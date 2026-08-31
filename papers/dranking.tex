@@ -1,0 +1,658 @@
+\documentclass[journal]{IEEEtran}
+\usepackage{color}
+\usepackage{cite}
+\usepackage{multirow}
+\usepackage{float}
+\usepackage{amsfonts}
+\usepackage{amssymb}
+\usepackage{amsmath}
+\usepackage{amsthm}
+\usepackage{url}
+\usepackage{enumitem}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+\usepackage{algorithm}
+\usepackage[noend]{algpseudocode}
+
+\newtheorem{definition}{Definition}
+\newtheorem{assumption}{Assumption}
+\newtheorem{law}{Law}
+\newtheorem{invariant}{Invariant}
+\newtheorem{proposition}{Proposition}
+\newtheorem{obligation}{Obligation}
+
+\author{Ryan~J.~Kung%
+\thanks{Ryan J. Kung can be reached at ryankung@ieee.org.
+Manuscript created February 11, 2023; rewritten August 31, 2026.
+This document supersedes the 2023 draft \emph{The Ranking Protocol}.}}
+\title{\huge The DRanking Protocol:\\
+Verifiable Distributed Ranking and Sybil-Bounded Admission\\
+for Structured Peer-to-Peer Networks}
+\date{}
+
+\IEEEaftertitletext{%
+\vspace{0.5\baselineskip}%
+\noindent\hfill
+\parbox{0.90\textwidth}{%
+\centering\bfseries Abstract\\[0.5\baselineskip]%
+\normalfont
+DRanking is a reputation and admission protocol for open structured
+peer-to-peer networks.  Its purpose is to convert locally observed peer
+behavior into a globally agreed, verifiable service weight that can gate
+admission to protocol roles, culminating in committee selection for Byzantine
+fault tolerant coordination.  The protocol is designed around one negative
+result and one restated assumption.  The negative result, due to Douceur, is
+that no internal mechanism can bound the \emph{number} of adversarial
+identities in an open network; identity creation is free.  The restated
+assumption is therefore not ``$2/3$ of nodes are honest'' but ``$2/3$ of
+accumulated, trust-weighted service is honest.''  Every component of DRanking
+exists to make that weight expensive to forge: unforgeable signed service
+receipts replace unsigned counters; a seed-anchored trust propagation with
+conservation, attenuation, and revocation laws bounds the influence any
+colluding cluster can extract; verifiable random sortition replaces oracle-based
+sampling; a minimal proof-of-authority ledger records epoch commitments while
+being trusted only for ordering, never for truth; and the ledger's state
+transition is a circuit-friendly pure function folded by an incrementally
+verifiable computation scheme, so that a browser node verifies the entire
+history at constant cost.  Rank is soulbound and slashable; rewards are a
+separate transferable asset.  We state the trust algebra as explicit laws and
+invariants, prove a bound on Sybil influence, and give an economic transition
+path from authority-anchored to stake-anchored operation.}}
+
+\begin{document}
+\maketitle
+
+\section{Introduction and Motivation}
+
+An open structured peer-to-peer network admits any participant who can
+generate a key pair.  This is a feature for reachability and a hazard for
+every protocol layer that must allocate a scarce resource: storage quota,
+relay bandwidth, committee membership, or a vote.  The network needs a notion
+of \emph{standing} --- which participants have served it, and how much ---
+that is robust against participants who manufacture identities, testimony, or
+both.
+
+The 2023 draft of this protocol proposed local behavioral scoring, global
+aggregation by random sampling, and a median-guessing incentive game.  Three
+years of implementation and analysis exposed a common root flaw in all three
+components: each assumed that honesty could be counted \emph{per identity},
+while identities cost nothing.  Statistical validation of sample placement
+cannot detect an adversary who places free identities uniformly; a median
+game rewards whichever coalition controls half the sample; unsigned local
+counters aggregate into unverifiable hearsay.  The present rewrite keeps the
+problem decomposition of the draft --- local evidence, global aggregation,
+sampling, incentives, cold start, punishment --- and replaces the adversarial
+assumption underneath every component.
+
+\subsection{Design Position}
+
+Douceur's Sybil result~\cite{Douceur2002} shows that without an external
+authority or a resource cost, an open system cannot bound the fraction of
+adversarial identities.  DRanking therefore does not attempt to count
+honest \emph{nodes}.  It prices honest \emph{weight}:
+
+\begin{assumption}[Honest weight]\label{asm:honest-weight}
+Let $t \in [0,1]^{V}$ be the global trust vector defined in
+Section~\ref{sec:trust}.  DRanking assumes that identities controlled by the
+adversary hold strictly less than $1/3$ of total trust mass:
+\[
+\sum_{v \in \mathsf{Adv}} t_v \;<\; \tfrac{1}{3}\sum_{v \in V} t_v .
+\]
+No assumption is made about the number of adversarial identities, which is
+unbounded.
+\end{assumption}
+
+Every mechanism in this paper is an instrument for making
+Assumption~\ref{asm:honest-weight} \emph{purchasable at a known price}: the
+protocol composes a one-time admission cost, a continuous service cost with
+decay, an objective punishment channel, and (in the final phase) an external
+economic anchor, and the security claim is the explicit cost function of
+acquiring $1/3$ of trust mass.
+
+\subsection{Contributions}
+
+\begin{enumerate}[leftmargin=*,noitemsep,topsep=0pt]
+\item \emph{Verifiable receipts} (Section~\ref{sec:receipts}): local
+  measurement is upgraded from unsigned counters to counterparty-signed
+  service receipts, making all aggregated evidence third-party checkable and
+  reducing the forgery surface to collusive self-dealing.
+\item \emph{A trust algebra} (Section~\ref{sec:trust}): seed-anchored
+  propagation with conservation, attenuation, and revocation laws; a proved
+  upper bound on the trust mass any Sybil region can hold; soulbound,
+  slashable rank.
+\item \emph{Oracle-free sampling} (Section~\ref{sec:sampling}): verifiable
+  random sortition weighted by trust, replacing the draft's decentralized
+  random oracle and its statistical validation, with an explicit account of
+  why the latter cannot detect Sybil density.
+\item \emph{A minimally trusted ledger} (Section~\ref{sec:ledger}): a small
+  proof-of-authority BFT chain whose validators are trusted for ordering and
+  availability only; all recorded content is self-certifying, and
+  equivocation proofs are first-class slash objects.
+\item \emph{A succinct chain} (Section~\ref{sec:ivc}): the ledger state
+  transition is a pure, circuit-friendly function; the trust fixpoint is
+  unrolled into one power-iteration step per epoch, so the whole chain folds
+  under incrementally verifiable computation and a browser verifies it at
+  constant cost.
+\item \emph{A two-asset economy} (Section~\ref{sec:economics}): rank is
+  soulbound; reward is transferable; we show why a payable rank destroys the
+  Sybil cost anchor, and give a security-budget criterion for the
+  authority-to-stake transition.
+\end{enumerate}
+
+\section{System Model and Adversary}\label{sec:model}
+
+\begin{definition}[Network substrate]
+The substrate is a structured overlay in the Chord
+family~\cite{Chord,ZaveChordCorrect}: identities are self-certifying
+decentralized identifiers (DIDs) derived from public keys, placed on the
+circular carrier $R=\mathbb{Z}/2^{160}\mathbb{Z}$; links are authenticated
+pairwise transports; every message is signed by its origin.  Establishing a
+link is cheap but not free (signaling plus session setup); creating an
+identity is free.
+\end{definition}
+
+\begin{definition}[Epoch]
+Protocol time is divided into epochs $k=0,1,2,\dots$ delimited by the ledger
+of Section~\ref{sec:ledger}.  All aggregation, trust updates, sortition, and
+reward issuance are per-epoch.
+\end{definition}
+
+\begin{assumption}[Adversary]\label{asm:adversary}
+The adversary controls an unbounded set of identities; may generate
+identifiers adaptively (grinding); may deviate arbitrarily from the protocol
+(Byzantine); may collude across all its identities, including exchanging
+valid signatures among them; and may participate honestly for arbitrarily
+long before deviating (patience).  The adversary cannot forge signatures of
+identities it does not control and cannot break the verifiable random
+function of Section~\ref{sec:sampling}.
+\end{assumption}
+
+The patience clause matters: any reputation earned by behavior can be farmed
+by an adversary willing to behave.  DRanking's response is not to prevent
+farming but to price it (continuous cost, Section~\ref{sec:receipts}), decay
+it (Law~\ref{law:revocation}), and make a single detected equivocation
+forfeit it entirely (Section~\ref{sec:ledger}).
+
+\section{Verifiable Service Receipts}\label{sec:receipts}
+
+The draft aggregated locally maintained counters (connect/disconnect,
+send/receive successes and failures).  Such counters are first-person
+testimony: sound as \emph{local} link-selection evidence, but unverifiable
+the moment they are reported to a third party.  A global ranking built on
+them aggregates hearsay.  DRanking makes the unit of evidence a signed
+receipt.
+
+\begin{definition}[Service receipt]\label{def:receipt}
+A receipt is a tuple
+\[
+\rho = \langle \mathsf{srv},\, a,\, b,\, k,\, n,\, \sigma_b \rangle
+\]
+in which $\mathsf{srv}$ names a service kind (relay, storage challenge,
+liveness probe), $a$ is the serving DID, $b$ the served DID, $k$ the epoch,
+$n$ a nonce unique per $(a,b,k)$ pair scope, and $\sigma_b$ the signature of
+$b$ over the preceding fields.  A receipt is \emph{valid} if $\sigma_b$
+verifies and $(b,k,n)$ has not been seen before.
+\end{definition}
+
+\begin{proposition}[Forgery surface]\label{prop:forgery}
+Under Assumption~\ref{asm:adversary}, an adversary cannot fabricate a valid
+receipt naming an honest $b$ as signer.  The only manufacturable receipts
+are those signed within the adversary's own identity set (self-dealing).
+\end{proposition}
+
+Self-dealing is not prevented at this layer; it is neutralized at the trust
+layer, where a receipt's contribution is weighted by the \emph{signer's}
+trust (Section~\ref{sec:trust}).  A cluster of zero-trust identities signing
+receipts to one another injects approximately zero weight.
+
+\begin{definition}[Receipt graph]
+The evidence of epoch $k$ is a weighted directed multigraph aggregated into
+the matrix $W_k \in \mathbb{R}_{\ge 0}^{V\times V}$, where $W_k[b,a]$ is the
+service value receipted by signer $b$ to server $a$ during epoch $k$, under a
+per-signer, per-epoch issuance cap $W_k[b,\cdot]\mathbf{1} \le w_{\max}$.
+\end{definition}
+
+The issuance cap makes receipt-signing itself a budgeted act: a signer
+cannot certify more service than the protocol deems one identity able to
+consume in one epoch.  This is the first of several conservation-shaped
+constraints; the trust layer adds the second.
+
+Receipts price honest weight continuously: to hold weight, an identity must
+keep producing service that real counterparties keep countersigning, which
+costs bandwidth and uptime for as long as the weight is to be held.  The
+protocol deliberately certifies \emph{performed service} rather than proving
+capacity with synthetic load; manufactured traffic between colluding
+identities would burn network capacity and still be discounted to zero by
+signer-trust weighting.
+
+\section{The Trust Algebra}\label{sec:trust}
+
+Global standing is a vector $t_k \in [0,1]^{V}$ computed from receipt
+graphs and a seed vector.  We state the algebra as laws, because each law
+closes a specific attack.
+
+\begin{definition}[Seed vector]\label{def:seed}
+A seed vector $s \in [0,1]^{V}$, $\sum_v s_v = 1$, assigns initial trust to
+a small authority set $S$ (Section~\ref{sec:ledger}).  Seeds are the
+protocol's explicit trust root: DRanking does not derive trust from nothing,
+it declares where trust originates and then constrains how it flows.
+\end{definition}
+
+\begin{law}[Conservation]\label{law:conservation}
+Trust is redistributed, never created.  The propagation matrix
+$C_k$ is the row-substochastic normalization of $W_k$:
+$C_k[b,a] = W_k[b,a] / \max(w_{\max}, W_k[b,\cdot]\mathbf{1})$.
+A signer's total outflow of endorsement can never exceed its own unit row,
+and endorsement given is budget spent.
+\end{law}
+
+\begin{law}[Attenuation]\label{law:attenuation}
+Trust decays along every hop by a damping factor $\alpha \in (0,1)$: a chain
+of endorsements of length $\ell$ carries at most $\alpha^{\ell}$ of its
+source weight.
+\end{law}
+
+\begin{law}[Revocation and decay]\label{law:revocation}
+Trust is a flow, not a stock: it must be re-earned every epoch because the
+update law re-derives $t_{k+1}$ from current receipts; a slashed identity
+(Section~\ref{sec:ledger}) is removed from the carrier of $t$ and its held
+mass returns to the seed term; seeds may withdraw endorsement.
+\end{law}
+
+\begin{definition}[Trust update]\label{def:update}
+\begin{equation}\label{eq:update}
+t_{k+1} \;=\; \alpha\, C_k^{\mathsf{T}} t_k \;+\; (1-\alpha)\, s .
+\end{equation}
+\end{definition}
+
+Equation~\eqref{eq:update} is one step of power iteration toward the
+personalized-PageRank/EigenTrust fixpoint~\cite{PageRank,EigenTrust}
+$t^{*} = (1-\alpha)(I - \alpha C^{\mathsf{T}})^{-1} s$.  DRanking
+deliberately does \emph{not} compute the fixpoint within an epoch: one step
+per epoch is executed, so the fixpoint is approached along chain time.  This
+choice is semantic as well as computational --- standing accrues over
+history, not instantaneously --- and it is what makes the transition function
+circuit-friendly in Section~\ref{sec:ivc}.
+
+\begin{invariant}[Mass]\label{inv:mass}
+If $\sum_v t_0(v) = 1$ then for all $k$,
+$\sum_v t_k(v) \le 1$, with equality when every row of $C_k$ is fully
+spent.  Trust mass never inflates.
+\end{invariant}
+
+\begin{proposition}[Sybil influence bound]\label{prop:sybil-bound}
+Partition $V$ into an honest region $H$ (including all seeds) and an
+adversarial region $A$.  Let the \emph{attack inflow} at epoch $k$ be
+$g_k = \sum_{b \in H, a \in A} C_k[b,a]\, t_k(b)$, the trust-weighted
+endorsement flowing from honest signers to adversarial servers, and let
+$g = \sup_k g_k$.  Then for all $k$,
+\[
+T_k(A) \;=\; \sum_{v\in A} t_k(v) \;\le\; \frac{\alpha\, g}{1-\alpha} .
+\]
+\end{proposition}
+
+\begin{proof}
+Since no seed lies in $A$, the seed term contributes nothing to $T_{k+1}(A)$.
+Splitting the propagation term by origin region,
+\[
+T_{k+1}(A) \;\le\; \alpha\big( g_k + T_k(A) \big),
+\]
+because mass arriving in $A$ from $A$ itself is at most $\alpha\,T_k(A)$ by
+Law~\ref{law:conservation} (rows are substochastic, so internal circulation
+cannot amplify) and mass arriving from $H$ is exactly $\alpha\,g_k$.
+Iterating from $T_0(A)=0$ gives a geometric series bounded by
+$\alpha g \sum_{i\ge0} \alpha^{i} = \alpha g/(1-\alpha)$.
+\end{proof}
+
+The bound has the right shape for engineering: adversarial standing is
+linear in \emph{honest endorsement actually granted to the adversary} ($g$),
+and independent of how many identities the adversary creates.  Defense
+concentrates on making $g$ small and expensive: endorsement costs budget
+(Law~\ref{law:conservation}), honest signers only countersign service they
+received, and detected misbehavior claws standing back
+(Law~\ref{law:revocation}).
+
+\begin{definition}[Soulbound rank]\label{def:soulbound}
+The rank of $v$ at epoch $k$ is $t_k(v)$.  Rank is bound to the DID that
+earned it: it cannot be transferred, delegated, or sold; it decays under
+Law~\ref{law:revocation}; and it is forfeited entirely upon an accepted
+misbehavior proof.  Section~\ref{sec:economics} shows that relaxing
+non-transferability re-opens the Sybil market the rest of the protocol
+closes.
+\end{definition}
+
+\subsection{Cold Start and Dilution}
+
+At genesis, $t_0 = s$: all standing is seed standing.  As the network serves
+and receipts accumulate, the propagation term grows relative to the seed
+term.  The protocol commits, in advance, to a \emph{dilution schedule}: the
+effective seed weight $(1-\alpha)$ in Equation~\eqref{eq:update} is a
+non-increasing function of cumulative receipted service, so authority
+influence declines on a published curve rather than by promise.  The same
+schedule governs the consensus transition in Section~\ref{sec:economics}.
+
+\section{Sampling by Verifiable Sortition}\label{sec:sampling}
+
+Global aggregation requires selecting, per epoch, which nodes' local receipt
+sets are collected and which nodes audit the epoch commitment.  The draft
+selected by lookup toward targets derived from a ``decentralized random
+oracle,'' then validated the sample with entropy and Kolmogorov--Smirnov
+tests.  Both halves fail, for instructive reasons.
+
+\subsection{Why Statistical Validation Cannot Work}
+
+The draft's tests check that sampled positions are \emph{uniformly placed}.
+Uniformity of placement is orthogonal to honesty of identity: an adversary
+who mints free identifiers uniformly over $R$ occupies any target fraction
+of the identifier space while passing every placement test exactly as an
+honest population would.  Statistical tests detect \emph{biased sampling};
+the threat is \emph{cheap identity}.  No test on positions can see the
+difference, so validation must instead be cryptographic (receipts,
+signatures, proofs) and economic (trust weighting).  Separately, a global
+random seed is a bootstrap circularity: a decentralized randomness beacon
+already requires the committee that sampling is meant to select.
+
+\subsection{Sortition}
+
+DRanking removes the global oracle.  Each node holds a verifiable random
+function (VRF)~\cite{VRF} key bound to its DID.  For epoch $k$ with
+finalized ledger beacon $B_k$ (the hash of the finalized epoch-$k$ header,
+unpredictable before finality under Assumption~\ref{asm:adversary}):
+
+\begin{algorithm}[H]
+\caption{Trust-weighted sortition (per node $v$, epoch $k$)}
+\begin{algorithmic}[1]
+\State $(y, \pi) \gets \mathsf{VRF}_{\mathsf{sk}_v}(B_k \,\|\, \mathsf{role})$
+\State \textbf{if} $y / 2^{|y|} < \tau \cdot t_k(v)$ \textbf{then}
+       $v$ holds $\mathsf{role}$ for epoch $k$, with proof $\pi$
+\end{algorithmic}
+\end{algorithm}
+
+Selection probability is proportional to rank, so
+Assumption~\ref{asm:honest-weight} translates directly into an
+honest-majority statement about every sampled set: sortition is the functor
+from trust mass to committee seats.  Grinding is closed at both inputs: the
+VRF key is fixed before $B_k$ exists, and $B_k$ is fixed by finality before
+the adversary can steer it.  Self-selection with public proofs also removes
+the draft's median game entirely --- there is no reported quantity for a
+coalition to steer, hence no game whose equilibrium must be argued.
+
+\section{The Admission Ledger}\label{sec:ledger}
+
+Aggregated evidence needs a single ordered record: without one, a node can
+show different evidence to different observers, and no deterministic global
+rank exists.  DRanking uses a deliberately small ledger.
+
+\subsection{Minimal Trust Design}
+
+\begin{definition}[Authority ledger]
+A BFT proof-of-authority chain operated by the seed set $S$ with instant
+finality (two-thirds quorum signatures on each block).  Per epoch, the chain
+records: the epoch commitment (a Merkle root of $W_k$), the resulting trust
+vector commitment (root of $t_{k+1}$), validator-set changes, slash records,
+and reward issuance.  Raw receipt data remains in the overlay's storage
+layer; the chain holds commitments.
+\end{definition}
+
+\begin{obligation}[Validators order, content certifies]\label{obl:minimal-trust}
+Every recorded object must be independently verifiable from signatures and
+commitments alone: receipts carry their signers' signatures, trust vectors
+are recomputable from committed inputs by Equation~\eqref{eq:update}, and
+slashes carry proofs.  A colluding validator quorum can censor or reorder;
+it must never be able to fabricate.  Any proposed ledger content that a
+validator quorum could forge is a design defect at this layer.
+\end{obligation}
+
+Censorship, the residual validator power, is bounded by a force-inclusion
+rule: a node holding a validator-acknowledged submission that does not
+appear on chain within a timeout publishes the acknowledgment as a
+misbehavior proof, slashing the withholding quorum's members.
+
+\subsection{Equivocation as the Objective Signal}
+
+All positive evidence (receipts) is verifiable but collusive; the only
+fully objective reputation events are negative:
+
+\begin{definition}[Equivocation proof]
+Two messages, both validly signed by the same DID, asserting contradictory
+protocol statements for the same slot (two epoch commitments for the same
+epoch, two votes for one height, two receipts with one nonce).  The pair is
+self-certifying: verifying it requires no honesty assumption at all.
+\end{definition}
+
+Equivocation proofs are first-class ledger objects: anyone may submit one;
+inclusion slashes the offender's rank to zero (Law~\ref{law:revocation})
+and, in the staked phase, its bond.  This is what defeats the patient
+adversary of Assumption~\ref{asm:adversary}: months of farmed standing are
+forfeited by one detected contradiction, so the expected value of farming
+falls with the certainty of eventual detection.
+
+\section{Succinct State by Folding}\label{sec:ivc}
+
+The substrate's defining deployment target is the browser: a wasm node with
+neither the storage to replay history nor a reason to trust a validator
+signature it cannot audit.  DRanking therefore requires the ledger to be
+\emph{succinctly verifiable}: a constant-size proof attests the validity of
+the entire chain state.
+
+\subsection{The Step Function}
+
+\begin{definition}[Epoch transition]\label{def:step}
+The ledger state is
+$\Sigma_k = \langle \mathsf{root}(t_k), \mathsf{root}(V_k),
+\mathsf{root}(\mathsf{slash}_k), \mathsf{root}(\mathsf{bal}_k) \rangle$.
+The transition
+$F(\Sigma_k, \mathsf{root}(W_k)) = \Sigma_{k+1}$
+is a pure function: one application of Equation~\eqref{eq:update}, slash
+application, validator-set update, and reward issuance, over
+Merkle-committed inputs.
+\end{definition}
+
+Because Equation~\eqref{eq:update} is a single sparse matrix--vector product
+with scalar damping --- additions and multiplications over committed data ---
+$F$ is circuit-friendly \emph{by construction}.  This is the payoff of
+unrolling the fixpoint: the draft's alternative (an eigenvector solve per
+epoch) is hostile to arithmetization; one power-iteration step is trivial
+under it.  The design rule generalizes:
+
+\begin{obligation}[Circuit discipline]
+Every extension of the ledger state machine must keep $F$ pure,
+deterministic, and expressible in cheap arithmetic over committed inputs.
+The ledger is an admission ledger, not a general contract platform; each
+added semantic multiplies proving cost and freezes harder under
+Obligation~\ref{obl:upgrade}.
+\end{obligation}
+
+\subsection{Folding}
+
+$F$ is folded by an incrementally verifiable computation scheme of the Nova
+family~\cite{Nova}: each epoch folds its step instance into a running
+accumulator; a compressed proof $\pi_k$ attests
+``$\Sigma_k$ is reachable from $\Sigma_0$ by $k$ valid applications of
+$F$.''  A fresh browser node verifies $\pi_k$ plus the finality quorum
+signature on $\Sigma_k$ --- constant work, after which it trusts mathematics
+for validity and the quorum only for canonicity.
+
+Two structural facts make the combination clean.  First, IVC folds a
+\emph{linear} chain of steps; BFT instant finality guarantees the chain
+never reorganizes, so no re-folding branch logic exists ---
+probabilistic-finality chains cannot say this.  Second, proving is
+asynchronous: the chain advances by replay verification among validators
+(cheap, since $F$ is pure), while the prover compresses history behind the
+head; succinctness is a property of verification, and lags nothing but
+itself.
+
+\begin{obligation}[Upgrade versioning]\label{obl:upgrade}
+Under IVC the circuit is the constitution: any change to $F$ changes the
+verifier key.  The protocol carries an explicit version register in
+$\Sigma$; upgrades bind old and new verifier keys at a committed epoch
+boundary.  This mechanism ships at genesis, not as a retrofit.
+\end{obligation}
+
+What folding does \emph{not} provide: canonicity (consensus chooses the
+chain), data availability (the overlay stores receipt data), or privacy of
+the receipt graph.  The granularity of what $\mathsf{root}(W_k)$ exposes ---
+full graph, per-node aggregates, or blinded commitments --- is an open
+design decision with surveillance consequences, and zero-knowledge openings
+of individual standing are its natural extension.
+
+\section{Incentives and Economics}\label{sec:economics}
+
+\subsection{Two Assets, Not One}
+
+The draft made rankings ``payable.''  This is the single most consequential
+error in the 2023 design:
+
+\begin{proposition}[Payable rank defeats cost anchoring]\label{prop:soulbound}
+If rank is transferable at market price $p$, the adversary's cost of
+acquiring trust mass $m$ is $\min(\mathsf{farm}(m),\, p\cdot m)$, and honest
+exiting nodes are rational sellers; the market clears at the price of the
+cheapest accumulated history, decoupling standing from behavior.
+Non-transferability (Definition~\ref{def:soulbound}) removes the second
+argument of the $\min$, restoring $\mathsf{farm}(m)$ --- service, time, and
+slash risk --- as the only acquisition path.
+\end{proposition}
+
+DRanking therefore carries two assets: \emph{rank}, soulbound, earned by
+receipted service, governing admission and sortition weight; and
+\emph{reward}, a transferable token issued per epoch to nodes in proportion
+to receipted, trust-weighted service.  Reward is the distribution mechanism:
+by the time the network transitions to stake, token holders are
+approximately its service providers, because service was the only faucet.
+
+\subsection{Value and Sinks}
+
+A reward token distributed against service is worthless without a sink.
+The protocol's fee loop makes the token the payment instrument for the
+network's scarce services: storage persistence beyond baseline replication,
+relay quality-of-service, and namespace registration.  Fees are burned or
+recycled into the epoch reward pool.  The security consequence is direct:
+the stake anchor of the next subsection is only as strong as the demand
+routed through these sinks, so the fee loop is a security parameter, not a
+business afterthought.
+
+\subsection{The Authority-to-Stake Transition}
+
+The ledger launches as proof-of-authority (Section~\ref{sec:ledger})
+because quorum arithmetic requires a closed set and genesis has no other
+Sybil anchor.  The transition to proof-of-stake replaces the fiat validator
+set with a sortition over bonded token weight.  Two rules govern it:
+
+\begin{obligation}[Security-budget crossover]
+The switch is conditioned, not scheduled: stake-based validation activates
+only when slashable bonded value exceeds a published multiple of the
+estimated attack payoff.  Before the crossover, PoA finality signatures
+remain a hybrid overlay on PoS block production, weighted down along the
+same dilution schedule as the seed vector (Section~\ref{sec:trust}).
+\end{obligation}
+
+\begin{obligation}[One abstraction boundary]
+Consensus is parameterized over an abstract validator-set function
+$\mathsf{vset}: \Sigma_k \to 2^{V}$; PoA supplies a constant, PoS supplies
+a bonded-sortition function.  The switch changes one pure function, not the
+engine.
+\end{obligation}
+
+Proof-of-work alternatives were evaluated and rejected: hash-rental markets
+price a majority attack on a young chain at hours of rented compute; and
+``proof of traffic'' fails twice --- synthetic load between colluding
+identities is indistinguishable from service (so it buys no Sybil
+resistance) while consuming the very bandwidth the network exists to
+provide.  Receipted real service with trust weighting is the version of
+proof-of-traffic that keeps the evidence and discards the waste.
+
+\section{Security Analysis}\label{sec:security}
+
+Table~\ref{tab:threats} summarizes the threat matrix.  Each row names the
+attack, the mechanism that bounds it, and the residual exposure.
+
+\begin{table}[H]
+\centering
+\caption{Threat matrix}\label{tab:threats}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}p{2.1cm}p{3.1cm}p{2.6cm}@{}}
+\toprule
+\textbf{Attack} & \textbf{Bounding mechanism} & \textbf{Residual} \\
+\midrule
+Sybil flood &
+Prop.~\ref{prop:sybil-bound}: mass bounded by honest endorsement, not
+identity count &
+$\alpha g/(1-\alpha)$ \\
+Self-dealing receipts &
+Signer-trust weighting (Prop.~\ref{prop:forgery}); issuance caps &
+zero-trust circulation \\
+Patient farming &
+Continuous cost, decay (Law~\ref{law:revocation}), total slash on
+equivocation &
+undetected deviation \\
+Whitewashing &
+Fresh DIDs start at $t=0$; standing is slow to earn, instant to lose &
+re-entry at zero \\
+Sampling grind\slash eclipse &
+VRF sortition on finalized beacon; keys precede beacon &
+--- \\
+Validator censorship &
+Force-inclusion with acknowledgment proofs; slashing &
+latency \\
+Seed compromise &
+Threshold multi-seed endorsement; revocation; dilution schedule &
+pre-dilution window \\
+Rank market &
+Soulbound rank (Prop.~\ref{prop:soulbound}) &
+out-of-band key sales \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Two residuals deserve emphasis.  Out-of-band key sales (selling the DID's
+private key, rank attached) cannot be prevented cryptographically; the
+mitigation is economic --- a sold identity carries its slash exposure, and
+a buyer inherits a history it did not control.  The pre-dilution window is
+the honest name for the PoA phase: until the dilution schedule and the
+security-budget crossover retire them, the seeds are a threshold trust
+root, and the paper claims exactly that, no more.
+
+\section{Related Work}\label{sec:related}
+
+DRanking's local layer descends from behavior scoring in file-sharing
+networks --- eDonkey's ranking queues~\cite{eMule} and BitTorrent's
+choking~\cite{Cohen03} --- which the 2023 draft adopted directly.
+EigenTrust~\cite{EigenTrust} and personalized PageRank~\cite{PageRank}
+supply the propagation fixpoint; DRanking's contribution is unrolling it
+along chain epochs and binding it to signed evidence.  The social-graph
+Sybil defenses SybilGuard, SybilLimit, and
+SybilRank~\cite{SybilGuard,SybilLimit,SybilRank} established the
+attack-edge bound pattern that Proposition~\ref{prop:sybil-bound} instantiates
+over a service graph.  Byzantine-resilient peer sampling
+(Brahms~\cite{Brahms}) addresses the sampling-under-adversary problem that
+the draft's statistical tests could not; DRanking sidesteps it with
+Algorand-style VRF sortition~\cite{Algorand,VRF} weighted by trust instead
+of stake.  S/Kademlia~\cite{SKademlia} prices identifier creation with
+puzzles, a complementary one-time cost.  The ledger design follows
+PBFT-lineage instant finality~\cite{PBFT}; the succinct chain follows
+Mina~\cite{Mina}, realized with Nova-family folding~\cite{Nova}.  The
+impossibility frame is Douceur's~\cite{Douceur2002}; the Byzantine quorum
+frame is Lamport, Shostak, and Pease's~\cite{LSP82}; the economic
+transition draws on Nakamoto's observation that external cost, not internal
+testimony, anchors open membership~\cite{Nakamoto}.
+
+\section{Conclusion}
+
+The 2023 draft decomposed the reputation problem correctly and secured each
+component against the wrong adversary --- one who lies, rather than one who
+is legion.  This rewrite keeps the decomposition and re-anchors every
+component in cost: receipts make testimony expensive to forge, the trust
+algebra makes influence expensive to accumulate and instant to lose,
+sortition makes selection impossible to steer, the ledger makes history
+impossible to equivocate, folding makes verification cheap enough for a
+browser, and the two-asset economy keeps standing off the market.  The
+protocol's honest claim is a priced assumption: the system is safe while
+one third of trust mass costs more than attacking it pays.  Every mechanism
+above is a term in that price.
+
+\bibliographystyle{IEEEtran}
+\bibliography{dranking}
+
+\end{document}
