@@ -7,6 +7,7 @@ mod builder;
 pub mod callback;
 pub(crate) mod transport;
 
+#[cfg(not(target_family = "wasm"))]
 use std::net::IpAddr;
 use std::num::NonZeroUsize;
 use std::sync::Arc;

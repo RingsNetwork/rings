@@ -1,5 +1,6 @@
 //! Native direct-underlay authorization-policy wiring.
 
+#[cfg(not(target_family = "wasm"))]
 use std::net::IpAddr;
 #[cfg(not(target_family = "wasm"))]
 use std::sync::Arc;
