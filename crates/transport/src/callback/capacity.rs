@@ -119,6 +119,13 @@ pub struct AdmittedInboundFrame {
     pub(super) permit: InboundFramePermit,
 }
 
+impl AdmittedInboundFrame {
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) fn payload(&self) -> &Bytes {
+        &self.payload
+    }
+}
+
 /// Result of decoding and capacity-admitting one raw backend frame.
 pub enum InboundFrameAdmission {
     /// The frame decoded and reserved raw capacity successfully.

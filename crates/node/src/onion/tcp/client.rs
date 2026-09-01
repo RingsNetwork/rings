@@ -28,15 +28,17 @@ impl pump::TcpDuplexEffects for ClientReturnPath {
     }
 }
 
-pub(super) fn spawn_client_stream(
+pub(super) fn spawn_client_stream<S>(
     runtime: Arc<OnionTcpRuntime>,
     scope: Scope,
     key: TcpStreamKey,
-    stream: TcpStream,
+    stream: S,
     path: OnionCircuitPath,
     client_return: OnionClientReturn,
     rx: mpsc::Receiver<TcpInbound>,
-) {
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     tokio::spawn(async move {
         let mut return_path = ClientReturnPath {
             runtime: runtime.clone(),

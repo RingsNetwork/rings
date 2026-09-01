@@ -70,6 +70,7 @@ ed25519 = "1.5.2"
 ed25519-dalek = "2.2.0"
 elliptic-curve = "0.13.6"
 ethereum-types = "0.14.1"
+event-listener = "5.4.2"
 flate2 = "1.0.22"
 futures = "0.3.32"
 futures-timer = "3.0.2"
@@ -84,6 +85,7 @@ rand = { version = "0.8.5", features = ["getrandom"] }
 rand_core = { version = "0.6.3", features = ["getrandom"] }
 rand_hc = "0.3.1"
 rings-codec = { workspace = true }
+rings-measure = { workspace = true }
 rings-transport = { workspace = true }
 serde = { version = "1.0.130", features = ["derive"] }
 serde_json = "1.0.70"
@@ -136,4 +138,4 @@ wasm-bindgen-test = { workspace = true }
 # Model checker — pulls getrandom/tiny_http, which don't build for wasm32, so
 # it (and the test_dht_stateright module that uses it) is non-wasm only.
 stateright = "0.31.0"
-tokio = { version = "1.13.0", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.13.0", features = ["macros", "rt", "rt-multi-thread", "sync", "test-util", "time"] }

@@ -49,7 +49,7 @@ pub struct ChunkMeta {
 impl Default for ChunkMeta {
     fn default() -> Self {
         Self {
-            id: uuid::Uuid::new_v4(),
+            id: crate::utils::new_uuid(),
             ts_ms: get_epoch_ms(),
             ttl_ms: DEFAULT_TTL_MS,
         }

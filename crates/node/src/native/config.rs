@@ -3,6 +3,7 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
+use rings_gateway::GatewayConfig;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -46,6 +47,59 @@ pub const DEFAULT_ICE_SERVERS: &str = "stun://stun.l.google.com:19302";
 pub const DEFAULT_STABILIZE_INTERVAL: u64 = 15;
 /// Default storage capacity in bytes for native storage backends.
 pub const DEFAULT_STORAGE_CAPACITY: u32 = 200000000;
+/// Default interval for refreshing gateway status.
+pub const DEFAULT_GATEWAY_STATUS_REFRESH_SECS: u64 = 2;
+
+/// Native foreground-gateway configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NativeGatewayConfig {
+    /// Whether `rings run` starts the gateway when this section is present.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Platform-neutral routing, TCP, and flow limits.
+    #[serde(flatten)]
+    pub runtime: GatewayConfig,
+    /// Requested Wintun interface name; on Unix the helper's `--interface` is authoritative.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface_name: Option<String>,
+    /// Durable journal used directly on Windows; on Unix the helper's `--ledger` is authoritative.
+    #[serde(default = "default_gateway_route_ledger_path")]
+    pub route_ledger_path: String,
+    /// Foreground `gateway-config-unix` control socket on Linux and macOS.
+    #[serde(default = "default_gateway_unix_helper_socket")]
+    pub unix_helper_socket: String,
+    /// Optional explicit Wintun DLL path on Windows; overrides `RINGS_GATEWAY_WINTUN_DLL`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wintun_dll_path: Option<String>,
+    /// Interval for refreshing Onion exit availability in gateway status.
+    #[serde(default = "default_gateway_status_refresh_secs")]
+    pub status_refresh_secs: u64,
+    /// Onion TCP exit service selected for captured flows.
+    #[serde(default = "OnionServiceName::tcp")]
+    pub onion_service: OnionServiceName,
+    /// Requested onion route hop count; zero selects the node default.
+    #[serde(default)]
+    pub onion_hop_count: usize,
+    /// Permit shorter onion paths when the requested hop count is unavailable.
+    #[serde(default)]
+    pub onion_allow_short_paths: bool,
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+const fn default_gateway_status_refresh_secs() -> u64 {
+    DEFAULT_GATEWAY_STATUS_REFRESH_SECS
+}
+
+fn default_gateway_route_ledger_path() -> String {
+    get_storage_location(".rings", "gateway-routes.json")
+}
+
+fn default_gateway_unix_helper_socket() -> String {
+    get_storage_location(".rings", "gateway-helper.sock")
+}
 
 /// Builds the default storage path under the user home directory.
 pub fn get_storage_location<P>(prefix: P, path: P) -> String
@@ -77,7 +131,7 @@ pub struct Config {
     pub external_api_addr: String,
     /// Internal endpoint URL used by local clients.
     pub endpoint_url: String,
-    /// WebRTC ICE server list.
+    /// WebRTC ICE server list, independent from optional gateway ingress.
     pub ice_servers: String,
     /// Chord stabilization interval in seconds.
     pub stabilize_interval: u64,
@@ -129,6 +183,9 @@ pub struct Config {
     /// Maximum simultaneous HTTP CONNECT proxy connections.
     #[serde(default = "crate::onion::proxy::http::default_max_connect_connections")]
     pub onion_http_proxy_max_connections: usize,
+    /// Optional native TUN gateway started in the same foreground lifecycle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<NativeGatewayConfig>,
     /// Virtual DHT positions per storage owner.
     #[serde(default = "default_storage_virtual_positions_per_owner")]
     pub dht_virtual_nodes: u16,
@@ -249,6 +306,7 @@ impl Config {
                 crate::onion::proxy::http::default_connect_header_timeout_secs(),
             onion_http_proxy_max_connections:
                 crate::onion::proxy::http::default_max_connect_connections(),
+            gateway: None,
             dht_virtual_nodes: DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER,
             external_ip: None,
             webrtc_udp_port_min: None,
@@ -363,6 +421,7 @@ measure_storage:
             cfg.onion_exit_services,
             crate::onion::default_onion_exit_services()
         );
+        assert!(cfg.gateway.is_none());
     }
 
     #[test]

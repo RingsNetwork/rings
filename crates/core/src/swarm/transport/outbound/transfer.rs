@@ -64,6 +64,7 @@ pub(in crate::swarm::transport) struct OutboundTransfer {
     pub(super) admitted: AdmittedConnection,
     pub(super) permit: ChunkSendPermit,
     source: FrameSource,
+    useful_bytes: u64,
     completion: TransferCompletion,
     first_frame_admitted: bool,
     pub(super) stop: TransferStop,
@@ -155,6 +156,7 @@ impl OutboundTransfer {
     pub(in crate::swarm::transport) fn whole(
         route: OutboundTransferRoute,
         data: Bytes,
+        useful_bytes: u64,
         completion: OutboundCompletion,
         stop: StopToken,
         detached_admission: Option<DetachedAdmission>,
@@ -162,6 +164,7 @@ impl OutboundTransfer {
         Self::new(
             route,
             FrameSource::Whole(Some(data)),
+            useful_bytes,
             completion,
             stop,
             detached_admission,
@@ -172,6 +175,7 @@ impl OutboundTransfer {
         route: OutboundTransferRoute,
         session_sk: SessionSk,
         chunks: ChunkFrames,
+        useful_bytes: u64,
         completion: OutboundCompletion,
         stop: StopToken,
         detached_admission: Option<DetachedAdmission>,
@@ -179,6 +183,7 @@ impl OutboundTransfer {
         Self::new(
             route,
             FrameSource::Chunked { session_sk, chunks },
+            useful_bytes,
             completion,
             stop,
             detached_admission,
@@ -188,6 +193,7 @@ impl OutboundTransfer {
     fn new(
         route: OutboundTransferRoute,
         source: FrameSource,
+        useful_bytes: u64,
         completion: OutboundCompletion,
         stop: StopToken,
         detached_admission: Option<DetachedAdmission>,
@@ -204,6 +210,7 @@ impl OutboundTransfer {
                 admitted: route.admitted,
                 permit: route.permit,
                 source,
+                useful_bytes,
                 completion,
                 first_frame_admitted: false,
                 stop: TransferStop::new(stop),
@@ -215,6 +222,11 @@ impl OutboundTransfer {
 
     pub(super) fn class(&self) -> TransferClass {
         self.class
+    }
+
+    /// Useful bytes in the original logical payload, independent of framing.
+    pub(super) const fn useful_bytes(&self) -> u64 {
+        self.useful_bytes
     }
 
     pub(super) fn next_frame(&mut self) -> Result<Option<(Bytes, &'static str)>> {

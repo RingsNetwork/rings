@@ -1,3 +1,6 @@
+[files]
+extend-exclude = ["crates/gateway/vendor/netlink-packet-core/**"]
+
 [type.rust]
 extend-ignore-re = ["[wW]s", "WS"]
 

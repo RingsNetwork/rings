@@ -1,5 +1,6 @@
 //! Processor of rings-node rpc server.
 
+use std::num::NonZeroUsize;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,9 +12,11 @@ use rings_core::dht::EntryStorage;
 use rings_core::dht::DEFAULT_FINGER_TABLE_SIZE;
 use rings_core::ecc::PublicKey;
 use rings_core::ecc::SecretKey;
+use rings_core::lifecycle::StopSource;
 use rings_core::lifecycle::StopToken;
 use rings_core::measure::MeasureImpl;
 use rings_core::measure::PeerMeasurement;
+use rings_core::measure::PeerMeasurementPage;
 use rings_core::measure::PeerQuality;
 use rings_core::message::e2e;
 use rings_core::message::e2e::E2eHandshakeRequest;
@@ -37,7 +40,6 @@ use uuid;
 use crate::consts::DATA_REDUNDANT;
 use crate::error::Error;
 use crate::error::Result;
-use crate::measure::peer_quality_thresholds;
 use crate::measure::PeriodicMeasure;
 use crate::onion::default_advertise_onion_exit;
 use crate::onion::default_advertise_onion_relay;
@@ -79,6 +81,8 @@ use crate::registration::OnlineNodeRegistration;
 use crate::registration::RegistrationContext;
 use crate::registration::RegistrationTask;
 
+const MEASUREMENT_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
+
 mod builder;
 mod config;
 
@@ -110,17 +114,18 @@ async fn sleep_dht_lookup_poll_interval(interval: Duration) -> Result<()> {
 async fn sleep_registration_interval_with_stop(
     interval: Duration,
     stop: &StopToken,
+    sibling_stop: &StopToken,
 ) -> Result<bool> {
     let mut remaining = interval;
     while !remaining.is_zero() {
-        if stop.should_stop() {
+        if stop.should_stop() || sibling_stop.should_stop() {
             return Ok(false);
         }
         let step = std::cmp::min(remaining, REGISTRATION_STOP_POLL_INTERVAL);
         sleep_registration_interval(step).await?;
         remaining = remaining.saturating_sub(step);
     }
-    Ok(!stop.should_stop())
+    Ok(!(stop.should_stop() || sibling_stop.should_stop()))
 }
 
 /// Processor for rings-node rpc server.
@@ -135,6 +140,7 @@ pub struct Processor {
     session_sk: SessionSk,
     stabilize_interval: Duration,
     online_node_registration: OnlineNodeRegistration,
+    measure: Option<Arc<PeriodicMeasure>>,
     #[cfg(all(feature = "browser", target_family = "wasm"))]
     advertise_onion_relay: bool,
     registration_tasks: Vec<Arc<dyn RegistrationTask>>,
@@ -374,9 +380,14 @@ impl Processor {
         task.register_once(&context).await
     }
 
-    async fn registration_task_daemon_with(&self, task: &dyn RegistrationTask, stop: StopToken) {
+    async fn registration_task_daemon_with(
+        &self,
+        task: &dyn RegistrationTask,
+        stop: StopToken,
+        sibling_stop: StopToken,
+    ) {
         loop {
-            if stop.should_stop() {
+            if stop.should_stop() || sibling_stop.should_stop() {
                 return;
             }
             if let Err(error) = self.run_registration_once(task, stop.clone()).await {
@@ -389,10 +400,11 @@ impl Processor {
                 }
                 tracing::warn!("Failed to run {} registration task: {error:?}", task.name());
             }
-            if stop.should_stop() {
+            if stop.should_stop() || sibling_stop.should_stop() {
                 return;
             }
-            match sleep_registration_interval_with_stop(task.interval(), &stop).await {
+            match sleep_registration_interval_with_stop(task.interval(), &stop, &sibling_stop).await
+            {
                 Ok(true) => {}
                 Ok(false) => return,
                 Err(error) => {
@@ -406,12 +418,10 @@ impl Processor {
         }
     }
 
-    async fn registration_daemons_with(&self, stop: StopToken) {
-        join_all(
-            self.registration_tasks
-                .iter()
-                .map(|task| self.registration_task_daemon_with(task.as_ref(), stop.clone())),
-        )
+    async fn registration_daemons_with(&self, stop: StopToken, sibling_stop: StopToken) {
+        join_all(self.registration_tasks.iter().map(|task| {
+            self.registration_task_daemon_with(task.as_ref(), stop.clone(), sibling_stop.clone())
+        }))
         .await;
     }
 
@@ -434,12 +444,51 @@ impl Processor {
         if self.registration_tasks.is_empty() {
             stabilizer.wait_with(self.stabilize_interval, stop).await;
         } else {
+            let registration_stop_source = StopSource::new();
+            let registration_stop = registration_stop_source.token();
+            let stabilizer_stop = stop.clone();
+            let stabilization = async {
+                stabilizer
+                    .wait_with(self.stabilize_interval, stabilizer_stop)
+                    .await;
+                registration_stop_source.request_stop();
+            };
             let _ = futures::future::join(
-                stabilizer.wait_with(self.stabilize_interval, stop.clone()),
-                self.registration_daemons_with(stop),
+                stabilization,
+                self.registration_daemons_with(stop, registration_stop),
             )
             .await;
         }
+        if let Err(error) = self.flush_measurements().await {
+            tracing::error!(%error, "failed to flush measurements during graceful shutdown");
+        }
+    }
+
+    /// Flush all applied measurement updates with the graceful-shutdown deadline.
+    pub async fn flush_measurements(&self) -> Result<()> {
+        if let Some(measure) = &self.measure {
+            measure
+                .flush_with_timeout(MEASUREMENT_FLUSH_TIMEOUT)
+                .await?;
+        }
+        Ok(())
+    }
+
+    #[cfg(all(test, feature = "ffi"))]
+    pub(crate) async fn record_authenticated_measurement_for_test(
+        &self,
+        peer: Did,
+    ) -> std::result::Result<(), rings_core::measure::MeasureError> {
+        if let Some(measure) = &self.measure {
+            rings_core::measure::Measure::record(
+                measure.as_ref(),
+                peer,
+                rings_core::measure::Authentication::Authenticated,
+                rings_core::measure::MeasurementEvent::Connected,
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     /// Connect peer with web3 did.
@@ -706,20 +755,20 @@ impl Processor {
         self.swarm.peer_measurement(did).await
     }
 
-    /// Return observed local measurement counters for all connected peers.
+    /// Return every retained local peer measurement.
     pub async fn peer_measurements(&self) -> Vec<PeerMeasurement> {
-        let mut measurements = join_all(
-            self.swarm
-                .peer_dids()
-                .into_iter()
-                .map(|did| self.peer_measurement(did)),
-        )
-        .await
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+        let mut measurements = self.swarm.peer_measurements().await;
         measurements.sort_by_key(|measurement| measurement.did);
         measurements
+    }
+
+    /// Return one bounded page of retained local peer measurements.
+    pub async fn peer_measurements_page(
+        &self,
+        after: Option<Did>,
+        limit: NonZeroUsize,
+    ) -> PeerMeasurementPage {
+        self.swarm.peer_measurements_page(after, limit).await
     }
 
     /// register service
@@ -769,11 +818,10 @@ impl OnionDirectoryReader for Processor {
     }
 
     async fn peer_qualities(&self) -> Vec<(Did, PeerQuality)> {
-        let thresholds = peer_quality_thresholds();
         self.peer_measurements()
             .await
             .into_iter()
-            .map(|measurement| (measurement.did, measurement.evidence.classify(thresholds)))
+            .map(|measurement| (measurement.did, measurement.quality))
             .collect()
     }
 }

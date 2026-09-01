@@ -33,7 +33,6 @@ use wasm_bindgen_futures::JsFuture;
 use crate::error::Error;
 use crate::error::Result as NodeResult;
 use crate::extension::ext::Scope;
-use crate::measure::peer_quality_thresholds;
 use crate::measure::MeasureStorage;
 use crate::onion::circuit::route_first_hop;
 use crate::onion::circuit::OnionCircuitCapabilities;
@@ -238,12 +237,11 @@ impl OnionDirectoryReader for BrowserOnionDirectoryReader {
     }
 
     async fn peer_qualities(&self) -> Vec<(Did, PeerQuality)> {
-        let thresholds = peer_quality_thresholds();
         self.processor
             .peer_measurements()
             .await
             .into_iter()
-            .map(|measurement| (measurement.did, measurement.evidence.classify(thresholds)))
+            .map(|measurement| (measurement.did, measurement.quality))
             .collect()
     }
 }

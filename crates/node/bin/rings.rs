@@ -6,6 +6,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context;
 use clap::ArgAction;
 use clap::Args;
 use clap::Parser;
@@ -20,7 +21,8 @@ use rings_node::measure::PeriodicMeasure;
 use rings_node::native::cli::Client;
 use rings_node::native::config;
 use rings_node::native::endpoint::run_external_api;
-use rings_node::native::endpoint::run_internal_api;
+use rings_node::native::endpoint::run_internal_api_with_gateway;
+use rings_node::native::gateway::NativeGatewayRunner;
 use rings_node::onion::proxy::http::run_onion_http_proxy;
 use rings_node::onion::proxy::http::OnionHttpProxyOptions;
 use rings_node::onion::tcp::NativeOnionCircuitHandle;
@@ -34,6 +36,7 @@ use rings_node::prelude::rings_core::dht::Did;
 use rings_node::prelude::rings_core::ecc::SecretKey;
 use rings_node::prelude::rings_core::storage::sled::SledStorage;
 use rings_node::prelude::SessionSkBuilder;
+use rings_node::prelude::StopSource;
 use rings_node::processor::ProcessorBuilder;
 use rings_node::processor::ProcessorConfig;
 use rings_node::provider::Provider;
@@ -41,6 +44,11 @@ use rings_node::util::ensure_parent_dir;
 use rings_node::util::expand_home;
 use tokio::io;
 use tokio::io::AsyncBufReadExt;
+use tokio::task::JoinError;
+use tokio::task::JoinHandle;
+use tokio::task::JoinSet;
+
+const FOREGROUND_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Parser, Debug)]
 #[command(about, version, author)]
@@ -142,7 +150,7 @@ enum Command {
     Init(InitCommand),
     #[command(about = "Creates a new session secret key.")]
     NewSession(NewSessionCommand),
-    #[command(about = "Starts a long-running node daemon.")]
+    #[command(about = "Runs a foreground, composable Rings node.")]
     Run(Box<RunCommand>),
     #[command(about = "Provides chat room-like functionality on the Rings Network.")]
     Pubsub(PubsubCommand),
@@ -193,6 +201,14 @@ struct NewSessionCommand {
 
 #[derive(Args, Debug)]
 struct RunCommand {
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help = "Enable the native TUN gateway configured by the gateway section",
+        env
+    )]
+    pub gateway: bool,
+
     #[arg(
         long,
         help = "Rings node external api listen address. If not provided, use external_api_addr in config file or 127.0.0.1:50001",
@@ -600,7 +616,7 @@ struct InspectCommand {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
+async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
     let mut c = config::Config::read_fs(args.config_args.config)?;
 
     if let Some(ice_servers) = args.ice_servers {
@@ -673,6 +689,12 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     if let Some(max_connections) = args.onion_http_proxy_max_connections {
         c.onion_http_proxy_max_connections = max_connections;
     }
+    if args.gateway {
+        let Some(gateway) = c.gateway.as_mut() else {
+            anyhow::bail!("--gateway requires a gateway section in the node config file");
+        };
+        gateway.enabled = true;
+    }
     if c.advertise_onion_exit {
         validate_native_onion_exit_services(&c.onion_exit_services)?;
     }
@@ -689,6 +711,7 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     let onion_http_proxy_allow_short_paths = c.onion_http_proxy_allow_short_paths;
     let onion_http_proxy_header_timeout_secs = c.onion_http_proxy_header_timeout_secs;
     let onion_http_proxy_max_connections = c.onion_http_proxy_max_connections;
+    let gateway_config = c.gateway.clone().filter(|gateway| gateway.enabled);
 
     let (data_storage, measure_storage) = if let Some(storage_path) = args.storage_path {
         let storage_path = Path::new(&storage_path);
@@ -712,7 +735,7 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
         SledStorage::new_with_cap_and_path(measure_storage.capacity, measure_storage.path).await?,
     );
 
-    let measure = PeriodicMeasure::new(per_measure_storage);
+    let measure = PeriodicMeasure::new(per_measure_storage).await?;
 
     let processor = Arc::new(
         ProcessorBuilder::from_config(&pc)?
@@ -737,13 +760,57 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
         advertise_onion_relay,
         onion_exit_config,
     )?;
+    let gateway_runner = gateway_config
+        .map(|config| NativeGatewayRunner::new(processor.clone(), onion.clone(), config))
+        .transpose()?;
+    let gateway_status = gateway_runner
+        .as_ref()
+        .map(NativeGatewayRunner::status_handle);
     // The Backend decodes inbound custom messages as namespaced envelopes and routes
     // them to the protocol registry.
     let backend = Arc::new(Backend::new(provider));
     processor.swarm.set_callback(backend)?;
 
-    let processor_clone1 = processor.clone();
-    let processor_clone2 = processor.clone();
+    let stop = StopSource::new();
+    let gateway_configured = gateway_runner.is_some();
+    let gateway_stop = stop.token();
+    let (gateway_started, gateway_startup) = tokio::sync::oneshot::channel();
+    let mut gateway_task = tokio::spawn(async move {
+        match gateway_runner {
+            Some(runner) => {
+                runner
+                    .run_with_startup_barrier(gateway_stop, gateway_started)
+                    .await
+            }
+            None => std::future::pending::<anyhow::Result<()>>().await,
+        }
+    });
+    await_gateway_startup(gateway_configured, gateway_startup, &mut gateway_task).await?;
+
+    let mut tasks = JoinSet::new();
+    let processor_task = processor.clone();
+    let processor_stop = stop.token();
+    let mut processor_task = tokio::spawn(async move {
+        processor_task.listen_with(processor_stop.clone()).await;
+        if processor_stop.should_stop() {
+            Ok(())
+        } else {
+            anyhow::bail!("node processor listener stopped unexpectedly")
+        }
+    });
+    let internal_processor = processor.clone();
+    let internal_gateway = gateway_status.clone();
+    tasks.spawn(async move {
+        run_internal_api_with_gateway(c.internal_api_port, internal_processor, internal_gateway)
+            .await
+            .context("internal API stopped")
+    });
+    let external_processor = processor.clone();
+    tasks.spawn(async move {
+        run_external_api(c.external_api_addr, external_processor)
+            .await
+            .context("external API stopped")
+    });
     if let Some(onion_http_proxy_addr) = onion_http_proxy_addr {
         let onion_http_proxy_addr = onion_http_proxy_addr.parse::<SocketAddr>()?;
         let proxy_options = OnionHttpProxyOptions {
@@ -754,20 +821,139 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
             max_connections: onion_http_proxy_max_connections,
             header_timeout: Duration::from_secs(onion_http_proxy_header_timeout_secs),
         };
-        let _ = futures::join!(
-            processor.listen(),
-            run_internal_api(c.internal_api_port, processor_clone2),
-            run_external_api(c.external_api_addr, processor_clone1),
-            run_onion_http_proxy(proxy_options, processor.clone(), onion),
-        );
-    } else {
-        let _ = futures::join!(
-            processor.listen(),
-            run_internal_api(c.internal_api_port, processor_clone2),
-            run_external_api(c.external_api_addr, processor_clone1),
-        );
+        tasks.spawn(async move {
+            run_onion_http_proxy(proxy_options, processor, onion)
+                .await
+                .context("Onion HTTP proxy stopped")
+        });
     }
 
+    enum ForegroundExit {
+        Signal(anyhow::Result<()>),
+        Service(Option<Result<anyhow::Result<()>, JoinError>>),
+        Gateway(Result<anyhow::Result<()>, JoinError>),
+        Processor(Result<anyhow::Result<()>, JoinError>),
+    }
+    let exit = tokio::select! {
+        signal = shutdown_signal() => ForegroundExit::Signal(signal),
+        service = tasks.join_next() => ForegroundExit::Service(service),
+        gateway = &mut gateway_task => ForegroundExit::Gateway(gateway),
+        processor = &mut processor_task => ForegroundExit::Processor(processor),
+    };
+    stop.request_stop();
+    // Stop request-serving tasks immediately, but keep the processor task separate so it can
+    // flush measurements through its cooperative `listen_with` shutdown path.
+    tasks.abort_all();
+
+    let (primary, gateway_finished, processor_finished) = match exit {
+        ForegroundExit::Signal(result) => (result, false, false),
+        ForegroundExit::Service(result) => (joined_service_result(result), false, false),
+        ForegroundExit::Gateway(result) => (joined_task_result(result, "gateway"), true, false),
+        ForegroundExit::Processor(result) => {
+            (joined_task_result(result, "node processor"), false, true)
+        }
+    };
+    let gateway_cleanup = if gateway_configured && !gateway_finished {
+        await_task_cleanup(&mut gateway_task, "gateway route cleanup").await
+    } else {
+        if !gateway_finished {
+            gateway_task.abort();
+        }
+        Ok(())
+    };
+    let processor_cleanup = if processor_finished {
+        Ok(())
+    } else {
+        await_task_cleanup(&mut processor_task, "node processor shutdown").await
+    };
+    combine_foreground_results(primary, gateway_cleanup, processor_cleanup)
+}
+
+fn joined_service_result(
+    result: Option<Result<anyhow::Result<()>, JoinError>>,
+) -> anyhow::Result<()> {
+    match result {
+        Some(Ok(result)) => result,
+        Some(Err(error)) => Err(anyhow::anyhow!("foreground service task failed: {error}")),
+        None => Err(anyhow::anyhow!("all foreground service tasks stopped")),
+    }
+}
+
+fn joined_task_result(
+    result: Result<anyhow::Result<()>, JoinError>,
+    task: &'static str,
+) -> anyhow::Result<()> {
+    match result {
+        Ok(result) => result,
+        Err(error) => Err(anyhow::anyhow!("{task} task failed: {error}")),
+    }
+}
+
+async fn await_gateway_startup(
+    configured: bool,
+    startup: tokio::sync::oneshot::Receiver<()>,
+    gateway_task: &mut JoinHandle<anyhow::Result<()>>,
+) -> anyhow::Result<()> {
+    if !configured {
+        return Ok(());
+    }
+    match startup.await {
+        Ok(()) => Ok(()),
+        Err(_) => joined_task_result(gateway_task.await, "gateway startup"),
+    }
+}
+
+async fn await_task_cleanup(
+    task: &mut JoinHandle<anyhow::Result<()>>,
+    operation: &'static str,
+) -> anyhow::Result<()> {
+    match tokio::time::timeout(FOREGROUND_CLEANUP_TIMEOUT, &mut *task).await {
+        Ok(result) => joined_task_result(result, operation),
+        Err(_) => {
+            task.abort();
+            Err(anyhow::anyhow!(
+                "{operation} did not finish within {FOREGROUND_CLEANUP_TIMEOUT:?}"
+            ))
+        }
+    }
+}
+
+fn combine_foreground_results(
+    primary: anyhow::Result<()>,
+    gateway_cleanup: anyhow::Result<()>,
+    processor_cleanup: anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let failures = [
+        primary.err().map(|error| format!("foreground: {error}")),
+        gateway_cleanup
+            .err()
+            .map(|error| format!("gateway cleanup: {error}")),
+        processor_cleanup
+            .err()
+            .map(|error| format!("processor cleanup: {error}")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(failures.join("; ")))
+    }
+}
+
+async fn shutdown_signal() -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result?,
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await?;
     Ok(())
 }
 
@@ -817,7 +1003,7 @@ fn main() -> anyhow::Result<()> {
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
-        Command::Run(args) => daemon_run(*args).await,
+        Command::Run(args) => foreground_run(*args).await,
         Command::Pubsub(args) => pubsub_run(args.client_args, args.topic).await,
         Command::Connect(ConnectCommand::Node(args)) => {
             args.client_args
@@ -920,10 +1106,16 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
     use clap::CommandFactory;
     use clap::FromArgMatches;
     use rings_node::logging::LogLevel;
 
+    use super::await_gateway_startup;
+    use super::await_task_cleanup;
     use super::Cli;
 
     fn parse_without_log_level_env<const N: usize>(args: [&str; N]) -> Result<Cli, clap::Error> {
@@ -964,6 +1156,41 @@ mod tests {
                 log_level: LogLevel::Debug,
                 ..
             })
+        ));
+    }
+
+    #[tokio::test]
+    async fn processor_cleanup_gets_a_cooperative_stop_window() {
+        let stop = rings_node::prelude::StopSource::new();
+        let token = stop.token();
+        let flushed = Arc::new(AtomicBool::new(false));
+        let task_flushed = Arc::clone(&flushed);
+        let mut task = tokio::spawn(async move {
+            token.stopped().await;
+            task_flushed.store(true, Ordering::Release);
+            Ok(())
+        });
+        stop.request_stop();
+
+        let cleanup = await_task_cleanup(&mut task, "test processor cleanup").await;
+
+        assert!(cleanup.is_ok());
+        assert!(flushed.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn gateway_startup_barrier_reports_early_failure() {
+        let (started, startup) = tokio::sync::oneshot::channel();
+        drop(started);
+        let mut task = tokio::spawn(async {
+            Err(anyhow::anyhow!("gateway activation failed before startup"))
+        });
+
+        let result = await_gateway_startup(true, startup, &mut task).await;
+
+        assert!(matches!(
+            result,
+            Err(error) if error.to_string().contains("activation failed before startup")
         ));
     }
 }

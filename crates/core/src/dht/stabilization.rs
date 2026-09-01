@@ -10,7 +10,6 @@ use futures::future::FutureExt;
 use futures::pin_mut;
 use futures::select;
 use rings_transport::core::transport::WebrtcConnectionState;
-use web_time::Instant;
 
 pub use self::storage_repair::StorageRepairOutcome;
 use crate::dht::successor::SuccessorReader;
@@ -23,8 +22,6 @@ use crate::dht::PeerRingRemoteAction;
 use crate::dht::TopoInfo;
 use crate::error::Error;
 use crate::error::Result;
-use crate::measure::PeerMeasurement;
-use crate::measure::PeerQualityThresholds;
 use crate::message::FindSuccessorReportHandler;
 use crate::message::FindSuccessorSend;
 use crate::message::FindSuccessorThen;
@@ -41,6 +38,7 @@ use crate::swarm::transport::PEER_LIVENESS_IDLE_MS;
 use crate::swarm::transport::TRACKED_PAYLOAD_COMPLETION_BOUND;
 use crate::utils::get_epoch_ms_i64;
 use crate::utils::sleep;
+use crate::utils::Instant;
 
 const STABILIZATION_STEP_TIMEOUT: Duration =
     TRACKED_PAYLOAD_COMPLETION_BOUND.saturating_add(Duration::from_secs(1));
@@ -51,8 +49,6 @@ const DISCONNECTED_CONNECTION_GRACE_MS: i64 = 30_000;
 /// from escaping into the following topology phase.
 pub(crate) const STORAGE_REPAIR_MAX_DELIVERIES_PER_STEP: usize = 1;
 pub(crate) const STORAGE_REPAIR_FRESH_CONNECTION_GRACE_MS: i64 = 30_000;
-const DHT_TOPOLOGY_EVICTION_THRESHOLDS: PeerQualityThresholds =
-    PeerQualityThresholds::new(3, 10, 10);
 
 #[derive(Clone, Copy, Debug)]
 enum TopologyPeerRemovalReason {
@@ -75,7 +71,6 @@ enum TopologyPeerRemovalReason {
         unanswered_for_ms: i64,
         timeout_ms: i64,
     },
-    LocalFailureLimit(PeerMeasurement),
 }
 
 #[derive(Clone, Copy)]
@@ -103,7 +98,6 @@ impl TopologyPeerRemovalReason {
             Self::DisconnectedSuccessorFailover { .. } => "disconnected_successor_failover",
             Self::DisconnectedTopologyPrune { .. } => "disconnected_topology_prune",
             Self::UnansweredLivenessProbe { .. } => "unanswered_liveness_probe",
-            Self::LocalFailureLimit(_) => "local_failure_limit",
         }
     }
 
@@ -149,13 +143,6 @@ impl TopologyPeerRemovalReason {
     const fn liveness_timeout_ms(self) -> Option<i64> {
         match self {
             Self::UnansweredLivenessProbe { timeout_ms, .. } => Some(timeout_ms),
-            _ => None,
-        }
-    }
-
-    const fn measurement(self) -> Option<PeerMeasurement> {
-        match self {
-            Self::LocalFailureLimit(measurement) => Some(measurement),
             _ => None,
         }
     }
@@ -427,17 +414,6 @@ impl Stabilizer {
             )));
         }
 
-        if let Some(measurement) = self.transport.peer_measurement(did).await {
-            if measurement
-                .evidence
-                .reaches_failure_limit(DHT_TOPOLOGY_EVICTION_THRESHOLDS)
-            {
-                return Ok(removal(TopologyPeerRemovalReason::LocalFailureLimit(
-                    measurement,
-                )));
-            }
-        }
-
         if let Some(expiry) = self
             .transport
             .peer_liveness_expiry(admitted.attempt, now_ms)?
@@ -548,7 +524,6 @@ impl Stabilizer {
             fallback = ?fallback_snapshot,
             liveness_unanswered_for_ms = ?reason.liveness_unanswered_for_ms(),
             liveness_timeout_ms = ?reason.liveness_timeout_ms(),
-            measurement = ?reason.measurement(),
             should_repair,
             "STABILIZATION clean_unavailable selected peer"
         );
@@ -674,6 +649,11 @@ impl Stabilizer {
             }
         }
         Ok(())
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) async fn probe_peer_liveness_for_simulation(&self) -> Result<()> {
+        self.probe_peer_liveness().await
     }
 
     /// Notify predecessor, this is a DHT operation.

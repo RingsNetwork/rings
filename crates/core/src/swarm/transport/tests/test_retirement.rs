@@ -50,10 +50,6 @@ impl BehaviourJudgement for BlockingDisconnectMeasure {
     async fn quality(&self, did: Did) -> PeerQuality {
         self.inner.quality(did).await
     }
-
-    async fn good(&self, did: Did) -> bool {
-        self.inner.good(did).await
-    }
 }
 
 #[cfg(feature = "dummy")]

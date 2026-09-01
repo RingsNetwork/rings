@@ -27,6 +27,8 @@ use crate::tests::native::prepare_processor;
 
 mod common;
 mod test_config;
+#[cfg(rings_native)]
+mod test_gateway;
 mod test_network;
 mod test_onion;
 mod test_registry;

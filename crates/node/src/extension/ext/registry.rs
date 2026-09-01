@@ -2,7 +2,9 @@
 //!
 //! [`Extensions`] registers `(Protocol, Interpret)` pairs by namespace. Each interpreter is
 //! handed a namespace-scoped [`Scope`] (overlay `send` / `did` / self-`inject`, confined to its
-//! own namespace) — *not* the router-internal `Core`. `Core` is the crate-private capability
+//! own namespace) — *not* the router-internal `Core`. Protocols that authenticate and select an
+//! exact physical next hop may additionally use crate-private `send_direct`; it preserves the
+//! namespace envelope while bypassing Chord route selection. `Core` is the crate-private capability
 //! that also routes an inbound [`Envelope`] to its protocol and drives the bounded re-injection
 //! fixpoint; the registry stays uniform (everything erased to the internal `Handler`) while each
 //! extension's shell is its own. Extension authors see only `Protocol` / `Interpret` / `Scope` /
@@ -75,6 +77,13 @@ impl Core {
     pub async fn send(&self, to: Did, namespace: &str, payload: Bytes) -> Result<()> {
         let envelope = Envelope::new(namespace, payload);
         self.processor.send_envelope(to, &envelope).await?;
+        Ok(())
+    }
+
+    /// Put a message on an already-connected transport edge without Chord route selection.
+    async fn send_direct(&self, to: Did, namespace: &str, payload: Bytes) -> Result<()> {
+        let envelope = Envelope::new(namespace, payload);
+        self.processor.send_direct_envelope(to, &envelope).await?;
         Ok(())
     }
 
@@ -165,6 +174,16 @@ impl Scope {
     /// Put a message on the overlay to `to`, under this interpreter's own namespace.
     pub async fn send(&self, to: Did, payload: Bytes) -> Result<()> {
         self.core.send(to, self.namespace.as_str(), payload).await
+    }
+
+    /// Send to an exact, already-connected peer under this scope's namespace.
+    ///
+    /// This is intentionally crate-private: only protocols that already authenticate their own
+    /// hop selection, such as onion circuits, may bypass the overlay routing decision.
+    pub(crate) async fn send_direct(&self, to: Did, payload: Bytes) -> Result<()> {
+        self.core
+            .send_direct(to, self.namespace.as_str(), payload)
+            .await
     }
 
     /// Self-inject `payload` into this interpreter's **own** namespace (`from = this node`).

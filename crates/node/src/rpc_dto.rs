@@ -20,8 +20,10 @@ use rings_rpc::protos::rings_node::OnionExitServiceInfo;
 use rings_rpc::protos::rings_node::OnionExitTransportInfo;
 use rings_rpc::protos::rings_node::OnlineNodeDescriptorInfo;
 use rings_rpc::protos::rings_node::OnlineNodeTypeInfo;
+use rings_rpc::protos::rings_node::PeerCreditInfo;
 use rings_rpc::protos::rings_node::PeerMeasurementCountersInfo;
 use rings_rpc::protos::rings_node::PeerMeasurementInfo;
+use rings_rpc::protos::rings_node::PeerReliabilityInfo;
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -309,9 +311,22 @@ fn peer_measurement_counters_info(evidence: PeerQualityEvidence) -> PeerMeasurem
 }
 
 pub(crate) fn peer_measurement_info(measurement: PeerMeasurement) -> Result<PeerMeasurementInfo> {
+    let credit = measurement.credit.map(|credit| PeerCreditInfo {
+        bytes_sent_to_peer: credit.bytes_sent_to_peer(),
+        bytes_received_from_peer: credit.bytes_received_from_peer(),
+        last_seen_seconds: credit.last_seen().as_secs(),
+        score: measurement.credit_score.as_f64(),
+    });
+    let reliability = match measurement.quality {
+        rings_core::measure::PeerQuality::Healthy => PeerReliabilityInfo::Healthy,
+        rings_core::measure::PeerQuality::Unknown => PeerReliabilityInfo::Unknown,
+        rings_core::measure::PeerQuality::Degraded => PeerReliabilityInfo::Degraded,
+    };
     Ok(PeerMeasurementInfo {
         did: measurement.did.to_string(),
         counters: peer_measurement_counters_info(measurement.evidence),
+        credit,
+        reliability,
     })
 }
 

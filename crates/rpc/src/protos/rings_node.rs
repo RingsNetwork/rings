@@ -486,9 +486,14 @@ pub struct PeerMeasurementRequest {
     pub did: String,
 }
 
-/// Request to list measurements for all peers.
+/// Request to list a bounded page of retained peer measurements.
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
-pub struct ListPeerMeasurementsRequest {}
+pub struct ListPeerMeasurementsRequest {
+    /// Maximum entries to return; omitted uses the server default.
+    pub limit: Option<u32>,
+    /// Exclusive DID cursor returned by the previous page.
+    pub cursor: Option<String>,
+}
 
 /// Counter set for peer transport measurements.
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
@@ -507,6 +512,32 @@ pub struct PeerMeasurementCountersInfo {
     pub failed_to_receive: u64,
 }
 
+/// Persistent local byte-credit values for one authenticated peer.
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct PeerCreditInfo {
+    /// Useful payload bytes sent by the local node to the peer.
+    pub bytes_sent_to_peer: u64,
+    /// Useful payload bytes received and verified from the peer.
+    pub bytes_received_from_peer: u64,
+    /// Most recent authenticated local observation in Unix seconds.
+    pub last_seen_seconds: u64,
+    /// aMule-compatible local resource-priority multiplier in `[1, 10]`.
+    pub score: f64,
+}
+
+/// Advisory recent local reliability class.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerReliabilityInfo {
+    /// Enough positive recent evidence remains below failure limits.
+    Healthy,
+    /// The local node has insufficient recent evidence.
+    #[default]
+    Unknown,
+    /// Recent local evidence reached a configured failure limit.
+    Degraded,
+}
+
 /// Measurements collected for a single peer.
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct PeerMeasurementInfo {
@@ -514,13 +545,19 @@ pub struct PeerMeasurementInfo {
     pub did: String,
     /// Transport measurement counters for the peer.
     pub counters: PeerMeasurementCountersInfo,
+    /// Persistent local byte credits, absent for counter-only custom implementations.
+    pub credit: Option<PeerCreditInfo>,
+    /// Advisory recent reliability class.
+    pub reliability: PeerReliabilityInfo,
 }
 
-/// Response containing measurements for all measured peers.
+/// Response containing one bounded page of measured peers.
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct ListPeerMeasurementsResponse {
     /// Per-peer measurement entries.
     pub measurements: Vec<PeerMeasurementInfo>,
+    /// Exclusive cursor for the next page, absent at the end of the ledger.
+    pub next_cursor: Option<String>,
 }
 
 /// Response containing measurements for one peer.

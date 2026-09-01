@@ -17,7 +17,7 @@ pub mod error;
 pub mod extension;
 pub mod logging;
 pub mod measure;
-#[cfg(feature = "node")]
+#[cfg(all(feature = "node", not(target_family = "wasm")))]
 /// Native-node configuration, CLI, and runtime adapters.
 pub mod native;
 pub mod onion;
