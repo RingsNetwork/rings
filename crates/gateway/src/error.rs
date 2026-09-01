@@ -54,8 +54,11 @@ pub enum ConfigError {
     /// The configured interface MTU is outside the IPv4 packet range.
     #[error("gateway MTU {0} is outside the supported IPv4 range 576..=65535")]
     InvalidMtu(u32),
-    /// A host-wide default capture route was requested.
-    #[error("gateway capture route {0} is a default route; select explicit destinations instead")]
+    /// An explicit full-tunnel policy was requested but is unsupported in this milestone.
+    #[error(
+        "gateway capture route {0} requests full-tunnel routing, which is unsupported in this \
+         milestone; configure specific destinations"
+    )]
     DefaultRouteUnsupported(ipnet::IpNet),
     /// An IPv6 route was supplied to the IPv4/TCP milestone.
     #[error("gateway IPv4/TCP milestone does not accept IPv6 route {0}")]

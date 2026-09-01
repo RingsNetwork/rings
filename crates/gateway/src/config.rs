@@ -240,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    fn host_wide_default_capture_is_rejected() {
+    fn explicit_full_tunnel_is_unsupported_in_this_milestone() {
         let mut candidate = plan();
         let default_route = route(Ipv4Addr::UNSPECIFIED, 0);
         candidate.included_routes = vec![default_route];
@@ -328,7 +328,7 @@ mod tests {
         }"#;
 
         let error = serde_json::from_str::<GatewayPlan>(legacy)
-            .expect_err("removed full-capture fields must fail closed")
+            .expect_err("removed route-authority fields must fail closed")
             .to_string();
         assert!(error.contains("unknown field"));
     }

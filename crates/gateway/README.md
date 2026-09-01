@@ -1,8 +1,9 @@
 # rings-gateway
 
 `rings-gateway` is the native packet-to-stream gateway used by Rings nodes. It forwards
-explicitly selected IPv4/TCP flows through Rings Onion circuits. It is not a host-wide VPN or
-kill switch.
+explicitly selected IPv4/TCP flows through Rings Onion circuits. The packet mechanism does not
+imply one routing policy: this milestone enables selective routing, not full-tunnel or kill-switch
+policy.
 
 The crate is intentionally unavailable to WebAssembly targets. Browser builds remain Rings
 clients and do not contain the native gateway or server runtime.
@@ -20,6 +21,14 @@ default route, IPv6, DNS, TURN, ICE, SDP, bootstrap endpoints, or observed peers
 `0.0.0.0/0` capture is rejected. Interface addresses must be IPv4 `/32` host addresses so setup
 cannot create a connected capture prefix. An empty set is valid when external routing owns packet
 selection instead.
+
+This follows the same mechanism-versus-policy separation as OpenVPN. OpenVPN's [`--route`
+option](https://openvpn.net/community-docs/community-articles/openvpn-2-7-manual.html) selects
+individual prefixes, while `--redirect-gateway def1` explicitly requests full-tunnel routing and
+implements it with two `/1` routes. OpenVPN-style routing and `/1` routes are not inherently a
+problem; installing them without an explicit full-tunnel policy would be. Rings does not expose
+that policy in this milestone, so an explicit `/0` is reported as unsupported rather than silently
+expanded.
 
 The gateway's fail-closed guarantee applies only after traffic enters it. A selected flow either
 opens its immutable target through a valid Onion route and compatible TCP exit, or fails without
