@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.20.0
+
+### Added
+
+- Add the opt-in native IPv4/TCP gateway for explicitly selected destination prefixes, with
+  Linux TUN, macOS utun, Windows Wintun, and a separately launched Unix privilege helper.
+- Add Swift and Kotlin/JNA desktop FFI examples aligned with the existing Python ownership and
+  provider lifecycle.
+
 ## 0.19.0
 
 ### Breaking changes
