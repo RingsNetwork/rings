@@ -29,7 +29,10 @@ implements it with two `/1` routes. That is a valid OpenVPN policy, but Rings in
 `redirect-gateway` equivalent. Capturing every host destination would also capture the ordinary
 underlay traffic carrying existing Rings neighbor links; avoiding recursion would require dynamic
 bypass state or guaranteed relay. Rings requires neither. A `/0` or equivalent covering prefix set
-is therefore rejected as outside the selective gateway contract.
+is therefore rejected as an intent stop-line outside the selective gateway contract. Near-cover
+sets remain valid, including the entire IPv4 space minus one `/32`; this rejection is not a proof
+against recursion. If the operator explicitly selects an underlay destination, it enters the same
+fail-closed path as any other selected destination and Rings does not create a direct bypass.
 
 The gateway's fail-closed guarantee applies only after traffic enters it. A selected flow either
 opens its immutable target through a valid Onion route and compatible TCP exit, or fails without
@@ -152,6 +155,14 @@ the same Onion egress.
 Runtime input never expands the capture set. If an operator deliberately selects a destination
 that Rings itself uses for bootstrap or ICE, the configured route has the same effect as any other
 operator route; Rings does not silently punch a bypass around it.
+
+At establishment, the native binding reads one route-table snapshot and rejects every exact or
+more-specific existing route inside a capture prefix because longest-prefix routing would let that
+sub-range bypass the gateway. Rings deliberately has no route-change subscription. A route added
+after that snapshot, including while establishment finishes, can therefore shadow a capture prefix
+and send that sub-range through the host's new route; operators must prevent or monitor such
+route-table mutation. The fail-closed guarantee begins only after a packet actually enters the
+gateway.
 
 Removed route-authority fields such as `routing_mode`, `excluded_routes`, `dns_policy`, and
 `dns_servers` are rejected inside `plan` instead of being silently ignored. The gateway never

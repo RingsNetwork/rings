@@ -1,6 +1,7 @@
 //! Typed failures exposed by gateway domain and effect boundaries.
 
 use std::io;
+use std::net::IpAddr;
 use std::net::SocketAddr;
 
 use thiserror::Error;
@@ -242,6 +243,19 @@ pub enum GatewayError {
         operation: &'static str,
         /// Runtime diagnostic.
         message: String,
+    },
+    /// Existing host routing would bypass one configured capture prefix.
+    #[error(
+        "gateway capture route {capture} is shadowed by existing host route \
+         {existing_destination}/{existing_prefix}"
+    )]
+    CaptureRouteShadowed {
+        /// Normalized prefix the gateway was asked to capture.
+        capture: ipnet::IpNet,
+        /// Destination of the exact or more-specific existing route.
+        existing_destination: IpAddr,
+        /// Prefix length of the exact or more-specific existing route.
+        existing_prefix: u8,
     },
     /// Runtime processing failed and fail-closed shutdown also reported an error.
     #[error("gateway runtime failed: {runtime}; shutdown cleanup also failed: {cleanup}")]

@@ -24,8 +24,6 @@ use crate::GatewayError;
 
 const MAX_FRAME_BYTES: usize = 64 * 1024;
 const RESPONSE_MARKER: u8 = 0x52;
-const REQUEST_READ_OPERATION: &str = "read-helper-request";
-const REQUEST_TIMEOUT_OPERATION: &str = "read-helper-request-timeout";
 
 pub(crate) fn write_request(
     stream: &mut UnixStream,
@@ -37,15 +35,7 @@ pub(crate) fn write_request(
 pub(crate) fn read_request(
     stream: &mut UnixStream,
 ) -> Result<Option<UnixConfigRequest>, GatewayError> {
-    read_optional_frame(stream, REQUEST_READ_OPERATION)
-}
-
-#[cfg(test)]
-pub(crate) fn is_request_timeout(error: &GatewayError) -> bool {
-    matches!(error, GatewayError::Platform {
-        operation: REQUEST_TIMEOUT_OPERATION,
-        ..
-    })
+    read_optional_frame(stream, "read-helper-request")
 }
 
 pub(crate) fn send_response(
@@ -159,7 +149,7 @@ fn read_optional_frame<T: DeserializeOwned>(
     let mut length = [0_u8; 4];
     let first = stream
         .read(&mut length)
-        .map_err(|error| frame_read_error(operation, error))?;
+        .map_err(|error| GatewayError::platform(operation, error))?;
     if first == 0 {
         return Ok(None);
     }
@@ -172,7 +162,7 @@ fn read_optional_frame<T: DeserializeOwned>(
                     message: format!("invalid frame prefix length {first}"),
                 })?,
         )
-        .map_err(|error| frame_read_error(operation, error))?;
+        .map_err(|error| GatewayError::platform(operation, error))?;
     decode_frame(stream, length, operation).map(Some)
 }
 
@@ -202,21 +192,8 @@ fn decode_frame<T: DeserializeOwned>(
     let mut payload = vec![0_u8; length];
     stream
         .read_exact(&mut payload)
-        .map_err(|error| frame_read_error(operation, error))?;
+        .map_err(|error| GatewayError::platform(operation, error))?;
     serde_json::from_slice(&payload).map_err(|error| GatewayError::platform(operation, error))
-}
-
-fn frame_read_error(operation: &'static str, error: std::io::Error) -> GatewayError {
-    let operation = if operation == REQUEST_READ_OPERATION
-        && matches!(
-            error.kind(),
-            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-        ) {
-        REQUEST_TIMEOUT_OPERATION
-    } else {
-        operation
-    };
-    GatewayError::platform(operation, error)
 }
 
 #[cfg(test)]
@@ -225,7 +202,6 @@ mod tests {
     use std::os::fd::AsRawFd;
     use std::os::unix::net::UnixStream;
 
-    use super::is_request_timeout;
     use super::read_request;
     use super::receive_response;
     use super::send_response;
@@ -252,18 +228,6 @@ mod tests {
             read_request(&mut server).expect("read request"),
             Some(request)
         );
-    }
-
-    #[test]
-    fn stalled_request_is_classified_as_a_timeout() {
-        let (mut server, _client) = UnixStream::pair().expect("pair");
-        server
-            .set_read_timeout(Some(std::time::Duration::from_millis(1)))
-            .expect("read timeout");
-
-        let error = read_request(&mut server).expect_err("stalled peer must time out");
-
-        assert!(is_request_timeout(&error));
     }
 
     #[test]

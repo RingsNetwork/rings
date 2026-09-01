@@ -76,15 +76,38 @@ fn failed_route_add_removes_the_unowned_cleanup_intent() {
 }
 
 #[test]
-fn route_ownership_conflicts_only_on_the_exact_destination_prefix() {
-    let existing = Route::new("203.0.113.0".parse().expect("existing route"), 24);
-    let same = Route::new("203.0.113.0".parse().expect("same route"), 24);
-    let more_specific = Route::new("203.0.113.7".parse().expect("host route"), 32);
+fn route_shadowing_detection_matches_longest_prefix_routing() {
+    let capture = "203.0.113.0/24".parse().expect("capture route");
+    let exact = Route::new("203.0.113.0".parse().expect("exact route"), 24);
+    let more_specific = Route::new("203.0.113.128".parse().expect("nested route"), 25);
+    let host = Route::new("203.0.113.7".parse().expect("host route"), 32);
+    let less_specific = Route::new("203.0.0.0".parse().expect("covering route"), 16);
     let adjacent = Route::new("203.0.114.0".parse().expect("adjacent route"), 24);
 
-    assert!(same_route_destination(&existing, &same));
-    assert!(!same_route_destination(&existing, &more_specific));
-    assert!(!same_route_destination(&existing, &adjacent));
+    assert!(route_shadows_capture(&exact, &capture));
+    assert!(route_shadows_capture(&more_specific, &capture));
+    assert!(route_shadows_capture(&host, &capture));
+    assert!(!route_shadows_capture(&less_specific, &capture));
+    assert!(!route_shadows_capture(&adjacent, &capture));
+}
+
+#[test]
+fn capture_shadowing_returns_a_typed_host_state_error() {
+    let capture = "203.0.113.0/24".parse().expect("capture route");
+    let existing = Route::new("203.0.113.128".parse().expect("nested route"), 25);
+
+    let error = ensure_capture_destinations_available(&[existing], &[capture])
+        .expect_err("more-specific route must block capture establishment");
+
+    assert!(matches!(
+        error,
+        GatewayError::CaptureRouteShadowed {
+            capture: actual_capture,
+            existing_destination,
+            existing_prefix: 25,
+        } if actual_capture == capture
+            && existing_destination == "203.0.113.128".parse::<IpAddr>().expect("address")
+    ));
 }
 
 #[test]

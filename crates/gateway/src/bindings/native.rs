@@ -215,9 +215,16 @@ impl NativeTunnelControl {
                 .if_index()
                 .map_err(|error| GatewayError::platform("read-interface-index", error))?;
 
-            for network in capture_routes(plan) {
+            let capture_routes = capture_routes(plan);
+            if !capture_routes.is_empty() {
+                let existing_routes = self
+                    .manager
+                    .list()
+                    .map_err(|error| GatewayError::platform("list-capture-routes", error))?;
+                ensure_capture_destinations_available(&existing_routes, &capture_routes)?;
+            }
+            for network in capture_routes {
                 let route = capture_route(network, interface_index);
-                self.ensure_capture_destination_available(&route)?;
                 self.install_route(route, &mut installed)?;
             }
             write_lease(&self.options.route_ledger_path, &installed)?;
@@ -270,27 +277,6 @@ impl NativeTunnelControl {
         )
     }
 
-    fn ensure_capture_destination_available(&mut self, route: &Route) -> Result<(), GatewayError> {
-        let existing = self
-            .manager
-            .list()
-            .map_err(|error| GatewayError::platform("list-capture-routes", error))?;
-        if let Some(conflict) = existing
-            .iter()
-            .find(|existing| same_route_destination(existing, route))
-        {
-            return Err(GatewayError::Platform {
-                operation: "capture-route-conflict",
-                message: format!(
-                    "destination {}/{} already has a route and is not owned by this gateway: {conflict:?}",
-                    route.destination(),
-                    route.prefix()
-                ),
-            });
-        }
-        Ok(())
-    }
-
     fn cleanup_routes(&mut self, routes: &mut Vec<Route>) -> Result<(), GatewayError> {
         while let Some(route) = routes.pop() {
             if let Err(error) = self.manager.delete(&route) {
@@ -306,8 +292,27 @@ impl NativeTunnelControl {
     }
 }
 
-fn same_route_destination(left: &Route, right: &Route) -> bool {
-    left.destination() == right.destination() && left.prefix() == right.prefix()
+fn ensure_capture_destinations_available(
+    existing_routes: &[Route],
+    capture_routes: &[IpNet],
+) -> Result<(), GatewayError> {
+    for capture in capture_routes {
+        if let Some(existing) = existing_routes
+            .iter()
+            .find(|existing| route_shadows_capture(existing, capture))
+        {
+            return Err(GatewayError::CaptureRouteShadowed {
+                capture: *capture,
+                existing_destination: existing.destination(),
+                existing_prefix: existing.prefix(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn route_shadows_capture(existing: &Route, capture: &IpNet) -> bool {
+    existing.prefix() >= capture.prefix_len() && capture.contains(&existing.destination())
 }
 
 fn journal_then_add_route<J, A>(

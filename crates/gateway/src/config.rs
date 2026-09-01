@@ -318,6 +318,21 @@ mod tests {
     }
 
     #[test]
+    fn all_but_one_ipv4_host_remains_a_selective_prefix_set() {
+        let mut candidate = plan();
+        // These are the 32 sibling prefixes along the path to the excluded all-ones `/32`.
+        candidate.included_routes = (1_u8..=32)
+            .map(|prefix| {
+                let shift = 33_u32 - u32::from(prefix);
+                let address = u32::MAX.checked_shl(shift).unwrap_or(u32::MIN);
+                route(Ipv4Addr::from(address), prefix)
+            })
+            .collect();
+
+        assert_eq!(candidate.validate(), Ok(()));
+    }
+
+    #[test]
     fn ipv6_is_rejected_until_the_gateway_has_an_ipv6_policy() {
         let mut candidate = plan();
         let ipv6 = IpNet::new("2001:db8::".parse().expect("test address"), 32).expect("test route");
