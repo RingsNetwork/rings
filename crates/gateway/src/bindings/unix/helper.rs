@@ -366,6 +366,21 @@ fn remove_stale_socket(path: &Path) -> Result<(), GatewayError> {
         Err(error) => return Err(GatewayError::platform("inspect-unix-helper-socket", error)),
     };
     ensure_socket(path, metadata.file_type())?;
+    match UnixStream::connect(path) {
+        Ok(_) => {
+            return Err(GatewayError::UnixHelperAlreadyRunning {
+                path: path.to_path_buf(),
+            });
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+            ) => {}
+        Err(error) => {
+            return Err(GatewayError::platform("probe-unix-helper-socket", error));
+        }
+    }
     std::fs::remove_file(path)
         .map_err(|error| GatewayError::platform("remove-stale-unix-helper", error))
 }
@@ -458,6 +473,7 @@ mod tests {
     use super::peer_uid;
     use super::remove_stale_socket;
     use super::secure_child_path;
+    use crate::GatewayError;
 
     #[test]
     fn stale_cleanup_refuses_regular_files() {
@@ -476,6 +492,23 @@ mod tests {
         drop(listener);
         remove_stale_socket(&path).expect("remove socket");
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn stale_cleanup_refuses_a_live_helper_socket() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("helper.sock");
+        let listener = UnixListener::bind(&path).expect("bind fixture");
+
+        let error = remove_stale_socket(&path).expect_err("live listener must retain its socket");
+
+        assert!(matches!(
+            error,
+            GatewayError::UnixHelperAlreadyRunning { path: active } if active == path
+        ));
+        assert!(path.exists());
+        drop(listener);
+        remove_stale_socket(&path).expect("remove socket after listener exits");
     }
 
     #[test]

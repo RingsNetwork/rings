@@ -20,6 +20,26 @@ async fn failed_teardown_returns_the_same_linear_lease() {
 }
 
 #[test]
+fn route_ledger_lock_is_exclusive_for_the_control_lifetime() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let options = NativeTunnelOptions::new(directory.path().join("routes.json"));
+    let first = NativeTunnelControl::new(options.clone()).expect("first ledger owner");
+
+    let error = match NativeTunnelControl::new(options.clone()) {
+        Ok(_) => panic!("second control unexpectedly acquired the same ledger lock"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        GatewayError::RouteLedgerLocked { path }
+            if path == route_ledger_lock_path(&options.route_ledger_path)
+    ));
+
+    drop(first);
+    NativeTunnelControl::new(options).expect("released ledger lock can be acquired again");
+}
+
+#[test]
 fn route_record_round_trip_preserves_cleanup_identity() {
     let route = Route::new("203.0.113.7".parse().expect("test route"), 32)
         .with_gateway("192.0.2.1".parse().expect("test gateway"));
@@ -107,6 +127,41 @@ fn capture_shadowing_returns_a_typed_host_state_error() {
             existing_prefix: 25,
         } if actual_capture == capture
             && existing_destination == "203.0.113.128".parse::<IpAddr>().expect("address")
+    ));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn stale_route_ownership_requires_one_exact_interface_match() {
+    let destination = "203.0.113.0".parse().expect("route destination");
+    let recorded = Route::new(destination, 24)
+        .with_if_index(17)
+        .with_if_name("utun17".to_string());
+    let owned = Route::new(destination, 24)
+        .with_if_index(17)
+        .with_if_name("utun17".to_string());
+    let foreign = Route::new(destination, 24)
+        .with_if_index(21)
+        .with_if_name("utun21".to_string());
+
+    assert_eq!(
+        stale_route_ownership(&recorded, &[]),
+        StaleRouteOwnership::Absent
+    );
+    assert_eq!(
+        stale_route_ownership(&recorded, std::slice::from_ref(&owned)),
+        StaleRouteOwnership::Owned
+    );
+    assert_eq!(
+        stale_route_ownership(&recorded, std::slice::from_ref(&foreign)),
+        StaleRouteOwnership::Conflict {
+            existing_interface_index: Some(21),
+            existing_interface_name: Some("utun21".to_string()),
+        }
+    );
+    assert!(matches!(
+        stale_route_ownership(&recorded, &[owned, foreign]),
+        StaleRouteOwnership::Conflict { .. }
     ));
 }
 

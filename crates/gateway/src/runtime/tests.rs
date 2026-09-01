@@ -27,6 +27,14 @@ struct ChannelPacketIo {
 
 struct FailingPacketIo;
 
+#[tokio::test]
+async fn tcp_poll_interval_skips_stalled_ticks_instead_of_bursting() {
+    assert_eq!(
+        tcp_poll_interval().missed_tick_behavior(),
+        tokio::time::MissedTickBehavior::Skip
+    );
+}
+
 #[async_trait::async_trait]
 impl PacketIo for FailingPacketIo {
     async fn read_packet(&mut self, _output: &mut [u8]) -> Result<usize, PacketIoError> {

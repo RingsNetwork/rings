@@ -1,6 +1,7 @@
 //! Shared desktop TUN/Wintun device, route transaction, and stale-state lease.
 
 use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::ErrorKind;
 use std::io::Write;
 use std::net::IpAddr;
@@ -135,22 +136,67 @@ struct ActiveTunnel {
     routes: Vec<Route>,
 }
 
+struct RouteLedgerLock {
+    _file: File,
+}
+
+impl RouteLedgerLock {
+    fn acquire(ledger_path: &Path) -> Result<Self, GatewayError> {
+        ensure_ledger_parent(ledger_path)?;
+        let lock_path = route_ledger_lock_path(ledger_path);
+        let mut options = OpenOptions::new();
+        options.create(true).read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+
+            options
+                .mode(0o600)
+                .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW);
+        }
+        let file = options
+            .open(&lock_path)
+            .map_err(|error| GatewayError::platform("open-route-ledger-lock", error))?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| GatewayError::platform("inspect-route-ledger-lock", error))?;
+        if !metadata.is_file() {
+            return Err(GatewayError::Platform {
+                operation: "inspect-route-ledger-lock",
+                message: format!("lock path {} is not a regular file", lock_path.display()),
+            });
+        }
+        match file.try_lock() {
+            Ok(()) => Ok(Self { _file: file }),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                Err(GatewayError::RouteLedgerLocked { path: lock_path })
+            }
+            Err(std::fs::TryLockError::Error(error)) => {
+                Err(GatewayError::platform("lock-route-ledger", error))
+            }
+        }
+    }
+}
+
 /// Desktop tunnel controller with durable, reverse-order route cleanup.
 pub struct NativeTunnelControl {
     manager: RouteManager,
     options: NativeTunnelOptions,
+    _ledger_lock: RouteLedgerLock,
     active: Option<ActiveTunnel>,
     next_lease_id: u64,
 }
 
 impl NativeTunnelControl {
-    /// Open the platform route manager without mutating host state.
+    /// Open the platform route manager and exclusively claim the ledger namespace.
     pub fn new(options: NativeTunnelOptions) -> Result<Self, GatewayError> {
+        let ledger_lock = RouteLedgerLock::acquire(&options.route_ledger_path)?;
         let manager =
             RouteManager::new().map_err(|error| GatewayError::platform("route-manager", error))?;
         Ok(Self {
             manager,
             options,
+            _ledger_lock: ledger_lock,
             active: None,
             next_lease_id: 1,
         })
@@ -167,7 +213,7 @@ impl NativeTunnelControl {
         let Some(mut routes) = read_lease(&self.options.route_ledger_path)? else {
             return Ok(());
         };
-        self.cleanup_routes(&mut routes)
+        self.cleanup_stale_routes(&mut routes)
     }
 
     fn establish_inner(
@@ -224,7 +270,7 @@ impl NativeTunnelControl {
                 ensure_capture_destinations_available(&existing_routes, &capture_routes)?;
             }
             for network in capture_routes {
-                let route = capture_route(network, interface_index);
+                let route = capture_route(network, interface_index, &interface_name);
                 self.install_route(route, &mut installed)?;
             }
             write_lease(&self.options.route_ledger_path, &installed)?;
@@ -279,16 +325,117 @@ impl NativeTunnelControl {
 
     fn cleanup_routes(&mut self, routes: &mut Vec<Route>) -> Result<(), GatewayError> {
         while let Some(route) = routes.pop() {
-            if let Err(error) = self.manager.delete(&route) {
-                if !route_is_absent(&error) {
+            if let Err(error) = self.delete_route_if_present(&route) {
+                routes.push(route);
+                write_lease(&self.options.route_ledger_path, routes)?;
+                return Err(error);
+            }
+            write_lease(&self.options.route_ledger_path, routes)?;
+        }
+        remove_ledger(&self.options.route_ledger_path)
+    }
+
+    fn delete_route_if_present(&mut self, route: &Route) -> Result<(), GatewayError> {
+        match self.manager.delete(route) {
+            Ok(()) => Ok(()),
+            Err(error) if route_is_absent(&error) => Ok(()),
+            Err(error) => Err(GatewayError::platform("delete-route", error)),
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn cleanup_stale_routes(&mut self, routes: &mut Vec<Route>) -> Result<(), GatewayError> {
+        self.cleanup_routes(routes)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn cleanup_stale_routes(&mut self, routes: &mut Vec<Route>) -> Result<(), GatewayError> {
+        let existing_routes = self
+            .manager
+            .list()
+            .map_err(|error| GatewayError::platform("list-stale-routes", error))?;
+        while let Some(route) = routes.pop() {
+            match stale_route_ownership(&route, &existing_routes) {
+                StaleRouteOwnership::Absent => {}
+                StaleRouteOwnership::Owned => {
+                    if let Err(error) = self.delete_route_if_present(&route) {
+                        routes.push(route);
+                        write_lease(&self.options.route_ledger_path, routes)?;
+                        return Err(error);
+                    }
+                }
+                StaleRouteOwnership::Conflict {
+                    existing_interface_index,
+                    existing_interface_name,
+                } => {
+                    let error = GatewayError::StaleRouteOwnershipConflict {
+                        destination: route.destination(),
+                        prefix: route.prefix(),
+                        expected_interface_index: route.if_index(),
+                        expected_interface_name: route.if_name().cloned(),
+                        existing_interface_index,
+                        existing_interface_name,
+                    };
                     routes.push(route);
-                    write_lease(&self.options.route_ledger_path, routes)?;
-                    return Err(GatewayError::platform("delete-route", error));
+                    return Err(error);
                 }
             }
             write_lease(&self.options.route_ledger_path, routes)?;
         }
         remove_ledger(&self.options.route_ledger_path)
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, Eq, PartialEq)]
+enum StaleRouteOwnership {
+    Absent,
+    Owned,
+    Conflict {
+        existing_interface_index: Option<u32>,
+        existing_interface_name: Option<String>,
+    },
+}
+
+#[cfg(target_os = "macos")]
+fn stale_route_ownership(recorded: &Route, existing_routes: &[Route]) -> StaleRouteOwnership {
+    let mut exact = existing_routes.iter().filter(|existing| {
+        existing.destination() == recorded.destination() && existing.prefix() == recorded.prefix()
+    });
+    let Some(first) = exact.next() else {
+        return StaleRouteOwnership::Absent;
+    };
+    if let Some(second) = exact.next() {
+        let conflict = if same_route_cleanup_identity(recorded, first) {
+            second
+        } else {
+            first
+        };
+        return stale_route_conflict(conflict);
+    }
+    if same_route_cleanup_identity(recorded, first) {
+        StaleRouteOwnership::Owned
+    } else {
+        stale_route_conflict(first)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn same_route_cleanup_identity(recorded: &Route, existing: &Route) -> bool {
+    recorded.if_index().is_some()
+        && recorded.if_index() == existing.if_index()
+        && recorded
+            .if_name()
+            .is_none_or(|name| existing.if_name() == Some(name))
+        && recorded.gateway() == existing.gateway()
+        && recorded.if_scope() == existing.if_scope()
+}
+
+#[cfg(target_os = "macos")]
+fn stale_route_conflict(existing: &Route) -> StaleRouteOwnership {
+    StaleRouteOwnership::Conflict {
+        existing_interface_index: existing.if_index(),
+        existing_interface_name: existing.if_name().cloned(),
     }
 }
 
@@ -491,8 +638,12 @@ impl RouteRecord {
     }
 }
 
-fn capture_route(network: IpNet, interface_index: u32) -> Route {
+fn capture_route(network: IpNet, interface_index: u32, interface_name: &str) -> Route {
     let route = Route::new(network.network(), network.prefix_len()).with_if_index(interface_index);
+    #[cfg(target_os = "macos")]
+    let route = route.with_if_name(interface_name.to_string());
+    #[cfg(not(target_os = "macos"))]
+    let _ = interface_name;
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     let route = route.with_metric(0);
     route
@@ -558,13 +709,7 @@ fn write_lease(path: &Path, routes: &[Route]) -> Result<(), GatewayError> {
     if routes.is_empty() {
         return remove_ledger(path);
     }
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| GatewayError::platform("create-ledger-directory", error))?;
-    }
+    ensure_ledger_parent(path)?;
     let ledger = RouteLedger {
         routes: routes.iter().map(RouteRecord::from_route).collect(),
     };
@@ -584,6 +729,23 @@ fn write_lease(path: &Path, routes: &[Route]) -> Result<(), GatewayError> {
     #[cfg(not(target_os = "windows"))]
     std::fs::rename(&temporary, path)
         .map_err(|error| GatewayError::platform("commit-route-ledger", error))
+}
+
+fn ensure_ledger_parent(path: &Path) -> Result<(), GatewayError> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| GatewayError::platform("create-ledger-directory", error))?;
+    }
+    Ok(())
+}
+
+fn route_ledger_lock_path(path: &Path) -> PathBuf {
+    let mut lock_path = path.as_os_str().to_os_string();
+    lock_path.push(".lock");
+    PathBuf::from(lock_path)
 }
 
 fn remove_ledger(path: &Path) -> Result<(), GatewayError> {

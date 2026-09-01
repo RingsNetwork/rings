@@ -97,7 +97,8 @@ sudo target/release/gateway-config-unix \
 
 Both direct parents must belong to the helper's effective UID. Every canonicalized ancestor must
 belong to that UID or root and reject group/other writes. The socket is mode 0600 and may be
-assigned to the authorized node UID.
+assigned to the authorized node UID. Startup probes an existing socket and refuses to unlink it
+while a helper is listening; only an unreachable stale socket node is removed.
 
 Then run the node separately:
 
@@ -170,11 +171,17 @@ interprets old full-capture configuration as a new selective-capture plan.
 
 ## Cleanup and status
 
-The durable route ledger contains only explicitly selected capture routes. Startup reconciliation
-removes stale owned routes. A failed teardown returns its linear lease so cleanup remains retryable.
-On Unix, the helper retains its packet descriptor after transfer. On Windows, the node retains the
-Wintun device after a cleanup failure. These behaviors keep affected selected destinations
-fail-closed without claiming control over unrelated traffic.
+The durable route ledger contains only explicitly selected capture routes. Its persistent `.lock`
+sidecar is held exclusively for the complete native-controller lifetime, including startup
+reconciliation, so a second helper or Windows node using the same ledger fails before it can touch
+the first instance's live routes. The sidecar file may remain after shutdown; the operating system
+releases its advisory lock when the process exits. Startup reconciliation removes only stale owned
+routes. On macOS it first requires the current exact route to carry the interface identity recorded
+in the ledger; an absent route clears the intent, while a foreign or ambiguous owner is preserved
+and reported rather than deleted. A failed teardown returns its linear lease so cleanup remains
+retryable. On Unix, the helper retains its packet descriptor after transfer. On Windows, the node
+retains the Wintun device after a cleanup failure. These behaviors keep affected selected
+destinations fail-closed without claiming control over unrelated traffic.
 
 Runtime limits reject more than 16,384 flows, TCP buffers larger than 1 MiB, or a declared
 four-buffer-per-flow budget above 1 GiB. The Unix client bounds connection and response operations

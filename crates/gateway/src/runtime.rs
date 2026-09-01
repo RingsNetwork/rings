@@ -258,7 +258,7 @@ impl GatewayRuntime {
         }
         let started = MonotonicInstant::now();
         let mut packet = vec![0_u8; usize::from(self.config.plan.mtu.get())];
-        let mut interval = tokio::time::interval(TCP_POLL_INTERVAL);
+        let mut interval = tcp_poll_interval();
         let result = loop {
             if should_stop() {
                 break Ok(());
@@ -781,6 +781,12 @@ impl GatewayRuntime {
         }
         first_error.map_or(Ok(()), Err)
     }
+}
+
+fn tcp_poll_interval() -> tokio::time::Interval {
+    let mut interval = tokio::time::interval(TCP_POLL_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    interval
 }
 
 fn record_first_error(first_error: &mut Option<GatewayError>, result: Result<(), GatewayError>) {

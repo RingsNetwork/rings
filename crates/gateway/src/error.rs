@@ -3,6 +3,7 @@
 use std::io;
 use std::net::IpAddr;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use thiserror::Error;
 
@@ -256,6 +257,38 @@ pub enum GatewayError {
         existing_destination: IpAddr,
         /// Prefix length of the exact or more-specific existing route.
         existing_prefix: u8,
+    },
+    /// Another native controller already owns the durable route-ledger namespace.
+    #[error("gateway route-ledger lock {path:?} is already held by another instance")]
+    RouteLedgerLocked {
+        /// Stable sidecar lock path derived from the configured ledger path.
+        path: PathBuf,
+    },
+    /// A stale macOS ledger entry now names a route owned by another interface.
+    #[error(
+        "stale gateway route {destination}/{prefix} expected interface index \
+         {expected_interface_index:?} ({expected_interface_name:?}), but the current route uses \
+         index {existing_interface_index:?} ({existing_interface_name:?}); refusing to delete it"
+    )]
+    StaleRouteOwnershipConflict {
+        /// Destination recorded in the stale cleanup ledger.
+        destination: IpAddr,
+        /// Prefix length recorded in the stale cleanup ledger.
+        prefix: u8,
+        /// Interface index that installed the stale route.
+        expected_interface_index: Option<u32>,
+        /// Interface name that installed the stale route when one was recorded.
+        expected_interface_name: Option<String>,
+        /// Interface index currently owning the same destination prefix.
+        existing_interface_index: Option<u32>,
+        /// Interface name currently owning the same destination prefix.
+        existing_interface_name: Option<String>,
+    },
+    /// A live Unix helper already owns the configured control-socket path.
+    #[error("a gateway Unix helper is already listening on {path:?}")]
+    UnixHelperAlreadyRunning {
+        /// Existing live helper socket.
+        path: PathBuf,
     },
     /// Runtime processing failed and fail-closed shutdown also reported an error.
     #[error("gateway runtime failed: {runtime}; shutdown cleanup also failed: {cleanup}")]
