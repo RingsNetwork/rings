@@ -1,2 +1,7 @@
 [type.rust]
 extend-ignore-re = ["[wW]s", "WS"]
+
+# Proper names in bibliography entries (papers/*.bib).
+[default.extend-words]
+Brin = "Brin"
+Pease = "Pease"
