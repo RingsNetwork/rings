@@ -1,7 +1,6 @@
 use std::env;
 use std::fs;
 use std::io;
-use std::net::IpAddr;
 use std::path::PathBuf;
 
 use rings_gateway::GatewayConfig;
@@ -48,8 +47,8 @@ pub const DEFAULT_ICE_SERVERS: &str = "stun://stun.l.google.com:19302";
 pub const DEFAULT_STABILIZE_INTERVAL: u64 = 15;
 /// Default storage capacity in bytes for native storage backends.
 pub const DEFAULT_STORAGE_CAPACITY: u32 = 200000000;
-/// Default interval for refreshing gateway dependency state.
-pub const DEFAULT_GATEWAY_UNDERLAY_REFRESH_SECS: u64 = 2;
+/// Default interval for refreshing gateway status.
+pub const DEFAULT_GATEWAY_STATUS_REFRESH_SECS: u64 = 2;
 
 /// Native foreground-gateway configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -72,12 +71,9 @@ pub struct NativeGatewayConfig {
     /// Optional explicit Wintun DLL path on Windows; overrides `RINGS_GATEWAY_WINTUN_DLL`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wintun_dll_path: Option<String>,
-    /// Additional fixed IPv4 underlay destinations that must bypass capture.
-    #[serde(default)]
-    pub underlay_bypass_targets: Vec<IpAddr>,
-    /// Interval for refreshing gateway dependency state, including Onion exit availability.
-    #[serde(default = "default_gateway_underlay_refresh_secs")]
-    pub underlay_refresh_secs: u64,
+    /// Interval for refreshing Onion exit availability in gateway status.
+    #[serde(default = "default_gateway_status_refresh_secs")]
+    pub status_refresh_secs: u64,
     /// Onion TCP exit service selected for captured flows.
     #[serde(default = "OnionServiceName::tcp")]
     pub onion_service: OnionServiceName,
@@ -93,8 +89,8 @@ const fn default_true() -> bool {
     true
 }
 
-const fn default_gateway_underlay_refresh_secs() -> u64 {
-    DEFAULT_GATEWAY_UNDERLAY_REFRESH_SECS
+const fn default_gateway_status_refresh_secs() -> u64 {
+    DEFAULT_GATEWAY_STATUS_REFRESH_SECS
 }
 
 fn default_gateway_route_ledger_path() -> String {
@@ -135,7 +131,7 @@ pub struct Config {
     pub external_api_addr: String,
     /// Internal endpoint URL used by local clients.
     pub endpoint_url: String,
-    /// WebRTC ICE server list; gateway mode requires an authenticated TURN entry.
+    /// WebRTC ICE server list, independent from optional gateway ingress.
     pub ice_servers: String,
     /// Chord stabilization interval in seconds.
     pub stabilize_interval: u64,

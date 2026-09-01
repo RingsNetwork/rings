@@ -2,7 +2,6 @@
 use std::io::Read;
 #[cfg(target_os = "linux")]
 use std::io::Write;
-use std::net::IpAddr;
 use std::net::Ipv4Addr;
 #[cfg(target_os = "linux")]
 use std::net::SocketAddrV4;
@@ -29,14 +28,12 @@ use rings_gateway::bindings::NativeTunnelLease;
 use rings_gateway::bindings::NativeTunnelOptions;
 #[cfg(target_os = "linux")]
 use rings_gateway::bindings::TunnelControl;
-use rings_gateway::DnsPolicy;
 use rings_gateway::GatewayConfig;
 use rings_gateway::GatewayPlan;
 use rings_gateway::GatewayRuntime;
 use rings_gateway::Mtu;
 use rings_gateway::PacketIo;
 use rings_gateway::PacketIoError;
-use rings_gateway::RoutingMode;
 use smoltcp::phy::ChecksumCapabilities;
 use smoltcp::wire::IpProtocol;
 use smoltcp::wire::Ipv4Packet;
@@ -116,22 +113,18 @@ impl TcpObservation {
 }
 
 fn gateway_config() -> GatewayConfig {
-    gateway_config_for(&["0.0.0.0/0"])
+    gateway_config_for(&["1.1.1.1/32"])
 }
 
 fn gateway_config_for(included_routes: &[&str]) -> GatewayConfig {
     GatewayConfig {
         plan: GatewayPlan {
-            routing_mode: RoutingMode::Split,
-            addresses: vec!["100.64.0.1/30".parse().expect("gateway address")],
+            addresses: vec!["100.64.0.1/32".parse().expect("gateway address")],
             included_routes: included_routes
                 .iter()
                 .map(|route| route.parse().expect("capture route"))
                 .collect(),
-            excluded_routes: vec!["127.0.0.0/8".parse().expect("loopback exclusion")],
             mtu: Mtu::try_from(1_280).expect("gateway MTU"),
-            dns_policy: DnsPolicy::Block,
-            dns_servers: vec![IpAddr::V4(PUBLIC_HTTP_IPV4)],
         },
         max_flows: 8,
         flow_idle_timeout: Duration::from_secs(30),

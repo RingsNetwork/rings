@@ -18,18 +18,16 @@ use nix::unistd::Uid;
 
 use super::config::UnixConfigRequest;
 use super::config::UnixConfigResponse;
-use super::transport::is_request_timeout;
 use super::transport::read_request;
 use super::transport::send_response;
 use crate::bindings::NativeTunnelControl;
 use crate::bindings::NativeTunnelLease;
 use crate::bindings::NativeTunnelOptions;
 use crate::bindings::TunnelControl;
-use crate::bindings::UnderlayPolicy;
 use crate::GatewayError;
 use crate::GatewayPlan;
 
-const HELPER_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+const HELPER_WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Configuration for one foreground Unix helper lifecycle.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -114,11 +112,6 @@ fn serve_listener(
         };
         match serve_connection(&runtime, &mut control, &mut active, &mut stream) {
             Ok(HelperConnectionExit::Disconnected) => {}
-            Ok(HelperConnectionExit::TimedOut) => {
-                eprintln!(
-                    "gateway helper client request timed out; any active capture remains fail-closed"
-                );
-            }
             Ok(HelperConnectionExit::TornDown) => return Ok(()),
             Err(error) if active.is_some() => {
                 eprintln!(
@@ -140,7 +133,6 @@ struct ActiveHelperTunnel {
 
 enum HelperConnectionExit {
     Disconnected,
-    TimedOut,
     TornDown,
 }
 
@@ -154,35 +146,11 @@ fn serve_connection(
         let request = match read_request(stream) {
             Ok(Some(request)) => request,
             Ok(None) => return Ok(HelperConnectionExit::Disconnected),
-            Err(error) if is_request_timeout(&error) => {
-                return Ok(HelperConnectionExit::TimedOut);
-            }
             Err(error) => return Err(error),
         };
         match request {
-            UnixConfigRequest::Establish {
-                plan,
-                underlay_targets,
-            } => establish_or_resume(runtime, control, active, stream, plan, underlay_targets)?,
-            UnixConfigRequest::ReplaceBypass {
-                lease_id,
-                underlay_targets,
-            } => {
-                if active.as_ref().map(|tunnel| tunnel.lease_id.as_str()) != Some(lease_id.as_str())
-                {
-                    send_failure(
-                        stream,
-                        "replace-underlay-bypass",
-                        "request does not own the active helper lease".to_string(),
-                    )?;
-                    continue;
-                }
-                match runtime.block_on(control.replace_bypass_targets(&underlay_targets)) {
-                    Ok(()) => send_response(stream, &UnixConfigResponse::Updated, None)?,
-                    Err(error) => {
-                        send_failure(stream, "replace-underlay-bypass", error.to_string())?
-                    }
-                }
+            UnixConfigRequest::Establish { plan } => {
+                establish_or_resume(runtime, control, active, stream, plan)?
             }
             UnixConfigRequest::Teardown { lease_id } => {
                 if active.as_ref().map(|tunnel| tunnel.lease_id.as_str()) != Some(lease_id.as_str())
@@ -231,7 +199,6 @@ fn establish_or_resume(
     active: &mut Option<ActiveHelperTunnel>,
     stream: &mut UnixStream,
     plan: GatewayPlan,
-    underlay_targets: Vec<std::net::IpAddr>,
 ) -> Result<(), GatewayError> {
     if let Some(tunnel) = active.as_ref() {
         if tunnel.plan != plan {
@@ -249,16 +216,7 @@ fn establish_or_resume(
                     .to_string(),
             );
         }
-        match runtime.block_on(control.replace_bypass_targets(&underlay_targets)) {
-            Ok(()) => return send_established(stream, tunnel),
-            Err(error) => {
-                return send_failure(stream, "replace-underlay-bypass", error.to_string());
-            }
-        }
-    }
-
-    if let Err(error) = runtime.block_on(control.replace_bypass_targets(&underlay_targets)) {
-        return send_failure(stream, "replace-underlay-bypass", error.to_string());
+        return send_established(stream, tunnel);
     }
     let established = match runtime.block_on(control.establish(&plan)) {
         Ok(established) => established,
@@ -314,8 +272,7 @@ fn accept_authorized(
             .map_err(|error| GatewayError::platform("accept-unix-helper", error))?;
         if peer_uid(&stream)? == authorized_uid {
             stream
-                .set_read_timeout(Some(HELPER_REQUEST_TIMEOUT))
-                .and_then(|()| stream.set_write_timeout(Some(HELPER_REQUEST_TIMEOUT)))
+                .set_write_timeout(Some(HELPER_WRITE_TIMEOUT))
                 .map_err(|error| GatewayError::platform("configure-unix-helper-peer", error))?;
             return Ok(stream);
         }
@@ -497,6 +454,7 @@ mod tests {
 
     use nix::unistd::Uid;
 
+    use super::accept_authorized;
     use super::peer_uid;
     use super::remove_stale_socket;
     use super::secure_child_path;
@@ -534,6 +492,24 @@ mod tests {
             Uid::effective().as_raw()
         );
         client.join().expect("client thread");
+    }
+
+    #[test]
+    fn active_lease_connection_has_no_idle_read_deadline() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("helper.sock");
+        let listener = UnixListener::bind(&path).expect("bind fixture");
+        let client_path = path.clone();
+        let client =
+            std::thread::spawn(move || UnixStream::connect(client_path).expect("connect fixture"));
+
+        let server = accept_authorized(&listener, Uid::effective().as_raw())
+            .expect("accept authorized client");
+
+        assert_eq!(server.read_timeout().expect("read timeout"), None);
+        assert!(server.write_timeout().expect("write timeout").is_some());
+        drop(server);
+        drop(client.join().expect("client thread"));
     }
 
     #[test]

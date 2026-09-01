@@ -6,7 +6,6 @@
 //! cover those separate boundaries.
 
 use std::io;
-use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -15,7 +14,6 @@ use std::time::Duration;
 use std::time::Instant;
 
 use rings_gateway::BoxGatewayDuplex;
-use rings_gateway::DnsPolicy;
 use rings_gateway::FlowId;
 use rings_gateway::GatewayConfig;
 use rings_gateway::GatewayError;
@@ -25,7 +23,6 @@ use rings_gateway::Mtu;
 use rings_gateway::OnionStreamConnector;
 use rings_gateway::PacketIo;
 use rings_gateway::PacketIoError;
-use rings_gateway::RoutingMode;
 use smoltcp::phy::ChecksumCapabilities;
 use smoltcp::wire::IpProtocol;
 use smoltcp::wire::Ipv4Packet;
@@ -117,8 +114,7 @@ impl TcpObservation {
 fn config(flow_count: usize) -> Result<GatewayConfig, GatewayError> {
     let config = GatewayConfig {
         plan: GatewayPlan {
-            routing_mode: RoutingMode::Split,
-            addresses: vec!["100.64.0.1/30".parse::<ipnet::IpNet>().map_err(|error| {
+            addresses: vec!["100.64.0.1/32".parse::<ipnet::IpNet>().map_err(|error| {
                 GatewayError::Platform {
                     operation: "benchmark-config",
                     message: error.to_string(),
@@ -130,15 +126,7 @@ fn config(flow_count: usize) -> Result<GatewayConfig, GatewayError> {
                     operation: "benchmark-config",
                     message: error.to_string(),
                 })?],
-            excluded_routes: Vec::new(),
             mtu: Mtu::try_from(1_500)?,
-            dns_policy: DnsPolicy::Block,
-            dns_servers: vec!["192.0.2.53".parse::<IpAddr>().map_err(|error| {
-                GatewayError::Platform {
-                    operation: "benchmark-config",
-                    message: error.to_string(),
-                }
-            })?],
         },
         max_flows: flow_count,
         flow_idle_timeout: Duration::from_secs(120),

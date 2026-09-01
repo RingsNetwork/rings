@@ -13,7 +13,6 @@ use crate::bridge::spawn_bridge;
 use crate::bridge::BridgeCommand;
 use crate::bridge::BridgeEvent;
 use crate::bridge::BridgeHandle;
-use crate::DnsPolicy;
 use crate::ExitAvailability;
 use crate::FlowEvent;
 use crate::FlowId;
@@ -204,7 +203,7 @@ impl GatewayRuntime {
         })
     }
 
-    /// Mark tunnel and underlay setup complete and begin packet admission.
+    /// Mark explicit packet ingress setup complete and begin packet admission.
     pub fn activate(&mut self, interface_name: String) -> Result<(), GatewayError> {
         self.server.transition(GatewayEvent::Start)?;
         self.server.set_established_interface(interface_name);
@@ -394,13 +393,6 @@ impl GatewayRuntime {
             PacketDisposition::Tcp(segment) => segment,
             PacketDisposition::Drop(reason) => return Ok(PacketOutcome::Dropped(reason)),
         };
-        if self.config.plan.dns_policy == DnsPolicy::Block && segment.flow.target.port() == 53 {
-            self.tcp.reject_segment(packet, elapsed);
-            return Ok(PacketOutcome::FlowRejected {
-                flow: segment.flow,
-                reason: FlowRejectReason::DnsBlocked,
-            });
-        }
         if !self.flows.contains_key(&segment.flow) {
             if !segment.opens_flow() {
                 self.tcp.reject_segment(packet, elapsed);

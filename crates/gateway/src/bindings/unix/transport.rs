@@ -40,6 +40,7 @@ pub(crate) fn read_request(
     read_optional_frame(stream, REQUEST_READ_OPERATION)
 }
 
+#[cfg(test)]
 pub(crate) fn is_request_timeout(error: &GatewayError) -> bool {
     matches!(error, GatewayError::Platform {
         operation: REQUEST_TIMEOUT_OPERATION,
@@ -231,30 +232,21 @@ mod tests {
     use super::write_request;
     use crate::bindings::unix::config::UnixConfigRequest;
     use crate::bindings::unix::config::UnixConfigResponse;
-    use crate::DnsPolicy;
     use crate::GatewayPlan;
     use crate::Mtu;
-    use crate::RoutingMode;
 
     fn plan() -> GatewayPlan {
         GatewayPlan {
-            routing_mode: RoutingMode::Split,
-            addresses: vec!["100.64.0.1/30".parse().expect("address")],
+            addresses: vec!["100.64.0.1/32".parse().expect("address")],
             included_routes: vec!["203.0.113.0/24".parse().expect("route")],
-            excluded_routes: Vec::new(),
             mtu: Mtu::try_from(1_280).expect("MTU"),
-            dns_policy: DnsPolicy::Block,
-            dns_servers: vec!["192.0.2.53".parse().expect("DNS")],
         }
     }
 
     #[test]
     fn request_round_trip_preserves_the_validated_plan() {
         let (mut server, mut client) = UnixStream::pair().expect("pair");
-        let request = UnixConfigRequest::Establish {
-            plan: plan(),
-            underlay_targets: vec!["198.51.100.4".parse().expect("target")],
-        };
+        let request = UnixConfigRequest::Establish { plan: plan() };
         write_request(&mut client, &request).expect("write request");
         assert_eq!(
             read_request(&mut server).expect("read request"),

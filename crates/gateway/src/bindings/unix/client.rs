@@ -1,6 +1,5 @@
 //! Unprivileged client for the foreground Unix tunnel-configuration helper.
 
-use std::net::IpAddr;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -12,12 +11,10 @@ use super::config::UnixConfigResponse;
 use super::lease::UnixLeaseId;
 use super::transport::receive_response;
 use super::transport::write_request;
-use crate::bindings::normalize_underlay_targets;
 use crate::bindings::EstablishedTunnel;
 use crate::bindings::NativePacketIo;
 use crate::bindings::TeardownFailure;
 use crate::bindings::TunnelControl;
-use crate::bindings::UnderlayPolicy;
 use crate::GatewayError;
 use crate::GatewayPlan;
 
@@ -56,12 +53,11 @@ pub struct UnixTunnelLease {
 
 /// Privilege-separated Unix tunnel controller.
 ///
-/// A single persistent connection covers establishment, bypass refreshes, and teardown. If this
+/// A single persistent connection covers establishment and teardown. If this
 /// connection disappears early, the foreground helper retains the active interface and routes;
 /// constructing a new controller with the same plan resumes that fail-closed lease.
 pub struct UnixTunnelControl {
     options: UnixTunnelOptions,
-    underlay_targets: Vec<IpAddr>,
     active: Option<UnixLeaseId>,
     stream: Option<Arc<Mutex<UnixStream>>>,
 }
@@ -71,7 +67,6 @@ impl UnixTunnelControl {
     pub fn new(options: UnixTunnelOptions) -> Self {
         Self {
             options,
-            underlay_targets: Vec::new(),
             active: None,
             stream: None,
         }
@@ -210,10 +205,7 @@ impl TunnelControl for UnixTunnelControl {
             });
         }
         let reply = self
-            .establish_via_helper(UnixConfigRequest::Establish {
-                plan: plan.clone(),
-                underlay_targets: self.underlay_targets.clone(),
-            })
+            .establish_via_helper(UnixConfigRequest::Establish { plan: plan.clone() })
             .await?;
         let (lease_id, interface_name) = match reply.response {
             UnixConfigResponse::Established {
@@ -295,40 +287,6 @@ impl TunnelControl for UnixTunnelControl {
     }
 }
 
-#[async_trait::async_trait]
-impl UnderlayPolicy for UnixTunnelControl {
-    async fn replace_bypass_targets(&mut self, targets: &[IpAddr]) -> Result<(), GatewayError> {
-        let normalized = normalize_underlay_targets(targets)?;
-        let Some(active) = self.active.as_ref() else {
-            self.underlay_targets = normalized;
-            return Ok(());
-        };
-        let (response, descriptor) = self
-            .exchange(UnixConfigRequest::ReplaceBypass {
-                lease_id: active.as_str().to_string(),
-                underlay_targets: normalized.clone(),
-            })
-            .await?;
-        if descriptor.is_some() {
-            return Err(GatewayError::Platform {
-                operation: "replace-unix-helper-bypass",
-                message: "helper transferred an unexpected descriptor during a bypass update"
-                    .to_string(),
-            });
-        }
-        match response {
-            UnixConfigResponse::Updated => {
-                self.underlay_targets = normalized;
-                Ok(())
-            }
-            UnixConfigResponse::Failed { operation, message } => {
-                Err(helper_failure(operation, message))
-            }
-            response => Err(unexpected_response("replace-unix-helper-bypass", response)),
-        }
-    }
-}
-
 fn helper_failure(operation: String, message: String) -> GatewayError {
     GatewayError::Platform {
         operation: "unix-helper-request",
@@ -345,27 +303,11 @@ fn unexpected_response(operation: &'static str, response: UnixConfigResponse) ->
 
 #[cfg(test)]
 mod tests {
-    use std::net::IpAddr;
     use std::path::PathBuf;
     use std::time::Duration;
 
     use super::UnixTunnelControl;
     use super::UnixTunnelOptions;
-    use crate::bindings::UnderlayPolicy;
-
-    #[tokio::test]
-    async fn bypass_targets_are_normalized_before_connection() {
-        let mut control = UnixTunnelControl::new(UnixTunnelOptions::new(PathBuf::from(
-            "/tmp/rings-gateway-test-unused.sock",
-        )));
-        let target = IpAddr::from([192, 0, 2, 4]);
-        control
-            .replace_bypass_targets(&[target, target])
-            .await
-            .expect("replace bypass");
-        assert_eq!(control.underlay_targets, vec![target]);
-    }
-
     #[tokio::test]
     async fn stalled_helper_exchange_is_bounded() {
         let (client, _stalled_helper) =

@@ -54,12 +54,9 @@ pub enum ConfigError {
     /// The configured interface MTU is outside the IPv4 packet range.
     #[error("gateway MTU {0} is outside the supported IPv4 range 576..=65535")]
     InvalidMtu(u32),
-    /// An enabled routing mode has no included routes.
-    #[error("gateway routing mode {0:?} requires at least one included route")]
-    MissingIncludedRoute(crate::RoutingMode),
-    /// One network is configured as both included and excluded.
-    #[error("gateway route {0} is both included and excluded")]
-    ConflictingRoute(ipnet::IpNet),
+    /// A host-wide default capture route was requested.
+    #[error("gateway capture route {0} is a default route; select explicit destinations instead")]
+    DefaultRouteUnsupported(ipnet::IpNet),
     /// An IPv6 route was supplied to the IPv4/TCP milestone.
     #[error("gateway IPv4/TCP milestone does not accept IPv6 route {0}")]
     Ipv6RouteUnsupported(ipnet::IpNet),
@@ -69,12 +66,9 @@ pub enum ConfigError {
     /// A virtual-interface address is not valid unicast IPv4.
     #[error("gateway interface address {0} is not unicast IPv4")]
     InvalidInterfaceAddress(ipnet::IpNet),
-    /// A DNS policy was requested without explicit resolver destinations.
-    #[error("gateway DNS policy {0:?} requires at least one explicit IPv4 resolver")]
-    MissingDnsServer(crate::DnsPolicy),
-    /// An IPv6 DNS resolver was supplied to the IPv4-only milestone.
-    #[error("gateway IPv4/TCP milestone does not accept IPv6 DNS resolver {0}")]
-    Ipv6DnsUnsupported(std::net::IpAddr),
+    /// A virtual-interface address could create an implicit connected capture prefix.
+    #[error("gateway interface address {0} must use /32 to avoid an implicit connected route")]
+    InterfacePrefixUnsupported(ipnet::IpNet),
 }
 
 /// A rejected flow-state transition.
@@ -172,7 +166,7 @@ pub enum TcpStackError {
     /// A packet referred to a flow that is not tracked by the TCP stack.
     #[error("gateway TCP flow {0:?} is not tracked by the TCP stack")]
     UnknownFlow(FlowId),
-    /// The interface route table could not install the AnyIP capture route.
+    /// The userspace interface could not install its private AnyIP reply route.
     #[error("gateway TCP interface route table is full")]
     RouteTableFull,
     /// The userspace TCP interface could not install its validated address.

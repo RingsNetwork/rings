@@ -22,7 +22,6 @@ use webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
-use webrtc::peer_connection::policy::ice_transport_policy::RTCIceTransportPolicy;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 
@@ -60,7 +59,6 @@ use crate::pool::Pool;
 use crate::webrtc_config::WebrtcUdpPortRange;
 
 mod send_runtime;
-mod underlay;
 
 use send_runtime::native_send_runtime;
 use send_runtime::poll_once_while_guarded;
@@ -70,11 +68,6 @@ use send_runtime::run_irrevocable_send_with_timeout;
 use send_runtime::run_native_close_task;
 use send_runtime::run_send_with_retirement;
 use send_runtime::NativeRetirementFence;
-use underlay::admission_policy;
-use underlay::shared_admission;
-use underlay::SharedUnderlayCandidateAdmission;
-pub use underlay::UnderlayCandidateAdmission;
-pub use underlay::UnderlayCandidateAdmissionError;
 
 const WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT: u8 = 8; // seconds
 const WEBRTC_GATHER_TIMEOUT: u8 = 60; // seconds
@@ -350,7 +343,6 @@ pub struct WebrtcTransport {
     udp_port_range: Option<WebrtcUdpPortRange>,
     pool: Pool<WebrtcConnection>,
     inbound_frames: Arc<InboundFrameCapacity>,
-    candidate_admission: SharedUnderlayCandidateAdmission,
 }
 
 impl WebrtcConnection {
@@ -452,53 +444,7 @@ impl WebrtcTransport {
             udp_port_range,
             pool: Pool::new(),
             inbound_frames: Arc::new(InboundFrameCapacity::new()),
-            candidate_admission: shared_admission(),
         }
-    }
-
-    /// Install the host policy that authorizes explicit direct-underlay targets.
-    ///
-    /// Installing a policy switches future connections to relay-only ICE. The operation fails if
-    /// any connection already exists, because an already-created ICE agent may retain direct host
-    /// candidates. Connection creation holds the same lock until pool insertion, so the emptiness
-    /// check is race-free.
-    pub async fn enable_underlay_candidate_admission(
-        &self,
-        admission: Arc<dyn UnderlayCandidateAdmission>,
-    ) -> std::result::Result<(), UnderlayCandidateAdmissionError> {
-        let mut installed = self.candidate_admission.write().await;
-        if !self.pool.connection_ids().is_empty() {
-            return Err(UnderlayCandidateAdmissionError::new(
-                "cannot enable relay-only gateway policy while native WebRTC connections exist",
-            ));
-        }
-        *installed = Some(admission);
-        Ok(())
-    }
-
-    /// Clear the explicit-target policy after gateway capture has been removed.
-    pub async fn clear_underlay_candidate_admission(&self) {
-        *self.candidate_admission.write().await = None;
-    }
-
-    /// Return whether explicit native-underlay admission is currently installed.
-    pub async fn underlay_candidate_admission_enabled(&self) -> bool {
-        self.candidate_admission.read().await.is_some()
-    }
-
-    /// Authorize a non-ICE underlay target through the installed gateway policy.
-    ///
-    /// The read guard prevents policy replacement until authorization completes. When no native
-    /// gateway policy is installed this is deliberately a no-op.
-    pub async fn admit_underlay_targets(
-        &self,
-        targets: &[IpAddr],
-    ) -> std::result::Result<(), UnderlayCandidateAdmissionError> {
-        let admission = admission_policy(&self.candidate_admission).await;
-        if let Some(policy) = admission.as_ref() {
-            policy.admit(targets).await?;
-        }
-        Ok(())
     }
 }
 
@@ -524,7 +470,6 @@ fn set_udp_network_range(
 
 async fn create_peer_connection(
     transport: &WebrtcTransport,
-    relay_only: bool,
 ) -> Result<(RTCPeerConnection, Vec<String>)> {
     let ice_servers = transport
         .ice_servers
@@ -534,11 +479,6 @@ async fn create_peer_connection(
         .collect();
     let configuration = RTCConfiguration {
         ice_servers,
-        ice_transport_policy: if relay_only {
-            RTCIceTransportPolicy::Relay
-        } else {
-            RTCIceTransportPolicy::default()
-        },
         ..Default::default()
     };
 
@@ -863,9 +803,7 @@ impl TransportInterface for WebrtcTransport {
     ) -> Result<ConnectionRef<Self::Connection>> {
         self.pool.ensure_peer_slot_available(cid)?;
 
-        let admission = admission_policy(&self.candidate_admission).await;
-        let (webrtc_conn, sdp_extra_host_candidates) =
-            create_peer_connection(self, admission.is_some()).await?;
+        let (webrtc_conn, sdp_extra_host_candidates) = create_peer_connection(self).await?;
 
         //
         // Set callbacks
@@ -905,9 +843,7 @@ impl TransportInterface for WebrtcTransport {
             sdp_extra_host_candidates,
         );
 
-        let inserted = self.pool.safely_insert(cid, conn).await;
-        drop(admission);
-        inserted
+        self.pool.safely_insert(cid, conn).await
     }
 
     async fn close_connection(&self, cid: &str) -> Result<()> {

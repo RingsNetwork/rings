@@ -2,20 +2,17 @@ use std::error::Error;
 use std::io;
 use std::io::Read;
 use std::io::Write;
-use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::SocketAddrV4;
 use std::time::Duration;
 use std::time::Instant;
 
 use rings_gateway::bindings::NativePacketIo;
-use rings_gateway::DnsPolicy;
 use rings_gateway::GatewayPlan;
 use rings_gateway::Mtu;
 use rings_gateway::PacketIo;
-use rings_gateway::RoutingMode;
 
-pub const BYPASS_TARGET: Ipv4Addr = Ipv4Addr::new(1, 1, 1, 1);
+pub const UNSELECTED_TARGET: Ipv4Addr = Ipv4Addr::new(1, 1, 1, 1);
 pub const CAPTURE_TARGET: Ipv4Addr = Ipv4Addr::new(1, 0, 0, 1);
 pub const IO_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -23,13 +20,9 @@ pub type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 
 pub fn gateway_plan() -> TestResult<GatewayPlan> {
     Ok(GatewayPlan {
-        routing_mode: RoutingMode::Split,
-        addresses: vec!["100.64.0.1/30".parse()?],
+        addresses: vec!["100.64.0.1/32".parse()?],
         included_routes: vec!["1.0.0.0/24".parse()?],
-        excluded_routes: Vec::new(),
         mtu: Mtu::try_from(1_280)?,
-        dns_policy: DnsPolicy::Block,
-        dns_servers: vec![IpAddr::V4(CAPTURE_TARGET)],
     })
 }
 
@@ -72,9 +65,9 @@ pub async fn capture_packet(device: &mut NativePacketIo, plan: &GatewayPlan) -> 
             let Some(destination) = ipv4_destination(ipv4) else {
                 continue;
             };
-            if destination == BYPASS_TARGET {
+            if destination == UNSELECTED_TARGET {
                 return Err(io::Error::other(
-                    "underlay bypass target was captured by the tunnel",
+                    "unselected target was captured by the tunnel",
                 ));
             }
             if destination == CAPTURE_TARGET {
@@ -88,19 +81,28 @@ pub async fn capture_packet(device: &mut NativePacketIo, plan: &GatewayPlan) -> 
     Ok(captured)
 }
 
-pub fn assert_ipv6_fail_closed_ledger(ledger: &std::path::Path) -> TestResult {
+pub fn assert_exact_capture_ledger(ledger: &std::path::Path) -> TestResult {
     let contents = std::fs::read_to_string(ledger)?;
     let json: serde_json::Value = serde_json::from_str(&contents)?;
     let routes = json
         .get("routes")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| io::Error::other("route ledger has no route array"))?;
-    for (destination, prefix) in [("::", 1_u64), ("8000::", 1_u64)] {
-        assert!(routes.iter().any(|route| {
-            route.get("destination").and_then(serde_json::Value::as_str) == Some(destination)
-                && route.get("prefix").and_then(serde_json::Value::as_u64) == Some(prefix)
-        }));
-    }
+    let destinations = routes
+        .iter()
+        .map(|route| {
+            let destination = route
+                .get("destination")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| io::Error::other("ledger route has no destination"))?;
+            let prefix = route
+                .get("prefix")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| io::Error::other("ledger route has no prefix"))?;
+            Ok((destination, prefix))
+        })
+        .collect::<TestResult<Vec<_>>>()?;
+    assert_eq!(destinations, vec![("1.0.0.0", 24)]);
     Ok(())
 }
 

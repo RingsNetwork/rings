@@ -71,7 +71,6 @@ pub(crate) use storage_sync::StorageSyncBatch;
 #[cfg(all(test, not(target_family = "wasm")))]
 pub(crate) use storage_sync::StorageSyncBatchStep;
 mod timeouts;
-mod underlay;
 pub(crate) use self::connection::AdmittedConnection;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::delivery::SendCompletionOutcome;

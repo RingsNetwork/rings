@@ -13,15 +13,6 @@ pub enum UnixConfigRequest {
     Establish {
         /// Fully validated declarative tunnel plan.
         plan: GatewayPlan,
-        /// Underlay IPv4 destinations that must bypass capture.
-        underlay_targets: Vec<std::net::IpAddr>,
-    },
-    /// Atomically replace the active lease's underlay bypass destinations.
-    ReplaceBypass {
-        /// Lease identifier returned by establishment.
-        lease_id: String,
-        /// Complete replacement set of underlay IPv4 destinations.
-        underlay_targets: Vec<std::net::IpAddr>,
     },
     /// Tear down the named linear cleanup lease.
     Teardown {
@@ -43,8 +34,6 @@ pub enum UnixConfigResponse {
     },
     /// Teardown completed.
     TornDown,
-    /// The active bypass set was replaced.
-    Updated,
     /// A named helper operation failed.
     Failed {
         /// Stable operation label.

@@ -27,11 +27,9 @@ mod status;
 mod stream;
 mod tcp;
 
-pub use config::DnsPolicy;
 pub use config::GatewayConfig;
 pub use config::GatewayPlan;
 pub use config::Mtu;
-pub use config::RoutingMode;
 pub use error::ConfigError;
 pub use error::FlowTableError;
 pub use error::FlowTransitionError;

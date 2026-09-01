@@ -4,10 +4,6 @@
 //! For the browser environment, we use `InternalRpcHandler` to process the requests.
 
 use std::collections::HashSet;
-#[cfg(all(feature = "node", not(target_family = "wasm")))]
-use std::net::IpAddr;
-#[cfg(all(feature = "node", not(target_family = "wasm")))]
-use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::str::FromStr;
 
@@ -42,17 +38,6 @@ impl HandleRpc<ConnectPeerViaHttpRequest, ConnectPeerViaHttpResponse> for Proces
         &self,
         req: ConnectPeerViaHttpRequest,
     ) -> Result<ConnectPeerViaHttpResponse> {
-        #[cfg(all(feature = "node", not(target_family = "wasm")))]
-        let client = {
-            if self.swarm.underlay_candidate_admission_enabled().await {
-                let targets = admit_http_signaling_underlay(self, &req.url).await?;
-                let http_client = pinned_signaling_http_client(&req.url, &targets)?;
-                rings_rpc::jsonrpc::Client::with_http_client(&req.url, http_client)
-            } else {
-                rings_rpc::jsonrpc::Client::new(&req.url)
-            }
-        };
-        #[cfg(not(all(feature = "node", not(target_family = "wasm"))))]
         let client = rings_rpc::jsonrpc::Client::new(&req.url);
 
         let did = client
@@ -76,115 +61,6 @@ impl HandleRpc<ConnectPeerViaHttpRequest, ConnectPeerViaHttpResponse> for Proces
 
         Ok(ConnectPeerViaHttpResponse { did })
     }
-}
-
-#[cfg(all(feature = "node", not(target_family = "wasm")))]
-async fn admit_http_signaling_underlay(
-    processor: &Processor,
-    endpoint: &str,
-) -> Result<Vec<IpAddr>> {
-    let targets = resolve_http_signaling_targets(endpoint).await?;
-    processor
-        .swarm
-        .admit_underlay_targets(&targets)
-        .await
-        .map_err(|error| {
-            Error::from(ServerError::RemoteRpcError(format!(
-                "cannot admit signaling endpoint {endpoint:?} before HTTP bootstrap: {error}"
-            )))
-        })?;
-    Ok(targets)
-}
-
-#[cfg(all(feature = "node", not(target_family = "wasm")))]
-async fn resolve_http_signaling_targets(endpoint: &str) -> Result<Vec<IpAddr>> {
-    let url = reqwest::Url::parse(endpoint).map_err(|error| {
-        ServerError::RemoteRpcError(format!(
-            "invalid HTTP signaling endpoint {endpoint:?}: {error}"
-        ))
-    })?;
-    if !matches!(url.scheme(), "http" | "https") {
-        return Err(ServerError::RemoteRpcError(format!(
-            "signaling endpoint {endpoint:?} must use http or https"
-        ))
-        .into());
-    }
-    let host = url.host_str().ok_or_else(|| {
-        ServerError::RemoteRpcError(format!("HTTP signaling endpoint {endpoint:?} has no host"))
-    })?;
-    let port = url.port_or_known_default().ok_or_else(|| {
-        ServerError::RemoteRpcError(format!(
-            "HTTP signaling endpoint {endpoint:?} has no usable port"
-        ))
-    })?;
-
-    if let Ok(address) = host.parse::<IpAddr>() {
-        return ipv4_signaling_targets(endpoint, [address]);
-    }
-
-    let resolved = tokio::net::lookup_host((host, port))
-        .await
-        .map_err(|error| {
-            ServerError::RemoteRpcError(format!(
-                "cannot resolve signaling endpoint {endpoint:?} before HTTP bootstrap; named \
-                 endpoints require gateway DNS bypass: {error}"
-            ))
-        })?;
-    ipv4_signaling_targets(endpoint, resolved.map(|address| address.ip()))
-}
-
-#[cfg(all(feature = "node", not(target_family = "wasm")))]
-fn ipv4_signaling_targets(
-    endpoint: &str,
-    addresses: impl IntoIterator<Item = IpAddr>,
-) -> Result<Vec<IpAddr>> {
-    let mut targets = addresses
-        .into_iter()
-        .filter(IpAddr::is_ipv4)
-        .collect::<Vec<_>>();
-    targets.sort_unstable();
-    targets.dedup();
-    if targets.is_empty() {
-        return Err(ServerError::RemoteRpcError(format!(
-            "HTTP signaling endpoint {endpoint:?} resolved to no IPv4 targets; the native \
-             gateway milestone is IPv4-only"
-        ))
-        .into());
-    }
-    Ok(targets)
-}
-
-#[cfg(all(feature = "node", not(target_family = "wasm")))]
-fn pinned_signaling_http_client(endpoint: &str, targets: &[IpAddr]) -> Result<reqwest::Client> {
-    let url = reqwest::Url::parse(endpoint).map_err(|error| {
-        ServerError::RemoteRpcError(format!(
-            "invalid HTTP signaling endpoint {endpoint:?}: {error}"
-        ))
-    })?;
-    let host = url.host_str().ok_or_else(|| {
-        ServerError::RemoteRpcError(format!("HTTP signaling endpoint {endpoint:?} has no host"))
-    })?;
-    let port = url.port_or_known_default().ok_or_else(|| {
-        ServerError::RemoteRpcError(format!(
-            "HTTP signaling endpoint {endpoint:?} has no usable port"
-        ))
-    })?;
-
-    let mut builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
-    if host.parse::<IpAddr>().is_err() {
-        let addresses = targets
-            .iter()
-            .copied()
-            .map(|address| SocketAddr::new(address, port))
-            .collect::<Vec<_>>();
-        builder = builder.resolve_to_addrs(host, &addresses);
-    }
-    builder.build().map_err(|error| {
-        ServerError::RemoteRpcError(format!(
-            "cannot construct pinned HTTP client for signaling endpoint {endpoint:?}: {error}"
-        ))
-        .into()
-    })
 }
 
 #[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
@@ -603,123 +479,5 @@ mod tests {
         };
         assert!(peer_measurement_page_request(&too_large).is_err());
         assert!(peer_measurement_page_request(&zero).is_err());
-    }
-}
-
-#[cfg(all(test, feature = "node", not(target_family = "wasm")))]
-mod signaling_underlay_tests {
-    use tokio::io::AsyncReadExt;
-    use tokio::io::AsyncWriteExt;
-
-    use super::*;
-
-    #[tokio::test]
-    async fn literal_ipv4_signaling_endpoint_needs_no_dns() {
-        let targets = resolve_http_signaling_targets("http://203.0.113.7:50000")
-            .await
-            .expect("literal IPv4 signaling target");
-
-        assert_eq!(targets, vec![IpAddr::V4([203, 0, 113, 7].into())]);
-    }
-
-    #[tokio::test]
-    async fn signaling_endpoint_rejects_non_http_schemes() {
-        assert!(resolve_http_signaling_targets("stun://203.0.113.7:3478")
-            .await
-            .is_err());
-    }
-
-    #[test]
-    fn signaling_targets_are_ipv4_only_sorted_and_deduplicated() {
-        let targets = ipv4_signaling_targets("http://seed.invalid", [
-            IpAddr::V4([203, 0, 113, 9].into()),
-            IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
-            IpAddr::V4([203, 0, 113, 7].into()),
-            IpAddr::V4([203, 0, 113, 9].into()),
-        ])
-        .expect("IPv4 targets");
-
-        assert_eq!(targets, vec![
-            IpAddr::V4([203, 0, 113, 7].into()),
-            IpAddr::V4([203, 0, 113, 9].into())
-        ]);
-    }
-
-    #[tokio::test]
-    async fn named_signaling_client_uses_only_the_pinned_target() {
-        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-            .await
-            .expect("test listener");
-        let port = listener.local_addr().expect("listener address").port();
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.expect("accept pinned request");
-            let mut request = [0_u8; 2048];
-            let _ = stream.read(&mut request).await.expect("read request");
-            let body = r#"{"jsonrpc":"2.0","result":{"did":"pinned-target"},"id":1}"#;
-            let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            stream
-                .write_all(response.as_bytes())
-                .await
-                .expect("write response");
-        });
-        let endpoint = format!("http://seed.example.invalid:{port}/rpc");
-        let targets = [IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)];
-        let http_client =
-            pinned_signaling_http_client(&endpoint, &targets).expect("pinned signaling client");
-        let client = rings_rpc::jsonrpc::Client::with_http_client(&endpoint, http_client);
-
-        let response = client
-            .node_did(&NodeDidRequest {})
-            .await
-            .expect("RPC through pinned address");
-
-        assert_eq!(response.did, "pinned-target");
-        server.await.expect("test server task");
-    }
-
-    #[tokio::test]
-    async fn signaling_client_rejects_unadmitted_redirect_destination() {
-        let destination = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-            .await
-            .expect("redirect destination listener");
-        let destination_port = destination
-            .local_addr()
-            .expect("redirect destination address")
-            .port();
-        let origin = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-            .await
-            .expect("redirect origin listener");
-        let origin_port = origin.local_addr().expect("redirect origin address").port();
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = origin.accept().await.expect("accept origin request");
-            let mut request = [0_u8; 2048];
-            let _ = stream
-                .read(&mut request)
-                .await
-                .expect("read origin request");
-            let response = format!(
-                "HTTP/1.1 302 Found\r\nlocation: http://127.0.0.1:{destination_port}/rpc\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
-            );
-            stream
-                .write_all(response.as_bytes())
-                .await
-                .expect("write redirect");
-        });
-        let endpoint = format!("http://seed.example.invalid:{origin_port}/rpc");
-        let targets = [IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)];
-        let http_client =
-            pinned_signaling_http_client(&endpoint, &targets).expect("pinned signaling client");
-        let client = rings_rpc::jsonrpc::Client::with_http_client(&endpoint, http_client);
-
-        assert!(client.node_did(&NodeDidRequest {}).await.is_err());
-        server.await.expect("redirect server task");
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(100), destination.accept())
-                .await
-                .is_err()
-        );
     }
 }

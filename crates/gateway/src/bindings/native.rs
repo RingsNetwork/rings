@@ -1,13 +1,10 @@
 //! Shared desktop TUN/Wintun device, route transaction, and stale-state lease.
 
-use std::cmp::Reverse;
 use std::fs::File;
 use std::io::ErrorKind;
 use std::io::Write;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
-#[cfg(target_os = "macos")]
-use std::net::Ipv6Addr;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -17,15 +14,12 @@ use serde::Serialize;
 use tun_rs::DeviceBuilder;
 use tun_rs::Layer;
 
-use super::normalize_underlay_targets;
 use super::route::Route;
 use super::route::RouteManager;
-use super::routes::bypass_routes;
 use super::routes::capture_routes;
 use super::EstablishedTunnel;
 use super::TeardownFailure;
 use super::TunnelControl;
-use super::UnderlayPolicy;
 use crate::GatewayError;
 use crate::GatewayPlan;
 use crate::PacketIo;
@@ -138,17 +132,13 @@ pub struct NativeTunnelLease {
 
 struct ActiveTunnel {
     id: u64,
-    baseline: Vec<Route>,
-    plan: GatewayPlan,
     routes: Vec<Route>,
-    bypass: Vec<Route>,
 }
 
 /// Desktop tunnel controller with durable, reverse-order route cleanup.
 pub struct NativeTunnelControl {
     manager: RouteManager,
     options: NativeTunnelOptions,
-    underlay_targets: Vec<IpAddr>,
     active: Option<ActiveTunnel>,
     next_lease_id: u64,
 }
@@ -161,7 +151,6 @@ impl NativeTunnelControl {
         Ok(Self {
             manager,
             options,
-            underlay_targets: Vec::new(),
             active: None,
             next_lease_id: 1,
         })
@@ -199,39 +188,15 @@ impl NativeTunnelControl {
                 message: "native tunnel lease identifier space is exhausted".to_string(),
             })?;
         plan.validate()?;
-        validate_underlay_capture_conflicts(plan, &self.underlay_targets)?;
         self.reconcile_stale()?;
-        let baseline = self
-            .manager
-            .list()
-            .map_err(|error| GatewayError::platform("list-baseline-routes", error))?;
         let mut installed = Vec::new();
-        let mut installed_bypass = Vec::new();
 
         let result: Result<(tun_rs::AsyncDevice, String), GatewayError> = (|| {
-            for network in bypass_routes(plan, &self.underlay_targets) {
-                let route = resolve_current_route(&mut self.manager, network)?;
-                if !baseline.contains(&route) && !installed.contains(&route) {
-                    self.install_route(route.clone(), &mut installed)?;
-                    installed_bypass.push(route);
-                }
-            }
-
             let (address, prefix) = plan.first_ipv4_address()?;
             let builder = DeviceBuilder::new()
                 .layer(Layer::L3)
                 .mtu(plan.mtu.get())
                 .ipv4(address, prefix, None::<Ipv4Addr>);
-            #[cfg(target_os = "macos")]
-            let builder = if plan.routing_mode == crate::RoutingMode::Disabled {
-                builder
-            } else {
-                // macOS rejects an AF_INET6 interface route with ENETUNREACH until the utun is
-                // IPv6-capable. This deterministic /128 ULA is only a capability anchor: the two
-                // global IPv6 capture halves remain unscoped, and the IPv4-only classifier drops
-                // every IPv6 packet they deliver. tun-rs configures it through SIOCAIFADDR_IN6.
-                builder.ipv6(macos_capture_anchor(address), 128)
-            };
             let device = configure_builder(builder, &self.options)
                 .build_async()
                 .map_err(|error| GatewayError::platform("create-packet-device", error))?;
@@ -252,6 +217,7 @@ impl NativeTunnelControl {
 
             for network in capture_routes(plan) {
                 let route = capture_route(network, interface_index);
+                self.ensure_capture_destination_available(&route)?;
                 self.install_route(route, &mut installed)?;
             }
             write_lease(&self.options.route_ledger_path, &installed)?;
@@ -276,10 +242,7 @@ impl NativeTunnelControl {
         self.next_lease_id = next_lease_id;
         self.active = Some(ActiveTunnel {
             id: lease_id,
-            baseline,
-            plan: plan.clone(),
             routes: installed,
-            bypass: installed_bypass,
         });
         Ok(EstablishedTunnel {
             device: NativePacketIo::new(device),
@@ -307,6 +270,27 @@ impl NativeTunnelControl {
         )
     }
 
+    fn ensure_capture_destination_available(&mut self, route: &Route) -> Result<(), GatewayError> {
+        let existing = self
+            .manager
+            .list()
+            .map_err(|error| GatewayError::platform("list-capture-routes", error))?;
+        if let Some(conflict) = existing
+            .iter()
+            .find(|existing| same_route_destination(existing, route))
+        {
+            return Err(GatewayError::Platform {
+                operation: "capture-route-conflict",
+                message: format!(
+                    "destination {}/{} already has a route and is not owned by this gateway: {conflict:?}",
+                    route.destination(),
+                    route.prefix()
+                ),
+            });
+        }
+        Ok(())
+    }
+
     fn cleanup_routes(&mut self, routes: &mut Vec<Route>) -> Result<(), GatewayError> {
         while let Some(route) = routes.pop() {
             if let Err(error) = self.manager.delete(&route) {
@@ -320,76 +304,45 @@ impl NativeTunnelControl {
         }
         remove_ledger(&self.options.route_ledger_path)
     }
+}
 
-    fn replace_active_bypass(
-        &mut self,
-        mut active: ActiveTunnel,
-        targets: &[IpAddr],
-    ) -> (ActiveTunnel, Result<(), GatewayError>) {
-        let desired = match bypass_routes(&active.plan, targets)
-            .into_iter()
-            .map(|network| inherit_baseline_route(&active.baseline, network))
-            .collect::<Result<Vec<_>, _>>()
-        {
-            Ok(routes) => routes,
-            Err(error) => return (active, Err(error)),
-        };
-
-        for route in &desired {
-            if active.baseline.contains(route) || active.routes.contains(route) {
-                continue;
-            }
-            if let Err(error) = self.install_route(route.clone(), &mut active.routes) {
-                return (active, Err(error));
-            }
-            active.bypass.push(route.clone());
-        }
-
-        let obsolete = active
-            .bypass
-            .iter()
-            .filter(|route| !desired.contains(route))
-            .cloned()
-            .collect::<Vec<_>>();
-        for route in obsolete {
-            if let Err(error) = self.manager.delete(&route) {
-                if !route_is_absent(&error) {
-                    return (
-                        active,
-                        Err(GatewayError::platform("delete-bypass-route", error)),
-                    );
-                }
-            }
-            active.bypass.retain(|candidate| candidate != &route);
-            active.routes.retain(|candidate| candidate != &route);
-            if let Err(error) = write_lease(&self.options.route_ledger_path, &active.routes) {
-                return (active, Err(error));
-            }
-        }
-        (active, Ok(()))
-    }
+fn same_route_destination(left: &Route, right: &Route) -> bool {
+    left.destination() == right.destination() && left.prefix() == right.prefix()
 }
 
 fn journal_then_add_route<J, A>(
     route: Route,
     installed: &mut Vec<Route>,
-    journal: J,
+    mut journal: J,
     add: A,
 ) -> Result<(), GatewayError>
 where
-    J: FnOnce(&[Route]) -> Result<(), GatewayError>,
+    J: FnMut(&[Route]) -> Result<(), GatewayError>,
     A: FnOnce(&Route) -> Result<(), GatewayError>,
 {
     // Write-ahead invariant: every route that may exist in the OS is already present in the
     // durable ledger. A crash after this write but before `add` leaves only a harmless cleanup
     // intent; a crash after `add` leaves enough information for the next start to remove it.
     installed.push(route);
-    journal(installed)?;
+    if let Err(error) = journal(installed) {
+        installed.pop();
+        return Err(error);
+    }
     let route = installed.last().ok_or_else(|| GatewayError::Platform {
         operation: "add-route",
         message: "write-ahead route ledger lost its pending route".to_string(),
     })?;
-    add(route)
+    if let Err(error) = add(route) {
+        installed.pop();
+        if let Err(rollback) = journal(installed) {
+            return Err(GatewayError::Platform {
+                operation: "rollback-route-intent",
+                message: format!("{error}; failed to remove unowned cleanup intent: {rollback}"),
+            });
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 #[async_trait::async_trait]
@@ -431,23 +384,6 @@ impl TunnelControl for NativeTunnelControl {
                 Err(TeardownFailure::new(lease, error))
             }
         }
-    }
-}
-
-#[async_trait::async_trait]
-impl UnderlayPolicy for NativeTunnelControl {
-    async fn replace_bypass_targets(&mut self, targets: &[IpAddr]) -> Result<(), GatewayError> {
-        let normalized = normalize_underlay_targets(targets)?;
-        if let Some(active) = self.active.as_ref() {
-            validate_underlay_capture_conflicts(&active.plan, &normalized)?;
-        }
-        if let Some(active) = self.active.take() {
-            let (active, result) = self.replace_active_bypass(active, &normalized);
-            self.active = Some(active);
-            result?;
-        }
-        self.underlay_targets = normalized;
-        Ok(())
     }
 }
 
@@ -550,134 +486,11 @@ impl RouteRecord {
     }
 }
 
-fn validate_underlay_capture_conflicts(
-    plan: &GatewayPlan,
-    targets: &[IpAddr],
-) -> Result<(), GatewayError> {
-    let capture = capture_routes(plan);
-    let conflict = targets.iter().find(|target| {
-        target.is_ipv4()
-            && capture
-                .iter()
-                .any(|route| route.prefix_len() == 32 && route.contains(*target))
-    });
-    match conflict {
-        Some(target) => Err(GatewayError::Platform {
-            operation: "validate-underlay-route",
-            message: format!(
-                "underlay target {target} is also an exact capture route; use a broader capture \
-                 network or remove the target from capture"
-            ),
-        }),
-        None => Ok(()),
-    }
-}
-
-fn inherit_baseline_route(baseline: &[Route], network: IpNet) -> Result<Route, GatewayError> {
-    let target = network.addr();
-    let original = baseline
-        .iter()
-        .filter(|route| route.contains(&target))
-        .max_by_key(|route| baseline_route_rank(route))
-        .ok_or_else(|| GatewayError::Platform {
-            operation: "resolve-bypass-route",
-            message: format!("no baseline route reaches {target}"),
-        })?;
-    inherit_route(original, network)
-}
-
-fn resolve_current_route(
-    manager: &mut RouteManager,
-    network: IpNet,
-) -> Result<Route, GatewayError> {
-    let target = network.addr();
-    let original = manager
-        .find_route(&target)
-        .map_err(|error| GatewayError::platform("resolve-current-bypass-route", error))?
-        .ok_or_else(|| GatewayError::Platform {
-            operation: "resolve-current-bypass-route",
-            message: format!("no current route reaches {target}"),
-        })?;
-    inherit_route(&original, network)
-}
-
-fn inherit_route(original: &Route, network: IpNet) -> Result<Route, GatewayError> {
-    let target = network.addr();
-    let mut route = Route::new(network.network(), network.prefix_len());
-    if let Some(gateway) = original.gateway() {
-        route = route.with_gateway(gateway);
-    }
-    if let Some(name) = original.if_name() {
-        route = route.with_if_name(name.clone());
-    }
-    if let Some(index) = original.if_index() {
-        route = route.with_if_index(index);
-    }
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    if let Some(metric) = original.metric() {
-        route = route.with_metric(metric);
-    }
-    #[cfg(target_os = "linux")]
-    {
-        route = route.with_table(original.table());
-        if let Some(source) = original.source() {
-            route = route.with_source(source, original.source_prefix());
-        }
-        if let Some(source) = original.pref_source() {
-            route = route.with_pref_source(source);
-        }
-    }
-    #[cfg(target_os = "windows")]
-    if let Some(luid) = original.luid() {
-        route = route.with_luid(luid);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        route = route.with_if_scope(original.if_scope());
-    }
-    if route.gateway().is_none() && route.if_index().is_none() && route.if_name().is_none() {
-        return Err(GatewayError::Platform {
-            operation: "resolve-bypass-route",
-            message: format!("baseline route for {target} has no gateway or interface"),
-        });
-    }
-    Ok(route)
-}
-
-fn baseline_route_rank(route: &Route) -> (u8, Reverse<u32>) {
-    (route.prefix(), Reverse(baseline_route_metric(route)))
-}
-
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-fn baseline_route_metric(route: &Route) -> u32 {
-    route.metric().unwrap_or(u32::MAX)
-}
-
-#[cfg(target_os = "macos")]
-fn baseline_route_metric(_route: &Route) -> u32 {
-    0
-}
-
 fn capture_route(network: IpNet, interface_index: u32) -> Route {
     let route = Route::new(network.network(), network.prefix_len()).with_if_index(interface_index);
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     let route = route.with_metric(0);
     route
-}
-
-#[cfg(target_os = "macos")]
-fn macos_capture_anchor(address: Ipv4Addr) -> Ipv6Addr {
-    let octets = address.octets();
-    Ipv6Addr::new(
-        0xfd72,
-        0x696e,
-        0x6773,
-        0,
-        0,
-        0,
-        u16::from_be_bytes([octets[0], octets[1]]),
-        u16::from_be_bytes([octets[2], octets[3]]),
-    )
 }
 
 #[cfg(target_os = "linux")]

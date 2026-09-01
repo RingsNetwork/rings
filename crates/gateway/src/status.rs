@@ -3,12 +3,11 @@
 use std::sync::Arc;
 use std::sync::RwLock;
 
+use ipnet::IpNet;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::DnsPolicy;
 use crate::GatewayState;
-use crate::RoutingMode;
 
 /// Current availability of a compatible onion TCP exit.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -45,10 +44,8 @@ pub struct GatewayStatus {
     pub health: GatewayHealth,
     /// Platform interface name when one exists.
     pub interface: Option<String>,
-    /// Routing mode currently requested.
-    pub routing_mode: RoutingMode,
-    /// Explicit DNS policy.
-    pub dns_policy: DnsPolicy,
+    /// Normalized destination prefixes explicitly selected for packet capture.
+    pub capture_routes: Vec<IpNet>,
     /// Compatible onion exit availability.
     pub exit_availability: ExitAvailability,
     /// Number of currently tracked TCP flows.
@@ -95,8 +92,7 @@ impl GatewayStatus {
     pub fn from_state(
         state: GatewayState,
         interface: Option<String>,
-        routing_mode: RoutingMode,
-        dns_policy: DnsPolicy,
+        capture_routes: Vec<IpNet>,
         exit_availability: ExitAvailability,
         active_flows: usize,
         reason: Option<String>,
@@ -111,8 +107,7 @@ impl GatewayStatus {
         Self {
             health,
             interface,
-            routing_mode,
-            dns_policy,
+            capture_routes,
             exit_availability,
             active_flows,
             reason,
@@ -129,8 +124,7 @@ mod tests {
         let status = GatewayStatus::from_state(
             GatewayState::Active,
             Some("tun-rings0".to_string()),
-            RoutingMode::Default,
-            DnsPolicy::Block,
+            vec!["198.18.0.0/15".parse().expect("test capture route")],
             ExitAvailability::Unavailable,
             0,
             Some("no compatible onion TCP exit".to_string()),
@@ -143,8 +137,7 @@ mod tests {
         let initial = GatewayStatus::from_state(
             GatewayState::Stopped,
             None,
-            RoutingMode::Split,
-            DnsPolicy::Block,
+            Vec::new(),
             ExitAvailability::Unknown,
             0,
             None,
@@ -153,8 +146,7 @@ mod tests {
         let active = GatewayStatus::from_state(
             GatewayState::Active,
             Some("rings0".to_string()),
-            RoutingMode::Split,
-            DnsPolicy::Block,
+            vec!["198.18.0.0/15".parse().expect("test capture route")],
             ExitAvailability::Available,
             2,
             None,

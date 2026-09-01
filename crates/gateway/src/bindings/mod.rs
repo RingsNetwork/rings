@@ -1,8 +1,5 @@
 //! Native operating-system effect boundaries.
 
-use std::collections::BTreeSet;
-use std::net::IpAddr;
-
 use crate::GatewayError;
 use crate::GatewayPlan;
 use crate::PacketIo;
@@ -11,8 +8,7 @@ use crate::PacketIo;
 mod native;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 mod route;
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-mod routes;
+pub(crate) mod routes;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod unix;
 #[cfg(target_os = "windows")]
@@ -101,7 +97,7 @@ pub trait TunnelControl: Send {
     /// Linear cleanup capability produced by a successful establish operation.
     type Lease: Send;
 
-    /// Reconcile stale state, install exclusions, then establish the capture interface and routes.
+    /// Reconcile stale state, then establish the packet interface and explicit capture routes.
     async fn establish(
         &mut self,
         plan: &GatewayPlan,
@@ -113,53 +109,7 @@ pub trait TunnelControl: Send {
     async fn teardown(&mut self, lease: Self::Lease) -> Result<(), TeardownFailure<Self::Lease>>;
 }
 
-/// Platform boundary that keeps Rings underlay traffic outside capture routes.
-#[async_trait::async_trait]
-pub trait UnderlayPolicy: Send {
-    /// Replace the current bypass set before packet admission or after peer topology changes.
-    async fn replace_bypass_targets(&mut self, targets: &[IpAddr]) -> Result<(), GatewayError>;
-}
-
-fn normalize_underlay_targets(targets: &[IpAddr]) -> Result<Vec<IpAddr>, GatewayError> {
-    if let Some(address) = targets.iter().find(|address| address.is_ipv6()) {
-        return Err(GatewayError::platform(
-            "normalize-underlay-bypass",
-            format!("IPv6 underlay target {address} is outside the IPv4 milestone"),
-        ));
-    }
-    Ok(targets
-        .iter()
-        .copied()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn underlay_targets_are_normalized_once_for_every_binding() {
-        assert_eq!(
-            normalize_underlay_targets(&[
-                "203.0.113.7".parse().expect("test address"),
-                "192.0.2.1".parse().expect("test address"),
-                "203.0.113.7".parse().expect("test address"),
-            ])
-            .expect("normalized targets"),
-            vec![
-                "192.0.2.1".parse::<IpAddr>().expect("test address"),
-                "203.0.113.7".parse::<IpAddr>().expect("test address"),
-            ]
-        );
-        assert!(
-            normalize_underlay_targets(&["2001:db8::1".parse().expect("test address")]).is_err()
-        );
-    }
-}
-
-/// Fail-closed packet boundary for native targets whose VPN integration is deferred.
+/// Fail-closed packet boundary for native targets whose packet binding is deferred.
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub struct UnsupportedPacketIo;
 
@@ -181,8 +131,8 @@ pub struct UnsupportedTunnelLease;
 
 /// Explicitly unsupported controller used to preserve non-desktop native node builds.
 ///
-/// iOS NetworkExtension and Android VpnService bindings are deferred. This controller performs no
-/// system calls and fails before packet admission rather than silently selecting a direct path.
+/// iOS and Android packet bindings are deferred. This controller performs no system calls and
+/// fails before packet admission rather than silently selecting a direct path.
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub struct UnsupportedTunnelControl;
 
@@ -224,13 +174,5 @@ impl TunnelControl for UnsupportedTunnelControl {
 
     async fn teardown(&mut self, lease: Self::Lease) -> Result<(), TeardownFailure<Self::Lease>> {
         Err(TeardownFailure::new(lease, Self::unsupported()))
-    }
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-#[async_trait::async_trait]
-impl UnderlayPolicy for UnsupportedTunnelControl {
-    async fn replace_bypass_targets(&mut self, _targets: &[IpAddr]) -> Result<(), GatewayError> {
-        Err(Self::unsupported())
     }
 }

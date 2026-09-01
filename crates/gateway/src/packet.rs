@@ -82,8 +82,6 @@ pub enum FlowRejectReason {
     },
     /// The userspace TCP listener rejected the captured target.
     ListenRejected,
-    /// Explicit DNS block policy rejected TCP port 53.
-    DnsBlocked,
 }
 
 /// Total result of processing one captured packet.
@@ -114,8 +112,7 @@ pub enum PacketDisposition {
 /// Validate and classify one raw packet from a platform `PacketIo` device.
 ///
 /// This function performs no IO and never creates a direct connection. Unsupported transports are
-/// explicitly dropped after capture. Platform routing must implement [`crate::DnsPolicy::Bypass`]
-/// before packets reach this boundary; captured UDP is never silently reinjected for direct egress.
+/// explicitly dropped after capture. Captured UDP is never silently reinjected for direct egress.
 pub fn classify_ipv4_packet(packet: &[u8]) -> PacketDisposition {
     match packet.first().map(|byte| byte >> 4) {
         Some(4) => {}

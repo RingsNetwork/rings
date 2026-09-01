@@ -1,6 +1,6 @@
 //! Minimal synchronous Windows route binding for the gateway transaction.
 //!
-//! This deliberately wraps only list/add/delete from the IP Helper API. Route change
+//! This deliberately wraps only add/delete from the IP Helper API. Route change
 //! subscriptions would pull an unrelated channel runtime into the native gateway graph.
 
 use std::io;
@@ -15,12 +15,10 @@ use windows_sys::Win32::Foundation::ERROR_SUCCESS;
 use windows_sys::Win32::Foundation::WIN32_ERROR;
 use windows_sys::Win32::NetworkManagement::IpHelper::ConvertInterfaceAliasToLuid;
 use windows_sys::Win32::NetworkManagement::IpHelper::ConvertInterfaceIndexToLuid;
-use windows_sys::Win32::NetworkManagement::IpHelper::ConvertInterfaceLuidToAlias;
 use windows_sys::Win32::NetworkManagement::IpHelper::ConvertInterfaceLuidToIndex;
 use windows_sys::Win32::NetworkManagement::IpHelper::CreateIpForwardEntry2;
 use windows_sys::Win32::NetworkManagement::IpHelper::DeleteIpForwardEntry2;
 use windows_sys::Win32::NetworkManagement::IpHelper::FreeMibTable;
-use windows_sys::Win32::NetworkManagement::IpHelper::GetBestRoute2;
 use windows_sys::Win32::NetworkManagement::IpHelper::GetIpForwardTable2;
 use windows_sys::Win32::NetworkManagement::IpHelper::InitializeIpForwardEntry;
 use windows_sys::Win32::NetworkManagement::IpHelper::MIB_IPFORWARD_ROW2;
@@ -111,18 +109,6 @@ impl Route {
         self
     }
 
-    pub(crate) fn contains(&self, target: &IpAddr) -> bool {
-        match (self.destination, *target) {
-            (IpAddr::V4(network), IpAddr::V4(address)) => {
-                masked_v4(network, self.prefix) == masked_v4(address, self.prefix)
-            }
-            (IpAddr::V6(network), IpAddr::V6(address)) => {
-                masked_v6(network, self.prefix) == masked_v6(address, self.prefix)
-            }
-            _ => false,
-        }
-    }
-
     fn checked_index(&self) -> io::Result<Option<u32>> {
         let name_index = self.if_name.as_deref().map(if_name_to_index).transpose()?;
         if let (Some(index), Some(resolved)) = (self.if_index, name_index) {
@@ -190,30 +176,7 @@ impl RouteManager {
             let first = ptr::addr_of!((*owned.0).Table).cast::<MIB_IPFORWARD_ROW2>();
             std::slice::from_raw_parts(first, count)
         };
-        Ok(rows.iter().filter_map(row_to_route).collect())
-    }
-
-    pub(crate) fn find_route(&mut self, destination: &IpAddr) -> io::Result<Option<Route>> {
-        // SAFETY: all structures are valid writable values for the duration of the call. The
-        // interface and source pointers are null by contract so Windows chooses the effective
-        // route and source exactly as it would for an unconstrained connection.
-        unsafe {
-            let mut row: MIB_IPFORWARD_ROW2 = std::mem::zeroed();
-            let mut destination_address: SOCKADDR_INET = std::mem::zeroed();
-            let mut best_source_address: SOCKADDR_INET = std::mem::zeroed();
-            write_sockaddr(&mut destination_address, *destination);
-            let status = GetBestRoute2(
-                ptr::null(),
-                0,
-                ptr::null(),
-                &destination_address,
-                0,
-                &mut row,
-                &mut best_source_address,
-            );
-            status_to_result(status)?;
-            Ok(row_to_route(&row))
-        }
+        Ok(rows.iter().filter_map(route_destination_from_row).collect())
     }
 
     pub(crate) fn add(&mut self, route: &Route) -> io::Result<()> {
@@ -249,19 +212,9 @@ fn status_to_result(status: WIN32_ERROR) -> io::Result<()> {
     }
 }
 
-fn row_to_route(row: &MIB_IPFORWARD_ROW2) -> Option<Route> {
+fn route_destination_from_row(row: &MIB_IPFORWARD_ROW2) -> Option<Route> {
     let destination = sockaddr_to_ip(&row.DestinationPrefix.Prefix)?;
-    let gateway = sockaddr_to_ip(&row.NextHop);
-    let if_name = if_index_to_name(row.InterfaceIndex).ok();
-    Some(Route {
-        destination,
-        prefix: row.DestinationPrefix.PrefixLength,
-        gateway,
-        if_name,
-        if_index: Some(row.InterfaceIndex),
-        metric: Some(row.Metric),
-        luid: Some(luid_to_u64(row.InterfaceLuid)),
-    })
+    Some(Route::new(destination, row.DestinationPrefix.PrefixLength))
 }
 
 fn route_to_row(route: &Route) -> io::Result<MIB_IPFORWARD_ROW2> {
@@ -351,24 +304,6 @@ fn if_name_to_index(name: &str) -> io::Result<u32> {
     luid_to_index(&luid)
 }
 
-fn if_index_to_name(index: u32) -> io::Result<String> {
-    let luid = index_to_luid(index)?;
-    let mut alias = vec![0_u16; 257];
-    // SAFETY: `luid` is initialized and `alias` exposes its valid writable capacity to Windows.
-    status_to_result(unsafe {
-        ConvertInterfaceLuidToAlias(&luid, alias.as_mut_ptr(), alias.len())
-    })?;
-    let end = alias
-        .iter()
-        .position(|code_unit| *code_unit == 0)
-        .unwrap_or(alias.len());
-    let prefix = match alias.get(..end) {
-        Some(prefix) => prefix,
-        None => &[],
-    };
-    Ok(String::from_utf16_lossy(prefix))
-}
-
 fn index_to_luid(index: u32) -> io::Result<NET_LUID_LH> {
     // SAFETY: `luid` is writable and initialized by Windows on successful return.
     let mut luid: NET_LUID_LH = unsafe { std::mem::zeroed() };
@@ -384,6 +319,7 @@ fn luid_to_index(luid: &NET_LUID_LH) -> io::Result<u32> {
     Ok(index)
 }
 
+#[cfg(test)]
 fn luid_to_u64(luid: NET_LUID_LH) -> u64 {
     // SAFETY: NET_LUID_LH is the Windows SDK's transparent 64-bit LUID union.
     unsafe { std::mem::transmute::<NET_LUID_LH, u64>(luid) }
@@ -392,18 +328,6 @@ fn luid_to_u64(luid: NET_LUID_LH) -> u64 {
 fn u64_to_luid(luid: u64) -> NET_LUID_LH {
     // SAFETY: NET_LUID_LH is the Windows SDK's transparent 64-bit LUID union.
     unsafe { std::mem::transmute::<u64, NET_LUID_LH>(luid) }
-}
-
-fn masked_v4(address: Ipv4Addr, prefix: u8) -> u32 {
-    let shift = 32_u32.saturating_sub(u32::from(prefix));
-    let mask = u32::MAX.checked_shl(shift).unwrap_or(0);
-    u32::from(address) & mask
-}
-
-fn masked_v6(address: Ipv6Addr, prefix: u8) -> u128 {
-    let shift = 128_u32.saturating_sub(u32::from(prefix));
-    let mask = u128::MAX.checked_shl(shift).unwrap_or(0);
-    u128::from(address) & mask
 }
 
 #[cfg(test)]
@@ -421,17 +345,6 @@ mod tests {
             write_sockaddr(&mut sockaddr, address);
             assert_eq!(sockaddr_to_ip(&sockaddr), Some(address));
         }
-    }
-
-    #[test]
-    fn route_contains_masks_v4_and_v6_prefixes() {
-        let ipv4 = Route::new("192.0.2.0".parse().expect("test route"), 24);
-        assert!(ipv4.contains(&"192.0.2.99".parse().expect("test address")));
-        assert!(!ipv4.contains(&"192.0.3.1".parse().expect("test address")));
-
-        let ipv6 = Route::new("2001:db8::".parse().expect("test route"), 32);
-        assert!(ipv6.contains(&"2001:db8:1::1".parse().expect("test address")));
-        assert!(!ipv6.contains(&"2001:db9::1".parse().expect("test address")));
     }
 
     #[test]

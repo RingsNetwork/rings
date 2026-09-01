@@ -124,6 +124,8 @@ impl TcpStack {
             return Err(TcpStackError::InterfaceAddressTableFull.into());
         }
         interface.set_any_ip(true);
+        // This is smoltcp's private reply-path route for packets already admitted from the TUN.
+        // It does not install or widen an operating-system capture route.
         interface
             .routes_mut()
             .add_default_ipv4_route(interface_address)
@@ -409,12 +411,10 @@ mod tests {
 
     use super::*;
     use crate::classify_ipv4_packet;
-    use crate::DnsPolicy;
     use crate::GatewayPlan;
     use crate::Mtu;
     use crate::PacketDisposition;
     use crate::PacketDropReason;
-    use crate::RoutingMode;
 
     fn route(address: Ipv4Addr, prefix: u8) -> IpNet {
         IpNet::new(address.into(), prefix).expect("valid test network")
@@ -423,13 +423,9 @@ mod tests {
     fn config() -> GatewayConfig {
         GatewayConfig {
             plan: GatewayPlan {
-                routing_mode: RoutingMode::Default,
-                addresses: vec![route(Ipv4Addr::new(100, 64, 0, 1), 30)],
-                included_routes: vec![route(Ipv4Addr::UNSPECIFIED, 0)],
-                excluded_routes: vec![route(Ipv4Addr::LOCALHOST, 8)],
+                addresses: vec![route(Ipv4Addr::new(100, 64, 0, 1), 32)],
+                included_routes: vec![route(Ipv4Addr::new(198, 18, 0, 0), 15)],
                 mtu: Mtu::try_from(1_280).expect("valid test MTU"),
-                dns_policy: DnsPolicy::Block,
-                dns_servers: vec!["1.1.1.1".parse().expect("test DNS")],
             },
             max_flows: 8,
             flow_idle_timeout: Duration::from_secs(30),

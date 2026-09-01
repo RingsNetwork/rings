@@ -54,64 +54,37 @@ fn route_install_persists_cleanup_intent_before_os_mutation() {
 }
 
 #[test]
-fn bypass_inherits_the_most_specific_baseline_route() {
-    let default = Route::new("0.0.0.0".parse().expect("default"), 0)
-        .with_gateway("192.0.2.1".parse().expect("gateway"));
-    let specific = Route::new("203.0.113.0".parse().expect("specific"), 24)
-        .with_gateway("198.51.100.1".parse().expect("gateway"));
-    let inherited = inherit_baseline_route(
-        &[default, specific],
-        "203.0.113.7/32".parse().expect("host route"),
-    )
-    .expect("baseline route");
-    assert_eq!(
-        inherited.gateway(),
-        Some("198.51.100.1".parse().expect("gateway"))
-    );
-}
+fn failed_route_add_removes_the_unowned_cleanup_intent() {
+    let route = Route::new("203.0.113.7".parse().expect("test route"), 32);
+    let journaled = RefCell::new(Vec::new());
+    let mut installed = Vec::new();
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-#[test]
-fn bypass_inherits_the_lowest_metric_route_at_the_same_prefix() {
-    let expensive = Route::new("0.0.0.0".parse().expect("default"), 0)
-        .with_gateway("192.0.2.1".parse().expect("expensive gateway"))
-        .with_metric(50);
-    let preferred = Route::new("0.0.0.0".parse().expect("default"), 0)
-        .with_gateway("198.51.100.1".parse().expect("preferred gateway"))
-        .with_metric(5);
-    let inherited = inherit_baseline_route(
-        &[expensive, preferred],
-        "203.0.113.7/32".parse().expect("host route"),
+    let error = journal_then_add_route(
+        route.clone(),
+        &mut installed,
+        |routes| {
+            journaled.borrow_mut().push(routes.to_vec());
+            Ok(())
+        },
+        |_| Err(GatewayError::platform("add-route", "route already exists")),
     )
-    .expect("baseline route");
+    .expect_err("failed add must not claim route ownership");
 
-    assert_eq!(
-        inherited.gateway(),
-        Some("198.51.100.1".parse().expect("preferred gateway"))
-    );
-    assert_eq!(inherited.metric(), Some(5));
+    assert!(error.to_string().contains("route already exists"));
+    assert!(installed.is_empty());
+    assert_eq!(journaled.into_inner(), vec![vec![route], Vec::new()]);
 }
 
 #[test]
-fn exact_capture_route_cannot_also_be_an_underlay_bypass() {
-    let target = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
-    let mut plan = GatewayPlan {
-        routing_mode: crate::RoutingMode::Split,
-        addresses: vec!["100.64.0.1/30".parse().expect("address")],
-        included_routes: vec!["203.0.113.7/32".parse().expect("capture")],
-        excluded_routes: Vec::new(),
-        mtu: crate::Mtu::try_from(1_280).expect("MTU"),
-        dns_policy: crate::DnsPolicy::Bypass,
-        dns_servers: vec!["1.1.1.1".parse().expect("DNS")],
-    };
-    assert!(validate_underlay_capture_conflicts(&plan, &[target]).is_err());
+fn route_ownership_conflicts_only_on_the_exact_destination_prefix() {
+    let existing = Route::new("203.0.113.0".parse().expect("existing route"), 24);
+    let same = Route::new("203.0.113.0".parse().expect("same route"), 24);
+    let more_specific = Route::new("203.0.113.7".parse().expect("host route"), 32);
+    let adjacent = Route::new("203.0.114.0".parse().expect("adjacent route"), 24);
 
-    plan.included_routes = vec!["203.0.113.0/24".parse().expect("capture")];
-    assert!(validate_underlay_capture_conflicts(&plan, &[target]).is_ok());
-
-    plan.dns_policy = crate::DnsPolicy::Block;
-    plan.dns_servers = vec![target];
-    assert!(validate_underlay_capture_conflicts(&plan, &[target]).is_err());
+    assert!(same_route_destination(&existing, &same));
+    assert!(!same_route_destination(&existing, &more_specific));
+    assert!(!same_route_destination(&existing, &adjacent));
 }
 
 #[test]
@@ -138,18 +111,6 @@ fn missing_interface_and_missing_route_errors_satisfy_cleanup() {
     assert!(!route_is_absent(&std::io::Error::from(
         std::io::ErrorKind::PermissionDenied
     )));
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn macos_ipv6_capture_uses_a_stable_ula_without_scoping_the_global_route() {
-    let first = macos_capture_anchor(Ipv4Addr::new(100, 64, 0, 1));
-    let second = macos_capture_anchor(Ipv4Addr::new(100, 64, 0, 2));
-    assert!(first.is_unique_local());
-    assert_ne!(first, second);
-
-    let route = capture_route("::/1".parse().expect("IPv6 capture half"), 42);
-    assert!(!route.if_scope());
 }
 
 #[cfg(target_os = "windows")]

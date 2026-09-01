@@ -224,7 +224,7 @@ struct RunCommand {
 
     #[arg(
         long,
-        help = "ICE server list. If not provided, use ice_servers in config file or stun://stun.l.google.com:19302. Gateway mode requires an authenticated turn:// URL",
+        help = "ICE server list. If not provided, use ice_servers in config file or stun://stun.l.google.com:19302",
         env
     )]
     pub ice_servers: Option<String>,
@@ -761,14 +761,7 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
         onion_exit_config,
     )?;
     let gateway_runner = gateway_config
-        .map(|config| {
-            NativeGatewayRunner::new(
-                processor.clone(),
-                onion.clone(),
-                config,
-                c.ice_servers.clone(),
-            )
-        })
+        .map(|config| NativeGatewayRunner::new(processor.clone(), onion.clone(), config))
         .transpose()?;
     let gateway_status = gateway_runner
         .as_ref()

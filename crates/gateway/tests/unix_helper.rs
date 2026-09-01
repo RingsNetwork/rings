@@ -5,7 +5,6 @@
 mod support;
 
 use std::io;
-use std::net::IpAddr;
 use std::path::Path;
 use std::process::Child;
 use std::process::Command;
@@ -17,16 +16,13 @@ use rings_gateway::bindings::unix::UnixTunnelControl;
 use rings_gateway::bindings::unix::UnixTunnelOptions;
 use rings_gateway::bindings::EstablishedTunnel;
 use rings_gateway::bindings::TunnelControl;
-use rings_gateway::bindings::UnderlayPolicy;
-use support::assert_ipv6_fail_closed_ledger;
+use support::assert_exact_capture_ledger;
 use support::capture_packet;
 use support::gateway_plan;
 use support::probe_http;
 use support::TestResult;
-use support::BYPASS_TARGET;
 use support::CAPTURE_TARGET;
-
-const EXTRA_BYPASS_TARGET: std::net::Ipv4Addr = std::net::Ipv4Addr::new(8, 8, 8, 8);
+use support::UNSELECTED_TARGET;
 
 const HELPER_START_TIMEOUT: Duration = Duration::from_secs(10);
 const HELPER_EXIT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -49,24 +45,14 @@ async fn privileged_helper_retains_and_recovers_a_disconnected_lease() -> TestRe
     let mut helper = HelperProcess::spawn(&socket, &ledger)?;
     helper.wait_for_socket(&socket).await?;
     let mut control = UnixTunnelControl::new(UnixTunnelOptions::new(socket.clone()));
-    control
-        .replace_bypass_targets(&[IpAddr::V4(BYPASS_TARGET)])
-        .await?;
     let EstablishedTunnel {
         mut device,
         lease,
         interface_name,
     } = control.establish(&plan).await?;
-    assert_ipv6_fail_closed_ledger(&ledger)?;
+    assert_exact_capture_ledger(&ledger)?;
 
-    control
-        .replace_bypass_targets(&[IpAddr::V4(BYPASS_TARGET), IpAddr::V4(EXTRA_BYPASS_TARGET)])
-        .await?;
-    control
-        .replace_bypass_targets(&[IpAddr::V4(BYPASS_TARGET)])
-        .await?;
-
-    let bypass_response = probe_http(BYPASS_TARGET).await?;
+    let unselected_response = probe_http(UNSELECTED_TARGET).await?;
     let first_capture = capture_packet(&mut device, &plan).await?;
     drop(device);
     drop(lease);
@@ -77,9 +63,6 @@ async fn privileged_helper_retains_and_recovers_a_disconnected_lease() -> TestRe
     assert!(probe_http(CAPTURE_TARGET).await.is_err());
 
     let mut resumed = UnixTunnelControl::new(UnixTunnelOptions::new(socket.clone()));
-    resumed
-        .replace_bypass_targets(&[IpAddr::V4(BYPASS_TARGET)])
-        .await?;
     let EstablishedTunnel {
         mut device,
         lease,
@@ -96,7 +79,7 @@ async fn privileged_helper_retains_and_recovers_a_disconnected_lease() -> TestRe
     assert!(baseline.starts_with(b"HTTP/1."));
     assert!(!interface_name.is_empty());
     assert_eq!(resumed_interface_name, interface_name);
-    assert!(bypass_response.starts_with(b"HTTP/1."));
+    assert!(unselected_response.starts_with(b"HTTP/1."));
     assert!(first_capture >= 20);
     assert!(resumed_capture >= 20);
     assert!(!ledger.exists());

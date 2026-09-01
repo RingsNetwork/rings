@@ -13,9 +13,9 @@ use crate::GatewayTransitionError;
 /// Events accepted by the gateway lifecycle.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GatewayEvent {
-    /// Begin establishing exclusions, interface state, and capture routes.
+    /// Begin establishing interface state and explicit capture routes.
     Start,
-    /// All exclusions and capture resources are installed; packet admission may begin.
+    /// All selected capture resources are installed; packet admission may begin.
     AdmitPackets,
     /// A recoverable dependency failure reduced service.
     Degrade,
@@ -76,7 +76,7 @@ impl GatewayState {
 
 /// Runtime-neutral coordinator for gateway and flow lifecycle state.
 ///
-/// IO, clocks, packet parsing, route discovery, and platform operations remain outside this type.
+/// IO, clocks, packet parsing, and platform operations remain outside this type.
 pub struct GatewayServer {
     config: GatewayConfig,
     state: GatewayState,
@@ -163,8 +163,7 @@ impl GatewayServer {
         GatewayStatus::from_state(
             self.state,
             self.interface.clone(),
-            self.config.plan.routing_mode,
-            self.config.plan.dns_policy,
+            super::bindings::routes::capture_routes(&self.config.plan),
             self.exit_availability,
             self.flows.len(),
             self.reason.clone(),
@@ -180,28 +179,20 @@ mod tests {
     use ipnet::IpNet;
 
     use super::*;
-    use crate::DnsPolicy;
     use crate::GatewayHealth;
     use crate::GatewayPlan;
     use crate::Mtu;
-    use crate::RoutingMode;
 
     fn config() -> GatewayConfig {
         GatewayConfig {
             plan: GatewayPlan {
-                routing_mode: RoutingMode::Default,
                 addresses: vec![
-                    IpNet::new(Ipv4Addr::new(100, 64, 0, 1).into(), 30).expect("test address")
+                    IpNet::new(Ipv4Addr::new(100, 64, 0, 1).into(), 32).expect("test address")
                 ],
                 included_routes: vec![
-                    IpNet::new(Ipv4Addr::UNSPECIFIED.into(), 0).expect("test route")
-                ],
-                excluded_routes: vec![
-                    IpNet::new(Ipv4Addr::LOCALHOST.into(), 8).expect("test route")
+                    IpNet::new(Ipv4Addr::new(198, 18, 0, 0).into(), 15).expect("test route")
                 ],
                 mtu: Mtu::try_from(1_280).expect("test MTU"),
-                dns_policy: DnsPolicy::Block,
-                dns_servers: vec!["1.1.1.1".parse().expect("test DNS")],
             },
             max_flows: 2,
             flow_idle_timeout: Duration::from_secs(30),

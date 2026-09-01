@@ -1,7 +1,5 @@
 //! Validated gateway configuration and declarative tunnel plan.
 
-use std::collections::BTreeSet;
-use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
@@ -18,28 +16,6 @@ const MAX_TCP_BUFFER_BYTES: usize = 1_024 * 1_024;
 // smoltcp receive/transmit buffers plus the two directions of Tokio's duplex bridge.
 const FLOW_BUFFER_ALLOCATION_FACTOR: usize = 4;
 const MAX_TOTAL_FLOW_BUFFER_BYTES: usize = 1_024 * 1_024 * 1_024;
-
-/// Host-routing behavior owned by the gateway.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum RoutingMode {
-    /// The gateway owns no capture route.
-    Disabled,
-    /// Only explicitly included routes are captured.
-    Split,
-    /// The IPv4 default route is captured, subject to exclusions.
-    Default,
-}
-
-/// DNS behavior for the IPv4/TCP milestone.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum DnsPolicy {
-    /// Route the declared host resolvers outside capture and report that DNS bypasses Onion.
-    Bypass,
-    /// Route the declared host resolvers into capture and reject ordinary DNS there.
-    Block,
-}
 
 /// A validated interface MTU.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -74,24 +50,18 @@ impl From<Mtu> for u32 {
 
 /// Declarative network state a platform binding must establish before admitting packets.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct GatewayPlan {
-    /// Routing mode.
-    pub routing_mode: RoutingMode,
-    /// IPv4 interface addresses assigned to the virtual interface.
+    /// IPv4 `/32` host addresses assigned to the virtual interface.
     pub addresses: Vec<IpNet>,
-    /// Destination networks captured by the gateway.
+    /// Exact destination networks captured by the gateway.
+    ///
+    /// An empty set is valid when an external router owns packet selection. Platform bindings may
+    /// normalize and deduplicate these routes, but must not add implicit capture routes.
+    #[serde(default)]
     pub included_routes: Vec<IpNet>,
-    /// More-specific destinations that must bypass capture.
-    pub excluded_routes: Vec<IpNet>,
     /// Virtual-interface MTU.
     pub mtu: Mtu,
-    /// Explicit DNS behavior.
-    pub dns_policy: DnsPolicy,
-    /// Explicit IPv4 host resolvers to bypass or capture according to `dns_policy`.
-    ///
-    /// Rings deliberately does not discover or mutate system DNS configuration. Operators must
-    /// list every resolver that applications can use so the route policy is deterministic.
-    pub dns_servers: Vec<IpAddr>,
 }
 
 impl GatewayPlan {
@@ -123,27 +93,21 @@ impl GatewayPlan {
         }) {
             return Err(ConfigError::InvalidInterfaceAddress(invalid));
         }
-        self.validate_dns()?;
-        if self.routing_mode != RoutingMode::Disabled && self.included_routes.is_empty() {
-            return Err(ConfigError::MissingIncludedRoute(self.routing_mode));
+        if let Some(prefixed) = self
+            .addresses
+            .iter()
+            .copied()
+            .find(|network| network.prefix_len() != 32)
+        {
+            return Err(ConfigError::InterfacePrefixUnsupported(prefixed));
         }
-        let mut captured = self
+        if let Some(default_route) = self
             .included_routes
             .iter()
             .copied()
-            .collect::<BTreeSet<_>>();
-        let mut bypassed = self
-            .excluded_routes
-            .iter()
-            .copied()
-            .collect::<BTreeSet<_>>();
-        let dns_routes = self.dns_servers.iter().filter_map(ipv4_host_route);
-        match self.dns_policy {
-            DnsPolicy::Block => captured.extend(dns_routes),
-            DnsPolicy::Bypass => bypassed.extend(dns_routes),
-        }
-        if let Some(conflict) = captured.intersection(&bypassed).next() {
-            return Err(ConfigError::ConflictingRoute(*conflict));
+            .find(|network| network.prefix_len() == 0)
+        {
+            return Err(ConfigError::DefaultRouteUnsupported(default_route));
         }
         Ok(())
     }
@@ -152,35 +116,12 @@ impl GatewayPlan {
         self.addresses
             .iter()
             .chain(&self.included_routes)
-            .chain(&self.excluded_routes)
             .find(|network| matches!(network, IpNet::V6(_)))
             .copied()
             .map_or(Ok(()), |network| {
                 Err(ConfigError::Ipv6RouteUnsupported(network))
             })
     }
-
-    fn validate_dns(&self) -> Result<(), ConfigError> {
-        if self.dns_servers.is_empty() {
-            return Err(ConfigError::MissingDnsServer(self.dns_policy));
-        }
-        if let Some(address) = self
-            .dns_servers
-            .iter()
-            .find(|address| !matches!(address, IpAddr::V4(_)))
-            .copied()
-        {
-            return Err(ConfigError::Ipv6DnsUnsupported(address));
-        }
-        Ok(())
-    }
-}
-
-fn ipv4_host_route(address: &IpAddr) -> Option<IpNet> {
-    let IpAddr::V4(address) = address else {
-        return None;
-    };
-    IpNet::new((*address).into(), 32).ok()
 }
 
 /// Validated limits and network plan for one gateway runtime.
@@ -285,55 +226,27 @@ mod tests {
 
     fn plan() -> GatewayPlan {
         GatewayPlan {
-            routing_mode: RoutingMode::Default,
-            addresses: vec![route(Ipv4Addr::new(100, 64, 0, 1), 30)],
-            included_routes: vec![route(Ipv4Addr::UNSPECIFIED, 0)],
-            excluded_routes: vec![route(Ipv4Addr::LOCALHOST, 8)],
+            addresses: vec![route(Ipv4Addr::new(100, 64, 0, 1), 32)],
+            included_routes: vec![route(Ipv4Addr::new(198, 18, 0, 0), 15)],
             mtu: Mtu::try_from(1_280).expect("test MTU must be valid"),
-            dns_policy: DnsPolicy::Block,
-            dns_servers: vec!["1.1.1.1".parse().expect("test DNS")],
         }
     }
 
     #[test]
-    fn default_route_plan_requires_an_included_route() {
+    fn empty_capture_set_is_valid_for_external_traffic_selection() {
         let mut candidate = plan();
         candidate.included_routes.clear();
-        assert_eq!(
-            candidate.validate(),
-            Err(ConfigError::MissingIncludedRoute(RoutingMode::Default))
-        );
+        assert_eq!(candidate.validate(), Ok(()));
     }
 
     #[test]
-    fn one_route_cannot_be_both_captured_and_excluded() {
+    fn host_wide_default_capture_is_rejected() {
         let mut candidate = plan();
-        candidate.excluded_routes = candidate.included_routes.clone();
+        let default_route = route(Ipv4Addr::UNSPECIFIED, 0);
+        candidate.included_routes = vec![default_route];
         assert_eq!(
             candidate.validate(),
-            Err(ConfigError::ConflictingRoute(route(
-                Ipv4Addr::UNSPECIFIED,
-                0
-            )))
-        );
-    }
-
-    #[test]
-    fn dns_policy_routes_cannot_conflict_with_explicit_routes() {
-        let dns_host = route(Ipv4Addr::new(1, 1, 1, 1), 32);
-        let mut blocked = plan();
-        blocked.excluded_routes.push(dns_host);
-        assert_eq!(
-            blocked.validate(),
-            Err(ConfigError::ConflictingRoute(dns_host))
-        );
-
-        let mut bypassed = plan();
-        bypassed.dns_policy = DnsPolicy::Bypass;
-        bypassed.included_routes = vec![dns_host];
-        assert_eq!(
-            bypassed.validate(),
-            Err(ConfigError::ConflictingRoute(dns_host))
+            Err(ConfigError::DefaultRouteUnsupported(default_route))
         );
     }
 
@@ -368,56 +281,56 @@ mod tests {
     }
 
     #[test]
-    fn primary_ipv4_address_is_plan_vocabulary() {
-        let candidate = plan();
+    fn interface_address_cannot_create_an_implicit_connected_prefix() {
+        let mut candidate = plan();
+        let prefixed = route(Ipv4Addr::new(100, 64, 0, 1), 30);
+        candidate.addresses = vec![prefixed];
         assert_eq!(
-            candidate.first_ipv4_address(),
-            Ok((Ipv4Addr::new(100, 64, 0, 1), 30))
+            candidate.validate(),
+            Err(ConfigError::InterfacePrefixUnsupported(prefixed))
         );
     }
 
     #[test]
-    fn every_dns_policy_requires_explicit_ipv4_resolvers() {
-        let mut candidate = plan();
-        candidate.dns_servers.clear();
+    fn primary_ipv4_address_is_plan_vocabulary() {
+        let candidate = plan();
         assert_eq!(
-            candidate.validate(),
-            Err(ConfigError::MissingDnsServer(DnsPolicy::Block))
+            candidate.first_ipv4_address(),
+            Ok((Ipv4Addr::new(100, 64, 0, 1), 32))
         );
-
-        let mut candidate = plan();
-        candidate.dns_policy = DnsPolicy::Bypass;
-        candidate.dns_servers.clear();
-        assert_eq!(
-            candidate.validate(),
-            Err(ConfigError::MissingDnsServer(DnsPolicy::Bypass))
-        );
-        candidate
-            .dns_servers
-            .push("2001:4860:4860::8888".parse().expect("test DNS"));
-        assert!(matches!(
-            candidate.validate(),
-            Err(ConfigError::Ipv6DnsUnsupported(_))
-        ));
     }
 
     #[test]
     fn runtime_limits_default_when_omitted_from_serialized_config() {
         let json = r#"{
             "plan": {
-                "routing_mode": "default",
-                "addresses": ["100.64.0.1/30"],
-                "included_routes": ["0.0.0.0/0"],
-                "excluded_routes": ["127.0.0.0/8"],
-                "mtu": 1280,
-                "dns_policy": "block",
-                "dns_servers": ["1.1.1.1"]
+                "addresses": ["100.64.0.1/32"],
+                "included_routes": ["198.18.0.0/15"],
+                "mtu": 1280
             }
         }"#;
         let config: GatewayConfig = serde_json::from_str(json).expect("valid gateway JSON");
         assert_eq!(config.max_flows, default_max_flows());
         assert_eq!(config.flow_idle_timeout, default_flow_idle_timeout());
         assert_eq!(config.tcp_buffer_bytes, default_tcp_buffer_bytes());
+    }
+
+    #[test]
+    fn removed_route_authority_fields_are_not_silently_accepted() {
+        let legacy = r#"{
+            "routing_mode": "default",
+            "addresses": ["100.64.0.1/32"],
+            "included_routes": ["198.18.0.0/15"],
+            "excluded_routes": [],
+            "mtu": 1280,
+            "dns_policy": "bypass",
+            "dns_servers": ["1.1.1.1"]
+        }"#;
+
+        let error = serde_json::from_str::<GatewayPlan>(legacy)
+            .expect_err("removed full-capture fields must fail closed")
+            .to_string();
+        assert!(error.contains("unknown field"));
     }
 
     #[test]

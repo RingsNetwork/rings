@@ -16,11 +16,9 @@ use tokio::io::AsyncWriteExt;
 
 use super::*;
 use crate::BoxGatewayDuplex;
-use crate::DnsPolicy;
 use crate::GatewayHealth;
 use crate::GatewayPlan;
 use crate::Mtu;
-use crate::RoutingMode;
 
 struct ChannelPacketIo {
     ingress: mpsc::Receiver<Vec<u8>>,
@@ -206,13 +204,9 @@ fn route(address: Ipv4Addr, prefix: u8) -> IpNet {
 fn config() -> GatewayConfig {
     GatewayConfig {
         plan: GatewayPlan {
-            routing_mode: RoutingMode::Default,
-            addresses: vec![route(Ipv4Addr::new(100, 64, 0, 1), 30)],
-            included_routes: vec![route(Ipv4Addr::UNSPECIFIED, 0)],
-            excluded_routes: vec![route(Ipv4Addr::LOCALHOST, 8)],
+            addresses: vec![route(Ipv4Addr::new(100, 64, 0, 1), 32)],
+            included_routes: vec![route(Ipv4Addr::new(198, 18, 0, 0), 15)],
             mtu: Mtu::try_from(1_280).expect("valid test MTU"),
-            dns_policy: DnsPolicy::Block,
-            dns_servers: vec!["1.1.1.1".parse().expect("test DNS")],
         },
         max_flows: 8,
         flow_idle_timeout: Duration::from_secs(30),
@@ -288,35 +282,6 @@ fn with_source_port(mut packet: Vec<u8>, source_port: u16) -> Vec<u8> {
         &Ipv4Addr::new(93, 184, 216, 34).into(),
     );
     packet
-}
-
-#[test]
-fn block_dns_policy_never_opens_a_tcp_53_flow() {
-    let (opened_tx, _opened_rx) = mpsc::channel(1);
-    let connector = Arc::new(RecordingConnector { opened: opened_tx });
-    let mut runtime = GatewayRuntime::new(config(), connector, 7).expect("valid runtime");
-    runtime
-        .activate("memory-tun".to_string())
-        .expect("activate runtime");
-
-    let outcome = runtime
-        .ingest_packet(
-            client_packet_to_port(TcpControl::Syn, TcpSeqNumber(7), None, 53),
-            Duration::ZERO,
-        )
-        .expect("blocked DNS packet is handled");
-
-    assert!(matches!(outcome, PacketOutcome::FlowRejected {
-        reason: FlowRejectReason::DnsBlocked,
-        ..
-    }));
-    assert_eq!(runtime.status().active_flows, 0);
-    assert!(runtime.tcp.take_egress().iter().any(|packet| {
-        matches!(
-            crate::classify_ipv4_packet(packet),
-            PacketDisposition::Tcp(crate::TcpSegment { rst: true, .. })
-        )
-    }));
 }
 
 #[test]
