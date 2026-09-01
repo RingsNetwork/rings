@@ -2,8 +2,8 @@
 
 `rings-gateway` is the native packet-to-stream gateway used by Rings nodes. It forwards
 explicitly selected IPv4/TCP flows through Rings Onion circuits. The packet mechanism does not
-imply one routing policy: this milestone enables selective routing, not full-tunnel or kill-switch
-policy.
+imply one routing policy: the Rings gateway contract is selective routing and has no full-tunnel
+or kill-switch mode.
 
 The crate is intentionally unavailable to WebAssembly targets. Browser builds remain Rings
 clients and do not contain the native gateway or server runtime.
@@ -18,23 +18,25 @@ installed destination capture routes = C
 
 The platform binding deduplicates and normalizes `C`, but does not add routes derived from a
 default route, IPv6, DNS, TURN, ICE, SDP, bootstrap endpoints, or observed peers. A host-wide
-`0.0.0.0/0` capture is rejected. Interface addresses must be IPv4 `/32` host addresses so setup
-cannot create a connected capture prefix. An empty set is valid when external routing owns packet
-selection instead.
+`0.0.0.0/0` capture, or any set of prefixes whose union covers the entire IPv4 address space, is
+rejected. Interface addresses must be IPv4 `/32` host addresses so setup cannot create a connected
+capture prefix. An empty set is valid when external routing owns packet selection instead.
 
 This follows the same mechanism-versus-policy separation as OpenVPN. OpenVPN's [`--route`
 option](https://openvpn.net/community-docs/community-articles/openvpn-2-7-manual.html) selects
 individual prefixes, while `--redirect-gateway def1` explicitly requests full-tunnel routing and
-implements it with two `/1` routes. OpenVPN-style routing and `/1` routes are not inherently a
-problem; installing them without an explicit full-tunnel policy would be. Rings does not expose
-that policy in this milestone, so an explicit `/0` is reported as unsupported rather than silently
-expanded.
+implements it with two `/1` routes. That is a valid OpenVPN policy, but Rings intentionally has no
+`redirect-gateway` equivalent. Capturing every host destination would also capture the ordinary
+underlay traffic carrying existing Rings neighbor links; avoiding recursion would require dynamic
+bypass state or guaranteed relay. Rings requires neither. A `/0` or equivalent covering prefix set
+is therefore rejected as outside the selective gateway contract.
 
 The gateway's fail-closed guarantee applies only after traffic enters it. A selected flow either
 opens its immutable target through a valid Onion route and compatible TCP exit, or fails without
 direct fallback. Traffic outside `C` continues to use ordinary host routing. Rings bootstrap, SDP
-messages, and ICE also keep their ordinary routing behavior; gateway activation does not require
-TURN or force relay-only ICE.
+messages, and ICE also keep their ordinary routing behavior. STUN remains an ordinary discovery
+facility. TURN may be configured, but gateway and server capability must never depend on it or
+force relay-only ICE.
 
 Traffic can enter the shared Onion egress through:
 
@@ -108,7 +110,7 @@ rejected at configuration time. Unlisted IPv4, all IPv6, and ordinary DNS traffi
 gateway policy.
 
 ```yaml
-# Ordinary STUN, TURN, or mixed ICE configuration remains independent from the gateway.
+# STUN remains ordinary discovery. TURN is optional and never a gateway prerequisite.
 ice_servers: stun://stun.l.google.com:19302
 
 gateway:

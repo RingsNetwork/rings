@@ -109,6 +109,9 @@ impl GatewayPlan {
         {
             return Err(ConfigError::DefaultRouteUnsupported(default_route));
         }
+        if captures_entire_ipv4_space(&self.included_routes) {
+            return Err(ConfigError::FullTunnelUnsupported);
+        }
         Ok(())
     }
 
@@ -122,6 +125,34 @@ impl GatewayPlan {
                 Err(ConfigError::Ipv6RouteUnsupported(network))
             })
     }
+}
+
+fn captures_entire_ipv4_space(routes: &[IpNet]) -> bool {
+    let mut ranges = routes
+        .iter()
+        .filter_map(|network| match network {
+            IpNet::V4(network) => {
+                Some((u32::from(network.network()), u32::from(network.broadcast())))
+            }
+            IpNet::V6(_) => None,
+        })
+        .collect::<Vec<_>>();
+    ranges.sort_unstable();
+
+    let Some((first_start, mut covered_end)) = ranges.first().copied() else {
+        return false;
+    };
+    if first_start != u32::MIN {
+        return false;
+    }
+
+    for (start, end) in ranges.into_iter().skip(1) {
+        if start > covered_end.saturating_add(1) {
+            return false;
+        }
+        covered_end = covered_end.max(end);
+    }
+    covered_end == u32::MAX
 }
 
 /// Validated limits and network plan for one gateway runtime.
@@ -240,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_full_tunnel_is_unsupported_in_this_milestone() {
+    fn default_route_capture_is_outside_the_gateway_contract() {
         let mut candidate = plan();
         let default_route = route(Ipv4Addr::UNSPECIFIED, 0);
         candidate.included_routes = vec![default_route];
@@ -248,6 +279,42 @@ mod tests {
             candidate.validate(),
             Err(ConfigError::DefaultRouteUnsupported(default_route))
         );
+    }
+
+    #[test]
+    fn equivalent_prefix_sets_cannot_create_a_full_tunnel() {
+        let covering_sets = [
+            vec![
+                route(Ipv4Addr::UNSPECIFIED, 1),
+                route(Ipv4Addr::new(128, 0, 0, 0), 1),
+            ],
+            vec![
+                route(Ipv4Addr::UNSPECIFIED, 2),
+                route(Ipv4Addr::new(64, 0, 0, 0), 2),
+                route(Ipv4Addr::new(128, 0, 0, 0), 2),
+                route(Ipv4Addr::new(192, 0, 0, 0), 2),
+            ],
+        ];
+
+        for included_routes in covering_sets {
+            let mut candidate = plan();
+            candidate.included_routes = included_routes;
+            assert_eq!(
+                candidate.validate(),
+                Err(ConfigError::FullTunnelUnsupported)
+            );
+        }
+    }
+
+    #[test]
+    fn prefix_set_with_an_ipv4_gap_remains_selective() {
+        let mut candidate = plan();
+        candidate.included_routes = vec![
+            route(Ipv4Addr::UNSPECIFIED, 1),
+            route(Ipv4Addr::new(128, 0, 0, 0), 2),
+        ];
+
+        assert_eq!(candidate.validate(), Ok(()));
     }
 
     #[test]
