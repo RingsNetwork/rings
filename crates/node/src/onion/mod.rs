@@ -42,6 +42,8 @@ pub mod circuit;
 pub(crate) mod directory;
 pub(crate) mod exit_accounting;
 mod failure;
+#[cfg(rings_native)]
+mod gateway;
 #[cfg(any(rings_native, rings_browser))]
 pub mod https;
 pub mod proxy;
@@ -53,6 +55,8 @@ pub mod tcp;
 
 pub use failure::OnionExitFailure;
 pub use failure::OnionRouteError;
+#[cfg(rings_native)]
+pub use gateway::NativeOnionGatewayConnector;
 pub use route::select_onion_route;
 pub(crate) use route::select_onion_route_from_candidates_with_first_hop;
 pub use route::OnionRoute;

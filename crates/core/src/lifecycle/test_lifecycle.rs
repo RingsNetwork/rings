@@ -38,3 +38,31 @@ fn test_never_token_is_independent_from_other_sources() {
 
     assert!(!token.should_stop());
 }
+
+#[cfg(not(target_family = "wasm"))]
+#[tokio::test]
+async fn test_stopped_wakes_existing_and_cloned_waiters() {
+    let source = StopSource::new();
+    let first = source.token();
+    let second = first.clone();
+
+    let waiters = tokio::spawn(async move {
+        tokio::join!(first.stopped(), second.stopped());
+    });
+    tokio::task::yield_now().await;
+    source.request_stop();
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), waiters)
+        .await
+        .expect("stop waiters wake before deadline")
+        .expect("stop waiter task completes");
+}
+
+#[test]
+fn test_stopped_observes_a_request_before_registration() {
+    let source = StopSource::new();
+    let token = source.token();
+    source.request_stop();
+
+    futures::executor::block_on(token.stopped());
+}

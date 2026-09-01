@@ -240,8 +240,9 @@ impl SwarmTransport {
     }
 
     /// Return admitted transports, including a terminal connection that still
-    /// needs lifecycle cleanup. This is deliberately internal: callers outside
-    /// the swarm only observe routable connections through [`Self::get_connections`].
+    /// needs lifecycle cleanup. Pending and admitting transports are excluded.
+    /// This is deliberately internal: callers outside the swarm only observe
+    /// routable connections through [`Self::get_connections`].
     pub(crate) fn admitted_connections(&self) -> Vec<(PendingConnectionAttempt, SwarmConnection)> {
         self.admitted_connection_snapshots()
             .unwrap_or_default()

@@ -1,0 +1,70 @@
+# Changelog
+## [0.8.2] - 2026-08-05
+### Breaking changes
+ - N/A
+
+### New features
+ - Add EthernetProtocol. (09b83bb)
+
+### Bug fixes
+ - N/A
+
+## [0.8.1] - 2025-09-18
+### Breaking changes
+ - N/A
+
+### New features
+ - N/A
+
+### Bug fixes
+ - Revert back to paste dependency. (4447216)
+
+## [0.8.0] - 2025-08-27
+### Breaking changes
+ - Changed `DecodeError` from enum to struct. (f55d7b7, 63da36a)
+ - Merged `netlink-packet-utils` into `netlink-packet-core`. (f55d7b7, 0951455,
+   ba127bf, a232478, 8027f63, 41fe03d, 260e596, cc6bf08, 63da36a, 410c61d)
+ - Remove dependency of byteorder crate. (16d63fb)
+
+### New features
+ - Support zero sized done message. (100413a)
+
+### Bug fixes
+ - N/A
+
+## [0.7.0] - 2023-07-09
+### Breaking changes
+ - `NetlinkPayload::Ack` removed and replaced by `NetlinkPayload::Error` where
+    `ErrorMessage.code` is set to None. (52732b3)
+
+### New features
+ - Derive `Default` for `ErrorMessage`. (3514766)
+
+### Bug fixes
+ - N/A
+
+## [0.6.0] - 2023-06-26
+### Breaking changes
+ - `NetlinkPayload::Done` changed to `NetlinkPayload::Done(DoneMessage)`.
+   (0c75fb5)
+
+### New features
+ - Support full done message. (0c75fb5)
+
+### Bug fixes
+ - N/A
+
+## [0.5.0] - 2023-01-28
+### Breaking changes
+ - All public struct and enum are marked as `non_exhaustive`. Please check
+   https://doc.rust-lang.org/reference/attributes/type_system.html for more
+   detail. (53a4c4e)
+
+ - Removed the reexport `netlink-packet-core::utils`, please use
+   `netlink_packet_utils` directly. (a76010a)
+
+### New features
+ - N/A
+
+### Bug fixes
+ - N/A
