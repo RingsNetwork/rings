@@ -155,7 +155,8 @@ No bound is assumed on $|\mathsf{Adv}|$.
 \draw[->] (t) -- (sor);
 \end{tikzpicture}
 \caption{Epoch cycle: receipts fold into trust, trust seats the
-committee, the committee finalizes the ledger, finality seeds the beacon.}
+committee, the committee finalizes the ledger and threshold-signs the
+beacon.}
 \label{fig:cycle}
 \end{figure}
 
@@ -419,12 +420,38 @@ Validation must be cryptographic and economic, and a global random seed is
 a bootstrap circularity (a randomness beacon presupposes the committee
 being selected).  Both are removed by sortition~\cite{Algorand,VRF}.
 
+\begin{definition}[Beacon]\label{def:beacon}
+\[
+\begin{array}{rcl}
+\mathsf{TSig}_S&:&\theta\text{-of-}|S|,\ \text{\emph{unique}~\cite{BLS}},\\
+|\{\sigma:\mathsf{TVrfy}(k,\sigma)=\top\}|&=&1\quad\forall k,\\
+B_k&=&\mathsf{h}\bigl(\mathsf{TSig}_S(k)\bigr).
+\end{array}
+\]
+\end{definition}
+
+\begin{proposition}[Beacon unbiasability]\label{prop:beacon}
+\[
+B_k=\mathsf{fn}(\mathsf{gpk},k)
+\;\land\;
+\mathsf{predict}(B_k)\Rightarrow\theta\ \text{shares},
+\]
+i.e.\ no participant choice influences $B_k$.  A header-hash beacon
+$\mathsf{h}(\mathsf{fin}(\Sigma_k))$ is excluded: proposers grind $B_k$
+through content selection.
+\begin{proof}
+Uniqueness leaves a single valid $\sigma$ per $k$: the signing protocol
+has no free variable to grind.  Unpredictability below $\theta$ shares is
+the threshold-signature security game.
+\end{proof}
+\end{proposition}
+
 \begin{algorithm}[H]
 \caption{Trust-weighted sortition (node $v$, epoch $k$, role $r$)}
 \label{alg:sortition}
 \begin{algorithmic}[1]
-\State $B_k\gets\mathsf{hash}(\mathsf{fin}(\Sigma_k))$
-  \Comment{beacon: fixed by finality}
+\State $B_k\gets\mathsf{h}(\mathsf{TSig}_S(k))$
+  \Comment{Definition~\ref{def:beacon}}
 \State $(y,\pi)\gets\mathsf{VRF}_{\mathsf{sk}_v}(B_k\Vert r)$
 \If{$y/2^{|y|}<\tau\cdot t_k(v)$}
   \State $v$ holds $r$ in epoch $k$; publishes $\pi$
@@ -436,14 +463,15 @@ being selected).  Both are removed by sortition~\cite{Algorand,VRF}.
 \[
 \begin{array}{rcl}
 \mathsf{sk}_v\ \text{fixed}&\prec&B_k\ \text{exists},\\
-B_k\ \text{fixed}&\prec&\mathsf{Adv}\ \text{acts},
+B_k\ \text{unbiasable}&&\text{(Proposition~\ref{prop:beacon})},
 \end{array}
 \;\Rightarrow\;
 \mathsf{grind}=\bot .
 \]
 \begin{proof}
 Both VRF inputs are committed before either party can condition on the
-output; unpredictability from Assumption~\ref{asm:adversary}.
+output; unpredictability from Assumption~\ref{asm:adversary} and
+Proposition~\ref{prop:beacon}.
 \end{proof}
 \end{proposition}
 
@@ -601,6 +629,37 @@ F'\in\mathsf{CheapArith}(\mathsf{committed}).
 The ledger is an admission ledger, not a contract platform.
 \end{obligation}
 
+\begin{definition}[Fixed-point carrier]\label{def:fixedpoint}
+Circuits have no reals.  With precision $\phi$:
+\[
+\begin{array}{rcl}
+\hat t&=&\lfloor t\cdot2^{\phi}\rfloor\in\mathbb{Z}_{\geq0},\\
+\hat x\cdot\hat y&\mapsto&\lfloor\hat x\hat y/2^{\phi}\rfloor,\\
+x/y&\mapsto&(q,r):\ x=qy+r,\\
+&&0\leq r<y\quad\text{(witnessed, ranged)}.
+\end{array}
+\]
+\end{definition}
+
+\begin{proposition}[Rounding soundness]\label{prop:rounding}
+Floor rounding is one-sided ($\hat t_k\leq t_k 2^{\phi}$: weight is never
+overcounted, so safety bounds survive verbatim), and the accumulated
+error is damped by the contraction of
+Proposition~\ref{prop:convergence}:
+\[
+e_{k+1}\leq\bar\alpha\,e_k+n\,2^{-\phi}
+\;\Rightarrow\;
+\sup_k e_k\leq\frac{n\,2^{-\phi}}{1-\bar\alpha},
+\]
+bounded for all time; precision is a parameter, not a drift.
+\begin{proof}
+Each of the $n$ components loses at most $2^{-\phi}$ per epoch to
+truncation; the prior error enters only through
+$\bar\alpha\,C^{\mathsf T}$, which is $\ell_1$-nonexpansive scaled by
+$\bar\alpha$; geometric sum.
+\end{proof}
+\end{proposition}
+
 \begin{obligation}[Upgrade versioning]\label{obl:upgrade}
 \[
 \begin{array}{rcl}
@@ -644,7 +703,8 @@ finite instances~\cite{Stateright}:
 \[
 \begin{array}{rcl}
 \mathsf{Spec}&\triangleq&
-  \mathsf{Init}\land\Box[\mathsf{Next}]_{\Sigma},\\[2pt]
+  \mathsf{Init}\land\Box[\mathsf{Next}]_{\Sigma}
+  \land\mathrm{WF}_{\Sigma}(\mathsf{Next}),\\[2pt]
 \mathsf{Init}&\triangleq&
   \Sigma=\langle\mathsf{rt}(s),\mathsf{rt}(S),\varnothing,
   \mathsf{rt}(\mathbf{0}),\mathsf{ver}_0\rangle,\\[2pt]
@@ -685,6 +745,26 @@ by Proposition~\ref{prop:linear} (quorum intersection under
 Assumption~\ref{asm:honest-weight}).
 \end{invariant}
 
+\begin{proposition}[Progress]\label{prop:progress}
+Under partial synchrony (after global stabilization time) with a live
+honest quorum --- $\theta|S|$ members in the authority phase
+(Definition~\ref{def:threshold}), honest committee majority via
+Proposition~\ref{prop:committee} in the staked phase ---
+\[
+\Box\Diamond\,\mathsf{Next}\text{-enabled}
+\;\land\;
+\mathrm{WF}_{\Sigma}(\mathsf{Next})
+\;\Rightarrow\;
+\forall k:\ \Diamond\,\mathsf{fin}(\Sigma_k).
+\]
+\begin{proof}
+$W$ may be empty, so $\mathsf{Next}$ is enabled whenever a quorum is
+live; BFT view-change liveness~\cite{PBFT} delivers
+$\mathsf{QC}_{2/3}$ after stabilization; weak fairness converts
+enabledness into occurrence.
+\end{proof}
+\end{proposition}
+
 \begin{obligation}[Checkable instances]\label{obl:model}
 Every implementation change to $F$ ships with a finite-instance model
 ($|V|\leq n_0$, bounded epochs) checking
@@ -705,6 +785,26 @@ Invariants~\ref{inv:mass},
 \end{array}
 \]
 \end{definition}
+
+\begin{proposition}[Countersigning game]\label{prop:countersign}
+For a service-consuming node $b$:
+\[
+\begin{array}{rcl}
+\mathsf{cost}(\mathsf{sign})&=&0\quad
+  \text{(outflow spends $b$'s row,}\\
+&&\phantom{0\quad\text{(}}\text{never $t(b)$)},\\
+u_b(\mathsf{withhold})&=&
+  \text{choked: service needs receipts},\\
+u_b(\mathsf{sign})&=&\text{continued service},
+\end{array}
+\]
+so truthful countersigning is weakly dominant under link-layer
+tit-for-tat (the eDonkey/BitTorrent heritage~\cite{eMule,Cohen03}).
+Selling receipts is not free-riding but attack-edge formation: the
+seller's flow enters $g$ of Proposition~\ref{prop:sybil-bound}, is
+volume-capped by $w_{\max}$, and is priced by
+Proposition~\ref{prop:farm-price}.
+\end{proposition}
 
 \begin{proposition}[Payable rank defeats cost anchoring]\label{prop:soulbound}
 Let rank be transferable at price $p$.  Then
@@ -834,6 +934,38 @@ out-of-band key sale \\
   \text{trust root until Obl.~\ref{obl:crossover}}.
 \end{array}
 \]
+
+\begin{table}[H]
+\centering
+\caption{Protocol parameters}\label{tab:params}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}clp{3.6cm}@{}}
+\toprule
+\textbf{Sym.} & \textbf{Role} & \textbf{Constraint} \\
+\midrule
+$\alpha_k$ & damping / seed weight &
+  $\bar\alpha=\sup_k\alpha_k<1$; Def.~\ref{def:dilution} \\
+$w_{\max}$ & receipt issuance cap &
+  bounds per-identity sale volume \\
+$\tau$ & expected committee size &
+  error $e^{-\tau\mathrm{D}(1/3\Vert T(A))}$,
+  Prop.~\ref{prop:committee} \\
+$\theta$ & authority threshold &
+  $\geq2/3$; Defs.~\ref{def:threshold},~\ref{def:beacon} \\
+$\Delta$ & inclusion timeout &
+  censorship latency, Obl.~\ref{obl:inclusion} \\
+$\mu$ & service metering &
+  published per kind, Def.~\ref{def:graph} \\
+$\phi$ & fixed-point precision &
+  error $\leq n2^{-\phi}/(1-\bar\alpha)$,
+  Prop.~\ref{prop:rounding} \\
+$D$ & dilution curve &
+  non-increasing, published, Def.~\ref{def:dilution} \\
+$\beta$ & crossover margin &
+  $>1$, Obl.~\ref{obl:crossover} \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \section{Related Work}\label{sec:related}
 
