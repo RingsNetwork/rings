@@ -264,7 +264,7 @@ version = "2.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "287272293e9d8c41773cec55e365490fe034813a2f172f502d6ddcf75b2f582b"
 dependencies = [
- "event-listener",
+ "event-listener 2.5.3",
 ]
 
 [[package]]
@@ -965,6 +965,16 @@ name = "event-listener"
 version = "2.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0206175f82b8d6bf6652ff7d71a1e27fd2e4efde587fd368662814d6ec1d9ce0"
+
+[[package]]
+name = "event-listener"
+version = "5.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a23add41df1562121a9393cb065eab5146a1242410f23a644851e90cfd669d2"
+dependencies = [
+ "parking",
+ "pin-project-lite",
+]
 
 [[package]]
 name = "fastrand"
@@ -2213,6 +2223,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "parking"
+version = "2.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f38d5652c16fde515bb1ecef450ab0f6a219d619a7274976324d5e377f7dceba"
+
+[[package]]
 name = "parking_lot_core"
 version = "0.9.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2642,7 +2658,7 @@ dependencies = [
 
 [[package]]
 name = "rings-codec"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "postcard",
  "serde",
@@ -2650,7 +2666,7 @@ dependencies = [
 
 [[package]]
 name = "rings-core"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "ark-bls12-381",
  "ark-ec",
@@ -2673,6 +2689,7 @@ dependencies = [
  "ed25519-dalek",
  "elliptic-curve",
  "ethereum-types",
+ "event-listener 5.4.2",
  "flate2",
  "futures",
  "futures-timer",
@@ -2712,7 +2729,7 @@ dependencies = [
 
 [[package]]
 name = "rings-derive"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2744,7 +2761,7 @@ dependencies = [
 
 [[package]]
 name = "rings-measure"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "serde",
  "thiserror 1.0.69",
@@ -2752,7 +2769,7 @@ dependencies = [
 
 [[package]]
 name = "rings-node"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "anyhow",
  "arrayref",
@@ -2798,7 +2815,7 @@ dependencies = [
 
 [[package]]
 name = "rings-rpc"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "async-trait",
  "base64 0.13.1",
@@ -2814,7 +2831,7 @@ dependencies = [
 
 [[package]]
 name = "rings-transport"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2836,7 +2853,7 @@ dependencies = [
 
 [[package]]
 name = "rings-webview"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "async-trait",
  "chrono",

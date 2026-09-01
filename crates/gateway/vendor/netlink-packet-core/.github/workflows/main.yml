@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches:
+      - main
+
+jobs:
+  ci:
+    name: CI (stable)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install Rust Stable
+        run: |
+          rustup override set stable
+          rustup update stable
+
+      - name: Test with default feature
+        run: cargo test

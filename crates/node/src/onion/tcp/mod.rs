@@ -206,7 +206,8 @@ pub struct NativeOnionOpenStream {
 
 impl NativeOnionOpenStream {
     /// Relay `stream` through this already-open onion TCP stream.
-    pub fn relay(self, stream: TcpStream) {
+    pub fn relay<S>(self, stream: S)
+    where S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static {
         spawn_client_stream(
             self.runtime,
             self.scope,

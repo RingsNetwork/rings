@@ -32,6 +32,7 @@ docs
 # Local scripts are allowed in the worktree but should not be added accidentally.
 scripts/*
 !scripts/cargo-publish-crates.sh
+!scripts/find-cargo-test-binary.py
 
 # OS related
 ### MacOS ###
