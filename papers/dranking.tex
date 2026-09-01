@@ -102,12 +102,19 @@ R&=&\mathbb{Z}/2^{160}\mathbb{Z}\quad\text{\cite{Chord,ZaveChordCorrect}},\\
 \]
 \end{definition}
 
-\begin{definition}[Epoch]
+\begin{definition}[Epoch]\label{def:epoch}
 \[
-k\in\mathbb{N},\qquad
-\mathsf{epoch}(k)=[\,\mathsf{fin}(\Sigma_k),\ \mathsf{fin}(\Sigma_{k+1})\,),
+\begin{array}{rcl}
+k&\in&\mathbb{N},\qquad
+\mathsf{epoch}(k)=[\,\mathsf{fin}(\Sigma_k),\ \mathsf{fin}(\Sigma_{k+1})\,),\\
+\mathsf{close}(k)&\equiv&
+  \mathsf{elapsed}\geq T_{\mathrm{ep}}
+  \quad\text{(proposer duty)},
+\end{array}
 \]
-delimited by ledger finality (Definition~\ref{def:ledger}).
+delimited by ledger finality (Definition~\ref{def:ledger}); the timer
+$T_{\mathrm{ep}}$ is what enables $\mathsf{Next}$ in
+Section~\ref{sec:spec}.
 \end{definition}
 
 \begin{assumption}[Adversary]\label{asm:adversary}
@@ -175,9 +182,12 @@ The unit of evidence is a countersigned receipt.
 a&=&\text{server},\quad b=\text{signer/served},\\
 \mathsf{valid}(\rho)&\equiv&
   \mathsf{Vrfy}(k_b,\sigma_b,\mathsf{srv}\Vert a\Vert b\Vert k\Vert n)=\top\\
-&&\land\ (b,k,n)\ \text{fresh}.
+&&\land\ (b,k,n)\ \text{fresh within}\ P_k,
 \end{array}
 \]
+freshness scoped to the epoch-$k$ input block $P_k$
+(Definition~\ref{def:input-block}): the tuple carries $k$, so no
+cross-epoch nonce state exists.
 \end{definition}
 
 \begin{proposition}[Forgery surface]\label{prop:forgery}
@@ -242,11 +252,20 @@ C_k[b,\cdot]\,\mathbf{1}\leq1.
 \begin{law}[Revocation]\label{law:revocation}
 \[
 \begin{array}{rcl}
-\mathsf{slash}(v)&\Rightarrow&t(v):=0,\ v\notin\mathsf{carrier}(t),\\
+\mathsf{slash}(v)&\Rightarrow&
+  v\notin\mathsf{carrier}:\ \text{$v$ is excluded from}\\
+&&\text{the vector, the columns \emph{and} rows}\\
+&&\text{of $C$, and the seed vector $s$},\\
 t_{k+1}&=&f(W_k,t_k)\quad\text{(re-derived per epoch)},\\
-s&&\text{withdrawable per seed}.
+s\restriction_{V\setminus\mathsf{sl}}&&
+  \text{un-renormalized: a slashed seed's}\\
+&&\text{share burns; re-endorsement is a}\\
+&&\text{threshold op (Def.~\ref{def:threshold})}.
 \end{array}
 \]
+Without the column and seed restrictions the slash is cosmetic: receipts
+naming $v$ as server, or a fixed $s_v>0$, would re-grant mass to $v$ one
+epoch later.
 \end{law}
 
 \begin{definition}[Trust update]\label{def:update}
@@ -322,10 +341,11 @@ so
 \;\geq\;
 \ell\cdot\mathsf{cost}\Bigl(\tfrac{1-\alpha}{\alpha}\,w\Bigr)
 \;+\;
-\Pr[\mathsf{detect}]\cdot w ,
+\Pr[\mathsf{detect}]\cdot u(w),
 \]
-the second term by Law~\ref{law:revocation}: one accepted equivocation
-forfeits the stock.  This is the $\mathsf{farm}$ function of
+where $u(w)$ is the holder's valuation of the forfeited stock (same
+cost units as the first term); the second term by
+Law~\ref{law:revocation}: one accepted equivocation forfeits the stock.  This is the $\mathsf{farm}$ function of
 Proposition~\ref{prop:soulbound}, made explicit.
 \begin{proof}
 $T_k(\{v\})\leq\alpha g_v/(1-\alpha)$; rearrange, multiply by holding
@@ -387,12 +407,16 @@ time-varying schedule with $\alpha:=\bar\alpha$.
 \begin{definition}[Threshold authority]\label{def:threshold}
 \[
 \begin{array}{rcl}
-\mathsf{Ops}(S)&=&\{\mathsf{withdraw},\mathsf{rotate},
-  \mathsf{endorse}_0\},\\
+\mathsf{Ops}(S)&=&\{\mathsf{withdraw},\mathsf{rotate},\\
+&&\ \ \mathsf{endorse}_0,\mathsf{reshare}\},\\
 o\in\mathsf{Ops}(S)&\Rightarrow&\mathsf{QC}_{\theta}(S)(o),
   \quad\theta\geq\tfrac23,\\
-|\mathsf{compromised}|<\theta|S|&\Rightarrow&
-  \mathsf{Cap}(\mathsf{Adv})\cap\mathsf{Ops}(S)=\varnothing .
+|\mathsf{comp}|<\theta|S|&\Rightarrow&
+  \mathsf{Cap}(\mathsf{Adv})\cap\mathsf{Ops}=\varnothing,\\
+\mathsf{keys}&:&\text{genesis DKG; $\mathsf{rotate}$ and}\\
+&&\text{beacon-group change trigger}\\
+&&\text{proactive $\mathsf{reshare}$,}\\
+&&\text{preserving $\mathsf{gpk}$}.
 \end{array}
 \]
 \end{definition}
@@ -423,11 +447,24 @@ being selected).  Both are removed by sortition~\cite{Algorand,VRF}.
 \begin{definition}[Beacon]\label{def:beacon}
 \[
 \begin{array}{rcl}
-\mathsf{TSig}_S&:&\theta\text{-of-}|S|,\ \text{\emph{unique}~\cite{BLS}},\\
-|\{\sigma:\mathsf{TVrfy}(k,\sigma)=\top\}|&=&1\quad\forall k,\\
-B_k&=&\mathsf{h}\bigl(\mathsf{TSig}_S(k)\bigr).
+G_0&=&S\quad\text{(genesis DKG)},\\
+G_k&=&\mathsf{vset}(\Sigma_k),\\
+\mathsf{TSig}_{G}&:&\theta\text{-of-}|G|,\ \text{\emph{unique}~\cite{BLS}}:\\
+&&|\{\sigma:\mathsf{TVrfy}(\mathsf{gpk},k,\sigma)\}|=1\ \ \forall k,\\
+B_k&=&\mathsf{h}\bigl(\mathsf{TSig}_{G_{k-1}}(k)\bigr),\\
+\mathsf{gpk}&\in&\Sigma\quad
+  \text{(invariant under $\mathsf{reshare}$)}.
 \end{array}
 \]
+The group is inductive, which breaks the bootstrap circularity in both
+phases: the already-seated group $G_{k-1}$ signs the beacon that seats
+epoch $k$; proactive resharing hands the same $\mathsf{gpk}$ to each new
+$\mathsf{vset}$, so verification never changes.  Remark: all $B_k$ are
+determined at key generation; unpredictability holds only below
+$\theta$ shares (as in drand-style beacons) --- a $\theta$-quorum can
+precompute every future beacon, which
+Definition~\ref{def:threshold} already assumes it must not form
+adversarially.
 \end{definition}
 
 \begin{proposition}[Beacon unbiasability]\label{prop:beacon}
@@ -450,14 +487,30 @@ the threshold-signature security game.
 \caption{Trust-weighted sortition (node $v$, epoch $k$, role $r$)}
 \label{alg:sortition}
 \begin{algorithmic}[1]
-\State $B_k\gets\mathsf{h}(\mathsf{TSig}_S(k))$
+\State $B_k\gets\mathsf{h}(\mathsf{TSig}_{G_{k-1}}(k))$
   \Comment{Definition~\ref{def:beacon}}
 \State $(y,\pi)\gets\mathsf{VRF}_{\mathsf{sk}_v}(B_k\Vert r)$
-\If{$y/2^{|y|}<\tau\cdot t_k(v)$}
-  \State $v$ holds $r$ in epoch $k$; publishes $\pi$
-\EndIf
+  \Comment{$\mathsf{sk}_v$ = the DID key}
+\State $\mathsf{seats}_v\gets
+  \mathrm{InvCDF}_{\mathrm{Bin}(\hat t_k(v),\,\tau/\hat T_k)}
+  \bigl(y/2^{|y|}\bigr)$
+\State $v$ holds $\mathsf{seats}_v$ seats for $r$; publishes $\pi$
 \end{algorithmic}
 \end{algorithm}
+
+Weight is atomized: node $v$'s fixed-point weight $\hat t_k(v)$
+(Definition~\ref{def:fixedpoint}) is $\hat t_k(v)$ unit atoms,
+$\hat T_k=\sum_v\hat t_k(v)$; each atom is selected independently with
+probability $\tau/\hat T_k$, realized per node through the inverse
+binomial CDF on the VRF output~\cite{Algorand}.  Atomization removes
+both hidden hypotheses of naive indicator sortition: expected seats are
+exactly proportional to weight with no per-node cap
+($\mathbb{E}[\mathsf{seats}_v]=\tau\,\hat t_k(v)/\hat T_k$, whales
+simply hold several seats), and normalization by $\hat T_k$ makes the
+fraction well-defined even when total mass is below one
+(Invariant~\ref{inv:mass}).  The DID key doubles as the VRF key: it is
+committed by $v$'s first appearance in the ledger, hence fixed before
+any later beacon exists (Proposition~\ref{prop:grind}).
 
 \begin{proposition}[Grinding closure]\label{prop:grind}
 \[
@@ -476,13 +529,15 @@ Proposition~\ref{prop:beacon}.
 \end{proposition}
 
 \begin{proposition}[Committee safety]\label{prop:committee}
-Let seats be independent indicators with
-$\mathbb{E}[X]=\tau$, $\mathbb{E}[X_A]=\tau\,T(A)$,
-$T(A)<\tfrac13$.  By Chernoff--Hoeffding,
+Atoms are independent indicators, so with
+$\pi_A=\hat T(A)/\hat T<\tfrac13$
+(Assumption~\ref{asm:honest-weight}, which is fractional),
+$\mathbb{E}[X]=\tau$ and $\mathbb{E}[X_A]=\tau\,\pi_A$.  By
+Chernoff--Hoeffding over the atom indicators,
 \[
 \Pr\Bigl[X_A\geq\tfrac{\tau}{3}\Bigr]
 \;\leq\;
-\exp\Bigl(-\tau\,\mathrm{D}\bigl(\tfrac13\,\Vert\,T(A)\bigr)\Bigr),
+\exp\Bigl(-\tau\,\mathrm{D}\bigl(\tfrac13\,\Vert\,\pi_A\bigr)\Bigr),
 \]
 with $\mathrm{D}$ the binary relative entropy: committee dishonesty decays
 exponentially in committee size.  Sortition is the transport of
@@ -498,14 +553,33 @@ vacuous by construction.
 \begin{array}{rcl}
 \Sigma_k&=&\langle
   \mathsf{rt}(t_k),\mathsf{rt}(V_k),\mathsf{rt}(\mathsf{sl}_k),
-  \mathsf{rt}(\mathsf{bal}_k),\mathsf{ver}\rangle,\\
+  \mathsf{rt}(\mathsf{bal}_k),\mathsf{gpk},\mathsf{ver}\rangle,\\
 \mathsf{fin}(\Sigma_k)&\equiv&
-  \mathsf{QC}_{2/3}(S_k)\quad\text{\cite{PBFT,LSP82}},\\
-\mathsf{content}&=&\{\mathsf{rt}(W_k)\}\cup\mathsf{sl}\cup
-  \Delta V\cup\mathsf{issue},\\
-\mathsf{data}(W_k)&\in&\mathsf{Overlay}\ \text{storage (not on chain)}.
+  \mathsf{QC}_{2/3}\bigl(\mathsf{vset}(\Sigma_{k-1})\bigr)
+  \quad\text{\cite{PBFT,LSP82}},\\
+\mathsf{content}_k&=&\{\mathsf{rt}(X_k)\},\qquad
+\mathsf{data}(X_k)\in\mathsf{Overlay}.
 \end{array}
 \]
+\end{definition}
+
+\begin{definition}[Input block]\label{def:input-block}
+\[
+\begin{array}{rcl}
+X_k&=&\langle P_k,\,E_k,\,\mathsf{TX}_k,\,\mathsf{fees}_k\rangle,\\
+P_k&=&\text{receipt multiset},\\
+E_k&=&\text{equivocation proofs},\\
+\mathsf{TX}_k&=&\text{transfer/bond/unbond ops},\\
+W_k&=&\mathsf{Agg}(P_k):\ \text{deterministic fold ---}\\
+&&\text{dedup $(b,k,n)$ within $P_k$, rows}\\
+&&\text{clipped to $w_{\max}$ in hash order}.
+\end{array}
+\]
+$X_k$ is assembled by the slot proposer from submissions during
+$\mathsf{epoch}(k)$; $\mathsf{Agg}$ is a pure function of the multiset,
+so $W_k$ is canonical given $X_k$.  Proposer discretion over
+\emph{admission} to $X_k$ is exactly the censorship power bounded by
+Obligation~\ref{obl:inclusion}.
 \end{definition}
 
 \begin{obligation}[Minimal trust]\label{obl:minimal-trust}
@@ -535,12 +609,22 @@ submittable by anyone.
 \end{definition}
 
 \begin{obligation}[Force inclusion]\label{obl:inclusion}
+Submissions are acknowledged per slot proposer $p$:
 \[
-\mathsf{ack}_{S}(x)\ \land\ x\notin\Sigma_{k+\Delta}
-\;\Rightarrow\;
-\mathsf{ack}_{S}(x)\in\mathsf{sl}\ \text{(quorum slash)},
+\begin{array}{r}
+\mathsf{ack}_p(x)\ \land\
+\mathsf{proposes}(p,[k,k+\Delta])\ \land\
+x\notin X_{[k,k+\Delta]}\\
+\Rightarrow\;
+\mathsf{slash}(p),
+\end{array}
 \]
-bounding censorship, the residual validator power, by latency $\Delta$.
+with evidence $\langle\mathsf{ack}_p(x),\ \text{$p$'s signed
+block}\rangle$ --- both signed by $p$, hence self-certifying \emph{and}
+attributable: the slash lands on the proposer who acknowledged and then
+withheld, never on a bystander quorum member.  Censorship, the residual
+validator power, is thereby bounded by latency $\Delta$ times the
+number of colluding proposers a submitter must route around.
 \end{obligation}
 
 Equivocation defeats patience: months of farmed standing forfeit on one
@@ -554,36 +638,54 @@ signature; the chain must be succinct~\cite{Mina}.
 
 \begin{definition}[Epoch transition]\label{def:step}
 \[
-F(\Sigma_k,\mathsf{rt}(W_k))=\Sigma_{k+1},
+F(\Sigma_k,X_k)=\Sigma_{k+1},\qquad
+\mathsf{rt}(X_k)\ \text{public input},\ X_k\ \text{witness},
 \]
+typed against Definition~\ref{def:input-block}: the body consumes the
+opened block (receipts, proofs, transactions, fees), never bare roots.
 \begin{algorithm}[H]
 \caption{$F$ --- pure, deterministic, per epoch}
 \label{alg:step}
 \begin{algorithmic}[1]
 \State $\mathsf{sl}_{k+1}\gets\mathsf{sl}_k\cup
-  \{\mathsf{verify}(e):e\ \text{submitted}\}$
-\State $t'\gets t_k\restriction_{V\setminus\mathsf{sl}_{k+1}}$
+  \{\mathsf{verify}(e):e\in E_k\}$
+\State $U\gets V\setminus\mathsf{sl}_{k+1}$;\quad
+  $t'\gets t_k\restriction_{U}$;\quad
+  $s'\gets s\restriction_{U}$;\quad
+  $\tilde C_k\gets C_k\restriction_{U\times U}$
   \Comment{Law~\ref{law:revocation}}
-\State $t_{k+1}\gets\alpha_k\,C_k^{\mathsf T}t'+(1-\alpha_k)\,s$
+\State $t_{k+1}\gets\alpha_k\,\tilde C_k^{\mathsf T}t'+(1-\alpha_k)\,s'$
   \Comment{Eq.~\eqref{eq:update}, Def.~\ref{def:dilution}}
-\State $\mathsf{bal}_{k+1}\gets\mathsf{bal}_k+
+\State $\mathsf{bal}'\gets\mathsf{apply}(\mathsf{TX}_k,\mathsf{bal}_k)$
+  \Comment{transfers, bond/unbond; $\mathsf{bal}\geq\mathsf{amt}$}
+\State $\mathsf{bal}_{k+1}\gets\mathsf{bal}'+
   \mathsf{issue}(W_k,t_k)-\mathsf{burn}(\mathsf{fees}_k)$
 \State $V_{k+1}\gets\mathsf{vset}(\Sigma_{k+1})$
   \Comment{Obligation~\ref{obl:vset}}
 \State \Return
   $\langle\mathsf{rt}(t_{k+1}),\mathsf{rt}(V_{k+1}),
   \mathsf{rt}(\mathsf{sl}_{k+1}),\mathsf{rt}(\mathsf{bal}_{k+1}),
-  \mathsf{ver}\rangle$
+  \mathsf{gpk},\mathsf{ver}\rangle$
 \end{algorithmic}
 \end{algorithm}
 \[
-\mathsf{cost}(F)=O(\mathsf{nnz}(W_k))\ \text{adds/mults over committed data}.
+\begin{array}{c}
+\mathsf{cost}(F)=O(\mathsf{nnz}(W_k)+|\mathsf{TX}_k|)\\
+\text{adds/mults over committed data}.
+\end{array}
 \]
 \end{definition}
 
-Line 3 is why the fixpoint is unrolled: one sparse
-matrix--vector product arithmetizes trivially; an eigenvector solve does
-not.
+Line 2 restricts vector, matrix (both dimensions), \emph{and} seeds:
+rows die with $t'(b)=0$, but columns and $s$ must be cut explicitly or
+slashed nodes re-accrue mass (Law~\ref{law:revocation}).  Line 3 is why
+the fixpoint is unrolled: one sparse matrix--vector product
+arithmetizes trivially; an eigenvector solve does not.  Line 4 is the
+transfer semantics of the two-asset economy
+(Definition~\ref{def:assets}): $\mathsf{apply}$ is sum-preserving, and
+bond/unbond move balance into and out of $\mathsf{Bond}$ with an
+unbonding delay of $\Delta_{\mathrm{ub}}$ epochs (slash exposure
+persists through the delay).
 
 \begin{definition}[Folding]\label{def:fold}
 Nova-family IVC~\cite{Nova}:
@@ -629,6 +731,31 @@ F'\in\mathsf{CheapArith}(\mathsf{committed}).
 The ledger is an admission ledger, not a contract platform.
 \end{obligation}
 
+\begin{obligation}[Verification boundary]\label{obl:boundary}
+\[
+\begin{array}{rcl}
+\text{in-fold}&:&F\ \text{(state arithmetic over $X_k$)},\\
+\text{out-of-fold}&:&\mathsf{Vrfy}(\rho),\ \mathsf{VRF}\ \pi,\
+  \mathsf{TSig},\\
+&&\text{checked by validators pre-}\mathsf{QC},\\
+\mathsf{QC}(\Sigma'\Vert\mathsf{rt}(X))&\Rightarrow&
+  \text{attests validity},\\
+\mathsf{invalid}\ \rho\in X_k&\Rightarrow&
+  \text{fraud proof from $X_k$ data}\\
+&&\Rightarrow\ \text{quorum slash}.
+\end{array}
+\]
+Elliptic-curve verifications are not $\mathsf{CheapArith}$
+(Obligation~\ref{obl:circuit}); the fold proves the arithmetic
+transition, the quorum attests input validity, and anyone holding
+$\mathsf{data}(X_k)$ can re-check --- so forged inputs are not
+impossible but detectable and slashable, preserving
+Obligation~\ref{obl:minimal-trust} through accountability rather than
+circuit cost.  In the staked phase the sortition proofs seating
+$V_{k+1}$ live on the same side: verified out-of-fold, consumed by
+line~6 of Algorithm~\ref{alg:step} as committed input.
+\end{obligation}
+
 \begin{definition}[Fixed-point carrier]\label{def:fixedpoint}
 Circuits have no reals.  With precision $\phi$:
 \[
@@ -660,6 +787,22 @@ $\bar\alpha$; geometric sum.
 \end{proof}
 \end{proposition}
 
+\begin{proposition}[Carrier boundedness]\label{prop:carrier}
+\[
+|\mathsf{carrier}(\hat t_k)|\;\leq\;2^{\phi}\qquad\forall k,
+\]
+independent of $|V|$: truncation is garbage collection.
+\begin{proof}
+Invariant~\ref{inv:mass} in fixed point gives
+$\sum_v\hat t_k(v)\leq2^{\phi}$ atoms; every carried $v$ holds
+$\hat t_k(v)\geq1$ atom, and a component truncated to $0$ leaves the
+carrier (its Merkle leaf is pruned).  Without truncation the carrier
+grows without bound --- geometric decay never reaches zero --- so
+state boundedness is a free consequence of
+Definition~\ref{def:fixedpoint}, not an extra mechanism.
+\end{proof}
+\end{proposition}
+
 \begin{obligation}[Upgrade versioning]\label{obl:upgrade}
 \[
 \begin{array}{rcl}
@@ -683,8 +826,10 @@ $\mathsf{availability}\in\mathsf{overlay}$.
 \mathsf{leak}(\mathsf{full})&=&\{(b,a,W[b,a])\}
   \quad\text{(the traffic graph)},\\
 \mathsf{leak}(\mathsf{agg})&=&\{(v,\ \mathsf{deg}^{\pm}(v))\},\\
-\mathsf{leak}(\mathsf{blind})&=&\varnothing,\quad
-  F\ \text{consumes ZK openings},\\
+\mathsf{leak}(\mathsf{blind})&=&\varnothing,\\
+\Gamma\neq\mathsf{full}&\Rightarrow&
+  F\ \text{consumes edge data as private}\\
+&&\text{witness (blind: ZK openings)},\\
 \mathsf{replay}(\Gamma)&=&\top\iff\Gamma=\mathsf{full}.
 \end{array}
 \]
@@ -707,12 +852,14 @@ finite instances~\cite{Stateright}:
   \land\mathrm{WF}_{\Sigma}(\mathsf{Next}),\\[2pt]
 \mathsf{Init}&\triangleq&
   \Sigma=\langle\mathsf{rt}(s),\mathsf{rt}(S),\varnothing,
-  \mathsf{rt}(\mathbf{0}),\mathsf{ver}_0\rangle,\\[2pt]
+  \mathsf{rt}(\mathbf{0}),\mathsf{gpk}_0,\mathsf{ver}_0\rangle,\\[2pt]
 \mathsf{Next}&\triangleq&
-  \exists\,W:\ \mathsf{QC}_{2/3}(\Sigma')\ \land\
-  \Sigma'=F(\Sigma,\mathsf{rt}(W)).
+  \exists\,X:\ \mathsf{QC}_{2/3}\bigl(\Sigma'\Vert\mathsf{rt}(X)\bigr)
+  \ \land\ \Sigma'=F(\Sigma,X),
 \end{array}
 \]
+with $\mathsf{gpk}_0$ from the genesis DKG
+(Definition~\ref{def:threshold}).
 
 \begin{invariant}[Slash monotone]\label{inv:slash}
 \[
@@ -720,10 +867,14 @@ finite instances~\cite{Stateright}:
 v\in\mathsf{sl}\Rightarrow t(v)=0 .
 \]
 \begin{proof}
-Lines 1--2 of Algorithm~\ref{alg:step}: $\mathsf{sl}$ only grows by
-union; the restriction $t\restriction_{V\setminus\mathsf{sl}}$ zeroes
-slashed carriers before every update, and Equation~\eqref{eq:update}
-grants no mass to $v\notin\mathsf{carrier}$.
+Lines 1--3 of Algorithm~\ref{alg:step}: $\mathsf{sl}$ only grows by
+union, and the update runs entirely over
+$U=V\setminus\mathsf{sl}_{k+1}$ --- vector $t'$, both dimensions of
+$\tilde C_k$, and seeds $s'$ are restricted, so no term of line~3 can
+assign mass to a slashed index.  (Restricting the vector alone would
+not suffice: an unrestricted column of $C_k$, or a fixed $s_v>0$,
+re-grants mass one epoch later --- hence
+Law~\ref{law:revocation} demands all three cuts.)
 \end{proof}
 \end{invariant}
 
@@ -779,7 +930,8 @@ Invariants~\ref{inv:mass},
 \begin{array}{rcl}
 \mathsf{rank}&:&\text{soulbound (Def.~\ref{def:soulbound})},\\
 &&\text{gates admission/sortition},\\
-\mathsf{reward}&:&\text{transferable},\\
+\mathsf{reward}&:&\text{transferable via}\ \mathsf{TX}
+  \ \text{(Alg.~\ref{alg:step}, l.4)},\\
 \mathsf{issue}_k(v)&\propto&
   \bigl(W_k^{\mathsf T}t_k\bigr)(v).
 \end{array}
@@ -830,8 +982,11 @@ path. \qed
 =\mathbf{1}^{\mathsf T}\mathsf{bal}_k
 +\mathsf{issue}_k-\mathsf{burn}_k,
 \]
-by line 4 of Algorithm~\ref{alg:step}: no other term touches
-$\mathsf{bal}$; supply changes only through published issuance and burn.
+by lines 4--5 of Algorithm~\ref{alg:step}:
+$\mathsf{apply}(\mathsf{TX}_k,\cdot)$ is sum-preserving (transfers
+permute balance, bond/unbond move it between $\mathsf{bal}$ and
+$\mathsf{Bond}$ within the same total), so supply changes only through
+published issuance and burn.
 \end{invariant}
 
 \begin{definition}[Fee loop]\label{def:sinks}
@@ -863,7 +1018,9 @@ production, weighted down by $D(\mathsf{vol}_k)$
 \begin{array}{rcl}
 \mathsf{vset}&:&\Sigma\to2^{V},\\
 \mathsf{vset}_{\mathsf{PoA}}&=&\mathsf{const}\ S,\\
-\mathsf{vset}_{\mathsf{PoS}}&=&\mathsf{sortition}(\mathsf{Bond});
+\mathsf{vset}_{\mathsf{PoS}}&=&\mathsf{sortition}(\mathsf{Bond})\\
+&&\text{(seat proofs out-of-fold,
+  Obl.~\ref{obl:boundary})};
 \end{array}
 \]
 the transition changes one pure function, not the engine.
@@ -954,6 +1111,10 @@ $\theta$ & authority threshold &
   $\geq2/3$; Defs.~\ref{def:threshold},~\ref{def:beacon} \\
 $\Delta$ & inclusion timeout &
   censorship latency, Obl.~\ref{obl:inclusion} \\
+$T_{\mathrm{ep}}$ & epoch timer &
+  enables $\mathsf{Next}$, Def.~\ref{def:epoch} \\
+$\Delta_{\mathrm{ub}}$ & unbonding delay &
+  slash exposure persists, Def.~\ref{def:step} \\
 $\mu$ & service metering &
   published per kind, Def.~\ref{def:graph} \\
 $\phi$ & fixed-point precision &
