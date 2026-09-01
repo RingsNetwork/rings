@@ -3012,6 +3012,7 @@ dependencies = [
  "rexie",
  "rings-codec",
  "rings-derive",
+ "rings-measure",
  "rings-transport",
  "serde",
  "serde-wasm-bindgen",
@@ -3046,6 +3047,15 @@ dependencies = [
  "quote",
  "syn 2.0.104",
  "wasm-bindgen-macro-support",
+]
+
+[[package]]
+name = "rings-measure"
+version = "0.19.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -3097,6 +3107,7 @@ dependencies = [
  "rings-codec",
  "rings-core",
  "rings-derive",
+ "rings-measure",
  "rings-rpc",
  "rings-transport",
  "serde",

@@ -220,8 +220,19 @@ async fn test_provider_exposes_sent_and_received_peer_measurements() {
     p1.swarm.set_callback(callback1.clone()).unwrap();
     p2.swarm.set_callback(callback2.clone()).unwrap();
     connect_processors(&p1, &p2, &callback1, &callback2).await;
+    let sent_before = p1.peer_measurement(p2.did()).await.unwrap();
+    let received_before = p2.peer_measurement(p1.did()).await.unwrap();
+    let sent_bytes_before = sent_before
+        .credit
+        .expect("periodic measurement exposes prior credit")
+        .bytes_sent_to_peer();
+    let received_bytes_before = received_before
+        .credit
+        .expect("periodic measurement exposes prior credit")
+        .bytes_received_from_peer();
 
-    p1.send_message(p2.did(), b"measure-provider")
+    p1.swarm
+        .send_direct_message(Message::custom(b"measure-provider").unwrap(), p2.did())
         .await
         .unwrap();
     let got_msg2 = wait_for_inbound_message(
@@ -231,15 +242,28 @@ async fn test_provider_exposes_sent_and_received_peer_measurements() {
     .await;
     assert!(matches!(got_msg2, Message::CustomMessage(_)));
 
-    let sent =
-        wait_for_peer_measurement(&p1, p2.did(), |measurement| measurement.evidence.sent >= 1)
-            .await;
+    let sent = wait_for_peer_measurement(&p1, p2.did(), |measurement| {
+        measurement
+            .credit
+            .is_some_and(|credit| credit.bytes_sent_to_peer() > sent_bytes_before)
+    })
+    .await;
     let received = wait_for_peer_measurement(&p2, p1.did(), |measurement| {
-        measurement.evidence.received >= 1
+        measurement
+            .credit
+            .is_some_and(|credit| credit.bytes_received_from_peer() > received_bytes_before)
     })
     .await;
     assert_eq!(sent.did, p2.did());
     assert_eq!(received.did, p1.did());
+    let sent_credit = sent.credit.expect("periodic measurement exposes credit");
+    let received_credit = received
+        .credit
+        .expect("periodic measurement exposes credit");
+    let sent_delta = sent_credit.bytes_sent_to_peer() - sent_bytes_before;
+    let received_delta = received_credit.bytes_received_from_peer() - received_bytes_before;
+    assert!(sent_delta > b"measure-provider".len() as u64);
+    assert!(received_delta > b"measure-provider".len() as u64);
 
     let node_info = p1.get_node_info().await.unwrap();
     assert_eq!(node_info.version, crate::util::build_version());
@@ -256,22 +280,38 @@ async fn test_provider_exposes_sent_and_received_peer_measurements() {
         .await
         .unwrap();
     let rpc_measurement: PeerMeasurementResponse = serde_json::from_value(rpc_value).unwrap();
-    assert!(rpc_measurement
+    let rpc_measurement = rpc_measurement
         .measurement
         .as_ref()
-        .is_some_and(|measurement| measurement.counters.sent >= 1));
+        .expect("peer measurement RPC entry");
+    assert!(rpc_measurement.counters.sent >= sent.evidence.sent);
+    assert!(
+        rpc_measurement
+            .credit
+            .as_ref()
+            .expect("peer credit RPC entry")
+            .bytes_sent_to_peer
+            >= sent_credit.bytes_sent_to_peer()
+    );
 
     let list_value = provider
-        .request(Method::ListPeerMeasurements, ListPeerMeasurementsRequest {})
+        .request(Method::ListPeerMeasurements, ListPeerMeasurementsRequest {
+            limit: Some(100),
+            cursor: None,
+        })
         .await
         .unwrap();
     let list_measurements: ListPeerMeasurementsResponse =
         serde_json::from_value(list_value).unwrap();
     let p2_did_json = serde_json::to_value(p2.did()).unwrap();
-    assert!(list_measurements
-        .measurements
-        .iter()
-        .any(|measurement| measurement.did == p2_did_json && measurement.counters.sent >= 1));
+    assert!(list_measurements.measurements.iter().any(|measurement| {
+        measurement.did == p2_did_json
+            && measurement
+                .credit
+                .as_ref()
+                .is_some_and(|credit| credit.bytes_sent_to_peer >= sent_credit.bytes_sent_to_peer())
+    }));
+    assert!(list_measurements.next_cursor.is_none());
 }
 
 #[tokio::test]

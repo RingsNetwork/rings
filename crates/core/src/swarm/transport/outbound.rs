@@ -54,6 +54,8 @@ mod mailbox;
 mod measurement;
 mod model;
 mod queue;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+mod simulation_pressure;
 mod spawn;
 #[cfg(test)]
 mod test_trace;
@@ -69,6 +71,8 @@ pub(super) use capacity::TransferCapacityPermit;
 pub(crate) use capacity::OUTBOUND_CONTROL_RESERVED_TRANSFERS;
 #[cfg(test)]
 pub(crate) use capacity::OUTBOUND_DATA_TRANSFER_CAPACITY;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use capacity::OUTBOUND_GLOBAL_BYTE_CAPACITY;
 #[cfg(test)]
 pub(crate) use capacity::OUTBOUND_TRANSFER_QUEUE_CAPACITY;
 use mailbox::MailboxLane;
@@ -83,7 +87,7 @@ use model::TransferClass;
 use queue::RunnableTransfer;
 use queue::TransferQueues;
 #[cfg(test)]
-use queue::OUTBOUND_CONTROL_BURST;
+pub(crate) use queue::OUTBOUND_CONTROL_BURST;
 use spawn::spawn_worker;
 pub(super) use transfer::ChunkFrames;
 use transfer::FinalTransferResult;
@@ -451,6 +455,16 @@ impl super::SwarmTransport {
         self.outbound_schedulers
             .admitted_transfer_count_for_test(peer)
     }
+
+    /// Exercise the live peer scheduler under lower-class saturation and record
+    /// whether an actual control reservation is rejected.
+    pub(crate) fn exercise_class_reservation_pressure_for_simulation(
+        &self,
+        peer: Did,
+    ) -> Result<Error> {
+        self.outbound_schedulers
+            .exercise_class_reservation_pressure(peer)
+    }
 }
 
 #[cfg(all(test, not(target_family = "wasm")))]
@@ -778,12 +792,14 @@ impl OutboundWorker {
             }
             ActiveFrameStep::Complete => {
                 if let Some(runnable) = self.active.take() {
+                    let useful_bytes = runnable.item().scheduled.transfer.useful_bytes();
                     self.terminate_transfer(
                         runnable,
                         Ok(SendCompletionOutcome::Succeeded),
                         TerminationFairness::AlreadyAdvanced,
                     );
-                    self.measurements.record(OutboundMeasurement::Sent);
+                    self.measurements
+                        .record(OutboundMeasurement::Sent { useful_bytes });
                 }
             }
             ActiveFrameStep::Failed(error) => {

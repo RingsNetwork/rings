@@ -1,0 +1,91 @@
+name: Deterministic sync storm
+
+on:
+  pull_request:
+    branches:
+      - master
+      - develop
+    paths:
+      - ".github/workflows/sync-storm.yml"
+      - "crates/core/**"
+      - "crates/transport/**"
+      - "scripts/check-sync-storm-time-leaks.sh"
+  schedule:
+    - cron: "23 19 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: 1.97.0
+
+jobs:
+  sync-storm-pr:
+    name: Ring and hotspot deterministic replay
+    if: github.event_name == 'pull_request'
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    env:
+      SYNC_STORM_TRACE_DIR: ${{ github.workspace }}/target/sync-storm-traces
+    steps:
+      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
+      - name: Setup Rust
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+      - name: Reject simulation system-time leaks
+        run: bash scripts/check-sync-storm-time-leaks.sh
+      - name: Run PR sync-storm gate
+        run: >-
+          cargo test -p rings-core --features dummy --no-default-features
+          test_sync_storm -- --nocapture
+      - name: Run PR N=10/25/50 scale gate
+        run: >-
+          cargo test -p rings-core --features dummy --no-default-features
+          test_pr_ring_and_hotspot_size_matrix -- --ignored --nocapture
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        name: Upload PR sync-storm traces
+        with:
+          name: sync-storm-pr-traces-${{ github.event.pull_request.number }}
+          path: target/sync-storm-traces
+          if-no-files-found: error
+
+  sync-storm-nightly:
+    name: Ring and hotspot N=10/25/50
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    env:
+      SYNC_STORM_TRACE_DIR: ${{ github.workspace }}/target/sync-storm-traces
+    steps:
+      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
+      - name: Setup Rust
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+      - name: Reject simulation system-time leaks
+        run: bash scripts/check-sync-storm-time-leaks.sh
+      - name: Run nightly size and seed matrices
+        run: |
+          cargo test -p rings-core --features dummy --no-default-features \
+            test_pr_ring_and_hotspot_size_matrix -- --ignored --nocapture
+          cargo test -p rings-core --features dummy --no-default-features \
+            test_nightly_extended_seed_matrix -- --ignored --nocapture
+      - name: Publish replay index
+        if: always()
+        run: |
+          echo "## Sync-storm replay artifacts" >> "$GITHUB_STEP_SUMMARY"
+          find "$SYNC_STORM_TRACE_DIR" -type f -name '*.json' -print 2>/dev/null \
+            | sort >> "$GITHUB_STEP_SUMMARY" || true
+          echo "Each test log contains a directly reusable SYNC_STORM_* replay command." \
+            >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        name: Upload sync-storm traces
+        with:
+          name: sync-storm-traces
+          path: target/sync-storm-traces
+          if-no-files-found: ignore

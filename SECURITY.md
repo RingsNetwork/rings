@@ -7,7 +7,8 @@ documentation, not a claim that every stronger model is implemented.
 
 Rings authenticates peer identities and protocol messages with DIDs and delegated
 session keys. That proves control of a key. It does not make identities scarce,
-expensive, or reputation-bearing.
+expensive, or globally reputation-bearing. Peer measurements remain local advisory
+state and are not portable trust claims.
 
 The current Chord overlay must therefore not be treated as Sybil-resistant
 permissionless membership. A party that can create many identities can influence
@@ -56,8 +57,8 @@ costly to create.
   adversarial.
 - Strong anonymity or traffic-analysis resistance for onion routes chosen from a
   Sybil-permissive live-node registry.
-- Economic security, stake weighting, proof-of-work admission, reputation, or
-  globally rate-limited identity issuance.
+- Economic security, stake weighting, proof-of-work admission, globally trusted or
+  portable reputation, or globally rate-limited identity issuance.
 
 ## Feature Boundaries
 
@@ -66,6 +67,25 @@ costly to create.
 DID signatures authenticate the key behind a message, descriptor, or session
 delegation. They do not prove that two DIDs are controlled by different operators,
 and they do not prevent an operator from generating many DIDs.
+
+### Local Measurement And Credit
+
+Credit and reliability are computed independently by each node from its own
+authenticated transport observations. They are advisory rather than authorization:
+reliability may reorder eligible connection candidates or weight eligible onion-route
+candidates, and credit is exposed for local policy, but neither value can add a peer
+to the candidate set, prove Chord membership or routing correctness, determine DHT
+ownership, or change storage placement.
+
+The measurement ledger is bounded and uses least-recently-authenticated eviction.
+Unknown or merely locally addressed identities cannot establish records. A residual
+Sybil risk remains because authenticated DIDs are not scarce: completing authenticated
+peer connections with 16,384 fresh DIDs can replace every record in a default full
+ledger. The credit multiplier remains neutral until a peer has supplied 1,000,000
+useful bytes, which raises the cost of earning positive credit but does not make
+identities scarce or protect ledger residency. Deployments that need stronger
+retention guarantees must add admission, identity-cost, or operator policy outside
+the measurement subsystem.
 
 ### Chord Routing
 

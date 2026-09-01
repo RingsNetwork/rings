@@ -223,7 +223,7 @@ impl MessagePayload {
     where
         T: Serialize,
     {
-        let tx_id = uuid::Uuid::new_v4();
+        let tx_id = crate::utils::new_uuid();
         let transaction = Transaction::new(destination, tx_id, data, session_sk)?;
         let relay = MessageRelay::new(
             vec![session_sk.account_did()],
@@ -361,7 +361,7 @@ pub trait PayloadSender {
     where
         T: Serialize + Send,
     {
-        let tx_id = uuid::Uuid::new_v4();
+        let tx_id = crate::utils::new_uuid();
         let transaction = Transaction::new_with_report_return(
             destination,
             tx_id,

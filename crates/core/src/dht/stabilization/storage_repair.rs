@@ -41,6 +41,12 @@ enum StorageRepairDeferReason {
     NextHopFresh { connected_for_ms: i64 },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RepairDeliveryResult {
+    Sent,
+    Deferred,
+}
+
 impl StorageRepairDeferReason {
     const fn as_str(self) -> &'static str {
         match self {
@@ -93,128 +99,16 @@ impl Stabilizer {
             "STABILIZATION storage repair deliveries prepared"
         );
 
-        let now_ms = get_epoch_ms_i64();
         let mut sent = 0usize;
         let mut deferred = 0usize;
         for planned in deliveries {
-            let PlannedStorageRepairDelivery { delivery } = planned;
-            let msg = SyncEntriesWithSuccessor::from_delivery(delivery);
-            let purpose = msg.purpose;
-            let destination = msg.destination;
-            let destination_did = destination.did();
-            let entries = msg.data.len();
-            let next_hop = self.dht.next_hop_for_storage_sync(destination)?;
-            let next_hop_state = next_hop
-                .and_then(|did| self.transport.get_connection(did))
-                .map(|conn| conn.webrtc_connection_state());
-
-            if let Some(reason) = self.storage_repair_defer_reason(next_hop, now_ms)? {
-                deferred = deferred.saturating_add(1);
-                tracing::debug!(
-                    target: "rings_core::dht::stabilization",
-                    local = %self.dht.did,
-                    purpose = ?purpose,
-                    destination = ?destination,
-                    destination_did = %destination_did,
-                    next_hop = ?next_hop,
-                    next_hop_state = ?next_hop_state,
-                    entries,
-                    reason = reason.as_str(),
-                    transport_readiness = ?reason.transport_readiness(),
-                    transport_readiness_kind = ?reason
-                        .transport_readiness()
-                        .map(TransportReadiness::as_str),
-                    connected_for_ms = ?reason.connected_for_ms(),
-                    grace_ms = STORAGE_REPAIR_FRESH_CONNECTION_GRACE_MS,
-                    "STABILIZATION storage repair deferred"
-                );
-                continue;
+            match self
+                .send_planned_storage_repair(planned, get_epoch_ms_i64())
+                .await?
+            {
+                RepairDeliveryResult::Sent => sent = sent.saturating_add(1),
+                RepairDeliveryResult::Deferred => deferred = deferred.saturating_add(1),
             }
-
-            tracing::debug!(
-                target: "rings_core::dht::stabilization",
-                local = %self.dht.did,
-                purpose = ?purpose,
-                destination = ?destination,
-                destination_did = %destination_did,
-                next_hop = ?next_hop,
-                next_hop_state = ?next_hop_state,
-                entries,
-                "STABILIZATION storage repair send start"
-            );
-
-            match self.transport.send_storage_sync_tracked(msg).await {
-                Ok(TrackedStorageSyncOutcome::PersistedLocally) => {
-                    tracing::debug!(
-                        target: "rings_core::dht::stabilization",
-                        local = %self.dht.did,
-                        purpose = ?purpose,
-                        destination = ?destination,
-                        entries,
-                        "STABILIZATION storage repair persisted locally"
-                    );
-                }
-                Ok(TrackedStorageSyncOutcome::Delivered(tx_id)) => {
-                    tracing::debug!(
-                        target: "rings_core::dht::stabilization",
-                        local = %self.dht.did,
-                        tx_id = %tx_id,
-                        purpose = ?purpose,
-                        destination = ?destination,
-                        destination_did = %destination_did,
-                        next_hop = ?next_hop,
-                        entries,
-                        "STABILIZATION storage repair send complete"
-                    );
-                }
-                Ok(TrackedStorageSyncOutcome::Deferred) => {
-                    deferred = deferred.saturating_add(1);
-                    tracing::warn!(
-                        target: "rings_core::dht::stabilization",
-                        local = %self.dht.did,
-                        purpose = ?purpose,
-                        destination = ?destination,
-                        destination_did = %destination_did,
-                        next_hop = ?next_hop,
-                        next_hop_state = ?next_hop_state,
-                        entries,
-                        "STABILIZATION storage repair delivery cancelled and deferred"
-                    );
-                    continue;
-                }
-                Err(e) if is_storage_repair_deferral(&e) => {
-                    deferred = deferred.saturating_add(1);
-                    tracing::warn!(
-                        target: "rings_core::dht::stabilization",
-                        local = %self.dht.did,
-                        purpose = ?purpose,
-                        destination = ?destination,
-                        destination_did = %destination_did,
-                        next_hop = ?next_hop,
-                        next_hop_state = ?next_hop_state,
-                        entries,
-                        error = ?e,
-                        "STABILIZATION storage repair deferred by transport readiness"
-                    );
-                    continue;
-                }
-                Err(e) => {
-                    tracing::error!(
-                        target: "rings_core::dht::stabilization",
-                        local = %self.dht.did,
-                        purpose = ?purpose,
-                        destination = ?destination,
-                        destination_did = %destination_did,
-                        next_hop = ?next_hop,
-                        next_hop_state = ?next_hop_state,
-                        entries,
-                        error = ?e,
-                        "STABILIZATION storage repair send failed"
-                    );
-                    return Err(e);
-                }
-            }
-            sent = sent.saturating_add(1);
         }
 
         if deferred > 0 {
@@ -228,6 +122,104 @@ impl Stabilizer {
             return Ok(StorageRepairOutcome::Deferred);
         }
         Ok(StorageRepairOutcome::Complete)
+    }
+
+    async fn send_planned_storage_repair(
+        &self,
+        planned: PlannedStorageRepairDelivery,
+        now_ms: i64,
+    ) -> Result<RepairDeliveryResult> {
+        let msg = SyncEntriesWithSuccessor::from_delivery(planned.delivery);
+        let purpose = msg.purpose;
+        let destination = msg.destination;
+        let entries = msg.data.len();
+        let next_hop = self.dht.next_hop_for_storage_sync(destination)?;
+        if let Some(reason) = self.storage_repair_defer_reason(next_hop, now_ms)? {
+            self.log_storage_repair_deferred(destination, next_hop, entries, reason, None);
+            return Ok(RepairDeliveryResult::Deferred);
+        }
+        tracing::debug!(
+            target: "rings_core::dht::stabilization",
+            local = %self.dht.did,
+            purpose = ?purpose,
+            destination = ?destination,
+            next_hop = ?next_hop,
+            entries,
+            "STABILIZATION storage repair send start"
+        );
+        match self.transport.send_storage_sync_tracked(msg).await {
+            Ok(TrackedStorageSyncOutcome::Delivered(tx_id)) => {
+                #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+                crate::simulation::record_repair_entries(entries);
+                tracing::debug!(
+                    target: "rings_core::dht::stabilization",
+                    local = %self.dht.did,
+                    tx_id = %tx_id,
+                    destination = ?destination,
+                    next_hop = ?next_hop,
+                    entries,
+                    "STABILIZATION storage repair send complete"
+                );
+                Ok(RepairDeliveryResult::Sent)
+            }
+            Ok(TrackedStorageSyncOutcome::PersistedLocally) => {
+                tracing::debug!(
+                    target: "rings_core::dht::stabilization",
+                    local = %self.dht.did,
+                    destination = ?destination,
+                    entries,
+                    "STABILIZATION storage repair persisted locally"
+                );
+                Ok(RepairDeliveryResult::Sent)
+            }
+            Ok(TrackedStorageSyncOutcome::Deferred) => {
+                tracing::warn!(
+                    target: "rings_core::dht::stabilization",
+                    local = %self.dht.did,
+                    destination = ?destination,
+                    next_hop = ?next_hop,
+                    entries,
+                    "STABILIZATION storage repair delivery cancelled and deferred"
+                );
+                Ok(RepairDeliveryResult::Deferred)
+            }
+            Err(error) if is_storage_repair_deferral(&error) => {
+                tracing::warn!(
+                    target: "rings_core::dht::stabilization",
+                    local = %self.dht.did,
+                    destination = ?destination,
+                    next_hop = ?next_hop,
+                    entries,
+                    error = ?error,
+                    "STABILIZATION storage repair deferred by transport readiness"
+                );
+                Ok(RepairDeliveryResult::Deferred)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn log_storage_repair_deferred(
+        &self,
+        destination: crate::dht::StorageSyncDestination,
+        next_hop: Option<Did>,
+        entries: usize,
+        reason: StorageRepairDeferReason,
+        error: Option<&Error>,
+    ) {
+        tracing::debug!(
+            target: "rings_core::dht::stabilization",
+            local = %self.dht.did,
+            destination = ?destination,
+            next_hop = ?next_hop,
+            entries,
+            reason = reason.as_str(),
+            transport_readiness = ?reason.transport_readiness(),
+            connected_for_ms = ?reason.connected_for_ms(),
+            grace_ms = STORAGE_REPAIR_FRESH_CONNECTION_GRACE_MS,
+            error = ?error,
+            "STABILIZATION storage repair deferred"
+        );
     }
 
     fn storage_repair_window(

@@ -172,6 +172,14 @@ impl PeerLivenessMap {
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    fn unanswered_probe_since_ms(&self, peer: Did, generation: u64) -> Option<i64> {
+        let liveness = self.peers.get(&peer)?;
+        (liveness.generation == generation)
+            .then_some(liveness.unanswered_probe_since_ms)
+            .flatten()
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     fn force_probe_sent_at(&mut self, peer: Did, generation: u64, sent_at_ms: i64) {
         let mut liveness = PeerLiveness::new(generation, sent_at_ms);
         liveness.mark_probe_sent(sent_at_ms);
@@ -308,6 +316,18 @@ impl SwarmTransport {
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn peer_liveness_count_for_test(&self) -> Result<usize> {
         self.with_connection_lifecycle(|| Ok(self.peer_liveness()?.peers.len()))
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) fn peer_liveness_unanswered_since_for_test(&self, peer: Did) -> Result<Option<i64>> {
+        self.with_connection_lifecycle(|| {
+            let Some(attempt) = self.active_attempt(peer)? else {
+                return Ok(None);
+            };
+            Ok(self
+                .peer_liveness()?
+                .unanswered_probe_since_ms(peer, attempt.generation))
+        })
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]

@@ -21,10 +21,15 @@ use crate::dht::StorageSyncPurpose;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
+use crate::measure::ApplyOutcome;
+use crate::measure::Authentication;
 use crate::measure::BehaviourJudgement;
 use crate::measure::Measure;
 use crate::measure::MeasureCounter;
+use crate::measure::MeasureError;
 use crate::measure::MeasureImpl;
+use crate::measure::MeasurementBatch;
+use crate::measure::MeasurementEvent;
 use crate::measure::PeerQuality;
 use crate::message::Message;
 use crate::message::MessageClass;
@@ -53,6 +58,7 @@ use crate::tests::outbound_capacity_released;
 #[derive(Default)]
 struct CountingMeasure {
     counters: Mutex<Vec<(crate::dht::Did, MeasureCounter)>>,
+    events: Mutex<Vec<(crate::dht::Did, MeasurementEvent)>>,
 }
 
 impl CountingMeasure {
@@ -64,6 +70,29 @@ impl CountingMeasure {
                     *observed_did == did && *observed_counter == counter
                 })
                 .count() as u64,
+            Err(_) => 0,
+        }
+    }
+
+    fn logical_transfer_count(
+        &self,
+        did: crate::dht::Did,
+        received: bool,
+        expected_useful_bytes: u64,
+    ) -> usize {
+        match self.events.lock() {
+            Ok(events) => events
+                .iter()
+                .filter(|(observed_did, event)| match event {
+                    MeasurementEvent::Sent { useful_bytes } => {
+                        *observed_did == did && !received && *useful_bytes == expected_useful_bytes
+                    }
+                    MeasurementEvent::Received { useful_bytes } => {
+                        *observed_did == did && received && *useful_bytes == expected_useful_bytes
+                    }
+                    _ => false,
+                })
+                .count(),
             Err(_) => 0,
         }
     }
@@ -80,16 +109,47 @@ impl Measure for CountingMeasure {
     async fn get_count(&self, did: crate::dht::Did, counter: MeasureCounter) -> u64 {
         self.count(did, counter)
     }
+
+    async fn record(
+        &self,
+        did: crate::dht::Did,
+        authentication: Authentication,
+        event: MeasurementEvent,
+    ) -> std::result::Result<ApplyOutcome, MeasureError> {
+        if !authentication.permits(event) {
+            return Ok(ApplyOutcome::IgnoredUnattributable);
+        }
+        if let Ok(mut events) = self.events.lock() {
+            events.push((did, event));
+        }
+        self.incr(did, MeasureCounter::from_event(event)).await;
+        Ok(ApplyOutcome::Applied)
+    }
+
+    async fn record_batch(
+        &self,
+        did: crate::dht::Did,
+        authentication: Authentication,
+        batch: MeasurementBatch,
+    ) -> std::result::Result<ApplyOutcome, MeasureError> {
+        if !authentication.permits(batch.event()) {
+            return Ok(ApplyOutcome::IgnoredUnattributable);
+        }
+        if let Ok(mut events) = self.events.lock() {
+            events.push((did, batch.event()));
+        }
+        let counter = MeasureCounter::from_event(batch.event());
+        for _ in 0..batch.occurrences().get() {
+            self.incr(did, counter).await;
+        }
+        Ok(ApplyOutcome::Applied)
+    }
 }
 
 #[async_trait]
 impl BehaviourJudgement for CountingMeasure {
     async fn quality(&self, _did: crate::dht::Did) -> PeerQuality {
         PeerQuality::Unknown
-    }
-
-    async fn good(&self, _did: crate::dht::Did) -> bool {
-        true
     }
 }
 
@@ -128,11 +188,15 @@ async fn recv_custom(node: &crate::tests::default::Node) -> Option<Vec<u8>> {
 }
 
 #[tokio::test]
-async fn test_large_message_is_chunked_and_reassembled() {
+async fn test_whole_and_chunked_payloads_have_identical_measurement_delta() {
     let key1 = SecretKey::random();
     let key2 = SecretKey::random();
-    let node1 = prepare_node(key1).await;
-    let node2 = prepare_node(key2).await;
+    let sender_measure = Arc::new(CountingMeasure::default());
+    let receiver_measure = Arc::new(CountingMeasure::default());
+    let sender_impl: MeasureImpl = sender_measure.clone();
+    let receiver_impl: MeasureImpl = receiver_measure.clone();
+    let node1 = prepare_node_with_measure(key1, sender_impl).unwrap();
+    let node2 = prepare_node_with_measure(key2, receiver_impl).unwrap();
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
     wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected)
         .await
@@ -141,27 +205,66 @@ async fn test_large_message_is_chunked_and_reassembled() {
         .await
         .unwrap();
 
-    // Force a small negotiated limit so the payload below must be chunked. Set it *after* the
-    // handshake so the connect offer/answer themselves are unaffected.
-    dummy_controlled::set_max_message_size(8192);
-
-    // Comfortably larger than the negotiated limit → many chunks.
+    // This is whole under the default negotiated limit and chunked under 8192 bytes.
     let big: Vec<u8> = (0..50_000u32).map(|i| i as u8).collect();
+    let expected_useful_bytes = u64::try_from(
+        rings_codec::serialize(&Message::custom(&big).unwrap())
+            .unwrap()
+            .len(),
+    )
+    .unwrap();
+    let sent_before =
+        sender_measure.logical_transfer_count(node2.did(), false, expected_useful_bytes);
+    let received_before =
+        receiver_measure.logical_transfer_count(node1.did(), true, expected_useful_bytes);
+
     node1
         .swarm
-        .send_message(Message::custom(&big).unwrap(), node2.did())
+        .send_direct_message(Message::custom(&big).unwrap(), node2.did())
         .await
-        .expect("send should succeed and chunk");
-
-    let got = recv_custom(&node2)
-        .await
-        .expect("reassembled custom message");
+        .expect("whole send should succeed");
+    let whole = recv_custom(&node2).await.expect("whole custom message");
+    assert_eq!(whole, big);
+    wait_for_test_condition("whole send must be measured once", || {
+        sender_measure.logical_transfer_count(node2.did(), false, expected_useful_bytes)
+            > sent_before
+    })
+    .await;
     assert_eq!(
-        got, big,
-        "receiver must reassemble the exact original payload"
+        sender_measure.logical_transfer_count(node2.did(), false, expected_useful_bytes),
+        sent_before + 1
+    );
+    assert_eq!(
+        receiver_measure.logical_transfer_count(node1.did(), true, expected_useful_bytes),
+        received_before + 1
     );
 
-    dummy_controlled::set_max_message_size(0);
+    let _max_size = MaxMessageSizeGuard::new(8192);
+    node1
+        .swarm
+        .send_direct_message(Message::custom(&big).unwrap(), node2.did())
+        .await
+        .expect("chunked send should succeed");
+    let chunked = recv_custom(&node2)
+        .await
+        .expect("reassembled custom message");
+    assert_eq!(chunked, big);
+    wait_for_test_condition("chunked send must be measured once", || {
+        sender_measure.logical_transfer_count(node2.did(), false, expected_useful_bytes)
+            >= sent_before + 2
+    })
+    .await;
+    assert_eq!(
+        sender_measure.logical_transfer_count(node2.did(), false, expected_useful_bytes),
+        sent_before + 2,
+        "whole and chunked sends must each emit one exact logical measurement"
+    );
+
+    assert_eq!(
+        receiver_measure.logical_transfer_count(node1.did(), true, expected_useful_bytes),
+        received_before + 2,
+        "whole and reassembled payloads must expose the same useful-byte delta"
+    );
 }
 
 #[tokio::test]

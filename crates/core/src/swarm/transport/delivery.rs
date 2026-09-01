@@ -24,8 +24,9 @@ use crate::dht::StorageSyncDestination;
 use crate::error::Error;
 use crate::error::Result;
 use crate::lifecycle::StopToken;
-use crate::measure::MeasureCounter;
+use crate::measure::Authentication;
 use crate::measure::MeasureImpl;
+use crate::measure::MeasurementEvent;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::session::SessionSk;
@@ -378,17 +379,23 @@ async fn complete_irrevocable_send(
 pub(super) async fn record_measurement(
     measure: Option<MeasureImpl>,
     did: Did,
-    counter: MeasureCounter,
+    authentication: Authentication,
+    event: MeasurementEvent,
 ) {
     if let Some(measure) = measure {
-        measure.incr(did, counter).await;
+        if let Err(error) = measure.record(did, authentication, event).await {
+            tracing::error!(peer = %did, ?authentication, ?event, %error, "failed to apply peer measurement");
+        }
     }
 }
 
 /// Frame one chunk into the bytes a data-channel send carries: wrap it in a `MessagePayload`
 /// addressed to `did` and serialize it. Pure (the only failure is serialization).
 pub(super) fn frame_chunk(session_sk: &SessionSk, did: Did, chunk: Chunk) -> Result<Bytes> {
-    MessagePayload::new_send(Message::Chunk(chunk), session_sk, did, did)?.to_wire()
+    let payload = MessagePayload::new_send(Message::Chunk(chunk), session_sk, did, did)?;
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    crate::simulation::record_outbound_submission(payload.transaction.tx_id);
+    payload.to_wire()
 }
 
 fn chunk_send_cancel_reason(

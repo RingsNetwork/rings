@@ -1,28 +1,56 @@
-//! This module implemented the `Measure` trait for swarm.
+//! Runtime adapter for the pure `rings-measure` state relation.
 
+use std::num::NonZeroU64;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use async_trait::async_trait;
-use chrono::DateTime;
-use chrono::Duration;
-use chrono::Utc;
-use dashmap::mapref::one::RefMut;
-use dashmap::DashMap;
+use futures::channel::mpsc;
+use futures::lock::Mutex as AsyncMutex;
+use futures::FutureExt;
+use futures::StreamExt;
 use rings_core::dht::Did;
 use rings_core::measure;
 use rings_core::measure::Measure;
 use rings_core::measure::MeasureCounter;
+use rings_core::measure::PeerMeasurement;
+use rings_core::measure::PeerMeasurementPage;
 use rings_core::measure::PeerQuality;
-use rings_core::measure::PeerQualityEvidence;
 use rings_core::measure::PeerQualityThresholds;
 use rings_core::storage::KvStorageInterface;
-use rings_derive::MeasureBehaviour;
+use rings_measure::ApplyOutcome;
+use rings_measure::Authentication;
+use rings_measure::CreditPolicy;
+use rings_measure::MeasureError;
+use rings_measure::MeasurementBatch;
+use rings_measure::MeasurementEvent;
+use rings_measure::MeasurementLedger;
+use rings_measure::MeasurementSnapshot;
+use rings_measure::ReliabilityPolicy;
+use rings_measure::UnixTime;
 
+// Legacy `PeriodicMeasure/counters/...` values intentionally remain unread:
+// a bare count proves neither byte-credit direction nor a live epoch timestamp.
+const SNAPSHOT_KEY: &str = "MeasurementLedger/v1";
+const PERSISTENCE_WAKE_CAPACITY: usize = 1;
+const PERSISTENCE_SHUTDOWN_ATTEMPTS: usize = 3;
+const PRUNE_INTERVAL_SECONDS: u64 = 60 * 60;
 #[cfg(test)]
-const DURATION: u64 = 1;
+const PERSISTENCE_MIN_INTERVAL: Duration = Duration::from_millis(50);
+// The first mutation and every later coalesced snapshot intentionally wait for
+// this interval. A hard crash may lose at most one interval of advisory state.
 #[cfg(not(test))]
-const DURATION: u64 = 60 * 60;
+const PERSISTENCE_MIN_INTERVAL: Duration = Duration::from_secs(60);
+#[cfg(test)]
+const RELIABILITY_WINDOW: NonZeroU64 = NonZeroU64::MIN;
+#[cfg(not(test))]
+#[allow(
+    clippy::unwrap_used,
+    reason = "the non-zero integer literal is validated during const evaluation"
+)]
+const RELIABILITY_WINDOW: NonZeroU64 = NonZeroU64::new(3_600).unwrap();
 
 /// Shared peer-quality thresholds used by measurement and route selection.
 pub(crate) const fn peer_quality_thresholds() -> PeerQualityThresholds {
@@ -33,199 +61,659 @@ pub(crate) const fn peer_quality_thresholds() -> PeerQualityThresholds {
     )
 }
 
-/// `MeasureStorage` is the type accepted by `PeriodicMeasure::new`.
-/// It's used to store counts in a storage media provided by user.
-#[cfg(all(feature = "browser", target_family = "wasm"))]
-pub type MeasureStorage = Box<dyn KvStorageInterface<u64>>;
-
-/// `MeasureStorage` is the type accepted by `PeriodicMeasure::new`.
-/// It's used to store counts in a storage media provided by user.
-#[cfg(not(all(feature = "browser", target_family = "wasm")))]
-pub type MeasureStorage = Box<dyn KvStorageInterface<u64> + Sync + Send>;
-
-/// `PeriodicMeasure` is used to assess the reliability of peers by counting their behaviour.
-/// It currently count the number of sent and received messages in a given period (1 hour).
-/// The method [Measure::incr] should be called in the proper places.
-#[derive(MeasureBehaviour)]
-pub struct PeriodicMeasure {
-    storage: MeasureStorage,
-    counters: DashMap<(Did, MeasureCounter), Mutex<PeriodicCounter>>,
-    clock: Arc<dyn MeasureClock>,
+const fn reliability_policy() -> ReliabilityPolicy {
+    ReliabilityPolicy::from_nonzero_window(RELIABILITY_WINDOW, 1, peer_quality_thresholds())
 }
 
-// Boundary: wall-clock time is injected here. The counter transition below is
-// pure with respect to its `now` input, so tests can advance time without
-// sleeping while production still reads `Utc::now`.
+/// Storage used for one versioned complete measurement snapshot.
+#[cfg(all(feature = "browser", target_family = "wasm"))]
+pub type MeasureStorage = Box<dyn KvStorageInterface<MeasurementSnapshot<Did>>>;
+
+/// Storage used for one versioned complete measurement snapshot.
+#[cfg(not(all(feature = "browser", target_family = "wasm")))]
+pub type MeasureStorage = Box<dyn KvStorageInterface<MeasurementSnapshot<Did>> + Sync + Send>;
+
+#[cfg(all(feature = "browser", target_family = "wasm"))]
+type SharedMeasureStorage = Arc<dyn KvStorageInterface<MeasurementSnapshot<Did>>>;
+#[cfg(not(all(feature = "browser", target_family = "wasm")))]
+type SharedMeasureStorage = Arc<dyn KvStorageInterface<MeasurementSnapshot<Did>> + Sync + Send>;
+
+/// Failure while loading or explicitly flushing the runtime measurement adapter.
+#[derive(Debug, thiserror::Error)]
+pub enum MeasureRuntimeError {
+    /// The configured key-value backend failed.
+    #[error("measurement storage failed: {0}")]
+    Storage(#[from] rings_core::error::Error),
+    /// Persisted or live state violated the pure measurement model.
+    #[error("measurement model failed: {0}")]
+    Model(#[from] MeasureError),
+    /// A bounded explicit flush did not complete before its deadline.
+    #[error("measurement persistence flush timed out")]
+    FlushTimeout,
+    /// The runtime stopped the owned flush task before it returned a result.
+    #[error("measurement persistence flush task stopped")]
+    FlushTaskStopped,
+    /// The browser could not schedule a measurement timer.
+    #[error("measurement timer failed: {0}")]
+    Timer(String),
+    /// Native construction was attempted without a live Tokio runtime.
+    #[cfg(not(all(feature = "browser", target_family = "wasm")))]
+    #[error("measurement persistence requires a live Tokio runtime: {0}")]
+    RuntimeUnavailable(String),
+}
+
+/// Pure-ledger runtime adapter with coalesced asynchronous snapshot persistence.
+///
+/// Network callbacks update only in-memory state and replace the pending full
+/// snapshot. A runtime task serializes storage writes. The algorithm, time
+/// projection, pruning, and snapshot schema remain in `rings-measure`.
+pub struct PeriodicMeasure {
+    state: Arc<MeasureState>,
+    persistence_wake: mpsc::Sender<()>,
+}
+
+struct MeasureState {
+    storage: SharedMeasureStorage,
+    runtime: Mutex<RuntimeLedger>,
+    persistence_lock: AsyncMutex<()>,
+    clock: Arc<dyn MeasureClock>,
+    #[cfg(not(all(feature = "browser", target_family = "wasm")))]
+    runtime_handle: tokio::runtime::Handle,
+}
+
+impl MeasureState {
+    /// Serialize clock sampling with the ledger transition it timestamps.
+    fn runtime_at_now(&self) -> (std::sync::MutexGuard<'_, RuntimeLedger>, UnixTime) {
+        let runtime = lock_or_recover(&self.runtime);
+        let now = self.clock.now();
+        (runtime, now)
+    }
+}
+
+struct RuntimeLedger {
+    ledger: MeasurementLedger<Did>,
+    dirty: bool,
+    persisting: bool,
+    mutated_while_persisting: bool,
+    last_clock: UnixTime,
+    next_prune_at: UnixTime,
+}
+
+// Boundary: the adapter supplies wall-clock seconds to the pure state relation.
 trait MeasureClock: Send + Sync {
-    fn now(&self) -> DateTime<Utc>;
+    fn now(&self) -> UnixTime;
 }
 
 struct SystemMeasureClock;
 
 impl MeasureClock for SystemMeasureClock {
     #[cfg(not(all(feature = "browser", target_family = "wasm")))]
-    fn now(&self) -> DateTime<Utc> {
-        Utc::now()
+    fn now(&self) -> UnixTime {
+        let seconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        UnixTime::from_secs(seconds)
     }
 
     #[cfg(all(feature = "browser", target_family = "wasm"))]
-    fn now(&self) -> DateTime<Utc> {
-        let now = js_sys::Date::now();
-        if !now.is_finite() {
-            return DateTime::UNIX_EPOCH;
+    fn now(&self) -> UnixTime {
+        let milliseconds = js_sys::Date::now();
+        if !milliseconds.is_finite() || milliseconds <= 0.0 {
+            return UnixTime::EPOCH;
         }
-        match DateTime::from_timestamp_millis(now as i64) {
-            Some(value) => value,
-            None => DateTime::UNIX_EPOCH,
-        }
-    }
-}
-
-#[derive(Debug)]
-struct PeriodicCounter {
-    // Invariant: `previous` is the start time of the current counting window;
-    // `count` records the current window; `previous_count` records the most
-    // recently completed window persisted through `barely_get`.
-    period: Duration,
-    count: u64,
-    previous: DateTime<Utc>,
-    previous_count: u64,
-}
-
-impl PeriodicCounter {
-    fn new(period: u64, previous_count: u64, now: DateTime<Utc>) -> Self {
-        Self {
-            period: Duration::seconds(period as i64),
-            count: 0,
-            previous: now,
-            previous_count,
-        }
-    }
-
-    // Reset periodic count on next period
-    fn refresh_at(&mut self, now: DateTime<Utc>) -> bool {
-        if now - self.previous < self.period {
-            return false;
-        }
-
-        self.previous_count = self.count;
-        self.count = 0;
-        self.previous = now;
-        true
-    }
-
-    // If there is no recourd in current period, get previous_count instead
-    fn barely_get(&self) -> u64 {
-        if self.previous_count == 0 {
-            self.count
-        } else {
-            self.previous_count
-        }
-    }
-
-    // Check period, then increase
-    fn incr_at(&mut self, now: DateTime<Utc>) -> (u64, bool) {
-        let is_refreshed = self.refresh_at(now);
-        self.count += 1;
-        (self.barely_get(), is_refreshed)
-    }
-
-    // Check period, return count or previous count
-    fn get_at(&mut self, now: DateTime<Utc>) -> (u64, bool) {
-        let is_refreshed = self.refresh_at(now);
-        (self.barely_get(), is_refreshed)
+        UnixTime::from_secs((milliseconds / 1_000.0) as u64)
     }
 }
 
 impl PeriodicMeasure {
-    /// Create a new `PeriodicMeasure` with the given storage.
-    pub fn new(storage: MeasureStorage) -> Self {
-        Self {
-            storage,
-            counters: DashMap::new(),
-            clock: Arc::new(SystemMeasureClock),
-        }
+    /// Load the complete ledger once and start the coalescing persistence task.
+    ///
+    /// On native targets this captures the active Tokio runtime handle. The
+    /// constructor returns `MeasureRuntimeError::RuntimeUnavailable` instead
+    /// of panicking when called outside a live runtime.
+    pub async fn new(storage: MeasureStorage) -> Result<Self, MeasureRuntimeError> {
+        Self::new_with_clock(storage, Arc::new(SystemMeasureClock)).await
     }
 
-    #[cfg(all(test, feature = "node"))]
-    fn new_with_clock(storage: MeasureStorage, clock: Arc<dyn MeasureClock>) -> Self {
-        Self {
+    async fn new_with_clock(
+        storage: MeasureStorage,
+        clock: Arc<dyn MeasureClock>,
+    ) -> Result<Self, MeasureRuntimeError> {
+        #[cfg(not(all(feature = "browser", target_family = "wasm")))]
+        let runtime_handle = tokio::runtime::Handle::try_current()
+            .map_err(|error| MeasureRuntimeError::RuntimeUnavailable(error.to_string()))?;
+        let storage = SharedMeasureStorage::from(storage);
+        let mut ledger = match storage.get(SNAPSHOT_KEY).await? {
+            Some(snapshot) => MeasurementLedger::from_snapshot(snapshot)?,
+            None => MeasurementLedger::new(),
+        };
+        let now = clock.now();
+        let reconciliation = ledger.reconcile_runtime(now, reliability_policy());
+        if reconciliation.is_adjusted() {
+            tracing::warn!(
+                clock_adjusted_records = reconciliation.clock_adjusted_records(),
+                reliability_reset_records = reconciliation.reliability_reset_records(),
+                "reconciled measurement state during startup"
+            );
+        }
+        let pruning = ledger.prune(now, CreditPolicy::amule());
+        log_prune_failures(&pruning);
+        let dirty = reconciliation.is_adjusted() || pruning.removed_count() > 0;
+        let next_prune_at = next_prune_time(&ledger, now);
+        let state = Arc::new(MeasureState {
             storage,
-            counters: DashMap::new(),
+            runtime: Mutex::new(RuntimeLedger {
+                ledger,
+                dirty,
+                persisting: false,
+                mutated_while_persisting: false,
+                last_clock: now,
+                next_prune_at,
+            }),
+            persistence_lock: AsyncMutex::new(()),
             clock,
+            #[cfg(not(all(feature = "browser", target_family = "wasm")))]
+            runtime_handle,
+        });
+        let (mut persistence_wake, receiver) = mpsc::channel(PERSISTENCE_WAKE_CAPACITY);
+        spawn_persistence_worker(state.clone(), receiver);
+        if dirty {
+            let _ = persistence_wake.try_send(());
         }
-    }
-
-    fn gen_storage_key(did: Did, counter: MeasureCounter) -> String {
-        format!("PeriodicMeasure/counters/{did}/{counter:?}")
-    }
-
-    // Get count from storage, or create a new count instance.
-    async fn ensure_counter(
-        &self,
-        did: Did,
-        counter: MeasureCounter,
-        now: DateTime<Utc>,
-    ) -> RefMut<'_, (Did, MeasureCounter), Mutex<PeriodicCounter>> {
-        let k = Self::gen_storage_key(did, counter);
-        let count = self
-            .storage
-            .get(&k)
-            .await
-            .unwrap_or_else(|e| {
-                log::error!("Failed to get counter: {e:?}");
-                Some(0)
-            })
-            .unwrap_or(0);
-        self.counters
-            .entry((did, counter))
-            .or_insert_with(|| Mutex::new(PeriodicCounter::new(DURATION, count, now)))
-    }
-
-    async fn save_counter(&self, did: Did, counter: MeasureCounter, count: u64) {
-        let k = Self::gen_storage_key(did, counter);
-        self.storage.put(&k, &count).await.unwrap_or_else(|e| {
-            log::error!("Failed to save counter: {e:?}");
+        Ok(Self {
+            state,
+            persistence_wake,
         })
     }
+
+    /// Persist a snapshot containing every update visible when this method starts.
+    ///
+    /// On native targets, the Tokio runtime captured by [`Self::new`] must
+    /// remain alive until the returned future completes.
+    pub async fn flush(&self) -> Result<(), MeasureRuntimeError> {
+        let (sender, flush) = futures::channel::oneshot::channel();
+        spawn_bounded_flush(self.state.clone(), sender);
+        match flush.await {
+            Ok(result) => result,
+            Err(_) => Err(MeasureRuntimeError::FlushTaskStopped),
+        }
+    }
+
+    /// Persist all applied updates unless the supplied deadline expires first.
+    ///
+    /// On native targets, the Tokio runtime captured by [`Self::new`] must
+    /// remain alive until the returned future completes or reaches `timeout`.
+    pub async fn flush_with_timeout(&self, timeout: Duration) -> Result<(), MeasureRuntimeError> {
+        let (sender, flush) = futures::channel::oneshot::channel();
+        spawn_bounded_flush(self.state.clone(), sender);
+        let flush = flush.fuse();
+        let deadline = measurement_delay(timeout).fuse();
+        futures::pin_mut!(flush, deadline);
+        futures::select! {
+            result = flush => match result {
+                Ok(result) => result,
+                Err(_) => Err(MeasureRuntimeError::FlushTaskStopped),
+            },
+            deadline = deadline => match deadline {
+                Ok(()) => Err(MeasureRuntimeError::FlushTimeout),
+                Err(error) => Err(error),
+            },
+        }
+    }
+
+    fn count(&self, did: Did, counter: MeasureCounter) -> u64 {
+        let (measurement, reconciled) = {
+            let (mut runtime, now) = self.state.runtime_at_now();
+            let reconciled = match maintain_runtime(&mut runtime, now) {
+                Ok(reconciled) => reconciled,
+                Err(error) => {
+                    tracing::error!(peer = %did, %error, "failed to maintain measurement state");
+                    return 0;
+                }
+            };
+            let measurement =
+                runtime
+                    .ledger
+                    .measurement(&did, now, CreditPolicy::amule(), reliability_policy());
+            (measurement, reconciled)
+        };
+        if reconciled {
+            self.wake_persistence();
+        }
+        let measurement = match measurement {
+            Ok(Some(measurement)) => measurement,
+            Ok(None) => return 0,
+            Err(error) => {
+                tracing::warn!(peer = %did, %error, "failed to project measurement counter");
+                return 0;
+            }
+        };
+        let evidence = measurement.reliability;
+        match counter {
+            MeasureCounter::Sent => evidence.sent,
+            MeasureCounter::FailedToSend => evidence.failed_to_send,
+            MeasureCounter::Received => evidence.received,
+            MeasureCounter::FailedToReceive => evidence.failed_to_receive,
+            MeasureCounter::Connect => evidence.connected,
+            MeasureCounter::Disconnected => evidence.disconnected,
+        }
+    }
+
+    fn wake_persistence(&self) {
+        let mut sender = self.persistence_wake.clone();
+        match sender.try_send(()) {
+            Ok(()) => {}
+            Err(error) if error.is_full() => {}
+            Err(error) => tracing::error!(%error, "measurement persistence worker stopped"),
+        }
+    }
+}
+
+async fn flush_state(state: &MeasureState) -> Result<(), MeasureRuntimeError> {
+    let _guard = state.persistence_lock.lock().await;
+    let snapshot = {
+        let mut runtime = lock_or_recover(&state.runtime);
+        prepare_snapshot(&mut runtime)
+    };
+    let result = state.storage.put(SNAPSHOT_KEY, &snapshot).await;
+    finish_persist(&mut lock_or_recover(&state.runtime), result.is_ok());
+    result.map_err(MeasureRuntimeError::from)
+}
+
+type FlushSender = futures::channel::oneshot::Sender<Result<(), MeasureRuntimeError>>;
+
+#[cfg(not(all(feature = "browser", target_family = "wasm")))]
+fn spawn_bounded_flush(state: Arc<MeasureState>, sender: FlushSender) {
+    let runtime_handle = state.runtime_handle.clone();
+    runtime_handle.spawn(async move {
+        let _ = sender.send(flush_state(&state).await);
+    });
+}
+
+#[cfg(not(all(feature = "browser", target_family = "wasm")))]
+async fn measurement_delay(duration: Duration) -> Result<(), MeasureRuntimeError> {
+    futures_timer::Delay::new(duration).await;
+    Ok(())
+}
+
+#[cfg(all(feature = "browser", target_family = "wasm"))]
+async fn measurement_delay(duration: Duration) -> Result<(), MeasureRuntimeError> {
+    let millis = i32::try_from(duration.as_millis()).unwrap_or(i32::MAX);
+    rings_core::utils::js_utils::window_sleep(millis)
+        .await
+        .map_err(|error| MeasureRuntimeError::Timer(format!("{error:?}")))?;
+    Ok(())
+}
+
+#[cfg(all(feature = "browser", target_family = "wasm"))]
+fn spawn_bounded_flush(state: Arc<MeasureState>, sender: FlushSender) {
+    wasm_bindgen_futures::spawn_local(async move {
+        let _ = sender.send(flush_state(&state).await);
+    });
+}
+
+fn next_prune_time(ledger: &MeasurementLedger<Did>, now: UnixTime) -> UnixTime {
+    ledger
+        .next_retention_boundary(CreditPolicy::amule())
+        .unwrap_or_else(|| {
+            UnixTime::from_secs(now.as_secs().saturating_add(PRUNE_INTERVAL_SECONDS))
+        })
+}
+
+fn reconcile_runtime_clock(
+    runtime: &mut RuntimeLedger,
+    now: UnixTime,
+) -> Result<bool, MeasureError> {
+    if now >= runtime.last_clock {
+        runtime.last_clock = now;
+        return Ok(false);
+    }
+    runtime.last_clock = now;
+    let reconciliation = runtime.ledger.reconcile_runtime(now, reliability_policy());
+    runtime.next_prune_at = next_prune_time(&runtime.ledger, now);
+    if !reconciliation.is_adjusted() {
+        return Ok(false);
+    }
+    mark_runtime_dirty(runtime);
+    tracing::warn!(
+        clock_adjusted_records = reconciliation.clock_adjusted_records(),
+        reliability_reset_records = reconciliation.reliability_reset_records(),
+        "reconciled measurement state after wall-clock regression"
+    );
+    Ok(true)
+}
+
+fn maintain_runtime(runtime: &mut RuntimeLedger, now: UnixTime) -> Result<bool, MeasureError> {
+    let mut persistence_required = reconcile_runtime_clock(runtime, now)?;
+    if now < runtime.next_prune_at {
+        return Ok(persistence_required);
+    }
+
+    let pruning = runtime.ledger.prune(now, CreditPolicy::amule());
+    log_prune_failures(&pruning);
+    runtime.next_prune_at = next_prune_time(&runtime.ledger, now);
+    if pruning.removed_count() > 0 {
+        mark_runtime_dirty(runtime);
+        persistence_required = true;
+    }
+    Ok(persistence_required)
+}
+
+fn mark_runtime_dirty(runtime: &mut RuntimeLedger) {
+    runtime.dirty = true;
+    if runtime.persisting {
+        runtime.mutated_while_persisting = true;
+    }
+}
+
+fn prepare_snapshot(runtime: &mut RuntimeLedger) -> MeasurementSnapshot<Did> {
+    runtime.persisting = true;
+    runtime.mutated_while_persisting = false;
+    runtime.ledger.snapshot()
+}
+
+fn finish_persist(runtime: &mut RuntimeLedger, succeeded: bool) {
+    runtime.persisting = false;
+    if succeeded && !runtime.mutated_while_persisting {
+        runtime.dirty = false;
+    }
+    runtime.mutated_while_persisting = false;
+}
+
+fn log_prune_failures(report: &rings_measure::PruneReport<Did>) {
+    for failure in report.failures() {
+        tracing::warn!(
+            peer = %failure.peer(),
+            error = %failure.error(),
+            "retained peer measurement that could not be pruned"
+        );
+    }
+}
+
+fn lock_or_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(not(all(feature = "browser", target_family = "wasm")))]
+fn spawn_persistence_worker(state: Arc<MeasureState>, receiver: mpsc::Receiver<()>) {
+    let runtime_handle = state.runtime_handle.clone();
+    runtime_handle.spawn(run_persistence_worker(state, receiver));
+}
+
+#[cfg(all(feature = "browser", target_family = "wasm"))]
+fn spawn_persistence_worker(state: Arc<MeasureState>, receiver: mpsc::Receiver<()>) {
+    wasm_bindgen_futures::spawn_local(run_persistence_worker(state, receiver));
+}
+
+async fn run_persistence_worker(state: Arc<MeasureState>, mut receiver: mpsc::Receiver<()>) {
+    let mut retrying = false;
+    loop {
+        let should_attempt = if retrying {
+            wait_for_retry_or_close(&mut receiver).await
+        } else {
+            match receiver.next().await {
+                Some(()) => wait_for_debounce_or_close(&mut receiver).await,
+                None => false,
+            }
+        };
+        if !should_attempt {
+            break;
+        }
+        retrying = match persist_pending_once(&state).await {
+            Ok(()) => false,
+            Err(error) => {
+                tracing::error!(%error, "failed to persist measurement snapshot; retrying");
+                true
+            }
+        };
+    }
+    persist_final_with_retries(&state).await;
+}
+
+async fn wait_for_debounce_or_close(receiver: &mut mpsc::Receiver<()>) -> bool {
+    wait_for_debounce_or_close_with_delay(receiver, measurement_delay(PERSISTENCE_MIN_INTERVAL))
+        .await
+}
+
+async fn wait_for_debounce_or_close_with_delay(
+    receiver: &mut mpsc::Receiver<()>,
+    delay: impl std::future::Future<Output = Result<(), MeasureRuntimeError>>,
+) -> bool {
+    let delay = delay.fuse();
+    futures::pin_mut!(delay);
+    loop {
+        let signal = receiver.next().fuse();
+        futures::pin_mut!(signal);
+        futures::select! {
+            result = delay => {
+                log_persistence_delay_error(result);
+                return true;
+            }
+            signal = signal => match signal {
+                Some(()) => {}
+                None => return false,
+            }
+        }
+    }
+}
+
+async fn wait_for_retry_or_close(receiver: &mut mpsc::Receiver<()>) -> bool {
+    wait_for_retry_or_close_with_delay(receiver, measurement_delay(PERSISTENCE_MIN_INTERVAL)).await
+}
+
+async fn wait_for_retry_or_close_with_delay(
+    receiver: &mut mpsc::Receiver<()>,
+    delay: impl std::future::Future<Output = Result<(), MeasureRuntimeError>>,
+) -> bool {
+    let delay = delay.fuse();
+    futures::pin_mut!(delay);
+    let mut wake_observed = false;
+    loop {
+        let signal = receiver.next().fuse();
+        futures::pin_mut!(signal);
+        futures::select! {
+            result = delay => {
+                match result {
+                    Ok(()) => return true,
+                    Err(error) => {
+                        tracing::error!(%error, "failed to schedule measurement persistence retry");
+                        if wake_observed {
+                            return true;
+                        }
+                        // A broken browser timer cannot provide bounded autonomous retry. Wait for
+                        // a later semantic mutation instead of spinning the JS microtask queue.
+                        return receiver.next().await.is_some();
+                    }
+                }
+            }
+            signal = signal => match signal {
+                Some(()) => wake_observed = true,
+                None => return false,
+            }
+        }
+    }
+}
+
+async fn persist_final_with_retries(state: &MeasureState) {
+    // Shutdown retries are deliberately back-to-back: this path must remain
+    // bounded and can recover immediate backend races, but must not add another
+    // timer dependency while the owning runtime is stopping.
+    for attempt in 1..=PERSISTENCE_SHUTDOWN_ATTEMPTS {
+        match persist_pending_once(state).await {
+            Ok(()) => return,
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    attempt,
+                    max_attempts = PERSISTENCE_SHUTDOWN_ATTEMPTS,
+                    "failed to persist final measurement snapshot"
+                );
+            }
+        }
+    }
+}
+
+fn log_persistence_delay_error(result: Result<(), MeasureRuntimeError>) {
+    if let Err(error) = result {
+        tracing::error!(%error, "failed to debounce measurement persistence");
+    }
+}
+
+async fn persist_pending_once(state: &MeasureState) -> Result<(), MeasureRuntimeError> {
+    let _guard = state.persistence_lock.lock().await;
+    let snapshot = {
+        let mut runtime = lock_or_recover(&state.runtime);
+        if !runtime.dirty {
+            return Ok(());
+        }
+        prepare_snapshot(&mut runtime)
+    };
+    let result = state.storage.put(SNAPSHOT_KEY, &snapshot).await;
+    finish_persist(&mut lock_or_recover(&state.runtime), result.is_ok());
+    result.map_err(MeasureRuntimeError::from)
 }
 
 #[cfg_attr(feature = "node", async_trait)]
 #[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
 impl Measure for PeriodicMeasure {
-    /// `incr` increments the counter of the given peer.
     async fn incr(&self, did: Did, counter: MeasureCounter) {
-        let now = self.clock.now();
-        let (count, is_refreshed) = {
-            let c = self.ensure_counter(did, counter, now).await;
-            let result = if let Ok(mut c) = c.lock() {
-                c.incr_at(now)
-            } else {
-                return;
-            };
-            result
-        };
-        if is_refreshed {
-            self.save_counter(did, counter, count).await;
+        if let Err(error) = self
+            .record(did, Authentication::Authenticated, counter.into_event())
+            .await
+        {
+            tracing::error!(peer = %did, %error, "failed to apply compatibility measurement");
         }
     }
 
-    /// `get_count` returns the counter of a peer in the current or previous period.
     async fn get_count(&self, did: Did, counter: MeasureCounter) -> u64 {
-        let now = self.clock.now();
-        let (count, is_refreshed) = {
-            let c = self.ensure_counter(did, counter, now).await;
-            let result = if let Ok(mut c) = c.lock() {
-                c.get_at(now)
-            } else {
-                return 0;
-            };
-            result
+        self.count(did, counter)
+    }
+
+    async fn record(
+        &self,
+        did: Did,
+        authentication: Authentication,
+        event: MeasurementEvent,
+    ) -> Result<ApplyOutcome, MeasureError> {
+        self.record_batch(did, authentication, MeasurementBatch::single(event))
+            .await
+    }
+
+    async fn record_batch(
+        &self,
+        did: Did,
+        authentication: Authentication,
+        batch: MeasurementBatch,
+    ) -> Result<ApplyOutcome, MeasureError> {
+        let (outcome, persistence_required) = {
+            let (mut runtime, now) = self.state.runtime_at_now();
+            let persistence_required = maintain_runtime(&mut runtime, now)?;
+            let outcome = runtime
+                .ledger
+                .apply_batch(did, authentication, batch, now, reliability_policy())
+                .map(|report| {
+                    if let Some(evicted_peer) = report.evicted_peer() {
+                        tracing::warn!(
+                            ?evicted_peer,
+                            replacement_peer = ?did,
+                            "measurement ledger evicted its stalest authenticated peer"
+                        );
+                    }
+                    report.outcome()
+                });
+            let applied = matches!(outcome, Ok(ApplyOutcome::Applied));
+            if applied {
+                mark_runtime_dirty(&mut runtime);
+            }
+            (outcome, persistence_required || applied)
         };
-        if is_refreshed {
-            self.save_counter(did, counter, count).await;
+        if persistence_required {
+            self.wake_persistence();
         }
-        count
+        outcome
+    }
+
+    async fn peer_measurement(&self, did: Did) -> Result<Option<PeerMeasurement>, MeasureError> {
+        let (projected, reconciled) = {
+            let (mut runtime, now) = self.state.runtime_at_now();
+            let reconciled = maintain_runtime(&mut runtime, now)?;
+            let projected =
+                runtime
+                    .ledger
+                    .measurement(&did, now, CreditPolicy::amule(), reliability_policy());
+            (projected, reconciled)
+        };
+        if reconciled {
+            self.wake_persistence();
+        }
+        Ok(projected?.map(PeerMeasurement::from_projected))
+    }
+
+    async fn peer_measurements(&self) -> Result<Vec<PeerMeasurement>, MeasureError> {
+        let (projection, reconciled) = {
+            let (mut runtime, now) = self.state.runtime_at_now();
+            let reconciled = maintain_runtime(&mut runtime, now)?;
+            let projection =
+                runtime
+                    .ledger
+                    .measurements(now, CreditPolicy::amule(), reliability_policy());
+            (projection, reconciled)
+        };
+        if reconciled {
+            self.wake_persistence();
+        }
+        let (measurements, failures) = projection.into_parts();
+        for failure in failures {
+            tracing::warn!(
+                peer = %failure.peer(),
+                error = %failure.error(),
+                "omitted invalid peer from measurement projection"
+            );
+        }
+        Ok(measurements
+            .into_iter()
+            .map(PeerMeasurement::from_projected)
+            .collect())
+    }
+
+    async fn peer_measurements_page(
+        &self,
+        after: Option<Did>,
+        limit: NonZeroUsize,
+    ) -> Result<PeerMeasurementPage, MeasureError> {
+        let (page, reconciled) = {
+            let (mut runtime, now) = self.state.runtime_at_now();
+            let reconciled = maintain_runtime(&mut runtime, now)?;
+            let page = runtime.ledger.measurements_page(
+                after.as_ref(),
+                limit,
+                now,
+                CreditPolicy::amule(),
+                reliability_policy(),
+            );
+            (page, reconciled)
+        };
+        if reconciled {
+            self.wake_persistence();
+        }
+        let (measurements, failures, next_cursor) = page.into_parts();
+        for failure in failures {
+            tracing::warn!(
+                peer = %failure.peer(),
+                error = %failure.error(),
+                "omitted invalid peer from bounded measurement projection"
+            );
+        }
+        Ok(PeerMeasurementPage {
+            measurements: measurements
+                .into_iter()
+                .map(PeerMeasurement::from_projected)
+                .collect(),
+            next_cursor,
+        })
     }
 }
 
@@ -233,211 +721,26 @@ impl Measure for PeriodicMeasure {
 #[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
 impl measure::BehaviourJudgement for PeriodicMeasure {
     async fn quality(&self, did: Did) -> PeerQuality {
-        let thresholds = peer_quality_thresholds();
-        PeerQualityEvidence::from_measure(self, did)
-            .await
-            .classify(thresholds)
-    }
-
-    async fn good(&self, did: Did) -> bool {
-        let connection_is_good = <Self as measure::ConnectBehaviour<
-            { crate::consts::CONNECT_FAILED_LIMIT },
-        >>::good(self, did)
-        .await;
-        let send_is_good = <Self as measure::MessageSendBehaviour<
-            { crate::consts::MSG_SEND_FAILED_LIMIT },
-        >>::good(self, did)
-        .await;
-        let receive_is_good = <Self as measure::MessageRecvBehaviour<
-            { crate::consts::MSG_RECV_FAILED_LIMIT },
-        >>::good(self, did)
-        .await;
-        connection_is_good && send_is_good && receive_is_good
+        match self.peer_measurement(did).await {
+            Ok(Some(measurement)) => measurement.quality,
+            Ok(None) => PeerQuality::Unknown,
+            Err(error) => {
+                tracing::error!(peer = %did, %error, "failed to project peer reliability");
+                PeerQuality::Unknown
+            }
+        }
     }
 }
 
 #[cfg(test)]
 #[cfg(feature = "node")]
-mod tests {
-    use std::str::FromStr;
-    use std::sync::Arc;
-    use std::sync::Mutex;
-
-    use rings_core::measure::BehaviourJudgement;
-    use rings_core::storage::sled::SledStorage;
-    use rings_core::storage::MemStorage;
-
-    use super::*;
-
-    #[derive(Clone)]
-    struct ManualMeasureClock {
-        now: Arc<Mutex<DateTime<Utc>>>,
-    }
-
-    impl ManualMeasureClock {
-        fn new(now: DateTime<Utc>) -> Self {
-            Self {
-                now: Arc::new(Mutex::new(now)),
-            }
-        }
-
-        fn advance(&self, duration: Duration) {
-            let Ok(mut now) = self.now.lock() else {
-                panic!("manual measure clock lock poisoned");
-            };
-            let Some(advanced) = now.checked_add_signed(duration) else {
-                panic!("manual measure clock overflow");
-            };
-            *now = advanced;
-        }
-    }
-
-    impl MeasureClock for ManualMeasureClock {
-        fn now(&self) -> DateTime<Utc> {
-            let Ok(now) = self.now.lock() else {
-                panic!("manual measure clock lock poisoned");
-            };
-            now.to_owned()
-        }
-    }
-
-    fn advance_period(clock: &ManualMeasureClock) {
-        clock.advance(Duration::seconds(DURATION as i64));
-    }
-
-    #[tokio::test]
-    async fn test_measure_counter() {
-        let ms = Box::new(MemStorage::new());
-
-        let did1 = Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
-        let did2 = Did::from_str("0x999999cf1046e68e36E1aA2E0E07105eDDD1f08E").unwrap();
-
-        let clock = ManualMeasureClock::new(Utc::now());
-        let measure = PeriodicMeasure::new_with_clock(ms, Arc::new(clock.clone()));
-        assert_eq!(measure.get_count(did1, MeasureCounter::Sent).await, 0);
-        assert_eq!(measure.get_count(did2, MeasureCounter::Sent).await, 0);
-        assert_eq!(measure.get_count(did1, MeasureCounter::Received).await, 0);
-        assert_eq!(measure.get_count(did2, MeasureCounter::Received).await, 0);
-
-        measure.incr(did1, MeasureCounter::Sent).await;
-        measure.incr(did1, MeasureCounter::Received).await;
-
-        measure.incr(did2, MeasureCounter::Sent).await;
-        measure.incr(did2, MeasureCounter::Sent).await;
-        measure.incr(did2, MeasureCounter::Received).await;
-        measure.incr(did2, MeasureCounter::Received).await;
-        measure.incr(did2, MeasureCounter::Received).await;
-
-        assert_eq!(measure.get_count(did1, MeasureCounter::Sent).await, 1);
-        assert_eq!(measure.get_count(did2, MeasureCounter::Sent).await, 2);
-        assert_eq!(measure.get_count(did1, MeasureCounter::Received).await, 1);
-        assert_eq!(measure.get_count(did2, MeasureCounter::Received).await, 3);
-    }
-
-    #[tokio::test]
-    async fn test_measure_period() {
-        let ms = Box::new(MemStorage::new());
-
-        let did = Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
-
-        let clock = ManualMeasureClock::new(Utc::now());
-        let measure = PeriodicMeasure::new_with_clock(ms, Arc::new(clock.clone()));
-        assert_eq!(measure.get_count(did, MeasureCounter::Sent).await, 0);
-        assert_eq!(measure.get_count(did, MeasureCounter::Received).await, 0);
-
-        measure.incr(did, MeasureCounter::Sent).await;
-        measure.incr(did, MeasureCounter::Sent).await;
-        measure.incr(did, MeasureCounter::Received).await;
-
-        // Will take current count since previous count is 0.
-        assert_eq!(measure.get_count(did, MeasureCounter::Sent).await, 2);
-        assert_eq!(measure.get_count(did, MeasureCounter::Received).await, 1);
-
-        advance_period(&clock);
-
-        measure.incr(did, MeasureCounter::Sent).await;
-        measure.incr(did, MeasureCounter::Received).await;
-        measure.incr(did, MeasureCounter::Received).await;
-        measure.incr(did, MeasureCounter::Received).await;
-
-        // Will take previous count.
-        assert_eq!(measure.get_count(did, MeasureCounter::Sent).await, 2);
-        assert_eq!(measure.get_count(did, MeasureCounter::Received).await, 1);
-
-        advance_period(&clock);
-
-        // Will take previous count.
-        assert_eq!(measure.get_count(did, MeasureCounter::Sent).await, 1);
-        assert_eq!(measure.get_count(did, MeasureCounter::Received).await, 3);
-
-        advance_period(&clock);
-
-        // Will take previous count.
-        assert_eq!(measure.get_count(did, MeasureCounter::Sent).await, 0);
-        assert_eq!(measure.get_count(did, MeasureCounter::Received).await, 0);
-    }
-
-    #[tokio::test]
-    async fn test_persistent_measure_storage() {
-        let ms: MeasureStorage = Box::new(
-            SledStorage::new_with_cap_and_path(4096, "tmp/measure_test_db")
-                .await
-                .unwrap(),
-        );
-        ms.clear().await.unwrap();
-
-        let did = Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
-        let clock = ManualMeasureClock::new(Utc::now());
-        let measure = PeriodicMeasure::new_with_clock(ms, Arc::new(clock.clone()));
-        assert_eq!(measure.get_count(did, MeasureCounter::Sent).await, 0);
-        assert_eq!(measure.get_count(did, MeasureCounter::Received).await, 0);
-
-        measure.incr(did, MeasureCounter::Sent).await;
-        measure.incr(did, MeasureCounter::Sent).await;
-        measure.incr(did, MeasureCounter::Received).await;
-
-        advance_period(&clock);
-
-        // Flush to storage.
-        let c1 = measure.get_count(did, MeasureCounter::Sent).await;
-        assert_eq!(c1, 2);
-        let c2 = measure.get_count(did, MeasureCounter::Received).await;
-        assert_eq!(c2, 1);
-
-        // Release lock of measure storage.
-        drop(measure);
-
-        // Create new measure.
-        let ms2 = Box::new(
-            SledStorage::new_with_cap_and_path(4096, "tmp/measure_test_db")
-                .await
-                .unwrap(),
-        );
-        let measure2 = PeriodicMeasure::new_with_clock(ms2, Arc::new(clock));
-
-        // Will take previous count from storage.
-        assert_eq!(measure2.get_count(did, MeasureCounter::Sent).await, 2);
-        assert_eq!(measure2.get_count(did, MeasureCounter::Received).await, 1);
-    }
-
-    #[tokio::test]
-    async fn test_repeated_disconnections_degrade_peer_quality(
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let ms = Box::new(MemStorage::new());
-        let did = Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0")?;
-        let clock = ManualMeasureClock::new(Utc::now());
-        let measure = PeriodicMeasure::new_with_clock(ms, Arc::new(clock));
-
-        assert_eq!(measure.quality(did).await, PeerQuality::Unknown);
-
-        measure.incr(did, MeasureCounter::Connect).await;
-        assert_eq!(measure.quality(did).await, PeerQuality::Healthy);
-
-        for _ in 0..crate::consts::CONNECT_FAILED_LIMIT {
-            measure.incr(did, MeasureCounter::Disconnected).await;
-        }
-
-        assert_eq!(measure.quality(did).await, PeerQuality::Degraded);
-        Ok(())
-    }
-}
+#[allow(clippy::panic)]
+mod authentication_tests;
+#[cfg(test)]
+#[cfg(feature = "node")]
+#[allow(clippy::panic)]
+mod tests;
+#[cfg(test)]
+#[cfg(feature = "node")]
+#[allow(clippy::panic)]
+mod worker_tests;

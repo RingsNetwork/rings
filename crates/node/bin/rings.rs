@@ -712,7 +712,7 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
         SledStorage::new_with_cap_and_path(measure_storage.capacity, measure_storage.path).await?,
     );
 
-    let measure = PeriodicMeasure::new(per_measure_storage);
+    let measure = PeriodicMeasure::new(per_measure_storage).await?;
 
     let processor = Arc::new(
         ProcessorBuilder::from_config(&pc)?

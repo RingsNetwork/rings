@@ -85,6 +85,7 @@ rand = { version = "0.8.5", features = ["getrandom"] }
 rings-codec = { workspace = true }
 rings-core = { workspace = true, optional = true }
 rings-derive = { workspace = true, optional = true }
+rings-measure = { workspace = true }
 rings-rpc = { workspace = true, optional = true }
 rings-transport = { workspace = true }
 serde = { version = "1.0.136", features = ["derive"] }

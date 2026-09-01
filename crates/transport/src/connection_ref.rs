@@ -70,6 +70,11 @@ impl ConnectionRef<crate::connections::WebrtcConnection> {
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 impl ConnectionRef<crate::connections::DummyConnection> {
+    /// Stable physical generation identifier used by deterministic dummy simulations.
+    pub fn dummy_generation_id(&self) -> Result<String> {
+        Ok(self.upgrade()?.generation_id().to_string())
+    }
+
     /// Test hook: force a dummy connection state without dispatching lifecycle callbacks.
     pub fn force_dummy_webrtc_connection_state_without_callback(
         &self,

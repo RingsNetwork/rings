@@ -48,6 +48,8 @@ mod test_outbound_scheduler;
 mod test_stabilization;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 mod test_stabilization_failover;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+mod test_sync_storm;
 
 const TEST_DHT_FINGER_TABLE_SIZE: usize = 8;
 const TEST_WAIT_TIMEOUT: Duration = Duration::from_secs(5);

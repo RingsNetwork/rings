@@ -65,6 +65,17 @@ struct OutboundSendLog {
     completion: OutboundCompletion,
 }
 
+struct OutboundPreparation {
+    message_kind: OutboundMessageKind,
+    wire_bytes: usize,
+    useful_bytes: u64,
+    records_missing_connection_failure: bool,
+    tx_id: uuid::Uuid,
+    destination: Did,
+    relay_destination: Did,
+    next_hop: Did,
+}
+
 struct PreparedOutboundTransfer {
     admitted: AdmittedConnection,
     handle: OutboundPeerHandle,
@@ -77,6 +88,13 @@ struct PreparedOutboundTransfer {
 struct FramedOutboundTransfer {
     transfer: OutboundTransfer,
     receiver: futures::channel::oneshot::Receiver<Result<SendCompletionOutcome>>,
+}
+
+struct OutboundTransferProperties {
+    useful_bytes: u64,
+    completion: OutboundCompletion,
+    stop: StopToken,
+    detached_admission: Option<DetachedAdmission>,
 }
 
 struct StopOnDrop {
@@ -400,7 +418,11 @@ impl SwarmTransport {
             OutboundCompletion::Detached => {
                 let Some(connection) = self.get_and_check_send_connection(did).await else {
                     if records_missing_connection_failure {
-                        self.record_peer_message_send_failed(did).await;
+                        self.record_peer_message_send_failed(
+                            did,
+                            crate::measure::Authentication::LocallyAddressed,
+                        )
+                        .await;
                     }
                     return Err(Error::SwarmMissDidInTable(did));
                 };
@@ -535,34 +557,14 @@ impl SwarmTransport {
         stop: StopToken,
         detached_admission: Option<DetachedAdmission>,
     ) -> Result<Option<PreparedOutboundTransfer>> {
-        let message_kind = OutboundMessageKind::from_wire(&payload.transaction.data)?;
-        let wire_bytes = payload.wire_size()?;
-        let message_kind_name = message_kind.as_str();
-        let records_missing_connection_failure = completion == OutboundCompletion::Detached
-            && message_kind.records_missing_connection_failure();
-        let tx_id = payload.transaction.tx_id;
-        let destination = payload.transaction.destination;
-        let relay_destination = payload.relay.destination;
-        let next_hop = payload.relay.next_hop;
-        if wire_bytes > TRANSPORT_MAX_SIZE {
-            log_oversized_payload(OversizedPayloadLog {
-                local: self.dht.did,
-                next_hop,
-                destination,
-                relay_destination,
-                tx_id,
-                message_kind: message_kind_name,
-                bytes: wire_bytes,
-                max_bytes: TRANSPORT_MAX_SIZE,
-            });
-            return Err(Error::MessageTooLarge(wire_bytes));
-        }
-        if self.admitted_send_connection(did)?.is_none() {
-            if records_missing_connection_failure {
-                self.record_peer_message_send_failed(did).await;
-            }
-            return Err(Error::SwarmMissDidInTable(did));
-        }
+        let preparation = self
+            .inspect_outbound_preparation(did, &payload, completion)
+            .await?;
+        let message_kind = preparation.message_kind;
+        let wire_bytes = preparation.wire_bytes;
+        let useful_bytes = preparation.useful_bytes;
+        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+        crate::simulation::record_outbound_submission(preparation.tx_id);
         let capacity_permit = self
             .reserve_outbound_capacity(
                 did,
@@ -578,7 +580,11 @@ impl SwarmTransport {
             ChunkSendPermit::Always
         };
         let admitted = self
-            .connection_for_send(did, completion, records_missing_connection_failure)
+            .connection_for_send(
+                did,
+                completion,
+                preparation.records_missing_connection_failure,
+            )
             .await?;
         let Some(handle) =
             admitted.with_current_connection(|_| self.outbound_schedulers.handle(did))?
@@ -588,18 +594,22 @@ impl SwarmTransport {
         let handle = handle?;
         let max_message_size = admitted.connection().max_message_size();
         let Some(plan) = WireReserves::PRODUCTION.plan(wire_bytes, max_message_size) else {
-            self.record_peer_message_send_failed(did).await;
+            self.record_peer_message_send_failed(
+                did,
+                crate::measure::Authentication::Authenticated,
+            )
+            .await;
             return Err(Error::PeerMaxMessageSizeTooSmall(max_message_size));
         };
         admitted.ensure_current()?;
         let data = payload.to_wire()?;
         tracing::debug!(
             local = %self.dht.did,
-            next_hop = %next_hop,
-            destination = %destination,
-            relay_destination = %relay_destination,
-            tx_id = %tx_id,
-            message_kind = message_kind_name,
+            next_hop = %preparation.next_hop,
+            destination = %preparation.destination,
+            relay_destination = %preparation.relay_destination,
+            tx_id = %preparation.tx_id,
+            message_kind = message_kind.as_str(),
             bytes = wire_bytes,
             max_message_size,
             framing = ?plan,
@@ -608,10 +618,13 @@ impl SwarmTransport {
         let framed = self.frame_outbound_transfer(
             OutboundTransferRoute::new(message_kind.class(), did, admitted.clone(), permit),
             data,
-            completion,
-            stop,
-            detached_admission,
             plan,
+            OutboundTransferProperties {
+                useful_bytes,
+                completion,
+                stop,
+                detached_admission,
+            },
         );
         Ok(Some(PreparedOutboundTransfer {
             admitted,
@@ -620,35 +633,91 @@ impl SwarmTransport {
             capacity_permit,
             receiver: framed.receiver,
             log: OutboundSendLog {
-                next_hop,
-                destination,
-                relay_destination,
-                tx_id,
-                message_kind: message_kind_name,
+                next_hop: preparation.next_hop,
+                destination: preparation.destination,
+                relay_destination: preparation.relay_destination,
+                tx_id: preparation.tx_id,
+                message_kind: message_kind.as_str(),
                 completion,
             },
         }))
+    }
+
+    async fn inspect_outbound_preparation(
+        &self,
+        did: Did,
+        payload: &MessagePayload,
+        completion: OutboundCompletion,
+    ) -> Result<OutboundPreparation> {
+        let message_kind = OutboundMessageKind::from_wire(&payload.transaction.data)?;
+        let wire_bytes = payload.wire_size()?;
+        let preparation = OutboundPreparation {
+            message_kind,
+            wire_bytes,
+            useful_bytes: u64::try_from(payload.transaction.data.len())
+                .map_err(|_| Error::MessageSizeOverflow)?,
+            records_missing_connection_failure: completion == OutboundCompletion::Detached
+                && message_kind.records_missing_connection_failure(),
+            tx_id: payload.transaction.tx_id,
+            destination: payload.transaction.destination,
+            relay_destination: payload.relay.destination,
+            next_hop: payload.relay.next_hop,
+        };
+        if wire_bytes > TRANSPORT_MAX_SIZE {
+            log_oversized_payload(OversizedPayloadLog {
+                local: self.dht.did,
+                next_hop: preparation.next_hop,
+                destination: preparation.destination,
+                relay_destination: preparation.relay_destination,
+                tx_id: preparation.tx_id,
+                message_kind: message_kind.as_str(),
+                bytes: wire_bytes,
+                max_bytes: TRANSPORT_MAX_SIZE,
+            });
+            return Err(Error::MessageTooLarge(wire_bytes));
+        }
+        if self.admitted_send_connection(did)?.is_none() {
+            if preparation.records_missing_connection_failure {
+                self.record_peer_message_send_failed(
+                    did,
+                    crate::measure::Authentication::LocallyAddressed,
+                )
+                .await;
+            }
+            return Err(Error::SwarmMissDidInTable(did));
+        }
+        Ok(preparation)
     }
 
     fn frame_outbound_transfer(
         &self,
         route: OutboundTransferRoute,
         data: bytes::Bytes,
-        completion: OutboundCompletion,
-        stop: StopToken,
-        detached_admission: Option<DetachedAdmission>,
         framing: Framing,
+        properties: OutboundTransferProperties,
     ) -> FramedOutboundTransfer {
+        let OutboundTransferProperties {
+            useful_bytes,
+            completion,
+            stop,
+            detached_admission,
+        } = properties;
         let (transfer, receiver) = match framing {
-            Framing::Whole => {
-                OutboundTransfer::whole(route, data, completion, stop, detached_admission)
-            }
+            Framing::Whole => OutboundTransfer::whole(
+                route,
+                data,
+                useful_bytes,
+                completion,
+                stop,
+                detached_admission,
+            ),
             Framing::Chunked { chunk_size } => {
                 let chunks: ChunkFrames = Box::new(ChunkList::stream(data, chunk_size));
                 OutboundTransfer::chunked(
                     route,
                     self.session_sk.clone(),
                     chunks,
+                    useful_bytes,
                     completion,
                     stop,
                     detached_admission,
