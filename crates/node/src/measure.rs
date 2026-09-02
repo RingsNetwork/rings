@@ -43,9 +43,13 @@ const PERSISTENCE_MIN_INTERVAL: Duration = Duration::from_millis(50);
 // this interval. A hard crash may lose at most one interval of advisory state.
 #[cfg(not(test))]
 const PERSISTENCE_MIN_INTERVAL: Duration = Duration::from_secs(60);
-#[cfg(test)]
-const RELIABILITY_WINDOW: NonZeroU64 = NonZeroU64::MIN;
-#[cfg(not(test))]
+// One window for tests and production. Controlled-clock unit tests advance the clock by
+// `RELIABILITY_WINDOW` to drive epoch rollover deterministically, so they need no shorter
+// window. A sub-second test window instead broke wall-clock integration tests: reliability
+// evidence is windowed (reset when a fresh observation lands in a later epoch) while credit
+// is cumulative, so under live keepalive traffic an epoch boundary between a send and a
+// later read could reset `evidence.sent` to 0 even though credit had grown — a flaky
+// `evidence.sent >= 1`. A production-sized window is never crossed within a test.
 #[allow(
     clippy::unwrap_used,
     reason = "the non-zero integer literal is validated during const evaluation"
