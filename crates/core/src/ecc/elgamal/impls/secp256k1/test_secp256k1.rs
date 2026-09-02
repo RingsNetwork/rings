@@ -117,7 +117,7 @@ fn test_algorithm() {
         31, 146, 117, 219, 175, 223, 186, 129, 148, 46, 179, 51, 11, 7, 243, 140, 190, 228, 235,
         184, 107, 220, 33, 116, 175, 150, 72, 213, 245, 80, 154, 84,
     ];
-    let r_sca = GroupScalar::<Secp256k1>::from(r).into_inner();
+    let r_sca = GroupScalar::<Secp256k1>::try_from(&r).unwrap().into_inner();
     let mut got_r = [0u8; 32];
     got_r.copy_from_slice(r_sca.to_bytes().as_slice());
     assert_eq!(got_r, r_v);
@@ -164,7 +164,10 @@ fn test_algorithm() {
     assert_eq!(got_c2_x, c2_x);
     assert_eq!(got_c2_y, c2_y);
 
-    let t = K256ProjectivePoint::from(a_c1) * GroupScalar::<Secp256k1>::from(key).into_inner();
+    let t = K256ProjectivePoint::from(a_c1)
+        * GroupScalar::<Secp256k1>::try_from(&key)
+            .unwrap()
+            .into_inner();
     let a_t = t.to_affine();
     let t_x = [
         218, 19, 55, 137, 15, 46, 160, 160, 208, 222, 206, 77, 46, 79, 32, 80, 64, 243, 93, 23,
@@ -189,7 +192,7 @@ fn test_encrypt_decrypt() {
             .unwrap();
     let pubkey = key.pubkey();
     let t: String = random(1024);
-    assert_eq!(decrypt(&encrypt(&t, pubkey).unwrap(), key).unwrap(), t)
+    assert_eq!(decrypt(&encrypt(&t, pubkey).unwrap(), &key).unwrap(), t)
 }
 
 #[test]
@@ -200,7 +203,7 @@ fn test_encrypt_decrypt_keeps_nul_bytes() {
     let pubkey = key.pubkey();
     let message = format!("\0{}{}", "a".repeat(FIELD_CHUNK_SIZE - 1), "\0tail");
     assert_eq!(
-        decrypt(&encrypt(&message, pubkey).unwrap(), key).unwrap(),
+        decrypt(&encrypt(&message, pubkey).unwrap(), &key).unwrap(),
         message
     );
 }
@@ -217,7 +220,7 @@ fn test_encrypt_decrypt_binary_bytes() {
 
     let ciphertext = encrypt_bytes_with_rng(&payload, pubkey, &mut rng).unwrap();
 
-    assert_eq!(decrypt_bytes(&ciphertext, key).unwrap(), payload);
+    assert_eq!(decrypt_bytes(&ciphertext, &key).unwrap(), payload);
 }
 
 #[test]
@@ -234,7 +237,7 @@ fn test_encrypt_with_rng_is_reproducible_for_same_seed() {
     let ciphertext_b = encrypt_with_rng(&message, pubkey, &mut rng_b).unwrap();
 
     assert_eq!(ciphertext_a, ciphertext_b);
-    assert_eq!(decrypt(&ciphertext_a, key).unwrap(), message);
+    assert_eq!(decrypt(&ciphertext_a, &key).unwrap(), message);
 }
 
 #[test]
@@ -260,7 +263,7 @@ fn test_decrypt_malformed_ciphertext_returns_error() {
         SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0")
             .unwrap();
     let malformed = PublicKey([0u8; 33]);
-    let result = std::panic::catch_unwind(|| decrypt(&[(malformed, malformed)], key));
+    let result = std::panic::catch_unwind(|| decrypt(&[(malformed, malformed)], &key));
 
     assert!(result.is_ok());
     assert!(result.unwrap().is_err());
@@ -279,7 +282,7 @@ fn test_aead_encrypt_decrypt_binary_bytes() {
 
     let sealed = encrypt_aead_with_rng(&payload, aad, pubkey, &mut rng).unwrap();
 
-    assert_eq!(decrypt_aead(&sealed, aad, key).unwrap(), payload);
+    assert_eq!(decrypt_aead(&sealed, aad, &key).unwrap(), payload);
 }
 
 #[test]
@@ -294,7 +297,7 @@ fn test_aead_rejects_ciphertext_tampering() {
     *first ^= 1;
 
     assert!(matches!(
-        decrypt_aead(&sealed, b"aad", key),
+        decrypt_aead(&sealed, b"aad", &key),
         Err(Error::MessageDecryptionFailed(_))
     ));
 }
@@ -309,7 +312,7 @@ fn test_aead_rejects_associated_data_tampering() {
     let sealed = encrypt_aead_with_rng(b"authenticated", b"aad", pubkey, &mut rng).unwrap();
 
     assert!(matches!(
-        decrypt_aead(&sealed, b"other-aad", key),
+        decrypt_aead(&sealed, b"other-aad", &key),
         Err(Error::MessageDecryptionFailed(_))
     ));
 }
@@ -327,7 +330,7 @@ fn test_aead_rejects_empty_wrapped_key() {
     };
 
     assert!(matches!(
-        decrypt_aead(&sealed, b"aad", key),
+        decrypt_aead(&sealed, b"aad", &key),
         Err(Error::MessageDecryptionFailed(_))
     ));
 }
@@ -345,7 +348,7 @@ fn test_bench_encrypt_decrypt_4kb() {
 
     for _ in 0..rounds {
         let ciphertext = encrypt(std::hint::black_box(&message), pubkey).unwrap();
-        let plaintext = decrypt(std::hint::black_box(&ciphertext), key).unwrap();
+        let plaintext = decrypt(std::hint::black_box(&ciphertext), &key).unwrap();
         assert_eq!(plaintext, message);
     }
 

@@ -344,7 +344,7 @@ pub mod tests {
 
     #[test]
     fn test_connect_successor_hint_skips_requester_self_report() -> Result<()> {
-        let keys = gen_ordered_keys(4);
+        let keys = gen_ordered_keys::<4>();
         let local = keys[0].address().into();
         let requester = keys[1].address().into();
         let next = keys[2].address().into();
@@ -362,10 +362,10 @@ pub mod tests {
 
     #[tokio::test]
     async fn test_sync_successor_report_connects_advertised_successor() -> Result<()> {
-        let keys = gen_ordered_keys(3);
-        let node1 = prepare_node(keys[0]).await;
-        let node2 = prepare_node(keys[1]).await;
-        let node3 = prepare_node(keys[2]).await;
+        let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys::<3>();
+        let node1 = prepare_node(key1).await;
+        let node2 = prepare_node(key2).await;
+        let node3 = prepare_node(key3).await;
 
         manually_establish_connection(&node1.swarm, &node2.swarm).await;
         wait_for_msgs([&node1, &node2, &node3]).await;
@@ -443,8 +443,7 @@ pub mod tests {
     //
     #[tokio::test]
     async fn test_triple_nodes_connection_1_2_3() -> Result<()> {
-        let keys = gen_ordered_keys(3);
-        let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
+        let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys::<3>();
         test_triple_ordered_nodes_connection(key1, key2, key3).await?;
         Ok(())
     }
@@ -452,8 +451,7 @@ pub mod tests {
     // The 2_3_1 should have same behavior as 1_2_3 since they are all clockwise.
     #[tokio::test]
     async fn test_triple_nodes_connection_2_3_1() -> Result<()> {
-        let keys = gen_ordered_keys(3);
-        let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
+        let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys::<3>();
         test_triple_ordered_nodes_connection(key2, key3, key1).await?;
         Ok(())
     }
@@ -461,8 +459,7 @@ pub mod tests {
     // The 3_1_2 should have same behavior as 1_2_3 since they are all clockwise.
     #[tokio::test]
     async fn test_triple_nodes_connection_3_1_2() -> Result<()> {
-        let keys = gen_ordered_keys(3);
-        let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
+        let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys::<3>();
         test_triple_ordered_nodes_connection(key3, key1, key2).await?;
         Ok(())
     }
@@ -488,8 +485,7 @@ pub mod tests {
     //
     #[tokio::test]
     async fn test_triple_nodes_connection_3_2_1() -> Result<()> {
-        let keys = gen_ordered_keys(3);
-        let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
+        let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys::<3>();
         test_triple_desc_ordered_nodes_connection(key3, key2, key1).await?;
         Ok(())
     }
@@ -497,8 +493,7 @@ pub mod tests {
     // The 2_1_3 should have same behavior as 3_2_1 since they are all anti-clockwise.
     #[tokio::test]
     async fn test_triple_nodes_connection_2_1_3() -> Result<()> {
-        let keys = gen_ordered_keys(3);
-        let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
+        let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys::<3>();
         test_triple_desc_ordered_nodes_connection(key2, key1, key3).await?;
         Ok(())
     }
@@ -506,8 +501,7 @@ pub mod tests {
     // The 1_3_2 should have same behavior as 3_2_1 since they are all anti-clockwise.
     #[tokio::test]
     async fn test_triple_nodes_connection_1_3_2() -> Result<()> {
-        let keys = gen_ordered_keys(3);
-        let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
+        let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys::<3>();
         test_triple_desc_ordered_nodes_connection(key1, key3, key2).await?;
         Ok(())
     }
@@ -693,8 +687,7 @@ pub mod tests {
 
     #[tokio::test]
     async fn test_fourth_node_connection() -> Result<()> {
-        let keys = gen_ordered_keys(4);
-        let (key1, key2, key3, key4) = (keys[0], keys[1], keys[2], keys[3]);
+        let [key1, key2, key3, key4]: [SecretKey; 4] = gen_ordered_keys::<4>();
         let (node1, node2, node3) = test_triple_ordered_nodes_connection(key1, key2, key3).await?;
         // we now have three connected nodes
         // node1 -> node2 -> node3
@@ -823,10 +816,9 @@ pub mod tests {
     #[cfg(feature = "dummy")]
     #[tokio::test]
     async fn test_joining_between_bootstrap_and_successor_connects_successor_hint() -> Result<()> {
-        let keys = gen_ordered_keys(4);
-        let (node1, node2, node3) =
-            test_triple_ordered_nodes_connection(keys[0], keys[2], keys[3]).await?;
-        let joining = prepare_node(keys[1]).await;
+        let [key1, joining_key, key3, key4]: [SecretKey; 4] = gen_ordered_keys::<4>();
+        let (node1, node2, node3) = test_triple_ordered_nodes_connection(key1, key3, key4).await?;
+        let joining = prepare_node(joining_key).await;
 
         manually_establish_connection(&joining.swarm, &node1.swarm).await;
         wait_until(

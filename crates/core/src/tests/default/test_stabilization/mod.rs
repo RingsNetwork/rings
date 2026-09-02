@@ -213,13 +213,13 @@ async fn test_stabilization_once() -> Result<()> {
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
     println!("swarm1: {:?}, swarm2: {:?}", node1.did(), node2.did());
 
-    wait_for_successor(&node1, key2.address().into()).await?;
-    wait_for_successor(&node2, key1.address().into()).await?;
+    wait_for_successor(&node1, node2.did()).await?;
+    wait_for_successor(&node2, node1.did()).await?;
 
     let stabilizer = node1.swarm.stabilizer();
     stabilizer.stabilize().await?;
-    wait_for_predecessor(&node2, key1.address().into()).await?;
-    wait_for_successor(&node1, key2.address().into()).await?;
+    wait_for_predecessor(&node2, node1.did()).await?;
+    wait_for_successor(&node1, node2.did()).await?;
 
     Ok(())
 }
@@ -776,14 +776,14 @@ async fn test_stabilization() -> Result<()> {
     let node2 = prepare_node(key2).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
 
-    wait_for_successor(&node1, key2.address().into()).await?;
-    wait_for_successor(&node2, key1.address().into()).await?;
+    wait_for_successor(&node1, node2.did()).await?;
+    wait_for_successor(&node2, node1.did()).await?;
 
     let stabilizer1 = node1.swarm.stabilizer();
     let stabilizer2 = node2.swarm.stabilizer();
     tokio::try_join!(stabilizer1.stabilize(), stabilizer2.stabilize())?;
 
-    wait_for_predecessor(&node2, key1.address().into()).await?;
-    wait_for_predecessor(&node1, key2.address().into()).await?;
+    wait_for_predecessor(&node2, node1.did()).await?;
+    wait_for_predecessor(&node1, node2.did()).await?;
     Ok(())
 }

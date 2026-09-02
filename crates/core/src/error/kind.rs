@@ -209,6 +209,10 @@ pub enum Error {
     #[error("ECDSA Invalid recover Id {0}")]
     InvalidRecoverId(u8),
 
+    /// Signature encoding is valid but not in its canonical form.
+    #[error("Signature is not canonical")]
+    NonCanonicalSignature,
+
     /// Gzip encode error.
     #[error("Gzip encode error.")]
     GzipEncode,

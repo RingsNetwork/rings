@@ -48,7 +48,7 @@ impl SessionSk {
         let account_entity = Did::from(key.address()).to_string();
         let account_type = "secp256k1".to_string();
         let builder = SessionSkBuilder::new(account_entity, account_type);
-        let sig = key.sign(&builder.unsigned_proof());
+        let sig = key.sign(&builder.unsigned_proof())?;
         builder.set_session_sig(sig.to_vec()).build()
     }
 
@@ -68,13 +68,13 @@ impl SessionSk {
         sealed: &crate::ecc::elgamal::impls::secp256k1::AeadCiphertext,
         aad: &[u8],
     ) -> Result<Vec<u8>> {
-        crate::ecc::elgamal::impls::secp256k1::decrypt_aead(sealed, aad, self.sk)
+        crate::ecc::elgamal::impls::secp256k1::decrypt_aead(sealed, aad, &self.sk)
     }
 
     /// Sign a message with the delegated session key.
     pub fn sign(&self, msg: &[u8]) -> Result<Vec<u8>> {
         let h = keccak256(msg);
-        Ok(signers::secp256k1::sign(self.sk, &h).to_vec())
+        Ok(signers::secp256k1::sign(&self.sk, &h)?.to_vec())
     }
 
     /// Get the authorizing account DID.

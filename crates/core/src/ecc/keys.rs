@@ -25,6 +25,7 @@ use rand::SeedableRng;
 use rand_hc::Hc128Rng;
 use serde::Deserialize;
 use serde::Serialize;
+use zeroize::Zeroize;
 
 use super::keccak256;
 use super::signers;
@@ -102,11 +103,11 @@ pub enum AccountVerifier {
 }
 
 /// Ed25519 signing seed.
-#[derive(Deserialize, Serialize, Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Deserialize, Serialize, Clone, Eq, PartialEq)]
 pub struct Ed25519SecretKey([u8; 32]);
 
 /// Secret key used for account signatures.
-#[derive(Deserialize, Serialize, Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Deserialize, Serialize, Clone, Eq, PartialEq)]
 pub enum SigningSecretKey {
     /// secp256k1 ECDSA signing key.
     Secp256k1(SecretKey),
@@ -120,6 +121,29 @@ pub enum SigningSecretKey {
     Ed25519(Ed25519SecretKey),
     /// BLS12-381 signing key.
     Bls12381(SecretKey),
+}
+
+impl std::fmt::Debug for Ed25519SecretKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Ed25519SecretKey")
+            .field(&"<redacted>")
+            .finish()
+    }
+}
+
+impl Drop for Ed25519SecretKey {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl std::fmt::Debug for SigningSecretKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SigningSecretKey")
+            .field("algorithm", &self.algorithm())
+            .field("secret", &"<redacted>")
+            .finish()
+    }
 }
 
 impl SignatureAlgorithm {
@@ -354,20 +378,20 @@ impl SigningSecretKey {
     /// Sign raw message bytes using this key's algorithm.
     pub fn sign_raw(&self, msg: &[u8]) -> Result<Vec<u8>> {
         Ok(match self {
-            Self::Secp256k1(sk) => signers::secp256k1::sign_raw(*sk, msg).to_vec(),
-            Self::Eip191(sk) => signers::eip191::sign_raw(*sk, msg).to_vec(),
+            Self::Secp256k1(sk) => signers::secp256k1::sign_raw(sk, msg)?.to_vec(),
+            Self::Eip191(sk) => signers::eip191::sign_raw(sk, msg)?.to_vec(),
             Self::Bip137(sk) => {
-                let signature = sk.sign_hash(&signers::bip137::magic_hash(msg));
+                let signature = sk.sign_hash(&signers::bip137::magic_hash(msg))?;
                 let mut out = Vec::with_capacity(65);
                 out.push(signature[64] + 27);
                 out.extend_from_slice(&signature[..64]);
                 out
             }
             Self::Secp256r1(sk) => {
-                signers::secp256r1::sign(*sk, &signers::secp256r1::hash(msg))?.to_vec()
+                signers::secp256r1::sign(sk, &signers::secp256r1::hash(msg))?.to_vec()
             }
             Self::Ed25519(sk) => sk.sign_raw(msg)?.to_vec(),
-            Self::Bls12381(sk) => signers::bls::sign(*sk, msg)?.0.to_vec(),
+            Self::Bls12381(sk) => signers::bls::sign(sk, msg)?.0.to_vec(),
         })
     }
 
@@ -412,14 +436,14 @@ impl SigningSecretKey {
             Self::Secp256k1(sk) => VerificationPublicKey::Secp256k1(sk.pubkey()),
             Self::Eip191(sk) => VerificationPublicKey::Eip191(sk.pubkey()),
             Self::Bip137(sk) => VerificationPublicKey::Bip137(sk.pubkey()),
-            Self::Secp256r1(sk) => VerificationPublicKey::Secp256r1(secp256r1_public_key(*sk)?),
+            Self::Secp256r1(sk) => VerificationPublicKey::Secp256r1(secp256r1_public_key(sk)?),
             Self::Ed25519(sk) => VerificationPublicKey::Ed25519(sk.public_key()?),
             Self::Bls12381(sk) => VerificationPublicKey::Bls12381(signers::bls::public_key(sk)?),
         })
     }
 }
 
-fn secp256r1_public_key(secret_key: SecretKey) -> Result<PublicKey<33>> {
+fn secp256r1_public_key(secret_key: &SecretKey) -> Result<PublicKey<33>> {
     let sk_bytes: elliptic_curve::FieldBytes<p256::NistP256> = secret_key.into();
     let signing_key = ecdsa::SigningKey::<p256::NistP256>::from_bytes(&sk_bytes)?;
     let encoded = signing_key.verifying_key().to_encoded_point(false);
@@ -460,7 +484,7 @@ mod tests {
             did,
         };
         let msg = b"session proof";
-        let sig = secret.sign_raw(msg);
+        let sig = secret.sign_raw(msg).unwrap();
 
         assert_eq!(reference.did(), did);
         assert!(reference.verify(msg, sig));
@@ -561,6 +585,20 @@ mod tests {
             SigningSecretKey::random_ed25519_with_rng(&mut rng_a),
             SigningSecretKey::random_ed25519_with_rng(&mut rng_b)
         );
+    }
+
+    #[test]
+    fn signing_secrets_redact_debug_and_need_drop() {
+        let ed25519 = Ed25519SecretKey::from_bytes([0xabu8; 32]);
+        let signing = SigningSecretKey::Ed25519(ed25519.clone());
+
+        assert_eq!(format!("{ed25519:?}"), "Ed25519SecretKey(\"<redacted>\")");
+        assert_eq!(
+            format!("{signing:?}"),
+            "SigningSecretKey { algorithm: \"ed25519\", secret: \"<redacted>\" }"
+        );
+        assert!(std::mem::needs_drop::<Ed25519SecretKey>());
+        assert!(std::mem::needs_drop::<SigningSecretKey>());
     }
 
     #[test]
