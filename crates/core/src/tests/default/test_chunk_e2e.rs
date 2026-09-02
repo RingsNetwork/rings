@@ -59,11 +59,12 @@ use crate::tests::outbound_capacity_released;
 struct CountingMeasure {
     counters: Mutex<Vec<(crate::dht::Did, MeasureCounter)>>,
     events: Mutex<Vec<(crate::dht::Did, MeasurementEvent)>>,
-    /// Monotonic generation bumped after every recorded event. It lets a test await
-    /// a specific measurement *landing* rather than poll a wall-clock window: `watch`
-    /// retains the latest value, so a bump that races a waiter's predicate re-check is
-    /// never lost, and a measurement that never lands surfaces as a deterministic hang
-    /// (bounded by the test harness) instead of an intermittent timeout.
+    /// Monotonic generation bumped once each recording is fully applied (its event and
+    /// counters both visible). It lets a test await a specific measurement *landing*
+    /// rather than poll a wall-clock window: `watch` retains the latest value, so a bump
+    /// that races a waiter's predicate re-check is never lost, and a measurement that
+    /// never lands surfaces as a deterministic hang (caught by the CI job timeout)
+    /// instead of an intermittent sub-second timeout.
     recorded: watch::Sender<u64>,
 }
 
@@ -72,7 +73,7 @@ impl Default for CountingMeasure {
         Self {
             counters: Mutex::new(Vec::new()),
             events: Mutex::new(Vec::new()),
-            recorded: watch::channel(0).0,
+            recorded: watch::Sender::new(0),
         }
     }
 }
@@ -113,15 +114,17 @@ impl CountingMeasure {
         }
     }
 
-    /// Await until `predicate` holds, re-checking only when a new measurement is
-    /// recorded. This is an event wait, not a timed poll: it parks on the `recorded`
-    /// generation and never consults the wall clock, so it cannot flake on a slow
-    /// runner. `wait_for` evaluates `predicate` immediately and again on each bump.
-    async fn await_event(&self, predicate: impl Fn(&Self) -> bool) {
+    /// Await until `predicate` holds over the fully-applied measure state, re-checking
+    /// only when a recording lands. This is an event wait, not a timed poll: it parks on
+    /// the `recorded` generation and never consults the wall clock, so it cannot flake
+    /// on a slow runner. `wait_for` evaluates `predicate` immediately and again on each
+    /// bump, and a bump lands only after the recording's counters are visible, so a
+    /// predicate over either `events` or `counters` is sound.
+    async fn await_recorded(&self, predicate: impl Fn(&Self) -> bool) {
         let mut recorded = self.recorded.subscribe();
         // The sender outlives every waiter (it is owned by this measure), so the
         // only `Err` is an impossible closed channel; discard it and let the parked
-        // future resolve on the next recorded event.
+        // future resolve on the next recording.
         let _ = recorded.wait_for(|_generation| predicate(self)).await;
     }
 }
@@ -150,8 +153,8 @@ impl Measure for CountingMeasure {
         if let Ok(mut events) = self.events.lock() {
             events.push((did, event));
         }
-        self.recorded.send_modify(|generation| *generation += 1);
         self.incr(did, MeasureCounter::from_event(event)).await;
+        self.recorded.send_modify(|generation| *generation += 1);
         Ok(ApplyOutcome::Applied)
     }
 
@@ -167,11 +170,11 @@ impl Measure for CountingMeasure {
         if let Ok(mut events) = self.events.lock() {
             events.push((did, batch.event()));
         }
-        self.recorded.send_modify(|generation| *generation += 1);
         let counter = MeasureCounter::from_event(batch.event());
         for _ in 0..batch.occurrences().get() {
             self.incr(did, counter).await;
         }
+        self.recorded.send_modify(|generation| *generation += 1);
         Ok(ApplyOutcome::Applied)
     }
 }
@@ -256,7 +259,7 @@ async fn test_whole_and_chunked_payloads_have_identical_measurement_delta() {
     let whole = recv_custom(&node2).await.expect("whole custom message");
     assert_eq!(whole, big);
     sender_measure
-        .await_event(|measure| {
+        .await_recorded(|measure| {
             measure.logical_transfer_count(node2.did(), false, expected_useful_bytes) > sent_before
         })
         .await;
@@ -280,7 +283,7 @@ async fn test_whole_and_chunked_payloads_have_identical_measurement_delta() {
         .expect("reassembled custom message");
     assert_eq!(chunked, big);
     sender_measure
-        .await_event(|measure| {
+        .await_recorded(|measure| {
             measure.logical_transfer_count(node2.did(), false, expected_useful_bytes)
                 >= sent_before + 2
         })
