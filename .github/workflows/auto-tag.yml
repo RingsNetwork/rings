@@ -1,0 +1,76 @@
+name: Auto Tag
+
+# Turn a version bump into a real release. When a PR that bumps
+# `[workspace.package].version` lands on master, this creates and pushes the matching
+# `vX.Y.Z` tag and kicks off `Auto Release` for it.
+#
+# Why an explicit dispatch instead of relying on the tag push: a tag pushed with the
+# built-in `GITHUB_TOKEN` does not trigger another workflow (GitHub suppresses recursive
+# runs), so `Auto Release`'s `push: tags: v*` path would never fire. We push the tag for
+# provenance (it points at the merge commit) and then dispatch `Auto Release` ourselves.
+#
+# This runs alongside the existing rolling `prerelease` that `Auto Release` publishes on
+# every master push; it only adds a real, versioned release when the version changes.
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - Cargo.toml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: auto-tag-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: tag version bump
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
+        with:
+          fetch-depth: 0
+
+      - name: Read workspace version
+        id: version
+        run: |
+          version="$(awk '
+            /^\[workspace\.package\]/ { in_section = 1; next }
+            /^\[/ { in_section = 0 }
+            in_section && /^version[[:space:]]*=/ {
+              gsub(/.*=[[:space:]]*"|".*/, "")
+              print
+              exit
+            }
+          ' Cargo.toml)"
+          if [ -z "$version" ]; then
+            echo "could not read [workspace.package] version from Cargo.toml" >&2
+            exit 1
+          fi
+          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Tag and trigger release when the version tag is new
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git fetch --tags --quiet
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "tag ${TAG} already exists; nothing to release."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${TAG}" -m "Release ${TAG}"
+          git push origin "${TAG}"
+
+          echo "created ${TAG}; dispatching Auto Release."
+          gh workflow run auto-release.yml --ref master -f "tags=${TAG}"
