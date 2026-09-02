@@ -19,7 +19,7 @@ use serde::Serialize;
 use sha1::Digest;
 use sha1::Sha1;
 use subtle::CtOption;
-use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
 use crate::error::Error;
 use crate::error::Result;
@@ -52,20 +52,14 @@ pub type PublicKeyAddress = H160;
 
 /// Secp256k1 secret key bytes.
 ///
-/// The bytes are validated at construction time and stay in the canonical
-/// external format used by existing configs and DIDs.
+/// The secret scalar is validated at construction time and serializes to the
+/// canonical external byte format used by existing configs and DIDs.
 #[derive(PartialEq, Eq, Clone)]
-pub struct SecretKey([u8; 32]);
+pub struct SecretKey(K256SecretKey);
 
 impl std::fmt::Debug for SecretKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("SecretKey").field(&"<redacted>").finish()
-    }
-}
-
-impl Drop for SecretKey {
-    fn drop(&mut self) {
-        self.0.zeroize();
     }
 }
 
@@ -160,15 +154,9 @@ impl PublicKey<33> {
     }
 }
 
-impl From<SecretKey> for FieldBytes<NistP256> {
-    fn from(val: SecretKey) -> Self {
-        Self::from(&val)
-    }
-}
-
 impl From<&SecretKey> for FieldBytes<NistP256> {
     fn from(val: &SecretKey) -> Self {
-        GenericArray::<u8, U32>::from(val.ser())
+        GenericArray::<u8, U32>::from(*val.ser())
     }
 }
 
@@ -228,18 +216,6 @@ impl From<K256VerifyingKey> for PublicKey<33> {
     }
 }
 
-impl From<SecretKey> for PublicKey<33> {
-    fn from(secret_key: SecretKey) -> Self {
-        secret_key.pubkey()
-    }
-}
-
-impl From<&SecretKey> for PublicKey<33> {
-    fn from(secret_key: &SecretKey) -> Self {
-        secret_key.pubkey()
-    }
-}
-
 impl<T> From<T> for HashStr
 where T: Into<String>
 {
@@ -269,7 +245,8 @@ impl std::str::FromStr for SecretKey {
 #[allow(clippy::to_string_trait_impl)]
 impl ToString for SecretKey {
     fn to_string(&self) -> String {
-        hex::encode(self.0)
+        let bytes = self.ser();
+        hex::encode(*bytes)
     }
 }
 
@@ -322,20 +299,18 @@ fn secret_key_address(secret_key: &SecretKey) -> PublicKeyAddress {
 
 impl SecretKey {
     pub(crate) fn from_bytes(bytes: [u8; 32]) -> Result<Self> {
-        K256SecretKey::from_slice(&bytes).map_err(|_| Error::PrivateKeyBadFormat)?;
-        Ok(Self(bytes))
+        let key = K256SecretKey::from_slice(&bytes).map_err(|_| Error::PrivateKeyBadFormat)?;
+        Ok(Self(key))
     }
 
-    pub(crate) fn secp256k1_scalar(&self) -> Result<K256Scalar> {
-        let secret = K256SecretKey::from_slice(&self.0).map_err(|_| Error::PrivateKeyBadFormat)?;
-        Ok(*secret.to_nonzero_scalar().as_ref())
+    pub(crate) fn secp256k1_scalar(&self) -> K256Scalar {
+        *self.0.to_nonzero_scalar()
     }
 
     /// Generate a random secp256k1 secret key.
     pub fn random() -> Self {
         let mut rng = Hc128Rng::from_entropy();
-        let bytes = K256SecretKey::random(&mut rng).to_bytes();
-        Self(bytes.into())
+        Self(K256SecretKey::random(&mut rng))
     }
 
     /// Derive the Ethereum-style address for this secret key.
@@ -362,8 +337,7 @@ impl SecretKey {
     ///
     /// Returns an error when the stored key is invalid or signing fails.
     pub fn sign_hash(&self, message_hash: &[u8; 32]) -> Result<SigBytes> {
-        let signing_key =
-            K256SigningKey::from_slice(&self.0).map_err(|_| Error::PrivateKeyBadFormat)?;
+        let signing_key = K256SigningKey::from(&self.0);
         let (signature, recover_id) = signing_key.sign_prehash_recoverable(message_hash)?;
         let mut sig_bytes: SigBytes = [0u8; 65];
         sig_bytes[0..64].copy_from_slice(signature.to_bytes().as_slice());
@@ -373,15 +347,12 @@ impl SecretKey {
 
     /// Derive the compressed public key for this secret key.
     pub fn pubkey(&self) -> PublicKey<33> {
-        match K256SecretKey::from_slice(&self.0) {
-            Ok(secret_key) => secret_key.public_key().into(),
-            Err(_) => PublicKey([0u8; 33]),
-        }
+        self.0.public_key().into()
     }
 
     /// Serialize this secret key into its 32-byte representation.
-    pub fn ser(&self) -> [u8; 32] {
-        self.0
+    pub fn ser(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(self.0.to_bytes().into())
     }
 }
 
@@ -405,7 +376,9 @@ pub fn recover_hash(message_hash: &[u8; 32], sig: &[u8; 65]) -> Result<PublicKey
     let r_s_signature: [u8; 64] = sig[..64].try_into()?;
     let recovery_id: u8 = sig[64];
     let signature = K256Signature::try_from(r_s_signature.as_slice()).map_err(Error::ECDSAError)?;
-    if signature.normalize_s().is_some() {
+    if signers::ecdsa_signature_s_is_high(&signature) {
+        // k256 rejects this during recovery too; this branch preserves the
+        // crate's explicit canonical-signature error.
         return Err(Error::NonCanonicalSignature);
     }
     let recovery_id =
@@ -481,7 +454,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn secret_key_redacts_debug_and_zeroizes_on_drop() {
+    fn secret_key_redacts_debug_and_needs_drop() {
         let key =
             SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0")
                 .unwrap();
@@ -491,15 +464,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn invalid_secret_key_state_returns_explicit_errors() {
-        let invalid = SecretKey([0u8; 32]);
-
+    fn zero_secret_key_bytes_are_rejected() {
         assert!(matches!(
-            invalid.sign_hash(&[0u8; 32]),
-            Err(Error::PrivateKeyBadFormat)
-        ));
-        assert!(matches!(
-            invalid.secp256k1_scalar(),
+            SecretKey::from_bytes([0u8; 32]),
             Err(Error::PrivateKeyBadFormat)
         ));
     }
@@ -524,8 +491,21 @@ pub(crate) mod tests {
         ));
     }
 
-    pub(crate) fn gen_ordered_keys(n: usize) -> Vec<SecretKey> {
+    pub(crate) fn gen_ordered_key_vec(n: usize) -> Vec<SecretKey> {
         let mut keys = Vec::from_iter(std::iter::repeat_with(SecretKey::random).take(n));
+        keys.sort_by(|a, b| {
+            if a.address() < b.address() {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Greater
+            }
+        });
+        keys
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn gen_ordered_keys<const N: usize>() -> [SecretKey; N] {
+        let mut keys = std::array::from_fn(|_| SecretKey::random());
         keys.sort_by(|a, b| {
             if a.address() < b.address() {
                 std::cmp::Ordering::Less

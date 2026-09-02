@@ -91,45 +91,45 @@ async fn test_notify_predecessor_rejects_unadmitted_origin_without_mutating_topo
 
 #[tokio::test]
 async fn test_triple_nodes_stabilization_1_2_3() -> Result<()> {
-    let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys(3).try_into().unwrap();
+    let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys::<3>();
     test_triple_ordered_nodes_stabilization(key1, key2, key3).await
 }
 
 #[tokio::test]
 async fn test_triple_nodes_stabilization_2_3_1() -> Result<()> {
-    let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys(3).try_into().unwrap();
+    let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys::<3>();
 
     test_triple_ordered_nodes_stabilization(key2, key3, key1).await
 }
 
 #[tokio::test]
 async fn test_triple_nodes_stabilization_3_1_2() -> Result<()> {
-    let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys(3).try_into().unwrap();
+    let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys::<3>();
     test_triple_ordered_nodes_stabilization(key3, key1, key2).await
 }
 
 #[tokio::test]
 async fn test_triple_nodes_stabilization_3_2_1() -> Result<()> {
-    let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys(3).try_into().unwrap();
+    let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys::<3>();
     test_triple_desc_ordered_nodes_stabilization(key3, key2, key1).await
 }
 
 #[tokio::test]
 async fn test_triple_nodes_stabilization_2_1_3() -> Result<()> {
-    let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys(3).try_into().unwrap();
+    let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys::<3>();
     test_triple_desc_ordered_nodes_stabilization(key2, key1, key3).await
 }
 
 #[tokio::test]
 async fn test_triple_nodes_stabilization_1_3_2() -> Result<()> {
-    let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys(3).try_into().unwrap();
+    let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys::<3>();
     test_triple_desc_ordered_nodes_stabilization(key1, key3, key2).await
 }
 
 #[tokio::test]
 async fn test_notify_predecessor_report_acks_local_branch_when_predecessor_already_connected(
 ) -> Result<()> {
-    let mut keys = gen_ordered_keys(3).into_iter();
+    let mut keys = gen_ordered_keys::<3>().into_iter();
     let key1 = next_generated_key(&mut keys)?;
     let key2 = next_generated_key(&mut keys)?;
     let key3 = next_generated_key(&mut keys)?;

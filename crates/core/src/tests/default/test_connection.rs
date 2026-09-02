@@ -13,13 +13,13 @@ use crate::tests::manually_establish_connection;
 
 #[tokio::test]
 async fn test_handshake_on_both_sides_ordered() {
-    let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys(3).try_into().unwrap();
+    let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys::<3>();
     test_handshake_on_both_sides(key1, key2, key3).await
 }
 
 #[tokio::test]
 async fn test_handshake_on_both_sides_desc_ordered() {
-    let [key3, key2, key1]: [SecretKey; 3] = gen_ordered_keys(3).try_into().unwrap();
+    let [key3, key2, key1]: [SecretKey; 3] = gen_ordered_keys::<3>();
     test_handshake_on_both_sides(key1, key2, key3).await
 }
 
@@ -130,7 +130,7 @@ async fn test_handshake_on_both_sides(key1: SecretKey, key2: SecretKey, key3: Se
 async fn test_dummy_mismatched_data_channel_open_does_not_admit_peer() {
     dummy_controlled::enable(true);
 
-    let [key1, key2]: [SecretKey; 2] = gen_ordered_keys(2).try_into().unwrap();
+    let [key1, key2]: [SecretKey; 2] = gen_ordered_keys::<2>();
     let node1 = prepare_node(key1).await;
     let node2 = prepare_node(key2).await;
 

@@ -55,15 +55,6 @@ fn to_compressed<T: CanonicalSerialize, const S: usize>(s: &T) -> Result<[u8; S]
     Ok(ret)
 }
 
-impl TryFrom<SecretKey> for Fr {
-    type Error = Error;
-    fn try_from(sk: SecretKey) -> Result<Fr> {
-        let data: [u8; 32] = sk.ser();
-        let ret: Fr = from_compressed(&data)?;
-        Ok(ret)
-    }
-}
-
 impl TryFrom<&SecretKey> for Fr {
     type Error = Error;
 

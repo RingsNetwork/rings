@@ -6,6 +6,10 @@
 
 - Secret signing keys are no longer `Copy`; signing helpers now borrow keys and return explicit
   errors instead of silently substituting invalid signatures or scalars.
+- Secret key containers now zeroize their long-lived scalar or seed storage on drop.
+- Secp256r1 verification now rejects high-s signatures, so persisted high-s secp256r1 session
+  proofs from older builds no longer verify. Ed25519 verification now uses strict signature
+  validation.
 
 ### Added
 

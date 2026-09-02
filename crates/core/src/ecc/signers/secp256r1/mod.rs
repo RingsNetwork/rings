@@ -62,7 +62,11 @@ pub fn sign(sec: &SecretKey, hash: &[u8; 32]) -> Result<[u8; 64]> {
     let sk_bytes: FieldBytes<p256::NistP256> = sec.into();
     let sk = ecdsa::SigningKey::<p256::NistP256>::from_bytes(&sk_bytes)?;
     let (sig, _rid) = sk.sign_prehash_recoverable(hash)?;
-    let sig = sig.normalize_s().unwrap_or(sig);
+    let sig = if super::ecdsa_signature_s_is_high(&sig) {
+        sig.normalize_s().ok_or(Error::NonCanonicalSignature)?
+    } else {
+        sig
+    };
     let sig_bytes: [u8; 64] = sig.to_bytes().as_slice().try_into()?;
     Ok(sig_bytes)
 }
@@ -101,7 +105,7 @@ pub fn verify(
     }
     let msg_hash = hash(msg);
     let signature = match ecdsa::Signature::<p256::NistP256>::from_slice(sig.as_ref()) {
-        Ok(signature) if signature.normalize_s().is_none() => signature,
+        Ok(signature) if !super::ecdsa_signature_s_is_high(&signature) => signature,
         Ok(_) | Err(_) => return false,
     };
     let res: Result<()> = ct_pk.unwrap().and_then(|pk| {

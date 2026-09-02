@@ -83,25 +83,26 @@ fn test_secp256r1_sign_and_verify() {
 }
 
 #[test]
-fn test_secp256r1_rejects_high_s_signature() {
+fn test_secp256r1_rejects_high_s_signature() -> Result<()> {
     let sk =
-        SecretKey::try_from("2544acda37415a476d42312969926dc48e529867036cec71922d4177ea9c1038")
-            .unwrap();
-    let pk = super::super::super::keys::SigningSecretKey::Secp256r1(sk.clone())
-        .public_key()
-        .unwrap();
-    let super::super::super::keys::VerificationPublicKey::Secp256r1(pk) = pk else {
-        unreachable!("secp256r1 signing key derives a secp256r1 public key");
-    };
+        SecretKey::try_from("2544acda37415a476d42312969926dc48e529867036cec71922d4177ea9c1038")?;
+    let sk_bytes: FieldBytes<p256::NistP256> = (&sk).into();
+    let signing_key = ecdsa::SigningKey::<p256::NistP256>::from_bytes(&sk_bytes)?;
+    let encoded = signing_key.verifying_key().to_encoded_point(false);
+    let pk = PublicKey::from_u8(
+        encoded
+            .as_bytes()
+            .get(1..)
+            .ok_or(Error::PublicKeyBadFormat)?,
+    )?;
     let msg = b"canonical signature";
-    let low_s =
-        ecdsa::Signature::<p256::NistP256>::from_slice(&sign(&sk, &hash(msg)).unwrap()).unwrap();
+    let low_s = ecdsa::Signature::<p256::NistP256>::from_slice(&sign(&sk, &hash(msg))?)?;
     let (r, s) = low_s.split_scalars();
-    let high_s =
-        ecdsa::Signature::<p256::NistP256>::from_scalars(r.to_bytes(), (-s).to_bytes()).unwrap();
+    let high_s = ecdsa::Signature::<p256::NistP256>::from_scalars(r.to_bytes(), (-s).to_bytes())?;
 
-    assert!(high_s.normalize_s().is_some());
+    assert!(super::super::ecdsa_signature_s_is_high(&high_s));
     assert!(!verify(msg, &pk.address(), high_s.to_bytes(), &pk));
+    Ok(())
 }
 
 #[test]

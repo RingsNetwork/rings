@@ -588,7 +588,7 @@ mod tests {
     }
 
     #[test]
-    fn signing_secrets_redact_debug_and_zeroize_on_drop() {
+    fn signing_secrets_redact_debug_and_need_drop() {
         let ed25519 = Ed25519SecretKey::from_bytes([0xabu8; 32]);
         let signing = SigningSecretKey::Ed25519(ed25519.clone());
 

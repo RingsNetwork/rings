@@ -728,15 +728,7 @@ impl TryFrom<&SecretKey> for Scalar<Secp256k1> {
     type Error = Error;
 
     fn try_from(secret_key: &SecretKey) -> Result<Self> {
-        Ok(Self::new(secret_key.secp256k1_scalar()?))
-    }
-}
-
-impl TryFrom<SecretKey> for Scalar<Secp256k1> {
-    type Error = Error;
-
-    fn try_from(secret_key: SecretKey) -> Result<Self> {
-        Self::try_from(&secret_key)
+        Ok(Self::new(secret_key.secp256k1_scalar()))
     }
 }
 

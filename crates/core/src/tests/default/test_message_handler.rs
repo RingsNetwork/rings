@@ -135,7 +135,7 @@ async fn test_join_dht_keeps_local_join_when_convergence_send_fails() -> Result<
 async fn test_handle_dht_notify_remote_action_sends_predecessor_to_target() -> Result<()> {
     dummy_controlled::enable(true);
 
-    let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys(3).try_into().unwrap();
+    let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys::<3>();
     let node1 = prepare_node(key1).await;
     let node2 = prepare_node(key2).await;
     let node3 = prepare_node(key3).await;
@@ -174,7 +174,7 @@ async fn test_handle_dht_notify_remote_action_sends_predecessor_to_target() -> R
 
 #[tokio::test]
 async fn test_handle_connect_node() -> Result<()> {
-    let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys(3).try_into().unwrap();
+    let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys::<3>();
 
     let node1 = prepare_node(key1).await;
     let node2 = prepare_node(key2).await;
