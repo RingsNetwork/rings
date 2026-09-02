@@ -724,9 +724,11 @@ impl_curve_group_adapter! {
     }
 }
 
-impl From<SecretKey> for Scalar<Secp256k1> {
-    fn from(secret_key: SecretKey) -> Self {
-        Self::new(secret_key.secp256k1_scalar())
+impl TryFrom<&SecretKey> for Scalar<Secp256k1> {
+    type Error = Error;
+
+    fn try_from(secret_key: &SecretKey) -> Result<Self> {
+        Ok(Self::new(secret_key.secp256k1_scalar()))
     }
 }
 

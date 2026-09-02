@@ -60,11 +60,11 @@ pub use virtual_node::MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 pub mod tests {
     //! test
     use super::*;
-    use crate::ecc::tests::gen_ordered_keys;
+    use crate::ecc::tests::gen_ordered_key_vec;
 
     /// Test get ordered did list
     pub fn gen_ordered_dids(n: usize) -> Vec<Did> {
-        gen_ordered_keys(n)
+        gen_ordered_key_vec(n)
             .iter()
             .map(|x| x.address().into())
             .collect()

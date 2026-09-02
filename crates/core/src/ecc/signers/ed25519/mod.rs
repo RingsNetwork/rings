@@ -1,6 +1,5 @@
 //! ed25519 sign algorithm using ed25519_dalek
 use ed25519_dalek::Signer;
-use ed25519_dalek::Verifier;
 
 use crate::ecc::PublicKey;
 use crate::ecc::PublicKeyAddress;
@@ -38,7 +37,7 @@ pub fn verify(
     };
     if let Ok(p) = TryInto::<ed25519_dalek::VerifyingKey>::try_into(*pubkey) {
         let s = ed25519_dalek::Signature::from_bytes(&sig_data);
-        match p.verify(msg, &s) {
+        match p.verify_strict(msg, &s) {
             Ok(()) => true,
             Err(_) => false,
         }

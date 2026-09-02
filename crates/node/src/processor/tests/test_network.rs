@@ -375,7 +375,7 @@ async fn test_processor_e2e_message_streams_and_decrypts_with_receiver_identity_
     let identity2 = SecretKey::random();
 
     let p1 = prepare_processor_with_identity_key(identity1).await;
-    let p2 = prepare_processor_with_identity_key(identity2).await;
+    let p2 = prepare_processor_with_identity_key(identity2.clone()).await;
 
     p1.swarm.set_callback(callback1.clone()).unwrap();
     p2.swarm.set_callback(callback2.clone()).unwrap();
