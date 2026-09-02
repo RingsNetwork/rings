@@ -6,7 +6,7 @@ fn test_sign_and_verify() {
     let msg = "hello world";
     let pk = public_key(&key).unwrap();
     let h = hash_to_curve(msg.as_bytes()).unwrap();
-    let sig = sign_hash(key, &h).unwrap();
+    let sig = sign_hash(&key, &h).unwrap();
     assert!(super::verify_hash(vec![h].as_slice(), &sig, vec![pk].as_slice()).unwrap());
     assert!(super::verify(vec![msg.as_bytes()].as_slice(), &sig, vec![pk].as_slice()).unwrap());
 }
@@ -41,8 +41,8 @@ fn test_aggregate() {
     let h1 = hash_to_curve(msg1.as_bytes()).unwrap();
     let h2 = hash_to_curve(msg2.as_bytes()).unwrap();
 
-    let sig1 = sign_hash(key1, &h1).unwrap();
-    let sig2 = sign_hash(key2, &h2).unwrap();
+    let sig1 = sign_hash(&key1, &h1).unwrap();
+    let sig2 = sign_hash(&key2, &h2).unwrap();
 
     let sig_agg = aggregate(&[sig1, sig2]).unwrap();
 

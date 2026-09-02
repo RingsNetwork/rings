@@ -9,6 +9,6 @@ fn test_default_sign() {
 
     let msg = "hello";
     let h = self::hash(msg.as_bytes());
-    let sig = self::sign(key, &h);
-    assert_eq!(sig, key.sign(msg));
+    let sig = self::sign(&key, &h).unwrap();
+    assert_eq!(sig, key.sign(msg).unwrap());
 }
