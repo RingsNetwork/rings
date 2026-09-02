@@ -1,0 +1,1164 @@
+\documentclass[journal]{IEEEtran}
+\usepackage{color}
+\usepackage{cite}
+\usepackage{multirow}
+\usepackage{float}
+\usepackage{amsfonts}
+\usepackage{amssymb}
+\usepackage{amsmath}
+\usepackage{amsthm}
+\usepackage{url}
+\usepackage{enumitem}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+\usepackage{algorithm}
+\usepackage[noend]{algpseudocode}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows}
+
+\newtheorem{definition}{Definition}
+\newtheorem{constraint}{Constraint}
+\newtheorem{assumption}{Assumption}
+\newtheorem{law}{Law}
+\newtheorem{invariant}{Invariant}
+\newtheorem{proposition}{Proposition}
+\newtheorem{obligation}{Obligation}
+
+\author{Ryan~J.~Kung%
+\thanks{Ryan J. Kung can be reached at ryankung@ieee.org.
+Manuscript created February 11, 2023; rewritten August 31, 2026;
+revised September 1, 2026.
+This document supersedes the 2023 draft \emph{The Ranking Protocol}.}}
+\title{\huge The DRanking Protocol:\\
+Verifiable Distributed Ranking and Sybil-Bounded Admission\\
+for Structured Peer-to-Peer Networks}
+\date{}
+
+\IEEEaftertitletext{%
+\vspace{0.5\baselineskip}%
+\noindent\hfill
+\parbox{0.90\textwidth}{%
+\centering\bfseries Abstract\\[0.5\baselineskip]%
+\normalfont
+DRanking converts locally observed peer behavior in an open structured
+peer-to-peer network into a globally agreed, verifiable service weight that
+gates admission to protocol roles.  Identity creation is free, so no
+mechanism bounds adversarial \emph{count}~\cite{Douceur2002}; the protocol
+instead bounds adversarial \emph{weight} and prices it.  The instruments
+are: counterparty-signed service receipts in place of unsigned counters; a
+seed-anchored trust flow
+$t_{k+1}=\alpha C_k^{\mathsf T}t_k+(1-\alpha)s$
+obeying conservation, attenuation, and revocation laws, with a proved bound
+$T_k(A)\le\alpha g/(1-\alpha)$ on Sybil mass; trust-weighted verifiable
+random sortition in place of oracle sampling; a proof-of-authority ledger
+trusted for ordering only, with equivocation proofs as first-class slash
+objects; and a circuit-friendly epoch transition folded by Nova-family
+incrementally verifiable computation, giving constant-cost verification to
+browser nodes.  Rank is soulbound and slashable; reward is a separate
+transferable asset; the authority-to-stake transition is conditioned on a
+security-budget crossover.}}
+
+\begin{document}
+\maketitle
+
+\section{Introduction}
+
+The 2023 draft of this protocol scored behavior per identity.  Identities
+are free; every component secured against lying nodes fell to numerous
+nodes.  This rewrite keeps the draft's decomposition --- local evidence,
+global aggregation, sampling, ledger, incentives --- and replaces the
+quantity being secured:
+
+\[
+\begin{array}{rcl}
+\mathsf{cost}(\mathsf{did})&=&0,\\
+|\mathsf{Adv}\cap V|&\leq&\infty,\\
+\mathsf{secure}(|\cdot|)&=&\bot\quad\text{\cite{Douceur2002}},\\[2pt]
+\mathsf{secure}&:=&\mathsf{secure}(T(\cdot)),\\
+T(A)&=&\textstyle\sum_{v\in A}t(v),\\
+\mathsf{claim}&=&\mathsf{price}\bigl(T(\mathsf{Adv})\geq\tfrac13\bigr).
+\end{array}
+\]
+
+Sections~\ref{sec:model}--\ref{sec:economics} construct $t$, its evidence,
+its sampling, its ledger, and its economy; Section~\ref{sec:security}
+tabulates the attack surface.  Each mechanism is a term of
+$\mathsf{price}$.
+
+\section{Model}\label{sec:model}
+
+\begin{definition}[Substrate]\label{def:substrate}
+\[
+\begin{array}{rcl}
+R&=&\mathbb{Z}/2^{160}\mathbb{Z}\quad\text{\cite{Chord,ZaveChordCorrect}},\\
+\mathsf{did}&:&K\to R,\quad\text{self-certifying},\\
+\mathsf{link}&\subseteq&V\times V,\quad\text{authenticated},\\
+\mathsf{msg}&=&\langle m,\sigma_{\mathsf{origin}}\rangle,\\
+\mathsf{cost}(\mathsf{did})&=&0,\\
+\mathsf{cost}(\mathsf{link})&=&\varepsilon>0.
+\end{array}
+\]
+\end{definition}
+
+\begin{definition}[Epoch]\label{def:epoch}
+\[
+\begin{array}{rcl}
+k&\in&\mathbb{N},\qquad
+\mathsf{epoch}(k)=[\,\mathsf{fin}(\Sigma_k),\ \mathsf{fin}(\Sigma_{k+1})\,),\\
+\mathsf{close}(k)&\equiv&
+  \mathsf{elapsed}\geq T_{\mathrm{ep}}
+  \quad\text{(proposer duty)},
+\end{array}
+\]
+delimited by ledger finality (Definition~\ref{def:ledger}); the timer
+$T_{\mathrm{ep}}$ is what enables $\mathsf{Next}$ in
+Section~\ref{sec:spec}.
+\end{definition}
+
+\begin{assumption}[Adversary]\label{asm:adversary}
+\[
+\begin{array}{rcl}
+|\mathsf{Adv}|&\leq&\infty,\\
+\mathsf{collude},\ \mathsf{grind},\ \mathsf{patience}&\in&
+  \mathsf{Cap}(\mathsf{Adv}),\\
+\mathsf{byzantine}&\in&\mathsf{Cap}(\mathsf{Adv}),\\
+\mathsf{forge}(\sigma_h),\ h\notin\mathsf{Adv}&\notin&
+  \mathsf{Cap}(\mathsf{Adv}),\\
+\mathsf{break}(\mathsf{VRF})&\notin&\mathsf{Cap}(\mathsf{Adv}).
+\end{array}
+\]
+\end{assumption}
+
+\begin{assumption}[Honest weight]\label{asm:honest-weight}
+\[
+T_k(\mathsf{Adv})\;<\;\tfrac13\,T_k(V)\qquad\forall k.
+\]
+No bound is assumed on $|\mathsf{Adv}|$.
+\end{assumption}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[>=latex,
+  box/.style={draw,minimum width=1.35cm,minimum height=.52cm,
+    align=center,font=\footnotesize}]
+\node[box] (w) {$W_k$};
+\node[box,right=0.62cm of w] (f) {$F$};
+\node[box,right=0.62cm of f] (t) {$t_{k+1}$};
+\node[box,right=0.62cm of t] (sig) {$\Sigma_{k+1}$};
+\node[box,below=0.55cm of sig] (qc) {$\mathsf{QC}_{2/3}$};
+\node[box,below=0.55cm of t] (com) {committee};
+\node[box,below=0.55cm of f] (sor) {sortition};
+\node[box,below=0.55cm of w] (b) {$B_{k+1}$};
+\draw[->] (w) -- node[above,font=\scriptsize]{$\S\ref{sec:receipts}$} (f);
+\draw[->] (f) -- node[above,font=\scriptsize]{$\S\ref{sec:trust}$} (t);
+\draw[->] (t) -- (sig);
+\draw[->] (sig) -- node[right,font=\scriptsize]{$\S\ref{sec:ledger}$} (qc);
+\draw[->] (qc.south) -- ++(0,-0.3) -| (b.south);
+\draw[->] (b) -- node[right,font=\scriptsize]{$\S\ref{sec:sampling}$} (sor);
+\draw[->] (sor) -- (com);
+\draw[->] (com) -- (qc);
+\draw[->] (t) -- (sor);
+\end{tikzpicture}
+\caption{Epoch cycle: receipts fold into trust, trust seats the
+committee, the committee finalizes the ledger and threshold-signs the
+beacon.}
+\label{fig:cycle}
+\end{figure}
+
+\section{Service Receipts}\label{sec:receipts}
+
+Unsigned counters are first-person testimony; aggregated, they are hearsay.
+The unit of evidence is a countersigned receipt.
+
+\begin{definition}[Receipt]\label{def:receipt}
+\[
+\rho=\langle\mathsf{srv},a,b,k,n,\sigma_b\rangle,
+\]
+\[
+\begin{array}{rcl}
+\mathsf{srv}&\in&\{\mathsf{relay},\mathsf{store},\mathsf{probe}\},\\
+a&=&\text{server},\quad b=\text{signer/served},\\
+\mathsf{valid}(\rho)&\equiv&
+  \mathsf{Vrfy}(k_b,\sigma_b,\mathsf{srv}\Vert a\Vert b\Vert k\Vert n)=\top\\
+&&\land\ (b,k,n)\ \text{fresh within}\ P_k,
+\end{array}
+\]
+freshness scoped to the epoch-$k$ input block $P_k$
+(Definition~\ref{def:input-block}): the tuple carries $k$, so no
+cross-epoch nonce state exists.
+\end{definition}
+
+\begin{proposition}[Forgery surface]\label{prop:forgery}
+\[
+\mathsf{valid}(\rho)\land b\notin\mathsf{Adv}
+\;\Rightarrow\;
+\rho\ \text{issued by}\ b.
+\]
+\begin{proof}
+Immediate from
+$\mathsf{forge}(\sigma_b)\notin\mathsf{Cap}(\mathsf{Adv})$
+(Assumption~\ref{asm:adversary}).  Manufacturable receipts are exactly
+those with $b\in\mathsf{Adv}$ (self-dealing); these are neutralized by
+signer-trust weighting (Section~\ref{sec:trust}).
+\end{proof}
+\end{proposition}
+
+\begin{definition}[Receipt graph]\label{def:graph}
+\[
+\begin{array}{rcl}
+\mathsf{val}(\rho)&=&\mu_{\mathsf{srv}(\rho)}\cdot
+  \mathsf{units}(\rho),\quad\mu\ \text{published per kind},\\
+W_k&\in&\mathbb{R}_{\geq0}^{V\times V},\\
+W_k[b,a]&=&\textstyle\sum\{\mathsf{val}(\rho):
+  \rho\ \text{valid},\ \mathsf{sig}\ b,\ \mathsf{srv}\ a,\ \mathsf{ep}\ k\},\\
+W_k[b,\cdot]\,\mathbf{1}&\leq&w_{\max}.
+\end{array}
+\]
+\end{definition}
+
+The cap makes countersigning a budgeted act; the protocol certifies
+performed service, never synthetic load
+(cf.\ Constraint~\ref{con:anchors}).
+
+\section{Trust Algebra}\label{sec:trust}
+
+\begin{definition}[Seed vector]\label{def:seed}
+\[
+\begin{array}{rcl}
+s&\in&[0,1]^{V},\qquad
+\textstyle\sum_v s_v=1,\\
+\mathsf{supp}(s)&=&S\quad\text{(authority set)}.
+\end{array}
+\]
+\end{definition}
+
+\begin{law}[Conservation]\label{law:conservation}
+\[
+C_k[b,a]=\frac{W_k[b,a]}{\max\bigl(w_{\max},\ W_k[b,\cdot]\,\mathbf{1}\bigr)},
+\qquad
+C_k[b,\cdot]\,\mathbf{1}\leq1.
+\]
+\end{law}
+
+\begin{law}[Attenuation]\label{law:attenuation}
+\[
+\alpha\in(0,1),\qquad
+\mathsf{flow}(\ell\ \text{hops})\leq\alpha^{\ell}.
+\]
+\end{law}
+
+\begin{law}[Revocation]\label{law:revocation}
+\[
+\begin{array}{rcl}
+\mathsf{slash}(v)&\Rightarrow&
+  v\notin\mathsf{carrier}:\ \text{$v$ is excluded from}\\
+&&\text{the vector, the columns \emph{and} rows}\\
+&&\text{of $C$, and the seed vector $s$},\\
+t_{k+1}&=&f(W_k,t_k)\quad\text{(re-derived per epoch)},\\
+s\restriction_{V\setminus\mathsf{sl}}&&
+  \text{un-renormalized: a slashed seed's}\\
+&&\text{share burns; re-endorsement is a}\\
+&&\text{threshold op (Def.~\ref{def:threshold})}.
+\end{array}
+\]
+Without the column and seed restrictions the slash is cosmetic: receipts
+naming $v$ as server, or a fixed $s_v>0$, would re-grant mass to $v$ one
+epoch later.
+\end{law}
+
+\begin{definition}[Trust update]\label{def:update}
+\begin{equation}\label{eq:update}
+t_{k+1}=\alpha\,C_k^{\mathsf T}t_k+(1-\alpha)\,s .
+\end{equation}
+One power-iteration step per epoch toward
+$t^{*}=(1-\alpha)(I-\alpha C^{\mathsf T})^{-1}s$
+\cite{PageRank,EigenTrust}; the fixpoint is approached along chain time,
+never computed within an epoch (cf.\ Definition~\ref{def:step}).
+\end{definition}
+
+\begin{invariant}[Mass]\label{inv:mass}
+\[
+\textstyle\sum_v t_0(v)=1
+\;\Rightarrow\;
+\textstyle\sum_v t_k(v)\leq1\quad\forall k.
+\]
+\begin{proof}
+\[
+\begin{aligned}
+\textstyle\sum_v t_{k+1}(v)
+&=\alpha\,\mathbf{1}^{\mathsf T}C_k^{\mathsf T}t_k+(1-\alpha)\\
+&\leq\alpha\,\mathbf{1}^{\mathsf T}t_k+(1-\alpha)
+\quad\text{(Law~\ref{law:conservation})}\\
+&\leq\alpha+(1-\alpha)=1
+\quad\text{(induction)}.
+\end{aligned}
+\]
+\end{proof}
+\end{invariant}
+
+\begin{proposition}[Sybil influence bound]\label{prop:sybil-bound}
+Partition $V=H\uplus A$, $S\subseteq H$.  Let
+\[
+g_k=\sum_{b\in H,\,a\in A}C_k[b,a]\,t_k(b),\qquad
+g=\sup_k g_k .
+\]
+Then
+\[
+T_k(A)=\sum_{v\in A}t_k(v)\;\leq\;\frac{\alpha\,g}{1-\alpha}
+\qquad\forall k.
+\]
+\begin{proof}
+$S\cap A=\varnothing$ kills the seed term over $A$.  Splitting
+\eqref{eq:update} by origin region and applying
+Law~\ref{law:conservation} to internal circulation,
+\[
+T_{k+1}(A)\leq\alpha\bigl(g_k+T_k(A)\bigr).
+\]
+From $T_0(A)=0$,
+\[
+T_k(A)\leq\alpha g\sum_{i\geq0}\alpha^{i}=\frac{\alpha g}{1-\alpha}.
+\]
+\end{proof}
+\end{proposition}
+
+$T(A)$ is linear in honest endorsement granted ($g$), independent of
+$|A|$.  Defense concentrates on $g$: endorsement spends budget
+(Law~\ref{law:conservation}), and detection claws it back
+(Law~\ref{law:revocation}).
+
+\begin{proposition}[Farming price]\label{prop:farm-price}
+Instantiating Proposition~\ref{prop:sybil-bound} at $A=\{v\}$:
+sustaining weight $w$ requires per-epoch honest endorsement
+\[
+g_v\;\geq\;\frac{1-\alpha}{\alpha}\,w
+\qquad\text{for every epoch the weight is held},
+\]
+so
+\[
+\mathsf{farm}(w,\ell\ \text{epochs})
+\;\geq\;
+\ell\cdot\mathsf{cost}\Bigl(\tfrac{1-\alpha}{\alpha}\,w\Bigr)
+\;+\;
+\Pr[\mathsf{detect}]\cdot u(w),
+\]
+where $u(w)$ is the holder's valuation of the forfeited stock (same
+cost units as the first term); the second term by
+Law~\ref{law:revocation}: one accepted equivocation forfeits the stock.  This is the $\mathsf{farm}$ function of
+Proposition~\ref{prop:soulbound}, made explicit.
+\begin{proof}
+$T_k(\{v\})\leq\alpha g_v/(1-\alpha)$; rearrange, multiply by holding
+duration, add the slash expectation.
+\end{proof}
+\end{proposition}
+
+\begin{proposition}[Geometric convergence]\label{prop:convergence}
+For stationary $C_k=C$, the map
+$\Phi(x)=\alpha C^{\mathsf T}x+(1-\alpha)s$ satisfies
+\[
+\Vert\Phi(x)-\Phi(y)\Vert_1\leq\alpha\Vert x-y\Vert_1,
+\]
+hence $t^{*}$ is the unique fixpoint and
+\[
+\Vert t_k-t^{*}\Vert_1\;\leq\;\alpha^{k}\,\Vert t_0-t^{*}\Vert_1 .
+\]
+\begin{proof}
+\[
+\begin{aligned}
+\Vert C^{\mathsf T}(x-y)\Vert_1
+&=\textstyle\sum_a\bigl|\sum_b C[b,a](x_b-y_b)\bigr|\\
+&\leq\textstyle\sum_b\bigl(\sum_a C[b,a]\bigr)|x_b-y_b|
+\leq\Vert x-y\Vert_1
+\end{aligned}
+\]
+by Law~\ref{law:conservation}; Banach on the affine contraction.
+Under drifting $C_k$ the iterate tracks the moving fixpoint with lag
+$O(\alpha^{j})$ per $j$ epochs of stability.
+\end{proof}
+\end{proposition}
+
+\begin{definition}[Soulbound rank]\label{def:soulbound}
+\[
+\begin{array}{rcl}
+\mathsf{rank}_k(v)&=&t_k(v),\\
+\mathsf{transfer}&\notin&\mathsf{Ops}(\mathsf{rank}),\\
+\mathsf{rank}&\xrightarrow{\ \mathsf{slash}\ }&0,\\
+\mathsf{rank}&\xrightarrow{\ \mathsf{epoch}\ }&
+  \text{re-derived}\ \eqref{eq:update}.
+\end{array}
+\]
+(Cf.\ Proposition~\ref{prop:soulbound}.)
+\end{definition}
+
+\begin{definition}[Dilution schedule]\label{def:dilution}
+\[
+\begin{array}{rcl}
+\mathsf{vol}_k&=&\textstyle\sum_{i\leq k}\mathbf{1}^{\mathsf T}W_i\,\mathbf{1},\\
+1-\alpha_k&=&D(\mathsf{vol}_k),\quad D\ \text{non-increasing, published},\\
+\bar\alpha&=&\sup_k\alpha_k\;<\;1,\\
+t_0&=&s\quad\text{(cold start)}.
+\end{array}
+\]
+Propositions~\ref{prop:sybil-bound}--\ref{prop:convergence} hold under the
+time-varying schedule with $\alpha:=\bar\alpha$.
+\end{definition}
+
+\begin{definition}[Threshold authority]\label{def:threshold}
+\[
+\begin{array}{rcl}
+\mathsf{Ops}(S)&=&\{\mathsf{withdraw},\mathsf{rotate},\\
+&&\ \ \mathsf{endorse}_0,\mathsf{reshare}\},\\
+o\in\mathsf{Ops}(S)&\Rightarrow&\mathsf{QC}_{\theta}(S)(o),
+  \quad\theta\geq\tfrac23,\\
+|\mathsf{comp}|<\theta|S|&\Rightarrow&
+  \mathsf{Cap}(\mathsf{Adv})\cap\mathsf{Ops}=\varnothing,\\
+\mathsf{keys}&:&\text{genesis DKG; $\mathsf{rotate}$ and}\\
+&&\text{beacon-group change trigger}\\
+&&\text{proactive $\mathsf{reshare}$,}\\
+&&\text{preserving $\mathsf{gpk}$}.
+\end{array}
+\]
+\end{definition}
+
+\section{Sortition}\label{sec:sampling}
+
+\begin{proposition}[Statistical undetectability]\label{prop:stat}
+Model $\mathsf{did}=\mathsf{h}(\mathsf{pk})$, $\mathsf{h}$ a random
+oracle.  For the adversarial placement strategy ``sample fresh keys,''
+honest and adversarial positions are identically distributed on $R$:
+\[
+\Delta_{\mathrm{TV}}\bigl(\mathsf{pos}(H\uplus A),\ \mathsf{pos}(H')\bigr)=0
+\quad\forall\,|A|,
+\]
+hence every position-based test (entropy, Kolmogorov--Smirnov) has
+distinguishing advantage $0$ against Sybil density.
+\begin{proof}
+$\mathsf{h}(\cdot)$ uniform on $R$ for every key, honest or adversarial; a
+union of i.i.d.\ uniforms is distribution-invariant in its partition.
+\end{proof}
+\end{proposition}
+
+Placement tests detect biased sampling; the threat is cheap identity.
+Validation must be cryptographic and economic, and a global random seed is
+a bootstrap circularity (a randomness beacon presupposes the committee
+being selected).  Both are removed by sortition~\cite{Algorand,VRF}.
+
+\begin{definition}[Beacon]\label{def:beacon}
+\[
+\begin{array}{rcl}
+G_0&=&S\quad\text{(genesis DKG)},\\
+G_k&=&\mathsf{vset}(\Sigma_k),\\
+\mathsf{TSig}_{G}&:&\theta\text{-of-}|G|,\ \text{\emph{unique}~\cite{BLS}}:\\
+&&|\{\sigma:\mathsf{TVrfy}(\mathsf{gpk},k,\sigma)\}|=1\ \ \forall k,\\
+B_k&=&\mathsf{h}\bigl(\mathsf{TSig}_{G_{k-1}}(k)\bigr),\\
+\mathsf{gpk}&\in&\Sigma\quad
+  \text{(invariant under $\mathsf{reshare}$)}.
+\end{array}
+\]
+The group is inductive, which breaks the bootstrap circularity in both
+phases: the already-seated group $G_{k-1}$ signs the beacon that seats
+epoch $k$; proactive resharing hands the same $\mathsf{gpk}$ to each new
+$\mathsf{vset}$, so verification never changes.  Remark: all $B_k$ are
+determined at key generation; unpredictability holds only below
+$\theta$ shares (as in drand-style beacons) --- a $\theta$-quorum can
+precompute every future beacon, which
+Definition~\ref{def:threshold} already assumes it must not form
+adversarially.
+\end{definition}
+
+\begin{proposition}[Beacon unbiasability]\label{prop:beacon}
+\[
+B_k=\mathsf{fn}(\mathsf{gpk},k)
+\;\land\;
+\mathsf{predict}(B_k)\Rightarrow\theta\ \text{shares},
+\]
+i.e.\ no participant choice influences $B_k$.  A header-hash beacon
+$\mathsf{h}(\mathsf{fin}(\Sigma_k))$ is excluded: proposers grind $B_k$
+through content selection.
+\begin{proof}
+Uniqueness leaves a single valid $\sigma$ per $k$: the signing protocol
+has no free variable to grind.  Unpredictability below $\theta$ shares is
+the threshold-signature security game.
+\end{proof}
+\end{proposition}
+
+\begin{algorithm}[H]
+\caption{Trust-weighted sortition (node $v$, epoch $k$, role $r$)}
+\label{alg:sortition}
+\begin{algorithmic}[1]
+\State $B_k\gets\mathsf{h}(\mathsf{TSig}_{G_{k-1}}(k))$
+  \Comment{Definition~\ref{def:beacon}}
+\State $(y,\pi)\gets\mathsf{VRF}_{\mathsf{sk}_v}(B_k\Vert r)$
+  \Comment{$\mathsf{sk}_v$ = the DID key}
+\State $\mathsf{seats}_v\gets
+  \mathrm{InvCDF}_{\mathrm{Bin}(\hat t_k(v),\,\tau/\hat T_k)}
+  \bigl(y/2^{|y|}\bigr)$
+\State $v$ holds $\mathsf{seats}_v$ seats for $r$; publishes $\pi$
+\end{algorithmic}
+\end{algorithm}
+
+Weight is atomized: node $v$'s fixed-point weight $\hat t_k(v)$
+(Definition~\ref{def:fixedpoint}) is $\hat t_k(v)$ unit atoms,
+$\hat T_k=\sum_v\hat t_k(v)$; each atom is selected independently with
+probability $\tau/\hat T_k$, realized per node through the inverse
+binomial CDF on the VRF output~\cite{Algorand}.  Atomization removes
+both hidden hypotheses of naive indicator sortition: expected seats are
+exactly proportional to weight with no per-node cap
+($\mathbb{E}[\mathsf{seats}_v]=\tau\,\hat t_k(v)/\hat T_k$, whales
+simply hold several seats), and normalization by $\hat T_k$ makes the
+fraction well-defined even when total mass is below one
+(Invariant~\ref{inv:mass}).  The DID key doubles as the VRF key: it is
+committed by $v$'s first appearance in the ledger, hence fixed before
+any later beacon exists (Proposition~\ref{prop:grind}).
+
+\begin{proposition}[Grinding closure]\label{prop:grind}
+\[
+\begin{array}{rcl}
+\mathsf{sk}_v\ \text{fixed}&\prec&B_k\ \text{exists},\\
+B_k\ \text{unbiasable}&&\text{(Proposition~\ref{prop:beacon})},
+\end{array}
+\;\Rightarrow\;
+\mathsf{grind}=\bot .
+\]
+\begin{proof}
+Both VRF inputs are committed before either party can condition on the
+output; unpredictability from Assumption~\ref{asm:adversary} and
+Proposition~\ref{prop:beacon}.
+\end{proof}
+\end{proposition}
+
+\begin{proposition}[Committee safety]\label{prop:committee}
+Atoms are independent indicators, so with
+$\pi_A=\hat T(A)/\hat T<\tfrac13$
+(Assumption~\ref{asm:honest-weight}, which is fractional),
+$\mathbb{E}[X]=\tau$ and $\mathbb{E}[X_A]=\tau\,\pi_A$.  By
+Chernoff--Hoeffding over the atom indicators,
+\[
+\Pr\Bigl[X_A\geq\tfrac{\tau}{3}\Bigr]
+\;\leq\;
+\exp\Bigl(-\tau\,\mathrm{D}\bigl(\tfrac13\,\Vert\,\pi_A\bigr)\Bigr),
+\]
+with $\mathrm{D}$ the binary relative entropy: committee dishonesty decays
+exponentially in committee size.  Sortition is the transport of
+Assumption~\ref{asm:honest-weight} from weight to seats; no reported
+quantity exists for a coalition to steer, so the draft's median game is
+vacuous by construction.
+\end{proposition}
+
+\section{Admission Ledger}\label{sec:ledger}
+
+\begin{definition}[Ledger]\label{def:ledger}
+\[
+\begin{array}{rcl}
+\Sigma_k&=&\langle
+  \mathsf{rt}(t_k),\mathsf{rt}(V_k),\mathsf{rt}(\mathsf{sl}_k),
+  \mathsf{rt}(\mathsf{bal}_k),\mathsf{gpk},\mathsf{ver}\rangle,\\
+\mathsf{fin}(\Sigma_k)&\equiv&
+  \mathsf{QC}_{2/3}\bigl(\mathsf{vset}(\Sigma_{k-1})\bigr)
+  \quad\text{\cite{PBFT,LSP82}},\\
+\mathsf{content}_k&=&\{\mathsf{rt}(X_k)\},\qquad
+\mathsf{data}(X_k)\in\mathsf{Overlay}.
+\end{array}
+\]
+\end{definition}
+
+\begin{definition}[Input block]\label{def:input-block}
+\[
+\begin{array}{rcl}
+X_k&=&\langle P_k,\,E_k,\,\mathsf{TX}_k,\,\mathsf{fees}_k\rangle,\\
+P_k&=&\text{receipt multiset},\\
+E_k&=&\text{equivocation proofs},\\
+\mathsf{TX}_k&=&\text{transfer/bond/unbond ops},\\
+W_k&=&\mathsf{Agg}(P_k):\ \text{deterministic fold ---}\\
+&&\text{dedup $(b,k,n)$ within $P_k$, rows}\\
+&&\text{clipped to $w_{\max}$ in hash order}.
+\end{array}
+\]
+$X_k$ is assembled by the slot proposer from submissions during
+$\mathsf{epoch}(k)$; $\mathsf{Agg}$ is a pure function of the multiset,
+so $W_k$ is canonical given $X_k$.  Proposer discretion over
+\emph{admission} to $X_k$ is exactly the censorship power bounded by
+Obligation~\ref{obl:inclusion}.
+\end{definition}
+
+\begin{obligation}[Minimal trust]\label{obl:minimal-trust}
+\[
+\begin{array}{rcl}
+\forall o\in\mathsf{content}:\ \mathsf{Verify}(o)&\perp&
+  \mathsf{honest}(S),\\
+\mathsf{Cap}(\mathsf{quorum})&=&
+  \{\mathsf{order},\mathsf{censor}\},\\
+\mathsf{forgeable}(\mathsf{quorum})\ni o&\Rightarrow&
+  \text{design defect}.
+\end{array}
+\]
+\end{obligation}
+
+\begin{definition}[Equivocation proof]\label{def:equiv}
+\[
+e=\langle m_1,\sigma_v(m_1),m_2,\sigma_v(m_2)\rangle,
+\]
+\[
+\mathsf{slot}(m_1)=\mathsf{slot}(m_2)\ \land\ m_1\neq m_2
+\;\Rightarrow\;
+\mathsf{slash}(v),
+\]
+verification assumption-free; $e$ is a first-class ledger object,
+submittable by anyone.
+\end{definition}
+
+\begin{obligation}[Force inclusion]\label{obl:inclusion}
+Submissions are acknowledged per slot proposer $p$:
+\[
+\begin{array}{r}
+\mathsf{ack}_p(x)\ \land\
+\mathsf{proposes}(p,[k,k+\Delta])\ \land\
+x\notin X_{[k,k+\Delta]}\\
+\Rightarrow\;
+\mathsf{slash}(p),
+\end{array}
+\]
+with evidence $\langle\mathsf{ack}_p(x),\ \text{$p$'s signed
+block}\rangle$ --- both signed by $p$, hence self-certifying \emph{and}
+attributable: the slash lands on the proposer who acknowledged and then
+withheld, never on a bystander quorum member.  Censorship, the residual
+validator power, is thereby bounded by latency $\Delta$ times the
+number of colluding proposers a submitter must route around.
+\end{obligation}
+
+Equivocation defeats patience: months of farmed standing forfeit on one
+contradiction, so
+$\mathbb{E}[\mathsf{farm}]\downarrow$ with detection probability.
+
+\section{Folded State}\label{sec:ivc}
+
+Browser wasm nodes can neither replay history nor audit a validator
+signature; the chain must be succinct~\cite{Mina}.
+
+\begin{definition}[Epoch transition]\label{def:step}
+\[
+F(\Sigma_k,X_k)=\Sigma_{k+1},\qquad
+\mathsf{rt}(X_k)\ \text{public input},\ X_k\ \text{witness},
+\]
+typed against Definition~\ref{def:input-block}: the body consumes the
+opened block (receipts, proofs, transactions, fees), never bare roots.
+\begin{algorithm}[H]
+\caption{$F$ --- pure, deterministic, per epoch}
+\label{alg:step}
+\begin{algorithmic}[1]
+\State $\mathsf{sl}_{k+1}\gets\mathsf{sl}_k\cup
+  \{\mathsf{verify}(e):e\in E_k\}$
+\State $U\gets V\setminus\mathsf{sl}_{k+1}$;\quad
+  $t'\gets t_k\restriction_{U}$;\quad
+  $s'\gets s\restriction_{U}$;\quad
+  $\tilde C_k\gets C_k\restriction_{U\times U}$
+  \Comment{Law~\ref{law:revocation}}
+\State $t_{k+1}\gets\alpha_k\,\tilde C_k^{\mathsf T}t'+(1-\alpha_k)\,s'$
+  \Comment{Eq.~\eqref{eq:update}, Def.~\ref{def:dilution}}
+\State $\mathsf{bal}'\gets\mathsf{apply}(\mathsf{TX}_k,\mathsf{bal}_k)$
+  \Comment{transfers, bond/unbond; $\mathsf{bal}\geq\mathsf{amt}$}
+\State $\mathsf{bal}_{k+1}\gets\mathsf{bal}'+
+  \mathsf{issue}(W_k,t_k)-\mathsf{burn}(\mathsf{fees}_k)$
+\State $V_{k+1}\gets\mathsf{vset}(\Sigma_{k+1})$
+  \Comment{Obligation~\ref{obl:vset}}
+\State \Return
+  $\langle\mathsf{rt}(t_{k+1}),\mathsf{rt}(V_{k+1}),
+  \mathsf{rt}(\mathsf{sl}_{k+1}),\mathsf{rt}(\mathsf{bal}_{k+1}),
+  \mathsf{gpk},\mathsf{ver}\rangle$
+\end{algorithmic}
+\end{algorithm}
+\[
+\begin{array}{c}
+\mathsf{cost}(F)=O(\mathsf{nnz}(W_k)+|\mathsf{TX}_k|)\\
+\text{adds/mults over committed data}.
+\end{array}
+\]
+\end{definition}
+
+Line 2 restricts vector, matrix (both dimensions), \emph{and} seeds:
+rows die with $t'(b)=0$, but columns and $s$ must be cut explicitly or
+slashed nodes re-accrue mass (Law~\ref{law:revocation}).  Line 3 is why
+the fixpoint is unrolled: one sparse matrix--vector product
+arithmetizes trivially; an eigenvector solve does not.  Line 4 is the
+transfer semantics of the two-asset economy
+(Definition~\ref{def:assets}): $\mathsf{apply}$ is sum-preserving, and
+bond/unbond move balance into and out of $\mathsf{Bond}$ with an
+unbonding delay of $\Delta_{\mathrm{ub}}$ epochs (slash exposure
+persists through the delay).
+
+\begin{definition}[Folding]\label{def:fold}
+Nova-family IVC~\cite{Nova}:
+\[
+\begin{array}{rcl}
+\pi_k&\vdash&\Sigma_0\xrightarrow{F^{\,k}}\Sigma_k,\\
+|\pi_k|&=&O(1),\qquad
+\mathsf{Verify}(\pi_k)=O(1),\\
+\mathsf{sync}&=&
+  \mathsf{Verify}(\pi_k)\land\mathsf{QC}_{2/3}(\Sigma_k),\\
+\mathsf{prove}&\parallel&\mathsf{consensus}
+  \quad\text{(asynchronous, trails head)}.
+\end{array}
+\]
+\end{definition}
+
+\begin{proposition}[Linearity]\label{prop:linear}
+\[
+\mathsf{fin}(\Sigma_k)\ \text{instant (BFT)}
+\;\Rightarrow\;
+\mathsf{chain}\cong(\Sigma_0,\Sigma_1,\dots)\ \text{linear},
+\]
+hence IVC applies with no re-folding branch; probabilistic-finality chains
+admit no such reduction.
+\begin{proof}
+Quorum intersection: two finalized blocks at one height require
+$\geq\tfrac13$ of the finality committee to equivocate
+(Definition~\ref{def:equiv}) --- contradicting
+Definition~\ref{def:threshold} in the authority phase, and
+Proposition~\ref{prop:committee} with
+Assumption~\ref{asm:honest-weight} in the staked phase.
+\end{proof}
+\end{proposition}
+
+\begin{obligation}[Circuit discipline]\label{obl:circuit}
+\[
+\begin{array}{rcl}
+\forall\ \text{extension}\ F':&&\\
+F'\ \text{pure}&\land&
+F'\in\mathsf{CheapArith}(\mathsf{committed}).
+\end{array}
+\]
+The ledger is an admission ledger, not a contract platform.
+\end{obligation}
+
+\begin{obligation}[Verification boundary]\label{obl:boundary}
+\[
+\begin{array}{rcl}
+\text{in-fold}&:&F\ \text{(state arithmetic over $X_k$)},\\
+\text{out-of-fold}&:&\mathsf{Vrfy}(\rho),\ \mathsf{VRF}\ \pi,\
+  \mathsf{TSig},\\
+&&\text{checked by validators pre-}\mathsf{QC},\\
+\mathsf{QC}(\Sigma'\Vert\mathsf{rt}(X))&\Rightarrow&
+  \text{attests validity},\\
+\mathsf{invalid}\ \rho\in X_k&\Rightarrow&
+  \text{fraud proof from $X_k$ data}\\
+&&\Rightarrow\ \text{quorum slash}.
+\end{array}
+\]
+Elliptic-curve verifications are not $\mathsf{CheapArith}$
+(Obligation~\ref{obl:circuit}); the fold proves the arithmetic
+transition, the quorum attests input validity, and anyone holding
+$\mathsf{data}(X_k)$ can re-check --- so forged inputs are not
+impossible but detectable and slashable, preserving
+Obligation~\ref{obl:minimal-trust} through accountability rather than
+circuit cost.  In the staked phase the sortition proofs seating
+$V_{k+1}$ live on the same side: verified out-of-fold, consumed by
+line~6 of Algorithm~\ref{alg:step} as committed input.
+\end{obligation}
+
+\begin{definition}[Fixed-point carrier]\label{def:fixedpoint}
+Circuits have no reals.  With precision $\phi$:
+\[
+\begin{array}{rcl}
+\hat t&=&\lfloor t\cdot2^{\phi}\rfloor\in\mathbb{Z}_{\geq0},\\
+\hat x\cdot\hat y&\mapsto&\lfloor\hat x\hat y/2^{\phi}\rfloor,\\
+x/y&\mapsto&(q,r):\ x=qy+r,\\
+&&0\leq r<y\quad\text{(witnessed, ranged)}.
+\end{array}
+\]
+\end{definition}
+
+\begin{proposition}[Rounding soundness]\label{prop:rounding}
+Floor rounding is one-sided ($\hat t_k\leq t_k 2^{\phi}$: weight is never
+overcounted, so safety bounds survive verbatim), and the accumulated
+error is damped by the contraction of
+Proposition~\ref{prop:convergence}:
+\[
+e_{k+1}\leq\bar\alpha\,e_k+n\,2^{-\phi}
+\;\Rightarrow\;
+\sup_k e_k\leq\frac{n\,2^{-\phi}}{1-\bar\alpha},
+\]
+bounded for all time; precision is a parameter, not a drift.
+\begin{proof}
+Each of the $n$ components loses at most $2^{-\phi}$ per epoch to
+truncation; the prior error enters only through
+$\bar\alpha\,C^{\mathsf T}$, which is $\ell_1$-nonexpansive scaled by
+$\bar\alpha$; geometric sum.
+\end{proof}
+\end{proposition}
+
+\begin{proposition}[Carrier boundedness]\label{prop:carrier}
+\[
+|\mathsf{carrier}(\hat t_k)|\;\leq\;2^{\phi}\qquad\forall k,
+\]
+independent of $|V|$: truncation is garbage collection.
+\begin{proof}
+Invariant~\ref{inv:mass} in fixed point gives
+$\sum_v\hat t_k(v)\leq2^{\phi}$ atoms; every carried $v$ holds
+$\hat t_k(v)\geq1$ atom, and a component truncated to $0$ leaves the
+carrier (its Merkle leaf is pruned).  Without truncation the carrier
+grows without bound --- geometric decay never reaches zero --- so
+state boundedness is a free consequence of
+Definition~\ref{def:fixedpoint}, not an extra mechanism.
+\end{proof}
+\end{proposition}
+
+\begin{obligation}[Upgrade versioning]\label{obl:upgrade}
+\[
+\begin{array}{rcl}
+F\mapsto F'&\Rightarrow&\mathsf{vk}\mapsto\mathsf{vk}',\\
+\mathsf{ver}&\in&\Sigma,\\
+\mathsf{bind}(\mathsf{vk},\mathsf{vk}')&\text{at}&
+  \text{committed epoch};
+\end{array}
+\]
+shipped at genesis, not retrofitted.
+\end{obligation}
+
+Folding provides validity only:
+$\mathsf{canonicity}\in\mathsf{consensus}$,
+$\mathsf{availability}\in\mathsf{overlay}$.
+
+\begin{definition}[Commitment granularity]\label{def:granularity}
+\[
+\begin{array}{rcl}
+\Gamma&\in&\{\mathsf{full},\mathsf{agg},\mathsf{blind}\},\\
+\mathsf{leak}(\mathsf{full})&=&\{(b,a,W[b,a])\}
+  \quad\text{(the traffic graph)},\\
+\mathsf{leak}(\mathsf{agg})&=&\{(v,\ \mathsf{deg}^{\pm}(v))\},\\
+\mathsf{leak}(\mathsf{blind})&=&\varnothing,\\
+\Gamma\neq\mathsf{full}&\Rightarrow&
+  F\ \text{consumes edge data as private}\\
+&&\text{witness (blind: ZK openings)},\\
+\mathsf{replay}(\Gamma)&=&\top\iff\Gamma=\mathsf{full}.
+\end{array}
+\]
+$\Gamma$ trades public replayability against surveillance of the service
+graph; the choice is a standing design decision, and
+$\Gamma=\mathsf{blind}$ prices its privacy in circuit cost
+(Obligation~\ref{obl:circuit}).
+\end{definition}
+
+\section{State Relation}\label{sec:spec}
+
+The ledger state machine in TLA
+form~\cite{LamportSpecifyingSystems}, the model-checking surface for
+finite instances~\cite{Stateright}:
+
+\[
+\begin{array}{rcl}
+\mathsf{Spec}&\triangleq&
+  \mathsf{Init}\land\Box[\mathsf{Next}]_{\Sigma}
+  \land\mathrm{WF}_{\Sigma}(\mathsf{Next}),\\[2pt]
+\mathsf{Init}&\triangleq&
+  \Sigma=\langle\mathsf{rt}(s),\mathsf{rt}(S),\varnothing,
+  \mathsf{rt}(\mathbf{0}),\mathsf{gpk}_0,\mathsf{ver}_0\rangle,\\[2pt]
+\mathsf{Next}&\triangleq&
+  \exists\,X:\ \mathsf{QC}_{2/3}\bigl(\Sigma'\Vert\mathsf{rt}(X)\bigr)
+  \ \land\ \Sigma'=F(\Sigma,X),
+\end{array}
+\]
+with $\mathsf{gpk}_0$ from the genesis DKG
+(Definition~\ref{def:threshold}).
+
+\begin{invariant}[Slash monotone]\label{inv:slash}
+\[
+\mathsf{sl}\subseteq\mathsf{sl}',\qquad
+v\in\mathsf{sl}\Rightarrow t(v)=0 .
+\]
+\begin{proof}
+Lines 1--3 of Algorithm~\ref{alg:step}: $\mathsf{sl}$ only grows by
+union, and the update runs entirely over
+$U=V\setminus\mathsf{sl}_{k+1}$ --- vector $t'$, both dimensions of
+$\tilde C_k$, and seeds $s'$ are restricted, so no term of line~3 can
+assign mass to a slashed index.  (Restricting the vector alone would
+not suffice: an unrestricted column of $C_k$, or a fixed $s_v>0$,
+re-grants mass one epoch later --- hence
+Law~\ref{law:revocation} demands all three cuts.)
+\end{proof}
+\end{invariant}
+
+\begin{invariant}[Version monotone]\label{inv:version}
+\[
+\mathsf{ver}'\geq\mathsf{ver},
+\]
+by Obligation~\ref{obl:upgrade}: $\mathsf{vk}$ rebinding occurs only at
+committed epoch boundaries, forward.
+\end{invariant}
+
+\begin{invariant}[Unique chain]\label{inv:unique}
+\[
+\mathsf{fin}(\Sigma_k)\land\mathsf{fin}(\Sigma_k')
+\;\Rightarrow\;
+\Sigma_k=\Sigma_k',
+\]
+by Proposition~\ref{prop:linear} (quorum intersection under
+Assumption~\ref{asm:honest-weight}).
+\end{invariant}
+
+\begin{proposition}[Progress]\label{prop:progress}
+Under partial synchrony (after global stabilization time) with a live
+honest quorum --- $\theta|S|$ members in the authority phase
+(Definition~\ref{def:threshold}), honest committee majority via
+Proposition~\ref{prop:committee} in the staked phase ---
+\[
+\Box\Diamond\,\mathsf{Next}\text{-enabled}
+\;\land\;
+\mathrm{WF}_{\Sigma}(\mathsf{Next})
+\;\Rightarrow\;
+\forall k:\ \Diamond\,\mathsf{fin}(\Sigma_k).
+\]
+\begin{proof}
+$W$ may be empty, so $\mathsf{Next}$ is enabled whenever a quorum is
+live; BFT view-change liveness~\cite{PBFT} delivers
+$\mathsf{QC}_{2/3}$ after stabilization; weak fairness converts
+enabledness into occurrence.
+\end{proof}
+\end{proposition}
+
+\begin{obligation}[Checkable instances]\label{obl:model}
+Every implementation change to $F$ ships with a finite-instance model
+($|V|\leq n_0$, bounded epochs) checking
+Invariants~\ref{inv:mass},
+\ref{inv:slash}--\ref{inv:unique} before merge.
+\end{obligation}
+
+\section{Economics}\label{sec:economics}
+
+\begin{definition}[Two assets]\label{def:assets}
+\[
+\begin{array}{rcl}
+\mathsf{rank}&:&\text{soulbound (Def.~\ref{def:soulbound})},\\
+&&\text{gates admission/sortition},\\
+\mathsf{reward}&:&\text{transferable via}\ \mathsf{TX}
+  \ \text{(Alg.~\ref{alg:step}, l.4)},\\
+\mathsf{issue}_k(v)&\propto&
+  \bigl(W_k^{\mathsf T}t_k\bigr)(v).
+\end{array}
+\]
+\end{definition}
+
+\begin{proposition}[Countersigning game]\label{prop:countersign}
+For a service-consuming node $b$:
+\[
+\begin{array}{rcl}
+\mathsf{cost}(\mathsf{sign})&=&0\quad
+  \text{(outflow spends $b$'s row,}\\
+&&\phantom{0\quad\text{(}}\text{never $t(b)$)},\\
+u_b(\mathsf{withhold})&=&
+  \text{choked: service needs receipts},\\
+u_b(\mathsf{sign})&=&\text{continued service},
+\end{array}
+\]
+so truthful countersigning is weakly dominant under link-layer
+tit-for-tat (the eDonkey/BitTorrent heritage~\cite{eMule,Cohen03}).
+Selling receipts is not free-riding but attack-edge formation: the
+seller's flow enters $g$ of Proposition~\ref{prop:sybil-bound}, is
+volume-capped by $w_{\max}$, and is priced by
+Proposition~\ref{prop:farm-price}.
+\end{proposition}
+
+\begin{proposition}[Payable rank defeats cost anchoring]\label{prop:soulbound}
+Let rank be transferable at price $p$.  Then
+\[
+\begin{array}{rcl}
+\mathsf{cost}_{\mathsf{Adv}}(m)&=&
+  \min\bigl(\mathsf{farm}(m),\ p\cdot m\bigr),\\
+u_{\mathsf{exit}}(\mathsf{hold})=0\ \land\ p>0
+&\Rightarrow&\text{exiting nodes sell},\\
+\text{supply}>0&\Rightarrow&
+  p\leq\inf_v\mathsf{farm}_v(m)/m,
+\end{array}
+\]
+so acquisition cost decouples from behavior.  Non-transferability removes
+the second branch of the $\min$, restoring
+$\mathsf{farm}(m)=\text{service}+\text{time}+\text{slash risk}$ as the sole
+path. \qed
+\end{proposition}
+
+\begin{invariant}[Balance conservation]\label{inv:balance}
+\[
+\mathbf{1}^{\mathsf T}\mathsf{bal}_{k+1}
+=\mathbf{1}^{\mathsf T}\mathsf{bal}_k
++\mathsf{issue}_k-\mathsf{burn}_k,
+\]
+by lines 4--5 of Algorithm~\ref{alg:step}:
+$\mathsf{apply}(\mathsf{TX}_k,\cdot)$ is sum-preserving (transfers
+permute balance, bond/unbond move it between $\mathsf{bal}$ and
+$\mathsf{Bond}$ within the same total), so supply changes only through
+published issuance and burn.
+\end{invariant}
+
+\begin{definition}[Fee loop]\label{def:sinks}
+\[
+\begin{array}{rcl}
+\mathsf{Sinks}&=&\{\mathsf{store}_{>\rho},\ \mathsf{QoS},\
+  \mathsf{namespace}\},\\
+\mathsf{fees}&\to&\mathsf{burn}\ \cup\ \mathsf{issue\ pool},\\
+\mathsf{anchor}_{\mathsf{PoS}}&\leq&
+  f(\mathsf{demand}(\mathsf{Sinks})).
+\end{array}
+\]
+\end{definition}
+
+\begin{obligation}[Security-budget crossover]\label{obl:crossover}
+\[
+\mathsf{activate}(\mathsf{PoS})
+\;\iff\;
+\mathsf{Bond}\;\geq\;\beta\cdot
+  \widehat{\mathsf{payoff}}(\mathsf{attack}),\quad\beta>1,
+\]
+conditioned, never scheduled; pre-crossover, PoA finality overlays PoS
+production, weighted down by $D(\mathsf{vol}_k)$
+(Definition~\ref{def:dilution}).
+\end{obligation}
+
+\begin{obligation}[Validator-set abstraction]\label{obl:vset}
+\[
+\begin{array}{rcl}
+\mathsf{vset}&:&\Sigma\to2^{V},\\
+\mathsf{vset}_{\mathsf{PoA}}&=&\mathsf{const}\ S,\\
+\mathsf{vset}_{\mathsf{PoS}}&=&\mathsf{sortition}(\mathsf{Bond})\\
+&&\text{(seat proofs out-of-fold,
+  Obl.~\ref{obl:boundary})};
+\end{array}
+\]
+the transition changes one pure function, not the engine.
+\end{obligation}
+
+\begin{constraint}[Rejected anchors]\label{con:anchors}
+\[
+\begin{array}{rcl}
+\mathsf{PoW}&:&
+  \mathsf{cost}(\text{51\%})=\mathsf{rent}(\mathsf{hash})\cdot
+  O(\text{hours})\ \Rightarrow\ \bot,\\
+\mathsf{PoT}&:&
+  W_{\mathsf{synth}}[b,a],\ a,b\in\mathsf{Adv}\
+  \not\perp\ W_{\mathsf{real}}\\
+&&\Rightarrow\ \text{bandwidth burned},\
+  \Delta T(\mathsf{Adv})\approx0\ \Rightarrow\ \bot.
+\end{array}
+\]
+Receipted real service with trust weighting is proof-of-traffic minus the
+synthetic load.
+\end{constraint}
+
+\section{Security Analysis}\label{sec:security}
+
+\begin{table}[H]
+\centering
+\caption{Threat matrix}\label{tab:threats}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}p{1.9cm}p{3.3cm}p{2.4cm}@{}}
+\toprule
+\textbf{Attack} & \textbf{Bound} & \textbf{Residual} \\
+\midrule
+Sybil flood &
+Prop.~\ref{prop:sybil-bound} &
+$\alpha g/(1-\alpha)$ \\
+Self-dealing &
+Prop.~\ref{prop:forgery} + signer-trust weight; cap
+(Def.~\ref{def:graph}) &
+zero-trust circulation \\
+Patient farming &
+Laws~\ref{law:conservation}--\ref{law:revocation}; total slash
+(Def.~\ref{def:equiv}) &
+undetected deviation \\
+Whitewashing &
+fresh DID $\Rightarrow t=0$; slow earn, instant loss &
+re-entry at zero \\
+Grind/eclipse &
+Prop.~\ref{prop:grind} &
+--- \\
+Censorship &
+Obl.~\ref{obl:inclusion} &
+latency $\Delta$ \\
+Seed compromise &
+threshold $S$; revocation; Def.~\ref{def:dilution} &
+pre-dilution window \\
+Rank market &
+Prop.~\ref{prop:soulbound} &
+out-of-band key sale \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\[
+\begin{array}{rcl}
+\mathsf{sale}(\mathsf{sk}_v)&\Rightarrow&
+  \text{buyer inherits slash exposure},\\
+\mathsf{PoA}&=&
+  \text{trust root until Obl.~\ref{obl:crossover}}.
+\end{array}
+\]
+
+\begin{table}[H]
+\centering
+\caption{Protocol parameters}\label{tab:params}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}clp{3.6cm}@{}}
+\toprule
+\textbf{Sym.} & \textbf{Role} & \textbf{Constraint} \\
+\midrule
+$\alpha_k$ & damping / seed weight &
+  $\bar\alpha=\sup_k\alpha_k<1$; Def.~\ref{def:dilution} \\
+$w_{\max}$ & receipt issuance cap &
+  bounds per-identity sale volume \\
+$\tau$ & expected committee size &
+  error $e^{-\tau\mathrm{D}(1/3\Vert T(A))}$,
+  Prop.~\ref{prop:committee} \\
+$\theta$ & authority threshold &
+  $\geq2/3$; Defs.~\ref{def:threshold},~\ref{def:beacon} \\
+$\Delta$ & inclusion timeout &
+  censorship latency, Obl.~\ref{obl:inclusion} \\
+$T_{\mathrm{ep}}$ & epoch timer &
+  enables $\mathsf{Next}$, Def.~\ref{def:epoch} \\
+$\Delta_{\mathrm{ub}}$ & unbonding delay &
+  slash exposure persists, Def.~\ref{def:step} \\
+$\mu$ & service metering &
+  published per kind, Def.~\ref{def:graph} \\
+$\phi$ & fixed-point precision &
+  error $\leq n2^{-\phi}/(1-\bar\alpha)$,
+  Prop.~\ref{prop:rounding} \\
+$D$ & dilution curve &
+  non-increasing, published, Def.~\ref{def:dilution} \\
+$\beta$ & crossover margin &
+  $>1$, Obl.~\ref{obl:crossover} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Related Work}\label{sec:related}
+
+Local scoring descends from eDonkey queues~\cite{eMule} and BitTorrent
+choking~\cite{Cohen03}; propagation from EigenTrust and personalized
+PageRank~\cite{EigenTrust,PageRank}, here unrolled along epochs over signed
+evidence; the attack-edge bound pattern from
+SybilGuard/SybilLimit/SybilRank~\cite{SybilGuard,SybilLimit,SybilRank},
+instantiated over a service graph.  Brahms~\cite{Brahms} addresses
+adversarial sampling that the draft's tests could not
+(Proposition~\ref{prop:stat}); DRanking sidesteps via Algorand-style
+sortition~\cite{Algorand,VRF} weighted by trust.
+S/Kademlia~\cite{SKademlia} prices identifier creation (complementary
+one-time cost).  Finality follows PBFT lineage~\cite{PBFT,LSP82};
+succinctness follows Mina~\cite{Mina} via Nova folding~\cite{Nova};
+impossibility framing is Douceur's~\cite{Douceur2002}; the external-cost
+anchor observation is Nakamoto's~\cite{Nakamoto}.
+
+\section{Conclusion}
+
+\[
+\mathsf{safe}
+\;\iff\;
+\mathsf{cost}\bigl(T(\mathsf{Adv})\geq\tfrac13\bigr)
+\;>\;
+\widehat{\mathsf{payoff}}(\mathsf{attack}),
+\]
+and every mechanism above --- receipts, the trust laws, sortition, the
+ledger, folding, the two-asset economy --- is a term on the left-hand
+side.
+
+\bibliographystyle{IEEEtran}
+\bibliography{dranking}
+
+\end{document}
