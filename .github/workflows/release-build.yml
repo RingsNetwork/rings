@@ -62,6 +62,11 @@ jobs:
         run: |
           rustup show
 
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ steps.target.outputs.target }}
+
       - name: Build
         run: |
           rustup run "$RUST_TOOLCHAIN" cargo build -p rings-node --bin rings --features node --no-default-features --release --target ${{ steps.target.outputs.target }}
@@ -110,6 +115,11 @@ jobs:
       - name: Setup rust toolchain
         run: |
           rustup show
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ steps.target.outputs.target }}
 
       - name: Install musl-tools
         if: matrix.platform == 'musl'
@@ -168,11 +178,18 @@ jobs:
           version: ${{ env.WASM_BINDGEN_CLI_VERSION }}
 
       - name: Install wasm-pack
-        run: cargo install wasm-pack --version "$WASM_PACK_VERSION" --locked
+        uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
+        with:
+          tool: wasm-pack@${{ env.WASM_PACK_VERSION }}
 
       - name: Setup rust toolchain
         run: |
           rustup show
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ steps.target.outputs.target }}
 
       - uses: actions/setup-node@3235b876344d2a9aa001b8d1453c930bba69e610 # v3
         with:

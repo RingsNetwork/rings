@@ -25,6 +25,13 @@ env:
 permissions:
   contents: read
 
+# Cancel superseded in-flight runs for the same PR (a new push obsoletes the previous
+# run). Scoped by head ref so parallel PRs don't cancel each other; master pushes use the
+# commit ref and are never cancelled, keeping the default-branch history intact.
+concurrency:
+  group: qaci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # Build every release target (macOS, static-musl linux, browser) on each PR via the shared
   # reusable workflow, so a release-only build failure (static-musl C++ linking, or the browser
@@ -56,7 +63,9 @@ jobs:
         uses: RyanKung/cargo-cooldown-check@d8588ee951cc30c7680e7538f20cfe190eaa1350
 
       - name: Install cargo-deny
-        run: cargo install cargo-deny --version "$CARGO_DENY_VERSION" --locked
+        uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
+        with:
+          tool: cargo-deny@${{ env.CARGO_DENY_VERSION }}
 
       - name: Check dependency policy
         run: cargo deny --locked check -A unmatched-source advisories licenses bans sources
@@ -74,6 +83,9 @@ jobs:
           rustup component add miri rust-src --toolchain "$NIGHTLY_TOOLCHAIN"
           cargo +"$NIGHTLY_TOOLCHAIN" miri setup
           rustup show
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Run Miri-compatible core tests
         env:
@@ -106,6 +118,9 @@ jobs:
           rustup target add x86_64-unknown-linux-gnu --toolchain "$NIGHTLY_TOOLCHAIN"
           rustup show
 
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
       - name: Run FFI lifecycle tests under ASan and LSan
         run: |
           set -euo pipefail
@@ -135,6 +150,9 @@ jobs:
           rustup default "$RUST_TOOLCHAIN"
           rustup target add wasm32-unknown-unknown
           rustup show
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - uses: jetli/wasm-bindgen-action@20b33e20595891ab1a0ed73145d8a21fc96e7c29 # v0.2.0
         with:
@@ -171,7 +189,9 @@ jobs:
         run: cargo clippy -p rings-node --features browser_default --no-deps --no-default-features --target=wasm32-unknown-unknown --tests -- -D warnings
 
       - name: Install wasm-pack
-        run: cargo install wasm-pack --version "$WASM_PACK_VERSION" --locked
+        uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
+        with:
+          tool: wasm-pack@${{ env.WASM_PACK_VERSION }}
 
       - uses: actions/setup-node@3235b876344d2a9aa001b8d1453c930bba69e610 # v3
         with:
@@ -192,7 +212,9 @@ jobs:
           sudo apt-get install -y librsvg2-bin
 
       - name: Install Trunk
-        run: cargo install trunk --version "$TRUNK_VERSION" --locked
+        uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
+        with:
+          tool: trunk@${{ env.TRUNK_VERSION }}
 
       - name: Build Rings frontend extension package
         run: npm run package:frontend-extension
@@ -257,6 +279,9 @@ jobs:
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
           rustup default "$RUST_TOOLCHAIN"
           rustup show
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Build
         run: cargo build --all --verbose
@@ -330,6 +355,9 @@ jobs:
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
           rustup default "$RUST_TOOLCHAIN"
           rustup show
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Run clippy for node ffi
         run: cargo clippy -p rings-node --features ffi
@@ -414,6 +442,9 @@ jobs:
           rustup default "$RUST_TOOLCHAIN"
           rustup show
 
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
       - name: Check shared data plane and Wintun binding
         run: cargo check -p rings-gateway --all-targets
 
@@ -459,6 +490,9 @@ jobs:
           rustup component add rustfmt --toolchain "$NIGHTLY_TOOLCHAIN"
           rustup show
 
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
       - name: Run strict clippy for node native lib
         run: |
           cargo clippy -p rings-node --no-default-features --features node --lib -- \
@@ -493,7 +527,9 @@ jobs:
         run: cargo doc -p rings-transport --no-default-features --no-deps
 
       - name: Install taplo
-        run: cargo install taplo-cli --version "$TAPLO_CLI_VERSION" --locked
+        uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
+        with:
+          tool: taplo-cli@${{ env.TAPLO_CLI_VERSION }}
 
       - name: Check toml file formating by taplo
         run: taplo format --check
