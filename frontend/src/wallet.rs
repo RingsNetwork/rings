@@ -6,6 +6,7 @@ use base64::Engine;
 use js_sys::Array;
 use js_sys::Object;
 use js_sys::Uint8Array;
+use rings_node::prelude::rings_core::ecc::signers::secp256r1;
 use wasm_bindgen::JsValue;
 
 use crate::browser_api::await_js;
@@ -221,7 +222,13 @@ async fn sign_webcrypto(private_key: &JsValue, proof: &str) -> Result<Vec<u8>, S
         &message.into(),
     )?)
     .await?;
-    Ok(Uint8Array::new(&signature).to_vec())
+    normalize_webcrypto_signature(Uint8Array::new(&signature).to_vec())
+}
+
+fn normalize_webcrypto_signature(signature: Vec<u8>) -> Result<Vec<u8>, String> {
+    secp256r1::normalize_signature(&signature)
+        .map(|signature| signature.to_vec())
+        .map_err(|error| format!("wallet returned an invalid secp256r1 signature: {error}"))
 }
 
 async fn connect_eip191() -> Result<WalletAccount, String> {
@@ -428,6 +435,20 @@ mod tests {
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn test_hex_signature_parser_accepts_prefixed_even_hex() {
         assert_eq!(hex_to_bytes("0x000aff"), Ok(vec![0, 10, 255]));
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn test_webcrypto_signature_normalizer_rewrites_high_s() {
+        let result = (|| -> Result<(), String> {
+            let low_s = hex_to_bytes("43e9f1ce3f4fc0761805cb13b3ec188ccd3d509b7e563f3794e5daf84eaf43bf4fe1343f0b08a810768475fa87fd061a586e943ca9665ee167a3f63c70c72fd9")?;
+            let high_s = hex_to_bytes("43e9f1ce3f4fc0761805cb13b3ec188ccd3d509b7e563f3794e5daf84eaf43bfb01ecbbff4f757f0897b8a057802f9e564786670fdb13fa38c15d4868b9bf578")?;
+
+            assert_eq!(normalize_webcrypto_signature(high_s), Ok(low_s));
+            Ok(())
+        })();
+
+        assert_eq!(result, Ok(()));
     }
 }
 

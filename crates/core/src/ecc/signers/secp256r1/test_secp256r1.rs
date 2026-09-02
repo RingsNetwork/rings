@@ -106,6 +106,30 @@ fn test_secp256r1_rejects_high_s_signature() -> Result<()> {
 }
 
 #[test]
+fn test_secp256r1_normalizes_high_s_signature() -> Result<()> {
+    let sk =
+        SecretKey::try_from("2544acda37415a476d42312969926dc48e529867036cec71922d4177ea9c1038")?;
+    let sk_bytes: FieldBytes<p256::NistP256> = (&sk).into();
+    let signing_key = ecdsa::SigningKey::<p256::NistP256>::from_bytes(&sk_bytes)?;
+    let encoded = signing_key.verifying_key().to_encoded_point(false);
+    let pk = PublicKey::from_u8(
+        encoded
+            .as_bytes()
+            .get(1..)
+            .ok_or(Error::PublicKeyBadFormat)?,
+    )?;
+    let msg = b"canonical signature";
+    let low_s = ecdsa::Signature::<p256::NistP256>::from_slice(&sign(&sk, &hash(msg))?)?;
+    let (r, s) = low_s.split_scalars();
+    let high_s = ecdsa::Signature::<p256::NistP256>::from_scalars(r.to_bytes(), (-s).to_bytes())?;
+    let normalized = normalize_signature(high_s.to_bytes())?;
+
+    assert_eq!(normalized, low_s.to_bytes().as_slice());
+    assert!(verify(msg, &pk.address(), normalized, &pk));
+    Ok(())
+}
+
+#[test]
 fn test_invalid_public_key_does_not_verify() {
     let pk = PublicKey([0u8; 33]);
     let sig = [0u8; 64];
