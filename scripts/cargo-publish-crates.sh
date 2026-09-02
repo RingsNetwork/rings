@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CRATES="rings-derive rings-transport rings-measure rings-core rings-rpc rings-node"
-INTERNAL_CRATES="rings-core rings-derive rings-measure rings-node rings-rpc rings-transport"
+# Publish order is a topological sort of the internal dependency graph: every crate
+# appears after all internal crates it depends on. `rings-codec` (a hard dep of
+# transport/core/node) and `rings-gateway` (an optional dep of node) must ship before
+# their dependents; `rings-webview` is an independent leaf crate with no dependents.
+CRATES="rings-derive rings-codec rings-measure rings-gateway rings-webview rings-transport rings-core rings-rpc rings-node"
+
+# Internal crates that appear as `{ workspace = true }` dependencies of a publishable
+# crate; used to validate workspace dependency metadata and to gate publishing on
+# crates.io indexing. `rings-webview` is omitted: it is published but never depended on,
+# so it has no `[workspace.dependencies]` entry to validate.
+INTERNAL_CRATES="rings-core rings-codec rings-derive rings-gateway rings-measure rings-node rings-rpc rings-transport"
 ROOT_MANIFEST="Cargo.toml"
 
 usage() {
@@ -17,12 +26,15 @@ USAGE
 
 manifest_for() {
   case "$1" in
+    rings-codec) echo "crates/codec/Cargo.toml" ;;
     rings-core) echo "crates/core/Cargo.toml" ;;
     rings-derive) echo "crates/derive/Cargo.toml" ;;
+    rings-gateway) echo "crates/gateway/Cargo.toml" ;;
     rings-measure) echo "crates/measure/Cargo.toml" ;;
     rings-node) echo "crates/node/Cargo.toml" ;;
     rings-rpc) echo "crates/rpc/Cargo.toml" ;;
     rings-transport) echo "crates/transport/Cargo.toml" ;;
+    rings-webview) echo "crates/webview/Cargo.toml" ;;
     *) echo "unknown crate: $1" >&2; return 1 ;;
   esac
 }
