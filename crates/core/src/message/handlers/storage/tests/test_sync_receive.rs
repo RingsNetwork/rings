@@ -274,7 +274,7 @@ async fn test_storage_sync_batch_persists_one_entry_per_step_after_validation() 
 
 #[tokio::test]
 async fn test_sync_entries_handler_accepts_placement_destination_on_local_branch() -> Result<()> {
-    let mut keys = gen_ordered_keys(2).into_iter();
+    let mut keys = gen_ordered_keys::<2>().into_iter();
     let node1 = prepare_node(next_generated_key(&mut keys)?).await;
     let node2 = prepare_node(next_generated_key(&mut keys)?).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
@@ -381,7 +381,7 @@ async fn test_additive_repair_sync_persists_without_cleanup_report() -> Result<(
 
 #[tokio::test]
 async fn test_sync_entries_handler_rejects_mismatched_placement_destination() -> Result<()> {
-    let mut keys = gen_ordered_keys(2).into_iter();
+    let mut keys = gen_ordered_keys::<2>().into_iter();
     let sender = prepare_node(next_generated_key(&mut keys)?).await;
     let receiver = prepare_node(next_generated_key(&mut keys)?).await;
     manually_establish_connection(&sender.swarm, &receiver.swarm).await;
@@ -432,7 +432,7 @@ async fn test_sync_entries_handler_rejects_mismatched_placement_destination() ->
 #[tokio::test]
 async fn test_sync_entries_handler_rejects_physical_destination_for_unowned_placement() -> Result<()>
 {
-    let mut keys = gen_ordered_keys(2).into_iter();
+    let mut keys = gen_ordered_keys::<2>().into_iter();
     let sender = prepare_node(next_generated_key(&mut keys)?).await;
     let receiver = prepare_node(next_generated_key(&mut keys)?).await;
     manually_establish_connection(&sender.swarm, &receiver.swarm).await;
@@ -481,7 +481,7 @@ async fn test_sync_entries_handler_rejects_physical_destination_for_unowned_plac
 
 #[tokio::test]
 async fn test_sync_entries_handler_acks_local_branch_with_successor_witness() -> Result<()> {
-    let mut keys = gen_ordered_keys(2).into_iter();
+    let mut keys = gen_ordered_keys::<2>().into_iter();
     let sender = prepare_node(next_generated_key(&mut keys)?).await;
     let receiver = prepare_node(next_generated_key(&mut keys)?).await;
     manually_establish_connection(&sender.swarm, &receiver.swarm).await;

@@ -7,12 +7,12 @@ use crate::ecc::SecretKey;
 use crate::error::Result;
 
 /// sign function passing raw message parameter.
-pub fn sign_raw(sec: SecretKey, msg: &[u8]) -> [u8; 65] {
+pub fn sign_raw(sec: &SecretKey, msg: &[u8]) -> Result<[u8; 65]> {
     sign(sec, &hash(msg))
 }
 
 /// sign function with `hash` data.
-pub fn sign(sec: SecretKey, hash: &[u8; 32]) -> [u8; 65] {
+pub fn sign(sec: &SecretKey, hash: &[u8; 32]) -> Result<[u8; 65]> {
     sec.sign_hash(hash)
 }
 

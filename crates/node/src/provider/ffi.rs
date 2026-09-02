@@ -542,7 +542,7 @@ mod tests {
         }
         let data = unsafe { CStr::from_ptr(data) };
         let key = SecretKey::try_from(TEST_SECRET_KEY).expect("valid test key");
-        let signature = eip191::sign_raw(key, data.to_bytes());
+        let signature = eip191::sign_raw(&key, data.to_bytes()).expect("valid test signature");
         unsafe {
             std::ptr::copy_nonoverlapping(
                 signature.as_ptr().cast::<c_char>(),

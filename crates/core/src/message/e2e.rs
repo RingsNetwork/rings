@@ -412,7 +412,7 @@ impl E2eStreamDecryptor {
 
         while let Some(frame) = self.pending_frames.get(&self.next_sequence) {
             let frame_plaintext =
-                secp256k1::decrypt_bytes(&frame.ciphertext, self.recipient_secret_key)?;
+                secp256k1::decrypt_bytes(&frame.ciphertext, &self.recipient_secret_key)?;
             let is_final = frame.is_final;
             plaintext.extend_from_slice(&frame_plaintext);
             self.pending_frames.remove(&self.next_sequence);
@@ -625,7 +625,13 @@ mod tests {
                     payload_len.div_ceil(frame_limit.max(1)).max(1)
                 );
                 assert_eq!(
-                    decrypt_stream(&frames, stream_id, sender.address().into(), recipient).unwrap(),
+                    decrypt_stream(
+                        &frames,
+                        stream_id,
+                        sender.address().into(),
+                        recipient.clone(),
+                    )
+                    .unwrap(),
                     payload
                 );
             }

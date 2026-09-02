@@ -141,7 +141,7 @@ where
 pub fn build_session_key(key: &SecretKey) -> rings_core::error::Result<SessionSk> {
     let did = Did::from(key.address());
     let mut builder = SessionSkBuilder::new(did.to_string(), "secp256k1".to_string());
-    let sig = key.sign(&builder.unsigned_proof());
+    let sig = key.sign(&builder.unsigned_proof())?;
     builder = builder.set_session_sig(sig.to_vec());
     builder.build()
 }

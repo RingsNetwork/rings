@@ -6,7 +6,6 @@ use sha2::Sha256;
 
 use crate::ecc::PublicKey;
 use crate::ecc::PublicKeyAddress;
-use crate::error::Error;
 use crate::error::Result;
 
 /// recover pubkey according to signature.
@@ -27,13 +26,8 @@ pub fn recover(msg: &[u8], sig: impl AsRef<[u8]>) -> Result<PublicKey<33>> {
     let sig_byte = array_mut_ref![sig, 0, 65];
     let hash = self::magic_hash(msg);
 
-    if sig_byte[64] >= 27 && sig_byte[64] <= 30 {
-        sig_byte[64] -= 27;
-    } else if sig_byte[64] >= 31 && sig_byte[64] <= 34 {
-        sig_byte[64] -= 31;
-    } else {
-        return Err(Error::InvalidRecoverId(sig_byte[64]));
-    }
+    sig_byte[64] = super::recovery_id_from_v(sig_byte[64], 27)
+        .or_else(|_| super::recovery_id_from_v(sig_byte[64], 31))?;
     crate::ecc::recover_hash(&hash, sig_byte)
 }
 

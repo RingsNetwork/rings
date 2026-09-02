@@ -46,8 +46,8 @@ pub fn test_session_verify_secp256r1_account_key() {
             .unwrap();
     let mut builder = SessionSkBuilder::new(account_entity.to_string(), "secp256r1".to_string());
     let proof = builder.unsigned_proof();
-    let sig =
-        signers::secp256r1::sign(signing_key, &signers::secp256r1::hash(proof.as_bytes())).unwrap();
+    let sig = signers::secp256r1::sign(&signing_key, &signers::secp256r1::hash(proof.as_bytes()))
+        .unwrap();
     builder = builder.set_session_sig(sig.to_vec());
 
     let session = builder.build().unwrap().session();
