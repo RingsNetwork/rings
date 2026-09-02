@@ -9,7 +9,7 @@ use crate::error::Result;
 use crate::error::WebviewError;
 
 /// Absolute target URL accepted by the gateway.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct TargetUrl {
     inner: Url,
 }
@@ -18,8 +18,16 @@ impl TargetUrl {
     /// Parse and validate an absolute HTTP(S) target URL.
     pub fn parse(input: &str) -> Result<Self> {
         let inner = Url::parse(input.trim())?;
+        Self::from_url(inner)
+    }
+
+    /// Validate an already parsed absolute HTTP(S) target URL.
+    pub fn from_url(inner: Url) -> Result<Self> {
         match inner.scheme() {
-            "http" | "https" => Ok(Self { inner }),
+            "http" | "https" => {
+                rings_network_policy::validate_public_url_host(&inner)?;
+                Ok(Self { inner })
+            }
             scheme => Err(WebviewError::UnsupportedScheme(scheme.to_string())),
         }
     }
@@ -32,6 +40,19 @@ impl TargetUrl {
     /// Consume this wrapper and return the URL.
     pub fn into_url(self) -> Url {
         self.inner
+    }
+}
+
+impl<'de> Deserialize<'de> for TargetUrl {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where D: serde::Deserializer<'de> {
+        #[derive(Deserialize)]
+        struct TargetUrlWire {
+            inner: Url,
+        }
+
+        let wire = TargetUrlWire::deserialize(deserializer)?;
+        Self::from_url(wire.inner).map_err(serde::de::Error::custom)
     }
 }
 
@@ -139,6 +160,49 @@ mod tests {
         assert!(matches!(
             TargetUrl::parse("file:///tmp/index.html"),
             Err(WebviewError::UnsupportedScheme(_))
+        ));
+    }
+
+    #[test]
+    fn test_gateway_rejects_private_and_local_targets_before_transport() {
+        for target in [
+            "http://127.0.0.1/",
+            "http://[::1]/",
+            "http://169.254.169.254/latest/meta-data/",
+            "https://10.0.0.1/",
+            "https://192.168.1.1/",
+            "https://localhost/",
+            "https://service.local/",
+            "https://metadata.google.internal/",
+            "https://intranet/",
+        ] {
+            assert!(matches!(
+                TargetUrl::parse(target),
+                Err(WebviewError::UnsafeTargetHost(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn test_gateway_accepts_public_hosts_for_both_http_schemes() -> Result<()> {
+        for target in [
+            "http://example.com/",
+            "https://example.com/",
+            "https://1.1.1.1/",
+            "https://[2606:4700:4700::1111]/",
+        ] {
+            TargetUrl::parse(target)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_deserialization_cannot_bypass_target_host_invariant() {
+        let encoded = r#"{"inner":"http://127.0.0.1/"}"#;
+        let target = serde_json::from_str::<TargetUrl>(encoded);
+        assert!(matches!(
+            target,
+            Err(error) if error.to_string().contains("not publicly routable")
         ));
     }
 

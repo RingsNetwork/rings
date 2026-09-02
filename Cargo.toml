@@ -25,6 +25,7 @@ rings-core = { path = "crates/core", version = "0.20.0", default-features = fals
 rings-derive = { path = "crates/derive", version = "0.20.0", default-features = false }
 rings-gateway = { path = "crates/gateway", version = "0.20.0" }
 rings-measure = { path = "crates/measure", version = "0.20.0" }
+rings-network-policy = { path = "crates/network-policy", version = "0.20.0" }
 rings-node = { path = "crates/node", version = "0.20.0" }
 rings-rpc = { path = "crates/rpc", version = "0.20.0", default-features = false }
 rings-transport = { path = "crates/transport", version = "0.20.0" }

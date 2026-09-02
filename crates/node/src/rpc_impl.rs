@@ -25,6 +25,10 @@ use rings_rpc::protos::rings_node::*;
 use rings_rpc::protos::rings_node_handler::HandleRpc;
 
 use crate::error::Error as ServerError;
+#[cfg(rings_native)]
+use crate::onion::target::resolve_public_target;
+#[cfg(rings_native)]
+use crate::onion::OnionProxyTarget;
 use crate::processor::Processor;
 use crate::seed::Seed;
 
@@ -38,7 +42,8 @@ impl HandleRpc<ConnectPeerViaHttpRequest, ConnectPeerViaHttpResponse> for Proces
         &self,
         req: ConnectPeerViaHttpRequest,
     ) -> Result<ConnectPeerViaHttpResponse> {
-        let client = rings_rpc::jsonrpc::Client::new(&req.url);
+        let ConnectPeerViaHttpRequest { url, api_token } = req;
+        let client = remote_rpc_client(&url, api_token).await?;
 
         let did = client
             .node_did(&NodeDidRequest {})
@@ -85,11 +90,12 @@ impl HandleRpc<ConnectWithSeedRequest, ConnectWithSeedResponse> for Processor {
 
         let tasks = seed
             .peers
-            .iter()
-            .filter(|&x| !connected.contains(&x.did))
+            .into_iter()
+            .filter(|x| !connected.contains(&x.did))
             .map(|x| {
                 self.handle_rpc(ConnectPeerViaHttpRequest {
-                    url: x.url.to_string(),
+                    url: x.url,
+                    api_token: x.api_token,
                 })
             });
 
@@ -101,6 +107,96 @@ impl HandleRpc<ConnectWithSeedRequest, ConnectWithSeedResponse> for Processor {
         }
 
         Ok(ConnectWithSeedResponse {})
+    }
+}
+
+fn validate_remote_rpc_url(url: &str) -> std::result::Result<reqwest::Url, ServerError> {
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|error| ServerError::UnsafeRemoteRpcTarget(error.to_string()))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(ServerError::UnsafeRemoteRpcTarget(
+            "only HTTP(S) endpoints are supported".to_string(),
+        ));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() || parsed.fragment().is_some() {
+        return Err(ServerError::UnsafeRemoteRpcTarget(
+            "credentials and fragments are not permitted in an RPC endpoint URL".to_string(),
+        ));
+    }
+    rings_network_policy::validate_public_url_host(&parsed)
+        .map_err(|error| ServerError::UnsafeRemoteRpcTarget(error.to_string()))?;
+    Ok(parsed)
+}
+
+#[cfg(rings_native)]
+async fn remote_rpc_client(
+    url: &str,
+    api_token: Option<String>,
+) -> std::result::Result<rings_rpc::jsonrpc::Client, ServerError> {
+    let parsed = validate_remote_rpc_url(url)?;
+    let host = parsed.host_str().ok_or_else(|| {
+        ServerError::UnsafeRemoteRpcTarget("endpoint URL has no host".to_string())
+    })?;
+    let port = parsed.port_or_known_default().ok_or_else(|| {
+        ServerError::UnsafeRemoteRpcTarget("endpoint URL has no usable port".to_string())
+    })?;
+    let target = OnionProxyTarget::new(host, port)?;
+    let addresses = resolve_public_target(&target).await?;
+    let http_client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .resolve_to_addrs(host, &addresses)
+        .build()
+        .map_err(|error| ServerError::RemoteRpcError(error.to_string()))?;
+    let client = rings_rpc::jsonrpc::Client::with_http_client(parsed.as_str(), http_client);
+    Ok(match api_token {
+        Some(token) => client.with_bearer_token(token),
+        None => client,
+    })
+}
+
+#[cfg(rings_browser)]
+async fn remote_rpc_client(
+    url: &str,
+    api_token: Option<String>,
+) -> std::result::Result<rings_rpc::jsonrpc::Client, ServerError> {
+    let parsed = validate_remote_rpc_url(url)?;
+    let client = rings_rpc::jsonrpc::Client::new(parsed.as_str());
+    Ok(match api_token {
+        Some(token) => client.with_bearer_token(token),
+        None => client,
+    })
+}
+
+#[cfg(test)]
+mod remote_rpc_security_tests {
+    use super::*;
+
+    #[test]
+    fn remote_rpc_url_rejects_local_targets_and_url_credentials() {
+        for target in [
+            "http://127.0.0.1:50001/",
+            "http://169.254.169.254/latest/meta-data/",
+            "https://intranet:50001/",
+            "https://token@example.com:50001/",
+            "file:///tmp/socket",
+        ] {
+            assert!(matches!(
+                validate_remote_rpc_url(target),
+                Err(ServerError::UnsafeRemoteRpcTarget(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn remote_rpc_url_accepts_public_http_and_https_targets() {
+        for target in [
+            "http://example.com:50001/",
+            "https://1.1.1.1/rpc",
+            "https://[2606:4700:4700::1111]/rpc",
+        ] {
+            assert!(validate_remote_rpc_url(target).is_ok());
+        }
     }
 }
 

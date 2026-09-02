@@ -3378,6 +3378,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rings-network-policy"
+version = "0.20.0"
+dependencies = [
+ "thiserror 1.0.69",
+ "url",
+]
+
+[[package]]
 name = "rings-node"
 version = "0.20.0"
 dependencies = [
@@ -3414,6 +3422,7 @@ dependencies = [
  "rings-derive",
  "rings-gateway",
  "rings-measure",
+ "rings-network-policy",
  "rings-rpc",
  "rings-transport",
  "serde",
@@ -3422,9 +3431,11 @@ dependencies = [
  "serde_yaml",
  "smoltcp",
  "strum",
+ "subtle",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
+ "tower",
  "tower-http",
  "tracing",
  "tracing-log 0.1.4",
@@ -3501,6 +3512,7 @@ dependencies = [
  "lol_html",
  "percent-encoding",
  "psl",
+ "rings-network-policy",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
