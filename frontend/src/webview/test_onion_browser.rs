@@ -294,7 +294,7 @@ async fn gateway_navigation(
     target: &TargetUrl,
 ) -> WebviewResult<GatewayResponse> {
     let redirect = node
-        .handle(WebviewHostRequest::navigation(target.clone()))
+        .handle(WebviewHostRequest::navigation(target.as_url().clone()))
         .await?;
     let WebviewHostOutcome::Redirect(gateway_url) = redirect else {
         return Err(WebviewError::transport(
@@ -302,9 +302,7 @@ async fn gateway_navigation(
         ));
     };
     let served = node
-        .handle(WebviewHostRequest::navigation(TargetUrl::parse(
-            gateway_url.as_str(),
-        )?))
+        .handle(WebviewHostRequest::navigation(gateway_url))
         .await?;
     expect_response(served, "gateway navigation")
 }
@@ -336,16 +334,16 @@ fn expect_status(
     }
 }
 
-fn controlled_origin() -> WebviewResult<TargetUrl> {
+fn controlled_origin() -> WebviewResult<Url> {
     let origin = web_sys::window()
         .ok_or_else(|| WebviewError::Browser("missing browser window".to_string()))?
         .location()
         .origin()
         .map_err(js_webview_error)?;
-    TargetUrl::parse(&format!("{}/", origin.trim_end_matches('/')))
+    Url::parse(&format!("{}/", origin.trim_end_matches('/'))).map_err(WebviewError::Url)
 }
 
-fn controlled_gateway_target(target: &str) -> WebviewResult<TargetUrl> {
+fn controlled_gateway_target(target: &str) -> WebviewResult<Url> {
     let origin = web_sys::window()
         .ok_or_else(|| WebviewError::Browser("missing browser window".to_string()))?
         .location()
@@ -353,11 +351,12 @@ fn controlled_gateway_target(target: &str) -> WebviewResult<TargetUrl> {
         .map_err(js_webview_error)?;
     let target = TargetUrl::parse(target)?;
     let prefix = GatewayPrefix::new(GATEWAY_PREFIX)?;
-    TargetUrl::parse(&format!(
+    Url::parse(&format!(
         "{}{}",
         origin.trim_end_matches('/'),
         prefix.encode(target.as_url())
     ))
+    .map_err(WebviewError::Url)
 }
 
 fn gateway_path(target: &str) -> WebviewResult<String> {

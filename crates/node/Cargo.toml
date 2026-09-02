@@ -99,6 +99,7 @@ thiserror = "1"
 tracing = "0.1.37"
 tracing-log = "0.1.3"
 tracing-subscriber = { version = "0.3.15", features = ["ansi", "env-filter"] }
+url = "2"
 uuid = { version = "0.8.2" }
 
 # node

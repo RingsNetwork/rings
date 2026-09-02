@@ -3441,6 +3441,7 @@ dependencies = [
  "tracing-log 0.1.4",
  "tracing-subscriber",
  "tracing-wasm",
+ "url",
  "uuid 0.8.2",
  "wasm-bindgen",
  "wasm-bindgen-futures",
