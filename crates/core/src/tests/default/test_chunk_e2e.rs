@@ -9,6 +9,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use rings_transport::connections::dummy_controlled;
 use rings_transport::core::transport::WebrtcConnectionState;
+use tokio::sync::watch;
 use tokio::time::sleep;
 use tokio::time::Duration;
 
@@ -55,10 +56,25 @@ use crate::tests::manually_establish_connection;
 use crate::tests::multi_frame_storage_sync_entries;
 use crate::tests::outbound_capacity_released;
 
-#[derive(Default)]
 struct CountingMeasure {
     counters: Mutex<Vec<(crate::dht::Did, MeasureCounter)>>,
     events: Mutex<Vec<(crate::dht::Did, MeasurementEvent)>>,
+    /// Monotonic generation bumped after every recorded event. It lets a test await
+    /// a specific measurement *landing* rather than poll a wall-clock window: `watch`
+    /// retains the latest value, so a bump that races a waiter's predicate re-check is
+    /// never lost, and a measurement that never lands surfaces as a deterministic hang
+    /// (bounded by the test harness) instead of an intermittent timeout.
+    recorded: watch::Sender<u64>,
+}
+
+impl Default for CountingMeasure {
+    fn default() -> Self {
+        Self {
+            counters: Mutex::new(Vec::new()),
+            events: Mutex::new(Vec::new()),
+            recorded: watch::channel(0).0,
+        }
+    }
 }
 
 impl CountingMeasure {
@@ -96,6 +112,18 @@ impl CountingMeasure {
             Err(_) => 0,
         }
     }
+
+    /// Await until `predicate` holds, re-checking only when a new measurement is
+    /// recorded. This is an event wait, not a timed poll: it parks on the `recorded`
+    /// generation and never consults the wall clock, so it cannot flake on a slow
+    /// runner. `wait_for` evaluates `predicate` immediately and again on each bump.
+    async fn await_event(&self, predicate: impl Fn(&Self) -> bool) {
+        let mut recorded = self.recorded.subscribe();
+        // The sender outlives every waiter (it is owned by this measure), so the
+        // only `Err` is an impossible closed channel; discard it and let the parked
+        // future resolve on the next recorded event.
+        let _ = recorded.wait_for(|_generation| predicate(self)).await;
+    }
 }
 
 #[async_trait]
@@ -122,6 +150,7 @@ impl Measure for CountingMeasure {
         if let Ok(mut events) = self.events.lock() {
             events.push((did, event));
         }
+        self.recorded.send_modify(|generation| *generation += 1);
         self.incr(did, MeasureCounter::from_event(event)).await;
         Ok(ApplyOutcome::Applied)
     }
@@ -138,6 +167,7 @@ impl Measure for CountingMeasure {
         if let Ok(mut events) = self.events.lock() {
             events.push((did, batch.event()));
         }
+        self.recorded.send_modify(|generation| *generation += 1);
         let counter = MeasureCounter::from_event(batch.event());
         for _ in 0..batch.occurrences().get() {
             self.incr(did, counter).await;
@@ -225,11 +255,11 @@ async fn test_whole_and_chunked_payloads_have_identical_measurement_delta() {
         .expect("whole send should succeed");
     let whole = recv_custom(&node2).await.expect("whole custom message");
     assert_eq!(whole, big);
-    wait_for_test_condition("whole send must be measured once", || {
-        sender_measure.logical_transfer_count(node2.did(), false, expected_useful_bytes)
-            > sent_before
-    })
-    .await;
+    sender_measure
+        .await_event(|measure| {
+            measure.logical_transfer_count(node2.did(), false, expected_useful_bytes) > sent_before
+        })
+        .await;
     assert_eq!(
         sender_measure.logical_transfer_count(node2.did(), false, expected_useful_bytes),
         sent_before + 1
@@ -249,11 +279,12 @@ async fn test_whole_and_chunked_payloads_have_identical_measurement_delta() {
         .await
         .expect("reassembled custom message");
     assert_eq!(chunked, big);
-    wait_for_test_condition("chunked send must be measured once", || {
-        sender_measure.logical_transfer_count(node2.did(), false, expected_useful_bytes)
-            >= sent_before + 2
-    })
-    .await;
+    sender_measure
+        .await_event(|measure| {
+            measure.logical_transfer_count(node2.did(), false, expected_useful_bytes)
+                >= sent_before + 2
+        })
+        .await;
     assert_eq!(
         sender_measure.logical_transfer_count(node2.did(), false, expected_useful_bytes),
         sent_before + 2,
