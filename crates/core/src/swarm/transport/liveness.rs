@@ -166,7 +166,7 @@ impl PeerLivenessMap {
             .flatten()
     }
 
-    fn connected_for_ms(&self, peer: Did, generation: u64, now_ms: i64) -> Option<i64> {
+    pub(super) fn connected_for_ms(&self, peer: Did, generation: u64, now_ms: i64) -> Option<i64> {
         let liveness = self.peers.get(&peer)?;
         (liveness.generation == generation).then(|| liveness.connected_for_ms(now_ms))
     }

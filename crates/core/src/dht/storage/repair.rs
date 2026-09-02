@@ -105,8 +105,8 @@ impl PeerRing {
         peer: Did,
         redundancy: u16,
     ) -> Result<bool> {
-        // Pre: peer is a terminal or departing DID under the caller's routing
-        // view.
+        // Pre: peer is a terminal, departing, or eviction-candidate DID under
+        // the caller's routing view.
         // Post: true iff peer is observed in a routing position that can affect
         // storage responsibility: predecessor, successor list, finger table, or
         // successor witness for some locally held affine placement key.
@@ -114,14 +114,7 @@ impl PeerRing {
         if self.observed_storage_virtual_owner_registered(peer)? {
             return Ok(true);
         }
-        let topology = self.topology_state()?;
-        if topology.predecessor == Some(peer) {
-            return Ok(true);
-        }
-        if topology.successors.contains(&peer) {
-            return Ok(true);
-        }
-        if topology.fingers.contains(&Some(peer)) {
+        if self.topology_state()?.references(peer) {
             return Ok(true);
         }
 

@@ -31,6 +31,7 @@ use crate::storage::KvStorageInterface;
 use crate::storage::MemStorage;
 use crate::swarm::callback::InnerSwarmCallback;
 use crate::swarm::callback::SwarmCallback;
+use crate::swarm::transport::ConnectionCapacity;
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::transport::SwarmTransportSettings;
 use crate::swarm::transport::SwarmWebrtcConfig;
@@ -190,6 +191,7 @@ async fn test_inbound_storage_batch_yields_to_control_between_persistence_steps(
             1,
             VirtualNodeConfig::disabled(),
             ReassemblyLimits::production(),
+            ConnectionCapacity::for_successor_capacity(3),
         ),
     ));
     let callback = Arc::new(InnerSwarmCallback::new(

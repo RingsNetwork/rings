@@ -275,7 +275,7 @@ impl LifecycleImplementation {
     fn new(peer: Did) -> Self {
         Self {
             peer,
-            lifecycles: ConnectionLifecycleRegistry::new(),
+            lifecycles: ConnectionLifecycleRegistry::new(1),
             previous_attempt: None,
             dht_member: false,
             transport_slot: false,

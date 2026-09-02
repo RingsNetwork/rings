@@ -309,13 +309,24 @@ impl SwarmTransport {
         self.commit_pending_reservation(peer)
     }
 
-    /// Validate the remote-peer precondition and expire stale records before commit.
+    /// Validate the remote-peer precondition and free a slot before commit.
     ///
-    /// Separation law: validation is pure; expiry and commit are separate lifecycle mutations,
-    /// each serialized by the shared boundary without holding a synchronous lock across await.
+    /// Stale handshakes expire first; when the registry is still full for a
+    /// peer without a record, the oldest unreferenced admitted connection is
+    /// evicted so the bound recycles displaced connections instead of refusing
+    /// every newcomer.
+    ///
+    /// Separation law: validation is pure; expiry, eviction, and commit are separate lifecycle
+    /// mutations, each serialized by the shared boundary without holding a synchronous lock
+    /// across await.
     async fn prepare_pending_reservation(&self, peer: Did) -> Result<()> {
         self.validate_pending_reservation(peer)?;
-        self.expire_pending_connections().await
+        self.expire_pending_connections().await?;
+        if self.peer_lifecycles()?.reservation_needs_eviction(peer) {
+            self.evict_unreferenced_connection(get_epoch_ms_i64())
+                .await?;
+        }
+        Ok(())
     }
 
     /// Pure precondition for reserving a remote peer.

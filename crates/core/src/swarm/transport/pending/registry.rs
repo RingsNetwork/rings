@@ -100,17 +100,25 @@ impl ActiveConnectionSet {
 /// Invariant: every peer has at most one generation and one lifecycle phase.
 /// `Active` belongs to the admitted projection; send-terminal generations are
 /// excluded from the routable projection until retirement removes them.
+///
+/// Invariant: `|Pending ∪ Admitting| <= MAX_PENDING` and `|State| <= capacity`.
+/// Preservation: `reserve` is the only transition that grows the map and it
+/// checks both bounds; every other transition keeps or shrinks the map, so an
+/// activation never exceeds the capacity its reservation was admitted under.
 #[derive(Debug)]
 #[cfg_attr(test, derive(Clone))]
 pub(in crate::swarm::transport) struct ConnectionLifecycleRegistry<const MAX_PENDING: usize> {
+    capacity: usize,
     next_generation: u64,
     peers: BTreeMap<Did, PeerConnectionLifecycle>,
     send_terminal: BTreeSet<PendingConnectionAttempt>,
 }
 
 impl<const MAX_PENDING: usize> ConnectionLifecycleRegistry<MAX_PENDING> {
-    pub(in crate::swarm::transport) fn new() -> Self {
+    /// Create an empty registry admitting at most `capacity` peers in any phase.
+    pub(in crate::swarm::transport) fn new(capacity: usize) -> Self {
         Self {
+            capacity,
             next_generation: 0,
             peers: BTreeMap::new(),
             send_terminal: BTreeSet::new(),
@@ -128,6 +136,11 @@ impl<const MAX_PENDING: usize> ConnectionLifecycleRegistry<MAX_PENDING> {
         if self.pending_len() >= MAX_PENDING {
             return Err(Error::PendingConnectionCapacityExceeded {
                 capacity: MAX_PENDING,
+            });
+        }
+        if self.is_full() {
+            return Err(Error::ConnectionCapacityExceeded {
+                capacity: self.capacity,
             });
         }
 
@@ -148,6 +161,20 @@ impl<const MAX_PENDING: usize> ConnectionLifecycleRegistry<MAX_PENDING> {
 
     pub(in crate::swarm::transport) fn contains(&self, peer: Did) -> bool {
         self.peers.contains_key(&peer)
+    }
+
+    /// `|State| >= capacity`: no further peer may reserve a generation until
+    /// one lifecycle record is retired.
+    pub(in crate::swarm::transport) fn is_full(&self) -> bool {
+        self.peers.len() >= self.capacity
+    }
+
+    /// Whether reserving `peer` requires retiring another lifecycle record first.
+    ///
+    /// A peer that already owns a record is rejected as `AlreadyConnected` by
+    /// `reserve`, so retiring a different record on its behalf would be wasted.
+    pub(in crate::swarm::transport) fn reservation_needs_eviction(&self, peer: Did) -> bool {
+        self.is_full() && !self.contains(peer)
     }
 
     pub(in crate::swarm::transport) fn state(&self, peer: Did) -> Option<PeerConnectionLifecycle> {

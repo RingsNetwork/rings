@@ -409,6 +409,12 @@ impl<'handler> CoreEffectInterpreter<'handler> {
                         );
                         Ok(())
                     }
+                    Err(Error::ConnectionCapacityExceeded { capacity }) => {
+                        tracing::debug!(
+                            "logical connection capacity is full ({capacity}); skipping DHT candidate {peer}"
+                        );
+                        Ok(())
+                    }
                     Err(e) => Err(e),
                 }
             }

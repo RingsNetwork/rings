@@ -1,7 +1,6 @@
 //! Stabilization run daemons to maintain dht.
 
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -320,8 +319,7 @@ impl Stabilizer {
     pub async fn clean_unavailable_connections(&self) -> Result<()> {
         self.transport.expire_pending_connections().await?;
         let admitted_states = self.admitted_connection_states()?;
-        let topology_peers = self.dht_topology_peers()?;
-        let mut candidates = topology_peers;
+        let mut candidates = self.dht.topology_state()?.referenced_peers();
         candidates.extend(self.transport.admitted_connection_ids());
         let now_ms = get_epoch_ms_i64();
 
@@ -351,31 +349,6 @@ impl Stabilizer {
                 }))
             })
             .collect()
-    }
-
-    fn dht_topology_peers(&self) -> Result<BTreeSet<Did>> {
-        let topology = self.dht.topology_state()?;
-        let mut peers = BTreeSet::new();
-
-        for did in topology.successors {
-            if did != self.dht.did {
-                peers.insert(did);
-            }
-        }
-
-        if let Some(predecessor) = topology.predecessor {
-            if predecessor != self.dht.did {
-                peers.insert(predecessor);
-            }
-        }
-
-        for did in topology.fingers.into_iter().flatten() {
-            if did != self.dht.did {
-                peers.insert(did);
-            }
-        }
-
-        Ok(peers)
     }
 
     async fn topology_peer_removal_reason(

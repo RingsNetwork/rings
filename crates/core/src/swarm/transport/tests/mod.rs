@@ -65,6 +65,8 @@ mod test_inbound;
 mod test_lifecycle;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 mod test_readiness;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+mod test_retention;
 mod test_retirement;
 
 #[derive(Default)]
@@ -389,7 +391,12 @@ fn transport_with_key_measure_and_reassembly_limits(
         session_sk,
         dht,
         Some(measure),
-        SwarmTransportSettings::new(1, VirtualNodeConfig::disabled(), reassembly_limits),
+        SwarmTransportSettings::new(
+            1,
+            VirtualNodeConfig::disabled(),
+            reassembly_limits,
+            ConnectionCapacity::for_successor_capacity(3),
+        ),
     ))
 }
 

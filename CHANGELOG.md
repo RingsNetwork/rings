@@ -17,6 +17,16 @@
   Linux TUN, macOS utun, Windows Wintun, and a separately launched Unix privilege helper.
 - Add Swift and Kotlin/JNA desktop FFI examples aligned with the existing Python ownership and
   provider lifecycle.
+- Bound the number of peers holding a logical connection record at twice the topology
+  reference slots. A reservation against a full table evicts the oldest admitted peer that no
+  local topology slot or storage placement references and whose data channel has been open for
+  the retention grace, and otherwise fails with `Error::ConnectionCapacityExceeded`.
+
+### Fixed
+
+- Chord `find_successor` now forwards to the successor head when no finger precedes the target
+  instead of addressing the local node, so finger fixing and lookups over a sparse finger table
+  make progress rather than failing on a self hop.
 
 ## 0.19.0
 
