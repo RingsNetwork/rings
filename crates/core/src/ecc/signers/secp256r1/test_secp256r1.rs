@@ -68,7 +68,7 @@ fn test_secp256r1_sign_and_verify() {
     let sig: [u8; 64] = hex::decode("43e9f1ce3f4fc0761805cb13b3ec188ccd3d509b7e563f3794e5daf84eaf43bf4fe1343f0b08a810768475fa87fd061a586e943ca9665ee167a3f63c70c72fd9").unwrap().try_into().unwrap();
 
     // Check our sign and verify work right
-    let our_sig = sign(sk, &hash(msg.as_bytes())).unwrap();
+    let our_sig = sign(&sk, &hash(msg.as_bytes())).unwrap();
     assert!(verify(msg.as_bytes(), &pk.address(), our_sig, &pk));
 
     let hash_msg: [u8; 32] =
@@ -80,6 +80,53 @@ fn test_secp256r1_sign_and_verify() {
     assert_eq!(hashed, hash_msg, "hash ret not equal");
 
     assert!(verify(msg.as_bytes(), &pk.address(), sig, &pk));
+}
+
+#[test]
+fn test_secp256r1_rejects_high_s_signature() -> Result<()> {
+    let sk =
+        SecretKey::try_from("2544acda37415a476d42312969926dc48e529867036cec71922d4177ea9c1038")?;
+    let sk_bytes: FieldBytes<p256::NistP256> = (&sk).into();
+    let signing_key = ecdsa::SigningKey::<p256::NistP256>::from_bytes(&sk_bytes)?;
+    let encoded = signing_key.verifying_key().to_encoded_point(false);
+    let pk = PublicKey::from_u8(
+        encoded
+            .as_bytes()
+            .get(1..)
+            .ok_or(Error::PublicKeyBadFormat)?,
+    )?;
+    let msg = b"canonical signature";
+    let low_s = ecdsa::Signature::<p256::NistP256>::from_slice(&sign(&sk, &hash(msg))?)?;
+    let (r, s) = low_s.split_scalars();
+    let high_s = ecdsa::Signature::<p256::NistP256>::from_scalars(r.to_bytes(), (-s).to_bytes())?;
+
+    assert!(super::super::ecdsa_signature_s_is_high(&high_s));
+    assert!(!verify(msg, &pk.address(), high_s.to_bytes(), &pk));
+    Ok(())
+}
+
+#[test]
+fn test_secp256r1_normalizes_high_s_signature() -> Result<()> {
+    let sk =
+        SecretKey::try_from("2544acda37415a476d42312969926dc48e529867036cec71922d4177ea9c1038")?;
+    let sk_bytes: FieldBytes<p256::NistP256> = (&sk).into();
+    let signing_key = ecdsa::SigningKey::<p256::NistP256>::from_bytes(&sk_bytes)?;
+    let encoded = signing_key.verifying_key().to_encoded_point(false);
+    let pk = PublicKey::from_u8(
+        encoded
+            .as_bytes()
+            .get(1..)
+            .ok_or(Error::PublicKeyBadFormat)?,
+    )?;
+    let msg = b"canonical signature";
+    let low_s = ecdsa::Signature::<p256::NistP256>::from_slice(&sign(&sk, &hash(msg))?)?;
+    let (r, s) = low_s.split_scalars();
+    let high_s = ecdsa::Signature::<p256::NistP256>::from_scalars(r.to_bytes(), (-s).to_bytes())?;
+    let normalized = normalize_signature(high_s.to_bytes())?;
+
+    assert_eq!(normalized, low_s.to_bytes().as_slice());
+    assert!(verify(msg, &pk.address(), normalized, &pk));
+    Ok(())
 }
 
 #[test]

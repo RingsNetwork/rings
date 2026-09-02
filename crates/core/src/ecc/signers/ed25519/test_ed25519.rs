@@ -26,3 +26,20 @@ fn test_verify_ed25519() {
         &signer
     ))
 }
+
+#[test]
+fn test_verify_strict_rejects_weak_public_key_signature() {
+    let mut weak_key_bytes = [0u8; 32];
+    weak_key_bytes[0] = 1;
+    let weak_key = ed25519_dalek::VerifyingKey::from_bytes(&weak_key_bytes).unwrap();
+    let public_key: PublicKey<33> = weak_key.into();
+    let mut identity_signature = [0u8; 64];
+    identity_signature[0] = 1;
+
+    assert!(!verify(
+        b"message",
+        &public_key.address(),
+        identity_signature,
+        &public_key
+    ));
+}
