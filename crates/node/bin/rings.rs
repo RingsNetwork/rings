@@ -130,6 +130,21 @@ fn parse_onion_service_name(raw: &str) -> Result<OnionServiceName, String> {
     OnionServiceName::parse(raw).map_err(|error| error.to_string())
 }
 
+/// Resolves a handshake payload argument that may be `-`, meaning "read it from stdin".
+///
+/// The base58-check offer/answer strings are long and awkward to pass inline, so the
+/// manual-handshake subcommands accept `-` and consume stdin (trimmed) instead.
+fn payload_arg_or_stdin(value: &str) -> anyhow::Result<String> {
+    if value != "-" {
+        return Ok(value.to_string());
+    }
+
+    let mut buf = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
+        .context("failed to read handshake payload from stdin")?;
+    Ok(buf.trim().to_string())
+}
+
 fn validate_native_onion_exit_services(services: &[OnionExitService]) -> anyhow::Result<()> {
     for service in services {
         if service.transport != OnionExitTransport::Tcp {
@@ -514,6 +529,16 @@ enum ConnectCommand {
     Did(ConnectWithDidCommand),
     #[command(about = "Connects to a node using its seed from a URL or file.")]
     Seed(ConnectWithSeedCommand),
+    #[command(
+        about = "Creates a manual-handshake offer targeting a peer DID; prints the encoded offer."
+    )]
+    Offer(ConnectOfferCommand),
+    #[command(
+        about = "Answers a peer's offer; prints the encoded answer to return to the offerer."
+    )]
+    Answer(ConnectAnswerCommand),
+    #[command(about = "Accepts a peer's answer, completing the manual handshake.")]
+    Accept(ConnectAcceptCommand),
 }
 
 #[derive(Args, Debug)]
@@ -538,6 +563,33 @@ struct ConnectWithSeedCommand {
     client_args: ClientArgs,
 
     source: String,
+}
+
+#[derive(Args, Debug)]
+struct ConnectOfferCommand {
+    #[command(flatten)]
+    client_args: ClientArgs,
+
+    /// DID of the peer this offer targets.
+    did: String,
+}
+
+#[derive(Args, Debug)]
+struct ConnectAnswerCommand {
+    #[command(flatten)]
+    client_args: ClientArgs,
+
+    /// Encoded offer produced by the peer's `connect offer`, or `-` to read it from stdin.
+    offer: String,
+}
+
+#[derive(Args, Debug)]
+struct ConnectAcceptCommand {
+    #[command(flatten)]
+    client_args: ClientArgs,
+
+    /// Encoded answer produced by the peer's `connect answer`, or `-` to read it from stdin.
+    answer: String,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1028,6 +1080,35 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 .new_client()
                 .await?
                 .connect_with_seed(args.source.as_str())
+                .await?
+                .display();
+            Ok(())
+        }
+        Command::Connect(ConnectCommand::Offer(args)) => {
+            args.client_args
+                .new_client()
+                .await?
+                .create_offer(args.did.as_str())
+                .await?
+                .display();
+            Ok(())
+        }
+        Command::Connect(ConnectCommand::Answer(args)) => {
+            let offer = payload_arg_or_stdin(args.offer.as_str())?;
+            args.client_args
+                .new_client()
+                .await?
+                .answer_offer(offer.as_str())
+                .await?
+                .display();
+            Ok(())
+        }
+        Command::Connect(ConnectCommand::Accept(args)) => {
+            let answer = payload_arg_or_stdin(args.answer.as_str())?;
+            args.client_args
+                .new_client()
+                .await?
+                .accept_answer(answer.as_str())
                 .await?
                 .display();
             Ok(())
