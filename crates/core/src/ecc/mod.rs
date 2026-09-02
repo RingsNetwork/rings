@@ -19,6 +19,7 @@ use serde::Serialize;
 use sha1::Digest;
 use sha1::Sha1;
 use subtle::CtOption;
+use zeroize::Zeroize;
 
 use crate::error::Error;
 use crate::error::Result;
@@ -34,7 +35,6 @@ use elliptic_curve::point::AffineCoordinates;
 use elliptic_curve::point::DecompressPoint;
 use elliptic_curve::sec1::ToEncodedPoint;
 use elliptic_curve::FieldBytes;
-use elliptic_curve::PrimeField as _;
 pub use group::*;
 pub use keys::*;
 use p256::NistP256;
@@ -54,12 +54,18 @@ pub type PublicKeyAddress = H160;
 ///
 /// The bytes are validated at construction time and stay in the canonical
 /// external format used by existing configs and DIDs.
-#[derive(PartialEq, Eq, Clone, Copy)]
+#[derive(PartialEq, Eq, Clone)]
 pub struct SecretKey([u8; 32]);
 
 impl std::fmt::Debug for SecretKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("SecretKey").field(&"<redacted>").finish()
+    }
+}
+
+impl Drop for SecretKey {
+    fn drop(&mut self) {
+        self.0.zeroize();
     }
 }
 
@@ -156,6 +162,12 @@ impl PublicKey<33> {
 
 impl From<SecretKey> for FieldBytes<NistP256> {
     fn from(val: SecretKey) -> Self {
+        Self::from(&val)
+    }
+}
+
+impl From<&SecretKey> for FieldBytes<NistP256> {
+    fn from(val: &SecretKey) -> Self {
         GenericArray::<u8, U32>::from(val.ser())
     }
 }
@@ -218,6 +230,12 @@ impl From<K256VerifyingKey> for PublicKey<33> {
 
 impl From<SecretKey> for PublicKey<33> {
     fn from(secret_key: SecretKey) -> Self {
+        secret_key.pubkey()
+    }
+}
+
+impl From<&SecretKey> for PublicKey<33> {
+    fn from(secret_key: &SecretKey) -> Self {
         secret_key.pubkey()
     }
 }
@@ -308,8 +326,9 @@ impl SecretKey {
         Ok(Self(bytes))
     }
 
-    pub(crate) fn secp256k1_scalar(&self) -> K256Scalar {
-        Option::<K256Scalar>::from(K256Scalar::from_repr(self.0.into())).unwrap_or(K256Scalar::ONE)
+    pub(crate) fn secp256k1_scalar(&self) -> Result<K256Scalar> {
+        let secret = K256SecretKey::from_slice(&self.0).map_err(|_| Error::PrivateKeyBadFormat)?;
+        Ok(*secret.to_nonzero_scalar().as_ref())
     }
 
     /// Generate a random secp256k1 secret key.
@@ -325,30 +344,31 @@ impl SecretKey {
     }
 
     /// Sign a UTF-8 message after hashing it with Keccak-256.
-    pub fn sign(&self, message: &str) -> SigBytes {
+    ///
+    /// Returns an error when the stored key is invalid or signing fails.
+    pub fn sign(&self, message: &str) -> Result<SigBytes> {
         self.sign_raw(message.as_bytes())
     }
 
     /// Sign raw message bytes after hashing them with Keccak-256.
-    pub fn sign_raw(&self, message: &[u8]) -> SigBytes {
+    ///
+    /// Returns an error when the stored key is invalid or signing fails.
+    pub fn sign_raw(&self, message: &[u8]) -> Result<SigBytes> {
         let message_hash = keccak256(message);
         self.sign_hash(&message_hash)
     }
 
     /// Sign an already computed 32-byte message hash.
-    pub fn sign_hash(&self, message_hash: &[u8; 32]) -> SigBytes {
-        let signing_key = match K256SigningKey::from_slice(&self.0) {
-            Ok(signing_key) => signing_key,
-            Err(_) => return [0u8; 65],
-        };
-        let (signature, recover_id) = match signing_key.sign_prehash_recoverable(message_hash) {
-            Ok(signature) => signature,
-            Err(_) => return [0u8; 65],
-        };
+    ///
+    /// Returns an error when the stored key is invalid or signing fails.
+    pub fn sign_hash(&self, message_hash: &[u8; 32]) -> Result<SigBytes> {
+        let signing_key =
+            K256SigningKey::from_slice(&self.0).map_err(|_| Error::PrivateKeyBadFormat)?;
+        let (signature, recover_id) = signing_key.sign_prehash_recoverable(message_hash)?;
         let mut sig_bytes: SigBytes = [0u8; 65];
         sig_bytes[0..64].copy_from_slice(signature.to_bytes().as_slice());
         sig_bytes[64] = recover_id.to_byte();
-        sig_bytes
+        Ok(sig_bytes)
     }
 
     /// Derive the compressed public key for this secret key.
@@ -385,6 +405,9 @@ pub fn recover_hash(message_hash: &[u8; 32], sig: &[u8; 65]) -> Result<PublicKey
     let r_s_signature: [u8; 64] = sig[..64].try_into()?;
     let recovery_id: u8 = sig[64];
     let signature = K256Signature::try_from(r_s_signature.as_slice()).map_err(Error::ECDSAError)?;
+    if signature.normalize_s().is_some() {
+        return Err(Error::NonCanonicalSignature);
+    }
     let recovery_id =
         RecoveryId::from_byte(recovery_id).ok_or(Error::InvalidRecoverId(recovery_id))?;
     Ok(
@@ -442,9 +465,9 @@ pub(crate) mod tests {
         let metamask_sig = Vec::from_hex("724fc31d9272b34d8406e2e3a12a182e72510b008de6cc44684577e31e20d9626fb760d6a0badd79a6cf4cd56b2fc0fbd60c438b809aa7d29bfb598c13e7b50e1b").unwrap();
         assert_eq!(metamask_sig.len(), 65);
         let h: [u8; 32] = sig_hash.as_slice().try_into().unwrap();
-        let recover_id = key.sign_hash(&h)[64];
+        let recover_id = key.sign_hash(&h).unwrap()[64];
         assert_eq!(recover_id, 0);
-        let mut sig = key.sign_raw(&prefix_msg);
+        let mut sig = key.sign_raw(&prefix_msg).unwrap();
         sig[64] = 27;
         assert_eq!(sig, metamask_sig.as_slice());
     }
@@ -453,8 +476,52 @@ pub(crate) mod tests {
     fn test_recover() {
         let key = SecretKey::random();
         let pubkey1 = key.pubkey();
-        let pubkey2 = recover("hello".as_bytes(), key.sign("hello")).unwrap();
+        let pubkey2 = recover("hello".as_bytes(), key.sign("hello").unwrap()).unwrap();
         assert_eq!(pubkey1, pubkey2);
+    }
+
+    #[test]
+    fn secret_key_redacts_debug_and_zeroizes_on_drop() {
+        let key =
+            SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0")
+                .unwrap();
+
+        assert_eq!(format!("{key:?}"), "SecretKey(\"<redacted>\")");
+        assert!(std::mem::needs_drop::<SecretKey>());
+    }
+
+    #[test]
+    fn invalid_secret_key_state_returns_explicit_errors() {
+        let invalid = SecretKey([0u8; 32]);
+
+        assert!(matches!(
+            invalid.sign_hash(&[0u8; 32]),
+            Err(Error::PrivateKeyBadFormat)
+        ));
+        assert!(matches!(
+            invalid.secp256k1_scalar(),
+            Err(Error::PrivateKeyBadFormat)
+        ));
+    }
+
+    #[test]
+    fn recover_hash_rejects_high_s_signature() {
+        let key =
+            SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0")
+                .unwrap();
+        let hash = keccak256(b"canonical signature");
+        let mut signature_bytes = key.sign_hash(&hash).unwrap();
+        let signature = K256Signature::try_from(&signature_bytes[..64]).unwrap();
+        let (r, s) = signature.split_scalars();
+        let high_s = K256Signature::from_scalars(r.to_bytes(), (-s).to_bytes()).unwrap();
+
+        signature_bytes[..64].copy_from_slice(&high_s.to_bytes());
+        signature_bytes[64] ^= 1;
+
+        assert!(matches!(
+            recover_hash(&hash, &signature_bytes),
+            Err(Error::NonCanonicalSignature)
+        ));
     }
 
     pub(crate) fn gen_ordered_keys(n: usize) -> Vec<SecretKey> {

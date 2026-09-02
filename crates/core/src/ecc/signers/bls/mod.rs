@@ -64,6 +64,15 @@ impl TryFrom<SecretKey> for Fr {
     }
 }
 
+impl TryFrom<&SecretKey> for Fr {
+    type Error = Error;
+
+    fn try_from(sk: &SecretKey) -> Result<Fr> {
+        let data = sk.ser();
+        from_compressed(&data)
+    }
+}
+
 impl TryFrom<Fr> for SecretKey {
     type Error = Error;
     fn try_from(sk: Fr) -> Result<SecretKey> {
@@ -118,7 +127,7 @@ pub fn hash_to_curve(msg: &[u8]) -> Result<[u8; 96]> {
 }
 
 /// Sign hashed message with bls privatekey
-pub fn sign_hash(sk: SecretKey, hashed_msg: &[u8; 96]) -> Result<Signature> {
+pub fn sign_hash(sk: &SecretKey, hashed_msg: &[u8; 96]) -> Result<Signature> {
     let sk: Fr = sk.try_into()?;
     let msg: G2Projective = from_compressed(hashed_msg)?;
     Ok(Signature(to_compressed(&(msg * sk))?))
@@ -126,7 +135,7 @@ pub fn sign_hash(sk: SecretKey, hashed_msg: &[u8; 96]) -> Result<Signature> {
 
 /// Sign message with bls privatekey
 /// signature = hash_into_g2(message) * sk
-pub fn sign(sk: SecretKey, msg: &[u8]) -> Result<Signature> {
+pub fn sign(sk: &SecretKey, msg: &[u8]) -> Result<Signature> {
     let sk: Fr = sk.try_into()?;
     let hashed_msg = hash_to_curve(msg)?;
     let msg: G2Projective = from_compressed(&hashed_msg)?;
@@ -184,7 +193,7 @@ pub fn aggregate(signatures: &[Signature]) -> Result<Signature> {
 /// Converts a BLS private key to a BLS public key.
 /// Get the public key for this private key. Calculated by pk = g1 * sk.
 pub fn public_key(key: &SecretKey) -> Result<PublicKey<48>> {
-    let sk: Fr = (*key).try_into()?;
+    let sk: Fr = key.try_into()?;
     let g1 = G1Projective::generator();
     (g1 * sk).try_into()
 }

@@ -96,11 +96,7 @@ async fn test_handle_join() -> Result<()> {
     let node2 = prepare_node(key2).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
     assert!(node1.listen_once().await.is_some());
-    assert!(node1
-        .dht()
-        .successors()
-        .list()?
-        .contains(&key2.address().into()));
+    assert!(node1.dht().successors().list()?.contains(&node2.did()));
     Ok(())
 }
 
@@ -139,10 +135,10 @@ async fn test_join_dht_keeps_local_join_when_convergence_send_fails() -> Result<
 async fn test_handle_dht_notify_remote_action_sends_predecessor_to_target() -> Result<()> {
     dummy_controlled::enable(true);
 
-    let keys = gen_ordered_keys(3);
-    let node1 = prepare_node(keys[0]).await;
-    let node2 = prepare_node(keys[1]).await;
-    let node3 = prepare_node(keys[2]).await;
+    let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys(3).try_into().unwrap();
+    let node1 = prepare_node(key1).await;
+    let node2 = prepare_node(key2).await;
+    let node3 = prepare_node(key3).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
 
     drain_controlled_dummy_events().await;
@@ -178,8 +174,7 @@ async fn test_handle_dht_notify_remote_action_sends_predecessor_to_target() -> R
 
 #[tokio::test]
 async fn test_handle_connect_node() -> Result<()> {
-    let keys = gen_ordered_keys(3);
-    let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
+    let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys(3).try_into().unwrap();
 
     let node1 = prepare_node(key1).await;
     let node2 = prepare_node(key2).await;
@@ -193,9 +188,9 @@ async fn test_handle_connect_node() -> Result<()> {
 
     wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
     wait_for_connection_state(&node2, node3.did(), WebrtcConnectionState::Connected).await?;
-    wait_for_successor(&node1, key2.address().into()).await?;
-    wait_for_successor(&node2, key3.address().into()).await?;
-    wait_for_successor(&node3, key2.address().into()).await?;
+    wait_for_successor(&node1, node2.did()).await?;
+    wait_for_successor(&node2, node3.did()).await?;
+    wait_for_successor(&node3, node2.did()).await?;
 
     println!("node1 key address: {:?}", node1.did());
     println!("node2 key address: {:?}", node2.did());
@@ -212,17 +207,17 @@ async fn test_handle_connect_node() -> Result<()> {
         println!("node3.dht() successor: {dht3_successor:?}");
 
         assert!(
-            dht1_successor.list()?.contains(&key2.address().into()),
+            dht1_successor.list()?.contains(&node2.did()),
             "Expect node1.dht() successor is key2, Found: {:?}",
             dht1_successor.list()?
         );
         assert!(
-            dht2_successor.list()?.contains(&key3.address().into()),
+            dht2_successor.list()?.contains(&node3.did()),
             "{:?}",
             dht2_successor.list()
         );
         assert!(
-            dht3_successor.list()?.contains(&key2.address().into()),
+            dht3_successor.list()?.contains(&node2.did()),
             "node3.dht() successor is key2"
         );
     }
@@ -249,24 +244,18 @@ async fn test_handle_notify_predecessor() -> Result<()> {
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
 
     wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
-    wait_for_successor(&node1, key2.address().into()).await?;
-    wait_for_successor(&node2, key1.address().into()).await?;
+    wait_for_successor(&node1, node2.did()).await?;
+    wait_for_successor(&node2, node1.did()).await?;
     node1
         .swarm
         .send_message(
-            Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
-                did: key1.address().into(),
-            }),
+            Message::NotifyPredecessorSend(message::NotifyPredecessorSend { did: node1.did() }),
             node2.did(),
         )
         .await
         .unwrap();
-    wait_for_predecessor(&node2, key1.address().into()).await?;
-    assert!(node1
-        .dht()
-        .successors()
-        .list()?
-        .contains(&key2.address().into()));
+    wait_for_predecessor(&node2, node1.did()).await?;
+    assert!(node1.dht().successors().list()?.contains(&node2.did()));
 
     Ok(())
 }
@@ -283,8 +272,8 @@ async fn test_handle_find_successor_increase() -> Result<()> {
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
 
     wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
-    wait_for_successor(&node1, key2.address().into()).await?;
-    wait_for_successor(&node2, key1.address().into()).await?;
+    wait_for_successor(&node1, node2.did()).await?;
+    wait_for_successor(&node2, node1.did()).await?;
     node1
         .swarm
         .send_message(
@@ -293,12 +282,8 @@ async fn test_handle_find_successor_increase() -> Result<()> {
         )
         .await
         .unwrap();
-    wait_for_predecessor(&node2, key1.address().into()).await?;
-    assert!(node1
-        .dht()
-        .successors()
-        .list()?
-        .contains(&key2.address().into()));
+    wait_for_predecessor(&node2, node1.did()).await?;
+    assert!(node1.dht().successors().list()?.contains(&node2.did()));
 
     println!("node1: {:?}, node2: {:?}", node1.did(), node2.did());
     node2
@@ -314,16 +299,8 @@ async fn test_handle_find_successor_increase() -> Result<()> {
         .await
         .unwrap();
     wait_for_msgs([&node1, &node2]).await;
-    assert!(node2
-        .dht()
-        .successors()
-        .list()?
-        .contains(&key1.address().into()));
-    assert!(node1
-        .dht()
-        .successors()
-        .list()?
-        .contains(&key2.address().into()));
+    assert!(node2.dht().successors().list()?.contains(&node1.did()));
+    assert!(node1.dht().successors().list()?.contains(&node2.did()));
 
     Ok(())
 }
@@ -341,10 +318,10 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
 
     wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
-    wait_for_successor(&node1, key2.address().into()).await?;
-    wait_for_successor(&node2, key1.address().into()).await?;
-    wait_for_finger(&node1, key2.address().into()).await?;
-    wait_for_finger(&node2, key1.address().into()).await?;
+    wait_for_successor(&node1, node2.did()).await?;
+    wait_for_successor(&node2, node1.did()).await?;
+    wait_for_finger(&node1, node2.did()).await?;
+    wait_for_finger(&node2, node1.did()).await?;
     node1
         .swarm
         .send_message(
@@ -353,12 +330,8 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
         )
         .await
         .unwrap();
-    wait_for_predecessor(&node2, key1.address().into()).await?;
-    assert!(node1
-        .dht()
-        .successors()
-        .list()?
-        .contains(&key2.address().into()));
+    wait_for_predecessor(&node2, node1.did()).await?;
+    assert!(node1.dht().successors().list()?.contains(&node2.did()));
     println!("node1: {:?}, node2: {:?}", node1.did(), node2.did());
     node2
         .swarm
@@ -375,8 +348,8 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
     wait_for_msgs([&node1, &node2]).await;
     let dht1_successor = node1.dht().successors();
     let dht2_successor = node2.dht().successors();
-    assert!(dht2_successor.list()?.contains(&key1.address().into()));
-    assert!(dht1_successor.list()?.contains(&key2.address().into()));
+    assert!(dht2_successor.list()?.contains(&node1.did()));
+    assert!(dht1_successor.list()?.contains(&node2.did()));
 
     Ok(())
 }
@@ -403,8 +376,8 @@ async fn test_handle_storage() -> Result<()> {
     // node1's successor is node2
     // node2's successor is node1
     wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
-    wait_for_successor(&node1, key2.address().into()).await?;
-    wait_for_successor(&node2, key1.address().into()).await?;
+    wait_for_successor(&node1, node2.did()).await?;
+    wait_for_successor(&node2, node1.did()).await?;
     node1
         .swarm
         .send_message(
@@ -413,12 +386,8 @@ async fn test_handle_storage() -> Result<()> {
         )
         .await
         .unwrap();
-    wait_for_predecessor(&node2, key1.address().into()).await?;
-    assert!(node1
-        .dht()
-        .successors()
-        .list()?
-        .contains(&key2.address().into()));
+    wait_for_predecessor(&node2, node1.did()).await?;
+    assert!(node1.dht().successors().list()?.contains(&node2.did()));
 
     assert!(node2.dht().storage.count().await.unwrap() == 0);
     let message = String::from("this is a test string");

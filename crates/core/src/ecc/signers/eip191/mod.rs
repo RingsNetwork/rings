@@ -8,15 +8,15 @@ use crate::ecc::SecretKey;
 use crate::error::Result;
 
 /// sign function passing raw message parameter.
-pub fn sign_raw(sec: SecretKey, msg: &[u8]) -> [u8; 65] {
+pub fn sign_raw(sec: &SecretKey, msg: &[u8]) -> Result<[u8; 65]> {
     sign(sec, &hash(msg))
 }
 
 /// sign function with `hash` data.
-pub fn sign(sec: SecretKey, hash: &[u8; 32]) -> [u8; 65] {
-    let mut sig = sec.sign_hash(hash);
+pub fn sign(sec: &SecretKey, hash: &[u8; 32]) -> Result<[u8; 65]> {
+    let mut sig = sec.sign_hash(hash)?;
     sig[64] += 27;
-    sig
+    Ok(sig)
 }
 
 /// \x19Ethereum Signed Message\n is used for PersonalSign, which can encode by send `personalSign` rpc call.
@@ -31,6 +31,9 @@ pub fn recover(msg: &[u8], sig: impl AsRef<[u8]>) -> Result<PublicKey<33>> {
     let sig_byte: [u8; 65] = sig.as_ref().try_into()?;
     let hash = hash(msg);
     let mut sig712 = sig_byte;
+    if !(27..=30).contains(&sig712[64]) {
+        return Err(crate::error::Error::InvalidRecoverId(sig712[64]));
+    }
     sig712[64] -= 27;
     crate::ecc::recover_hash(&hash, &sig712)
 }

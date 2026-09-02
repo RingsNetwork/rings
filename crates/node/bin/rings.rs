@@ -462,7 +462,7 @@ impl SessionArgs {
             .set_ttl(self.ttl * 1000);
         let unsigned_proof = ssk_builder.unsigned_proof();
 
-        let sig = key.sign(&unsigned_proof).to_vec();
+        let sig = key.sign(&unsigned_proof)?.to_vec();
         let ssk_builder = ssk_builder.set_session_sig(sig);
 
         let ssk = ssk_builder.build()?;
@@ -477,8 +477,8 @@ impl SessionArgs {
     }
 
     fn load_or_create_key(&self) -> anyhow::Result<SecretKey> {
-        if let Some(key) = self.ecdsa_key {
-            return Ok(key);
+        if let Some(key) = &self.ecdsa_key {
+            return Ok(key.clone());
         }
 
         if let Some(key_file) = &self.ecdsa_key_file {

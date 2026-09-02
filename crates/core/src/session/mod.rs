@@ -26,7 +26,7 @@
 //!
 //! let builder = SessionSkBuilder::new(account_entity, account_type);
 //! let unsigned_proof = builder.unsigned_proof();
-//! let session_sig = user_secret_key.sign(&unsigned_proof).to_vec();
+//! let session_sig = user_secret_key.sign(&unsigned_proof).unwrap().to_vec();
 //! let session_sk = builder.set_session_sig(session_sig).build().unwrap();
 //!
 //! assert_eq!(session_sk.account_did(), user_secret_key_did);

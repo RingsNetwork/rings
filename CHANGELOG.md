@@ -2,6 +2,11 @@
 
 ## 0.20.0
 
+### Breaking changes
+
+- Secret signing keys are no longer `Copy`; signing helpers now borrow keys and return explicit
+  errors instead of silently substituting invalid signatures or scalars.
+
 ### Added
 
 - Add the opt-in native IPv4/TCP gateway for explicitly selected destination prefixes, with

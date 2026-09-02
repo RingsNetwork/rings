@@ -91,44 +91,38 @@ async fn test_notify_predecessor_rejects_unadmitted_origin_without_mutating_topo
 
 #[tokio::test]
 async fn test_triple_nodes_stabilization_1_2_3() -> Result<()> {
-    let keys = gen_ordered_keys(3);
-    let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
+    let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys(3).try_into().unwrap();
     test_triple_ordered_nodes_stabilization(key1, key2, key3).await
 }
 
 #[tokio::test]
 async fn test_triple_nodes_stabilization_2_3_1() -> Result<()> {
-    let keys = gen_ordered_keys(3);
-    let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
+    let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys(3).try_into().unwrap();
 
     test_triple_ordered_nodes_stabilization(key2, key3, key1).await
 }
 
 #[tokio::test]
 async fn test_triple_nodes_stabilization_3_1_2() -> Result<()> {
-    let keys = gen_ordered_keys(3);
-    let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
+    let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys(3).try_into().unwrap();
     test_triple_ordered_nodes_stabilization(key3, key1, key2).await
 }
 
 #[tokio::test]
 async fn test_triple_nodes_stabilization_3_2_1() -> Result<()> {
-    let keys = gen_ordered_keys(3);
-    let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
+    let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys(3).try_into().unwrap();
     test_triple_desc_ordered_nodes_stabilization(key3, key2, key1).await
 }
 
 #[tokio::test]
 async fn test_triple_nodes_stabilization_2_1_3() -> Result<()> {
-    let keys = gen_ordered_keys(3);
-    let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
+    let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys(3).try_into().unwrap();
     test_triple_desc_ordered_nodes_stabilization(key2, key1, key3).await
 }
 
 #[tokio::test]
 async fn test_triple_nodes_stabilization_1_3_2() -> Result<()> {
-    let keys = gen_ordered_keys(3);
-    let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
+    let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys(3).try_into().unwrap();
     test_triple_desc_ordered_nodes_stabilization(key1, key3, key2).await
 }
 

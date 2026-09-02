@@ -58,10 +58,11 @@ use crate::error::Error;
 use crate::error::Result;
 
 /// sign function with `hash` data. Recover is no needed.
-pub fn sign(sec: SecretKey, hash: &[u8; 32]) -> Result<[u8; 64]> {
+pub fn sign(sec: &SecretKey, hash: &[u8; 32]) -> Result<[u8; 64]> {
     let sk_bytes: FieldBytes<p256::NistP256> = sec.into();
     let sk = ecdsa::SigningKey::<p256::NistP256>::from_bytes(&sk_bytes)?;
     let (sig, _rid) = sk.sign_prehash_recoverable(hash)?;
+    let sig = sig.normalize_s().unwrap_or(sig);
     let sig_bytes: [u8; 64] = sig.to_bytes().as_slice().try_into()?;
     Ok(sig_bytes)
 }
@@ -99,13 +100,13 @@ pub fn verify(
         return false;
     }
     let msg_hash = hash(msg);
+    let signature = match ecdsa::Signature::<p256::NistP256>::from_slice(sig.as_ref()) {
+        Ok(signature) if signature.normalize_s().is_none() => signature,
+        Ok(_) | Err(_) => return false,
+    };
     let res: Result<()> = ct_pk.unwrap().and_then(|pk| {
-        pk.verify_prehash(
-            &msg_hash,
-            &ecdsa::Signature::<p256::NistP256>::from_slice(sig.as_ref())
-                .map_err(Error::ECDSAError)?,
-        )
-        .map_err(Error::ECDSAError)
+        pk.verify_prehash(&msg_hash, &signature)
+            .map_err(Error::ECDSAError)
     });
     res.is_ok()
 }
