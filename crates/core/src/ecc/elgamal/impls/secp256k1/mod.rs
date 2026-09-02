@@ -377,14 +377,14 @@ pub fn encrypt_bytes_with_rng(
 }
 
 /// Decrypt ciphertext produced by the current secp256k1 compatibility adapter.
-pub fn decrypt(m: &[CiphertextBlock], k: SecretKey) -> Result<String> {
+pub fn decrypt(m: &[CiphertextBlock], k: &SecretKey) -> Result<String> {
     String::from_utf8(decrypt_bytes(m, k)?).map_err(Error::Utf8Encoding)
 }
 
 /// Decrypt arbitrary bytes produced by [`encrypt_bytes_with_rng`].
-pub fn decrypt_bytes(m: &[CiphertextBlock], k: SecretKey) -> Result<Vec<u8>> {
+pub fn decrypt_bytes(m: &[CiphertextBlock], k: &SecretKey) -> Result<Vec<u8>> {
     let secret_key =
-        ElGamalSecretKey::<Point<Secp256k1>>::from_scalar(GroupScalar::<Secp256k1>::from(k));
+        ElGamalSecretKey::<Point<Secp256k1>>::from_scalar(GroupScalar::<Secp256k1>::try_from(k)?);
     let ciphertext = m
         .iter()
         .map(|(c1, c2)| Ok(((*c1).try_into()?, (*c2).try_into()?)))
@@ -431,7 +431,7 @@ pub fn encrypt_aead_with_rng(
 pub fn decrypt_aead(
     sealed: &AeadCiphertext,
     aad: &[u8],
-    recipient_secret: SecretKey,
+    recipient_secret: &SecretKey,
 ) -> Result<Vec<u8>> {
     if sealed.version != AEAD_VERSION {
         return Err(Error::MessageDecryptionFailed(format!(

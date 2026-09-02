@@ -233,7 +233,7 @@ async fn test_placed_entry_operation_rejects_non_affine_placement() -> Result<()
 
 #[tokio::test]
 async fn test_remote_redundant_store_writes_split_replica_at_affine_placement() -> Result<()> {
-    let mut keys = gen_ordered_keys(2).into_iter();
+    let mut keys = gen_ordered_keys::<2>().into_iter();
     let node1 = prepare_node_with_storage_redundancy(next_generated_key(&mut keys)?, 2)?;
     let node2 = prepare_node_with_storage_redundancy(next_generated_key(&mut keys)?, 2)?;
 

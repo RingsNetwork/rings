@@ -13,15 +13,13 @@ use crate::tests::manually_establish_connection;
 
 #[tokio::test]
 async fn test_handshake_on_both_sides_ordered() {
-    let keys = gen_ordered_keys(3);
-    let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
+    let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys::<3>();
     test_handshake_on_both_sides(key1, key2, key3).await
 }
 
 #[tokio::test]
 async fn test_handshake_on_both_sides_desc_ordered() {
-    let keys = gen_ordered_keys(3);
-    let (key3, key2, key1) = (keys[0], keys[1], keys[2]);
+    let [key3, key2, key1]: [SecretKey; 3] = gen_ordered_keys::<3>();
     test_handshake_on_both_sides(key1, key2, key3).await
 }
 
@@ -132,9 +130,9 @@ async fn test_handshake_on_both_sides(key1: SecretKey, key2: SecretKey, key3: Se
 async fn test_dummy_mismatched_data_channel_open_does_not_admit_peer() {
     dummy_controlled::enable(true);
 
-    let keys = gen_ordered_keys(2);
-    let node1 = prepare_node(keys[0]).await;
-    let node2 = prepare_node(keys[1]).await;
+    let [key1, key2]: [SecretKey; 2] = gen_ordered_keys::<2>();
+    let node1 = prepare_node(key1).await;
+    let node2 = prepare_node(key2).await;
 
     let offer = node1.swarm.create_offer(node2.did()).await.unwrap();
     assert!(node1.swarm.transport.get_connection(node2.did()).is_none());
