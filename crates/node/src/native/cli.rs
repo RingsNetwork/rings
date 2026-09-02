@@ -112,6 +112,55 @@ impl Client {
         ClientOutput::ok("Successful!".to_owned(), ())
     }
 
+    /// Creates a local WebRTC offer targeting `did` for a manual, out-of-band handshake.
+    ///
+    /// Returns the base58-check encoded offer payload, which the remote peer feeds to
+    /// [`answer_offer`](Self::answer_offer). Use this when the peers cannot signal over
+    /// HTTP and the offer/answer strings are exchanged by other means (copy/paste, QR, chat).
+    pub async fn create_offer(&mut self, did: &str) -> Output<String> {
+        let offer = self
+            .client
+            .create_offer(&CreateOfferRequest {
+                did: did.to_string(),
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?
+            .offer;
+
+        ClientOutput::ok(offer.clone(), offer)
+    }
+
+    /// Answers a peer's offer, producing the encoded answer to return to the offerer.
+    ///
+    /// Consumes the encoded offer emitted by [`create_offer`](Self::create_offer) and returns the
+    /// base58-check encoded answer payload, which the offerer feeds to
+    /// [`accept_answer`](Self::accept_answer).
+    pub async fn answer_offer(&mut self, offer: &str) -> Output<String> {
+        let answer = self
+            .client
+            .answer_offer(&AnswerOfferRequest {
+                offer: offer.to_string(),
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?
+            .answer;
+
+        ClientOutput::ok(answer.clone(), answer)
+    }
+
+    /// Accepts a peer's answer, completing the manual handshake initiated by
+    /// [`create_offer`](Self::create_offer).
+    pub async fn accept_answer(&mut self, answer: &str) -> Output<()> {
+        self.client
+            .accept_answer(&AcceptAnswerRequest {
+                answer: answer.to_string(),
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        ClientOutput::ok("Done.".into(), ())
+    }
+
     /// Lists all connected peers and their status.
     ///
     /// Returns an Output containing a formatted string representation of the list of peers if successful, or an anyhow::Error if an error occurred.
