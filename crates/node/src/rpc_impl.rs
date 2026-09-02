@@ -138,8 +138,8 @@ async fn remote_rpc_client(
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none());
     if let Some(target) = remote_rpc_resolution_target(&parsed)? {
-        let addresses = resolve_public_target(&target).await?;
-        builder = builder.resolve_to_addrs(target.host(), &addresses);
+        let addresses = resolve_public_target(&target.resolution_target).await?;
+        builder = builder.resolve_to_addrs(&target.pin_host, &addresses);
     }
     let http_client = builder
         .build()
@@ -154,7 +154,7 @@ async fn remote_rpc_client(
 #[cfg(rings_native)]
 fn remote_rpc_resolution_target(
     parsed: &reqwest::Url,
-) -> std::result::Result<Option<OnionProxyTarget>, ServerError> {
+) -> std::result::Result<Option<RemoteRpcResolutionTarget>, ServerError> {
     let port = parsed.port_or_known_default().ok_or_else(|| {
         ServerError::UnsafeRemoteRpcTarget("endpoint URL has no usable port".to_string())
     })?;
@@ -162,9 +162,26 @@ fn remote_rpc_resolution_target(
         .host()
         .ok_or_else(|| ServerError::UnsafeRemoteRpcTarget("endpoint URL has no host".to_string()))?
     {
-        url::Host::Domain(host) => OnionProxyTarget::new(host, port).map(Some),
+        url::Host::Domain(host) => {
+            let pin_host = parsed.host_str().ok_or_else(|| {
+                ServerError::UnsafeRemoteRpcTarget("endpoint URL has no host".to_string())
+            })?;
+            OnionProxyTarget::new(host, port).map(|resolution_target| {
+                Some(RemoteRpcResolutionTarget {
+                    resolution_target,
+                    pin_host: pin_host.to_string(),
+                })
+            })
+        }
         url::Host::Ipv4(_) | url::Host::Ipv6(_) => Ok(None),
     }
+}
+
+#[cfg(rings_native)]
+#[derive(Debug, Eq, PartialEq)]
+struct RemoteRpcResolutionTarget {
+    resolution_target: OnionProxyTarget,
+    pin_host: String,
 }
 
 #[cfg(rings_browser)]
@@ -223,14 +240,34 @@ mod remote_rpc_security_tests {
 
     #[cfg(rings_native)]
     #[test]
-    fn remote_rpc_domains_keep_unbracketed_dns_pinning_target(
+    fn remote_rpc_domains_preserve_connect_time_host_for_dns_pin(
     ) -> std::result::Result<(), ServerError> {
         let parsed = validate_remote_rpc_url("https://example.com:8443/rpc")?;
         let target = remote_rpc_resolution_target(&parsed)?;
 
         assert!(matches!(
             target,
-            Some(target) if target.host() == "example.com" && target.port() == 8443
+            Some(target)
+                if target.resolution_target.host() == "example.com"
+                    && target.resolution_target.port() == 8443
+                    && target.pin_host == "example.com"
+        ));
+        Ok(())
+    }
+
+    #[cfg(rings_native)]
+    #[test]
+    fn remote_rpc_trailing_dot_domains_keep_dotted_dns_pin_key(
+    ) -> std::result::Result<(), ServerError> {
+        let parsed = validate_remote_rpc_url("https://example.com.:8443/rpc")?;
+        let target = remote_rpc_resolution_target(&parsed)?;
+
+        assert!(matches!(
+            target,
+            Some(target)
+                if target.resolution_target.host() == "example.com"
+                    && target.resolution_target.port() == 8443
+                    && target.pin_host == "example.com."
         ));
         Ok(())
     }
