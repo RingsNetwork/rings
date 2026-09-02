@@ -449,6 +449,20 @@ impl GatewayTransport for RecordingTransport {
 }
 
 #[test]
+fn test_gateway_rejects_direct_private_request_before_transport_io() -> Result<()> {
+    let gateway =
+        ConcurrentWebviewGateway::new(GatewayPrefix::new("/webview/")?, RecordingTransport::new());
+    let request = GatewayRequest::navigation(Url::parse("http://169.254.169.254/metadata")?);
+
+    assert!(matches!(
+        futures::executor::block_on(gateway.send(request)),
+        Err(WebviewError::UnsafeTargetHost(_))
+    ));
+    assert!(gateway.transport.requests.test_lock()?.is_empty());
+    Ok(())
+}
+
+#[test]
 fn test_gateway_replaces_caller_cookie_header_with_virtual_target_cookie() -> Result<()> {
     let transport = RecordingTransport::new();
     let target = TargetUrl::parse("https://example.com/index.html")?.into_url();

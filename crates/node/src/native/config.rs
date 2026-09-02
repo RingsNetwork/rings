@@ -131,6 +131,15 @@ pub struct Config {
     pub external_api_addr: String,
     /// Internal endpoint URL used by local clients.
     pub endpoint_url: String,
+    /// Optional API token file path; relative paths are resolved next to this config file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_token_path: Option<String>,
+    /// Exact browser origins permitted to call the authenticated API.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub api_allowed_origins: Vec<String>,
+    /// Explicitly allow the external API listener to bind a non-loopback address.
+    #[serde(default)]
+    pub allow_remote_external_api: bool,
     /// WebRTC ICE server list, independent from optional gateway ingress.
     pub ice_servers: String,
     /// Chord stabilization interval in seconds.
@@ -284,6 +293,9 @@ impl Config {
             internal_api_port: DEFAULT_INTERNAL_API_PORT,
             external_api_addr: DEFAULT_EXTERNAL_API_ADDR.to_string(),
             endpoint_url: DEFAULT_ENDPOINT_URL.to_string(),
+            api_token_path: None,
+            api_allowed_origins: Vec::new(),
+            allow_remote_external_api: false,
             ice_servers: DEFAULT_ICE_SERVERS.to_string(),
             stabilize_interval: DEFAULT_STABILIZE_INTERVAL,
             online_node_heartbeat_interval_secs:
@@ -422,6 +434,9 @@ measure_storage:
             crate::onion::default_onion_exit_services()
         );
         assert!(cfg.gateway.is_none());
+        assert_eq!(cfg.api_token_path, None);
+        assert!(cfg.api_allowed_origins.is_empty());
+        assert!(!cfg.allow_remote_external_api);
     }
 
     #[test]

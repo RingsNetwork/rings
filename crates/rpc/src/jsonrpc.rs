@@ -11,6 +11,7 @@ use crate::protos::rings_node::*;
 pub struct Client {
     client: HttpClient,
     endpoint_url: String,
+    bearer_token: Option<String>,
 }
 
 /// The errors returned by the client.
@@ -42,7 +43,26 @@ impl Client {
         Self {
             client: HttpClient::default(),
             endpoint_url: endpoint_url.to_string(),
+            bearer_token: None,
         }
+    }
+
+    /// Creates a client using a caller-configured HTTP transport.
+    ///
+    /// Native callers use this boundary to pin a DNS snapshot and disable ambient proxies before
+    /// a security-sensitive request. The endpoint URL remains the authority used for TLS SNI.
+    pub fn with_http_client(endpoint_url: &str, client: HttpClient) -> Self {
+        Self {
+            client,
+            endpoint_url: endpoint_url.to_string(),
+            bearer_token: None,
+        }
+    }
+
+    /// Attach the Bearer credential required by an authenticated RPC endpoint.
+    pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
+        self.bearer_token = Some(token.into());
+        self
     }
 
     /// Sends a typed JSON-RPC request and decodes the typed response body.
@@ -76,6 +96,10 @@ impl Client {
             .header("content-type", "application/json")
             .header("accept", "application/json")
             .body(body);
+        let req = match &self.bearer_token {
+            Some(token) => req.bearer_auth(token),
+            None => req,
+        };
 
         let resp = req
             .send()

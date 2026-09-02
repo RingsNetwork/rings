@@ -168,6 +168,25 @@ fn test_browser_request_allows_source_free_subresources() -> WebviewResult<()> {
 }
 
 #[wasm_bindgen_test]
+fn test_browser_request_allows_local_controlled_gateway_urls() -> WebviewResult<()> {
+    let requested = "http://127.0.0.1:8080/webview/https%3A%2F%2Fexample%2Etest%2F";
+    let value = Object::new();
+    crate::browser_api::js_set(&value, "requested", &JsValue::from_str(requested))
+        .map_err(WebviewError::Browser)?;
+    crate::browser_api::js_set(&value, "method", &JsValue::from_str("GET"))
+        .map_err(WebviewError::Browser)?;
+    crate::browser_api::js_set(&value, "kind", &JsValue::from_str("navigation"))
+        .map_err(WebviewError::Browser)?;
+
+    let request = browser_host_request(&value.into()).map_err(WebviewError::Browser)?;
+
+    assert_eq!(request.requested.as_str(), requested);
+    assert_eq!(request.kind, GatewayRequestKind::Navigation);
+    assert!(request.source_target.is_none());
+    Ok(())
+}
+
+#[wasm_bindgen_test]
 fn test_host_redirects_then_serves_a_gateway_document_through_its_transport() -> WebviewResult<()> {
     let (host, requests) = fixture_host()?;
     let target = TargetUrl::parse("https://example.test/docs/index.html")?;
@@ -175,7 +194,7 @@ fn test_host_redirects_then_serves_a_gateway_document_through_its_transport() ->
     let body = vec![0x00, 0xff];
     let redirect =
         futures::executor::block_on(host.handle(WebviewHostRequest::navigation_with_payload(
-            target.clone(),
+            target.as_url().clone(),
             "POST",
             headers.clone(),
             body.clone(),
@@ -188,7 +207,7 @@ fn test_host_redirects_then_serves_a_gateway_document_through_its_transport() ->
 
     let response =
         futures::executor::block_on(host.handle(WebviewHostRequest::navigation_with_payload(
-            TargetUrl::parse(gateway_url.as_str())?,
+            gateway_url,
             "POST",
             headers,
             body,
@@ -224,7 +243,7 @@ fn test_host_redirects_then_serves_a_gateway_document_through_its_transport() ->
 fn test_iframe_navigation_gets_bootstrap_without_webview_overlay() -> WebviewResult<()> {
     let (host, requests) = fixture_host()?;
     let target = TargetUrl::parse("https://frame.example.test/nested.html")?;
-    let gateway_target = TargetUrl::parse(host.policy.gateway_url(target.as_url())?.as_str())?;
+    let gateway_target = host.policy.gateway_url(target.as_url())?;
 
     let response = futures::executor::block_on(
         host.handle(
@@ -264,7 +283,7 @@ fn test_host_serves_cross_target_runtime_reads_when_upstream_allows_cors() -> We
     let (host, requests) = fixture_host()?;
     let source = TargetUrl::parse("https://app.example.test/index.html?q=1#section")?;
     let target = TargetUrl::parse("https://bank.example.test/account")?;
-    let gateway_target = TargetUrl::parse(host.policy.gateway_url(target.as_url())?.as_str())?;
+    let gateway_target = host.policy.gateway_url(target.as_url())?;
 
     let outcome = futures::executor::block_on(host.handle(WebviewHostRequest::fetch(
         gateway_target,

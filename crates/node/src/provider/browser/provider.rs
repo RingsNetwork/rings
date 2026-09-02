@@ -56,6 +56,7 @@ use crate::processor::Processor;
 use crate::processor::ProcessorConfig;
 use crate::provider::AsyncSigner;
 use crate::provider::Provider;
+use crate::provider::RemoteRpcEndpoint;
 use crate::provider::Signer;
 
 mod onion_proxy;
@@ -128,7 +129,7 @@ pub struct BrowserOnionProxy {
     scope: Scope,
     config: OnionProxyConfig,
     runtime: Arc<OnionHttpsRuntime>,
-    directory_endpoint: Option<String>,
+    directory_endpoint: Option<RemoteRpcEndpoint>,
 }
 
 /// Typed response from a cancellable browser onion HTTPS request.
@@ -142,7 +143,7 @@ pub struct BrowserOnionProxyResponse {
 #[derive(Clone)]
 enum BrowserOnionDirectorySource {
     Local,
-    Remote { endpoint_url: String },
+    Remote(RemoteRpcEndpoint),
 }
 
 struct BrowserOnionDirectoryReader {
@@ -158,10 +159,10 @@ impl BrowserOnionDirectoryReader {
         }
     }
 
-    fn remote(processor: Arc<Processor>, endpoint_url: String) -> Self {
+    fn remote(processor: Arc<Processor>, endpoint: RemoteRpcEndpoint) -> Self {
         Self {
             processor,
-            source: BrowserOnionDirectorySource::Remote { endpoint_url },
+            source: BrowserOnionDirectorySource::Remote(endpoint),
         }
     }
 
@@ -183,8 +184,8 @@ impl BrowserOnionDirectoryReader {
     async fn read_online_nodes(&self) -> NodeResult<Vec<OnlineNodeDescriptor>> {
         match &self.source {
             BrowserOnionDirectorySource::Local => self.processor.lookup_online_nodes(false).await,
-            BrowserOnionDirectorySource::Remote { endpoint_url } => {
-                let response = RpcClient::new(endpoint_url.as_str())
+            BrowserOnionDirectorySource::Remote(endpoint) => {
+                let response = authenticated_rpc_client(endpoint)
                     .lookup_online_nodes(&LookupOnlineNodesRequest {
                         include_expired: false,
                     })
@@ -202,8 +203,8 @@ impl BrowserOnionDirectoryReader {
             BrowserOnionDirectorySource::Local => {
                 self.processor.lookup_onion_exits(service, false).await
             }
-            BrowserOnionDirectorySource::Remote { endpoint_url } => {
-                let response = RpcClient::new(endpoint_url.as_str())
+            BrowserOnionDirectorySource::Remote(endpoint) => {
+                let response = authenticated_rpc_client(endpoint)
                     .lookup_onion_exits(&LookupOnionExitsRequest {
                         service: service.to_string(),
                         include_expired: false,
@@ -215,6 +216,14 @@ impl BrowserOnionDirectoryReader {
                 ))
             }
         }
+    }
+}
+
+fn authenticated_rpc_client(endpoint: &RemoteRpcEndpoint) -> RpcClient {
+    let client = RpcClient::new(endpoint.url.as_str());
+    match &endpoint.api_token {
+        Some(token) => client.with_bearer_token(token.to_string()),
+        None => client,
     }
 }
 
@@ -267,10 +276,10 @@ async fn build_browser_onion_proxy_route(
     processor: Arc<Processor>,
     config: OnionProxyConfig,
     target: OnionProxyTarget,
-    directory_endpoint: Option<String>,
+    directory_endpoint: Option<RemoteRpcEndpoint>,
 ) -> NodeResult<OnionProxyRoute> {
-    if let Some(endpoint_url) = directory_endpoint {
-        let remote_reader = BrowserOnionDirectoryReader::remote(processor.clone(), endpoint_url);
+    if let Some(endpoint) = directory_endpoint {
+        let remote_reader = BrowserOnionDirectoryReader::remote(processor.clone(), endpoint);
         match build_browser_route_from_reader(&remote_reader, config.clone(), target.clone()).await
         {
             Ok(route) => return Ok(route),
@@ -655,19 +664,26 @@ impl Provider {
 
     /// connect peer with remote jsonrpc server url
     pub fn connect_peer_via_http(&self, remote_url: String) -> js_sys::Promise {
+        self.connect_peer_via_http_with_token(remote_url, None)
+    }
+
+    /// Connect to a peer whose remote JSON-RPC endpoint requires a Bearer token.
+    pub fn connect_peer_via_http_with_token(
+        &self,
+        remote_url: String,
+        remote_api_token: Option<String>,
+    ) -> js_sys::Promise {
         log::debug!("remote_url: {remote_url}");
         let provider = self.clone();
         future_to_promise(async move {
             let params = serde_json::to_value(ConnectPeerViaHttpRequest {
                 url: remote_url.clone(),
+                api_token: remote_api_token,
             })
             .map_err(JsError::from)?;
             let ret = provider
                 .request_internal("connectPeerViaHttp".to_string(), params)
                 .await
-                .map_err(JsError::from)?;
-            provider
-                .set_onion_directory_endpoint(Some(remote_url))
                 .map_err(JsError::from)?;
             Ok(js_value::serialize(&ret).map_err(JsError::from)?)
         })

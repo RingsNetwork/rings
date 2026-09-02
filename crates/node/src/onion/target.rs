@@ -1,5 +1,6 @@
 //! Target authority parsing shared by onion policy and proxy adapters.
 
+#[cfg(rings_browser)]
 use std::net::IpAddr;
 #[cfg(any(test, rings_native))]
 use std::net::SocketAddr;
@@ -44,6 +45,15 @@ pub struct OnionProxyTarget {
 }
 
 impl OnionProxyTarget {
+    /// Validate a host and port already separated by a URL or proxy parser.
+    pub fn new(host: &str, port: u16) -> Result<Self> {
+        let host = normalize_host(host)?;
+        if port == 0 {
+            return Err(OnionProxyTargetError::ZeroPort.into());
+        }
+        Ok(Self { host, port })
+    }
+
     /// Parse an HTTP CONNECT authority (`host:port` or `[ipv6]:port`).
     pub fn parse_authority(authority: &str) -> Result<Self> {
         let authority = authority.trim();
@@ -65,15 +75,10 @@ impl OnionProxyTarget {
                 .ok_or(OnionProxyTargetError::MissingPort)?
         };
 
-        let host = normalize_host(host)?;
         let port = port
             .parse::<u16>()
             .map_err(|_| OnionProxyTargetError::InvalidPort)?;
-        if port == 0 {
-            return Err(OnionProxyTargetError::ZeroPort.into());
-        }
-
-        Ok(Self { host, port })
+        Self::new(host, port)
     }
 
     /// Return the normalized host.
@@ -144,7 +149,7 @@ pub(crate) fn select_public_exit_addresses(addresses: Vec<SocketAddr>) -> Public
     }
     let public = addresses
         .into_iter()
-        .filter(|address| is_public_exit_ip(address.ip()))
+        .filter(|address| rings_network_policy::is_public_ip(address.ip()))
         .fold(Vec::new(), |mut selected, address| {
             if !selected.contains(&address) {
                 selected.push(address);
@@ -166,86 +171,11 @@ pub(crate) fn validate_public_ip_literal(target: &OnionProxyTarget) -> Result<()
         .host()
         .parse::<IpAddr>()
         .map_err(|_| Error::NoPermission)?;
-    if is_public_exit_ip(address) {
+    if rings_network_policy::is_public_ip(address) {
         Ok(())
     } else {
         Err(Error::NoPermission)
     }
-}
-
-/// Return whether an address is eligible for arbitrary onion-exit egress.
-///
-/// This predicate is intentionally conservative: private, loopback, link-local,
-/// carrier-grade NAT, documentation, benchmarking, multicast, reserved,
-/// transition, and address-translation prefixes are all rejected. IPv4 values
-/// embedded in IPv6 are classified by their IPv4 address.
-const fn is_public_exit_ip(address: IpAddr) -> bool {
-    match address {
-        IpAddr::V4(address) => is_public_exit_ipv4(address.octets()),
-        IpAddr::V6(address) => {
-            let octets = address.octets();
-            if let Some(ipv4) = embedded_ipv4(octets) {
-                return is_public_exit_ipv4(ipv4);
-            }
-            // Public IPv6 unicast is currently allocated only from 2000::/3.
-            // Rejecting every other top-level block fails closed as IANA assigns
-            // new space, rather than treating reserved space as public egress.
-            if octets[0] < 0x20 || octets[0] > 0x3f {
-                return false;
-            }
-            !matches!(
-                octets,
-                // IETF protocol assignments, including Teredo and ORCHID.
-                [0x20, 0x01, 0x00..=0x01, ..]
-                    // Documentation 2001:db8::/32.
-                    | [0x20, 0x01, 0x0d, 0xb8, ..]
-                    // 6to4 can embed a private IPv4 destination.
-                    | [0x20, 0x02, ..]
-                    // Documentation 3fff::/20.
-                    | [0x3f, 0xf0..=0xff, ..]
-            )
-        }
-    }
-}
-
-const fn embedded_ipv4(octets: [u8; 16]) -> Option<[u8; 4]> {
-    let compatible_prefix = octets[0] == 0
-        && octets[1] == 0
-        && octets[2] == 0
-        && octets[3] == 0
-        && octets[4] == 0
-        && octets[5] == 0
-        && octets[6] == 0
-        && octets[7] == 0
-        && octets[8] == 0
-        && octets[9] == 0;
-    if compatible_prefix
-        && ((octets[10] == 0 && octets[11] == 0) || (octets[10] == 0xff && octets[11] == 0xff))
-    {
-        Some([octets[12], octets[13], octets[14], octets[15]])
-    } else {
-        None
-    }
-}
-
-const fn is_public_exit_ipv4([first, second, third, _fourth]: [u8; 4]) -> bool {
-    !matches!(
-        (first, second, third),
-        (0, _, _)
-            | (10, _, _)
-            | (100, 64..=127, _)
-            | (127, _, _)
-            | (169, 254, _)
-            | (172, 16..=31, _)
-            | (192, 0, 0)
-            | (192, 0, 2)
-            | (192, 88, 99)
-            | (192, 168, _)
-            | (198, 18..=19, _)
-            | (198, 51, 100)
-            | (203, 0, 113)
-            | (224..=255, _, _)
-    )
 }
 
 fn normalize_host(host: &str) -> Result<String> {
@@ -264,7 +194,6 @@ mod tests {
     use std::net::IpAddr;
     use std::net::SocketAddr;
 
-    use super::is_public_exit_ip;
     #[cfg(rings_native)]
     use super::resolve_public_target;
     use super::select_public_exit_addresses;
@@ -319,7 +248,7 @@ mod tests {
         ] {
             let address = address.parse::<IpAddr>().expect("valid fixture address");
             assert!(
-                !is_public_exit_ip(address),
+                !rings_network_policy::is_public_ip(address),
                 "accepted special address {address}"
             );
         }
@@ -330,7 +259,7 @@ mod tests {
         for address in ["1.1.1.1", "8.8.8.8", "2606:4700:4700::1111"] {
             let address = address.parse::<IpAddr>().expect("valid fixture address");
             assert!(
-                is_public_exit_ip(address),
+                rings_network_policy::is_public_ip(address),
                 "rejected public address {address}"
             );
         }

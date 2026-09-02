@@ -18,6 +18,10 @@ use rings_node::extension::Backend;
 use rings_node::logging::init_logging;
 use rings_node::logging::LogLevel;
 use rings_node::measure::PeriodicMeasure;
+use rings_node::native::api_auth::load_api_token;
+use rings_node::native::api_auth::load_api_token_file;
+use rings_node::native::api_auth::load_or_create_api_token;
+use rings_node::native::api_auth::ApiSecurity;
 use rings_node::native::cli::Client;
 use rings_node::native::config;
 use rings_node::native::endpoint::run_external_api;
@@ -224,6 +228,30 @@ struct RunCommand {
 
     #[arg(
         long,
+        help = "API Bearer token file. Relative paths are resolved next to the node config file",
+        env
+    )]
+    pub api_token_path: Option<String>,
+
+    #[arg(
+        long = "api-allowed-origin",
+        action = ArgAction::Append,
+        help = "Exact browser origin permitted to call the authenticated API; repeat as needed",
+        env,
+        value_delimiter = ','
+    )]
+    pub api_allowed_origins: Vec<String>,
+
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help = "Explicitly permit external_api_addr to bind a non-loopback address",
+        env
+    )]
+    pub allow_remote_external_api: bool,
+
+    #[arg(
+        long,
         help = "ICE server list. If not provided, use ice_servers in config file or stun://stun.l.google.com:19302",
         env
     )]
@@ -401,6 +429,13 @@ struct ClientArgs {
     endpoint_url: Option<String>,
 
     #[arg(
+        long,
+        help = "API Bearer token file. Relative paths are resolved next to the node config file",
+        env
+    )]
+    api_token_path: Option<String>,
+
+    #[arg(
         long = "key",
         short = 'k',
         env,
@@ -416,7 +451,12 @@ impl ClientArgs {
     async fn new_client(&self) -> anyhow::Result<Client> {
         let c = config::Config::read_fs(&self.config_args.config)?;
         let endpoint_url = self.endpoint_url.as_ref().unwrap_or(&c.endpoint_url);
-        Client::new(endpoint_url)
+        let configured_path = self
+            .api_token_path
+            .as_deref()
+            .or(c.api_token_path.as_deref());
+        let token = load_api_token(&self.config_args.config, configured_path)?;
+        Client::with_api_token(endpoint_url, token.into_secret())
     }
 }
 
@@ -522,6 +562,13 @@ struct ConnectUrlCommand {
     client_args: ClientArgs,
 
     node_url: String,
+
+    #[arg(
+        long,
+        help = "Bearer token file for the remote peer API",
+        env = "RINGS_REMOTE_API_TOKEN_FILE"
+    )]
+    remote_api_token_file: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -617,7 +664,8 @@ struct InspectCommand {
 
 #[allow(clippy::too_many_arguments)]
 async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
-    let mut c = config::Config::read_fs(args.config_args.config)?;
+    let config_path = args.config_args.config.clone();
+    let mut c = config::Config::read_fs(&config_path)?;
 
     if let Some(ice_servers) = args.ice_servers {
         c.ice_servers = ice_servers;
@@ -698,8 +746,15 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
     if c.advertise_onion_exit {
         validate_native_onion_exit_services(&c.onion_exit_services)?;
     }
-
     let pc = ProcessorConfig::try_from(c.clone())?;
+    let api_security = configure_api_security(
+        &config_path,
+        &mut c,
+        args.api_token_path,
+        args.api_allowed_origins,
+        args.allow_remote_external_api,
+    )?;
+
     let onion_session_sk = pc.session_sk();
     let advertise_onion_relay = c.advertise_onion_relay;
     let advertise_onion_exit = c.advertise_onion_exit;
@@ -800,14 +855,20 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
     });
     let internal_processor = processor.clone();
     let internal_gateway = gateway_status.clone();
+    let internal_security = api_security.clone();
     tasks.spawn(async move {
-        run_internal_api_with_gateway(c.internal_api_port, internal_processor, internal_gateway)
-            .await
-            .context("internal API stopped")
+        run_internal_api_with_gateway(
+            c.internal_api_port,
+            internal_processor,
+            internal_gateway,
+            internal_security,
+        )
+        .await
+        .context("internal API stopped")
     });
     let external_processor = processor.clone();
     tasks.spawn(async move {
-        run_external_api(c.external_api_addr, external_processor)
+        run_external_api(c.external_api_addr, external_processor, api_security)
             .await
             .context("external API stopped")
     });
@@ -867,6 +928,33 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
         await_task_cleanup(&mut processor_task, "node processor shutdown").await
     };
     combine_foreground_results(primary, gateway_cleanup, processor_cleanup)
+}
+
+fn configure_api_security(
+    config_path: &str,
+    config: &mut config::Config,
+    token_path_override: Option<String>,
+    allowed_origin_overrides: Vec<String>,
+    allow_remote_override: bool,
+) -> anyhow::Result<Arc<ApiSecurity>> {
+    if let Some(token_path) = token_path_override {
+        config.api_token_path = Some(token_path);
+    }
+    if !allowed_origin_overrides.is_empty() {
+        config.api_allowed_origins = allowed_origin_overrides;
+    }
+    if allow_remote_override {
+        config.allow_remote_external_api = true;
+    }
+    let token = load_or_create_api_token(config_path, config.api_token_path.as_deref())?;
+    println!("API authentication token file: {}", token.path().display());
+    ApiSecurity::new(
+        token.into_secret(),
+        &config.api_allowed_origins,
+        config.allow_remote_external_api,
+    )
+    .map(Arc::new)
+    .map_err(Into::into)
 }
 
 fn joined_service_result(
@@ -1006,10 +1094,16 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Run(args) => foreground_run(*args).await,
         Command::Pubsub(args) => pubsub_run(args.client_args, args.topic).await,
         Command::Connect(ConnectCommand::Node(args)) => {
+            let remote_api_token = args
+                .remote_api_token_file
+                .as_deref()
+                .map(load_api_token_file)
+                .transpose()?
+                .map(|token| token.into_secret());
             args.client_args
                 .new_client()
                 .await?
-                .connect_peer_via_http(args.node_url.as_str())
+                .connect_peer_via_http_with_token(args.node_url.as_str(), remote_api_token)
                 .await?
                 .display();
             Ok(())
@@ -1085,7 +1179,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             let session_sk_path = args.session_args.new_session_then_write_to_fs()?;
             let config = config::Config::new(session_sk_path);
             let p = config.write_fs(&args.location)?;
+            let api_token = load_or_create_api_token(&p, config.api_token_path.as_deref())?;
             println!("Your config file has saved to: {p}");
+            println!(
+                "API authentication token file: {}",
+                api_token.path().display()
+            );
             Ok(())
         }
         Command::NewSession(args) => {

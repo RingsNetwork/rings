@@ -87,16 +87,19 @@ rings-codec = { workspace = true }
 rings-core = { workspace = true, optional = true }
 rings-derive = { workspace = true, optional = true }
 rings-measure = { workspace = true }
+rings-network-policy = { workspace = true }
 rings-rpc = { workspace = true, optional = true }
 rings-transport = { workspace = true }
 serde = { version = "1.0.136", features = ["derive"] }
 serde_json = "1.0.70"
 serde_yaml = "0.9.17"
 strum = "0.25.0"
+subtle = "2.4.1"
 thiserror = "1"
 tracing = "0.1.37"
 tracing-log = "0.1.3"
 tracing-subscriber = { version = "0.3.15", features = ["ansi", "env-filter"] }
+url = "2"
 uuid = { version = "0.8.2" }
 
 # node
@@ -147,6 +150,7 @@ smoltcp = { version = "0.14.0", default-features = false, features = [
     "proto-ipv4",
     "socket-tcp",
 ] }
+tower = "0.5"
 wasm-bindgen-test = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
