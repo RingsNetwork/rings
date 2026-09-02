@@ -19,10 +19,23 @@ pub struct PeerInfo {
 }
 
 /// Request to connect to a peer through its HTTP RPC endpoint.
-#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ConnectPeerViaHttpRequest {
     /// HTTP endpoint URL exposed by the peer.
     pub url: String,
+    /// Optional Bearer token required by the remote peer's API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_token: Option<String>,
+}
+
+impl std::fmt::Debug for ConnectPeerViaHttpRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ConnectPeerViaHttpRequest")
+            .field("url", &self.url)
+            .field("api_token", &self.api_token.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 /// Response returned after connecting to an HTTP-reachable peer.
@@ -44,12 +57,26 @@ pub struct ConnectWithDidRequest {
 pub struct ConnectWithDidResponse {}
 
 /// Bootstrap peer descriptor used by seed connection requests.
-#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct SeedPeer {
     /// Decentralized identifier of the seed peer.
     pub did: String,
     /// HTTP endpoint URL for the seed peer.
     pub url: String,
+    /// Optional Bearer token required by this seed peer's API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_token: Option<String>,
+}
+
+impl std::fmt::Debug for SeedPeer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SeedPeer")
+            .field("did", &self.did)
+            .field("url", &self.url)
+            .field("api_token", &self.api_token.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 /// Request to connect to one or more bootstrap peers.

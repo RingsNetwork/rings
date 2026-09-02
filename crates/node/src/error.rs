@@ -282,6 +282,9 @@ pub enum Error {
         /// Canonical target authority.
         authority: String,
     } = 1607,
+    /// A remote JSON-RPC URL failed the public-network egress policy.
+    #[error("Unsafe remote RPC target: {0}")]
+    UnsafeRemoteRpcTarget(String) = 1608,
 }
 
 impl Error {

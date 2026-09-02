@@ -51,6 +51,12 @@ impl Client {
         Ok(Self { client: rpc_client })
     }
 
+    /// Creates a client for an endpoint protected by the supplied API Bearer token.
+    pub fn with_api_token(endpoint_url: &str, api_token: String) -> anyhow::Result<Self> {
+        let rpc_client = RpcClient::new(endpoint_url).with_bearer_token(api_token);
+        Ok(Self { client: rpc_client })
+    }
+
     /// Establishes a WebRTC connection with a remote peer using HTTP as the signaling channel.
     ///
     /// This function allows two peers to establish a WebRTC connection using HTTP,
@@ -60,10 +66,20 @@ impl Client {
     /// Takes a URL for an HTTP server that will be used as the signaling channel to exchange ICE candidates and SDP with the remote peer.
     /// Returns a Did that can be used to refer to this connection in subsequent WebRTC operations.
     pub async fn connect_peer_via_http(&mut self, url: &str) -> Output<String> {
+        self.connect_peer_via_http_with_token(url, None).await
+    }
+
+    /// Establishes a WebRTC connection through a remote API protected by a Bearer token.
+    pub async fn connect_peer_via_http_with_token(
+        &mut self,
+        url: &str,
+        remote_api_token: Option<String>,
+    ) -> Output<String> {
         let peer_did = self
             .client
             .connect_peer_via_http(&ConnectPeerViaHttpRequest {
                 url: url.to_string(),
+                api_token: remote_api_token,
             })
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?

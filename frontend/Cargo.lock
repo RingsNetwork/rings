@@ -2658,7 +2658,7 @@ dependencies = [
 
 [[package]]
 name = "rings-codec"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "postcard",
  "serde",
@@ -2666,7 +2666,7 @@ dependencies = [
 
 [[package]]
 name = "rings-core"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "ark-bls12-381",
  "ark-ec",
@@ -2729,7 +2729,7 @@ dependencies = [
 
 [[package]]
 name = "rings-derive"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2761,15 +2761,23 @@ dependencies = [
 
 [[package]]
 name = "rings-measure"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "serde",
  "thiserror 1.0.69",
 ]
 
 [[package]]
+name = "rings-network-policy"
+version = "0.20.1"
+dependencies = [
+ "thiserror 1.0.69",
+ "url",
+]
+
+[[package]]
 name = "rings-node"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "anyhow",
  "arrayref",
@@ -2795,6 +2803,7 @@ dependencies = [
  "rings-core",
  "rings-derive",
  "rings-measure",
+ "rings-network-policy",
  "rings-rpc",
  "rings-transport",
  "serde",
@@ -2802,11 +2811,13 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "strum",
+ "subtle",
  "thiserror 1.0.69",
  "tracing",
  "tracing-log 0.1.4",
  "tracing-subscriber",
  "tracing-wasm",
+ "url",
  "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -2815,7 +2826,7 @@ dependencies = [
 
 [[package]]
 name = "rings-rpc"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "async-trait",
  "base64 0.13.1",
@@ -2831,7 +2842,7 @@ dependencies = [
 
 [[package]]
 name = "rings-transport"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2853,7 +2864,7 @@ dependencies = [
 
 [[package]]
 name = "rings-webview"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2862,6 +2873,7 @@ dependencies = [
  "lol_html",
  "percent-encoding",
  "psl",
+ "rings-network-policy",
  "serde",
  "serde-wasm-bindgen 0.6.5",
  "serde_json",

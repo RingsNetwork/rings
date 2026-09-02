@@ -74,3 +74,21 @@ rings <command> [options]
 - `-c, --config <FILE>`: specifies a custom configuration file to use instead of the default "config.toml". The configuration file is used to specify the network configuration, account settings, and other parameters that control the behavior of the rings-node daemon.
 - `-h, --help`: displays the usage information.
 - `-V, --version`: displays the version information for rings-node.
+
+### Control API security
+
+`rings init` creates an owner-only `api-token` file next to the YAML configuration. The internal
+and external JSON-RPC listeners, WebSocket endpoint, `/status`, and `/gateway/status` all require
+that token as an `Authorization: Bearer ...` header. The `rings` CLI reads the token file
+automatically. JSON-RPC requests must also use `Content-Type: application/json`.
+
+Browser origins are denied by default. Add exact origins to `api_allowed_origins` in the YAML
+configuration or repeat `--api-allowed-origin` when starting the node. Wildcard origins are not
+accepted. A non-loopback `external_api_addr` additionally requires
+`allow_remote_external_api: true` or `--allow-remote-external-api`.
+
+If the external API is explicitly bound to a non-loopback address, terminate TLS in front of it;
+plain HTTP exposes bearer tokens to anyone able to observe that network path.
+
+Connecting to a protected remote peer requires its token. `rings connect node` accepts
+`--remote-api-token-file`; seed entries may include an optional `api_token` field.

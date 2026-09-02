@@ -10,6 +10,11 @@
 //! trusted boundary redirects navigation, rejects cross-target runtime reads, and keeps direct
 //! remote traffic out of the browser network stack.
 //!
+//! [`TargetUrl`] also rejects private, loopback, link-local, and obvious local-name targets before
+//! a pluggable transport runs. Native transports remain responsible for resolving domains once,
+//! applying the same public-address policy to the DNS snapshot, and connecting only to admitted
+//! addresses so DNS rebinding cannot bypass this first gate.
+//!
 //! ## Opaque-origin deployment boundary
 //!
 //! Production navigation responses deliberately use CSP `sandbox` without

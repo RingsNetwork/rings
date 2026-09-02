@@ -221,6 +221,9 @@ pub enum WebviewError {
     /// The target scheme is outside the gateway policy.
     #[error("unsupported target URL scheme {0:?}")]
     UnsupportedScheme(String),
+    /// The target host is local, private, or otherwise ineligible for public-network egress.
+    #[error("unsafe target host: {0}")]
+    UnsafeTargetHost(#[from] rings_network_policy::PublicHostError),
     /// Header validation or policy normalization failed.
     #[error("header policy error: {0}")]
     Header(String),

@@ -183,7 +183,7 @@ const navigation = (await import(navigationUrl)) as NavigationModule;
 assert.equal(protocol.WEBVIEW_GATEWAY_PREFIX, "/webview/");
 assert.equal(protocol.CONTROLLED_WEBVIEW_ORIGIN, "https://rings-webview.invalid");
 assert.match(rustHost, /GATEWAY_PREFIX:\s*&str\s*=\s*"\/webview\/"/);
-assert.match(rustHost, /TargetUrl::parse\("https:\/\/rings-webview\.invalid\/"\)/);
+assert.match(rustHost, /Url::parse\("https:\/\/rings-webview\.invalid\/"\)/);
 
 assert.deepEqual(
   protocol.parseRendererFrameMessage({

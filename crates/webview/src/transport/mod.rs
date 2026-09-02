@@ -17,6 +17,7 @@ use crate::types::GatewayRequest;
 use crate::types::GatewayRequestKind;
 use crate::types::GatewayResponse;
 use crate::url::GatewayPrefix;
+use crate::url::TargetUrl;
 
 const MAX_GATEWAY_BODY_BYTES: usize = 8 * 1024 * 1024;
 
@@ -439,6 +440,10 @@ where T: GatewayTransport
 {
     /// Send one request without holding the virtual-cookie lock during upstream I/O.
     pub async fn send(&self, request: GatewayRequest) -> Result<GatewayResponse> {
+        // `GatewayRequest` remains a wire-friendly type with a public `Url` field. Enforce the
+        // same admission boundary here so direct Rust callers cannot bypass `TargetUrl` and hand
+        // a loopback or private destination to an otherwise naive transport implementation.
+        TargetUrl::from_url(request.target.clone())?;
         let mut session = {
             let prepare_now = current_time_millis()?;
             let cookies = self.lock_cookies()?;

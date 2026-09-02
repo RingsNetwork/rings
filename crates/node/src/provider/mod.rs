@@ -46,7 +46,14 @@ pub struct Provider {
     #[cfg(all(feature = "browser", target_family = "wasm"))]
     onion_https_runtime: Arc<Mutex<Option<Arc<crate::onion::https::OnionHttpsRuntime>>>>,
     #[cfg(all(feature = "browser", target_family = "wasm"))]
-    onion_directory_endpoint: Arc<Mutex<Option<String>>>,
+    onion_directory_endpoint: Arc<Mutex<Option<RemoteRpcEndpoint>>>,
+}
+
+#[cfg(all(feature = "browser", target_family = "wasm"))]
+#[derive(Clone)]
+pub(crate) struct RemoteRpcEndpoint {
+    pub(crate) url: String,
+    pub(crate) api_token: Option<Arc<str>>,
 }
 
 /// Async signer, without Send required
@@ -316,21 +323,32 @@ impl Provider {
 }
 
 #[cfg(all(feature = "browser", target_family = "wasm"))]
-fn onion_directory_endpoint_from_rpc(method: &str, params: &serde_json::Value) -> Option<String> {
+fn onion_directory_endpoint_from_rpc(
+    method: &str,
+    params: &serde_json::Value,
+) -> Option<RemoteRpcEndpoint> {
     if !matches!(method, "connectPeerViaHttp" | "ConnectPeerViaHttp") {
         return None;
     }
-    params
+    let url = params
         .get("url")
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|url| !url.is_empty())
-        .map(ToOwned::to_owned)
+        .map(ToOwned::to_owned)?;
+    let api_token = params
+        .get("api_token")
+        .and_then(serde_json::Value::as_str)
+        .map(Arc::<str>::from);
+    Some(RemoteRpcEndpoint { url, api_token })
 }
 
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 impl Provider {
-    pub(crate) fn set_onion_directory_endpoint(&self, endpoint: Option<String>) -> Result<()> {
+    pub(crate) fn set_onion_directory_endpoint(
+        &self,
+        endpoint: Option<RemoteRpcEndpoint>,
+    ) -> Result<()> {
         let mut slot = self
             .onion_directory_endpoint
             .lock()
@@ -339,7 +357,7 @@ impl Provider {
         Ok(())
     }
 
-    pub(crate) fn onion_directory_endpoint(&self) -> Result<Option<String>> {
+    pub(crate) fn onion_directory_endpoint(&self) -> Result<Option<RemoteRpcEndpoint>> {
         self.onion_directory_endpoint
             .lock()
             .map(|slot| slot.clone())

@@ -74,6 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         provider
             .request(Method::ConnectPeerViaHttp, ConnectPeerViaHttpRequest {
                 url: args.seed_url,
+                api_token: None,
             })
             .await?,
     )?;

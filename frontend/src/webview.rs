@@ -121,7 +121,7 @@ pub(crate) async fn dispatch_browser_request(gateway: WebviewNode, request: JsVa
 }
 
 fn browser_host_request(value: &JsValue) -> Result<WebviewHostRequest, String> {
-    let requested = parse_target(
+    let requested = parse_url(
         crate::browser_api::js_string_field(value, "requested")?,
         "requested",
     )?;
@@ -163,6 +163,10 @@ fn browser_host_request(value: &JsValue) -> Result<WebviewHostRequest, String> {
         kind => Err(format!("unknown gateway request kind {kind}")),
     }?;
     Ok(request.with_credentials(credentials))
+}
+
+fn parse_url(value: String, field: &str) -> Result<Url, String> {
+    Url::parse(value.as_str()).map_err(|error| format!("{field}: {error}"))
 }
 
 fn browser_credentials(value: &JsValue) -> Result<GatewayCredentials, String> {
@@ -339,7 +343,7 @@ fn default_failure_summary(status: u16) -> &'static str {
 /// A browser request captured by the Rings-controlled WebView host.
 #[derive(Clone, Debug)]
 pub struct WebviewHostRequest {
-    requested: TargetUrl,
+    requested: Url,
     source_target: Option<TargetUrl>,
     method: String,
     headers: Vec<GatewayHeader>,
@@ -351,13 +355,13 @@ pub struct WebviewHostRequest {
 
 impl WebviewHostRequest {
     /// Build a document navigation request.
-    pub fn navigation(requested: TargetUrl) -> Self {
+    pub fn navigation(requested: Url) -> Self {
         Self::navigation_with_payload(requested, "GET", Vec::new(), Vec::new())
     }
 
     /// Build a document navigation request while preserving its HTTP payload.
     pub fn navigation_with_payload(
-        requested: TargetUrl,
+        requested: Url,
         method: impl Into<String>,
         headers: Vec<GatewayHeader>,
         body: Vec<u8>,
@@ -375,7 +379,7 @@ impl WebviewHostRequest {
 
     /// Build a static subresource request with its captured HTTP payload.
     pub fn subresource(
-        requested: TargetUrl,
+        requested: Url,
         source_target: Option<TargetUrl>,
         method: impl Into<String>,
         headers: Vec<GatewayHeader>,
@@ -394,7 +398,7 @@ impl WebviewHostRequest {
 
     /// Build a runtime fetch request with the trusted initiating page target.
     pub fn fetch(
-        requested: TargetUrl,
+        requested: Url,
         source_target: TargetUrl,
         method: impl Into<String>,
         headers: Vec<GatewayHeader>,
@@ -412,7 +416,7 @@ impl WebviewHostRequest {
 
     /// Build a runtime XHR request with the trusted initiating page target.
     pub fn xhr(
-        requested: TargetUrl,
+        requested: Url,
         source_target: TargetUrl,
         method: impl Into<String>,
         headers: Vec<GatewayHeader>,
@@ -429,7 +433,7 @@ impl WebviewHostRequest {
     }
 
     fn new(
-        requested: TargetUrl,
+        requested: Url,
         source_target: Option<TargetUrl>,
         method: impl Into<String>,
         headers: Vec<GatewayHeader>,
@@ -449,7 +453,7 @@ impl WebviewHostRequest {
     }
 
     fn runtime(
-        requested: TargetUrl,
+        requested: Url,
         source_target: TargetUrl,
         method: impl Into<String>,
         headers: Vec<GatewayHeader>,
@@ -536,7 +540,7 @@ impl WebviewNode {
         if !is_http_origin(&origin) {
             return Ok(None);
         }
-        let controlled_origin = TargetUrl::parse(&format!("{}/", origin.trim_end_matches('/')))
+        let controlled_origin = Url::parse(&format!("{}/", origin.trim_end_matches('/')))
             .map_err(|error| WebviewError::Browser(format!("parse frontend origin: {error}")))?;
         Self::new(
             Rc::new((*provider).clone()),
@@ -556,7 +560,7 @@ impl WebviewNode {
         provider: Arc<Provider>,
         onion_settings: WebviewOnionSettings,
     ) -> WebviewResult<Self> {
-        let controlled_origin = TargetUrl::parse("https://rings-webview.invalid/")?;
+        let controlled_origin = Url::parse("https://rings-webview.invalid/")?;
         Self::new(
             Rc::new((*provider).clone()),
             controlled_origin,
@@ -572,12 +576,12 @@ impl WebviewNode {
 
     fn new(
         provider: Rc<Provider>,
-        controlled_origin: TargetUrl,
+        controlled_origin: Url,
         onion_settings: WebviewOnionSettings,
         request_bootstrap: fn(&GatewayRequest) -> String,
     ) -> WebviewResult<Self> {
         let prefix = GatewayPrefix::new(GATEWAY_PREFIX)?;
-        let policy = GatewayRoutePolicy::new(controlled_origin.into_url(), prefix.clone())?;
+        let policy = GatewayRoutePolicy::new(controlled_origin, prefix.clone())?;
         let gateway = ConcurrentWebviewGateway::new(prefix, OnionGatewayTransport {
             provider,
             onion_settings,
@@ -607,7 +611,7 @@ where T: GatewayTransport
 {
     async fn handle(&self, request: WebviewHostRequest) -> WebviewResult<WebviewHostOutcome> {
         match self.policy.route(
-            request.requested.as_url(),
+            &request.requested,
             request.source_target.as_ref(),
             request.kind,
         )? {
