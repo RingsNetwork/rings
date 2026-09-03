@@ -1,11 +1,15 @@
-//! Epoch clock boundary for periodic reassembly cleanup.
+//! Epoch clock boundary for chunk reassembly: admission freshness and periodic cleanup.
+//!
+//! Both decisions read one clock so a test can drive expiry deterministically
+//! through the production path instead of waiting for wall time to pass.
 
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 use std::sync::Arc;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 use std::sync::Mutex;
 
-pub(in crate::swarm::callback) enum ReassemblyCleanupClock {
+#[derive(Clone)]
+pub(in crate::swarm::callback) enum ReassemblyClock {
     /// Read the current Unix epoch timestamp in milliseconds.
     System,
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -13,7 +17,7 @@ pub(in crate::swarm::callback) enum ReassemblyCleanupClock {
     Controlled(Arc<Mutex<u128>>),
 }
 
-impl ReassemblyCleanupClock {
+impl ReassemblyClock {
     pub(in crate::swarm::callback) const fn system() -> Self {
         Self::System
     }

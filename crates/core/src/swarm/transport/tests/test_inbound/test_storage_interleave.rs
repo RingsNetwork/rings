@@ -1,13 +1,11 @@
-use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::sync::Notify;
 
 use super::super::RecordingMeasure;
+use super::super::TestLatch;
 use super::local_wire;
 use super::spawn_inbound_delivery;
 use crate::chunk::ReassemblyLimits;
@@ -38,62 +36,11 @@ use crate::swarm::transport::SwarmWebrtcConfig;
 #[derive(Default)]
 struct InterleaveProbe {
     put_calls: AtomicUsize,
-    first_persisted: AtomicBool,
-    first_persisted_notify: Notify,
-    release_first_persist: AtomicBool,
-    release_first_persist_notify: Notify,
-    control_waiting: AtomicBool,
-    control_waiting_notify: Notify,
-    control_may_progress: AtomicBool,
-    control_may_progress_notify: Notify,
-    control_progressed: AtomicBool,
-}
-
-impl InterleaveProbe {
-    async fn wait_for_control_waiting(&self) {
-        loop {
-            let notified = self.control_waiting_notify.notified();
-            if self.control_waiting.load(Ordering::SeqCst) {
-                return;
-            }
-            notified.await;
-        }
-    }
-
-    async fn wait_for_first_persist(&self) {
-        loop {
-            let notified = self.first_persisted_notify.notified();
-            if self.first_persisted.load(Ordering::SeqCst) {
-                return;
-            }
-            notified.await;
-        }
-    }
-
-    async fn wait_for_first_persist_release(&self) {
-        loop {
-            let notified = self.release_first_persist_notify.notified();
-            if self.release_first_persist.load(Ordering::SeqCst) {
-                return;
-            }
-            notified.await;
-        }
-    }
-
-    fn release_first_persist(&self) {
-        self.release_first_persist.store(true, Ordering::SeqCst);
-        self.release_first_persist_notify.notify_waiters();
-    }
-
-    async fn wait_for_control_progress_permission(&self) {
-        loop {
-            let notified = self.control_may_progress_notify.notified();
-            if self.control_may_progress.load(Ordering::SeqCst) {
-                return;
-            }
-            notified.await;
-        }
-    }
+    first_persisted: TestLatch,
+    release_first_persist: TestLatch,
+    control_waiting: TestLatch,
+    control_may_progress: TestLatch,
+    control_progressed: TestLatch,
 }
 
 struct InterleaveStorage {
@@ -109,20 +56,16 @@ impl KvStorageInterface<Entry> for InterleaveStorage {
 
     async fn put(&self, key: &str, value: &Entry) -> Result<()> {
         let call = self.probe.put_calls.fetch_add(1, Ordering::SeqCst);
-        if call == 1 && !self.probe.control_progressed.load(Ordering::SeqCst) {
+        if call == 1 && !self.probe.control_progressed.is_set() {
             return Err(Error::InvalidMessage(
                 "second storage effect ran before queued control traffic".to_string(),
             ));
         }
         self.inner.put(key, value).await?;
         if call == 0 {
-            self.probe.first_persisted.store(true, Ordering::SeqCst);
-            self.probe.first_persisted_notify.notify_waiters();
-            self.probe.wait_for_first_persist_release().await;
-            self.probe
-                .control_may_progress
-                .store(true, Ordering::SeqCst);
-            self.probe.control_may_progress_notify.notify_waiters();
+            self.probe.first_persisted.set();
+            self.probe.release_first_persist.wait().await;
+            self.probe.control_may_progress.set();
         }
         Ok(())
     }
@@ -158,10 +101,9 @@ impl SwarmCallback for InterleaveCallback {
             payload.transaction.data::<Message>()?,
             Message::PeerLivenessReport(_)
         ) {
-            self.probe.control_waiting.store(true, Ordering::SeqCst);
-            self.probe.control_waiting_notify.notify_waiters();
-            self.probe.wait_for_control_progress_permission().await;
-            self.probe.control_progressed.store(true, Ordering::SeqCst);
+            self.probe.control_waiting.set();
+            self.probe.control_may_progress.wait().await;
+            self.probe.control_progressed.set();
         }
         Ok(())
     }
@@ -220,9 +162,7 @@ async fn test_inbound_storage_batch_yields_to_control_between_persistence_steps(
         transport.dht.did,
     )?;
     let storage_delivery = spawn_inbound_delivery(Arc::clone(&callback), cid.clone(), storage);
-    tokio::time::timeout(Duration::from_secs(1), probe.wait_for_first_persist())
-        .await
-        .map_err(|_| Error::InvalidMessage("first storage persistence timed out".to_string()))?;
+    probe.first_persisted.wait().await;
 
     let control = local_wire(
         Message::PeerLivenessReport(crate::message::PeerLivenessReport { sent_at_ms: 1 }),
@@ -230,24 +170,17 @@ async fn test_inbound_storage_batch_yields_to_control_between_persistence_steps(
         transport.dht.did,
     )?;
     let control_delivery = spawn_inbound_delivery(callback, cid, control);
-    tokio::time::timeout(Duration::from_secs(1), probe.wait_for_control_waiting())
-        .await
-        .map_err(|_| Error::InvalidMessage("control admission timed out".to_string()))?;
-    probe.release_first_persist();
+    probe.control_waiting.wait().await;
+    probe.release_first_persist.set();
 
-    tokio::time::timeout(Duration::from_secs(1), async {
-        storage_delivery
-            .await
-            .map_err(|_| Error::InvalidMessage("storage mailbox task panicked".to_string()))??;
-        control_delivery
-            .await
-            .map_err(|_| Error::InvalidMessage("control mailbox task panicked".to_string()))??;
-        Ok::<(), Error>(())
-    })
-    .await
-    .map_err(|_| Error::InvalidMessage("storage/control interleave timed out".to_string()))??;
+    storage_delivery
+        .await
+        .map_err(|_| Error::InvalidMessage("storage mailbox task panicked".to_string()))??;
+    control_delivery
+        .await
+        .map_err(|_| Error::InvalidMessage("control mailbox task panicked".to_string()))??;
 
     assert_eq!(probe.put_calls.load(Ordering::SeqCst), 2);
-    assert!(probe.control_progressed.load(Ordering::SeqCst));
+    assert!(probe.control_progressed.is_set());
     Ok(())
 }

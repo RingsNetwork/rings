@@ -7,13 +7,13 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-use std::time::Duration;
 
 use async_trait::async_trait;
 #[cfg(feature = "dummy")]
 use bytes::Bytes;
 use rings_transport::core::callback::TransportCallback;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+use tokio::sync::watch;
 #[cfg(feature = "dummy")]
 use tokio::sync::Notify;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
@@ -57,6 +57,7 @@ use crate::swarm::callback::SwarmCallback;
 #[cfg(feature = "dummy")]
 use crate::swarm::callback::SwarmEvent;
 use crate::swarm::SwarmBuilder;
+use crate::utils::GenerationWitness;
 
 mod test_events;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
@@ -70,14 +71,88 @@ mod test_readiness;
 mod test_retention;
 mod test_retirement;
 
+/// Latched test event: set at most once by the system under test, awaited by
+/// event rather than by wall clock.
+///
+/// `watch` retains the value, so a `set` that races the waiter's registration
+/// is never lost; the `AtomicBool` + `Notify::notify_waiters` pairing it
+/// replaces could drop exactly that wake-up.
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+struct TestLatch(watch::Sender<bool>);
+
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+impl TestLatch {
+    fn set(&self) {
+        self.0.send_replace(true);
+    }
+
+    fn is_set(&self) -> bool {
+        *self.0.borrow()
+    }
+
+    async fn wait(&self) {
+        let mut receiver = self.0.subscribe();
+        let _ = receiver.wait_for(|set| *set).await;
+    }
+}
+
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+impl Default for TestLatch {
+    fn default() -> Self {
+        Self(watch::Sender::new(false))
+    }
+}
+
+/// Monotone test counter whose readings can be awaited by event.
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+struct TestCounter(watch::Sender<usize>);
+
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+impl TestCounter {
+    /// Increment and return the previous value.
+    fn increment(&self) -> usize {
+        let mut previous = 0;
+        self.0.send_modify(|count| {
+            previous = *count;
+            *count += 1;
+        });
+        previous
+    }
+
+    fn get(&self) -> usize {
+        *self.0.borrow()
+    }
+
+    async fn wait_until(&self, predicate: impl Fn(usize) -> bool) {
+        let mut receiver = self.0.subscribe();
+        let _ = receiver.wait_for(|count| predicate(*count)).await;
+    }
+}
+
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+impl Default for TestCounter {
+    fn default() -> Self {
+        Self(watch::Sender::new(0))
+    }
+}
+
 #[derive(Default)]
 struct RecordingMeasure {
     counters: Mutex<Vec<(Did, MeasureCounter)>>,
     measurements: Mutex<Vec<(Did, MeasurementEvent)>>,
     qualities: Mutex<BTreeMap<Did, PeerQuality>>,
+    /// Bumped after each counter or measurement lands, so a test awaits the
+    /// recording rather than polling under a wall-clock bound.
+    recorded: GenerationWitness,
 }
 
 impl RecordingMeasure {
+    /// Resolve once `predicate` holds over the fully applied measure state.
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    async fn await_recorded(&self, predicate: impl Fn(&Self) -> bool) {
+        self.recorded.await_until(|| predicate(self)).await;
+    }
+
     fn snapshot_counters(&self) -> std::io::Result<Vec<(Did, MeasureCounter)>> {
         self.counters
             .lock()
@@ -110,6 +185,7 @@ impl Measure for RecordingMeasure {
             Ok(mut counters) => counters.push((did, counter)),
             Err(_) => tracing::error!("RecordingMeasure counters mutex is poisoned"),
         }
+        self.recorded.bump();
     }
 
     async fn get_count(&self, did: Did, counter: MeasureCounter) -> u64 {

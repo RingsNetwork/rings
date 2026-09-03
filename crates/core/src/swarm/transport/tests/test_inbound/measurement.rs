@@ -152,13 +152,7 @@ async fn test_reassembly_rejections_score_only_invalid_input_and_release_resourc
 
     callback.close_inbound_for_test();
     drop(callback);
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while budget.buffered_cost_for_test() != 0 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .map_err(|_| Error::InvalidMessage("reassembly budget was not released".to_string()))?;
+    budget.await_buffered_cost_for_test(|cost| cost == 0).await;
     Ok(())
 }
 
@@ -195,7 +189,7 @@ async fn test_expired_partial_reassembly_releases_shared_budget_without_more_pee
         .prepare_connection_offer_with_attempt(peer, offer_callback)
         .await?;
     assert!(transport.activate_connection_for_test(attempt)?);
-    let callback = InnerSwarmCallback::new_with_reassembly_cleanup_clock_for_test(
+    let callback = InnerSwarmCallback::new_with_reassembly_clock_for_test(
         Arc::clone(&transport),
         Arc::new(NoopSwarmCallback),
         Arc::clone(&cleanup_now_ms),
@@ -216,19 +210,16 @@ async fn test_expired_partial_reassembly_releases_shared_budget_without_more_pee
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
     assert!(budget.buffered_cost_for_test() > 0);
-    tokio::time::sleep(Duration::from_millis(meta.ttl_ms.saturating_add(1))).await;
+    // Admission and cleanup read the injected clock, so advancing it to the
+    // expiry is the whole expiry event; no wall time needs to pass.
     *cleanup_now_ms
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = expiry;
 
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while budget.buffered_cost_for_test() != 0 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .map_err(|_| Error::InvalidMessage("expired reassembly budget was retained".to_string()))?;
-    assert_eq!(failed_receive_count(&measure, peer)?, 1);
+    budget.await_buffered_cost_for_test(|cost| cost == 0).await;
+    measure
+        .await_recorded(|measure| matches!(failed_receive_count(measure, peer), Ok(1)))
+        .await;
 
     callback
         .on_admitted_message_for_test(&peer.to_string(), &frame)
@@ -264,8 +255,14 @@ async fn test_expired_partial_reassembly_releases_shared_budget_without_more_pee
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
     assert!(budget.buffered_cost_for_test() > 0);
+    let passes_before_close = callback.reassembly_cleanup_passes_for_test();
     callback.close_inbound_for_test();
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    // The close path runs one cleanup pass immediately under the pre-expiry
+    // clock. Awaiting that pass, rather than a wall-clock window, proves the
+    // retention decision was taken and not merely not yet reached.
+    callback
+        .await_reassembly_cleanup_passes_for_test(|passes| passes > passes_before_close)
+        .await;
     assert!(
         budget.buffered_cost_for_test() > 0,
         "closing before TTL must retain only bounded reassembly cleanup state"
@@ -278,17 +275,10 @@ async fn test_expired_partial_reassembly_releases_shared_budget_without_more_pee
     *cleanup_now_ms
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = closing_expiry;
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while budget.buffered_cost_for_test() != 0
-            || !matches!(failed_receive_count(&measure, peer), Ok(2))
-        {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .map_err(|_| {
-        Error::InvalidMessage("inbound close did not account expired partial".to_string())
-    })?;
+    budget.await_buffered_cost_for_test(|cost| cost == 0).await;
+    measure
+        .await_recorded(|measure| matches!(failed_receive_count(measure, peer), Ok(2)))
+        .await;
     Ok(())
 }
 
@@ -324,7 +314,7 @@ async fn test_authenticated_partial_expiry_remains_attributable_after_disconnect
         .prepare_connection_offer_with_attempt(peer, offer_callback)
         .await?;
     assert!(transport.activate_connection_for_test(attempt)?);
-    let callback = InnerSwarmCallback::new_with_reassembly_cleanup_clock_for_test(
+    let callback = InnerSwarmCallback::new_with_reassembly_clock_for_test(
         Arc::clone(&transport),
         Arc::new(NoopSwarmCallback),
         Arc::clone(&cleanup_now_ms),
@@ -350,17 +340,10 @@ async fn test_authenticated_partial_expiry_remains_attributable_after_disconnect
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = expiry;
 
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while budget.buffered_cost_for_test() != 0
-            || !matches!(failed_receive_count(&measure, peer), Ok(1))
-        {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .map_err(|_| {
-        Error::InvalidMessage("authenticated partial lost attribution after disconnect".to_string())
-    })?;
+    budget.await_buffered_cost_for_test(|cost| cost == 0).await;
+    measure
+        .await_recorded(|measure| matches!(failed_receive_count(measure, peer), Ok(1)))
+        .await;
     Ok(())
 }
 

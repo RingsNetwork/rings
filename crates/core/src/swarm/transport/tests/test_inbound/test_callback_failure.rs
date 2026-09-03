@@ -5,7 +5,7 @@ use super::*;
 #[derive(Default)]
 struct TimeoutOnceValidateSwarmCallback {
     calls: AtomicUsize,
-    dropped: AtomicBool,
+    dropped: TestLatch,
 }
 
 #[async_trait]
@@ -25,7 +25,7 @@ impl SwarmCallback for TimeoutOnceValidateSwarmCallback {
 #[derive(Default)]
 struct TimeoutOnceInboundSwarmCallback {
     calls: AtomicUsize,
-    dropped: AtomicBool,
+    dropped: TestLatch,
 }
 
 #[async_trait]
@@ -45,8 +45,8 @@ impl SwarmCallback for TimeoutOnceInboundSwarmCallback {
 #[derive(Default)]
 struct PanickingValidateSwarmCallback {
     calls: AtomicUsize,
-    started: Notify,
-    release: Notify,
+    started: TestLatch,
+    release: TestLatch,
 }
 
 #[async_trait]
@@ -56,8 +56,8 @@ impl SwarmCallback for PanickingValidateSwarmCallback {
         _payload: &MessagePayload,
     ) -> std::result::Result<(), crate::error::CallbackError> {
         if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-            self.started.notify_one();
-            self.release.notified().await;
+            self.started.set();
+            self.release.wait().await;
             panic!("injected inbound actor panic");
         }
         Ok(())
@@ -90,7 +90,7 @@ async fn test_validation_deadline_drops_user_future_releases_capacity_and_unbloc
         error.downcast_ref::<Error>(),
         Some(Error::InboundValidationTimeout { peer: Some(found), .. }) if *found == peer
     ));
-    assert!(app_callback.dropped.load(Ordering::SeqCst));
+    assert!(app_callback.dropped.is_set());
     assert_eq!(callback.inbound_admitted_count_for_test(), 0);
 
     let second = local_wire(
@@ -131,7 +131,7 @@ async fn test_inbound_callback_deadline_drops_user_future_and_releases_capacity(
         error.downcast_ref::<Error>(),
         Some(Error::InboundProcessingTimeout { peer: Some(found), .. }) if *found == peer
     ));
-    assert!(app_callback.dropped.load(Ordering::SeqCst));
+    assert!(app_callback.dropped.is_set());
     assert_eq!(callback.inbound_admitted_count_for_test(), 0);
     Ok(())
 }
@@ -163,7 +163,7 @@ async fn test_actor_panic_drops_active_and_queued_capacity_and_closes_mailbox() 
         cid.clone(),
         frame.clone(),
     ));
-    app_callback.started.notified().await;
+    app_callback.started.wait().await;
     for _ in 1..QUEUED {
         deliveries.push(spawn_inbound_delivery(
             Arc::clone(&callback),
@@ -171,14 +171,10 @@ async fn test_actor_panic_drops_active_and_queued_capacity_and_closes_mailbox() 
             frame.clone(),
         ));
     }
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while callback.inbound_admitted_count_for_test() != QUEUED {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .map_err(|_| Error::InvalidMessage("panic regression inputs were not admitted".into()))?;
-    app_callback.release.notify_waiters();
+    callback
+        .await_inbound_admitted_count_for_test(|admitted| admitted >= QUEUED)
+        .await;
+    app_callback.release.set();
 
     for delivery in deliveries {
         assert!(matches!(
@@ -188,13 +184,9 @@ async fn test_actor_panic_drops_active_and_queued_capacity_and_closes_mailbox() 
             Err(Error::InvalidMessage(_))
         ));
     }
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while callback.inbound_admitted_count_for_test() != 0 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .map_err(|_| Error::InvalidMessage("actor panic retained inbound capacity".into()))?;
+    callback
+        .await_inbound_admitted_count_for_test(|admitted| admitted == 0)
+        .await;
     let error = callback
         .on_admitted_message_for_test(&cid, &frame)
         .await

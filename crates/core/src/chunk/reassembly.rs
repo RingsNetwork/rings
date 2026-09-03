@@ -142,6 +142,8 @@ pub struct MessageReassembler {
 pub(crate) struct ReassemblyBudget {
     pub(super) buffered_cost: AtomicUsize,
     limit: usize,
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    applied: crate::utils::GenerationWitness,
 }
 
 impl ReassemblyBudget {
@@ -149,11 +151,18 @@ impl ReassemblyBudget {
         Self {
             buffered_cost: AtomicUsize::new(0),
             limit: limits.normalized().max_total_buffered_cost,
+            #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+            applied: crate::utils::GenerationWitness::new(),
         }
     }
 
     fn try_reserve(&self, cost: usize) -> bool {
-        try_reserve_atomic(&self.buffered_cost, cost, self.limit)
+        let reserved = try_reserve_atomic(&self.buffered_cost, cost, self.limit);
+        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+        if reserved {
+            self.applied.bump();
+        }
+        reserved
     }
 
     fn release(&self, cost: usize) {
@@ -166,11 +175,22 @@ impl ReassemblyBudget {
         {
             tracing::error!(cost, "reassembly budget release exceeded retained cost");
         }
+        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+        self.applied.bump();
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn buffered_cost_for_test(&self) -> usize {
         self.buffered_cost.load(Ordering::Acquire)
+    }
+
+    /// Resolve once `predicate` holds over the retained cost, re-checked on
+    /// every reservation or release.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) async fn await_buffered_cost_for_test(&self, predicate: impl Fn(usize) -> bool) {
+        self.applied
+            .await_until(|| predicate(self.buffered_cost_for_test()))
+            .await;
     }
 }
 
@@ -452,16 +472,6 @@ impl MessageReassembler {
         self.handle_retained_at(chunk, now).0
     }
 
-    /// Accept one chunk and also report how many older incomplete logical messages expired before
-    /// admission. The runtime adapter uses the count for one peer failure per expired message.
-    pub(crate) fn handle_retained_outcome_with_expiry(
-        &mut self,
-        chunk: Chunk,
-        peer_attributable: bool,
-    ) -> (ReassemblyOutcome, usize) {
-        self.handle_retained_at_with_attribution(chunk, get_epoch_ms(), peer_attributable)
-    }
-
     /// [`handle`](Self::handle) with the clock injected, so tests drive expiry/admission against a
     /// controlled `now` through the real production path instead of poking internal state.
     pub(super) fn handle_at(&mut self, chunk: Chunk, now: u128) -> Option<Bytes> {
@@ -475,7 +485,13 @@ impl MessageReassembler {
         self.handle_retained_at_with_attribution(chunk, now, true)
     }
 
-    fn handle_retained_at_with_attribution(
+    /// Accept one chunk against the caller's clock and also report how many older incomplete
+    /// logical messages expired before admission; the runtime adapter records one peer failure
+    /// per expired message.
+    ///
+    /// The inbound processor supplies its injected reassembly clock so admission freshness and
+    /// cleanup expiry agree on one `now`.
+    pub(crate) fn handle_retained_at_with_attribution(
         &mut self,
         chunk: Chunk,
         now: u128,

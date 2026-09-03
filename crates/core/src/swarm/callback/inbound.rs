@@ -62,7 +62,7 @@ use self::failure::InboundFailure;
 pub(crate) use self::lane::InboundLane;
 use self::lane::INBOUND_LANE_COUNT;
 use self::reassembly::process_chunk_event;
-pub(super) use self::reassembly_clock::ReassemblyCleanupClock;
+pub(super) use self::reassembly_clock::ReassemblyClock;
 use self::spawn::spawn_actor;
 use self::ticket::InboundCommand;
 use self::ticket::InboundSender;
@@ -169,6 +169,10 @@ impl InboundPeerCapacityState {
 pub(crate) struct InboundCapacity {
     state: Mutex<InboundCapacityState>,
     peer_states: Mutex<BTreeMap<Option<Did>, InboundPeerCapacityState>>,
+    /// Bumped after every reservation, transition, or release is applied and
+    /// its locks are released, so tests await the admitted count by event.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    applied: crate::utils::GenerationWitness,
 }
 
 impl InboundCapacity {
@@ -176,8 +180,21 @@ impl InboundCapacity {
         Self {
             state: Mutex::new(InboundCapacityState::new()),
             peer_states: Mutex::new(BTreeMap::new()),
+            #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+            applied: crate::utils::GenerationWitness::new(),
         }
     }
+
+    /// Publish an applied capacity change to waiting tests.
+    ///
+    /// Pre: every capacity lock is released by the caller.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    fn publish_applied(&self) {
+        self.applied.bump();
+    }
+
+    #[cfg(not(all(test, feature = "dummy", not(target_family = "wasm"))))]
+    const fn publish_applied(&self) {}
 
     fn try_acquire(
         self: &Arc<Self>,
@@ -231,6 +248,8 @@ impl InboundCapacity {
             ),
         );
         peer_states.insert(peer, next_peer);
+        drop((state, peer_states));
+        self.publish_applied();
         Ok(InboundCapacityPermit {
             capacity: self.clone(),
             peer,
@@ -257,6 +276,13 @@ impl InboundCapacity {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .0
             .admitted_count()
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) async fn await_admitted_count_for_test(&self, predicate: impl Fn(usize) -> bool) {
+        self.applied
+            .await_until(|| predicate(self.admitted_count_for_test()))
+            .await;
     }
 }
 
@@ -321,6 +347,8 @@ impl InboundCapacityPermit {
                 );
                 self.lane = lane;
                 self.bytes = bytes;
+                drop((state, peer_states));
+                self.capacity.publish_applied();
                 Ok(())
             }
             Err(CountedReservationRejection::Count) => Err(Error::InboundMailboxCapacityExceeded {
@@ -350,6 +378,8 @@ impl Drop for InboundCapacityPermit {
                 peer_states.remove(&self.peer);
             }
         }
+        drop((state, peer_states));
+        self.capacity.publish_applied();
     }
 }
 
@@ -384,20 +414,39 @@ pub(super) struct InboundMailbox {
     sender: Arc<Mutex<InboundSender>>,
     capacity: Arc<InboundCapacity>,
     actor_available: bool,
+    /// Bumped after each raw transport lease is released at the core handoff.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    handoffs: Arc<crate::utils::GenerationWitness>,
+    /// Bumped after each completed reassembly cleanup pass, periodic or close-time.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    cleanup_passes: Arc<crate::utils::GenerationWitness>,
 }
 
 impl InboundMailbox {
     pub(super) fn spawn(
         processor: InboundProcessor,
         capacity: Arc<InboundCapacity>,
-        cleanup_clock: ReassemblyCleanupClock,
+        reassembly_clock: ReassemblyClock,
     ) -> Self {
         let (sender, receiver) = mpsc::unbounded();
-        let actor_available = spawn_actor(InboundActor::new(processor, receiver, cleanup_clock));
+        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+        let cleanup_passes = Arc::new(crate::utils::GenerationWitness::new());
+        let actor = InboundActor::new(
+            processor,
+            receiver,
+            reassembly_clock,
+            #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+            Arc::clone(&cleanup_passes),
+        );
+        let actor_available = spawn_actor(actor);
         Self {
             sender: Arc::new(Mutex::new(InboundSender::new(sender))),
             capacity,
             actor_available,
+            #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+            handoffs: Arc::new(crate::utils::GenerationWitness::new()),
+            #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+            cleanup_passes,
         }
     }
 
@@ -455,6 +504,8 @@ impl InboundMailbox {
         // bytes and their transport lease together at this handoff boundary.
         let wire_bytes = bytes.len();
         drop((bytes, transport_capacity));
+        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+        self.handoffs.bump();
         ticket.release_admission_turn();
         if !processor.pending_connection_allows_message(peer).await? {
             return Ok(());
@@ -499,6 +550,30 @@ impl InboundMailbox {
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(super) fn admitted_count_for_test(&self) -> usize {
         self.capacity.admitted_count_for_test()
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(super) async fn await_admitted_count_for_test(&self, predicate: impl Fn(usize) -> bool) {
+        self.capacity.await_admitted_count_for_test(predicate).await;
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(super) async fn await_handoffs_for_test(&self, predicate: impl Fn(u64) -> bool) {
+        self.handoffs
+            .await_until(|| predicate(self.handoffs.generation()))
+            .await;
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(super) fn cleanup_passes_for_test(&self) -> u64 {
+        self.cleanup_passes.generation()
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(super) async fn await_cleanup_passes_for_test(&self, predicate: impl Fn(u64) -> bool) {
+        self.cleanup_passes
+            .await_until(|| predicate(self.cleanup_passes.generation()))
+            .await;
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -619,16 +694,21 @@ struct InboundActor {
     active: FuturesUnordered<InboundTaskFuture>,
     active_lanes: [Option<u64>; INBOUND_LANE_COUNT],
     reassembly_handoff_barrier: Option<ReassemblyHandoffBarrier>,
-    reassembly_cleanup_clock: ReassemblyCleanupClock,
+    reassembly_clock: ReassemblyClock,
     next_reassembly_cleanup: Instant,
     input_closed: bool,
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    cleanup_passes: Arc<crate::utils::GenerationWitness>,
 }
 
 impl InboundActor {
     fn new(
         processor: InboundProcessor,
         receiver: mpsc::UnboundedReceiver<InboundCommand>,
-        reassembly_cleanup_clock: ReassemblyCleanupClock,
+        reassembly_clock: ReassemblyClock,
+        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))] cleanup_passes: Arc<
+            crate::utils::GenerationWitness,
+        >,
     ) -> Self {
         Self {
             processor,
@@ -637,9 +717,11 @@ impl InboundActor {
             active: FuturesUnordered::new(),
             active_lanes: [None; INBOUND_LANE_COUNT],
             reassembly_handoff_barrier: None,
-            reassembly_cleanup_clock,
+            reassembly_clock,
             next_reassembly_cleanup: Instant::now() + REASSEMBLY_CLEANUP_INTERVAL,
             input_closed: false,
+            #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+            cleanup_passes,
         }
     }
 
@@ -790,9 +872,11 @@ impl InboundActor {
     }
 
     async fn cleanup_expired_reassembly(&mut self) {
-        let now_ms = self.reassembly_cleanup_clock.now_ms();
+        let now_ms = self.reassembly_clock.now_ms();
         self.processor.remove_expired_reassembly_at(now_ms).await;
         self.next_reassembly_cleanup = Instant::now() + REASSEMBLY_CLEANUP_INTERVAL;
+        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+        self.cleanup_passes.bump();
     }
 
     async fn finish_reassembly_after_close(&mut self) {

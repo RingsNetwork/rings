@@ -9,8 +9,8 @@ use super::*;
 
 #[derive(Default)]
 struct BlockingValidateSwarmCallback {
-    started: Notify,
-    release: Notify,
+    started: TestLatch,
+    release: TestLatch,
 }
 
 #[async_trait]
@@ -19,8 +19,8 @@ impl SwarmCallback for BlockingValidateSwarmCallback {
         &self,
         _payload: &MessagePayload,
     ) -> std::result::Result<(), crate::error::CallbackError> {
-        self.started.notify_one();
-        self.release.notified().await;
+        self.started.set();
+        self.release.wait().await;
         Ok(())
     }
 }
@@ -67,25 +67,26 @@ fn retain_remaining_raw_capacity(
     }
 }
 
+/// Await the core handoff that releases the dispatched frame's raw lease, then
+/// witness the freed capacity with one admission. The lease drop releases
+/// synchronously before the handoff is published, so no retry is needed.
 async fn wait_for_raw_capacity_release(
+    core_callback: &InnerSwarmCallback,
     callback: &InnerTransportCallback,
     raw: &bytes::Bytes,
 ) -> Result<AdmittedInboundFrame> {
-    tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            match callback.admit_inbound_frame(raw.clone()) {
-                InboundFrameAdmission::Admitted(frame) => return Ok(frame),
-                InboundFrameAdmission::CapacityExceeded => tokio::task::yield_now().await,
-                _ => {
-                    return Err(Error::InvalidMessage(
-                        "valid raw transport frame became invalid".to_string(),
-                    ));
-                }
-            }
-        }
-    })
-    .await
-    .map_err(|_| Error::InvalidMessage("raw transport capacity was not released".to_string()))?
+    core_callback
+        .await_inbound_handoffs_for_test(|handoffs| handoffs >= 1)
+        .await;
+    match callback.admit_inbound_frame(raw.clone()) {
+        InboundFrameAdmission::Admitted(frame) => Ok(frame),
+        InboundFrameAdmission::CapacityExceeded => Err(Error::InvalidMessage(
+            "raw transport capacity was not released at the core handoff".to_string(),
+        )),
+        _ => Err(Error::InvalidMessage(
+            "valid raw transport frame became invalid".to_string(),
+        )),
+    }
 }
 
 #[tokio::test]
@@ -134,16 +135,13 @@ async fn test_raw_transport_lease_is_held_until_core_capacity_admission() -> Res
     ));
 
     drop(admission_blocker);
-    tokio::time::timeout(Duration::from_secs(1), application.started.notified())
-        .await
-        .map_err(|_| Error::InvalidMessage("core processing did not start".to_string()))?;
+    application.started.wait().await;
     assert_eq!(core_callback.inbound_admitted_count_for_test(), 1);
-    let released = wait_for_raw_capacity_release(&transport_callback, &raw).await?;
+    let released = wait_for_raw_capacity_release(&core_callback, &transport_callback, &raw).await?;
     drop((released, retained));
-    application.release.notify_one();
-    tokio::time::timeout(Duration::from_secs(1), dispatch)
+    application.release.set();
+    dispatch
         .await
-        .map_err(|_| Error::InvalidMessage("transport dispatch did not stop".to_string()))?
         .map_err(|_| Error::InvalidMessage("transport dispatch task panicked".to_string()))?;
     assert_eq!(core_callback.inbound_admitted_count_for_test(), 0);
     Ok(())
