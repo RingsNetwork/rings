@@ -42,6 +42,8 @@ use crate::measure::PeerQuality;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::message::MessageClass;
 use crate::message::MessagePayload;
+#[cfg(feature = "dummy")]
+use crate::message::MessageSigner;
 use crate::storage::MemStorage;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::swarm::callback::max_on_message_recursion_depth_for_test;
@@ -52,6 +54,9 @@ use crate::swarm::callback::SwarmCallback;
 #[cfg(feature = "dummy")]
 use crate::swarm::callback::SwarmEvent;
 use crate::swarm::SwarmBuilder;
+#[cfg(feature = "dummy")]
+#[cfg(feature = "dummy")]
+use crate::tests::TEST_NETWORK_ID;
 use crate::utils::GenerationWitness;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::utils::Witness;
@@ -566,7 +571,7 @@ async fn test_pending_callback_messages_do_not_dispatch_before_admission() -> Re
         .with_pending_connection_attempt(attempt);
     let payload = MessagePayload::new_send(
         Message::custom(b"message-before-admission")?,
-        &peer_session,
+        MessageSigner::new(&peer_session, TEST_NETWORK_ID),
         transport.dht.did,
         transport.dht.did,
     )?;
@@ -622,7 +627,7 @@ async fn test_nested_reassembled_chunk_is_rejected_without_recursive_callback_en
         .with_pending_connection_attempt(attempt);
     let mut current: Bytes = MessagePayload::new_send(
         Message::custom(b"mailbox-drained")?,
-        &peer_session,
+        MessageSigner::new(&peer_session, TEST_NETWORK_ID),
         transport.dht.did,
         transport.dht.did,
     )?
@@ -635,7 +640,7 @@ async fn test_nested_reassembled_chunk_is_rejected_without_recursive_callback_en
         };
         current = MessagePayload::new_send(
             Message::Chunk(chunk),
-            &peer_session,
+            MessageSigner::new(&peer_session, TEST_NETWORK_ID),
             transport.dht.did,
             transport.dht.did,
         )?
@@ -684,7 +689,7 @@ async fn test_missing_peer_error_precedes_outbound_capacity_admission() -> Resul
     }
     let payload = MessagePayload::new_send(
         Message::custom(b"missing-peer")?,
-        transport.session_sk(),
+        transport.message_signer(),
         peer,
         peer,
     )?;
@@ -718,7 +723,7 @@ async fn test_invalid_inbound_log_omits_transaction_data() -> Result<()> {
     let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback));
     let mut payload = MessagePayload::new_send(
         Message::custom(PRIVATE_MARKER.as_bytes())?,
-        &peer_session,
+        MessageSigner::new(&peer_session, TEST_NETWORK_ID),
         transport.dht.did,
         transport.dht.did,
     )?;

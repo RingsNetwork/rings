@@ -363,6 +363,11 @@ impl SwarmTransport {
         Ok(cursor.as_ref().map(|cursor| format!("{cursor:?}")))
     }
 
+    /// The session key this node authenticates with.
+    pub(crate) fn session_sk(&self) -> &SessionSk {
+        &self.session_sk
+    }
+
     /// Storage virtual-node positions required by this DHT protocol mode.
     pub(crate) fn dht_virtual_nodes(&self) -> u16 {
         self.dht_virtual_nodes

@@ -3,6 +3,8 @@ use rand::Rng;
 use super::*;
 use crate::ecc::SecretKey;
 use crate::message::Message;
+use crate::session::SessionSk;
+use crate::tests::TEST_NETWORK_ID;
 
 #[derive(Deserialize, Serialize, PartialEq, Debug, Clone)]
 pub struct TestData {
@@ -27,7 +29,13 @@ where T: Serialize + DeserializeOwned {
     let key = SecretKey::random();
     let destination = SecretKey::random().address().into();
     let session_sk = SessionSk::new_with_seckey(&key).unwrap();
-    MessagePayload::new_send(data, &session_sk, next_hop, destination).unwrap()
+    MessagePayload::new_send(
+        data,
+        MessageSigner::new(&session_sk, TEST_NETWORK_ID),
+        next_hop,
+        destination,
+    )
+    .unwrap()
 }
 
 #[test]
@@ -36,7 +44,7 @@ fn test_new_then_verify() {
     let did2 = key2.address().into();
 
     let payload = new_test_payload(did2);
-    assert!(payload.verify());
+    assert!(payload.verify(TEST_NETWORK_ID));
 }
 
 #[test]
@@ -57,13 +65,21 @@ fn test_relay_destination_predicates_name_forwarding_state() -> Result<()> {
     let local: Did = local_key.address().into();
     let remote: Did = SecretKey::random().address().into();
 
-    let local_payload =
-        MessagePayload::new_send(Message::custom(b"local")?, &session_sk, local, local)?;
+    let local_payload = MessagePayload::new_send(
+        Message::custom(b"local")?,
+        MessageSigner::new(&session_sk, TEST_NETWORK_ID),
+        local,
+        local,
+    )?;
     assert!(local_payload.is_relay_destination_for(local));
     assert!(!local_payload.should_forward_from(local));
 
-    let remote_payload =
-        MessagePayload::new_send(Message::custom(b"remote")?, &session_sk, remote, remote)?;
+    let remote_payload = MessagePayload::new_send(
+        Message::custom(b"remote")?,
+        MessageSigner::new(&session_sk, TEST_NETWORK_ID),
+        remote,
+        remote,
+    )?;
     assert!(!remote_payload.is_relay_destination_for(local));
     assert!(remote_payload.should_forward_from(local));
 
@@ -84,12 +100,12 @@ fn test_report_return_policy_is_signed_by_transaction() -> Result<()> {
         ReportReturnPolicy::Routed {
             destination: sender,
         },
-        &session_sk,
+        MessageSigner::new(&session_sk, TEST_NETWORK_ID),
     )?;
-    assert!(transaction.verify());
+    assert!(transaction.verify(TEST_NETWORK_ID));
 
     transaction.report_return = ReportReturnPolicy::Path;
-    assert!(!transaction.verify());
+    assert!(!transaction.verify(TEST_NETWORK_ID));
     Ok(())
 }
 
@@ -108,7 +124,7 @@ fn test_routed_report_return_destination_must_match_signer() -> Result<()> {
             ReportReturnPolicy::Routed {
                 destination: unrelated_return,
             },
-            &session_sk,
+            MessageSigner::new(&session_sk, TEST_NETWORK_ID),
         ),
         Err(Error::InvalidMessage(_))
     ));
@@ -260,4 +276,27 @@ fn test_wire_size_matches_every_message_discriminant_and_signature_width() -> Re
         }
     }
     Ok(())
+}
+
+/// Domain separation: the transaction and payload signatures cover the same hash under distinct
+/// tags, so one can never stand in for the other.
+#[test]
+fn test_transaction_and_payload_signatures_are_not_interchangeable() {
+    let next_hop = SecretKey::random().address().into();
+    let mut payload = new_test_payload(next_hop);
+    assert!(payload.verify(TEST_NETWORK_ID));
+    assert!(payload.transaction.verify(TEST_NETWORK_ID));
+
+    payload.verification = payload.transaction.verification.clone();
+    assert!(!payload.verify(TEST_NETWORK_ID));
+}
+
+/// Overlay binding: both signatures verify only under the overlay they were issued for.
+#[test]
+fn test_payload_signed_for_another_overlay_is_rejected() {
+    let next_hop = SecretKey::random().address().into();
+    let payload = new_test_payload(next_hop);
+
+    assert!(!payload.verify(TEST_NETWORK_ID + 1));
+    assert!(!payload.transaction.verify(TEST_NETWORK_ID + 1));
 }

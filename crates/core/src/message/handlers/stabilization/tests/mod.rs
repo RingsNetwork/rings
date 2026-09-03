@@ -4,7 +4,6 @@ use tokio::time::timeout;
 use tokio::time::Duration;
 
 use super::*;
-use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
@@ -16,6 +15,7 @@ use crate::ecc::tests::gen_ordered_keys;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::message::Encoder;
+use crate::message::MessageSigner;
 use crate::message::SyncEntriesWithSuccessorReport;
 use crate::session::SessionSk;
 use crate::swarm::callback::SwarmCallback;
@@ -24,6 +24,7 @@ use crate::tests::default::assert_no_more_msg;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;
 use crate::tests::manually_establish_connection;
+use crate::tests::TEST_NETWORK_ID;
 
 struct NoopCallback;
 
@@ -33,7 +34,7 @@ fn notify_context(origin: &SecretKey, destination: crate::dht::Did) -> Result<Me
     let session = SessionSk::new_with_seckey(origin)?;
     MessagePayload::new_send(
         Message::custom(b"notify predecessor context")?,
-        &session,
+        MessageSigner::new(&session, TEST_NETWORK_ID),
         destination,
         destination,
     )
@@ -140,7 +141,7 @@ async fn test_notify_predecessor_report_acks_local_branch_when_predecessor_alrea
     wait_for_msgs([&node1, &node2]).await;
     assert_no_more_msg([&node1, &node2]).await;
 
-    let entry = Entry::new(
+    let entry = crate::tests::live_entry(
         key3.address().into(),
         vec![String::from("sync me").encode()?],
         EntryKind::Data,
@@ -160,7 +161,7 @@ async fn test_notify_predecessor_report_acks_local_branch_when_predecessor_alrea
     let context_session = SessionSk::new_with_seckey(&context_key)?;
     let context = MessagePayload::new_send(
         Message::custom(b"notify report context")?,
-        &context_session,
+        MessageSigner::new(&context_session, TEST_NETWORK_ID),
         node1.did(),
         node1.did(),
     )?;

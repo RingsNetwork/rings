@@ -353,7 +353,6 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::dht::entry::Entry;
     use crate::dht::entry::EntryKind;
     use crate::dht::entry::PlacedEntry;
     use crate::dht::StorageSyncDestination;
@@ -368,7 +367,8 @@ mod tests {
             .copied()
             .map(|value| {
                 let destination = StorageSyncDestination::PlacementKey(Did::from(value));
-                let entry = Entry::new(Did::from(value + 100), vec![], EntryKind::Data);
+                let entry =
+                    crate::tests::live_entry(Did::from(value + 100), vec![], EntryKind::Data);
                 PeerRingAction::sync_entries_for_repair(destination, vec![PlacedEntry::new(
                     destination.did(),
                     entry,

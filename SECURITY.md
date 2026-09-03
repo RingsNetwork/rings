@@ -24,7 +24,11 @@ placement, and can attempt eclipse behavior.
 - WebRTC transport establishment and data channels provide the expected channel
   security for a successfully established peer connection.
 - `network_id` separates overlays by configuration. It is not an access-control
-  secret, because a peer can choose to use the same value.
+  secret, because a peer can choose to use the same value. Every message and
+  descriptor signature is nevertheless bound to the signer's `network_id` and to a
+  per-message-family domain tag, so a signature issued inside one overlay does not
+  verify inside another, and a signature over one message family does not verify
+  as a different family that shares the same signing surface.
 - Honest peers run the same protocol rules, refresh descriptors before expiry, and
   participate in stabilization and storage replication.
 
@@ -116,9 +120,20 @@ use; it is not a Sybil defence.
 ### DHT Storage
 
 Storage ownership and replication are topology-derived. CRDT joins, owner checks,
-TTL cleanup, and read repair improve convergence among honest or fail-stop peers.
-They do not force a Byzantine storage owner to serve data or preserve data it has
-chosen to withhold.
+retention cleanup, and read repair improve convergence among honest or fail-stop
+peers. They do not force a Byzantine storage owner to serve data or preserve data
+it has chosen to withhold.
+
+Every accepted entry carries a retention bound stamped by its origin and capped at
+admission by the maximum time-to-live, so a peer cannot ask a storage owner to hold
+a value indefinitely; expired values are retired on their next read. Admission
+also rejects CRDT versions whose logical time runs ahead of the receiver's clock
+by more than the message skew tolerance, so a forged version cannot pin a key
+against later honest writes. Native storage enforces its configured byte budget by
+retiring the least recently written values, and the fetched-entry cache is bounded
+by entry count. These bounds limit resource use by any single writer; they are not a
+Sybil defence, and an adversary with many identities can still fill a budget with
+values that expire only at the maximum time-to-live.
 
 ### Online And Onion Registries
 

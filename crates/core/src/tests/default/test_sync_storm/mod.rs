@@ -457,7 +457,10 @@ fn entry_owned_by(owner: &Node, label: &str) -> PlacedEntry {
             let data = vec![u8::try_from(nonce % 251).expect("byte must fit"); ENTRY_PAYLOAD_BYTES]
                 .encode()
                 .expect("test payload must encode");
-            return PlacedEntry::new(key, Entry::new(key, vec![data], EntryKind::Data));
+            return PlacedEntry::new(
+                key,
+                crate::tests::live_entry(key, vec![data], EntryKind::Data),
+            );
         }
     }
     panic!("failed to derive an entry owned by {}", owner.did());

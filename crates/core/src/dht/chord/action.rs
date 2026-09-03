@@ -40,8 +40,9 @@ pub enum RemoteAction {
     FindSuccessor(Did),
     /// Ask the recipient to find one entry placement.
     FindEntry(EntryLookupKey),
-    /// Ask the recipient to find one placement for operating.
-    FindEntryForOperate(PlacedEntryOperation),
+    /// Ask the recipient to find one placement for operating. Boxed: the carried entry
+    /// dominates the size of every other variant.
+    FindEntryForOperate(Box<PlacedEntryOperation>),
     /// Send a predecessor notification to the recipient.
     Notify(Did),
     /// Copy placed entries to one storage sync destination.

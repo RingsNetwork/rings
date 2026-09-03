@@ -9,6 +9,8 @@ use std::sync::Mutex;
 
 use rings_core::dht::Did;
 use rings_core::ecc::SecretKey;
+#[cfg(rings_native)]
+use rings_core::message::MessageSigner;
 use rings_core::session::SessionSk;
 
 #[cfg(rings_native)]
@@ -56,6 +58,10 @@ use crate::processor::ProcessorBuilder;
 use crate::processor::ProcessorConfig;
 #[cfg(rings_native)]
 use crate::sync_lock::lock;
+
+/// Overlay every fixture exit descriptor is published for.
+#[cfg(rings_native)]
+const TEST_NETWORK_ID: u32 = 1;
 
 pub(super) fn session() -> SessionSk {
     SessionSk::new_with_seckey(&SecretKey::random()).expect("session key")
@@ -634,7 +640,7 @@ async fn test_send_effect_releases_transition_turn_and_preserves_peer_order() {
                 OnionReturnId::new([tag; 16]),
                 test_payload("ordered"),
                 local.session_public_key(),
-                &local,
+                MessageSigner::new(&local, TEST_NETWORK_ID),
             )
             .expect("encrypt ordered fixture"),
         })
@@ -691,7 +697,7 @@ async fn test_endpoint_send_awaits_the_same_paced_link_lane_and_emits_cover() {
                 OnionReturnId::new([42; 16]),
                 test_payload("endpoint-shaped"),
                 local.session_public_key(),
-                &local,
+                MessageSigner::new(&local, TEST_NETWORK_ID),
             )
             .expect("encrypt endpoint fixture"),
         }),
@@ -1016,7 +1022,7 @@ async fn test_client_backward_payload_decryption_runs_in_shell_handler() {
             return_id,
             expected.clone(),
             client.session_public_key(),
-            &exit,
+            MessageSigner::new(&exit, TEST_NETWORK_ID),
         )
         .expect("encrypt backward"),
     };

@@ -7,18 +7,29 @@ use rings_core::dht::Did;
 use rings_core::ecc::VerificationPublicKey;
 use rings_core::error::Error;
 use rings_core::error::Result;
+use rings_core::message::DomainTag;
 use rings_core::message::Encoded;
 use rings_core::message::Encoder;
 use rings_core::message::MessageVerification;
+use rings_core::message::SigningDomain;
 use rings_core::session::SessionSk;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
+/// A descriptor body signs under its own message family inside the overlay it names.
+///
+/// Both descriptor kinds carry `network_id` as a signed body field, so the overlay component of
+/// the [`SigningDomain`] is read from the body on signing and from the descriptor on
+/// verification: a descriptor whose stated overlay differs from the signer's fails to verify.
 pub(crate) trait SignedDescriptorBody: Sized {
     type Descriptor;
 
+    /// Message family of this descriptor kind.
+    const DOMAIN_TAG: DomainTag;
+
     fn body_did(&self) -> Did;
     fn body_public_key(&self) -> &VerificationPublicKey;
+    fn body_network_id(&self) -> u32;
     fn body_signing_data(&self) -> Result<Vec<u8>>;
     fn into_signed_descriptor(self, signature: MessageVerification) -> Self::Descriptor;
 }
@@ -36,13 +47,18 @@ where
         return Err(Error::InvalidMessage(mismatch_message.to_string()));
     }
 
-    let signature = MessageVerification::new(&body.body_signing_data()?, session_sk)?;
+    let domain = SigningDomain::new(B::DOMAIN_TAG, body.body_network_id());
+    let signature = MessageVerification::new(domain, &body.body_signing_data()?, session_sk)?;
     Ok(body.into_signed_descriptor(signature))
 }
 
 pub(crate) trait SignedDescriptor: Sized {
+    /// Message family of this descriptor kind; equal to its body's tag.
+    const DOMAIN_TAG: DomainTag;
+
     fn descriptor_did(&self) -> Did;
     fn descriptor_public_key(&self) -> &VerificationPublicKey;
+    fn descriptor_network_id(&self) -> u32;
     fn descriptor_signature(&self) -> &MessageVerification;
     fn descriptor_heartbeat_at_ms(&self) -> u128;
     fn descriptor_expires_at_ms(&self) -> u128;
@@ -66,7 +82,8 @@ pub(crate) trait SignedDescriptor: Sized {
         let Ok(data) = self.descriptor_signing_data() else {
             return false;
         };
-        signature.verify(&data)
+        let domain = SigningDomain::new(Self::DOMAIN_TAG, self.descriptor_network_id());
+        signature.verify(domain, &data)
     }
 
     fn descriptor_is_expired_at(&self, now_ms: u128) -> bool {

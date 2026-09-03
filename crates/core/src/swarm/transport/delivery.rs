@@ -29,7 +29,7 @@ use crate::measure::MeasureImpl;
 use crate::measure::MeasurementEvent;
 use crate::message::Message;
 use crate::message::MessagePayload;
-use crate::session::SessionSk;
+use crate::message::MessageSigner;
 use crate::utils::sleep;
 
 pub(super) const DATA_CHANNEL_SEND_ACCEPT_TIMEOUT: Duration = TRANSPORT_TIMEOUT_PROFILE.send_accept;
@@ -391,8 +391,8 @@ pub(super) async fn record_measurement(
 
 /// Frame one chunk into the bytes a data-channel send carries: wrap it in a `MessagePayload`
 /// addressed to `did` and serialize it. Pure (the only failure is serialization).
-pub(super) fn frame_chunk(session_sk: &SessionSk, did: Did, chunk: Chunk) -> Result<Bytes> {
-    let payload = MessagePayload::new_send(Message::Chunk(chunk), session_sk, did, did)?;
+pub(super) fn frame_chunk(signer: MessageSigner<'_>, did: Did, chunk: Chunk) -> Result<Bytes> {
+    let payload = MessagePayload::new_send(Message::Chunk(chunk), signer, did, did)?;
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     crate::simulation::record_outbound_submission(payload.transaction.tx_id);
     payload.to_wire()

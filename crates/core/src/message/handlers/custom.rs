@@ -34,14 +34,16 @@ mod tests {
     use crate::ecc::SecretKey;
     use crate::error::Error;
     use crate::message::Message;
+    use crate::message::MessageSigner;
     use crate::session::SessionSk;
+    use crate::tests::TEST_NETWORK_ID;
 
     fn custom_payload(destination: Did) -> Result<MessagePayload> {
         let key = SecretKey::random();
         let session_sk = SessionSk::new_with_seckey(&key)?;
         MessagePayload::new_send(
             Message::custom(b"hello")?,
-            &session_sk,
+            MessageSigner::new(&session_sk, TEST_NETWORK_ID),
             destination,
             destination,
         )

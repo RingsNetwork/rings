@@ -1,11 +1,23 @@
 //! Constant variables.
+
+use std::num::NonZeroU32;
+
+/// Default time-to-live in milliseconds, shared by message signatures and DHT entries.
 ///
-/// Default DHT entry time-to-live in milliseconds.
+/// A message proof is live for this long after its timestamp; a DHT entry stamped at the
+/// operation boundary is retained for this long after it was issued.
 pub const DEFAULT_TTL_MS: u64 = 600 * 1000;
-/// Maximum accepted DHT entry time-to-live in milliseconds.
+/// Maximum accepted time-to-live in milliseconds for message signatures and DHT entries.
 pub const MAX_TTL_MS: u64 = DEFAULT_TTL_MS * 10;
 /// Accepted timestamp drift in milliseconds.
 pub const TS_OFFSET_TOLERANCE_MS: u128 = 3000;
+/// Maximum number of fetched entries the local DHT cache retains before evicting the
+/// least recently written one.
+pub const LOCAL_CACHE_CAPACITY: NonZeroU32 = match NonZeroU32::new(1024) {
+    Some(capacity) => capacity,
+    // Evaluated at compile time; the literal is non-zero.
+    None => unreachable!(),
+};
 /// Default session time-to-live in milliseconds.
 pub const DEFAULT_SESSION_TTL_MS: u64 = 30 * 24 * 3600 * 1000;
 /// 60k

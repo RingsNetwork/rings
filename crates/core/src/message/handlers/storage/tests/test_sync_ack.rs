@@ -4,7 +4,6 @@ use super::test_support::next_payload_for_tx;
 use super::test_support::non_affine_placement;
 use super::test_support::storage_sync_report_payload;
 use super::test_support::NoopCallback;
-use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
@@ -32,9 +31,9 @@ async fn test_sync_entries_report_handler_deletes_only_acked_keys() -> Result<()
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
     let acked_key = Did::from(100u32);
     let pending_key = Did::from(120u32);
-    let acked_entry = Entry::new(Did::from(10u32), vec![], EntryKind::Data);
+    let acked_entry = crate::tests::live_entry(Did::from(10u32), vec![], EntryKind::Data);
     let acked_storage_entry = acked_entry.clone().try_into_storage_entry()?;
-    let pending_entry = Entry::new(Did::from(20u32), vec![], EntryKind::Data);
+    let pending_entry = crate::tests::live_entry(Did::from(20u32), vec![], EntryKind::Data);
     let sync_msg = SyncEntriesWithSuccessor {
         purpose: StorageSyncPurpose::OwnershipHandoff,
         destination: StorageSyncDestination::PhysicalOwner(node.did()),
@@ -42,7 +41,7 @@ async fn test_sync_entries_report_handler_deletes_only_acked_keys() -> Result<()
     };
     let request = MessagePayload::new_send(
         Message::SyncEntriesWithSuccessor(sync_msg.clone()),
-        node.swarm.transport.session_sk(),
+        node.swarm.transport.message_signer(),
         node.did(),
         node.did(),
     )?;
@@ -71,7 +70,7 @@ async fn test_sync_entries_report_handler_deletes_only_acked_keys() -> Result<()
     let context = storage_sync_report_payload(
         &request,
         report.clone(),
-        node.swarm.transport.session_sk(),
+        node.swarm.transport.message_signer(),
         node.did(),
         node.did(),
     )?;
@@ -91,7 +90,7 @@ async fn test_sync_entries_report_handler_rejects_untracked_acks() -> Result<()>
     let node = prepare_node(SecretKey::random()).await;
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
     let acked_key = Did::from(100u32);
-    let acked_entry = Entry::new(Did::from(10u32), vec![], EntryKind::Data);
+    let acked_entry = crate::tests::live_entry(Did::from(10u32), vec![], EntryKind::Data);
     let acked_storage_entry = acked_entry.clone().try_into_storage_entry()?;
     node.dht()
         .storage
@@ -105,7 +104,7 @@ async fn test_sync_entries_report_handler_rejects_untracked_acks() -> Result<()>
     };
     let request = MessagePayload::new_send(
         Message::SyncEntriesWithSuccessor(sync_msg.clone()),
-        node.swarm.transport.session_sk(),
+        node.swarm.transport.message_signer(),
         node.did(),
         node.did(),
     )?;
@@ -118,7 +117,7 @@ async fn test_sync_entries_report_handler_rejects_untracked_acks() -> Result<()>
     let context = storage_sync_report_payload(
         &request,
         report.clone(),
-        node.swarm.transport.session_sk(),
+        node.swarm.transport.message_signer(),
         node.did(),
         node.did(),
     )?;
@@ -153,7 +152,7 @@ async fn test_sync_entries_report_handler_forwards_before_pending_capability_che
     };
     let request = MessagePayload::new_send(
         Message::SyncEntriesWithSuccessor(sync_msg.clone()),
-        sender.swarm.transport.session_sk(),
+        sender.swarm.transport.message_signer(),
         receiver.did(),
         receiver.did(),
     )?;
@@ -166,7 +165,7 @@ async fn test_sync_entries_report_handler_forwards_before_pending_capability_che
     let context = storage_sync_report_payload(
         &request,
         report.clone(),
-        receiver.swarm.transport.session_sk(),
+        receiver.swarm.transport.message_signer(),
         relay.did(),
         sender.did(),
     )?;
@@ -194,7 +193,7 @@ async fn test_sync_entries_report_handler_forwards_before_pending_capability_che
 async fn test_additive_repair_sync_cannot_create_pending_cleanup_capability() -> Result<()> {
     let node = prepare_node(SecretKey::random()).await;
     let placement_key = Did::from(100u32);
-    let entry = Entry::new(Did::from(100u32), vec![], EntryKind::Data);
+    let entry = crate::tests::live_entry(Did::from(100u32), vec![], EntryKind::Data);
     let sync_msg = SyncEntriesWithSuccessor {
         purpose: StorageSyncPurpose::AdditiveRepair,
         destination: StorageSyncDestination::PhysicalOwner(node.did()),
@@ -202,7 +201,7 @@ async fn test_additive_repair_sync_cannot_create_pending_cleanup_capability() ->
     };
     let request = MessagePayload::new_send(
         Message::SyncEntriesWithSuccessor(sync_msg.clone()),
-        node.swarm.transport.session_sk(),
+        node.swarm.transport.message_signer(),
         node.did(),
         node.did(),
     )?;
@@ -226,7 +225,7 @@ async fn test_additive_repair_sync_cannot_create_pending_cleanup_capability() ->
 #[tokio::test]
 async fn test_send_storage_sync_applies_local_destination_without_transport_send() -> Result<()> {
     let node = prepare_node(SecretKey::random()).await;
-    let entry = Entry::new(Did::from(100u32), vec![], EntryKind::Data);
+    let entry = crate::tests::live_entry(Did::from(100u32), vec![], EntryKind::Data);
     let placement_key = entry.did;
     let stored_entry = entry.clone().try_into_storage_entry()?;
     let sync_msg = SyncEntriesWithSuccessor {
@@ -248,9 +247,9 @@ async fn test_send_storage_sync_applies_local_destination_without_transport_send
 #[tokio::test]
 async fn test_local_storage_sync_validates_entire_batch_before_persisting() -> Result<()> {
     let node = prepare_node(SecretKey::random()).await;
-    let valid_entry = Entry::new(Did::from(101u32), vec![], EntryKind::Data);
+    let valid_entry = crate::tests::live_entry(Did::from(101u32), vec![], EntryKind::Data);
     let valid_key = valid_entry.did;
-    let invalid_entry = Entry::new(Did::from(102u32), vec![], EntryKind::Data);
+    let invalid_entry = crate::tests::live_entry(Did::from(102u32), vec![], EntryKind::Data);
     let invalid_key = non_affine_placement(invalid_entry.did, node.swarm.storage_redundancy())?;
     let sync_msg = SyncEntriesWithSuccessor {
         purpose: StorageSyncPurpose::AdditiveRepair,
@@ -288,7 +287,7 @@ async fn test_sync_entries_report_handler_rejects_wrong_physical_receiver() -> R
     let receiver = prepare_node(SecretKey::random()).await;
     let handler = MessageHandler::new(sender.swarm.transport.clone(), Arc::new(NoopCallback));
     let acked_key = Did::from(100u32);
-    let acked_entry = Entry::new(Did::from(10u32), vec![], EntryKind::Data);
+    let acked_entry = crate::tests::live_entry(Did::from(10u32), vec![], EntryKind::Data);
     let acked_storage_entry = acked_entry.clone().try_into_storage_entry()?;
     sender
         .dht()
@@ -303,7 +302,7 @@ async fn test_sync_entries_report_handler_rejects_wrong_physical_receiver() -> R
     };
     let request = MessagePayload::new_send(
         Message::SyncEntriesWithSuccessor(sync_msg.clone()),
-        sender.swarm.transport.session_sk(),
+        sender.swarm.transport.message_signer(),
         receiver.did(),
         receiver.did(),
     )?;
@@ -323,7 +322,7 @@ async fn test_sync_entries_report_handler_rejects_wrong_physical_receiver() -> R
     let context = storage_sync_report_payload(
         &request,
         report.clone(),
-        sender.swarm.transport.session_sk(),
+        sender.swarm.transport.message_signer(),
         sender.did(),
         sender.did(),
     )?;
@@ -348,7 +347,7 @@ async fn test_sync_entries_report_handler_rejects_unproven_placement_receiver() 
     let final_receiver = prepare_node(SecretKey::random()).await;
     let handler = MessageHandler::new(sender.swarm.transport.clone(), Arc::new(NoopCallback));
     let placement_key = Did::from(100u32);
-    let acked_entry = Entry::new(Did::from(10u32), vec![], EntryKind::Data);
+    let acked_entry = crate::tests::live_entry(Did::from(10u32), vec![], EntryKind::Data);
     let acked_storage_entry = acked_entry.clone().try_into_storage_entry()?;
     sender
         .dht()
@@ -363,7 +362,7 @@ async fn test_sync_entries_report_handler_rejects_unproven_placement_receiver() 
     };
     let request = MessagePayload::new_send(
         Message::SyncEntriesWithSuccessor(sync_msg.clone()),
-        sender.swarm.transport.session_sk(),
+        sender.swarm.transport.message_signer(),
         route_next_hop.did(),
         sync_msg.destination.did(),
     )?;
@@ -383,7 +382,7 @@ async fn test_sync_entries_report_handler_rejects_unproven_placement_receiver() 
     let context = storage_sync_report_payload(
         &request,
         report.clone(),
-        final_receiver.swarm.transport.session_sk(),
+        final_receiver.swarm.transport.message_signer(),
         sender.did(),
         sender.did(),
     )?;

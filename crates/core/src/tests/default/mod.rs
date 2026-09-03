@@ -223,7 +223,7 @@ fn prepare_node_with_optional_measure(
     let storage = Box::new(MemStorage::new());
 
     let session_sk = SessionSk::new_with_seckey(&key)?;
-    let builder = SwarmBuilder::new(0, stun, storage, session_sk)
+    let builder = SwarmBuilder::new(crate::tests::TEST_NETWORK_ID, stun, storage, session_sk)
         .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
         .dht_virtual_nodes(0);
     let builder = match measure {

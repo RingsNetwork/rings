@@ -177,7 +177,10 @@ fn entry_for_remote_repair_placement(node: &Node, successor: Did) -> Result<(Ent
     ) {
         // `rotate_affine(n)[0] = self`, so choosing the witnessed placement as the entry key
         // deterministically makes it one of the repair placements for every non-zero redundancy.
-        return Ok((Entry::new(placement, vec![], EntryKind::Data), placement));
+        return Ok((
+            crate::tests::live_entry(placement, vec![], EntryKind::Data),
+            placement,
+        ));
     }
     Err(Error::InvalidMessage(
         "remote repair fixture DID did not route remotely".to_string(),

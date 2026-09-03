@@ -38,6 +38,7 @@ use crate::message::MessageVerificationExt;
 use crate::message::PayloadSender;
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::Swarm;
+use crate::utils::get_epoch_ms;
 
 /// ChordStorageInterface should imply necessary method for DHT storage
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
@@ -163,7 +164,7 @@ pub(super) async fn handle_storage_store_act(
     match act {
         PeerRingAction::RemoteAction(target, PeerRingRemoteAction::FindEntryForOperate(op)) => {
             transport
-                .send_message(Message::OperateEntry(op), target)
+                .send_message(Message::OperateEntry(*op), target)
                 .await?;
         }
         PeerRingAction::MultiActions(acts) => {
@@ -184,12 +185,13 @@ async fn operate_entry_at_placement(
     placement: Did,
     op: EntryOperation,
 ) -> Result<()> {
-    let op = op.stamped(dht.did)?;
-    let this = match dht.storage.get(&placement.to_string()).await? {
+    let now_ms = get_epoch_ms();
+    let op = op.stamped_at(now_ms, dht.did)?;
+    let this = match dht.live_storage_entry(placement, now_ms).await? {
         Some(this) => this,
         None => op.clone().gen_default_entry()?,
     };
-    let entry = this.operate(op, dht.did)?;
+    let entry = this.operate_at(now_ms, op, dht.did)?;
     dht.join_storage_entry(placement, entry).await?;
     Ok(())
 }

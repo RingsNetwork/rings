@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use super::PeerRingAction;
 use super::RemoteAction;
 use super::TopoInfo;
+use crate::consts::LOCAL_CACHE_CAPACITY;
 use crate::dht::did::BiasId;
 use crate::dht::entry::Entry;
 use crate::dht::finger::DEFAULT_FINGER_TABLE_SIZE;
@@ -47,7 +48,7 @@ pub struct PeerRing {
     predecessor: Arc<Mutex<Option<Did>>>,
     /// Persistent replicated-entry storage.
     pub storage: EntryStorage,
-    /// Local fetched-entry cache.
+    /// Local fetched-entry cache, bounded at [`LOCAL_CACHE_CAPACITY`] entries.
     pub cache: EntryStorage,
     storage_virtual_node_config: VirtualNodeConfig,
     topology_transition: Mutex<()>,
@@ -96,7 +97,7 @@ impl PeerRing {
             predecessor: Arc::new(Mutex::new(None)),
             finger: Arc::new(Mutex::new(FingerTable::new(did, finger_table_size))),
             storage,
-            cache: Box::new(MemStorage::new()),
+            cache: Box::new(MemStorage::bounded(LOCAL_CACHE_CAPACITY)),
             storage_virtual_node_config: virtual_nodes,
             topology_transition: Mutex::new(()),
             did,

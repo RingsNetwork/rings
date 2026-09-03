@@ -148,7 +148,7 @@ async fn test_inbound_storage_batch_yields_to_control_between_persistence_steps(
     let entries = [31_u32, 32_u32]
         .into_iter()
         .map(|did| {
-            let entry = Entry::new(Did::from(did), Vec::new(), EntryKind::Data);
+            let entry = crate::tests::live_entry(Did::from(did), Vec::new(), EntryKind::Data);
             PlacedEntry::new(entry.did, entry)
         })
         .collect();

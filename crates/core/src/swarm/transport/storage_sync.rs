@@ -19,6 +19,7 @@ use crate::message::MessagePayload;
 use crate::message::PayloadSender;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::message::SyncEntriesWithSuccessorReport;
+use crate::utils::get_epoch_ms;
 use crate::utils::get_epoch_ms_i64;
 
 const STORAGE_SYNC_ACK_CAPACITY: usize = 1024;
@@ -233,8 +234,12 @@ impl<'data> StorageSyncBatch<'data> {
 
         // Preservation: every input is validated before the first storage
         // effect, so a later invalid input leaves the entire batch unwritten.
+        // The admission law is re-checked by `join_storage_entry` at persist
+        // time; it is evaluated here so that a failing entry rejects the batch
+        // before any earlier entry has been written.
         if should_persist_synced_entry(transport, self.destination, placed.key)? {
             placed.validate_placement(transport.storage_redundancy())?;
+            placed.entry.validate_admissible_at(get_epoch_ms())?;
             let entry = placed.entry.clone().try_into_storage_entry()?;
             self.accepted.push(SyncedEntryAck::new(placed.key, entry));
         }
@@ -451,7 +456,7 @@ impl SwarmTransport {
         };
         let payload = MessagePayload::new_send(
             Message::SyncEntriesWithSuccessor(msg.clone()),
-            self.session_sk(),
+            self.message_signer(),
             next_hop,
             destination,
         )?;

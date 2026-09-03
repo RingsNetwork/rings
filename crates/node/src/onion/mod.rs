@@ -18,6 +18,7 @@ use rings_core::ecc::VerificationPublicKey;
 use rings_core::error::Error as CoreError;
 use rings_core::error::Result as CoreResult;
 use rings_core::message::Decoder;
+use rings_core::message::DomainTag;
 use rings_core::message::Encoded;
 use rings_core::message::Encoder;
 use rings_core::message::MessageVerification;
@@ -78,6 +79,9 @@ pub const ONION_RELAY_CAPABILITY: &str = "onion-relay";
 
 const DEFAULT_ONION_EXIT_HEARTBEAT_INTERVAL_SECS: u64 = 30;
 const DEFAULT_ONION_EXIT_TTL_SECS: u64 = 90;
+/// Message family of the onion-exit descriptor signature.
+const ONION_EXIT_DESCRIPTOR_DOMAIN_TAG: DomainTag =
+    DomainTag::new("rings-node:onion-exit-descriptor:v1");
 
 /// Default onion-exit registry heartbeat interval in seconds.
 pub(crate) const fn default_onion_exit_heartbeat_interval_secs() -> u64 {
@@ -468,12 +472,18 @@ impl OnionExitDescriptorBody {
 impl SignedDescriptorBody for OnionExitDescriptorBody {
     type Descriptor = OnionExitDescriptor;
 
+    const DOMAIN_TAG: DomainTag = ONION_EXIT_DESCRIPTOR_DOMAIN_TAG;
+
     fn body_did(&self) -> Did {
         self.did
     }
 
     fn body_public_key(&self) -> &VerificationPublicKey {
         &self.public_key
+    }
+
+    fn body_network_id(&self) -> u32 {
+        self.network_id
     }
 
     fn body_signing_data(&self) -> CoreResult<Vec<u8>> {
@@ -677,12 +687,18 @@ impl OnionExitDescriptor {
 }
 
 impl SignedDescriptor for OnionExitDescriptor {
+    const DOMAIN_TAG: DomainTag = ONION_EXIT_DESCRIPTOR_DOMAIN_TAG;
+
     fn descriptor_did(&self) -> Did {
         self.did
     }
 
     fn descriptor_public_key(&self) -> &VerificationPublicKey {
         &self.public_key
+    }
+
+    fn descriptor_network_id(&self) -> u32 {
+        self.network_id
     }
 
     fn descriptor_signature(&self) -> &MessageVerification {

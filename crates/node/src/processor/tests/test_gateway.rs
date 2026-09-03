@@ -243,18 +243,21 @@ async fn prepare_two_hop_public_gateway(config: GatewayConfig) -> Result<TwoHopG
     let client_onion = NativeOnionCircuitHandle::install(
         &client_provider.extensions(),
         client.session_sk().clone(),
+        client.swarm.network_id(),
         false,
         None,
     )?;
     let _relay_onion = NativeOnionCircuitHandle::install(
         &relay_provider.extensions(),
         relay.session_sk().clone(),
+        relay.swarm.network_id(),
         true,
         None,
     )?;
     let _exit_onion = NativeOnionCircuitHandle::install(
         &exit_provider.extensions(),
         exit.session_sk().clone(),
+        exit.swarm.network_id(),
         false,
         Some(NativeOnionTcpExitConfig::tcp(exit_policy.clone())),
     )?;

@@ -5,7 +5,9 @@ use crate::algebra::assert_join_semilattice_laws;
 use crate::algebra::assert_strong_eventual_consistency;
 use crate::ecc::SecretKey;
 use crate::message::Message;
+use crate::message::MessageSigner;
 use crate::session::SessionSk;
+use crate::tests::TEST_NETWORK_ID;
 
 fn encoded(value: &str) -> Result<Encoded> {
     value.to_string().encode()
@@ -670,7 +672,12 @@ fn test_message_payload_entry_key_targets_successor_of_signer() -> Result<()> {
     let key = SecretKey::random();
     let session = SessionSk::new_with_seckey(&key)?;
     let signer: Did = key.address().into();
-    let payload = MessagePayload::new_send(Message::custom(b"relay")?, &session, signer, signer)?;
+    let payload = MessagePayload::new_send(
+        Message::custom(b"relay")?,
+        MessageSigner::new(&session, TEST_NETWORK_ID),
+        signer,
+        signer,
+    )?;
     let entry = Entry::try_from(payload)?;
     let expected = BigUint::from(signer) + BigUint::from(1u16);
     assert_eq!(entry.did, expected.into());
@@ -687,5 +694,179 @@ fn test_affine_preserves_payload_and_kind_while_rotating_keys() -> Result<()> {
         assert_eq!(rotated.data, entry.data);
         assert_eq!(rotated.kind, entry.kind);
     }
+    Ok(())
+}
+
+const NOW_MS: u128 = 1_700_000_000_000;
+
+fn bounded(mut entry: Entry, expires_at_ms: u128) -> Entry {
+    entry.expires_at_ms = Some(expires_at_ms);
+    entry
+}
+
+fn admissible_delta(topic: &str, value: &str, counter: u32) -> Result<Entry> {
+    Ok(bounded(data_delta(topic, value, counter)?, NOW_MS + 1_000))
+}
+
+fn version_at(logical_time_ms: u128) -> EntryVersion {
+    EntryVersion::new(logical_time_ms, actor(), Did::from(1u32))
+}
+
+/// Law: the operation boundary stamps `now + DEFAULT_TTL_MS` on every variant that carries no
+/// bound and preserves a bound the origin already stamped.
+#[test]
+fn test_stamped_assigns_default_lifetime_and_preserves_existing() -> Result<()> {
+    let expected = NOW_MS + u128::from(DEFAULT_TTL_MS);
+    let unstamped = data_entry("topic", "value")?;
+    let ops = [
+        EntryOperation::Overwrite(unstamped.clone()),
+        EntryOperation::Extend(unstamped.clone()),
+        EntryOperation::Touch(unstamped.clone()),
+        EntryOperation::Tombstone(unstamped.clone()),
+        EntryOperation::CompactData(unstamped.clone()),
+    ];
+    for op in ops {
+        let stamped = op.stamped_at(NOW_MS, actor())?;
+        assert_eq!(stamped.into_entry().expires_at_ms, Some(expected));
+    }
+
+    let forwarded = EntryOperation::Extend(bounded(unstamped, 7)).stamped_at(NOW_MS, actor())?;
+    assert_eq!(forwarded.into_entry().expires_at_ms, Some(7));
+    Ok(())
+}
+
+impl EntryOperation {
+    fn into_entry(self) -> Entry {
+        match self {
+            EntryOperation::Overwrite(entry)
+            | EntryOperation::Extend(entry)
+            | EntryOperation::Touch(entry)
+            | EntryOperation::Tombstone(entry)
+            | EntryOperation::CompactData(entry) => entry,
+        }
+    }
+}
+
+/// Law: the retention bound joins by `max`, commutatively, for data and relay carriers and for
+/// every operation that materializes a join.
+#[test]
+fn test_join_takes_the_later_retention_bound() -> Result<()> {
+    let earlier = bounded(data_delta("topic", "a", 1)?, 10);
+    let later = bounded(data_delta("topic", "b", 2)?, 20);
+    assert_eq!(earlier.join(later.clone())?.expires_at_ms, Some(20));
+    assert_eq!(later.join(earlier.clone())?.expires_at_ms, Some(20));
+
+    let relay_earlier = bounded(relay_delta(Did::from(7u32), "m1", 1)?, 10);
+    let relay_later = bounded(relay_delta(Did::from(7u32), "m2", 2)?, 20);
+    assert_eq!(relay_earlier.join(relay_later)?.expires_at_ms, Some(20));
+
+    let tombstoned = earlier.tombstone(bounded(data_entry("topic", "a")?, 30))?;
+    assert_eq!(tombstoned.expires_at_ms, Some(30));
+
+    let compacted =
+        earlier.compact_data_at(NOW_MS, bounded(data_entry("topic", "a")?, 40), actor())?;
+    assert_eq!(compacted.expires_at_ms, Some(40));
+
+    let unbounded_join = data_delta("topic", "c", 3)?.join(earlier.clone())?;
+    assert_eq!(unbounded_join.expires_at_ms, Some(10));
+    Ok(())
+}
+
+/// Law: an entry is live exactly when it carries a bound strictly after `now`.
+#[test]
+fn test_is_live_at_requires_a_bound_after_now() -> Result<()> {
+    let unstamped = data_entry("topic", "value")?;
+    assert!(!unstamped.is_live_at(0));
+    let stamped = bounded(unstamped, 5);
+    assert!(stamped.is_live_at(4));
+    assert!(!stamped.is_live_at(5));
+    Ok(())
+}
+
+/// Admission law: the bound must be live and at most `now + MAX_TTL_MS + TS_OFFSET_TOLERANCE_MS`.
+#[test]
+fn test_admission_bounds_the_retention_bound() -> Result<()> {
+    let limit = NOW_MS + u128::from(MAX_TTL_MS) + TS_OFFSET_TOLERANCE_MS;
+    let delta = data_delta("topic", "value", 1)?;
+
+    assert!(matches!(
+        delta.validate_admissible_at(NOW_MS),
+        Err(Error::EntryNotLive)
+    ));
+    assert!(matches!(
+        bounded(delta.clone(), NOW_MS).validate_admissible_at(NOW_MS),
+        Err(Error::EntryNotLive)
+    ));
+    assert!(matches!(
+        bounded(delta.clone(), limit + 1).validate_admissible_at(NOW_MS),
+        Err(Error::EntryLifetimeExceedsMax)
+    ));
+    bounded(delta.clone(), limit).validate_admissible_at(NOW_MS)?;
+    bounded(delta, NOW_MS + 1).validate_admissible_at(NOW_MS)?;
+    Ok(())
+}
+
+/// Admission law: every carried version (dots, tombstones, register) has a logical time at most
+/// `now + TS_OFFSET_TOLERANCE_MS`, so a peer-supplied `u128::MAX` floor cannot pin a key.
+#[test]
+fn test_admission_bounds_every_version_logical_time() -> Result<()> {
+    let clock_bound = NOW_MS + TS_OFFSET_TOLERANCE_MS;
+    let base = admissible_delta("topic", "value", 1)?;
+
+    let mut ahead_dot = base.clone();
+    ahead_dot.crdt.dots = vec![EntryDot::for_index(version_at(clock_bound + 1), 0)?];
+    assert!(matches!(
+        ahead_dot.validate_admissible_at(NOW_MS),
+        Err(Error::EntryVersionAheadOfClock)
+    ));
+
+    let mut ahead_register = base.clone();
+    ahead_register.crdt.register = Some(version_at(u128::MAX));
+    assert!(matches!(
+        ahead_register.validate_admissible_at(NOW_MS),
+        Err(Error::EntryVersionAheadOfClock)
+    ));
+
+    let mut ahead_tombstone = base.clone();
+    ahead_tombstone.crdt.tombstones = vec![EntryDot::for_index(version_at(clock_bound + 1), 0)?];
+    assert!(matches!(
+        ahead_tombstone.validate_admissible_at(NOW_MS),
+        Err(Error::EntryVersionAheadOfClock)
+    ));
+
+    let mut at_bound = base;
+    at_bound.crdt.dots = vec![EntryDot::for_index(version_at(clock_bound), 0)?];
+    at_bound.crdt.register = Some(version_at(clock_bound));
+    at_bound.validate_admissible_at(NOW_MS)?;
+    Ok(())
+}
+
+/// Storage normalization and affine placement preserve the retention bound.
+#[test]
+fn test_normalization_and_affine_preserve_retention_bound() -> Result<()> {
+    let entry = admissible_delta("topic", "value", 1)?;
+    assert_eq!(
+        entry.clone().try_into_storage_entry()?.expires_at_ms,
+        entry.expires_at_ms
+    );
+    for replica in entry.affine(3)? {
+        assert_eq!(replica.expires_at_ms, entry.expires_at_ms);
+    }
+    Ok(())
+}
+
+/// A stored value written before retention bounds existed deserializes as unstamped and is
+/// therefore not live, so it is retired on its next read instead of being served forever.
+#[test]
+fn test_legacy_value_without_bound_is_not_live() -> Result<()> {
+    let mut legacy = serde_json::to_value(admissible_delta("topic", "value", 1)?)
+        .map_err(|_| Error::SerializeToString)?;
+    legacy
+        .as_object_mut()
+        .ok_or_else(|| Error::InvalidMessage("entry must serialize to an object".to_string()))?
+        .remove("expires_at_ms");
+    let entry: Entry = serde_json::from_value(legacy).map_err(Error::Deserialize)?;
+    assert_eq!(entry.expires_at_ms, None);
+    assert!(!entry.is_live_at(0));
     Ok(())
 }

@@ -748,7 +748,7 @@ async fn test_stale_send_after_retirement_does_not_recreate_outbound_scheduler()
     let (transport, peer, attempt) = transport_with_routable_peer().await?;
     let payload = MessagePayload::new_send(
         Message::custom(b"stale-after-admission")?,
-        transport.session_sk(),
+        transport.message_signer(),
         peer,
         peer,
     )?;
@@ -774,7 +774,7 @@ async fn test_scheduler_shutdown_revokes_a_frame_waiting_at_transport_dispatch()
     let (transport, peer, _attempt) = transport_with_routable_peer().await?;
     let payload = MessagePayload::new_send(
         Message::custom(b"shutdown-at-dispatch")?,
-        transport.session_sk(),
+        transport.message_signer(),
         peer,
         peer,
     )?;
@@ -812,7 +812,7 @@ async fn test_scheduler_shutdown_after_backend_acceptance_preserves_detached_suc
     let (transport, peer, _attempt) = transport_with_routable_peer().await?;
     let payload = MessagePayload::new_send(
         Message::custom(b"shutdown-after-backend-acceptance")?,
-        transport.session_sk(),
+        transport.message_signer(),
         peer,
         peer,
     )?;
@@ -856,7 +856,7 @@ async fn test_scheduler_shutdown_cancels_a_send_before_queue_acceptance() -> Res
     let (transport, peer, _attempt) = transport_with_routable_peer().await?;
     let payload = MessagePayload::new_send(
         Message::custom(b"linearized-before-shutdown")?,
-        transport.session_sk(),
+        transport.message_signer(),
         peer,
         peer,
     )?;

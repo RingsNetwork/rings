@@ -210,7 +210,7 @@ impl Swarm {
         // The invoker should fix it before sending.
         let payload = MessagePayload::new_send(
             Message::ConnectNodeSend(offer_msg),
-            self.transport.session_sk(),
+            self.transport.message_signer(),
             self.did(),
             peer,
         )?;
@@ -221,7 +221,7 @@ impl Swarm {
     /// Answer the offer of remote connection. This function will verify the answer payload and
     /// will wrap the answer inside a payload with verification.
     pub async fn answer_offer(&self, offer_payload: MessagePayload) -> Result<MessagePayload> {
-        if !offer_payload.verify() {
+        if !offer_payload.verify(self.network_id()) {
             return Err(Error::VerifySignatureFailed);
         }
 
@@ -241,7 +241,7 @@ impl Swarm {
         // The invoker should fix it before sending.
         let answer_payload = MessagePayload::new_send(
             Message::ConnectNodeReport(answer_msg),
-            self.transport.session_sk(),
+            self.transport.message_signer(),
             self.did(),
             self.did(),
         )?;
@@ -252,7 +252,7 @@ impl Swarm {
     /// Accept the answer of remote connection. This function will verify the answer payload and
     /// will return its did with the connection.
     pub async fn accept_answer(&self, answer_payload: MessagePayload) -> Result<()> {
-        if !answer_payload.verify() {
+        if !answer_payload.verify(self.network_id()) {
             return Err(Error::VerifySignatureFailed);
         }
 

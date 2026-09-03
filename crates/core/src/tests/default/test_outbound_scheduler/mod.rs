@@ -69,7 +69,7 @@ async fn connected_nodes() -> Result<(Node, Node)> {
 fn tracked_payload(node: &Node, peer: Did, body: &[u8]) -> Result<MessagePayload> {
     MessagePayload::new_send(
         Message::custom(body)?,
-        node.swarm.transport.session_sk(),
+        node.swarm.transport.message_signer(),
         peer,
         peer,
     )
@@ -134,7 +134,7 @@ async fn test_tracked_timeout_removes_target_behind_multiple_predecessors() -> R
             let body = format!("queued-predecessor-{index}");
             let payload = MessagePayload::new_send(
                 Message::custom(body.as_bytes())?,
-                swarm.transport.session_sk(),
+                swarm.transport.message_signer(),
                 peer,
                 peer,
             )?;
@@ -781,7 +781,7 @@ fn spawn_data_capacity_transfers(node: &Node, peer: Did) -> Vec<JoinHandle<Resul
             let body = format!("capacity-transfer-{index}");
             let payload = MessagePayload::new_send(
                 Message::custom(body.as_bytes())?,
-                swarm.transport.session_sk(),
+                swarm.transport.message_signer(),
                 peer,
                 peer,
             )?;
@@ -834,7 +834,7 @@ fn spawn_reserved_control_transfers(
                 Message::PeerLivenessProbe(PeerLivenessProbe {
                     sent_at_ms: index as i64,
                 }),
-                swarm.transport.session_sk(),
+                swarm.transport.message_signer(),
                 peer,
                 peer,
             )?;

@@ -457,7 +457,10 @@ fn entry_routed_remotely_by(node: &Node, label: &str) -> PlacedEntry {
             let data = vec![0x6d; ENTRY_PAYLOAD_BYTES]
                 .encode()
                 .expect("repair fixture payload must encode");
-            return PlacedEntry::new(key, Entry::new(key, vec![data], EntryKind::Data));
+            return PlacedEntry::new(
+                key,
+                crate::tests::live_entry(key, vec![data], EntryKind::Data),
+            );
         }
     }
     panic!("failed to derive a remote repair entry from {}", node.did());

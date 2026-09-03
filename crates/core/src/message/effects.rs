@@ -461,7 +461,9 @@ mod tests {
     use crate::dht::StorageSyncPurpose;
     use crate::ecc::SecretKey;
     use crate::message::types::QueryFor;
+    use crate::message::MessageSigner;
     use crate::session::SessionSk;
+    use crate::tests::TEST_NETWORK_ID;
 
     fn did() -> Did {
         SecretKey::random().address().into()
@@ -472,7 +474,7 @@ mod tests {
         let session_sk = SessionSk::new_with_seckey(&key)?;
         MessagePayload::new_send(
             Message::custom(b"hello")?,
-            &session_sk,
+            MessageSigner::new(&session_sk, TEST_NETWORK_ID),
             destination,
             destination,
         )

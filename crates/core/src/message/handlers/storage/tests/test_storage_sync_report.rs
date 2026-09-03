@@ -7,7 +7,6 @@ use super::test_support::physical_sync_route_next_hop;
 use super::test_support::prepare_node_with_virtual_nodes;
 use super::test_support::storage_sync_route_next_hop;
 use super::test_support::NoopCallback;
-use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
@@ -49,7 +48,7 @@ async fn test_sync_entries_handler_reports_persisted_entries() -> Result<()> {
 
     let receiver_handler =
         MessageHandler::new(receiver.swarm.transport.clone(), Arc::new(NoopCallback));
-    let entry = Entry::new(
+    let entry = crate::tests::live_entry(
         Did::from(10u32),
         vec!["handler acked".to_string().encode()?],
         EntryKind::Data,
@@ -67,7 +66,7 @@ async fn test_sync_entries_handler_reports_persisted_entries() -> Result<()> {
     };
     let context = MessagePayload::new_send(
         Message::SyncEntriesWithSuccessor(sync_msg.clone()),
-        sender.swarm.transport.session_sk(),
+        sender.swarm.transport.message_signer(),
         receiver.did(),
         receiver.did(),
     )?;
@@ -102,7 +101,7 @@ async fn test_sync_entries_handler_reports_persisted_entries() -> Result<()> {
 #[tokio::test]
 async fn test_persist_synced_entries_returns_acks_for_owned_entries() -> Result<()> {
     let receiver = prepare_node(SecretKey::random()).await;
-    let entry = Entry::new(
+    let entry = crate::tests::live_entry(
         Did::from(10u32),
         vec!["acked".to_string().encode()?],
         EntryKind::Data,
@@ -159,7 +158,7 @@ async fn test_sync_entries_handler_skips_entries_owned_by_another_virtual_owner(
             if owner == sender.did() && key == placement_key
     ));
 
-    let entry = Entry::new(
+    let entry = crate::tests::live_entry(
         Did::from(10u32),
         vec!["wrong owner".to_string().encode()?],
         EntryKind::Data,
@@ -177,7 +176,7 @@ async fn test_sync_entries_handler_skips_entries_owned_by_another_virtual_owner(
     };
     let context = MessagePayload::new_send(
         Message::SyncEntriesWithSuccessor(sync_msg.clone()),
-        sender.swarm.transport.session_sk(),
+        sender.swarm.transport.message_signer(),
         receiver.did(),
         receiver.did(),
     )?;
@@ -255,7 +254,7 @@ async fn test_sync_entries_physical_destination_routes_by_physical_did_not_stora
     };
     let context = MessagePayload::new_send(
         Message::SyncEntriesWithSuccessor(msg.clone()),
-        node.swarm.transport.session_sk(),
+        node.swarm.transport.message_signer(),
         node.did(),
         destination,
     )?;

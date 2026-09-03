@@ -293,7 +293,7 @@ async fn test_malformed_outbound_payload_is_rejected_before_connection_admission
     let peer = SecretKey::random().address().into();
     let mut payload = MessagePayload::new_send(
         Message::custom(b"malformed outbound payload")?,
-        &transport.session_sk,
+        transport.message_signer(),
         peer,
         peer,
     )?;

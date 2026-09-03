@@ -9,6 +9,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use rings_core::dht::Did;
 use rings_core::ecc::PublicKey;
+use rings_core::message::MessageSigner;
 use rings_core::session::SessionSk;
 use serde::Deserialize;
 use serde::Serialize;
@@ -123,11 +124,12 @@ impl NativeOnionCircuitHandle {
     pub fn install(
         extensions: &Extensions,
         session_sk: SessionSk,
+        network_id: u32,
         allow_relay: bool,
         exit_config: Option<NativeOnionTcpExitConfig>,
     ) -> Result<Self> {
         let allow_exit = exit_config.is_some();
-        let (runtime, https) = native_onion_runtimes(session_sk.clone(), exit_config);
+        let (runtime, https) = native_onion_runtimes(session_sk.clone(), network_id, exit_config);
         if let Some(config) = runtime.exit_config.as_ref() {
             if config.allows_service(&OnionServiceName::https()) {
                 https.set_exit_policy(Some(config.policy().clone()));
@@ -144,6 +146,7 @@ impl NativeOnionCircuitHandle {
                     runtime: runtime.clone(),
                     https,
                     session_sk: handler_session_sk,
+                    network_id,
                 },
                 runtime.link_sender.clone(),
             ),
@@ -180,12 +183,14 @@ impl NativeOnionCircuitHandle {
 
 fn native_onion_runtimes(
     session_sk: SessionSk,
+    network_id: u32,
     exit_config: Option<NativeOnionTcpExitConfig>,
 ) -> (Arc<OnionTcpRuntime>, Arc<OnionHttpsRuntime>) {
     let accounting = OnionExitAccounting::default();
     let link_sender = OnionLinkSender::default();
     let runtime = Arc::new(OnionTcpRuntime::with_resources(
         session_sk,
+        network_id,
         exit_config,
         accounting.clone(),
         link_sender.clone(),
@@ -225,6 +230,7 @@ struct NativeOnionCircuitHandler {
     runtime: Arc<OnionTcpRuntime>,
     https: Arc<OnionHttpsRuntime>,
     session_sk: SessionSk,
+    network_id: u32,
 }
 
 #[async_trait::async_trait]
@@ -233,8 +239,13 @@ impl OnionCircuitHandler for NativeOnionCircuitHandler {
         if frame
             .payload
             .matches_service(crate::onion::proxy::ONION_PROXY_HTTPS_SERVICE)
-            && try_handle_https_exit_payload(&self.https, &self.session_sk, scope, frame.clone())
-                .await?
+            && try_handle_https_exit_payload(
+                &self.https,
+                MessageSigner::new(&self.session_sk, self.network_id),
+                scope,
+                frame.clone(),
+            )
+            .await?
         {
             return Ok(());
         }
@@ -256,6 +267,7 @@ impl OnionCircuitHandler for NativeOnionCircuitHandler {
 
 struct OnionTcpRuntime {
     session_sk: SessionSk,
+    network_id: u32,
     client_streams: Mutex<HashMap<TcpStreamKey, ClientStream>>,
     exit_streams: Mutex<HashMap<TcpStreamKey, ExitStream>>,
     forward_replays: Mutex<OnionForwardReplayPartitions>,
@@ -266,9 +278,14 @@ struct OnionTcpRuntime {
 
 impl OnionTcpRuntime {
     #[cfg(test)]
-    fn new(session_sk: SessionSk, exit_config: Option<NativeOnionTcpExitConfig>) -> Self {
+    fn new(
+        session_sk: SessionSk,
+        network_id: u32,
+        exit_config: Option<NativeOnionTcpExitConfig>,
+    ) -> Self {
         Self::with_resources(
             session_sk,
+            network_id,
             exit_config,
             OnionExitAccounting::default(),
             OnionLinkSender::default(),
@@ -277,12 +294,14 @@ impl OnionTcpRuntime {
 
     fn with_resources(
         session_sk: SessionSk,
+        network_id: u32,
         exit_config: Option<NativeOnionTcpExitConfig>,
         accounting: OnionExitAccounting,
         link_sender: OnionLinkSender,
     ) -> Self {
         Self {
             session_sk,
+            network_id,
             client_streams: Mutex::new(HashMap::new()),
             exit_streams: Mutex::new(HashMap::new()),
             forward_replays: Mutex::new(OnionForwardReplayPartitions::default()),
@@ -290,6 +309,11 @@ impl OnionTcpRuntime {
             accounting,
             link_sender,
         }
+    }
+
+    /// The authority that signs this exit's backward payloads.
+    fn message_signer(&self) -> MessageSigner<'_> {
+        MessageSigner::new(&self.session_sk, self.network_id)
     }
 
     async fn open_client_connection(
@@ -606,7 +630,7 @@ impl OnionTcpRuntime {
         TcpBackwardRoute {
             link_sender: &self.link_sender,
             scope: &request.scope,
-            signer: &self.session_sk,
+            signer: self.message_signer(),
             service: &request.service,
             circuit_id: request.circuit_id,
             return_peer: request.return_peer,

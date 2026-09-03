@@ -864,6 +864,7 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
     let onion = NativeOnionCircuitHandle::install(
         &provider.extensions(),
         onion_session_sk,
+        pc.network_id(),
         advertise_onion_relay,
         onion_exit_config,
     )?;

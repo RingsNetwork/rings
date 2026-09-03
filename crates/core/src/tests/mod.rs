@@ -19,11 +19,31 @@ use crate::dht::successor::SuccessorReader;
 use crate::dht::topology;
 use crate::dht::Did;
 use crate::error::Result;
+use crate::message::Encoded;
 use crate::message::Encoder;
 use crate::message::MessageClass;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::Swarm;
+use crate::utils::get_epoch_ms;
+
+/// Overlay every test fixture signs for and verifies against.
+pub(crate) const TEST_NETWORK_ID: u32 = 0;
+
+/// Retention bound far enough ahead that a fixture stays live for a whole test.
+const FIXTURE_RETENTION_MS: u128 = 60 * 60 * 1_000;
+
+/// An entry stamped as the operation boundary would stamp it, so a fixture that is written
+/// to storage or carried in a sync message passes storage admission.
+pub(crate) fn live_entry(did: Did, data: Vec<Encoded>, kind: EntryKind) -> Entry {
+    live(Entry::new(did, data, kind))
+}
+
+/// Stamp an existing fixture with a live retention bound.
+pub(crate) fn live(mut entry: Entry) -> Entry {
+    entry.expires_at_ms = Some(get_epoch_ms() + FIXTURE_RETENTION_MS);
+    entry
+}
 
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
 pub mod wasm;
@@ -99,7 +119,7 @@ pub fn multi_frame_storage_sync_entries() -> Result<Vec<PlacedEntry>> {
     let topic = "shared multi-frame storage contention";
     let entry_did = Entry::gen_did(topic)?;
     let payload = vec![0xcd; 1024 * 1024].encode()?;
-    let entry = Entry::new(entry_did, vec![payload], EntryKind::Data);
+    let entry = live_entry(entry_did, vec![payload], EntryKind::Data);
     Ok(vec![PlacedEntry::new(entry_did, entry)])
 }
 

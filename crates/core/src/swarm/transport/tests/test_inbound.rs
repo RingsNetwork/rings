@@ -4,10 +4,12 @@ use super::*;
 use crate::chunk::ChunkList;
 use crate::message::CustomMessage;
 use crate::message::FoundEntry;
+use crate::message::MessageSigner;
 use crate::swarm::callback::inbound_application_capacity_for_test;
 use crate::swarm::callback::inbound_mailbox_capacity_for_test;
 use crate::swarm::callback::inbound_peer_capacity_for_test;
 use crate::swarm::callback::InboundLane;
+use crate::tests::TEST_NETWORK_ID;
 
 mod test_callback_failure;
 mod test_capacity_handoff;
@@ -191,7 +193,7 @@ async fn test_pending_message_rechecks_admission_after_async_validation() -> Res
 
     let message = MessagePayload::new_send(
         Message::custom(b"must-not-dispatch-after-retire")?,
-        &peer_session,
+        MessageSigner::new(&peer_session, TEST_NETWORK_ID),
         transport.dht.did,
         transport.dht.did,
     )?
@@ -237,14 +239,14 @@ async fn test_inbound_control_lane_progresses_while_application_validation_is_bl
     ));
     let application = MessagePayload::new_send(
         Message::custom(b"blocked-application")?,
-        &peer_session,
+        MessageSigner::new(&peer_session, TEST_NETWORK_ID),
         transport.dht.did,
         transport.dht.did,
     )?
     .to_wire()?;
     let control = MessagePayload::new_send(
         Message::PeerLivenessReport(crate::message::PeerLivenessReport { sent_at_ms: 1 }),
-        &peer_session,
+        MessageSigner::new(&peer_session, TEST_NETWORK_ID),
         transport.dht.did,
         transport.dht.did,
     )?
@@ -304,7 +306,7 @@ async fn test_inbound_mailbox_reserves_control_capacity_under_application_satura
         let session = SessionSk::new_with_seckey(&key)?;
         let message = MessagePayload::new_send(
             Message::custom(b"bounded-inbound-mailbox")?,
-            &session,
+            MessageSigner::new(&session, TEST_NETWORK_ID),
             transport.dht.did,
             transport.dht.did,
         )?
@@ -316,14 +318,14 @@ async fn test_inbound_mailbox_reserves_control_capacity_under_application_satura
     let control_session = SessionSk::new_with_seckey(&control_key)?;
     let overflow_message = MessagePayload::new_send(
         Message::custom(b"global-application-overflow")?,
-        &control_session,
+        MessageSigner::new(&control_session, TEST_NETWORK_ID),
         transport.dht.did,
         transport.dht.did,
     )?
     .to_wire()?;
     let control = MessagePayload::new_send(
         Message::PeerLivenessReport(crate::message::PeerLivenessReport { sent_at_ms: 2 }),
-        &control_session,
+        MessageSigner::new(&control_session, TEST_NETWORK_ID),
         transport.dht.did,
         transport.dht.did,
     )?
@@ -394,7 +396,7 @@ async fn test_closing_inbound_mailbox_cancels_pending_callback() -> Result<()> {
     ));
     let message = MessagePayload::new_send(
         Message::custom(b"pending-inbound-callback")?,
-        &peer_session,
+        MessageSigner::new(&peer_session, TEST_NETWORK_ID),
         transport.dht.did,
         transport.dht.did,
     )?
@@ -425,7 +427,13 @@ async fn test_closing_inbound_mailbox_cancels_pending_callback() -> Result<()> {
 }
 
 fn local_wire(message: Message, session: &SessionSk, local: Did) -> Result<bytes::Bytes> {
-    MessagePayload::new_send(message, session, local, local)?.to_wire()
+    MessagePayload::new_send(
+        message,
+        MessageSigner::new(session, TEST_NETWORK_ID),
+        local,
+        local,
+    )?
+    .to_wire()
 }
 
 fn failed_receive_count(measure: &RecordingMeasure, peer: Did) -> Result<usize> {
@@ -492,7 +500,7 @@ async fn test_chunk_reassembly_records_one_exact_logical_receive() -> Result<()>
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
     let logical_payload = MessagePayload::new_send(
         Message::custom(&vec![41; 512])?,
-        &peer_session,
+        MessageSigner::new(&peer_session, TEST_NETWORK_ID),
         transport.dht.did,
         transport.dht.did,
     )?;
@@ -554,7 +562,7 @@ async fn test_reassembled_undecodable_message_records_one_failure_only() -> Resu
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
     let undecodable = MessagePayload::new_send(
         vec![0xff_u8; 512],
-        &peer_session,
+        MessageSigner::new(&peer_session, TEST_NETWORK_ID),
         transport.dht.did,
         transport.dht.did,
     )?;
@@ -702,13 +710,15 @@ async fn test_transport_preparation_authenticates_every_reserved_lane() -> Resul
         .ok_or(Error::InboundActorInvariantViolation)?;
     let reassembly = local_wire(Message::Chunk(chunk), &peer_session, transport.dht.did)?;
 
-    let control_lane = crate::swarm::callback::prepare_transport_frame_lane_for_test(&control)?;
+    let control_lane =
+        crate::swarm::callback::prepare_transport_frame_lane_for_test(TEST_NETWORK_ID, &control)?;
     assert_eq!(control_lane, InboundLane::DhtControl);
     let truncated = control
         .get(..control.len().saturating_sub(1))
         .ok_or(Error::InboundActorInvariantViolation)?;
     assert!(
-        crate::swarm::callback::prepare_transport_frame_lane_for_test(truncated).is_err(),
+        crate::swarm::callback::prepare_transport_frame_lane_for_test(TEST_NETWORK_ID, truncated)
+            .is_err(),
         "a truncated control-shaped payload must not claim control capacity"
     );
     for (name, frame) in [
@@ -723,23 +733,36 @@ async fn test_transport_preparation_authenticates_every_reserved_lane() -> Resul
             .ok_or(Error::InboundActorInvariantViolation)?;
         *final_byte ^= 1;
         assert!(
-            crate::swarm::callback::prepare_transport_frame_lane_for_test(&damaged).is_err(),
+            crate::swarm::callback::prepare_transport_frame_lane_for_test(
+                TEST_NETWORK_ID,
+                &damaged
+            )
+            .is_err(),
             "unauthenticated {name} shape must not claim reserved capacity"
         );
     }
     assert_eq!(
-        crate::swarm::callback::prepare_transport_frame_lane_for_test(&application)?,
+        crate::swarm::callback::prepare_transport_frame_lane_for_test(
+            TEST_NETWORK_ID,
+            &application
+        )?,
         InboundLane::Application
     );
     assert_eq!(
-        crate::swarm::callback::prepare_transport_frame_lane_for_test(&storage)?,
+        crate::swarm::callback::prepare_transport_frame_lane_for_test(TEST_NETWORK_ID, &storage)?,
         InboundLane::Storage
     );
     assert_eq!(
-        crate::swarm::callback::prepare_transport_frame_lane_for_test(&reassembly)?,
+        crate::swarm::callback::prepare_transport_frame_lane_for_test(
+            TEST_NETWORK_ID,
+            &reassembly
+        )?,
         InboundLane::Reassembly
     );
-    assert!(crate::swarm::callback::prepare_transport_frame_lane_for_test(&[0xff]).is_err());
+    assert!(
+        crate::swarm::callback::prepare_transport_frame_lane_for_test(TEST_NETWORK_ID, &[0xff])
+            .is_err()
+    );
     Ok(())
 }
 
@@ -759,7 +782,7 @@ async fn test_reassembled_control_shape_is_verified_before_lane_transition() -> 
     let session = SessionSk::new_with_seckey(&peer_key)?;
     let mut tampered = MessagePayload::new_send(
         Message::PeerLivenessReport(crate::message::PeerLivenessReport { sent_at_ms: 4 }),
-        &session,
+        MessageSigner::new(&session, TEST_NETWORK_ID),
         transport.dht.did,
         transport.dht.did,
     )?;

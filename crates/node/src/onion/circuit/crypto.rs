@@ -8,7 +8,9 @@ use rings_core::dht::Did;
 use rings_core::ecc::elgamal::impls::secp256k1::encrypt_aead_with_rng;
 use rings_core::ecc::elgamal::impls::secp256k1::AeadCiphertext;
 use rings_core::ecc::PublicKey;
-use rings_core::message::MessageVerification;
+use rings_core::message::DomainTag;
+use rings_core::message::MessageSigner;
+use rings_core::message::SigningDomain;
 use rings_core::session::SessionSk;
 use rings_core::utils::get_epoch_ms;
 use serde::Serialize;
@@ -43,6 +45,10 @@ use crate::onion::OnionRouteError;
 use crate::onion::OnionRouteHop;
 #[cfg(rings_native)]
 use crate::onion::OnionServiceName;
+
+/// Message family of the exit's backward-payload signature.
+const ONION_BACKWARD_PAYLOAD_DOMAIN_TAG: DomainTag =
+    DomainTag::new("rings-node:onion-backward-payload:v1");
 
 /// Encode the first forward frame for `route`.
 ///
@@ -164,7 +170,7 @@ pub(crate) fn route_first_link(route: &OnionRoute) -> Result<OnionLink> {
 pub async fn send_backward(
     link_sender: &OnionLinkSender,
     scope: &Scope,
-    signer: &SessionSk,
+    signer: MessageSigner<'_>,
     path: OnionBackwardPath,
     sequence: OnionBackwardSequence,
     payload: OnionCircuitPayload,
@@ -354,7 +360,7 @@ pub(super) fn encrypt_client_payload(
     return_id: OnionReturnId,
     payload: OnionCircuitPayload,
     recipient: PublicKey<33>,
-    signer: &SessionSk,
+    signer: MessageSigner<'_>,
 ) -> Result<AeadCiphertext> {
     encrypt_client_payload_at_sequence(
         return_id,
@@ -370,7 +376,7 @@ pub(super) fn encrypt_client_payload_at_sequence(
     sequence: OnionBackwardSequence,
     payload: OnionCircuitPayload,
     recipient: PublicKey<33>,
-    signer: &SessionSk,
+    signer: MessageSigner<'_>,
 ) -> Result<AeadCiphertext> {
     let authenticated =
         OnionAuthenticatedPayload::new_signed_at_sequence(return_id, sequence, payload, signer)?;
@@ -399,7 +405,7 @@ impl OnionAuthenticatedPayload {
     pub fn new_signed(
         return_id: OnionReturnId,
         payload: OnionCircuitPayload,
-        signer: &SessionSk,
+        signer: MessageSigner<'_>,
     ) -> Result<Self> {
         Self::new_signed_at_sequence(return_id, OnionBackwardSequence::FIRST, payload, signer)
     }
@@ -409,20 +415,21 @@ impl OnionAuthenticatedPayload {
         return_id: OnionReturnId,
         sequence: OnionBackwardSequence,
         payload: OnionCircuitPayload,
-        signer: &SessionSk,
+        signer: MessageSigner<'_>,
     ) -> Result<Self> {
         let nonce = OnionBackwardNonce::random();
-        let authentication = MessageVerification::new(
-            &backward_payload_authentication_data(
-                return_id,
-                nonce,
-                sequence,
-                signer.session_public_key(),
-                &payload,
-            )?,
-            signer,
-        )
-        .map_err(Error::CoreError)?;
+        let authentication = signer
+            .sign(
+                ONION_BACKWARD_PAYLOAD_DOMAIN_TAG,
+                &backward_payload_authentication_data(
+                    return_id,
+                    nonce,
+                    sequence,
+                    signer.session_sk().session_public_key(),
+                    &payload,
+                )?,
+            )
+            .map_err(Error::CoreError)?;
         Ok(Self {
             return_id,
             nonce,
@@ -438,7 +445,8 @@ impl OnionAuthenticatedPayload {
     /// signer account DID equals descriptor DID, signer account public key equals descriptor public
     /// key, and signer session DID equals the descriptor session encryption key DID. The signed
     /// transcript also binds the client/exit return id, per-frame nonce, exit session public key,
-    /// and payload.
+    /// and payload, and its signing domain binds the overlay the exit descriptor was published
+    /// for.
     pub fn into_verified_payload(
         self,
         return_id: OnionReturnId,
@@ -475,7 +483,9 @@ impl OnionAuthenticatedPayload {
             expected_exit.session_public_key,
             &self.payload,
         )?;
-        if !self.authentication.verify_unexpired(&data) {
+        let domain =
+            SigningDomain::new(ONION_BACKWARD_PAYLOAD_DOMAIN_TAG, expected_exit.network_id);
+        if !self.authentication.verify_unexpired(domain, &data) {
             return Err(Error::OnionRouteError(
                 OnionRouteError::InvalidBackwardSignature,
             ));

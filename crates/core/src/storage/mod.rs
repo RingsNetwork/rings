@@ -8,6 +8,7 @@ pub mod memory;
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 /// Persistent storage for native runtimes.
 pub mod sled;
+mod write_ordered;
 
 use async_trait::async_trait;
 

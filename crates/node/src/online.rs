@@ -7,6 +7,7 @@ use rings_core::error::Error;
 use rings_core::error::Result;
 use rings_core::message::Decoder;
 use rings_core::message::DhtProtocolMode;
+use rings_core::message::DomainTag;
 use rings_core::message::Encoded;
 use rings_core::message::Encoder;
 use rings_core::message::MessageVerification;
@@ -25,6 +26,9 @@ use crate::descriptor::SignedDescriptorBody;
 pub const ONLINE_NODES_TOPIC: &str = "online_nodes";
 /// Capability label for nodes that provide DHT storage.
 pub const ONLINE_NODE_CAPABILITY_STORAGE: &str = "storage";
+/// Message family of the online-node descriptor signature.
+const ONLINE_NODE_DESCRIPTOR_DOMAIN_TAG: DomainTag =
+    DomainTag::new("rings-node:online-node-descriptor:v1");
 
 /// Runtime family advertised by a node descriptor.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -95,12 +99,18 @@ impl OnlineNodeDescriptorBody {
 impl SignedDescriptorBody for OnlineNodeDescriptorBody {
     type Descriptor = OnlineNodeDescriptor;
 
+    const DOMAIN_TAG: DomainTag = ONLINE_NODE_DESCRIPTOR_DOMAIN_TAG;
+
     fn body_did(&self) -> Did {
         self.did
     }
 
     fn body_public_key(&self) -> &VerificationPublicKey {
         &self.public_key
+    }
+
+    fn body_network_id(&self) -> u32 {
+        self.network_id
     }
 
     fn body_signing_data(&self) -> Result<Vec<u8>> {
@@ -277,12 +287,18 @@ impl OnlineNodeDescriptor {
 }
 
 impl SignedDescriptor for OnlineNodeDescriptor {
+    const DOMAIN_TAG: DomainTag = ONLINE_NODE_DESCRIPTOR_DOMAIN_TAG;
+
     fn descriptor_did(&self) -> Did {
         self.did
     }
 
     fn descriptor_public_key(&self) -> &VerificationPublicKey {
         &self.public_key
+    }
+
+    fn descriptor_network_id(&self) -> u32 {
+        self.network_id
     }
 
     fn descriptor_signature(&self) -> &MessageVerification {

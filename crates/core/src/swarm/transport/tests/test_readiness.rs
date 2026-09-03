@@ -126,7 +126,7 @@ async fn test_tracked_send_rejects_disconnected_open_transport() -> Result<()> {
 
     let payload = MessagePayload::new_send(
         Message::custom(b"must-not-send")?,
-        transport.session_sk(),
+        transport.message_signer(),
         peer,
         peer,
     )?;

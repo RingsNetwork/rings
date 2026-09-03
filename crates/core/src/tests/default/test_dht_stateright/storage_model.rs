@@ -53,6 +53,9 @@ use crate::message::Encoded;
 // ===================================================================
 
 pub(super) const STORAGE_REPLICA_COUNT: usize = 3;
+/// Retention bound shared by every model value; the model checks the payload lattice, and a
+/// common bound keeps the retention component of every join equal.
+const MODEL_RETENTION_BOUND_MS: Option<u128> = Some(u128::MAX);
 pub(super) const STORAGE_PARTITION_MASKS: [StoragePartition; STORAGE_REPLICA_COUNT] = [
     StoragePartition(0b001),
     StoragePartition(0b010),
@@ -230,6 +233,7 @@ fn data_value_range(did: Did, label: &'static str, start_time: u128, count: usiz
             dots,
             tombstones: Vec::new(),
         },
+        expires_at_ms: MODEL_RETENTION_BOUND_MS,
     }
 }
 
@@ -243,6 +247,7 @@ fn data_overwrite_value(did: Did, label: &'static str, version: EntryVersion) ->
             dots: vec![storage_dot(version, 0)],
             tombstones: Vec::new(),
         },
+        expires_at_ms: MODEL_RETENTION_BOUND_MS,
     }
 }
 
@@ -256,6 +261,7 @@ fn relay_add_value(did: Did, label: &'static str, dot: EntryDot) -> Entry {
             dots: vec![dot],
             tombstones: Vec::new(),
         },
+        expires_at_ms: MODEL_RETENTION_BOUND_MS,
     }
 }
 
@@ -269,6 +275,7 @@ fn relay_remove_value(did: Did, dot: EntryDot) -> Entry {
             dots: Vec::new(),
             tombstones: vec![dot],
         },
+        expires_at_ms: MODEL_RETENTION_BOUND_MS,
     }
 }
 

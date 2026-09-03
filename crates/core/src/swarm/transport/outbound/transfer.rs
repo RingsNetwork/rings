@@ -21,6 +21,7 @@ use crate::chunk::Chunk;
 use crate::dht::Did;
 use crate::error::Result;
 use crate::lifecycle::StopToken;
+use crate::message::MessageSigner;
 use crate::session::SessionSk;
 
 type TransferResultSender = oneshot::Sender<Result<SendCompletionOutcome>>;
@@ -34,6 +35,7 @@ enum FrameSource {
     Whole(Option<Bytes>),
     Chunked {
         session_sk: SessionSk,
+        network_id: u32,
         chunks: ChunkFrames,
     },
 }
@@ -42,7 +44,11 @@ impl FrameSource {
     fn next_frame(&mut self, did: Did) -> Result<Option<(Bytes, &'static str)>> {
         match self {
             Self::Whole(frame) => Ok(frame.take().map(|bytes| (bytes, "whole_message"))),
-            Self::Chunked { session_sk, chunks } => {
+            Self::Chunked {
+                session_sk,
+                network_id,
+                chunks,
+            } => {
                 let Some(chunk) = chunks.next() else {
                     return Ok(None);
                 };
@@ -52,7 +58,8 @@ impl FrameSource {
                 } else {
                     "chunked_tail"
                 };
-                frame_chunk(session_sk, did, chunk).map(|bytes| Some((bytes, context)))
+                frame_chunk(MessageSigner::new(session_sk, *network_id), did, chunk)
+                    .map(|bytes| Some((bytes, context)))
             }
         }
     }
@@ -171,9 +178,11 @@ impl OutboundTransfer {
         )
     }
 
+    /// A chunked transfer re-signs every chunk envelope, so it keeps its own copy of the
+    /// signing authority for the whole transfer.
     pub(in crate::swarm::transport) fn chunked(
         route: OutboundTransferRoute,
-        session_sk: SessionSk,
+        signer: MessageSigner<'_>,
         chunks: ChunkFrames,
         useful_bytes: u64,
         completion: OutboundCompletion,
@@ -182,7 +191,11 @@ impl OutboundTransfer {
     ) -> (Self, oneshot::Receiver<Result<SendCompletionOutcome>>) {
         Self::new(
             route,
-            FrameSource::Chunked { session_sk, chunks },
+            FrameSource::Chunked {
+                session_sk: signer.session_sk().clone(),
+                network_id: signer.network_id(),
+                chunks,
+            },
             useful_bytes,
             completion,
             stop,

@@ -128,6 +128,18 @@ pub enum Error {
         index: usize,
     },
 
+    /// Entry carries no retention bound or its retention bound has elapsed
+    #[error("Entry carries no retention bound or its retention bound has elapsed")]
+    EntryNotLive,
+
+    /// Entry retention bound exceeds the maximum time-to-live
+    #[error("Entry retention bound exceeds the maximum time-to-live")]
+    EntryLifetimeExceedsMax,
+
+    /// Entry version logical time is beyond the accepted clock skew
+    #[error("Entry version logical time is beyond the accepted clock skew")]
+    EntryVersionAheadOfClock,
+
     /// Affine rotation scalar must be greater than zero
     #[error("Affine rotation scalar must be greater than zero")]
     InvalidAffineScalar,
@@ -708,6 +720,15 @@ pub enum Error {
     /// Invalid capacity value
     #[error("Invalid capacity value")]
     InvalidCapacity,
+
+    /// A value of {required} bytes cannot fit a storage budget of {capacity} bytes
+    #[error("A value of {required} bytes cannot fit a storage budget of {capacity} bytes")]
+    StorageValueExceedsCapacity {
+        /// Bytes the value occupies on disk.
+        required: u64,
+        /// Total byte budget of the storage.
+        capacity: u64,
+    },
 
     /// entry not found
     #[error("entry not found")]

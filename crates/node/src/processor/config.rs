@@ -89,6 +89,11 @@ impl ProcessorConfig {
         self.session_sk.clone()
     }
 
+    /// Return the overlay this node joins.
+    pub fn network_id(&self) -> u32 {
+        self.network_id
+    }
+
     /// Enables only the standard HTTPS-over-TCP onion exit service.
     pub fn enable_https_onion_exit(mut self) -> Self {
         self.advertise_onion_exit = true;

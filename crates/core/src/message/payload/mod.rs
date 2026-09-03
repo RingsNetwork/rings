@@ -16,7 +16,9 @@ use serde::Serialize;
 use super::encoder::Decoder;
 use super::encoder::Encoded;
 use super::encoder::Encoder;
+use super::protocols::DomainTag;
 use super::protocols::MessageRelay;
+use super::protocols::MessageSigner;
 use super::protocols::MessageVerification;
 use super::protocols::MessageVerificationExt;
 use super::protocols::ReportReturnPolicy;
@@ -27,7 +29,14 @@ use crate::dht::PeerRingAction;
 use crate::ecc::keccak256;
 use crate::error::Error;
 use crate::error::Result;
-use crate::session::SessionSk;
+
+/// Message family of the [`Transaction`] signature: the origin's authorship of a message.
+const TRANSACTION_DOMAIN_TAG: DomainTag =
+    DomainTag::new("rings-core:message-verification:transaction:v1");
+/// Message family of the [`MessagePayload`] signature: one hop's authorship of a forwarded
+/// envelope. Distinct from [`TRANSACTION_DOMAIN_TAG`] so the two signatures over the same
+/// transaction hash are never interchangeable.
+const PAYLOAD_DOMAIN_TAG: DomainTag = DomainTag::new("rings-core:message-verification:payload:v1");
 
 /// Compresses the given data byte slice using the gzip algorithm with the specified compression level.
 pub fn encode_data_gzip(data: &Bytes, level: u8) -> Result<Bytes> {
@@ -141,23 +150,17 @@ impl fmt::Debug for MessagePayload {
 
 impl Transaction {
     /// Wrap data. Will serialize by [rings_codec::serialize]
-    /// then sign [MessageVerification] by session_sk.
+    /// then sign [MessageVerification] by `signer`.
     pub fn new<T>(
         destination: Did,
         tx_id: uuid::Uuid,
         data: T,
-        session_sk: &SessionSk,
+        signer: MessageSigner<'_>,
     ) -> Result<Self>
     where
         T: Serialize,
     {
-        Self::new_with_report_return(
-            destination,
-            tx_id,
-            data,
-            ReportReturnPolicy::Path,
-            session_sk,
-        )
+        Self::new_with_report_return(destination, tx_id, data, ReportReturnPolicy::Path, signer)
     }
 
     /// Wrap data with an explicit report-return policy.
@@ -166,15 +169,15 @@ impl Transaction {
         tx_id: uuid::Uuid,
         data: T,
         report_return: ReportReturnPolicy,
-        session_sk: &SessionSk,
+        signer: MessageSigner<'_>,
     ) -> Result<Self>
     where
         T: Serialize,
     {
-        report_return.validate_authorized_by(session_sk.account_did())?;
+        report_return.validate_authorized_by(signer.account_did())?;
         let data = rings_codec::serialize(&data).map_err(Error::CodecSerialize)?;
         let msg_hash = hash_transaction(destination, tx_id, report_return, &data);
-        let verification = MessageVerification::new(&msg_hash, session_sk)?;
+        let verification = signer.sign(TRANSACTION_DOMAIN_TAG, &msg_hash)?;
         Ok(Self {
             destination,
             tx_id,
@@ -193,10 +196,10 @@ impl Transaction {
 
 impl MessagePayload {
     /// Create new `MessagePayload`.
-    /// Need [Transaction], [SessionSk] and [MessageRelay].
+    /// Need [Transaction], [MessageSigner] and [MessageRelay].
     pub fn new(
         transaction: Transaction,
-        session_sk: &SessionSk,
+        signer: MessageSigner<'_>,
         relay: MessageRelay,
     ) -> Result<Self> {
         let msg_hash = hash_transaction(
@@ -205,7 +208,7 @@ impl MessagePayload {
             transaction.report_return,
             &transaction.data,
         );
-        let verification = MessageVerification::new(&msg_hash, session_sk)?;
+        let verification = signer.sign(PAYLOAD_DOMAIN_TAG, &msg_hash)?;
         Ok(Self {
             transaction,
             relay,
@@ -216,7 +219,7 @@ impl MessagePayload {
     /// Helps to create sending message from data.
     pub fn new_send<T>(
         data: T,
-        session_sk: &SessionSk,
+        signer: MessageSigner<'_>,
         next_hop: Did,
         destination: Did,
     ) -> Result<Self>
@@ -224,13 +227,13 @@ impl MessagePayload {
         T: Serialize,
     {
         let tx_id = crate::utils::new_uuid();
-        let transaction = Transaction::new(destination, tx_id, data, session_sk)?;
+        let transaction = Transaction::new(destination, tx_id, data, signer)?;
         let relay = MessageRelay::new(
-            vec![session_sk.account_did()],
+            vec![signer.account_did()],
             next_hop,
             transaction.destination,
         );
-        Self::new(transaction, session_sk, relay)
+        Self::new(transaction, signer, relay)
     }
 
     /// Deserializes a `MessagePayload` instance from the Rings wire encoding.
@@ -263,6 +266,8 @@ impl MessagePayload {
 }
 
 impl MessageVerificationExt for Transaction {
+    const DOMAIN_TAG: DomainTag = TRANSACTION_DOMAIN_TAG;
+
     fn verification_data(&self) -> Result<Vec<u8>> {
         self.report_return.validate_authorized_by(self.signer())?;
         Ok(hash_transaction(self.destination, self.tx_id, self.report_return, &self.data).to_vec())
@@ -274,6 +279,8 @@ impl MessageVerificationExt for Transaction {
 }
 
 impl MessageVerificationExt for MessagePayload {
+    const DOMAIN_TAG: DomainTag = PAYLOAD_DOMAIN_TAG;
+
     fn verification_data(&self) -> Result<Vec<u8>> {
         self.transaction.verification_data()
     }
@@ -300,8 +307,8 @@ impl Decoder for MessagePayload {
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait PayloadSender {
-    /// Get the session sk
-    fn session_sk(&self) -> &SessionSk;
+    /// The authority that signs every payload this sender emits.
+    fn message_signer(&self) -> MessageSigner<'_>;
 
     /// Get access to DHT.
     fn dht(&self) -> Arc<PeerRing>;
@@ -344,7 +351,7 @@ pub trait PayloadSender {
     where
         T: Serialize + Send,
     {
-        let payload = MessagePayload::new_send(msg, self.session_sk(), next_hop, destination)?;
+        let payload = MessagePayload::new_send(msg, self.message_signer(), next_hop, destination)?;
         let tx_id = payload.transaction.tx_id;
         self.send_payload(payload).await?;
         Ok(tx_id)
@@ -362,19 +369,15 @@ pub trait PayloadSender {
         T: Serialize + Send,
     {
         let tx_id = crate::utils::new_uuid();
-        let transaction = Transaction::new_with_report_return(
-            destination,
-            tx_id,
-            msg,
-            report_return,
-            self.session_sk(),
-        )?;
+        let signer = self.message_signer();
+        let transaction =
+            Transaction::new_with_report_return(destination, tx_id, msg, report_return, signer)?;
         let relay = MessageRelay::new(
-            vec![self.session_sk().account_did()],
+            vec![signer.account_did()],
             next_hop,
             transaction.destination,
         );
-        let payload = MessagePayload::new(transaction, self.session_sk(), relay)?;
+        let payload = MessagePayload::new(transaction, signer, relay)?;
         self.send_payload(payload).await?;
         Ok(tx_id)
     }
@@ -425,21 +428,19 @@ pub trait PayloadSender {
             .relay
             .report(self.dht().did, policy, routed_next_hop)?;
 
-        let transaction = Transaction::new(
-            relay.destination,
-            payload.transaction.tx_id,
-            msg,
-            self.session_sk(),
-        )?;
+        let signer = self.message_signer();
+        let transaction =
+            Transaction::new(relay.destination, payload.transaction.tx_id, msg, signer)?;
 
-        let pl = MessagePayload::new(transaction, self.session_sk(), relay)?;
+        let pl = MessagePayload::new(transaction, signer, relay)?;
         self.send_payload(pl).await
     }
 
     /// Forward a payload message by relay.
     /// It just create a new payload, cloned data, resigned with session and send
     async fn forward_by_relay(&self, payload: &MessagePayload, relay: MessageRelay) -> Result<()> {
-        let new_pl = MessagePayload::new(payload.transaction.clone(), self.session_sk(), relay)?;
+        let new_pl =
+            MessagePayload::new(payload.transaction.clone(), self.message_signer(), relay)?;
         self.send_payload(new_pl).await
     }
 

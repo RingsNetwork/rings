@@ -1,4 +1,5 @@
 use rings_core::ecc::SecretKey;
+use rings_core::message::MessageSigner;
 
 use super::super::*;
 use crate::onion::OnionExitDescriptorBody;
@@ -7,6 +8,9 @@ use crate::onion::OnionExitTransport;
 use crate::onion::OnionServiceName;
 use crate::online::OnlineNodeType;
 use crate::sync_lock::lock;
+
+/// Overlay every fixture exit descriptor is published for.
+const TEST_NETWORK_ID: u32 = 1;
 
 fn did() -> Did {
     SecretKey::random().address().into()
@@ -40,7 +44,7 @@ fn exit_descriptor(session: &SessionSk) -> OnionExitDescriptor {
 }
 
 fn runtime() -> OnionTcpRuntime {
-    OnionTcpRuntime::new(session(), None)
+    OnionTcpRuntime::new(session(), TEST_NETWORK_ID, None)
 }
 
 #[test]
@@ -51,7 +55,7 @@ fn test_native_tcp_and_https_share_one_node_wide_exit_budget() {
         max_streams_per_circuit: 1,
         ..OnionExitPolicy::default()
     };
-    let (tcp, https) = native_onion_runtimes(session, None);
+    let (tcp, https) = native_onion_runtimes(session, TEST_NETWORK_ID, None);
     let peer = Did::from(71_u32);
     let _tcp_lease = tcp
         .accounting
@@ -93,7 +97,7 @@ fn dummy_authenticated_payload_for_service(
     OnionAuthenticatedPayload::new_signed(
         return_id,
         encode_tcp_payload(&service, OnionTcpPayload::Close).expect("encode payload"),
-        session,
+        MessageSigner::new(session, TEST_NETWORK_ID),
     )
     .expect("signed payload")
 }
@@ -425,7 +429,7 @@ fn test_exit_runtime_accepts_only_installed_tcp_services() -> Result<()> {
         vec![OnionExitService::new("web", OnionExitTransport::Tcp)?],
         OnionExitPolicy::default(),
     )?;
-    let runtime = OnionTcpRuntime::new(session(), Some(config));
+    let runtime = OnionTcpRuntime::new(session(), TEST_NETWORK_ID, Some(config));
     let custom_payload = encode_tcp_payload(&service, OnionTcpPayload::Close)?;
     let tcp_payload = encode_tcp_payload(&OnionServiceName::tcp(), OnionTcpPayload::Close)?;
 
@@ -536,11 +540,18 @@ fn test_exit_limiter_counts_distinct_circuit_ids() {
 async fn test_install_rejects_duplicate_namespace_instead_of_splitting_runtime() -> Result<()> {
     let processor = Arc::new(crate::tests::native::prepare_processor().await);
     let session_sk = processor.session_sk().clone();
+    let network_id = processor.swarm.network_id();
     let extensions = Extensions::new(processor);
-    let _handle = NativeOnionCircuitHandle::install(&extensions, session_sk.clone(), false, None)?;
+    let _handle = NativeOnionCircuitHandle::install(
+        &extensions,
+        session_sk.clone(),
+        network_id,
+        false,
+        None,
+    )?;
 
     assert!(matches!(
-        NativeOnionCircuitHandle::install(&extensions, session_sk, false, None),
+        NativeOnionCircuitHandle::install(&extensions, session_sk, network_id, false, None),
         Err(Error::ExtensionError(_))
     ));
     Ok(())

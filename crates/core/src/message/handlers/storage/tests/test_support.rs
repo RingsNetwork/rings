@@ -23,6 +23,7 @@ use crate::message::types::SyncEntriesWithSuccessorReport;
 use crate::message::Encoder;
 use crate::message::MessagePayload;
 use crate::message::MessageRelay;
+use crate::message::MessageSigner;
 use crate::message::PayloadSender;
 use crate::message::Transaction;
 use crate::session::SessionSk;
@@ -219,7 +220,7 @@ async fn test_matching_payload_restores_current_message_when_predicate_panics() 
 fn test_payload(node: &Node, data: &[u8]) -> Result<MessagePayload> {
     MessagePayload::new_send(
         Message::custom(data)?,
-        node.swarm.transport.session_sk(),
+        node.swarm.transport.message_signer(),
         node.did(),
         node.did(),
     )
@@ -233,7 +234,7 @@ pub(super) fn next_generated_key(keys: &mut impl Iterator<Item = SecretKey>) -> 
 pub(super) fn storage_sync_report_payload(
     request: &MessagePayload,
     report: SyncEntriesWithSuccessorReport,
-    signer: &SessionSk,
+    signer: MessageSigner<'_>,
     next_hop: Did,
     destination: Did,
 ) -> Result<MessagePayload> {
@@ -361,7 +362,7 @@ pub(super) fn install_two_node_chord_view(first: &Node, second: &Node) -> Result
 pub(super) fn split_redundant_entry(nodes: &[&Node]) -> Result<(Entry, Did, Did, usize, usize)> {
     for attempt in 0..512 {
         let topic = format!("split remote replica placement {attempt}");
-        let entry: Entry = topic.try_into()?;
+        let entry: Entry = crate::tests::live(topic.try_into()?);
         let mut placements = entry.did.rotate_affine(2)?.into_iter();
         let primary = placements
             .next()

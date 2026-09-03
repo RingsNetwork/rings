@@ -6,6 +6,8 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use rings_core::ecc::SecretKey;
+#[cfg(rings_native)]
+use rings_core::message::MessageSigner;
 use rings_core::session::SessionSk;
 #[cfg(rings_native)]
 use tokio::io::AsyncReadExt;
@@ -18,6 +20,9 @@ use super::super::*;
 use crate::onion::OnionExitDescriptorBody;
 use crate::onion::OnionExitService;
 use crate::online::OnlineNodeType;
+
+/// Overlay every fixture exit descriptor is published for.
+const TEST_NETWORK_ID: u32 = 1;
 
 fn did() -> Did {
     SecretKey::random().address().into()
@@ -60,7 +65,7 @@ fn dummy_authenticated_payload(
             "wrong peer".to_string(),
         )))
         .expect("encode payload"),
-        session,
+        MessageSigner::new(session, TEST_NETWORK_ID),
     )
     .expect("signed payload")
 }
@@ -233,7 +238,7 @@ fn test_pending_request_reports_authenticated_request_as_unexpected_backward_pay
     let payload = OnionAuthenticatedPayload::new_signed(
         return_id,
         encode_https_payload(request_payload).unwrap(),
-        &exit,
+        MessageSigner::new(&exit, TEST_NETWORK_ID),
     )
     .unwrap();
 

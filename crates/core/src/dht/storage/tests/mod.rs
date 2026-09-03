@@ -14,6 +14,7 @@ use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::EntryLookupKey;
 use crate::dht::entry::EntryOperation;
+use crate::dht::entry::EntryVersion;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::PlacementMiss;
 use crate::dht::entry::SyncedEntryAck;
@@ -21,6 +22,7 @@ use crate::dht::stabilization::STORAGE_REPAIR_MAX_DELIVERIES_PER_STEP;
 use crate::dht::successor::SuccessorWriter;
 use crate::dht::Chord;
 use crate::dht::ChordStorage;
+use crate::dht::ChordStorageCache;
 use crate::dht::ChordStorageRepair;
 use crate::dht::ChordStorageSync;
 use crate::dht::Did;
@@ -34,19 +36,21 @@ use crate::message::types::Message;
 use crate::message::types::SyncEntriesWithSuccessor;
 use crate::storage::KvStorageInterface;
 use crate::storage::MemStorage;
+use crate::tests::live_entry;
+use crate::utils::get_epoch_ms;
 
 mod test_repair;
 
 fn data_entry(did: Did) -> Entry {
-    Entry::new(did, vec![], EntryKind::Data)
+    live_entry(did, vec![], EntryKind::Data)
 }
 
 fn data_entry_with_data(did: Did, data: &str) -> Entry {
-    Entry::new(did, vec![data.into()], EntryKind::Data)
+    live_entry(did, vec![data.into()], EntryKind::Data)
 }
 
 fn data_entry_with_payload_len(did: Did, len: usize) -> Entry {
-    Entry::new(did, vec!["x".repeat(len).into()], EntryKind::Data)
+    live_entry(did, vec!["x".repeat(len).into()], EntryKind::Data)
 }
 
 fn first_two_affine_keys(did: Did) -> Result<(Did, Did)> {
@@ -844,5 +848,148 @@ async fn test_sync_batch_ack_deletes_acked_batch_and_retries_unacked_batches() -
             .filter(|placed| !acked_batch.iter().any(|acked| acked.key == placed.key)),
     );
     assert_eq!(retried_entries, expected_remaining);
+    Ok(())
+}
+
+fn expired(mut entry: Entry) -> Entry {
+    entry.expires_at_ms = Some(1);
+    entry
+}
+
+/// Retention law: a stored value whose bound elapsed is retired on read and reported absent.
+#[tokio::test]
+async fn test_live_storage_read_retires_expired_value() -> Result<()> {
+    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
+    let placement_key = Did::from(100u32);
+    node.storage
+        .put(
+            &placement_key.to_string(),
+            &expired(data_entry(Did::from(10u32))),
+        )
+        .await?;
+
+    assert_eq!(
+        node.live_storage_entry(placement_key, get_epoch_ms())
+            .await?,
+        None
+    );
+    assert_eq!(node.storage.get(&placement_key.to_string()).await?, None);
+    Ok(())
+}
+
+/// Retention law: a bulk read returns only live values and retires the rest, so hand-off and
+/// republish never offer an expired value.
+#[tokio::test]
+async fn test_live_storage_entries_retires_expired_values() -> Result<()> {
+    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
+    let live_key = Did::from(100u32);
+    let expired_key = Did::from(200u32);
+    let live_entry = data_entry(Did::from(10u32));
+    node.storage.put(&live_key.to_string(), &live_entry).await?;
+    node.storage
+        .put(
+            &expired_key.to_string(),
+            &expired(data_entry(Did::from(20u32))),
+        )
+        .await?;
+
+    let entries = node.live_storage_entries(get_epoch_ms()).await?;
+    assert_eq!(entries, vec![(live_key.to_string(), live_entry)]);
+    assert_eq!(node.storage.count().await?, 1);
+    Ok(())
+}
+
+/// Admission law at the write funnel: a peer-supplied register at `u128::MAX` is rejected and
+/// leaves storage untouched, so it cannot pin the key against honest writers.
+#[tokio::test]
+async fn test_join_storage_entry_rejects_pinned_register() -> Result<()> {
+    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
+    let placement_key = Did::from(100u32);
+    let honest = data_entry_with_data(Did::from(10u32), "honest");
+    node.join_storage_entry(placement_key, honest.clone())
+        .await?;
+
+    let mut pinned = data_entry_with_data(Did::from(10u32), "pinned");
+    pinned.crdt.register = Some(EntryVersion::new(
+        u128::MAX,
+        Did::from(99u32),
+        Did::from(1u32),
+    ));
+    assert!(matches!(
+        node.join_storage_entry(placement_key, pinned).await,
+        Err(Error::EntryVersionAheadOfClock)
+    ));
+    assert_eq!(
+        node.storage.get(&placement_key.to_string()).await?,
+        Some(honest.try_into_storage_entry()?)
+    );
+    Ok(())
+}
+
+/// Admission law at the write funnel: an expired or over-long retention bound is rejected.
+#[tokio::test]
+async fn test_join_storage_entry_bounds_retention() -> Result<()> {
+    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
+    let placement_key = Did::from(100u32);
+
+    assert!(matches!(
+        node.join_storage_entry(placement_key, expired(data_entry(Did::from(10u32))))
+            .await,
+        Err(Error::EntryNotLive)
+    ));
+    let mut overlong = data_entry(Did::from(10u32));
+    overlong.expires_at_ms = Some(u128::MAX);
+    assert!(matches!(
+        node.join_storage_entry(placement_key, overlong).await,
+        Err(Error::EntryLifetimeExceedsMax)
+    ));
+    assert_eq!(node.storage.count().await?, 0);
+    Ok(())
+}
+
+/// Retention law under join: an accepted write extends the stored bound to the later of the
+/// two, and never shortens it.
+#[tokio::test]
+async fn test_join_storage_entry_keeps_the_later_retention_bound() -> Result<()> {
+    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
+    let placement_key = Did::from(100u32);
+    let now_ms = get_epoch_ms();
+    let mut earlier = data_entry_with_data(Did::from(10u32), "a");
+    earlier.expires_at_ms = Some(now_ms + 1_000);
+    let mut later = data_entry_with_data(Did::from(10u32), "b");
+    later.expires_at_ms = Some(now_ms + 2_000);
+
+    node.join_storage_entry(placement_key, later).await?;
+    let stored = node.join_storage_entry(placement_key, earlier).await?;
+    assert_eq!(stored.expires_at_ms, Some(now_ms + 2_000));
+    Ok(())
+}
+
+/// The fetched-entry cache shares the admission law and retires expired values on read.
+#[tokio::test]
+async fn test_local_cache_shares_admission_and_retention() -> Result<()> {
+    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
+    let resource = Did::from(10u32);
+
+    assert!(matches!(
+        node.local_cache_put(expired(data_entry(resource))).await,
+        Err(Error::EntryNotLive)
+    ));
+    let mut pinned = data_entry(resource);
+    pinned.crdt.register = Some(EntryVersion::new(
+        u128::MAX,
+        Did::from(9u32),
+        Did::from(1u32),
+    ));
+    assert!(matches!(
+        node.local_cache_put(pinned).await,
+        Err(Error::EntryVersionAheadOfClock)
+    ));
+
+    node.cache
+        .put(&resource.to_string(), &expired(data_entry(resource)))
+        .await?;
+    assert_eq!(node.local_cache_get(resource).await?, None);
+    assert_eq!(node.cache.count().await?, 0);
     Ok(())
 }

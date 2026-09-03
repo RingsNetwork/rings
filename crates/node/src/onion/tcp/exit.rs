@@ -111,7 +111,7 @@ impl ExitReturnPath {
         TcpBackwardRoute {
             link_sender: &self.runtime.link_sender,
             scope: &self.scope,
-            signer: &self.runtime.session_sk,
+            signer: self.runtime.message_signer(),
             service: &self.service,
             circuit_id: self.circuit_id,
             return_peer: self.return_peer,

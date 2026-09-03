@@ -1,3 +1,5 @@
+use rings_core::message::MessageSigner;
+
 use super::super::codec::OnionCircuitInput;
 use super::super::codec::OnionWireMessage;
 use super::super::crypto::decrypt_client_payload;
@@ -15,6 +17,9 @@ use super::test_circuit_protocol::return_edge;
 use super::test_circuit_protocol::route;
 use super::test_circuit_protocol::session;
 use super::test_circuit_protocol::test_payload;
+
+/// Overlay every fixture exit descriptor is published for.
+const TEST_NETWORK_ID: u32 = 1;
 
 #[test]
 fn test_relay_return_table_evicts_expired_entries() {
@@ -87,7 +92,7 @@ fn test_backward_cell_after_return_expiry_is_never_forwarded() {
             OnionReturnId::new([43; 16]),
             test_payload("expired-return"),
             client.session_public_key(),
-            &next,
+            MessageSigner::new(&next, TEST_NETWORK_ID),
         )
         .expect("encrypt backward fixture"),
     });
@@ -286,7 +291,7 @@ fn test_aead_context_binds_direction_and_circuit_id() {
         return_id,
         test_payload("tcp-close"),
         client.session_public_key(),
-        &exit,
+        MessageSigner::new(&exit, TEST_NETWORK_ID),
     )
     .expect("encrypt backward");
     let authenticated = decrypt_client_payload(&client, &backward).expect("decrypt backward");
@@ -311,7 +316,7 @@ fn test_backward_payload_authentication_rejects_wrong_exit_signer() {
         return_id,
         test_payload("forged"),
         client.session_public_key(),
-        &attacker,
+        MessageSigner::new(&attacker, TEST_NETWORK_ID),
     )
     .expect("encrypt forged payload");
 

@@ -656,7 +656,8 @@ impl InboundProcessor {
                 return Err(e);
             }
         };
-        if !(payload.verify() && payload.transaction.verify()) {
+        let network_id = self.transport.network_id;
+        if !(payload.verify(network_id) && payload.transaction.verify(network_id)) {
             log_inbound_verification_failure(peer, &payload, msg.len());
             self.record_receive_failure(peer, authentication).await;
             return Err(crate::error::Error::InvalidMessage(
@@ -710,11 +711,12 @@ pub(super) struct PreparedInboundFrame {
 }
 
 fn prepare_transport_frame(
+    network_id: u32,
     peer: Option<Did>,
     bytes: &[u8],
 ) -> crate::error::Result<PreparedInboundFrame> {
     let payload = MessagePayload::from_wire(bytes)?;
-    if !(payload.transaction.verify() && payload.verify()) {
+    if !(payload.transaction.verify(network_id) && payload.verify(network_id)) {
         log_inbound_verification_failure(peer, &payload, bytes.len());
         return Err(crate::error::Error::InvalidMessage(
             "message verification failed or message expired".to_string(),
@@ -733,9 +735,10 @@ fn prepare_transport_frame(
 
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) fn prepare_transport_frame_lane_for_test(
+    network_id: u32,
     bytes: &[u8],
 ) -> crate::error::Result<InboundLane> {
-    prepare_transport_frame(None, bytes).map(|prepared| prepared.lane)
+    prepare_transport_frame(network_id, None, bytes).map(|prepared| prepared.lane)
 }
 
 impl InnerSwarmCallback {
@@ -752,7 +755,11 @@ impl InnerSwarmCallback {
         let authentication = peer.map_or(Authentication::Unauthenticated, |peer| {
             self.processor.peer_authentication(peer)
         });
-        let prepared = match prepare_transport_frame(peer, msg.as_ref()) {
+        let prepared = match prepare_transport_frame(
+            self.processor.transport.network_id,
+            peer,
+            msg.as_ref(),
+        ) {
             Ok(prepared) => prepared,
             Err(error) => {
                 self.processor

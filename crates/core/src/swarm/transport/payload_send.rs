@@ -38,8 +38,8 @@ use crate::lifecycle::StopSource;
 use crate::lifecycle::StopToken;
 use crate::message::Message;
 use crate::message::MessagePayload;
+use crate::message::MessageSigner;
 use crate::message::PayloadSender;
-use crate::session::SessionSk;
 use crate::utils::sleep;
 
 const TRACKED_PAYLOAD_TIMEOUT: Duration = TRANSPORT_TIMEOUT_PROFILE.tracked_payload;
@@ -715,7 +715,7 @@ impl SwarmTransport {
                 let chunks: ChunkFrames = Box::new(ChunkList::stream(data, chunk_size));
                 OutboundTransfer::chunked(
                     route,
-                    self.session_sk.clone(),
+                    self.message_signer(),
                     chunks,
                     useful_bytes,
                     completion,
@@ -832,8 +832,8 @@ impl SwarmTransport {
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl PayloadSender for SwarmTransport {
-    fn session_sk(&self) -> &SessionSk {
-        &self.session_sk
+    fn message_signer(&self) -> MessageSigner<'_> {
+        MessageSigner::new(&self.session_sk, self.network_id)
     }
 
     fn dht(&self) -> Arc<PeerRing> {

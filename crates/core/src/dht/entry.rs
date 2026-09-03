@@ -7,7 +7,10 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::algebra::JoinSemilattice;
+use crate::consts::DEFAULT_TTL_MS;
 use crate::consts::ENTRY_DATA_MAX_LEN;
+use crate::consts::MAX_TTL_MS;
+use crate::consts::TS_OFFSET_TOLERANCE_MS;
 use crate::dht::Did;
 use crate::ecc::HashStr;
 use crate::error::Error;
@@ -16,6 +19,7 @@ use crate::message::Encoded;
 use crate::message::Encoder;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
+use crate::utils::get_epoch_ms;
 
 mod crdt;
 
@@ -135,6 +139,12 @@ fn placement_belongs_to_entry_key(entry_key: Did, placement: Did, redundancy: u1
 /// * If kind value is [EntryKind::RelayMessage], it's the destination Did of
 ///   message plus 1 (to ensure that the message is sent to the successor of destination),
 ///   thus while destination node going online, it will sync message from its successor.
+///
+/// Retention: every entry accepted into storage carries a retention bound
+/// `expires_at_ms`, stamped by the origin at the operation boundary and bounded by the
+/// receiver at admission (see [`Entry::validate_admissible_at`]). The bound joins by `max`, so
+/// every accepted write extends the carrier's life to at least its own bound, and an entry whose
+/// bound has elapsed is dropped on the next read instead of being served or replicated.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
     /// The ring key of this entry. It has the same representation as a node DID, but a
@@ -147,6 +157,10 @@ pub struct Entry {
     /// CRDT metadata that makes replicated merge a join-semilattice operation.
     #[serde(default)]
     pub crdt: EntryCrdt,
+    /// Retention bound in milliseconds since the Unix epoch. `None` only before the operation
+    /// boundary stamps it; a stored value without a bound is treated as not live.
+    #[serde(default)]
+    pub expires_at_ms: Option<u128>,
 }
 
 /// An [`Entry`] paired with its Chord placement key.
@@ -279,6 +293,7 @@ impl Entry {
             data,
             kind,
             crdt: EntryCrdt::default(),
+            expires_at_ms: None,
         }
     }
 
@@ -292,29 +307,54 @@ impl Entry {
 }
 
 impl EntryOperation {
-    /// Return this operation with CRDT versions assigned at the operation boundary.
+    /// Return this operation with CRDT versions and the retention bound assigned at the
+    /// operation boundary, read from the local clock.
     ///
-    /// Existing CRDT witnesses are preserved so forwarded operations keep the
-    /// origin's dot/version instead of being reissued by every routing hop.
+    /// Existing CRDT witnesses and an existing retention bound are preserved so forwarded
+    /// operations keep the origin's dot/version and lifetime instead of being reissued by every
+    /// routing hop.
     pub fn stamped(self, actor: Did) -> Result<Self> {
+        self.stamped_at(get_epoch_ms(), actor)
+    }
+
+    /// [`Self::stamped`] at an explicit operation-boundary time.
+    ///
+    /// Post: every carried entry has `expires_at_ms = Some(_)`; an absent bound becomes
+    /// `now_ms + DEFAULT_TTL_MS`.
+    pub(crate) fn stamped_at(self, now_ms: u128, actor: Did) -> Result<Self> {
         Ok(match self {
-            EntryOperation::Overwrite(entry) => EntryOperation::Overwrite(
-                entry.ensure_stamp_after(actor, None, EntryStampKind::Overwrite)?,
-            ),
-            EntryOperation::Extend(entry) => EntryOperation::Extend(entry.ensure_stamp_after(
-                actor,
-                None,
-                EntryStampKind::Delta,
-            )?),
-            EntryOperation::Touch(entry) => EntryOperation::Touch(entry.ensure_stamp_after(
-                actor,
-                None,
-                EntryStampKind::Delta,
-            )?),
-            EntryOperation::Tombstone(entry) => EntryOperation::Tombstone(entry),
-            EntryOperation::CompactData(entry) => {
-                EntryOperation::CompactData(entry.ensure_overwrite_stamp_after(actor, None)?)
+            EntryOperation::Overwrite(entry) => {
+                EntryOperation::Overwrite(entry.ensure_lifetime_from(now_ms).ensure_stamp_after(
+                    now_ms,
+                    actor,
+                    None,
+                    EntryStampKind::Overwrite,
+                )?)
             }
+            EntryOperation::Extend(entry) => {
+                EntryOperation::Extend(entry.ensure_lifetime_from(now_ms).ensure_stamp_after(
+                    now_ms,
+                    actor,
+                    None,
+                    EntryStampKind::Delta,
+                )?)
+            }
+            EntryOperation::Touch(entry) => {
+                EntryOperation::Touch(entry.ensure_lifetime_from(now_ms).ensure_stamp_after(
+                    now_ms,
+                    actor,
+                    None,
+                    EntryStampKind::Delta,
+                )?)
+            }
+            EntryOperation::Tombstone(entry) => {
+                EntryOperation::Tombstone(entry.ensure_lifetime_from(now_ms))
+            }
+            EntryOperation::CompactData(entry) => EntryOperation::CompactData(
+                entry
+                    .ensure_lifetime_from(now_ms)
+                    .ensure_overwrite_stamp_after(now_ms, actor, None)?,
+            ),
         })
     }
 
@@ -358,6 +398,7 @@ impl TryFrom<MessagePayload> for Entry {
             data: vec![data],
             kind: EntryKind::RelayMessage,
             crdt: EntryCrdt::default(),
+            expires_at_ms: None,
         })
     }
 }
@@ -370,6 +411,7 @@ impl TryFrom<(String, Encoded)> for Entry {
             data: vec![e],
             kind: EntryKind::Data,
             crdt: EntryCrdt::default(),
+            expires_at_ms: None,
         })
     }
 }
@@ -426,12 +468,18 @@ impl Entry {
         Did::try_from(HashStr::from_bytes(&bytes))
     }
 
-    fn issue_version_after(&self, actor: Did, floor: Option<EntryVersion>) -> Result<EntryVersion> {
-        Ok(EntryVersion::issued_by(actor, self.operation_digest()?).after(floor))
+    fn issue_version_after(
+        &self,
+        now_ms: u128,
+        actor: Did,
+        floor: Option<EntryVersion>,
+    ) -> Result<EntryVersion> {
+        Ok(EntryVersion::new(now_ms, actor, self.operation_digest()?).after(floor))
     }
 
     fn ensure_stamp_after(
         self,
+        now_ms: u128,
         actor: Did,
         floor: Option<EntryVersion>,
         kind: EntryStampKind,
@@ -439,30 +487,90 @@ impl Entry {
         match self.crdt.has_write_witness() {
             true => Ok(self),
             false => {
-                let version = self.issue_version_after(actor, floor)?;
+                let version = self.issue_version_after(now_ms, actor, floor)?;
                 self.stamp(version, kind)
             }
         }
     }
 
-    fn ensure_overwrite_stamp_after(self, actor: Did, floor: Option<EntryVersion>) -> Result<Self> {
+    fn ensure_overwrite_stamp_after(
+        self,
+        now_ms: u128,
+        actor: Did,
+        floor: Option<EntryVersion>,
+    ) -> Result<Self> {
         match self.crdt.register.is_some() {
             true => Ok(self),
             false => {
-                let version = self.issue_version_after(actor, floor)?;
+                let version = self.issue_version_after(now_ms, actor, floor)?;
                 self.stamp_overwrite(version)
             }
         }
     }
 
-    fn max_observed_version(&self) -> Option<EntryVersion> {
+    /// Every version this entry carries: element dots, tombstones, and the reset floor.
+    fn versions(&self) -> impl Iterator<Item = EntryVersion> + '_ {
         self.crdt
             .dots
             .iter()
             .map(|dot| dot.version)
             .chain(self.crdt.tombstones.iter().map(|dot| dot.version))
             .chain(self.crdt.register)
-            .max()
+    }
+
+    fn max_observed_version(&self) -> Option<EntryVersion> {
+        self.versions().max()
+    }
+
+    /// Stamp the retention bound when the origin left it absent.
+    fn ensure_lifetime_from(mut self, now_ms: u128) -> Self {
+        if self.expires_at_ms.is_none() {
+            self.expires_at_ms = Some(now_ms.saturating_add(u128::from(DEFAULT_TTL_MS)));
+        }
+        self
+    }
+
+    /// The retention bound of a join: the later of the two bounds.
+    fn joined_lifetime(&self, other: &Self) -> Option<u128> {
+        self.expires_at_ms.max(other.expires_at_ms)
+    }
+
+    /// Whether this entry may still be served or replicated at `now_ms`.
+    ///
+    /// Post: `false` for an unstamped entry, so a legacy stored value without a bound is
+    /// retired on its next read.
+    pub fn is_live_at(&self, now_ms: u128) -> bool {
+        self.expires_at_ms
+            .is_some_and(|expires_at_ms| now_ms < expires_at_ms)
+    }
+
+    /// Admission law for an entry supplied by a peer or read back from storage.
+    ///
+    /// Pre: `now_ms` is the receiver's clock.
+    /// Post: `Ok` implies the entry is live, its bound is at most
+    /// `now_ms + MAX_TTL_MS + TS_OFFSET_TOLERANCE_MS`, and every version it carries has a
+    /// logical time at most `now_ms + TS_OFFSET_TOLERANCE_MS`. The version bound keeps a
+    /// peer-supplied hybrid clock from pinning a key: an accepted floor can exceed the
+    /// receiver's clock only by the message skew tolerance, so honest writers issued after
+    /// that tolerance elapses dominate it again.
+    pub fn validate_admissible_at(&self, now_ms: u128) -> Result<()> {
+        let Some(expires_at_ms) = self.expires_at_ms.filter(|&bound| now_ms < bound) else {
+            return Err(Error::EntryNotLive);
+        };
+        let lifetime_bound = now_ms
+            .saturating_add(u128::from(MAX_TTL_MS))
+            .saturating_add(TS_OFFSET_TOLERANCE_MS);
+        if expires_at_ms > lifetime_bound {
+            return Err(Error::EntryLifetimeExceedsMax);
+        }
+        let clock_bound = now_ms.saturating_add(TS_OFFSET_TOLERANCE_MS);
+        if self
+            .versions()
+            .any(|version| version.logical_time_ms > clock_bound)
+        {
+            return Err(Error::EntryVersionAheadOfClock);
+        }
+        Ok(())
     }
 
     fn validate_same_carrier(&self, other: &Self) -> Result<()> {
@@ -513,6 +621,7 @@ impl Entry {
         register: Option<EntryVersion>,
         elements: impl IntoIterator<Item = (Encoded, EntryDot)>,
         tombstones: BTreeSet<EntryDot>,
+        expires_at_ms: Option<u128>,
     ) -> Self {
         let mut visible = elements
             .into_iter()
@@ -539,26 +648,33 @@ impl Entry {
                 dots,
                 tombstones: tombstones.into_iter().collect(),
             },
+            expires_at_ms,
         }
     }
 
-    fn materialize_topic_buffer(&self, buffer: DataTopicBuffer) -> Self {
+    fn materialize_topic_buffer(
+        &self,
+        buffer: DataTopicBuffer,
+        expires_at_ms: Option<u128>,
+    ) -> Self {
         Self::materialize_elements(
             self.did,
             self.kind,
             buffer.register,
             buffer.values,
             buffer.removes,
+            expires_at_ms,
         )
     }
 
-    fn materialize_relay_set(&self, set: RelayMessageSet) -> Self {
+    fn materialize_relay_set(&self, set: RelayMessageSet, expires_at_ms: Option<u128>) -> Self {
         Self::materialize_elements(
             self.did,
             self.kind,
             set.adds.register,
             set.adds.values,
             set.removes,
+            expires_at_ms,
         )
     }
 
@@ -639,16 +755,18 @@ impl Entry {
     /// Law: for a fixed `(did, kind)` carrier, this is the state-based CRDT
     /// join. Data entries are bounded LWW element sets with an LWW overwrite
     /// register; relay entries are two-phase sets whose remove side is carried
-    /// by tombstones.
+    /// by tombstones. The retention bound joins by `max`, so the product of the
+    /// payload lattice and the bound lattice is again a join-semilattice.
     pub fn join(&self, other: Self) -> Result<Self> {
         self.validate_same_carrier(&other)?;
+        let expires_at_ms = self.joined_lifetime(&other);
         match self.kind {
-            EntryKind::Data => {
-                Ok(self.materialize_topic_buffer(self.topic_buffer()?.join(other.topic_buffer()?)))
-            }
-            EntryKind::RelayMessage => {
-                Ok(self.materialize_relay_set(self.relay_set()?.join(other.relay_set()?)))
-            }
+            EntryKind::Data => Ok(self.materialize_topic_buffer(
+                self.topic_buffer()?.join(other.topic_buffer()?),
+                expires_at_ms,
+            )),
+            EntryKind::RelayMessage => Ok(self
+                .materialize_relay_set(self.relay_set()?.join(other.relay_set()?), expires_at_ms)),
         }
     }
 
@@ -692,24 +810,29 @@ impl Entry {
         match self.kind {
             EntryKind::Data => {
                 let buffer = self.topic_buffer()?;
-                Ok(self.materialize_topic_buffer(buffer))
+                Ok(self.materialize_topic_buffer(buffer, self.expires_at_ms))
             }
             EntryKind::RelayMessage => {
                 let set = self.relay_set()?;
-                Ok(self.materialize_relay_set(set))
+                Ok(self.materialize_relay_set(set, self.expires_at_ms))
             }
         }
     }
 
-    /// The entry point of [EntryOperation].
-    /// Will dispatch to different operation handlers according to the variant.
+    /// The entry point of [EntryOperation], stamping any unstamped witness from the local
+    /// clock. Will dispatch to different operation handlers according to the variant.
     pub fn operate(&self, op: EntryOperation, actor: Did) -> Result<Self> {
+        self.operate_at(get_epoch_ms(), op, actor)
+    }
+
+    /// [`Self::operate`] at an explicit operation-boundary time.
+    pub(crate) fn operate_at(&self, now_ms: u128, op: EntryOperation, actor: Did) -> Result<Self> {
         match op {
-            EntryOperation::Overwrite(entry) => self.overwrite(entry, actor),
-            EntryOperation::Extend(entry) => self.extend(entry, actor),
-            EntryOperation::Touch(entry) => self.touch(entry, actor),
+            EntryOperation::Overwrite(entry) => self.overwrite_at(now_ms, entry, actor),
+            EntryOperation::Extend(entry) => self.extend_at(now_ms, entry, actor),
+            EntryOperation::Touch(entry) => self.touch_at(now_ms, entry, actor),
             EntryOperation::Tombstone(entry) => self.tombstone(entry),
-            EntryOperation::CompactData(entry) => self.compact_data(entry, actor),
+            EntryOperation::CompactData(entry) => self.compact_data_at(now_ms, entry, actor),
         }
     }
 
@@ -722,10 +845,15 @@ impl Entry {
     ///
     /// The handler of [EntryOperation::Overwrite].
     pub fn overwrite(&self, other: Self, actor: Did) -> Result<Self> {
+        self.overwrite_at(get_epoch_ms(), other, actor)
+    }
+
+    fn overwrite_at(&self, now_ms: u128, other: Self, actor: Did) -> Result<Self> {
         if !self.is_data_entry() {
             return Err(Error::EntryNotOverwritable);
         }
         self.join(other.ensure_stamp_after(
+            now_ms,
             actor,
             self.max_observed_version(),
             EntryStampKind::Overwrite,
@@ -735,10 +863,15 @@ impl Entry {
     /// This method is used to extend data to a Data kind [`Entry`].
     /// The handler of [EntryOperation::Extend].
     pub fn extend(&self, other: Self, actor: Did) -> Result<Self> {
+        self.extend_at(get_epoch_ms(), other, actor)
+    }
+
+    fn extend_at(&self, now_ms: u128, other: Self, actor: Did) -> Result<Self> {
         if !self.is_data_entry() {
             return Err(Error::EntryNotAppendable);
         }
         self.join(other.ensure_stamp_after(
+            now_ms,
             actor,
             self.max_observed_version(),
             EntryStampKind::Delta,
@@ -749,10 +882,15 @@ impl Entry {
     /// If any element is already existed, move it to the end of the data vector.
     /// The handler of [EntryOperation::Touch].
     pub fn touch(&self, other: Self, actor: Did) -> Result<Self> {
+        self.touch_at(get_epoch_ms(), other, actor)
+    }
+
+    fn touch_at(&self, now_ms: u128, other: Self, actor: Did) -> Result<Self> {
         if !self.is_data_entry() {
             return Err(Error::EntryNotAppendable);
         }
         self.join(other.ensure_stamp_after(
+            now_ms,
             actor,
             self.max_observed_version(),
             EntryStampKind::Delta,
@@ -767,6 +905,7 @@ impl Entry {
     pub fn tombstone(&self, other: Self) -> Result<Self> {
         self.validate_same_carrier(&other)?;
 
+        let expires_at_ms = self.joined_lifetime(&other);
         let target_values = other.data.into_iter().collect::<BTreeSet<_>>();
         let target_dots = other.crdt.dots.into_iter().collect::<BTreeSet<_>>();
         let has_dot_witness = !target_dots.is_empty();
@@ -781,7 +920,7 @@ impl Entry {
                         buffer.removes.insert(*dot);
                     }
                 }
-                Ok(self.materialize_topic_buffer(buffer))
+                Ok(self.materialize_topic_buffer(buffer, expires_at_ms))
             }
             EntryKind::RelayMessage => {
                 let mut set = self.relay_set()?;
@@ -792,7 +931,7 @@ impl Entry {
                         set.removes.insert(*dot);
                     }
                 }
-                Ok(self.materialize_relay_set(set))
+                Ok(self.materialize_relay_set(set, expires_at_ms))
             }
         }
     }
@@ -804,15 +943,21 @@ impl Entry {
     /// under the greatest observed register floor, and older tombstone metadata
     /// is pruned by that floor.
     pub fn compact_data(&self, removals: Self, actor: Did) -> Result<Self> {
+        self.compact_data_at(get_epoch_ms(), removals, actor)
+    }
+
+    fn compact_data_at(&self, now_ms: u128, removals: Self, actor: Did) -> Result<Self> {
         match self.is_data_entry() {
-            true => self.compact_data_entry(removals, actor),
+            true => self.compact_data_entry(now_ms, removals, actor),
             false => Err(Error::EntryNotOverwritable),
         }
     }
 
-    fn compact_data_entry(&self, removals: Self, actor: Did) -> Result<Self> {
-        let removals = removals.ensure_overwrite_stamp_after(actor, self.max_observed_version())?;
+    fn compact_data_entry(&self, now_ms: u128, removals: Self, actor: Did) -> Result<Self> {
+        let removals =
+            removals.ensure_overwrite_stamp_after(now_ms, actor, self.max_observed_version())?;
         self.validate_same_carrier(&removals)?;
+        let expires_at_ms = self.joined_lifetime(&removals);
         let floor = removals.crdt.register.ok_or_else(|| {
             Error::InvalidMessage("compact data operation has no register floor".to_string())
         })?;
@@ -831,6 +976,7 @@ impl Entry {
             Some(output_floor),
             elements,
             tombstones,
+            expires_at_ms,
         ))
     }
 }

@@ -35,9 +35,16 @@
 //! still cannot authorize source cleanup unless the sync purpose carries a
 //! non-virtual `handoff_proof`.
 //!
+//! Retention:
+//! Every stored entry carries a retention bound (see [`Entry`]). Reads retire
+//! a value whose bound has elapsed before returning it, so `sigma_n[k]` below
+//! always denotes the live value; an expired value is absent from every
+//! transition here and is never republished, copied, or acknowledged.
+//!
 //! Safety:
-//! - S1 Additivity (#612): repair transitions in this module never call
-//!   `storage.remove`; they only deliver additional joins.
+//! - S1 Additivity (#612): repair transitions in this module never remove a
+//!   live value; they only deliver additional joins. The only removals they
+//!   perform are retention retirements of values that are already expired.
 //! - S1' Ownership validation: receivers persist only placements they accept
 //!   under their current `view`; stale senders keep local entries and retry in a
 //!   later anti-entropy round.
@@ -75,6 +82,7 @@ use crate::dht::entry::PlacementMiss;
 use crate::dht::ChordStorageRepair;
 use crate::dht::Did;
 use crate::error::Result;
+use crate::utils::get_epoch_ms;
 
 fn merge_actions(actions: Vec<PeerRingAction>) -> PeerRingAction {
     if actions.is_empty() {
@@ -207,7 +215,7 @@ impl ChordStorageRepair<PeerRingAction> for PeerRing {
         // redundancy) is either joined locally when self accepts it or emitted
         // as a copy action toward the local view's storage-sync destination.
         let mut actions = Vec::new();
-        for (_, entry) in self.storage.get_all().await? {
+        for (_, entry) in self.live_storage_entries(get_epoch_ms()).await? {
             let action = self.republish_entry(entry, redundancy).await?;
             push_action(&mut actions, action);
         }
