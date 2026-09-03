@@ -140,6 +140,14 @@ pub enum Error {
     #[error("Entry version logical time is beyond the accepted clock skew")]
     EntryVersionAheadOfClock,
 
+    /// Entry payload exceeds the per-payload size bound
+    #[error("Entry payload exceeds the per-payload size bound")]
+    EntryPayloadExceedsMax,
+
+    /// A storage lock was poisoned by a panicking holder
+    #[error("A storage lock was poisoned by a panicking holder")]
+    StorageLockPoisoned,
+
     /// Affine rotation scalar must be greater than zero
     #[error("Affine rotation scalar must be greater than zero")]
     InvalidAffineScalar,

@@ -33,12 +33,17 @@ impl<V> MemTable<V> {
         }
     }
 
+    /// Whether storing `key` would add a key that the bound must make room for.
+    fn bound_applies_to(&self, key: &str) -> Option<usize> {
+        let capacity = self.capacity?;
+        (!self.slots.contains(key)).then_some(capacity.get() as usize)
+    }
+
     /// Store `value` under `key`, restoring the key budget first.
     ///
     /// Post: `slots.len() <= capacity` when a bound is set.
     fn put(&mut self, key: String, value: V) {
-        if let Some(capacity) = self.capacity.filter(|_| !self.slots.contains(&key)) {
-            let capacity = capacity.get() as usize;
+        if let Some(capacity) = self.bound_applies_to(&key) {
             while self.slots.len() >= capacity {
                 if self.slots.pop_oldest().is_none() {
                     break;
@@ -77,11 +82,11 @@ impl<V> MemStorage<V> {
     }
 
     fn read(&self) -> Result<RwLockReadGuard<'_, MemTable<V>>> {
-        self.table.read().map_err(|_| Error::DHTSyncLockError)
+        self.table.read().map_err(|_| Error::StorageLockPoisoned)
     }
 
     fn write(&self) -> Result<RwLockWriteGuard<'_, MemTable<V>>> {
-        self.table.write().map_err(|_| Error::DHTSyncLockError)
+        self.table.write().map_err(|_| Error::StorageLockPoisoned)
     }
 }
 
@@ -119,7 +124,8 @@ where V: Clone + Send + Sync
     }
 
     async fn count(&self) -> Result<u32> {
-        Ok(self.read()?.slots.len() as u32)
+        let count = self.read()?.slots.len();
+        u32::try_from(count).map_err(|_| Error::MessageSizeOverflow)
     }
 }
 

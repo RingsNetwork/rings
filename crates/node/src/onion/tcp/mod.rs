@@ -145,8 +145,7 @@ impl NativeOnionCircuitHandle {
                 NativeOnionCircuitHandler {
                     runtime: runtime.clone(),
                     https,
-                    session_sk: handler_session_sk,
-                    network_id,
+                    signer: MessageSigner::new(handler_session_sk, network_id),
                 },
                 runtime.link_sender.clone(),
             ),
@@ -229,8 +228,8 @@ impl NativeOnionOpenStream {
 struct NativeOnionCircuitHandler {
     runtime: Arc<OnionTcpRuntime>,
     https: Arc<OnionHttpsRuntime>,
-    session_sk: SessionSk,
-    network_id: u32,
+    /// The exit's signing authority for backward payloads.
+    signer: MessageSigner<SessionSk>,
 }
 
 #[async_trait::async_trait]
@@ -241,7 +240,7 @@ impl OnionCircuitHandler for NativeOnionCircuitHandler {
             .matches_service(crate::onion::proxy::ONION_PROXY_HTTPS_SERVICE)
             && try_handle_https_exit_payload(
                 &self.https,
-                MessageSigner::new(&self.session_sk, self.network_id),
+                self.signer.by_ref(),
                 scope,
                 frame.clone(),
             )
@@ -266,8 +265,8 @@ impl OnionCircuitHandler for NativeOnionCircuitHandler {
 }
 
 struct OnionTcpRuntime {
-    session_sk: SessionSk,
-    network_id: u32,
+    /// The session key decrypts inbound cells; paired with the overlay it signs backward payloads.
+    signer: MessageSigner<SessionSk>,
     client_streams: Mutex<HashMap<TcpStreamKey, ClientStream>>,
     exit_streams: Mutex<HashMap<TcpStreamKey, ExitStream>>,
     forward_replays: Mutex<OnionForwardReplayPartitions>,
@@ -300,8 +299,7 @@ impl OnionTcpRuntime {
         link_sender: OnionLinkSender,
     ) -> Self {
         Self {
-            session_sk,
-            network_id,
+            signer: MessageSigner::new(session_sk, network_id),
             client_streams: Mutex::new(HashMap::new()),
             exit_streams: Mutex::new(HashMap::new()),
             forward_replays: Mutex::new(OnionForwardReplayPartitions::default()),
@@ -312,8 +310,12 @@ impl OnionTcpRuntime {
     }
 
     /// The authority that signs this exit's backward payloads.
-    fn message_signer(&self) -> MessageSigner<'_> {
-        MessageSigner::new(&self.session_sk, self.network_id)
+    fn message_signer(&self) -> MessageSigner<&SessionSk> {
+        self.signer.by_ref()
+    }
+
+    fn session_sk(&self) -> &SessionSk {
+        self.signer.session_sk()
     }
 
     async fn open_client_connection(
@@ -325,7 +327,7 @@ impl OnionTcpRuntime {
         let expected_return_peer = route_first_hop(&route)?;
         let expected_exit = route.exit().clone();
         let service = route.service_name().clone();
-        let client_return = OnionClientReturn::new(self.session_sk.session_public_key());
+        let client_return = OnionClientReturn::new(self.session_sk().session_public_key());
         let (tx, rx) = mpsc::channel(32);
         let (open_tx, open_rx) = oneshot::channel();
         let key = self.insert_client_stream(

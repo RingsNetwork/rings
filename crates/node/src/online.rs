@@ -1,6 +1,7 @@
 //! Signed online-node descriptors stored in the DHT.
 
 use rings_core::dht::Did;
+use rings_core::domain_tag;
 use rings_core::ecc::PublicKey;
 use rings_core::ecc::VerificationPublicKey;
 use rings_core::error::Error;
@@ -10,6 +11,7 @@ use rings_core::message::DhtProtocolMode;
 use rings_core::message::DomainTag;
 use rings_core::message::Encoded;
 use rings_core::message::Encoder;
+use rings_core::message::MessageSigner;
 use rings_core::message::MessageVerification;
 use rings_core::session::SessionSk;
 use serde::Deserialize;
@@ -28,7 +30,7 @@ pub const ONLINE_NODES_TOPIC: &str = "online_nodes";
 pub const ONLINE_NODE_CAPABILITY_STORAGE: &str = "storage";
 /// Message family of the online-node descriptor signature.
 const ONLINE_NODE_DESCRIPTOR_DOMAIN_TAG: DomainTag =
-    DomainTag::new("rings-node:online-node-descriptor:v1");
+    domain_tag!("rings-node:online-node-descriptor:v1");
 
 /// Runtime family advertised by a node descriptor.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -195,10 +197,13 @@ pub struct OnlineNodeDescriptor {
 
 impl OnlineNodeDescriptor {
     /// Create and sign a descriptor.
-    pub fn new_signed(body: OnlineNodeDescriptorBody, session_sk: &SessionSk) -> Result<Self> {
+    pub fn new_signed(
+        body: OnlineNodeDescriptorBody,
+        signer: MessageSigner<&SessionSk>,
+    ) -> Result<Self> {
         sign_descriptor_body(
             body,
-            session_sk,
+            signer,
             "online node descriptor DID/public key/session mismatch",
         )
     }
@@ -256,14 +261,15 @@ impl OnlineNodeDescriptor {
         self.dht_protocol_mode().matches(expected)
     }
 
-    /// Verify the descriptor signature and DID/public-key binding.
+    /// Verify the descriptor signature under the receiver's overlay `network_id` and the
+    /// DID/public-key binding.
     ///
     /// This does not apply the embedded [`MessageVerification`] timestamp/TTL
     /// as a liveness rule. Online-node liveness is defined solely by the
     /// signed `expires_at_ms` descriptor field; use [`Self::is_live_at`] when
     /// expiry should be enforced.
-    pub fn verify_signature(&self) -> bool {
-        self.descriptor_verify_signature()
+    pub fn verify_signature(&self, network_id: u32) -> bool {
+        self.descriptor_verify_signature(network_id)
     }
 
     /// Returns whether this descriptor is expired at `now_ms`.
@@ -271,23 +277,25 @@ impl OnlineNodeDescriptor {
         self.descriptor_is_expired_at(now_ms)
     }
 
-    /// Returns whether this descriptor has a valid signature and is not expired.
-    pub fn is_live_at(&self, now_ms: u128) -> bool {
-        self.descriptor_is_live_at(now_ms)
+    /// Returns whether this descriptor verifies under the overlay `network_id` and is not
+    /// expired.
+    pub fn is_live_at(&self, now_ms: u128, network_id: u32) -> bool {
+        self.descriptor_is_live_at(now_ms, network_id)
     }
 
-    /// Select the newest valid descriptor per DID.
+    /// Select the newest descriptor per DID that verifies under the overlay `network_id`.
     pub fn latest_valid_by_did(
         descriptors: impl IntoIterator<Item = Self>,
         now_ms: u128,
+        network_id: u32,
         include_expired: bool,
     ) -> Vec<Self> {
-        latest_valid_by_did(descriptors, now_ms, include_expired)
+        latest_valid_by_did(descriptors, now_ms, network_id, include_expired)
     }
 }
 
 impl SignedDescriptor for OnlineNodeDescriptor {
-    const DOMAIN_TAG: DomainTag = ONLINE_NODE_DESCRIPTOR_DOMAIN_TAG;
+    type Body = OnlineNodeDescriptorBody;
 
     fn descriptor_did(&self) -> Did {
         self.did
@@ -295,10 +303,6 @@ impl SignedDescriptor for OnlineNodeDescriptor {
 
     fn descriptor_public_key(&self) -> &VerificationPublicKey {
         &self.public_key
-    }
-
-    fn descriptor_network_id(&self) -> u32 {
-        self.network_id
     }
 
     fn descriptor_signature(&self) -> &MessageVerification {
@@ -336,6 +340,7 @@ mod tests {
     use rings_core::session::SessionSk;
 
     use super::*;
+    use crate::tests::TEST_NETWORK_ID;
 
     fn descriptor_at(heartbeat_at_ms: u128, expires_at_ms: u128) -> Result<OnlineNodeDescriptor> {
         let key = SecretKey::random();
@@ -357,20 +362,20 @@ mod tests {
                 expires_at_ms,
                 version: "test".to_string(),
             },
-            &session_sk,
+            MessageSigner::new(&session_sk, TEST_NETWORK_ID),
         )
     }
 
     #[test]
     fn test_descriptor_signature_covers_mutable_fields() -> Result<()> {
         let mut descriptor = descriptor_at(20, 30)?;
-        assert!(descriptor.verify_signature());
+        assert!(descriptor.verify_signature(TEST_NETWORK_ID));
 
         descriptor.node_type = OnlineNodeType::Browser;
-        assert!(!descriptor.verify_signature());
+        assert!(!descriptor.verify_signature(TEST_NETWORK_ID));
         descriptor = descriptor_at(20, 30)?;
         descriptor.storage_redundancy = 7;
-        assert!(!descriptor.verify_signature());
+        assert!(!descriptor.verify_signature(TEST_NETWORK_ID));
         Ok(())
     }
 
@@ -381,7 +386,7 @@ mod tests {
         let decoded = OnlineNodeDescriptor::from_encoded(&encoded)?;
 
         assert_eq!(decoded, descriptor);
-        assert!(decoded.verify_signature());
+        assert!(decoded.verify_signature(TEST_NETWORK_ID));
         Ok(())
     }
 
@@ -408,7 +413,7 @@ mod tests {
                 expires_at_ms: 100,
                 version: "old".to_string(),
             },
-            &session_sk,
+            MessageSigner::new(&session_sk, TEST_NETWORK_ID),
         )?;
         let newer = OnlineNodeDescriptor::new_signed(
             OnlineNodeDescriptorBody {
@@ -426,7 +431,7 @@ mod tests {
                 expires_at_ms: 100,
                 version: "new".to_string(),
             },
-            &session_sk,
+            MessageSigner::new(&session_sk, TEST_NETWORK_ID),
         )?;
         let other_live = descriptor_at(25, 100)?;
         let expired = descriptor_at(30, 40)?;
@@ -439,6 +444,7 @@ mod tests {
                 expired.clone(),
             ],
             50,
+            TEST_NETWORK_ID,
             false,
         );
 
@@ -451,6 +457,7 @@ mod tests {
         let with_expired = OnlineNodeDescriptor::latest_valid_by_did(
             vec![older, newer, other_live, expired],
             50,
+            TEST_NETWORK_ID,
             true,
         );
         assert_eq!(with_expired.len(), 3);

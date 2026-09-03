@@ -9,7 +9,6 @@ use std::sync::Mutex;
 
 use rings_core::dht::Did;
 use rings_core::ecc::SecretKey;
-#[cfg(rings_native)]
 use rings_core::message::MessageSigner;
 use rings_core::session::SessionSk;
 
@@ -58,10 +57,7 @@ use crate::processor::ProcessorBuilder;
 use crate::processor::ProcessorConfig;
 #[cfg(rings_native)]
 use crate::sync_lock::lock;
-
-/// Overlay every fixture exit descriptor is published for.
-#[cfg(rings_native)]
-const TEST_NETWORK_ID: u32 = 1;
+use crate::tests::TEST_NETWORK_ID;
 
 pub(super) fn session() -> SessionSk {
     SessionSk::new_with_seckey(&SecretKey::random()).expect("session key")
@@ -118,7 +114,7 @@ fn route_for_service(service: &str, relays: &[SessionSk], exit_session: &Session
             public_key,
             session_public_key: exit_session.session_public_key(),
             node_type: OnlineNodeType::Native,
-            network_id: 1,
+            network_id: TEST_NETWORK_ID,
             service: OnionExitService::new("https", OnionExitTransport::Tcp)
                 .expect("valid test service"),
             policy: Default::default(),
@@ -127,7 +123,7 @@ fn route_for_service(service: &str, relays: &[SessionSk], exit_session: &Session
             expires_at_ms: 1,
             version: "test".to_string(),
         },
-        exit_session,
+        MessageSigner::new(exit_session, TEST_NETWORK_ID),
     )
     .expect("signed exit");
     OnionRoute::new(

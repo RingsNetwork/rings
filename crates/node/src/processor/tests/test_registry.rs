@@ -1,3 +1,5 @@
+use rings_core::message::MessageSigner;
+
 use super::common::*;
 use super::*;
 
@@ -207,7 +209,7 @@ async fn test_online_node_descriptor_publishes_and_lists_signed_self() -> Result
         nodes[0].dht_virtual_nodes,
         processor.swarm.dht_virtual_nodes()
     );
-    assert!(nodes[0].verify_signature());
+    assert!(nodes[0].verify_signature(processor.swarm.network_id()));
     assert!(!nodes[0].is_expired_at(get_epoch_ms()));
     Ok(())
 }
@@ -421,7 +423,10 @@ async fn test_online_node_lookup_filters_expired_descriptors_by_default() -> Res
             expires_at_ms: now_ms.saturating_sub(30_000),
             version: crate::util::build_version(),
         },
-        &expired_processor.session_sk,
+        MessageSigner::new(
+            &expired_processor.session_sk,
+            expired_processor.swarm.network_id(),
+        ),
     )
     .map_err(Error::CoreError)?;
 
@@ -512,7 +517,7 @@ async fn test_online_node_lookup_filters_other_storage_redundancy_modes() -> Res
             expires_at_ms: now_ms.saturating_add(60_000),
             version: crate::util::build_version(),
         },
-        &foreign.session_sk,
+        MessageSigner::new(&foreign.session_sk, foreign.swarm.network_id()),
     )
     .map_err(Error::CoreError)?;
 
@@ -549,6 +554,8 @@ async fn test_online_node_registry_lists_multiple_nodes() -> Result<()> {
         .iter()
         .any(|descriptor| descriptor.did == published.did));
     assert!(nodes.iter().any(|descriptor| descriptor.did == other.did()));
-    assert!(nodes.iter().all(OnlineNodeDescriptor::verify_signature));
+    assert!(nodes
+        .iter()
+        .all(|descriptor| descriptor.verify_signature(processor.swarm.network_id())));
     Ok(())
 }

@@ -132,6 +132,9 @@ pub(crate) enum StorageSyncBatchStep {
 }
 
 pub(crate) struct StorageSyncBatch<'data> {
+    /// Admission time shared by validation and persistence, so a value admitted in the
+    /// validate phase cannot expire between phases and fail the batch half-written.
+    now_ms: u128,
     destination: StorageSyncDestination,
     data: &'data [PlacedEntry],
     validate_index: usize,
@@ -143,6 +146,7 @@ pub(crate) struct StorageSyncBatch<'data> {
 impl<'data> StorageSyncBatch<'data> {
     pub(crate) fn new(msg: &'data SyncEntriesWithSuccessor) -> Self {
         Self {
+            now_ms: get_epoch_ms(),
             destination: msg.destination,
             data: &msg.data,
             validate_index: 0,
@@ -239,7 +243,7 @@ impl<'data> StorageSyncBatch<'data> {
         // before any earlier entry has been written.
         if should_persist_synced_entry(transport, self.destination, placed.key)? {
             placed.validate_placement(transport.storage_redundancy())?;
-            placed.entry.validate_admissible_at(get_epoch_ms())?;
+            placed.entry.validate_admissible_at(self.now_ms)?;
             let entry = placed.entry.clone().try_into_storage_entry()?;
             self.accepted.push(SyncedEntryAck::new(placed.key, entry));
         }
@@ -254,7 +258,10 @@ impl<'data> StorageSyncBatch<'data> {
         let key = ack.key;
         let entry = ack.entry.clone();
 
-        transport.dht.join_storage_entry(key, entry).await?;
+        transport
+            .dht
+            .join_storage_entry(self.now_ms, key, entry)
+            .await?;
         #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
         crate::simulation::record_storage_persisted(transport.dht.did);
         self.persist_index += 1;

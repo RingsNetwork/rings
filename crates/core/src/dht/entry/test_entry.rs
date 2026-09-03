@@ -3,6 +3,10 @@ use num_bigint::BigUint;
 use super::*;
 use crate::algebra::assert_join_semilattice_laws;
 use crate::algebra::assert_strong_eventual_consistency;
+use crate::consts::DEFAULT_TTL_MS;
+use crate::consts::ENTRY_PAYLOAD_MAX_BYTES;
+use crate::consts::MAX_TTL_MS;
+use crate::consts::TS_OFFSET_TOLERANCE_MS;
 use crate::ecc::SecretKey;
 use crate::message::Message;
 use crate::message::MessageSigner;
@@ -330,7 +334,7 @@ fn test_forwarded_overwrite_witness_is_not_reissued_after_local_floor() -> Resul
     let current = overwrite_delta("topic", "current", 10)?;
     let stale_forwarded = overwrite_delta("topic", "stale", 1)?;
 
-    let updated = current.overwrite(stale_forwarded, actor())?;
+    let updated = current.overwrite(NOW_MS, stale_forwarded, actor())?;
 
     assert_eq!(decode_entry_data(&updated)?, vec![String::from("current")]);
     Ok(())
@@ -340,7 +344,7 @@ fn test_forwarded_overwrite_witness_is_not_reissued_after_local_floor() -> Resul
 fn test_overwrite_replaces_data_for_same_data_entry() -> Result<()> {
     let entry = data_entry("topic", "old")?;
     let other = data_entry("topic", "new")?;
-    let updated = entry.overwrite(other, actor())?;
+    let updated = entry.overwrite(NOW_MS, other, actor())?;
     assert_eq!(decode_entry_data(&updated)?, vec![String::from("new")]);
     Ok(())
 }
@@ -351,7 +355,7 @@ fn test_overwrite_rejects_non_data_entry() -> Result<()> {
     let other = entry.clone();
 
     assert!(matches!(
-        entry.overwrite(other, actor()),
+        entry.overwrite(NOW_MS, other, actor()),
         Err(Error::EntryNotOverwritable)
     ));
     Ok(())
@@ -364,7 +368,7 @@ fn test_overwrite_rejects_kind_mismatch() -> Result<()> {
     other.kind = EntryKind::RelayMessage;
 
     assert!(matches!(
-        entry.overwrite(other, actor()),
+        entry.overwrite(NOW_MS, other, actor()),
         Err(Error::EntryKindNotEqual)
     ));
     Ok(())
@@ -376,7 +380,7 @@ fn test_overwrite_rejects_key_mismatch() -> Result<()> {
     let other = data_entry("topic-b", "new")?;
 
     assert!(matches!(
-        entry.overwrite(other, actor()),
+        entry.overwrite(NOW_MS, other, actor()),
         Err(Error::EntryDidNotEqual)
     ));
     Ok(())
@@ -387,7 +391,7 @@ fn test_overwrite_caps_payloads_larger_than_max_len() -> Result<()> {
     let overflow = 3;
     let (incoming, incoming_count) = overflowing_data_entry("topic", overflow)?;
     let entry = data_entry("topic", "base")?;
-    let updated = entry.overwrite(incoming, actor())?;
+    let updated = entry.overwrite(NOW_MS, incoming, actor())?;
     assert_entry_keeps_recent_overflow(&updated, incoming_count, overflow)
 }
 
@@ -395,7 +399,7 @@ fn test_overwrite_caps_payloads_larger_than_max_len() -> Result<()> {
 fn test_extend_appends_data_for_same_entry() -> Result<()> {
     let entry = data_entry("topic", "first")?;
     let other = data_entry("topic", "second")?;
-    let updated = entry.extend(other, actor())?;
+    let updated = entry.extend(NOW_MS, other, actor())?;
     assert_eq!(decode_entry_data(&updated)?, vec![
         String::from("first"),
         String::from("second")
@@ -409,14 +413,14 @@ fn test_extend_trims_oldest_items_at_max_len() -> Result<()> {
     for i in 1..ENTRY_DATA_MAX_LEN {
         let data = format!("test{i}");
         let other = data_entry("topic", &data)?;
-        entry = entry.extend(other, actor())?;
+        entry = entry.extend(NOW_MS, other, actor())?;
         assert_eq!(entry.data.len(), i + 1);
     }
 
     for i in ENTRY_DATA_MAX_LEN..ENTRY_DATA_MAX_LEN + 10 {
         let data = format!("test{i}");
         let other = data_entry("topic", &data)?;
-        entry = entry.extend(other, actor())?;
+        entry = entry.extend(NOW_MS, other, actor())?;
         assert_eq!(entry.data.len(), ENTRY_DATA_MAX_LEN);
         let decoded = decode_entry_data(&entry)?;
         assert_eq!(
@@ -433,7 +437,7 @@ fn test_extend_caps_incoming_payloads_larger_than_max_len() -> Result<()> {
     let overflow = 3;
     let (incoming, incoming_count) = overflowing_data_entry("topic", overflow)?;
     let entry = data_entry("topic", "base")?;
-    let updated = entry.extend(incoming, actor())?;
+    let updated = entry.extend(NOW_MS, incoming, actor())?;
     assert_entry_keeps_recent_overflow(&updated, incoming_count, overflow)
 }
 
@@ -443,7 +447,7 @@ fn test_extend_rejects_non_data_entry() -> Result<()> {
     let other = entry.clone();
 
     assert!(matches!(
-        entry.extend(other, actor()),
+        entry.extend(NOW_MS, other, actor()),
         Err(Error::EntryNotAppendable)
     ));
     Ok(())
@@ -452,10 +456,10 @@ fn test_extend_rejects_non_data_entry() -> Result<()> {
 #[test]
 fn test_touch_moves_existing_items_to_end_once() -> Result<()> {
     let entry = data_entry("topic", "a")?
-        .extend(data_entry("topic", "b")?, actor())?
-        .extend(data_entry("topic", "c")?, actor())?;
+        .extend(NOW_MS, data_entry("topic", "b")?, actor())?
+        .extend(NOW_MS, data_entry("topic", "c")?, actor())?;
     let touched = data_entry("topic", "b")?;
-    let updated = entry.touch(touched, actor())?;
+    let updated = entry.touch(NOW_MS, touched, actor())?;
     assert_eq!(decode_entry_data(&updated)?, vec![
         String::from("a"),
         String::from("c"),
@@ -468,9 +472,9 @@ fn test_touch_moves_existing_items_to_end_once() -> Result<()> {
 fn test_touch_trims_oldest_non_touched_items_at_max_len() -> Result<()> {
     let mut entry = data_entry("topic", "test0")?;
     for i in 1..ENTRY_DATA_MAX_LEN {
-        entry = entry.extend(data_entry("topic", &format!("test{i}"))?, actor())?;
+        entry = entry.extend(NOW_MS, data_entry("topic", &format!("test{i}"))?, actor())?;
     }
-    let updated = entry.touch(data_entry("topic", "test0")?, actor())?;
+    let updated = entry.touch(NOW_MS, data_entry("topic", "test0")?, actor())?;
     assert_eq!(updated.data.len(), ENTRY_DATA_MAX_LEN);
     let decoded = decode_entry_data(&updated)?;
     assert_eq!(decoded.first(), Some(&String::from("test1")));
@@ -532,7 +536,7 @@ fn test_data_compaction_prunes_tombstones_and_preserves_current_live_payloads() 
     ]);
     assert!(!carrier.crdt.tombstones.is_empty());
 
-    let compacted = carrier.compact_data(data_entry("topic", "first")?, actor())?;
+    let compacted = carrier.compact_data(NOW_MS, data_entry("topic", "first")?, actor())?;
 
     assert_entry_data_set(&compacted, &["second", "concurrent"])?;
     assert!(compacted.crdt.register.is_some());
@@ -554,10 +558,10 @@ fn test_data_compaction_uses_one_shared_floor_for_divergent_replicas() -> Result
         .tombstone(first.clone())?;
     let left = tombstoned.clone().join(left_live)?;
     let right = tombstoned.join(right_live)?;
-    let op = EntryOperation::CompactData(data_entry("topic", "first")?).stamped(actor())?;
+    let op = EntryOperation::CompactData(data_entry("topic", "first")?).stamped(NOW_MS, actor())?;
 
-    let compacted_left = left.operate(op.clone(), Did::from(7u32))?;
-    let compacted_right = right.operate(op, Did::from(8u32))?;
+    let compacted_left = left.operate(NOW_MS, op.clone(), Did::from(7u32))?;
+    let compacted_right = right.operate(NOW_MS, op, Did::from(8u32))?;
 
     assert_eq!(compacted_left.crdt.register, compacted_right.crdt.register);
     let joined = compacted_left.join(compacted_right)?;
@@ -580,10 +584,10 @@ fn test_data_compaction_keeps_value_dots_stable_across_replica_positions() -> Re
         .tombstone(first.clone())?;
     let left = tombstoned.clone().join(left_live)?.join(shared.clone())?;
     let right = tombstoned.join(shared)?;
-    let op = EntryOperation::CompactData(data_entry("topic", "first")?).stamped(actor())?;
+    let op = EntryOperation::CompactData(data_entry("topic", "first")?).stamped(NOW_MS, actor())?;
 
-    let compacted_left = left.operate(op.clone(), Did::from(7u32))?;
-    let compacted_right = right.operate(op, Did::from(8u32))?;
+    let compacted_left = left.operate(NOW_MS, op.clone(), Did::from(7u32))?;
+    let compacted_right = right.operate(NOW_MS, op, Did::from(8u32))?;
     let joined = compacted_left.join(compacted_right.clone())?;
     assert_entry_data_set(&joined, &["left-live", "shared"])?;
 
@@ -602,7 +606,7 @@ fn test_delayed_data_compaction_preserves_post_floor_writes() -> Result<()> {
         .join(first.clone())?
         .join(second)?
         .tombstone(first.clone())?;
-    let op = EntryOperation::CompactData(data_entry("topic", "first")?).stamped(actor())?;
+    let op = EntryOperation::CompactData(data_entry("topic", "first")?).stamped(NOW_MS, actor())?;
     let floor = compact_operation_floor(&op)?;
     let readded_first = data_entry("topic", "first")?.stamp_delta(version_after(floor, 101)?)?;
     let late_live = data_entry("topic", "late-live")?.stamp_delta(version_after(floor, 102)?)?;
@@ -610,7 +614,7 @@ fn test_delayed_data_compaction_preserves_post_floor_writes() -> Result<()> {
     let late_live_dot = entry_dot_for_value(&late_live, "late-live")?;
     let with_post_floor_writes = tombstoned.join(readded_first)?.join(late_live)?;
 
-    let compacted = with_post_floor_writes.operate(op, Did::from(7u32))?;
+    let compacted = with_post_floor_writes.operate(NOW_MS, op, Did::from(7u32))?;
 
     assert_entry_data_set(&compacted, &["first", "second", "late-live"])?;
     assert_eq!(entry_dot_for_value(&compacted, "first")?, readded_first_dot);
@@ -622,7 +626,8 @@ fn test_delayed_data_compaction_preserves_post_floor_writes() -> Result<()> {
 
 #[test]
 fn test_delayed_data_compaction_preserves_newer_register_floor() -> Result<()> {
-    let op = EntryOperation::CompactData(data_entry("topic", "obsolete")?).stamped(actor())?;
+    let op =
+        EntryOperation::CompactData(data_entry("topic", "obsolete")?).stamped(NOW_MS, actor())?;
     let compact_floor = compact_operation_floor(&op)?;
     let stale_after_compact =
         data_entry("topic", "stale")?.stamp_delta(version_after(compact_floor, 1)?)?;
@@ -639,7 +644,7 @@ fn test_delayed_data_compaction_preserves_newer_register_floor() -> Result<()> {
     assert_entry_data_set(&state, &["reset"])?;
     assert_eq!(state.crdt.register, Some(reset_floor));
 
-    let compacted = state.operate(op, Did::from(7u32))?;
+    let compacted = state.operate(NOW_MS, op, Did::from(7u32))?;
 
     assert_entry_data_set(&compacted, &["reset"])?;
     assert_eq!(compacted.crdt.register, Some(reset_floor));
@@ -653,7 +658,7 @@ fn test_touch_caps_incoming_payloads_larger_than_max_len() -> Result<()> {
     let overflow = 3;
     let (incoming, incoming_count) = overflowing_data_entry("topic", overflow)?;
     let entry = data_entry("topic", "base")?;
-    let updated = entry.touch(incoming, actor())?;
+    let updated = entry.touch(NOW_MS, incoming, actor())?;
     assert_entry_keeps_recent_overflow(&updated, incoming_count, overflow)
 }
 
@@ -726,25 +731,13 @@ fn test_stamped_assigns_default_lifetime_and_preserves_existing() -> Result<()> 
         EntryOperation::CompactData(unstamped.clone()),
     ];
     for op in ops {
-        let stamped = op.stamped_at(NOW_MS, actor())?;
-        assert_eq!(stamped.into_entry().expires_at_ms, Some(expected));
+        let stamped = op.stamped(NOW_MS, actor())?;
+        assert_eq!(stamped.entry().expires_at_ms, Some(expected));
     }
 
-    let forwarded = EntryOperation::Extend(bounded(unstamped, 7)).stamped_at(NOW_MS, actor())?;
-    assert_eq!(forwarded.into_entry().expires_at_ms, Some(7));
+    let forwarded = EntryOperation::Extend(bounded(unstamped, 7)).stamped(NOW_MS, actor())?;
+    assert_eq!(forwarded.entry().expires_at_ms, Some(7));
     Ok(())
-}
-
-impl EntryOperation {
-    fn into_entry(self) -> Entry {
-        match self {
-            EntryOperation::Overwrite(entry)
-            | EntryOperation::Extend(entry)
-            | EntryOperation::Touch(entry)
-            | EntryOperation::Tombstone(entry)
-            | EntryOperation::CompactData(entry) => entry,
-        }
-    }
 }
 
 /// Law: the retention bound joins by `max`, commutatively, for data and relay carriers and for
@@ -764,7 +757,7 @@ fn test_join_takes_the_later_retention_bound() -> Result<()> {
     assert_eq!(tombstoned.expires_at_ms, Some(30));
 
     let compacted =
-        earlier.compact_data_at(NOW_MS, bounded(data_entry("topic", "a")?, 40), actor())?;
+        earlier.compact_data(NOW_MS, bounded(data_entry("topic", "a")?, 40), actor())?;
     assert_eq!(compacted.expires_at_ms, Some(40));
 
     let unbounded_join = data_delta("topic", "c", 3)?.join(earlier.clone())?;
@@ -772,81 +765,30 @@ fn test_join_takes_the_later_retention_bound() -> Result<()> {
     Ok(())
 }
 
-/// Retention policy is a property of the kind: relay entries (an offline destination's
-/// inbox) are stamped with and admitted up to their own, longer, bounds.
+/// Admission law: every payload is at most `ENTRY_PAYLOAD_MAX_BYTES` encoded bytes. The bound is
+/// per element, so the carrier stays a lattice and its size is bounded by the count cap.
 #[test]
-fn test_relay_entries_use_their_own_retention_policy() -> Result<()> {
-    let relay = relay_delta(Did::from(7u32), "m1", 1)?;
-    let stamped = EntryOperation::Extend(relay.clone())
-        .stamped_at(NOW_MS, actor())?
-        .into_entry();
-    assert_eq!(
-        stamped.expires_at_ms,
-        Some(NOW_MS + u128::from(DEFAULT_RELAY_ENTRY_TTL_MS))
+fn test_admission_bounds_every_payload_size() -> Result<()> {
+    let did = Entry::gen_did("topic")?;
+    let at_bound = Entry::new(
+        did,
+        vec![Encoded::from("x".repeat(ENTRY_PAYLOAD_MAX_BYTES))],
+        EntryKind::Data,
     );
-    assert!(u128::from(DEFAULT_RELAY_ENTRY_TTL_MS) > u128::from(MAX_TTL_MS));
-
-    let relay_limit = NOW_MS + u128::from(MAX_RELAY_ENTRY_TTL_MS) + TS_OFFSET_TOLERANCE_MS;
-    bounded(relay.clone(), relay_limit).validate_admissible_at(NOW_MS)?;
-    assert!(matches!(
-        bounded(relay, relay_limit + 1).validate_admissible_at(NOW_MS),
-        Err(Error::EntryLifetimeExceedsMax)
-    ));
-
-    let data_limit = NOW_MS + u128::from(MAX_TTL_MS) + TS_OFFSET_TOLERANCE_MS;
-    assert!(matches!(
-        bounded(data_delta("topic", "value", 1)?, data_limit + 1).validate_admissible_at(NOW_MS),
-        Err(Error::EntryLifetimeExceedsMax)
-    ));
-    Ok(())
-}
-
-/// Byte budget law: the retained suffix is the newest payloads that fit the kind's byte budget,
-/// so a busy relay inbox keeps only its most recent messages, and a payload that alone exceeds
-/// the budget is dropped rather than retained over it.
-#[test]
-fn test_byte_budget_keeps_newest_payloads() -> Result<()> {
-    let did = Did::from(7u32);
-    let unit = RELAY_INBOX_MAX_BYTES / 4;
-    let raw_message =
-        |counter: u32, filler: usize| Encoded::from(format!("{counter}:{}", "x".repeat(filler)));
-    let retained_bytes = |entry: &Entry| {
-        entry
-            .data
-            .iter()
-            .map(|value| value.value().len())
-            .sum::<usize>()
-    };
-    let prefixes = |entry: &Entry| {
-        entry
-            .data
-            .iter()
-            .filter_map(|value| value.value().split(':').next().map(str::to_owned))
-            .collect::<Vec<_>>()
-    };
-
-    let mut inbox = relay_entry();
-    for counter in 1..=5u32 {
-        let delta = Entry::new(
-            did,
-            vec![raw_message(counter, unit)],
-            EntryKind::RelayMessage,
-        )
-        .stamp_delta(version(counter))?;
-        inbox = inbox.join(delta)?;
-    }
-    assert!(retained_bytes(&inbox) <= RELAY_INBOX_MAX_BYTES);
-    assert_eq!(prefixes(&inbox), ["3", "4", "5"]);
+    bounded(at_bound, NOW_MS + 1_000).validate_admissible_at(NOW_MS)?;
 
     let oversize = Entry::new(
         did,
-        vec![raw_message(9, RELAY_INBOX_MAX_BYTES)],
-        EntryKind::RelayMessage,
-    )
-    .stamp_delta(version(9))?;
-    let joined = inbox.join(oversize)?;
-    assert!(retained_bytes(&joined) <= RELAY_INBOX_MAX_BYTES);
-    assert!(!prefixes(&joined).contains(&"9".to_owned()));
+        vec![
+            Encoded::from("small"),
+            Encoded::from("x".repeat(ENTRY_PAYLOAD_MAX_BYTES + 1)),
+        ],
+        EntryKind::Data,
+    );
+    assert!(matches!(
+        bounded(oversize, NOW_MS + 1_000).validate_admissible_at(NOW_MS),
+        Err(Error::EntryPayloadExceedsMax)
+    ));
     Ok(())
 }
 

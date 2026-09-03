@@ -241,6 +241,7 @@ impl Processor {
         Ok(OnlineNodeDescriptor::latest_valid_by_did(
             descriptors,
             get_epoch_ms(),
+            self.swarm.network_id(),
             include_expired,
         ))
     }
@@ -311,10 +312,9 @@ impl Processor {
         include_expired: bool,
     ) -> Vec<OnionExitDescriptor> {
         OnionExitDescriptor::latest_valid_by_service_did(
-            Self::onion_exit_descriptors_from_entry(entry)
-                .into_iter()
-                .filter(|descriptor| descriptor.matches_network(self.swarm.network_id())),
+            Self::onion_exit_descriptors_from_entry(entry),
             get_epoch_ms(),
+            self.swarm.network_id(),
             include_expired,
         )
         .into_iter()
@@ -326,10 +326,9 @@ impl Processor {
         let now_ms = get_epoch_ms();
         Self::onion_exit_descriptors_from_entry(entry)
             .into_iter()
-            .filter(|descriptor| descriptor.matches_network(self.swarm.network_id()))
             .any(|descriptor| {
                 (service.is_empty() || descriptor.offers_service(service))
-                    && descriptor.verify_signature()
+                    && descriptor.verify_signature(self.swarm.network_id())
                     && descriptor.is_expired_at(now_ms)
             })
     }

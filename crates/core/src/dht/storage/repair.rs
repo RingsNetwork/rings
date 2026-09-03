@@ -126,6 +126,7 @@ impl PeerRing {
 
     async fn copy_entry_to_placement(
         &self,
+        now_ms: u128,
         placement_key: Did,
         entry: &Entry,
     ) -> Result<PeerRingAction> {
@@ -141,7 +142,7 @@ impl PeerRing {
         let placed = PlacedEntry::new(placement_key, entry.clone());
         match self.storage_sync_target(placement_key)? {
             StorageSyncTarget::Local => {
-                self.join_storage_entry(placement_key, entry.clone())
+                self.join_storage_entry(now_ms, placement_key, entry.clone())
                     .await?;
                 Ok(PeerRingAction::None)
             }
@@ -155,6 +156,7 @@ impl PeerRing {
 
     async fn copy_entry_to_observed_miss(
         &self,
+        now_ms: u128,
         miss: PlacementMiss,
         entry: &Entry,
         redundancy: u16,
@@ -173,7 +175,8 @@ impl PeerRing {
         let placed = PlacedEntry::new(miss.key, entry.clone());
         placed.validate_placement(redundancy)?;
         if miss.owner == self.did {
-            self.join_storage_entry(placed.key, placed.entry).await?;
+            self.join_storage_entry(now_ms, placed.key, placed.entry)
+                .await?;
             Ok(PeerRingAction::None)
         } else {
             Ok(PeerRingAction::sync_entries_for_repair(
@@ -183,7 +186,12 @@ impl PeerRing {
         }
     }
 
-    async fn republish_entry(&self, entry: Entry, redundancy: u16) -> Result<PeerRingAction> {
+    async fn republish_entry(
+        &self,
+        now_ms: u128,
+        entry: Entry,
+        redundancy: u16,
+    ) -> Result<PeerRingAction> {
         if redundancy <= 1 {
             return Ok(PeerRingAction::None);
         }
@@ -191,7 +199,9 @@ impl PeerRing {
         let entry = entry.try_into_storage_entry()?;
         let mut actions = Vec::new();
         for placement_key in entry.did.rotate_affine(redundancy)? {
-            let action = self.copy_entry_to_placement(placement_key, &entry).await?;
+            let action = self
+                .copy_entry_to_placement(now_ms, placement_key, &entry)
+                .await?;
             push_action(&mut actions, action);
         }
         Ok(merge_actions(actions))
@@ -214,9 +224,10 @@ impl ChordStorageRepair<PeerRingAction> for PeerRing {
         // Post S4: for every local entry e, each key in place(id(e),
         // redundancy) is either joined locally when self accepts it or emitted
         // as a copy action toward the local view's storage-sync destination.
+        let now_ms = get_epoch_ms();
         let mut actions = Vec::new();
-        for (_, entry) in self.live_storage_entries(get_epoch_ms()).await? {
-            let action = self.republish_entry(entry, redundancy).await?;
+        for (_, entry) in self.live_storage_entries(now_ms).await? {
+            let action = self.republish_entry(now_ms, entry, redundancy).await?;
             push_action(&mut actions, action);
         }
         Ok(merge_actions(actions))
@@ -240,10 +251,11 @@ impl ChordStorageRepair<PeerRingAction> for PeerRing {
         // used only to validate observed misses, never to synthesize targets.
         // Preservation S1/S3: this transition never removes and duplicate copy
         // actions are duplicate Entry::join deliveries.
+        let now_ms = get_epoch_ms();
         let mut actions = Vec::new();
         for miss in misses.iter().copied() {
             let action = self
-                .copy_entry_to_observed_miss(miss, &entry, redundancy)
+                .copy_entry_to_observed_miss(now_ms, miss, &entry, redundancy)
                 .await?;
             push_action(&mut actions, action);
         }

@@ -7,27 +7,33 @@
 - Message, transaction, and descriptor signatures now sign a domain-separated transcript that
   binds the signer's `network_id` and a per-message-family tag. Signatures issued by earlier
   builds no longer verify, and a signature issued inside one overlay does not verify inside
-  another. `Transaction`, `MessagePayload`, and `PayloadSender` take a `MessageSigner` (a session
-  key acting inside one overlay) instead of a bare `SessionSk`, and
-  `MessageVerificationExt::verify` takes the receiver's `network_id`.
-- DHT entries carry a retention bound (`expires_at_ms`) stamped at the operation boundary and
-  bounded at admission, per entry kind: data entries use `DEFAULT_TTL_MS` / `MAX_TTL_MS`
-  (10 min / 100 min), relayed messages held for an offline destination use
-  `DEFAULT_RELAY_ENTRY_TTL_MS` / `MAX_RELAY_ENTRY_TTL_MS` (24 h / 7 d). Stored values without a
-  bound, or whose bound has elapsed, are retired on their next read and are never replicated or
-  served.
-- Each entry carrier is bounded in bytes as well as in payload count: data entries keep at most
-  `ENTRY_DATA_MAX_BYTES` (1 MiB) and relay inboxes at most `RELAY_INBOX_MAX_BYTES` (16 MiB) of
-  encoded payloads, dropping the oldest first so a busy inbox retains its newest messages.
+  another. Every signature is issued by a `MessageSigner` (a session key acting inside one
+  overlay; `MessageSigner<&SessionSk>` borrowed, `MessageSigner<SessionSk>` owned) and verified
+  under the receiver's overlay: `Transaction`, `MessagePayload`, `PayloadSender`, and the node
+  descriptors take a `MessageSigner`, `MessageVerificationExt::verify` and the descriptor
+  `verify_signature` / `is_live_at` / `latest_valid_by_*` take the receiver's `network_id`, and
+  signing a descriptor whose body states another overlay is refused. Domain tags are built with
+  `domain_tag!`.
+- DHT entries carry a retention bound (`expires_at_ms`) stamped at the operation boundary with
+  `DEFAULT_TTL_MS` and bounded at admission by `MAX_TTL_MS`. Stored values without a bound, or
+  whose bound has elapsed, are retired on their next read and are never replicated or served.
+  The native file store also retires a record the current schema cannot decode on the read that
+  discovers it, so values written by earlier builds are dropped instead of failing every later
+  write to their key.
 - Storage admission rejects peer-supplied CRDT versions whose logical time is more than
   `TS_OFFSET_TOLERANCE_MS` ahead of the receiver's clock, so a forged register floor can no longer
-  pin a key.
+  pin a key, and rejects any payload element larger than `ENTRY_PAYLOAD_MAX_BYTES` (64 KiB), so a
+  carrier holds at most `ENTRY_DATA_MAX_LEN * ENTRY_PAYLOAD_MAX_BYTES` encoded bytes. Admission is
+  applied to the peer-supplied delta, never to the receiver's join result.
+- `Entry::operate`, `overwrite`, `extend`, `touch`, `compact_data`, and `EntryOperation::stamped`
+  take the operation-boundary time explicitly; the clock is read only at the storage boundary.
 
 ### Fixed
 
 - The native file-backed storage now enforces its configured byte capacity: a write beyond the
   budget retires the least recently written keys first, a value larger than the whole budget is
-  rejected with `Error::StorageValueExceedsCapacity`, and the budget is restored on open.
+  rejected with `Error::StorageValueExceedsCapacity`, the index is updated only after the file
+  system operation succeeded, and the budget is restored on open.
 - The local fetched-entry cache is bounded at `LOCAL_CACHE_CAPACITY` entries, evicting the least
   recently written entry.
 

@@ -232,11 +232,12 @@ pub(crate) fn online_node_descriptor_from_info(
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 pub(crate) fn online_node_descriptors_from_infos(
     descriptors: impl IntoIterator<Item = OnlineNodeDescriptorInfo>,
+    network_id: u32,
 ) -> Vec<OnlineNodeDescriptor> {
     descriptors
         .into_iter()
         .filter_map(|descriptor| online_node_descriptor_from_info(descriptor).ok())
-        .filter(OnlineNodeDescriptor::verify_signature)
+        .filter(|descriptor| descriptor.verify_signature(network_id))
         .collect()
 }
 
@@ -282,12 +283,13 @@ pub(crate) fn onion_exit_descriptors_from_info(
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 pub(crate) fn onion_exit_descriptors_from_infos(
     descriptors: impl IntoIterator<Item = OnionExitDescriptorInfo>,
+    network_id: u32,
 ) -> Vec<OnionExitDescriptor> {
     descriptors
         .into_iter()
         .filter_map(|descriptor| onion_exit_descriptors_from_info(descriptor).ok())
         .flatten()
-        .filter(OnionExitDescriptor::verify_signature)
+        .filter(|descriptor| descriptor.verify_signature(network_id))
         .collect()
 }
 

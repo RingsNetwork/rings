@@ -234,7 +234,7 @@ pub(super) fn next_generated_key(keys: &mut impl Iterator<Item = SecretKey>) -> 
 pub(super) fn storage_sync_report_payload(
     request: &MessagePayload,
     report: SyncEntriesWithSuccessorReport,
-    signer: MessageSigner<'_>,
+    signer: MessageSigner<&SessionSk>,
     next_hop: Did,
     destination: Did,
 ) -> Result<MessagePayload> {

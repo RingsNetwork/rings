@@ -74,11 +74,11 @@ pub(crate) async fn build_onion_proxy_route_with_first_hop(
     let directory_exits = OnionExitDescriptor::latest_valid_by_service_did(
         reader.live_onion_exits("").await?,
         now_ms,
+        reader.dht_protocol_mode().network_id,
         false,
     );
     let service_exits = directory_exits
         .into_iter()
-        .filter(|exit| exit.matches_network(reader.dht_protocol_mode().network_id))
         .filter(|exit| exit.advertises_service_name(service_name.as_str()))
         .collect::<Vec<_>>();
     if service_exits.is_empty() {

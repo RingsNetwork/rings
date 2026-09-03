@@ -884,8 +884,8 @@ async fn test_live_storage_entries_retires_expired_values() -> Result<()> {
     let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
     let live_key = Did::from(100u32);
     let expired_key = Did::from(200u32);
-    let live_entry = data_entry(Did::from(10u32));
-    node.storage.put(&live_key.to_string(), &live_entry).await?;
+    let live_value = data_entry(Did::from(10u32));
+    node.storage.put(&live_key.to_string(), &live_value).await?;
     node.storage
         .put(
             &expired_key.to_string(),
@@ -894,7 +894,7 @@ async fn test_live_storage_entries_retires_expired_values() -> Result<()> {
         .await?;
 
     let entries = node.live_storage_entries(get_epoch_ms()).await?;
-    assert_eq!(entries, vec![(live_key.to_string(), live_entry)]);
+    assert_eq!(entries, vec![(live_key.to_string(), live_value)]);
     assert_eq!(node.storage.count().await?, 1);
     Ok(())
 }
@@ -906,7 +906,7 @@ async fn test_join_storage_entry_rejects_pinned_register() -> Result<()> {
     let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
     let placement_key = Did::from(100u32);
     let honest = data_entry_with_data(Did::from(10u32), "honest");
-    node.join_storage_entry(placement_key, honest.clone())
+    node.join_storage_entry(get_epoch_ms(), placement_key, honest.clone())
         .await?;
 
     let mut pinned = data_entry_with_data(Did::from(10u32), "pinned");
@@ -916,7 +916,8 @@ async fn test_join_storage_entry_rejects_pinned_register() -> Result<()> {
         Did::from(1u32),
     ));
     assert!(matches!(
-        node.join_storage_entry(placement_key, pinned).await,
+        node.join_storage_entry(get_epoch_ms(), placement_key, pinned)
+            .await,
         Err(Error::EntryVersionAheadOfClock)
     ));
     assert_eq!(
@@ -933,14 +934,19 @@ async fn test_join_storage_entry_bounds_retention() -> Result<()> {
     let placement_key = Did::from(100u32);
 
     assert!(matches!(
-        node.join_storage_entry(placement_key, expired(data_entry(Did::from(10u32))))
-            .await,
+        node.join_storage_entry(
+            get_epoch_ms(),
+            placement_key,
+            expired(data_entry(Did::from(10u32)))
+        )
+        .await,
         Err(Error::EntryNotLive)
     ));
     let mut overlong = data_entry(Did::from(10u32));
     overlong.expires_at_ms = Some(u128::MAX);
     assert!(matches!(
-        node.join_storage_entry(placement_key, overlong).await,
+        node.join_storage_entry(get_epoch_ms(), placement_key, overlong)
+            .await,
         Err(Error::EntryLifetimeExceedsMax)
     ));
     assert_eq!(node.storage.count().await?, 0);
@@ -959,8 +965,11 @@ async fn test_join_storage_entry_keeps_the_later_retention_bound() -> Result<()>
     let mut later = data_entry_with_data(Did::from(10u32), "b");
     later.expires_at_ms = Some(now_ms + 2_000);
 
-    node.join_storage_entry(placement_key, later).await?;
-    let stored = node.join_storage_entry(placement_key, earlier).await?;
+    node.join_storage_entry(now_ms, placement_key, later)
+        .await?;
+    let stored = node
+        .join_storage_entry(now_ms, placement_key, earlier)
+        .await?;
     assert_eq!(stored.expires_at_ms, Some(now_ms + 2_000));
     Ok(())
 }

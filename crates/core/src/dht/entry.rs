@@ -7,14 +7,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::algebra::JoinSemilattice;
-use crate::consts::DEFAULT_RELAY_ENTRY_TTL_MS;
-use crate::consts::DEFAULT_TTL_MS;
-use crate::consts::ENTRY_DATA_MAX_BYTES;
 use crate::consts::ENTRY_DATA_MAX_LEN;
-use crate::consts::MAX_RELAY_ENTRY_TTL_MS;
-use crate::consts::MAX_TTL_MS;
-use crate::consts::RELAY_INBOX_MAX_BYTES;
-use crate::consts::TS_OFFSET_TOLERANCE_MS;
 use crate::dht::Did;
 use crate::ecc::HashStr;
 use crate::error::Error;
@@ -23,9 +16,9 @@ use crate::message::Encoded;
 use crate::message::Encoder;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
-use crate::utils::get_epoch_ms;
 
 mod crdt;
+mod retention;
 
 pub use crdt::DataTopicBuffer;
 pub use crdt::EntryCrdt;
@@ -43,62 +36,21 @@ pub enum EntryKind {
     RelayMessage,
 }
 
-impl EntryKind {
-    /// Retention stamped at the operation boundary when the origin left it absent.
-    ///
-    /// Relay entries are an offline destination's inbox and outlive data entries.
-    pub const fn default_lifetime_ms(self) -> u64 {
-        match self {
-            EntryKind::Data => DEFAULT_TTL_MS,
-            EntryKind::RelayMessage => DEFAULT_RELAY_ENTRY_TTL_MS,
-        }
-    }
-
-    /// The longest retention a receiver admits for this kind.
-    pub const fn max_lifetime_ms(self) -> u64 {
-        match self {
-            EntryKind::Data => MAX_TTL_MS,
-            EntryKind::RelayMessage => MAX_RELAY_ENTRY_TTL_MS,
-        }
-    }
-
-    /// Encoded bytes one carrier of this kind retains; the oldest payloads are dropped first.
-    pub const fn max_data_bytes(self) -> usize {
-        match self {
-            EntryKind::Data => ENTRY_DATA_MAX_BYTES,
-            EntryKind::RelayMessage => RELAY_INBOX_MAX_BYTES,
-        }
-    }
-}
-
-/// Index of the first element of `visible` (ordered oldest to newest) that is retained under
-/// the kind's count and byte budgets.
-///
-/// Law: the retained suffix is the longest suffix whose length is at most
-/// [`ENTRY_DATA_MAX_LEN`] and whose encoded bytes sum to at most
-/// [`EntryKind::max_data_bytes`]. Newer payloads are always preferred, so a payload that alone
-/// exceeds the byte budget is dropped rather than retained over the budget.
-fn retained_suffix_start(visible: &[(Encoded, EntryDot)], kind: EntryKind) -> usize {
-    let max_bytes = kind.max_data_bytes();
-    let mut retained_bytes = 0usize;
-    let mut retained = 0usize;
-    for (value, _) in visible.iter().rev().take(ENTRY_DATA_MAX_LEN) {
-        let Some(next_bytes) = retained_bytes.checked_add(value.value().len()) else {
-            break;
-        };
-        if next_bytes > max_bytes {
-            break;
-        }
-        retained_bytes = next_bytes;
-        retained += 1;
-    }
-    visible.len().saturating_sub(retained)
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EntryStampKind {
     Overwrite,
     Delta,
+}
+
+/// The write witness an [`EntryOperation`] must carry after stamping.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EntryWitness {
+    /// Per-element dots, plus a reset register for overwrites.
+    Elements(EntryStampKind),
+    /// A register floor only.
+    Register,
+    /// No witness: the operation names existing dots or values.
+    None,
 }
 
 // Canonical stamp input for EntryVersion.operation.
@@ -196,12 +148,12 @@ fn placement_belongs_to_entry_key(entry_key: Did, placement: Did, redundancy: u1
 ///   message plus 1 (to ensure that the message is sent to the successor of destination),
 ///   thus while destination node going online, it will sync message from its successor.
 ///
-/// Retention: every entry accepted into storage carries a retention bound
-/// `expires_at_ms`, stamped by the origin at the operation boundary with the kind's
-/// [`EntryKind::default_lifetime_ms`] and bounded by the receiver at admission by the kind's
-/// [`EntryKind::max_lifetime_ms`] (see [`Entry::validate_admissible_at`]). The bound joins by `max`, so
-/// every accepted write extends the carrier's life to at least its own bound, and an entry whose
-/// bound has elapsed is dropped on the next read instead of being served or replicated.
+/// Retention: every entry accepted into storage carries a retention bound `expires_at_ms`,
+/// stamped by the origin at the operation boundary and bounded by the receiver at admission
+/// (see the `retention` module and [`Entry::validate_admissible_at`]). The bound joins by
+/// `max`, so every accepted write extends the carrier's life to at least its own bound, and an
+/// entry whose bound has elapsed is dropped on the next read instead of being served or
+/// replicated.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
     /// The ring key of this entry. It has the same representation as a node DID, but a
@@ -365,76 +317,68 @@ impl Entry {
 
 impl EntryOperation {
     /// Return this operation with CRDT versions and the retention bound assigned at the
-    /// operation boundary, read from the local clock.
+    /// operation boundary `now_ms`.
     ///
     /// Existing CRDT witnesses and an existing retention bound are preserved so forwarded
     /// operations keep the origin's dot/version and lifetime instead of being reissued by every
     /// routing hop.
-    pub fn stamped(self, actor: Did) -> Result<Self> {
-        self.stamped_at(get_epoch_ms(), actor)
-    }
-
-    /// [`Self::stamped`] at an explicit operation-boundary time.
     ///
     /// Post: every carried entry has `expires_at_ms = Some(_)`; an absent bound becomes
-    /// `now_ms + kind.default_lifetime_ms()`.
-    pub(crate) fn stamped_at(self, now_ms: u128, actor: Did) -> Result<Self> {
+    /// `now_ms + DEFAULT_TTL_MS`.
+    pub fn stamped(self, now_ms: u128, actor: Did) -> Result<Self> {
+        let witness = self.witness();
+        self.try_map_entry(|entry| {
+            let entry = entry.ensure_lifetime_from(now_ms);
+            match witness {
+                EntryWitness::Elements(kind) => entry.ensure_stamp_after(now_ms, actor, None, kind),
+                EntryWitness::Register => entry.ensure_overwrite_stamp_after(now_ms, actor, None),
+                EntryWitness::None => Ok(entry),
+            }
+        })
+    }
+
+    /// The write witness each operation kind must carry.
+    const fn witness(&self) -> EntryWitness {
+        match self {
+            EntryOperation::Overwrite(_) => EntryWitness::Elements(EntryStampKind::Overwrite),
+            EntryOperation::Extend(_) | EntryOperation::Touch(_) => {
+                EntryWitness::Elements(EntryStampKind::Delta)
+            }
+            EntryOperation::Tombstone(_) => EntryWitness::None,
+            EntryOperation::CompactData(_) => EntryWitness::Register,
+        }
+    }
+
+    /// The entry this operation carries.
+    pub fn entry(&self) -> &Entry {
+        match self {
+            EntryOperation::Overwrite(entry)
+            | EntryOperation::Extend(entry)
+            | EntryOperation::Touch(entry)
+            | EntryOperation::Tombstone(entry)
+            | EntryOperation::CompactData(entry) => entry,
+        }
+    }
+
+    /// Apply `f` to the carried entry, keeping the operation kind.
+    fn try_map_entry(self, f: impl FnOnce(Entry) -> Result<Entry>) -> Result<Self> {
         Ok(match self {
-            EntryOperation::Overwrite(entry) => {
-                EntryOperation::Overwrite(entry.ensure_lifetime_from(now_ms).ensure_stamp_after(
-                    now_ms,
-                    actor,
-                    None,
-                    EntryStampKind::Overwrite,
-                )?)
-            }
-            EntryOperation::Extend(entry) => {
-                EntryOperation::Extend(entry.ensure_lifetime_from(now_ms).ensure_stamp_after(
-                    now_ms,
-                    actor,
-                    None,
-                    EntryStampKind::Delta,
-                )?)
-            }
-            EntryOperation::Touch(entry) => {
-                EntryOperation::Touch(entry.ensure_lifetime_from(now_ms).ensure_stamp_after(
-                    now_ms,
-                    actor,
-                    None,
-                    EntryStampKind::Delta,
-                )?)
-            }
-            EntryOperation::Tombstone(entry) => {
-                EntryOperation::Tombstone(entry.ensure_lifetime_from(now_ms))
-            }
-            EntryOperation::CompactData(entry) => EntryOperation::CompactData(
-                entry
-                    .ensure_lifetime_from(now_ms)
-                    .ensure_overwrite_stamp_after(now_ms, actor, None)?,
-            ),
+            EntryOperation::Overwrite(entry) => EntryOperation::Overwrite(f(entry)?),
+            EntryOperation::Extend(entry) => EntryOperation::Extend(f(entry)?),
+            EntryOperation::Touch(entry) => EntryOperation::Touch(f(entry)?),
+            EntryOperation::Tombstone(entry) => EntryOperation::Tombstone(f(entry)?),
+            EntryOperation::CompactData(entry) => EntryOperation::CompactData(f(entry)?),
         })
     }
 
     /// Extract the did of target Entry.
     pub fn did(&self) -> Result<Did> {
-        Ok(match self {
-            EntryOperation::Overwrite(entry) => entry.did,
-            EntryOperation::Extend(entry) => entry.did,
-            EntryOperation::Touch(entry) => entry.did,
-            EntryOperation::Tombstone(entry) => entry.did,
-            EntryOperation::CompactData(entry) => entry.did,
-        })
+        Ok(self.entry().did)
     }
 
     /// Extract the kind of target Entry.
     pub fn kind(&self) -> EntryKind {
-        match self {
-            EntryOperation::Overwrite(entry) => entry.kind,
-            EntryOperation::Extend(entry) => entry.kind,
-            EntryOperation::Touch(entry) => entry.kind,
-            EntryOperation::Tombstone(entry) => entry.kind,
-            EntryOperation::CompactData(entry) => entry.kind,
-        }
+        self.entry().kind
     }
 
     /// Generate a target Entry when it is not existed.
@@ -450,26 +394,14 @@ impl TryFrom<MessagePayload> for Entry {
         // `+ 1` intentionally wraps in the fixed-width DID ring.
         let did = msg.signer() + Did::from(1u32);
         let data = msg.encode()?;
-        Ok(Self {
-            did,
-            data: vec![data],
-            kind: EntryKind::RelayMessage,
-            crdt: EntryCrdt::default(),
-            expires_at_ms: None,
-        })
+        Ok(Self::new(did, vec![data], EntryKind::RelayMessage))
     }
 }
 
 impl TryFrom<(String, Encoded)> for Entry {
     type Error = Error;
     fn try_from((topic, e): (String, Encoded)) -> Result<Self> {
-        Ok(Self {
-            did: Self::gen_did(&topic)?,
-            data: vec![e],
-            kind: EntryKind::Data,
-            crdt: EntryCrdt::default(),
-            expires_at_ms: None,
-        })
+        Ok(Self::new(Self::gen_did(&topic)?, vec![e], EntryKind::Data))
     }
 }
 
@@ -579,58 +511,6 @@ impl Entry {
         self.versions().max()
     }
 
-    /// Stamp the retention bound when the origin left it absent.
-    fn ensure_lifetime_from(mut self, now_ms: u128) -> Self {
-        if self.expires_at_ms.is_none() {
-            self.expires_at_ms =
-                Some(now_ms.saturating_add(u128::from(self.kind.default_lifetime_ms())));
-        }
-        self
-    }
-
-    /// The retention bound of a join: the later of the two bounds.
-    fn joined_lifetime(&self, other: &Self) -> Option<u128> {
-        self.expires_at_ms.max(other.expires_at_ms)
-    }
-
-    /// Whether this entry may still be served or replicated at `now_ms`.
-    ///
-    /// Post: `false` for an unstamped entry, so a legacy stored value without a bound is
-    /// retired on its next read.
-    pub fn is_live_at(&self, now_ms: u128) -> bool {
-        self.expires_at_ms
-            .is_some_and(|expires_at_ms| now_ms < expires_at_ms)
-    }
-
-    /// Admission law for an entry supplied by a peer or read back from storage.
-    ///
-    /// Pre: `now_ms` is the receiver's clock.
-    /// Post: `Ok` implies the entry is live, its bound is at most
-    /// `now_ms + kind.max_lifetime_ms() + TS_OFFSET_TOLERANCE_MS`, and every version it carries has a
-    /// logical time at most `now_ms + TS_OFFSET_TOLERANCE_MS`. The version bound keeps a
-    /// peer-supplied hybrid clock from pinning a key: an accepted floor can exceed the
-    /// receiver's clock only by the message skew tolerance, so honest writers issued after
-    /// that tolerance elapses dominate it again.
-    pub fn validate_admissible_at(&self, now_ms: u128) -> Result<()> {
-        let Some(expires_at_ms) = self.expires_at_ms.filter(|&bound| now_ms < bound) else {
-            return Err(Error::EntryNotLive);
-        };
-        let lifetime_bound = now_ms
-            .saturating_add(u128::from(self.kind.max_lifetime_ms()))
-            .saturating_add(TS_OFFSET_TOLERANCE_MS);
-        if expires_at_ms > lifetime_bound {
-            return Err(Error::EntryLifetimeExceedsMax);
-        }
-        let clock_bound = now_ms.saturating_add(TS_OFFSET_TOLERANCE_MS);
-        if self
-            .versions()
-            .any(|version| version.logical_time_ms > clock_bound)
-        {
-            return Err(Error::EntryVersionAheadOfClock);
-        }
-        Ok(())
-    }
-
     fn validate_same_carrier(&self, other: &Self) -> Result<()> {
         if !self.same_kind_as(other) {
             return Err(Error::EntryKindNotEqual);
@@ -693,7 +573,7 @@ impl Entry {
                 .cmp(right_dot)
                 .then_with(|| left_value.cmp(right_value))
         });
-        let skip_count = retained_suffix_start(&visible, kind);
+        let skip_count = visible.len().saturating_sub(ENTRY_DATA_MAX_LEN);
         let visible = visible.into_iter().skip(skip_count).collect::<Vec<_>>();
         let (data, dots): (Vec<_>, Vec<_>) = visible.into_iter().unzip();
 
@@ -861,8 +741,7 @@ impl Entry {
     ///
     /// Post: normalization uses the same carrier materialization as
     /// [`Self::join`]; there is no second cap strategy outside the CRDT.
-    /// Post: `result.data.len() <= ENTRY_DATA_MAX_LEN` and the encoded bytes of `result.data`
-    /// sum to at most `kind.max_data_bytes()`; when either budget binds, the oldest payloads
+    /// Post: `result.data.len() <= ENTRY_DATA_MAX_LEN`; when the cap binds, the oldest payloads
     /// are the ones dropped.
     /// Post: `result.data.len() == result.crdt.dots.len()` for Data and
     /// RelayMessage entries.
@@ -879,20 +758,16 @@ impl Entry {
         }
     }
 
-    /// The entry point of [EntryOperation], stamping any unstamped witness from the local
-    /// clock. Will dispatch to different operation handlers according to the variant.
-    pub fn operate(&self, op: EntryOperation, actor: Did) -> Result<Self> {
-        self.operate_at(get_epoch_ms(), op, actor)
-    }
-
-    /// [`Self::operate`] at an explicit operation-boundary time.
-    pub(crate) fn operate_at(&self, now_ms: u128, op: EntryOperation, actor: Did) -> Result<Self> {
+    /// The entry point of [EntryOperation] at the operation-boundary time `now_ms`, which
+    /// stamps any unstamped witness. Will dispatch to different operation handlers according to
+    /// the variant.
+    pub fn operate(&self, now_ms: u128, op: EntryOperation, actor: Did) -> Result<Self> {
         match op {
-            EntryOperation::Overwrite(entry) => self.overwrite_at(now_ms, entry, actor),
-            EntryOperation::Extend(entry) => self.extend_at(now_ms, entry, actor),
-            EntryOperation::Touch(entry) => self.touch_at(now_ms, entry, actor),
+            EntryOperation::Overwrite(entry) => self.overwrite(now_ms, entry, actor),
+            EntryOperation::Extend(entry) => self.extend(now_ms, entry, actor),
+            EntryOperation::Touch(entry) => self.touch(now_ms, entry, actor),
             EntryOperation::Tombstone(entry) => self.tombstone(entry),
-            EntryOperation::CompactData(entry) => self.compact_data_at(now_ms, entry, actor),
+            EntryOperation::CompactData(entry) => self.compact_data(now_ms, entry, actor),
         }
     }
 
@@ -904,11 +779,7 @@ impl Entry {
     /// non-monotone assignment.
     ///
     /// The handler of [EntryOperation::Overwrite].
-    pub fn overwrite(&self, other: Self, actor: Did) -> Result<Self> {
-        self.overwrite_at(get_epoch_ms(), other, actor)
-    }
-
-    fn overwrite_at(&self, now_ms: u128, other: Self, actor: Did) -> Result<Self> {
+    pub fn overwrite(&self, now_ms: u128, other: Self, actor: Did) -> Result<Self> {
         if !self.is_data_entry() {
             return Err(Error::EntryNotOverwritable);
         }
@@ -922,11 +793,7 @@ impl Entry {
 
     /// This method is used to extend data to a Data kind [`Entry`].
     /// The handler of [EntryOperation::Extend].
-    pub fn extend(&self, other: Self, actor: Did) -> Result<Self> {
-        self.extend_at(get_epoch_ms(), other, actor)
-    }
-
-    fn extend_at(&self, now_ms: u128, other: Self, actor: Did) -> Result<Self> {
+    pub fn extend(&self, now_ms: u128, other: Self, actor: Did) -> Result<Self> {
         if !self.is_data_entry() {
             return Err(Error::EntryNotAppendable);
         }
@@ -941,11 +808,7 @@ impl Entry {
     /// This method is used to extend data to a Data kind [`Entry`] uniquely.
     /// If any element is already existed, move it to the end of the data vector.
     /// The handler of [EntryOperation::Touch].
-    pub fn touch(&self, other: Self, actor: Did) -> Result<Self> {
-        self.touch_at(get_epoch_ms(), other, actor)
-    }
-
-    fn touch_at(&self, now_ms: u128, other: Self, actor: Did) -> Result<Self> {
+    pub fn touch(&self, now_ms: u128, other: Self, actor: Did) -> Result<Self> {
         if !self.is_data_entry() {
             return Err(Error::EntryNotAppendable);
         }
@@ -1002,11 +865,7 @@ impl Entry {
     /// Post: every current visible payload not listed in `removals` is preserved
     /// under the greatest observed register floor, and older tombstone metadata
     /// is pruned by that floor.
-    pub fn compact_data(&self, removals: Self, actor: Did) -> Result<Self> {
-        self.compact_data_at(get_epoch_ms(), removals, actor)
-    }
-
-    fn compact_data_at(&self, now_ms: u128, removals: Self, actor: Did) -> Result<Self> {
+    pub fn compact_data(&self, now_ms: u128, removals: Self, actor: Did) -> Result<Self> {
         match self.is_data_entry() {
             true => self.compact_data_entry(now_ms, removals, actor),
             false => Err(Error::EntryNotOverwritable),

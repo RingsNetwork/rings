@@ -12,9 +12,15 @@
 //! integers are big-endian, and `len(tag)` is one byte. The length prefix makes the tag component
 //! prefix-free, so transcripts of distinct domains never collide for any `m`. Binding `network_id`
 //! makes a signature non-portable across overlays that share a session key; binding the tag makes
-//! it non-portable across message families that share a signing surface. Both bindings are
-//! verified by the receiver against *its own* domain, never against a value carried in the
-//! message.
+//! it non-portable across message families that share a signing surface.
+//!
+//! Authority: every signature is issued by a [`MessageSigner`], a session key paired with the
+//! overlay it acts in, and every verification is performed against the *receiver's* domain, never
+//! against a value carried in the message. A type that embeds a verification implements
+//! [`MessageVerificationExt`] with its own [`DomainTag`] and verifies under the receiver's
+//! `network_id`.
+
+use std::borrow::Borrow;
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -31,20 +37,19 @@ use crate::utils::get_epoch_ms;
 /// Name of one signed message family; the first component of a [`SigningDomain`].
 ///
 /// Law: `label.len() <= u8::MAX`, so the label fits its one-byte length prefix in the
-/// transcript. The bound is checked when a tag is constructed, at compile time for `const` tags.
+/// transcript. Construct tags with [`domain_tag!`](crate::domain_tag), which checks the law at
+/// compile time; [`DomainTag::new`] is the total form for labels known only at runtime.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DomainTag(&'static str);
 
 impl DomainTag {
-    /// Name a message family.
-    ///
-    /// Panics at compile time when a `const` label is longer than `u8::MAX` bytes.
-    pub const fn new(label: &'static str) -> Self {
-        assert!(
-            label.len() <= u8::MAX as usize,
-            "domain tag label must fit its one-byte length prefix"
-        );
-        Self(label)
+    /// Name a message family, or `None` when `label` does not fit its length prefix.
+    pub const fn new(label: &'static str) -> Option<Self> {
+        if label.len() <= u8::MAX as usize {
+            Some(Self(label))
+        } else {
+            None
+        }
     }
 
     /// The label bytes.
@@ -56,6 +61,24 @@ impl DomainTag {
     const fn len_byte(self) -> u8 {
         self.0.len() as u8
     }
+}
+
+/// Name a message family from a literal, rejecting at compile time a label longer than the
+/// one-byte length prefix allows.
+#[macro_export]
+macro_rules! domain_tag {
+    ($label:literal) => {{
+        const _: () = assert!(
+            $label.len() <= u8::MAX as usize,
+            "domain tag label must fit its one-byte length prefix"
+        );
+        const TAG: $crate::message::DomainTag = match $crate::message::DomainTag::new($label) {
+            Some(tag) => tag,
+            // Excluded by the assertion above.
+            None => unreachable!(),
+        };
+        TAG
+    }};
 }
 
 /// The message family and overlay a signature transcript is bound to.
@@ -106,16 +129,24 @@ impl SigningDomain {
 ///
 /// Signing is the map `(session_sk, network_id) × (tag, data) → MessageVerification`. This
 /// type fixes the first component, so message constructors take one authority instead of a key
-/// and an overlay that could be paired inconsistently.
-#[derive(Clone, Copy)]
-pub struct MessageSigner<'a> {
-    session_sk: &'a SessionSk,
+/// and an overlay that could be paired inconsistently. `S` is how the key is held: a borrowed
+/// authority `MessageSigner<&SessionSk>` is `Copy` and is what signing functions take; an owned
+/// authority `MessageSigner<SessionSk>` is what long-lived runtimes store, so the pairing is
+/// never split across two fields.
+///
+/// Law: copying or cloning an authority is semantically invisible, since it names the same key
+/// and the same overlay.
+#[derive(Clone, Copy, Debug)]
+pub struct MessageSigner<S> {
+    session_sk: S,
     network_id: u32,
 }
 
-impl<'a> MessageSigner<'a> {
+impl<S> MessageSigner<S>
+where S: Borrow<SessionSk>
+{
     /// Let `session_sk` sign on behalf of the overlay `network_id`.
-    pub const fn new(session_sk: &'a SessionSk, network_id: u32) -> Self {
+    pub const fn new(session_sk: S, network_id: u32) -> Self {
         Self {
             session_sk,
             network_id,
@@ -123,27 +154,43 @@ impl<'a> MessageSigner<'a> {
     }
 
     /// The session key.
-    pub const fn session_sk(self) -> &'a SessionSk {
-        self.session_sk
+    pub fn session_sk(&self) -> &SessionSk {
+        self.session_sk.borrow()
     }
 
     /// The overlay this authority signs for.
-    pub const fn network_id(self) -> u32 {
+    pub const fn network_id(&self) -> u32 {
         self.network_id
     }
 
     /// The account DID that authorized the session key.
-    pub fn account_did(self) -> Did {
-        self.session_sk.account_did()
+    pub fn account_did(&self) -> Did {
+        self.session_sk().account_did()
     }
 
-    /// Sign `data` as a member of the message family `tag` inside this overlay.
-    pub fn sign(self, tag: DomainTag, data: &[u8]) -> Result<MessageVerification> {
-        MessageVerification::new(
-            SigningDomain::new(tag, self.network_id),
-            data,
-            self.session_sk,
-        )
+    /// This authority borrowing its key: the form signing functions take.
+    pub fn by_ref(&self) -> MessageSigner<&SessionSk> {
+        MessageSigner::new(self.session_sk(), self.network_id)
+    }
+
+    /// This authority owning a copy of its key: the form long-lived runtimes store.
+    pub fn to_owned(&self) -> MessageSigner<SessionSk> {
+        MessageSigner::new(self.session_sk().clone(), self.network_id)
+    }
+
+    /// Sign `data` as a member of the message family `tag` inside this overlay, stamped with
+    /// the current time and the default TTL.
+    pub fn sign(&self, tag: DomainTag, data: &[u8]) -> Result<MessageVerification> {
+        let domain = SigningDomain::new(tag, self.network_id);
+        let ts_ms = get_epoch_ms();
+        let ttl_ms = DEFAULT_TTL_MS;
+        let msg = domain.transcript(data, ts_ms, ttl_ms);
+        Ok(MessageVerification {
+            session: self.session_sk().session(),
+            sig: self.session_sk().sign(&msg)?,
+            ttl_ms,
+            ts_ms,
+        })
     }
 }
 
@@ -162,21 +209,6 @@ pub struct MessageVerification {
 }
 
 impl MessageVerification {
-    /// Sign `data` under `domain` with the [SessionSk], stamped with the current time and the
-    /// default TTL.
-    pub fn new(domain: SigningDomain, data: &[u8], session_sk: &SessionSk) -> Result<Self> {
-        let ts_ms = get_epoch_ms();
-        let ttl_ms = DEFAULT_TTL_MS;
-        let msg = domain.transcript(data, ts_ms, ttl_ms);
-        let verification = MessageVerification {
-            session: session_sk.session(),
-            sig: session_sk.sign(&msg)?,
-            ttl_ms,
-            ts_ms,
-        };
-        Ok(verification)
-    }
-
     /// Verify the signature over `data` under the receiver's `domain`.
     pub fn verify(&self, domain: SigningDomain, data: &[u8]) -> bool {
         let msg = domain.transcript(data, self.ts_ms, self.ttl_ms);
@@ -262,8 +294,8 @@ mod tests {
     use super::*;
     use crate::ecc::SecretKey;
 
-    const FIXTURE_TAG: DomainTag = DomainTag::new("rings-core:test:fixture:v1");
-    const OTHER_TAG: DomainTag = DomainTag::new("rings-core:test:other:v1");
+    const FIXTURE_TAG: DomainTag = domain_tag!("rings-core:test:fixture:v1");
+    const OTHER_TAG: DomainTag = domain_tag!("rings-core:test:other:v1");
     const NETWORK_ID: u32 = 7;
 
     struct VerifiedFixture {
@@ -286,11 +318,15 @@ mod tests {
         SigningDomain::new(FIXTURE_TAG, NETWORK_ID)
     }
 
+    fn fixture_signer(session_sk: &SessionSk) -> MessageSigner<&SessionSk> {
+        MessageSigner::new(session_sk, NETWORK_ID)
+    }
+
     #[test]
     fn test_expiration_handles_timestamp_below_tolerance_without_underflow() -> Result<()> {
         let key = SecretKey::random();
         let session_sk = SessionSk::new_with_seckey(&key)?;
-        let mut verification = MessageVerification::new(fixture_domain(), &[], &session_sk)?;
+        let mut verification = fixture_signer(&session_sk).sign(FIXTURE_TAG, &[])?;
         verification.ts_ms = 0;
         let fixture = VerifiedFixture { verification };
 
@@ -355,12 +391,21 @@ mod tests {
         assert_eq!(transcript, expected);
     }
 
+    /// Law: a label longer than the one-byte length prefix is not a tag.
+    #[test]
+    fn test_domain_tag_rejects_label_beyond_length_prefix() {
+        const LONG: &str = "rings-core:test:long-label:v1 - 0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789";
+        assert!(LONG.len() > usize::from(u8::MAX));
+        assert!(DomainTag::new(LONG).is_none());
+        assert!(DomainTag::new("rings-core:test:short:v1").is_some());
+    }
+
     /// Law: a signature issued for overlay `n` does not verify under overlay `n' != n`.
     #[test]
     fn test_signature_is_bound_to_the_overlay() -> Result<()> {
         let key = SecretKey::random();
         let session_sk = SessionSk::new_with_seckey(&key)?;
-        let verification = MessageVerification::new(fixture_domain(), b"data", &session_sk)?;
+        let verification = fixture_signer(&session_sk).sign(FIXTURE_TAG, b"data")?;
 
         assert!(verification.verify(fixture_domain(), b"data"));
         assert!(!verification.verify(SigningDomain::new(FIXTURE_TAG, NETWORK_ID + 1), b"data"));
@@ -372,7 +417,7 @@ mod tests {
     fn test_signature_is_bound_to_the_message_family() -> Result<()> {
         let key = SecretKey::random();
         let session_sk = SessionSk::new_with_seckey(&key)?;
-        let verification = MessageVerification::new(fixture_domain(), b"data", &session_sk)?;
+        let verification = fixture_signer(&session_sk).sign(FIXTURE_TAG, b"data")?;
 
         assert!(!verification.verify(SigningDomain::new(OTHER_TAG, NETWORK_ID), b"data"));
         Ok(())
@@ -384,7 +429,7 @@ mod tests {
     fn test_ext_verify_uses_type_tag_and_receiver_overlay() -> Result<()> {
         let key = SecretKey::random();
         let session_sk = SessionSk::new_with_seckey(&key)?;
-        let signer = MessageSigner::new(&session_sk, NETWORK_ID);
+        let signer = fixture_signer(&session_sk);
         let fixture = VerifiedFixture {
             verification: signer.sign(FIXTURE_TAG, &[])?,
         };
@@ -396,6 +441,20 @@ mod tests {
             verification: signer.sign(OTHER_TAG, &[])?,
         };
         assert!(!mislabeled.verify(NETWORK_ID));
+        Ok(())
+    }
+
+    /// Law: the owned and borrowed forms of one authority sign identically verifiable proofs.
+    #[test]
+    fn test_owned_and_borrowed_authorities_are_the_same_signer() -> Result<()> {
+        let key = SecretKey::random();
+        let session_sk = SessionSk::new_with_seckey(&key)?;
+        let owned = fixture_signer(&session_sk).to_owned();
+        let proof = owned.by_ref().sign(FIXTURE_TAG, b"data")?;
+
+        assert_eq!(owned.network_id(), NETWORK_ID);
+        assert_eq!(owned.account_did(), session_sk.account_did());
+        assert!(proof.verify(fixture_domain(), b"data"));
         Ok(())
     }
 }

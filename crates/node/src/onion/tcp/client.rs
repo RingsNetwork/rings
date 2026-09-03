@@ -1,5 +1,6 @@
 use rings_core::ecc::PublicKey;
 use rings_core::message::MessageSigner;
+use rings_core::session::SessionSk;
 
 use super::*;
 use crate::onion::circuit::OnionBackwardPath;
@@ -69,7 +70,7 @@ async fn send_client_payload(
 pub(super) struct TcpBackwardRoute<'route> {
     pub(super) link_sender: &'route OnionLinkSender,
     pub(super) scope: &'route Scope,
-    pub(super) signer: MessageSigner<'route>,
+    pub(super) signer: MessageSigner<&'route SessionSk>,
     pub(super) service: &'route OnionServiceName,
     pub(super) circuit_id: OnionCircuitId,
     pub(super) return_peer: Did,

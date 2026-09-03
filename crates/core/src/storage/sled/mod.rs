@@ -8,10 +8,14 @@
 //! `Error::StorageValueExceedsCapacity` and changes nothing. The budget is also restored when
 //! the storage is opened, so lowering the configured capacity retires the oldest files.
 //!
-//! The in-memory index mirrors the directory: it is rebuilt from the directory on open and
-//! updated by every write under the same lock, and the directory is owned exclusively by this
-//! instance while it is open. A retired file that fails to delete is dropped from the index and
-//! reclaimed by the next open.
+//! Index law: the in-memory index mirrors the directory. It is rebuilt from the directory on
+//! open (stale `.tmp` files from an interrupted write are removed then), every write updates it
+//! under the same lock only after the file system operation succeeded, and the directory is
+//! owned exclusively by this instance while it is open.
+//!
+//! Decode law: the store holds only records decodable as `V`. A record the current schema
+//! cannot decode (written by an earlier build) is retired on the read that discovers it and
+//! reported absent, so it neither serves stale data nor occupies the budget.
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -62,11 +66,6 @@ impl FileIndex {
         self.used_bytes = self.used_bytes.saturating_sub(len);
         Some(name)
     }
-
-    fn forget_all(&mut self) {
-        self.files.clear();
-        self.used_bytes = 0;
-    }
 }
 
 /// StorageInstance struct
@@ -88,15 +87,11 @@ impl SledStorage {
             capacity: u64::from(cap),
             index: RwLock::new(FileIndex::default()),
         };
-        let mut index = storage.index.write().map_err(|_| Error::DHTSyncLockError)?;
+        let mut index = storage.write_index()?;
         *index = storage.scan_directory()?;
         storage.retire_until_fits(&mut index, 0)?;
         drop(index);
         Ok(storage)
-    }
-
-    fn key_path(&self, key: &str) -> PathBuf {
-        self.root.join(file_name_for(key))
     }
 
     /// Rebuild the index from the directory, ordering files by their modification time so the
@@ -112,6 +107,10 @@ impl SledStorage {
         let mut files = Vec::new();
         for entry in entries.flatten() {
             let path = entry.path();
+            if path.extension().is_some_and(|extension| extension == "tmp") {
+                remove_file_if_present(&path)?;
+                continue;
+            }
             let Some(name) = entry_file_name(&path) else {
                 continue;
             };
@@ -142,11 +141,31 @@ impl SledStorage {
     }
 
     fn read_index(&self) -> Result<RwLockReadGuard<'_, FileIndex>> {
-        self.index.read().map_err(|_| Error::DHTSyncLockError)
+        self.index.read().map_err(|_| Error::StorageLockPoisoned)
     }
 
     fn write_index(&self) -> Result<RwLockWriteGuard<'_, FileIndex>> {
-        self.index.write().map_err(|_| Error::DHTSyncLockError)
+        self.index.write().map_err(|_| Error::StorageLockPoisoned)
+    }
+
+    /// Remove the record stored as `name` and forget it.
+    fn retire(&self, name: &str) -> Result<()> {
+        let mut index = self.write_index()?;
+        remove_file_if_present(&self.root.join(name))?;
+        index.forget(name);
+        Ok(())
+    }
+
+    /// Decode one record file, retiring it when the current schema cannot read it.
+    fn decode_record<V>(&self, name: &str, data: &[u8]) -> Result<Option<(String, V)>>
+    where V: DeserializeOwned {
+        match rings_codec::deserialize::<(String, V)>(data) {
+            Ok(record) => Ok(Some(record)),
+            Err(_) => {
+                self.retire(name)?;
+                Ok(None)
+            }
+        }
     }
 }
 
@@ -169,76 +188,92 @@ impl<V> KvStorageInterface<V> for SledStorage
 where V: Serialize + DeserializeOwned + Sync
 {
     async fn get(&self, key: &str) -> Result<Option<V>> {
-        let _guard = self.read_index()?;
-        match std::fs::read(self.key_path(key)) {
-            Ok(data) => {
-                let (stored_key, value): (String, V) =
-                    rings_codec::deserialize(&data).map_err(Error::CodecDeserialize)?;
-                if stored_key == key {
-                    Ok(Some(value))
-                } else {
-                    Ok(None)
-                }
+        let name = file_name_for(key);
+        let data = {
+            let _guard = self.read_index()?;
+            match std::fs::read(self.root.join(&name)) {
+                Ok(data) => data,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(Error::ServiceIOError(error)),
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(Error::ServiceIOError(error)),
-        }
+        };
+        Ok(self
+            .decode_record::<V>(&name, &data)?
+            .filter(|(stored_key, _)| stored_key == key)
+            .map(|(_, value)| value))
     }
 
     async fn put(&self, key: &str, value: &V) -> Result<()> {
         let data = rings_codec::serialize(&(key, value)).map_err(Error::CodecSerialize)?;
-        let required = data.len() as u64;
+        let required = u64::try_from(data.len()).map_err(|_| Error::MessageSizeOverflow)?;
         if required > self.capacity {
             return Err(Error::StorageValueExceedsCapacity {
                 required,
                 capacity: self.capacity,
             });
         }
-        let mut index = self.write_index()?;
         let name = file_name_for(key);
-        // The rewritten key does not compete with itself for the budget.
-        index.forget(&name);
-        self.retire_until_fits(&mut index, required)?;
-        std::fs::create_dir_all(&self.root).map_err(Error::ServiceIOError)?;
-        tracing::debug!("Try inserting key: {:?}", key);
         let path = self.root.join(&name);
         let tmp_path = path.with_extension("tmp");
+        let mut index = self.write_index()?;
+        // The temporary file lives outside the index, so a failed write changes nothing.
+        std::fs::create_dir_all(&self.root).map_err(Error::ServiceIOError)?;
         std::fs::write(&tmp_path, data).map_err(Error::ServiceIOError)?;
-        std::fs::rename(tmp_path, path).map_err(Error::ServiceIOError)?;
+        tracing::debug!("Try inserting key: {:?}", key);
+        // The rewritten key does not compete with itself for the budget.
+        let previous_len = index.files.get(&name).copied();
+        index.forget(&name);
+        self.retire_until_fits(&mut index, required)?;
+        if let Err(error) = std::fs::rename(&tmp_path, &path) {
+            // The previous record is still on disk; keep the index faithful to it.
+            if let Some(previous_len) = previous_len {
+                index.record(name, previous_len);
+            }
+            remove_file_if_present(&tmp_path)?;
+            return Err(Error::ServiceIOError(error));
+        }
         index.record(name, required);
         Ok(())
     }
 
     async fn get_all(&self) -> Result<Vec<(String, V)>> {
-        let index = self.read_index()?;
-        Ok(index
-            .files
-            .iter()
-            .flat_map(|(name, _)| {
-                let data = std::fs::read(self.root.join(name)).ok()?;
-                rings_codec::deserialize::<(String, V)>(&data).ok()
-            })
-            .collect_vec())
+        let records = {
+            let index = self.read_index()?;
+            index
+                .files
+                .iter()
+                .map(|(name, _)| (name.to_owned(), std::fs::read(self.root.join(name))))
+                .collect_vec()
+        };
+        let mut decoded = Vec::with_capacity(records.len());
+        for (name, data) in records {
+            let data = match data {
+                Ok(data) => data,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(Error::ServiceIOError(error)),
+            };
+            if let Some(record) = self.decode_record::<V>(&name, &data)? {
+                decoded.push(record);
+            }
+        }
+        Ok(decoded)
     }
 
     async fn remove(&self, key: &str) -> Result<()> {
-        let mut index = self.write_index()?;
-        remove_file_if_present(&self.key_path(key))?;
-        index.forget(&file_name_for(key));
-        Ok(())
+        self.retire(&file_name_for(key))
     }
 
     async fn clear(&self) -> Result<()> {
         let mut index = self.write_index()?;
-        for (name, _) in index.files.iter() {
-            std::fs::remove_file(self.root.join(name)).map_err(Error::ServiceIOError)?;
+        while let Some(name) = index.retire_oldest() {
+            remove_file_if_present(&self.root.join(name))?;
         }
-        index.forget_all();
         Ok(())
     }
 
     async fn count(&self) -> Result<u32> {
-        Ok(self.read_index()?.files.len() as u32)
+        let count = self.read_index()?.files.len();
+        u32::try_from(count).map_err(|_| Error::MessageSizeOverflow)
     }
 }
 

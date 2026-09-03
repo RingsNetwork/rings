@@ -186,14 +186,8 @@ async fn operate_entry_at_placement(
     op: EntryOperation,
 ) -> Result<()> {
     let now_ms = get_epoch_ms();
-    let op = op.stamped_at(now_ms, dht.did)?;
-    let this = match dht.live_storage_entry(placement, now_ms).await? {
-        Some(this) => this,
-        None => op.clone().gen_default_entry()?,
-    };
-    let entry = this.operate_at(now_ms, op, dht.did)?;
-    dht.join_storage_entry(placement, entry).await?;
-    Ok(())
+    dht.operate_storage_entry(now_ms, placement, op.stamped(now_ms, dht.did)?)
+        .await
 }
 
 async fn handle_placed_entry_operation(

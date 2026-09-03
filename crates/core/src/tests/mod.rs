@@ -33,8 +33,8 @@ pub(crate) const TEST_NETWORK_ID: u32 = 0;
 /// Retention bound far enough ahead that a fixture stays live for a whole test.
 const FIXTURE_RETENTION_MS: u128 = 60 * 60 * 1_000;
 
-/// An entry stamped as the operation boundary would stamp it, so a fixture that is written
-/// to storage or carried in a sync message passes storage admission.
+/// An entry with a retention bound one hour ahead, inside the admission maximum, so a fixture
+/// that is written to storage or carried in a sync message passes storage admission.
 pub(crate) fn live_entry(did: Did, data: Vec<Encoded>, kind: EntryKind) -> Entry {
     live(Entry::new(did, data, kind))
 }

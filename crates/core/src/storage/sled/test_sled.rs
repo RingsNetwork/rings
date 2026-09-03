@@ -173,7 +173,7 @@ async fn test_reopen_restores_budget_in_write_order() {
             storage.put(key, &"v".to_string()).await.expect("put");
             let modified = std::time::SystemTime::UNIX_EPOCH
                 + std::time::Duration::from_secs(1_000 + index as u64);
-            std::fs::File::open(storage.key_path(key))
+            std::fs::File::open(storage.root.join(file_name_for(key)))
                 .expect("open file")
                 .set_modified(modified)
                 .expect("set modified");

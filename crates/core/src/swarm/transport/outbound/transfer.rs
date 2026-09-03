@@ -34,8 +34,7 @@ pub(in crate::swarm::transport) type ChunkFrames = Box<dyn Iterator<Item = Chunk
 enum FrameSource {
     Whole(Option<Bytes>),
     Chunked {
-        session_sk: SessionSk,
-        network_id: u32,
+        signer: MessageSigner<SessionSk>,
         chunks: ChunkFrames,
     },
 }
@@ -44,11 +43,7 @@ impl FrameSource {
     fn next_frame(&mut self, did: Did) -> Result<Option<(Bytes, &'static str)>> {
         match self {
             Self::Whole(frame) => Ok(frame.take().map(|bytes| (bytes, "whole_message"))),
-            Self::Chunked {
-                session_sk,
-                network_id,
-                chunks,
-            } => {
+            Self::Chunked { signer, chunks } => {
                 let Some(chunk) = chunks.next() else {
                     return Ok(None);
                 };
@@ -58,8 +53,7 @@ impl FrameSource {
                 } else {
                     "chunked_tail"
                 };
-                frame_chunk(MessageSigner::new(session_sk, *network_id), did, chunk)
-                    .map(|bytes| Some((bytes, context)))
+                frame_chunk(signer.by_ref(), did, chunk).map(|bytes| Some((bytes, context)))
             }
         }
     }
@@ -182,7 +176,7 @@ impl OutboundTransfer {
     /// signing authority for the whole transfer.
     pub(in crate::swarm::transport) fn chunked(
         route: OutboundTransferRoute,
-        signer: MessageSigner<'_>,
+        signer: MessageSigner<&SessionSk>,
         chunks: ChunkFrames,
         useful_bytes: u64,
         completion: OutboundCompletion,
@@ -192,8 +186,7 @@ impl OutboundTransfer {
         Self::new(
             route,
             FrameSource::Chunked {
-                session_sk: signer.session_sk().clone(),
-                network_id: signer.network_id(),
+                signer: signer.to_owned(),
                 chunks,
             },
             useful_bytes,

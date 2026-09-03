@@ -5,6 +5,7 @@ use std::sync::atomic::Ordering;
 
 use bytes::Bytes;
 use rings_core::dht::Did;
+use rings_core::domain_tag;
 use rings_core::ecc::elgamal::impls::secp256k1::encrypt_aead_with_rng;
 use rings_core::ecc::elgamal::impls::secp256k1::AeadCiphertext;
 use rings_core::ecc::PublicKey;
@@ -48,7 +49,7 @@ use crate::onion::OnionServiceName;
 
 /// Message family of the exit's backward-payload signature.
 const ONION_BACKWARD_PAYLOAD_DOMAIN_TAG: DomainTag =
-    DomainTag::new("rings-node:onion-backward-payload:v1");
+    domain_tag!("rings-node:onion-backward-payload:v1");
 
 /// Encode the first forward frame for `route`.
 ///
@@ -170,7 +171,7 @@ pub(crate) fn route_first_link(route: &OnionRoute) -> Result<OnionLink> {
 pub async fn send_backward(
     link_sender: &OnionLinkSender,
     scope: &Scope,
-    signer: MessageSigner<'_>,
+    signer: MessageSigner<&SessionSk>,
     path: OnionBackwardPath,
     sequence: OnionBackwardSequence,
     payload: OnionCircuitPayload,
@@ -360,7 +361,7 @@ pub(super) fn encrypt_client_payload(
     return_id: OnionReturnId,
     payload: OnionCircuitPayload,
     recipient: PublicKey<33>,
-    signer: MessageSigner<'_>,
+    signer: MessageSigner<&SessionSk>,
 ) -> Result<AeadCiphertext> {
     encrypt_client_payload_at_sequence(
         return_id,
@@ -376,7 +377,7 @@ pub(super) fn encrypt_client_payload_at_sequence(
     sequence: OnionBackwardSequence,
     payload: OnionCircuitPayload,
     recipient: PublicKey<33>,
-    signer: MessageSigner<'_>,
+    signer: MessageSigner<&SessionSk>,
 ) -> Result<AeadCiphertext> {
     let authenticated =
         OnionAuthenticatedPayload::new_signed_at_sequence(return_id, sequence, payload, signer)?;
@@ -405,7 +406,7 @@ impl OnionAuthenticatedPayload {
     pub fn new_signed(
         return_id: OnionReturnId,
         payload: OnionCircuitPayload,
-        signer: MessageSigner<'_>,
+        signer: MessageSigner<&SessionSk>,
     ) -> Result<Self> {
         Self::new_signed_at_sequence(return_id, OnionBackwardSequence::FIRST, payload, signer)
     }
@@ -415,7 +416,7 @@ impl OnionAuthenticatedPayload {
         return_id: OnionReturnId,
         sequence: OnionBackwardSequence,
         payload: OnionCircuitPayload,
-        signer: MessageSigner<'_>,
+        signer: MessageSigner<&SessionSk>,
     ) -> Result<Self> {
         let nonce = OnionBackwardNonce::random();
         let authentication = signer

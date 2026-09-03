@@ -55,7 +55,6 @@ use crate::swarm::callback::SwarmCallback;
 use crate::swarm::callback::SwarmEvent;
 use crate::swarm::SwarmBuilder;
 #[cfg(feature = "dummy")]
-#[cfg(feature = "dummy")]
 use crate::tests::TEST_NETWORK_ID;
 use crate::utils::GenerationWitness;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]

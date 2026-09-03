@@ -2683,7 +2683,6 @@ dependencies = [
  "bytes",
  "chacha20poly1305",
  "chrono",
- "dashmap",
  "ecdsa",
  "ed25519 1.5.3",
  "ed25519-dalek",

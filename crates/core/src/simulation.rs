@@ -804,9 +804,14 @@ mod tests {
             ),
         ];
         for (sequence, (message, expected)) in fixtures.into_iter().enumerate() {
-            let wire = MessagePayload::new_send(message, MessageSigner::new(&session, 0), did, did)
-                .and_then(|payload| payload.to_wire())
-                .expect("payload must encode");
+            let wire = MessagePayload::new_send(
+                message,
+                MessageSigner::new(&session, crate::tests::TEST_NETWORK_ID),
+                did,
+                did,
+            )
+            .and_then(|payload| payload.to_wire())
+            .expect("payload must encode");
             assert_eq!(
                 inspect_message(sequence as u64, &wire)
                     .expect("payload must classify")

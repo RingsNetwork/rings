@@ -18,7 +18,6 @@ use bytes::Bytes;
 use futures::channel::oneshot;
 use rings_core::dht::Did;
 use rings_core::message::MessageSigner;
-#[cfg(rings_browser)]
 use rings_core::session::SessionSk;
 use serde::Deserialize;
 use serde::Serialize;
@@ -525,24 +524,16 @@ fn url_path(suffix: &str) -> String {
 #[cfg(rings_browser)]
 pub(crate) struct BrowserOnionCircuitHandler {
     https: Arc<OnionHttpsRuntime>,
-    session_sk: SessionSk,
-    network_id: u32,
+    /// The exit's signing authority for backward payloads.
+    signer: MessageSigner<SessionSk>,
 }
 
 #[cfg(rings_browser)]
 impl BrowserOnionCircuitHandler {
     /// Create a browser circuit handler backed by the HTTPS runtime, signing backward payloads
     /// for the overlay `network_id`.
-    pub(crate) fn new(
-        https: Arc<OnionHttpsRuntime>,
-        session_sk: SessionSk,
-        network_id: u32,
-    ) -> Self {
-        Self {
-            https,
-            session_sk,
-            network_id,
-        }
+    pub(crate) fn new(https: Arc<OnionHttpsRuntime>, signer: MessageSigner<SessionSk>) -> Self {
+        Self { https, signer }
     }
 }
 
@@ -550,13 +541,8 @@ impl BrowserOnionCircuitHandler {
 #[async_trait::async_trait(?Send)]
 impl OnionCircuitHandler for BrowserOnionCircuitHandler {
     async fn handle_exit(&self, scope: &Scope, frame: OnionCircuitExitFrame) -> Result<()> {
-        let _ = try_handle_https_exit_payload(
-            &self.https,
-            MessageSigner::new(&self.session_sk, self.network_id),
-            scope,
-            frame,
-        )
-        .await?;
+        let _ =
+            try_handle_https_exit_payload(&self.https, self.signer.by_ref(), scope, frame).await?;
         Ok(())
     }
 
@@ -574,7 +560,7 @@ impl OnionCircuitHandler for BrowserOnionCircuitHandler {
 
 pub(crate) async fn try_handle_https_exit_payload(
     runtime: &Arc<OnionHttpsRuntime>,
-    signer: MessageSigner<'_>,
+    signer: MessageSigner<&SessionSk>,
     scope: &Scope,
     frame: OnionCircuitExitFrame,
 ) -> Result<bool> {

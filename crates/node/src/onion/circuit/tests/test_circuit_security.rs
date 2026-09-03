@@ -17,9 +17,7 @@ use super::test_circuit_protocol::return_edge;
 use super::test_circuit_protocol::route;
 use super::test_circuit_protocol::session;
 use super::test_circuit_protocol::test_payload;
-
-/// Overlay every fixture exit descriptor is published for.
-const TEST_NETWORK_ID: u32 = 1;
+use crate::tests::TEST_NETWORK_ID;
 
 #[test]
 fn test_relay_return_table_evicts_expired_entries() {

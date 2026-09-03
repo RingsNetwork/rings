@@ -1,9 +1,11 @@
 use rings_core::dht::entry;
 use rings_core::ecc::SecretKey;
 use rings_core::message::Encoder;
+use rings_core::message::MessageSigner;
 use rings_core::session::SessionSk;
 
 use super::super::*;
+use crate::tests::TEST_NETWORK_ID;
 
 fn service(name: &str) -> OnionExitService {
     OnionExitService::new(name, OnionExitTransport::Tcp).expect("valid test service")
@@ -52,7 +54,7 @@ fn signed_exit_for_session_at(
             expires_at_ms,
             version: version.to_string(),
         },
-        session_sk,
+        MessageSigner::new(session_sk, TEST_NETWORK_ID),
     )
     .map_err(Error::CoreError)
 }
@@ -176,11 +178,11 @@ fn test_exit_policy_rejects_invalid_target_entries() {
 #[test]
 fn test_exit_descriptor_signature_covers_policy() -> Result<()> {
     let mut descriptor = signed_exit_at(20, 100)?;
-    assert!(descriptor.verify_signature());
+    assert!(descriptor.verify_signature(TEST_NETWORK_ID));
 
     descriptor.policy.max_circuits = 32;
 
-    assert!(!descriptor.verify_signature());
+    assert!(!descriptor.verify_signature(TEST_NETWORK_ID));
     Ok(())
 }
 
@@ -191,11 +193,11 @@ fn test_exit_descriptor_signature_covers_schema_version() -> Result<()> {
         descriptor.schema_version,
         ONION_EXIT_DESCRIPTOR_SCHEMA_VERSION
     );
-    assert!(descriptor.verify_signature());
+    assert!(descriptor.verify_signature(TEST_NETWORK_ID));
 
     descriptor.schema_version = descriptor.schema_version.saturating_add(1);
 
-    assert!(!descriptor.verify_signature());
+    assert!(!descriptor.verify_signature(TEST_NETWORK_ID));
     Ok(())
 }
 
@@ -245,7 +247,7 @@ fn test_latest_valid_by_service_did_filters_expired_and_keeps_newest() -> Result
             expires_at_ms: 100,
             version: "old".to_string(),
         },
-        &session_sk,
+        MessageSigner::new(&session_sk, TEST_NETWORK_ID),
     )
     .map_err(Error::CoreError)?;
     let newer = OnionExitDescriptor::new_signed(
@@ -262,7 +264,7 @@ fn test_latest_valid_by_service_did_filters_expired_and_keeps_newest() -> Result
             expires_at_ms: 100,
             version: "new".to_string(),
         },
-        &session_sk,
+        MessageSigner::new(&session_sk, TEST_NETWORK_ID),
     )
     .map_err(Error::CoreError)?;
     let other_live = signed_exit_at(25, 100)?;
@@ -276,6 +278,7 @@ fn test_latest_valid_by_service_did_filters_expired_and_keeps_newest() -> Result
             expired.clone(),
         ],
         50,
+        TEST_NETWORK_ID,
         false,
     );
 
@@ -288,6 +291,7 @@ fn test_latest_valid_by_service_did_filters_expired_and_keeps_newest() -> Result
     let with_expired = OnionExitDescriptor::latest_valid_by_service_did(
         vec![older, newer, other_live, expired],
         50,
+        TEST_NETWORK_ID,
         true,
     );
     assert_eq!(with_expired.len(), 3);
@@ -315,6 +319,7 @@ fn test_latest_valid_by_service_did_preserves_same_did_distinct_services() -> Re
     let descriptors = OnionExitDescriptor::latest_valid_by_service_did(
         vec![old_tcp, new_tcp.clone(), https.clone(), custom.clone()],
         50,
+        TEST_NETWORK_ID,
         false,
     );
 

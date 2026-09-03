@@ -40,6 +40,7 @@ use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::MessageSigner;
 use crate::message::PayloadSender;
+use crate::session::SessionSk;
 use crate::utils::sleep;
 
 const TRACKED_PAYLOAD_TIMEOUT: Duration = TRANSPORT_TIMEOUT_PROFILE.tracked_payload;
@@ -832,7 +833,7 @@ impl SwarmTransport {
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl PayloadSender for SwarmTransport {
-    fn message_signer(&self) -> MessageSigner<'_> {
+    fn message_signer(&self) -> MessageSigner<&SessionSk> {
         MessageSigner::new(&self.session_sk, self.network_id)
     }
 

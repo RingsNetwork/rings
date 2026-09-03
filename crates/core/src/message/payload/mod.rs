@@ -26,17 +26,19 @@ use crate::dht::Chord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::dht::PeerRingAction;
+use crate::domain_tag;
 use crate::ecc::keccak256;
 use crate::error::Error;
 use crate::error::Result;
+use crate::session::SessionSk;
 
 /// Message family of the [`Transaction`] signature: the origin's authorship of a message.
 const TRANSACTION_DOMAIN_TAG: DomainTag =
-    DomainTag::new("rings-core:message-verification:transaction:v1");
+    domain_tag!("rings-core:message-verification:transaction:v1");
 /// Message family of the [`MessagePayload`] signature: one hop's authorship of a forwarded
 /// envelope. Distinct from [`TRANSACTION_DOMAIN_TAG`] so the two signatures over the same
 /// transaction hash are never interchangeable.
-const PAYLOAD_DOMAIN_TAG: DomainTag = DomainTag::new("rings-core:message-verification:payload:v1");
+const PAYLOAD_DOMAIN_TAG: DomainTag = domain_tag!("rings-core:message-verification:payload:v1");
 
 /// Compresses the given data byte slice using the gzip algorithm with the specified compression level.
 pub fn encode_data_gzip(data: &Bytes, level: u8) -> Result<Bytes> {
@@ -155,7 +157,7 @@ impl Transaction {
         destination: Did,
         tx_id: uuid::Uuid,
         data: T,
-        signer: MessageSigner<'_>,
+        signer: MessageSigner<&SessionSk>,
     ) -> Result<Self>
     where
         T: Serialize,
@@ -169,7 +171,7 @@ impl Transaction {
         tx_id: uuid::Uuid,
         data: T,
         report_return: ReportReturnPolicy,
-        signer: MessageSigner<'_>,
+        signer: MessageSigner<&SessionSk>,
     ) -> Result<Self>
     where
         T: Serialize,
@@ -199,7 +201,7 @@ impl MessagePayload {
     /// Need [Transaction], [MessageSigner] and [MessageRelay].
     pub fn new(
         transaction: Transaction,
-        signer: MessageSigner<'_>,
+        signer: MessageSigner<&SessionSk>,
         relay: MessageRelay,
     ) -> Result<Self> {
         let msg_hash = hash_transaction(
@@ -219,7 +221,7 @@ impl MessagePayload {
     /// Helps to create sending message from data.
     pub fn new_send<T>(
         data: T,
-        signer: MessageSigner<'_>,
+        signer: MessageSigner<&SessionSk>,
         next_hop: Did,
         destination: Did,
     ) -> Result<Self>
@@ -308,7 +310,7 @@ impl Decoder for MessagePayload {
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait PayloadSender {
     /// The authority that signs every payload this sender emits.
-    fn message_signer(&self) -> MessageSigner<'_>;
+    fn message_signer(&self) -> MessageSigner<&SessionSk>;
 
     /// Get access to DHT.
     fn dht(&self) -> Arc<PeerRing>;

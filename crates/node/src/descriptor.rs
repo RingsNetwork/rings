@@ -1,4 +1,10 @@
 //! Shared helpers for signed DHT descriptors.
+//!
+//! A descriptor is signed by the node's [`MessageSigner`], so its signature is bound to the
+//! signer's overlay exactly like every other message, and verified under the *receiver's*
+//! overlay. The body also carries `network_id` as a signed field; signing refuses a body whose
+//! stated overlay differs from the signer's, so a verified descriptor's stated overlay is the
+//! overlay it was signed for, and a descriptor issued in one overlay does not verify in another.
 
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
@@ -10,17 +16,14 @@ use rings_core::error::Result;
 use rings_core::message::DomainTag;
 use rings_core::message::Encoded;
 use rings_core::message::Encoder;
+use rings_core::message::MessageSigner;
 use rings_core::message::MessageVerification;
 use rings_core::message::SigningDomain;
 use rings_core::session::SessionSk;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-/// A descriptor body signs under its own message family inside the overlay it names.
-///
-/// Both descriptor kinds carry `network_id` as a signed body field, so the overlay component of
-/// the [`SigningDomain`] is read from the body on signing and from the descriptor on
-/// verification: a descriptor whose stated overlay differs from the signer's fails to verify.
+/// The signed fields of one descriptor kind.
 pub(crate) trait SignedDescriptorBody: Sized {
     type Descriptor;
 
@@ -34,37 +37,46 @@ pub(crate) trait SignedDescriptorBody: Sized {
     fn into_signed_descriptor(self, signature: MessageVerification) -> Self::Descriptor;
 }
 
+/// Sign `body` with the node's authority.
+///
+/// Pre: the body names the signer's account and public key, and states the signer's overlay.
 pub(crate) fn sign_descriptor_body<B>(
     body: B,
-    session_sk: &SessionSk,
+    signer: MessageSigner<&SessionSk>,
     mismatch_message: &'static str,
 ) -> Result<B::Descriptor>
 where
     B: SignedDescriptorBody,
 {
     let did = body.body_did();
-    if body.body_public_key().did() != did || session_sk.account_did() != did {
+    if body.body_public_key().did() != did || signer.account_did() != did {
         return Err(Error::InvalidMessage(mismatch_message.to_string()));
     }
+    if body.body_network_id() != signer.network_id() {
+        return Err(Error::InvalidMessage(
+            "descriptor states an overlay other than the signer's".to_string(),
+        ));
+    }
 
-    let domain = SigningDomain::new(B::DOMAIN_TAG, body.body_network_id());
-    let signature = MessageVerification::new(domain, &body.body_signing_data()?, session_sk)?;
+    let signature = signer.sign(B::DOMAIN_TAG, &body.body_signing_data()?)?;
     Ok(body.into_signed_descriptor(signature))
 }
 
+/// A published descriptor: its body plus the signature over it.
 pub(crate) trait SignedDescriptor: Sized {
-    /// Message family of this descriptor kind; equal to its body's tag.
-    const DOMAIN_TAG: DomainTag;
+    /// The body this descriptor was signed from; fixes the message family.
+    type Body: SignedDescriptorBody<Descriptor = Self>;
 
     fn descriptor_did(&self) -> Did;
     fn descriptor_public_key(&self) -> &VerificationPublicKey;
-    fn descriptor_network_id(&self) -> u32;
     fn descriptor_signature(&self) -> &MessageVerification;
     fn descriptor_heartbeat_at_ms(&self) -> u128;
     fn descriptor_expires_at_ms(&self) -> u128;
     fn descriptor_signing_data(&self) -> Result<Vec<u8>>;
 
-    fn descriptor_verify_signature(&self) -> bool {
+    /// Verify the signature under the receiver's overlay `network_id` and the DID/public-key
+    /// binding of the signer.
+    fn descriptor_verify_signature(&self, network_id: u32) -> bool {
         let did = self.descriptor_did();
         let public_key = self.descriptor_public_key();
         let signature = self.descriptor_signature();
@@ -82,7 +94,8 @@ pub(crate) trait SignedDescriptor: Sized {
         let Ok(data) = self.descriptor_signing_data() else {
             return false;
         };
-        let domain = SigningDomain::new(Self::DOMAIN_TAG, self.descriptor_network_id());
+        let domain =
+            SigningDomain::new(<Self::Body as SignedDescriptorBody>::DOMAIN_TAG, network_id);
         signature.verify(domain, &data)
     }
 
@@ -90,14 +103,16 @@ pub(crate) trait SignedDescriptor: Sized {
         self.descriptor_expires_at_ms() < now_ms
     }
 
-    fn descriptor_is_live_at(&self, now_ms: u128) -> bool {
-        self.descriptor_verify_signature() && !self.descriptor_is_expired_at(now_ms)
+    fn descriptor_is_live_at(&self, now_ms: u128, network_id: u32) -> bool {
+        self.descriptor_verify_signature(network_id) && !self.descriptor_is_expired_at(now_ms)
     }
 }
 
+/// Select the newest descriptor per DID that verifies under the receiver's overlay.
 pub(crate) fn latest_valid_by_did<D>(
     descriptors: impl IntoIterator<Item = D>,
     now_ms: u128,
+    network_id: u32,
     include_expired: bool,
 ) -> Vec<D>
 where
@@ -106,10 +121,10 @@ where
     let mut latest = BTreeMap::<Did, D>::new();
     for descriptor in descriptors {
         if include_expired {
-            if !descriptor.descriptor_verify_signature() {
+            if !descriptor.descriptor_verify_signature(network_id) {
                 continue;
             }
-        } else if !descriptor.descriptor_is_live_at(now_ms) {
+        } else if !descriptor.descriptor_is_live_at(now_ms, network_id) {
             continue;
         }
         match latest.entry(descriptor.descriptor_did()) {

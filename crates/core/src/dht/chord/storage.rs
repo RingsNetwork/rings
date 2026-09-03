@@ -55,15 +55,19 @@ impl PeerRing {
         Ok(live)
     }
 
-    /// Join an incoming replicated entry delta into local storage.
+    /// Join a peer-supplied replicated value into local storage at time `now_ms`.
     ///
-    /// Pre: `incoming` satisfies [`Entry::validate_admissible_at`] for the local clock; the
-    /// check is enforced here so every write path shares one admission rule.
+    /// Pre: `incoming` is the value a peer supplied, not a local join result; it is admitted
+    /// by [`Entry::validate_admissible_at`] here so every replication path shares one rule.
     /// Post: the stored value is the least upper bound of the previous live local
     /// value and `incoming` when a previous value exists; otherwise it is
     /// `incoming` normalized for storage.
-    pub(crate) async fn join_storage_entry(&self, key: Did, incoming: Entry) -> Result<Entry> {
-        let now_ms = get_epoch_ms();
+    pub(crate) async fn join_storage_entry(
+        &self,
+        now_ms: u128,
+        key: Did,
+        incoming: Entry,
+    ) -> Result<Entry> {
         incoming.validate_admissible_at(now_ms)?;
         let incoming = incoming.try_into_storage_entry()?;
         let stored = if let Some(local) = self.live_storage_entry(key, now_ms).await? {
@@ -74,6 +78,30 @@ impl PeerRing {
         .try_into_storage_entry()?;
         self.storage.put(&key.to_string(), &stored).await?;
         Ok(stored)
+    }
+
+    /// Apply a stamped operation to the value stored at `placement` at time `now_ms`.
+    ///
+    /// Pre: `op` is stamped. Admission is checked on the delta `op` carries, never on the join
+    /// result, so a locally derived version (a compaction floor bumped by one step) is never
+    /// mistaken for a peer clock running ahead.
+    /// Post: the stored value is `local.operate(op)` normalized for storage, where `local` is
+    /// the live stored value or the operation's default carrier.
+    pub(crate) async fn operate_storage_entry(
+        &self,
+        now_ms: u128,
+        placement: Did,
+        op: EntryOperation,
+    ) -> Result<()> {
+        op.validate_admissible_at(now_ms)?;
+        let local = match self.live_storage_entry(placement, now_ms).await? {
+            Some(local) => local,
+            None => op.clone().gen_default_entry()?,
+        };
+        let stored = local
+            .operate(now_ms, op, self.did)?
+            .try_into_storage_entry()?;
+        self.storage.put(&placement.to_string(), &stored).await
     }
 
     fn storage_fetch_fallback_successor(&self) -> Result<Option<Did>> {
@@ -181,18 +209,14 @@ impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing 
 
     async fn entry_operate(&self, op: EntryOperation) -> Result<PeerRingAction> {
         let now_ms = get_epoch_ms();
-        let op = op.stamped_at(now_ms, self.did)?;
+        let op = op.stamped(now_ms, self.did)?;
         let entry_key = op.did()?;
         let mut ret = vec![];
         for entry_key in entry_key.rotate_affine(REDUNDANT)? {
             let act = match self.find_storage_owner(entry_key) {
                 Ok(PeerRingAction::Some(_)) => {
-                    let this = match self.live_storage_entry(entry_key, now_ms).await? {
-                        Some(this) => this,
-                        None => op.clone().gen_default_entry()?,
-                    };
-                    let entry = this.operate_at(now_ms, op.clone(), self.did)?;
-                    self.join_storage_entry(entry_key, entry).await?;
+                    self.operate_storage_entry(now_ms, entry_key, op.clone())
+                        .await?;
                     Ok(PeerRingAction::None)
                 }
                 Ok(PeerRingAction::RemoteAction(next, RemoteAction::FindSuccessor(_))) => {

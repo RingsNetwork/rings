@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rings_core::dht::Did;
+use rings_core::domain_tag;
 use rings_core::ecc::PublicKey;
 use rings_core::ecc::VerificationPublicKey;
 use rings_core::error::Error as CoreError;
@@ -21,6 +22,7 @@ use rings_core::message::Decoder;
 use rings_core::message::DomainTag;
 use rings_core::message::Encoded;
 use rings_core::message::Encoder;
+use rings_core::message::MessageSigner;
 use rings_core::message::MessageVerification;
 use rings_core::session::SessionSk;
 use rings_core::utils::get_epoch_ms;
@@ -81,7 +83,7 @@ const DEFAULT_ONION_EXIT_HEARTBEAT_INTERVAL_SECS: u64 = 30;
 const DEFAULT_ONION_EXIT_TTL_SECS: u64 = 90;
 /// Message family of the onion-exit descriptor signature.
 const ONION_EXIT_DESCRIPTOR_DOMAIN_TAG: DomainTag =
-    DomainTag::new("rings-node:onion-exit-descriptor:v1");
+    domain_tag!("rings-node:onion-exit-descriptor:v1");
 
 /// Default onion-exit registry heartbeat interval in seconds.
 pub(crate) const fn default_onion_exit_heartbeat_interval_secs() -> u64 {
@@ -564,10 +566,13 @@ pub struct OnionExitDescriptor {
 
 impl OnionExitDescriptor {
     /// Create and sign an onion-exit descriptor.
-    pub fn new_signed(body: OnionExitDescriptorBody, session_sk: &SessionSk) -> CoreResult<Self> {
+    pub fn new_signed(
+        body: OnionExitDescriptorBody,
+        signer: MessageSigner<&SessionSk>,
+    ) -> CoreResult<Self> {
         sign_descriptor_body(
             body,
-            session_sk,
+            signer,
             "onion exit descriptor DID/public key/session mismatch",
         )
     }
@@ -614,11 +619,6 @@ impl OnionExitDescriptor {
         self.schema_version == ONION_EXIT_DESCRIPTOR_SCHEMA_VERSION
     }
 
-    /// Return whether this descriptor belongs to `network_id`.
-    pub const fn matches_network(&self, network_id: u32) -> bool {
-        self.network_id == network_id
-    }
-
     /// Return whether this descriptor advertises the requested service name.
     pub fn advertises_service_name(&self, service: &str) -> bool {
         self.service.has_name(service)
@@ -637,8 +637,8 @@ impl OnionExitDescriptor {
     }
 
     /// Verify the descriptor signature and DID/public-key binding.
-    pub fn verify_signature(&self) -> bool {
-        self.has_supported_schema() && self.descriptor_verify_signature()
+    pub fn verify_signature(&self, network_id: u32) -> bool {
+        self.has_supported_schema() && self.descriptor_verify_signature(network_id)
     }
 
     /// Returns whether this descriptor is expired at `now_ms`.
@@ -647,8 +647,8 @@ impl OnionExitDescriptor {
     }
 
     /// Returns whether this descriptor has a valid signature and is not expired.
-    pub fn is_live_at(&self, now_ms: u128) -> bool {
-        self.verify_signature() && !self.is_expired_at(now_ms)
+    pub fn is_live_at(&self, now_ms: u128, network_id: u32) -> bool {
+        self.verify_signature(network_id) && !self.is_expired_at(now_ms)
     }
 
     /// Select the newest valid onion-exit descriptor per `(DID, service)`.
@@ -659,15 +659,16 @@ impl OnionExitDescriptor {
     pub fn latest_valid_by_service_did(
         descriptors: impl IntoIterator<Item = Self>,
         now_ms: u128,
+        network_id: u32,
         include_expired: bool,
     ) -> Vec<Self> {
         let mut latest = BTreeMap::<(Did, OnionExitService), Self>::new();
         for descriptor in descriptors {
             if include_expired {
-                if !descriptor.verify_signature() {
+                if !descriptor.verify_signature(network_id) {
                     continue;
                 }
-            } else if !descriptor.is_live_at(now_ms) {
+            } else if !descriptor.is_live_at(now_ms, network_id) {
                 continue;
             }
             let key = (descriptor.did, descriptor.service.clone());
@@ -687,7 +688,7 @@ impl OnionExitDescriptor {
 }
 
 impl SignedDescriptor for OnionExitDescriptor {
-    const DOMAIN_TAG: DomainTag = ONION_EXIT_DESCRIPTOR_DOMAIN_TAG;
+    type Body = OnionExitDescriptorBody;
 
     fn descriptor_did(&self) -> Did {
         self.did
@@ -695,10 +696,6 @@ impl SignedDescriptor for OnionExitDescriptor {
 
     fn descriptor_public_key(&self) -> &VerificationPublicKey {
         &self.public_key
-    }
-
-    fn descriptor_network_id(&self) -> u32 {
-        self.network_id
     }
 
     fn descriptor_signature(&self) -> &MessageVerification {
@@ -827,7 +824,7 @@ impl OnionExitRegistration {
                 expires_at_ms: now_ms + self.ttl.as_millis(),
                 version: crate::util::build_version(),
             },
-            context.session_sk(),
+            context.message_signer(),
         )
         .map_err(Error::CoreError)
     }
@@ -849,7 +846,8 @@ impl OnionExitRegistration {
                     .decode::<OnionExitDescriptor>()
                     .is_ok_and(|descriptor| {
                         descriptor.did == context.did()
-                            || (descriptor.verify_signature() && descriptor.is_expired_at(now_ms))
+                            || (descriptor.verify_signature(context.network_id())
+                                && descriptor.is_expired_at(now_ms))
                     })
             })
             .await?;

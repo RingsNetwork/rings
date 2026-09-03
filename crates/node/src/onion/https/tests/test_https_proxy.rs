@@ -20,9 +20,7 @@ use super::super::*;
 use crate::onion::OnionExitDescriptorBody;
 use crate::onion::OnionExitService;
 use crate::online::OnlineNodeType;
-
-/// Overlay every fixture exit descriptor is published for.
-const TEST_NETWORK_ID: u32 = 1;
+use crate::tests::TEST_NETWORK_ID;
 
 fn did() -> Did {
     SecretKey::random().address().into()
@@ -42,7 +40,7 @@ fn exit_descriptor(session: &SessionSk) -> OnionExitDescriptor {
                 .expect("verification key"),
             session_public_key: session.session_public_key(),
             node_type: OnlineNodeType::Browser,
-            network_id: 1,
+            network_id: TEST_NETWORK_ID,
             service: OnionExitService::https(),
             policy: OnionExitPolicy::default(),
             started_at_ms: 0,
@@ -50,7 +48,7 @@ fn exit_descriptor(session: &SessionSk) -> OnionExitDescriptor {
             expires_at_ms: 1,
             version: "test".to_string(),
         },
-        session,
+        MessageSigner::new(session, TEST_NETWORK_ID),
     )
     .expect("signed exit")
 }
