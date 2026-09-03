@@ -8,7 +8,6 @@
 //! permit. Capacity pressure fails without peer penalty rather than parking ingress
 //! behind the actor that releases it.
 
-use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
@@ -31,11 +30,10 @@ use super::PreparedInboundFrame;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
-use crate::fair_admission::CountedReservationRejection;
-use crate::fair_admission::CountedReservedCapacity;
 use crate::measure::Authentication;
 use crate::message::MessagePayload;
 use crate::utils::try_sleep;
+use crate::utils::GenerationWitness;
 use crate::utils::Instant;
 
 mod barrier;
@@ -50,11 +48,9 @@ mod ticket;
 
 use self::barrier::lane_waits_for_reassembly;
 use self::barrier::ReassemblyHandoffBarrier;
-use self::capacity::memory_capacity_error;
 use self::capacity::memory_reservation;
-use self::capacity::peer_memory_capacity_error;
-use self::capacity::validate_memory_request;
-use self::capacity::validate_peer_memory_request;
+pub(crate) use self::capacity::InboundCapacity;
+use self::capacity::InboundCapacityPermit;
 use self::deadline::await_inbound_deadline;
 use self::deadline::InboundDeadline;
 use self::failure::inbound_failure_error;
@@ -109,280 +105,6 @@ const INBOUND_CALLBACK_TIMEOUT: Duration = Duration::from_secs(30);
 const REASSEMBLY_CLEANUP_INTERVAL: Duration = Duration::from_millis(50);
 #[cfg(not(all(test, feature = "dummy", not(target_family = "wasm"))))]
 const REASSEMBLY_CLEANUP_INTERVAL: Duration = Duration::from_secs(1);
-#[derive(Clone, Copy)]
-struct InboundCapacityState(CountedReservedCapacity<INBOUND_LANE_COUNT>);
-
-impl InboundCapacityState {
-    const fn new() -> Self {
-        Self(CountedReservedCapacity::new())
-    }
-    fn try_reserve(
-        &mut self,
-        lane: InboundLane,
-        bytes: usize,
-    ) -> std::result::Result<(), CountedReservationRejection> {
-        CountedReservedCapacity::try_reserve(
-            &mut self.0,
-            lane.index(),
-            bytes,
-            INBOUND_MAILBOX_CAPACITY,
-            &INBOUND_RESERVED_TRANSFERS,
-            INBOUND_MAILBOX_BYTE_CAPACITY,
-            &INBOUND_RESERVED_BYTES,
-        )
-    }
-    fn release(&mut self, lane: InboundLane, bytes: usize) {
-        self.0.release(lane.index(), bytes);
-    }
-}
-
-const PEER_RESERVATION: [usize; 1] = [0];
-
-#[derive(Clone, Copy, Default)]
-struct InboundPeerCapacityState(CountedReservedCapacity<1>);
-
-impl InboundPeerCapacityState {
-    fn try_reserve(
-        &mut self,
-        bytes: usize,
-    ) -> std::result::Result<(), CountedReservationRejection> {
-        CountedReservedCapacity::try_reserve(
-            &mut self.0,
-            0,
-            bytes,
-            INBOUND_PEER_CAPACITY,
-            &PEER_RESERVATION,
-            INBOUND_PEER_BYTE_CAPACITY,
-            &PEER_RESERVATION,
-        )
-    }
-
-    fn release(&mut self, bytes: usize) {
-        self.0.release(0, bytes);
-    }
-
-    const fn is_idle(self) -> bool {
-        self.0.admitted_count() == 0
-    }
-}
-
-pub(crate) struct InboundCapacity {
-    state: Mutex<InboundCapacityState>,
-    peer_states: Mutex<BTreeMap<Option<Did>, InboundPeerCapacityState>>,
-    /// Bumped after every reservation, transition, or release is applied and
-    /// its locks are released, so tests await the admitted count by event.
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    applied: crate::utils::GenerationWitness,
-}
-
-impl InboundCapacity {
-    pub(crate) fn new() -> Self {
-        Self {
-            state: Mutex::new(InboundCapacityState::new()),
-            peer_states: Mutex::new(BTreeMap::new()),
-            #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-            applied: crate::utils::GenerationWitness::new(),
-        }
-    }
-
-    /// Publish an applied capacity change to waiting tests.
-    ///
-    /// Pre: every capacity lock is released by the caller.
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    fn publish_applied(&self) {
-        self.applied.bump();
-    }
-
-    #[cfg(not(all(test, feature = "dummy", not(target_family = "wasm"))))]
-    const fn publish_applied(&self) {}
-
-    fn try_acquire(
-        self: &Arc<Self>,
-        peer: Option<Did>,
-        lane: InboundLane,
-        bytes: usize,
-    ) -> Result<InboundCapacityPermit> {
-        let mut peer_states = self
-            .peer_states
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut next_peer = peer_states.get(&peer).copied().unwrap_or_default();
-        match next_peer.try_reserve(bytes) {
-            Ok(()) => {}
-            Err(CountedReservationRejection::Count) => {
-                return Err(Error::InboundPeerCapacityExceeded {
-                    peer,
-                    capacity: INBOUND_PEER_CAPACITY,
-                });
-            }
-            Err(CountedReservationRejection::Bytes) => {
-                return Err(peer_memory_capacity_error(peer, bytes));
-            }
-        }
-        match state.try_reserve(lane, bytes) {
-            Ok(()) => {}
-            Err(CountedReservationRejection::Count) => {
-                return Err(Error::InboundMailboxCapacityExceeded {
-                    capacity: INBOUND_MAILBOX_CAPACITY,
-                });
-            }
-            Err(CountedReservationRejection::Bytes) => return Err(memory_capacity_error(bytes)),
-        }
-        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-        crate::simulation::observe_inbound_capacity(
-            (
-                next_peer.0.admitted_count(),
-                next_peer.0.admitted_bytes(),
-                INBOUND_PEER_CAPACITY,
-                INBOUND_PEER_BYTE_CAPACITY,
-            ),
-            (
-                state.0.admitted_count(),
-                state.0.admitted_bytes(),
-                INBOUND_MAILBOX_CAPACITY,
-                INBOUND_MAILBOX_BYTE_CAPACITY,
-            ),
-        );
-        peer_states.insert(peer, next_peer);
-        drop((state, peer_states));
-        self.publish_applied();
-        Ok(InboundCapacityPermit {
-            capacity: self.clone(),
-            peer,
-            lane,
-            bytes,
-        })
-    }
-
-    fn acquire(
-        self: &Arc<Self>,
-        peer: Option<Did>,
-        lane: InboundLane,
-        bytes: usize,
-    ) -> Result<InboundCapacityPermit> {
-        validate_memory_request(lane, bytes)?;
-        validate_peer_memory_request(peer, bytes)?;
-        self.try_acquire(peer, lane, bytes)
-    }
-
-    #[cfg(all(test, not(target_family = "wasm")))]
-    pub(crate) fn admitted_count_for_test(&self) -> usize {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .0
-            .admitted_count()
-    }
-
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) async fn await_admitted_count_for_test(&self, predicate: impl Fn(usize) -> bool) {
-        self.applied
-            .await_until(|| predicate(self.admitted_count_for_test()))
-            .await;
-    }
-}
-
-struct InboundCapacityPermit {
-    capacity: Arc<InboundCapacity>,
-    peer: Option<Did>,
-    lane: InboundLane,
-    bytes: usize,
-}
-
-impl InboundCapacityPermit {
-    fn try_transition(&mut self, lane: InboundLane, bytes: usize) -> Result<()> {
-        if lane == self.lane && bytes == self.bytes {
-            return Ok(());
-        }
-        validate_memory_request(lane, bytes)?;
-        validate_peer_memory_request(self.peer, bytes)?;
-        let mut peer_states = self
-            .capacity
-            .peer_states
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut state = self
-            .capacity
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut next_peer = peer_states.get(&self.peer).copied().unwrap_or_default();
-        next_peer.release(self.bytes);
-        match next_peer.try_reserve(bytes) {
-            Ok(()) => {}
-            Err(CountedReservationRejection::Count) => {
-                return Err(Error::InboundPeerCapacityExceeded {
-                    peer: self.peer,
-                    capacity: INBOUND_PEER_CAPACITY,
-                });
-            }
-            Err(CountedReservationRejection::Bytes) => {
-                return Err(peer_memory_capacity_error(self.peer, bytes));
-            }
-        }
-        let mut next = *state;
-        next.release(self.lane, self.bytes);
-        match next.try_reserve(lane, bytes) {
-            Ok(()) => {
-                peer_states.insert(self.peer, next_peer);
-                *state = next;
-                #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-                crate::simulation::observe_inbound_capacity(
-                    (
-                        next_peer.0.admitted_count(),
-                        next_peer.0.admitted_bytes(),
-                        INBOUND_PEER_CAPACITY,
-                        INBOUND_PEER_BYTE_CAPACITY,
-                    ),
-                    (
-                        next.0.admitted_count(),
-                        next.0.admitted_bytes(),
-                        INBOUND_MAILBOX_CAPACITY,
-                        INBOUND_MAILBOX_BYTE_CAPACITY,
-                    ),
-                );
-                self.lane = lane;
-                self.bytes = bytes;
-                drop((state, peer_states));
-                self.capacity.publish_applied();
-                Ok(())
-            }
-            Err(CountedReservationRejection::Count) => Err(Error::InboundMailboxCapacityExceeded {
-                capacity: INBOUND_MAILBOX_CAPACITY,
-            }),
-            Err(CountedReservationRejection::Bytes) => Err(memory_capacity_error(bytes)),
-        }
-    }
-}
-
-impl Drop for InboundCapacityPermit {
-    fn drop(&mut self) {
-        let mut peer_states = self
-            .capacity
-            .peer_states
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut state = self
-            .capacity
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.release(self.lane, self.bytes);
-        if let Some(peer_state) = peer_states.get_mut(&self.peer) {
-            peer_state.release(self.bytes);
-            if peer_state.is_idle() {
-                peer_states.remove(&self.peer);
-            }
-        }
-        drop((state, peer_states));
-        self.capacity.publish_applied();
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InboundValidation {
     Dispatch,
@@ -415,11 +137,11 @@ pub(super) struct InboundMailbox {
     capacity: Arc<InboundCapacity>,
     actor_available: bool,
     /// Bumped after each raw transport lease is released at the core handoff.
+    handoffs: Arc<GenerationWitness>,
+    /// Bumped by the actor after each completed reassembly cleanup pass,
+    /// periodic or close-time; the mailbox only reads it for tests.
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    handoffs: Arc<crate::utils::GenerationWitness>,
-    /// Bumped after each completed reassembly cleanup pass, periodic or close-time.
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    cleanup_passes: Arc<crate::utils::GenerationWitness>,
+    cleanup_passes: Arc<GenerationWitness>,
 }
 
 impl InboundMailbox {
@@ -429,13 +151,11 @@ impl InboundMailbox {
         reassembly_clock: ReassemblyClock,
     ) -> Self {
         let (sender, receiver) = mpsc::unbounded();
-        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-        let cleanup_passes = Arc::new(crate::utils::GenerationWitness::new());
+        let cleanup_passes = Arc::new(GenerationWitness::default());
         let actor = InboundActor::new(
             processor,
             receiver,
             reassembly_clock,
-            #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
             Arc::clone(&cleanup_passes),
         );
         let actor_available = spawn_actor(actor);
@@ -443,8 +163,7 @@ impl InboundMailbox {
             sender: Arc::new(Mutex::new(InboundSender::new(sender))),
             capacity,
             actor_available,
-            #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-            handoffs: Arc::new(crate::utils::GenerationWitness::new()),
+            handoffs: Arc::new(GenerationWitness::default()),
             #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
             cleanup_passes,
         }
@@ -504,7 +223,6 @@ impl InboundMailbox {
         // bytes and their transport lease together at this handoff boundary.
         let wire_bytes = bytes.len();
         drop((bytes, transport_capacity));
-        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
         self.handoffs.bump();
         ticket.release_admission_turn();
         if !processor.pending_connection_allows_message(peer).await? {
@@ -559,21 +277,17 @@ impl InboundMailbox {
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(super) async fn await_handoffs_for_test(&self, predicate: impl Fn(u64) -> bool) {
-        self.handoffs
-            .await_until(|| predicate(self.handoffs.generation()))
-            .await;
+        self.handoffs.await_until(predicate).await;
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(super) fn cleanup_passes_for_test(&self) -> u64 {
-        self.cleanup_passes.generation()
+        self.cleanup_passes.get()
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(super) async fn await_cleanup_passes_for_test(&self, predicate: impl Fn(u64) -> bool) {
-        self.cleanup_passes
-            .await_until(|| predicate(self.cleanup_passes.generation()))
-            .await;
+        self.cleanup_passes.await_until(predicate).await;
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -697,8 +411,7 @@ struct InboundActor {
     reassembly_clock: ReassemblyClock,
     next_reassembly_cleanup: Instant,
     input_closed: bool,
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    cleanup_passes: Arc<crate::utils::GenerationWitness>,
+    cleanup_passes: Arc<GenerationWitness>,
 }
 
 impl InboundActor {
@@ -706,9 +419,7 @@ impl InboundActor {
         processor: InboundProcessor,
         receiver: mpsc::UnboundedReceiver<InboundCommand>,
         reassembly_clock: ReassemblyClock,
-        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))] cleanup_passes: Arc<
-            crate::utils::GenerationWitness,
-        >,
+        cleanup_passes: Arc<GenerationWitness>,
     ) -> Self {
         Self {
             processor,
@@ -720,7 +431,6 @@ impl InboundActor {
             reassembly_clock,
             next_reassembly_cleanup: Instant::now() + REASSEMBLY_CLEANUP_INTERVAL,
             input_closed: false,
-            #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
             cleanup_passes,
         }
     }
@@ -875,7 +585,6 @@ impl InboundActor {
         let now_ms = self.reassembly_clock.now_ms();
         self.processor.remove_expired_reassembly_at(now_ms).await;
         self.next_reassembly_cleanup = Instant::now() + REASSEMBLY_CLEANUP_INTERVAL;
-        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
         self.cleanup_passes.bump();
     }
 

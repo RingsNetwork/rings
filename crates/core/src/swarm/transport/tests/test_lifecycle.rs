@@ -146,10 +146,7 @@ impl BlockedRetirement {
 
 #[test]
 fn test_connection_lifecycle_registry_is_bounded_and_rejects_duplicate_peers() -> Result<()> {
-    let mut registry = ConnectionLifecycleRegistry::new(LifecycleBounds {
-        pending: 2,
-        total: 8,
-    });
+    let mut registry = ConnectionLifecycleRegistry::new(LifecycleBounds::new(2, 8));
     let now = 1_000;
     let peer_a = SecretKey::random().address().into();
     let peer_b = SecretKey::random().address().into();
@@ -175,10 +172,7 @@ fn test_connection_lifecycle_registry_is_bounded_and_rejects_duplicate_peers() -
 
 #[test]
 fn test_connection_lifecycle_registry_bounds_records_across_every_phase() -> Result<()> {
-    let mut registry = ConnectionLifecycleRegistry::new(LifecycleBounds {
-        pending: 8,
-        total: 2,
-    });
+    let mut registry = ConnectionLifecycleRegistry::new(LifecycleBounds::new(2, 2));
     let now = 1_000;
     let peer_a = SecretKey::random().address().into();
     let peer_b = SecretKey::random().address().into();
@@ -191,7 +185,15 @@ fn test_connection_lifecycle_registry_bounds_records_across_every_phase() -> Res
         .ok_or(Error::AlreadyConnected)?;
     admitting.activate();
     let _attempt_b = registry.reserve(peer_b, now)?;
-    assert!(registry.is_full());
+    assert_eq!(
+        registry.reservation_verdict(peer_c),
+        ReservationVerdict::CapacityExceeded
+    );
+    assert!(registry.reservation_verdict(peer_c).needs_eviction());
+    assert_eq!(
+        registry.reservation_verdict(peer_a),
+        ReservationVerdict::AlreadyConnected
+    );
     assert!(matches!(
         registry.reserve(peer_c, now),
         Err(Error::ConnectionCapacityExceeded { capacity: 2 })
@@ -199,18 +201,54 @@ fn test_connection_lifecycle_registry_bounds_records_across_every_phase() -> Res
     assert_eq!(registry.pending_len(), 1);
 
     assert!(registry.remove_active(attempt_a));
-    assert!(!registry.is_full());
+    assert_eq!(
+        registry.reservation_verdict(peer_c),
+        ReservationVerdict::Admissible
+    );
     assert!(registry.reserve(peer_c, now).is_ok());
-    assert!(registry.is_full());
+    // Two pending records saturate both bounds; the handshake bound is the
+    // verdict because it is decided before the total.
+    assert_eq!(
+        registry.reservation_verdict(peer_a),
+        ReservationVerdict::PendingCapacityExceeded
+    );
+    assert!(registry.reserve(peer_a, now).is_err());
     Ok(())
+}
+
+/// A saturated handshake set is refused before the total bound is consulted,
+/// so it never asks for an eviction.
+#[test]
+fn test_pending_saturation_is_not_a_capacity_verdict() -> Result<()> {
+    let mut registry = ConnectionLifecycleRegistry::new(LifecycleBounds::new(1, 3));
+    let now = 1_000;
+    let peer_a = SecretKey::random().address().into();
+    let peer_b = SecretKey::random().address().into();
+
+    let _attempt_a = registry.reserve(peer_a, now)?;
+    let verdict = registry.reservation_verdict(peer_b);
+
+    assert_eq!(verdict, ReservationVerdict::PendingCapacityExceeded);
+    assert!(!verdict.needs_eviction());
+    assert!(matches!(
+        registry.reserve(peer_b, now),
+        Err(Error::PendingConnectionCapacityExceeded { capacity: 1 })
+    ));
+    Ok(())
+}
+
+/// Law: the handshake share never exceeds the total.
+#[test]
+fn test_lifecycle_bounds_clamp_the_handshake_share_into_the_total() {
+    let bounds = LifecycleBounds::new(8, 2);
+    assert_eq!(bounds.pending(), 2);
+    assert_eq!(bounds.total(), 2);
+    assert_eq!(LifecycleBounds::new(2, 8).pending(), 2);
 }
 
 #[test]
 fn test_stale_pending_callback_cannot_remove_a_replacement_attempt() -> Result<()> {
-    let mut registry = ConnectionLifecycleRegistry::new(LifecycleBounds {
-        pending: 1,
-        total: 8,
-    });
+    let mut registry = ConnectionLifecycleRegistry::new(LifecycleBounds::new(1, 8));
     let now = 1_000;
     let peer = SecretKey::random().address().into();
 
@@ -226,10 +264,7 @@ fn test_stale_pending_callback_cannot_remove_a_replacement_attempt() -> Result<(
 
 #[test]
 fn test_connection_lifecycle_registry_expires_only_unopened_handshakes() -> Result<()> {
-    let mut registry = ConnectionLifecycleRegistry::new(LifecycleBounds {
-        pending: 1,
-        total: 8,
-    });
+    let mut registry = ConnectionLifecycleRegistry::new(LifecycleBounds::new(1, 8));
     let now = 1_000;
     let active_peer = SecretKey::random().address().into();
     let pending_peer = SecretKey::random().address().into();
@@ -249,10 +284,7 @@ fn test_connection_lifecycle_registry_expires_only_unopened_handshakes() -> Resu
 
 #[test]
 fn test_connection_lifecycle_registry_expires_abandoned_admission() -> Result<()> {
-    let mut registry = ConnectionLifecycleRegistry::new(LifecycleBounds {
-        pending: 1,
-        total: 8,
-    });
+    let mut registry = ConnectionLifecycleRegistry::new(LifecycleBounds::new(1, 8));
     let now = 1_000;
     let peer = SecretKey::random().address().into();
     let replacement_peer = SecretKey::random().address().into();
@@ -276,10 +308,7 @@ fn test_connection_lifecycle_registry_expires_abandoned_admission() -> Result<()
 
 #[test]
 fn test_promotion_replaces_pending_with_active_in_one_state_slot() -> Result<()> {
-    let mut registry = ConnectionLifecycleRegistry::new(LifecycleBounds {
-        pending: 1,
-        total: 8,
-    });
+    let mut registry = ConnectionLifecycleRegistry::new(LifecycleBounds::new(1, 8));
     let now = 1_000;
     let peer = SecretKey::random().address().into();
     let attempt = registry.reserve(peer, now)?;
@@ -297,10 +326,7 @@ fn test_promotion_replaces_pending_with_active_in_one_state_slot() -> Result<()>
 
 #[test]
 fn test_terminal_send_marker_is_generation_scoped_and_survives_until_retirement() -> Result<()> {
-    let mut registry = ConnectionLifecycleRegistry::new(LifecycleBounds {
-        pending: 1,
-        total: 8,
-    });
+    let mut registry = ConnectionLifecycleRegistry::new(LifecycleBounds::new(1, 8));
     let peer = SecretKey::random().address().into();
     let attempt = registry.reserve(peer, 1_000)?;
     assert!(registry.activate_for_test(attempt));

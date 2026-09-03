@@ -48,6 +48,18 @@ enum DhtPeerRemoval {
     Unavailable,
 }
 
+/// Outcome of retiring an admitted generation only if the topology no longer
+/// references it, decided under the lifecycle boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum UnreferencedRetirement {
+    /// The record was retired and the peer removed from the DHT.
+    Retired,
+    /// A topology slot referenced the peer at retirement time; nothing changed.
+    Referenced,
+    /// The generation no longer owned the active slot; nothing changed.
+    Superseded,
+}
+
 /// Proof that one physical connection belongs to the current admitted
 /// generation for its peer.
 ///
@@ -542,6 +554,47 @@ impl SwarmTransport {
             self.close_connection_for_disconnect(&connection).await?;
         }
         Ok(Some(PeerRemovalOutcome { fallback }))
+    }
+
+    /// Retire `attempt` unless the local topology references its peer.
+    ///
+    /// The reference check and the retirement run inside one lifecycle
+    /// critical section; every transition that writes a topology slot also
+    /// holds that boundary, so no reference can appear between the check and
+    /// `dht.remove`. The physical close runs afterwards and its failure is
+    /// logged rather than returned: the record slot is already free, which is
+    /// what the caller asked for.
+    pub(super) async fn retire_unless_referenced(
+        &self,
+        attempt: PendingConnectionAttempt,
+    ) -> Result<UnreferencedRetirement> {
+        let connection = self.get_raw_connection(attempt.peer);
+        let retirement = self.retire_active_connection_if(attempt, |_| {
+            if self
+                .dht
+                .with_topology_state(|topology| topology.references(attempt.peer))?
+            {
+                return Ok(None);
+            }
+            self.dht.remove(attempt.peer)?;
+            Ok(Some(()))
+        })?;
+        match retirement {
+            None => return Ok(UnreferencedRetirement::Superseded),
+            Some(None) => return Ok(UnreferencedRetirement::Referenced),
+            Some(Some(())) => {}
+        }
+        if let Some(connection) = connection {
+            if let Err(error) = self.close_connection_for_disconnect(&connection).await {
+                tracing::warn!(
+                    peer = %attempt.peer,
+                    generation = attempt.generation,
+                    error = ?error,
+                    "evicted connection failed to close after retirement"
+                );
+            }
+        }
+        Ok(UnreferencedRetirement::Retired)
     }
 
     async fn close_connection_for_disconnect(&self, connection: &SwarmConnection) -> Result<()> {

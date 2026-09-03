@@ -280,10 +280,7 @@ impl LifecycleImplementation {
     fn new(peer: Did) -> Self {
         Self {
             peer,
-            lifecycles: ConnectionLifecycleRegistry::new(LifecycleBounds {
-                pending: 1,
-                total: 1,
-            }),
+            lifecycles: ConnectionLifecycleRegistry::new(LifecycleBounds::new(1, 1)),
             previous_attempt: None,
             dht_member: false,
             transport_slot: false,

@@ -9,21 +9,18 @@ use crate::dht::Chord;
 #[derive(Default)]
 struct BlockingDisconnectMeasure {
     inner: RecordingMeasure,
-    disconnect_started: AtomicBool,
-    disconnect_started_notify: Notify,
-    release_disconnect: Notify,
+    disconnect_started: TestLatch,
+    release_disconnect: TestLatch,
 }
 
 #[cfg(feature = "dummy")]
 impl BlockingDisconnectMeasure {
     async fn wait_for_disconnect_started(&self) {
-        while !self.disconnect_started.load(Ordering::SeqCst) {
-            self.disconnect_started_notify.notified().await;
-        }
+        self.disconnect_started.wait().await;
     }
 
     fn release_disconnect(&self) {
-        self.release_disconnect.notify_waiters();
+        self.release_disconnect.set();
     }
 }
 
@@ -32,9 +29,8 @@ impl BlockingDisconnectMeasure {
 impl Measure for BlockingDisconnectMeasure {
     async fn incr(&self, did: Did, counter: MeasureCounter) {
         if counter == MeasureCounter::Disconnected {
-            self.disconnect_started.store(true, Ordering::SeqCst);
-            self.disconnect_started_notify.notify_waiters();
-            self.release_disconnect.notified().await;
+            self.disconnect_started.set();
+            self.release_disconnect.wait().await;
         }
         self.inner.incr(did, counter).await;
     }

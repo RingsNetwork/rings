@@ -142,7 +142,7 @@ pub struct MessageReassembler {
 pub(crate) struct ReassemblyBudget {
     pub(super) buffered_cost: AtomicUsize,
     limit: usize,
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    /// Bumped after every applied reservation or release.
     applied: crate::utils::GenerationWitness,
 }
 
@@ -151,14 +151,12 @@ impl ReassemblyBudget {
         Self {
             buffered_cost: AtomicUsize::new(0),
             limit: limits.normalized().max_total_buffered_cost,
-            #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-            applied: crate::utils::GenerationWitness::new(),
+            applied: crate::utils::GenerationWitness::default(),
         }
     }
 
     fn try_reserve(&self, cost: usize) -> bool {
         let reserved = try_reserve_atomic(&self.buffered_cost, cost, self.limit);
-        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
         if reserved {
             self.applied.bump();
         }
@@ -175,7 +173,6 @@ impl ReassemblyBudget {
         {
             tracing::error!(cost, "reassembly budget release exceeded retained cost");
         }
-        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
         self.applied.bump();
     }
 
@@ -189,7 +186,7 @@ impl ReassemblyBudget {
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) async fn await_buffered_cost_for_test(&self, predicate: impl Fn(usize) -> bool) {
         self.applied
-            .await_until(|| predicate(self.buffered_cost_for_test()))
+            .await_until(|_generation| predicate(self.buffered_cost_for_test()))
             .await;
     }
 }

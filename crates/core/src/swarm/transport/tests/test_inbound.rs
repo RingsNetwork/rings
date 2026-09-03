@@ -28,7 +28,7 @@ impl BlockingValidateSwarmCallback {
 
     async fn wait_for_validates_at_least(&self, count: usize) {
         self.validates
-            .wait_until(|validates| validates >= count)
+            .await_until(|validates| validates >= count)
             .await;
     }
 

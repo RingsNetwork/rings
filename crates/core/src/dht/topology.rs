@@ -346,13 +346,13 @@ fn closest_preceding_finger(state: &TopologyState, target: &BigUint) -> Option<D
 /// `Local(head)` answers when `did` lies in the local successor interval
 /// `(n, head]`; a node without successors answers with itself. Otherwise the
 /// query is forwarded to the closest preceding finger, falling back to the
-/// successor head as the Chord paper's `closest_preceding_node` does when no
-/// finger precedes `did`. The sparse/no-wrap finger table may hold no such
-/// finger right after a join or after a run was cleared, and the successor head
-/// is the only forward hop the local state can prove.
+/// successor head. The Chord paper needs no such fallback because its
+/// `finger[1]` is the successor, so `closest_preceding_node` always finds a
+/// hop; the sparse/no-wrap finger table may hold no finger right after a join
+/// or after a run was cleared, and the head fallback restores that invariant.
 ///
 /// `TopologyState` has public fields, so a successor or finger entry equal to
-/// `local` is representable; both are treated as absent rather than trusted.
+/// `local` is representable; such entries are skipped rather than trusted.
 ///
 /// Post: `Remote { next, .. }` satisfies `precedes(n, next, dist(n, did))` for
 /// every state, so every remote step is a strict clockwise advance and never a
@@ -360,9 +360,9 @@ fn closest_preceding_finger(state: &TopologyState, target: &BigUint) -> Option<D
 pub fn find_successor(state: &TopologyState, did: Did) -> FindSuccessorStep {
     let Some(head) = state
         .successors
-        .first()
+        .iter()
         .copied()
-        .filter(|head| *head != state.local)
+        .find(|successor| *successor != state.local)
     else {
         return FindSuccessorStep::Local(state.local);
     };

@@ -5,9 +5,10 @@
 ### Added
 
 - Bound the number of peers holding a logical connection record at twice the topology
-  reference slots. A reservation against a full table evicts the oldest admitted peer that no
-  local topology slot references and whose connection is older than the retention grace, and
-  otherwise fails with `Error::ConnectionCapacityExceeded`.
+  reference slots. A reservation against a full table evicts one admitted peer that no local
+  topology slot references, preferring a generation already revoked by a send failure and then
+  the peer silent longest among those older than the retention grace, and otherwise fails with
+  `Error::ConnectionCapacityExceeded`.
 
 ### Fixed
 

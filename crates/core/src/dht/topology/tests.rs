@@ -453,11 +453,24 @@ fn test_find_successor_remote_hop_always_makes_strict_progress() {
 #[test]
 fn test_find_successor_treats_local_successor_entry_as_absent() {
     let local = did(0);
-    let current = state(local, vec![local], None, vec![Some(local), None], 0);
-
+    let only_local = state(local, vec![local], None, vec![Some(local), None], 0);
     assert_eq!(
-        find_successor(&current, did(8)),
+        find_successor(&only_local, did(8)),
         FindSuccessorStep::Local(local)
+    );
+
+    let head = did(4);
+    let local_then_head = state(local, vec![local, head], None, vec![Some(local), None], 0);
+    assert_eq!(
+        find_successor(&local_then_head, did(2)),
+        FindSuccessorStep::Local(head)
+    );
+    assert_eq!(
+        find_successor(&local_then_head, did(8)),
+        FindSuccessorStep::Remote {
+            next: head,
+            did: did(8)
+        }
     );
 }
 

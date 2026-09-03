@@ -36,6 +36,7 @@ pub(crate) use stabilization::MaintenancePhaseEvent;
 pub(crate) use stabilization::MaintenancePhaseKind;
 pub use stabilization::Stabilizer;
 pub use stabilization::StorageRepairOutcome;
+pub(crate) use stabilization::DISCONNECTED_CONNECTION_GRACE_MS;
 pub(crate) use storage::StorageSyncDelivery;
 pub(crate) use storage::StorageSyncDeliveryCursor;
 pub use storage::StorageSyncDestination;

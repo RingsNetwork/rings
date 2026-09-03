@@ -9,6 +9,8 @@ pub(super) use registry::ActiveConnectionSet;
 pub(super) use registry::ConnectionLifecycleRegistry;
 pub(super) use registry::LifecycleBounds;
 use registry::PeerConnectionLifecycle;
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(super) use registry::ReservationVerdict;
 
 use super::SwarmConnection;
 use super::SwarmTransport;
@@ -629,14 +631,29 @@ impl SwarmTransport {
         action: impl FnOnce(&ActiveConnectionSet) -> Result<T>,
     ) -> Result<Option<T>> {
         let _lifecycle = self.connection_lifecycle()?;
+        self.retire_active_connection_locked(attempt, |active| action(active).map(Some))
+            .map(Option::flatten)
+    }
+
+    /// Retire `attempt` only if `action` decides to, under the lifecycle boundary.
+    ///
+    /// Post: `Ok(None)` iff `attempt` was not the active generation;
+    /// `Ok(Some(None))` iff `action` declined and no local state changed;
+    /// `Ok(Some(Some(value)))` iff `action` committed and the record was retired.
+    pub(super) fn retire_active_connection_if<T>(
+        &self,
+        attempt: PendingConnectionAttempt,
+        action: impl FnOnce(&ActiveConnectionSet) -> Result<Option<T>>,
+    ) -> Result<Option<Option<T>>> {
+        let _lifecycle = self.connection_lifecycle()?;
         self.retire_active_connection_locked(attempt, action)
     }
 
     fn retire_active_connection_locked<T>(
         &self,
         attempt: PendingConnectionAttempt,
-        action: impl FnOnce(&ActiveConnectionSet) -> Result<T>,
-    ) -> Result<Option<T>> {
+        action: impl FnOnce(&ActiveConnectionSet) -> Result<Option<T>>,
+    ) -> Result<Option<Option<T>>> {
         let mut lifecycles = self.peer_lifecycles()?;
         if lifecycles.active_attempt(attempt.peer) != Some(attempt) {
             return Ok(None);
@@ -649,16 +666,19 @@ impl SwarmTransport {
         let mut pending_finger_updates = self.pending_finger_updates()?;
         let mut peer_liveness = self.peer_liveness()?;
         let mut measured_disconnects = self.measured_disconnects()?;
-        let result = action(&active)?;
+        let Some(result) = action(&active)? else {
+            return Ok(Some(None));
+        };
 
         // These mutations are infallible after the DHT action commits. If the
-        // action fails, all four guards drop without changing local state.
+        // action fails or declines, all four guards drop without changing
+        // local state.
         lifecycles.remove_active(attempt);
         pending_finger_updates.retain(|pending, _| pending.peer != attempt.peer);
         peer_liveness.remove(attempt.peer);
         measured_disconnects.remove(&attempt.peer);
         self.outbound_schedulers.shutdown(attempt.peer);
-        Ok(Some(result))
+        Ok(Some(Some(result)))
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -671,7 +691,8 @@ impl SwarmTransport {
         let _lifecycle = self
             .connection_lifecycle
             .lock_with_waiter_observer_for_test(before_lifecycle_gate)?;
-        self.retire_active_connection_locked(attempt, action)
+        self.retire_active_connection_locked(attempt, |active| action(active).map(Some))
+            .map(Option::flatten)
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
