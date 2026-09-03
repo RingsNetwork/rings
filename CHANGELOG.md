@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.21.0
+
+### Breaking changes
+
+- Message, transaction, and descriptor signatures now sign a domain-separated transcript that
+  binds the signer's `network_id` and a per-message-family tag. Signatures issued by earlier
+  builds no longer verify, and a signature issued inside one overlay does not verify inside
+  another. `Transaction`, `MessagePayload`, and `PayloadSender` take a `MessageSigner` (a session
+  key acting inside one overlay) instead of a bare `SessionSk`, and
+  `MessageVerificationExt::verify` takes the receiver's `network_id`.
+- DHT entries carry a retention bound (`expires_at_ms`) stamped at the operation boundary with
+  `DEFAULT_TTL_MS` and bounded at admission by `MAX_TTL_MS`. Stored values without a bound, or
+  whose bound has elapsed, are retired on their next read and are never replicated or served.
+- Storage admission rejects peer-supplied CRDT versions whose logical time is more than
+  `TS_OFFSET_TOLERANCE_MS` ahead of the receiver's clock, so a forged register floor can no longer
+  pin a key.
+
+### Fixed
+
+- The native file-backed storage now enforces its configured byte capacity: a write beyond the
+  budget retires the least recently written keys first, a value larger than the whole budget is
+  rejected with `Error::StorageValueExceedsCapacity`, and the budget is restored on open.
+- The local fetched-entry cache is bounded at `LOCAL_CACHE_CAPACITY` entries, evicting the least
+  recently written entry.
+
 ## 0.20.2
 
 ### Added
