@@ -89,6 +89,64 @@ impl ActiveConnectionSet {
     }
 }
 
+/// Cardinality bounds over the lifecycle map.
+///
+/// Invariant: `pending <= total`, so a handshake slot always fits inside the
+/// total and a pending-saturated registry is never mistaken for a full one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::swarm::transport) struct LifecycleBounds {
+    pending: usize,
+    total: usize,
+}
+
+impl LifecycleBounds {
+    /// Bound `Pending ∪ Admitting` by `pending` and every phase by `total`,
+    /// clamping the handshake share into the total.
+    pub(in crate::swarm::transport) const fn new(pending: usize, total: usize) -> Self {
+        Self {
+            pending: if pending < total { pending } else { total },
+            total,
+        }
+    }
+
+    /// Maximum peers in `Pending ∪ Admitting`, the handshake working set.
+    #[cfg(test)]
+    pub(in crate::swarm::transport) const fn pending(self) -> usize {
+        self.pending
+    }
+
+    /// Maximum peers in any phase.
+    #[cfg(test)]
+    pub(in crate::swarm::transport) const fn total(self) -> usize {
+        self.total
+    }
+}
+
+/// Why `reserve` would refuse a peer, or that it would admit it.
+///
+/// One source for the admission rule: `reserve` and the eviction policy both
+/// read it, so a reservation that cannot succeed for another reason never
+/// triggers an eviction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::swarm::transport) enum ReservationVerdict {
+    /// The peer already owns a lifecycle record.
+    AlreadyConnected,
+    /// The handshake working set is saturated.
+    PendingCapacityExceeded,
+    /// Every record slot is occupied; retiring one would admit the peer.
+    CapacityExceeded,
+    /// The reservation would be admitted.
+    Admissible,
+}
+
+impl ReservationVerdict {
+    /// Whether retiring one admitted record is what stands between this peer
+    /// and admission.
+    pub(in crate::swarm::transport) const fn needs_eviction(self) -> bool {
+        matches!(self, Self::CapacityExceeded)
+    }
+}
+
 /// Registry of mutually exclusive pending, admitting, and active generations.
 ///
 /// Model: `State = (Did ->?
@@ -100,17 +158,25 @@ impl ActiveConnectionSet {
 /// Invariant: every peer has at most one generation and one lifecycle phase.
 /// `Active` belongs to the admitted projection; send-terminal generations are
 /// excluded from the routable projection until retirement removes them.
+///
+/// Invariant: `|Pending ∪ Admitting| <= bounds.pending()` and `|State| <= bounds.total()`.
+/// Preservation: `reserve` is the only transition that grows the map and it
+/// checks both bounds; every other transition keeps or shrinks the map, so an
+/// activation never exceeds the bound its reservation was admitted under.
 #[derive(Debug)]
 #[cfg_attr(test, derive(Clone))]
-pub(in crate::swarm::transport) struct ConnectionLifecycleRegistry<const MAX_PENDING: usize> {
+pub(in crate::swarm::transport) struct ConnectionLifecycleRegistry {
+    bounds: LifecycleBounds,
     next_generation: u64,
     peers: BTreeMap<Did, PeerConnectionLifecycle>,
     send_terminal: BTreeSet<PendingConnectionAttempt>,
 }
 
-impl<const MAX_PENDING: usize> ConnectionLifecycleRegistry<MAX_PENDING> {
-    pub(in crate::swarm::transport) fn new() -> Self {
+impl ConnectionLifecycleRegistry {
+    /// Create an empty registry under `bounds`.
+    pub(in crate::swarm::transport) fn new(bounds: LifecycleBounds) -> Self {
         Self {
+            bounds,
             next_generation: 0,
             peers: BTreeMap::new(),
             send_terminal: BTreeSet::new(),
@@ -122,13 +188,19 @@ impl<const MAX_PENDING: usize> ConnectionLifecycleRegistry<MAX_PENDING> {
         peer: Did,
         now_ms: i64,
     ) -> Result<PendingConnectionAttempt> {
-        if self.peers.contains_key(&peer) {
-            return Err(Error::AlreadyConnected);
-        }
-        if self.pending_len() >= MAX_PENDING {
-            return Err(Error::PendingConnectionCapacityExceeded {
-                capacity: MAX_PENDING,
-            });
+        match self.reservation_verdict(peer) {
+            ReservationVerdict::AlreadyConnected => return Err(Error::AlreadyConnected),
+            ReservationVerdict::PendingCapacityExceeded => {
+                return Err(Error::PendingConnectionCapacityExceeded {
+                    capacity: self.bounds.pending,
+                });
+            }
+            ReservationVerdict::CapacityExceeded => {
+                return Err(Error::ConnectionCapacityExceeded {
+                    capacity: self.bounds.total,
+                });
+            }
+            ReservationVerdict::Admissible => {}
         }
 
         self.next_generation = self
@@ -148,6 +220,33 @@ impl<const MAX_PENDING: usize> ConnectionLifecycleRegistry<MAX_PENDING> {
 
     pub(in crate::swarm::transport) fn contains(&self, peer: Did) -> bool {
         self.peers.contains_key(&peer)
+    }
+
+    /// Decide `reserve(peer)` without mutating: duplicate peer first, then the
+    /// handshake bound, then the total bound.
+    pub(in crate::swarm::transport) fn reservation_verdict(&self, peer: Did) -> ReservationVerdict {
+        if self.contains(peer) {
+            ReservationVerdict::AlreadyConnected
+        } else if self.pending_len() >= self.bounds.pending {
+            ReservationVerdict::PendingCapacityExceeded
+        } else if self.peers.len() >= self.bounds.total {
+            ReservationVerdict::CapacityExceeded
+        } else {
+            ReservationVerdict::Admissible
+        }
+    }
+
+    /// Replace the bounds of an empty registry.
+    ///
+    /// Pre: no lifecycle record exists, so no record was admitted under bounds
+    /// the new ones would violate.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(in crate::swarm::transport) fn set_bounds_for_test(&mut self, bounds: LifecycleBounds) {
+        debug_assert!(
+            self.peers.is_empty(),
+            "bounds may only change on an empty registry"
+        );
+        self.bounds = bounds;
     }
 
     pub(in crate::swarm::transport) fn state(&self, peer: Did) -> Option<PeerConnectionLifecycle> {

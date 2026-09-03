@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.20.2
+
+### Added
+
+- Bound the number of peers holding a logical connection record at twice the topology
+  reference slots. A reservation against a full table evicts one admitted peer that no local
+  topology slot references, preferring a generation already revoked by a send failure and then
+  the peer silent longest among those older than the retention grace, and otherwise fails with
+  `Error::ConnectionCapacityExceeded`.
+
+### Fixed
+
+- Chord `find_successor` now forwards to the successor head when no finger precedes the target
+  instead of addressing the local node, so finger fixing and lookups over a sparse finger table
+  make progress rather than failing on a self hop.
+
 ## 0.20.0
 
 ### Breaking changes

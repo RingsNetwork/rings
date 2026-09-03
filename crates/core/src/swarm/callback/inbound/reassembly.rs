@@ -17,12 +17,14 @@ impl InboundProcessor {
         authentication: Authentication,
         chunk: crate::chunk::Chunk,
     ) -> ReassemblyOutcome {
+        let now_ms = self.reassembly_clock.now_ms();
         let (outcome, expired) = self
             .reassembler
             .lock()
             .await
-            .handle_retained_outcome_with_expiry(
+            .handle_retained_at_with_attribution(
                 chunk,
+                now_ms,
                 matches!(authentication, Authentication::Authenticated),
             );
         self.record_expired_reassembly_failures(peer, expired).await;

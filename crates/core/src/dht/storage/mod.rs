@@ -299,10 +299,6 @@ impl PeerRing {
         Ok(self.storage_virtual_nodes()?.owner_for_key(placement_key))
     }
 
-    pub(super) fn observed_storage_virtual_owner_registered(&self, owner: Did) -> Result<bool> {
-        Ok(self.storage_virtual_nodes()?.contains_owner(owner))
-    }
-
     fn storage_virtual_nodes(&self) -> Result<StorageVirtualNodes> {
         let state = self.topology_state()?;
         Ok(self.storage_virtual_nodes_for_topology(&state))

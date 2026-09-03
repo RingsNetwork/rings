@@ -64,6 +64,7 @@ mod outbound;
 mod payload_send;
 mod pending;
 mod readiness;
+mod retention;
 mod storage_lookup;
 mod storage_sync;
 #[cfg(all(test, not(target_family = "wasm")))]
@@ -108,6 +109,8 @@ use self::pending::SharedConnectionLifecycles;
 #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
 use self::pending::PENDING_CONNECTION_TIMEOUT_MS;
 pub(crate) use self::readiness::TransportReadiness;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::retention::UNREFERENCED_CONNECTION_GRACE_MS;
 use self::storage_lookup::StorageLookupObservationMap;
 #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
 pub(crate) use self::storage_lookup::STORAGE_LOOKUP_OBSERVATION_CAPACITY;
@@ -232,6 +235,7 @@ impl SwarmTransport {
         measure: Option<MeasureImpl>,
         settings: SwarmTransportSettings,
     ) -> Self {
+        let lifecycle_bounds = self::retention::lifecycle_bounds(dht.successors().capacity());
         Self {
             network_id,
             transport: Transport::new(
@@ -249,9 +253,9 @@ impl SwarmTransport {
             connection_lifecycle: ConnectionLifecycleBoundary::new(),
             swarm_event_delivery: SwarmEventDeliveryLocks::new(),
             connection_creation: PeerOperationLocks::new(),
-            peer_lifecycles: Arc::new(
-                Mutex::new(self::pending::ConnectionLifecycleRegistry::new()),
-            ),
+            peer_lifecycles: Arc::new(Mutex::new(self::pending::ConnectionLifecycleRegistry::new(
+                lifecycle_bounds,
+            ))),
             pending_finger_updates: Mutex::new(BTreeMap::new()),
             peer_liveness: Mutex::new(PeerLivenessMap::new()),
             storage_lookup_observations: Mutex::new(BTreeMap::new()),

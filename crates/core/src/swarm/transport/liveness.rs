@@ -79,6 +79,10 @@ impl PeerLiveness {
     fn connected_for_ms(&self, now_ms: i64) -> i64 {
         now_ms.saturating_sub(self.connected_at_ms)
     }
+
+    fn idle_for_ms(&self, now_ms: i64) -> i64 {
+        now_ms.saturating_sub(self.last_inbound_ms)
+    }
 }
 
 /// Bounded-by-active-peers overlay liveness state.
@@ -166,9 +170,15 @@ impl PeerLivenessMap {
             .flatten()
     }
 
-    fn connected_for_ms(&self, peer: Did, generation: u64, now_ms: i64) -> Option<i64> {
+    pub(super) fn connected_for_ms(&self, peer: Did, generation: u64, now_ms: i64) -> Option<i64> {
         let liveness = self.peers.get(&peer)?;
         (liveness.generation == generation).then(|| liveness.connected_for_ms(now_ms))
+    }
+
+    /// Time since the last authenticated inbound payload on this generation.
+    pub(super) fn idle_for_ms(&self, peer: Did, generation: u64, now_ms: i64) -> Option<i64> {
+        let liveness = self.peers.get(&peer)?;
+        (liveness.generation == generation).then(|| liveness.idle_for_ms(now_ms))
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -184,6 +194,19 @@ impl PeerLivenessMap {
         let mut liveness = PeerLiveness::new(generation, sent_at_ms);
         liveness.mark_probe_sent(sent_at_ms);
         self.peers.insert(peer, liveness);
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    fn force_last_inbound_at(&mut self, peer: Did, generation: u64, last_inbound_ms: i64) -> bool {
+        let Some(liveness) = self
+            .peers
+            .get_mut(&peer)
+            .filter(|liveness| liveness.generation == generation)
+        else {
+            return false;
+        };
+        liveness.last_inbound_ms = last_inbound_ms;
+        true
     }
 
     #[cfg(test)]
@@ -343,6 +366,28 @@ impl SwarmTransport {
             self.peer_liveness()?
                 .force_probe_sent_at(peer, attempt.generation, sent_at_ms);
             Ok(())
+        })
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) fn force_peer_last_inbound_at(&self, peer: Did, last_inbound_ms: i64) -> Result<()> {
+        self.with_connection_lifecycle(|| {
+            let Some(attempt) = self.active_attempt(peer)? else {
+                return Err(Error::InvalidMessage(format!(
+                    "cannot age missing active peer {peer}"
+                )));
+            };
+            if self.peer_liveness()?.force_last_inbound_at(
+                peer,
+                attempt.generation,
+                last_inbound_ms,
+            ) {
+                Ok(())
+            } else {
+                Err(Error::InvalidMessage(format!(
+                    "cannot age missing liveness generation for peer {peer}"
+                )))
+            }
         })
     }
 

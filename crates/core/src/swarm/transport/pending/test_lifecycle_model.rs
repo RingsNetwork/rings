@@ -140,6 +140,11 @@ struct LifecycleView {
     generation_exhausted: bool,
 }
 
+/// Per-peer phase model of the registry.
+///
+/// Scope: the transitions of one peer's generation. The cardinality bounds
+/// (`LifecycleBounds`) range over the whole peer map and are outside this
+/// model; the table tests in `tests/test_lifecycle.rs` witness them.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct LifecycleModel {
     peer: PeerLifecycle,
@@ -263,7 +268,7 @@ impl LifecycleModel {
 #[derive(Clone)]
 struct LifecycleImplementation {
     peer: Did,
-    lifecycles: ConnectionLifecycleRegistry<1>,
+    lifecycles: ConnectionLifecycleRegistry,
     previous_attempt: Option<PendingConnectionAttempt>,
     dht_member: bool,
     transport_slot: bool,
@@ -275,7 +280,7 @@ impl LifecycleImplementation {
     fn new(peer: Did) -> Self {
         Self {
             peer,
-            lifecycles: ConnectionLifecycleRegistry::new(),
+            lifecycles: ConnectionLifecycleRegistry::new(LifecycleBounds::new(1, 1)),
             previous_attempt: None,
             dht_member: false,
             transport_slot: false,

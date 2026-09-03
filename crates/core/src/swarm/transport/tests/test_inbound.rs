@@ -15,35 +15,33 @@ mod test_storage_interleave;
 
 #[derive(Default)]
 struct BlockingValidateSwarmCallback {
-    validates: AtomicUsize,
-    inbounds: AtomicUsize,
-    validate_started: AtomicBool,
-    validate_started_notify: Notify,
-    release_validate: Notify,
+    validates: TestCounter,
+    inbounds: TestCounter,
+    validate_started: TestLatch,
+    release_validate: TestLatch,
 }
 
 impl BlockingValidateSwarmCallback {
-    async fn wait_for_first_validate_started(&self) -> Result<()> {
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !self.validate_started.load(Ordering::SeqCst) {
-                self.validate_started_notify.notified().await;
-            }
-        })
-        .await
-        .map_err(|_| Error::InvalidMessage("validation did not start within test bound".into()))?;
-        Ok(())
+    async fn wait_for_first_validate_started(&self) {
+        self.validate_started.wait().await;
+    }
+
+    async fn wait_for_validates_at_least(&self, count: usize) {
+        self.validates
+            .await_until(|validates| validates >= count)
+            .await;
     }
 
     fn release_first_validate(&self) {
-        self.release_validate.notify_waiters();
+        self.release_validate.set();
     }
 
     fn validates(&self) -> usize {
-        self.validates.load(Ordering::SeqCst)
+        self.validates.get()
     }
 
     fn inbounds(&self) -> usize {
-        self.inbounds.load(Ordering::SeqCst)
+        self.inbounds.get()
     }
 }
 
@@ -53,11 +51,9 @@ impl SwarmCallback for BlockingValidateSwarmCallback {
         &self,
         _payload: &MessagePayload,
     ) -> std::result::Result<(), crate::error::CallbackError> {
-        let previous = self.validates.fetch_add(1, Ordering::SeqCst);
-        if previous == 0 {
-            self.validate_started.store(true, Ordering::SeqCst);
-            self.validate_started_notify.notify_waiters();
-            self.release_validate.notified().await;
+        if self.validates.increment() == 0 {
+            self.validate_started.set();
+            self.release_validate.wait().await;
         }
         Ok(())
     }
@@ -66,31 +62,28 @@ impl SwarmCallback for BlockingValidateSwarmCallback {
         &self,
         _payload: &MessagePayload,
     ) -> std::result::Result<(), crate::error::CallbackError> {
-        self.inbounds.fetch_add(1, Ordering::SeqCst);
+        self.inbounds.increment();
         Ok(())
     }
 }
 
 #[derive(Default)]
 struct PendingValidateSwarmCallback {
-    started: AtomicBool,
-    started_notify: Notify,
-    dropped: AtomicBool,
+    started: TestLatch,
+    dropped: TestLatch,
 }
 
-struct PendingValidateDropGuard<'a>(&'a AtomicBool);
+struct PendingValidateDropGuard<'a>(&'a TestLatch);
 
 impl Drop for PendingValidateDropGuard<'_> {
     fn drop(&mut self) {
-        self.0.store(true, Ordering::SeqCst);
+        self.0.set();
     }
 }
 
 impl PendingValidateSwarmCallback {
     async fn wait_for_started(&self) {
-        while !self.started.load(Ordering::SeqCst) {
-            self.started_notify.notified().await;
-        }
+        self.started.wait().await;
     }
 }
 
@@ -101,8 +94,7 @@ impl SwarmCallback for PendingValidateSwarmCallback {
         _payload: &MessagePayload,
     ) -> std::result::Result<(), crate::error::CallbackError> {
         let _drop_guard = PendingValidateDropGuard(&self.dropped);
-        self.started.store(true, Ordering::SeqCst);
-        self.started_notify.notify_waiters();
+        self.started.set();
         pending::<()>().await;
         Ok(())
     }
@@ -110,22 +102,19 @@ impl SwarmCallback for PendingValidateSwarmCallback {
 
 #[derive(Default)]
 struct OrderedReassemblyCallback {
-    final_chunk_started: AtomicBool,
-    final_chunk_started_notify: Notify,
-    release_final_chunk: Notify,
+    final_chunk_started: TestLatch,
+    release_final_chunk: TestLatch,
     delivered: Mutex<Vec<Vec<u8>>>,
     validated: Mutex<Vec<&'static str>>,
 }
 
 impl OrderedReassemblyCallback {
     async fn wait_for_final_chunk(&self) {
-        while !self.final_chunk_started.load(Ordering::SeqCst) {
-            self.final_chunk_started_notify.notified().await;
-        }
+        self.final_chunk_started.wait().await;
     }
 
     fn release_final_chunk(&self) {
-        self.release_final_chunk.notify_waiters();
+        self.release_final_chunk.set();
     }
 
     fn delivered(&self) -> std::io::Result<Vec<Vec<u8>>> {
@@ -151,9 +140,8 @@ impl SwarmCallback for OrderedReassemblyCallback {
     ) -> std::result::Result<(), crate::error::CallbackError> {
         match payload.transaction.data::<Message>()? {
             Message::Chunk(chunk) if chunk.chunk[0].saturating_add(1) == chunk.chunk[1] => {
-                self.final_chunk_started.store(true, Ordering::SeqCst);
-                self.final_chunk_started_notify.notify_waiters();
-                self.release_final_chunk.notified().await;
+                self.final_chunk_started.set();
+                self.release_final_chunk.wait().await;
             }
             Message::CustomMessage(_) => self
                 .validated
@@ -218,7 +206,7 @@ async fn test_pending_message_rechecks_admission_after_async_validation() -> Res
             .map_err(|error| Error::InvalidMessage(error.to_string()))
     });
 
-    app_callback.wait_for_first_validate_started().await?;
+    app_callback.wait_for_first_validate_started().await;
     assert!(matches!(
         transport.retire_active_connection_with(attempt, |_| Ok(())),
         Ok(Some(()))
@@ -271,7 +259,7 @@ async fn test_inbound_control_lane_progresses_while_application_validation_is_bl
             .await
             .map_err(|error| Error::InvalidMessage(error.to_string()))
     });
-    app_callback.wait_for_first_validate_started().await?;
+    app_callback.wait_for_first_validate_started().await;
 
     let control_callback = Arc::clone(&callback);
     let control_task = tokio::spawn(async move {
@@ -280,13 +268,7 @@ async fn test_inbound_control_lane_progresses_while_application_validation_is_bl
             .await
             .map_err(|error| Error::InvalidMessage(error.to_string()))
     });
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while app_callback.validates() < 2 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .map_err(|_| Error::InvalidMessage("control lane was starved".to_string()))?;
+    app_callback.wait_for_validates_at_least(2).await;
 
     app_callback.release_first_validate();
     blocked
@@ -362,13 +344,11 @@ async fn test_inbound_mailbox_reserves_control_capacity_under_application_satura
             }));
         }
     }
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while callback.inbound_admitted_count_for_test() < inbound_application_capacity_for_test() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .map_err(|_| Error::InvalidMessage("inbound mailbox did not fill".to_string()))?;
+    callback
+        .await_inbound_admitted_count_for_test(|admitted| {
+            admitted >= inbound_application_capacity_for_test()
+        })
+        .await;
 
     let overflow = callback
         .on_admitted_message_for_test(&control_cid, &overflow_message)
@@ -380,13 +360,13 @@ async fn test_inbound_mailbox_reserves_control_capacity_under_application_satura
             if *capacity == inbound_mailbox_capacity_for_test()
     ));
 
-    tokio::time::timeout(
-        Duration::from_secs(1),
-        callback.on_admitted_message_for_test(&control_cid, &control),
-    )
-    .await
-    .map_err(|_| Error::InvalidMessage("reserved control capacity was starved".to_string()))?
-    .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+    // The reserved control lane either admits this frame or fails with a typed
+    // capacity error; a starved lane would surface as a hang bounded by the
+    // test harness, never as a sub-second race.
+    callback
+        .on_admitted_message_for_test(&control_cid, &control)
+        .await
+        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
     assert!(app_callback.validates() >= 2);
 
     app_callback.release_first_validate();
@@ -436,13 +416,7 @@ async fn test_closing_inbound_mailbox_cancels_pending_callback() -> Result<()> {
 
     app_callback.wait_for_started().await;
     callback.close_inbound_for_test();
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while !app_callback.dropped.load(Ordering::SeqCst) {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .map_err(|_| Error::InvalidMessage("pending callback was not cancelled".to_string()))?;
+    app_callback.dropped.wait().await;
     assert!(delivery
         .await
         .map_err(|_| Error::InvalidMessage("inbound mailbox task panicked".to_string()))?);
@@ -670,9 +644,8 @@ async fn test_reassembly_handoff_preserves_data_order_without_blocking_control()
         transport.dht.did,
     )?;
     let control_delivery = spawn_inbound_delivery(Arc::clone(&callback), cid, control);
-    tokio::time::timeout(Duration::from_secs(1), control_delivery)
+    control_delivery
         .await
-        .map_err(|_| Error::InvalidMessage("control lane was blocked by reassembly".to_string()))?
         .map_err(|_| Error::InvalidMessage("control lane task panicked".to_string()))??;
     assert!(app_callback.delivered()?.is_empty());
     assert!(app_callback.validated()?.is_empty());

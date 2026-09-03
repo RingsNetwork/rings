@@ -45,7 +45,7 @@ pub(crate) const fn inbound_peer_capacity_for_test() -> usize {
     inbound::peer_capacity_for_test()
 }
 use inbound::InboundMailbox;
-use inbound::ReassemblyCleanupClock;
+use inbound::ReassemblyClock;
 
 pub use crate::error::CallbackError;
 type TransportCallbackError = Box<dyn std::error::Error>;
@@ -180,6 +180,7 @@ pub(super) struct InboundProcessor {
     message_handler: MessageHandler,
     callback: SharedSwarmCallback,
     reassembler: Arc<FuturesMutex<MessageReassembler>>,
+    reassembly_clock: ReassemblyClock,
     pending_attempt: Arc<Mutex<Option<PendingConnectionAttempt>>>,
 }
 
@@ -235,17 +236,13 @@ impl InnerSwarmCallback {
 
     /// Create a new [InnerSwarmCallback] with the provided transport and callback.
     pub fn new(transport: Arc<SwarmTransport>, callback: SharedSwarmCallback) -> Self {
-        Self::new_with_reassembly_cleanup_clock(
-            transport,
-            callback,
-            ReassemblyCleanupClock::system(),
-        )
+        Self::new_with_reassembly_clock(transport, callback, ReassemblyClock::system())
     }
 
-    fn new_with_reassembly_cleanup_clock(
+    fn new_with_reassembly_clock(
         transport: Arc<SwarmTransport>,
         callback: SharedSwarmCallback,
-        cleanup_clock: ReassemblyCleanupClock,
+        reassembly_clock: ReassemblyClock,
     ) -> Self {
         let inbound_capacity = transport.inbound_capacity();
         let message_handler = MessageHandler::new(transport.clone(), callback.clone());
@@ -258,24 +255,22 @@ impl InnerSwarmCallback {
             message_handler,
             callback,
             reassembler: Arc::new(FuturesMutex::new(reassembler)),
+            reassembly_clock: reassembly_clock.clone(),
             pending_attempt: Arc::new(Mutex::new(None)),
         };
-        let inbound = InboundMailbox::spawn(processor.clone(), inbound_capacity, cleanup_clock);
+        let inbound = InboundMailbox::spawn(processor.clone(), inbound_capacity, reassembly_clock);
         Self { processor, inbound }
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    /// Construct an inbound actor with an injected periodic-cleanup clock.
-    pub(crate) fn new_with_reassembly_cleanup_clock_for_test(
+    /// Construct an inbound actor whose chunk admission and periodic cleanup
+    /// read one injected clock.
+    pub(crate) fn new_with_reassembly_clock_for_test(
         transport: Arc<SwarmTransport>,
         callback: SharedSwarmCallback,
         now_ms: Arc<Mutex<u128>>,
     ) -> Self {
-        Self::new_with_reassembly_cleanup_clock(
-            transport,
-            callback,
-            ReassemblyCleanupClock::controlled(now_ms),
-        )
+        Self::new_with_reassembly_clock(transport, callback, ReassemblyClock::controlled(now_ms))
     }
 
     /// Bind this callback to the pending handshake that created its transport.
@@ -290,6 +285,38 @@ impl InnerSwarmCallback {
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn inbound_admitted_count_for_test(&self) -> usize {
         self.inbound.admitted_count_for_test()
+    }
+
+    /// Resolve once `predicate` holds over the admitted inbound count,
+    /// re-checked on every capacity reservation, transition, or release.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) async fn await_inbound_admitted_count_for_test(
+        &self,
+        predicate: impl Fn(usize) -> bool,
+    ) {
+        self.inbound.await_admitted_count_for_test(predicate).await;
+    }
+
+    /// Resolve once `predicate` holds over the number of frames whose raw
+    /// transport lease this mailbox has released after core admission.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) async fn await_inbound_handoffs_for_test(&self, predicate: impl Fn(u64) -> bool) {
+        self.inbound.await_handoffs_for_test(predicate).await;
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) fn reassembly_cleanup_passes_for_test(&self) -> u64 {
+        self.inbound.cleanup_passes_for_test()
+    }
+
+    /// Resolve once `predicate` holds over the number of completed reassembly
+    /// cleanup passes, periodic or close-time.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) async fn await_reassembly_cleanup_passes_for_test(
+        &self,
+        predicate: impl Fn(u64) -> bool,
+    ) {
+        self.inbound.await_cleanup_passes_for_test(predicate).await;
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]

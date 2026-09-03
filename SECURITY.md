@@ -93,6 +93,26 @@ Chord routing assumes the node set is acceptable under the deployment model. It
 gives deterministic routing over the observed topology; it does not defend, by
 itself, against an adversary that can occupy many positions on the identifier ring.
 
+### Connection Admission
+
+Each node bounds the number of peers holding any logical connection record,
+whether handshaking or admitted, at twice its topology reference slots
+(one slot per ring bit for fingers, the successor-list capacity, and the
+predecessor). One share covers the peers this node references; the other covers
+peers that reference this node, which it cannot observe because references are
+directed while connections are shared; Chord places no bound on how many
+peers may hold this node as a finger, so the second share is a heuristic, not
+a bound. When the bound is reached, a new reservation evicts one admitted peer
+that no local topology slot references: a generation already revoked by a send
+failure first, otherwise the peer that has been silent longest among those
+older than the retention grace. If every unreferenced peer is younger than the
+grace, the reservation is rejected. The reference check and the retirement
+share one critical section, so a peer referenced by the local topology at
+retirement time is never evicted. Eviction happens only under admission
+pressure, so an identity-rich adversary that fills the table loses one
+connection per admission that honest peers attempt. The bound limits resource
+use; it is not a Sybil defence.
+
 ### DHT Storage
 
 Storage ownership and replication are topology-derived. CRDT joins, owner checks,

@@ -252,6 +252,13 @@ pub enum Error {
         capacity: usize,
     },
 
+    /// Logical peer connection capacity {capacity} is exhausted
+    #[error("Logical peer connection capacity {capacity} is exhausted")]
+    ConnectionCapacityExceeded {
+        /// Maximum number of peers with a pending, admitting, or active connection.
+        capacity: usize,
+    },
+
     /// Pending WebRTC connection generation id space is exhausted.
     #[error("Pending WebRTC connection generation is exhausted")]
     PendingConnectionGenerationExhausted,

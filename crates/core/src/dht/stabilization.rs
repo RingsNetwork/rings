@@ -1,7 +1,6 @@
 //! Stabilization run daemons to maintain dht.
 
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,7 +42,10 @@ use crate::utils::Instant;
 const STABILIZATION_STEP_TIMEOUT: Duration =
     TRACKED_PAYLOAD_COMPLETION_BOUND.saturating_add(Duration::from_secs(1));
 const STABILIZATION_STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
-const DISCONNECTED_CONNECTION_GRACE_MS: i64 = 30_000;
+/// How long a transport may stay in a non-productive state before it is
+/// reclaimed: disconnected here, unreferenced under admission pressure in
+/// `swarm::transport::retention`.
+pub(crate) const DISCONNECTED_CONNECTION_GRACE_MS: i64 = 30_000;
 /// Run one repair delivery per maintenance phase. Every frame has a bounded
 /// data-channel admission wait, and tracked completion prevents a chunk tail
 /// from escaping into the following topology phase.
@@ -320,8 +322,7 @@ impl Stabilizer {
     pub async fn clean_unavailable_connections(&self) -> Result<()> {
         self.transport.expire_pending_connections().await?;
         let admitted_states = self.admitted_connection_states()?;
-        let topology_peers = self.dht_topology_peers()?;
-        let mut candidates = topology_peers;
+        let mut candidates = self.dht.topology_state()?.referenced_peers();
         candidates.extend(self.transport.admitted_connection_ids());
         let now_ms = get_epoch_ms_i64();
 
@@ -351,31 +352,6 @@ impl Stabilizer {
                 }))
             })
             .collect()
-    }
-
-    fn dht_topology_peers(&self) -> Result<BTreeSet<Did>> {
-        let topology = self.dht.topology_state()?;
-        let mut peers = BTreeSet::new();
-
-        for did in topology.successors {
-            if did != self.dht.did {
-                peers.insert(did);
-            }
-        }
-
-        if let Some(predecessor) = topology.predecessor {
-            if predecessor != self.dht.did {
-                peers.insert(predecessor);
-            }
-        }
-
-        for did in topology.fingers.into_iter().flatten() {
-            if did != self.dht.did {
-                peers.insert(did);
-            }
-        }
-
-        Ok(peers)
     }
 
     async fn topology_peer_removal_reason(
@@ -485,33 +461,16 @@ impl Stabilizer {
         )
     }
 
+    /// `PrunableTopologyPeer(n, p)`: referenced by a non-head slot only.
     fn disconnected_topology_prune_candidate(&self, peer: Did) -> Result<bool> {
-        let topology = self.dht.topology_state()?;
-        if topology.successors.first().copied() == Some(peer) {
-            return Ok(false);
-        }
-        if topology
-            .successors
-            .iter()
-            .skip(1)
-            .any(|successor| *successor == peer)
-        {
-            return Ok(true);
-        }
-
-        if topology.predecessor == Some(peer) {
-            return Ok(true);
-        }
-
-        Ok(topology.fingers.contains(&Some(peer)))
+        self.dht.with_topology_state(|topology| {
+            topology.references(peer) && topology.successors.first().copied() != Some(peer)
+        })
     }
 
     async fn remove_unavailable_peer(&self, did: Did, removal: TopologyPeerRemoval) -> Result<()> {
         let reason = removal.reason;
-        let should_repair = self
-            .dht
-            .peer_may_share_storage_responsibility(did, self.transport.storage_redundancy())
-            .await?;
+        let should_repair = self.dht.peer_may_share_storage_responsibility(did)?;
         let fallback_snapshot = self.transport.live_successor_fallback(did)?;
         tracing::info!(
             target: "rings_core::dht::stabilization",

@@ -1,27 +1,23 @@
 use std::collections::BTreeMap;
 #[cfg(feature = "dummy")]
-use std::sync::atomic::AtomicBool;
-#[cfg(feature = "dummy")]
 use std::sync::atomic::AtomicUsize;
 #[cfg(feature = "dummy")]
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-use std::time::Duration;
 
 use async_trait::async_trait;
 #[cfg(feature = "dummy")]
 use bytes::Bytes;
 use rings_transport::core::callback::TransportCallback;
-#[cfg(feature = "dummy")]
-use tokio::sync::Notify;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use tracing_test::traced_test;
 
 use super::pending::ConnectionLifecycleRegistry;
 #[cfg(feature = "dummy")]
 use super::pending::FingerUpdateDisposition;
+use super::pending::LifecycleBounds;
+use super::pending::ReservationVerdict;
 use super::*;
 #[cfg(feature = "dummy")]
 use crate::chunk::Chunk;
@@ -56,6 +52,9 @@ use crate::swarm::callback::SwarmCallback;
 #[cfg(feature = "dummy")]
 use crate::swarm::callback::SwarmEvent;
 use crate::swarm::SwarmBuilder;
+use crate::utils::GenerationWitness;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+use crate::utils::Witness;
 
 mod test_events;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
@@ -65,16 +64,41 @@ mod test_inbound;
 mod test_lifecycle;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 mod test_readiness;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+mod test_retention;
 mod test_retirement;
+
+/// Latched test event: set by the system under test, awaited by event.
+///
+/// The `AtomicBool` + `Notify::notify_waiters` pairing it replaces could lose
+/// the wake-up between the flag check and `notified()` registration; the
+/// witness retains the value.
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+type TestLatch = Witness<bool>;
+
+/// Monotone test counter whose readings can be awaited by event.
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+type TestCounter = Witness<usize>;
 
 #[derive(Default)]
 struct RecordingMeasure {
     counters: Mutex<Vec<(Did, MeasureCounter)>>,
     measurements: Mutex<Vec<(Did, MeasurementEvent)>>,
     qualities: Mutex<BTreeMap<Did, PeerQuality>>,
+    /// Bumped after each counter or measurement lands, so a test awaits the
+    /// recording rather than polling under a wall-clock bound.
+    recorded: GenerationWitness,
 }
 
 impl RecordingMeasure {
+    /// Resolve once `predicate` holds over the fully applied measure state.
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    async fn await_recorded(&self, predicate: impl Fn(&Self) -> bool) {
+        self.recorded
+            .await_until(|_generation| predicate(self))
+            .await;
+    }
+
     fn snapshot_counters(&self) -> std::io::Result<Vec<(Did, MeasureCounter)>> {
         self.counters
             .lock()
@@ -107,6 +131,7 @@ impl Measure for RecordingMeasure {
             Ok(mut counters) => counters.push((did, counter)),
             Err(_) => tracing::error!("RecordingMeasure counters mutex is poisoned"),
         }
+        self.recorded.bump();
     }
 
     async fn get_count(&self, did: Did, counter: MeasureCounter) -> u64 {
@@ -245,36 +270,32 @@ impl SwarmCallback for CountingSwarmCallback {
     }
 }
 
-#[cfg(feature = "dummy")]
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 #[derive(Default)]
 struct BlockingConnectMeasure {
     inner: RecordingMeasure,
-    connect_started: AtomicBool,
-    connect_started_notify: Notify,
-    release_connect: Notify,
+    connect_started: TestLatch,
+    release_connect: TestLatch,
 }
 
-#[cfg(feature = "dummy")]
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 impl BlockingConnectMeasure {
     async fn wait_for_connect_started(&self) {
-        while !self.connect_started.load(Ordering::SeqCst) {
-            self.connect_started_notify.notified().await;
-        }
+        self.connect_started.wait().await;
     }
 
     fn release_connect(&self) {
-        self.release_connect.notify_waiters();
+        self.release_connect.set();
     }
 }
 
-#[cfg(feature = "dummy")]
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 #[async_trait]
 impl Measure for BlockingConnectMeasure {
     async fn incr(&self, did: Did, counter: MeasureCounter) {
         if counter == MeasureCounter::Connect {
-            self.connect_started.store(true, Ordering::SeqCst);
-            self.connect_started_notify.notify_waiters();
-            self.release_connect.notified().await;
+            self.connect_started.set();
+            self.release_connect.wait().await;
         }
         self.inner.incr(did, counter).await;
     }
@@ -284,7 +305,7 @@ impl Measure for BlockingConnectMeasure {
     }
 }
 
-#[cfg(feature = "dummy")]
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 #[async_trait]
 impl BehaviourJudgement for BlockingConnectMeasure {
     async fn quality(&self, did: Did) -> PeerQuality {
@@ -292,17 +313,16 @@ impl BehaviourJudgement for BlockingConnectMeasure {
     }
 }
 
-#[cfg(feature = "dummy")]
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 #[derive(Default)]
 struct BlockingEventSwarmCallback {
     blocked_peer: Mutex<Option<Did>>,
-    connected_started: AtomicBool,
-    connected_started_notify: Notify,
-    release_connected: Notify,
+    connected_started: TestLatch,
+    release_connected: TestLatch,
     events: Mutex<Vec<(Did, WebrtcConnectionState)>>,
 }
 
-#[cfg(feature = "dummy")]
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 impl BlockingEventSwarmCallback {
     fn blocking_peer(peer: Did) -> Self {
         Self {
@@ -312,13 +332,11 @@ impl BlockingEventSwarmCallback {
     }
 
     async fn wait_for_connected_event_started(&self) {
-        while !self.connected_started.load(Ordering::SeqCst) {
-            self.connected_started_notify.notified().await;
-        }
+        self.connected_started.wait().await;
     }
 
     fn release_connected_event(&self) {
-        self.release_connected.notify_waiters();
+        self.release_connected.set();
     }
 
     fn events(&self) -> std::io::Result<Vec<WebrtcConnectionState>> {
@@ -346,7 +364,7 @@ impl BlockingEventSwarmCallback {
     }
 }
 
-#[cfg(feature = "dummy")]
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 #[async_trait]
 impl SwarmCallback for BlockingEventSwarmCallback {
     async fn on_event(
@@ -359,9 +377,8 @@ impl SwarmCallback for BlockingEventSwarmCallback {
             Err(_) => tracing::error!("BlockingEventSwarmCallback events mutex is poisoned"),
         }
         if *state == WebrtcConnectionState::Connected && self.blocks_connected_peer(*peer) {
-            self.connected_started.store(true, Ordering::SeqCst);
-            self.connected_started_notify.notify_waiters();
-            self.release_connected.notified().await;
+            self.connected_started.set();
+            self.release_connected.wait().await;
         }
         Ok(())
     }

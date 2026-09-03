@@ -19,3 +19,8 @@ pub mod js_utils;
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
 /// JavaScript value conversion helpers used by the WASM bindings.
 pub mod js_value;
+
+mod witness;
+pub(crate) use witness::GenerationWitness;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use witness::Witness;
