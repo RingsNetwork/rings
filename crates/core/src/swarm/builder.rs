@@ -17,7 +17,6 @@ use crate::measure::MeasureImpl;
 use crate::session::SessionSk;
 use crate::swarm::callback::SharedSwarmCallback;
 use crate::swarm::callback::SwarmCallback;
-use crate::swarm::transport::ConnectionCapacity;
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::transport::SwarmTransportSettings;
 use crate::swarm::transport::SwarmWebrtcConfig;
@@ -179,7 +178,6 @@ impl SwarmBuilder {
                 self.dht_storage_redundancy,
                 storage_virtual_node_config,
                 self.reassembly_limits,
-                ConnectionCapacity::for_successor_capacity(self.dht_succ_max),
             ),
         ));
 

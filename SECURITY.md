@@ -101,12 +101,13 @@ whether handshaking or admitted, at twice its topology reference slots
 predecessor). One share covers the peers this node references; the other covers
 peers that reference this node, which it cannot observe because references are
 directed while connections are shared. When the bound is reached, a new
-reservation evicts the oldest admitted peer that no local topology slot or
-storage placement references and whose data channel has been open for at least
-the retention grace; if every unreferenced peer is younger than the grace, the
-reservation is rejected. An identity-rich adversary can therefore occupy the
-table only by reconnecting at least once per grace per slot, and honest peers
-that are referenced by the local topology are never evicted on its behalf.
+reservation evicts the oldest admitted peer that no local topology slot
+references and whose connection is older than the retention grace; if every
+unreferenced peer is younger than the grace, the reservation is rejected.
+Eviction happens only under admission pressure, so an identity-rich adversary
+that fills the table loses one connection per admission that honest peers
+attempt, and peers referenced by the local topology are never evicted on its
+behalf. The bound limits resource use; it is not a Sybil defence.
 
 ### DHT Storage
 

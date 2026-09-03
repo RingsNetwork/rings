@@ -481,10 +481,7 @@ impl Stabilizer {
 
     async fn remove_unavailable_peer(&self, did: Did, removal: TopologyPeerRemoval) -> Result<()> {
         let reason = removal.reason;
-        let should_repair = self
-            .dht
-            .peer_may_share_storage_responsibility(did, self.transport.storage_redundancy())
-            .await?;
+        let should_repair = self.dht.peer_may_share_storage_responsibility(did)?;
         let fallback_snapshot = self.transport.live_successor_fallback(did)?;
         tracing::info!(
             target: "rings_core::dht::stabilization",

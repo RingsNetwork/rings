@@ -448,6 +448,19 @@ fn test_find_successor_remote_hop_always_makes_strict_progress() {
     }
 }
 
+/// A successor entry equal to `local` is representable through the public
+/// fields and must be treated as no successor, never as a remote hop.
+#[test]
+fn test_find_successor_treats_local_successor_entry_as_absent() {
+    let local = did(0);
+    let current = state(local, vec![local], None, vec![Some(local), None], 0);
+
+    assert_eq!(
+        find_successor(&current, did(8)),
+        FindSuccessorStep::Local(local)
+    );
+}
+
 /// Finger maintenance on a cleared table asks the successor head, not itself.
 #[test]
 fn test_fix_finger_step_forwards_to_successor_head_when_fingers_are_sparse() {

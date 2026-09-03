@@ -3,17 +3,21 @@
 //! State relation, per node `n`:
 //! - `Admitted(n)` is the set of peers holding an `Active` lifecycle record.
 //! - `Referenced(n, p)` iff `p` occupies a successor, predecessor, or finger
-//!   slot of `n` ([`crate::dht::topology::TopologyState::references`]), or `p`
-//!   owns a storage placement that `n` replicates
-//!   (`PeerRing::peer_may_share_storage_responsibility`).
-//! - `Unreferenced(n, p)` iff `p ∈ Admitted(n) ∧ ¬Referenced(n, p)`.
-//! - `Evictable(n, p, now)` iff `Unreferenced(n, p)` and `p`'s data channel has
-//!   been open for at least [`UNREFERENCED_CONNECTION_GRACE_MS`].
+//!   slot of `n` ([`crate::dht::topology::TopologyState::references`]).
+//!   Storage responsibility is derived from the same slots, so
+//!   `PeerRing::peer_may_share_storage_responsibility` is the same proposition
+//!   under its storage-facing name.
+//! - `Age(n, p, now)` is how long `p`'s current generation has held a liveness
+//!   record: since its data channel opened, or since the first liveness scan
+//!   that observed an admitted generation without one.
+//! - `Evictable(n, p, now)` iff `p ∈ Admitted(n) ∧ ¬Referenced(n, p) ∧
+//!   Age(n, p, now) >= UNREFERENCED_CONNECTION_GRACE_MS`.
 //!
-//! Invariant: `|lifecycle records of n| <= capacity`, enforced by the lifecycle
-//! registry. Eviction is the only transition that retires a healthy admitted
-//! connection, and it runs only when a reservation would otherwise violate the
-//! bound: it removes exactly the oldest evictable peer, so a full node recycles
+//! Invariant: `|lifecycle records of n| <= bounds.total`, enforced by the
+//! lifecycle registry. Eviction is the only policy-driven transition that
+//! retires a healthy admitted connection; an explicit `disconnect` is
+//! caller-driven. It runs only when a reservation would otherwise violate the
+//! bound and removes exactly the oldest evictable peer, so a full node recycles
 //! one displaced connection per admission instead of rejecting every newcomer.
 //!
 //! Why eviction is pressure-driven rather than periodic: a physical connection
@@ -28,13 +32,15 @@
 use std::cmp::Reverse;
 use std::collections::BTreeSet;
 
+use super::pending::LifecycleBounds;
+use super::pending::DEFAULT_PENDING_CONNECTION_CAPACITY;
 use super::PendingConnectionAttempt;
 use super::SwarmTransport;
 use crate::dht::Did;
 use crate::dht::DEFAULT_FINGER_TABLE_SIZE;
 use crate::error::Result;
 
-/// Minimum data-channel age before an unreferenced connection may be evicted.
+/// Minimum liveness-record age before an unreferenced connection may be evicted.
 ///
 /// A freshly admitted peer is still negotiating its role: its finger-fix
 /// report or join continuation may reference it within one round trip. The
@@ -43,7 +49,7 @@ pub(crate) const UNREFERENCED_CONNECTION_GRACE_MS: i64 = 30_000;
 
 /// Logical connections retained per topology reference slot.
 ///
-/// Law: `capacity = RETAINED_CONNECTIONS_PER_REFERENCE_SLOT × (finger slots +
+/// Law: `total = RETAINED_CONNECTIONS_PER_REFERENCE_SLOT × (finger slots +
 /// successor capacity + 1 predecessor)`, where the finger slot count is
 /// [`DEFAULT_FINGER_TABLE_SIZE`], one slot per ring bit, the upper bound on the
 /// distinct fingers any peer can hold regardless of the locally configured
@@ -54,53 +60,37 @@ pub(crate) const UNREFERENCED_CONNECTION_GRACE_MS: i64 = 30_000;
 /// handshakes count against the same bound.
 const RETAINED_CONNECTIONS_PER_REFERENCE_SLOT: usize = 2;
 
-/// Upper bound on peers holding any lifecycle record at one node.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ConnectionCapacity(usize);
-
-impl ConnectionCapacity {
-    /// Derive the capacity from the configured successor-list capacity.
-    pub(crate) const fn for_successor_capacity(successor_capacity: u8) -> Self {
-        let reference_slots = DEFAULT_FINGER_TABLE_SIZE
-            .saturating_add(successor_capacity as usize)
-            .saturating_add(1);
-        Self(reference_slots.saturating_mul(RETAINED_CONNECTIONS_PER_REFERENCE_SLOT))
-    }
-
-    /// Fix an exact capacity for tests that need to reach the bound quickly.
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) const fn exact_for_test(capacity: usize) -> Self {
-        Self(capacity)
-    }
-
-    /// The bound as a count of lifecycle records.
-    pub(crate) const fn get(self) -> usize {
-        self.0
+/// Lifecycle bounds derived from the successor-list capacity of the local DHT.
+pub(super) fn lifecycle_bounds(successor_capacity: usize) -> LifecycleBounds {
+    let reference_slots = DEFAULT_FINGER_TABLE_SIZE
+        .saturating_add(successor_capacity)
+        .saturating_add(1);
+    LifecycleBounds {
+        pending: DEFAULT_PENDING_CONNECTION_CAPACITY,
+        total: reference_slots.saturating_mul(RETAINED_CONNECTIONS_PER_REFERENCE_SLOT),
     }
 }
 
-/// One admitted generation together with its data-channel age, when known.
+/// One admitted generation together with its liveness-record age, when known.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RetentionCandidate {
     attempt: PendingConnectionAttempt,
     /// `None` when liveness holds no record for this generation; such a peer
     /// has not proven an open data channel and is treated as within grace.
-    connected_for_ms: Option<i64>,
+    age_ms: Option<i64>,
 }
 
 impl RetentionCandidate {
-    /// `Evictable(n, p, now)` restricted to the locally observable part of
-    /// `Referenced`: topology references are decided here, storage placement
-    /// is checked by the effect layer only for peers that pass this filter.
+    /// `Evictable(n, p, now)` with `Age` already evaluated at plan time.
     fn is_evictable(&self, referenced: &BTreeSet<Did>) -> bool {
         !referenced.contains(&self.attempt.peer)
             && self
-                .connected_for_ms
+                .age_ms
                 .is_some_and(|age_ms| age_ms >= UNREFERENCED_CONNECTION_GRACE_MS)
     }
 }
 
-/// `EvictionOrder(A, R)`: the evictable candidates, oldest data channel first.
+/// `EvictionOrder(A, R)`: the evictable candidates, oldest record first.
 ///
 /// Post: every returned attempt is unreferenced by `referenced` and past
 /// grace; ties keep the caller's order, which is DID order for registry
@@ -113,7 +103,7 @@ fn eviction_order(
         .into_iter()
         .filter(|candidate| candidate.is_evictable(referenced))
         .collect::<Vec<_>>();
-    evictable.sort_by_key(|candidate| Reverse(candidate.connected_for_ms));
+    evictable.sort_by_key(|candidate| Reverse(candidate.age_ms));
     evictable
         .into_iter()
         .map(|candidate| candidate.attempt)
@@ -121,9 +111,19 @@ fn eviction_order(
 }
 
 impl SwarmTransport {
+    /// Whether reserving `peer` must retire another lifecycle record first.
+    ///
+    /// A peer that already owns a record is rejected as `AlreadyConnected` by
+    /// the registry, so retiring a different record on its behalf would be
+    /// wasted.
+    pub(super) fn reservation_needs_eviction(&self, peer: Did) -> Result<bool> {
+        let lifecycles = self.peer_lifecycles()?;
+        Ok(lifecycles.is_full() && !lifecycles.contains(peer))
+    }
+
     /// Snapshot the eviction plan under the lifecycle boundary.
     ///
-    /// Topology references and connection ages are read under one lock so a
+    /// Topology references and record ages are read under one lock so a
     /// concurrent admission or retirement cannot interleave with the plan.
     fn unreferenced_eviction_order(&self, now_ms: i64) -> Result<Vec<PendingConnectionAttempt>> {
         self.with_connection_lifecycle(|| {
@@ -134,11 +134,7 @@ impl SwarmTransport {
                 .iter()
                 .map(|attempt| RetentionCandidate {
                     attempt,
-                    connected_for_ms: liveness.connected_for_ms(
-                        attempt.peer,
-                        attempt.generation,
-                        now_ms,
-                    ),
+                    age_ms: liveness.connected_for_ms(attempt.peer, attempt.generation, now_ms),
                 })
                 .collect();
             Ok(eviction_order(candidates, &referenced))
@@ -148,19 +144,29 @@ impl SwarmTransport {
     /// Retire the oldest unreferenced admitted connection to free one slot.
     ///
     /// Pre: the lifecycle registry is full for a peer that owns no record.
-    /// Post: `Ok(Some(peer))` iff one admitted generation that no local
-    /// topology slot or storage placement references, and whose data channel
-    /// has been open for at least [`UNREFERENCED_CONNECTION_GRACE_MS`], left
-    /// the DHT and had its transport closed. Referenced and younger
-    /// connections are preserved, so `Ok(None)` leaves the reservation to be
-    /// rejected by the registry bound. Evidence superseded between the plan
-    /// and the retirement is skipped in favour of the next candidate.
-    pub(super) async fn evict_unreferenced_connection(&self, now_ms: i64) -> Result<Option<Did>> {
-        for attempt in self.unreferenced_eviction_order(now_ms)? {
+    /// Post: at most one admitted generation that was `Evictable` at plan
+    /// time, and is still unreferenced when retirement runs, left the DHT and
+    /// had its transport closed. Referenced and younger connections are
+    /// preserved, so a plan without survivors leaves the reservation to be
+    /// rejected by the registry bound. A candidate referenced by a topology
+    /// transition after the plan, or whose generation was superseded, is
+    /// skipped in favour of the next one.
+    pub(super) async fn evict_unreferenced_connection(&self, now_ms: i64) -> Result<()> {
+        self.evict_unreferenced_connection_with(now_ms, |_| {})
+            .await
+    }
+
+    async fn evict_unreferenced_connection_with(
+        &self,
+        now_ms: i64,
+        observe_plan: impl FnOnce(&[PendingConnectionAttempt]),
+    ) -> Result<()> {
+        let plan = self.unreferenced_eviction_order(now_ms)?;
+        observe_plan(&plan);
+        for attempt in plan {
             if self
                 .dht
-                .peer_may_share_storage_responsibility(attempt.peer, self.storage_redundancy())
-                .await?
+                .peer_may_share_storage_responsibility(attempt.peer)?
             {
                 continue;
             }
@@ -175,9 +181,28 @@ impl SwarmTransport {
                 grace_ms = UNREFERENCED_CONNECTION_GRACE_MS,
                 "evicted unreferenced connection to admit a new peer"
             );
-            return Ok(Some(attempt.peer));
+            return Ok(());
         }
-        Ok(None)
+        Ok(())
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) async fn evict_unreferenced_connection_with_plan_observer_for_test(
+        &self,
+        now_ms: i64,
+        observe_plan: impl FnOnce(&[PendingConnectionAttempt]),
+    ) -> Result<()> {
+        self.evict_unreferenced_connection_with(now_ms, observe_plan)
+            .await
+    }
+
+    /// Replace the lifecycle bounds of an empty registry.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(super) fn set_lifecycle_bounds_for_test(&self, bounds: LifecycleBounds) -> Result<()> {
+        self.with_connection_lifecycle(|| {
+            self.peer_lifecycles()?.set_bounds_for_test(bounds);
+            Ok(())
+        })
     }
 }
 
@@ -186,19 +211,19 @@ mod tests {
     use super::*;
     use crate::ecc::SecretKey;
 
-    fn candidate(peer: Did, generation: u64, connected_for_ms: Option<i64>) -> RetentionCandidate {
+    fn candidate(peer: Did, generation: u64, age_ms: Option<i64>) -> RetentionCandidate {
         RetentionCandidate {
             attempt: PendingConnectionAttempt { peer, generation },
-            connected_for_ms,
+            age_ms,
         }
     }
 
     #[test]
-    fn test_capacity_covers_both_reference_directions_of_every_slot() {
-        assert_eq!(
-            ConnectionCapacity::for_successor_capacity(3).get(),
-            (DEFAULT_FINGER_TABLE_SIZE + 3 + 1) * RETAINED_CONNECTIONS_PER_REFERENCE_SLOT
-        );
+    fn test_bounds_cover_both_reference_directions_of_every_slot() {
+        assert_eq!(lifecycle_bounds(3), LifecycleBounds {
+            pending: DEFAULT_PENDING_CONNECTION_CAPACITY,
+            total: (DEFAULT_FINGER_TABLE_SIZE + 3 + 1) * RETAINED_CONNECTIONS_PER_REFERENCE_SLOT,
+        });
     }
 
     #[test]

@@ -109,7 +109,6 @@ use self::pending::SharedConnectionLifecycles;
 #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
 use self::pending::PENDING_CONNECTION_TIMEOUT_MS;
 pub(crate) use self::readiness::TransportReadiness;
-pub(crate) use self::retention::ConnectionCapacity;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::retention::UNREFERENCED_CONNECTION_GRACE_MS;
 use self::storage_lookup::StorageLookupObservationMap;
@@ -167,23 +166,19 @@ pub(crate) struct SwarmTransportSettings {
     storage_redundancy: u16,
     dht_virtual_nodes: u16,
     reassembly_limits: ReassemblyLimits,
-    connection_capacity: ConnectionCapacity,
 }
 
 impl SwarmTransportSettings {
-    /// Build transport settings from DHT protocol parameters, chunk reassembly
-    /// limits, and the logical connection bound.
+    /// Build transport settings from DHT protocol parameters and chunk reassembly limits.
     pub(crate) fn new(
         storage_redundancy: u16,
         storage_virtual_node_config: VirtualNodeConfig,
         reassembly_limits: ReassemblyLimits,
-        connection_capacity: ConnectionCapacity,
     ) -> Self {
         Self {
             storage_redundancy,
             dht_virtual_nodes: storage_virtual_node_config.positions_per_owner(),
             reassembly_limits,
-            connection_capacity,
         }
     }
 }
@@ -240,6 +235,7 @@ impl SwarmTransport {
         measure: Option<MeasureImpl>,
         settings: SwarmTransportSettings,
     ) -> Self {
+        let lifecycle_bounds = self::retention::lifecycle_bounds(dht.successors().capacity());
         Self {
             network_id,
             transport: Transport::new(
@@ -258,7 +254,7 @@ impl SwarmTransport {
             swarm_event_delivery: SwarmEventDeliveryLocks::new(),
             connection_creation: PeerOperationLocks::new(),
             peer_lifecycles: Arc::new(Mutex::new(self::pending::ConnectionLifecycleRegistry::new(
-                settings.connection_capacity.get(),
+                lifecycle_bounds,
             ))),
             pending_finger_updates: Mutex::new(BTreeMap::new()),
             peer_liveness: Mutex::new(PeerLivenessMap::new()),

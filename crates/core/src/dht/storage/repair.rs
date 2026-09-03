@@ -72,7 +72,6 @@ use crate::dht::chord::PeerRingAction;
 use crate::dht::entry::Entry;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::PlacementMiss;
-use crate::dht::Chord;
 use crate::dht::ChordStorageRepair;
 use crate::dht::Did;
 use crate::error::Result;
@@ -98,44 +97,23 @@ fn push_action(actions: &mut Vec<PeerRingAction>, action: PeerRingAction) {
 }
 
 impl PeerRing {
-    /// Returns whether a departed peer was near enough to local storage
-    /// responsibility that local entries should be republished after removing it.
-    pub(crate) async fn peer_may_share_storage_responsibility(
-        &self,
-        peer: Did,
-        redundancy: u16,
-    ) -> Result<bool> {
-        // Pre: peer is a terminal, departing, or eviction-candidate DID under
-        // the caller's routing view.
-        // Post: true iff peer is observed in a routing position that can affect
-        // storage responsibility: predecessor, successor list, finger table, or
-        // successor witness for some locally held affine placement key.
-        // Preservation S1: this predicate performs no storage writes/removes.
-        if self.observed_storage_virtual_owner_registered(peer)? {
-            return Ok(true);
-        }
-        if self.topology_state()?.references(peer) {
-            return Ok(true);
-        }
-
-        if redundancy <= 1 {
-            return Ok(false);
-        }
-
-        // Departure repair is only an accelerator; periodic anti-entropy is
-        // the authoritative backstop. This scan is O(entries * redundancy) and
-        // may race with another terminal-state trigger, but repair only
-        // delivers joins, so duplicate triggers preserve storage state.
-        for (_, entry) in self.storage.get_all().await? {
-            for placement_key in entry.did.rotate_affine(redundancy)? {
-                match self.find_successor(placement_key)? {
-                    PeerRingAction::Some(owner) if owner == peer => return Ok(true),
-                    PeerRingAction::RemoteAction(next, _) if next == peer => return Ok(true),
-                    _ => {}
-                }
-            }
-        }
-        Ok(false)
+    /// `StorageResponsible(n, p)`: removing or evicting `p` may leave locally
+    /// held entries under-replicated, so the caller should schedule repair.
+    ///
+    /// Law: `StorageResponsible(n, p) ⟺ Referenced(n, p)`. The virtual-owner
+    /// set is built from exactly the successor, predecessor, and finger slots
+    /// (`storage_virtual_nodes_for_topology`), and every placement witness
+    /// produced by `find_successor` is the successor head or a finger, so no
+    /// storage scan can name a peer outside those slots. The predicate keeps
+    /// its storage-facing name because that is the proposition callers decide
+    /// on; its evidence is the topology alone.
+    // Pre: peer is a terminal, departing, or eviction-candidate DID under the
+    // caller's routing view.
+    // Post: true iff peer occupies a routing slot that storage placement can
+    // resolve to. Preservation S1: this predicate performs no storage
+    // writes/removes and reads no entries.
+    pub(crate) fn peer_may_share_storage_responsibility(&self, peer: Did) -> Result<bool> {
+        Ok(self.topology_state()?.references(peer))
     }
 
     async fn copy_entry_to_placement(

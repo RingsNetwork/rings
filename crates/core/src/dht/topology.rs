@@ -63,24 +63,28 @@ impl TopologyState {
         }
     }
 
-    /// `Referenced(n, p)`: `p` occupies a successor, predecessor, or finger
-    /// slot of `n`, so `n`'s routing state depends on reaching `p`.
-    pub fn references(&self, peer: Did) -> bool {
-        peer != self.local
-            && (self.successors.contains(&peer)
-                || self.predecessor == Some(peer)
-                || self.fingers.contains(&Some(peer)))
-    }
-
-    /// `{ p | Referenced(n, p) }`: every peer the local routing state depends on.
-    pub fn referenced_peers(&self) -> BTreeSet<Did> {
+    /// Every occupied successor, predecessor, and finger slot other than `local`.
+    ///
+    /// This is the single definition of `Referenced(n, p)`; the predicate and
+    /// the set below are both projections of it.
+    fn referenced_slots(&self) -> impl Iterator<Item = Did> + '_ {
         self.successors
             .iter()
             .copied()
             .chain(self.predecessor)
             .chain(self.fingers.iter().flatten().copied())
-            .filter(|peer| *peer != self.local)
-            .collect()
+            .filter(move |peer| *peer != self.local)
+    }
+
+    /// `Referenced(n, p)`: `p` occupies a successor, predecessor, or finger
+    /// slot of `n`, so `n`'s routing state depends on reaching `p`.
+    pub fn references(&self, peer: Did) -> bool {
+        self.referenced_slots().any(|slot| slot == peer)
+    }
+
+    /// `{ p | Referenced(n, p) }`: every peer the local routing state depends on.
+    pub fn referenced_peers(&self) -> BTreeSet<Did> {
+        self.referenced_slots().collect()
     }
 }
 
@@ -347,10 +351,19 @@ fn closest_preceding_finger(state: &TopologyState, target: &BigUint) -> Option<D
 /// finger right after a join or after a run was cleared, and the successor head
 /// is the only forward hop the local state can prove.
 ///
-/// Post: `Remote { next, .. }` satisfies `precedes(n, next, dist(n, did))`, so
-/// every remote step is a strict clockwise advance and never a self hop.
+/// `TopologyState` has public fields, so a successor or finger entry equal to
+/// `local` is representable; both are treated as absent rather than trusted.
+///
+/// Post: `Remote { next, .. }` satisfies `precedes(n, next, dist(n, did))` for
+/// every state, so every remote step is a strict clockwise advance and never a
+/// self hop.
 pub fn find_successor(state: &TopologyState, did: Did) -> FindSuccessorStep {
-    let Some(head) = state.successors.first().copied() else {
+    let Some(head) = state
+        .successors
+        .first()
+        .copied()
+        .filter(|head| *head != state.local)
+    else {
         return FindSuccessorStep::Local(state.local);
     };
     let target = dist(state.local, did);

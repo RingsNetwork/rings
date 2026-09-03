@@ -7,6 +7,7 @@ mod registry;
 
 pub(super) use registry::ActiveConnectionSet;
 pub(super) use registry::ConnectionLifecycleRegistry;
+pub(super) use registry::LifecycleBounds;
 use registry::PeerConnectionLifecycle;
 
 use super::SwarmConnection;
@@ -23,8 +24,7 @@ pub(crate) const DEFAULT_PENDING_CONNECTION_CAPACITY: usize = 32;
 
 pub(super) const PENDING_CONNECTION_TIMEOUT_MS: i64 = 180_000;
 
-pub(super) type SharedConnectionLifecycles =
-    Arc<Mutex<ConnectionLifecycleRegistry<DEFAULT_PENDING_CONNECTION_CAPACITY>>>;
+pub(super) type SharedConnectionLifecycles = Arc<Mutex<ConnectionLifecycleRegistry>>;
 pub(super) type PendingFingerUpdates =
     BTreeMap<PendingConnectionAttempt, BTreeMap<usize, Option<Did>>>;
 type PendingFingerUpdatesGuard<'transport> =
@@ -236,9 +236,7 @@ impl SwarmTransport {
 
     pub(super) fn peer_lifecycles(
         &self,
-    ) -> Result<
-        std::sync::MutexGuard<'_, ConnectionLifecycleRegistry<DEFAULT_PENDING_CONNECTION_CAPACITY>>,
-    > {
+    ) -> Result<std::sync::MutexGuard<'_, ConnectionLifecycleRegistry>> {
         self.peer_lifecycles
             .lock()
             .map_err(|_| Error::SwarmConnectionLifecycleLock)
@@ -322,7 +320,7 @@ impl SwarmTransport {
     async fn prepare_pending_reservation(&self, peer: Did) -> Result<()> {
         self.validate_pending_reservation(peer)?;
         self.expire_pending_connections().await?;
-        if self.peer_lifecycles()?.reservation_needs_eviction(peer) {
+        if self.reservation_needs_eviction(peer)? {
             self.evict_unreferenced_connection(get_epoch_ms_i64())
                 .await?;
         }

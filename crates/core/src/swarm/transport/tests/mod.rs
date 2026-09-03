@@ -22,6 +22,7 @@ use tracing_test::traced_test;
 use super::pending::ConnectionLifecycleRegistry;
 #[cfg(feature = "dummy")]
 use super::pending::FingerUpdateDisposition;
+use super::pending::LifecycleBounds;
 use super::*;
 #[cfg(feature = "dummy")]
 use crate::chunk::Chunk;
@@ -391,12 +392,7 @@ fn transport_with_key_measure_and_reassembly_limits(
         session_sk,
         dht,
         Some(measure),
-        SwarmTransportSettings::new(
-            1,
-            VirtualNodeConfig::disabled(),
-            reassembly_limits,
-            ConnectionCapacity::for_successor_capacity(3),
-        ),
+        SwarmTransportSettings::new(1, VirtualNodeConfig::disabled(), reassembly_limits),
     ))
 }
 

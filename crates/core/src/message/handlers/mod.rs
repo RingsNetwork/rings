@@ -137,11 +137,7 @@ impl MessageHandler {
     pub(crate) async fn leave_dht_attempt(&self, attempt: PendingConnectionAttempt) -> Result<()> {
         let should_repair = self
             .dht
-            .peer_may_share_storage_responsibility(
-                attempt.peer(),
-                self.transport.storage_redundancy(),
-            )
-            .await?;
+            .peer_may_share_storage_responsibility(attempt.peer())?;
         let removed = if self.transport.disconnect_attempt(attempt).await? {
             true
         } else {
@@ -155,10 +151,7 @@ impl MessageHandler {
 
     #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
     pub(crate) async fn leave_dht(&self, peer: Did) -> Result<()> {
-        let should_repair = self
-            .dht
-            .peer_may_share_storage_responsibility(peer, self.transport.storage_redundancy())
-            .await?;
+        let should_repair = self.dht.peer_may_share_storage_responsibility(peer)?;
         self.dht.remove(peer)?;
         if should_repair {
             self.transport.request_storage_repair();
