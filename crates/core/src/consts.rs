@@ -9,6 +9,14 @@ use std::num::NonZeroU32;
 pub const DEFAULT_TTL_MS: u64 = 600 * 1000;
 /// Maximum accepted time-to-live in milliseconds for message signatures and DHT entries.
 pub const MAX_TTL_MS: u64 = DEFAULT_TTL_MS * 10;
+/// Default retention in milliseconds of a relayed message held for an offline destination.
+///
+/// Relay entries are the destination's inbox while it is offline, so they outlive data entries
+/// by design: a peer that returns within this window after the last relayed message still
+/// receives the whole inbox.
+pub const DEFAULT_RELAY_ENTRY_TTL_MS: u64 = 24 * 3600 * 1000;
+/// Maximum accepted retention in milliseconds of a relayed message.
+pub const MAX_RELAY_ENTRY_TTL_MS: u64 = DEFAULT_RELAY_ENTRY_TTL_MS * 7;
 /// Accepted timestamp drift in milliseconds.
 pub const TS_OFFSET_TOLERANCE_MS: u128 = 3000;
 /// Maximum number of fetched entries the local DHT cache retains before evicting the
@@ -44,3 +52,8 @@ pub const MAX_CHUNK_ENVELOPE_OVERHEAD: usize = 4096;
 pub const MIN_CHUNK_DATA: usize = 1024;
 /// Maximum number of encoded payloads kept in a single DHT storage entry.
 pub const ENTRY_DATA_MAX_LEN: usize = 1024;
+/// Maximum encoded bytes kept in a single data entry; older payloads are dropped first.
+pub const ENTRY_DATA_MAX_BYTES: usize = 1024 * 1024;
+/// Maximum encoded bytes kept in one relay inbox (the relayed messages held for an offline
+/// destination); older messages are dropped first, so a busy inbox keeps only the newest.
+pub const RELAY_INBOX_MAX_BYTES: usize = 16 * 1024 * 1024;

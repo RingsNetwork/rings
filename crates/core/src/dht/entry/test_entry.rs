@@ -772,6 +772,84 @@ fn test_join_takes_the_later_retention_bound() -> Result<()> {
     Ok(())
 }
 
+/// Retention policy is a property of the kind: relay entries (an offline destination's
+/// inbox) are stamped with and admitted up to their own, longer, bounds.
+#[test]
+fn test_relay_entries_use_their_own_retention_policy() -> Result<()> {
+    let relay = relay_delta(Did::from(7u32), "m1", 1)?;
+    let stamped = EntryOperation::Extend(relay.clone())
+        .stamped_at(NOW_MS, actor())?
+        .into_entry();
+    assert_eq!(
+        stamped.expires_at_ms,
+        Some(NOW_MS + u128::from(DEFAULT_RELAY_ENTRY_TTL_MS))
+    );
+    assert!(u128::from(DEFAULT_RELAY_ENTRY_TTL_MS) > u128::from(MAX_TTL_MS));
+
+    let relay_limit = NOW_MS + u128::from(MAX_RELAY_ENTRY_TTL_MS) + TS_OFFSET_TOLERANCE_MS;
+    bounded(relay.clone(), relay_limit).validate_admissible_at(NOW_MS)?;
+    assert!(matches!(
+        bounded(relay, relay_limit + 1).validate_admissible_at(NOW_MS),
+        Err(Error::EntryLifetimeExceedsMax)
+    ));
+
+    let data_limit = NOW_MS + u128::from(MAX_TTL_MS) + TS_OFFSET_TOLERANCE_MS;
+    assert!(matches!(
+        bounded(data_delta("topic", "value", 1)?, data_limit + 1).validate_admissible_at(NOW_MS),
+        Err(Error::EntryLifetimeExceedsMax)
+    ));
+    Ok(())
+}
+
+/// Byte budget law: the retained suffix is the newest payloads that fit the kind's byte budget,
+/// so a busy relay inbox keeps only its most recent messages, and a payload that alone exceeds
+/// the budget is dropped rather than retained over it.
+#[test]
+fn test_byte_budget_keeps_newest_payloads() -> Result<()> {
+    let did = Did::from(7u32);
+    let unit = RELAY_INBOX_MAX_BYTES / 4;
+    let raw_message =
+        |counter: u32, filler: usize| Encoded::from(format!("{counter}:{}", "x".repeat(filler)));
+    let retained_bytes = |entry: &Entry| {
+        entry
+            .data
+            .iter()
+            .map(|value| value.value().len())
+            .sum::<usize>()
+    };
+    let prefixes = |entry: &Entry| {
+        entry
+            .data
+            .iter()
+            .filter_map(|value| value.value().split(':').next().map(str::to_owned))
+            .collect::<Vec<_>>()
+    };
+
+    let mut inbox = relay_entry();
+    for counter in 1..=5u32 {
+        let delta = Entry::new(
+            did,
+            vec![raw_message(counter, unit)],
+            EntryKind::RelayMessage,
+        )
+        .stamp_delta(version(counter))?;
+        inbox = inbox.join(delta)?;
+    }
+    assert!(retained_bytes(&inbox) <= RELAY_INBOX_MAX_BYTES);
+    assert_eq!(prefixes(&inbox), ["3", "4", "5"]);
+
+    let oversize = Entry::new(
+        did,
+        vec![raw_message(9, RELAY_INBOX_MAX_BYTES)],
+        EntryKind::RelayMessage,
+    )
+    .stamp_delta(version(9))?;
+    let joined = inbox.join(oversize)?;
+    assert!(retained_bytes(&joined) <= RELAY_INBOX_MAX_BYTES);
+    assert!(!prefixes(&joined).contains(&"9".to_owned()));
+    Ok(())
+}
+
 /// Law: an entry is live exactly when it carries a bound strictly after `now`.
 #[test]
 fn test_is_live_at_requires_a_bound_after_now() -> Result<()> {

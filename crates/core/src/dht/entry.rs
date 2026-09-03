@@ -7,9 +7,13 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::algebra::JoinSemilattice;
+use crate::consts::DEFAULT_RELAY_ENTRY_TTL_MS;
 use crate::consts::DEFAULT_TTL_MS;
+use crate::consts::ENTRY_DATA_MAX_BYTES;
 use crate::consts::ENTRY_DATA_MAX_LEN;
+use crate::consts::MAX_RELAY_ENTRY_TTL_MS;
 use crate::consts::MAX_TTL_MS;
+use crate::consts::RELAY_INBOX_MAX_BYTES;
 use crate::consts::TS_OFFSET_TOLERANCE_MS;
 use crate::dht::Did;
 use crate::ecc::HashStr;
@@ -37,6 +41,58 @@ pub enum EntryKind {
     /// A relayed but unreached message, which should be stored on
     /// the successor of the destination Did.
     RelayMessage,
+}
+
+impl EntryKind {
+    /// Retention stamped at the operation boundary when the origin left it absent.
+    ///
+    /// Relay entries are an offline destination's inbox and outlive data entries.
+    pub const fn default_lifetime_ms(self) -> u64 {
+        match self {
+            EntryKind::Data => DEFAULT_TTL_MS,
+            EntryKind::RelayMessage => DEFAULT_RELAY_ENTRY_TTL_MS,
+        }
+    }
+
+    /// The longest retention a receiver admits for this kind.
+    pub const fn max_lifetime_ms(self) -> u64 {
+        match self {
+            EntryKind::Data => MAX_TTL_MS,
+            EntryKind::RelayMessage => MAX_RELAY_ENTRY_TTL_MS,
+        }
+    }
+
+    /// Encoded bytes one carrier of this kind retains; the oldest payloads are dropped first.
+    pub const fn max_data_bytes(self) -> usize {
+        match self {
+            EntryKind::Data => ENTRY_DATA_MAX_BYTES,
+            EntryKind::RelayMessage => RELAY_INBOX_MAX_BYTES,
+        }
+    }
+}
+
+/// Index of the first element of `visible` (ordered oldest to newest) that is retained under
+/// the kind's count and byte budgets.
+///
+/// Law: the retained suffix is the longest suffix whose length is at most
+/// [`ENTRY_DATA_MAX_LEN`] and whose encoded bytes sum to at most
+/// [`EntryKind::max_data_bytes`]. Newer payloads are always preferred, so a payload that alone
+/// exceeds the byte budget is dropped rather than retained over the budget.
+fn retained_suffix_start(visible: &[(Encoded, EntryDot)], kind: EntryKind) -> usize {
+    let max_bytes = kind.max_data_bytes();
+    let mut retained_bytes = 0usize;
+    let mut retained = 0usize;
+    for (value, _) in visible.iter().rev().take(ENTRY_DATA_MAX_LEN) {
+        let Some(next_bytes) = retained_bytes.checked_add(value.value().len()) else {
+            break;
+        };
+        if next_bytes > max_bytes {
+            break;
+        }
+        retained_bytes = next_bytes;
+        retained += 1;
+    }
+    visible.len().saturating_sub(retained)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -141,8 +197,9 @@ fn placement_belongs_to_entry_key(entry_key: Did, placement: Did, redundancy: u1
 ///   thus while destination node going online, it will sync message from its successor.
 ///
 /// Retention: every entry accepted into storage carries a retention bound
-/// `expires_at_ms`, stamped by the origin at the operation boundary and bounded by the
-/// receiver at admission (see [`Entry::validate_admissible_at`]). The bound joins by `max`, so
+/// `expires_at_ms`, stamped by the origin at the operation boundary with the kind's
+/// [`EntryKind::default_lifetime_ms`] and bounded by the receiver at admission by the kind's
+/// [`EntryKind::max_lifetime_ms`] (see [`Entry::validate_admissible_at`]). The bound joins by `max`, so
 /// every accepted write extends the carrier's life to at least its own bound, and an entry whose
 /// bound has elapsed is dropped on the next read instead of being served or replicated.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -320,7 +377,7 @@ impl EntryOperation {
     /// [`Self::stamped`] at an explicit operation-boundary time.
     ///
     /// Post: every carried entry has `expires_at_ms = Some(_)`; an absent bound becomes
-    /// `now_ms + DEFAULT_TTL_MS`.
+    /// `now_ms + kind.default_lifetime_ms()`.
     pub(crate) fn stamped_at(self, now_ms: u128, actor: Did) -> Result<Self> {
         Ok(match self {
             EntryOperation::Overwrite(entry) => {
@@ -525,7 +582,8 @@ impl Entry {
     /// Stamp the retention bound when the origin left it absent.
     fn ensure_lifetime_from(mut self, now_ms: u128) -> Self {
         if self.expires_at_ms.is_none() {
-            self.expires_at_ms = Some(now_ms.saturating_add(u128::from(DEFAULT_TTL_MS)));
+            self.expires_at_ms =
+                Some(now_ms.saturating_add(u128::from(self.kind.default_lifetime_ms())));
         }
         self
     }
@@ -548,7 +606,7 @@ impl Entry {
     ///
     /// Pre: `now_ms` is the receiver's clock.
     /// Post: `Ok` implies the entry is live, its bound is at most
-    /// `now_ms + MAX_TTL_MS + TS_OFFSET_TOLERANCE_MS`, and every version it carries has a
+    /// `now_ms + kind.max_lifetime_ms() + TS_OFFSET_TOLERANCE_MS`, and every version it carries has a
     /// logical time at most `now_ms + TS_OFFSET_TOLERANCE_MS`. The version bound keeps a
     /// peer-supplied hybrid clock from pinning a key: an accepted floor can exceed the
     /// receiver's clock only by the message skew tolerance, so honest writers issued after
@@ -558,7 +616,7 @@ impl Entry {
             return Err(Error::EntryNotLive);
         };
         let lifetime_bound = now_ms
-            .saturating_add(u128::from(MAX_TTL_MS))
+            .saturating_add(u128::from(self.kind.max_lifetime_ms()))
             .saturating_add(TS_OFFSET_TOLERANCE_MS);
         if expires_at_ms > lifetime_bound {
             return Err(Error::EntryLifetimeExceedsMax);
@@ -635,7 +693,7 @@ impl Entry {
                 .cmp(right_dot)
                 .then_with(|| left_value.cmp(right_value))
         });
-        let skip_count = visible.len().saturating_sub(ENTRY_DATA_MAX_LEN);
+        let skip_count = retained_suffix_start(&visible, kind);
         let visible = visible.into_iter().skip(skip_count).collect::<Vec<_>>();
         let (data, dots): (Vec<_>, Vec<_>) = visible.into_iter().unzip();
 
@@ -803,7 +861,9 @@ impl Entry {
     ///
     /// Post: normalization uses the same carrier materialization as
     /// [`Self::join`]; there is no second cap strategy outside the CRDT.
-    /// Post: `result.data.len() <= ENTRY_DATA_MAX_LEN`.
+    /// Post: `result.data.len() <= ENTRY_DATA_MAX_LEN` and the encoded bytes of `result.data`
+    /// sum to at most `kind.max_data_bytes()`; when either budget binds, the oldest payloads
+    /// are the ones dropped.
     /// Post: `result.data.len() == result.crdt.dots.len()` for Data and
     /// RelayMessage entries.
     pub fn try_into_storage_entry(self) -> Result<Self> {

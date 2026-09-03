@@ -125,8 +125,12 @@ peers. They do not force a Byzantine storage owner to serve data or preserve dat
 it has chosen to withhold.
 
 Every accepted entry carries a retention bound stamped by its origin and capped at
-admission by the maximum time-to-live, so a peer cannot ask a storage owner to hold
-a value indefinitely; expired values are retired on their next read. Admission
+admission by the maximum time-to-live of its kind (relayed messages held for an
+offline destination are retained longer than data entries), so a peer cannot ask a
+storage owner to hold a value indefinitely; expired values are retired on their
+next read. Each carrier is also bounded in payload count and encoded bytes, with the
+oldest payloads dropped first, so a relay inbox that keeps receiving messages retains
+only its newest ones. Admission
 also rejects CRDT versions whose logical time runs ahead of the receiver's clock
 by more than the message skew tolerance, so a forged version cannot pin a key
 against later honest writes. Native storage enforces its configured byte budget by

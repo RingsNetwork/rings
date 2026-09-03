@@ -10,9 +10,15 @@
   another. `Transaction`, `MessagePayload`, and `PayloadSender` take a `MessageSigner` (a session
   key acting inside one overlay) instead of a bare `SessionSk`, and
   `MessageVerificationExt::verify` takes the receiver's `network_id`.
-- DHT entries carry a retention bound (`expires_at_ms`) stamped at the operation boundary with
-  `DEFAULT_TTL_MS` and bounded at admission by `MAX_TTL_MS`. Stored values without a bound, or
-  whose bound has elapsed, are retired on their next read and are never replicated or served.
+- DHT entries carry a retention bound (`expires_at_ms`) stamped at the operation boundary and
+  bounded at admission, per entry kind: data entries use `DEFAULT_TTL_MS` / `MAX_TTL_MS`
+  (10 min / 100 min), relayed messages held for an offline destination use
+  `DEFAULT_RELAY_ENTRY_TTL_MS` / `MAX_RELAY_ENTRY_TTL_MS` (24 h / 7 d). Stored values without a
+  bound, or whose bound has elapsed, are retired on their next read and are never replicated or
+  served.
+- Each entry carrier is bounded in bytes as well as in payload count: data entries keep at most
+  `ENTRY_DATA_MAX_BYTES` (1 MiB) and relay inboxes at most `RELAY_INBOX_MAX_BYTES` (16 MiB) of
+  encoded payloads, dropping the oldest first so a busy inbox retains its newest messages.
 - Storage admission rejects peer-supplied CRDT versions whose logical time is more than
   `TS_OFFSET_TOLERANCE_MS` ahead of the receiver's clock, so a forged register floor can no longer
   pin a key.
