@@ -141,6 +141,7 @@ async fn expire_healthy_peer(
     nodes[observer]
         .swarm
         .stabilizer()
+        .expect("swarm callback lock must be healthy")
         .probe_peer_liveness_for_simulation()
         .await
         .expect("production stabilizer must send its real liveness probe");
@@ -315,6 +316,7 @@ async fn observe_false_disconnect(
     nodes[observer]
         .swarm
         .stabilizer()
+        .expect("swarm callback lock must be healthy")
         .clean_unavailable_connections()
         .await
         .expect("expired liveness evidence must be processed");
@@ -393,7 +395,10 @@ async fn observe_repair_feedback(
         .into_iter()
         .map(|delivery| delivery.sequence)
         .collect::<BTreeSet<_>>();
-    let stabilizer = nodes[observer].swarm.stabilizer();
+    let stabilizer = nodes[observer]
+        .swarm
+        .stabilizer()
+        .expect("swarm callback lock must be healthy");
     let outcome = stabilizer
         .run_requested_storage_repair()
         .await

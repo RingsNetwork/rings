@@ -266,6 +266,22 @@ pub trait MessageVerificationExt {
         self.verification().is_expired()
     }
 
+    /// Verifies that the signature was issued for this message family inside the overlay
+    /// `network_id`, regardless of whether its proof is still live.
+    ///
+    /// Use this only where the message's own lifetime is governed elsewhere (a relay inbox holds
+    /// a message past its proof lifetime and bounds it by retention); every transport path uses
+    /// [`Self::verify`].
+    fn verify_signature(&self, network_id: u32) -> bool {
+        let Ok(data) = self.verification_data() else {
+            tracing::warn!("MessageVerificationExt verify get verification_data failed");
+            return false;
+        };
+
+        self.verification()
+            .verify(SigningDomain::new(Self::DOMAIN_TAG, network_id), &data)
+    }
+
     /// Verifies that the message is not expired and that the signature was issued for this
     /// message family inside the overlay `network_id`.
     fn verify(&self, network_id: u32) -> bool {
@@ -274,13 +290,7 @@ pub trait MessageVerificationExt {
             return false;
         }
 
-        let Ok(data) = self.verification_data() else {
-            tracing::warn!("MessageVerificationExt verify get verification_data failed");
-            return false;
-        };
-
-        self.verification()
-            .verify_unexpired(SigningDomain::new(Self::DOMAIN_TAG, network_id), &data)
+        self.verify_signature(network_id)
     }
 
     /// Get signer did from verification.

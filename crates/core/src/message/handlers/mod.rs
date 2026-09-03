@@ -27,6 +27,8 @@ pub mod connection;
 pub mod custom;
 /// Operator and Handler for E2E encrypted messages
 pub mod e2e;
+/// Relay inbox: holding messages for offline peers and draining one's own inbox.
+pub(crate) mod inbox;
 /// Operator and handler for DHT stabilization
 pub mod stabilization;
 /// Operator and Handler for Storage

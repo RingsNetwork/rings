@@ -27,6 +27,24 @@
   applied to the peer-supplied delta, never to the receiver's join result.
 - `Entry::operate`, `overwrite`, `extend`, `touch`, `compact_data`, and `EntryOperation::stamped`
   take the operation-boundary time explicitly; the clock is read only at the storage boundary.
+  `Entry::extend` and `compact_data` now apply to relay inboxes as well as data topics, and
+  `Swarm::stabilizer` returns a `Result` because the stabilizer delivers drained inbox messages
+  through the swarm callback.
+
+### Added
+
+- Relay inbox for offline peers. An application message that reaches the node responsible for its
+  destination's ring position while the destination is not connected is held in the inbox carrier
+  `destination + 1` (`EntryKind::RelayMessage`). Storage admits an inbox element only under a
+  witness the owner verifies itself: it decodes as a signed `MessagePayload` addressed to the
+  inbox's peer, carries an application message, and both signatures verify inside the local
+  overlay regardless of proof liveness. Inboxes are retained for `DEFAULT_RELAY_INBOX_TTL_MS`
+  (24 h) after the last held message, up to `MAX_RELAY_INBOX_TTL_MS` (7 d). When the peer returns
+  its inbox key falls into its own storage interval and is handed over by ownership sync; every
+  stabilization round the peer drains its local inbox to the application (`on_validate`, then
+  `on_inbound`) and compacts the delivered messages out of the carrier, so the floor also prunes
+  their tombstones. `MessageVerificationExt::verify_signature` verifies a signature without its
+  liveness check for this purpose.
 
 ### Fixed
 

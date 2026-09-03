@@ -399,7 +399,11 @@ mod tests {
         for round in 1..=MAX_ROUNDS {
             let before = actual.clone();
             for sw in &swarms {
-                let _ = sw.stabilizer().stabilize().await;
+                let _ = sw
+                    .stabilizer()
+                    .expect("swarm callback lock must be healthy")
+                    .stabilize()
+                    .await;
             }
             let stats = drain(pick, &mut delivered).await;
             actual = inspect_all(&swarms);

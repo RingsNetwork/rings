@@ -40,6 +40,7 @@ mod test_dht_schedule;
 // End-to-end chunking uses the dummy backend's `max_message_size` test hook.
 #[cfg(feature = "dummy")]
 mod test_chunk_e2e;
+mod test_inbox;
 mod test_message_handler;
 #[cfg(all(feature = "std", not(feature = "dummy")))]
 mod test_native_transport;

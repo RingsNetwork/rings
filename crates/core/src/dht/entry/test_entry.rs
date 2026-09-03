@@ -1,5 +1,3 @@
-use num_bigint::BigUint;
-
 use super::*;
 use crate::algebra::assert_join_semilattice_laws;
 use crate::algebra::assert_strong_eventual_consistency;
@@ -7,10 +5,6 @@ use crate::consts::DEFAULT_TTL_MS;
 use crate::consts::ENTRY_PAYLOAD_MAX_BYTES;
 use crate::consts::MAX_TTL_MS;
 use crate::consts::TS_OFFSET_TOLERANCE_MS;
-use crate::ecc::SecretKey;
-use crate::message::Message;
-use crate::message::MessageSigner;
-use crate::session::SessionSk;
 use crate::tests::TEST_NETWORK_ID;
 
 fn encoded(value: &str) -> Result<Encoded> {
@@ -441,13 +435,17 @@ fn test_extend_caps_incoming_payloads_larger_than_max_len() -> Result<()> {
     assert_entry_keeps_recent_overflow(&updated, incoming_count, overflow)
 }
 
+/// Extend is the element-set join for both carriers, so a relay inbox grows by extension;
+/// touch remains a data-topic operation.
 #[test]
-fn test_extend_rejects_non_data_entry() -> Result<()> {
-    let entry = relay_entry();
-    let other = entry.clone();
+fn test_extend_grows_relay_inbox_but_touch_rejects_it() -> Result<()> {
+    let inbox = relay_entry();
+    let delta = relay_delta(inbox.did, "m1", 1)?;
 
+    let extended = inbox.extend(NOW_MS, delta.clone(), actor())?;
+    assert_eq!(extended.data, delta.data);
     assert!(matches!(
-        entry.extend(NOW_MS, other, actor()),
+        inbox.touch(NOW_MS, delta, actor()),
         Err(Error::EntryNotAppendable)
     ));
     Ok(())
@@ -673,24 +671,6 @@ fn test_operation_default_entry_matches_operation_kind() -> Result<()> {
 }
 
 #[test]
-fn test_message_payload_entry_key_targets_successor_of_signer() -> Result<()> {
-    let key = SecretKey::random();
-    let session = SessionSk::new_with_seckey(&key)?;
-    let signer: Did = key.address().into();
-    let payload = MessagePayload::new_send(
-        Message::custom(b"relay")?,
-        MessageSigner::new(&session, TEST_NETWORK_ID),
-        signer,
-        signer,
-    )?;
-    let entry = Entry::try_from(payload)?;
-    let expected = BigUint::from(signer) + BigUint::from(1u16);
-    assert_eq!(entry.did, expected.into());
-    assert_eq!(entry.kind, EntryKind::RelayMessage);
-    Ok(())
-}
-
-#[test]
 fn test_affine_preserves_payload_and_kind_while_rotating_keys() -> Result<()> {
     let entry = data_entry("topic", "value")?;
     let affined = entry.affine(3)?;
@@ -775,7 +755,7 @@ fn test_admission_bounds_every_payload_size() -> Result<()> {
         vec![Encoded::from("x".repeat(ENTRY_PAYLOAD_MAX_BYTES))],
         EntryKind::Data,
     );
-    bounded(at_bound, NOW_MS + 1_000).validate_admissible_at(NOW_MS)?;
+    bounded(at_bound, NOW_MS + 1_000).validate_admissible_at(NOW_MS, TEST_NETWORK_ID)?;
 
     let oversize = Entry::new(
         did,
@@ -786,7 +766,7 @@ fn test_admission_bounds_every_payload_size() -> Result<()> {
         EntryKind::Data,
     );
     assert!(matches!(
-        bounded(oversize, NOW_MS + 1_000).validate_admissible_at(NOW_MS),
+        bounded(oversize, NOW_MS + 1_000).validate_admissible_at(NOW_MS, TEST_NETWORK_ID),
         Err(Error::EntryPayloadExceedsMax)
     ));
     Ok(())
@@ -810,19 +790,19 @@ fn test_admission_bounds_the_retention_bound() -> Result<()> {
     let delta = data_delta("topic", "value", 1)?;
 
     assert!(matches!(
-        delta.validate_admissible_at(NOW_MS),
+        delta.validate_admissible_at(NOW_MS, TEST_NETWORK_ID),
         Err(Error::EntryNotLive)
     ));
     assert!(matches!(
-        bounded(delta.clone(), NOW_MS).validate_admissible_at(NOW_MS),
+        bounded(delta.clone(), NOW_MS).validate_admissible_at(NOW_MS, TEST_NETWORK_ID),
         Err(Error::EntryNotLive)
     ));
     assert!(matches!(
-        bounded(delta.clone(), limit + 1).validate_admissible_at(NOW_MS),
+        bounded(delta.clone(), limit + 1).validate_admissible_at(NOW_MS, TEST_NETWORK_ID),
         Err(Error::EntryLifetimeExceedsMax)
     ));
-    bounded(delta.clone(), limit).validate_admissible_at(NOW_MS)?;
-    bounded(delta, NOW_MS + 1).validate_admissible_at(NOW_MS)?;
+    bounded(delta.clone(), limit).validate_admissible_at(NOW_MS, TEST_NETWORK_ID)?;
+    bounded(delta, NOW_MS + 1).validate_admissible_at(NOW_MS, TEST_NETWORK_ID)?;
     Ok(())
 }
 
@@ -836,28 +816,28 @@ fn test_admission_bounds_every_version_logical_time() -> Result<()> {
     let mut ahead_dot = base.clone();
     ahead_dot.crdt.dots = vec![EntryDot::for_index(version_at(clock_bound + 1), 0)?];
     assert!(matches!(
-        ahead_dot.validate_admissible_at(NOW_MS),
+        ahead_dot.validate_admissible_at(NOW_MS, TEST_NETWORK_ID),
         Err(Error::EntryVersionAheadOfClock)
     ));
 
     let mut ahead_register = base.clone();
     ahead_register.crdt.register = Some(version_at(u128::MAX));
     assert!(matches!(
-        ahead_register.validate_admissible_at(NOW_MS),
+        ahead_register.validate_admissible_at(NOW_MS, TEST_NETWORK_ID),
         Err(Error::EntryVersionAheadOfClock)
     ));
 
     let mut ahead_tombstone = base.clone();
     ahead_tombstone.crdt.tombstones = vec![EntryDot::for_index(version_at(clock_bound + 1), 0)?];
     assert!(matches!(
-        ahead_tombstone.validate_admissible_at(NOW_MS),
+        ahead_tombstone.validate_admissible_at(NOW_MS, TEST_NETWORK_ID),
         Err(Error::EntryVersionAheadOfClock)
     ));
 
     let mut at_bound = base;
     at_bound.crdt.dots = vec![EntryDot::for_index(version_at(clock_bound), 0)?];
     at_bound.crdt.register = Some(version_at(clock_bound));
-    at_bound.validate_admissible_at(NOW_MS)?;
+    at_bound.validate_admissible_at(NOW_MS, TEST_NETWORK_ID)?;
     Ok(())
 }
 

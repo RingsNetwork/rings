@@ -38,7 +38,7 @@ async fn assert_unavailable_successor_fails_over(
 
     node1
         .swarm
-        .stabilizer()
+        .stabilizer()?
         .clean_unavailable_connections()
         .await?;
 

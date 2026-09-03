@@ -144,6 +144,18 @@ pub enum Error {
     #[error("Entry payload exceeds the per-payload size bound")]
     EntryPayloadExceedsMax,
 
+    /// Relay inbox element is not addressed to the peer the inbox is kept for
+    #[error("Relay inbox element is not addressed to the peer the inbox is kept for")]
+    RelayMessageNotAddressedToInbox,
+
+    /// Relay inbox element does not carry an application message
+    #[error("Relay inbox element does not carry an application message")]
+    RelayMessageNotApplication,
+
+    /// Relay inbox element signatures do not verify inside this overlay
+    #[error("Relay inbox element signatures do not verify inside this overlay")]
+    RelayMessageUnverifiable,
+
     /// A storage lock was poisoned by a panicking holder
     #[error("A storage lock was poisoned by a panicking holder")]
     StorageLockPoisoned,

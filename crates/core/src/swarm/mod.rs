@@ -114,8 +114,8 @@ impl Swarm {
     }
 
     /// Create [Stabilizer] for swarm.
-    pub fn stabilizer(&self) -> Stabilizer {
-        Stabilizer::new(self.transport.clone())
+    pub fn stabilizer(&self) -> Result<Stabilizer> {
+        Ok(Stabilizer::new(self.transport.clone(), self.callback()?))
     }
 
     /// Disconnect a connection. There are three steps:

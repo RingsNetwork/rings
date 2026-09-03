@@ -25,6 +25,7 @@ use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::handlers::inbox::hold_for_offline_destination;
 use crate::message::types::FindSuccessorSend;
 use crate::message::FindSuccessorReportHandler;
 use crate::message::FindSuccessorThen;
@@ -228,6 +229,11 @@ pub(crate) enum CoreEffect<'payload> {
         /// Storage-sync message to route by its storage destination.
         msg: SyncEntriesWithSuccessor,
     },
+    /// Hold an application payload in the relay inbox of its offline destination.
+    HoldForOfflineDestination {
+        /// Payload whose destination this node is responsible for but cannot reach.
+        payload: &'payload MessagePayload,
+    },
 }
 
 impl<'payload> CoreEffect<'payload> {
@@ -250,6 +256,11 @@ impl<'payload> CoreEffect<'payload> {
     /// Create a destination-reset effect.
     pub(crate) fn reset_destination(payload: &'payload MessagePayload, next_hop: Did) -> Self {
         Self::ResetDestination { payload, next_hop }
+    }
+
+    /// Create an effect that holds `payload` in its destination's relay inbox.
+    pub(crate) fn hold_for_offline_destination(payload: &'payload MessagePayload) -> Self {
+        Self::HoldForOfflineDestination { payload }
     }
 
     /// Create a normally-routed send effect.
@@ -381,6 +392,9 @@ impl<'handler> CoreEffectInterpreter<'handler> {
             }
             CoreEffect::ResetDestination { payload, next_hop } => {
                 self.transport.reset_destination(payload, next_hop).await
+            }
+            CoreEffect::HoldForOfflineDestination { payload } => {
+                hold_for_offline_destination(self.transport.clone(), payload).await
             }
             CoreEffect::SendMessage { msg, destination } => {
                 self.transport.send_message(*msg, destination).await?;

@@ -216,6 +216,22 @@ impl PeerRing {
         self.storage_virtual_node_config
     }
 
+    /// The overlay this ring belongs to; every stored value is admitted inside it.
+    pub const fn network_id(&self) -> u32 {
+        self.storage_virtual_node_config.network_id()
+    }
+
+    /// Whether this node is the Chord successor of the position `did`, i.e.
+    /// `did ∈ (predecessor, self]`; with no known predecessor the node is responsible for the
+    /// whole ring. A message addressed to an unconnected `did` in this interval has reached the
+    /// node that must hold it.
+    pub(crate) fn is_responsible_for(&self, did: Did) -> Result<bool> {
+        let state = self.topology_state()?;
+        Ok(state.predecessor.is_none_or(|predecessor| {
+            topology::dist(predecessor, did) <= topology::dist(predecessor, self.did)
+        }))
+    }
+
     fn transition_topology(&self, event: TopologyEvent) -> Result<TopologyStep> {
         self.transition_topology_with_observer(event, |_| {})
     }

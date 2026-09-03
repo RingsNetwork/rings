@@ -101,10 +101,11 @@ async fn repair_observed_storage_misses(
 /// Execute storage fetch actions for the Swarm-facing storage API.
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_recursion(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_recursion)]
-async fn handle_storage_fetch_act<const REDUNDANT: u16>(
+async fn handle_storage_fetch_act(
     transport: Arc<SwarmTransport>,
     resource: Did,
     act: PeerRingAction,
+    redundancy: u16,
 ) -> Result<()> {
     match act {
         PeerRingAction::SomeEntry(evidence) => {
@@ -115,7 +116,7 @@ async fn handle_storage_fetch_act<const REDUNDANT: u16>(
             let misses = evidence.misses;
             let repair = transport
                 .dht
-                .read_repair_entry(evidence.entry, &misses, REDUNDANT)
+                .read_repair_entry(evidence.entry, &misses, redundancy)
                 .await?;
             run_storage_repair_transport_effects(transport.clone(), repair).await?;
         }
@@ -131,7 +132,7 @@ async fn handle_storage_fetch_act<const REDUNDANT: u16>(
                         Message::SearchEntry(SearchEntry {
                             resource: query.resource,
                             placement: query.placement,
-                            redundancy: REDUNDANT,
+                            redundancy,
                         }),
                         next,
                     )
@@ -140,14 +141,14 @@ async fn handle_storage_fetch_act<const REDUNDANT: u16>(
         }
         PeerRingAction::MultiActions(acts) => {
             for (act, has_next) in core_actor_steps(acts) {
-                handle_storage_fetch_act::<REDUNDANT>(transport.clone(), resource, act).await?;
+                handle_storage_fetch_act(transport.clone(), resource, act, redundancy).await?;
                 if has_next {
                     yield_core_actor_step().await;
                 }
             }
         }
         PeerRingAction::EntryMisses(misses) => {
-            transport.observe_storage_misses(resource, REDUNDANT, misses)?;
+            transport.observe_storage_misses(resource, redundancy, misses)?;
         }
         act => finish_storage_action(act)?,
     }
@@ -284,9 +285,32 @@ async fn operate_storage_entry<const REDUNDANT: u16>(
     operation: EntryOperation,
 ) -> Result<()> {
     swarm.transport.ensure_storage_redundancy::<REDUNDANT>()?;
-    let action =
-        <PeerRing as ChordStorage<_, REDUNDANT>>::entry_operate(&swarm.dht, operation).await?;
-    handle_storage_store_act(swarm.transport.clone(), action).await
+    operate_entry(swarm.transport.clone(), operation).await
+}
+
+/// Apply `operation` under the transport's configured redundancy: locally where this node is
+/// an accepted placement and by `OperateEntry` toward every remote one.
+pub(crate) async fn operate_entry(
+    transport: Arc<SwarmTransport>,
+    operation: EntryOperation,
+) -> Result<()> {
+    let action = transport
+        .dht
+        .entry_operate_with_redundancy(operation, transport.storage_redundancy())
+        .await?;
+    handle_storage_store_act(transport, action).await
+}
+
+/// Fetch `entry_key` under the transport's configured redundancy: a local hit is copied into
+/// the cache, a miss queries the responsible owners.
+pub(crate) async fn fetch_entry(transport: Arc<SwarmTransport>, entry_key: Did) -> Result<()> {
+    let redundancy = transport.storage_redundancy();
+    transport.start_storage_lookup(entry_key, redundancy)?;
+    let act = transport
+        .dht
+        .entry_lookup_for_fetch(entry_key, redundancy)
+        .await?;
+    handle_storage_fetch_act(transport, entry_key, act, redundancy).await
 }
 
 fn next_hop_for_sync_entries(
@@ -344,14 +368,7 @@ impl<const REDUNDANT: u16> ChordStorageInterface<REDUNDANT> for Swarm {
     /// otherwise query the responsible remote node.
     async fn storage_fetch(&self, entry_key: Did) -> Result<()> {
         self.transport.ensure_storage_redundancy::<REDUNDANT>()?;
-        self.transport.start_storage_lookup(entry_key, REDUNDANT)?;
-        // If peer found that data is on it's localstore, copy it to the cache
-        let act = self
-            .dht
-            .entry_lookup_for_fetch::<REDUNDANT>(entry_key)
-            .await?;
-        handle_storage_fetch_act::<REDUNDANT>(self.transport.clone(), entry_key, act).await?;
-        Ok(())
+        fetch_entry(self.transport.clone(), entry_key).await
     }
 
     /// Store Entry, `TryInto<Entry>` is implemented for alot of types

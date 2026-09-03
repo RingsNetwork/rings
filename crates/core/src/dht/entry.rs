@@ -14,10 +14,9 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::message::Encoded;
 use crate::message::Encoder;
-use crate::message::MessagePayload;
-use crate::message::MessageVerificationExt;
 
 mod crdt;
+pub mod inbox;
 mod retention;
 
 pub use crdt::DataTopicBuffer;
@@ -69,7 +68,7 @@ struct OperationDigest<'a> {
 pub enum EntryOperation {
     /// Create or update an [`Entry`].
     Overwrite(Entry),
-    /// Extend data to a Data kind [`Entry`].
+    /// Add payloads to a data topic or a relay inbox.
     /// This operation will create an [`Entry`] if it does not exist.
     Extend(Entry),
     /// Extend data to a Data kind [`Entry`] uniquely.
@@ -384,17 +383,6 @@ impl EntryOperation {
     /// Generate a target Entry when it is not existed.
     pub fn gen_default_entry(self) -> Result<Entry> {
         Ok(Entry::new(self.did()?, vec![], self.kind()))
-    }
-}
-
-impl TryFrom<MessagePayload> for Entry {
-    type Error = Error;
-    fn try_from(msg: MessagePayload) -> Result<Self> {
-        // Relay entries target the signer's successor on R = Z / 2^160, so the
-        // `+ 1` intentionally wraps in the fixed-width DID ring.
-        let did = msg.signer() + Did::from(1u32);
-        let data = msg.encode()?;
-        Ok(Self::new(did, vec![data], EntryKind::RelayMessage))
     }
 }
 
@@ -791,12 +779,10 @@ impl Entry {
         )?)
     }
 
-    /// This method is used to extend data to a Data kind [`Entry`].
+    /// Add `other`'s payloads to this carrier: the element-set join for a data topic and for
+    /// a relay inbox alike, so holding a message for an offline peer is one ordinary write.
     /// The handler of [EntryOperation::Extend].
     pub fn extend(&self, now_ms: u128, other: Self, actor: Did) -> Result<Self> {
-        if !self.is_data_entry() {
-            return Err(Error::EntryNotAppendable);
-        }
         self.join(other.ensure_stamp_after(
             now_ms,
             actor,
@@ -859,20 +845,15 @@ impl Entry {
         }
     }
 
-    /// Compact a Data kind entry using the receiver's current visible payloads.
+    /// Compact a carrier using the receiver's current visible payloads.
     ///
-    /// Pre: `removals` names the same Data carrier as `self`.
+    /// Pre: `removals` names the same carrier as `self`.
     /// Post: every current visible payload not listed in `removals` is preserved
     /// under the greatest observed register floor, and older tombstone metadata
-    /// is pruned by that floor.
+    /// is pruned by that floor. For a relay inbox this is how the recipient
+    /// retires the messages it has delivered without leaving their tombstones
+    /// behind.
     pub fn compact_data(&self, now_ms: u128, removals: Self, actor: Did) -> Result<Self> {
-        match self.is_data_entry() {
-            true => self.compact_data_entry(now_ms, removals, actor),
-            false => Err(Error::EntryNotOverwritable),
-        }
-    }
-
-    fn compact_data_entry(&self, now_ms: u128, removals: Self, actor: Did) -> Result<Self> {
         let removals =
             removals.ensure_overwrite_stamp_after(now_ms, actor, self.max_observed_version())?;
         self.validate_same_carrier(&removals)?;
@@ -881,17 +862,26 @@ impl Entry {
             Error::InvalidMessage("compact data operation has no register floor".to_string())
         })?;
         let removal_values = removals.data.into_iter().collect::<BTreeSet<_>>();
-        let buffer = self.topic_buffer()?;
-        let output_floor = Self::compact_data_output_floor(self.crdt.register, floor);
+        let (register, values, removes) = match self.kind {
+            EntryKind::Data => {
+                let buffer = self.topic_buffer()?;
+                (buffer.register, buffer.values, buffer.removes)
+            }
+            EntryKind::RelayMessage => {
+                let set = self.relay_set()?;
+                (set.adds.register, set.adds.values, set.removes)
+            }
+        };
+        let output_floor = Self::compact_data_output_floor(register, floor);
         let elements = Self::compact_data_elements(
             floor,
             &removal_values,
-            Self::data_compaction_candidates(&self.data, buffer.values),
+            Self::data_compaction_candidates(&self.data, values),
         )?;
-        let tombstones = Self::compact_data_tombstones(output_floor, buffer.removes);
+        let tombstones = Self::compact_data_tombstones(output_floor, removes);
         Ok(Self::materialize_elements(
             self.did,
-            EntryKind::Data,
+            self.kind,
             Some(output_floor),
             elements,
             tombstones,
@@ -902,3 +892,5 @@ impl Entry {
 
 #[cfg(test)]
 mod test_entry;
+#[cfg(test)]
+mod test_inbox;

@@ -403,10 +403,10 @@ mod tests {
         );
 
         let selected = [
-            selected_destination(&swarm.stabilizer(), &[1, 2, 3])?,
-            selected_destination(&swarm.stabilizer(), &[2, 3])?,
-            selected_destination(&swarm.stabilizer(), &[1, 2, 3])?,
-            selected_destination(&swarm.stabilizer(), &[1, 2, 3])?,
+            selected_destination(&swarm.stabilizer()?, &[1, 2, 3])?,
+            selected_destination(&swarm.stabilizer()?, &[2, 3])?,
+            selected_destination(&swarm.stabilizer()?, &[1, 2, 3])?,
+            selected_destination(&swarm.stabilizer()?, &[1, 2, 3])?,
         ];
 
         assert_eq!(selected, [
@@ -430,7 +430,7 @@ mod tests {
             )
             .build(),
         );
-        let stabilizer = swarm.stabilizer();
+        let stabilizer = swarm.stabilizer()?;
 
         let selected = [
             selected_destination(&stabilizer, &[1, 2])?,

@@ -68,7 +68,7 @@ impl PeerRing {
         key: Did,
         incoming: Entry,
     ) -> Result<Entry> {
-        incoming.validate_admissible_at(now_ms)?;
+        incoming.validate_admissible_at(now_ms, self.network_id())?;
         let incoming = incoming.try_into_storage_entry()?;
         let stored = if let Some(local) = self.live_storage_entry(key, now_ms).await? {
             local.join(incoming)?
@@ -93,7 +93,7 @@ impl PeerRing {
         placement: Did,
         op: EntryOperation,
     ) -> Result<()> {
-        op.validate_admissible_at(now_ms)?;
+        op.validate_admissible_at(now_ms, self.network_id())?;
         let local = match self.live_storage_entry(placement, now_ms).await? {
             Some(local) => local,
             None => op.clone().gen_default_entry()?,
@@ -112,15 +112,16 @@ impl PeerRing {
             .find(|successor| *successor != self.did))
     }
 
-    async fn entry_lookup_inner<const REDUNDANT: u16>(
+    async fn entry_lookup_inner(
         &self,
         entry_key: Did,
         fallback_on_local_virtual_miss: bool,
+        redundancy: u16,
     ) -> Result<PeerRingAction> {
         let now_ms = get_epoch_ms();
         let mut ret = vec![];
         let mut misses = vec![];
-        for placement_key in entry_key.rotate_affine(REDUNDANT)? {
+        for placement_key in entry_key.rotate_affine(redundancy)? {
             let query = EntryLookupKey::new(entry_key, placement_key);
             let act = match self.find_storage_owner(placement_key) {
                 Ok(PeerRingAction::Some(succ)) => {
@@ -192,27 +193,26 @@ impl PeerRing {
     /// read repair can converge instead of treating the fresh local miss as
     /// authoritative. Remote `SearchEntry` handling uses [`ChordStorage`] and
     /// intentionally does not enable this fallback.
-    pub(crate) async fn entry_lookup_for_fetch<const REDUNDANT: u16>(
+    pub(crate) async fn entry_lookup_for_fetch(
         &self,
         entry_key: Did,
+        redundancy: u16,
     ) -> Result<PeerRingAction> {
-        self.entry_lookup_inner::<REDUNDANT>(entry_key, true).await
-    }
-}
-
-#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
-#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
-impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing {
-    async fn entry_lookup(&self, entry_key: Did) -> Result<PeerRingAction> {
-        self.entry_lookup_inner::<REDUNDANT>(entry_key, false).await
+        self.entry_lookup_inner(entry_key, true, redundancy).await
     }
 
-    async fn entry_operate(&self, op: EntryOperation) -> Result<PeerRingAction> {
+    /// Apply `op` under a runtime `redundancy`: locally at every accepted placement, and as a
+    /// [`RemoteAction::FindEntryForOperate`] toward every remote one.
+    pub(crate) async fn entry_operate_with_redundancy(
+        &self,
+        op: EntryOperation,
+        redundancy: u16,
+    ) -> Result<PeerRingAction> {
         let now_ms = get_epoch_ms();
         let op = op.stamped(now_ms, self.did)?;
         let entry_key = op.did()?;
         let mut ret = vec![];
-        for entry_key in entry_key.rotate_affine(REDUNDANT)? {
+        for entry_key in entry_key.rotate_affine(redundancy)? {
             let act = match self.find_storage_owner(entry_key) {
                 Ok(PeerRingAction::Some(_)) => {
                     self.operate_storage_entry(now_ms, entry_key, op.clone())
@@ -241,13 +241,25 @@ impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing 
 
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
+impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing {
+    async fn entry_lookup(&self, entry_key: Did) -> Result<PeerRingAction> {
+        self.entry_lookup_inner(entry_key, false, REDUNDANT).await
+    }
+
+    async fn entry_operate(&self, op: EntryOperation) -> Result<PeerRingAction> {
+        self.entry_operate_with_redundancy(op, REDUNDANT).await
+    }
+}
+
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl ChordStorageCache<PeerRingAction> for PeerRing {
     /// Cache a fetched entry.
     ///
     /// Pre: `entry` satisfies the same admission law as a replicated write, so a peer cannot
     /// pin a fetched value in the cache past the retention bound it could obtain in storage.
     async fn local_cache_put(&self, entry: Entry) -> Result<()> {
-        entry.validate_admissible_at(get_epoch_ms())?;
+        entry.validate_admissible_at(get_epoch_ms(), self.network_id())?;
         self.cache.put(&entry.did.to_string(), &entry).await
     }
 

@@ -132,6 +132,10 @@ holds at most their product; when the count cap binds, the oldest payloads are t
 ones dropped. Admission also rejects CRDT versions whose logical time runs ahead of
 the receiver's clock by more than the message skew tolerance, so a forged version can
 dominate honest writes only for that tolerance and cannot pin a key beyond it.
+A relay inbox, the messages held for an offline peer, is retained longer than a data
+topic; that policy is safe because the storage owner verifies every inbox element
+itself (a signed application message addressed to the inbox's peer, verifiable inside
+the local overlay), so a peer cannot obtain the inbox policy by declaring the kind.
 Native storage enforces its configured byte budget by retiring the least recently
 written values, and the fetched-entry cache is bounded by entry count. These bounds
 limit resource use by any single writer; they are not a Sybil defence, and an

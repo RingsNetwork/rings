@@ -219,7 +219,7 @@ async fn test_stabilization_once() -> Result<()> {
     wait_for_successor(&node1, node2.did()).await?;
     wait_for_successor(&node2, node1.did()).await?;
 
-    let stabilizer = node1.swarm.stabilizer();
+    let stabilizer = node1.swarm.stabilizer()?;
     stabilizer.stabilize().await?;
     wait_for_predecessor(&node2, node1.did()).await?;
     wait_for_successor(&node1, node2.did()).await?;
@@ -308,7 +308,7 @@ async fn test_liveness_probe_backpressure_does_not_degrade_peer() -> Result<()> 
     let _pending_send = PendingSendGuard::new();
     node1
         .swarm
-        .stabilizer()
+        .stabilizer()?
         .stabilize_with_step_timeout(Duration::from_secs(1))
         .await?;
 
@@ -348,7 +348,7 @@ async fn test_clean_unavailable_connections_removes_silent_connected_peer() -> R
     let _drop_messages = DropMessagesGuard::new();
     node1
         .swarm
-        .stabilizer()
+        .stabilizer()?
         .clean_unavailable_connections()
         .await?;
 
@@ -397,7 +397,7 @@ async fn test_clean_unavailable_connections_observes_disconnected_peer_without_c
 
     node1
         .swarm
-        .stabilizer()
+        .stabilizer()?
         .clean_unavailable_connections()
         .await?;
 
@@ -418,7 +418,7 @@ async fn test_clean_unavailable_connections_observes_disconnected_peer_without_c
 
     node1
         .swarm
-        .stabilizer()
+        .stabilizer()?
         .clean_unavailable_connections()
         .await?;
 
@@ -458,7 +458,7 @@ async fn test_clean_unavailable_connections_fails_over_to_live_successor_tail() 
 
     node1
         .swarm
-        .stabilizer()
+        .stabilizer()?
         .clean_unavailable_connections()
         .await?;
 
@@ -523,7 +523,7 @@ async fn test_clean_unavailable_connections_prunes_disconnected_non_head_slots()
 
     node1
         .swarm
-        .stabilizer()
+        .stabilizer()?
         .clean_unavailable_connections()
         .await?;
 
@@ -592,7 +592,7 @@ async fn test_clean_unavailable_connections_does_not_fail_over_to_disconnected_f
 
     node1
         .swarm
-        .stabilizer()
+        .stabilizer()?
         .clean_unavailable_connections()
         .await?;
 
@@ -646,7 +646,7 @@ async fn test_clean_unavailable_connections_prunes_disconnected_finger() -> Resu
 
     node1
         .swarm
-        .stabilizer()
+        .stabilizer()?
         .clean_unavailable_connections()
         .await?;
 
@@ -676,7 +676,7 @@ async fn test_clean_unavailable_connections_prunes_disconnected_finger() -> Resu
 
     node1
         .swarm
-        .stabilizer()
+        .stabilizer()?
         .clean_unavailable_connections()
         .await?;
 
@@ -706,7 +706,7 @@ async fn test_clean_unavailable_connections_removes_stale_topology_peer() -> Res
     assert!(!node.swarm.transport.is_admitted_connection(stale));
 
     node.swarm
-        .stabilizer()
+        .stabilizer()?
         .clean_unavailable_connections()
         .await?;
 
@@ -755,7 +755,7 @@ async fn test_clean_unavailable_connections_keeps_degraded_admitted_peer() -> Re
 
     node1
         .swarm
-        .stabilizer()
+        .stabilizer()?
         .clean_unavailable_connections()
         .await?;
 
@@ -782,8 +782,8 @@ async fn test_stabilization() -> Result<()> {
     wait_for_successor(&node1, node2.did()).await?;
     wait_for_successor(&node2, node1.did()).await?;
 
-    let stabilizer1 = node1.swarm.stabilizer();
-    let stabilizer2 = node2.swarm.stabilizer();
+    let stabilizer1 = node1.swarm.stabilizer()?;
+    let stabilizer2 = node2.swarm.stabilizer()?;
     tokio::try_join!(stabilizer1.stabilize(), stabilizer2.stabilize())?;
 
     wait_for_predecessor(&node2, node1.did()).await?;

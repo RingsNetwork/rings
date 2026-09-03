@@ -21,6 +21,7 @@ use crate::dht::PeerRingRemoteAction;
 use crate::dht::TopoInfo;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::handlers::inbox::drain_inbox;
 use crate::message::FindSuccessorReportHandler;
 use crate::message::FindSuccessorSend;
 use crate::message::FindSuccessorThen;
@@ -30,6 +31,7 @@ use crate::message::NotifyPredecessorSend;
 use crate::message::PayloadSender;
 use crate::message::PeerLivenessProbe;
 use crate::message::QueryForTopoInfoSend;
+use crate::swarm::callback::SharedSwarmCallback;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::transport::TransportReadiness;
@@ -178,13 +180,19 @@ where F: Future<Output = Result<T>> {
 pub struct Stabilizer {
     transport: Arc<SwarmTransport>,
     dht: Arc<PeerRing>,
+    /// The application the drained relay inbox is delivered to.
+    swarm_callback: SharedSwarmCallback,
 }
 
 impl Stabilizer {
-    /// Create a new stabilization runner.
-    pub fn new(transport: Arc<SwarmTransport>) -> Self {
+    /// Create a new stabilization runner delivering drained inbox messages to `swarm_callback`.
+    pub fn new(transport: Arc<SwarmTransport>, swarm_callback: SharedSwarmCallback) -> Self {
         let dht = transport.dht.clone();
-        Self { transport, dht }
+        Self {
+            transport,
+            dht,
+            swarm_callback,
+        }
     }
 
     /// Run stabilization once.
@@ -195,6 +203,12 @@ impl Stabilizer {
 
     pub(crate) async fn stabilize_with_step_timeout(&self, timeout: Duration) -> Result<()> {
         self.stabilize_topology_with_step_timeout(timeout).await;
+        self.run_step(
+            "drain_inbox",
+            timeout,
+            drain_inbox(self.transport.clone(), &self.swarm_callback),
+        )
+        .await;
         self.transport.claim_storage_repair();
         let repair_outcome = self
             .run_step("repair_storage", timeout, self.repair_storage())

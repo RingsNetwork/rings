@@ -9,6 +9,14 @@ use std::num::NonZeroU32;
 pub const DEFAULT_TTL_MS: u64 = 600 * 1000;
 /// Maximum accepted time-to-live in milliseconds for message signatures and DHT entries.
 pub const MAX_TTL_MS: u64 = DEFAULT_TTL_MS * 10;
+/// Default retention in milliseconds of a relay inbox, the messages held for an offline peer.
+///
+/// A peer that returns within this window after the last message held for it still receives the
+/// whole inbox. The policy is safe only because every inbox element carries a witness the
+/// storage owner verifies itself (see `dht::entry::inbox`).
+pub const DEFAULT_RELAY_INBOX_TTL_MS: u64 = 24 * 3600 * 1000;
+/// Maximum accepted retention in milliseconds of a relay inbox.
+pub const MAX_RELAY_INBOX_TTL_MS: u64 = DEFAULT_RELAY_INBOX_TTL_MS * 7;
 /// Accepted timestamp drift in milliseconds.
 pub const TS_OFFSET_TOLERANCE_MS: u128 = 3000;
 /// Maximum number of fetched entries the local DHT cache retains before evicting the

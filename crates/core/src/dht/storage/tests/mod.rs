@@ -418,7 +418,7 @@ async fn test_local_fetch_falls_back_when_local_virtual_owner_has_no_entry() -> 
         )])])
     );
 
-    let local_fetch_lookup = node.entry_lookup_for_fetch::<1>(placement).await?;
+    let local_fetch_lookup = node.entry_lookup_for_fetch(placement, 1).await?;
     assert_eq!(
         local_fetch_lookup,
         PeerRingAction::MultiActions(vec![PeerRingAction::RemoteAction(

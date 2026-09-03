@@ -243,7 +243,9 @@ impl<'data> StorageSyncBatch<'data> {
         // before any earlier entry has been written.
         if should_persist_synced_entry(transport, self.destination, placed.key)? {
             placed.validate_placement(transport.storage_redundancy())?;
-            placed.entry.validate_admissible_at(self.now_ms)?;
+            placed
+                .entry
+                .validate_admissible_at(self.now_ms, transport.network_id)?;
             let entry = placed.entry.clone().try_into_storage_entry()?;
             self.accepted.push(SyncedEntryAck::new(placed.key, entry));
         }

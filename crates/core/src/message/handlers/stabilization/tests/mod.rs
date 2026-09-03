@@ -437,6 +437,6 @@ async fn test_triple_desc_ordered_nodes_stabilization(
 }
 
 async fn run_stabilization_once(swarm: Arc<Swarm>) -> Result<()> {
-    let stab = swarm.stabilizer();
+    let stab = swarm.stabilizer()?;
     stab.notify_predecessor().await
 }
