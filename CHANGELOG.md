@@ -48,6 +48,11 @@
 
 ### Fixed
 
+- Storage ownership hand-off is now a stabilization step: every round the owner offers the live
+  local entries placed beyond `(self, successor head]` to the head, and the receiver's
+  acknowledgement removes the local copy. Previously the hand-off ran only when the old successor
+  replied with `NotifyPredecessorReport`, so a head moved by a topology query or by a directly
+  connected peer left entries at a node that no longer owned them until they expired.
 - The native file-backed storage now enforces its configured byte capacity: a write beyond the
   budget retires the least recently written keys first, a value larger than the whole budget is
   rejected with `Error::StorageValueExceedsCapacity`, the index is updated only after the file

@@ -12,6 +12,7 @@ use rings_transport::core::transport::WebrtcConnectionState;
 
 pub use self::storage_repair::StorageRepairOutcome;
 use crate::dht::successor::SuccessorReader;
+use crate::dht::topology;
 use crate::dht::types::CorrectChord;
 use crate::dht::Chord;
 use crate::dht::Did;
@@ -22,6 +23,7 @@ use crate::dht::TopoInfo;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::handlers::inbox::drain_inbox;
+use crate::message::handlers::storage::hand_off_storage;
 use crate::message::FindSuccessorReportHandler;
 use crate::message::FindSuccessorSend;
 use crate::message::FindSuccessorThen;
@@ -203,6 +205,8 @@ impl Stabilizer {
 
     pub(crate) async fn stabilize_with_step_timeout(&self, timeout: Duration) -> Result<()> {
         self.stabilize_topology_with_step_timeout(timeout).await;
+        self.run_step("hand_off_storage", timeout, self.hand_off_storage())
+            .await;
         self.run_step(
             "drain_inbox",
             timeout,
@@ -627,6 +631,22 @@ impl Stabilizer {
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) async fn probe_peer_liveness_for_simulation(&self) -> Result<()> {
         self.probe_peer_liveness().await
+    }
+
+    /// Placement invariant: every live local entry lies in `(self, head]`, or is offered to the
+    /// head as an ownership hand-off in this round.
+    ///
+    /// Placement is a function of the ring state, so this holds whichever input moved the head
+    /// (a notify report, a topology query, or a direct connection) and however the head was
+    /// reached. It is a round step rather than a transition effect because a delivery sent the
+    /// instant this node admits a peer can precede the peer's own admission of this node and be
+    /// dropped; the next round offers it again, and the ack-gated cleanup makes repetition
+    /// idempotent.
+    async fn hand_off_storage(&self) -> Result<()> {
+        let Some(head) = self.dht.with_topology_state(topology::successor_head)? else {
+            return Ok(());
+        };
+        hand_off_storage(self.transport.clone(), head).await
     }
 
     /// Notify predecessor, this is a DHT operation.

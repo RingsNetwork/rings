@@ -517,3 +517,16 @@ fn test_referenced_peers_collect_every_topology_slot_except_local() {
     assert!(!current.references(local));
     assert!(!current.references(did(1)));
 }
+
+#[test]
+fn test_successor_head_skips_local_and_is_absent_when_alone() {
+    let local = did(0);
+    assert_eq!(
+        successor_head(&state(local, vec![local, did(20)], None, vec![None; 5], 0)),
+        Some(did(20))
+    );
+    assert_eq!(
+        successor_head(&state(local, vec![local], None, vec![None; 5], 0)),
+        None
+    );
+}

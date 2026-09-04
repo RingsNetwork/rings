@@ -77,9 +77,9 @@ pub trait ChordStorage<Action, const REDUNDANT: u16>: Chord<Action> {
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait ChordStorageSync<Action>: Chord<Action> {
-    /// When the successor of a node is updated, it needs to check if there are
-    /// live `Entry`s that are no longer between current node and `new_successor`,
-    /// and copy them to the new successor.
+    /// Offer the live `Entry`s no longer placed in `(self, new_successor]` to
+    /// `new_successor`. The stabilizer runs this every round against the current
+    /// successor head, whichever input moved it, so repetition must be idempotent.
     ///
     /// Mode law: with storage virtual nodes enabled, `new_successor` is only the
     /// stabilization trigger. The copy target is the current

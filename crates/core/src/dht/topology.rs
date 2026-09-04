@@ -341,6 +341,17 @@ fn closest_preceding_finger(state: &TopologyState, target: &BigUint) -> Option<D
         .find(|peer| precedes(state.local, *peer, target))
 }
 
+/// `head(s)`: the nearest successor other than `local`, the upper end of the
+/// local placement interval `(local, head]`; `None` when the node stands alone.
+/// Placement is a function of this value alone, whichever input moved it.
+pub fn successor_head(state: &TopologyState) -> Option<Did> {
+    state
+        .successors
+        .iter()
+        .copied()
+        .find(|successor| *successor != state.local)
+}
+
 /// Pure Chord successor lookup against one topology state.
 ///
 /// `Local(head)` answers when `did` lies in the local successor interval
@@ -358,12 +369,7 @@ fn closest_preceding_finger(state: &TopologyState, target: &BigUint) -> Option<D
 /// every state, so every remote step is a strict clockwise advance and never a
 /// self hop.
 pub fn find_successor(state: &TopologyState, did: Did) -> FindSuccessorStep {
-    let Some(head) = state
-        .successors
-        .iter()
-        .copied()
-        .find(|successor| *successor != state.local)
-    else {
+    let Some(head) = successor_head(state) else {
         return FindSuccessorStep::Local(state.local);
     };
     let target = dist(state.local, did);

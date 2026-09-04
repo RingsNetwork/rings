@@ -298,6 +298,23 @@ pub async fn wait_for_predecessor(node: &Node, predecessor: Did) -> crate::error
     .await
 }
 
+/// Wait until `node` no longer stores a value at `entry`.
+pub async fn wait_for_storage_absence(node: &Node, entry: Did) -> crate::error::Result<()> {
+    let started = Instant::now();
+    loop {
+        if node.dht().storage.get(&entry.to_string()).await?.is_none() {
+            return Ok(());
+        }
+
+        assert!(
+            started.elapsed() <= TEST_WAIT_TIMEOUT,
+            "storage entry was not removed within {TEST_WAIT_TIMEOUT:?}: {entry}"
+        );
+        tokio::task::yield_now().await;
+        sleep(TEST_WAIT_POLL_INTERVAL).await;
+    }
+}
+
 pub async fn wait_for_storage_entry(node: &Node, entry: Did) -> crate::error::Result<Entry> {
     let started = Instant::now();
     loop {

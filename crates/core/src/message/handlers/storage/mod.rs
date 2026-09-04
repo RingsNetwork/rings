@@ -95,7 +95,7 @@ async fn repair_observed_storage_misses(
         .dht
         .read_repair_entry(entry, &misses, redundancy)
         .await?;
-    run_storage_repair_transport_effects(transport, repair).await
+    send_storage_sync_actions(transport, repair, "storage_repair").await
 }
 
 /// Execute storage fetch actions for the Swarm-facing storage API.
@@ -118,7 +118,7 @@ async fn handle_storage_fetch_act(
                 .dht
                 .read_repair_entry(evidence.entry, &misses, redundancy)
                 .await?;
-            run_storage_repair_transport_effects(transport.clone(), repair).await?;
+            send_storage_sync_actions(transport.clone(), repair, "storage_repair").await?;
         }
         PeerRingAction::RemoteAction(next, dht_act) => {
             if let PeerRingRemoteAction::FindEntry(query) = dht_act {
@@ -209,21 +209,30 @@ async fn handle_placed_entry_operation(
     }
 }
 
-/// Execute copy-only storage repair actions at the Swarm API adapter boundary.
-async fn run_storage_repair_transport_effects(
+/// Send every storage-sync delivery of `act` at the transport boundary.
+async fn send_storage_sync_actions(
     transport: Arc<SwarmTransport>,
     act: PeerRingAction,
+    context: &'static str,
 ) -> Result<()> {
     for (delivery, has_next) in core_actor_steps(act.coalesced_storage_sync_deliveries()?) {
         let msg = SyncEntriesWithSuccessor::from_delivery(delivery);
-        transport
-            .send_storage_sync_or_defer(msg, "storage_repair")
-            .await?;
+        transport.send_storage_sync_or_defer(msg, context).await?;
         if has_next {
             yield_core_actor_step().await;
         }
     }
     Ok(())
+}
+
+/// Offer every live local entry placed beyond `head` to it as an ownership hand-off.
+///
+/// Pre: `head` is the current successor head, so the local placement interval is `(self, head]`.
+/// Post: every live local entry beyond that interval has been offered to `head`; local copies are
+/// removed only by the receiver's acknowledgement, so repeating this is idempotent.
+pub(crate) async fn hand_off_storage(transport: Arc<SwarmTransport>, head: Did) -> Result<()> {
+    let handoff = transport.dht.sync_entries_with_successor(head).await?;
+    send_storage_sync_actions(transport, handoff, "ownership_handoff").await
 }
 
 /// Execute storage search actions emitted by inbound message handlers.

@@ -124,7 +124,9 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
         let mut data = Vec::<PlacedEntry>::new();
         let all_items = self.live_storage_entries(get_epoch_ms()).await?;
 
-        // Pre: new_successor is the successor adopted by stabilization.
+        // Pre: new_successor is the current successor head, whichever input
+        // moved it. The stabilizer runs this every round, so a delivery lost
+        // before the head admitted this node is offered again.
         // Post S1: forall key in local_before, local_after[key] =
         // local_before[key]; this transition emits join deliveries only.
         // Post S2(copy): every emitted PlacedEntry keeps the exact local

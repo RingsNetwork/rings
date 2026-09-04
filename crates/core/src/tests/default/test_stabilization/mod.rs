@@ -47,6 +47,7 @@ use crate::tests::manually_establish_connection;
 use crate::tests::replace_observed_fingers;
 use crate::utils::get_epoch_ms_i64;
 
+mod test_storage_handoff;
 mod test_storage_repair;
 
 #[derive(Default)]

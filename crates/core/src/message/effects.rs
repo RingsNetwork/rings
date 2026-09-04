@@ -34,7 +34,6 @@ use crate::message::MessagePayload;
 use crate::message::NotifyPredecessorSend;
 use crate::message::PayloadSender;
 use crate::message::QueryForTopoInfoSend;
-use crate::message::SyncEntriesWithSuccessor;
 use crate::swarm::callback::InnerSwarmCallback;
 use crate::swarm::callback::SharedSwarmCallback;
 use crate::swarm::transport::SwarmTransport;
@@ -224,11 +223,6 @@ pub(crate) enum CoreEffect<'payload> {
         /// Peer to connect.
         peer: Did,
     },
-    /// Send copy-only storage entries and register the matching ack capability.
-    SendStorageSync {
-        /// Storage-sync message to route by its storage destination.
-        msg: SyncEntriesWithSuccessor,
-    },
     /// Hold an application payload in the relay inbox of its offline destination.
     HoldForOfflineDestination {
         /// Payload whose destination this node is responsible for but cannot reach.
@@ -282,11 +276,6 @@ impl<'payload> CoreEffect<'payload> {
     /// Create a DHT connection effect.
     pub(crate) const fn connect_dht_peer(peer: Did) -> Self {
         Self::ConnectDhtPeer { peer }
-    }
-
-    /// Create a storage-sync effect.
-    pub(crate) fn send_storage_sync(msg: SyncEntriesWithSuccessor) -> Self {
-        Self::SendStorageSync { msg }
     }
 }
 
@@ -431,12 +420,6 @@ impl<'handler> CoreEffectInterpreter<'handler> {
                     Err(e) => Err(e),
                 }
             }
-            CoreEffect::SendStorageSync { msg } => {
-                self.transport
-                    .send_storage_sync_or_defer(msg, "core_effect")
-                    .await?;
-                Ok(())
-            }
         }
     }
 
@@ -471,8 +454,6 @@ mod tests {
     use std::task::Waker;
 
     use super::*;
-    use crate::dht::StorageSyncDestination;
-    use crate::dht::StorageSyncPurpose;
     use crate::ecc::SecretKey;
     use crate::message::types::QueryFor;
     use crate::message::MessageSigner;
@@ -587,31 +568,6 @@ mod tests {
             effect => {
                 return Err(Error::InvalidMessage(format!(
                     "expected ResetDestination, got {effect:?}"
-                )))
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn test_storage_sync_effect_owns_sync_message() -> Result<()> {
-        let destination = did();
-        let msg = SyncEntriesWithSuccessor {
-            purpose: StorageSyncPurpose::OwnershipHandoff,
-            destination: StorageSyncDestination::PhysicalOwner(destination),
-            data: vec![],
-        };
-
-        let effect: CoreEffect<'_> = CoreEffect::send_storage_sync(msg.clone());
-
-        match effect {
-            CoreEffect::SendStorageSync { msg: effect_msg } => {
-                assert_eq!(effect_msg.destination, msg.destination);
-                assert!(effect_msg.data.is_empty());
-            }
-            effect => {
-                return Err(Error::InvalidMessage(format!(
-                    "expected SendStorageSync, got {effect:?}"
                 )))
             }
         }

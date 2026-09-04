@@ -1,13 +1,11 @@
 use async_trait::async_trait;
 
-use crate::dht::ChordStorageSync;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::effects::CoreEffect;
 use crate::message::types::Message;
 use crate::message::types::NotifyPredecessorReport;
 use crate::message::types::NotifyPredecessorSend;
-use crate::message::types::SyncEntriesWithSuccessor;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
@@ -60,22 +58,12 @@ impl MessageHandler {
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
+    /// The successor reports the node that now precedes it: connect to it. Adopting it as the
+    /// successor head is the admission's topology transition, and the storage hand-off that
+    /// follows is the stabilizer's placement invariant, not this message's.
     async fn handle(&self, _ctx: &MessagePayload, msg: &NotifyPredecessorReport) -> Result<()> {
         self.run_effects([CoreEffect::connect_dht_peer(msg.did)])
-            .await?;
-
-        let deliveries = self
-            .dht
-            .sync_entries_with_successor(msg.did)
-            .await?
-            .coalesced_storage_sync_deliveries()?;
-        let effects = deliveries.into_iter().map(|delivery| {
-            let msg = SyncEntriesWithSuccessor::from_delivery(delivery);
-            CoreEffect::send_storage_sync(msg)
-        });
-        self.run_effects(effects).await?;
-
-        Ok(())
+            .await
     }
 }
 
