@@ -40,6 +40,7 @@ mod test_dht_schedule;
 // End-to-end chunking uses the dummy backend's `max_message_size` test hook.
 #[cfg(feature = "dummy")]
 mod test_chunk_e2e;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 mod test_inbox;
 mod test_message_handler;
 #[cfg(all(feature = "std", not(feature = "dummy")))]
@@ -299,6 +300,7 @@ pub async fn wait_for_predecessor(node: &Node, predecessor: Did) -> crate::error
 }
 
 /// Wait until `node` no longer stores a value at `entry`.
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 pub async fn wait_for_storage_absence(node: &Node, entry: Did) -> crate::error::Result<()> {
     let started = Instant::now();
     loop {

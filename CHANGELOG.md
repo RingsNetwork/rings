@@ -41,16 +41,19 @@
   overlay regardless of proof liveness. Inboxes are retained for `DEFAULT_RELAY_INBOX_TTL_MS`
   (24 h) after the last held message, up to `MAX_RELAY_INBOX_TTL_MS` (7 d). When the peer returns
   its inbox key falls into its own storage interval and is handed over by ownership sync; every
-  stabilization round the peer drains its local inbox to the application (`on_validate`, then
+  storage repair pass the peer drains its local inbox to the application (`on_validate`, then
   `on_inbound`) and compacts the delivered messages out of the carrier, so the floor also prunes
   their tombstones. `MessageVerificationExt::verify_signature` verifies a signature without its
   liveness check for this purpose.
 
 ### Fixed
 
-- Storage ownership hand-off is now a stabilization step: every round the owner offers the live
-  local entries placed beyond `(self, successor head]` to the head, and the receiver's
-  acknowledgement removes the local copy. Previously the hand-off ran only when the old successor
+- Storage ownership hand-off is now part of the storage repair pass: the pass drains the local
+  inbox, offers the live local entries placed beyond `(self, successor head]` to the head (the
+  receiver's acknowledgement removes the local copy), and republishes to missing affine owners,
+  all through the repair delivery window with its fresh-connection grace. Every topology
+  transition that moves the successor head (`TopologyAction::SuccessorHeadChanged`) requests a
+  repair round instead of sending. Previously the hand-off ran only when the old successor
   replied with `NotifyPredecessorReport`, so a head moved by a topology query or by a directly
   connected peer left entries at a node that no longer owned them until they expired.
 - The native file-backed storage now enforces its configured byte capacity: a write beyond the

@@ -78,7 +78,7 @@ pub trait ChordStorage<Action, const REDUNDANT: u16>: Chord<Action> {
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait ChordStorageSync<Action>: Chord<Action> {
     /// Offer the live `Entry`s no longer placed in `(self, new_successor]` to
-    /// `new_successor`. The stabilizer runs this every round against the current
+    /// `new_successor`. The storage repair pass runs this against the current
     /// successor head, whichever input moved it, so repetition must be idempotent.
     ///
     /// Mode law: with storage virtual nodes enabled, `new_successor` is only the

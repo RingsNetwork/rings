@@ -228,6 +228,11 @@ pub(crate) enum CoreEffect<'payload> {
         /// Payload whose destination this node is responsible for but cannot reach.
         payload: &'payload MessagePayload,
     },
+    /// Request a storage repair round: the placement interval changed, so the stabilizer's next
+    /// repair pass must hand off what lies beyond the new successor head. Only the intent is
+    /// recorded here; the pass itself runs under the repair schedule, whose admission grace
+    /// outlives the peer's own admission of this node.
+    RequestStorageRepair,
 }
 
 impl<'payload> CoreEffect<'payload> {
@@ -276,6 +281,11 @@ impl<'payload> CoreEffect<'payload> {
     /// Create a DHT connection effect.
     pub(crate) const fn connect_dht_peer(peer: Did) -> Self {
         Self::ConnectDhtPeer { peer }
+    }
+
+    /// Create a storage repair request effect.
+    pub(crate) const fn request_storage_repair() -> Self {
+        Self::RequestStorageRepair
     }
 }
 
@@ -331,6 +341,9 @@ pub(crate) fn lower_dht_action<'payload>(
         PeerRingAction::RemoteAction(peer, PeerRingRemoteAction::TryConnect) => {
             Ok(Some(CoreEffect::connect_dht_peer(*peer)))
         }
+        PeerRingAction::RemoteAction(_, PeerRingRemoteAction::HandOffStorage) => {
+            Ok(Some(CoreEffect::request_storage_repair()))
+        }
         PeerRingAction::RemoteAction(target, PeerRingRemoteAction::Notify(predecessor)) => {
             let (target, predecessor) = (*target, *predecessor);
             Ok(if target == predecessor {
@@ -384,6 +397,10 @@ impl<'handler> CoreEffectInterpreter<'handler> {
             }
             CoreEffect::HoldForOfflineDestination { payload } => {
                 hold_for_offline_destination(self.transport.clone(), payload).await
+            }
+            CoreEffect::RequestStorageRepair => {
+                self.transport.request_storage_repair();
+                Ok(())
             }
             CoreEffect::SendMessage { msg, destination } => {
                 self.transport.send_message(*msg, destination).await?;
@@ -572,6 +589,21 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn test_dht_hand_off_storage_lowers_to_a_repair_request() -> Result<()> {
+        let effect = single_effect(lower_dht_action(
+            &PeerRingAction::RemoteAction(did(), PeerRingRemoteAction::HandOffStorage),
+            |_| false,
+        ))?;
+
+        match effect {
+            CoreEffect::RequestStorageRepair => Ok(()),
+            effect => Err(Error::InvalidMessage(format!(
+                "expected RequestStorageRepair, got {effect:?}"
+            ))),
+        }
     }
 
     #[test]

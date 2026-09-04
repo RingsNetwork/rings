@@ -170,6 +170,9 @@ impl PeerRing {
         self.remove_with_successor_evidence(did, SuccessorRemoval::ReplaceWith(replacements))
     }
 
+    /// Post: the emitted actions are dropped. A removal only widens `(self, head]` (a closer
+    /// connected peer would already be the head), so its head change moves no placement out of
+    /// this node; the caller requests the storage repair round for the widened interval itself.
     fn remove_with_successor_evidence(&self, did: Did, successor: SuccessorRemoval) -> Result<()> {
         self.transition_topology(TopologyEvent::Remove {
             peer: did,
@@ -274,6 +277,9 @@ impl PeerRing {
             }
             TopologyAction::Notify(did) => {
                 PeerRingAction::RemoteAction(did, RemoteAction::Notify(self.did))
+            }
+            TopologyAction::SuccessorHeadChanged(head) => {
+                PeerRingAction::RemoteAction(head, RemoteAction::HandOffStorage)
             }
         }
     }

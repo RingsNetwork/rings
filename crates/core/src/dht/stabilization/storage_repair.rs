@@ -1,12 +1,15 @@
 use super::Stabilizer;
 use super::STORAGE_REPAIR_FRESH_CONNECTION_GRACE_MS;
 use super::STORAGE_REPAIR_MAX_DELIVERIES_PER_STEP;
+use crate::dht::topology;
 use crate::dht::types::ChordStorageRepair;
+use crate::dht::ChordStorageSync;
 use crate::dht::Did;
 use crate::dht::PeerRingAction;
 use crate::dht::StorageSyncDelivery;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::handlers::inbox::drain_inbox;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::swarm::transport::TrackedStorageSyncOutcome;
 use crate::swarm::transport::TransportReadiness;
@@ -311,18 +314,40 @@ impl Stabilizer {
         }
     }
 
-    /// Republish locally-held entries to their current affine owners.
+    /// The live local entries beyond `(self, head]`, offered to the head as an ownership
+    /// hand-off; nothing when the node stands alone.
+    async fn hand_off_action(&self) -> Result<PeerRingAction> {
+        match self.dht.with_topology_state(topology::successor_head)? {
+            Some(head) => self.dht.sync_entries_with_successor(head).await,
+            None => Ok(PeerRingAction::None),
+        }
+    }
+
+    /// One bounded pass restoring the placement invariant of local storage.
+    ///
+    /// Invariant: every live local entry lies in `(self, head]` and at each of its affine
+    /// owners, and this node's own inbox has been delivered. The pass drains the inbox, offers
+    /// the entries beyond the head to the head (ownership hand-off, whose local cleanup is
+    /// ack-gated), and republishes local entries to missing affine owners (additive), then sends
+    /// the deliveries through one repair window. Placement is a function of the ring state, so
+    /// the pass is the same whichever input moved the head; a head change only requests it, and
+    /// the fresh-connection grace of the window outlives the peer's own admission of this node,
+    /// which a send at admission time would race. Repetition is idempotent: deliveries are joins
+    /// and every local removal is acknowledged first.
     pub async fn repair_storage(&self) -> Result<StorageRepairOutcome> {
         tracing::debug!(
             target: "rings_core::dht::stabilization",
             local = %self.dht.did,
             redundancy = self.transport.storage_redundancy(),
-            "STABILIZATION repair_storage republish start"
+            "STABILIZATION repair_storage start"
         );
-        let action = self
+        drain_inbox(self.transport.clone(), &self.swarm_callback).await?;
+        let handoff = self.hand_off_action().await?;
+        let republish = self
             .dht
             .republish_local_entries(self.transport.storage_redundancy())
             .await?;
+        let action = PeerRingAction::MultiActions(vec![handoff, republish]);
         let (action_kind, action_count) = match &action {
             PeerRingAction::None => ("None", 0),
             PeerRingAction::Some(_) => ("Some", 1),

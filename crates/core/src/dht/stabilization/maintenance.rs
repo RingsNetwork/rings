@@ -274,8 +274,8 @@ impl Stabilizer {
 
     /// Run staggered maintenance until `stop` asks this loop to exit.
     ///
-    /// Repair requests are shared with disconnect handlers and survive missed
-    /// phase deadlines. Cooperative stop is observed between phases; the
+    /// Repair requests are shared with disconnect handlers and successor-head
+    /// changes and survive missed phase deadlines. Cooperative stop is observed between phases; the
     /// per-step deadline may still cancel a hung network maintenance future.
     pub async fn wait_with(self: Arc<Self>, interval: Duration, stop: StopToken) {
         let origin = Instant::now();

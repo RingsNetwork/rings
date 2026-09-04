@@ -17,6 +17,17 @@
 //! transitions over this state. Stabilize/notify/finger refinement are monotone
 //! over the finite known topology set; their least fixpoint is the converged
 //! Chord state plus a finger table derived from that topology.
+//!
+//! Head law: `head(s)` is the nearest successor other than `local`, the upper
+//! end of the local placement interval `(local, head]`.
+//! [`step`](crate::dht::topology::step) emits
+//! [`TopologyAction::SuccessorHeadChanged`](crate::dht::topology::TopologyAction::SuccessorHeadChanged)`(h)`
+//! iff `head(next) = Some(h)` and
+//! `head(state) ≠ Some(h)`, once per transition, after the event's own actions.
+//! Placement is a function of the ring state, not of the input that changed it,
+//! so every input that moves the head (join, admit, remove, update, stabilize)
+//! is reported through this one action and the shell schedules the placement
+//! repair from it.
 
 use std::collections::BTreeSet;
 
@@ -198,6 +209,8 @@ pub enum TopologyAction {
     QuerySuccessorList(Did),
     /// Notify this successor that `local` is its predecessor candidate.
     Notify(Did),
+    /// The successor head became this node (see the head law).
+    SuccessorHeadChanged(Did),
 }
 
 /// Result of applying one pure topology transition.
@@ -343,7 +356,6 @@ fn closest_preceding_finger(state: &TopologyState, target: &BigUint) -> Option<D
 
 /// `head(s)`: the nearest successor other than `local`, the upper end of the
 /// local placement interval `(local, head]`; `None` when the node stands alone.
-/// Placement is a function of this value alone, whichever input moved it.
 pub fn successor_head(state: &TopologyState) -> Option<Did> {
     state
         .successors
@@ -571,8 +583,22 @@ fn step_fix_finger(state: &TopologyState) -> TopologyStep {
 /// Apply one pure topology transition.
 ///
 /// Post: the returned state depends only on `state` and `event`; no locks,
-/// storage, clocks, randomness, or transport effects are read here.
+/// storage, clocks, randomness, or transport effects are read here. The head
+/// law holds: `SuccessorHeadChanged(h)` is the last action iff the head moved
+/// to `h`.
 pub fn step(state: &TopologyState, event: TopologyEvent, capacity: usize) -> TopologyStep {
+    let mut next = step_event(state, event, capacity);
+    if let Some(head) =
+        successor_head(&next.state).filter(|head| successor_head(state) != Some(*head))
+    {
+        next.actions
+            .push(TopologyAction::SuccessorHeadChanged(head));
+    }
+    next
+}
+
+/// The event's own transition, before the head law is applied.
+fn step_event(state: &TopologyState, event: TopologyEvent, capacity: usize) -> TopologyStep {
     match event {
         TopologyEvent::Join { peer } => step_join(state, peer, capacity),
         TopologyEvent::Admit {

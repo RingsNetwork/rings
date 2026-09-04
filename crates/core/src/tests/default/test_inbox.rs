@@ -2,9 +2,9 @@
 //! carrier by whichever node owns it, handed to the peer with its storage interval when the peer
 //! returns, delivered to the peer's application on stabilization, and compacted afterwards.
 //!
-//! The hand-off is the owner's stabilization placement invariant, so it holds however the owner
-//! learns of the returning peer: through its successor's notify report, or through a direct
-//! connection from the peer.
+//! The hand-off is the placement invariant of the owner's storage repair pass, so it holds however
+//! the owner learns of the returning peer: through its successor's notify report, or through a
+//! direct connection from the peer.
 
 use std::time::Instant;
 
@@ -14,6 +14,7 @@ use crate::dht::entry::inbox::inbox_key;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::Did;
+use crate::dht::STORAGE_REPAIR_FRESH_CONNECTION_GRACE_MS;
 use crate::ecc::tests::gen_ordered_keys;
 use crate::error::Error;
 use crate::error::Result;
@@ -31,6 +32,7 @@ use crate::tests::default::Node;
 use crate::tests::default::TEST_WAIT_POLL_INTERVAL;
 use crate::tests::default::TEST_WAIT_TIMEOUT;
 use crate::tests::manually_establish_connection;
+use crate::utils::get_epoch_ms_i64;
 
 const HELD_MESSAGE: &[u8] = b"held while offline";
 
@@ -105,6 +107,20 @@ async fn hold_message_for_offline_peer(node1: &Node, node3: &Node, offline: Did)
     Ok(())
 }
 
+/// Phase 2: the owner's storage repair pass hands the inbox carrier to the returned peer. The pass
+/// defers to a connection younger than the fresh-connection grace, so the connection is aged past
+/// it first; the acknowledgement then removes the owner's copy.
+async fn hand_off_inbox(owner: &Node, peer: &Node) -> Result<()> {
+    owner.swarm.transport.force_peer_connected_at(
+        peer.did(),
+        get_epoch_ms_i64() - STORAGE_REPAIR_FRESH_CONNECTION_GRACE_MS - 1,
+    )?;
+    owner.swarm.stabilizer()?.stabilize().await?;
+    let inbox = inbox_key(peer.did());
+    wait_for_storage_entry(peer, inbox).await?;
+    wait_for_storage_absence(owner, inbox).await
+}
+
 /// Phase 3: the returned peer's own stabilization round drains its inbox to the application and
 /// compacts the delivered message out of the carrier.
 async fn assert_inbox_drained(peer: &Node, sender: Did) -> Result<()> {
@@ -126,12 +142,11 @@ async fn test_message_to_offline_peer_is_held_and_delivered_on_return() -> Resul
     let node1 = prepare_node(key1).await;
     let node3 = prepare_node(key3).await;
     let offline: Did = key2.address().into();
-    let inbox = inbox_key(offline);
     hold_message_for_offline_peer(&node1, &node3, offline).await?;
 
     // The peer returns by joining through its successor node3. node2 notifies node3, node1's
     // next stabilization learns from node3 that node2 now precedes it and connects to it, and the
-    // admission moves node1's head to node2. The round after that hands over the inbox carrier,
+    // admission moves node1's head to node2. The repair pass then hands over the inbox carrier,
     // whose key lies in node2's interval `(node2, node3]`.
     let node2 = prepare_node(key2).await;
     manually_establish_connection(&node2.swarm, &node3.swarm).await;
@@ -143,9 +158,7 @@ async fn test_message_to_offline_peer_is_held_and_delivered_on_return() -> Resul
     node1.swarm.stabilizer()?.stabilize().await?;
     wait_for_msgs([&node1, &node2, &node3]).await;
     wait_for_successor(&node1, node2.did()).await?;
-    node1.swarm.stabilizer()?.stabilize().await?;
-    wait_for_storage_entry(&node2, inbox).await?;
-    wait_for_storage_absence(&node1, inbox).await?;
+    hand_off_inbox(&node1, &node2).await?;
 
     assert_inbox_drained(&node2, node1.did()).await
 }
@@ -156,19 +169,17 @@ async fn test_held_message_is_delivered_when_peer_returns_through_its_predecesso
     let node1 = prepare_node(key1).await;
     let node3 = prepare_node(key3).await;
     let offline: Did = key2.address().into();
-    let inbox = inbox_key(offline);
     hold_message_for_offline_peer(&node1, &node3, offline).await?;
 
     // The peer returns by connecting straight to node1, the inbox owner. No notify report is
-    // exchanged: the admission itself moves node1's head to node2, and node1's next round hands
-    // the inbox carrier over.
+    // exchanged: the admission itself moves node1's head to node2 and requests the repair pass
+    // that hands the inbox carrier over.
     let node2 = prepare_node(key2).await;
     manually_establish_connection(&node2.swarm, &node1.swarm).await;
     wait_for_msgs([&node1, &node2, &node3]).await;
     wait_for_successor(&node1, node2.did()).await?;
-    node1.swarm.stabilizer()?.stabilize().await?;
-    wait_for_storage_entry(&node2, inbox).await?;
-    wait_for_storage_absence(&node1, inbox).await?;
+    assert!(node1.swarm.transport.storage_repair_requested());
+    hand_off_inbox(&node1, &node2).await?;
 
     assert_inbox_drained(&node2, node1.did()).await
 }

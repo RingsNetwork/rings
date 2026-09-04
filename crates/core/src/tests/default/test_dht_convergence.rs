@@ -195,6 +195,14 @@ pub(super) mod spec {
         crate::dht::topology::stabilize_query(me, current, topo_predecessor)
     }
 
+    /// `Head(n)` — the nearest forward node of a successor list, the upper end of
+    /// the placement interval `(n, head]`.
+    pub fn head(me: Did, successors: &[Did]) -> Option<Did> {
+        crate::dht::topology::successors(successors, me, 1)
+            .first()
+            .copied()
+    }
+
     /// `CorrectStabilize` notify side effect: notify the new successor, if any.
     pub fn correct_stabilize_notify(me: Did, next_successors: &[Did]) -> Option<Did> {
         crate::dht::topology::stabilize_notify(me, next_successors)
@@ -344,6 +352,15 @@ fn assert_correct_stabilize_matches_spec(
         expected_actions.push(PeerRingAction::RemoteAction(
             notify,
             PeerRingRemoteAction::Notify(me),
+        ));
+    }
+    // Head law: a stabilize that moves the head requests the hand-off toward it.
+    if let Some(head) = spec::head(me, &expected_successors)
+        .filter(|head| spec::head(me, current_successors) != Some(*head))
+    {
+        expected_actions.push(PeerRingAction::RemoteAction(
+            head,
+            PeerRingRemoteAction::HandOffStorage,
         ));
     }
 

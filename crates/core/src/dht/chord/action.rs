@@ -45,6 +45,9 @@ pub enum RemoteAction {
     FindEntryForOperate(Box<PlacedEntryOperation>),
     /// Send a predecessor notification to the recipient.
     Notify(Did),
+    /// The recipient became the successor head: request a storage repair round, which offers it
+    /// every local entry placed beyond it as an ownership hand-off.
+    HandOffStorage,
     /// Copy placed entries to one storage sync destination.
     SyncEntriesWithSuccessor {
         /// Sync transition kind.
