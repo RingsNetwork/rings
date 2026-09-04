@@ -209,7 +209,7 @@ pub enum TopologyAction {
     QuerySuccessorList(Did),
     /// Notify this successor that `local` is its predecessor candidate.
     Notify(Did),
-    /// The successor head became this node (see the head law).
+    /// The successor head moved to this node (see the head law).
     SuccessorHeadChanged(Did),
 }
 

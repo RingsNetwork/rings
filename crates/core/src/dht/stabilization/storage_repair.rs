@@ -8,6 +8,7 @@ use crate::dht::Did;
 use crate::dht::PeerRingAction;
 use crate::dht::StorageSyncDelivery;
 use crate::error::Error;
+use crate::error::Error as CoreError;
 use crate::error::Result;
 use crate::message::handlers::inbox::drain_inbox;
 use crate::message::SyncEntriesWithSuccessor;
@@ -314,26 +315,27 @@ impl Stabilizer {
         }
     }
 
-    /// The live local entries beyond `(self, head]`, offered to the head as an ownership
-    /// hand-off; nothing when the node stands alone.
-    async fn hand_off_action(&self) -> Result<PeerRingAction> {
-        match self.dht.with_topology_state(topology::successor_head)? {
-            Some(head) => self.dht.sync_entries_with_successor(head).await,
-            None => Ok(PeerRingAction::None),
-        }
+    /// Deliver this node's own relay inbox to the application it currently serves and retire the
+    /// delivered elements (see `message::handlers::inbox`).
+    pub(super) async fn deliver_inbox(&self) -> Result<()> {
+        let callback = self
+            .callback
+            .read()
+            .map_err(|_| CoreError::CallbackSyncLockError)?
+            .clone();
+        drain_inbox(self.transport.clone(), callback).await
     }
 
     /// One bounded pass restoring the placement invariant of local storage.
     ///
     /// Invariant: every live local entry lies in `(self, head]` and at each of its affine
-    /// owners, and this node's own inbox has been delivered. The pass drains the inbox, offers
-    /// the entries beyond the head to the head (ownership hand-off, whose local cleanup is
-    /// ack-gated), and republishes local entries to missing affine owners (additive), then sends
-    /// the deliveries through one repair window. Placement is a function of the ring state, so
-    /// the pass is the same whichever input moved the head; a head change only requests it, and
-    /// the fresh-connection grace of the window outlives the peer's own admission of this node,
-    /// which a send at admission time would race. Repetition is idempotent: deliveries are joins
-    /// and every local removal is acknowledged first.
+    /// owners. The pass offers the entries beyond the head to the head (ownership hand-off,
+    /// whose local cleanup is ack-gated) and republishes local entries to missing affine owners
+    /// (additive), then sends the deliveries through one repair window. Placement is a function
+    /// of the ring state, so the pass is the same whichever input moved the head; a head change
+    /// only requests it, and the fresh-connection grace of the window outlives the peer's own
+    /// admission of this node, which a send at admission time would race. Repetition is
+    /// idempotent: deliveries are joins and every local removal is acknowledged first.
     pub async fn repair_storage(&self) -> Result<StorageRepairOutcome> {
         tracing::debug!(
             target: "rings_core::dht::stabilization",
@@ -341,28 +343,15 @@ impl Stabilizer {
             redundancy = self.transport.storage_redundancy(),
             "STABILIZATION repair_storage start"
         );
-        drain_inbox(self.transport.clone(), &self.swarm_callback).await?;
-        let handoff = self.hand_off_action().await?;
+        let handoff = match self.dht.with_topology_state(topology::successor_head)? {
+            Some(head) => self.dht.sync_entries_with_successor(head).await?,
+            None => PeerRingAction::None,
+        };
         let republish = self
             .dht
             .republish_local_entries(self.transport.storage_redundancy())
             .await?;
         let action = PeerRingAction::MultiActions(vec![handoff, republish]);
-        let (action_kind, action_count) = match &action {
-            PeerRingAction::None => ("None", 0),
-            PeerRingAction::Some(_) => ("Some", 1),
-            PeerRingAction::SomeEntry(_) => ("SomeEntry", 1),
-            PeerRingAction::EntryMisses(misses) => ("EntryMisses", misses.len()),
-            PeerRingAction::RemoteAction(_, _) => ("RemoteAction", 1),
-            PeerRingAction::MultiActions(actions) => ("MultiActions", actions.len()),
-        };
-        tracing::debug!(
-            target: "rings_core::dht::stabilization",
-            local = %self.dht.did,
-            action_kind,
-            action_count,
-            "STABILIZATION repair_storage republish action prepared"
-        );
         let outcome = self.handle_storage_repair_action(action).await?;
         tracing::debug!(
             target: "rings_core::dht::stabilization",
@@ -428,10 +417,10 @@ mod tests {
         );
 
         let selected = [
-            selected_destination(&swarm.stabilizer()?, &[1, 2, 3])?,
-            selected_destination(&swarm.stabilizer()?, &[2, 3])?,
-            selected_destination(&swarm.stabilizer()?, &[1, 2, 3])?,
-            selected_destination(&swarm.stabilizer()?, &[1, 2, 3])?,
+            selected_destination(&swarm.stabilizer(), &[1, 2, 3])?,
+            selected_destination(&swarm.stabilizer(), &[2, 3])?,
+            selected_destination(&swarm.stabilizer(), &[1, 2, 3])?,
+            selected_destination(&swarm.stabilizer(), &[1, 2, 3])?,
         ];
 
         assert_eq!(selected, [
@@ -455,7 +444,7 @@ mod tests {
             )
             .build(),
         );
-        let stabilizer = swarm.stabilizer()?;
+        let stabilizer = swarm.stabilizer();
 
         let selected = [
             selected_destination(&stabilizer, &[1, 2])?,

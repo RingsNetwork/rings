@@ -96,7 +96,7 @@ async fn test_leave_dht_defers_repair_until_maintenance_runs() -> Result<()> {
         None
     );
 
-    node.swarm.stabilizer()?.stabilize().await?;
+    node.swarm.stabilizer().stabilize().await?;
 
     assert!(!node.swarm.transport.storage_repair_requested());
     assert_eq!(

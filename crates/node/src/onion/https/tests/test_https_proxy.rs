@@ -191,7 +191,12 @@ fn test_pending_request_completes_only_from_expected_return_peer() {
         .begin_request(expected, exit_descriptor(&exit), return_id)
         .unwrap();
 
-    runtime.complete_payload(other, id, dummy_authenticated_payload(return_id, &exit));
+    runtime.complete_payload(
+        other,
+        id,
+        dummy_authenticated_payload(return_id, &exit),
+        TEST_NETWORK_ID,
+    );
     assert_eq!(runtime.pending_len(), 1);
     drop(pending_request);
 }
@@ -211,6 +216,7 @@ fn test_pending_request_rejects_payload_from_wrong_exit_session() {
         expected,
         id,
         dummy_authenticated_payload(return_id, &wrong_exit),
+        TEST_NETWORK_ID,
     );
 
     assert_eq!(runtime.pending_len(), 0);
@@ -240,7 +246,7 @@ fn test_pending_request_reports_authenticated_request_as_unexpected_backward_pay
     )
     .unwrap();
 
-    runtime.complete_payload(expected, id, payload);
+    runtime.complete_payload(expected, id, payload, TEST_NETWORK_ID);
 
     assert_eq!(runtime.pending_len(), 0);
     assert!(matches!(

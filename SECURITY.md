@@ -134,8 +134,16 @@ the receiver's clock by more than the message skew tolerance, so a forged versio
 dominate honest writes only for that tolerance and cannot pin a key beyond it.
 A relay inbox, the messages held for an offline peer, is retained longer than a data
 topic; that policy is safe because the storage owner verifies every inbox element
-itself (a signed application message addressed to the inbox's peer, verifiable inside
-the local overlay), so a peer cannot obtain the inbox policy by declaring the kind.
+itself: a `CustomMessage` addressed to the inbox's peer, wrapped and signed by the node
+that held it, verified inside the local overlay as of the hold instant, and admitted
+only from the node the owner itself routes that peer to. A removal is accepted only from
+the recipient, a relocation only as an ownership hand-off from the predecessor, and a
+relay carrier is never fetched, cached, replicated, or returned to a lookup by anyone
+but its recipient. A malicious holder is one identity in one ring position: it can hold
+junk for the peers it is responsible for (bounded to the newest 64 messages per inbox)
+or redeliver a message inside the sender's own proof lifetime, and every element names
+it by signature. Held messages are stored and relocated in the clear between owners, as
+every DHT value is; confidentiality is the application's E2E layer's.
 Native storage enforces its configured byte budget by retiring the least recently
 written values, and the fetched-entry cache is bounded by entry count. These bounds
 limit resource use by any single writer; they are not a Sybil defence, and an

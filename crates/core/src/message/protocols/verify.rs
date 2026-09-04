@@ -109,7 +109,7 @@ impl SigningDomain {
     /// Law (injectivity): `transcript(d, ts, ttl, m) = transcript(d', ts', ttl', m')` implies
     /// `(d, ts, ttl, m) = (d', ts', ttl', m')`, because every component before `m` has a fixed
     /// width or a length prefix.
-    fn transcript(self, data: &[u8], ts_ms: u128, ttl_ms: u64) -> Vec<u8> {
+    pub(crate) fn transcript(self, data: &[u8], ts_ms: u128, ttl_ms: u64) -> Vec<u8> {
         let tag = self.tag.as_bytes();
         let mut msg = Vec::with_capacity(1 + tag.len() + 4 + 16 + 8 + data.len());
 
@@ -174,7 +174,7 @@ where S: Borrow<SessionSk>
     }
 
     /// This authority owning a copy of its key: the form long-lived runtimes store.
-    pub fn to_owned(&self) -> MessageSigner<SessionSk> {
+    pub fn owned(&self) -> MessageSigner<SessionSk> {
         MessageSigner::new(self.session_sk().clone(), self.network_id)
     }
 
@@ -209,12 +209,23 @@ pub struct MessageVerification {
 }
 
 impl MessageVerification {
-    /// Verify the signature over `data` under the receiver's `domain`.
+    /// Verify the signature over `data` under the receiver's `domain`, with the signing session
+    /// judged as of now.
     pub fn verify(&self, domain: SigningDomain, data: &[u8]) -> bool {
+        self.verify_at(domain, data, get_epoch_ms())
+    }
+
+    /// Verify the signature over `data` under the receiver's `domain`, with the signing session
+    /// judged as of the instant `at_ms`.
+    ///
+    /// Post: `true` implies the session was authorized and live at `at_ms` and signed the
+    /// transcript of `(domain, data, ts_ms, ttl_ms)`. Proof liveness is not judged here; see
+    /// [`Self::is_live_at`].
+    pub fn verify_at(&self, domain: SigningDomain, data: &[u8], at_ms: u128) -> bool {
         let msg = domain.transcript(data, self.ts_ms, self.ttl_ms);
 
         self.session
-            .verify(&msg, &self.sig)
+            .verify_at(&msg, &self.sig, at_ms)
             .map_err(|e| {
                 tracing::warn!("MessageVerification verify failed: {:?}", e);
             })
@@ -266,31 +277,34 @@ pub trait MessageVerificationExt {
         self.verification().is_expired()
     }
 
-    /// Verifies that the signature was issued for this message family inside the overlay
-    /// `network_id`, regardless of whether its proof is still live.
+    /// Verifies the message as of the instant `at_ms`: its proof was live then, its session was
+    /// authorized and live then, and the signature was issued for this message family inside
+    /// the overlay `network_id`.
     ///
-    /// Use this only where the message's own lifetime is governed elsewhere (a relay inbox holds
-    /// a message past its proof lifetime and bounds it by retention); every transport path uses
-    /// [`Self::verify`].
-    fn verify_signature(&self, network_id: u32) -> bool {
+    /// Every transport path judges as of now through [`Self::verify`]; a relay inbox judges a
+    /// held message as of the instant its holder received it, so a sender's session expiring
+    /// afterwards does not retroactively unverify a message that was valid when held.
+    fn verify_at(&self, network_id: u32, at_ms: u128) -> bool {
+        if !self.verification().is_live_at(at_ms) {
+            tracing::warn!("message proof not live at the judged instant");
+            return false;
+        }
         let Ok(data) = self.verification_data() else {
             tracing::warn!("MessageVerificationExt verify get verification_data failed");
             return false;
         };
 
-        self.verification()
-            .verify(SigningDomain::new(Self::DOMAIN_TAG, network_id), &data)
+        self.verification().verify_at(
+            SigningDomain::new(Self::DOMAIN_TAG, network_id),
+            &data,
+            at_ms,
+        )
     }
 
     /// Verifies that the message is not expired and that the signature was issued for this
-    /// message family inside the overlay `network_id`.
+    /// message family inside the overlay `network_id`, as of now.
     fn verify(&self, network_id: u32) -> bool {
-        if self.is_expired() {
-            tracing::warn!("message expired");
-            return false;
-        }
-
-        self.verify_signature(network_id)
+        self.verify_at(network_id, get_epoch_ms())
     }
 
     /// Get signer did from verification.
@@ -459,7 +473,7 @@ mod tests {
     fn test_owned_and_borrowed_authorities_are_the_same_signer() -> Result<()> {
         let key = SecretKey::random();
         let session_sk = SessionSk::new_with_seckey(&key)?;
-        let owned = fixture_signer(&session_sk).to_owned();
+        let owned = fixture_signer(&session_sk).owned();
         let proof = owned.by_ref().sign(FIXTURE_TAG, b"data")?;
 
         assert_eq!(owned.network_id(), NETWORK_ID);

@@ -69,14 +69,20 @@ pub(crate) trait SignedDescriptor: Sized {
 
     fn descriptor_did(&self) -> Did;
     fn descriptor_public_key(&self) -> &VerificationPublicKey;
+    /// The overlay the body states.
+    fn descriptor_network_id(&self) -> u32;
     fn descriptor_signature(&self) -> &MessageVerification;
     fn descriptor_heartbeat_at_ms(&self) -> u128;
     fn descriptor_expires_at_ms(&self) -> u128;
     fn descriptor_signing_data(&self) -> Result<Vec<u8>>;
 
-    /// Verify the signature under the receiver's overlay `network_id` and the DID/public-key
-    /// binding of the signer.
+    /// Verify the signature under the receiver's overlay `network_id`, the DID/public-key
+    /// binding of the signer, and that the body states that same overlay, so a verified
+    /// descriptor's stated overlay is the overlay it was signed for.
     fn descriptor_verify_signature(&self, network_id: u32) -> bool {
+        if self.descriptor_network_id() != network_id {
+            return false;
+        }
         let did = self.descriptor_did();
         let public_key = self.descriptor_public_key();
         let signature = self.descriptor_signature();

@@ -3,6 +3,7 @@ use std::cell::Cell;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::RwLock;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -46,6 +47,26 @@ pub(crate) const fn inbound_peer_capacity_for_test() -> usize {
 }
 use inbound::InboundMailbox;
 use inbound::ReassemblyClock;
+
+/// The application the swarm currently delivers to, replaceable through `Swarm::set_callback`;
+/// every delivery resolves it at delivery time.
+pub type SwarmCallbackSlot = Arc<RwLock<SharedSwarmCallback>>;
+
+/// Deliver a payload addressed to this node that did not arrive over a connection (a message
+/// drained from this node's relay inbox) through the same pipeline an inbound frame takes:
+/// application validation under the inbound deadline, handler dispatch, then `on_inbound`
+/// under the inbound deadline.
+///
+/// Pre: `payload.transaction.destination == transport.dht.did` and the payload was verified by
+/// the caller (the inbox witness verifies it as of its hold instant).
+pub(crate) async fn deliver_local_payload(
+    transport: Arc<SwarmTransport>,
+    callback: SharedSwarmCallback,
+    payload: &MessagePayload,
+) -> crate::error::Result<()> {
+    let processor = InboundProcessor::new(transport, callback, ReassemblyClock::system());
+    inbound::deliver_local(&processor, payload).await
+}
 
 pub use crate::error::CallbackError;
 type TransportCallbackError = Box<dyn std::error::Error>;
@@ -191,6 +212,26 @@ pub struct InnerSwarmCallback {
 }
 
 impl InboundProcessor {
+    fn new(
+        transport: Arc<SwarmTransport>,
+        callback: SharedSwarmCallback,
+        reassembly_clock: ReassemblyClock,
+    ) -> Self {
+        let message_handler = MessageHandler::new(transport.clone(), callback.clone());
+        let reassembler = MessageReassembler::with_limits_and_budget(
+            transport.reassembly_limits(),
+            transport.reassembly_budget(),
+        );
+        Self {
+            transport,
+            message_handler,
+            callback,
+            reassembler: Arc::new(FuturesMutex::new(reassembler)),
+            reassembly_clock,
+            pending_attempt: Arc::new(Mutex::new(None)),
+        }
+    }
+
     fn pending_attempt(&self) -> Option<PendingConnectionAttempt> {
         *self
             .pending_attempt
@@ -245,19 +286,7 @@ impl InnerSwarmCallback {
         reassembly_clock: ReassemblyClock,
     ) -> Self {
         let inbound_capacity = transport.inbound_capacity();
-        let message_handler = MessageHandler::new(transport.clone(), callback.clone());
-        let reassembler = MessageReassembler::with_limits_and_budget(
-            transport.reassembly_limits(),
-            transport.reassembly_budget(),
-        );
-        let processor = InboundProcessor {
-            transport,
-            message_handler,
-            callback,
-            reassembler: Arc::new(FuturesMutex::new(reassembler)),
-            reassembly_clock: reassembly_clock.clone(),
-            pending_attempt: Arc::new(Mutex::new(None)),
-        };
+        let processor = InboundProcessor::new(transport, callback, reassembly_clock.clone());
         let inbound = InboundMailbox::spawn(processor.clone(), inbound_capacity, reassembly_clock);
         Self { processor, inbound }
     }

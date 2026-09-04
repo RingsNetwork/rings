@@ -1083,7 +1083,7 @@ async fn test_client_backward_payload_decryption_runs_in_shell_handler() {
     assert_eq!(
         authenticated
             .clone()
-            .into_verified_payload(return_id, &expected_exit)
+            .into_verified_payload(return_id, &expected_exit, TEST_NETWORK_ID)
             .expect("valid exit proof")
             .payload,
         expected

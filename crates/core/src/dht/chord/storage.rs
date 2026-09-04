@@ -3,7 +3,9 @@ use async_trait::async_trait;
 use super::PeerRing;
 use super::PeerRingAction;
 use super::RemoteAction;
+use crate::dht::entry::inbox::inbox_destination;
 use crate::dht::entry::Entry;
+use crate::dht::entry::EntryKind;
 use crate::dht::entry::EntryLookupEvidence;
 use crate::dht::entry::EntryLookupKey;
 use crate::dht::entry::EntryOperation;
@@ -87,13 +89,23 @@ impl PeerRing {
     /// mistaken for a peer clock running ahead.
     /// Post: the stored value is `local.operate(op)` normalized for storage, where `local` is
     /// the live stored value or the operation's default carrier.
+    /// Apply `op` to the carrier at `placement`, issued by `writer`.
+    ///
+    /// Pre: `writer` is the signer of the operation as the shell verified it (this node for a
+    /// local operation). Post: the delta passed admission and, for a relay inbox, the authority
+    /// law under this node's own routing view.
     pub(crate) async fn operate_storage_entry(
         &self,
         now_ms: u128,
         placement: Did,
         op: EntryOperation,
+        writer: Did,
     ) -> Result<()> {
         op.validate_admissible_at(now_ms, self.network_id())?;
+        if op.entry().kind == EntryKind::RelayMessage {
+            let responsible = self.inbox_hold_authority(inbox_destination(placement))?;
+            op.validate_inbox_authority(writer, responsible)?;
+        }
         let local = match self.live_storage_entry(placement, now_ms).await? {
             Some(local) => local,
             None => op.clone().gen_default_entry()?,
@@ -211,11 +223,17 @@ impl PeerRing {
         let now_ms = get_epoch_ms();
         let op = op.stamped(now_ms, self.did)?;
         let entry_key = op.did()?;
+        let kind = op.entry().kind;
+        // A relay inbox has one owner: it is never replicated.
+        let redundancy = match kind {
+            EntryKind::Data => redundancy,
+            EntryKind::RelayMessage => 1,
+        };
         let mut ret = vec![];
         for entry_key in entry_key.rotate_affine(redundancy)? {
-            let act = match self.find_storage_owner(entry_key) {
+            let act = match self.find_storage_owner_for(entry_key, kind) {
                 Ok(PeerRingAction::Some(_)) => {
-                    self.operate_storage_entry(now_ms, entry_key, op.clone())
+                    self.operate_storage_entry(now_ms, entry_key, op.clone(), self.did)
                         .await?;
                     Ok(PeerRingAction::None)
                 }
@@ -259,6 +277,9 @@ impl ChordStorageCache<PeerRingAction> for PeerRing {
     /// Pre: `entry` satisfies the same admission law as a replicated write, so a peer cannot
     /// pin a fetched value in the cache past the retention bound it could obtain in storage.
     async fn local_cache_put(&self, entry: Entry) -> Result<()> {
+        if entry.kind == EntryKind::RelayMessage {
+            return Err(Error::RelayInboxOperationNotAllowed);
+        }
         entry.validate_admissible_at(get_epoch_ms(), self.network_id())?;
         self.cache.put(&entry.did.to_string(), &entry).await
     }

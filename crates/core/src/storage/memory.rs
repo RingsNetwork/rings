@@ -33,8 +33,9 @@ impl<V> MemTable<V> {
         }
     }
 
-    /// Whether storing `key` would add a key that the bound must make room for.
-    fn bound_applies_to(&self, key: &str) -> Option<usize> {
+    /// The key budget storing `key` must first restore: the bound, when one is set and `key`
+    /// is new; a rewrite competes with no other key.
+    fn budget_to_restore_for(&self, key: &str) -> Option<usize> {
         let capacity = self.capacity?;
         (!self.slots.contains(key)).then_some(capacity.get() as usize)
     }
@@ -43,12 +44,9 @@ impl<V> MemTable<V> {
     ///
     /// Post: `slots.len() <= capacity` when a bound is set.
     fn put(&mut self, key: String, value: V) {
-        if let Some(capacity) = self.bound_applies_to(&key) {
-            while self.slots.len() >= capacity {
-                if self.slots.pop_oldest().is_none() {
-                    break;
-                }
-            }
+        if let Some(capacity) = self.budget_to_restore_for(&key) {
+            // `len >= capacity >= 1` guarantees an oldest key to retire.
+            while self.slots.len() >= capacity && self.slots.pop_oldest().is_some() {}
         }
         self.slots.insert(key, value);
     }
@@ -125,7 +123,7 @@ where V: Clone + Send + Sync
 
     async fn count(&self) -> Result<u32> {
         let count = self.read()?.slots.len();
-        u32::try_from(count).map_err(|_| Error::MessageSizeOverflow)
+        u32::try_from(count).map_err(|_| Error::StorageCountOverflow)
     }
 }
 

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use async_recursion::async_recursion;
 use async_trait::async_trait;
 
+use crate::dht::entry::inbox::inbox_destination;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::EntryOperation;
@@ -185,9 +186,10 @@ async fn operate_entry_at_placement(
     dht: &PeerRing,
     placement: Did,
     op: EntryOperation,
+    writer: Did,
 ) -> Result<()> {
     let now_ms = get_epoch_ms();
-    dht.operate_storage_entry(now_ms, placement, op.stamped(now_ms, dht.did)?)
+    dht.operate_storage_entry(now_ms, placement, op.stamped(now_ms, dht.did)?, writer)
         .await
 }
 
@@ -198,9 +200,18 @@ async fn handle_placed_entry_operation(
 ) -> Result<()> {
     msg.validate_placement(handler.transport.storage_redundancy())?;
 
-    match handler.dht.find_storage_owner(msg.placement)? {
+    match handler
+        .dht
+        .find_storage_owner_for(msg.placement, msg.op.entry().kind)?
+    {
         PeerRingAction::Some(_) => {
-            operate_entry_at_placement(&handler.dht, msg.placement, msg.op.clone()).await
+            operate_entry_at_placement(
+                &handler.dht,
+                msg.placement,
+                msg.op.clone(),
+                ctx.transaction.signer(),
+            )
+            .await
         }
         PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessor(_)) => {
             reset_storage_relay_destination(handler, ctx, next).await
@@ -238,11 +249,21 @@ async fn handle_storage_search_act(
 ) -> Result<()> {
     match act {
         PeerRingAction::SomeEntry(evidence) => {
+            // A relay inbox is readable by its recipient alone.
+            let data = match evidence.entry.kind {
+                EntryKind::Data => vec![evidence.entry],
+                EntryKind::RelayMessage
+                    if ctx.transaction.signer() == inbox_destination(evidence.entry.did) =>
+                {
+                    vec![evidence.entry]
+                }
+                EntryKind::RelayMessage => Vec::new(),
+            };
             handler
                 .run_effects([CoreEffect::send_report_message(
                     ctx,
                     Message::FoundEntry(FoundEntry {
-                        data: vec![evidence.entry],
+                        data,
                         misses: evidence.misses,
                         resource,
                         redundancy,
@@ -280,7 +301,7 @@ async fn handle_storage_search_act(
     }
 }
 
-async fn operate_storage_entry<const REDUNDANT: u16>(
+async fn operate_entry_under_redundancy<const REDUNDANT: u16>(
     swarm: &Swarm,
     operation: EntryOperation,
 ) -> Result<()> {
@@ -299,18 +320,6 @@ pub(crate) async fn operate_entry(
         .entry_operate_with_redundancy(operation, transport.storage_redundancy())
         .await?;
     handle_storage_store_act(transport, action).await
-}
-
-/// Fetch `entry_key` under the transport's configured redundancy: a local hit is copied into
-/// the cache, a miss queries the responsible owners.
-pub(crate) async fn fetch_entry(transport: Arc<SwarmTransport>, entry_key: Did) -> Result<()> {
-    let redundancy = transport.storage_redundancy();
-    transport.start_storage_lookup(entry_key, redundancy)?;
-    let act = transport
-        .dht
-        .entry_lookup_for_fetch(entry_key, redundancy)
-        .await?;
-    handle_storage_fetch_act(transport, entry_key, act, redundancy).await
 }
 
 fn next_hop_for_sync_entries(
@@ -368,32 +377,39 @@ impl<const REDUNDANT: u16> ChordStorageInterface<REDUNDANT> for Swarm {
     /// otherwise query the responsible remote node.
     async fn storage_fetch(&self, entry_key: Did) -> Result<()> {
         self.transport.ensure_storage_redundancy::<REDUNDANT>()?;
-        fetch_entry(self.transport.clone(), entry_key).await
+        let transport = self.transport.clone();
+        let redundancy = transport.storage_redundancy();
+        transport.start_storage_lookup(entry_key, redundancy)?;
+        let act = transport
+            .dht
+            .entry_lookup_for_fetch(entry_key, redundancy)
+            .await?;
+        handle_storage_fetch_act(transport, entry_key, act, redundancy).await
     }
 
     /// Store Entry, `TryInto<Entry>` is implemented for alot of types
     async fn storage_store(&self, entry: Entry) -> Result<()> {
-        operate_storage_entry::<REDUNDANT>(self, EntryOperation::Overwrite(entry)).await
+        operate_entry_under_redundancy::<REDUNDANT>(self, EntryOperation::Overwrite(entry)).await
     }
 
     async fn storage_append_data(&self, topic: &str, data: Encoded) -> Result<()> {
         let entry: Entry = (topic.to_string(), data).try_into()?;
-        operate_storage_entry::<REDUNDANT>(self, EntryOperation::Extend(entry)).await
+        operate_entry_under_redundancy::<REDUNDANT>(self, EntryOperation::Extend(entry)).await
     }
 
     async fn storage_touch_data(&self, topic: &str, data: Encoded) -> Result<()> {
         let entry: Entry = (topic.to_string(), data).try_into()?;
-        operate_storage_entry::<REDUNDANT>(self, EntryOperation::Touch(entry)).await
+        operate_entry_under_redundancy::<REDUNDANT>(self, EntryOperation::Touch(entry)).await
     }
 
     async fn storage_tombstone_data(&self, topic: &str, data: Encoded) -> Result<()> {
         let entry: Entry = (topic.to_string(), data).try_into()?;
-        operate_storage_entry::<REDUNDANT>(self, EntryOperation::Tombstone(entry)).await
+        operate_entry_under_redundancy::<REDUNDANT>(self, EntryOperation::Tombstone(entry)).await
     }
 
     async fn storage_compact_data(&self, topic: &str, removals: Vec<Encoded>) -> Result<()> {
         let entry = Entry::new(Entry::gen_did(topic)?, removals, EntryKind::Data);
-        operate_storage_entry::<REDUNDANT>(self, EntryOperation::CompactData(entry)).await
+        operate_entry_under_redundancy::<REDUNDANT>(self, EntryOperation::CompactData(entry)).await
     }
 }
 
@@ -466,7 +482,11 @@ impl HandleMsg<SyncEntriesWithSuccessor> for MessageHandler {
                 .await;
         }
 
-        let acks = self.transport.persist_storage_sync_entries(msg).await?;
+        let origin = ctx.relay.try_origin_sender()?;
+        let acks = self
+            .transport
+            .persist_storage_sync_entries(msg, origin)
+            .await?;
         if msg.purpose.permits_source_cleanup() {
             if let Err(e) =
                 report_synced_entries(self, ctx, msg.purpose, msg.destination, acks).await

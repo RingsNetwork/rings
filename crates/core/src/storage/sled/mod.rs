@@ -205,7 +205,7 @@ where V: Serialize + DeserializeOwned + Sync
 
     async fn put(&self, key: &str, value: &V) -> Result<()> {
         let data = rings_codec::serialize(&(key, value)).map_err(Error::CodecSerialize)?;
-        let required = u64::try_from(data.len()).map_err(|_| Error::MessageSizeOverflow)?;
+        let required = u64::try_from(data.len()).map_err(|_| Error::StorageCountOverflow)?;
         if required > self.capacity {
             return Err(Error::StorageValueExceedsCapacity {
                 required,
@@ -273,7 +273,7 @@ where V: Serialize + DeserializeOwned + Sync
 
     async fn count(&self) -> Result<u32> {
         let count = self.read_index()?.files.len();
-        u32::try_from(count).map_err(|_| Error::MessageSizeOverflow)
+        u32::try_from(count).map_err(|_| Error::StorageCountOverflow)
     }
 }
 

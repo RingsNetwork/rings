@@ -305,6 +305,10 @@ impl SignedDescriptor for OnlineNodeDescriptor {
         &self.public_key
     }
 
+    fn descriptor_network_id(&self) -> u32 {
+        self.network_id
+    }
+
     fn descriptor_signature(&self) -> &MessageVerification {
         &self.signature
     }

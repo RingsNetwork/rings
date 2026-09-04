@@ -9,7 +9,7 @@ use super::*;
 fn connect_and_hand_off(peer: Did, local: Did) -> PeerRingAction {
     PeerRingAction::MultiActions(vec![
         PeerRingAction::RemoteAction(peer, RemoteAction::FindSuccessorForConnect(local)),
-        PeerRingAction::RemoteAction(peer, RemoteAction::HandOffStorage),
+        PeerRingAction::StorageRepairDue,
     ])
 }
 

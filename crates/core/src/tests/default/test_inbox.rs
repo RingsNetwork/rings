@@ -8,10 +8,7 @@
 
 use std::time::Instant;
 
-use tokio::time::sleep;
-
 use crate::dht::entry::inbox::inbox_key;
-use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::Did;
 use crate::dht::STORAGE_REPAIR_FRESH_CONNECTION_GRACE_MS;
@@ -27,11 +24,12 @@ use crate::tests::default::wait_for_msgs;
 use crate::tests::default::wait_for_predecessor;
 use crate::tests::default::wait_for_storage_absence;
 use crate::tests::default::wait_for_storage_entry;
+use crate::tests::default::wait_for_storage_state;
 use crate::tests::default::wait_for_successor;
 use crate::tests::default::Node;
-use crate::tests::default::TEST_WAIT_POLL_INTERVAL;
 use crate::tests::default::TEST_WAIT_TIMEOUT;
 use crate::tests::manually_establish_connection;
+use crate::utils::get_epoch_ms;
 use crate::utils::get_epoch_ms_i64;
 
 const HELD_MESSAGE: &[u8] = b"held while offline";
@@ -65,23 +63,6 @@ async fn next_held_message(node: &Node) -> Result<MessagePayload> {
     }
 }
 
-async fn wait_for_inbox_compaction(node: &Node, key: Did) -> Result<Entry> {
-    let started = Instant::now();
-    loop {
-        if let Some(entry) = node.dht().storage.get(&key.to_string()).await? {
-            if entry.data.is_empty() {
-                return Ok(entry);
-            }
-        }
-        assert!(
-            started.elapsed() <= TEST_WAIT_TIMEOUT,
-            "inbox at {key} was not compacted within {TEST_WAIT_TIMEOUT:?}"
-        );
-        tokio::task::yield_now().await;
-        sleep(TEST_WAIT_POLL_INTERVAL).await;
-    }
-}
-
 /// Phase 1: node1 and node3 form the ring and a message to the absent `offline` is held.
 ///
 /// node1 routes the message to succ(offline) = node3, which is responsible for the offline
@@ -91,6 +72,10 @@ async fn hold_message_for_offline_peer(node1: &Node, node3: &Node, offline: Did)
     manually_establish_connection(&node1.swarm, &node3.swarm).await;
     wait_for_msgs([node1, node3]).await;
     wait_for_successor(node1, node3.did()).await?;
+    // node3 is responsible for `offline` only once it knows node1 as its predecessor.
+    node1.swarm.stabilizer().stabilize().await?;
+    wait_for_msgs([node1, node3]).await;
+    wait_for_predecessor(node3, node1.did()).await?;
 
     node1
         .swarm
@@ -100,39 +85,46 @@ async fn hold_message_for_offline_peer(node1: &Node, node3: &Node, offline: Did)
     let held = wait_for_storage_entry(node1, inbox_key(offline)).await?;
     assert_eq!(held.kind, EntryKind::RelayMessage);
     assert_eq!(held.data.len(), 1);
-    assert!(held
-        .deliverable_inbox_messages(node1.swarm.network_id())
-        .iter()
-        .all(is_held_message));
+    let drain = held.drain_inbox(get_epoch_ms(), node1.swarm.network_id());
+    assert_eq!(drain.rejected, 0);
+    assert!(drain.deliverable.iter().all(is_held_message));
     Ok(())
 }
 
-/// Phase 2: the owner's storage repair pass hands the inbox carrier to the returned peer. The pass
-/// defers to a connection younger than the fresh-connection grace, so the connection is aged past
-/// it first; the acknowledgement then removes the owner's copy.
+/// Phase 2: the owner's storage repair pass hands the inbox carrier to the returned peer. The
+/// peer accepts a relay carrier only from its predecessor, so the owner's notify must have
+/// reached it first; the pass defers to a connection younger than the fresh-connection grace, so
+/// the connection is aged past it; the acknowledgement then removes the owner's copy.
 async fn hand_off_inbox(owner: &Node, peer: &Node) -> Result<()> {
+    owner.swarm.stabilizer().stabilize().await?;
+    wait_for_predecessor(peer, owner.did()).await?;
     owner.swarm.transport.force_peer_connected_at(
         peer.did(),
         get_epoch_ms_i64() - STORAGE_REPAIR_FRESH_CONNECTION_GRACE_MS - 1,
     )?;
-    owner.swarm.stabilizer()?.stabilize().await?;
+    owner.swarm.stabilizer().stabilize().await?;
     let inbox = inbox_key(peer.did());
     wait_for_storage_entry(peer, inbox).await?;
     wait_for_storage_absence(owner, inbox).await
 }
 
 /// Phase 3: the returned peer's own stabilization round drains its inbox to the application and
-/// compacts the delivered message out of the carrier.
-async fn assert_inbox_drained(peer: &Node, sender: Did) -> Result<()> {
+/// retires the delivered message from the carrier by its dot.
+async fn drain_and_assert_delivered(peer: &Node, sender: Did) -> Result<()> {
     let inbox = inbox_key(peer.did());
-    peer.swarm.stabilizer()?.stabilize().await?;
+    peer.swarm.stabilizer().stabilize().await?;
 
     let delivered = next_held_message(peer).await?;
     assert_eq!(delivered.transaction.destination, peer.did());
     assert_eq!(delivered.transaction.signer(), sender);
 
-    let compacted = wait_for_inbox_compaction(peer, inbox).await?;
-    assert!(compacted.crdt.register.is_some());
+    let retired = wait_for_storage_state(peer, inbox, "drained", |stored| {
+        stored.is_some_and(|entry| entry.data.is_empty())
+    })
+    .await?
+    .ok_or_else(|| Error::InvalidMessage("drained inbox vanished".to_string()))?;
+    assert!(retired.crdt.register.is_none());
+    assert!(!retired.crdt.tombstones.is_empty());
     Ok(())
 }
 
@@ -152,15 +144,15 @@ async fn test_message_to_offline_peer_is_held_and_delivered_on_return() -> Resul
     manually_establish_connection(&node2.swarm, &node3.swarm).await;
     wait_for_msgs([&node1, &node2, &node3]).await;
     wait_for_successor(&node2, node3.did()).await?;
-    node2.swarm.stabilizer()?.stabilize().await?;
+    node2.swarm.stabilizer().stabilize().await?;
     wait_for_msgs([&node1, &node2, &node3]).await;
     wait_for_predecessor(&node3, node2.did()).await?;
-    node1.swarm.stabilizer()?.stabilize().await?;
+    node1.swarm.stabilizer().stabilize().await?;
     wait_for_msgs([&node1, &node2, &node3]).await;
     wait_for_successor(&node1, node2.did()).await?;
     hand_off_inbox(&node1, &node2).await?;
 
-    assert_inbox_drained(&node2, node1.did()).await
+    drain_and_assert_delivered(&node2, node1.did()).await
 }
 
 #[tokio::test]
@@ -181,5 +173,5 @@ async fn test_held_message_is_delivered_when_peer_returns_through_its_predecesso
     assert!(node1.swarm.transport.storage_repair_requested());
     hand_off_inbox(&node1, &node2).await?;
 
-    assert_inbox_drained(&node2, node1.did()).await
+    drain_and_assert_delivered(&node2, node1.did()).await
 }

@@ -148,13 +148,47 @@ pub enum Error {
     #[error("Relay inbox element is not addressed to the peer the inbox is kept for")]
     RelayMessageNotAddressedToInbox,
 
-    /// Relay inbox element does not carry an application message
-    #[error("Relay inbox element does not carry an application message")]
-    RelayMessageNotApplication,
+    /// Relay inbox element does not carry a custom message
+    #[error("Relay inbox element does not carry a custom message")]
+    RelayMessageNotCustom,
 
-    /// Relay inbox element signatures do not verify inside this overlay
-    #[error("Relay inbox element signatures do not verify inside this overlay")]
+    /// Relay inbox element holder signature does not verify inside this overlay
+    #[error("Relay inbox element holder signature does not verify inside this overlay")]
     RelayMessageUnverifiable,
+
+    /// Relay inbox element was held ahead of the receiver's clock
+    #[error("Relay inbox element was held ahead of the receiver's clock")]
+    RelayMessageHeldAheadOfClock,
+
+    /// Relay inbox element payload does not verify as of its hold instant
+    #[error("Relay inbox element payload does not verify as of its hold instant")]
+    RelayMessageHeldOutsideSenderProof,
+
+    /// Relay inbox element was not held by the node responsible for its destination
+    #[error("Relay inbox element was not held by the node responsible for its destination")]
+    RelayMessageHolderNotResponsible,
+
+    /// Relay inbox carrier must not carry a reset floor
+    #[error("Relay inbox carrier must not carry a reset floor")]
+    RelayInboxRegisterNotAllowed,
+
+    /// Relay inbox operation is not a hold or a removal
+    #[error("Relay inbox operation is not a hold or a removal")]
+    RelayInboxOperationNotAllowed,
+
+    /// Relay inbox removal was not issued by the inbox's recipient
+    #[error("Relay inbox removal was not issued by the inbox's recipient")]
+    RelayInboxWriterNotRecipient,
+
+    /// Relay inbox carrier may only be relocated by an ownership hand-off from the predecessor
+    #[error(
+        "Relay inbox carrier may only be relocated by an ownership hand-off from the predecessor"
+    )]
+    RelayInboxNotRelocatable,
+
+    /// A storage count or record length does not fit its interface width
+    #[error("A storage count or record length does not fit its interface width")]
+    StorageCountOverflow,
 
     /// A storage lock was poisoned by a panicking holder
     #[error("A storage lock was poisoned by a panicking holder")]

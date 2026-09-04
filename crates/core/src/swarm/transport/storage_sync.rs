@@ -4,6 +4,8 @@ use std::mem;
 use super::delivery::SendCompletionOutcome;
 use super::outbound::OutboundCompletion;
 use super::SwarmTransport;
+use crate::dht::entry::inbox::validate_inbox_relocation;
+use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
 use crate::dht::Did;
@@ -135,6 +137,9 @@ pub(crate) struct StorageSyncBatch<'data> {
     /// Admission time shared by validation and persistence, so a value admitted in the
     /// validate phase cannot expire between phases and fail the batch half-written.
     now_ms: u128,
+    /// The peer that sent the batch, for the relocation law of relay inboxes.
+    origin: Did,
+    purpose: StorageSyncPurpose,
     destination: StorageSyncDestination,
     data: &'data [PlacedEntry],
     validate_index: usize,
@@ -144,9 +149,11 @@ pub(crate) struct StorageSyncBatch<'data> {
 }
 
 impl<'data> StorageSyncBatch<'data> {
-    pub(crate) fn new(msg: &'data SyncEntriesWithSuccessor) -> Self {
+    pub(crate) fn new(msg: &'data SyncEntriesWithSuccessor, origin: Did) -> Self {
         Self {
             now_ms: get_epoch_ms(),
+            origin,
+            purpose: msg.purpose,
             destination: msg.destination,
             data: &msg.data,
             validate_index: 0,
@@ -241,11 +248,21 @@ impl<'data> StorageSyncBatch<'data> {
         // The admission law is re-checked by `join_storage_entry` at persist
         // time; it is evaluated here so that a failing entry rejects the batch
         // before any earlier entry has been written.
-        if should_persist_synced_entry(transport, self.destination, placed.key)? {
+        if should_persist_synced_entry(transport, self.destination, placed)? {
             placed.validate_placement(transport.storage_redundancy())?;
             placed
                 .entry
                 .validate_admissible_at(self.now_ms, transport.network_id)?;
+            if placed.entry.kind == EntryKind::RelayMessage {
+                // A relay inbox moves only with its ownership, from the predecessor.
+                if self.purpose != StorageSyncPurpose::OwnershipHandoff {
+                    return Err(Error::RelayInboxNotRelocatable);
+                }
+                let predecessor = transport
+                    .dht
+                    .with_topology_state(|state| state.predecessor)?;
+                validate_inbox_relocation(self.origin, predecessor)?;
+            }
             let entry = placed.entry.clone().try_into_storage_entry()?;
             self.accepted.push(SyncedEntryAck::new(placed.key, entry));
         }
@@ -307,13 +324,16 @@ fn test_per_entry_yield_ablation_reaches_real_storage_batch_policy() {
 fn should_persist_synced_entry(
     transport: &SwarmTransport,
     destination: StorageSyncDestination,
-    placement: Did,
+    placed: &PlacedEntry,
 ) -> Result<bool> {
-    if !storage_sync_destination_accepts_placement(destination, placement) {
+    if !storage_sync_destination_accepts_placement(destination, placed.key) {
         return Ok(false);
     }
 
-    match transport.dht.find_storage_owner(placement)? {
+    match transport
+        .dht
+        .find_storage_owner_for(placed.key, placed.entry.kind)?
+    {
         // Invariant: `Some(_)` is the local-storage branch. In non-virtual
         // Chord storage the DID carried by `Some` is the successor witness used
         // for fallback lookup, not a remote-owner denial.
@@ -345,8 +365,9 @@ impl SwarmTransport {
     pub(crate) async fn persist_storage_sync_entries(
         &self,
         msg: &SyncEntriesWithSuccessor,
+        origin: Did,
     ) -> Result<Vec<SyncedEntryAck>> {
-        StorageSyncBatch::new(msg).run(self).await
+        StorageSyncBatch::new(msg, origin).run(self).await
     }
 
     /// Record the exact ack capability created by an outbound storage-sync payload.
@@ -460,7 +481,8 @@ impl SwarmTransport {
             .next_hop_for_storage_sync(msg.destination)?
             .filter(|next_hop| *next_hop != self.dht.did)
         else {
-            self.persist_storage_sync_entries(&msg).await?;
+            self.persist_storage_sync_entries(&msg, self.dht.did)
+                .await?;
             return Ok(StorageSyncCompletion::PersistedLocally);
         };
         let payload = MessagePayload::new_send(

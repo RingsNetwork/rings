@@ -295,10 +295,10 @@ fn test_aead_context_binds_direction_and_circuit_id() {
     let authenticated = decrypt_client_payload(&client, &backward).expect("decrypt backward");
     assert!(authenticated
         .clone()
-        .into_verified_payload(return_id, route.exit())
+        .into_verified_payload(return_id, route.exit(), TEST_NETWORK_ID)
         .is_ok());
     assert!(authenticated
-        .into_verified_payload(wrong_return_id, route.exit())
+        .into_verified_payload(wrong_return_id, route.exit(), TEST_NETWORK_ID)
         .is_err());
     assert!(decrypt_forward_layer(&client, wrong_circuit_id, &backward).is_err());
 }
@@ -321,7 +321,7 @@ fn test_backward_payload_authentication_rejects_wrong_exit_signer() {
     let authenticated = decrypt_client_payload(&client, &sealed).expect("decrypt forged payload");
 
     assert!(matches!(
-        authenticated.into_verified_payload(return_id, route.exit()),
+        authenticated.into_verified_payload(return_id, route.exit(), TEST_NETWORK_ID),
         Err(crate::error::Error::OnionRouteError(_))
     ));
 }

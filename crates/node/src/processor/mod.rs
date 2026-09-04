@@ -438,13 +438,7 @@ impl Processor {
     /// browser IndexedDB request futures while their JavaScript callbacks are
     /// still pending.
     pub async fn listen_with(&self, stop: StopToken) {
-        let stabilizer = match self.swarm.stabilizer() {
-            Ok(stabilizer) => Arc::new(stabilizer),
-            Err(error) => {
-                tracing::error!(error = ?error, "cannot start stabilization: swarm callback unavailable");
-                return;
-            }
-        };
+        let stabilizer = Arc::new(self.swarm.stabilizer());
         if self.registration_tasks.is_empty() {
             stabilizer.wait_with(self.stabilize_interval, stop).await;
         } else {

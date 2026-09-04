@@ -323,7 +323,7 @@ impl Stabilizer {
                         MaintenanceTask::Repair,
                         now_ms,
                     );
-                    if let Some(outcome) = self.run_requested_storage_repair().await {
+                    if let Some(outcome) = self.run_requested_storage_maintenance().await {
                         schedule
                             .complete_repair(monotonic_elapsed_ms(&origin), outcome.is_complete());
                     }
@@ -339,22 +339,33 @@ impl Stabilizer {
         }
     }
 
-    pub(crate) async fn run_requested_storage_repair(&self) -> Option<StorageRepairOutcome> {
+    /// Run the storage maintenance phase if one was requested: deliver this node's own inbox,
+    /// then restore placement (ownership hand-off and additive republish).
+    pub(crate) async fn run_requested_storage_maintenance(&self) -> Option<StorageRepairOutcome> {
         if !self.transport.claim_storage_repair() {
             return None;
         }
+        Some(
+            self.maintain_storage_with_step_timeout(STABILIZATION_STEP_TIMEOUT)
+                .await,
+        )
+    }
+
+    /// The storage maintenance phase as two steps; an incomplete repair re-requests the phase.
+    pub(super) async fn maintain_storage_with_step_timeout(
+        &self,
+        timeout: Duration,
+    ) -> StorageRepairOutcome {
+        self.run_step("deliver_inbox", timeout, self.deliver_inbox())
+            .await;
         let outcome = self
-            .run_step(
-                "repair_storage",
-                STABILIZATION_STEP_TIMEOUT,
-                self.repair_storage(),
-            )
+            .run_step("repair_storage", timeout, self.repair_storage())
             .await
             .unwrap_or(StorageRepairOutcome::Deferred);
         if !outcome.is_complete() {
             self.transport.request_storage_repair();
         }
-        Some(outcome)
+        outcome
     }
 }
 

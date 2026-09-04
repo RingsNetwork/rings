@@ -39,7 +39,7 @@ async fn test_repair_pass_hands_off_entries_beyond_a_directly_connected_head() -
     let stored_entry = entry.clone().try_into_storage_entry()?;
     assert!(matches!(
         node1.dht().find_storage_owner(entry.did)?,
-        PeerRingAction::Some(_)
+        PeerRingAction::Some(witness) if witness == node3.did()
     ));
 
     // node2 connects straight to node1. Admission moves node1's head to node2, so the key now
@@ -58,8 +58,8 @@ async fn test_repair_pass_hands_off_entries_beyond_a_directly_connected_head() -
     assert_eq!(
         node1
             .swarm
-            .stabilizer()?
-            .run_requested_storage_repair()
+            .stabilizer()
+            .run_requested_storage_maintenance()
             .await,
         Some(StorageRepairOutcome::Complete)
     );

@@ -281,8 +281,10 @@ impl OnionHttpsRuntime {
         from: Did,
         id: OnionCircuitId,
         payload: OnionAuthenticatedPayload,
+        network_id: u32,
     ) {
-        let Some((pending, payload)) = self.take_pending_payload(from, id, payload) else {
+        let Some((pending, payload)) = self.take_pending_payload(from, id, payload, network_id)
+        else {
             return;
         };
         match decode_https_payload(payload) {
@@ -318,6 +320,7 @@ impl OnionHttpsRuntime {
         from: Did,
         id: OnionCircuitId,
         payload: OnionAuthenticatedPayload,
+        network_id: u32,
     ) -> Option<(PendingRequest, OnionCircuitPayload)> {
         let mut pending = self.pending.lock().ok()?;
         let request = pending.remove(&id)?;
@@ -325,7 +328,7 @@ impl OnionHttpsRuntime {
             pending.insert(id, request);
             return None;
         }
-        match payload.into_verified_payload(request.return_id, &request.expected_exit) {
+        match payload.into_verified_payload(request.return_id, &request.expected_exit, network_id) {
             Ok(verified) => Some((request, verified.payload)),
             Err(error) => {
                 let _ = request.sender.send(Err(error));
@@ -553,7 +556,8 @@ impl OnionCircuitHandler for BrowserOnionCircuitHandler {
         circuit_id: OnionCircuitId,
         payload: OnionAuthenticatedPayload,
     ) -> Result<()> {
-        self.https.complete_payload(from, circuit_id, payload);
+        self.https
+            .complete_payload(from, circuit_id, payload, self.signer.network_id());
         Ok(())
     }
 }

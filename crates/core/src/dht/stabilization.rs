@@ -30,7 +30,7 @@ use crate::message::NotifyPredecessorSend;
 use crate::message::PayloadSender;
 use crate::message::PeerLivenessProbe;
 use crate::message::QueryForTopoInfoSend;
-use crate::swarm::callback::SharedSwarmCallback;
+use crate::swarm::callback::SwarmCallbackSlot;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::transport::TransportReadiness;
@@ -179,18 +179,18 @@ where F: Future<Output = Result<T>> {
 pub struct Stabilizer {
     transport: Arc<SwarmTransport>,
     dht: Arc<PeerRing>,
-    /// The application the drained relay inbox is delivered to.
-    swarm_callback: SharedSwarmCallback,
+    /// The application the drained relay inbox is delivered to, resolved at delivery time.
+    callback: SwarmCallbackSlot,
 }
 
 impl Stabilizer {
-    /// Create a new stabilization runner delivering drained inbox messages to `swarm_callback`.
-    pub fn new(transport: Arc<SwarmTransport>, swarm_callback: SharedSwarmCallback) -> Self {
+    /// Create a new stabilization runner delivering drained inbox messages to `callback`.
+    pub fn new(transport: Arc<SwarmTransport>, callback: SwarmCallbackSlot) -> Self {
         let dht = transport.dht.clone();
         Self {
             transport,
             dht,
-            swarm_callback,
+            callback,
         }
     }
 
@@ -203,12 +203,7 @@ impl Stabilizer {
     pub(crate) async fn stabilize_with_step_timeout(&self, timeout: Duration) -> Result<()> {
         self.stabilize_topology_with_step_timeout(timeout).await;
         self.transport.claim_storage_repair();
-        let repair_outcome = self
-            .run_step("repair_storage", timeout, self.repair_storage())
-            .await;
-        if !matches!(repair_outcome, Some(StorageRepairOutcome::Complete)) {
-            self.transport.request_storage_repair();
-        }
+        self.maintain_storage_with_step_timeout(timeout).await;
         Ok(())
     }
 

@@ -76,15 +76,9 @@ async fn wait_for_ring_convergence(nodes: &[&crate::swarm::Swarm]) {
 
 async fn run_stabilization_round(nodes: &[&crate::swarm::Swarm; 3]) {
     let [first_node, second_node, third_node] = *nodes;
-    let first = first_node
-        .stabilizer()
-        .expect("swarm callback lock must be healthy");
-    let second = second_node
-        .stabilizer()
-        .expect("swarm callback lock must be healthy");
-    let third = third_node
-        .stabilizer()
-        .expect("swarm callback lock must be healthy");
+    let first = first_node.stabilizer();
+    let second = second_node.stabilizer();
+    let third = third_node.stabilizer();
     let (first, second, third) =
         futures::join!(first.stabilize(), second.stabilize(), third.stabilize(),);
     first.unwrap();
@@ -293,10 +287,7 @@ fn start_browser_maintenance(
 ) -> Vec<futures::channel::oneshot::Receiver<()>> {
     let mut completions = Vec::new();
     for node in nodes {
-        let stabilizer = Arc::new(
-            node.stabilizer()
-                .expect("swarm callback lock must be healthy"),
-        );
+        let stabilizer = Arc::new(node.stabilizer());
         let token = stop.token();
         let (completed, completion) = futures::channel::oneshot::channel();
         wasm_bindgen_futures::spawn_local(async move {

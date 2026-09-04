@@ -354,14 +354,11 @@ fn assert_correct_stabilize_matches_spec(
             PeerRingRemoteAction::Notify(me),
         ));
     }
-    // Head law: a stabilize that moves the head requests the hand-off toward it.
-    if let Some(head) = spec::head(me, &expected_successors)
-        .filter(|head| spec::head(me, current_successors) != Some(*head))
+    // Head law: a stabilize that moves the head makes a storage repair round due.
+    if spec::head(me, &expected_successors)
+        .is_some_and(|head| spec::head(me, current_successors) != Some(head))
     {
-        expected_actions.push(PeerRingAction::RemoteAction(
-            head,
-            PeerRingRemoteAction::HandOffStorage,
-        ));
+        expected_actions.push(PeerRingAction::StorageRepairDue);
     }
 
     assert_eq!(

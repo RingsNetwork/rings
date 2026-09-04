@@ -186,7 +186,7 @@ impl OutboundTransfer {
         Self::new(
             route,
             FrameSource::Chunked {
-                signer: signer.to_owned(),
+                signer: signer.owned(),
                 chunks,
             },
             useful_bytes,

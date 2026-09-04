@@ -21,7 +21,10 @@ pub const MAX_RELAY_INBOX_TTL_MS: u64 = DEFAULT_RELAY_INBOX_TTL_MS * 7;
 pub const TS_OFFSET_TOLERANCE_MS: u128 = 3000;
 /// Maximum number of fetched entries the local DHT cache retains before evicting the
 /// least recently written one.
-pub const LOCAL_CACHE_CAPACITY: NonZeroU32 = NonZeroU32::MIN.saturating_add(1023);
+pub const LOCAL_CACHE_CAPACITY: NonZeroU32 = match NonZeroU32::new(1024) {
+    Some(capacity) => capacity,
+    None => unreachable!(),
+};
 /// Default session time-to-live in milliseconds.
 pub const DEFAULT_SESSION_TTL_MS: u64 = 30 * 24 * 3600 * 1000;
 /// 60k
@@ -46,10 +49,20 @@ pub const MAX_CHUNK_ENVELOPE_OVERHEAD: usize = 4096;
 /// message into a huge number of near-empty chunks. This bounds the chunk count for any payload:
 /// at most `TRANSPORT_MAX_SIZE / MIN_CHUNK_DATA` chunks.
 pub const MIN_CHUNK_DATA: usize = 1024;
-/// Maximum number of encoded payloads kept in a single DHT storage entry.
+/// Maximum number of encoded payloads kept in a data topic.
 pub const ENTRY_DATA_MAX_LEN: usize = 1024;
+/// Maximum number of held messages kept in a relay inbox.
+pub const RELAY_INBOX_MAX_LEN: usize = 64;
 /// Maximum encoded bytes of one payload element in a DHT storage entry.
 ///
 /// The bound is per element so that filtering by it is a lattice morphism; with
 /// [`ENTRY_DATA_MAX_LEN`] it bounds every carrier at `ENTRY_DATA_MAX_LEN * ENTRY_PAYLOAD_MAX_BYTES`.
-pub const ENTRY_PAYLOAD_MAX_BYTES: usize = 64 * 1024;
+pub const ENTRY_PAYLOAD_MAX_BYTES: usize = 32 * 1024;
+/// Carrier law: a full carrier must still be one transport message, since a hand-off, a
+/// republish, and a lookup answer each carry a whole carrier. Elements are already in their
+/// wire encoding; the carrier's wire form adds only codec framing, dots, and the message
+/// envelope, for which a quarter of [`TRANSPORT_MAX_SIZE`] is reserved.
+const _: () = assert!(
+    ENTRY_DATA_MAX_LEN * ENTRY_PAYLOAD_MAX_BYTES <= TRANSPORT_MAX_SIZE / 4 * 3,
+    "a full carrier must fit one transport message with room for its envelope"
+);

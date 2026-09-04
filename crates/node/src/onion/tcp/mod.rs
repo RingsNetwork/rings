@@ -788,7 +788,8 @@ impl OnionTcpRuntime {
                 stream.return_id,
             )
         };
-        let verified = payload.into_verified_payload(return_id, &expected_exit)?;
+        let verified =
+            payload.into_verified_payload(return_id, &expected_exit, self.signer.network_id())?;
         if !verified.payload.is_service(&service) {
             return Err(Error::OnionRouteError(
                 OnionRouteError::PayloadServiceMismatch {

@@ -8,6 +8,7 @@ use serde::Serialize;
 
 use crate::algebra::JoinSemilattice;
 use crate::consts::ENTRY_DATA_MAX_LEN;
+use crate::consts::RELAY_INBOX_MAX_LEN;
 use crate::dht::Did;
 use crate::ecc::HashStr;
 use crate::error::Error;
@@ -16,7 +17,7 @@ use crate::message::Encoded;
 use crate::message::Encoder;
 
 mod crdt;
-pub mod inbox;
+pub(crate) mod inbox;
 mod retention;
 
 pub use crdt::DataTopicBuffer;
@@ -30,9 +31,30 @@ pub use crdt::RelayMessageSet;
 pub enum EntryKind {
     /// Encoded data stored in DHT
     Data,
-    /// A relayed but unreached message, which should be stored on
-    /// the successor of the destination Did.
+    /// A relay inbox: messages held for an offline peer (see the `inbox` module).
     RelayMessage,
+}
+
+impl EntryKind {
+    /// The greatest number of visible elements a carrier of this kind keeps; when the cap binds,
+    /// the oldest elements are the ones dropped.
+    pub const fn max_data_len(self) -> usize {
+        match self {
+            EntryKind::Data => ENTRY_DATA_MAX_LEN,
+            EntryKind::RelayMessage => RELAY_INBOX_MAX_LEN,
+        }
+    }
+
+    /// The greatest number of tombstones a carrier of this kind keeps. A data topic keeps every
+    /// tombstone below its reset floor's pruning; a relay inbox has one owner and one
+    /// ack-gated relocation at a time, so a stale copy can only be transient and the newest
+    /// [`RELAY_INBOX_MAX_LEN`] removals suffice to shadow it.
+    pub const fn max_tombstones(self) -> Option<usize> {
+        match self {
+            EntryKind::Data => None,
+            EntryKind::RelayMessage => Some(RELAY_INBOX_MAX_LEN),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -323,7 +345,7 @@ impl EntryOperation {
     /// routing hop.
     ///
     /// Post: every carried entry has `expires_at_ms = Some(_)`; an absent bound becomes
-    /// `now_ms + DEFAULT_TTL_MS`.
+    /// `now_ms + kind.default_lifetime_ms()`.
     pub fn stamped(self, now_ms: u128, actor: Did) -> Result<Self> {
         let witness = self.witness();
         self.try_map_entry(|entry| {
@@ -561,9 +583,12 @@ impl Entry {
                 .cmp(right_dot)
                 .then_with(|| left_value.cmp(right_value))
         });
-        let skip_count = visible.len().saturating_sub(ENTRY_DATA_MAX_LEN);
+        let skip_count = visible.len().saturating_sub(kind.max_data_len());
         let visible = visible.into_iter().skip(skip_count).collect::<Vec<_>>();
         let (data, dots): (Vec<_>, Vec<_>) = visible.into_iter().unzip();
+        let tombstone_skip = kind
+            .max_tombstones()
+            .map_or(0, |cap| tombstones.len().saturating_sub(cap));
 
         Self {
             did,
@@ -572,7 +597,7 @@ impl Entry {
             crdt: EntryCrdt {
                 register,
                 dots,
-                tombstones: tombstones.into_iter().collect(),
+                tombstones: tombstones.into_iter().skip(tombstone_skip).collect(),
             },
             expires_at_ms,
         }
@@ -729,7 +754,7 @@ impl Entry {
     ///
     /// Post: normalization uses the same carrier materialization as
     /// [`Self::join`]; there is no second cap strategy outside the CRDT.
-    /// Post: `result.data.len() <= ENTRY_DATA_MAX_LEN`; when the cap binds, the oldest payloads
+    /// Post: `result.data.len() <= kind.max_data_len()`; when the cap binds, the oldest payloads
     /// are the ones dropped.
     /// Post: `result.data.len() == result.crdt.dots.len()` for Data and
     /// RelayMessage entries.
@@ -845,15 +870,17 @@ impl Entry {
         }
     }
 
-    /// Compact a carrier using the receiver's current visible payloads.
+    /// Compact a data topic using the receiver's current visible payloads.
     ///
-    /// Pre: `removals` names the same carrier as `self`.
+    /// Pre: `removals` names the same data topic as `self`; a relay inbox is never compacted
+    /// by a reset floor, its removals are per-dot tombstones issued by its recipient.
     /// Post: every current visible payload not listed in `removals` is preserved
     /// under the greatest observed register floor, and older tombstone metadata
-    /// is pruned by that floor. For a relay inbox this is how the recipient
-    /// retires the messages it has delivered without leaving their tombstones
-    /// behind.
+    /// is pruned by that floor.
     pub fn compact_data(&self, now_ms: u128, removals: Self, actor: Did) -> Result<Self> {
+        if !self.is_data_entry() {
+            return Err(Error::RelayInboxOperationNotAllowed);
+        }
         let removals =
             removals.ensure_overwrite_stamp_after(now_ms, actor, self.max_observed_version())?;
         self.validate_same_carrier(&removals)?;
@@ -862,16 +889,8 @@ impl Entry {
             Error::InvalidMessage("compact data operation has no register floor".to_string())
         })?;
         let removal_values = removals.data.into_iter().collect::<BTreeSet<_>>();
-        let (register, values, removes) = match self.kind {
-            EntryKind::Data => {
-                let buffer = self.topic_buffer()?;
-                (buffer.register, buffer.values, buffer.removes)
-            }
-            EntryKind::RelayMessage => {
-                let set = self.relay_set()?;
-                (set.adds.register, set.adds.values, set.removes)
-            }
-        };
+        let buffer = self.topic_buffer()?;
+        let (register, values, removes) = (buffer.register, buffer.values, buffer.removes);
         let output_floor = Self::compact_data_output_floor(register, floor);
         let elements = Self::compact_data_elements(
             floor,

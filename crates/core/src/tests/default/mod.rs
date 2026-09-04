@@ -299,38 +299,44 @@ pub async fn wait_for_predecessor(node: &Node, predecessor: Did) -> crate::error
     .await
 }
 
-/// Wait until `node` no longer stores a value at `entry`.
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-pub async fn wait_for_storage_absence(node: &Node, entry: Did) -> crate::error::Result<()> {
+/// Wait until the value `node` stores at `key` (or its absence) satisfies `ready`, returning
+/// that value.
+///
+/// Post: returns only after `ready` held; the timeout is a failure deadline, never the event.
+pub async fn wait_for_storage_state(
+    node: &Node,
+    key: Did,
+    label: &str,
+    ready: impl Fn(Option<&Entry>) -> bool,
+) -> crate::error::Result<Option<Entry>> {
     let started = Instant::now();
     loop {
-        if node.dht().storage.get(&entry.to_string()).await?.is_none() {
-            return Ok(());
+        let stored = node.dht().storage.get(&key.to_string()).await?;
+        if ready(stored.as_ref()) {
+            return Ok(stored);
         }
 
         assert!(
             started.elapsed() <= TEST_WAIT_TIMEOUT,
-            "storage entry was not removed within {TEST_WAIT_TIMEOUT:?}: {entry}"
+            "storage at {key} did not reach the state within {TEST_WAIT_TIMEOUT:?}: {label}"
         );
         tokio::task::yield_now().await;
         sleep(TEST_WAIT_POLL_INTERVAL).await;
     }
 }
 
-pub async fn wait_for_storage_entry(node: &Node, entry: Did) -> crate::error::Result<Entry> {
-    let started = Instant::now();
-    loop {
-        if let Some(entry) = node.dht().storage.get(&entry.to_string()).await? {
-            return Ok(entry);
-        }
+/// Wait until `node` no longer stores a value at `key`.
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+pub async fn wait_for_storage_absence(node: &Node, key: Did) -> crate::error::Result<()> {
+    wait_for_storage_state(node, key, "absent", |stored| stored.is_none())
+        .await
+        .map(drop)
+}
 
-        assert!(
-            started.elapsed() <= TEST_WAIT_TIMEOUT,
-            "storage entry did not appear within {TEST_WAIT_TIMEOUT:?}: {entry}"
-        );
-        tokio::task::yield_now().await;
-        sleep(TEST_WAIT_POLL_INTERVAL).await;
-    }
+pub async fn wait_for_storage_entry(node: &Node, key: Did) -> crate::error::Result<Entry> {
+    wait_for_storage_state(node, key, "present", |stored| stored.is_some())
+        .await?
+        .ok_or_else(|| crate::error::Error::InvalidMessage(format!("no entry at {key}")))
 }
 
 pub fn gen_pure_dht(did: Did) -> PeerRing {

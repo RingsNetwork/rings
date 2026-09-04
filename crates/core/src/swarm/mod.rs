@@ -9,7 +9,6 @@ pub(crate) mod transport;
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
-use std::sync::RwLock;
 
 pub use builder::SwarmBuilder;
 
@@ -31,6 +30,7 @@ use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
 use crate::message::PayloadSender;
 use crate::swarm::callback::SharedSwarmCallback;
+use crate::swarm::callback::SwarmCallbackSlot;
 use crate::swarm::transport::SwarmTransport;
 
 /// The transport and dht management.
@@ -39,7 +39,7 @@ pub struct Swarm {
     pub(crate) dht: Arc<PeerRing>,
     /// Swarm transport.
     pub(crate) transport: Arc<SwarmTransport>,
-    callback: RwLock<SharedSwarmCallback>,
+    callback: SwarmCallbackSlot,
 }
 
 impl Swarm {
@@ -113,9 +113,9 @@ impl Swarm {
         Ok(())
     }
 
-    /// Create [Stabilizer] for swarm.
-    pub fn stabilizer(&self) -> Result<Stabilizer> {
-        Ok(Stabilizer::new(self.transport.clone(), self.callback()?))
+    /// Create [Stabilizer] for swarm; it delivers to whichever callback is set when it delivers.
+    pub fn stabilizer(&self) -> Stabilizer {
+        Stabilizer::new(self.transport.clone(), self.callback.clone())
     }
 
     /// Disconnect a connection. There are three steps:

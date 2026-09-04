@@ -446,12 +446,13 @@ impl OnionAuthenticatedPayload {
     /// signer account DID equals descriptor DID, signer account public key equals descriptor public
     /// key, and signer session DID equals the descriptor session encryption key DID. The signed
     /// transcript also binds the client/exit return id, per-frame nonce, exit session public key,
-    /// and payload, and its signing domain binds the overlay the exit descriptor was published
-    /// for.
+    /// and payload, and its signing domain binds the receiver's overlay `network_id`, never a
+    /// value carried by the exit.
     pub fn into_verified_payload(
         self,
         return_id: OnionReturnId,
         expected_exit: &OnionExitDescriptor,
+        network_id: u32,
     ) -> Result<OnionVerifiedPayload> {
         if self.return_id != return_id {
             return Err(Error::OnionRouteError(
@@ -484,8 +485,7 @@ impl OnionAuthenticatedPayload {
             expected_exit.session_public_key,
             &self.payload,
         )?;
-        let domain =
-            SigningDomain::new(ONION_BACKWARD_PAYLOAD_DOMAIN_TAG, expected_exit.network_id);
+        let domain = SigningDomain::new(ONION_BACKWARD_PAYLOAD_DOMAIN_TAG, network_id);
         if !self.authentication.verify_unexpired(domain, &data) {
             return Err(Error::OnionRouteError(
                 OnionRouteError::InvalidBackwardSignature,

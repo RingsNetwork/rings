@@ -154,7 +154,7 @@ async fn test_delivery_timeout_marks_generation_terminal_before_releasing_fifo_l
     assert_eq!(dummy_controlled::sent_count(), 1);
     timeout(
         Duration::from_secs(2),
-        node1.swarm.stabilizer()?.clean_unavailable_connections(),
+        node1.swarm.stabilizer().clean_unavailable_connections(),
     )
     .await
     .map_err(|_| invalid_test_state("terminal generation cleanup stayed pending"))??;

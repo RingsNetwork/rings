@@ -341,9 +341,7 @@ pub(crate) fn lower_dht_action<'payload>(
         PeerRingAction::RemoteAction(peer, PeerRingRemoteAction::TryConnect) => {
             Ok(Some(CoreEffect::connect_dht_peer(*peer)))
         }
-        PeerRingAction::RemoteAction(_, PeerRingRemoteAction::HandOffStorage) => {
-            Ok(Some(CoreEffect::request_storage_repair()))
-        }
+        PeerRingAction::StorageRepairDue => Ok(Some(CoreEffect::request_storage_repair())),
         PeerRingAction::RemoteAction(target, PeerRingRemoteAction::Notify(predecessor)) => {
             let (target, predecessor) = (*target, *predecessor);
             Ok(if target == predecessor {
@@ -592,11 +590,10 @@ mod tests {
     }
 
     #[test]
-    fn test_dht_hand_off_storage_lowers_to_a_repair_request() -> Result<()> {
-        let effect = single_effect(lower_dht_action(
-            &PeerRingAction::RemoteAction(did(), PeerRingRemoteAction::HandOffStorage),
-            |_| false,
-        ))?;
+    fn test_storage_repair_due_lowers_to_a_repair_request() -> Result<()> {
+        let effect = single_effect(lower_dht_action(&PeerRingAction::StorageRepairDue, |_| {
+            false
+        }))?;
 
         match effect {
             CoreEffect::RequestStorageRepair => Ok(()),

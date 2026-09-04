@@ -687,7 +687,6 @@ async fn run_empty_repair_maintenance(nodes: &[Node], driver: &mut TraceDriver) 
     for node in nodes {
         node.swarm
             .stabilizer()
-            .expect("swarm callback lock must be healthy")
             .clean_unavailable_connections()
             .await
             .expect("pre-storm topology maintenance must succeed");
@@ -697,8 +696,7 @@ async fn run_empty_repair_maintenance(nodes: &[Node], driver: &mut TraceDriver) 
         let outcome = node
             .swarm
             .stabilizer()
-            .expect("swarm callback lock must be healthy")
-            .run_requested_storage_repair()
+            .run_requested_storage_maintenance()
             .await
             .expect("claimed empty repair request must run");
         let model_outcome = match outcome {
@@ -722,7 +720,6 @@ async fn begin_liveness_under_storm(
     for node in nodes {
         node.swarm
             .stabilizer()
-            .expect("swarm callback lock must be healthy")
             .probe_peer_liveness_for_simulation()
             .await
             .expect("real liveness probe pass must succeed");
@@ -771,7 +768,6 @@ async fn conclude_healthy_liveness(
     for node in nodes {
         node.swarm
             .stabilizer()
-            .expect("swarm callback lock must be healthy")
             .clean_unavailable_connections()
             .await
             .expect("real healthy liveness verdict must succeed");

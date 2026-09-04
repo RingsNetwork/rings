@@ -117,7 +117,7 @@ async fn test_persist_synced_entries_returns_acks_for_owned_entries() -> Result<
     let acks = receiver
         .swarm
         .transport
-        .persist_storage_sync_entries(&sync_msg)
+        .persist_storage_sync_entries(&sync_msg, Did::from(1u32))
         .await?;
 
     assert_eq!(acks, vec![SyncedEntryAck::new(

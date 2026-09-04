@@ -27,24 +27,36 @@
   applied to the peer-supplied delta, never to the receiver's join result.
 - `Entry::operate`, `overwrite`, `extend`, `touch`, `compact_data`, and `EntryOperation::stamped`
   take the operation-boundary time explicitly; the clock is read only at the storage boundary.
-  `Entry::extend` and `compact_data` now apply to relay inboxes as well as data topics, and
-  `Swarm::stabilizer` returns a `Result` because the stabilizer delivers drained inbox messages
-  through the swarm callback.
+  `Entry::extend` applies to relay inboxes as well as data topics; `compact_data` stays a data
+  topic operation. `Session::verify_at`, `MessageVerification::verify_at`, and
+  `MessageVerificationExt::verify_at` judge a signature as of a given instant; the
+  liveness-free `verify_signature` is gone. `MessageSigner::to_owned` is `owned`.
+  `ENTRY_PAYLOAD_MAX_BYTES` is 32 KiB so a full carrier fits one transport message (checked at
+  compile time). The stabilizer resolves the swarm callback at delivery time, so
+  `Swarm::set_callback` after `listen` is honoured by inbox delivery.
 
 ### Added
 
-- Relay inbox for offline peers. An application message that reaches the node responsible for its
-  destination's ring position while the destination is not connected is held in the inbox carrier
-  `destination + 1` (`EntryKind::RelayMessage`). Storage admits an inbox element only under a
-  witness the owner verifies itself: it decodes as a signed `MessagePayload` addressed to the
-  inbox's peer, carries an application message, and both signatures verify inside the local
-  overlay regardless of proof liveness. Inboxes are retained for `DEFAULT_RELAY_INBOX_TTL_MS`
-  (24 h) after the last held message, up to `MAX_RELAY_INBOX_TTL_MS` (7 d). When the peer returns
-  its inbox key falls into its own storage interval and is handed over by ownership sync; every
-  storage repair pass the peer drains its local inbox to the application (`on_validate`, then
-  `on_inbound`) and compacts the delivered messages out of the carrier, so the floor also prunes
-  their tombstones. `MessageVerificationExt::verify_signature` verifies a signature without its
-  liveness check for this purpose.
+- Relay inbox for offline peers. A `CustomMessage` that reaches the node responsible for its
+  destination's ring position while the destination has no connection is *held*: wrapped in a
+  `HeldMessage` under the holder's signature (domain
+  `rings-core:relay-inbox:held-message:v1`, timestamp = hold instant) and written into the inbox
+  carrier `destination + 1` (`EntryKind::RelayMessage`), which is placed by the ring geometry in
+  every storage mode. Storage admits an inbox element only under a witness the owner verifies
+  itself: it is a held `CustomMessage` addressed to the inbox's peer, held no later than the
+  receiver's clock, whose holder signature verifies inside the local overlay and whose payload
+  verifies *as of the hold instant* (`MessageVerificationExt::verify_at`; a sender's session
+  expiring later does not unverify a held message, and a holder can hold only inside the sender's
+  proof lifetime). Authority is checked at the write: a hold only from the node the owner routes
+  the destination to, a removal only from the recipient, a relocation only as an ownership
+  hand-off from the predecessor; a relay carrier is never fetched, cached, replicated, or read by
+  anyone but its recipient. Removal is per element by its add dot (never a reset floor), the
+  carrier keeps at most `RELAY_INBOX_MAX_LEN` (64) newest messages, and inboxes are retained for
+  `DEFAULT_RELAY_INBOX_TTL_MS` (24 h) after the last hold, up to `MAX_RELAY_INBOX_TTL_MS` (7 d).
+  When the peer returns its inbox key falls into its own storage interval and the predecessor's
+  repair pass hands it over; every storage maintenance pass the peer drains its local inbox
+  through the inbound pipeline (application validation, dispatch, `on_inbound`, each under the
+  inbound deadline) and tombstones the drained elements. Delivery is at least once.
 
 ### Fixed
 
@@ -62,6 +74,11 @@
   system operation succeeded, and the budget is restored on open.
 - The local fetched-entry cache is bounded at `LOCAL_CACHE_CAPACITY` entries, evicting the least
   recently written entry.
+- A node that has successors but no known predecessor is no longer responsible for the whole
+  ring: it forwards messages instead of holding them, and its responsibility interval is
+  `(predecessor, self]` exactly.
+- Node descriptors verify only when the body states the receiver's overlay, and onion backward
+  payloads are verified under the receiver's overlay rather than the overlay stated by the exit.
 
 ## 0.20.2
 

@@ -12,6 +12,8 @@ use crate::consts::TRANSPORT_CUSTOM_OVERHEAD;
 use crate::dht::chord::PeerRing;
 use crate::dht::chord::PeerRingAction;
 use crate::dht::did::BiasId;
+use crate::dht::entry::Entry;
+use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
 use crate::dht::ChordStorageSync;
@@ -117,45 +119,19 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
     /// `Entry`s that are no longer between current node and `new_successor`,
     /// and copy them to the new successor.
     async fn sync_entries_with_successor(&self, new_successor: Did) -> Result<PeerRingAction> {
-        if self.storage_virtual_nodes_enabled()? {
-            return self.copy_entries_to_observed_virtual_storage_owners().await;
-        }
-
-        let mut data = Vec::<PlacedEntry>::new();
         let all_items = self.live_storage_entries(get_epoch_ms()).await?;
-
-        // Pre: new_successor is the current successor head, whichever input
-        // moved it. The storage repair pass runs this, so a delivery deferred
-        // or lost before the head admitted this node is offered again.
-        // Post S1: forall key in local_before, local_after[key] =
-        // local_before[key]; this transition emits join deliveries only.
-        // Post S2(copy): every emitted PlacedEntry keeps the exact local
-        // placement key, so an eventual ack names the key whose durable copy was
-        // reported by the receiver.
-        // Preservation #611/#614: sync hand-off is join-before-ack-before-local
-        // cleanup. acknowledge_synced_entries is the only value-dependent local
-        // cleanup transition and does not define storage convergence; retention
-        // expiry retires values independently of their content.
-        for (entry_key_str, entry) in all_items {
-            let entry_key = Did::from_str(&entry_key_str)?;
-            if BiasId::cmp_from_observer(self.did, entry_key, new_successor)
-                == std::cmp::Ordering::Greater
-            {
-                data.push(PlacedEntry::new(entry_key, entry));
-            }
-        }
-
-        let batches = sync_entries_batches(data, SYNC_BATCH_MAX_BYTES)?;
-        Ok(batches
+        // Relay inboxes are placed by the ring geometry in every storage mode
+        // (see the `inbox` module); data topics follow the configured mode.
+        let (relay, data): (Vec<_>, Vec<_>) = all_items
             .into_iter()
-            .map(|batch| {
-                PeerRingAction::sync_entries_for_handoff(
-                    StorageSyncDestination::PhysicalOwner(new_successor),
-                    batch,
-                )
-            })
-            .collect::<Vec<_>>()
-            .into())
+            .partition(|(_, entry)| entry.kind == EntryKind::RelayMessage);
+        let mut actions = vec![self.hand_off_beyond_successor(new_successor, relay)?];
+        actions.push(if self.storage_virtual_nodes_enabled()? {
+            self.copy_entries_to_observed_virtual_storage_owners(data)?
+        } else {
+            self.hand_off_beyond_successor(new_successor, data)?
+        });
+        Ok(actions.into())
     }
 
     async fn acknowledge_synced_entries(&self, acks: &[SyncedEntryAck]) -> Result<PeerRingAction> {
@@ -184,8 +160,53 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
 }
 
 impl PeerRing {
-    async fn copy_entries_to_observed_virtual_storage_owners(&self) -> Result<PeerRingAction> {
-        let all_items = self.live_storage_entries(get_epoch_ms()).await?;
+    /// Offer every item placed beyond `(self, new_successor]` to `new_successor` as an
+    /// ownership hand-off.
+    ///
+    /// Pre: new_successor is the current successor head, whichever input
+    /// moved it. The storage repair pass runs this, so a delivery deferred
+    /// or lost before the head admitted this node is offered again.
+    /// Post S1: forall key in local_before, local_after[key] =
+    /// local_before[key]; this transition emits join deliveries only.
+    /// Post S2(copy): every emitted PlacedEntry keeps the exact local
+    /// placement key, so an eventual ack names the key whose durable copy was
+    /// reported by the receiver.
+    /// Preservation #611/#614: sync hand-off is join-before-ack-before-local
+    /// cleanup. acknowledge_synced_entries is the only value-dependent local
+    /// cleanup transition and does not define storage convergence; retention
+    /// expiry retires values independently of their content.
+    fn hand_off_beyond_successor(
+        &self,
+        new_successor: Did,
+        items: Vec<(String, Entry)>,
+    ) -> Result<PeerRingAction> {
+        let mut data = Vec::<PlacedEntry>::new();
+        for (entry_key_str, entry) in items {
+            let entry_key = Did::from_str(&entry_key_str)?;
+            if BiasId::cmp_from_observer(self.did, entry_key, new_successor)
+                == std::cmp::Ordering::Greater
+            {
+                data.push(PlacedEntry::new(entry_key, entry));
+            }
+        }
+
+        let batches = sync_entries_batches(data, SYNC_BATCH_MAX_BYTES)?;
+        Ok(batches
+            .into_iter()
+            .map(|batch| {
+                PeerRingAction::sync_entries_for_handoff(
+                    StorageSyncDestination::PhysicalOwner(new_successor),
+                    batch,
+                )
+            })
+            .collect::<Vec<_>>()
+            .into())
+    }
+
+    fn copy_entries_to_observed_virtual_storage_owners(
+        &self,
+        all_items: Vec<(String, Entry)>,
+    ) -> Result<PeerRingAction> {
         let mut by_target =
             std::collections::BTreeMap::<StorageSyncDestination, Vec<PlacedEntry>>::new();
 

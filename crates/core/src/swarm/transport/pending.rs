@@ -392,6 +392,16 @@ impl SwarmTransport {
         Ok(self.peer_lifecycles()?.active_attempt(peer))
     }
 
+    /// Whether any connection attempt toward `peer` exists, admitted or still handshaking.
+    ///
+    /// Post: `false` means `peer` is unreachable from this node right now and nothing is under
+    /// way to change that; a message for it cannot be handed to a connection.
+    pub(crate) fn has_connection_attempt(&self, peer: Did) -> Result<bool> {
+        let lifecycles = self.peer_lifecycles()?;
+        Ok(lifecycles.active_attempt(peer).is_some()
+            || lifecycles.unadmitted_attempt(peer).is_some())
+    }
+
     #[cfg(all(test, feature = "dummy"))]
     pub(crate) fn is_pending_connection_attempt(
         &self,

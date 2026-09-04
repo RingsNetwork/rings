@@ -455,8 +455,8 @@ pub(super) async fn wait_for_mutual_dht_topology(
             return Ok(());
         }
 
-        let stabilizer = processor.swarm.stabilizer()?;
-        let other_stabilizer = other.swarm.stabilizer()?;
+        let stabilizer = processor.swarm.stabilizer();
+        let other_stabilizer = other.swarm.stabilizer();
         futures::try_join!(stabilizer.stabilize(), other_stabilizer.stabilize(),)
             .map_err(Error::CoreError)?;
         let remaining = deadline

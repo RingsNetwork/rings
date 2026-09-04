@@ -10,7 +10,7 @@
 //! losslessly to/from a real `PeerRing` (proven below), making real chord ops
 //! usable from a hashable model state. The models then use the `spec` operators
 //! (proven equal to production in `test_dht_convergence`) directly, which is far
-//! cheaper for the checker to expand than a `DashMap`-backed `PeerRing` per step.
+//! cheaper for the checker to expand than a storage-backed `PeerRing` per step.
 //!
 //! Both stages are deliberately scoped (see each stage's SCOPE note); they test
 //! sub-behaviours/abstractions, not a faithful model of the full 6-node regime.
@@ -162,7 +162,7 @@ impl ChordNode {
 
     /// The predecessor update — a direct reimplementation of `PeerRing::notify`
     /// (predecessor becomes the candidate closer *behind* `me`), used instead of
-    /// a throwaway `PeerRing` (which allocates a `DashMap`) so the checker can
+    /// a throwaway `PeerRing` (which allocates its storage) so the checker can
     /// expand states cheaply. It is NOT assumed equivalent: the test
     /// `test_apply_notify_matches_peer_ring` checks it against the real
     /// `PeerRing::notify` across representative states, so it remains a faithful

@@ -227,7 +227,7 @@ async fn test_storage_sync_batch_persists_one_entry_per_step_after_validation() 
             PlacedEntry::new(second_key, second),
         ],
     };
-    let mut batch = StorageSyncBatch::new(&msg);
+    let mut batch = StorageSyncBatch::new(&msg, Did::from(1u32));
 
     assert!(matches!(
         batch.step(&node.swarm.transport).await?,

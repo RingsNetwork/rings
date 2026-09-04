@@ -13,6 +13,7 @@ use serde::Serialize;
 use super::chord::PeerRing;
 use super::chord::PeerRingAction;
 use super::chord::RemoteAction;
+use super::entry::EntryKind;
 use super::entry::PlacedEntry;
 use super::topology;
 use super::topology::FindSuccessorStep;
@@ -315,6 +316,20 @@ impl PeerRing {
         owners.extend(state.predecessor);
         owners.extend(state.fingers.iter().flatten().copied());
         StorageVirtualNodes::from_owners(self.storage_virtual_node_config(), owners)
+    }
+
+    /// The owner of `placement_key` for a carrier of `kind`: a relay inbox is placed by the ring
+    /// geometry alone, so that its owner can attest who is responsible for its recipient (see
+    /// the `inbox` module); a data topic follows the configured storage mode.
+    pub(crate) fn find_storage_owner_for(
+        &self,
+        placement_key: Did,
+        kind: EntryKind,
+    ) -> Result<PeerRingAction> {
+        match kind {
+            EntryKind::Data => self.find_storage_owner(placement_key),
+            EntryKind::RelayMessage => self.find_successor(placement_key),
+        }
     }
 
     pub(crate) fn find_storage_owner(&self, placement_key: Did) -> Result<PeerRingAction> {

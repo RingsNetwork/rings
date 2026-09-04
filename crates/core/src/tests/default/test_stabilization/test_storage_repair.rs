@@ -48,7 +48,7 @@ async fn test_stabilize_republishes_local_entries_to_missing_affine_owners() -> 
         .put(&placement_keys[0].to_string(), &entry)
         .await?;
 
-    node.swarm.stabilizer()?.stabilize().await?;
+    node.swarm.stabilizer().stabilize().await?;
 
     assert_eq!(
         node.dht()
@@ -112,9 +112,9 @@ async fn test_continuous_storage_repair_reaches_remote_owners_across_three_nodes
     let stop = StopSource::new();
     let maintenance_interval = Duration::from_millis(500);
     let maintenance = [
-        node1.swarm.stabilizer()?,
-        node2.swarm.stabilizer()?,
-        node3.swarm.stabilizer()?,
+        node1.swarm.stabilizer(),
+        node2.swarm.stabilizer(),
+        node3.swarm.stabilizer(),
     ]
     .map(|stabilizer| {
         let token = stop.token();
@@ -221,7 +221,7 @@ async fn test_native_wait_with_repairs_storage_before_connection_retirement() ->
     let maintenance = {
         let token = stop.token();
         tokio::spawn(
-            Arc::new(node1.swarm.stabilizer()?).wait_with(Duration::from_millis(500), token),
+            Arc::new(node1.swarm.stabilizer()).wait_with(Duration::from_millis(500), token),
         )
     };
     let repair_pressure = {
@@ -321,7 +321,7 @@ async fn test_repair_storage_defers_sync_to_fresh_next_hop() -> Result<()> {
         .await?;
 
     assert_eq!(
-        node1.swarm.stabilizer()?.repair_storage().await?,
+        node1.swarm.stabilizer().repair_storage().await?,
         StorageRepairOutcome::Deferred
     );
 
@@ -372,7 +372,7 @@ async fn test_repair_storage_defers_disconnected_open_transport_without_sending(
     let _pending_wait = PendingDataChannelWaitGuard::new();
     let outcome = timeout(
         Duration::from_millis(200),
-        node1.swarm.stabilizer()?.repair_storage(),
+        node1.swarm.stabilizer().repair_storage(),
     )
     .await
     .map_err(|_| Error::PromiseStateTimeout)??;
@@ -427,7 +427,7 @@ async fn test_repair_storage_backpressure_defers_without_degrading_or_removing_p
 
     let _pending_send = PendingSendGuard::new();
     assert_eq!(
-        node1.swarm.stabilizer()?.repair_storage().await?,
+        node1.swarm.stabilizer().repair_storage().await?,
         StorageRepairOutcome::Deferred
     );
 
@@ -450,8 +450,8 @@ async fn test_repair_storage_backpressure_defers_without_degrading_or_removing_p
     assert_eq!(
         node1
             .swarm
-            .stabilizer()?
-            .run_requested_storage_repair()
+            .stabilizer()
+            .run_requested_storage_maintenance()
             .await,
         Some(StorageRepairOutcome::Deferred)
     );
@@ -462,7 +462,7 @@ async fn test_repair_storage_backpressure_defers_without_degrading_or_removing_p
 
     node1
         .swarm
-        .stabilizer()?
+        .stabilizer()
         .clean_unavailable_connections()
         .await?;
 

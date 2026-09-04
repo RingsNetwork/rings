@@ -225,14 +225,29 @@ impl PeerRing {
     }
 
     /// Whether this node is the Chord successor of the position `did`, i.e.
-    /// `did ∈ (predecessor, self]`; with no known predecessor the node is responsible for the
-    /// whole ring. A message addressed to an unconnected `did` in this interval has reached the
-    /// node that must hold it.
+    /// `did ∈ (predecessor, self]`. With no known predecessor the node is responsible only when
+    /// it stands alone: a node that has successors but has not yet learned its predecessor is
+    /// merely uninformed, not responsible for the whole ring. A message addressed to an
+    /// unreachable `did` in this interval has reached the node that must hold it.
     pub(crate) fn is_responsible_for(&self, did: Did) -> Result<bool> {
         let state = self.topology_state()?;
-        Ok(state.predecessor.is_none_or(|predecessor| {
-            topology::dist(predecessor, did) <= topology::dist(predecessor, self.did)
-        }))
+        Ok(match state.predecessor {
+            Some(predecessor) => {
+                did != predecessor
+                    && topology::dist(predecessor, did) <= topology::dist(predecessor, self.did)
+            }
+            None => topology::successor_head(&state).is_none(),
+        })
+    }
+
+    /// The node this owner routes the position `destination` to, when its own view answers:
+    /// the only node whose holds for `destination` this owner admits (see the `inbox` module).
+    pub(crate) fn inbox_hold_authority(&self, destination: Did) -> Result<Option<Did>> {
+        let state = self.topology_state()?;
+        Ok(match topology::find_successor(&state, destination) {
+            FindSuccessorStep::Local(responsible) => Some(responsible),
+            FindSuccessorStep::Remote { .. } => None,
+        })
     }
 
     fn transition_topology(&self, event: TopologyEvent) -> Result<TopologyStep> {
@@ -278,9 +293,8 @@ impl PeerRing {
             TopologyAction::Notify(did) => {
                 PeerRingAction::RemoteAction(did, RemoteAction::Notify(self.did))
             }
-            TopologyAction::SuccessorHeadChanged(head) => {
-                PeerRingAction::RemoteAction(head, RemoteAction::HandOffStorage)
-            }
+            // The pass reads the current head when it runs, so the head is not carried.
+            TopologyAction::SuccessorHeadChanged(_) => PeerRingAction::StorageRepairDue,
         }
     }
 

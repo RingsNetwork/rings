@@ -17,14 +17,15 @@
 //! - Admission: a value is admissible at `now` in overlay `n` iff it is live, its bound is at
 //!   most `now + kind.max_lifetime_ms() + TS_OFFSET_TOLERANCE_MS`, every version it carries has
 //!   a logical time at most `now + TS_OFFSET_TOLERANCE_MS`, every payload is at most
-//!   `ENTRY_PAYLOAD_MAX_BYTES`, and its kind's witness holds (a relay inbox admits only messages
-//!   addressed to its owner and signed inside `n`). Admission is a predicate on the
+//!   `ENTRY_PAYLOAD_MAX_BYTES`, and its kind's witness holds (a relay inbox admits only held
+//!   messages addressed to its recipient, attested by their holder and verified as of the hold
+//!   instant inside `n`; see the `inbox` module). Admission is a predicate on the
 //!   peer-supplied delta, never on the receiver's join result, so locally derived versions (a
 //!   compaction floor bumped by one step) are never mistaken for a peer clock running ahead.
 //!
 //! Size: the payload predicate is element-intrinsic, so filtering by it commutes with union
-//! and the carrier stays a lattice; together with the count cap `ENTRY_DATA_MAX_LEN` it bounds
-//! a carrier at `ENTRY_DATA_MAX_LEN × ENTRY_PAYLOAD_MAX_BYTES` encoded bytes. A byte budget
+//! and the carrier stays a lattice; together with the count cap `kind.max_data_len()` it bounds
+//! a carrier at `max_data_len × ENTRY_PAYLOAD_MAX_BYTES` encoded bytes. A byte budget
 //! over the whole carrier is deliberately not used: "the newest payloads that fit" depends on
 //! the sizes of payloads a replica may already have dropped, so it is not a lattice morphism
 //! and replicas would diverge.
@@ -120,7 +121,7 @@ impl Entry {
         }
         match self.kind {
             EntryKind::Data => Ok(()),
-            EntryKind::RelayMessage => self.validate_inbox_witness(network_id),
+            EntryKind::RelayMessage => self.validate_inbox_witness(now_ms, network_id),
         }
     }
 }

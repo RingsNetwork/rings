@@ -159,10 +159,10 @@ impl SwarmBuilder {
             ),
         );
 
-        let callback = RwLock::new(
+        let callback = Arc::new(RwLock::new(
             self.callback
                 .unwrap_or_else(|| Arc::new(DefaultCallback {})),
-        );
+        ));
 
         let transport = Arc::new(SwarmTransport::new(
             self.network_id,
