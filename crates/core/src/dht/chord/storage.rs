@@ -82,18 +82,16 @@ impl PeerRing {
         Ok(stored)
     }
 
-    /// Apply a stamped operation to the value stored at `placement` at time `now_ms`.
+    /// Apply a stamped operation issued by `writer` to the value stored at `placement` at time
+    /// `now_ms`.
     ///
-    /// Pre: `op` is stamped. Admission is checked on the delta `op` carries, never on the join
+    /// Pre: `op` is stamped, and `writer` is its signer as the shell verified it (this node for
+    /// a local operation). Admission is checked on the delta `op` carries, never on the join
     /// result, so a locally derived version (a compaction floor bumped by one step) is never
-    /// mistaken for a peer clock running ahead.
+    /// mistaken for a peer clock running ahead; a relay inbox also passes the authority law
+    /// under this node's own routing view.
     /// Post: the stored value is `local.operate(op)` normalized for storage, where `local` is
     /// the live stored value or the operation's default carrier.
-    /// Apply `op` to the carrier at `placement`, issued by `writer`.
-    ///
-    /// Pre: `writer` is the signer of the operation as the shell verified it (this node for a
-    /// local operation). Post: the delta passed admission and, for a relay inbox, the authority
-    /// law under this node's own routing view.
     pub(crate) async fn operate_storage_entry(
         &self,
         now_ms: u128,
@@ -103,7 +101,13 @@ impl PeerRing {
     ) -> Result<()> {
         op.validate_admissible_at(now_ms, self.network_id())?;
         if op.entry().kind == EntryKind::RelayMessage {
-            let responsible = self.inbox_hold_authority(inbox_destination(placement))?;
+            // Only a hold needs to know who is responsible for the recipient.
+            let responsible = match op {
+                EntryOperation::Extend(_) => {
+                    self.inbox_hold_authority(inbox_destination(placement))?
+                }
+                _ => None,
+            };
             op.validate_inbox_authority(writer, responsible)?;
         }
         let local = match self.live_storage_entry(placement, now_ms).await? {

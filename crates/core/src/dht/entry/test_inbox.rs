@@ -6,6 +6,7 @@ use super::inbox::HELD_MESSAGE_DOMAIN_TAG;
 use super::Entry;
 use super::EntryKind;
 use super::EntryOperation;
+use super::EntryVersion;
 use crate::consts::DEFAULT_RELAY_INBOX_TTL_MS;
 use crate::consts::DEFAULT_TTL_MS;
 use crate::consts::MAX_RELAY_INBOX_TTL_MS;
@@ -216,7 +217,7 @@ fn test_witness_rejects_a_tampered_payload_and_a_reset_floor() -> Result<()> {
 
     let held = held_by(&holder, destination, TEST_NETWORK_ID)?;
     let mut with_floor = live_at(Entry::inbox_delta(&held)?, now_ms);
-    with_floor.crdt.register = Some(super::EntryVersion::new(
+    with_floor.crdt.register = Some(EntryVersion::new(
         now_ms,
         holder.account_did(),
         Did::from(0u32),

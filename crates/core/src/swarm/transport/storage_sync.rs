@@ -248,26 +248,41 @@ impl<'data> StorageSyncBatch<'data> {
         // The admission law is re-checked by `join_storage_entry` at persist
         // time; it is evaluated here so that a failing entry rejects the batch
         // before any earlier entry has been written.
-        if should_persist_synced_entry(transport, self.destination, placed)? {
+        if should_persist_synced_entry(transport, self.destination, placed)?
+            && self.relay_relocation_permits(transport, placed)?
+        {
             placed.validate_placement(transport.storage_redundancy())?;
             placed
                 .entry
                 .validate_admissible_at(self.now_ms, transport.network_id)?;
-            if placed.entry.kind == EntryKind::RelayMessage {
-                // A relay inbox moves only with its ownership, from the predecessor.
-                if self.purpose != StorageSyncPurpose::OwnershipHandoff {
-                    return Err(Error::RelayInboxNotRelocatable);
-                }
-                let predecessor = transport
-                    .dht
-                    .with_topology_state(|state| state.predecessor)?;
-                validate_inbox_relocation(self.origin, predecessor)?;
-            }
             let entry = placed.entry.clone().try_into_storage_entry()?;
             self.accepted.push(SyncedEntryAck::new(placed.key, entry));
         }
 
         Ok(Some(StorageSyncBatchStep::Pending))
+    }
+
+    /// Whether the relocation law lets this batch carry `placed`: a data topic always, a relay
+    /// inbox only as an ownership hand-off from the receiver's predecessor.
+    ///
+    /// Post: `false` skips the entry without acknowledging it, so its owner keeps it and offers
+    /// it again on a later pass; it does not fail the batch, as the entry is not invalid, only
+    /// not this receiver's to take yet.
+    fn relay_relocation_permits(
+        &self,
+        transport: &SwarmTransport,
+        placed: &PlacedEntry,
+    ) -> Result<bool> {
+        if placed.entry.kind != EntryKind::RelayMessage {
+            return Ok(true);
+        }
+        if self.purpose != StorageSyncPurpose::OwnershipHandoff {
+            return Ok(false);
+        }
+        let predecessor = transport
+            .dht
+            .with_topology_state(|state| state.predecessor)?;
+        Ok(validate_inbox_relocation(self.origin, predecessor).is_ok())
     }
 
     async fn persist_one(&mut self, transport: &SwarmTransport) -> Result<StorageSyncBatchStep> {

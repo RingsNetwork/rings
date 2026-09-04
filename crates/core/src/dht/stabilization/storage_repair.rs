@@ -8,7 +8,6 @@ use crate::dht::Did;
 use crate::dht::PeerRingAction;
 use crate::dht::StorageSyncDelivery;
 use crate::error::Error;
-use crate::error::Error as CoreError;
 use crate::error::Result;
 use crate::message::handlers::inbox::drain_inbox;
 use crate::message::SyncEntriesWithSuccessor;
@@ -321,7 +320,7 @@ impl Stabilizer {
         let callback = self
             .callback
             .read()
-            .map_err(|_| CoreError::CallbackSyncLockError)?
+            .map_err(|_| Error::CallbackSyncLockError)?
             .clone();
         drain_inbox(self.transport.clone(), callback).await
     }

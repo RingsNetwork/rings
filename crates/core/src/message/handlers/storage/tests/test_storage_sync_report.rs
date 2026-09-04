@@ -98,6 +98,44 @@ async fn test_sync_entries_handler_reports_persisted_entries() -> Result<()> {
     Ok(())
 }
 
+/// Relocation law: a relay carrier offered by anyone but the receiver's predecessor is skipped
+/// without an acknowledgement, and the data entries sharing its batch are still accepted; the
+/// carrier is not invalid, only not this receiver's to take yet.
+#[tokio::test]
+async fn test_persist_synced_entries_skips_a_relay_carrier_from_a_stranger() -> Result<()> {
+    let receiver = prepare_node(SecretKey::random()).await;
+    let topic = crate::tests::live_entry(
+        Did::from(10u32),
+        vec!["acked".to_string().encode()?],
+        EntryKind::Data,
+    );
+    let inbox = crate::tests::live_entry(Did::from(20u32), Vec::new(), EntryKind::RelayMessage);
+    let sync_msg = SyncEntriesWithSuccessor {
+        purpose: StorageSyncPurpose::OwnershipHandoff,
+        destination: StorageSyncDestination::PhysicalOwner(receiver.did()),
+        data: vec![
+            PlacedEntry::new(inbox.did, inbox.clone()),
+            PlacedEntry::new(topic.did, topic.clone()),
+        ],
+    };
+
+    let acks = receiver
+        .swarm
+        .transport
+        .persist_storage_sync_entries(&sync_msg, Did::from(1u32))
+        .await?;
+
+    assert_eq!(acks, vec![SyncedEntryAck::new(
+        topic.did,
+        topic.clone().try_into_storage_entry()?
+    )]);
+    assert_eq!(
+        receiver.dht().storage.get(&inbox.did.to_string()).await?,
+        None
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_persist_synced_entries_returns_acks_for_owned_entries() -> Result<()> {
     let receiver = prepare_node(SecretKey::random()).await;
