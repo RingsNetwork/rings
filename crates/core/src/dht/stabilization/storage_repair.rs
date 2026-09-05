@@ -320,7 +320,7 @@ impl Stabilizer {
         let callback = self
             .callback
             .read()
-            .map_err(|_| Error::CallbackSyncLockError)?
+            .map_err(|_| Error::LockPoisoned)?
             .clone();
         drain_inbox(self.transport.clone(), callback).await
     }
@@ -373,6 +373,7 @@ mod tests {
     use crate::session::SessionSk;
     use crate::storage::MemStorage;
     use crate::swarm::SwarmBuilder;
+    use crate::tests::live_entry;
 
     fn repair_deliveries(values: &[u32]) -> Result<Vec<StorageSyncDelivery>> {
         let actions = values
@@ -380,8 +381,7 @@ mod tests {
             .copied()
             .map(|value| {
                 let destination = StorageSyncDestination::PlacementKey(Did::from(value));
-                let entry =
-                    crate::tests::live_entry(Did::from(value + 100), vec![], EntryKind::Data);
+                let entry = live_entry(Did::from(value + 100), vec![], EntryKind::Data);
                 PeerRingAction::sync_entries_for_repair(destination, vec![PlacedEntry::new(
                     destination.did(),
                     entry,

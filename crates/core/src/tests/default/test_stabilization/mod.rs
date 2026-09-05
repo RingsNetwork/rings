@@ -43,6 +43,7 @@ use crate::tests::default::wait_for_msgs;
 use crate::tests::default::wait_for_predecessor;
 use crate::tests::default::wait_for_successor;
 use crate::tests::default::Node;
+use crate::tests::live_entry;
 use crate::tests::manually_establish_connection;
 use crate::tests::replace_observed_fingers;
 use crate::utils::get_epoch_ms_i64;
@@ -179,10 +180,7 @@ fn entry_for_remote_repair_placement(node: &Node, successor: Did) -> Result<(Ent
     ) {
         // `rotate_affine(n)[0] = self`, so choosing the witnessed placement as the entry key
         // deterministically makes it one of the repair placements for every non-zero redundancy.
-        return Ok((
-            crate::tests::live_entry(placement, vec![], EntryKind::Data),
-            placement,
-        ));
+        return Ok((live_entry(placement, vec![], EntryKind::Data), placement));
     }
     Err(Error::InvalidMessage(
         "remote repair fixture DID did not route remotely".to_string(),

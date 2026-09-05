@@ -34,6 +34,11 @@
   `ENTRY_PAYLOAD_MAX_BYTES` is 32 KiB so a full carrier fits one transport message (checked at
   compile time). The stabilizer resolves the swarm callback at delivery time, so
   `Swarm::set_callback` after `listen` is honoured by inbox delivery.
+- `rings_core::storage::sled::SledStorage` is `rings_core::storage::file::FileStorage`, the name
+  of what it has been since the byte budget landed: one file per key under a budget. The three
+  poisoned-lock errors (`DHTSyncLockError`, `CallbackSyncLockError`, `StorageLockPoisoned`) are
+  one `Error::LockPoisoned`. `MessageSigner` no longer hands out its session key; it exposes
+  `session_public_key`.
 
 ### Added
 

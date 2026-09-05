@@ -90,7 +90,7 @@ impl Swarm {
         Ok(self
             .callback
             .read()
-            .map_err(|_| Error::CallbackSyncLockError)?
+            .map_err(|_| Error::LockPoisoned)?
             .clone())
     }
 
@@ -103,10 +103,7 @@ impl Swarm {
 
     /// Set callback for swarm.
     pub fn set_callback(&self, callback: SharedSwarmCallback) -> Result<()> {
-        let mut inner = self
-            .callback
-            .write()
-            .map_err(|_| Error::CallbackSyncLockError)?;
+        let mut inner = self.callback.write().map_err(|_| Error::LockPoisoned)?;
 
         *inner = callback;
 

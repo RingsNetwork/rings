@@ -10,6 +10,7 @@ use crate::message::Encoder;
 use crate::tests::default::wait_for_msgs;
 use crate::tests::default::wait_for_storage_absence;
 use crate::tests::default::wait_for_storage_entry;
+use crate::tests::live_entry;
 
 /// After a direct connection moves the successor head, admission requests a repair pass, and the
 /// owner's pass hands the entries placed beyond the new head over to it once the connection has
@@ -26,7 +27,7 @@ async fn test_repair_pass_hands_off_entries_beyond_a_directly_connected_head() -
     wait_for_successor(&node1, node3.did()).await?;
 
     // `node3 ∈ (node1, node3]`, so node1 owns the key while node3 is its head.
-    let entry = crate::tests::live_entry(
+    let entry = live_entry(
         node3.did(),
         vec![String::from("sync me").encode()?],
         EntryKind::Data,

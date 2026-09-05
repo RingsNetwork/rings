@@ -25,6 +25,7 @@ use crate::message::MessageVerification;
 use crate::message::NotifyPredecessorSend;
 use crate::message::SigningDomain;
 use crate::session::SessionSk;
+use crate::tests::with_retention;
 use crate::tests::TEST_NETWORK_ID;
 use crate::utils::get_epoch_ms;
 
@@ -71,13 +72,6 @@ fn holder_signature_at(
     })
 }
 
-/// A carrier stamped live at `now_ms`.
-fn live_at(entry: Entry, now_ms: u128) -> Entry {
-    let mut entry = entry;
-    entry.expires_at_ms = Some(now_ms + u128::from(DEFAULT_RELAY_INBOX_TTL_MS));
-    entry
-}
-
 /// The owner's carrier after admitting `delta` as a hold at `now_ms`.
 fn carrier_with(delta: Entry, now_ms: u128, actor: Did) -> Result<Entry> {
     Entry::new(delta.did, Vec::new(), EntryKind::RelayMessage).extend(now_ms, delta, actor)
@@ -96,7 +90,10 @@ fn test_witness_admits_a_held_custom_message_addressed_to_the_recipient() -> Res
     let holder = session()?;
     let destination: Did = SecretKey::random().address().into();
     let held = held_by(&holder, destination, TEST_NETWORK_ID)?;
-    let delta = live_at(Entry::inbox_delta(&held)?, now_ms);
+    let delta = with_retention(
+        Entry::inbox_delta(&held)?,
+        now_ms + u128::from(DEFAULT_RELAY_INBOX_TTL_MS),
+    );
 
     assert_eq!(delta.did, inbox_key(destination));
     delta.validate_admissible_at(now_ms, TEST_NETWORK_ID)?;
@@ -109,7 +106,10 @@ fn test_witness_rejects_a_message_addressed_elsewhere() -> Result<()> {
     let now_ms = get_epoch_ms();
     let destination: Did = SecretKey::random().address().into();
     let held = held_by(&session()?, destination, TEST_NETWORK_ID)?;
-    let mut misfiled = live_at(Entry::inbox_delta(&held)?, now_ms);
+    let mut misfiled = with_retention(
+        Entry::inbox_delta(&held)?,
+        now_ms + u128::from(DEFAULT_RELAY_INBOX_TTL_MS),
+    );
     misfiled.did = inbox_key(SecretKey::random().address().into());
 
     assert!(matches!(
@@ -216,7 +216,10 @@ fn test_witness_rejects_a_tampered_payload_and_a_reset_floor() -> Result<()> {
     ));
 
     let held = held_by(&holder, destination, TEST_NETWORK_ID)?;
-    let mut with_floor = live_at(Entry::inbox_delta(&held)?, now_ms);
+    let mut with_floor = with_retention(
+        Entry::inbox_delta(&held)?,
+        now_ms + u128::from(DEFAULT_RELAY_INBOX_TTL_MS),
+    );
     with_floor.crdt.register = Some(EntryVersion::new(
         now_ms,
         holder.account_did(),

@@ -5,7 +5,10 @@ use crate::consts::DEFAULT_TTL_MS;
 use crate::consts::ENTRY_PAYLOAD_MAX_BYTES;
 use crate::consts::MAX_TTL_MS;
 use crate::consts::TS_OFFSET_TOLERANCE_MS;
+use crate::tests::with_retention;
 use crate::tests::TEST_NETWORK_ID;
+
+const NOW_MS: u128 = 1_700_000_000_000;
 
 fn encoded(value: &str) -> Result<Encoded> {
     value.to_string().encode()
@@ -682,15 +685,11 @@ fn test_affine_preserves_payload_and_kind_while_rotating_keys() -> Result<()> {
     Ok(())
 }
 
-const NOW_MS: u128 = 1_700_000_000_000;
-
-fn bounded(mut entry: Entry, expires_at_ms: u128) -> Entry {
-    entry.expires_at_ms = Some(expires_at_ms);
-    entry
-}
-
 fn admissible_delta(topic: &str, value: &str, counter: u32) -> Result<Entry> {
-    Ok(bounded(data_delta(topic, value, counter)?, NOW_MS + 1_000))
+    Ok(with_retention(
+        data_delta(topic, value, counter)?,
+        NOW_MS + 1_000,
+    ))
 }
 
 fn version_at(logical_time_ms: u128) -> EntryVersion {
@@ -715,7 +714,8 @@ fn test_stamped_assigns_default_lifetime_and_preserves_existing() -> Result<()> 
         assert_eq!(stamped.entry().expires_at_ms, Some(expected));
     }
 
-    let forwarded = EntryOperation::Extend(bounded(unstamped, 7)).stamped(NOW_MS, actor())?;
+    let forwarded =
+        EntryOperation::Extend(with_retention(unstamped, 7)).stamped(NOW_MS, actor())?;
     assert_eq!(forwarded.entry().expires_at_ms, Some(7));
     Ok(())
 }
@@ -724,20 +724,23 @@ fn test_stamped_assigns_default_lifetime_and_preserves_existing() -> Result<()> 
 /// every operation that materializes a join.
 #[test]
 fn test_join_takes_the_later_retention_bound() -> Result<()> {
-    let earlier = bounded(data_delta("topic", "a", 1)?, 10);
-    let later = bounded(data_delta("topic", "b", 2)?, 20);
+    let earlier = with_retention(data_delta("topic", "a", 1)?, 10);
+    let later = with_retention(data_delta("topic", "b", 2)?, 20);
     assert_eq!(earlier.join(later.clone())?.expires_at_ms, Some(20));
     assert_eq!(later.join(earlier.clone())?.expires_at_ms, Some(20));
 
-    let relay_earlier = bounded(relay_delta(Did::from(7u32), "m1", 1)?, 10);
-    let relay_later = bounded(relay_delta(Did::from(7u32), "m2", 2)?, 20);
+    let relay_earlier = with_retention(relay_delta(Did::from(7u32), "m1", 1)?, 10);
+    let relay_later = with_retention(relay_delta(Did::from(7u32), "m2", 2)?, 20);
     assert_eq!(relay_earlier.join(relay_later)?.expires_at_ms, Some(20));
 
-    let tombstoned = earlier.tombstone(bounded(data_entry("topic", "a")?, 30))?;
+    let tombstoned = earlier.tombstone(with_retention(data_entry("topic", "a")?, 30))?;
     assert_eq!(tombstoned.expires_at_ms, Some(30));
 
-    let compacted =
-        earlier.compact_data(NOW_MS, bounded(data_entry("topic", "a")?, 40), actor())?;
+    let compacted = earlier.compact_data(
+        NOW_MS,
+        with_retention(data_entry("topic", "a")?, 40),
+        actor(),
+    )?;
     assert_eq!(compacted.expires_at_ms, Some(40));
 
     let unbounded_join = data_delta("topic", "c", 3)?.join(earlier.clone())?;
@@ -755,7 +758,7 @@ fn test_admission_bounds_every_payload_size() -> Result<()> {
         vec![Encoded::from("x".repeat(ENTRY_PAYLOAD_MAX_BYTES))],
         EntryKind::Data,
     );
-    bounded(at_bound, NOW_MS + 1_000).validate_admissible_at(NOW_MS, TEST_NETWORK_ID)?;
+    with_retention(at_bound, NOW_MS + 1_000).validate_admissible_at(NOW_MS, TEST_NETWORK_ID)?;
 
     let oversize = Entry::new(
         did,
@@ -766,7 +769,7 @@ fn test_admission_bounds_every_payload_size() -> Result<()> {
         EntryKind::Data,
     );
     assert!(matches!(
-        bounded(oversize, NOW_MS + 1_000).validate_admissible_at(NOW_MS, TEST_NETWORK_ID),
+        with_retention(oversize, NOW_MS + 1_000).validate_admissible_at(NOW_MS, TEST_NETWORK_ID),
         Err(Error::EntryPayloadExceedsMax)
     ));
     Ok(())
@@ -777,7 +780,7 @@ fn test_admission_bounds_every_payload_size() -> Result<()> {
 fn test_is_live_at_requires_a_bound_after_now() -> Result<()> {
     let unstamped = data_entry("topic", "value")?;
     assert!(!unstamped.is_live_at(0));
-    let stamped = bounded(unstamped, 5);
+    let stamped = with_retention(unstamped, 5);
     assert!(stamped.is_live_at(4));
     assert!(!stamped.is_live_at(5));
     Ok(())
@@ -794,15 +797,15 @@ fn test_admission_bounds_the_retention_bound() -> Result<()> {
         Err(Error::EntryNotLive)
     ));
     assert!(matches!(
-        bounded(delta.clone(), NOW_MS).validate_admissible_at(NOW_MS, TEST_NETWORK_ID),
+        with_retention(delta.clone(), NOW_MS).validate_admissible_at(NOW_MS, TEST_NETWORK_ID),
         Err(Error::EntryNotLive)
     ));
     assert!(matches!(
-        bounded(delta.clone(), limit + 1).validate_admissible_at(NOW_MS, TEST_NETWORK_ID),
+        with_retention(delta.clone(), limit + 1).validate_admissible_at(NOW_MS, TEST_NETWORK_ID),
         Err(Error::EntryLifetimeExceedsMax)
     ));
-    bounded(delta.clone(), limit).validate_admissible_at(NOW_MS, TEST_NETWORK_ID)?;
-    bounded(delta, NOW_MS + 1).validate_admissible_at(NOW_MS, TEST_NETWORK_ID)?;
+    with_retention(delta.clone(), limit).validate_admissible_at(NOW_MS, TEST_NETWORK_ID)?;
+    with_retention(delta, NOW_MS + 1).validate_admissible_at(NOW_MS, TEST_NETWORK_ID)?;
     Ok(())
 }
 

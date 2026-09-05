@@ -80,11 +80,11 @@ impl<V> MemStorage<V> {
     }
 
     fn read(&self) -> Result<RwLockReadGuard<'_, MemTable<V>>> {
-        self.table.read().map_err(|_| Error::StorageLockPoisoned)
+        self.table.read().map_err(|_| Error::LockPoisoned)
     }
 
     fn write(&self) -> Result<RwLockWriteGuard<'_, MemTable<V>>> {
-        self.table.write().map_err(|_| Error::StorageLockPoisoned)
+        self.table.write().map_err(|_| Error::LockPoisoned)
     }
 }
 

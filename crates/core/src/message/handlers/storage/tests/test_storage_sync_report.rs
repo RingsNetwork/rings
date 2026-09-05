@@ -32,6 +32,7 @@ use crate::message::PayloadSender;
 use crate::tests::default::assert_no_more_msg;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;
+use crate::tests::live_entry;
 use crate::tests::manually_establish_connection;
 
 #[tokio::test]
@@ -48,7 +49,7 @@ async fn test_sync_entries_handler_reports_persisted_entries() -> Result<()> {
 
     let receiver_handler =
         MessageHandler::new(receiver.swarm.transport.clone(), Arc::new(NoopCallback));
-    let entry = crate::tests::live_entry(
+    let entry = live_entry(
         Did::from(10u32),
         vec!["handler acked".to_string().encode()?],
         EntryKind::Data,
@@ -104,12 +105,12 @@ async fn test_sync_entries_handler_reports_persisted_entries() -> Result<()> {
 #[tokio::test]
 async fn test_persist_synced_entries_skips_a_relay_carrier_from_a_stranger() -> Result<()> {
     let receiver = prepare_node(SecretKey::random()).await;
-    let topic = crate::tests::live_entry(
+    let topic = live_entry(
         Did::from(10u32),
         vec!["acked".to_string().encode()?],
         EntryKind::Data,
     );
-    let inbox = crate::tests::live_entry(Did::from(20u32), Vec::new(), EntryKind::RelayMessage);
+    let inbox = live_entry(Did::from(20u32), Vec::new(), EntryKind::RelayMessage);
     let sync_msg = SyncEntriesWithSuccessor {
         purpose: StorageSyncPurpose::OwnershipHandoff,
         destination: StorageSyncDestination::PhysicalOwner(receiver.did()),
@@ -139,7 +140,7 @@ async fn test_persist_synced_entries_skips_a_relay_carrier_from_a_stranger() -> 
 #[tokio::test]
 async fn test_persist_synced_entries_returns_acks_for_owned_entries() -> Result<()> {
     let receiver = prepare_node(SecretKey::random()).await;
-    let entry = crate::tests::live_entry(
+    let entry = live_entry(
         Did::from(10u32),
         vec!["acked".to_string().encode()?],
         EntryKind::Data,
@@ -196,7 +197,7 @@ async fn test_sync_entries_handler_skips_entries_owned_by_another_virtual_owner(
             if owner == sender.did() && key == placement_key
     ));
 
-    let entry = crate::tests::live_entry(
+    let entry = live_entry(
         Did::from(10u32),
         vec!["wrong owner".to_string().encode()?],
         EntryKind::Data,

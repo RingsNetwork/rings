@@ -40,9 +40,20 @@ pub(crate) fn live_entry(did: Did, data: Vec<Encoded>, kind: EntryKind) -> Entry
 }
 
 /// Stamp an existing fixture with a live retention bound.
-pub(crate) fn live(mut entry: Entry) -> Entry {
-    entry.expires_at_ms = Some(get_epoch_ms() + FIXTURE_RETENTION_MS);
+pub(crate) fn live(entry: Entry) -> Entry {
+    with_retention(entry, get_epoch_ms() + FIXTURE_RETENTION_MS)
+}
+
+/// Stamp an existing fixture with the retention bound `expires_at_ms`.
+pub(crate) fn with_retention(mut entry: Entry, expires_at_ms: u128) -> Entry {
+    entry.expires_at_ms = Some(expires_at_ms);
     entry
+}
+
+/// Stamp an existing fixture with a retention bound that has already elapsed.
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+pub(crate) fn expired(entry: Entry) -> Entry {
+    with_retention(entry, 1)
 }
 
 #[cfg(all(feature = "wasm", target_family = "wasm"))]

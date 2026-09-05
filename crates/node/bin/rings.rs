@@ -38,7 +38,7 @@ use rings_node::onion::OnionServiceName;
 use rings_node::prelude::rings_core::chunk::ReassemblyLimits;
 use rings_node::prelude::rings_core::dht::Did;
 use rings_node::prelude::rings_core::ecc::SecretKey;
-use rings_node::prelude::rings_core::storage::sled::SledStorage;
+use rings_node::prelude::rings_core::storage::file::FileStorage;
 use rings_node::prelude::SessionSkBuilder;
 use rings_node::prelude::StopSource;
 use rings_node::processor::ProcessorBuilder;
@@ -836,10 +836,10 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
     };
 
     let per_data_storage = Box::new(
-        SledStorage::new_with_cap_and_path(data_storage.capacity, data_storage.path).await?,
+        FileStorage::new_with_cap_and_path(data_storage.capacity, data_storage.path).await?,
     );
     let per_measure_storage = Box::new(
-        SledStorage::new_with_cap_and_path(measure_storage.capacity, measure_storage.path).await?,
+        FileStorage::new_with_cap_and_path(measure_storage.capacity, measure_storage.path).await?,
     );
 
     let measure = PeriodicMeasure::new(per_measure_storage).await?;

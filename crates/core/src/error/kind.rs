@@ -190,9 +190,9 @@ pub enum Error {
     #[error("A storage count or record length does not fit its interface width")]
     StorageCountOverflow,
 
-    /// A storage lock was poisoned by a panicking holder
-    #[error("A storage lock was poisoned by a panicking holder")]
-    StorageLockPoisoned,
+    /// A lock was poisoned by a panicking holder
+    #[error("A lock was poisoned by a panicking holder")]
+    LockPoisoned,
 
     /// Affine rotation scalar must be greater than zero
     #[error("Affine rotation scalar must be greater than zero")]
@@ -791,14 +791,6 @@ pub enum Error {
     /// IO error: {0}
     #[error("IO error: {0}")]
     IOError(std::io::Error),
-
-    /// Failed to get dht from a sync lock
-    #[error("Failed to get dht from a sync lock")]
-    DHTSyncLockError,
-
-    /// Failed to lock callback of swarm
-    #[error("Failed to lock callback of swarm")]
-    CallbackSyncLockError,
 
     /// Failed to build swarm: {0}
     #[error("Failed to build swarm: {0}")]

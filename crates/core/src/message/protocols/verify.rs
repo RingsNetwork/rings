@@ -29,6 +29,7 @@ use crate::consts::DEFAULT_TTL_MS;
 use crate::consts::MAX_TTL_MS;
 use crate::consts::TS_OFFSET_TOLERANCE_MS;
 use crate::dht::Did;
+use crate::ecc::PublicKey;
 use crate::error::Result;
 use crate::session::Session;
 use crate::session::SessionSk;
@@ -153,9 +154,13 @@ where S: Borrow<SessionSk>
         }
     }
 
-    /// The session key.
-    pub fn session_sk(&self) -> &SessionSk {
+    fn session_sk(&self) -> &SessionSk {
         self.session_sk.borrow()
+    }
+
+    /// The public key of the session this authority signs with.
+    pub fn session_public_key(&self) -> PublicKey<33> {
+        self.session_sk().session_public_key()
     }
 
     /// The overlay this authority signs for.

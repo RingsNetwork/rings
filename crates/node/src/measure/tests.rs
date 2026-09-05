@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 
 use rings_core::error::Error as CoreError;
 use rings_core::measure::BehaviourJudgement;
-use rings_core::storage::sled::SledStorage;
+use rings_core::storage::file::FileStorage;
 use rings_core::storage::KvStorageInterface;
 use rings_core::storage::MemStorage;
 use tokio::sync::Notify;
@@ -302,7 +302,7 @@ async fn useful_bytes_produce_amule_credit_and_one_reliability_event() {
 async fn persistence_restores_complete_credit_and_epoch_state() {
     let path = "tmp/measure_snapshot_test_db";
     let storage: MeasureStorage = Box::new(
-        SledStorage::new_with_cap_and_path(4096, path)
+        FileStorage::new_with_cap_and_path(4096, path)
             .await
             .unwrap_or_else(|error| panic!("test storage must open: {error}")),
     );
@@ -330,7 +330,7 @@ async fn persistence_restores_complete_credit_and_epoch_state() {
 
     let restored = PeriodicMeasure::new_with_clock(
         Box::new(
-            SledStorage::new_with_cap_and_path(4096, path)
+            FileStorage::new_with_cap_and_path(4096, path)
                 .await
                 .unwrap_or_else(|error| panic!("test storage must reopen: {error}")),
         ),

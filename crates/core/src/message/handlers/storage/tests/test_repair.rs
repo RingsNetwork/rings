@@ -41,6 +41,7 @@ use crate::tests::default::dummy_hooks::PendingSendGuard;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;
 use crate::tests::default::Node;
+use crate::tests::live_entry;
 use crate::tests::manually_establish_connection;
 use crate::tests::TEST_NETWORK_ID;
 
@@ -76,7 +77,7 @@ async fn test_leave_dht_defers_repair_until_maintenance_runs() -> Result<()> {
     let node = Node::new(swarm);
     let departed = Did::from(100u32);
     node.dht().successors().update(departed)?;
-    let entry = crate::tests::live_entry(key.address().into(), vec![], EntryKind::Data);
+    let entry = live_entry(key.address().into(), vec![], EntryKind::Data);
     let placement_keys = entry.did.rotate_affine(2)?;
     node.dht()
         .storage
@@ -314,7 +315,7 @@ async fn test_local_hit_read_repair_sends_no_search_for_unknown_replicas() -> Re
         .build(),
     );
     let node = Node::new(swarm);
-    let entry = crate::tests::live_entry(
+    let entry = live_entry(
         key.address().into(),
         vec!["local".to_string().encode()?],
         EntryKind::Data,
@@ -341,7 +342,7 @@ async fn test_local_hit_read_repair_sends_no_search_for_unknown_replicas() -> Re
 async fn test_found_entry_repairs_buffered_misses_only() -> Result<()> {
     let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
-    let entry = crate::tests::live_entry(
+    let entry = live_entry(
         Did::from(10u32),
         vec!["repair".to_string().encode()?],
         EntryKind::Data,
@@ -402,12 +403,12 @@ async fn test_found_entry_rejects_multiple_entries() -> Result<()> {
     let node = prepare_node(SecretKey::random()).await;
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
     let resource = Did::from(10u32);
-    let first = crate::tests::live_entry(
+    let first = live_entry(
         resource,
         vec!["first".to_string().encode()?],
         EntryKind::Data,
     );
-    let second = crate::tests::live_entry(
+    let second = live_entry(
         resource,
         vec!["second".to_string().encode()?],
         EntryKind::Data,
@@ -448,7 +449,7 @@ async fn test_found_entry_rejects_redundancy_outside_local_protocol_mode() -> Re
     let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
     let resource = Did::from(10u32);
-    let entry = crate::tests::live_entry(
+    let entry = live_entry(
         resource,
         vec!["wrong redundancy".to_string().encode()?],
         EntryKind::Data,
@@ -493,7 +494,7 @@ async fn test_found_entry_rejects_response_without_active_lookup() -> Result<()>
     let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
     let resource = Did::from(10u32);
-    let entry = crate::tests::live_entry(
+    let entry = live_entry(
         resource,
         vec!["unsolicited".to_string().encode()?],
         EntryKind::Data,
@@ -534,7 +535,7 @@ async fn test_found_entry_rejects_resource_mismatch_without_cache_write() -> Res
     let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
     let resource = Did::from(10u32);
-    let entry = crate::tests::live_entry(
+    let entry = live_entry(
         Did::from(11u32),
         vec!["wrong resource".to_string().encode()?],
         EntryKind::Data,
@@ -613,7 +614,7 @@ async fn test_storage_fetch_starts_fresh_observation_round() -> Result<()> {
 async fn test_expired_storage_response_does_not_update_cache_or_repair() -> Result<()> {
     let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
-    let entry = crate::tests::live_entry(
+    let entry = live_entry(
         Did::from(10u32),
         vec!["fresh".to_string().encode()?],
         EntryKind::Data,

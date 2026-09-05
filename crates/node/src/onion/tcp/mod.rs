@@ -314,10 +314,6 @@ impl OnionTcpRuntime {
         self.signer.by_ref()
     }
 
-    fn session_sk(&self) -> &SessionSk {
-        self.signer.session_sk()
-    }
-
     async fn open_client_connection(
         self: &Arc<Self>,
         scope: Scope,
@@ -327,7 +323,7 @@ impl OnionTcpRuntime {
         let expected_return_peer = route_first_hop(&route)?;
         let expected_exit = route.exit().clone();
         let service = route.service_name().clone();
-        let client_return = OnionClientReturn::new(self.session_sk().session_public_key());
+        let client_return = OnionClientReturn::new(self.signer.session_public_key());
         let (tx, rx) = mpsc::channel(32);
         let (open_tx, open_rx) = oneshot::channel();
         let key = self.insert_client_stream(

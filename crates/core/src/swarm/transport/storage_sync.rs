@@ -149,9 +149,9 @@ pub(crate) struct StorageSyncBatch<'data> {
 }
 
 impl<'data> StorageSyncBatch<'data> {
-    pub(crate) fn new(msg: &'data SyncEntriesWithSuccessor, origin: Did) -> Self {
+    pub(crate) fn new(msg: &'data SyncEntriesWithSuccessor, origin: Did, now_ms: u128) -> Self {
         Self {
-            now_ms: get_epoch_ms(),
+            now_ms,
             origin,
             purpose: msg.purpose,
             destination: msg.destination,
@@ -382,7 +382,9 @@ impl SwarmTransport {
         msg: &SyncEntriesWithSuccessor,
         origin: Did,
     ) -> Result<Vec<SyncedEntryAck>> {
-        StorageSyncBatch::new(msg, origin).run(self).await
+        StorageSyncBatch::new(msg, origin, get_epoch_ms())
+            .run(self)
+            .await
     }
 
     /// Record the exact ack capability created by an outbound storage-sync payload.
@@ -418,7 +420,7 @@ impl SwarmTransport {
         let mut pending = self
             .pending_storage_sync_acks
             .lock()
-            .map_err(|_| Error::DHTSyncLockError)?;
+            .map_err(|_| Error::LockPoisoned)?;
         evict_storage_sync_acks(&mut pending);
         pending.insert(tx_id, capability);
         Ok(())
@@ -457,7 +459,7 @@ impl SwarmTransport {
         let mut pending = self
             .pending_storage_sync_acks
             .lock()
-            .map_err(|_| Error::DHTSyncLockError)?;
+            .map_err(|_| Error::LockPoisoned)?;
         let Some(capability) = pending.get(&tx_id) else {
             return Err(Error::InvalidMessage(
                 "storage sync report has no pending capability".to_string(),

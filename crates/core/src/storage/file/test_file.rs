@@ -17,7 +17,7 @@ async fn test_kv_storage_put_delete() {
             .unwrap()
             .as_nanos()
     ));
-    let storage = SledStorage::new_with_cap_and_path(4096, &path)
+    let storage = FileStorage::new_with_cap_and_path(4096, &path)
         .await
         .unwrap();
     let key1 = "test1".to_owned();
@@ -25,7 +25,7 @@ async fn test_kv_storage_put_delete() {
         content: "test1".to_string(),
     };
     storage.put(&key1, &data1).await.unwrap();
-    let count1 = <SledStorage as KvStorageInterface<TestStorageStruct>>::count::<'_, '_>(&storage)
+    let count1 = <FileStorage as KvStorageInterface<TestStorageStruct>>::count::<'_, '_>(&storage)
         .await
         .unwrap();
     assert!(count1 == 1, "expect count1.1 is {}, got {}", 1, count1);
@@ -45,7 +45,7 @@ async fn test_kv_storage_put_delete() {
     storage.put(&key2, &data2).await.unwrap();
 
     let count_got_2 =
-        <SledStorage as KvStorageInterface<TestStorageStruct>>::count::<'_, '_>(&storage)
+        <FileStorage as KvStorageInterface<TestStorageStruct>>::count::<'_, '_>(&storage)
             .await
             .unwrap();
     assert!(count_got_2 == 2, "expect count 2, got {count_got_2}");
@@ -73,10 +73,10 @@ async fn test_kv_storage_put_delete() {
     assert!(data3 == got_d3, "expect {data3}, got {got_d3}");
 
     // Clear full db and check if it's count is zero now.
-    <SledStorage as KvStorageInterface<TestStorageStruct>>::clear::<'_, '_>(&storage)
+    <FileStorage as KvStorageInterface<TestStorageStruct>>::clear::<'_, '_>(&storage)
         .await
         .unwrap();
-    let count1 = <SledStorage as KvStorageInterface<TestStorageStruct>>::count::<'_, '_>(&storage)
+    let count1 = <FileStorage as KvStorageInterface<TestStorageStruct>>::count::<'_, '_>(&storage)
         .await
         .unwrap();
     assert!(count1 == 0, "expect count1 is 0, got {count1}");
@@ -101,8 +101,8 @@ fn record_len(key: &str, value: &str) -> u32 {
         .len() as u32
 }
 
-async fn stored_keys(storage: &SledStorage) -> Vec<String> {
-    let mut keys = <SledStorage as KvStorageInterface<String>>::get_all(storage)
+async fn stored_keys(storage: &FileStorage) -> Vec<String> {
+    let mut keys = <FileStorage as KvStorageInterface<String>>::get_all(storage)
         .await
         .expect("get_all")
         .into_iter()
@@ -118,7 +118,7 @@ async fn stored_keys(storage: &SledStorage) -> Vec<String> {
 async fn test_put_beyond_budget_retires_least_recently_written_keys() {
     let root = temp_root("budget");
     let one = record_len("a", "v");
-    let storage = SledStorage::new_with_cap_and_path(one * 2, &root)
+    let storage = FileStorage::new_with_cap_and_path(one * 2, &root)
         .await
         .expect("open");
 
@@ -130,7 +130,7 @@ async fn test_put_beyond_budget_retires_least_recently_written_keys() {
     storage.put("c", &"v".to_string()).await.expect("put c");
     assert_eq!(stored_keys(&storage).await, ["a", "c"]);
     assert_eq!(
-        <SledStorage as KvStorageInterface<String>>::get(&storage, "b")
+        <FileStorage as KvStorageInterface<String>>::get(&storage, "b")
             .await
             .expect("get b"),
         None
@@ -144,7 +144,7 @@ async fn test_put_beyond_budget_retires_least_recently_written_keys() {
 async fn test_value_larger_than_budget_is_rejected_without_change() {
     let root = temp_root("oversize");
     let one = record_len("a", "v");
-    let storage = SledStorage::new_with_cap_and_path(one, &root)
+    let storage = FileStorage::new_with_cap_and_path(one, &root)
         .await
         .expect("open");
     storage.put("a", &"v".to_string()).await.expect("put a");
@@ -166,7 +166,7 @@ async fn test_reopen_restores_budget_in_write_order() {
     let root = temp_root("reopen");
     let one = record_len("a", "v");
     {
-        let storage = SledStorage::new_with_cap_and_path(one * 3, &root)
+        let storage = FileStorage::new_with_cap_and_path(one * 3, &root)
             .await
             .expect("open");
         for (index, key) in ["a", "b", "c"].into_iter().enumerate() {
@@ -180,12 +180,12 @@ async fn test_reopen_restores_budget_in_write_order() {
         }
     }
 
-    let reopened = SledStorage::new_with_cap_and_path(one * 2, &root)
+    let reopened = FileStorage::new_with_cap_and_path(one * 2, &root)
         .await
         .expect("reopen");
     assert_eq!(stored_keys(&reopened).await, ["b", "c"]);
     assert_eq!(
-        <SledStorage as KvStorageInterface<String>>::count(&reopened)
+        <FileStorage as KvStorageInterface<String>>::count(&reopened)
             .await
             .expect("count"),
         2

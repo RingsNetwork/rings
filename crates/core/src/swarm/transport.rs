@@ -326,7 +326,7 @@ impl SwarmTransport {
         let cursor = self
             .storage_repair_cursor
             .lock()
-            .map_err(|_| Error::DHTSyncLockError)?;
+            .map_err(|_| Error::LockPoisoned)?;
         let start = match cursor.as_ref() {
             Some(previous) => {
                 let next = ordered.partition_point(|candidate| candidate <= previous);
@@ -349,7 +349,7 @@ impl SwarmTransport {
         let mut cursor = self
             .storage_repair_cursor
             .lock()
-            .map_err(|_| Error::DHTSyncLockError)?;
+            .map_err(|_| Error::LockPoisoned)?;
         *cursor = Some(scheduled);
         Ok(())
     }
@@ -359,7 +359,7 @@ impl SwarmTransport {
         let cursor = self
             .storage_repair_cursor
             .lock()
-            .map_err(|_| Error::DHTSyncLockError)?;
+            .map_err(|_| Error::LockPoisoned)?;
         Ok(cursor.as_ref().map(|cursor| format!("{cursor:?}")))
     }
 

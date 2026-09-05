@@ -426,7 +426,7 @@ impl OnionAuthenticatedPayload {
                     return_id,
                     nonce,
                     sequence,
-                    signer.session_sk().session_public_key(),
+                    signer.session_public_key(),
                     &payload,
                 )?,
             )

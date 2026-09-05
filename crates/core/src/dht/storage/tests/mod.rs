@@ -36,6 +36,7 @@ use crate::message::types::Message;
 use crate::message::types::SyncEntriesWithSuccessor;
 use crate::storage::KvStorageInterface;
 use crate::storage::MemStorage;
+use crate::tests::expired;
 use crate::tests::live_entry;
 use crate::utils::get_epoch_ms;
 
@@ -849,11 +850,6 @@ async fn test_sync_batch_ack_deletes_acked_batch_and_retries_unacked_batches() -
     );
     assert_eq!(retried_entries, expected_remaining);
     Ok(())
-}
-
-fn expired(mut entry: Entry) -> Entry {
-    entry.expires_at_ms = Some(1);
-    entry
 }
 
 /// Retention law: a stored value whose bound elapsed is retired on read and reported absent.

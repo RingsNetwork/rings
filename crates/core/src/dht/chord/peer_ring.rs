@@ -116,11 +116,11 @@ impl PeerRing {
     }
 
     fn lock_finger_state(&self) -> Result<MutexGuard<'_, FingerTable>> {
-        self.finger.lock().map_err(|_| Error::DHTSyncLockError)
+        self.finger.lock().map_err(|_| Error::LockPoisoned)
     }
 
     fn lock_predecessor_state(&self) -> Result<MutexGuard<'_, Option<Did>>> {
-        self.predecessor.lock().map_err(|_| Error::DHTSyncLockError)
+        self.predecessor.lock().map_err(|_| Error::LockPoisoned)
     }
 
     #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
@@ -133,7 +133,7 @@ impl PeerRing {
         let _transition = self
             .topology_transition
             .lock()
-            .map_err(|_| Error::DHTSyncLockError)?;
+            .map_err(|_| Error::LockPoisoned)?;
         let mut observed = self.lock_finger_state()?;
         for (index, did) in fingers {
             if *index >= observed.slot_count() {
@@ -197,7 +197,7 @@ impl PeerRing {
         let _transition = self
             .topology_transition
             .lock()
-            .map_err(|_| Error::DHTSyncLockError)?;
+            .map_err(|_| Error::LockPoisoned)?;
         let state = self.topology_state_unlocked()?;
         Ok(observe(&state))
     }
@@ -262,7 +262,7 @@ impl PeerRing {
         let _transition = self
             .topology_transition
             .lock()
-            .map_err(|_| Error::DHTSyncLockError)?;
+            .map_err(|_| Error::LockPoisoned)?;
         let current = self.topology_state_unlocked()?;
         observe_snapshot(&current);
         let next = topology::step(&current, event, self.successor_seq.capacity());

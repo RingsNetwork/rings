@@ -69,14 +69,14 @@ impl FileIndex {
 }
 
 /// StorageInstance struct
-pub struct SledStorage {
+pub struct FileStorage {
     root: PathBuf,
     capacity: u64,
     index: RwLock<FileIndex>,
 }
 
-impl SledStorage {
-    /// New SledStorage
+impl FileStorage {
+    /// New FileStorage
     /// * cap: max_size in bytes
     /// * path: db file location
     pub async fn new_with_cap_and_path<P>(cap: u32, path: P) -> Result<Self>
@@ -141,11 +141,11 @@ impl SledStorage {
     }
 
     fn read_index(&self) -> Result<RwLockReadGuard<'_, FileIndex>> {
-        self.index.read().map_err(|_| Error::StorageLockPoisoned)
+        self.index.read().map_err(|_| Error::LockPoisoned)
     }
 
     fn write_index(&self) -> Result<RwLockWriteGuard<'_, FileIndex>> {
-        self.index.write().map_err(|_| Error::StorageLockPoisoned)
+        self.index.write().map_err(|_| Error::LockPoisoned)
     }
 
     /// Remove the record stored as `name` and forget it.
@@ -184,7 +184,7 @@ fn remove_file_if_present(path: &Path) -> Result<()> {
 }
 
 #[async_trait]
-impl<V> KvStorageInterface<V> for SledStorage
+impl<V> KvStorageInterface<V> for FileStorage
 where V: Serialize + DeserializeOwned + Sync
 {
     async fn get(&self, key: &str) -> Result<Option<V>> {
@@ -283,9 +283,9 @@ fn entry_file_name(path: &Path) -> Option<&str> {
         .then_some(file_name)
 }
 
-impl std::fmt::Debug for SledStorage {
+impl std::fmt::Debug for FileStorage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SledStorage")
+        f.debug_struct("FileStorage")
             .field("capacity", &self.capacity)
             .field("root", &self.root)
             .finish()
@@ -293,4 +293,4 @@ impl std::fmt::Debug for SledStorage {
 }
 
 #[cfg(test)]
-mod test_sled;
+mod test_file;
