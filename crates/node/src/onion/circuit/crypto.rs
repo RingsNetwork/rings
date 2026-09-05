@@ -486,7 +486,7 @@ impl OnionAuthenticatedPayload {
             &self.payload,
         )?;
         let domain = SigningDomain::new(ONION_BACKWARD_PAYLOAD_DOMAIN_TAG, network_id);
-        if !self.authentication.verify_unexpired(domain, &data) {
+        if !self.authentication.verify_live(domain, &data) {
             return Err(Error::OnionRouteError(
                 OnionRouteError::InvalidBackwardSignature,
             ));

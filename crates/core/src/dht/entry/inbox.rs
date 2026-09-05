@@ -26,16 +26,24 @@
 //! bounds replay: a holder can only hold a message inside its sender's own proof lifetime.
 //!
 //! Authority (checked by the shell, which knows who is writing): a fresh hold is admitted only
-//! from the node the owner itself routes `d` to (`find_successor(d)` answered locally), a
-//! relocation of the carrier only from the owner's predecessor as an ownership hand-off, and a
-//! removal only from `d`; a relay carrier is never fetched, cached, or replicated. Removal is
-//! per element by its add dot (an observed-remove), never by a reset floor, so a message the
-//! recipient has not seen is never dropped by a compaction it did not issue.
+//! from the node the owner itself routes `d` to (`find_successor(d)` answered locally), only
+//! while the held message's sender proof is still live by the owner's clock (so the hold instant
+//! a holder signs cannot lie about the past), a relocation of the carrier only from the owner's
+//! authenticated predecessor as an ownership hand-off, and a removal only from `d`; a relay
+//! carrier is never fetched, cached, or replicated. Removal is per element by its add dot (an
+//! observed-remove), never by a reset floor, so a message the recipient has not seen is never
+//! dropped by a compaction it did not issue.
+//!
+//! Both "responsible for `d`" (the holder's `(pred, self]`) and "routes `d` to" (the owner's
+//! successor list) are projections of failure detection: while an owner still lists the departed
+//! `d` as its head, it routes `d` to `d` and refuses the hold, and the message is lost as it was
+//! before the inbox existed. The window closes when the owner retires `d`.
 
 use serde::Deserialize;
 use serde::Serialize;
 
 use super::Entry;
+use super::EntryDot;
 use super::EntryKind;
 use super::EntryOperation;
 use crate::consts::TS_OFFSET_TOLERANCE_MS;
@@ -108,11 +116,15 @@ impl Decoder for HeldMessage {
 }
 
 impl HeldMessage {
-    /// Hold `payload` under `holder`'s authority, stamped with the current instant.
-    pub(crate) fn hold(payload: MessagePayload, holder: MessageSigner<&SessionSk>) -> Result<Self> {
+    /// Hold `payload` under `holder`'s authority at the instant `held_at_ms`.
+    pub(crate) fn hold(
+        payload: MessagePayload,
+        holder: MessageSigner<&SessionSk>,
+        held_at_ms: u128,
+    ) -> Result<Self> {
         let data = rings_codec::serialize(&payload).map_err(Error::CodecSerialize)?;
         Ok(Self {
-            holder: holder.sign(HELD_MESSAGE_DOMAIN_TAG, &data)?,
+            holder: holder.sign_at(HELD_MESSAGE_DOMAIN_TAG, &data, held_at_ms)?,
             payload,
         })
     }
@@ -130,7 +142,8 @@ impl HeldMessage {
     /// The element witness (see the module documentation).
     ///
     /// Pre: `now_ms` is the receiver's clock and `network_id` its overlay.
-    /// Post: `Ok(())` implies the payload is a `CustomMessage` addressed to `destination`, the
+    /// Post: `Ok(())` implies the payload is a `CustomMessage` whose transaction and relay are
+    /// both addressed to `destination` (so its recipient has nothing to forward), the
     /// hold instant is at most `now_ms + TS_OFFSET_TOLERANCE_MS`, the holder signature verifies
     /// inside `network_id` as of the hold instant, and the payload's transaction and hop
     /// signatures verify inside `network_id` as of the hold instant.
@@ -140,7 +153,9 @@ impl HeldMessage {
         now_ms: u128,
         network_id: u32,
     ) -> Result<()> {
-        if self.payload.transaction.destination != destination {
+        if self.payload.transaction.destination != destination
+            || self.payload.relay.destination != destination
+        {
             return Err(Error::RelayMessageNotAddressedToInbox);
         }
         if !matches!(
@@ -190,93 +205,131 @@ impl Entry {
         ))
     }
 
-    /// The element witness over every element of a relay carrier, and the carrier shape a relay
-    /// carrier must keep: no reset floor, because removal is by dot only.
+    /// Every element of this relay carrier, decoded and witnessed, in carrier order; and the
+    /// carrier shape a relay carrier must keep: no reset floor, because removal is by dot only,
+    /// and no more elements than the inbox keeps.
     ///
     /// Pre: `self.kind == EntryKind::RelayMessage`.
-    pub(super) fn validate_inbox_witness(&self, now_ms: u128, network_id: u32) -> Result<()> {
+    pub(crate) fn witnessed_inbox_elements(
+        &self,
+        now_ms: u128,
+        network_id: u32,
+    ) -> Result<Vec<HeldMessage>> {
         if self.crdt.register.is_some() {
             return Err(Error::RelayInboxRegisterNotAllowed);
         }
+        // Every element costs signature verifications; a delta the inbox could not keep is
+        // refused before the first one. (A data topic caps at materialization instead: its
+        // elements cost nothing to admit.)
+        if self.data.len() > self.kind.max_data_len() {
+            return Err(Error::RelayInboxDeltaExceedsCapacity);
+        }
         let destination = inbox_destination(self.did);
-        self.data.iter().try_for_each(|element| {
-            verified_element(element, destination, now_ms, network_id).map(drop)
-        })
+        self.data
+            .iter()
+            .map(|element| verified_element(element, destination, now_ms, network_id))
+            .collect()
     }
 
-    /// Whether every element of this relay delta was held by `holder`.
-    ///
-    /// Pre: `self` passed [`Self::validate_inbox_witness`], so every element decodes.
-    pub(crate) fn every_element_held_by(&self, holder: Did) -> bool {
-        self.data.iter().all(|element| {
-            HeldMessage::from_encoded(element).is_ok_and(|held| held.holder() == holder)
-        })
+    /// The element witness over every element of a relay carrier.
+    pub(super) fn validate_inbox_witness(&self, now_ms: u128, network_id: u32) -> Result<()> {
+        self.witnessed_inbox_elements(now_ms, network_id).map(drop)
     }
 
-    /// Partition this inbox into the messages its recipient may deliver and the dots of every
-    /// element it must retire: the delivered ones and the ones that fail the witness under the
-    /// recipient's overlay (junk a misbehaving owner relocated).
+    /// Partition this stored inbox into the elements its recipient may deliver, each with the
+    /// add dot that retires it, and the removal delta of every element that fails the witness
+    /// under the recipient's overlay (junk a misbehaving owner relocated).
     ///
-    /// Post: `deliverable` is in carrier order; `retired` names every element of the carrier.
-    pub(crate) fn drain_inbox(&self, now_ms: u128, network_id: u32) -> InboxDrain {
+    /// Pre: `self` is the materialized stored carrier, so `data` and `crdt.dots` align.
+    /// Post: `deliverable` is in carrier order; `deliverable` dots and `rejected` dots together
+    /// are every dot of the carrier.
+    pub(crate) fn partition_inbox(&self, now_ms: u128, network_id: u32) -> InboxDrain {
         let destination = inbox_destination(self.did);
         let mut deliverable = Vec::new();
-        let mut rejected = 0usize;
-        for element in &self.data {
+        let mut rejected = Vec::new();
+        for (element, dot) in self.data.iter().zip(self.crdt.dots.iter().copied()) {
             match verified_element(element, destination, now_ms, network_id) {
-                Ok(held) => deliverable.push(held.payload),
-                Err(_) => rejected = rejected.saturating_add(1),
+                Ok(held) => deliverable.push(InboxElement {
+                    dot,
+                    payload: held.payload,
+                }),
+                Err(_) => rejected.push(dot),
             }
         }
         InboxDrain {
             deliverable,
-            rejected,
-            retired: self.tombstone_delta(),
+            rejected: self.removal_of(rejected),
         }
     }
 
-    /// The removal delta naming every element of this carrier by its add dot.
-    fn tombstone_delta(&self) -> Entry {
+    /// The removal delta of this carrier naming `dots`.
+    pub(crate) fn removal_of(&self, dots: impl IntoIterator<Item = EntryDot>) -> Entry {
         let mut removal = Self::new(self.did, Vec::new(), EntryKind::RelayMessage);
-        removal.crdt.dots = self.crdt.dots.clone();
+        removal.crdt.dots = dots.into_iter().collect();
         removal
     }
 }
 
-/// The outcome of draining an inbox: what to deliver and what to retire.
+/// One deliverable inbox element: the payload and the add dot that retires it once delivered.
+#[derive(Debug)]
+pub(crate) struct InboxElement {
+    /// The add dot of the element in the stored carrier.
+    pub(crate) dot: EntryDot,
+    /// The held application payload.
+    pub(crate) payload: MessagePayload,
+}
+
+/// The outcome of partitioning an inbox: what to deliver and what to retire unread.
 #[derive(Debug)]
 pub(crate) struct InboxDrain {
-    /// Messages that pass the witness, in carrier order.
-    pub(crate) deliverable: Vec<MessagePayload>,
-    /// Elements that failed the witness under the recipient's overlay.
-    pub(crate) rejected: usize,
-    /// The tombstone delta retiring every element of the drained carrier.
-    pub(crate) retired: Entry,
+    /// Elements that pass the witness, in carrier order.
+    pub(crate) deliverable: Vec<InboxElement>,
+    /// The removal delta of the elements that failed the witness; empty when none did.
+    pub(crate) rejected: Entry,
 }
 
 impl EntryOperation {
-    /// The authority law of a relay-carrier operation: a hold (`Extend`) only from the node the
-    /// owner routes the destination to (`responsible`, `None` when that route is not local), a
-    /// removal (`Tombstone`) only from the recipient, and no other operation.
+    /// The write law of a relay-carrier operation issued by `writer` at the owner's clock
+    /// `now_ms`: a hold (`Extend`) only from the node the owner routes the destination to
+    /// (`responsible`, `None` when that route is not local), every element held by that node,
+    /// and held while its sender's proof is still live by the owner's own clock; a removal
+    /// (`Tombstone`) only from the recipient; no other operation.
     ///
-    /// Pre: the carried entry passed the element witness.
-    pub(crate) fn validate_inbox_authority(
+    /// The freshness bound is what makes the hold instant honest: the holder signs it, so the
+    /// witness alone would let a holder judge an old message at a time of its choosing. Judged
+    /// once here at the write, it bounds replay by the sender's proof lifetime; relocation and
+    /// delivery then judge as of the recorded instant, which keeps them monotone in time.
+    ///
+    /// Post: `Ok(())` implies the carried entry passed the element witness; authority is judged
+    /// before any signature is verified, so a stranger costs the owner no verification.
+    pub(crate) fn validate_inbox_write(
         &self,
         writer: Did,
         responsible: Option<Did>,
+        now_ms: u128,
+        network_id: u32,
     ) -> Result<()> {
-        let entry = self.entry();
         match self {
-            EntryOperation::Extend(_) => {
-                let holds = responsible
-                    .is_some_and(|node| writer == node && entry.every_element_held_by(node));
-                holds
-                    .then_some(())
-                    .ok_or(Error::RelayMessageHolderNotResponsible)
+            EntryOperation::Extend(entry) => {
+                if responsible != Some(writer) {
+                    return Err(Error::RelayMessageHolderNotResponsible);
+                }
+                for held in entry.witnessed_inbox_elements(now_ms, network_id)? {
+                    if held.holder() != writer {
+                        return Err(Error::RelayMessageHolderNotResponsible);
+                    }
+                    if !held.payload.transaction.verification.is_live_at(now_ms) {
+                        return Err(Error::RelayMessageHoldStale);
+                    }
+                }
+                Ok(())
             }
-            EntryOperation::Tombstone(_) => (writer == inbox_destination(entry.did))
-                .then_some(())
-                .ok_or(Error::RelayInboxWriterNotRecipient),
+            EntryOperation::Tombstone(entry) => {
+                if writer != inbox_destination(entry.did) {
+                    return Err(Error::RelayInboxWriterNotRecipient);
+                }
+                entry.validate_inbox_witness(now_ms, network_id)
+            }
             EntryOperation::Overwrite(_)
             | EntryOperation::Touch(_)
             | EntryOperation::CompactData(_) => Err(Error::RelayInboxOperationNotAllowed),
@@ -286,8 +339,10 @@ impl EntryOperation {
 
 /// The authority law of a relay-carrier relocation: an ownership hand-off is accepted only from
 /// the receiver's predecessor, the owner whose interval the carrier is leaving.
-pub(crate) fn validate_inbox_relocation(origin: Did, predecessor: Option<Did>) -> Result<()> {
-    (predecessor == Some(origin))
+///
+/// Pre: `sender` is the authenticated signer of the hand-off, not its peer-declared relay path.
+pub(crate) fn validate_inbox_relocation(sender: Did, predecessor: Option<Did>) -> Result<()> {
+    (predecessor == Some(sender))
         .then_some(())
         .ok_or(Error::RelayInboxNotRelocatable)
 }

@@ -100,6 +100,16 @@ impl Entry {
     /// a key: an accepted floor can exceed the receiver's clock only by the message skew
     /// tolerance, so honest writers issued after that tolerance elapses dominate it again.
     pub fn validate_admissible_at(&self, now_ms: u128, network_id: u32) -> Result<()> {
+        self.validate_bounds_at(now_ms)?;
+        match self.kind {
+            EntryKind::Data => Ok(()),
+            EntryKind::RelayMessage => self.validate_inbox_witness(now_ms, network_id),
+        }
+    }
+
+    /// The kind-independent part of the admission law: liveness, retention bound, version
+    /// clocks, and payload sizes.
+    pub(crate) fn validate_bounds_at(&self, now_ms: u128) -> Result<()> {
         if !self.is_live_at(now_ms) {
             return Err(Error::EntryNotLive);
         }
@@ -119,10 +129,7 @@ impl Entry {
         if !self.data.iter().all(payload_within_bound) {
             return Err(Error::EntryPayloadExceedsMax);
         }
-        match self.kind {
-            EntryKind::Data => Ok(()),
-            EntryKind::RelayMessage => self.validate_inbox_witness(now_ms, network_id),
-        }
+        Ok(())
     }
 }
 

@@ -5,7 +5,6 @@ use std::sync::Arc;
 use async_recursion::async_recursion;
 use async_trait::async_trait;
 
-use crate::dht::entry::inbox::inbox_destination;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::EntryOperation;
@@ -249,14 +248,10 @@ async fn handle_storage_search_act(
 ) -> Result<()> {
     match act {
         PeerRingAction::SomeEntry(evidence) => {
-            // A relay inbox is readable by its recipient alone.
+            // A relay inbox is never fetched: its recipient drains it from local storage, so a
+            // lookup sees it as absent whoever asks.
             let data = match evidence.entry.kind {
                 EntryKind::Data => vec![evidence.entry],
-                EntryKind::RelayMessage
-                    if ctx.transaction.signer() == inbox_destination(evidence.entry.did) =>
-                {
-                    vec![evidence.entry]
-                }
                 EntryKind::RelayMessage => Vec::new(),
             };
             handler
@@ -482,10 +477,12 @@ impl HandleMsg<SyncEntriesWithSuccessor> for MessageHandler {
                 .await;
         }
 
-        let origin = ctx.relay.try_origin_sender()?;
+        // The sender is the transaction signer, the one origin the transport authenticated; the
+        // relay path is peer-declared and forwards unchanged, so it names nobody.
+        let sender = ctx.transaction.signer();
         let acks = self
             .transport
-            .persist_storage_sync_entries(msg, origin)
+            .persist_storage_sync_entries(msg, sender)
             .await?;
         if msg.purpose.permits_source_cleanup() {
             if let Err(e) =

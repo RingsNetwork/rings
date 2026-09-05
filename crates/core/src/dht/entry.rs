@@ -45,6 +45,20 @@ impl EntryKind {
         }
     }
 
+    /// Whether this kind is a relay inbox.
+    pub const fn is_relay_inbox(self) -> bool {
+        matches!(self, EntryKind::RelayMessage)
+    }
+
+    /// The replication a carrier of this kind actually gets when `requested` is configured: a
+    /// relay inbox has one owner and is never replicated.
+    pub const fn replication(self, requested: u16) -> u16 {
+        match self {
+            EntryKind::Data => requested,
+            EntryKind::RelayMessage => 1,
+        }
+    }
+
     /// The greatest number of tombstones a carrier of this kind keeps. A data topic keeps every
     /// tombstone below its reset floor's pruning; a relay inbox has one owner and one
     /// ack-gated relocation at a time, so a stale copy can only be transient and the newest
@@ -70,8 +84,8 @@ enum EntryWitness {
     Elements(EntryStampKind),
     /// A register floor only.
     Register,
-    /// No witness: the operation names existing dots or values.
-    None,
+    /// A reference witness: the operation names existing dots or values and issues none.
+    Reference,
 }
 
 // Canonical stamp input for EntryVersion.operation.
@@ -353,7 +367,7 @@ impl EntryOperation {
             match witness {
                 EntryWitness::Elements(kind) => entry.ensure_stamp_after(now_ms, actor, None, kind),
                 EntryWitness::Register => entry.ensure_overwrite_stamp_after(now_ms, actor, None),
-                EntryWitness::None => Ok(entry),
+                EntryWitness::Reference => Ok(entry),
             }
         })
     }
@@ -365,7 +379,7 @@ impl EntryOperation {
             EntryOperation::Extend(_) | EntryOperation::Touch(_) => {
                 EntryWitness::Elements(EntryStampKind::Delta)
             }
-            EntryOperation::Tombstone(_) => EntryWitness::None,
+            EntryOperation::Tombstone(_) => EntryWitness::Reference,
             EntryOperation::CompactData(_) => EntryWitness::Register,
         }
     }
@@ -403,7 +417,7 @@ impl EntryOperation {
     }
 
     /// Generate a target Entry when it is not existed.
-    pub fn gen_default_entry(self) -> Result<Entry> {
+    pub fn gen_default_entry(&self) -> Result<Entry> {
         Ok(Entry::new(self.did()?, vec![], self.kind()))
     }
 }
@@ -739,7 +753,7 @@ impl Entry {
     }
 
     fn is_data_entry(&self) -> bool {
-        self.kind == EntryKind::Data
+        !self.kind.is_relay_inbox()
     }
 
     fn same_kind_as(&self, other: &Self) -> bool {

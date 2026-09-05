@@ -44,13 +44,16 @@ use crate::utils::get_epoch_ms;
 pub struct DomainTag(&'static str);
 
 impl DomainTag {
-    /// Name a message family, or `None` when `label` does not fit its length prefix.
-    pub const fn new(label: &'static str) -> Option<Self> {
-        if label.len() <= u8::MAX as usize {
-            Some(Self(label))
-        } else {
-            None
-        }
+    /// Name a message family.
+    ///
+    /// Pre: `label.len() <= u8::MAX`, the length prefix's width; a longer label is a programming
+    /// error and is refused here, at compile time when the constructor runs in a `const`.
+    pub const fn new(label: &'static str) -> Self {
+        assert!(
+            label.len() <= u8::MAX as usize,
+            "domain tag label must fit its one-byte length prefix"
+        );
+        Self(label)
     }
 
     /// The label bytes.
@@ -64,20 +67,12 @@ impl DomainTag {
     }
 }
 
-/// Name a message family from a literal, rejecting at compile time a label longer than the
-/// one-byte length prefix allows.
+/// Name a message family from a literal in a `const`, so a label longer than the one-byte
+/// length prefix allows is refused at compile time.
 #[macro_export]
 macro_rules! domain_tag {
     ($label:literal) => {{
-        const _: () = assert!(
-            $label.len() <= u8::MAX as usize,
-            "domain tag label must fit its one-byte length prefix"
-        );
-        const TAG: $crate::message::DomainTag = match $crate::message::DomainTag::new($label) {
-            Some(tag) => tag,
-            // Excluded by the assertion above.
-            None => unreachable!(),
-        };
+        const TAG: $crate::message::DomainTag = $crate::message::DomainTag::new($label);
         TAG
     }};
 }
@@ -186,8 +181,13 @@ where S: Borrow<SessionSk>
     /// Sign `data` as a member of the message family `tag` inside this overlay, stamped with
     /// the current time and the default TTL.
     pub fn sign(&self, tag: DomainTag, data: &[u8]) -> Result<MessageVerification> {
+        self.sign_at(tag, data, get_epoch_ms())
+    }
+
+    /// Sign `data` as a member of the message family `tag` inside this overlay, stamped with
+    /// the instant `ts_ms` and the default TTL.
+    pub fn sign_at(&self, tag: DomainTag, data: &[u8], ts_ms: u128) -> Result<MessageVerification> {
         let domain = SigningDomain::new(tag, self.network_id);
-        let ts_ms = get_epoch_ms();
         let ttl_ms = DEFAULT_TTL_MS;
         let msg = domain.transcript(data, ts_ms, ttl_ms);
         Ok(MessageVerification {
@@ -253,14 +253,19 @@ impl MessageVerification {
             && now_ms <= self.ts_ms.saturating_add(self.ttl_ms as u128)
     }
 
-    /// Verify the signature only when the verification timestamp is still live.
-    pub fn verify_unexpired(&self, domain: SigningDomain, data: &[u8]) -> bool {
-        if self.is_expired() {
-            tracing::warn!("message expired");
+    /// Verify the signature only when the proof is live now.
+    pub fn verify_live(&self, domain: SigningDomain, data: &[u8]) -> bool {
+        self.verify_live_at(domain, data, get_epoch_ms())
+    }
+
+    /// Verify the signature as of `at_ms`, requiring the proof to have been live then: the one
+    /// composition of liveness, session validity, and signature every verifying path uses.
+    pub fn verify_live_at(&self, domain: SigningDomain, data: &[u8], at_ms: u128) -> bool {
+        if !self.is_live_at(at_ms) {
+            tracing::warn!("message proof not live at the judged instant");
             return false;
         }
-
-        self.verify(domain, data)
+        self.verify_at(domain, data, at_ms)
     }
 }
 
@@ -290,16 +295,12 @@ pub trait MessageVerificationExt {
     /// held message as of the instant its holder received it, so a sender's session expiring
     /// afterwards does not retroactively unverify a message that was valid when held.
     fn verify_at(&self, network_id: u32, at_ms: u128) -> bool {
-        if !self.verification().is_live_at(at_ms) {
-            tracing::warn!("message proof not live at the judged instant");
-            return false;
-        }
         let Ok(data) = self.verification_data() else {
             tracing::warn!("MessageVerificationExt verify get verification_data failed");
             return false;
         };
 
-        self.verification().verify_at(
+        self.verification().verify_live_at(
             SigningDomain::new(Self::DOMAIN_TAG, network_id),
             &data,
             at_ms,
@@ -379,18 +380,18 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_unexpired_rejects_ttl_above_max() -> Result<()> {
+    fn test_verify_live_rejects_ttl_above_max() -> Result<()> {
         let key = SecretKey::random();
         let session_sk = SessionSk::new_with_seckey(&key)?;
         let proof = signed_verification(&[], &session_sk, get_epoch_ms(), MAX_TTL_MS + 1)?;
 
         assert!(proof.is_expired());
-        assert!(!proof.verify_unexpired(fixture_domain(), &[]));
+        assert!(!proof.verify_live(fixture_domain(), &[]));
         Ok(())
     }
 
     #[test]
-    fn test_verify_unexpired_rejects_timestamp_beyond_future_tolerance() -> Result<()> {
+    fn test_verify_live_rejects_timestamp_beyond_future_tolerance() -> Result<()> {
         let key = SecretKey::random();
         let session_sk = SessionSk::new_with_seckey(&key)?;
         let proof = signed_verification(
@@ -401,7 +402,7 @@ mod tests {
         )?;
 
         assert!(proof.is_expired());
-        assert!(!proof.verify_unexpired(fixture_domain(), &[]));
+        assert!(!proof.verify_live(fixture_domain(), &[]));
         Ok(())
     }
 
@@ -422,11 +423,11 @@ mod tests {
 
     /// Law: a label longer than the one-byte length prefix is not a tag.
     #[test]
+    #[should_panic(expected = "domain tag label must fit its one-byte length prefix")]
     fn test_domain_tag_rejects_label_beyond_length_prefix() {
         const LONG: &str = "rings-core:test:long-label:v1 - 0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789";
         assert!(LONG.len() > usize::from(u8::MAX));
-        assert!(DomainTag::new(LONG).is_none());
-        assert!(DomainTag::new("rings-core:test:short:v1").is_some());
+        let _ = DomainTag::new(LONG);
     }
 
     /// Law: a signature issued for overlay `n` does not verify under overlay `n' != n`.

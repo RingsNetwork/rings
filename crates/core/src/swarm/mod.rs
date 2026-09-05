@@ -50,15 +50,12 @@ impl Swarm {
 
     /// Get the local account public key used for E2E public-key negotiation.
     pub fn account_pubkey(&self) -> Result<PublicKey<33>> {
-        self.transport.session_sk().session().account_pubkey()
+        self.transport.session().account_pubkey()
     }
 
     /// Get the typed account verification public key.
     pub fn account_verification_pubkey(&self) -> Result<VerificationPublicKey> {
-        self.transport
-            .session_sk()
-            .session()
-            .account_verification_pubkey()
+        self.transport.session().account_verification_pubkey()
     }
 
     /// Get this swarm's network id.
@@ -87,11 +84,7 @@ impl Swarm {
     }
 
     fn callback(&self) -> Result<SharedSwarmCallback> {
-        Ok(self
-            .callback
-            .read()
-            .map_err(|_| Error::LockPoisoned)?
-            .clone())
+        self.callback.current()
     }
 
     fn inner_callback(&self) -> Result<InnerSwarmCallback> {
@@ -103,11 +96,7 @@ impl Swarm {
 
     /// Set callback for swarm.
     pub fn set_callback(&self, callback: SharedSwarmCallback) -> Result<()> {
-        let mut inner = self.callback.write().map_err(|_| Error::LockPoisoned)?;
-
-        *inner = callback;
-
-        Ok(())
+        self.callback.replace(callback)
     }
 
     /// Create [Stabilizer] for swarm; it delivers to whichever callback is set when it delivers.

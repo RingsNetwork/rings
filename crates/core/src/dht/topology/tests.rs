@@ -651,3 +651,20 @@ fn test_predecessor_and_finger_steps_never_report_a_head_change() {
             .any(|action| matches!(action, TopologyAction::SuccessorHeadChanged(_))));
     }
 }
+
+#[test]
+fn test_responsibility_is_the_predecessor_interval_or_standing_alone() {
+    let local = did(10);
+    let with_predecessor = state(local, vec![did(20)], Some(did(5)), vec![None; 5], 0);
+    assert!(is_responsible_for(&with_predecessor, did(10)));
+    assert!(is_responsible_for(&with_predecessor, did(7)));
+    assert!(!is_responsible_for(&with_predecessor, did(5)));
+    assert!(!is_responsible_for(&with_predecessor, did(15)));
+
+    let uninformed = state(local, vec![did(20)], None, vec![None; 5], 0);
+    assert!(!is_responsible_for(&uninformed, did(7)));
+
+    let alone = state(local, Vec::new(), None, vec![None; 5], 0);
+    assert!(is_responsible_for(&alone, did(7)));
+    assert!(is_responsible_for(&alone, did(15)));
+}

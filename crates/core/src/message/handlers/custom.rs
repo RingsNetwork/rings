@@ -8,6 +8,15 @@ use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 
+/// How this node stands to a message's destination.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Reachability {
+    /// The destination can be reached, or is somebody else's to reach: forward.
+    Reachable,
+    /// This node is responsible for the destination's position and it has no connection: hold.
+    Offline,
+}
+
 /// The effect an application message requires at `local`.
 ///
 /// Post: a message for `local` needs no effect; a message for a destination this node is
@@ -16,14 +25,15 @@ use crate::message::MessagePayload;
 pub(crate) fn custom_message_effects<'payload>(
     local: Did,
     ctx: &'payload MessagePayload,
-    destination_offline: bool,
+    destination: Reachability,
 ) -> Option<CoreEffect<'payload>> {
     if !ctx.should_forward_from(local) {
         None
-    } else if destination_offline {
-        Some(CoreEffect::hold_for_offline_destination(ctx))
     } else {
-        Some(CoreEffect::forward_payload(ctx, None))
+        Some(match destination {
+            Reachability::Offline => CoreEffect::hold_for_offline_destination(ctx),
+            Reachability::Reachable => CoreEffect::forward_payload(ctx, None),
+        })
     }
 }
 
@@ -31,12 +41,8 @@ pub(crate) fn custom_message_effects<'payload>(
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<CustomMessage> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, _: &CustomMessage) -> Result<()> {
-        let destination_offline = self.destination_is_offline(ctx.transaction.destination)?;
-        self.run_effects(custom_message_effects(
-            self.dht.did,
-            ctx,
-            destination_offline,
-        ))
-        .await
+        let destination = self.destination_reachability(ctx.transaction.destination)?;
+        self.run_effects(custom_message_effects(self.dht.did, ctx, destination))
+            .await
     }
 }

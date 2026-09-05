@@ -50,22 +50,61 @@ use inbound::ReassemblyClock;
 
 /// The application the swarm currently delivers to, replaceable through `Swarm::set_callback`;
 /// every delivery resolves it at delivery time.
-pub type SwarmCallbackSlot = Arc<RwLock<SharedSwarmCallback>>;
-
-/// Deliver a payload addressed to this node that did not arrive over a connection (a message
-/// drained from this node's relay inbox) through the same pipeline an inbound frame takes:
-/// application validation under the inbound deadline, handler dispatch, then `on_inbound`
-/// under the inbound deadline.
 ///
-/// Pre: `payload.transaction.destination == transport.dht.did` and the payload was verified by
-/// the caller (the inbox witness verifies it as of its hold instant).
-pub(crate) async fn deliver_local_payload(
-    transport: Arc<SwarmTransport>,
-    callback: SharedSwarmCallback,
-    payload: &MessagePayload,
-) -> crate::error::Result<()> {
-    let processor = InboundProcessor::new(transport, callback, ReassemblyClock::system());
-    inbound::deliver_local(&processor, payload).await
+/// Lock law: the slot is read for the duration of one clone and written for one replacement, so
+/// a poisoned slot (`Error::LockPoisoned`) is the only failure either can report.
+#[derive(Clone)]
+pub struct SwarmCallbackSlot(Arc<RwLock<SharedSwarmCallback>>);
+
+impl SwarmCallbackSlot {
+    /// A slot holding `callback`.
+    pub fn new(callback: SharedSwarmCallback) -> Self {
+        Self(Arc::new(RwLock::new(callback)))
+    }
+
+    /// The callback currently set.
+    pub fn current(&self) -> crate::error::Result<SharedSwarmCallback> {
+        Ok(self
+            .0
+            .read()
+            .map_err(|_| crate::error::Error::LockPoisoned)?
+            .clone())
+    }
+
+    /// Replace the callback for every later delivery.
+    pub fn replace(&self, callback: SharedSwarmCallback) -> crate::error::Result<()> {
+        *self
+            .0
+            .write()
+            .map_err(|_| crate::error::Error::LockPoisoned)? = callback;
+        Ok(())
+    }
+}
+
+/// Delivery of payloads addressed to this node that did not arrive over a connection (messages
+/// drained from this node's relay inbox), through the same pipeline an inbound frame takes:
+/// application validation under the inbound deadline, handler dispatch, then `on_inbound` under
+/// the inbound deadline. Built once per drain; the connection-shaped state of the processor is
+/// unused, as a drained payload is already whole.
+pub(crate) struct LocalDelivery {
+    processor: InboundProcessor,
+}
+
+impl LocalDelivery {
+    /// Deliver to `callback` through `transport`'s handlers.
+    pub(crate) fn new(transport: Arc<SwarmTransport>, callback: SharedSwarmCallback) -> Self {
+        Self {
+            processor: InboundProcessor::new(transport, callback, ReassemblyClock::system()),
+        }
+    }
+
+    /// Deliver one payload.
+    ///
+    /// Pre: `payload.transaction.destination` is this node and the payload was verified by the
+    /// caller (the inbox witness verifies it as of its hold instant).
+    pub(crate) async fn deliver(&self, payload: &MessagePayload) -> crate::error::Result<()> {
+        inbound::deliver_local(&self.processor, payload).await
+    }
 }
 
 pub use crate::error::CallbackError;

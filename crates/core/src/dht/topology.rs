@@ -364,6 +364,19 @@ pub fn successor_head(state: &TopologyState) -> Option<Did> {
         .find(|successor| *successor != state.local)
 }
 
+/// `Responsible(n, id)`: `id ∈ (pred(n), n]`, so `n` is the Chord successor of the position
+/// `id`. Without a known predecessor `n` is responsible only when it stands alone: a node that
+/// has successors but has not yet learned its predecessor is uninformed, not responsible for
+/// the whole ring.
+pub fn is_responsible_for(state: &TopologyState, id: Did) -> bool {
+    match state.predecessor {
+        Some(predecessor) => {
+            id != predecessor && dist(predecessor, id) <= dist(predecessor, state.local)
+        }
+        None => successor_head(state).is_none(),
+    }
+}
+
 /// Pure Chord successor lookup against one topology state.
 ///
 /// `Local(head)` answers when `did` lies in the local successor interval

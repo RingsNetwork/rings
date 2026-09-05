@@ -164,6 +164,14 @@ pub enum Error {
     #[error("Relay inbox element payload does not verify as of its hold instant")]
     RelayMessageHeldOutsideSenderProof,
 
+    /// Relay inbox hold arrived after its message's sender proof expired
+    #[error("Relay inbox hold arrived after its message's sender proof expired")]
+    RelayMessageHoldStale,
+
+    /// Relay inbox delta carries more elements than the inbox keeps
+    #[error("Relay inbox delta carries more elements than the inbox keeps")]
+    RelayInboxDeltaExceedsCapacity,
+
     /// Relay inbox element was not held by the node responsible for its destination
     #[error("Relay inbox element was not held by the node responsible for its destination")]
     RelayMessageHolderNotResponsible,

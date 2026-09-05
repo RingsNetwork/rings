@@ -230,14 +230,7 @@ impl PeerRing {
     /// merely uninformed, not responsible for the whole ring. A message addressed to an
     /// unreachable `did` in this interval has reached the node that must hold it.
     pub(crate) fn is_responsible_for(&self, did: Did) -> Result<bool> {
-        let state = self.topology_state()?;
-        Ok(match state.predecessor {
-            Some(predecessor) => {
-                did != predecessor
-                    && topology::dist(predecessor, did) <= topology::dist(predecessor, self.did)
-            }
-            None => topology::successor_head(&state).is_none(),
-        })
+        self.with_topology_state(|state| topology::is_responsible_for(state, did))
     }
 
     /// The node this owner routes the position `destination` to, when its own view answers:

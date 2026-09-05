@@ -13,7 +13,6 @@ use crate::dht::chord::PeerRing;
 use crate::dht::chord::PeerRingAction;
 use crate::dht::did::BiasId;
 use crate::dht::entry::Entry;
-use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
 use crate::dht::ChordStorageSync;
@@ -124,7 +123,7 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
         // (see the `inbox` module); data topics follow the configured mode.
         let (relay, data): (Vec<_>, Vec<_>) = all_items
             .into_iter()
-            .partition(|(_, entry)| entry.kind == EntryKind::RelayMessage);
+            .partition(|(_, entry)| entry.kind.is_relay_inbox());
         let mut actions = vec![self.hand_off_beyond_successor(new_successor, relay)?];
         actions.push(if self.storage_virtual_nodes_enabled()? {
             self.copy_entries_to_observed_virtual_storage_owners(data)?
@@ -183,9 +182,7 @@ impl PeerRing {
         let mut data = Vec::<PlacedEntry>::new();
         for (entry_key_str, entry) in items {
             let entry_key = Did::from_str(&entry_key_str)?;
-            if BiasId::cmp_from_observer(self.did, entry_key, new_successor)
-                == std::cmp::Ordering::Greater
-            {
+            if self.placed_beyond(entry_key, new_successor) {
                 data.push(PlacedEntry::new(entry_key, entry));
             }
         }
@@ -201,6 +198,12 @@ impl PeerRing {
             })
             .collect::<Vec<_>>()
             .into())
+    }
+
+    /// `key ∉ (self, head]`: the placement lies beyond this node's interval up to `head`, so
+    /// `head` (or a node past it) owns it now.
+    fn placed_beyond(&self, key: Did, head: Did) -> bool {
+        BiasId::cmp_from_observer(self.did, key, head) == std::cmp::Ordering::Greater
     }
 
     fn copy_entries_to_observed_virtual_storage_owners(

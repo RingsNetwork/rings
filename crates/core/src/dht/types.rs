@@ -81,9 +81,10 @@ pub trait ChordStorageSync<Action>: Chord<Action> {
     /// `new_successor`. The storage repair pass runs this against the current
     /// successor head, whichever input moved it, so repetition must be idempotent.
     ///
-    /// Mode law: with storage virtual nodes enabled, `new_successor` is only the
-    /// stabilization trigger. The copy target is the current
-    /// `storage_owner(k, view, cfg)` relation, not necessarily `new_successor`.
+    /// Mode law: a relay inbox is placed by the ring geometry in every mode and
+    /// is always offered to `new_successor`. With storage virtual nodes enabled a
+    /// data topic follows the current `storage_owner(k, view, cfg)` relation
+    /// instead, and `new_successor` is only the trigger of that additive copy.
     ///
     /// Post: this only delivers entry joins. Local cleanup is performed by
     /// [`Self::acknowledge_synced_entries`] after the successor reports durable

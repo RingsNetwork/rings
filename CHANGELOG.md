@@ -22,23 +22,20 @@
   write to their key.
 - Storage admission rejects peer-supplied CRDT versions whose logical time is more than
   `TS_OFFSET_TOLERANCE_MS` ahead of the receiver's clock, so a forged register floor can no longer
-  pin a key, and rejects any payload element larger than `ENTRY_PAYLOAD_MAX_BYTES` (64 KiB), so a
+  pin a key, and rejects any payload element larger than `ENTRY_PAYLOAD_MAX_BYTES` (32 KiB), so a
   carrier holds at most `ENTRY_DATA_MAX_LEN * ENTRY_PAYLOAD_MAX_BYTES` encoded bytes. Admission is
   applied to the peer-supplied delta, never to the receiver's join result.
 - `Entry::operate`, `overwrite`, `extend`, `touch`, `compact_data`, and `EntryOperation::stamped`
   take the operation-boundary time explicitly; the clock is read only at the storage boundary.
-  `Entry::extend` applies to relay inboxes as well as data topics; `compact_data` stays a data
-  topic operation. `Session::verify_at`, `MessageVerification::verify_at`, and
-  `MessageVerificationExt::verify_at` judge a signature as of a given instant; the
-  liveness-free `verify_signature` is gone. `MessageSigner::to_owned` is `owned`.
-  `ENTRY_PAYLOAD_MAX_BYTES` is 32 KiB so a full carrier fits one transport message (checked at
-  compile time). The stabilizer resolves the swarm callback at delivery time, so
-  `Swarm::set_callback` after `listen` is honoured by inbox delivery.
+  `Entry::extend` applies to relay inboxes as well as data topics. `Session::verify_at`,
+  `MessageVerification::{verify_at, verify_live, verify_live_at}`, and
+  `MessageVerificationExt::verify_at` judge a signature as of a given instant;
+  `MessageVerification::verify_unexpired` is `verify_live`. A full carrier fits one transport
+  message by a compile-time law over `ENTRY_DATA_MAX_LEN` and `ENTRY_PAYLOAD_MAX_BYTES`.
 - `rings_core::storage::sled::SledStorage` is `rings_core::storage::file::FileStorage`, the name
   of what it has been since the byte budget landed: one file per key under a budget. The three
   poisoned-lock errors (`DHTSyncLockError`, `CallbackSyncLockError`, `StorageLockPoisoned`) are
-  one `Error::LockPoisoned`. `MessageSigner` no longer hands out its session key; it exposes
-  `session_public_key`.
+  one `Error::LockPoisoned`.
 
 ### Added
 
@@ -53,15 +50,16 @@
   verifies *as of the hold instant* (`MessageVerificationExt::verify_at`; a sender's session
   expiring later does not unverify a held message, and a holder can hold only inside the sender's
   proof lifetime). Authority is checked at the write: a hold only from the node the owner routes
-  the destination to, a removal only from the recipient, a relocation only as an ownership
-  hand-off from the predecessor; a relay carrier is never fetched, cached, replicated, or read by
-  anyone but its recipient. Removal is per element by its add dot (never a reset floor), the
+  the destination to and only while the message's sender proof is still live by the owner's own
+  clock, a removal only from the recipient, a relocation only as an ownership hand-off from the
+  authenticated predecessor; a relay carrier is never fetched, cached, replicated, or returned to
+  a lookup. Removal is per element by its add dot (never a reset floor), the
   carrier keeps at most `RELAY_INBOX_MAX_LEN` (64) newest messages, and inboxes are retained for
   `DEFAULT_RELAY_INBOX_TTL_MS` (24 h) after the last hold, up to `MAX_RELAY_INBOX_TTL_MS` (7 d).
   When the peer returns its inbox key falls into its own storage interval and the predecessor's
   repair pass hands it over; every storage maintenance pass the peer drains its local inbox
   through the inbound pipeline (application validation, dispatch, `on_inbound`, each under the
-  inbound deadline) and tombstones the drained elements. Delivery is at least once.
+  inbound deadline) and tombstones each element as it is delivered. Delivery is at least once.
 
 ### Fixed
 

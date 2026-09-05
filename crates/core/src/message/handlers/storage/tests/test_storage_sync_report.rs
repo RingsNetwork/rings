@@ -7,6 +7,8 @@ use super::test_support::physical_sync_route_next_hop;
 use super::test_support::prepare_node_with_virtual_nodes;
 use super::test_support::storage_sync_route_next_hop;
 use super::test_support::NoopCallback;
+use crate::dht::entry::inbox::HeldMessage;
+use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
@@ -28,12 +30,17 @@ use crate::message::Encoder;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
+use crate::message::MessageSigner;
 use crate::message::PayloadSender;
+use crate::session::SessionSk;
 use crate::tests::default::assert_no_more_msg;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;
+use crate::tests::live;
 use crate::tests::live_entry;
 use crate::tests::manually_establish_connection;
+use crate::tests::TEST_NETWORK_ID;
+use crate::utils::get_epoch_ms;
 
 #[tokio::test]
 async fn test_sync_entries_handler_reports_persisted_entries() -> Result<()> {
@@ -99,18 +106,40 @@ async fn test_sync_entries_handler_reports_persisted_entries() -> Result<()> {
     Ok(())
 }
 
-/// Relocation law: a relay carrier offered by anyone but the receiver's predecessor is skipped
-/// without an acknowledgement, and the data entries sharing its batch are still accepted; the
-/// carrier is not invalid, only not this receiver's to take yet.
+/// A witnessed inbox carrier for `destination`, held now by a fresh session.
+fn held_inbox_for(destination: Did) -> Result<Entry> {
+    let sender = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let holder = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let payload = MessagePayload::new_send(
+        Message::custom(b"held")?,
+        MessageSigner::new(&sender, TEST_NETWORK_ID),
+        destination,
+        destination,
+    )?;
+    let held = HeldMessage::hold(
+        payload,
+        MessageSigner::new(&holder, TEST_NETWORK_ID),
+        get_epoch_ms(),
+    )?;
+    Ok(live(Entry::inbox_delta(&held)?))
+}
+
+/// Relocation law: a relay carrier is accepted from the receiver's predecessor and skipped
+/// without an acknowledgement from anyone else, while the data entries sharing its batch are
+/// accepted either way; the carrier is not invalid, only not this receiver's to take yet.
 #[tokio::test]
-async fn test_persist_synced_entries_skips_a_relay_carrier_from_a_stranger() -> Result<()> {
+async fn test_persist_synced_entries_relocates_a_relay_carrier_from_the_predecessor_alone(
+) -> Result<()> {
     let receiver = prepare_node(SecretKey::random()).await;
+    let predecessor: Did = SecretKey::random().address().into();
+    let stranger: Did = SecretKey::random().address().into();
+    *receiver.dht().lock_predecessor()? = Some(predecessor);
     let topic = live_entry(
         Did::from(10u32),
         vec!["acked".to_string().encode()?],
         EntryKind::Data,
     );
-    let inbox = live_entry(Did::from(20u32), Vec::new(), EntryKind::RelayMessage);
+    let inbox = held_inbox_for(receiver.did())?;
     let sync_msg = SyncEntriesWithSuccessor {
         purpose: StorageSyncPurpose::OwnershipHandoff,
         destination: StorageSyncDestination::PhysicalOwner(receiver.did()),
@@ -120,16 +149,66 @@ async fn test_persist_synced_entries_skips_a_relay_carrier_from_a_stranger() -> 
         ],
     };
 
-    let acks = receiver
+    let from_stranger = receiver
         .swarm
         .transport
-        .persist_storage_sync_entries(&sync_msg, Did::from(1u32))
+        .persist_storage_sync_entries(&sync_msg, stranger)
         .await?;
-
-    assert_eq!(acks, vec![SyncedEntryAck::new(
+    assert_eq!(from_stranger, vec![SyncedEntryAck::new(
         topic.did,
         topic.clone().try_into_storage_entry()?
     )]);
+    assert_eq!(
+        receiver.dht().storage.get(&inbox.did.to_string()).await?,
+        None
+    );
+
+    let from_predecessor = receiver
+        .swarm
+        .transport
+        .persist_storage_sync_entries(&sync_msg, predecessor)
+        .await?;
+    assert_eq!(from_predecessor.len(), 2);
+    assert!(receiver
+        .dht()
+        .storage
+        .get(&inbox.did.to_string())
+        .await?
+        .is_some());
+    Ok(())
+}
+
+/// The relocation sender is the authenticated transaction signer: a relay path that names the
+/// receiver's predecessor as its origin is peer-declared and proves nothing.
+#[tokio::test]
+async fn test_sync_entries_handler_ignores_a_forged_relay_origin_for_a_relay_carrier() -> Result<()>
+{
+    let attacker = prepare_node(SecretKey::random()).await;
+    let receiver = prepare_node(SecretKey::random()).await;
+    manually_establish_connection(&attacker.swarm, &receiver.swarm).await;
+    wait_for_msgs([&attacker, &receiver]).await;
+    assert_no_more_msg([&attacker, &receiver]).await;
+    let predecessor: Did = SecretKey::random().address().into();
+    *receiver.dht().lock_predecessor()? = Some(predecessor);
+
+    let inbox = held_inbox_for(receiver.did())?;
+    let sync_msg = SyncEntriesWithSuccessor {
+        purpose: StorageSyncPurpose::OwnershipHandoff,
+        destination: StorageSyncDestination::PhysicalOwner(receiver.did()),
+        data: vec![PlacedEntry::new(inbox.did, inbox.clone())],
+    };
+    let mut context = MessagePayload::new_send(
+        Message::SyncEntriesWithSuccessor(sync_msg.clone()),
+        attacker.swarm.transport.message_signer(),
+        receiver.did(),
+        receiver.did(),
+    )?;
+    context.relay.path = vec![predecessor, attacker.did()];
+
+    let receiver_handler =
+        MessageHandler::new(receiver.swarm.transport.clone(), Arc::new(NoopCallback));
+    receiver_handler.handle(&context, &sync_msg).await?;
+
     assert_eq!(
         receiver.dht().storage.get(&inbox.did.to_string()).await?,
         None

@@ -51,7 +51,7 @@ fn e2e_handshake_response_effect<'payload>(
 impl HandleMsg<E2eHandshakeRequest> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, msg: &E2eHandshakeRequest) -> Result<()> {
         run_e2e_local_or_forward(self, ctx, || {
-            let responder_public_key = self.transport.session_sk().session().account_pubkey()?;
+            let responder_public_key = self.transport.session().account_pubkey()?;
             Ok(vec![e2e_handshake_response_effect(
                 ctx,
                 msg,

@@ -7,8 +7,9 @@
 //!
 //! Invariant: `order` is the inverse of `written` restricted to `slots`, i.e.
 //! `order[slots[k].written] = k` for every stored `k`, and `written` is injective because it is
-//! drawn from a strictly increasing clock. Hence the least recently written key is the first
-//! key of `order`.
+//! drawn from a clock that strictly increases on every write. Hence the least recently written
+//! key is the first key of `order`. The clock saturates at `u64::MAX`, so the invariant is
+//! stated for fewer than `2^64` writes to one map, beyond any process lifetime.
 
 use std::collections::BTreeMap;
 

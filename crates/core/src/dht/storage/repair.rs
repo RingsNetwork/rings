@@ -77,7 +77,6 @@ use super::StorageSyncTarget;
 use crate::dht::chord::PeerRing;
 use crate::dht::chord::PeerRingAction;
 use crate::dht::entry::Entry;
-use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::PlacementMiss;
 use crate::dht::ChordStorageRepair;
@@ -193,8 +192,7 @@ impl PeerRing {
         entry: Entry,
         redundancy: u16,
     ) -> Result<PeerRingAction> {
-        // A relay inbox has one owner and is never replicated.
-        if redundancy <= 1 || entry.kind == EntryKind::RelayMessage {
+        if entry.kind.replication(redundancy) <= 1 {
             return Ok(PeerRingAction::None);
         }
 

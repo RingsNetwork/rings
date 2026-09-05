@@ -51,6 +51,7 @@ use crate::message::ConnectNodeSend;
 use crate::message::DhtProtocolMode;
 use crate::message::Message;
 use crate::message::PayloadSender;
+use crate::session::Session;
 use crate::session::SessionSk;
 use crate::swarm::callback::InnerSwarmCallback;
 use crate::utils::get_epoch_ms_i64;
@@ -363,9 +364,9 @@ impl SwarmTransport {
         Ok(cursor.as_ref().map(|cursor| format!("{cursor:?}")))
     }
 
-    /// The session key this node authenticates with.
-    pub(crate) fn session_sk(&self) -> &SessionSk {
-        &self.session_sk
+    /// The session this node authenticates with: its public half and account authorization.
+    pub(crate) fn session(&self) -> Session {
+        self.session_sk.session()
     }
 
     /// Storage virtual-node positions required by this DHT protocol mode.

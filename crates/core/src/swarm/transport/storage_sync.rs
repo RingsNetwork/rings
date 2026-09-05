@@ -5,7 +5,6 @@ use super::delivery::SendCompletionOutcome;
 use super::outbound::OutboundCompletion;
 use super::SwarmTransport;
 use crate::dht::entry::inbox::validate_inbox_relocation;
-use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
 use crate::dht::Did;
@@ -137,8 +136,9 @@ pub(crate) struct StorageSyncBatch<'data> {
     /// Admission time shared by validation and persistence, so a value admitted in the
     /// validate phase cannot expire between phases and fail the batch half-written.
     now_ms: u128,
-    /// The peer that sent the batch, for the relocation law of relay inboxes.
-    origin: Did,
+    /// The authenticated sender of the batch (its transaction signer), for the relocation law of
+    /// relay inboxes.
+    sender: Did,
     purpose: StorageSyncPurpose,
     destination: StorageSyncDestination,
     data: &'data [PlacedEntry],
@@ -149,10 +149,10 @@ pub(crate) struct StorageSyncBatch<'data> {
 }
 
 impl<'data> StorageSyncBatch<'data> {
-    pub(crate) fn new(msg: &'data SyncEntriesWithSuccessor, origin: Did, now_ms: u128) -> Self {
+    pub(crate) fn new(msg: &'data SyncEntriesWithSuccessor, sender: Did, now_ms: u128) -> Self {
         Self {
             now_ms,
-            origin,
+            sender,
             purpose: msg.purpose,
             destination: msg.destination,
             data: &msg.data,
@@ -273,16 +273,16 @@ impl<'data> StorageSyncBatch<'data> {
         transport: &SwarmTransport,
         placed: &PlacedEntry,
     ) -> Result<bool> {
-        if placed.entry.kind != EntryKind::RelayMessage {
+        if !placed.entry.kind.is_relay_inbox() {
             return Ok(true);
         }
-        if self.purpose != StorageSyncPurpose::OwnershipHandoff {
+        if !self.purpose.is_ownership_handoff() {
             return Ok(false);
         }
         let predecessor = transport
             .dht
             .with_topology_state(|state| state.predecessor)?;
-        Ok(validate_inbox_relocation(self.origin, predecessor).is_ok())
+        Ok(validate_inbox_relocation(self.sender, predecessor).is_ok())
     }
 
     async fn persist_one(&mut self, transport: &SwarmTransport) -> Result<StorageSyncBatchStep> {
@@ -377,12 +377,15 @@ fn evict_storage_sync_acks(pending: &mut StorageSyncAckMap) {
 
 impl SwarmTransport {
     /// Validate a complete local storage-sync batch before persisting any entry.
+    ///
+    /// Pre: `sender` is the authenticated signer of the message carrying `msg`, never a value
+    /// read from its relay path.
     pub(crate) async fn persist_storage_sync_entries(
         &self,
         msg: &SyncEntriesWithSuccessor,
-        origin: Did,
+        sender: Did,
     ) -> Result<Vec<SyncedEntryAck>> {
-        StorageSyncBatch::new(msg, origin, get_epoch_ms())
+        StorageSyncBatch::new(msg, sender, get_epoch_ms())
             .run(self)
             .await
     }

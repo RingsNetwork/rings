@@ -9,7 +9,7 @@ use crate::dht::PeerRingAction;
 use crate::dht::StorageSyncDelivery;
 use crate::error::Error;
 use crate::error::Result;
-use crate::message::handlers::inbox::drain_inbox;
+use crate::message::handlers::inbox::deliver_inbox;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::swarm::transport::TrackedStorageSyncOutcome;
 use crate::swarm::transport::TransportReadiness;
@@ -317,12 +317,7 @@ impl Stabilizer {
     /// Deliver this node's own relay inbox to the application it currently serves and retire the
     /// delivered elements (see `message::handlers::inbox`).
     pub(super) async fn deliver_inbox(&self) -> Result<()> {
-        let callback = self
-            .callback
-            .read()
-            .map_err(|_| Error::LockPoisoned)?
-            .clone();
-        drain_inbox(self.transport.clone(), callback).await
+        deliver_inbox(self.transport.clone(), self.callback.current()?).await
     }
 
     /// One bounded pass restoring the placement invariant of local storage.
@@ -355,7 +350,7 @@ impl Stabilizer {
         tracing::debug!(
             target: "rings_core::dht::stabilization",
             local = %self.dht.did,
-            "STABILIZATION repair_storage republish complete"
+            "STABILIZATION repair_storage complete"
         );
         Ok(outcome)
     }

@@ -26,13 +26,23 @@ use crate::utils::get_epoch_ms;
 /// absent, so expiry is enforced lazily on every read path instead of by a sweeper.
 async fn live_entry(store: &EntryStorage, key: &str, now_ms: u128) -> Result<Option<Entry>> {
     match store.get(key).await? {
-        Some(entry) if entry.is_live_at(now_ms) => Ok(Some(entry)),
-        Some(_) => {
-            store.remove(key).await?;
-            Ok(None)
-        }
+        Some(entry) => retire_unless_live(store, key, entry, now_ms).await,
         None => Ok(None),
     }
+}
+
+/// Keep `entry`, read from `store` at `key`, iff it is live at `now_ms`; remove it otherwise.
+async fn retire_unless_live(
+    store: &EntryStorage,
+    key: &str,
+    entry: Entry,
+    now_ms: u128,
+) -> Result<Option<Entry>> {
+    if entry.is_live_at(now_ms) {
+        return Ok(Some(entry));
+    }
+    store.remove(key).await?;
+    Ok(None)
 }
 
 impl PeerRing {
@@ -48,10 +58,8 @@ impl PeerRing {
     pub(crate) async fn live_storage_entries(&self, now_ms: u128) -> Result<Vec<(String, Entry)>> {
         let mut live = Vec::new();
         for (key, entry) in self.storage.get_all().await? {
-            if entry.is_live_at(now_ms) {
+            if let Some(entry) = retire_unless_live(&self.storage, &key, entry, now_ms).await? {
                 live.push((key, entry));
-            } else {
-                self.storage.remove(&key).await?;
             }
         }
         Ok(live)
@@ -99,20 +107,23 @@ impl PeerRing {
         op: EntryOperation,
         writer: Did,
     ) -> Result<()> {
-        op.validate_admissible_at(now_ms, self.network_id())?;
-        if op.entry().kind == EntryKind::RelayMessage {
-            // Only a hold needs to know who is responsible for the recipient.
-            let responsible = match op {
-                EntryOperation::Extend(_) => {
-                    self.inbox_hold_authority(inbox_destination(placement))?
-                }
-                _ => None,
-            };
-            op.validate_inbox_authority(writer, responsible)?;
+        match op.entry().kind {
+            EntryKind::Data => op.validate_admissible_at(now_ms, self.network_id())?,
+            EntryKind::RelayMessage => {
+                op.entry().validate_bounds_at(now_ms)?;
+                // Only a hold needs to know who is responsible for the recipient.
+                let responsible = match op {
+                    EntryOperation::Extend(_) => {
+                        self.inbox_hold_authority(inbox_destination(placement))?
+                    }
+                    _ => None,
+                };
+                op.validate_inbox_write(writer, responsible, now_ms, self.network_id())?;
+            }
         }
         let local = match self.live_storage_entry(placement, now_ms).await? {
             Some(local) => local,
-            None => op.clone().gen_default_entry()?,
+            None => op.gen_default_entry()?,
         };
         let stored = local
             .operate(now_ms, op, self.did)?
@@ -228,11 +239,7 @@ impl PeerRing {
         let op = op.stamped(now_ms, self.did)?;
         let entry_key = op.did()?;
         let kind = op.entry().kind;
-        // A relay inbox has one owner: it is never replicated.
-        let redundancy = match kind {
-            EntryKind::Data => redundancy,
-            EntryKind::RelayMessage => 1,
-        };
+        let redundancy = kind.replication(redundancy);
         let mut ret = vec![];
         for entry_key in entry_key.rotate_affine(redundancy)? {
             let act = match self.find_storage_owner_for(entry_key, kind) {
@@ -281,7 +288,7 @@ impl ChordStorageCache<PeerRingAction> for PeerRing {
     /// Pre: `entry` satisfies the same admission law as a replicated write, so a peer cannot
     /// pin a fetched value in the cache past the retention bound it could obtain in storage.
     async fn local_cache_put(&self, entry: Entry) -> Result<()> {
-        if entry.kind == EntryKind::RelayMessage {
+        if entry.kind.is_relay_inbox() {
             return Err(Error::RelayInboxOperationNotAllowed);
         }
         entry.validate_admissible_at(get_epoch_ms(), self.network_id())?;

@@ -68,7 +68,7 @@ impl FileIndex {
     }
 }
 
-/// StorageInstance struct
+/// One file per key under a byte budget (see the module documentation for its laws).
 pub struct FileStorage {
     root: PathBuf,
     capacity: u64,
@@ -76,15 +76,17 @@ pub struct FileStorage {
 }
 
 impl FileStorage {
-    /// New FileStorage
-    /// * cap: max_size in bytes
-    /// * path: db file location
-    pub async fn new_with_cap_and_path<P>(cap: u32, path: P) -> Result<Self>
+    /// Open the store rooted at `path`, creating it if absent, under a budget of `capacity`
+    /// bytes.
+    ///
+    /// Post: the index mirrors the directory (stale `.tmp` files removed) and the budget law
+    /// holds, so lowering the configured capacity retires the oldest files at open.
+    pub async fn new_with_cap_and_path<P>(capacity: u32, path: P) -> Result<Self>
     where P: AsRef<std::path::Path> {
         std::fs::create_dir_all(path.as_ref()).map_err(Error::ServiceIOError)?;
         let storage = Self {
             root: path.as_ref().to_path_buf(),
-            capacity: u64::from(cap),
+            capacity: u64::from(capacity),
             index: RwLock::new(FileIndex::default()),
         };
         let mut index = storage.write_index()?;
