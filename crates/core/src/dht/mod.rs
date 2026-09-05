@@ -30,10 +30,12 @@ pub use finger::DEFAULT_FINGER_TABLE_SIZE;
 pub(crate) use stabilization::maintenance_phase_trace_for_test;
 #[cfg(all(test, target_family = "wasm"))]
 pub(crate) use stabilization::reset_maintenance_phase_trace_for_test;
+pub use stabilization::InboxDelivery;
 #[cfg(all(test, target_family = "wasm"))]
 pub(crate) use stabilization::MaintenancePhaseEvent;
 #[cfg(all(test, target_family = "wasm"))]
 pub(crate) use stabilization::MaintenancePhaseKind;
+pub use stabilization::SharedInboxDelivery;
 pub use stabilization::Stabilizer;
 pub use stabilization::StorageRepairOutcome;
 pub(crate) use stabilization::DISCONNECTED_CONNECTION_GRACE_MS;

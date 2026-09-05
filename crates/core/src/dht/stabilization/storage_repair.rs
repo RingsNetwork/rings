@@ -9,7 +9,6 @@ use crate::dht::PeerRingAction;
 use crate::dht::StorageSyncDelivery;
 use crate::error::Error;
 use crate::error::Result;
-use crate::message::handlers::inbox::deliver_inbox;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::swarm::transport::TrackedStorageSyncOutcome;
 use crate::swarm::transport::TransportReadiness;
@@ -314,10 +313,10 @@ impl Stabilizer {
         }
     }
 
-    /// Deliver this node's own relay inbox to the application it currently serves and retire the
-    /// delivered elements (see `message::handlers::inbox`).
+    /// Emit the intent to deliver this node's own relay inbox; the swarm interprets it (see
+    /// `swarm::inbox`).
     pub(super) async fn deliver_inbox(&self) -> Result<()> {
-        deliver_inbox(self.transport.clone(), self.callback.current()?).await
+        self.inbox.deliver_inbox().await
     }
 
     /// One bounded pass restoring the placement invariant of local storage.

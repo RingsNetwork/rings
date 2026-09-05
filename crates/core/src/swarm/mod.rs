@@ -5,6 +5,7 @@
 mod builder;
 /// Callback interface for swarm
 pub mod callback;
+mod inbox;
 pub(crate) mod transport;
 
 use std::num::NonZeroUsize;
@@ -31,6 +32,7 @@ use crate::message::MessageVerificationExt;
 use crate::message::PayloadSender;
 use crate::swarm::callback::SharedSwarmCallback;
 use crate::swarm::callback::SwarmCallbackSlot;
+use crate::swarm::inbox::SwarmInboxDelivery;
 use crate::swarm::transport::SwarmTransport;
 
 /// The transport and dht management.
@@ -99,9 +101,16 @@ impl Swarm {
         self.callback.replace(callback)
     }
 
-    /// Create [Stabilizer] for swarm; it delivers to whichever callback is set when it delivers.
+    /// Create [Stabilizer] for swarm; its inbox-delivery intent is interpreted here, toward
+    /// whichever callback is set when it delivers.
     pub fn stabilizer(&self) -> Stabilizer {
-        Stabilizer::new(self.transport.clone(), self.callback.clone())
+        Stabilizer::new(
+            self.transport.clone(),
+            Arc::new(SwarmInboxDelivery::new(
+                self.transport.clone(),
+                self.callback.clone(),
+            )),
+        )
     }
 
     /// Disconnect a connection. There are three steps:

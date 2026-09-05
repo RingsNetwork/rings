@@ -5,6 +5,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use futures::future::FutureExt;
 use futures::pin_mut;
 use futures::select;
@@ -30,7 +31,6 @@ use crate::message::NotifyPredecessorSend;
 use crate::message::PayloadSender;
 use crate::message::PeerLivenessProbe;
 use crate::message::QueryForTopoInfoSend;
-use crate::swarm::callback::SwarmCallbackSlot;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::transport::TransportReadiness;
@@ -179,18 +179,36 @@ where F: Future<Output = Result<T>> {
 pub struct Stabilizer {
     transport: Arc<SwarmTransport>,
     dht: Arc<PeerRing>,
-    /// The application the drained relay inbox is delivered to, resolved at delivery time.
-    callback: SwarmCallbackSlot,
+    /// The layer that owns the application, which interprets the intent to deliver the inbox.
+    inbox: SharedInboxDelivery,
 }
 
+/// The one intent the storage maintenance phase emits toward the layer that owns the
+/// application: deliver this node's own relay inbox. The DHT names the intent; the swarm, which
+/// owns the callback and the inbound pipeline, interprets it.
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
+pub trait InboxDelivery {
+    /// Deliver every witnessed element of this node's inbox to the application and retire it.
+    async fn deliver_inbox(&self) -> Result<()>;
+}
+
+/// A shared interpreter of the inbox-delivery intent.
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+pub type SharedInboxDelivery = Arc<dyn InboxDelivery>;
+
+/// A shared interpreter of the inbox-delivery intent.
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+pub type SharedInboxDelivery = Arc<dyn InboxDelivery + Send + Sync>;
+
 impl Stabilizer {
-    /// Create a new stabilization runner delivering drained inbox messages to `callback`.
-    pub fn new(transport: Arc<SwarmTransport>, callback: SwarmCallbackSlot) -> Self {
+    /// Create a new stabilization runner whose inbox-delivery intent `inbox` interprets.
+    pub fn new(transport: Arc<SwarmTransport>, inbox: SharedInboxDelivery) -> Self {
         let dht = transport.dht.clone();
         Self {
             transport,
             dht,
-            callback,
+            inbox,
         }
     }
 

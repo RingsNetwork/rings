@@ -442,30 +442,28 @@ fn test_partition_pairs_each_witnessed_element_with_its_dot_and_retires_the_rest
 
 #[test]
 fn test_inbox_keeps_the_newest_elements_and_bounds_its_tombstones() -> Result<()> {
-    let now_ms = get_epoch_ms();
     let holder = session()?;
     let destination: Did = SecretKey::random().address().into();
     let actor = holder.account_did();
 
     // Two full inboxes, drained in turn: the second drain leaves twice the cap of removals to
-    // choose from, and the carrier keeps the newest cap of them.
+    // choose from, and the carrier keeps the newest cap of them. Every instant is read from the
+    // clock the holder signatures use, so the witness never sees a hold ahead of its judge.
     let mut carrier = Entry::new(inbox_key(destination), Vec::new(), EntryKind::RelayMessage);
-    let mut clock = now_ms;
     let mut first_round_dots = Vec::new();
     for round in 0..2 {
         let mut newest = None;
         for _ in 0..RELAY_INBOX_MAX_LEN + 1 {
-            clock += 1;
             let held = held_by(&holder, destination, TEST_NETWORK_ID)?;
             newest = Some(held.encode()?);
-            carrier = carrier.extend(clock, Entry::inbox_delta(&held)?, actor)?;
+            carrier = carrier.extend(get_epoch_ms(), Entry::inbox_delta(&held)?, actor)?;
         }
         assert_eq!(carrier.data.len(), RELAY_INBOX_MAX_LEN);
         assert_eq!(carrier.data.last(), newest.as_ref());
         if round == 0 {
             first_round_dots = carrier.crdt.dots.clone();
         }
-        let drained = carrier.partition_inbox(clock, TEST_NETWORK_ID);
+        let drained = carrier.partition_inbox(get_epoch_ms(), TEST_NETWORK_ID);
         let removal = carrier.removal_of(drained.deliverable.iter().map(|element| element.dot));
         carrier = carrier.tombstone(removal)?;
         assert!(carrier.data.is_empty());
