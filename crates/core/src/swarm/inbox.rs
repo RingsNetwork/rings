@@ -17,9 +17,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::dht::entry::inbox::inbox_key;
 use crate::dht::entry::Entry;
-use crate::dht::entry::EntryKind;
 use crate::dht::entry::EntryOperation;
 use crate::dht::InboxDelivery;
 use crate::dht::StorageKey;
@@ -59,7 +57,7 @@ impl InboxDelivery for SwarmInboxDelivery {
     /// was tombstoned unread.
     async fn deliver_inbox(&self) -> Result<()> {
         let now_ms = get_epoch_ms();
-        let key = StorageKey::new(EntryKind::RelayMessage, inbox_key(self.transport.dht.did));
+        let key = StorageKey::inbox_of(self.transport.dht.did);
         let Some(inbox) = self.transport.dht.live_storage_entry(key, now_ms).await? else {
             return Ok(());
         };

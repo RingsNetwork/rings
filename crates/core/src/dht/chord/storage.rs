@@ -7,6 +7,7 @@ use super::PeerRing;
 use super::PeerRingAction;
 use super::RemoteAction;
 use crate::dht::entry::inbox::inbox_destination;
+use crate::dht::entry::inbox::inbox_key;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::EntryLookupEvidence;
@@ -44,6 +45,11 @@ impl StorageKey {
     /// The slot of a carrier of `kind` placed at `placement`.
     pub(crate) const fn new(kind: EntryKind, placement: Did) -> Self {
         Self { kind, placement }
+    }
+
+    /// The slot of the relay inbox kept for `destination`.
+    pub(crate) fn inbox_of(destination: Did) -> Self {
+        Self::new(EntryKind::RelayMessage, inbox_key(destination))
     }
 
     /// The placement of the carrier.
@@ -160,8 +166,10 @@ impl PeerRing {
     /// result, so a locally derived version (a compaction floor bumped by one step) is never
     /// mistaken for a peer clock running ahead; a relay inbox also passes the authority law
     /// under this node's own routing view.
-    /// Post: the stored value is `local.operate(op)` normalized for storage, where `local` is
-    /// the live stored value or the operation's default carrier.
+    /// Post: the slot holds `local.operate(op)` normalized for storage, where `local` is the
+    /// live stored value or the operation's default carrier, when that result is live; a result
+    /// with no retention (a removal against nothing held) leaves the slot empty, so a stored
+    /// value is always live when written.
     pub(crate) async fn operate_storage_entry(
         &self,
         now_ms: u128,
@@ -191,7 +199,11 @@ impl PeerRing {
         let stored = local
             .operate(now_ms, op, self.did)?
             .try_into_storage_entry()?;
-        self.storage.put(&key.to_string(), &stored).await
+        if stored.is_live_at(now_ms) {
+            self.storage.put(&key.to_string(), &stored).await
+        } else {
+            self.storage.remove(&key.to_string()).await
+        }
     }
 
     fn storage_fetch_fallback_successor(&self) -> Result<Option<Did>> {

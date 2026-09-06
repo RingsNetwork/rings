@@ -977,7 +977,7 @@ async fn test_data_topic_at_the_inbox_position_does_not_block_the_hold() -> Resu
         .await?
         .ok_or_else(|| Error::InvalidMessage("parked topic vanished".to_string()))?;
     let inbox = node
-        .live_storage_entry(StorageKey::new(EntryKind::RelayMessage, position), now_ms)
+        .live_storage_entry(StorageKey::inbox_of(destination), now_ms)
         .await?
         .ok_or_else(|| Error::InvalidMessage("hold was not stored".to_string()))?;
     assert_eq!(topic.kind, EntryKind::Data);
@@ -985,6 +985,48 @@ async fn test_data_topic_at_the_inbox_position_does_not_block_the_hold() -> Resu
     assert_eq!(inbox.kind, EntryKind::RelayMessage);
     assert_eq!(inbox.data.len(), 1);
     assert_eq!(node.storage.count().await?, 2);
+    Ok(())
+}
+
+/// Removal law at the write funnel: a removal never creates a carrier. Against nothing held the
+/// result has no retention, so the slot stays empty instead of holding a value the next read
+/// would retire; for a data topic by value, for a relay inbox by a dot the recipient once saw.
+#[tokio::test]
+async fn test_removal_against_nothing_held_stores_nothing() -> Result<()> {
+    let holder = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let node = PeerRing::new_with_storage(holder.account_did(), 3, Box::new(MemStorage::new()));
+    let now_ms = get_epoch_ms();
+
+    let topic = Did::from(100u32);
+    let removal = EntryOperation::Tombstone(Entry::new(
+        topic,
+        vec![Encoded::from("gone")],
+        EntryKind::Data,
+    ))
+    .stamped(now_ms, node.did)?;
+    node.operate_storage_entry(now_ms, topic, removal, node.did)
+        .await?;
+    assert_eq!(node.storage.count().await?, 0);
+
+    let destination = Did::from(50u32);
+    let position = inbox_key(destination);
+    let hold =
+        EntryOperation::Extend(held_inbox_for(destination, &holder)?).stamped(now_ms, node.did)?;
+    node.operate_storage_entry(now_ms, position, hold, node.did)
+        .await?;
+    let inbox = node
+        .live_storage_entry(StorageKey::inbox_of(destination), now_ms)
+        .await?
+        .ok_or_else(|| Error::InvalidMessage("hold was not stored".to_string()))?;
+    node.storage
+        .remove(&StorageKey::inbox_of(destination).to_string())
+        .await?;
+
+    let removal = EntryOperation::Tombstone(inbox.removal_of(inbox.crdt.dots.clone()))
+        .stamped(now_ms, node.did)?;
+    node.operate_storage_entry(now_ms, position, removal, destination)
+        .await?;
+    assert_eq!(node.storage.count().await?, 0);
     Ok(())
 }
 

@@ -54,16 +54,16 @@ use inbound::ReassemblyClock;
 /// Lock law: the slot is read for the duration of one clone and written for one replacement, so
 /// a poisoned slot (`Error::LockPoisoned`) is the only failure either can report.
 #[derive(Clone)]
-pub struct SwarmCallbackSlot(Arc<RwLock<SharedSwarmCallback>>);
+pub(crate) struct SwarmCallbackSlot(Arc<RwLock<SharedSwarmCallback>>);
 
 impl SwarmCallbackSlot {
     /// A slot holding `callback`.
-    pub fn new(callback: SharedSwarmCallback) -> Self {
+    pub(crate) fn new(callback: SharedSwarmCallback) -> Self {
         Self(Arc::new(RwLock::new(callback)))
     }
 
     /// The callback currently set.
-    pub fn current(&self) -> crate::error::Result<SharedSwarmCallback> {
+    pub(crate) fn current(&self) -> crate::error::Result<SharedSwarmCallback> {
         Ok(self
             .0
             .read()
@@ -72,7 +72,7 @@ impl SwarmCallbackSlot {
     }
 
     /// Replace the callback for every later delivery.
-    pub fn replace(&self, callback: SharedSwarmCallback) -> crate::error::Result<()> {
+    pub(crate) fn replace(&self, callback: SharedSwarmCallback) -> crate::error::Result<()> {
         *self
             .0
             .write()

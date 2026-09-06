@@ -188,22 +188,22 @@ pub struct Stabilizer {
 /// owns the callback and the inbound pipeline, interprets it.
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
-pub trait InboxDelivery {
+pub(crate) trait InboxDelivery {
     /// Deliver every witnessed element of this node's inbox to the application and retire it.
     async fn deliver_inbox(&self) -> Result<()>;
 }
 
 /// A shared interpreter of the inbox-delivery intent.
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
-pub type SharedInboxDelivery = Arc<dyn InboxDelivery>;
+pub(crate) type SharedInboxDelivery = Arc<dyn InboxDelivery>;
 
 /// A shared interpreter of the inbox-delivery intent.
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
-pub type SharedInboxDelivery = Arc<dyn InboxDelivery + Send + Sync>;
+pub(crate) type SharedInboxDelivery = Arc<dyn InboxDelivery + Send + Sync>;
 
 impl Stabilizer {
     /// Create a new stabilization runner whose inbox-delivery intent `inbox` interprets.
-    pub fn new(transport: Arc<SwarmTransport>, inbox: SharedInboxDelivery) -> Self {
+    pub(crate) fn new(transport: Arc<SwarmTransport>, inbox: SharedInboxDelivery) -> Self {
         let dht = transport.dht.clone();
         Self {
             transport,

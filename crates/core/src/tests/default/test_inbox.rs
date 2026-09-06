@@ -8,7 +8,6 @@
 
 use std::time::Instant;
 
-use crate::dht::entry::inbox::inbox_key;
 use crate::dht::entry::EntryKind;
 use crate::dht::Did;
 use crate::dht::StorageKey;
@@ -34,11 +33,6 @@ use crate::utils::get_epoch_ms;
 use crate::utils::get_epoch_ms_i64;
 
 const HELD_MESSAGE: &[u8] = b"held while offline";
-
-/// The slot of the inbox carrier kept for `destination`.
-fn inbox_slot(destination: Did) -> StorageKey {
-    StorageKey::new(EntryKind::RelayMessage, inbox_key(destination))
-}
 
 fn is_held_message(payload: &MessagePayload) -> bool {
     matches!(
@@ -88,7 +82,7 @@ async fn hold_message_for_offline_peer(node1: &Node, node3: &Node, offline: Did)
         .transport
         .send_message(Message::custom(HELD_MESSAGE)?, offline)
         .await?;
-    let held = wait_for_storage_entry(node1, inbox_slot(offline)).await?;
+    let held = wait_for_storage_entry(node1, StorageKey::inbox_of(offline)).await?;
     assert_eq!(held.kind, EntryKind::RelayMessage);
     assert_eq!(held.data.len(), 1);
     let drain = held.partition_inbox(get_epoch_ms(), node1.swarm.network_id());
@@ -112,7 +106,7 @@ async fn hand_off_inbox(owner: &Node, peer: &Node) -> Result<()> {
         get_epoch_ms_i64() - STORAGE_REPAIR_FRESH_CONNECTION_GRACE_MS - 1,
     )?;
     owner.swarm.stabilizer().stabilize().await?;
-    let inbox = inbox_slot(peer.did());
+    let inbox = StorageKey::inbox_of(peer.did());
     wait_for_storage_entry(peer, inbox).await?;
     wait_for_storage_absence(owner, inbox).await
 }
@@ -120,7 +114,7 @@ async fn hand_off_inbox(owner: &Node, peer: &Node) -> Result<()> {
 /// Phase 3: the returned peer's own stabilization round drains its inbox to the application and
 /// retires the delivered message from the carrier by its dot.
 async fn drain_and_assert_delivered(peer: &Node, sender: Did) -> Result<()> {
-    let inbox = inbox_slot(peer.did());
+    let inbox = StorageKey::inbox_of(peer.did());
     peer.swarm.stabilizer().stabilize().await?;
 
     let delivered = next_held_message(peer).await?;
