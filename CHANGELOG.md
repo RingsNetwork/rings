@@ -17,6 +17,8 @@
 - DHT entries carry a retention bound (`expires_at_ms`) stamped at the operation boundary with
   `DEFAULT_TTL_MS` and bounded at admission by `MAX_TTL_MS`. Stored values without a bound, or
   whose bound has elapsed, are retired on their next read and are never replicated or served.
+  The bound joins by `max` and is refreshed by what is held (adds, overwrites, compaction
+  floors), never by a removal: a tombstone leaves the carrier's bound unchanged.
   The native file store also retires a record the current schema cannot decode on the read that
   discovers it, so values written by earlier builds are dropped instead of failing every later
   write to their key.

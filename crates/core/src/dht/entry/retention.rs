@@ -12,6 +12,10 @@
 //! - Join: the bound of a join is the `max` of the bounds, with `None < Some(_)`. `max` is
 //!   idempotent, commutative, and associative, so the product of the payload lattice and the
 //!   bound lattice is again a join-semilattice.
+//! - Removal: a tombstone leaves the carrier's bound unchanged. Retention is refreshed by what
+//!   is held (adds, overwrites, compaction floors), never by a removal, so a carrier drained to
+//!   tombstones expires when its last hold would have instead of outliving it by the
+//!   removal's own bound.
 //! - Liveness: `is_live_at(now) ⟺ expires_at_ms = Some(t) ∧ now < t`. An unstamped value is
 //!   not live, so a stored value that predates retention is retired on its next read.
 //! - Admission: a value is admissible at `now` in overlay `n` iff it is live, its bound is at

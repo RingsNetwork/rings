@@ -26,6 +26,7 @@ use futures::StreamExt;
 use rings_transport::core::callback::InboundFrameCapacityLease;
 
 use super::InboundProcessor;
+use super::LogicalInbound;
 use super::PreparedInboundFrame;
 use crate::dht::Did;
 use crate::error::Error;
@@ -704,7 +705,7 @@ async fn process_event(
     }
 
     let result = process_logical_message(
-        &processor,
+        &processor.logical,
         event.peer,
         &event.payload,
         event.prepared_message,
@@ -720,12 +721,12 @@ async fn process_event(
 
 /// Offer `payload` to the application's `on_validate` under the inbound deadline.
 async fn validate_payload(
-    processor: &InboundProcessor,
+    pipeline: &LogicalInbound,
     peer: Option<Did>,
     payload: &MessagePayload,
 ) -> std::result::Result<(), InboundFailure> {
     match await_inbound_deadline(
-        processor.callback.on_validate(payload),
+        pipeline.callback.on_validate(payload),
         INBOUND_CALLBACK_TIMEOUT,
     )
     .await
@@ -742,13 +743,13 @@ async fn validate_payload(
 /// Deliver a locally sourced payload: validation, dispatch, and `on_inbound`, exactly as for a
 /// verified frame from a connection, but with no connection to gate on.
 pub(super) async fn deliver_local(
-    processor: &InboundProcessor,
+    pipeline: &LogicalInbound,
     payload: &MessagePayload,
 ) -> Result<()> {
-    validate_payload(processor, None, payload)
+    validate_payload(pipeline, None, payload)
         .await
         .map_err(inbound_failure_error)?;
-    process_logical_message(processor, None, payload, None)
+    process_logical_message(pipeline, None, payload, None)
         .await
         .map_err(inbound_failure_error)
 }
@@ -764,7 +765,7 @@ async fn validate_event(
     {
         return Ok(InboundValidation::AcknowledgeDrop);
     }
-    validate_payload(processor, event.peer, &event.payload).await?;
+    validate_payload(&processor.logical, event.peer, &event.payload).await?;
     let still_admitted = processor
         .pending_connection_allows_message(event.peer)
         .await
@@ -777,19 +778,19 @@ async fn validate_event(
 }
 
 async fn process_logical_message(
-    processor: &InboundProcessor,
+    pipeline: &LogicalInbound,
     peer: Option<Did>,
     payload: &MessagePayload,
     prepared_message: Option<crate::message::Message>,
 ) -> std::result::Result<(), InboundFailure> {
-    processor
+    pipeline
         .handle_payload(payload, prepared_message)
         .await
         .map_err(InboundFailure::Core)?;
-    if !processor.is_local_destination(payload) {
+    if !pipeline.is_local_destination(payload) {
         return Ok(());
     }
-    match await_inbound_deadline(processor.on_inbound(payload), INBOUND_CALLBACK_TIMEOUT).await {
+    match await_inbound_deadline(pipeline.on_inbound(payload), INBOUND_CALLBACK_TIMEOUT).await {
         InboundDeadline::Completed(result) => result.map_err(InboundFailure::Callback),
         InboundDeadline::TimedOut => Err(InboundFailure::ProcessingTimeout { peer }),
         InboundDeadline::TimerUnavailable => Err(InboundFailure::TimerUnavailable {

@@ -862,11 +862,13 @@ impl Entry {
     ///
     /// Pre: `self` and `other` are the same data or relay-message carrier.
     /// Post: every removed payload is represented by an add-dot tombstone, so
-    /// future joins with stale add replicas cannot resurrect it.
+    /// future joins with stale add replicas cannot resurrect it. The carrier keeps
+    /// its own retention bound: retention is refreshed by what is held, never by
+    /// a removal, so a drained carrier expires when its last hold would have.
     pub fn tombstone(&self, other: Self) -> Result<Self> {
         self.validate_same_carrier(&other)?;
 
-        let expires_at_ms = self.joined_lifetime(&other);
+        let expires_at_ms = self.expires_at_ms;
         let target_values = other.data.into_iter().collect::<BTreeSet<_>>();
         let target_dots = other.crdt.dots.into_iter().collect::<BTreeSet<_>>();
         let has_dot_witness = !target_dots.is_empty();

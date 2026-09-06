@@ -733,9 +733,6 @@ fn test_join_takes_the_later_retention_bound() -> Result<()> {
     let relay_later = with_retention(relay_delta(Did::from(7u32), "m2", 2)?, 20);
     assert_eq!(relay_earlier.join(relay_later)?.expires_at_ms, Some(20));
 
-    let tombstoned = earlier.tombstone(with_retention(data_entry("topic", "a")?, 30))?;
-    assert_eq!(tombstoned.expires_at_ms, Some(30));
-
     let compacted = earlier.compact_data(
         NOW_MS,
         with_retention(data_entry("topic", "a")?, 40),
@@ -745,6 +742,24 @@ fn test_join_takes_the_later_retention_bound() -> Result<()> {
 
     let unbounded_join = data_delta("topic", "c", 3)?.join(earlier.clone())?;
     assert_eq!(unbounded_join.expires_at_ms, Some(10));
+    Ok(())
+}
+
+/// Removal law: a tombstone leaves the carrier's retention bound unchanged, for a data topic
+/// and a relay inbox alike, however far ahead the removal's own bound lies.
+#[test]
+fn test_removal_leaves_the_retention_bound_unchanged() -> Result<()> {
+    let topic = with_retention(data_delta("topic", "a", 1)?, 10);
+    let removal = with_retention(data_entry("topic", "a")?, 30);
+    let drained = topic.tombstone(removal)?;
+    assert!(drained.data.is_empty());
+    assert_eq!(drained.expires_at_ms, Some(10));
+
+    let inbox = with_retention(relay_delta(Did::from(7u32), "m1", 1)?, 10);
+    let removal = with_retention(inbox.removal_of(inbox.crdt.dots.clone()), 30);
+    let drained = inbox.tombstone(removal)?;
+    assert!(drained.data.is_empty());
+    assert_eq!(drained.expires_at_ms, Some(10));
     Ok(())
 }
 
