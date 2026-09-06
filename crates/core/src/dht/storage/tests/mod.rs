@@ -883,6 +883,32 @@ async fn test_live_storage_read_retires_expired_value() -> Result<()> {
     Ok(())
 }
 
+/// Retention law at the read boundary: a value written to storage without a retention bound (a
+/// fixture built with `Entry::new`, or a value from a build that predates retention) is not live,
+/// so it is reported absent, removed, and never republished or handed off.
+#[tokio::test]
+async fn test_live_storage_read_retires_an_unstamped_value() -> Result<()> {
+    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
+    let placement_key = Did::from(100u32);
+    let unstamped = Entry::new(Did::from(10u32), vec!["value".into()], EntryKind::Data);
+    assert_eq!(unstamped.expires_at_ms, None);
+    node.storage
+        .put(&placement_key.to_string(), &unstamped)
+        .await?;
+
+    assert_eq!(
+        node.live_storage_entry(
+            StorageKey::new(EntryKind::Data, placement_key),
+            get_epoch_ms()
+        )
+        .await?,
+        None
+    );
+    assert_eq!(node.storage.get(&placement_key.to_string()).await?, None);
+    assert_eq!(node.republish_local_entries(2).await?, PeerRingAction::None);
+    Ok(())
+}
+
 /// Retention law: a bulk read returns only live values and retires the rest, so hand-off and
 /// republish never offer an expired value.
 #[tokio::test]
