@@ -46,6 +46,16 @@ trunk serve --release true
 Then open the Trunk URL. Use the guide as the landing page, then open the node
 console for connection, onion proxy, and custom-message workflows.
 
+## Deploy to rings.rs
+
+The web app is published to GitHub Pages by `.github/workflows/deploy-frontend.yml`,
+which serves `https://rings.rs` through the repository's Pages custom domain. It runs
+on every master push that touches `frontend/` or `crates/` (and on manual dispatch),
+builds with `npm run build:frontend-web` (a release `trunk build` from the
+repository root), and uploads `frontend/dist`. The shell is hash-routed; the path-routed WebView gateway
+(`/webview`, `/webview/…`) is answered by the service worker, and `404.html` is a
+copy of the shell so a cold load of such a path boots the app and registers it.
+
 ## Package as a Chrome Extension
 
 Package the same Yew/Wasm application with the explicit repository script. A
