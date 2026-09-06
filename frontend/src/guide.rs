@@ -2,6 +2,7 @@
 
 use yew::prelude::*;
 
+use crate::controls::ProjectLink;
 use crate::controls::ShellPage;
 
 pub(crate) fn page(
@@ -37,22 +38,7 @@ fn hero_section(open_console: Callback<MouseEvent>) -> Html {
                     <button class="landing-primary-action" type="button" onclick={open_console}>
                         { "Open Node" }
                     </button>
-                    <a
-                        class="landing-secondary-action"
-                        href="https://github.com/RingsNetwork/rings"
-                        target="_blank"
-                        rel="noreferrer"
-                    >
-                        { "GitHub" }
-                    </a>
-                    <a
-                        class="landing-secondary-action"
-                        href="https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf"
-                        target="_blank"
-                        rel="noreferrer"
-                    >
-                        { "Whitepaper" }
-                    </a>
+                    { for ProjectLink::ALL.into_iter().map(|link| link.anchor("landing-secondary-action")) }
                 </div>
             </div>
         </section>
