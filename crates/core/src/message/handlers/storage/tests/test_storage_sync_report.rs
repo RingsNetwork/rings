@@ -112,8 +112,8 @@ fn inbox_held_by_a_stranger(destination: Did) -> Result<Entry> {
 }
 
 /// The slot of the inbox carrier `inbox`.
-fn inbox_slot(inbox: &Entry) -> String {
-    StorageKey::new(EntryKind::RelayMessage, inbox.did).to_string()
+fn inbox_slot(inbox: &Entry) -> StorageKey {
+    StorageKey::new(EntryKind::RelayMessage, inbox.did)
 }
 
 /// Relocation law: a relay carrier is accepted from the receiver's predecessor and skipped
@@ -150,7 +150,14 @@ async fn test_persist_synced_entries_relocates_a_relay_carrier_from_the_predeces
         topic.did,
         topic.clone().try_into_storage_entry()?
     )]);
-    assert_eq!(receiver.dht().storage.get(&inbox_slot(&inbox)).await?, None);
+    assert_eq!(
+        receiver
+            .dht()
+            .storage
+            .get(&inbox_slot(&inbox).to_string())
+            .await?,
+        None
+    );
 
     let from_predecessor = receiver
         .swarm
@@ -161,7 +168,7 @@ async fn test_persist_synced_entries_relocates_a_relay_carrier_from_the_predeces
     assert!(receiver
         .dht()
         .storage
-        .get(&inbox_slot(&inbox))
+        .get(&inbox_slot(&inbox).to_string())
         .await?
         .is_some());
     Ok(())
@@ -198,7 +205,14 @@ async fn test_sync_entries_handler_ignores_a_forged_relay_origin_for_a_relay_car
         MessageHandler::new(receiver.swarm.transport.clone(), Arc::new(NoopCallback));
     receiver_handler.handle(&context, &sync_msg).await?;
 
-    assert_eq!(receiver.dht().storage.get(&inbox_slot(&inbox)).await?, None);
+    assert_eq!(
+        receiver
+            .dht()
+            .storage
+            .get(&inbox_slot(&inbox).to_string())
+            .await?,
+        None
+    );
     Ok(())
 }
 
