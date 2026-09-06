@@ -133,6 +133,50 @@ async fn test_value_larger_than_budget_is_rejected_without_change() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// Index law under a refused removal: a record the file system will not remove (its path is
+/// occupied by a directory here) stays indexed and counted, the write that needed its bytes
+/// fails without changing the store, and the same write succeeds once the file is back.
+#[tokio::test]
+async fn test_refused_retirement_keeps_the_record_indexed() {
+    let root = temp_root("refused");
+    let one = record_len("a", "v");
+    let storage = FileStorage::new_with_cap_and_path(one, &root)
+        .await
+        .expect("open");
+    storage.put("a", &"v".to_string()).await.expect("put a");
+    let path = storage.root.join(file_name_for("a"));
+    let record = std::fs::read(&path).expect("read record a");
+    std::fs::remove_file(&path).expect("remove record a");
+    std::fs::create_dir(&path).expect("occupy record a's path");
+
+    assert!(matches!(
+        storage.put("b", &"v".to_string()).await,
+        Err(Error::ServiceIOError(_))
+    ));
+    assert_eq!(
+        <FileStorage as KvStorageInterface<String>>::count(&storage)
+            .await
+            .expect("count"),
+        1
+    );
+    assert_eq!(
+        <FileStorage as KvStorageInterface<String>>::get(&storage, "b")
+            .await
+            .expect("get b"),
+        None
+    );
+    let path_b = storage.root.join(file_name_for("b"));
+    assert!(!path_b.exists());
+    assert!(!path_b.with_extension("tmp").exists());
+
+    std::fs::remove_dir(&path).expect("release record a's path");
+    std::fs::write(&path, record).expect("restore record a");
+    storage.put("b", &"v".to_string()).await.expect("put b");
+    assert_eq!(stored_keys(&storage).await, ["b"]);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
 /// Budget law across restarts: reopening rebuilds the index from the directory in modification
 /// order and restores a lowered budget by retiring the oldest files.
 #[tokio::test]

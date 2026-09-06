@@ -9,9 +9,10 @@
 //! the storage is opened, so lowering the configured capacity retires the oldest files.
 //!
 //! Index law: the in-memory index mirrors the directory. It is rebuilt from the directory on
-//! open (stale `.tmp` files from an interrupted write are removed then), every write updates it
-//! under the same lock only after the file system operation succeeded, and the directory is
-//! owned exclusively by this instance while it is open.
+//! open (stale `.tmp` files from an interrupted write are removed then), every write and every
+//! retirement updates it under the same lock only after the file system operation succeeded
+//! (so a file the file system refused to remove stays indexed and stays counted against the
+//! budget), and the directory is owned exclusively by this instance while it is open.
 //!
 //! Decode law: the store holds only records decodable as `V`. A record the current schema
 //! cannot decode (written by an earlier build) is retired on the read that discovers it and
@@ -60,11 +61,9 @@ impl FileIndex {
         self.used_bytes = self.used_bytes.saturating_add(len);
     }
 
-    /// Forget the least recently written file, returning its name.
-    fn retire_oldest(&mut self) -> Option<String> {
-        let (name, len) = self.files.pop_oldest()?;
-        self.used_bytes = self.used_bytes.saturating_sub(len);
-        Some(name)
+    /// The least recently written file, the next one the budget retires.
+    fn oldest(&self) -> Option<String> {
+        self.files.oldest().map(str::to_owned)
     }
 }
 
@@ -131,15 +130,60 @@ impl FileStorage {
     /// Retire least recently written files until `incoming` more bytes fit the budget.
     ///
     /// Pre: `incoming <= capacity`.
-    /// Post: `index.used_bytes + incoming <= capacity`.
+    /// Post: `Ok(())` implies `index.used_bytes + incoming <= capacity`; on `Err`, every file
+    /// the file system refused to remove is still indexed (the index law).
     fn retire_until_fits(&self, index: &mut FileIndex, incoming: u64) -> Result<()> {
         while index.used_bytes.saturating_add(incoming) > self.capacity {
-            let Some(name) = index.retire_oldest() else {
+            let Some(name) = index.oldest() else {
                 break;
             };
-            remove_file_if_present(&self.root.join(name))?;
+            self.retire_indexed(index, &name)?;
         }
         Ok(())
+    }
+
+    /// Remove the record stored as `name` from the directory, then forget it.
+    ///
+    /// Post: `name` is forgotten iff its file is gone.
+    fn retire_indexed(&self, index: &mut FileIndex, name: &str) -> Result<()> {
+        remove_file_if_present(&self.root.join(name))?;
+        index.forget(name);
+        Ok(())
+    }
+
+    /// Make the record written to `tmp_path` the stored record `name` of `required` bytes,
+    /// retiring other records as the budget demands.
+    ///
+    /// Post: on `Ok` the index records `name` as the newest file; on `Err` nothing was renamed,
+    /// every file still on disk is still indexed, and a previous record under `name` is still
+    /// on disk and indexed (re-recorded as the newest file, the one recency the index cannot
+    /// restore exactly).
+    fn commit_record(
+        &self,
+        index: &mut FileIndex,
+        name: String,
+        path: &Path,
+        tmp_path: &Path,
+        required: u64,
+    ) -> Result<()> {
+        // The rewritten key does not compete with itself for the budget.
+        let previous_len = index.files.get(&name).copied();
+        index.forget(&name);
+        let renamed = self
+            .retire_until_fits(index, required)
+            .and_then(|()| std::fs::rename(tmp_path, path).map_err(Error::ServiceIOError));
+        match renamed {
+            Ok(()) => {
+                index.record(name, required);
+                Ok(())
+            }
+            Err(error) => {
+                if let Some(previous_len) = previous_len {
+                    index.record(name, previous_len);
+                }
+                Err(error)
+            }
+        }
     }
 
     fn read_index(&self) -> Result<RwLockReadGuard<'_, FileIndex>> {
@@ -153,9 +197,7 @@ impl FileStorage {
     /// Remove the record stored as `name` and forget it.
     fn retire(&self, name: &str) -> Result<()> {
         let mut index = self.write_index()?;
-        remove_file_if_present(&self.root.join(name))?;
-        index.forget(name);
-        Ok(())
+        self.retire_indexed(&mut index, name)
     }
 
     /// Decode one record file, retiring it when the current schema cannot read it.
@@ -222,20 +264,11 @@ where V: Serialize + DeserializeOwned + Sync
         std::fs::create_dir_all(&self.root).map_err(Error::ServiceIOError)?;
         std::fs::write(&tmp_path, data).map_err(Error::ServiceIOError)?;
         tracing::debug!("Try inserting key: {:?}", key);
-        // The rewritten key does not compete with itself for the budget.
-        let previous_len = index.files.get(&name).copied();
-        index.forget(&name);
-        self.retire_until_fits(&mut index, required)?;
-        if let Err(error) = std::fs::rename(&tmp_path, &path) {
-            // The previous record is still on disk; keep the index faithful to it.
-            if let Some(previous_len) = previous_len {
-                index.record(name, previous_len);
-            }
+        let committed = self.commit_record(&mut index, name, &path, &tmp_path, required);
+        if committed.is_err() {
             remove_file_if_present(&tmp_path)?;
-            return Err(Error::ServiceIOError(error));
         }
-        index.record(name, required);
-        Ok(())
+        committed
     }
 
     async fn get_all(&self) -> Result<Vec<(String, V)>> {
@@ -267,8 +300,8 @@ where V: Serialize + DeserializeOwned + Sync
 
     async fn clear(&self) -> Result<()> {
         let mut index = self.write_index()?;
-        while let Some(name) = index.retire_oldest() {
-            remove_file_if_present(&self.root.join(name))?;
+        while let Some(name) = index.oldest() {
+            self.retire_indexed(&mut index, &name)?;
         }
         Ok(())
     }
