@@ -52,7 +52,7 @@ pub(super) fn append(css: &mut String) {
 fn themed_nav(css: &mut String, scope: &str, theme: Theme) {
     rule(
         css,
-        &format!("{scope} .header-nav-button,{scope} .header-github-link"),
+        &format!("{scope} .header-nav-button,{scope} .header-external-link"),
         &[
             ("min-height", "34px"),
             ("border-color", theme.line_strong),
@@ -64,7 +64,7 @@ fn themed_nav(css: &mut String, scope: &str, theme: Theme) {
     );
     rule(
         css,
-        &format!("{scope} .header-nav-button.active,{scope} .header-nav-button:hover,{scope} .header-github-link:hover"),
+        &format!("{scope} .header-nav-button.active,{scope} .header-nav-button:hover,{scope} .header-external-link:hover"),
         &[
             ("border-color", "#111827"),
             ("background", "#111827"),

@@ -90,7 +90,7 @@ fn append_mid_breakpoint(css: &mut String) {
                 ][..],
             ),
             (
-                ".app-shell:not(.extension-mode) .landing-header .header-nav-button,.app-shell:not(.extension-mode) .landing-header .header-github-link",
+                ".app-shell:not(.extension-mode) .landing-header .header-nav-button,.app-shell:not(.extension-mode) .landing-header .header-external-link",
                 &[
                     ("width", "100%"),
                     ("min-width", "0"),
@@ -111,7 +111,7 @@ fn append_mid_breakpoint(css: &mut String) {
                 ][..],
             ),
             (
-                ".app-shell:not(.extension-mode) .landing-header .header-nav-button:hover,.app-shell:not(.extension-mode) .landing-header .header-github-link:hover",
+                ".app-shell:not(.extension-mode) .landing-header .header-nav-button:hover,.app-shell:not(.extension-mode) .landing-header .header-external-link:hover",
                 &[
                     ("background", "#111827"),
                     ("color", "#fff"),
@@ -160,7 +160,7 @@ fn append_mobile_navigation(css: &mut String) {
                 ][..],
             ),
             (
-                ".header-nav-button,.header-github-link",
+                ".header-nav-button,.header-external-link",
                 &[("width", "100%"), ("min-width", "0")][..],
             ),
             (".guide-shell", &[("gap", "0"), ("padding", "0")][..]),
@@ -194,7 +194,7 @@ fn append_mobile_navigation(css: &mut String) {
                 ][..],
             ),
             (
-                ".app-shell:not(.extension-mode) .landing-header .header-nav-button,.app-shell:not(.extension-mode) .landing-header .header-github-link",
+                ".app-shell:not(.extension-mode) .landing-header .header-nav-button,.app-shell:not(.extension-mode) .landing-header .header-external-link",
                 &[
                     ("height", "42px"),
                     ("min-height", "42px"),
@@ -206,7 +206,7 @@ fn append_mobile_navigation(css: &mut String) {
                 ][..],
             ),
             (
-                ".app-shell:not(.extension-mode) .landing-header .header-nav-button:hover,.app-shell:not(.extension-mode) .landing-header .header-github-link:hover,.app-shell:not(.extension-mode) .landing-header .header-nav-button.active",
+                ".app-shell:not(.extension-mode) .landing-header .header-nav-button:hover,.app-shell:not(.extension-mode) .landing-header .header-external-link:hover,.app-shell:not(.extension-mode) .landing-header .header-nav-button.active",
                 &[
                     ("background", "#111827"),
                     ("color", "#fff"),
