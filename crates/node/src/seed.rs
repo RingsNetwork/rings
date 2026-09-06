@@ -20,7 +20,8 @@ pub struct SeedPeer {
     pub did: String,
     /// remote client endpoint
     pub url: String,
-    /// Optional Bearer token required by the remote endpoint.
+    /// Optional Bearer token for a seed peer that gates its handshake; absent by default,
+    /// since the external handshake is public.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_token: Option<String>,
 }

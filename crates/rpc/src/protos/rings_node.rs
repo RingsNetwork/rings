@@ -23,7 +23,8 @@ pub struct PeerInfo {
 pub struct ConnectPeerViaHttpRequest {
     /// HTTP endpoint URL exposed by the peer.
     pub url: String,
-    /// Optional Bearer token required by the remote peer's API.
+    /// Optional Bearer token for a remote peer that gates its handshake; absent by default,
+    /// since the external handshake is public.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_token: Option<String>,
 }
@@ -63,7 +64,8 @@ pub struct SeedPeer {
     pub did: String,
     /// HTTP endpoint URL for the seed peer.
     pub url: String,
-    /// Optional Bearer token required by this seed peer's API.
+    /// Optional Bearer token for a seed peer that gates its handshake; absent by default,
+    /// since the external handshake is public.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_token: Option<String>,
 }

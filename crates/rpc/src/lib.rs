@@ -5,7 +5,7 @@
 pub mod error;
 /// JSON-RPC client implementation.
 pub mod jsonrpc;
-/// JSON-RPC method names.
+/// JSON-RPC method names and their authorization classes.
 pub mod method;
 /// Re-exported dependencies used by public RPC types.
 pub mod prelude;

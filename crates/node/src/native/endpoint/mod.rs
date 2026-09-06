@@ -1,11 +1,18 @@
-//! rings-node service run with `Swarm` and chord stabilization.
+//! Native JSON-RPC listeners: routing, per-listener authorization, and the JSON-RPC dispatch.
+//!
+//! Both listeners are built by `secure_router`, whose security layer decodes a JSON-RPC body
+//! exactly once, decides the request's authorization requirement through
+//! [`ApiListener::required_authorization`], and hands the decoded request to the route handler as
+//! a `DecodedJsonRpc` extension so that no later stage buffers or parses the body again.
 mod http_error;
 mod ws;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use axum::body::Bytes;
 use axum::extract::ConnectInfo;
+use axum::extract::FromRequest;
 use axum::extract::Request;
 use axum::extract::State;
 use axum::extract::WebSocketUpgrade;
@@ -18,14 +25,19 @@ use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::routing::get;
 use axum::routing::post;
+use axum::Extension;
 use axum::Router;
+use jsonrpc_core::ErrorCode;
 use jsonrpc_core::MetaIoHandler;
+use jsonrpc_core::Version;
 use rings_gateway::GatewayStatus;
 use rings_gateway::GatewayStatusHandle;
+use rings_rpc::method::AuthorizationClass;
 use rings_rpc::protos::rings_node::NodeInfoResponse;
 use tokio::net::TcpListener;
 
 use self::http_error::HttpError;
+use crate::native::api_auth::ApiListener;
 use crate::native::api_auth::ApiSecurity;
 use crate::processor::Processor;
 
@@ -57,6 +69,38 @@ pub struct GatewayStatusState {
     status: GatewayStatusHandle,
 }
 
+/// Security state of one listener: the node-wide credential policy and the listener's floor.
+#[derive(Clone)]
+struct ListenerSecurity {
+    policy: Arc<ApiSecurity>,
+    listener: ApiListener,
+}
+
+/// A JSON-RPC body decoded exactly once by the security layer.
+///
+/// The layer attaches it as a request extension and forwards an empty body, so the route
+/// handler dispatches the decoded request instead of parsing again. A body that failed to
+/// decode carries the JSON-RPC parse error the handler must answer with. Invariant: every
+/// request reaching the JSON-RPC route carries this extension, because [`secure_router`] is the
+/// only constructor of a served router.
+#[derive(Clone)]
+struct DecodedJsonRpc(Result<jsonrpc_core::Request, jsonrpc_core::Error>);
+
+impl DecodedJsonRpc {
+    /// Decode a body the way `MetaIoHandler::handle_request` does, keeping its parse error.
+    fn decode(bytes: &[u8]) -> Self {
+        Self(
+            serde_json::from_slice(bytes)
+                .map_err(|_| jsonrpc_core::Error::new(ErrorCode::ParseError)),
+        )
+    }
+
+    /// Return the decoded request, or `None` for a body that did not decode.
+    fn request(&self) -> Option<&jsonrpc_core::Request> {
+        self.0.as_ref().ok()
+    }
+}
+
 struct ExternalRpcMiddleware;
 struct InternalRpcMiddleware;
 
@@ -78,34 +122,8 @@ pub async fn run_internal_api_with_gateway(
 ) -> anyhow::Result<()> {
     let gateway_configured = gateway.is_some();
     let binding_addr = SocketAddr::from(([127, 0, 0, 1], port));
-
-    let jsonrpc_handler = MetaIoHandler::with_middleware(InternalRpcMiddleware);
-    let jsonrpc_state = Arc::new(JsonRpcState {
-        processor: processor.clone(),
-        io_handler: jsonrpc_handler,
-    });
-
-    let ws_state = Arc::new(WsState {
-        processor: processor.clone(),
-    });
-
-    let status_state = Arc::new(StatusState { processor });
-
-    let mut router = Router::new()
-        .route(
-            "/",
-            post(jsonrpc_io_handler).with_state(jsonrpc_state.clone()),
-        )
-        .route("/ws", get(ws_handler).with_state(ws_state))
-        .route("/status", get(status_handler).with_state(status_state));
-    if let Some(status) = gateway {
-        router = router.route(
-            "/gateway/status",
-            get(gateway_status_handler).with_state(Arc::new(GatewayStatusState { status })),
-        );
-    }
-    let axum_make_service =
-        secure_router(router, security).into_make_service_with_connect_info::<SocketAddr>();
+    let axum_make_service = internal_router(processor, gateway, security)
+        .into_make_service_with_connect_info::<SocketAddr>();
 
     println!("JSON-RPC endpoint: http://{binding_addr}");
     println!("WebSocket endpoint: http://{binding_addr}/ws");
@@ -125,23 +143,8 @@ pub async fn run_external_api(
 ) -> anyhow::Result<()> {
     let binding_addr: SocketAddr = addr.parse()?;
     security.validate_external_listener(binding_addr)?;
-
-    let jsonrpc_handler = MetaIoHandler::with_middleware(ExternalRpcMiddleware);
-    let jsonrpc_state = Arc::new(JsonRpcState {
-        processor: processor.clone(),
-        io_handler: jsonrpc_handler,
-    });
-
-    let status_state = Arc::new(StatusState { processor });
-
-    let router = Router::new()
-        .route(
-            "/",
-            post(jsonrpc_io_handler).with_state(jsonrpc_state.clone()),
-        )
-        .route("/status", get(status_handler).with_state(status_state));
     let axum_make_service =
-        secure_router(router, security).into_make_service_with_connect_info::<SocketAddr>();
+        external_router(processor, security).into_make_service_with_connect_info::<SocketAddr>();
 
     println!("JSON-RPC endpoint: http://{addr}");
     let listener = TcpListener::bind(binding_addr).await?;
@@ -149,38 +152,113 @@ pub async fn run_external_api(
     Ok(())
 }
 
-fn secure_router(router: Router, security: Arc<ApiSecurity>) -> Router {
-    let cors = security.cors_layer();
+/// Build the operator's control router: JSON-RPC, WebSocket, status, and optional gateway status.
+fn internal_router(
+    processor: Arc<Processor>,
+    gateway: Option<GatewayStatusHandle>,
+    security: Arc<ApiSecurity>,
+) -> Router {
+    let jsonrpc_state = Arc::new(JsonRpcState {
+        processor: processor.clone(),
+        io_handler: MetaIoHandler::with_middleware(InternalRpcMiddleware),
+    });
+    let ws_state = Arc::new(WsState {
+        processor: processor.clone(),
+    });
+    let status_state = Arc::new(StatusState { processor });
+
+    let mut router = Router::new()
+        .route("/", post(jsonrpc_io_handler).with_state(jsonrpc_state))
+        .route("/ws", get(ws_handler).with_state(ws_state))
+        .route("/status", get(status_handler).with_state(status_state));
+    if let Some(status) = gateway {
+        router = router.route(
+            "/gateway/status",
+            get(gateway_status_handler).with_state(Arc::new(GatewayStatusState { status })),
+        );
+    }
+    secure_router(router, security, ApiListener::Internal)
+}
+
+/// Build the peer-facing router: the external JSON-RPC allowlist and the status read.
+fn external_router(processor: Arc<Processor>, security: Arc<ApiSecurity>) -> Router {
+    let jsonrpc_state = Arc::new(JsonRpcState {
+        processor: processor.clone(),
+        io_handler: MetaIoHandler::with_middleware(ExternalRpcMiddleware),
+    });
+    let status_state = Arc::new(StatusState { processor });
+
+    let router = Router::new()
+        .route("/", post(jsonrpc_io_handler).with_state(jsonrpc_state))
+        .route("/status", get(status_handler).with_state(status_state));
+    secure_router(router, security, ApiListener::External)
+}
+
+fn secure_router(router: Router, policy: Arc<ApiSecurity>, listener: ApiListener) -> Router {
+    let cors = policy.cors_layer();
     router
         .layer(axum::middleware::from_fn(node_info_header))
         .layer(axum::middleware::from_fn_with_state(
-            security,
+            ListenerSecurity { policy, listener },
             enforce_api_security,
         ))
         .layer(cors)
 }
 
+/// Apply the listener's authorization policy to one request.
+///
+/// Routes other than the JSON-RPC root are status and control reads, so their floor is `⊤` on
+/// both listeners; the JSON-RPC root takes the listener's floor. The requirement of a JSON-RPC
+/// request is `floor ⊔ class(body)`, and since `⊤` absorbs under `⊔` a floor of `⊤` settles an
+/// unauthenticated request before its body is read; only a public floor needs the body decoded
+/// to reach a verdict. The body is read through the `Bytes` extractor so axum's default size
+/// limit and its rejections apply as they did when the route handler extracted the body, and the
+/// decoded request is forwarded as [`DecodedJsonRpc`] so the handler never parses it again.
 async fn enforce_api_security(
-    State(security): State<Arc<ApiSecurity>>,
-    req: Request,
+    State(security): State<ListenerSecurity>,
+    mut req: Request,
     next: axum::middleware::Next,
 ) -> Response {
-    if !security.authorizes(req.headers()) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            [(WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"))],
-            "authentication required",
-        )
-            .into_response();
+    let authenticated = security.policy.authorizes(req.headers());
+    let jsonrpc = is_jsonrpc_post(&req);
+    let floor = if jsonrpc {
+        security.listener.authorization_floor()
+    } else {
+        AuthorizationClass::Gated
+    };
+    if !floor.satisfied_by(authenticated) {
+        return unauthorized();
     }
-    if is_jsonrpc_post(&req) && !has_json_content_type(&req) {
+    if !jsonrpc {
+        return next.run(req).await;
+    }
+    if !has_json_content_type(&req) {
         return (
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "application/json required",
         )
             .into_response();
     }
+    let body = std::mem::take(req.body_mut());
+    let decoded = match Bytes::from_request(Request::new(body), &()).await {
+        Ok(bytes) => DecodedJsonRpc::decode(bytes.as_ref()),
+        Err(rejection) => return rejection.into_response(),
+    };
+    let required = security.listener.required_authorization(decoded.request());
+    if !required.satisfied_by(authenticated) {
+        return unauthorized();
+    }
+    req.extensions_mut().insert(decoded);
     next.run(req).await
+}
+
+fn unauthorized() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        [(WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"))],
+        "authentication required",
+    )
+        .into_response()
 }
 
 fn is_jsonrpc_post(req: &Request) -> bool {
@@ -197,17 +275,24 @@ fn has_json_content_type(req: &Request) -> bool {
 
 async fn jsonrpc_io_handler<M>(
     State(state): State<Arc<JsonRpcState<M>>>,
-    body: String,
+    Extension(DecodedJsonRpc(request)): Extension<DecodedJsonRpc>,
 ) -> Result<JsonResponse, HttpError>
 where
     M: jsonrpc_core::Middleware<Arc<Processor>>,
 {
-    let r = state
-        .io_handler
-        .handle_request(&body, state.processor.clone())
-        .await
-        .ok_or(HttpError::BadRequest)?;
-    Ok(JsonResponse(r))
+    let response = match request {
+        Ok(request) => {
+            state
+                .io_handler
+                .handle_rpc_request(request, state.processor.clone())
+                .await
+        }
+        // The handlers are built with the default compatibility, whose version is V2.
+        Err(error) => Some(jsonrpc_core::Response::from(error, Some(Version::V2))),
+    };
+    let response = response.ok_or(HttpError::BadRequest)?;
+    let body = serde_json::to_string(&response).map_err(|_| HttpError::Internal)?;
+    Ok(JsonResponse(body))
 }
 
 async fn node_info_header(req: Request, next: axum::middleware::Next) -> axum::response::Response {
@@ -331,9 +416,21 @@ mod jsonrpc_middleware_impl {
 mod security_tests {
     use axum::body::Body;
     use axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN;
+    use axum::http::header::AUTHORIZATION;
+    use axum::http::header::ORIGIN;
     use tower::ServiceExt;
 
     use super::*;
+    use crate::tests::native::prepare_processor;
+
+    macro_rules! token {
+        () => {
+            "0123456789abcdef0123456789abcdef"
+        };
+    }
+
+    const TOKEN: &str = token!();
+    const ORIGIN_ALLOWED: &str = "https://app.example.com";
 
     #[test]
     fn jsonrpc_content_type_rejects_simple_cross_origin_posts() {
@@ -351,106 +448,293 @@ mod security_tests {
         assert!(matches!(json, Ok(request) if has_json_content_type(&request)));
     }
 
-    fn test_router() -> Router {
-        let origins = ["https://app.example.com".to_string()];
-        let security = ApiSecurity::new(
-            "0123456789abcdef0123456789abcdef".to_string(),
-            &origins,
-            false,
-        );
-        let security = match security {
-            Ok(security) => Arc::new(security),
-            Err(_) => return Router::new(),
+    fn security() -> Option<Arc<ApiSecurity>> {
+        let origins = [ORIGIN_ALLOWED.to_string()];
+        ApiSecurity::new(TOKEN.to_string(), &origins, false)
+            .ok()
+            .map(Arc::new)
+    }
+
+    /// A router whose JSON-RPC route accepts whatever the security layer lets through.
+    fn stub_router(listener: ApiListener) -> Router {
+        let Some(security) = security() else {
+            return Router::new();
         };
         let router = Router::new()
             .route("/", post(|| async { "accepted" }))
             .route("/status", get(|| async { "status" }))
             .route("/ws", get(|| async { "websocket" }))
             .route("/gateway/status", get(|| async { "gateway status" }));
-        secure_router(router, security)
+        secure_router(router, security, listener)
     }
 
-    fn authorized_request(content_type: &str) -> std::result::Result<Request, axum::http::Error> {
+    fn call(method: &str) -> String {
+        format!(r#"{{"jsonrpc":"2.0","id":1,"method":"{method}","params":{{}}}}"#)
+    }
+
+    fn batch(methods: &[&str]) -> String {
+        let calls = methods.iter().copied().map(call).collect::<Vec<_>>();
+        format!("[{}]", calls.join(","))
+    }
+
+    fn jsonrpc_request(body: String) -> std::result::Result<Request, axum::http::Error> {
         Request::builder()
             .method(Method::POST)
             .uri("/")
-            .header(
-                axum::http::header::AUTHORIZATION,
-                "Bearer 0123456789abcdef0123456789abcdef",
-            )
-            .header(CONTENT_TYPE, content_type)
-            .body(Body::from("{}"))
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+    }
+
+    fn bearer(
+        request: std::result::Result<Request, axum::http::Error>,
+    ) -> std::result::Result<Request, axum::http::Error> {
+        request.map(|mut request| {
+            request.headers_mut().insert(
+                AUTHORIZATION,
+                HeaderValue::from_static(concat!("Bearer ", token!())),
+            );
+            request
+        })
+    }
+
+    fn authorized_request(content_type: &str) -> std::result::Result<Request, axum::http::Error> {
+        bearer(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/")
+                .header(CONTENT_TYPE, content_type)
+                .body(Body::from(call("nodeInfo"))),
+        )
+    }
+
+    async fn status_of(
+        router: Router,
+        request: std::result::Result<Request, axum::http::Error>,
+    ) -> Option<StatusCode> {
+        let request = request.ok()?;
+        router
+            .oneshot(request)
+            .await
+            .ok()
+            .map(|response| response.status())
     }
 
     #[tokio::test]
-    async fn router_requires_auth_before_every_control_route() {
-        for (method, path) in [
-            (Method::POST, "/"),
-            (Method::GET, "/status"),
-            (Method::GET, "/ws"),
-            (Method::GET, "/gateway/status"),
+    async fn every_listener_requires_auth_before_every_control_route() {
+        for listener in [ApiListener::Internal, ApiListener::External] {
+            for (method, path) in [
+                (Method::POST, "/"),
+                (Method::GET, "/status"),
+                (Method::GET, "/ws"),
+                (Method::GET, "/gateway/status"),
+            ] {
+                let request = Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(call("nodeInfo")));
+                assert_eq!(
+                    status_of(stub_router(listener), request).await,
+                    Some(StatusCode::UNAUTHORIZED),
+                    "{listener:?} route {path} was not protected"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn external_listener_serves_the_handshake_without_a_token() {
+        for method in ["nodeDid", "answerOffer"] {
+            assert_eq!(
+                status_of(
+                    stub_router(ApiListener::External),
+                    jsonrpc_request(call(method))
+                )
+                .await,
+                Some(StatusCode::OK),
+                "{method} must be public on the external listener"
+            );
+        }
+        let handshake = batch(&["nodeDid", "answerOffer"]);
+        assert_eq!(
+            status_of(
+                stub_router(ApiListener::External),
+                jsonrpc_request(handshake)
+            )
+            .await,
+            Some(StatusCode::OK)
+        );
+    }
+
+    #[tokio::test]
+    async fn external_listener_gates_status_and_registry_reads() {
+        for method in [
+            "nodeInfo",
+            "lookupOnlineNodes",
+            "lookupOnionExits",
+            "listPeers",
         ] {
-            let request = Request::builder()
-                .method(method)
-                .uri(path)
-                .header(CONTENT_TYPE, "application/json")
-                .body(Body::from("{}"));
-            let response = test_router()
-                .oneshot(request.expect("test request must build"))
-                .await;
-            assert!(
-                matches!(response, Ok(response) if response.status() == StatusCode::UNAUTHORIZED),
-                "route {path} was not protected"
+            assert_eq!(
+                status_of(
+                    stub_router(ApiListener::External),
+                    jsonrpc_request(call(method))
+                )
+                .await,
+                Some(StatusCode::UNAUTHORIZED),
+                "{method} must be gated on the external listener"
             );
         }
     }
 
     #[tokio::test]
+    async fn internal_listener_gates_every_method_including_the_handshake() {
+        for method in ["nodeDid", "answerOffer", "nodeInfo"] {
+            assert_eq!(
+                status_of(
+                    stub_router(ApiListener::Internal),
+                    jsonrpc_request(call(method))
+                )
+                .await,
+                Some(StatusCode::UNAUTHORIZED),
+                "{method} must be gated on the internal listener"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_batch_is_gated_by_its_strictest_member() {
+        let mixed = batch(&["nodeDid", "nodeInfo"]);
+        assert_eq!(
+            status_of(
+                stub_router(ApiListener::External),
+                jsonrpc_request(mixed.clone())
+            )
+            .await,
+            Some(StatusCode::UNAUTHORIZED)
+        );
+        assert_eq!(
+            status_of(
+                stub_router(ApiListener::External),
+                bearer(jsonrpc_request(mixed))
+            )
+            .await,
+            Some(StatusCode::OK)
+        );
+    }
+
+    #[tokio::test]
+    async fn undecodable_and_unknown_bodies_are_gated() {
+        for body in ["{}", "not json", "[]{", &call("notAMethod")] {
+            assert_eq!(
+                status_of(
+                    stub_router(ApiListener::External),
+                    jsonrpc_request(body.to_string())
+                )
+                .await,
+                Some(StatusCode::UNAUTHORIZED),
+                "body {body:?} must not be served without a token"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_public_call_still_requires_json_content_type() {
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/")
+            .header(CONTENT_TYPE, "text/plain")
+            .body(Body::from(call("nodeDid")));
+        assert_eq!(
+            status_of(stub_router(ApiListener::External), request).await,
+            Some(StatusCode::UNSUPPORTED_MEDIA_TYPE)
+        );
+    }
+
+    #[tokio::test]
     async fn router_rejects_simple_content_type_and_accepts_authenticated_json() {
-        let plain = test_router()
-            .oneshot(authorized_request("text/plain").expect("test request must build"))
-            .await;
-        let json = test_router()
-            .oneshot(authorized_request("application/json").expect("test request must build"))
-            .await;
-        assert!(matches!(
-            plain,
-            Ok(response) if response.status() == StatusCode::UNSUPPORTED_MEDIA_TYPE
-        ));
-        assert!(matches!(json, Ok(response) if response.status() == StatusCode::OK));
+        for listener in [ApiListener::Internal, ApiListener::External] {
+            assert_eq!(
+                status_of(stub_router(listener), authorized_request("text/plain")).await,
+                Some(StatusCode::UNSUPPORTED_MEDIA_TYPE)
+            );
+            assert_eq!(
+                status_of(
+                    stub_router(listener),
+                    authorized_request("application/json")
+                )
+                .await,
+                Some(StatusCode::OK)
+            );
+        }
     }
 
     #[tokio::test]
     async fn router_emits_cors_only_for_the_configured_exact_origin() {
-        let allowed = authorized_request("application/json").map(|mut request| {
-            request.headers_mut().insert(
-                axum::http::header::ORIGIN,
-                HeaderValue::from_static("https://app.example.com"),
-            );
-            request
-        });
-        let denied = authorized_request("application/json").map(|mut request| {
-            request.headers_mut().insert(
-                axum::http::header::ORIGIN,
-                HeaderValue::from_static("https://attacker.example"),
-            );
-            request
-        });
-        let allowed = test_router()
-            .oneshot(allowed.expect("test request must build"))
+        let with_origin = |origin: &'static str| {
+            authorized_request("application/json").map(|mut request| {
+                request
+                    .headers_mut()
+                    .insert(ORIGIN, HeaderValue::from_static(origin));
+                request
+            })
+        };
+        let allowed = stub_router(ApiListener::Internal)
+            .oneshot(with_origin(ORIGIN_ALLOWED).expect("test request must build"))
             .await;
-        let denied = test_router()
-            .oneshot(denied.expect("test request must build"))
+        let denied = stub_router(ApiListener::Internal)
+            .oneshot(with_origin("https://attacker.example").expect("test request must build"))
             .await;
         assert!(matches!(
             allowed,
             Ok(response)
                 if response.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN)
-                    == Some(&HeaderValue::from_static("https://app.example.com"))
+                    == Some(&HeaderValue::from_static(ORIGIN_ALLOWED))
         ));
         assert!(matches!(
             denied,
             Ok(response) if response.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN).is_none()
         ));
+    }
+
+    async fn json_reply(
+        router: Router,
+        request: std::result::Result<Request, axum::http::Error>,
+    ) -> Option<(StatusCode, serde_json::Value)> {
+        let response = router.oneshot(request.ok()?).await.ok()?;
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .ok()?;
+        let reply = serde_json::from_slice(bytes.as_ref()).ok()?;
+        Some((status, reply))
+    }
+
+    /// The decoded body reaches the real dispatcher: an unauthenticated `nodeDid` on the
+    /// external router answers with the node's DID, and a parse failure answers with the
+    /// JSON-RPC parse error rather than an HTTP error.
+    #[tokio::test]
+    async fn external_router_dispatches_the_decoded_public_call() {
+        let Some(security) = security() else {
+            return;
+        };
+        let processor = Arc::new(prepare_processor().await);
+        let did = processor.did().to_string();
+        let router = external_router(processor, security);
+
+        let served = json_reply(router.clone(), jsonrpc_request(call("nodeDid"))).await;
+        assert_eq!(
+            served
+                .as_ref()
+                .map(|(status, reply)| (*status, reply.pointer("/result/did"))),
+            Some((StatusCode::OK, Some(&serde_json::Value::String(did))))
+        );
+
+        let malformed = json_reply(router, bearer(jsonrpc_request("not json".to_string()))).await;
+        assert_eq!(
+            malformed
+                .as_ref()
+                .map(|(status, reply)| (*status, reply.pointer("/error/code"))),
+            Some((StatusCode::OK, Some(&serde_json::Value::from(-32700))))
+        );
     }
 }
