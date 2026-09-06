@@ -5,6 +5,7 @@ use crate::dht::topology;
 use crate::dht::StorageSyncDestination;
 #[cfg(not(target_family = "wasm"))]
 use crate::lifecycle::StopSource;
+use crate::tests::live_entry;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::tests::midpoint_storage_key;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
@@ -41,7 +42,7 @@ async fn test_stabilize_republishes_local_entries_to_missing_affine_owners() -> 
         .build(),
     );
     let node = Node::new(swarm);
-    let entry = Entry::new(key.address().into(), vec![], EntryKind::Data);
+    let entry = live_entry(key.address().into(), vec![], EntryKind::Data);
     let placement_keys = entry.did.rotate_affine(2)?;
     node.dht()
         .storage
@@ -91,8 +92,8 @@ async fn test_continuous_storage_repair_reaches_remote_owners_across_three_nodes
     ensure_storage_repair_route(&node1, head_key, head.did())?;
     ensure_storage_repair_route(&node1, tail_key, tail.did())?;
 
-    let head_entry = Entry::new(head_key, vec![], EntryKind::Data);
-    let tail_entry = Entry::new(tail_key, vec![], EntryKind::Data);
+    let head_entry = live_entry(head_key, vec![], EntryKind::Data);
+    let tail_entry = live_entry(tail_key, vec![], EntryKind::Data);
     let expected_head_entry = head_entry.clone().try_into_storage_entry()?;
     let expected_tail_entry = tail_entry.clone().try_into_storage_entry()?;
     node1
@@ -451,7 +452,7 @@ async fn test_repair_storage_backpressure_defers_without_degrading_or_removing_p
         node1
             .swarm
             .stabilizer()
-            .run_requested_storage_repair()
+            .run_requested_storage_maintenance()
             .await,
         Some(StorageRepairOutcome::Deferred)
     );

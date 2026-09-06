@@ -51,6 +51,7 @@ use crate::message::ConnectNodeSend;
 use crate::message::DhtProtocolMode;
 use crate::message::Message;
 use crate::message::PayloadSender;
+use crate::session::Session;
 use crate::session::SessionSk;
 use crate::swarm::callback::InnerSwarmCallback;
 use crate::utils::get_epoch_ms_i64;
@@ -326,7 +327,7 @@ impl SwarmTransport {
         let cursor = self
             .storage_repair_cursor
             .lock()
-            .map_err(|_| Error::DHTSyncLockError)?;
+            .map_err(|_| Error::LockPoisoned)?;
         let start = match cursor.as_ref() {
             Some(previous) => {
                 let next = ordered.partition_point(|candidate| candidate <= previous);
@@ -349,7 +350,7 @@ impl SwarmTransport {
         let mut cursor = self
             .storage_repair_cursor
             .lock()
-            .map_err(|_| Error::DHTSyncLockError)?;
+            .map_err(|_| Error::LockPoisoned)?;
         *cursor = Some(scheduled);
         Ok(())
     }
@@ -359,8 +360,13 @@ impl SwarmTransport {
         let cursor = self
             .storage_repair_cursor
             .lock()
-            .map_err(|_| Error::DHTSyncLockError)?;
+            .map_err(|_| Error::LockPoisoned)?;
         Ok(cursor.as_ref().map(|cursor| format!("{cursor:?}")))
+    }
+
+    /// The session this node authenticates with: its public half and account authorization.
+    pub(crate) fn session(&self) -> Session {
+        self.session_sk.session()
     }
 
     /// Storage virtual-node positions required by this DHT protocol mode.

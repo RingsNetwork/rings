@@ -17,6 +17,7 @@ use rings_core::ecc::VerificationPublicKey;
 use rings_core::lifecycle::StopToken;
 use rings_core::message::Encoded;
 use rings_core::message::Encoder;
+use rings_core::message::MessageSigner;
 use rings_core::session::SessionSk;
 use rings_core::utils::get_epoch_ms;
 
@@ -159,6 +160,11 @@ impl<'a> RegistrationContext<'a> {
     /// Return the local session signing key.
     pub fn session_sk(&self) -> &SessionSk {
         self.processor.session_sk()
+    }
+
+    /// The authority that signs this node's descriptors: its session key inside its overlay.
+    pub fn message_signer(&self) -> MessageSigner<&SessionSk> {
+        MessageSigner::new(self.session_sk(), self.network_id())
     }
 
     pub(crate) async fn fetch_storage_entry(&self, entry_key: Did) -> Result<Option<entry::Entry>> {
@@ -552,7 +558,7 @@ impl OnlineNodeRegistration {
                 expires_at_ms: now_ms + self.ttl.as_millis(),
                 version: crate::util::build_version(),
             },
-            context.session_sk(),
+            context.message_signer(),
         )
         .map_err(Error::CoreError)
     }
@@ -574,7 +580,7 @@ impl OnlineNodeRegistration {
                         .decode::<OnlineNodeDescriptor>()
                         .is_ok_and(|descriptor| {
                             descriptor.did == context.did()
-                                || (descriptor.verify_signature()
+                                || (descriptor.verify_signature(context.network_id())
                                     && descriptor.is_expired_at(now_ms))
                         })
                 },
@@ -582,7 +588,8 @@ impl OnlineNodeRegistration {
                     observed
                         .decode::<OnlineNodeDescriptor>()
                         .is_ok_and(|descriptor| {
-                            descriptor.verify_signature() && !descriptor.is_expired_at(now_ms)
+                            descriptor.verify_signature(context.network_id())
+                                && !descriptor.is_expired_at(now_ms)
                         })
                 },
             )

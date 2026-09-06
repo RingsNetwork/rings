@@ -8,16 +8,17 @@ use serde::Serialize;
 
 use crate::algebra::JoinSemilattice;
 use crate::consts::ENTRY_DATA_MAX_LEN;
+use crate::consts::RELAY_INBOX_MAX_LEN;
 use crate::dht::Did;
 use crate::ecc::HashStr;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::Encoded;
 use crate::message::Encoder;
-use crate::message::MessagePayload;
-use crate::message::MessageVerificationExt;
 
 mod crdt;
+pub(crate) mod inbox;
+mod retention;
 
 pub use crdt::DataTopicBuffer;
 pub use crdt::EntryCrdt;
@@ -30,15 +31,61 @@ pub use crdt::RelayMessageSet;
 pub enum EntryKind {
     /// Encoded data stored in DHT
     Data,
-    /// A relayed but unreached message, which should be stored on
-    /// the successor of the destination Did.
+    /// A relay inbox: messages held for an offline peer (see the `inbox` module).
     RelayMessage,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+impl EntryKind {
+    /// The greatest number of visible elements a carrier of this kind keeps; when the cap binds,
+    /// the oldest elements are the ones dropped.
+    pub const fn max_data_len(self) -> usize {
+        match self {
+            EntryKind::Data => ENTRY_DATA_MAX_LEN,
+            EntryKind::RelayMessage => RELAY_INBOX_MAX_LEN,
+        }
+    }
+
+    /// Whether this kind is a relay inbox.
+    pub const fn is_relay_inbox(self) -> bool {
+        matches!(self, EntryKind::RelayMessage)
+    }
+
+    /// The replication a carrier of this kind actually gets when `requested` is configured: a
+    /// relay inbox has one owner and is never replicated.
+    pub const fn replication(self, requested: u16) -> u16 {
+        match self {
+            EntryKind::Data => requested,
+            EntryKind::RelayMessage => 1,
+        }
+    }
+
+    /// The greatest number of tombstones a carrier of this kind keeps. A data topic keeps every
+    /// tombstone below its reset floor's pruning; a relay inbox has one owner and one
+    /// ack-gated relocation at a time, so a stale copy can only be transient and the newest
+    /// [`RELAY_INBOX_MAX_LEN`] removals suffice to shadow it.
+    pub const fn max_tombstones(self) -> Option<usize> {
+        match self {
+            EntryKind::Data => None,
+            EntryKind::RelayMessage => Some(RELAY_INBOX_MAX_LEN),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EntryStampKind {
     Overwrite,
     Delta,
+}
+
+/// The write witness an [`EntryOperation`] must carry after stamping.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EntryWitness {
+    /// Per-element dots, plus a reset register for overwrites.
+    Elements(EntryStampKind),
+    /// A register floor only.
+    Register,
+    /// A reference witness: the operation names existing dots or values and issues none.
+    Reference,
 }
 
 // Canonical stamp input for EntryVersion.operation.
@@ -57,7 +104,7 @@ struct OperationDigest<'a> {
 pub enum EntryOperation {
     /// Create or update an [`Entry`].
     Overwrite(Entry),
-    /// Extend data to a Data kind [`Entry`].
+    /// Add payloads to a data topic or a relay inbox.
     /// This operation will create an [`Entry`] if it does not exist.
     Extend(Entry),
     /// Extend data to a Data kind [`Entry`] uniquely.
@@ -84,8 +131,9 @@ pub enum EntryOperation {
 /// A storage operation targeted at one concrete affine placement key.
 ///
 /// Invariant: `placement` must be one of the affine replica keys derived from
-/// the operation's entry DID under the receiver's configured storage
-/// redundancy. The sender may choose a replica from that set, but cannot choose
+/// the operation's entry DID under the replication its kind gets from the
+/// receiver's configured storage redundancy (a relay inbox has one placement,
+/// its DID). The sender may choose a replica from that set, but cannot choose
 /// where the replica set itself lives.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlacedEntryOperation {
@@ -104,7 +152,7 @@ impl PlacedEntryOperation {
     /// Return whether `placement` is in this entry's affine replica set.
     pub fn placement_belongs_to_entry(&self, redundancy: u16) -> Result<bool> {
         let entry_key = self.entry_key()?;
-        placement_belongs_to_entry_key(entry_key, self.placement, redundancy)
+        placement_belongs_to_entry_key(entry_key, self.placement, self.op.kind(), redundancy)
     }
 
     /// Enforce that `placement` belongs to the operation's entry.
@@ -120,8 +168,17 @@ impl PlacedEntryOperation {
     }
 }
 
-fn placement_belongs_to_entry_key(entry_key: Did, placement: Did, redundancy: u16) -> Result<bool> {
-    Ok(entry_key.rotate_affine(redundancy)?.contains(&placement))
+/// Whether `placement` lies in the affine replica set of a carrier of `kind` identified by
+/// `entry_key`: the set has `kind.replication(redundancy)` keys, one for a relay inbox.
+fn placement_belongs_to_entry_key(
+    entry_key: Did,
+    placement: Did,
+    kind: EntryKind,
+    redundancy: u16,
+) -> Result<bool> {
+    Ok(entry_key
+        .rotate_affine(kind.replication(redundancy))?
+        .contains(&placement))
 }
 
 /// A DHT storage entry with an [`EntryKind`] and a ring key represented as [`Did`].
@@ -132,9 +189,19 @@ fn placement_belongs_to_entry_key(entry_key: Did, placement: Did, redundancy: u1
 ///
 /// The [`Did`] of an [`Entry`] is in the following format:
 /// * If kind value is [EntryKind::Data], it's sha1 of data topic.
-/// * If kind value is [EntryKind::RelayMessage], it's the destination Did of
-///   message plus 1 (to ensure that the message is sent to the successor of destination),
-///   thus while destination node going online, it will sync message from its successor.
+/// * If kind value is [EntryKind::RelayMessage], it's the destination Did of the held
+///   messages plus 1, the position just after the destination, which lies in the
+///   destination's own storage interval once it is online (see the `inbox` module).
+///
+/// The kind is part of the carrier's storage identity: a data topic and a relay inbox at the
+/// same position are distinct slots, so neither can shadow the other.
+///
+/// Retention: every entry accepted into storage carries a retention bound `expires_at_ms`,
+/// stamped by the origin at the operation boundary and bounded by the receiver at admission
+/// (see the `retention` module and [`Entry::validate_admissible_at`]). The bound joins by
+/// `max`, so every accepted write extends the carrier's life to at least its own bound, and an
+/// entry whose bound has elapsed is dropped on the next read instead of being served or
+/// replicated.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
     /// The ring key of this entry. It has the same representation as a node DID, but a
@@ -147,6 +214,10 @@ pub struct Entry {
     /// CRDT metadata that makes replicated merge a join-semilattice operation.
     #[serde(default)]
     pub crdt: EntryCrdt,
+    /// Retention bound in milliseconds since the Unix epoch. `None` only before the operation
+    /// boundary stamps it; a stored value without a bound is treated as not live.
+    #[serde(default)]
+    pub expires_at_ms: Option<u128>,
 }
 
 /// An [`Entry`] paired with its Chord placement key.
@@ -169,7 +240,7 @@ impl PlacedEntry {
 
     /// Return whether `key` is in `entry.did`'s affine replica set.
     pub fn placement_belongs_to_entry(&self, redundancy: u16) -> Result<bool> {
-        placement_belongs_to_entry_key(self.entry.did, self.key, redundancy)
+        placement_belongs_to_entry_key(self.entry.did, self.key, self.entry.kind, redundancy)
     }
 
     /// Enforce that `key` belongs to `entry.did`'s affine replica set.
@@ -279,6 +350,7 @@ impl Entry {
             data,
             kind,
             crdt: EntryCrdt::default(),
+            expires_at_ms: None,
         }
     }
 
@@ -292,85 +364,81 @@ impl Entry {
 }
 
 impl EntryOperation {
-    /// Return this operation with CRDT versions assigned at the operation boundary.
+    /// Return this operation with CRDT versions and the retention bound assigned at the
+    /// operation boundary `now_ms`.
     ///
-    /// Existing CRDT witnesses are preserved so forwarded operations keep the
-    /// origin's dot/version instead of being reissued by every routing hop.
-    pub fn stamped(self, actor: Did) -> Result<Self> {
-        Ok(match self {
-            EntryOperation::Overwrite(entry) => EntryOperation::Overwrite(
-                entry.ensure_stamp_after(actor, None, EntryStampKind::Overwrite)?,
-            ),
-            EntryOperation::Extend(entry) => EntryOperation::Extend(entry.ensure_stamp_after(
-                actor,
-                None,
-                EntryStampKind::Delta,
-            )?),
-            EntryOperation::Touch(entry) => EntryOperation::Touch(entry.ensure_stamp_after(
-                actor,
-                None,
-                EntryStampKind::Delta,
-            )?),
-            EntryOperation::Tombstone(entry) => EntryOperation::Tombstone(entry),
-            EntryOperation::CompactData(entry) => {
-                EntryOperation::CompactData(entry.ensure_overwrite_stamp_after(actor, None)?)
+    /// Existing CRDT witnesses and an existing retention bound are preserved so forwarded
+    /// operations keep the origin's dot/version and lifetime instead of being reissued by every
+    /// routing hop.
+    ///
+    /// Post: every carried entry has `expires_at_ms = Some(_)`; an absent bound becomes
+    /// `now_ms + kind.default_lifetime_ms()`.
+    pub fn stamped(self, now_ms: u128, actor: Did) -> Result<Self> {
+        let witness = self.witness();
+        self.try_map_entry(|entry| {
+            let entry = entry.ensure_lifetime_from(now_ms);
+            match witness {
+                EntryWitness::Elements(kind) => entry.ensure_stamp_after(now_ms, actor, None, kind),
+                EntryWitness::Register => entry.ensure_overwrite_stamp_after(now_ms, actor, None),
+                EntryWitness::Reference => Ok(entry),
             }
+        })
+    }
+
+    /// The write witness each operation kind must carry.
+    const fn witness(&self) -> EntryWitness {
+        match self {
+            EntryOperation::Overwrite(_) => EntryWitness::Elements(EntryStampKind::Overwrite),
+            EntryOperation::Extend(_) | EntryOperation::Touch(_) => {
+                EntryWitness::Elements(EntryStampKind::Delta)
+            }
+            EntryOperation::Tombstone(_) => EntryWitness::Reference,
+            EntryOperation::CompactData(_) => EntryWitness::Register,
+        }
+    }
+
+    /// The entry this operation carries.
+    pub fn entry(&self) -> &Entry {
+        match self {
+            EntryOperation::Overwrite(entry)
+            | EntryOperation::Extend(entry)
+            | EntryOperation::Touch(entry)
+            | EntryOperation::Tombstone(entry)
+            | EntryOperation::CompactData(entry) => entry,
+        }
+    }
+
+    /// Apply `f` to the carried entry, keeping the operation kind.
+    fn try_map_entry(self, f: impl FnOnce(Entry) -> Result<Entry>) -> Result<Self> {
+        Ok(match self {
+            EntryOperation::Overwrite(entry) => EntryOperation::Overwrite(f(entry)?),
+            EntryOperation::Extend(entry) => EntryOperation::Extend(f(entry)?),
+            EntryOperation::Touch(entry) => EntryOperation::Touch(f(entry)?),
+            EntryOperation::Tombstone(entry) => EntryOperation::Tombstone(f(entry)?),
+            EntryOperation::CompactData(entry) => EntryOperation::CompactData(f(entry)?),
         })
     }
 
     /// Extract the did of target Entry.
     pub fn did(&self) -> Result<Did> {
-        Ok(match self {
-            EntryOperation::Overwrite(entry) => entry.did,
-            EntryOperation::Extend(entry) => entry.did,
-            EntryOperation::Touch(entry) => entry.did,
-            EntryOperation::Tombstone(entry) => entry.did,
-            EntryOperation::CompactData(entry) => entry.did,
-        })
+        Ok(self.entry().did)
     }
 
     /// Extract the kind of target Entry.
     pub fn kind(&self) -> EntryKind {
-        match self {
-            EntryOperation::Overwrite(entry) => entry.kind,
-            EntryOperation::Extend(entry) => entry.kind,
-            EntryOperation::Touch(entry) => entry.kind,
-            EntryOperation::Tombstone(entry) => entry.kind,
-            EntryOperation::CompactData(entry) => entry.kind,
-        }
+        self.entry().kind
     }
 
     /// Generate a target Entry when it is not existed.
-    pub fn gen_default_entry(self) -> Result<Entry> {
+    pub fn gen_default_entry(&self) -> Result<Entry> {
         Ok(Entry::new(self.did()?, vec![], self.kind()))
-    }
-}
-
-impl TryFrom<MessagePayload> for Entry {
-    type Error = Error;
-    fn try_from(msg: MessagePayload) -> Result<Self> {
-        // Relay entries target the signer's successor on R = Z / 2^160, so the
-        // `+ 1` intentionally wraps in the fixed-width DID ring.
-        let did = msg.signer() + Did::from(1u32);
-        let data = msg.encode()?;
-        Ok(Self {
-            did,
-            data: vec![data],
-            kind: EntryKind::RelayMessage,
-            crdt: EntryCrdt::default(),
-        })
     }
 }
 
 impl TryFrom<(String, Encoded)> for Entry {
     type Error = Error;
     fn try_from((topic, e): (String, Encoded)) -> Result<Self> {
-        Ok(Self {
-            did: Self::gen_did(&topic)?,
-            data: vec![e],
-            kind: EntryKind::Data,
-            crdt: EntryCrdt::default(),
-        })
+        Ok(Self::new(Self::gen_did(&topic)?, vec![e], EntryKind::Data))
     }
 }
 
@@ -426,12 +494,18 @@ impl Entry {
         Did::try_from(HashStr::from_bytes(&bytes))
     }
 
-    fn issue_version_after(&self, actor: Did, floor: Option<EntryVersion>) -> Result<EntryVersion> {
-        Ok(EntryVersion::issued_by(actor, self.operation_digest()?).after(floor))
+    fn issue_version_after(
+        &self,
+        now_ms: u128,
+        actor: Did,
+        floor: Option<EntryVersion>,
+    ) -> Result<EntryVersion> {
+        Ok(EntryVersion::new(now_ms, actor, self.operation_digest()?).after(floor))
     }
 
     fn ensure_stamp_after(
         self,
+        now_ms: u128,
         actor: Did,
         floor: Option<EntryVersion>,
         kind: EntryStampKind,
@@ -439,30 +513,39 @@ impl Entry {
         match self.crdt.has_write_witness() {
             true => Ok(self),
             false => {
-                let version = self.issue_version_after(actor, floor)?;
+                let version = self.issue_version_after(now_ms, actor, floor)?;
                 self.stamp(version, kind)
             }
         }
     }
 
-    fn ensure_overwrite_stamp_after(self, actor: Did, floor: Option<EntryVersion>) -> Result<Self> {
+    fn ensure_overwrite_stamp_after(
+        self,
+        now_ms: u128,
+        actor: Did,
+        floor: Option<EntryVersion>,
+    ) -> Result<Self> {
         match self.crdt.register.is_some() {
             true => Ok(self),
             false => {
-                let version = self.issue_version_after(actor, floor)?;
+                let version = self.issue_version_after(now_ms, actor, floor)?;
                 self.stamp_overwrite(version)
             }
         }
     }
 
-    fn max_observed_version(&self) -> Option<EntryVersion> {
+    /// Every version this entry carries: element dots, tombstones, and the reset floor.
+    fn versions(&self) -> impl Iterator<Item = EntryVersion> + '_ {
         self.crdt
             .dots
             .iter()
             .map(|dot| dot.version)
             .chain(self.crdt.tombstones.iter().map(|dot| dot.version))
             .chain(self.crdt.register)
-            .max()
+    }
+
+    fn max_observed_version(&self) -> Option<EntryVersion> {
+        self.versions().max()
     }
 
     fn validate_same_carrier(&self, other: &Self) -> Result<()> {
@@ -513,6 +596,7 @@ impl Entry {
         register: Option<EntryVersion>,
         elements: impl IntoIterator<Item = (Encoded, EntryDot)>,
         tombstones: BTreeSet<EntryDot>,
+        expires_at_ms: Option<u128>,
     ) -> Self {
         let mut visible = elements
             .into_iter()
@@ -526,9 +610,12 @@ impl Entry {
                 .cmp(right_dot)
                 .then_with(|| left_value.cmp(right_value))
         });
-        let skip_count = visible.len().saturating_sub(ENTRY_DATA_MAX_LEN);
+        let skip_count = visible.len().saturating_sub(kind.max_data_len());
         let visible = visible.into_iter().skip(skip_count).collect::<Vec<_>>();
         let (data, dots): (Vec<_>, Vec<_>) = visible.into_iter().unzip();
+        let tombstone_skip = kind
+            .max_tombstones()
+            .map_or(0, |cap| tombstones.len().saturating_sub(cap));
 
         Self {
             did,
@@ -537,28 +624,35 @@ impl Entry {
             crdt: EntryCrdt {
                 register,
                 dots,
-                tombstones: tombstones.into_iter().collect(),
+                tombstones: tombstones.into_iter().skip(tombstone_skip).collect(),
             },
+            expires_at_ms,
         }
     }
 
-    fn materialize_topic_buffer(&self, buffer: DataTopicBuffer) -> Self {
+    fn materialize_topic_buffer(
+        &self,
+        buffer: DataTopicBuffer,
+        expires_at_ms: Option<u128>,
+    ) -> Self {
         Self::materialize_elements(
             self.did,
             self.kind,
             buffer.register,
             buffer.values,
             buffer.removes,
+            expires_at_ms,
         )
     }
 
-    fn materialize_relay_set(&self, set: RelayMessageSet) -> Self {
+    fn materialize_relay_set(&self, set: RelayMessageSet, expires_at_ms: Option<u128>) -> Self {
         Self::materialize_elements(
             self.did,
             self.kind,
             set.adds.register,
             set.adds.values,
             set.removes,
+            expires_at_ms,
         )
     }
 
@@ -639,16 +733,18 @@ impl Entry {
     /// Law: for a fixed `(did, kind)` carrier, this is the state-based CRDT
     /// join. Data entries are bounded LWW element sets with an LWW overwrite
     /// register; relay entries are two-phase sets whose remove side is carried
-    /// by tombstones.
+    /// by tombstones. The retention bound joins by `max`, so the product of the
+    /// payload lattice and the bound lattice is again a join-semilattice.
     pub fn join(&self, other: Self) -> Result<Self> {
         self.validate_same_carrier(&other)?;
+        let expires_at_ms = self.joined_lifetime(&other);
         match self.kind {
-            EntryKind::Data => {
-                Ok(self.materialize_topic_buffer(self.topic_buffer()?.join(other.topic_buffer()?)))
-            }
-            EntryKind::RelayMessage => {
-                Ok(self.materialize_relay_set(self.relay_set()?.join(other.relay_set()?)))
-            }
+            EntryKind::Data => Ok(self.materialize_topic_buffer(
+                self.topic_buffer()?.join(other.topic_buffer()?),
+                expires_at_ms,
+            )),
+            EntryKind::RelayMessage => Ok(self
+                .materialize_relay_set(self.relay_set()?.join(other.relay_set()?), expires_at_ms)),
         }
     }
 
@@ -670,7 +766,7 @@ impl Entry {
     }
 
     fn is_data_entry(&self) -> bool {
-        self.kind == EntryKind::Data
+        !self.kind.is_relay_inbox()
     }
 
     fn same_kind_as(&self, other: &Self) -> bool {
@@ -685,31 +781,33 @@ impl Entry {
     ///
     /// Post: normalization uses the same carrier materialization as
     /// [`Self::join`]; there is no second cap strategy outside the CRDT.
-    /// Post: `result.data.len() <= ENTRY_DATA_MAX_LEN`.
+    /// Post: `result.data.len() <= kind.max_data_len()`; when the cap binds, the oldest payloads
+    /// are the ones dropped.
     /// Post: `result.data.len() == result.crdt.dots.len()` for Data and
     /// RelayMessage entries.
     pub fn try_into_storage_entry(self) -> Result<Self> {
         match self.kind {
             EntryKind::Data => {
                 let buffer = self.topic_buffer()?;
-                Ok(self.materialize_topic_buffer(buffer))
+                Ok(self.materialize_topic_buffer(buffer, self.expires_at_ms))
             }
             EntryKind::RelayMessage => {
                 let set = self.relay_set()?;
-                Ok(self.materialize_relay_set(set))
+                Ok(self.materialize_relay_set(set, self.expires_at_ms))
             }
         }
     }
 
-    /// The entry point of [EntryOperation].
-    /// Will dispatch to different operation handlers according to the variant.
-    pub fn operate(&self, op: EntryOperation, actor: Did) -> Result<Self> {
+    /// The entry point of [EntryOperation] at the operation-boundary time `now_ms`, which
+    /// stamps any unstamped witness. Will dispatch to different operation handlers according to
+    /// the variant.
+    pub fn operate(&self, now_ms: u128, op: EntryOperation, actor: Did) -> Result<Self> {
         match op {
-            EntryOperation::Overwrite(entry) => self.overwrite(entry, actor),
-            EntryOperation::Extend(entry) => self.extend(entry, actor),
-            EntryOperation::Touch(entry) => self.touch(entry, actor),
+            EntryOperation::Overwrite(entry) => self.overwrite(now_ms, entry, actor),
+            EntryOperation::Extend(entry) => self.extend(now_ms, entry, actor),
+            EntryOperation::Touch(entry) => self.touch(now_ms, entry, actor),
             EntryOperation::Tombstone(entry) => self.tombstone(entry),
-            EntryOperation::CompactData(entry) => self.compact_data(entry, actor),
+            EntryOperation::CompactData(entry) => self.compact_data(now_ms, entry, actor),
         }
     }
 
@@ -721,24 +819,24 @@ impl Entry {
     /// non-monotone assignment.
     ///
     /// The handler of [EntryOperation::Overwrite].
-    pub fn overwrite(&self, other: Self, actor: Did) -> Result<Self> {
+    pub fn overwrite(&self, now_ms: u128, other: Self, actor: Did) -> Result<Self> {
         if !self.is_data_entry() {
             return Err(Error::EntryNotOverwritable);
         }
         self.join(other.ensure_stamp_after(
+            now_ms,
             actor,
             self.max_observed_version(),
             EntryStampKind::Overwrite,
         )?)
     }
 
-    /// This method is used to extend data to a Data kind [`Entry`].
+    /// Add `other`'s payloads to this carrier: the element-set join for a data topic and for
+    /// a relay inbox alike, so holding a message for an offline peer is one ordinary write.
     /// The handler of [EntryOperation::Extend].
-    pub fn extend(&self, other: Self, actor: Did) -> Result<Self> {
-        if !self.is_data_entry() {
-            return Err(Error::EntryNotAppendable);
-        }
+    pub fn extend(&self, now_ms: u128, other: Self, actor: Did) -> Result<Self> {
         self.join(other.ensure_stamp_after(
+            now_ms,
             actor,
             self.max_observed_version(),
             EntryStampKind::Delta,
@@ -748,11 +846,12 @@ impl Entry {
     /// This method is used to extend data to a Data kind [`Entry`] uniquely.
     /// If any element is already existed, move it to the end of the data vector.
     /// The handler of [EntryOperation::Touch].
-    pub fn touch(&self, other: Self, actor: Did) -> Result<Self> {
+    pub fn touch(&self, now_ms: u128, other: Self, actor: Did) -> Result<Self> {
         if !self.is_data_entry() {
             return Err(Error::EntryNotAppendable);
         }
         self.join(other.ensure_stamp_after(
+            now_ms,
             actor,
             self.max_observed_version(),
             EntryStampKind::Delta,
@@ -763,10 +862,13 @@ impl Entry {
     ///
     /// Pre: `self` and `other` are the same data or relay-message carrier.
     /// Post: every removed payload is represented by an add-dot tombstone, so
-    /// future joins with stale add replicas cannot resurrect it.
+    /// future joins with stale add replicas cannot resurrect it. The carrier keeps
+    /// its own retention bound: retention is refreshed by what is held, never by
+    /// a removal, so a drained carrier expires when its last hold would have.
     pub fn tombstone(&self, other: Self) -> Result<Self> {
         self.validate_same_carrier(&other)?;
 
+        let expires_at_ms = self.expires_at_ms;
         let target_values = other.data.into_iter().collect::<BTreeSet<_>>();
         let target_dots = other.crdt.dots.into_iter().collect::<BTreeSet<_>>();
         let has_dot_witness = !target_dots.is_empty();
@@ -781,7 +883,7 @@ impl Entry {
                         buffer.removes.insert(*dot);
                     }
                 }
-                Ok(self.materialize_topic_buffer(buffer))
+                Ok(self.materialize_topic_buffer(buffer, expires_at_ms))
             }
             EntryKind::RelayMessage => {
                 let mut set = self.relay_set()?;
@@ -792,48 +894,51 @@ impl Entry {
                         set.removes.insert(*dot);
                     }
                 }
-                Ok(self.materialize_relay_set(set))
+                Ok(self.materialize_relay_set(set, expires_at_ms))
             }
         }
     }
 
-    /// Compact a Data kind entry using the receiver's current visible payloads.
+    /// Compact a data topic using the receiver's current visible payloads.
     ///
-    /// Pre: `removals` names the same Data carrier as `self`.
+    /// Pre: `removals` names the same data topic as `self`; a relay inbox is never compacted
+    /// by a reset floor, its removals are per-dot tombstones issued by its recipient.
     /// Post: every current visible payload not listed in `removals` is preserved
     /// under the greatest observed register floor, and older tombstone metadata
     /// is pruned by that floor.
-    pub fn compact_data(&self, removals: Self, actor: Did) -> Result<Self> {
-        match self.is_data_entry() {
-            true => self.compact_data_entry(removals, actor),
-            false => Err(Error::EntryNotOverwritable),
+    pub fn compact_data(&self, now_ms: u128, removals: Self, actor: Did) -> Result<Self> {
+        if !self.is_data_entry() {
+            return Err(Error::RelayInboxOperationNotAllowed);
         }
-    }
-
-    fn compact_data_entry(&self, removals: Self, actor: Did) -> Result<Self> {
-        let removals = removals.ensure_overwrite_stamp_after(actor, self.max_observed_version())?;
+        let removals =
+            removals.ensure_overwrite_stamp_after(now_ms, actor, self.max_observed_version())?;
         self.validate_same_carrier(&removals)?;
+        let expires_at_ms = self.joined_lifetime(&removals);
         let floor = removals.crdt.register.ok_or_else(|| {
             Error::InvalidMessage("compact data operation has no register floor".to_string())
         })?;
         let removal_values = removals.data.into_iter().collect::<BTreeSet<_>>();
         let buffer = self.topic_buffer()?;
-        let output_floor = Self::compact_data_output_floor(self.crdt.register, floor);
+        let (register, values, removes) = (buffer.register, buffer.values, buffer.removes);
+        let output_floor = Self::compact_data_output_floor(register, floor);
         let elements = Self::compact_data_elements(
             floor,
             &removal_values,
-            Self::data_compaction_candidates(&self.data, buffer.values),
+            Self::data_compaction_candidates(&self.data, values),
         )?;
-        let tombstones = Self::compact_data_tombstones(output_floor, buffer.removes);
+        let tombstones = Self::compact_data_tombstones(output_floor, removes);
         Ok(Self::materialize_elements(
             self.did,
-            EntryKind::Data,
+            self.kind,
             Some(output_floor),
             elements,
             tombstones,
+            expires_at_ms,
         ))
     }
 }
 
 #[cfg(test)]
 mod test_entry;
+#[cfg(test)]
+mod test_inbox;

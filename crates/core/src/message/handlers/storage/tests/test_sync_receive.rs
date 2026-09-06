@@ -9,7 +9,6 @@ use super::test_support::prepare_node_with_storage_redundancy;
 use super::test_support::remote_storage_placement_after;
 use super::test_support::NoopCallback;
 use crate::consts::ENTRY_DATA_MAX_LEN;
-use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
@@ -30,6 +29,7 @@ use crate::message::Encoder;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
+use crate::message::MessageSigner;
 use crate::message::PayloadSender;
 use crate::session::SessionSk;
 use crate::swarm::transport::StorageSyncBatch;
@@ -37,7 +37,10 @@ use crate::swarm::transport::StorageSyncBatchStep;
 use crate::tests::default::assert_no_more_msg;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;
+use crate::tests::live_entry;
 use crate::tests::manually_establish_connection;
+use crate::tests::TEST_NETWORK_ID;
+use crate::utils::get_epoch_ms;
 
 #[test]
 fn test_finish_storage_action_accepts_empty_action() -> Result<()> {
@@ -64,7 +67,7 @@ async fn test_sync_entries_handler_stores_entry_at_placement_key() -> Result<()>
     let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
     let resource_id = Did::from(10u32);
-    let entry = Entry::new(
+    let entry = live_entry(
         resource_id,
         vec!["placed".to_string().encode()?],
         EntryKind::Data,
@@ -80,7 +83,7 @@ async fn test_sync_entries_handler_stores_entry_at_placement_key() -> Result<()>
     let context_session = SessionSk::new_with_seckey(&context_key)?;
     let context = MessagePayload::new_send(
         Message::custom(b"sync context")?,
-        &context_session,
+        MessageSigner::new(&context_session, TEST_NETWORK_ID),
         node.did(),
         node.did(),
     )?;
@@ -108,7 +111,7 @@ async fn test_sync_entries_handler_stores_entry_at_placement_key() -> Result<()>
 async fn test_sync_entries_handler_caps_inbound_entry_payloads() -> Result<()> {
     let node = prepare_node(SecretKey::random()).await;
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
-    let entry = Entry::new(
+    let entry = live_entry(
         Did::from(10u32),
         (0..ENTRY_DATA_MAX_LEN + 3)
             .map(|i| format!("payload{i}").encode())
@@ -120,7 +123,7 @@ async fn test_sync_entries_handler_caps_inbound_entry_payloads() -> Result<()> {
     let context_session = SessionSk::new_with_seckey(&context_key)?;
     let context = MessagePayload::new_send(
         Message::custom(b"sync context")?,
-        &context_session,
+        MessageSigner::new(&context_session, TEST_NETWORK_ID),
         node.did(),
         node.did(),
     )?;
@@ -154,12 +157,12 @@ async fn test_sync_entries_handler_caps_inbound_entry_payloads() -> Result<()> {
 async fn test_sync_entries_handler_rejects_non_affine_placement_before_writing() -> Result<()> {
     let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
-    let valid_entry = Entry::new(
+    let valid_entry = live_entry(
         Did::from(20u32),
         vec!["valid".to_string().encode()?],
         EntryKind::Data,
     );
-    let invalid_entry = Entry::new(
+    let invalid_entry = live_entry(
         Did::from(10u32),
         vec!["invalid".to_string().encode()?],
         EntryKind::Data,
@@ -170,7 +173,7 @@ async fn test_sync_entries_handler_rejects_non_affine_placement_before_writing()
     let context_session = SessionSk::new_with_seckey(&context_key)?;
     let context = MessagePayload::new_send(
         Message::custom(b"sync context")?,
-        &context_session,
+        MessageSigner::new(&context_session, TEST_NETWORK_ID),
         node.did(),
         node.did(),
     )?;
@@ -204,12 +207,12 @@ async fn test_sync_entries_handler_rejects_non_affine_placement_before_writing()
 #[tokio::test]
 async fn test_storage_sync_batch_persists_one_entry_per_step_after_validation() -> Result<()> {
     let node = prepare_node(SecretKey::random()).await;
-    let first = Entry::new(
+    let first = live_entry(
         Did::from(31u32),
         vec!["first".to_string().encode()?],
         EntryKind::Data,
     );
-    let second = Entry::new(
+    let second = live_entry(
         Did::from(32u32),
         vec!["second".to_string().encode()?],
         EntryKind::Data,
@@ -226,7 +229,7 @@ async fn test_storage_sync_batch_persists_one_entry_per_step_after_validation() 
             PlacedEntry::new(second_key, second),
         ],
     };
-    let mut batch = StorageSyncBatch::new(&msg);
+    let mut batch = StorageSyncBatch::new(&msg, Did::from(1u32), get_epoch_ms());
 
     assert!(matches!(
         batch.step(&node.swarm.transport).await?,
@@ -288,7 +291,7 @@ async fn test_sync_entries_handler_accepts_placement_destination_on_local_branch
         node1.dht().find_storage_owner(placement_key)?,
         PeerRingAction::Some(witness) if witness == node2.did() && witness != node1.did()
     ));
-    let entry = Entry::new(
+    let entry = live_entry(
         placement_key,
         vec!["routed repair".to_string().encode()?],
         EntryKind::Data,
@@ -301,7 +304,7 @@ async fn test_sync_entries_handler_accepts_placement_destination_on_local_branch
     };
     let context = MessagePayload::new_send(
         Message::SyncEntriesWithSuccessor(msg.clone()),
-        node2.swarm.transport.session_sk(),
+        node2.swarm.transport.message_signer(),
         node1.did(),
         placement_key,
     )?;
@@ -347,7 +350,7 @@ async fn test_additive_repair_sync_persists_without_cleanup_report() -> Result<(
         receiver.dht().find_storage_owner(placement_key)?,
         PeerRingAction::Some(owner) if owner == receiver.did()
     ));
-    let entry = Entry::new(
+    let entry = live_entry(
         placement_key,
         vec!["repair copy".to_string().encode()?],
         EntryKind::Data,
@@ -360,7 +363,7 @@ async fn test_additive_repair_sync_persists_without_cleanup_report() -> Result<(
     };
     let context = MessagePayload::new_send(
         Message::SyncEntriesWithSuccessor(sync_msg.clone()),
-        sender.swarm.transport.session_sk(),
+        sender.swarm.transport.message_signer(),
         receiver.did(),
         receiver.did(),
     )?;
@@ -391,7 +394,7 @@ async fn test_sync_entries_handler_rejects_mismatched_placement_destination() ->
 
     let destination_key = receiver.did();
     let mismatched_key = sender.did();
-    let entry = Entry::new(
+    let entry = live_entry(
         Did::from(10u32),
         vec!["mismatched placement".to_string().encode()?],
         EntryKind::Data,
@@ -403,7 +406,7 @@ async fn test_sync_entries_handler_rejects_mismatched_placement_destination() ->
     };
     let context = MessagePayload::new_send(
         Message::SyncEntriesWithSuccessor(sync_msg.clone()),
-        sender.swarm.transport.session_sk(),
+        sender.swarm.transport.message_signer(),
         receiver.did(),
         destination_key,
     )?;
@@ -441,7 +444,7 @@ async fn test_sync_entries_handler_rejects_physical_destination_for_unowned_plac
     install_two_node_chord_view(&sender, &receiver)?;
 
     let placement_key = remote_storage_placement_after(&receiver, sender.did())?;
-    let entry = Entry::new(
+    let entry = live_entry(
         Did::from(10u32),
         vec!["wrong physical owner".to_string().encode()?],
         EntryKind::Data,
@@ -453,7 +456,7 @@ async fn test_sync_entries_handler_rejects_physical_destination_for_unowned_plac
     };
     let context = MessagePayload::new_send(
         Message::SyncEntriesWithSuccessor(sync_msg.clone()),
-        sender.swarm.transport.session_sk(),
+        sender.swarm.transport.message_signer(),
         receiver.did(),
         receiver.did(),
     )?;
@@ -495,7 +498,7 @@ async fn test_sync_entries_handler_acks_local_branch_with_successor_witness() ->
         PeerRingAction::Some(witness) if witness == sender.did() && witness != receiver.did()
     ));
 
-    let entry = Entry::new(
+    let entry = live_entry(
         placement_key,
         vec!["successor witness owner".to_string().encode()?],
         EntryKind::Data,
@@ -508,7 +511,7 @@ async fn test_sync_entries_handler_acks_local_branch_with_successor_witness() ->
     };
     let context = MessagePayload::new_send(
         Message::SyncEntriesWithSuccessor(sync_msg.clone()),
-        sender.swarm.transport.session_sk(),
+        sender.swarm.transport.message_signer(),
         receiver.did(),
         receiver.did(),
     )?;

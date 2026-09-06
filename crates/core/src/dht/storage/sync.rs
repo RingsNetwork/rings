@@ -1,5 +1,3 @@
-use std::str::FromStr;
-
 use async_trait::async_trait;
 use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 use serde::Serialize;
@@ -17,10 +15,12 @@ use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
 use crate::dht::ChordStorageSync;
 use crate::dht::Did;
+use crate::dht::StorageKey;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::types::Message;
 use crate::message::types::SyncEntriesWithSuccessor;
+use crate::utils::get_epoch_ms;
 
 /// Maximum wire budget for one `SyncEntriesWithSuccessor` hand-off batch.
 ///
@@ -117,28 +117,68 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
     /// `Entry`s that are no longer between current node and `new_successor`,
     /// and copy them to the new successor.
     async fn sync_entries_with_successor(&self, new_successor: Did) -> Result<PeerRingAction> {
-        if self.storage_virtual_nodes_enabled()? {
-            return self.copy_entries_to_observed_virtual_storage_owners().await;
+        let all_items = self.live_storage_entries(get_epoch_ms()).await?;
+        // Relay inboxes are placed by the ring geometry in every storage mode
+        // (see the `inbox` module); data topics follow the configured mode.
+        let (relay, data): (Vec<_>, Vec<_>) = all_items
+            .into_iter()
+            .partition(|(_, entry)| entry.kind.is_relay_inbox());
+        let mut actions = vec![self.hand_off_beyond_successor(new_successor, relay)?];
+        actions.push(if self.storage_virtual_nodes_enabled()? {
+            self.copy_entries_to_observed_virtual_storage_owners(data)?
+        } else {
+            self.hand_off_beyond_successor(new_successor, data)?
+        });
+        Ok(actions.into())
+    }
+
+    async fn acknowledge_synced_entries(&self, acks: &[SyncedEntryAck]) -> Result<PeerRingAction> {
+        // Pre S2': each ack in acks is contained in a
+        // SyncEntriesWithSuccessorReport sent only after the receiver persisted
+        // SyncedEntryAck { key, entry } at key.
+        // Post S2': a local key is removed only if canonical(local_before[key])
+        // == canonical(ack.entry). If the canonical local value differs, the
+        // local value is preserved and will be offered again by a later
+        // sync_entries_with_successor transition.
+        // Preservation #614: a write racing between copy and ack changes the
+        // canonical local value, so confirms_local_value is false and delete
+        // is skipped.
+        let now_ms = get_epoch_ms();
+        for ack in acks {
+            let key = StorageKey::new(ack.entry.kind, ack.key);
+            self.remove_storage_entry_confirmed_by(key, now_ms, ack)
+                .await?;
         }
 
-        let mut data = Vec::<PlacedEntry>::new();
-        let all_items: Vec<(String, Entry)> = self.storage.get_all().await?;
+        Ok(PeerRingAction::None)
+    }
+}
 
-        // Pre: new_successor is the successor adopted by stabilization.
-        // Post S1: forall key in local_before, local_after[key] =
-        // local_before[key]; this transition emits join deliveries only.
-        // Post S2(copy): every emitted PlacedEntry keeps the exact local
-        // placement key, so an eventual ack names the key whose durable copy was
-        // reported by the receiver.
-        // Preservation #611/#614: sync hand-off is join-before-ack-before-local
-        // cleanup. acknowledge_synced_entries is the only local cleanup
-        // transition and does not define storage convergence.
-        for (entry_key_str, entry) in all_items {
-            let entry_key = Did::from_str(&entry_key_str)?;
-            if BiasId::cmp_from_observer(self.did, entry_key, new_successor)
-                == std::cmp::Ordering::Greater
-            {
-                data.push(PlacedEntry::new(entry_key, entry));
+impl PeerRing {
+    /// Offer every item placed beyond `(self, new_successor]` to `new_successor` as an
+    /// ownership hand-off.
+    ///
+    /// Pre: new_successor is the current successor head, whichever input
+    /// moved it. The storage repair pass runs this, so a delivery deferred
+    /// or lost before the head admitted this node is offered again.
+    /// Post S1: forall key in local_before, local_after[key] =
+    /// local_before[key]; this transition emits join deliveries only.
+    /// Post S2(copy): every emitted PlacedEntry keeps the exact local
+    /// placement key, so an eventual ack names the key whose durable copy was
+    /// reported by the receiver.
+    /// Preservation #611/#614: sync hand-off is join-before-ack-before-local
+    /// cleanup. acknowledge_synced_entries is the only value-dependent local
+    /// cleanup transition and does not define storage convergence; retention
+    /// expiry retires values independently of their content.
+    fn hand_off_beyond_successor(
+        &self,
+        new_successor: Did,
+        items: Vec<(StorageKey, Entry)>,
+    ) -> Result<PeerRingAction> {
+        let mut data = Vec::<PlacedEntry>::new();
+        for (key, entry) in items {
+            if self.placed_beyond(key.placement(), new_successor) {
+                data.push(PlacedEntry::new(key.placement(), entry));
             }
         }
 
@@ -155,33 +195,16 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
             .into())
     }
 
-    async fn acknowledge_synced_entries(&self, acks: &[SyncedEntryAck]) -> Result<PeerRingAction> {
-        // Pre S2': each ack in acks is contained in a
-        // SyncEntriesWithSuccessorReport sent only after the receiver persisted
-        // SyncedEntryAck { key, entry } at key.
-        // Post S2': a local key is removed only if canonical(local_before[key])
-        // == canonical(ack.entry). If the canonical local value differs, the
-        // local value is preserved and will be offered again by a later
-        // sync_entries_with_successor transition.
-        // Preservation #614: a write racing between copy and ack changes the
-        // canonical local value, so confirms_local_value is false and delete
-        // is skipped.
-        for ack in acks {
-            let Some(local_entry) = self.storage.get(&ack.key.to_string()).await? else {
-                continue;
-            };
-            if ack.confirms_local_value(&local_entry)? {
-                self.storage.remove(&ack.key.to_string()).await?;
-            }
-        }
-
-        Ok(PeerRingAction::None)
+    /// `key ∉ (self, head]`: the placement lies beyond this node's interval up to `head`, so
+    /// `head` (or a node past it) owns it now.
+    fn placed_beyond(&self, key: Did, head: Did) -> bool {
+        BiasId::cmp_from_observer(self.did, key, head) == std::cmp::Ordering::Greater
     }
-}
 
-impl PeerRing {
-    async fn copy_entries_to_observed_virtual_storage_owners(&self) -> Result<PeerRingAction> {
-        let all_items: Vec<(String, Entry)> = self.storage.get_all().await?;
+    fn copy_entries_to_observed_virtual_storage_owners(
+        &self,
+        all_items: Vec<(StorageKey, Entry)>,
+    ) -> Result<PeerRingAction> {
         let mut by_target =
             std::collections::BTreeMap::<StorageSyncDestination, Vec<PlacedEntry>>::new();
 
@@ -195,13 +218,12 @@ impl PeerRing {
         // Preservation S1'': this transition cannot create a delete-capable
         // report. Only non-virtual physical handoff has an ownership proof
         // strong enough to permit source cleanup.
-        for (entry_key_str, entry) in all_items {
-            let entry_key = Did::from_str(&entry_key_str)?;
-            if let StorageSyncTarget::Remote(target) = self.storage_sync_target(entry_key)? {
+        for (key, entry) in all_items {
+            if let StorageSyncTarget::Remote(target) = self.storage_sync_target(key.placement())? {
                 by_target
                     .entry(target)
                     .or_default()
-                    .push(PlacedEntry::new(entry_key, entry));
+                    .push(PlacedEntry::new(key.placement(), entry));
             }
         }
 

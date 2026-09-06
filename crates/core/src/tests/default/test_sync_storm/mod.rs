@@ -56,6 +56,7 @@ use crate::swarm::transport::PEER_LIVENESS_TIMEOUT_MS;
 use crate::swarm::SwarmBuilder;
 use crate::tests::default::prepare_node;
 use crate::tests::default::Node;
+use crate::tests::live_entry;
 use crate::tests::manually_establish_connection;
 
 const TEST_EPOCH_MS: u128 = 1_700_000_000_000;
@@ -457,7 +458,7 @@ fn entry_owned_by(owner: &Node, label: &str) -> PlacedEntry {
             let data = vec![u8::try_from(nonce % 251).expect("byte must fit"); ENTRY_PAYLOAD_BYTES]
                 .encode()
                 .expect("test payload must encode");
-            return PlacedEntry::new(key, Entry::new(key, vec![data], EntryKind::Data));
+            return PlacedEntry::new(key, live_entry(key, vec![data], EntryKind::Data));
         }
     }
     panic!("failed to derive an entry owned by {}", owner.did());
@@ -693,7 +694,7 @@ async fn run_empty_repair_maintenance(nodes: &[Node], driver: &mut TraceDriver) 
         let outcome = node
             .swarm
             .stabilizer()
-            .run_requested_storage_repair()
+            .run_requested_storage_maintenance()
             .await
             .expect("claimed empty repair request must run");
         let model_outcome = match outcome {

@@ -22,6 +22,7 @@ pub use chord::EntryStorage;
 pub use chord::PeerRing;
 pub use chord::PeerRingAction;
 pub use chord::RemoteAction as PeerRingRemoteAction;
+pub(crate) use chord::StorageKey;
 pub use chord::TopoInfo;
 pub use did::Did;
 pub use finger::FingerTable;
@@ -30,6 +31,7 @@ pub use finger::DEFAULT_FINGER_TABLE_SIZE;
 pub(crate) use stabilization::maintenance_phase_trace_for_test;
 #[cfg(all(test, target_family = "wasm"))]
 pub(crate) use stabilization::reset_maintenance_phase_trace_for_test;
+pub(crate) use stabilization::InboxDelivery;
 #[cfg(all(test, target_family = "wasm"))]
 pub(crate) use stabilization::MaintenancePhaseEvent;
 #[cfg(all(test, target_family = "wasm"))]
@@ -37,6 +39,8 @@ pub(crate) use stabilization::MaintenancePhaseKind;
 pub use stabilization::Stabilizer;
 pub use stabilization::StorageRepairOutcome;
 pub(crate) use stabilization::DISCONNECTED_CONNECTION_GRACE_MS;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use stabilization::STORAGE_REPAIR_FRESH_CONNECTION_GRACE_MS;
 pub(crate) use storage::StorageSyncDelivery;
 pub(crate) use storage::StorageSyncDeliveryCursor;
 pub use storage::StorageSyncDestination;

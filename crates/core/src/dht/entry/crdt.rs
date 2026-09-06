@@ -59,11 +59,6 @@ impl EntryVersion {
         }
     }
 
-    /// Construct a version at the current operation boundary.
-    pub fn issued_by(actor: Did, operation: Did) -> Self {
-        Self::new(crate::utils::get_epoch_ms(), actor, operation)
-    }
-
     pub(super) fn after(self, floor: Option<Self>) -> Self {
         let Some(floor) = floor else {
             return self;

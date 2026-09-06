@@ -4,6 +4,8 @@
 ))]
 use num_bigint::BigUint;
 
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+use crate::dht::entry::inbox::HeldMessage;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
@@ -18,12 +20,72 @@ use crate::dht::successor::SuccessorReader;
 ))]
 use crate::dht::topology;
 use crate::dht::Did;
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+use crate::ecc::SecretKey;
 use crate::error::Result;
+use crate::message::Encoded;
 use crate::message::Encoder;
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+use crate::message::Message;
 use crate::message::MessageClass;
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+use crate::message::MessagePayload;
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+use crate::message::MessageSigner;
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+use crate::session::SessionSk;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::Swarm;
+use crate::utils::get_epoch_ms;
+
+/// Overlay every test fixture signs for and verifies against.
+pub(crate) const TEST_NETWORK_ID: u32 = 0;
+
+/// Retention bound far enough ahead that a fixture stays live for a whole test.
+const FIXTURE_RETENTION_MS: u128 = 60 * 60 * 1_000;
+
+/// An entry with a retention bound one hour ahead, inside the admission maximum, so a fixture
+/// that is written to storage or carried in a sync message passes storage admission.
+pub(crate) fn live_entry(did: Did, data: Vec<Encoded>, kind: EntryKind) -> Entry {
+    live(Entry::new(did, data, kind))
+}
+
+/// Stamp an existing fixture with a live retention bound.
+pub(crate) fn live(entry: Entry) -> Entry {
+    with_retention(entry, get_epoch_ms() + FIXTURE_RETENTION_MS)
+}
+
+/// Stamp an existing fixture with the retention bound `expires_at_ms`.
+pub(crate) fn with_retention(mut entry: Entry, expires_at_ms: u128) -> Entry {
+    entry.expires_at_ms = Some(expires_at_ms);
+    entry
+}
+
+/// Stamp an existing fixture with a retention bound that has already elapsed.
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+pub(crate) fn expired(entry: Entry) -> Entry {
+    with_retention(entry, 1)
+}
+
+/// A live inbox delta for `destination`: one custom message from a fresh sender, held now by
+/// `holder` inside [`TEST_NETWORK_ID`].
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+pub(crate) fn held_inbox_for(destination: Did, holder: &SessionSk) -> Result<Entry> {
+    let sender = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let payload = MessagePayload::new_send(
+        Message::custom(b"held")?,
+        MessageSigner::new(&sender, TEST_NETWORK_ID),
+        destination,
+        destination,
+    )?;
+    let held = HeldMessage::hold(
+        payload,
+        MessageSigner::new(holder, TEST_NETWORK_ID),
+        get_epoch_ms(),
+    )?;
+    Ok(live(Entry::inbox_delta(&held)?))
+}
 
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
 pub mod wasm;
@@ -99,7 +161,7 @@ pub fn multi_frame_storage_sync_entries() -> Result<Vec<PlacedEntry>> {
     let topic = "shared multi-frame storage contention";
     let entry_did = Entry::gen_did(topic)?;
     let payload = vec![0xcd; 1024 * 1024].encode()?;
-    let entry = Entry::new(entry_did, vec![payload], EntryKind::Data);
+    let entry = live_entry(entry_did, vec![payload], EntryKind::Data);
     Ok(vec![PlacedEntry::new(entry_did, entry)])
 }
 

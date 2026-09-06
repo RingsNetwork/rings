@@ -5,6 +5,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use futures::future::FutureExt;
 use futures::pin_mut;
 use futures::select;
@@ -178,13 +179,37 @@ where F: Future<Output = Result<T>> {
 pub struct Stabilizer {
     transport: Arc<SwarmTransport>,
     dht: Arc<PeerRing>,
+    /// The layer that owns the application, which interprets the intent to deliver the inbox.
+    inbox: SharedInboxDelivery,
 }
 
+/// The one intent the storage maintenance phase emits toward the layer that owns the
+/// application: deliver this node's own relay inbox. The DHT names the intent; the swarm, which
+/// owns the callback and the inbound pipeline, interprets it.
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
+pub(crate) trait InboxDelivery {
+    /// Deliver every witnessed element of this node's inbox to the application and retire it.
+    async fn deliver_inbox(&self) -> Result<()>;
+}
+
+/// A shared interpreter of the inbox-delivery intent.
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+pub(crate) type SharedInboxDelivery = Arc<dyn InboxDelivery>;
+
+/// A shared interpreter of the inbox-delivery intent.
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+pub(crate) type SharedInboxDelivery = Arc<dyn InboxDelivery + Send + Sync>;
+
 impl Stabilizer {
-    /// Create a new stabilization runner.
-    pub fn new(transport: Arc<SwarmTransport>) -> Self {
+    /// Create a new stabilization runner whose inbox-delivery intent `inbox` interprets.
+    pub(crate) fn new(transport: Arc<SwarmTransport>, inbox: SharedInboxDelivery) -> Self {
         let dht = transport.dht.clone();
-        Self { transport, dht }
+        Self {
+            transport,
+            dht,
+            inbox,
+        }
     }
 
     /// Run stabilization once.
@@ -196,12 +221,7 @@ impl Stabilizer {
     pub(crate) async fn stabilize_with_step_timeout(&self, timeout: Duration) -> Result<()> {
         self.stabilize_topology_with_step_timeout(timeout).await;
         self.transport.claim_storage_repair();
-        let repair_outcome = self
-            .run_step("repair_storage", timeout, self.repair_storage())
-            .await;
-        if !matches!(repair_outcome, Some(StorageRepairOutcome::Complete)) {
-            self.transport.request_storage_repair();
-        }
+        self.maintain_storage_with_step_timeout(timeout).await;
         Ok(())
     }
 
@@ -626,7 +646,7 @@ impl Stabilizer {
         if self.dht.did != successor_min {
             for s in successor_list {
                 let payload =
-                    MessagePayload::new_send(msg.clone(), self.transport.session_sk(), s, s)?;
+                    MessagePayload::new_send(msg.clone(), self.transport.message_signer(), s, s)?;
                 let tx_id = payload.transaction.tx_id;
                 let target_state = self
                     .transport
@@ -700,7 +720,7 @@ impl Stabilizer {
                     });
                     let payload = MessagePayload::new_send(
                         msg.clone(),
-                        self.transport.session_sk(),
+                        self.transport.message_signer(),
                         closest_predecessor,
                         closest_predecessor,
                     )?;

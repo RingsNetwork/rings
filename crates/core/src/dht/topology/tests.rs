@@ -63,7 +63,8 @@ fn test_join_step_updates_successors_fingers_and_connect_action() {
         TopologyAction::FindSuccessorForConnect {
             next: peer,
             did: local
-        }
+        },
+        TopologyAction::SuccessorHeadChanged(peer),
     ]);
 }
 
@@ -234,7 +235,9 @@ fn test_remove_step_replaces_unavailable_head_with_validated_successors_only() {
         Some(fallback),
         Some(verified_tail)
     ]);
-    assert!(next.actions.is_empty());
+    assert_eq!(next.actions, vec![TopologyAction::SuccessorHeadChanged(
+        fallback
+    )]);
 }
 
 #[test]
@@ -266,7 +269,8 @@ fn test_admit_step_commits_join_and_pending_fingers_in_one_state() {
         TopologyAction::FindSuccessorForConnect {
             next: peer,
             did: local
-        }
+        },
+        TopologyAction::SuccessorHeadChanged(peer),
     ]);
 }
 
@@ -516,4 +520,172 @@ fn test_referenced_peers_collect_every_topology_slot_except_local() {
     }
     assert!(!current.references(local));
     assert!(!current.references(did(1)));
+}
+
+#[test]
+fn test_successor_head_skips_local_and_is_absent_when_alone() {
+    let local = did(0);
+    assert_eq!(
+        successor_head(&state(local, vec![local, did(20)], None, vec![None; 5], 0)),
+        Some(did(20))
+    );
+    assert_eq!(
+        successor_head(&state(local, vec![local], None, vec![None; 5], 0)),
+        None
+    );
+}
+
+/// The head law: `SuccessorHeadChanged(h)` is emitted, last and once, iff the head moved to `h`.
+fn assert_head_law(before: &TopologyState, next: &TopologyStep) {
+    let head_changes = next
+        .actions
+        .iter()
+        .filter(|action| matches!(action, TopologyAction::SuccessorHeadChanged(_)))
+        .count();
+    match successor_head(&next.state).filter(|head| successor_head(before) != Some(*head)) {
+        Some(head) => {
+            assert_eq!(head_changes, 1);
+            assert_eq!(
+                next.actions.last(),
+                Some(&TopologyAction::SuccessorHeadChanged(head))
+            );
+        }
+        None => assert_eq!(head_changes, 0),
+    }
+}
+
+#[test]
+fn test_admit_step_reports_head_change_only_when_the_head_moves() {
+    let local = did(0);
+    let current = state(local, vec![did(30)], None, vec![None; 5], 0);
+
+    let closer = step(
+        &current,
+        TopologyEvent::Admit {
+            peer: did(20),
+            fixed_fingers: Vec::new(),
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+    assert_head_law(&current, &closer);
+    assert_eq!(
+        closer.actions.last(),
+        Some(&TopologyAction::SuccessorHeadChanged(did(20)))
+    );
+
+    let farther = step(
+        &current,
+        TopologyEvent::Admit {
+            peer: did(40),
+            fixed_fingers: Vec::new(),
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+    assert_head_law(&current, &farther);
+    assert!(!farther
+        .actions
+        .iter()
+        .any(|action| matches!(action, TopologyAction::SuccessorHeadChanged(_))));
+}
+
+#[test]
+fn test_stabilize_step_reports_head_change_when_reported_predecessor_precedes_head() {
+    let local = did(0);
+    let current = state(local, vec![did(30)], None, vec![None; 5], 0);
+    let next = step(
+        &current,
+        TopologyEvent::Stabilize {
+            successors: vec![did(30), did(40)],
+            predecessor: Some(did(20)),
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+
+    assert_eq!(next.state.successors, vec![did(20), did(30)]);
+    assert_head_law(&current, &next);
+    assert_eq!(
+        next.actions.last(),
+        Some(&TopologyAction::SuccessorHeadChanged(did(20)))
+    );
+}
+
+#[test]
+fn test_remove_step_reports_head_change_to_the_surviving_successor() {
+    let local = did(0);
+    let current = state(local, vec![did(20), did(30)], None, vec![None; 5], 0);
+    let next = step(
+        &current,
+        TopologyEvent::Remove {
+            peer: did(20),
+            successor: SuccessorRemoval::Preserve,
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+
+    assert_head_law(&current, &next);
+    assert_eq!(next.actions, vec![TopologyAction::SuccessorHeadChanged(
+        did(30)
+    )]);
+}
+
+#[test]
+fn test_predecessor_and_finger_steps_never_report_a_head_change() {
+    let local = did(0);
+    let current = state(local, vec![did(30)], None, vec![None; 5], 0);
+    for event in [
+        TopologyEvent::Notify {
+            predecessor: did(90),
+        },
+        TopologyEvent::FixFinger,
+        TopologyEvent::ApplyFinger {
+            index: 2,
+            successor: did(40),
+        },
+        TopologyEvent::UpdateSuccessor { successor: did(30) },
+    ] {
+        let next = step(&current, event, DEFAULT_SUCCESSOR_CAPACITY);
+        assert_head_law(&current, &next);
+        assert!(!next
+            .actions
+            .iter()
+            .any(|action| matches!(action, TopologyAction::SuccessorHeadChanged(_))));
+    }
+}
+
+#[test]
+fn test_responsibility_is_the_predecessor_interval_or_standing_alone() {
+    let local = did(10);
+    let with_predecessor = state(local, vec![did(20)], Some(did(5)), vec![None; 5], 0);
+    assert!(is_responsible_for(&with_predecessor, did(10)));
+    assert!(is_responsible_for(&with_predecessor, did(7)));
+    assert!(!is_responsible_for(&with_predecessor, did(5)));
+    assert!(!is_responsible_for(&with_predecessor, did(15)));
+
+    let uninformed = state(local, vec![did(20)], None, vec![None; 5], 0);
+    assert!(!is_responsible_for(&uninformed, did(7)));
+
+    let alone = state(local, Vec::new(), None, vec![None; 5], 0);
+    assert!(is_responsible_for(&alone, did(7)));
+    assert!(is_responsible_for(&alone, did(15)));
+}
+
+/// Law: a node is never its own predecessor. A candidate equal to `local` leaves the current
+/// value, whether one is known or not, so `(pred, local]` is never emptied by a self-reference.
+#[test]
+fn test_rectify_never_adopts_the_local_node_as_predecessor() {
+    let local = did(10);
+    assert_eq!(rectify_predecessor(local, None, local), None);
+    assert_eq!(
+        rectify_predecessor(local, Some(did(5)), local),
+        Some(did(5))
+    );
+    assert_eq!(rectify_predecessor(local, None, did(5)), Some(did(5)));
+
+    let notified_by_itself = step(
+        &state(local, vec![did(20)], Some(did(5)), vec![None; 5], 0),
+        TopologyEvent::Notify { predecessor: local },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+    assert_eq!(notified_by_itself.state.predecessor, Some(did(5)));
+    assert!(is_responsible_for(&notified_by_itself.state, did(7)));
 }

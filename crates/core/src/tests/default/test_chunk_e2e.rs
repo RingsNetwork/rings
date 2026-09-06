@@ -764,7 +764,7 @@ async fn test_tracked_cleanup_grace_terminalizes_a_nonresponsive_generation() ->
     let _pending_close = PendingCloseGuard::new();
     let payload = MessagePayload::new_send(
         Message::custom(b"tracked-cleanup-grace")?,
-        node1.swarm.transport.session_sk(),
+        node1.swarm.transport.message_signer(),
         peer,
         peer,
     )?;

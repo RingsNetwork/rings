@@ -9,7 +9,7 @@ publish = false
 
 [dependencies]
 rings-core = { workspace = true }
-rings-node = { path = "../../crates/node", version = "0.20.2", default-features = false, features = ["node"] }
+rings-node = { path = "../../crates/node", version = "0.21.0", default-features = false, features = ["node"] }
 tokio = { version = "1.13.0", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
 
 [[example]]

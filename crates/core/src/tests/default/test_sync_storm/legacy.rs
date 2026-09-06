@@ -3,6 +3,7 @@ use super::pressure::exercise_per_entry_yield;
 use super::pressure::start_controlled_deliveries;
 use super::pressure::wait_for_control_barrier_verdict;
 use super::*;
+use crate::tests::live_entry;
 
 pub(super) async fn legacy_feedback_loop_state() -> SimState {
     let runtime =
@@ -395,7 +396,7 @@ async fn observe_repair_feedback(
         .collect::<BTreeSet<_>>();
     let stabilizer = nodes[observer].swarm.stabilizer();
     let outcome = stabilizer
-        .run_requested_storage_repair()
+        .run_requested_storage_maintenance()
         .await
         .expect("claimed repair request must execute a bounded pass");
     assert!(
@@ -457,7 +458,7 @@ fn entry_routed_remotely_by(node: &Node, label: &str) -> PlacedEntry {
             let data = vec![0x6d; ENTRY_PAYLOAD_BYTES]
                 .encode()
                 .expect("repair fixture payload must encode");
-            return PlacedEntry::new(key, Entry::new(key, vec![data], EntryKind::Data));
+            return PlacedEntry::new(key, live_entry(key, vec![data], EntryKind::Data));
         }
     }
     panic!("failed to derive a remote repair entry from {}", node.did());

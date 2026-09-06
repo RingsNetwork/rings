@@ -28,6 +28,9 @@ pub enum PeerRingAction {
     RemoteAction(Did, RemoteAction),
     /// Trigger multiple remote actions.
     MultiActions(Vec<PeerRingAction>),
+    /// The placement interval changed: a storage repair round is due. A local intent, carrying
+    /// nothing, because the pass reads the ring state when it runs.
+    StorageRepairDue,
 }
 
 /// Describes the remote continuation required by a peer-ring operation.
@@ -40,8 +43,9 @@ pub enum RemoteAction {
     FindSuccessor(Did),
     /// Ask the recipient to find one entry placement.
     FindEntry(EntryLookupKey),
-    /// Ask the recipient to find one placement for operating.
-    FindEntryForOperate(PlacedEntryOperation),
+    /// Ask the recipient to find one placement for operating. Boxed: the carried entry
+    /// dominates the size of every other variant.
+    FindEntryForOperate(Box<PlacedEntryOperation>),
     /// Send a predecessor notification to the recipient.
     Notify(Did),
     /// Copy placed entries to one storage sync destination.

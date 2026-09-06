@@ -14,6 +14,7 @@ use crate::dht::entry::Entry;
 use crate::dht::successor::SuccessorReader;
 use crate::dht::Did;
 use crate::dht::PeerRing;
+use crate::dht::StorageKey;
 use crate::ecc::SecretKey;
 use crate::error::Result;
 use crate::measure::MeasureImpl;
@@ -40,6 +41,8 @@ mod test_dht_schedule;
 // End-to-end chunking uses the dummy backend's `max_message_size` test hook.
 #[cfg(feature = "dummy")]
 mod test_chunk_e2e;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+mod test_inbox;
 mod test_message_handler;
 #[cfg(all(feature = "std", not(feature = "dummy")))]
 mod test_native_transport;
@@ -223,7 +226,7 @@ fn prepare_node_with_optional_measure(
     let storage = Box::new(MemStorage::new());
 
     let session_sk = SessionSk::new_with_seckey(&key)?;
-    let builder = SwarmBuilder::new(0, stun, storage, session_sk)
+    let builder = SwarmBuilder::new(crate::tests::TEST_NETWORK_ID, stun, storage, session_sk)
         .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
         .dht_virtual_nodes(0);
     let builder = match measure {
@@ -297,20 +300,44 @@ pub async fn wait_for_predecessor(node: &Node, predecessor: Did) -> crate::error
     .await
 }
 
-pub async fn wait_for_storage_entry(node: &Node, entry: Did) -> crate::error::Result<Entry> {
+/// Wait until the value `node` stores at `key` (or its absence) satisfies `ready`, returning
+/// that value.
+///
+/// Post: returns only after `ready` held; the timeout is a failure deadline, never the event.
+pub async fn wait_for_storage_state(
+    node: &Node,
+    key: StorageKey,
+    label: &str,
+    ready: impl Fn(Option<&Entry>) -> bool,
+) -> crate::error::Result<Option<Entry>> {
     let started = Instant::now();
     loop {
-        if let Some(entry) = node.dht().storage.get(&entry.to_string()).await? {
-            return Ok(entry);
+        let stored = node.dht().storage.get(&key.to_string()).await?;
+        if ready(stored.as_ref()) {
+            return Ok(stored);
         }
 
         assert!(
             started.elapsed() <= TEST_WAIT_TIMEOUT,
-            "storage entry did not appear within {TEST_WAIT_TIMEOUT:?}: {entry}"
+            "storage at {key} did not reach the state within {TEST_WAIT_TIMEOUT:?}: {label}"
         );
         tokio::task::yield_now().await;
         sleep(TEST_WAIT_POLL_INTERVAL).await;
     }
+}
+
+/// Wait until `node` no longer stores a value at `key`.
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+pub async fn wait_for_storage_absence(node: &Node, key: StorageKey) -> crate::error::Result<()> {
+    wait_for_storage_state(node, key, "absent", |stored| stored.is_none())
+        .await
+        .map(drop)
+}
+
+pub async fn wait_for_storage_entry(node: &Node, key: StorageKey) -> crate::error::Result<Entry> {
+    wait_for_storage_state(node, key, "present", |stored| stored.is_some())
+        .await?
+        .ok_or_else(|| crate::error::Error::InvalidMessage(format!("no entry at {key}")))
 }
 
 pub fn gen_pure_dht(did: Did) -> PeerRing {

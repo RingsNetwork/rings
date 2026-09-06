@@ -1,7 +1,9 @@
 use super::Stabilizer;
 use super::STORAGE_REPAIR_FRESH_CONNECTION_GRACE_MS;
 use super::STORAGE_REPAIR_MAX_DELIVERIES_PER_STEP;
+use crate::dht::topology;
 use crate::dht::types::ChordStorageRepair;
+use crate::dht::ChordStorageSync;
 use crate::dht::Did;
 use crate::dht::PeerRingAction;
 use crate::dht::StorageSyncDelivery;
@@ -311,38 +313,37 @@ impl Stabilizer {
         }
     }
 
-    /// Republish locally-held entries to their current affine owners.
+    /// One bounded pass restoring the placement invariant of local storage.
+    ///
+    /// Invariant: every live local entry lies in `(self, head]` and at each of its affine
+    /// owners. The pass offers the entries beyond the head to the head (ownership hand-off,
+    /// whose local cleanup is ack-gated) and republishes local entries to missing affine owners
+    /// (additive), then sends the deliveries through one repair window. Placement is a function
+    /// of the ring state, so the pass is the same whichever input moved the head; a head change
+    /// only requests it, and the fresh-connection grace of the window outlives the peer's own
+    /// admission of this node, which a send at admission time would race. Repetition is
+    /// idempotent: deliveries are joins and every local removal is acknowledged first.
     pub async fn repair_storage(&self) -> Result<StorageRepairOutcome> {
         tracing::debug!(
             target: "rings_core::dht::stabilization",
             local = %self.dht.did,
             redundancy = self.transport.storage_redundancy(),
-            "STABILIZATION repair_storage republish start"
+            "STABILIZATION repair_storage start"
         );
-        let action = self
+        let handoff = match self.dht.with_topology_state(topology::successor_head)? {
+            Some(head) => self.dht.sync_entries_with_successor(head).await?,
+            None => PeerRingAction::None,
+        };
+        let republish = self
             .dht
             .republish_local_entries(self.transport.storage_redundancy())
             .await?;
-        let (action_kind, action_count) = match &action {
-            PeerRingAction::None => ("None", 0),
-            PeerRingAction::Some(_) => ("Some", 1),
-            PeerRingAction::SomeEntry(_) => ("SomeEntry", 1),
-            PeerRingAction::EntryMisses(misses) => ("EntryMisses", misses.len()),
-            PeerRingAction::RemoteAction(_, _) => ("RemoteAction", 1),
-            PeerRingAction::MultiActions(actions) => ("MultiActions", actions.len()),
-        };
-        tracing::debug!(
-            target: "rings_core::dht::stabilization",
-            local = %self.dht.did,
-            action_kind,
-            action_count,
-            "STABILIZATION repair_storage republish action prepared"
-        );
+        let action = PeerRingAction::MultiActions(vec![handoff, republish]);
         let outcome = self.handle_storage_repair_action(action).await?;
         tracing::debug!(
             target: "rings_core::dht::stabilization",
             local = %self.dht.did,
-            "STABILIZATION repair_storage republish complete"
+            "STABILIZATION repair_storage complete"
         );
         Ok(outcome)
     }
@@ -353,7 +354,6 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::dht::entry::Entry;
     use crate::dht::entry::EntryKind;
     use crate::dht::entry::PlacedEntry;
     use crate::dht::StorageSyncDestination;
@@ -361,6 +361,7 @@ mod tests {
     use crate::session::SessionSk;
     use crate::storage::MemStorage;
     use crate::swarm::SwarmBuilder;
+    use crate::tests::live_entry;
 
     fn repair_deliveries(values: &[u32]) -> Result<Vec<StorageSyncDelivery>> {
         let actions = values
@@ -368,7 +369,7 @@ mod tests {
             .copied()
             .map(|value| {
                 let destination = StorageSyncDestination::PlacementKey(Did::from(value));
-                let entry = Entry::new(Did::from(value + 100), vec![], EntryKind::Data);
+                let entry = live_entry(Did::from(value + 100), vec![], EntryKind::Data);
                 PeerRingAction::sync_entries_for_repair(destination, vec![PlacedEntry::new(
                     destination.did(),
                     entry,

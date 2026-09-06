@@ -24,7 +24,9 @@ async fn test_onion_exit_lookup_uses_dedicated_exit_registry() -> Result<()> {
     let exits = processor.lookup_onion_exits("web", false).await?;
 
     assert_eq!(exits, vec![exit_descriptor]);
-    assert!(exits.iter().all(OnionExitDescriptor::verify_signature));
+    assert!(exits
+        .iter()
+        .all(|descriptor| descriptor.verify_signature(processor.swarm.network_id())));
     assert!(!exits
         .iter()
         .any(|descriptor| descriptor.did == relay_only.did()));

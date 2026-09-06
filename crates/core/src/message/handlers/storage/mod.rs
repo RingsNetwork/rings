@@ -38,6 +38,7 @@ use crate::message::MessageVerificationExt;
 use crate::message::PayloadSender;
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::Swarm;
+use crate::utils::get_epoch_ms;
 
 /// ChordStorageInterface should imply necessary method for DHT storage
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
@@ -100,10 +101,11 @@ async fn repair_observed_storage_misses(
 /// Execute storage fetch actions for the Swarm-facing storage API.
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_recursion(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_recursion)]
-async fn handle_storage_fetch_act<const REDUNDANT: u16>(
+async fn handle_storage_fetch_act(
     transport: Arc<SwarmTransport>,
     resource: Did,
     act: PeerRingAction,
+    redundancy: u16,
 ) -> Result<()> {
     match act {
         PeerRingAction::SomeEntry(evidence) => {
@@ -114,7 +116,7 @@ async fn handle_storage_fetch_act<const REDUNDANT: u16>(
             let misses = evidence.misses;
             let repair = transport
                 .dht
-                .read_repair_entry(evidence.entry, &misses, REDUNDANT)
+                .read_repair_entry(evidence.entry, &misses, redundancy)
                 .await?;
             run_storage_repair_transport_effects(transport.clone(), repair).await?;
         }
@@ -130,7 +132,7 @@ async fn handle_storage_fetch_act<const REDUNDANT: u16>(
                         Message::SearchEntry(SearchEntry {
                             resource: query.resource,
                             placement: query.placement,
-                            redundancy: REDUNDANT,
+                            redundancy,
                         }),
                         next,
                     )
@@ -139,14 +141,14 @@ async fn handle_storage_fetch_act<const REDUNDANT: u16>(
         }
         PeerRingAction::MultiActions(acts) => {
             for (act, has_next) in core_actor_steps(acts) {
-                handle_storage_fetch_act::<REDUNDANT>(transport.clone(), resource, act).await?;
+                handle_storage_fetch_act(transport.clone(), resource, act, redundancy).await?;
                 if has_next {
                     yield_core_actor_step().await;
                 }
             }
         }
         PeerRingAction::EntryMisses(misses) => {
-            transport.observe_storage_misses(resource, REDUNDANT, misses)?;
+            transport.observe_storage_misses(resource, redundancy, misses)?;
         }
         act => finish_storage_action(act)?,
     }
@@ -163,7 +165,7 @@ pub(super) async fn handle_storage_store_act(
     match act {
         PeerRingAction::RemoteAction(target, PeerRingRemoteAction::FindEntryForOperate(op)) => {
             transport
-                .send_message(Message::OperateEntry(op), target)
+                .send_message(Message::OperateEntry(*op), target)
                 .await?;
         }
         PeerRingAction::MultiActions(acts) => {
@@ -183,15 +185,11 @@ async fn operate_entry_at_placement(
     dht: &PeerRing,
     placement: Did,
     op: EntryOperation,
+    writer: Did,
 ) -> Result<()> {
-    let op = op.stamped(dht.did)?;
-    let this = match dht.storage.get(&placement.to_string()).await? {
-        Some(this) => this,
-        None => op.clone().gen_default_entry()?,
-    };
-    let entry = this.operate(op, dht.did)?;
-    dht.join_storage_entry(placement, entry).await?;
-    Ok(())
+    let now_ms = get_epoch_ms();
+    dht.operate_storage_entry(now_ms, placement, op.stamped(now_ms, dht.did)?, writer)
+        .await
 }
 
 async fn handle_placed_entry_operation(
@@ -201,9 +199,18 @@ async fn handle_placed_entry_operation(
 ) -> Result<()> {
     msg.validate_placement(handler.transport.storage_redundancy())?;
 
-    match handler.dht.find_storage_owner(msg.placement)? {
+    match handler
+        .dht
+        .find_storage_owner_for(msg.placement, msg.op.entry().kind)?
+    {
         PeerRingAction::Some(_) => {
-            operate_entry_at_placement(&handler.dht, msg.placement, msg.op.clone()).await
+            operate_entry_at_placement(
+                &handler.dht,
+                msg.placement,
+                msg.op.clone(),
+                ctx.transaction.signer(),
+            )
+            .await
         }
         PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessor(_)) => {
             reset_storage_relay_destination(handler, ctx, next).await
@@ -283,14 +290,25 @@ async fn handle_storage_search_act(
     }
 }
 
-async fn operate_storage_entry<const REDUNDANT: u16>(
+async fn operate_entry_under_redundancy<const REDUNDANT: u16>(
     swarm: &Swarm,
     operation: EntryOperation,
 ) -> Result<()> {
     swarm.transport.ensure_storage_redundancy::<REDUNDANT>()?;
-    let action =
-        <PeerRing as ChordStorage<_, REDUNDANT>>::entry_operate(&swarm.dht, operation).await?;
-    handle_storage_store_act(swarm.transport.clone(), action).await
+    operate_entry(swarm.transport.clone(), operation).await
+}
+
+/// Apply `operation` under the transport's configured redundancy: locally where this node is
+/// an accepted placement and by `OperateEntry` toward every remote one.
+pub(crate) async fn operate_entry(
+    transport: Arc<SwarmTransport>,
+    operation: EntryOperation,
+) -> Result<()> {
+    let action = transport
+        .dht
+        .entry_operate_with_redundancy(operation, transport.storage_redundancy())
+        .await?;
+    handle_storage_store_act(transport, action).await
 }
 
 fn next_hop_for_sync_entries(
@@ -348,39 +366,39 @@ impl<const REDUNDANT: u16> ChordStorageInterface<REDUNDANT> for Swarm {
     /// otherwise query the responsible remote node.
     async fn storage_fetch(&self, entry_key: Did) -> Result<()> {
         self.transport.ensure_storage_redundancy::<REDUNDANT>()?;
-        self.transport.start_storage_lookup(entry_key, REDUNDANT)?;
-        // If peer found that data is on it's localstore, copy it to the cache
-        let act = self
+        let transport = self.transport.clone();
+        let redundancy = transport.storage_redundancy();
+        transport.start_storage_lookup(entry_key, redundancy)?;
+        let act = transport
             .dht
-            .entry_lookup_for_fetch::<REDUNDANT>(entry_key)
+            .entry_lookup_for_fetch(entry_key, redundancy)
             .await?;
-        handle_storage_fetch_act::<REDUNDANT>(self.transport.clone(), entry_key, act).await?;
-        Ok(())
+        handle_storage_fetch_act(transport, entry_key, act, redundancy).await
     }
 
     /// Store Entry, `TryInto<Entry>` is implemented for alot of types
     async fn storage_store(&self, entry: Entry) -> Result<()> {
-        operate_storage_entry::<REDUNDANT>(self, EntryOperation::Overwrite(entry)).await
+        operate_entry_under_redundancy::<REDUNDANT>(self, EntryOperation::Overwrite(entry)).await
     }
 
     async fn storage_append_data(&self, topic: &str, data: Encoded) -> Result<()> {
         let entry: Entry = (topic.to_string(), data).try_into()?;
-        operate_storage_entry::<REDUNDANT>(self, EntryOperation::Extend(entry)).await
+        operate_entry_under_redundancy::<REDUNDANT>(self, EntryOperation::Extend(entry)).await
     }
 
     async fn storage_touch_data(&self, topic: &str, data: Encoded) -> Result<()> {
         let entry: Entry = (topic.to_string(), data).try_into()?;
-        operate_storage_entry::<REDUNDANT>(self, EntryOperation::Touch(entry)).await
+        operate_entry_under_redundancy::<REDUNDANT>(self, EntryOperation::Touch(entry)).await
     }
 
     async fn storage_tombstone_data(&self, topic: &str, data: Encoded) -> Result<()> {
         let entry: Entry = (topic.to_string(), data).try_into()?;
-        operate_storage_entry::<REDUNDANT>(self, EntryOperation::Tombstone(entry)).await
+        operate_entry_under_redundancy::<REDUNDANT>(self, EntryOperation::Tombstone(entry)).await
     }
 
     async fn storage_compact_data(&self, topic: &str, removals: Vec<Encoded>) -> Result<()> {
         let entry = Entry::new(Entry::gen_did(topic)?, removals, EntryKind::Data);
-        operate_storage_entry::<REDUNDANT>(self, EntryOperation::CompactData(entry)).await
+        operate_entry_under_redundancy::<REDUNDANT>(self, EntryOperation::CompactData(entry)).await
     }
 }
 
@@ -453,7 +471,13 @@ impl HandleMsg<SyncEntriesWithSuccessor> for MessageHandler {
                 .await;
         }
 
-        let acks = self.transport.persist_storage_sync_entries(msg).await?;
+        // The sender is the transaction signer, the one origin the transport authenticated; the
+        // relay path is peer-declared and forwards unchanged, so it names nobody.
+        let sender = ctx.transaction.signer();
+        let acks = self
+            .transport
+            .persist_storage_sync_entries(msg, sender)
+            .await?;
         if msg.purpose.permits_source_cleanup() {
             if let Err(e) =
                 report_synced_entries(self, ctx, msg.purpose, msg.destination, acks).await

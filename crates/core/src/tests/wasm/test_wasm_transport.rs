@@ -33,6 +33,7 @@ use crate::swarm::transport::Transport;
 use crate::swarm::Swarm;
 use crate::tests::assert_control_interleaves_transfer;
 use crate::tests::control_interleaves_transfer;
+use crate::tests::live_entry;
 use crate::tests::manually_establish_connection;
 use crate::tests::midpoint_storage_key;
 use crate::tests::multi_frame_storage_sync_entries;
@@ -155,12 +156,14 @@ async fn seed_remote_repair_entries(node1: &Swarm, node2: &Swarm, node3: &Swarm)
     replace_observed_fingers(node1, &[(0, head.did()), (3, tail.did())]).unwrap();
     let head_key = midpoint_storage_key(node1.did(), head.did(), tail.did());
     let tail_key = tail_storage_key(node1.did(), tail.did());
-    let head_entry = Entry::new(
+    // Stamped live: a value written to storage without a retention bound is retired on its
+    // next read and would never be republished.
+    let head_entry = live_entry(
         head_key,
         vec!["repair-head".encode().unwrap()],
         EntryKind::Data,
     );
-    let tail_entry = Entry::new(
+    let tail_entry = live_entry(
         tail_key,
         vec!["repair-tail".encode().unwrap()],
         EntryKind::Data,

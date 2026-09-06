@@ -17,6 +17,7 @@ use bytes::Bytes;
 #[cfg(any(test, rings_browser))]
 use futures::channel::oneshot;
 use rings_core::dht::Did;
+use rings_core::message::MessageSigner;
 use rings_core::session::SessionSk;
 use serde::Deserialize;
 use serde::Serialize;
@@ -280,8 +281,10 @@ impl OnionHttpsRuntime {
         from: Did,
         id: OnionCircuitId,
         payload: OnionAuthenticatedPayload,
+        network_id: u32,
     ) {
-        let Some((pending, payload)) = self.take_pending_payload(from, id, payload) else {
+        let Some((pending, payload)) = self.take_pending_payload(from, id, payload, network_id)
+        else {
             return;
         };
         match decode_https_payload(payload) {
@@ -317,6 +320,7 @@ impl OnionHttpsRuntime {
         from: Did,
         id: OnionCircuitId,
         payload: OnionAuthenticatedPayload,
+        network_id: u32,
     ) -> Option<(PendingRequest, OnionCircuitPayload)> {
         let mut pending = self.pending.lock().ok()?;
         let request = pending.remove(&id)?;
@@ -324,7 +328,7 @@ impl OnionHttpsRuntime {
             pending.insert(id, request);
             return None;
         }
-        match payload.into_verified_payload(request.return_id, &request.expected_exit) {
+        match payload.into_verified_payload(request.return_id, &request.expected_exit, network_id) {
             Ok(verified) => Some((request, verified.payload)),
             Err(error) => {
                 let _ = request.sender.send(Err(error));
@@ -523,14 +527,16 @@ fn url_path(suffix: &str) -> String {
 #[cfg(rings_browser)]
 pub(crate) struct BrowserOnionCircuitHandler {
     https: Arc<OnionHttpsRuntime>,
-    session_sk: SessionSk,
+    /// The exit's signing authority for backward payloads.
+    signer: MessageSigner<SessionSk>,
 }
 
 #[cfg(rings_browser)]
 impl BrowserOnionCircuitHandler {
-    /// Create a browser circuit handler backed by the HTTPS runtime.
-    pub(crate) fn new(https: Arc<OnionHttpsRuntime>, session_sk: SessionSk) -> Self {
-        Self { https, session_sk }
+    /// Create a browser circuit handler backed by the HTTPS runtime, signing backward payloads
+    /// for the overlay `network_id`.
+    pub(crate) fn new(https: Arc<OnionHttpsRuntime>, signer: MessageSigner<SessionSk>) -> Self {
+        Self { https, signer }
     }
 }
 
@@ -538,7 +544,8 @@ impl BrowserOnionCircuitHandler {
 #[async_trait::async_trait(?Send)]
 impl OnionCircuitHandler for BrowserOnionCircuitHandler {
     async fn handle_exit(&self, scope: &Scope, frame: OnionCircuitExitFrame) -> Result<()> {
-        let _ = try_handle_https_exit_payload(&self.https, &self.session_sk, scope, frame).await?;
+        let _ =
+            try_handle_https_exit_payload(&self.https, self.signer.by_ref(), scope, frame).await?;
         Ok(())
     }
 
@@ -549,14 +556,15 @@ impl OnionCircuitHandler for BrowserOnionCircuitHandler {
         circuit_id: OnionCircuitId,
         payload: OnionAuthenticatedPayload,
     ) -> Result<()> {
-        self.https.complete_payload(from, circuit_id, payload);
+        self.https
+            .complete_payload(from, circuit_id, payload, self.signer.network_id());
         Ok(())
     }
 }
 
 pub(crate) async fn try_handle_https_exit_payload(
     runtime: &Arc<OnionHttpsRuntime>,
-    session_sk: &SessionSk,
+    signer: MessageSigner<&SessionSk>,
     scope: &Scope,
     frame: OnionCircuitExitFrame,
 ) -> Result<bool> {
@@ -591,7 +599,7 @@ pub(crate) async fn try_handle_https_exit_payload(
     send_backward(
         &runtime.link_sender,
         scope,
-        session_sk,
+        signer,
         OnionBackwardPath::new(
             frame.circuit_id,
             frame.return_peer,

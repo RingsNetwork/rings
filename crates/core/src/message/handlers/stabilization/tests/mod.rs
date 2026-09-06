@@ -1,22 +1,11 @@
 use std::sync::Arc;
 
-use tokio::time::timeout;
-use tokio::time::Duration;
-
 use super::*;
-use crate::dht::entry::Entry;
-use crate::dht::entry::EntryKind;
-use crate::dht::entry::PlacedEntry;
-use crate::dht::entry::SyncedEntryAck;
 use crate::dht::successor::SuccessorReader;
-use crate::dht::PeerRingAction;
-use crate::dht::StorageSyncDestination;
-use crate::dht::StorageSyncPurpose;
 use crate::ecc::tests::gen_ordered_keys;
 use crate::ecc::SecretKey;
 use crate::error::Error;
-use crate::message::Encoder;
-use crate::message::SyncEntriesWithSuccessorReport;
+use crate::message::MessageSigner;
 use crate::session::SessionSk;
 use crate::swarm::callback::SwarmCallback;
 use crate::swarm::Swarm;
@@ -24,6 +13,7 @@ use crate::tests::default::assert_no_more_msg;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;
 use crate::tests::manually_establish_connection;
+use crate::tests::TEST_NETWORK_ID;
 
 struct NoopCallback;
 
@@ -33,15 +23,10 @@ fn notify_context(origin: &SecretKey, destination: crate::dht::Did) -> Result<Me
     let session = SessionSk::new_with_seckey(origin)?;
     MessagePayload::new_send(
         Message::custom(b"notify predecessor context")?,
-        &session,
+        MessageSigner::new(&session, TEST_NETWORK_ID),
         destination,
         destination,
     )
-}
-
-fn next_generated_key(keys: &mut impl Iterator<Item = SecretKey>) -> Result<SecretKey> {
-    keys.next()
-        .ok_or_else(|| Error::InvalidMessage("expected generated key".to_string()))
 }
 
 #[tokio::test]
@@ -124,124 +109,6 @@ async fn test_triple_nodes_stabilization_2_1_3() -> Result<()> {
 async fn test_triple_nodes_stabilization_1_3_2() -> Result<()> {
     let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys::<3>();
     test_triple_desc_ordered_nodes_stabilization(key1, key3, key2).await
-}
-
-#[tokio::test]
-async fn test_notify_predecessor_report_acks_local_branch_when_predecessor_already_connected(
-) -> Result<()> {
-    let mut keys = gen_ordered_keys::<3>().into_iter();
-    let key1 = next_generated_key(&mut keys)?;
-    let key2 = next_generated_key(&mut keys)?;
-    let key3 = next_generated_key(&mut keys)?;
-
-    let node1 = prepare_node(key1).await;
-    let node2 = prepare_node(key2).await;
-    manually_establish_connection(&node1.swarm, &node2.swarm).await;
-    wait_for_msgs([&node1, &node2]).await;
-    assert_no_more_msg([&node1, &node2]).await;
-
-    let entry = Entry::new(
-        key3.address().into(),
-        vec![String::from("sync me").encode()?],
-        EntryKind::Data,
-    );
-    node1
-        .dht()
-        .storage
-        .put(&entry.did.to_string(), &entry)
-        .await?;
-    let stored_entry = entry.clone().try_into_storage_entry()?;
-    assert!(matches!(
-        node2.dht().find_storage_owner(entry.did)?,
-        PeerRingAction::Some(witness) if witness == node1.did() && witness != node2.did()
-    ));
-
-    let context_key = SecretKey::random();
-    let context_session = SessionSk::new_with_seckey(&context_key)?;
-    let context = MessagePayload::new_send(
-        Message::custom(b"notify report context")?,
-        &context_session,
-        node1.did(),
-        node1.did(),
-    )?;
-
-    let handler = MessageHandler::new(node1.swarm.transport.clone(), Arc::new(NoopCallback));
-    handler
-        .handle(&context, &NotifyPredecessorReport { did: node2.did() })
-        .await?;
-
-    let payload = match timeout(Duration::from_secs(1), node2.listen_once()).await {
-        Ok(Some(payload)) => payload,
-        Ok(None) => {
-            return Err(Error::InvalidMessage(
-                "node2 message stream closed before entry sync".to_string(),
-            ))
-        }
-        Err(_) => {
-            return Err(Error::InvalidMessage(
-                "timed out waiting for entry sync".to_string(),
-            ))
-        }
-    };
-
-    match payload.transaction.data::<Message>()? {
-        Message::SyncEntriesWithSuccessor(SyncEntriesWithSuccessor {
-            purpose,
-            destination,
-            data,
-        }) => {
-            assert_eq!(purpose, StorageSyncPurpose::OwnershipHandoff);
-            assert_eq!(
-                destination,
-                StorageSyncDestination::PhysicalOwner(node2.did())
-            );
-            assert_eq!(data, vec![PlacedEntry::new(entry.did, entry.clone())]);
-        }
-        message => {
-            return Err(Error::InvalidMessage(format!(
-                "expected SyncEntriesWithSuccessor, got {message:?}"
-            )))
-        }
-    }
-    let payload = match timeout(Duration::from_secs(1), node1.listen_once()).await {
-        Ok(Some(payload)) => payload,
-        Ok(None) => {
-            return Err(Error::InvalidMessage(
-                "node1 message stream closed before entry sync ack".to_string(),
-            ))
-        }
-        Err(_) => {
-            return Err(Error::InvalidMessage(
-                "timed out waiting for entry sync ack".to_string(),
-            ))
-        }
-    };
-
-    match payload.transaction.data::<Message>()? {
-        Message::SyncEntriesWithSuccessorReport(SyncEntriesWithSuccessorReport {
-            purpose,
-            acks,
-            ..
-        }) => {
-            assert_eq!(purpose, StorageSyncPurpose::OwnershipHandoff);
-            assert_eq!(acks, vec![SyncedEntryAck::new(
-                entry.did,
-                stored_entry.clone()
-            )]);
-        }
-        message => {
-            return Err(Error::InvalidMessage(format!(
-                "expected SyncEntriesWithSuccessorReport, got {message:?}"
-            )))
-        }
-    }
-    assert_eq!(node1.dht().storage.get(&entry.did.to_string()).await?, None);
-    assert_eq!(
-        node2.dht().storage.get(&entry.did.to_string()).await?,
-        Some(stored_entry)
-    );
-
-    Ok(())
 }
 
 async fn test_triple_ordered_nodes_stabilization(

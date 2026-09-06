@@ -25,6 +25,7 @@ use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::handlers::inbox::hold_for_offline_destination;
 use crate::message::types::FindSuccessorSend;
 use crate::message::FindSuccessorReportHandler;
 use crate::message::FindSuccessorThen;
@@ -33,7 +34,6 @@ use crate::message::MessagePayload;
 use crate::message::NotifyPredecessorSend;
 use crate::message::PayloadSender;
 use crate::message::QueryForTopoInfoSend;
-use crate::message::SyncEntriesWithSuccessor;
 use crate::swarm::callback::InnerSwarmCallback;
 use crate::swarm::callback::SharedSwarmCallback;
 use crate::swarm::transport::SwarmTransport;
@@ -223,11 +223,16 @@ pub(crate) enum CoreEffect<'payload> {
         /// Peer to connect.
         peer: Did,
     },
-    /// Send copy-only storage entries and register the matching ack capability.
-    SendStorageSync {
-        /// Storage-sync message to route by its storage destination.
-        msg: SyncEntriesWithSuccessor,
+    /// Hold an application payload in the relay inbox of its offline destination.
+    HoldForOfflineDestination {
+        /// Payload whose destination this node is responsible for but cannot reach.
+        payload: &'payload MessagePayload,
     },
+    /// Request a storage repair round: the placement interval changed, so the stabilizer's next
+    /// repair pass must hand off what lies beyond the new successor head. Only the intent is
+    /// recorded here; the pass itself runs under the repair schedule, whose admission grace
+    /// outlives the peer's own admission of this node.
+    RequestStorageRepair,
 }
 
 impl<'payload> CoreEffect<'payload> {
@@ -252,6 +257,11 @@ impl<'payload> CoreEffect<'payload> {
         Self::ResetDestination { payload, next_hop }
     }
 
+    /// Create an effect that holds `payload` in its destination's relay inbox.
+    pub(crate) fn hold_for_offline_destination(payload: &'payload MessagePayload) -> Self {
+        Self::HoldForOfflineDestination { payload }
+    }
+
     /// Create a normally-routed send effect.
     pub(crate) fn send_message(msg: Message, destination: Did) -> Self {
         Self::SendMessage {
@@ -273,9 +283,9 @@ impl<'payload> CoreEffect<'payload> {
         Self::ConnectDhtPeer { peer }
     }
 
-    /// Create a storage-sync effect.
-    pub(crate) fn send_storage_sync(msg: SyncEntriesWithSuccessor) -> Self {
-        Self::SendStorageSync { msg }
+    /// Create a storage repair request effect.
+    pub(crate) const fn request_storage_repair() -> Self {
+        Self::RequestStorageRepair
     }
 }
 
@@ -331,6 +341,7 @@ pub(crate) fn lower_dht_action<'payload>(
         PeerRingAction::RemoteAction(peer, PeerRingRemoteAction::TryConnect) => {
             Ok(Some(CoreEffect::connect_dht_peer(*peer)))
         }
+        PeerRingAction::StorageRepairDue => Ok(Some(CoreEffect::request_storage_repair())),
         PeerRingAction::RemoteAction(target, PeerRingRemoteAction::Notify(predecessor)) => {
             let (target, predecessor) = (*target, *predecessor);
             Ok(if target == predecessor {
@@ -382,6 +393,13 @@ impl<'handler> CoreEffectInterpreter<'handler> {
             CoreEffect::ResetDestination { payload, next_hop } => {
                 self.transport.reset_destination(payload, next_hop).await
             }
+            CoreEffect::HoldForOfflineDestination { payload } => {
+                hold_for_offline_destination(self.transport.clone(), payload).await
+            }
+            CoreEffect::RequestStorageRepair => {
+                self.transport.request_storage_repair();
+                Ok(())
+            }
             CoreEffect::SendMessage { msg, destination } => {
                 self.transport.send_message(*msg, destination).await?;
                 Ok(())
@@ -417,12 +435,6 @@ impl<'handler> CoreEffectInterpreter<'handler> {
                     Err(e) => Err(e),
                 }
             }
-            CoreEffect::SendStorageSync { msg } => {
-                self.transport
-                    .send_storage_sync_or_defer(msg, "core_effect")
-                    .await?;
-                Ok(())
-            }
         }
     }
 
@@ -457,11 +469,11 @@ mod tests {
     use std::task::Waker;
 
     use super::*;
-    use crate::dht::StorageSyncDestination;
-    use crate::dht::StorageSyncPurpose;
     use crate::ecc::SecretKey;
     use crate::message::types::QueryFor;
+    use crate::message::MessageSigner;
     use crate::session::SessionSk;
+    use crate::tests::TEST_NETWORK_ID;
 
     fn did() -> Did {
         SecretKey::random().address().into()
@@ -472,7 +484,7 @@ mod tests {
         let session_sk = SessionSk::new_with_seckey(&key)?;
         MessagePayload::new_send(
             Message::custom(b"hello")?,
-            &session_sk,
+            MessageSigner::new(&session_sk, TEST_NETWORK_ID),
             destination,
             destination,
         )
@@ -578,28 +590,17 @@ mod tests {
     }
 
     #[test]
-    fn test_storage_sync_effect_owns_sync_message() -> Result<()> {
-        let destination = did();
-        let msg = SyncEntriesWithSuccessor {
-            purpose: StorageSyncPurpose::OwnershipHandoff,
-            destination: StorageSyncDestination::PhysicalOwner(destination),
-            data: vec![],
-        };
-
-        let effect: CoreEffect<'_> = CoreEffect::send_storage_sync(msg.clone());
+    fn test_storage_repair_due_lowers_to_a_repair_request() -> Result<()> {
+        let effect = single_effect(lower_dht_action(&PeerRingAction::StorageRepairDue, |_| {
+            false
+        }))?;
 
         match effect {
-            CoreEffect::SendStorageSync { msg: effect_msg } => {
-                assert_eq!(effect_msg.destination, msg.destination);
-                assert!(effect_msg.data.is_empty());
-            }
-            effect => {
-                return Err(Error::InvalidMessage(format!(
-                    "expected SendStorageSync, got {effect:?}"
-                )))
-            }
+            CoreEffect::RequestStorageRepair => Ok(()),
+            effect => Err(Error::InvalidMessage(format!(
+                "expected RequestStorageRepair, got {effect:?}"
+            ))),
         }
-        Ok(())
     }
 
     #[test]

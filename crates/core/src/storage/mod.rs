@@ -1,13 +1,14 @@
 //! Module of MemStorage and PersistenceStorage
 
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+/// Persistent storage for native runtimes.
+pub mod file;
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
 /// IndexedDB-backed storage for browser runtimes.
 pub mod idb;
 /// In-memory key value storage.
 pub mod memory;
-#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
-/// Persistent storage for native runtimes.
-pub mod sled;
+mod write_ordered;
 
 use async_trait::async_trait;
 

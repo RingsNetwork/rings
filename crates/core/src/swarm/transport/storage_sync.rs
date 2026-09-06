@@ -4,6 +4,7 @@ use std::mem;
 use super::delivery::SendCompletionOutcome;
 use super::outbound::OutboundCompletion;
 use super::SwarmTransport;
+use crate::dht::entry::inbox::relocates_from_predecessor;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
 use crate::dht::Did;
@@ -19,6 +20,7 @@ use crate::message::MessagePayload;
 use crate::message::PayloadSender;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::message::SyncEntriesWithSuccessorReport;
+use crate::utils::get_epoch_ms;
 use crate::utils::get_epoch_ms_i64;
 
 const STORAGE_SYNC_ACK_CAPACITY: usize = 1024;
@@ -131,6 +133,13 @@ pub(crate) enum StorageSyncBatchStep {
 }
 
 pub(crate) struct StorageSyncBatch<'data> {
+    /// Admission time shared by validation and persistence, so a value admitted in the
+    /// validate phase cannot expire between phases and fail the batch half-written.
+    now_ms: u128,
+    /// The authenticated sender of the batch (its transaction signer), for the relocation law of
+    /// relay inboxes.
+    sender: Did,
+    purpose: StorageSyncPurpose,
     destination: StorageSyncDestination,
     data: &'data [PlacedEntry],
     validate_index: usize,
@@ -140,8 +149,11 @@ pub(crate) struct StorageSyncBatch<'data> {
 }
 
 impl<'data> StorageSyncBatch<'data> {
-    pub(crate) fn new(msg: &'data SyncEntriesWithSuccessor) -> Self {
+    pub(crate) fn new(msg: &'data SyncEntriesWithSuccessor, sender: Did, now_ms: u128) -> Self {
         Self {
+            now_ms,
+            sender,
+            purpose: msg.purpose,
             destination: msg.destination,
             data: &msg.data,
             validate_index: 0,
@@ -233,13 +245,44 @@ impl<'data> StorageSyncBatch<'data> {
 
         // Preservation: every input is validated before the first storage
         // effect, so a later invalid input leaves the entire batch unwritten.
-        if should_persist_synced_entry(transport, self.destination, placed.key)? {
+        // The admission law is re-checked by `join_storage_entry` at persist
+        // time; it is evaluated here so that a failing entry rejects the batch
+        // before any earlier entry has been written.
+        if should_persist_synced_entry(transport, self.destination, placed)?
+            && self.relay_relocation_permits(transport, placed)?
+        {
             placed.validate_placement(transport.storage_redundancy())?;
+            placed
+                .entry
+                .validate_admissible_at(self.now_ms, transport.network_id)?;
             let entry = placed.entry.clone().try_into_storage_entry()?;
             self.accepted.push(SyncedEntryAck::new(placed.key, entry));
         }
 
         Ok(Some(StorageSyncBatchStep::Pending))
+    }
+
+    /// Whether the relocation law lets this batch carry `placed`: a data topic always, a relay
+    /// inbox only as an ownership hand-off from the receiver's predecessor.
+    ///
+    /// Post: `false` skips the entry without acknowledging it, so its owner keeps it and offers
+    /// it again on a later pass; it does not fail the batch, as the entry is not invalid, only
+    /// not this receiver's to take yet.
+    fn relay_relocation_permits(
+        &self,
+        transport: &SwarmTransport,
+        placed: &PlacedEntry,
+    ) -> Result<bool> {
+        if !placed.entry.kind.is_relay_inbox() {
+            return Ok(true);
+        }
+        if !self.purpose.is_ownership_handoff() {
+            return Ok(false);
+        }
+        let predecessor = transport
+            .dht
+            .with_topology_state(|state| state.predecessor)?;
+        Ok(relocates_from_predecessor(self.sender, predecessor))
     }
 
     async fn persist_one(&mut self, transport: &SwarmTransport) -> Result<StorageSyncBatchStep> {
@@ -249,7 +292,10 @@ impl<'data> StorageSyncBatch<'data> {
         let key = ack.key;
         let entry = ack.entry.clone();
 
-        transport.dht.join_storage_entry(key, entry).await?;
+        transport
+            .dht
+            .join_storage_entry(self.now_ms, key, entry)
+            .await?;
         #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
         crate::simulation::record_storage_persisted(transport.dht.did);
         self.persist_index += 1;
@@ -293,13 +339,16 @@ fn test_per_entry_yield_ablation_reaches_real_storage_batch_policy() {
 fn should_persist_synced_entry(
     transport: &SwarmTransport,
     destination: StorageSyncDestination,
-    placement: Did,
+    placed: &PlacedEntry,
 ) -> Result<bool> {
-    if !storage_sync_destination_accepts_placement(destination, placement) {
+    if !storage_sync_destination_accepts_placement(destination, placed.key) {
         return Ok(false);
     }
 
-    match transport.dht.find_storage_owner(placement)? {
+    match transport
+        .dht
+        .find_storage_owner_for(placed.key, placed.entry.kind)?
+    {
         // Invariant: `Some(_)` is the local-storage branch. In non-virtual
         // Chord storage the DID carried by `Some` is the successor witness used
         // for fallback lookup, not a remote-owner denial.
@@ -328,11 +377,17 @@ fn evict_storage_sync_acks(pending: &mut StorageSyncAckMap) {
 
 impl SwarmTransport {
     /// Validate a complete local storage-sync batch before persisting any entry.
+    ///
+    /// Pre: `sender` is the authenticated signer of the message carrying `msg`, never a value
+    /// read from its relay path.
     pub(crate) async fn persist_storage_sync_entries(
         &self,
         msg: &SyncEntriesWithSuccessor,
+        sender: Did,
     ) -> Result<Vec<SyncedEntryAck>> {
-        StorageSyncBatch::new(msg).run(self).await
+        StorageSyncBatch::new(msg, sender, get_epoch_ms())
+            .run(self)
+            .await
     }
 
     /// Record the exact ack capability created by an outbound storage-sync payload.
@@ -368,7 +423,7 @@ impl SwarmTransport {
         let mut pending = self
             .pending_storage_sync_acks
             .lock()
-            .map_err(|_| Error::DHTSyncLockError)?;
+            .map_err(|_| Error::LockPoisoned)?;
         evict_storage_sync_acks(&mut pending);
         pending.insert(tx_id, capability);
         Ok(())
@@ -407,7 +462,7 @@ impl SwarmTransport {
         let mut pending = self
             .pending_storage_sync_acks
             .lock()
-            .map_err(|_| Error::DHTSyncLockError)?;
+            .map_err(|_| Error::LockPoisoned)?;
         let Some(capability) = pending.get(&tx_id) else {
             return Err(Error::InvalidMessage(
                 "storage sync report has no pending capability".to_string(),
@@ -446,12 +501,13 @@ impl SwarmTransport {
             .next_hop_for_storage_sync(msg.destination)?
             .filter(|next_hop| *next_hop != self.dht.did)
         else {
-            self.persist_storage_sync_entries(&msg).await?;
+            self.persist_storage_sync_entries(&msg, self.dht.did)
+                .await?;
             return Ok(StorageSyncCompletion::PersistedLocally);
         };
         let payload = MessagePayload::new_send(
             Message::SyncEntriesWithSuccessor(msg.clone()),
-            self.session_sk(),
+            self.message_signer(),
             next_hop,
             destination,
         )?;

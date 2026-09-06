@@ -17,6 +17,17 @@
 //! transitions over this state. Stabilize/notify/finger refinement are monotone
 //! over the finite known topology set; their least fixpoint is the converged
 //! Chord state plus a finger table derived from that topology.
+//!
+//! Head law: `head(s)` is the nearest successor other than `local`, the upper
+//! end of the local placement interval `(local, head]`.
+//! [`step`](crate::dht::topology::step) emits
+//! [`TopologyAction::SuccessorHeadChanged`](crate::dht::topology::TopologyAction::SuccessorHeadChanged)`(h)`
+//! iff `head(next) = Some(h)` and
+//! `head(state) ≠ Some(h)`, once per transition, after the event's own actions.
+//! Placement is a function of the ring state, not of the input that changed it,
+//! so every input that moves the head (join, admit, remove, update, stabilize)
+//! is reported through this one action and the shell schedules the placement
+//! repair from it.
 
 use std::collections::BTreeSet;
 
@@ -198,6 +209,8 @@ pub enum TopologyAction {
     QuerySuccessorList(Did),
     /// Notify this successor that `local` is its predecessor candidate.
     Notify(Did),
+    /// The successor head moved to this node (see the head law).
+    SuccessorHeadChanged(Did),
 }
 
 /// Result of applying one pure topology transition.
@@ -341,6 +354,29 @@ fn closest_preceding_finger(state: &TopologyState, target: &BigUint) -> Option<D
         .find(|peer| precedes(state.local, *peer, target))
 }
 
+/// `head(s)`: the nearest successor other than `local`, the upper end of the
+/// local placement interval `(local, head]`; `None` when the node stands alone.
+pub fn successor_head(state: &TopologyState) -> Option<Did> {
+    state
+        .successors
+        .iter()
+        .copied()
+        .find(|successor| *successor != state.local)
+}
+
+/// `Responsible(n, id)`: `id ∈ (pred(n), n]`, so `n` is the Chord successor of the position
+/// `id`. Without a known predecessor `n` is responsible only when it stands alone: a node that
+/// has successors but has not yet learned its predecessor is uninformed, not responsible for
+/// the whole ring.
+pub fn is_responsible_for(state: &TopologyState, id: Did) -> bool {
+    match state.predecessor {
+        Some(predecessor) => {
+            id != predecessor && dist(predecessor, id) <= dist(predecessor, state.local)
+        }
+        None => successor_head(state).is_none(),
+    }
+}
+
 /// Pure Chord successor lookup against one topology state.
 ///
 /// `Local(head)` answers when `did` lies in the local successor interval
@@ -358,12 +394,7 @@ fn closest_preceding_finger(state: &TopologyState, target: &BigUint) -> Option<D
 /// every state, so every remote step is a strict clockwise advance and never a
 /// self hop.
 pub fn find_successor(state: &TopologyState, did: Did) -> FindSuccessorStep {
-    let Some(head) = state
-        .successors
-        .iter()
-        .copied()
-        .find(|successor| *successor != state.local)
-    else {
+    let Some(head) = successor_head(state) else {
         return FindSuccessorStep::Local(state.local);
     };
     let target = dist(state.local, did);
@@ -375,7 +406,14 @@ pub fn find_successor(state: &TopologyState, did: Did) -> FindSuccessorStep {
 }
 
 /// Correct predecessor value after one HMCC/Zave rectify transition.
+///
+/// Law: `local` is never its own predecessor, so a candidate equal to `local` leaves the
+/// current value; the responsibility interval `(pred, local]` is then never empty by a
+/// self-reference.
 pub fn rectify_predecessor(local: Did, current: Option<Did>, candidate: Did) -> Option<Did> {
+    if candidate == local {
+        return current;
+    }
     match current {
         Some(cur) if dist(local, cur) >= dist(local, candidate) => Some(cur),
         _ => Some(candidate),
@@ -565,8 +603,22 @@ fn step_fix_finger(state: &TopologyState) -> TopologyStep {
 /// Apply one pure topology transition.
 ///
 /// Post: the returned state depends only on `state` and `event`; no locks,
-/// storage, clocks, randomness, or transport effects are read here.
+/// storage, clocks, randomness, or transport effects are read here. The head
+/// law holds: `SuccessorHeadChanged(h)` is the last action iff the head moved
+/// to `h`.
 pub fn step(state: &TopologyState, event: TopologyEvent, capacity: usize) -> TopologyStep {
+    let mut next = step_event(state, event, capacity);
+    if let Some(head) =
+        successor_head(&next.state).filter(|head| successor_head(state) != Some(*head))
+    {
+        next.actions
+            .push(TopologyAction::SuccessorHeadChanged(head));
+    }
+    next
+}
+
+/// The event's own transition, before the head law is applied.
+fn step_event(state: &TopologyState, event: TopologyEvent, capacity: usize) -> TopologyStep {
     match event {
         TopologyEvent::Join { peer } => step_join(state, peer, capacity),
         TopologyEvent::Admit {

@@ -465,9 +465,8 @@ fn eligible_exits(
     service: &OnionServiceName,
     exits: impl IntoIterator<Item = OnionExitDescriptor>,
 ) -> Vec<OnionExitDescriptor> {
-    OnionExitDescriptor::latest_valid_by_service_did(exits, now_ms, false)
+    OnionExitDescriptor::latest_valid_by_service_did(exits, now_ms, network_id, false)
         .into_iter()
-        .filter(|descriptor| descriptor.matches_network(network_id))
         .filter(|descriptor| descriptor.offers_service(service.as_str()))
         .collect()
 }
@@ -478,7 +477,7 @@ fn eligible_relay_dids(
     local: Did,
     online_nodes: impl IntoIterator<Item = OnlineNodeDescriptor>,
 ) -> Vec<OnionRouteHop> {
-    OnlineNodeDescriptor::latest_valid_by_did(online_nodes, now_ms, false)
+    OnlineNodeDescriptor::latest_valid_by_did(online_nodes, now_ms, dht_protocol.network_id, false)
         .into_iter()
         .filter(|descriptor| descriptor.matches_dht_protocol(dht_protocol))
         .filter(has_onion_relay_capability)

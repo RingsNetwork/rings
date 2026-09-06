@@ -45,13 +45,22 @@ impl Session {
 
     /// Check whether the session has expired.
     pub fn is_expired(&self) -> bool {
-        let now = utils::get_epoch_ms();
-        now > self.ts_ms + self.ttl_ms as u128
+        self.is_expired_at(utils::get_epoch_ms())
+    }
+
+    /// Check whether the session had expired at the instant `at_ms`.
+    pub fn is_expired_at(&self, at_ms: u128) -> bool {
+        at_ms > self.ts_ms + self.ttl_ms as u128
     }
 
     /// Verify that the account authorized this unexpired session.
     pub fn verify_self(&self) -> Result<()> {
-        if self.is_expired() {
+        self.verify_self_at(utils::get_epoch_ms())
+    }
+
+    /// Verify that the account authorized this session and that it was live at `at_ms`.
+    pub fn verify_self_at(&self, at_ms: u128) -> Result<()> {
+        if self.is_expired_at(at_ms) {
             return Err(Error::SessionExpired);
         }
 
@@ -68,7 +77,13 @@ impl Session {
 
     /// Verify a message signed by this session key.
     pub fn verify(&self, msg: &[u8], sig: impl AsRef<[u8]>) -> Result<()> {
-        self.verify_self()?;
+        self.verify_at(msg, sig, utils::get_epoch_ms())
+    }
+
+    /// Verify a message signed by this session key as of the instant `at_ms`: the session must
+    /// have been live then, whatever it is now.
+    pub fn verify_at(&self, msg: &[u8], sig: impl AsRef<[u8]>, at_ms: u128) -> Result<()> {
+        self.verify_self_at(at_ms)?;
         if !signers::secp256k1::verify(msg, &self.session_id, sig) {
             return Err(Error::VerifySignatureFailed);
         }

@@ -3,7 +3,6 @@
 //! [Swarm]
 
 use std::sync::Arc;
-use std::sync::RwLock;
 
 use rings_transport::webrtc_config::WebrtcUdpPortRange;
 
@@ -17,6 +16,7 @@ use crate::measure::MeasureImpl;
 use crate::session::SessionSk;
 use crate::swarm::callback::SharedSwarmCallback;
 use crate::swarm::callback::SwarmCallback;
+use crate::swarm::callback::SwarmCallbackSlot;
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::transport::SwarmTransportSettings;
 use crate::swarm::transport::SwarmWebrtcConfig;
@@ -159,7 +159,7 @@ impl SwarmBuilder {
             ),
         );
 
-        let callback = RwLock::new(
+        let callback = SwarmCallbackSlot::new(
             self.callback
                 .unwrap_or_else(|| Arc::new(DefaultCallback {})),
         );

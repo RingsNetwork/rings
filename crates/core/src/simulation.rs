@@ -758,6 +758,7 @@ mod tests {
     use crate::ecc::SecretKey;
     use crate::message::Message;
     use crate::message::MessagePayload;
+    use crate::message::MessageSigner;
     use crate::message::PeerLivenessProbe;
     use crate::message::SyncEntriesWithSuccessor;
     use crate::session::SessionSk;
@@ -803,9 +804,14 @@ mod tests {
             ),
         ];
         for (sequence, (message, expected)) in fixtures.into_iter().enumerate() {
-            let wire = MessagePayload::new_send(message, &session, did, did)
-                .and_then(|payload| payload.to_wire())
-                .expect("payload must encode");
+            let wire = MessagePayload::new_send(
+                message,
+                MessageSigner::new(&session, crate::tests::TEST_NETWORK_ID),
+                did,
+                did,
+            )
+            .and_then(|payload| payload.to_wire())
+            .expect("payload must encode");
             assert_eq!(
                 inspect_message(sequence as u64, &wire)
                     .expect("payload must classify")

@@ -101,7 +101,7 @@ impl SwarmTransport {
         let mut observations = self
             .storage_lookup_observations
             .lock()
-            .map_err(|_| Error::DHTSyncLockError)?;
+            .map_err(|_| Error::LockPoisoned)?;
         let now = storage_lookup_observation_now_ms();
         evict_storage_lookup_observations(&mut observations, now);
         reserve_storage_lookup_observation_slot(&mut observations);
@@ -124,7 +124,7 @@ impl SwarmTransport {
         let mut observations = self
             .storage_lookup_observations
             .lock()
-            .map_err(|_| Error::DHTSyncLockError)?;
+            .map_err(|_| Error::LockPoisoned)?;
         let now = storage_lookup_observation_now_ms();
         evict_storage_lookup_observations(&mut observations, now);
         if observations.contains_key(&key) {
@@ -156,7 +156,7 @@ impl SwarmTransport {
         let mut observations = self
             .storage_lookup_observations
             .lock()
-            .map_err(|_| Error::DHTSyncLockError)?;
+            .map_err(|_| Error::LockPoisoned)?;
         let now = storage_lookup_observation_now_ms();
         evict_storage_lookup_observations(&mut observations, now);
         let Some(observation) = observations.get_mut(&key) else {
@@ -187,7 +187,7 @@ impl SwarmTransport {
         let mut observations = self
             .storage_lookup_observations
             .lock()
-            .map_err(|_| Error::DHTSyncLockError)?;
+            .map_err(|_| Error::LockPoisoned)?;
         let now = storage_lookup_observation_now_ms();
         evict_storage_lookup_observations(&mut observations, now);
         let Some(observation) = observations.get_mut(&key) else {
@@ -211,7 +211,7 @@ impl SwarmTransport {
         let mut observations = self
             .storage_lookup_observations
             .lock()
-            .map_err(|_| Error::DHTSyncLockError)?;
+            .map_err(|_| Error::LockPoisoned)?;
         if let Some(observation) = observations.get_mut(&key) {
             observation.observed_at_ms = storage_lookup_observation_now_ms()
                 .saturating_sub(STORAGE_LOOKUP_OBSERVATION_TTL_MS + 1);
@@ -225,7 +225,7 @@ impl SwarmTransport {
         let observations = self
             .storage_lookup_observations
             .lock()
-            .map_err(|_| Error::DHTSyncLockError)?;
+            .map_err(|_| Error::LockPoisoned)?;
         Ok(observations.len())
     }
 }

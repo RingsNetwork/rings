@@ -32,6 +32,7 @@ use crate::swarm::callback::SwarmCallback;
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::transport::SwarmTransportSettings;
 use crate::swarm::transport::SwarmWebrtcConfig;
+use crate::tests::live_entry;
 
 #[derive(Default)]
 struct InterleaveProbe {
@@ -148,7 +149,7 @@ async fn test_inbound_storage_batch_yields_to_control_between_persistence_steps(
     let entries = [31_u32, 32_u32]
         .into_iter()
         .map(|did| {
-            let entry = Entry::new(Did::from(did), Vec::new(), EntryKind::Data);
+            let entry = live_entry(Did::from(did), Vec::new(), EntryKind::Data);
             PlacedEntry::new(entry.did, entry)
         })
         .collect();

@@ -36,7 +36,10 @@ pub use handlers::HandleMsg;
 pub use handlers::MessageHandler;
 
 mod protocols;
+pub use protocols::DomainTag;
 pub use protocols::MessageRelay;
+pub use protocols::MessageSigner;
 pub use protocols::MessageVerification;
 pub use protocols::MessageVerificationExt;
 pub use protocols::ReportReturnPolicy;
+pub use protocols::SigningDomain;

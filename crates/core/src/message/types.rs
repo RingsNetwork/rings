@@ -587,7 +587,6 @@ mod tests {
 
     use super::*;
     use crate::chunk::ChunkMeta;
-    use crate::dht::entry::EntryCrdt;
     use crate::dht::entry::EntryKind;
     use crate::dht::entry::EntryOperation;
     use crate::ecc::SecretKey;
@@ -605,12 +604,7 @@ mod tests {
             Self {
                 did,
                 public_key: secret_key.pubkey(),
-                entry: Entry {
-                    did,
-                    data: Vec::new(),
-                    kind: EntryKind::Data,
-                    crdt: EntryCrdt::default(),
-                },
+                entry: Entry::new(did, Vec::new(), EntryKind::Data),
             }
         }
     }

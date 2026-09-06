@@ -3,10 +3,12 @@ use std::sync::Mutex;
 use std::sync::MutexGuard;
 
 use async_trait::async_trait;
+use futures::lock::Mutex as FuturesMutex;
 
 use super::PeerRingAction;
 use super::RemoteAction;
 use super::TopoInfo;
+use crate::consts::LOCAL_CACHE_CAPACITY;
 use crate::dht::did::BiasId;
 use crate::dht::entry::Entry;
 use crate::dht::finger::DEFAULT_FINGER_TABLE_SIZE;
@@ -47,10 +49,12 @@ pub struct PeerRing {
     predecessor: Arc<Mutex<Option<Did>>>,
     /// Persistent replicated-entry storage.
     pub storage: EntryStorage,
-    /// Local fetched-entry cache.
+    /// Local fetched-entry cache, bounded at [`LOCAL_CACHE_CAPACITY`] entries.
     pub cache: EntryStorage,
     storage_virtual_node_config: VirtualNodeConfig,
     topology_transition: Mutex<()>,
+    /// Serializes every read-modify-write of a storage slot (see `chord::storage`).
+    pub(super) storage_transition: FuturesMutex<()>,
 }
 
 impl PeerRing {
@@ -96,9 +100,10 @@ impl PeerRing {
             predecessor: Arc::new(Mutex::new(None)),
             finger: Arc::new(Mutex::new(FingerTable::new(did, finger_table_size))),
             storage,
-            cache: Box::new(MemStorage::new()),
+            cache: Box::new(MemStorage::bounded(LOCAL_CACHE_CAPACITY)),
             storage_virtual_node_config: virtual_nodes,
             topology_transition: Mutex::new(()),
+            storage_transition: FuturesMutex::new(()),
             did,
         }
     }
@@ -115,11 +120,11 @@ impl PeerRing {
     }
 
     fn lock_finger_state(&self) -> Result<MutexGuard<'_, FingerTable>> {
-        self.finger.lock().map_err(|_| Error::DHTSyncLockError)
+        self.finger.lock().map_err(|_| Error::LockPoisoned)
     }
 
     fn lock_predecessor_state(&self) -> Result<MutexGuard<'_, Option<Did>>> {
-        self.predecessor.lock().map_err(|_| Error::DHTSyncLockError)
+        self.predecessor.lock().map_err(|_| Error::LockPoisoned)
     }
 
     #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
@@ -132,7 +137,7 @@ impl PeerRing {
         let _transition = self
             .topology_transition
             .lock()
-            .map_err(|_| Error::DHTSyncLockError)?;
+            .map_err(|_| Error::LockPoisoned)?;
         let mut observed = self.lock_finger_state()?;
         for (index, did) in fingers {
             if *index >= observed.slot_count() {
@@ -169,6 +174,9 @@ impl PeerRing {
         self.remove_with_successor_evidence(did, SuccessorRemoval::ReplaceWith(replacements))
     }
 
+    /// Post: the emitted actions are dropped. A removal only widens `(self, head]` (a closer
+    /// connected peer would already be the head), so its head change moves no placement out of
+    /// this node; the caller requests the storage repair round for the widened interval itself.
     fn remove_with_successor_evidence(&self, did: Did, successor: SuccessorRemoval) -> Result<()> {
         self.transition_topology(TopologyEvent::Remove {
             peer: did,
@@ -193,7 +201,7 @@ impl PeerRing {
         let _transition = self
             .topology_transition
             .lock()
-            .map_err(|_| Error::DHTSyncLockError)?;
+            .map_err(|_| Error::LockPoisoned)?;
         let state = self.topology_state_unlocked()?;
         Ok(observe(&state))
     }
@@ -215,6 +223,30 @@ impl PeerRing {
         self.storage_virtual_node_config
     }
 
+    /// The overlay this ring belongs to; every stored value is admitted inside it.
+    pub const fn network_id(&self) -> u32 {
+        self.storage_virtual_node_config.network_id()
+    }
+
+    /// Whether this node is the Chord successor of the position `did`, i.e.
+    /// `did ∈ (predecessor, self]`. With no known predecessor the node is responsible only when
+    /// it stands alone: a node that has successors but has not yet learned its predecessor is
+    /// merely uninformed, not responsible for the whole ring. A message addressed to an
+    /// unreachable `did` in this interval has reached the node that must hold it.
+    pub(crate) fn is_responsible_for(&self, did: Did) -> Result<bool> {
+        self.with_topology_state(|state| topology::is_responsible_for(state, did))
+    }
+
+    /// The node this owner routes the position `destination` to, when its own view answers:
+    /// the only node whose holds for `destination` this owner admits (see the `inbox` module).
+    pub(crate) fn inbox_hold_authority(&self, destination: Did) -> Result<Option<Did>> {
+        let state = self.topology_state()?;
+        Ok(match topology::find_successor(&state, destination) {
+            FindSuccessorStep::Local(responsible) => Some(responsible),
+            FindSuccessorStep::Remote { .. } => None,
+        })
+    }
+
     fn transition_topology(&self, event: TopologyEvent) -> Result<TopologyStep> {
         self.transition_topology_with_observer(event, |_| {})
     }
@@ -227,7 +259,7 @@ impl PeerRing {
         let _transition = self
             .topology_transition
             .lock()
-            .map_err(|_| Error::DHTSyncLockError)?;
+            .map_err(|_| Error::LockPoisoned)?;
         let current = self.topology_state_unlocked()?;
         observe_snapshot(&current);
         let next = topology::step(&current, event, self.successor_seq.capacity());
@@ -258,6 +290,8 @@ impl PeerRing {
             TopologyAction::Notify(did) => {
                 PeerRingAction::RemoteAction(did, RemoteAction::Notify(self.did))
             }
+            // The pass reads the current head when it runs, so the head is not carried.
+            TopologyAction::SuccessorHeadChanged(_) => PeerRingAction::StorageRepairDue,
         }
     }
 

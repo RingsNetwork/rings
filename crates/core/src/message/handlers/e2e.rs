@@ -10,7 +10,6 @@ use crate::message::Message;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
-use crate::message::PayloadSender;
 
 fn e2e_local_or_forward_effects<'payload>(
     local: crate::dht::Did,
@@ -52,7 +51,7 @@ fn e2e_handshake_response_effect<'payload>(
 impl HandleMsg<E2eHandshakeRequest> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, msg: &E2eHandshakeRequest) -> Result<()> {
         run_e2e_local_or_forward(self, ctx, || {
-            let responder_public_key = self.transport.session_sk().session().account_pubkey()?;
+            let responder_public_key = self.transport.session().account_pubkey()?;
             Ok(vec![e2e_handshake_response_effect(
                 ctx,
                 msg,
@@ -96,7 +95,9 @@ mod tests {
     use crate::error::Error;
     use crate::message::e2e::encrypt_stream_with_rng;
     use crate::message::e2e::E2eHandshakeRequest;
+    use crate::message::MessageSigner;
     use crate::session::SessionSk;
+    use crate::tests::TEST_NETWORK_ID;
 
     fn e2e_payload(destination: crate::dht::Did) -> Result<MessagePayload> {
         let sender = SecretKey::random();
@@ -116,7 +117,7 @@ mod tests {
             .ok_or_else(|| Error::InvalidMessage("expected one E2E stream frame".to_string()))?;
         MessagePayload::new_send(
             Message::E2eStreamFrame(encrypted),
-            &session_sk,
+            MessageSigner::new(&session_sk, TEST_NETWORK_ID),
             destination,
             destination,
         )
@@ -130,7 +131,7 @@ mod tests {
         let session_sk = SessionSk::new_with_seckey(signer)?;
         MessagePayload::new_send(
             Message::E2eHandshakeRequest(request),
-            &session_sk,
+            MessageSigner::new(&session_sk, TEST_NETWORK_ID),
             destination,
             destination,
         )

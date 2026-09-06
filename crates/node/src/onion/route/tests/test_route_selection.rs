@@ -4,6 +4,7 @@ use rings_core::ecc::SecretKey;
 use rings_core::error::Result as CoreResult;
 use rings_core::measure::PeerQuality;
 use rings_core::message::DhtProtocolMode;
+use rings_core::message::MessageSigner;
 use rings_core::session::SessionSk;
 
 use super::super::*;
@@ -70,7 +71,7 @@ fn signed_exit_for_session_network_at(
             expires_at_ms,
             version: "test".to_string(),
         },
-        session_sk,
+        MessageSigner::new(session_sk, network_id),
     )
     .map_err(Error::CoreError)
 }
@@ -123,7 +124,7 @@ fn online_node_at_with_network_and_capabilities(
             expires_at_ms,
             version: "test".to_string(),
         },
-        session_sk,
+        MessageSigner::new(session_sk, network_id),
     )
 }
 

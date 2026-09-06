@@ -18,6 +18,7 @@ use rings_core::ecc::PublicKey;
 use rings_core::lifecycle::StopSource;
 use rings_core::measure::PeerQuality;
 use rings_core::message::DhtProtocolMode;
+use rings_core::message::MessageSigner;
 use rings_core::storage::idb::IdbStorage;
 use rings_core::utils::js_utils;
 use rings_core::utils::js_value;
@@ -193,6 +194,7 @@ impl BrowserOnionDirectoryReader {
                     .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
                 Ok(crate::rpc_dto::online_node_descriptors_from_infos(
                     response.nodes,
+                    self.processor.swarm.network_id(),
                 ))
             }
         }
@@ -213,6 +215,7 @@ impl BrowserOnionDirectoryReader {
                     .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
                 Ok(crate::rpc_dto::onion_exit_descriptors_from_infos(
                     response.exits,
+                    self.processor.swarm.network_id(),
                 ))
             }
         }
@@ -926,7 +929,13 @@ impl Provider {
         let link_sender = runtime.link_sender();
         OnionCircuitShell::with_link_sender(
             self.processor.session_sk().clone(),
-            BrowserOnionCircuitHandler::new(runtime, self.processor.session_sk().clone()),
+            BrowserOnionCircuitHandler::new(
+                runtime,
+                MessageSigner::new(
+                    self.processor.session_sk().clone(),
+                    self.processor.swarm.network_id(),
+                ),
+            ),
             link_sender,
         )
     }

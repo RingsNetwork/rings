@@ -1,3 +1,5 @@
+use rings_core::message::MessageSigner;
+
 use super::*;
 
 // Native WebRTC tests share process-global ICE/UDP resources and timing-sensitive
@@ -313,7 +315,7 @@ pub(super) fn onion_exit_descriptor_for_processor_with_node_type_service(
             expires_at_ms: now_ms + 90_000,
             version: crate::util::build_version(),
         },
-        &processor.session_sk,
+        MessageSigner::new(&processor.session_sk, processor.swarm.network_id()),
     )
     .map_err(Error::CoreError)
 }
@@ -343,7 +345,7 @@ pub(super) fn online_relay_descriptor_for_processor(
             expires_at_ms: now_ms + 90_000,
             version: crate::util::build_version(),
         },
-        &processor.session_sk,
+        MessageSigner::new(&processor.session_sk, processor.swarm.network_id()),
     )
     .map_err(Error::CoreError)
 }

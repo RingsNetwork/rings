@@ -6,6 +6,8 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use rings_core::ecc::SecretKey;
+#[cfg(rings_native)]
+use rings_core::message::MessageSigner;
 use rings_core::session::SessionSk;
 #[cfg(rings_native)]
 use tokio::io::AsyncReadExt;
@@ -18,6 +20,7 @@ use super::super::*;
 use crate::onion::OnionExitDescriptorBody;
 use crate::onion::OnionExitService;
 use crate::online::OnlineNodeType;
+use crate::tests::TEST_NETWORK_ID;
 
 fn did() -> Did {
     SecretKey::random().address().into()
@@ -37,7 +40,7 @@ fn exit_descriptor(session: &SessionSk) -> OnionExitDescriptor {
                 .expect("verification key"),
             session_public_key: session.session_public_key(),
             node_type: OnlineNodeType::Browser,
-            network_id: 1,
+            network_id: TEST_NETWORK_ID,
             service: OnionExitService::https(),
             policy: OnionExitPolicy::default(),
             started_at_ms: 0,
@@ -45,7 +48,7 @@ fn exit_descriptor(session: &SessionSk) -> OnionExitDescriptor {
             expires_at_ms: 1,
             version: "test".to_string(),
         },
-        session,
+        MessageSigner::new(session, TEST_NETWORK_ID),
     )
     .expect("signed exit")
 }
@@ -60,7 +63,7 @@ fn dummy_authenticated_payload(
             "wrong peer".to_string(),
         )))
         .expect("encode payload"),
-        session,
+        MessageSigner::new(session, TEST_NETWORK_ID),
     )
     .expect("signed payload")
 }
@@ -188,7 +191,12 @@ fn test_pending_request_completes_only_from_expected_return_peer() {
         .begin_request(expected, exit_descriptor(&exit), return_id)
         .unwrap();
 
-    runtime.complete_payload(other, id, dummy_authenticated_payload(return_id, &exit));
+    runtime.complete_payload(
+        other,
+        id,
+        dummy_authenticated_payload(return_id, &exit),
+        TEST_NETWORK_ID,
+    );
     assert_eq!(runtime.pending_len(), 1);
     drop(pending_request);
 }
@@ -208,6 +216,7 @@ fn test_pending_request_rejects_payload_from_wrong_exit_session() {
         expected,
         id,
         dummy_authenticated_payload(return_id, &wrong_exit),
+        TEST_NETWORK_ID,
     );
 
     assert_eq!(runtime.pending_len(), 0);
@@ -233,11 +242,11 @@ fn test_pending_request_reports_authenticated_request_as_unexpected_backward_pay
     let payload = OnionAuthenticatedPayload::new_signed(
         return_id,
         encode_https_payload(request_payload).unwrap(),
-        &exit,
+        MessageSigner::new(&exit, TEST_NETWORK_ID),
     )
     .unwrap();
 
-    runtime.complete_payload(expected, id, payload);
+    runtime.complete_payload(expected, id, payload, TEST_NETWORK_ID);
 
     assert_eq!(runtime.pending_len(), 0);
     assert!(matches!(

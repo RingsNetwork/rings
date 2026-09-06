@@ -5,11 +5,11 @@
 mod builder;
 /// Callback interface for swarm
 pub mod callback;
+mod inbox;
 pub(crate) mod transport;
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
-use std::sync::RwLock;
 
 pub use builder::SwarmBuilder;
 
@@ -31,6 +31,8 @@ use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
 use crate::message::PayloadSender;
 use crate::swarm::callback::SharedSwarmCallback;
+use crate::swarm::callback::SwarmCallbackSlot;
+use crate::swarm::inbox::SwarmInboxDelivery;
 use crate::swarm::transport::SwarmTransport;
 
 /// The transport and dht management.
@@ -39,7 +41,7 @@ pub struct Swarm {
     pub(crate) dht: Arc<PeerRing>,
     /// Swarm transport.
     pub(crate) transport: Arc<SwarmTransport>,
-    callback: RwLock<SharedSwarmCallback>,
+    callback: SwarmCallbackSlot,
 }
 
 impl Swarm {
@@ -50,15 +52,12 @@ impl Swarm {
 
     /// Get the local account public key used for E2E public-key negotiation.
     pub fn account_pubkey(&self) -> Result<PublicKey<33>> {
-        self.transport.session_sk().session().account_pubkey()
+        self.transport.session().account_pubkey()
     }
 
     /// Get the typed account verification public key.
     pub fn account_verification_pubkey(&self) -> Result<VerificationPublicKey> {
-        self.transport
-            .session_sk()
-            .session()
-            .account_verification_pubkey()
+        self.transport.session().account_verification_pubkey()
     }
 
     /// Get this swarm's network id.
@@ -87,11 +86,7 @@ impl Swarm {
     }
 
     fn callback(&self) -> Result<SharedSwarmCallback> {
-        Ok(self
-            .callback
-            .read()
-            .map_err(|_| Error::CallbackSyncLockError)?
-            .clone())
+        self.callback.current()
     }
 
     fn inner_callback(&self) -> Result<InnerSwarmCallback> {
@@ -103,19 +98,19 @@ impl Swarm {
 
     /// Set callback for swarm.
     pub fn set_callback(&self, callback: SharedSwarmCallback) -> Result<()> {
-        let mut inner = self
-            .callback
-            .write()
-            .map_err(|_| Error::CallbackSyncLockError)?;
-
-        *inner = callback;
-
-        Ok(())
+        self.callback.replace(callback)
     }
 
-    /// Create [Stabilizer] for swarm.
+    /// Create [Stabilizer] for swarm; its inbox-delivery intent is interpreted here, toward
+    /// whichever callback is set when it delivers.
     pub fn stabilizer(&self) -> Stabilizer {
-        Stabilizer::new(self.transport.clone())
+        Stabilizer::new(
+            self.transport.clone(),
+            Arc::new(SwarmInboxDelivery::new(
+                self.transport.clone(),
+                self.callback.clone(),
+            )),
+        )
     }
 
     /// Disconnect a connection. There are three steps:
@@ -210,7 +205,7 @@ impl Swarm {
         // The invoker should fix it before sending.
         let payload = MessagePayload::new_send(
             Message::ConnectNodeSend(offer_msg),
-            self.transport.session_sk(),
+            self.transport.message_signer(),
             self.did(),
             peer,
         )?;
@@ -221,7 +216,7 @@ impl Swarm {
     /// Answer the offer of remote connection. This function will verify the answer payload and
     /// will wrap the answer inside a payload with verification.
     pub async fn answer_offer(&self, offer_payload: MessagePayload) -> Result<MessagePayload> {
-        if !offer_payload.verify() {
+        if !offer_payload.verify(self.network_id()) {
             return Err(Error::VerifySignatureFailed);
         }
 
@@ -241,7 +236,7 @@ impl Swarm {
         // The invoker should fix it before sending.
         let answer_payload = MessagePayload::new_send(
             Message::ConnectNodeReport(answer_msg),
-            self.transport.session_sk(),
+            self.transport.message_signer(),
             self.did(),
             self.did(),
         )?;
@@ -252,7 +247,7 @@ impl Swarm {
     /// Accept the answer of remote connection. This function will verify the answer payload and
     /// will return its did with the connection.
     pub async fn accept_answer(&self, answer_payload: MessagePayload) -> Result<()> {
-        if !answer_payload.verify() {
+        if !answer_payload.verify(self.network_id()) {
             return Err(Error::VerifySignatureFailed);
         }
 

@@ -92,10 +92,12 @@ async fn test_online_node_registry_lists_two_publishers_over_network() -> Result
     let nodes =
         wait_for_online_node_dids(&publisher, &expected, "publisher sees both publishers").await?;
 
-    assert!(nodes.iter().all(OnlineNodeDescriptor::verify_signature));
+    assert!(nodes
+        .iter()
+        .all(|descriptor| descriptor.verify_signature(publisher.swarm.network_id())));
     assert!(other_nodes
         .iter()
-        .all(OnlineNodeDescriptor::verify_signature));
+        .all(|descriptor| descriptor.verify_signature(owner.swarm.network_id())));
     Ok(())
 }
 

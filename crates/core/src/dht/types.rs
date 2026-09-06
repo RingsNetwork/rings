@@ -77,13 +77,14 @@ pub trait ChordStorage<Action, const REDUNDANT: u16>: Chord<Action> {
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait ChordStorageSync<Action>: Chord<Action> {
-    /// When the successor of a node is updated, it needs to check if there are
-    /// `Entry`s that are no longer between current node and `new_successor`,
-    /// and copy them to the new successor.
+    /// Offer the live `Entry`s no longer placed in `(self, new_successor]` to
+    /// `new_successor`. The storage repair pass runs this against the current
+    /// successor head, whichever input moved it, so repetition must be idempotent.
     ///
-    /// Mode law: with storage virtual nodes enabled, `new_successor` is only the
-    /// stabilization trigger. The copy target is the current
-    /// `storage_owner(k, view, cfg)` relation, not necessarily `new_successor`.
+    /// Mode law: a relay inbox is placed by the ring geometry in every mode and
+    /// is always offered to `new_successor`. With storage virtual nodes enabled a
+    /// data topic follows the current `storage_owner(k, view, cfg)` relation
+    /// instead, and `new_successor` is only the trigger of that additive copy.
     ///
     /// Post: this only delivers entry joins. Local cleanup is performed by
     /// [`Self::acknowledge_synced_entries`] after the successor reports durable
@@ -101,16 +102,17 @@ pub trait ChordStorageSync<Action>: Chord<Action> {
 
 /// ChordStorageRepair defines additive repair for redundant DHT storage.
 ///
-/// Repair never deletes local copies. It only republishes a known [`Entry`] as
-/// a join delivery to the current affine placement set so missing owners can
-/// regain a copy.
+/// Repair never deletes a live local copy. It only republishes a known
+/// [`Entry`] as a join delivery to the current affine placement set so missing
+/// owners can regain a copy; values whose retention bound has elapsed are
+/// retired before republish and are never offered.
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait ChordStorageRepair<Action>: Chord<Action> {
-    /// Republish every locally stored entry to its current affine owners.
+    /// Republish every live locally stored entry to its current affine owners.
     ///
-    /// Post: no local key is removed. Remote actions, if any, are join-delivery
-    /// sync messages carrying explicit placement keys.
+    /// Post: no live local key is removed. Remote actions, if any, are
+    /// join-delivery sync messages carrying explicit placement keys.
     async fn republish_local_entries(&self, redundancy: u16) -> Result<Action>;
 
     /// Copy a found entry only to placement keys observed missing during lookup.
@@ -127,12 +129,16 @@ pub trait ChordStorageRepair<Action>: Chord<Action> {
 }
 
 /// ChordStorageCache defines the basic API for getting and setting DHT cache storage.
+///
+/// The cache is bounded and shares the storage admission law: a fetched entry
+/// is cached only if it could have been accepted into storage, and it is
+/// retired once its retention bound elapses.
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait ChordStorageCache<Action>: Chord<Action> {
     /// Cache fetched resource locally.
     async fn local_cache_put(&self, entry: Entry) -> Result<()>;
-    /// Get local cache.
+    /// Get a live cached entry.
     async fn local_cache_get(&self, entry_key: Did) -> Result<Option<Entry>>;
 }
 

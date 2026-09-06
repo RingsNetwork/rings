@@ -8,14 +8,32 @@ use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 
+/// How this node stands to a message's destination.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Reachability {
+    /// The destination can be reached, or is somebody else's to reach: forward.
+    Reachable,
+    /// This node is responsible for the destination's position and it has no connection: hold.
+    Offline,
+}
+
+/// The effect an application message requires at `local`.
+///
+/// Post: a message for `local` needs no effect; a message for a destination this node is
+/// responsible for but cannot reach is held in that destination's relay inbox; every other
+/// message is forwarded along the relay path.
 pub(crate) fn custom_message_effects<'payload>(
     local: Did,
     ctx: &'payload MessagePayload,
+    destination: Reachability,
 ) -> Option<CoreEffect<'payload>> {
-    if ctx.should_forward_from(local) {
-        Some(CoreEffect::forward_payload(ctx, None))
-    } else {
+    if !ctx.should_forward_from(local) {
         None
+    } else {
+        Some(match destination {
+            Reachability::Offline => CoreEffect::hold_for_offline_destination(ctx),
+            Reachability::Reachable => CoreEffect::forward_payload(ctx, None),
+        })
     }
 }
 
@@ -23,61 +41,8 @@ pub(crate) fn custom_message_effects<'payload>(
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<CustomMessage> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, _: &CustomMessage) -> Result<()> {
-        self.run_effects(custom_message_effects(self.dht.did, ctx))
+        let destination = self.destination_reachability(ctx.transaction.destination)?;
+        self.run_effects(custom_message_effects(self.dht.did, ctx, destination))
             .await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ecc::SecretKey;
-    use crate::error::Error;
-    use crate::message::Message;
-    use crate::session::SessionSk;
-
-    fn custom_payload(destination: Did) -> Result<MessagePayload> {
-        let key = SecretKey::random();
-        let session_sk = SessionSk::new_with_seckey(&key)?;
-        MessagePayload::new_send(
-            Message::custom(b"hello")?,
-            &session_sk,
-            destination,
-            destination,
-        )
-    }
-
-    #[test]
-    fn test_local_custom_message_has_no_core_effects() -> Result<()> {
-        let local = SecretKey::random().address().into();
-        let payload = custom_payload(local)?;
-
-        assert!(custom_message_effects(local, &payload).is_none());
-        Ok(())
-    }
-
-    #[test]
-    fn test_remote_custom_message_forwards_payload() -> Result<()> {
-        let local = SecretKey::random().address().into();
-        let remote = SecretKey::random().address().into();
-        let payload = custom_payload(remote)?;
-        let effect = custom_message_effects(local, &payload)
-            .ok_or_else(|| Error::InvalidMessage("expected ForwardPayload effect".to_string()))?;
-
-        match effect {
-            CoreEffect::ForwardPayload {
-                payload: forwarded,
-                next_hop,
-            } => {
-                assert!(std::ptr::eq(forwarded, &payload));
-                assert_eq!(next_hop, None);
-            }
-            effect => {
-                return Err(Error::InvalidMessage(format!(
-                    "expected ForwardPayload, got {effect:?}"
-                )))
-            }
-        }
-        Ok(())
     }
 }

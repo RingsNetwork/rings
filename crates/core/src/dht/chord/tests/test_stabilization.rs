@@ -68,10 +68,12 @@ async fn test_correct_chord_maintains_expected_successors() -> Result<()> {
         panic!("wrong action");
     };
     for action in actions {
-        let PeerRingAction::RemoteAction(target, _) = action else {
-            panic!("expected remote action");
-        };
-        assert_eq!(target, n1.did);
+        match action {
+            PeerRingAction::RemoteAction(target, _) => assert_eq!(target, n1.did),
+            // Admitting the first successor moves the head, which makes a repair round due.
+            PeerRingAction::StorageRepairDue => {}
+            action => panic!("expected a remote action or a repair request, got {action:?}"),
+        }
     }
     Ok(())
 }

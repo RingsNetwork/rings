@@ -128,6 +128,74 @@ pub enum Error {
         index: usize,
     },
 
+    /// Entry carries no retention bound or its retention bound has elapsed
+    #[error("Entry carries no retention bound or its retention bound has elapsed")]
+    EntryNotLive,
+
+    /// Entry retention bound exceeds the maximum time-to-live
+    #[error("Entry retention bound exceeds the maximum time-to-live")]
+    EntryLifetimeExceedsMax,
+
+    /// Entry version logical time is beyond the accepted clock skew
+    #[error("Entry version logical time is beyond the accepted clock skew")]
+    EntryVersionAheadOfClock,
+
+    /// Entry payload exceeds the per-payload size bound
+    #[error("Entry payload exceeds the per-payload size bound")]
+    EntryPayloadExceedsMax,
+
+    /// Relay inbox element is not addressed to the peer the inbox is kept for
+    #[error("Relay inbox element is not addressed to the peer the inbox is kept for")]
+    RelayMessageNotAddressedToInbox,
+
+    /// Relay inbox element does not carry a custom message
+    #[error("Relay inbox element does not carry a custom message")]
+    RelayMessageNotCustom,
+
+    /// Relay inbox element holder signature does not verify inside this overlay
+    #[error("Relay inbox element holder signature does not verify inside this overlay")]
+    RelayMessageUnverifiable,
+
+    /// Relay inbox element was held ahead of the receiver's clock
+    #[error("Relay inbox element was held ahead of the receiver's clock")]
+    RelayMessageHeldAheadOfClock,
+
+    /// Relay inbox element payload does not verify as of its hold instant
+    #[error("Relay inbox element payload does not verify as of its hold instant")]
+    RelayMessageHeldOutsideSenderProof,
+
+    /// Relay inbox hold arrived after its message's sender proof expired
+    #[error("Relay inbox hold arrived after its message's sender proof expired")]
+    RelayMessageHoldStale,
+
+    /// Relay inbox delta carries more elements than the inbox keeps
+    #[error("Relay inbox delta carries more elements than the inbox keeps")]
+    RelayInboxDeltaExceedsCapacity,
+
+    /// Relay inbox element was not held by the node responsible for its destination
+    #[error("Relay inbox element was not held by the node responsible for its destination")]
+    RelayMessageHolderNotResponsible,
+
+    /// Relay inbox carrier must not carry a reset floor
+    #[error("Relay inbox carrier must not carry a reset floor")]
+    RelayInboxRegisterNotAllowed,
+
+    /// Relay inbox operation is not a hold or a removal
+    #[error("Relay inbox operation is not a hold or a removal")]
+    RelayInboxOperationNotAllowed,
+
+    /// Relay inbox removal was not issued by the inbox's recipient
+    #[error("Relay inbox removal was not issued by the inbox's recipient")]
+    RelayInboxWriterNotRecipient,
+
+    /// A storage count or record length does not fit its interface width
+    #[error("A storage count or record length does not fit its interface width")]
+    StorageCountOverflow,
+
+    /// A lock was poisoned by a panicking holder
+    #[error("A lock was poisoned by a panicking holder")]
+    LockPoisoned,
+
     /// Affine rotation scalar must be greater than zero
     #[error("Affine rotation scalar must be greater than zero")]
     InvalidAffineScalar,
@@ -709,6 +777,15 @@ pub enum Error {
     #[error("Invalid capacity value")]
     InvalidCapacity,
 
+    /// A value of {required} bytes cannot fit a storage budget of {capacity} bytes
+    #[error("A value of {required} bytes cannot fit a storage budget of {capacity} bytes")]
+    StorageValueExceedsCapacity {
+        /// Bytes the value occupies on disk.
+        required: u64,
+        /// Total byte budget of the storage.
+        capacity: u64,
+    },
+
     /// entry not found
     #[error("entry not found")]
     EntryNotFound,
@@ -716,14 +793,6 @@ pub enum Error {
     /// IO error: {0}
     #[error("IO error: {0}")]
     IOError(std::io::Error),
-
-    /// Failed to get dht from a sync lock
-    #[error("Failed to get dht from a sync lock")]
-    DHTSyncLockError,
-
-    /// Failed to lock callback of swarm
-    #[error("Failed to lock callback of swarm")]
-    CallbackSyncLockError,
 
     /// Failed to build swarm: {0}
     #[error("Failed to build swarm: {0}")]

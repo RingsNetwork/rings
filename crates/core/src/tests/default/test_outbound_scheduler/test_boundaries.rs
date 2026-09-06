@@ -78,7 +78,7 @@ async fn test_oversized_payload_log_omits_the_custom_message_body() -> Result<()
     let relay_destination: Did = SecretKey::random().address().into();
     let mut payload = MessagePayload::new_send(
         Message::CustomMessage(CustomMessage(body)),
-        node1.swarm.transport.session_sk(),
+        node1.swarm.transport.message_signer(),
         next_hop,
         destination,
     )?;
