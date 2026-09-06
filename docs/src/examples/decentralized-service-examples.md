@@ -39,7 +39,7 @@ You can use `curl` or just visit `http://127.0.0.1:8000/posts` in browsers to ch
 
 ### Run a rings-node(name:node-0) and register the service
 
-1. Install the lastest Rings node
+1. Install the latest Rings node
 
 Let's name this node `node-0`
 
@@ -77,7 +77,7 @@ data_storage:
   path: <your-data-dir>
   capacity: 200000000
 measure_storage:
-  path: <your-mesure-dir>
+  path: <your-measure-dir>
   capacity: 200000000
 backend:
 - name: sample_json_server
@@ -112,7 +112,7 @@ data_storage:
   path: <your-data-dir>
   capacity: 200000000
 measure_storage:
-  path: <your-mesure-dir>
+  path: <your-measure-dir>
   capacity: 200000000
 ```
 

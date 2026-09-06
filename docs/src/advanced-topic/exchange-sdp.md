@@ -54,13 +54,13 @@ After that you will see your DID and signature, this signature is used for verif
 ```bash
 # node1
 Did: <did1>
-Signautre: <sig1>
+Signature: <sig1>
 JSON-RPC endpoint: http://127.0.0.1:50000
 WebSocket endpoint: http://127.0.0.1:50000/ws
 
 # node1
 Did: <did2>
-Signautre: <sig2>
+Signature: <sig2>
 JSON-RPC endpoint: http://127.0.0.1:50000
 WebSocket endpoint: http://127.0.0.1:50000/ws
 ```

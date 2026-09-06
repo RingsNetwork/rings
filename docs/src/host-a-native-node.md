@@ -46,7 +46,7 @@ Options:
       --storage-path <STORAGE_PATH>
           Storage files location. If not provided, use storage.path in config file or ~/.local/share/rings [env: STORAGE_PATH=]
       --storage-capacity <STORAGE_CAPACITY>
-          Storage capcity. If not provider, use storage.capacity in config file or 200000000 [env: STORAGE_CAPACITY=] [default: 200000000]
+          Storage capacity. If not provider, use storage.capacity in config file or 200000000 [env: STORAGE_CAPACITY=] [default: 200000000]
   -c, --config <CONFIG>
           Config file location [env: CONFIG=] [default: ~/.rings/config.yaml]
   -h, --help
