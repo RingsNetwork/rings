@@ -16,7 +16,9 @@
 //!
 //! Decode law: the store holds only records decodable as `V`. A record the current schema
 //! cannot decode (written by an earlier build) is retired on the read that discovers it and
-//! reported absent, so it neither serves stale data nor occupies the budget.
+//! reported absent, so it neither serves stale data nor occupies the budget. The retirement
+//! removes exactly the bytes the read observed: a record rewritten between the read and the
+//! retirement is the writer's, and stays.
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -206,10 +208,26 @@ impl FileStorage {
         match rings_codec::deserialize::<(String, V)>(data) {
             Ok(record) => Ok(Some(record)),
             Err(_) => {
-                self.retire(name)?;
+                self.retire_observed(name, data)?;
                 Ok(None)
             }
         }
+    }
+
+    /// Retire the record stored as `name` iff its file still holds `observed`, the bytes a read
+    /// saw under the read guard. The read released that guard before deciding, so a `put` may
+    /// have replaced the record meanwhile; that record is the writer's to keep.
+    fn retire_observed(&self, name: &str, observed: &[u8]) -> Result<()> {
+        let mut index = self.write_index()?;
+        let current = match std::fs::read(self.root.join(name)) {
+            Ok(current) => current,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(Error::ServiceIOError(error)),
+        };
+        if current == observed {
+            self.retire_indexed(&mut index, name)?;
+        }
+        Ok(())
     }
 }
 

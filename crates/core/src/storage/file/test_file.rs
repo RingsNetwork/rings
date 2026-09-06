@@ -177,6 +177,56 @@ async fn test_refused_retirement_keeps_the_record_indexed() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// Decode law: a record the current schema cannot read is reported absent and retired on the
+/// read that discovers it, but only while the file still holds the bytes that read observed;
+/// a record rewritten meanwhile stays.
+#[tokio::test]
+async fn test_undecodable_record_is_retired_only_while_unchanged() {
+    let root = temp_root("undecodable");
+    std::fs::create_dir_all(&root).expect("root");
+    let name = file_name_for("a");
+    let garbage = b"not a record".to_vec();
+    std::fs::write(root.join(&name), &garbage).expect("write garbage");
+    let storage = FileStorage::new_with_cap_and_path(4096, &root)
+        .await
+        .expect("open");
+    assert_eq!(
+        <FileStorage as KvStorageInterface<String>>::count(&storage)
+            .await
+            .expect("count"),
+        1
+    );
+
+    // The bytes on disk are not the ones the read observed: the record is the writer's.
+    storage
+        .retire_observed(&name, b"what an earlier read saw")
+        .expect("retire nothing");
+    assert!(root.join(&name).exists());
+    assert_eq!(
+        <FileStorage as KvStorageInterface<String>>::count(&storage)
+            .await
+            .expect("count"),
+        1
+    );
+
+    // A read that observes the garbage retires it.
+    assert_eq!(
+        <FileStorage as KvStorageInterface<String>>::get(&storage, "a")
+            .await
+            .expect("get a"),
+        None
+    );
+    assert!(!root.join(&name).exists());
+    assert_eq!(
+        <FileStorage as KvStorageInterface<String>>::count(&storage)
+            .await
+            .expect("count"),
+        0
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
 /// Budget law across restarts: reopening rebuilds the index from the directory in modification
 /// order and restores a lowered budget by retiring the oldest files.
 #[tokio::test]

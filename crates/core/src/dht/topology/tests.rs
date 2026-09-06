@@ -668,3 +668,24 @@ fn test_responsibility_is_the_predecessor_interval_or_standing_alone() {
     assert!(is_responsible_for(&alone, did(7)));
     assert!(is_responsible_for(&alone, did(15)));
 }
+
+/// Law: a node is never its own predecessor. A candidate equal to `local` leaves the current
+/// value, whether one is known or not, so `(pred, local]` is never emptied by a self-reference.
+#[test]
+fn test_rectify_never_adopts_the_local_node_as_predecessor() {
+    let local = did(10);
+    assert_eq!(rectify_predecessor(local, None, local), None);
+    assert_eq!(
+        rectify_predecessor(local, Some(did(5)), local),
+        Some(did(5))
+    );
+    assert_eq!(rectify_predecessor(local, None, did(5)), Some(did(5)));
+
+    let notified_by_itself = step(
+        &state(local, vec![did(20)], Some(did(5)), vec![None; 5], 0),
+        TopologyEvent::Notify { predecessor: local },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+    assert_eq!(notified_by_itself.state.predecessor, Some(did(5)));
+    assert!(is_responsible_for(&notified_by_itself.state, did(7)));
+}

@@ -406,7 +406,14 @@ pub fn find_successor(state: &TopologyState, did: Did) -> FindSuccessorStep {
 }
 
 /// Correct predecessor value after one HMCC/Zave rectify transition.
+///
+/// Law: `local` is never its own predecessor, so a candidate equal to `local` leaves the
+/// current value; the responsibility interval `(pred, local]` is then never empty by a
+/// self-reference.
 pub fn rectify_predecessor(local: Did, current: Option<Did>, candidate: Did) -> Option<Did> {
+    if candidate == local {
+        return current;
+    }
     match current {
         Some(cur) if dist(local, cur) >= dist(local, candidate) => Some(cur),
         _ => Some(candidate),
