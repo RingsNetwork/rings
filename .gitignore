@@ -21,7 +21,8 @@ frontend/dist-e2e/
 .envrc
 .env
 debug
-docs
+# Local scratch documents, never tracked (the published book is docs/)
+dev_docs
 # project
 .vscode/
 .claude/settings.local.json
@@ -51,3 +52,6 @@ node_modules/
 .playwright-cli/
 output/
 frontend/.generated/
+
+# mdBook output of docs/
+docs/book/

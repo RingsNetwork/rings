@@ -91,8 +91,8 @@ Then we ask Node2 to accept the answer:
 curl -X POST \
 -H "Content-Type: application/json" \
 -H "X-SIGNATURE: <sig2>" \
---data '{"jsonrpc": "2.0", 
-        "id": 1, "method": "answerOffer", 
+--data '{"jsonrpc": "2.0",
+        "id": 1, "method": "answerOffer",
         "params": ["<b58 encoded offer>"]}' \
 "http://127.0.0.1:50001"
 ```
@@ -111,9 +111,9 @@ Finally, we send the answer to Node 1 to finish handshake:
 curl -X POST \
 -H "Content-Type: application/json" \
 -H "X-SIGNATURE: <sig1>" \
---data '{"jsonrpc": "2.0", 
-         "id": 1, "method": 
-         "acceptAnswer", 
+--data '{"jsonrpc": "2.0",
+         "id": 1, "method":
+         "acceptAnswer",
          "params": ["<b58 encoded answer>"]}' \
 "http://127.0.0.1:50000"
 ```
@@ -129,8 +129,8 @@ It will respond:
 
 ## Conclusion
 
-So, as you can see here, the handshake process of the Rings Network can be summarized in 3 steps:&#x20;
+So, as you can see here, the handshake process of the Rings Network can be summarized in 3 steps:
 
-* 1\. Creating an offer and sending it to the other party;&#x20;
-* 2\. Accepting the offer and replying with an answer;&#x20;
+* 1\. Creating an offer and sending it to the other party;
+* 2\. Accepting the offer and replying with an answer;
 * 3\. Accepting the answer and completing the handshake.

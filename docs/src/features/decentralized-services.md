@@ -1,6 +1,6 @@
 # Decentralized services
 
-<figure><img src="../.gitbook/assets/Elder_Ryan_webassembly_p2p_network_627824ef-f0b8-4887-ab7b-c166dac4b4ad.png" alt=""><figcaption></figcaption></figure>
+![A WebAssembly peer-to-peer network](../assets/webassembly-p2p-network.png)
 
 Rings Network enables users to integrate services into its decentralized network. Its underlying mechanism relies on Rings DHT for service registration and discovery. Setting up hidden services is a straightforward process that decentralizes any service with just a few simple steps.
 
@@ -16,7 +16,7 @@ Every de-service provider can register itself in the network. The Rings network 
 
 In fact, we will utilize the Chord algorithm to find the corresponding data based on the hash of the register\_name. For more details, you can continue reading the section about the Distributed Hash Table (DHT).
 
-[chord.md](../advanced-topic/chord.md "mention")
+[chord.md](../advanced-topic/chord.md)
 
 ### Lookup of de-service
 
@@ -103,7 +103,7 @@ Thus, our config.yaml can be looks like this:
 
 Rings allows users to configure hidden services through the "config.yaml" file. If you are not familiar with what "config.yaml" is, I recommend reading up on it.
 
-[config.yaml.md](../advanced-topic/config.yaml.md "mention")
+[config.yaml.md](../advanced-topic/config.yaml.md)
 
 For a hidden service, three fields need to be provided: "name," "register\_service," and "prefix". For example:
 
@@ -140,4 +140,4 @@ Once all the configurations are set up, you can use the command `rings run` to s
 
 ## An example of de-service
 
-[decentralized-service-examples.md](../examples/decentralized-service-examples.md "mention")
+[decentralized-service-examples.md](../examples/decentralized-service-examples.md)

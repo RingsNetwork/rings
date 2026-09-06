@@ -13,4 +13,4 @@ Both approaches have their advantages. Relay connections are more convenient, wh
 
 To understand more about how handshake works, you may like to read:
 
-[exchange-sdp.md](exchange-sdp.md "mention")
+[exchange-sdp.md](exchange-sdp.md)

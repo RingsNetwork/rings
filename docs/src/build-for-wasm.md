@@ -22,7 +22,7 @@ If you want to use the latest version of Rings Network, you can also directly in
 
 ```
 
-As a developer, if you want to build local offline dependencies, you can do the following.&#x20;
+As a developer, if you want to build local offline dependencies, you can do the following.
 
 ````
 ```text

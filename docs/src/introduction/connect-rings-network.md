@@ -2,11 +2,11 @@
 
 Rings is a peer-to-peer network based on WebRTC transport, and as such, you have multiple ways to establish connections:
 
-### Peer-to-Peer：&#x20;
+### Peer-to-Peer：
 
 You can establish a direct connection by exchanging Session Description Protocol (SDP). SDP is a format used to describe media session characteristics in a format that can be exchanged between peers. Read more:
 
-[exchange-sdp.md](../advanced-topic/exchange-sdp.md "mention")
+[exchange-sdp.md](../advanced-topic/exchange-sdp.md)
 
 ### Via Entry Point
 
@@ -26,6 +26,6 @@ If you are using a Browser node, you can utilize the Entry Point by calling the 
 client.connect_peer_via_http(url)
 ```
 
-Future reading:&#x20;
+Future reading:
 
-[handshake.md](../advanced-topic/handshake.md "mention")
+[handshake.md](../advanced-topic/handshake.md)

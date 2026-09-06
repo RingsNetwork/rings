@@ -20,6 +20,7 @@ env:
   PYTHON_VERSION: "3.11"
   CARGO_DENY_VERSION: 0.20.2
   TRUNK_VERSION: 0.21.14
+  MDBOOK_VERSION: 0.5.4
   TAPLO_CLI_VERSION: 0.10.0
 
 permissions:
@@ -69,6 +70,23 @@ jobs:
 
       - name: Check dependency policy
         run: cargo deny --locked check -A unmatched-source advisories licenses bans sources
+
+  # The book ships with the site (deploy-pages.yml renders it under `/docs/`); a chapter listed
+  # in SUMMARY.md without a file, or a malformed summary, fails the build, so gate it here.
+  docs_book:
+    name: Build documentation book
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
+
+      - name: Install mdBook
+        uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
+        with:
+          tool: mdbook@${{ env.MDBOOK_VERSION }}
+
+      - name: Build documentation book
+        run: mdbook build docs
 
   miri_core:
     name: Miri core invariants

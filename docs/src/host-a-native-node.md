@@ -14,7 +14,7 @@ By default, an ECDSA key pair will be automatically generated for you. The key p
 
 More about `config.yaml`you can find at:
 
-[config.yaml.md](advanced-topic/config.yaml.md "mention")
+[config.yaml.md](advanced-topic/config.yaml.md)
 
 ## Ready go!
 
