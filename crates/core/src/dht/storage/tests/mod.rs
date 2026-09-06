@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::str::FromStr;
 
 use async_trait::async_trait;
 
@@ -10,6 +11,7 @@ use super::sync::sync_entries_batches;
 use super::sync::SYNC_BATCH_MAX_BYTES;
 use crate::consts::MAX_CHUNK_ENVELOPE_OVERHEAD;
 use crate::consts::TRANSPORT_CUSTOM_OVERHEAD;
+use crate::dht::entry::inbox::inbox_key;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::EntryLookupKey;
@@ -26,17 +28,22 @@ use crate::dht::ChordStorageCache;
 use crate::dht::ChordStorageRepair;
 use crate::dht::ChordStorageSync;
 use crate::dht::Did;
+use crate::dht::StorageKey;
 use crate::dht::StorageSyncDestination;
 use crate::dht::StorageSyncPurpose;
 use crate::dht::StorageSyncRoute;
 use crate::dht::VirtualNodeConfig;
+use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::types::Message;
 use crate::message::types::SyncEntriesWithSuccessor;
+use crate::message::Encoded;
+use crate::session::SessionSk;
 use crate::storage::KvStorageInterface;
 use crate::storage::MemStorage;
 use crate::tests::expired;
+use crate::tests::held_inbox_for;
 use crate::tests::live_entry;
 use crate::utils::get_epoch_ms;
 
@@ -865,8 +872,11 @@ async fn test_live_storage_read_retires_expired_value() -> Result<()> {
         .await?;
 
     assert_eq!(
-        node.live_storage_entry(placement_key, get_epoch_ms())
-            .await?,
+        node.live_storage_entry(
+            StorageKey::new(EntryKind::Data, placement_key),
+            get_epoch_ms()
+        )
+        .await?,
         None
     );
     assert_eq!(node.storage.get(&placement_key.to_string()).await?, None);
@@ -890,8 +900,65 @@ async fn test_live_storage_entries_retires_expired_values() -> Result<()> {
         .await?;
 
     let entries = node.live_storage_entries(get_epoch_ms()).await?;
-    assert_eq!(entries, vec![(live_key.to_string(), live_value)]);
+    assert_eq!(entries, vec![(
+        StorageKey::new(EntryKind::Data, live_key),
+        live_value
+    )]);
     assert_eq!(node.storage.count().await?, 1);
+    Ok(())
+}
+
+/// Key law: the two kinds a position can carry occupy distinct slots, the data slot keeps the
+/// historical rendering of a bare placement, and rendering is injective and invertible.
+#[test]
+fn test_storage_key_partitions_kinds_and_keeps_the_data_rendering() -> Result<()> {
+    let placement = Did::from(42u32);
+    let topic = StorageKey::new(EntryKind::Data, placement);
+    let inbox = StorageKey::new(EntryKind::RelayMessage, placement);
+
+    assert_eq!(topic.to_string(), placement.to_string());
+    assert_ne!(topic.to_string(), inbox.to_string());
+    assert_eq!(StorageKey::from_str(&topic.to_string())?, topic);
+    assert_eq!(StorageKey::from_str(&inbox.to_string())?, inbox);
+    assert_eq!(topic.placement(), placement);
+    assert_eq!(inbox.placement(), placement);
+    Ok(())
+}
+
+/// Namespace law at the write funnel: a data topic parked at the inbox position `d + 1` (any
+/// node may name any position through an overwrite) and the relay inbox kept for `d` are
+/// distinct carriers, so the topic cannot block the hold and the hold cannot touch the topic.
+#[tokio::test]
+async fn test_data_topic_at_the_inbox_position_does_not_block_the_hold() -> Result<()> {
+    let holder = SessionSk::new_with_seckey(&SecretKey::random())?;
+    // Standing alone, the node routes every position to itself and is the hold authority.
+    let node = PeerRing::new_with_storage(holder.account_did(), 3, Box::new(MemStorage::new()));
+    let destination = Did::from(50u32);
+    let position = inbox_key(destination);
+    let now_ms = get_epoch_ms();
+
+    let park = EntryOperation::Overwrite(data_entry_with_data(position, "parked"))
+        .stamped(now_ms, node.did)?;
+    node.operate_storage_entry(now_ms, position, park, node.did)
+        .await?;
+    let hold =
+        EntryOperation::Extend(held_inbox_for(destination, &holder)?).stamped(now_ms, node.did)?;
+    node.operate_storage_entry(now_ms, position, hold, node.did)
+        .await?;
+
+    let topic = node
+        .live_storage_entry(StorageKey::new(EntryKind::Data, position), now_ms)
+        .await?
+        .ok_or_else(|| Error::InvalidMessage("parked topic vanished".to_string()))?;
+    let inbox = node
+        .live_storage_entry(StorageKey::new(EntryKind::RelayMessage, position), now_ms)
+        .await?
+        .ok_or_else(|| Error::InvalidMessage("hold was not stored".to_string()))?;
+    assert_eq!(topic.kind, EntryKind::Data);
+    assert_eq!(topic.data, vec![Encoded::from("parked")]);
+    assert_eq!(inbox.kind, EntryKind::RelayMessage);
+    assert_eq!(inbox.data.len(), 1);
+    assert_eq!(node.storage.count().await?, 2);
     Ok(())
 }
 

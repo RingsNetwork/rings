@@ -1,3 +1,6 @@
+use std::fmt;
+use std::str::FromStr;
+
 use async_trait::async_trait;
 
 use super::PeerRing;
@@ -18,6 +21,57 @@ use crate::dht::EntryStorage;
 use crate::error::Error;
 use crate::error::Result;
 use crate::utils::get_epoch_ms;
+
+/// The identity of a stored carrier: its kind and its placement.
+///
+/// Storage is partitioned by kind, so the two carriers one position can name (a data topic,
+/// which any node may place at any position through an overwrite, and the relay inbox of the
+/// peer just before that position) never contend for one slot: a topic parked at `d + 1` cannot
+/// shadow the inbox kept for `d`. The data namespace keeps the historical rendering of a bare
+/// placement, so values written by earlier builds stay addressable.
+///
+/// Law: `StorageKey::from_str(&key.to_string()) == Ok(key)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StorageKey {
+    kind: EntryKind,
+    placement: Did,
+}
+
+impl StorageKey {
+    /// The rendering prefix of the relay-inbox namespace; the data namespace has none.
+    const RELAY_INBOX_PREFIX: &'static str = "relay:";
+
+    /// The slot of a carrier of `kind` placed at `placement`.
+    pub(crate) const fn new(kind: EntryKind, placement: Did) -> Self {
+        Self { kind, placement }
+    }
+
+    /// The placement of the carrier.
+    pub(crate) const fn placement(self) -> Did {
+        self.placement
+    }
+}
+
+impl fmt::Display for StorageKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.kind {
+            EntryKind::Data => write!(f, "{}", self.placement),
+            EntryKind::RelayMessage => write!(f, "{}{}", Self::RELAY_INBOX_PREFIX, self.placement),
+        }
+    }
+}
+
+impl FromStr for StorageKey {
+    type Err = Error;
+
+    fn from_str(key: &str) -> Result<Self> {
+        let (kind, placement) = match key.strip_prefix(Self::RELAY_INBOX_PREFIX) {
+            Some(placement) => (EntryKind::RelayMessage, placement),
+            None => (EntryKind::Data, key),
+        };
+        Ok(Self::new(kind, Did::from_str(placement)?))
+    }
+}
 
 /// Read `key` from `store`, retiring a value that is no longer live.
 ///
@@ -47,19 +101,26 @@ async fn retire_unless_live(
 
 impl PeerRing {
     /// Read the live replicated entry stored at `key`.
-    pub(crate) async fn live_storage_entry(&self, key: Did, now_ms: u128) -> Result<Option<Entry>> {
+    pub(crate) async fn live_storage_entry(
+        &self,
+        key: StorageKey,
+        now_ms: u128,
+    ) -> Result<Option<Entry>> {
         live_entry(&self.storage, &key.to_string(), now_ms).await
     }
 
-    /// Every live replicated entry with its placement key, retiring the rest.
+    /// Every live replicated entry with its key, retiring the rest.
     ///
     /// Post: every returned entry satisfies `is_live_at(now_ms)`; every stored entry that does
     /// not has been removed.
-    pub(crate) async fn live_storage_entries(&self, now_ms: u128) -> Result<Vec<(String, Entry)>> {
+    pub(crate) async fn live_storage_entries(
+        &self,
+        now_ms: u128,
+    ) -> Result<Vec<(StorageKey, Entry)>> {
         let mut live = Vec::new();
         for (key, entry) in self.storage.get_all().await? {
             if let Some(entry) = retire_unless_live(&self.storage, &key, entry, now_ms).await? {
-                live.push((key, entry));
+                live.push((StorageKey::from_str(&key)?, entry));
             }
         }
         Ok(live)
@@ -79,6 +140,7 @@ impl PeerRing {
         incoming: Entry,
     ) -> Result<Entry> {
         incoming.validate_admissible_at(now_ms, self.network_id())?;
+        let key = StorageKey::new(incoming.kind, key);
         let incoming = incoming.try_into_storage_entry()?;
         let stored = if let Some(local) = self.live_storage_entry(key, now_ms).await? {
             local.join(incoming)?
@@ -121,14 +183,15 @@ impl PeerRing {
                 op.validate_inbox_write(writer, responsible, now_ms, self.network_id())?;
             }
         }
-        let local = match self.live_storage_entry(placement, now_ms).await? {
+        let key = StorageKey::new(op.kind(), placement);
+        let local = match self.live_storage_entry(key, now_ms).await? {
             Some(local) => local,
             None => op.gen_default_entry()?,
         };
         let stored = local
             .operate(now_ms, op, self.did)?
             .try_into_storage_entry()?;
-        self.storage.put(&placement.to_string(), &stored).await
+        self.storage.put(&key.to_string(), &stored).await
     }
 
     fn storage_fetch_fallback_successor(&self) -> Result<Option<Did>> {
@@ -150,9 +213,12 @@ impl PeerRing {
         let mut misses = vec![];
         for placement_key in entry_key.rotate_affine(redundancy)? {
             let query = EntryLookupKey::new(entry_key, placement_key);
+            // A lookup reads the data namespace: a relay inbox is never fetched, its recipient
+            // drains it from local storage, so a lookup at its position sees it as absent.
+            let key = StorageKey::new(EntryKind::Data, placement_key);
             let act = match self.find_storage_owner(placement_key) {
                 Ok(PeerRingAction::Some(succ)) => {
-                    match self.live_storage_entry(placement_key, now_ms).await {
+                    match self.live_storage_entry(key, now_ms).await {
                         Ok(Some(value)) => {
                             let observed_misses = std::mem::take(&mut misses);
                             Ok(PeerRingAction::SomeEntry(EntryLookupEvidence::new(

@@ -22,6 +22,7 @@ pub use chord::EntryStorage;
 pub use chord::PeerRing;
 pub use chord::PeerRingAction;
 pub use chord::RemoteAction as PeerRingRemoteAction;
+pub(crate) use chord::StorageKey;
 pub use chord::TopoInfo;
 pub use did::Did;
 pub use finger::FingerTable;

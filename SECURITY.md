@@ -139,7 +139,8 @@ that held it, verified inside the local overlay as of the hold instant, and admi
 only from the node the owner itself routes that peer to. A removal is accepted only from
 the recipient, a relocation only as an ownership hand-off from the predecessor, and a
 relay carrier is never fetched, cached, replicated, or returned to a lookup by anyone
-but its recipient. A malicious holder is one identity in one ring position: it can hold
+but its recipient. A relay carrier has one placement and its own storage namespace, so
+a data topic any node parks at the inbox position cannot shadow the inbox. A malicious holder is one identity in one ring position: it can hold
 junk for the peers it is responsible for (bounded to the newest 64 messages per inbox)
 or redeliver a message inside the sender's own proof lifetime, and every element names
 it by signature. Held messages are stored and relocated in the clear between owners, as

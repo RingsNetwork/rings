@@ -14,6 +14,7 @@ use crate::dht::entry::Entry;
 use crate::dht::successor::SuccessorReader;
 use crate::dht::Did;
 use crate::dht::PeerRing;
+use crate::dht::StorageKey;
 use crate::ecc::SecretKey;
 use crate::error::Result;
 use crate::measure::MeasureImpl;
@@ -305,7 +306,7 @@ pub async fn wait_for_predecessor(node: &Node, predecessor: Did) -> crate::error
 /// Post: returns only after `ready` held; the timeout is a failure deadline, never the event.
 pub async fn wait_for_storage_state(
     node: &Node,
-    key: Did,
+    key: StorageKey,
     label: &str,
     ready: impl Fn(Option<&Entry>) -> bool,
 ) -> crate::error::Result<Option<Entry>> {
@@ -327,13 +328,13 @@ pub async fn wait_for_storage_state(
 
 /// Wait until `node` no longer stores a value at `key`.
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-pub async fn wait_for_storage_absence(node: &Node, key: Did) -> crate::error::Result<()> {
+pub async fn wait_for_storage_absence(node: &Node, key: StorageKey) -> crate::error::Result<()> {
     wait_for_storage_state(node, key, "absent", |stored| stored.is_none())
         .await
         .map(drop)
 }
 
-pub async fn wait_for_storage_entry(node: &Node, key: Did) -> crate::error::Result<Entry> {
+pub async fn wait_for_storage_entry(node: &Node, key: StorageKey) -> crate::error::Result<Entry> {
     wait_for_storage_state(node, key, "present", |stored| stored.is_some())
         .await?
         .ok_or_else(|| crate::error::Error::InvalidMessage(format!("no entry at {key}")))

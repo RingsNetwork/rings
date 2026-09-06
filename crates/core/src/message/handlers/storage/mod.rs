@@ -248,17 +248,11 @@ async fn handle_storage_search_act(
 ) -> Result<()> {
     match act {
         PeerRingAction::SomeEntry(evidence) => {
-            // A relay inbox is never fetched: its recipient drains it from local storage, so a
-            // lookup sees it as absent whoever asks.
-            let data = match evidence.entry.kind {
-                EntryKind::Data => vec![evidence.entry],
-                EntryKind::RelayMessage => Vec::new(),
-            };
             handler
                 .run_effects([CoreEffect::send_report_message(
                     ctx,
                     Message::FoundEntry(FoundEntry {
-                        data,
+                        data: vec![evidence.entry],
                         misses: evidence.misses,
                         resource,
                         redundancy,

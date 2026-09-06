@@ -6,6 +6,8 @@ use super::Entry;
 use super::EntryKind;
 use super::EntryOperation;
 use super::EntryVersion;
+use super::PlacedEntry;
+use super::PlacedEntryOperation;
 use crate::consts::DEFAULT_RELAY_INBOX_TTL_MS;
 use crate::consts::DEFAULT_TTL_MS;
 use crate::consts::MAX_RELAY_INBOX_TTL_MS;
@@ -77,6 +79,41 @@ fn test_inbox_key_is_the_position_after_the_destination() {
     let destination = Did::from(41u32);
     assert_eq!(inbox_key(destination), Did::from(42u32));
     assert_eq!(inbox_destination(inbox_key(destination)), destination);
+}
+
+/// Placement law: a relay carrier has one placement, its DID, whatever redundancy the receiver
+/// configures, so no rotated replica key ever admits a hold; a data topic keeps its affine set.
+#[test]
+fn test_relay_carrier_has_one_placement_whatever_the_redundancy() -> Result<()> {
+    let holder = session()?;
+    let destination: Did = SecretKey::random().address().into();
+    let inbox = live_delta(
+        &held_by(&holder, destination, TEST_NETWORK_ID)?,
+        get_epoch_ms(),
+    )?;
+    let mut keys = inbox.did.rotate_affine(2)?.into_iter();
+    let (Some(own), Some(rotated)) = (keys.next(), keys.next()) else {
+        return Err(Error::InvalidAffineScalar);
+    };
+    assert_eq!(own, inbox.did);
+
+    assert!(PlacedEntry::new(own, inbox.clone())
+        .validate_placement(2)
+        .is_ok());
+    assert!(PlacedEntry::new(rotated, inbox.clone())
+        .validate_placement(2)
+        .is_err());
+    let hold = PlacedEntryOperation {
+        placement: rotated,
+        op: EntryOperation::Extend(inbox.clone()),
+    };
+    assert!(hold.validate_placement(2).is_err());
+
+    let topic = Entry::new(inbox.did, Vec::new(), EntryKind::Data);
+    assert!(PlacedEntry::new(rotated, topic)
+        .validate_placement(2)
+        .is_ok());
+    Ok(())
 }
 
 #[test]

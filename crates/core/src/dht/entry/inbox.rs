@@ -6,10 +6,12 @@
 //! signature and the hold instant, and writes it into the carrier `inbox(d) = d + 1`
 //! (arithmetic in `Z / 2^160`, kind [`EntryKind::RelayMessage`]) through the ordinary storage
 //! write path. Relay carriers are placed by the ring geometry alone, `k ∈ (n, succ(n)]`, in every
-//! storage mode, so while `d` is offline the carrier lives at `d`'s predecessor and once `d`
-//! returns `d + 1 ∈ (d, succ(d)]` makes `d` itself the owner: the storage repair pass of the
-//! predecessor hands the carrier to `d`, which delivers it through its inbound pipeline and
-//! tombstones the delivered elements.
+//! storage mode, at that one placement whatever the configured redundancy, and in their own
+//! storage namespace, so a data topic parked at `d + 1` (any node may name any position through
+//! an overwrite) never shadows the inbox kept for `d`. While `d` is offline the carrier lives at
+//! `d`'s predecessor and once `d` returns `d + 1 ∈ (d, succ(d)]` makes `d` itself the owner: the
+//! storage repair pass of the predecessor hands the carrier to `d`, which delivers it through its
+//! inbound pipeline and tombstones the delivered elements.
 //!
 //! Only [`Message::CustomMessage`] is held; every other message class (control, storage, E2E
 //! frames) is forwarded as before and lost at a dead end, which is the pre-existing behaviour.

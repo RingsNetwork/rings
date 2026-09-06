@@ -1,5 +1,3 @@
-use std::str::FromStr;
-
 use async_trait::async_trait;
 use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 use serde::Serialize;
@@ -17,6 +15,7 @@ use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
 use crate::dht::ChordStorageSync;
 use crate::dht::Did;
+use crate::dht::StorageKey;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::types::Message;
@@ -146,11 +145,12 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
         // is skipped.
         let now_ms = get_epoch_ms();
         for ack in acks {
-            let Some(local_entry) = self.live_storage_entry(ack.key, now_ms).await? else {
+            let key = StorageKey::new(ack.entry.kind, ack.key);
+            let Some(local_entry) = self.live_storage_entry(key, now_ms).await? else {
                 continue;
             };
             if ack.confirms_local_value(&local_entry)? {
-                self.storage.remove(&ack.key.to_string()).await?;
+                self.storage.remove(&key.to_string()).await?;
             }
         }
 
@@ -177,13 +177,12 @@ impl PeerRing {
     fn hand_off_beyond_successor(
         &self,
         new_successor: Did,
-        items: Vec<(String, Entry)>,
+        items: Vec<(StorageKey, Entry)>,
     ) -> Result<PeerRingAction> {
         let mut data = Vec::<PlacedEntry>::new();
-        for (entry_key_str, entry) in items {
-            let entry_key = Did::from_str(&entry_key_str)?;
-            if self.placed_beyond(entry_key, new_successor) {
-                data.push(PlacedEntry::new(entry_key, entry));
+        for (key, entry) in items {
+            if self.placed_beyond(key.placement(), new_successor) {
+                data.push(PlacedEntry::new(key.placement(), entry));
             }
         }
 
@@ -208,7 +207,7 @@ impl PeerRing {
 
     fn copy_entries_to_observed_virtual_storage_owners(
         &self,
-        all_items: Vec<(String, Entry)>,
+        all_items: Vec<(StorageKey, Entry)>,
     ) -> Result<PeerRingAction> {
         let mut by_target =
             std::collections::BTreeMap::<StorageSyncDestination, Vec<PlacedEntry>>::new();
@@ -223,13 +222,12 @@ impl PeerRing {
         // Preservation S1'': this transition cannot create a delete-capable
         // report. Only non-virtual physical handoff has an ownership proof
         // strong enough to permit source cleanup.
-        for (entry_key_str, entry) in all_items {
-            let entry_key = Did::from_str(&entry_key_str)?;
-            if let StorageSyncTarget::Remote(target) = self.storage_sync_target(entry_key)? {
+        for (key, entry) in all_items {
+            if let StorageSyncTarget::Remote(target) = self.storage_sync_target(key.placement())? {
                 by_target
                     .entry(target)
                     .or_default()
-                    .push(PlacedEntry::new(entry_key, entry));
+                    .push(PlacedEntry::new(key.placement(), entry));
             }
         }
 

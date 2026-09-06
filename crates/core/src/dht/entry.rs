@@ -131,8 +131,9 @@ pub enum EntryOperation {
 /// A storage operation targeted at one concrete affine placement key.
 ///
 /// Invariant: `placement` must be one of the affine replica keys derived from
-/// the operation's entry DID under the receiver's configured storage
-/// redundancy. The sender may choose a replica from that set, but cannot choose
+/// the operation's entry DID under the replication its kind gets from the
+/// receiver's configured storage redundancy (a relay inbox has one placement,
+/// its DID). The sender may choose a replica from that set, but cannot choose
 /// where the replica set itself lives.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlacedEntryOperation {
@@ -151,7 +152,7 @@ impl PlacedEntryOperation {
     /// Return whether `placement` is in this entry's affine replica set.
     pub fn placement_belongs_to_entry(&self, redundancy: u16) -> Result<bool> {
         let entry_key = self.entry_key()?;
-        placement_belongs_to_entry_key(entry_key, self.placement, redundancy)
+        placement_belongs_to_entry_key(entry_key, self.placement, self.op.kind(), redundancy)
     }
 
     /// Enforce that `placement` belongs to the operation's entry.
@@ -167,8 +168,17 @@ impl PlacedEntryOperation {
     }
 }
 
-fn placement_belongs_to_entry_key(entry_key: Did, placement: Did, redundancy: u16) -> Result<bool> {
-    Ok(entry_key.rotate_affine(redundancy)?.contains(&placement))
+/// Whether `placement` lies in the affine replica set of a carrier of `kind` identified by
+/// `entry_key`: the set has `kind.replication(redundancy)` keys, one for a relay inbox.
+fn placement_belongs_to_entry_key(
+    entry_key: Did,
+    placement: Did,
+    kind: EntryKind,
+    redundancy: u16,
+) -> Result<bool> {
+    Ok(entry_key
+        .rotate_affine(kind.replication(redundancy))?
+        .contains(&placement))
 }
 
 /// A DHT storage entry with an [`EntryKind`] and a ring key represented as [`Did`].
@@ -179,9 +189,12 @@ fn placement_belongs_to_entry_key(entry_key: Did, placement: Did, redundancy: u1
 ///
 /// The [`Did`] of an [`Entry`] is in the following format:
 /// * If kind value is [EntryKind::Data], it's sha1 of data topic.
-/// * If kind value is [EntryKind::RelayMessage], it's the destination Did of
-///   message plus 1 (to ensure that the message is sent to the successor of destination),
-///   thus while destination node going online, it will sync message from its successor.
+/// * If kind value is [EntryKind::RelayMessage], it's the destination Did of the held
+///   messages plus 1, the position just after the destination, which lies in the
+///   destination's own storage interval once it is online (see the `inbox` module).
+///
+/// The kind is part of the carrier's storage identity: a data topic and a relay inbox at the
+/// same position are distinct slots, so neither can shadow the other.
 ///
 /// Retention: every entry accepted into storage carries a retention bound `expires_at_ms`,
 /// stamped by the origin at the operation boundary and bounded by the receiver at admission
@@ -227,7 +240,7 @@ impl PlacedEntry {
 
     /// Return whether `key` is in `entry.did`'s affine replica set.
     pub fn placement_belongs_to_entry(&self, redundancy: u16) -> Result<bool> {
-        placement_belongs_to_entry_key(self.entry.did, self.key, redundancy)
+        placement_belongs_to_entry_key(self.entry.did, self.key, self.entry.kind, redundancy)
     }
 
     /// Enforce that `key` belongs to `entry.did`'s affine replica set.

@@ -7,7 +7,6 @@ use super::test_support::physical_sync_route_next_hop;
 use super::test_support::prepare_node_with_virtual_nodes;
 use super::test_support::storage_sync_route_next_hop;
 use super::test_support::NoopCallback;
-use crate::dht::entry::inbox::HeldMessage;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
@@ -18,6 +17,7 @@ use crate::dht::Chord;
 use crate::dht::Did;
 use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
+use crate::dht::StorageKey;
 use crate::dht::StorageSyncDestination;
 use crate::dht::StorageSyncPurpose;
 use crate::ecc::tests::gen_ordered_keys;
@@ -30,17 +30,14 @@ use crate::message::Encoder;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
-use crate::message::MessageSigner;
 use crate::message::PayloadSender;
 use crate::session::SessionSk;
 use crate::tests::default::assert_no_more_msg;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;
-use crate::tests::live;
+use crate::tests::held_inbox_for;
 use crate::tests::live_entry;
 use crate::tests::manually_establish_connection;
-use crate::tests::TEST_NETWORK_ID;
-use crate::utils::get_epoch_ms;
 
 #[tokio::test]
 async fn test_sync_entries_handler_reports_persisted_entries() -> Result<()> {
@@ -107,21 +104,16 @@ async fn test_sync_entries_handler_reports_persisted_entries() -> Result<()> {
 }
 
 /// A witnessed inbox carrier for `destination`, held now by a fresh session.
-fn held_inbox_for(destination: Did) -> Result<Entry> {
-    let sender = SessionSk::new_with_seckey(&SecretKey::random())?;
-    let holder = SessionSk::new_with_seckey(&SecretKey::random())?;
-    let payload = MessagePayload::new_send(
-        Message::custom(b"held")?,
-        MessageSigner::new(&sender, TEST_NETWORK_ID),
+fn inbox_held_by_a_stranger(destination: Did) -> Result<Entry> {
+    held_inbox_for(
         destination,
-        destination,
-    )?;
-    let held = HeldMessage::hold(
-        payload,
-        MessageSigner::new(&holder, TEST_NETWORK_ID),
-        get_epoch_ms(),
-    )?;
-    Ok(live(Entry::inbox_delta(&held)?))
+        &SessionSk::new_with_seckey(&SecretKey::random())?,
+    )
+}
+
+/// The slot of the inbox carrier `inbox`.
+fn inbox_slot(inbox: &Entry) -> String {
+    StorageKey::new(EntryKind::RelayMessage, inbox.did).to_string()
 }
 
 /// Relocation law: a relay carrier is accepted from the receiver's predecessor and skipped
@@ -139,7 +131,7 @@ async fn test_persist_synced_entries_relocates_a_relay_carrier_from_the_predeces
         vec!["acked".to_string().encode()?],
         EntryKind::Data,
     );
-    let inbox = held_inbox_for(receiver.did())?;
+    let inbox = inbox_held_by_a_stranger(receiver.did())?;
     let sync_msg = SyncEntriesWithSuccessor {
         purpose: StorageSyncPurpose::OwnershipHandoff,
         destination: StorageSyncDestination::PhysicalOwner(receiver.did()),
@@ -158,10 +150,7 @@ async fn test_persist_synced_entries_relocates_a_relay_carrier_from_the_predeces
         topic.did,
         topic.clone().try_into_storage_entry()?
     )]);
-    assert_eq!(
-        receiver.dht().storage.get(&inbox.did.to_string()).await?,
-        None
-    );
+    assert_eq!(receiver.dht().storage.get(&inbox_slot(&inbox)).await?, None);
 
     let from_predecessor = receiver
         .swarm
@@ -172,7 +161,7 @@ async fn test_persist_synced_entries_relocates_a_relay_carrier_from_the_predeces
     assert!(receiver
         .dht()
         .storage
-        .get(&inbox.did.to_string())
+        .get(&inbox_slot(&inbox))
         .await?
         .is_some());
     Ok(())
@@ -191,7 +180,7 @@ async fn test_sync_entries_handler_ignores_a_forged_relay_origin_for_a_relay_car
     let predecessor: Did = SecretKey::random().address().into();
     *receiver.dht().lock_predecessor()? = Some(predecessor);
 
-    let inbox = held_inbox_for(receiver.did())?;
+    let inbox = inbox_held_by_a_stranger(receiver.did())?;
     let sync_msg = SyncEntriesWithSuccessor {
         purpose: StorageSyncPurpose::OwnershipHandoff,
         destination: StorageSyncDestination::PhysicalOwner(receiver.did()),
@@ -209,10 +198,7 @@ async fn test_sync_entries_handler_ignores_a_forged_relay_origin_for_a_relay_car
         MessageHandler::new(receiver.swarm.transport.clone(), Arc::new(NoopCallback));
     receiver_handler.handle(&context, &sync_msg).await?;
 
-    assert_eq!(
-        receiver.dht().storage.get(&inbox.did.to_string()).await?,
-        None
-    );
+    assert_eq!(receiver.dht().storage.get(&inbox_slot(&inbox)).await?, None);
     Ok(())
 }
 

@@ -9,6 +9,7 @@ pub use action::RemoteAction;
 pub use action::TopoInfo;
 pub use peer_ring::EntryStorage;
 pub use peer_ring::PeerRing;
+pub(crate) use storage::StorageKey;
 
 #[cfg(all(not(all(feature = "wasm", target_family = "wasm")), test))]
 mod tests;

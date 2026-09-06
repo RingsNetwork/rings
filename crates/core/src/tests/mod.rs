@@ -4,6 +4,8 @@
 ))]
 use num_bigint::BigUint;
 
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+use crate::dht::entry::inbox::HeldMessage;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
@@ -18,10 +20,20 @@ use crate::dht::successor::SuccessorReader;
 ))]
 use crate::dht::topology;
 use crate::dht::Did;
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+use crate::ecc::SecretKey;
 use crate::error::Result;
 use crate::message::Encoded;
 use crate::message::Encoder;
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+use crate::message::Message;
 use crate::message::MessageClass;
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+use crate::message::MessagePayload;
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+use crate::message::MessageSigner;
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+use crate::session::SessionSk;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::Swarm;
@@ -54,6 +66,25 @@ pub(crate) fn with_retention(mut entry: Entry, expires_at_ms: u128) -> Entry {
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 pub(crate) fn expired(entry: Entry) -> Entry {
     with_retention(entry, 1)
+}
+
+/// A live inbox delta for `destination`: one custom message from a fresh sender, held now by
+/// `holder` inside [`TEST_NETWORK_ID`].
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+pub(crate) fn held_inbox_for(destination: Did, holder: &SessionSk) -> Result<Entry> {
+    let sender = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let payload = MessagePayload::new_send(
+        Message::custom(b"held")?,
+        MessageSigner::new(&sender, TEST_NETWORK_ID),
+        destination,
+        destination,
+    )?;
+    let held = HeldMessage::hold(
+        payload,
+        MessageSigner::new(holder, TEST_NETWORK_ID),
+        get_epoch_ms(),
+    )?;
+    Ok(live(Entry::inbox_delta(&held)?))
 }
 
 #[cfg(all(feature = "wasm", target_family = "wasm"))]

@@ -4,6 +4,8 @@
 //! reports, and admitting it only requests the pass.
 
 use super::*;
+use crate::dht::entry::EntryKind;
+use crate::dht::StorageKey;
 use crate::dht::STORAGE_REPAIR_FRESH_CONNECTION_GRACE_MS;
 use crate::ecc::tests::gen_ordered_keys;
 use crate::message::Encoder;
@@ -65,10 +67,8 @@ async fn test_repair_pass_hands_off_entries_beyond_a_directly_connected_head() -
         Some(StorageRepairOutcome::Complete)
     );
 
-    assert_eq!(
-        wait_for_storage_entry(&node2, entry.did).await?,
-        stored_entry
-    );
-    wait_for_storage_absence(&node1, entry.did).await?;
+    let slot = StorageKey::new(EntryKind::Data, entry.did);
+    assert_eq!(wait_for_storage_entry(&node2, slot).await?, stored_entry);
+    wait_for_storage_absence(&node1, slot).await?;
     Ok(())
 }

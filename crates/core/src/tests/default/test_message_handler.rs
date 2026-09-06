@@ -11,6 +11,7 @@ use tokio::time::timeout;
 use tokio::time::Duration;
 
 use crate::dht::entry::Entry;
+use crate::dht::entry::EntryKind;
 use crate::dht::entry::EntryOperation;
 use crate::dht::entry::PlacedEntryOperation;
 use crate::dht::successor::SuccessorReader;
@@ -18,6 +19,7 @@ use crate::dht::successor::SuccessorReader;
 use crate::dht::PeerRingAction;
 #[cfg(feature = "dummy")]
 use crate::dht::PeerRingRemoteAction;
+use crate::dht::StorageKey;
 use crate::ecc::tests::gen_ordered_keys;
 use crate::ecc::SecretKey;
 use crate::error::Error;
@@ -405,7 +407,7 @@ async fn test_handle_storage() -> Result<()> {
         )
         .await
         .unwrap();
-    let data = wait_for_storage_entry(&node2, entry.did).await?;
+    let data = wait_for_storage_entry(&node2, StorageKey::new(EntryKind::Data, entry.did)).await?;
     assert!(node1.dht().storage.count().await.unwrap() == 0);
     assert!(node2.dht().storage.count().await.unwrap() > 0);
     assert_eq!(data.data[0].clone().decode::<String>().unwrap(), message);

@@ -80,6 +80,15 @@
 - A node that has successors but no known predecessor is no longer responsible for the whole
   ring: it forwards messages instead of holding them, and its responsibility interval is
   `(predecessor, self]` exactly.
+- Storage is partitioned by entry kind: a data topic and a relay inbox at the same position are
+  distinct slots (relay slots render as `relay:<placement>`, data slots keep the bare placement,
+  so values written by earlier builds stay addressable). Previously any node could park a data
+  topic at `d + 1` through `storage_store` and every hold for `d` then failed with
+  `EntryKindNotEqual` for as long as the topic was refreshed. A lookup reads the data slot only.
+- A relay carrier has exactly one placement, its DID, under any configured storage redundancy:
+  a placed operation or a synced entry naming a rotated replica key for a relay carrier is
+  refused, so a hold can no longer be admitted at a rotated position under the authority for
+  that position's own inbox.
 - Node descriptors verify only when the body states the receiver's overlay, and onion backward
   payloads are verified under the receiver's overlay rather than the overlay stated by the exit.
 
