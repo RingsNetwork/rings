@@ -1,6 +1,6 @@
 use super::inbox::inbox_destination;
 use super::inbox::inbox_key;
-use super::inbox::validate_inbox_relocation;
+use super::inbox::relocates_from_predecessor;
 use super::inbox::HeldMessage;
 use super::Entry;
 use super::EntryKind;
@@ -414,15 +414,12 @@ fn test_removal_authority_is_the_recipient_alone_and_nothing_else_is_allowed() -
 #[test]
 fn test_relocation_is_accepted_from_the_predecessor_alone() {
     let predecessor = Did::from(3u32);
-    assert!(validate_inbox_relocation(predecessor, Some(predecessor)).is_ok());
-    assert!(matches!(
-        validate_inbox_relocation(Did::from(4u32), Some(predecessor)),
-        Err(Error::RelayInboxNotRelocatable)
+    assert!(relocates_from_predecessor(predecessor, Some(predecessor)));
+    assert!(!relocates_from_predecessor(
+        Did::from(4u32),
+        Some(predecessor)
     ));
-    assert!(matches!(
-        validate_inbox_relocation(predecessor, None),
-        Err(Error::RelayInboxNotRelocatable)
-    ));
+    assert!(!relocates_from_predecessor(predecessor, None));
 }
 
 #[test]

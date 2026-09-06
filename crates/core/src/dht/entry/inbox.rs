@@ -340,11 +340,11 @@ impl EntryOperation {
 }
 
 /// The authority law of a relay-carrier relocation: an ownership hand-off is accepted only from
-/// the receiver's predecessor, the owner whose interval the carrier is leaving.
+/// the receiver's predecessor, the owner whose interval the carrier is leaving. A hand-off from
+/// anyone else is not invalid, only not this receiver's to take yet, so the law is a predicate
+/// the batch skips on rather than an error it fails with.
 ///
 /// Pre: `sender` is the authenticated signer of the hand-off, not its peer-declared relay path.
-pub(crate) fn validate_inbox_relocation(sender: Did, predecessor: Option<Did>) -> Result<()> {
-    (predecessor == Some(sender))
-        .then_some(())
-        .ok_or(Error::RelayInboxNotRelocatable)
+pub(crate) fn relocates_from_predecessor(sender: Did, predecessor: Option<Did>) -> bool {
+    predecessor == Some(sender)
 }

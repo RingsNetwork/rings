@@ -4,7 +4,7 @@ use std::mem;
 use super::delivery::SendCompletionOutcome;
 use super::outbound::OutboundCompletion;
 use super::SwarmTransport;
-use crate::dht::entry::inbox::validate_inbox_relocation;
+use crate::dht::entry::inbox::relocates_from_predecessor;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
 use crate::dht::Did;
@@ -282,7 +282,7 @@ impl<'data> StorageSyncBatch<'data> {
         let predecessor = transport
             .dht
             .with_topology_state(|state| state.predecessor)?;
-        Ok(validate_inbox_relocation(self.sender, predecessor).is_ok())
+        Ok(relocates_from_predecessor(self.sender, predecessor))
     }
 
     async fn persist_one(&mut self, transport: &SwarmTransport) -> Result<StorageSyncBatchStep> {

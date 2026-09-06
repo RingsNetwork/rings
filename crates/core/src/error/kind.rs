@@ -188,12 +188,6 @@ pub enum Error {
     #[error("Relay inbox removal was not issued by the inbox's recipient")]
     RelayInboxWriterNotRecipient,
 
-    /// Relay inbox carrier may only be relocated by an ownership hand-off from the predecessor
-    #[error(
-        "Relay inbox carrier may only be relocated by an ownership hand-off from the predecessor"
-    )]
-    RelayInboxNotRelocatable,
-
     /// A storage count or record length does not fit its interface width
     #[error("A storage count or record length does not fit its interface width")]
     StorageCountOverflow,
