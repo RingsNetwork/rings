@@ -356,7 +356,8 @@ impl Stabilizer {
         &self,
         timeout: Duration,
     ) -> StorageRepairOutcome {
-        self.run_step("deliver_inbox", timeout, self.deliver_inbox())
+        // The intent to deliver this node's own relay inbox; the swarm interprets it.
+        self.run_step("deliver_inbox", timeout, self.inbox.deliver_inbox())
             .await;
         let outcome = self
             .run_step("repair_storage", timeout, self.repair_storage())

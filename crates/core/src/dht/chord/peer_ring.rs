@@ -3,6 +3,7 @@ use std::sync::Mutex;
 use std::sync::MutexGuard;
 
 use async_trait::async_trait;
+use futures::lock::Mutex as FuturesMutex;
 
 use super::PeerRingAction;
 use super::RemoteAction;
@@ -52,6 +53,8 @@ pub struct PeerRing {
     pub cache: EntryStorage,
     storage_virtual_node_config: VirtualNodeConfig,
     topology_transition: Mutex<()>,
+    /// Serializes every read-modify-write of a storage slot (see `chord::storage`).
+    pub(super) storage_transition: FuturesMutex<()>,
 }
 
 impl PeerRing {
@@ -100,6 +103,7 @@ impl PeerRing {
             cache: Box::new(MemStorage::bounded(LOCAL_CACHE_CAPACITY)),
             storage_virtual_node_config: virtual_nodes,
             topology_transition: Mutex::new(()),
+            storage_transition: FuturesMutex::new(()),
             did,
         }
     }

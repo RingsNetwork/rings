@@ -146,12 +146,8 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
         let now_ms = get_epoch_ms();
         for ack in acks {
             let key = StorageKey::new(ack.entry.kind, ack.key);
-            let Some(local_entry) = self.live_storage_entry(key, now_ms).await? else {
-                continue;
-            };
-            if ack.confirms_local_value(&local_entry)? {
-                self.storage.remove(&key.to_string()).await?;
-            }
+            self.remove_storage_entry_confirmed_by(key, now_ms, ack)
+                .await?;
         }
 
         Ok(PeerRingAction::None)

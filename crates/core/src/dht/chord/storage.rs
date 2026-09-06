@@ -15,6 +15,7 @@ use crate::dht::entry::EntryLookupKey;
 use crate::dht::entry::EntryOperation;
 use crate::dht::entry::PlacedEntryOperation;
 use crate::dht::entry::PlacementMiss;
+use crate::dht::entry::SyncedEntryAck;
 use crate::dht::types::ChordStorage;
 use crate::dht::types::ChordStorageCache;
 use crate::dht::Did;
@@ -81,6 +82,7 @@ impl FromStr for StorageKey {
 
 /// Read `key` from `store`, retiring a value that is no longer live.
 ///
+/// Pre: the caller holds the ring's storage transition, since a retirement is a write.
 /// Post: `Ok(Some(entry))` implies `entry.is_live_at(now_ms)`. A stored value whose
 /// retention bound has elapsed (or that predates retention bounds) is removed and reported
 /// absent, so expiry is enforced lazily on every read path instead of by a sweeper.
@@ -105,6 +107,14 @@ async fn retire_unless_live(
     Ok(None)
 }
 
+/// Storage transition law: every read-modify-write of a slot (an operation, a join, an
+/// acknowledged removal, and the retirement a read performs) runs under the ring's storage
+/// transition, one at a time. The inbound actor and the stabilizer write the same slots
+/// concurrently (a hold arriving while the recipient drains its inbox, a hand-off joining while
+/// a repair pass reads), and the store itself only orders single puts, so without this
+/// serialization one of two interleaved read-modify-writes would overwrite the other and a held
+/// message could be lost. The transition is held across the store's own awaits and nothing
+/// else, so it never nests and never waits on the network.
 impl PeerRing {
     /// Read the live replicated entry stored at `key`.
     pub(crate) async fn live_storage_entry(
@@ -112,6 +122,7 @@ impl PeerRing {
         key: StorageKey,
         now_ms: u128,
     ) -> Result<Option<Entry>> {
+        let _transition = self.storage_transition.lock().await;
         live_entry(&self.storage, &key.to_string(), now_ms).await
     }
 
@@ -123,6 +134,7 @@ impl PeerRing {
         &self,
         now_ms: u128,
     ) -> Result<Vec<(StorageKey, Entry)>> {
+        let _transition = self.storage_transition.lock().await;
         let mut live = Vec::new();
         for (key, entry) in self.storage.get_all().await? {
             if let Some(entry) = retire_unless_live(&self.storage, &key, entry, now_ms).await? {
@@ -130,6 +142,28 @@ impl PeerRing {
             }
         }
         Ok(live)
+    }
+
+    /// Remove the value stored at `key` iff `ack` proves the receiver holds exactly that
+    /// value: the ack-gated local cleanup of an ownership hand-off.
+    ///
+    /// Post: a value written after the hand-off copy was taken differs from the acked one and
+    /// stays; the comparison and the removal are one storage transition, so a write landing
+    /// between them cannot be removed by an ack for an older value.
+    pub(crate) async fn remove_storage_entry_confirmed_by(
+        &self,
+        key: StorageKey,
+        now_ms: u128,
+        ack: &SyncedEntryAck,
+    ) -> Result<()> {
+        let _transition = self.storage_transition.lock().await;
+        let Some(local) = live_entry(&self.storage, &key.to_string(), now_ms).await? else {
+            return Ok(());
+        };
+        if ack.confirms_local_value(&local)? {
+            self.storage.remove(&key.to_string()).await?;
+        }
+        Ok(())
     }
 
     /// Join a peer-supplied replicated value into local storage at time `now_ms`.
@@ -146,15 +180,16 @@ impl PeerRing {
         incoming: Entry,
     ) -> Result<Entry> {
         incoming.validate_admissible_at(now_ms, self.network_id())?;
-        let key = StorageKey::new(incoming.kind, key);
+        let key = StorageKey::new(incoming.kind, key).to_string();
         let incoming = incoming.try_into_storage_entry()?;
-        let stored = if let Some(local) = self.live_storage_entry(key, now_ms).await? {
+        let _transition = self.storage_transition.lock().await;
+        let stored = if let Some(local) = live_entry(&self.storage, &key, now_ms).await? {
             local.join(incoming)?
         } else {
             incoming
         }
         .try_into_storage_entry()?;
-        self.storage.put(&key.to_string(), &stored).await?;
+        self.storage.put(&key, &stored).await?;
         Ok(stored)
     }
 
@@ -191,8 +226,9 @@ impl PeerRing {
                 op.validate_inbox_write(writer, responsible, now_ms, self.network_id())?;
             }
         }
-        let key = StorageKey::new(op.kind(), placement);
-        let local = match self.live_storage_entry(key, now_ms).await? {
+        let key = StorageKey::new(op.kind(), placement).to_string();
+        let _transition = self.storage_transition.lock().await;
+        let local = match live_entry(&self.storage, &key, now_ms).await? {
             Some(local) => local,
             None => op.gen_default_entry()?,
         };
@@ -200,9 +236,9 @@ impl PeerRing {
             .operate(now_ms, op, self.did)?
             .try_into_storage_entry()?;
         if stored.is_live_at(now_ms) {
-            self.storage.put(&key.to_string(), &stored).await
+            self.storage.put(&key, &stored).await
         } else {
-            self.storage.remove(&key.to_string()).await
+            self.storage.remove(&key).await
         }
     }
 

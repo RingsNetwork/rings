@@ -313,12 +313,6 @@ impl Stabilizer {
         }
     }
 
-    /// Emit the intent to deliver this node's own relay inbox; the swarm interprets it (see
-    /// `swarm::inbox`).
-    pub(super) async fn deliver_inbox(&self) -> Result<()> {
-        self.inbox.deliver_inbox().await
-    }
-
     /// One bounded pass restoring the placement invariant of local storage.
     ///
     /// Invariant: every live local entry lies in `(self, head]` and at each of its affine

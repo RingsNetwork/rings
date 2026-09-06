@@ -80,6 +80,10 @@
   system operation succeeded, and the budget is restored on open.
 - The local fetched-entry cache is bounded at `LOCAL_CACHE_CAPACITY` entries, evicting the least
   recently written entry.
+- Every read-modify-write of a DHT storage slot (an operation, a join, an acknowledged removal,
+  and the retirement a read performs) runs under one storage transition per ring, so a hold
+  arriving from the inbound actor while the stabilizer drains the same inbox, or a hand-off
+  joining while a repair pass reads, can no longer overwrite each other's write.
 - A node that has successors but no known predecessor is no longer responsible for the whole
   ring: it forwards messages instead of holding them, and its responsibility interval is
   `(predecessor, self]` exactly.

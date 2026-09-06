@@ -988,6 +988,100 @@ async fn test_data_topic_at_the_inbox_position_does_not_block_the_hold() -> Resu
     Ok(())
 }
 
+/// A store whose every access yields to the executor first, so two operations on one slot
+/// interleave at each of their storage awaits, the way a hold from the inbound actor and a
+/// drain from the stabilizer do.
+struct YieldingStorage(MemStorage<Entry>);
+
+#[async_trait]
+impl KvStorageInterface<Entry> for YieldingStorage {
+    async fn get(&self, key: &str) -> Result<Option<Entry>> {
+        tokio::task::yield_now().await;
+        self.0.get(key).await
+    }
+
+    async fn put(&self, key: &str, value: &Entry) -> Result<()> {
+        tokio::task::yield_now().await;
+        self.0.put(key, value).await
+    }
+
+    async fn get_all(&self) -> Result<Vec<(String, Entry)>> {
+        tokio::task::yield_now().await;
+        self.0.get_all().await
+    }
+
+    async fn remove(&self, key: &str) -> Result<()> {
+        tokio::task::yield_now().await;
+        self.0.remove(key).await
+    }
+
+    async fn clear(&self) -> Result<()> {
+        self.0.clear().await
+    }
+
+    async fn count(&self) -> Result<u32> {
+        self.0.count().await
+    }
+}
+
+/// Storage transition law: two operations on one slot that interleave at their storage awaits
+/// are serialized, so neither read-modify-write overwrites the other. Here two holds land in
+/// one inbox at once, and one hold races the recipient's removal of an earlier element; both
+/// holds survive either way.
+#[tokio::test]
+async fn test_interleaved_operations_on_one_slot_do_not_lose_a_write() -> Result<()> {
+    let holder = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let node = PeerRing::new_with_storage(
+        holder.account_did(),
+        3,
+        Box::new(YieldingStorage(MemStorage::new())),
+    );
+    let destination = Did::from(50u32);
+    let position = inbox_key(destination);
+    let now_ms = get_epoch_ms();
+    let slot = StorageKey::inbox_of(destination);
+
+    let first =
+        EntryOperation::Extend(held_inbox_for(destination, &holder)?).stamped(now_ms, node.did)?;
+    let second =
+        EntryOperation::Extend(held_inbox_for(destination, &holder)?).stamped(now_ms, node.did)?;
+    let (first, second) = futures::join!(
+        node.operate_storage_entry(now_ms, position, first, node.did),
+        node.operate_storage_entry(now_ms, position, second, node.did),
+    );
+    first?;
+    second?;
+    let inbox = node
+        .live_storage_entry(slot, now_ms)
+        .await?
+        .ok_or_else(|| Error::InvalidMessage("inbox vanished".to_string()))?;
+    assert_eq!(inbox.data.len(), 2);
+
+    let first_dot = inbox
+        .crdt
+        .dots
+        .first()
+        .copied()
+        .ok_or_else(|| Error::InvalidMessage("inbox has no dots".to_string()))?;
+    let removal =
+        EntryOperation::Tombstone(inbox.removal_of([first_dot])).stamped(now_ms, node.did)?;
+    let third =
+        EntryOperation::Extend(held_inbox_for(destination, &holder)?).stamped(now_ms, node.did)?;
+    let (removal, third) = futures::join!(
+        node.operate_storage_entry(now_ms, position, removal, destination),
+        node.operate_storage_entry(now_ms, position, third, node.did),
+    );
+    removal?;
+    third?;
+    let inbox = node
+        .live_storage_entry(slot, now_ms)
+        .await?
+        .ok_or_else(|| Error::InvalidMessage("inbox vanished".to_string()))?;
+    assert_eq!(inbox.data.len(), 2);
+    assert_eq!(inbox.crdt.tombstones.len(), 1);
+    Ok(())
+}
+
 /// Removal law at the write funnel: a removal never creates a carrier. Against nothing held the
 /// result has no retention, so the slot stays empty instead of holding a value the next read
 /// would retire; for a data topic by value, for a relay inbox by a dot the recipient once saw.
