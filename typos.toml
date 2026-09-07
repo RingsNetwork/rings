@@ -8,3 +8,7 @@ extend-ignore-re = ["[wW]s", "WS"]
 [default.extend-words]
 Brin = "Brin"
 Pease = "Pease"
+
+# JSON-RPC method name as documented in docs/src/jsonrpc.md.
+[default.extend-identifiers]
+listPendings = "listPendings"

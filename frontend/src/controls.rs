@@ -41,6 +41,51 @@ impl ShellPage {
     }
 }
 
+/// Destinations outside the shell that the landing hero and the header both link to, in
+/// presentation order. One finite index set, rendered by [`ProjectLink::anchor`] into whichever
+/// class the surrounding surface styles: the set of links is defined once, the surfaces differ
+/// only in their class (`anchor : ProjectLink × Class → Html`).
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum ProjectLink {
+    Docs,
+    Repository,
+    Whitepaper,
+}
+
+impl ProjectLink {
+    /// Every link, in the order the surfaces present them.
+    pub(crate) const ALL: [Self; 3] = [Self::Docs, Self::Repository, Self::Whitepaper];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Docs => "Docs",
+            Self::Repository => "GitHub",
+            Self::Whitepaper => "Whitepaper",
+        }
+    }
+
+    /// Absolute URLs: the same shell runs from `rings.rs` and from an extension origin, where a
+    /// site-relative `/docs/` would resolve inside the extension.
+    fn href(self) -> &'static str {
+        match self {
+            Self::Docs => "https://rings.rs/docs/",
+            Self::Repository => "https://github.com/RingsNetwork/rings",
+            Self::Whitepaper => {
+                "https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf"
+            }
+        }
+    }
+
+    /// The link as an anchor of the given class, opened in a new tab without a referrer.
+    pub(crate) fn anchor(self, class: &'static str) -> Html {
+        html! {
+            <a class={class} href={self.href()} target="_blank" rel="noreferrer">
+                { self.label() }
+            </a>
+        }
+    }
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum Panel {
     Onion,
@@ -282,22 +327,7 @@ pub(crate) fn app_header(
                     >
                         { ShellPage::Console.label() }
                     </button>
-                    <a
-                        class="header-github-link"
-                        href="https://github.com/RingsNetwork/rings"
-                        target="_blank"
-                        rel="noreferrer"
-                    >
-                        { "GitHub" }
-                    </a>
-                    <a
-                        class="header-github-link"
-                        href="https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf"
-                        target="_blank"
-                        rel="noreferrer"
-                    >
-                        { "Whitepaper" }
-                    </a>
+                    { for ProjectLink::ALL.into_iter().map(|link| link.anchor("header-external-link")) }
                 </nav>
             }
         </header>

@@ -1,17 +1,20 @@
-# Publishes the browser frontend (`frontend/`, Trunk + Yew) to GitHub Pages, which serves
-# https://rings.rs once the repository's Pages custom domain is set to `rings.rs`.
+# Publishes the https://rings.rs site to GitHub Pages: the browser frontend (`frontend/`,
+# Trunk + Yew) at the root and the documentation book (`docs/`, mdBook) under `/docs/`.
 #
-# Separation of concerns — QACI already compiles, lints, and tests the frontend on every PR;
-# this workflow only *ships* it. It runs on master pushes that can change the browser build
-# (the frontend itself, or the crates it links) and on manual dispatch, so a green master is
-# what rings.rs serves. The deploy environment is `github-pages`, the one the Pages
+# Separation of concerns — QACI already compiles, lints, and tests the frontend and builds the
+# book on every PR; this workflow only *ships* them. It runs on master pushes that can change
+# the site (the frontend, the crates it links, or the docs) and on manual dispatch, so a green
+# master is what rings.rs serves. The deploy environment is `github-pages`, the one the Pages
 # integration owns; the `id-token` grant is the OIDC proof the Pages deployment API requires.
+#
+# The site is one Pages artifact: Trunk owns `frontend/dist` (it clears the directory on every
+# build), so the book is rendered into it afterwards, and the SPA fallback is added last.
 #
 # Routing: the shell is hash-routed (`#node`, `#webview`, …), which static hosting serves
 # unchanged. The Onion WebView gateway is path-routed (`/webview`, `/webview/…`) and is answered
 # by the service worker once it is registered; a cold load of such a path has no worker yet, so
 # `404.html` is a copy of the (absolute-path) shell that boots the app and registers it.
-name: Deploy frontend to Pages
+name: Deploy site to Pages
 
 on:
   push:
@@ -20,7 +23,8 @@ on:
     paths:
       - "frontend/**"
       - "crates/**"
-      - ".github/workflows/deploy-frontend.yml"
+      - "docs/**"
+      - ".github/workflows/deploy-pages.yml"
   workflow_dispatch:
 
 permissions:
@@ -37,10 +41,11 @@ env:
   RUST_TOOLCHAIN: 1.97.0
   WASM_BINDGEN_CLI_VERSION: 0.2.121
   TRUNK_VERSION: 0.21.14
+  MDBOOK_VERSION: 0.5.4
 
 jobs:
   build:
-    name: Build frontend web app
+    name: Build site
     timeout-minutes: 45
     runs-on: ubuntu-latest
     steps:
@@ -64,14 +69,17 @@ jobs:
         with:
           version: ${{ env.WASM_BINDGEN_CLI_VERSION }}
 
-      - name: Install Trunk
+      - name: Install Trunk and mdBook
         uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
         with:
-          tool: trunk@${{ env.TRUNK_VERSION }}
+          tool: trunk@${{ env.TRUNK_VERSION }},mdbook@${{ env.MDBOOK_VERSION }}
 
       # The same script developers and QACI use, so the shipped build is the checked one.
       - name: Build frontend web app
         run: npm run build:frontend-web
+
+      - name: Build the documentation book into the site
+        run: mdbook build docs --dest-dir frontend/dist/docs
 
       - name: Add the SPA fallback for path-routed WebView URLs
         run: cp frontend/dist/index.html frontend/dist/404.html
