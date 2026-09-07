@@ -5,8 +5,8 @@
 //! perform the HTTP handshake: its `nodeDid` and `answerOffer` methods are public, while its
 //! status and registry reads stay gated. The requirement for one request is the pure function
 //! `required(listener, body) = floor(listener) ⊔ class(body)` over the join-semilattice
-//! [`AuthorizationClass`]; this module owns the listener floor and that function, and the
-//! endpoint layer only applies its verdict.
+//! [`rings_rpc::method::AuthorizationClass`]; this module owns the listener floor and that
+//! function, and the endpoint layer only applies its verdict.
 
 use std::fs;
 use std::fs::OpenOptions;

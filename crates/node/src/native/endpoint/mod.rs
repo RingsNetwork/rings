@@ -2,8 +2,9 @@
 //!
 //! Both listeners are built by `secure_router`, whose security layer decodes a JSON-RPC body
 //! exactly once, decides the request's authorization requirement through
-//! [`ApiListener::required_authorization`], and hands the decoded request to the route handler as
-//! a `DecodedJsonRpc` extension so that no later stage buffers or parses the body again.
+//! [`crate::native::api_auth::ApiListener::required_authorization`], and hands the decoded
+//! request to the route handler as a `DecodedJsonRpc` extension so that no later stage buffers
+//! or parses the body again.
 mod http_error;
 mod ws;
 
