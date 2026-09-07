@@ -19,7 +19,7 @@ fn append_base_nav(css: &mut String) {
         ("justify-content", "flex-end"),
         ("min-width", "0"),
     ]);
-    rule(css, ".header-nav-button,.header-github-link", &[
+    rule(css, ".header-nav-button,.header-external-link", &[
         ("display", "inline-flex"),
         ("min-height", "32px"),
         ("align-items", "center"),
@@ -37,7 +37,7 @@ fn append_base_nav(css: &mut String) {
     ]);
     rule(
         css,
-        ".header-nav-button.active,.header-nav-button:hover,.header-github-link:hover",
+        ".header-nav-button.active,.header-nav-button:hover,.header-external-link:hover",
         &[
             ("border-color", "rgba(0, 229, 255, 0.34)"),
             ("background", "rgba(0, 229, 255, 0.11)"),
@@ -117,7 +117,7 @@ fn append_header_nav(css: &mut String, theme: Theme) {
     ]);
     rule(
         css,
-        ".landing-header .header-nav-button,.landing-header .header-github-link",
+        ".landing-header .header-nav-button,.landing-header .header-external-link",
         &[
             ("box-sizing", "border-box"),
             ("height", "34px"),
