@@ -77,10 +77,21 @@ rings <command> [options]
 
 ### Control API security
 
-`rings init` creates an owner-only `api-token` file next to the YAML configuration. The internal
-and external JSON-RPC listeners, WebSocket endpoint, `/status`, and `/gateway/status` all require
-that token as an `Authorization: Bearer ...` header. The `rings` CLI reads the token file
-automatically. JSON-RPC requests must also use `Content-Type: application/json`.
+`rings init` creates an owner-only `api-token` file next to the YAML configuration. The token is
+presented as an `Authorization: Bearer ...` header; the `rings` CLI reads the token file
+automatically. Which requests demand it depends on the listener and, on the external listener,
+on the JSON-RPC method:
+
+| Listener | Method | Authorization |
+|---|---|---|
+| internal (`internal_api_port`, default 50000) | every method, WebSocket, `/status`, `/gateway/status` | Bearer required |
+| external (`external_api_addr`, default 127.0.0.1:50001) | `nodeDid`, `answerOffer` | public |
+| external (`external_api_addr`, default 127.0.0.1:50001) | `nodeInfo`, `lookupOnlineNodes`, `lookupOnionExits`, `/status` | Bearer required |
+
+The public methods are the two halves of the HTTP handshake, whose offer is already bound to the
+peer DID by its signature, so a seed can admit arbitrary peers without sharing its token. A batch
+is authorized by its strictest member: a batch that mixes a public and a gated method requires
+the token. Every JSON-RPC request, public or gated, must use `Content-Type: application/json`.
 
 Browser origins are denied by default. Add exact origins to `api_allowed_origins` in the YAML
 configuration or repeat `--api-allowed-origin` when starting the node. Wildcard origins are not
@@ -90,5 +101,7 @@ accepted. A non-loopback `external_api_addr` additionally requires
 If the external API is explicitly bound to a non-loopback address, terminate TLS in front of it;
 plain HTTP exposes bearer tokens to anyone able to observe that network path.
 
-Connecting to a protected remote peer requires its token. `rings connect node` accepts
-`--remote-api-token-file`; seed entries may include an optional `api_token` field.
+Connecting to a remote peer needs no token by default, because its handshake is public. An
+operator who fronts the external listener with a proxy that demands the token can still be
+dialled: `rings connect node` accepts `--remote-api-token-file`, and seed entries may include an
+optional `api_token` field.

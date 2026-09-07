@@ -117,6 +117,22 @@ pressure, so an identity-rich adversary that fills the table loses one
 connection per admission that honest peers attempt. The bound limits resource
 use; it is not a Sybil defence.
 
+### Control API
+
+Each native node serves two JSON-RPC listeners guarded by one owner-only Bearer token. The
+internal listener is the operator's control surface and demands the token on every route.
+The external listener is the surface peers dial for the HTTP handshake: `nodeDid` and
+`answerOffer` are served without the token, because the offer they exchange is already
+bound to the caller's DID by its signature and the resulting connection is subject to the
+admission bound above; `nodeInfo`, `lookupOnlineNodes`, `lookupOnionExits`, and `/status`
+demand the token. A batch is authorized by its strictest member, so a public method
+cannot carry a gated one past the check. Both listeners accept only
+`Content-Type: application/json` and only exact configured browser origins, and the
+external listener binds a non-loopback address only under an explicit opt-in. The token
+is therefore a control credential, not an admission credential: a seed admits arbitrary
+peers without sharing it, and the overlay's admission story is the one described in the
+sections above.
+
 ### DHT Storage
 
 Storage ownership and replication are topology-derived. CRDT joins, owner checks,

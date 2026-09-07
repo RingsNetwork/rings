@@ -1,4 +1,12 @@
-//! Authentication and browser-origin policy for native control APIs.
+//! Authentication and browser-origin policy for the native JSON-RPC listeners.
+//!
+//! A node serves two listeners. The internal listener is the operator's control surface and
+//! gates every route behind the Bearer token. The external listener is the surface peers dial to
+//! perform the HTTP handshake: its `nodeDid` and `answerOffer` methods are public, while its
+//! status and registry reads stay gated. The requirement for one request is the pure function
+//! `required(listener, body) = floor(listener) ⊔ class(body)` over the join-semilattice
+//! [`rings_rpc::method::AuthorizationClass`]; this module owns the listener floor and that
+//! function, and the endpoint layer only applies its verdict.
 
 use std::fs;
 use std::fs::OpenOptions;
@@ -19,6 +27,7 @@ use axum::http::header::CONTENT_TYPE;
 use axum::http::Method;
 use rand::rngs::OsRng;
 use rand::RngCore;
+use rings_rpc::method::AuthorizationClass;
 use subtle::ConstantTimeEq;
 use tower_http::cors::AllowOrigin;
 use tower_http::cors::CorsLayer;
@@ -83,7 +92,39 @@ impl LoadedApiToken {
     }
 }
 
-/// Immutable authentication and browser-origin policy shared by one API server.
+/// The two JSON-RPC listeners a native node serves, distinguished by their authorization floor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApiListener {
+    /// Loopback control listener: every route demands the token.
+    Internal,
+    /// Peer-facing listener: the HTTP handshake is public, everything else demands the token.
+    External,
+}
+
+impl ApiListener {
+    /// Return the least class this listener demands of any request, `floor(self)`.
+    pub fn authorization_floor(self) -> AuthorizationClass {
+        match self {
+            ApiListener::Internal => AuthorizationClass::Gated,
+            ApiListener::External => AuthorizationClass::Public,
+        }
+    }
+
+    /// Return the class this listener demands of one JSON-RPC body:
+    /// `floor(self) ⊔ class(body)`.
+    ///
+    /// `None` stands for a body that did not decode as JSON-RPC. It carries no classifiable call
+    /// and is `⊤`, so a decoding failure is reported only to an authenticated caller.
+    pub fn required_authorization(
+        self,
+        body: Option<&jsonrpc_core::Request>,
+    ) -> AuthorizationClass {
+        let body_class = body.map_or(AuthorizationClass::Gated, AuthorizationClass::of_request);
+        self.authorization_floor().join(body_class)
+    }
+}
+
+/// Immutable authentication and browser-origin policy shared by both listeners of one node.
 pub struct ApiSecurity {
     token: Box<str>,
     allowed_origins: Vec<HeaderValue>,
@@ -311,6 +352,37 @@ mod tests {
         headers.remove(AUTHORIZATION);
         headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer wrong"));
         assert!(!security.authorizes(&headers));
+    }
+
+    #[test]
+    fn the_listener_floor_joins_with_the_body_class() {
+        let handshake = jsonrpc_core::Request::Batch(vec![call("nodeDid"), call("answerOffer")]);
+        let status = jsonrpc_core::Request::Single(call("nodeInfo"));
+        assert_eq!(
+            ApiListener::External.required_authorization(Some(&handshake)),
+            AuthorizationClass::Public
+        );
+        assert_eq!(
+            ApiListener::External.required_authorization(Some(&status)),
+            AuthorizationClass::Gated
+        );
+        assert_eq!(
+            ApiListener::External.required_authorization(None),
+            AuthorizationClass::Gated
+        );
+        assert_eq!(
+            ApiListener::Internal.required_authorization(Some(&handshake)),
+            AuthorizationClass::Gated
+        );
+    }
+
+    fn call(method: &str) -> jsonrpc_core::Call {
+        jsonrpc_core::Call::MethodCall(jsonrpc_core::MethodCall {
+            jsonrpc: Some(jsonrpc_core::Version::V2),
+            method: method.to_string(),
+            params: jsonrpc_core::Params::None,
+            id: jsonrpc_core::Id::Num(1),
+        })
     }
 
     #[test]

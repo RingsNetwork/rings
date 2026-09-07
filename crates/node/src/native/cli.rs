@@ -69,7 +69,8 @@ impl Client {
         self.connect_peer_via_http_with_token(url, None).await
     }
 
-    /// Establishes a WebRTC connection through a remote API protected by a Bearer token.
+    /// Establishes a WebRTC connection through a remote API, presenting a Bearer token only
+    /// when the remote gates its otherwise public handshake.
     pub async fn connect_peer_via_http_with_token(
         &mut self,
         url: &str,

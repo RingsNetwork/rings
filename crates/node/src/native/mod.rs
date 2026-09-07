@@ -1,4 +1,4 @@
-/// Local API authentication, origin policy, and token-file lifecycle.
+/// API authentication, per-listener authorization floors, origin policy, and token-file lifecycle.
 pub mod api_auth;
 /// Native command-line client helpers.
 pub mod cli;

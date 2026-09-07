@@ -243,7 +243,7 @@ struct RunCommand {
 
     #[arg(
         long,
-        help = "API Bearer token file. Relative paths are resolved next to the node config file",
+        help = "API Bearer token file guarding the internal API and the external status and registry reads; the external handshake (nodeDid, answerOffer) is public. Relative paths are resolved next to the node config file",
         env
     )]
     pub api_token_path: Option<String>,
@@ -445,7 +445,7 @@ struct ClientArgs {
 
     #[arg(
         long,
-        help = "API Bearer token file. Relative paths are resolved next to the node config file",
+        help = "API Bearer token file of the local node's internal API. Relative paths are resolved next to the node config file",
         env
     )]
     api_token_path: Option<String>,
@@ -590,7 +590,7 @@ struct ConnectUrlCommand {
 
     #[arg(
         long,
-        help = "Bearer token file for the remote peer API",
+        help = "Bearer token file for a remote peer that gates its handshake behind its token; not needed by default, since the external handshake (nodeDid, answerOffer) is public",
         env = "RINGS_REMOTE_API_TOKEN_FILE"
     )]
     remote_api_token_file: Option<String>,
