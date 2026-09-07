@@ -171,6 +171,7 @@ execute, or maintain a proving backend.
 | Rings Whitepaper | [PDF](./papers/rings.pdf), [LaTeX source](./papers/rings.tex), [citation](#whitepaper) | Canonical protocol paper |
 | Security model | [SECURITY.md](./SECURITY.md) | Overlay assumptions, deployment models, and Sybil boundary |
 | Browser frontend | [`frontend`](./frontend) | Landing guide, web app, and extension workflow |
+| Documentation | [rings.rs/docs](https://rings.rs/docs/), [source](./docs) | mdBook book, published with the site |
 | Examples | [`examples/`](./examples) | Native, dweb, relay, and FFI examples |
 
 ## Components
