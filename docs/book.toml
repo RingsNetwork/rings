@@ -1,0 +1,16 @@
+# The Rings documentation book. Built by mdBook into the GitHub Pages site under `/docs/`
+# (see `.github/workflows/deploy-pages.yml`); `mdbook serve docs` previews it locally.
+[book]
+title = "Rings Network"
+description = "Documentation for Rings, a peer-to-peer network in browsers and native nodes"
+authors = ["Rings Network"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+
+[output.html]
+site-url = "/docs/"
+git-repository-url = "https://github.com/RingsNetwork/rings"
+edit-url-template = "https://github.com/RingsNetwork/rings/edit/master/docs/{path}"
