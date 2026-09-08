@@ -223,7 +223,7 @@ struct RunCommand {
     #[arg(
         long,
         action = ArgAction::SetTrue,
-        help = "Enable the native TUN gateway configured by the gateway section",
+        help = "Start the native TUN gateway from the config's gateway section for this run; the section alone never starts it (rings init writes it with enabled: false)",
         env
     )]
     pub gateway: bool,
@@ -791,7 +791,11 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
     }
     if args.gateway {
         let Some(gateway) = c.gateway.as_mut() else {
-            anyhow::bail!("--gateway requires a gateway section in the node config file");
+            anyhow::bail!(
+                "--gateway requires a gateway section in {config_path}; `rings init` writes one \
+                 into a new config file, or append this to the existing file:\n{}",
+                config::NativeGatewayConfig::disabled_default().to_yaml_section()?
+            );
         };
         gateway.enabled = true;
     }
@@ -818,7 +822,7 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
     let onion_http_proxy_allow_short_paths = c.onion_http_proxy_allow_short_paths;
     let onion_http_proxy_header_timeout_secs = c.onion_http_proxy_header_timeout_secs;
     let onion_http_proxy_max_connections = c.onion_http_proxy_max_connections;
-    let gateway_config = c.gateway.clone().filter(|gateway| gateway.enabled);
+    let gateway_config = c.enabled_gateway().cloned();
 
     let (data_storage, measure_storage) = if let Some(storage_path) = args.storage_path {
         let storage_path = Path::new(&storage_path);

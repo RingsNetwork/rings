@@ -4,6 +4,7 @@ use std::io;
 use std::path::PathBuf;
 
 use rings_gateway::GatewayConfig;
+use rings_gateway::GatewayPlan;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -50,17 +51,29 @@ pub const DEFAULT_STORAGE_CAPACITY: u32 = 200000000;
 /// Default interval for refreshing gateway status.
 pub const DEFAULT_GATEWAY_STATUS_REFRESH_SECS: u64 = 2;
 
-/// Native foreground-gateway configuration.
+/// Native foreground-gateway configuration: the `gateway:` section of the node config file.
+///
+/// `rings init` writes this section in full through [`NativeGatewayConfig::disabled_default`],
+/// so the generated file is the one place an operator edits and `rings run --gateway` works on
+/// it unchanged. Presence of the section is not consent to start a TUN device:
+///
+/// ```text
+/// gateway starts ⟺ section present ∧ (enabled = true ∨ --gateway)
+/// ```
+///
+/// A section that omits `enabled` is therefore inert, and a config without the section loads
+/// with `gateway = None`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NativeGatewayConfig {
-    /// Whether `rings run` starts the gateway when this section is present.
-    #[serde(default = "default_true")]
+    /// Whether plain `rings run` starts the gateway. Absent means `false`; only an explicit
+    /// `enabled: true` or `rings run --gateway` starts a TUN device.
+    #[serde(default)]
     pub enabled: bool,
     /// Platform-neutral routing, TCP, and flow limits.
     #[serde(flatten)]
     pub runtime: GatewayConfig,
     /// Requested Wintun interface name; on Unix the helper's `--interface` is authoritative.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub interface_name: Option<String>,
     /// Durable journal used directly on Windows; on Unix the helper's `--ledger` is authoritative.
     #[serde(default = "default_gateway_route_ledger_path")]
@@ -69,7 +82,7 @@ pub struct NativeGatewayConfig {
     #[serde(default = "default_gateway_unix_helper_socket")]
     pub unix_helper_socket: String,
     /// Optional explicit Wintun DLL path on Windows; overrides `RINGS_GATEWAY_WINTUN_DLL`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub wintun_dll_path: Option<String>,
     /// Interval for refreshing Onion exit availability in gateway status.
     #[serde(default = "default_gateway_status_refresh_secs")]
@@ -85,8 +98,36 @@ pub struct NativeGatewayConfig {
     pub onion_allow_short_paths: bool,
 }
 
-const fn default_true() -> bool {
-    true
+impl NativeGatewayConfig {
+    /// The section `rings init` writes: the gateway crate's interface-only plan under its default
+    /// limits, the node's default paths, and `enabled: false`, with every field stated so the
+    /// generated file documents the whole surface. Optional fields are written as `null`.
+    pub fn disabled_default() -> Self {
+        Self {
+            enabled: false,
+            runtime: GatewayConfig::with_default_limits(GatewayPlan::interface_only()),
+            interface_name: None,
+            route_ledger_path: default_gateway_route_ledger_path(),
+            unix_helper_socket: default_gateway_unix_helper_socket(),
+            wintun_dll_path: None,
+            status_refresh_secs: default_gateway_status_refresh_secs(),
+            onion_service: OnionServiceName::tcp(),
+            onion_hop_count: 0,
+            onion_allow_short_paths: false,
+        }
+    }
+
+    /// Render this section as the top-level `gateway:` mapping of a config file, so a message
+    /// telling an operator what to add quotes the shape `rings init` writes rather than a copy.
+    pub fn to_yaml_section(&self) -> Result<String> {
+        serde_yaml::to_string(&GatewaySection { gateway: self }).map_err(|_| Error::EncodeError)
+    }
+}
+
+/// A config document consisting of the `gateway:` section alone.
+#[derive(Serialize)]
+struct GatewaySection<'a> {
+    gateway: &'a NativeGatewayConfig,
 }
 
 const fn default_gateway_status_refresh_secs() -> u64 {
@@ -192,7 +233,9 @@ pub struct Config {
     /// Maximum simultaneous HTTP CONNECT proxy connections.
     #[serde(default = "crate::onion::proxy::http::default_max_connect_connections")]
     pub onion_http_proxy_max_connections: usize,
-    /// Optional native TUN gateway started in the same foreground lifecycle.
+    /// Native TUN gateway section; `rings init` writes it disabled, and it starts a gateway in
+    /// the same foreground lifecycle only under `enabled: true` or `--gateway`. Older configs
+    /// without the section load as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway: Option<NativeGatewayConfig>,
     /// Virtual DHT positions per storage owner.
@@ -318,7 +361,7 @@ impl Config {
                 crate::onion::proxy::http::default_connect_header_timeout_secs(),
             onion_http_proxy_max_connections:
                 crate::onion::proxy::http::default_max_connect_connections(),
-            gateway: None,
+            gateway: Some(NativeGatewayConfig::disabled_default()),
             dht_virtual_nodes: DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER,
             external_ip: None,
             webrtc_udp_port_min: None,
@@ -326,6 +369,14 @@ impl Config {
             data_storage: DEFAULT_DATA_STORAGE_CONFIG.clone(),
             measure_storage: DEFAULT_MEASURE_STORAGE_CONFIG.clone(),
         }
+    }
+
+    /// The gateway section `rings run` starts a runner from, if any.
+    ///
+    /// Law: `enabled_gateway() = Some(g) ⟺ gateway = Some(g) ∧ g.enabled`. `--gateway` sets
+    /// `enabled` before this is consulted, so the flag and the field select the same runner.
+    pub fn enabled_gateway(&self) -> Option<&NativeGatewayConfig> {
+        self.gateway.as_ref().filter(|gateway| gateway.enabled)
     }
 
     /// Writes this configuration to a YAML file and returns the written path.
@@ -464,6 +515,151 @@ measure_storage:
         let cfg: Config = serde_yaml::from_str(yaml).unwrap();
 
         assert_eq!(cfg.dht_virtual_nodes, 0);
+    }
+
+    const CONFIG_WITHOUT_GATEWAY_SECTION: &str = r#"
+network_id: 1
+session_sk: session_sk
+internal_api_port: 50000
+external_api_addr: 127.0.0.1:50001
+endpoint_url: http://127.0.0.1:50000
+ice_servers: stun://stun.l.google.com:19302
+stabilize_interval: 15
+external_ip: null
+webrtc_udp_port_min: null
+webrtc_udp_port_max: null
+data_storage:
+  path: /Users/foo/.rings/data
+  capacity: 200000000
+measure_storage:
+  path: /Users/foo/.rings/measure
+  capacity: 200000000
+"#;
+
+    /// A hand-written section stating only what the gateway crate requires.
+    const GATEWAY_SECTION_WITHOUT_ENABLED: &str = r#"
+gateway:
+  plan:
+    addresses:
+    - 100.64.0.1/32
+    included_routes: []
+    mtu: 1280
+"#;
+
+    const GATEWAY_SECTION_ENABLED: &str = r#"
+gateway:
+  enabled: true
+  plan:
+    addresses:
+    - 100.64.0.1/32
+    included_routes: []
+    mtu: 1280
+"#;
+
+    fn config_from(document: &str) -> Config {
+        match serde_yaml::from_str(document) {
+            Ok(config) => config,
+            Err(error) => panic!("config document must parse: {error}"),
+        }
+    }
+
+    #[test]
+    fn generated_config_round_trips_with_the_gateway_disabled() {
+        let root = std::env::temp_dir().join(format!("rings-config-{}", uuid::Uuid::new_v4()));
+        let path = root.join("config.yaml");
+        let written = Config::new("session_sk").write_fs(&path);
+        let restored = written.and_then(Config::read_fs);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(root);
+
+        let restored = match restored {
+            Ok(config) => config,
+            Err(error) => panic!("generated config must round-trip: {error:?}"),
+        };
+        let Some(gateway) = restored.gateway.as_ref() else {
+            panic!("generated config must carry a gateway section");
+        };
+        assert!(!gateway.enabled);
+        assert_eq!(gateway.runtime.validate(), Ok(()));
+        assert!(restored.enabled_gateway().is_none());
+    }
+
+    #[test]
+    fn generated_gateway_section_states_every_field() {
+        let document = match serde_yaml::to_value(Config::new("session_sk")) {
+            Ok(document) => document,
+            Err(error) => panic!("generated config must serialize: {error}"),
+        };
+        let keys = document
+            .get("gateway")
+            .and_then(serde_yaml::Value::as_mapping)
+            .map(|section| {
+                section
+                    .keys()
+                    .filter_map(serde_yaml::Value::as_str)
+                    .collect::<Vec<_>>()
+            });
+
+        assert_eq!(
+            keys,
+            Some(vec![
+                "enabled",
+                "plan",
+                "max_flows",
+                "flow_idle_timeout",
+                "tcp_buffer_bytes",
+                "interface_name",
+                "route_ledger_path",
+                "unix_helper_socket",
+                "wintun_dll_path",
+                "status_refresh_secs",
+                "onion_service",
+                "onion_hop_count",
+                "onion_allow_short_paths",
+            ])
+        );
+    }
+
+    #[test]
+    fn gateway_section_without_enabled_is_inert() {
+        let document = format!("{CONFIG_WITHOUT_GATEWAY_SECTION}{GATEWAY_SECTION_WITHOUT_ENABLED}");
+        let config = config_from(&document);
+
+        assert!(matches!(config.gateway, Some(ref gateway) if !gateway.enabled));
+        assert!(config.enabled_gateway().is_none());
+    }
+
+    #[test]
+    fn explicitly_enabled_gateway_section_selects_a_runner() {
+        let document = format!("{CONFIG_WITHOUT_GATEWAY_SECTION}{GATEWAY_SECTION_ENABLED}");
+        let config = config_from(&document);
+
+        assert!(config.enabled_gateway().is_some());
+    }
+
+    #[test]
+    fn enabling_the_generated_section_selects_a_runner() {
+        let mut config = Config::new("session_sk");
+        assert!(config.enabled_gateway().is_none());
+
+        if let Some(gateway) = config.gateway.as_mut() {
+            gateway.enabled = true;
+        }
+
+        assert!(config.enabled_gateway().is_some());
+    }
+
+    #[test]
+    fn rendered_yaml_section_completes_a_config_without_one() {
+        let section = match NativeGatewayConfig::disabled_default().to_yaml_section() {
+            Ok(section) => section,
+            Err(error) => panic!("section must render: {error:?}"),
+        };
+        assert!(section.starts_with("gateway:\n"));
+
+        let config = config_from(&format!("{CONFIG_WITHOUT_GATEWAY_SECTION}{section}"));
+
+        assert!(matches!(config.gateway, Some(ref gateway) if !gateway.enabled));
     }
 
     #[test]
