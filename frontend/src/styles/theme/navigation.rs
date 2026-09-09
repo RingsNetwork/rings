@@ -109,10 +109,15 @@ fn append_header_brand(css: &mut String, theme: Theme) {
     ]);
 }
 
+/// The header nav lays its children out as one row of implicit columns, so the column count is
+/// the child count (`columns = |ShellPage| + |ProjectLink::ALL|`) and adding a link can never
+/// spill into a second row. An explicit column list would have to be edited in step with the
+/// link set; #729 added `Docs` to a four-column template and the fifth item wrapped.
 fn append_header_nav(css: &mut String, theme: Theme) {
     rule(css, ".landing-header .header-nav", &[
         ("display", "grid"),
-        ("grid-template-columns", "68px 68px 78px 112px"),
+        ("grid-auto-flow", "column"),
+        ("grid-auto-columns", "max-content"),
         ("gap", "6px"),
     ]);
     rule(
