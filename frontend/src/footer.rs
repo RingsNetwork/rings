@@ -97,6 +97,7 @@ const COLUMNS: [Column; 3] = [
             SiteLink::Project(ProjectLink::Security),
             SiteLink::Project(ProjectLink::Roadmap),
             SiteLink::Project(ProjectLink::Sponsor),
+            SiteLink::Project(ProjectLink::XAccount),
             SiteLink::Project(ProjectLink::License),
         ],
     },

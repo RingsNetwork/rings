@@ -65,3 +65,4 @@ This file follows https://llmstxt.org/. It is for coding agents that build on Ri
 - [crates.io: rings-node](https://crates.io/crates/rings-node), [docs.rs](https://docs.rs/rings-node), [npm: @ringsnetwork/rings-node](https://www.npmjs.com/package/@ringsnetwork/rings-node).
 - [Releases](https://github.com/RingsNetwork/rings/releases): prebuilt `rings` for macOS (x86_64, aarch64) and Linux (x86_64 musl), and the wasm package.
 - Public seed node: https://node.rings.rs. Its external handshake (`nodeDid`, `answerOffer`) is public; status and control methods need its Bearer token.
+- Official X (Twitter) account: https://x.com/RingsNetworkio.

@@ -30,6 +30,7 @@ pub(crate) enum ProjectLink {
     Sponsor,
     License,
     LlmsTxt,
+    XAccount,
 }
 
 impl ProjectLink {
@@ -54,6 +55,7 @@ impl ProjectLink {
             Self::Sponsor => "Sponsor",
             Self::License => "License",
             Self::LlmsTxt => "llms.txt",
+            Self::XAccount => "X (Twitter)",
         }
     }
 
@@ -72,6 +74,7 @@ impl ProjectLink {
             Self::Sponsor => "https://github.com/sponsors/RingsNetwork",
             Self::License => "https://github.com/RingsNetwork/rings/blob/master/LICENSE",
             Self::LlmsTxt => "https://rings.rs/llms.txt",
+            Self::XAccount => "https://x.com/RingsNetworkio",
         }
     }
 

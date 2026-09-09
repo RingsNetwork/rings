@@ -175,6 +175,7 @@ execute, or maintain a proving backend.
 | Guide | [rings.rs/#guide](https://rings.rs/#guide) | One card per runtime with the first commands; the book is the reference |
 | For AI agents | [rings.rs/llms.txt](https://rings.rs/llms.txt), [source](./llms.txt) | Project map for coding agents ([llms.txt](https://llmstxt.org/)), maintained with the code |
 | Examples | [`examples/`](./examples) | Native, dweb, relay, and FFI examples |
+| X (Twitter) | [@RingsNetworkio](https://x.com/RingsNetworkio) | Project announcements |
 
 ## Components
 
