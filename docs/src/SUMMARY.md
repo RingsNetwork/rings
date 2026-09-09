@@ -4,14 +4,20 @@
 
 # Native Node
 
-- [Native Node](install-a-native-node.md)
+- [Install a Native Node](install-a-native-node.md)
 - [Host a Native Node](host-a-native-node.md)
+- [Operate a Node from the CLI](cli.md)
 - [Native Gateway](native-gateway.md)
 
 # Wasm Node (WebAssembly for Browsers)
 
 - [Build for Wasm](build-for-wasm.md)
+- [Browser Node and Extension](browser-node.md)
 - [Connect Rings Network](introduction/connect-rings-network.md)
+
+# Embedding
+
+- [Embed via C FFI](ffi.md)
 
 # Advanced topic
 
@@ -31,3 +37,7 @@
 # Examples
 
 - [Decentralized Service Examples](examples/decentralized-service-examples.md)
+
+# For AI Agents
+
+- [llms.txt](llms.md)

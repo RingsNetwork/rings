@@ -9,12 +9,14 @@ use yew::prelude::*;
 use crate::extension;
 use crate::forms::readonly_textarea;
 use crate::forms::text_input;
+use crate::forms::text_input_with_suggestions;
 use crate::forms::textarea;
 use crate::generation::GenerationClock;
 use crate::generation::GenerationToken;
 use crate::node;
 use crate::node::DemoNode;
 use crate::node::PeerView;
+use crate::node::SEED_ENDPOINTS;
 use crate::peer_sync;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -483,7 +485,7 @@ fn connect_dialog(view: ConnectDialogView, actions: ConnectDialogActions) -> Htm
                                         <h3>{ "HTTP endpoint" }</h3>
                                         <span class="payload-state">{ "Seed" }</span>
                                     </div>
-                                    { text_input("Seed HTTP endpoint", view.http_endpoint) }
+                                    { text_input_with_suggestions("Seed HTTP endpoint", view.http_endpoint, "seed-http-endpoints", &SEED_ENDPOINTS) }
                                     <button onclick={actions.on_http_connect}>{ "Connect endpoint" }</button>
                                 </div>
                             },

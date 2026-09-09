@@ -6,9 +6,22 @@ description: Start from using rings-node
 
 ## Installation
 
-You can install rings-node either from Cargo or from source.
+You can install the `rings` binary from a prebuilt release, from Cargo, or from source.
 
-### From Cargo:
+### Prebuilt binaries
+
+Every [release](https://github.com/RingsNetwork/rings/releases) ships `rings` for macOS
+(`aarch64-apple-darwin`, `x86_64-apple-darwin`) and Linux (`x86_64-unknown-linux-musl`, a
+static binary that runs on any distribution), plus the WebAssembly package for browsers.
+Download the archive for your platform, unpack it, and put `rings` on your `PATH`:
+
+```bash
+unzip rings-v0.21.2-aarch64-apple-darwin.zip
+install -m 755 rings /usr/local/bin/rings
+rings --version
+```
+
+### From Cargo
 
 ```
 cargo install rings-node
@@ -19,9 +32,9 @@ cargo install rings-node
 ### From Source
 
 ```
-git clone https://github.com/RingsNetwork/rings-node
-cd rings-node
-cargo build
+git clone https://github.com/RingsNetwork/rings
+cd rings
+cargo install --path crates/node
 ```
 
 ### Usage

@@ -1,309 +1,225 @@
-//! Landing guide page for the browser frontend.
+//! Guide page: the short, link-first orientation for each way to run Rings.
+//!
+//! The documentation book (`docs/`, published under `rings.rs/docs`) is the authority; this
+//! page is its abridgement (`guide ⊑ book`): one card per runtime — native binary, browser
+//! (Wasm) node, browser extension, C FFI — the first commands for each, and a pointer to the
+//! chapter that carries the full treatment. Anything that needs more than a screen belongs in
+//! the book, not here.
 
 use yew::prelude::*;
 
-use crate::controls::ProjectLink;
 use crate::controls::ShellPage;
+use crate::links::Chapter;
+use crate::links::ProjectLink;
+use crate::links::SiteLink;
+use crate::node::public_seed_endpoint;
 
-pub(crate) fn page(
-    navigate_page: Callback<ShellPage>,
-    active_architecture_layer: UseStateHandle<usize>,
-) -> Html {
-    let open_console = {
-        let navigate_page = navigate_page.clone();
-        Callback::from(move |_| navigate_page.emit(ShellPage::Console))
-    };
+pub(crate) fn page(navigate_page: Callback<ShellPage>) -> Html {
     html! {
-        <section class="guide-page" aria-labelledby="guide-title">
-            { hero_section(open_console.clone()) }
-            { features_section() }
-            { architecture_section(active_architecture_layer) }
-            { runtime_section() }
-            { examples_section() }
-            { final_section(open_console) }
+        <section class="site-page guide-page" aria-labelledby="guide-title">
+            { heading_section() }
+            { runtimes_section(&navigate_page) }
+            { first_steps_section() }
+            { further_reading_section(&navigate_page) }
         </section>
     }
 }
 
-fn hero_section(open_console: Callback<MouseEvent>) -> Html {
+fn heading_section() -> Html {
     html! {
-        <section class="landing-hero" aria-labelledby="guide-title">
-            <div class="landing-hero-copy">
-                <p class="landing-kicker">{ "Rings Network" }</p>
-                <h2 id="guide-title">{ "A P2P network for the sovereign age." }</h2>
-                <p class="landing-lede">
-                    { "Rings is a browser-native, structured peer-to-peer network for applications that need their own network layer instead of a server-owned data path. Browser tabs and native daemons can join the same overlay, discover peers by DID, and exchange messages over direct WebRTC datachannels routed by a Chord DHT." }
-                </p>
-                <div class="landing-actions" aria-label="Primary actions">
-                    <button class="landing-primary-action" type="button" onclick={open_console}>
-                        { "Open Node" }
-                    </button>
-                    { for ProjectLink::ALL.into_iter().map(|link| link.anchor("landing-secondary-action")) }
-                </div>
-            </div>
-        </section>
+        <header class="guide-heading">
+            <p class="landing-kicker">{ "Guide" }</p>
+            <h2 id="guide-title">{ "Run a Rings node your way." }</h2>
+            <p class="landing-lede">
+                { "Pick a runtime, run its first commands, then follow the linked chapter. The documentation is the full reference; this page is the short route into it." }
+            </p>
+        </header>
     }
 }
 
-fn features_section() -> Html {
+fn runtimes_section(navigate_page: &Callback<ShellPage>) -> Html {
     html! {
-        <section class="landing-section landing-feature-section" aria-label="Features">
+        <section class="landing-section" aria-labelledby="guide-runtimes-title">
             <div class="landing-section-heading">
-                <p>{ "Features" }</p>
+                <p>{ "Runtimes" }</p>
+                <h2 id="guide-runtimes-title">{ "One node, four ways to run it." }</h2>
             </div>
-            <div class="landing-feature-grid">
-                { landing_feature("Browser-native peers", "Runs in browsers through WebAssembly and web_sys, and on native hosts through the same Rust node stack. WebRTC datachannels carry browser-to-browser and daemon traffic without an application server in the data path.", "assets/images/feature-network-background.png") }
-                { landing_feature("DID identity and cryptography", "Peers are addressed by decentralized identifiers backed by selectable signature schemes, including secp256k1, secp256r1, ed25519, BLS, and bip137.", "assets/images/feature-did-identity.png") }
-                { landing_feature("Structured peer routing", "A Chord DHT provides successor and finger-table routing, DID lookup, message relay, stabilization, and network_id isolation for independent overlays.", "assets/images/feature-peer-routing.png") }
-                { landing_feature("Protocol runtime", "Application protocols are namespace-scoped. A pure step function owns state transitions while an Interpret shell performs side effects through a scoped capability.", "assets/images/feature-protocol-runtime.png") }
+            <div class="guide-runtime-grid">
+                { for RUNTIMES.iter().map(|runtime| runtime.render(navigate_page)) }
             </div>
         </section>
     }
 }
 
-fn architecture_section(active_architecture_layer: UseStateHandle<usize>) -> Html {
-    let selected_index = selected_architecture_index(*active_architecture_layer);
-    let Some(selected_layer) = ARCHITECTURE_LAYERS.get(selected_index) else {
-        return html! {};
-    };
-
+fn first_steps_section() -> Html {
     html! {
-        <section class="landing-section landing-architecture" aria-labelledby="landing-architecture-title">
+        <section class="landing-section" aria-labelledby="guide-steps-title">
             <div class="landing-section-heading">
-                <p>{ "Architecture" }</p>
-                <h2 id="landing-architecture-title">{ "Every layer is decentralized." }</h2>
+                <p>{ "First steps" }</p>
+                <h2 id="guide-steps-title">{ "From install to the first message." }</h2>
                 <p class="landing-section-lede">
-                    { "Rings maps applications, protocols, extension runtime, overlay routing, transport, and identity directly to repository crates and modules. Select a layer to inspect its role." }
+                    { "Each step is complete on its own; the chapter it links to explains the options behind every command." }
                 </p>
             </div>
-            <div class="landing-architecture-grid">
-                <div class="landing-layer-stack" aria-label="Rings architecture layers">
-                    { for ARCHITECTURE_LAYERS.iter().enumerate().map(|(index, layer)| {
-                        architecture_layer_tab(
-                            index,
-                            layer,
-                            index == selected_index,
-                            active_architecture_layer.clone(),
-                        )
-                    }) }
-                </div>
-                { architecture_layer_detail(selected_layer) }
+            <div class="guide-step-grid">
+                { for STEPS.iter().map(Step::render) }
             </div>
         </section>
     }
 }
 
-fn selected_architecture_index(index: usize) -> usize {
-    index.min(ARCHITECTURE_LAYERS.len().saturating_sub(1))
-}
-
-fn architecture_layer_detail(layer: &ArchitectureLayer) -> Html {
+fn further_reading_section(navigate_page: &Callback<ShellPage>) -> Html {
     html! {
-        <aside class="landing-layer-detail" aria-live="polite" aria-label="Selected architecture layer">
-            <div class="landing-layer-detail-heading">
-                <span class="landing-layer-detail-index">{ layer.index }</span>
-                <div>
-                    <span class="landing-layer-label">{ layer.label }</span>
-                    <h3>{ layer.title }</h3>
-                </div>
-            </div>
-            <section class="landing-layer-detail-section">
-                <span>{ "Summary" }</span>
-                <p class="landing-layer-detail-summary">{ layer.summary }</p>
-            </section>
-            <section class="landing-layer-detail-section">
-                <span>{ "Responsibilities" }</span>
-                <p>{ layer.detail }</p>
-            </section>
-            <dl class="landing-layer-detail-list">
-                <div>
-                    <dt>{ "Repository surface" }</dt>
-                    <dd>{ layer.surface }</dd>
-                </div>
-                <div>
-                    <dt>{ "Contract / invariant" }</dt>
-                    <dd>{ layer.contract }</dd>
-                </div>
-            </dl>
-        </aside>
-    }
-}
-
-fn runtime_section() -> Html {
-    html! {
-        <section class="landing-section landing-runtime" aria-labelledby="landing-runtime-title">
+        <section class="landing-section" aria-labelledby="guide-reading-title">
             <div class="landing-section-heading">
-                <p>{ "Extending Rings" }</p>
-                <h2 id="landing-runtime-title">{ "Pure protocol core, scoped interpreter shell." }</h2>
-                <p class="landing-section-lede">
-                    { "The README's extension model is the landing page's developer contract: register a protocol, bind its interpreter, then route inbound envelopes by namespace." }
-                </p>
+                <p>{ "Go deeper" }</p>
+                <h2 id="guide-reading-title">{ "The reference, the model, and the paper." }</h2>
             </div>
-            <div class="landing-runtime-visual">
-                <pre class="landing-code"><code>{ "provider.register_protocol(Echo, EchoShell)?;\nprovider.set_backend()?;\n\nlet relay = RelayHandle::install(&provider.extensions())?;\nrelay\n    .register_tcp_service(\"web\".into(), \"example.com:80\".parse()?)\n    .await?;\nrelay\n    .open_tcp_tunnel(local_addr, peer_did, \"web\".into())\n    .await?;" }</code></pre>
+            <div class="landing-actions" aria-label="Further reading">
+                { for FURTHER_READING.iter().map(|link| link.render("landing-secondary-action", navigate_page)) }
             </div>
         </section>
     }
 }
 
-fn examples_section() -> Html {
-    html! {
-        <section class="landing-section landing-examples" aria-labelledby="landing-examples-title">
-            <div class="landing-section-heading">
-                <p>{ "Examples" }</p>
-                <h2 id="landing-examples-title">{ "Runnable surfaces from the repository." }</h2>
-            </div>
-            <div class="landing-example-grid">
-                { landing_link_card("native", "Start here for a minimal native node. It shows wallet setup, node bootstrapping, and registration of a custom namespaced protocol without browser-specific APIs.", "https://github.com/RingsNetwork/rings/tree/master/examples/native") }
-                { landing_link_card("relay", "Open TCP and UDP tunnels through the overlay. This example is the practical path for exposing a peer service and carrying traffic without a public server hop.", "https://github.com/RingsNetwork/rings/tree/master/examples/relay") }
-                { landing_link_card("dweb", "Explore the decentralized-web application shape. It demonstrates how application content can be addressed through Rings instead of relying on a conventional hosted backend.", "https://github.com/RingsNetwork/rings/tree/master/examples/dweb") }
-                { landing_link_card("ffi", "Drive a Rings node from another runtime through the C FFI. This is the integration point for embedding Rings into hosts that cannot call the Rust API directly.", "https://github.com/RingsNetwork/rings/tree/master/examples/ffi") }
-            </div>
-        </section>
-    }
-}
-
-fn final_section(open_console: Callback<MouseEvent>) -> Html {
-    html! {
-        <section class="landing-final" aria-label="Open Rings Node">
-            <div>
-                <p>{ "Frontend" }</p>
-                <h2>{ "Use the browser node for the live network surface." }</h2>
-                <span>
-                    { "Wallet login, SDP/HTTP connectivity, topology inspection, onion proxy requests, and custom messages live here." }
-                </span>
-            </div>
-            <button class="landing-primary-action" type="button" onclick={open_console}>
-                { "Open Node" }
-            </button>
-        </section>
-    }
-}
-
-struct ArchitectureLayer {
-    index: &'static str,
+/// One way to run a node: what it is, and where to install, run, and read about it.
+struct Runtime {
     label: &'static str,
-    role: &'static str,
     title: &'static str,
-    summary: &'static str,
-    detail: &'static str,
-    surface: &'static str,
-    contract: &'static str,
+    body: &'static str,
+    links: &'static [SiteLink],
 }
 
-const ARCHITECTURE_LAYERS: [ArchitectureLayer; 6] = [
-    ArchitectureLayer {
-        index: "01",
-        label: "applications",
-        role: "runs user-facing workflows.",
-        title: "dWeb, relay, and custom apps",
-        summary: "Apps run over the protocol layer instead of a hosted backend data path.",
-        detail: "Application surfaces are repository examples and browser node panels. They compose wallet login, dWeb content, relay tunnels, and custom protocol messages on top of the same peer runtime. The application layer should read as product-facing behavior: it chooses what to ask the network to do, while the lower layers keep addressing, routing, and transport concerns out of the UI code.",
-        surface: "frontend Node page, examples/dweb, examples/relay",
-        contract: "Application code addresses peers and namespaces; it does not own overlay routing or transport setup.",
+impl Runtime {
+    fn render(&self, navigate_page: &Callback<ShellPage>) -> Html {
+        html! {
+            <article class="guide-card">
+                <p class="guide-card-label">{ self.label }</p>
+                <h3>{ self.title }</h3>
+                <p>{ self.body }</p>
+                <div class="guide-card-links">
+                    { for self.links.iter().map(|link| link.render("guide-card-link", navigate_page)) }
+                </div>
+            </article>
+        }
+    }
+}
+
+const RUNTIMES: [Runtime; 4] = [
+    Runtime {
+        label: "Native",
+        title: "Native node",
+        body: "The rings daemon joins the overlay from a terminal, serves a JSON-RPC API on the loopback interface, and can seed other peers. Install it from crates.io or a prebuilt release for macOS and Linux.",
+        links: &[
+            SiteLink::Chapter(Chapter::InstallNativeNode),
+            SiteLink::Chapter(Chapter::HostNativeNode),
+            SiteLink::Project(ProjectLink::Releases),
+        ],
     },
-    ArchitectureLayer {
-        index: "02",
-        label: "protocols",
-        role: "defines namespaced behavior.",
-        title: "relay, echo, and user namespaces",
-        summary: "Built-ins cover TCP/UDP relay and echo; user protocols are addressed by namespace.",
-        detail: "Protocols are registered behind stable namespaces. Built-in protocols cover relay and echo flows, while external applications can install their own protocol state machines without changing the overlay. This layer is the extension boundary: new behavior is added by registering a protocol and its interpreter, not by branching the node or adding a new transport path.",
-        surface: "protocol registry, relay handles, echo protocol, custom namespaces",
-        contract: "Every inbound envelope is dispatched by namespace before it reaches application-specific logic.",
+    Runtime {
+        label: "Browser",
+        title: "Wasm node",
+        body: "The same node compiled to WebAssembly. Run it in the hosted console on this site, or embed the npm package in your own page and drive it from JavaScript.",
+        links: &[
+            SiteLink::Page(ShellPage::Console),
+            SiteLink::Chapter(Chapter::BuildForWasm),
+            SiteLink::Project(ProjectLink::Npm),
+        ],
     },
-    ArchitectureLayer {
-        index: "03",
-        label: "runtime",
-        role: "executes protocol state.",
-        title: "pure Protocol::step plus Interpret shell",
-        summary: "Protocol logic stays pure while side effects are confined to namespace-scoped capabilities.",
-        detail: "The runtime keeps deterministic protocol transitions separate from IO. Pure step logic computes the next state and effects; the interpreter shell is the only place where scoped side effects are executed. This makes protocol behavior easier to test and reason about, because replayable state transitions are separated from browser APIs, native sockets, storage, and wallet interaction.",
-        surface: "Protocol::step, Interpret shell, provider extension hooks",
-        contract: "State transitions must be reproducible; IO must pass through explicit provider capabilities.",
+    Runtime {
+        label: "Extension",
+        title: "Browser extension",
+        body: "The frontend packaged as a Chrome MV3 extension: a side panel over a retained node, a wallet bridge for MetaMask and Phantom, and the Onion WebView.",
+        links: &[
+            SiteLink::Chapter(Chapter::BrowserNode),
+            SiteLink::Project(ProjectLink::Repository),
+        ],
     },
-    ArchitectureLayer {
-        index: "04",
-        label: "overlay",
-        role: "routes peer messages.",
-        title: "Chord DHT routing",
-        summary: "Successor and finger tables route DID-addressed messages with stabilization and network isolation.",
-        detail: "The overlay maps DID identifiers into a Chord ring. Stabilization keeps successor context current, while finger links reduce lookup distance and keep routing independent of any central server. The overlay is responsible for peer discovery, message forwarding, and path selection; applications see a DID-addressed network rather than a set of manually managed connections.",
-        surface: "Chord identifiers, successor tables, finger routing, network_id isolation",
-        contract: "Routing chooses peer paths by identifier space, not by hosted origin or application server.",
-    },
-    ArchitectureLayer {
-        index: "05",
-        label: "transport",
-        role: "moves data between peers.",
-        title: "WebRTC datachannels",
-        summary: "Native and browser transports use STUN, ICE, and SDP to establish direct peer connections.",
-        detail: "Browser and native peers share the same transport shape. WebRTC handles NAT traversal through ICE and SDP exchange, then carries overlay messages through direct datachannels. This layer is deliberately narrow: it moves bytes between peers and reports connection state, while routing policy and protocol semantics remain above it.",
-        surface: "browser WebRTC, native WebRTC, STUN, SDP exchange",
-        contract: "Transport establishes peer connectivity; overlay and protocol layers decide what should be carried.",
-    },
-    ArchitectureLayer {
-        index: "06",
-        label: "identity",
-        role: "authenticates peers.",
-        title: "DID plus selectable signatures",
-        summary: "The network bridges browser, daemon, and wallet identity workflows without one key system.",
-        detail: "Identity is represented as DID-addressable cryptographic material. The implementation supports multiple signature families so browser wallets, native daemons, and tests can share a common addressing model. Higher layers can depend on stable peer identity without knowing whether the key came from WebCrypto, a wallet bridge, or a native node process.",
-        surface: "DID documents, wallet account selection, secp256k1, secp256r1, ed25519, BLS, bip137",
-        contract: "Peers authenticate as DIDs; higher layers should depend on identity abstractions rather than one wallet backend.",
+    Runtime {
+        label: "FFI",
+        title: "C FFI",
+        body: "Drive a node from Python, Swift, Kotlin, or any host with a C ABI through rings.h: create a provider with a signer callback, listen, and issue the same JSON-RPC methods.",
+        links: &[
+            SiteLink::Chapter(Chapter::Ffi),
+            SiteLink::Chapter(Chapter::JsonRpc),
+        ],
     },
 ];
 
-fn landing_feature(title: &'static str, body: &'static str, image_src: &'static str) -> Html {
-    html! {
-        <article class="landing-feature-card">
-            <img
-                class="landing-feature-illustration"
-                src={image_src}
-                alt=""
-                loading="lazy"
-                decoding="async"
-                aria-hidden="true"
-            />
-            <div class="landing-feature-copy">
-                <h3>{ title }</h3>
-                <p>{ body }</p>
-            </div>
-        </article>
+/// A first step: its commands and the chapter that explains them.
+struct Step {
+    index: &'static str,
+    title: &'static str,
+    summary: &'static str,
+    code: &'static str,
+    chapter: Chapter,
+}
+
+impl Step {
+    fn render(&self) -> Html {
+        html! {
+            <article class="guide-step">
+                <div class="guide-step-copy">
+                    <div class="guide-step-heading">
+                        <span class="guide-step-index">{ self.index }</span>
+                        <h3>{ self.title }</h3>
+                    </div>
+                    <p>{ self.summary }</p>
+                    { self.chapter.anchor("guide-card-link") }
+                </div>
+                <pre class="landing-code"><code>{ self.code }</code></pre>
+            </article>
+        }
     }
 }
 
-fn architecture_layer_tab(
-    index: usize,
-    layer: &ArchitectureLayer,
-    selected: bool,
-    active_architecture_layer: UseStateHandle<usize>,
-) -> Html {
-    let on_click = {
-        let active_architecture_layer = active_architecture_layer.clone();
-        Callback::from(move |_| active_architecture_layer.set(index))
-    };
-    let class = if selected {
-        "landing-layer active"
-    } else {
-        "landing-layer"
-    };
-    html! {
-        <button class={class} type="button" onclick={on_click} aria-pressed={selected.to_string()}>
-            <span class="landing-layer-index">{ layer.index }</span>
-            <div>
-                <h3>{ layer.label }</h3>
-                <p>{ layer.role }</p>
-            </div>
-        </button>
-    }
-}
+const STEPS: [Step; 3] = [
+    Step {
+        index: "01",
+        title: "Run a native node",
+        summary: "Install the CLI, write the default configuration, and start the daemon. Then join the overlay through a seed node and list the peers it found.",
+        code: concat!(
+            "cargo install rings-node\n",
+            "rings init   # writes ~/.rings/config.yaml\n",
+            "rings run    # foreground; JSON-RPC on 127.0.0.1:50000\n",
+            "\n",
+            "# in a second terminal\n",
+            "rings connect node ", public_seed_endpoint!(), "\n",
+            "rings peer list",
+        ),
+        chapter: Chapter::Cli,
+    },
+    Step {
+        index: "02",
+        title: "Start a browser node",
+        summary: "Load the npm package, construct a provider from your account and a signer, start listening, and join through a seed node's HTTP endpoint.",
+        code: concat!(
+            "import init, { Provider } from \"@ringsnetwork/rings-node\";\n",
+            "\n",
+            "await init();\n",
+            "const provider = await new Provider(\n",
+            "  1, \"stun://stun.l.google.com:19302\", 15,\n",
+            "  account, \"eip191\", signer,\n",
+            ");\n",
+            "provider.listen();\n",
+            "await provider.connect_peer_via_http(\"", public_seed_endpoint!(), "\");",
+        ),
+        chapter: Chapter::BuildForWasm,
+    },
+    Step {
+        index: "03",
+        title: "Talk to peers",
+        summary: "Send a namespaced message to a peer, publish a service under a name so other peers can find you, and inspect the routing tables.",
+        code: "rings send message <peer-did> chat \"hello\"\nrings service register web\nrings service lookup web\nrings inspect",
+        chapter: Chapter::Cli,
+    },
+];
 
-fn landing_link_card(title: &'static str, body: &'static str, href: &'static str) -> Html {
-    html! {
-        <a class="landing-example-card" href={href} target="_blank" rel="noreferrer">
-            <h3>{ title }</h3>
-            <p>{ body }</p>
-        </a>
-    }
-}
+const FURTHER_READING: [SiteLink; 6] = [
+    SiteLink::Chapter(Chapter::JsonRpc),
+    SiteLink::Chapter(Chapter::ConfigYaml),
+    SiteLink::Chapter(Chapter::Architecture),
+    SiteLink::Project(ProjectLink::Security),
+    SiteLink::Project(ProjectLink::Whitepaper),
+    SiteLink::Chapter(Chapter::ForAgents),
+];

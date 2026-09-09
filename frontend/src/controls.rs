@@ -10,7 +10,10 @@ use crate::browser_api::js_global_prop;
 use crate::browser_api::js_string_field;
 use crate::extension;
 use crate::forms::text_input;
+use crate::forms::text_input_with_suggestions;
+use crate::links::ProjectLink;
 use crate::node::PeerView;
+use crate::node::SEED_ENDPOINTS;
 use crate::topology;
 use crate::wallet::WalletAccount;
 use crate::wallet::WalletKind;
@@ -26,62 +29,59 @@ const FIREFOX_EXTENSION_MANAGER_URL: &str = "about:debugging#/runtime/this-firef
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum ShellPage {
+    Home,
     Guide,
     Console,
     Webview,
 }
 
 impl ShellPage {
+    /// The pages the header navigates between, in presentation order. The console is entered
+    /// from the landing page's calls to action and the WebView from the console, so neither is
+    /// a header destination.
+    pub(crate) const HEADER: [Self; 2] = [Self::Home, Self::Guide];
+
     fn label(self) -> &'static str {
         match self {
-            Self::Guide => "Home",
+            Self::Home => "Home",
+            Self::Guide => "Guide",
             Self::Console => "Node",
             Self::Webview => "WebView",
         }
     }
-}
 
-/// Destinations outside the shell that the landing hero and the header both link to, in
-/// presentation order. One finite index set, rendered by [`ProjectLink::anchor`] into whichever
-/// class the surrounding surface styles: the set of links is defined once, the surfaces differ
-/// only in their class (`anchor : ProjectLink × Class → Html`).
-#[derive(Clone, Copy, Eq, PartialEq)]
-pub(crate) enum ProjectLink {
-    Docs,
-    Repository,
-    Whitepaper,
-}
-
-impl ProjectLink {
-    /// Every link, in the order the surfaces present them.
-    pub(crate) const ALL: [Self; 3] = [Self::Docs, Self::Repository, Self::Whitepaper];
-
-    fn label(self) -> &'static str {
+    /// The page's name in URLs and DOM keys: the hash fragment that addresses it (the landing
+    /// page's is the empty fragment, see `app::routes`) and the identity of its document.
+    pub(crate) const fn slug(self) -> &'static str {
         match self {
-            Self::Docs => "Docs",
-            Self::Repository => "GitHub",
-            Self::Whitepaper => "Whitepaper",
+            Self::Home => "home",
+            Self::Guide => "guide",
+            Self::Console => "node",
+            Self::Webview => "webview",
         }
     }
 
-    /// Absolute URLs: the same shell runs from `rings.rs` and from an extension origin, where a
-    /// site-relative `/docs/` would resolve inside the extension.
-    fn href(self) -> &'static str {
-        match self {
-            Self::Docs => "https://rings.rs/docs/",
-            Self::Repository => "https://github.com/RingsNetwork/rings",
-            Self::Whitepaper => {
-                "https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf"
-            }
-        }
-    }
-
-    /// The link as an anchor of the given class, opened in a new tab without a referrer.
-    pub(crate) fn anchor(self, class: &'static str) -> Html {
+    /// The page as a navigation button of the given class; `current` marks the page the
+    /// surface is showing (`aria-current`). The header and the footer both render pages this
+    /// way, so a page's label and its click behaviour are defined once
+    /// (`button : ShellPage × Class × Bool → Html`).
+    pub(crate) fn button(
+        self,
+        class: &'static str,
+        current: bool,
+        navigate_page: &Callback<ShellPage>,
+    ) -> Html {
+        let navigate_page = navigate_page.clone();
+        let onclick = Callback::from(move |_| navigate_page.emit(self));
         html! {
-            <a class={class} href={self.href()} target="_blank" rel="noreferrer">
+            <button
+                class={class}
+                type="button"
+                aria-current={if current { "page" } else { "false" }}
+                onclick={onclick}
+            >
                 { self.label() }
-            </a>
+            </button>
         }
     }
 }
@@ -283,16 +283,6 @@ pub(crate) fn app_header(
     navigate_page: Callback<ShellPage>,
     show_nav: bool,
 ) -> Html {
-    let guide_class = header_page_class(active_page, ShellPage::Guide);
-    let console_class = header_page_class(active_page, ShellPage::Console);
-    let open_guide = {
-        let navigate_page = navigate_page.clone();
-        Callback::from(move |_| navigate_page.emit(ShellPage::Guide))
-    };
-    let open_console = {
-        let navigate_page = navigate_page.clone();
-        Callback::from(move |_| navigate_page.emit(ShellPage::Console))
-    };
     html! {
         <header class="app-header landing-header">
             <div class="landing-header-brand" aria-label="Rings Network">
@@ -311,23 +301,14 @@ pub(crate) fn app_header(
             </div>
             if show_nav {
                 <nav class="header-nav" aria-label="Primary">
-                    <button
-                        class={guide_class}
-                        type="button"
-                        aria-current={if active_page == ShellPage::Guide { "page" } else { "false" }}
-                        onclick={open_guide}
-                    >
-                        { ShellPage::Guide.label() }
-                    </button>
-                    <button
-                        class={console_class}
-                        type="button"
-                        aria-current={if active_page == ShellPage::Console { "page" } else { "false" }}
-                        onclick={open_console}
-                    >
-                        { ShellPage::Console.label() }
-                    </button>
-                    { for ProjectLink::ALL.into_iter().map(|link| link.anchor("header-external-link")) }
+                    { for ShellPage::HEADER.into_iter().map(|page| {
+                        page.button(
+                            header_page_class(active_page, page),
+                            active_page == page,
+                            &navigate_page,
+                        )
+                    }) }
+                    { for ProjectLink::HEADER.into_iter().map(|link| link.anchor("header-external-link")) }
                 </nav>
             }
         </header>
@@ -714,7 +695,7 @@ fn settings_controls(
 ) -> Html {
     html! {
         <>
-            { text_input("Seed URL", seed_url.clone()) }
+            { text_input_with_suggestions("Seed URL", seed_url.clone(), "seed-url-endpoints", &SEED_ENDPOINTS) }
             { text_input("Network ID", network_id.clone()) }
             { text_input("ICE servers", ice_servers.clone()) }
             { text_input("Stabilize interval seconds", stabilize_interval.clone()) }

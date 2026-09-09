@@ -3,14 +3,17 @@ use super::rule;
 use super::Theme;
 
 pub(super) fn append(css: &mut String, theme: Theme) {
-    append_guide_shell(css, theme);
+    append_document_shell(css, theme);
     append_hero(css, theme);
     append_landing_actions(css, theme);
     append_landing_sections(css, theme);
 }
 
-fn append_guide_shell(css: &mut String, theme: Theme) {
-    rule(css, ".guide-shell", &[
+/// The document shell is header over one scroll container (`.site-document`), which holds a
+/// page (`.site-page`: the landing page or the guide) followed by the site footer. The page
+/// carries the document typography and the horizontal margins; the footer spans the container.
+fn append_document_shell(css: &mut String, theme: Theme) {
+    rule(css, ".document-shell", &[
         ("position", "relative"),
         ("z-index", "10"),
         ("grid-template-rows", "auto minmax(0, 1fr)"),
@@ -18,21 +21,27 @@ fn append_guide_shell(css: &mut String, theme: Theme) {
         ("padding", "0"),
         ("background", theme.page),
     ]);
+    rule(css, ".site-document", &[
+        ("min-height", "0"),
+        ("overflow", "auto"),
+        ("background", theme.page),
+    ]);
     rule(
         css,
-        ".guide-page",
+        ".site-page",
         &[
             ("display", "grid"),
             ("grid-template-columns", "minmax(0, 1fr)"),
-            ("min-height", "0"),
             ("gap", "52px"),
             ("padding", "0 10% 64px"),
-            ("background", "linear-gradient(180deg, #fbf4e6 0, #fbf4e6 620px, #f3ead8 620px), #f3ead8"),
             ("color", "#111827"),
             ("font-family", "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif"),
-            ("overflow", "auto"),
         ],
     );
+    rule(css, ".landing-page", &[(
+        "background",
+        "linear-gradient(180deg, #fbf4e6 0, #fbf4e6 620px, #f3ead8 620px), #f3ead8",
+    )]);
 }
 
 fn append_hero(css: &mut String, theme: Theme) {
@@ -198,18 +207,22 @@ fn append_feature_cards(css: &mut String, theme: Theme) {
         ("grid-template-columns", "repeat(2, minmax(0, 1fr))"),
         ("gap", "16px"),
     ]);
-    rule(css, ".landing-feature-card,.landing-example-card", &[
-        ("display", "grid"),
-        ("min-width", "0"),
-        ("gap", "10px"),
-        ("border", border(theme.line)),
-        ("border-radius", "8px"),
-        ("padding", "18px"),
-        ("background", theme.panel),
-        ("color", theme.ink_soft),
-        ("text-decoration", "none"),
-        ("box-shadow", "0 1px 2px rgba(16, 24, 40, 0.04)"),
-    ]);
+    rule(
+        css,
+        ".landing-feature-card,.landing-example-card,.guide-card",
+        &[
+            ("display", "grid"),
+            ("min-width", "0"),
+            ("gap", "10px"),
+            ("border", border(theme.line)),
+            ("border-radius", "8px"),
+            ("padding", "18px"),
+            ("background", theme.panel),
+            ("color", theme.ink_soft),
+            ("text-decoration", "none"),
+            ("box-shadow", "0 1px 2px rgba(16, 24, 40, 0.04)"),
+        ],
+    );
     rule(css, ".landing-feature-card", &[
         (
             "grid-template-columns",
@@ -239,7 +252,7 @@ fn append_feature_cards(css: &mut String, theme: Theme) {
     ]);
     rule(
         css,
-        ".landing-feature-card h3,.landing-example-card h3,.landing-layer h3,.landing-layer-detail h3",
+        ".landing-feature-card h3,.landing-example-card h3,.guide-card h3,.guide-step h3,.landing-layer h3,.landing-layer-detail h3",
         &[
             ("margin", "0"),
             ("color", theme.ink),
@@ -250,7 +263,7 @@ fn append_feature_cards(css: &mut String, theme: Theme) {
     );
     rule(
         css,
-        ".landing-feature-card p,.landing-example-card p,.landing-layer p,.landing-layer-detail>p",
+        ".landing-feature-card p,.landing-example-card p,.guide-card p,.guide-step p,.landing-layer p,.landing-layer-detail>p",
         &[
             ("margin", "0"),
             ("color", "#475467"),

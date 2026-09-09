@@ -1,9 +1,11 @@
 use std::fmt::Write as _;
 
-pub(super) const THEME_CSS_CAPACITY: usize = 24_000;
+pub(super) const THEME_CSS_CAPACITY: usize = 32_000;
 
 mod console;
 mod dialogs;
+mod footer;
+mod guide;
 mod landing;
 mod navigation;
 mod responsive;
@@ -43,6 +45,8 @@ const WARM: Theme = Theme {
 pub(super) fn append(css: &mut String) {
     navigation::append(css, WARM);
     landing::append(css, WARM);
+    guide::append(css, WARM);
+    footer::append(css, WARM);
     console::append(css, WARM);
     topology::append(css, WARM);
     dialogs::append(css, WARM);

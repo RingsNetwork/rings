@@ -8,7 +8,8 @@
 # integration owns; the `id-token` grant is the OIDC proof the Pages deployment API requires.
 #
 # The site is one Pages artifact: Trunk owns `frontend/dist` (it clears the directory on every
-# build), so the book is rendered into it afterwards, and the SPA fallback is added last.
+# build), so the book is rendered into it afterwards, the repository's `llms.txt` is copied to
+# the site root beside it, and the SPA fallback is added last.
 #
 # Routing: the shell is hash-routed (`#node`, `#webview`, …), which static hosting serves
 # unchanged. The Onion WebView gateway is path-routed (`/webview`, `/webview/…`) and is answered
@@ -24,6 +25,7 @@ on:
       - "frontend/**"
       - "crates/**"
       - "docs/**"
+      - "llms.txt"
       - ".github/workflows/deploy-pages.yml"
   workflow_dispatch:
 
@@ -80,6 +82,9 @@ jobs:
 
       - name: Build the documentation book into the site
         run: mdbook build docs --dest-dir frontend/dist/docs
+
+      - name: Publish llms.txt at the site root
+        run: cp llms.txt frontend/dist/llms.txt
 
       - name: Add the SPA fallback for path-routed WebView URLs
         run: cp frontend/dist/index.html frontend/dist/404.html

@@ -2,7 +2,7 @@
 name = "rings-frontend"
 version = "0.2.0"
 edition = "2021"
-license = "GPL-3.0"
+license = "AGPL-3.0-only"
 publish = false
 
 # Wasm/Yew app for both web and Chrome MV3 extension packaging. The empty

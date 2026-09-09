@@ -32,7 +32,13 @@ Styles are split under `src/styles/` by responsibility:
 - Start a browser Rings node with WebCrypto P-256, MetaMask EIP-191, or Phantom Ed25519.
 - Connect by SDP offer/answer or by a seed node HTTP endpoint.
 - Render connected peers as a circular topology.
-- Present a landing guide with links into the node console and GitHub.
+- Present a landing page with links into the node console, the documentation, and GitHub,
+  and a guide page that condenses the documentation into one card per runtime (native,
+  browser, extension, FFI) with the first commands for each.
+- Close every document page (landing and guide) with a site footer carrying the project's
+  standing declarations: license, commercial use, warranty, the security boundary, and
+  privacy. The footer is hidden under the mobile breakpoint, where the fixed bottom
+  navigation bar owns that space.
 - Build HTTPS onion proxy routes and send HTTPS requests through onion exits.
 - Register and send user custom namespace messages.
 
@@ -43,8 +49,11 @@ cd frontend
 trunk serve --release true
 ```
 
-Then open the Trunk URL. Use the guide as the landing page, then open the node
-console for connection, onion proxy, and custom-message workflows.
+Then open the Trunk URL. The shell is hash-routed: the landing page is the root, the
+guide is `#guide`, and the node console (`#node`) holds the connection, onion proxy,
+and custom-message workflows. The header navigates between the landing page and the
+guide and links to the documentation and the whitepaper; the node console and GitHub
+are entered from the landing page itself.
 
 ## Deploy to rings.rs
 
@@ -57,6 +66,12 @@ repository root), renders the documentation book (`docs/`, mdBook) into
 path-routed WebView gateway (`/webview`, `/webview/…`) is answered by the service
 worker, and `404.html` is a copy of the shell so a cold load of such a path boots the
 app and registers it.
+
+Link previews (Open Graph and Twitter cards) are the `<meta>` tags in `index.html` and
+the card at `assets/social/rings-card.png`, rendered from `assets/social/card.svg` with
+`rsvg-convert card.svg -o rings-card.png`; the book's template carries the same tags.
+Crawlers do not run the app, so every hash route shares the landing page's card. The
+card is not part of the extension package.
 
 ## Package as a Chrome Extension
 

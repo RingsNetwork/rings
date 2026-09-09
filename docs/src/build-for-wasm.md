@@ -18,7 +18,7 @@ If you want to use the latest version of Rings Network, you can also directly in
 
 ```
 # package.json
-"@ringsnetwork/rings-node": "https://github.com/RingsNetwork/rings-node.git#35412577e3369241add837cdc580435947c997d1",
+"@ringsnetwork/rings-node": "https://github.com/RingsNetwork/rings.git#master",
 
 ```
 
@@ -26,18 +26,16 @@ As a developer, if you want to build local offline dependencies, you can do the 
 
 ````
 ```text
-"@ringsnetwork/rings-node": "git+file:../rings-node#master",
+"@ringsnetwork/rings-node": "git+file:../rings#master",
 ````
 
-Note: The reason for using a git path instead of a local path is that npm, after a certain version, no longer executes the prepare script in local path packages, and rings-node relies on the prepare script to help with wasm compilation.
+Note: The reason for using a git path instead of a local path is that npm, after a certain version, no longer executes the prepare script in local path packages, and the package relies on the prepare script to help with wasm compilation.
 
 ### Rings Browser Extension
 
-Rings Browser Extension is not released yet, but you can check the implementation at
-
-```
-https://github.com/RingsNetwork/ext_v2
-```
+The browser extension is the repository's frontend packaged as a Chrome Manifest V3
+extension; [Browser Node and Extension](browser-node.md) covers the hosted console and the
+packaging steps.
 
 ### Custom Build
 

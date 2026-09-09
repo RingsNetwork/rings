@@ -19,6 +19,25 @@ use crate::wallet::WalletAccount;
 use crate::webview::WebviewNode;
 use crate::webview::WebviewOnionSettings;
 
+/// The public seed node Rings Network operates, as a literal so `concat!` can splice it into
+/// the guide's command listings; [`PUBLIC_SEED_ENDPOINT`] is the same value as a constant.
+macro_rules! public_seed_endpoint {
+    () => {
+        "https://node.rings.rs"
+    };
+}
+pub(crate) use public_seed_endpoint;
+
+/// The public seed node Rings Network operates; the default a browser node joins through.
+pub(crate) const PUBLIC_SEED_ENDPOINT: &str = public_seed_endpoint!();
+
+/// The external API of a native node run beside the browser with `rings run` defaults.
+pub(crate) const LOCAL_NODE_ENDPOINT: &str = "http://127.0.0.1:50001";
+
+/// The endpoints the seed inputs suggest, the default first. The value stays free text; the
+/// list only names the endpoints a user reaches for most.
+pub(crate) const SEED_ENDPOINTS: [&str; 2] = [PUBLIC_SEED_ENDPOINT, LOCAL_NODE_ENDPOINT];
+
 /// A browser Rings node with its application adapters initialized.
 #[derive(Clone)]
 pub struct DemoNode {

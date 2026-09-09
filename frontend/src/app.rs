@@ -8,7 +8,6 @@ use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use web_sys::Event;
-use web_sys::Window;
 use yew::prelude::*;
 
 use crate::connect;
@@ -25,9 +24,11 @@ use crate::controls::ShellPage;
 use crate::custom;
 use crate::dweb;
 use crate::extension;
+use crate::footer;
 use crate::forms::select_value;
 use crate::generation::GenerationClock;
 use crate::guide;
+use crate::landing;
 use crate::node;
 use crate::node::DemoNode;
 use crate::node::PeerView;
@@ -39,6 +40,7 @@ use crate::webview_ui;
 use crate::workbench;
 
 mod actions;
+mod routes;
 
 const DEFAULT_STABILIZE_INTERVAL_SECONDS: &str = "15";
 const LEGACY_DEFAULT_STABILIZE_INTERVAL_SECONDS: &str = "3";
@@ -135,10 +137,10 @@ struct AppRenderContext<'a> {
 #[hook]
 fn use_shell_state() -> ShellState {
     ShellState {
-        active_page: use_state(initial_shell_page),
+        active_page: use_state(routes::initial_shell_page),
         active_architecture_layer: use_state(|| 0_usize),
         active_panel: use_state(|| Panel::Onion),
-        active_dialog: use_state(initial_shell_dialog),
+        active_dialog: use_state(routes::initial_shell_dialog),
         control_sidebar_collapsed: use_state(|| false),
     }
 }
@@ -194,11 +196,11 @@ fn use_node_state() -> NodeState {
         webview_onion_settings: (*webview_onion_settings).clone(),
         peers: use_state(Vec::<PeerView>::new),
         seed_url: use_state(|| {
-            extension::load_setting_with_legacy(
+            load_setting_or_default(
                 extension::SETTING_SEED_URL,
                 extension::LEGACY_SETTING_SEED_URL,
+                node::PUBLIC_SEED_ENDPOINT,
             )
-            .unwrap_or_default()
         }),
         webview_ready: use_state(|| false),
     }
@@ -211,7 +213,7 @@ fn use_link_state() -> LinkState {
             load_setting_or_default(
                 extension::SETTING_HTTP_ENDPOINT,
                 extension::LEGACY_SETTING_HTTP_ENDPOINT,
-                "http://127.0.0.1:50001",
+                node::PUBLIC_SEED_ENDPOINT,
             )
         }),
         sdp_remote_did: use_state(String::new),
@@ -504,7 +506,7 @@ fn use_shell_history(
             let page = active_page.clone();
             let dialog = active_dialog.clone();
             let listener = Closure::<dyn FnMut(Event)>::wrap(Box::new(move |_| {
-                let route = current_shell_route();
+                let route = routes::current_shell_route();
                 page.set(route.page);
                 dialog.set(route.dialog);
             }));
@@ -531,10 +533,27 @@ fn render_app(ctx: AppRenderContext<'_>) -> Html {
     }
     let navigate_page = navigate_page_callback(ctx.shell);
     let header = controls::app_header(effective_page, navigate_page.clone(), !ctx.extension_mode);
-    if effective_page == ShellPage::Guide {
-        render_guide_shell(header, navigate_page, ctx.shell)
-    } else {
-        render_console_shell(ctx, header)
+    match document_body(effective_page, ctx.shell, &navigate_page) {
+        Some(body) => render_document_shell(effective_page, header, body, navigate_page),
+        None => render_console_shell(ctx, header),
+    }
+}
+
+/// The body of a document page, or `None` for the application screens. The pages partition
+/// into documents (landing, guide), which scroll and carry the site footer, and application
+/// screens (console, WebView), which fill the viewport.
+fn document_body(
+    page: ShellPage,
+    shell: &ShellState,
+    navigate_page: &Callback<ShellPage>,
+) -> Option<Html> {
+    match page {
+        ShellPage::Home => Some(landing::page(
+            navigate_page.clone(),
+            shell.active_architecture_layer.clone(),
+        )),
+        ShellPage::Guide => Some(guide::page(navigate_page.clone())),
+        ShellPage::Console | ShellPage::Webview => None,
     }
 }
 
@@ -549,7 +568,7 @@ fn effective_shell_page(shell: &ShellState, extension_mode: bool) -> ShellPage {
 fn navigate_page_callback(shell: &ShellState) -> Callback<ShellPage> {
     let active_page = shell.active_page.clone();
     let active_dialog = shell.active_dialog.clone();
-    Callback::from(move |page| navigate_shell_page(page, &active_page, &active_dialog))
+    Callback::from(move |page| routes::navigate_shell_page(page, &active_page, &active_dialog))
 }
 
 fn dialog_actions(shell: &ShellState) -> controls::DialogActions {
@@ -559,24 +578,31 @@ fn dialog_actions(shell: &ShellState) -> controls::DialogActions {
     let close_dialog = shell.active_dialog.clone();
     controls::DialogActions {
         open: Callback::from(move |dialog| {
-            open_shell_dialog(dialog, &open_page, &open_dialog);
+            routes::open_shell_dialog(dialog, &open_page, &open_dialog);
         }),
         close: Callback::from(move |_| {
-            close_shell_dialog(&close_page, &close_dialog);
+            routes::close_shell_dialog(&close_page, &close_dialog);
         }),
     }
 }
 
-fn render_guide_shell(
+/// A document page: the header, then one scroll container holding the page body and the site
+/// footer. The container is keyed by the page so switching pages replaces it and the new page
+/// opens at its top instead of inheriting the previous page's scroll offset.
+fn render_document_shell(
+    page: ShellPage,
     header: Html,
+    body: Html,
     navigate_page: Callback<ShellPage>,
-    shell: &ShellState,
 ) -> Html {
     html! {
-        <main class="app-shell guide-shell">
+        <main class="app-shell document-shell">
             <style>{ styles::app_css() }</style>
             { header }
-            { guide::page(navigate_page, shell.active_architecture_layer.clone()) }
+            <div class="site-document" key={page.slug()}>
+                { body }
+                { footer::site_footer(navigate_page) }
+            </div>
         </main>
     }
 }
@@ -761,183 +787,6 @@ fn render_custom_panel(node: &NodeState, custom_state: &CustomState) -> Html {
         node.node_ref.clone(),
         node.status.clone(),
     )
-}
-
-fn initial_shell_page() -> ShellPage {
-    current_shell_route().page
-}
-
-fn initial_shell_dialog() -> ActiveDialog {
-    current_shell_route().dialog
-}
-
-#[derive(Clone, Copy)]
-struct ShellRoute {
-    page: ShellPage,
-    dialog: ActiveDialog,
-}
-
-fn current_shell_route() -> ShellRoute {
-    let route = routed_shell_route();
-    if extension::extension_node_bridge().is_some() {
-        return ShellRoute {
-            page: ShellPage::Console,
-            dialog: route
-                .map(|route| route.dialog)
-                .unwrap_or(ActiveDialog::None),
-        };
-    }
-    route.unwrap_or(ShellRoute {
-        page: ShellPage::Guide,
-        dialog: ActiveDialog::None,
-    })
-}
-
-fn routed_shell_route() -> Option<ShellRoute> {
-    let location = web_sys::window()?.location();
-    let pathname = location.pathname().ok()?;
-    if is_webview_path(pathname.as_str()) {
-        return Some(ShellRoute {
-            page: ShellPage::Webview,
-            dialog: ActiveDialog::None,
-        });
-    }
-    let hash = location.hash().ok()?;
-    route_for_hash(hash.as_str())
-}
-
-fn is_webview_path(pathname: &str) -> bool {
-    pathname == "/webview" || pathname.starts_with(webview::GATEWAY_PREFIX)
-}
-
-fn route_for_hash(hash: &str) -> Option<ShellRoute> {
-    match hash.trim_start_matches('#').trim_start_matches('/') {
-        "" | "home" => Some(ShellRoute {
-            page: ShellPage::Guide,
-            dialog: ActiveDialog::None,
-        }),
-        "node" => Some(ShellRoute {
-            page: ShellPage::Console,
-            dialog: ActiveDialog::None,
-        }),
-        "webview" => Some(ShellRoute {
-            page: ShellPage::Webview,
-            dialog: ActiveDialog::None,
-        }),
-        "node/settings" | "settings" => Some(ShellRoute {
-            page: ShellPage::Console,
-            dialog: ActiveDialog::Settings,
-        }),
-        "node/workbench" | "workbench" => Some(ShellRoute {
-            page: ShellPage::Console,
-            dialog: ActiveDialog::Workbench,
-        }),
-        _ => None,
-    }
-}
-
-fn navigate_shell_page(
-    page: ShellPage,
-    active_page: &UseStateHandle<ShellPage>,
-    active_dialog: &UseStateHandle<ActiveDialog>,
-) {
-    let route = current_shell_route();
-    if **active_page == page && route.page == page && route.dialog == ActiveDialog::None {
-        return;
-    }
-    write_shell_route(page, ActiveDialog::None, false);
-    active_page.set(page);
-    active_dialog.set(ActiveDialog::None);
-}
-
-fn open_shell_dialog(
-    dialog: ActiveDialog,
-    active_page: &UseStateHandle<ShellPage>,
-    active_dialog: &UseStateHandle<ActiveDialog>,
-) {
-    if !dialog.is_open() {
-        close_shell_dialog(active_page, active_dialog);
-        return;
-    }
-    let replace = (**active_dialog).is_open();
-    write_shell_route(ShellPage::Console, dialog, replace);
-    active_page.set(ShellPage::Console);
-    active_dialog.set(dialog);
-}
-
-fn close_shell_dialog(
-    active_page: &UseStateHandle<ShellPage>,
-    active_dialog: &UseStateHandle<ActiveDialog>,
-) {
-    if !(**active_dialog).is_open() {
-        return;
-    }
-    let page = current_shell_route().page;
-    write_shell_route(page, ActiveDialog::None, true);
-    active_page.set(page);
-    active_dialog.set(ActiveDialog::None);
-}
-
-fn clear_shell_dialog_route() {
-    let route = current_shell_route();
-    if route.dialog.is_open() {
-        write_shell_route(route.page, ActiveDialog::None, true);
-    }
-}
-
-fn write_shell_route(page: ShellPage, dialog: ActiveDialog, replace: bool) {
-    let Some(window) = web_sys::window() else {
-        return;
-    };
-    let Some(target) = shell_route_url(&window, page, dialog) else {
-        return;
-    };
-    if !replace && current_path_search_hash(&window) == Some(target.clone()) {
-        return;
-    }
-    let Ok(history) = window.history() else {
-        return;
-    };
-    if replace {
-        let _ = history.replace_state_with_url(&JsValue::NULL, "", Some(&target));
-    } else {
-        let _ = history.push_state_with_url(&JsValue::NULL, "", Some(&target));
-    }
-}
-
-fn shell_route_url(window: &Window, page: ShellPage, dialog: ActiveDialog) -> Option<String> {
-    let location = window.location();
-    let mut target = location.pathname().ok()?;
-    if let Ok(search) = location.search() {
-        target.push_str(&search);
-    }
-    if let Some(fragment) = shell_route_fragment(page, dialog) {
-        target.push('#');
-        target.push_str(fragment);
-    }
-    Some(target)
-}
-
-fn shell_route_fragment(page: ShellPage, dialog: ActiveDialog) -> Option<&'static str> {
-    match (page, dialog) {
-        (ShellPage::Guide, ActiveDialog::None) => None,
-        (ShellPage::Console, ActiveDialog::None) => Some("node"),
-        (ShellPage::Webview, ActiveDialog::None) => Some("webview"),
-        (_, ActiveDialog::Settings) => Some("node/settings"),
-        (_, ActiveDialog::Workbench) => Some("node/workbench"),
-    }
-}
-
-fn current_path_search_hash(window: &Window) -> Option<String> {
-    let location = window.location();
-    let mut current = location.pathname().ok()?;
-    if let Ok(search) = location.search() {
-        current.push_str(&search);
-    }
-    if let Ok(hash) = location.hash() {
-        current.push_str(&hash);
-    }
-    Some(current)
 }
 
 #[cfg(test)]

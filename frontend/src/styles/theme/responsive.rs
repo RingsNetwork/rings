@@ -32,6 +32,10 @@ fn append_wide_breakpoints(css: &mut String) {
             ".landing-feature-illustration",
             &[("min-height", "178px")][..],
         ),
+        (
+            ".site-footer-grid",
+            &[("grid-template-columns", "repeat(2, minmax(0, 1fr))")][..],
+        ),
     ]);
 }
 
@@ -101,6 +105,10 @@ fn append_mid_breakpoint(css: &mut String) {
                     ("border", "0"),
                     ("border-radius", "4px"),
                     ("background", "transparent"),
+                    // Four cells share the bar; on a 360px viewport with 10% side padding each
+                    // is 72px, 64px inside the cell padding, and the ten-character WHITEPAPER
+                    // label advances 0.545em per character in the monospace face, so 11px
+                    // (60px) is the largest size that fits and 12px (65.4px) does not.
                     ("font-size", "11px"),
                 ][..],
             ),
@@ -127,8 +135,16 @@ fn append_mid_breakpoint(css: &mut String) {
                 &[("padding-bottom", "calc(72px + env(safe-area-inset-bottom))")][..],
             ),
             (
-                ".guide-page",
+                ".site-page",
                 &[("padding-bottom", "calc(96px + env(safe-area-inset-bottom))")][..],
+            ),
+            // The fixed bottom bar is the mobile navigation; the footer's link columns would
+            // repeat it and its declarations would sit under it, so the footer is a wide-screen
+            // surface only.
+            (".site-footer", &[("display", "none")][..]),
+            (
+                ".guide-runtime-grid,.guide-step",
+                &[("grid-template-columns", "1fr")][..],
             ),
         ],
     );
@@ -165,7 +181,7 @@ fn append_mobile_navigation(css: &mut String) {
                 ".header-nav-button,.header-external-link",
                 &[("width", "100%"), ("min-width", "0")][..],
             ),
-            (".guide-shell", &[("gap", "0"), ("padding", "0")][..]),
+            (".document-shell", &[("gap", "0"), ("padding", "0")][..]),
             (
                 ".landing-header",
                 &[
@@ -205,10 +221,6 @@ fn append_mobile_navigation(css: &mut String) {
                     ("border", "0"),
                     ("border-radius", "4px"),
                     ("background", "transparent"),
-                    // Five cells share the bar; on a 360px viewport each is 57.6px, and the
-                    // ten-character WHITEPAPER label advances 0.545em per character in the
-                    // monospace face, so 10px (54.5px) is the largest size that fits the cell.
-                    ("font-size", "10px"),
                 ][..],
             ),
             (
@@ -223,7 +235,7 @@ fn append_mobile_navigation(css: &mut String) {
                 &[("padding-bottom", "calc(72px + env(safe-area-inset-bottom))")][..],
             ),
             (
-                ".guide-page",
+                ".site-page",
                 &[
                     ("gap", "34px"),
                     ("padding", "0 10% calc(96px + env(safe-area-inset-bottom))"),

@@ -148,6 +148,8 @@ const EXTENSION_RUNTIME_ARTIFACTS: readonly ExtensionRuntimeArtifactPolicy[] = [
   excludedArtifact(join("assets", "webview-worker-navigation.js")),
   excludedArtifact(join("assets", "webview-worker-request.js")),
   excludedArtifact(join("assets", "webview-worker-response.js")),
+  // The link-preview card belongs to the hosted site; an extension page is never shared.
+  excludedArtifact(join("assets", "social")),
 ];
 validateExtensionRuntimeArtifactPolicy(EXTENSION_RUNTIME_ARTIFACTS);
 
@@ -202,7 +204,7 @@ await cp(join(projectRoot, "assets"), join(extensionDist, "assets"), { recursive
 await Promise.all(
   excludedExtensionOutputs()
     .filter((output: string): boolean => output.startsWith(`assets${sep}`) || output.startsWith("assets/"))
-    .map((output: string): Promise<void> => rm(join(extensionDist, output))),
+    .map((output: string): Promise<void> => rm(join(extensionDist, output), { recursive: true })),
 );
 
 await writeFile(join(extensionDist, "index.html"), htmlShell(jsFile, wasmFile, { includeNodeBridge: true }), "utf8");
@@ -254,7 +256,7 @@ function generatedArtifact(output: string, exposure: "private" | "renderer"): Ge
   return { kind: "generated", output, exposure };
 }
 
-/** Declares one browser-only output forbidden from the extension package. */
+/** Declares one browser-only output (a file or a directory) forbidden from the extension package. */
 function excludedArtifact(output: string): ExcludedExtensionArtifact {
   return { kind: "excluded", output };
 }
