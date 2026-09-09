@@ -32,6 +32,7 @@ use crate::measure::MeasureImpl;
 use crate::measure::MeasurementBatch;
 use crate::measure::MeasurementEvent;
 use crate::measure::PeerQuality;
+use crate::message::HopBudget;
 use crate::message::Message;
 use crate::message::MessageClass;
 use crate::message::MessagePayload;
@@ -767,6 +768,7 @@ async fn test_tracked_cleanup_grace_terminalizes_a_nonresponsive_generation() ->
         node1.swarm.transport.message_signer(),
         peer,
         peer,
+        HopBudget::MAX,
     )?;
 
     let error = tokio::time::timeout(

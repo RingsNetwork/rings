@@ -1,4 +1,5 @@
 use super::*;
+use crate::message::HopBudget;
 
 #[cfg(feature = "dummy")]
 #[tokio::test]
@@ -296,6 +297,7 @@ async fn test_malformed_outbound_payload_is_rejected_before_connection_admission
         transport.message_signer(),
         peer,
         peer,
+        HopBudget::MAX,
     )?;
     payload.transaction.data = vec![0xff];
 

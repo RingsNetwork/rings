@@ -5,6 +5,7 @@ use crate::dht::successor::SuccessorReader;
 use crate::ecc::tests::gen_ordered_keys;
 use crate::ecc::SecretKey;
 use crate::error::Error;
+use crate::message::HopBudget;
 use crate::message::MessageSigner;
 use crate::session::SessionSk;
 use crate::swarm::callback::SwarmCallback;
@@ -26,6 +27,7 @@ fn notify_context(origin: &SecretKey, destination: crate::dht::Did) -> Result<Me
         MessageSigner::new(&session, TEST_NETWORK_ID),
         destination,
         destination,
+        HopBudget::MAX,
     )
 }
 

@@ -8,6 +8,8 @@ use super::*;
 use crate::dht::StorageSyncDestination;
 #[cfg(feature = "dummy")]
 use crate::dht::TopoInfo;
+#[cfg(feature = "dummy")]
+use crate::message::HopBudget;
 
 #[cfg(feature = "dummy")]
 async fn transport_with_routable_peer(
@@ -751,6 +753,7 @@ async fn test_stale_send_after_retirement_does_not_recreate_outbound_scheduler()
         transport.message_signer(),
         peer,
         peer,
+        HopBudget::MAX,
     )?;
     let retire_transport = Arc::clone(&transport);
 
@@ -777,6 +780,7 @@ async fn test_scheduler_shutdown_revokes_a_frame_waiting_at_transport_dispatch()
         transport.message_signer(),
         peer,
         peer,
+        HopBudget::MAX,
     )?;
     dummy_controlled::reset_sent_count();
     dummy_controlled::pause_send_message_at_dispatch();
@@ -815,6 +819,7 @@ async fn test_scheduler_shutdown_after_backend_acceptance_preserves_detached_suc
         transport.message_signer(),
         peer,
         peer,
+        HopBudget::MAX,
     )?;
     dummy_controlled::reset_sent_count();
     dummy_controlled::set_drop_messages(true);
@@ -859,6 +864,7 @@ async fn test_scheduler_shutdown_cancels_a_send_before_queue_acceptance() -> Res
         transport.message_signer(),
         peer,
         peer,
+        HopBudget::MAX,
     )?;
     dummy_controlled::reset_sent_count();
     dummy_controlled::set_drop_messages(true);

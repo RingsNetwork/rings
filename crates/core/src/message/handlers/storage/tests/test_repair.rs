@@ -140,6 +140,7 @@ async fn test_found_entry_read_repair_backpressure_is_deferred() -> Result<()> {
         node2.swarm.transport.message_signer(),
         node1.did(),
         node1.did(),
+        HopBudget::MAX,
     )?;
     let handler = MessageHandler::new(node1.swarm.transport.clone(), Arc::new(NoopCallback));
     node1.swarm.transport.start_storage_lookup(entry.did, 2)?;
@@ -214,6 +215,7 @@ async fn test_placed_entry_operation_rejects_non_affine_placement() -> Result<()
         MessageSigner::new(&sender_session, TEST_NETWORK_ID),
         node.did(),
         node.did(),
+        HopBudget::MAX,
     )?;
 
     assert!(!msg.placement_belongs_to_entry(2)?);
@@ -367,6 +369,7 @@ async fn test_found_entry_repairs_buffered_misses_only() -> Result<()> {
         MessageSigner::new(&context_session, TEST_NETWORK_ID),
         node.did(),
         node.did(),
+        HopBudget::MAX,
     )?;
     node.swarm.transport.start_storage_lookup(entry.did, 2)?;
 
@@ -425,6 +428,7 @@ async fn test_found_entry_rejects_multiple_entries() -> Result<()> {
         MessageSigner::new(&context_session, TEST_NETWORK_ID),
         node.did(),
         node.did(),
+        HopBudget::MAX,
     )?;
 
     let result = handler
@@ -466,6 +470,7 @@ async fn test_found_entry_rejects_redundancy_outside_local_protocol_mode() -> Re
         MessageSigner::new(&context_session, TEST_NETWORK_ID),
         node.did(),
         node.did(),
+        HopBudget::MAX,
     )?;
     node.swarm.transport.start_storage_lookup(resource, 2)?;
 
@@ -511,6 +516,7 @@ async fn test_found_entry_rejects_response_without_active_lookup() -> Result<()>
         MessageSigner::new(&context_session, TEST_NETWORK_ID),
         node.did(),
         node.did(),
+        HopBudget::MAX,
     )?;
 
     let result = handler
@@ -552,6 +558,7 @@ async fn test_found_entry_rejects_resource_mismatch_without_cache_write() -> Res
         MessageSigner::new(&context_session, TEST_NETWORK_ID),
         node.did(),
         node.did(),
+        HopBudget::MAX,
     )?;
     node.swarm.transport.start_storage_lookup(resource, 2)?;
 
@@ -637,6 +644,7 @@ async fn test_expired_storage_response_does_not_update_cache_or_repair() -> Resu
         MessageSigner::new(&context_session, TEST_NETWORK_ID),
         node.did(),
         node.did(),
+        HopBudget::MAX,
     )?;
     node.swarm.transport.start_storage_lookup(entry.did, 2)?;
 
@@ -671,5 +679,6 @@ async fn test_expired_storage_response_does_not_update_cache_or_repair() -> Resu
     );
     Ok(())
 }
+use crate::message::HopBudget;
 #[cfg(feature = "dummy")]
 use crate::message::PayloadSender;

@@ -27,6 +27,7 @@ use crate::measure::MeasureImpl;
 use crate::measure::PeerQuality;
 use crate::message::CustomMessage;
 use crate::message::FoundEntry;
+use crate::message::HopBudget;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
@@ -72,6 +73,7 @@ fn tracked_payload(node: &Node, peer: Did, body: &[u8]) -> Result<MessagePayload
         node.swarm.transport.message_signer(),
         peer,
         peer,
+        HopBudget::MAX,
     )
 }
 
@@ -137,6 +139,7 @@ async fn test_tracked_timeout_removes_target_behind_multiple_predecessors() -> R
                 swarm.transport.message_signer(),
                 peer,
                 peer,
+                HopBudget::MAX,
             )?;
             swarm
                 .transport
@@ -784,6 +787,7 @@ fn spawn_data_capacity_transfers(node: &Node, peer: Did) -> Vec<JoinHandle<Resul
                 swarm.transport.message_signer(),
                 peer,
                 peer,
+                HopBudget::MAX,
             )?;
             let tx_id = payload.transaction.tx_id;
             swarm
@@ -837,6 +841,7 @@ fn spawn_reserved_control_transfers(
                 swarm.transport.message_signer(),
                 peer,
                 peer,
+                HopBudget::MAX,
             )?;
             let tx_id = payload.transaction.tx_id;
             swarm

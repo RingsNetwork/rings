@@ -344,7 +344,7 @@ impl EntryOperation {
 /// anyone else is not invalid, only not this receiver's to take yet, so the law is a predicate
 /// the batch skips on rather than an error it fails with.
 ///
-/// Pre: `sender` is the authenticated signer of the hand-off, not its peer-declared relay path.
+/// Pre: `sender` is the authenticated origin of the hand-off.
 pub(crate) fn relocates_from_predecessor(sender: Did, predecessor: Option<Did>) -> bool {
     predecessor == Some(sender)
 }

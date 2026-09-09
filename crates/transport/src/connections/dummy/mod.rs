@@ -513,13 +513,18 @@ struct DummyConnectionState {
 }
 
 impl DummyConnectionState {
+    /// The product state the transport observes.
+    ///
+    /// Law (causality): without an override the data channel is open iff the peer connection is
+    /// `Connected`, and a dummy connection reaches `Connected` only when the offerer accepts the
+    /// answer, which moves both ends at once. An answerer is therefore never open, and never
+    /// admitted, before the offerer has applied its answer; a real WebRTC channel cannot open
+    /// earlier either. Tests that model the browser callback order in which the channel opens
+    /// while the peer connection still reports `Connecting` set the override explicitly.
     const fn snapshot(self) -> ConnectionStateSnapshot {
         let data_channel_open = match self.data_channel_open_override {
             Some(open) => open,
-            None => matches!(
-                self.webrtc,
-                WebrtcConnectionState::Connected | WebrtcConnectionState::Connecting
-            ),
+            None => matches!(self.webrtc, WebrtcConnectionState::Connected),
         };
         ConnectionStateSnapshot::new(self.webrtc, data_channel_open)
     }

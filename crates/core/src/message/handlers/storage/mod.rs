@@ -34,7 +34,6 @@ use crate::message::Encoded;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
-use crate::message::MessageVerificationExt;
 use crate::message::PayloadSender;
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::Swarm;
@@ -208,7 +207,7 @@ async fn handle_placed_entry_operation(
                 &handler.dht,
                 msg.placement,
                 msg.op.clone(),
-                ctx.transaction.signer(),
+                ctx.transaction.origin(),
             )
             .await
         }
@@ -471,9 +470,7 @@ impl HandleMsg<SyncEntriesWithSuccessor> for MessageHandler {
                 .await;
         }
 
-        // The sender is the transaction signer, the one origin the transport authenticated; the
-        // relay path is peer-declared and forwards unchanged, so it names nobody.
-        let sender = ctx.transaction.signer();
+        let sender = ctx.transaction.origin();
         let acks = self
             .transport
             .persist_storage_sync_entries(msg, sender)
@@ -503,16 +500,15 @@ impl HandleMsg<SyncEntriesWithSuccessorReport> for MessageHandler {
                 .await;
         }
 
-        let signer = ctx.transaction.signer();
-        let origin = ctx.relay.try_origin_sender()?;
-        if signer != msg.receiver || origin != msg.receiver {
+        let origin = ctx.transaction.origin();
+        if origin != msg.receiver {
             return Err(Error::InvalidMessage(
                 "storage sync report receiver does not match signed report origin".to_string(),
             ));
         }
         let acks =
             self.transport
-                .take_pending_storage_sync_ack(ctx.transaction.tx_id, signer, msg)?;
+                .take_pending_storage_sync_ack(ctx.transaction.tx_id, origin, msg)?;
         let action = self.dht.acknowledge_synced_entries(&acks).await?;
         finish_storage_action(action)
     }

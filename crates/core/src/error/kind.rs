@@ -740,21 +740,13 @@ pub enum Error {
     #[error("Current node is not the next hop of message")]
     InvalidNextHop,
 
-    /// Adjacent elements in path cannot be equal
-    #[error("Adjacent elements in path cannot be equal")]
-    InvalidRelayPath,
+    /// The payload has taken every forward its relay carrier was given
+    #[error("Relay hop budget exhausted: the payload has taken every forward it was given")]
+    RelayHopBudgetExhausted,
 
-    /// Suspected infinite looping in path
-    #[error("Suspected infinite looping in path")]
-    InfiniteRelayPath,
-
-    /// The destination of report message should always be the first element of path
-    #[error("The destination of report message should always be the first element of path")]
-    InvalidRelayDestination,
-
-    /// Cannot infer next hop
-    #[error("Cannot infer next hop")]
-    CannotInferNextHop,
+    /// A relay carrier claimed more forwards than any fresh carrier holds
+    #[error("Relay hop budget {0} is above the maximum a carrier can hold")]
+    RelayHopBudgetAboveMax(u8),
 
     /// Cannot get next hop when sending message
     #[error("Cannot get next hop when sending message")]

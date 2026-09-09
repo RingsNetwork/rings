@@ -26,6 +26,8 @@ use crate::error::Result;
 use crate::message::Encoded;
 use crate::message::Encoder;
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+use crate::message::HopBudget;
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 use crate::message::Message;
 use crate::message::MessageClass;
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
@@ -78,6 +80,7 @@ pub(crate) fn held_inbox_for(destination: Did, holder: &SessionSk) -> Result<Ent
         MessageSigner::new(&sender, TEST_NETWORK_ID),
         destination,
         destination,
+        HopBudget::MAX,
     )?;
     let held = HeldMessage::hold(
         payload,

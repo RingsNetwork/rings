@@ -645,8 +645,13 @@ impl Stabilizer {
         let msg = Message::NotifyPredecessorSend(NotifyPredecessorSend { did: self.dht.did });
         if self.dht.did != successor_min {
             for s in successor_list {
-                let payload =
-                    MessagePayload::new_send(msg.clone(), self.transport.message_signer(), s, s)?;
+                let payload = MessagePayload::new_send(
+                    msg.clone(),
+                    self.transport.message_signer(),
+                    s,
+                    s,
+                    self.transport.hop_budget()?,
+                )?;
                 let tx_id = payload.transaction.tx_id;
                 let target_state = self
                     .transport
@@ -723,6 +728,7 @@ impl Stabilizer {
                         self.transport.message_signer(),
                         closest_predecessor,
                         closest_predecessor,
+                        self.transport.hop_budget()?,
                     )?;
                     let tx_id = payload.transaction.tx_id;
                     let next_hop_state = self

@@ -208,6 +208,7 @@ impl Swarm {
             self.transport.message_signer(),
             self.did(),
             peer,
+            self.transport.hop_budget()?,
         )?;
 
         Ok(payload)
@@ -226,7 +227,7 @@ impl Swarm {
             ));
         };
 
-        let peer = offer_payload.transaction.signer();
+        let peer = offer_payload.transaction.origin();
         let answer_msg = self
             .transport
             .answer_remote_connection(peer, self.inner_callback()?, &msg)
@@ -239,6 +240,7 @@ impl Swarm {
             self.transport.message_signer(),
             self.did(),
             self.did(),
+            self.transport.hop_budget()?,
         )?;
 
         Ok(answer_payload)

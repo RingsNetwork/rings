@@ -21,6 +21,7 @@ use crate::error::Result;
 use crate::message::types::Message;
 use crate::message::types::SyncEntriesWithSuccessorReport;
 use crate::message::Encoder;
+use crate::message::HopBudget;
 use crate::message::MessagePayload;
 use crate::message::MessageRelay;
 use crate::message::MessageSigner;
@@ -223,6 +224,7 @@ fn test_payload(node: &Node, data: &[u8]) -> Result<MessagePayload> {
         node.swarm.transport.message_signer(),
         node.did(),
         node.did(),
+        HopBudget::MAX,
     )
 }
 
@@ -244,7 +246,7 @@ pub(super) fn storage_sync_report_payload(
         Message::SyncEntriesWithSuccessorReport(report),
         signer,
     )?;
-    let relay = MessageRelay::new(vec![signer.account_did()], next_hop, destination);
+    let relay = MessageRelay::new(next_hop, destination, HopBudget::MAX);
     MessagePayload::new(transaction, signer, relay)
 }
 

@@ -183,7 +183,7 @@ pub(crate) fn core_actor_steps<T>(
 /// One side effect requested by a Core message handler.
 #[derive(Clone, Debug)]
 pub(crate) enum CoreEffect<'payload> {
-    /// Forward an existing payload through the relay path.
+    /// Forward an existing payload one hop further along its Chord route.
     ForwardPayload {
         /// Payload to forward.
         payload: &'payload MessagePayload,
@@ -471,6 +471,7 @@ mod tests {
     use super::*;
     use crate::ecc::SecretKey;
     use crate::message::types::QueryFor;
+    use crate::message::HopBudget;
     use crate::message::MessageSigner;
     use crate::session::SessionSk;
     use crate::tests::TEST_NETWORK_ID;
@@ -487,6 +488,7 @@ mod tests {
             MessageSigner::new(&session_sk, TEST_NETWORK_ID),
             destination,
             destination,
+            HopBudget::MAX,
         )
     }
 

@@ -31,16 +31,15 @@
 //! (We can modify web-sys to support it, it may be easy, but it still won't work in Firefox.)
 //! So the best solution for message relay is to create a similar protocol to MSRP.
 //!
-//! The message relay protocol is similar to MSRP(RFC8873). All relay messages should have path data fields: `path`, `destination`.
-//! If a message is sent from A to Z over Ring when a relay node X got the message, the path data of the relay message may look like this:
+//! The message relay protocol is similar to MSRP(RFC8873), except that it carries no hop history.
+//! Every relayed message carries a relay carrier `next_hop`, `destination`, `hop_budget`. A relay
+//! node X that is the `next_hop` of a message for Z picks the next hop toward Z from its own
+//! finger table, spends one unit of the hop budget, and re-signs the envelope; a message whose
+//! budget is spent is dropped rather than forwarded, which is how a routing loop ends.
 //!
-//! ```txt
-//! path:[A, B, C, D] destination: Z
-//! ```
-//!
-//! Node X must append itself to the `path` list: `path[A, B, C, X]`.
-//!
-//! When node Z receives the relay message, node Z can respond without any query on DHT -- Just reverse the path.
+//! When node Z receives the message it knows the origin from the transaction signature and the
+//! last hop from the transport edge, nothing else about the route. Z responds by routing a report
+//! back to the origin over the Ring the same way.
 //!
 //! # ECDSA Session
 //!

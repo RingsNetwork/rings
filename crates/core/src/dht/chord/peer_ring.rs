@@ -119,6 +119,11 @@ impl PeerRing {
         self.successor_seq.clone()
     }
 
+    /// The number of finger slots this ring routes with.
+    pub fn finger_slot_count(&self) -> Result<usize> {
+        Ok(self.lock_finger_state()?.slot_count())
+    }
+
     fn lock_finger_state(&self) -> Result<MutexGuard<'_, FingerTable>> {
         self.finger.lock().map_err(|_| Error::LockPoisoned)
     }

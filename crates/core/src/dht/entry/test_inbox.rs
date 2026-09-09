@@ -19,6 +19,7 @@ use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::Encoder;
+use crate::message::HopBudget;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::MessageSigner;
@@ -39,6 +40,7 @@ fn payload_to(message: Message, destination: Did, network_id: u32) -> Result<Mes
         MessageSigner::new(&sender, network_id),
         destination,
         destination,
+        HopBudget::MAX,
     )
 }
 

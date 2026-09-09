@@ -2,6 +2,7 @@ use rand::Rng;
 
 use super::*;
 use crate::ecc::SecretKey;
+use crate::message::HopBudget;
 use crate::message::Message;
 use crate::session::SessionSk;
 use crate::tests::TEST_NETWORK_ID;
@@ -34,6 +35,7 @@ where T: Serialize + DeserializeOwned {
         MessageSigner::new(&session_sk, TEST_NETWORK_ID),
         next_hop,
         destination,
+        HopBudget::MAX,
     )
     .unwrap()
 }
@@ -70,6 +72,7 @@ fn test_relay_destination_predicates_name_forwarding_state() -> Result<()> {
         MessageSigner::new(&session_sk, TEST_NETWORK_ID),
         local,
         local,
+        HopBudget::MAX,
     )?;
     assert!(local_payload.is_relay_destination_for(local));
     assert!(!local_payload.should_forward_from(local));
@@ -79,6 +82,7 @@ fn test_relay_destination_predicates_name_forwarding_state() -> Result<()> {
         MessageSigner::new(&session_sk, TEST_NETWORK_ID),
         remote,
         remote,
+        HopBudget::MAX,
     )?;
     assert!(!remote_payload.is_relay_destination_for(local));
     assert!(remote_payload.should_forward_from(local));
@@ -86,48 +90,23 @@ fn test_relay_destination_predicates_name_forwarding_state() -> Result<()> {
     Ok(())
 }
 
+/// The origin of a transaction is the account behind its signing session, not the session id.
 #[test]
-fn test_report_return_policy_is_signed_by_transaction() -> Result<()> {
-    let sender_key = SecretKey::random();
-    let session_sk = SessionSk::new_with_seckey(&sender_key)?;
-    let sender = session_sk.account_did();
+fn test_origin_is_the_account_behind_the_signing_session() -> Result<()> {
+    let account_key = SecretKey::random();
+    let session_sk = SessionSk::new_with_seckey(&account_key)?;
+    let account: Did = account_key.address().into();
     let destination: Did = SecretKey::random().address().into();
 
-    let mut transaction = Transaction::new_with_report_return(
+    let transaction = Transaction::new(
         destination,
         uuid::Uuid::new_v4(),
-        Message::custom(b"policy")?,
-        ReportReturnPolicy::Routed {
-            destination: sender,
-        },
+        Message::custom(b"origin")?,
         MessageSigner::new(&session_sk, TEST_NETWORK_ID),
     )?;
-    assert!(transaction.verify(TEST_NETWORK_ID));
 
-    transaction.report_return = ReportReturnPolicy::Path;
-    assert!(!transaction.verify(TEST_NETWORK_ID));
-    Ok(())
-}
-
-#[test]
-fn test_routed_report_return_destination_must_match_signer() -> Result<()> {
-    let sender_key = SecretKey::random();
-    let session_sk = SessionSk::new_with_seckey(&sender_key)?;
-    let destination: Did = SecretKey::random().address().into();
-    let unrelated_return: Did = SecretKey::random().address().into();
-
-    assert!(matches!(
-        Transaction::new_with_report_return(
-            destination,
-            uuid::Uuid::new_v4(),
-            Message::custom(b"policy")?,
-            ReportReturnPolicy::Routed {
-                destination: unrelated_return,
-            },
-            MessageSigner::new(&session_sk, TEST_NETWORK_ID),
-        ),
-        Err(Error::InvalidMessage(_))
-    ));
+    assert_eq!(transaction.origin(), account);
+    assert_ne!(transaction.origin(), session_sk.session().session_did());
     Ok(())
 }
 

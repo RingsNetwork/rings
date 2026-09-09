@@ -4,6 +4,7 @@ use super::*;
 use crate::chunk::ChunkList;
 use crate::message::CustomMessage;
 use crate::message::FoundEntry;
+use crate::message::HopBudget;
 use crate::message::MessageSigner;
 use crate::swarm::callback::inbound_application_capacity_for_test;
 use crate::swarm::callback::inbound_mailbox_capacity_for_test;
@@ -196,6 +197,7 @@ async fn test_pending_message_rechecks_admission_after_async_validation() -> Res
         MessageSigner::new(&peer_session, TEST_NETWORK_ID),
         transport.dht.did,
         transport.dht.did,
+        HopBudget::MAX,
     )?
     .to_wire()?;
     let pending_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone())
@@ -242,6 +244,7 @@ async fn test_inbound_control_lane_progresses_while_application_validation_is_bl
         MessageSigner::new(&peer_session, TEST_NETWORK_ID),
         transport.dht.did,
         transport.dht.did,
+        HopBudget::MAX,
     )?
     .to_wire()?;
     let control = MessagePayload::new_send(
@@ -249,6 +252,7 @@ async fn test_inbound_control_lane_progresses_while_application_validation_is_bl
         MessageSigner::new(&peer_session, TEST_NETWORK_ID),
         transport.dht.did,
         transport.dht.did,
+        HopBudget::MAX,
     )?
     .to_wire()?;
     let cid = peer.to_string();
@@ -309,6 +313,7 @@ async fn test_inbound_mailbox_reserves_control_capacity_under_application_satura
             MessageSigner::new(&session, TEST_NETWORK_ID),
             transport.dht.did,
             transport.dht.did,
+            HopBudget::MAX,
         )?
         .to_wire()?;
         application_inputs.push((peer.to_string(), message));
@@ -321,6 +326,7 @@ async fn test_inbound_mailbox_reserves_control_capacity_under_application_satura
         MessageSigner::new(&control_session, TEST_NETWORK_ID),
         transport.dht.did,
         transport.dht.did,
+        HopBudget::MAX,
     )?
     .to_wire()?;
     let control = MessagePayload::new_send(
@@ -328,6 +334,7 @@ async fn test_inbound_mailbox_reserves_control_capacity_under_application_satura
         MessageSigner::new(&control_session, TEST_NETWORK_ID),
         transport.dht.did,
         transport.dht.did,
+        HopBudget::MAX,
     )?
     .to_wire()?;
     let control_cid = control_peer.to_string();
@@ -399,6 +406,7 @@ async fn test_closing_inbound_mailbox_cancels_pending_callback() -> Result<()> {
         MessageSigner::new(&peer_session, TEST_NETWORK_ID),
         transport.dht.did,
         transport.dht.did,
+        HopBudget::MAX,
     )?
     .to_wire()?;
     let cid = peer.to_string();
@@ -432,6 +440,7 @@ fn local_wire(message: Message, session: &SessionSk, local: Did) -> Result<bytes
         MessageSigner::new(session, TEST_NETWORK_ID),
         local,
         local,
+        HopBudget::MAX,
     )?
     .to_wire()
 }
@@ -503,6 +512,7 @@ async fn test_chunk_reassembly_records_one_exact_logical_receive() -> Result<()>
         MessageSigner::new(&peer_session, TEST_NETWORK_ID),
         transport.dht.did,
         transport.dht.did,
+        HopBudget::MAX,
     )?;
     let expected_useful_bytes = u64::try_from(logical_payload.transaction.data.len())
         .map_err(|_| Error::MessageSizeOverflow)?;
@@ -565,6 +575,7 @@ async fn test_reassembled_undecodable_message_records_one_failure_only() -> Resu
         MessageSigner::new(&peer_session, TEST_NETWORK_ID),
         transport.dht.did,
         transport.dht.did,
+        HopBudget::MAX,
     )?;
     let chunks: Vec<Chunk> = ChunkList::split(&undecodable.to_wire()?, 32).into();
     let final_index = chunks.len().saturating_sub(1);
@@ -785,6 +796,7 @@ async fn test_reassembled_control_shape_is_verified_before_lane_transition() -> 
         MessageSigner::new(&session, TEST_NETWORK_ID),
         transport.dht.did,
         transport.dht.did,
+        HopBudget::MAX,
     )?;
     tampered.transaction.data.push(0);
     assert_eq!(

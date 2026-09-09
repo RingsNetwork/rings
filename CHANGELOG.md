@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.23.0
+
+### Breaking changes
+
+- The relay carrier no longer records the route. `MessageRelay` is `{ next_hop, destination,
+  hop_budget }`: every forward spends one unit of the budget and a payload whose budget is
+  spent is dropped with `RelayHopBudgetExhausted`, which replaces the history-based loop
+  detection. A fresh budget is the ring's finger slots plus its successor capacity, capped at
+  `MAX_RELAY_HOPS` (32), and decoding rejects a carrier that claims more.
+- Reports are always Chord-routed to the transaction origin. `ReportReturnPolicy` and the
+  `report_return` field of `Transaction` are removed, together with the `*_with_report_return`
+  senders; the transaction hash covers `destination || tx_id || data`.
+- The relay-derived origin accessors (`MessageRelay::origin_sender`, `try_origin_sender`,
+  `sender`) are removed. Handlers take the origin from `Transaction::origin`, the account
+  behind the signing session.
+- Wire format and transaction hash are incompatible with 0.22.x; every node in an overlay must
+  upgrade together.
+
 ## 0.22.0
 
 ### Breaking changes

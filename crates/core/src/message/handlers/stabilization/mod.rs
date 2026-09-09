@@ -44,7 +44,7 @@ impl MessageHandler {
         ctx: &MessagePayload,
         msg: &NotifyPredecessorSend,
     ) -> Result<crate::dht::Did> {
-        let origin = ctx.relay.try_origin_sender()?;
+        let origin = ctx.transaction.origin();
         if msg.did != origin {
             return Err(Error::NotifyPredecessorOriginMismatch {
                 claimed: msg.did,

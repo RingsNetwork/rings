@@ -97,6 +97,18 @@ Chord routing assumes the node set is acceptable under the deployment model. It
 gives deterministic routing over the observed topology; it does not defend, by
 itself, against an adversary that can occupy many positions on the identifier ring.
 
+A relayed message carries no hop history: its relay carrier names only the next hop,
+the destination, and a hop budget that every forward spends, so each hop learns its
+predecessor from the transport edge and its successor from the carrier, and the
+destination learns only the last hop. A route that outruns its budget is dropped as a
+loop. The carrier is outside every signature, so the budget bounds the work honest hops
+do for one message and is not a promise a dishonest hop keeps. The plain relay therefore
+offers payload confidentiality only to the extent the application's E2E layer provides it,
+and per-hop topology hiding; it does not offer sender or receiver unlinkability. The
+origin is visible to every hop through the transaction signature, the destination is
+visible to every hop because Chord routes by it, and a report is always routed back to
+the origin. Hiding the origin is the onion layer's concern, not the relay's.
+
 ### Connection Admission
 
 Each node bounds the number of peers holding any logical connection record,
