@@ -1,7 +1,8 @@
 # Native Gateway
 
-A native node can forward explicitly selected IPv4/TCP destinations through Rings Onion
-circuits over a TUN device. The gateway is configured by the `gateway:` section of
+A native node can forward explicitly selected IPv4/TCP destinations through Rings onion
+circuits, the [privacy layer](https://github.com/RingsNetwork/rings/blob/master/SECURITY.md#privacy-layer),
+over a TUN device. The gateway is configured by the `gateway:` section of
 `config.yaml`, which `rings init` writes in full with `enabled: false`; see
 [config.yaml](advanced-topic/config.yaml.md#gateway) for the generated section.
 

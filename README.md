@@ -19,14 +19,16 @@ their own network layer instead of a server-owned data path. Browser tabs and na
 daemons can join the same overlay, discover peers by DID, and exchange messages over
 direct WebRTC datachannels routed by a Chord DHT.
 
-The current overlay threat model is documented in [SECURITY.md](./SECURITY.md).
-DID authentication proves key control; it is not, by itself, Sybil or eclipse
-resistance for permissionless public membership.
+The threat model and the contract of each layer are documented in
+[SECURITY.md](./SECURITY.md). DID authentication proves key control; it is not, by
+itself, Sybil or eclipse resistance for permissionless public membership. The overlay
+routes and, after an E2E handshake, encrypts; it does not hide who is talking to whom.
+That is the job of the privacy layer, the onion circuits in `crates/node/src/onion`.
 
 At the application layer, Rings gives developers a namespace-scoped protocol runtime:
 write a pure state machine, attach an interpreter shell, and run it over a decentralized
 overlay. Built-in protocols cover peer service relay and echo; the roadmap extends
-this into a fully server-less network layer and privacy layer.
+both the network layer and the privacy layer.
 
 ## Whitepaper
 
@@ -71,6 +73,17 @@ The overlay uses a Chord DHT for successor/finger-table routing, DID lookup, mes
 relay, stabilization, and `network_id` isolation. Independent overlays stay separate
 while retaining deterministic routing behavior. Chord routing assumes an acceptable
 membership model; see [the overlay threat model](./SECURITY.md#chord-routing).
+
+### Privacy layer
+
+Onion circuits in [`crates/node/src/onion`](./crates/node/src/onion) carry traffic over
+direct edges through layered ElGamal-AEAD frames, fixed-batch cover cells with pacing,
+and fixed cell size classes. A circuit hides the route's hops from one another and hides
+the client from the exit. It does not hide the client from its first hop, does not hide
+overlay membership, and does not hide activity timing from an observer that watches
+every link. The plain overlay relay offers none of this: it minimizes what it leaks, and
+the privacy layer is where privacy is provided. See
+[the layer contracts](./SECURITY.md#layer-contracts).
 
 ### Protocol runtime
 
@@ -169,7 +182,7 @@ execute, or maintain a proving backend.
 | Resource | Link | Notes |
 |---|---|---|
 | Rings Whitepaper | [PDF](./papers/rings.pdf), [LaTeX source](./papers/rings.tex), [citation](#whitepaper) | Canonical protocol paper |
-| Security model | [SECURITY.md](./SECURITY.md) | Overlay assumptions, deployment models, and Sybil boundary |
+| Security model | [SECURITY.md](./SECURITY.md) | Overlay assumptions, deployment models, Sybil boundary, and the communication-layer / privacy-layer contracts |
 | Browser frontend | [`frontend`](./frontend) | Landing guide, web app, and extension workflow |
 | Documentation | [rings.rs/docs](https://rings.rs/docs/), [source](./docs) | mdBook book, published with the site |
 | Guide | [rings.rs/#guide](https://rings.rs/#guide) | One card per runtime with the first commands; the book is the reference |
@@ -205,8 +218,12 @@ claim; see [SECURITY.md](./SECURITY.md). Each layer maps directly to a crate/mod
 │  Extension      pure `Protocol::step` → `Effect` → `Interpret` shell   │  node::extension::ext
 │  runtime        over a namespace-scoped `Scope` (send / self-inject)   │
 ├──────────────────────────────────────────────────────────────────────┤
+│  Privacy        onion circuits: layered ElGamal-AEAD over direct       │  crates/node/src/onion
+│  (circuits)     edges, fixed-batch cover + pacing, exit registry       │
+├──────────────────────────────────────────────────────────────────────┤
 │  Overlay        Chord DHT: successor / finger tables, stabilization,   │  crates/core
-│  (routing)      DID addressing, message relay, network_id isolation    │
+│  (routing +     DID addressing, message relay, network_id isolation,   │
+│  encryption)    E2E ElGamal to a DID after its handshake               │
 ├──────────────────────────────────────────────────────────────────────┤
 │  Transport      direct WebRTC datachannels (native + browser/web_sys), │  crates/transport
 │                 STUN / ICE / SDP NAT traversal                         │
@@ -223,7 +240,14 @@ claim; see [SECURITY.md](./SECURITY.md). Each layer maps directly to a crate/mod
   Browser nodes still use the browser ICE stack, whose local UDP ports are not
   controlled by Rings.
 - **Overlay** organizes peers into a Chord DHT and routes messages by DID; distinct overlays are
-  isolated by `network_id`.
+  isolated by `network_id`. Its contract is routing and confidentiality only: a payload can be
+  encrypted to the destination's account key once the E2E handshake has supplied that key, but
+  every hop sees the origin DID by signature and the destination DID by routing. The overlay
+  minimizes what it leaks; it does not provide privacy.
+- **Privacy** is the onion circuit data plane: layered ElGamal-AEAD frames over direct edges,
+  fixed-batch cover cells with pacing, fixed cell size classes, and route selection from the
+  onion-relay and onion-exit registries. Each relay learns its predecessor and its successor and
+  nothing else about the route. See [SECURITY.md](./SECURITY.md#layer-contracts).
 - **Extension runtime** is a *functional core / imperative shell*: a protocol's state transition
   is pure (`step`), and all IO happens in its `Interpret` shell, which only ever receives a
   **namespace-scoped capability** (`Scope`). The core owns no global effect/command bus — adding
@@ -233,8 +257,8 @@ claim; see [SECURITY.md](./SECURITY.md). Each layer maps directly to a crate/mod
   an echo protocol used by examples and tests. Register your own with
   `provider.register_protocol(..)` (Rust) or `provider.on(namespace, ..)` (JS).
 
-Where this is heading — a fully server-less, sovereign **network layer** and **privacy layer** —
-is described in [ROADMAP.md](./ROADMAP.md).
+The **privacy layer** exists today as `crates/node/src/onion`; where it and the **network layer**
+are heading — a fully server-less, sovereign network — is described in [ROADMAP.md](./ROADMAP.md).
 
 ## Contributing
 

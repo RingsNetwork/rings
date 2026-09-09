@@ -1,7 +1,9 @@
 # Security And Overlay Threat Model
 
 This document describes the current security boundary for the Rings overlay. It is
-documentation, not a claim that every stronger model is implemented.
+documentation, not a claim that every stronger model is implemented. Rings has two
+layers with different contracts, drawn under [Layer Contracts](#layer-contracts):
+the communication layer minimizes leakage; the privacy layer provides privacy.
 
 ## Summary
 
@@ -59,10 +61,128 @@ costly to create.
 - Eclipse resistance against an attacker that can choose many DIDs.
 - Strong public-network availability when storage owners or route candidates are
   adversarial.
-- Strong anonymity or traffic-analysis resistance for onion routes chosen from a
-  Sybil-permissive live-node registry.
+- Sender or receiver unlinkability on the communication layer. Chord routes by the
+  destination DID and every payload names its origin by signature, so the plain
+  relay cannot hide either endpoint; this is a boundary of the layer, not missing
+  work on the relay. Unlinkability is a privacy-layer property.
+- Strong anonymity or traffic-analysis resistance for privacy-layer routes chosen
+  from a Sybil-permissive live-node registry.
 - Economic security, stake weighting, proof-of-work admission, globally trusted or
   portable reputation, or globally rate-limited identity issuance.
+
+## Layer Contracts
+
+Rings has two layers with different security contracts, and the boundary between
+them is where every privacy claim is decided. The rule is: **the communication
+layer minimizes leakage; the privacy layer provides privacy.** A property belongs
+to the communication layer only if the plain relay delivers it to every message;
+everything that needs a circuit belongs to the privacy layer. Confusing the two
+produces two recurring errors: privacy properties get attributed to the plain relay,
+as if encryption to a DID were anonymity, and communication-layer leaks get treated
+as privacy-layer bugs that cover traffic is expected to absorb.
+
+### Communication layer
+
+The communication layer is `crates/core`: Chord routing, `MessageRelay`,
+`MessagePayload`, session-key signatures, and the E2E ElGamal stream family. Its
+contract is payload authenticity for every message and payload confidentiality for
+peers that have completed the E2E handshake. It has no unlinkability contract and
+cannot acquire one by changing the relay: Chord routes by the destination DID, so
+every hop must see it, and every payload names its origin through the transaction
+signature, so every hop can attribute it.
+
+Every hop, and the destination, learns from a relayed message:
+
+- the origin DID, named by the transaction signature;
+- the destination DID, carried by the transaction and by the relay header, because
+  the next hop is chosen from it;
+- its own predecessor, the authenticated transport edge the message arrived on, and
+  its successor, the relay's `next_hop`;
+- the encoded size and the arrival time of the message;
+- until #736 lands, the complete hop history: the relay's `path` is a push-only stack
+  that every forwarding hop appends itself to, so an intermediate hop sees every node
+  that handled the message before it, and the destination receives the whole route.
+  After #736 the relay carries only `next_hop`, `destination`, and a hop budget, so a
+  hop learns exactly its predecessor and successor and the destination learns only
+  the last hop.
+
+Confidentiality on this layer is opt-in by construction, not by policy. A DID is the
+160-bit keccak digest of the account public key, so a Chord lookup by DID yields a
+routable identifier and not a key to encrypt to. A sender cannot encrypt to a peer it
+has only looked up; it first completes the E2E handshake, which carries the peer's
+account public key under that peer's DID signature, and then sends ElGamal stream
+frames encrypted to that key. A message sent outside the E2E stream family is
+readable by every hop, and by the storage owner that holds it for an offline
+recipient. Encrypting at the DHT itself would need join and lookup to carry keys
+rather than key digests, which is a different identifier design, not a relay change.
+
+The obligations of this layer are leak-minimization obligations:
+
+- no hop history on the wire (#736);
+- no telemetry in the envelope beyond what routing needs: the next hop, the
+  destination, and the hop budget;
+- payload bytes encrypted to the destination's account key once the E2E handshake
+  has completed, with the signed envelope supplying the integrity that the
+  malleable ElGamal frames lack on their own;
+- every signature bound to `network_id` and to a per-message-family domain tag, so
+  an observation in one overlay is not a credential in another.
+
+A leak on this layer is a communication-layer bug. Cover traffic and circuits do not
+fix it: they run above the relay and inherit whatever it exposes.
+
+### Privacy layer
+
+The privacy layer is `crates/node/src/onion`: layered ElGamal-AEAD circuits over
+direct edges, fixed-batch cover cells with pacing, replay witnesses, fixed size
+classes for cells, and route selection from the online-node and onion-exit
+registries. It sits in `rings-node` deliberately: Chord remains the storage and
+discovery substrate, and exit policy is an application decision.
+
+**Per-hop knowledge bound.** Forward layers are wrapped from exit to entry with the
+selected hops' session public keys. Each relay decrypts exactly one ElGamal-AEAD
+layer and learns only the immediate next hop plus an opaque inner layer; backward
+frames carry a client-encrypted AEAD payload that relays forward with local return
+state. A circuit id identifies exactly one directed edge of one route and is
+rewritten at every hop, and the client/exit return id is encrypted inside the exit
+layer and never appears as an edge header. A relay therefore knows its predecessor
+and its successor on the circuit and nothing else about the route; only the exit sees
+the application payload, and only the client knows the whole route. A route is at
+most eight hops and defaults to three, counting the exit.
+
+**Cover and pacing contract** (`circuit/send_outbox.rs`). Let `B = 4` be the link
+batch size. A non-empty batch toward one next hop carries `r` real cells,
+`1 <= r <= B`, followed by exactly `B - r` authenticated one-hop cover cells, so
+every observable batch holds `B` cells and the visible cell-count amplification is at
+most `B`. One pacing delay drawn from the closed interval `[5, 25]` ms precedes each
+batch. Cover is generated only for a real-driven batch and an idle lane emits
+nothing, so a link is batch-shaped rather than constant-rate: an observer that sees
+the link still sees when a client is active. Cells are encoded in fixed size classes,
+from 4 KiB to 12 MiB, and a relay preserves the visible class across an edge so that
+a shrinking cell cannot reveal route position. The bandwidth and latency these rules
+cost are intentional privacy properties, not queue inefficiencies to optimize away.
+
+**What circuits hide, and what they do not.** A circuit hides the route's hops from
+one another and hides the client from the exit. It does not hide the client from its
+first hop, which authenticates the client's DID on the transport edge the first cell
+arrives on; it does not hide overlay membership, which is public; and it does not
+hide activity timing from an observer that watches every link.
+
+**Inherited from the communication layer, and not repairable here:**
+
+- overlay membership is public: joining the ring and publishing a presence
+  descriptor are signed, attributable actions;
+- the edge to the first hop is established through Chord relay signalling, so the
+  nodes that relay that handshake learn that the client and the first hop are
+  connecting;
+- reading the online-node and onion-exit registries reveals interest to the storage
+  owners that hold those topics;
+- the first hop learns the client DID.
+
+**Candidate set.** Route security depends on the candidate set as much as on the
+circuit protocol. In an authenticated-open overlay, a Sybil operator can try to
+appear in several positions of one route unless the deployment adds independent
+admission or diversity controls. Reliability weighting may reorder eligible
+candidates; it never adds one.
 
 ## Feature Boundaries
 
@@ -171,15 +291,9 @@ at the maximum time-to-live.
 
 Online-node and onion-exit descriptors are signed and expire. This bounds stale
 records and makes advertised claims attributable. It does not prevent a Sybil
-operator from publishing many live descriptors or many exit candidates.
-
-### Onion Routing
-
-Onion circuits protect payload layers from intermediate hops according to the
-implemented circuit protocol. Route security still depends on the candidate set.
-In an authenticated-open overlay, a Sybil operator can try to appear in multiple
-route positions unless the deployment adds independent admission or diversity
-controls.
+operator from publishing many live descriptors or many exit candidates. The routes
+the privacy layer selects from these registries, and the caveat that follows from
+their candidate set, are specified under [Privacy layer](#privacy-layer).
 
 ### Native Gateway
 
