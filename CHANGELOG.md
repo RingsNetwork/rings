@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.22.0
+
+### Breaking changes
+
+- The license is now the GNU Affero General Public License, version 3.0 only (AGPL-3.0-only)
+  for every crate, the frontend, and the npm package. Works derived from Rings, and services
+  that offer it over a network, must publish their source; a commercial license for use
+  outside those terms is available from Rings Network on request. The name, logo, and the
+  hosted rings.rs service are not covered by the software license.
+
+### Added
+
+- Frontend: a guide page (`#guide`) with one card per runtime (native, browser, extension, C
+  FFI), the first commands for each, and links into the matching book chapters; a site footer
+  on the landing and guide pages carrying the license, commercial-use, warranty, security, and
+  privacy declarations (hidden under the mobile breakpoint, where the bottom navigation bar
+  owns the space); the header is Home, Guide, Docs, and Whitepaper, since the node console and
+  GitHub are entered from the landing page.
+- Frontend: the browser node's seed inputs (the Seed URL setting and the link dialog's HTTP
+  endpoint) default to the public seed `https://node.rings.rs` and suggest it beside the local
+  daemon endpoint.
+- Documentation: the book is restyled to the site's palette with a site bar back to rings.rs,
+  and gains chapters on operating a node from the CLI, the browser node and extension, the C
+  FFI, and `llms.txt`; the install chapter covers the prebuilt release binaries.
+- `llms.txt` at the repository root, published at `https://rings.rs/llms.txt`: a map of the
+  project for coding agents (authoritative documents, crate layering, build and test commands,
+  conventions).
+
 ## 0.21.2
 
 ### Breaking changes

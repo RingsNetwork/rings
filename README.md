@@ -124,9 +124,9 @@ rings --help
 ## Frontend
 
 The browser and extension frontend lives in [`frontend`](./frontend). It is the
-user-facing Rings web surface for the landing guide, browser node console,
-onion proxy WorkBench, wallet login, SDP/HTTP connectivity, topology, and custom
-messages.
+user-facing Rings web surface for the landing page, the [guide](https://rings.rs/#guide),
+the browser node console, onion proxy WorkBench, wallet login, SDP/HTTP connectivity,
+topology, and custom messages.
 
 ## Examples
 
@@ -172,6 +172,8 @@ execute, or maintain a proving backend.
 | Security model | [SECURITY.md](./SECURITY.md) | Overlay assumptions, deployment models, and Sybil boundary |
 | Browser frontend | [`frontend`](./frontend) | Landing guide, web app, and extension workflow |
 | Documentation | [rings.rs/docs](https://rings.rs/docs/), [source](./docs) | mdBook book, published with the site |
+| Guide | [rings.rs/#guide](https://rings.rs/#guide) | One card per runtime with the first commands; the book is the reference |
+| For AI agents | [rings.rs/llms.txt](https://rings.rs/llms.txt), [source](./llms.txt) | Project map for coding agents ([llms.txt](https://llmstxt.org/)), maintained with the code |
 | Examples | [`examples/`](./examples) | Native, dweb, relay, and FFI examples |
 
 ## Components
@@ -250,6 +252,17 @@ If you'd like to contribute code, please follow these steps:
 ```
 
 We'll review your pull request as soon as we can, and we appreciate your contributions!
+
+## License
+
+Rings is released under the GNU Affero General Public License, version 3.0 only
+([AGPL-3.0-only](./LICENSE)). Works derived from it must be released under the same license,
+and the AGPL's network clause extends that obligation to services that offer Rings over a
+network: a product or hosted service built on Rings must publish its source.
+
+A commercial license for use outside the AGPL's terms is available from Rings Network on
+request. The Rings Network name, logo, and the hosted [rings.rs](https://rings.rs) service are
+not covered by the software license.
 
 
 ## Ref:

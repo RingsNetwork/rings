@@ -10,7 +10,9 @@ use crate::browser_api::js_global_prop;
 use crate::browser_api::js_string_field;
 use crate::extension;
 use crate::forms::text_input;
+use crate::forms::text_input_with_suggestions;
 use crate::node::PeerView;
+use crate::node::SEED_ENDPOINTS;
 use crate::topology;
 use crate::wallet::WalletAccount;
 use crate::wallet::WalletKind;
@@ -26,63 +28,141 @@ const FIREFOX_EXTENSION_MANAGER_URL: &str = "about:debugging#/runtime/this-firef
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum ShellPage {
+    Home,
     Guide,
     Console,
     Webview,
 }
 
 impl ShellPage {
-    fn label(self) -> &'static str {
+    /// The pages the header navigates between, in presentation order. The console is entered
+    /// from the landing page's calls to action and the WebView from the console, so neither is
+    /// a header destination.
+    pub(crate) const HEADER: [Self; 2] = [Self::Home, Self::Guide];
+
+    pub(crate) fn label(self) -> &'static str {
         match self {
-            Self::Guide => "Home",
+            Self::Home => "Home",
+            Self::Guide => "Guide",
             Self::Console => "Node",
             Self::Webview => "WebView",
         }
     }
+
+    /// The page as a navigation button of the given class; `current` marks the page the
+    /// surface is showing (`aria-current`). The header and the footer both render pages this
+    /// way, so a page's label and its click behaviour are defined once
+    /// (`button : ShellPage × Class × Bool → Html`).
+    pub(crate) fn button(
+        self,
+        class: &'static str,
+        current: bool,
+        navigate_page: &Callback<ShellPage>,
+    ) -> Html {
+        let navigate_page = navigate_page.clone();
+        let onclick = Callback::from(move |_| navigate_page.emit(self));
+        html! {
+            <button
+                class={class}
+                type="button"
+                aria-current={if current { "page" } else { "false" }}
+                onclick={onclick}
+            >
+                { self.label() }
+            </button>
+        }
+    }
 }
 
-/// Destinations outside the shell that the landing hero and the header both link to, in
-/// presentation order. One finite index set, rendered by [`ProjectLink::anchor`] into whichever
-/// class the surrounding surface styles: the set of links is defined once, the surfaces differ
-/// only in their class (`anchor : ProjectLink × Class → Html`).
+/// Absolute URL of a chapter of the documentation book, from its path inside the book.
+/// Absolute because the same shell runs from `rings.rs` and from an extension origin, where a
+/// site-relative `/docs/` would resolve inside the extension.
+macro_rules! docs_url {
+    ($chapter:literal) => {
+        concat!("https://rings.rs/docs/", $chapter)
+    };
+}
+pub(crate) use docs_url;
+
+/// Destinations outside the shell that the landing hero, the header, the guide, and the footer
+/// link to. One finite index set, rendered by [`ProjectLink::anchor`] into whichever class the
+/// surrounding surface styles: the set of links is defined once, the surfaces differ only in
+/// the subset they present and its class (`anchor : ProjectLink × Class → Html`).
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum ProjectLink {
     Docs,
     Repository,
     Whitepaper,
+    Releases,
+    CratesIo,
+    Npm,
+    Security,
+    Roadmap,
+    Sponsor,
+    License,
+    LlmsTxt,
 }
 
 impl ProjectLink {
-    /// Every link, in the order the surfaces present them.
-    pub(crate) const ALL: [Self; 3] = [Self::Docs, Self::Repository, Self::Whitepaper];
+    /// The links the landing hero presents beside its call to action.
+    pub(crate) const HERO: [Self; 3] = [Self::Docs, Self::Repository, Self::Whitepaper];
+
+    /// The links the header presents after the page buttons. The repository and the node
+    /// console are entered from the landing page, so the header carries only the two
+    /// destinations the landing page does not lead to on its own.
+    pub(crate) const HEADER: [Self; 2] = [Self::Docs, Self::Whitepaper];
 
     fn label(self) -> &'static str {
         match self {
             Self::Docs => "Docs",
             Self::Repository => "GitHub",
             Self::Whitepaper => "Whitepaper",
+            Self::Releases => "Releases",
+            Self::CratesIo => "crates.io",
+            Self::Npm => "npm",
+            Self::Security => "Security model",
+            Self::Roadmap => "Roadmap",
+            Self::Sponsor => "Sponsor",
+            Self::License => "License",
+            Self::LlmsTxt => "llms.txt",
         }
     }
 
-    /// Absolute URLs: the same shell runs from `rings.rs` and from an extension origin, where a
-    /// site-relative `/docs/` would resolve inside the extension.
+    /// Absolute URLs, for the reason [`docs_url!`] gives.
     fn href(self) -> &'static str {
         match self {
-            Self::Docs => "https://rings.rs/docs/",
+            Self::Docs => docs_url!(""),
             Self::Repository => "https://github.com/RingsNetwork/rings",
             Self::Whitepaper => {
                 "https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf"
             }
+            Self::Releases => "https://github.com/RingsNetwork/rings/releases",
+            Self::CratesIo => "https://crates.io/crates/rings-node",
+            Self::Npm => "https://www.npmjs.com/package/@ringsnetwork/rings-node",
+            Self::Security => "https://github.com/RingsNetwork/rings/blob/master/SECURITY.md",
+            Self::Roadmap => "https://github.com/RingsNetwork/rings/blob/master/ROADMAP.md",
+            Self::Sponsor => "https://github.com/sponsors/RingsNetwork",
+            Self::License => "https://github.com/RingsNetwork/rings/blob/master/LICENSE",
+            Self::LlmsTxt => "https://rings.rs/llms.txt",
         }
     }
 
-    /// The link as an anchor of the given class, opened in a new tab without a referrer.
+    /// The link as an anchor of the given class.
     pub(crate) fn anchor(self, class: &'static str) -> Html {
-        html! {
-            <a class={class} href={self.href()} target="_blank" rel="noreferrer">
-                { self.label() }
-            </a>
-        }
+        external_anchor(class, self.href(), self.label())
+    }
+}
+
+/// An anchor to a destination outside the shell, opened in a new tab without a referrer.
+pub(crate) fn external_anchor(
+    class: &'static str,
+    href: &'static str,
+    label: &'static str,
+) -> Html {
+    html! {
+        <a class={class} href={href} target="_blank" rel="noreferrer">
+            { label }
+        </a>
     }
 }
 
@@ -283,16 +363,6 @@ pub(crate) fn app_header(
     navigate_page: Callback<ShellPage>,
     show_nav: bool,
 ) -> Html {
-    let guide_class = header_page_class(active_page, ShellPage::Guide);
-    let console_class = header_page_class(active_page, ShellPage::Console);
-    let open_guide = {
-        let navigate_page = navigate_page.clone();
-        Callback::from(move |_| navigate_page.emit(ShellPage::Guide))
-    };
-    let open_console = {
-        let navigate_page = navigate_page.clone();
-        Callback::from(move |_| navigate_page.emit(ShellPage::Console))
-    };
     html! {
         <header class="app-header landing-header">
             <div class="landing-header-brand" aria-label="Rings Network">
@@ -311,23 +381,14 @@ pub(crate) fn app_header(
             </div>
             if show_nav {
                 <nav class="header-nav" aria-label="Primary">
-                    <button
-                        class={guide_class}
-                        type="button"
-                        aria-current={if active_page == ShellPage::Guide { "page" } else { "false" }}
-                        onclick={open_guide}
-                    >
-                        { ShellPage::Guide.label() }
-                    </button>
-                    <button
-                        class={console_class}
-                        type="button"
-                        aria-current={if active_page == ShellPage::Console { "page" } else { "false" }}
-                        onclick={open_console}
-                    >
-                        { ShellPage::Console.label() }
-                    </button>
-                    { for ProjectLink::ALL.into_iter().map(|link| link.anchor("header-external-link")) }
+                    { for ShellPage::HEADER.into_iter().map(|page| {
+                        page.button(
+                            header_page_class(active_page, page),
+                            active_page == page,
+                            &navigate_page,
+                        )
+                    }) }
+                    { for ProjectLink::HEADER.into_iter().map(|link| link.anchor("header-external-link")) }
                 </nav>
             }
         </header>
@@ -714,7 +775,7 @@ fn settings_controls(
 ) -> Html {
     html! {
         <>
-            { text_input("Seed URL", seed_url.clone()) }
+            { text_input_with_suggestions("Seed URL", seed_url.clone(), "seed-url-endpoints", &SEED_ENDPOINTS) }
             { text_input("Network ID", network_id.clone()) }
             { text_input("ICE servers", ice_servers.clone()) }
             { text_input("Stabilize interval seconds", stabilize_interval.clone()) }

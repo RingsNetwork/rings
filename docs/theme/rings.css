@@ -1,0 +1,363 @@
+/*
+ * Rings theme for the documentation book.
+ *
+ * Loaded after mdBook's own stylesheets (`additional-css` in book.toml), so it only overrides:
+ * the warm palette of rings.rs for the light theme and a slate palette for the dark one, the
+ * site bar the `header.hbs` partial renders above the menu bar, and the typography the
+ * frontend uses. mdBook sets the root font size to 62.5%, so 1rem is 10px throughout.
+ */
+
+:root {
+    --sidebar-target-width: 280px;
+    --content-max-width: 800px;
+    --page-padding: 24px;
+    --menu-bar-height: 52px;
+    --mono-font: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    --code-font-size: 0.85em;
+    --rings-font: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+/* Palettes: the frontend's warm light theme, and one slate dark theme under mdBook's
+   preferred dark name so the theme picker and prefers-color-scheme both reach it. */
+
+.light,
+html:not(.js) {
+    --bg: #fbf4e6;
+    --fg: #101828;
+
+    --sidebar-bg: #f3ead8;
+    --sidebar-fg: #344054;
+    --sidebar-non-existant: #a89f8f;
+    --sidebar-active: #b42318;
+    --sidebar-spacer: #dfd0b7;
+
+    --scrollbar: #b8a98e;
+
+    --icons: #736453;
+    --icons-hover: #101828;
+
+    --links: #0f766e;
+
+    --inline-code-color: #8a5a12;
+
+    --theme-popup-bg: #fffaf0;
+    --theme-popup-border: #d7c6aa;
+    --theme-hover: #f3ead8;
+
+    --quote-bg: #fff6e6;
+    --quote-border: #dfd0b7;
+
+    --warning-border: #8a5a12;
+
+    --table-border-color: #dfd0b7;
+    --table-header-bg: #f3ead8;
+    --table-alternate-bg: #fff6e6;
+
+    --searchbar-border-color: #d7c6aa;
+    --searchbar-bg: #fffaf0;
+    --searchbar-fg: #101828;
+    --searchbar-shadow-color: #d7c6aa;
+    --searchresults-header-fg: #736453;
+    --searchresults-border-color: #d7c6aa;
+    --searchresults-li-bg: #fff6e6;
+    --search-mark-bg: #fde68a;
+
+    --color-scheme: light;
+
+    --footnote-highlight: #b42318;
+    --overlay-bg: rgba(16, 24, 40, 0.35);
+    --sidebar-header-border-color: #b42318;
+
+    --rings-mark-bg: #111827;
+    --rings-mark-fg: #ffffff;
+}
+
+.navy {
+    --bg: #0b1220;
+    --fg: #d0d5dd;
+
+    --sidebar-bg: #0f172a;
+    --sidebar-fg: #98a2b3;
+    --sidebar-non-existant: #475467;
+    --sidebar-active: #f97066;
+    --sidebar-spacer: #1d2939;
+
+    --scrollbar: #475467;
+
+    --icons: #667085;
+    --icons-hover: #f2f4f7;
+
+    --links: #5eead4;
+
+    --inline-code-color: #fdb022;
+
+    --theme-popup-bg: #101828;
+    --theme-popup-border: #344054;
+    --theme-hover: #1d2939;
+
+    --quote-bg: #101828;
+    --quote-border: #1d2939;
+
+    --warning-border: #fdb022;
+
+    --table-border-color: #1d2939;
+    --table-header-bg: #1d2939;
+    --table-alternate-bg: #0f172a;
+
+    --searchbar-border-color: #344054;
+    --searchbar-bg: #101828;
+    --searchbar-fg: #f2f4f7;
+    --searchbar-shadow-color: #000000;
+    --searchresults-header-fg: #98a2b3;
+    --searchresults-border-color: #344054;
+    --searchresults-li-bg: #101828;
+    --search-mark-bg: #b42318;
+
+    --color-scheme: dark;
+
+    --footnote-highlight: #f97066;
+    --overlay-bg: rgba(16, 24, 40, 0.6);
+    --sidebar-header-border-color: #f97066;
+
+    --rings-mark-bg: #1f2937;
+    --rings-mark-fg: #ffffff;
+}
+
+/* Typography */
+
+html {
+    font-family: var(--rings-font);
+}
+
+.content h1,
+.content h2,
+.content h3,
+.content h4 {
+    font-family: var(--rings-font);
+    color: var(--fg);
+    letter-spacing: -0.01em;
+}
+
+.content h1 {
+    margin-block-end: 1.6rem;
+    font-size: 3.4rem;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    line-height: 1.1;
+}
+
+.content h2 {
+    padding-block-end: 0.6rem;
+    border-block-end: 1px solid var(--table-border-color);
+    font-size: 2.4rem;
+    font-weight: 800;
+}
+
+.content h3 {
+    font-size: 1.9rem;
+    font-weight: 700;
+}
+
+.content h4 {
+    font-size: 1.6rem;
+    font-weight: 700;
+}
+
+.content p,
+.content li {
+    line-height: 1.75;
+}
+
+.content a {
+    text-underline-offset: 0.2em;
+}
+
+.content :not(pre) > code {
+    padding: 0.1em 0.4em;
+    border-radius: 4px;
+    background: var(--quote-bg);
+}
+
+.content pre {
+    border: 1px solid var(--quote-border);
+    border-radius: 8px;
+}
+
+.content pre > code {
+    padding: 1.6rem;
+    line-height: 1.6;
+}
+
+.content blockquote {
+    border-radius: 8px;
+    border-inline-start: 3px solid var(--sidebar-active);
+}
+
+.content table {
+    border-collapse: separate;
+    border-spacing: 0;
+    border: 1px solid var(--table-border-color);
+    border-radius: 8px;
+}
+
+.content table th,
+.content table td {
+    padding: 0.8rem 1.2rem;
+    border: 0;
+    border-block-end: 1px solid var(--table-border-color);
+    text-align: start;
+}
+
+.content table th {
+    background: var(--table-header-bg);
+    font-weight: 700;
+}
+
+.content table tr:last-child td {
+    border-block-end: 0;
+}
+
+/* The brand mark on the landing chapter: the icon is white, so it sits on the same dark tile
+   the frontend header gives it. */
+.rings-mark {
+    box-sizing: border-box;
+    width: 56px;
+    height: 56px;
+    padding: 10px;
+    border-radius: 12px;
+    background: var(--rings-mark-bg);
+}
+
+/* Chrome: menu bar and sidebar */
+
+#mdbook-menu-bar {
+    border-block-end-color: var(--table-border-color);
+}
+
+.menu-title {
+    font-family: var(--rings-font);
+    font-weight: 800;
+    letter-spacing: -0.01em;
+}
+
+.sidebar {
+    border-inline-end: 1px solid var(--sidebar-spacer);
+    font-size: 0.9em;
+}
+
+.chapter {
+    line-height: 2;
+}
+
+.chapter li.part-title {
+    margin-block-start: 1.6em;
+    color: var(--sidebar-fg);
+    font-size: 0.75em;
+    font-weight: 800;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    opacity: 0.8;
+}
+
+.chapter li a.active {
+    font-weight: 700;
+}
+
+.chapter li a:hover {
+    color: var(--sidebar-active);
+    text-decoration: none;
+}
+
+/* Site bar: rendered by theme/header.hbs above the menu bar, spanning the page like it.
+   The built-in layout pulls the page up by one menu-bar height so that the sticky hover
+   placeholder sits above the viewport; with a bar in front of it that pull would hide the
+   bar instead, so the page starts at the top and the placeholder (only useful when the menu
+   bar is not sticky, and it always is here) is dropped. */
+
+.page {
+    margin-block-start: 0;
+}
+
+#mdbook-menu-bar-hover-placeholder {
+    display: none;
+}
+
+.rings-site-bar {
+    display: flex;
+    min-height: 56px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin: 0 calc(0px - var(--page-padding));
+    padding: 0 var(--page-padding);
+    border-block-end: 1px solid var(--table-border-color);
+    background: var(--sidebar-bg);
+    font-family: var(--rings-font);
+}
+
+.rings-site-brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--fg);
+    text-decoration: none;
+}
+
+.rings-site-brand img {
+    box-sizing: border-box;
+    width: 32px;
+    height: 32px;
+    padding: 5px;
+    border-radius: 8px;
+    background: var(--rings-mark-bg);
+}
+
+.rings-site-brand > span {
+    display: grid;
+    gap: 1px;
+}
+
+.rings-site-brand strong {
+    font-size: 1.4rem;
+    line-height: 1.1;
+}
+
+.rings-site-brand > span > span {
+    font-size: 1.1rem;
+    line-height: 1.1;
+    opacity: 0.7;
+}
+
+.rings-site-nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.rings-site-nav a {
+    display: inline-flex;
+    min-height: 30px;
+    align-items: center;
+    padding: 0 10px;
+    border: 1px solid var(--table-border-color);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--mono-font);
+    font-size: 1.1rem;
+    font-weight: 700;
+    text-decoration: none;
+    text-transform: uppercase;
+}
+
+.rings-site-nav a:hover {
+    border-color: var(--rings-mark-bg);
+    background: var(--rings-mark-bg);
+    color: var(--rings-mark-fg);
+}
+
+@media only screen and (max-width: 720px) {
+    .rings-site-nav {
+        display: none;
+    }
+}

@@ -25,9 +25,11 @@ use crate::controls::ShellPage;
 use crate::custom;
 use crate::dweb;
 use crate::extension;
+use crate::footer;
 use crate::forms::select_value;
 use crate::generation::GenerationClock;
 use crate::guide;
+use crate::landing;
 use crate::node;
 use crate::node::DemoNode;
 use crate::node::PeerView;
@@ -194,11 +196,11 @@ fn use_node_state() -> NodeState {
         webview_onion_settings: (*webview_onion_settings).clone(),
         peers: use_state(Vec::<PeerView>::new),
         seed_url: use_state(|| {
-            extension::load_setting_with_legacy(
+            load_setting_or_default(
                 extension::SETTING_SEED_URL,
                 extension::LEGACY_SETTING_SEED_URL,
+                node::PUBLIC_SEED_ENDPOINT,
             )
-            .unwrap_or_default()
         }),
         webview_ready: use_state(|| false),
     }
@@ -211,7 +213,7 @@ fn use_link_state() -> LinkState {
             load_setting_or_default(
                 extension::SETTING_HTTP_ENDPOINT,
                 extension::LEGACY_SETTING_HTTP_ENDPOINT,
-                "http://127.0.0.1:50001",
+                node::PUBLIC_SEED_ENDPOINT,
             )
         }),
         sdp_remote_did: use_state(String::new),
@@ -531,10 +533,27 @@ fn render_app(ctx: AppRenderContext<'_>) -> Html {
     }
     let navigate_page = navigate_page_callback(ctx.shell);
     let header = controls::app_header(effective_page, navigate_page.clone(), !ctx.extension_mode);
-    if effective_page == ShellPage::Guide {
-        render_guide_shell(header, navigate_page, ctx.shell)
-    } else {
-        render_console_shell(ctx, header)
+    match document_body(effective_page, ctx.shell, &navigate_page) {
+        Some(body) => render_document_shell(effective_page, header, body, navigate_page),
+        None => render_console_shell(ctx, header),
+    }
+}
+
+/// The body of a document page, or `None` for the application screens. The pages partition
+/// into documents (landing, guide), which scroll and carry the site footer, and application
+/// screens (console, WebView), which fill the viewport.
+fn document_body(
+    page: ShellPage,
+    shell: &ShellState,
+    navigate_page: &Callback<ShellPage>,
+) -> Option<Html> {
+    match page {
+        ShellPage::Home => Some(landing::page(
+            navigate_page.clone(),
+            shell.active_architecture_layer.clone(),
+        )),
+        ShellPage::Guide => Some(guide::page(navigate_page.clone())),
+        ShellPage::Console | ShellPage::Webview => None,
     }
 }
 
@@ -567,16 +586,23 @@ fn dialog_actions(shell: &ShellState) -> controls::DialogActions {
     }
 }
 
-fn render_guide_shell(
+/// A document page: the header, then one scroll container holding the page body and the site
+/// footer. The container is keyed by the page so switching pages replaces it and the new page
+/// opens at its top instead of inheriting the previous page's scroll offset.
+fn render_document_shell(
+    page: ShellPage,
     header: Html,
+    body: Html,
     navigate_page: Callback<ShellPage>,
-    shell: &ShellState,
 ) -> Html {
     html! {
-        <main class="app-shell guide-shell">
+        <main class="app-shell document-shell">
             <style>{ styles::app_css() }</style>
             { header }
-            { guide::page(navigate_page, shell.active_architecture_layer.clone()) }
+            <div class="site-document" key={page.label()}>
+                { body }
+                { footer::site_footer(navigate_page) }
+            </div>
         </main>
     }
 }
@@ -788,7 +814,7 @@ fn current_shell_route() -> ShellRoute {
         };
     }
     route.unwrap_or(ShellRoute {
-        page: ShellPage::Guide,
+        page: ShellPage::Home,
         dialog: ActiveDialog::None,
     })
 }
@@ -813,6 +839,10 @@ fn is_webview_path(pathname: &str) -> bool {
 fn route_for_hash(hash: &str) -> Option<ShellRoute> {
     match hash.trim_start_matches('#').trim_start_matches('/') {
         "" | "home" => Some(ShellRoute {
+            page: ShellPage::Home,
+            dialog: ActiveDialog::None,
+        }),
+        "guide" => Some(ShellRoute {
             page: ShellPage::Guide,
             dialog: ActiveDialog::None,
         }),
@@ -920,7 +950,8 @@ fn shell_route_url(window: &Window, page: ShellPage, dialog: ActiveDialog) -> Op
 
 fn shell_route_fragment(page: ShellPage, dialog: ActiveDialog) -> Option<&'static str> {
     match (page, dialog) {
-        (ShellPage::Guide, ActiveDialog::None) => None,
+        (ShellPage::Home, ActiveDialog::None) => None,
+        (ShellPage::Guide, ActiveDialog::None) => Some("guide"),
         (ShellPage::Console, ActiveDialog::None) => Some("node"),
         (ShellPage::Webview, ActiveDialog::None) => Some("webview"),
         (_, ActiveDialog::Settings) => Some("node/settings"),
@@ -983,5 +1014,45 @@ mod tests {
     fn test_browser_webview_uses_the_local_gateway_witness() {
         assert!(!webview_gateway_ready(false, "did:ring:online", false));
         assert!(webview_gateway_ready(false, "", true));
+    }
+
+    /// `route_for_hash ∘ fragment = id` on every page without a dialog: the fragment a page
+    /// writes is the fragment that reads back as that page, the landing page included, whose
+    /// fragment is empty.
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn test_page_fragments_round_trip_through_the_hash_router() {
+        for page in [
+            ShellPage::Home,
+            ShellPage::Guide,
+            ShellPage::Console,
+            ShellPage::Webview,
+        ] {
+            let fragment = shell_route_fragment(page, ActiveDialog::None).unwrap_or("");
+            let route = route_for_hash(&format!("#{fragment}"));
+            assert!(
+                matches!(route, Some(ShellRoute { page: routed, dialog: ActiveDialog::None }) if routed == page),
+                "fragment {fragment:?} did not read back as its page"
+            );
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn test_guide_hash_routes_to_the_guide_page() {
+        assert!(matches!(
+            route_for_hash("#guide"),
+            Some(ShellRoute {
+                page: ShellPage::Guide,
+                dialog: ActiveDialog::None
+            })
+        ));
+        assert!(matches!(
+            route_for_hash("#/guide"),
+            Some(ShellRoute {
+                page: ShellPage::Guide,
+                dialog: ActiveDialog::None
+            })
+        ));
     }
 }
