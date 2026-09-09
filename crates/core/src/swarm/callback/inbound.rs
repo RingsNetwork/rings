@@ -226,9 +226,6 @@ impl InboundMailbox {
         drop((bytes, transport_capacity));
         self.handoffs.bump();
         ticket.release_admission_turn();
-        if !processor.pending_connection_allows_message(peer).await? {
-            return Ok(());
-        }
         let payload = if kind.is_chunk() {
             processor
                 .validate_preverified_payload(peer, authentication, &payload)
@@ -324,8 +321,9 @@ pub(super) const fn application_capacity_for_test() -> usize {
     INBOUND_MAILBOX_CAPACITY - INBOUND_RESERVED_TRANSFERS_PER_LANE * (INBOUND_LANE_COUNT - 1)
 }
 
-#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(super) const fn peer_capacity_for_test() -> usize {
+/// The frames one peer may have in flight: the bound an admitted peer and a peer awaiting
+/// admission share.
+pub(super) const fn peer_capacity() -> usize {
     INBOUND_PEER_CAPACITY
 }
 
@@ -759,7 +757,7 @@ async fn validate_event(
     event: &InboundEvent,
 ) -> std::result::Result<InboundValidation, InboundFailure> {
     if !processor
-        .pending_connection_allows_message(event.peer)
+        .pending_connection_admits(event.peer)
         .await
         .map_err(InboundFailure::Core)?
     {
@@ -767,7 +765,7 @@ async fn validate_event(
     }
     validate_payload(&processor.logical, event.peer, &event.payload).await?;
     let still_admitted = processor
-        .pending_connection_allows_message(event.peer)
+        .pending_connection_admits(event.peer)
         .await
         .map_err(InboundFailure::Core)?;
     Ok(if still_admitted {

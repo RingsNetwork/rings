@@ -28,6 +28,7 @@ use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 
 mod inbound;
+mod pre_admission;
 pub(crate) use inbound::InboundCapacity;
 pub(crate) use inbound::InboundLane;
 
@@ -43,10 +44,12 @@ pub(crate) const fn inbound_application_capacity_for_test() -> usize {
 
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) const fn inbound_peer_capacity_for_test() -> usize {
-    inbound::peer_capacity_for_test()
+    inbound::peer_capacity()
 }
 use inbound::InboundMailbox;
 use inbound::ReassemblyClock;
+use pre_admission::Arrival;
+use pre_admission::PreAdmissionHold;
 
 /// The application the swarm currently delivers to, replaceable through `Swarm::set_callback`;
 /// every delivery resolves it at delivery time.
@@ -313,6 +316,31 @@ pub(super) struct InboundProcessor {
     reassembler: Arc<FuturesMutex<MessageReassembler>>,
     reassembly_clock: ReassemblyClock,
     pending_attempt: Arc<Mutex<Option<PendingConnectionAttempt>>>,
+    /// Verified frames that arrived before this end admitted the connection; bounded by the
+    /// per-peer inbound capacity, so an unadmitted peer holds no more than an admitted one.
+    pre_admission: Arc<Mutex<PreAdmissionHold<HeldInboundFrame>>>,
+}
+
+/// One verified frame waiting for admission, with everything its delivery needs.
+///
+/// The peer's authentication is not kept: it is judged as of delivery, when the handshake it
+/// was waiting for has been admitted.
+struct HeldInboundFrame {
+    peer: Did,
+    bytes: Bytes,
+    prepared: PreparedInboundFrame,
+    transport_capacity: Option<InboundFrameCapacityLease>,
+}
+
+/// How the pending handshake bound to a callback disposes of a frame from `peer`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InboundGate {
+    /// No handshake is pending, or it has been admitted: the frame may be delivered.
+    Admitted,
+    /// The handshake is with this peer and not yet admitted: the frame is early, not wrong.
+    Unadmitted,
+    /// The frame does not belong to the pending handshake: it is refused.
+    Refused,
 }
 
 /// [InnerSwarmCallback] wraps [SharedSwarmCallback] with inner handling for a specific connection.
@@ -336,6 +364,21 @@ impl InboundProcessor {
             reassembler: Arc::new(FuturesMutex::new(reassembler)),
             reassembly_clock,
             pending_attempt: Arc::new(Mutex::new(None)),
+            pre_admission: Arc::new(Mutex::new(PreAdmissionHold::new(inbound::peer_capacity()))),
+        }
+    }
+
+    fn pre_admission(&self) -> std::sync::MutexGuard<'_, PreAdmissionHold<HeldInboundFrame>> {
+        self.pre_admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Forget every frame held for a handshake that will never be admitted.
+    fn discard_pre_admission_hold(&self) {
+        let discarded = self.pre_admission().discard();
+        if discarded > 0 {
+            tracing::debug!("discarded {discarded} frames held for a cancelled pending connection");
         }
     }
 
@@ -427,6 +470,11 @@ impl InnerSwarmCallback {
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn inbound_admitted_count_for_test(&self) -> usize {
         self.inbound.admitted_count_for_test()
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) fn pre_admission_held_count_for_test(&self) -> usize {
+        self.processor.pre_admission().len()
     }
 
     /// Resolve once `predicate` holds over the admitted inbound count,
@@ -545,7 +593,11 @@ impl InnerSwarmCallback {
         {
             return Ok(false);
         }
-        self.emit_connected_event_for_attempt(did, attempt).await
+        let connected = self.emit_connected_event_for_attempt(did, attempt).await?;
+        if connected {
+            self.drain_pre_admission_hold().await;
+        }
+        Ok(connected)
     }
 
     async fn emit_connected_event_for_attempt(
@@ -683,6 +735,7 @@ impl InnerSwarmCallback {
             .cancel_pending_connection(attempt)
             .await?
         {
+            self.processor.discard_pre_admission_hold();
             self.processor
                 .logical
                 .transport
@@ -707,6 +760,7 @@ impl InnerSwarmCallback {
             .cancel_pending_connection(attempt)
             .await?
         {
+            self.processor.discard_pre_admission_hold();
             self.processor
                 .logical
                 .transport
@@ -730,19 +784,19 @@ impl InnerSwarmCallback {
 }
 
 impl InboundProcessor {
-    pub(super) async fn pending_connection_allows_message(
+    async fn pending_connection_gate(
         &self,
         peer: Option<Did>,
-    ) -> crate::error::Result<bool> {
+    ) -> crate::error::Result<InboundGate> {
         let Some(attempt) = self.pending_attempt() else {
-            return Ok(true);
+            return Ok(InboundGate::Admitted);
         };
         let Some(peer) = peer else {
             tracing::warn!(
                 "ignoring message from unparsable peer; pending attempt belongs to {}",
                 attempt.peer()
             );
-            return Ok(false);
+            return Ok(InboundGate::Refused);
         };
         if attempt.peer() != peer {
             tracing::warn!(
@@ -753,17 +807,36 @@ impl InboundProcessor {
                 .transport
                 .cancel_pending_connection(attempt)
                 .await?;
-            return Ok(false);
+            self.discard_pre_admission_hold();
+            return Ok(InboundGate::Refused);
         }
-        if !self
+        if self
             .logical
             .transport
             .is_admitted_connection_attempt(attempt)
         {
-            tracing::debug!("ignoring message from {peer}; pending connection is not admitted yet");
-            return Ok(false);
+            Ok(InboundGate::Admitted)
+        } else {
+            Ok(InboundGate::Unadmitted)
         }
-        Ok(true)
+    }
+
+    /// Whether a frame from `peer` may be dispatched now: the gate judged as of this instant,
+    /// with an unadmitted or refused frame both answering no.
+    pub(super) async fn pending_connection_admits(
+        &self,
+        peer: Option<Did>,
+    ) -> crate::error::Result<bool> {
+        Ok(self.pending_connection_gate(peer).await? == InboundGate::Admitted)
+    }
+
+    /// Whether the handshake bound to this callback, if any, has been admitted by now.
+    fn pending_attempt_admitted(&self) -> bool {
+        self.pending_attempt().is_none_or(|attempt| {
+            self.logical
+                .transport
+                .is_admitted_connection_attempt(attempt)
+        })
     }
 
     pub(super) async fn decode_verified_payload(
@@ -892,17 +965,96 @@ impl InnerSwarmCallback {
                 return Err(error.into());
             }
         };
+        let admitted = match self.processor.pending_connection_gate(peer).await? {
+            InboundGate::Admitted => true,
+            InboundGate::Unadmitted => false,
+            InboundGate::Refused => return Ok(()),
+        };
+        let Some(peer) = peer else {
+            return self
+                .inbound
+                .submit_prepared(
+                    &self.processor,
+                    None,
+                    authentication,
+                    msg,
+                    prepared,
+                    transport_capacity,
+                )
+                .await
+                .map_err(Into::into);
+        };
+        let frame = HeldInboundFrame {
+            peer,
+            bytes: msg,
+            prepared,
+            transport_capacity,
+        };
+        let arrival = self.processor.pre_admission().arrive(frame, admitted);
+        match arrival {
+            Arrival::Pass(frame) => self.deliver_held_frame(frame).await.map_err(Into::into),
+            Arrival::Held => {
+                // The judgement and the admission commit are not one atomic step: admission may
+                // have committed, and drained, between them. Re-reading admission after the frame
+                // is queued closes that window, since the drain is exclusive and idempotent.
+                if self.processor.pending_attempt_admitted() {
+                    self.drain_pre_admission_hold().await;
+                } else {
+                    tracing::debug!(
+                        "holding message from {peer} until its pending connection is admitted"
+                    );
+                }
+                Ok(())
+            }
+            Arrival::Overflow(_) => {
+                tracing::debug!("dropping message from {peer}; the pre-admission hold is full");
+                Ok(())
+            }
+        }
+    }
+
+    /// Deliver one frame past the admission gate.
+    async fn deliver_held_frame(&self, frame: HeldInboundFrame) -> crate::error::Result<()> {
+        let HeldInboundFrame {
+            peer,
+            bytes,
+            prepared,
+            transport_capacity,
+        } = frame;
+        let authentication = self.processor.peer_authentication(peer);
         self.inbound
             .submit_prepared(
                 &self.processor,
-                peer,
+                Some(peer),
                 authentication,
-                msg,
+                bytes,
                 prepared,
                 transport_capacity,
             )
             .await
-            .map_err(Into::into)
+    }
+
+    /// Release every held frame in arrival order, once, to the delivery path.
+    ///
+    /// A failure to deliver one frame is logged and does not stop the drain: the frame was
+    /// accepted from the transport when it arrived, so there is no caller left to fail.
+    async fn drain_pre_admission_hold(&self) {
+        if !self.processor.pre_admission().begin_drain() {
+            return;
+        }
+        loop {
+            let Some(frame) = self.processor.pre_admission().drain_next() else {
+                return;
+            };
+            let peer = frame.peer;
+            if let Err(error) = self.deliver_held_frame(frame).await {
+                tracing::warn!(
+                    peer = %peer,
+                    error = ?error,
+                    "failed to deliver a message held until admission"
+                );
+            }
+        }
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
