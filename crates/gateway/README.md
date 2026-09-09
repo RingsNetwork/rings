@@ -8,6 +8,7 @@ or kill-switch mode.
 The crate is intentionally unavailable to WebAssembly targets. Browser builds remain Rings
 clients and do not contain the native gateway or server runtime.
 
+<!-- ANCHOR: operator-guide -->
 ## Traffic-selection contract
 
 The operator owns traffic selection. Let `C` be the normalized set in `included_routes`:
@@ -203,6 +204,7 @@ GET /gateway/status
 It reports interface, lifecycle, normalized capture routes, active-flow count, last error, and
 Onion-exit availability without granting route mutation authority.
 
+<!-- ANCHOR_END: operator-guide -->
 ## Library model API
 
 The lifecycle, parser, flow-table, and `TcpStack` types are public deterministic model and embedding

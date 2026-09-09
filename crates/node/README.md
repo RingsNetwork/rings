@@ -67,11 +67,11 @@ rings <command> [options]
 
 - `help`: displays the usage information.
 - `init`: creates a default configuration file, `~/.rings/config.yaml` unless `--location` says otherwise. This file can be edited to customize the behavior of the rings-node daemon. The generated file states every section explicitly, including a complete `gateway:` section with `enabled: false` (see [Native gateway](#native-gateway)).
-- `run`: runs the rings-node daemon. This command starts the daemon process, which will validate transactions, maintain the blockchain, and participate in consensus to earn rewards. By default, the daemon will use the "config.toml" file in the current directory for configuration. Use the "-c" or "--config" option to specify a custom configuration file.
+- `run`: runs the rings-node daemon. By default, the daemon will use `~/.rings/config.yaml` for configuration. Use the "-c" or "--config" option to specify a custom configuration file.
 
 ### Options
 
-- `-c, --config <FILE>`: specifies a custom configuration file to use instead of the default "config.toml". The configuration file is used to specify the network configuration, account settings, and other parameters that control the behavior of the rings-node daemon.
+- `-c, --config <FILE>`: specifies a custom configuration file to use instead of the default `~/.rings/config.yaml`. The configuration file is used to specify the network configuration, account settings, and other parameters that control the behavior of the rings-node daemon.
 - `-h, --help`: displays the usage information.
 - `-V, --version`: displays the version information for rings-node.
 
