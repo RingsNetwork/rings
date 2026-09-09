@@ -67,6 +67,12 @@ path-routed WebView gateway (`/webview`, `/webview/…`) is answered by the serv
 worker, and `404.html` is a copy of the shell so a cold load of such a path boots the
 app and registers it.
 
+Link previews (Open Graph and Twitter cards) are the `<meta>` tags in `index.html` and
+the card at `assets/social/rings-card.png`, rendered from `assets/social/card.svg` with
+`rsvg-convert card.svg -o rings-card.png`; the book's template carries the same tags.
+Crawlers do not run the app, so every hash route shares the landing page's card. The
+card is not part of the extension package.
+
 ## Package as a Chrome Extension
 
 Package the same Yew/Wasm application with the explicit repository script. A

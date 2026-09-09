@@ -23,7 +23,23 @@
 
         <meta name="description" content="{{ description }}">
         <meta name="viewport" content="width=device-width, initial-scale=1">
-        <meta name="theme-color" content="#ffffff">
+        <meta name="theme-color" content="#fbf4e6">
+
+        <!-- Link previews (Open Graph, Twitter cards): the chapter's title and the book's
+             description over the site's card, which the Pages deploy serves beside the book. -->
+        <meta property="og:type" content="article">
+        <meta property="og:site_name" content="Rings Network">
+        <meta property="og:title" content="{{ title }}">
+        <meta property="og:description" content="{{ description }}">
+        <meta property="og:image" content="https://rings.rs/assets/social/rings-card.png">
+        <meta property="og:image:width" content="1200">
+        <meta property="og:image:height" content="630">
+        <meta property="og:image:alt" content="Rings Network: a P2P network for the sovereign age">
+        <meta name="twitter:card" content="summary_large_image">
+        <meta name="twitter:title" content="{{ title }}">
+        <meta name="twitter:description" content="{{ description }}">
+        <meta name="twitter:image" content="https://rings.rs/assets/social/rings-card.png">
+        <meta name="twitter:image:alt" content="Rings Network: a P2P network for the sovereign age">
 
         {{#if favicon_svg}}
         <link rel="icon" href="{{ resource "favicon.svg" }}">

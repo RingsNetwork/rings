@@ -8,6 +8,25 @@
     <link data-trunk rel="copy-file" href="rings-webview-service-worker.js" />
     <link rel="icon" type="image/svg+xml" href="assets/icons/rings.svg" />
     <meta name="theme-color" content="#020c10" />
+    <!-- Link previews (Open Graph, Twitter cards). Crawlers do not run the app, so the shell is
+         described once, as the landing page; every hash route shares the card. The URLs are
+         absolute because a preview is fetched from the sharing site, not from this origin. -->
+    <meta name="description" content="Rings is a browser-native, structured peer-to-peer network: browser tabs and native daemons join one overlay, find each other by DID, and talk over direct WebRTC datachannels routed by a Chord DHT." />
+    <link rel="canonical" href="https://rings.rs/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Rings Network" />
+    <meta property="og:title" content="Rings - A P2P network for the sovereign age" />
+    <meta property="og:description" content="Browser tabs and native daemons join one overlay, find each other by DID, and talk over direct WebRTC datachannels routed by a Chord DHT." />
+    <meta property="og:url" content="https://rings.rs/" />
+    <meta property="og:image" content="https://rings.rs/assets/social/rings-card.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Rings Network: a P2P network for the sovereign age" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Rings - A P2P network for the sovereign age" />
+    <meta name="twitter:description" content="Browser tabs and native daemons join one overlay, find each other by DID, and talk over direct WebRTC datachannels routed by a Chord DHT." />
+    <meta name="twitter:image" content="https://rings.rs/assets/social/rings-card.png" />
+    <meta name="twitter:image:alt" content="Rings Network: a P2P network for the sovereign age" />
   </head>
   <body>
     <script src="/assets/webview-host.js"></script>
