@@ -10,9 +10,10 @@ src = "src"
 [build]
 build-dir = "book"
 
-# The theme is the built-in one plus `theme/rings.css` (palette, typography, the site bar) and
-# the `theme/header.hbs` partial that renders the site bar; `light` and `navy` are the two
-# themes the stylesheet restyles, so they are the defaults for each colour scheme.
+# The theme is the built-in one with `theme/index.hbs` (the default template carrying the
+# frontend's header and footer) and `theme/rings.css` (the frontend's palette, type, cards,
+# and pills); `light` and `navy` are the two themes the stylesheet restyles, so they are the
+# defaults for each colour scheme.
 [output.html]
 site-url = "/docs/"
 default-theme = "light"

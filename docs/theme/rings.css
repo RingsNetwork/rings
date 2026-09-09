@@ -1,24 +1,26 @@
 /*
- * Rings theme for the documentation book.
+ * Rings theme for the documentation book: the frontend's landing style over mdBook's layout.
  *
- * Loaded after mdBook's own stylesheets (`additional-css` in book.toml), so it only overrides:
- * the warm palette of rings.rs for the light theme and a slate palette for the dark one, the
- * site bar the `header.hbs` partial renders above the menu bar, and the typography the
- * frontend uses. mdBook sets the root font size to 62.5%, so 1rem is 10px throughout.
+ * Loaded after mdBook's own stylesheets (`additional-css` in book.toml), so it only overrides.
+ * The palette, type, cards, pills, code blocks, and footer are the ones the frontend defines
+ * in `frontend/src/styles/theme` (WARM: page #f3ead8 / #fbf4e6, panel #fffaf0, line #dfd0b7,
+ * ink #101828, accent #b42318); `theme/index.hbs` provides the header and footer markup this
+ * styles. mdBook sets the root font size to 62.5%, so 1rem is 10px throughout.
  */
 
 :root {
     --sidebar-target-width: 280px;
-    --content-max-width: 800px;
+    --content-max-width: 820px;
     --page-padding: 24px;
-    --menu-bar-height: 52px;
+    --menu-bar-height: 64px;
     --mono-font: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
     --code-font-size: 0.85em;
     --rings-font: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --rings-radius: 8px;
 }
 
-/* Palettes: the frontend's warm light theme, and one slate dark theme under mdBook's
-   preferred dark name so the theme picker and prefers-color-scheme both reach it. */
+/* Palettes: the frontend's warm light theme; a slate dark under mdBook's preferred dark name
+   so the theme picker and prefers-color-scheme both reach it. */
 
 .light,
 html:not(.js) {
@@ -36,7 +38,7 @@ html:not(.js) {
     --icons: #736453;
     --icons-hover: #101828;
 
-    --links: #0f766e;
+    --links: #b42318;
 
     --inline-code-color: #8a5a12;
 
@@ -68,7 +70,18 @@ html:not(.js) {
     --overlay-bg: rgba(16, 24, 40, 0.35);
     --sidebar-header-border-color: #b42318;
 
-    --rings-mark-bg: #111827;
+    /* The frontend's surfaces. */
+    --rings-page: #f3ead8;
+    --rings-panel: #fffaf0;
+    --rings-panel-alt: #fff6e6;
+    --rings-line: #dfd0b7;
+    --rings-line-strong: #d7c6aa;
+    --rings-ink: #101828;
+    --rings-ink-soft: #344054;
+    --rings-muted: #736453;
+    --rings-body: #475467;
+    --rings-accent: #b42318;
+    --rings-dark: #111827;
     --rings-mark-fg: #ffffff;
 }
 
@@ -87,7 +100,7 @@ html:not(.js) {
     --icons: #667085;
     --icons-hover: #f2f4f7;
 
-    --links: #5eead4;
+    --links: #f97066;
 
     --inline-code-color: #fdb022;
 
@@ -119,14 +132,28 @@ html:not(.js) {
     --overlay-bg: rgba(16, 24, 40, 0.6);
     --sidebar-header-border-color: #f97066;
 
-    --rings-mark-bg: #1f2937;
+    --rings-page: #0f172a;
+    --rings-panel: #101828;
+    --rings-panel-alt: #1d2939;
+    --rings-line: #1d2939;
+    --rings-line-strong: #344054;
+    --rings-ink: #f2f4f7;
+    --rings-ink-soft: #d0d5dd;
+    --rings-muted: #98a2b3;
+    --rings-body: #98a2b3;
+    --rings-accent: #f97066;
+    --rings-dark: #1f2937;
     --rings-mark-fg: #ffffff;
 }
 
-/* Typography */
+/* Type */
 
 html {
     font-family: var(--rings-font);
+}
+
+.content main {
+    color: var(--rings-ink-soft);
 }
 
 .content h1,
@@ -134,145 +161,174 @@ html {
 .content h3,
 .content h4 {
     font-family: var(--rings-font);
-    color: var(--fg);
-    letter-spacing: -0.01em;
+    color: var(--rings-ink);
+    letter-spacing: 0;
 }
 
 .content h1 {
-    margin-block-end: 1.6rem;
+    margin-block: 0.4em 0.7em;
     font-size: 3.4rem;
     font-weight: 800;
-    letter-spacing: -0.02em;
-    line-height: 1.1;
+    line-height: 1.06;
 }
 
 .content h2 {
-    padding-block-end: 0.6rem;
-    border-block-end: 1px solid var(--table-border-color);
-    font-size: 2.4rem;
+    margin-block-start: 2.4em;
+    padding-block-end: 0.5em;
+    border-block-end: 1px solid var(--rings-line);
+    font-size: 2.2rem;
     font-weight: 800;
+    line-height: 1.15;
 }
 
 .content h3 {
-    font-size: 1.9rem;
-    font-weight: 700;
+    font-size: 1.7rem;
+    font-weight: 800;
+    line-height: 1.25;
 }
 
 .content h4 {
-    font-size: 1.6rem;
+    font-size: 1.5rem;
     font-weight: 700;
 }
 
 .content p,
 .content li {
-    line-height: 1.75;
+    line-height: 1.72;
+}
+
+.content p {
+    color: var(--rings-body);
+}
+
+.content strong {
+    color: var(--rings-ink);
 }
 
 .content a {
+    color: var(--links);
+    font-weight: 600;
+    text-decoration: none;
+}
+
+.content a:hover {
+    text-decoration: underline;
     text-underline-offset: 0.2em;
 }
 
+/* Code: the landing page's dark block on every theme (index.hbs loads the dark highlight
+   sheet for the light theme too), the inline form on the panel-alt surface. */
+
 .content :not(pre) > code {
     padding: 0.1em 0.4em;
+    border: 1px solid var(--rings-line);
     border-radius: 4px;
-    background: var(--quote-bg);
+    background: var(--rings-panel-alt);
+    color: var(--inline-code-color);
 }
 
 .content pre {
-    border: 1px solid var(--quote-border);
-    border-radius: 8px;
+    border: 1px solid #1f2937;
+    border-radius: var(--rings-radius);
+    background: #101828;
 }
 
-.content pre > code {
-    padding: 1.6rem;
-    line-height: 1.6;
+.content pre > code,
+.content pre > code.hljs {
+    padding: 1.6rem 1.8rem;
+    background: #101828;
+    color: #f2f4f7;
+    line-height: 1.65;
 }
+
+.content pre > .buttons button {
+    border-color: #344054;
+    background: #1d2939;
+    color: #d0d5dd;
+}
+
+/* Blocks: cards with the landing's line, radius, and panel. */
 
 .content blockquote {
-    border-radius: 8px;
-    border-inline-start: 3px solid var(--sidebar-active);
+    margin-inline: 0;
+    border: 1px solid var(--rings-line);
+    border-inline-start: 3px solid var(--rings-accent);
+    border-radius: var(--rings-radius);
+    background: var(--rings-panel);
 }
 
 .content table {
     border-collapse: separate;
     border-spacing: 0;
-    border: 1px solid var(--table-border-color);
-    border-radius: 8px;
+    width: 100%;
+    border: 1px solid var(--rings-line);
+    border-radius: var(--rings-radius);
+    background: var(--rings-panel);
 }
 
 .content table th,
 .content table td {
-    padding: 0.8rem 1.2rem;
+    padding: 0.9rem 1.2rem;
     border: 0;
-    border-block-end: 1px solid var(--table-border-color);
+    border-block-end: 1px solid var(--rings-line);
     text-align: start;
+    vertical-align: top;
 }
 
 .content table th {
-    background: var(--table-header-bg);
-    font-weight: 700;
+    background: var(--rings-page);
+    color: var(--rings-muted);
+    font-size: 1.2rem;
+    font-weight: 900;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
 }
 
 .content table tr:last-child td {
     border-block-end: 0;
 }
 
-/* The brand mark on the landing chapter: the icon is white, so it sits on the same dark tile
-   the frontend header gives it. */
+.content table tbody tr:nth-child(2n) {
+    background: transparent;
+}
+
+.content hr {
+    border: 0;
+    border-block-start: 1px solid var(--rings-line);
+}
+
+/* The brand mark: the icon is white, so it sits on the dark tile the frontend gives it. */
+
 .rings-mark {
+    display: grid;
+    box-sizing: border-box;
+    width: 34px;
+    height: 34px;
+    flex: 0 0 auto;
+    place-items: center;
+    border-radius: var(--rings-radius);
+    background: var(--rings-dark);
+}
+
+.rings-mark img {
+    display: block;
+    width: 23px;
+    height: 23px;
+    object-fit: contain;
+}
+
+.content img.rings-mark {
     box-sizing: border-box;
     width: 56px;
     height: 56px;
     padding: 10px;
     border-radius: 12px;
-    background: var(--rings-mark-bg);
+    background: var(--rings-dark);
 }
 
-/* Chrome: menu bar and sidebar */
-
-#mdbook-menu-bar {
-    border-block-end-color: var(--table-border-color);
-}
-
-.menu-title {
-    font-family: var(--rings-font);
-    font-weight: 800;
-    letter-spacing: -0.01em;
-}
-
-.sidebar {
-    border-inline-end: 1px solid var(--sidebar-spacer);
-    font-size: 0.9em;
-}
-
-.chapter {
-    line-height: 2;
-}
-
-.chapter li.part-title {
-    margin-block-start: 1.6em;
-    color: var(--sidebar-fg);
-    font-size: 0.75em;
-    font-weight: 800;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    opacity: 0.8;
-}
-
-.chapter li a.active {
-    font-weight: 700;
-}
-
-.chapter li a:hover {
-    color: var(--sidebar-active);
-    text-decoration: none;
-}
-
-/* Site bar: rendered by theme/header.hbs above the menu bar, spanning the page like it.
-   The built-in layout pulls the page up by one menu-bar height so that the sticky hover
-   placeholder sits above the viewport; with a bar in front of it that pull would hide the
-   bar instead, so the page starts at the top and the placeholder (only useful when the menu
-   bar is not sticky, and it always is here) is dropped. */
+/* Header: the frontend's landing header. The built-in layout pulls the page up by one
+   menu-bar height for a sticky hover placeholder, which this header does not use, so the
+   page starts at the top and the placeholder is dropped; the header itself stays sticky. */
 
 .page {
     margin-block-start: 0;
@@ -282,82 +338,448 @@ html {
     display: none;
 }
 
-.rings-site-bar {
+#mdbook-menu-bar.rings-header,
+#mdbook-menu-bar.rings-header.sticky,
+html.sidebar-visible #mdbook-menu-bar.rings-header {
+    position: sticky;
+    top: 0 !important;
     display: flex;
-    min-height: 56px;
+    min-height: var(--menu-bar-height);
+    flex-wrap: nowrap;
     align-items: center;
-    justify-content: space-between;
     gap: 16px;
-    margin: 0 calc(0px - var(--page-padding));
     padding: 0 var(--page-padding);
-    border-block-end: 1px solid var(--table-border-color);
-    background: var(--sidebar-bg);
+    border-block-end: 1px solid var(--rings-line);
+    background: var(--bg);
+    box-shadow: 0 1px 0 rgba(17, 24, 39, 0.04);
     font-family: var(--rings-font);
 }
 
-.rings-site-brand {
+#mdbook-menu-bar.rings-header.bordered {
+    border-block-end-color: var(--rings-line-strong);
+}
+
+.rings-header .menu-title {
+    display: none;
+}
+
+.rings-brand {
     display: inline-flex;
+    min-width: 0;
     align-items: center;
     gap: 10px;
-    color: var(--fg);
+    color: var(--rings-ink);
     text-decoration: none;
 }
 
-.rings-site-brand img {
-    box-sizing: border-box;
-    width: 32px;
-    height: 32px;
-    padding: 5px;
-    border-radius: 8px;
-    background: var(--rings-mark-bg);
-}
-
-.rings-site-brand > span {
+.rings-brand-text {
     display: grid;
     gap: 1px;
+    min-width: 0;
 }
 
-.rings-site-brand strong {
-    font-size: 1.4rem;
+.rings-brand-text strong {
+    overflow: hidden;
+    font-size: 1.47rem;
+    line-height: 1.1;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.rings-brand-text > span {
+    color: var(--rings-muted);
+    font-size: 1.15rem;
     line-height: 1.1;
 }
 
-.rings-site-brand > span > span {
-    font-size: 1.1rem;
-    line-height: 1.1;
-    opacity: 0.7;
-}
-
-.rings-site-nav {
-    display: flex;
-    flex-wrap: wrap;
+.rings-nav {
+    display: grid;
+    margin-inline-start: auto;
+    grid-auto-flow: column;
+    grid-auto-columns: max-content;
     gap: 6px;
 }
 
-.rings-site-nav a {
+.rings-nav a {
     display: inline-flex;
-    min-height: 30px;
+    box-sizing: border-box;
+    height: 34px;
     align-items: center;
     padding: 0 10px;
-    border: 1px solid var(--table-border-color);
-    border-radius: 6px;
-    background: var(--bg);
-    color: var(--fg);
+    border: 1px solid var(--rings-line-strong);
+    border-radius: var(--rings-radius);
+    background: var(--rings-panel);
+    color: var(--rings-ink-soft);
     font-family: var(--mono-font);
-    font-size: 1.1rem;
-    font-weight: 700;
+    font-size: 12px;
+    font-weight: 800;
+    line-height: 1;
     text-decoration: none;
     text-transform: uppercase;
 }
 
-.rings-site-nav a:hover {
-    border-color: var(--rings-mark-bg);
-    background: var(--rings-mark-bg);
+.rings-nav a.active,
+.rings-nav a:hover {
+    border-color: var(--rings-dark);
+    background: var(--rings-dark);
     color: var(--rings-mark-fg);
 }
 
-@media only screen and (max-width: 720px) {
-    .rings-site-nav {
+.rings-tools {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 2px;
+    margin-inline-start: 8px;
+    padding-inline-start: 12px;
+    border-inline-start: 1px solid var(--rings-line);
+}
+
+.rings-tools .left-buttons,
+.rings-tools .right-buttons {
+    display: flex;
+    align-items: center;
+    margin: 0;
+}
+
+/* The built-in rules for these are id-qualified (`#mdbook-menu-bar .icon-button`, with a
+   line height of one menu bar and side padding), so these are too. */
+
+#mdbook-menu-bar.rings-header .icon-button,
+#mdbook-menu-bar.rings-header .right-buttons a {
+    display: inline-flex;
+    width: 34px;
+    height: 34px;
+    align-items: center;
+    justify-content: center;
+    margin: 0;
+    padding: 0;
+    border-radius: var(--rings-radius);
+    color: var(--icons);
+    line-height: 1;
+}
+
+#mdbook-menu-bar.rings-header .icon-button:hover,
+#mdbook-menu-bar.rings-header .right-buttons a:hover {
+    background: var(--rings-panel-alt);
+    color: var(--icons-hover);
+}
+
+#mdbook-menu-bar.rings-header .fa-svg {
+    display: block;
+    width: 16px;
+    height: 16px;
+    padding: 0;
+    line-height: 1;
+}
+
+.theme-popup {
+    top: calc(var(--menu-bar-height) - 6px);
+    border: 1px solid var(--rings-line-strong);
+    border-radius: var(--rings-radius);
+    background: var(--rings-panel);
+    box-shadow: 0 12px 28px rgba(17, 24, 39, 0.12);
+    font-family: var(--rings-font);
+}
+
+.theme-popup .theme {
+    font-size: 1.3rem;
+}
+
+/* Search */
+
+#mdbook-searchbar {
+    border: 1px solid var(--rings-line-strong);
+    border-radius: var(--rings-radius);
+    background: var(--rings-panel);
+    color: var(--rings-ink);
+    font-family: var(--rings-font);
+    box-shadow: none;
+}
+
+#mdbook-searchbar:focus,
+#mdbook-searchbar.active {
+    border-color: var(--rings-dark);
+    box-shadow: none;
+}
+
+.searchresults-header {
+    color: var(--rings-muted);
+    font-size: 1.2rem;
+    font-weight: 900;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+ul#mdbook-searchresults li {
+    border-radius: var(--rings-radius);
+}
+
+/* Sidebar: the landing's panel, with part titles as the landing's kickers and the current
+   chapter as its dark pill. */
+
+.sidebar {
+    border-inline-end: 1px solid var(--rings-line);
+    background: var(--rings-page);
+    font-family: var(--rings-font);
+    font-size: 0.875em;
+}
+
+.sidebar .sidebar-scrollbox {
+    padding: 16px 14px 40px;
+}
+
+.chapter {
+    line-height: 1.9;
+}
+
+.chapter li.part-title {
+    margin-block: 1.8em 0.4em;
+    padding-inline: 8px;
+    color: var(--rings-accent);
+    font-size: 0.74em;
+    font-weight: 900;
+    letter-spacing: 0.08em;
+    line-height: 1.4;
+    text-transform: uppercase;
+}
+
+.chapter li.part-title:first-child {
+    margin-block-start: 0.4em;
+}
+
+.chapter li.chapter-item {
+    margin-block-start: 0.15em;
+}
+
+.chapter li a {
+    display: block;
+    padding: 2px 8px;
+    border-radius: 6px;
+    color: var(--rings-ink-soft);
+}
+
+.chapter li a:hover {
+    background: var(--rings-panel);
+    color: var(--rings-ink);
+    text-decoration: none;
+}
+
+.chapter li a.active {
+    background: var(--rings-dark);
+    color: var(--rings-mark-fg);
+    font-weight: 700;
+}
+
+.chapter li > ol {
+    margin-inline-start: 8px;
+}
+
+.chapter .on-this-page li a {
+    padding-block: 1px;
+    color: var(--rings-muted);
+    font-size: 0.92em;
+}
+
+.chapter .on-this-page li a:hover,
+.chapter .on-this-page li a.current-header {
+    background: transparent;
+    color: var(--rings-accent);
+}
+
+.sidebar .sidebar-resize-handle .sidebar-resize-indicator {
+    background: var(--rings-line);
+}
+
+.sidebar .sidebar-resize-handle .sidebar-resize-indicator::before,
+.sidebar .sidebar-resize-handle .sidebar-resize-indicator::after {
+    border-color: var(--rings-line-strong);
+}
+
+/* Chapter navigation arrows */
+
+.nav-chapters {
+    color: var(--rings-muted);
+}
+
+.nav-chapters:hover {
+    background: var(--rings-panel-alt);
+    color: var(--rings-ink);
+}
+
+.mobile-nav-chapters {
+    border: 1px solid var(--rings-line-strong);
+    border-radius: var(--rings-radius);
+    background: var(--rings-panel);
+    color: var(--rings-ink-soft);
+}
+
+.mobile-nav-chapters:hover {
+    background: var(--rings-dark);
+    color: var(--rings-mark-fg);
+}
+
+/* Footer: the frontend's site footer, spanning the page like the header. */
+
+.rings-footer {
+    display: grid;
+    gap: 36px;
+    margin: 64px calc(0px - var(--page-padding)) 0;
+    padding: 56px var(--page-padding) 36px;
+    border-block-start: 1px solid var(--rings-line);
+    background: #101828;
+    color: #d0d5dd;
+    font-family: var(--rings-font);
+    font-size: 1.4rem;
+}
+
+.rings-footer-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.5fr) repeat(3, minmax(0, 1fr));
+    gap: 32px;
+}
+
+.rings-footer-brand {
+    display: grid;
+    max-width: 380px;
+    align-content: start;
+    gap: 10px;
+}
+
+.rings-footer .rings-mark {
+    width: 38px;
+    height: 38px;
+    background: #1f2937;
+}
+
+.rings-footer-brand strong {
+    color: #fff;
+    font-size: 1.6rem;
+}
+
+.rings-footer-brand p {
+    margin: 0;
+    color: #98a2b3;
+    line-height: 1.6;
+}
+
+.rings-footer-column {
+    display: grid;
+    align-content: start;
+    gap: 12px;
+}
+
+.rings-footer-column h3 {
+    margin: 0;
+    color: #fff;
+    font-size: 1.18rem;
+    font-weight: 900;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.rings-footer-column ul {
+    display: grid;
+    gap: 8px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.rings-footer-column a {
+    color: #d0d5dd;
+    font-weight: 500;
+    text-decoration: none;
+}
+
+.rings-footer-column a:hover {
+    color: #fff;
+    text-decoration: underline;
+}
+
+.rings-footer-notices {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 20px 28px;
+    margin: 0;
+    padding-block-start: 28px;
+    border-block-start: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.rings-footer-notices > div {
+    display: grid;
+    gap: 6px;
+}
+
+.rings-footer-notices dt {
+    color: #fff;
+    font-size: 1.25rem;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.rings-footer-notices dd {
+    margin: 0;
+    color: #98a2b3;
+    font-size: 1.28rem;
+    line-height: 1.6;
+}
+
+.rings-footer-bottom {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 8px 24px;
+    padding-block-start: 20px;
+    border-block-start: 1px solid rgba(255, 255, 255, 0.1);
+    color: #667085;
+    font-size: 1.25rem;
+}
+
+/* Narrow viewports: the header keeps the brand and the controls; the page links live on the
+   site itself, and the footer folds to two columns, then one. */
+
+@media only screen and (max-width: 1080px) {
+    .rings-footer-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media only screen and (max-width: 860px) {
+    .rings-nav {
         display: none;
+    }
+
+    .rings-tools {
+        margin-inline-start: auto;
+    }
+
+    .rings-footer-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* Phones: the mark alone stands for the brand, and the controls tighten so the header is one
+   row (34px mark, six 30px controls, the paddings: 268px on a 375px viewport). */
+
+@media only screen and (max-width: 520px) {
+    :root {
+        --page-padding: 16px;
+    }
+
+    .rings-brand-text {
+        display: none;
+    }
+
+    .rings-tools {
+        gap: 0;
+        margin-inline-start: auto;
+        padding-inline-start: 6px;
+    }
+
+    #mdbook-menu-bar.rings-header .icon-button,
+    #mdbook-menu-bar.rings-header .right-buttons a {
+        width: 30px;
     }
 }
