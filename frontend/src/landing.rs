@@ -2,8 +2,8 @@
 
 use yew::prelude::*;
 
-use crate::controls::ProjectLink;
 use crate::controls::ShellPage;
+use crate::links::ProjectLink;
 
 pub(crate) fn page(
     navigate_page: Callback<ShellPage>,

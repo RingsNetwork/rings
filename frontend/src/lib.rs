@@ -19,6 +19,7 @@ mod generation;
 mod guide;
 mod hex;
 mod landing;
+mod links;
 mod node;
 mod onion;
 mod peer_sync;

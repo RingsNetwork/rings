@@ -8,10 +8,11 @@
 
 use yew::prelude::*;
 
-use crate::controls::docs_url;
-use crate::controls::external_anchor;
-use crate::controls::ProjectLink;
 use crate::controls::ShellPage;
+use crate::links::Chapter;
+use crate::links::ProjectLink;
+use crate::links::SiteLink;
+use crate::node::public_seed_endpoint;
 
 pub(crate) fn page(navigate_page: Callback<ShellPage>) -> Html {
     html! {
@@ -81,82 +82,12 @@ fn further_reading_section(navigate_page: &Callback<ShellPage>) -> Html {
     }
 }
 
-/// Chapters of the book the guide condenses, addressed by their path inside the book.
-#[derive(Clone, Copy)]
-enum Chapter {
-    InstallNativeNode,
-    HostNativeNode,
-    Cli,
-    BuildForWasm,
-    BrowserNode,
-    Ffi,
-    JsonRpc,
-    ConfigYaml,
-    Architecture,
-    ForAgents,
-}
-
-impl Chapter {
-    fn label(self) -> &'static str {
-        match self {
-            Self::InstallNativeNode => "Install",
-            Self::HostNativeNode => "Host a node",
-            Self::Cli => "CLI operations",
-            Self::BuildForWasm => "Build for Wasm",
-            Self::BrowserNode => "Browser node & extension",
-            Self::Ffi => "Embed via FFI",
-            Self::JsonRpc => "JSON-RPC API",
-            Self::ConfigYaml => "config.yaml",
-            Self::Architecture => "Architecture",
-            Self::ForAgents => "For AI agents",
-        }
-    }
-
-    fn href(self) -> &'static str {
-        match self {
-            Self::InstallNativeNode => docs_url!("install-a-native-node.html"),
-            Self::HostNativeNode => docs_url!("host-a-native-node.html"),
-            Self::Cli => docs_url!("cli.html"),
-            Self::BuildForWasm => docs_url!("build-for-wasm.html"),
-            Self::BrowserNode => docs_url!("browser-node.html"),
-            Self::Ffi => docs_url!("ffi.html"),
-            Self::JsonRpc => docs_url!("jsonrpc.html"),
-            Self::ConfigYaml => docs_url!("advanced-topic/config.yaml.html"),
-            Self::Architecture => docs_url!("advanced-topic/architecture.html"),
-            Self::ForAgents => docs_url!("llms.html"),
-        }
-    }
-
-    fn anchor(self, class: &'static str) -> Html {
-        external_anchor(class, self.href(), self.label())
-    }
-}
-
-/// A destination a guide card or row points at: a chapter of the book, a project resource,
-/// or a page of this shell. The three are one sum type so a card's links are one list.
-#[derive(Clone, Copy)]
-enum GuideLink {
-    Chapter(Chapter),
-    Project(ProjectLink),
-    Page(ShellPage),
-}
-
-impl GuideLink {
-    fn render(self, class: &'static str, navigate_page: &Callback<ShellPage>) -> Html {
-        match self {
-            Self::Chapter(chapter) => chapter.anchor(class),
-            Self::Project(link) => link.anchor(class),
-            Self::Page(page) => page.button(class, false, navigate_page),
-        }
-    }
-}
-
 /// One way to run a node: what it is, and where to install, run, and read about it.
 struct Runtime {
     label: &'static str,
     title: &'static str,
     body: &'static str,
-    links: &'static [GuideLink],
+    links: &'static [SiteLink],
 }
 
 impl Runtime {
@@ -180,9 +111,9 @@ const RUNTIMES: [Runtime; 4] = [
         title: "Native node",
         body: "The rings daemon joins the overlay from a terminal, serves a JSON-RPC API on the loopback interface, and can seed other peers. Install it from crates.io or a prebuilt release for macOS and Linux.",
         links: &[
-            GuideLink::Chapter(Chapter::InstallNativeNode),
-            GuideLink::Chapter(Chapter::HostNativeNode),
-            GuideLink::Project(ProjectLink::Releases),
+            SiteLink::Chapter(Chapter::InstallNativeNode),
+            SiteLink::Chapter(Chapter::HostNativeNode),
+            SiteLink::Project(ProjectLink::Releases),
         ],
     },
     Runtime {
@@ -190,9 +121,9 @@ const RUNTIMES: [Runtime; 4] = [
         title: "Wasm node",
         body: "The same node compiled to WebAssembly. Run it in the hosted console on this site, or embed the npm package in your own page and drive it from JavaScript.",
         links: &[
-            GuideLink::Page(ShellPage::Console),
-            GuideLink::Chapter(Chapter::BuildForWasm),
-            GuideLink::Project(ProjectLink::Npm),
+            SiteLink::Page(ShellPage::Console),
+            SiteLink::Chapter(Chapter::BuildForWasm),
+            SiteLink::Project(ProjectLink::Npm),
         ],
     },
     Runtime {
@@ -200,8 +131,8 @@ const RUNTIMES: [Runtime; 4] = [
         title: "Browser extension",
         body: "The frontend packaged as a Chrome MV3 extension: a side panel over a retained node, a wallet bridge for MetaMask and Phantom, and the Onion WebView.",
         links: &[
-            GuideLink::Chapter(Chapter::BrowserNode),
-            GuideLink::Project(ProjectLink::Repository),
+            SiteLink::Chapter(Chapter::BrowserNode),
+            SiteLink::Project(ProjectLink::Repository),
         ],
     },
     Runtime {
@@ -209,8 +140,8 @@ const RUNTIMES: [Runtime; 4] = [
         title: "C FFI",
         body: "Drive a node from Python, Swift, Kotlin, or any host with a C ABI through rings.h: create a provider with a signer callback, listen, and issue the same JSON-RPC methods.",
         links: &[
-            GuideLink::Chapter(Chapter::Ffi),
-            GuideLink::Chapter(Chapter::JsonRpc),
+            SiteLink::Chapter(Chapter::Ffi),
+            SiteLink::Chapter(Chapter::JsonRpc),
         ],
     },
 ];
@@ -247,14 +178,32 @@ const STEPS: [Step; 3] = [
         index: "01",
         title: "Run a native node",
         summary: "Install the CLI, write the default configuration, and start the daemon. Then join the overlay through a seed node and list the peers it found.",
-        code: "cargo install rings-node\nrings init   # writes ~/.rings/config.yaml\nrings run    # foreground; JSON-RPC on 127.0.0.1:50000\n\n# in a second terminal\nrings connect node https://node.rings.rs\nrings peer list",
+        code: concat!(
+            "cargo install rings-node\n",
+            "rings init   # writes ~/.rings/config.yaml\n",
+            "rings run    # foreground; JSON-RPC on 127.0.0.1:50000\n",
+            "\n",
+            "# in a second terminal\n",
+            "rings connect node ", public_seed_endpoint!(), "\n",
+            "rings peer list",
+        ),
         chapter: Chapter::Cli,
     },
     Step {
         index: "02",
         title: "Start a browser node",
         summary: "Load the npm package, construct a provider from your account and a signer, start listening, and join through a seed node's HTTP endpoint.",
-        code: "import init, { Provider } from \"@ringsnetwork/rings-node\";\n\nawait init();\nconst provider = await new Provider(\n  1, \"stun://stun.l.google.com:19302\", 15,\n  account, \"eip191\", signer,\n);\nprovider.listen();\nawait provider.connect_peer_via_http(\"https://node.rings.rs\");",
+        code: concat!(
+            "import init, { Provider } from \"@ringsnetwork/rings-node\";\n",
+            "\n",
+            "await init();\n",
+            "const provider = await new Provider(\n",
+            "  1, \"stun://stun.l.google.com:19302\", 15,\n",
+            "  account, \"eip191\", signer,\n",
+            ");\n",
+            "provider.listen();\n",
+            "await provider.connect_peer_via_http(\"", public_seed_endpoint!(), "\");",
+        ),
         chapter: Chapter::BuildForWasm,
     },
     Step {
@@ -266,11 +215,11 @@ const STEPS: [Step; 3] = [
     },
 ];
 
-const FURTHER_READING: [GuideLink; 6] = [
-    GuideLink::Chapter(Chapter::JsonRpc),
-    GuideLink::Chapter(Chapter::ConfigYaml),
-    GuideLink::Chapter(Chapter::Architecture),
-    GuideLink::Project(ProjectLink::Security),
-    GuideLink::Project(ProjectLink::Whitepaper),
-    GuideLink::Chapter(Chapter::ForAgents),
+const FURTHER_READING: [SiteLink; 6] = [
+    SiteLink::Chapter(Chapter::JsonRpc),
+    SiteLink::Chapter(Chapter::ConfigYaml),
+    SiteLink::Chapter(Chapter::Architecture),
+    SiteLink::Project(ProjectLink::Security),
+    SiteLink::Project(ProjectLink::Whitepaper),
+    SiteLink::Chapter(Chapter::ForAgents),
 ];

@@ -473,8 +473,15 @@ html.sidebar-visible #mdbook-menu-bar.rings-header {
     line-height: 1;
 }
 
+/* The popup is positioned against the nearest positioned ancestor; the built-in layout puts
+   it at the bar's left edge, where its buttons are, so here the controls group anchors it. */
+.rings-tools .left-buttons {
+    position: relative;
+}
+
 .theme-popup {
-    top: calc(var(--menu-bar-height) - 6px);
+    left: 0;
+    top: calc(100% + 6px);
     border: 1px solid var(--rings-line-strong);
     border-radius: var(--rings-radius);
     background: var(--rings-panel);

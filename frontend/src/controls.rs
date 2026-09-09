@@ -11,6 +11,7 @@ use crate::browser_api::js_string_field;
 use crate::extension;
 use crate::forms::text_input;
 use crate::forms::text_input_with_suggestions;
+use crate::links::ProjectLink;
 use crate::node::PeerView;
 use crate::node::SEED_ENDPOINTS;
 use crate::topology;
@@ -40,12 +41,23 @@ impl ShellPage {
     /// a header destination.
     pub(crate) const HEADER: [Self; 2] = [Self::Home, Self::Guide];
 
-    pub(crate) fn label(self) -> &'static str {
+    fn label(self) -> &'static str {
         match self {
             Self::Home => "Home",
             Self::Guide => "Guide",
             Self::Console => "Node",
             Self::Webview => "WebView",
+        }
+    }
+
+    /// The page's name in URLs and DOM keys: the hash fragment that addresses it (the landing
+    /// page's is the empty fragment, see `app::routes`) and the identity of its document.
+    pub(crate) const fn slug(self) -> &'static str {
+        match self {
+            Self::Home => "home",
+            Self::Guide => "guide",
+            Self::Console => "node",
+            Self::Webview => "webview",
         }
     }
 
@@ -71,98 +83,6 @@ impl ShellPage {
                 { self.label() }
             </button>
         }
-    }
-}
-
-/// Absolute URL of a chapter of the documentation book, from its path inside the book.
-/// Absolute because the same shell runs from `rings.rs` and from an extension origin, where a
-/// site-relative `/docs/` would resolve inside the extension.
-macro_rules! docs_url {
-    ($chapter:literal) => {
-        concat!("https://rings.rs/docs/", $chapter)
-    };
-}
-pub(crate) use docs_url;
-
-/// Destinations outside the shell that the landing hero, the header, the guide, and the footer
-/// link to. One finite index set, rendered by [`ProjectLink::anchor`] into whichever class the
-/// surrounding surface styles: the set of links is defined once, the surfaces differ only in
-/// the subset they present and its class (`anchor : ProjectLink × Class → Html`).
-#[derive(Clone, Copy, Eq, PartialEq)]
-pub(crate) enum ProjectLink {
-    Docs,
-    Repository,
-    Whitepaper,
-    Releases,
-    CratesIo,
-    Npm,
-    Security,
-    Roadmap,
-    Sponsor,
-    License,
-    LlmsTxt,
-}
-
-impl ProjectLink {
-    /// The links the landing hero presents beside its call to action.
-    pub(crate) const HERO: [Self; 3] = [Self::Docs, Self::Repository, Self::Whitepaper];
-
-    /// The links the header presents after the page buttons. The repository and the node
-    /// console are entered from the landing page, so the header carries only the two
-    /// destinations the landing page does not lead to on its own.
-    pub(crate) const HEADER: [Self; 2] = [Self::Docs, Self::Whitepaper];
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Docs => "Docs",
-            Self::Repository => "GitHub",
-            Self::Whitepaper => "Whitepaper",
-            Self::Releases => "Releases",
-            Self::CratesIo => "crates.io",
-            Self::Npm => "npm",
-            Self::Security => "Security model",
-            Self::Roadmap => "Roadmap",
-            Self::Sponsor => "Sponsor",
-            Self::License => "License",
-            Self::LlmsTxt => "llms.txt",
-        }
-    }
-
-    /// Absolute URLs, for the reason [`docs_url!`] gives.
-    fn href(self) -> &'static str {
-        match self {
-            Self::Docs => docs_url!(""),
-            Self::Repository => "https://github.com/RingsNetwork/rings",
-            Self::Whitepaper => {
-                "https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf"
-            }
-            Self::Releases => "https://github.com/RingsNetwork/rings/releases",
-            Self::CratesIo => "https://crates.io/crates/rings-node",
-            Self::Npm => "https://www.npmjs.com/package/@ringsnetwork/rings-node",
-            Self::Security => "https://github.com/RingsNetwork/rings/blob/master/SECURITY.md",
-            Self::Roadmap => "https://github.com/RingsNetwork/rings/blob/master/ROADMAP.md",
-            Self::Sponsor => "https://github.com/sponsors/RingsNetwork",
-            Self::License => "https://github.com/RingsNetwork/rings/blob/master/LICENSE",
-            Self::LlmsTxt => "https://rings.rs/llms.txt",
-        }
-    }
-
-    /// The link as an anchor of the given class.
-    pub(crate) fn anchor(self, class: &'static str) -> Html {
-        external_anchor(class, self.href(), self.label())
-    }
-}
-
-/// An anchor to a destination outside the shell, opened in a new tab without a referrer.
-pub(crate) fn external_anchor(
-    class: &'static str,
-    href: &'static str,
-    label: &'static str,
-) -> Html {
-    html! {
-        <a class={class} href={href} target="_blank" rel="noreferrer">
-            { label }
-        </a>
     }
 }
 

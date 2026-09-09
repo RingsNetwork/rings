@@ -8,7 +8,6 @@ use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use web_sys::Event;
-use web_sys::Window;
 use yew::prelude::*;
 
 use crate::connect;
@@ -41,6 +40,7 @@ use crate::webview_ui;
 use crate::workbench;
 
 mod actions;
+mod routes;
 
 const DEFAULT_STABILIZE_INTERVAL_SECONDS: &str = "15";
 const LEGACY_DEFAULT_STABILIZE_INTERVAL_SECONDS: &str = "3";
@@ -137,10 +137,10 @@ struct AppRenderContext<'a> {
 #[hook]
 fn use_shell_state() -> ShellState {
     ShellState {
-        active_page: use_state(initial_shell_page),
+        active_page: use_state(routes::initial_shell_page),
         active_architecture_layer: use_state(|| 0_usize),
         active_panel: use_state(|| Panel::Onion),
-        active_dialog: use_state(initial_shell_dialog),
+        active_dialog: use_state(routes::initial_shell_dialog),
         control_sidebar_collapsed: use_state(|| false),
     }
 }
@@ -506,7 +506,7 @@ fn use_shell_history(
             let page = active_page.clone();
             let dialog = active_dialog.clone();
             let listener = Closure::<dyn FnMut(Event)>::wrap(Box::new(move |_| {
-                let route = current_shell_route();
+                let route = routes::current_shell_route();
                 page.set(route.page);
                 dialog.set(route.dialog);
             }));
@@ -568,7 +568,7 @@ fn effective_shell_page(shell: &ShellState, extension_mode: bool) -> ShellPage {
 fn navigate_page_callback(shell: &ShellState) -> Callback<ShellPage> {
     let active_page = shell.active_page.clone();
     let active_dialog = shell.active_dialog.clone();
-    Callback::from(move |page| navigate_shell_page(page, &active_page, &active_dialog))
+    Callback::from(move |page| routes::navigate_shell_page(page, &active_page, &active_dialog))
 }
 
 fn dialog_actions(shell: &ShellState) -> controls::DialogActions {
@@ -578,10 +578,10 @@ fn dialog_actions(shell: &ShellState) -> controls::DialogActions {
     let close_dialog = shell.active_dialog.clone();
     controls::DialogActions {
         open: Callback::from(move |dialog| {
-            open_shell_dialog(dialog, &open_page, &open_dialog);
+            routes::open_shell_dialog(dialog, &open_page, &open_dialog);
         }),
         close: Callback::from(move |_| {
-            close_shell_dialog(&close_page, &close_dialog);
+            routes::close_shell_dialog(&close_page, &close_dialog);
         }),
     }
 }
@@ -599,7 +599,7 @@ fn render_document_shell(
         <main class="app-shell document-shell">
             <style>{ styles::app_css() }</style>
             { header }
-            <div class="site-document" key={page.label()}>
+            <div class="site-document" key={page.slug()}>
                 { body }
                 { footer::site_footer(navigate_page) }
             </div>
@@ -789,188 +789,6 @@ fn render_custom_panel(node: &NodeState, custom_state: &CustomState) -> Html {
     )
 }
 
-fn initial_shell_page() -> ShellPage {
-    current_shell_route().page
-}
-
-fn initial_shell_dialog() -> ActiveDialog {
-    current_shell_route().dialog
-}
-
-#[derive(Clone, Copy)]
-struct ShellRoute {
-    page: ShellPage,
-    dialog: ActiveDialog,
-}
-
-fn current_shell_route() -> ShellRoute {
-    let route = routed_shell_route();
-    if extension::extension_node_bridge().is_some() {
-        return ShellRoute {
-            page: ShellPage::Console,
-            dialog: route
-                .map(|route| route.dialog)
-                .unwrap_or(ActiveDialog::None),
-        };
-    }
-    route.unwrap_or(ShellRoute {
-        page: ShellPage::Home,
-        dialog: ActiveDialog::None,
-    })
-}
-
-fn routed_shell_route() -> Option<ShellRoute> {
-    let location = web_sys::window()?.location();
-    let pathname = location.pathname().ok()?;
-    if is_webview_path(pathname.as_str()) {
-        return Some(ShellRoute {
-            page: ShellPage::Webview,
-            dialog: ActiveDialog::None,
-        });
-    }
-    let hash = location.hash().ok()?;
-    route_for_hash(hash.as_str())
-}
-
-fn is_webview_path(pathname: &str) -> bool {
-    pathname == "/webview" || pathname.starts_with(webview::GATEWAY_PREFIX)
-}
-
-fn route_for_hash(hash: &str) -> Option<ShellRoute> {
-    match hash.trim_start_matches('#').trim_start_matches('/') {
-        "" | "home" => Some(ShellRoute {
-            page: ShellPage::Home,
-            dialog: ActiveDialog::None,
-        }),
-        "guide" => Some(ShellRoute {
-            page: ShellPage::Guide,
-            dialog: ActiveDialog::None,
-        }),
-        "node" => Some(ShellRoute {
-            page: ShellPage::Console,
-            dialog: ActiveDialog::None,
-        }),
-        "webview" => Some(ShellRoute {
-            page: ShellPage::Webview,
-            dialog: ActiveDialog::None,
-        }),
-        "node/settings" | "settings" => Some(ShellRoute {
-            page: ShellPage::Console,
-            dialog: ActiveDialog::Settings,
-        }),
-        "node/workbench" | "workbench" => Some(ShellRoute {
-            page: ShellPage::Console,
-            dialog: ActiveDialog::Workbench,
-        }),
-        _ => None,
-    }
-}
-
-fn navigate_shell_page(
-    page: ShellPage,
-    active_page: &UseStateHandle<ShellPage>,
-    active_dialog: &UseStateHandle<ActiveDialog>,
-) {
-    let route = current_shell_route();
-    if **active_page == page && route.page == page && route.dialog == ActiveDialog::None {
-        return;
-    }
-    write_shell_route(page, ActiveDialog::None, false);
-    active_page.set(page);
-    active_dialog.set(ActiveDialog::None);
-}
-
-fn open_shell_dialog(
-    dialog: ActiveDialog,
-    active_page: &UseStateHandle<ShellPage>,
-    active_dialog: &UseStateHandle<ActiveDialog>,
-) {
-    if !dialog.is_open() {
-        close_shell_dialog(active_page, active_dialog);
-        return;
-    }
-    let replace = (**active_dialog).is_open();
-    write_shell_route(ShellPage::Console, dialog, replace);
-    active_page.set(ShellPage::Console);
-    active_dialog.set(dialog);
-}
-
-fn close_shell_dialog(
-    active_page: &UseStateHandle<ShellPage>,
-    active_dialog: &UseStateHandle<ActiveDialog>,
-) {
-    if !(**active_dialog).is_open() {
-        return;
-    }
-    let page = current_shell_route().page;
-    write_shell_route(page, ActiveDialog::None, true);
-    active_page.set(page);
-    active_dialog.set(ActiveDialog::None);
-}
-
-fn clear_shell_dialog_route() {
-    let route = current_shell_route();
-    if route.dialog.is_open() {
-        write_shell_route(route.page, ActiveDialog::None, true);
-    }
-}
-
-fn write_shell_route(page: ShellPage, dialog: ActiveDialog, replace: bool) {
-    let Some(window) = web_sys::window() else {
-        return;
-    };
-    let Some(target) = shell_route_url(&window, page, dialog) else {
-        return;
-    };
-    if !replace && current_path_search_hash(&window) == Some(target.clone()) {
-        return;
-    }
-    let Ok(history) = window.history() else {
-        return;
-    };
-    if replace {
-        let _ = history.replace_state_with_url(&JsValue::NULL, "", Some(&target));
-    } else {
-        let _ = history.push_state_with_url(&JsValue::NULL, "", Some(&target));
-    }
-}
-
-fn shell_route_url(window: &Window, page: ShellPage, dialog: ActiveDialog) -> Option<String> {
-    let location = window.location();
-    let mut target = location.pathname().ok()?;
-    if let Ok(search) = location.search() {
-        target.push_str(&search);
-    }
-    if let Some(fragment) = shell_route_fragment(page, dialog) {
-        target.push('#');
-        target.push_str(fragment);
-    }
-    Some(target)
-}
-
-fn shell_route_fragment(page: ShellPage, dialog: ActiveDialog) -> Option<&'static str> {
-    match (page, dialog) {
-        (ShellPage::Home, ActiveDialog::None) => None,
-        (ShellPage::Guide, ActiveDialog::None) => Some("guide"),
-        (ShellPage::Console, ActiveDialog::None) => Some("node"),
-        (ShellPage::Webview, ActiveDialog::None) => Some("webview"),
-        (_, ActiveDialog::Settings) => Some("node/settings"),
-        (_, ActiveDialog::Workbench) => Some("node/workbench"),
-    }
-}
-
-fn current_path_search_hash(window: &Window) -> Option<String> {
-    let location = window.location();
-    let mut current = location.pathname().ok()?;
-    if let Ok(search) = location.search() {
-        current.push_str(&search);
-    }
-    if let Ok(hash) = location.hash() {
-        current.push_str(&hash);
-    }
-    Some(current)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1014,45 +832,5 @@ mod tests {
     fn test_browser_webview_uses_the_local_gateway_witness() {
         assert!(!webview_gateway_ready(false, "did:ring:online", false));
         assert!(webview_gateway_ready(false, "", true));
-    }
-
-    /// `route_for_hash ∘ fragment = id` on every page without a dialog: the fragment a page
-    /// writes is the fragment that reads back as that page, the landing page included, whose
-    /// fragment is empty.
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn test_page_fragments_round_trip_through_the_hash_router() {
-        for page in [
-            ShellPage::Home,
-            ShellPage::Guide,
-            ShellPage::Console,
-            ShellPage::Webview,
-        ] {
-            let fragment = shell_route_fragment(page, ActiveDialog::None).unwrap_or("");
-            let route = route_for_hash(&format!("#{fragment}"));
-            assert!(
-                matches!(route, Some(ShellRoute { page: routed, dialog: ActiveDialog::None }) if routed == page),
-                "fragment {fragment:?} did not read back as its page"
-            );
-        }
-    }
-
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn test_guide_hash_routes_to_the_guide_page() {
-        assert!(matches!(
-            route_for_hash("#guide"),
-            Some(ShellRoute {
-                page: ShellPage::Guide,
-                dialog: ActiveDialog::None
-            })
-        ));
-        assert!(matches!(
-            route_for_hash("#/guide"),
-            Some(ShellRoute {
-                page: ShellPage::Guide,
-                dialog: ActiveDialog::None
-            })
-        ));
     }
 }

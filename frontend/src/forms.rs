@@ -9,20 +9,7 @@ use web_sys::InputEvent;
 use yew::prelude::*;
 
 pub(crate) fn text_input(label: &'static str, state: UseStateHandle<String>) -> Html {
-    let oninput = {
-        let state = state.clone();
-        Callback::from(move |event: InputEvent| {
-            if let Some(value) = input_value(&event) {
-                state.set(value);
-            }
-        })
-    };
-    html! {
-        <label class="field">
-            <span>{ label }</span>
-            <input value={(*state).clone()} {oninput} />
-        </label>
-    }
+    text_field(label, state, None)
 }
 
 /// A text input that offers `suggestions` through a `<datalist>`: the value stays free text,
@@ -34,6 +21,29 @@ pub(crate) fn text_input_with_suggestions(
     list_id: &'static str,
     suggestions: &'static [&'static str],
 ) -> Html {
+    text_field(
+        label,
+        state,
+        Some(Suggestions {
+            list_id,
+            values: suggestions,
+        }),
+    )
+}
+
+/// A `<datalist>` and the id an input names it by.
+struct Suggestions {
+    list_id: &'static str,
+    values: &'static [&'static str],
+}
+
+/// A labelled text field bound to `state`, with or without a datalist: the two public forms
+/// differ only in that option.
+fn text_field(
+    label: &'static str,
+    state: UseStateHandle<String>,
+    suggestions: Option<Suggestions>,
+) -> Html {
     let oninput = {
         let state = state.clone();
         Callback::from(move |event: InputEvent| {
@@ -42,13 +52,16 @@ pub(crate) fn text_input_with_suggestions(
             }
         })
     };
+    let list_id = suggestions.as_ref().map(|suggestions| suggestions.list_id);
     html! {
         <label class="field">
             <span>{ label }</span>
             <input value={(*state).clone()} list={list_id} {oninput} />
-            <datalist id={list_id}>
-                { for suggestions.iter().map(|suggestion| html! { <option value={*suggestion} /> }) }
-            </datalist>
+            if let Some(suggestions) = suggestions {
+                <datalist id={suggestions.list_id}>
+                    { for suggestions.values.iter().map(|value| html! { <option value={*value} /> }) }
+                </datalist>
+            }
         </label>
     }
 }
