@@ -181,6 +181,18 @@ In an authenticated-open overlay, a Sybil operator can try to appear in multiple
 route positions unless the deployment adds independent admission or diversity
 controls.
 
+### Native Gateway
+
+The native TUN gateway is configured by the `gateway:` section that `rings init` writes into
+every new config file. Presence of that section is not consent to touch the host's routing:
+a gateway starts only under an explicit `enabled: true` or `rings run --gateway`, and a section
+that omits `enabled` is inert. Earlier builds treated a present section as enabled, so a config
+written by hand for one of them now needs `enabled: true` to keep starting its gateway. The
+generated plan assigns one RFC 6598 host address and captures no destination, so enabling it
+creates the interface without steering traffic until the operator lists a prefix. The
+capabilities a TUN device needs (`CAP_NET_ADMIN`, the Unix helper, a relaxed service sandbox)
+are never granted by the configuration and remain an operator decision.
+
 ## Required Work Before Stronger Claims
 
 Before Rings can claim Sybil-resistant permissionless membership, the project

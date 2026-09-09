@@ -6,6 +6,7 @@
 
 - [Native Node](install-a-native-node.md)
 - [Host a Native Node](host-a-native-node.md)
+- [Native Gateway](native-gateway.md)
 
 # Wasm Node (WebAssembly for Browsers)
 

@@ -4,6 +4,7 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use ipnet::IpNet;
+use ipnet::Ipv4Net;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -11,6 +12,13 @@ use crate::ConfigError;
 
 const MIN_IPV4_MTU: u32 = 576;
 const MAX_IPV4_PACKET: u32 = 65_535;
+/// Minimum link MTU every IPv6 link must carry (RFC 8200 §5). A tunnel sized to it fits any
+/// underlay a node can run on, so it is the MTU a generated plan starts from.
+const IPV6_MINIMUM_LINK_MTU: u16 = 1_280;
+/// Host address a generated plan assigns to the virtual interface. It is drawn from the shared
+/// address space of RFC 6598 (`100.64.0.0/10`), reserved for carrier-grade NAT, so it collides
+/// neither with the RFC 1918 ranges that LANs and VPNs assign from nor with public unicast space.
+const DEFAULT_INTERFACE_ADDRESS: Ipv4Addr = Ipv4Addr::new(100, 64, 0, 1);
 pub(crate) const MAX_GATEWAY_FLOWS: usize = 16_384;
 const MAX_TCP_BUFFER_BYTES: usize = 1_024 * 1_024;
 // smoltcp receive/transmit buffers plus the two directions of Tokio's duplex bridge.
@@ -23,17 +31,32 @@ const MAX_TOTAL_FLOW_BUFFER_BYTES: usize = 1_024 * 1_024 * 1_024;
 pub struct Mtu(u16);
 
 impl Mtu {
+    /// The IPv6 minimum link MTU, the largest MTU every underlay is required to carry.
+    ///
+    /// Law: `Mtu::try_from(u32::from(Mtu::IPV6_MINIMUM)) = Ok(Mtu::IPV6_MINIMUM)`; the
+    /// compile-time assertion below checks the constant against the same predicate the
+    /// validator applies, so this constant can never name an MTU that `TryFrom` would refuse.
+    pub const IPV6_MINIMUM: Self = Self(IPV6_MINIMUM_LINK_MTU);
+
     /// Return the validated MTU as a host integer.
     pub const fn get(self) -> u16 {
         self.0
     }
 }
 
+/// The predicate `TryFrom<u32> for Mtu` decides: `MIN_IPV4_MTU ≤ value ≤ MAX_IPV4_PACKET`.
+const fn within_ipv4_bounds(value: u32) -> bool {
+    MIN_IPV4_MTU <= value && value <= MAX_IPV4_PACKET
+}
+
+// The widening cast is lossless; `u32::from` is not usable in a constant expression.
+const _: () = assert!(within_ipv4_bounds(IPV6_MINIMUM_LINK_MTU as u32));
+
 impl TryFrom<u32> for Mtu {
     type Error = ConfigError;
 
     fn try_from(value: u32) -> Result<Self, Self::Error> {
-        if !(MIN_IPV4_MTU..=MAX_IPV4_PACKET).contains(&value) {
+        if !within_ipv4_bounds(value) {
             return Err(ConfigError::InvalidMtu(value));
         }
         u16::try_from(value)
@@ -65,6 +88,21 @@ pub struct GatewayPlan {
 }
 
 impl GatewayPlan {
+    /// The plan a freshly initialised node starts from: the default host address on the virtual
+    /// interface, no capture routes, and the IPv6-minimum MTU.
+    ///
+    /// It satisfies [`GatewayPlan::validate`] and captures nothing (`C = ∅` in the
+    /// traffic-selection contract), so a gateway enabled over it creates the packet interface
+    /// without steering any destination into it until an operator lists one in
+    /// `included_routes` or installs a route externally.
+    pub fn interface_only() -> Self {
+        Self {
+            addresses: vec![IpNet::V4(Ipv4Net::from(DEFAULT_INTERFACE_ADDRESS))],
+            included_routes: Vec::new(),
+            mtu: Mtu::IPV6_MINIMUM,
+        }
+    }
+
     /// Return the primary IPv4 interface address and prefix.
     pub fn first_ipv4_address(&self) -> Result<(Ipv4Addr, u8), ConfigError> {
         self.addresses
@@ -202,6 +240,20 @@ mod duration_seconds {
 }
 
 impl GatewayConfig {
+    /// The given plan under the runtime limits a serialized document receives when it omits them.
+    ///
+    /// Law: for every plan `p`, `with_default_limits(p)` equals the deserialization of a document
+    /// stating only `plan: p`, so a config written from this constructor and one written by hand
+    /// with the limits left out denote the same runtime.
+    pub fn with_default_limits(plan: GatewayPlan) -> Self {
+        Self {
+            plan,
+            max_flows: default_max_flows(),
+            flow_idle_timeout: default_flow_idle_timeout(),
+            tcp_buffer_bytes: default_tcp_buffer_bytes(),
+        }
+    }
+
     /// Validate runtime limits and the underlying tunnel plan.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.max_flows == 0 {
@@ -395,6 +447,43 @@ mod tests {
         assert_eq!(config.max_flows, default_max_flows());
         assert_eq!(config.flow_idle_timeout, default_flow_idle_timeout());
         assert_eq!(config.tcp_buffer_bytes, default_tcp_buffer_bytes());
+    }
+
+    #[test]
+    fn ipv6_minimum_mtu_is_a_fixed_point_of_the_validator() {
+        assert_eq!(
+            Mtu::try_from(u32::from(Mtu::IPV6_MINIMUM)),
+            Ok(Mtu::IPV6_MINIMUM)
+        );
+    }
+
+    #[test]
+    fn interface_only_plan_is_valid_and_captures_nothing() {
+        let candidate = GatewayPlan::interface_only();
+        assert_eq!(candidate.validate(), Ok(()));
+        assert_eq!(
+            candidate.first_ipv4_address(),
+            Ok((DEFAULT_INTERFACE_ADDRESS, 32))
+        );
+        assert!(candidate.included_routes.is_empty());
+        assert_eq!(candidate.mtu, Mtu::IPV6_MINIMUM);
+    }
+
+    #[test]
+    fn default_limits_agree_with_the_serde_defaults() {
+        let json = r#"{
+            "plan": {
+                "addresses": ["100.64.0.1/32"],
+                "included_routes": [],
+                "mtu": 1280
+            }
+        }"#;
+        let config: GatewayConfig = serde_json::from_str(json).expect("valid gateway JSON");
+        assert_eq!(
+            config,
+            GatewayConfig::with_default_limits(GatewayPlan::interface_only())
+        );
+        assert_eq!(config.validate(), Ok(()));
     }
 
     #[test]
