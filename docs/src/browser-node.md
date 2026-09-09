@@ -23,9 +23,10 @@ to bottom:
    [`rings connect node`](cli.md#through-a-peers-http-endpoint) uses), or by hand with an SDP
    offer and answer pasted between two browsers.
 5. **Topology**: the connected peers drawn on the Chord ring, with the node's own position.
-6. **Workbench** (`#node/workbench`): the Onion Proxy panel builds routes through onion relays
-   and exits and sends HTTPS requests over them; the Custom panel registers a namespace and
-   sends and receives messages under it.
+6. **Workbench** (`#node/workbench`): the Onion Proxy panel builds privacy-layer routes through
+   onion relays and exits and sends HTTPS requests over them; the Custom panel registers a
+   namespace and sends and receives messages under it over the plain overlay, which routes and
+   encrypts but does not hide the endpoints.
 7. **WebView**: once the local onion gateway is ready, `/webview` browses target sites through
    onion circuits, answered by a service worker the shell registers.
 
