@@ -78,7 +78,8 @@ fn append_mid_breakpoint(css: &mut String) {
                     ("bottom", "0"),
                     ("z-index", "60"),
                     ("display", "grid"),
-                    ("grid-template-columns", "repeat(4, minmax(0, 1fr))"),
+                    ("grid-auto-flow", "column"),
+                    ("grid-auto-columns", "minmax(0, 1fr)"),
                     ("gap", "0"),
                     ("width", "auto"),
                     ("padding", "8px 10% calc(8px + env(safe-area-inset-bottom))"),
@@ -156,7 +157,8 @@ fn append_mobile_navigation(css: &mut String) {
                 &[
                     ("display", "grid"),
                     ("width", "100%"),
-                    ("grid-template-columns", "repeat(3, minmax(0, 1fr))"),
+                    ("grid-auto-flow", "column"),
+                    ("grid-auto-columns", "minmax(0, 1fr)"),
                 ][..],
             ),
             (
@@ -182,7 +184,8 @@ fn append_mobile_navigation(css: &mut String) {
                     ("bottom", "0"),
                     ("z-index", "60"),
                     ("display", "grid"),
-                    ("grid-template-columns", "repeat(4, minmax(0, 1fr))"),
+                    ("grid-auto-flow", "column"),
+                    ("grid-auto-columns", "minmax(0, 1fr)"),
                     ("gap", "0"),
                     ("width", "auto"),
                     ("padding", "8px 10% calc(8px + env(safe-area-inset-bottom))"),
@@ -202,7 +205,10 @@ fn append_mobile_navigation(css: &mut String) {
                     ("border", "0"),
                     ("border-radius", "4px"),
                     ("background", "transparent"),
-                    ("font-size", "11px"),
+                    // Five cells share the bar; on a 360px viewport each is 57.6px, and the
+                    // ten-character WHITEPAPER label advances 0.545em per character in the
+                    // monospace face, so 10px (54.5px) is the largest size that fits the cell.
+                    ("font-size", "10px"),
                 ][..],
             ),
             (
