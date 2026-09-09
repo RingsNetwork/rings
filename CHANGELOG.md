@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.21.2
+
+### Breaking changes
+
+- A `gateway:` section that omits `enabled` is now disabled. Earlier builds started the native
+  TUN gateway whenever the section was present; a hand-written section from one of them needs
+  `enabled: true` to keep starting its gateway. `rings run --gateway` still enables the section
+  for one run.
+
+### Added
+
+- `rings init` writes a complete `gateway:` section with `enabled: false` and every field stated,
+  so plain `rings run` behaves as before while `rings run --gateway` works on the generated file
+  without editing. The plan and its defaults come from the gateway crate:
+  `GatewayPlan::interface_only` (one RFC 6598 host address, no capture routes,
+  `Mtu::IPV6_MINIMUM`) and `GatewayConfig::with_default_limits`; the node composes them in
+  `NativeGatewayConfig::disabled_default` and selects a runner through `Config::enabled_gateway`.
+- `rings run --gateway` on a config without the section now names `rings init` and prints the
+  exact section to append.
+
 ## 0.21.0
 
 ### Breaking changes

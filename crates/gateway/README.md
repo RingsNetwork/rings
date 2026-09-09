@@ -8,6 +8,7 @@ or kill-switch mode.
 The crate is intentionally unavailable to WebAssembly targets. Browser builds remain Rings
 clients and do not contain the native gateway or server runtime.
 
+<!-- ANCHOR: operator-guide -->
 ## Traffic-selection contract
 
 The operator owns traffic selection. Let `C` be the normalized set in `included_routes`:
@@ -113,6 +114,12 @@ gateway. UDP or fragmented IPv4 packets that enter a listed prefix are dropped; 
 rejected at configuration time. Unlisted IPv4, all IPv6, and ordinary DNS traffic remain outside
 gateway policy.
 
+`rings init` writes a complete `gateway:` section with `enabled: false`: the interface-only plan
+(`GatewayPlan::interface_only`, one RFC 6598 host address, no capture routes, the IPv6 minimum
+MTU) under the default runtime limits. The section starts nothing by itself; the gateway runs only
+under an explicit `enabled: true` or `rings run --gateway`, and a section that omits `enabled` is
+inert.
+
 ```yaml
 # STUN remains ordinary discovery. TURN is optional and never a gateway prerequisite.
 ice_servers: stun://stun.l.google.com:19302
@@ -143,6 +150,7 @@ still exists, but Rings installs no destination route:
 
 ```yaml
 gateway:
+  enabled: true
   plan:
     addresses: ["100.64.0.1/32"]
     included_routes: []
@@ -196,6 +204,7 @@ GET /gateway/status
 It reports interface, lifecycle, normalized capture routes, active-flow count, last error, and
 Onion-exit availability without granting route mutation authority.
 
+<!-- ANCHOR_END: operator-guide -->
 ## Library model API
 
 The lifecycle, parser, flow-table, and `TcpStack` types are public deterministic model and embedding
