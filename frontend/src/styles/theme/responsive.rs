@@ -205,7 +205,10 @@ fn append_mobile_navigation(css: &mut String) {
                     ("border", "0"),
                     ("border-radius", "4px"),
                     ("background", "transparent"),
-                    ("font-size", "11px"),
+                    // Five cells share the bar; on a 360px viewport each is 57.6px, and the
+                    // ten-character WHITEPAPER label advances 0.545em per character in the
+                    // monospace face, so 10px (54.5px) is the largest size that fits the cell.
+                    ("font-size", "10px"),
                 ][..],
             ),
             (
