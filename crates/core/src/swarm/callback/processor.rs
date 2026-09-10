@@ -32,6 +32,7 @@ fn log_inbound_verification_failure(
         .ok()
         .map(MessageKind::as_str);
     tracing::error!(
+        target: "rings_core::swarm::callback",
         peer = ?peer,
         tx_id = %payload.transaction.tx_id,
         destination = %payload.transaction.destination,
