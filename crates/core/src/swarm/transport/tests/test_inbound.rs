@@ -1,4 +1,5 @@
 use std::future::pending;
+use std::time::Duration;
 
 use super::*;
 use crate::chunk::ChunkList;
@@ -31,6 +32,12 @@ impl BlockingValidateSwarmCallback {
     async fn wait_for_validates_at_least(&self, count: usize) {
         self.validates
             .await_until(|validates| validates >= count)
+            .await;
+    }
+
+    async fn wait_for_inbounds_at_least(&self, count: usize) {
+        self.inbounds
+            .await_until(|inbounds| inbounds >= count)
             .await;
     }
 
@@ -280,6 +287,154 @@ async fn test_inbound_control_lane_progresses_while_application_validation_is_bl
         .await
         .map_err(|_| Error::InvalidMessage("control mailbox task panicked".to_string()))??;
     assert_eq!(app_callback.inbounds(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_pre_admission_drain_does_not_block_open_or_admitted_arrivals() -> Result<()> {
+    let transport = Arc::new(transport_with_measure(Arc::new(
+        RecordingMeasure::default(),
+    ))?);
+    let peer_key = SecretKey::random();
+    let peer: Did = peer_key.address().into();
+    let peer_session = SessionSk::new_with_seckey(&peer_key)?;
+    let app_callback = Arc::new(CountingSwarmCallback::default());
+    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
+    let (attempt, _offer) = transport
+        .prepare_connection_offer_with_attempt(peer, offer_callback)
+        .await?;
+    let callback = Arc::new(
+        InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone())
+            .with_pending_connection_attempt(attempt),
+    );
+    let early = MessagePayload::new_send(
+        Message::custom(b"early-drain-must-not-block-open")?,
+        MessageSigner::new(&peer_session, TEST_NETWORK_ID),
+        transport.dht.did,
+        transport.dht.did,
+    )?
+    .to_wire()?;
+    let late = MessagePayload::new_send(
+        Message::custom(b"late-admitted-arrival-queues-behind-drain")?,
+        MessageSigner::new(&peer_session, TEST_NETWORK_ID),
+        transport.dht.did,
+        transport.dht.did,
+    )?
+    .to_wire()?;
+    let cid = peer.to_string();
+
+    callback
+        .on_admitted_message_for_test(&cid, &early)
+        .await
+        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+    assert_eq!(callback.pre_admission_held_count_for_test(), 1);
+    let application_admission = callback.hold_application_admission_for_test()?;
+
+    transport
+        .force_peer_connection_state_without_callback(peer, WebrtcConnectionState::Connecting)?;
+    transport.force_peer_data_channel_open_without_callback(peer, Some(true))?;
+    let open_callback = Arc::clone(&callback);
+    let open_cid = cid.clone();
+    let open = tokio::spawn(async move {
+        open_callback
+            .on_data_channel_open(&open_cid)
+            .await
+            .map_err(|error| Error::InvalidMessage(error.to_string()))
+    });
+    tokio::time::timeout(Duration::from_secs(1), open)
+        .await
+        .map_err(|_| Error::InvalidMessage("data-channel open waited on drain".to_string()))?
+        .map_err(|_| Error::InvalidMessage("data-channel-open task panicked".to_string()))??;
+
+    let late_callback = Arc::clone(&callback);
+    let late_cid = cid.clone();
+    let late_delivery = tokio::spawn(async move {
+        late_callback
+            .on_admitted_message_for_test(&late_cid, &late)
+            .await
+            .map_err(|error| Error::InvalidMessage(error.to_string()))
+    });
+    tokio::time::timeout(Duration::from_secs(1), late_delivery)
+        .await
+        .map_err(|_| Error::InvalidMessage("admitted arrival waited on active drain".to_string()))?
+        .map_err(|_| Error::InvalidMessage("admitted-arrival task panicked".to_string()))??;
+    assert_eq!(app_callback.inbounds(), 0);
+
+    drop(application_admission);
+    app_callback.wait_for_inbounds_at_least(2).await;
+    assert_eq!(callback.pre_admission_held_count_for_test(), 0);
+    assert_eq!(app_callback.inbounds(), 2);
+
+    transport.disconnect(peer).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_pre_admission_drain_returns_before_application_validation_completes() -> Result<()> {
+    let transport = Arc::new(transport_with_measure(Arc::new(
+        RecordingMeasure::default(),
+    ))?);
+    let peer_key = SecretKey::random();
+    let peer: Did = peer_key.address().into();
+    let peer_session = SessionSk::new_with_seckey(&peer_key)?;
+    let app_callback = Arc::new(BlockingValidateSwarmCallback::default());
+    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
+    let (attempt, _offer) = transport
+        .prepare_connection_offer_with_attempt(peer, offer_callback)
+        .await?;
+    let callback = Arc::new(
+        InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone())
+            .with_pending_connection_attempt(attempt),
+    );
+    let message = MessagePayload::new_send(
+        Message::custom(b"early-validation-must-not-block-admission")?,
+        MessageSigner::new(&peer_session, TEST_NETWORK_ID),
+        transport.dht.did,
+        transport.dht.did,
+    )?
+    .to_wire()?;
+    let cid = peer.to_string();
+
+    callback
+        .on_admitted_message_for_test(&cid, &message)
+        .await
+        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+    assert_eq!(callback.pre_admission_held_count_for_test(), 1);
+    assert_eq!(app_callback.validates(), 0);
+
+    transport
+        .force_peer_connection_state_without_callback(peer, WebrtcConnectionState::Connecting)?;
+    transport.force_peer_data_channel_open_without_callback(peer, Some(true))?;
+    let open_callback = Arc::clone(&callback);
+    let open_cid = cid.clone();
+    let open = tokio::spawn(async move {
+        open_callback
+            .on_data_channel_open(&open_cid)
+            .await
+            .map_err(|error| Error::InvalidMessage(error.to_string()))
+    });
+    tokio::time::timeout(Duration::from_secs(1), open)
+        .await
+        .map_err(|_| Error::InvalidMessage("data-channel open waited on validation".to_string()))?
+        .map_err(|_| Error::InvalidMessage("data-channel-open task panicked".to_string()))??;
+
+    assert!(transport.is_admitted_connection(peer));
+    assert!(transport.is_admitted_connection_attempt(attempt));
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        app_callback.wait_for_first_validate_started(),
+    )
+    .await
+    .map_err(|_| {
+        Error::InvalidMessage("held frame was not submitted to inbound actor".to_string())
+    })?;
+    assert_eq!(callback.pre_admission_held_count_for_test(), 0);
+    assert_eq!(app_callback.inbounds(), 0);
+    app_callback.release_first_validate();
+    app_callback.wait_for_inbounds_at_least(1).await;
+    assert_eq!(app_callback.inbounds(), 1);
+
+    transport.disconnect(peer).await?;
     Ok(())
 }
 

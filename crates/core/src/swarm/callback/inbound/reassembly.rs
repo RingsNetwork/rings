@@ -1,4 +1,4 @@
-use super::finish_reply;
+use super::finish_completion;
 use super::memory_reservation;
 use super::InboundEvent;
 use super::InboundFailure;
@@ -101,12 +101,12 @@ pub(super) async fn process_chunk_event(
                 lane: reassembled.lane,
                 wire_bytes: event.wire_bytes,
                 permit: event.permit,
-                reply: event.reply,
+                completion: event.completion,
             });
         }
         Err(error) => Err(InboundFailure::Core(error)),
     };
-    finish_reply(event.reply, terminal_reply);
+    finish_completion(event.completion, terminal_reply);
     None
 }
 

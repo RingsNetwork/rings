@@ -217,6 +217,7 @@ struct CountingSwarmCallback {
     /// The bytes of every inbound `CustomMessage`, in delivery order.
     inbound_custom_data: Mutex<Vec<Vec<u8>>>,
     events: Mutex<Vec<WebrtcConnectionState>>,
+    inbound_changed: GenerationWitness,
 }
 
 #[cfg(feature = "dummy")]
@@ -227,6 +228,12 @@ impl CountingSwarmCallback {
 
     fn inbounds(&self) -> usize {
         self.inbounds.load(Ordering::SeqCst)
+    }
+
+    async fn wait_for_inbounds_at_least(&self, count: usize) {
+        self.inbound_changed
+            .await_until(|_generation| self.inbounds() >= count)
+            .await;
     }
 
     fn inbound_custom_data(&self) -> std::io::Result<Vec<Vec<u8>>> {
@@ -273,6 +280,7 @@ impl SwarmCallback for CountingSwarmCallback {
                 Err(_) => tracing::error!("CountingSwarmCallback inbound data mutex is poisoned"),
             }
         }
+        self.inbound_changed.bump();
         Ok(())
     }
 
@@ -649,6 +657,7 @@ async fn test_pending_callback_messages_are_held_until_admission() -> Result<()>
     assert!(!transport.dht.successors().contains(&pending.peer)?);
 
     pending.admit(&transport).await?;
+    app_callback.wait_for_inbounds_at_least(1).await;
 
     assert_eq!(pending.callback.pre_admission_held_count_for_test(), 0);
     assert_eq!(app_callback.validates(), 1);

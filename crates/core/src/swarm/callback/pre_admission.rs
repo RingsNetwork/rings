@@ -3,7 +3,8 @@
 //! Admission is asymmetric in time: each end admits an edge on its own data-channel-open
 //! callback, so a peer that has admitted the edge may send over it before this end has. Such a
 //! frame is authenticated (its transport edge and both signatures were verified before it got
-//! here) and merely early, so it is held rather than dropped, and released once admission commits.
+//! here) and merely early, so it is held rather than dropped, and transferred to the inbound actor
+//! once admission commits.
 //!
 //! A hold is a queue and a drain flag, with the arrival map
 //! `arrive : Hold × F × Admitted → Arrival`:
@@ -13,9 +14,10 @@
 //!   `Overflow` when the hold is full.
 //!
 //! Law (order): frames leave a hold in arrival order, and a frame that arrives while the hold
-//! drains leaves after every frame held before it, including the one the drainer is delivering.
+//! drains leaves after every frame held before it, including the one the drainer is transferring.
 //! A drain is exclusive: `begin_drain` grants at most one drainer until it observes the empty
-//! queue, so two callers cannot interleave. Law (bound): a hold keeps at most `capacity`
+//! queue, so two callers cannot interleave. Logical processing runs after release under the
+//! inbound actor's lane rules. Law (bound): a hold keeps at most `capacity`
 //! frames; the frame that would exceed it never enters the queue.
 
 use std::collections::VecDeque;
@@ -131,7 +133,7 @@ mod tests {
         assert!(hold.begin_drain());
         assert_eq!(hold.drain_next(), Some(1));
         assert_eq!(hold.drain_next(), Some(2));
-        // The drainer is delivering frame 2: a new arrival queues behind it.
+        // The drainer is transferring frame 2: a new arrival queues behind it.
         assert_eq!(hold.arrive(3, true), Arrival::Held);
         assert_eq!(hold.drain_next(), Some(3));
         assert_eq!(hold.drain_next(), None);

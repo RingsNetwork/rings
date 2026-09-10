@@ -47,6 +47,7 @@ pub(crate) const fn inbound_peer_capacity_for_test() -> usize {
     inbound::peer_capacity()
 }
 use inbound::InboundMailbox;
+use inbound::InboundSubmission;
 use inbound::ReassemblyClock;
 use pre_admission::Arrival;
 use pre_admission::PreAdmissionHold;
@@ -349,6 +350,25 @@ pub struct InnerSwarmCallback {
     inbound: InboundMailbox,
 }
 
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+fn spawn_pre_admission_drain(drainer: InnerSwarmCallback) -> bool {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return false;
+    };
+    drop(runtime.spawn(async move {
+        drainer.drain_claimed_pre_admission_hold().await;
+    }));
+    true
+}
+
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+fn spawn_pre_admission_drain(drainer: InnerSwarmCallback) -> bool {
+    wasm_bindgen_futures::spawn_local(async move {
+        drainer.drain_claimed_pre_admission_hold().await;
+    });
+    true
+}
+
 impl InboundProcessor {
     fn new(
         transport: Arc<SwarmTransport>,
@@ -594,8 +614,13 @@ impl InnerSwarmCallback {
             return Ok(false);
         }
         let connected = self.emit_connected_event_for_attempt(did, attempt).await?;
-        if connected {
-            self.drain_pre_admission_hold().await;
+        if self
+            .processor
+            .logical
+            .transport
+            .is_admitted_connection_attempt(attempt)
+        {
+            self.start_pre_admission_drain().await;
         }
         Ok(connected)
     }
@@ -971,16 +996,11 @@ impl InnerSwarmCallback {
             InboundGate::Refused => return Ok(()),
         };
         let Some(peer) = peer else {
+            let submission =
+                InboundSubmission::new(None, authentication, msg, prepared, transport_capacity);
             return self
                 .inbound
-                .submit_prepared(
-                    &self.processor,
-                    None,
-                    authentication,
-                    msg,
-                    prepared,
-                    transport_capacity,
-                )
+                .submit_prepared(&self.processor, submission)
                 .await
                 .map_err(Into::into);
         };
@@ -998,7 +1018,7 @@ impl InnerSwarmCallback {
                 // have committed, and drained, between them. Re-reading admission after the frame
                 // is queued closes that window, since the drain is exclusive and idempotent.
                 if self.processor.pending_attempt_admitted() {
-                    self.drain_pre_admission_hold().await;
+                    self.start_pre_admission_drain().await;
                 } else {
                     tracing::debug!(
                         "holding message from {peer} until its pending connection is admitted"
@@ -1022,36 +1042,73 @@ impl InnerSwarmCallback {
             transport_capacity,
         } = frame;
         let authentication = self.processor.peer_authentication(peer);
+        let submission = InboundSubmission::new(
+            Some(peer),
+            authentication,
+            bytes,
+            prepared,
+            transport_capacity,
+        );
         self.inbound
-            .submit_prepared(
-                &self.processor,
-                Some(peer),
-                authentication,
-                bytes,
-                prepared,
-                transport_capacity,
-            )
+            .submit_prepared(&self.processor, submission)
             .await
     }
 
-    /// Release every held frame in arrival order, once, to the delivery path.
+    /// Transfer one frame past the admission gate without waiting for logical completion.
+    async fn enqueue_held_frame(&self, frame: HeldInboundFrame) -> crate::error::Result<()> {
+        let HeldInboundFrame {
+            peer,
+            bytes,
+            prepared,
+            transport_capacity,
+        } = frame;
+        let authentication = self.processor.peer_authentication(peer);
+        let submission = InboundSubmission::new(
+            Some(peer),
+            authentication,
+            bytes,
+            prepared,
+            transport_capacity,
+        );
+        self.inbound
+            .submit_prepared_detached(&self.processor, peer, submission)
+            .await
+    }
+
+    /// Start releasing held frames in arrival order to the inbound actor.
     ///
-    /// A failure to deliver one frame is logged and does not stop the drain: the frame was
-    /// accepted from the transport when it arrived, so there is no caller left to fail.
-    async fn drain_pre_admission_hold(&self) {
+    /// The caller claims the drain synchronously so later admitted arrivals join the same ordered
+    /// drain instead of racing past queued frames. Native and wasm runtimes run the drain in the
+    /// background; an unavailable native runtime falls back to the old inline drain so the claimed
+    /// queue is not left stuck.
+    async fn start_pre_admission_drain(&self) {
         if !self.processor.pre_admission().begin_drain() {
             return;
         }
+        let drainer = Self {
+            processor: self.processor.clone(),
+            inbound: self.inbound.clone(),
+        };
+        if !spawn_pre_admission_drain(drainer) {
+            self.drain_claimed_pre_admission_hold().await;
+        }
+    }
+
+    /// Release every frame from a claimed drain, once, to the inbound actor.
+    ///
+    /// A failure before actor ownership is logged and does not stop the drain: the frame was
+    /// accepted from the transport when it arrived, so the admission callback must not fail on it.
+    async fn drain_claimed_pre_admission_hold(&self) {
         loop {
             let Some(frame) = self.processor.pre_admission().drain_next() else {
                 return;
             };
             let peer = frame.peer;
-            if let Err(error) = self.deliver_held_frame(frame).await {
+            if let Err(error) = self.enqueue_held_frame(frame).await {
                 tracing::warn!(
                     peer = %peer,
                     error = ?error,
-                    "failed to deliver a message held until admission"
+                    "failed to enqueue a message held until admission"
                 );
             }
         }
