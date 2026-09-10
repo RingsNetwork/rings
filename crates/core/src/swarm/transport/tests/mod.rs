@@ -39,8 +39,6 @@ use crate::measure::MeasureCounter;
 use crate::measure::MeasureError;
 use crate::measure::MeasurementBatch;
 use crate::measure::PeerQuality;
-#[cfg(feature = "dummy")]
-use crate::message::HopBudget;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::message::MessageClass;
 use crate::message::MessagePayload;
@@ -610,7 +608,6 @@ impl PendingPeer {
             MessageSigner::new(&self.session, TEST_NETWORK_ID),
             transport.dht.did,
             transport.dht.did,
-            HopBudget::MAX,
         )?
         .to_wire()
         .map(|wire| wire.to_vec())
@@ -730,7 +727,6 @@ async fn test_held_messages_are_discarded_when_the_pending_connection_is_cancell
         MessageSigner::new(&stranger_session, TEST_NETWORK_ID),
         transport.dht.did,
         transport.dht.did,
-        HopBudget::MAX,
     )?
     .to_wire()?;
     pending
@@ -767,7 +763,6 @@ async fn test_nested_reassembled_chunk_is_rejected_without_recursive_callback_en
         MessageSigner::new(&peer_session, TEST_NETWORK_ID),
         transport.dht.did,
         transport.dht.did,
-        HopBudget::MAX,
     )?
     .to_wire()?;
     for _ in 0..2 {
@@ -781,7 +776,6 @@ async fn test_nested_reassembled_chunk_is_rejected_without_recursive_callback_en
             MessageSigner::new(&peer_session, TEST_NETWORK_ID),
             transport.dht.did,
             transport.dht.did,
-            HopBudget::MAX,
         )?
         .to_wire()?;
     }
@@ -831,7 +825,6 @@ async fn test_missing_peer_error_precedes_outbound_capacity_admission() -> Resul
         transport.message_signer(),
         peer,
         peer,
-        HopBudget::MAX,
     )?;
 
     let error = transport
@@ -866,7 +859,6 @@ async fn test_invalid_inbound_log_omits_transaction_data() -> Result<()> {
         MessageSigner::new(&peer_session, TEST_NETWORK_ID),
         transport.dht.did,
         transport.dht.did,
-        HopBudget::MAX,
     )?;
     payload.transaction.data.push(171);
     let expected_tx_id = payload.transaction.tx_id;

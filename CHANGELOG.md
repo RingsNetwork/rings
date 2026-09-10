@@ -7,8 +7,10 @@
 - The relay carrier no longer records the route. `MessageRelay` is `{ next_hop, destination,
   hop_budget }`: every forward spends one unit of the budget and a payload whose budget is
   spent is dropped with `RelayHopBudgetExhausted`, which replaces the history-based loop
-  detection. A fresh budget is the ring's finger slots plus its successor capacity, capped at
-  `MAX_RELAY_HOPS` (32), and decoding rejects a carrier that claims more.
+  detection. A fresh budget is `MAX_RELAY_HOPS` (64), and decoding rejects a carrier that
+  claims more.
+- A verified message that arrives on a connection before this end has admitted it is held and
+  delivered, in arrival order, once admission commits; it used to be dropped.
 - Reports are always Chord-routed to the transaction origin. `ReportReturnPolicy` and the
   `report_return` field of `Transaction` are removed, together with the `*_with_report_return`
   senders; the transaction hash covers `destination || tx_id || data`.

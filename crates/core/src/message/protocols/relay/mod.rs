@@ -37,26 +37,11 @@ use crate::error::Result;
 pub struct HopBudget(u8);
 
 impl HopBudget {
-    /// The top of the chain: the most forwards any carrier can hold.
+    /// The top of the chain: what a fresh carrier holds, and the most any carrier can hold.
     pub const MAX: Self = Self(MAX_RELAY_HOPS);
 
     /// The bottom of the chain: a payload that can be delivered but not forwarded.
     pub const EXHAUSTED: Self = Self(0);
-
-    /// The budget a fresh payload leaves a ring with.
-    ///
-    /// A greedy Chord route over a finger table of `finger_slots` slots uses each slot at most
-    /// once, because the hop taken through slot `i` leaves less than `2^i` of distance and every
-    /// later hop is through a lower slot; after the fingers are spent the route walks the
-    /// successor list, at most `successor_capacity` more hops. That sum is the length of the
-    /// longest fault-free route, and [`Self::MAX`] caps it: a route longer than the cap needs an
-    /// overlay wider than any this network routes over, so it is a loop, not a long ring.
-    ///
-    /// Law: `for_ring(f, s) = min(f + s, MAX)`, monotone in both arguments.
-    pub fn for_ring(finger_slots: usize, successor_capacity: usize) -> Self {
-        let route = finger_slots.saturating_add(successor_capacity);
-        Self(u8::try_from(route).unwrap_or(u8::MAX).min(MAX_RELAY_HOPS))
-    }
 
     /// The forwards remaining.
     pub const fn remaining(self) -> u8 {

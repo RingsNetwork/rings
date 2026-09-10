@@ -19,13 +19,15 @@ pub const DEFAULT_RELAY_INBOX_TTL_MS: u64 = 24 * 3600 * 1000;
 pub const MAX_RELAY_INBOX_TTL_MS: u64 = DEFAULT_RELAY_INBOX_TTL_MS * 7;
 /// Accepted timestamp drift in milliseconds.
 pub const TS_OFFSET_TOLERANCE_MS: u128 = 3000;
-/// The most forwards one relay carrier can hold.
+/// The forwards a fresh relay carrier holds, and the most any carrier can hold.
 ///
-/// A greedy Chord route over `N` nodes takes about `log2 N` distinct finger hops, so this is
-/// the log2 of the widest overlay the relay routes over; a fresh carrier gets the smaller of
-/// this cap and its own ring's finger slots plus successor capacity
-/// (see `message::HopBudget::for_ring`).
-pub const MAX_RELAY_HOPS: u8 = 32;
+/// A greedy Chord route over `N` nodes with a finger table spanning the identifier space takes
+/// about `log2 N` finger hops, so this covers overlays far wider than any the relay routes over.
+/// A ring whose finger table does not span the space (the small tables of simulated networks)
+/// routes by successor walk instead, whose length is the ring size and is known to no node, so
+/// the budget is a network constant rather than a per-ring derivation; it covers such rings up
+/// to 65 nodes.
+pub const MAX_RELAY_HOPS: u8 = 64;
 /// Maximum number of fetched entries the local DHT cache retains before evicting the
 /// least recently written one.
 pub const LOCAL_CACHE_CAPACITY: NonZeroU32 = match NonZeroU32::new(1024) {

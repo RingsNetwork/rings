@@ -2,7 +2,6 @@ use rand::Rng;
 
 use super::*;
 use crate::ecc::SecretKey;
-use crate::message::HopBudget;
 use crate::message::Message;
 use crate::session::SessionSk;
 use crate::tests::TEST_NETWORK_ID;
@@ -35,7 +34,6 @@ where T: Serialize + DeserializeOwned {
         MessageSigner::new(&session_sk, TEST_NETWORK_ID),
         next_hop,
         destination,
-        HopBudget::MAX,
     )
     .unwrap()
 }
@@ -72,7 +70,6 @@ fn test_relay_destination_predicates_name_forwarding_state() -> Result<()> {
         MessageSigner::new(&session_sk, TEST_NETWORK_ID),
         local,
         local,
-        HopBudget::MAX,
     )?;
     assert!(local_payload.is_relay_destination_for(local));
     assert!(!local_payload.should_forward_from(local));
@@ -82,7 +79,6 @@ fn test_relay_destination_predicates_name_forwarding_state() -> Result<()> {
         MessageSigner::new(&session_sk, TEST_NETWORK_ID),
         remote,
         remote,
-        HopBudget::MAX,
     )?;
     assert!(!remote_payload.is_relay_destination_for(local));
     assert!(remote_payload.should_forward_from(local));

@@ -1,6 +1,5 @@
 use super::*;
 use crate::dht::LiveDid;
-use crate::message::HopBudget;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
@@ -130,7 +129,6 @@ async fn test_tracked_send_rejects_disconnected_open_transport() -> Result<()> {
         transport.message_signer(),
         peer,
         peer,
-        HopBudget::MAX,
     )?;
     assert!(matches!(
         transport.send_payload_tracked(payload).await,

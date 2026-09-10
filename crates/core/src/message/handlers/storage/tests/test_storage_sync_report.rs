@@ -28,7 +28,6 @@ use crate::message::types::Message;
 use crate::message::types::SyncEntriesWithSuccessor;
 use crate::message::Encoder;
 use crate::message::HandleMsg;
-use crate::message::HopBudget;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
@@ -75,7 +74,6 @@ async fn test_sync_entries_handler_reports_persisted_entries() -> Result<()> {
         sender.swarm.transport.message_signer(),
         receiver.did(),
         receiver.did(),
-        HopBudget::MAX,
     )?;
 
     receiver_handler.handle(&context, &sync_msg).await?;
@@ -257,7 +255,6 @@ async fn test_sync_entries_handler_skips_entries_owned_by_another_virtual_owner(
         sender.swarm.transport.message_signer(),
         receiver.did(),
         receiver.did(),
-        HopBudget::MAX,
     )?;
     sender.swarm.transport.record_pending_storage_sync_ack(
         context.transaction.tx_id,
@@ -336,7 +333,6 @@ async fn test_sync_entries_physical_destination_routes_by_physical_did_not_stora
         node.swarm.transport.message_signer(),
         node.did(),
         destination,
-        HopBudget::MAX,
     )?;
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
 

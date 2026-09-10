@@ -208,7 +208,6 @@ impl Swarm {
             self.transport.message_signer(),
             self.did(),
             peer,
-            self.transport.hop_budget()?,
         )?;
 
         Ok(payload)
@@ -240,7 +239,6 @@ impl Swarm {
             self.transport.message_signer(),
             self.did(),
             self.did(),
-            self.transport.hop_budget()?,
         )?;
 
         Ok(answer_payload)

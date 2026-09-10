@@ -224,7 +224,6 @@ fn test_payload(node: &Node, data: &[u8]) -> Result<MessagePayload> {
         node.swarm.transport.message_signer(),
         node.did(),
         node.did(),
-        HopBudget::MAX,
     )
 }
 

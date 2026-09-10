@@ -1,5 +1,4 @@
 use super::*;
-use crate::message::HopBudget;
 
 #[tokio::test]
 async fn test_outbound_capacity_is_reserved_before_readiness_wait() -> Result<()> {
@@ -82,7 +81,6 @@ async fn test_oversized_payload_log_omits_the_custom_message_body() -> Result<()
         node1.swarm.transport.message_signer(),
         next_hop,
         destination,
-        HopBudget::MAX,
     )?;
     payload.relay.destination = relay_destination;
     let expected_tx_id = payload.transaction.tx_id.to_string();

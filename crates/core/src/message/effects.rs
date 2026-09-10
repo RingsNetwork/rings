@@ -471,7 +471,6 @@ mod tests {
     use super::*;
     use crate::ecc::SecretKey;
     use crate::message::types::QueryFor;
-    use crate::message::HopBudget;
     use crate::message::MessageSigner;
     use crate::session::SessionSk;
     use crate::tests::TEST_NETWORK_ID;
@@ -488,7 +487,6 @@ mod tests {
             MessageSigner::new(&session_sk, TEST_NETWORK_ID),
             destination,
             destination,
-            HopBudget::MAX,
         )
     }
 

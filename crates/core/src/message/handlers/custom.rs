@@ -80,13 +80,13 @@ mod tests {
     ) -> Result<(MessagePayload, CustomMessage)> {
         let origin = SessionSk::new_with_seckey(&SecretKey::random())?;
         let message = CustomMessage(b"through".to_vec());
-        let payload = MessagePayload::new_send(
+        let mut payload = MessagePayload::new_send(
             Message::CustomMessage(message.clone()),
             MessageSigner::new(&origin, TEST_NETWORK_ID),
             relay.did(),
             destination.did(),
-            hop_budget,
         )?;
+        payload.relay.hop_budget = hop_budget;
         Ok((payload, message))
     }
 

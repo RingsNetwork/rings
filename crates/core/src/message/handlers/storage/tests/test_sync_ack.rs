@@ -17,7 +17,6 @@ use crate::message::types::Message;
 use crate::message::types::SyncEntriesWithSuccessor;
 use crate::message::types::SyncEntriesWithSuccessorReport;
 use crate::message::HandleMsg;
-use crate::message::HopBudget;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
@@ -46,7 +45,6 @@ async fn test_sync_entries_report_handler_deletes_only_acked_keys() -> Result<()
         node.swarm.transport.message_signer(),
         node.did(),
         node.did(),
-        HopBudget::MAX,
     )?;
     node.swarm.transport.record_pending_storage_sync_ack(
         request.transaction.tx_id,
@@ -110,7 +108,6 @@ async fn test_sync_entries_report_handler_rejects_untracked_acks() -> Result<()>
         node.swarm.transport.message_signer(),
         node.did(),
         node.did(),
-        HopBudget::MAX,
     )?;
     let report = SyncEntriesWithSuccessorReport::new(
         sync_msg.purpose,
@@ -159,7 +156,6 @@ async fn test_sync_entries_report_handler_forwards_before_pending_capability_che
         sender.swarm.transport.message_signer(),
         receiver.did(),
         receiver.did(),
-        HopBudget::MAX,
     )?;
     let report = SyncEntriesWithSuccessorReport::new(
         sync_msg.purpose,
@@ -209,7 +205,6 @@ async fn test_additive_repair_sync_cannot_create_pending_cleanup_capability() ->
         node.swarm.transport.message_signer(),
         node.did(),
         node.did(),
-        HopBudget::MAX,
     )?;
 
     let result = node.swarm.transport.record_pending_storage_sync_ack(
@@ -311,7 +306,6 @@ async fn test_sync_entries_report_handler_rejects_wrong_physical_receiver() -> R
         sender.swarm.transport.message_signer(),
         receiver.did(),
         receiver.did(),
-        HopBudget::MAX,
     )?;
     sender.swarm.transport.record_pending_storage_sync_ack(
         request.transaction.tx_id,
@@ -372,7 +366,6 @@ async fn test_sync_entries_report_handler_rejects_unproven_placement_receiver() 
         sender.swarm.transport.message_signer(),
         route_next_hop.did(),
         sync_msg.destination.did(),
-        HopBudget::MAX,
     )?;
     sender.swarm.transport.record_pending_storage_sync_ack(
         request.transaction.tx_id,

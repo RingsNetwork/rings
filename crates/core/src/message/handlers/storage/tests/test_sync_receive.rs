@@ -27,7 +27,6 @@ use crate::message::types::SyncEntriesWithSuccessor;
 use crate::message::types::SyncEntriesWithSuccessorReport;
 use crate::message::Encoder;
 use crate::message::HandleMsg;
-use crate::message::HopBudget;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::MessageSigner;
@@ -87,7 +86,6 @@ async fn test_sync_entries_handler_stores_entry_at_placement_key() -> Result<()>
         MessageSigner::new(&context_session, TEST_NETWORK_ID),
         node.did(),
         node.did(),
-        HopBudget::MAX,
     )?;
 
     handler
@@ -128,7 +126,6 @@ async fn test_sync_entries_handler_caps_inbound_entry_payloads() -> Result<()> {
         MessageSigner::new(&context_session, TEST_NETWORK_ID),
         node.did(),
         node.did(),
-        HopBudget::MAX,
     )?;
 
     handler
@@ -179,7 +176,6 @@ async fn test_sync_entries_handler_rejects_non_affine_placement_before_writing()
         MessageSigner::new(&context_session, TEST_NETWORK_ID),
         node.did(),
         node.did(),
-        HopBudget::MAX,
     )?;
 
     let result = handler
@@ -311,7 +307,6 @@ async fn test_sync_entries_handler_accepts_placement_destination_on_local_branch
         node2.swarm.transport.message_signer(),
         node1.did(),
         placement_key,
-        HopBudget::MAX,
     )?;
 
     handler.handle(&context, &msg).await?;
@@ -371,7 +366,6 @@ async fn test_additive_repair_sync_persists_without_cleanup_report() -> Result<(
         sender.swarm.transport.message_signer(),
         receiver.did(),
         receiver.did(),
-        HopBudget::MAX,
     )?;
 
     receiver_handler.handle(&context, &sync_msg).await?;
@@ -415,7 +409,6 @@ async fn test_sync_entries_handler_rejects_mismatched_placement_destination() ->
         sender.swarm.transport.message_signer(),
         receiver.did(),
         destination_key,
-        HopBudget::MAX,
     )?;
     let receiver_handler =
         MessageHandler::new(receiver.swarm.transport.clone(), Arc::new(NoopCallback));
@@ -466,7 +459,6 @@ async fn test_sync_entries_handler_rejects_physical_destination_for_unowned_plac
         sender.swarm.transport.message_signer(),
         receiver.did(),
         receiver.did(),
-        HopBudget::MAX,
     )?;
     let receiver_handler =
         MessageHandler::new(receiver.swarm.transport.clone(), Arc::new(NoopCallback));
@@ -522,7 +514,6 @@ async fn test_sync_entries_handler_acks_local_branch_with_successor_witness() ->
         sender.swarm.transport.message_signer(),
         receiver.did(),
         receiver.did(),
-        HopBudget::MAX,
     )?;
     let receiver_handler =
         MessageHandler::new(receiver.swarm.transport.clone(), Arc::new(NoopCallback));

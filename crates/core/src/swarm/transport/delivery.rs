@@ -30,7 +30,9 @@ use crate::measure::MeasurementEvent;
 use crate::message::HopBudget;
 use crate::message::Message;
 use crate::message::MessagePayload;
+use crate::message::MessageRelay;
 use crate::message::MessageSigner;
+use crate::message::Transaction;
 use crate::session::SessionSk;
 use crate::utils::sleep;
 
@@ -401,13 +403,10 @@ pub(super) fn frame_chunk(
     did: Did,
     chunk: Chunk,
 ) -> Result<Bytes> {
-    let payload = MessagePayload::new_send(
-        Message::Chunk(chunk),
-        signer,
-        did,
-        did,
-        HopBudget::EXHAUSTED,
-    )?;
+    let transaction =
+        Transaction::new(did, crate::utils::new_uuid(), Message::Chunk(chunk), signer)?;
+    let relay = MessageRelay::new(did, did, HopBudget::EXHAUSTED);
+    let payload = MessagePayload::new(transaction, signer, relay)?;
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     crate::simulation::record_outbound_submission(payload.transaction.tx_id);
     payload.to_wire()

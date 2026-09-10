@@ -756,7 +756,6 @@ mod tests {
     use crate::dht::StorageSyncDestination;
     use crate::dht::StorageSyncPurpose;
     use crate::ecc::SecretKey;
-    use crate::message::HopBudget;
     use crate::message::Message;
     use crate::message::MessagePayload;
     use crate::message::MessageSigner;
@@ -810,7 +809,6 @@ mod tests {
                 MessageSigner::new(&session, crate::tests::TEST_NETWORK_ID),
                 did,
                 did,
-                HopBudget::MAX,
             )
             .and_then(|payload| payload.to_wire())
             .expect("payload must encode");

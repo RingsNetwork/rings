@@ -95,7 +95,6 @@ mod tests {
     use crate::error::Error;
     use crate::message::e2e::encrypt_stream_with_rng;
     use crate::message::e2e::E2eHandshakeRequest;
-    use crate::message::HopBudget;
     use crate::message::MessageSigner;
     use crate::session::SessionSk;
     use crate::tests::TEST_NETWORK_ID;
@@ -121,7 +120,6 @@ mod tests {
             MessageSigner::new(&session_sk, TEST_NETWORK_ID),
             destination,
             destination,
-            HopBudget::MAX,
         )
     }
 
@@ -136,7 +134,6 @@ mod tests {
             MessageSigner::new(&session_sk, TEST_NETWORK_ID),
             destination,
             destination,
-            HopBudget::MAX,
         )
     }
 

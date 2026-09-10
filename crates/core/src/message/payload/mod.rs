@@ -194,20 +194,19 @@ impl MessagePayload {
         })
     }
 
-    /// Helps to create sending message from data.
+    /// Helps to create sending message from data: a fresh carrier with the full hop budget.
     pub fn new_send<T>(
         data: T,
         signer: MessageSigner<&SessionSk>,
         next_hop: Did,
         destination: Did,
-        hop_budget: HopBudget,
     ) -> Result<Self>
     where
         T: Serialize,
     {
         let tx_id = crate::utils::new_uuid();
         let transaction = Transaction::new(destination, tx_id, data, signer)?;
-        let relay = MessageRelay::new(next_hop, transaction.destination, hop_budget);
+        let relay = MessageRelay::new(next_hop, transaction.destination, HopBudget::MAX);
         Self::new(transaction, signer, relay)
     }
 
@@ -287,15 +286,6 @@ pub trait PayloadSender {
     /// Get access to DHT.
     fn dht(&self) -> Arc<PeerRing>;
 
-    /// The hop budget every fresh payload this sender emits leaves with.
-    fn hop_budget(&self) -> Result<HopBudget> {
-        let dht = self.dht();
-        Ok(HopBudget::for_ring(
-            dht.finger_slot_count()?,
-            dht.successors().capacity(),
-        ))
-    }
-
     /// Used to check if destination is already connected when `infer_next_hop`
     fn is_connected(&self, did: Did) -> bool;
 
@@ -334,13 +324,7 @@ pub trait PayloadSender {
     where
         T: Serialize + Send,
     {
-        let payload = MessagePayload::new_send(
-            msg,
-            self.message_signer(),
-            next_hop,
-            destination,
-            self.hop_budget()?,
-        )?;
+        let payload = MessagePayload::new_send(msg, self.message_signer(), next_hop, destination)?;
         let tx_id = payload.transaction.tx_id;
         self.send_payload(payload).await?;
         Ok(tx_id)
@@ -368,7 +352,7 @@ pub trait PayloadSender {
         let next_hop = self.infer_next_hop(origin, None)?;
         let relay = payload
             .relay
-            .report(self.dht().did, origin, next_hop, self.hop_budget()?)?;
+            .report(self.dht().did, origin, next_hop, HopBudget::MAX)?;
 
         let signer = self.message_signer();
         let transaction = Transaction::new(origin, payload.transaction.tx_id, msg, signer)?;

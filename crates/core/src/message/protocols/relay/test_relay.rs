@@ -21,18 +21,6 @@ fn test_spend_is_the_predecessor_on_the_chain() {
     assert_eq!(steps, MAX_RELAY_HOPS);
 }
 
-/// Law: `for_ring(f, s) = min(f + s, MAX)`, monotone in both arguments.
-#[test]
-fn test_for_ring_is_finger_slots_plus_successors_under_the_cap() {
-    assert_eq!(HopBudget::for_ring(8, 3).remaining(), 11);
-    assert_eq!(HopBudget::for_ring(16, 3).remaining(), 19);
-    assert_eq!(HopBudget::for_ring(160, 3), HopBudget::MAX);
-    assert_eq!(HopBudget::for_ring(0, 3).remaining(), 3);
-    assert_eq!(HopBudget::for_ring(usize::MAX, usize::MAX), HopBudget::MAX);
-    assert!(HopBudget::for_ring(8, 3) < HopBudget::for_ring(9, 3));
-    assert!(HopBudget::for_ring(8, 3) < HopBudget::for_ring(8, 4));
-}
-
 /// A forwarding cycle spends the budget one forward per hop and then drops with the typed error:
 /// the witness that replaces history-based loop detection.
 #[test]

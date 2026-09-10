@@ -509,7 +509,6 @@ impl SwarmTransport {
             self.message_signer(),
             next_hop,
             destination,
-            self.hop_budget()?,
         )?;
         let tx_id = payload.transaction.tx_id;
         let records_cleanup_ack = msg.purpose.permits_source_cleanup();
