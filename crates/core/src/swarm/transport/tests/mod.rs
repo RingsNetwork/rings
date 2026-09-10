@@ -703,6 +703,7 @@ async fn test_held_messages_are_delivered_in_arrival_order() -> Result<()> {
     pending
         .receive(&pending.custom_message_wire(&transport, b"third")?)
         .await?;
+    app_callback.wait_for_inbounds_at_least(3).await;
 
     assert_eq!(app_callback.inbound_custom_data()?, vec![
         b"first".to_vec(),
