@@ -93,18 +93,16 @@ signature, so every hop can attribute it.
 
 Every hop, and the destination, learns from a relayed message:
 
-- the origin DID, named by the transaction signature;
+- the origin DID, named by the transaction signature, which is also where every report
+  for the message is routed back to;
 - the destination DID, carried by the transaction and by the relay header, because
   the next hop is chosen from it;
 - its own predecessor, the authenticated transport edge the message arrived on, and
   its successor, the relay's `next_hop`;
 - the encoded size and the arrival time of the message;
-- until #736 lands, the complete hop history: the relay's `path` is a push-only stack
-  that every forwarding hop appends itself to, so an intermediate hop sees every node
-  that handled the message before it, and the destination receives the whole route.
-  After #736 the relay carries only `next_hop`, `destination`, and a hop budget, so a
-  hop learns exactly its predecessor and successor and the destination learns only
-  the last hop.
+- nothing about the route: the relay carrier is `next_hop`, `destination`, and a hop
+  budget that every forward spends, so a hop learns exactly its predecessor and
+  successor and the destination learns only the last hop.
 
 Confidentiality on this layer is opt-in by construction, not by policy. A DID is the
 160-bit keccak digest of the account public key, so a Chord lookup by DID yields a
@@ -118,7 +116,9 @@ rather than key digests, which is a different identifier design, not a relay cha
 
 The obligations of this layer are leak-minimization obligations:
 
-- no hop history on the wire (#736);
+- no hop history on the wire; a route that outruns its hop budget is dropped as a
+  loop, and since the carrier is outside every signature the budget bounds the work
+  honest hops do for one message and is not a promise a dishonest hop keeps;
 - no telemetry in the envelope beyond what routing needs: the next hop, the
   destination, and the hop budget;
 - payload bytes encrypted to the destination's account key once the E2E handshake
@@ -216,18 +216,8 @@ the measurement subsystem.
 Chord routing assumes the node set is acceptable under the deployment model. It
 gives deterministic routing over the observed topology; it does not defend, by
 itself, against an adversary that can occupy many positions on the identifier ring.
-
-A relayed message carries no hop history: its relay carrier names only the next hop,
-the destination, and a hop budget that every forward spends, so each hop learns its
-predecessor from the transport edge and its successor from the carrier, and the
-destination learns only the last hop. A route that outruns its budget is dropped as a
-loop. The carrier is outside every signature, so the budget bounds the work honest hops
-do for one message and is not a promise a dishonest hop keeps. The plain relay therefore
-offers payload confidentiality only to the extent the application's E2E layer provides it,
-and per-hop topology hiding; it does not offer sender or receiver unlinkability. The
-origin is visible to every hop through the transaction signature, the destination is
-visible to every hop because Chord routes by it, and a report is always routed back to
-the origin. Hiding the origin is the onion layer's concern, not the relay's.
+What a relayed message reveals to each hop is stated under the communication layer
+contract above.
 
 ### Connection Admission
 
