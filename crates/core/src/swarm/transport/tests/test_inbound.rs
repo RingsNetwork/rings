@@ -14,6 +14,7 @@ use crate::tests::TEST_NETWORK_ID;
 
 mod test_callback_failure;
 mod test_capacity_handoff;
+mod test_pre_admission;
 mod test_storage_interleave;
 
 #[derive(Default)]

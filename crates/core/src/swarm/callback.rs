@@ -613,7 +613,7 @@ impl InnerSwarmCallback {
         {
             return Ok(false);
         }
-        let connected = self.emit_connected_event_for_attempt(did, attempt).await?;
+        let connected = self.emit_connected_event_for_attempt(did, attempt).await;
         if self
             .processor
             .logical
@@ -622,7 +622,7 @@ impl InnerSwarmCallback {
         {
             self.start_pre_admission_drain().await;
         }
-        Ok(connected)
+        connected
     }
 
     async fn emit_connected_event_for_attempt(

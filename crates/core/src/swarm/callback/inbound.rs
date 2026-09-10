@@ -267,6 +267,10 @@ impl InboundMailbox {
         drop((bytes, transport_capacity));
         self.handoffs.bump();
         ticket.release_admission_turn();
+        if !processor.pending_connection_admits(peer).await? {
+            finish_completion(completion, Ok(()));
+            return Ok(());
+        }
         let payload = if kind.is_chunk() {
             processor
                 .validate_preverified_payload(peer, authentication, &payload)
