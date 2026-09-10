@@ -1,9 +1,6 @@
 use std::error::Error;
 use std::io;
-use std::io::Read;
-use std::io::Write;
 use std::net::Ipv4Addr;
-use std::net::SocketAddrV4;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -24,29 +21,6 @@ pub fn gateway_plan() -> TestResult<GatewayPlan> {
         included_routes: vec!["1.0.0.0/24".parse()?],
         mtu: Mtu::try_from(1_280)?,
     })
-}
-
-pub async fn probe_http(target: Ipv4Addr) -> io::Result<Vec<u8>> {
-    tokio::task::spawn_blocking(move || {
-        let mut stream = std::net::TcpStream::connect_timeout(
-            &SocketAddrV4::new(target, 80).into(),
-            IO_TIMEOUT,
-        )?;
-        stream.set_read_timeout(Some(IO_TIMEOUT))?;
-        stream.set_write_timeout(Some(IO_TIMEOUT))?;
-        stream.write_all(
-            format!("HEAD / HTTP/1.1\r\nHost: {target}\r\nConnection: close\r\n\r\n").as_bytes(),
-        )?;
-        let mut response = vec![0_u8; 256];
-        let length = stream.read(response.as_mut_slice())?;
-        if length == 0 {
-            return Err(io::Error::other("HTTP probe returned an empty response"));
-        }
-        response.truncate(length);
-        Ok(response)
-    })
-    .await
-    .map_err(|error| io::Error::other(format!("HTTP probe task failed: {error}")))?
 }
 
 pub async fn capture_packet(device: &mut NativePacketIo, plan: &GatewayPlan) -> io::Result<usize> {
@@ -75,7 +49,7 @@ pub async fn capture_packet(device: &mut NativePacketIo, plan: &GatewayPlan) -> 
             }
         }
     });
-    let (captured, injection) = tokio::join!(capture, inject_captured_udp(CAPTURE_TARGET));
+    let (captured, injection) = tokio::join!(capture, inject_route_probe_packets());
     let captured = captured.map_err(|_| io::Error::other("timed out waiting for packet"))??;
     injection?;
     Ok(captured)
@@ -106,7 +80,13 @@ pub fn assert_exact_capture_ledger(ledger: &std::path::Path) -> TestResult {
     Ok(())
 }
 
-async fn inject_captured_udp(target: Ipv4Addr) -> io::Result<()> {
+async fn inject_route_probe_packets() -> io::Result<()> {
+    inject_udp(UNSELECTED_TARGET).await?;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    inject_udp(CAPTURE_TARGET).await
+}
+
+async fn inject_udp(target: Ipv4Addr) -> io::Result<()> {
     tokio::task::spawn_blocking(move || {
         let socket = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
         let deadline = Instant::now() + IO_TIMEOUT;
@@ -118,12 +98,12 @@ async fn inject_captured_udp(target: Ipv4Addr) -> io::Result<()> {
                 {
                     std::thread::sleep(Duration::from_millis(100));
                 }
-                Err(error) => return Err(io_context("captured UDP injection", error)),
+                Err(error) => return Err(io_context("UDP route-probe injection", error)),
             }
         }
     })
     .await
-    .map_err(|error| io::Error::other(format!("captured UDP injection task failed: {error}")))?
+    .map_err(|error| io::Error::other(format!("UDP route-probe injection task failed: {error}")))?
 }
 
 fn capture_route_may_be_converging(error: &io::Error) -> bool {
