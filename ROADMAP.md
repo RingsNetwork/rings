@@ -60,12 +60,18 @@ The substrate both layers build on:
 
 **Shipped**
 - Signed messaging with selectable signature schemes; plaintext and signed message paths.
+- End-to-end ElGamal encryption to a DID's account key after the E2E handshake
+  (`crates/core/src/message/e2e.rs`); opt-in, because a DID is a key digest and a lookup
+  yields no key to encrypt to.
+- Onion circuits over direct edges with layered ElGamal-AEAD frames, fixed-batch cover
+  cells, pacing, and fixed cell size classes (`crates/node/src/onion`); the contract is drawn
+  in [SECURITY.md](./SECURITY.md#layer-contracts).
 
 **Planned**
-- End-to-end encryption across the messaging layer (sender-to-recipient, not hop-by-hop).
 - User-installed zero-knowledge identity and verifiable off-chain compute protocols.
 - Secret sharing and private storage primitives.
-- Metadata-resistant routing (reducing what intermediaries can observe).
+- Leak minimization on the communication layer (no hop history on the wire) and
+  DID-to-DID sender-unlinkable messaging on top of the circuits.
 
 ---
 

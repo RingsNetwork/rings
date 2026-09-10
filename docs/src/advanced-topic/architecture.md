@@ -1,6 +1,6 @@
 # Architecture
 
-The Rings Network architecture is streamlined into five distinct layers.
+The Rings Network architecture is streamlined into six distinct layers.
 
 #### Runtime Layer
 
@@ -23,6 +23,12 @@ Assuming Node A and Node B want to create a WebRTC connection, they would need t
 #### Network Layer
 
 The Rings Network is a structured peer-to-peer network that incorporates a distributed hash table (DHT) to facilitate efficient and scalable lookups. The Chord algorithm is utilized to implement the lookup function within the DHT, thereby enabling effective routing of messages and storage of key-value pairs in a peer-to-peer setting. The use of a DHT, incorporating the Chord algorithm, guarantees high availability in the Rings Network, which is critical for handling the substantial number of nodes and requests typically present in large-scale peer-to-peer networks.
+
+#### Privacy Layer
+
+The network layer is the communication layer: it routes by DID and, once two peers have exchanged account public keys through the E2E handshake, encrypts a payload to its destination. A DID is the 160-bit digest of a public key, so a lookup yields an identifier to route to and not a key to encrypt to, and every hop sees the origin DID by signature and the destination DID by routing. The communication layer therefore minimizes what it leaks and does not provide privacy.
+
+Privacy is provided by the privacy layer, the onion circuits in `crates/node/src/onion`: layered ElGamal-AEAD frames over direct edges, fixed-batch cover cells with pacing, and fixed cell size classes. Each relay decrypts one layer and learns only its predecessor and its successor; the exit sees the application payload but not the client. The contract of each layer, including what circuits do not hide, is drawn in the [security model](https://github.com/RingsNetwork/rings/blob/master/SECURITY.md#layer-contracts).
 
 #### Protocol Layer
 

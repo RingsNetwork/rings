@@ -7,6 +7,12 @@ one overlay, find each other by DID, and exchange messages over direct WebRTC da
 routed by a Chord DHT. There is no server in the data path: seed nodes only help a peer find
 its first connection.
 
+The overlay is the communication layer: it routes by DID and, once two peers have completed
+the E2E handshake, encrypts to a DID. It does not hide who is talking to whom. Privacy is the
+job of the privacy layer, the onion circuits that bound what each relay can learn to its
+predecessor and its successor; the contract of each layer is drawn in the
+[security model](https://github.com/RingsNetwork/rings/blob/master/SECURITY.md#layer-contracts).
+
 On top of the overlay, Rings gives applications a namespace-scoped protocol runtime. A
 protocol is a pure state machine; its interpreter shell performs the side effects, and only
 within its own namespace. Built-in protocols cover peer service relay and echo; yours are
@@ -39,7 +45,7 @@ and to the JSON-RPC [API](jsonrpc.md) every runtime shares.
 ## Beyond the book
 
 - [Rings whitepaper](https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf): the protocol paper.
-- [Security model](https://github.com/RingsNetwork/rings/blob/master/SECURITY.md): the assumptions, deployment models, and the boundary between DID authentication and Sybil resistance. Read it before deploying.
+- [Security model](https://github.com/RingsNetwork/rings/blob/master/SECURITY.md): the assumptions, deployment models, the boundary between DID authentication and Sybil resistance, and the contracts of the communication layer and the privacy layer. Read it before deploying.
 - [Roadmap](https://github.com/RingsNetwork/rings/blob/master/ROADMAP.md): where the network layer and the privacy layer are heading.
 - [Source on GitHub](https://github.com/RingsNetwork/rings): the code, examples, and issues.
 - [License](https://github.com/RingsNetwork/rings/blob/master/LICENSE): AGPL-3.0-only, so a product or hosted service built on Rings publishes its source; a commercial license for use outside those terms is available on request.
