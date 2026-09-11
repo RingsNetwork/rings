@@ -77,23 +77,6 @@ pub(crate) struct BowlGeometry {
     pub(crate) inner_waist: Point,
 }
 
-/// The inner leg boundary constructed from two arcs and their common tangent.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct InnerLegGeometry {
-    /// Circle rounding the leg root.
-    pub(crate) root_circle: Circle,
-    /// Circle resolving the leg into the lower-right corner.
-    pub(crate) tip_circle: Circle,
-    /// Point where the leg leaves the waist.
-    pub(crate) root: Point,
-    /// Tangency from the root circle to the straight segment.
-    pub(crate) root_tangent: Point,
-    /// Tangency from the straight segment to the tip circle.
-    pub(crate) tip_tangent: Point,
-    /// Terminal point at the lower-right corner.
-    pub(crate) tip: Point,
-}
-
 /// Curved leg from the center to the lower-right corner.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct LegGeometry {
@@ -103,8 +86,10 @@ pub(crate) struct LegGeometry {
     pub(crate) outer_start: Point,
     /// End of the outer contour at the lower-right corner.
     pub(crate) outer_end: Point,
-    /// Inner contour.
-    pub(crate) inner: InnerLegGeometry,
+    /// Start of the inner contour on the mother-square diagonal.
+    pub(crate) inner_start: Point,
+    /// End of the inner contour at the lower-right corner.
+    pub(crate) inner_end: Point,
 }
 
 /// Complete rational construction of the central R.
@@ -142,7 +127,7 @@ impl GlyphGeometry {
             stem,
             serifs: serifs(square_half, unit, stem),
             bowl: bowl(unit),
-            leg: leg(square_half, unit),
+            leg: leg(square_half),
         }
     }
 
@@ -271,27 +256,12 @@ fn bowl(unit: f64) -> BowlGeometry {
     }
 }
 
-fn leg(square_half: f64, unit: f64) -> LegGeometry {
+fn leg(square_half: f64) -> LegGeometry {
     let outer_start = Point { x: 0.0, y: 0.0 };
     let outer_end = Point {
         x: square_half,
         y: square_half,
     };
-    let root_circle = Circle {
-        center: Point {
-            x: unit,
-            y: 3.0 * unit / 4.0,
-        },
-        radius: 3.0 * unit / 4.0,
-    };
-    let tip_circle = Circle {
-        center: Point {
-            x: square_half,
-            y: square_half - unit / 4.0,
-        },
-        radius: unit / 4.0,
-    };
-    let (root_tangent, tip_tangent) = inner_common_tangent(root_circle, tip_circle);
     LegGeometry {
         outer_circle: Circle {
             center: Point {
@@ -302,41 +272,9 @@ fn leg(square_half: f64, unit: f64) -> LegGeometry {
         },
         outer_start,
         outer_end,
-        inner: InnerLegGeometry {
-            root_circle,
-            tip_circle,
-            root: Point { x: unit, y: 0.0 },
-            root_tangent,
-            tip_tangent,
-            tip: outer_end,
-        },
+        inner_start: outer_start,
+        inner_end: outer_end,
     }
-}
-
-fn inner_common_tangent(first: Circle, second: Circle) -> (Point, Point) {
-    let delta = Point {
-        x: second.center.x - first.center.x,
-        y: second.center.y - first.center.y,
-    };
-    let distance = delta.x.hypot(delta.y);
-    let axis = Point {
-        x: delta.x / distance,
-        y: delta.y / distance,
-    };
-    let radial_projection = (first.radius - second.radius) / distance;
-    let tangent_projection = (1.0 - radial_projection.powi(2)).sqrt();
-    let left_normal = Point {
-        x: -axis.y,
-        y: axis.x,
-    };
-    let normal = Point {
-        x: radial_projection * axis.x + tangent_projection * left_normal.x,
-        y: radial_projection * axis.y + tangent_projection * left_normal.y,
-    };
-    (
-        first.point_at_offset(first.radius * normal.x, first.radius * normal.y),
-        second.point_at_offset(second.radius * normal.x, second.radius * normal.y),
-    )
 }
 
 #[cfg(test)]
@@ -392,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn leg_is_a_quarter_circle_closed_by_a_biarc_common_tangent() {
+    fn leg_is_the_region_between_a_quarter_circle_and_square_diagonal() {
         let glyph = GlyphGeometry::from_aperture(100.0);
         let leg = glyph.leg;
         assert!(
@@ -403,36 +341,15 @@ mod tests {
             (distance(leg.outer_circle.center, leg.outer_end) - leg.outer_circle.radius).abs()
                 < EPSILON
         );
-        assert!(
-            (distance(leg.inner.root_circle.center, leg.inner.root) - leg.inner.root_circle.radius)
-                .abs()
-                < EPSILON
-        );
-        assert!(
-            (distance(leg.inner.tip_circle.center, leg.inner.tip) - leg.inner.tip_circle.radius)
-                .abs()
-                < EPSILON
-        );
-
-        let tangent = subtract(leg.inner.tip_tangent, leg.inner.root_tangent);
-        let root_radius = subtract(leg.inner.root_tangent, leg.inner.root_circle.center);
-        let tip_radius = subtract(leg.inner.tip_tangent, leg.inner.tip_circle.center);
-        assert!(dot(tangent, root_radius).abs() < EPSILON);
-        assert!(dot(tangent, tip_radius).abs() < EPSILON);
+        assert!((leg.inner_start.x - leg.inner_start.y).abs() < EPSILON);
+        assert!((leg.inner_end.x - leg.inner_end.y).abs() < EPSILON);
+        assert!((leg.inner_start.x - leg.outer_start.x).abs() < EPSILON);
+        assert!((leg.inner_start.y - leg.outer_start.y).abs() < EPSILON);
+        assert!((leg.inner_end.x - leg.outer_end.x).abs() < EPSILON);
+        assert!((leg.inner_end.y - leg.outer_end.y).abs() < EPSILON);
     }
 
     fn distance(first: Point, second: Point) -> f64 {
         (first.x - second.x).hypot(first.y - second.y)
-    }
-
-    fn subtract(first: Point, second: Point) -> Point {
-        Point {
-            x: first.x - second.x,
-            y: first.y - second.y,
-        }
-    }
-
-    fn dot(first: Point, second: Point) -> f64 {
-        first.x * second.x + first.y * second.y
     }
 }

@@ -33,11 +33,12 @@ cargo run -p rings-logo -- check
   aperture (`L = sqrt(2)a`); stem edges are `-19u/6` and `-13u/6`; the paired
   bowl circles have radius `5u/2` and centers `(-u/2,-2u)` and
   `(-3u/2,-3u/2)`; each serif circle has radius `2u/3`.
-- The leg is not assigned an arbitrary angle. Its outer edge is the exact
-  quarter circle from the square center to the lower-right corner, centered at
-  the right midpoint. Its inner edge is two circular arcs of radii `3u/4` and
-  `u/4`, joined by their calculated common tangent. The root has width `u` and
-  the two contours resolve at the same corner.
+- The leg is not assigned an arbitrary angle or rounded with added tangent
+  circles. As in the plate, it occupies the region between the mother-square
+  diagonal from the center to the lower-right corner and one exact circular
+  arc with the same endpoints. The arc is a quarter circle centered at the
+  square's right midpoint, so both boundaries resolve at the corner without a
+  fitted tip or root.
 - Stroke hierarchy is `30:5:1`, directly matching teeth, bores, and one
   construction unit. With `w_R = u = sqrt(2)a/9` and six teeth per bore sector,
   the gear and bore outlines are `w_G = w_R/6`; construction guides are

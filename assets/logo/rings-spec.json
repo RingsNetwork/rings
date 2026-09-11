@@ -31,10 +31,9 @@
     "fine_stroke": 7.856742,
     "bowl_radius": 39.28371,
     "serif_circle_radius": 10.475656,
-    "leg_root_circle_radius": 11.785113,
-    "leg_tip_circle_radius": 3.928371,
-    "leg_root_tangent": [8.264571, 20.917614],
-    "leg_tip_tangent": [68.227707, 69.826474]
+    "leg_outer_circle_radius": 70.710678,
+    "leg_start": [0, 0],
+    "leg_end": [70.710678, 70.710678]
   },
   "glyph_rules": {
     "historical_base": {
@@ -43,7 +42,8 @@
       "dominant_stroke": "u=L/9",
       "fine_stroke": "u/2=L/18",
       "b_round": "paired circular contours; lower diameter 5L/9",
-      "serifs": "brackets constructed by tangent circles"
+      "serifs": "brackets constructed by tangent circles",
+      "leg": "bounded by the center-to-corner diagonal and a circular arc"
     },
     "rings_completion": {
       "scope": "parameters not fully specified by the surviving Pacioli plate",
@@ -53,7 +53,7 @@
       "bowl_inner": "center=(-3u/2,-3u/2); radius=5u/2",
       "serif_circle_radius": "2u/3",
       "leg_outer": "quarter circle centered at the square right midpoint",
-      "leg_inner": "arcs of radii 3u/4 and u/4 joined by their exact common tangent"
+      "leg_inner": "mother-square diagonal from center to lower-right corner"
     }
   },
   "color_rules": {
