@@ -428,6 +428,94 @@ async fn test_native_fetch_records_response_bytes_as_chunks_arrive() {
 
 #[cfg(rings_native)]
 #[test]
+fn test_native_transport_headers_are_not_caller_controlled() {
+    for name in [
+        "Host",
+        ":authority",
+        "Connection",
+        "Proxy-Connection",
+        "Keep-Alive",
+        "Proxy-Authenticate",
+        "Proxy-Authorization",
+        "TE",
+        "Trailer",
+        "Transfer-Encoding",
+        "Content-Length",
+        "Upgrade",
+        "Expect",
+    ] {
+        assert!(is_native_transport_managed_header(name), "{name}");
+    }
+    for name in ["Accept", "Authorization", "Content-Type", "X-Application"] {
+        assert!(!is_native_transport_managed_header(name), "{name}");
+    }
+}
+
+#[cfg(rings_native)]
+#[tokio::test]
+async fn test_native_fetch_uses_validated_url_authority_instead_of_caller_host() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let expected_host = format!("allowed.example:{}", address.port());
+    let expected_host_for_server = expected_host.clone();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let length = stream.read(&mut chunk).await.unwrap();
+            assert_ne!(length, 0, "request headers ended before their delimiter");
+            request.extend_from_slice(&chunk[..length]);
+        }
+        let request = String::from_utf8_lossy(&request).to_ascii_lowercase();
+        assert!(request.starts_with("post /probe http/1.1\r\n"));
+        assert!(request.contains(&format!("\r\nhost: {expected_host_for_server}\r\n")));
+        assert!(request.contains("\r\nx-application: preserved\r\n"));
+        assert!(request.contains("\r\ncontent-length: 2\r\n"));
+        assert!(!request.contains("blocked.example"));
+        assert!(!request.contains("content-length: 999"));
+        assert!(!request.contains("proxy-connection:"));
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+            .await
+            .unwrap();
+    });
+    let request = OnionHttpsRequest {
+        target: expected_host.clone(),
+        method: "POST".to_string(),
+        path: "/probe".to_string(),
+        headers: vec![
+            ("Host".to_string(), "blocked.example".to_string()),
+            (":authority".to_string(), "blocked.example".to_string()),
+            ("Content-Length".to_string(), "999".to_string()),
+            ("Proxy-Connection".to_string(), "keep-alive".to_string()),
+            ("X-Application".to_string(), "preserved".to_string()),
+        ],
+        body: b"ok".to_vec(),
+    };
+    let egress = NativeHttpsEgress::Direct {
+        host: "allowed.example".to_string(),
+        addresses: vec![address],
+    };
+
+    let response = native_fetch_with_timeout(
+        &format!("http://{expected_host}/probe"),
+        &request,
+        DEFAULT_HTTPS_RESPONSE_BODY_LIMIT_BYTES,
+        Duration::from_secs(1),
+        &egress,
+        |_| Ok(()),
+    )
+    .await
+    .unwrap();
+
+    server.await.unwrap();
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body, b"ok");
+}
+
+#[cfg(rings_native)]
+#[test]
 fn test_native_egress_selection_pins_public_addresses_and_proxies_only_synthetic_dns() {
     let target = OnionProxyTarget::parse_authority("example.com:443").unwrap();
     let public = "8.8.8.8:443".parse().unwrap();
