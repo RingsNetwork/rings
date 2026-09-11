@@ -31,6 +31,8 @@ use self::limits::usize_to_u64;
 #[cfg(rings_native)]
 use self::native::execute_https_request;
 #[cfg(all(test, rings_native))]
+use self::native::is_native_transport_managed_header;
+#[cfg(all(test, rings_native))]
 use self::native::native_fetch_with_timeout;
 #[cfg(all(test, rings_native))]
 use self::native::select_native_https_egress;

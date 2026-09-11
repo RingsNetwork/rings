@@ -18,6 +18,30 @@ use crate::onion::OnionExitPolicy;
 
 const HTTPS_EXIT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Return whether the native exit, rather than the onion client, owns this request header.
+///
+/// The validated URL is the sole authority source. Message framing and hop-by-hop behavior also
+/// belong to reqwest so untrusted callers cannot override transport semantics.
+pub(super) fn is_native_transport_managed_header(name: &str) -> bool {
+    [
+        "host",
+        ":authority",
+        "connection",
+        "proxy-connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "content-length",
+        "upgrade",
+        "expect",
+    ]
+    .iter()
+    .any(|managed| name.eq_ignore_ascii_case(managed))
+}
+
 /// Mutually exclusive native HTTPS egress strategies.
 ///
 /// A direct request is allowed only after resolving and pinning public addresses. A proxied
@@ -132,6 +156,9 @@ pub(super) async fn native_fetch_with_timeout(
         .map_err(|error| Error::HttpRequestError(format!("build HTTPS proxy client: {error}")))?;
     let mut builder = client.request(method, url);
     for (name, value) in &request.headers {
+        if is_native_transport_managed_header(name) {
+            continue;
+        }
         builder = builder.header(name.as_str(), value.as_str());
     }
     if !request.body.is_empty() {
