@@ -297,7 +297,7 @@ html {
     border-block-start: 1px solid var(--rings-line);
 }
 
-/* The brand mark: the icon is white, so it sits on the dark tile the frontend gives it. */
+/* The brand mark uses its generated dark-background construction colorway. */
 
 .rings-mark {
     display: grid;

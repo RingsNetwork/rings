@@ -3354,6 +3354,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rings-logo"
+version = "0.23.0"
+
+[[package]]
 name = "rings-measure"
 version = "0.23.0"
 dependencies = [
