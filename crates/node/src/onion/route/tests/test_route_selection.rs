@@ -56,6 +56,7 @@ fn signed_exit_for_session_network_at(
                 .account_verification_pubkey()
                 .map_err(Error::CoreError)?,
             session_public_key: session_sk.session_public_key(),
+            process_epoch: crate::onion::OnionExitEpoch::new([29; 16]),
             node_type: OnlineNodeType::Native,
             network_id,
             service: service("web"),

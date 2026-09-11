@@ -100,6 +100,8 @@ pub enum OnionRouteError {
     ForwardReplay,
     /// A forward payload reached the exit after its authenticated expiry.
     ForwardPayloadExpired,
+    /// A forward payload names an exit process epoch that is no longer active.
+    ForwardEpochMismatch,
     /// A backward sequence number has already delivered a client-side action.
     BackwardReplay,
     /// A circuit direction exhausted its monotonic sequence space.
@@ -222,6 +224,9 @@ impl fmt::Display for OnionRouteError {
             }
             Self::ForwardReplay => f.write_str("replayed onion forward payload"),
             Self::ForwardPayloadExpired => f.write_str("expired onion forward payload"),
+            Self::ForwardEpochMismatch => {
+                f.write_str("onion forward payload belongs to another exit process epoch")
+            }
             Self::BackwardReplay => f.write_str("replayed onion TCP backward payload"),
             Self::SequenceExhausted => f.write_str("onion circuit sequence exhausted"),
             Self::BackwardReturnIdMismatch => {

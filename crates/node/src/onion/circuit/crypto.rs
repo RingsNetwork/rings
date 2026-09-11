@@ -78,6 +78,7 @@ pub(crate) fn encode_initial_forward_link(
     let layer = build_forward_layers(
         client,
         route.encryption_hops(),
+        route.exit().process_epoch,
         circuit_id,
         OnionForwardSequence::FIRST,
         payload,
@@ -132,6 +133,7 @@ impl OnionCircuitPath {
         let layer = build_forward_layers_with_ids(
             client,
             self.route.encryption_hops(),
+            self.route.exit().process_epoch,
             self.edge_circuit_ids.as_slice(),
             sequence,
             payload,
@@ -203,17 +205,26 @@ pub async fn send_backward(
 fn build_forward_layers(
     client: OnionClientReturn,
     hops: &[OnionRouteHop],
+    process_epoch: crate::onion::OnionExitEpoch,
     first_circuit_id: OnionCircuitId,
     sequence: OnionForwardSequence,
     payload: OnionCircuitPayload,
 ) -> Result<AeadCiphertext> {
     let circuit_ids = edge_circuit_ids(hops.len(), first_circuit_id)?;
-    build_forward_layers_with_ids(client, hops, circuit_ids.as_slice(), sequence, payload)
+    build_forward_layers_with_ids(
+        client,
+        hops,
+        process_epoch,
+        circuit_ids.as_slice(),
+        sequence,
+        payload,
+    )
 }
 
 fn build_forward_layers_with_ids(
     client: OnionClientReturn,
     hops: &[OnionRouteHop],
+    process_epoch: crate::onion::OnionExitEpoch,
     circuit_ids: &[OnionCircuitId],
     sequence: OnionForwardSequence,
     payload: OnionCircuitPayload,
@@ -241,6 +252,7 @@ fn build_forward_layers_with_ids(
     let mut layer = encrypt_forward_layer(
         exit_circuit_id,
         OnionForwardLayer::Exit {
+            process_epoch,
             client,
             return_session_public_key: exit_return_session_public_key,
             expires_at_ms,

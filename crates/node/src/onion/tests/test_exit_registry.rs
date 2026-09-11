@@ -39,6 +39,7 @@ fn signed_exit_for_session_at(
                 .account_verification_pubkey()
                 .map_err(Error::CoreError)?,
             session_public_key: session_sk.session_public_key(),
+            process_epoch: OnionExitEpoch::new([31; 16]),
             node_type: OnlineNodeType::Native,
             network_id: 1,
             service,
@@ -202,6 +203,17 @@ fn test_exit_descriptor_signature_covers_schema_version() -> Result<()> {
 }
 
 #[test]
+fn test_exit_descriptor_signature_covers_process_epoch() -> Result<()> {
+    let mut descriptor = signed_exit_at(20, 100)?;
+    assert!(descriptor.verify_signature(TEST_NETWORK_ID));
+
+    descriptor.process_epoch = OnionExitEpoch::new([32; 16]);
+
+    assert!(!descriptor.verify_signature(TEST_NETWORK_ID));
+    Ok(())
+}
+
+#[test]
 fn test_exit_registry_decode_reports_rejected_schema_values() -> Result<()> {
     let valid = signed_exit_at(20, 100)?;
     let mut unsupported = signed_exit_at(21, 100)?;
@@ -238,6 +250,7 @@ fn test_latest_valid_by_service_did_filters_expired_and_keeps_newest() -> Result
             did,
             public_key: public_key.clone(),
             session_public_key: session_sk.session_public_key(),
+            process_epoch: OnionExitEpoch::new([31; 16]),
             node_type: OnlineNodeType::Native,
             network_id: 1,
             service: service("web"),
@@ -255,6 +268,7 @@ fn test_latest_valid_by_service_did_filters_expired_and_keeps_newest() -> Result
             did,
             public_key,
             session_public_key: session_sk.session_public_key(),
+            process_epoch: OnionExitEpoch::new([31; 16]),
             node_type: OnlineNodeType::Native,
             network_id: 1,
             service: service("web"),

@@ -27,6 +27,7 @@ fn exit_descriptor(session: &SessionSk) -> OnionExitDescriptor {
                 .account_verification_pubkey()
                 .expect("verification key"),
             session_public_key: session.session_public_key(),
+            process_epoch: crate::onion::OnionExitEpoch::new([19; 16]),
             node_type: OnlineNodeType::Native,
             network_id: TEST_NETWORK_ID,
             service: OnionExitService::tcp(),

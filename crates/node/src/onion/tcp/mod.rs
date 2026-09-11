@@ -128,7 +128,9 @@ impl NativeOnionCircuitHandle {
         allow_relay: bool,
         exit_config: Option<NativeOnionTcpExitConfig>,
     ) -> Result<Self> {
-        let allow_exit = exit_config.is_some();
+        let exit_epoch = exit_config
+            .as_ref()
+            .map(|_| extensions.core().onion_exit_epoch());
         let (runtime, https) = native_onion_runtimes(session_sk.clone(), network_id, exit_config);
         if let Some(config) = runtime.exit_config.as_ref() {
             if config.allows_service(&OnionServiceName::https()) {
@@ -136,7 +138,7 @@ impl NativeOnionCircuitHandle {
                 https.set_native_proxy(config.https_proxy().map(ToString::to_string));
             }
         }
-        let capabilities = OnionCircuitCapabilities::from_registration(allow_relay, allow_exit);
+        let capabilities = OnionCircuitCapabilities::from_registration(allow_relay, exit_epoch);
         let handler_session_sk = session_sk.clone();
         extensions.register(
             OnionCircuitProtocol::new(capabilities),

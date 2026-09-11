@@ -73,6 +73,11 @@ impl Core {
         self.processor.did()
     }
 
+    #[cfg(rings_native)]
+    pub(crate) fn onion_exit_epoch(&self) -> crate::onion::OnionExitEpoch {
+        self.processor.onion_exit_epoch()
+    }
+
     /// Put a message on the overlay to `to` under `namespace`.
     pub async fn send(&self, to: Did, namespace: &str, payload: Bytes) -> Result<()> {
         let envelope = Envelope::new(namespace, payload);

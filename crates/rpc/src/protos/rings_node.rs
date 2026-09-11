@@ -369,6 +369,8 @@ pub struct OnionExitDescriptorInfo {
     pub public_key: Value,
     /// Session encryption public key encoded with the core serde shape.
     pub session_public_key: Value,
+    /// Random process epoch encoded with the node serde shape.
+    pub process_epoch: Value,
     /// Runtime class of the exit node.
     pub node_type: OnlineNodeTypeInfo,
     /// Overlay network identifier the exit belongs to.

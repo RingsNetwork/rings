@@ -1,6 +1,8 @@
 #[cfg(rings_native)]
 use std::sync::atomic::AtomicBool;
 #[cfg(rings_native)]
+use std::sync::atomic::AtomicUsize;
+#[cfg(rings_native)]
 use std::sync::atomic::Ordering;
 #[cfg(rings_native)]
 use std::sync::Arc;
@@ -43,8 +45,15 @@ use crate::extension::ext::Protocol;
 #[cfg(rings_native)]
 use crate::extension::ext::Scope;
 use crate::extension::ext::Wire;
+#[cfg(rings_native)]
+use crate::onion::replay::OnionForwardReplayKey;
+#[cfg(rings_native)]
+use crate::onion::replay::OnionForwardReplayPartitions;
+#[cfg(rings_native)]
+use crate::onion::replay::ReplayAdmission;
 use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitDescriptorBody;
+use crate::onion::OnionExitEpoch;
 use crate::onion::OnionExitService;
 use crate::onion::OnionExitTransport;
 use crate::onion::OnionRoute;
@@ -88,6 +97,10 @@ pub(super) fn test_payload(label: &str) -> OnionCircuitPayload {
     )
 }
 
+fn process_epoch() -> OnionExitEpoch {
+    OnionExitEpoch::new([17; 16])
+}
+
 fn payload_for_service(service: &str, label: &str) -> OnionCircuitPayload {
     OnionCircuitPayload::try_new(service, Bytes::copy_from_slice(label.as_bytes()))
         .expect("valid payload service")
@@ -113,6 +126,7 @@ fn route_for_service(service: &str, relays: &[SessionSk], exit_session: &Session
             did: exit,
             public_key,
             session_public_key: exit_session.session_public_key(),
+            process_epoch: process_epoch(),
             node_type: OnlineNodeType::Native,
             network_id: TEST_NETWORK_ID,
             service: OnionExitService::new("https", OnionExitTransport::Tcp)
@@ -218,12 +232,25 @@ async fn peel_forward_cell(
 #[derive(Clone, Default)]
 struct RecordingHandler {
     clients: Arc<Mutex<Vec<(Did, OnionCircuitId, OnionAuthenticatedPayload)>>>,
+    exit_count: Arc<AtomicUsize>,
+    exit_notify: Arc<tokio::sync::Notify>,
+    forward_replays: Arc<Mutex<OnionForwardReplayPartitions>>,
 }
 
 #[cfg(rings_native)]
 impl RecordingHandler {
     fn take_clients(&self) -> Vec<(Did, OnionCircuitId, OnionAuthenticatedPayload)> {
         std::mem::take(&mut self.clients.lock().expect("recorded clients"))
+    }
+
+    fn exit_count(&self) -> usize {
+        self.exit_count.load(Ordering::SeqCst)
+    }
+
+    async fn wait_for_exit_count(&self, expected: usize) {
+        while self.exit_count() < expected {
+            self.exit_notify.notified().await;
+        }
     }
 }
 
@@ -234,8 +261,16 @@ impl OnionCircuitHandler for RecordingHandler {
     async fn handle_exit(
         &self,
         _scope: &Scope,
-        _frame: OnionCircuitExitFrame,
+        frame: OnionCircuitExitFrame,
     ) -> crate::error::Result<()> {
+        let admission = lock(&self.forward_replays)?.consume(
+            frame.from,
+            OnionForwardReplayKey::new(frame.circuit_id, frame.forward_nonce),
+            rings_core::utils::get_epoch_ms(),
+        );
+        assert_eq!(admission, ReplayAdmission::Consumed);
+        self.exit_count.fetch_add(1, Ordering::SeqCst);
+        self.exit_notify.notify_one();
         Ok(())
     }
 
@@ -730,7 +765,7 @@ async fn test_endpoint_send_awaits_the_same_paced_link_lane_and_emits_cover() {
 #[test]
 fn test_expired_exit_layer_emits_no_exit_effect() {
     let client = session();
-    let reducer = OnionCircuitReducer::new(OnionCircuitCapabilities::exit());
+    let reducer = OnionCircuitReducer::new(OnionCircuitCapabilities::exit(process_epoch()));
     let state = OnionCircuitState::default();
     let circuit_id = OnionCircuitId::new([8; 16]);
 
@@ -740,6 +775,7 @@ fn test_expired_exit_layer_emits_no_exit_effect() {
         bucket: OnionCellBucket::KiB4,
         circuit_id,
         layer: OnionForwardLayer::Exit {
+            process_epoch: process_epoch(),
             client: OnionClientReturn::new(client.session_public_key()),
             return_session_public_key: client.session_public_key(),
             expires_at_ms: 100,
@@ -773,7 +809,7 @@ fn test_read_only_reducer_arm_structurally_shares_return_state() {
 #[test]
 fn test_overlong_exit_layer_emits_no_exit_effect() {
     let client = session();
-    let reducer = OnionCircuitReducer::new(OnionCircuitCapabilities::exit());
+    let reducer = OnionCircuitReducer::new(OnionCircuitCapabilities::exit(process_epoch()));
     let state = OnionCircuitState::default();
     let received_at_ms = 100;
     let circuit_id = OnionCircuitId::new([38; 16]);
@@ -784,6 +820,7 @@ fn test_overlong_exit_layer_emits_no_exit_effect() {
         bucket: OnionCellBucket::KiB4,
         circuit_id,
         layer: OnionForwardLayer::Exit {
+            process_epoch: process_epoch(),
             client: OnionClientReturn::new(client.session_public_key()),
             return_session_public_key: client.session_public_key(),
             expires_at_ms: received_at_ms
@@ -977,7 +1014,7 @@ async fn test_two_relays_peel_fixed_size_cells_through_the_exit_reducer_and_shel
         seal_encoded_message(encoded_message, *recipient, Some(*bucket)).expect("seal exit cell");
     assert_eq!(first_payload.len(), exit_payload.len());
 
-    let exit_protocol = OnionCircuitProtocol::new(OnionCircuitCapabilities::exit());
+    let exit_protocol = OnionCircuitProtocol::new(OnionCircuitCapabilities::exit(process_epoch()));
     let exit_shell = OnionCircuitShell::new(exit.clone(), RecordingHandler::default());
     let exit_scope = test_scope(exit.clone());
     let exit_transition = peel_forward_cell(
@@ -996,6 +1033,72 @@ async fn test_two_relays_peel_fixed_size_cells_through_the_exit_reducer_and_shel
     ));
     assert_eq!(first_transition.state.relay_return_count(), 1);
     assert_eq!(second_transition.state.relay_return_count(), 1);
+}
+
+#[cfg(rings_native)]
+#[tokio::test]
+async fn test_restarted_exit_rejects_old_epoch_before_replay_state_or_side_effect() {
+    let client = session();
+    let exit = session();
+    let route = route(&[], &exit);
+    let original_epoch = route.exit().process_epoch;
+    let circuit_id = OnionCircuitId::new([41; 16]);
+    let (_, payload) = encode_initial_forward(
+        OnionClientReturn::new(client.session_public_key()),
+        &route,
+        circuit_id,
+        test_payload("one-shot"),
+    )
+    .expect("encode original process cell");
+
+    let original_protocol =
+        OnionCircuitProtocol::new(OnionCircuitCapabilities::exit(original_epoch));
+    let original_handler = RecordingHandler::default();
+    let original_shell = OnionCircuitShell::new(exit.clone(), original_handler.clone());
+    let original_scope = test_scope(exit.clone());
+    let original_transition = peel_forward_cell(
+        &original_protocol,
+        &original_shell,
+        &original_scope,
+        &original_protocol.init(),
+        client.account_did(),
+        exit.account_did(),
+        &payload,
+    )
+    .await;
+    let [exit_effect] = original_transition.effects.as_slice() else {
+        panic!("the original process must authorize one exit effect");
+    };
+    original_shell
+        .run(&original_scope, exit_effect.clone())
+        .await
+        .expect("consume original replay witness");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        original_handler.wait_for_exit_count(1),
+    )
+    .await
+    .expect("original exit effect completed");
+
+    let restarted_handler = RecordingHandler::default();
+    let restarted_protocol = OnionCircuitProtocol::new(OnionCircuitCapabilities::exit(
+        OnionExitEpoch::new([42; 16]),
+    ));
+    let restarted_shell = OnionCircuitShell::new(exit.clone(), restarted_handler.clone());
+    let restarted_scope = test_scope(exit.clone());
+    let restarted_transition = peel_forward_cell(
+        &restarted_protocol,
+        &restarted_shell,
+        &restarted_scope,
+        &restarted_protocol.init(),
+        client.account_did(),
+        exit.account_did(),
+        &payload,
+    )
+    .await;
+
+    assert!(restarted_transition.effects.is_empty());
+    assert_eq!(restarted_handler.exit_count(), 0);
 }
 
 #[cfg(rings_native)]

@@ -37,9 +37,11 @@ placement, and can attempt eclipse behavior.
 ## Fault Model
 
 The implementation is intended to handle ordinary churn and fail-stop behavior:
-peers can disconnect, crash, restart with a new session, or miss heartbeats. TTLs,
-stabilization, storage repair, and descriptor refreshes are designed for that
-environment.
+peers can disconnect, crash, restart, or miss heartbeats. Onion exits generate a
+fresh process epoch at each start and bind it into signed descriptors and encrypted
+forward layers, so reusing a persisted delegated session key does not keep
+pre-restart exit cells valid. TTLs, stabilization, storage repair, and descriptor
+refreshes are designed for that environment.
 
 The current overlay does not provide Byzantine membership safety. A malicious peer
 can drop, delay, or refuse messages; advertise service policy it later ignores;
@@ -144,10 +146,12 @@ layer and learns only the immediate next hop plus an opaque inner layer; backwar
 frames carry a client-encrypted AEAD payload that relays forward with local return
 state. A circuit id identifies exactly one directed edge of one route and is
 rewritten at every hop, and the client/exit return id is encrypted inside the exit
-layer and never appears as an edge header. A relay therefore knows its predecessor
-and its successor on the circuit and nothing else about the route; only the exit sees
-the application payload, and only the client knows the whole route. A route is at
-most eight hops and defaults to three, counting the exit.
+layer and never appears as an edge header. The final layer also authenticates the
+selected descriptor's random process epoch, and the exit checks that epoch before
+emitting any adapter effect. A relay therefore knows its predecessor and its
+successor on the circuit and nothing else about the route; only the exit sees the
+application payload, and only the client knows the whole route. A route is at most
+eight hops and defaults to three, counting the exit.
 
 **Cover and pacing contract** (`circuit/send_outbox.rs`). Let `B = 4` be the link
 batch size. A non-empty batch toward one next hop carries `r` real cells,

@@ -361,12 +361,13 @@ async fn test_onion_exit_publish_replaces_observed_self_records() -> Result<()> 
         ])?)
         .await?;
 
-    let registration = OnionExitRegistration::new(
+    let registration = OnionExitRegistration::with_process_epoch(
         Duration::from_secs(30),
         Duration::from_secs(90),
         default_online_node_type(),
         vec![OnionExitService::https()],
         policy,
+        processor.onion_exit_epoch(),
     );
     let published = registration
         .publish_descriptors(&processor.registration_context())
@@ -375,6 +376,10 @@ async fn test_onion_exit_publish_replaces_observed_self_records() -> Result<()> 
         .into_iter()
         .next()
         .ok_or_else(|| Error::InvalidConfig("expected one onion-exit descriptor".to_string()))?;
+    assert_eq!(
+        published_descriptor.process_epoch,
+        processor.onion_exit_epoch()
+    );
     let entry_key = entry::Entry::gen_did(ONION_EXITS_TOPIC)?;
     processor.storage_fetch(entry_key).await?;
     let entry = processor

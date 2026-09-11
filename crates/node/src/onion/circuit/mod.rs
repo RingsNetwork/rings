@@ -91,7 +91,7 @@ pub(super) const MAX_ONION_CRYPTO_OPS_GLOBAL_PER_WINDOW: u32 = 8192;
 pub(super) const MAX_ONION_CRYPTO_BYTES_PER_WINDOW: u64 = 256 * 1024 * 1024;
 pub(super) const MAX_ONION_CRYPTO_BYTES_GLOBAL_PER_WINDOW: u64 = 512 * 1024 * 1024;
 pub(super) const MAX_ONION_CRYPTO_PEERS: usize = 64;
-pub(super) const ONION_AEAD_NAMESPACE: &str = "rings-node:onion-circuit:v1";
+pub(super) const ONION_AEAD_NAMESPACE: &str = "rings-node:onion-circuit:v2";
 
 /// Opaque application payload carried over a route-aware onion circuit.
 ///
@@ -355,6 +355,7 @@ pub(super) enum OnionForwardLayer {
         inner: AeadCiphertext,
     },
     Exit {
+        process_epoch: super::OnionExitEpoch,
         client: OnionClientReturn,
         return_session_public_key: PublicKey<33>,
         expires_at_ms: u128,
