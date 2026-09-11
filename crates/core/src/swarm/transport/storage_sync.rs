@@ -378,8 +378,7 @@ fn evict_storage_sync_acks(pending: &mut StorageSyncAckMap) {
 impl SwarmTransport {
     /// Validate a complete local storage-sync batch before persisting any entry.
     ///
-    /// Pre: `sender` is the authenticated signer of the message carrying `msg`, never a value
-    /// read from its relay path.
+    /// Pre: `sender` is the authenticated origin of the message carrying `msg`.
     pub(crate) async fn persist_storage_sync_entries(
         &self,
         msg: &SyncEntriesWithSuccessor,

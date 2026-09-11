@@ -114,6 +114,11 @@ enum InboundValidation {
 
 type InboundReply = oneshot::Sender<std::result::Result<(), InboundFailure>>;
 
+enum InboundCompletion {
+    Await(InboundReply),
+    LogHeld { peer: Did },
+}
+
 struct InboundEvent {
     sequence: u64,
     peer: Option<Did>,
@@ -123,7 +128,33 @@ struct InboundEvent {
     lane: InboundLane,
     wire_bytes: usize,
     permit: InboundCapacityPermit,
-    reply: InboundReply,
+    completion: InboundCompletion,
+}
+
+pub(super) struct InboundSubmission {
+    peer: Option<Did>,
+    authentication: Authentication,
+    bytes: Bytes,
+    prepared: PreparedInboundFrame,
+    transport_capacity: Option<InboundFrameCapacityLease>,
+}
+
+impl InboundSubmission {
+    pub(super) const fn new(
+        peer: Option<Did>,
+        authentication: Authentication,
+        bytes: Bytes,
+        prepared: PreparedInboundFrame,
+        transport_capacity: Option<InboundFrameCapacityLease>,
+    ) -> Self {
+        Self {
+            peer,
+            authentication,
+            bytes,
+            prepared,
+            transport_capacity,
+        }
+    }
 }
 
 impl InboundEvent {
@@ -173,22 +204,28 @@ impl InboundMailbox {
     pub(super) async fn submit_prepared(
         &self,
         processor: &InboundProcessor,
-        peer: Option<Did>,
-        authentication: Authentication,
-        bytes: Bytes,
-        prepared: PreparedInboundFrame,
-        transport_capacity: Option<InboundFrameCapacityLease>,
+        submission: InboundSubmission,
     ) -> Result<()> {
         self.ensure_actor_available()?;
-        self.submit_to_lane(
-            processor,
-            peer,
-            authentication,
-            bytes,
-            prepared,
-            transport_capacity,
-        )
-        .await
+        let (reply, completion) = oneshot::channel();
+        self.enqueue_to_lane(processor, submission, InboundCompletion::Await(reply))
+            .await?;
+        match completion.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(inbound_failure_error(error)),
+            Err(_) => Err(Error::InboundMailboxClosed),
+        }
+    }
+
+    pub(super) async fn submit_prepared_detached(
+        &self,
+        processor: &InboundProcessor,
+        peer: Did,
+        submission: InboundSubmission,
+    ) -> Result<()> {
+        self.ensure_actor_available()?;
+        self.enqueue_to_lane(processor, submission, InboundCompletion::LogHeld { peer })
+            .await
     }
 
     fn ensure_actor_available(&self) -> Result<()> {
@@ -199,15 +236,19 @@ impl InboundMailbox {
         }
     }
 
-    async fn submit_to_lane(
+    async fn enqueue_to_lane(
         &self,
         processor: &InboundProcessor,
-        peer: Option<Did>,
-        authentication: Authentication,
-        bytes: Bytes,
-        prepared: PreparedInboundFrame,
-        transport_capacity: Option<InboundFrameCapacityLease>,
+        submission: InboundSubmission,
+        completion: InboundCompletion,
     ) -> Result<()> {
+        let InboundSubmission {
+            peer,
+            authentication,
+            bytes,
+            prepared,
+            transport_capacity,
+        } = submission;
         let lane = prepared.lane;
         let mut ticket = self.reserve_ticket(lane)?;
         let permit = self
@@ -226,7 +267,8 @@ impl InboundMailbox {
         drop((bytes, transport_capacity));
         self.handoffs.bump();
         ticket.release_admission_turn();
-        if !processor.pending_connection_allows_message(peer).await? {
+        if !processor.pending_connection_admits(peer).await? {
+            finish_completion(completion, Ok(()));
             return Ok(());
         }
         let payload = if kind.is_chunk() {
@@ -239,7 +281,6 @@ impl InboundMailbox {
                 .accept_verified_logical_message(peer, authentication, payload)
                 .await?
         };
-        let (reply, completion) = oneshot::channel();
         let sequence = ticket.sequence();
         ticket.commit(InboundEvent {
             sequence,
@@ -250,13 +291,9 @@ impl InboundMailbox {
             lane,
             wire_bytes,
             permit,
-            reply,
+            completion,
         })?;
-        match completion.await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(error)) => Err(inbound_failure_error(error)),
-            Err(_) => Err(Error::InboundMailboxClosed),
-        }
+        Ok(())
     }
 
     fn reserve_ticket(&self, lane: InboundLane) -> Result<InboundTicket> {
@@ -324,8 +361,9 @@ pub(super) const fn application_capacity_for_test() -> usize {
     INBOUND_MAILBOX_CAPACITY - INBOUND_RESERVED_TRANSFERS_PER_LANE * (INBOUND_LANE_COUNT - 1)
 }
 
-#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(super) const fn peer_capacity_for_test() -> usize {
+/// The frames one peer may have in flight: the bound an admitted peer and a peer awaiting
+/// admission share.
+pub(super) const fn peer_capacity() -> usize {
     INBOUND_PEER_CAPACITY
 }
 
@@ -677,7 +715,7 @@ async fn process_event(
     match validate_event(&processor, &event).await {
         Ok(InboundValidation::Dispatch) => {}
         Ok(InboundValidation::AcknowledgeDrop) => {
-            finish_reply(event.reply, Ok(()));
+            finish_completion(event.completion, Ok(()));
             return InboundTaskCompletion {
                 lane,
                 sequence,
@@ -685,7 +723,7 @@ async fn process_event(
             };
         }
         Err(error) => {
-            finish_reply(event.reply, Err(error));
+            finish_completion(event.completion, Err(error));
             return InboundTaskCompletion {
                 lane,
                 sequence,
@@ -711,7 +749,7 @@ async fn process_event(
         event.prepared_message,
     )
     .await;
-    finish_reply(event.reply, result);
+    finish_completion(event.completion, result);
     InboundTaskCompletion {
         lane,
         sequence,
@@ -759,7 +797,7 @@ async fn validate_event(
     event: &InboundEvent,
 ) -> std::result::Result<InboundValidation, InboundFailure> {
     if !processor
-        .pending_connection_allows_message(event.peer)
+        .pending_connection_admits(event.peer)
         .await
         .map_err(InboundFailure::Core)?
     {
@@ -767,7 +805,7 @@ async fn validate_event(
     }
     validate_payload(&processor.logical, event.peer, &event.payload).await?;
     let still_admitted = processor
-        .pending_connection_allows_message(event.peer)
+        .pending_connection_admits(event.peer)
         .await
         .map_err(InboundFailure::Core)?;
     Ok(if still_admitted {
@@ -800,8 +838,25 @@ async fn process_logical_message(
     }
 }
 
-fn finish_reply(reply: InboundReply, result: std::result::Result<(), InboundFailure>) {
-    let _ = reply.send(result);
+fn finish_completion(
+    completion: InboundCompletion,
+    result: std::result::Result<(), InboundFailure>,
+) {
+    match completion {
+        InboundCompletion::Await(reply) => {
+            let _ = reply.send(result);
+        }
+        InboundCompletion::LogHeld { peer } => {
+            if let Err(failure) = result {
+                let error = inbound_failure_error(failure);
+                tracing::warn!(
+                    peer = %peer,
+                    error = ?error,
+                    "failed to deliver a message held until admission"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]

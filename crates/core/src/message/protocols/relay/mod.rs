@@ -1,218 +1,161 @@
 #![deny(missing_docs)]
 
+//! The relay carrier of a payload: where it goes next, where it ends, and how many forwards it
+//! has left.
+//!
+//! A carrier is the triple `(next_hop, destination, hop_budget)`. Forwarding is the partial map
+//!
+//! ```text
+//! forward(current, next') : (current, d, n) ↦ (next', d, n − 1)    defined iff n > 0
+//! ```
+//!
+//! so the budget component walks the finite chain `MAX > … > 1 > 0` and never climbs it; a report
+//! is a fresh carrier, not a continuation. The carrier records nothing about the hops already
+//! taken: each hop learns its predecessor from the transport edge it received on and its
+//! successor from `next_hop`, and the destination learns only the last hop. Chord greedy routing
+//! is monotone toward the destination, so a route that outruns its budget is a fault, and budget
+//! exhaustion is the witness that replaces any history-based loop detection.
+//!
+//! The carrier is outside every signature: it is rewritten by each hop under that hop's own
+//! transport edge. A budget therefore bounds the work honest hops do for one payload; it is not a
+//! promise a dishonest hop keeps.
+
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::consts::MAX_RELAY_HOPS;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
 
-/// Policy used when sending a report for a request payload.
+/// The number of forwards a payload may still take.
 ///
-/// The default preserves the legacy path-return behavior. Routed returns are
-/// opt-in and send the report as a fresh Chord-routed payload to the declared
-/// destination.
-#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ReportReturnPolicy {
-    /// Return the report through the reversed relay path.
-    #[default]
-    Path,
-    /// Route the report normally through Chord to this destination.
-    Routed {
-        /// DID that should receive the report.
-        destination: Did,
-    },
-}
+/// Invariant: `0 ≤ n ≤ MAX_RELAY_HOPS`, established by every constructor and by decoding, so a
+/// carrier received from a peer can never claim more forwards than a fresh one.
+#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(try_from = "u8", into = "u8")]
+pub struct HopBudget(u8);
 
-impl ReportReturnPolicy {
-    /// Validate that this policy is authorized by the signed request origin.
-    pub fn validate_authorized_by(&self, signer: Did) -> Result<()> {
-        match self {
-            Self::Path => Ok(()),
-            Self::Routed { destination } if *destination == signer => Ok(()),
-            Self::Routed { destination } => Err(Error::InvalidMessage(format!(
-                "routed report return destination {destination} is not signed by that destination"
-            ))),
-        }
+impl HopBudget {
+    /// The top of the chain: what a fresh carrier holds, and the most any carrier can hold.
+    pub const MAX: Self = Self(MAX_RELAY_HOPS);
+
+    /// The bottom of the chain: a payload that can be delivered but not forwarded.
+    pub const EXHAUSTED: Self = Self(0);
+
+    /// The forwards remaining.
+    pub const fn remaining(self) -> u8 {
+        self.0
+    }
+
+    /// Spend one forward: the predecessor on the chain, undefined at the bottom.
+    ///
+    /// Law: `spend(n) = Some(n − 1)` iff `n > 0`; `spend` is strictly decreasing where defined.
+    pub fn spend(self) -> Option<Self> {
+        self.0.checked_sub(1).map(Self)
     }
 }
 
-/// MessageRelay guide message passing on rings network by relay.
+impl TryFrom<u8> for HopBudget {
+    type Error = Error;
+
+    /// Admit a budget only inside the invariant, so decoding a carrier cannot mint forwards.
+    fn try_from(remaining: u8) -> Result<Self> {
+        if remaining > MAX_RELAY_HOPS {
+            return Err(Error::RelayHopBudgetAboveMax(remaining));
+        }
+        Ok(Self(remaining))
+    }
+}
+
+impl From<HopBudget> for u8 {
+    fn from(budget: HopBudget) -> Self {
+        budget.remaining()
+    }
+}
+
+/// The relay carrier of a payload (see the module documentation).
 ///
-/// All messages should be sent with `MessageRelay`.
-/// By calling `relay` method in correct place, `MessageRelay` help to do things:
-/// - Record the whole transport path for inspection.
-/// - Get the sender of a message.
+/// Every payload is sent under a carrier. A handler picks the transport by `next_hop`; a
+/// forwarding hop chooses the next carrier from `destination`.
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct MessageRelay {
-    /// A push only stack. Record routes when handling messages.
-    pub path: Vec<Did>,
-
-    /// The next node to handle the message.
-    /// A message handler will pick transport by this field.
+    /// The node that handles the payload next.
     pub next_hop: Did,
 
-    /// The destination of the message.
-    /// It may help the handler to find out `next_hop` in some situations.
+    /// The node the payload is routed toward.
+    ///
+    /// A sender that does not know the final destination names `next_hop` here, and a later hop
+    /// re-aims the carrier with [`Self::reset_destination`].
     pub destination: Did,
+
+    /// The forwards the payload may still take.
+    pub hop_budget: HopBudget,
 }
 
 impl MessageRelay {
-    /// Create a new `MessageRelay`.
-    pub fn new(path: Vec<Did>, next_hop: Did, destination: Did) -> Self {
+    /// A fresh carrier.
+    pub fn new(next_hop: Did, destination: Did, hop_budget: HopBudget) -> Self {
         Self {
-            path,
             next_hop,
             destination,
+            hop_budget,
         }
     }
 
-    /// Validate relay, then create a new `MessageRelay` that have `current` did in the end of path.
-    /// The new relay will use `next_hop` as `next_hop` and `self.destination` as `destination`.
+    /// The carrier `current` sends on toward `self.destination` through `next_hop`.
+    ///
+    /// Pre: `self` was addressed to `current`.
+    /// Post: `Ok` spends exactly one forward; `Err(RelayHopBudgetExhausted)` is the drop of a
+    /// payload that has taken every forward it was given.
     pub fn forward(&self, current: Did, next_hop: Did) -> Result<Self> {
         self.validate(current)?;
-
-        if self.next_hop != current {
-            return Err(Error::InvalidNextHop);
-        }
-
-        let mut path = self.path.clone();
-        path.push(current);
+        let hop_budget = self
+            .hop_budget
+            .spend()
+            .ok_or(Error::RelayHopBudgetExhausted)?;
 
         Ok(Self {
-            path,
             next_hop,
             destination: self.destination,
+            hop_budget,
         })
     }
 
-    /// Validate relay, then create a new `MessageRelay` that used to report the message.
-    /// The new relay will use `self.path[self.path.len() - 1]` as `next_hop` and `self.sender()` as `destination`.
-    /// In the new relay, the path will be cleared and only have `current` did.
-    pub fn path_report(&self, current: Did) -> Result<Self> {
-        self.validate(current)?;
-
-        if self.path.is_empty() {
-            return Err(Error::CannotInferNextHop);
-        }
-
-        Ok(Self {
-            path: vec![current],
-            next_hop: self.path.last().copied().ok_or(Error::CannotInferNextHop)?,
-            destination: self.try_origin_sender()?,
-        })
-    }
-
-    /// Validate relay, then create a fresh Chord-routed report relay.
+    /// The fresh carrier of a report `current` sends for the request carried by `self`.
     ///
-    /// The caller must infer `next_hop` from the destination before invoking
-    /// this constructor.
-    pub fn routed_report(&self, current: Did, destination: Did, next_hop: Did) -> Result<Self> {
-        self.validate(current)?;
-
-        Ok(Self {
-            path: vec![current],
-            next_hop,
-            destination,
-        })
-    }
-
-    /// Create a report relay with an explicit return policy.
+    /// Pre: `self` was addressed to `current`; `next_hop` was inferred by the caller from
+    /// `destination`.
     pub fn report(
         &self,
         current: Did,
-        policy: ReportReturnPolicy,
-        routed_next_hop: Option<Did>,
+        destination: Did,
+        next_hop: Did,
+        hop_budget: HopBudget,
     ) -> Result<Self> {
-        match policy {
-            ReportReturnPolicy::Path => self.path_report(current),
-            ReportReturnPolicy::Routed { destination } => self.routed_report(
-                current,
-                destination,
-                routed_next_hop.ok_or(Error::CannotInferNextHop)?,
-            ),
-        }
+        self.validate(current)?;
+
+        Ok(Self::new(next_hop, destination, hop_budget))
     }
 
-    /// Sometime the sender may not know the destination of the message. They just use next_hop as destination.
-    /// The next node can find a new next_hop, and may use this function to set that next_hop as destination again.
+    /// The same carrier aimed at `destination`.
+    ///
+    /// A sender that does not know the final destination names its next hop as the destination;
+    /// a hop that resolves a farther node re-aims the carrier here before forwarding it.
     pub fn reset_destination(&self, destination: Did) -> Self {
         let mut relay = self.clone();
         relay.destination = destination;
         relay
     }
 
-    /// Check if path and destination is valid.
+    /// Check that this carrier was addressed to `current`.
     pub fn validate(&self, current: Did) -> Result<()> {
         if self.next_hop != current {
             return Err(Error::InvalidNextHop);
         }
 
-        // Adjacent elements in self.path cannot be equal
-        if self
-            .path
-            .windows(2)
-            .any(|window| matches!(window, [left, right] if left == right))
-        {
-            return Err(Error::InvalidRelayPath);
-        }
-
-        // Prevent infinite loop
-        if has_infinite_loop(&self.path) {
-            tracing::error!("Infinite path detected {:?}", self.path);
-            return Err(Error::InfiniteRelayPath);
-        }
-
         Ok(())
     }
-
-    /// Get the origin sender of current message.
-    /// Should be the first element of path.
-    #[deprecated(note = "please use `origin_sender` instead")]
-    pub fn sender(&self) -> Did {
-        self.origin_sender()
-    }
-
-    /// Get the origin sender of current message as a checked relay-path boundary.
-    pub fn try_origin_sender(&self) -> Result<Did> {
-        self.path.first().copied().ok_or(Error::CannotInferNextHop)
-    }
-
-    /// Get the origin sender of current message.
-    ///
-    /// The origin should be the first element of `path`. Empty relay paths keep
-    /// the legacy fallback to `destination`; callers that must distinguish an
-    /// invalid relay boundary from a real origin should use
-    /// [`try_origin_sender`](Self::try_origin_sender).
-    pub fn origin_sender(&self) -> Did {
-        self.path.first().copied().unwrap_or(self.destination)
-    }
-}
-
-// Since rust cannot zip N iterators, when you change this number,
-// you should also change the code of `has_infinite_loop` below.
-const INFINITE_LOOP_TOLERANCE: usize = 3;
-
-fn has_infinite_loop<T>(path: &[T]) -> bool
-where T: PartialEq {
-    // Invariant: a relay loop is witnessed by a non-empty suffix period P such
-    // that the final path segment is P repeated INFINITE_LOOP_TOLERANCE times.
-    for period in 1..=path.len() / INFINITE_LOOP_TOLERANCE {
-        let repeated_len = period * INFINITE_LOOP_TOLERANCE;
-        let start = path.len() - repeated_len;
-        let Some(suffix) = path.get(start..) else {
-            continue;
-        };
-        let mut chunks = suffix.chunks_exact(period);
-        let Some(first) = chunks.next() else {
-            continue;
-        };
-        if chunks.all(|chunk| chunk == first) {
-            return true;
-        }
-    }
-
-    false
 }
 
 #[cfg(test)]

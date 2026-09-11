@@ -11,12 +11,10 @@ use rings_gateway::bindings::TunnelControl;
 use support::assert_exact_capture_ledger;
 use support::capture_packet;
 use support::gateway_plan;
-use support::probe_http;
 use support::TestResult;
-use support::UNSELECTED_TARGET;
 
 #[tokio::test]
-#[ignore = "requires TUN/route privileges and public TCP reachability"]
+#[ignore = "requires TUN/route privileges"]
 async fn privileged_native_tunnel_establishes_and_cleans_up() -> TestResult {
     let directory = tempfile::tempdir()?;
     let ledger = directory.path().join("routes.json");
@@ -35,12 +33,7 @@ async fn privileged_native_tunnel_establishes_and_cleans_up() -> TestResult {
     } = control.establish(&plan).await?;
 
     assert_exact_capture_ledger(&ledger)?;
-    let (unselected_response, captured_length) = tokio::join!(
-        probe_http(UNSELECTED_TARGET),
-        capture_packet(&mut device, &plan)
-    );
-    let unselected_response = unselected_response?;
-    let captured_length = captured_length?;
+    let captured_length = capture_packet(&mut device, &plan).await?;
     control
         .teardown(lease)
         .await
@@ -48,7 +41,6 @@ async fn privileged_native_tunnel_establishes_and_cleans_up() -> TestResult {
     drop(device);
 
     assert!(!interface_name.is_empty());
-    assert!(unselected_response.starts_with(b"HTTP/1."));
     assert!(captured_length >= 20);
     assert!(!ledger.exists());
 

@@ -66,12 +66,14 @@ The substrate both layers build on:
 - Onion circuits over direct edges with layered ElGamal-AEAD frames, fixed-batch cover
   cells, pacing, and fixed cell size classes (`crates/node/src/onion`); the contract is drawn
   in [SECURITY.md](./SECURITY.md#layer-contracts).
+- A path-less relay on the communication layer: the carrier names only the next hop, the
+  destination, and a hop budget, so no hop learns the route
+  (`crates/core/src/message/protocols/relay`).
 
 **Planned**
 - User-installed zero-knowledge identity and verifiable off-chain compute protocols.
 - Secret sharing and private storage primitives.
-- Leak minimization on the communication layer (no hop history on the wire) and
-  DID-to-DID sender-unlinkable messaging on top of the circuits.
+- DID-to-DID sender-unlinkable messaging on top of the circuits.
 
 ---
 

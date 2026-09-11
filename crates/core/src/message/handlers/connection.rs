@@ -117,7 +117,7 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
             tracing::warn!(
                 local = %self.dht.did,
                 tx_id = %ctx.transaction.tx_id,
-                origin = ?ctx.relay.try_origin_sender().ok(),
+                origin = %ctx.transaction.origin(),
                 relay_destination = %ctx.relay.destination,
                 transaction_destination = %ctx.transaction.destination,
                 mode = ?msg.dht_protocol_mode(),
@@ -130,7 +130,7 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
             tracing::trace!(
                 local = %self.dht.did,
                 tx_id = %ctx.transaction.tx_id,
-                origin = ?ctx.relay.try_origin_sender().ok(),
+                origin = %ctx.transaction.origin(),
                 next_hop = %ctx.relay.next_hop,
                 relay_destination = %ctx.relay.destination,
                 transaction_destination = %ctx.transaction.destination,
@@ -140,7 +140,7 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
             self.run_effects([CoreEffect::forward_payload(ctx, None)])
                 .await
         } else {
-            let peer = ctx.relay.try_origin_sender()?;
+            let peer = ctx.transaction.origin();
             tracing::trace!(
                 local = %self.dht.did,
                 peer = %peer,
@@ -191,7 +191,7 @@ impl HandleMsg<ConnectNodeReport> for MessageHandler {
             tracing::trace!(
                 local = %self.dht.did,
                 tx_id = %ctx.transaction.tx_id,
-                origin = ?ctx.relay.try_origin_sender().ok(),
+                origin = %ctx.transaction.origin(),
                 next_hop = %ctx.relay.next_hop,
                 relay_destination = %ctx.relay.destination,
                 transaction_destination = %ctx.transaction.destination,
@@ -201,7 +201,7 @@ impl HandleMsg<ConnectNodeReport> for MessageHandler {
             self.run_effects([CoreEffect::forward_payload(ctx, None)])
                 .await
         } else {
-            let peer = ctx.relay.try_origin_sender()?;
+            let peer = ctx.transaction.origin();
             tracing::trace!(
                 local = %self.dht.did,
                 peer = %peer,
@@ -246,7 +246,7 @@ impl HandleMsg<FindSuccessorSend> for MessageHandler {
                             let did = match handler {
                                 FindSuccessorReportHandler::Connect => connect_successor_hint(
                                     self.dht.as_ref(),
-                                    ctx.relay.try_origin_sender()?,
+                                    ctx.transaction.origin(),
                                     did,
                                 )?,
                                 _ => did,

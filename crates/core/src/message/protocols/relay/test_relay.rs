@@ -1,200 +1,125 @@
 use super::*;
 
-#[test]
-#[rustfmt::skip]
-fn test_has_infinite_loop() {
-    assert!(!has_infinite_loop(&Vec::<u8>::new()));
+/// The hop budget the fixtures below start with; small enough for a cycle to exhaust quickly.
+const FIXTURE_BUDGET: HopBudget = HopBudget::MAX;
 
-    assert!(!has_infinite_loop(&[
-        1, 2, 3,
-    ]));
-
-    assert!(!has_infinite_loop(&[
-        1, 2, 3,
-        1, 2, 3,
-    ]));
-
-    assert!(has_infinite_loop(&[
-        1, 2, 3,
-        1, 2, 3,
-        1, 2, 3,
-    ]));
-
-    assert!(has_infinite_loop(&[
-        1, 1, 2, 3,
-           1, 2, 3,
-           1, 2, 3,
-    ]));
-
-    assert!(!has_infinite_loop(&[
-           1, 2, 3,
-        1, 1, 2, 3,
-           1, 2, 3,
-    ]));
-
-    assert!(has_infinite_loop(&[
-        1, 2, 1, 2, 3,
-              1, 2, 3,
-              1, 2, 3,
-    ]));
-
-    assert!(has_infinite_loop(&[
-        4, 5, 1, 2, 3,
-              1, 2, 3,
-              1, 2, 3,
-    ]));
-
-    assert!(!has_infinite_loop(&[
-        1, 2, 3,
-              3,
-        1, 2, 3,
-              3,
-        1, 2, 3,
-    ]));
-
-    assert!(!has_infinite_loop(&[
-              1,
-        1, 2, 3,
-              3,
-        1, 2, 3,
-              3,
-        1, 2, 3,
-    ]));
-
-    assert!(has_infinite_loop(&[
-              3,
-        1, 2, 3,
-              3,
-        1, 2, 3,
-              3,
-        1, 2, 3,
-    ]));
-
-    assert!(has_infinite_loop(&[
-        1, 2, 3,
-        1, 2, 3,
-              3,
-        1, 2, 3,
-              3,
-        1, 2, 3,
-    ]));
-
-    assert!(has_infinite_loop(&[
-              1, 2,
-           3, 1, 2,
-        3, 3, 1, 2,
-        3, 3, 1, 2,
-        3, 3, 1, 2,
-    ]));
-
-    assert!(!has_infinite_loop(&[
-           2, 3,
-           4, 3,
-        1, 2, 3,
-           4, 3,
-        1, 2, 3,
-           4, 3,
-    ]));
-
-    assert!(has_infinite_loop(&[
-        1, 2, 3,
-           4, 3,
-        1, 2, 3,
-           4, 3,
-        1, 2, 3,
-           4, 3,
-    ]));
-
-    assert!(has_infinite_loop(&[
-           1, 2, 3, 4,
-        3, 1, 2, 3, 4,
-        3, 1, 2, 3, 4,
-        3, 1, 2, 3, 4,
-    ]));
+fn did(n: u32) -> Did {
+    Did::from(n)
 }
 
+/// Law: `spend` walks the chain down one step at a time and is undefined at the bottom.
 #[test]
-fn test_empty_path_origin_sender_is_checked() {
-    let fallback_destination = Did::from(2);
-    let relay = MessageRelay::new(vec![], Did::from(1), fallback_destination);
-
-    assert!(matches!(
-        relay.try_origin_sender(),
-        Err(Error::CannotInferNextHop)
-    ));
-    assert_eq!(relay.origin_sender(), fallback_destination);
-}
-
-#[test]
-fn test_path_report_preserves_legacy_reverse_path() -> Result<()> {
-    let origin = Did::from(1);
-    let hop = Did::from(2);
-    let current = Did::from(3);
-    let relay = MessageRelay::new(vec![origin, hop], current, current);
-
-    let report = relay.report(current, ReportReturnPolicy::Path, None)?;
-
-    assert_eq!(report.path, vec![current]);
-    assert_eq!(report.next_hop, hop);
-    assert_eq!(report.destination, origin);
-    Ok(())
-}
-
-#[test]
-fn test_routed_report_uses_declared_destination_and_next_hop() -> Result<()> {
-    let origin = Did::from(1);
-    let current = Did::from(2);
-    let return_destination = Did::from(3);
-    let routed_next_hop = Did::from(4);
-    let relay = MessageRelay::new(vec![origin], current, current);
-
-    let report = relay.report(
-        current,
-        ReportReturnPolicy::Routed {
-            destination: return_destination,
-        },
-        Some(routed_next_hop),
-    )?;
-
-    assert_eq!(report.path, vec![current]);
-    assert_eq!(report.next_hop, routed_next_hop);
-    assert_eq!(report.destination, return_destination);
-    Ok(())
-}
-
-#[test]
-fn test_routed_report_requires_explicit_next_hop() {
-    let origin = Did::from(1);
-    let current = Did::from(2);
-    let return_destination = Did::from(3);
-    let relay = MessageRelay::new(vec![origin], current, current);
-
-    assert!(matches!(
-        relay.report(
-            current,
-            ReportReturnPolicy::Routed {
-                destination: return_destination,
-            },
-            None,
-        ),
-        Err(Error::CannotInferNextHop)
-    ));
-}
-
-#[test]
-fn test_routed_policy_must_be_authorized_by_destination_signer() -> Result<()> {
-    let signer = Did::from(1);
-    let other = Did::from(2);
-
-    ReportReturnPolicy::Path.validate_authorized_by(signer)?;
-    ReportReturnPolicy::Routed {
-        destination: signer,
+fn test_spend_is_the_predecessor_on_the_chain() {
+    let mut budget = HopBudget::MAX;
+    let mut steps = 0u8;
+    while let Some(next) = budget.spend() {
+        assert_eq!(next.remaining() + 1, budget.remaining());
+        budget = next;
+        steps += 1;
     }
-    .validate_authorized_by(signer)?;
+    assert_eq!(budget, HopBudget::EXHAUSTED);
+    assert_eq!(steps, MAX_RELAY_HOPS);
+}
+
+/// A forwarding cycle spends the budget one forward per hop and then drops with the typed error:
+/// the witness that replaces history-based loop detection.
+#[test]
+fn test_forwarding_cycle_exhausts_the_budget_and_drops() -> Result<()> {
+    let cycle = [did(1), did(2), did(3)];
+    let destination = did(9);
+    let mut relay = MessageRelay::new(cycle[0], destination, FIXTURE_BUDGET);
+    let mut forwards = 0u8;
+
+    let dropped = loop {
+        let index = usize::from(forwards) % cycle.len();
+        let current = cycle[index];
+        let next = cycle[(index + 1) % cycle.len()];
+        match relay.forward(current, next) {
+            Ok(forwarded) => {
+                assert_eq!(forwarded.destination, destination);
+                assert_eq!(forwarded.next_hop, next);
+                assert_eq!(
+                    forwarded.hop_budget.remaining() + 1,
+                    relay.hop_budget.remaining()
+                );
+                relay = forwarded;
+                forwards += 1;
+            }
+            Err(error) => break error,
+        }
+    };
+
+    assert!(matches!(dropped, Error::RelayHopBudgetExhausted));
+    assert_eq!(forwards, FIXTURE_BUDGET.remaining());
+    assert_eq!(relay.hop_budget, HopBudget::EXHAUSTED);
+    Ok(())
+}
+
+/// A carrier is only forwarded by the node it was addressed to, whatever its budget.
+#[test]
+fn test_forward_rejects_a_node_the_carrier_was_not_addressed_to() {
+    let relay = MessageRelay::new(did(1), did(9), FIXTURE_BUDGET);
 
     assert!(matches!(
-        ReportReturnPolicy::Routed { destination: other }.validate_authorized_by(signer),
-        Err(Error::InvalidMessage(_))
+        relay.forward(did(2), did(3)),
+        Err(Error::InvalidNextHop)
     ));
+}
+
+/// Re-aiming keeps the budget: only `forward` spends it.
+#[test]
+fn test_reset_destination_keeps_the_budget() -> Result<()> {
+    let relay = MessageRelay::new(did(1), did(1), FIXTURE_BUDGET);
+
+    let aimed = relay.reset_destination(did(5));
+    assert_eq!(aimed.hop_budget, FIXTURE_BUDGET);
+    assert_eq!(aimed.destination, did(5));
+
+    let forwarded = aimed.forward(did(1), did(5))?;
+    assert_eq!(
+        forwarded.hop_budget.remaining() + 1,
+        FIXTURE_BUDGET.remaining()
+    );
+    Ok(())
+}
+
+/// A report is a fresh carrier: it starts from the reporter's own budget, not the request's.
+#[test]
+fn test_report_is_a_fresh_carrier() -> Result<()> {
+    let current = did(2);
+    let origin = did(1);
+    let next_hop = did(4);
+    let request = MessageRelay::new(current, current, HopBudget::EXHAUSTED);
+
+    let report = request.report(current, origin, next_hop, FIXTURE_BUDGET)?;
+
+    assert_eq!(report.next_hop, next_hop);
+    assert_eq!(report.destination, origin);
+    assert_eq!(report.hop_budget, FIXTURE_BUDGET);
+    assert!(matches!(
+        request.report(did(3), origin, next_hop, FIXTURE_BUDGET),
+        Err(Error::InvalidNextHop)
+    ));
+    Ok(())
+}
+
+/// Decoding admits a budget only inside the invariant, so a peer cannot mint forwards.
+#[test]
+fn test_decoding_rejects_a_budget_above_the_cap() -> Result<()> {
+    let relay = MessageRelay::new(did(1), did(9), FIXTURE_BUDGET);
+    let mut wire = rings_codec::serialize(&relay).map_err(Error::CodecSerialize)?;
+    let budget_byte = wire
+        .iter()
+        .rposition(|byte| *byte == MAX_RELAY_HOPS)
+        .ok_or_else(|| Error::InvalidMessage("budget byte not found".to_string()))?;
+    wire[budget_byte] = MAX_RELAY_HOPS + 1;
+
+    let decoded: std::result::Result<MessageRelay, _> = rings_codec::deserialize(&wire);
+    assert!(decoded.is_err());
+    assert!(matches!(
+        HopBudget::try_from(MAX_RELAY_HOPS + 1),
+        Err(Error::RelayHopBudgetAboveMax(claimed)) if claimed == MAX_RELAY_HOPS + 1
+    ));
+    assert_eq!(HopBudget::try_from(MAX_RELAY_HOPS)?, HopBudget::MAX);
     Ok(())
 }

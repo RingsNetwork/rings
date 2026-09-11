@@ -214,7 +214,10 @@ impl SwarmCallback for NoopSwarmCallback {}
 struct CountingSwarmCallback {
     validates: AtomicUsize,
     inbounds: AtomicUsize,
+    /// The bytes of every inbound `CustomMessage`, in delivery order.
+    inbound_custom_data: Mutex<Vec<Vec<u8>>>,
     events: Mutex<Vec<WebrtcConnectionState>>,
+    inbound_changed: GenerationWitness,
 }
 
 #[cfg(feature = "dummy")]
@@ -225,6 +228,19 @@ impl CountingSwarmCallback {
 
     fn inbounds(&self) -> usize {
         self.inbounds.load(Ordering::SeqCst)
+    }
+
+    async fn wait_for_inbounds_at_least(&self, count: usize) {
+        self.inbound_changed
+            .await_until(|_generation| self.inbounds() >= count)
+            .await;
+    }
+
+    fn inbound_custom_data(&self) -> std::io::Result<Vec<Vec<u8>>> {
+        self.inbound_custom_data
+            .lock()
+            .map(|data| data.clone())
+            .map_err(|_| std::io::Error::other("inbound data poisoned"))
     }
 
     fn events(&self) -> std::io::Result<Vec<WebrtcConnectionState>> {
@@ -255,9 +271,16 @@ impl SwarmCallback for CountingSwarmCallback {
 
     async fn on_inbound(
         &self,
-        _payload: &MessagePayload,
+        payload: &MessagePayload,
     ) -> std::result::Result<(), crate::error::CallbackError> {
         self.inbounds.fetch_add(1, Ordering::SeqCst);
+        if let Ok(Message::CustomMessage(message)) = payload.transaction.data::<Message>() {
+            match self.inbound_custom_data.lock() {
+                Ok(mut data) => data.push(message.0),
+                Err(_) => tracing::error!("CountingSwarmCallback inbound data mutex is poisoned"),
+            }
+        }
+        self.inbound_changed.bump();
         Ok(())
     }
 
@@ -444,6 +467,9 @@ async fn open_dummy_data_channel_before_ice_connected(
         .webrtc_answer_offer("remote-dummy-connection".to_string())
         .await
         .map_err(Error::Transport)?;
+    // The browser callback order under test: the channel opens while the peer connection still
+    // reports `Connecting`. The dummy is causal on its own, so the order is set explicitly.
+    transport.force_peer_data_channel_open_without_callback(peer, Some(true))?;
     assert_eq!(
         connection.webrtc_connection_state(),
         WebrtcConnectionState::Connecting
@@ -553,57 +579,175 @@ async fn test_data_channel_open_admits_successor_before_ice_connected() -> Resul
     Ok(())
 }
 
+/// A pending handshake bound to a callback, with a signer for the peer's messages.
 #[cfg(feature = "dummy")]
-#[tokio::test]
-async fn test_pending_callback_messages_do_not_dispatch_before_admission() -> Result<()> {
-    let measure = Arc::new(RecordingMeasure::default());
-    let transport = Arc::new(transport_with_measure(measure.clone())?);
+struct PendingPeer {
+    peer: Did,
+    session: SessionSk,
+    callback: InnerSwarmCallback,
+}
+
+#[cfg(feature = "dummy")]
+async fn pending_peer(
+    transport: &Arc<SwarmTransport>,
+    app_callback: &Arc<CountingSwarmCallback>,
+) -> Result<PendingPeer> {
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();
-    let peer_session = SessionSk::new_with_seckey(&peer_key)?;
-    let app_callback = Arc::new(CountingSwarmCallback::default());
-    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
+    let session = SessionSk::new_with_seckey(&peer_key)?;
+    let offer_callback = InnerSwarmCallback::new(Arc::clone(transport), app_callback.clone());
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, offer_callback)
         .await?;
-    let pending_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone())
+    let callback = InnerSwarmCallback::new(Arc::clone(transport), app_callback.clone())
         .with_pending_connection_attempt(attempt);
-    let payload = MessagePayload::new_send(
-        Message::custom(b"message-before-admission")?,
-        MessageSigner::new(&peer_session, TEST_NETWORK_ID),
-        transport.dht.did,
-        transport.dht.did,
-    )?;
-    let bytes = payload.to_wire()?;
+    Ok(PendingPeer {
+        peer,
+        session,
+        callback,
+    })
+}
 
-    pending_callback
-        .on_admitted_message_for_test(&peer.to_string(), &bytes)
-        .await
-        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+#[cfg(feature = "dummy")]
+impl PendingPeer {
+    fn custom_message_wire(&self, transport: &SwarmTransport, data: &[u8]) -> Result<Vec<u8>> {
+        MessagePayload::new_send(
+            Message::custom(data)?,
+            MessageSigner::new(&self.session, TEST_NETWORK_ID),
+            transport.dht.did,
+            transport.dht.did,
+        )?
+        .to_wire()
+        .map(|wire| wire.to_vec())
+    }
 
+    async fn receive(&self, bytes: &[u8]) -> Result<()> {
+        self.callback
+            .on_admitted_message_for_test(&self.peer.to_string(), bytes)
+            .await
+            .map_err(|error| Error::InvalidMessage(error.to_string()))
+    }
+
+    async fn admit(&self, transport: &SwarmTransport) -> Result<()> {
+        open_dummy_data_channel_before_ice_connected(transport, self.peer).await?;
+        self.callback
+            .on_data_channel_open(&self.peer.to_string())
+            .await
+            .map_err(|error| Error::InvalidMessage(error.to_string()))
+    }
+}
+
+/// A verified message that arrives before this end admits the connection is held, not dropped,
+/// and is delivered once by admission itself; a message after admission passes straight through.
+#[cfg(feature = "dummy")]
+#[tokio::test]
+async fn test_pending_callback_messages_are_held_until_admission() -> Result<()> {
+    let measure = Arc::new(RecordingMeasure::default());
+    let transport = Arc::new(transport_with_measure(measure.clone())?);
+    let app_callback = Arc::new(CountingSwarmCallback::default());
+    let pending = pending_peer(&transport, &app_callback).await?;
+    let early = pending.custom_message_wire(&transport, b"message-before-admission")?;
+
+    pending.receive(&early).await?;
+
+    assert_eq!(pending.callback.pre_admission_held_count_for_test(), 1);
     assert_eq!(app_callback.validates(), 0);
     assert_eq!(app_callback.inbounds(), 0);
     assert_eq!(measure.snapshot_counters()?, Vec::new());
-    assert!(!transport.dht.successors().contains(&peer)?);
-    open_dummy_data_channel_before_ice_connected(&transport, peer).await?;
+    assert!(!transport.dht.successors().contains(&pending.peer)?);
 
-    pending_callback
-        .on_data_channel_open(&peer.to_string())
-        .await
-        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
-    pending_callback
-        .on_admitted_message_for_test(&peer.to_string(), &bytes)
-        .await
-        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+    pending.admit(&transport).await?;
+    app_callback.wait_for_inbounds_at_least(1).await;
 
+    assert_eq!(pending.callback.pre_admission_held_count_for_test(), 0);
     assert_eq!(app_callback.validates(), 1);
     assert_eq!(app_callback.inbounds(), 1);
     let counters = measure.snapshot_counters()?;
-    assert!(counters.contains(&(peer, MeasureCounter::Connect)));
-    assert!(counters.contains(&(peer, MeasureCounter::Received)));
-    assert!(transport.is_admitted_connection(peer));
+    assert!(counters.contains(&(pending.peer, MeasureCounter::Connect)));
+    assert!(counters.contains(&(pending.peer, MeasureCounter::Received)));
+    assert!(transport.is_admitted_connection(pending.peer));
 
-    transport.disconnect(peer).await?;
+    let late = pending.custom_message_wire(&transport, b"message-after-admission")?;
+    pending.receive(&late).await?;
+    assert_eq!(app_callback.inbounds(), 2);
+    assert_eq!(app_callback.inbound_custom_data()?, vec![
+        b"message-before-admission".to_vec(),
+        b"message-after-admission".to_vec(),
+    ]);
+
+    transport.disconnect(pending.peer).await?;
+    Ok(())
+}
+
+/// Law (order): held messages are delivered in arrival order, ahead of anything that arrives
+/// after admission.
+#[cfg(feature = "dummy")]
+#[tokio::test]
+async fn test_held_messages_are_delivered_in_arrival_order() -> Result<()> {
+    let transport = Arc::new(transport_with_measure(Arc::new(
+        RecordingMeasure::default(),
+    ))?);
+    let app_callback = Arc::new(CountingSwarmCallback::default());
+    let pending = pending_peer(&transport, &app_callback).await?;
+
+    pending
+        .receive(&pending.custom_message_wire(&transport, b"first")?)
+        .await?;
+    pending
+        .receive(&pending.custom_message_wire(&transport, b"second")?)
+        .await?;
+    assert_eq!(pending.callback.pre_admission_held_count_for_test(), 2);
+    assert_eq!(app_callback.inbounds(), 0);
+
+    pending.admit(&transport).await?;
+    pending
+        .receive(&pending.custom_message_wire(&transport, b"third")?)
+        .await?;
+    app_callback.wait_for_inbounds_at_least(3).await;
+
+    assert_eq!(app_callback.inbound_custom_data()?, vec![
+        b"first".to_vec(),
+        b"second".to_vec(),
+        b"third".to_vec(),
+    ]);
+    transport.disconnect(pending.peer).await?;
+    Ok(())
+}
+
+/// A message from a peer the handshake does not belong to cancels the handshake, and the frames
+/// held for it are discarded with it.
+#[cfg(feature = "dummy")]
+#[tokio::test]
+async fn test_held_messages_are_discarded_when_the_pending_connection_is_cancelled() -> Result<()> {
+    let transport = Arc::new(transport_with_measure(Arc::new(
+        RecordingMeasure::default(),
+    ))?);
+    let app_callback = Arc::new(CountingSwarmCallback::default());
+    let pending = pending_peer(&transport, &app_callback).await?;
+    pending
+        .receive(&pending.custom_message_wire(&transport, b"held")?)
+        .await?;
+    assert_eq!(pending.callback.pre_admission_held_count_for_test(), 1);
+
+    let stranger_key = SecretKey::random();
+    let stranger: Did = stranger_key.address().into();
+    let stranger_session = SessionSk::new_with_seckey(&stranger_key)?;
+    let intrusion = MessagePayload::new_send(
+        Message::custom(b"stranger")?,
+        MessageSigner::new(&stranger_session, TEST_NETWORK_ID),
+        transport.dht.did,
+        transport.dht.did,
+    )?
+    .to_wire()?;
+    pending
+        .callback
+        .on_admitted_message_for_test(&stranger.to_string(), &intrusion)
+        .await
+        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+
+    assert_eq!(pending.callback.pre_admission_held_count_for_test(), 0);
+    assert!(!transport.has_connection_attempt(pending.peer)?);
+    assert_eq!(app_callback.inbounds(), 0);
     Ok(())
 }
 

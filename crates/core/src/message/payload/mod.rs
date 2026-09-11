@@ -17,11 +17,11 @@ use super::encoder::Decoder;
 use super::encoder::Encoded;
 use super::encoder::Encoder;
 use super::protocols::DomainTag;
+use super::protocols::HopBudget;
 use super::protocols::MessageRelay;
 use super::protocols::MessageSigner;
 use super::protocols::MessageVerification;
 use super::protocols::MessageVerificationExt;
-use super::protocols::ReportReturnPolicy;
 use crate::dht::Chord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
@@ -72,23 +72,11 @@ where T: DeserializeOwned {
     Ok(m)
 }
 
-fn hash_transaction(
-    destination: Did,
-    tx_id: uuid::Uuid,
-    report_return: ReportReturnPolicy,
-    data: &[u8],
-) -> [u8; 32] {
+fn hash_transaction(destination: Did, tx_id: uuid::Uuid, data: &[u8]) -> [u8; 32] {
     let mut msg = vec![];
 
     msg.extend_from_slice(destination.as_bytes());
     msg.extend_from_slice(tx_id.as_bytes());
-    match report_return {
-        ReportReturnPolicy::Path => msg.push(0),
-        ReportReturnPolicy::Routed { destination } => {
-            msg.push(1);
-            msg.extend_from_slice(destination.as_bytes());
-        }
-    }
     msg.extend_from_slice(data);
 
     keccak256(&msg)
@@ -96,6 +84,9 @@ fn hash_transaction(
 
 /// All messages transmitted in RingsNetwork should be wrapped by `Transaction`.
 /// It additionally offer destination, tx_id and verification.
+///
+/// A report for a transaction is routed to the transaction's [origin](Self::origin); no other
+/// return address exists, so a request can never direct a report at a third party.
 ///
 /// To transmit `Transaction` in RingsNetwork, user should build
 /// [MessagePayload] and use [PayloadSender] to send.
@@ -108,9 +99,6 @@ pub struct Transaction {
     pub tx_id: uuid::Uuid,
     /// data
     pub data: Vec<u8>,
-    /// Return policy used by reports for this transaction.
-    #[serde(default)]
-    pub report_return: ReportReturnPolicy,
     /// This field holds a signature from a node,
     /// which is used to prove that the transaction was created by that node.
     pub verification: MessageVerification,
@@ -122,7 +110,6 @@ impl fmt::Debug for Transaction {
             .field("destination", &self.destination)
             .field("tx_id", &self.tx_id)
             .field("data_bytes", &self.data.len())
-            .field("report_return", &self.report_return)
             .finish()
     }
 }
@@ -133,8 +120,7 @@ impl fmt::Debug for Transaction {
 pub struct MessagePayload {
     /// Payload data
     pub transaction: Transaction,
-    /// Relay records the transport path of message.
-    /// And can also help message sender to find the next hop.
+    /// The relay carrier: the next hop, the destination, and the forwards left.
     pub relay: MessageRelay,
     /// This field holds a signature from a node,
     /// which is used to prove that payload was created by that node.
@@ -162,31 +148,22 @@ impl Transaction {
     where
         T: Serialize,
     {
-        Self::new_with_report_return(destination, tx_id, data, ReportReturnPolicy::Path, signer)
-    }
-
-    /// Wrap data with an explicit report-return policy.
-    pub fn new_with_report_return<T>(
-        destination: Did,
-        tx_id: uuid::Uuid,
-        data: T,
-        report_return: ReportReturnPolicy,
-        signer: MessageSigner<&SessionSk>,
-    ) -> Result<Self>
-    where
-        T: Serialize,
-    {
-        report_return.validate_authorized_by(signer.account_did())?;
         let data = rings_codec::serialize(&data).map_err(Error::CodecSerialize)?;
-        let msg_hash = hash_transaction(destination, tx_id, report_return, &data);
+        let msg_hash = hash_transaction(destination, tx_id, &data);
         let verification = signer.sign(TRANSACTION_DOMAIN_TAG, &msg_hash)?;
         Ok(Self {
             destination,
             tx_id,
             data,
-            report_return,
             verification,
         })
+    }
+
+    /// The origin of this transaction: the account that authorized the session it is signed
+    /// by. This is the ring position a request is authorized against and the address its report
+    /// is routed to; it is never the session id, which names a key, not a node.
+    pub fn origin(&self) -> Did {
+        self.verification.session.account_did()
     }
 
     /// Deserializes the data field into a `T` instance.
@@ -207,7 +184,6 @@ impl MessagePayload {
         let msg_hash = hash_transaction(
             transaction.destination,
             transaction.tx_id,
-            transaction.report_return,
             &transaction.data,
         );
         let verification = signer.sign(PAYLOAD_DOMAIN_TAG, &msg_hash)?;
@@ -218,7 +194,7 @@ impl MessagePayload {
         })
     }
 
-    /// Helps to create sending message from data.
+    /// Helps to create sending message from data: a fresh carrier with the full hop budget.
     pub fn new_send<T>(
         data: T,
         signer: MessageSigner<&SessionSk>,
@@ -230,11 +206,7 @@ impl MessagePayload {
     {
         let tx_id = crate::utils::new_uuid();
         let transaction = Transaction::new(destination, tx_id, data, signer)?;
-        let relay = MessageRelay::new(
-            vec![signer.account_did()],
-            next_hop,
-            transaction.destination,
-        );
+        let relay = MessageRelay::new(next_hop, transaction.destination, HopBudget::MAX);
         Self::new(transaction, signer, relay)
     }
 
@@ -271,8 +243,7 @@ impl MessageVerificationExt for Transaction {
     const DOMAIN_TAG: DomainTag = TRANSACTION_DOMAIN_TAG;
 
     fn verification_data(&self) -> Result<Vec<u8>> {
-        self.report_return.validate_authorized_by(self.signer())?;
-        Ok(hash_transaction(self.destination, self.tx_id, self.report_return, &self.data).to_vec())
+        Ok(hash_transaction(self.destination, self.tx_id, &self.data).to_vec())
     }
 
     fn verification(&self) -> &MessageVerification {
@@ -359,51 +330,11 @@ pub trait PayloadSender {
         Ok(tx_id)
     }
 
-    /// Send a message to a specified destination by specified next hop with an explicit report policy.
-    async fn send_message_by_hop_with_report_return<T>(
-        &self,
-        msg: T,
-        destination: Did,
-        next_hop: Did,
-        report_return: ReportReturnPolicy,
-    ) -> Result<uuid::Uuid>
-    where
-        T: Serialize + Send,
-    {
-        let tx_id = crate::utils::new_uuid();
-        let signer = self.message_signer();
-        let transaction =
-            Transaction::new_with_report_return(destination, tx_id, msg, report_return, signer)?;
-        let relay = MessageRelay::new(
-            vec![signer.account_did()],
-            next_hop,
-            transaction.destination,
-        );
-        let payload = MessagePayload::new(transaction, signer, relay)?;
-        self.send_payload(payload).await?;
-        Ok(tx_id)
-    }
-
     /// Send a message to a specified destination.
     async fn send_message<T>(&self, msg: T, destination: Did) -> Result<uuid::Uuid>
     where T: Serialize + Send {
         let next_hop = self.infer_next_hop(destination, None)?;
         self.send_message_by_hop(msg, destination, next_hop).await
-    }
-
-    /// Send a message to a specified destination with an explicit report policy.
-    async fn send_message_with_report_return<T>(
-        &self,
-        msg: T,
-        destination: Did,
-        report_return: ReportReturnPolicy,
-    ) -> Result<uuid::Uuid>
-    where
-        T: Serialize + Send,
-    {
-        let next_hop = self.infer_next_hop(destination, None)?;
-        self.send_message_by_hop_with_report_return(msg, destination, next_hop, report_return)
-            .await
     }
 
     /// Send a direct message to a specified destination.
@@ -413,26 +344,18 @@ pub trait PayloadSender {
             .await
     }
 
-    /// Send a report message to a specified destination.
+    /// Send a report for the request carried by `payload`: a fresh payload Chord-routed to the
+    /// request's origin under the same transaction id.
     async fn send_report_message<T>(&self, payload: &MessagePayload, msg: T) -> Result<()>
     where T: Serialize + Send {
-        let policy = payload.transaction.report_return;
-        // Keep this send-boundary check even though transaction verification
-        // enforces the same authorization when the request is received.
-        policy.validate_authorized_by(payload.transaction.signer())?;
-        let routed_next_hop = match policy {
-            ReportReturnPolicy::Path => None,
-            ReportReturnPolicy::Routed { destination } => {
-                Some(self.infer_next_hop(destination, None)?)
-            }
-        };
+        let origin = payload.transaction.origin();
+        let next_hop = self.infer_next_hop(origin, None)?;
         let relay = payload
             .relay
-            .report(self.dht().did, policy, routed_next_hop)?;
+            .report(self.dht().did, origin, next_hop, HopBudget::MAX)?;
 
         let signer = self.message_signer();
-        let transaction =
-            Transaction::new(relay.destination, payload.transaction.tx_id, msg, signer)?;
+        let transaction = Transaction::new(origin, payload.transaction.tx_id, msg, signer)?;
 
         let pl = MessagePayload::new(transaction, signer, relay)?;
         self.send_payload(pl).await

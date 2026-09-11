@@ -183,7 +183,7 @@ pub(crate) fn core_actor_steps<T>(
 /// One side effect requested by a Core message handler.
 #[derive(Clone, Debug)]
 pub(crate) enum CoreEffect<'payload> {
-    /// Forward an existing payload through the relay path.
+    /// Forward an existing payload one hop further along its Chord route.
     ForwardPayload {
         /// Payload to forward.
         payload: &'payload MessagePayload,

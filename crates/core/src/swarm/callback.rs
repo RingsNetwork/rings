@@ -1,6 +1,5 @@
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 use std::cell::Cell;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
@@ -8,28 +7,28 @@ use std::sync::RwLock;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::lock::Mutex as FuturesMutex;
-use rings_transport::core::callback::AdmittedInboundMessage;
 use rings_transport::core::callback::InboundFrameCapacityLease;
-use rings_transport::core::callback::TransportCallback;
 use rings_transport::core::transport::WebrtcConnectionState;
 
 use crate::chunk::MessageReassembler;
 use crate::dht::Did;
-use crate::measure::Authentication;
-use crate::message::with_message_variants;
-use crate::message::HandleMsg;
 use crate::message::Message;
 use crate::message::MessageHandler;
 use crate::message::MessageKind;
 use crate::message::MessagePayload;
-use crate::message::MessageVerificationExt;
-use crate::swarm::transport::ConnectionEventDisposition;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 
 mod inbound;
+mod inner;
+mod logical;
+mod pre_admission;
+mod processor;
+
 pub(crate) use inbound::InboundCapacity;
 pub(crate) use inbound::InboundLane;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use processor::prepare_transport_frame_lane_for_test;
 
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) const fn inbound_mailbox_capacity_for_test() -> usize {
@@ -43,10 +42,12 @@ pub(crate) const fn inbound_application_capacity_for_test() -> usize {
 
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) const fn inbound_peer_capacity_for_test() -> usize {
-    inbound::peer_capacity_for_test()
+    inbound::peer_capacity()
 }
+
 use inbound::InboundMailbox;
 use inbound::ReassemblyClock;
+use pre_admission::PreAdmissionHold;
 
 /// The application the swarm currently delivers to, replaceable through `Swarm::set_callback`;
 /// every delivery resolves it at delivery time.
@@ -90,47 +91,11 @@ pub(crate) struct LocalDelivery {
     pipeline: LogicalInbound,
 }
 
-impl LocalDelivery {
-    /// Deliver to `callback` through `transport`'s handlers.
-    pub(crate) fn new(transport: Arc<SwarmTransport>, callback: SharedSwarmCallback) -> Self {
-        Self {
-            pipeline: LogicalInbound::new(transport, callback),
-        }
-    }
-
-    /// Deliver one payload.
-    ///
-    /// Pre: `payload.transaction.destination` is this node and the payload was verified by the
-    /// caller (the inbox witness verifies it as of its hold instant).
-    pub(crate) async fn deliver(&self, payload: &MessagePayload) -> crate::error::Result<()> {
-        inbound::deliver_local(&self.pipeline, payload).await
-    }
-}
-
 pub use crate::error::CallbackError;
 type TransportCallbackError = Box<dyn std::error::Error>;
 
 fn into_transport_callback_error(error: CallbackError) -> TransportCallbackError {
     error
-}
-
-fn log_inbound_verification_failure(
-    peer: Option<Did>,
-    payload: &MessagePayload,
-    wire_bytes: usize,
-) {
-    let message_kind = MessageKind::from_wire(&payload.transaction.data)
-        .ok()
-        .map(MessageKind::as_str);
-    tracing::error!(
-        peer = ?peer,
-        tx_id = %payload.transaction.tx_id,
-        destination = %payload.transaction.destination,
-        message_kind,
-        data_bytes = payload.transaction.data.len(),
-        wire_bytes,
-        "inbound message verification failed or expired"
-    );
 }
 
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -244,67 +209,6 @@ pub(super) struct LogicalInbound {
     callback: SharedSwarmCallback,
 }
 
-impl LogicalInbound {
-    fn new(transport: Arc<SwarmTransport>, callback: SharedSwarmCallback) -> Self {
-        let message_handler = MessageHandler::new(transport.clone(), callback.clone());
-        Self {
-            transport,
-            message_handler,
-            callback,
-        }
-    }
-
-    pub(super) async fn handle_payload(
-        &self,
-        payload: &MessagePayload,
-        prepared_message: Option<Message>,
-    ) -> crate::error::Result<()> {
-        let message = match prepared_message {
-            Some(message) => message,
-            None => payload.transaction.data()?,
-        };
-
-        macro_rules! dispatch_message_body {
-            (Chunk, $msg:expr) => {{
-                let _ = $msg;
-                Err(crate::error::Error::InboundActorInvariantViolation)
-            }};
-            ($variant:ident, $msg:expr) => {
-                self.message_handler.handle(payload, $msg).await
-            };
-        }
-        macro_rules! dispatch_message {
-            ($( $(#[$docs:meta])* $index:literal => $variant:ident($body:ty): $class:ident, $storage_route:ident ),+ $(,)?) => {
-                match message {
-                    $(Message::$variant(ref msg) => dispatch_message_body!($variant, msg)),+
-                }
-            };
-        }
-
-        let result = with_message_variants!(dispatch_message);
-
-        // A handler that errored must not then be reported to the application as a successful
-        // inbound message: surface the error and do not run `on_inbound` for it.
-        if let Err(e) = result {
-            tracing::error!("Failed to handle_payload: {e:?}");
-            return Err(e);
-        }
-
-        Ok(())
-    }
-
-    pub(super) fn is_local_destination(&self, payload: &MessagePayload) -> bool {
-        payload.transaction.destination == self.transport.dht.did
-    }
-
-    pub(super) async fn on_inbound(
-        &self,
-        payload: &MessagePayload,
-    ) -> std::result::Result<(), CallbackError> {
-        self.callback.on_inbound(payload).await
-    }
-}
-
 /// The connection stage of the inbound pipeline for one connection: reassembly and admission
 /// gates in front of the logical stage.
 #[derive(Clone)]
@@ -313,6 +217,31 @@ pub(super) struct InboundProcessor {
     reassembler: Arc<FuturesMutex<MessageReassembler>>,
     reassembly_clock: ReassemblyClock,
     pending_attempt: Arc<Mutex<Option<PendingConnectionAttempt>>>,
+    /// Verified frames that arrived before this end admitted the connection; bounded by the
+    /// per-peer inbound capacity, so an unadmitted peer holds no more than an admitted one.
+    pre_admission: Arc<Mutex<PreAdmissionHold<HeldInboundFrame>>>,
+}
+
+/// One verified frame waiting for admission, with everything its delivery needs.
+///
+/// The peer's authentication is not kept: it is judged as of delivery, when the handshake it
+/// was waiting for has been admitted.
+struct HeldInboundFrame {
+    peer: Did,
+    bytes: Bytes,
+    prepared: PreparedInboundFrame,
+    transport_capacity: Option<InboundFrameCapacityLease>,
+}
+
+/// How the pending handshake bound to a callback disposes of a frame from `peer`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InboundGate {
+    /// No handshake is pending, or it has been admitted: the frame may be delivered.
+    Admitted,
+    /// The handshake is with this peer and not yet admitted: the frame is early, not wrong.
+    Unadmitted,
+    /// The frame does not belong to the pending handshake: it is refused.
+    Refused,
 }
 
 /// [InnerSwarmCallback] wraps [SharedSwarmCallback] with inner handling for a specific connection.
@@ -321,803 +250,9 @@ pub struct InnerSwarmCallback {
     inbound: InboundMailbox,
 }
 
-impl InboundProcessor {
-    fn new(
-        transport: Arc<SwarmTransport>,
-        callback: SharedSwarmCallback,
-        reassembly_clock: ReassemblyClock,
-    ) -> Self {
-        let reassembler = MessageReassembler::with_limits_and_budget(
-            transport.reassembly_limits(),
-            transport.reassembly_budget(),
-        );
-        Self {
-            logical: LogicalInbound::new(transport, callback),
-            reassembler: Arc::new(FuturesMutex::new(reassembler)),
-            reassembly_clock,
-            pending_attempt: Arc::new(Mutex::new(None)),
-        }
-    }
-
-    fn pending_attempt(&self) -> Option<PendingConnectionAttempt> {
-        *self
-            .pending_attempt
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    fn set_pending_attempt(&self, attempt: PendingConnectionAttempt) {
-        *self
-            .pending_attempt
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(attempt);
-    }
-
-    fn peer_authentication(&self, peer: Did) -> Authentication {
-        let Some(attempt) = self.pending_attempt() else {
-            return Authentication::Unauthenticated;
-        };
-        if attempt.peer() == peer
-            && self
-                .logical
-                .transport
-                .is_admitted_connection_attempt(attempt)
-        {
-            Authentication::Authenticated
-        } else {
-            Authentication::Unauthenticated
-        }
-    }
-
-    pub(super) async fn record_receive_failure(
-        &self,
-        peer: Option<Did>,
-        authentication: Authentication,
-    ) {
-        if let Some(peer) = peer {
-            self.logical
-                .transport
-                .record_peer_message_receive_failed(peer, authentication)
-                .await;
-        }
-    }
-}
-
-impl InnerSwarmCallback {
-    fn pending_attempt(&self) -> Option<PendingConnectionAttempt> {
-        self.processor.pending_attempt()
-    }
-
-    /// Create a new [InnerSwarmCallback] with the provided transport and callback.
-    pub fn new(transport: Arc<SwarmTransport>, callback: SharedSwarmCallback) -> Self {
-        Self::new_with_reassembly_clock(transport, callback, ReassemblyClock::system())
-    }
-
-    fn new_with_reassembly_clock(
-        transport: Arc<SwarmTransport>,
-        callback: SharedSwarmCallback,
-        reassembly_clock: ReassemblyClock,
-    ) -> Self {
-        let inbound_capacity = transport.inbound_capacity();
-        let processor = InboundProcessor::new(transport, callback, reassembly_clock.clone());
-        let inbound = InboundMailbox::spawn(processor.clone(), inbound_capacity, reassembly_clock);
-        Self { processor, inbound }
-    }
-
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    /// Construct an inbound actor whose chunk admission and periodic cleanup
-    /// read one injected clock.
-    pub(crate) fn new_with_reassembly_clock_for_test(
-        transport: Arc<SwarmTransport>,
-        callback: SharedSwarmCallback,
-        now_ms: Arc<Mutex<u128>>,
-    ) -> Self {
-        Self::new_with_reassembly_clock(transport, callback, ReassemblyClock::controlled(now_ms))
-    }
-
-    /// Bind this callback to the pending handshake that created its transport.
-    pub(crate) fn with_pending_connection_attempt(
-        self,
-        pending_attempt: PendingConnectionAttempt,
-    ) -> Self {
-        self.processor.set_pending_attempt(pending_attempt);
-        self
-    }
-
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) fn inbound_admitted_count_for_test(&self) -> usize {
-        self.inbound.admitted_count_for_test()
-    }
-
-    /// Resolve once `predicate` holds over the admitted inbound count,
-    /// re-checked on every capacity reservation, transition, or release.
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) async fn await_inbound_admitted_count_for_test(
-        &self,
-        predicate: impl Fn(usize) -> bool,
-    ) {
-        self.inbound.await_admitted_count_for_test(predicate).await;
-    }
-
-    /// Resolve once `predicate` holds over the number of frames whose raw
-    /// transport lease this mailbox has released after core admission.
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) async fn await_inbound_handoffs_for_test(&self, predicate: impl Fn(u64) -> bool) {
-        self.inbound.await_handoffs_for_test(predicate).await;
-    }
-
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) fn reassembly_cleanup_passes_for_test(&self) -> u64 {
-        self.inbound.cleanup_passes_for_test()
-    }
-
-    /// Resolve once `predicate` holds over the number of completed reassembly
-    /// cleanup passes, periodic or close-time.
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) async fn await_reassembly_cleanup_passes_for_test(
-        &self,
-        predicate: impl Fn(u64) -> bool,
-    ) {
-        self.inbound.await_cleanup_passes_for_test(predicate).await;
-    }
-
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) fn hold_application_admission_for_test(&self) -> crate::error::Result<impl Drop> {
-        self.inbound.hold_application_admission_for_test()
-    }
-
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) fn hold_application_capacity_for_test(
-        &self,
-        peer: Did,
-    ) -> crate::error::Result<impl Drop> {
-        self.inbound.hold_application_capacity_for_test(peer)
-    }
-
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) fn close_inbound_for_test(&self) {
-        self.inbound.close_for_test();
-    }
-
-    async fn admit_pending_connection(&self, did: Did) -> Result<bool, CallbackError> {
-        let Some(attempt) = self.pending_attempt() else {
-            return Ok(false);
-        };
-        if attempt.peer() != did {
-            tracing::warn!(
-                "ignoring data-channel open for {did}; pending attempt belongs to {}",
-                attempt.peer()
-            );
-            self.processor
-                .logical
-                .transport
-                .cancel_pending_connection(attempt)
-                .await?;
-            return Ok(false);
-        }
-        if !self
-            .processor
-            .logical
-            .transport
-            .begin_ready_connection_admission(attempt)?
-        {
-            return Ok(false);
-        }
-
-        match self
-            .processor
-            .logical
-            .message_handler
-            .admit_dht_attempt(attempt)
-            .await
-        {
-            Ok(true) => {}
-            Ok(false) => return Ok(false),
-            Err(error) => {
-                if let Err(cleanup_error) = self
-                    .processor
-                    .logical
-                    .transport
-                    .cancel_pending_connection(attempt)
-                    .await
-                {
-                    tracing::warn!(
-                        peer = %did,
-                        generation = attempt.generation(),
-                        error = ?cleanup_error,
-                        "failed to close connection after admission error"
-                    );
-                }
-                return Err(error.into());
-            }
-        }
-
-        self.processor
-            .logical
-            .transport
-            .record_peer_connected(attempt)
-            .await;
-        if !self
-            .processor
-            .logical
-            .transport
-            .is_admitted_connection_attempt(attempt)
-        {
-            return Ok(false);
-        }
-        self.emit_connected_event_for_attempt(did, attempt).await
-    }
-
-    async fn emit_connected_event_for_attempt(
-        &self,
-        did: Did,
-        attempt: PendingConnectionAttempt,
-    ) -> Result<bool, CallbackError> {
-        let delivery = self
-            .processor
-            .logical
-            .transport
-            .swarm_event_delivery_lock(did);
-        let result = async {
-            let delivery_turn = delivery.acquire().await;
-            if !self
-                .processor
-                .logical
-                .transport
-                .is_admitted_connection_attempt(attempt)
-            {
-                tracing::debug!("suppressing connected event for {did}; connection was retired before event delivery");
-                return Ok(false);
-            }
-            self.emit_connection_state_change_after_ordered_start(
-                delivery_turn,
-                did,
-                WebrtcConnectionState::Connected,
-            )
-            .await?;
-            Ok(true)
-        }
-        .await;
-        self.processor
-            .logical
-            .transport
-            .prune_swarm_event_delivery_lock(did, &delivery);
-        result
-    }
-
-    async fn emit_connection_state_change(
-        &self,
-        did: Did,
-        state: WebrtcConnectionState,
-        attempt: Option<PendingConnectionAttempt>,
-    ) -> Result<(), CallbackError> {
-        let delivery = self
-            .processor
-            .logical
-            .transport
-            .swarm_event_delivery_lock(did);
-        let result = async {
-            let delivery_turn = delivery.acquire().await;
-            if let Some(attempt) = attempt {
-                match self
-                    .processor
-                    .logical
-                    .transport
-                    .connection_event_disposition(attempt)?
-                {
-                    ConnectionEventDisposition::Deliver => {}
-                    ConnectionEventDisposition::Suppress { active } => {
-                        tracing::debug!(
-                            peer = %did,
-                            generation = attempt.generation(),
-                            active_generation = active.generation(),
-                            state = ?state,
-                            "suppressing connection event from superseded generation"
-                        );
-                        return Ok(());
-                    }
-                }
-            }
-            self.emit_connection_state_change_after_ordered_start(delivery_turn, did, state)
-                .await
-        }
-        .await;
-        self.processor
-            .logical
-            .transport
-            .prune_swarm_event_delivery_lock(did, &delivery);
-        result
-    }
-
-    async fn emit_connection_state_change_after_ordered_start(
-        &self,
-        delivery_turn: crate::swarm::transport::SwarmEventDeliveryTurn,
-        did: Did,
-        state: WebrtcConnectionState,
-    ) -> Result<(), CallbackError> {
-        let event = SwarmEvent::ConnectionStateChange { peer: did, state };
-        delivery_turn
-            .poll_once_then_release(self.processor.logical.callback.on_event(&event))
-            .await
-    }
-
-    fn pending_disconnected_before_admission(&self, did: Did) -> bool {
-        let Some(attempt) = self.pending_attempt() else {
-            return false;
-        };
-        attempt.peer() == did
-            && !self
-                .processor
-                .logical
-                .transport
-                .is_admitted_connection_attempt(attempt)
-    }
-
-    fn is_local_did_event(&self, did: Did, operation: &str) -> bool {
-        if did != self.processor.logical.transport.dht.did {
-            return false;
-        }
-        tracing::warn!("ignoring {operation} for local DID {did}");
-        true
-    }
-
-    async fn cancel_mismatched_pending_connection(
-        &self,
-        did: Did,
-        operation: &str,
-    ) -> Result<bool, CallbackError> {
-        let Some(attempt) = self.pending_attempt() else {
-            return Ok(false);
-        };
-        if attempt.peer() == did {
-            return Ok(false);
-        }
-        tracing::warn!(
-            "ignoring {operation} for {did}; pending attempt belongs to {}",
-            attempt.peer()
-        );
-        if self
-            .processor
-            .logical
-            .transport
-            .cancel_pending_connection(attempt)
-            .await?
-        {
-            self.processor
-                .logical
-                .transport
-                .record_peer_disconnected(attempt)
-                .await;
-        }
-        Ok(true)
-    }
-
-    async fn handle_pending_terminal_event(
-        &self,
-        did: Did,
-        operation: &str,
-    ) -> Result<bool, CallbackError> {
-        let Some(attempt) = self.pending_attempt() else {
-            return Ok(false);
-        };
-        if self
-            .processor
-            .logical
-            .transport
-            .cancel_pending_connection(attempt)
-            .await?
-        {
-            self.processor
-                .logical
-                .transport
-                .record_peer_disconnected(attempt)
-                .await;
-            return Ok(true);
-        }
-        if self
-            .processor
-            .logical
-            .transport
-            .is_admitted_connection_attempt(attempt)
-        {
-            return Ok(false);
-        }
-        tracing::debug!(
-            "ignoring late {operation} for {did}; pending attempt belongs to generation already superseded"
-        );
-        Ok(true)
-    }
-}
-
-impl InboundProcessor {
-    pub(super) async fn pending_connection_allows_message(
-        &self,
-        peer: Option<Did>,
-    ) -> crate::error::Result<bool> {
-        let Some(attempt) = self.pending_attempt() else {
-            return Ok(true);
-        };
-        let Some(peer) = peer else {
-            tracing::warn!(
-                "ignoring message from unparsable peer; pending attempt belongs to {}",
-                attempt.peer()
-            );
-            return Ok(false);
-        };
-        if attempt.peer() != peer {
-            tracing::warn!(
-                "ignoring message from {peer}; pending attempt belongs to {}",
-                attempt.peer()
-            );
-            self.logical
-                .transport
-                .cancel_pending_connection(attempt)
-                .await?;
-            return Ok(false);
-        }
-        if !self
-            .logical
-            .transport
-            .is_admitted_connection_attempt(attempt)
-        {
-            tracing::debug!("ignoring message from {peer}; pending connection is not admitted yet");
-            return Ok(false);
-        }
-        Ok(true)
-    }
-
-    pub(super) async fn decode_verified_payload(
-        &self,
-        peer: Option<Did>,
-        authentication: Authentication,
-        msg: &[u8],
-    ) -> crate::error::Result<MessagePayload> {
-        let payload = match MessagePayload::from_wire(msg) {
-            Ok(payload) => payload,
-            Err(e) => {
-                self.record_receive_failure(peer, authentication).await;
-                return Err(e);
-            }
-        };
-        let network_id = self.logical.transport.network_id;
-        if !(payload.verify(network_id) && payload.transaction.verify(network_id)) {
-            log_inbound_verification_failure(peer, &payload, msg.len());
-            self.record_receive_failure(peer, authentication).await;
-            return Err(crate::error::Error::InvalidMessage(
-                "message verification failed or message expired".to_string(),
-            ));
-        }
-        Ok(payload)
-    }
-
-    pub(super) async fn validate_preverified_payload(
-        &self,
-        peer: Option<Did>,
-        authentication: Authentication,
-        payload: &MessagePayload,
-    ) -> crate::error::Result<()> {
-        if payload.is_expired() || payload.transaction.is_expired() {
-            self.record_receive_failure(peer, authentication).await;
-            return Err(crate::error::Error::InvalidMessage(
-                "message expired after transport admission".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
-    pub(super) async fn accept_verified_logical_message(
-        &self,
-        peer: Option<Did>,
-        authentication: Authentication,
-        payload: MessagePayload,
-    ) -> crate::error::Result<MessagePayload> {
-        self.validate_preverified_payload(peer, authentication, &payload)
-            .await?;
-        let useful_bytes = u64::try_from(payload.transaction.data.len())
-            .map_err(|_| crate::error::Error::MessageSizeOverflow)?;
-        if let (Some(peer), Some(attempt)) = (peer, self.pending_attempt()) {
-            if attempt.peer() == peer {
-                self.logical
-                    .transport
-                    .record_peer_message_received(attempt, authentication, useful_bytes)
-                    .await;
-            }
-        }
-        Ok(payload)
-    }
-}
-
 pub(super) struct PreparedInboundFrame {
     payload: MessagePayload,
     message: Message,
     kind: MessageKind,
     lane: InboundLane,
-}
-
-fn prepare_transport_frame(
-    network_id: u32,
-    peer: Option<Did>,
-    bytes: &[u8],
-) -> crate::error::Result<PreparedInboundFrame> {
-    let payload = MessagePayload::from_wire(bytes)?;
-    if !(payload.transaction.verify(network_id) && payload.verify(network_id)) {
-        log_inbound_verification_failure(peer, &payload, bytes.len());
-        return Err(crate::error::Error::InvalidMessage(
-            "message verification failed or message expired".to_string(),
-        ));
-    }
-    let message = payload.transaction.data::<Message>()?;
-    let kind = MessageKind::from_message(&message);
-    let lane = InboundLane::from_kind(kind);
-    Ok(PreparedInboundFrame {
-        payload,
-        message,
-        kind,
-        lane,
-    })
-}
-
-#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(crate) fn prepare_transport_frame_lane_for_test(
-    network_id: u32,
-    bytes: &[u8],
-) -> crate::error::Result<InboundLane> {
-    prepare_transport_frame(network_id, None, bytes).map(|prepared| prepared.lane)
-}
-
-impl InnerSwarmCallback {
-    async fn submit_inbound_message(
-        &self,
-        cid: &str,
-        msg: Bytes,
-        transport_capacity: Option<InboundFrameCapacityLease>,
-    ) -> Result<(), TransportCallbackError> {
-        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-        let _depth_guard = OnMessageRecursionDepthGuard::enter();
-
-        let peer = Did::from_str(cid).ok();
-        let authentication = peer.map_or(Authentication::Unauthenticated, |peer| {
-            self.processor.peer_authentication(peer)
-        });
-        let prepared = match prepare_transport_frame(
-            self.processor.logical.transport.network_id,
-            peer,
-            msg.as_ref(),
-        ) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                self.processor
-                    .record_receive_failure(peer, authentication)
-                    .await;
-                return Err(error.into());
-            }
-        };
-        self.inbound
-            .submit_prepared(
-                &self.processor,
-                peer,
-                authentication,
-                msg,
-                prepared,
-                transport_capacity,
-            )
-            .await
-            .map_err(Into::into)
-    }
-
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) async fn on_admitted_message_for_test(
-        &self,
-        cid: &str,
-        msg: &[u8],
-    ) -> Result<(), TransportCallbackError> {
-        self.submit_inbound_message(cid, Bytes::copy_from_slice(msg), None)
-            .await
-    }
-}
-
-#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
-#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
-impl TransportCallback for InnerSwarmCallback {
-    async fn on_admitted_message(
-        &self,
-        message: AdmittedInboundMessage<'_>,
-    ) -> Result<(), TransportCallbackError> {
-        let (cid, msg, transport_capacity) = message.into_parts();
-        self.submit_inbound_message(cid, msg, Some(transport_capacity))
-            .await
-    }
-
-    async fn on_invalid_inbound_frame(&self, cid: &str) -> Result<(), TransportCallbackError> {
-        let peer = Did::from_str(cid).ok();
-        let authentication = peer.map_or(Authentication::Unauthenticated, |peer| {
-            self.processor.peer_authentication(peer)
-        });
-        self.processor
-            .record_receive_failure(peer, authentication)
-            .await;
-        Ok(())
-    }
-
-    async fn on_peer_connection_state_change(
-        &self,
-        cid: &str,
-        s: WebrtcConnectionState,
-    ) -> Result<(), TransportCallbackError> {
-        let Ok(did) = Did::from_str(cid) else {
-            tracing::warn!("on_peer_connection_state_change parse did failed: {}", cid);
-            return Ok(());
-        };
-        if self
-            .cancel_mismatched_pending_connection(did, "connection state change")
-            .await
-            .map_err(into_transport_callback_error)?
-        {
-            return Ok(());
-        }
-        if self.is_local_did_event(did, "connection state change") {
-            return Ok(());
-        }
-
-        let admission_completed = match s {
-            // Peer-state progress may complete admission, but only when the
-            // product snapshot also observes an open data channel. This makes
-            // either browser callback order converge on the same transition.
-            WebrtcConnectionState::Connecting | WebrtcConnectionState::Connected => self
-                .admit_pending_connection(did)
-                .await
-                .map_err(into_transport_callback_error)?,
-            // `Failed` and `Closed` are terminal states. Pending handshakes are
-            // discarded without touching the DHT; active peers leave it.
-            WebrtcConnectionState::Failed | WebrtcConnectionState::Closed => {
-                if self
-                    .handle_pending_terminal_event(did, "connection terminal state")
-                    .await
-                    .map_err(into_transport_callback_error)?
-                {
-                    return Ok(());
-                }
-                let Some(attempt) = self.pending_attempt() else {
-                    tracing::warn!("ignoring unbound terminal connection event for {did}");
-                    return Ok(());
-                };
-                if !self
-                    .processor
-                    .logical
-                    .transport
-                    .is_admitted_connection_attempt(attempt)
-                {
-                    return Ok(());
-                }
-                self.processor
-                    .logical
-                    .transport
-                    .record_peer_disconnected(attempt)
-                    .await;
-                self.processor
-                    .logical
-                    .message_handler
-                    .leave_dht_attempt(attempt)
-                    .await?;
-                false
-            }
-            // `Disconnected` is a transient ICE state that frequently recovers
-            // back to `Connected` on its own (e.g. a brief network blip or ICE
-            // consent refresh). Tearing the connection down here would kill a
-            // link that WebRTC could have healed, and drop the peer from the DHT
-            // with no reconnect path. We leave it alone: it will either recover,
-            // or degrade to `Failed`, which is handled above.
-            WebrtcConnectionState::Disconnected => {
-                if self.pending_disconnected_before_admission(did) {
-                    tracing::debug!(
-                        "ignoring pre-admission disconnected state for pending connection {did}"
-                    );
-                    return Ok(());
-                }
-                let Some(attempt) = self.pending_attempt() else {
-                    tracing::warn!("ignoring unbound disconnected connection event for {did}");
-                    return Ok(());
-                };
-                self.processor
-                    .logical
-                    .transport
-                    .record_peer_disconnected(attempt)
-                    .await;
-                tracing::debug!("Connection to {did} is disconnected, waiting for recovery");
-                false
-            }
-            _ => false,
-        };
-
-        // Data-channel admission emits the application-level Connected event.
-        // Other state changes are passed through directly, unless this exact
-        // callback completed admission and already emitted the ordered Connected event.
-        if s != WebrtcConnectionState::Connected && !admission_completed {
-            self.emit_connection_state_change(did, s, self.pending_attempt())
-                .await
-                .map_err(into_transport_callback_error)?
-        }
-
-        Ok(())
-    }
-
-    async fn on_data_channel_open(&self, cid: &str) -> Result<(), TransportCallbackError> {
-        let Ok(did) = Did::from_str(cid) else {
-            tracing::warn!("on_data_channel_open parse did failed: {}", cid);
-            return Ok(());
-        };
-        if self
-            .cancel_mismatched_pending_connection(did, "data-channel open")
-            .await
-            .map_err(into_transport_callback_error)?
-        {
-            return Ok(());
-        }
-        if self.is_local_did_event(did, "data-channel open") {
-            return Ok(());
-        }
-
-        if !self
-            .admit_pending_connection(did)
-            .await
-            .map_err(into_transport_callback_error)?
-            && !self.processor.logical.transport.is_admitted_connection(did)
-        {
-            tracing::debug!("ignoring late data-channel open for {did}");
-        }
-        Ok(())
-    }
-
-    async fn on_data_channel_close(&self, cid: &str) -> Result<(), TransportCallbackError> {
-        let Ok(did) = Did::from_str(cid) else {
-            tracing::warn!("on_data_channel_close parse did failed: {}", cid);
-            return Ok(());
-        };
-        if self
-            .cancel_mismatched_pending_connection(did, "data-channel close")
-            .await
-            .map_err(into_transport_callback_error)?
-        {
-            return Ok(());
-        }
-        if self.is_local_did_event(did, "data-channel close") {
-            return Ok(());
-        }
-
-        // The data channel closing is a reliable signal that the peer is gone
-        // (e.g. it closed the connection), so tear the connection down now
-        // instead of waiting for the ICE state to reach `Failed`. This is the
-        // graceful counterpart to a local `disconnect()`: the remote learns of
-        // it promptly without relying on the transient `Disconnected` state.
-        if self
-            .handle_pending_terminal_event(did, "data-channel close")
-            .await
-            .map_err(into_transport_callback_error)?
-        {
-            return Ok(());
-        }
-        let Some(attempt) = self.pending_attempt() else {
-            tracing::warn!("ignoring unbound data-channel close for {did}");
-            return Ok(());
-        };
-        if !self
-            .processor
-            .logical
-            .transport
-            .is_admitted_connection_attempt(attempt)
-        {
-            return Ok(());
-        }
-        self.processor
-            .logical
-            .transport
-            .record_peer_disconnected(attempt)
-            .await;
-        self.processor
-            .logical
-            .message_handler
-            .leave_dht_attempt(attempt)
-            .await?;
-        Ok(())
-    }
 }

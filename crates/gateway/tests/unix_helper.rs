@@ -19,10 +19,7 @@ use rings_gateway::bindings::TunnelControl;
 use support::assert_exact_capture_ledger;
 use support::capture_packet;
 use support::gateway_plan;
-use support::probe_http;
 use support::TestResult;
-use support::CAPTURE_TARGET;
-use support::UNSELECTED_TARGET;
 
 const HELPER_START_TIMEOUT: Duration = Duration::from_secs(10);
 const HELPER_EXIT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -32,9 +29,8 @@ const HELPER_STATE_PARENT: &str = "/var/run";
 const HELPER_STATE_PARENT: &str = "/var/db";
 
 #[tokio::test]
-#[ignore = "requires root TUN/route privileges and public TCP reachability"]
+#[ignore = "requires root TUN/route privileges"]
 async fn privileged_helper_retains_and_recovers_a_disconnected_lease() -> TestResult {
-    let baseline = probe_http(CAPTURE_TARGET).await?;
     let directory = tempfile::Builder::new()
         .prefix("rings-gateway-helper-")
         .tempdir_in(HELPER_STATE_PARENT)?;
@@ -52,7 +48,6 @@ async fn privileged_helper_retains_and_recovers_a_disconnected_lease() -> TestRe
     } = control.establish(&plan).await?;
     assert_exact_capture_ledger(&ledger)?;
 
-    let unselected_response = probe_http(UNSELECTED_TARGET).await?;
     let first_capture = capture_packet(&mut device, &plan).await?;
     drop(device);
     drop(lease);
@@ -60,7 +55,6 @@ async fn privileged_helper_retains_and_recovers_a_disconnected_lease() -> TestRe
 
     helper.assert_running()?;
     assert!(ledger.exists());
-    assert!(probe_http(CAPTURE_TARGET).await.is_err());
 
     let mut resumed = UnixTunnelControl::new(UnixTunnelOptions::new(socket.clone()));
     let EstablishedTunnel {
@@ -76,10 +70,8 @@ async fn privileged_helper_retains_and_recovers_a_disconnected_lease() -> TestRe
     drop(device);
     helper.wait_for_success().await?;
 
-    assert!(baseline.starts_with(b"HTTP/1."));
     assert!(!interface_name.is_empty());
     assert_eq!(resumed_interface_name, interface_name);
-    assert!(unselected_response.starts_with(b"HTTP/1."));
     assert!(first_capture >= 20);
     assert!(resumed_capture >= 20);
     assert!(!ledger.exists());

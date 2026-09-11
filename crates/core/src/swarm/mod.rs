@@ -226,7 +226,7 @@ impl Swarm {
             ));
         };
 
-        let peer = offer_payload.transaction.signer();
+        let peer = offer_payload.transaction.origin();
         let answer_msg = self
             .transport
             .answer_remote_connection(peer, self.inner_callback()?, &msg)

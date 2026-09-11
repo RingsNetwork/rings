@@ -174,48 +174,6 @@ async fn test_persist_synced_entries_relocates_a_relay_carrier_from_the_predeces
     Ok(())
 }
 
-/// The relocation sender is the authenticated transaction signer: a relay path that names the
-/// receiver's predecessor as its origin is peer-declared and proves nothing.
-#[tokio::test]
-async fn test_sync_entries_handler_ignores_a_forged_relay_origin_for_a_relay_carrier() -> Result<()>
-{
-    let attacker = prepare_node(SecretKey::random()).await;
-    let receiver = prepare_node(SecretKey::random()).await;
-    manually_establish_connection(&attacker.swarm, &receiver.swarm).await;
-    wait_for_msgs([&attacker, &receiver]).await;
-    assert_no_more_msg([&attacker, &receiver]).await;
-    let predecessor: Did = SecretKey::random().address().into();
-    *receiver.dht().lock_predecessor()? = Some(predecessor);
-
-    let inbox = inbox_held_by_a_stranger(receiver.did())?;
-    let sync_msg = SyncEntriesWithSuccessor {
-        purpose: StorageSyncPurpose::OwnershipHandoff,
-        destination: StorageSyncDestination::PhysicalOwner(receiver.did()),
-        data: vec![PlacedEntry::new(inbox.did, inbox.clone())],
-    };
-    let mut context = MessagePayload::new_send(
-        Message::SyncEntriesWithSuccessor(sync_msg.clone()),
-        attacker.swarm.transport.message_signer(),
-        receiver.did(),
-        receiver.did(),
-    )?;
-    context.relay.path = vec![predecessor, attacker.did()];
-
-    let receiver_handler =
-        MessageHandler::new(receiver.swarm.transport.clone(), Arc::new(NoopCallback));
-    receiver_handler.handle(&context, &sync_msg).await?;
-
-    assert_eq!(
-        receiver
-            .dht()
-            .storage
-            .get(&inbox_slot(&inbox).to_string())
-            .await?,
-        None
-    );
-    Ok(())
-}
-
 #[tokio::test]
 async fn test_persist_synced_entries_returns_acks_for_owned_entries() -> Result<()> {
     let receiver = prepare_node(SecretKey::random()).await;
