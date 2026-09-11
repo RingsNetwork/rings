@@ -4,9 +4,13 @@ use std::error::Error;
 use std::f64::consts::PI;
 use std::fmt;
 
+use crate::glyph::GlyphGeometry;
+
 /// A validated construction failure.
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum GeometryError {
+    /// The sole linear module is not finite and positive.
+    InvalidModule,
     /// A rotational count cannot define the required polygons.
     InvalidConstructionCount,
     /// The bore count does not divide the tooth count.
@@ -24,6 +28,7 @@ pub(crate) enum GeometryError {
 impl fmt::Display for GeometryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
+            Self::InvalidModule => "module must be finite and positive",
             Self::InvalidConstructionCount => "teeth and bores must define non-zero polygons",
             Self::IncommensurateBorePhase => "bore count must divide tooth count",
             Self::InvalidRadiusOrder => "gear radii must be strictly ordered",
@@ -71,33 +76,6 @@ pub(crate) struct Point {
     pub(crate) y: f64,
 }
 
-/// The geometric construction of the central R.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct GlyphGeometry {
-    /// Golden ratio inherited from the regular pentagon.
-    pub(crate) golden_ratio: f64,
-    /// Horizontal center of the vertical stem.
-    pub(crate) stem_x: f64,
-    /// Symmetric cap distance above and below the origin.
-    pub(crate) cap: f64,
-    /// Horizontal tangent point of the semicircular bowl.
-    pub(crate) bowl_x: f64,
-    /// Vertical tangent point of the bowl and middle bar.
-    pub(crate) middle_y: f64,
-    /// Radius of the exact semicircular bowl.
-    pub(crate) bowl_radius: f64,
-    /// Start of the pentagon-derived diagonal.
-    pub(crate) leg_start: Point,
-    /// End of the pentagon-derived diagonal.
-    pub(crate) leg_end: Point,
-    /// Uniform glyph stroke.
-    pub(crate) stroke_width: f64,
-    /// Bore whose radial axis determines the diagonal leg.
-    pub(crate) leg_bore_index: u32,
-    /// Diagonal angle aligned with the lower-right bore.
-    pub(crate) leg_angle_degrees: f64,
-}
-
 /// Validated radii, phases, and curves for one mark.
 #[derive(Debug)]
 pub(crate) struct GearModel {
@@ -134,6 +112,9 @@ pub(crate) struct GearModel {
 impl GearModel {
     /// Validates a specification and derives its complete geometry.
     pub(crate) fn new(spec: Spec) -> Result<Self, GeometryError> {
+        if !spec.module.is_finite() || spec.module <= 0.0 {
+            return Err(GeometryError::InvalidModule);
+        }
         if spec.teeth == 0 || spec.hole_count < 2 {
             return Err(GeometryError::InvalidConstructionCount);
         }
@@ -145,7 +126,7 @@ impl GearModel {
         let aperture_radius = 2.0 * f64::from(spec.hole_count) * spec.module;
         let hole_orbit = aperture_radius + 2.0 * spec.module;
         let hole_radius = f64::from(spec.hole_count - 1) * spec.module / f64::from(spec.hole_count);
-        let glyph_stroke_width = aperture_radius / f64::from(spec.hole_count);
+        let glyph_stroke_width = GlyphGeometry::stroke_width_for_aperture(aperture_radius);
         let teeth_per_bore_sector = spec.teeth / spec.hole_count;
         let gear_outline_width = glyph_stroke_width / f64::from(teeth_per_bore_sector);
         let construction_guide_width = gear_outline_width / f64::from(spec.hole_count);
@@ -212,33 +193,9 @@ impl GearModel {
             .map(move |index| Self::point(self.hole_orbit, -PI / 2.0 + f64::from(index) * sector))
     }
 
-    /// Returns the central R from the aperture and pentagonal golden ratio.
+    /// Returns the central R from its nine-part mother square.
     pub(crate) fn glyph(&self) -> GlyphGeometry {
-        let golden_ratio = (1.0 + 5.0_f64.sqrt()) / 2.0;
-        let bore_sector = 360.0 / f64::from(self.spec.hole_count);
-        let leg_bore_index = self.spec.hole_count / 2;
-        let leg_angle_degrees = -90.0 + f64::from(leg_bore_index) * bore_sector;
-        let leg_angle = leg_angle_degrees.to_radians();
-        let cap = self.aperture_radius / golden_ratio;
-        let leg_start = Point { x: 0.0, y: 0.0 };
-        let leg_end = Point {
-            x: cap / leg_angle.tan(),
-            y: cap,
-        };
-
-        GlyphGeometry {
-            golden_ratio,
-            stem_x: -self.aperture_radius / 2.0,
-            cap,
-            bowl_x: 0.0,
-            middle_y: 0.0,
-            bowl_radius: cap / 2.0,
-            leg_start,
-            leg_end,
-            stroke_width: self.aperture_radius / f64::from(self.spec.hole_count),
-            leg_bore_index,
-            leg_angle_degrees,
-        }
+        GlyphGeometry::from_aperture(self.aperture_radius)
     }
 
     /// Returns the number of teeth in each bore sector.
@@ -346,40 +303,14 @@ mod tests {
     }
 
     #[test]
-    fn glyph_bowl_is_tangent_and_leg_aligns_with_lower_right_bore() {
+    fn glyph_stroke_derives_from_a_nine_part_inscribed_square() {
         let model = GearModel::new(Spec::rings());
         assert!(model.is_ok());
         if let Ok(model) = model {
             let glyph = model.glyph();
-            assert!((2.0 * glyph.bowl_radius - (glyph.cap + glyph.middle_y)).abs() < 1e-9);
-            assert!((glyph.cap * glyph.golden_ratio - model.aperture_radius).abs() < 1e-9);
-            assert!((glyph.stem_x + model.aperture_radius / 2.0).abs() < 1e-9);
-            assert!(glyph.bowl_x.abs() < 1e-9);
-            assert!(glyph.middle_y.abs() < 1e-9);
-            assert!(glyph.leg_start.x.abs() < 1e-9 && glyph.leg_start.y.abs() < 1e-9);
-            assert!(
-                (glyph.stroke_width - model.aperture_radius / f64::from(model.spec.hole_count))
-                    .abs()
-                    < 1e-9
-            );
-            assert!((glyph.leg_angle_degrees - 54.0).abs() < 1e-9);
-            let angle = (glyph.leg_end.y - glyph.leg_start.y)
-                .atan2(glyph.leg_end.x - glyph.leg_start.x)
-                .to_degrees();
-            assert!((angle - glyph.leg_angle_degrees).abs() < 1e-9);
-            let mut aligned_bore_found = false;
-            for (index, bore) in (0..model.spec.hole_count).zip(model.holes()) {
-                if index == glyph.leg_bore_index {
-                    let leg_x = glyph.leg_end.x - glyph.leg_start.x;
-                    let leg_y = glyph.leg_end.y - glyph.leg_start.y;
-                    let cross_product = leg_x * bore.y - leg_y * bore.x;
-                    let dot_product = leg_x * bore.x + leg_y * bore.y;
-                    assert!(cross_product.abs() < 1e-9);
-                    assert!(dot_product > 0.0);
-                    aligned_bore_found = true;
-                }
-            }
-            assert!(aligned_bore_found);
+            assert!((2.0 * glyph.square_half - 9.0 * glyph.unit).abs() < 1e-9);
+            assert!((2.0_f64.sqrt() * glyph.square_half - model.aperture_radius).abs() < 1e-9);
+            assert!((glyph.stroke_width - glyph.unit).abs() < 1e-9);
         }
     }
 }

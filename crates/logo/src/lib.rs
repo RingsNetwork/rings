@@ -5,6 +5,7 @@
 //! inputs. Generated files are repository artifacts, never design sources.
 
 mod color;
+mod glyph;
 mod model;
 mod svg;
 

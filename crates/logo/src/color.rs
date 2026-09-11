@@ -77,12 +77,12 @@ impl Palette {
     fn solve(model: &GearModel, ground: Ground) -> Result<Self, ColorError> {
         let teeth = f64::from(model.spec.teeth);
         let holes = f64::from(model.spec.hole_count);
-        let golden_ratio = model.glyph().golden_ratio;
+        let pentagonal_ratio = (1.0 + 5.0_f64.sqrt()) / 2.0;
         let rust_hue = 360.0 / (2.0 * holes);
         let signal_hue = rust_hue + 180.0;
         let accent_chroma = (holes - 1.0) / teeth;
         let guide_chroma = 1.0 / teeth;
-        let neutral_chroma = guide_chroma / golden_ratio.powi(2);
+        let neutral_chroma = guide_chroma / pentagonal_ratio.powi(2);
 
         Ok(Self {
             primary: solve_paint("primary", ground, neutral_chroma, rust_hue, 7.0)?,

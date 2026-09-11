@@ -22,19 +22,39 @@ cargo run -p rings-logo -- check
   exactly six teeth. Aperture, bore orbit, bore radius, flank sample count, and
   canvas margin derive from the tooth count, bore count, and `m`; they are not
   additional fitted constants.
-- The central R is derived only from the aperture radius `a`, the pentagon's
-  golden ratio `phi`, and its 72-degree sector: height `a/phi`, stem axis
-  `-a/2`, semicircular bowl radius `a/(2phi)`, stroke `a/5`, and leg angle
-  `-90deg + 2 * 72deg = 54deg`, aligned with the lower-right bore. Its final
-  leg coordinate is the resulting line intersection, not a selected point.
+- The central R follows Luca Pacioli's construction grammar: a mother square of
+  side `L`, divided into nine modules `u = L/9`; a dominant stroke `u`; a fine
+  stroke `u/2 = L/18`; R derived from B; paired circular contours; and bracketed
+  serifs located by tangent circles. This is a modular, high-contrast serif
+  letter rather than a constant-width stroked symbol.
+- Pacioli's surviving plate does not specify enough measurements to reproduce
+  every contour uniquely. The generator therefore names its deterministic
+  choices the **Rings completion**: the mother square is inscribed in the
+  aperture (`L = sqrt(2)a`); stem edges are `-19u/6` and `-13u/6`; the paired
+  bowl circles have radius `5u/2` and centers `(-u/2,-2u)` and
+  `(-3u/2,-3u/2)`; each serif circle has radius `2u/3`.
+- The leg is not assigned an arbitrary angle. Its outer edge is the exact
+  quarter circle from the square center to the lower-right corner, centered at
+  the right midpoint. Its inner edge is two circular arcs of radii `3u/4` and
+  `u/4`, joined by their calculated common tangent. The root has width `u` and
+  the two contours resolve at the same corner.
 - Stroke hierarchy is `30:5:1`, directly matching teeth, bores, and one
-  construction unit. With `w_R = a/5 = 20` and six teeth per bore sector, the
-  gear and bore outlines are `w_G = w_R/6 = 10/3`; construction guides are
-  `w_C = w_G/5 = 2/3`.
+  construction unit. With `w_R = u = sqrt(2)a/9` and six teeth per bore sector,
+  the gear and bore outlines are `w_G = w_R/6`; construction guides are
+  `w_C = w_G/5`.
 - Palette hues are derived from the pentagon: rust is `72deg/2 = 36deg`; signal
   cyan is its 180-degree complement. Chroma derives from tooth and bore counts.
   Lightness is solved on a `1/10000` OKLCH grid against WCAG contrast targets of
   7:1, 4.5:1, and 3:1 on exact white or black.
+
+The historical interpretation is based on Pacioli's 1509 alphabet plate and
+modern geometric analysis of its modular construction. The repository makes a
+strict distinction between that evidence and the Rings completion recorded in
+`rings-spec.json`; changing a completion parameter changes generated assets and
+their invariant tests.
+
+- [Pacioli, *De divina proportione* (1509), Metropolitan Museum of Art](https://www.metmuseum.org/art/collection/search/336656)
+- [Geometric analysis of Pacioli's alphabet, Politecnico di Milano](https://re.public.polimi.it/handle/11311/1061101)
 
 The gear motif originates in the
 [Rust logo artwork](https://github.com/rust-lang/rust-artwork/tree/main/logo),

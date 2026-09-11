@@ -20,20 +20,41 @@
     "bore_orbit": "aperture_radius+2*module",
     "bore_radius": "(bore_count-1)/bore_count*module",
     "flank_samples": "teeth/bore_count*(bore_count-1)",
-    "viewbox_radius": "outer_radius+2*bore_radius"
+    "viewbox_radius": "outer_radius+2*bore_radius",
+    "gear_outline_width": "r_stroke/teeth_per_bore_sector",
+    "construction_guide_width": "gear_outline_width/bore_count"
+  },
+  "glyph": {
+    "mother_square_side": 141.421356,
+    "unit": 15.713484,
+    "dominant_stroke": 15.713484,
+    "fine_stroke": 7.856742,
+    "bowl_radius": 39.28371,
+    "serif_circle_radius": 10.475656,
+    "leg_root_circle_radius": 11.785113,
+    "leg_tip_circle_radius": 3.928371,
+    "leg_root_tangent": [8.264571, 20.917614],
+    "leg_tip_tangent": [68.227707, 69.826474]
   },
   "glyph_rules": {
-    "golden_ratio": 1.618034,
-    "vertical_extent": "aperture_radius/golden_ratio",
-    "stem_axis": "-aperture_radius/2",
-    "bowl_radius": "aperture_radius/(2*golden_ratio)",
-    "stroke_width": "aperture_radius/bore_count",
-    "gear_outline_width": "stroke_width/teeth_per_bore_sector",
-    "construction_guide_width": "gear_outline_width/bore_count",
-    "stroke_hierarchy": "teeth:bore_count:1",
-    "leg_bore_index": 2,
-    "leg_angle": "-90+leg_bore_index*(360/bore_count)",
-    "leg_angle_degrees": 54
+    "historical_base": {
+      "method": "R derived from B",
+      "mother_square": "side L divided into nine modules",
+      "dominant_stroke": "u=L/9",
+      "fine_stroke": "u/2=L/18",
+      "b_round": "paired circular contours; lower diameter 5L/9",
+      "serifs": "brackets constructed by tangent circles"
+    },
+    "rings_completion": {
+      "scope": "parameters not fully specified by the surviving Pacioli plate",
+      "square_binding": "L=sqrt(2)*aperture_radius",
+      "stem_edges": "left=-19u/6; right=-13u/6",
+      "bowl_outer": "center=(-u/2,-2u); radius=5u/2",
+      "bowl_inner": "center=(-3u/2,-3u/2); radius=5u/2",
+      "serif_circle_radius": "2u/3",
+      "leg_outer": "quarter circle centered at the square right midpoint",
+      "leg_inner": "arcs of radii 3u/4 and u/4 joined by their exact common tangent"
+    }
   },
   "color_rules": {
     "space": "OKLCH converted to quantized sRGB",
@@ -42,7 +63,7 @@
     "signal_hue": "rust_hue+180=216deg",
     "accent_chroma": "(bore_count-1)/teeth",
     "guide_chroma": "1/teeth",
-    "neutral_chroma": "guide_chroma/golden_ratio^2"
+    "neutral_chroma": "guide_chroma/pentagonal_golden_ratio^2"
   },
   "palettes": {
     "light_background": {
