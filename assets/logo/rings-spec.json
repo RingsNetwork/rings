@@ -28,8 +28,9 @@
     "stem_axis": "-aperture_radius/2",
     "bowl_radius": "aperture_radius/(2*golden_ratio)",
     "stroke_width": "aperture_radius/bore_count",
-    "gear_outline_width": "stroke_width/(bore_count-1)",
-    "glyph_to_gear_stroke_ratio": "bore_count-1",
+    "gear_outline_width": "stroke_width/teeth_per_bore_sector",
+    "construction_guide_width": "gear_outline_width/bore_count",
+    "stroke_hierarchy": "teeth:bore_count:1",
     "leg_bore_index": 2,
     "leg_angle": "-90+leg_bore_index*(360/bore_count)",
     "leg_angle_degrees": 54

@@ -27,10 +27,10 @@ cargo run -p rings-logo -- check
   `-a/2`, semicircular bowl radius `a/(2phi)`, stroke `a/5`, and leg angle
   `-90deg + 2 * 72deg = 54deg`, aligned with the lower-right bore. Its final
   leg coordinate is the resulting line intersection, not a selected point.
-- The gear and bore outlines have width `w_R/(5-1) = w_R/4`, where
-  `w_R = a/5` is the R stroke. The `4:1` hierarchy comes from the four intervals
-  between five pentagonal vertices; construction guides remain a separate thin
-  layer.
+- Stroke hierarchy is `30:5:1`, directly matching teeth, bores, and one
+  construction unit. With `w_R = a/5 = 20` and six teeth per bore sector, the
+  gear and bore outlines are `w_G = w_R/6 = 10/3`; construction guides are
+  `w_C = w_G/5 = 2/3`.
 - Palette hues are derived from the pentagon: rust is `72deg/2 = 36deg`; signal
   cyan is its 180-degree complement. Chroma derives from tooth and bore counts.
   Lightness is solved on a `1/10000` OKLCH grid against WCAG contrast targets of

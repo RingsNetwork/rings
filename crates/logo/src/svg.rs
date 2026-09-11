@@ -123,7 +123,7 @@ fn geometry_fragment(model: &GearModel) -> String {
     let _ = writeln!(
         output,
         "<g class=\"guide\" fill=\"none\" stroke-width=\"{}\">",
-        format_number(module / (2.0 * holes)),
+        format_number(model.construction_guide_width),
     );
     let _ = writeln!(
         output,
@@ -322,8 +322,8 @@ fn metadata(model: &GearModel) -> String {
     format!(
         "module={};teeth={};pressure-angle={}deg;pitch-radius={};base-radius={};\
          outer-radius={};root-radius={};aperture-radius={};bore-count={};\
-         bore-orbit={};bore-radius={};gear-stroke={};r-stroke={};r-golden-ratio={};\
-         r-leg-bore={};r-leg-angle={}deg",
+         bore-orbit={};bore-radius={};r-stroke={};gear-stroke={};guide-stroke={};\
+         stroke-hierarchy={}:{}:1;r-golden-ratio={};r-leg-bore={};r-leg-angle={}deg",
         format_number(model.spec.module),
         model.spec.teeth,
         format_number(model.spec.pressure_angle_degrees),
@@ -335,8 +335,11 @@ fn metadata(model: &GearModel) -> String {
         model.spec.hole_count,
         format_number(model.hole_orbit),
         format_number(model.hole_radius),
-        format_number(model.gear_outline_width),
         format_number(model.glyph().stroke_width),
+        format_number(model.gear_outline_width),
+        format_number(model.construction_guide_width),
+        model.spec.teeth,
+        model.spec.hole_count,
         format_number(model.glyph().golden_ratio),
         model.glyph().leg_bore_index,
         format_number(model.glyph().leg_angle_degrees),
@@ -373,8 +376,9 @@ pub(crate) fn render_specification(model: &GearModel, light: &Palette, dark: &Pa
             "    \"stroke_width\": \"aperture_radius/bore_count\",",
             concat!(
                 "    \"stroke_width\": \"aperture_radius/bore_count\",\n",
-                "    \"gear_outline_width\": \"stroke_width/(bore_count-1)\",\n",
-                "    \"glyph_to_gear_stroke_ratio\": \"bore_count-1\",",
+                "    \"gear_outline_width\": \"stroke_width/teeth_per_bore_sector\",\n",
+                "    \"construction_guide_width\": \"gear_outline_width/bore_count\",\n",
+                "    \"stroke_hierarchy\": \"teeth:bore_count:1\",",
             ),
         )
         .replace(

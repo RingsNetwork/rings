@@ -119,6 +119,8 @@ pub(crate) struct GearModel {
     pub(crate) hole_radius: f64,
     /// Mechanical outline width, derived from the central glyph stroke.
     pub(crate) gear_outline_width: f64,
+    /// Construction guide width, derived from the mechanical outline.
+    pub(crate) construction_guide_width: f64,
     /// Angular pitch between adjacent teeth.
     pub(crate) tooth_pitch: f64,
     /// Rotation from the tooth center to an involute base point.
@@ -144,7 +146,9 @@ impl GearModel {
         let hole_orbit = aperture_radius + 2.0 * spec.module;
         let hole_radius = f64::from(spec.hole_count - 1) * spec.module / f64::from(spec.hole_count);
         let glyph_stroke_width = aperture_radius / f64::from(spec.hole_count);
-        let gear_outline_width = glyph_stroke_width / f64::from(spec.hole_count - 1);
+        let teeth_per_bore_sector = spec.teeth / spec.hole_count;
+        let gear_outline_width = glyph_stroke_width / f64::from(teeth_per_bore_sector);
+        let construction_guide_width = gear_outline_width / f64::from(spec.hole_count);
         let flank_samples = (spec.teeth / spec.hole_count) * (spec.hole_count - 1);
 
         validate(
@@ -177,6 +181,7 @@ impl GearModel {
             hole_orbit,
             hole_radius,
             gear_outline_width,
+            construction_guide_width,
             tooth_pitch,
             flank_rotation,
             outer_involute_parameter,
@@ -301,13 +306,41 @@ mod tests {
                 (model.hole_orbit - model.aperture_radius - 2.0 * model.spec.module).abs() < 1e-9
             );
             assert!((model.hole_radius - (bores - 1.0) * model.spec.module / bores).abs() < 1e-9);
-            assert!(
-                (model.gear_outline_width - model.glyph().stroke_width / (bores - 1.0)).abs()
-                    < 1e-9
-            );
             assert_eq!(
                 model.flank_samples,
                 model.teeth_per_bore_sector() * (model.spec.hole_count - 1)
+            );
+        }
+    }
+
+    #[test]
+    fn stroke_hierarchy_matches_tooth_and_bore_counts() {
+        let model = GearModel::new(Spec::rings());
+        assert!(model.is_ok());
+        if let Ok(model) = model {
+            let glyph = model.glyph();
+            assert!(
+                (model.gear_outline_width
+                    - glyph.stroke_width / f64::from(model.teeth_per_bore_sector()))
+                .abs()
+                    < 1e-9
+            );
+            assert!(
+                (model.construction_guide_width
+                    - model.gear_outline_width / f64::from(model.spec.hole_count))
+                .abs()
+                    < 1e-9
+            );
+            assert!(
+                (glyph.stroke_width / model.construction_guide_width - f64::from(model.spec.teeth))
+                    .abs()
+                    < 1e-9
+            );
+            assert!(
+                (model.gear_outline_width / model.construction_guide_width
+                    - f64::from(model.spec.hole_count))
+                .abs()
+                    < 1e-9
             );
         }
     }
@@ -323,12 +356,6 @@ mod tests {
             assert!((glyph.stem_x + model.aperture_radius / 2.0).abs() < 1e-9);
             assert!(glyph.bowl_x.abs() < 1e-9);
             assert!(glyph.middle_y.abs() < 1e-9);
-            assert!(
-                (glyph.stroke_width / model.gear_outline_width
-                    - f64::from(model.spec.hole_count - 1))
-                .abs()
-                    < 1e-9
-            );
             assert!(glyph.leg_start.x.abs() < 1e-9 && glyph.leg_start.y.abs() < 1e-9);
             assert!(
                 (glyph.stroke_width - model.aperture_radius / f64::from(model.spec.hole_count))

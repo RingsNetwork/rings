@@ -1,11 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="-176 -176 352 352" role="img" aria-labelledby="title desc">
 <title id="title">Rings geometric construction mark, adaptive background</title>
 <desc id="desc">A thirty-tooth involute gear, five bores on a regular pentagon, construction circles, and a pentagon-derived geometric R.</desc>
-<metadata>module=10;teeth=30;pressure-angle=20deg;pitch-radius=150;base-radius=140.953893;outer-radius=160;root-radius=137.5;aperture-radius=100;bore-count=5;bore-orbit=120;bore-radius=8;gear-stroke=5;r-stroke=20;r-golden-ratio=1.618034;r-leg-bore=2;r-leg-angle=54deg</metadata>
+<metadata>module=10;teeth=30;pressure-angle=20deg;pitch-radius=150;base-radius=140.953893;outer-radius=160;root-radius=137.5;aperture-radius=100;bore-count=5;bore-orbit=120;bore-radius=8;r-stroke=20;gear-stroke=3.333333;guide-stroke=0.666667;stroke-hierarchy=30:5:1;r-golden-ratio=1.618034;r-leg-bore=2;r-leg-angle=54deg</metadata>
 <style>.primary{stroke:#605755}.accent{stroke:#bc593f}.signal{fill:#0081a1}.guide{stroke:#7d99a1}
 @media(prefers-color-scheme:dark){.primary{stroke:#9d9390}.accent{stroke:#ba573d}.signal{fill:#007f9e}.guide{stroke:#435e65}}</style>
 <defs><path id="tooth" d="M -9.241863,-137.189059 L -9.474012,-140.635142 L -9.475858,-140.670393 L -9.479294,-140.776236 L -9.481159,-140.952723 L -9.478293,-141.199802 L -9.467538,-141.517315 L -9.44574,-141.904996 L -9.409757,-142.362476 L -9.356455,-142.889277 L -9.282719,-143.48482 L -9.185448,-144.148418 L -9.061566,-144.879281 L -8.908018,-145.676516 L -8.721779,-146.539125 L -8.499853,-147.466012 L -8.239279,-148.455976 L -7.937131,-149.507717 L -7.590524,-150.619837 L -7.196614,-151.790839 L -6.752603,-153.019129 L -6.255743,-154.303018 L -5.703336,-155.640722 L -5.092736,-157.030367 L -4.421358,-158.469986 L -3.686673,-159.957521 A 160 160 0 0 1 3.686673,-159.957521 L 4.421358,-158.469986 L 5.092736,-157.030367 L 5.703336,-155.640722 L 6.255743,-154.303018 L 6.752603,-153.019129 L 7.196614,-151.790839 L 7.590524,-150.619837 L 7.937131,-149.507717 L 8.239279,-148.455976 L 8.499853,-147.466012 L 8.721779,-146.539125 L 8.908018,-145.676516 L 9.061566,-144.879281 L 9.185448,-144.148418 L 9.282719,-143.48482 L 9.356455,-142.889277 L 9.409757,-142.362476 L 9.44574,-141.904996 L 9.467538,-141.517315 L 9.478293,-141.199802 L 9.481159,-140.952723 L 9.479294,-140.776236 L 9.475858,-140.670393 L 9.474012,-140.635142 L 9.241863,-137.189059 A 137.5 137.5 0 0 1 19.483303,-136.112641"/></defs>
-<g class="guide" fill="none" stroke-width="1">
+<g class="guide" fill="none" stroke-width="0.666667">
   <path d="M -170 0 H 170 M 0 -170 V 170"/>
   <circle r="160"/>
   <circle r="150" stroke-dasharray="4 5"/>
@@ -16,7 +16,7 @@
   <polygon points="0,-120 114.126782,-37.082039 70.53423,97.082039 -70.53423,97.082039 -114.126782,-37.082039"/>
   <path d="M 0 0 L 0,-160"/>
 </g>
-<g class="primary" fill="none" stroke-width="5" stroke-linecap="square" stroke-linejoin="miter">
+<g class="primary" fill="none" stroke-width="3.333333" stroke-linecap="square" stroke-linejoin="miter">
   <use href="#tooth" transform="rotate(0)"/>
   <use href="#tooth" transform="rotate(12)"/>
   <use href="#tooth" transform="rotate(24)"/>
@@ -48,7 +48,7 @@
   <use href="#tooth" transform="rotate(336)"/>
   <use href="#tooth" transform="rotate(348)"/>
 </g>
-<g class="accent" fill="none" stroke-width="5" stroke-linecap="butt" stroke-linejoin="miter">
+<g class="accent" fill="none" stroke-width="3.333333" stroke-linecap="butt" stroke-linejoin="miter">
   <circle cx="0" cy="-120" r="8"/>
   <circle cx="114.126782" cy="-37.082039" r="8"/>
   <circle cx="70.53423" cy="97.082039" r="8"/>
