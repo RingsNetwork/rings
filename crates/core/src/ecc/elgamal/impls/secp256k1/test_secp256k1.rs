@@ -331,8 +331,48 @@ fn test_aead_rejects_empty_wrapped_key() {
 
     assert!(matches!(
         decrypt_aead(&sealed, b"aad", &key),
-        Err(Error::MessageDecryptionFailed(_))
+        Err(Error::AeadWrappedKeyBlockCount {
+            expected: AEAD_WRAPPED_KEY_BLOCKS,
+            actual: 0,
+        })
     ));
+}
+
+#[test]
+fn test_aead_rejects_oversized_wrapped_key_before_curve_conversion() {
+    let key =
+        SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0")
+            .unwrap();
+    let invalid_point = PublicKey([0u8; 33]);
+    let actual = AEAD_WRAPPED_KEY_BLOCKS + 1;
+    let sealed = AeadCiphertext {
+        version: AEAD_VERSION,
+        encrypted_key: vec![(invalid_point, invalid_point); actual],
+        nonce: [0u8; AEAD_NONCE_LEN],
+        ciphertext: Vec::new(),
+    };
+
+    assert!(matches!(
+        decrypt_aead(&sealed, b"aad", &key),
+        Err(Error::AeadWrappedKeyBlockCount {
+            expected: AEAD_WRAPPED_KEY_BLOCKS,
+            actual: observed,
+        }) if observed == actual
+    ));
+}
+
+#[test]
+fn test_aead_decode_rejects_oversized_wrapped_key() {
+    let invalid_point = PublicKey([0u8; 33]);
+    let sealed = AeadCiphertext {
+        version: AEAD_VERSION,
+        encrypted_key: vec![(invalid_point, invalid_point); AEAD_WRAPPED_KEY_BLOCKS + 1],
+        nonce: [0u8; AEAD_NONCE_LEN],
+        ciphertext: Vec::new(),
+    };
+    let encoded = rings_codec::serialize(&sealed).expect("encode invalid envelope fixture");
+
+    assert!(rings_codec::deserialize::<AeadCiphertext>(&encoded).is_err());
 }
 
 #[test]
