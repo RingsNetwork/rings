@@ -1,6 +1,6 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/logo/rings_network_red.png">
-  <img alt="Rings Network" src="assets/logo/rings_network_black.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="assets/logo/rings-white.svg">
+  <img alt="Rings Network" src="assets/logo/rings.svg" width="128" height="128">
 </picture>
 
 Rings Network
