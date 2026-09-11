@@ -8,6 +8,7 @@ pub struct ProcessorBuilder {
     pub(in crate::processor) external_address: Option<String>,
     pub(in crate::processor) webrtc_udp_port_range: Option<WebrtcUdpPortRange>,
     pub(in crate::processor) session_sk: SessionSk,
+    pub(in crate::processor) onion_exit_epoch: OnionExitEpoch,
     pub(in crate::processor) storage: Option<EntryStorage>,
     pub(in crate::processor) measure: Option<Arc<PeriodicMeasure>>,
     pub(in crate::processor) stabilize_interval: Duration,
@@ -60,6 +61,7 @@ impl ProcessorBuilder {
             external_address: config.external_address.clone(),
             webrtc_udp_port_range: config.webrtc_udp_port_range()?,
             session_sk: config.session_sk.clone(),
+            onion_exit_epoch: OnionExitEpoch::random(),
             storage: None,
             measure: None,
             stabilize_interval: config.stabilize_interval,
@@ -186,6 +188,7 @@ impl ProcessorBuilder {
                 self.online_node_type,
                 self.onion_exit_services,
                 self.onion_exit_policy,
+                self.onion_exit_epoch,
             );
             onion_exit_registration.validate_enabled_schedule()?;
             registration_tasks.push(Arc::new(onion_exit_registration));
@@ -215,6 +218,7 @@ impl ProcessorBuilder {
         Ok(Processor {
             swarm,
             session_sk,
+            onion_exit_epoch: self.onion_exit_epoch,
             stabilize_interval: self.stabilize_interval,
             online_node_registration,
             measure,

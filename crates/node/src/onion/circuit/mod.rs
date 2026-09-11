@@ -14,7 +14,7 @@ mod reducer;
 mod send_outbox;
 mod shell;
 
-#[cfg(test)]
+#[cfg(all(test, rings_native))]
 mod tests;
 
 use bytes::Bytes;
@@ -355,6 +355,7 @@ pub(super) enum OnionForwardLayer {
         inner: AeadCiphertext,
     },
     Exit {
+        process_epoch: super::OnionExitEpoch,
         client: OnionClientReturn,
         return_session_public_key: PublicKey<33>,
         expires_at_ms: u128,

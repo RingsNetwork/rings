@@ -13,6 +13,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitDescriptorBody;
+use crate::onion::OnionExitEpoch;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionExitService;
 use crate::onion::OnionExitTarget;
@@ -22,6 +23,9 @@ use crate::onion::ONION_RELAY_CAPABILITY;
 use crate::online::OnlineNodeDescriptor;
 use crate::online::OnlineNodeDescriptorBody;
 use crate::online::OnlineNodeType;
+
+/// Stable non-zero process epoch used only to make signed route fixtures deterministic.
+const TEST_EXIT_PROCESS_EPOCH: OnionExitEpoch = OnionExitEpoch::new([29; 16]);
 
 fn service(name: &str) -> OnionExitService {
     OnionExitService::new(name, OnionExitTransport::Tcp).expect("valid test service")
@@ -56,6 +60,7 @@ fn signed_exit_for_session_network_at(
                 .account_verification_pubkey()
                 .map_err(Error::CoreError)?,
             session_public_key: session_sk.session_public_key(),
+            process_epoch: TEST_EXIT_PROCESS_EPOCH,
             node_type: OnlineNodeType::Native,
             network_id,
             service: service("web"),

@@ -57,6 +57,7 @@ use crate::onion::proxy::OnionProxyTarget;
 use crate::onion::proxy::ONION_PROXY_HTTPS_SERVICE;
 use crate::onion::validate_onion_exit_registration_timing;
 use crate::onion::OnionExitDescriptor;
+use crate::onion::OnionExitEpoch;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionExitRegistration;
 use crate::onion::OnionExitService;
@@ -138,6 +139,8 @@ pub struct Processor {
     pub swarm: Arc<Swarm>,
     /// Same session key held by the swarm transport; kept here for node-layer descriptor signing.
     session_sk: SessionSk,
+    /// Fresh process epoch shared by exit advertisement and exit-layer admission.
+    onion_exit_epoch: OnionExitEpoch,
     stabilize_interval: Duration,
     online_node_registration: OnlineNodeRegistration,
     measure: Option<Arc<PeriodicMeasure>>,
@@ -154,6 +157,10 @@ impl Processor {
 
     pub(crate) fn session_sk(&self) -> &SessionSk {
         &self.session_sk
+    }
+
+    pub(crate) const fn onion_exit_epoch(&self) -> OnionExitEpoch {
+        self.onion_exit_epoch
     }
 
     #[cfg(all(feature = "browser", target_family = "wasm"))]

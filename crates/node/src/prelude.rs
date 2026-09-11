@@ -35,7 +35,6 @@ pub use crate::onion::proxy::ONION_PROXY_HTTPS_SERVICE;
 pub use crate::onion::proxy::ONION_PROXY_TCP_SERVICE;
 pub use crate::onion::OnionExitDescriptor;
 pub use crate::onion::OnionExitPolicy;
-pub use crate::onion::OnionExitRegistration;
 pub use crate::onion::OnionExitService;
 pub use crate::onion::OnionExitTransport;
 pub use crate::onion::OnionRoute;

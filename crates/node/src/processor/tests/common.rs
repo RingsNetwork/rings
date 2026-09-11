@@ -306,6 +306,7 @@ pub(super) fn onion_exit_descriptor_for_processor_with_node_type_service(
                 .account_verification_pubkey()
                 .map_err(Error::CoreError)?,
             session_public_key: processor.session_sk.session_public_key(),
+            process_epoch: processor.onion_exit_epoch,
             node_type,
             network_id: processor.swarm.network_id(),
             service,

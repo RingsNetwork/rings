@@ -67,12 +67,12 @@ pub struct OnionCircuitState {
 }
 
 impl OnionCircuitState {
-    #[cfg(test)]
+    #[cfg(all(test, rings_native))]
     pub(super) fn relay_return_count(&self) -> usize {
         self.relay_returns.len()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, rings_native))]
     pub(super) fn shares_return_table_with(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.relay_returns, &other.relay_returns)
     }
@@ -286,6 +286,7 @@ impl OnionCircuitReducer {
                 })
             }
             OnionForwardLayer::Exit {
+                process_epoch,
                 client,
                 return_session_public_key,
                 expires_at_ms,
@@ -293,8 +294,10 @@ impl OnionCircuitReducer {
                 forward_sequence,
                 payload,
             } => {
-                if !self.capabilities.permits_exit_layer() {
-                    return Err(Error::NoPermission);
+                if !self.capabilities.permits_exit_epoch(process_epoch) {
+                    return Err(Error::OnionRouteError(
+                        OnionRouteError::ForwardEpochMismatch,
+                    ));
                 }
                 // Invariant: every accepted layer expires while its replay witness is still live.
                 // The upper bound also prevents a malicious client from extending authenticated

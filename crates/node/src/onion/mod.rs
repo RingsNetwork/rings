@@ -74,10 +74,26 @@ pub use target::OnionProxyTargetError;
 /// DHT topic used for application-layer onion exit descriptors.
 pub const ONION_EXITS_TOPIC: &str = "onion_exits";
 
-pub(crate) const ONION_EXIT_DESCRIPTOR_SCHEMA_VERSION: u16 = 2;
+pub(crate) const ONION_EXIT_DESCRIPTOR_SCHEMA_VERSION: u16 = 3;
 
 /// Capability label for nodes willing to relay onion cells.
 pub const ONION_RELAY_CAPABILITY: &str = "onion-relay";
+
+/// Random process epoch that invalidates encrypted exit layers after an exit restarts.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct OnionExitEpoch([u8; 16]);
+
+impl OnionExitEpoch {
+    /// Build an exit epoch from explicit bytes.
+    pub const fn new(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
+    /// Generate a fresh exit epoch for one process lifetime.
+    pub fn random() -> Self {
+        Self(rand::random())
+    }
+}
 
 const DEFAULT_ONION_EXIT_HEARTBEAT_INTERVAL_SECS: u64 = 30;
 const DEFAULT_ONION_EXIT_TTL_SECS: u64 = 90;
@@ -430,6 +446,8 @@ pub struct OnionExitDescriptorBody {
     pub public_key: VerificationPublicKey,
     /// Session public key used for encrypted onion exit frames.
     pub session_public_key: PublicKey<33>,
+    /// Random process epoch bound into every encrypted exit layer.
+    pub process_epoch: OnionExitEpoch,
     /// Runtime family of this exit node.
     pub node_type: OnlineNodeType,
     /// Network identifier.
@@ -455,6 +473,7 @@ impl OnionExitDescriptorBody {
             did: self.did,
             public_key: &self.public_key,
             session_public_key: &self.session_public_key,
+            process_epoch: self.process_epoch,
             node_type: &self.node_type,
             network_id: self.network_id,
             service: &self.service,
@@ -498,6 +517,7 @@ impl SignedDescriptorBody for OnionExitDescriptorBody {
             did: self.did,
             public_key: self.public_key,
             session_public_key: self.session_public_key,
+            process_epoch: self.process_epoch,
             node_type: self.node_type,
             network_id: self.network_id,
             service: self.service,
@@ -517,6 +537,7 @@ struct OnionExitDescriptorBodyRef<'a> {
     did: Did,
     public_key: &'a VerificationPublicKey,
     session_public_key: &'a PublicKey<33>,
+    process_epoch: OnionExitEpoch,
     node_type: &'a OnlineNodeType,
     network_id: u32,
     service: &'a OnionExitService,
@@ -544,6 +565,8 @@ pub struct OnionExitDescriptor {
     pub public_key: VerificationPublicKey,
     /// Session public key used for encrypted onion exit frames.
     pub session_public_key: PublicKey<33>,
+    /// Random process epoch bound into every encrypted exit layer.
+    pub process_epoch: OnionExitEpoch,
     /// Runtime family of this exit node.
     pub node_type: OnlineNodeType,
     /// Network identifier.
@@ -583,6 +606,7 @@ impl OnionExitDescriptor {
             did,
             public_key,
             session_public_key,
+            process_epoch,
             node_type,
             network_id,
             service,
@@ -599,6 +623,7 @@ impl OnionExitDescriptor {
             did: *did,
             public_key,
             session_public_key,
+            process_epoch: *process_epoch,
             node_type,
             network_id: *network_id,
             service,
@@ -754,10 +779,11 @@ impl OnionExitDescriptorDecodeReport {
 
 /// Periodic node-layer registration for onion exit policy.
 #[derive(Clone, Debug)]
-pub struct OnionExitRegistration {
+pub(crate) struct OnionExitRegistration {
     heartbeat_interval: Duration,
     ttl: Duration,
     node_type: OnlineNodeType,
+    process_epoch: OnionExitEpoch,
     started_at_ms: u128,
     services: Vec<OnionExitService>,
     policy: OnionExitPolicy,
@@ -765,18 +791,19 @@ pub struct OnionExitRegistration {
 }
 
 impl OnionExitRegistration {
-    /// Create an onion-exit registration task.
-    pub fn new(
+    pub(crate) fn new(
         heartbeat_interval: Duration,
         ttl: Duration,
         node_type: OnlineNodeType,
         services: Vec<OnionExitService>,
         policy: OnionExitPolicy,
+        process_epoch: OnionExitEpoch,
     ) -> Self {
         Self {
             heartbeat_interval,
             ttl,
             node_type,
+            process_epoch,
             started_at_ms: get_epoch_ms(),
             services,
             policy,
@@ -819,6 +846,7 @@ impl OnionExitRegistration {
                 did: context.did(),
                 public_key: context.account_verification_pubkey()?,
                 session_public_key: context.session_sk().session_public_key(),
+                process_epoch: self.process_epoch,
                 node_type: self.node_type.clone(),
                 network_id: context.network_id(),
                 service,

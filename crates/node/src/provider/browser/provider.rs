@@ -895,7 +895,7 @@ impl Provider {
                 }
                 let capabilities = OnionCircuitCapabilities::from_registration(
                     self.processor.advertise_onion_relay(),
-                    allow_exit,
+                    allow_exit.then(|| self.processor.onion_exit_epoch()),
                 );
                 self.register_protocol(
                     OnionCircuitProtocol::new(capabilities),
@@ -911,7 +911,7 @@ impl Provider {
             if registered {
                 let capabilities = OnionCircuitCapabilities::from_registration(
                     self.processor.advertise_onion_relay(),
-                    true,
+                    Some(self.processor.onion_exit_epoch()),
                 );
                 self.extensions().replace(
                     OnionCircuitProtocol::new(capabilities),

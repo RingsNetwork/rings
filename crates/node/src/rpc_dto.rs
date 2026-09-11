@@ -186,6 +186,7 @@ pub(crate) fn onion_exit_descriptor_info(
         did: descriptor.did.to_string(),
         public_key: json_value(descriptor.public_key)?,
         session_public_key: json_value(descriptor.session_public_key)?,
+        process_epoch: json_value(descriptor.process_epoch)?,
         node_type: online_node_type_info(descriptor.node_type),
         network_id: descriptor.network_id,
         services: vec![onion_exit_service_info(descriptor.service)],
@@ -248,6 +249,7 @@ pub(crate) fn onion_exit_descriptors_from_info(
     let did = did_from_string(descriptor.did.as_str())?;
     let public_key = from_json_value::<VerificationPublicKey>(descriptor.public_key)?;
     let session_public_key = from_json_value::<PublicKey<33>>(descriptor.session_public_key)?;
+    let process_epoch = from_json_value::<crate::onion::OnionExitEpoch>(descriptor.process_epoch)?;
     let node_type = online_node_type_from_info(descriptor.node_type);
     let policy = onion_exit_policy_from_info(descriptor.policy)?;
     let signature = from_json_value::<MessageVerification>(descriptor.signature)?;
@@ -267,6 +269,7 @@ pub(crate) fn onion_exit_descriptors_from_info(
             did,
             public_key: public_key.clone(),
             session_public_key,
+            process_epoch,
             node_type: node_type.clone(),
             network_id: descriptor.network_id,
             service,
