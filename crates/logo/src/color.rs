@@ -188,7 +188,8 @@ fn contrast_ratio(first: f64, second: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::Palette;
-    use crate::model::{GearModel, Spec};
+    use crate::model::GearModel;
+    use crate::model::Spec;
 
     #[test]
     fn every_role_meets_its_contrast_constraint() {

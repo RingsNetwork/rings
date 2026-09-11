@@ -25,8 +25,12 @@ cargo run -p rings-logo -- check
 - The central R is derived only from the aperture radius `a`, the pentagon's
   golden ratio `phi`, and its 72-degree sector: height `a/phi`, stem axis
   `-a/2`, semicircular bowl radius `a/(2phi)`, stroke `a/5`, and leg angle
-  `3/4 * 72deg = 54deg`. Its final leg coordinate is the resulting line
-  intersection, not a selected point.
+  `-90deg + 2 * 72deg = 54deg`, aligned with the lower-right bore. Its final
+  leg coordinate is the resulting line intersection, not a selected point.
+- The gear and bore outlines have width `w_R/(5-1) = w_R/4`, where
+  `w_R = a/5` is the R stroke. The `4:1` hierarchy comes from the four intervals
+  between five pentagonal vertices; construction guides remain a separate thin
+  layer.
 - Palette hues are derived from the pentagon: rust is `72deg/2 = 36deg`; signal
   cyan is its 180-degree complement. Chroma derives from tooth and bore counts.
   Lightness is solved on a `1/10000` OKLCH grid against WCAG contrast targets of

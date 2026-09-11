@@ -6,10 +6,12 @@ use std::error::Error;
 use std::ffi::OsString;
 use std::fmt;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
-use rings_logo::{generate_assets, LogoError};
+use rings_logo::generate_assets;
+use rings_logo::LogoError;
 
 fn main() -> ExitCode {
     match run() {

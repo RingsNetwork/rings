@@ -92,7 +92,9 @@ pub(crate) struct GlyphGeometry {
     pub(crate) leg_end: Point,
     /// Uniform glyph stroke.
     pub(crate) stroke_width: f64,
-    /// Diagonal angle derived from three quarters of one bore sector.
+    /// Bore whose radial axis determines the diagonal leg.
+    pub(crate) leg_bore_index: u32,
+    /// Diagonal angle aligned with the lower-right bore.
     pub(crate) leg_angle_degrees: f64,
 }
 
@@ -115,6 +117,8 @@ pub(crate) struct GearModel {
     pub(crate) hole_orbit: f64,
     /// Radius shared by all bores.
     pub(crate) hole_radius: f64,
+    /// Mechanical outline width, derived from the central glyph stroke.
+    pub(crate) gear_outline_width: f64,
     /// Angular pitch between adjacent teeth.
     pub(crate) tooth_pitch: f64,
     /// Rotation from the tooth center to an involute base point.
@@ -139,6 +143,8 @@ impl GearModel {
         let aperture_radius = 2.0 * f64::from(spec.hole_count) * spec.module;
         let hole_orbit = aperture_radius + 2.0 * spec.module;
         let hole_radius = f64::from(spec.hole_count - 1) * spec.module / f64::from(spec.hole_count);
+        let glyph_stroke_width = aperture_radius / f64::from(spec.hole_count);
+        let gear_outline_width = glyph_stroke_width / f64::from(spec.hole_count - 1);
         let flank_samples = (spec.teeth / spec.hole_count) * (spec.hole_count - 1);
 
         validate(
@@ -170,6 +176,7 @@ impl GearModel {
             aperture_radius,
             hole_orbit,
             hole_radius,
+            gear_outline_width,
             tooth_pitch,
             flank_rotation,
             outer_involute_parameter,
@@ -204,7 +211,8 @@ impl GearModel {
     pub(crate) fn glyph(&self) -> GlyphGeometry {
         let golden_ratio = (1.0 + 5.0_f64.sqrt()) / 2.0;
         let bore_sector = 360.0 / f64::from(self.spec.hole_count);
-        let leg_angle_degrees = bore_sector * 3.0 / 4.0;
+        let leg_bore_index = self.spec.hole_count / 2;
+        let leg_angle_degrees = -90.0 + f64::from(leg_bore_index) * bore_sector;
         let leg_angle = leg_angle_degrees.to_radians();
         let cap = self.aperture_radius / golden_ratio;
         let leg_start = Point { x: 0.0, y: 0.0 };
@@ -223,6 +231,7 @@ impl GearModel {
             leg_start,
             leg_end,
             stroke_width: self.aperture_radius / f64::from(self.spec.hole_count),
+            leg_bore_index,
             leg_angle_degrees,
         }
     }
@@ -265,7 +274,8 @@ fn validate(spec: &Spec, radii: Radii, flank_samples: u32) -> Result<(), Geometr
 
 #[cfg(test)]
 mod tests {
-    use super::{GearModel, Spec};
+    use super::GearModel;
+    use super::Spec;
 
     #[test]
     fn bore_polygon_and_tooth_phase_are_commensurate() {
@@ -291,6 +301,10 @@ mod tests {
                 (model.hole_orbit - model.aperture_radius - 2.0 * model.spec.module).abs() < 1e-9
             );
             assert!((model.hole_radius - (bores - 1.0) * model.spec.module / bores).abs() < 1e-9);
+            assert!(
+                (model.gear_outline_width - model.glyph().stroke_width / (bores - 1.0)).abs()
+                    < 1e-9
+            );
             assert_eq!(
                 model.flank_samples,
                 model.teeth_per_bore_sector() * (model.spec.hole_count - 1)
@@ -299,7 +313,7 @@ mod tests {
     }
 
     #[test]
-    fn glyph_bowl_is_tangent_and_leg_follows_pentagon_angle() {
+    fn glyph_bowl_is_tangent_and_leg_aligns_with_lower_right_bore() {
         let model = GearModel::new(Spec::rings());
         assert!(model.is_ok());
         if let Ok(model) = model {
@@ -309,6 +323,12 @@ mod tests {
             assert!((glyph.stem_x + model.aperture_radius / 2.0).abs() < 1e-9);
             assert!(glyph.bowl_x.abs() < 1e-9);
             assert!(glyph.middle_y.abs() < 1e-9);
+            assert!(
+                (glyph.stroke_width / model.gear_outline_width
+                    - f64::from(model.spec.hole_count - 1))
+                .abs()
+                    < 1e-9
+            );
             assert!(glyph.leg_start.x.abs() < 1e-9 && glyph.leg_start.y.abs() < 1e-9);
             assert!(
                 (glyph.stroke_width - model.aperture_radius / f64::from(model.spec.hole_count))
@@ -320,6 +340,19 @@ mod tests {
                 .atan2(glyph.leg_end.x - glyph.leg_start.x)
                 .to_degrees();
             assert!((angle - glyph.leg_angle_degrees).abs() < 1e-9);
+            let mut aligned_bore_found = false;
+            for (index, bore) in (0..model.spec.hole_count).zip(model.holes()) {
+                if index == glyph.leg_bore_index {
+                    let leg_x = glyph.leg_end.x - glyph.leg_start.x;
+                    let leg_y = glyph.leg_end.y - glyph.leg_start.y;
+                    let cross_product = leg_x * bore.y - leg_y * bore.x;
+                    let dot_product = leg_x * bore.x + leg_y * bore.y;
+                    assert!(cross_product.abs() < 1e-9);
+                    assert!(dot_product > 0.0);
+                    aligned_bore_found = true;
+                }
+            }
+            assert!(aligned_bore_found);
         }
     }
 }

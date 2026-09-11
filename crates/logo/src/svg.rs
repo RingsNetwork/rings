@@ -2,8 +2,10 @@
 
 use std::fmt::Write as _;
 
-use crate::color::{Paint, Palette};
-use crate::model::{GearModel, Point};
+use crate::color::Paint;
+use crate::color::Palette;
+use crate::model::GearModel;
+use crate::model::Point;
 
 pub(crate) fn render_fixed(model: &GearModel, palette: &Palette, ground: &str) -> String {
     render_svg(model, fixed_style(palette), ground)
@@ -168,7 +170,7 @@ fn geometry_fragment(model: &GearModel) -> String {
     let _ = writeln!(
         output,
         "<g class=\"primary\" fill=\"none\" stroke-width=\"{}\" stroke-linecap=\"square\" stroke-linejoin=\"miter\">",
-        format_number(module / 8.0),
+        format_number(model.gear_outline_width),
     );
     for tooth in 0..model.spec.teeth {
         let rotation = 360.0 * f64::from(tooth) / f64::from(model.spec.teeth);
@@ -183,7 +185,7 @@ fn geometry_fragment(model: &GearModel) -> String {
     let _ = writeln!(
         output,
         "<g class=\"accent\" fill=\"none\" stroke-width=\"{}\" stroke-linecap=\"butt\" stroke-linejoin=\"miter\">",
-        format_number(module / 8.0),
+        format_number(model.gear_outline_width),
     );
     for hole in model.holes() {
         let _ = writeln!(
@@ -320,7 +322,8 @@ fn metadata(model: &GearModel) -> String {
     format!(
         "module={};teeth={};pressure-angle={}deg;pitch-radius={};base-radius={};\
          outer-radius={};root-radius={};aperture-radius={};bore-count={};\
-         bore-orbit={};bore-radius={};r-golden-ratio={};r-leg-angle={}deg",
+         bore-orbit={};bore-radius={};gear-stroke={};r-stroke={};r-golden-ratio={};\
+         r-leg-bore={};r-leg-angle={}deg",
         format_number(model.spec.module),
         model.spec.teeth,
         format_number(model.spec.pressure_angle_degrees),
@@ -332,7 +335,10 @@ fn metadata(model: &GearModel) -> String {
         model.spec.hole_count,
         format_number(model.hole_orbit),
         format_number(model.hole_radius),
+        format_number(model.gear_outline_width),
+        format_number(model.glyph().stroke_width),
         format_number(model.glyph().golden_ratio),
+        model.glyph().leg_bore_index,
         format_number(model.glyph().leg_angle_degrees),
     )
 }
@@ -342,7 +348,7 @@ fn viewbox_radius(model: &GearModel) -> f64 {
 }
 
 pub(crate) fn render_specification(model: &GearModel, light: &Palette, dark: &Palette) -> String {
-    format!(
+    let document = format!(
         "{{\n  \"generator\": \"rings-logo\",\n  \"geometry\": {{\n    \"module\": {},\n    \"teeth\": {},\n    \"pressure_angle_degrees\": {},\n    \"pitch_radius\": {},\n    \"base_radius\": {},\n    \"outer_radius\": {},\n    \"root_radius\": {},\n    \"aperture_radius\": {},\n    \"bore_count\": {},\n    \"bore_orbit\": {},\n    \"bore_radius\": {},\n    \"teeth_per_bore_sector\": {},\n    \"flank_samples\": {}\n  }},\n  \"geometry_rules\": {{\n    \"aperture_radius\": \"2*bore_count*module\",\n    \"bore_orbit\": \"aperture_radius+2*module\",\n    \"bore_radius\": \"(bore_count-1)/bore_count*module\",\n    \"flank_samples\": \"teeth/bore_count*(bore_count-1)\",\n    \"viewbox_radius\": \"outer_radius+2*bore_radius\"\n  }},\n  \"glyph_rules\": {{\n    \"golden_ratio\": {},\n    \"vertical_extent\": \"aperture_radius/golden_ratio\",\n    \"stem_axis\": \"-aperture_radius/2\",\n    \"bowl_radius\": \"aperture_radius/(2*golden_ratio)\",\n    \"stroke_width\": \"aperture_radius/bore_count\",\n    \"leg_angle\": \"3/4*(360/bore_count)\",\n    \"leg_angle_degrees\": {}\n  }},\n  \"color_rules\": {{\n    \"space\": \"OKLCH converted to quantized sRGB\",\n    \"lightness_grid\": \"1/10000\",\n    \"rust_hue\": \"360/(2*bore_count)=36deg\",\n    \"signal_hue\": \"rust_hue+180=216deg\",\n    \"accent_chroma\": \"(bore_count-1)/teeth\",\n    \"guide_chroma\": \"1/teeth\",\n    \"neutral_chroma\": \"guide_chroma/golden_ratio^2\"\n  }},\n  \"palettes\": {{\n    \"light_background\": {},\n    \"dark_background\": {}\n  }}\n}}\n",
         format_number(model.spec.module),
         model.spec.teeth,
@@ -361,7 +367,23 @@ pub(crate) fn render_specification(model: &GearModel, light: &Palette, dark: &Pa
         format_number(model.glyph().leg_angle_degrees),
         palette_json(light),
         palette_json(dark),
-    )
+    );
+    document
+        .replace(
+            "    \"stroke_width\": \"aperture_radius/bore_count\",",
+            concat!(
+                "    \"stroke_width\": \"aperture_radius/bore_count\",\n",
+                "    \"gear_outline_width\": \"stroke_width/(bore_count-1)\",\n",
+                "    \"glyph_to_gear_stroke_ratio\": \"bore_count-1\",",
+            ),
+        )
+        .replace(
+            "    \"leg_angle\": \"3/4*(360/bore_count)\",",
+            &format!(
+                "    \"leg_bore_index\": {},\n    \"leg_angle\": \"-90+leg_bore_index*(360/bore_count)\",",
+                model.glyph().leg_bore_index
+            ),
+        )
 }
 
 fn palette_json(palette: &Palette) -> String {
@@ -404,8 +426,10 @@ fn format_number(value: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{geometry_fragment, tooth_path};
-    use crate::model::{GearModel, Spec};
+    use super::geometry_fragment;
+    use super::tooth_path;
+    use crate::model::GearModel;
+    use crate::model::Spec;
 
     #[test]
     fn one_tooth_is_reused_at_exact_angular_pitch() {

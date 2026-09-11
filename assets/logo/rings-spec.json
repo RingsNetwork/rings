@@ -28,7 +28,10 @@
     "stem_axis": "-aperture_radius/2",
     "bowl_radius": "aperture_radius/(2*golden_ratio)",
     "stroke_width": "aperture_radius/bore_count",
-    "leg_angle": "3/4*(360/bore_count)",
+    "gear_outline_width": "stroke_width/(bore_count-1)",
+    "glyph_to_gear_stroke_ratio": "bore_count-1",
+    "leg_bore_index": 2,
+    "leg_angle": "-90+leg_bore_index*(360/bore_count)",
     "leg_angle_degrees": 54
   },
   "color_rules": {
