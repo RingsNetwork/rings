@@ -361,7 +361,7 @@ async fn test_onion_exit_publish_replaces_observed_self_records() -> Result<()> 
         ])?)
         .await?;
 
-    let registration = OnionExitRegistration::with_process_epoch(
+    let registration = OnionExitRegistration::new(
         Duration::from_secs(30),
         Duration::from_secs(90),
         default_online_node_type(),

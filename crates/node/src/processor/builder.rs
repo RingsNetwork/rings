@@ -182,7 +182,7 @@ impl ProcessorBuilder {
             registration_tasks.push(Arc::new(online_node_registration.clone()));
         }
         if self.advertise_onion_exit {
-            let onion_exit_registration = OnionExitRegistration::with_process_epoch(
+            let onion_exit_registration = OnionExitRegistration::new(
                 self.onion_exit_heartbeat_interval,
                 self.onion_exit_ttl,
                 self.online_node_type,

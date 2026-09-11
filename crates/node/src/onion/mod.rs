@@ -779,7 +779,7 @@ impl OnionExitDescriptorDecodeReport {
 
 /// Periodic node-layer registration for onion exit policy.
 #[derive(Clone, Debug)]
-pub struct OnionExitRegistration {
+pub(crate) struct OnionExitRegistration {
     heartbeat_interval: Duration,
     ttl: Duration,
     node_type: OnlineNodeType,
@@ -791,25 +791,7 @@ pub struct OnionExitRegistration {
 }
 
 impl OnionExitRegistration {
-    /// Create an onion-exit registration task.
-    pub fn new(
-        heartbeat_interval: Duration,
-        ttl: Duration,
-        node_type: OnlineNodeType,
-        services: Vec<OnionExitService>,
-        policy: OnionExitPolicy,
-    ) -> Self {
-        Self::with_process_epoch(
-            heartbeat_interval,
-            ttl,
-            node_type,
-            services,
-            policy,
-            OnionExitEpoch::random(),
-        )
-    }
-
-    pub(crate) fn with_process_epoch(
+    pub(crate) fn new(
         heartbeat_interval: Duration,
         ttl: Duration,
         node_type: OnlineNodeType,
