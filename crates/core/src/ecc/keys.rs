@@ -462,7 +462,7 @@ fn with_key_rng<R>(f: impl FnOnce(&mut Hc128Rng) -> R) -> R {
 }
 
 fn public_key_from_b58m_exact<const SIZE: usize>(value: &str) -> Result<PublicKey<SIZE>> {
-    let bytes = base58_monero::decode_check(value).map_err(|_| Error::PublicKeyBadFormat)?;
+    let bytes = crate::base58_check::decode(value).map_err(|_| Error::PublicKeyBadFormat)?;
     PublicKey::from_exact_u8(&bytes)
 }
 

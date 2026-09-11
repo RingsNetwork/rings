@@ -70,6 +70,7 @@
 )]
 
 pub mod algebra;
+mod base58_check;
 pub mod dht;
 pub mod ecc;
 pub mod error;

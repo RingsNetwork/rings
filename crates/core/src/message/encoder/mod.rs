@@ -1,6 +1,5 @@
 use std::ops::Deref;
 
-use base58_monero as b58m;
 use bytes::Bytes;
 use serde::Deserialize;
 use serde::Serialize;
@@ -41,7 +40,7 @@ impl Deref for Encoded {
 impl Encoder for String {
     fn encode(&self) -> Result<Encoded> {
         Ok(Encoded(
-            b58m::encode_check(self.as_bytes()).map_err(|_| Error::Encode)?,
+            base58_monero::encode_check(self.as_bytes()).map_err(|_| Error::Encode)?,
         ))
     }
 }
@@ -62,7 +61,7 @@ impl Encoder for &str {
 impl Encoder for &[u8] {
     fn encode(&self) -> Result<Encoded> {
         Ok(Encoded(
-            b58m::encode_check(self).map_err(|_| Error::Encode)?,
+            base58_monero::encode_check(self).map_err(|_| Error::Encode)?,
         ))
     }
 }
@@ -70,7 +69,7 @@ impl Encoder for &[u8] {
 impl Encoder for Vec<u8> {
     fn encode(&self) -> Result<Encoded> {
         Ok(Encoded(
-            b58m::encode_check(self).map_err(|_| Error::Encode)?,
+            base58_monero::encode_check(self).map_err(|_| Error::Encode)?,
         ))
     }
 }
@@ -83,7 +82,7 @@ impl Encoder for Bytes {
 
 impl Decoder for Vec<u8> {
     fn from_encoded(encoded: &Encoded) -> Result<Self> {
-        b58m::decode_check(encoded.deref()).map_err(|_| Error::Decode)
+        crate::base58_check::decode(encoded.deref()).map_err(|_| Error::Decode)
     }
 }
 

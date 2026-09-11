@@ -88,6 +88,40 @@ jobs:
       - name: Build documentation book
         run: mdbook build docs
 
+  # Decode-boundary smoke tests live with the crates that own each boundary. CI generates a seed
+  # and case count per run, prints them for replay, and never checks generated corpus files into
+  # the repository.
+  decode_boundary_smoke:
+    name: Decode boundary smoke
+    timeout-minutes: 25
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
+
+      - name: Setup rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+          rustup show
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Generate decode-boundary inputs
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_ENV"
+          import secrets
+
+          print(f"RINGS_DECODE_BOUNDARY_SEED={secrets.randbits(64)}")
+          print("RINGS_DECODE_BOUNDARY_CASES=1024")
+          PY
+
+      - name: Run generated decode-boundary tests
+        run: |
+          cargo test -p rings-core --features dummy --no-default-features decode_boundary -- --nocapture
+          cargo test -p rings-transport --no-default-features --features dummy decode_boundary -- --nocapture
+          cargo test -p rings-node --no-default-features --features node decode_boundary -- --nocapture
+
   miri_core:
     name: Miri core invariants
     timeout-minutes: 45

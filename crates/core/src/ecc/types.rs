@@ -32,7 +32,7 @@ impl PublicKey<33> {
     /// monero and bitcoin style b58
     pub fn try_from_b58m(value: &str) -> Result<PublicKey<33>> {
         let value: &[u8] =
-            &base58_monero::decode_check(value).map_err(|_| Error::PublicKeyBadFormat)?;
+            &crate::base58_check::decode(value).map_err(|_| Error::PublicKeyBadFormat)?;
         Self::from_u8(value)
     }
 
@@ -103,7 +103,7 @@ impl<'de, const SIZE: usize> serde::de::Visitor<'de> for PublicKeyVisitor<SIZE> 
     fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
     where E: serde::de::Error {
         let value =
-            base58_monero::decode_check(value).map_err(|_| E::custom(Error::PublicKeyBadFormat))?;
+            crate::base58_check::decode(value).map_err(|_| E::custom(Error::PublicKeyBadFormat))?;
         if SIZE == 33 {
             let key = PublicKey::<33>::from_u8(&value).map_err(E::custom)?;
             return PublicKey::from_exact_u8(&key.0).map_err(E::custom);
