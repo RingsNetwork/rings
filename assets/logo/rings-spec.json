@@ -32,8 +32,12 @@
     "bowl_radius": 39.28371,
     "serif_circle_radius": 10.475656,
     "leg_outer_circle_radius": 70.710678,
-    "leg_start": [0, 0],
-    "leg_end": [70.710678, 70.710678]
+    "leg_root_arc_radius": 10.955396,
+    "leg_tip_arc_radius": 4.758088,
+    "leg_root": [15.713484, 0],
+    "leg_root_tangent": [14.540087, 16.510951],
+    "leg_tip_tangent": [67.346202, 69.317066],
+    "leg_tip": [70.710678, 70.710678]
   },
   "glyph_rules": {
     "historical_base": {
@@ -43,7 +47,9 @@
       "fine_stroke": "u/2=L/18",
       "b_round": "paired circular contours; lower diameter 5L/9",
       "serifs": "brackets constructed by tangent circles",
-      "leg": "bounded by the center-to-corner diagonal and a circular arc"
+      "leg_outer": "circular arc from square center to lower-right corner",
+      "leg_inner": "straight segment joined to two tangent circular arcs",
+      "leg_root_width": "approximately L/9; both sides taper to zero at the corner"
     },
     "rings_completion": {
       "scope": "parameters not fully specified by the surviving Pacioli plate",
@@ -52,8 +58,13 @@
       "bowl_outer": "center=(-u/2,-2u); radius=5u/2",
       "bowl_inner": "center=(-3u/2,-3u/2); radius=5u/2",
       "serif_circle_radius": "2u/3",
-      "leg_outer": "quarter circle centered at the square right midpoint",
-      "leg_inner": "mother-square diagonal from center to lower-right corner"
+      "leg_root": "S=(u,0), shared with the bowl outer contour; CS=u",
+      "leg_root_arc": "externally tangent to the bowl at S",
+      "leg_straight": "parallel to the 45deg mother-square diagonal",
+      "leg_radius_partition": "r_root+r_tip=u",
+      "leg_root_radius": "u/(2-4/(5*sqrt(2)))",
+      "leg_tip_radius": "u-r_root",
+      "leg_tip": "tip arc tangent to baseline; both contours meet at lower-right corner"
     }
   },
   "color_rules": {

@@ -33,12 +33,18 @@ cargo run -p rings-logo -- check
   aperture (`L = sqrt(2)a`); stem edges are `-19u/6` and `-13u/6`; the paired
   bowl circles have radius `5u/2` and centers `(-u/2,-2u)` and
   `(-3u/2,-3u/2)`; each serif circle has radius `2u/3`.
-- The leg is not assigned an arbitrary angle or rounded with added tangent
-  circles. As in the plate, it occupies the region between the mother-square
-  diagonal from the center to the lower-right corner and one exact circular
-  arc with the same endpoints. The arc is a quarter circle centered at the
-  square's right midpoint, so both boundaries resolve at the corner without a
-  fitted tip or root.
+- The square's center-to-lower-right chord remains the exact 45-degree
+  construction diagonal; it is not itself a black contour. The leg's outer
+  contour is the quarter circle with those endpoints. Its inner contour starts
+  at `S = (u,0)`, the same point on the bowl's outer circle, so `CS = u = L/9`.
+  A root arc externally tangent to the bowl joins a straight segment parallel
+  to the diagonal; a second tangent arc resolves that segment into the
+  lower-right corner and is tangent to the baseline there.
+- The two transition radii partition one module and are solved from the
+  tangency constraints, not fitted: `r_root + r_tip = u`,
+  `r_root = u/(2 - 4/(5sqrt(2)))`, and `r_tip = u - r_root`. Both leg contours
+  therefore meet with zero width at the same corner. Their support circles are
+  part of the model but are not drawn as decorative construction circles.
 - Stroke hierarchy is `30:5:1`, directly matching teeth, bores, and one
   construction unit. With `w_R = u = sqrt(2)a/9` and six teeth per bore sector,
   the gear and bore outlines are `w_G = w_R/6`; construction guides are
