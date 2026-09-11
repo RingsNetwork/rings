@@ -321,7 +321,17 @@ fn parse_allowed_origin(origin: &str) -> Result<HeaderValue, ApiSecurityError> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+    use std::time::SystemTime;
+    use std::time::UNIX_EPOCH;
+
+    use rings_rpc::method::Method as RpcMethod;
+
     use super::*;
+
+    const SEED_ENV: &str = "RINGS_DECODE_BOUNDARY_SEED";
+    const CASES_ENV: &str = "RINGS_DECODE_BOUNDARY_CASES";
+    const DEFAULT_CASES: usize = 128;
 
     fn token() -> String {
         "0123456789abcdef0123456789abcdef".to_string()
@@ -383,6 +393,169 @@ mod tests {
             params: jsonrpc_core::Params::None,
             id: jsonrpc_core::Id::Num(1),
         })
+    }
+
+    #[test]
+    fn generated_jsonrpc_decode_boundary_bodies_classify_without_public_fail_open() {
+        let mut generator = DecodeBoundaryGenerator::named("node-jsonrpc");
+        let cases = generated_case_count();
+        eprintln!(
+            "{SEED_ENV}={} {CASES_ENV}={cases} target=node-jsonrpc",
+            generator.seed()
+        );
+
+        for _ in 0..cases {
+            let body = generated_jsonrpc_body(&mut generator);
+            let decoded = crate::native::endpoint::DecodedJsonRpc::decode(&body);
+            let external = ApiListener::External.required_authorization(decoded.request());
+            let internal = ApiListener::Internal.required_authorization(decoded.request());
+            assert_eq!(internal, AuthorizationClass::Gated);
+            match decoded.request() {
+                None => assert_eq!(external, AuthorizationClass::Gated),
+                Some(request) => assert_eq!(
+                    external == AuthorizationClass::Public,
+                    every_call_is_public(request)
+                ),
+            }
+        }
+    }
+
+    fn generated_jsonrpc_body(generator: &mut DecodeBoundaryGenerator) -> Vec<u8> {
+        match generator.usize(6) {
+            0 => generator.bytes(2048),
+            1 => method_call(generator, true).into_bytes(),
+            2 => method_call(generator, false).into_bytes(),
+            3 => batch_call(generator).into_bytes(),
+            4 => br#"{"jsonrpc":"2.0","id":4}"#.to_vec(),
+            _ => br#"[{"jsonrpc":"2.0","id":1}]"#.to_vec(),
+        }
+    }
+
+    fn method_call(generator: &mut DecodeBoundaryGenerator, include_id: bool) -> String {
+        let method = generator.method();
+        if include_id {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":{},"method":"{method}","params":[]}}"#,
+                generator.next_u64()
+            )
+        } else {
+            format!(r#"{{"jsonrpc":"2.0","method":"{method}","params":[]}}"#)
+        }
+    }
+
+    fn batch_call(generator: &mut DecodeBoundaryGenerator) -> String {
+        format!(
+            "[{},{}]",
+            method_call(generator, true),
+            method_call(generator, true)
+        )
+    }
+
+    fn every_call_is_public(request: &jsonrpc_core::Request) -> bool {
+        match request {
+            jsonrpc_core::Request::Single(call) => call_is_public(call),
+            jsonrpc_core::Request::Batch(calls) => calls.iter().all(call_is_public),
+        }
+    }
+
+    fn call_is_public(call: &jsonrpc_core::Call) -> bool {
+        match call {
+            jsonrpc_core::Call::MethodCall(call) => method_is_public(call.method.as_str()),
+            jsonrpc_core::Call::Notification(notification) => {
+                method_is_public(notification.method.as_str())
+            }
+            jsonrpc_core::Call::Invalid { .. } => false,
+        }
+    }
+
+    fn method_is_public(name: &str) -> bool {
+        matches!(
+            RpcMethod::try_from(name),
+            Ok(RpcMethod::NodeDid | RpcMethod::AnswerOffer)
+        )
+    }
+
+    fn generated_case_count() -> usize {
+        std::env::var(CASES_ENV)
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .map(|cases| cases.clamp(1, 50_000))
+            .unwrap_or(DEFAULT_CASES)
+    }
+
+    struct DecodeBoundaryGenerator {
+        seed: u64,
+        state: u64,
+    }
+
+    impl DecodeBoundaryGenerator {
+        fn named(label: &str) -> Self {
+            let seed = std::env::var(SEED_ENV)
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or_else(time_seed);
+            let state = fold_label(seed, label);
+            Self { seed, state }
+        }
+
+        fn seed(&self) -> u64 {
+            self.seed
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            self.state = splitmix64(self.state);
+            self.state
+        }
+
+        fn bytes(&mut self, max_len: usize) -> Vec<u8> {
+            let len = self.usize(max_len.saturating_add(1));
+            let mut bytes = Vec::with_capacity(len);
+            for _ in 0..len {
+                bytes.push(self.byte());
+            }
+            bytes
+        }
+
+        fn byte(&mut self) -> u8 {
+            u8::try_from(self.next_u64() & 0xff).unwrap_or(0)
+        }
+
+        fn usize(&mut self, upper: usize) -> usize {
+            let upper = u64::try_from(upper).unwrap_or(u64::MAX).max(1);
+            usize::try_from(self.next_u64() % upper).unwrap_or(0)
+        }
+
+        fn method(&mut self) -> &'static str {
+            match self.usize(5) {
+                0 => "nodeDid",
+                1 => "answerOffer",
+                2 => "nodeInfo",
+                3 => "disconnect",
+                _ => "generatedUnknown",
+            }
+        }
+    }
+
+    fn time_seed() -> u64 {
+        let duration = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO);
+        let nanos = u64::try_from(duration.as_nanos()).unwrap_or(duration.as_secs());
+        nanos ^ u64::from(std::process::id())
+    }
+
+    fn fold_label(seed: u64, label: &str) -> u64 {
+        label
+            .bytes()
+            .fold(seed, |state, byte| splitmix64(state ^ u64::from(byte)))
+    }
+
+    fn splitmix64(mut state: u64) -> u64 {
+        state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut mixed = state;
+        mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        mixed ^ (mixed >> 31)
     }
 
     #[test]

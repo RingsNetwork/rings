@@ -31,7 +31,7 @@ impl FromStr for SessionSk {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        let s = base58_monero::decode_check(s).map_err(|_| Error::Decode)?;
+        let s = crate::base58_check::decode(s).map_err(|_| Error::Decode)?;
         serde_json::from_slice(&s).map_err(Error::Deserialize)
     }
 }

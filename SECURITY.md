@@ -219,6 +219,13 @@ itself, against an adversary that can occupy many positions on the identifier ri
 What a relayed message reveals to each hop is stated under the communication layer
 contract above.
 
+The decoders that admit relayed bytes have generated decode-boundary smoke tests in
+their owning crates. `rings-core` covers the base58-check envelope, postcard wire
+envelope, message body decode, chunk framing, and chunk reassembly bounds;
+`rings-transport` covers SDP `a=max-message-size` parsing; `rings-node` covers
+the JSON-RPC body decoder and authorization classification. CI generates each run's
+seed and case count, so the repository does not carry generated corpora.
+
 ### Connection Admission
 
 Each node bounds the number of peers holding any logical connection record,
@@ -253,7 +260,9 @@ cannot carry a gated one past the check. Both listeners accept only
 external listener binds a non-loopback address only under an explicit opt-in. The token
 is therefore a control credential, not an admission credential: a seed admits arbitrary
 peers without sharing it, and the overlay's admission story is the one described in the
-sections above.
+sections above. The body decoder and the classification are covered by generated
+decode-boundary tests whose invariant is that a body that does not decode, an invalid
+call, or an unknown method never classifies as public.
 
 ### DHT Storage
 

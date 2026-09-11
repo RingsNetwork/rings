@@ -42,6 +42,8 @@ mod test_dht_schedule;
 #[cfg(feature = "dummy")]
 mod test_chunk_e2e;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+mod test_decode_boundaries;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 mod test_inbox;
 mod test_message_handler;
 #[cfg(all(feature = "std", not(feature = "dummy")))]

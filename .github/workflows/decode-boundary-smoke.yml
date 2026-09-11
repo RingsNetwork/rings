@@ -1,0 +1,49 @@
+name: Decode Boundary Smoke
+
+# Longer scheduled run for the crate-owned decode-boundary tests. The tests generate inputs at
+# runtime from the seed printed by this workflow, so the repository never carries generated corpus
+# files or a separate fuzz workspace.
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: 1.97.0
+
+permissions:
+  contents: read
+
+jobs:
+  decode_boundary_smoke:
+    name: Decode boundary smoke (scheduled)
+    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
+
+      - name: Setup rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+          rustup show
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Generate decode-boundary inputs
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_ENV"
+          import secrets
+
+          print(f"RINGS_DECODE_BOUNDARY_SEED={secrets.randbits(64)}")
+          print("RINGS_DECODE_BOUNDARY_CASES=4096")
+          PY
+
+      - name: Run generated decode-boundary tests
+        run: |
+          cargo test -p rings-core --features dummy --no-default-features decode_boundary -- --nocapture
+          cargo test -p rings-transport --no-default-features --features dummy decode_boundary -- --nocapture
+          cargo test -p rings-node --no-default-features --features node decode_boundary -- --nocapture

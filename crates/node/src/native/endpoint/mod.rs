@@ -82,14 +82,15 @@ struct ListenerSecurity {
 /// The layer attaches it as a request extension and forwards an empty body, so the route
 /// handler dispatches the decoded request instead of parsing again. A body that failed to
 /// decode carries the JSON-RPC parse error the handler must answer with. Invariant: every
-/// request reaching the JSON-RPC route carries this extension, because [`secure_router`] is the
-/// only constructor of a served router.
+/// request reaching the JSON-RPC route carries this extension, because `secure_router` is the
+/// only constructor of a served router. Test-only decode-boundary checks drive this exact
+/// decoder, not a re-implementation of it.
 #[derive(Clone)]
-struct DecodedJsonRpc(Result<jsonrpc_core::Request, jsonrpc_core::Error>);
+pub(crate) struct DecodedJsonRpc(Result<jsonrpc_core::Request, jsonrpc_core::Error>);
 
 impl DecodedJsonRpc {
     /// Decode a body the way `MetaIoHandler::handle_request` does, keeping its parse error.
-    fn decode(bytes: &[u8]) -> Self {
+    pub(crate) fn decode(bytes: &[u8]) -> Self {
         Self(
             serde_json::from_slice(bytes)
                 .map_err(|_| jsonrpc_core::Error::new(ErrorCode::ParseError)),
@@ -97,7 +98,7 @@ impl DecodedJsonRpc {
     }
 
     /// Return the decoded request, or `None` for a body that did not decode.
-    fn request(&self) -> Option<&jsonrpc_core::Request> {
+    pub(crate) fn request(&self) -> Option<&jsonrpc_core::Request> {
         self.0.as_ref().ok()
     }
 }

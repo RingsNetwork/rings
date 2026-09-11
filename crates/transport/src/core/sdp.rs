@@ -211,12 +211,20 @@ pub fn parse_sdp_max_message_size(sdp: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+    use std::time::SystemTime;
+    use std::time::UNIX_EPOCH;
+
     use super::lex;
     use super::parse;
     use super::parse_attribute;
     use super::parse_sdp_max_message_size;
     use super::Attribute;
     use super::Line;
+
+    const SEED_ENV: &str = "RINGS_DECODE_BOUNDARY_SEED";
+    const CASES_ENV: &str = "RINGS_DECODE_BOUNDARY_CASES";
+    const DEFAULT_CASES: usize = 128;
 
     /// A minimal but realistic data-channel SDP, with a `body` of media-section attribute lines.
     fn data_channel_sdp(body: &str) -> String {
@@ -225,8 +233,179 @@ mod tests {
              o=- 0 0 IN IP4 0.0.0.0\r\n\
              m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
              a=setup:actpass\r\n\
-             {body}"
+            {body}"
         )
+    }
+
+    #[test]
+    fn generated_sdp_decode_boundary_inputs_are_total() {
+        let mut generator = DecodeBoundaryGenerator::named("transport-sdp");
+        let cases = generated_case_count();
+        eprintln!(
+            "{SEED_ENV}={} {CASES_ENV}={cases} target=transport-sdp",
+            generator.seed()
+        );
+
+        for _ in 0..cases {
+            let bytes = generator.bytes(4096);
+            let lossy = String::from_utf8_lossy(&bytes);
+            let _raw = parse_sdp_max_message_size(&lossy);
+            let sdp = generator.sdp();
+            let _structured = parse_sdp_max_message_size(&sdp);
+        }
+    }
+
+    fn generated_case_count() -> usize {
+        std::env::var(CASES_ENV)
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .map(|cases| cases.clamp(1, 50_000))
+            .unwrap_or(DEFAULT_CASES)
+    }
+
+    struct DecodeBoundaryGenerator {
+        seed: u64,
+        state: u64,
+    }
+
+    impl DecodeBoundaryGenerator {
+        fn named(label: &str) -> Self {
+            let seed = std::env::var(SEED_ENV)
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or_else(time_seed);
+            let state = fold_label(seed, label);
+            Self { seed, state }
+        }
+
+        fn seed(&self) -> u64 {
+            self.seed
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            self.state = splitmix64(self.state);
+            self.state
+        }
+
+        fn bytes(&mut self, max_len: usize) -> Vec<u8> {
+            let len = self.usize(max_len.saturating_add(1));
+            let mut bytes = Vec::with_capacity(len);
+            for _ in 0..len {
+                bytes.push(self.byte());
+            }
+            bytes
+        }
+
+        fn byte(&mut self) -> u8 {
+            u8::try_from(self.next_u64() & 0xff).unwrap_or(0)
+        }
+
+        fn usize(&mut self, upper: usize) -> usize {
+            let upper = u64::try_from(upper).unwrap_or(u64::MAX).max(1);
+            usize::try_from(self.next_u64() % upper).unwrap_or(0)
+        }
+
+        fn sdp(&mut self) -> String {
+            let mut text = String::new();
+            for _ in 0..self.usize(24).saturating_add(1) {
+                text.push_str(&self.sdp_line());
+            }
+            text
+        }
+
+        fn sdp_line(&mut self) -> String {
+            match self.usize(6) {
+                0 => format!("{}={}\r\n", self.line_kind(), self.text(96)),
+                1 => format!(
+                    "m={} {} {} {}\r\n",
+                    self.media(),
+                    self.port(),
+                    self.proto(),
+                    self.format_token()
+                ),
+                2 => format!("a=max-message-size:{}\r\n", self.next_u64()),
+                3 => format!("a={}:{}\r\n", self.text(32), self.text(64)),
+                4 => "a=sctp-port:5000\r\n".to_string(),
+                _ => self.text(128),
+            }
+        }
+
+        fn text(&mut self, max_len: usize) -> String {
+            let len = self.usize(max_len.saturating_add(1));
+            (0..len)
+                .map(|_| char::from(32_u8.saturating_add(self.byte() % 95)))
+                .collect()
+        }
+
+        fn line_kind(&mut self) -> char {
+            match self.usize(6) {
+                0 => 'v',
+                1 => 'o',
+                2 => 'm',
+                3 => 'a',
+                4 => '=',
+                _ => 'x',
+            }
+        }
+
+        fn media(&mut self) -> &'static str {
+            match self.usize(4) {
+                0 => "application",
+                1 => "Application",
+                2 => "audio",
+                _ => "video",
+            }
+        }
+
+        fn port(&mut self) -> &'static str {
+            match self.usize(4) {
+                0 => "0",
+                1 => "9",
+                2 => "65535",
+                _ => "port",
+            }
+        }
+
+        fn proto(&mut self) -> &'static str {
+            match self.usize(5) {
+                0 => "UDP/DTLS/SCTP",
+                1 => "TCP/DTLS/SCTP",
+                2 => "udp/dtls/sctp",
+                3 => "UDP/DTLS/SCTPX",
+                _ => "RTP/AVP",
+            }
+        }
+
+        fn format_token(&mut self) -> &'static str {
+            match self.usize(4) {
+                0 => "webrtc-datachannel",
+                1 => "WEBRTC-DATACHANNEL",
+                2 => "5000",
+                _ => "webrtc-datachannel-x",
+            }
+        }
+    }
+
+    fn time_seed() -> u64 {
+        let duration = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO);
+        let nanos = u64::try_from(duration.as_nanos()).unwrap_or(duration.as_secs());
+        nanos ^ u64::from(std::process::id())
+    }
+
+    fn fold_label(seed: u64, label: &str) -> u64 {
+        label
+            .bytes()
+            .fold(seed, |state, byte| splitmix64(state ^ u64::from(byte)))
+    }
+
+    fn splitmix64(mut state: u64) -> u64 {
+        state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut mixed = state;
+        mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        mixed ^ (mixed >> 31)
     }
 
     #[test]

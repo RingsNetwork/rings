@@ -48,7 +48,8 @@ This file follows https://llmstxt.org/. It is for coding agents that build on Ri
 - Frontend (from `frontend/`): `cargo check --target wasm32-unknown-unknown`; `cargo clippy --target wasm32-unknown-unknown --all-targets -- -D warnings`; `cargo test --release --target wasm32-unknown-unknown`; `trunk serve --release true` to run it. Extension: `npm ci --ignore-scripts && npm run package:frontend-extension` from the root.
 - FFI: `cargo build -p rings-node --features ffi`; `RINGS_FFI_REQUIRE_LIBRARY=1 pytest examples/ffi/tests`.
 - Docs: `mdbook build docs`; `mdbook serve docs` to preview; a chapter listed in `SUMMARY.md` without a file fails the build.
-- Gates a change must pass (`.github/workflows/qaci.yml`): clippy with `-D warnings` on the native, wasm, and ffi feature sets; `cargo +nightly fmt --check`; rustdoc with `-D warnings`; `taplo format --check`; typos; cargo-deny; Miri on core invariants; the native, wasm, frontend, dweb, and gateway test suites; the docs build.
+- Decode-boundary smoke: set `RINGS_DECODE_BOUNDARY_SEED` and `RINGS_DECODE_BOUNDARY_CASES`, then run the `decode_boundary` test filters for `rings-core`, `rings-transport`, and `rings-node`; CI generates these values instead of committing corpora.
+- Gates a change must pass (`.github/workflows/qaci.yml`): clippy with `-D warnings` on the native, wasm, and ffi feature sets; `cargo +nightly fmt --check`; rustdoc with `-D warnings`; `taplo format --check`; typos; cargo-deny; Miri on core invariants; the native, wasm, frontend, dweb, gateway, and generated decode-boundary test suites; the docs build.
 
 ## Conventions
 
