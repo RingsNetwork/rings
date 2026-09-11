@@ -7,6 +7,11 @@ use rings_core::session::SessionSk;
 use super::super::*;
 use crate::tests::TEST_NETWORK_ID;
 
+/// Stable epoch used by signed descriptor fixtures; its concrete byte value is not semantic.
+const TEST_PROCESS_EPOCH: OnionExitEpoch = OnionExitEpoch::new([31; 16]);
+/// Distinct epoch used to witness that epoch substitution invalidates the descriptor signature.
+const TAMPERED_PROCESS_EPOCH: OnionExitEpoch = OnionExitEpoch::new([32; 16]);
+
 fn service(name: &str) -> OnionExitService {
     OnionExitService::new(name, OnionExitTransport::Tcp).expect("valid test service")
 }
@@ -39,7 +44,7 @@ fn signed_exit_for_session_at(
                 .account_verification_pubkey()
                 .map_err(Error::CoreError)?,
             session_public_key: session_sk.session_public_key(),
-            process_epoch: OnionExitEpoch::new([31; 16]),
+            process_epoch: TEST_PROCESS_EPOCH,
             node_type: OnlineNodeType::Native,
             network_id: 1,
             service,
@@ -202,12 +207,14 @@ fn test_exit_descriptor_signature_covers_schema_version() -> Result<()> {
     Ok(())
 }
 
+/// The process epoch is signed, so a registry observer cannot substitute another
+/// replay-admission generation while preserving the descriptor signature.
 #[test]
 fn test_exit_descriptor_signature_covers_process_epoch() -> Result<()> {
     let mut descriptor = signed_exit_at(20, 100)?;
     assert!(descriptor.verify_signature(TEST_NETWORK_ID));
 
-    descriptor.process_epoch = OnionExitEpoch::new([32; 16]);
+    descriptor.process_epoch = TAMPERED_PROCESS_EPOCH;
 
     assert!(!descriptor.verify_signature(TEST_NETWORK_ID));
     Ok(())
@@ -250,7 +257,7 @@ fn test_latest_valid_by_service_did_filters_expired_and_keeps_newest() -> Result
             did,
             public_key: public_key.clone(),
             session_public_key: session_sk.session_public_key(),
-            process_epoch: OnionExitEpoch::new([31; 16]),
+            process_epoch: TEST_PROCESS_EPOCH,
             node_type: OnlineNodeType::Native,
             network_id: 1,
             service: service("web"),
@@ -268,7 +275,7 @@ fn test_latest_valid_by_service_did_filters_expired_and_keeps_newest() -> Result
             did,
             public_key,
             session_public_key: session_sk.session_public_key(),
-            process_epoch: OnionExitEpoch::new([31; 16]),
+            process_epoch: TEST_PROCESS_EPOCH,
             node_type: OnlineNodeType::Native,
             network_id: 1,
             service: service("web"),

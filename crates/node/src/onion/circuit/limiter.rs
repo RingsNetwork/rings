@@ -71,7 +71,7 @@ impl Default for OnionCryptoLimiter {
 }
 
 impl OnionCryptoLimiter {
-    #[cfg(test)]
+    #[cfg(all(test, rings_native))]
     pub(super) fn with_limit(max_ops_per_window: u32) -> Self {
         Self::with_limits(CryptoLimits {
             per_peer: CryptoBudget {

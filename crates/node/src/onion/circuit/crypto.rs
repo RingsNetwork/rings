@@ -41,6 +41,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::extension::ext::Scope;
 use crate::onion::OnionExitDescriptor;
+use crate::onion::OnionExitEpoch;
 use crate::onion::OnionRoute;
 use crate::onion::OnionRouteError;
 use crate::onion::OnionRouteHop;
@@ -205,7 +206,7 @@ pub async fn send_backward(
 fn build_forward_layers(
     client: OnionClientReturn,
     hops: &[OnionRouteHop],
-    process_epoch: crate::onion::OnionExitEpoch,
+    process_epoch: OnionExitEpoch,
     first_circuit_id: OnionCircuitId,
     sequence: OnionForwardSequence,
     payload: OnionCircuitPayload,
@@ -224,7 +225,7 @@ fn build_forward_layers(
 fn build_forward_layers_with_ids(
     client: OnionClientReturn,
     hops: &[OnionRouteHop],
-    process_epoch: crate::onion::OnionExitEpoch,
+    process_epoch: OnionExitEpoch,
     circuit_ids: &[OnionCircuitId],
     sequence: OnionForwardSequence,
     payload: OnionCircuitPayload,
@@ -368,7 +369,7 @@ pub(super) fn decrypt_forward_layer(
     rings_codec::deserialize(&plaintext).map_err(|_| Error::DecodeError)
 }
 
-#[cfg(test)]
+#[cfg(all(test, rings_native))]
 pub(super) fn encrypt_client_payload(
     return_id: OnionReturnId,
     payload: OnionCircuitPayload,

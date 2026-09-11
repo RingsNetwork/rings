@@ -67,12 +67,12 @@ pub struct OnionCircuitState {
 }
 
 impl OnionCircuitState {
-    #[cfg(test)]
+    #[cfg(all(test, rings_native))]
     pub(super) fn relay_return_count(&self) -> usize {
         self.relay_returns.len()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, rings_native))]
     pub(super) fn shares_return_table_with(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.relay_returns, &other.relay_returns)
     }
