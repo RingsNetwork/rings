@@ -5,6 +5,7 @@ use std::fmt::Write as _;
 use crate::color::Paint;
 use crate::color::Palette;
 use crate::model::GearModel;
+use crate::model::GlyphGeometry;
 use crate::model::Point;
 
 pub(crate) fn render_fixed(model: &GearModel, palette: &Palette, ground: &str) -> String {
@@ -13,14 +14,16 @@ pub(crate) fn render_fixed(model: &GearModel, palette: &Palette, ground: &str) -
 
 pub(crate) fn render_adaptive(model: &GearModel, light: &Palette, dark: &Palette) -> String {
     let style = format!(
-        ".primary{{stroke:{}}}.accent{{stroke:{}}}.signal{{fill:{}}}.guide{{stroke:{}}}\n\
+        ".primary{{stroke:{}}}.accent{{stroke:{}}}.glyph{{fill:{}}}.signal{{fill:{}}}.guide{{stroke:{}}}\n\
          @media(prefers-color-scheme:dark){{.primary{{stroke:{}}}.accent{{stroke:{}}}\
-         .signal{{fill:{}}}.guide{{stroke:{}}}}}",
+         .glyph{{fill:{}}}.signal{{fill:{}}}.guide{{stroke:{}}}}}",
         light.primary.hex,
+        light.accent.hex,
         light.accent.hex,
         light.signal.hex,
         light.guide.hex,
         dark.primary.hex,
+        dark.accent.hex,
         dark.accent.hex,
         dark.signal.hex,
         dark.guide.hex,
@@ -92,8 +95,12 @@ fn embedded_logo(model: &GearModel, palette: &Palette) -> String {
 
 fn fixed_style(palette: &Palette) -> String {
     format!(
-        ".primary{{stroke:{}}}.accent{{stroke:{}}}.signal{{fill:{}}}.guide{{stroke:{}}}",
-        palette.primary.hex, palette.accent.hex, palette.signal.hex, palette.guide.hex,
+        ".primary{{stroke:{}}}.accent{{stroke:{}}}.glyph{{fill:{}}}.signal{{fill:{}}}.guide{{stroke:{}}}",
+        palette.primary.hex,
+        palette.accent.hex,
+        palette.accent.hex,
+        palette.signal.hex,
+        palette.guide.hex,
     )
 }
 
@@ -107,7 +114,7 @@ fn render_svg(model: &GearModel, style: String, ground: &str) -> String {
          viewBox=\"-{} -{} {size} {size}\" role=\"img\" aria-labelledby=\"title desc\">\n\
          <title id=\"title\">Rings geometric construction mark, {ground}</title>\n\
          <desc id=\"desc\">A thirty-tooth involute gear, five bores on a regular pentagon, \
-         construction circles, and a pentagon-derived geometric R.</desc>\n\
+         construction circles, and a square-and-circle geometric R.</desc>\n\
          <metadata>{}</metadata>\n<style>{style}</style>\n\
          <defs><path id=\"tooth\" d=\"{tooth}\"/></defs>\n{geometry}</svg>\n",
         format_number(radius),
@@ -165,6 +172,7 @@ fn geometry_fragment(model: &GearModel) -> String {
     let _ = writeln!(output, "  <polygon points=\"{}\"/>", polygon_points(model));
     let phase = GearModel::point(model.outer_radius, -std::f64::consts::PI / 2.0);
     let _ = writeln!(output, "  <path d=\"M 0 0 L {}\"/>", command_point(phase));
+    append_glyph_guides(&mut output, model.glyph());
     output.push_str("</g>\n");
 
     let _ = writeln!(
@@ -196,13 +204,9 @@ fn geometry_fragment(model: &GearModel) -> String {
             format_number(model.hole_radius),
         );
     }
-    let _ = writeln!(
-        output,
-        "  <path d=\"{}\" stroke-width=\"{}\"/>",
-        glyph_path(model),
-        format_number(model.glyph().stroke_width),
-    );
-    output.push_str("</g>\n<g class=\"signal\">\n");
+    output.push_str("</g>\n");
+    append_glyph(&mut output, model.glyph());
+    output.push_str("<g class=\"signal\">\n");
     for hole in model.holes() {
         let _ = writeln!(
             output,
@@ -219,6 +223,67 @@ fn geometry_fragment(model: &GearModel) -> String {
     );
     output.push_str("</g>\n");
     output
+}
+
+fn append_glyph_guides(output: &mut String, glyph: GlyphGeometry) {
+    let square_side = 2.0 * glyph.square_half_extent;
+    let _ = writeln!(
+        output,
+        "  <rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"/>",
+        format_number(-glyph.square_half_extent),
+        format_number(-glyph.square_half_extent),
+        format_number(square_side),
+        format_number(square_side),
+    );
+    let _ = writeln!(
+        output,
+        "  <circle cx=\"{}\" cy=\"{}\" r=\"{}\"/>",
+        format_number(glyph.bowl_center.x),
+        format_number(glyph.bowl_center.y),
+        format_number(glyph.bowl_outer_radius),
+    );
+    let _ = writeln!(
+        output,
+        "  <circle cx=\"{}\" cy=\"{}\" r=\"{}\"/>",
+        format_number(glyph.bowl_center.x),
+        format_number(glyph.bowl_center.y),
+        format_number(glyph.bowl_inner_radius),
+    );
+    let _ = writeln!(
+        output,
+        "  <path d=\"M {} L {}\"/>",
+        command_point(glyph.tail_start),
+        command_point(glyph.tail_end),
+    );
+}
+
+fn append_glyph(output: &mut String, glyph: GlyphGeometry) {
+    let square_side = 2.0 * glyph.square_half_extent;
+    let _ = writeln!(output, "<g class=\"glyph\" fill-rule=\"evenodd\">");
+    let _ = writeln!(output, "  <path d=\"{}\"/>", tail_path(glyph));
+    let _ = writeln!(
+        output,
+        "  <rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"/>",
+        format_number(glyph.stem_left),
+        format_number(-glyph.square_half_extent),
+        format_number(glyph.stroke_width),
+        format_number(square_side),
+    );
+    append_bar(output, glyph, glyph.top_bar_top, glyph.top_bar_bottom);
+    append_bar(output, glyph, glyph.middle_bar_top, glyph.middle_bar_bottom);
+    let _ = writeln!(output, "  <path d=\"{}\"/>", bowl_path(glyph));
+    output.push_str("</g>\n");
+}
+
+fn append_bar(output: &mut String, glyph: GlyphGeometry, top: f64, bottom: f64) {
+    let _ = writeln!(
+        output,
+        "  <rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"/>",
+        format_number(glyph.stem_right),
+        format_number(top),
+        format_number(-glyph.stem_right),
+        format_number(bottom - top),
+    );
 }
 
 fn append_circle(output: &mut String, radius: f64, dash: f64, gap: f64) {
@@ -286,23 +351,44 @@ fn tooth_path(model: &GearModel) -> String {
     commands
 }
 
-fn glyph_path(model: &GearModel) -> String {
-    let glyph = model.glyph();
+fn bowl_path(glyph: GlyphGeometry) -> String {
+    let outer_left = Point {
+        x: glyph.bowl_center.x - glyph.bowl_outer_radius,
+        y: glyph.bowl_center.y,
+    };
+    let outer_right = Point {
+        x: glyph.bowl_center.x + glyph.bowl_outer_radius,
+        y: glyph.bowl_center.y,
+    };
+    let inner_left = Point {
+        x: glyph.bowl_center.x - glyph.bowl_inner_radius,
+        y: glyph.bowl_center.y,
+    };
+    let inner_right = Point {
+        x: glyph.bowl_center.x + glyph.bowl_inner_radius,
+        y: glyph.bowl_center.y,
+    };
     format!(
-        "M {} {} V -{} H {} A {} {} 0 0 1 {} {} H {} M {} {} L {} {}",
-        format_number(glyph.stem_x),
-        format_number(glyph.cap),
-        format_number(glyph.cap),
-        format_number(glyph.bowl_x),
-        format_number(glyph.bowl_radius),
-        format_number(glyph.bowl_radius),
-        format_number(glyph.bowl_x),
-        format_number(glyph.middle_y),
-        format_number(glyph.stem_x),
-        format_number(glyph.leg_start.x),
-        format_number(glyph.leg_start.y),
-        format_number(glyph.leg_end.x),
-        format_number(glyph.leg_end.y),
+        "M {} A {outer} {outer} 0 1 0 {} A {outer} {outer} 0 1 0 {} Z \
+         M {} A {inner} {inner} 0 1 0 {} A {inner} {inner} 0 1 0 {} Z",
+        command_point(outer_left),
+        command_point(outer_right),
+        command_point(outer_left),
+        command_point(inner_left),
+        command_point(inner_right),
+        command_point(inner_left),
+        outer = format_number(glyph.bowl_outer_radius),
+        inner = format_number(glyph.bowl_inner_radius),
+    )
+}
+
+fn tail_path(glyph: GlyphGeometry) -> String {
+    let radius = format_number(glyph.tail_arc_radius);
+    format!(
+        "M {} L {} A {radius} {radius} 0 0 1 {} Z",
+        command_point(glyph.tail_start),
+        command_point(glyph.tail_end),
+        command_point(glyph.tail_start),
     )
 }
 
@@ -322,8 +408,9 @@ fn metadata(model: &GearModel) -> String {
     format!(
         "module={};teeth={};pressure-angle={}deg;pitch-radius={};base-radius={};\
          outer-radius={};root-radius={};aperture-radius={};bore-count={};\
-         bore-orbit={};bore-radius={};r-stroke={};gear-stroke={};guide-stroke={};\
-         stroke-hierarchy={}:{}:1;r-golden-ratio={};r-leg-bore={};r-leg-angle={}deg",
+         bore-orbit={};bore-radius={};r-em-square={};r-stroke={};gear-stroke={};\
+         guide-stroke={};stroke-hierarchy={}:{}:1;r-golden-ratio={};\
+         r-tail-sagitta={};r-tail-radius={};r-tail-angle={}deg",
         format_number(model.spec.module),
         model.spec.teeth,
         format_number(model.spec.pressure_angle_degrees),
@@ -335,14 +422,16 @@ fn metadata(model: &GearModel) -> String {
         model.spec.hole_count,
         format_number(model.hole_orbit),
         format_number(model.hole_radius),
+        format_number(2.0 * model.glyph().square_half_extent),
         format_number(model.glyph().stroke_width),
         format_number(model.gear_outline_width),
         format_number(model.construction_guide_width),
         model.spec.teeth,
         model.spec.hole_count,
         format_number(model.glyph().golden_ratio),
-        model.glyph().leg_bore_index,
-        format_number(model.glyph().leg_angle_degrees),
+        format_number(model.glyph().tail_sagitta),
+        format_number(model.glyph().tail_arc_radius),
+        format_number(model.glyph().tail_angle_degrees),
     )
 }
 
@@ -367,27 +456,53 @@ pub(crate) fn render_specification(model: &GearModel, light: &Palette, dark: &Pa
         model.teeth_per_bore_sector(),
         model.flank_samples,
         format_number(model.glyph().golden_ratio),
-        format_number(model.glyph().leg_angle_degrees),
+        format_number(model.glyph().tail_angle_degrees),
         palette_json(light),
         palette_json(dark),
     );
-    document
-        .replace(
-            "    \"stroke_width\": \"aperture_radius/bore_count\",",
-            concat!(
-                "    \"stroke_width\": \"aperture_radius/bore_count\",\n",
-                "    \"gear_outline_width\": \"stroke_width/teeth_per_bore_sector\",\n",
-                "    \"construction_guide_width\": \"gear_outline_width/bore_count\",\n",
-                "    \"stroke_hierarchy\": \"teeth:bore_count:1\",",
-            ),
-        )
-        .replace(
-            "    \"leg_angle\": \"3/4*(360/bore_count)\",",
-            &format!(
-                "    \"leg_bore_index\": {},\n    \"leg_angle\": \"-90+leg_bore_index*(360/bore_count)\",",
-                model.glyph().leg_bore_index
-            ),
-        )
+    let legacy_rules = format!(
+        concat!(
+            "    \"vertical_extent\": \"aperture_radius/golden_ratio\",\n",
+            "    \"stem_axis\": \"-aperture_radius/2\",\n",
+            "    \"bowl_radius\": \"aperture_radius/(2*golden_ratio)\",\n",
+            "    \"stroke_width\": \"aperture_radius/bore_count\",\n",
+            "    \"leg_angle\": \"3/4*(360/bore_count)\",\n",
+            "    \"leg_angle_degrees\": {}",
+        ),
+        format_number(model.glyph().tail_angle_degrees),
+    );
+    document.replace(&legacy_rules, &glyph_rules_json(model))
+}
+
+fn glyph_rules_json(model: &GearModel) -> String {
+    let glyph = model.glyph();
+    format!(
+        concat!(
+            "    \"em_square_side\": \"2*aperture_radius/golden_ratio\",\n",
+            "    \"em_square_side_value\": {},\n",
+            "    \"major_stroke_width\": \"em_square_side/9\",\n",
+            "    \"major_stroke_width_value\": {},\n",
+            "    \"stem_left\": \"-em_square_side/2+major_stroke_width\",\n",
+            "    \"stem_right\": \"stem_left+major_stroke_width\",\n",
+            "    \"bowl_center\": \"[0,-2*em_square_side/9]\",\n",
+            "    \"bowl_outer_radius\": \"5*em_square_side/18\",\n",
+            "    \"bowl_inner_radius\": \"em_square_side/6\",\n",
+            "    \"top_bar\": \"[-em_square_side/2,-em_square_side/2+major_stroke_width]\",\n",
+            "    \"middle_bar\": \"[-major_stroke_width/2,major_stroke_width/2]\",\n",
+            "    \"tail_chord\": \"square_center->lower_right_corner\",\n",
+            "    \"tail_angle_degrees\": {},\n",
+            "    \"tail_sagitta\": \"major_stroke_width\",\n",
+            "    \"tail_arc_radius\": \"tail_chord^2/(8*tail_sagitta)+tail_sagitta/2\",\n",
+            "    \"tail_arc_radius_value\": {},\n",
+            "    \"gear_outline_width\": \"major_stroke_width/teeth_per_bore_sector\",\n",
+            "    \"construction_guide_width\": \"gear_outline_width/bore_count\",\n",
+            "    \"stroke_hierarchy\": \"teeth:bore_count:1\"",
+        ),
+        format_number(2.0 * glyph.square_half_extent),
+        format_number(glyph.stroke_width),
+        format_number(glyph.tail_angle_degrees),
+        format_number(glyph.tail_arc_radius),
+    )
 }
 
 fn palette_json(palette: &Palette) -> String {
@@ -444,6 +559,22 @@ mod tests {
             assert_eq!(fragment.matches("<use href=\"#tooth\"").count(), 30);
             assert!(fragment.contains("transform=\"rotate(12)\""));
             assert!(!tooth_path(&model).contains("NaN"));
+        }
+    }
+
+    #[test]
+    fn r_is_emitted_as_a_filled_geometric_construction() {
+        let model = GearModel::new(Spec::rings());
+        assert!(model.is_ok());
+        if let Ok(model) = model {
+            let fragment = geometry_fragment(&model);
+            assert!(fragment.contains("<g class=\"glyph\" fill-rule=\"evenodd\">"));
+            assert!(fragment.contains(&format!(
+                "A {} {}",
+                super::format_number(model.glyph().tail_arc_radius),
+                super::format_number(model.glyph().tail_arc_radius),
+            )));
+            assert!(!fragment.contains("class=\"glyph\" fill=\"none\""));
         }
     }
 }

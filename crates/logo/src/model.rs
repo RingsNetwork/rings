@@ -76,26 +76,38 @@ pub(crate) struct Point {
 pub(crate) struct GlyphGeometry {
     /// Golden ratio inherited from the regular pentagon.
     pub(crate) golden_ratio: f64,
-    /// Horizontal center of the vertical stem.
-    pub(crate) stem_x: f64,
-    /// Symmetric cap distance above and below the origin.
-    pub(crate) cap: f64,
-    /// Horizontal tangent point of the semicircular bowl.
-    pub(crate) bowl_x: f64,
-    /// Vertical tangent point of the bowl and middle bar.
-    pub(crate) middle_y: f64,
-    /// Radius of the exact semicircular bowl.
-    pub(crate) bowl_radius: f64,
-    /// Start of the pentagon-derived diagonal.
-    pub(crate) leg_start: Point,
-    /// End of the pentagon-derived diagonal.
-    pub(crate) leg_end: Point,
-    /// Uniform glyph stroke.
+    /// Half-side of the square that contains the complete letterform.
+    pub(crate) square_half_extent: f64,
+    /// Left edge of the vertical stem.
+    pub(crate) stem_left: f64,
+    /// Right edge of the vertical stem.
+    pub(crate) stem_right: f64,
+    /// Shared center of the circular bowl boundaries.
+    pub(crate) bowl_center: Point,
+    /// Outer radius of the circular bowl.
+    pub(crate) bowl_outer_radius: f64,
+    /// Inner radius of the circular bowl.
+    pub(crate) bowl_inner_radius: f64,
+    /// Top edge of the upper connector.
+    pub(crate) top_bar_top: f64,
+    /// Bottom edge of the upper connector.
+    pub(crate) top_bar_bottom: f64,
+    /// Top edge of the middle connector.
+    pub(crate) middle_bar_top: f64,
+    /// Bottom edge of the middle connector.
+    pub(crate) middle_bar_bottom: f64,
+    /// Start of the curvilinear tail at the square center.
+    pub(crate) tail_start: Point,
+    /// End of the curvilinear tail at the lower-right square corner.
+    pub(crate) tail_end: Point,
+    /// Maximum distance between the tail arc and its diagonal chord.
+    pub(crate) tail_sagitta: f64,
+    /// Radius of the circular tail boundary.
+    pub(crate) tail_arc_radius: f64,
+    /// Major glyph stroke, one ninth of the em square.
     pub(crate) stroke_width: f64,
-    /// Bore whose radial axis determines the diagonal leg.
-    pub(crate) leg_bore_index: u32,
-    /// Diagonal angle aligned with the lower-right bore.
-    pub(crate) leg_angle_degrees: f64,
+    /// Angle of the square diagonal that forms the tail chord.
+    pub(crate) tail_angle_degrees: f64,
 }
 
 /// Validated radii, phases, and curves for one mark.
@@ -145,7 +157,7 @@ impl GearModel {
         let aperture_radius = 2.0 * f64::from(spec.hole_count) * spec.module;
         let hole_orbit = aperture_radius + 2.0 * spec.module;
         let hole_radius = f64::from(spec.hole_count - 1) * spec.module / f64::from(spec.hole_count);
-        let glyph_stroke_width = aperture_radius / f64::from(spec.hole_count);
+        let glyph_stroke_width = glyph_square_side(aperture_radius) / 9.0;
         let teeth_per_bore_sector = spec.teeth / spec.hole_count;
         let gear_outline_width = glyph_stroke_width / f64::from(teeth_per_bore_sector);
         let construction_guide_width = gear_outline_width / f64::from(spec.hole_count);
@@ -212,32 +224,47 @@ impl GearModel {
             .map(move |index| Self::point(self.hole_orbit, -PI / 2.0 + f64::from(index) * sector))
     }
 
-    /// Returns the central R from the aperture and pentagonal golden ratio.
+    /// Returns the central R as a square-and-circle construction.
     pub(crate) fn glyph(&self) -> GlyphGeometry {
-        let golden_ratio = (1.0 + 5.0_f64.sqrt()) / 2.0;
-        let bore_sector = 360.0 / f64::from(self.spec.hole_count);
-        let leg_bore_index = self.spec.hole_count / 2;
-        let leg_angle_degrees = -90.0 + f64::from(leg_bore_index) * bore_sector;
-        let leg_angle = leg_angle_degrees.to_radians();
-        let cap = self.aperture_radius / golden_ratio;
-        let leg_start = Point { x: 0.0, y: 0.0 };
-        let leg_end = Point {
-            x: cap / leg_angle.tan(),
-            y: cap,
+        let golden_ratio = golden_ratio();
+        let square_side = glyph_square_side(self.aperture_radius);
+        let square_half_extent = square_side / 2.0;
+        let stroke_width = square_side / 9.0;
+        let stem_left = -square_half_extent + stroke_width;
+        let stem_right = stem_left + stroke_width;
+        let bowl_center = Point {
+            x: 0.0,
+            y: -2.0 * square_side / 9.0,
         };
+        let bowl_outer_radius = 5.0 * square_side / 18.0;
+        let bowl_inner_radius = square_side / 6.0;
+        let tail_start = Point { x: 0.0, y: 0.0 };
+        let tail_end = Point {
+            x: square_half_extent,
+            y: square_half_extent,
+        };
+        let tail_sagitta = stroke_width;
+        let tail_chord_squared = 2.0 * square_half_extent.powi(2);
+        let tail_arc_radius = tail_chord_squared / (8.0 * tail_sagitta) + tail_sagitta / 2.0;
 
         GlyphGeometry {
             golden_ratio,
-            stem_x: -self.aperture_radius / 2.0,
-            cap,
-            bowl_x: 0.0,
-            middle_y: 0.0,
-            bowl_radius: cap / 2.0,
-            leg_start,
-            leg_end,
-            stroke_width: self.aperture_radius / f64::from(self.spec.hole_count),
-            leg_bore_index,
-            leg_angle_degrees,
+            square_half_extent,
+            stem_left,
+            stem_right,
+            bowl_center,
+            bowl_outer_radius,
+            bowl_inner_radius,
+            top_bar_top: -square_half_extent,
+            top_bar_bottom: -square_half_extent + stroke_width,
+            middle_bar_top: -stroke_width / 2.0,
+            middle_bar_bottom: stroke_width / 2.0,
+            tail_start,
+            tail_end,
+            tail_sagitta,
+            tail_arc_radius,
+            stroke_width,
+            tail_angle_degrees: 45.0,
         }
     }
 
@@ -245,6 +272,14 @@ impl GearModel {
     pub(crate) fn teeth_per_bore_sector(&self) -> u32 {
         self.spec.teeth / self.spec.hole_count
     }
+}
+
+fn golden_ratio() -> f64 {
+    (1.0 + 5.0_f64.sqrt()) / 2.0
+}
+
+fn glyph_square_side(aperture_radius: f64) -> f64 {
+    2.0 * aperture_radius / golden_ratio()
 }
 
 #[derive(Clone, Copy)]
@@ -346,40 +381,61 @@ mod tests {
     }
 
     #[test]
-    fn glyph_bowl_is_tangent_and_leg_aligns_with_lower_right_bore() {
+    fn glyph_boundaries_are_square_and_circle_intersections() {
         let model = GearModel::new(Spec::rings());
         assert!(model.is_ok());
         if let Ok(model) = model {
             let glyph = model.glyph();
-            assert!((2.0 * glyph.bowl_radius - (glyph.cap + glyph.middle_y)).abs() < 1e-9);
-            assert!((glyph.cap * glyph.golden_ratio - model.aperture_radius).abs() < 1e-9);
-            assert!((glyph.stem_x + model.aperture_radius / 2.0).abs() < 1e-9);
-            assert!(glyph.bowl_x.abs() < 1e-9);
-            assert!(glyph.middle_y.abs() < 1e-9);
-            assert!(glyph.leg_start.x.abs() < 1e-9 && glyph.leg_start.y.abs() < 1e-9);
             assert!(
-                (glyph.stroke_width - model.aperture_radius / f64::from(model.spec.hole_count))
-                    .abs()
+                (glyph.square_half_extent * glyph.golden_ratio - model.aperture_radius).abs()
                     < 1e-9
             );
-            assert!((glyph.leg_angle_degrees - 54.0).abs() < 1e-9);
-            let angle = (glyph.leg_end.y - glyph.leg_start.y)
-                .atan2(glyph.leg_end.x - glyph.leg_start.x)
+            let square_side = 2.0 * glyph.square_half_extent;
+            assert!((9.0 * glyph.stroke_width - square_side).abs() < 1e-9);
+            assert!((glyph.stem_right - glyph.stem_left - glyph.stroke_width).abs() < 1e-9);
+            assert!(
+                (glyph.stem_right - (glyph.bowl_center.x - glyph.bowl_outer_radius)).abs() < 1e-9
+            );
+            assert!(
+                (glyph.bowl_outer_radius - glyph.bowl_inner_radius - glyph.stroke_width).abs()
+                    < 1e-9
+            );
+            assert!(
+                (glyph.bowl_center.y - glyph.bowl_outer_radius - glyph.top_bar_top).abs() < 1e-9
+            );
+            assert!(
+                (glyph.bowl_center.y - glyph.bowl_inner_radius - glyph.top_bar_bottom).abs() < 1e-9
+            );
+            assert!(
+                (glyph.bowl_center.y + glyph.bowl_inner_radius - glyph.middle_bar_top).abs() < 1e-9
+            );
+            assert!(
+                (glyph.bowl_center.y + glyph.bowl_outer_radius - glyph.middle_bar_bottom).abs()
+                    < 1e-9
+            );
+        }
+    }
+
+    #[test]
+    fn glyph_tail_is_square_diagonal_with_one_stroke_sagitta() {
+        let model = GearModel::new(Spec::rings());
+        assert!(model.is_ok());
+        if let Ok(model) = model {
+            let glyph = model.glyph();
+            assert!(glyph.tail_start.x.abs() < 1e-9 && glyph.tail_start.y.abs() < 1e-9);
+            assert!((glyph.tail_end.x - glyph.square_half_extent).abs() < 1e-9);
+            assert!((glyph.tail_end.y - glyph.square_half_extent).abs() < 1e-9);
+            let angle = (glyph.tail_end.y - glyph.tail_start.y)
+                .atan2(glyph.tail_end.x - glyph.tail_start.x)
                 .to_degrees();
-            assert!((angle - glyph.leg_angle_degrees).abs() < 1e-9);
-            let mut aligned_bore_found = false;
-            for (index, bore) in (0..model.spec.hole_count).zip(model.holes()) {
-                if index == glyph.leg_bore_index {
-                    let leg_x = glyph.leg_end.x - glyph.leg_start.x;
-                    let leg_y = glyph.leg_end.y - glyph.leg_start.y;
-                    let cross_product = leg_x * bore.y - leg_y * bore.x;
-                    let dot_product = leg_x * bore.x + leg_y * bore.y;
-                    assert!(cross_product.abs() < 1e-9);
-                    assert!(dot_product > 0.0);
-                    aligned_bore_found = true;
-                }
-            }
-            assert!(aligned_bore_found);
+            assert!((angle - glyph.tail_angle_degrees).abs() < 1e-9);
+            assert!((glyph.tail_sagitta - glyph.stroke_width).abs() < 1e-9);
+            let chord_x = glyph.tail_end.x - glyph.tail_start.x;
+            let chord_y = glyph.tail_end.y - glyph.tail_start.y;
+            let half_chord = chord_x.hypot(chord_y) / 2.0;
+            let sagitta =
+                glyph.tail_arc_radius - (glyph.tail_arc_radius.powi(2) - half_chord.powi(2)).sqrt();
+            assert!((sagitta - glyph.tail_sagitta).abs() < 1e-9);
         }
     }
 }
