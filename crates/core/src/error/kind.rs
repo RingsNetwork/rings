@@ -802,6 +802,15 @@ pub enum Error {
     #[error("Message decryption failed")]
     MessageDecryptionFailed(String),
 
+    /// An ElGamal AEAD envelope carries the wrong number of wrapped-key blocks.
+    #[error("ElGamal AEAD wrapped-key block count mismatch: expected {expected}, actual {actual}")]
+    AeadWrappedKeyBlockCount {
+        /// Number of blocks required to encode the fixed-size AEAD key.
+        expected: usize,
+        /// Number of blocks supplied by the envelope.
+        actual: usize,
+    },
+
     /// Message has {0} bytes which is too large
     #[error("Message has {0} bytes which is too large")]
     MessageTooLarge(usize),

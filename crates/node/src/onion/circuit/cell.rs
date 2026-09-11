@@ -4,9 +4,10 @@
 //! the already-visible bucket across a circuit edge so that shrinking cells cannot reveal route
 //! position. An authenticated hostile peer can deliberately choose a larger bucket for a small
 //! hidden payload; a relay cannot canonicalize that choice without weakening the fixed-bucket
-//! privacy contract. The crypto admission gate therefore charges `bucket.plaintext_len()` before
-//! decryption. For a byte budget `L` and visible bucket size `b`, at most `floor(L / b)` such cells
-//! can be admitted in one limiter window, independent of their hidden encoded lengths.
+//! privacy contract. The wire decoder first proves that the ElGamal-wrapped key has its fixed block
+//! count; the crypto admission gate can then charge `bucket.plaintext_len()` before decryption. For
+//! a byte budget `L` and visible bucket size `b`, at most `floor(L / b)` such cells can be admitted
+//! in one limiter window, independent of their hidden encoded lengths.
 
 use bytes::Bytes;
 use rand::CryptoRng;

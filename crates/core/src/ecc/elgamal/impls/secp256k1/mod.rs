@@ -90,12 +90,13 @@ impl Field {
 
 const AEAD_VERSION: u8 = 1;
 const AEAD_KEY_LEN: usize = 32;
+const AEAD_WRAPPED_KEY_BLOCKS: usize = AEAD_KEY_LEN.div_ceil(PLAINTEXT_BLOCK_SIZE);
 const AEAD_NONCE_LEN: usize = 12;
 const AEAD_HKDF_SALT: &[u8] = b"rings-core:secp256k1-elgamal-aead:salt:v1";
 const AEAD_HKDF_INFO: &[u8] = b"rings-core:secp256k1-elgamal-aead:chacha20poly1305:v1";
 
 /// KEM/DEM ciphertext using secp256k1 ElGamal to wrap a ChaCha20-Poly1305 key.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct AeadCiphertext {
     /// Version of the AEAD envelope format.
     pub version: u8,
@@ -105,6 +106,48 @@ pub struct AeadCiphertext {
     pub nonce: [u8; AEAD_NONCE_LEN],
     /// ChaCha20-Poly1305 ciphertext, including the authentication tag.
     pub ciphertext: Vec<u8>,
+}
+
+impl AeadCiphertext {
+    /// Prove that the envelope carries exactly the blocks needed for one fixed-size AEAD key.
+    ///
+    /// Deserialization calls this before producing an envelope, and [`decrypt_aead`] repeats the
+    /// check as defense in depth for values constructed in memory.
+    pub fn validate_wrapped_key(&self) -> Result<()> {
+        let actual = self.encrypted_key.len();
+        if actual != AEAD_WRAPPED_KEY_BLOCKS {
+            return Err(Error::AeadWrappedKeyBlockCount {
+                expected: AEAD_WRAPPED_KEY_BLOCKS,
+                actual,
+            });
+        }
+        Ok(())
+    }
+}
+
+impl<'de> Deserialize<'de> for AeadCiphertext {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where D: serde::Deserializer<'de> {
+        #[derive(Deserialize)]
+        struct WireEnvelope {
+            version: u8,
+            encrypted_key: Vec<CiphertextBlock>,
+            nonce: [u8; AEAD_NONCE_LEN],
+            ciphertext: Vec<u8>,
+        }
+
+        let envelope = WireEnvelope::deserialize(deserializer)?;
+        let sealed = Self {
+            version: envelope.version,
+            encrypted_key: envelope.encrypted_key,
+            nonce: envelope.nonce,
+            ciphertext: envelope.ciphertext,
+        };
+        sealed
+            .validate_wrapped_key()
+            .map_err(serde::de::Error::custom)?;
+        Ok(sealed)
+    }
 }
 
 #[derive(Serialize)]
@@ -440,6 +483,7 @@ pub fn decrypt_aead(
         )));
     }
 
+    sealed.validate_wrapped_key()?;
     let key_material = Zeroizing::new(decrypt_bytes(&sealed.encrypted_key, recipient_secret)?);
     let key = derive_aead_key(key_material.as_slice(), AeadErrorSide::Decrypt)?;
     let associated_data = aead_associated_data(&sealed.encrypted_key, aad)?;

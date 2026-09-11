@@ -147,3 +147,36 @@ pub(super) fn encode_local_message(message: OnionLocalMessage) -> Result<Bytes> 
         .map(Bytes::from)
         .map_err(|_| Error::EncodeError)
 }
+
+#[cfg(test)]
+mod tests {
+    use rings_core::ecc::SecretKey;
+    use rings_core::session::SessionSk;
+
+    use super::*;
+    use crate::onion::circuit::cell::seal_message;
+
+    #[test]
+    fn test_decode_rejects_oversized_wrapped_key_before_crypto_admission() {
+        let sender = SessionSk::new_with_seckey(&SecretKey::random()).expect("sender session");
+        let recipient =
+            SessionSk::new_with_seckey(&SecretKey::random()).expect("recipient session");
+        let payload = seal_message(
+            &OnionWireMessage::Cover,
+            recipient.session_public_key(),
+            Some(OnionCellBucket::KiB4),
+        )
+        .expect("seal cell");
+        let mut cell = rings_codec::deserialize::<OnionWireCell>(&payload).expect("decode cell");
+        let extra_block = cell
+            .sealed
+            .encrypted_key
+            .first()
+            .cloned()
+            .expect("wrapped-key block");
+        cell.sealed.encrypted_key.push(extra_block);
+        let oversized = rings_codec::serialize(&cell).expect("encode oversized cell");
+
+        assert!(decode_wire_message(sender.account_did(), &oversized).is_err());
+    }
+}
