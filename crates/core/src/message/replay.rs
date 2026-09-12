@@ -452,6 +452,7 @@ mod tests {
         TransactionDigest::new([value; 32])
     }
 
+    #[cfg(not(target_family = "wasm"))]
     fn stream(destination: Did) -> StreamKey {
         StreamKey::new(7, SecretKey::random().address().into(), destination)
     }
@@ -564,6 +565,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(not(target_family = "wasm"))]
     #[tokio::test]
     async fn sender_allocators_are_independent_per_destination() -> Result<()> {
         let origin: Did = SecretKey::random().address().into();
@@ -579,6 +581,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(not(target_family = "wasm"))]
     #[tokio::test]
     async fn sender_and_receiver_state_survive_runtime_recreation() -> Result<()> {
         let destination: Did = SecretKey::random().address().into();
@@ -601,6 +604,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(not(target_family = "wasm"))]
     #[tokio::test]
     async fn counter_exhaustion_fails_closed() -> Result<()> {
         let key = stream(SecretKey::random().address().into());
@@ -619,6 +623,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(not(target_family = "wasm"))]
     #[tokio::test]
     async fn load_failure_fails_closed_and_is_counted() {
         let runtime = TransactionReplay::new(Box::new(FailingStorage));
@@ -634,6 +639,7 @@ mod tests {
         assert_eq!(runtime.counters().persistence_failure, 1);
     }
 
+    #[cfg(not(target_family = "wasm"))]
     #[tokio::test]
     async fn store_failure_fails_closed_before_admission_and_is_counted() {
         let runtime = TransactionReplay::new(Box::new(StoreFailingStorage));
@@ -649,6 +655,7 @@ mod tests {
         assert_eq!(runtime.counters().persistence_failure, 1);
     }
 
+    #[cfg(not(target_family = "wasm"))]
     #[tokio::test]
     async fn new_sender_stream_fails_closed_at_the_table_bound() -> Result<()> {
         assert_eq!(TRANSACTION_REPLAY_STREAM_CAPACITY, 4096);
@@ -672,8 +679,10 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(not(target_family = "wasm"))]
     struct FailingStorage;
 
+    #[cfg(not(target_family = "wasm"))]
     #[async_trait::async_trait]
     impl KvStorageInterface<ReplaySnapshot> for FailingStorage {
         async fn get(&self, _key: &str) -> Result<Option<ReplaySnapshot>> {
@@ -701,8 +710,10 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_family = "wasm"))]
     struct StoreFailingStorage;
 
+    #[cfg(not(target_family = "wasm"))]
     #[async_trait::async_trait]
     impl KvStorageInterface<ReplaySnapshot> for StoreFailingStorage {
         async fn get(&self, _key: &str) -> Result<Option<ReplaySnapshot>> {
@@ -730,8 +741,10 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_family = "wasm"))]
     struct SharedStorage(std::sync::Arc<crate::storage::MemStorage<ReplaySnapshot>>);
 
+    #[cfg(not(target_family = "wasm"))]
     #[async_trait::async_trait]
     impl KvStorageInterface<ReplaySnapshot> for SharedStorage {
         async fn get(&self, key: &str) -> Result<Option<ReplaySnapshot>> {
