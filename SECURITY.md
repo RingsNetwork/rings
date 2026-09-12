@@ -129,6 +129,27 @@ The obligations of this layer are leak-minimization obligations:
 - every signature bound to `network_id` and to a per-message-family domain tag, so
   an observation in one overlay is not a credential in another.
 
+### Transaction replay boundary
+
+Signed transactions use a destination-scoped sequence stream keyed by `network_id`, the origin
+account DID recovered from the delegated session, and the final destination DID. The final
+destination persists a fixed 32-sequence acceptance window before application validation and
+handler dispatch. Exact duplicates, conflicting transactions at one sequence, and sequences
+below the retained window are rejected as separate typed verdicts. Session-key rotation does not
+reset the account stream, sender timestamps do not order it, and intermediate Chord relays keep no
+origin replay state.
+
+This is an at-most-once dispatch guarantee only while the replay store is retained. A crash after
+the receiver commits a sequence but before handler dispatch can lose that event; replay storage
+and application effects are not one transaction, so exactly-once effects are not claimed. A gap
+is allowed and proves neither omission nor relay fault. Deleting the replay store deletes the
+guarantee, and there is no reset/incarnation protocol: capacity and persistence failures fail
+closed instead of evicting an old stream. Native daemon and browser-provider defaults use durable
+stores; custom builders must supply `ReplayStorage` to preserve the guarantee across restart.
+Concurrent devices or processes for one account/destination must delegate to one serialized
+allocator; sharing only the underlying store is not an atomic multi-writer protocol and may
+produce a typed fork.
+
 A leak on this layer is a communication-layer bug. Cover traffic and circuits do not
 fix it: they run above the relay and inherit whatever it exposes.
 

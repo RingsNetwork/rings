@@ -11,6 +11,7 @@ use rings_core::dht::EntryStorage;
 #[cfg(feature = "node")]
 use rings_core::lifecycle::StopToken;
 use rings_core::measure::PeerMeasurement;
+use rings_core::message::ReplayStorage;
 use rings_core::session::SessionSkBuilder;
 use rings_core::storage::MemStorage;
 use rings_core::swarm::callback::SharedSwarmCallback;
@@ -152,17 +153,20 @@ impl Provider {
         entry_storage: Option<EntryStorage>,
         measure_storage: Option<MeasureStorage>,
         onion_entry_guard_storage: Option<OnionEntryGuardStorage>,
+        replay_storage: Option<ReplayStorage>,
     ) -> Result<Provider> {
         let entry_storage = entry_storage.unwrap_or_else(|| Box::new(MemStorage::new()));
         let measure_storage = measure_storage.unwrap_or_else(|| Box::new(MemStorage::new()));
         let onion_entry_guard_storage =
             onion_entry_guard_storage.unwrap_or_else(|| Box::new(MemStorage::new()));
+        let replay_storage = replay_storage.unwrap_or_else(|| Box::new(MemStorage::new()));
 
         let measure = PeriodicMeasure::new(measure_storage).await?;
 
         let processor_builder = ProcessorBuilder::from_config(&config)?
             .storage(entry_storage)
             .onion_entry_guard_storage(onion_entry_guard_storage)
+            .replay_storage(replay_storage)
             .measure(measure);
 
         let processor = Arc::new(processor_builder.build()?);
@@ -199,6 +203,7 @@ impl Provider {
         entry_storage: Option<EntryStorage>,
         measure_storage: Option<MeasureStorage>,
         onion_entry_guard_storage: Option<OnionEntryGuardStorage>,
+        replay_storage: Option<ReplayStorage>,
     ) -> Result<Provider> {
         Self::new_provider_internal_with_config(
             network_id,
@@ -210,6 +215,7 @@ impl Provider {
             entry_storage,
             measure_storage,
             onion_entry_guard_storage,
+            replay_storage,
             core::convert::identity,
         )
         .await
@@ -226,6 +232,7 @@ impl Provider {
         entry_storage: Option<EntryStorage>,
         measure_storage: Option<MeasureStorage>,
         onion_entry_guard_storage: Option<OnionEntryGuardStorage>,
+        replay_storage: Option<ReplayStorage>,
         configure: impl FnOnce(ProcessorConfig) -> ProcessorConfig,
     ) -> Result<Provider> {
         let mut sk_builder = SessionSkBuilder::new(account, account_type);
@@ -243,6 +250,7 @@ impl Provider {
             entry_storage,
             measure_storage,
             onion_entry_guard_storage,
+            replay_storage,
         )
         .await
     }

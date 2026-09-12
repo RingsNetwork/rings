@@ -242,6 +242,7 @@ pub(super) fn storage_sync_report_payload(
     let transaction = Transaction::new(
         destination,
         request.transaction.tx_id,
+        request.transaction.sequence,
         Message::SyncEntriesWithSuccessorReport(report),
         signer,
     )?;

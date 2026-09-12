@@ -55,6 +55,7 @@ use tokio::task::JoinSet;
 
 const FOREGROUND_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
 const ONION_ENTRY_GUARD_STORAGE_CAPACITY: u32 = 64 * 1024;
+const TRANSACTION_REPLAY_STORAGE_CAPACITY: u32 = 16 * 1024 * 1024;
 
 fn onion_entry_guard_storage_path(data_storage_path: &str) -> String {
     let data_path = Path::new(data_storage_path);
@@ -64,6 +65,18 @@ fn onion_entry_guard_storage_path(data_storage_path: &str) -> String {
         .unwrap_or_else(|| Path::new("."));
     parent
         .join("onion-entry-guards")
+        .to_string_lossy()
+        .to_string()
+}
+
+fn transaction_replay_storage_path(data_storage_path: &str) -> String {
+    let data_path = Path::new(data_storage_path);
+    let parent = data_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    parent
+        .join("transaction-replay-v2")
         .to_string_lossy()
         .to_string()
 }
@@ -868,6 +881,13 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
         )
         .await?,
     );
+    let per_transaction_replay_storage = Box::new(
+        FileStorage::new_with_cap_and_path(
+            TRANSACTION_REPLAY_STORAGE_CAPACITY,
+            transaction_replay_storage_path(&data_storage.path),
+        )
+        .await?,
+    );
 
     let measure = PeriodicMeasure::new(per_measure_storage).await?;
 
@@ -875,6 +895,7 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
         ProcessorBuilder::from_config(&pc)?
             .storage(per_data_storage)
             .onion_entry_guard_storage(per_onion_entry_guard_storage)
+            .replay_storage(per_transaction_replay_storage)
             .measure(measure)
             .reassembly_limits(args.reassembly_profile.limits())
             .build()?,
@@ -1326,6 +1347,7 @@ mod tests {
     use super::await_gateway_startup;
     use super::await_task_cleanup;
     use super::onion_entry_guard_storage_path;
+    use super::transaction_replay_storage_path;
     use super::Cli;
 
     fn parse_without_log_level_env<const N: usize>(args: [&str; N]) -> Result<Cli, clap::Error> {
@@ -1378,6 +1400,18 @@ mod tests {
         assert_eq!(
             onion_entry_guard_storage_path("/tmp/rings/data"),
             "/tmp/rings/onion-entry-guards"
+        );
+    }
+
+    #[test]
+    fn test_transaction_replay_storage_is_sibling_of_data_storage() {
+        assert_eq!(
+            transaction_replay_storage_path(".rings/data"),
+            ".rings/transaction-replay-v2"
+        );
+        assert_eq!(
+            transaction_replay_storage_path("/tmp/rings/data"),
+            "/tmp/rings/transaction-replay-v2"
         );
     }
 

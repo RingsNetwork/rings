@@ -460,14 +460,19 @@ async fn test_inbound_mailbox_reserves_control_capacity_under_application_satura
         let key = SecretKey::random();
         let peer: Did = key.address().into();
         let session = SessionSk::new_with_seckey(&key)?;
-        let message = MessagePayload::new_send(
-            Message::custom(b"bounded-inbound-mailbox")?,
-            MessageSigner::new(&session, TEST_NETWORK_ID),
-            transport.dht.did,
-            transport.dht.did,
-        )?
-        .to_wire()?;
-        application_inputs.push((peer.to_string(), message));
+        let mut messages = Vec::with_capacity(inbound_peer_capacity_for_test());
+        for _ in 0..inbound_peer_capacity_for_test() {
+            messages.push(
+                MessagePayload::new_send(
+                    Message::custom(b"bounded-inbound-mailbox")?,
+                    MessageSigner::new(&session, TEST_NETWORK_ID),
+                    transport.dht.did,
+                    transport.dht.did,
+                )?
+                .to_wire()?,
+            );
+        }
+        application_inputs.push((peer.to_string(), messages));
     }
     let control_key = SecretKey::random();
     let control_peer: Did = control_key.address().into();
@@ -489,10 +494,9 @@ async fn test_inbound_mailbox_reserves_control_capacity_under_application_satura
     let control_cid = control_peer.to_string();
     let mut deliveries = Vec::new();
 
-    for (cid, message) in application_inputs {
-        for _ in 0..inbound_peer_capacity_for_test() {
+    for (cid, messages) in application_inputs {
+        for message in messages {
             let callback = Arc::clone(&callback);
-            let message = message.clone();
             let cid = cid.clone();
             deliveries.push(tokio::spawn(async move {
                 callback

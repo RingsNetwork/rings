@@ -51,6 +51,7 @@ use crate::message::ConnectNodeSend;
 use crate::message::DhtProtocolMode;
 use crate::message::Message;
 use crate::message::PayloadSender;
+use crate::message::TransactionReplay;
 use crate::session::Session;
 use crate::session::SessionSk;
 use crate::swarm::callback::InnerSwarmCallback;
@@ -68,6 +69,7 @@ mod readiness;
 mod retention;
 mod storage_lookup;
 mod storage_sync;
+mod transaction_replay;
 #[cfg(all(test, not(target_family = "wasm")))]
 pub(crate) use storage_sync::StorageSyncBatch;
 #[cfg(all(test, not(target_family = "wasm")))]
@@ -144,6 +146,7 @@ pub struct SwarmTransport {
     outbound_schedulers: OutboundSchedulers,
     measured_disconnects: Mutex<MeasuredDisconnectMap>,
     measure: Option<MeasureImpl>,
+    transaction_replay: Arc<TransactionReplay>,
 }
 
 type MeasuredDisconnectMap = BTreeMap<Did, MeasuredDisconnect>;
@@ -234,6 +237,7 @@ impl SwarmTransport {
         session_sk: SessionSk,
         dht: Arc<PeerRing>,
         measure: Option<MeasureImpl>,
+        transaction_replay: Arc<TransactionReplay>,
         settings: SwarmTransportSettings,
     ) -> Self {
         let lifecycle_bounds = self::retention::lifecycle_bounds(dht.successors().capacity());
@@ -266,6 +270,7 @@ impl SwarmTransport {
             outbound_schedulers: OutboundSchedulers::new(measure.clone()),
             measured_disconnects: Mutex::new(BTreeMap::new()),
             measure,
+            transaction_replay,
         }
     }
 

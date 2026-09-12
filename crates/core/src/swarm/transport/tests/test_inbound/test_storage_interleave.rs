@@ -129,6 +129,9 @@ async fn test_inbound_storage_batch_yields_to_control_between_persistence_steps(
         local_session,
         dht,
         Some(Arc::new(RecordingMeasure::default())),
+        Arc::new(crate::message::TransactionReplay::new(Box::new(
+            crate::storage::MemStorage::new(),
+        ))),
         SwarmTransportSettings::new(
             1,
             VirtualNodeConfig::disabled(),

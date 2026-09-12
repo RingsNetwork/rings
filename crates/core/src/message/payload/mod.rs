@@ -2,7 +2,12 @@
 
 use std::fmt;
 use std::io::Write;
+use std::num::NonZeroU64;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::LazyLock;
+#[cfg(test)]
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -22,6 +27,8 @@ use super::protocols::MessageRelay;
 use super::protocols::MessageSigner;
 use super::protocols::MessageVerification;
 use super::protocols::MessageVerificationExt;
+use super::replay::StreamKey;
+use super::replay::TransactionDigest;
 use crate::dht::Chord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
@@ -34,11 +41,32 @@ use crate::session::SessionSk;
 
 /// Message family of the [`Transaction`] signature: the origin's authorship of a message.
 const TRANSACTION_DOMAIN_TAG: DomainTag =
-    domain_tag!("rings-core:message-verification:transaction:v1");
+    domain_tag!("rings-core:message-verification:transaction:v2");
 /// Message family of the [`MessagePayload`] signature: one hop's authorship of a forwarded
 /// envelope. Distinct from [`TRANSACTION_DOMAIN_TAG`] so the two signatures over the same
 /// transaction hash are never interchangeable.
 const PAYLOAD_DOMAIN_TAG: DomainTag = domain_tag!("rings-core:message-verification:payload:v1");
+/// Prefix that makes the v2 transaction cutover unambiguous before decoding any legacy shape.
+const TRANSACTION_V2_WIRE_PREFIX: &[u8] = b"RINGS-TX-V2\0";
+#[cfg(test)]
+static TEST_TRANSACTION_SEQUENCES: LazyLock<Mutex<std::collections::BTreeMap<StreamKey, u64>>> =
+    LazyLock::new(|| Mutex::new(std::collections::BTreeMap::new()));
+
+#[cfg(test)]
+fn next_test_transaction_sequence(key: StreamKey) -> Result<u64> {
+    let mut sequences = TEST_TRANSACTION_SEQUENCES
+        .lock()
+        .map_err(|_| Error::TransactionReplayStateInvalid)?;
+    let Some(last) = sequences.get_mut(&key) else {
+        sequences.insert(key, 0);
+        return Ok(0);
+    };
+    let next = last
+        .checked_add(1)
+        .ok_or(Error::TransactionSequenceExhausted { key })?;
+    *last = next;
+    Ok(next)
+}
 
 /// Compresses the given data byte slice using the gzip algorithm with the specified compression level.
 pub fn encode_data_gzip(data: &Bytes, level: u8) -> Result<Bytes> {
@@ -72,11 +100,12 @@ where T: DeserializeOwned {
     Ok(m)
 }
 
-fn hash_transaction(destination: Did, tx_id: uuid::Uuid, data: &[u8]) -> [u8; 32] {
+fn hash_transaction(destination: Did, tx_id: uuid::Uuid, sequence: u64, data: &[u8]) -> [u8; 32] {
     let mut msg = vec![];
 
     msg.extend_from_slice(destination.as_bytes());
     msg.extend_from_slice(tx_id.as_bytes());
+    msg.extend_from_slice(&sequence.to_be_bytes());
     msg.extend_from_slice(data);
 
     keccak256(&msg)
@@ -97,6 +126,8 @@ pub struct Transaction {
     /// The transaction ID.
     /// Remote peer should use same tx_id when response.
     pub tx_id: uuid::Uuid,
+    /// Monotonic sequence inside the origin account's destination-scoped stream.
+    pub sequence: u64,
     /// data
     pub data: Vec<u8>,
     /// This field holds a signature from a node,
@@ -109,6 +140,7 @@ impl fmt::Debug for Transaction {
         f.debug_struct("Transaction")
             .field("destination", &self.destination)
             .field("tx_id", &self.tx_id)
+            .field("sequence", &self.sequence)
             .field("data_bytes", &self.data.len())
             .finish()
     }
@@ -142,6 +174,7 @@ impl Transaction {
     pub fn new<T>(
         destination: Did,
         tx_id: uuid::Uuid,
+        sequence: u64,
         data: T,
         signer: MessageSigner<&SessionSk>,
     ) -> Result<Self>
@@ -149,11 +182,12 @@ impl Transaction {
         T: Serialize,
     {
         let data = rings_codec::serialize(&data).map_err(Error::CodecSerialize)?;
-        let msg_hash = hash_transaction(destination, tx_id, &data);
+        let msg_hash = hash_transaction(destination, tx_id, sequence, &data);
         let verification = signer.sign(TRANSACTION_DOMAIN_TAG, &msg_hash)?;
         Ok(Self {
             destination,
             tx_id,
+            sequence,
             data,
             verification,
         })
@@ -164,6 +198,17 @@ impl Transaction {
     /// is routed to; it is never the session id, which names a key, not a node.
     pub fn origin(&self) -> Did {
         self.verification.session.account_did()
+    }
+
+    /// Destination-scoped stream identity under the receiver's overlay.
+    pub fn stream_key(&self, network_id: u32) -> StreamKey {
+        StreamKey::new(network_id, self.origin(), self.destination)
+    }
+
+    /// Digest of this exact signed transaction, including its delegated session and signature.
+    pub fn digest(&self) -> Result<TransactionDigest> {
+        let wire = rings_codec::serialize(self).map_err(Error::CodecSerialize)?;
+        Ok(TransactionDigest::new(keccak256(&wire)))
     }
 
     /// Deserializes the data field into a `T` instance.
@@ -184,6 +229,7 @@ impl MessagePayload {
         let msg_hash = hash_transaction(
             transaction.destination,
             transaction.tx_id,
+            transaction.sequence,
             &transaction.data,
         );
         let verification = signer.sign(PAYLOAD_DOMAIN_TAG, &msg_hash)?;
@@ -195,7 +241,24 @@ impl MessagePayload {
     }
 
     /// Helps to create sending message from data: a fresh carrier with the full hop budget.
-    pub fn new_send<T>(
+    pub fn new_send_with_sequence<T>(
+        data: T,
+        signer: MessageSigner<&SessionSk>,
+        next_hop: Did,
+        destination: Did,
+        sequence: u64,
+    ) -> Result<Self>
+    where
+        T: Serialize,
+    {
+        let tx_id = crate::utils::new_uuid();
+        let transaction = Transaction::new(destination, tx_id, sequence, data, signer)?;
+        let relay = MessageRelay::new(next_hop, transaction.destination, HopBudget::MAX);
+        Self::new(transaction, signer, relay)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_send<T>(
         data: T,
         signer: MessageSigner<&SessionSk>,
         next_hop: Did,
@@ -204,28 +267,43 @@ impl MessagePayload {
     where
         T: Serialize,
     {
-        let tx_id = crate::utils::new_uuid();
-        let transaction = Transaction::new(destination, tx_id, data, signer)?;
-        let relay = MessageRelay::new(next_hop, transaction.destination, HopBudget::MAX);
-        Self::new(transaction, signer, relay)
+        let sequence = next_test_transaction_sequence(StreamKey::new(
+            signer.network_id(),
+            signer.account_did(),
+            destination,
+        ))?;
+        Self::new_send_with_sequence(data, signer, next_hop, destination, sequence)
     }
 
     /// Deserializes a `MessagePayload` instance from the Rings wire encoding.
     pub fn from_wire(data: &[u8]) -> Result<Self> {
-        rings_codec::deserialize(data).map_err(Error::CodecDeserialize)
+        let body = data
+            .strip_prefix(TRANSACTION_V2_WIRE_PREFIX)
+            .ok_or(Error::LegacyTransactionWireFormat)?;
+        rings_codec::deserialize(body).map_err(Error::CodecDeserialize)
     }
 
     /// Serializes the `MessagePayload` instance into the Rings wire encoding.
     pub fn to_wire(&self) -> Result<Bytes> {
-        rings_codec::serialize(self)
-            .map(Bytes::from)
-            .map_err(Error::CodecSerialize)
+        let body = rings_codec::serialize(self).map_err(Error::CodecSerialize)?;
+        let capacity = TRANSACTION_V2_WIRE_PREFIX
+            .len()
+            .checked_add(body.len())
+            .ok_or(Error::MessageSizeOverflow)?;
+        let mut wire = Vec::with_capacity(capacity);
+        wire.extend_from_slice(TRANSACTION_V2_WIRE_PREFIX);
+        wire.extend_from_slice(&body);
+        Ok(Bytes::from(wire))
     }
 
     /// Return the exact Rings wire size without allocating the wire buffer.
     pub(crate) fn wire_size(&self) -> Result<usize> {
         let bytes = rings_codec::serialized_size(self).map_err(Error::CodecSerialize)?;
-        usize::try_from(bytes).map_err(|_| Error::MessageSizeOverflow)
+        let body = usize::try_from(bytes).map_err(|_| Error::MessageSizeOverflow)?;
+        TRANSACTION_V2_WIRE_PREFIX
+            .len()
+            .checked_add(body)
+            .ok_or(Error::MessageSizeOverflow)
     }
 
     /// Returns whether `local` is the relay destination of this payload.
@@ -243,7 +321,7 @@ impl MessageVerificationExt for Transaction {
     const DOMAIN_TAG: DomainTag = TRANSACTION_DOMAIN_TAG;
 
     fn verification_data(&self) -> Result<Vec<u8>> {
-        Ok(hash_transaction(self.destination, self.tx_id, &self.data).to_vec())
+        Ok(hash_transaction(self.destination, self.tx_id, self.sequence, &self.data).to_vec())
     }
 
     fn verification(&self) -> &MessageVerification {
@@ -289,6 +367,13 @@ pub trait PayloadSender {
     /// Used to check if destination is already connected when `infer_next_hop`
     fn is_connected(&self, did: Did) -> bool;
 
+    /// Persistently reserve sender sequences for one final destination before signing.
+    async fn reserve_transaction_sequences(
+        &self,
+        destination: Did,
+        count: NonZeroU64,
+    ) -> Result<std::ops::RangeInclusive<u64>>;
+
     /// Send a message payload to a specified DID.
     async fn do_send_payload(&self, did: Did, payload: MessagePayload) -> Result<()>;
 
@@ -324,7 +409,17 @@ pub trait PayloadSender {
     where
         T: Serialize + Send,
     {
-        let payload = MessagePayload::new_send(msg, self.message_signer(), next_hop, destination)?;
+        let sequence = *self
+            .reserve_transaction_sequences(destination, NonZeroU64::MIN)
+            .await?
+            .start();
+        let payload = MessagePayload::new_send_with_sequence(
+            msg,
+            self.message_signer(),
+            next_hop,
+            destination,
+            sequence,
+        )?;
         let tx_id = payload.transaction.tx_id;
         self.send_payload(payload).await?;
         Ok(tx_id)
@@ -355,7 +450,12 @@ pub trait PayloadSender {
             .report(self.dht().did, origin, next_hop, HopBudget::MAX)?;
 
         let signer = self.message_signer();
-        let transaction = Transaction::new(origin, payload.transaction.tx_id, msg, signer)?;
+        let sequence = *self
+            .reserve_transaction_sequences(origin, NonZeroU64::MIN)
+            .await?
+            .start();
+        let transaction =
+            Transaction::new(origin, payload.transaction.tx_id, sequence, msg, signer)?;
 
         let pl = MessagePayload::new(transaction, signer, relay)?;
         self.send_payload(pl).await

@@ -12,6 +12,7 @@ use super::delivery::terminate_accepted_connection;
 use super::delivery::ChunkSendPermit;
 use super::delivery::SendCompletionOutcome;
 use super::outbound::ChunkFrames;
+use super::outbound::ChunkedFrameSource;
 use super::outbound::DetachedAdmission;
 use super::outbound::DetachedAdmissionCancel;
 use super::outbound::OutboundCompletion;
@@ -92,6 +93,7 @@ struct FramedOutboundTransfer {
 }
 
 struct OutboundTransferProperties {
+    logical_sequence: u64,
     useful_bytes: u64,
     completion: OutboundCompletion,
     stop: StopToken,
@@ -621,6 +623,7 @@ impl SwarmTransport {
             data,
             plan,
             OutboundTransferProperties {
+                logical_sequence: payload.transaction.sequence,
                 useful_bytes,
                 completion,
                 stop,
@@ -698,6 +701,7 @@ impl SwarmTransport {
         properties: OutboundTransferProperties,
     ) -> FramedOutboundTransfer {
         let OutboundTransferProperties {
+            logical_sequence,
             useful_bytes,
             completion,
             stop,
@@ -716,8 +720,7 @@ impl SwarmTransport {
                 let chunks: ChunkFrames = Box::new(ChunkList::stream(data, chunk_size));
                 OutboundTransfer::chunked(
                     route,
-                    self.message_signer(),
-                    chunks,
+                    ChunkedFrameSource::new(self.message_signer(), chunks, logical_sequence),
                     useful_bytes,
                     completion,
                     stop,
@@ -843,6 +846,14 @@ impl PayloadSender for SwarmTransport {
 
     fn is_connected(&self, did: Did) -> bool {
         self.get_connection(did).is_some()
+    }
+
+    async fn reserve_transaction_sequences(
+        &self,
+        destination: Did,
+        count: std::num::NonZeroU64,
+    ) -> Result<std::ops::RangeInclusive<u64>> {
+        SwarmTransport::reserve_transaction_sequences(self, destination, count).await
     }
 
     async fn do_send_payload(&self, did: Did, payload: MessagePayload) -> Result<()> {

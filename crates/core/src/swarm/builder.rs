@@ -13,6 +13,9 @@ use crate::dht::VirtualNodeConfig;
 use crate::dht::DEFAULT_FINGER_TABLE_SIZE;
 use crate::dht::DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use crate::measure::MeasureImpl;
+use crate::message::ReplaySnapshot;
+use crate::message::ReplayStorage;
+use crate::message::TransactionReplay;
 use crate::session::SessionSk;
 use crate::swarm::callback::SharedSwarmCallback;
 use crate::swarm::callback::SwarmCallback;
@@ -37,6 +40,7 @@ pub struct SwarmBuilder {
     dht_virtual_nodes: u16,
     reassembly_limits: ReassemblyLimits,
     dht_storage: EntryStorage,
+    replay_storage: ReplayStorage,
     session_sk: SessionSk,
     session_ttl: Option<usize>,
     measure: Option<MeasureImpl>,
@@ -62,6 +66,7 @@ impl SwarmBuilder {
             dht_virtual_nodes: DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER,
             reassembly_limits: default_reassembly_limits(),
             dht_storage,
+            replay_storage: Box::new(crate::storage::MemStorage::<ReplaySnapshot>::new()),
             session_sk,
             session_ttl: None,
             measure: None,
@@ -143,6 +148,12 @@ impl SwarmBuilder {
         self
     }
 
+    /// Set the durable sender-sequence and receiver replay-window storage.
+    pub fn replay_storage(mut self, storage: ReplayStorage) -> Self {
+        self.replay_storage = storage;
+        self
+    }
+
     /// Try build for `Swarm`.
     pub fn build(self) -> Swarm {
         let dht_did = self.session_sk.account_did();
@@ -174,6 +185,7 @@ impl SwarmBuilder {
             self.session_sk,
             dht.clone(),
             self.measure,
+            Arc::new(TransactionReplay::new(self.replay_storage)),
             SwarmTransportSettings::new(
                 self.dht_storage_redundancy,
                 storage_virtual_node_config,

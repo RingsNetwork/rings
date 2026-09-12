@@ -82,10 +82,119 @@ impl LogicalInbound {
         payload.transaction.destination == self.transport.dht.did
     }
 
+    pub(super) async fn admit_final_transaction(
+        &self,
+        payload: &MessagePayload,
+    ) -> crate::error::Result<()> {
+        if self.is_local_destination(payload) {
+            self.transport
+                .admit_transaction_replay(&payload.transaction)
+                .await?;
+        }
+        Ok(())
+    }
+
     pub(super) async fn on_inbound(
         &self,
         payload: &MessagePayload,
     ) -> std::result::Result<(), CallbackError> {
         self.callback.on_inbound(payload).await
+    }
+}
+
+#[cfg(all(test, not(target_family = "wasm")))]
+mod tests {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::ecc::SecretKey;
+    use crate::error::Error;
+    use crate::message::Message;
+    use crate::message::MessageSigner;
+    use crate::session::SessionSk;
+    use crate::storage::MemStorage;
+    use crate::swarm::SwarmBuilder;
+    use crate::tests::TEST_NETWORK_ID;
+
+    #[derive(Default)]
+    struct ObservedCallback {
+        validations: AtomicUsize,
+        inbounds: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::swarm::callback::SwarmCallback for ObservedCallback {
+        async fn on_validate(
+            &self,
+            _payload: &MessagePayload,
+        ) -> std::result::Result<(), CallbackError> {
+            self.validations.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        async fn on_inbound(
+            &self,
+            _payload: &MessagePayload,
+        ) -> std::result::Result<(), CallbackError> {
+            self.inbounds.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    fn payload(
+        destination: crate::dht::Did,
+        sequence: u64,
+    ) -> crate::error::Result<MessagePayload> {
+        let sender = SessionSk::new_with_seckey(&SecretKey::random())?;
+        MessagePayload::new_send_with_sequence(
+            Message::custom(b"replay boundary")?,
+            MessageSigner::new(&sender, TEST_NETWORK_ID),
+            destination,
+            destination,
+            sequence,
+        )
+    }
+
+    #[tokio::test]
+    async fn final_destination_persists_before_validation_and_rejects_duplicate_dispatch() {
+        let local = SessionSk::new_with_seckey(&SecretKey::random()).expect("local session");
+        let callback = Arc::new(ObservedCallback::default());
+        let swarm = SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local)
+            .callback(callback.clone())
+            .build();
+        let delivery = LocalDelivery::new(swarm.transport.clone(), callback.clone());
+        let payload = payload(swarm.did(), 0).expect("payload");
+
+        delivery.deliver(&payload).await.expect("first delivery");
+        assert!(matches!(
+            delivery.deliver(&payload).await,
+            Err(Error::TransactionReplay { .. })
+        ));
+        assert_eq!(callback.validations.load(Ordering::Relaxed), 1);
+        assert_eq!(callback.inbounds.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn intermediate_relay_does_not_create_origin_replay_state() {
+        let local = SessionSk::new_with_seckey(&SecretKey::random()).expect("local session");
+        let callback = Arc::new(ObservedCallback::default());
+        let swarm = SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local)
+            .callback(callback.clone())
+            .build();
+        let logical = LogicalInbound::new(swarm.transport.clone(), callback);
+        let remote_destination = SecretKey::random().address().into();
+        let payload = payload(remote_destination, 0).expect("payload");
+
+        logical
+            .admit_final_transaction(&payload)
+            .await
+            .expect("first relay pass");
+        logical
+            .admit_final_transaction(&payload)
+            .await
+            .expect("second relay pass");
+        assert_eq!(swarm.transaction_replay_counters(), Default::default());
     }
 }
