@@ -37,9 +37,19 @@ cargo run -p rings-logo -- check
   closely than the former pair of congruent, diagonally offset circles. Each
   serif circle has radius `2u/3`.
 - The square's center-to-lower-right chord remains the exact 45-degree
-  construction diagonal; it is not itself a black contour. The leg's outer
-  contour is the unique shallow circular arc through the square center `C` and
-  lower-right corner `D` with sagitta `u/10`.
+  construction diagonal; it is not itself a black contour. A support circle
+  through the square center `C` and lower-right corner `D`, with sagitta
+  `u/10`, determines the long outer arc of the leg.
+- The visible outer contour starts at the bowl point
+  `B = (-u/2 + 3sqrt(2)u/4,0)`, not at `C`. Its root width to the inner start
+  `S` is therefore exactly `3sqrt(2)u/4`, approximately `1.061u`, matching the
+  plate's approximately one-module width. A derived rounding
+  circle joins `B` tangentially to the long outer arc. If that arc has center
+  `O` and radius `R`, the bowl has center `O_b` and radius `r_b`, and
+  `n = (B-O_b)/r_b`, then the rounding radius is
+  `r_o = (R^2-|B-O|^2)/(2(R+(B-O) dot n))`. Its center is `B+r_o*n`; the other
+  tangency is `T = O+R(B+r_o*n-O)/|B+r_o*n-O|`. No visual join parameter is
+  fitted independently.
 - The inner contour begins at `S = (-u/2,0)`. Its root circle has center
   `(-u/2,13u/64)` and radius `13u/64`, meeting the crossbar at `S` and the line
   `x = 3y/4 - 29u/32` at `(-53u/80,13u/40)`. The line's direction is therefore
@@ -47,8 +57,11 @@ cargo run -p rings-logo -- check
 - The terminal circle has center `(21551u/4160,-13563u/16640)`, radius
   `17833u/3328`, and is tangent to that line at `(143u/160,12u/5)`. It passes
   through `D = (9u/2,9u/2)`, where both leg contours meet with zero width. The
-  two support circles are part of the model but are not drawn as decorative
+  support circles are part of the model but are not drawn as decorative
   construction circles.
+- The complete R is emitted as one compound SVG path. Component contours are
+  solved independently but never rasterized as adjacent fill objects, so no
+  internal shared edge can appear as a seam.
 - Stroke hierarchy is `30:5:1`, directly matching teeth, bores, and one
   construction unit. With `w_R = u = sqrt(2)a/9` and six teeth per bore sector,
   the gear and bore outlines are `w_G = w_R/6`; construction guides are

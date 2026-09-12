@@ -80,12 +80,18 @@ pub(crate) struct BowlGeometry {
 /// Curved leg constructed around the center-to-corner diagonal.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct LegGeometry {
-    /// Circle whose shallow arc is the outer contour.
+    /// Circle supporting the long, shallow part of the outer contour.
     pub(crate) outer_circle: Circle,
-    /// Sagitta of the outer arc measured from the square diagonal.
+    /// Sagitta of the supporting arc measured from the square diagonal.
     pub(crate) outer_sagitta: f64,
-    /// Start of the outer contour at the square center.
+    /// Start of the supporting chord at the square center.
+    pub(crate) diagonal_start: Point,
+    /// Circle rounding the bowl continuously into the outer leg.
+    pub(crate) outer_rounding_circle: Circle,
+    /// Start of the visible outer contour on the bowl.
     pub(crate) outer_start: Point,
+    /// Tangency between the rounding circle and long outer arc.
+    pub(crate) outer_join: Point,
     /// End of the outer contour at the lower-right corner.
     pub(crate) outer_end: Point,
     /// Inner contour built from two tangent arcs and a 3:4 line.
@@ -145,7 +151,7 @@ impl GlyphGeometry {
             stem,
             serifs: serifs(square_half, unit, stem),
             bowl,
-            leg: leg(square_half, unit),
+            leg: leg(square_half, unit, bowl),
         }
     }
 
@@ -273,8 +279,8 @@ fn bowl(unit: f64) -> BowlGeometry {
     }
 }
 
-fn leg(square_half: f64, unit: f64) -> LegGeometry {
-    let outer_start = Point { x: 0.0, y: 0.0 };
+fn leg(square_half: f64, unit: f64, bowl: BowlGeometry) -> LegGeometry {
+    let diagonal_start = Point { x: 0.0, y: 0.0 };
     let outer_end = Point {
         x: square_half,
         y: square_half,
@@ -290,6 +296,9 @@ fn leg(square_half: f64, unit: f64) -> LegGeometry {
         },
         radius: outer_radius,
     };
+    let outer_start = bowl.outer_waist;
+    let outer_rounding_circle = outer_root_rounding(bowl.outer, outer_circle, outer_start);
+    let outer_join = internal_tangent_point(outer_circle, outer_rounding_circle);
 
     let root = Point {
         x: -unit / 2.0,
@@ -321,7 +330,10 @@ fn leg(square_half: f64, unit: f64) -> LegGeometry {
     LegGeometry {
         outer_circle,
         outer_sagitta,
+        diagonal_start,
+        outer_rounding_circle,
         outer_start,
+        outer_join,
         outer_end,
         inner: InnerLegGeometry {
             root_circle,
@@ -331,6 +343,41 @@ fn leg(square_half: f64, unit: f64) -> LegGeometry {
             tip_tangent,
             tip: outer_end,
         },
+    }
+}
+
+fn outer_root_rounding(bowl: Circle, outer: Circle, root: Point) -> Circle {
+    let normal = Point {
+        x: (root.x - bowl.center.x) / bowl.radius,
+        y: (root.y - bowl.center.y) / bowl.radius,
+    };
+    let root_from_outer = Point {
+        x: root.x - outer.center.x,
+        y: root.y - outer.center.y,
+    };
+    let squared_distance =
+        root_from_outer.x * root_from_outer.x + root_from_outer.y * root_from_outer.y;
+    let projection = root_from_outer.x * normal.x + root_from_outer.y * normal.y;
+    let radius =
+        (outer.radius * outer.radius - squared_distance) / (2.0 * (outer.radius + projection));
+    Circle {
+        center: Point {
+            x: root.x + radius * normal.x,
+            y: root.y + radius * normal.y,
+        },
+        radius,
+    }
+}
+
+fn internal_tangent_point(outer: Circle, inner: Circle) -> Point {
+    let centers = Point {
+        x: inner.center.x - outer.center.x,
+        y: inner.center.y - outer.center.y,
+    };
+    let distance = centers.x.hypot(centers.y);
+    Point {
+        x: outer.center.x + outer.radius * centers.x / distance,
+        y: outer.center.y + outer.radius * centers.y / distance,
     }
 }
 
@@ -399,14 +446,14 @@ mod tests {
         let leg = glyph.leg;
         let inner = leg.inner;
         assert!(
-            (distance(leg.outer_circle.center, leg.outer_start) - leg.outer_circle.radius).abs()
+            (distance(leg.outer_circle.center, leg.diagonal_start) - leg.outer_circle.radius).abs()
                 < EPSILON
         );
         assert!(
             (distance(leg.outer_circle.center, leg.outer_end) - leg.outer_circle.radius).abs()
                 < EPSILON
         );
-        let chord_midpoint = midpoint(leg.outer_start, leg.outer_end);
+        let chord_midpoint = midpoint(leg.diagonal_start, leg.outer_end);
         let arc_midpoint = Point {
             x: chord_midpoint.x - leg.outer_sagitta / 2.0_f64.sqrt(),
             y: chord_midpoint.y + leg.outer_sagitta / 2.0_f64.sqrt(),
@@ -417,7 +464,48 @@ mod tests {
         );
         assert!((distance(chord_midpoint, arc_midpoint) - leg.outer_sagitta).abs() < EPSILON);
 
-        assert!((distance(leg.outer_start, inner.root) - glyph.unit / 2.0).abs() < EPSILON);
+        assert!((leg.outer_start.x - glyph.bowl.outer_waist.x).abs() < EPSILON);
+        assert!((leg.outer_start.y - glyph.bowl.outer_waist.y).abs() < EPSILON);
+        assert!(
+            (distance(glyph.bowl.outer.center, leg.outer_start) - glyph.bowl.outer.radius).abs()
+                < EPSILON
+        );
+        assert!(
+            (distance(leg.outer_rounding_circle.center, leg.outer_start)
+                - leg.outer_rounding_circle.radius)
+                .abs()
+                < EPSILON
+        );
+        assert!(
+            (distance(glyph.bowl.outer.center, leg.outer_rounding_circle.center)
+                - glyph.bowl.outer.radius
+                - leg.outer_rounding_circle.radius)
+                .abs()
+                < EPSILON
+        );
+        assert!(
+            (distance(leg.outer_circle.center, leg.outer_rounding_circle.center)
+                - leg.outer_circle.radius
+                + leg.outer_rounding_circle.radius)
+                .abs()
+                < EPSILON
+        );
+        assert!(
+            (distance(leg.outer_rounding_circle.center, leg.outer_join)
+                - leg.outer_rounding_circle.radius)
+                .abs()
+                < EPSILON
+        );
+        assert!(
+            (distance(leg.outer_circle.center, leg.outer_join) - leg.outer_circle.radius).abs()
+                < EPSILON
+        );
+        assert!(
+            (leg.outer_start.x - inner.root.x - 3.0 * 2.0_f64.sqrt() * glyph.unit / 4.0).abs()
+                < EPSILON
+        );
+
+        assert!((distance(leg.diagonal_start, inner.root) - glyph.unit / 2.0).abs() < EPSILON);
         assert!((inner.root.x + glyph.unit / 2.0).abs() < EPSILON);
         assert!(inner.root.y.abs() < EPSILON);
         assert!(
