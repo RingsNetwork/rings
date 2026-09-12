@@ -10,6 +10,7 @@ pub struct ProcessorBuilder {
     pub(in crate::processor) session_sk: SessionSk,
     pub(in crate::processor) onion_exit_epoch: OnionExitEpoch,
     pub(in crate::processor) storage: Option<EntryStorage>,
+    pub(in crate::processor) replay_storage: Option<ReplayStorage>,
     pub(in crate::processor) onion_entry_guard_storage: Option<OnionEntryGuardStorage>,
     pub(in crate::processor) measure: Option<Arc<PeriodicMeasure>>,
     pub(in crate::processor) stabilize_interval: Duration,
@@ -64,6 +65,7 @@ impl ProcessorBuilder {
             session_sk: config.session_sk.clone(),
             onion_exit_epoch: OnionExitEpoch::random(),
             storage: None,
+            replay_storage: None,
             onion_entry_guard_storage: None,
             measure: None,
             stabilize_interval: config.stabilize_interval,
@@ -87,6 +89,12 @@ impl ProcessorBuilder {
     /// Set the storage for the processor.
     pub fn storage(mut self, storage: EntryStorage) -> Self {
         self.storage = Some(storage);
+        self
+    }
+
+    /// Set durable destination-scoped transaction replay storage.
+    pub fn replay_storage(mut self, storage: ReplayStorage) -> Self {
+        self.replay_storage = Some(storage);
         self
     }
 
@@ -171,6 +179,9 @@ impl ProcessorBuilder {
             .map_err(|e| Error::VerifyError(e.to_string()))?;
 
         let storage = self.storage.unwrap_or_else(|| Box::new(MemStorage::new()));
+        let replay_storage = self
+            .replay_storage
+            .unwrap_or_else(|| Box::new(MemStorage::new()));
         let onion_entry_guard_storage = self
             .onion_entry_guard_storage
             .unwrap_or_else(|| Box::new(MemStorage::new()));
@@ -211,6 +222,7 @@ impl ProcessorBuilder {
         swarm_builder = swarm_builder.dht_finger_table_size(self.dht_finger_table_size);
         swarm_builder = swarm_builder.dht_virtual_nodes(self.dht_virtual_nodes);
         swarm_builder = swarm_builder.reassembly_limits(self.reassembly_limits);
+        swarm_builder = swarm_builder.replay_storage(replay_storage);
 
         if let Some(external_address) = self.external_address {
             swarm_builder = swarm_builder.external_address(external_address);

@@ -30,6 +30,7 @@ use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
 use crate::message::PayloadSender;
+use crate::message::ReplayCounters;
 use crate::swarm::callback::SharedSwarmCallback;
 use crate::swarm::callback::SwarmCallbackSlot;
 use crate::swarm::inbox::SwarmInboxDelivery;
@@ -190,6 +191,11 @@ impl Swarm {
     pub async fn inspect(&self) -> SwarmInspect {
         SwarmInspect::inspect(self).await
     }
+
+    /// Return destination-scoped transaction replay counters.
+    pub fn transaction_replay_counters(&self) -> ReplayCounters {
+        self.transport.replay_counters()
+    }
 }
 
 impl Swarm {
@@ -203,12 +209,10 @@ impl Swarm {
 
         // This payload has fake next_hop.
         // The invoker should fix it before sending.
-        let payload = MessagePayload::new_send(
-            Message::ConnectNodeSend(offer_msg),
-            self.transport.message_signer(),
-            self.did(),
-            peer,
-        )?;
+        let payload = self
+            .transport
+            .signed_payload(Message::ConnectNodeSend(offer_msg), self.did(), peer)
+            .await?;
 
         Ok(payload)
     }
@@ -216,7 +220,7 @@ impl Swarm {
     /// Answer the offer of remote connection. This function will verify the answer payload and
     /// will wrap the answer inside a payload with verification.
     pub async fn answer_offer(&self, offer_payload: MessagePayload) -> Result<MessagePayload> {
-        if !offer_payload.verify(self.network_id()) {
+        if !offer_payload.verify_transaction_and_payload(self.network_id()) {
             return Err(Error::VerifySignatureFailed);
         }
 
@@ -225,6 +229,14 @@ impl Swarm {
                 "Should be ConnectNodeSend".to_string(),
             ));
         };
+        if offer_payload.transaction.destination != self.did() {
+            return Err(Error::InvalidMessage(
+                "ConnectNodeSend destination does not match this node".to_string(),
+            ));
+        }
+        self.transport
+            .admit_transaction_replay(&offer_payload.transaction)
+            .await?;
 
         let peer = offer_payload.transaction.origin();
         let answer_msg = self
@@ -234,12 +246,10 @@ impl Swarm {
 
         // This payload has fake next_hop.
         // The invoker should fix it before sending.
-        let answer_payload = MessagePayload::new_send(
-            Message::ConnectNodeReport(answer_msg),
-            self.transport.message_signer(),
-            self.did(),
-            self.did(),
-        )?;
+        let answer_payload = self
+            .transport
+            .signed_payload(Message::ConnectNodeReport(answer_msg), self.did(), peer)
+            .await?;
 
         Ok(answer_payload)
     }
@@ -247,7 +257,7 @@ impl Swarm {
     /// Accept the answer of remote connection. This function will verify the answer payload and
     /// will return its did with the connection.
     pub async fn accept_answer(&self, answer_payload: MessagePayload) -> Result<()> {
-        if !answer_payload.verify(self.network_id()) {
+        if !answer_payload.verify_transaction_and_payload(self.network_id()) {
             return Err(Error::VerifySignatureFailed);
         }
 
@@ -256,6 +266,14 @@ impl Swarm {
                 "Should be ConnectNodeReport".to_string(),
             ));
         };
+        if answer_payload.transaction.destination != self.did() {
+            return Err(Error::InvalidMessage(
+                "ConnectNodeReport destination does not match this node".to_string(),
+            ));
+        }
+        self.transport
+            .admit_transaction_replay(&answer_payload.transaction)
+            .await?;
 
         let peer = answer_payload.transaction.signer();
         self.transport.accept_remote_connection(peer, msg).await

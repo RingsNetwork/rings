@@ -97,6 +97,7 @@ fn test_origin_is_the_account_behind_the_signing_session() -> Result<()> {
     let transaction = Transaction::new(
         destination,
         uuid::Uuid::new_v4(),
+        0,
         Message::custom(b"origin")?,
         MessageSigner::new(&session_sk, TEST_NETWORK_ID),
     )?;
@@ -274,4 +275,29 @@ fn test_payload_signed_for_another_overlay_is_rejected() {
 
     assert!(!payload.verify(TEST_NETWORK_ID + 1));
     assert!(!payload.transaction.verify(TEST_NETWORK_ID + 1));
+}
+
+#[test]
+fn test_transaction_sequence_is_inside_both_signature_transcripts() {
+    let next_hop = SecretKey::random().address().into();
+    let mut payload = new_test_payload(next_hop);
+    assert!(payload.verify(TEST_NETWORK_ID));
+    assert!(payload.transaction.verify(TEST_NETWORK_ID));
+
+    payload.transaction.sequence = payload.transaction.sequence.saturating_add(1);
+    assert!(!payload.transaction.verify(TEST_NETWORK_ID));
+    assert!(!payload.verify(TEST_NETWORK_ID));
+}
+
+#[test]
+fn test_unprefixed_transaction_shape_is_rejected_by_hard_cutover() -> Result<()> {
+    let next_hop = SecretKey::random().address().into();
+    let payload = new_test_payload(next_hop);
+    let legacy_wire = rings_codec::serialize(&payload).map_err(Error::CodecSerialize)?;
+
+    assert!(matches!(
+        MessagePayload::from_wire(&legacy_wire),
+        Err(Error::LegacyTransactionWireFormat)
+    ));
+    Ok(())
 }

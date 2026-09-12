@@ -33,17 +33,38 @@ pub(in crate::swarm::transport) type ChunkFrames = Box<dyn Iterator<Item = Chunk
 
 enum FrameSource {
     Whole(Option<Bytes>),
-    Chunked {
-        signer: MessageSigner<SessionSk>,
+    Chunked(ChunkedFrameSource),
+}
+
+pub(in crate::swarm::transport) struct ChunkedFrameSource {
+    signer: MessageSigner<SessionSk>,
+    chunks: ChunkFrames,
+    logical_sequence: u64,
+}
+
+impl ChunkedFrameSource {
+    pub(in crate::swarm::transport) fn new(
+        signer: MessageSigner<&SessionSk>,
         chunks: ChunkFrames,
-    },
+        logical_sequence: u64,
+    ) -> Self {
+        Self {
+            signer: signer.owned(),
+            chunks,
+            logical_sequence,
+        }
+    }
 }
 
 impl FrameSource {
     fn next_frame(&mut self, did: Did) -> Result<Option<(Bytes, &'static str)>> {
         match self {
             Self::Whole(frame) => Ok(frame.take().map(|bytes| (bytes, "whole_message"))),
-            Self::Chunked { signer, chunks } => {
+            Self::Chunked(ChunkedFrameSource {
+                signer,
+                chunks,
+                logical_sequence,
+            }) => {
                 let Some(chunk) = chunks.next() else {
                     return Ok(None);
                 };
@@ -53,7 +74,8 @@ impl FrameSource {
                 } else {
                     "chunked_tail"
                 };
-                frame_chunk(signer.by_ref(), did, chunk).map(|bytes| Some((bytes, context)))
+                frame_chunk(signer.by_ref(), did, chunk, *logical_sequence)
+                    .map(|bytes| Some((bytes, context)))
             }
         }
     }
@@ -176,8 +198,7 @@ impl OutboundTransfer {
     /// signing authority for the whole transfer.
     pub(in crate::swarm::transport) fn chunked(
         route: OutboundTransferRoute,
-        signer: MessageSigner<&SessionSk>,
-        chunks: ChunkFrames,
+        source: ChunkedFrameSource,
         useful_bytes: u64,
         completion: OutboundCompletion,
         stop: StopToken,
@@ -185,10 +206,7 @@ impl OutboundTransfer {
     ) -> (Self, oneshot::Receiver<Result<SendCompletionOutcome>>) {
         Self::new(
             route,
-            FrameSource::Chunked {
-                signer: signer.owned(),
-                chunks,
-            },
+            FrameSource::Chunked(source),
             useful_bytes,
             completion,
             stop,

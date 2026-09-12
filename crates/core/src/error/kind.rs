@@ -64,6 +64,71 @@ pub enum Error {
     #[error("E2E frame sequence counter overflowed")]
     E2eFrameSequenceOverflow,
 
+    /// A sender exhausted the sequence space for one destination-scoped transaction stream.
+    #[error("Transaction sequence exhausted for {key:?}")]
+    TransactionSequenceExhausted {
+        /// Stream whose counter cannot advance without wrapping.
+        key: crate::message::StreamKey,
+    },
+
+    /// An exact signed transaction was already admitted at the final destination.
+    #[error("Transaction sequence {sequence} is a replay for {key:?}")]
+    TransactionReplay {
+        /// Destination-scoped stream.
+        key: crate::message::StreamKey,
+        /// Replayed sequence.
+        sequence: u64,
+    },
+
+    /// Two different signed transactions claimed one stream sequence.
+    #[error("Transaction sequence {sequence} forks {key:?}")]
+    TransactionSequenceFork {
+        /// Destination-scoped stream.
+        key: crate::message::StreamKey,
+        /// Conflicting sequence.
+        sequence: u64,
+        /// Previously retained and newly presented transaction digests.
+        evidence: Box<crate::message::TransactionForkEvidence>,
+    },
+
+    /// A transaction sequence fell below the retained replay window.
+    #[error(
+        "Transaction sequence {sequence} is stale for {key:?}; retained window starts at {retained_min}"
+    )]
+    TransactionSequenceStale {
+        /// Destination-scoped stream.
+        key: crate::message::StreamKey,
+        /// Rejected sequence.
+        sequence: u64,
+        /// Lowest sequence whose digest may still be retained.
+        retained_min: u64,
+    },
+
+    /// A new replay stream would exceed the fail-closed stream table bound.
+    #[error("Transaction replay stream capacity {capacity} exceeded")]
+    TransactionReplayStreamCapacityExceeded {
+        /// Maximum sender streams or receiver streams retained by one runtime.
+        capacity: usize,
+    },
+
+    /// The versioned replay snapshot violates its structural bounds.
+    #[error("Transaction replay state is invalid")]
+    TransactionReplayStateInvalid,
+
+    /// Durable replay state could not be loaded or committed.
+    #[error("Transaction replay persistence failed during {operation}: {source}")]
+    TransactionReplayPersistence {
+        /// Persistence operation that failed.
+        operation: &'static str,
+        /// Storage failure retained as the source.
+        #[source]
+        source: Box<Error>,
+    },
+
+    /// The payload does not carry the v2 hard-cutover wire marker.
+    #[error("Legacy transaction wire format is not accepted")]
+    LegacyTransactionWireFormat,
+
     /// E2E frame received after the authenticated final frame
     #[error("E2E frame received after the authenticated final frame")]
     E2eFrameAfterFinal,

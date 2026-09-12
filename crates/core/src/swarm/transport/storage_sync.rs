@@ -16,8 +16,6 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::message::yield_core_actor_step;
 use crate::message::Message;
-use crate::message::MessagePayload;
-use crate::message::PayloadSender;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::message::SyncEntriesWithSuccessorReport;
 use crate::utils::get_epoch_ms;
@@ -504,12 +502,13 @@ impl SwarmTransport {
                 .await?;
             return Ok(StorageSyncCompletion::PersistedLocally);
         };
-        let payload = MessagePayload::new_send(
-            Message::SyncEntriesWithSuccessor(msg.clone()),
-            self.message_signer(),
-            next_hop,
-            destination,
-        )?;
+        let payload = self
+            .signed_payload(
+                Message::SyncEntriesWithSuccessor(msg.clone()),
+                next_hop,
+                destination,
+            )
+            .await?;
         let tx_id = payload.transaction.tx_id;
         let records_cleanup_ack = msg.purpose.permits_source_cleanup();
         if records_cleanup_ack {

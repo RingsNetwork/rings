@@ -433,6 +433,9 @@ fn transport_with_key_measure_and_reassembly_limits(
         session_sk,
         dht,
         Some(measure),
+        Arc::new(crate::message::TransactionReplay::new(Box::new(
+            crate::storage::MemStorage::new(),
+        ))),
         SwarmTransportSettings::new(1, VirtualNodeConfig::disabled(), reassembly_limits),
     ))
 }

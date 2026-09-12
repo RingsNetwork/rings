@@ -26,6 +26,20 @@ pub use payload::MessagePayload;
 pub use payload::PayloadSender;
 pub use payload::Transaction;
 
+mod replay;
+pub use replay::observe;
+pub use replay::ReplayCounters;
+pub use replay::ReplaySnapshot;
+pub use replay::ReplayStorage;
+pub use replay::SequenceState;
+pub use replay::SequenceVerdict;
+pub use replay::StreamKey;
+pub use replay::TransactionDigest;
+pub use replay::TransactionForkEvidence;
+pub(crate) use replay::TransactionReplay;
+pub use replay::TRANSACTION_REPLAY_STREAM_CAPACITY;
+pub use replay::TRANSACTION_REPLAY_WINDOW;
+
 pub mod types;
 pub use types::*;
 

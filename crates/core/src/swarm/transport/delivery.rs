@@ -402,9 +402,15 @@ pub(super) fn frame_chunk(
     signer: MessageSigner<&SessionSk>,
     did: Did,
     chunk: Chunk,
+    sequence: u64,
 ) -> Result<Bytes> {
-    let transaction =
-        Transaction::new(did, crate::utils::new_uuid(), Message::Chunk(chunk), signer)?;
+    let transaction = Transaction::new(
+        did,
+        crate::utils::new_uuid(),
+        sequence,
+        Message::Chunk(chunk),
+        signer,
+    )?;
     let relay = MessageRelay::new(did, did, HopBudget::EXHAUSTED);
     let payload = MessagePayload::new(transaction, signer, relay)?;
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]

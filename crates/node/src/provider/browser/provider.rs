@@ -19,6 +19,7 @@ use rings_core::lifecycle::StopSource;
 use rings_core::measure::PeerQuality;
 use rings_core::message::DhtProtocolMode;
 use rings_core::message::MessageSigner;
+use rings_core::message::ReplayStorage;
 use rings_core::storage::idb::IdbStorage;
 use rings_core::utils::js_utils;
 use rings_core::utils::js_value;
@@ -447,6 +448,16 @@ async fn open_browser_entry_guard_storage(storage_name: &str) -> Option<OnionEnt
     }
 }
 
+async fn open_browser_replay_storage(storage_name: &str) -> NodeResult<ReplayStorage> {
+    IdbStorage::new_with_cap_and_name(2, storage_name)
+        .await
+        .map(|storage| Box::new(storage) as ReplayStorage)
+        .map_err(|source| Error::BrowserStorageOpen {
+            name: storage_name.to_string(),
+            source,
+        })
+}
+
 impl Provider {
     /// Create a browser provider backed by IndexedDB storage and install its default backend.
     ///
@@ -463,12 +474,15 @@ impl Provider {
             open_browser_measure_storage(&format!("{storage_name}/measure")).await;
         let onion_entry_guard_storage =
             open_browser_entry_guard_storage(&format!("{storage_name}/onion-entry-guards")).await;
+        let replay_storage =
+            open_browser_replay_storage(&format!("{storage_name}/transaction-replay-v2")).await?;
 
         let provider = Self::new_provider_with_storage_internal(
             config,
             entry_storage,
             measure_storage,
             onion_entry_guard_storage,
+            Some(replay_storage),
         )
         .await?;
         provider.set_backend()?;
@@ -515,6 +529,8 @@ impl Provider {
             let measure_storage = open_browser_measure_storage("rings-node/measure").await;
             let onion_entry_guard_storage =
                 open_browser_entry_guard_storage("rings-node/onion-entry-guards").await;
+            let replay_storage =
+                open_browser_replay_storage("rings-node/transaction-replay-v2").await?;
 
             let provider = Provider::new_provider_internal(
                 network_id,
@@ -526,6 +542,7 @@ impl Provider {
                 entry_storage,
                 measure_storage,
                 onion_entry_guard_storage,
+                Some(replay_storage),
             )
             .await?;
 
@@ -557,6 +574,8 @@ impl Provider {
             let measure_storage = open_browser_measure_storage("rings-node/measure").await;
             let onion_entry_guard_storage =
                 open_browser_entry_guard_storage("rings-node/onion-entry-guards").await;
+            let replay_storage =
+                open_browser_replay_storage("rings-node/transaction-replay-v2").await?;
 
             let config_policy = policy.clone();
             let provider = Provider::new_provider_internal_with_config(
@@ -569,6 +588,7 @@ impl Provider {
                 entry_storage,
                 measure_storage,
                 onion_entry_guard_storage,
+                Some(replay_storage),
                 move |config| {
                     config
                         .enable_https_onion_exit()

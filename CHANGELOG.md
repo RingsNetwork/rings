@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.24.0
+
+### Breaking changes
+
+- Every signed `Transaction` now carries a mandatory destination-scoped `u64` sequence and uses
+  the `rings-core:message-verification:transaction:v2` signature domain. Payload wire bytes carry
+  an explicit `RINGS-TX-V2` marker; 0.23.x payloads fail closed before decoding. Mixed-version
+  overlays are unsupported.
+
+### Added
+
+- Final destinations persist a fixed 32-slot replay window per
+  `(network_id, origin_account_did, destination_did)` before application validation and dispatch.
+  Duplicate, fork, and stale sequence verdicts are typed and observable; gaps and bounded late
+  delivery are admitted. Sender allocators persist reservations before signing, session rotation
+  preserves the account stream, relays remain stateless, and both native and browser runtimes use
+  dedicated durable replay stores without LRU eviction.
+
 ## 0.23.0
 
 ### Breaking changes

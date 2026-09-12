@@ -27,6 +27,7 @@
 - [DHT - Network Layer](advanced-topic/chord.md)
 - [API](jsonrpc.md)
 - [Account Abstraction](advanced-topic/account-abstraction.md)
+- [Transaction Replay Protection](advanced-topic/transaction-replay.md)
 - [config.yaml](advanced-topic/config.yaml.md)
 
 # Features

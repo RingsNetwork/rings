@@ -784,6 +784,7 @@ pub(super) async fn deliver_local(
     pipeline: &LogicalInbound,
     payload: &MessagePayload,
 ) -> Result<()> {
+    pipeline.admit_final_transaction(payload).await?;
     validate_payload(pipeline, None, payload)
         .await
         .map_err(inbound_failure_error)?;
@@ -802,6 +803,16 @@ async fn validate_event(
         .map_err(InboundFailure::Core)?
     {
         return Ok(InboundValidation::AcknowledgeDrop);
+    }
+    // Chunk envelopes are transport framing, not logical transactions. Their existing bounded
+    // reassembly/tombstone state handles envelope replay; the reassembled payload returns through
+    // this function on its logical lane and is admitted exactly once here.
+    if event.lane() != InboundLane::Reassembly {
+        processor
+            .logical
+            .admit_final_transaction(&event.payload)
+            .await
+            .map_err(InboundFailure::Core)?;
     }
     validate_payload(&processor.logical, event.peer, &event.payload).await?;
     let still_admitted = processor

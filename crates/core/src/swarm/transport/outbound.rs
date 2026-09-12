@@ -90,6 +90,7 @@ use queue::TransferQueues;
 pub(crate) use queue::OUTBOUND_CONTROL_BURST;
 use spawn::spawn_worker;
 pub(super) use transfer::ChunkFrames;
+pub(super) use transfer::ChunkedFrameSource;
 use transfer::FinalTransferResult;
 pub(super) use transfer::OutboundTransfer;
 pub(super) use transfer::OutboundTransferRoute;
