@@ -15,15 +15,17 @@ pub(crate) fn render_fixed(model: &GearModel, palette: &Palette, ground: &str) -
 
 pub(crate) fn render_adaptive(model: &GearModel, light: &Palette, dark: &Palette) -> String {
     let style = format!(
-        ".primary{{stroke:{}}}.accent{{stroke:{}}}.accent-fill{{fill:{}}}\
+        ".gear-fill{{fill:{}}}.primary{{stroke:{}}}.accent{{stroke:{}}}.accent-fill{{fill:{}}}\
          .signal{{fill:{}}}.guide{{stroke:{}}}\n\
-         @media(prefers-color-scheme:dark){{.primary{{stroke:{}}}.accent{{stroke:{}}}\
+         @media(prefers-color-scheme:dark){{.gear-fill{{fill:{}}}.primary{{stroke:{}}}.accent{{stroke:{}}}\
          .accent-fill{{fill:{}}}.signal{{fill:{}}}.guide{{stroke:{}}}}}",
+        light.accent.hex,
         light.primary.hex,
         light.accent.hex,
         light.accent.hex,
         light.signal.hex,
         light.guide.hex,
+        dark.accent.hex,
         dark.primary.hex,
         dark.accent.hex,
         dark.accent.hex,
@@ -97,8 +99,9 @@ fn embedded_logo(model: &GearModel, palette: &Palette) -> String {
 
 fn fixed_style(palette: &Palette) -> String {
     format!(
-        ".primary{{stroke:{}}}.accent{{stroke:{}}}.accent-fill{{fill:{}}}\
+        ".gear-fill{{fill:{}}}.primary{{stroke:{}}}.accent{{stroke:{}}}.accent-fill{{fill:{}}}\
          .signal{{fill:{}}}.guide{{stroke:{}}}",
+        palette.accent.hex,
         palette.primary.hex,
         palette.accent.hex,
         palette.accent.hex,
@@ -130,6 +133,7 @@ fn geometry_fragment(model: &GearModel) -> String {
     let module = model.spec.module;
     let holes = f64::from(model.spec.hole_count);
     let mut output = String::new();
+    append_gear_fill(&mut output, model);
     let _ = writeln!(
         output,
         "<g class=\"guide\" fill=\"none\" stroke-width=\"{}\">",
@@ -221,6 +225,15 @@ fn geometry_fragment(model: &GearModel) -> String {
     }
     output.push_str("</g>\n");
     output
+}
+
+fn append_gear_fill(output: &mut String, model: &GearModel) {
+    let _ = writeln!(
+        output,
+        "<g class=\"gear-fill\" stroke=\"none\" fill-rule=\"evenodd\">"
+    );
+    let _ = writeln!(output, "  <path d=\"{}\"/>", gear_body_path(model));
+    output.push_str("</g>\n");
 }
 
 fn append_circle(output: &mut String, radius: f64, dash: f64, gap: f64) {
@@ -364,13 +377,28 @@ fn counter_path(glyph: GlyphGeometry) -> String {
 
 fn tooth_path(model: &GearModel) -> String {
     let center = -std::f64::consts::PI / 2.0;
+    let mut commands = String::new();
+    append_tooth_contour(&mut commands, model, center, ContourStart::Move);
+    commands
+}
+
+enum ContourStart {
+    Move,
+    Connected,
+}
+
+fn append_tooth_contour(
+    commands: &mut String,
+    model: &GearModel,
+    center: f64,
+    start: ContourStart,
+) {
     let left_root = GearModel::point(model.root_radius, center - model.flank_rotation);
+    if let ContourStart::Move = start {
+        let _ = write!(commands, "M {}", command_point(left_root));
+    }
     let left_base = GearModel::point(model.base_radius, center - model.flank_rotation);
-    let mut commands = format!(
-        "M {} L {}",
-        command_point(left_root),
-        command_point(left_base)
-    );
+    let _ = write!(commands, " L {}", command_point(left_base));
 
     for sample in 1..=model.flank_samples {
         let parameter =
@@ -414,7 +442,52 @@ fn tooth_path(model: &GearModel) -> String {
         format_number(model.root_radius),
         command_point(next_left_root),
     );
+}
+
+fn gear_body_path(model: &GearModel) -> String {
+    let first_center = -std::f64::consts::PI / 2.0;
+    let mut commands = String::new();
+    append_tooth_contour(&mut commands, model, first_center, ContourStart::Move);
+    for tooth in 1..model.spec.teeth {
+        append_tooth_contour(
+            &mut commands,
+            model,
+            first_center + f64::from(tooth) * model.tooth_pitch,
+            ContourStart::Connected,
+        );
+    }
+    commands.push_str(" Z");
+    append_cutout_circle(
+        &mut commands,
+        Point { x: 0.0, y: 0.0 },
+        model.aperture_radius,
+    );
+    for hole in model.holes() {
+        append_cutout_circle(&mut commands, hole, model.hole_radius);
+    }
     commands
+}
+
+fn append_cutout_circle(commands: &mut String, center: Point, radius: f64) {
+    let right = Point {
+        x: center.x + radius,
+        y: center.y,
+    };
+    let left = Point {
+        x: center.x - radius,
+        y: center.y,
+    };
+    let _ = write!(
+        commands,
+        " M {} A {} {} 0 1 0 {} A {} {} 0 1 0 {} Z",
+        command_point(right),
+        format_number(radius),
+        format_number(radius),
+        command_point(left),
+        format_number(radius),
+        format_number(radius),
+        command_point(right),
+    );
 }
 
 fn polygon_points(model: &GearModel) -> String {
@@ -440,7 +513,7 @@ fn metadata(model: &GearModel) -> String {
          r-serif-radius={};r-leg-outer=diagonal-chord-circle;sagitta={};\
          r-leg-outer-rounding-radius={};r-glyph-fill=one-outer-silhouette-plus-counter;\
          r-leg-root-radius={};r-leg-tip-radius={};\
-         r-leg-inner=two-tangent-arcs-plus-3-4-5-line;\
+         r-leg-inner=two-tangent-arcs-plus-3-4-5-line;gear-fill=calculated-rust-accent;\
          r-method=pacioli-nine-part-square-plus-rings-explicit-completion",
         format_number(model.spec.module),
         model.spec.teeth,
@@ -523,8 +596,9 @@ pub(crate) fn render_specification(model: &GearModel, light: &Palette, dark: &Pa
 
 fn palette_json(palette: &Palette) -> String {
     format!(
-        "{{\n      \"primary\": {},\n      \"accent\": {},\n      \"signal\": {},\n      \"guide\": {}\n    }}",
+        "{{\n      \"primary\": {},\n      \"accent\": {},\n      \"gear_fill\": {},\n      \"signal\": {},\n      \"guide\": {}\n    }}",
         paint_json(&palette.primary),
+        paint_json(&palette.accent),
         paint_json(&palette.accent),
         paint_json(&palette.signal),
         paint_json(&palette.guide),
@@ -562,8 +636,11 @@ fn format_number(value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::append_glyph;
+    use super::fixed_style;
+    use super::gear_body_path;
     use super::geometry_fragment;
     use super::tooth_path;
+    use crate::color::Palette;
     use crate::model::GearModel;
     use crate::model::Spec;
 
@@ -589,6 +666,42 @@ mod tests {
             assert_eq!(rendered.matches("<path ").count(), 1);
             assert_eq!(rendered.matches(" Z").count(), 2);
             assert!(rendered.contains("fill-rule=\"evenodd\""));
+        }
+    }
+
+    #[test]
+    fn gear_fill_is_one_outer_silhouette_with_six_transparent_cutouts() {
+        let model = GearModel::new(Spec::rings());
+        assert!(model.is_ok());
+        if let Ok(model) = model {
+            let body = gear_body_path(&model);
+            assert_eq!(body.matches(" Z").count(), 7);
+            assert!(!body.contains("NaN"));
+            assert!(!body.contains("Infinity"));
+
+            let fragment = geometry_fragment(&model);
+            let fill = fragment.find("class=\"gear-fill\"");
+            let guides = fragment.find("class=\"guide\"");
+            assert!(fill.is_some());
+            assert!(guides.is_some());
+            if let (Some(fill), Some(guides)) = (fill, guides) {
+                assert!(fill < guides);
+            }
+            assert!(fragment.contains("fill-rule=\"evenodd\""));
+        }
+    }
+
+    #[test]
+    fn gear_fill_reuses_the_calculated_accent_paint() {
+        let model = GearModel::new(Spec::rings());
+        assert!(model.is_ok());
+        if let Ok(model) = model {
+            let palette = Palette::light(&model);
+            assert!(palette.is_ok());
+            if let Ok(palette) = palette {
+                let expected = format!(".gear-fill{{fill:{}}}", palette.accent.hex);
+                assert!(fixed_style(&palette).contains(&expected));
+            }
         }
     }
 }

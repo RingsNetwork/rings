@@ -89,12 +89,14 @@
     "light_background": {
       "primary": {"hex": "#605755", "oklch": [0.4659, 0.012732, 36], "contrast": 7.019156, "target": 7},
       "accent": {"hex": "#bc593f", "oklch": [0.5815, 0.133333, 36], "contrast": 4.526837, "target": 4.5},
+      "gear_fill": {"hex": "#bc593f", "oklch": [0.5815, 0.133333, 36], "contrast": 4.526837, "target": 4.5},
       "signal": {"hex": "#0081a1", "oklch": [0.5458, 0.133333, 216], "contrast": 4.511526, "target": 4.5},
       "guide": {"hex": "#7d99a1", "oklch": [0.6657, 0.033333, 216], "contrast": 3.024573, "target": 3}
     },
     "dark_background": {
       "primary": {"hex": "#9d9390", "oklch": [0.6696, 0.012732, 36], "contrast": 7.00983, "target": 7},
       "accent": {"hex": "#ba573d", "oklch": [0.5747, 0.133333, 36], "contrast": 4.518483, "target": 4.5},
+      "gear_fill": {"hex": "#ba573d", "oklch": [0.5747, 0.133333, 36], "contrast": 4.518483, "target": 4.5},
       "signal": {"hex": "#007f9e", "oklch": [0.5361, 0.133333, 216], "contrast": 4.529473, "target": 4.5},
       "guide": {"hex": "#435e65", "oklch": [0.4619, 0.033333, 216], "contrast": 3.027657, "target": 3}
     }

@@ -70,6 +70,13 @@ cargo run -p rings-logo -- check
   construction unit. With `w_R = u = sqrt(2)a/9` and six teeth per bore sector,
   the gear and bore outlines are `w_G = w_R/6`; construction guides are
   `w_C = w_G/5`.
+- Like the former Rings gear mark, the involute gear is an opaque filled body,
+  not only a contour. Its central aperture and the five pentagonal bores are
+  true transparent cutouts in one even-odd path. The fill uses the same solved
+  rust paint as the R, so the two solid components retain the old mark's
+  monochrome relationship without copying an arbitrary legacy RGB value. Its
+  OKLCH hue is `H = 360/(2*5) = 36deg`, chroma is `C = (5-1)/30 = 2/15`, and
+  lightness is the first point on the `1/10000` grid meeting `4.5:1` contrast.
 - Palette hues are derived from the pentagon: rust is `72deg/2 = 36deg`; signal
   cyan is its 180-degree complement. Chroma derives from tooth and bore counts.
   Lightness is solved on a `1/10000` OKLCH grid against WCAG contrast targets of
