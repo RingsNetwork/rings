@@ -7,6 +7,7 @@ use crate::color::Palette;
 use crate::glyph::Circle;
 use crate::glyph::GlyphGeometry;
 use crate::model::GearModel;
+use crate::model::InnerLobe;
 use crate::model::Point;
 
 pub(crate) fn render_fixed(model: &GearModel, palette: &Palette, ground: &str) -> String {
@@ -130,10 +131,17 @@ fn render_svg(model: &GearModel, style: String, ground: &str) -> String {
 }
 
 fn geometry_fragment(model: &GearModel) -> String {
-    let module = model.spec.module;
-    let holes = f64::from(model.spec.hole_count);
     let mut output = String::new();
     append_gear_fill(&mut output, model);
+    append_construction_guides(&mut output, model);
+    append_mechanical_outline(&mut output, model);
+    append_marks(&mut output, model);
+    output
+}
+
+fn append_construction_guides(output: &mut String, model: &GearModel) {
+    let module = model.spec.module;
+    let holes = f64::from(model.spec.hole_count);
     let _ = writeln!(
         output,
         "<g class=\"guide\" fill=\"none\" stroke-width=\"{}\">",
@@ -153,14 +161,14 @@ fn geometry_fragment(model: &GearModel) -> String {
         format_number(model.outer_radius)
     );
     append_circle(
-        &mut output,
+        output,
         model.pitch_radius,
         module * (holes - 3.0) / holes,
         module / 2.0,
     );
-    append_circle(&mut output, model.base_radius, module / holes, module / 2.0);
+    append_circle(output, model.base_radius, module / holes, module / 2.0);
     append_circle(
-        &mut output,
+        output,
         model.root_radius,
         module * (holes - 1.0) / holes,
         module * (holes - 3.0) / holes,
@@ -171,17 +179,43 @@ fn geometry_fragment(model: &GearModel) -> String {
         format_number(model.aperture_radius)
     );
     append_circle(
-        &mut output,
+        output,
+        model.inner_ring_radius,
+        module * (holes - 1.0) / holes,
+        module / holes,
+    );
+    append_circle(
+        output,
         model.hole_orbit,
         module * (holes - 2.0) / holes,
         module / 2.0,
     );
     let _ = writeln!(output, "  <polygon points=\"{}\"/>", polygon_points(model));
+    for lobe in model.inner_lobes() {
+        append_positioned_circle(
+            output,
+            Circle {
+                center: lobe.tip_center,
+                radius: model.inner_lobe_tip_radius,
+            },
+            "  ",
+        );
+        let _ = writeln!(
+            output,
+            "  <path d=\"M {} L {} M {} L {}\"/>",
+            command_point(lobe.before),
+            command_point(lobe.before_tangent),
+            command_point(lobe.after_tangent),
+            command_point(lobe.after),
+        );
+    }
     let phase = GearModel::point(model.outer_radius, -std::f64::consts::PI / 2.0);
     let _ = writeln!(output, "  <path d=\"M 0 0 L {}\"/>", command_point(phase));
-    append_glyph_guides(&mut output, model.glyph());
+    append_glyph_guides(output, model.glyph());
     output.push_str("</g>\n");
+}
 
+fn append_mechanical_outline(output: &mut String, model: &GearModel) {
     let _ = writeln!(
         output,
         "<g class=\"primary\" fill=\"none\" stroke-width=\"{}\" stroke-linecap=\"square\" stroke-linejoin=\"miter\">",
@@ -195,8 +229,12 @@ fn geometry_fragment(model: &GearModel) -> String {
             format_number(rotation)
         );
     }
+    let _ = writeln!(output, "  <path d=\"{}\"/>", inner_ring_path(model));
     output.push_str("</g>\n");
+}
 
+fn append_marks(output: &mut String, model: &GearModel) {
+    let holes = f64::from(model.spec.hole_count);
     let _ = writeln!(
         output,
         "<g class=\"accent\" fill=\"none\" stroke-width=\"{}\" stroke-linecap=\"butt\" stroke-linejoin=\"miter\">",
@@ -212,7 +250,7 @@ fn geometry_fragment(model: &GearModel) -> String {
         );
     }
     output.push_str("</g>\n");
-    append_glyph(&mut output, model.glyph());
+    append_glyph(output, model.glyph());
     output.push_str("<g class=\"signal\">\n");
     for hole in model.holes() {
         let _ = writeln!(
@@ -224,7 +262,6 @@ fn geometry_fragment(model: &GearModel) -> String {
         );
     }
     output.push_str("</g>\n");
-    output
 }
 
 fn append_gear_fill(output: &mut String, model: &GearModel) {
@@ -457,15 +494,53 @@ fn gear_body_path(model: &GearModel) -> String {
         );
     }
     commands.push_str(" Z");
-    append_cutout_circle(
-        &mut commands,
-        Point { x: 0.0, y: 0.0 },
-        model.aperture_radius,
-    );
+    commands.push(' ');
+    commands.push_str(&inner_ring_path(model));
     for hole in model.holes() {
         append_cutout_circle(&mut commands, hole, model.hole_radius);
     }
     commands
+}
+
+fn inner_ring_path(model: &GearModel) -> String {
+    let mut lobes = model.inner_lobes();
+    let mut commands = String::new();
+    if let Some(first) = lobes.next() {
+        append_lobe(&mut commands, model, first, ContourStart::Move);
+        for lobe in lobes {
+            let _ = write!(
+                commands,
+                " A {} {} 0 0 1 {}",
+                format_number(model.inner_ring_radius),
+                format_number(model.inner_ring_radius),
+                command_point(lobe.before),
+            );
+            append_lobe(&mut commands, model, lobe, ContourStart::Connected);
+        }
+        let _ = write!(
+            commands,
+            " A {} {} 0 0 1 {} Z",
+            format_number(model.inner_ring_radius),
+            format_number(model.inner_ring_radius),
+            command_point(first.before),
+        );
+    }
+    commands
+}
+
+fn append_lobe(commands: &mut String, model: &GearModel, lobe: InnerLobe, start: ContourStart) {
+    if let ContourStart::Move = start {
+        let _ = write!(commands, "M {}", command_point(lobe.before));
+    }
+    let _ = write!(
+        commands,
+        " L {} A {} {} 0 0 0 {} L {}",
+        command_point(lobe.before_tangent),
+        format_number(model.inner_lobe_tip_radius),
+        format_number(model.inner_lobe_tip_radius),
+        command_point(lobe.after_tangent),
+        command_point(lobe.after),
+    );
 }
 
 fn append_cutout_circle(commands: &mut String, center: Point, radius: f64) {
@@ -507,7 +582,10 @@ fn metadata(model: &GearModel) -> String {
     format!(
         "module={};teeth={};pressure-angle={}deg;pitch-radius={};base-radius={};\
          outer-radius={};root-radius={};aperture-radius={};bore-count={};\
-         bore-orbit={};bore-radius={};r-stroke={};gear-stroke={};guide-stroke={};\
+         bore-orbit={};bore-radius={};inner-ring-radius={};inner-lobe-half-span={};\
+         inner-lobe-tip-orbit={};inner-lobe-tip-radius={};\
+         inner-lobe-half-angle={}deg;inner-profile=five-bracketed-bore-lobes;\
+         r-stroke={};gear-stroke={};guide-stroke={};\
          r-square-side={};r-unit={};r-thin-stroke={};r-bowl-outer-radius={};\
          r-bowl-inner-radius={};\
          r-serif-radius={};r-leg-outer=diagonal-chord-circle;sagitta={};\
@@ -526,6 +604,11 @@ fn metadata(model: &GearModel) -> String {
         model.spec.hole_count,
         format_number(model.hole_orbit),
         format_number(model.hole_radius),
+        format_number(model.inner_ring_radius),
+        format_number(model.inner_lobe_half_span),
+        format_number(model.inner_lobe_tip_orbit),
+        format_number(model.inner_lobe_tip_radius),
+        format_number(model.inner_lobe_half_angle.to_degrees()),
         format_number(glyph.stroke_width),
         format_number(model.gear_outline_width),
         format_number(model.construction_guide_width),
@@ -548,7 +631,7 @@ fn viewbox_radius(model: &GearModel) -> f64 {
 
 pub(crate) fn render_specification(model: &GearModel, light: &Palette, dark: &Palette) -> String {
     let glyph = model.glyph();
-    format!(
+    let base = format!(
         "{{\n  \"generator\": \"rings-logo\",\n  \"geometry\": {{\n    \"module\": {},\n    \"teeth\": {},\n    \"pressure_angle_degrees\": {},\n    \"pitch_radius\": {},\n    \"base_radius\": {},\n    \"outer_radius\": {},\n    \"root_radius\": {},\n    \"aperture_radius\": {},\n    \"bore_count\": {},\n    \"bore_orbit\": {},\n    \"bore_radius\": {},\n    \"teeth_per_bore_sector\": {},\n    \"flank_samples\": {}\n  }},\n  \"geometry_rules\": {{\n    \"aperture_radius\": \"2*bore_count*module\",\n    \"bore_orbit\": \"aperture_radius+2*module\",\n    \"bore_radius\": \"(bore_count-1)/bore_count*module\",\n    \"flank_samples\": \"teeth/bore_count*(bore_count-1)\",\n    \"viewbox_radius\": \"outer_radius+2*bore_radius\",\n    \"gear_outline_width\": \"r_stroke/teeth_per_bore_sector\",\n    \"construction_guide_width\": \"gear_outline_width/bore_count\"\n  }},\n  \"glyph\": {{\n    \"mother_square_side\": {},\n    \"unit\": {},\n    \"dominant_stroke\": {},\n    \"fine_stroke\": {},\n    \"bowl_outer_radius\": {},\n    \"bowl_inner_radius\": {},\n    \"serif_circle_radius\": {},\n    \"leg_outer_circle_radius\": {},\n    \"leg_outer_sagitta\": {},\n    \"leg_outer_rounding_radius\": {},\n    \"leg_outer_root\": [{}, {}],\n    \"leg_outer_rounding_center\": [{}, {}],\n    \"leg_outer_join\": [{}, {}],\n    \"leg_root_arc_radius\": {},\n    \"leg_tip_arc_radius\": {},\n    \"leg_root\": [{}, {}],\n    \"leg_root_tangent\": [{}, {}],\n    \"leg_tip_tangent\": [{}, {}],\n    \"leg_tip\": [{}, {}]\n  }},\n  \"glyph_rules\": {{\n    \"historical_base\": {{\n      \"method\": \"R derived from B\",\n      \"mother_square\": \"side L divided into nine modules\",\n      \"dominant_stroke\": \"u=L/9\",\n      \"fine_stroke\": \"u/2=L/18\",\n      \"b_round\": \"paired circular contours; lower diameter 5L/9\",\n      \"serifs\": \"brackets constructed by tangent circles\",\n      \"leg_outer\": \"circular arc from square center to lower-right corner\",\n      \"leg_inner\": \"straight segment joined to two tangent circular arcs\",\n      \"leg_root_width\": \"approximately L/9; both sides taper to zero at the corner\"\n    }},\n    \"rings_completion\": {{\n      \"scope\": \"parameters not fully specified by the surviving Pacioli plate\",\n      \"square_binding\": \"L=sqrt(2)*aperture_radius\",\n      \"stem_edges\": \"left=-19u/6; right=-13u/6\",\n      \"bowl_outer\": \"center=(-u/2,-17u/8); radius=19u/8\",\n      \"bowl_inner\": \"center=(-5u/4,-17u/8); radius=17u/8\",\n      \"serif_circle_radius\": \"2u/3\",\n      \"leg_root\": \"S=(-129u/128,0), on the crossbar; S_x=-29u/32-(13u/64)/2\",\n      \"leg_root_arc\": \"center=(-129u/128,13u/64); radius=13u/64; tangent to the crossbar at S\",\n      \"leg_straight\": \"x=3y/4-29u/32; direction is the 3-4-5 triangle\",\n      \"leg_outer_arc\": \"support circle passes through C and D with sagitta u/10; visible arc begins at the derived tangent T\",\n      \"leg_outer_root\": \"B=bowl outer waist; BS=(65/128+3sqrt(2)/4)u\",\n      \"leg_outer_rounding\": \"n=(B-O_b)/r_b; r_o=(R^2-|B-O|^2)/(2(R+(B-O) dot n)); center=B+r_o*n; tangent=T=O+R(center-O)/|center-O|\",\n      \"glyph_fill\": \"one continuous outer silhouette plus one counter; no component closure crosses the bowl-leg junction\",\n      \"leg_root_radius\": \"13u/64; line tangency=(-541u/640,13u/160)\",\n      \"leg_tip_radius\": \"17833u/3328; line tangency=(143u/160,12u/5)\",\n      \"leg_tip\": \"tip arc passes through D=(9u/2,9u/2); both contours meet at D\"\n    }}\n  }},\n  \"color_rules\": {{\n    \"space\": \"OKLCH converted to quantized sRGB\",\n    \"lightness_grid\": \"1/10000\",\n    \"rust_hue\": \"360/(2*bore_count)=36deg\",\n    \"signal_hue\": \"rust_hue+180=216deg\",\n    \"accent_chroma\": \"(bore_count-1)/teeth\",\n    \"guide_chroma\": \"1/teeth\",\n    \"neutral_chroma\": \"guide_chroma/pentagonal_golden_ratio^2\"\n  }},\n  \"palettes\": {{\n    \"light_background\": {},\n    \"dark_background\": {}\n  }}\n}}\n",
         format_number(model.spec.module),
         model.spec.teeth,
@@ -591,7 +674,45 @@ pub(crate) fn render_specification(model: &GearModel, light: &Palette, dark: &Pa
         format_number(glyph.leg.inner.tip.y),
         palette_json(light),
         palette_json(dark),
-    )
+    );
+    insert_inner_ring_spec(base, model)
+}
+
+fn insert_inner_ring_spec(base: String, model: &GearModel) -> String {
+    const GLYPH_MARKER: &str = "  \"glyph\": {";
+    let profile = format!(
+        concat!(
+            "  \"gear_inner_profile\": {{\n",
+            "    \"topology\": \"five bracketed bore lobes alternating with five inner-ring arcs\",\n",
+            "    \"inner_ring_radius\": {},\n",
+            "    \"lobe_half_span\": {},\n",
+            "    \"tip_center_orbit\": {},\n",
+            "    \"tip_radius\": {},\n",
+            "    \"lobe_half_angle_degrees\": {},\n",
+            "    \"positive_tip_tangent\": [{}, {}],\n",
+            "    \"minimum_radius\": {},\n",
+            "    \"rules\": {{\n",
+            "      \"inner_ring_radius\": \"bore_orbit-module/2\",\n",
+            "      \"lobe_half_span\": \"2*module\",\n",
+            "      \"tip_center_orbit\": \"aperture_radius\",\n",
+            "      \"tip_radius\": \"module/2\",\n",
+            "      \"lobe_half_angle\": \"asin(lobe_half_span/inner_ring_radius)\",\n",
+            "      \"sides\": \"exact tangents from inner-ring endpoints to the tip circle\",\n",
+            "      \"phase\": \"one lobe per bore on the regular pentagon\"\n",
+            "    }}\n",
+            "  }},\n",
+            "  \"glyph\": {{",
+        ),
+        format_number(model.inner_ring_radius),
+        format_number(model.inner_lobe_half_span),
+        format_number(model.inner_lobe_tip_orbit),
+        format_number(model.inner_lobe_tip_radius),
+        format_number(model.inner_lobe_half_angle.to_degrees()),
+        format_number(model.inner_lobe_tangent_x),
+        format_number(model.inner_lobe_tangent_y),
+        format_number(model.inner_lobe_tip_orbit - model.inner_lobe_tip_radius),
+    );
+    base.replacen(GLYPH_MARKER, &profile, 1)
 }
 
 fn palette_json(palette: &Palette) -> String {
@@ -639,6 +760,7 @@ mod tests {
     use super::fixed_style;
     use super::gear_body_path;
     use super::geometry_fragment;
+    use super::inner_ring_path;
     use super::tooth_path;
     use crate::color::Palette;
     use crate::model::GearModel;
@@ -702,6 +824,24 @@ mod tests {
                 let expected = format!(".gear-fill{{fill:{}}}", palette.accent.hex);
                 assert!(fixed_style(&palette).contains(&expected));
             }
+        }
+    }
+
+    #[test]
+    fn inner_ring_alternates_five_ring_arcs_with_five_bracketed_lobes() {
+        let model = GearModel::new(Spec::rings());
+        assert!(model.is_ok());
+        if let Ok(model) = model {
+            let path = inner_ring_path(&model);
+            let ring_arc = format!("A {} {}", model.inner_ring_radius, model.inner_ring_radius);
+            let tip_arc = format!(
+                "A {} {}",
+                model.inner_lobe_tip_radius, model.inner_lobe_tip_radius
+            );
+            assert_eq!(path.matches(&ring_arc).count(), 5);
+            assert_eq!(path.matches(&tip_arc).count(), 5);
+            assert_eq!(path.matches(" L ").count(), 10);
+            assert_eq!(path.matches(" Z").count(), 1);
         }
     }
 }

@@ -21,6 +21,8 @@ pub(crate) enum GeometryError {
     BoreIntersectsAperture,
     /// A bore crosses the gear root circle.
     BoreCrossesRoot,
+    /// An inner lobe cannot connect its base arc to its rounded tip.
+    InvalidInnerLobe,
     /// The involute sampling bound is too low.
     CoarseInvolute,
 }
@@ -34,6 +36,7 @@ impl fmt::Display for GeometryError {
             Self::InvalidRadiusOrder => "gear radii must be strictly ordered",
             Self::BoreIntersectsAperture => "a bore intersects the central aperture",
             Self::BoreCrossesRoot => "a bore crosses the root circle",
+            Self::InvalidInnerLobe => "inner lobes must admit real tangent segments",
             Self::CoarseInvolute => "involute sampling bound must be at least twelve",
         };
         formatter.write_str(message)
@@ -76,6 +79,21 @@ pub(crate) struct Point {
     pub(crate) y: f64,
 }
 
+/// One bracketed lobe that carries a bore inside the gear body.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct InnerLobe {
+    /// Endpoint reached before the lobe center phase.
+    pub(crate) before: Point,
+    /// Tangency from the first straight side into the tip circle.
+    pub(crate) before_tangent: Point,
+    /// Center of the circular tip.
+    pub(crate) tip_center: Point,
+    /// Tangency from the tip circle into the second straight side.
+    pub(crate) after_tangent: Point,
+    /// Endpoint reached after the lobe center phase.
+    pub(crate) after: Point,
+}
+
 /// Validated radii, phases, and curves for one mark.
 #[derive(Debug)]
 pub(crate) struct GearModel {
@@ -95,6 +113,20 @@ pub(crate) struct GearModel {
     pub(crate) hole_orbit: f64,
     /// Radius shared by all bores.
     pub(crate) hole_radius: f64,
+    /// Radius of the circular inner ring between bore lugs.
+    pub(crate) inner_ring_radius: f64,
+    /// Tangential half-span from a lobe centerline to either ring endpoint.
+    pub(crate) inner_lobe_half_span: f64,
+    /// Orbit of each circular lobe-tip center.
+    pub(crate) inner_lobe_tip_orbit: f64,
+    /// Radius of each circular lobe tip.
+    pub(crate) inner_lobe_tip_radius: f64,
+    /// Half-angle between a lobe centerline and either ring endpoint.
+    pub(crate) inner_lobe_half_angle: f64,
+    /// Positive local tangential coordinate of the tip tangency.
+    pub(crate) inner_lobe_tangent_x: f64,
+    /// Local radial coordinate of the tip tangency.
+    pub(crate) inner_lobe_tangent_y: f64,
     /// Mechanical outline width, derived from the central glyph stroke.
     pub(crate) gear_outline_width: f64,
     /// Construction guide width, derived from the mechanical outline.
@@ -126,6 +158,10 @@ impl GearModel {
         let aperture_radius = 2.0 * f64::from(spec.hole_count) * spec.module;
         let hole_orbit = aperture_radius + 2.0 * spec.module;
         let hole_radius = f64::from(spec.hole_count - 1) * spec.module / f64::from(spec.hole_count);
+        let inner_ring_radius = hole_orbit - spec.module / 2.0;
+        let inner_lobe_half_span = 2.0 * spec.module;
+        let inner_lobe_tip_orbit = aperture_radius;
+        let inner_lobe_tip_radius = spec.module / 2.0;
         let glyph_stroke_width = GlyphGeometry::stroke_width_for_aperture(aperture_radius);
         let teeth_per_bore_sector = spec.teeth / spec.hole_count;
         let gear_outline_width = glyph_stroke_width / f64::from(teeth_per_bore_sector);
@@ -142,6 +178,10 @@ impl GearModel {
                 aperture: aperture_radius,
                 hole_orbit,
                 hole: hole_radius,
+                inner_ring: inner_ring_radius,
+                lobe_half_span: inner_lobe_half_span,
+                lobe_tip_orbit: inner_lobe_tip_orbit,
+                lobe_tip: inner_lobe_tip_radius,
             },
             flank_samples,
         )?;
@@ -151,6 +191,17 @@ impl GearModel {
         let half_tooth_at_pitch = PI / (2.0 * f64::from(spec.teeth));
         let flank_rotation = half_tooth_at_pitch + pitch_involute;
         let outer_involute_parameter = ((outer_radius / base_radius).powi(2) - 1.0).sqrt();
+        let inner_lobe_endpoint_y =
+            (inner_ring_radius.powi(2) - inner_lobe_half_span.powi(2)).sqrt();
+        let inner_lobe_half_angle = inner_lobe_half_span.atan2(inner_lobe_endpoint_y);
+        let tangent = tangent_to_circle(
+            Point {
+                x: inner_lobe_half_span,
+                y: inner_lobe_endpoint_y,
+            },
+            inner_lobe_tip_orbit,
+            inner_lobe_tip_radius,
+        );
 
         Ok(Self {
             spec,
@@ -161,6 +212,13 @@ impl GearModel {
             aperture_radius,
             hole_orbit,
             hole_radius,
+            inner_ring_radius,
+            inner_lobe_half_span,
+            inner_lobe_tip_orbit,
+            inner_lobe_tip_radius,
+            inner_lobe_half_angle,
+            inner_lobe_tangent_x: tangent.x,
+            inner_lobe_tangent_y: tangent.y,
             gear_outline_width,
             construction_guide_width,
             tooth_pitch,
@@ -193,6 +251,29 @@ impl GearModel {
             .map(move |index| Self::point(self.hole_orbit, -PI / 2.0 + f64::from(index) * sector))
     }
 
+    /// Returns bracketed lobes whose lines and circular tips define the inner ring.
+    pub(crate) fn inner_lobes(&self) -> impl Iterator<Item = InnerLobe> + '_ {
+        let sector = 2.0 * PI / f64::from(self.spec.hole_count);
+        (0..self.spec.hole_count).map(move |index| {
+            let phase = -PI / 2.0 + f64::from(index) * sector;
+            InnerLobe {
+                before: Self::point(self.inner_ring_radius, phase - self.inner_lobe_half_angle),
+                before_tangent: oriented_point(
+                    phase,
+                    -self.inner_lobe_tangent_x,
+                    self.inner_lobe_tangent_y,
+                ),
+                tip_center: Self::point(self.inner_lobe_tip_orbit, phase),
+                after_tangent: oriented_point(
+                    phase,
+                    self.inner_lobe_tangent_x,
+                    self.inner_lobe_tangent_y,
+                ),
+                after: Self::point(self.inner_ring_radius, phase + self.inner_lobe_half_angle),
+            }
+        })
+    }
+
     /// Returns the central R from its nine-part mother square.
     pub(crate) fn glyph(&self) -> GlyphGeometry {
         GlyphGeometry::from_aperture(self.aperture_radius)
@@ -201,6 +282,25 @@ impl GearModel {
     /// Returns the number of teeth in each bore sector.
     pub(crate) fn teeth_per_bore_sector(&self) -> u32 {
         self.spec.teeth / self.spec.hole_count
+    }
+}
+
+fn tangent_to_circle(endpoint: Point, center_y: f64, radius: f64) -> Point {
+    let offset_x = endpoint.x;
+    let offset_y = endpoint.y - center_y;
+    let distance_squared = offset_x.powi(2) + offset_y.powi(2);
+    let tangent_length = (distance_squared - radius.powi(2)).sqrt();
+    Point {
+        x: (radius.powi(2) * offset_x + radius * tangent_length * offset_y) / distance_squared,
+        y: center_y
+            + (radius.powi(2) * offset_y - radius * tangent_length * offset_x) / distance_squared,
+    }
+}
+
+fn oriented_point(phase: f64, tangential: f64, radial: f64) -> Point {
+    Point {
+        x: radial * phase.cos() - tangential * phase.sin(),
+        y: radial * phase.sin() + tangential * phase.cos(),
     }
 }
 
@@ -213,6 +313,10 @@ struct Radii {
     aperture: f64,
     hole_orbit: f64,
     hole: f64,
+    inner_ring: f64,
+    lobe_half_span: f64,
+    lobe_tip_orbit: f64,
+    lobe_tip: f64,
 }
 
 fn validate(spec: &Spec, radii: Radii, flank_samples: u32) -> Result<(), GeometryError> {
@@ -227,6 +331,18 @@ fn validate(spec: &Spec, radii: Radii, flank_samples: u32) -> Result<(), Geometr
     }
     if radii.hole_orbit + radii.hole >= radii.root {
         return Err(GeometryError::BoreCrossesRoot);
+    }
+    let endpoint_y_squared = radii.inner_ring.powi(2) - radii.lobe_half_span.powi(2);
+    if endpoint_y_squared <= 0.0
+        || radii.lobe_tip_orbit <= radii.lobe_tip
+        || radii.lobe_tip_orbit + radii.lobe_tip >= radii.inner_ring
+    {
+        return Err(GeometryError::InvalidInnerLobe);
+    }
+    let tangent_distance_squared =
+        radii.lobe_half_span.powi(2) + (endpoint_y_squared.sqrt() - radii.lobe_tip_orbit).powi(2);
+    if tangent_distance_squared <= radii.lobe_tip.powi(2) {
+        return Err(GeometryError::InvalidInnerLobe);
     }
     if flank_samples < 12 {
         return Err(GeometryError::CoarseInvolute);
@@ -267,6 +383,44 @@ mod tests {
                 model.flank_samples,
                 model.teeth_per_bore_sector() * (model.spec.hole_count - 1)
             );
+        }
+    }
+
+    #[test]
+    fn bracketed_lobes_reconstruct_the_legacy_inner_ring() {
+        let model = GearModel::new(Spec::rings());
+        assert!(model.is_ok());
+        if let Ok(model) = model {
+            assert!(
+                (model.inner_ring_radius - (model.hole_orbit - model.spec.module / 2.0)).abs()
+                    < 1e-9
+            );
+            assert!((model.inner_lobe_half_span - 2.0 * model.spec.module).abs() < 1e-9);
+            assert!((model.inner_lobe_tip_orbit - model.aperture_radius).abs() < 1e-9);
+            assert!((model.inner_lobe_tip_radius - model.spec.module / 2.0).abs() < 1e-9);
+            assert_eq!(model.inner_lobes().count(), 5);
+
+            for lobe in model.inner_lobes() {
+                for endpoint in [lobe.before, lobe.after] {
+                    assert!((endpoint.x.hypot(endpoint.y) - model.inner_ring_radius).abs() < 1e-9);
+                }
+                for (endpoint, tangent) in [
+                    (lobe.before, lobe.before_tangent),
+                    (lobe.after, lobe.after_tangent),
+                ] {
+                    assert!(
+                        ((tangent.x - lobe.tip_center.x).hypot(tangent.y - lobe.tip_center.y)
+                            - model.inner_lobe_tip_radius)
+                            .abs()
+                            < 1e-9
+                    );
+                    let side_x = endpoint.x - tangent.x;
+                    let side_y = endpoint.y - tangent.y;
+                    let radius_x = tangent.x - lobe.tip_center.x;
+                    let radius_y = tangent.y - lobe.tip_center.y;
+                    assert!((side_x * radius_x + side_y * radius_y).abs() < 1e-9);
+                }
+            }
         }
     }
 

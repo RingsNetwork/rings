@@ -24,6 +24,25 @@
     "gear_outline_width": "r_stroke/teeth_per_bore_sector",
     "construction_guide_width": "gear_outline_width/bore_count"
   },
+  "gear_inner_profile": {
+    "topology": "five bracketed bore lobes alternating with five inner-ring arcs",
+    "inner_ring_radius": 115,
+    "lobe_half_span": 20,
+    "tip_center_orbit": 100,
+    "tip_radius": 5,
+    "lobe_half_angle_degrees": 10.01541,
+    "positive_tip_tangent": [3.569282, 96.49854],
+    "minimum_radius": 95,
+    "rules": {
+      "inner_ring_radius": "bore_orbit-module/2",
+      "lobe_half_span": "2*module",
+      "tip_center_orbit": "aperture_radius",
+      "tip_radius": "module/2",
+      "lobe_half_angle": "asin(lobe_half_span/inner_ring_radius)",
+      "sides": "exact tangents from inner-ring endpoints to the tip circle",
+      "phase": "one lobe per bore on the regular pentagon"
+    }
+  },
   "glyph": {
     "mother_square_side": 141.421356,
     "unit": 15.713484,

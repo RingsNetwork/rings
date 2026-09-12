@@ -22,6 +22,15 @@ cargo run -p rings-logo -- check
   exactly six teeth. Aperture, bore orbit, bore radius, flank sample count, and
   canvas margin derive from the tooth count, bore count, and `m`; they are not
   additional fitted constants.
+- The filled gear restores the former mark's five-lobed inner ring. Its base
+  circle is `r_i = r_bore - m/2 = 11.5m`. Each lobe begins at tangential
+  offsets `+/-2m` on that circle, so its half-angle is
+  `delta = asin(2m/r_i)`, approximately `10.02deg`. A tip circle of radius
+  `m/2` is centered at radius `a = 10m` on the corresponding bore axis. Two
+  exact tangents join the ring endpoints to that tip circle. The visible edge
+  therefore alternates five base-circle arcs with five line-arc-line brackets;
+  its minimum radius is `a-m/2 = 9.5m`. This reconstructs the former narrow,
+  rounded bearing lugs instead of replacing them with a generic circular hole.
 - The central R follows Luca Pacioli's construction grammar: a mother square of
   side `L`, divided into nine modules `u = L/9`; a dominant stroke `u`; a fine
   stroke `u/2 = L/18`; R derived from B; paired circular contours; and bracketed
@@ -29,8 +38,9 @@ cargo run -p rings-logo -- check
   letter rather than a constant-width stroked symbol.
 - Pacioli's surviving plate does not specify enough measurements to reproduce
   every contour uniquely. The generator therefore names its deterministic
-  choices the **Rings completion**: the mother square is inscribed in the
-  aperture (`L = sqrt(2)a`); stem edges are `-19u/6` and `-13u/6`; the outer
+  choices the **Rings completion**: the mother square is inscribed in a glyph
+  construction circle of radius `a` (`L = sqrt(2)a`); stem edges are `-19u/6`
+  and `-13u/6`; the outer
   bowl has center `(-u/2,-17u/8)` and radius `19u/8`, while the counter has
   center `(-5u/4,-17u/8)` and radius `17u/8`. Their common horizontal axis and
   rational eighth-module dimensions reconstruct the printed plate much more
@@ -71,12 +81,13 @@ cargo run -p rings-logo -- check
   the gear and bore outlines are `w_G = w_R/6`; construction guides are
   `w_C = w_G/5`.
 - Like the former Rings gear mark, the involute gear is an opaque filled body,
-  not only a contour. Its central aperture and the five pentagonal bores are
-  true transparent cutouts in one even-odd path. The fill uses the same solved
-  rust paint as the R, so the two solid components retain the old mark's
-  monochrome relationship without copying an arbitrary legacy RGB value. Its
-  OKLCH hue is `H = 360/(2*5) = 36deg`, chroma is `C = (5-1)/30 = 2/15`, and
-  lightness is the first point on the `1/10000` grid meeting `4.5:1` contrast.
+  not only a contour. Its five-lobed inner opening and the five pentagonal
+  bores are true transparent cutouts in one even-odd path. The fill uses the
+  same solved rust paint as the R, so the two solid components retain the old
+  mark's monochrome relationship without copying an arbitrary legacy RGB
+  value. Its OKLCH hue is `H = 360/(2*5) = 36deg`, chroma is
+  `C = (5-1)/30 = 2/15`, and lightness is the first point on the `1/10000` grid
+  meeting `4.5:1` contrast.
 - Palette hues are derived from the pentagon: rust is `72deg/2 = 36deg`; signal
   cyan is its 180-degree complement. Chroma derives from tooth and bore counts.
   Lightness is solved on a `1/10000` OKLCH grid against WCAG contrast targets of
