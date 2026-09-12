@@ -52,10 +52,10 @@ cargo run -p rings-logo -- check
   fitted independently.
 - The inner contour begins at `S = (-u/2,0)`. Its root circle has center
   `(-u/2,13u/64)` and radius `13u/64`, meeting the crossbar at `S` and the line
-  `x = 3y/4 - 51u/128` at `(-27u/80,13u/160)`. The line's direction is therefore
+  `x = 3y/4 - 29u/32` at `(-53u/80,13u/40)`. The line's direction is therefore
   the exact rational `3:4:5` triangle, not an assumed 45-degree parallel.
-- The terminal circle has center `(99837u/16640,-69801u/66560)`, radius
-  `76515u/13312`, and is tangent to that line at `(897u/640,12u/5)`. It passes
+- The terminal circle has center `(21551u/4160,-13563u/16640)`, radius
+  `17833u/3328`, and is tangent to that line at `(143u/160,12u/5)`. It passes
   through `D = (9u/2,9u/2)`, where both leg contours meet with zero width. The
   support circles are part of the model but are not drawn as decorative
   construction circles.

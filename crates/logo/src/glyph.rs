@@ -311,9 +311,9 @@ fn leg(square_half: f64, unit: f64, bowl: BowlGeometry) -> LegGeometry {
     };
 
     let root_tangent =
-        root_circle.point_at_offset(4.0 * root_radius / 5.0, -3.0 * root_radius / 5.0);
+        root_circle.point_at_offset(-4.0 * root_radius / 5.0, 3.0 * root_radius / 5.0);
     let tip_tangent = Point {
-        x: 897.0 * unit / 640.0,
+        x: 143.0 * unit / 160.0,
         y: 12.0 * unit / 5.0,
     };
     let tip_circle = tip_rounding_circle(tip_tangent, outer_end);
@@ -526,9 +526,8 @@ mod tests {
         );
         assert!((inner.root_circle.center.x - inner.root.x).abs() < EPSILON);
         assert!((inner.root_circle.radius - 13.0 * glyph.unit / 64.0).abs() < EPSILON);
-        assert!((inner.root_tangent.x + 27.0 * glyph.unit / 80.0).abs() < EPSILON);
-        assert!((inner.root_tangent.y - 13.0 * glyph.unit / 160.0).abs() < EPSILON);
-        assert!(inner.root_tangent.x > inner.root.x);
+        assert!((inner.root_tangent.x + 53.0 * glyph.unit / 80.0).abs() < EPSILON);
+        assert!((inner.root_tangent.y - 13.0 * glyph.unit / 40.0).abs() < EPSILON);
 
         let tangent = subtract(inner.tip_tangent, inner.root_tangent);
         let root_radius = subtract(inner.root_tangent, inner.root_circle.center);
@@ -537,11 +536,11 @@ mod tests {
         assert!(dot(tangent, root_radius).abs() < EPSILON);
         assert!(dot(tangent, tip_radius).abs() < EPSILON);
         for point in [inner.root_tangent, inner.tip_tangent] {
-            assert!((point.x - 3.0 * point.y / 4.0 + 51.0 * glyph.unit / 128.0).abs() < EPSILON);
+            assert!((point.x - 3.0 * point.y / 4.0 + 29.0 * glyph.unit / 32.0).abs() < EPSILON);
         }
-        assert!((inner.tip_tangent.x - 897.0 * glyph.unit / 640.0).abs() < EPSILON);
+        assert!((inner.tip_tangent.x - 143.0 * glyph.unit / 160.0).abs() < EPSILON);
         assert!((inner.tip_tangent.y - 12.0 * glyph.unit / 5.0).abs() < EPSILON);
-        assert!((inner.tip_circle.radius - 76515.0 * glyph.unit / 13312.0).abs() < EPSILON);
+        assert!((inner.tip_circle.radius - 17833.0 * glyph.unit / 3328.0).abs() < EPSILON);
 
         assert!((inner.tip.x - leg.outer_end.x).abs() < EPSILON);
         assert!((inner.tip.y - leg.outer_end.y).abs() < EPSILON);

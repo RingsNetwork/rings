@@ -39,10 +39,10 @@
     "leg_outer_rounding_center": [11.131908, 4.652022],
     "leg_outer_join": [7.279367, 8.143562],
     "leg_root_arc_radius": 3.191801,
-    "leg_tip_arc_radius": 90.318302,
+    "leg_tip_arc_radius": 84.200289,
     "leg_root": [-7.856742, 0],
-    "leg_root_tangent": [-5.303301, 1.276721],
-    "leg_tip_tangent": [22.02343, 37.712362],
+    "leg_root_tangent": [-10.410183, 5.106882],
+    "leg_tip_tangent": [14.043926, 37.712362],
     "leg_tip": [70.710678, 70.710678]
   },
   "glyph_rules": {
@@ -65,14 +65,14 @@
       "bowl_inner": "center=(-5u/4,-17u/8); radius=17u/8",
       "serif_circle_radius": "2u/3",
       "leg_root": "S=(-u/2,0), on the crossbar; CS=u/2",
-      "leg_root_arc": "center=(-u/2,13u/64); radius=13u/64; tangent to the crossbar at S and leaves it toward the lower right",
-      "leg_straight": "x=3y/4-51u/128; direction is the 3-4-5 triangle",
+      "leg_root_arc": "center=(-u/2,13u/64); radius=13u/64; tangent to the crossbar at S",
+      "leg_straight": "x=3y/4-29u/32; direction is the 3-4-5 triangle",
       "leg_outer_arc": "support circle passes through C and D with sagitta u/10; visible arc begins at the derived tangent T",
       "leg_outer_root": "B=bowl outer waist; BS=3sqrt(2)u/4",
       "leg_outer_rounding": "n=(B-O_b)/r_b; r_o=(R^2-|B-O|^2)/(2(R+(B-O) dot n)); center=B+r_o*n; tangent=T=O+R(center-O)/|center-O|",
       "glyph_fill": "one continuous outer silhouette plus one counter; no component closure crosses the bowl-leg junction",
-      "leg_root_radius": "13u/64; line tangency=(-27u/80,13u/160)",
-      "leg_tip_radius": "76515u/13312; line tangency=(897u/640,12u/5)",
+      "leg_root_radius": "13u/64; line tangency=(-53u/80,13u/40)",
+      "leg_tip_radius": "17833u/3328; line tangency=(143u/160,12u/5)",
       "leg_tip": "tip arc passes through D=(9u/2,9u/2); both contours meet at D"
     }
   },
