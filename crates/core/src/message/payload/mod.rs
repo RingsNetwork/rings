@@ -315,6 +315,11 @@ impl MessagePayload {
     pub(crate) fn should_forward_from(&self, local: Did) -> bool {
         !self.is_relay_destination_for(local)
     }
+
+    /// Verify both the immutable origin transaction and the current payload carrier.
+    pub(crate) fn verify_transaction_and_payload(&self, network_id: u32) -> bool {
+        self.transaction.verify(network_id) && MessageVerificationExt::verify(self, network_id)
+    }
 }
 
 impl MessageVerificationExt for Transaction {

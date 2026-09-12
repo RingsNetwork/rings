@@ -49,6 +49,32 @@ async fn test_http_handshake_transactions_are_replay_protected() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn test_http_handshake_rejects_invalid_inner_signatures_before_replay_admission() -> Result<()>
+{
+    let [key1, key2]: [SecretKey; 2] = gen_ordered_keys::<2>();
+    let node1 = prepare_node(key1).await;
+    let node2 = prepare_node(key2).await;
+
+    let offer = node1.swarm.create_offer(node2.did()).await?;
+    let mut forged_offer = offer.clone();
+    forged_offer.transaction.verification.sig.clear();
+    assert!(matches!(
+        node2.swarm.answer_offer(forged_offer).await,
+        Err(Error::VerifySignatureFailed)
+    ));
+
+    let answer = node2.swarm.answer_offer(offer).await?;
+    let mut forged_answer = answer.clone();
+    forged_answer.transaction.verification.sig.clear();
+    assert!(matches!(
+        node1.swarm.accept_answer(forged_answer).await,
+        Err(Error::VerifySignatureFailed)
+    ));
+    node1.swarm.accept_answer(answer).await?;
+    Ok(())
+}
+
 async fn test_handshake_on_both_sides(key1: SecretKey, key2: SecretKey, key3: SecretKey) {
     let node1 = prepare_node(key1).await;
     let node2 = prepare_node(key2).await;

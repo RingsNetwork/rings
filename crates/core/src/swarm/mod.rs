@@ -220,7 +220,7 @@ impl Swarm {
     /// Answer the offer of remote connection. This function will verify the answer payload and
     /// will wrap the answer inside a payload with verification.
     pub async fn answer_offer(&self, offer_payload: MessagePayload) -> Result<MessagePayload> {
-        if !offer_payload.verify(self.network_id()) {
+        if !offer_payload.verify_transaction_and_payload(self.network_id()) {
             return Err(Error::VerifySignatureFailed);
         }
 
@@ -257,7 +257,7 @@ impl Swarm {
     /// Accept the answer of remote connection. This function will verify the answer payload and
     /// will return its did with the connection.
     pub async fn accept_answer(&self, answer_payload: MessagePayload) -> Result<()> {
-        if !answer_payload.verify(self.network_id()) {
+        if !answer_payload.verify_transaction_and_payload(self.network_id()) {
             return Err(Error::VerifySignatureFailed);
         }
 

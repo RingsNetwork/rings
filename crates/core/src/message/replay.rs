@@ -234,11 +234,51 @@ pub fn observe(
 
 /// Versioned durable sender and receiver state.
 ///
-/// Fields are private so only [`TransactionReplay`] can apply the capacity and persistence laws.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+/// Fields are private so only the transaction replay runtime can apply the capacity and
+/// persistence laws. The Serde representation is an opaque Rings-codec byte sequence: browser
+/// storage therefore never exposes structured map keys or `u64` counters to JavaScript's JSON
+/// number and object-key restrictions.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ReplaySnapshot {
     sender: BTreeMap<StreamKey, u64>,
     receiver: BTreeMap<StreamKey, SequenceState>,
+}
+
+#[derive(Serialize)]
+struct ReplaySnapshotRef<'a> {
+    sender: &'a BTreeMap<StreamKey, u64>,
+    receiver: &'a BTreeMap<StreamKey, SequenceState>,
+}
+
+#[derive(Deserialize)]
+struct ReplaySnapshotWire {
+    sender: BTreeMap<StreamKey, u64>,
+    receiver: BTreeMap<StreamKey, SequenceState>,
+}
+
+impl Serialize for ReplaySnapshot {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where S: serde::Serializer {
+        let wire = ReplaySnapshotRef {
+            sender: &self.sender,
+            receiver: &self.receiver,
+        };
+        let encoded = rings_codec::serialize(&wire).map_err(serde::ser::Error::custom)?;
+        encoded.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ReplaySnapshot {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where D: serde::Deserializer<'de> {
+        let encoded = Vec::<u8>::deserialize(deserializer)?;
+        let wire: ReplaySnapshotWire =
+            rings_codec::deserialize(&encoded).map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            sender: wire.sender,
+            receiver: wire.receiver,
+        })
+    }
 }
 
 /// Storage accepted by the transaction replay runtime.
@@ -493,6 +533,23 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_encoding_preserves_structured_keys_and_full_width_sequences() {
+        let origin: Did = SecretKey::random().address().into();
+        let destination: Did = SecretKey::random().address().into();
+        let key = StreamKey::new(7, origin, destination);
+        let mut snapshot = ReplaySnapshot::default();
+        snapshot.sender.insert(key, u64::MAX);
+        snapshot
+            .receiver
+            .insert(key, SequenceState::first(u64::MAX, digest(9)));
+
+        let encoded = rings_codec::serialize(&snapshot).expect("snapshot encodes");
+        let decoded: ReplaySnapshot = rings_codec::deserialize(&encoded).expect("snapshot decodes");
+
+        assert_eq!(decoded, snapshot);
+    }
+
+    #[test]
     fn destinations_advance_independently() {
         let origin: Did = SecretKey::random().address().into();
         let a: Did = SecretKey::random().address().into();
@@ -677,6 +734,52 @@ mod tests {
             Err(Error::TransactionReplayStreamCapacityExceeded { capacity: 4096 })
         ));
         Ok(())
+    }
+
+    #[cfg(all(feature = "wasm", target_family = "wasm"))]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    async fn browser_storage_round_trip_retains_nonempty_replay_state() {
+        const STORAGE_NAME: &str = "rings-core/replay-snapshot-round-trip-v2";
+        let storage = crate::storage::idb::IdbStorage::new_with_cap_and_name(2, STORAGE_NAME)
+            .await
+            .expect("IndexedDB opens");
+        storage.clear().await.expect("IndexedDB clears");
+        let origin: Did = SecretKey::random().address().into();
+        let destination: Did = SecretKey::random().address().into();
+        let key = StreamKey::new(7, origin, destination);
+        let first = TransactionReplay::new(Box::new(storage));
+
+        assert_eq!(
+            first
+                .reserve(key, NonZeroU64::MIN)
+                .await
+                .expect("sender reservation persists"),
+            0..=0
+        );
+        assert_eq!(
+            first
+                .admit(key, u64::MAX, digest(1))
+                .await
+                .expect("receiver state persists"),
+            SequenceVerdict::First
+        );
+        drop(first);
+
+        let reopened = crate::storage::idb::IdbStorage::new_with_cap_and_name(2, STORAGE_NAME)
+            .await
+            .expect("IndexedDB reopens");
+        let restarted = TransactionReplay::new(Box::new(reopened));
+        assert_eq!(
+            restarted
+                .reserve(key, NonZeroU64::MIN)
+                .await
+                .expect("sender state reloads"),
+            1..=1
+        );
+        assert!(matches!(
+            restarted.admit(key, u64::MAX, digest(1)).await,
+            Err(Error::TransactionReplay { .. })
+        ));
     }
 
     #[cfg(not(target_family = "wasm"))]

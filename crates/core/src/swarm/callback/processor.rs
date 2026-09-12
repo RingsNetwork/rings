@@ -192,7 +192,7 @@ impl InboundProcessor {
             }
         };
         let network_id = self.logical.transport.network_id;
-        if !(payload.verify(network_id) && payload.transaction.verify(network_id)) {
+        if !payload.verify_transaction_and_payload(network_id) {
             log_inbound_verification_failure(peer, &payload, msg.len());
             self.record_receive_failure(peer, authentication).await;
             return Err(crate::error::Error::InvalidMessage(
@@ -245,7 +245,7 @@ pub(super) fn prepare_transport_frame(
     bytes: &[u8],
 ) -> crate::error::Result<PreparedInboundFrame> {
     let payload = MessagePayload::from_wire(bytes)?;
-    if !(payload.transaction.verify(network_id) && payload.verify(network_id)) {
+    if !payload.verify_transaction_and_payload(network_id) {
         log_inbound_verification_failure(peer, &payload, bytes.len());
         return Err(crate::error::Error::InvalidMessage(
             "message verification failed or message expired".to_string(),
