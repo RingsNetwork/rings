@@ -30,21 +30,25 @@ cargo run -p rings-logo -- check
 - Pacioli's surviving plate does not specify enough measurements to reproduce
   every contour uniquely. The generator therefore names its deterministic
   choices the **Rings completion**: the mother square is inscribed in the
-  aperture (`L = sqrt(2)a`); stem edges are `-19u/6` and `-13u/6`; the paired
-  bowl circles have radius `5u/2` and centers `(-u/2,-2u)` and
-  `(-3u/2,-3u/2)`; each serif circle has radius `2u/3`.
+  aperture (`L = sqrt(2)a`); stem edges are `-19u/6` and `-13u/6`; the outer
+  bowl has center `(-u/2,-17u/8)` and radius `19u/8`, while the counter has
+  center `(-5u/4,-17u/8)` and radius `17u/8`. Their common horizontal axis and
+  rational eighth-module dimensions reconstruct the printed plate much more
+  closely than the former pair of congruent, diagonally offset circles. Each
+  serif circle has radius `2u/3`.
 - The square's center-to-lower-right chord remains the exact 45-degree
   construction diagonal; it is not itself a black contour. The leg's outer
-  contour is the quarter circle with those endpoints. Its inner contour starts
-  at `S = (u,0)`, the same point on the bowl's outer circle, so `CS = u = L/9`.
-  A root arc externally tangent to the bowl joins a straight segment parallel
-  to the diagonal; a second tangent arc resolves that segment into the
-  lower-right corner and is tangent to the baseline there.
-- The two transition radii partition one module and are solved from the
-  tangency constraints, not fitted: `r_root + r_tip = u`,
-  `r_root = u/(2 - 4/(5sqrt(2)))`, and `r_tip = u - r_root`. Both leg contours
-  therefore meet with zero width at the same corner. Their support circles are
-  part of the model but are not drawn as decorative construction circles.
+  contour is the unique shallow circular arc through the square center `C` and
+  lower-right corner `D` with sagitta `u/10`.
+- The inner contour begins at `S = (-u/2,0)`. Its root circle has center
+  `(-u/2,13u/64)` and radius `13u/64`, meeting the crossbar at `S` and the line
+  `x = 3y/4 - 29u/32` at `(-53u/80,13u/40)`. The line's direction is therefore
+  the exact rational `3:4:5` triangle, not an assumed 45-degree parallel.
+- The terminal circle has center `(21551u/4160,-13563u/16640)`, radius
+  `17833u/3328`, and is tangent to that line at `(143u/160,12u/5)`. It passes
+  through `D = (9u/2,9u/2)`, where both leg contours meet with zero width. The
+  two support circles are part of the model but are not drawn as decorative
+  construction circles.
 - Stroke hierarchy is `30:5:1`, directly matching teeth, bores, and one
   construction unit. With `w_R = u = sqrt(2)a/9` and six teeth per bore sector,
   the gear and bore outlines are `w_G = w_R/6`; construction guides are

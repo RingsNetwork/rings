@@ -60,12 +60,12 @@ pub(crate) struct SerifGeometry {
     pub(crate) bottom_inner: TangentCircle,
 }
 
-/// Paired eccentric circles inherited from Pacioli's B construction.
+/// Paired circles inherited from Pacioli's B construction.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct BowlGeometry {
     /// Outer contour circle.
     pub(crate) outer: Circle,
-    /// Inner counter circle, congruent and offset from the outer circle.
+    /// Inner counter circle, sharing the outer circle's horizontal axis.
     pub(crate) inner: Circle,
     /// Top tangency of the outer contour.
     pub(crate) outer_top: Point,
@@ -77,27 +77,29 @@ pub(crate) struct BowlGeometry {
     pub(crate) inner_waist: Point,
 }
 
-/// Curved leg from the center to the lower-right corner.
+/// Curved leg constructed around the center-to-corner diagonal.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct LegGeometry {
-    /// Circle whose quarter arc is the outer contour.
+    /// Circle whose shallow arc is the outer contour.
     pub(crate) outer_circle: Circle,
+    /// Sagitta of the outer arc measured from the square diagonal.
+    pub(crate) outer_sagitta: f64,
     /// Start of the outer contour at the square center.
     pub(crate) outer_start: Point,
     /// End of the outer contour at the lower-right corner.
     pub(crate) outer_end: Point,
-    /// Inner contour built from two tangent arcs and a diagonal-parallel line.
+    /// Inner contour built from two tangent arcs and a 3:4 line.
     pub(crate) inner: InnerLegGeometry,
 }
 
 /// Inner leg contour joined continuously to the bowl and terminal corner.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct InnerLegGeometry {
-    /// Circle externally tangent to the bowl at the root.
+    /// Circle tangent to the crossbar at the root and to the straight segment.
     pub(crate) root_circle: Circle,
-    /// Circle tangent to the baseline at the terminal corner.
+    /// Circle tangent to the straight segment and passing through the corner.
     pub(crate) tip_circle: Circle,
-    /// Root shared with the outer bowl contour.
+    /// Root on the lower edge of the crossbar.
     pub(crate) root: Point,
     /// Tangency between the root arc and straight segment.
     pub(crate) root_tangent: Point,
@@ -143,7 +145,7 @@ impl GlyphGeometry {
             stem,
             serifs: serifs(square_half, unit, stem),
             bowl,
-            leg: leg(square_half, unit, bowl),
+            leg: leg(square_half, unit),
         }
     }
 
@@ -244,86 +246,89 @@ fn baseline_circle(
 }
 
 fn bowl(unit: f64) -> BowlGeometry {
-    let radius = 5.0 * unit / 2.0;
     let outer = Circle {
         center: Point {
             x: -unit / 2.0,
-            y: -2.0 * unit,
+            y: -17.0 * unit / 8.0,
         },
-        radius,
+        radius: 19.0 * unit / 8.0,
     };
     let inner = Circle {
         center: Point {
-            x: -3.0 * unit / 2.0,
-            y: -3.0 * unit / 2.0,
+            x: -5.0 * unit / 4.0,
+            y: -17.0 * unit / 8.0,
         },
-        radius,
+        radius: 17.0 * unit / 8.0,
     };
     BowlGeometry {
         outer,
         inner,
-        outer_top: outer.point_at_offset(0.0, -radius),
-        inner_top: inner.point_at_offset(0.0, -radius),
-        outer_waist: Point { x: unit, y: 0.0 },
-        inner_waist: Point {
-            x: unit / 2.0,
+        outer_top: outer.point_at_offset(0.0, -outer.radius),
+        inner_top: inner.point_at_offset(0.0, -inner.radius),
+        outer_waist: Point {
+            x: unit * (-0.5 + 3.0 * 2.0_f64.sqrt() / 4.0),
             y: 0.0,
         },
+        inner_waist: inner.point_at_offset(0.0, inner.radius),
     }
 }
 
-fn leg(square_half: f64, unit: f64, bowl: BowlGeometry) -> LegGeometry {
+fn leg(square_half: f64, unit: f64) -> LegGeometry {
     let outer_start = Point { x: 0.0, y: 0.0 };
     let outer_end = Point {
         x: square_half,
         y: square_half,
     };
+    let outer_sagitta = unit / 10.0;
     let diagonal_component = 1.0 / 2.0_f64.sqrt();
-    let root_radius = unit / (2.0 - 4.0 * diagonal_component / 5.0);
-    let tip_radius = unit - root_radius;
-    let root_normal = Point {
-        x: 3.0 / 5.0,
-        y: 4.0 / 5.0,
+    let outer_radius = square_half * square_half / (4.0 * outer_sagitta) + outer_sagitta / 2.0;
+    let outer_center_offset = outer_radius - outer_sagitta;
+    let outer_circle = Circle {
+        center: Point {
+            x: square_half / 2.0 + outer_center_offset * diagonal_component,
+            y: square_half / 2.0 - outer_center_offset * diagonal_component,
+        },
+        radius: outer_radius,
     };
-    let tangent_normal = Point {
-        x: -diagonal_component,
-        y: diagonal_component,
+
+    let root = Point {
+        x: -unit / 2.0,
+        y: 0.0,
     };
-    let root = bowl.outer_waist;
+    let root_radius = 13.0 * unit / 64.0;
     let root_circle = Circle {
         center: Point {
-            x: root.x + root_radius * root_normal.x,
-            y: root.y + root_radius * root_normal.y,
+            x: root.x,
+            y: root.y + root_radius,
         },
         radius: root_radius,
     };
+
+    let root_tangent =
+        root_circle.point_at_offset(-4.0 * root_radius / 5.0, 3.0 * root_radius / 5.0);
+    let tip_tangent = Point {
+        x: 143.0 * unit / 160.0,
+        y: 12.0 * unit / 5.0,
+    };
+    let tip_radius = 17833.0 * unit / 3328.0;
     let tip_circle = Circle {
         center: Point {
-            x: square_half,
-            y: square_half - tip_radius,
+            x: 21551.0 * unit / 4160.0,
+            y: -13563.0 * unit / 16640.0,
         },
         radius: tip_radius,
     };
     LegGeometry {
-        outer_circle: Circle {
-            center: Point {
-                x: square_half,
-                y: 0.0,
-            },
-            radius: square_half,
-        },
+        outer_circle,
+        outer_sagitta,
         outer_start,
         outer_end,
         inner: InnerLegGeometry {
             root_circle,
             tip_circle,
             root,
-            root_tangent: root_circle.point_at_offset(
-                root_radius * tangent_normal.x,
-                root_radius * tangent_normal.y,
-            ),
-            tip_tangent: tip_circle
-                .point_at_offset(tip_radius * tangent_normal.x, tip_radius * tangent_normal.y),
+            root_tangent,
+            tip_tangent,
             tip: outer_end,
         },
     }
@@ -347,16 +352,23 @@ mod tests {
     }
 
     #[test]
-    fn bowl_uses_congruent_eccentric_circles() {
+    fn bowl_uses_rational_circles_on_one_axis() {
         let glyph = GlyphGeometry::from_aperture(100.0);
         let bowl = glyph.bowl;
-        assert!((bowl.outer.radius - 5.0 * glyph.unit / 2.0).abs() < EPSILON);
-        assert!((bowl.outer.radius - bowl.inner.radius).abs() < EPSILON);
-        assert!((bowl.inner.center.x - bowl.outer.center.x + glyph.unit).abs() < EPSILON);
-        assert!((bowl.inner.center.y - bowl.outer.center.y - glyph.unit / 2.0).abs() < EPSILON);
+        assert!((bowl.outer.radius - 19.0 * glyph.unit / 8.0).abs() < EPSILON);
+        assert!((bowl.inner.radius - 17.0 * glyph.unit / 8.0).abs() < EPSILON);
         assert!(
-            (bowl.outer_waist.x - bowl.inner_waist.x - glyph.thin_stroke_width).abs() < EPSILON
+            (bowl.inner.center.x - bowl.outer.center.x + 3.0 * glyph.unit / 4.0).abs() < EPSILON
         );
+        assert!((bowl.inner.center.y - bowl.outer.center.y).abs() < EPSILON);
+        assert!((bowl.outer.radius - bowl.inner.radius - glyph.unit / 4.0).abs() < EPSILON);
+        assert!(
+            (distance(bowl.outer.center, bowl.outer_waist) - bowl.outer.radius).abs() < EPSILON
+        );
+        assert!(
+            (distance(bowl.inner.center, bowl.inner_waist) - bowl.inner.radius).abs() < EPSILON
+        );
+        assert!((bowl.outer_top.y - glyph.stem.top).abs() < EPSILON);
     }
 
     #[test]
@@ -382,7 +394,7 @@ mod tests {
     }
 
     #[test]
-    fn leg_obeys_root_tangency_diagonal_tangent_and_terminal_taper() {
+    fn leg_obeys_pacioli_arc_tangencies_and_terminal_taper() {
         let glyph = GlyphGeometry::from_aperture(100.0);
         let leg = glyph.leg;
         let inner = leg.inner;
@@ -394,40 +406,55 @@ mod tests {
             (distance(leg.outer_circle.center, leg.outer_end) - leg.outer_circle.radius).abs()
                 < EPSILON
         );
-        assert!((distance(leg.outer_start, inner.root) - glyph.unit).abs() < EPSILON);
-        assert!((inner.root.x - glyph.bowl.outer_waist.x).abs() < EPSILON);
-        assert!((inner.root.y - glyph.bowl.outer_waist.y).abs() < EPSILON);
+        let chord_midpoint = midpoint(leg.outer_start, leg.outer_end);
+        let arc_midpoint = Point {
+            x: chord_midpoint.x - leg.outer_sagitta / 2.0_f64.sqrt(),
+            y: chord_midpoint.y + leg.outer_sagitta / 2.0_f64.sqrt(),
+        };
         assert!(
-            (distance(glyph.bowl.outer.center, inner.root) - glyph.bowl.outer.radius).abs()
+            (distance(leg.outer_circle.center, arc_midpoint) - leg.outer_circle.radius).abs()
                 < EPSILON
         );
+        assert!((distance(chord_midpoint, arc_midpoint) - leg.outer_sagitta).abs() < EPSILON);
+
+        assert!((distance(leg.outer_start, inner.root) - glyph.unit / 2.0).abs() < EPSILON);
+        assert!((inner.root.x + glyph.unit / 2.0).abs() < EPSILON);
+        assert!(inner.root.y.abs() < EPSILON);
         assert!(
             (distance(inner.root_circle.center, inner.root) - inner.root_circle.radius).abs()
                 < EPSILON
         );
-        assert!(
-            (distance(glyph.bowl.outer.center, inner.root_circle.center)
-                - glyph.bowl.outer.radius
-                - inner.root_circle.radius)
-                .abs()
-                < EPSILON
-        );
-        assert!((inner.root_circle.radius + inner.tip_circle.radius - glyph.unit).abs() < EPSILON);
+        assert!((inner.root_circle.center.x - inner.root.x).abs() < EPSILON);
+        assert!((inner.root_circle.radius - 13.0 * glyph.unit / 64.0).abs() < EPSILON);
+        assert!((inner.root_tangent.x + 53.0 * glyph.unit / 80.0).abs() < EPSILON);
+        assert!((inner.root_tangent.y - 13.0 * glyph.unit / 40.0).abs() < EPSILON);
 
         let tangent = subtract(inner.tip_tangent, inner.root_tangent);
         let root_radius = subtract(inner.root_tangent, inner.root_circle.center);
         let tip_radius = subtract(inner.tip_tangent, inner.tip_circle.center);
-        assert!((tangent.x - tangent.y).abs() < EPSILON);
+        assert!((4.0 * tangent.x - 3.0 * tangent.y).abs() < EPSILON);
         assert!(dot(tangent, root_radius).abs() < EPSILON);
         assert!(dot(tangent, tip_radius).abs() < EPSILON);
+        for point in [inner.root_tangent, inner.tip_tangent] {
+            assert!((point.x - 3.0 * point.y / 4.0 + 29.0 * glyph.unit / 32.0).abs() < EPSILON);
+        }
+        assert!((inner.tip_tangent.x - 143.0 * glyph.unit / 160.0).abs() < EPSILON);
+        assert!((inner.tip_tangent.y - 12.0 * glyph.unit / 5.0).abs() < EPSILON);
+        assert!((inner.tip_circle.radius - 17833.0 * glyph.unit / 3328.0).abs() < EPSILON);
 
         assert!((inner.tip.x - leg.outer_end.x).abs() < EPSILON);
         assert!((inner.tip.y - leg.outer_end.y).abs() < EPSILON);
-        assert!((inner.tip_circle.center.x - inner.tip.x).abs() < EPSILON);
         assert!(
             (distance(inner.tip_circle.center, inner.tip) - inner.tip_circle.radius).abs()
                 < EPSILON
         );
+    }
+
+    fn midpoint(first: Point, second: Point) -> Point {
+        Point {
+            x: (first.x + second.x) / 2.0,
+            y: (first.y + second.y) / 2.0,
+        }
     }
 
     fn distance(first: Point, second: Point) -> f64 {
