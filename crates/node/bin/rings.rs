@@ -31,6 +31,7 @@ use rings_node::onion::proxy::http::run_onion_http_proxy;
 use rings_node::onion::proxy::http::OnionHttpProxyOptions;
 use rings_node::onion::tcp::NativeOnionCircuitHandle;
 use rings_node::onion::tcp::NativeOnionTcpExitConfig;
+use rings_node::onion::OnionEntryGuardStorage;
 use rings_node::onion::OnionExitService;
 use rings_node::onion::OnionExitTarget;
 use rings_node::onion::OnionExitTransport;
@@ -53,6 +54,19 @@ use tokio::task::JoinHandle;
 use tokio::task::JoinSet;
 
 const FOREGROUND_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
+const ONION_ENTRY_GUARD_STORAGE_CAPACITY: u32 = 64 * 1024;
+
+fn onion_entry_guard_storage_path(data_storage_path: &str) -> String {
+    let data_path = Path::new(data_storage_path);
+    let parent = data_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    parent
+        .join("onion-entry-guards")
+        .to_string_lossy()
+        .to_string()
+}
 
 #[derive(Parser, Debug)]
 #[command(about, version, author)]
@@ -840,10 +854,19 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
     };
 
     let per_data_storage = Box::new(
-        FileStorage::new_with_cap_and_path(data_storage.capacity, data_storage.path).await?,
+        FileStorage::new_with_cap_and_path(data_storage.capacity, data_storage.path.clone())
+            .await?,
     );
     let per_measure_storage = Box::new(
         FileStorage::new_with_cap_and_path(measure_storage.capacity, measure_storage.path).await?,
+    );
+    let onion_entry_guard_path = onion_entry_guard_storage_path(&data_storage.path);
+    let per_onion_entry_guard_storage: OnionEntryGuardStorage = Box::new(
+        FileStorage::new_with_cap_and_path(
+            ONION_ENTRY_GUARD_STORAGE_CAPACITY,
+            onion_entry_guard_path,
+        )
+        .await?,
     );
 
     let measure = PeriodicMeasure::new(per_measure_storage).await?;
@@ -851,6 +874,7 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
     let processor = Arc::new(
         ProcessorBuilder::from_config(&pc)?
             .storage(per_data_storage)
+            .onion_entry_guard_storage(per_onion_entry_guard_storage)
             .measure(measure)
             .reassembly_limits(args.reassembly_profile.limits())
             .build()?,
@@ -1301,6 +1325,7 @@ mod tests {
 
     use super::await_gateway_startup;
     use super::await_task_cleanup;
+    use super::onion_entry_guard_storage_path;
     use super::Cli;
 
     fn parse_without_log_level_env<const N: usize>(args: [&str; N]) -> Result<Cli, clap::Error> {
@@ -1342,6 +1367,18 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn test_entry_guard_storage_is_sibling_of_data_storage() {
+        assert_eq!(
+            onion_entry_guard_storage_path(".rings/data"),
+            ".rings/onion-entry-guards"
+        );
+        assert_eq!(
+            onion_entry_guard_storage_path("/tmp/rings/data"),
+            "/tmp/rings/onion-entry-guards"
+        );
     }
 
     #[tokio::test]

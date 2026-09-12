@@ -43,6 +43,7 @@ use crate::registration::RegistrationTask;
 
 pub mod circuit;
 pub(crate) mod directory;
+mod entry_guard;
 pub(crate) mod exit_accounting;
 mod failure;
 #[cfg(rings_native)]
@@ -56,12 +57,15 @@ pub mod target;
 #[cfg(rings_native)]
 pub mod tcp;
 
+pub use entry_guard::OnionEntryGuardState;
+pub use entry_guard::OnionEntryGuardStorage;
+pub(crate) use entry_guard::OnionEntryGuards;
 pub use failure::OnionExitFailure;
 pub use failure::OnionRouteError;
 #[cfg(rings_native)]
 pub use gateway::NativeOnionGatewayConnector;
 pub use route::select_onion_route;
-pub(crate) use route::select_onion_route_from_candidates_with_first_hop;
+pub(crate) use route::select_onion_route_from_candidates_with_first_hop_policy;
 pub use route::OnionRoute;
 pub(crate) use route::OnionRouteCandidates;
 pub use route::OnionRouteHop;
