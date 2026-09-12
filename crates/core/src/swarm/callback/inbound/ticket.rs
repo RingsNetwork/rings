@@ -65,6 +65,10 @@ impl InboundSender {
         })
     }
 
+    pub(super) fn is_closed(&self) -> bool {
+        self.sender.is_closed()
+    }
+
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(super) fn close_channel(&mut self) {
         self.sender.close_channel();

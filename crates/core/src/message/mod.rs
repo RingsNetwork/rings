@@ -26,6 +26,24 @@ pub use payload::MessagePayload;
 pub use payload::PayloadSender;
 pub use payload::Transaction;
 
+mod quota;
+pub use quota::OriginQuota;
+pub use quota::OriginQuotaArithmeticError;
+pub use quota::OriginQuotaConfig;
+pub use quota::OriginQuotaConfigError;
+pub use quota::OriginQuotaCounters;
+pub use quota::OriginQuotaInstant;
+pub use quota::OriginQuotaKey;
+pub use quota::OriginQuotaLane;
+pub use quota::OriginQuotaLaneConfig;
+pub use quota::OriginQuotaLaneCounters;
+pub use quota::OriginQuotaVerdict;
+pub use quota::DEFAULT_ORIGIN_QUOTA_BYTES_PER_SECOND;
+pub use quota::DEFAULT_ORIGIN_QUOTA_BYTE_BURST;
+pub use quota::DEFAULT_ORIGIN_QUOTA_MESSAGES_PER_SECOND;
+pub use quota::DEFAULT_ORIGIN_QUOTA_MESSAGE_BURST;
+pub use quota::DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE;
+
 mod replay;
 pub use replay::observe;
 pub use replay::ReplayCounters;

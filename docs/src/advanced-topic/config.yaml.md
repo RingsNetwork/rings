@@ -56,6 +56,31 @@ gateway:
   onion_hop_count: 0
   onion_allow_short_paths: false
 dht_virtual_nodes: 160
+origin_quota:
+  dht_control:
+    message_rate_per_second: 8
+    message_burst: 32
+    byte_rate_per_second: 4194304
+    byte_burst: 67108864
+    max_records: 1024
+  storage:
+    message_rate_per_second: 8
+    message_burst: 32
+    byte_rate_per_second: 4194304
+    byte_burst: 67108864
+    max_records: 1024
+  e2e:
+    message_rate_per_second: 8
+    message_burst: 32
+    byte_rate_per_second: 4194304
+    byte_burst: 67108864
+    max_records: 1024
+  application:
+    message_rate_per_second: 8
+    message_burst: 32
+    byte_rate_per_second: 4194304
+    byte_burst: 67108864
+    max_records: 1024
 data_storage:
   path: /home/operator/.rings/data
   capacity: 200000000
@@ -84,6 +109,11 @@ where noted.
 * `stabilize_interval`: seconds between Chord stabilization rounds.
 * `dht_virtual_nodes`: virtual DHT positions this node owns for storage placement; `0` disables
   virtual positions.
+* `origin_quota`: runtime-local final-destination rate limits. Each of `dht_control`, `storage`,
+  `e2e`, and `application` sets message rate/burst, byte rate/burst, and the maximum retained
+  origin records for that lane. Every value must be non-zero. The key uses the verified origin
+  account and final destination, not the delegated session or immediate relay. Token balances are
+  deliberately reset on restart; durable replay state is separate.
 * `external_ip`, `webrtc_udp_port_min`, `webrtc_udp_port_max`: optional reachability hints, an
   externally visible address and a UDP port range for ICE. The two port bounds must be given
   together.

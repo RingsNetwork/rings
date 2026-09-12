@@ -163,6 +163,13 @@ async fn advance_chunk_event(
         return Err(Error::NestedChunkMessage);
     }
     let lane = InboundLane::from_kind(kind);
+    // Chunk envelopes are transport framing. The verified original transaction is admitted here,
+    // before it reserves or enters its logical lane, and therefore consumes one quota charge no
+    // matter how many envelopes carried it.
+    processor
+        .logical
+        .admit_final_transaction(&payload, lane)
+        .await?;
     event.permit.try_transition(lane, reservation)?;
     let payload = processor
         .accept_verified_logical_message(event.peer, event.authentication, payload)

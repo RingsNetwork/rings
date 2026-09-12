@@ -17,6 +17,7 @@ use crate::online::OnlineNodeType;
 use crate::prelude::rings_core::dht::default_storage_virtual_positions_per_owner;
 use crate::prelude::rings_core::dht::DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use crate::prelude::rings_core::ecc::SecretKey;
+use crate::prelude::rings_core::message::OriginQuotaConfig;
 use crate::prelude::SessionSk;
 use crate::processor::ProcessorConfig;
 use crate::processor::ProcessorConfigSerialized;
@@ -241,6 +242,9 @@ pub struct Config {
     /// Virtual DHT positions per storage owner.
     #[serde(default = "default_storage_virtual_positions_per_owner")]
     pub dht_virtual_nodes: u16,
+    /// Runtime-local final-destination quotas keyed by verified origin and logical lane.
+    #[serde(default)]
+    pub origin_quota: OriginQuotaConfig,
     /// Optional externally reachable IP address hint.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_ip: Option<String>,
@@ -295,7 +299,8 @@ impl TryFrom<Config> for ProcessorConfigSerialized {
         .onion_exit_ttl_secs(config.onion_exit_ttl_secs)
         .onion_exit_services(config.onion_exit_services)
         .onion_exit_policy(config.onion_exit_policy)
-        .dht_virtual_nodes(config.dht_virtual_nodes);
+        .dht_virtual_nodes(config.dht_virtual_nodes)
+        .origin_quota(config.origin_quota);
 
         cs = if let Some(ext_ip) = config.external_ip {
             cs.external_address(ext_ip)
@@ -363,6 +368,7 @@ impl Config {
                 crate::onion::proxy::http::default_max_connect_connections(),
             gateway: Some(NativeGatewayConfig::disabled_default()),
             dht_virtual_nodes: DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER,
+            origin_quota: OriginQuotaConfig::default(),
             external_ip: None,
             webrtc_udp_port_min: None,
             webrtc_udp_port_max: None,
@@ -582,6 +588,7 @@ gateway:
         assert!(!gateway.enabled);
         assert_eq!(gateway.runtime.validate(), Ok(()));
         assert!(restored.enabled_gateway().is_none());
+        assert_eq!(restored.origin_quota, OriginQuotaConfig::default());
     }
 
     #[test]

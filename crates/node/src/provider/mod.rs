@@ -143,6 +143,11 @@ impl Provider {
         self.processor.peer_measurements().await
     }
 
+    /// Return aggregate final-destination origin-quota drops by lane and reason.
+    pub fn origin_quota_counters(&self) -> rings_core::message::OriginQuotaCounters {
+        self.processor.origin_quota_counters()
+    }
+
     pub(crate) async fn flush_measurements(&self) -> Result<()> {
         self.processor.flush_measurements().await
     }

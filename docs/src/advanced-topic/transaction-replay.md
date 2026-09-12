@@ -51,6 +51,14 @@ replay state. Each envelope binds the already-reserved logical sequence without 
 sequence; after reassembly, the original logical transaction is admitted only if that node is its
 final destination.
 
+At that destination, replay classification and the runtime-local origin rate quota share one
+serialized admission boundary but remain separate state models. Replay, Fork, and Stale consume no
+quota; quota rejection leaves the durable replay window unchanged; and a replay-store failure
+rolls back the provisional quota reservation. Quota state is never encoded in `ReplaySnapshot`.
+The deterministic byte cost is the verified original transaction's `data.len()`: normal messages
+pay it once, chunk envelopes pay nothing, and a successfully reassembled original pays it once
+before logical lane admission.
+
 ## Persistence and bounds
 
 The sender reserves and persists the next sequence before exposing a signature. A crash may leave

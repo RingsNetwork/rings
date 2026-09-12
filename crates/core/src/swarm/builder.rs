@@ -13,6 +13,7 @@ use crate::dht::VirtualNodeConfig;
 use crate::dht::DEFAULT_FINGER_TABLE_SIZE;
 use crate::dht::DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use crate::measure::MeasureImpl;
+use crate::message::OriginQuotaConfig;
 use crate::message::ReplaySnapshot;
 use crate::message::ReplayStorage;
 use crate::message::TransactionReplay;
@@ -41,6 +42,7 @@ pub struct SwarmBuilder {
     reassembly_limits: ReassemblyLimits,
     dht_storage: EntryStorage,
     replay_storage: ReplayStorage,
+    origin_quota: OriginQuotaConfig,
     session_sk: SessionSk,
     session_ttl: Option<usize>,
     measure: Option<MeasureImpl>,
@@ -67,6 +69,7 @@ impl SwarmBuilder {
             reassembly_limits: default_reassembly_limits(),
             dht_storage,
             replay_storage: Box::new(crate::storage::MemStorage::<ReplaySnapshot>::new()),
+            origin_quota: OriginQuotaConfig::default(),
             session_sk,
             session_ttl: None,
             measure: None,
@@ -154,6 +157,12 @@ impl SwarmBuilder {
         self
     }
 
+    /// Set final-destination per-origin message and byte-rate quotas.
+    pub fn origin_quota(mut self, config: OriginQuotaConfig) -> Self {
+        self.origin_quota = config;
+        self
+    }
+
     /// Try build for `Swarm`.
     pub fn build(self) -> Swarm {
         let dht_did = self.session_sk.account_did();
@@ -185,7 +194,10 @@ impl SwarmBuilder {
             self.session_sk,
             dht.clone(),
             self.measure,
-            Arc::new(TransactionReplay::new(self.replay_storage)),
+            Arc::new(TransactionReplay::new_with_quota(
+                self.replay_storage,
+                self.origin_quota,
+            )),
             SwarmTransportSettings::new(
                 self.dht_storage_redundancy,
                 storage_virtual_node_config,

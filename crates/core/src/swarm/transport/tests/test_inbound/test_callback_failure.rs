@@ -164,11 +164,17 @@ async fn test_actor_panic_drops_active_and_queued_capacity_and_closes_mailbox() 
         frame.clone(),
     ));
     app_callback.started.wait().await;
-    for _ in 1..QUEUED {
+    for index in 1..QUEUED {
+        let body = format!("panic-release-{index}");
+        let queued_frame = local_wire(
+            Message::custom(body.as_bytes())?,
+            &session,
+            transport.dht.did,
+        )?;
         deliveries.push(spawn_inbound_delivery(
             Arc::clone(&callback),
             cid.clone(),
-            frame.clone(),
+            queued_frame,
         ));
     }
     callback

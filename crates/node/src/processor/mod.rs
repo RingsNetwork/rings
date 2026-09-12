@@ -27,6 +27,8 @@ use rings_core::message::DhtProtocolMode;
 use rings_core::message::Encoded;
 use rings_core::message::Encoder;
 use rings_core::message::Message;
+use rings_core::message::OriginQuotaConfig;
+use rings_core::message::OriginQuotaCounters;
 use rings_core::message::ReplayStorage;
 use rings_core::storage::MemStorage;
 use rings_core::swarm::Swarm;
@@ -783,6 +785,11 @@ impl Processor {
         limit: NonZeroUsize,
     ) -> PeerMeasurementPage {
         self.swarm.peer_measurements_page(after, limit).await
+    }
+
+    /// Return aggregate final-destination origin-quota drops by lane and reason.
+    pub fn origin_quota_counters(&self) -> OriginQuotaCounters {
+        self.swarm.origin_quota_counters()
     }
 
     /// register service

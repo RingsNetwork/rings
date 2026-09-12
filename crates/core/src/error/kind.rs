@@ -125,6 +125,43 @@ pub enum Error {
         source: Box<Error>,
     },
 
+    /// A final-destination origin exhausted its message-rate allowance.
+    #[error("Origin quota message rate exhausted for {key:?}")]
+    OriginQuotaMessageRateExhausted {
+        /// Origin, destination, overlay, and logical lane sharing the allowance.
+        key: crate::message::OriginQuotaKey,
+    },
+
+    /// A final-destination origin exhausted its byte-rate allowance.
+    #[error(
+        "Origin quota byte rate exhausted for {key:?} while admitting {requested_bytes} bytes"
+    )]
+    OriginQuotaByteRateExhausted {
+        /// Origin, destination, overlay, and logical lane sharing the allowance.
+        key: crate::message::OriginQuotaKey,
+        /// Deterministic logical-message bytes requested.
+        requested_bytes: usize,
+    },
+
+    /// A lane's bounded origin table had no fully replenished record safe to reuse.
+    #[error("Origin quota table for {lane:?} exhausted its {capacity} records")]
+    OriginQuotaTableCapacityExhausted {
+        /// Logical lane whose record bound was reached.
+        lane: crate::message::OriginQuotaLane,
+        /// Maximum retained records for that lane.
+        capacity: usize,
+    },
+
+    /// The pure origin-quota transition could not be evaluated safely.
+    #[error("Origin quota arithmetic failed for {key:?}: {source}")]
+    OriginQuotaArithmetic {
+        /// Origin, destination, overlay, and logical lane being evaluated.
+        key: crate::message::OriginQuotaKey,
+        /// Typed arithmetic or monotonic-clock failure.
+        #[source]
+        source: crate::message::OriginQuotaArithmeticError,
+    },
+
     /// The payload does not carry the v2 hard-cutover wire marker.
     #[error("Legacy transaction wire format is not accepted")]
     LegacyTransactionWireFormat,

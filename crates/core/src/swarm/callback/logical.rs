@@ -85,10 +85,14 @@ impl LogicalInbound {
     pub(super) async fn admit_final_transaction(
         &self,
         payload: &MessagePayload,
+        lane: crate::swarm::callback::InboundLane,
     ) -> crate::error::Result<()> {
         if self.is_local_destination(payload) {
+            let quota_lane = lane
+                .origin_quota_lane()
+                .ok_or(crate::error::Error::InboundActorInvariantViolation)?;
             self.transport
-                .admit_transaction_replay(&payload.transaction)
+                .admit_final_transaction(&payload.transaction, quota_lane)
                 .await?;
         }
         Ok(())
@@ -113,6 +117,8 @@ mod tests {
     use crate::error::Error;
     use crate::message::Message;
     use crate::message::MessageSigner;
+    use crate::message::OriginQuotaConfig;
+    use crate::message::OriginQuotaLaneConfig;
     use crate::session::SessionSk;
     use crate::storage::MemStorage;
     use crate::swarm::SwarmBuilder;
@@ -122,6 +128,22 @@ mod tests {
     struct ObservedCallback {
         validations: AtomicUsize,
         inbounds: AtomicUsize,
+    }
+
+    #[derive(Default)]
+    struct RejectingValidationCallback {
+        validations: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::swarm::callback::SwarmCallback for RejectingValidationCallback {
+        async fn on_validate(
+            &self,
+            _payload: &MessagePayload,
+        ) -> std::result::Result<(), CallbackError> {
+            self.validations.fetch_add(1, Ordering::Relaxed);
+            Err(std::io::Error::other("rejected by application").into())
+        }
     }
 
     #[async_trait::async_trait]
@@ -157,6 +179,20 @@ mod tests {
         )
     }
 
+    fn payload_from(
+        sender: &SessionSk,
+        destination: crate::dht::Did,
+        sequence: u64,
+    ) -> crate::error::Result<MessagePayload> {
+        MessagePayload::new_send_with_sequence(
+            Message::custom(b"quota before validation")?,
+            MessageSigner::new(sender, TEST_NETWORK_ID),
+            destination,
+            destination,
+            sequence,
+        )
+    }
+
     #[tokio::test]
     async fn final_destination_persists_before_validation_and_rejects_duplicate_dispatch() {
         let local = SessionSk::new_with_seckey(&SecretKey::random()).expect("local session");
@@ -177,6 +213,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn application_validation_failure_still_consumes_committed_quota() {
+        let local = SessionSk::new_with_seckey(&SecretKey::random()).expect("local session");
+        let sender = SessionSk::new_with_seckey(&SecretKey::random()).expect("sender session");
+        let callback = Arc::new(RejectingValidationCallback::default());
+        let lane =
+            OriginQuotaLaneConfig::new(1, 1, 1024, 1024, 8).expect("test quota configuration");
+        let quota = OriginQuotaConfig::new(lane, lane, lane, lane);
+        let swarm = SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local)
+            .origin_quota(quota)
+            .callback(callback.clone())
+            .build();
+        let delivery = LocalDelivery::new(swarm.transport.clone(), callback.clone());
+        let first = payload_from(&sender, swarm.did(), 0).expect("first payload");
+        let second = payload_from(&sender, swarm.did(), 1).expect("second payload");
+
+        assert!(delivery.deliver(&first).await.is_err());
+        assert!(matches!(
+            delivery.deliver(&second).await,
+            Err(Error::OriginQuotaMessageRateExhausted { .. })
+        ));
+        assert_eq!(callback.validations.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
     async fn intermediate_relay_does_not_create_origin_replay_state() {
         let local = SessionSk::new_with_seckey(&SecretKey::random()).expect("local session");
         let callback = Arc::new(ObservedCallback::default());
@@ -188,13 +248,18 @@ mod tests {
         let payload = payload(remote_destination, 0).expect("payload");
 
         logical
-            .admit_final_transaction(&payload)
+            .admit_final_transaction(&payload, crate::swarm::callback::InboundLane::Application)
             .await
             .expect("first relay pass");
         logical
-            .admit_final_transaction(&payload)
+            .admit_final_transaction(&payload, crate::swarm::callback::InboundLane::Application)
             .await
             .expect("second relay pass");
         assert_eq!(swarm.transaction_replay_counters(), Default::default());
+        assert_eq!(swarm.origin_quota_counters(), Default::default());
+        assert_eq!(
+            swarm.transport.origin_quota_record_count_for_test().await,
+            0
+        );
     }
 }

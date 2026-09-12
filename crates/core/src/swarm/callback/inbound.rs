@@ -229,11 +229,18 @@ impl InboundMailbox {
     }
 
     fn ensure_actor_available(&self) -> Result<()> {
-        if self.actor_available {
-            Ok(())
-        } else {
-            Err(Error::InboundMailboxRuntimeUnavailable)
+        if !self.actor_available {
+            return Err(Error::InboundMailboxRuntimeUnavailable);
         }
+        if self
+            .sender
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_closed()
+        {
+            return Err(Error::InboundMailboxClosed);
+        }
+        Ok(())
     }
 
     async fn enqueue_to_lane(
@@ -250,6 +257,16 @@ impl InboundMailbox {
             transport_capacity,
         } = submission;
         let lane = prepared.lane;
+        if !prepared.kind.is_chunk() {
+            if !processor.pending_connection_admits(peer).await? {
+                finish_completion(completion, Ok(()));
+                return Ok(());
+            }
+            processor
+                .logical
+                .admit_final_transaction(&prepared.payload, lane)
+                .await?;
+        }
         let mut ticket = self.reserve_ticket(lane)?;
         let permit = self
             .capacity
@@ -784,11 +801,13 @@ pub(super) async fn deliver_local(
     pipeline: &LogicalInbound,
     payload: &MessagePayload,
 ) -> Result<()> {
-    pipeline.admit_final_transaction(payload).await?;
+    let message = payload.transaction.data::<crate::message::Message>()?;
+    let lane = InboundLane::from_kind(crate::message::MessageKind::from_message(&message));
+    pipeline.admit_final_transaction(payload, lane).await?;
     validate_payload(pipeline, None, payload)
         .await
         .map_err(inbound_failure_error)?;
-    process_logical_message(pipeline, None, payload, None)
+    process_logical_message(pipeline, None, payload, Some(message))
         .await
         .map_err(inbound_failure_error)
 }
@@ -803,16 +822,6 @@ async fn validate_event(
         .map_err(InboundFailure::Core)?
     {
         return Ok(InboundValidation::AcknowledgeDrop);
-    }
-    // Chunk envelopes are transport framing, not logical transactions. Their existing bounded
-    // reassembly/tombstone state handles envelope replay; the reassembled payload returns through
-    // this function on its logical lane and is admitted exactly once here.
-    if event.lane() != InboundLane::Reassembly {
-        processor
-            .logical
-            .admit_final_transaction(&event.payload)
-            .await
-            .map_err(InboundFailure::Core)?;
     }
     validate_payload(&processor.logical, event.peer, &event.payload).await?;
     let still_admitted = processor
