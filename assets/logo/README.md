@@ -52,16 +52,17 @@ cargo run -p rings-logo -- check
   fitted independently.
 - The inner contour begins at `S = (-u/2,0)`. Its root circle has center
   `(-u/2,13u/64)` and radius `13u/64`, meeting the crossbar at `S` and the line
-  `x = 3y/4 - 29u/32` at `(-53u/80,13u/40)`. The line's direction is therefore
+  `x = 3y/4 - 51u/128` at `(-27u/80,13u/160)`. The line's direction is therefore
   the exact rational `3:4:5` triangle, not an assumed 45-degree parallel.
-- The terminal circle has center `(21551u/4160,-13563u/16640)`, radius
-  `17833u/3328`, and is tangent to that line at `(143u/160,12u/5)`. It passes
+- The terminal circle has center `(99837u/16640,-69801u/66560)`, radius
+  `76515u/13312`, and is tangent to that line at `(897u/640,12u/5)`. It passes
   through `D = (9u/2,9u/2)`, where both leg contours meet with zero width. The
   support circles are part of the model but are not drawn as decorative
   construction circles.
-- The complete R is emitted as one compound SVG path. Component contours are
-  solved independently but never rasterized as adjacent fill objects, so no
-  internal shared edge can appear as a seam.
+- The complete R is emitted as one continuous outer silhouette plus one counter
+  subpath under the even-odd rule. No component closes across the bowl-leg
+  junction, so the join contains neither a shared raster edge nor a pinched
+  subpath contact.
 - Stroke hierarchy is `30:5:1`, directly matching teeth, bores, and one
   construction unit. With `w_R = u = sqrt(2)a/9` and six teeth per bore sector,
   the gear and bore outlines are `w_G = w_R/6`; construction guides are

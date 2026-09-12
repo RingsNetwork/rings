@@ -32,10 +32,6 @@ pub(crate) struct StemGeometry {
     pub(crate) left: f64,
     /// Right edge of the dominant stroke.
     pub(crate) right: f64,
-    /// Cap line.
-    pub(crate) top: f64,
-    /// Baseline.
-    pub(crate) bottom: f64,
 }
 
 /// A circle with the two points where it touches orthogonal boundaries.
@@ -73,8 +69,8 @@ pub(crate) struct BowlGeometry {
     pub(crate) inner_top: Point,
     /// Waist point on the outer contour.
     pub(crate) outer_waist: Point,
-    /// Waist point on the counter.
-    pub(crate) inner_waist: Point,
+    /// Intersection of the counter circle with the upper edge of the crossbar.
+    pub(crate) counter_bottom: Point,
 }
 
 /// Curved leg constructed around the center-to-corner diagonal.
@@ -141,7 +137,7 @@ impl GlyphGeometry {
     pub(crate) fn from_aperture(aperture_radius: f64) -> Self {
         let square_half = aperture_radius / 2.0_f64.sqrt();
         let unit = 2.0 * square_half / 9.0;
-        let stem = stem(square_half, unit);
+        let stem = stem(unit);
         let bowl = bowl(unit);
         Self {
             square_half,
@@ -161,12 +157,10 @@ impl GlyphGeometry {
     }
 }
 
-fn stem(square_half: f64, unit: f64) -> StemGeometry {
+fn stem(unit: f64) -> StemGeometry {
     StemGeometry {
         left: -19.0 * unit / 6.0,
         right: -13.0 * unit / 6.0,
-        top: -square_half,
-        bottom: square_half,
     }
 }
 
@@ -275,7 +269,10 @@ fn bowl(unit: f64) -> BowlGeometry {
             x: unit * (-0.5 + 3.0 * 2.0_f64.sqrt() / 4.0),
             y: 0.0,
         },
-        inner_waist: inner.point_at_offset(0.0, inner.radius),
+        counter_bottom: Point {
+            x: unit * (30.0_f64.sqrt() - 5.0) / 4.0,
+            y: -unit / 2.0,
+        },
     }
 }
 
@@ -314,19 +311,12 @@ fn leg(square_half: f64, unit: f64, bowl: BowlGeometry) -> LegGeometry {
     };
 
     let root_tangent =
-        root_circle.point_at_offset(-4.0 * root_radius / 5.0, 3.0 * root_radius / 5.0);
+        root_circle.point_at_offset(4.0 * root_radius / 5.0, -3.0 * root_radius / 5.0);
     let tip_tangent = Point {
-        x: 143.0 * unit / 160.0,
+        x: 897.0 * unit / 640.0,
         y: 12.0 * unit / 5.0,
     };
-    let tip_radius = 17833.0 * unit / 3328.0;
-    let tip_circle = Circle {
-        center: Point {
-            x: 21551.0 * unit / 4160.0,
-            y: -13563.0 * unit / 16640.0,
-        },
-        radius: tip_radius,
-    };
+    let tip_circle = tip_rounding_circle(tip_tangent, outer_end);
     LegGeometry {
         outer_circle,
         outer_sagitta,
@@ -343,6 +333,27 @@ fn leg(square_half: f64, unit: f64, bowl: BowlGeometry) -> LegGeometry {
             tip_tangent,
             tip: outer_end,
         },
+    }
+}
+
+fn tip_rounding_circle(tangent: Point, tip: Point) -> Circle {
+    let normal = Point {
+        x: 4.0 / 5.0,
+        y: -3.0 / 5.0,
+    };
+    let chord = Point {
+        x: tip.x - tangent.x,
+        y: tip.y - tangent.y,
+    };
+    let squared_length = chord.x * chord.x + chord.y * chord.y;
+    let normal_projection = chord.x * normal.x + chord.y * normal.y;
+    let radius = squared_length / (2.0 * normal_projection);
+    Circle {
+        center: Point {
+            x: tangent.x + radius * normal.x,
+            y: tangent.y + radius * normal.y,
+        },
+        radius,
     }
 }
 
@@ -413,9 +424,10 @@ mod tests {
             (distance(bowl.outer.center, bowl.outer_waist) - bowl.outer.radius).abs() < EPSILON
         );
         assert!(
-            (distance(bowl.inner.center, bowl.inner_waist) - bowl.inner.radius).abs() < EPSILON
+            (distance(bowl.inner.center, bowl.counter_bottom) - bowl.inner.radius).abs() < EPSILON
         );
-        assert!((bowl.outer_top.y - glyph.stem.top).abs() < EPSILON);
+        assert!((bowl.counter_bottom.y + glyph.thin_stroke_width).abs() < EPSILON);
+        assert!((bowl.outer_top.y + glyph.square_half).abs() < EPSILON);
     }
 
     #[test]
@@ -435,9 +447,9 @@ mod tests {
                     < EPSILON
             );
         }
-        assert!((glyph.serifs.top_left.edge_tangent.y - glyph.stem.top).abs() < EPSILON);
-        assert!((glyph.serifs.bottom_left.edge_tangent.y - glyph.stem.bottom).abs() < EPSILON);
-        assert!((glyph.serifs.bottom_inner.edge_tangent.y - glyph.stem.bottom).abs() < EPSILON);
+        assert!((glyph.serifs.top_left.edge_tangent.y + glyph.square_half).abs() < EPSILON);
+        assert!((glyph.serifs.bottom_left.edge_tangent.y - glyph.square_half).abs() < EPSILON);
+        assert!((glyph.serifs.bottom_inner.edge_tangent.y - glyph.square_half).abs() < EPSILON);
     }
 
     #[test]
@@ -514,8 +526,9 @@ mod tests {
         );
         assert!((inner.root_circle.center.x - inner.root.x).abs() < EPSILON);
         assert!((inner.root_circle.radius - 13.0 * glyph.unit / 64.0).abs() < EPSILON);
-        assert!((inner.root_tangent.x + 53.0 * glyph.unit / 80.0).abs() < EPSILON);
-        assert!((inner.root_tangent.y - 13.0 * glyph.unit / 40.0).abs() < EPSILON);
+        assert!((inner.root_tangent.x + 27.0 * glyph.unit / 80.0).abs() < EPSILON);
+        assert!((inner.root_tangent.y - 13.0 * glyph.unit / 160.0).abs() < EPSILON);
+        assert!(inner.root_tangent.x > inner.root.x);
 
         let tangent = subtract(inner.tip_tangent, inner.root_tangent);
         let root_radius = subtract(inner.root_tangent, inner.root_circle.center);
@@ -524,11 +537,11 @@ mod tests {
         assert!(dot(tangent, root_radius).abs() < EPSILON);
         assert!(dot(tangent, tip_radius).abs() < EPSILON);
         for point in [inner.root_tangent, inner.tip_tangent] {
-            assert!((point.x - 3.0 * point.y / 4.0 + 29.0 * glyph.unit / 32.0).abs() < EPSILON);
+            assert!((point.x - 3.0 * point.y / 4.0 + 51.0 * glyph.unit / 128.0).abs() < EPSILON);
         }
-        assert!((inner.tip_tangent.x - 143.0 * glyph.unit / 160.0).abs() < EPSILON);
+        assert!((inner.tip_tangent.x - 897.0 * glyph.unit / 640.0).abs() < EPSILON);
         assert!((inner.tip_tangent.y - 12.0 * glyph.unit / 5.0).abs() < EPSILON);
-        assert!((inner.tip_circle.radius - 17833.0 * glyph.unit / 3328.0).abs() < EPSILON);
+        assert!((inner.tip_circle.radius - 76515.0 * glyph.unit / 13312.0).abs() < EPSILON);
 
         assert!((inner.tip.x - leg.outer_end.x).abs() < EPSILON);
         assert!((inner.tip.y - leg.outer_end.y).abs() < EPSILON);

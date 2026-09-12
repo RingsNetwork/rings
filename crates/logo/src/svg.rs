@@ -293,111 +293,30 @@ fn append_positioned_circle(output: &mut String, circle: Circle, indent: &str) {
 fn append_glyph(output: &mut String, glyph: GlyphGeometry) {
     let _ = writeln!(
         output,
-        "<g class=\"accent-fill\" stroke=\"none\" fill-rule=\"nonzero\">"
+        "<g class=\"accent-fill\" stroke=\"none\" fill-rule=\"evenodd\">"
     );
     let _ = writeln!(output, "  <path d=\"{}\"/>", glyph_path(glyph));
     output.push_str("</g>\n");
 }
 
 fn glyph_path(glyph: GlyphGeometry) -> String {
-    [
-        stem_path(glyph),
-        top_serif_path(glyph),
-        bottom_serif_path(glyph),
-        shoulder_path(glyph),
-        bowl_path(glyph),
-        crossbar_path(glyph),
-        leg_path(glyph),
-    ]
-    .join(" ")
+    format!("{} {}", outer_silhouette_path(glyph), counter_path(glyph))
 }
 
-fn stem_path(glyph: GlyphGeometry) -> String {
-    format!(
-        "M {},{} H {} V {} H {} Z",
-        format_number(glyph.stem.left),
-        format_number(glyph.stem.top),
-        format_number(glyph.stem.right),
-        format_number(glyph.stem.bottom),
-        format_number(glyph.stem.left),
-    )
-}
-
-fn top_serif_path(glyph: GlyphGeometry) -> String {
-    let serif = glyph.serifs.top_left;
-    format!(
-        "M -{},{} H {} V {} H {} A {} {} 0 0 0 {} H -{} Z",
-        format_number(glyph.square_half),
-        format_number(glyph.stem.top),
-        format_number(glyph.stem.right),
-        format_number(serif.stem_tangent.y),
-        format_number(serif.stem_tangent.x),
-        format_number(serif.circle.radius),
-        format_number(serif.circle.radius),
-        command_point(serif.edge_tangent),
-        format_number(glyph.square_half),
-    )
-}
-
-fn bottom_serif_path(glyph: GlyphGeometry) -> String {
-    let left = glyph.serifs.bottom_left;
-    let inner = glyph.serifs.bottom_inner;
-    format!(
-        "M {} A {} {} 0 0 1 {} H {} A {} {} 0 0 1 {} H {} Z",
-        command_point(left.stem_tangent),
-        format_number(left.circle.radius),
-        format_number(left.circle.radius),
-        command_point(left.edge_tangent),
-        format_number(inner.edge_tangent.x),
-        format_number(inner.circle.radius),
-        format_number(inner.circle.radius),
-        command_point(inner.stem_tangent),
-        format_number(left.stem_tangent.x),
-    )
-}
-
-fn shoulder_path(glyph: GlyphGeometry) -> String {
-    format!(
-        "M {},{} L {} L {} L {},{} Z",
-        format_number(glyph.stem.right),
-        format_number(glyph.stem.top),
-        command_point(glyph.bowl.outer_top),
-        command_point(glyph.bowl.inner_top),
-        format_number(glyph.stem.right),
-        format_number(glyph.bowl.inner_top.y),
-    )
-}
-
-fn bowl_path(glyph: GlyphGeometry) -> String {
-    let bowl = glyph.bowl;
-    format!(
-        "M {} A {} {} 0 0 1 {} L {} A {} {} 0 0 0 {} Z",
-        command_point(bowl.outer_top),
-        format_number(bowl.outer.radius),
-        format_number(bowl.outer.radius),
-        command_point(bowl.outer_waist),
-        command_point(bowl.inner_waist),
-        format_number(bowl.inner.radius),
-        format_number(bowl.inner.radius),
-        command_point(bowl.inner_top),
-    )
-}
-
-fn crossbar_path(glyph: GlyphGeometry) -> String {
-    format!(
-        "M {},-{} H {} V 0 H {} Z",
-        format_number(glyph.stem.right),
-        format_number(glyph.thin_stroke_width),
-        format_number(glyph.bowl.outer_waist.x),
-        format_number(glyph.stem.right),
-    )
-}
-
-fn leg_path(glyph: GlyphGeometry) -> String {
+fn outer_silhouette_path(glyph: GlyphGeometry) -> String {
     let leg = glyph.leg;
     let inner = leg.inner;
+    let top = glyph.serifs.top_left;
+    let bottom_left = glyph.serifs.bottom_left;
+    let bottom_inner = glyph.serifs.bottom_inner;
     format!(
-        "M {} A {} {} 0 0 0 {} A {} {} 0 0 0 {} A {} {} 0 0 1 {} L {} A {} {} 0 0 1 {} L {} Z",
+        "M {} A {} {} 0 0 1 {} A {} {} 0 0 0 {} A {} {} 0 0 0 {} \
+         A {} {} 0 0 1 {} L {} A {} {} 0 0 0 {} H {} V {} \
+         A {} {} 0 0 0 {} H {} A {} {} 0 0 0 {} V {} \
+         A {} {} 0 0 0 {} H -{} H {} Z",
+        command_point(glyph.bowl.outer_top),
+        format_number(glyph.bowl.outer.radius),
+        format_number(glyph.bowl.outer.radius),
         command_point(leg.outer_start),
         format_number(leg.outer_rounding_circle.radius),
         format_number(leg.outer_rounding_circle.radius),
@@ -412,7 +331,34 @@ fn leg_path(glyph: GlyphGeometry) -> String {
         format_number(inner.root_circle.radius),
         format_number(inner.root_circle.radius),
         command_point(inner.root),
-        command_point(leg.outer_start),
+        format_number(glyph.stem.right),
+        format_number(bottom_inner.stem_tangent.y),
+        format_number(bottom_inner.circle.radius),
+        format_number(bottom_inner.circle.radius),
+        command_point(bottom_inner.edge_tangent),
+        format_number(bottom_left.edge_tangent.x),
+        format_number(bottom_left.circle.radius),
+        format_number(bottom_left.circle.radius),
+        command_point(bottom_left.stem_tangent),
+        format_number(top.stem_tangent.y),
+        format_number(top.circle.radius),
+        format_number(top.circle.radius),
+        command_point(top.edge_tangent),
+        format_number(glyph.square_half),
+        format_number(glyph.bowl.outer_top.x),
+    )
+}
+
+fn counter_path(glyph: GlyphGeometry) -> String {
+    format!(
+        "M {},{} H {} A {} {} 0 0 1 {} H {} Z",
+        format_number(glyph.stem.right),
+        format_number(glyph.bowl.inner_top.y),
+        format_number(glyph.bowl.inner_top.x),
+        format_number(glyph.bowl.inner.radius),
+        format_number(glyph.bowl.inner.radius),
+        command_point(glyph.bowl.counter_bottom),
+        format_number(glyph.stem.right),
     )
 }
 
@@ -492,7 +438,7 @@ fn metadata(model: &GearModel) -> String {
          r-square-side={};r-unit={};r-thin-stroke={};r-bowl-outer-radius={};\
          r-bowl-inner-radius={};\
          r-serif-radius={};r-leg-outer=diagonal-chord-circle;sagitta={};\
-         r-leg-outer-rounding-radius={};r-glyph-fill=single-compound-path;\
+         r-leg-outer-rounding-radius={};r-glyph-fill=one-outer-silhouette-plus-counter;\
          r-leg-root-radius={};r-leg-tip-radius={};\
          r-leg-inner=two-tangent-arcs-plus-3-4-5-line;\
          r-method=pacioli-nine-part-square-plus-rings-explicit-completion",
@@ -530,7 +476,7 @@ fn viewbox_radius(model: &GearModel) -> f64 {
 pub(crate) fn render_specification(model: &GearModel, light: &Palette, dark: &Palette) -> String {
     let glyph = model.glyph();
     format!(
-        "{{\n  \"generator\": \"rings-logo\",\n  \"geometry\": {{\n    \"module\": {},\n    \"teeth\": {},\n    \"pressure_angle_degrees\": {},\n    \"pitch_radius\": {},\n    \"base_radius\": {},\n    \"outer_radius\": {},\n    \"root_radius\": {},\n    \"aperture_radius\": {},\n    \"bore_count\": {},\n    \"bore_orbit\": {},\n    \"bore_radius\": {},\n    \"teeth_per_bore_sector\": {},\n    \"flank_samples\": {}\n  }},\n  \"geometry_rules\": {{\n    \"aperture_radius\": \"2*bore_count*module\",\n    \"bore_orbit\": \"aperture_radius+2*module\",\n    \"bore_radius\": \"(bore_count-1)/bore_count*module\",\n    \"flank_samples\": \"teeth/bore_count*(bore_count-1)\",\n    \"viewbox_radius\": \"outer_radius+2*bore_radius\",\n    \"gear_outline_width\": \"r_stroke/teeth_per_bore_sector\",\n    \"construction_guide_width\": \"gear_outline_width/bore_count\"\n  }},\n  \"glyph\": {{\n    \"mother_square_side\": {},\n    \"unit\": {},\n    \"dominant_stroke\": {},\n    \"fine_stroke\": {},\n    \"bowl_outer_radius\": {},\n    \"bowl_inner_radius\": {},\n    \"serif_circle_radius\": {},\n    \"leg_outer_circle_radius\": {},\n    \"leg_outer_sagitta\": {},\n    \"leg_outer_rounding_radius\": {},\n    \"leg_outer_root\": [{}, {}],\n    \"leg_outer_rounding_center\": [{}, {}],\n    \"leg_outer_join\": [{}, {}],\n    \"leg_root_arc_radius\": {},\n    \"leg_tip_arc_radius\": {},\n    \"leg_root\": [{}, {}],\n    \"leg_root_tangent\": [{}, {}],\n    \"leg_tip_tangent\": [{}, {}],\n    \"leg_tip\": [{}, {}]\n  }},\n  \"glyph_rules\": {{\n    \"historical_base\": {{\n      \"method\": \"R derived from B\",\n      \"mother_square\": \"side L divided into nine modules\",\n      \"dominant_stroke\": \"u=L/9\",\n      \"fine_stroke\": \"u/2=L/18\",\n      \"b_round\": \"paired circular contours; lower diameter 5L/9\",\n      \"serifs\": \"brackets constructed by tangent circles\",\n      \"leg_outer\": \"circular arc from square center to lower-right corner\",\n      \"leg_inner\": \"straight segment joined to two tangent circular arcs\",\n      \"leg_root_width\": \"approximately L/9; both sides taper to zero at the corner\"\n    }},\n    \"rings_completion\": {{\n      \"scope\": \"parameters not fully specified by the surviving Pacioli plate\",\n      \"square_binding\": \"L=sqrt(2)*aperture_radius\",\n      \"stem_edges\": \"left=-19u/6; right=-13u/6\",\n      \"bowl_outer\": \"center=(-u/2,-17u/8); radius=19u/8\",\n      \"bowl_inner\": \"center=(-5u/4,-17u/8); radius=17u/8\",\n      \"serif_circle_radius\": \"2u/3\",\n      \"leg_root\": \"S=(-u/2,0), on the crossbar; CS=u/2\",\n      \"leg_root_arc\": \"center=(-u/2,13u/64); radius=13u/64; tangent to the crossbar at S\",\n      \"leg_straight\": \"x=3y/4-29u/32; direction is the 3-4-5 triangle\",\n      \"leg_outer_arc\": \"support circle passes through C and D with sagitta u/10; visible arc begins at the derived tangent T\",\n      \"leg_outer_root\": \"B=bowl outer waist; BS=3sqrt(2)u/4\",\n      \"leg_outer_rounding\": \"n=(B-O_b)/r_b; r_o=(R^2-|B-O|^2)/(2(R+(B-O) dot n)); center=B+r_o*n; tangent=T=O+R(center-O)/|center-O|\",\n      \"glyph_fill\": \"one compound path; no adjacent fill seams\",\n      \"leg_root_radius\": \"13u/64; line tangency=(-53u/80,13u/40)\",\n      \"leg_tip_radius\": \"17833u/3328; line tangency=(143u/160,12u/5)\",\n      \"leg_tip\": \"tip arc passes through D=(9u/2,9u/2); both contours meet at D\"\n    }}\n  }},\n  \"color_rules\": {{\n    \"space\": \"OKLCH converted to quantized sRGB\",\n    \"lightness_grid\": \"1/10000\",\n    \"rust_hue\": \"360/(2*bore_count)=36deg\",\n    \"signal_hue\": \"rust_hue+180=216deg\",\n    \"accent_chroma\": \"(bore_count-1)/teeth\",\n    \"guide_chroma\": \"1/teeth\",\n    \"neutral_chroma\": \"guide_chroma/pentagonal_golden_ratio^2\"\n  }},\n  \"palettes\": {{\n    \"light_background\": {},\n    \"dark_background\": {}\n  }}\n}}\n",
+        "{{\n  \"generator\": \"rings-logo\",\n  \"geometry\": {{\n    \"module\": {},\n    \"teeth\": {},\n    \"pressure_angle_degrees\": {},\n    \"pitch_radius\": {},\n    \"base_radius\": {},\n    \"outer_radius\": {},\n    \"root_radius\": {},\n    \"aperture_radius\": {},\n    \"bore_count\": {},\n    \"bore_orbit\": {},\n    \"bore_radius\": {},\n    \"teeth_per_bore_sector\": {},\n    \"flank_samples\": {}\n  }},\n  \"geometry_rules\": {{\n    \"aperture_radius\": \"2*bore_count*module\",\n    \"bore_orbit\": \"aperture_radius+2*module\",\n    \"bore_radius\": \"(bore_count-1)/bore_count*module\",\n    \"flank_samples\": \"teeth/bore_count*(bore_count-1)\",\n    \"viewbox_radius\": \"outer_radius+2*bore_radius\",\n    \"gear_outline_width\": \"r_stroke/teeth_per_bore_sector\",\n    \"construction_guide_width\": \"gear_outline_width/bore_count\"\n  }},\n  \"glyph\": {{\n    \"mother_square_side\": {},\n    \"unit\": {},\n    \"dominant_stroke\": {},\n    \"fine_stroke\": {},\n    \"bowl_outer_radius\": {},\n    \"bowl_inner_radius\": {},\n    \"serif_circle_radius\": {},\n    \"leg_outer_circle_radius\": {},\n    \"leg_outer_sagitta\": {},\n    \"leg_outer_rounding_radius\": {},\n    \"leg_outer_root\": [{}, {}],\n    \"leg_outer_rounding_center\": [{}, {}],\n    \"leg_outer_join\": [{}, {}],\n    \"leg_root_arc_radius\": {},\n    \"leg_tip_arc_radius\": {},\n    \"leg_root\": [{}, {}],\n    \"leg_root_tangent\": [{}, {}],\n    \"leg_tip_tangent\": [{}, {}],\n    \"leg_tip\": [{}, {}]\n  }},\n  \"glyph_rules\": {{\n    \"historical_base\": {{\n      \"method\": \"R derived from B\",\n      \"mother_square\": \"side L divided into nine modules\",\n      \"dominant_stroke\": \"u=L/9\",\n      \"fine_stroke\": \"u/2=L/18\",\n      \"b_round\": \"paired circular contours; lower diameter 5L/9\",\n      \"serifs\": \"brackets constructed by tangent circles\",\n      \"leg_outer\": \"circular arc from square center to lower-right corner\",\n      \"leg_inner\": \"straight segment joined to two tangent circular arcs\",\n      \"leg_root_width\": \"approximately L/9; both sides taper to zero at the corner\"\n    }},\n    \"rings_completion\": {{\n      \"scope\": \"parameters not fully specified by the surviving Pacioli plate\",\n      \"square_binding\": \"L=sqrt(2)*aperture_radius\",\n      \"stem_edges\": \"left=-19u/6; right=-13u/6\",\n      \"bowl_outer\": \"center=(-u/2,-17u/8); radius=19u/8\",\n      \"bowl_inner\": \"center=(-5u/4,-17u/8); radius=17u/8\",\n      \"serif_circle_radius\": \"2u/3\",\n      \"leg_root\": \"S=(-u/2,0), on the crossbar; CS=u/2\",\n      \"leg_root_arc\": \"center=(-u/2,13u/64); radius=13u/64; tangent to the crossbar at S and leaves it toward the lower right\",\n      \"leg_straight\": \"x=3y/4-51u/128; direction is the 3-4-5 triangle\",\n      \"leg_outer_arc\": \"support circle passes through C and D with sagitta u/10; visible arc begins at the derived tangent T\",\n      \"leg_outer_root\": \"B=bowl outer waist; BS=3sqrt(2)u/4\",\n      \"leg_outer_rounding\": \"n=(B-O_b)/r_b; r_o=(R^2-|B-O|^2)/(2(R+(B-O) dot n)); center=B+r_o*n; tangent=T=O+R(center-O)/|center-O|\",\n      \"glyph_fill\": \"one continuous outer silhouette plus one counter; no component closure crosses the bowl-leg junction\",\n      \"leg_root_radius\": \"13u/64; line tangency=(-27u/80,13u/160)\",\n      \"leg_tip_radius\": \"76515u/13312; line tangency=(897u/640,12u/5)\",\n      \"leg_tip\": \"tip arc passes through D=(9u/2,9u/2); both contours meet at D\"\n    }}\n  }},\n  \"color_rules\": {{\n    \"space\": \"OKLCH converted to quantized sRGB\",\n    \"lightness_grid\": \"1/10000\",\n    \"rust_hue\": \"360/(2*bore_count)=36deg\",\n    \"signal_hue\": \"rust_hue+180=216deg\",\n    \"accent_chroma\": \"(bore_count-1)/teeth\",\n    \"guide_chroma\": \"1/teeth\",\n    \"neutral_chroma\": \"guide_chroma/pentagonal_golden_ratio^2\"\n  }},\n  \"palettes\": {{\n    \"light_background\": {},\n    \"dark_background\": {}\n  }}\n}}\n",
         format_number(model.spec.module),
         model.spec.teeth,
         format_number(model.spec.pressure_angle_degrees),
@@ -634,14 +580,15 @@ mod tests {
     }
 
     #[test]
-    fn glyph_is_one_compound_fill_without_internal_path_seams() {
+    fn glyph_is_one_outer_silhouette_with_one_counter() {
         let model = GearModel::new(Spec::rings());
         assert!(model.is_ok());
         if let Ok(model) = model {
             let mut rendered = String::new();
             append_glyph(&mut rendered, model.glyph());
             assert_eq!(rendered.matches("<path ").count(), 1);
-            assert_eq!(rendered.matches(" Z").count(), 7);
+            assert_eq!(rendered.matches(" Z").count(), 2);
+            assert!(rendered.contains("fill-rule=\"evenodd\""));
         }
     }
 }
