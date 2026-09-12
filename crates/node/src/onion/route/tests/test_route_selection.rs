@@ -509,3 +509,32 @@ fn test_route_builder_shortens_to_permitted_exit_when_no_first_relay_is_allowed(
     assert_eq!(route.hops().first().copied(), Some(exit_did));
     Ok(())
 }
+
+#[test]
+fn test_route_builder_direct_exit_filter_is_separate_from_relay_guard_filter() -> Result<()> {
+    let remote = node_key().map_err(Error::CoreError)?;
+    let exit = signed_exit_at(20, 100)?;
+    let exit_did = exit.did;
+    let request = route_request("web", 3, true)?;
+    let candidates = OnionRouteCandidates {
+        relays: vec![OnionRouteHop::new(
+            remote.account_did(),
+            remote.session_public_key(),
+        )],
+        exits: vec![exit],
+    };
+    let mut entropy = FixedEntropy::new([0]);
+
+    let route = select_onion_route_from_candidates_with_first_hop_policy(
+        &request,
+        candidates,
+        Vec::new(),
+        &mut entropy,
+        |_| false,
+        |did| did == exit_did,
+    )?;
+
+    assert_eq!(route.hops().len(), 1);
+    assert_eq!(route.hops().first().copied(), Some(exit_did));
+    Ok(())
+}

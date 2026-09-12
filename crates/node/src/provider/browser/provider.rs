@@ -49,6 +49,7 @@ use crate::onion::https::OnionHttpsRuntime;
 use crate::onion::proxy::OnionProxyConfig;
 use crate::onion::proxy::OnionProxyRoute;
 use crate::onion::proxy::OnionProxyTarget;
+use crate::onion::OnionEntryGuardStorage;
 use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionRouteError;
@@ -256,6 +257,10 @@ impl OnionDirectoryReader for BrowserOnionDirectoryReader {
             .map(|measurement| (measurement.did, measurement.quality))
             .collect()
     }
+
+    fn onion_entry_guards(&self) -> &crate::onion::OnionEntryGuards {
+        self.processor.onion_entry_guards()
+    }
 }
 
 async fn build_browser_route_from_reader(
@@ -428,6 +433,20 @@ async fn open_browser_measure_storage(storage_name: &str) -> Option<MeasureStora
     }
 }
 
+async fn open_browser_entry_guard_storage(storage_name: &str) -> Option<OnionEntryGuardStorage> {
+    match IdbStorage::new_with_cap_and_name(1024, storage_name).await {
+        Ok(storage) => Some(Box::new(storage) as OnionEntryGuardStorage),
+        Err(source) => {
+            tracing::warn!(
+                storage_name = %storage_name,
+                error = %source,
+                "browser onion entry-guard IndexedDB unavailable; falling back to in-memory entry guards"
+            );
+            None
+        }
+    }
+}
+
 impl Provider {
     /// Create a browser provider backed by IndexedDB storage and install its default backend.
     ///
@@ -442,10 +461,16 @@ impl Provider {
         let entry_storage = open_browser_entry_storage_or_memory(&storage_name).await;
         let measure_storage =
             open_browser_measure_storage(&format!("{storage_name}/measure")).await;
+        let onion_entry_guard_storage =
+            open_browser_entry_guard_storage(&format!("{storage_name}/onion-entry-guards")).await;
 
-        let provider =
-            Self::new_provider_with_storage_internal(config, entry_storage, measure_storage)
-                .await?;
+        let provider = Self::new_provider_with_storage_internal(
+            config,
+            entry_storage,
+            measure_storage,
+            onion_entry_guard_storage,
+        )
+        .await?;
         provider.set_backend()?;
         if let Some(policy) = onion_https_exit_policy {
             provider.install_onion_https_protocol(Some(policy))?;
@@ -488,6 +513,8 @@ impl Provider {
 
             let entry_storage = open_browser_entry_storage_or_memory("rings-node").await;
             let measure_storage = open_browser_measure_storage("rings-node/measure").await;
+            let onion_entry_guard_storage =
+                open_browser_entry_guard_storage("rings-node/onion-entry-guards").await;
 
             let provider = Provider::new_provider_internal(
                 network_id,
@@ -498,6 +525,7 @@ impl Provider {
                 Signer::Async(Box::new(signer)),
                 entry_storage,
                 measure_storage,
+                onion_entry_guard_storage,
             )
             .await?;
 
@@ -527,6 +555,8 @@ impl Provider {
 
             let entry_storage = open_browser_entry_storage_or_memory("rings-node").await;
             let measure_storage = open_browser_measure_storage("rings-node/measure").await;
+            let onion_entry_guard_storage =
+                open_browser_entry_guard_storage("rings-node/onion-entry-guards").await;
 
             let config_policy = policy.clone();
             let provider = Provider::new_provider_internal_with_config(
@@ -538,6 +568,7 @@ impl Provider {
                 Signer::Async(Box::new(signer)),
                 entry_storage,
                 measure_storage,
+                onion_entry_guard_storage,
                 move |config| {
                     config
                         .enable_https_onion_exit()

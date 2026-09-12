@@ -265,6 +265,25 @@ pub(crate) fn select_onion_route_from_candidates_with_first_hop(
     entropy: &mut impl RouteEntropy,
     first_hop_permitted: impl Fn(Did) -> bool,
 ) -> Result<OnionRoute> {
+    let first_hop_permitted = &first_hop_permitted;
+    select_onion_route_from_candidates_with_first_hop_policy(
+        request,
+        candidates,
+        qualities,
+        entropy,
+        first_hop_permitted,
+        first_hop_permitted,
+    )
+}
+
+pub(crate) fn select_onion_route_from_candidates_with_first_hop_policy(
+    request: &OnionRouteRequest,
+    candidates: OnionRouteCandidates,
+    qualities: impl IntoIterator<Item = (Did, PeerQuality)>,
+    entropy: &mut impl RouteEntropy,
+    first_relay_hop_permitted: impl Fn(Did) -> bool,
+    direct_exit_permitted: impl Fn(Did) -> bool,
+) -> Result<OnionRoute> {
     let target_hop_count = request.target_hop_count();
     if target_hop_count == 0 || target_hop_count > usize::from(MAX_ONION_CIRCUIT_HOPS) {
         return Err(Error::OnionRouteError(
@@ -277,7 +296,8 @@ pub(crate) fn select_onion_route_from_candidates_with_first_hop(
 
     let quality_by_did = qualities.into_iter().collect::<BTreeMap<_, _>>();
     let mut exit_candidates = candidates.exits;
-    let first_hop_permitted = &first_hop_permitted;
+    let first_relay_hop_permitted = &first_relay_hop_permitted;
+    let direct_exit_permitted = &direct_exit_permitted;
     let first_hop_exit_only = target_hop_count == 1;
     if exit_candidates.is_empty() {
         return Err(Error::OnionRouteError(OnionRouteError::NoLiveExit {
@@ -290,7 +310,7 @@ pub(crate) fn select_onion_route_from_candidates_with_first_hop(
             exit_candidates,
             &quality_by_did,
             entropy,
-            first_hop_permitted,
+            direct_exit_permitted,
         );
     }
 
@@ -301,7 +321,7 @@ pub(crate) fn select_onion_route_from_candidates_with_first_hop(
         let has_relay_candidates = !relay_candidates.is_empty();
         let Some(first_index) =
             pick_weighted_hop_index_where(&relay_candidates, &quality_by_did, entropy, |did| {
-                first_hop_permitted(did)
+                first_relay_hop_permitted(did)
                     && route_can_still_select_exit(&selected_relays, did, &exit_candidates)
             })
         else {
@@ -311,7 +331,7 @@ pub(crate) fn select_onion_route_from_candidates_with_first_hop(
                     exit_candidates,
                     &quality_by_did,
                     entropy,
-                    first_hop_permitted,
+                    direct_exit_permitted,
                 );
             }
             let error = if has_relay_candidates {
@@ -427,7 +447,7 @@ fn pick_weighted_candidate_index(
     eligible.into_iter().nth(selected).map(|(index, _)| index)
 }
 
-fn pick_weighted_index(
+pub(crate) fn pick_weighted_index(
     dids: &[Did],
     quality_by_did: &BTreeMap<Did, PeerQuality>,
     entropy: &mut impl RouteEntropy,

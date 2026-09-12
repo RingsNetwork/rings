@@ -10,6 +10,7 @@ pub struct ProcessorBuilder {
     pub(in crate::processor) session_sk: SessionSk,
     pub(in crate::processor) onion_exit_epoch: OnionExitEpoch,
     pub(in crate::processor) storage: Option<EntryStorage>,
+    pub(in crate::processor) onion_entry_guard_storage: Option<OnionEntryGuardStorage>,
     pub(in crate::processor) measure: Option<Arc<PeriodicMeasure>>,
     pub(in crate::processor) stabilize_interval: Duration,
     pub(in crate::processor) online_node_heartbeat_interval: Duration,
@@ -63,6 +64,7 @@ impl ProcessorBuilder {
             session_sk: config.session_sk.clone(),
             onion_exit_epoch: OnionExitEpoch::random(),
             storage: None,
+            onion_entry_guard_storage: None,
             measure: None,
             stabilize_interval: config.stabilize_interval,
             online_node_heartbeat_interval: config.online_node_heartbeat_interval,
@@ -85,6 +87,12 @@ impl ProcessorBuilder {
     /// Set the storage for the processor.
     pub fn storage(mut self, storage: EntryStorage) -> Self {
         self.storage = Some(storage);
+        self
+    }
+
+    /// Set the local entry-guard storage for onion route selection.
+    pub fn onion_entry_guard_storage(mut self, storage: OnionEntryGuardStorage) -> Self {
+        self.onion_entry_guard_storage = Some(storage);
         self
     }
 
@@ -163,6 +171,9 @@ impl ProcessorBuilder {
             .map_err(|e| Error::VerifyError(e.to_string()))?;
 
         let storage = self.storage.unwrap_or_else(|| Box::new(MemStorage::new()));
+        let onion_entry_guard_storage = self
+            .onion_entry_guard_storage
+            .unwrap_or_else(|| Box::new(MemStorage::new()));
         let endpoint_hint = self.external_address.clone();
         let mut online_node_capabilities = Vec::new();
         if self.advertise_onion_relay {
@@ -219,6 +230,7 @@ impl ProcessorBuilder {
             swarm,
             session_sk,
             onion_exit_epoch: self.onion_exit_epoch,
+            onion_entry_guards: Arc::new(OnionEntryGuards::new(onion_entry_guard_storage)),
             stabilize_interval: self.stabilize_interval,
             online_node_registration,
             measure,

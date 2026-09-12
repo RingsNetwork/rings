@@ -188,6 +188,15 @@ appear in several positions of one route unless the deployment adds independent
 admission or diversity controls. Reliability weighting may reorder eligible
 candidates; it never adds one.
 
+**Entry guards.** A client pins a small local set of eligible first-hop relays per
+network and persists it outside Chord. New routes choose the relay first hop only
+from that guard set, so repeated HTTP requests, CONNECT tunnels, and TCP/UDP onion
+flows do not resample the whole live relay population as their entry. Guards are
+replaced only when they are no longer live, no longer satisfy the caller's first-hop
+policy, or a healthier eligible replacement set exists. This reduces the number of
+relays that can observe the client edge over time, but it does not hide the client
+from whichever guard is selected for a given circuit.
+
 ## Feature Boundaries
 
 ### DID Identity

@@ -22,6 +22,7 @@ use crate::error::Result;
 use crate::extension::Backend;
 use crate::measure::MeasureStorage;
 use crate::measure::PeriodicMeasure;
+use crate::onion::OnionEntryGuardStorage;
 use crate::prelude::wasm_export;
 use crate::processor::Processor;
 use crate::processor::ProcessorBuilder;
@@ -150,14 +151,18 @@ impl Provider {
         config: ProcessorConfig,
         entry_storage: Option<EntryStorage>,
         measure_storage: Option<MeasureStorage>,
+        onion_entry_guard_storage: Option<OnionEntryGuardStorage>,
     ) -> Result<Provider> {
         let entry_storage = entry_storage.unwrap_or_else(|| Box::new(MemStorage::new()));
         let measure_storage = measure_storage.unwrap_or_else(|| Box::new(MemStorage::new()));
+        let onion_entry_guard_storage =
+            onion_entry_guard_storage.unwrap_or_else(|| Box::new(MemStorage::new()));
 
         let measure = PeriodicMeasure::new(measure_storage).await?;
 
         let processor_builder = ProcessorBuilder::from_config(&config)?
             .storage(entry_storage)
+            .onion_entry_guard_storage(onion_entry_guard_storage)
             .measure(measure);
 
         let processor = Arc::new(processor_builder.build()?);
@@ -193,6 +198,7 @@ impl Provider {
         signer: Signer,
         entry_storage: Option<EntryStorage>,
         measure_storage: Option<MeasureStorage>,
+        onion_entry_guard_storage: Option<OnionEntryGuardStorage>,
     ) -> Result<Provider> {
         Self::new_provider_internal_with_config(
             network_id,
@@ -203,6 +209,7 @@ impl Provider {
             signer,
             entry_storage,
             measure_storage,
+            onion_entry_guard_storage,
             core::convert::identity,
         )
         .await
@@ -218,6 +225,7 @@ impl Provider {
         signer: Signer,
         entry_storage: Option<EntryStorage>,
         measure_storage: Option<MeasureStorage>,
+        onion_entry_guard_storage: Option<OnionEntryGuardStorage>,
         configure: impl FnOnce(ProcessorConfig) -> ProcessorConfig,
     ) -> Result<Provider> {
         let mut sk_builder = SessionSkBuilder::new(account, account_type);
@@ -230,7 +238,13 @@ impl Provider {
         let session_sk = sk_builder.build().map_err(Error::InternalError)?;
         let config = ProcessorConfig::new(network_id, ice_servers, session_sk, stabilize_interval);
         let config = configure(config);
-        Self::new_provider_with_storage_internal(config, entry_storage, measure_storage).await
+        Self::new_provider_with_storage_internal(
+            config,
+            entry_storage,
+            measure_storage,
+            onion_entry_guard_storage,
+        )
+        .await
     }
 
     /// Install the extension [`Backend`] as the swarm's inbound callback, so inbound

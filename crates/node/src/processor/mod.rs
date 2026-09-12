@@ -56,6 +56,8 @@ use crate::onion::proxy::OnionProxyTarget;
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 use crate::onion::proxy::ONION_PROXY_HTTPS_SERVICE;
 use crate::onion::validate_onion_exit_registration_timing;
+use crate::onion::OnionEntryGuardStorage;
+use crate::onion::OnionEntryGuards;
 use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitEpoch;
 use crate::onion::OnionExitPolicy;
@@ -141,6 +143,7 @@ pub struct Processor {
     session_sk: SessionSk,
     /// Fresh process epoch shared by exit advertisement and exit-layer admission.
     onion_exit_epoch: OnionExitEpoch,
+    onion_entry_guards: Arc<OnionEntryGuards>,
     stabilize_interval: Duration,
     online_node_registration: OnlineNodeRegistration,
     measure: Option<Arc<PeriodicMeasure>>,
@@ -161,6 +164,11 @@ impl Processor {
 
     pub(crate) const fn onion_exit_epoch(&self) -> OnionExitEpoch {
         self.onion_exit_epoch
+    }
+
+    #[cfg(all(feature = "browser", target_family = "wasm"))]
+    pub(crate) fn onion_entry_guards(&self) -> &OnionEntryGuards {
+        self.onion_entry_guards.as_ref()
     }
 
     #[cfg(all(feature = "browser", target_family = "wasm"))]
@@ -828,6 +836,10 @@ impl OnionDirectoryReader for Processor {
             .into_iter()
             .map(|measurement| (measurement.did, measurement.quality))
             .collect()
+    }
+
+    fn onion_entry_guards(&self) -> &OnionEntryGuards {
+        self.onion_entry_guards.as_ref()
     }
 }
 

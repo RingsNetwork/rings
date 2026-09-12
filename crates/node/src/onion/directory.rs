@@ -5,7 +5,8 @@ use rings_core::measure::PeerQuality;
 use rings_core::message::DhtProtocolMode;
 use rings_core::utils::get_epoch_ms;
 
-use super::select_onion_route_from_candidates_with_first_hop;
+use super::select_onion_route_from_candidates_with_first_hop_policy;
+use super::OnionEntryGuards;
 use super::OnionExitDescriptor;
 use super::OnionExitTarget;
 use super::OnionRoute;
@@ -38,6 +39,9 @@ pub(crate) trait OnionDirectoryReader {
 
     /// Return local peer-quality observations for route weighting.
     async fn peer_qualities(&self) -> Vec<(Did, PeerQuality)>;
+
+    /// Return the local entry-guard manager for this client.
+    fn onion_entry_guards(&self) -> &OnionEntryGuards;
 }
 
 /// Build an onion route from live directory descriptors.
@@ -164,11 +168,25 @@ async fn build_onion_route_from_exits(
         online_nodes,
         exits,
     );
-    select_onion_route_from_candidates_with_first_hop(
+    let qualities = reader.peer_qualities().await;
+    let mut entropy = SystemRouteEntropy::new();
+    let first_hop_permitted = &first_hop_permitted;
+    let guard_set = reader
+        .onion_entry_guards()
+        .select_relay_guards(
+            reader.dht_protocol_mode().network_id,
+            &candidates.relays,
+            &qualities,
+            &mut entropy,
+            first_hop_permitted,
+        )
+        .await?;
+    select_onion_route_from_candidates_with_first_hop_policy(
         &request,
         candidates,
-        reader.peer_qualities().await,
-        &mut SystemRouteEntropy::new(),
+        qualities,
+        &mut entropy,
+        |did| guard_set.contains(did) && first_hop_permitted(did),
         first_hop_permitted,
     )
 }

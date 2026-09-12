@@ -426,6 +426,7 @@ pub unsafe extern "C" fn rings_node_new_provider_with_callback(
                     Signer::Sync(Box::new(wrapped_signer(signer))),
                     None,
                     None,
+                    None,
                 ))?;
                 Ok((provider, runtime))
             })
@@ -653,6 +654,7 @@ mod tests {
                     config,
                     None,
                     Some(Box::new(storage.clone())),
+                    None,
                 )
                 .await
             })
