@@ -41,19 +41,22 @@ cargo run -p rings-logo -- check
   through the square center `C` and lower-right corner `D`, with sagitta
   `u/10`, determines the long outer arc of the leg.
 - The visible outer contour starts at the bowl point
-  `B = (-u/2 + 3sqrt(2)u/4,0)`, not at `C`. Its root width to the inner start
-  `S` is therefore exactly `3sqrt(2)u/4`, approximately `1.061u`, matching the
-  plate's approximately one-module width. A derived rounding
-  circle joins `B` tangentially to the long outer arc. If that arc has center
+  `B = (-u/2 + 3sqrt(2)u/4,0)`, not at `C`. The staggered junction span from
+  `S` to `B` is `(65/128 + 3sqrt(2)/4)u`, approximately `1.568u`; this span is
+  wider than the leg's normal section because it includes the crossbar-to-leg
+  transition. A derived rounding circle joins `B` tangentially to the long
+  outer arc. If that arc has center
   `O` and radius `R`, the bowl has center `O_b` and radius `r_b`, and
   `n = (B-O_b)/r_b`, then the rounding radius is
   `r_o = (R^2-|B-O|^2)/(2(R+(B-O) dot n))`. Its center is `B+r_o*n`; the other
   tangency is `T = O+R(B+r_o*n-O)/|B+r_o*n-O|`. No visual join parameter is
   fitted independently.
-- The inner contour begins at `S = (-u/2,0)`. Its root circle has center
-  `(-u/2,13u/64)` and radius `13u/64`, meeting the crossbar at `S` and the line
-  `x = 3y/4 - 29u/32` at `(-53u/80,13u/40)`. The line's direction is therefore
-  the exact rational `3:4:5` triangle, not an assumed 45-degree parallel.
+- The inner contour begins at `S = (-129u/128,0)`. Its root circle has center
+  `(-129u/128,13u/64)` and radius `13u/64`, meeting the crossbar at `S` and the
+  line `x = 3y/4 - 29u/32` at `(-541u/640,13u/160)`. Here
+  `S_x = -29u/32 - (13u/64)/2`: the root is solved from the line intercept and
+  tangency radius. The line's direction is the exact rational `3:4:5` triangle,
+  not an assumed 45-degree parallel.
 - The terminal circle has center `(21551u/4160,-13563u/16640)`, radius
   `17833u/3328`, and is tangent to that line at `(143u/160,12u/5)`. It passes
   through `D = (9u/2,9u/2)`, where both leg contours meet with zero width. The

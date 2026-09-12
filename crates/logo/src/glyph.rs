@@ -297,11 +297,11 @@ fn leg(square_half: f64, unit: f64, bowl: BowlGeometry) -> LegGeometry {
     let outer_rounding_circle = outer_root_rounding(bowl.outer, outer_circle, outer_start);
     let outer_join = internal_tangent_point(outer_circle, outer_rounding_circle);
 
+    let root_radius = 13.0 * unit / 64.0;
     let root = Point {
-        x: -unit / 2.0,
+        x: -129.0 * unit / 128.0,
         y: 0.0,
     };
-    let root_radius = 13.0 * unit / 64.0;
     let root_circle = Circle {
         center: Point {
             x: root.x,
@@ -311,7 +311,7 @@ fn leg(square_half: f64, unit: f64, bowl: BowlGeometry) -> LegGeometry {
     };
 
     let root_tangent =
-        root_circle.point_at_offset(-4.0 * root_radius / 5.0, 3.0 * root_radius / 5.0);
+        root_circle.point_at_offset(4.0 * root_radius / 5.0, -3.0 * root_radius / 5.0);
     let tip_tangent = Point {
         x: 143.0 * unit / 160.0,
         y: 12.0 * unit / 5.0,
@@ -512,13 +512,10 @@ mod tests {
             (distance(leg.outer_circle.center, leg.outer_join) - leg.outer_circle.radius).abs()
                 < EPSILON
         );
-        assert!(
-            (leg.outer_start.x - inner.root.x - 3.0 * 2.0_f64.sqrt() * glyph.unit / 4.0).abs()
-                < EPSILON
-        );
+        let root_width = glyph.unit * (65.0 / 128.0 + 3.0 * 2.0_f64.sqrt() / 4.0);
+        assert!((leg.outer_start.x - inner.root.x - root_width).abs() < EPSILON);
 
-        assert!((distance(leg.diagonal_start, inner.root) - glyph.unit / 2.0).abs() < EPSILON);
-        assert!((inner.root.x + glyph.unit / 2.0).abs() < EPSILON);
+        assert!((inner.root.x + 129.0 * glyph.unit / 128.0).abs() < EPSILON);
         assert!(inner.root.y.abs() < EPSILON);
         assert!(
             (distance(inner.root_circle.center, inner.root) - inner.root_circle.radius).abs()
@@ -526,8 +523,9 @@ mod tests {
         );
         assert!((inner.root_circle.center.x - inner.root.x).abs() < EPSILON);
         assert!((inner.root_circle.radius - 13.0 * glyph.unit / 64.0).abs() < EPSILON);
-        assert!((inner.root_tangent.x + 53.0 * glyph.unit / 80.0).abs() < EPSILON);
-        assert!((inner.root_tangent.y - 13.0 * glyph.unit / 40.0).abs() < EPSILON);
+        assert!((inner.root_tangent.x + 541.0 * glyph.unit / 640.0).abs() < EPSILON);
+        assert!((inner.root_tangent.y - 13.0 * glyph.unit / 160.0).abs() < EPSILON);
+        assert!(inner.root_tangent.x > inner.root.x);
 
         let tangent = subtract(inner.tip_tangent, inner.root_tangent);
         let root_radius = subtract(inner.root_tangent, inner.root_circle.center);
