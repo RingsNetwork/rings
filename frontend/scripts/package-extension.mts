@@ -97,6 +97,7 @@ const sourceDist = resolve(projectRoot, process.argv[2] ?? "dist");
 const extensionDist = resolve(projectRoot, process.argv[3] ?? "dist-extension");
 const execFileAsync = promisify(execFile);
 const sourceIconSvg = join(projectRoot, "assets", "icons", "rings.svg");
+const sourceFaviconSvg = join(projectRoot, "assets", "icons", "favicon.svg");
 const extensionAssets = resolve(projectRoot, ".generated", "extension-assets");
 const staticExtensionAssets = resolve(projectRoot, "extension-assets");
 const dependencyRoot = resolve(projectRoot, "..", "node_modules");
@@ -364,7 +365,9 @@ async function writeExtensionIcons(): Promise<void> {
   const iconsDir = join(extensionDist, "icons");
   await mkdir(iconsDir, { recursive: true });
   const iconSvg = await readFile(sourceIconSvg, "utf8");
+  const faviconSvg = await readFile(sourceFaviconSvg, "utf8");
   await writeFile(join(iconsDir, "rings.svg"), iconSvg, "utf8");
+  await writeFile(join(iconsDir, "favicon.svg"), faviconSvg, "utf8");
   for (const state of Object.values(ICON_STATES)) {
     const tempDir = await mkdtemp(join(tmpdir(), "rings-icon-"));
     const svgPath = join(tempDir, `${state.file}.svg`);
@@ -383,13 +386,17 @@ async function writeExtensionIcons(): Promise<void> {
  * Recolors the source SVG while preserving its shape.
  */
 function tintIconSvg(svg: string, color: string): string {
-  const tinted = svg.replace(/\sfill="(?!none\b)[^"]*"/gi, ` fill="${color}"`);
-  if (tinted !== svg) {
-    return tinted;
+  const styled = svg.replace(/\b(stroke|fill):#[0-9a-f]{6}\b/gi, `$1:${color}`);
+  if (styled !== svg) {
+    return styled;
   }
-  return svg.replace(
+  const attributed = svg.replace(/\s(stroke|fill)="(?!none\b)[^"]*"/gi, ` $1="${color}"`);
+  if (attributed !== svg) {
+    return attributed;
+  }
+  return attributed.replace(
     /<svg\b([^>]*)>/i,
-    `<svg$1>\n<style>path,circle,rect,polygon,polyline,ellipse{fill:${color};}</style>`,
+    `<svg$1>\n<style>path,circle,rect,polygon,polyline,ellipse{fill:${color};stroke:${color};}</style>`,
   );
 }
 
@@ -426,7 +433,7 @@ function htmlShell(jsFileName: string, wasmFileName: string, options: HtmlShellO
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Rings - A P2P network for the sovereign age</title>
-    <link rel="icon" type="image/svg+xml" href="./icons/rings.svg" />
+    <link rel="icon" type="image/svg+xml" href="./icons/favicon.svg" />
     <link rel="icon" type="image/png" sizes="16x16" href="./icons/rings-16.png" />
     <link rel="icon" type="image/png" sizes="32x32" href="./icons/rings-32.png" />
     <link rel="apple-touch-icon" href="./icons/rings-128.png" />

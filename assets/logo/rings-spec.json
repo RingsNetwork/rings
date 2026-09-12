@@ -1,0 +1,123 @@
+{
+  "generator": "rings-logo",
+  "geometry": {
+    "module": 10,
+    "teeth": 30,
+    "pressure_angle_degrees": 20,
+    "pitch_radius": 150,
+    "base_radius": 140.953893,
+    "outer_radius": 160,
+    "root_radius": 137.5,
+    "aperture_radius": 100,
+    "bore_count": 5,
+    "bore_orbit": 120,
+    "bore_radius": 8,
+    "teeth_per_bore_sector": 6,
+    "flank_samples": 24
+  },
+  "geometry_rules": {
+    "aperture_radius": "2*bore_count*module",
+    "bore_orbit": "aperture_radius+2*module",
+    "bore_radius": "(bore_count-1)/bore_count*module",
+    "flank_samples": "teeth/bore_count*(bore_count-1)",
+    "viewbox_radius": "outer_radius+2*bore_radius",
+    "gear_outline_width": "r_stroke/teeth_per_bore_sector",
+    "construction_guide_width": "gear_outline_width/bore_count"
+  },
+  "gear_inner_profile": {
+    "topology": "five bracketed bore lobes alternating with five inner-ring arcs",
+    "inner_ring_radius": 115,
+    "lobe_half_span": 20,
+    "tip_center_orbit": 100,
+    "tip_radius": 5,
+    "lobe_half_angle_degrees": 10.01541,
+    "positive_tip_tangent": [3.569282, 96.49854],
+    "minimum_radius": 95,
+    "rules": {
+      "inner_ring_radius": "bore_orbit-module/2",
+      "lobe_half_span": "2*module",
+      "tip_center_orbit": "aperture_radius",
+      "tip_radius": "module/2",
+      "lobe_half_angle": "asin(lobe_half_span/inner_ring_radius)",
+      "sides": "exact tangents from inner-ring endpoints to the tip circle",
+      "phase": "one lobe per bore on the regular pentagon"
+    }
+  },
+  "glyph": {
+    "mother_square_side": 141.421356,
+    "unit": 15.713484,
+    "dominant_stroke": 15.713484,
+    "fine_stroke": 7.856742,
+    "bowl_outer_radius": 37.319525,
+    "bowl_inner_radius": 33.391154,
+    "serif_circle_radius": 10.475656,
+    "leg_outer_circle_radius": 796.280803,
+    "leg_outer_sagitta": 1.571348,
+    "leg_outer_rounding_radius": 5.199319,
+    "leg_outer_root": [8.809925, 0],
+    "leg_outer_rounding_center": [11.131908, 4.652022],
+    "leg_outer_join": [7.279367, 8.143562],
+    "leg_root_arc_radius": 3.191801,
+    "leg_tip_arc_radius": 84.200289,
+    "leg_root": [-15.836246, 0],
+    "leg_root_tangent": [-13.282804, 1.276721],
+    "leg_tip_tangent": [14.043926, 37.712362],
+    "leg_tip": [70.710678, 70.710678]
+  },
+  "glyph_rules": {
+    "historical_base": {
+      "method": "R derived from B",
+      "mother_square": "side L divided into nine modules",
+      "dominant_stroke": "u=L/9",
+      "fine_stroke": "u/2=L/18",
+      "b_round": "paired circular contours; lower diameter 5L/9",
+      "serifs": "brackets constructed by tangent circles",
+      "leg_outer": "circular arc from square center to lower-right corner",
+      "leg_inner": "straight segment joined to two tangent circular arcs",
+      "leg_root_width": "approximately L/9; both sides taper to zero at the corner"
+    },
+    "rings_completion": {
+      "scope": "parameters not fully specified by the surviving Pacioli plate",
+      "square_binding": "L=sqrt(2)*aperture_radius",
+      "stem_edges": "left=-19u/6; right=-13u/6",
+      "bowl_outer": "center=(-u/2,-17u/8); radius=19u/8",
+      "bowl_inner": "center=(-5u/4,-17u/8); radius=17u/8",
+      "serif_circle_radius": "2u/3",
+      "leg_root": "S=(-129u/128,0), on the crossbar; S_x=-29u/32-(13u/64)/2",
+      "leg_root_arc": "center=(-129u/128,13u/64); radius=13u/64; tangent to the crossbar at S",
+      "leg_straight": "x=3y/4-29u/32; direction is the 3-4-5 triangle",
+      "leg_outer_arc": "support circle passes through C and D with sagitta u/10; visible arc begins at the derived tangent T",
+      "leg_outer_root": "B=bowl outer waist; BS=(65/128+3sqrt(2)/4)u",
+      "leg_outer_rounding": "n=(B-O_b)/r_b; r_o=(R^2-|B-O|^2)/(2(R+(B-O) dot n)); center=B+r_o*n; tangent=T=O+R(center-O)/|center-O|",
+      "glyph_fill": "one continuous outer silhouette plus one counter; no component closure crosses the bowl-leg junction",
+      "leg_root_radius": "13u/64; line tangency=(-541u/640,13u/160)",
+      "leg_tip_radius": "17833u/3328; line tangency=(143u/160,12u/5)",
+      "leg_tip": "tip arc passes through D=(9u/2,9u/2); both contours meet at D"
+    }
+  },
+  "color_rules": {
+    "space": "OKLCH converted to quantized sRGB",
+    "lightness_grid": "1/10000",
+    "rust_hue": "360/(2*bore_count)=36deg",
+    "signal_hue": "rust_hue+180=216deg",
+    "accent_chroma": "(bore_count-1)/teeth",
+    "guide_chroma": "1/teeth",
+    "neutral_chroma": "guide_chroma/pentagonal_golden_ratio^2"
+  },
+  "palettes": {
+    "light_background": {
+      "primary": {"hex": "#605755", "oklch": [0.4659, 0.012732, 36], "contrast": 7.019156, "target": 7},
+      "accent": {"hex": "#bc593f", "oklch": [0.5815, 0.133333, 36], "contrast": 4.526837, "target": 4.5},
+      "gear_fill": {"hex": "#bc593f", "oklch": [0.5815, 0.133333, 36], "contrast": 4.526837, "target": 4.5},
+      "signal": {"hex": "#0081a1", "oklch": [0.5458, 0.133333, 216], "contrast": 4.511526, "target": 4.5},
+      "guide": {"hex": "#7d99a1", "oklch": [0.6657, 0.033333, 216], "contrast": 3.024573, "target": 3}
+    },
+    "dark_background": {
+      "primary": {"hex": "#9d9390", "oklch": [0.6696, 0.012732, 36], "contrast": 7.00983, "target": 7},
+      "accent": {"hex": "#ba573d", "oklch": [0.5747, 0.133333, 36], "contrast": 4.518483, "target": 4.5},
+      "gear_fill": {"hex": "#ba573d", "oklch": [0.5747, 0.133333, 36], "contrast": 4.518483, "target": 4.5},
+      "signal": {"hex": "#007f9e", "oklch": [0.5361, 0.133333, 216], "contrast": 4.529473, "target": 4.5},
+      "guide": {"hex": "#435e65", "oklch": [0.4619, 0.033333, 216], "contrast": 3.027657, "target": 3}
+    }
+  }
+}
