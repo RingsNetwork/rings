@@ -11,8 +11,6 @@ use crate::message::types::ConnectNodeSend;
 use crate::message::types::FindSuccessorReport;
 use crate::message::types::FindSuccessorSend;
 use crate::message::types::Message;
-use crate::message::types::PeerLivenessProbe;
-use crate::message::types::PeerLivenessReport;
 use crate::message::types::QueryForTopoInfoReport;
 use crate::message::types::QueryForTopoInfoSend;
 use crate::message::types::Then;
@@ -29,34 +27,6 @@ use topology_view::confirmed_topology;
 use topology_view::connect_successor_hint;
 #[cfg(all(test, not(target_family = "wasm")))]
 use topology_view::topology_has_confirmed_peer;
-
-/// PeerLivenessProbe is a direct overlay liveness probe.
-#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
-#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
-impl HandleMsg<PeerLivenessProbe> for MessageHandler {
-    async fn handle(&self, ctx: &MessagePayload, msg: &PeerLivenessProbe) -> Result<()> {
-        if ctx.should_forward_from(self.dht.did) {
-            return self
-                .run_effects([CoreEffect::forward_payload(ctx, None)])
-                .await;
-        }
-
-        self.run_effects([CoreEffect::send_report_message(
-            ctx,
-            Message::PeerLivenessReport(msg.resp()),
-        )])
-        .await
-    }
-}
-
-/// PeerLivenessReport is handled by the callback's verified-inbound liveness update.
-#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
-#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
-impl HandleMsg<PeerLivenessReport> for MessageHandler {
-    async fn handle(&self, _ctx: &MessagePayload, _msg: &PeerLivenessReport) -> Result<()> {
-        Ok(())
-    }
-}
 
 /// QueryForTopoInfoSend is direct message
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]

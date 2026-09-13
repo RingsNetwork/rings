@@ -17,6 +17,7 @@ use futures::StreamExt;
 use rings_node::extension::Backend;
 use rings_node::logging::init_logging;
 use rings_node::logging::LogLevel;
+use rings_node::measure::EvidenceCollectorIdentity;
 use rings_node::measure::PeriodicMeasure;
 use rings_node::native::api_auth::load_api_token;
 use rings_node::native::api_auth::load_api_token_file;
@@ -77,6 +78,18 @@ fn transaction_replay_storage_path(data_storage_path: &str) -> String {
         .unwrap_or_else(|| Path::new("."));
     parent
         .join("transaction-replay-v2")
+        .to_string_lossy()
+        .to_string()
+}
+
+fn provisional_evidence_storage_path(measure_storage_path: &str) -> String {
+    let measure_path = Path::new(measure_storage_path);
+    let parent = measure_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    parent
+        .join("provisional-evidence-v1")
         .to_string_lossy()
         .to_string()
 }
@@ -871,7 +884,13 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
             .await?,
     );
     let per_measure_storage = Box::new(
-        FileStorage::new_with_cap_and_path(measure_storage.capacity, measure_storage.path).await?,
+        FileStorage::new_with_cap_and_path(measure_storage.capacity, measure_storage.path.clone())
+            .await?,
+    );
+    let provisional_evidence_path = provisional_evidence_storage_path(&measure_storage.path);
+    let per_evidence_storage = Box::new(
+        FileStorage::new_with_cap_and_path(measure_storage.capacity, provisional_evidence_path)
+            .await?,
     );
     let onion_entry_guard_path = onion_entry_guard_storage_path(&data_storage.path);
     let per_onion_entry_guard_storage: OnionEntryGuardStorage = Box::new(
@@ -889,7 +908,13 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
         .await?,
     );
 
-    let measure = PeriodicMeasure::new(per_measure_storage).await?;
+    let collector = EvidenceCollectorIdentity::new(pc.network_id(), pc.session_sk().account_did());
+    let measure = PeriodicMeasure::new_with_evidence_storage(
+        per_measure_storage,
+        per_evidence_storage,
+        collector,
+    )
+    .await?;
 
     let processor = Arc::new(
         ProcessorBuilder::from_config(&pc)?
@@ -1347,6 +1372,7 @@ mod tests {
     use super::await_gateway_startup;
     use super::await_task_cleanup;
     use super::onion_entry_guard_storage_path;
+    use super::provisional_evidence_storage_path;
     use super::transaction_replay_storage_path;
     use super::Cli;
 
@@ -1412,6 +1438,18 @@ mod tests {
         assert_eq!(
             transaction_replay_storage_path("/tmp/rings/data"),
             "/tmp/rings/transaction-replay-v2"
+        );
+    }
+
+    #[test]
+    fn test_provisional_evidence_storage_is_sibling_of_measure_storage() {
+        assert_eq!(
+            provisional_evidence_storage_path(".rings/measure"),
+            ".rings/provisional-evidence-v1"
+        );
+        assert_eq!(
+            provisional_evidence_storage_path("/tmp/rings/measure"),
+            "/tmp/rings/provisional-evidence-v1"
         );
     }
 

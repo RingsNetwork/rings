@@ -634,7 +634,7 @@ fn test_final_handle_drop_requests_stop_before_channel_close() {
 
 #[test]
 fn test_message_classification_is_local_and_control_first() {
-    let dht = Message::PeerLivenessProbe(crate::message::PeerLivenessProbe { sent_at_ms: 1 });
+    let dht = Message::ProbeRequest(crate::message::test_probe_request(1));
     let storage = Message::SyncEntriesWithSuccessor(crate::message::SyncEntriesWithSuccessor {
         purpose: crate::dht::StorageSyncPurpose::AdditiveRepair,
         destination: crate::dht::StorageSyncDestination::PhysicalOwner(Did::from(1_u32)),
@@ -652,7 +652,7 @@ fn test_message_classification_is_local_and_control_first() {
     });
     let app = Message::custom(b"hello").expect("custom message must build");
 
-    assert_wire_classification(&dht, "PeerLivenessProbe", TransferClass::DhtControl);
+    assert_wire_classification(&dht, "ProbeRequest", TransferClass::DhtControl);
     assert_wire_classification(&storage, "SyncEntriesWithSuccessor", TransferClass::Storage);
     assert_wire_classification(&app, "CustomMessage", TransferClass::Application);
     assert_wire_classification(&e2e, "E2eHandshakeRequest", TransferClass::E2e);

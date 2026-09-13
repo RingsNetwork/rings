@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.25.0
+
+### Breaking changes
+
+- The timestamp-only peer-liveness request/report wire is replaced by the three-step `Probe`
+  request, offer, and acknowledgement transcript. There is no fallback or dual decoder, so every
+  node in an overlay must upgrade together.
+
+### Added
+
+- Providers can retain jointly signed provisional service receipts with bounded durable replay
+  markers. Admission validates both roles, the embedded transactions, epoch and session liveness,
+  and commits the receipt and replay marker before reporting success.
+- Native and browser evidence stores restore only records bound to the configured overlay and local
+  provider. Executable protocol and persistence models cover bounded network schedules, capacity,
+  eviction, restart, and persistence failure.
+
 ## 0.24.0
 
 ### Breaking changes

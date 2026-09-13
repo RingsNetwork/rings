@@ -14,6 +14,10 @@ use rings_core::ecc::PublicKey;
 use rings_core::ecc::SecretKey;
 use rings_core::lifecycle::StopSource;
 use rings_core::lifecycle::StopToken;
+use rings_core::measure::EvidenceCounters;
+use rings_core::measure::EvidenceDigest;
+use rings_core::measure::EvidenceError;
+use rings_core::measure::EvidencePage;
 use rings_core::measure::MeasureImpl;
 use rings_core::measure::PeerMeasurement;
 use rings_core::measure::PeerMeasurementPage;
@@ -785,6 +789,29 @@ impl Processor {
         limit: NonZeroUsize,
     ) -> PeerMeasurementPage {
         self.swarm.peer_measurements_page(after, limit).await
+    }
+
+    /// Return one bounded page of locally collected provisional receipts.
+    pub async fn provisional_evidence_page(
+        &self,
+        after: Option<EvidenceDigest>,
+        limit: NonZeroUsize,
+    ) -> std::result::Result<EvidencePage<Did>, EvidenceError> {
+        let Some(measure) = &self.measure else {
+            return Err(EvidenceError::StorageUnavailable);
+        };
+        rings_core::measure::Measure::provisional_evidence_page(measure.as_ref(), after, limit)
+            .await
+    }
+
+    /// Return aggregate receipt admission and eviction counters without account labels.
+    pub async fn provisional_evidence_counters(&self) -> EvidenceCounters {
+        match &self.measure {
+            Some(measure) => {
+                rings_core::measure::Measure::provisional_evidence_counters(measure.as_ref()).await
+            }
+            None => EvidenceCounters::default(),
+        }
     }
 
     /// Return aggregate final-destination origin-quota drops by lane and reason.

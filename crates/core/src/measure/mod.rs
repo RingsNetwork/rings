@@ -18,9 +18,16 @@ pub use quality::PeerQualityEvidence;
 pub use quality::PeerQualityThresholds;
 pub use rings_measure::ApplyOutcome;
 pub use rings_measure::Authentication;
+pub use rings_measure::EvidenceAdmission;
+pub use rings_measure::EvidenceAdmissionReport;
+pub use rings_measure::EvidenceCounters;
+pub use rings_measure::EvidenceDigest;
+pub use rings_measure::EvidenceError;
+pub use rings_measure::EvidencePage;
 pub use rings_measure::MeasureError;
 pub use rings_measure::MeasurementBatch;
 pub use rings_measure::MeasurementEvent;
+pub use rings_measure::ProvisionalEvidenceRecord;
 
 #[cfg(test)]
 mod test_measure;

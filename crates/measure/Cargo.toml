@@ -16,3 +16,6 @@ thiserror = "1"
 
 [dev-dependencies]
 serde_json = "1.0.70"
+
+[target.'cfg(not(target_family="wasm"))'.dev-dependencies]
+stateright = "0.31.0"

@@ -756,10 +756,10 @@ mod tests {
     use crate::dht::StorageSyncDestination;
     use crate::dht::StorageSyncPurpose;
     use crate::ecc::SecretKey;
+    use crate::message::test_probe_request;
     use crate::message::Message;
     use crate::message::MessagePayload;
     use crate::message::MessageSigner;
-    use crate::message::PeerLivenessProbe;
     use crate::message::SyncEntriesWithSuccessor;
     use crate::session::SessionSk;
 
@@ -779,7 +779,7 @@ mod tests {
         let did = session.account_did();
         let fixtures = [
             (
-                Message::PeerLivenessProbe(PeerLivenessProbe { sent_at_ms: 1 }),
+                Message::ProbeRequest(test_probe_request(1)),
                 ScheduledDeliveryClass::Control,
             ),
             (

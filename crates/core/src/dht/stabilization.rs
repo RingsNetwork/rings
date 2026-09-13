@@ -6,9 +6,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures::future::ready;
 use futures::future::FutureExt;
 use futures::pin_mut;
 use futures::select;
+use futures::stream;
+use futures::StreamExt;
+use futures::TryStreamExt;
 use rings_transport::core::transport::WebrtcConnectionState;
 
 pub use self::storage_repair::StorageRepairOutcome;
@@ -26,9 +30,11 @@ use crate::message::FindSuccessorReportHandler;
 use crate::message::FindSuccessorSend;
 use crate::message::FindSuccessorThen;
 use crate::message::Message;
+use crate::message::MessagePayload;
 use crate::message::NotifyPredecessorSend;
 use crate::message::PayloadSender;
-use crate::message::PeerLivenessProbe;
+use crate::message::ProbeRequest;
+use crate::message::ProvisionalEpoch;
 use crate::message::QueryForTopoInfoSend;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
@@ -51,6 +57,13 @@ pub(crate) const DISCONNECTED_CONNECTION_GRACE_MS: i64 = 30_000;
 /// from escaping into the following topology phase.
 pub(crate) const STORAGE_REPAIR_MAX_DELIVERIES_PER_STEP: usize = 1;
 pub(crate) const STORAGE_REPAIR_FRESH_CONNECTION_GRACE_MS: i64 = 30_000;
+
+struct PreparedLivenessProbe {
+    attempt: PendingConnectionAttempt,
+    request: ProbeRequest,
+    payload: MessagePayload,
+    peer_state: Option<WebrtcConnectionState>,
+}
 
 #[derive(Clone, Copy, Debug)]
 enum TopologyPeerRemovalReason {
@@ -585,45 +598,99 @@ impl Stabilizer {
 
     async fn probe_peer_liveness(&self) -> Result<()> {
         let now_ms = get_epoch_ms_i64();
+        let unix_seconds = u64::try_from(now_ms).unwrap_or(0) / 1_000;
+        let epoch = ProvisionalEpoch::from_unix_seconds(unix_seconds);
         let candidates = self.transport.liveness_probe_candidates(now_ms)?;
-        for attempt in candidates {
-            let peer = attempt.peer();
-            let state = self
-                .transport
-                .get_connection(peer)
-                .map(|conn| conn.webrtc_connection_state());
-            let msg = Message::PeerLivenessProbe(PeerLivenessProbe { sent_at_ms: now_ms });
-            tracing::debug!(
-                target: "rings_core::dht::stabilization",
-                local = %self.dht.did,
-                peer = %peer,
-                state = ?state,
-                idle_ms = PEER_LIVENESS_IDLE_MS,
-                "STABILIZATION peer liveness probe send start"
-            );
-            match self.transport.send_direct_message(msg, peer).await {
-                Ok(tx_id) => {
-                    self.transport
-                        .record_peer_liveness_probe_sent(attempt, now_ms)?;
-                    tracing::debug!(
-                        target: "rings_core::dht::stabilization",
-                        local = %self.dht.did,
-                        peer = %peer,
-                        tx_id = %tx_id,
-                        "STABILIZATION peer liveness probe send complete"
-                    );
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        target: "rings_core::dht::stabilization",
-                        local = %self.dht.did,
-                        peer = %peer,
-                        state = ?state,
-                        error = ?error,
-                        records_peer_failure = error.records_peer_send_failure(),
-                        "STABILIZATION peer liveness probe send failed"
-                    );
-                }
+        stream::iter(candidates)
+            .then(|attempt| self.prepare_liveness_probe(attempt, epoch))
+            .try_filter_map(|probe| ready(self.register_liveness_probe(probe)))
+            .try_for_each(|probe| self.send_registered_liveness_probe(probe, now_ms))
+            .await
+    }
+
+    async fn prepare_liveness_probe(
+        &self,
+        attempt: PendingConnectionAttempt,
+        epoch: ProvisionalEpoch,
+    ) -> Result<PreparedLivenessProbe> {
+        let peer = attempt.peer();
+        let peer_state = self
+            .transport
+            .get_connection(peer)
+            .map(|conn| conn.webrtc_connection_state());
+        let request = ProbeRequest::random_for_epoch(epoch);
+        let payload = self
+            .transport
+            .signed_payload(Message::ProbeRequest(request), peer, peer)
+            .await?;
+        Ok(PreparedLivenessProbe {
+            attempt,
+            request,
+            payload,
+            peer_state,
+        })
+    }
+
+    fn register_liveness_probe(
+        &self,
+        probe: PreparedLivenessProbe,
+    ) -> Result<Option<PreparedLivenessProbe>> {
+        self.transport
+            .register_pending_liveness_probe(
+                probe.attempt,
+                probe.payload.transaction.tx_id,
+                probe.request,
+            )
+            .map(|registered| registered.then_some(probe))
+    }
+
+    async fn send_registered_liveness_probe(
+        &self,
+        probe: PreparedLivenessProbe,
+        now_ms: i64,
+    ) -> Result<()> {
+        let PreparedLivenessProbe {
+            attempt,
+            request,
+            payload,
+            peer_state,
+        } = probe;
+        let peer = attempt.peer();
+        let tx_id = payload.transaction.tx_id;
+        tracing::debug!(
+            target: "rings_core::dht::stabilization",
+            local = %self.dht.did,
+            peer = %peer,
+            state = ?peer_state,
+            idle_ms = PEER_LIVENESS_IDLE_MS,
+            "STABILIZATION peer liveness probe send start"
+        );
+        match self.transport.send_payload(payload).await {
+            Ok(()) => {
+                let matching_probe_recorded = self
+                    .transport
+                    .record_peer_liveness_probe_sent(attempt, now_ms, tx_id, request)?;
+                tracing::debug!(
+                    target: "rings_core::dht::stabilization",
+                    local = %self.dht.did,
+                    peer = %peer,
+                    tx_id = %tx_id,
+                    matching_probe_recorded,
+                    "STABILIZATION peer liveness probe send complete"
+                );
+            }
+            Err(error) => {
+                self.transport
+                    .cancel_pending_liveness_probe(attempt, tx_id, request)?;
+                tracing::warn!(
+                    target: "rings_core::dht::stabilization",
+                    local = %self.dht.did,
+                    peer = %peer,
+                    state = ?peer_state,
+                    error = ?error,
+                    records_peer_failure = error.records_peer_send_failure(),
+                    "STABILIZATION peer liveness probe send failed"
+                );
             }
         }
         Ok(())

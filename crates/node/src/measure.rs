@@ -23,24 +23,36 @@ use rings_core::storage::KvStorageInterface;
 use rings_measure::ApplyOutcome;
 use rings_measure::Authentication;
 use rings_measure::CreditPolicy;
+use rings_measure::EvidenceAdmissionReport;
+use rings_measure::EvidenceCounters;
+use rings_measure::EvidenceDigest;
+use rings_measure::EvidenceError;
+use rings_measure::EvidenceLimits;
+use rings_measure::EvidencePage;
+use rings_measure::EvidenceReplayMarker;
+use rings_measure::EvidenceSnapshot;
 use rings_measure::MeasureError;
 use rings_measure::MeasurementBatch;
 use rings_measure::MeasurementEvent;
 use rings_measure::MeasurementLedger;
 use rings_measure::MeasurementSnapshot;
+use rings_measure::ProvisionalEvidenceRecord;
+use rings_measure::ProvisionalEvidenceStore;
 use rings_measure::ReliabilityPolicy;
 use rings_measure::UnixTime;
 
 // Legacy `PeriodicMeasure/counters/...` values intentionally remain unread:
 // a bare count proves neither byte-credit direction nor a live epoch timestamp.
 const SNAPSHOT_KEY: &str = "MeasurementLedger/v1";
+const EVIDENCE_SNAPSHOT_KEY: &str = "ProvisionalEvidence/v1";
 const PERSISTENCE_WAKE_CAPACITY: usize = 1;
 const PERSISTENCE_SHUTDOWN_ATTEMPTS: usize = 3;
 const PRUNE_INTERVAL_SECONDS: u64 = 60 * 60;
 #[cfg(test)]
 const PERSISTENCE_MIN_INTERVAL: Duration = Duration::from_millis(50);
-// The first mutation and every later coalesced snapshot intentionally wait for
-// this interval. A hard crash may lose at most one interval of advisory state.
+// Measurement-ledger mutations are coalesced over this interval. Provisional
+// evidence admission uses the same serialization lock but commits separately
+// before returning success.
 #[cfg(not(test))]
 const PERSISTENCE_MIN_INTERVAL: Duration = Duration::from_secs(60);
 // One window for tests and production. Controlled-clock unit tests advance the clock by
@@ -77,10 +89,86 @@ pub type MeasureStorage = Box<dyn KvStorageInterface<MeasurementSnapshot<Did>>>;
 #[cfg(not(all(feature = "browser", target_family = "wasm")))]
 pub type MeasureStorage = Box<dyn KvStorageInterface<MeasurementSnapshot<Did>> + Sync + Send>;
 
+/// Storage used for the separate provisional-receipt evidence snapshot.
+#[cfg(all(feature = "browser", target_family = "wasm"))]
+pub type EvidenceStorage = Box<dyn KvStorageInterface<EvidenceSnapshot<Did>>>;
+
+/// Storage used for the separate provisional-receipt evidence snapshot.
+#[cfg(not(all(feature = "browser", target_family = "wasm")))]
+pub type EvidenceStorage = Box<dyn KvStorageInterface<EvidenceSnapshot<Did>> + Sync + Send>;
+
+/// Evidence backend used when a provider did not configure durable receipt storage.
+///
+/// Reads expose an empty initial state so measurement-only runtimes can start, but every write
+/// fails. Consequently the admission adapter rolls back and never returns `Admitted` under a
+/// process-local store that cannot refine the crash-recovery model.
+pub(crate) struct UnavailableEvidenceStorage;
+
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
+impl KvStorageInterface<EvidenceSnapshot<Did>> for UnavailableEvidenceStorage {
+    async fn get(&self, _key: &str) -> rings_core::error::Result<Option<EvidenceSnapshot<Did>>> {
+        Ok(None)
+    }
+
+    async fn put(
+        &self,
+        _key: &str,
+        value: &EvidenceSnapshot<Did>,
+    ) -> rings_core::error::Result<()> {
+        if value.records.is_empty()
+            && value.replay_markers.is_empty()
+            && value.replay_floor == 0
+            && value.counters == EvidenceCounters::default()
+        {
+            return Ok(());
+        }
+        Err(EvidenceError::StorageUnavailable.into())
+    }
+
+    async fn get_all(&self) -> rings_core::error::Result<Vec<(String, EvidenceSnapshot<Did>)>> {
+        Ok(Vec::new())
+    }
+
+    async fn remove(&self, _key: &str) -> rings_core::error::Result<()> {
+        Ok(())
+    }
+
+    async fn clear(&self) -> rings_core::error::Result<()> {
+        Ok(())
+    }
+
+    async fn count(&self) -> rings_core::error::Result<u32> {
+        Ok(0)
+    }
+}
+
+/// Runtime identity that owns one persisted provisional-evidence collection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EvidenceCollectorIdentity {
+    network_id: u32,
+    provider_account: Did,
+}
+
+impl EvidenceCollectorIdentity {
+    /// Bind persisted evidence to one overlay and the local provider account.
+    pub const fn new(network_id: u32, provider_account: Did) -> Self {
+        Self {
+            network_id,
+            provider_account,
+        }
+    }
+}
+
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 type SharedMeasureStorage = Arc<dyn KvStorageInterface<MeasurementSnapshot<Did>>>;
 #[cfg(not(all(feature = "browser", target_family = "wasm")))]
 type SharedMeasureStorage = Arc<dyn KvStorageInterface<MeasurementSnapshot<Did>> + Sync + Send>;
+
+#[cfg(all(feature = "browser", target_family = "wasm"))]
+type SharedEvidenceStorage = Arc<dyn KvStorageInterface<EvidenceSnapshot<Did>>>;
+#[cfg(not(all(feature = "browser", target_family = "wasm")))]
+type SharedEvidenceStorage = Arc<dyn KvStorageInterface<EvidenceSnapshot<Did>> + Sync + Send>;
 
 /// Failure while loading or explicitly flushing the runtime measurement adapter.
 #[derive(Debug, thiserror::Error)]
@@ -91,6 +179,9 @@ pub enum MeasureRuntimeError {
     /// Persisted or live state violated the pure measurement model.
     #[error("measurement model failed: {0}")]
     Model(#[from] MeasureError),
+    /// Persisted or live provisional evidence violated its bounded model.
+    #[error("provisional evidence model failed: {0}")]
+    Evidence(#[from] EvidenceError),
     /// A bounded explicit flush did not complete before its deadline.
     #[error("measurement persistence flush timed out")]
     FlushTimeout,
@@ -106,11 +197,12 @@ pub enum MeasureRuntimeError {
     RuntimeUnavailable(String),
 }
 
-/// Pure-ledger runtime adapter with coalesced asynchronous snapshot persistence.
+/// Pure-ledger runtime adapter with durable evidence admission and coalesced measurement snapshots.
 ///
-/// Network callbacks update only in-memory state and replace the pending full
-/// snapshot. A runtime task serializes storage writes. The algorithm, time
-/// projection, pruning, and snapshot schema remain in `rings-measure`.
+/// Measurement callbacks update in-memory state and replace the pending full
+/// snapshot. Receipt admission commits its evidence snapshot before success.
+/// One runtime lock serializes both write paths. The algorithm, time projection,
+/// pruning, and snapshot schemas remain in `rings-measure`.
 pub struct PeriodicMeasure {
     state: Arc<MeasureState>,
     persistence_wake: mpsc::Sender<()>,
@@ -118,6 +210,7 @@ pub struct PeriodicMeasure {
 
 struct MeasureState {
     storage: SharedMeasureStorage,
+    evidence_storage: SharedEvidenceStorage,
     runtime: Mutex<RuntimeLedger>,
     persistence_lock: AsyncMutex<()>,
     clock: Arc<dyn MeasureClock>,
@@ -136,6 +229,7 @@ impl MeasureState {
 
 struct RuntimeLedger {
     ledger: MeasurementLedger<Did>,
+    evidence: ProvisionalEvidenceStore<Did>,
     dirty: bool,
     persisting: bool,
     mutated_while_persisting: bool,
@@ -176,23 +270,94 @@ impl PeriodicMeasure {
     /// On native targets this captures the active Tokio runtime handle. The
     /// constructor returns `MeasureRuntimeError::RuntimeUnavailable` instead
     /// of panicking when called outside a live runtime.
+    /// Provisional receipt admission is disabled; use [`Self::new_with_evidence_storage`]
+    /// when successful receipt admission must survive process restart.
     pub async fn new(storage: MeasureStorage) -> Result<Self, MeasureRuntimeError> {
-        Self::new_with_clock(storage, Arc::new(SystemMeasureClock)).await
+        Self::new_with_clock_and_evidence(
+            storage,
+            Box::new(UnavailableEvidenceStorage),
+            None,
+            Arc::new(SystemMeasureClock),
+        )
+        .await
     }
 
+    /// Load snapshots and bind restored evidence to this local collector.
+    ///
+    /// Pre: `evidence_storage` preserves a successful `put` across process restart. A volatile
+    /// test backend is valid for bounded tests, but does not satisfy the crash-recovery claim.
+    pub async fn new_with_evidence_storage(
+        storage: MeasureStorage,
+        evidence_storage: EvidenceStorage,
+        collector: EvidenceCollectorIdentity,
+    ) -> Result<Self, MeasureRuntimeError> {
+        Self::new_with_clock_and_evidence(
+            storage,
+            evidence_storage,
+            Some(collector),
+            Arc::new(SystemMeasureClock),
+        )
+        .await
+    }
+
+    #[cfg(all(test, feature = "node"))]
     async fn new_with_clock(
         storage: MeasureStorage,
+        clock: Arc<dyn MeasureClock>,
+    ) -> Result<Self, MeasureRuntimeError> {
+        Self::new_with_clock_and_evidence(
+            storage,
+            Box::new(rings_core::storage::MemStorage::new()),
+            None,
+            clock,
+        )
+        .await
+    }
+
+    async fn new_with_clock_and_evidence(
+        storage: MeasureStorage,
+        evidence_storage: EvidenceStorage,
+        collector: Option<EvidenceCollectorIdentity>,
         clock: Arc<dyn MeasureClock>,
     ) -> Result<Self, MeasureRuntimeError> {
         #[cfg(not(all(feature = "browser", target_family = "wasm")))]
         let runtime_handle = tokio::runtime::Handle::try_current()
             .map_err(|error| MeasureRuntimeError::RuntimeUnavailable(error.to_string()))?;
         let storage = SharedMeasureStorage::from(storage);
+        let evidence_storage = SharedEvidenceStorage::from(evidence_storage);
         let mut ledger = match storage.get(SNAPSHOT_KEY).await? {
             Some(snapshot) => MeasurementLedger::from_snapshot(snapshot)?,
             None => MeasurementLedger::new(),
         };
         let now = clock.now();
+        let (evidence, evidence_load) = match evidence_storage.get(EVIDENCE_SNAPSHOT_KEY).await? {
+            Some(snapshot) => ProvisionalEvidenceStore::from_snapshot_with_validator(
+                snapshot,
+                EvidenceLimits::default(),
+                |record| {
+                    collector.is_some_and(|identity| valid_persisted_evidence(record, identity))
+                },
+                |marker| {
+                    collector
+                        .is_some_and(|identity| valid_persisted_replay_marker(marker, identity))
+                },
+            )?,
+            None => (
+                ProvisionalEvidenceStore::new(EvidenceLimits::default()),
+                rings_measure::EvidenceLoadReport::default(),
+            ),
+        };
+        if evidence_load.rejected_records() > 0
+            || evidence_load.evicted_records() > 0
+            || evidence_load.rejected_replay_markers() > 0
+        {
+            tracing::warn!(
+                rejected_records = evidence_load.rejected_records(),
+                evicted_records = evidence_load.evicted_records(),
+                rejected_replay_markers = evidence_load.rejected_replay_markers(),
+                "reconciled provisional evidence during startup"
+            );
+        }
         let reconciliation = ledger.reconcile_runtime(now, reliability_policy());
         if reconciliation.is_adjusted() {
             tracing::warn!(
@@ -203,12 +368,18 @@ impl PeriodicMeasure {
         }
         let pruning = ledger.prune(now, CreditPolicy::amule());
         log_prune_failures(&pruning);
-        let dirty = reconciliation.is_adjusted() || pruning.removed_count() > 0;
+        let dirty = reconciliation.is_adjusted()
+            || pruning.removed_count() > 0
+            || evidence_load.rejected_records() > 0
+            || evidence_load.evicted_records() > 0
+            || evidence_load.rejected_replay_markers() > 0;
         let next_prune_at = next_prune_time(&ledger, now);
         let state = Arc::new(MeasureState {
             storage,
+            evidence_storage,
             runtime: Mutex::new(RuntimeLedger {
                 ledger,
+                evidence,
                 dirty,
                 persisting: false,
                 mutated_while_persisting: false,
@@ -316,11 +487,19 @@ impl PeriodicMeasure {
 
 async fn flush_state(state: &MeasureState) -> Result<(), MeasureRuntimeError> {
     let _guard = state.persistence_lock.lock().await;
-    let snapshot = {
+    let (snapshot, evidence_snapshot) = {
         let mut runtime = lock_or_recover(&state.runtime);
-        prepare_snapshot(&mut runtime)
+        prepare_snapshots(&mut runtime)
     };
-    let result = state.storage.put(SNAPSHOT_KEY, &snapshot).await;
+    let result = match state.storage.put(SNAPSHOT_KEY, &snapshot).await {
+        Ok(()) => {
+            state
+                .evidence_storage
+                .put(EVIDENCE_SNAPSHOT_KEY, &evidence_snapshot)
+                .await
+        }
+        Err(error) => Err(error),
+    };
     finish_persist(&mut lock_or_recover(&state.runtime), result.is_ok());
     result.map_err(MeasureRuntimeError::from)
 }
@@ -411,10 +590,52 @@ fn mark_runtime_dirty(runtime: &mut RuntimeLedger) {
     }
 }
 
-fn prepare_snapshot(runtime: &mut RuntimeLedger) -> MeasurementSnapshot<Did> {
+fn prepare_snapshots(
+    runtime: &mut RuntimeLedger,
+) -> (MeasurementSnapshot<Did>, EvidenceSnapshot<Did>) {
     runtime.persisting = true;
     runtime.mutated_while_persisting = false;
-    runtime.ledger.snapshot()
+    (runtime.ledger.snapshot(), runtime.evidence.snapshot())
+}
+
+fn valid_persisted_evidence(
+    record: &ProvisionalEvidenceRecord<Did>,
+    collector: EvidenceCollectorIdentity,
+) -> bool {
+    let Ok(receipt) = rings_core::message::ProvisionalServiceReceipt::from_canonical_bytes(
+        record.canonical_receipt(),
+    ) else {
+        return false;
+    };
+    let claim = &receipt.claim;
+    let observed_at_ms = u128::from(record.observed_at().as_secs()) * 1_000;
+    let observed_slot =
+        rings_core::message::ProvisionalEpoch::from_unix_seconds(record.observed_at().as_secs())
+            .slot;
+    receipt
+        .verify_live_at(collector.network_id, observed_at_ms)
+        .is_ok()
+        && claim.network_id == collector.network_id
+        && claim.provider_account == collector.provider_account
+        && claim.network_id == record.freshness().network_id()
+        && claim.provider_account == *record.pair().provider()
+        && claim.beneficiary_account == *record.pair().beneficiary()
+        && claim.beneficiary_account == *record.freshness().beneficiary()
+        && claim.epoch.slot == record.freshness().epoch_slot()
+        && claim.nonce == record.freshness().nonce()
+        && record.replay_floor() == observed_slot.saturating_sub(1)
+        && receipt
+            .digest()
+            .is_ok_and(|digest| digest.into_bytes() == record.digest().into_bytes())
+}
+
+fn valid_persisted_replay_marker(
+    marker: &EvidenceReplayMarker<Did>,
+    collector: EvidenceCollectorIdentity,
+) -> bool {
+    marker.freshness().network_id() == collector.network_id
+        && *marker.pair().provider() == collector.provider_account
+        && marker.pair().beneficiary() == marker.freshness().beneficiary()
 }
 
 fn finish_persist(runtime: &mut RuntimeLedger, succeeded: bool) {
@@ -568,14 +789,22 @@ fn log_persistence_delay_error(result: Result<(), MeasureRuntimeError>) {
 
 async fn persist_pending_once(state: &MeasureState) -> Result<(), MeasureRuntimeError> {
     let _guard = state.persistence_lock.lock().await;
-    let snapshot = {
+    let (snapshot, evidence_snapshot) = {
         let mut runtime = lock_or_recover(&state.runtime);
         if !runtime.dirty {
             return Ok(());
         }
-        prepare_snapshot(&mut runtime)
+        prepare_snapshots(&mut runtime)
     };
-    let result = state.storage.put(SNAPSHOT_KEY, &snapshot).await;
+    let result = match state.storage.put(SNAPSHOT_KEY, &snapshot).await {
+        Ok(()) => {
+            state
+                .evidence_storage
+                .put(EVIDENCE_SNAPSHOT_KEY, &evidence_snapshot)
+                .await
+        }
+        Err(error) => Err(error),
+    };
     finish_persist(&mut lock_or_recover(&state.runtime), result.is_ok());
     result.map_err(MeasureRuntimeError::from)
 }
@@ -719,6 +948,54 @@ impl Measure for PeriodicMeasure {
             next_cursor,
         })
     }
+
+    async fn admit_provisional_evidence(
+        &self,
+        record: ProvisionalEvidenceRecord<Did>,
+    ) -> Result<EvidenceAdmissionReport<Did>, EvidenceError> {
+        // The evidence-storage put below is the successful operation's linearization point.
+        // Queries and other admissions take this same lock, so an explicit write failure is
+        // rolled back before it becomes observable. Cancellation may conservatively leave the
+        // dirty in-memory marker for the worker to persist, which preserves at-most-once admission.
+        let _persistence_guard = self.state.persistence_lock.lock().await;
+        let (before, result, snapshot) = {
+            let mut runtime = lock_or_recover(&self.state.runtime);
+            let before = runtime.evidence.clone();
+            let result = runtime.evidence.admit(record);
+            mark_runtime_dirty(&mut runtime);
+            let snapshot = runtime.evidence.snapshot();
+            (before, result, snapshot)
+        };
+        self.wake_persistence();
+        if let Err(error) = self
+            .state
+            .evidence_storage
+            .put(EVIDENCE_SNAPSHOT_KEY, &snapshot)
+            .await
+        {
+            tracing::error!(%error, "failed to commit provisional evidence admission");
+            let mut runtime = lock_or_recover(&self.state.runtime);
+            runtime.evidence = before;
+            return Err(EvidenceError::PersistenceUnavailable);
+        }
+        result
+    }
+
+    async fn provisional_evidence_page(
+        &self,
+        after: Option<EvidenceDigest>,
+        limit: NonZeroUsize,
+    ) -> Result<EvidencePage<Did>, EvidenceError> {
+        let _persistence_guard = self.state.persistence_lock.lock().await;
+        Ok(lock_or_recover(&self.state.runtime)
+            .evidence
+            .page(after, limit))
+    }
+
+    async fn provisional_evidence_counters(&self) -> EvidenceCounters {
+        let _persistence_guard = self.state.persistence_lock.lock().await;
+        lock_or_recover(&self.state.runtime).evidence.counters()
+    }
 }
 
 #[cfg_attr(feature = "node", async_trait)]
@@ -740,6 +1017,10 @@ impl measure::BehaviourJudgement for PeriodicMeasure {
 #[cfg(feature = "node")]
 #[allow(clippy::panic)]
 mod authentication_tests;
+#[cfg(test)]
+#[cfg(feature = "node")]
+#[allow(clippy::panic)]
+mod evidence_tests;
 #[cfg(test)]
 #[cfg(feature = "node")]
 #[allow(clippy::panic)]

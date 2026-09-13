@@ -4,6 +4,7 @@ use std::sync::atomic::Ordering;
 
 use rings_core::error::Error as CoreError;
 use rings_core::measure::BehaviourJudgement;
+use rings_core::measure::Measure;
 use rings_core::storage::file::FileStorage;
 use rings_core::storage::KvStorageInterface;
 use rings_core::storage::MemStorage;

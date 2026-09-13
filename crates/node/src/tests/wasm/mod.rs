@@ -1,4 +1,5 @@
 pub mod test_browser;
+pub mod test_evidence;
 pub mod test_processor;
 use std::sync::Arc;
 

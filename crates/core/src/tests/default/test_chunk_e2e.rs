@@ -32,11 +32,11 @@ use crate::measure::MeasureImpl;
 use crate::measure::MeasurementBatch;
 use crate::measure::MeasurementEvent;
 use crate::measure::PeerQuality;
+use crate::message::test_probe_request;
 use crate::message::Message;
 use crate::message::MessageClass;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
-use crate::message::PeerLivenessProbe;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::swarm::transport::TrackedStorageSyncOutcome;
 use crate::tests::assert_control_interleaves_transfer;
@@ -901,10 +901,7 @@ async fn test_dht_control_frame_runs_while_storage_transfer_waits_for_delivery()
 
     node1
         .swarm
-        .send_message(
-            Message::PeerLivenessProbe(PeerLivenessProbe { sent_at_ms: 7 }),
-            node2.did(),
-        )
+        .send_message(Message::ProbeRequest(test_probe_request(7)), node2.did())
         .await?;
     assert_eq!(
         dummy_controlled::sent_count(),
@@ -917,7 +914,7 @@ async fn test_dht_control_frame_runs_while_storage_transfer_waits_for_delivery()
     assert!(
         matches!(
             second.transaction.data::<Message>()?,
-            Message::PeerLivenessProbe(_)
+            Message::ProbeRequest(_)
         ),
         "new control work must be admitted before any new bulk frame"
     );

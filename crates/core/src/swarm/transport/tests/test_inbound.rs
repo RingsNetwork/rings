@@ -254,7 +254,7 @@ async fn test_inbound_control_lane_progresses_while_application_validation_is_bl
     )?
     .to_wire()?;
     let control = MessagePayload::new_send(
-        Message::PeerLivenessReport(crate::message::PeerLivenessReport { sent_at_ms: 1 }),
+        noop_control_message(transport.dht.did),
         MessageSigner::new(&peer_session, TEST_NETWORK_ID),
         transport.dht.did,
         transport.dht.did,
@@ -486,7 +486,7 @@ async fn test_inbound_mailbox_reserves_control_capacity_under_application_satura
     )?
     .to_wire()?;
     let control = MessagePayload::new_send(
-        Message::PeerLivenessReport(crate::message::PeerLivenessReport { sent_at_ms: 2 }),
+        noop_control_message(transport.dht.did),
         MessageSigner::new(&control_session, TEST_NETWORK_ID),
         transport.dht.did,
         transport.dht.did,
@@ -595,6 +595,13 @@ fn local_wire(message: Message, session: &SessionSk, local: Did) -> Result<bytes
         local,
     )?
     .to_wire()
+}
+
+fn noop_control_message(did: Did) -> Message {
+    Message::FindSuccessorReport(crate::message::FindSuccessorReport {
+        did,
+        handler: crate::message::FindSuccessorReportHandler::None,
+    })
 }
 
 fn failed_receive_count(measure: &RecordingMeasure, peer: Did) -> Result<usize> {
@@ -808,7 +815,7 @@ async fn test_reassembly_handoff_preserves_data_order_without_blocking_control()
     let later_delivery = spawn_inbound_delivery(Arc::clone(&callback), cid.clone(), later);
 
     let control = local_wire(
-        Message::PeerLivenessReport(crate::message::PeerLivenessReport { sent_at_ms: 1 }),
+        noop_control_message(transport.dht.did),
         &peer_session,
         transport.dht.did,
     )?;
@@ -845,7 +852,7 @@ async fn test_transport_preparation_authenticates_every_reserved_lane() -> Resul
     let peer_key = SecretKey::random();
     let peer_session = SessionSk::new_with_seckey(&peer_key)?;
     let control = local_wire(
-        Message::PeerLivenessReport(crate::message::PeerLivenessReport { sent_at_ms: 1 }),
+        noop_control_message(transport.dht.did),
         &peer_session,
         transport.dht.did,
     )?;
@@ -942,7 +949,7 @@ async fn test_reassembled_control_shape_is_verified_before_lane_transition() -> 
     let peer: Did = peer_key.address().into();
     let session = SessionSk::new_with_seckey(&peer_key)?;
     let mut tampered = MessagePayload::new_send(
-        Message::PeerLivenessReport(crate::message::PeerLivenessReport { sent_at_ms: 4 }),
+        noop_control_message(transport.dht.did),
         MessageSigner::new(&session, TEST_NETWORK_ID),
         transport.dht.did,
         transport.dht.did,

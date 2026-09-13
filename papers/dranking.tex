@@ -222,6 +222,18 @@ The cap makes countersigning a budgeted act; the protocol certifies
 performed service, never synthetic load
 (cf.\ Constraint~\ref{con:anchors}).
 
+\paragraph{Current implementation boundary.}
+The deployed vertical slice is deliberately narrower than
+Definition~\ref{def:receipt}: it accepts only a versioned one-unit probe,
+countersigned by distinct provider and beneficiary account roles.  Its claim
+binds the overlay, provisional wall-clock epoch, fresh nonce, and digests of
+the exact signed request and completion transactions.  Live collection and
+later cryptographic verification are separate predicates, and retained
+evidence is bounded local input only: it does not update credit, routing, the
+receipt graph, or trust.  A finalized input-block receipt will use a distinct
+canonical format and signing domain rather than reinterpret the provisional
+wire.
+
 \section{Trust Algebra}\label{sec:trust}
 
 \begin{definition}[Seed vector]\label{def:seed}

@@ -188,11 +188,9 @@ fn mixed_pressure_sends<'a>(
                 nodes[sender]
                     .swarm
                     .send_direct_message(
-                        Message::PeerLivenessProbe(PeerLivenessProbe {
-                            sent_at_ms: i64::try_from(TEST_EPOCH_MS)
-                                .expect("epoch must fit i64")
-                                .saturating_add(ordinal as i64),
-                        }),
+                        Message::ProbeRequest(test_probe_request(
+                            u8::try_from(ordinal).unwrap_or(u8::MAX),
+                        )),
                         peer,
                     )
                     .await
@@ -284,12 +282,7 @@ pub(super) async fn exercise_barrier_control_exemption(
 
     let mut control_send = nodes[sender]
         .swarm
-        .send_direct_message(
-            Message::PeerLivenessProbe(PeerLivenessProbe {
-                sent_at_ms: i64::try_from(TEST_EPOCH_MS).expect("epoch must fit i64"),
-            }),
-            peer,
-        )
+        .send_direct_message(Message::ProbeRequest(test_probe_request(1)), peer)
         .boxed_local();
     let mut control_send_complete = false;
     wait_for_class_while_sending(

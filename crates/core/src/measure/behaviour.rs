@@ -14,7 +14,13 @@ pub type MeasureImpl = Arc<dyn BehaviourJudgement + Send + Sync>;
 pub type MeasureImpl = Arc<dyn BehaviourJudgement>;
 
 use rings_measure::ApplyOutcome;
+use rings_measure::EvidenceAdmissionReport;
+use rings_measure::EvidenceCounters;
+use rings_measure::EvidenceDigest;
+use rings_measure::EvidenceError;
+use rings_measure::EvidencePage;
 use rings_measure::MeasureError;
+use rings_measure::ProvisionalEvidenceRecord;
 
 use super::Authentication;
 use super::MeasureCounter;
@@ -104,6 +110,28 @@ pub trait Measure {
         _limit: NonZeroUsize,
     ) -> Result<PeerMeasurementPage, MeasureError> {
         Ok(PeerMeasurementPage::default())
+    }
+
+    /// Admit one already-verified provisional receipt into bounded evidence storage.
+    async fn admit_provisional_evidence(
+        &self,
+        _record: ProvisionalEvidenceRecord<Did>,
+    ) -> Result<EvidenceAdmissionReport<Did>, EvidenceError> {
+        Err(EvidenceError::StorageUnavailable)
+    }
+
+    /// Return one bounded page of provisional receipt evidence.
+    async fn provisional_evidence_page(
+        &self,
+        _after: Option<EvidenceDigest>,
+        _limit: NonZeroUsize,
+    ) -> Result<EvidencePage<Did>, EvidenceError> {
+        Err(EvidenceError::StorageUnavailable)
+    }
+
+    /// Return aggregate evidence counters without account-labelled dimensions.
+    async fn provisional_evidence_counters(&self) -> EvidenceCounters {
+        EvidenceCounters::default()
     }
 }
 

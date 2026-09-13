@@ -10,6 +10,10 @@ use rings_core::dht::Did;
 use rings_core::dht::EntryStorage;
 #[cfg(feature = "node")]
 use rings_core::lifecycle::StopToken;
+use rings_core::measure::EvidenceCounters;
+use rings_core::measure::EvidenceDigest;
+use rings_core::measure::EvidenceError;
+use rings_core::measure::EvidencePage;
 use rings_core::measure::PeerMeasurement;
 use rings_core::message::ReplayStorage;
 use rings_core::session::SessionSkBuilder;
@@ -21,8 +25,11 @@ use rings_rpc::protos::rings_node_handler::InternalRpcHandler;
 use crate::error::Error;
 use crate::error::Result;
 use crate::extension::Backend;
+use crate::measure::EvidenceCollectorIdentity;
+use crate::measure::EvidenceStorage;
 use crate::measure::MeasureStorage;
 use crate::measure::PeriodicMeasure;
+use crate::measure::UnavailableEvidenceStorage;
 use crate::onion::OnionEntryGuardStorage;
 use crate::prelude::wasm_export;
 use crate::processor::Processor;
@@ -143,6 +150,20 @@ impl Provider {
         self.processor.peer_measurements().await
     }
 
+    /// Return one bounded page of canonical provisional service-receipt evidence.
+    pub async fn provisional_evidence_page(
+        &self,
+        after: Option<EvidenceDigest>,
+        limit: std::num::NonZeroUsize,
+    ) -> std::result::Result<EvidencePage<Did>, EvidenceError> {
+        self.processor.provisional_evidence_page(after, limit).await
+    }
+
+    /// Return aggregate provisional-evidence counters without account labels.
+    pub async fn provisional_evidence_counters(&self) -> EvidenceCounters {
+        self.processor.provisional_evidence_counters().await
+    }
+
     /// Return aggregate final-destination origin-quota drops by lane and reason.
     pub fn origin_quota_counters(&self) -> rings_core::message::OriginQuotaCounters {
         self.processor.origin_quota_counters()
@@ -157,16 +178,26 @@ impl Provider {
         config: ProcessorConfig,
         entry_storage: Option<EntryStorage>,
         measure_storage: Option<MeasureStorage>,
+        evidence_storage: Option<EvidenceStorage>,
         onion_entry_guard_storage: Option<OnionEntryGuardStorage>,
         replay_storage: Option<ReplayStorage>,
     ) -> Result<Provider> {
         let entry_storage = entry_storage.unwrap_or_else(|| Box::new(MemStorage::new()));
         let measure_storage = measure_storage.unwrap_or_else(|| Box::new(MemStorage::new()));
+        let evidence_storage = evidence_storage
+            .unwrap_or_else(|| Box::new(UnavailableEvidenceStorage) as EvidenceStorage);
         let onion_entry_guard_storage =
             onion_entry_guard_storage.unwrap_or_else(|| Box::new(MemStorage::new()));
         let replay_storage = replay_storage.unwrap_or_else(|| Box::new(MemStorage::new()));
 
-        let measure = PeriodicMeasure::new(measure_storage).await?;
+        let collector =
+            EvidenceCollectorIdentity::new(config.network_id(), config.session_sk().account_did());
+        let measure = PeriodicMeasure::new_with_evidence_storage(
+            measure_storage,
+            evidence_storage,
+            collector,
+        )
+        .await?;
 
         let processor_builder = ProcessorBuilder::from_config(&config)?
             .storage(entry_storage)
@@ -207,6 +238,7 @@ impl Provider {
         signer: Signer,
         entry_storage: Option<EntryStorage>,
         measure_storage: Option<MeasureStorage>,
+        evidence_storage: Option<EvidenceStorage>,
         onion_entry_guard_storage: Option<OnionEntryGuardStorage>,
         replay_storage: Option<ReplayStorage>,
     ) -> Result<Provider> {
@@ -219,6 +251,7 @@ impl Provider {
             signer,
             entry_storage,
             measure_storage,
+            evidence_storage,
             onion_entry_guard_storage,
             replay_storage,
             core::convert::identity,
@@ -236,6 +269,7 @@ impl Provider {
         signer: Signer,
         entry_storage: Option<EntryStorage>,
         measure_storage: Option<MeasureStorage>,
+        evidence_storage: Option<EvidenceStorage>,
         onion_entry_guard_storage: Option<OnionEntryGuardStorage>,
         replay_storage: Option<ReplayStorage>,
         configure: impl FnOnce(ProcessorConfig) -> ProcessorConfig,
@@ -254,6 +288,7 @@ impl Provider {
             config,
             entry_storage,
             measure_storage,
+            evidence_storage,
             onion_entry_guard_storage,
             replay_storage,
         )

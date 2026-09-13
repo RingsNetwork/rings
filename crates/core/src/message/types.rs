@@ -22,6 +22,9 @@ use crate::error::Result;
 use crate::message::e2e::E2eHandshakeRequest;
 use crate::message::e2e::E2eHandshakeResponse;
 use crate::message::e2e::E2eStreamFrame;
+use crate::message::ProbeAcknowledgement;
+use crate::message::ProbeOffer;
+use crate::message::ProbeRequest;
 
 /// DHT protocol mode that must match before two peers join the same DHT.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, Eq, PartialEq)]
@@ -165,29 +168,6 @@ pub struct NotifyPredecessorSend {
 pub struct NotifyPredecessorReport {
     /// The real predecessor of current node after compare.
     pub did: Did,
-}
-
-/// Overlay liveness probe sent to an admitted peer.
-#[derive(Debug, Deserialize, Serialize, Copy, Clone)]
-pub struct PeerLivenessProbe {
-    /// Sender-local timestamp for logging and correlation.
-    pub sent_at_ms: i64,
-}
-
-/// Overlay liveness report sent in response to [`PeerLivenessProbe`].
-#[derive(Debug, Deserialize, Serialize, Copy, Clone)]
-pub struct PeerLivenessReport {
-    /// Sender-local timestamp copied from the probe.
-    pub sent_at_ms: i64,
-}
-
-impl PeerLivenessProbe {
-    /// Build a response that proves the receiver processed this probe.
-    pub const fn resp(self) -> PeerLivenessReport {
-        PeerLivenessReport {
-            sent_at_ms: self.sent_at_ms,
-        }
-    }
 }
 
 /// The reason of query successor's TopoInfo
@@ -399,10 +379,10 @@ macro_rules! with_message_variants {
             4 => NotifyPredecessorSend(NotifyPredecessorSend): DhtControl, NoStorageRoute,
             /// Response of NotifyPredecessorSend.
             5 => NotifyPredecessorReport(NotifyPredecessorReport): DhtControl, NoStorageRoute,
-            /// Overlay liveness probe.
-            6 => PeerLivenessProbe(PeerLivenessProbe): DhtControl, NoStorageRoute,
-            /// Overlay liveness probe response.
-            7 => PeerLivenessReport(PeerLivenessReport): DhtControl, NoStorageRoute,
+            /// Beneficiary request initiating the provisional Probe transcript.
+            6 => ProbeRequest(ProbeRequest): DhtControl, NoStorageRoute,
+            /// Provider offer carrying the signed request, completion, and claim.
+            7 => ProbeOffer(Box<ProbeOffer>): DhtControl, NoStorageRoute,
             /// Remote message for searching an entry.
             8 => SearchEntry(SearchEntry): Storage, NoStorageRoute,
             /// Response when entries are found.
@@ -427,6 +407,8 @@ macro_rules! with_message_variants {
             18 => QueryForTopoInfoReport(QueryForTopoInfoReport): DhtControl, NoStorageRoute,
             /// A chunk that can be deserialized to a payload.
             19 => Chunk(Chunk): Application, NoStorageRoute,
+            /// Beneficiary acknowledgement completing the provisional receipt.
+            20 => ProbeAcknowledgement(Box<ProbeAcknowledgement>): DhtControl, NoStorageRoute,
         }
     };
 }
@@ -529,9 +511,9 @@ macro_rules! define_message_model {
             }
 
             #[cfg(test)]
-            pub(crate) fn test_variants() -> Vec<Self> {
-                let fixture = tests::MessageFixture::new();
-                vec![$(Self::$variant(tests::sample_body::<$body>(&fixture))),+]
+            pub(crate) fn test_variants() -> Result<Vec<Self>> {
+                let fixture = tests::MessageFixture::new()?;
+                Ok(vec![$(Self::$variant(tests::sample_body::<$body>(&fixture)?)),+])
             }
         }
     };
@@ -590,38 +572,58 @@ mod tests {
     use crate::dht::entry::EntryKind;
     use crate::dht::entry::EntryOperation;
     use crate::ecc::SecretKey;
+    use crate::message::MessageSigner;
+    use crate::message::ProbeCompletion;
+    use crate::message::ProvisionalEpoch;
+    use crate::message::ProvisionalServiceClaim;
+    use crate::message::ProvisionalServiceReceipt;
+    use crate::message::Transaction;
+    use crate::session::SessionSk;
 
     pub(super) struct MessageFixture {
         did: Did,
         public_key: crate::ecc::PublicKey<33>,
         entry: Entry,
+        provider: SessionSk,
+        beneficiary: SessionSk,
     }
 
     impl MessageFixture {
-        pub(super) fn new() -> Self {
-            let secret_key = SecretKey::random();
-            let did = secret_key.address().into();
-            Self {
+        pub(super) fn new() -> Result<Self> {
+            let provider = SessionSk::new_with_seckey(&SecretKey::random())?;
+            let beneficiary = SessionSk::new_with_seckey(&SecretKey::random())?;
+            let did = provider.account_did();
+            Ok(Self {
                 did,
-                public_key: secret_key.pubkey(),
+                public_key: provider.session_public_key(),
                 entry: Entry::new(did, Vec::new(), EntryKind::Data),
-            }
+                provider,
+                beneficiary,
+            })
         }
     }
 
     pub(super) trait SampleMessageBody: Sized {
-        fn sample(fixture: &MessageFixture) -> Self;
+        fn sample(fixture: &MessageFixture) -> Result<Self>;
     }
 
-    pub(super) fn sample_body<T: SampleMessageBody>(fixture: &MessageFixture) -> T {
+    pub(super) fn sample_body<T: SampleMessageBody>(fixture: &MessageFixture) -> Result<T> {
         T::sample(fixture)
+    }
+
+    impl<T> SampleMessageBody for Box<T>
+    where T: SampleMessageBody
+    {
+        fn sample(fixture: &MessageFixture) -> Result<Self> {
+            T::sample(fixture).map(Box::new)
+        }
     }
 
     macro_rules! sample_message_body {
         ($body:ty, |$fixture:ident| $sample:expr) => {
             impl SampleMessageBody for $body {
-                fn sample($fixture: &MessageFixture) -> Self {
-                    $sample
+                fn sample($fixture: &MessageFixture) -> Result<Self> {
+                    Ok($sample)
                 }
             }
         };
@@ -654,12 +656,20 @@ mod tests {
     sample_message_body!(NotifyPredecessorReport, |fixture| NotifyPredecessorReport {
         did: fixture.did,
     });
-    sample_message_body!(PeerLivenessProbe, |fixture| PeerLivenessProbe {
-        sent_at_ms: i64::from(fixture.did != Did::from(0_u32)),
+    sample_message_body!(ProbeRequest, |fixture| ProbeRequest {
+        epoch: ProvisionalEpoch { slot: 1 },
+        nonce: [u8::from(fixture.did != Did::from(0_u32)); 32],
     });
-    sample_message_body!(PeerLivenessReport, |fixture| PeerLivenessReport {
-        sent_at_ms: i64::from(fixture.did != Did::from(0_u32)),
-    });
+    impl SampleMessageBody for ProbeOffer {
+        fn sample(fixture: &MessageFixture) -> Result<Self> {
+            sample_probe_offer(fixture).map(|(offer, _)| offer)
+        }
+    }
+    impl SampleMessageBody for ProbeAcknowledgement {
+        fn sample(fixture: &MessageFixture) -> Result<Self> {
+            sample_probe_offer(fixture).map(|(_, receipt)| ProbeAcknowledgement { receipt })
+        }
+    }
     sample_message_body!(SearchEntry, |fixture| SearchEntry {
         resource: fixture.did,
         placement: fixture.did,
@@ -723,6 +733,62 @@ mod tests {
         meta: ChunkMeta::default(),
     });
 
+    fn sample_probe_offer(
+        fixture: &MessageFixture,
+    ) -> Result<(ProbeOffer, ProvisionalServiceReceipt)> {
+        let network_id = 1;
+        let tx_id = uuid::Uuid::nil();
+        let request_body = ProbeRequest {
+            epoch: ProvisionalEpoch { slot: 1 },
+            nonce: [7; 32],
+        };
+        let request = Transaction::new(
+            fixture.provider.account_did(),
+            tx_id,
+            0,
+            Message::ProbeRequest(request_body),
+            MessageSigner::new(&fixture.beneficiary, network_id),
+        )?;
+        let request_digest = request.digest()?.into_bytes();
+        let completion = Transaction::new(
+            fixture.beneficiary.account_did(),
+            tx_id,
+            0,
+            ProbeCompletion {
+                request_digest,
+                nonce: request_body.nonce,
+            },
+            MessageSigner::new(&fixture.provider, network_id),
+        )?;
+        let claim = ProvisionalServiceClaim::probe(
+            network_id,
+            fixture.provider.account_did(),
+            fixture.beneficiary.account_did(),
+            request_body.epoch,
+            request_body.nonce,
+            request_digest,
+            completion.digest()?.into_bytes(),
+        );
+        let provider_attestation =
+            claim.sign_provider(MessageSigner::new(&fixture.provider, network_id))?;
+        let beneficiary_attestation =
+            claim.sign_beneficiary(MessageSigner::new(&fixture.beneficiary, network_id))?;
+        let receipt = ProvisionalServiceReceipt::new(
+            claim.clone(),
+            provider_attestation.clone(),
+            beneficiary_attestation,
+        )?;
+        Ok((
+            ProbeOffer {
+                request,
+                completion,
+                claim,
+                provider_attestation,
+            },
+            receipt,
+        ))
+    }
+
     fn random_did() -> Did {
         SecretKey::random().address().into()
     }
@@ -783,8 +849,8 @@ mod tests {
     }
 
     #[test]
-    fn test_message_metadata_wire_indices_follow_enum_declaration_order() {
-        let messages = Message::test_variants();
+    fn test_message_metadata_wire_indices_follow_enum_declaration_order() -> Result<()> {
+        let messages = Message::test_variants()?;
         assert_eq!(messages.len(), MessageKind::WIRE_ORDER.len());
         for (position, ((wire_index, kind), message)) in
             MessageKind::WIRE_ORDER.iter().zip(messages).enumerate()
@@ -796,5 +862,6 @@ mod tests {
                 message.storage_sync_destination().is_some()
             );
         }
+        Ok(())
     }
 }

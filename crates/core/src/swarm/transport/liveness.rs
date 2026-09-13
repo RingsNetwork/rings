@@ -5,6 +5,7 @@ use super::pending::ActiveConnectionSet;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::ProbeRequest;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 use crate::utils::get_epoch_ms_i64;
@@ -21,6 +22,13 @@ struct PeerLiveness {
     last_inbound_ms: i64,
     last_probe_ms: Option<i64>,
     unanswered_probe_since_ms: Option<i64>,
+    pending_probe: Option<PendingProbe>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PendingProbe {
+    tx_id: uuid::Uuid,
+    request: ProbeRequest,
 }
 
 #[derive(Clone, Copy)]
@@ -46,6 +54,7 @@ impl PeerLiveness {
             last_inbound_ms: now_ms,
             last_probe_ms: None,
             unanswered_probe_since_ms: None,
+            pending_probe: None,
         }
     }
 
@@ -65,6 +74,37 @@ impl PeerLiveness {
     fn mark_probe_sent(&mut self, now_ms: i64) {
         self.last_probe_ms = Some(now_ms);
         self.unanswered_probe_since_ms.get_or_insert(now_ms);
+    }
+
+    fn set_pending_probe(&mut self, tx_id: uuid::Uuid, request: ProbeRequest) {
+        self.pending_probe = Some(PendingProbe { tx_id, request });
+    }
+
+    fn mark_matching_probe_sent(
+        &mut self,
+        now_ms: i64,
+        tx_id: uuid::Uuid,
+        request: ProbeRequest,
+    ) -> bool {
+        if self.pending_probe != Some(PendingProbe { tx_id, request }) {
+            return false;
+        }
+        self.mark_probe_sent(now_ms);
+        true
+    }
+
+    fn cancel_pending_probe(&mut self, tx_id: uuid::Uuid, request: ProbeRequest) {
+        if self.pending_probe == Some(PendingProbe { tx_id, request }) {
+            self.pending_probe = None;
+        }
+    }
+
+    fn consume_pending_probe(&mut self, tx_id: uuid::Uuid, request: ProbeRequest) -> bool {
+        if self.pending_probe != Some(PendingProbe { tx_id, request }) {
+            return false;
+        }
+        self.pending_probe = None;
+        true
     }
 
     fn expiry(&self, now_ms: i64) -> Option<PeerLivenessExpiry> {
@@ -150,17 +190,65 @@ impl PeerLivenessMap {
             .collect()
     }
 
-    fn mark_probe_sent(&mut self, peer: Did, generation: u64, now_ms: i64) {
+    fn register_probe(
+        &mut self,
+        peer: Did,
+        generation: u64,
+        tx_id: uuid::Uuid,
+        request: ProbeRequest,
+    ) {
         match self.peers.get_mut(&peer) {
             Some(liveness) if liveness.generation == generation => {
-                liveness.mark_probe_sent(now_ms);
+                liveness.set_pending_probe(tx_id, request);
             }
             _ => {
-                let mut liveness = PeerLiveness::new(generation, now_ms);
-                liveness.mark_probe_sent(now_ms);
-                self.peers.insert(peer, liveness);
+                // The active generation is registered before probe candidates are
+                // returned, so a missing/mismatched entry is a superseded attempt.
             }
         }
+    }
+
+    fn mark_probe_sent(
+        &mut self,
+        peer: Did,
+        generation: u64,
+        now_ms: i64,
+        tx_id: uuid::Uuid,
+        request: ProbeRequest,
+    ) -> bool {
+        self.peers
+            .get_mut(&peer)
+            .filter(|liveness| liveness.generation == generation)
+            .is_some_and(|liveness| liveness.mark_matching_probe_sent(now_ms, tx_id, request))
+    }
+
+    fn cancel_pending_probe(
+        &mut self,
+        peer: Did,
+        generation: u64,
+        tx_id: uuid::Uuid,
+        request: ProbeRequest,
+    ) {
+        if let Some(liveness) = self
+            .peers
+            .get_mut(&peer)
+            .filter(|liveness| liveness.generation == generation)
+        {
+            liveness.cancel_pending_probe(tx_id, request);
+        }
+    }
+
+    fn consume_pending_probe(
+        &mut self,
+        peer: Did,
+        generation: u64,
+        tx_id: uuid::Uuid,
+        request: ProbeRequest,
+    ) -> bool {
+        self.peers
+            .get_mut(&peer)
+            .filter(|liveness| liveness.generation == generation)
+            .is_some_and(|liveness| liveness.consume_pending_probe(tx_id, request))
     }
 
     fn expiry(&self, peer: Did, generation: u64, now_ms: i64) -> Option<PeerLivenessExpiry> {
@@ -289,17 +377,74 @@ impl SwarmTransport {
         })
     }
 
+    pub(crate) fn register_pending_liveness_probe(
+        &self,
+        attempt: PendingConnectionAttempt,
+        tx_id: uuid::Uuid,
+        request: ProbeRequest,
+    ) -> Result<bool> {
+        self.with_active_slot(attempt, || {
+            self.peer_liveness()?
+                .register_probe(attempt.peer, attempt.generation, tx_id, request);
+            Ok(())
+        })
+        .map(|registered| registered.is_some())
+    }
+
     pub(crate) fn record_peer_liveness_probe_sent(
         &self,
         attempt: PendingConnectionAttempt,
         now_ms: i64,
+        tx_id: uuid::Uuid,
+        request: ProbeRequest,
+    ) -> Result<bool> {
+        self.with_active_slot(attempt, || {
+            Ok(self.peer_liveness()?.mark_probe_sent(
+                attempt.peer,
+                attempt.generation,
+                now_ms,
+                tx_id,
+                request,
+            ))
+        })
+        .map(|recorded| recorded.unwrap_or(false))
+    }
+
+    pub(crate) fn cancel_pending_liveness_probe(
+        &self,
+        attempt: PendingConnectionAttempt,
+        tx_id: uuid::Uuid,
+        request: ProbeRequest,
     ) -> Result<()> {
         self.with_active_slot(attempt, || {
-            self.peer_liveness()?
-                .mark_probe_sent(attempt.peer, attempt.generation, now_ms);
+            self.peer_liveness()?.cancel_pending_probe(
+                attempt.peer,
+                attempt.generation,
+                tx_id,
+                request,
+            );
             Ok(())
         })
         .map(|_| ())
+    }
+
+    pub(crate) fn consume_pending_probe(
+        &self,
+        provider: Did,
+        tx_id: uuid::Uuid,
+        request: ProbeRequest,
+    ) -> Result<bool> {
+        self.with_connection_lifecycle(|| {
+            let Some(attempt) = self.active_attempt(provider)? else {
+                return Ok(false);
+            };
+            Ok(self.peer_liveness()?.consume_pending_probe(
+                provider,
+                attempt.generation,
+                tx_id,
+                request,
+            ))
+        })
     }
 
     pub(crate) fn peer_liveness_expiry(
@@ -410,5 +555,36 @@ impl SwarmTransport {
                 )))
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn response_before_send_completion_consumes_the_registered_probe_once() {
+        let request = crate::message::test_probe_request(9);
+        let tx_id = uuid::Uuid::new_v4();
+        let mut liveness = PeerLiveness::new(1, 10);
+
+        liveness.set_pending_probe(tx_id, request);
+        assert!(liveness.consume_pending_probe(tx_id, request));
+        assert!(!liveness.mark_matching_probe_sent(11, tx_id, request));
+        assert_eq!(liveness.unanswered_probe_since_ms, None);
+        assert!(!liveness.consume_pending_probe(tx_id, request));
+    }
+
+    #[test]
+    fn failed_send_cancels_only_its_matching_registered_probe() {
+        let request = crate::message::test_probe_request(10);
+        let replacement = crate::message::test_probe_request(11);
+        let tx_id = uuid::Uuid::new_v4();
+        let replacement_tx_id = uuid::Uuid::new_v4();
+        let mut liveness = PeerLiveness::new(1, 10);
+
+        liveness.set_pending_probe(replacement_tx_id, replacement);
+        liveness.cancel_pending_probe(tx_id, request);
+        assert!(liveness.consume_pending_probe(replacement_tx_id, replacement));
     }
 }

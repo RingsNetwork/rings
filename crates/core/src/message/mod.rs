@@ -59,6 +59,21 @@ pub(crate) use replay::TransactionReplay;
 pub use replay::TRANSACTION_REPLAY_STREAM_CAPACITY;
 pub use replay::TRANSACTION_REPLAY_WINDOW;
 
+mod service_receipt;
+#[cfg(test)]
+pub(crate) use service_receipt::test_probe_request;
+pub use service_receipt::ProbeAcknowledgement;
+pub use service_receipt::ProbeCompletion;
+pub use service_receipt::ProbeOffer;
+pub use service_receipt::ProbeRequest;
+pub use service_receipt::ProvisionalEpoch;
+pub use service_receipt::ProvisionalServiceClaim;
+pub use service_receipt::ProvisionalServiceReceipt;
+pub use service_receipt::ServiceKind;
+pub use service_receipt::ServiceReceiptDigest;
+pub use service_receipt::ServiceReceiptError;
+pub use service_receipt::PROVISIONAL_RECEIPT_EPOCH_SECS;
+
 pub mod types;
 pub use types::*;
 
