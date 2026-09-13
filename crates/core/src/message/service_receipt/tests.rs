@@ -31,6 +31,50 @@ fn signed_receipt(network_id: u32) -> Result<(ProvisionalServiceReceiptV1, Sessi
     ))
 }
 
+fn receipt_signed_at(
+    network_id: u32,
+    epoch: ProvisionalEpochV1,
+    provider_ts_ms: u128,
+    beneficiary_ts_ms: u128,
+) -> Result<ProvisionalServiceReceiptV1> {
+    let provider_account = SecretKey::random();
+    let beneficiary_account = SecretKey::random();
+    let provider = SessionSk::from_test_keys(
+        &provider_account,
+        SecretKey::random(),
+        provider_ts_ms,
+        crate::consts::DEFAULT_SESSION_TTL_MS,
+    )?;
+    let beneficiary = SessionSk::from_test_keys(
+        &beneficiary_account,
+        SecretKey::random(),
+        beneficiary_ts_ms,
+        crate::consts::DEFAULT_SESSION_TTL_MS,
+    )?;
+    let claim = ProvisionalServiceClaimV1::probe(
+        network_id,
+        provider.account_did(),
+        beneficiary.account_did(),
+        epoch,
+        [13; 32],
+        [14; 32],
+        [15; 32],
+    );
+    let bytes = claim.canonical_bytes()?;
+    let provider_attestation = MessageSigner::new(&provider, network_id).sign_at(
+        PROVIDER_DOMAIN,
+        &bytes,
+        provider_ts_ms,
+    )?;
+    let beneficiary_attestation = MessageSigner::new(&beneficiary, network_id).sign_at(
+        BENEFICIARY_DOMAIN,
+        &bytes,
+        beneficiary_ts_ms,
+    )?;
+    ProvisionalServiceReceiptV1::new(claim, provider_attestation, beneficiary_attestation)
+        .map_err(Error::from)
+}
+
 #[test]
 fn session_rotation_preserves_account_roles() -> Result<()> {
     let (receipt, _, _) = signed_receipt(7)?;
@@ -105,17 +149,115 @@ fn every_claim_field_is_covered_by_the_role_signatures() -> Result<()> {
 }
 
 #[test]
-fn live_admission_checks_proof_liveness_epoch_and_time_overflow() -> Result<()> {
-    let (receipt, _, _) = signed_receipt(7)?;
+fn live_admission_rejects_a_validly_signed_stale_epoch() -> Result<()> {
     let observed_at = crate::utils::get_epoch_ms();
-    receipt.verify_live_at(7, observed_at)?;
+    let observed_seconds = u64::try_from(observed_at / 1_000)
+        .map_err(|_| Error::ServiceReceipt(ServiceReceiptError::ObservationTimeOverflow))?;
+    let observed_epoch = ProvisionalEpochV1::from_unix_seconds(observed_seconds);
+    let stale_epoch = ProvisionalEpochV1 {
+        slot: observed_epoch.slot.saturating_sub(3),
+    };
+    let receipt = receipt_signed_at(7, stale_epoch, observed_at, observed_at)?;
 
-    let mut stale = receipt.clone();
-    stale.claim.epoch.slot = stale.claim.epoch.slot.saturating_sub(3);
-    assert!(stale.verify_live_at(7, observed_at).is_err());
+    assert_eq!(
+        receipt.verify_live_at(7, observed_at),
+        Err(ServiceReceiptError::EpochOutsideTolerance {
+            claim_slot: stale_epoch.slot,
+            observed_slot: observed_epoch.slot,
+        })
+    );
+    Ok(())
+}
+
+#[test]
+fn live_admission_distinguishes_expired_provider_and_beneficiary_proofs() -> Result<()> {
+    let observed_at = crate::utils::get_epoch_ms();
+    let observed_seconds = u64::try_from(observed_at / 1_000)
+        .map_err(|_| Error::ServiceReceipt(ServiceReceiptError::ObservationTimeOverflow))?;
+    let epoch = ProvisionalEpochV1::from_unix_seconds(observed_seconds);
+    let expired_ts = observed_at.saturating_sub(u128::from(crate::consts::DEFAULT_TTL_MS) + 1);
+    let expired_provider = receipt_signed_at(7, epoch, expired_ts, observed_at)?;
+    let expired_beneficiary = receipt_signed_at(7, epoch, observed_at, expired_ts)?;
+
+    expired_provider.verify_crypto(7)?;
+    expired_beneficiary.verify_crypto(7)?;
+    assert_eq!(
+        expired_provider.verify_live_at(7, observed_at),
+        Err(ServiceReceiptError::ProviderAttestationNotLive)
+    );
+    assert_eq!(
+        expired_beneficiary.verify_live_at(7, observed_at),
+        Err(ServiceReceiptError::BeneficiaryAttestationNotLive)
+    );
+    Ok(())
+}
+
+#[test]
+fn live_admission_rejects_observation_time_overflow() -> Result<()> {
+    let (receipt, _, _) = signed_receipt(7)?;
+
     assert_eq!(
         receipt.verify_live_at(7, u128::MAX),
         Err(ServiceReceiptError::ObservationTimeOverflow)
+    );
+    Ok(())
+}
+
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), test)]
+fn canonical_receipt_golden_vector_is_stable() -> Result<()> {
+    const CREATED_AT_MS: u128 = 1_700_000_000_000;
+    const SESSION_TTL_MS: u64 = 86_400_000;
+    const SIGNED_AT_MS: u128 = CREATED_AT_MS + 123;
+    let provider_account =
+        SecretKey::try_from("0000000000000000000000000000000000000000000000000000000000000001")?;
+    let provider_session_key =
+        SecretKey::try_from("0000000000000000000000000000000000000000000000000000000000000002")?;
+    let beneficiary_account =
+        SecretKey::try_from("0000000000000000000000000000000000000000000000000000000000000003")?;
+    let beneficiary_session_key =
+        SecretKey::try_from("0000000000000000000000000000000000000000000000000000000000000004")?;
+    let provider = SessionSk::from_test_keys(
+        &provider_account,
+        provider_session_key,
+        CREATED_AT_MS,
+        SESSION_TTL_MS,
+    )?;
+    let beneficiary = SessionSk::from_test_keys(
+        &beneficiary_account,
+        beneficiary_session_key,
+        CREATED_AT_MS,
+        SESSION_TTL_MS,
+    )?;
+    let claim = ProvisionalServiceClaimV1::probe(
+        7,
+        provider.account_did(),
+        beneficiary.account_did(),
+        ProvisionalEpochV1 { slot: 3 },
+        [4; 32],
+        [5; 32],
+        [6; 32],
+    );
+    let bytes = claim.canonical_bytes()?;
+    let receipt = ProvisionalServiceReceiptV1::new(
+        claim,
+        MessageSigner::new(&provider, 7).sign_at(PROVIDER_DOMAIN, &bytes, SIGNED_AT_MS)?,
+        MessageSigner::new(&beneficiary, 7).sign_at(BENEFICIARY_DOMAIN, &bytes, SIGNED_AT_MS)?,
+    )?;
+    let canonical = receipt.canonical_bytes()?;
+
+    receipt.verify_crypto(7)?;
+    assert_eq!(
+        hex::encode(&canonical),
+        "52494e47532d50524f564953494f4e414c2d534552564943452d524543454950542d56310007002a3078376535663435353230393161363931323564356466636237623863323635393032393339356264662a30783638313365623933363233373265656636323030663362316462633366383139363731636261363903040404040404040404040404040404040404040404040404040404040404040401050505050505050505050505050505050505050505050505050505050505050506060606060606060606060606060606060606060606060606060606060606062a307832623561643563343739356330323635313466383331376337613231356532313864636364366366002a30783765356634353532303931613639313235643564666362376238633236353930323933393562646680b8992980d095ffbc314134cac11c98d6784d088d0e0bf905f42d58c14c585cd8504f98760b32e2a0a9204da47050b5f48d4dae7087c1fdb67c97470491af0902ec15878b4363c8732fa601c0cf24fbd095ffbc31413c53fa848941d1fba7af4a5aecf179fde4d2b7153a05926582c4b3dd40c93f6b47423c560d11e395a7fb5a7305aa226ca5195f3fed9739aed135f2457e48fb51002a307831656666343762633361313061343564346232333062356431306533373735316665366161373138002a30783638313365623933363233373265656636323030663362316462633366383139363731636261363980b8992980d095ffbc3141a0a355a84db0e7604c37aac193c5f6c4206acf103247a13a2feefa340c52c7686f52528da21a1fde9fac4199118fdd6dde83fc0b375a0cfa6e68441baef15a2e00c0cf24fbd095ffbc314100897a0ed5e793ced4fa356f7655b21fd84de67bd15c26349ab5cdc3c61ed6062b72bb1cafbec1aac1c268ca8662552d9455f44e98c9b7342e1dc7c347166d1400"
+    );
+    assert_eq!(
+        hex::encode(receipt.digest()?.into_bytes()),
+        "f8c1094b66b495bf4be037749ea00e3df98607f2d9c62e5480cb1c771ad1d990"
+    );
+    assert_eq!(
+        ProvisionalServiceReceiptV1::from_canonical_bytes(&canonical)?,
+        receipt
     );
     Ok(())
 }

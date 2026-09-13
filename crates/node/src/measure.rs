@@ -95,6 +95,23 @@ pub type EvidenceStorage = Box<dyn KvStorageInterface<EvidenceSnapshot<Did>>>;
 #[cfg(not(all(feature = "browser", target_family = "wasm")))]
 pub type EvidenceStorage = Box<dyn KvStorageInterface<EvidenceSnapshot<Did>> + Sync + Send>;
 
+/// Runtime identity that owns one persisted provisional-evidence collection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EvidenceCollectorIdentity {
+    network_id: u32,
+    provider_account: Did,
+}
+
+impl EvidenceCollectorIdentity {
+    /// Bind persisted evidence to one overlay and the local provider account.
+    pub const fn new(network_id: u32, provider_account: Did) -> Self {
+        Self {
+            network_id,
+            provider_account,
+        }
+    }
+}
+
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 type SharedMeasureStorage = Arc<dyn KvStorageInterface<MeasurementSnapshot<Did>>>;
 #[cfg(not(all(feature = "browser", target_family = "wasm")))]
@@ -205,17 +222,28 @@ impl PeriodicMeasure {
     /// constructor returns `MeasureRuntimeError::RuntimeUnavailable` instead
     /// of panicking when called outside a live runtime.
     pub async fn new(storage: MeasureStorage) -> Result<Self, MeasureRuntimeError> {
-        Self::new_with_evidence_storage(storage, Box::new(rings_core::storage::MemStorage::new()))
-            .await
+        Self::new_with_clock_and_evidence(
+            storage,
+            Box::new(rings_core::storage::MemStorage::new()),
+            None,
+            Arc::new(SystemMeasureClock),
+        )
+        .await
     }
 
-    /// Load measurement and provisional-evidence snapshots from separate bounded backends.
+    /// Load snapshots and bind restored evidence to this local collector.
     pub async fn new_with_evidence_storage(
         storage: MeasureStorage,
         evidence_storage: EvidenceStorage,
+        collector: EvidenceCollectorIdentity,
     ) -> Result<Self, MeasureRuntimeError> {
-        Self::new_with_clock_and_evidence(storage, evidence_storage, Arc::new(SystemMeasureClock))
-            .await
+        Self::new_with_clock_and_evidence(
+            storage,
+            evidence_storage,
+            Some(collector),
+            Arc::new(SystemMeasureClock),
+        )
+        .await
     }
 
     #[cfg(all(test, feature = "node"))]
@@ -226,6 +254,7 @@ impl PeriodicMeasure {
         Self::new_with_clock_and_evidence(
             storage,
             Box::new(rings_core::storage::MemStorage::new()),
+            None,
             clock,
         )
         .await
@@ -234,6 +263,7 @@ impl PeriodicMeasure {
     async fn new_with_clock_and_evidence(
         storage: MeasureStorage,
         evidence_storage: EvidenceStorage,
+        collector: Option<EvidenceCollectorIdentity>,
         clock: Arc<dyn MeasureClock>,
     ) -> Result<Self, MeasureRuntimeError> {
         #[cfg(not(all(feature = "browser", target_family = "wasm")))]
@@ -250,7 +280,9 @@ impl PeriodicMeasure {
             Some(snapshot) => ProvisionalEvidenceStore::from_snapshot_with_validator(
                 snapshot,
                 EvidenceLimits::default(),
-                valid_persisted_evidence,
+                |record| {
+                    collector.is_some_and(|identity| valid_persisted_evidence(record, identity))
+                },
             )?,
             None => (
                 ProvisionalEvidenceStore::new(EvidenceLimits::default()),
@@ -503,7 +535,10 @@ fn prepare_snapshots(
     (runtime.ledger.snapshot(), runtime.evidence.snapshot())
 }
 
-fn valid_persisted_evidence(record: &ProvisionalEvidenceRecord<Did>) -> bool {
+fn valid_persisted_evidence(
+    record: &ProvisionalEvidenceRecord<Did>,
+    collector: EvidenceCollectorIdentity,
+) -> bool {
     let Ok(receipt) = rings_core::message::ProvisionalServiceReceiptV1::from_canonical_bytes(
         record.canonical_receipt(),
     ) else {
@@ -512,8 +547,10 @@ fn valid_persisted_evidence(record: &ProvisionalEvidenceRecord<Did>) -> bool {
     let claim = &receipt.claim;
     let observed_at_ms = u128::from(record.observed_at().as_secs()) * 1_000;
     receipt
-        .verify_live_at(record.freshness().network_id(), observed_at_ms)
+        .verify_live_at(collector.network_id, observed_at_ms)
         .is_ok()
+        && claim.network_id == collector.network_id
+        && claim.provider_account == collector.provider_account
         && claim.network_id == record.freshness().network_id()
         && claim.provider_account == *record.pair().provider()
         && claim.beneficiary_account == *record.pair().beneficiary()

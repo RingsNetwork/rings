@@ -16,11 +16,12 @@ use rings_measure::ProvisionalEvidenceRecord;
 use rings_measure::UnixTime;
 use wasm_bindgen_test::wasm_bindgen_test;
 
+use crate::measure::EvidenceCollectorIdentity;
 use crate::measure::EvidenceStorage;
 use crate::measure::MeasureStorage;
 use crate::measure::PeriodicMeasure;
 
-fn evidence_record() -> ProvisionalEvidenceRecord<Did> {
+fn evidence_fixture() -> (ProvisionalEvidenceRecord<Did>, EvidenceCollectorIdentity) {
     let provider = SessionSk::new_with_seckey(&SecretKey::random()).unwrap();
     let beneficiary = SessionSk::new_with_seckey(&SecretKey::random()).unwrap();
     let observed_at_seconds = u64::try_from(rings_core::utils::get_epoch_ms() / 1_000).unwrap();
@@ -45,7 +46,7 @@ fn evidence_record() -> ProvisionalEvidenceRecord<Did> {
         beneficiary_attestation,
     )
     .unwrap();
-    ProvisionalEvidenceRecord::new(
+    let record = ProvisionalEvidenceRecord::new(
         EvidenceAccountPair::new(claim.provider_account, claim.beneficiary_account),
         EvidenceFreshnessKey::new(
             claim.network_id,
@@ -56,7 +57,9 @@ fn evidence_record() -> ProvisionalEvidenceRecord<Did> {
         EvidenceDigest::new(receipt.digest().unwrap().into_bytes()),
         receipt.canonical_bytes().unwrap(),
         UnixTime::from_secs(observed_at_seconds),
-    )
+    );
+    let collector = EvidenceCollectorIdentity::new(claim.network_id, claim.provider_account);
+    (record, collector)
 }
 
 async fn storages(name: &str) -> (MeasureStorage, EvidenceStorage) {
@@ -80,20 +83,20 @@ async fn indexed_db_restart_restores_non_empty_provisional_evidence() {
     let (measure_storage, evidence_storage) = storages(&name).await;
     measure_storage.clear().await.unwrap();
     evidence_storage.clear().await.unwrap();
-    let measure = PeriodicMeasure::new_with_evidence_storage(measure_storage, evidence_storage)
-        .await
-        .unwrap();
-    measure
-        .admit_provisional_evidence(evidence_record())
-        .await
-        .unwrap();
+    let (record, collector) = evidence_fixture();
+    let measure =
+        PeriodicMeasure::new_with_evidence_storage(measure_storage, evidence_storage, collector)
+            .await
+            .unwrap();
+    measure.admit_provisional_evidence(record).await.unwrap();
     measure.flush().await.unwrap();
     drop(measure);
 
     let (measure_storage, evidence_storage) = storages(&name).await;
-    let restored = PeriodicMeasure::new_with_evidence_storage(measure_storage, evidence_storage)
-        .await
-        .unwrap();
+    let restored =
+        PeriodicMeasure::new_with_evidence_storage(measure_storage, evidence_storage, collector)
+            .await
+            .unwrap();
     let page = restored
         .provisional_evidence_page(None, NonZeroUsize::new(4).unwrap())
         .await

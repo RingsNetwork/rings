@@ -355,7 +355,9 @@ async fn persistence_restores_complete_credit_and_epoch_state() {
     );
 }
 
-fn provisional_evidence_record(nonce: u8) -> ProvisionalEvidenceRecord<Did> {
+fn provisional_evidence_fixture(
+    nonce: u8,
+) -> (ProvisionalEvidenceRecord<Did>, EvidenceCollectorIdentity) {
     let provider =
         rings_core::session::SessionSk::new_with_seckey(&rings_core::ecc::SecretKey::random())
             .unwrap_or_else(|error| panic!("provider session must build: {error}"));
@@ -386,7 +388,7 @@ fn provisional_evidence_record(nonce: u8) -> ProvisionalEvidenceRecord<Did> {
         beneficiary_attestation,
     )
     .unwrap_or_else(|error| panic!("receipt must assemble: {error}"));
-    ProvisionalEvidenceRecord::new(
+    let record = ProvisionalEvidenceRecord::new(
         rings_measure::EvidenceAccountPair::new(claim.provider_account, claim.beneficiary_account),
         rings_measure::EvidenceFreshnessKey::new(
             claim.network_id,
@@ -404,13 +406,15 @@ fn provisional_evidence_record(nonce: u8) -> ProvisionalEvidenceRecord<Did> {
             .canonical_bytes()
             .unwrap_or_else(|error| panic!("receipt must encode: {error}")),
         UnixTime::from_secs(observed_at_seconds),
-    )
+    );
+    let collector = EvidenceCollectorIdentity::new(claim.network_id, claim.provider_account);
+    (record, collector)
 }
 
 #[test]
 fn persisted_evidence_revalidates_observation_time_and_isolates_invalid_neighbors() {
-    let valid = provisional_evidence_record(4);
-    let source = provisional_evidence_record(8);
+    let (valid, collector) = provisional_evidence_fixture(4);
+    let (source, _) = provisional_evidence_fixture(8);
     let future_observation =
         UnixTime::from_secs(source.observed_at().as_secs().saturating_add(900));
     let malformed = ProvisionalEvidenceRecord::new(
@@ -420,8 +424,8 @@ fn persisted_evidence_revalidates_observation_time_and_isolates_invalid_neighbor
         source.canonical_receipt().to_vec(),
         future_observation,
     );
-    assert!(valid_persisted_evidence(&valid));
-    assert!(!valid_persisted_evidence(&malformed));
+    assert!(valid_persisted_evidence(&valid, collector));
+    assert!(!valid_persisted_evidence(&malformed, collector));
 
     let mut snapshot_store = ProvisionalEvidenceStore::new(EvidenceLimits::default());
     snapshot_store
@@ -433,7 +437,7 @@ fn persisted_evidence_revalidates_observation_time_and_isolates_invalid_neighbor
     let (restored, report) = ProvisionalEvidenceStore::from_snapshot_with_validator(
         snapshot_store.snapshot(),
         EvidenceLimits::default(),
-        valid_persisted_evidence,
+        |record| valid_persisted_evidence(record, collector),
     )
     .unwrap_or_else(|error| panic!("snapshot must restore valid neighbors: {error}"));
 
@@ -447,6 +451,72 @@ fn persisted_evidence_revalidates_observation_time_and_isolates_invalid_neighbor
             .map(ProvisionalEvidenceRecord::digest),
         Some(valid.digest())
     );
+}
+
+#[test]
+fn persisted_evidence_is_bound_to_the_runtime_network_and_provider() {
+    let (record, collector) = provisional_evidence_fixture(4);
+    let foreign_network = EvidenceCollectorIdentity::new(
+        collector.network_id.saturating_add(1),
+        collector.provider_account,
+    );
+    let foreign_provider = EvidenceCollectorIdentity::new(
+        collector.network_id,
+        collector.provider_account + Did::from(1_u32),
+    );
+
+    assert!(valid_persisted_evidence(&record, collector));
+    assert!(!valid_persisted_evidence(&record, foreign_network));
+    assert!(!valid_persisted_evidence(&record, foreign_provider));
+}
+
+#[tokio::test]
+async fn startup_rejects_foreign_network_and_provider_snapshot_records() {
+    let (record, collector) = provisional_evidence_fixture(4);
+    let rejected_collectors = [
+        EvidenceCollectorIdentity::new(
+            collector.network_id.saturating_add(1),
+            collector.provider_account,
+        ),
+        EvidenceCollectorIdentity::new(
+            collector.network_id,
+            collector.provider_account + Did::from(1_u32),
+        ),
+    ];
+
+    for rejected_collector in rejected_collectors {
+        let evidence_storage = MemStorage::new();
+        let mut snapshot_store = ProvisionalEvidenceStore::new(EvidenceLimits::default());
+        snapshot_store
+            .admit(record.clone())
+            .unwrap_or_else(|error| panic!("foreign fixture must enter its raw snapshot: {error}"));
+        evidence_storage
+            .put(EVIDENCE_SNAPSHOT_KEY, &snapshot_store.snapshot())
+            .await
+            .unwrap_or_else(|error| panic!("foreign snapshot must persist: {error}"));
+
+        let measure = PeriodicMeasure::new_with_clock_and_evidence(
+            Box::new(MemStorage::new()),
+            Box::new(evidence_storage),
+            Some(rejected_collector),
+            Arc::new(ManualMeasureClock::new(10)),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("measurement must reconcile foreign evidence: {error}"));
+        let page = measure
+            .provisional_evidence_page(None, nonzero_usize(1))
+            .await
+            .unwrap_or_else(|error| panic!("reconciled evidence must project: {error}"));
+
+        assert!(page.records().is_empty());
+        assert_eq!(
+            measure
+                .provisional_evidence_counters()
+                .await
+                .rejected_records(),
+            1
+        );
+    }
 }
 
 #[tokio::test]
@@ -472,16 +542,18 @@ async fn native_restart_restores_non_empty_provisional_evidence() {
         .await
         .unwrap_or_else(|error| panic!("evidence storage must clear: {error}"));
     let clock = Arc::new(ManualMeasureClock::new(10));
+    let (record, collector) = provisional_evidence_fixture(4);
     let measure = PeriodicMeasure::new_with_clock_and_evidence(
         measure_storage,
         evidence_storage,
+        Some(collector),
         clock.clone(),
     )
     .await
     .unwrap_or_else(|error| panic!("measurement must initialize: {error}"));
     assert!(matches!(
         measure
-            .admit_provisional_evidence(provisional_evidence_record(4))
+            .admit_provisional_evidence(record)
             .await
             .map(|report| report.admission()),
         Ok(rings_measure::EvidenceAdmission::Admitted)
@@ -503,6 +575,7 @@ async fn native_restart_restores_non_empty_provisional_evidence() {
                 .await
                 .unwrap_or_else(|error| panic!("evidence storage must reopen: {error}")),
         ),
+        Some(collector),
         clock,
     )
     .await

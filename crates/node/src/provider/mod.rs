@@ -25,6 +25,7 @@ use rings_rpc::protos::rings_node_handler::InternalRpcHandler;
 use crate::error::Error;
 use crate::error::Result;
 use crate::extension::Backend;
+use crate::measure::EvidenceCollectorIdentity;
 use crate::measure::EvidenceStorage;
 use crate::measure::MeasureStorage;
 use crate::measure::PeriodicMeasure;
@@ -187,8 +188,14 @@ impl Provider {
             onion_entry_guard_storage.unwrap_or_else(|| Box::new(MemStorage::new()));
         let replay_storage = replay_storage.unwrap_or_else(|| Box::new(MemStorage::new()));
 
-        let measure =
-            PeriodicMeasure::new_with_evidence_storage(measure_storage, evidence_storage).await?;
+        let collector =
+            EvidenceCollectorIdentity::new(config.network_id(), config.session_sk().account_did());
+        let measure = PeriodicMeasure::new_with_evidence_storage(
+            measure_storage,
+            evidence_storage,
+            collector,
+        )
+        .await?;
 
         let processor_builder = ProcessorBuilder::from_config(&config)?
             .storage(entry_storage)

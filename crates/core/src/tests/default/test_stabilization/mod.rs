@@ -1,7 +1,10 @@
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+use rings_measure::EvidenceLimits;
+use rings_measure::ProvisionalEvidenceStore;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use rings_transport::connections::dummy_controlled;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
@@ -22,11 +25,19 @@ use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
 use crate::measure::BehaviourJudgement;
+use crate::measure::EvidenceAdmissionReport;
+use crate::measure::EvidenceCounters;
+use crate::measure::EvidenceDigest;
+use crate::measure::EvidenceError;
+use crate::measure::EvidencePage;
 use crate::measure::Measure;
 use crate::measure::MeasureCounter;
 use crate::measure::MeasureImpl;
 use crate::measure::PeerQuality;
 use crate::measure::PeerQualityThresholds;
+use crate::measure::ProvisionalEvidenceRecord;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+use crate::message::ProvisionalServiceReceiptV1;
 use crate::session::SessionSk;
 use crate::storage::MemStorage;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
@@ -52,9 +63,18 @@ use crate::utils::get_epoch_ms_i64;
 mod test_storage_handoff;
 mod test_storage_repair;
 
-#[derive(Default)]
 struct CountingMeasure {
     counters: Mutex<Vec<(Did, MeasureCounter)>>,
+    evidence: Mutex<ProvisionalEvidenceStore<Did>>,
+}
+
+impl Default for CountingMeasure {
+    fn default() -> Self {
+        Self {
+            counters: Mutex::new(Vec::new()),
+            evidence: Mutex::new(ProvisionalEvidenceStore::new(EvidenceLimits::default())),
+        }
+    }
 }
 
 #[async_trait]
@@ -79,6 +99,35 @@ impl Measure for CountingMeasure {
                 0
             }
         }
+    }
+
+    async fn admit_provisional_evidence(
+        &self,
+        record: ProvisionalEvidenceRecord<Did>,
+    ) -> std::result::Result<EvidenceAdmissionReport<Did>, EvidenceError> {
+        self.evidence
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .admit(record)
+    }
+
+    async fn provisional_evidence_page(
+        &self,
+        after: Option<EvidenceDigest>,
+        limit: NonZeroUsize,
+    ) -> std::result::Result<EvidencePage<Did>, EvidenceError> {
+        Ok(self
+            .evidence
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .page(after, limit))
+    }
+
+    async fn provisional_evidence_counters(&self) -> EvidenceCounters {
+        self.evidence
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .counters()
     }
 }
 
@@ -318,6 +367,49 @@ async fn test_liveness_probe_backpressure_does_not_degrade_peer() -> Result<()> 
             .await,
         0
     );
+    Ok(())
+}
+
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+#[tokio::test]
+async fn test_liveness_probe_round_trip_admits_provider_evidence() -> Result<()> {
+    let provider_measure = Arc::new(CountingMeasure::default());
+    let measure_impl: MeasureImpl = provider_measure.clone();
+    let beneficiary = prepare_node(SecretKey::random()).await;
+    let provider = prepare_node_with_measure(SecretKey::random(), measure_impl)?;
+
+    manually_establish_connection(&beneficiary.swarm, &provider.swarm).await;
+    wait_for_successor(&beneficiary, provider.did()).await?;
+    wait_for_successor(&provider, beneficiary.did()).await?;
+    wait_for_msgs([&beneficiary, &provider]).await;
+    beneficiary.swarm.transport.force_peer_last_inbound_at(
+        provider.did(),
+        get_epoch_ms_i64() - PEER_LIVENESS_IDLE_MS - 1,
+    )?;
+
+    beneficiary
+        .swarm
+        .stabilizer()
+        .probe_peer_liveness_for_simulation()
+        .await?;
+    wait_for_msgs([&beneficiary, &provider]).await;
+
+    let page = provider_measure
+        .provisional_evidence_page(None, NonZeroUsize::MIN)
+        .await?;
+    let receipt = page
+        .records()
+        .first()
+        .ok_or_else(|| Error::InvalidMessage("provider admitted no probe receipt".to_string()))?;
+    let decoded = ProvisionalServiceReceiptV1::from_canonical_bytes(receipt.canonical_receipt())?;
+    let counters = provider_measure.provisional_evidence_counters().await;
+
+    assert_eq!(page.records().len(), 1);
+    assert_eq!(decoded.claim.provider_account, provider.did());
+    assert_eq!(decoded.claim.beneficiary_account, beneficiary.did());
+    assert_eq!(counters.admitted(), 1);
+    assert_eq!(counters.duplicates(), 0);
+    assert_eq!(counters.conflicts(), 0);
     Ok(())
 }
 

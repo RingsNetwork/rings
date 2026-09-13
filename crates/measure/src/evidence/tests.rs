@@ -79,6 +79,48 @@ fn pair_and_global_bounds_evict_oldest_records_deterministically() -> Result<(),
 }
 
 #[test]
+fn admission_never_evicts_the_candidate_it_reports_as_admitted() -> Result<(), EvidenceError> {
+    let mut store = ProvisionalEvidenceStore::new(limits(1, 8, 1, 8));
+    let resident = record(1, 2, 1, 1, 2, 2, 8);
+    let candidate = record(1, 2, 1, 2, 1, 2, 8);
+    store.admit(resident.clone())?;
+
+    let report = store.admit(candidate.clone())?;
+
+    assert_eq!(report.admission(), EvidenceAdmission::Admitted);
+    assert_eq!(report.evictions().len(), 1);
+    assert_eq!(
+        report.evictions().first().map(EvidenceEviction::digest),
+        Some(resident.digest())
+    );
+    assert_eq!(store.len(), 1);
+    assert_eq!(store.page(None, nonzero(1)).records(), &[candidate]);
+    assert_eq!(store.counters().admitted(), 2);
+    assert_eq!(store.counters().evicted_records(), 1);
+    Ok(())
+}
+
+#[test]
+fn admission_replaces_newer_resident_instead_of_discarding_older_candidate(
+) -> Result<(), EvidenceError> {
+    let mut store = ProvisionalEvidenceStore::new(limits(1, 8, 1, 8));
+    let resident = record(1, 2, 1, 1, 1, 2, 8);
+    let candidate = record(1, 2, 1, 2, 2, 1, 8);
+    store.admit(resident.clone())?;
+
+    let report = store.admit(candidate.clone())?;
+
+    assert_eq!(report.admission(), EvidenceAdmission::Admitted);
+    assert_eq!(report.evictions().len(), 1);
+    assert_eq!(
+        report.evictions().first().map(EvidenceEviction::digest),
+        Some(resident.digest())
+    );
+    assert_eq!(store.page(None, nonzero(1)).records(), &[candidate]);
+    Ok(())
+}
+
+#[test]
 fn snapshot_restore_skips_invalid_records_without_hiding_valid_records() -> Result<(), EvidenceError>
 {
     let snapshot = EvidenceSnapshot {

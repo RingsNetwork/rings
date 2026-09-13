@@ -41,6 +41,27 @@ impl SessionSk {
         Self { session, sk }
     }
 
+    #[cfg(test)]
+    /// Construct a deterministic delegated session for cross-target wire fixtures.
+    pub(crate) fn from_test_keys(
+        account_key: &SecretKey,
+        session_key: SecretKey,
+        ts_ms: u128,
+        ttl_ms: u64,
+    ) -> Result<Self> {
+        let session_id = Did::from(session_key.address());
+        let proof = super::model::pack_session(session_id, ts_ms, ttl_ms);
+        let session = Session {
+            session_id,
+            account: super::Account::Secp256k1(account_key.address().into()),
+            ttl_ms,
+            ts_ms,
+            sig: account_key.sign(&proof)?.to_vec(),
+        };
+        session.verify_self_at(ts_ms)?;
+        Ok(Self::from_parts(session, session_key))
+    }
+
     /// Generate a session with a private key. Only use this for unit tests.
     ///
     /// To protect account private keys in production, use [`SessionSkBuilder`] instead.

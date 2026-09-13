@@ -17,6 +17,7 @@ use futures::StreamExt;
 use rings_node::extension::Backend;
 use rings_node::logging::init_logging;
 use rings_node::logging::LogLevel;
+use rings_node::measure::EvidenceCollectorIdentity;
 use rings_node::measure::PeriodicMeasure;
 use rings_node::native::api_auth::load_api_token;
 use rings_node::native::api_auth::load_api_token_file;
@@ -896,9 +897,13 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
         .await?,
     );
 
-    let measure =
-        PeriodicMeasure::new_with_evidence_storage(per_measure_storage, per_evidence_storage)
-            .await?;
+    let collector = EvidenceCollectorIdentity::new(pc.network_id(), pc.session_sk().account_did());
+    let measure = PeriodicMeasure::new_with_evidence_storage(
+        per_measure_storage,
+        per_evidence_storage,
+        collector,
+    )
+    .await?;
 
     let processor = Arc::new(
         ProcessorBuilder::from_config(&pc)?

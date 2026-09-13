@@ -476,7 +476,7 @@ where P: Clone + Ord
 
         let mut evictions = Vec::new();
         while self.pair_over_bound(&pair) {
-            let Some(victim) = self.oldest_digest(Some(&pair)) else {
+            let Some(victim) = self.oldest_digest_excluding(Some(&pair), digest) else {
                 break;
             };
             if let Some(eviction) = self.evict(victim) {
@@ -484,7 +484,7 @@ where P: Clone + Ord
             }
         }
         while self.global_over_bound() {
-            let Some(victim) = self.oldest_digest(None) else {
+            let Some(victim) = self.oldest_digest_excluding(None, digest) else {
                 break;
             };
             if let Some(eviction) = self.evict(victim) {
@@ -592,10 +592,16 @@ where P: Clone + Ord
             })
     }
 
-    fn oldest_digest(&self, pair: Option<&EvidenceAccountPair<P>>) -> Option<EvidenceDigest> {
+    fn oldest_digest_excluding(
+        &self,
+        pair: Option<&EvidenceAccountPair<P>>,
+        excluded: EvidenceDigest,
+    ) -> Option<EvidenceDigest> {
         self.records
             .iter()
-            .filter(|(_, record)| pair.is_none_or(|pair| &record.pair == pair))
+            .filter(|(digest, record)| {
+                **digest != excluded && pair.is_none_or(|pair| &record.pair == pair)
+            })
             .min_by_key(|(digest, record)| (record.observed_at, **digest))
             .map(|(digest, _)| *digest)
     }
