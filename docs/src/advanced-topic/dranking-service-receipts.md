@@ -88,6 +88,12 @@ deterministically without removing its active replay marker. Replay markers have
 global and per-beneficiary bounds; saturation rejects new keys. APIs expose only bounded
 digest-ordered pages and aggregate counters without DID labels.
 
+Opening the browser evidence store is part of provider construction. If IndexedDB cannot be
+opened, construction fails instead of substituting volatile memory, because a successful
+memory-only admission would not refine the documented process-crash model.
+Likewise, embedding constructors that do not supply a durable evidence backend keep probe
+liveness available but fail closed rather than returning a successful receipt admission.
+
 This evidence does not update `CreditRecord`, affect `order_peers_by_quality`, prove relay or
 storage service, prevent self-dealing, or provide Sybil resistance. A later finalized DRanking
 ledger must define a distinct receipt format and signing domain instead of treating provisional

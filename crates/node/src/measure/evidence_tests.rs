@@ -278,6 +278,25 @@ async fn failed_durable_admission_rolls_back_receipt_and_replay_marker() {
 }
 
 #[tokio::test]
+async fn missing_durable_evidence_backend_never_returns_admitted() {
+    let (record, _) = provisional_evidence_fixture(5);
+    let measure = PeriodicMeasure::new(Box::new(MemStorage::new()))
+        .await
+        .unwrap_or_else(|error| panic!("measurement-only runtime must initialize: {error}"));
+
+    assert_eq!(
+        measure.admit_provisional_evidence(record).await,
+        Err(EvidenceError::PersistenceUnavailable)
+    );
+    assert!(measure
+        .provisional_evidence_page(None, nonzero_usize(1))
+        .await
+        .unwrap_or_else(|error| panic!("rolled-back evidence must project: {error}"))
+        .records()
+        .is_empty());
+}
+
+#[tokio::test]
 async fn successful_admission_survives_native_restart_without_flush() {
     let measure_path = "tmp/measure_with_evidence_test_db";
     let evidence_path = "tmp/provisional_evidence_test_db";

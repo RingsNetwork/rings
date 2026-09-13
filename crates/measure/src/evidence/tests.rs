@@ -178,6 +178,55 @@ fn replay_capacity_and_clock_regression_fail_closed() -> Result<(), EvidenceErro
 }
 
 #[test]
+fn global_and_per_beneficiary_replay_bounds_are_independent() -> Result<(), EvidenceError> {
+    let mut configured = limits(8, 1024, 8, 1024);
+    configured.max_replay_markers = nonzero(3);
+    configured.max_replay_markers_per_beneficiary = nonzero(1);
+    let mut store = ProvisionalEvidenceStore::new(configured);
+
+    assert_eq!(
+        store.admit(record(1, 2, 3, 1, 1, 3, 8))?.admission(),
+        EvidenceAdmission::Admitted
+    );
+    assert_eq!(
+        store.admit(record(3, 2, 3, 2, 2, 3, 8))?.admission(),
+        EvidenceAdmission::ReplayCapacityExhausted
+    );
+    assert_eq!(
+        store.admit(record(3, 4, 3, 3, 3, 3, 8))?.admission(),
+        EvidenceAdmission::Admitted
+    );
+    assert_eq!(
+        store.admit(record(5, 6, 3, 4, 4, 3, 8))?.admission(),
+        EvidenceAdmission::Admitted
+    );
+    assert_eq!(
+        store.admit(record(7, 8, 3, 5, 5, 3, 8))?.admission(),
+        EvidenceAdmission::ReplayCapacityExhausted
+    );
+    assert_eq!(store.replay_marker_len(), 3);
+    assert_eq!(store.counters().replay_capacity_rejections(), 2);
+    Ok(())
+}
+
+#[test]
+fn malformed_record_sizes_fail_closed_without_state() {
+    let mut store = ProvisionalEvidenceStore::new(limits(4, 16, 4, 8));
+
+    assert_eq!(
+        store.admit(record(1, 2, 3, 1, 1, 3, 0)),
+        Err(EvidenceError::EmptyReceipt)
+    );
+    assert_eq!(
+        store.admit(record(1, 2, 3, 2, 2, 3, 9)),
+        Err(EvidenceError::ReceiptTooLarge { bytes: 9, limit: 8 })
+    );
+    assert!(store.is_empty());
+    assert_eq!(store.replay_marker_len(), 0);
+    assert_eq!(store.counters().rejected_records(), 2);
+}
+
+#[test]
 fn snapshot_restore_skips_invalid_records_without_hiding_valid_records() -> Result<(), EvidenceError>
 {
     let records = vec![

@@ -29,6 +29,7 @@ use crate::measure::EvidenceCollectorIdentity;
 use crate::measure::EvidenceStorage;
 use crate::measure::MeasureStorage;
 use crate::measure::PeriodicMeasure;
+use crate::measure::UnavailableEvidenceStorage;
 use crate::onion::OnionEntryGuardStorage;
 use crate::prelude::wasm_export;
 use crate::processor::Processor;
@@ -183,7 +184,8 @@ impl Provider {
     ) -> Result<Provider> {
         let entry_storage = entry_storage.unwrap_or_else(|| Box::new(MemStorage::new()));
         let measure_storage = measure_storage.unwrap_or_else(|| Box::new(MemStorage::new()));
-        let evidence_storage = evidence_storage.unwrap_or_else(|| Box::new(MemStorage::new()));
+        let evidence_storage = evidence_storage
+            .unwrap_or_else(|| Box::new(UnavailableEvidenceStorage) as EvidenceStorage);
         let onion_entry_guard_storage =
             onion_entry_guard_storage.unwrap_or_else(|| Box::new(MemStorage::new()));
         let replay_storage = replay_storage.unwrap_or_else(|| Box::new(MemStorage::new()));

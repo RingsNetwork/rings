@@ -206,6 +206,10 @@ browser nodes. Invalid persisted entries are skipped independently so one malfor
 hide valid evidence. Fixed-size replay markers have separate global and per-beneficiary count
 bounds. Receipt eviction reduces later evidence availability but leaves its replay marker intact;
 if marker capacity is exhausted, new keys fail closed instead of displacing live replay state.
+Browser provider construction also fails closed if its dedicated IndexedDB evidence store cannot
+be opened; it never silently substitutes process-local memory for the crash-recovery assumption.
+Provider/measurement constructors without an explicit durable evidence backend leave receipt
+collection disabled: probes still serve liveness, but evidence admission cannot return success.
 
 Receipt admission and its replay marker are committed to the separate evidence storage before the
 admission returns success; a storage failure rolls the in-memory transition back. Consequently a

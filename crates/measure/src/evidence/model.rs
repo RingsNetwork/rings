@@ -1,7 +1,9 @@
 //! Executable model and production refinement for the evidence-store relation.
 //!
 //! The finite candidate set contains an exact duplicate, a freshness conflict,
-//! pair-local and global pressure, an oversized record, and an empty record.
+//! pair-local and global pressure, distinct beneficiaries, replay-capacity and
+//! clock-regression schedules, and an empty record. Structural size rejection
+//! is covered by the pure-store tests without multiplying the state space here.
 //! Stateright explores every candidate ordering and every possible placement of
 //! one hard-crash restart. Each successful admission is already durable, so
 //! every abstract history is replayed through the real
@@ -22,7 +24,8 @@ const CANDIDATE_COUNT: u8 = 7;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct ModelRecord {
-    pair: u8,
+    provider: u8,
+    beneficiary: u8,
     freshness: u8,
     digest: u8,
     observed_at: u8,
@@ -32,7 +35,8 @@ struct ModelRecord {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct ModelMarker {
-    pair: u8,
+    provider: u8,
+    beneficiary: u8,
     freshness: u8,
     digest: u8,
 }
@@ -40,7 +44,8 @@ struct ModelMarker {
 impl From<ModelRecord> for ModelMarker {
     fn from(record: ModelRecord) -> Self {
         Self {
-            pair: record.pair,
+            provider: record.provider,
+            beneficiary: record.beneficiary,
             freshness: record.freshness,
             digest: record.digest,
         }
@@ -51,7 +56,8 @@ const fn candidate(id: u8) -> ModelRecord {
     match id {
         // Candidates 0 and 1 are the same canonical receipt.
         0 | 1 => ModelRecord {
-            pair: 0,
+            provider: 0,
+            beneficiary: 0,
             freshness: 1,
             digest: 0,
             observed_at: 1,
@@ -60,7 +66,8 @@ const fn candidate(id: u8) -> ModelRecord {
         },
         // Same freshness as candidate 0, but a different digest and provider.
         2 => ModelRecord {
-            pair: 1,
+            provider: 1,
+            beneficiary: 0,
             freshness: 1,
             digest: 1,
             observed_at: 1,
@@ -69,7 +76,8 @@ const fn candidate(id: u8) -> ModelRecord {
         },
         // A second record for pair 0 exercises the per-pair bound.
         3 => ModelRecord {
-            pair: 0,
+            provider: 0,
+            beneficiary: 0,
             freshness: 2,
             digest: 2,
             observed_at: 2,
@@ -78,24 +86,29 @@ const fn candidate(id: u8) -> ModelRecord {
         },
         // Distinct pairs exercise the global count and byte bounds.
         4 => ModelRecord {
-            pair: 2,
+            provider: 2,
+            beneficiary: 1,
             freshness: 3,
             digest: 3,
             observed_at: 3,
             bytes: 3,
             replay_floor: 2,
         },
+        // A third provider for beneficiary 0 separates its marker bound from
+        // the global marker bound exercised with the other beneficiaries.
         5 => ModelRecord {
-            pair: 3,
+            provider: 3,
+            beneficiary: 0,
             freshness: 4,
             digest: 4,
             observed_at: 4,
-            bytes: 4,
-            replay_floor: 3,
+            bytes: 3,
+            replay_floor: 1,
         },
         // Empty canonical bytes are structurally invalid.
         _ => ModelRecord {
-            pair: 4,
+            provider: 4,
+            beneficiary: 3,
             freshness: 5,
             digest: 5,
             observed_at: 5,
@@ -194,7 +207,7 @@ impl StoreState {
             self.outcomes.push(Outcome::Conflict(retained));
             return;
         }
-        if self.replay_over_bound_after() {
+        if self.replay_over_bound_after(record.beneficiary) {
             self.counters.replay_capacity_rejections += 1;
             self.outcomes.push(Outcome::ReplayCapacityExhausted);
             return;
@@ -206,9 +219,9 @@ impl StoreState {
         self.records.sort_by_key(|resident| resident.digest);
         self.counters.admitted += 1;
         self.evict_while(
-            |state| state.pair_over_bound(record.pair),
+            |state| state.pair_over_bound(record.provider, record.beneficiary),
             record.digest,
-            Some(record.pair),
+            Some((record.provider, record.beneficiary)),
         );
         self.evict_while(Self::global_over_bound, record.digest, None);
         self.outcomes.push(Outcome::Admitted);
@@ -216,6 +229,14 @@ impl StoreState {
 
     fn advance_replay_floor(&mut self, floor: u8) {
         self.replay_floor = self.replay_floor.max(floor);
+        self.prune_expired_evicted_markers();
+    }
+
+    fn reconcile_restart(&mut self) {
+        self.prune_expired_evicted_markers();
+    }
+
+    fn prune_expired_evicted_markers(&mut self) {
         self.markers.retain(|marker| {
             marker.freshness >= self.replay_floor
                 || self
@@ -225,9 +246,14 @@ impl StoreState {
         });
     }
 
-    fn replay_over_bound_after(&self) -> bool {
+    fn replay_over_bound_after(&self, beneficiary: u8) -> bool {
         let next_global = self.markers.len().saturating_add(1);
-        let next_beneficiary = next_global;
+        let next_beneficiary = self
+            .markers
+            .iter()
+            .filter(|marker| marker.beneficiary == beneficiary)
+            .count()
+            .saturating_add(1);
         next_global > model_limits().max_replay_markers.get()
             || next_beneficiary > model_limits().max_replay_markers_per_beneficiary.get()
     }
@@ -236,14 +262,15 @@ impl StoreState {
         &mut self,
         over_bound: impl Fn(&Self) -> bool,
         candidate_digest: u8,
-        pair: Option<u8>,
+        pair: Option<(u8, u8)>,
     ) {
         while over_bound(self) {
             let victim = self
                 .records
                 .iter()
                 .filter(|record| {
-                    record.digest != candidate_digest && pair.is_none_or(|pair| record.pair == pair)
+                    record.digest != candidate_digest
+                        && pair.is_none_or(|pair| (record.provider, record.beneficiary) == pair)
                 })
                 .min_by_key(|record| (record.observed_at, record.digest))
                 .copied();
@@ -256,11 +283,11 @@ impl StoreState {
         }
     }
 
-    fn pair_over_bound(&self, pair: u8) -> bool {
+    fn pair_over_bound(&self, provider: u8, beneficiary: u8) -> bool {
         let records = self
             .records
             .iter()
-            .filter(|record| record.pair == pair)
+            .filter(|record| record.provider == provider && record.beneficiary == beneficiary)
             .collect::<Vec<_>>();
         records.len() > model_limits().max_records_per_pair.get()
             || records
@@ -287,8 +314,38 @@ impl StoreState {
             self.markers
                 .iter()
                 .skip(index.saturating_add(1))
-                .all(|other| other.freshness != marker.freshness)
+                .all(|other| {
+                    (other.beneficiary, other.freshness) != (marker.beneficiary, marker.freshness)
+                })
         })
+    }
+
+    fn marker_digests_are_unique(&self) -> bool {
+        self.markers.iter().enumerate().all(|(index, marker)| {
+            self.markers
+                .iter()
+                .skip(index.saturating_add(1))
+                .all(|other| other.digest != marker.digest)
+        })
+    }
+
+    fn retained_records_have_markers(&self) -> bool {
+        self.records.iter().all(|record| {
+            self.markers
+                .iter()
+                .any(|marker| marker.digest == record.digest)
+        })
+    }
+
+    fn replay_markers_are_within_bounds(&self) -> bool {
+        self.markers.len() <= model_limits().max_replay_markers.get()
+            && self.markers.iter().all(|marker| {
+                self.markers
+                    .iter()
+                    .filter(|other| other.beneficiary == marker.beneficiary)
+                    .count()
+                    <= model_limits().max_replay_markers_per_beneficiary.get()
+            })
     }
 }
 
@@ -328,17 +385,22 @@ impl Model for EvidenceModel {
             ),
             Property::<Self>::always("global and per-pair hard bounds hold", |_, history| {
                 let state = abstract_replay(history);
-                !state.global_over_bound() && (0..=4).all(|pair| !state.pair_over_bound(pair))
+                !state.global_over_bound()
+                    && (0..=4).all(|provider| {
+                        (0..=3).all(|beneficiary| !state.pair_over_bound(provider, beneficiary))
+                    })
             }),
             Property::<Self>::always("durable replay-marker bounds hold", |_, history| {
-                let state = abstract_replay(history);
-                state.markers.len() <= model_limits().max_replay_markers.get()
-                    && state.markers.len()
-                        <= model_limits().max_replay_markers_per_beneficiary.get()
+                abstract_replay(history).replay_markers_are_within_bounds()
             }),
             Property::<Self>::always("one digest owns each freshness key", |_, history| {
-                abstract_replay(history).freshness_is_unique()
+                let state = abstract_replay(history);
+                state.freshness_is_unique() && state.marker_digests_are_unique()
             }),
+            Property::<Self>::always(
+                "retained evidence always has a replay marker",
+                |_, history| abstract_replay(history).retained_records_have_markers(),
+            ),
             Property::<Self>::always(
                 "an admitted digest is never admitted twice",
                 |_, history| no_digest_is_admitted_twice(history),
@@ -399,7 +461,7 @@ impl Model for EvidenceModel {
                 |_, history| expired_evicted_marker_is_pruned(history),
             ),
             Property::<Self>::sometimes("invalid records are rejected", |_, history| {
-                abstract_replay(history).counters.rejected_records == 2
+                abstract_replay(history).counters.rejected_records > 0
             }),
         ]
     }
@@ -408,8 +470,9 @@ impl Model for EvidenceModel {
 fn abstract_replay(history: &[Action]) -> StoreState {
     let mut state = StoreState::initial();
     for action in history {
-        if let Action::Admit(id) = action {
-            state.admit(candidate(*id));
+        match action {
+            Action::Admit(id) => state.admit(candidate(*id)),
+            Action::CrashRestart => state.reconcile_restart(),
         }
     }
     state
@@ -419,16 +482,18 @@ fn no_digest_is_admitted_twice(history: &[Action]) -> bool {
     let mut state = StoreState::initial();
     let mut admitted = Vec::new();
     for action in history {
-        let Action::Admit(id) = action else {
-            continue;
-        };
-        state.admit(candidate(*id));
-        if state.outcomes.last() == Some(&Outcome::Admitted) {
-            let digest = candidate(*id).digest;
-            if admitted.contains(&digest) {
-                return false;
+        match action {
+            Action::Admit(id) => {
+                state.admit(candidate(*id));
+                if state.outcomes.last() == Some(&Outcome::Admitted) {
+                    let digest = candidate(*id).digest;
+                    if admitted.contains(&digest) {
+                        return false;
+                    }
+                    admitted.push(digest);
+                }
             }
-            admitted.push(digest);
+            Action::CrashRestart => state.reconcile_restart(),
         }
     }
     true
@@ -438,13 +503,15 @@ fn active_admissions_remain_marked(history: &[Action]) -> bool {
     let mut state = StoreState::initial();
     let mut admitted = Vec::new();
     for action in history {
-        let Action::Admit(id) = action else {
-            continue;
-        };
-        let record = candidate(*id);
-        state.admit(record);
-        if state.outcomes.last() == Some(&Outcome::Admitted) {
-            admitted.push(ModelMarker::from(record));
+        match action {
+            Action::Admit(id) => {
+                let record = candidate(*id);
+                state.admit(record);
+                if state.outcomes.last() == Some(&Outcome::Admitted) {
+                    admitted.push(ModelMarker::from(record));
+                }
+            }
+            Action::CrashRestart => state.reconcile_restart(),
         }
     }
     admitted
@@ -456,12 +523,15 @@ fn replay_floor_is_monotonic(history: &[Action]) -> bool {
     let mut state = StoreState::initial();
     let mut prior = state.replay_floor;
     for action in history {
-        if let Action::Admit(id) = action {
-            state.admit(candidate(*id));
-            if state.replay_floor < prior {
-                return false;
+        match action {
+            Action::Admit(id) => {
+                state.admit(candidate(*id));
+                if state.replay_floor < prior {
+                    return false;
+                }
+                prior = state.replay_floor;
             }
-            prior = state.replay_floor;
+            Action::CrashRestart => state.reconcile_restart(),
         }
     }
     true
@@ -472,13 +542,15 @@ fn expired_evicted_marker_is_pruned(history: &[Action]) -> bool {
     let mut prefix = StoreState::initial();
     let mut admitted_first = false;
     for action in history {
-        let Action::Admit(id) = action else {
-            continue;
-        };
-        prefix.admit(candidate(*id));
-        if *id == 0 {
-            admitted_first = prefix.outcomes.last() == Some(&Outcome::Admitted);
-            break;
+        match action {
+            Action::Admit(id) => {
+                prefix.admit(candidate(*id));
+                if *id == 0 {
+                    admitted_first = prefix.outcomes.last() == Some(&Outcome::Admitted);
+                    break;
+                }
+            }
+            Action::CrashRestart => prefix.reconcile_restart(),
         }
     }
     admitted_first
@@ -497,14 +569,19 @@ fn evicted_duplicate_is_rejected(history: &[Action]) -> bool {
     let mut state = StoreState::initial();
     let mut first_was_evicted = false;
     for action in history {
-        let Action::Admit(id) = action else {
-            continue;
-        };
-        if *id == 1 && first_was_evicted {
-            state.admit(candidate(*id));
-            return state.outcomes.last() == Some(&Outcome::Duplicate);
+        match action {
+            Action::Admit(id) => {
+                if *id == 1 && first_was_evicted {
+                    state.admit(candidate(*id));
+                    return matches!(
+                        state.outcomes.last(),
+                        Some(Outcome::Duplicate | Outcome::Stale)
+                    );
+                }
+                state.admit(candidate(*id));
+            }
+            Action::CrashRestart => state.reconcile_restart(),
         }
-        state.admit(candidate(*id));
         first_was_evicted = state
             .markers
             .iter()
@@ -523,7 +600,7 @@ fn model_limits() -> EvidenceLimits {
         max_bytes: nonzero(5),
         max_records_per_pair: nonzero(1),
         max_bytes_per_pair: nonzero(3),
-        max_replay_markers: nonzero(2),
+        max_replay_markers: nonzero(3),
         max_replay_markers_per_beneficiary: nonzero(2),
     }
 }
@@ -537,8 +614,13 @@ fn effective_record_limit() -> usize {
 
 fn production_record(record: ModelRecord) -> ProvisionalEvidenceRecord<u8> {
     ProvisionalEvidenceRecord::new(
-        EvidenceAccountPair::new(record.pair, 9),
-        EvidenceFreshnessKey::new(1, 9, u64::from(record.freshness), [record.freshness; 32]),
+        EvidenceAccountPair::new(record.provider, record.beneficiary),
+        EvidenceFreshnessKey::new(
+            1,
+            record.beneficiary,
+            u64::from(record.freshness),
+            [record.freshness; 32],
+        ),
         EvidenceDigest::new([record.digest.saturating_add(1); 32]),
         vec![record.digest; usize::from(record.bytes)],
         UnixTime::from_secs(u64::from(record.observed_at)),
@@ -563,7 +645,8 @@ fn projection(store: &ProvisionalEvidenceStore<u8>, outcomes: Vec<Outcome>) -> S
         .records()
         .iter()
         .map(|record| ModelRecord {
-            pair: *record.pair().provider(),
+            provider: *record.pair().provider(),
+            beneficiary: *record.pair().beneficiary(),
             freshness: u8::try_from(record.freshness().epoch_slot()).unwrap_or(u8::MAX),
             digest: record.digest().into_bytes()[0].saturating_sub(1),
             observed_at: u8::try_from(record.observed_at().as_secs()).unwrap_or(u8::MAX),
@@ -576,7 +659,8 @@ fn projection(store: &ProvisionalEvidenceStore<u8>, outcomes: Vec<Outcome>) -> S
         .replay_markers
         .iter()
         .map(|marker| ModelMarker {
-            pair: *marker.pair().provider(),
+            provider: *marker.pair().provider(),
+            beneficiary: *marker.pair().beneficiary(),
             freshness: u8::try_from(marker.freshness().epoch_slot()).unwrap_or(u8::MAX),
             digest: marker.digest().into_bytes()[0].saturating_sub(1),
         })

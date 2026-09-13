@@ -97,6 +97,52 @@ pub type EvidenceStorage = Box<dyn KvStorageInterface<EvidenceSnapshot<Did>>>;
 #[cfg(not(all(feature = "browser", target_family = "wasm")))]
 pub type EvidenceStorage = Box<dyn KvStorageInterface<EvidenceSnapshot<Did>> + Sync + Send>;
 
+/// Evidence backend used when a provider did not configure durable receipt storage.
+///
+/// Reads expose an empty initial state so measurement-only runtimes can start, but every write
+/// fails. Consequently the admission adapter rolls back and never returns `Admitted` under a
+/// process-local store that cannot refine the crash-recovery model.
+pub(crate) struct UnavailableEvidenceStorage;
+
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
+impl KvStorageInterface<EvidenceSnapshot<Did>> for UnavailableEvidenceStorage {
+    async fn get(&self, _key: &str) -> rings_core::error::Result<Option<EvidenceSnapshot<Did>>> {
+        Ok(None)
+    }
+
+    async fn put(
+        &self,
+        _key: &str,
+        value: &EvidenceSnapshot<Did>,
+    ) -> rings_core::error::Result<()> {
+        if value.records.is_empty()
+            && value.replay_markers.is_empty()
+            && value.replay_floor == 0
+            && value.counters == EvidenceCounters::default()
+        {
+            return Ok(());
+        }
+        Err(EvidenceError::StorageUnavailable.into())
+    }
+
+    async fn get_all(&self) -> rings_core::error::Result<Vec<(String, EvidenceSnapshot<Did>)>> {
+        Ok(Vec::new())
+    }
+
+    async fn remove(&self, _key: &str) -> rings_core::error::Result<()> {
+        Ok(())
+    }
+
+    async fn clear(&self) -> rings_core::error::Result<()> {
+        Ok(())
+    }
+
+    async fn count(&self) -> rings_core::error::Result<u32> {
+        Ok(0)
+    }
+}
+
 /// Runtime identity that owns one persisted provisional-evidence collection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EvidenceCollectorIdentity {
@@ -224,10 +270,12 @@ impl PeriodicMeasure {
     /// On native targets this captures the active Tokio runtime handle. The
     /// constructor returns `MeasureRuntimeError::RuntimeUnavailable` instead
     /// of panicking when called outside a live runtime.
+    /// Provisional receipt admission is disabled; use [`Self::new_with_evidence_storage`]
+    /// when successful receipt admission must survive process restart.
     pub async fn new(storage: MeasureStorage) -> Result<Self, MeasureRuntimeError> {
         Self::new_with_clock_and_evidence(
             storage,
-            Box::new(rings_core::storage::MemStorage::new()),
+            Box::new(UnavailableEvidenceStorage),
             None,
             Arc::new(SystemMeasureClock),
         )
@@ -235,6 +283,9 @@ impl PeriodicMeasure {
     }
 
     /// Load snapshots and bind restored evidence to this local collector.
+    ///
+    /// Pre: `evidence_storage` preserves a successful `put` across process restart. A volatile
+    /// test backend is valid for bounded tests, but does not satisfy the crash-recovery claim.
     pub async fn new_with_evidence_storage(
         storage: MeasureStorage,
         evidence_storage: EvidenceStorage,

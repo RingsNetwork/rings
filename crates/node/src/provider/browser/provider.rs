@@ -435,18 +435,14 @@ async fn open_browser_measure_storage(storage_name: &str) -> Option<MeasureStora
     }
 }
 
-async fn open_browser_evidence_storage(storage_name: &str) -> Option<EvidenceStorage> {
-    match IdbStorage::new_with_cap_and_name(2, storage_name).await {
-        Ok(storage) => Some(Box::new(storage) as EvidenceStorage),
-        Err(source) => {
-            tracing::warn!(
-                storage_name = %storage_name,
-                error = %source,
-                "browser provisional-evidence IndexedDB unavailable; falling back to memory"
-            );
-            None
-        }
-    }
+async fn open_browser_evidence_storage(storage_name: &str) -> NodeResult<EvidenceStorage> {
+    IdbStorage::new_with_cap_and_name(2, storage_name)
+        .await
+        .map(|storage| Box::new(storage) as EvidenceStorage)
+        .map_err(|source| Error::BrowserStorageOpen {
+            name: storage_name.to_string(),
+            source,
+        })
 }
 
 async fn open_browser_entry_guard_storage(storage_name: &str) -> Option<OnionEntryGuardStorage> {
@@ -487,8 +483,10 @@ impl Provider {
         let entry_storage = open_browser_entry_storage_or_memory(&storage_name).await;
         let measure_storage =
             open_browser_measure_storage(&format!("{storage_name}/measure")).await;
-        let evidence_storage =
-            open_browser_evidence_storage(&format!("{storage_name}/provisional-evidence-v1")).await;
+        let evidence_storage = Some(
+            open_browser_evidence_storage(&format!("{storage_name}/provisional-evidence-v1"))
+                .await?,
+        );
         let onion_entry_guard_storage =
             open_browser_entry_guard_storage(&format!("{storage_name}/onion-entry-guards")).await;
         let replay_storage =
@@ -546,7 +544,7 @@ impl Provider {
             let entry_storage = open_browser_entry_storage_or_memory("rings-node").await;
             let measure_storage = open_browser_measure_storage("rings-node/measure").await;
             let evidence_storage =
-                open_browser_evidence_storage("rings-node/provisional-evidence-v1").await;
+                Some(open_browser_evidence_storage("rings-node/provisional-evidence-v1").await?);
             let onion_entry_guard_storage =
                 open_browser_entry_guard_storage("rings-node/onion-entry-guards").await;
             let replay_storage =
@@ -594,7 +592,7 @@ impl Provider {
             let entry_storage = open_browser_entry_storage_or_memory("rings-node").await;
             let measure_storage = open_browser_measure_storage("rings-node/measure").await;
             let evidence_storage =
-                open_browser_evidence_storage("rings-node/provisional-evidence-v1").await;
+                Some(open_browser_evidence_storage("rings-node/provisional-evidence-v1").await?);
             let onion_entry_guard_storage =
                 open_browser_entry_guard_storage("rings-node/onion-entry-guards").await;
             let replay_storage =
