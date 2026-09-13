@@ -510,8 +510,9 @@ fn valid_persisted_evidence(record: &ProvisionalEvidenceRecord<Did>) -> bool {
         return false;
     };
     let claim = &receipt.claim;
+    let observed_at_ms = u128::from(record.observed_at().as_secs()) * 1_000;
     receipt
-        .verify_crypto(record.freshness().network_id())
+        .verify_live_at(record.freshness().network_id(), observed_at_ms)
         .is_ok()
         && claim.network_id == record.freshness().network_id()
         && claim.provider_account == *record.pair().provider()

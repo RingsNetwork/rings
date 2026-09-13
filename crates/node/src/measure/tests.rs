@@ -355,21 +355,24 @@ async fn persistence_restores_complete_credit_and_epoch_state() {
     );
 }
 
-fn provisional_evidence_record() -> ProvisionalEvidenceRecord<Did> {
+fn provisional_evidence_record(nonce: u8) -> ProvisionalEvidenceRecord<Did> {
     let provider =
         rings_core::session::SessionSk::new_with_seckey(&rings_core::ecc::SecretKey::random())
             .unwrap_or_else(|error| panic!("provider session must build: {error}"));
     let beneficiary =
         rings_core::session::SessionSk::new_with_seckey(&rings_core::ecc::SecretKey::random())
             .unwrap_or_else(|error| panic!("beneficiary session must build: {error}"));
+    let observed_at_ms = rings_core::utils::get_epoch_ms();
+    let observed_at_seconds = u64::try_from(observed_at_ms / 1_000)
+        .unwrap_or_else(|_| panic!("current observation time must fit whole seconds"));
     let claim = ProvisionalServiceClaimV1::probe(
         7,
         provider.account_did(),
         beneficiary.account_did(),
-        ProvisionalEpochV1 { slot: 3 },
-        [4; 32],
-        [5; 32],
-        [6; 32],
+        ProvisionalEpochV1::from_unix_seconds(observed_at_seconds),
+        [nonce; 32],
+        [nonce.wrapping_add(1); 32],
+        [nonce.wrapping_add(2); 32],
     );
     let provider_attestation = claim
         .sign_provider(MessageSigner::new(&provider, 7))
@@ -400,8 +403,50 @@ fn provisional_evidence_record() -> ProvisionalEvidenceRecord<Did> {
         receipt
             .canonical_bytes()
             .unwrap_or_else(|error| panic!("receipt must encode: {error}")),
-        UnixTime::from_secs(10),
+        UnixTime::from_secs(observed_at_seconds),
     )
+}
+
+#[test]
+fn persisted_evidence_revalidates_observation_time_and_isolates_invalid_neighbors() {
+    let valid = provisional_evidence_record(4);
+    let source = provisional_evidence_record(8);
+    let future_observation =
+        UnixTime::from_secs(source.observed_at().as_secs().saturating_add(900));
+    let malformed = ProvisionalEvidenceRecord::new(
+        *source.pair(),
+        *source.freshness(),
+        source.digest(),
+        source.canonical_receipt().to_vec(),
+        future_observation,
+    );
+    assert!(valid_persisted_evidence(&valid));
+    assert!(!valid_persisted_evidence(&malformed));
+
+    let mut snapshot_store = ProvisionalEvidenceStore::new(EvidenceLimits::default());
+    snapshot_store
+        .admit(malformed)
+        .unwrap_or_else(|error| panic!("malformed fixture must enter the raw snapshot: {error}"));
+    snapshot_store
+        .admit(valid.clone())
+        .unwrap_or_else(|error| panic!("valid fixture must enter the raw snapshot: {error}"));
+    let (restored, report) = ProvisionalEvidenceStore::from_snapshot_with_validator(
+        snapshot_store.snapshot(),
+        EvidenceLimits::default(),
+        valid_persisted_evidence,
+    )
+    .unwrap_or_else(|error| panic!("snapshot must restore valid neighbors: {error}"));
+
+    assert_eq!(report.rejected_records(), 1);
+    assert_eq!(restored.len(), 1);
+    assert_eq!(
+        restored
+            .page(None, nonzero_usize(2))
+            .records()
+            .first()
+            .map(ProvisionalEvidenceRecord::digest),
+        Some(valid.digest())
+    );
 }
 
 #[tokio::test]
@@ -436,7 +481,7 @@ async fn native_restart_restores_non_empty_provisional_evidence() {
     .unwrap_or_else(|error| panic!("measurement must initialize: {error}"));
     assert!(matches!(
         measure
-            .admit_provisional_evidence(provisional_evidence_record())
+            .admit_provisional_evidence(provisional_evidence_record(4))
             .await
             .map(|report| report.admission()),
         Ok(rings_measure::EvidenceAdmission::Admitted)
