@@ -433,6 +433,44 @@ pub enum OriginQuotaArithmeticError {
     ByteCostOverflow,
 }
 
+/// Failure at the final-destination origin-quota boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum OriginQuotaError {
+    /// A verified origin exhausted its message-rate allowance.
+    #[error("Origin quota message rate exhausted for {key:?}")]
+    MessageRateExhausted {
+        /// Origin, destination, overlay, and logical lane sharing the allowance.
+        key: OriginQuotaKey,
+    },
+    /// A verified origin exhausted its byte-rate allowance.
+    #[error(
+        "Origin quota byte rate exhausted for {key:?} while admitting {requested_bytes} bytes"
+    )]
+    ByteRateExhausted {
+        /// Origin, destination, overlay, and logical lane sharing the allowance.
+        key: OriginQuotaKey,
+        /// Deterministic logical-message bytes requested.
+        requested_bytes: usize,
+    },
+    /// A lane's bounded origin table had no fully replenished record safe to reuse.
+    #[error("Origin quota table for {lane:?} exhausted its {capacity} records")]
+    TableCapacityExhausted {
+        /// Logical lane whose record bound was reached.
+        lane: OriginQuotaLane,
+        /// Maximum retained records for that lane.
+        capacity: usize,
+    },
+    /// The pure origin-quota transition could not be evaluated safely.
+    #[error("Origin quota arithmetic failed for {key:?}: {source}")]
+    Arithmetic {
+        /// Origin, destination, overlay, and logical lane being evaluated.
+        key: OriginQuotaKey,
+        /// Typed arithmetic or monotonic-clock failure.
+        #[source]
+        source: OriginQuotaArithmeticError,
+    },
+}
+
 #[derive(Debug)]
 pub(super) enum OriginQuotaAdmissionError {
     Verdict(OriginQuotaRejection),
@@ -518,7 +556,7 @@ impl OriginQuotaTable {
             .count();
         let evicted = if lane_records >= lane_config.max_records {
             let victim = self.safe_victim(key.lane, lane_config, now)?;
-            let Some((victim_key, _)) = victim else {
+            let Some(victim_key) = victim else {
                 return Err(OriginQuotaAdmissionError::Verdict(
                     OriginQuotaRejection::Capacity {
                         capacity: lane_config.max_records,
@@ -544,7 +582,7 @@ impl OriginQuotaTable {
         lane: OriginQuotaLane,
         config: OriginQuotaLaneConfig,
         now: OriginQuotaInstant,
-    ) -> Result<Option<(OriginQuotaKey, OriginQuotaInstant)>, OriginQuotaAdmissionError> {
+    ) -> Result<Option<OriginQuotaKey>, OriginQuotaAdmissionError> {
         let mut victim = None;
         for (key, quota) in self.records.iter().filter(|(key, _)| key.lane == lane) {
             if !quota
@@ -553,12 +591,12 @@ impl OriginQuotaTable {
             {
                 continue;
             }
-            let candidate = (*key, quota.last_refill);
+            let candidate = (quota.last_refill, *key);
             if victim.is_none_or(|current| candidate < current) {
                 victim = Some(candidate);
             }
         }
-        Ok(victim)
+        Ok(victim.map(|(_, key)| key))
     }
 
     #[cfg(test)]
@@ -679,22 +717,24 @@ pub(super) fn quota_admission_error(
 ) -> crate::error::Error {
     match error {
         OriginQuotaAdmissionError::Verdict(OriginQuotaRejection::MessageRate) => {
-            crate::error::Error::OriginQuotaMessageRateExhausted { key }
+            OriginQuotaError::MessageRateExhausted { key }.into()
         }
         OriginQuotaAdmissionError::Verdict(OriginQuotaRejection::ByteRate) => {
-            crate::error::Error::OriginQuotaByteRateExhausted {
+            OriginQuotaError::ByteRateExhausted {
                 key,
                 requested_bytes: byte_cost,
             }
+            .into()
         }
         OriginQuotaAdmissionError::Verdict(OriginQuotaRejection::Capacity { capacity }) => {
-            crate::error::Error::OriginQuotaTableCapacityExhausted {
+            OriginQuotaError::TableCapacityExhausted {
                 lane: key.lane,
                 capacity,
             }
+            .into()
         }
         OriginQuotaAdmissionError::Arithmetic(source) => {
-            crate::error::Error::OriginQuotaArithmetic { key, source }
+            OriginQuotaError::Arithmetic { key, source }.into()
         }
     }
 }
@@ -838,14 +878,14 @@ mod tests {
         let mut table = OriginQuotaTable::new(OriginQuotaConfig::new(lane, lane, lane, lane));
         table
             .reserve(
-                key(1, OriginQuotaLane::Application),
+                key(2, OriginQuotaLane::Application),
                 1,
                 OriginQuotaInstant::ZERO,
             )
             .expect("first record is admitted");
         table
             .reserve(
-                key(2, OriginQuotaLane::Application),
+                key(1, OriginQuotaLane::Application),
                 1,
                 OriginQuotaInstant::from_nanos(1),
             )
@@ -865,12 +905,12 @@ mod tests {
             .reserve(
                 key(3, OriginQuotaLane::Application),
                 1,
-                OriginQuotaInstant::from_nanos(NANOS_PER_SECOND),
+                OriginQuotaInstant::from_nanos(NANOS_PER_SECOND + 1),
             )
             .expect("oldest fully replenished record is reusable");
         assert_eq!(table.len(), 2);
-        assert!(table.get(key(1, OriginQuotaLane::Application)).is_none());
-        assert!(table.get(key(2, OriginQuotaLane::Application)).is_some());
+        assert!(table.get(key(1, OriginQuotaLane::Application)).is_some());
+        assert!(table.get(key(2, OriginQuotaLane::Application)).is_none());
         assert!(table.get(key(3, OriginQuotaLane::Application)).is_some());
     }
 

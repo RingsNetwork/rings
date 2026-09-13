@@ -16,7 +16,11 @@ fn stream(origin: u32) -> StreamKey {
 }
 
 fn quota_config(message_burst: u64) -> OriginQuotaConfig {
-    let lane = OriginQuotaLaneConfig::new(1, message_burst, 1_000, 1_000, 8)
+    quota_config_with_capacity(message_burst, 8)
+}
+
+fn quota_config_with_capacity(message_burst: u64, max_records: usize) -> OriginQuotaConfig {
+    let lane = OriginQuotaLaneConfig::new(1, message_burst, 1_000, 1_000, max_records)
         .expect("test quota configuration is valid");
     OriginQuotaConfig::new(lane, lane, lane, lane)
 }
@@ -104,7 +108,9 @@ async fn quota_rejection_does_not_advance_replay_and_retry_can_commit() -> Resul
     );
     assert!(matches!(
         admit_at(&runtime, key, 1, digest(2), 0).await,
-        Err(Error::OriginQuotaMessageRateExhausted { .. })
+        Err(Error::OriginQuota(
+            crate::message::OriginQuotaError::MessageRateExhausted { .. }
+        ))
     ));
     assert_eq!(
         runtime
@@ -116,6 +122,41 @@ async fn quota_rejection_does_not_advance_replay_and_retry_can_commit() -> Resul
     assert_eq!(
         admit_at(&runtime, key, 1, digest(2), ONE_SECOND).await?,
         SequenceVerdict::Advance
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn capacity_rejection_preserves_replay_until_an_idle_slot_is_safe() -> Result<()> {
+    let runtime = TransactionReplay::new_with_quota(
+        Box::new(MemStorage::<ReplaySnapshot>::new()),
+        quota_config_with_capacity(1, 1),
+    );
+    let first = stream(1);
+    let waiting = stream(2);
+    assert_eq!(
+        admit_at(&runtime, first, 0, digest(1), 0).await?,
+        SequenceVerdict::First
+    );
+    assert!(matches!(
+        admit_at(&runtime, waiting, 0, digest(2), 0).await,
+        Err(Error::OriginQuota(
+            crate::message::OriginQuotaError::TableCapacityExhausted {
+                lane: OriginQuotaLane::Application,
+                capacity: 1,
+            }
+        ))
+    ));
+    assert_eq!(
+        runtime
+            .quota_counters()
+            .lane(OriginQuotaLane::Application)
+            .capacity_exhausted,
+        1
+    );
+    assert_eq!(
+        admit_at(&runtime, waiting, 0, digest(2), ONE_SECOND).await?,
+        SequenceVerdict::First
     );
     Ok(())
 }

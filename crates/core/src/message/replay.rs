@@ -575,7 +575,7 @@ impl TransactionReplay {
         .await
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(target_family = "wasm")))]
     pub(crate) async fn quota_record_count_for_test(&self) -> usize {
         self.state.lock().await.quota.len()
     }

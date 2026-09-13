@@ -118,6 +118,7 @@ mod tests {
     use crate::message::Message;
     use crate::message::MessageSigner;
     use crate::message::OriginQuotaConfig;
+    use crate::message::OriginQuotaError;
     use crate::message::OriginQuotaLaneConfig;
     use crate::session::SessionSk;
     use crate::storage::MemStorage;
@@ -231,7 +232,9 @@ mod tests {
         assert!(delivery.deliver(&first).await.is_err());
         assert!(matches!(
             delivery.deliver(&second).await,
-            Err(Error::OriginQuotaMessageRateExhausted { .. })
+            Err(Error::OriginQuota(
+                OriginQuotaError::MessageRateExhausted { .. }
+            ))
         ));
         assert_eq!(callback.validations.load(Ordering::Relaxed), 1);
     }

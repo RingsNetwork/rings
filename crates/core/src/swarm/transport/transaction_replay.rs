@@ -25,7 +25,7 @@ impl SwarmTransport {
         self.transaction_replay.quota_counters()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(target_family = "wasm")))]
     pub(crate) async fn origin_quota_record_count_for_test(&self) -> usize {
         self.transaction_replay.quota_record_count_for_test().await
     }

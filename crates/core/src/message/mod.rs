@@ -32,6 +32,7 @@ pub use quota::OriginQuotaArithmeticError;
 pub use quota::OriginQuotaConfig;
 pub use quota::OriginQuotaConfigError;
 pub use quota::OriginQuotaCounters;
+pub use quota::OriginQuotaError;
 pub use quota::OriginQuotaInstant;
 pub use quota::OriginQuotaKey;
 pub use quota::OriginQuotaLane;
