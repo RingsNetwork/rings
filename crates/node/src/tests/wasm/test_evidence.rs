@@ -4,9 +4,9 @@ use rings_core::dht::Did;
 use rings_core::ecc::SecretKey;
 use rings_core::measure::Measure;
 use rings_core::message::MessageSigner;
-use rings_core::message::ProvisionalEpochV1;
-use rings_core::message::ProvisionalServiceClaimV1;
-use rings_core::message::ProvisionalServiceReceiptV1;
+use rings_core::message::ProvisionalEpoch;
+use rings_core::message::ProvisionalServiceClaim;
+use rings_core::message::ProvisionalServiceReceipt;
 use rings_core::session::SessionSk;
 use rings_core::storage::idb::IdbStorage;
 use rings_measure::EvidenceAccountPair;
@@ -25,11 +25,11 @@ fn evidence_fixture() -> (ProvisionalEvidenceRecord<Did>, EvidenceCollectorIdent
     let provider = SessionSk::new_with_seckey(&SecretKey::random()).unwrap();
     let beneficiary = SessionSk::new_with_seckey(&SecretKey::random()).unwrap();
     let observed_at_seconds = u64::try_from(rings_core::utils::get_epoch_ms() / 1_000).unwrap();
-    let claim = ProvisionalServiceClaimV1::probe(
+    let claim = ProvisionalServiceClaim::probe(
         9,
         provider.account_did(),
         beneficiary.account_did(),
-        ProvisionalEpochV1::from_unix_seconds(observed_at_seconds),
+        ProvisionalEpoch::from_unix_seconds(observed_at_seconds),
         [5; 32],
         [6; 32],
         [7; 32],
@@ -40,7 +40,7 @@ fn evidence_fixture() -> (ProvisionalEvidenceRecord<Did>, EvidenceCollectorIdent
     let beneficiary_attestation = claim
         .sign_beneficiary(MessageSigner::new(&beneficiary, 9))
         .unwrap();
-    let receipt = ProvisionalServiceReceiptV1::new(
+    let receipt = ProvisionalServiceReceipt::new(
         claim.clone(),
         provider_attestation,
         beneficiary_attestation,

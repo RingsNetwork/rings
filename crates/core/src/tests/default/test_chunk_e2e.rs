@@ -901,7 +901,7 @@ async fn test_dht_control_frame_runs_while_storage_transfer_waits_for_delivery()
 
     node1
         .swarm
-        .send_message(Message::ProbeRequestV1(test_probe_request(7)), node2.did())
+        .send_message(Message::ProbeRequest(test_probe_request(7)), node2.did())
         .await?;
     assert_eq!(
         dummy_controlled::sent_count(),
@@ -914,7 +914,7 @@ async fn test_dht_control_frame_runs_while_storage_transfer_waits_for_delivery()
     assert!(
         matches!(
             second.transaction.data::<Message>()?,
-            Message::ProbeRequestV1(_)
+            Message::ProbeRequest(_)
         ),
         "new control work must be admitted before any new bulk frame"
     );

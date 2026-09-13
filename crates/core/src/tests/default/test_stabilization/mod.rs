@@ -37,7 +37,7 @@ use crate::measure::PeerQuality;
 use crate::measure::PeerQualityThresholds;
 use crate::measure::ProvisionalEvidenceRecord;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-use crate::message::ProvisionalServiceReceiptV1;
+use crate::message::ProvisionalServiceReceipt;
 use crate::session::SessionSk;
 use crate::storage::MemStorage;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
@@ -401,7 +401,7 @@ async fn test_liveness_probe_round_trip_admits_provider_evidence() -> Result<()>
         .records()
         .first()
         .ok_or_else(|| Error::InvalidMessage("provider admitted no probe receipt".to_string()))?;
-    let decoded = ProvisionalServiceReceiptV1::from_canonical_bytes(receipt.canonical_receipt())?;
+    let decoded = ProvisionalServiceReceipt::from_canonical_bytes(receipt.canonical_receipt())?;
     let counters = provider_measure.provisional_evidence_counters().await;
 
     assert_eq!(page.records().len(), 1);

@@ -5,7 +5,7 @@ use super::pending::ActiveConnectionSet;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
-use crate::message::ProbeRequestV1;
+use crate::message::ProbeRequest;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 use crate::utils::get_epoch_ms_i64;
@@ -28,7 +28,7 @@ struct PeerLiveness {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PendingProbe {
     tx_id: uuid::Uuid,
-    request: ProbeRequestV1,
+    request: ProbeRequest,
 }
 
 #[derive(Clone, Copy)]
@@ -76,7 +76,7 @@ impl PeerLiveness {
         self.unanswered_probe_since_ms.get_or_insert(now_ms);
     }
 
-    fn set_pending_probe(&mut self, tx_id: uuid::Uuid, request: ProbeRequestV1) {
+    fn set_pending_probe(&mut self, tx_id: uuid::Uuid, request: ProbeRequest) {
         self.pending_probe = Some(PendingProbe { tx_id, request });
     }
 
@@ -84,7 +84,7 @@ impl PeerLiveness {
         &mut self,
         now_ms: i64,
         tx_id: uuid::Uuid,
-        request: ProbeRequestV1,
+        request: ProbeRequest,
     ) -> bool {
         if self.pending_probe != Some(PendingProbe { tx_id, request }) {
             return false;
@@ -93,13 +93,13 @@ impl PeerLiveness {
         true
     }
 
-    fn cancel_pending_probe(&mut self, tx_id: uuid::Uuid, request: ProbeRequestV1) {
+    fn cancel_pending_probe(&mut self, tx_id: uuid::Uuid, request: ProbeRequest) {
         if self.pending_probe == Some(PendingProbe { tx_id, request }) {
             self.pending_probe = None;
         }
     }
 
-    fn consume_pending_probe(&mut self, tx_id: uuid::Uuid, request: ProbeRequestV1) -> bool {
+    fn consume_pending_probe(&mut self, tx_id: uuid::Uuid, request: ProbeRequest) -> bool {
         if self.pending_probe != Some(PendingProbe { tx_id, request }) {
             return false;
         }
@@ -195,7 +195,7 @@ impl PeerLivenessMap {
         peer: Did,
         generation: u64,
         tx_id: uuid::Uuid,
-        request: ProbeRequestV1,
+        request: ProbeRequest,
     ) {
         match self.peers.get_mut(&peer) {
             Some(liveness) if liveness.generation == generation => {
@@ -214,7 +214,7 @@ impl PeerLivenessMap {
         generation: u64,
         now_ms: i64,
         tx_id: uuid::Uuid,
-        request: ProbeRequestV1,
+        request: ProbeRequest,
     ) -> bool {
         self.peers
             .get_mut(&peer)
@@ -227,7 +227,7 @@ impl PeerLivenessMap {
         peer: Did,
         generation: u64,
         tx_id: uuid::Uuid,
-        request: ProbeRequestV1,
+        request: ProbeRequest,
     ) {
         if let Some(liveness) = self
             .peers
@@ -243,7 +243,7 @@ impl PeerLivenessMap {
         peer: Did,
         generation: u64,
         tx_id: uuid::Uuid,
-        request: ProbeRequestV1,
+        request: ProbeRequest,
     ) -> bool {
         self.peers
             .get_mut(&peer)
@@ -381,7 +381,7 @@ impl SwarmTransport {
         &self,
         attempt: PendingConnectionAttempt,
         tx_id: uuid::Uuid,
-        request: ProbeRequestV1,
+        request: ProbeRequest,
     ) -> Result<bool> {
         self.with_active_slot(attempt, || {
             self.peer_liveness()?
@@ -396,7 +396,7 @@ impl SwarmTransport {
         attempt: PendingConnectionAttempt,
         now_ms: i64,
         tx_id: uuid::Uuid,
-        request: ProbeRequestV1,
+        request: ProbeRequest,
     ) -> Result<bool> {
         self.with_active_slot(attempt, || {
             Ok(self.peer_liveness()?.mark_probe_sent(
@@ -414,7 +414,7 @@ impl SwarmTransport {
         &self,
         attempt: PendingConnectionAttempt,
         tx_id: uuid::Uuid,
-        request: ProbeRequestV1,
+        request: ProbeRequest,
     ) -> Result<()> {
         self.with_active_slot(attempt, || {
             self.peer_liveness()?.cancel_pending_probe(
@@ -432,7 +432,7 @@ impl SwarmTransport {
         &self,
         provider: Did,
         tx_id: uuid::Uuid,
-        request: ProbeRequestV1,
+        request: ProbeRequest,
     ) -> Result<bool> {
         self.with_connection_lifecycle(|| {
             let Some(attempt) = self.active_attempt(provider)? else {

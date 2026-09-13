@@ -17,12 +17,12 @@ use crate::measure::MeasurementEvent;
 use crate::measure::PeerMeasurement;
 use crate::measure::PeerMeasurementPage;
 use crate::measure::PeerQuality;
-use crate::message::ProvisionalServiceReceiptV1;
+use crate::message::ProvisionalServiceReceipt;
 
 impl SwarmTransport {
     pub(crate) async fn admit_provisional_receipt(
         &self,
-        receipt: &ProvisionalServiceReceiptV1,
+        receipt: &ProvisionalServiceReceipt,
         observed_at_ms: u128,
     ) -> crate::error::Result<()> {
         receipt.verify_live_at(self.network_id, observed_at_ms)?;
@@ -30,7 +30,7 @@ impl SwarmTransport {
         let digest = EvidenceDigest::new(receipt.digest()?.into_bytes());
         let observed_seconds = u64::try_from(observed_at_ms / 1_000)
             .map_err(|_| crate::message::ServiceReceiptError::ObservationTimeOverflow)?;
-        let replay_floor = crate::message::ProvisionalEpochV1::from_unix_seconds(observed_seconds)
+        let replay_floor = crate::message::ProvisionalEpoch::from_unix_seconds(observed_seconds)
             .slot
             .saturating_sub(1);
         let claim = &receipt.claim;

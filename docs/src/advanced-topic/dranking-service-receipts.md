@@ -5,14 +5,14 @@ authenticated liveness probe. It is a collection and persistence vertical slice.
 finalized epoch ledger, trust algebra, committee protocol, or routing policy described by the full
 DRanking design.
 
-## ProbeV1 flow
+## Probe flow
 
-1. The beneficiary sends `ProbeRequestV1` with a random nonce and a current five-minute epoch.
-2. The provider returns `ProbeOfferV1`. The offer embeds the exact signed request transaction, an
+1. The beneficiary sends `ProbeRequest` with a random nonce and a current five-minute epoch.
+2. The provider returns `ProbeOffer`. The offer embeds the exact signed request transaction, an
    exact provider-signed completion transaction, the canonical claim, and the provider's claim
    attestation.
 3. The beneficiary verifies the transcript against its one outstanding request, signs the same
-   claim under the beneficiary role domain, and returns `ProbeAcknowledgementV1`.
+   claim under the beneficiary role domain, and returns `ProbeAcknowledgement`.
 4. The provider verifies the complete receipt under live rules and admits it to its bounded local
    evidence store.
 

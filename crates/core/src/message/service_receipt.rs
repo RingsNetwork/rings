@@ -1,4 +1,4 @@
-//! Canonical provisional service receipts and the ProbeV1 transcript.
+//! Canonical provisional service receipts and the Probe transcript.
 //!
 //! These receipt types are deliberately distinct from future ledger receipts.
 //! Their signing domains and versioned canonical encodings cannot be reused by
@@ -34,19 +34,19 @@ pub const PROVISIONAL_RECEIPT_EPOCH_SECS: u64 = 300;
 
 /// Service kinds accepted by the v1 provisional receipt wire.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub enum ServiceKindV1 {
+pub enum ServiceKind {
     /// One authenticated request/response probe.
     Probe,
 }
 
 /// Coarse wall-clock slot used only for live provisional collection.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
-pub struct ProvisionalEpochV1 {
+pub struct ProvisionalEpoch {
     /// Unix-time slice number.
     pub slot: u64,
 }
 
-impl ProvisionalEpochV1 {
+impl ProvisionalEpoch {
     /// Derive the provisional slot from whole Unix seconds.
     pub const fn from_unix_seconds(seconds: u64) -> Self {
         Self {
@@ -63,20 +63,20 @@ impl ProvisionalEpochV1 {
 
 /// Canonical v1 provisional service claim.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ProvisionalServiceClaimV1 {
+pub struct ProvisionalServiceClaim {
     /// Overlay in which the receipt signatures are valid.
     pub network_id: u32,
     /// Service evidence profile.
-    pub service: ServiceKindV1,
+    pub service: ServiceKind,
     /// Account that supplied the service.
     pub provider_account: Did,
     /// Account that requested and acknowledged the service.
     pub beneficiary_account: Did,
     /// Provisional live-collection epoch.
-    pub epoch: ProvisionalEpochV1,
+    pub epoch: ProvisionalEpoch,
     /// Beneficiary-selected fresh nonce.
     pub nonce: [u8; 32],
-    /// Service units; ProbeV1 requires exactly one.
+    /// Service units; Probe requires exactly one.
     pub units: NonZeroU64,
     /// Digest of the exact signed request transaction.
     pub request_digest: [u8; 32],
@@ -84,20 +84,20 @@ pub struct ProvisionalServiceClaimV1 {
     pub completion_digest: [u8; 32],
 }
 
-impl ProvisionalServiceClaimV1 {
+impl ProvisionalServiceClaim {
     /// Construct the only v1 service profile, a one-unit probe.
     pub const fn probe(
         network_id: u32,
         provider_account: Did,
         beneficiary_account: Did,
-        epoch: ProvisionalEpochV1,
+        epoch: ProvisionalEpoch,
         nonce: [u8; 32],
         request_digest: [u8; 32],
         completion_digest: [u8; 32],
     ) -> Self {
         Self {
             network_id,
-            service: ServiceKindV1::Probe,
+            service: ServiceKind::Probe,
             provider_account,
             beneficiary_account,
             epoch,
@@ -114,8 +114,8 @@ impl ProvisionalServiceClaimV1 {
             return Err(ServiceReceiptError::SameAccountRoles);
         }
         match self.service {
-            ServiceKindV1::Probe if self.units == NonZeroU64::MIN => Ok(()),
-            ServiceKindV1::Probe => Err(ServiceReceiptError::InvalidProbeUnits {
+            ServiceKind::Probe if self.units == NonZeroU64::MIN => Ok(()),
+            ServiceKind::Probe => Err(ServiceReceiptError::InvalidProbeUnits {
                 units: self.units.get(),
             }),
         }
@@ -243,19 +243,19 @@ impl ServiceReceiptDigest {
 
 /// Complete two-role provisional receipt.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ProvisionalServiceReceiptV1 {
+pub struct ProvisionalServiceReceipt {
     /// Canonical service claim.
-    pub claim: ProvisionalServiceClaimV1,
+    pub claim: ProvisionalServiceClaim,
     /// Provider-session signature under the provider role domain.
     pub provider_attestation: MessageVerification,
     /// Beneficiary-session signature under the beneficiary role domain.
     pub beneficiary_attestation: MessageVerification,
 }
 
-impl ProvisionalServiceReceiptV1 {
+impl ProvisionalServiceReceipt {
     /// Assemble an acknowledged receipt without weakening either signature.
     pub fn new(
-        claim: ProvisionalServiceClaimV1,
+        claim: ProvisionalServiceClaim,
         provider_attestation: MessageVerification,
         beneficiary_attestation: MessageVerification,
     ) -> std::result::Result<Self, ServiceReceiptError> {
@@ -338,34 +338,42 @@ impl ProvisionalServiceReceiptV1 {
         if !self.claim.epoch.is_accepted_at(seconds) {
             return Err(ServiceReceiptError::EpochOutsideTolerance {
                 claim_slot: self.claim.epoch.slot,
-                observed_slot: ProvisionalEpochV1::from_unix_seconds(seconds).slot,
+                observed_slot: ProvisionalEpoch::from_unix_seconds(seconds).slot,
             });
         }
         Ok(())
     }
 }
 
-/// Beneficiary request initiating ProbeV1.
+/// Beneficiary request initiating Probe.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ProbeRequestV1 {
+pub struct ProbeRequest {
     /// Provisional collection slot proposed by the beneficiary.
-    pub epoch: ProvisionalEpochV1,
+    pub epoch: ProvisionalEpoch,
     /// Fresh random request nonce.
     pub nonce: [u8; 32],
 }
 
+impl ProbeRequest {
+    pub(crate) fn random_for_epoch(epoch: ProvisionalEpoch) -> Self {
+        let mut nonce = [0_u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce);
+        Self { epoch, nonce }
+    }
+}
+
 #[cfg(test)]
-pub(crate) fn test_probe_request(nonce: u8) -> ProbeRequestV1 {
+pub(crate) fn test_probe_request(nonce: u8) -> ProbeRequest {
     let seconds = u64::try_from(crate::utils::get_epoch_ms() / 1_000).unwrap_or(0);
-    ProbeRequestV1 {
-        epoch: ProvisionalEpochV1::from_unix_seconds(seconds),
+    ProbeRequest {
+        epoch: ProvisionalEpoch::from_unix_seconds(seconds),
         nonce: [nonce; 32],
     }
 }
 
 /// Provider-signed completion transaction embedded in the offer.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ProbeCompletionV1 {
+pub struct ProbeCompletion {
     /// Digest of the exact request transaction this completes.
     pub request_digest: [u8; 32],
     /// Request nonce copied into the completion.
@@ -374,18 +382,18 @@ pub struct ProbeCompletionV1 {
 
 /// Provider response carrying the two exact signed transcript transactions.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ProbeOfferV1 {
+pub struct ProbeOffer {
     /// Beneficiary-signed request transaction.
     pub request: Transaction,
     /// Provider-signed completion transaction.
     pub completion: Transaction,
     /// Claim binding the transaction digests and account roles.
-    pub claim: ProvisionalServiceClaimV1,
+    pub claim: ProvisionalServiceClaim,
     /// Provider signature over the claim under its role domain.
     pub provider_attestation: MessageVerification,
 }
 
-impl ProbeOfferV1 {
+impl ProbeOffer {
     /// Verify one self-consistent transcript with currently live embedded transactions.
     ///
     /// The caller must already have admitted the outer payload through the shared transport
@@ -395,7 +403,7 @@ impl ProbeOfferV1 {
         outer: &MessagePayload,
         receiver_network_id: u32,
         beneficiary: Did,
-    ) -> std::result::Result<ProbeRequestV1, ServiceReceiptError> {
+    ) -> std::result::Result<ProbeRequest, ServiceReceiptError> {
         self.verify_transcript_at(
             outer,
             receiver_network_id,
@@ -410,7 +418,7 @@ impl ProbeOfferV1 {
         receiver_network_id: u32,
         beneficiary: Did,
         observed_at_ms: u128,
-    ) -> std::result::Result<ProbeRequestV1, ServiceReceiptError> {
+    ) -> std::result::Result<ProbeRequest, ServiceReceiptError> {
         self.claim.validate()?;
         if self.claim.network_id != receiver_network_id {
             return Err(ServiceReceiptError::NetworkMismatch {
@@ -436,7 +444,7 @@ impl ProbeOfferV1 {
             .request
             .data()
             .map_err(|_| ServiceReceiptError::InvalidRequestTransaction)?;
-        let Message::ProbeRequestV1(request) = request_message else {
+        let Message::ProbeRequest(request) = request_message else {
             return Err(ServiceReceiptError::InvalidRequestTransaction);
         };
         if request.epoch != self.claim.epoch || request.nonce != self.claim.nonce {
@@ -459,7 +467,7 @@ impl ProbeOfferV1 {
         {
             return Err(ServiceReceiptError::InvalidCompletionTransaction);
         }
-        let completion: ProbeCompletionV1 = self
+        let completion: ProbeCompletion = self
             .completion
             .data()
             .map_err(|_| ServiceReceiptError::InvalidCompletionTransaction)?;
@@ -490,7 +498,7 @@ impl ProbeOfferV1 {
         receiver_network_id: u32,
         beneficiary: Did,
         observed_at_ms: u128,
-    ) -> std::result::Result<ProbeRequestV1, ServiceReceiptError> {
+    ) -> std::result::Result<ProbeRequest, ServiceReceiptError> {
         let request =
             self.verify_transcript_at(outer, receiver_network_id, beneficiary, observed_at_ms)?;
         let seconds = u64::try_from(observed_at_ms / 1_000)
@@ -505,7 +513,7 @@ impl ProbeOfferV1 {
         if !self.claim.epoch.is_accepted_at(seconds) {
             return Err(ServiceReceiptError::EpochOutsideTolerance {
                 claim_slot: self.claim.epoch.slot,
-                observed_slot: ProvisionalEpochV1::from_unix_seconds(seconds).slot,
+                observed_slot: ProvisionalEpoch::from_unix_seconds(seconds).slot,
             });
         }
         Ok(request)
@@ -514,9 +522,9 @@ impl ProbeOfferV1 {
 
 /// Beneficiary acknowledgement carrying the now-complete receipt.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ProbeAcknowledgementV1 {
+pub struct ProbeAcknowledgement {
     /// Complete receipt admitted by the provider after verification.
-    pub receipt: ProvisionalServiceReceiptV1,
+    pub receipt: ProvisionalServiceReceipt,
 }
 
 /// Typed rejection reason for provisional receipt construction or verification.
@@ -539,8 +547,8 @@ pub enum ServiceReceiptError {
     /// Provider and beneficiary cannot be the same account.
     #[error("provisional receipt provider and beneficiary are the same account")]
     SameAccountRoles,
-    /// ProbeV1 has a unit count other than one.
-    #[error("ProbeV1 requires one unit, got {units}")]
+    /// Probe has a unit count other than one.
+    #[error("Probe requires one unit, got {units}")]
     InvalidProbeUnits {
         /// Rejected non-zero unit count.
         units: u64,

@@ -180,7 +180,7 @@ local drops and do not disconnect the immediate peer, which may be an honest rel
 
 ### Provisional service-receipt boundary
 
-The implemented receipt protocol is a provisional `ProbeV1` evidence collector, not the
+The implemented receipt protocol is a provisional `Probe` evidence collector, not the
 finalized DRanking ledger. A beneficiary sends an authenticated request containing a fresh nonce
 and a current or adjacent five-minute epoch. The provider returns an offer that embeds the exact
 signed request transaction and an exact provider-signed completion transaction. The provider and
@@ -189,7 +189,7 @@ returns the complete receipt in an acknowledgement. Account DIDs define the role
 session rotation neither changes a role nor creates a distinct receipt identity.
 
 The `V1` wire markers and signing domains are protocol-domain separators, not compatibility
-fallbacks. Only `ProbeV1` is accepted. Unknown service kinds, noncanonical bytes, a unit count
+fallbacks. Only `Probe` is accepted. Unknown service kinds, noncanonical bytes, a unit count
 other than one, same-account roles, digest or role mismatches, stale epochs, and expired delegated
 proofs fail closed during live admission. The old unsigned liveness probe/report wire is removed.
 

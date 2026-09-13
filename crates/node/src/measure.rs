@@ -602,7 +602,7 @@ fn valid_persisted_evidence(
     record: &ProvisionalEvidenceRecord<Did>,
     collector: EvidenceCollectorIdentity,
 ) -> bool {
-    let Ok(receipt) = rings_core::message::ProvisionalServiceReceiptV1::from_canonical_bytes(
+    let Ok(receipt) = rings_core::message::ProvisionalServiceReceipt::from_canonical_bytes(
         record.canonical_receipt(),
     ) else {
         return false;
@@ -610,7 +610,7 @@ fn valid_persisted_evidence(
     let claim = &receipt.claim;
     let observed_at_ms = u128::from(record.observed_at().as_secs()) * 1_000;
     let observed_slot =
-        rings_core::message::ProvisionalEpochV1::from_unix_seconds(record.observed_at().as_secs())
+        rings_core::message::ProvisionalEpoch::from_unix_seconds(record.observed_at().as_secs())
             .slot;
     receipt
         .verify_live_at(collector.network_id, observed_at_ms)

@@ -5,18 +5,18 @@ use crate::message::HopBudget;
 use crate::message::MessageRelay;
 use crate::session::SessionSk;
 
-fn signed_receipt(network_id: u32) -> Result<(ProvisionalServiceReceiptV1, SessionSk, SessionSk)> {
+fn signed_receipt(network_id: u32) -> Result<(ProvisionalServiceReceipt, SessionSk, SessionSk)> {
     let provider = SessionSk::new_with_seckey(&SecretKey::random())?;
     let beneficiary_key = SecretKey::random();
     let beneficiary = SessionSk::new_with_seckey(&beneficiary_key)?;
     let rotated_beneficiary = SessionSk::new_with_seckey(&beneficiary_key)?;
     let now_seconds = u64::try_from(crate::utils::get_epoch_ms() / 1_000)
         .map_err(|_| Error::ServiceReceipt(ServiceReceiptError::ObservationTimeOverflow))?;
-    let claim = ProvisionalServiceClaimV1::probe(
+    let claim = ProvisionalServiceClaim::probe(
         network_id,
         provider.account_did(),
         beneficiary.account_did(),
-        ProvisionalEpochV1::from_unix_seconds(now_seconds),
+        ProvisionalEpoch::from_unix_seconds(now_seconds),
         [3; 32],
         [4; 32],
         [5; 32],
@@ -25,7 +25,7 @@ fn signed_receipt(network_id: u32) -> Result<(ProvisionalServiceReceiptV1, Sessi
     let beneficiary_attestation =
         claim.sign_beneficiary(MessageSigner::new(&rotated_beneficiary, network_id))?;
     Ok((
-        ProvisionalServiceReceiptV1::new(claim, provider_attestation, beneficiary_attestation)?,
+        ProvisionalServiceReceipt::new(claim, provider_attestation, beneficiary_attestation)?,
         provider,
         beneficiary,
     ))
@@ -33,10 +33,10 @@ fn signed_receipt(network_id: u32) -> Result<(ProvisionalServiceReceiptV1, Sessi
 
 fn receipt_signed_at(
     network_id: u32,
-    epoch: ProvisionalEpochV1,
+    epoch: ProvisionalEpoch,
     provider_ts_ms: u128,
     beneficiary_ts_ms: u128,
-) -> Result<ProvisionalServiceReceiptV1> {
+) -> Result<ProvisionalServiceReceipt> {
     let provider_account = SecretKey::random();
     let beneficiary_account = SecretKey::random();
     let provider = SessionSk::from_test_keys(
@@ -51,7 +51,7 @@ fn receipt_signed_at(
         beneficiary_ts_ms,
         crate::consts::DEFAULT_SESSION_TTL_MS,
     )?;
-    let claim = ProvisionalServiceClaimV1::probe(
+    let claim = ProvisionalServiceClaim::probe(
         network_id,
         provider.account_did(),
         beneficiary.account_did(),
@@ -71,7 +71,7 @@ fn receipt_signed_at(
         &bytes,
         beneficiary_ts_ms,
     )?;
-    ProvisionalServiceReceiptV1::new(claim, provider_attestation, beneficiary_attestation)
+    ProvisionalServiceReceipt::new(claim, provider_attestation, beneficiary_attestation)
         .map_err(Error::from)
 }
 
@@ -95,7 +95,7 @@ fn mismatched_delegated_account_and_role_swaps_fail_closed() -> Result<()> {
         ))
     ));
 
-    let swapped = ProvisionalServiceReceiptV1::new(
+    let swapped = ProvisionalServiceReceipt::new(
         receipt.claim.clone(),
         receipt
             .claim
@@ -153,8 +153,8 @@ fn live_admission_rejects_a_validly_signed_stale_epoch() -> Result<()> {
     let observed_at = crate::utils::get_epoch_ms();
     let observed_seconds = u64::try_from(observed_at / 1_000)
         .map_err(|_| Error::ServiceReceipt(ServiceReceiptError::ObservationTimeOverflow))?;
-    let observed_epoch = ProvisionalEpochV1::from_unix_seconds(observed_seconds);
-    let stale_epoch = ProvisionalEpochV1 {
+    let observed_epoch = ProvisionalEpoch::from_unix_seconds(observed_seconds);
+    let stale_epoch = ProvisionalEpoch {
         slot: observed_epoch.slot.saturating_sub(3),
     };
     let receipt = receipt_signed_at(7, stale_epoch, observed_at, observed_at)?;
@@ -174,7 +174,7 @@ fn live_admission_distinguishes_expired_provider_and_beneficiary_proofs() -> Res
     let observed_at = crate::utils::get_epoch_ms();
     let observed_seconds = u64::try_from(observed_at / 1_000)
         .map_err(|_| Error::ServiceReceipt(ServiceReceiptError::ObservationTimeOverflow))?;
-    let epoch = ProvisionalEpochV1::from_unix_seconds(observed_seconds);
+    let epoch = ProvisionalEpoch::from_unix_seconds(observed_seconds);
     let expired_ts = observed_at.saturating_sub(u128::from(crate::consts::DEFAULT_TTL_MS) + 1);
     let expired_provider = receipt_signed_at(7, epoch, expired_ts, observed_at)?;
     let expired_beneficiary = receipt_signed_at(7, epoch, observed_at, expired_ts)?;
@@ -214,11 +214,11 @@ fn live_admission_rejects_proofs_signed_before_their_sessions_expired() -> Resul
         SESSION_CREATED_AT_MS,
         LONG_SESSION_TTL_MS,
     )?;
-    let claim = ProvisionalServiceClaimV1::probe(
+    let claim = ProvisionalServiceClaim::probe(
         NETWORK_ID,
         provider.account_did(),
         beneficiary.account_did(),
-        ProvisionalEpochV1::from_unix_seconds(u64::try_from(OBSERVED_AT_MS / 1_000).unwrap_or(0)),
+        ProvisionalEpoch::from_unix_seconds(u64::try_from(OBSERVED_AT_MS / 1_000).unwrap_or(0)),
         [21; 32],
         [22; 32],
         [23; 32],
@@ -231,7 +231,7 @@ fn live_admission_rejects_proofs_signed_before_their_sessions_expired() -> Resul
         &bytes,
         SIGNED_AT_MS,
     )?;
-    let provider_expired = ProvisionalServiceReceiptV1::new(
+    let provider_expired = ProvisionalServiceReceipt::new(
         claim.clone(),
         provider_attestation.clone(),
         beneficiary_attestation.clone(),
@@ -255,17 +255,17 @@ fn live_admission_rejects_proofs_signed_before_their_sessions_expired() -> Resul
         SESSION_CREATED_AT_MS,
         LONG_SESSION_TTL_MS,
     )?;
-    let claim = ProvisionalServiceClaimV1::probe(
+    let claim = ProvisionalServiceClaim::probe(
         NETWORK_ID,
         long_provider.account_did(),
         short_beneficiary.account_did(),
-        ProvisionalEpochV1::from_unix_seconds(u64::try_from(OBSERVED_AT_MS / 1_000).unwrap_or(0)),
+        ProvisionalEpoch::from_unix_seconds(u64::try_from(OBSERVED_AT_MS / 1_000).unwrap_or(0)),
         [24; 32],
         [25; 32],
         [26; 32],
     );
     let bytes = claim.canonical_bytes()?;
-    let beneficiary_expired = ProvisionalServiceReceiptV1::new(
+    let beneficiary_expired = ProvisionalServiceReceipt::new(
         claim,
         MessageSigner::new(&long_provider, NETWORK_ID).sign_at(
             PROVIDER_DOMAIN,
@@ -324,17 +324,17 @@ fn canonical_receipt_golden_vector_is_stable() -> Result<()> {
         CREATED_AT_MS,
         SESSION_TTL_MS,
     )?;
-    let claim = ProvisionalServiceClaimV1::probe(
+    let claim = ProvisionalServiceClaim::probe(
         7,
         provider.account_did(),
         beneficiary.account_did(),
-        ProvisionalEpochV1 { slot: 3 },
+        ProvisionalEpoch { slot: 3 },
         [4; 32],
         [5; 32],
         [6; 32],
     );
     let bytes = claim.canonical_bytes()?;
-    let receipt = ProvisionalServiceReceiptV1::new(
+    let receipt = ProvisionalServiceReceipt::new(
         claim,
         MessageSigner::new(&provider, 7).sign_at(PROVIDER_DOMAIN, &bytes, SIGNED_AT_MS)?,
         MessageSigner::new(&beneficiary, 7).sign_at(BENEFICIARY_DOMAIN, &bytes, SIGNED_AT_MS)?,
@@ -351,7 +351,7 @@ fn canonical_receipt_golden_vector_is_stable() -> Result<()> {
         "f8c1094b66b495bf4be037749ea00e3df98607f2d9c62e5480cb1c771ad1d990"
     );
     assert_eq!(
-        ProvisionalServiceReceiptV1::from_canonical_bytes(&canonical)?,
+        ProvisionalServiceReceipt::from_canonical_bytes(&canonical)?,
         receipt
     );
     Ok(())
@@ -360,11 +360,11 @@ fn canonical_receipt_golden_vector_is_stable() -> Result<()> {
 #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_family = "wasm"), test)]
 fn canonical_claim_golden_vector_is_stable() -> Result<()> {
-    let claim = ProvisionalServiceClaimV1::probe(
+    let claim = ProvisionalServiceClaim::probe(
         7,
         Did::from(1_u32),
         Did::from(2_u32),
-        ProvisionalEpochV1 { slot: 3 },
+        ProvisionalEpoch { slot: 3 },
         [4; 32],
         [5; 32],
         [6; 32],
@@ -379,7 +379,7 @@ fn canonical_claim_golden_vector_is_stable() -> Result<()> {
         "72698f171a530ebd5fbb21edc4fffc8206cb96e1c01d3d2700ef431d85dd113a"
     );
     assert_eq!(
-        ProvisionalServiceClaimV1::from_canonical_bytes(&bytes)?,
+        ProvisionalServiceClaim::from_canonical_bytes(&bytes)?,
         claim
     );
     Ok(())
@@ -391,7 +391,7 @@ struct RawClaim {
     service: u32,
     provider_account: Did,
     beneficiary_account: Did,
-    epoch: ProvisionalEpochV1,
+    epoch: ProvisionalEpoch,
     nonce: [u8; 32],
     units: u64,
     request_digest: [u8; 32],
@@ -404,7 +404,7 @@ fn raw_claim(service: u32, units: u64) -> std::result::Result<Vec<u8>, ServiceRe
         service,
         provider_account: Did::from(1_u32),
         beneficiary_account: Did::from(2_u32),
-        epoch: ProvisionalEpochV1 { slot: 3 },
+        epoch: ProvisionalEpoch { slot: 3 },
         nonce: [4; 32],
         units,
         request_digest: [5; 32],
@@ -414,8 +414,8 @@ fn raw_claim(service: u32, units: u64) -> std::result::Result<Vec<u8>, ServiceRe
 
 #[test]
 fn zero_units_and_unknown_service_kind_fail_decoding() -> Result<()> {
-    assert!(ProvisionalServiceClaimV1::from_canonical_bytes(&raw_claim(0, 0)?).is_err());
-    assert!(ProvisionalServiceClaimV1::from_canonical_bytes(&raw_claim(1, 1)?).is_err());
+    assert!(ProvisionalServiceClaim::from_canonical_bytes(&raw_claim(0, 0)?).is_err());
+    assert!(ProvisionalServiceClaim::from_canonical_bytes(&raw_claim(1, 1)?).is_err());
     Ok(())
 }
 
@@ -428,8 +428,8 @@ fn probe_offer_verifies_the_exact_signed_request_and_completion() -> Result<()> 
     let beneficiary_signer = MessageSigner::new(&beneficiary, network_id);
     let provider_did = provider.account_did();
     let beneficiary_did = beneficiary.account_did();
-    let request = ProbeRequestV1 {
-        epoch: ProvisionalEpochV1::from_unix_seconds(
+    let request = ProbeRequest {
+        epoch: ProvisionalEpoch::from_unix_seconds(
             u64::try_from(crate::utils::get_epoch_ms() / 1_000).unwrap_or(0),
         ),
         nonce: [8; 32],
@@ -439,7 +439,7 @@ fn probe_offer_verifies_the_exact_signed_request_and_completion() -> Result<()> 
         provider_did,
         tx_id,
         1,
-        Message::ProbeRequestV1(request),
+        Message::ProbeRequest(request),
         beneficiary_signer,
     )?;
     let request_digest = request_transaction.digest()?.into_bytes();
@@ -447,13 +447,13 @@ fn probe_offer_verifies_the_exact_signed_request_and_completion() -> Result<()> 
         beneficiary_did,
         tx_id,
         1,
-        ProbeCompletionV1 {
+        ProbeCompletion {
             request_digest,
             nonce: request.nonce,
         },
         provider_signer,
     )?;
-    let claim = ProvisionalServiceClaimV1::probe(
+    let claim = ProvisionalServiceClaim::probe(
         network_id,
         provider_did,
         beneficiary_did,
@@ -462,7 +462,7 @@ fn probe_offer_verifies_the_exact_signed_request_and_completion() -> Result<()> 
         request_digest,
         completion.digest()?.into_bytes(),
     );
-    let offer = ProbeOfferV1 {
+    let offer = ProbeOffer {
         request: request_transaction,
         completion,
         provider_attestation: claim.sign_provider(provider_signer)?,
@@ -472,7 +472,7 @@ fn probe_offer_verifies_the_exact_signed_request_and_completion() -> Result<()> 
         beneficiary_did,
         tx_id,
         2,
-        Message::ProbeOfferV1(Box::new(offer.clone())),
+        Message::ProbeOffer(Box::new(offer.clone())),
         provider_signer,
     )?;
     let outer = MessagePayload::new(
@@ -523,8 +523,8 @@ fn probe_offer_rejects_an_attestation_from_an_expired_provider_session() -> Resu
     let beneficiary_signer = MessageSigner::new(&beneficiary, NETWORK_ID);
     let provider_did = provider_transport.account_did();
     let beneficiary_did = beneficiary.account_did();
-    let request = ProbeRequestV1 {
-        epoch: ProvisionalEpochV1::from_unix_seconds(
+    let request = ProbeRequest {
+        epoch: ProvisionalEpoch::from_unix_seconds(
             u64::try_from(observed_at_ms / 1_000).unwrap_or(0),
         ),
         nonce: [27; 32],
@@ -534,7 +534,7 @@ fn probe_offer_rejects_an_attestation_from_an_expired_provider_session() -> Resu
         provider_did,
         tx_id,
         1,
-        Message::ProbeRequestV1(request),
+        Message::ProbeRequest(request),
         beneficiary_signer,
     )?;
     let request_digest = request_transaction.digest()?.into_bytes();
@@ -542,13 +542,13 @@ fn probe_offer_rejects_an_attestation_from_an_expired_provider_session() -> Resu
         beneficiary_did,
         tx_id,
         1,
-        ProbeCompletionV1 {
+        ProbeCompletion {
             request_digest,
             nonce: request.nonce,
         },
         provider_signer,
     )?;
-    let claim = ProvisionalServiceClaimV1::probe(
+    let claim = ProvisionalServiceClaim::probe(
         NETWORK_ID,
         provider_did,
         beneficiary_did,
@@ -557,7 +557,7 @@ fn probe_offer_rejects_an_attestation_from_an_expired_provider_session() -> Resu
         request_digest,
         completion.digest()?.into_bytes(),
     );
-    let offer = ProbeOfferV1 {
+    let offer = ProbeOffer {
         request: request_transaction,
         completion,
         provider_attestation: MessageSigner::new(&provider_attestation_session, NETWORK_ID)
@@ -572,7 +572,7 @@ fn probe_offer_rejects_an_attestation_from_an_expired_provider_session() -> Resu
         beneficiary_did,
         tx_id,
         2,
-        Message::ProbeOfferV1(Box::new(offer.clone())),
+        Message::ProbeOffer(Box::new(offer.clone())),
         provider_signer,
     )?;
     let outer = MessagePayload::new(
@@ -606,8 +606,8 @@ fn probe_offer_judges_embedded_transaction_sessions_at_observation_time() -> Res
     let beneficiary_signer = MessageSigner::new(&beneficiary, NETWORK_ID);
     let provider_did = provider.account_did();
     let beneficiary_did = beneficiary.account_did();
-    let request = ProbeRequestV1 {
-        epoch: ProvisionalEpochV1::from_unix_seconds(
+    let request = ProbeRequest {
+        epoch: ProvisionalEpoch::from_unix_seconds(
             u64::try_from(observed_at_ms / 1_000).unwrap_or(0),
         ),
         nonce: [28; 32],
@@ -617,7 +617,7 @@ fn probe_offer_judges_embedded_transaction_sessions_at_observation_time() -> Res
         provider_did,
         tx_id,
         1,
-        Message::ProbeRequestV1(request),
+        Message::ProbeRequest(request),
         beneficiary_signer,
     )?;
     let request_digest = request_transaction.digest()?.into_bytes();
@@ -625,13 +625,13 @@ fn probe_offer_judges_embedded_transaction_sessions_at_observation_time() -> Res
         beneficiary_did,
         tx_id,
         1,
-        ProbeCompletionV1 {
+        ProbeCompletion {
             request_digest,
             nonce: request.nonce,
         },
         provider_signer,
     )?;
-    let claim = ProvisionalServiceClaimV1::probe(
+    let claim = ProvisionalServiceClaim::probe(
         NETWORK_ID,
         provider_did,
         beneficiary_did,
@@ -640,7 +640,7 @@ fn probe_offer_judges_embedded_transaction_sessions_at_observation_time() -> Res
         request_digest,
         completion.digest()?.into_bytes(),
     );
-    let offer = ProbeOfferV1 {
+    let offer = ProbeOffer {
         request: request_transaction,
         completion,
         provider_attestation: claim.sign_provider(provider_signer)?,
@@ -650,7 +650,7 @@ fn probe_offer_judges_embedded_transaction_sessions_at_observation_time() -> Res
         beneficiary_did,
         tx_id,
         2,
-        Message::ProbeOfferV1(Box::new(offer.clone())),
+        Message::ProbeOffer(Box::new(offer.clone())),
         provider_signer,
     )?;
     let outer = MessagePayload::new(

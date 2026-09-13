@@ -1,12 +1,16 @@
-//! Executable finite-state model for the provisional ProbeV1 receipt flow.
+#![cfg(all(test, not(target_family = "wasm")))]
+
+//! Executable finite-state model for the provisional Probe receipt flow.
 //!
 //! Model scope and refinement map:
 //!
 //! - [`Action::SendRequest`] refines `Stabilizer::probe_peer_liveness`.
-//! - [`Action::DeliverRequest`] refines `HandleMsg<ProbeRequestV1>`.
-//! - [`Action::DeliverOffer`] refines `HandleMsg<ProbeOfferV1>`.
+//! - [`Action::DeliverRequest`] refines `HandleMsg<ProbeRequest>` through the
+//!   receipt effect interpreter.
+//! - [`Action::DeliverOffer`] refines `HandleMsg<ProbeOffer>` through the
+//!   receipt effect interpreter.
 //! - [`Action::DeliverAcknowledgement`] refines
-//!   `HandleMsg<ProbeAcknowledgementV1>` and `admit_provisional_receipt`.
+//!   `HandleMsg<ProbeAcknowledgement>` and `admit_provisional_receipt`.
 //! - [`Action::Tick`], [`Action::Duplicate`], and [`Action::Drop`] model the
 //!   relevant finite time and network schedules.
 //! - [`Action::HardCrashRestart`] preserves synchronously committed
@@ -427,7 +431,7 @@ impl Model for ProbeModel {
 fn signed_receipt_with_session_ends(
     provider_ttl_ms: u64,
     beneficiary_ttl_ms: u64,
-) -> crate::error::Result<ProvisionalServiceReceiptV1> {
+) -> crate::error::Result<ProvisionalServiceReceipt> {
     const CREATED_AT_MS: u128 = 1_700_000_000_000;
     const NETWORK_ID: u32 = 7;
     let provider = SessionSk::from_test_keys(
@@ -442,17 +446,17 @@ fn signed_receipt_with_session_ends(
         CREATED_AT_MS,
         beneficiary_ttl_ms,
     )?;
-    let claim = ProvisionalServiceClaimV1::probe(
+    let claim = ProvisionalServiceClaim::probe(
         NETWORK_ID,
         provider.account_did(),
         beneficiary.account_did(),
-        ProvisionalEpochV1::from_unix_seconds(u64::try_from(CREATED_AT_MS / 1_000).unwrap_or(0)),
+        ProvisionalEpoch::from_unix_seconds(u64::try_from(CREATED_AT_MS / 1_000).unwrap_or(0)),
         [1; 32],
         [2; 32],
         [3; 32],
     );
     let bytes = claim.canonical_bytes().map_err(crate::error::Error::from)?;
-    ProvisionalServiceReceiptV1::new(
+    ProvisionalServiceReceipt::new(
         claim,
         MessageSigner::new(&provider, NETWORK_ID).sign_at(
             PROVIDER_DOMAIN,

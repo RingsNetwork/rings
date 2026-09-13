@@ -732,7 +732,7 @@ async fn test_submitted_control_preempts_a_ready_bulk_tail() -> Result<()> {
     let control_swarm = node1.swarm.clone();
     let control_send = tokio::spawn(async move {
         control_swarm
-            .send_direct_message(Message::ProbeRequestV1(test_probe_request(41)), peer)
+            .send_direct_message(Message::ProbeRequest(test_probe_request(41)), peer)
             .await
     });
     wait_until("control transfer submission", || {
@@ -756,7 +756,7 @@ async fn test_submitted_control_preempts_a_ready_bulk_tail() -> Result<()> {
             match payload.transaction.data::<Message>()? {
                 Message::Chunk(_) => observed.push("bulk"),
                 Message::FoundEntry(_) => observed.push("storage"),
-                Message::ProbeRequestV1(_) => {
+                Message::ProbeRequest(_) => {
                     observed.push("control");
                     return Ok::<_, Error>(observed);
                 }
@@ -828,7 +828,7 @@ fn spawn_reserved_control_transfers(
         let swarm = node.swarm.clone();
         sends.push(tokio::spawn(async move {
             let payload = MessagePayload::new_send(
-                Message::ProbeRequestV1(test_probe_request(u8::try_from(index).unwrap_or(u8::MAX))),
+                Message::ProbeRequest(test_probe_request(u8::try_from(index).unwrap_or(u8::MAX))),
                 swarm.transport.message_signer(),
                 peer,
                 peer,
@@ -853,7 +853,7 @@ async fn assert_control_capacity_is_bounded(node: &Node, peer: Did) -> Result<()
     .await?;
     let control_error = node
         .swarm
-        .send_direct_message(Message::ProbeRequestV1(test_probe_request(255)), peer)
+        .send_direct_message(Message::ProbeRequest(test_probe_request(255)), peer)
         .await
         .expect_err("control traffic must preserve the other data-class reserves");
     assert!(matches!(

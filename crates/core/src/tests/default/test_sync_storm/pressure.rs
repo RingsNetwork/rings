@@ -188,7 +188,7 @@ fn mixed_pressure_sends<'a>(
                 nodes[sender]
                     .swarm
                     .send_direct_message(
-                        Message::ProbeRequestV1(test_probe_request(
+                        Message::ProbeRequest(test_probe_request(
                             u8::try_from(ordinal).unwrap_or(u8::MAX),
                         )),
                         peer,
@@ -282,7 +282,7 @@ pub(super) async fn exercise_barrier_control_exemption(
 
     let mut control_send = nodes[sender]
         .swarm
-        .send_direct_message(Message::ProbeRequestV1(test_probe_request(1)), peer)
+        .send_direct_message(Message::ProbeRequest(test_probe_request(1)), peer)
         .boxed_local();
     let mut control_send_complete = false;
     wait_for_class_while_sending(

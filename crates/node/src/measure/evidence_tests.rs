@@ -6,9 +6,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use rings_core::error::Error as CoreError;
 use rings_core::message::MessageSigner;
-use rings_core::message::ProvisionalEpochV1;
-use rings_core::message::ProvisionalServiceClaimV1;
-use rings_core::message::ProvisionalServiceReceiptV1;
+use rings_core::message::ProvisionalEpoch;
+use rings_core::message::ProvisionalServiceClaim;
+use rings_core::message::ProvisionalServiceReceipt;
 use rings_core::storage::file::FileStorage;
 use rings_core::storage::KvStorageInterface;
 use rings_core::storage::MemStorage;
@@ -86,11 +86,11 @@ fn provisional_evidence_fixture(
     let observed_at_ms = rings_core::utils::get_epoch_ms();
     let observed_at_seconds = u64::try_from(observed_at_ms / 1_000)
         .unwrap_or_else(|_| panic!("current observation time must fit whole seconds"));
-    let claim = ProvisionalServiceClaimV1::probe(
+    let claim = ProvisionalServiceClaim::probe(
         7,
         provider.account_did(),
         beneficiary.account_did(),
-        ProvisionalEpochV1::from_unix_seconds(observed_at_seconds),
+        ProvisionalEpoch::from_unix_seconds(observed_at_seconds),
         [nonce; 32],
         [nonce.wrapping_add(1); 32],
         [nonce.wrapping_add(2); 32],
@@ -101,7 +101,7 @@ fn provisional_evidence_fixture(
     let beneficiary_attestation = claim
         .sign_beneficiary(MessageSigner::new(&beneficiary, 7))
         .unwrap_or_else(|error| panic!("beneficiary attestation must sign: {error}"));
-    let receipt = ProvisionalServiceReceiptV1::new(
+    let receipt = ProvisionalServiceReceipt::new(
         claim.clone(),
         provider_attestation,
         beneficiary_attestation,

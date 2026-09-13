@@ -22,9 +22,9 @@ use crate::error::Result;
 use crate::message::e2e::E2eHandshakeRequest;
 use crate::message::e2e::E2eHandshakeResponse;
 use crate::message::e2e::E2eStreamFrame;
-use crate::message::ProbeAcknowledgementV1;
-use crate::message::ProbeOfferV1;
-use crate::message::ProbeRequestV1;
+use crate::message::ProbeAcknowledgement;
+use crate::message::ProbeOffer;
+use crate::message::ProbeRequest;
 
 /// DHT protocol mode that must match before two peers join the same DHT.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, Eq, PartialEq)]
@@ -379,10 +379,10 @@ macro_rules! with_message_variants {
             4 => NotifyPredecessorSend(NotifyPredecessorSend): DhtControl, NoStorageRoute,
             /// Response of NotifyPredecessorSend.
             5 => NotifyPredecessorReport(NotifyPredecessorReport): DhtControl, NoStorageRoute,
-            /// Beneficiary request initiating the provisional ProbeV1 transcript.
-            6 => ProbeRequestV1(ProbeRequestV1): DhtControl, NoStorageRoute,
+            /// Beneficiary request initiating the provisional Probe transcript.
+            6 => ProbeRequest(ProbeRequest): DhtControl, NoStorageRoute,
             /// Provider offer carrying the signed request, completion, and claim.
-            7 => ProbeOfferV1(Box<ProbeOfferV1>): DhtControl, NoStorageRoute,
+            7 => ProbeOffer(Box<ProbeOffer>): DhtControl, NoStorageRoute,
             /// Remote message for searching an entry.
             8 => SearchEntry(SearchEntry): Storage, NoStorageRoute,
             /// Response when entries are found.
@@ -408,7 +408,7 @@ macro_rules! with_message_variants {
             /// A chunk that can be deserialized to a payload.
             19 => Chunk(Chunk): Application, NoStorageRoute,
             /// Beneficiary acknowledgement completing the provisional receipt.
-            20 => ProbeAcknowledgementV1(Box<ProbeAcknowledgementV1>): DhtControl, NoStorageRoute,
+            20 => ProbeAcknowledgement(Box<ProbeAcknowledgement>): DhtControl, NoStorageRoute,
         }
     };
 }
@@ -573,10 +573,10 @@ mod tests {
     use crate::dht::entry::EntryOperation;
     use crate::ecc::SecretKey;
     use crate::message::MessageSigner;
-    use crate::message::ProbeCompletionV1;
-    use crate::message::ProvisionalEpochV1;
-    use crate::message::ProvisionalServiceClaimV1;
-    use crate::message::ProvisionalServiceReceiptV1;
+    use crate::message::ProbeCompletion;
+    use crate::message::ProvisionalEpoch;
+    use crate::message::ProvisionalServiceClaim;
+    use crate::message::ProvisionalServiceReceipt;
     use crate::message::Transaction;
     use crate::session::SessionSk;
 
@@ -656,18 +656,18 @@ mod tests {
     sample_message_body!(NotifyPredecessorReport, |fixture| NotifyPredecessorReport {
         did: fixture.did,
     });
-    sample_message_body!(ProbeRequestV1, |fixture| ProbeRequestV1 {
-        epoch: ProvisionalEpochV1 { slot: 1 },
+    sample_message_body!(ProbeRequest, |fixture| ProbeRequest {
+        epoch: ProvisionalEpoch { slot: 1 },
         nonce: [u8::from(fixture.did != Did::from(0_u32)); 32],
     });
-    impl SampleMessageBody for ProbeOfferV1 {
+    impl SampleMessageBody for ProbeOffer {
         fn sample(fixture: &MessageFixture) -> Result<Self> {
             sample_probe_offer(fixture).map(|(offer, _)| offer)
         }
     }
-    impl SampleMessageBody for ProbeAcknowledgementV1 {
+    impl SampleMessageBody for ProbeAcknowledgement {
         fn sample(fixture: &MessageFixture) -> Result<Self> {
-            sample_probe_offer(fixture).map(|(_, receipt)| ProbeAcknowledgementV1 { receipt })
+            sample_probe_offer(fixture).map(|(_, receipt)| ProbeAcknowledgement { receipt })
         }
     }
     sample_message_body!(SearchEntry, |fixture| SearchEntry {
@@ -735,18 +735,18 @@ mod tests {
 
     fn sample_probe_offer(
         fixture: &MessageFixture,
-    ) -> Result<(ProbeOfferV1, ProvisionalServiceReceiptV1)> {
+    ) -> Result<(ProbeOffer, ProvisionalServiceReceipt)> {
         let network_id = 1;
         let tx_id = uuid::Uuid::nil();
-        let request_body = ProbeRequestV1 {
-            epoch: ProvisionalEpochV1 { slot: 1 },
+        let request_body = ProbeRequest {
+            epoch: ProvisionalEpoch { slot: 1 },
             nonce: [7; 32],
         };
         let request = Transaction::new(
             fixture.provider.account_did(),
             tx_id,
             0,
-            Message::ProbeRequestV1(request_body),
+            Message::ProbeRequest(request_body),
             MessageSigner::new(&fixture.beneficiary, network_id),
         )?;
         let request_digest = request.digest()?.into_bytes();
@@ -754,13 +754,13 @@ mod tests {
             fixture.beneficiary.account_did(),
             tx_id,
             0,
-            ProbeCompletionV1 {
+            ProbeCompletion {
                 request_digest,
                 nonce: request_body.nonce,
             },
             MessageSigner::new(&fixture.provider, network_id),
         )?;
-        let claim = ProvisionalServiceClaimV1::probe(
+        let claim = ProvisionalServiceClaim::probe(
             network_id,
             fixture.provider.account_did(),
             fixture.beneficiary.account_did(),
@@ -773,13 +773,13 @@ mod tests {
             claim.sign_provider(MessageSigner::new(&fixture.provider, network_id))?;
         let beneficiary_attestation =
             claim.sign_beneficiary(MessageSigner::new(&fixture.beneficiary, network_id))?;
-        let receipt = ProvisionalServiceReceiptV1::new(
+        let receipt = ProvisionalServiceReceipt::new(
             claim.clone(),
             provider_attestation.clone(),
             beneficiary_attestation,
         )?;
         Ok((
-            ProbeOfferV1 {
+            ProbeOffer {
                 request,
                 completion,
                 claim,

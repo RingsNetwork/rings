@@ -779,7 +779,7 @@ mod tests {
         let did = session.account_did();
         let fixtures = [
             (
-                Message::ProbeRequestV1(test_probe_request(1)),
+                Message::ProbeRequest(test_probe_request(1)),
                 ScheduledDeliveryClass::Control,
             ),
             (

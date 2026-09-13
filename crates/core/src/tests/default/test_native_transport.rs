@@ -59,7 +59,7 @@ async fn test_native_webrtc_control_interleaves_the_shared_multiframe_storage_fi
         node1
             .swarm
             .send_direct_message(
-                Message::ProbeRequestV1(test_probe_request(round)),
+                Message::ProbeRequest(test_probe_request(round)),
                 node2.did(),
             )
             .await?;
