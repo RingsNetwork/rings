@@ -17,6 +17,11 @@
   delivery are admitted. Sender allocators persist reservations before signing, session rotation
   preserves the account stream, relays remain stateless, and both native and browser runtimes use
   dedicated durable replay stores without LRU eviction.
+- Final destinations enforce runtime-local message and byte token buckets per verified origin,
+  destination, overlay, and logical lane. Replay and quota decisions commit atomically before
+  logical mailbox admission; chunked transactions are charged once after reassembly, relay paths
+  share the origin allowance, table pressure reuses only fully replenished idle records, and
+  aggregate drop counters avoid origin labels.
 
 ## 0.23.0
 

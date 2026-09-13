@@ -35,6 +35,8 @@ pub struct ProcessorConfig {
     pub(in crate::processor) advertise_presence: bool,
     /// Storage-only virtual positions derived per physical peer.
     pub(in crate::processor) dht_virtual_nodes: u16,
+    /// Runtime-local final-destination quotas keyed by verified origin and logical lane.
+    pub(in crate::processor) origin_quota: OriginQuotaConfig,
     /// Whether this node advertises onion relay capability in the online-node registry.
     pub(in crate::processor) advertise_onion_relay: bool,
     /// Whether this node publishes an onion-exit descriptor.
@@ -73,6 +75,7 @@ impl ProcessorConfig {
             online_node_type: default_online_node_type(),
             advertise_presence: default_advertise_presence(),
             dht_virtual_nodes: DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER,
+            origin_quota: OriginQuotaConfig::default(),
             advertise_onion_relay: default_advertise_onion_relay(),
             advertise_onion_exit: default_advertise_onion_exit(),
             onion_exit_heartbeat_interval: Duration::from_secs(
@@ -144,6 +147,12 @@ impl ProcessorConfig {
         self
     }
 
+    /// Sets runtime-local final-destination quotas keyed by verified origin and logical lane.
+    pub fn origin_quota(mut self, config: OriginQuotaConfig) -> Self {
+        self.origin_quota = config;
+        self
+    }
+
     /// Return the HTTPS onion-exit policy when this config advertises that service.
     #[cfg(all(feature = "browser", target_family = "wasm"))]
     pub fn onion_https_exit_policy(&self) -> Option<OnionExitPolicy> {
@@ -199,6 +208,9 @@ pub struct ProcessorConfigSerialized {
     /// Storage-only virtual positions derived per physical peer.
     #[serde(default = "default_storage_virtual_positions_per_owner")]
     dht_virtual_nodes: u16,
+    /// Runtime-local final-destination quotas keyed by verified origin and logical lane.
+    #[serde(default)]
+    origin_quota: OriginQuotaConfig,
     /// Whether listen() advertises onion relay capability.
     #[serde(default = "default_advertise_onion_relay")]
     advertise_onion_relay: bool,
@@ -240,6 +252,7 @@ impl ProcessorConfigSerialized {
             online_node_type: default_online_node_type(),
             advertise_presence: default_advertise_presence(),
             dht_virtual_nodes: DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER,
+            origin_quota: OriginQuotaConfig::default(),
             advertise_onion_relay: default_advertise_onion_relay(),
             advertise_onion_exit: default_advertise_onion_exit(),
             onion_exit_heartbeat_interval_secs: default_onion_exit_heartbeat_interval_secs(),
@@ -301,6 +314,12 @@ impl ProcessorConfigSerialized {
     /// once before storage ownership and protocol advertisement are created.
     pub fn dht_virtual_nodes(mut self, positions_per_peer: u16) -> Self {
         self.dht_virtual_nodes = positions_per_peer;
+        self
+    }
+
+    /// Sets runtime-local final-destination quotas keyed by verified origin and logical lane.
+    pub fn origin_quota(mut self, config: OriginQuotaConfig) -> Self {
+        self.origin_quota = config;
         self
     }
 
@@ -423,6 +442,7 @@ impl TryFrom<ProcessorConfig> for ProcessorConfigSerialized {
             online_node_type: ins.online_node_type,
             advertise_presence: ins.advertise_presence,
             dht_virtual_nodes: ins.dht_virtual_nodes,
+            origin_quota: ins.origin_quota,
             advertise_onion_relay: ins.advertise_onion_relay,
             advertise_onion_exit: ins.advertise_onion_exit,
             onion_exit_heartbeat_interval_secs: ins.onion_exit_heartbeat_interval.as_secs(),
@@ -475,6 +495,7 @@ impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
             online_node_type: ins.online_node_type,
             advertise_presence: ins.advertise_presence,
             dht_virtual_nodes: ins.dht_virtual_nodes,
+            origin_quota: ins.origin_quota,
             advertise_onion_relay: ins.advertise_onion_relay,
             advertise_onion_exit: ins.advertise_onion_exit,
             onion_exit_heartbeat_interval,

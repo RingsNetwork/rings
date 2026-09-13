@@ -11,6 +11,7 @@ pub struct ProcessorBuilder {
     pub(in crate::processor) onion_exit_epoch: OnionExitEpoch,
     pub(in crate::processor) storage: Option<EntryStorage>,
     pub(in crate::processor) replay_storage: Option<ReplayStorage>,
+    pub(in crate::processor) origin_quota: OriginQuotaConfig,
     pub(in crate::processor) onion_entry_guard_storage: Option<OnionEntryGuardStorage>,
     pub(in crate::processor) measure: Option<Arc<PeriodicMeasure>>,
     pub(in crate::processor) stabilize_interval: Duration,
@@ -66,6 +67,7 @@ impl ProcessorBuilder {
             onion_exit_epoch: OnionExitEpoch::random(),
             storage: None,
             replay_storage: None,
+            origin_quota: config.origin_quota,
             onion_entry_guard_storage: None,
             measure: None,
             stabilize_interval: config.stabilize_interval,
@@ -95,6 +97,12 @@ impl ProcessorBuilder {
     /// Set durable destination-scoped transaction replay storage.
     pub fn replay_storage(mut self, storage: ReplayStorage) -> Self {
         self.replay_storage = Some(storage);
+        self
+    }
+
+    /// Set final-destination per-origin message and byte-rate quotas.
+    pub fn origin_quota(mut self, config: OriginQuotaConfig) -> Self {
+        self.origin_quota = config;
         self
     }
 
@@ -223,6 +231,7 @@ impl ProcessorBuilder {
         swarm_builder = swarm_builder.dht_virtual_nodes(self.dht_virtual_nodes);
         swarm_builder = swarm_builder.reassembly_limits(self.reassembly_limits);
         swarm_builder = swarm_builder.replay_storage(replay_storage);
+        swarm_builder = swarm_builder.origin_quota(self.origin_quota);
 
         if let Some(external_address) = self.external_address {
             swarm_builder = swarm_builder.external_address(external_address);

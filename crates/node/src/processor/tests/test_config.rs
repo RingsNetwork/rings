@@ -1,5 +1,7 @@
 use rings_core::dht::DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use rings_core::dht::MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
+use rings_core::message::OriginQuotaConfig;
+use rings_core::message::OriginQuotaLaneConfig;
 
 use super::common::*;
 use super::*;
@@ -126,6 +128,7 @@ fn test_presence_advertisement_is_enabled_by_default() {
         builder.dht_virtual_nodes,
         DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER
     );
+    assert_eq!(builder.origin_quota, OriginQuotaConfig::default());
 }
 
 #[test]
@@ -177,6 +180,26 @@ advertise_presence: true
         builder.dht_virtual_nodes,
         DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER
     );
+    assert_eq!(builder.origin_quota, OriginQuotaConfig::default());
+}
+
+#[test]
+fn test_processor_construction_preserves_explicit_origin_quota() {
+    let key = SecretKey::random();
+    let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+    let lane = OriginQuotaLaneConfig::new(2, 3, 5, 7, 11).unwrap();
+    let quota = OriginQuotaConfig::new(lane, lane, lane, lane);
+    let config = ProcessorConfig::new(
+        0,
+        "stun://stun.l.google.com:19302".to_string(),
+        session_sk,
+        3,
+    )
+    .origin_quota(quota);
+
+    let builder = ProcessorBuilder::from_config(&config).unwrap();
+
+    assert_eq!(builder.origin_quota, quota);
 }
 
 #[test]

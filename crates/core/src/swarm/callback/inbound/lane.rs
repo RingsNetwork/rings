@@ -1,5 +1,6 @@
 use crate::message::MessageClass;
 use crate::message::MessageKind;
+use crate::message::OriginQuotaLane;
 
 pub(super) const INBOUND_LANE_COUNT: usize = MessageClass::COUNT + 1;
 
@@ -49,6 +50,16 @@ impl InboundLane {
 
     pub(super) const fn is_logical_data(self) -> bool {
         matches!(self, Self::Storage | Self::E2e | Self::Application)
+    }
+
+    pub(in crate::swarm::callback) const fn origin_quota_lane(self) -> Option<OriginQuotaLane> {
+        match self {
+            Self::DhtControl => Some(OriginQuotaLane::DhtControl),
+            Self::Storage => Some(OriginQuotaLane::Storage),
+            Self::E2e => Some(OriginQuotaLane::E2e),
+            Self::Application => Some(OriginQuotaLane::Application),
+            Self::Reassembly => None,
+        }
     }
 }
 

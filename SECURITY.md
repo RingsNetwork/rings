@@ -150,6 +150,34 @@ Concurrent devices or processes for one account/destination must delegate to one
 allocator; sharing only the underlying store is not an atomic multi-writer protocol and may
 produce a typed fork.
 
+### Final-destination origin rate boundary
+
+Transport admission retains separate node-wide and per-immediate-peer count and byte occupancy
+bounds. Those bounds limit queued memory; they are not rate limits and do not identify the signed
+origin. After both payload signatures verify, a final destination additionally applies two
+runtime-local token buckets keyed by `(network_id, origin account DID, destination DID, logical
+inbound lane)`: one for messages and one for verified logical-message bytes. The account DID comes
+from the inner transaction signature, so changing a delegated session or last-hop relay does not
+reset an active allowance, while unrelated origins carried by one relay remain independent.
+
+The destination serializes replay classification and quota admission as one commit boundary. A
+Replay, Fork, or Stale verdict consumes no tokens; a quota rejection does not advance replay; and
+a replay-persistence failure rolls back the provisional quota reservation. After that commit,
+logical lane capacity and application validation run, so even an application-rejected transaction
+has consumed quota for the authenticated work it caused. The complete order is: raw transport
+occupancy, decode and both signature checks, final-destination check, replay plus quota commit,
+logical lane reservation, then application validation and handler effects. An over-quota
+transaction therefore enters neither the logical mailbox nor application code.
+
+The byte charge is `Transaction.data.len()` from the verified original transaction. A normal
+frame is charged once at destination admission. Chunk envelopes are transport framing and consume
+no origin quota; after complete reassembly and signature verification, the recovered original
+transaction is charged once by the same function. Quota time is monotonic and local, token state
+is never serialized into the replay snapshot, and each lane has a hard record bound. Under
+pressure only a fully replenished idle record is reusable; if none exists, admission fails closed.
+Quota drops are counted by the bounded lane and reason dimensions, never by origin DID. They are
+local drops and do not disconnect the immediate peer, which may be an honest relay.
+
 A leak on this layer is a communication-layer bug. Cover traffic and circuits do not
 fix it: they run above the relay and inherit whatever it exposes.
 
@@ -363,8 +391,8 @@ needs concrete mitigation work such as one or more of:
   route selection;
 - multiple independently controlled bootstrap or registry sources;
 - storage audit, challenge, or accountability mechanisms for unavailable owners;
-- application-level quotas, abuse handling, and monitoring for authenticated-open
-  deployments.
+- application-specific authorization, abuse response, and monitoring beyond the generic
+  final-destination origin quotas for authenticated-open deployments.
 
 Any such mitigation should be tracked and reviewed as a separate design or
 implementation issue. Until then, deployment documentation and feature claims

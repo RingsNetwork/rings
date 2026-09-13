@@ -29,6 +29,8 @@ use crate::message::DhtProtocolMode;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
+use crate::message::OriginQuotaCounters;
+use crate::message::OriginQuotaLane;
 use crate::message::PayloadSender;
 use crate::message::ReplayCounters;
 use crate::swarm::callback::SharedSwarmCallback;
@@ -196,6 +198,11 @@ impl Swarm {
     pub fn transaction_replay_counters(&self) -> ReplayCounters {
         self.transport.replay_counters()
     }
+
+    /// Return aggregate final-destination origin-quota drop counters by logical lane and reason.
+    pub fn origin_quota_counters(&self) -> OriginQuotaCounters {
+        self.transport.origin_quota_counters()
+    }
 }
 
 impl Swarm {
@@ -235,7 +242,7 @@ impl Swarm {
             ));
         }
         self.transport
-            .admit_transaction_replay(&offer_payload.transaction)
+            .admit_final_transaction(&offer_payload.transaction, OriginQuotaLane::DhtControl)
             .await?;
 
         let peer = offer_payload.transaction.origin();
@@ -272,7 +279,7 @@ impl Swarm {
             ));
         }
         self.transport
-            .admit_transaction_replay(&answer_payload.transaction)
+            .admit_final_transaction(&answer_payload.transaction, OriginQuotaLane::DhtControl)
             .await?;
 
         let peer = answer_payload.transaction.signer();

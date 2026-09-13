@@ -125,6 +125,10 @@ pub enum Error {
         source: Box<Error>,
     },
 
+    /// Final-destination origin-quota admission failed.
+    #[error(transparent)]
+    OriginQuota(#[from] crate::message::OriginQuotaError),
+
     /// The payload does not carry the v2 hard-cutover wire marker.
     #[error("Legacy transaction wire format is not accepted")]
     LegacyTransactionWireFormat,

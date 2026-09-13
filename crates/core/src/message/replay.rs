@@ -9,7 +9,9 @@
 //! Persistence is one versioned snapshot under one storage key. Sender and receiver tables each
 //! have a hard stream-count bound and never evict: once the bound is reached, a new stream fails
 //! closed. Existing stream records remain durable until an operator explicitly removes the
-//! replay store. Deleting that store deletes the corresponding replay guarantee.
+//! replay store. Deleting that store deletes the corresponding replay guarantee. Runtime-local
+//! origin quota state shares the serialized receiver commit boundary but is not part of the
+//! snapshot.
 
 use std::collections::BTreeMap;
 use std::num::NonZeroU64;
@@ -24,7 +26,16 @@ use serde::Serialize;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::quota::quota_admission_error;
+use crate::message::quota::OriginQuotaCounterState;
+use crate::message::quota::OriginQuotaTable;
+use crate::message::OriginQuotaConfig;
+use crate::message::OriginQuotaCounters;
+use crate::message::OriginQuotaInstant;
+use crate::message::OriginQuotaKey;
+use crate::message::OriginQuotaLane;
 use crate::storage::KvStorageInterface;
+use crate::utils::Instant;
 
 /// Number of out-of-order sequence slots retained for one destination-scoped stream.
 pub const TRANSACTION_REPLAY_WINDOW: usize = 32;
@@ -324,23 +335,46 @@ impl ReplayCounterState {
 /// Serialized sender allocator and receiver replay-window effect boundary.
 pub(crate) struct TransactionReplay {
     storage: ReplayStorage,
-    snapshot: Mutex<Option<ReplaySnapshot>>,
+    state: Mutex<TransactionAdmissionState>,
+    started_at: Instant,
     counters: ReplayCounterState,
+    quota_counters: OriginQuotaCounterState,
+}
+
+struct TransactionAdmissionState {
+    snapshot: Option<ReplaySnapshot>,
+    quota: OriginQuotaTable,
 }
 
 impl TransactionReplay {
     /// Construct a replay runtime. The snapshot is loaded lazily on its first operation.
+    #[cfg(test)]
     pub(crate) fn new(storage: ReplayStorage) -> Self {
+        Self::new_with_quota(storage, OriginQuotaConfig::default())
+    }
+
+    /// Construct a replay runtime with explicit runtime-local origin quotas.
+    pub(crate) fn new_with_quota(storage: ReplayStorage, quota_config: OriginQuotaConfig) -> Self {
         Self {
             storage,
-            snapshot: Mutex::new(None),
+            state: Mutex::new(TransactionAdmissionState {
+                snapshot: None,
+                quota: OriginQuotaTable::new(quota_config),
+            }),
+            started_at: Instant::now(),
             counters: ReplayCounterState::default(),
+            quota_counters: OriginQuotaCounterState::default(),
         }
     }
 
     /// Current observable counters.
     pub(crate) fn counters(&self) -> ReplayCounters {
         self.counters.snapshot()
+    }
+
+    /// Current aggregate origin-quota rejection counters.
+    pub(crate) fn quota_counters(&self) -> OriginQuotaCounters {
+        self.quota_counters.snapshot()
     }
 
     async fn load_snapshot<'a>(
@@ -395,8 +429,8 @@ impl TransactionReplay {
         key: StreamKey,
         count: NonZeroU64,
     ) -> Result<RangeInclusive<u64>> {
-        let mut slot = self.snapshot.lock().await;
-        let snapshot = self.load_snapshot(&mut slot).await?;
+        let mut state = self.state.lock().await;
+        let snapshot = self.load_snapshot(&mut state.snapshot).await?;
         let previous = snapshot.sender.get(&key).copied();
         if previous.is_none() && snapshot.sender.len() >= TRANSACTION_REPLAY_STREAM_CAPACITY {
             return Err(Error::TransactionReplayStreamCapacityExceeded {
@@ -427,59 +461,123 @@ impl TransactionReplay {
         Ok(first..=last)
     }
 
-    /// Persist one receiver transition before allowing final-destination dispatch.
-    pub(crate) async fn admit(
+    /// Atomically commit replay classification and origin-quota admission before dispatch.
+    pub(crate) async fn admit_with_quota(
         &self,
         key: StreamKey,
         sequence: u64,
         digest: TransactionDigest,
+        lane: OriginQuotaLane,
+        byte_cost: usize,
     ) -> Result<SequenceVerdict> {
-        let mut slot = self.snapshot.lock().await;
-        let snapshot = self.load_snapshot(&mut slot).await?;
-        let previous = snapshot.receiver.get(&key).cloned();
-        if previous.is_none() && snapshot.receiver.len() >= TRANSACTION_REPLAY_STREAM_CAPACITY {
+        let now = OriginQuotaInstant::from_nanos(
+            Instant::now()
+                .saturating_duration_since(self.started_at)
+                .as_nanos(),
+        );
+        self.admit_at(key, sequence, digest, lane, byte_cost, now)
+            .await
+    }
+
+    async fn admit_at(
+        &self,
+        key: StreamKey,
+        sequence: u64,
+        digest: TransactionDigest,
+        lane: OriginQuotaLane,
+        byte_cost: usize,
+        now: OriginQuotaInstant,
+    ) -> Result<SequenceVerdict> {
+        let mut state = self.state.lock().await;
+        self.load_snapshot(&mut state.snapshot).await?;
+        let previous = state
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.receiver.get(&key).cloned());
+        let receiver_len = state
+            .snapshot
+            .as_ref()
+            .map_or(0, |snapshot| snapshot.receiver.len());
+        if previous.is_none() && receiver_len >= TRANSACTION_REPLAY_STREAM_CAPACITY {
             return Err(Error::TransactionReplayStreamCapacityExceeded {
                 capacity: TRANSACTION_REPLAY_STREAM_CAPACITY,
             });
         }
         let (next, verdict) = observe(previous.clone(), sequence, digest);
         match verdict {
-            SequenceVerdict::First | SequenceVerdict::Advance | SequenceVerdict::Late => {
-                snapshot.receiver.insert(key, next);
-                if let Err(error) = self.persist(snapshot).await {
-                    match previous {
-                        Some(previous) => {
-                            snapshot.receiver.insert(key, previous);
-                        }
-                        None => {
-                            snapshot.receiver.remove(&key);
-                        }
-                    }
-                    return Err(error);
-                }
-                Ok(verdict)
-            }
+            SequenceVerdict::First | SequenceVerdict::Advance | SequenceVerdict::Late => {}
             SequenceVerdict::Replay => {
                 self.counters.replay.fetch_add(1, Ordering::Relaxed);
-                Err(Error::TransactionReplay { key, sequence })
+                return Err(Error::TransactionReplay { key, sequence });
             }
             SequenceVerdict::Fork { accepted, incoming } => {
                 self.counters.fork.fetch_add(1, Ordering::Relaxed);
-                Err(Error::TransactionSequenceFork {
+                return Err(Error::TransactionSequenceFork {
                     key,
                     sequence,
                     evidence: Box::new(TransactionForkEvidence { accepted, incoming }),
-                })
+                });
             }
             SequenceVerdict::Stale { retained_min } => {
                 self.counters.stale.fetch_add(1, Ordering::Relaxed);
-                Err(Error::TransactionSequenceStale {
+                return Err(Error::TransactionSequenceStale {
                     key,
                     sequence,
                     retained_min,
-                })
+                });
             }
         }
+
+        let quota_key =
+            OriginQuotaKey::new(key.network_id, key.origin_account, key.destination, lane);
+        let quota_reservation = match state.quota.reserve(quota_key, byte_cost, now) {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                self.quota_counters.record(lane, &error);
+                return Err(quota_admission_error(quota_key, byte_cost, error));
+            }
+        };
+        let Some(snapshot) = state.snapshot.as_mut() else {
+            quota_reservation.rollback(&mut state.quota);
+            return Err(Error::TransactionReplayStateInvalid);
+        };
+        snapshot.receiver.insert(key, next);
+        if let Err(error) = self.persist(snapshot).await {
+            match previous {
+                Some(previous) => {
+                    snapshot.receiver.insert(key, previous);
+                }
+                None => {
+                    snapshot.receiver.remove(&key);
+                }
+            }
+            quota_reservation.rollback(&mut state.quota);
+            return Err(error);
+        }
+        Ok(verdict)
+    }
+
+    #[cfg(test)]
+    async fn admit(
+        &self,
+        key: StreamKey,
+        sequence: u64,
+        digest: TransactionDigest,
+    ) -> Result<SequenceVerdict> {
+        self.admit_at(
+            key,
+            sequence,
+            digest,
+            OriginQuotaLane::Application,
+            0,
+            OriginQuotaInstant::ZERO,
+        )
+        .await
+    }
+
+    #[cfg(all(test, not(target_family = "wasm")))]
+    pub(crate) async fn quota_record_count_for_test(&self) -> usize {
+        self.state.lock().await.quota.len()
     }
 }
 
@@ -668,8 +766,8 @@ mod tests {
         let storage = crate::storage::MemStorage::new();
         let runtime = TransactionReplay::new(Box::new(storage));
         {
-            let mut slot = runtime.snapshot.lock().await;
-            let snapshot = runtime.load_snapshot(&mut slot).await?;
+            let mut state = runtime.state.lock().await;
+            let snapshot = runtime.load_snapshot(&mut state.snapshot).await?;
             snapshot.sender.insert(key, u64::MAX);
             runtime.persist(snapshot).await?;
         }
@@ -719,8 +817,8 @@ mod tests {
         let runtime = TransactionReplay::new(Box::new(crate::storage::MemStorage::new()));
         let destination = Did::from(1_u32);
         {
-            let mut slot = runtime.snapshot.lock().await;
-            let snapshot = runtime.load_snapshot(&mut slot).await?;
+            let mut state = runtime.state.lock().await;
+            let snapshot = runtime.load_snapshot(&mut state.snapshot).await?;
             for origin in 0_u32..4096 {
                 snapshot
                     .sender
@@ -875,3 +973,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(all(test, not(target_family = "wasm")))]
+mod quota_admission_tests;
