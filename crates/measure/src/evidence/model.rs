@@ -453,6 +453,18 @@ impl Model for EvidenceModel {
                     .outcomes
                     .contains(&Outcome::ReplayCapacityExhausted)
             }),
+            Property::<Self>::sometimes(
+                "distinct beneficiaries share the global replay budget",
+                |_, history| {
+                    let state = abstract_replay(history);
+                    state.markers.iter().any(|left| {
+                        state
+                            .markers
+                            .iter()
+                            .any(|right| left.beneficiary != right.beneficiary)
+                    })
+                },
+            ),
             Property::<Self>::sometimes("clock regression fails closed", |_, history| {
                 abstract_replay(history).outcomes.contains(&Outcome::Stale)
             }),
