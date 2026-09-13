@@ -238,7 +238,7 @@ fn test_wire_size_matches_every_message_discriminant_and_signature_width() -> Re
     for signature_len in [
         0, 1, 63, 64, 127, 128, 255, 256, 16_383, 16_384, 65_535, 65_536,
     ] {
-        for message in Message::test_variants() {
+        for message in Message::test_variants()? {
             let message_kind = message.kind().as_str();
             let mut payload = new_payload(message, next_hop);
             payload.verification.sig = vec![9; signature_len];

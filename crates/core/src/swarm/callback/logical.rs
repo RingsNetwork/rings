@@ -54,6 +54,12 @@ impl LogicalInbound {
                 let _ = $msg;
                 Err(crate::error::Error::InboundActorInvariantViolation)
             }};
+            (ProbeOfferV1, $msg:expr) => {
+                self.message_handler.handle(payload, $msg.as_ref()).await
+            };
+            (ProbeAcknowledgementV1, $msg:expr) => {
+                self.message_handler.handle(payload, $msg.as_ref()).await
+            };
             ($variant:ident, $msg:expr) => {
                 self.message_handler.handle(payload, $msg).await
             };

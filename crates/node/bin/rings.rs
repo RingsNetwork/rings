@@ -871,7 +871,14 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
             .await?,
     );
     let per_measure_storage = Box::new(
-        FileStorage::new_with_cap_and_path(measure_storage.capacity, measure_storage.path).await?,
+        FileStorage::new_with_cap_and_path(measure_storage.capacity, measure_storage.path.clone())
+            .await?,
+    );
+    let provisional_evidence_path =
+        Path::new(&measure_storage.path).join("provisional-evidence-v1");
+    let per_evidence_storage = Box::new(
+        FileStorage::new_with_cap_and_path(measure_storage.capacity, provisional_evidence_path)
+            .await?,
     );
     let onion_entry_guard_path = onion_entry_guard_storage_path(&data_storage.path);
     let per_onion_entry_guard_storage: OnionEntryGuardStorage = Box::new(
@@ -889,7 +896,9 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
         .await?,
     );
 
-    let measure = PeriodicMeasure::new(per_measure_storage).await?;
+    let measure =
+        PeriodicMeasure::new_with_evidence_storage(per_measure_storage, per_evidence_storage)
+            .await?;
 
     let processor = Arc::new(
         ProcessorBuilder::from_config(&pc)?

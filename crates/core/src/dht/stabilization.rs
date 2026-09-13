@@ -28,7 +28,8 @@ use crate::message::FindSuccessorThen;
 use crate::message::Message;
 use crate::message::NotifyPredecessorSend;
 use crate::message::PayloadSender;
-use crate::message::PeerLivenessProbe;
+use crate::message::ProbeRequestV1;
+use crate::message::ProvisionalEpochV1;
 use crate::message::QueryForTopoInfoSend;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
@@ -585,6 +586,7 @@ impl Stabilizer {
 
     async fn probe_peer_liveness(&self) -> Result<()> {
         let now_ms = get_epoch_ms_i64();
+        let unix_seconds = u64::try_from(now_ms).unwrap_or(0) / 1_000;
         let candidates = self.transport.liveness_probe_candidates(now_ms)?;
         for attempt in candidates {
             let peer = attempt.peer();
@@ -592,7 +594,23 @@ impl Stabilizer {
                 .transport
                 .get_connection(peer)
                 .map(|conn| conn.webrtc_connection_state());
-            let msg = Message::PeerLivenessProbe(PeerLivenessProbe { sent_at_ms: now_ms });
+            let mut nonce = [0_u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce);
+            let request = ProbeRequestV1 {
+                epoch: ProvisionalEpochV1::from_unix_seconds(unix_seconds),
+                nonce,
+            };
+            let payload = self
+                .transport
+                .signed_payload(Message::ProbeRequestV1(request), peer, peer)
+                .await?;
+            let tx_id = payload.transaction.tx_id;
+            if !self
+                .transport
+                .register_pending_liveness_probe(attempt, tx_id, request)?
+            {
+                continue;
+            }
             tracing::debug!(
                 target: "rings_core::dht::stabilization",
                 local = %self.dht.did,
@@ -601,19 +619,23 @@ impl Stabilizer {
                 idle_ms = PEER_LIVENESS_IDLE_MS,
                 "STABILIZATION peer liveness probe send start"
             );
-            match self.transport.send_direct_message(msg, peer).await {
-                Ok(tx_id) => {
-                    self.transport
-                        .record_peer_liveness_probe_sent(attempt, now_ms)?;
+            match self.transport.send_payload(payload).await {
+                Ok(()) => {
+                    let pending = self
+                        .transport
+                        .record_peer_liveness_probe_sent(attempt, now_ms, tx_id, request)?;
                     tracing::debug!(
                         target: "rings_core::dht::stabilization",
                         local = %self.dht.did,
                         peer = %peer,
                         tx_id = %tx_id,
+                        pending,
                         "STABILIZATION peer liveness probe send complete"
                     );
                 }
                 Err(error) => {
+                    self.transport
+                        .cancel_pending_liveness_probe(attempt, tx_id, request)?;
                     tracing::warn!(
                         target: "rings_core::dht::stabilization",
                         local = %self.dht.did,

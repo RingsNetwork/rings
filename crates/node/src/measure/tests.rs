@@ -4,6 +4,11 @@ use std::sync::atomic::Ordering;
 
 use rings_core::error::Error as CoreError;
 use rings_core::measure::BehaviourJudgement;
+use rings_core::measure::Measure;
+use rings_core::message::MessageSigner;
+use rings_core::message::ProvisionalEpochV1;
+use rings_core::message::ProvisionalServiceClaimV1;
+use rings_core::message::ProvisionalServiceReceiptV1;
 use rings_core::storage::file::FileStorage;
 use rings_core::storage::KvStorageInterface;
 use rings_core::storage::MemStorage;
@@ -348,6 +353,120 @@ async fn persistence_restores_complete_credit_and_epoch_state() {
         projected.credit.map(|credit| credit.bytes_sent_to_peer()),
         Some(17)
     );
+}
+
+fn provisional_evidence_record() -> ProvisionalEvidenceRecord<Did> {
+    let provider =
+        rings_core::session::SessionSk::new_with_seckey(&rings_core::ecc::SecretKey::random())
+            .unwrap_or_else(|error| panic!("provider session must build: {error}"));
+    let beneficiary =
+        rings_core::session::SessionSk::new_with_seckey(&rings_core::ecc::SecretKey::random())
+            .unwrap_or_else(|error| panic!("beneficiary session must build: {error}"));
+    let claim = ProvisionalServiceClaimV1::probe(
+        7,
+        provider.account_did(),
+        beneficiary.account_did(),
+        ProvisionalEpochV1 { slot: 3 },
+        [4; 32],
+        [5; 32],
+        [6; 32],
+    );
+    let provider_attestation = claim
+        .sign_provider(MessageSigner::new(&provider, 7))
+        .unwrap_or_else(|error| panic!("provider attestation must sign: {error}"));
+    let beneficiary_attestation = claim
+        .sign_beneficiary(MessageSigner::new(&beneficiary, 7))
+        .unwrap_or_else(|error| panic!("beneficiary attestation must sign: {error}"));
+    let receipt = ProvisionalServiceReceiptV1::new(
+        claim.clone(),
+        provider_attestation,
+        beneficiary_attestation,
+    )
+    .unwrap_or_else(|error| panic!("receipt must assemble: {error}"));
+    ProvisionalEvidenceRecord::new(
+        rings_measure::EvidenceAccountPair::new(claim.provider_account, claim.beneficiary_account),
+        rings_measure::EvidenceFreshnessKey::new(
+            claim.network_id,
+            claim.beneficiary_account,
+            claim.epoch.slot,
+            claim.nonce,
+        ),
+        EvidenceDigest::new(
+            receipt
+                .digest()
+                .unwrap_or_else(|error| panic!("receipt must hash: {error}"))
+                .into_bytes(),
+        ),
+        receipt
+            .canonical_bytes()
+            .unwrap_or_else(|error| panic!("receipt must encode: {error}")),
+        UnixTime::from_secs(10),
+    )
+}
+
+#[tokio::test]
+async fn native_restart_restores_non_empty_provisional_evidence() {
+    let measure_path = "tmp/measure_with_evidence_test_db";
+    let evidence_path = "tmp/provisional_evidence_test_db";
+    let measure_storage: MeasureStorage = Box::new(
+        FileStorage::new_with_cap_and_path(1024 * 1024, measure_path)
+            .await
+            .unwrap_or_else(|error| panic!("measurement storage must open: {error}")),
+    );
+    let evidence_storage: EvidenceStorage = Box::new(
+        FileStorage::new_with_cap_and_path(1024 * 1024, evidence_path)
+            .await
+            .unwrap_or_else(|error| panic!("evidence storage must open: {error}")),
+    );
+    measure_storage
+        .clear()
+        .await
+        .unwrap_or_else(|error| panic!("measurement storage must clear: {error}"));
+    evidence_storage
+        .clear()
+        .await
+        .unwrap_or_else(|error| panic!("evidence storage must clear: {error}"));
+    let clock = Arc::new(ManualMeasureClock::new(10));
+    let measure = PeriodicMeasure::new_with_clock_and_evidence(
+        measure_storage,
+        evidence_storage,
+        clock.clone(),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("measurement must initialize: {error}"));
+    assert!(matches!(
+        measure
+            .admit_provisional_evidence(provisional_evidence_record())
+            .await
+            .map(|report| report.admission()),
+        Ok(rings_measure::EvidenceAdmission::Admitted)
+    ));
+    measure
+        .flush()
+        .await
+        .unwrap_or_else(|error| panic!("evidence must flush: {error}"));
+    drop(measure);
+
+    let restored = PeriodicMeasure::new_with_clock_and_evidence(
+        Box::new(
+            FileStorage::new_with_cap_and_path(1024 * 1024, measure_path)
+                .await
+                .unwrap_or_else(|error| panic!("measurement storage must reopen: {error}")),
+        ),
+        Box::new(
+            FileStorage::new_with_cap_and_path(1024 * 1024, evidence_path)
+                .await
+                .unwrap_or_else(|error| panic!("evidence storage must reopen: {error}")),
+        ),
+        clock,
+    )
+    .await
+    .unwrap_or_else(|error| panic!("measurement must restore: {error}"));
+    let page = restored
+        .provisional_evidence_page(None, nonzero_usize(4))
+        .await
+        .unwrap_or_else(|error| panic!("evidence page must project: {error}"));
+    assert_eq!(page.records().len(), 1);
 }
 
 #[tokio::test]

@@ -35,6 +35,7 @@ use wasm_bindgen_futures::JsFuture;
 use crate::error::Error;
 use crate::error::Result as NodeResult;
 use crate::extension::ext::Scope;
+use crate::measure::EvidenceStorage;
 use crate::measure::MeasureStorage;
 use crate::onion::circuit::route_first_hop;
 use crate::onion::circuit::OnionCircuitCapabilities;
@@ -434,6 +435,20 @@ async fn open_browser_measure_storage(storage_name: &str) -> Option<MeasureStora
     }
 }
 
+async fn open_browser_evidence_storage(storage_name: &str) -> Option<EvidenceStorage> {
+    match IdbStorage::new_with_cap_and_name(2, storage_name).await {
+        Ok(storage) => Some(Box::new(storage) as EvidenceStorage),
+        Err(source) => {
+            tracing::warn!(
+                storage_name = %storage_name,
+                error = %source,
+                "browser provisional-evidence IndexedDB unavailable; falling back to memory"
+            );
+            None
+        }
+    }
+}
+
 async fn open_browser_entry_guard_storage(storage_name: &str) -> Option<OnionEntryGuardStorage> {
     match IdbStorage::new_with_cap_and_name(1024, storage_name).await {
         Ok(storage) => Some(Box::new(storage) as OnionEntryGuardStorage),
@@ -472,6 +487,8 @@ impl Provider {
         let entry_storage = open_browser_entry_storage_or_memory(&storage_name).await;
         let measure_storage =
             open_browser_measure_storage(&format!("{storage_name}/measure")).await;
+        let evidence_storage =
+            open_browser_evidence_storage(&format!("{storage_name}/provisional-evidence-v1")).await;
         let onion_entry_guard_storage =
             open_browser_entry_guard_storage(&format!("{storage_name}/onion-entry-guards")).await;
         let replay_storage =
@@ -481,6 +498,7 @@ impl Provider {
             config,
             entry_storage,
             measure_storage,
+            evidence_storage,
             onion_entry_guard_storage,
             Some(replay_storage),
         )
@@ -527,6 +545,8 @@ impl Provider {
 
             let entry_storage = open_browser_entry_storage_or_memory("rings-node").await;
             let measure_storage = open_browser_measure_storage("rings-node/measure").await;
+            let evidence_storage =
+                open_browser_evidence_storage("rings-node/provisional-evidence-v1").await;
             let onion_entry_guard_storage =
                 open_browser_entry_guard_storage("rings-node/onion-entry-guards").await;
             let replay_storage =
@@ -541,6 +561,7 @@ impl Provider {
                 Signer::Async(Box::new(signer)),
                 entry_storage,
                 measure_storage,
+                evidence_storage,
                 onion_entry_guard_storage,
                 Some(replay_storage),
             )
@@ -572,6 +593,8 @@ impl Provider {
 
             let entry_storage = open_browser_entry_storage_or_memory("rings-node").await;
             let measure_storage = open_browser_measure_storage("rings-node/measure").await;
+            let evidence_storage =
+                open_browser_evidence_storage("rings-node/provisional-evidence-v1").await;
             let onion_entry_guard_storage =
                 open_browser_entry_guard_storage("rings-node/onion-entry-guards").await;
             let replay_storage =
@@ -587,6 +610,7 @@ impl Provider {
                 Signer::Async(Box::new(signer)),
                 entry_storage,
                 measure_storage,
+                evidence_storage,
                 onion_entry_guard_storage,
                 Some(replay_storage),
                 move |config| {

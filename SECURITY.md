@@ -178,6 +178,39 @@ pressure only a fully replenished idle record is reusable; if none exists, admis
 Quota drops are counted by the bounded lane and reason dimensions, never by origin DID. They are
 local drops and do not disconnect the immediate peer, which may be an honest relay.
 
+### Provisional service-receipt boundary
+
+The implemented receipt protocol is a provisional `ProbeV1` evidence collector, not the
+finalized DRanking ledger. A beneficiary sends an authenticated request containing a fresh nonce
+and a current or adjacent five-minute epoch. The provider returns an offer that embeds the exact
+signed request transaction and an exact provider-signed completion transaction. The provider and
+beneficiary then sign the same canonical claim under different role domains, and the beneficiary
+returns the complete receipt in an acknowledgement. Account DIDs define the roles; delegated
+session rotation neither changes a role nor creates a distinct receipt identity.
+
+The `V1` wire markers and signing domains are protocol-domain separators, not compatibility
+fallbacks. Only `ProbeV1` is accepted. Unknown service kinds, noncanonical bytes, a unit count
+other than one, same-account roles, digest or role mismatches, stale epochs, and expired delegated
+proofs fail closed during live admission. The old unsigned liveness probe/report wire is removed.
+
+Cryptographic validity and live collection are intentionally separate. A stored receipt can later
+prove that both account roles signed one canonical claim and that their delegated proofs were valid
+at signing time. It cannot later prove that the receipt was observed inside the receiver's live
+epoch tolerance. Live admission checks that fact once and stores the local observation time.
+
+Provisional evidence is isolated from peer measurements, `CreditRecord`, and
+`order_peers_by_quality`; it changes neither routing nor credit. The evidence store has hard global
+and per-provider/beneficiary record and byte limits, deterministic oldest-first eviction, aggregate
+unlabelled counters, bounded digest pagination, and a separate durable snapshot on native and
+browser nodes. Invalid persisted entries are skipped independently so one malformed record cannot
+hide valid evidence. Eviction reduces later evidence availability and must not be interpreted as
+proof that the underlying service did not occur.
+
+These receipts do not prevent colluding accounts from manufacturing mutually signed probes, make
+DIDs scarce, prove useful relay/storage work, or create Sybil-resistant reputation. A future
+finalized-epoch DRanking receipt must use a distinct canonical format and signing domain; it must
+not reinterpret this provisional wire or silently aggregate it into trust.
+
 A leak on this layer is a communication-layer bug. Cover traffic and circuits do not
 fix it: they run above the relay and inherit whatever it exposes.
 

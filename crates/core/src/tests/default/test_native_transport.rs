@@ -7,9 +7,9 @@ use crate::dht::StorageSyncDestination;
 use crate::dht::StorageSyncPurpose;
 use crate::ecc::SecretKey;
 use crate::error::Result;
+use crate::message::test_probe_request;
 use crate::message::Message;
 use crate::message::MessageClass;
-use crate::message::PeerLivenessProbe;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::tests::assert_control_interleaves_transfer;
 use crate::tests::control_interleaves_transfer;
@@ -59,9 +59,7 @@ async fn test_native_webrtc_control_interleaves_the_shared_multiframe_storage_fi
         node1
             .swarm
             .send_direct_message(
-                Message::PeerLivenessProbe(PeerLivenessProbe {
-                    sent_at_ms: i64::from(round),
-                }),
+                Message::ProbeRequestV1(test_probe_request(round)),
                 node2.did(),
             )
             .await?;

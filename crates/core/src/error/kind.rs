@@ -129,6 +129,14 @@ pub enum Error {
     #[error(transparent)]
     OriginQuota(#[from] crate::message::OriginQuotaError),
 
+    /// A provisional service receipt or probe transcript is invalid.
+    #[error(transparent)]
+    ServiceReceipt(#[from] crate::message::ServiceReceiptError),
+
+    /// Bounded provisional-evidence state rejected a transition.
+    #[error(transparent)]
+    ProvisionalEvidence(#[from] rings_measure::EvidenceError),
+
     /// The payload does not carry the v2 hard-cutover wire marker.
     #[error("Legacy transaction wire format is not accepted")]
     LegacyTransactionWireFormat,

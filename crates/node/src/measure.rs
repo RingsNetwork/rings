@@ -23,17 +23,27 @@ use rings_core::storage::KvStorageInterface;
 use rings_measure::ApplyOutcome;
 use rings_measure::Authentication;
 use rings_measure::CreditPolicy;
+use rings_measure::EvidenceAdmissionReport;
+use rings_measure::EvidenceCounters;
+use rings_measure::EvidenceDigest;
+use rings_measure::EvidenceError;
+use rings_measure::EvidenceLimits;
+use rings_measure::EvidencePage;
+use rings_measure::EvidenceSnapshot;
 use rings_measure::MeasureError;
 use rings_measure::MeasurementBatch;
 use rings_measure::MeasurementEvent;
 use rings_measure::MeasurementLedger;
 use rings_measure::MeasurementSnapshot;
+use rings_measure::ProvisionalEvidenceRecord;
+use rings_measure::ProvisionalEvidenceStore;
 use rings_measure::ReliabilityPolicy;
 use rings_measure::UnixTime;
 
 // Legacy `PeriodicMeasure/counters/...` values intentionally remain unread:
 // a bare count proves neither byte-credit direction nor a live epoch timestamp.
 const SNAPSHOT_KEY: &str = "MeasurementLedger/v1";
+const EVIDENCE_SNAPSHOT_KEY: &str = "ProvisionalEvidence/v1";
 const PERSISTENCE_WAKE_CAPACITY: usize = 1;
 const PERSISTENCE_SHUTDOWN_ATTEMPTS: usize = 3;
 const PRUNE_INTERVAL_SECONDS: u64 = 60 * 60;
@@ -77,10 +87,23 @@ pub type MeasureStorage = Box<dyn KvStorageInterface<MeasurementSnapshot<Did>>>;
 #[cfg(not(all(feature = "browser", target_family = "wasm")))]
 pub type MeasureStorage = Box<dyn KvStorageInterface<MeasurementSnapshot<Did>> + Sync + Send>;
 
+/// Storage used for the separate provisional-receipt evidence snapshot.
+#[cfg(all(feature = "browser", target_family = "wasm"))]
+pub type EvidenceStorage = Box<dyn KvStorageInterface<EvidenceSnapshot<Did>>>;
+
+/// Storage used for the separate provisional-receipt evidence snapshot.
+#[cfg(not(all(feature = "browser", target_family = "wasm")))]
+pub type EvidenceStorage = Box<dyn KvStorageInterface<EvidenceSnapshot<Did>> + Sync + Send>;
+
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 type SharedMeasureStorage = Arc<dyn KvStorageInterface<MeasurementSnapshot<Did>>>;
 #[cfg(not(all(feature = "browser", target_family = "wasm")))]
 type SharedMeasureStorage = Arc<dyn KvStorageInterface<MeasurementSnapshot<Did>> + Sync + Send>;
+
+#[cfg(all(feature = "browser", target_family = "wasm"))]
+type SharedEvidenceStorage = Arc<dyn KvStorageInterface<EvidenceSnapshot<Did>>>;
+#[cfg(not(all(feature = "browser", target_family = "wasm")))]
+type SharedEvidenceStorage = Arc<dyn KvStorageInterface<EvidenceSnapshot<Did>> + Sync + Send>;
 
 /// Failure while loading or explicitly flushing the runtime measurement adapter.
 #[derive(Debug, thiserror::Error)]
@@ -91,6 +114,9 @@ pub enum MeasureRuntimeError {
     /// Persisted or live state violated the pure measurement model.
     #[error("measurement model failed: {0}")]
     Model(#[from] MeasureError),
+    /// Persisted or live provisional evidence violated its bounded model.
+    #[error("provisional evidence model failed: {0}")]
+    Evidence(#[from] EvidenceError),
     /// A bounded explicit flush did not complete before its deadline.
     #[error("measurement persistence flush timed out")]
     FlushTimeout,
@@ -118,6 +144,7 @@ pub struct PeriodicMeasure {
 
 struct MeasureState {
     storage: SharedMeasureStorage,
+    evidence_storage: SharedEvidenceStorage,
     runtime: Mutex<RuntimeLedger>,
     persistence_lock: AsyncMutex<()>,
     clock: Arc<dyn MeasureClock>,
@@ -136,6 +163,7 @@ impl MeasureState {
 
 struct RuntimeLedger {
     ledger: MeasurementLedger<Did>,
+    evidence: ProvisionalEvidenceStore<Did>,
     dirty: bool,
     persisting: bool,
     mutated_while_persisting: bool,
@@ -177,22 +205,65 @@ impl PeriodicMeasure {
     /// constructor returns `MeasureRuntimeError::RuntimeUnavailable` instead
     /// of panicking when called outside a live runtime.
     pub async fn new(storage: MeasureStorage) -> Result<Self, MeasureRuntimeError> {
-        Self::new_with_clock(storage, Arc::new(SystemMeasureClock)).await
+        Self::new_with_evidence_storage(storage, Box::new(rings_core::storage::MemStorage::new()))
+            .await
     }
 
+    /// Load measurement and provisional-evidence snapshots from separate bounded backends.
+    pub async fn new_with_evidence_storage(
+        storage: MeasureStorage,
+        evidence_storage: EvidenceStorage,
+    ) -> Result<Self, MeasureRuntimeError> {
+        Self::new_with_clock_and_evidence(storage, evidence_storage, Arc::new(SystemMeasureClock))
+            .await
+    }
+
+    #[cfg(all(test, feature = "node"))]
     async fn new_with_clock(
         storage: MeasureStorage,
+        clock: Arc<dyn MeasureClock>,
+    ) -> Result<Self, MeasureRuntimeError> {
+        Self::new_with_clock_and_evidence(
+            storage,
+            Box::new(rings_core::storage::MemStorage::new()),
+            clock,
+        )
+        .await
+    }
+
+    async fn new_with_clock_and_evidence(
+        storage: MeasureStorage,
+        evidence_storage: EvidenceStorage,
         clock: Arc<dyn MeasureClock>,
     ) -> Result<Self, MeasureRuntimeError> {
         #[cfg(not(all(feature = "browser", target_family = "wasm")))]
         let runtime_handle = tokio::runtime::Handle::try_current()
             .map_err(|error| MeasureRuntimeError::RuntimeUnavailable(error.to_string()))?;
         let storage = SharedMeasureStorage::from(storage);
+        let evidence_storage = SharedEvidenceStorage::from(evidence_storage);
         let mut ledger = match storage.get(SNAPSHOT_KEY).await? {
             Some(snapshot) => MeasurementLedger::from_snapshot(snapshot)?,
             None => MeasurementLedger::new(),
         };
         let now = clock.now();
+        let (evidence, evidence_load) = match evidence_storage.get(EVIDENCE_SNAPSHOT_KEY).await? {
+            Some(snapshot) => ProvisionalEvidenceStore::from_snapshot_with_validator(
+                snapshot,
+                EvidenceLimits::default(),
+                valid_persisted_evidence,
+            )?,
+            None => (
+                ProvisionalEvidenceStore::new(EvidenceLimits::default()),
+                rings_measure::EvidenceLoadReport::default(),
+            ),
+        };
+        if evidence_load.rejected_records() > 0 || evidence_load.evicted_records() > 0 {
+            tracing::warn!(
+                rejected_records = evidence_load.rejected_records(),
+                evicted_records = evidence_load.evicted_records(),
+                "reconciled provisional evidence during startup"
+            );
+        }
         let reconciliation = ledger.reconcile_runtime(now, reliability_policy());
         if reconciliation.is_adjusted() {
             tracing::warn!(
@@ -203,12 +274,17 @@ impl PeriodicMeasure {
         }
         let pruning = ledger.prune(now, CreditPolicy::amule());
         log_prune_failures(&pruning);
-        let dirty = reconciliation.is_adjusted() || pruning.removed_count() > 0;
+        let dirty = reconciliation.is_adjusted()
+            || pruning.removed_count() > 0
+            || evidence_load.rejected_records() > 0
+            || evidence_load.evicted_records() > 0;
         let next_prune_at = next_prune_time(&ledger, now);
         let state = Arc::new(MeasureState {
             storage,
+            evidence_storage,
             runtime: Mutex::new(RuntimeLedger {
                 ledger,
+                evidence,
                 dirty,
                 persisting: false,
                 mutated_while_persisting: false,
@@ -316,11 +392,19 @@ impl PeriodicMeasure {
 
 async fn flush_state(state: &MeasureState) -> Result<(), MeasureRuntimeError> {
     let _guard = state.persistence_lock.lock().await;
-    let snapshot = {
+    let (snapshot, evidence_snapshot) = {
         let mut runtime = lock_or_recover(&state.runtime);
-        prepare_snapshot(&mut runtime)
+        prepare_snapshots(&mut runtime)
     };
-    let result = state.storage.put(SNAPSHOT_KEY, &snapshot).await;
+    let result = match state.storage.put(SNAPSHOT_KEY, &snapshot).await {
+        Ok(()) => {
+            state
+                .evidence_storage
+                .put(EVIDENCE_SNAPSHOT_KEY, &evidence_snapshot)
+                .await
+        }
+        Err(error) => Err(error),
+    };
     finish_persist(&mut lock_or_recover(&state.runtime), result.is_ok());
     result.map_err(MeasureRuntimeError::from)
 }
@@ -411,10 +495,33 @@ fn mark_runtime_dirty(runtime: &mut RuntimeLedger) {
     }
 }
 
-fn prepare_snapshot(runtime: &mut RuntimeLedger) -> MeasurementSnapshot<Did> {
+fn prepare_snapshots(
+    runtime: &mut RuntimeLedger,
+) -> (MeasurementSnapshot<Did>, EvidenceSnapshot<Did>) {
     runtime.persisting = true;
     runtime.mutated_while_persisting = false;
-    runtime.ledger.snapshot()
+    (runtime.ledger.snapshot(), runtime.evidence.snapshot())
+}
+
+fn valid_persisted_evidence(record: &ProvisionalEvidenceRecord<Did>) -> bool {
+    let Ok(receipt) = rings_core::message::ProvisionalServiceReceiptV1::from_canonical_bytes(
+        record.canonical_receipt(),
+    ) else {
+        return false;
+    };
+    let claim = &receipt.claim;
+    receipt
+        .verify_crypto(record.freshness().network_id())
+        .is_ok()
+        && claim.network_id == record.freshness().network_id()
+        && claim.provider_account == *record.pair().provider()
+        && claim.beneficiary_account == *record.pair().beneficiary()
+        && claim.beneficiary_account == *record.freshness().beneficiary()
+        && claim.epoch.slot == record.freshness().epoch_slot()
+        && claim.nonce == record.freshness().nonce()
+        && receipt
+            .digest()
+            .is_ok_and(|digest| digest.into_bytes() == record.digest().into_bytes())
 }
 
 fn finish_persist(runtime: &mut RuntimeLedger, succeeded: bool) {
@@ -568,14 +675,22 @@ fn log_persistence_delay_error(result: Result<(), MeasureRuntimeError>) {
 
 async fn persist_pending_once(state: &MeasureState) -> Result<(), MeasureRuntimeError> {
     let _guard = state.persistence_lock.lock().await;
-    let snapshot = {
+    let (snapshot, evidence_snapshot) = {
         let mut runtime = lock_or_recover(&state.runtime);
         if !runtime.dirty {
             return Ok(());
         }
-        prepare_snapshot(&mut runtime)
+        prepare_snapshots(&mut runtime)
     };
-    let result = state.storage.put(SNAPSHOT_KEY, &snapshot).await;
+    let result = match state.storage.put(SNAPSHOT_KEY, &snapshot).await {
+        Ok(()) => {
+            state
+                .evidence_storage
+                .put(EVIDENCE_SNAPSHOT_KEY, &evidence_snapshot)
+                .await
+        }
+        Err(error) => Err(error),
+    };
     finish_persist(&mut lock_or_recover(&state.runtime), result.is_ok());
     result.map_err(MeasureRuntimeError::from)
 }
@@ -718,6 +833,34 @@ impl Measure for PeriodicMeasure {
                 .collect(),
             next_cursor,
         })
+    }
+
+    async fn admit_provisional_evidence(
+        &self,
+        record: ProvisionalEvidenceRecord<Did>,
+    ) -> Result<EvidenceAdmissionReport<Did>, EvidenceError> {
+        let result = {
+            let mut runtime = lock_or_recover(&self.state.runtime);
+            let result = runtime.evidence.admit(record);
+            mark_runtime_dirty(&mut runtime);
+            result
+        };
+        self.wake_persistence();
+        result
+    }
+
+    async fn provisional_evidence_page(
+        &self,
+        after: Option<EvidenceDigest>,
+        limit: NonZeroUsize,
+    ) -> Result<EvidencePage<Did>, EvidenceError> {
+        Ok(lock_or_recover(&self.state.runtime)
+            .evidence
+            .page(after, limit))
+    }
+
+    async fn provisional_evidence_counters(&self) -> EvidenceCounters {
+        lock_or_recover(&self.state.runtime).evidence.counters()
     }
 }
 

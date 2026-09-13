@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use super::super::RecordingMeasure;
 use super::super::TestLatch;
 use super::local_wire;
+use super::noop_control_message;
 use super::spawn_inbound_delivery;
 use crate::chunk::ReassemblyLimits;
 use crate::dht::entry::Entry;
@@ -100,7 +101,7 @@ impl SwarmCallback for InterleaveCallback {
     ) -> std::result::Result<(), crate::error::CallbackError> {
         if matches!(
             payload.transaction.data::<Message>()?,
-            Message::PeerLivenessReport(_)
+            Message::FindSuccessorReport(_)
         ) {
             self.probe.control_waiting.set();
             self.probe.control_may_progress.wait().await;
@@ -169,7 +170,7 @@ async fn test_inbound_storage_batch_yields_to_control_between_persistence_steps(
     probe.first_persisted.wait().await;
 
     let control = local_wire(
-        Message::PeerLivenessReport(crate::message::PeerLivenessReport { sent_at_ms: 1 }),
+        noop_control_message(transport.dht.did),
         &peer_session,
         transport.dht.did,
     )?;

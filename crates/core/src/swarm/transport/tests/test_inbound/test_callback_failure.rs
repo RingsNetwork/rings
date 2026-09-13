@@ -94,7 +94,7 @@ async fn test_validation_deadline_drops_user_future_releases_capacity_and_unbloc
     assert_eq!(callback.inbound_admitted_count_for_test(), 0);
 
     let second = local_wire(
-        Message::PeerLivenessReport(crate::message::PeerLivenessReport { sent_at_ms: 3 }),
+        noop_control_message(transport.dht.did),
         &session,
         transport.dht.did,
     )?;

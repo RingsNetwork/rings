@@ -1,17 +1,73 @@
 use std::num::NonZeroUsize;
 
+use rings_measure::EvidenceAccountPair;
+use rings_measure::EvidenceDigest;
+use rings_measure::EvidenceFreshnessKey;
+use rings_measure::ProvisionalEvidenceRecord;
+use rings_measure::UnixTime;
+
 use super::delivery::record_measurement;
 use super::PendingConnectionAttempt;
 use super::SwarmTransport;
 use crate::dht::Did;
 use crate::measure::order_peers_by_quality;
 use crate::measure::Authentication;
+use crate::measure::EvidenceAdmission;
 use crate::measure::MeasurementEvent;
 use crate::measure::PeerMeasurement;
 use crate::measure::PeerMeasurementPage;
 use crate::measure::PeerQuality;
+use crate::message::ProvisionalServiceReceiptV1;
 
 impl SwarmTransport {
+    pub(crate) async fn admit_provisional_receipt(
+        &self,
+        receipt: &ProvisionalServiceReceiptV1,
+        observed_at_ms: u128,
+    ) -> crate::error::Result<()> {
+        receipt.verify_live_at(self.network_id, observed_at_ms)?;
+        let canonical_receipt = receipt.canonical_bytes()?;
+        let digest = EvidenceDigest::new(receipt.digest()?.into_bytes());
+        let observed_seconds = u64::try_from(observed_at_ms / 1_000)
+            .map_err(|_| crate::message::ServiceReceiptError::ObservationTimeOverflow)?;
+        let claim = &receipt.claim;
+        let record = ProvisionalEvidenceRecord::new(
+            EvidenceAccountPair::new(claim.provider_account, claim.beneficiary_account),
+            EvidenceFreshnessKey::new(
+                claim.network_id,
+                claim.beneficiary_account,
+                claim.epoch.slot,
+                claim.nonce,
+            ),
+            digest,
+            canonical_receipt,
+            UnixTime::from_secs(observed_seconds),
+        );
+        let Some(measure) = &self.measure else {
+            return Err(rings_measure::EvidenceError::StorageUnavailable.into());
+        };
+        let report = measure.admit_provisional_evidence(record).await?;
+        for eviction in report.evictions() {
+            tracing::warn!(
+                receipt_digest = ?eviction.digest(),
+                bytes = eviction.bytes(),
+                "provisional evidence evicted to preserve a hard bound"
+            );
+        }
+        match report.admission() {
+            EvidenceAdmission::Admitted => Ok(()),
+            EvidenceAdmission::Duplicate => Err(crate::error::Error::InvalidMessage(
+                "duplicate provisional receipt".to_string(),
+            )),
+            EvidenceAdmission::Conflict { retained } => {
+                tracing::warn!(?retained, ?digest, "provisional receipt freshness conflict");
+                Err(crate::error::Error::InvalidMessage(
+                    "conflicting provisional receipt freshness key".to_string(),
+                ))
+            }
+        }
+    }
+
     pub(super) async fn record_peer_measurement(
         &self,
         peer: Did,

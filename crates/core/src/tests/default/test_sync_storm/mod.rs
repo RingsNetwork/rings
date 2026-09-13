@@ -21,9 +21,9 @@ use crate::dht::StorageSyncPurpose;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::fair_admission::retained_wire_bytes;
+use crate::message::test_probe_request;
 use crate::message::Encoder;
 use crate::message::Message;
-use crate::message::PeerLivenessProbe;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::session::SessionSk;
 use crate::simulation::model::SimAction;
@@ -494,12 +494,7 @@ async fn submit_workload(nodes: &[Node], kind: ScenarioTopology) {
         );
         nodes[sender]
             .swarm
-            .send_direct_message(
-                Message::PeerLivenessProbe(PeerLivenessProbe {
-                    sent_at_ms: i64::try_from(TEST_EPOCH_MS).expect("epoch must fit i64"),
-                }),
-                receiver_did,
-            )
+            .send_direct_message(Message::ProbeRequestV1(test_probe_request(1)), receiver_did)
             .await
             .expect("control probe must enter the real outbound scheduler");
     }
