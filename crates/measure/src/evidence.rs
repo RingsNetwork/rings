@@ -1,9 +1,9 @@
 //! Bounded provisional service-receipt evidence.
 //!
 //! The store is deliberately generic over the account identifier. It owns only
-//! canonical receipt bytes and the metadata needed for bounded admission. The
-//! protocol crate verifies those bytes before constructing a record and again
-//! while restoring a snapshot.
+//! canonical receipt bytes and independently bounded durable replay markers.
+//! The protocol crate verifies receipt bytes before constructing a record and
+//! again while restoring a snapshot.
 
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
@@ -111,6 +111,7 @@ pub struct ProvisionalEvidenceRecord<P> {
     digest: EvidenceDigest,
     canonical_receipt: Vec<u8>,
     observed_at: UnixTime,
+    replay_floor: u64,
 }
 
 impl<P> ProvisionalEvidenceRecord<P> {
@@ -121,6 +122,7 @@ impl<P> ProvisionalEvidenceRecord<P> {
         digest: EvidenceDigest,
         canonical_receipt: Vec<u8>,
         observed_at: UnixTime,
+        replay_floor: u64,
     ) -> Self {
         Self {
             pair,
@@ -128,6 +130,7 @@ impl<P> ProvisionalEvidenceRecord<P> {
             digest,
             canonical_receipt,
             observed_at,
+            replay_floor,
         }
     }
 
@@ -156,8 +159,47 @@ impl<P> ProvisionalEvidenceRecord<P> {
         self.observed_at
     }
 
+    /// Oldest provisional epoch that remained admissible at observation.
+    pub const fn replay_floor(&self) -> u64 {
+        self.replay_floor
+    }
+
     fn byte_len(&self) -> usize {
         self.canonical_receipt.len()
+    }
+}
+
+/// Durable replay marker retained independently from evictable receipt bytes.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct EvidenceReplayMarker<P> {
+    pair: EvidenceAccountPair<P>,
+    freshness: EvidenceFreshnessKey<P>,
+    digest: EvidenceDigest,
+}
+
+impl<P> EvidenceReplayMarker<P> {
+    fn from_record(record: &ProvisionalEvidenceRecord<P>) -> Self
+    where P: Clone {
+        Self {
+            pair: record.pair.clone(),
+            freshness: record.freshness.clone(),
+            digest: record.digest,
+        }
+    }
+
+    /// Ordered provider-beneficiary pair that admitted the key.
+    pub const fn pair(&self) -> &EvidenceAccountPair<P> {
+        &self.pair
+    }
+
+    /// Epoch-scoped nonce key that has already been admitted.
+    pub const fn freshness(&self) -> &EvidenceFreshnessKey<P> {
+        &self.freshness
+    }
+
+    /// Digest admitted for the freshness key.
+    pub const fn digest(&self) -> EvidenceDigest {
+        self.digest
     }
 }
 
@@ -172,6 +214,10 @@ pub struct EvidenceLimits {
     pub max_records_per_pair: NonZeroUsize,
     /// Maximum canonical receipt bytes retained for one ordered account pair.
     pub max_bytes_per_pair: NonZeroUsize,
+    /// Maximum durable replay markers retained globally.
+    pub max_replay_markers: NonZeroUsize,
+    /// Maximum durable replay markers retained for one beneficiary.
+    pub max_replay_markers_per_beneficiary: NonZeroUsize,
 }
 
 impl Default for EvidenceLimits {
@@ -181,6 +227,8 @@ impl Default for EvidenceLimits {
             max_bytes: nonzero(16 * 1024 * 1024),
             max_records_per_pair: nonzero(64),
             max_bytes_per_pair: nonzero(1024 * 1024),
+            max_replay_markers: nonzero(16_384),
+            max_replay_markers_per_beneficiary: nonzero(256),
         }
     }
 }
@@ -202,6 +250,8 @@ pub struct EvidenceCounters {
     evicted_records: u64,
     evicted_bytes: u64,
     rejected_records: u64,
+    replay_capacity_rejections: u64,
+    rejected_replay_markers: u64,
 }
 
 impl EvidenceCounters {
@@ -210,7 +260,7 @@ impl EvidenceCounters {
         self.admitted
     }
 
-    /// Exact duplicate receipts rejected.
+    /// Exact duplicate receipts rejected, including evicted receipt bytes.
     pub const fn duplicates(self) -> u64 {
         self.duplicates
     }
@@ -234,6 +284,16 @@ impl EvidenceCounters {
     pub const fn rejected_records(self) -> u64 {
         self.rejected_records
     }
+
+    /// Valid receipts rejected because replay memory was full.
+    pub const fn replay_capacity_rejections(self) -> u64 {
+        self.replay_capacity_rejections
+    }
+
+    /// Invalid persisted replay markers rejected during restore.
+    pub const fn rejected_replay_markers(self) -> u64 {
+        self.rejected_replay_markers
+    }
 }
 
 /// Admission outcome for a candidate receipt.
@@ -241,13 +301,15 @@ impl EvidenceCounters {
 pub enum EvidenceAdmission {
     /// The candidate was admitted, possibly evicting older evidence.
     Admitted,
-    /// The same canonical digest was already resident.
+    /// The same canonical digest already has a durable replay marker.
     Duplicate,
-    /// The freshness key was already occupied by a different receipt.
+    /// The freshness key was already occupied by a different admitted digest.
     Conflict {
-        /// Digest retained for the freshness key.
+        /// Digest recorded for the freshness key.
         retained: EvidenceDigest,
     },
+    /// The receipt was not admitted because durable replay memory was full.
+    ReplayCapacityExhausted,
 }
 
 /// One deterministically evicted evidence record.
@@ -301,15 +363,20 @@ pub struct EvidenceSnapshot<P> {
     pub schema_version: u16,
     /// Canonical records in digest order.
     pub records: Vec<ProvisionalEvidenceRecord<P>>,
+    /// Durable markers for admitted keys, including evicted receipts.
+    pub replay_markers: Vec<EvidenceReplayMarker<P>>,
+    /// Monotonic lower bound below which regressed-clock admissions fail closed.
+    pub replay_floor: u64,
     /// Aggregate counters without account labels.
     pub counters: EvidenceCounters,
 }
 
-/// Summary of invalid or over-bound snapshot entries skipped during restore.
+/// Summary of invalid records/markers skipped and valid records evicted during restore.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct EvidenceLoadReport {
     rejected_records: usize,
     evicted_records: usize,
+    rejected_replay_markers: usize,
 }
 
 impl EvidenceLoadReport {
@@ -321,6 +388,11 @@ impl EvidenceLoadReport {
     /// Valid snapshot entries deterministically evicted to restore active bounds.
     pub const fn evicted_records(self) -> usize {
         self.evicted_records
+    }
+
+    /// Replay markers rejected by runtime binding or structural validation.
+    pub const fn rejected_replay_markers(self) -> usize {
+        self.rejected_replay_markers
     }
 }
 
@@ -371,13 +443,34 @@ pub enum EvidenceError {
         /// Effective maximum bytes for one record.
         limit: usize,
     },
+    /// The candidate belongs to an epoch below the monotonic replay floor.
+    #[error("receipt epoch {epoch} is below replay floor {floor}")]
+    FreshnessBeforeReplayFloor {
+        /// Candidate receipt epoch.
+        epoch: u64,
+        /// Oldest epoch that may still be admitted.
+        floor: u64,
+    },
+    /// A persisted replay set exceeds the configured hard bound.
+    #[error("persisted replay markers {markers} exceed limit {limit}")]
+    ReplayMarkerLimitExceeded {
+        /// Persisted marker count in the rejected scope.
+        markers: usize,
+        /// Configured hard limit.
+        limit: usize,
+    },
+    /// Durable evidence persistence failed; no admission was committed.
+    #[error("durable provisional evidence persistence failed")]
+    PersistenceUnavailable,
 }
 
 /// Pure bounded provisional-evidence state.
+#[derive(Clone)]
 pub struct ProvisionalEvidenceStore<P> {
     limits: EvidenceLimits,
     records: BTreeMap<EvidenceDigest, ProvisionalEvidenceRecord<P>>,
-    freshness: BTreeMap<EvidenceFreshnessKey<P>, EvidenceDigest>,
+    freshness: BTreeMap<EvidenceFreshnessKey<P>, EvidenceReplayMarker<P>>,
+    replay_floor: u64,
     resident_bytes: usize,
     counters: EvidenceCounters,
 }
@@ -391,16 +484,18 @@ where P: Clone + Ord
             limits,
             records: BTreeMap::new(),
             freshness: BTreeMap::new(),
+            replay_floor: 0,
             resident_bytes: 0,
             counters: EvidenceCounters::default(),
         }
     }
 
-    /// Restore valid entries independently so one malformed record cannot hide another.
+    /// Restore valid records and durable replay markers independently.
     pub fn from_snapshot_with_validator(
         snapshot: EvidenceSnapshot<P>,
         limits: EvidenceLimits,
         validator: impl Fn(&ProvisionalEvidenceRecord<P>) -> bool,
+        replay_marker_validator: impl Fn(&EvidenceReplayMarker<P>) -> bool,
     ) -> Result<(Self, EvidenceLoadReport), EvidenceError> {
         if snapshot.schema_version != EVIDENCE_SNAPSHOT_VERSION {
             return Err(EvidenceError::UnsupportedSnapshotVersion {
@@ -409,24 +504,64 @@ where P: Clone + Ord
         }
         let prior_counters = snapshot.counters;
         let mut records = snapshot.records;
+        let mut replay_markers = snapshot.replay_markers;
         records.sort_by_key(|record| (record.observed_at(), record.digest()));
         let mut store = Self::new(limits);
+        store.replay_floor = snapshot.replay_floor;
         let mut report = EvidenceLoadReport::default();
         for record in records {
-            if !validator(&record) {
+            if !validator(&record) || store.validate_size(&record).is_err() {
                 report.rejected_records = report.rejected_records.saturating_add(1);
                 continue;
             }
-            match store.admit(record) {
-                Ok(admission) if admission.admission == EvidenceAdmission::Admitted => {
-                    report.evicted_records = report
-                        .evicted_records
-                        .saturating_add(admission.evictions.len());
-                }
-                Ok(_) | Err(_) => {
-                    report.rejected_records = report.rejected_records.saturating_add(1);
-                }
+            let marker = EvidenceReplayMarker::from_record(&record);
+            if !store.can_restore_marker(&marker) {
+                report.rejected_records = report.rejected_records.saturating_add(1);
+                continue;
             }
+            store.ensure_replay_capacity(&marker)?;
+            store.freshness.insert(marker.freshness.clone(), marker);
+            let pair = record.pair.clone();
+            let digest = record.digest;
+            store.resident_bytes = store.resident_bytes.saturating_add(record.byte_len());
+            store.records.insert(digest, record);
+            let evictions = store.evict_to_bounds(&pair, digest);
+            report.evicted_records = report.evicted_records.saturating_add(evictions.len());
+        }
+        replay_markers.sort_by(|left, right| {
+            (&left.freshness, left.digest, &left.pair).cmp(&(
+                &right.freshness,
+                right.digest,
+                &right.pair,
+            ))
+        });
+        for marker in replay_markers {
+            if !store.marker_is_structural(&marker) || !replay_marker_validator(&marker) {
+                report.rejected_replay_markers = report.rejected_replay_markers.saturating_add(1);
+                continue;
+            }
+            if marker.freshness.epoch_slot < store.replay_floor
+                && !store.records.contains_key(&marker.digest)
+            {
+                continue;
+            }
+            if let Some(existing) = store.freshness.get(&marker.freshness) {
+                if existing == &marker {
+                    continue;
+                }
+                report.rejected_replay_markers = report.rejected_replay_markers.saturating_add(1);
+                continue;
+            }
+            if store
+                .freshness
+                .values()
+                .any(|existing| existing.digest == marker.digest)
+            {
+                report.rejected_replay_markers = report.rejected_replay_markers.saturating_add(1);
+                continue;
+            }
+            store.ensure_replay_capacity(&marker)?;
+            store.freshness.insert(marker.freshness.clone(), marker);
         }
         let restore_counters = store.counters;
         store.counters = EvidenceCounters {
@@ -442,6 +577,10 @@ where P: Clone + Ord
             rejected_records: prior_counters
                 .rejected_records
                 .saturating_add(u64::try_from(report.rejected_records).unwrap_or(u64::MAX)),
+            replay_capacity_rejections: prior_counters.replay_capacity_rejections,
+            rejected_replay_markers: prior_counters
+                .rejected_replay_markers
+                .saturating_add(u64::try_from(report.rejected_replay_markers).unwrap_or(u64::MAX)),
         };
         Ok((store, report))
     }
@@ -452,45 +591,52 @@ where P: Clone + Ord
         record: ProvisionalEvidenceRecord<P>,
     ) -> Result<EvidenceAdmissionReport<P>, EvidenceError> {
         self.validate_size(&record)?;
-        if self.records.contains_key(&record.digest) {
+        self.advance_replay_floor(record.replay_floor);
+        if record.freshness.epoch_slot < self.replay_floor {
+            self.counters.rejected_records = self.counters.rejected_records.saturating_add(1);
+            return Err(EvidenceError::FreshnessBeforeReplayFloor {
+                epoch: record.freshness.epoch_slot,
+                floor: self.replay_floor,
+            });
+        }
+        if self
+            .freshness
+            .values()
+            .any(|marker| marker.digest == record.digest)
+        {
             self.counters.duplicates = self.counters.duplicates.saturating_add(1);
             return Ok(EvidenceAdmissionReport {
                 admission: EvidenceAdmission::Duplicate,
                 evictions: Vec::new(),
             });
         }
-        if let Some(retained) = self.freshness.get(&record.freshness).copied() {
+        if let Some(retained) = self.freshness.get(&record.freshness) {
             self.counters.conflicts = self.counters.conflicts.saturating_add(1);
             return Ok(EvidenceAdmissionReport {
-                admission: EvidenceAdmission::Conflict { retained },
+                admission: EvidenceAdmission::Conflict {
+                    retained: retained.digest,
+                },
                 evictions: Vec::new(),
             });
         }
 
+        let marker = EvidenceReplayMarker::from_record(&record);
+        if self.ensure_replay_capacity(&marker).is_err() {
+            self.counters.replay_capacity_rejections =
+                self.counters.replay_capacity_rejections.saturating_add(1);
+            return Ok(EvidenceAdmissionReport {
+                admission: EvidenceAdmission::ReplayCapacityExhausted,
+                evictions: Vec::new(),
+            });
+        }
         let pair = record.pair.clone();
         let digest = record.digest;
         self.resident_bytes = self.resident_bytes.saturating_add(record.byte_len());
-        self.freshness.insert(record.freshness.clone(), digest);
+        self.freshness.insert(record.freshness.clone(), marker);
         self.records.insert(digest, record);
         self.counters.admitted = self.counters.admitted.saturating_add(1);
 
-        let mut evictions = Vec::new();
-        while self.pair_over_bound(&pair) {
-            let Some(victim) = self.oldest_digest_excluding(Some(&pair), digest) else {
-                break;
-            };
-            if let Some(eviction) = self.evict(victim) {
-                evictions.push(eviction);
-            }
-        }
-        while self.global_over_bound() {
-            let Some(victim) = self.oldest_digest_excluding(None, digest) else {
-                break;
-            };
-            if let Some(eviction) = self.evict(victim) {
-                evictions.push(eviction);
-            }
-        }
+        let evictions = self.evict_to_bounds(&pair, digest);
         Ok(EvidenceAdmissionReport {
             admission: EvidenceAdmission::Admitted,
             evictions,
@@ -539,13 +685,97 @@ where P: Clone + Ord
         self.resident_bytes
     }
 
+    /// Durable replay-marker count, including markers whose receipt was evicted.
+    pub fn replay_marker_len(&self) -> usize {
+        self.freshness.len()
+    }
+
+    /// Monotonic oldest epoch that may still be admitted after clock regression.
+    pub const fn replay_floor(&self) -> u64 {
+        self.replay_floor
+    }
+
     /// Produce the deterministic persistence form.
     pub fn snapshot(&self) -> EvidenceSnapshot<P> {
         EvidenceSnapshot {
             schema_version: EVIDENCE_SNAPSHOT_VERSION,
             records: self.records.values().cloned().collect(),
+            replay_markers: self.freshness.values().cloned().collect(),
+            replay_floor: self.replay_floor,
             counters: self.counters,
         }
+    }
+
+    fn advance_replay_floor(&mut self, floor: u64) {
+        self.replay_floor = self.replay_floor.max(floor);
+        let records = &self.records;
+        self.freshness.retain(|_, marker| {
+            marker.freshness.epoch_slot >= self.replay_floor || records.contains_key(&marker.digest)
+        });
+    }
+
+    fn marker_is_structural(&self, marker: &EvidenceReplayMarker<P>) -> bool {
+        marker.pair.beneficiary() == marker.freshness.beneficiary()
+    }
+
+    fn can_restore_marker(&self, marker: &EvidenceReplayMarker<P>) -> bool {
+        self.marker_is_structural(marker)
+            && !self.freshness.contains_key(&marker.freshness)
+            && !self
+                .freshness
+                .values()
+                .any(|existing| existing.digest == marker.digest && existing != marker)
+    }
+
+    fn ensure_replay_capacity(
+        &self,
+        marker: &EvidenceReplayMarker<P>,
+    ) -> Result<(), EvidenceError> {
+        let next_global = self.freshness.len().saturating_add(1);
+        if next_global > self.limits.max_replay_markers.get() {
+            return Err(EvidenceError::ReplayMarkerLimitExceeded {
+                markers: next_global,
+                limit: self.limits.max_replay_markers.get(),
+            });
+        }
+        let beneficiary_markers = self
+            .freshness
+            .values()
+            .filter(|existing| existing.freshness.beneficiary() == marker.freshness.beneficiary())
+            .count()
+            .saturating_add(1);
+        if beneficiary_markers > self.limits.max_replay_markers_per_beneficiary.get() {
+            return Err(EvidenceError::ReplayMarkerLimitExceeded {
+                markers: beneficiary_markers,
+                limit: self.limits.max_replay_markers_per_beneficiary.get(),
+            });
+        }
+        Ok(())
+    }
+
+    fn evict_to_bounds(
+        &mut self,
+        pair: &EvidenceAccountPair<P>,
+        candidate: EvidenceDigest,
+    ) -> Vec<EvidenceEviction<P>> {
+        let mut evictions = Vec::new();
+        while self.pair_over_bound(pair) {
+            let Some(victim) = self.oldest_digest_excluding(Some(pair), candidate) else {
+                break;
+            };
+            if let Some(eviction) = self.evict(victim) {
+                evictions.push(eviction);
+            }
+        }
+        while self.global_over_bound() {
+            let Some(victim) = self.oldest_digest_excluding(None, candidate) else {
+                break;
+            };
+            if let Some(eviction) = self.evict(victim) {
+                evictions.push(eviction);
+            }
+        }
+        evictions
     }
 
     fn validate_size(
@@ -609,7 +839,6 @@ where P: Clone + Ord
     fn evict(&mut self, digest: EvidenceDigest) -> Option<EvidenceEviction<P>> {
         let record = self.records.remove(&digest)?;
         let bytes = record.byte_len();
-        self.freshness.remove(&record.freshness);
         self.resident_bytes = self.resident_bytes.saturating_sub(bytes);
         self.counters.evicted_records = self.counters.evicted_records.saturating_add(1);
         self.counters.evicted_bytes = self
@@ -626,3 +855,8 @@ where P: Clone + Ord
 
 #[cfg(test)]
 mod tests;
+
+// The bounded native model checks every ordering of the finite admission,
+// conflict, eviction, rejection, clock, and crash-restart schedule used for refinement.
+#[cfg(all(test, not(target_family = "wasm")))]
+mod model;

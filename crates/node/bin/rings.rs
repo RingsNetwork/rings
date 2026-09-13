@@ -82,6 +82,18 @@ fn transaction_replay_storage_path(data_storage_path: &str) -> String {
         .to_string()
 }
 
+fn provisional_evidence_storage_path(measure_storage_path: &str) -> String {
+    let measure_path = Path::new(measure_storage_path);
+    let parent = measure_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    parent
+        .join("provisional-evidence-v1")
+        .to_string_lossy()
+        .to_string()
+}
+
 #[derive(Parser, Debug)]
 #[command(about, version, author)]
 struct Cli {
@@ -875,8 +887,7 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
         FileStorage::new_with_cap_and_path(measure_storage.capacity, measure_storage.path.clone())
             .await?,
     );
-    let provisional_evidence_path =
-        Path::new(&measure_storage.path).join("provisional-evidence-v1");
+    let provisional_evidence_path = provisional_evidence_storage_path(&measure_storage.path);
     let per_evidence_storage = Box::new(
         FileStorage::new_with_cap_and_path(measure_storage.capacity, provisional_evidence_path)
             .await?,
@@ -1361,6 +1372,7 @@ mod tests {
     use super::await_gateway_startup;
     use super::await_task_cleanup;
     use super::onion_entry_guard_storage_path;
+    use super::provisional_evidence_storage_path;
     use super::transaction_replay_storage_path;
     use super::Cli;
 
@@ -1426,6 +1438,18 @@ mod tests {
         assert_eq!(
             transaction_replay_storage_path("/tmp/rings/data"),
             "/tmp/rings/transaction-replay-v2"
+        );
+    }
+
+    #[test]
+    fn test_provisional_evidence_storage_is_sibling_of_measure_storage() {
+        assert_eq!(
+            provisional_evidence_storage_path(".rings/measure"),
+            ".rings/provisional-evidence-v1"
+        );
+        assert_eq!(
+            provisional_evidence_storage_path("/tmp/rings/measure"),
+            "/tmp/rings/provisional-evidence-v1"
         );
     }
 

@@ -34,15 +34,59 @@ adjacent provisional epoch at observation time. Persisted evidence records that 
 but replaying an old receipt never recreates live-observation status.
 
 The freshness key is `(network_id, beneficiary_account, epoch, nonce)`. The same receipt digest is
-a duplicate; a different receipt for an occupied freshness key is a conflict. Both are rejected.
+a duplicate; a different receipt for an occupied freshness key is a conflict. Receipt bytes may be
+evicted, but their fixed-size replay markers remain independently bounded and durable while the key
+can still be admitted. If the global or per-beneficiary marker bound is full, a new key fails closed
+instead of evicting an active marker. A monotonic replay floor prevents clock regression from
+reopening a pruned epoch.
+
+## Executable model and refinement
+
+Two native Stateright models define the complete state relation for this provisional slice:
+
+- `crates/core/src/message/service_receipt/model.rs` models the request, offer, acknowledgement,
+  pending request, three replay gates, four independent delegated-session lifetimes, proof
+  lifetimes, epoch, retained evidence, and independent freshness occupancy. Its actions cover
+  send/deliver, time advance, loss, duplication, reordering, hard-crash restart, and receipt
+  eviction; its admission outcomes cover commit, replay-capacity rejection, and persistence
+  failure.
+- `crates/measure/src/evidence/model.rs` models admission, exact duplicates, freshness conflicts,
+  pair-local and global pressure, deterministic eviction, invalid record rejection, pagination,
+  replay-marker saturation, clock regression, and hard-crash restart under explicit record, byte,
+  and marker bounds.
+
+The checked safety properties are: admitted evidence was live at its observation instant; only a
+complete transcript can be admitted; no admitted digest is admitted twice; receipt and replay-state
+bounds always hold; eviction cannot remove duplicate protection for a still-admissible key; restart
+preserves every committed marker; capacity and regressed-clock paths fail closed; and provisional
+evidence cannot change credit or routing inputs. Reachability properties witness the live happy path
+and every admission outcome. No delivery fairness is assumed, so the happy path is reachable rather
+than inevitable under loss. Production-refinement checks replay the model states through real
+session signatures and through `ProvisionalEvidenceStore`; the shared native/Wasm tests cover
+canonical bytes, claim-field binding, transaction binding, and the live-session boundary.
+
+The finite model bounds time, message multiplicity, candidates, and one crash restart. Cryptographic
+unforgeability remains an explicit assumption: model checking does not replace verification of the
+real signing and canonical-encoding implementations, which is why those are separate refinement
+tests. Delivery actions take prior acceptance of each outer transport envelope as a precondition;
+the model still checks the embedded request and completion independently from the two claim-role
+attestations.
+
+Evidence admission is synchronous with the separate evidence snapshot: storage failure rolls the
+transition back, and success means the receipt plus replay marker survive a process crash. Deleting
+or replacing that configured store explicitly starts a new collector history and is outside the
+crash model. The durable storage write is the admission linearization point; evidence queries and
+other admissions share its serialization lock. Cancellation of an incomplete call may
+conservatively retain the marker, but cannot admit the key twice.
 
 ## Storage and non-claims
 
 The node keeps provisional evidence in a component separate from local peer measurements. Native
 nodes use a separate file-backed snapshot and browser nodes use a separate IndexedDB store. Global
 and per-account-pair record and byte limits are hard bounds. Oldest evidence is evicted
-deterministically; APIs expose only bounded digest-ordered pages and aggregate counters without DID
-labels.
+deterministically without removing its active replay marker. Replay markers have separate hard
+global and per-beneficiary bounds; saturation rejects new keys. APIs expose only bounded
+digest-ordered pages and aggregate counters without DID labels.
 
 This evidence does not update `CreditRecord`, affect `order_peers_by_quality`, prove relay or
 storage service, prevent self-dealing, or provide Sybil resistance. A later finalized DRanking

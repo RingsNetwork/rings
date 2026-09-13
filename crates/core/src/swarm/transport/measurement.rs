@@ -30,6 +30,9 @@ impl SwarmTransport {
         let digest = EvidenceDigest::new(receipt.digest()?.into_bytes());
         let observed_seconds = u64::try_from(observed_at_ms / 1_000)
             .map_err(|_| crate::message::ServiceReceiptError::ObservationTimeOverflow)?;
+        let replay_floor = crate::message::ProvisionalEpochV1::from_unix_seconds(observed_seconds)
+            .slot
+            .saturating_sub(1);
         let claim = &receipt.claim;
         let record = ProvisionalEvidenceRecord::new(
             EvidenceAccountPair::new(claim.provider_account, claim.beneficiary_account),
@@ -42,6 +45,7 @@ impl SwarmTransport {
             digest,
             canonical_receipt,
             UnixTime::from_secs(observed_seconds),
+            replay_floor,
         );
         let Some(measure) = &self.measure else {
             return Err(rings_measure::EvidenceError::StorageUnavailable.into());
@@ -63,6 +67,12 @@ impl SwarmTransport {
                 tracing::warn!(?retained, ?digest, "provisional receipt freshness conflict");
                 Err(crate::error::Error::InvalidMessage(
                     "conflicting provisional receipt freshness key".to_string(),
+                ))
+            }
+            EvidenceAdmission::ReplayCapacityExhausted => {
+                tracing::warn!(?digest, "provisional receipt replay capacity exhausted");
+                Err(crate::error::Error::InvalidMessage(
+                    "provisional receipt replay capacity exhausted".to_string(),
                 ))
             }
         }

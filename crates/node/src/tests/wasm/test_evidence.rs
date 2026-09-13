@@ -57,6 +57,7 @@ fn evidence_fixture() -> (ProvisionalEvidenceRecord<Did>, EvidenceCollectorIdent
         EvidenceDigest::new(receipt.digest().unwrap().into_bytes()),
         receipt.canonical_bytes().unwrap(),
         UnixTime::from_secs(observed_at_seconds),
+        claim.epoch.slot.saturating_sub(1),
     );
     let collector = EvidenceCollectorIdentity::new(claim.network_id, claim.provider_account);
     (record, collector)
@@ -78,7 +79,7 @@ async fn storages(name: &str) -> (MeasureStorage, EvidenceStorage) {
 }
 
 #[wasm_bindgen_test]
-async fn indexed_db_restart_restores_non_empty_provisional_evidence() {
+async fn successful_admission_survives_indexed_db_restart_without_flush() {
     let name = format!("rings-evidence-test-{}", uuid::Uuid::new_v4());
     let (measure_storage, evidence_storage) = storages(&name).await;
     measure_storage.clear().await.unwrap();
@@ -89,7 +90,6 @@ async fn indexed_db_restart_restores_non_empty_provisional_evidence() {
             .await
             .unwrap();
     measure.admit_provisional_evidence(record).await.unwrap();
-    measure.flush().await.unwrap();
     drop(measure);
 
     let (measure_storage, evidence_storage) = storages(&name).await;

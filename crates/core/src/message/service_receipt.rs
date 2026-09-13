@@ -198,6 +198,31 @@ impl ProvisionalServiceClaimV1 {
         }
         Ok(())
     }
+
+    fn verify_live_role_attestation_at(
+        &self,
+        attestation: &MessageVerification,
+        expected_account: Did,
+        domain: super::DomainTag,
+        observed_at_ms: u128,
+        not_live: ServiceReceiptError,
+    ) -> std::result::Result<(), ServiceReceiptError> {
+        if attestation.session.account_did() != expected_account {
+            return Err(ServiceReceiptError::SignerRoleMismatch {
+                expected: expected_account,
+                actual: attestation.session.account_did(),
+            });
+        }
+        let claim = self.canonical_bytes()?;
+        if !attestation.verify_live_at(
+            SigningDomain::new(domain, self.network_id),
+            &claim,
+            observed_at_ms,
+        ) {
+            return Err(not_live);
+        }
+        Ok(())
+    }
 }
 
 /// Digest of one canonical provisional receipt or claim.
@@ -296,12 +321,20 @@ impl ProvisionalServiceReceiptV1 {
         self.verify_crypto(receiver_network_id)?;
         let seconds = u64::try_from(observed_at_ms / 1_000)
             .map_err(|_| ServiceReceiptError::ObservationTimeOverflow)?;
-        if !self.provider_attestation.is_live_at(observed_at_ms) {
-            return Err(ServiceReceiptError::ProviderAttestationNotLive);
-        }
-        if !self.beneficiary_attestation.is_live_at(observed_at_ms) {
-            return Err(ServiceReceiptError::BeneficiaryAttestationNotLive);
-        }
+        self.claim.verify_live_role_attestation_at(
+            &self.provider_attestation,
+            self.claim.provider_account,
+            PROVIDER_DOMAIN,
+            observed_at_ms,
+            ServiceReceiptError::ProviderAttestationNotLive,
+        )?;
+        self.claim.verify_live_role_attestation_at(
+            &self.beneficiary_attestation,
+            self.claim.beneficiary_account,
+            BENEFICIARY_DOMAIN,
+            observed_at_ms,
+            ServiceReceiptError::BeneficiaryAttestationNotLive,
+        )?;
         if !self.claim.epoch.is_accepted_at(seconds) {
             return Err(ServiceReceiptError::EpochOutsideTolerance {
                 claim_slot: self.claim.epoch.slot,
@@ -353,12 +386,30 @@ pub struct ProbeOfferV1 {
 }
 
 impl ProbeOfferV1 {
-    /// Verify that the offer and its outer response are one self-consistent live transcript.
+    /// Verify one self-consistent transcript with currently live embedded transactions.
+    ///
+    /// The caller must already have admitted the outer payload through the shared transport
+    /// verification and replay boundary.
     pub fn verify_transcript(
         &self,
         outer: &MessagePayload,
         receiver_network_id: u32,
         beneficiary: Did,
+    ) -> std::result::Result<ProbeRequestV1, ServiceReceiptError> {
+        self.verify_transcript_at(
+            outer,
+            receiver_network_id,
+            beneficiary,
+            crate::utils::get_epoch_ms(),
+        )
+    }
+
+    fn verify_transcript_at(
+        &self,
+        outer: &MessagePayload,
+        receiver_network_id: u32,
+        beneficiary: Did,
+        observed_at_ms: u128,
     ) -> std::result::Result<ProbeRequestV1, ServiceReceiptError> {
         self.claim.validate()?;
         if self.claim.network_id != receiver_network_id {
@@ -377,7 +428,7 @@ impl ProbeOfferV1 {
         if self.request.origin() != beneficiary
             || self.request.destination != provider
             || self.request.tx_id != outer.transaction.tx_id
-            || !self.request.verify(receiver_network_id)
+            || !self.request.verify_at(receiver_network_id, observed_at_ms)
         {
             return Err(ServiceReceiptError::InvalidRequestTransaction);
         }
@@ -402,7 +453,9 @@ impl ProbeOfferV1 {
         if self.completion.origin() != provider
             || self.completion.destination != beneficiary
             || self.completion.tx_id != outer.transaction.tx_id
-            || !self.completion.verify(receiver_network_id)
+            || !self
+                .completion
+                .verify_at(receiver_network_id, observed_at_ms)
         {
             return Err(ServiceReceiptError::InvalidCompletionTransaction);
         }
@@ -438,12 +491,17 @@ impl ProbeOfferV1 {
         beneficiary: Did,
         observed_at_ms: u128,
     ) -> std::result::Result<ProbeRequestV1, ServiceReceiptError> {
-        let request = self.verify_transcript(outer, receiver_network_id, beneficiary)?;
+        let request =
+            self.verify_transcript_at(outer, receiver_network_id, beneficiary, observed_at_ms)?;
         let seconds = u64::try_from(observed_at_ms / 1_000)
             .map_err(|_| ServiceReceiptError::ObservationTimeOverflow)?;
-        if !self.provider_attestation.is_live_at(observed_at_ms) {
-            return Err(ServiceReceiptError::ProviderAttestationNotLive);
-        }
+        self.claim.verify_live_role_attestation_at(
+            &self.provider_attestation,
+            self.claim.provider_account,
+            PROVIDER_DOMAIN,
+            observed_at_ms,
+            ServiceReceiptError::ProviderAttestationNotLive,
+        )?;
         if !self.claim.epoch.is_accepted_at(seconds) {
             return Err(ServiceReceiptError::EpochOutsideTolerance {
                 claim_slot: self.claim.epoch.slot,
@@ -562,3 +620,9 @@ where T: serde::de::DeserializeOwned + Serialize {
 
 #[cfg(test)]
 mod tests;
+
+// The native-only executable model explores time, loss, duplication,
+// reordering, replay, restart, and eviction. Wasm keeps the shared refinement
+// tests in `tests` without pulling in the native Stateright dependency.
+#[cfg(all(test, not(target_family = "wasm")))]
+mod model;

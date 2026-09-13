@@ -44,6 +44,7 @@ pub use evidence::EvidenceFreshnessKey;
 pub use evidence::EvidenceLimits;
 pub use evidence::EvidenceLoadReport;
 pub use evidence::EvidencePage;
+pub use evidence::EvidenceReplayMarker;
 pub use evidence::EvidenceSnapshot;
 pub use evidence::ProvisionalEvidenceRecord;
 pub use evidence::ProvisionalEvidenceStore;

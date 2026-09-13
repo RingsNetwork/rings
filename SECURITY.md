@@ -203,8 +203,17 @@ Provisional evidence is isolated from peer measurements, `CreditRecord`, and
 and per-provider/beneficiary record and byte limits, deterministic oldest-first eviction, aggregate
 unlabelled counters, bounded digest pagination, and a separate durable snapshot on native and
 browser nodes. Invalid persisted entries are skipped independently so one malformed record cannot
-hide valid evidence. Eviction reduces later evidence availability and must not be interpreted as
-proof that the underlying service did not occur.
+hide valid evidence. Fixed-size replay markers have separate global and per-beneficiary count
+bounds. Receipt eviction reduces later evidence availability but leaves its replay marker intact;
+if marker capacity is exhausted, new keys fail closed instead of displacing live replay state.
+
+Receipt admission and its replay marker are committed to the separate evidence storage before the
+admission returns success; a storage failure rolls the in-memory transition back. Consequently a
+hard process crash cannot turn a successfully returned admission into a fresh key after restart.
+The monotonic replay floor also prevents a wall-clock regression from reopening an epoch whose
+evicted markers were pruned. Explicit deletion or replacement of the evidence store resets this
+local history and therefore starts a new collector state; that administrative action is outside
+the process-crash guarantee.
 
 These receipts do not prevent colluding accounts from manufacturing mutually signed probes, make
 DIDs scarce, prove useful relay/storage work, or create Sybil-resistant reputation. A future

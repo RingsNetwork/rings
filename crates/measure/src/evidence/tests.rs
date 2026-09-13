@@ -6,6 +6,8 @@ fn limits(records: usize, bytes: usize, pair_records: usize, pair_bytes: usize) 
         max_bytes: nonzero(bytes),
         max_records_per_pair: nonzero(pair_records),
         max_bytes_per_pair: nonzero(pair_bytes),
+        max_replay_markers: nonzero(records.saturating_mul(4)),
+        max_replay_markers_per_beneficiary: nonzero(records.saturating_mul(4)),
     }
 }
 
@@ -24,6 +26,7 @@ fn record(
         EvidenceDigest::new([digest; 32]),
         vec![digest; bytes],
         UnixTime::from_secs(observed),
+        slot.saturating_sub(1),
     )
 }
 
@@ -121,21 +124,82 @@ fn admission_replaces_newer_resident_instead_of_discarding_older_candidate(
 }
 
 #[test]
+fn eviction_and_restart_retain_duplicate_and_conflict_protection() -> Result<(), EvidenceError> {
+    let configured = limits(1, 8, 1, 8);
+    let mut store = ProvisionalEvidenceStore::new(configured);
+    let first = record(1, 2, 3, 1, 1, 3, 8);
+    store.admit(first.clone())?;
+    store.admit(record(1, 2, 3, 2, 2, 3, 8))?;
+    assert_eq!(store.len(), 1);
+    assert_eq!(store.replay_marker_len(), 2);
+
+    let (mut restored, report) = ProvisionalEvidenceStore::from_snapshot_with_validator(
+        store.snapshot(),
+        configured,
+        |_| true,
+        |_| true,
+    )?;
+    assert_eq!(report, EvidenceLoadReport::default());
+    assert_eq!(
+        restored.admit(first)?.admission(),
+        EvidenceAdmission::Duplicate
+    );
+    assert_eq!(
+        restored.admit(record(9, 2, 3, 1, 3, 3, 8))?.admission(),
+        EvidenceAdmission::Conflict {
+            retained: EvidenceDigest::new([1; 32])
+        }
+    );
+    Ok(())
+}
+
+#[test]
+fn replay_capacity_and_clock_regression_fail_closed() -> Result<(), EvidenceError> {
+    let mut configured = limits(4, 64, 4, 64);
+    configured.max_replay_markers = nonzero(1);
+    configured.max_replay_markers_per_beneficiary = nonzero(1);
+    let mut store = ProvisionalEvidenceStore::new(configured);
+    store.admit(record(1, 2, 3, 1, 1, 3, 8))?;
+    assert_eq!(
+        store.admit(record(1, 2, 3, 2, 2, 3, 8))?.admission(),
+        EvidenceAdmission::ReplayCapacityExhausted
+    );
+    assert_eq!(store.counters().replay_capacity_rejections(), 1);
+    assert_eq!(store.len(), 1);
+
+    let mut regressed = ProvisionalEvidenceStore::new(limits(4, 64, 4, 64));
+    regressed.admit(record(1, 2, 4, 1, 1, 4, 8))?;
+    assert_eq!(
+        regressed.admit(record(1, 2, 1, 2, 2, 1, 8)),
+        Err(EvidenceError::FreshnessBeforeReplayFloor { epoch: 1, floor: 3 })
+    );
+    assert_eq!(regressed.len(), 1);
+    Ok(())
+}
+
+#[test]
 fn snapshot_restore_skips_invalid_records_without_hiding_valid_records() -> Result<(), EvidenceError>
 {
+    let records = vec![
+        record(1, 2, 1, 1, 1, 1, 8),
+        record(3, 4, 1, 2, 2, 2, 8),
+        record(5, 6, 1, 3, 3, 3, 8),
+    ];
     let snapshot = EvidenceSnapshot {
         schema_version: EVIDENCE_SNAPSHOT_VERSION,
-        records: vec![
-            record(1, 2, 1, 1, 1, 1, 8),
-            record(3, 4, 1, 2, 2, 2, 8),
-            record(5, 6, 1, 3, 3, 3, 8),
-        ],
+        replay_markers: records
+            .iter()
+            .map(EvidenceReplayMarker::from_record)
+            .collect(),
+        records,
+        replay_floor: 0,
         counters: EvidenceCounters::default(),
     };
     let (store, report) = ProvisionalEvidenceStore::from_snapshot_with_validator(
         snapshot,
         limits(8, 1024, 8, 1024),
         |record| record.digest() != EvidenceDigest::new([2; 32]),
+        |_| true,
     )?;
     assert_eq!(report.rejected_records(), 1);
     let page = store.page(None, nonzero(8));
@@ -164,6 +228,7 @@ fn snapshot_restore_preserves_historical_counters_without_recounting_records(
     let (restored, report) = ProvisionalEvidenceStore::from_snapshot_with_validator(
         original.snapshot(),
         limits(8, 1024, 8, 1024),
+        |_| true,
         |_| true,
     )?;
 

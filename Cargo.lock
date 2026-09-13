@@ -3363,6 +3363,7 @@ version = "0.24.0"
 dependencies = [
  "serde",
  "serde_json",
+ "stateright",
  "thiserror 1.0.69",
 ]
 

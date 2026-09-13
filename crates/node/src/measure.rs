@@ -29,6 +29,7 @@ use rings_measure::EvidenceDigest;
 use rings_measure::EvidenceError;
 use rings_measure::EvidenceLimits;
 use rings_measure::EvidencePage;
+use rings_measure::EvidenceReplayMarker;
 use rings_measure::EvidenceSnapshot;
 use rings_measure::MeasureError;
 use rings_measure::MeasurementBatch;
@@ -49,8 +50,9 @@ const PERSISTENCE_SHUTDOWN_ATTEMPTS: usize = 3;
 const PRUNE_INTERVAL_SECONDS: u64 = 60 * 60;
 #[cfg(test)]
 const PERSISTENCE_MIN_INTERVAL: Duration = Duration::from_millis(50);
-// The first mutation and every later coalesced snapshot intentionally wait for
-// this interval. A hard crash may lose at most one interval of advisory state.
+// Measurement-ledger mutations are coalesced over this interval. Provisional
+// evidence admission uses the same serialization lock but commits separately
+// before returning success.
 #[cfg(not(test))]
 const PERSISTENCE_MIN_INTERVAL: Duration = Duration::from_secs(60);
 // One window for tests and production. Controlled-clock unit tests advance the clock by
@@ -149,11 +151,12 @@ pub enum MeasureRuntimeError {
     RuntimeUnavailable(String),
 }
 
-/// Pure-ledger runtime adapter with coalesced asynchronous snapshot persistence.
+/// Pure-ledger runtime adapter with durable evidence admission and coalesced measurement snapshots.
 ///
-/// Network callbacks update only in-memory state and replace the pending full
-/// snapshot. A runtime task serializes storage writes. The algorithm, time
-/// projection, pruning, and snapshot schema remain in `rings-measure`.
+/// Measurement callbacks update in-memory state and replace the pending full
+/// snapshot. Receipt admission commits its evidence snapshot before success.
+/// One runtime lock serializes both write paths. The algorithm, time projection,
+/// pruning, and snapshot schemas remain in `rings-measure`.
 pub struct PeriodicMeasure {
     state: Arc<MeasureState>,
     persistence_wake: mpsc::Sender<()>,
@@ -283,16 +286,24 @@ impl PeriodicMeasure {
                 |record| {
                     collector.is_some_and(|identity| valid_persisted_evidence(record, identity))
                 },
+                |marker| {
+                    collector
+                        .is_some_and(|identity| valid_persisted_replay_marker(marker, identity))
+                },
             )?,
             None => (
                 ProvisionalEvidenceStore::new(EvidenceLimits::default()),
                 rings_measure::EvidenceLoadReport::default(),
             ),
         };
-        if evidence_load.rejected_records() > 0 || evidence_load.evicted_records() > 0 {
+        if evidence_load.rejected_records() > 0
+            || evidence_load.evicted_records() > 0
+            || evidence_load.rejected_replay_markers() > 0
+        {
             tracing::warn!(
                 rejected_records = evidence_load.rejected_records(),
                 evicted_records = evidence_load.evicted_records(),
+                rejected_replay_markers = evidence_load.rejected_replay_markers(),
                 "reconciled provisional evidence during startup"
             );
         }
@@ -309,7 +320,8 @@ impl PeriodicMeasure {
         let dirty = reconciliation.is_adjusted()
             || pruning.removed_count() > 0
             || evidence_load.rejected_records() > 0
-            || evidence_load.evicted_records() > 0;
+            || evidence_load.evicted_records() > 0
+            || evidence_load.rejected_replay_markers() > 0;
         let next_prune_at = next_prune_time(&ledger, now);
         let state = Arc::new(MeasureState {
             storage,
@@ -546,6 +558,9 @@ fn valid_persisted_evidence(
     };
     let claim = &receipt.claim;
     let observed_at_ms = u128::from(record.observed_at().as_secs()) * 1_000;
+    let observed_slot =
+        rings_core::message::ProvisionalEpochV1::from_unix_seconds(record.observed_at().as_secs())
+            .slot;
     receipt
         .verify_live_at(collector.network_id, observed_at_ms)
         .is_ok()
@@ -557,9 +572,19 @@ fn valid_persisted_evidence(
         && claim.beneficiary_account == *record.freshness().beneficiary()
         && claim.epoch.slot == record.freshness().epoch_slot()
         && claim.nonce == record.freshness().nonce()
+        && record.replay_floor() == observed_slot.saturating_sub(1)
         && receipt
             .digest()
             .is_ok_and(|digest| digest.into_bytes() == record.digest().into_bytes())
+}
+
+fn valid_persisted_replay_marker(
+    marker: &EvidenceReplayMarker<Did>,
+    collector: EvidenceCollectorIdentity,
+) -> bool {
+    marker.freshness().network_id() == collector.network_id
+        && *marker.pair().provider() == collector.provider_account
+        && marker.pair().beneficiary() == marker.freshness().beneficiary()
 }
 
 fn finish_persist(runtime: &mut RuntimeLedger, succeeded: bool) {
@@ -877,13 +902,31 @@ impl Measure for PeriodicMeasure {
         &self,
         record: ProvisionalEvidenceRecord<Did>,
     ) -> Result<EvidenceAdmissionReport<Did>, EvidenceError> {
-        let result = {
+        // The evidence-storage put below is the successful operation's linearization point.
+        // Queries and other admissions take this same lock, so an explicit write failure is
+        // rolled back before it becomes observable. Cancellation may conservatively leave the
+        // dirty in-memory marker for the worker to persist, which preserves at-most-once admission.
+        let _persistence_guard = self.state.persistence_lock.lock().await;
+        let (before, result, snapshot) = {
             let mut runtime = lock_or_recover(&self.state.runtime);
+            let before = runtime.evidence.clone();
             let result = runtime.evidence.admit(record);
             mark_runtime_dirty(&mut runtime);
-            result
+            let snapshot = runtime.evidence.snapshot();
+            (before, result, snapshot)
         };
         self.wake_persistence();
+        if let Err(error) = self
+            .state
+            .evidence_storage
+            .put(EVIDENCE_SNAPSHOT_KEY, &snapshot)
+            .await
+        {
+            tracing::error!(%error, "failed to commit provisional evidence admission");
+            let mut runtime = lock_or_recover(&self.state.runtime);
+            runtime.evidence = before;
+            return Err(EvidenceError::PersistenceUnavailable);
+        }
         result
     }
 
@@ -892,12 +935,14 @@ impl Measure for PeriodicMeasure {
         after: Option<EvidenceDigest>,
         limit: NonZeroUsize,
     ) -> Result<EvidencePage<Did>, EvidenceError> {
+        let _persistence_guard = self.state.persistence_lock.lock().await;
         Ok(lock_or_recover(&self.state.runtime)
             .evidence
             .page(after, limit))
     }
 
     async fn provisional_evidence_counters(&self) -> EvidenceCounters {
+        let _persistence_guard = self.state.persistence_lock.lock().await;
         lock_or_recover(&self.state.runtime).evidence.counters()
     }
 }
@@ -921,6 +966,10 @@ impl measure::BehaviourJudgement for PeriodicMeasure {
 #[cfg(feature = "node")]
 #[allow(clippy::panic)]
 mod authentication_tests;
+#[cfg(test)]
+#[cfg(feature = "node")]
+#[allow(clippy::panic)]
+mod evidence_tests;
 #[cfg(test)]
 #[cfg(feature = "node")]
 #[allow(clippy::panic)]
