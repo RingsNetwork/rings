@@ -23,11 +23,12 @@ use crate::measure::PeriodicMeasure;
 fn evidence_record() -> ProvisionalEvidenceRecord<Did> {
     let provider = SessionSk::new_with_seckey(&SecretKey::random()).unwrap();
     let beneficiary = SessionSk::new_with_seckey(&SecretKey::random()).unwrap();
+    let observed_at_seconds = u64::try_from(rings_core::utils::get_epoch_ms() / 1_000).unwrap();
     let claim = ProvisionalServiceClaimV1::probe(
         9,
         provider.account_did(),
         beneficiary.account_did(),
-        ProvisionalEpochV1 { slot: 4 },
+        ProvisionalEpochV1::from_unix_seconds(observed_at_seconds),
         [5; 32],
         [6; 32],
         [7; 32],
@@ -54,7 +55,7 @@ fn evidence_record() -> ProvisionalEvidenceRecord<Did> {
         ),
         EvidenceDigest::new(receipt.digest().unwrap().into_bytes()),
         receipt.canonical_bytes().unwrap(),
-        UnixTime::from_secs(1_200),
+        UnixTime::from_secs(observed_at_seconds),
     )
 }
 
