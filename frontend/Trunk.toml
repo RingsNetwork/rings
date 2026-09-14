@@ -4,9 +4,12 @@ watch = [
   "src",
   "assets",
   "rings-webview-service-worker.js",
+  "build.rs",
   "Cargo.toml",
   "Trunk.toml",
+  "static-shell.css",
   "extension-assets",
+  "scripts/check_static_index.py",
   "scripts/check-extension-docs.mts",
   "scripts/package-extension.mts",
   "scripts/test-extension-wallet-bridge.mts",
@@ -18,3 +21,12 @@ ignore = [
   "dist",
   "dist-extension",
 ]
+
+[[hooks]]
+stage = "post_build"
+command = "python3"
+command_arguments = ["scripts/check_static_index.py"]
+
+[hooks.windows]
+command = "python"
+command_arguments = ["scripts/check_static_index.py"]

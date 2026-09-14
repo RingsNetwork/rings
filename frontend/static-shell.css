@@ -1,0 +1,198 @@
+:root {
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+.static-site {
+  min-height: 100vh;
+  background: #f3ead8;
+  color: #344054;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.static-site h1,
+.static-site h2,
+.static-site h3,
+.static-site p {
+  margin-top: 0;
+}
+
+.static-site h1,
+.static-site h2,
+.static-site h3 {
+  color: #101828;
+}
+
+.static-site a {
+  color: #344054;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.static-site a:hover,
+.static-site a:focus-visible {
+  color: #b42318;
+  text-decoration: underline;
+}
+
+.static-header,
+.static-footer {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 18px 10%;
+  background: #fffaf0;
+}
+
+.static-header {
+  border-bottom: 1px solid #dfd0b7;
+}
+
+.static-brand,
+.static-nav,
+.static-actions {
+  display: flex;
+  align-items: center;
+}
+
+.static-brand {
+  gap: 10px;
+  color: #101828;
+  font-size: 1rem;
+}
+
+.static-brand img {
+  display: block;
+}
+
+.static-nav,
+.static-actions {
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.static-nav a,
+.static-actions a {
+  border-radius: 8px;
+  padding: 9px 12px;
+  background: #fff6e6;
+}
+
+.static-hero {
+  display: grid;
+  min-height: 580px;
+  align-items: center;
+  padding: 72px 10%;
+  background:
+    linear-gradient(90deg, rgba(251, 244, 230, 0.97) 0%, rgba(251, 244, 230, 0.9) 40%, rgba(251, 244, 230, 0.38) 72%),
+    url("assets/images/rings-market-hero.png") center / cover no-repeat;
+}
+
+.static-hero > div {
+  display: grid;
+  max-width: 680px;
+  gap: 22px;
+}
+
+.static-kicker {
+  margin-bottom: 0;
+  color: #b42318;
+  font-size: 0.78rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.static-hero h1 {
+  margin-bottom: 0;
+  font-size: clamp(2.7rem, 7vw, 4rem);
+  line-height: 1.02;
+}
+
+.static-lede {
+  margin-bottom: 0;
+  font-size: 1.08rem;
+  line-height: 1.72;
+}
+
+.static-actions .static-primary-action {
+  background: #101828;
+  color: #fff;
+}
+
+.static-section {
+  display: grid;
+  gap: 16px;
+  margin: 0 10%;
+  border-top: 1px solid #dfd0b7;
+  padding: 52px 0;
+}
+
+.static-section > h2 {
+  max-width: 760px;
+  margin-bottom: 0;
+  font-size: clamp(1.7rem, 4vw, 2rem);
+}
+
+.static-feature-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.static-feature-grid > section {
+  border: 1px solid #ded0bd;
+  border-radius: 8px;
+  padding: 20px;
+  background: #fbf4e8;
+}
+
+.static-feature-grid h3 {
+  margin-bottom: 10px;
+}
+
+.static-feature-grid p,
+.static-architecture > p:not(.static-kicker) {
+  margin-bottom: 0;
+  line-height: 1.7;
+}
+
+.static-footer {
+  border-top: 1px solid #dfd0b7;
+  color: #736453;
+  font-size: 0.78rem;
+}
+
+@media (max-width: 720px) {
+  .static-header,
+  .static-footer {
+    align-items: flex-start;
+    flex-direction: column;
+    padding-right: 6%;
+    padding-left: 6%;
+  }
+
+  .static-hero {
+    min-height: 520px;
+    padding-right: 6%;
+    padding-left: 6%;
+  }
+
+  .static-section {
+    margin-right: 6%;
+    margin-left: 6%;
+  }
+
+  .static-feature-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

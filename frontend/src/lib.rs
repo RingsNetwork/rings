@@ -23,6 +23,7 @@ mod links;
 mod node;
 mod onion;
 mod peer_sync;
+mod project_content;
 mod styles;
 mod topology;
 mod wallet;

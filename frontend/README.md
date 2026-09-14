@@ -73,6 +73,14 @@ the card at `assets/social/rings-card.png`, rendered from `assets/social/card.sv
 Crawlers do not run the app, so every hash route shares the landing page's card. The
 card is not part of the extension package.
 
+The initial `index.html` also carries a substantive static project introduction for
+machine readers and browsers where JavaScript or WebAssembly is unavailable. Its marked,
+visible project copy is the single source of truth: `build.rs` generates the constants used
+by the interactive Yew landing page. Yew replaces the static document when it mounts. Every
+Trunk build runs `scripts/check_static_index.py` against the final `dist/index.html`; QACI
+additionally opens the build with Playwright both with JavaScript disabled and with the Yew
+app active.
+
 ## Package as a Chrome Extension
 
 Package the same Yew/Wasm application with the explicit repository script. A
@@ -147,5 +155,6 @@ npm --prefix .. ci --ignore-scripts
 npm --prefix .. run package:frontend-extension
 cd ..
 npx playwright install chromium
+npm run test:frontend-static-shell
 npm run test:frontend-extension-wallet
 ```

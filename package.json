@@ -17,6 +17,7 @@
     "build:frontend-extension-scripts": "npm run check:frontend-extension-scripts && rm -rf frontend/.generated && tsc -p frontend/tsconfig.extension-assets.json && tsc -p frontend/tsconfig.scripts.json && node frontend/.generated/scripts/check-extension-docs.mjs && node frontend/.generated/scripts/test-webview-service-worker.mjs && node frontend/.generated/scripts/test-webview-overlay.mjs && node frontend/.generated/scripts/test-extension-webview-contract.mjs && node frontend/.generated/scripts/test-extension-webview-service-worker.mjs",
     "build:frontend-web": "cd frontend && NO_COLOR=true trunk build --release",
     "package:frontend-extension": "npm run build:frontend-extension-scripts && cd frontend && NO_COLOR=true trunk build --release && cd .. && node frontend/.generated/scripts/package-extension.mjs",
+    "test:frontend-static-shell": "tsc -p frontend/tsconfig.scripts.json && npm run build:frontend-web && node frontend/.generated/scripts/test-frontend-static-shell.mjs",
     "test:frontend-extension-wallet": "npm run package:frontend-extension && node frontend/.generated/scripts/test-extension-wallet-bridge.mjs",
     "test:frontend-extension-webview": "npm run package:frontend-extension && node frontend/.generated/scripts/test-extension-webview.mjs && node frontend/.generated/scripts/test-extension-webview-regressions.mjs",
     "test:frontend-webview-service-worker": "tsc -p frontend/tsconfig.scripts.json && node frontend/.generated/scripts/test-webview-service-worker.mjs",
