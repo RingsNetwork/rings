@@ -30,6 +30,8 @@ pub use finger::FingerTable;
 pub use finger::DEFAULT_FINGER_TABLE_SIZE;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use stabilization::finger_schedule_deadline_for_test;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use stabilization::finger_schedule_resumed_deadline_for_test;
 #[cfg(all(test, target_family = "wasm"))]
 pub(crate) use stabilization::maintenance_phase_trace_for_test;
 #[cfg(all(test, target_family = "wasm"))]

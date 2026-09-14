@@ -15,7 +15,9 @@
   affected slots, losing the last successor invalidates all membership evidence, and correlated
   request epochs reject stale or expired in-flight results at commit time.
 - Automatic convergence permits one lookup per node at a time, spreads simultaneous fleet starts
-  over a boot-randomized 10-second phase window, and has no catch-up bursts. Send failure, invalid
+  over a node-lifecycle-randomized 10-second phase window, reuses that phase across repeated browser
+  listener restarts, rephases deadlines left stale by browser suspension, and has no catch-up
+  bursts. Send failure, invalid
   reports, timeouts, and topology invalidation of an in-flight proof use a
   2/4/8/16/32/60-second exponential retry floor plus a full jitter window; only an applied range
   proof resets the failure level. A due convergence turn may yield to at most two topology or

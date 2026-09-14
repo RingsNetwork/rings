@@ -44,11 +44,15 @@ identifier allocated at the effect boundary;
 expiry is checked again when a report is committed, so results from an expired request or from a
 request invalidated by a topology change cannot overwrite newer state, including after a process
 restart. A fleet's first automatic attempt is spread over a
-boot-randomized 10-second per-node phase window, so an identity cannot preselect its time bucket.
+node-lifecycle-randomized 10-second per-node phase window, so an identity cannot preselect its time
+bucket. Repeated `stop`/`listen` cycles on the same browser provider reuse that phase instead of
+rerolling it. When browser suspension leaves a finger deadline at least 10 seconds overdue, the
+node spreads the stale attempt over a new 1--11 second delay rather than emitting on resume; a full
+provider reconstruction is a new lifecycle and selects new entropy.
 Send cancellation, invalid reports, timeouts, and topology changes that invalidate an
 in-flight proof increase a progress-sensitive retry floor through 2, 4, 8, 16, 32, and 60 seconds;
 each retry is additionally spread across a full jitter window of the same size. Only an applied
-range proof resets that failure level. Missed
+range proof resets that failure level. Other missed
 deadlines schedule one future attempt rather than catch-up bursts. Finger convergence may yield to
 at most two due topology/storage phases before its turn is reserved.
 

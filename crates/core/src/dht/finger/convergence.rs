@@ -9,8 +9,9 @@
 //!   process-monotonic clock supplied by the effect boundary.
 //! - `failure_streak` and `retry_not_before_ms` make loss, invalid reports,
 //!   timeouts, and send cancellation progress-sensitive. Only a proved range
-//!   resets the streak; the runtime scheduler adds boot-randomized full-window
-//!   jitter and never performs catch-up bursts.
+//!   resets the streak; the runtime scheduler adds node-lifecycle-randomized
+//!   full-window jitter, rephases stale browser-resume deadlines, and never
+//!   performs catch-up bursts.
 
 use num_bigint::BigUint;
 use serde::Deserialize;

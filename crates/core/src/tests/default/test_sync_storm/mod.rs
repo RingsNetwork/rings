@@ -15,6 +15,7 @@ use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::finger::FINGER_LOOKUP_MIN_INTERVAL_MS;
 use crate::dht::finger_schedule_deadline_for_test;
+use crate::dht::finger_schedule_resumed_deadline_for_test;
 use crate::dht::successor::SuccessorReader;
 use crate::dht::Chord;
 use crate::dht::PeerRingAction;
@@ -77,6 +78,7 @@ const VIRTUAL_SERVICE_BYTES_PER_MS: usize = 256;
 const MAX_FRAME_SERVICE_MS: u64 = 64;
 const FINGER_INITIAL_PHASE_MS: u64 = 10_000;
 const FINGER_MAX_RETRY_FLOOR_MS: u64 = 60_000;
+const FINGER_MAX_FIXTURE_NODES_PER_SECOND: usize = 30;
 
 const MODEL_LIMITS: SimLimits = SimLimits {
     node_bytes: 128 * 1024 * 1024,
@@ -91,11 +93,16 @@ enum ScenarioTopology {
     Hotspot,
 }
 
-/// Law: boot entropy, rather than a grindable DID alone, selects a deadline
-/// inside the explicit per-node initial and retry windows.
+/// Law: lifecycle entropy, rather than a grindable DID alone, selects a
+/// deadline inside the explicit per-node initial and retry windows. Browser
+/// resume rephases stale work over the same fleet window instead of emitting
+/// one immediate request per resumed node.
 #[test]
-fn test_finger_convergence_schedule_has_per_node_bounds_and_boot_entropy() {
-    let mut first_boot_deadlines = BTreeSet::new();
+fn test_finger_convergence_schedule_has_per_node_churn_bounds_and_lifecycle_entropy() {
+    let mut first_lifecycle_deadlines = BTreeSet::new();
+    let mut resumed_delays = BTreeSet::new();
+    let mut initial_bucket_counts = BTreeMap::<u64, usize>::new();
+    let mut resumed_bucket_counts = BTreeMap::<u64, usize>::new();
     let mut entropy_changed_deadline = 0usize;
     for identity in 0..200u32 {
         let local = crate::dht::Did::from(identity);
@@ -104,6 +111,8 @@ fn test_finger_convergence_schedule_has_per_node_bounds_and_boot_entropy() {
         let initial = finger_schedule_deadline_for_test(local, first_boot, 0);
         let another_initial = finger_schedule_deadline_for_test(local, second_boot, 0);
         let retry = finger_schedule_deadline_for_test(local, first_boot, u8::MAX);
+        let (resumed_at, resumed_deadline) =
+            finger_schedule_resumed_deadline_for_test(local, first_boot);
 
         assert!((1_000..=1_000 + FINGER_INITIAL_PHASE_MS).contains(&initial));
         assert!((1_000..=1_000 + FINGER_INITIAL_PHASE_MS).contains(&another_initial));
@@ -111,18 +120,39 @@ fn test_finger_convergence_schedule_has_per_node_bounds_and_boot_entropy() {
             (FINGER_MAX_RETRY_FLOOR_MS..=FINGER_MAX_RETRY_FLOOR_MS.saturating_mul(2))
                 .contains(&retry)
         );
-        first_boot_deadlines.insert(initial);
+        assert!(resumed_deadline > resumed_at);
+        assert!((1_000..=1_000 + FINGER_INITIAL_PHASE_MS)
+            .contains(&resumed_deadline.saturating_sub(resumed_at)));
+        first_lifecycle_deadlines.insert(initial);
+        let resumed_delay = resumed_deadline.saturating_sub(resumed_at);
+        resumed_delays.insert(resumed_delay);
+        *initial_bucket_counts.entry(initial / 1_000).or_default() += 1;
+        *resumed_bucket_counts
+            .entry(resumed_delay / 1_000)
+            .or_default() += 1;
         entropy_changed_deadline =
             entropy_changed_deadline.saturating_add(usize::from(initial != another_initial));
     }
     assert!(
-        first_boot_deadlines.len() >= 190,
-        "boot fixture clustered 200 nodes into only {} deadlines",
-        first_boot_deadlines.len()
+        first_lifecycle_deadlines.len() >= 190,
+        "lifecycle fixture clustered 200 nodes into only {} deadlines",
+        first_lifecycle_deadlines.len()
+    );
+    assert!(
+        resumed_delays.len() >= 190,
+        "resume fixture clustered 200 nodes into only {} delays",
+        resumed_delays.len()
+    );
+    assert!(
+        initial_bucket_counts
+            .values()
+            .chain(resumed_bucket_counts.values())
+            .all(|count| *count <= FINGER_MAX_FIXTURE_NODES_PER_SECOND),
+        "lifecycle or resume fixture exceeded {FINGER_MAX_FIXTURE_NODES_PER_SECOND} due nodes in one second"
     );
     assert!(
         entropy_changed_deadline >= 190,
-        "boot entropy changed only {entropy_changed_deadline} of 200 deadlines"
+        "lifecycle entropy changed only {entropy_changed_deadline} of 200 deadlines"
     );
 }
 

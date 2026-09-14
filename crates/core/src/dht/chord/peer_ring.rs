@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
+use std::sync::OnceLock;
 
 use async_trait::async_trait;
 use futures::lock::Mutex as FuturesMutex;
@@ -59,6 +60,7 @@ pub struct PeerRing {
     storage_virtual_node_config: VirtualNodeConfig,
     topology_transition: Mutex<()>,
     finger_clock_origin: Instant,
+    finger_jitter_entropy: OnceLock<uuid::Uuid>,
     /// Serializes every read-modify-write of a storage slot (see `chord::storage`).
     pub(super) storage_transition: FuturesMutex<()>,
 }
@@ -110,6 +112,7 @@ impl PeerRing {
             storage_virtual_node_config: virtual_nodes,
             topology_transition: Mutex::new(()),
             finger_clock_origin: Instant::now(),
+            finger_jitter_entropy: OnceLock::new(),
             storage_transition: FuturesMutex::new(()),
             did,
         }
@@ -341,6 +344,16 @@ impl PeerRing {
 
     fn finger_now_ms(&self) -> u64 {
         u64::try_from(self.finger_clock_origin.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// Return the per-node-lifecycle entropy used to spread automatic finger work.
+    ///
+    /// A browser provider can stop and restart its listener without rebuilding
+    /// the ring. Keeping this value on the ring prevents every listener restart
+    /// from rerolling its phase while still assigning a new phase after a full
+    /// provider reconstruction.
+    pub(crate) fn finger_jitter_entropy(&self) -> uuid::Uuid {
+        *self.finger_jitter_entropy.get_or_init(new_uuid)
     }
 
     pub(crate) fn finger_convergence_status(&self) -> Result<FingerConvergenceStatus> {
