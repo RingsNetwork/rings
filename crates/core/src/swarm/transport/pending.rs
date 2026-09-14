@@ -19,7 +19,8 @@ pub(super) use registry::ReservationVerdict;
 
 use super::SwarmConnection;
 use super::SwarmTransport;
-use crate::dht::finger::FingerResultDisposition;
+use crate::dht::finger::FingerDeferOutcome;
+use crate::dht::finger::FingerRetireOutcome;
 use crate::dht::Did;
 use crate::dht::FingerFixRequest;
 use crate::dht::PeerRingAction;
@@ -692,23 +693,10 @@ impl SwarmTransport {
         request: FingerFixRequest,
         observe_admission: impl FnOnce(),
     ) -> Result<FingerUpdateDisposition> {
-        let _lifecycle = self.connection_lifecycle()?;
-        match self.dht.finger_result_disposition(request, peer)? {
-            FingerResultDisposition::Stale => return Ok(FingerUpdateDisposition::Stale),
-            FingerResultDisposition::Invalid => {
-                return self
-                    .dht
-                    .apply_fixed_finger(request, peer)
-                    .map(FingerUpdateDisposition::from);
-            }
-            FingerResultDisposition::Expired => {
-                return self
-                    .dht
-                    .apply_fixed_finger(request, peer)
-                    .map(FingerUpdateDisposition::from);
-            }
-            FingerResultDisposition::Applied { .. } => {}
-        }
+        // The lifecycle guard keeps classification, proof transfer, and queue
+        // attachment in one critical section. No async network effect occurs
+        // while it is held.
+        let _lifecycle_guard = self.connection_lifecycle()?;
         if peer == self.dht.did {
             return self
                 .dht
@@ -723,13 +711,16 @@ impl SwarmTransport {
         match finger_candidate_admission(lifecycle, is_routable) {
             FingerCandidateAdmission::Queue(current) => {
                 observe_admission();
+                // Acquire the queue before transferring proof ownership. If
+                // this lock fails, the proof remains AwaitingReport rather
+                // than becoming an admission proof with no transport owner.
                 let mut pending_updates = self.pending_finger_updates()?;
-                let disposition = self.dht.defer_fixed_finger(request, peer)?;
-                if matches!(disposition, FingerResultDisposition::Applied { .. }) {
-                    pending_updates.entry(current).or_default().insert(request);
-                    Ok(FingerUpdateDisposition::Queued)
-                } else {
-                    Ok(disposition.into())
+                match self.dht.defer_fixed_finger(request, peer)? {
+                    FingerDeferOutcome::Deferred { .. } => {
+                        pending_updates.entry(current).or_default().insert(request);
+                        Ok(FingerUpdateDisposition::Queued)
+                    }
+                    FingerDeferOutcome::Rejected(rejection) => Ok(rejection.into()),
                 }
             }
             FingerCandidateAdmission::Apply => {
@@ -740,14 +731,26 @@ impl SwarmTransport {
             }
             FingerCandidateAdmission::Missing => {
                 observe_admission();
+                // The report becomes a durable, expiring admission proof
+                // before the caller starts an async WebRTC handshake. A
+                // cancelled or hung handler therefore cannot strand it.
                 self.dht
                     .defer_fixed_finger(request, peer)
-                    .map(|disposition| match disposition {
-                        FingerResultDisposition::Applied { .. } => FingerUpdateDisposition::Missing,
-                        disposition => disposition.into(),
+                    .map(|outcome| match outcome {
+                        FingerDeferOutcome::Deferred { .. } => FingerUpdateDisposition::Missing,
+                        FingerDeferOutcome::Rejected(rejection) => rejection.into(),
                     })
             }
-            FingerCandidateAdmission::Unroutable => Ok(FingerUpdateDisposition::Unroutable),
+            FingerCandidateAdmission::Unroutable => {
+                // Validate token and successor in the same topology
+                // transition that retires the unusable candidate. Checking
+                // only the token here would let a conflicting duplicate evict
+                // a different successor's retained admission proof.
+                match self.dht.retire_finger_candidate(request, peer)? {
+                    FingerRetireOutcome::Retired => Ok(FingerUpdateDisposition::Unroutable),
+                    FingerRetireOutcome::Rejected(rejection) => Ok(rejection.into()),
+                }
+            }
         }
     }
 

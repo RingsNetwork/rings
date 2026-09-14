@@ -31,6 +31,20 @@ Rings Network builds upon Correct Chord and incorporates several modifications, 
 
 ## Finger-table convergence
 
+### Algorithmic basis and Rings policy
+
+The [original Chord paper](https://pdos.csail.mit.edu/papers/ton:chord/paper-ton.pdf)
+defines finger slot `i` as the successor of
+`local + 2^i`. Rings derives one batching lemma from that definition: if the
+lookup for slot `i` returns a successor at clockwise distance `d`, the same
+answer proves every consecutive slot through `floor(log2(d))`. The Chord paper
+does not prescribe the convergence state machine below. UUID correlation,
+per-slot evidence epochs, admission leases, exponential retry, jitter, and
+browser lifecycle handling are Rings engineering policy.
+[Pamela Zave's Chord correctness work](https://arxiv.org/abs/1502.06461)
+supports the separation used here: ring correctness depends
+on a valid successor structure; fingers are replaceable routing optimization.
+
 Rings treats entries learned from admission, successor changes, and peer removal as routing hints,
 not as proof that a finger slot is current. A lookup for slot `i` verifies the consecutive range
 from `i` through the highest slot whose target is no farther than the returned successor. This

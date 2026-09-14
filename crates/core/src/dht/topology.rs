@@ -33,17 +33,23 @@ use std::collections::BTreeSet;
 
 use num_bigint::BigUint;
 
-use super::finger::finger_proof_end;
 use super::finger::FingerConvergenceState;
 use super::finger::FingerConvergenceStatus;
-use super::finger::FingerResultDisposition;
 #[cfg(test)]
 use super::finger::FINGER_LOOKUP_MIN_INTERVAL_MS;
 use super::Did;
 use super::FingerFixRequest;
 
+mod finger;
 mod stabilization;
 mod successor_sync;
+use finger::advance as step_fix_finger;
+pub(crate) use finger::apply as apply_finger;
+use finger::apply_result as apply_finger_result;
+use finger::begin_revalidation as begin_finger_revalidation;
+use finger::cancel as cancel_finger_result;
+pub(crate) use finger::defer as defer_finger;
+pub(crate) use finger::retire_candidate as retire_finger_candidate;
 use stabilization::local_successor_range_end;
 pub use stabilization::rectify_predecessor;
 pub use stabilization::stabilize_notify;
@@ -192,21 +198,6 @@ impl TopologyState {
         &self,
     ) -> super::finger::FingerConvergenceProjection {
         self.finger_convergence.projection()
-    }
-
-    pub(crate) fn finger_result_disposition(
-        &self,
-        request: FingerFixRequest,
-        successor: Did,
-        now_ms: u64,
-    ) -> FingerResultDisposition {
-        self.finger_convergence.result_disposition(
-            self.local,
-            self.fingers.len(),
-            request,
-            successor,
-            now_ms,
-        )
     }
 
     /// Every occupied successor, predecessor, and finger slot other than `local`.
@@ -701,153 +692,6 @@ fn step_update_successor(state: &TopologyState, successor: Did, capacity: usize)
         } else {
             Vec::new()
         },
-    }
-}
-
-fn step_fix_finger(state: &TopologyState, now_ms: u64, request_id: uuid::Uuid) -> TopologyStep {
-    // A temporarily isolated node has no membership evidence from which it can
-    // prove an empty finger range. Keep every slot unverified but dormant; a
-    // later successor admission makes the existing state pending again.
-    if state.fingers.is_empty() || successor_head(state).is_none() {
-        return TopologyStep {
-            state: state.clone(),
-            actions: Vec::new(),
-        };
-    }
-    let mut finger_convergence = state.finger_convergence.clone();
-    let first_remote_slot = local_successor_range_end(state)
-        .map(|end| end.saturating_add(1))
-        .unwrap_or(0);
-    let Some(request) =
-        finger_convergence.prepare_lookup(&state.fingers, first_remote_slot, now_ms, request_id)
-    else {
-        return TopologyStep {
-            state: TopologyState {
-                finger_convergence,
-                ..state.clone()
-            },
-            actions: Vec::new(),
-        };
-    };
-    let index = request.slot_index();
-    let did = state.local + Did::power_of_two(index);
-    let prepared = TopologyState {
-        finger_convergence,
-        ..state.clone()
-    };
-    match find_successor(&prepared, did) {
-        FindSuccessorStep::Local(successor) => TopologyStep {
-            state: apply_finger_result(&prepared, request, successor, now_ms).0,
-            actions: Vec::new(),
-        },
-        FindSuccessorStep::Remote { next, did } => TopologyStep {
-            state: prepared,
-            actions: vec![TopologyAction::FindSuccessorForFix { next, did, request }],
-        },
-    }
-}
-
-fn begin_finger_revalidation(state: &TopologyState) -> TopologyState {
-    let mut finger_convergence = state.finger_convergence.clone();
-    finger_convergence.begin_revalidation(&state.fingers, state.fix_finger_index);
-    TopologyState {
-        finger_convergence,
-        ..state.clone()
-    }
-}
-
-fn apply_finger_result(
-    state: &TopologyState,
-    request: FingerFixRequest,
-    successor: Did,
-    now_ms: u64,
-) -> (TopologyState, FingerResultDisposition) {
-    let mut fingers = state.fingers.clone();
-    let mut finger_convergence = state.finger_convergence.clone();
-    let disposition =
-        finger_convergence.apply_result(state.local, &mut fingers, request, successor, now_ms);
-    let fix_finger_index = match disposition {
-        FingerResultDisposition::Applied { end } => end,
-        FingerResultDisposition::Invalid
-        | FingerResultDisposition::Expired
-        | FingerResultDisposition::Stale => state.fix_finger_index,
-    };
-    (
-        TopologyState {
-            fingers,
-            fix_finger_index,
-            finger_convergence,
-            ..state.clone()
-        },
-        disposition,
-    )
-}
-
-fn defer_finger_result(
-    state: &TopologyState,
-    request: FingerFixRequest,
-    successor: Did,
-    now_ms: u64,
-) -> (TopologyState, FingerResultDisposition) {
-    let mut finger_convergence = state.finger_convergence.clone();
-    let disposition = finger_convergence.defer_result(
-        state.local,
-        state.fingers.len(),
-        request,
-        successor,
-        now_ms,
-    );
-    (
-        TopologyState {
-            finger_convergence,
-            ..state.clone()
-        },
-        disposition,
-    )
-}
-
-pub(crate) fn apply_finger(
-    state: &TopologyState,
-    request: FingerFixRequest,
-    successor: Did,
-    now_ms: u64,
-) -> (TopologyStep, FingerResultDisposition) {
-    let (state, disposition) = apply_finger_result(state, request, successor, now_ms);
-    (
-        TopologyStep {
-            state,
-            actions: Vec::new(),
-        },
-        disposition,
-    )
-}
-
-pub(crate) fn defer_finger(
-    state: &TopologyState,
-    request: FingerFixRequest,
-    successor: Did,
-    now_ms: u64,
-) -> (TopologyStep, FingerResultDisposition) {
-    let (state, disposition) = defer_finger_result(state, request, successor, now_ms);
-    (
-        TopologyStep {
-            state,
-            actions: Vec::new(),
-        },
-        disposition,
-    )
-}
-
-fn cancel_finger_result(
-    state: &TopologyState,
-    request: FingerFixRequest,
-    now_ms: u64,
-) -> TopologyState {
-    let mut finger_convergence = state.finger_convergence.clone();
-    finger_convergence.cancel(request, now_ms);
-    TopologyState {
-        finger_convergence,
-        ..state.clone()
     }
 }
 

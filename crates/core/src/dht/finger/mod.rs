@@ -12,13 +12,16 @@ mod convergence;
 
 pub(crate) use convergence::finger_lookup_backoff_ms;
 pub(crate) use convergence::finger_proof_end;
+pub(crate) use convergence::FingerApplyOutcome;
 pub(crate) use convergence::FingerConvergencePhase;
 #[cfg(test)]
 pub(crate) use convergence::FingerConvergenceProjection;
 pub(crate) use convergence::FingerConvergenceState;
 pub(crate) use convergence::FingerConvergenceStatus;
+pub(crate) use convergence::FingerDeferOutcome;
 pub use convergence::FingerFixRequest;
-pub(crate) use convergence::FingerResultDisposition;
+pub(crate) use convergence::FingerReportRejection;
+pub(crate) use convergence::FingerRetireOutcome;
 pub(crate) use convergence::FINGER_ADMISSION_TIMEOUT_MS;
 #[cfg(test)]
 pub(crate) use convergence::FINGER_LOOKUP_MIN_INTERVAL_MS;
@@ -26,8 +29,11 @@ pub(crate) use convergence::FINGER_LOOKUP_MIN_INTERVAL_MS;
 /// Default number of Chord finger slots for a 160-bit `Did`.
 pub const DEFAULT_FINGER_TABLE_SIZE: usize = 160;
 
-/// Finger table of Chord DHT
-/// Ring's finger table is implemented with BiasRing
+/// Finger table of the Rings Chord DHT.
+///
+/// Equality compares the complete serializable protocol state, including the
+/// maintenance cursor, convergence ownership, evidence epochs, and retry
+/// state. Call [`Self::list`] when only routing hints should be compared.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct FingerTable {
     did: Did,

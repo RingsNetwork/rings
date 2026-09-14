@@ -222,137 +222,152 @@ impl FingerRetryState {
         next
     }
 
+    fn advance_before_deadline(&self) -> Self {
+        let deadline = self.next_deadline_ms();
+        if deadline > self.now_ms {
+            self.advance_at(deadline.saturating_sub(1))
+        } else {
+            self.clone()
+        }
+    }
+
+    fn apply_progress(&self) -> Self {
+        let Some(request) = self.in_flight_request() else {
+            return self.clone();
+        };
+        self.apply_current(self.topology.local + Did::power_of_two(request.slot_index()))
+    }
+
+    fn apply_invalid_report(&self) -> Self {
+        let Some(request) = self.in_flight_request() else {
+            return self.clone();
+        };
+        let Some(previous_slot) = request.slot_index().checked_sub(1) else {
+            return self.clone();
+        };
+        self.apply_current(self.topology.local + Did::power_of_two(previous_slot))
+    }
+
+    fn apply_late_report(&self) -> Self {
+        let projection = self.topology.finger_convergence_projection();
+        let (Some(request), Some(expires_at_ms)) = (projection.in_flight, projection.expires_at_ms)
+        else {
+            return self.clone();
+        };
+        self.apply_current_at(
+            self.topology.local + Did::power_of_two(request.slot_index()),
+            expires_at_ms.max(self.now_ms),
+        )
+    }
+
+    fn cancel_current(&self) -> Self {
+        let Some(request) = self.current_request() else {
+            return self.clone();
+        };
+        let output = step(
+            &self.topology,
+            TopologyEvent::CancelFinger {
+                request,
+                now_ms: self.now_ms,
+            },
+            DEFAULT_SUCCESSOR_CAPACITY,
+        );
+        let mut next = self.clone();
+        next.topology = output.state;
+        next.delayed_reports.push(request);
+        next
+    }
+
+    fn deliver_duplicate(&self) -> Self {
+        let Some(request) = self.delayed_reports.last().copied() else {
+            return self.clone();
+        };
+        let output = step(
+            &self.topology,
+            TopologyEvent::DeferFinger {
+                request,
+                successor: Did::from(2u32),
+                now_ms: self.now_ms,
+            },
+            DEFAULT_SUCCESSOR_CAPACITY,
+        );
+        let mut next = self.clone();
+        next.topology = output.state;
+        next
+    }
+
+    fn change_topology(&self) -> Self {
+        let event = match self.next_topology_mutation {
+            0 => TopologyEvent::Join {
+                peer: Did::from(4u32),
+            },
+            1 => TopologyEvent::Admit {
+                peer: Did::from(6u32),
+                fixed_fingers: Vec::new(),
+                now_ms: self.now_ms,
+            },
+            2 => TopologyEvent::UpdateSuccessor {
+                successor: Did::from(16u32),
+            },
+            3 => TopologyEvent::Stabilize {
+                reporter: self
+                    .topology
+                    .successors
+                    .first()
+                    .copied()
+                    .unwrap_or(Did::from(8u32)),
+                request_id: None,
+                successors: vec![Did::from(32u32)],
+                predecessor: Some(Did::from(2u32)),
+            },
+            _ => TopologyEvent::Remove {
+                peer: self
+                    .topology
+                    .successors
+                    .first()
+                    .copied()
+                    .unwrap_or(Did::from(4u32)),
+                successor: SuccessorRemoval::Preserve,
+            },
+        };
+        let output = step(&self.topology, event, DEFAULT_SUCCESSOR_CAPACITY);
+        let mut next = self.clone();
+        next.topology = output.state;
+        next.next_topology_mutation = self.next_topology_mutation.saturating_add(1) % 5;
+        next
+    }
+
+    fn restart(&self) -> Self {
+        let mut next = self.clone();
+        next.topology = TopologyState::new(
+            self.topology.local,
+            self.topology.successors.clone(),
+            self.topology.predecessor,
+            self.topology.fingers.clone(),
+            self.topology.fix_finger_index,
+        );
+        if let Some(request) = self.current_request() {
+            next.delayed_reports.push(request);
+        }
+        next.now_ms = 0;
+        next.run_generation = next.run_generation.saturating_add(1);
+        next
+    }
+
     fn transition(&self, action: FingerRetryAction) -> Self {
         match action {
-            FingerRetryAction::AdvanceBeforeDeadline => {
-                let deadline = self.next_deadline_ms();
-                if deadline > self.now_ms {
-                    self.advance_at(deadline.saturating_sub(1))
-                } else {
-                    self.clone()
-                }
-            }
+            FingerRetryAction::AdvanceBeforeDeadline => self.advance_before_deadline(),
             FingerRetryAction::AdvanceToDeadline => self.advance_at(self.next_deadline_ms()),
-            FingerRetryAction::Progress => {
-                let Some(request) = self.in_flight_request() else {
-                    return self.clone();
-                };
-                self.apply_current(self.topology.local + Did::power_of_two(request.slot_index()))
-            }
-            FingerRetryAction::Invalid => {
-                let Some(request) = self.in_flight_request() else {
-                    return self.clone();
-                };
-                let Some(previous_slot) = request.slot_index().checked_sub(1) else {
-                    return self.clone();
-                };
-                self.apply_current(self.topology.local + Did::power_of_two(previous_slot))
-            }
-            FingerRetryAction::LateReport => {
-                let projection = self.topology.finger_convergence_projection();
-                let (Some(request), Some(expires_at_ms)) =
-                    (projection.in_flight, projection.expires_at_ms)
-                else {
-                    return self.clone();
-                };
-                self.apply_current_at(
-                    self.topology.local + Did::power_of_two(request.slot_index()),
-                    expires_at_ms.max(self.now_ms),
-                )
-            }
-            FingerRetryAction::Cancel => {
-                let Some(request) = self.current_request() else {
-                    return self.clone();
-                };
-                let output = step(
-                    &self.topology,
-                    TopologyEvent::CancelFinger {
-                        request,
-                        now_ms: self.now_ms,
-                    },
-                    DEFAULT_SUCCESSOR_CAPACITY,
-                );
-                let mut next = self.clone();
-                next.topology = output.state;
-                next.delayed_reports.push(request);
-                next
-            }
+            FingerRetryAction::Progress => self.apply_progress(),
+            FingerRetryAction::Invalid => self.apply_invalid_report(),
+            FingerRetryAction::LateReport => self.apply_late_report(),
+            FingerRetryAction::Cancel => self.cancel_current(),
             FingerRetryAction::Defer => self.defer_current(),
             FingerRetryAction::AdmitDeferred => self.admit_deferred(),
             FingerRetryAction::Lose => self.clone(),
-            FingerRetryAction::Duplicate => {
-                let Some(request) = self.delayed_reports.last().copied() else {
-                    return self.clone();
-                };
-                let output = step(
-                    &self.topology,
-                    TopologyEvent::DeferFinger {
-                        request,
-                        successor: Did::from(2u32),
-                        now_ms: self.now_ms,
-                    },
-                    DEFAULT_SUCCESSOR_CAPACITY,
-                );
-                let mut next = self.clone();
-                next.topology = output.state;
-                next
-            }
-            FingerRetryAction::TopologyChange => {
-                let event = match self.next_topology_mutation {
-                    0 => TopologyEvent::Join {
-                        peer: Did::from(4u32),
-                    },
-                    1 => TopologyEvent::Admit {
-                        peer: Did::from(6u32),
-                        fixed_fingers: Vec::new(),
-                        now_ms: self.now_ms,
-                    },
-                    2 => TopologyEvent::UpdateSuccessor {
-                        successor: Did::from(16u32),
-                    },
-                    3 => TopologyEvent::Stabilize {
-                        reporter: self
-                            .topology
-                            .successors
-                            .first()
-                            .copied()
-                            .unwrap_or(Did::from(8u32)),
-                        request_id: None,
-                        successors: vec![Did::from(32u32)],
-                        predecessor: Some(Did::from(2u32)),
-                    },
-                    _ => TopologyEvent::Remove {
-                        peer: self
-                            .topology
-                            .successors
-                            .first()
-                            .copied()
-                            .unwrap_or(Did::from(4u32)),
-                        successor: SuccessorRemoval::Preserve,
-                    },
-                };
-                let output = step(&self.topology, event, DEFAULT_SUCCESSOR_CAPACITY);
-                let mut next = self.clone();
-                next.topology = output.state;
-                next.next_topology_mutation = self.next_topology_mutation.saturating_add(1) % 5;
-                next
-            }
-            FingerRetryAction::Restart => {
-                let mut next = self.clone();
-                next.topology = TopologyState::new(
-                    self.topology.local,
-                    self.topology.successors.clone(),
-                    self.topology.predecessor,
-                    self.topology.fingers.clone(),
-                    self.topology.fix_finger_index,
-                );
-                if let Some(request) = self.current_request() {
-                    next.delayed_reports.push(request);
-                }
-                next.now_ms = 0;
-                next.run_generation = next.run_generation.saturating_add(1);
-                next
-            }
+            FingerRetryAction::Duplicate => self.deliver_duplicate(),
+            FingerRetryAction::TopologyChange => self.change_topology(),
+            FingerRetryAction::Restart => self.restart(),
         }
     }
 

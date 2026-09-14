@@ -30,10 +30,10 @@ fn state(
 }
 
 fn issue_request(current: &mut TopologyState, slot: usize, now_ms: u64) -> FingerFixRequest {
-    current.finger_convergence.verified.fill(true);
-    if let Some(verified) = current.finger_convergence.verified.get_mut(slot) {
-        *verified = false;
-    }
+    current.finger_convergence.fill_verified_for_test(true);
+    assert!(current
+        .finger_convergence
+        .set_slot_verified_for_test(slot, false));
     let request = current.finger_convergence.prepare_lookup(
         &current.fingers,
         0,
@@ -372,7 +372,9 @@ fn test_fix_finger_step_emits_correlated_remote_action() {
         vec![None, None, Some(next_hop), None],
         2,
     );
-    current.finger_convergence.verified = vec![true, true, true, false];
+    current
+        .finger_convergence
+        .set_verified_for_test(&[true, true, true, false]);
     let next = step(&current, advance(1_000), DEFAULT_SUCCESSOR_CAPACITY);
 
     assert_eq!(next.actions, vec![TopologyAction::FindSuccessorForFix {
@@ -397,7 +399,9 @@ fn test_fix_finger_step_queries_local_relative_probe() {
         vec![None, None, Some(next_hop), None],
         2,
     );
-    current.finger_convergence.verified = vec![true, true, true, false];
+    current
+        .finger_convergence
+        .set_verified_for_test(&[true, true, true, false]);
     let next = step(&current, advance(1_000), DEFAULT_SUCCESSOR_CAPACITY);
 
     assert_eq!(next.actions, vec![TopologyAction::FindSuccessorForFix {
@@ -508,12 +512,14 @@ fn test_local_successor_range_waits_for_stabilization_instead_of_routing_around_
         vec![Some(head), Some(head), Some(head), None],
         0,
     );
-    current.finger_convergence.verified = vec![false, false, false, true];
+    current
+        .finger_convergence
+        .set_verified_for_test(&[false, false, false, true]);
 
     assert!(!current.finger_convergence_status(0).pending());
     let dormant = step(&current, advance(1_000), DEFAULT_SUCCESSOR_CAPACITY);
     assert!(dormant.actions.is_empty());
-    assert_eq!(dormant.state.finger_convergence.verified, vec![
+    assert_eq!(dormant.state.finger_convergence.verified_for_test(), vec![
         false, false, false, true
     ]);
 
@@ -545,9 +551,10 @@ fn test_local_successor_range_waits_for_stabilization_instead_of_routing_around_
         .actions
         .iter()
         .all(|action| !matches!(action, TopologyAction::FindSuccessorForFix { .. })));
-    assert_eq!(stabilized.state.finger_convergence.verified, vec![
-        true, true, true, true
-    ]);
+    assert_eq!(
+        stabilized.state.finger_convergence.verified_for_test(),
+        vec![true, true, true, true]
+    );
 }
 
 #[test]
@@ -561,7 +568,9 @@ fn test_stale_stabilization_report_cannot_verify_the_local_successor_range() {
         vec![Some(head), Some(head), Some(head), None],
         0,
     );
-    current.finger_convergence.verified = vec![false, false, false, true];
+    current
+        .finger_convergence
+        .set_verified_for_test(&[false, false, false, true]);
     let old_request = request_id(10);
     let current_request = request_id(11);
     let first = step(
@@ -590,7 +599,7 @@ fn test_stale_stabilization_report_cannot_verify_the_local_successor_range() {
     );
 
     assert_eq!(stale.state, superseded.state);
-    assert_eq!(stale.state.finger_convergence.verified, vec![
+    assert_eq!(stale.state.finger_convergence.verified_for_test(), vec![
         false, false, false, true
     ]);
 
@@ -612,7 +621,7 @@ fn test_stale_stabilization_report_cannot_verify_the_local_successor_range() {
         },
         DEFAULT_SUCCESSOR_CAPACITY,
     );
-    assert_eq!(fresh.state.finger_convergence.verified, vec![
+    assert_eq!(fresh.state.finger_convergence.verified_for_test(), vec![
         true, true, true, true
     ]);
 }
@@ -685,7 +694,9 @@ fn test_fix_finger_step_forwards_to_successor_head_when_fingers_are_sparse() {
     let local = did(0);
     let successor = did(4);
     let mut current = state(local, vec![successor], None, vec![None; 4], 2);
-    current.finger_convergence.verified = vec![true, true, true, false];
+    current
+        .finger_convergence
+        .set_verified_for_test(&[true, true, true, false]);
     let next = step(&current, advance(1_000), DEFAULT_SUCCESSOR_CAPACITY);
 
     assert_eq!(next.actions, vec![TopologyAction::FindSuccessorForFix {

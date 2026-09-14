@@ -1,5 +1,7 @@
 use super::*;
 use crate::dht::finger::FingerConvergencePhase;
+use crate::dht::finger::FingerReportRejection;
+use crate::dht::finger::FingerRetireOutcome;
 
 #[test]
 fn test_timely_finger_proof_survives_a_long_handshake_until_atomic_admission() {
@@ -59,6 +61,82 @@ fn test_timely_finger_proof_survives_a_long_handshake_until_atomic_admission() {
     let projection = admitted.state.finger_convergence_projection();
     assert_eq!(projection.deferred, None);
     assert_eq!(projection.failure_streak, 0);
+}
+
+#[test]
+fn test_conflicting_duplicate_cannot_evict_a_retained_finger_proof() {
+    let local = did(0);
+    let candidate = did(8);
+    let conflicting_candidate = did(16);
+    let mut current = state(local, vec![did(1)], None, vec![None; 5], 0);
+    let request = issue_request(&mut current, 3, 1_000);
+    let deferred = step(
+        &current,
+        TopologyEvent::DeferFinger {
+            request,
+            successor: candidate,
+            now_ms: 1_001,
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+
+    let conflicting = step(
+        &deferred.state,
+        TopologyEvent::DeferFinger {
+            request,
+            successor: conflicting_candidate,
+            now_ms: 1_002,
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+    assert_eq!(conflicting.state, deferred.state);
+
+    let admitted = step(
+        &conflicting.state,
+        TopologyEvent::Admit {
+            peer: candidate,
+            fixed_fingers: vec![ConditionalFingerUpdate { request }],
+            now_ms: 1_003,
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+    assert_eq!(admitted.state.fingers[3], Some(candidate));
+    assert_eq!(
+        admitted.state.finger_convergence_projection().deferred,
+        None
+    );
+}
+
+#[test]
+fn test_unroutable_conflicting_duplicate_cannot_retire_admission_owner() {
+    let local = did(0);
+    let candidate = did(8);
+    let conflicting_candidate = did(16);
+    let mut current = state(local, vec![did(1)], None, vec![None; 5], 0);
+    let request = issue_request(&mut current, 3, 1_000);
+    let deferred = step(
+        &current,
+        TopologyEvent::DeferFinger {
+            request,
+            successor: candidate,
+            now_ms: 1_001,
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+
+    let (conflicting, outcome) =
+        retire_finger_candidate(&deferred.state, request, conflicting_candidate, 1_002);
+    assert_eq!(
+        outcome,
+        FingerRetireOutcome::Rejected(FingerReportRejection::Stale)
+    );
+    assert_eq!(conflicting.state, deferred.state);
+
+    let (retired, outcome) = retire_finger_candidate(&conflicting.state, request, candidate, 1_003);
+    assert_eq!(outcome, FingerRetireOutcome::Retired);
+    let projection = retired.state.finger_convergence_projection();
+    assert_eq!(projection.deferred, None);
+    assert_eq!(projection.failure_streak, 1);
 }
 
 #[test]

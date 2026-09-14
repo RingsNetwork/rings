@@ -12,8 +12,10 @@ use super::TopoInfo;
 use crate::consts::LOCAL_CACHE_CAPACITY;
 use crate::dht::did::BiasId;
 use crate::dht::entry::Entry;
+use crate::dht::finger::FingerApplyOutcome;
 use crate::dht::finger::FingerConvergenceStatus;
-use crate::dht::finger::FingerResultDisposition;
+use crate::dht::finger::FingerDeferOutcome;
+use crate::dht::finger::FingerRetireOutcome;
 use crate::dht::finger::DEFAULT_FINGER_TABLE_SIZE;
 use crate::dht::successor::SuccessorReader;
 use crate::dht::successor::SuccessorSeq;
@@ -398,21 +400,11 @@ impl PeerRing {
         Ok(self.topology_leaf_actions(next.actions))
     }
 
-    pub(crate) fn finger_result_disposition(
-        &self,
-        request: FingerFixRequest,
-        successor: Did,
-    ) -> Result<FingerResultDisposition> {
-        self.with_topology_state(|state| {
-            state.finger_result_disposition(request, successor, self.finger_now_ms())
-        })
-    }
-
     pub(crate) fn apply_fixed_finger(
         &self,
         request: FingerFixRequest,
         successor: Did,
-    ) -> Result<FingerResultDisposition> {
+    ) -> Result<FingerApplyOutcome> {
         self.transition_finger_result(|state, now_ms| {
             topology::apply_finger(state, request, successor, now_ms)
         })
@@ -422,16 +414,26 @@ impl PeerRing {
         &self,
         request: FingerFixRequest,
         successor: Did,
-    ) -> Result<FingerResultDisposition> {
+    ) -> Result<FingerDeferOutcome> {
         self.transition_finger_result(|state, now_ms| {
             topology::defer_finger(state, request, successor, now_ms)
         })
     }
 
-    fn transition_finger_result(
+    pub(crate) fn retire_finger_candidate(
         &self,
-        transition: impl FnOnce(&TopologyState, u64) -> (TopologyStep, FingerResultDisposition),
-    ) -> Result<FingerResultDisposition> {
+        request: FingerFixRequest,
+        successor: Did,
+    ) -> Result<FingerRetireOutcome> {
+        self.transition_finger_result(|state, now_ms| {
+            topology::retire_finger_candidate(state, request, successor, now_ms)
+        })
+    }
+
+    fn transition_finger_result<Outcome>(
+        &self,
+        transition: impl FnOnce(&TopologyState, u64) -> (TopologyStep, Outcome),
+    ) -> Result<Outcome> {
         let _transition = self
             .topology_transition
             .lock()

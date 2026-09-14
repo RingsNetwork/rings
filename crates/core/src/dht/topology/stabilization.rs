@@ -1,7 +1,6 @@
 //! Pure HMCC/Zave predecessor and successor stabilization propositions.
 
 use super::dist;
-use super::finger_proof_end;
 use super::successors;
 use super::Did;
 use super::StabilizationPhase;
@@ -9,6 +8,7 @@ use super::StabilizationRequest;
 use super::TopologyAction;
 use super::TopologyState;
 use super::TopologyStep;
+use crate::dht::finger::finger_proof_end;
 
 /// Bounded connection-effect cursor for one claimed stabilization report.
 ///

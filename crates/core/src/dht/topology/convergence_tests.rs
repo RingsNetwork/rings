@@ -1,6 +1,8 @@
 use num_bigint::BigUint;
 
 use super::*;
+use crate::dht::finger::FingerApplyOutcome;
+use crate::dht::finger::FingerReportRejection;
 
 fn did(value: u32) -> Did {
     Did::from(value)
@@ -175,7 +177,7 @@ fn test_join_after_isolation_revalidates_every_previously_unknown_range() {
     assert!(!isolated.finger_convergence_status(0).pending());
     assert!(isolated
         .finger_convergence
-        .verified
+        .verified_for_test()
         .iter()
         .all(|verified| !verified));
 
@@ -207,7 +209,7 @@ fn test_finger_rejoin_after_losing_last_successor_discards_old_empty_range_proof
 
     assert!(converged
         .finger_convergence
-        .verified
+        .verified_for_test()
         .iter()
         .all(|verified| *verified));
     assert!(converged.fingers.last().is_some_and(Option::is_none));
@@ -224,7 +226,7 @@ fn test_finger_rejoin_after_losing_last_successor_discards_old_empty_range_proof
     assert!(isolated.successors.is_empty());
     assert!(isolated
         .finger_convergence
-        .verified
+        .verified_for_test()
         .iter()
         .all(|verified| !verified));
     assert!(!isolated.finger_convergence_status(0).pending());
@@ -277,12 +279,8 @@ fn test_restart_uses_a_new_request_identity_and_rejects_the_old_report() {
         DEFAULT_SUCCESSOR_CAPACITY,
     );
     assert_eq!(stale.state, after_restart.state);
-    assert_eq!(
-        stale
-            .state
-            .finger_result_disposition(new_request, did(8), 2_001),
-        FingerResultDisposition::Applied { end: 3 }
-    );
+    let (_, current_outcome) = apply_finger(&stale.state, new_request, did(8), 2_001);
+    assert_eq!(current_outcome, FingerApplyOutcome::Applied { end: 3 });
 }
 
 #[test]
@@ -315,11 +313,10 @@ fn test_finger_report_at_deadline_expires_without_a_scheduler_poll() {
     assert_eq!(projection.in_flight, None);
     assert_eq!(projection.failure_streak, 1);
     assert_eq!(projection.retry_not_before_ms, Some(13_000));
+    let (_, replay_outcome) = apply_finger(&expired.state, request, seed, 11_000);
     assert_eq!(
-        expired
-            .state
-            .finger_result_disposition(request, seed, 11_000),
-        FingerResultDisposition::Stale
+        replay_outcome,
+        FingerApplyOutcome::Rejected(FingerReportRejection::Stale)
     );
 }
 
@@ -367,7 +364,7 @@ fn test_insertion_and_removal_invalidate_only_changed_finger_slots() {
         DEFAULT_SUCCESSOR_CAPACITY,
     )
     .state;
-    assert_eq!(inserted.finger_convergence.verified, vec![
+    assert_eq!(inserted.finger_convergence.verified_for_test(), vec![
         false, false, false, false, false, true, true, true
     ]);
     let (with_closer, _) = converge_with_oracle(inserted, &[local, closer, seed]);
@@ -385,7 +382,7 @@ fn test_insertion_and_removal_invalidate_only_changed_finger_slots() {
         DEFAULT_SUCCESSOR_CAPACITY,
     )
     .state;
-    assert_eq!(removed.finger_convergence.verified, vec![
+    assert_eq!(removed.finger_convergence.verified_for_test(), vec![
         false, false, false, false, false, true, true, true
     ]);
     let (without_closer, _) = converge_with_oracle(removed, &[local, seed]);
@@ -601,7 +598,7 @@ fn test_periodic_revalidation_marks_a_range_without_emitting_a_lookup() {
         ],
         0,
     );
-    stable.finger_convergence.verified.fill(true);
+    stable.finger_convergence.fill_verified_for_test(true);
 
     let marked = step(
         &stable,

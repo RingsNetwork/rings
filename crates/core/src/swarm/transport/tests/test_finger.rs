@@ -182,6 +182,15 @@ async fn test_finger_candidate_distinguishes_missing_and_unroutable_connections(
         transport.record_finger_candidate(peer, unroutable_request)?,
         FingerUpdateDisposition::Unroutable
     );
+    assert_eq!(
+        transport
+            .dht
+            .lock_finger()?
+            .convergence_state()
+            .status()
+            .failure_streak(),
+        1
+    );
     assert_eq!(transport.dht.lock_finger()?.get(0), None);
     transport.disconnect(peer).await?;
     Ok(())

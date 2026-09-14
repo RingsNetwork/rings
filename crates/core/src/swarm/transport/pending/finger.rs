@@ -2,7 +2,8 @@
 
 use super::PeerConnectionLifecycle;
 use super::PendingConnectionAttempt;
-use crate::dht::finger::FingerResultDisposition;
+use crate::dht::finger::FingerApplyOutcome;
+use crate::dht::finger::FingerReportRejection;
 
 /// Result of reconciling one reported finger with connection ownership.
 ///
@@ -40,13 +41,21 @@ impl FingerUpdateDisposition {
     }
 }
 
-impl From<FingerResultDisposition> for FingerUpdateDisposition {
-    fn from(disposition: FingerResultDisposition) -> Self {
-        match disposition {
-            FingerResultDisposition::Applied { .. } => Self::Applied,
-            FingerResultDisposition::Invalid => Self::Invalid,
-            FingerResultDisposition::Expired => Self::Expired,
-            FingerResultDisposition::Stale => Self::Stale,
+impl From<FingerReportRejection> for FingerUpdateDisposition {
+    fn from(rejection: FingerReportRejection) -> Self {
+        match rejection {
+            FingerReportRejection::Invalid => Self::Invalid,
+            FingerReportRejection::Expired => Self::Expired,
+            FingerReportRejection::Stale => Self::Stale,
+        }
+    }
+}
+
+impl From<FingerApplyOutcome> for FingerUpdateDisposition {
+    fn from(outcome: FingerApplyOutcome) -> Self {
+        match outcome {
+            FingerApplyOutcome::Applied { .. } => Self::Applied,
+            FingerApplyOutcome::Rejected(rejection) => rejection.into(),
         }
     }
 }

@@ -9,7 +9,7 @@ fn test_equality_includes_convergence_and_cursor_state() {
     assert_ne!(baseline, different_cursor);
 
     let mut progressed = baseline.clone();
-    progressed.convergence.verified.fill(true);
+    progressed.convergence.fill_verified_for_test(true);
     assert_ne!(baseline, progressed);
 }
 use crate::dht::tests::gen_ordered_dids;

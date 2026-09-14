@@ -7,6 +7,8 @@
 - Finger-table lookup reports now carry a fresh UUID correlation token instead of a bare slot
   index, and topology query requests/reports carry a mandatory UUID correlation token. The wire
   format is incompatible with 0.25.x, so every node in an overlay must upgrade together.
+- `FingerTable` equality now covers its complete serialized maintenance and convergence state.
+  Callers that need hint-only equality should compare `FingerTable::list()` instead.
 
 ### Added
 
