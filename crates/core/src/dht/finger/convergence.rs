@@ -123,11 +123,12 @@ pub(crate) struct FingerConvergenceState {
 pub(crate) enum FingerResultDisposition {
     Applied { end: usize },
     Invalid,
+    Expired,
     Stale,
 }
 
 /// Test-only projection used to model-check the production retry transition.
-#[cfg(all(test, not(target_family = "wasm")))]
+#[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct FingerConvergenceProjection {
     pub(crate) in_flight: Option<FingerFixRequest>,
@@ -170,7 +171,7 @@ impl FingerConvergenceState {
         FingerConvergenceStatus::new(self.is_pending(), self.failure_streak)
     }
 
-    #[cfg(all(test, not(target_family = "wasm")))]
+    #[cfg(test)]
     pub(crate) fn projection(&self) -> FingerConvergenceProjection {
         FingerConvergenceProjection {
             in_flight: self.in_flight.map(|pending| pending.request),
@@ -356,10 +357,14 @@ impl FingerConvergenceState {
         slot_count: usize,
         request: FingerFixRequest,
         successor: Did,
+        now_ms: u64,
     ) -> FingerResultDisposition {
         let Some(pending) = self.in_flight.filter(|pending| pending.request == request) else {
             return FingerResultDisposition::Stale;
         };
+        if now_ms >= pending.expires_at_ms {
+            return FingerResultDisposition::Expired;
+        }
         let Some(end) = finger_proof_end(local, successor, request.slot_index(), slot_count) else {
             return FingerResultDisposition::Invalid;
         };
@@ -388,6 +393,10 @@ impl FingerConvergenceState {
             return FingerResultDisposition::Stale;
         };
         self.in_flight = None;
+        if now_ms >= pending.expires_at_ms {
+            self.record_failure(now_ms);
+            return FingerResultDisposition::Expired;
+        }
         let Some(end) = finger_proof_end(local, successor, request.slot_index(), fingers.len())
         else {
             self.record_failure(now_ms);

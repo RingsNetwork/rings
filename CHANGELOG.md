@@ -13,7 +13,7 @@
 - Finger-table convergence distinguishes inferred hints from verified ranges. One lookup proves
   every consecutive slot owned by the reported successor; topology changes invalidate only the
   affected slots, losing the last successor invalidates all membership evidence, and correlated
-  request epochs reject stale in-flight results.
+  request epochs reject stale or expired in-flight results at commit time.
 - Automatic convergence permits one lookup per node at a time, spreads simultaneous fleet starts
   over a boot-randomized 10-second phase window, and has no catch-up bursts. Send failure, invalid
   reports, timeouts, and topology invalidation of an in-flight proof use a

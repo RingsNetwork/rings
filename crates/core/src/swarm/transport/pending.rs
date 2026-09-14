@@ -130,6 +130,8 @@ pub(crate) enum FingerUpdateDisposition {
     Unroutable,
     /// The report did not prove the requested finger threshold.
     Invalid,
+    /// The report arrived after the current request deadline.
+    Expired,
     /// The report no longer matches the node's current in-flight request.
     Stale,
 }
@@ -735,12 +737,17 @@ impl SwarmTransport {
                 let _ = self.dht.apply_fixed_finger(request, peer)?;
                 return Ok(FingerUpdateDisposition::Invalid);
             }
+            FingerResultDisposition::Expired => {
+                let _ = self.dht.apply_fixed_finger(request, peer)?;
+                return Ok(FingerUpdateDisposition::Expired);
+            }
             FingerResultDisposition::Applied { .. } => {}
         }
         if peer == self.dht.did {
             return Ok(match self.dht.apply_fixed_finger(request, peer)? {
                 FingerResultDisposition::Applied { .. } => FingerUpdateDisposition::Applied,
                 FingerResultDisposition::Invalid => FingerUpdateDisposition::Invalid,
+                FingerResultDisposition::Expired => FingerUpdateDisposition::Expired,
                 FingerResultDisposition::Stale => FingerUpdateDisposition::Stale,
             });
         }
@@ -763,6 +770,7 @@ impl SwarmTransport {
                 Ok(match self.dht.apply_fixed_finger(request, peer)? {
                     FingerResultDisposition::Applied { .. } => FingerUpdateDisposition::Applied,
                     FingerResultDisposition::Invalid => FingerUpdateDisposition::Invalid,
+                    FingerResultDisposition::Expired => FingerUpdateDisposition::Expired,
                     FingerResultDisposition::Stale => FingerUpdateDisposition::Stale,
                 })
             }

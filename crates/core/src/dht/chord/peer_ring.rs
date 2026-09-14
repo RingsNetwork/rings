@@ -357,7 +357,9 @@ impl PeerRing {
         request: FingerFixRequest,
         successor: Did,
     ) -> Result<FingerResultDisposition> {
-        self.with_topology_state(|state| state.finger_result_disposition(request, successor))
+        self.with_topology_state(|state| {
+            state.finger_result_disposition(request, successor, self.finger_now_ms())
+        })
     }
 
     pub(crate) fn apply_fixed_finger(
@@ -365,15 +367,23 @@ impl PeerRing {
         request: FingerFixRequest,
         successor: Did,
     ) -> Result<FingerResultDisposition> {
-        let mut disposition = FingerResultDisposition::Stale;
-        self.transition_topology_with_factory(
-            || TopologyEvent::ApplyFinger {
+        let _transition = self
+            .topology_transition
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?;
+        let current = self.topology_state_unlocked()?;
+        let now_ms = self.finger_now_ms();
+        let disposition = current.finger_result_disposition(request, successor, now_ms);
+        let next = topology::step(
+            &current,
+            TopologyEvent::ApplyFinger {
                 request,
                 successor,
-                now_ms: self.finger_now_ms(),
+                now_ms,
             },
-            |state| disposition = state.finger_result_disposition(request, successor),
-        )?;
+            self.successor_seq.capacity(),
+        );
+        self.interpret_topology_state_unlocked(&next.state)?;
         Ok(disposition)
     }
 

@@ -119,7 +119,7 @@ impl TopologyState {
         }
     }
 
-    #[cfg(all(test, not(target_family = "wasm")))]
+    #[cfg(test)]
     pub(crate) fn finger_convergence_projection(
         &self,
     ) -> super::finger::FingerConvergenceProjection {
@@ -130,12 +130,14 @@ impl TopologyState {
         &self,
         request: FingerFixRequest,
         successor: Did,
+        now_ms: u64,
     ) -> FingerResultDisposition {
         self.finger_convergence.result_disposition(
             self.local,
             self.fingers.len(),
             request,
             successor,
+            now_ms,
         )
     }
 
@@ -740,7 +742,9 @@ fn apply_finger_result(
         finger_convergence.apply_result(state.local, &mut fingers, request, successor, now_ms);
     let fix_finger_index = match disposition {
         FingerResultDisposition::Applied { end } => end,
-        FingerResultDisposition::Invalid | FingerResultDisposition::Stale => state.fix_finger_index,
+        FingerResultDisposition::Invalid
+        | FingerResultDisposition::Expired
+        | FingerResultDisposition::Stale => state.fix_finger_index,
     };
     TopologyState {
         fingers,

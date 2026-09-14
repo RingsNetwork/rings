@@ -11,7 +11,7 @@ use crate::dht::Did;
 mod convergence;
 
 pub(crate) use convergence::finger_lookup_backoff_ms;
-#[cfg(all(test, not(target_family = "wasm")))]
+#[cfg(test)]
 pub(crate) use convergence::FingerConvergenceProjection;
 pub(crate) use convergence::FingerConvergenceState;
 pub(crate) use convergence::FingerConvergenceStatus;

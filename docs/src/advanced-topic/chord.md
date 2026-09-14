@@ -41,8 +41,9 @@ membership set is empty, and the first successor admission activates the pending
 
 Each node keeps at most one finger lookup in flight. Reports echo a fresh 128-bit UUID request
 identifier allocated at the effect boundary;
-results from an expired request or from a request invalidated by a topology change cannot overwrite
-newer state, including after a process restart. A fleet's first automatic attempt is spread over a
+expiry is checked again when a report is committed, so results from an expired request or from a
+request invalidated by a topology change cannot overwrite newer state, including after a process
+restart. A fleet's first automatic attempt is spread over a
 boot-randomized 10-second per-node phase window, so an identity cannot preselect its time bucket.
 Send cancellation, invalid reports, timeouts, and topology changes that invalidate an
 in-flight proof increase a progress-sensitive retry floor through 2, 4, 8, 16, 32, and 60 seconds;

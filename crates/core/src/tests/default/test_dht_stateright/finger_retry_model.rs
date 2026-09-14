@@ -3,8 +3,8 @@
 //! State variables are the real [`TopologyState`], process-monotonic time,
 //! emitted request identities, delayed reports, and the next identity supplied
 //! by the effect boundary. The environment may advance before or to a
-//! deadline, deliver progress or invalid evidence, cancel, lose, duplicate,
-//! change topology, or restart.
+//! deadline, deliver progress, invalid evidence, or a report exactly at its
+//! expiry, cancel, lose, duplicate, change topology, or restart.
 //!
 //! Safety does not assume eventual delivery. Liveness is conditional on a fair
 //! scheduler and eventual valid delivery. The checker executes
@@ -132,6 +132,10 @@ impl FingerRetryState {
     }
 
     fn apply_current(&self, successor: Did) -> Self {
+        self.apply_current_at(successor, self.now_ms)
+    }
+
+    fn apply_current_at(&self, successor: Did, now_ms: u64) -> Self {
         let Some(request) = self.current_request() else {
             return self.clone();
         };
@@ -140,12 +144,13 @@ impl FingerRetryState {
             TopologyEvent::ApplyFinger {
                 request,
                 successor,
-                now_ms: self.now_ms,
+                now_ms,
             },
             DEFAULT_SUCCESSOR_CAPACITY,
         );
         let mut next = self.clone();
         next.topology = output.state;
+        next.now_ms = now_ms;
         next.delayed_reports.push(request);
         next
     }
@@ -175,6 +180,18 @@ impl FingerRetryState {
                     return self.clone();
                 };
                 self.apply_current(self.topology.local + Did::power_of_two(previous_slot))
+            }
+            FingerRetryAction::LateReport => {
+                let projection = self.topology.finger_convergence_projection();
+                let (Some(request), Some(expires_at_ms)) =
+                    (projection.in_flight, projection.expires_at_ms)
+                else {
+                    return self.clone();
+                };
+                self.apply_current_at(
+                    self.topology.local + Did::power_of_two(request.slot_index()),
+                    expires_at_ms.max(self.now_ms),
+                )
             }
             FingerRetryAction::Cancel => {
                 let Some(request) = self.current_request() else {
@@ -290,6 +307,7 @@ enum FingerRetryAction {
     AdvanceToDeadline,
     Progress,
     Invalid,
+    LateReport,
     Cancel,
     Lose,
     Duplicate,
@@ -297,11 +315,12 @@ enum FingerRetryAction {
     Restart,
 }
 
-const ACTIONS: [FingerRetryAction; 9] = [
+const ACTIONS: [FingerRetryAction; 10] = [
     FingerRetryAction::AdvanceBeforeDeadline,
     FingerRetryAction::AdvanceToDeadline,
     FingerRetryAction::Progress,
     FingerRetryAction::Invalid,
+    FingerRetryAction::LateReport,
     FingerRetryAction::Cancel,
     FingerRetryAction::Lose,
     FingerRetryAction::Duplicate,
@@ -376,7 +395,9 @@ fn test_production_finger_retry_transition_preserves_bounded_resource_laws() {
                 }
                 if matches!(
                     action,
-                    FingerRetryAction::Invalid | FingerRetryAction::Cancel
+                    FingerRetryAction::Invalid
+                        | FingerRetryAction::LateReport
+                        | FingerRetryAction::Cancel
                 ) && state.current_request().is_some()
                     && next.current_request().is_none()
                 {
@@ -389,6 +410,11 @@ fn test_production_finger_retry_transition_preserves_bounded_resource_laws() {
                             ))
                         )
                     );
+                }
+                if matches!(action, FingerRetryAction::LateReport)
+                    && state.current_request().is_some()
+                {
+                    assert_eq!(next.topology.fingers, state.topology.fingers);
                 }
 
                 if !seen.iter().any(|visited| visited == &next) {

@@ -27,6 +27,13 @@ fn state(
     TopologyState::new(local, successors, predecessor, fingers, fix_finger_index)
 }
 
+fn emitted_finger_request(output: &TopologyStep) -> FingerFixRequest {
+    match output.actions.as_slice() {
+        [TopologyAction::FindSuccessorForFix { request, .. }] => *request,
+        actions => panic!("expected exactly one finger lookup action, got {actions:?}"),
+    }
+}
+
 fn converge_with_oracle(mut current: TopologyState, all: &[Did]) -> (TopologyState, usize) {
     let mut lookups = 0usize;
     for round in 0..=RING_BITS {
@@ -211,20 +218,7 @@ fn test_restart_uses_a_new_request_identity_and_rejects_the_old_report() {
     )
     .state;
     let before_restart = step(&hinted, advance(1_000), DEFAULT_SUCCESSOR_CAPACITY);
-    let old_request = before_restart
-        .actions
-        .iter()
-        .find_map(|action| match action {
-            TopologyAction::FindSuccessorForFix { request, .. } => Some(*request),
-            _ => None,
-        });
-    let Some(old_request) = old_request else {
-        assert!(
-            before_restart.actions.is_empty(),
-            "expected pre-restart request"
-        );
-        return;
-    };
+    let old_request = emitted_finger_request(&before_restart);
 
     let restarted = state(
         local,
@@ -234,20 +228,7 @@ fn test_restart_uses_a_new_request_identity_and_rejects_the_old_report() {
         before_restart.state.fix_finger_index,
     );
     let after_restart = step(&restarted, advance(2_000), DEFAULT_SUCCESSOR_CAPACITY);
-    let new_request = after_restart
-        .actions
-        .iter()
-        .find_map(|action| match action {
-            TopologyAction::FindSuccessorForFix { request, .. } => Some(*request),
-            _ => None,
-        });
-    let Some(new_request) = new_request else {
-        assert!(
-            after_restart.actions.is_empty(),
-            "expected post-restart request"
-        );
-        return;
-    };
+    let new_request = emitted_finger_request(&after_restart);
     assert_ne!(old_request, new_request);
 
     let stale = step(
@@ -261,8 +242,48 @@ fn test_restart_uses_a_new_request_identity_and_rejects_the_old_report() {
     );
     assert_eq!(stale.state, after_restart.state);
     assert_eq!(
-        stale.state.finger_result_disposition(new_request, did(8)),
+        stale
+            .state
+            .finger_result_disposition(new_request, did(8), 2_001),
         FingerResultDisposition::Applied { end: 3 }
+    );
+}
+
+#[test]
+fn test_finger_report_at_deadline_expires_without_a_scheduler_poll() {
+    let local = did(0);
+    let seed = did(128);
+    let hinted = step(
+        &state(local, Vec::new(), None, vec![None; 8], 0),
+        TopologyEvent::Join { peer: seed },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    )
+    .state;
+    let issued = step(&hinted, advance(1_000), DEFAULT_SUCCESSOR_CAPACITY);
+    let request = emitted_finger_request(&issued);
+    let fingers_before = issued.state.fingers.clone();
+
+    let expired = step(
+        &issued.state,
+        TopologyEvent::ApplyFinger {
+            request,
+            successor: seed,
+            now_ms: 11_000,
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+    let projection = expired.state.finger_convergence_projection();
+
+    assert!(expired.actions.is_empty());
+    assert_eq!(expired.state.fingers, fingers_before);
+    assert_eq!(projection.in_flight, None);
+    assert_eq!(projection.failure_streak, 1);
+    assert_eq!(projection.retry_not_before_ms, Some(13_000));
+    assert_eq!(
+        expired
+            .state
+            .finger_result_disposition(request, seed, 11_000),
+        FingerResultDisposition::Stale
     );
 }
 
@@ -467,11 +488,7 @@ fn test_finger_lookup_has_one_in_flight_request_and_a_bounded_retry() {
     )
     .state;
     let issued = step(&hinted, advance(1_000), DEFAULT_SUCCESSOR_CAPACITY);
-    let first = issued.actions.iter().find_map(|action| match action {
-        TopologyAction::FindSuccessorForFix { request, .. } => Some(*request),
-        _ => None,
-    });
-    assert!(first.is_some());
+    let first = emitted_finger_request(&issued);
 
     let blocked = step(&issued.state, advance(10_999), DEFAULT_SUCCESSOR_CAPACITY);
     assert!(blocked.actions.is_empty());
@@ -491,11 +508,7 @@ fn test_finger_lookup_has_one_in_flight_request_and_a_bounded_retry() {
         advance(13_000),
         DEFAULT_SUCCESSOR_CAPACITY,
     );
-    let retry = retried.actions.iter().find_map(|action| match action {
-        TopologyAction::FindSuccessorForFix { request, .. } => Some(*request),
-        _ => None,
-    });
-    assert!(retry.is_some());
+    let retry = emitted_finger_request(&retried);
     assert_ne!(first, retry);
 }
 
@@ -536,14 +549,7 @@ fn test_cancelled_finger_lookup_still_obeys_the_per_node_rate_limit() {
     )
     .state;
     let issued = step(&hinted, advance(1_000), DEFAULT_SUCCESSOR_CAPACITY);
-    let request = issued.actions.iter().find_map(|action| match action {
-        TopologyAction::FindSuccessorForFix { request, .. } => Some(*request),
-        _ => None,
-    });
-    let Some(request) = request else {
-        assert!(issued.actions.is_empty(), "expected a finger lookup action");
-        return;
-    };
+    let request = emitted_finger_request(&issued);
     let cancelled = step(
         &issued.state,
         TopologyEvent::CancelFinger {
@@ -577,27 +583,16 @@ fn test_persistent_send_failures_have_a_capped_exponential_emission_bound() {
     .state;
     let mut issued_at_ms = 1_000u64;
     let first = step(&current, advance(issued_at_ms), DEFAULT_SUCCESSOR_CAPACITY);
-    let mut request = first.actions.iter().find_map(|action| match action {
-        TopologyAction::FindSuccessorForFix { request, .. } => Some(*request),
-        _ => None,
-    });
-    assert!(request.is_some());
+    let mut request = emitted_finger_request(&first);
     current = first.state;
 
     let retry_floors_ms = [2_000u64, 4_000, 8_000, 16_000, 32_000, 60_000, 60_000];
     let mut emission_count = 1usize;
     for (index, retry_floor_ms) in retry_floors_ms.into_iter().enumerate() {
-        let Some(current_request) = request else {
-            assert!(
-                request.is_some(),
-                "failure model lost its in-flight request"
-            );
-            return;
-        };
         let cancelled = step(
             &current,
             TopologyEvent::CancelFinger {
-                request: current_request,
+                request,
                 now_ms: issued_at_ms,
             },
             DEFAULT_SUCCESSOR_CAPACITY,
@@ -620,10 +615,7 @@ fn test_persistent_send_failures_have_a_capped_exponential_emission_bound() {
             advance(retry_at_ms),
             DEFAULT_SUCCESSOR_CAPACITY,
         );
-        request = due.actions.iter().find_map(|action| match action {
-            TopologyAction::FindSuccessorForFix { request, .. } => Some(*request),
-            _ => None,
-        });
+        request = emitted_finger_request(&due);
         assert_eq!(
             due.actions
                 .iter()
@@ -651,14 +643,7 @@ fn test_proved_progress_resets_failure_backoff() {
     )
     .state;
     let first = step(&initial, advance(1_000), DEFAULT_SUCCESSOR_CAPACITY);
-    let request = first.actions.iter().find_map(|action| match action {
-        TopologyAction::FindSuccessorForFix { request, .. } => Some(*request),
-        _ => None,
-    });
-    let Some(request) = request else {
-        assert!(first.actions.is_empty(), "expected a finger lookup action");
-        return;
-    };
+    let request = emitted_finger_request(&first);
     let cancelled = step(
         &first.state,
         TopologyEvent::CancelFinger {
@@ -668,14 +653,7 @@ fn test_proved_progress_resets_failure_backoff() {
         DEFAULT_SUCCESSOR_CAPACITY,
     );
     let retry = step(&cancelled.state, advance(3_000), DEFAULT_SUCCESSOR_CAPACITY);
-    let retry_request = retry.actions.iter().find_map(|action| match action {
-        TopologyAction::FindSuccessorForFix { request, .. } => Some(*request),
-        _ => None,
-    });
-    let Some(retry_request) = retry_request else {
-        assert!(retry.actions.is_empty(), "expected a retry action");
-        return;
-    };
+    let retry_request = emitted_finger_request(&retry);
     let progressed = step(
         &retry.state,
         TopologyEvent::ApplyFinger {
