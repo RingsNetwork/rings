@@ -61,9 +61,16 @@ pub enum RemoteAction {
     FindSuccessorForConnect(Did),
     /// Find a successor and report its proved finger-table range.
     FindSuccessorForFix {
-        /// DID whose successor begins the proved finger range.
+        /// Ring position whose successor proves the request's lowest finger slot.
+        ///
+        /// The recipient resolves this position without changing it; the
+        /// returned successor may cover later slots only after the receiver
+        /// validates the Chord range proof.
         did: Did,
-        /// Correlation token the report must echo before updating the range.
+        /// Correlation token that owns this lookup until its report is consumed.
+        ///
+        /// It binds the requested slot to a unique attempt, preventing a late
+        /// or duplicate response from updating a newer convergence round.
         request: crate::dht::FingerFixRequest,
     },
     /// Fetch the recipient's successor list.
@@ -71,7 +78,11 @@ pub enum RemoteAction {
     /// Fetch the recipient's successor list and predecessor for one exact
     /// stabilization request.
     QueryForSuccessorListAndPred {
-        /// Correlation token the response must echo.
+        /// Correlation token that authorizes exactly one topology report.
+        ///
+        /// The queried successor echoes this value unchanged; the requester
+        /// rejects reports whose token or authenticated sender no longer owns
+        /// the active stabilization round.
         request_id: uuid::Uuid,
     },
     /// Try to connect to the recipient.
@@ -106,8 +117,12 @@ impl TopoInfo {
         self.predecessor.is_some() || !self.successors.is_empty()
     }
 
-    /// Bounded, duplicate-free non-local successors that one sync report may
-    /// ask the transport to admit.
+    /// Select bounded, duplicate-free, non-local successor candidates.
+    ///
+    /// Selection preserves the report's first-seen order, skips the local DID,
+    /// and stops after `successor_capacity` accepted peers. The result is the
+    /// complete connection budget for one successor-sync report, so untrusted
+    /// report length cannot create unbounded transport work.
     pub(crate) fn successor_connection_candidates(
         &self,
         local: Did,
@@ -125,9 +140,13 @@ impl TopoInfo {
         candidates
     }
 
-    /// Bounded, duplicate-free peers that one stabilization report may ask
-    /// the transport to admit. The predecessor gets one independent slot;
-    /// successor candidates are capped by the local successor-list capacity.
+    /// Select the bounded peer candidates for one stabilization report.
+    ///
+    /// The reported predecessor is considered first and receives one
+    /// independent budget slot. Successors then retain first-seen order and are
+    /// capped by `successor_capacity`; local and duplicate DIDs are removed
+    /// across both sources. The result therefore contains at most
+    /// `successor_capacity + 1` peers.
     pub(crate) fn connection_candidates(&self, local: Did, successor_capacity: usize) -> Vec<Did> {
         let mut candidates = Vec::with_capacity(successor_capacity.saturating_add(1));
         for candidate in self

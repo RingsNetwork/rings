@@ -2,6 +2,10 @@
 
 use super::*;
 
+/// Prove finger mutation and retirement cannot interleave across the lifecycle gate.
+///
+/// The test pauses after the candidate is validated, verifies retirement waits,
+/// then releases the update and confirms retirement removes the committed finger.
 #[tokio::test]
 async fn test_finger_update_serializes_with_generation_retirement() -> Result<()> {
     let (transport, peer, attempt) = transport_with_routable_peer().await?;

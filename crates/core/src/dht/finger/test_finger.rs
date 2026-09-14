@@ -1,5 +1,10 @@
 use super::*;
 
+/// Verify that structural equality includes maintenance state, not only hints.
+///
+/// The test changes the fix cursor and convergence evidence independently from
+/// the visible finger vector. Each mutation must make the table unequal to the
+/// baseline, proving derived `PartialEq` covers the complete serialized state.
 #[test]
 fn test_equality_includes_convergence_and_cursor_state() {
     let did = Did::from(1u32);
@@ -17,6 +22,11 @@ fn test_equality_includes_convergence_and_cursor_state() {
 }
 use crate::dht::tests::gen_ordered_dids;
 
+/// Verify constructor bounds for the fixed-width 160-bit Chord address space.
+///
+/// A requested width above [`DEFAULT_FINGER_TABLE_SIZE`] must clamp to 160,
+/// while zero remains valid for fixtures that intentionally disable finger
+/// maintenance.
 #[test]
 fn test_finger_table_size_bounds() {
     let did = gen_ordered_dids(1)[0];
@@ -28,6 +38,12 @@ fn test_finger_table_size_bounds() {
     assert_eq!(FingerTable::new(did, 0).slot_count(), 0);
 }
 
+/// Verify indexed writes, out-of-range rejection, removal, and gap filling.
+///
+/// The test exercises empty lookup, sparse insertion, an ignored oversized
+/// index, removal of present and absent peers, and propagation of neighboring
+/// hints after removal. It also checks that the table's fixed slot width never
+/// changes while its populated-entry count does.
 #[test]
 fn test_finger_table_get_set_remove() {
     let dids = gen_ordered_dids(5);
@@ -147,6 +163,11 @@ fn test_finger_table_get_set_remove() {
     assert_eq!(table.finger.len(), 3);
 }
 
+/// Verify deterministic repair when removing peers from varied hint layouts.
+///
+/// The cases cover removal from the beginning, middle, and end; sparse tables;
+/// and non-contiguous runs of the same peer. Expected vectors pin the rule that
+/// only invalidated runs are repaired and unrelated intervening hints survive.
 #[test]
 fn test_finger_table_remove_then_fill() {
     let dids = gen_ordered_dids(6);

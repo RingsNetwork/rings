@@ -4,6 +4,43 @@
 //! A `QueryForTopoInfoReport` is useful only if it spends a matching in-flight
 //! request id. This module keeps that correlation near the bounded connection
 //! plans so stale reports cannot trigger background connection fan-out.
+//!
+//! Algorithm flow:
+//!
+//! ```text
+//! [authenticated topology report]
+//!                 |
+//!                 v
+//!       [select report purpose]
+//!          /                 \
+//!         v                   v
+//! [claim successor-sync] [claim stabilization]
+//!         |                   |
+//!    stale? -> [stop]    stale? -> [stop]
+//!         |                   |
+//!         v                   v
+//! [bounded successors] [bounded predecessor + successors]
+//!         |                   |
+//!         +--------+----------+
+//!                  |
+//!                  v
+//!       [revalidate token before each candidate]
+//!                  |
+//!         stale? -> [stop without more effects]
+//!                  |
+//!                  v
+//!          [connect one candidate]
+//!                  |
+//!          more? --+-- yes --> [revalidate again]
+//!                  |
+//!                 no
+//!                  v
+//!       [sync: join connected candidates]
+//!       [stab: revalidate routability and commit]
+//!                  |
+//!                  v
+//!             [cancel token]
+//! ```
 
 use async_trait::async_trait;
 
@@ -33,7 +70,19 @@ use crate::message::MessagePayload;
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<QueryForTopoInfoReport> for MessageHandler {
-    /// Dispatch one topology report to the exact successor-sync or stabilization flow it answers.
+    /// Dispatch one report to the exact synchronization flow authorized by its token.
+    ///
+    /// Successor-sync claims are single-use and revalidated before every
+    /// bounded candidate. Each connected candidate is joined before the cursor
+    /// advances; any connection or join failure cancels the token. A stale plan
+    /// returns without emitting additional effects. Stabilization reports are
+    /// delegated to `handle_stabilization_report`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when DHT claim state cannot be accessed, or when an
+    /// authorized candidate cannot be connected or joined. The matching token
+    /// is cancelled before propagating an effect failure.
     async fn handle(&self, ctx: &MessagePayload, msg: &QueryForTopoInfoReport) -> Result<()> {
         match msg.then {
             <QueryForTopoInfoReport as Then>::Then::SyncSuccessor => {
@@ -98,6 +147,18 @@ impl MessageHandler {
     /// validate successor or predecessor evidence. The DHT mutation happens
     /// after those async effects and is still guarded by the transport
     /// lifecycle boundary in `stabilize_routable_topology`.
+    ///
+    /// Every candidate reservation rechecks that the reporter still owns the
+    /// processing token. Completion revalidates transport routability, commits
+    /// at most one topology transition, and retires the token before follow-up
+    /// DHT effects execute.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when claim/plan state cannot be read, a candidate
+    /// connection fails, routable topology cannot be committed, or a resulting
+    /// DHT action cannot be interpreted. Connection failures cancel the active
+    /// stabilization token before returning.
     async fn handle_stabilization_report(
         &self,
         ctx: &MessagePayload,
@@ -191,4 +252,5 @@ pub(super) fn connect_successor_hint(dht: &PeerRing, requester: Did, reported: D
 }
 
 #[cfg(all(test, not(target_family = "wasm")))]
+/// Regression tests for correlated topology reports and bounded candidate admission.
 mod tests;

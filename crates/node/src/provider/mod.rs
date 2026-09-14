@@ -57,7 +57,11 @@ pub struct Provider {
     #[cfg(all(feature = "browser", target_family = "wasm"))]
     onion_directory_endpoint: Arc<Mutex<Option<RemoteRpcEndpoint>>>,
     #[cfg(all(feature = "browser", target_family = "wasm"))]
-    /// Browser-only gate that serializes long-running `listen` tasks for this provider.
+    /// Browser-only ownership gate shared by every listener generation.
+    ///
+    /// A generation holds this mutex from immediately before publishing its
+    /// `started` signal until `Processor::listen_with` completes cleanup. Every
+    /// clone of the provider therefore observes the same serialization order.
     listener_gate: Arc<futures::lock::Mutex<()>>,
 }
 

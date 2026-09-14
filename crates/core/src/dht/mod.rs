@@ -10,6 +10,34 @@ pub mod entry;
 /// Finger table for Rings
 pub mod finger;
 /// Periodic DHT topology, storage, and finger maintenance runner.
+///
+/// ```text
+/// Maintenance wake
+///       |
+///       v
+/// Clean unavailable transports and stale topology
+///       |
+///       v
+/// Stabilize successor/predecessor relationships
+///       |
+///       +--------------------+
+///       |                    |
+///       v                    v
+/// Reserve storage       Begin or resume one
+/// repair work           finger-range proof
+///       |                    |
+///       v                    v
+/// Deliver bounded       Send one correlated
+/// repair chunk          successor lookup
+///       |                    |
+///       +----------+---------+
+///                  |
+///                  v
+///       Recompute absolute deadlines
+///                  |
+///                  v
+///           Sleep or observe stop
+/// ```
 mod stabilization;
 mod storage;
 pub mod successor;

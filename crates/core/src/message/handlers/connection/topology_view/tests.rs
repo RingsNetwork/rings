@@ -6,6 +6,12 @@ use crate::dht::Did;
 use crate::dht::TopoInfo;
 use crate::ecc::SecretKey;
 
+/// Proves that topology filtering retains only peers accepted by the current
+/// transport-evidence predicate.
+///
+/// One successor is marked active while an additional successor and the
+/// predecessor remain pending. The filtered report must contain only the active
+/// peer and still report usable topology.
 #[test]
 fn test_topology_report_keeps_only_confirmed_peers() {
     // `active` is the only DID the production predicate would accept as
@@ -26,6 +32,11 @@ fn test_topology_report_keeps_only_confirmed_peers() {
     assert!(topology_has_confirmed_peer(&confirmed));
 }
 
+/// Proves the stabilization candidate budget, order, and de-duplication law.
+///
+/// The predecessor receives the first independent slot; local and duplicate
+/// DIDs are removed; successor candidates preserve report order and cannot
+/// exceed the configured successor capacity.
 #[test]
 fn test_stabilization_candidate_effects_are_deduplicated_and_capacity_bounded() {
     let local = Did::from(0u32);
@@ -55,6 +66,12 @@ fn test_stabilization_candidate_effects_are_deduplicated_and_capacity_bounded() 
     assert!(candidates.len() <= 4);
 }
 
+/// Proves that successor-sync candidate selection ignores predecessor hints
+/// and emits only bounded unique remote successors.
+///
+/// The fixture includes the local DID, a duplicate, and more successors than
+/// capacity. The expected vector witnesses stable first-seen ordering and the
+/// exact three-candidate bound.
 #[test]
 fn test_sync_candidate_effects_are_deduplicated_and_capacity_bounded() {
     let local = Did::from(0u32);

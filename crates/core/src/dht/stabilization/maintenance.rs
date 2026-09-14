@@ -158,7 +158,11 @@ struct MaintenanceDecision {
 struct MaintenanceSchedule {
     /// Shared period for stabilization and periodic storage-repair deadlines.
     period_ms: u64,
-    /// Last loop timestamp observed by [`MaintenanceSchedule::poll`].
+    /// Greatest monotonic loop timestamp observed by polling or completion.
+    ///
+    /// Observation gaps are measured from this value to distinguish a suspended
+    /// host from ordinary timer delay. Updates use `max` so a stale callback
+    /// cannot move scheduler time backward.
     last_observed_ms: u64,
     /// Absolute timestamp for the next topology phase.
     next_stabilize_ms: u64,
@@ -170,15 +174,31 @@ struct MaintenanceSchedule {
     repair_admission_budget_ms: u64,
     /// Whether stabilization reserved the next available turn for pending repair.
     repair_turn_reserved: bool,
-    /// Absolute timestamp for the next independently paced finger turn.
+    /// Absolute monotonic timestamp for the next independently paced finger turn.
+    ///
+    /// `u64::MAX` represents an inactive convergence machine. Awaiting phases
+    /// replace it with their lease expiry; runnable phases replace it with a
+    /// jittered retry deadline.
     next_finger_ms: u64,
-    /// Finger convergence phase seen during the previous poll.
+    /// Finger convergence phase observed during the previous reconciliation.
+    ///
+    /// A phase transition changes which clock owns the next wake and therefore
+    /// forces `next_finger_ms` to be recomputed exactly once.
     finger_phase_last_poll: FingerConvergencePhase,
-    /// Consecutive finger lookup failures seen during the previous poll.
+    /// Consecutive lookup failures observed during the previous reconciliation.
+    ///
+    /// A changed streak re-arms a runnable attempt with the corresponding
+    /// exponential backoff floor; successful applied evidence resets it upstream.
     finger_failure_streak: u8,
-    /// Deterministic per-node jitter state advanced for every finger delay.
+    /// Replayable pseudo-random state used to spread this node's finger attempts.
+    ///
+    /// It is seeded from the local DID and node-lifecycle entropy, then advanced
+    /// exactly once for each newly selected initial or retry delay.
     finger_jitter_state: u64,
-    /// Count of due finger turns yielded to higher-priority phases.
+    /// Number of consecutive due finger turns yielded to topology or repair.
+    ///
+    /// The count resets when finger work runs or ceases to be ready. Reaching
+    /// `MAX_FINGER_PRIORITY_DEFERRALS` reserves the next decision for convergence.
     finger_priority_deferrals: u8,
 }
 
@@ -307,7 +327,12 @@ impl MaintenanceSchedule {
         };
     }
 
-    /// Reconcile the next finger deadline after one finger convergence turn.
+    /// Reconcile the finger deadline from the state observed after one turn.
+    ///
+    /// Awaiting phases preserve their exact remaining lease, inactive work is
+    /// removed from the wake set, and runnable work receives a fresh jittered
+    /// retry measured from actual completion. Measuring from completion prevents
+    /// a slow attempt from creating an immediate catch-up burst.
     fn complete_finger_convergence(
         &mut self,
         completed_at_ms: u64,
@@ -330,7 +355,12 @@ impl MaintenanceSchedule {
         };
     }
 
-    /// Align the schedule to the current finger convergence state.
+    /// Align the scheduler-owned wake time with the peer-ring convergence phase.
+    ///
+    /// Awaiting phases copy their remaining lease into an absolute deadline.
+    /// Entering `Runnable` chooses initial jitter, while a changed failure streak
+    /// chooses retry backoff. An unchanged runnable phase keeps its existing
+    /// deadline so ordinary polling cannot continuously postpone work.
     fn reconcile_finger_status(&mut self, now_ms: u64, status: FingerConvergenceStatus) {
         // A pace change means the retry floor changed; a phase change means a
         // different scheduler clock now owns the next finger wake.
@@ -362,7 +392,12 @@ impl MaintenanceSchedule {
         self.finger_failure_streak = status.failure_streak();
     }
 
-    /// Rephase a stale runnable finger deadline after a long observation gap.
+    /// Rephase overdue runnable work after a suspension-sized observation gap.
+    ///
+    /// Rephasing requires both the polling gap and deadline lateness to cross the
+    /// resume threshold. This avoids treating normal timer jitter as suspension,
+    /// and clears priority deferrals because the newly phased turn has not yet
+    /// yielded to another task.
     fn rephase_stale_finger_deadline(
         &mut self,
         now_ms: u64,
@@ -381,14 +416,22 @@ impl MaintenanceSchedule {
         }
     }
 
-    /// Return the next retry delay for a failed or continuing finger lookup.
+    /// Draw a full-jitter retry delay for a failed or continuing lookup.
+    ///
+    /// The failure streak selects the exponential backoff floor. The mixed state
+    /// contributes an inclusive `[0, floor]` offset, so the returned delay lies
+    /// in `[floor, 2 * floor]` with saturating arithmetic at the numeric limit.
     fn next_finger_delay_ms(&mut self, failure_streak: u8) -> u64 {
         self.finger_jitter_state = mix_jitter(self.finger_jitter_state);
         let retry_floor_ms = finger_lookup_backoff_ms(failure_streak);
         retry_floor_ms.saturating_add(self.finger_jitter_state % retry_floor_ms.saturating_add(1))
     }
 
-    /// Return the first finger delay for a new runnable phase.
+    /// Draw the first delay after convergence enters a runnable phase.
+    ///
+    /// The minimum delay is the zero-failure lookup backoff. A node-specific
+    /// inclusive jitter in the configured initial window spreads simultaneous
+    /// starts while retaining deterministic replay for one node lifecycle.
     fn next_initial_finger_delay_ms(&mut self) -> u64 {
         self.finger_jitter_state = mix_jitter(self.finger_jitter_state);
         let initial_jitter_ms = duration_ms(FINGER_CONVERGENCE_INITIAL_JITTER);
@@ -452,7 +495,12 @@ impl MaintenanceSchedule {
     }
 }
 
-/// Deterministically derive a per-node jitter seed from the DID and lifecycle entropy.
+/// Derive the initial replayable jitter state from node identity and lifecycle.
+///
+/// The FNV-style fold makes listener restarts within one node lifecycle reuse
+/// the same phase, while a new lifecycle UUID produces a different schedule.
+/// Wrapping multiplication is intentional because the state is entropy for
+/// pacing, not a cryptographic digest.
 fn finger_jitter_seed(local: crate::dht::Did, entropy: uuid::Uuid) -> u64 {
     local
         .as_bytes()
@@ -463,7 +511,11 @@ fn finger_jitter_seed(local: crate::dht::Did, entropy: uuid::Uuid) -> u64 {
         })
 }
 
-/// Advance the small xorshift state used for replayable finger scheduling jitter.
+/// Advance the small xorshift state used for finger scheduling jitter.
+///
+/// The transform is deterministic and cheap, which is sufficient for dispersing
+/// maintenance deadlines. It must not be used for cryptographic randomness or
+/// any decision whose unpredictability is a security property.
 fn mix_jitter(mut value: u64) -> u64 {
     value ^= value << 13;
     value ^= value >> 7;
@@ -472,7 +524,11 @@ fn mix_jitter(mut value: u64) -> u64 {
 }
 
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-/// First runnable finger deadline for a test node and failure level.
+/// Return the first runnable finger deadline for a deterministic test node.
+///
+/// The helper exposes scheduler timing without running the async loop. Callers
+/// provide identity, lifecycle entropy, and failure streak so tests can assert
+/// the exact initial/retry window selected by production reconciliation.
 pub(crate) fn finger_schedule_deadline_for_test(
     local: crate::dht::Did,
     jitter_entropy: uuid::Uuid,
@@ -484,7 +540,11 @@ pub(crate) fn finger_schedule_deadline_for_test(
 }
 
 #[cfg(all(test, not(target_family = "wasm")))]
-/// Deadline used when a finger lookup is already awaiting its report.
+/// Return the absolute wake deadline for a lookup already awaiting its report.
+///
+/// `listener_now_ms` supplies the scheduler's monotonic origin and `status`
+/// carries the remaining report lease. The result verifies that awaiting work
+/// bypasses jitter and wakes exactly at lease expiry.
 pub(crate) fn finger_awaiting_report_deadline_for_test(
     listener_now_ms: u64,
     status: FingerConvergenceStatus,
@@ -500,7 +560,11 @@ pub(crate) fn finger_awaiting_report_deadline_for_test(
 }
 
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-/// Simulate a stale browser-resume poll and return the rephased finger deadline.
+/// Simulate a suspension-sized polling gap and return resume timing.
+///
+/// The pair contains the synthetic resume timestamp followed by the newly
+/// rephased finger deadline. The helper also checks internally that resumption
+/// does not immediately dispatch the stale convergence turn.
 pub(crate) fn finger_schedule_resumed_deadline_for_test(
     local: crate::dht::Did,
     jitter_entropy: uuid::Uuid,
@@ -607,8 +671,12 @@ impl Stabilizer {
         }
     }
 
-    /// Execute one selected maintenance task and reconcile its schedule from the
-    /// actual completion timestamp.
+    /// Execute one selected maintenance task and reconcile scheduler state.
+    ///
+    /// Topology completion may publish a sticky repair intent, repair completion
+    /// records whether another pass is required, and finger completion re-reads
+    /// the peer-ring phase before choosing its next delay. Every branch uses the
+    /// actual monotonic completion time, so overruns never create catch-up bursts.
     async fn run_maintenance_task(
         &self,
         task: MaintenanceTask,
@@ -738,6 +806,8 @@ mod tests {
         FingerConvergenceStatus::new(pending, 0)
     }
 
+    /// Verifies that stabilization and storage repair occupy distinct offsets
+    /// inside one maintenance period and repeat without collapsing together.
     #[test]
     fn test_maintenance_phases_are_staggered_within_each_period() {
         let mut schedule = schedule(0, PERIOD, crate::dht::Did::from(0u32));
@@ -761,6 +831,8 @@ mod tests {
         );
     }
 
+    /// Verifies that a stabilization task finishing after the repair phase
+    /// preserves repair intent and emits it after the mandatory quiet gap.
     #[test]
     fn test_repeated_stabilization_overruns_preserve_repair_intent() {
         let mut schedule = schedule(0, PERIOD, crate::dht::Did::from(0u32));
@@ -779,6 +851,8 @@ mod tests {
         );
     }
 
+    /// Verifies that a long stabilization completion advances to the first
+    /// future stabilization deadline instead of replaying missed periods.
     #[test]
     fn test_long_stabilization_skips_missed_stabilization_deadlines() {
         let mut schedule = schedule(0, PERIOD, crate::dht::Did::from(0u32));
@@ -796,6 +870,8 @@ mod tests {
         );
     }
 
+    /// Verifies that an overdue repair receives a complete execution window
+    /// before the next stabilization turn is allowed to start.
     #[test]
     fn test_stabilization_reserves_a_window_for_pending_repair() {
         let mut schedule = schedule(0, PERIOD, crate::dht::Did::from(0u32));
@@ -829,6 +905,8 @@ mod tests {
         );
     }
 
+    /// Verifies that waking after a reserved repair window still runs repair
+    /// rather than discarding its turn because the timer overshot the deadline.
     #[test]
     fn test_reserved_repair_turn_survives_timer_overshoot() {
         let mut schedule = schedule(0, Duration::from_millis(100), crate::dht::Did::from(0u32));
@@ -852,6 +930,8 @@ mod tests {
         );
     }
 
+    /// Verifies over several late wakeups that repair and stabilization both
+    /// continue to receive turns and neither phase starves the other.
     #[test]
     fn test_repeated_timer_overshoots_preserve_repair_and_stabilization_fairness() {
         let mut schedule = schedule(0, Duration::from_millis(500), crate::dht::Did::from(0u32));
@@ -875,6 +955,8 @@ mod tests {
         }
     }
 
+    /// Verifies that repair completion after a stabilization deadline rephases
+    /// stabilization from actual completion and retains the quiet gap.
     #[test]
     fn test_repair_overrun_reconciles_stabilization_with_actual_completion() {
         let mut schedule = schedule(0, PERIOD, crate::dht::Did::from(0u32));
@@ -901,6 +983,8 @@ mod tests {
         );
     }
 
+    /// Verifies that failed repair does not spin immediately and instead waits
+    /// for the next topology phase before repair becomes eligible again.
     #[test]
     fn test_failed_repair_waits_for_the_next_topology_phase() {
         let mut schedule = schedule(0, PERIOD, crate::dht::Did::from(0u32));
@@ -934,6 +1018,11 @@ mod tests {
         assert_eq!(remaining_delay(100, 125), Duration::ZERO);
     }
 
+    /// Proves that runnable convergence is jittered and never replayed as backlog.
+    ///
+    /// The first turn must stay inside the initial jitter window and remain
+    /// dormant until its exact deadline. Completing that turn late must schedule
+    /// the next attempt after completion instead of immediately catching up.
     #[test]
     fn test_finger_convergence_is_jittered_and_never_catches_up_in_a_burst() {
         let mut schedule = schedule(0, PERIOD, crate::dht::Did::from(11u32));
@@ -966,6 +1055,11 @@ mod tests {
         );
     }
 
+    /// Proves that an awaiting-report phase is governed by its lease expiry.
+    ///
+    /// The scheduler must neither add jitter nor dispatch before the remaining
+    /// report lease reaches zero; at the exact expiry it may select one finger
+    /// convergence turn to process timeout state.
     #[test]
     fn test_in_flight_finger_lookup_wakes_only_at_its_exact_expiry() {
         let mut schedule = schedule(0, PERIOD, crate::dht::Did::from(11u32));
@@ -991,6 +1085,11 @@ mod tests {
         );
     }
 
+    /// Proves lifecycle-stable but lifecycle-distinct initial jitter.
+    ///
+    /// Equal DID and entropy inputs model listener restarts and must replay the
+    /// same first deadline. Changing only lifecycle entropy must choose another
+    /// deadline while keeping both results inside the configured initial window.
     #[test]
     fn test_initial_finger_jitter_uses_replayable_node_lifecycle_entropy() {
         let local = crate::dht::Did::from(4u32);
@@ -1009,6 +1108,11 @@ mod tests {
         assert!((1_000..=11_000).contains(&another_lifecycle.next_finger_ms));
     }
 
+    /// Proves repeated browser resumes rephase stale work instead of bursting it.
+    ///
+    /// Each simulated suspension crosses the stale threshold. Every resumed poll
+    /// must produce no immediate task and must place the next finger deadline in
+    /// the fresh initial-jitter window following the resume timestamp.
     #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_family = "wasm"), test)]
     fn test_repeated_browser_resume_rephases_stale_finger_deadlines() {

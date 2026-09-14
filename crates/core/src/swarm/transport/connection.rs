@@ -362,7 +362,12 @@ impl SwarmTransport {
         self.stabilize_routable_topology_with_observer(reporter, request_id, reported, || {})
     }
 
-    /// Stabilize with a test observer placed after confirmation and before DHT mutation.
+    /// Commit a correlated topology report while its transport evidence remains valid.
+    ///
+    /// The lifecycle gate prevents reporter retirement between readiness
+    /// validation and DHT mutation. The observer is a test synchronization hook
+    /// called after all reported peers are filtered but before the correlated
+    /// stabilization transition consumes `request_id`.
     fn stabilize_routable_topology_with_observer(
         &self,
         reporter: Did,

@@ -1,4 +1,39 @@
 //! Serialized browser listener lifecycle.
+//!
+//! Each [`Provider`] owns one asynchronous gate. A listener generation does
+//! not announce that it has started until it owns that gate, and it retains
+//! ownership until `listen_with` has completed cooperative shutdown. This
+//! prevents a replacement listener from overlapping the cleanup of the
+//! previous browser transport generation.
+//!
+//! # Algorithm flow
+//!
+//! ```text
+//! Provider::listen
+//!       |
+//!       +--> create stop source and one-shot start signal
+//!       |
+//!       +--> return ProviderListener with two JavaScript promises
+//!                    |
+//!                    v
+//!            task waits for provider gate
+//!                    |
+//!                    v
+//!            acquire exclusive listener generation
+//!                    |
+//!                    +--> resolve started promise
+//!                    |
+//!                    v
+//!            run processor.listen_with(stop token)
+//!                    |
+//!          stop() requests cooperative shutdown
+//!                    |
+//!                    v
+//!            listener cleanup completes
+//!                    |
+//!                    v
+//!            release gate and resolve task promise
+//! ```
 
 use futures::channel::oneshot;
 use rings_core::lifecycle::StopSource;
@@ -12,11 +47,21 @@ use crate::provider::Provider;
 #[derive(Clone)]
 #[wasm_export]
 pub struct ProviderListener {
-    /// Cooperative shutdown source owned by this exported handle.
+    /// Cooperative shutdown authority retained by the exported handle.
+    ///
+    /// Calling [`Self::stop`] flips the paired token observed by
+    /// `Processor::listen_with`; dropping this source alone does not report a
+    /// successful listener shutdown to JavaScript.
     stop: StopSource,
-    /// Promise resolved after this listener generation acquires the provider gate.
+    /// Promise resolved after this generation acquires the provider gate.
+    ///
+    /// It deliberately remains pending while an earlier generation is still
+    /// cleaning up, so callers never confuse task creation with active service.
     started: js_sys::Promise,
-    /// Promise for the long-running listener task.
+    /// Promise representing the complete long-running listener generation.
+    ///
+    /// Resolution means `listen_with` returned and released the provider gate;
+    /// callers may then start another generation without overlap.
     task: js_sys::Promise,
 }
 

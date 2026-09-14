@@ -87,8 +87,10 @@ enum ScenarioTopology {
     Hotspot,
 }
 
-// Isolated schedule-law tests share the storm fixture imports but do not run
-// the full production network simulation.
+/// Isolated finger scheduling laws that reuse deterministic storm fixtures.
+///
+/// These tests measure deadline spread without running the full production
+/// network simulation exercised by the surrounding scenarios.
 mod finger_schedule_tests;
 
 /// Five active dummy transports witness that revalidating the local successor
@@ -142,7 +144,10 @@ async fn test_five_node_local_successor_range_emits_no_finger_submission() {
 /// and every admission follow-up caused while the new connection quiesces.
 #[tokio::test(start_paused = true)]
 async fn test_finger_discovery_measures_the_complete_transport_cascade() {
-    // Upper bound for this fixture's routed lookup, report, and admission follow-ups.
+    /// Maximum control submissions allowed for this three-node convergence fixture.
+    ///
+    /// The bound includes routed lookup, proof report, connection admission,
+    /// and every resulting topology follow-up before the fixture quiesces.
     const THREE_NODE_FIXTURE_MAX_CONTROL_SUBMISSIONS: usize = 20;
 
     let runtime = SimulationRuntimeGuard::enter(768, TEST_EPOCH_MS, ProtectionProfile::ALL_ENABLED)

@@ -112,7 +112,7 @@ impl Drop for BrowserTaskYieldGuard {
 ///
 /// Native tasks yield for one executor poll. Browser tasks do the same cheap
 /// yield and additionally cross a `MessageChannel` task boundary every
-/// [`CORE_ACTOR_BROWSER_YIELD_INTERVAL`] steps, bounding event-loop starvation
+/// `CORE_ACTOR_BROWSER_YIELD_INTERVAL` steps, bounding event-loop starvation
 /// without the nested-timer clamp of `setTimeout(0)`.
 pub(crate) async fn yield_core_actor_step() {
     yield_executor_once().await;
@@ -225,9 +225,17 @@ pub(crate) enum CoreEffect<'payload> {
     /// because a request id should become admissible only when the transport
     /// actually attempts to send the query to the current successor.
     SendSuccessorQuery {
-        /// Query whose request identity authorizes exactly one successor-sync report.
+        /// Topology query whose identity authorizes one successor-sync report.
+        ///
+        /// The interpreter registers `query.request_id` before moving this
+        /// value onto the transport, so an immediate authenticated response can
+        /// claim the exact request without a registration race.
         query: QueryForTopoInfoSend,
-        /// Current successor that must report the result with `query.request_id`.
+        /// Current successor that owns the registered response token.
+        ///
+        /// This DID is both the direct transport destination and the reporter
+        /// expected by the DHT claim. A successor change invalidates the claim
+        /// before any later report can create connection effects.
         destination: Did,
     },
     /// Establish an idempotent DHT-driven transport connection.
@@ -290,7 +298,12 @@ impl<'payload> CoreEffect<'payload> {
         }
     }
 
-    /// Create a successor-list query effect with deferred DHT claim registration.
+    /// Create a successor-list query whose claim is registered at interpretation time.
+    ///
+    /// Construction is pure: it stores `query` and `destination` without
+    /// mutating DHT state. [`CoreEffectInterpreter`] later registers the exact
+    /// request before sending it and cancels that registration if transport
+    /// delivery fails.
     pub(crate) const fn send_successor_query(
         query: QueryForTopoInfoSend,
         destination: Did,
@@ -529,8 +542,12 @@ mod tests {
     use crate::tests::manually_establish_connection;
     use crate::tests::TEST_NETWORK_ID;
 
+    /// Callback fixture for tests that exercise only interpreter-owned transport effects.
+    ///
+    /// It intentionally implements no event behavior, ensuring assertions
+    /// observe request registration, delivery, and cancellation rather than a
+    /// callback-generated DHT transition.
     #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-    /// Swarm callback used when a test needs only the effect interpreter's transport side effects.
     struct NoopCallback;
 
     #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
@@ -722,6 +739,11 @@ mod tests {
         Ok(())
     }
 
+    /// Proves that lowering a finger lookup preserves its complete range token.
+    ///
+    /// The test checks the remote hop, lookup position, strictness flag, slot,
+    /// and UUID after lowering, preventing the effect layer from degrading a
+    /// range-aware request back into an uncorrelated slot update.
     #[test]
     fn test_dht_find_successor_for_fix_echoes_range_request() -> Result<()> {
         let next = did();
@@ -791,6 +813,8 @@ mod tests {
         Ok(())
     }
 
+    /// Verifies that lowering a successor-list query for an admitted peer emits
+    /// one correlated send effect addressed to that exact peer.
     #[test]
     fn test_dht_query_successor_list_sends_when_connected() -> Result<()> {
         let target = did();
@@ -822,6 +846,12 @@ mod tests {
         Ok(())
     }
 
+    /// Proves that successor-sync authority is installed before delivery and
+    /// removed when delivery fails.
+    ///
+    /// A successful send leaves the exact reporter/token pair claimable. A send
+    /// to a missing peer returns an error and leaves the same pair unclaimable,
+    /// witnessing both sides of the interpreter's transactional boundary.
     #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
     #[tokio::test]
     async fn test_successor_query_effect_registers_before_send_and_cancels_send_failure(

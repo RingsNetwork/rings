@@ -4,7 +4,11 @@ use super::*;
 use crate::dht::finger::FingerConvergencePhase;
 use crate::dht::FingerFixRequest;
 
-/// Prepare the exact request token that a production finger lookup would place in the DHT.
+/// Prepare the exact request token that production finger lookup would place in the DHT.
+///
+/// The helper mutates the test finger state into `AwaitingReport` for `slot` and
+/// returns an error when that slot cannot start a request, ensuring each test
+/// exercises the same correlation checks as the message handler.
 fn finger_request(transport: &SwarmTransport, slot: usize) -> Result<FingerFixRequest> {
     transport
         .dht
@@ -13,6 +17,10 @@ fn finger_request(transport: &SwarmTransport, slot: usize) -> Result<FingerFixRe
         .ok_or_else(|| Error::InvalidMessage("failed to prepare test finger request".to_owned()))
 }
 
+/// Prove that a proof queued by a pending generation is applied by its admission commit.
+///
+/// The test also checks that the proof remains absent from the finger table
+/// before commit and moves through the DHT's `AwaitingAdmission` phase.
 #[tokio::test(start_paused = true)]
 async fn test_pending_finger_update_is_applied_when_attempt_is_admitted() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
@@ -59,6 +67,10 @@ async fn test_pending_finger_update_is_applied_when_attempt_is_admitted() -> Res
     Ok(())
 }
 
+/// Prove that cancelling a pending handshake also cancels its deferred finger proof.
+///
+/// The expected failure streak witnesses that cancellation reaches the DHT
+/// convergence state instead of merely deleting the transport-side queue.
 #[tokio::test]
 async fn test_pending_handshake_cancellation_releases_its_finger_proof() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
@@ -85,6 +97,10 @@ async fn test_pending_handshake_cancellation_releases_its_finger_proof() -> Resu
     Ok(())
 }
 
+/// Prove that an admitting generation retains a finger proof until atomic commit.
+///
+/// The candidate must stay out of the finger table while admission is in
+/// progress and become visible only after the same generation commits.
 #[tokio::test]
 async fn test_admitting_finger_update_is_retained_until_atomic_commit() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
@@ -117,6 +133,10 @@ async fn test_admitting_finger_update_is_retained_until_atomic_commit() -> Resul
     Ok(())
 }
 
+/// Prove that a candidate applies immediately when admission wins the queue race.
+///
+/// The active generation is made fully routable before the report arrives, so
+/// the report must bypass deferred storage and update the requested slot.
 #[tokio::test]
 async fn test_pending_finger_update_applies_if_admission_wins_queue_race() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
@@ -143,6 +163,10 @@ async fn test_pending_finger_update_applies_if_admission_wins_queue_race() -> Re
     Ok(())
 }
 
+/// Prove that missing and owned-but-unroutable peers produce distinct outcomes.
+///
+/// Missing peers retain a proof that can move onto a new pending generation;
+/// unroutable active peers retire the proof and increment convergence failure.
 #[tokio::test(start_paused = true)]
 async fn test_finger_candidate_distinguishes_missing_and_unroutable_connections() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
@@ -208,6 +232,10 @@ async fn test_finger_candidate_distinguishes_missing_and_unroutable_connections(
     Ok(())
 }
 
+/// Prove that an expired request cannot authorize transport admission or finger mutation.
+///
+/// A second delivery of the same token must be stale, demonstrating that the
+/// first rejection consumed the expired in-flight request deterministically.
 #[tokio::test(start_paused = true)]
 async fn test_expired_finger_candidate_never_enters_connection_admission() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
@@ -233,6 +261,10 @@ async fn test_expired_finger_candidate_never_enters_connection_admission() -> Re
     Ok(())
 }
 
+/// Prove that a candidate below the requested threshold cannot open a connection.
+///
+/// The invalid report leaves transport and finger state unchanged, and replaying
+/// its consumed request token is classified as stale.
 #[tokio::test]
 async fn test_invalid_finger_candidate_never_enters_connection_admission() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(

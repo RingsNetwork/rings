@@ -5,6 +5,9 @@ use std::sync::Mutex;
 
 use rings_transport::core::transport::TransportInterface;
 /// Finger-table proof admission at the pending/active transport boundary.
+///
+/// The module-level algorithm and its exhaustive lifecycle branches are
+/// documented in `pending::finger`.
 mod finger;
 mod registry;
 
@@ -240,7 +243,12 @@ impl SwarmTransport {
             .map_err(|_| Error::SwarmConnectionLifecycleLock)
     }
 
-    /// Cancel every deferred finger proof owned by a pending connection attempt.
+    /// Cancel every deferred finger proof owned by one connection generation.
+    ///
+    /// The function first removes the generation's complete request set from
+    /// the transport side table, then tells the DHT to retire each correlated
+    /// lookup. After success, no deferred proof remains owned by `attempt`.
+    /// Lock poisoning or a failed DHT transition is returned to the caller.
     fn cancel_pending_finger_updates(&self, attempt: PendingConnectionAttempt) -> Result<()> {
         let requests = self
             .pending_finger_updates()?
@@ -720,6 +728,11 @@ impl SwarmTransport {
     }
 
     /// Classify and either apply, retain, or reject a reported finger candidate.
+    ///
+    /// The lifecycle boundary covers the snapshot, proof transfer, and queue
+    /// attachment so retirement cannot change the owning generation between
+    /// validation and commit. `observe_admission` is a test synchronization
+    /// hook invoked only after the branch is selected and before its mutation.
     fn record_finger_candidate_with_observer(
         &self,
         peer: Did,

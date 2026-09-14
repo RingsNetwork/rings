@@ -53,9 +53,15 @@ use crate::onion::tcp::NativeOnionCircuitHandle;
 use crate::onion::tcp::NativeOnionTcpExitConfig;
 use crate::onion::NativeOnionGatewayConnector;
 
-/// Public HTTP port used by the ignored gateway smoke tests.
+/// Destination port used by the ignored public-egress gateway smoke test.
+///
+/// Port 80 is selected because the test needs a small plaintext response whose
+/// bytes can be observed after the synthetic TCP handshake crosses Onion.
 const PUBLIC_HTTP_PORT: u16 = 80;
-/// Literal public IPv4 target used by the ignored gateway smoke tests.
+/// Literal globally routable IPv4 target admitted by the smoke-test exit policy.
+///
+/// Keeping the address literal excludes host DNS and fake-IP interception from
+/// the route assertion.
 const PUBLIC_HTTP_IPV4: Ipv4Addr = Ipv4Addr::new(1, 1, 1, 1);
 const CLIENT_PORT: u16 = 41_000;
 
@@ -551,6 +557,12 @@ fn linux_namespace_http_request() -> std::result::Result<Vec<u8>, String> {
     Ok(response)
 }
 
+/// Verifies that captured TCP reaches a public HTTP endpoint only after a
+/// client, relay, and exit complete the two-hop Onion route.
+///
+/// The fixture injects a synthetic SYN, rejects reset packets as handshake
+/// success, completes the TCP exchange, and requires a non-reset HTTP payload
+/// before the gateway flow's longer idle deadline can expire.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires public network access and three native WebRTC processors"]
 async fn captured_tcp_reaches_public_http_only_through_two_hop_onion_route() -> Result<()> {

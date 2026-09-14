@@ -44,13 +44,23 @@ use crate::utils::get_epoch_ms_i64;
 use crate::utils::sleep;
 use crate::utils::Instant;
 
+/// Selects whether a topology pass also advances finger convergence or only
+/// publishes the intent for the independently paced maintenance phase.
+///
+/// The distinction preserves the eager semantics of direct stabilization
+/// callers while preventing the long-running scheduler from coupling finger
+/// lookup traffic to the topology period.
 #[derive(Clone, Copy)]
 enum FingerMaintenanceMode {
-    /// Legacy/manual stabilization path: start and advance finger work in the
-    /// same maintenance invocation.
+    /// Start revalidation and advance its first effect in the same pass.
+    ///
+    /// Direct callers use this mode so one explicit stabilization request keeps
+    /// the pre-scheduler behavior of making immediate finger-table progress.
     Immediate,
-    /// Scheduled loop path: mark work in the topology phase and let the
-    /// independent finger phase advance it after jitter/backoff.
+    /// Mark a range for revalidation without issuing its lookup in this pass.
+    ///
+    /// The maintenance scheduler later advances that range after applying the
+    /// node-specific initial jitter or failure backoff.
     Jittered,
 }
 
@@ -297,14 +307,23 @@ impl Stabilizer {
             .await;
     }
 
-    /// Run topology maintenance inside the scheduled loop, where finger work is
-    /// marked here and advanced by a separately paced phase.
+    /// Run the topology portion of scheduled maintenance without coupling a
+    /// finger lookup to the topology deadline.
+    ///
+    /// The pass may mark one range as pending, but the scheduler owns the later
+    /// call that advances it. Each topology sub-step still has the supplied
+    /// deadline and logs its own failure without aborting subsequent steps.
     async fn stabilize_scheduled_topology_with_step_timeout(&self, timeout: Duration) {
         self.stabilize_topology_with_finger_mode(timeout, FingerMaintenanceMode::Jittered)
             .await;
     }
 
-    /// Execute one topology phase and choose how finger convergence is advanced.
+    /// Execute the ordered topology sub-steps under a selected finger policy.
+    ///
+    /// Cleaning and predecessor notification run before finger maintenance;
+    /// liveness probing and Chord stabilization run afterward. [`Self::run_step`]
+    /// contains errors and timeouts per sub-step, so one failed effect cannot
+    /// prevent the remaining topology obligations from being attempted.
     async fn stabilize_topology_with_finger_mode(
         &self,
         timeout: Duration,
@@ -868,26 +887,45 @@ impl Stabilizer {
         self.advance_finger_convergence().await
     }
 
-    /// Mark a range as needing finger revalidation without sending a lookup yet.
+    /// Ask the peer-ring state machine to mark its next unproved finger range.
+    ///
+    /// This boundary does not choose scheduling delay. It only converts the
+    /// local state transition into the restricted action vocabulary accepted by
+    /// [`Self::interpret_finger_action`]; a no-op means no range currently needs
+    /// work.
     async fn begin_finger_revalidation(&self) -> Result<()> {
         self.interpret_finger_action(self.dht.begin_finger_revalidation())
             .await
     }
 
-    /// Advance the independently paced finger convergence state by one effect.
+    /// Advance finger convergence by at most one state-machine effect.
+    ///
+    /// A runnable range may emit one `FindSuccessorForFix` request, while an
+    /// inactive or still-waiting range emits no network work. The emitted action
+    /// is interpreted through the same signing, send, and cancellation boundary
+    /// as eager stabilization.
     async fn advance_finger_convergence(&self) -> Result<()> {
         self.interpret_finger_action(self.dht.advance_finger_convergence())
             .await
     }
 
-    /// Test-only hook that lets simulations drive one scheduled finger phase.
+    /// Advance one scheduled finger turn from a native dummy-network simulation.
+    ///
+    /// The hook deliberately exposes the production transition unchanged so
+    /// model tests can control phase ordering without running the wall-clock
+    /// maintenance loop.
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) async fn converge_fingers_for_simulation(&self) -> Result<()> {
         self.advance_finger_convergence().await
     }
 
-    /// Interpret the only peer-ring actions that the finger convergence boundary
-    /// may emit during stabilization.
+    /// Interpret the closed set of peer-ring actions emitted by finger convergence.
+    ///
+    /// `None` completes locally. `FindSuccessorForFix` is signed and sent to the
+    /// selected predecessor. A signing or send failure cancels the matching
+    /// lookup lease before the error is returned, preventing an unsent request
+    /// from leaving the range stuck in an awaiting-report phase. Any other action
+    /// is rejected as an internal protocol mismatch.
     async fn interpret_finger_action(&self, action: Result<PeerRingAction>) -> Result<()> {
         match action {
             Ok(action) => match action {

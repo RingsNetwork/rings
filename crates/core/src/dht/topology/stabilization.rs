@@ -1,4 +1,49 @@
 //! Pure HMCC/Zave predecessor and successor stabilization propositions.
+//!
+//! # Algorithm flow
+//!
+//! ```text
+//! [BeginStabilize(request_id)]
+//!             |
+//!             v
+//! [current successor head?] -- no --> [clear pending request]
+//!             |
+//!            yes
+//!             v
+//! [store Requested(reporter, request_id)]
+//!             |
+//!             v
+//! [emit QuerySuccessorTopology]
+//!             |
+//!             v
+//! [authenticated report arrives]
+//!             |
+//!             v
+//! [exact Requested token?] -- no --> [ignore as stale]
+//!             |
+//!            yes
+//!             v
+//! [mark Processing and bound candidate list]
+//!             |
+//!             v
+//! [recheck claim before each connection effect]
+//!             |
+//!             v
+//! [merge successors -> query improvement -> notify head]
+//!             |
+//!             v
+//! [reporter stayed head and pred(head) == local?]
+//!             |                         |
+//!            yes                        no
+//!             |                         |
+//!             v                         v
+//! [prove local finger range]       [retain old proof]
+//!             |                         |
+//!             +------------+------------+
+//!                          |
+//!                          v
+//!                 [retire correlated token]
+//! ```
 
 use super::dist;
 use super::successors;
@@ -18,12 +63,24 @@ use crate::dht::finger::finger_proof_end;
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub(crate) struct StabilizationConnectionPlan {
     /// Successor that produced the claimed topology report.
+    ///
+    /// Every call to [`Self::advance`] rechecks that this DID remains the owner
+    /// of `request_id`; a successor-head change therefore makes the plan stale.
     reporter: Did,
-    /// Correlation token echoed by that report.
+    /// Correlation token echoed by the authenticated topology report.
+    ///
+    /// The token distinguishes this plan from older and newer stabilization
+    /// rounds that queried the same reporter.
     request_id: uuid::Uuid,
     /// Bounded, deduplicated peers reported by the successor.
+    ///
+    /// Construction removes `local`, preserves first-seen order, and caps the
+    /// list at one predecessor candidate plus the successor-list capacity.
     candidates: Vec<Did>,
     /// Cursor for the next candidate whose connection effect may run.
+    ///
+    /// The cursor advances only after the current claim is revalidated and a
+    /// candidate is returned, so each bounded candidate is emitted at most once.
     next_candidate: usize,
 }
 
@@ -33,8 +90,14 @@ pub(crate) enum StabilizationConnectionStep {
     /// Connect this bounded candidate, then re-enter the transition.
     Connect {
         /// Candidate admitted by this step.
+        ///
+        /// The caller may perform one connection effect for this DID before
+        /// re-entering [`StabilizationConnectionPlan::advance`].
         candidate: Did,
         /// Claimed report whose budget owns the effect.
+        ///
+        /// Effect handlers propagate this token so a later state transition can
+        /// reject the connection if the stabilization round was superseded.
         request_id: uuid::Uuid,
     },
     /// Every candidate was consumed while the claim remained current.
@@ -45,6 +108,11 @@ pub(crate) enum StabilizationConnectionStep {
 
 impl StabilizationConnectionPlan {
     /// Create a bounded candidate cursor for one claimed stabilization report.
+    ///
+    /// Candidates are consumed in report order after removing the local DID and
+    /// duplicates. The stored list is capped at `successor_capacity + 1`, which
+    /// gives the reported predecessor one possible slot without permitting an
+    /// unbounded number of connection effects from one report.
     pub(crate) fn new(
         reporter: Did,
         request_id: uuid::Uuid,
@@ -73,6 +141,10 @@ impl StabilizationConnectionPlan {
     }
 
     /// Return the next candidate only while the report claim is still current.
+    ///
+    /// A superseded reporter/token pair yields [`StabilizationConnectionStep::Stale`]
+    /// without advancing the cursor. A valid exhausted plan yields `Complete`;
+    /// otherwise exactly one candidate is returned and the cursor advances once.
     pub(crate) fn advance(&mut self, state: &TopologyState) -> StabilizationConnectionStep {
         if !state.is_processing_stabilization_report(self.reporter, self.request_id) {
             return StabilizationConnectionStep::Stale;
@@ -121,6 +193,11 @@ pub fn rectify_predecessor(local: Did, current: Option<Did>, candidate: Did) -> 
 }
 
 /// Correct successor list after one HMCC/Zave stabilize transition.
+///
+/// The candidate set combines the local node, current successors, the reported
+/// predecessor, and every reported successor except the reporter's terminal
+/// self entry. [`successors`] then removes duplicates, orders candidates by
+/// clockwise distance, and enforces `capacity`.
 pub fn stabilize_successors(
     local: Did,
     current: &[Did],
@@ -143,6 +220,10 @@ pub fn stabilize_successors(
 }
 
 /// Improved-successor query emitted by one HMCC/Zave stabilize transition.
+///
+/// A reported predecessor is queried only when it is neither `local` nor at or
+/// beyond the current head. This preserves strict clockwise improvement and
+/// avoids issuing a redundant query for the existing successor interval.
 pub fn stabilize_query(local: Did, current: &[Did], topo_predecessor: Option<Did>) -> Option<Did> {
     let pred = topo_predecessor?;
     if pred == local {
@@ -156,6 +237,9 @@ pub fn stabilize_query(local: Did, current: &[Did], topo_predecessor: Option<Did
 }
 
 /// Notify action emitted after one HMCC/Zave stabilize transition.
+///
+/// The nearest normalized successor is notified unless it is the local node.
+/// Empty or self-only successor lists therefore produce no network action.
 pub fn stabilize_notify(local: Did, next_successors: &[Did]) -> Option<Did> {
     next_successors.first().copied().filter(|&did| did != local)
 }
@@ -181,6 +265,10 @@ pub(super) fn stabilized_successor_proof_end(
 }
 
 /// Start a stabilization query against the current successor head.
+///
+/// A state with no remote head clears any obsolete request and emits no action.
+/// Otherwise the exact `(reporter, request_id)` pair is stored in `Requested`
+/// phase before the matching topology query is emitted.
 pub(super) fn step_begin(state: &TopologyState, request_id: uuid::Uuid) -> TopologyStep {
     let Some(reporter) = successor_head(state) else {
         return TopologyStep {
@@ -208,6 +296,10 @@ pub(super) fn step_begin(state: &TopologyState, request_id: uuid::Uuid) -> Topol
 }
 
 /// Move a matching stabilization report from requested to processing.
+///
+/// Only the exact current reporter and request token may claim the round. A
+/// mismatch leaves the state unchanged, while a match reserves the token for
+/// bounded connection effects and later application by [`step_stabilize`].
 pub(super) fn step_claim(
     state: &TopologyState,
     reporter: Did,
@@ -230,6 +322,13 @@ pub(super) fn step_claim(
 }
 
 /// Apply a successor topology report after optional token correlation.
+///
+/// Token-bearing reports must already own the current `Processing` claim or the
+/// entire transition is ignored. A valid report normalizes successor evidence,
+/// emits improvement and notification actions, updates finger hints, and proves
+/// the local finger range only when the reporter remains the head and reports
+/// `local` as its predecessor. The compatibility path without a token may refine
+/// successors but cannot establish finger proof.
 pub(super) fn step_stabilize(
     state: &TopologyState,
     reporter: Did,

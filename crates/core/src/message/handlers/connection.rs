@@ -18,7 +18,12 @@ use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 
-/// Shared topology-report admission helpers for connection handlers.
+/// Correlated topology-report admission and bounded candidate processing.
+///
+/// The submodule owns the request-token checks and connection-plan state
+/// machine used by topology reports. Keeping that flow separate prevents the
+/// general connection dispatcher from mutating DHT topology before transport
+/// evidence is current.
 mod topology_view;
 
 use topology_view::connect_successor_hint;
@@ -290,6 +295,12 @@ pub mod tests {
         Ok(())
     }
 
+    /// Proves that an advertised successor is connected only after the report
+    /// spends a registered token owned by its authenticated sender.
+    ///
+    /// The stale report is delivered first and must have no effect. The second
+    /// report uses an exact in-flight token and must connect and admit the
+    /// advertised successor.
     #[tokio::test]
     async fn test_sync_successor_report_requires_token_before_connecting_successor() -> Result<()> {
         let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys::<3>();
@@ -350,6 +361,11 @@ pub mod tests {
         Ok(())
     }
 
+    /// Proves that an uncorrelated stabilization report cannot trigger
+    /// transport admission or alter the local successor list.
+    ///
+    /// Node 2 advertises Node 3 with a token Node 1 never issued. After message
+    /// processing, Node 3 must remain disconnected and absent from Node 1's DHT.
     #[tokio::test]
     async fn test_stale_stabilization_report_does_not_start_advertised_connections() -> Result<()> {
         let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys::<3>();

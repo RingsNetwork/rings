@@ -11,12 +11,16 @@ fn did(value: u32) -> Did {
     Did::from(value)
 }
 
-/// Deterministic UUID fixture used as a correlation token.
+/// Convert an integer into a deterministic topology request UUID.
+///
+/// Distinct values make correlation and supersession assertions reproducible.
 fn request_id(value: u128) -> uuid::Uuid {
     uuid::Uuid::from_u128(value)
 }
 
-/// Build a finger-convergence tick whose request ID is derived from `now_ms`.
+/// Build a convergence tick with deterministic time and identity inputs.
+///
+/// Coupling the UUID to `now_ms` prevents accidental token reuse in clock tests.
 fn advance(now_ms: u64) -> TopologyEvent {
     TopologyEvent::AdvanceFingerConvergence {
         now_ms,
@@ -36,6 +40,9 @@ fn state(
 }
 
 /// Prepare one artificial in-flight finger lookup for a selected slot.
+///
+/// All other slots are marked verified so production selection must issue the
+/// requested slot and provide a valid owner token for report tests.
 fn issue_request(current: &mut TopologyState, slot: usize, now_ms: u64) -> FingerFixRequest {
     // Mark every other slot verified so the requested slot is the only eligible
     // lookup target for this fixture.
@@ -121,6 +128,8 @@ fn test_join_step_refines_successor_distance_vector() {
     assert!(refines_successor_distances(&current, &next.state));
 }
 
+/// Verifies that stabilization replaces a farther successor with a reported
+/// predecessor and strictly refines the clockwise successor-distance vector.
 #[test]
 fn test_stabilize_step_refines_successor_distance_vector() {
     let local = did(0);
@@ -282,6 +291,8 @@ fn test_remove_step_replaces_unavailable_head_with_validated_successors_only() {
     )]);
 }
 
+/// Verifies that one admission transition atomically joins the peer, applies
+/// its retained finger proof, and emits the required topology actions.
 #[test]
 fn test_admit_step_commits_join_and_pending_fingers_in_one_state() {
     let local = did(0);
@@ -316,6 +327,8 @@ fn test_admit_step_commits_join_and_pending_fingers_in_one_state() {
     ]);
 }
 
+/// Verifies that admitting a deferred proof cannot overwrite a finger hint
+/// whose evidence epoch advanced after the proof was retained.
 #[test]
 fn test_admit_step_does_not_overwrite_finger_changed_after_update_was_deferred() {
     let local = did(0);
@@ -356,6 +369,10 @@ fn test_admit_step_does_not_overwrite_finger_changed_after_update_was_deferred()
     assert_eq!(next.state.fingers[4], Some(fresher));
 }
 
+/// Prove an isolated sparse table stays pending without emitting an invalid route.
+///
+/// With no successor witness, the reducer preserves its cursor and unknown slots
+/// while remaining dormant until topology evidence arrives.
 #[test]
 fn test_fix_finger_step_keeps_isolated_sparse_range_unverified_and_dormant() {
     let local = did(0);
@@ -372,6 +389,10 @@ fn test_fix_finger_step_keeps_isolated_sparse_range_unverified_and_dormant() {
     assert!(next.actions.is_empty());
 }
 
+/// Prove a remote finger action carries the selected range's correlation token.
+///
+/// The only unverified slot determines the lower-bound DID, next hop, and exact
+/// request identity required to validate the eventual report.
 #[test]
 fn test_fix_finger_step_emits_correlated_remote_action() {
     let local = did(0);
@@ -399,6 +420,8 @@ fn test_fix_finger_step_emits_correlated_remote_action() {
     }]);
 }
 
+/// Verifies that a finger lookup target is computed relative to the local DID
+/// and routed through the current next hop with its correlation token intact.
 #[test]
 fn test_fix_finger_step_queries_local_relative_probe() {
     let local = did(100);
@@ -426,6 +449,10 @@ fn test_fix_finger_step_queries_local_relative_probe() {
     }]);
 }
 
+/// Prove one valid distance proof updates every covered finger slot.
+///
+/// A successor for slot two also proves slot three, witnessing range application
+/// instead of one-result-per-slot mutation.
 #[test]
 fn test_apply_finger_step_updates_every_slot_proved_by_distance() {
     let local = did(0);
@@ -452,6 +479,10 @@ fn test_apply_finger_step_updates_every_slot_proved_by_distance() {
     assert!(next.actions.is_empty());
 }
 
+/// Prove invalid, replayed, and out-of-range reports cannot mutate finger slots.
+///
+/// Insufficient correlated evidence enters backoff; its replay and an impossible
+/// slot are then rejected without additional state change.
 #[test]
 fn test_apply_finger_step_rejects_stale_and_invalid_results() {
     let local = did(0);
@@ -513,6 +544,10 @@ fn test_find_successor_falls_back_to_successor_head_when_no_finger_precedes_targ
     });
 }
 
+/// Prove a local-successor range waits for authenticated stabilization evidence.
+///
+/// The convergence tick emits no route around the ring; only the claimed current
+/// head report may verify locally covered slots.
 #[test]
 fn test_local_successor_range_waits_for_stabilization_instead_of_routing_around_ring() {
     let local = did(0);
@@ -571,6 +606,10 @@ fn test_local_successor_range_waits_for_stabilization_instead_of_routing_around_
     );
 }
 
+/// Prove a superseded stabilization token cannot verify the local successor range.
+///
+/// The stale report preserves evidence, while claiming and consuming the current
+/// token verifies the same slots and isolates correlation as the decisive input.
 #[test]
 fn test_stale_stabilization_report_cannot_verify_the_local_successor_range() {
     let local = did(0);
@@ -780,6 +819,8 @@ fn assert_head_law(before: &TopologyState, next: &TopologyStep) {
     }
 }
 
+/// Verifies that admission emits `SuccessorHeadChanged` exactly when the
+/// admitted peer becomes the new closest clockwise successor.
 #[test]
 fn test_admit_step_reports_head_change_only_when_the_head_moves() {
     let local = did(0);
@@ -816,6 +857,8 @@ fn test_admit_step_reports_head_change_only_when_the_head_moves() {
         .any(|action| matches!(action, TopologyAction::SuccessorHeadChanged(_))));
 }
 
+/// Verifies that a stabilization report announces a head change when the
+/// reporter's predecessor lies before the previous successor head.
 #[test]
 fn test_stabilize_step_reports_head_change_when_reported_predecessor_precedes_head() {
     let local = did(0);
@@ -858,6 +901,8 @@ fn test_remove_step_reports_head_change_to_the_surviving_successor() {
     )]);
 }
 
+/// Verifies that predecessor notification and finger-maintenance transitions
+/// never emit a successor-head change for an unchanged successor set.
 #[test]
 fn test_predecessor_and_finger_steps_never_report_a_head_change() {
     let local = did(0);

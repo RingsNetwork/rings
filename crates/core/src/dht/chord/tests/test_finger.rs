@@ -13,6 +13,8 @@ fn connect_and_hand_off(peer: Did, local: Did) -> PeerRingAction {
     ])
 }
 
+/// Verifies that joins update finger hints in clockwise order across both the
+/// ordinary interval and the identifier-space wraparound boundary.
 #[tokio::test]
 async fn test_finger_table_tracks_clockwise_and_wrapped_joins() -> Result<()> {
     let a = Did::from_str("0x00E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
@@ -106,6 +108,11 @@ async fn test_finger_table_tracks_clockwise_and_wrapped_joins() -> Result<()> {
     Ok(())
 }
 
+/// Proves that the public `fix_fingers` operation starts revalidation and
+/// advances exactly far enough to emit its first routable range lookup.
+///
+/// The fixture has one remote seed, making the expected next hop unambiguous;
+/// observing `FindSuccessorForFix` witnesses the legacy one-call contract.
 #[test]
 fn test_public_fix_fingers_advances_one_range() -> Result<()> {
     // This public API regression protects the legacy `fix_fingers()` contract: a caller that asks
@@ -127,6 +134,11 @@ fn test_public_fix_fingers_advances_one_range() -> Result<()> {
     Ok(())
 }
 
+/// Proves that beginning revalidation changes convergence state without
+/// bypassing the independently paced lookup scheduler.
+///
+/// The test expects no immediate remote action, then checks that pending work
+/// is visible for a later `advance_finger_convergence` call.
 #[test]
 fn test_begin_finger_revalidation_does_not_emit_a_lookup() -> Result<()> {
     let local = Did::from(0u32);

@@ -21,6 +21,11 @@ fn test_stabilize_handles_empty_successor_info() -> Result<()> {
     Ok(())
 }
 
+/// Proves that one stabilization correlation token authorizes at most one
+/// report handler to spend its bounded connection budget.
+///
+/// The first exact claim must succeed and atomically move the request into its
+/// processing phase; replaying the same authenticated pair must fail.
 #[test]
 fn test_stabilization_report_claim_is_single_use() -> Result<()> {
     let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
@@ -35,6 +40,11 @@ fn test_stabilization_report_claim_is_single_use() -> Result<()> {
     Ok(())
 }
 
+/// Proves that successor-list churn revokes reports registered against the
+/// previous successor snapshot.
+///
+/// The test registers a sync request, changes the successor set, and verifies
+/// that the old reporter/token pair can no longer be claimed.
 #[test]
 fn test_successor_change_invalidates_an_outstanding_sync_report() -> Result<()> {
     let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
@@ -51,6 +61,8 @@ fn test_successor_change_invalidates_an_outstanding_sync_report() -> Result<()> 
     Ok(())
 }
 
+/// Verifies that repeated stabilization over the representative Chord fixture
+/// leaves every node with the expected immediate and backup successors.
 #[tokio::test]
 async fn test_correct_chord_maintains_expected_successors() -> Result<()> {
     fn has_successor(dht: &PeerRing, did: Did) -> bool {

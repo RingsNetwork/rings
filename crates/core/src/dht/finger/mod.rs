@@ -46,6 +46,10 @@ pub struct FingerTable {
     /// Cursor used by periodic maintenance to resume range revalidation.
     pub(super) fix_finger_index: usize,
     /// Verification and retry state attached to the inferred hints.
+    ///
+    /// This serialized state binds every hint to freshness evidence, owns at
+    /// most one maintenance request, and preserves retry pacing across topology
+    /// transitions.
     convergence: FingerConvergenceState,
 }
 
@@ -83,6 +87,11 @@ impl FingerTable {
     }
 
     /// Apply a hint mutation and invalidate only evidence touched by it.
+    ///
+    /// The complete pre-mutation hint vector is retained long enough to compare
+    /// each slot after `mutation` runs. The convergence state then advances only
+    /// evidence whose corresponding hint changed and retires ownership when its
+    /// proof premise was invalidated.
     fn mutate_hints(&mut self, mutation: impl FnOnce(&mut Vec<Option<Did>>)) {
         let before = self.finger.clone();
         mutation(&mut self.finger);
@@ -186,11 +195,19 @@ impl FingerTable {
     }
 
     /// Borrow the convergence state associated with these finger hints.
+    ///
+    /// The immutable borrow lets topology and scheduling code inspect evidence,
+    /// ownership, and retry projections without bypassing `FingerTable`'s hint
+    /// mutation boundary.
     pub(crate) fn convergence_state(&self) -> &FingerConvergenceState {
         &self.convergence
     }
 
     /// Prepare an exact slot request through the real convergence path.
+    ///
+    /// Test fixtures use a fixed monotonic timestamp and fresh UUID while the
+    /// production state machine handles verification flags, attempt ownership,
+    /// and pacing. An invalid slot returns `None` without creating work.
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn prepare_request_for_test(
         &mut self,

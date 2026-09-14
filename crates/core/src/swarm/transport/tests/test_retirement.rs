@@ -158,6 +158,10 @@ async fn test_retirement_shuts_down_outbound_scheduler_for_departed_peer() -> Re
     Ok(())
 }
 
+/// Prove a failed DHT retirement leaves connection and deferred-proof ownership intact.
+///
+/// The injected transition error must preserve the active generation, liveness
+/// record, and its pending finger request so the operation is transaction-like.
 #[tokio::test]
 async fn test_failed_dht_retirement_preserves_active_peer_state() -> Result<()> {
     let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;

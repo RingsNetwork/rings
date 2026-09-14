@@ -1,10 +1,17 @@
 //! Regression tests for finger proofs that wait on transport admission.
+//!
+//! These cases separate proof ownership from handshake timing and verify that
+//! only matching admission, cancellation, or timeout can consume retained evidence.
 
 use super::*;
 use crate::dht::finger::FingerConvergencePhase;
 use crate::dht::finger::FingerReportRejection;
 use crate::dht::finger::FingerRetireOutcome;
 
+/// Prove a timely proof remains valid throughout a long transport handshake.
+///
+/// Deferral transfers ownership to admission, whose matching atomic transition may
+/// commit after the original lookup deadline has elapsed.
 #[test]
 fn test_timely_finger_proof_survives_a_long_handshake_until_atomic_admission() {
     let local = did(0);
@@ -67,6 +74,10 @@ fn test_timely_finger_proof_survives_a_long_handshake_until_atomic_admission() {
     assert_eq!(projection.failure_streak, 0);
 }
 
+/// Prove a conflicting duplicate cannot replace a retained admission proof.
+///
+/// Once the first candidate owns the token, another successor using that request
+/// is rejected while the legitimate candidate remains able to commit.
 #[test]
 fn test_conflicting_duplicate_cannot_evict_a_retained_finger_proof() {
     let local = did(0);
@@ -113,6 +124,10 @@ fn test_conflicting_duplicate_cannot_evict_a_retained_finger_proof() {
     );
 }
 
+/// Prove an unroutable duplicate cannot retire the current admission owner.
+///
+/// Conflicting evidence is stale by correlation and leaves the original deferred
+/// request available for legitimate completion.
 #[test]
 fn test_unroutable_conflicting_duplicate_cannot_retire_admission_owner() {
     let local = did(0);
@@ -147,6 +162,10 @@ fn test_unroutable_conflicting_duplicate_cannot_retire_admission_owner() {
     assert_eq!(projection.failure_streak, 1);
 }
 
+/// Prove an abandoned deferred proof expires into bounded retry backoff.
+///
+/// Reaching the admission lease boundary clears ownership, increments failure
+/// history, and schedules the next eligible convergence turn.
 #[test]
 fn test_abandoned_deferred_finger_proof_expires_into_backoff() {
     let local = did(0);
@@ -183,6 +202,10 @@ fn test_abandoned_deferred_finger_proof_expires_into_backoff() {
     assert_eq!(projection.retry_not_before_ms, Some(183_001));
 }
 
+/// Prove consecutive deferred-handshake failures accumulate exponential backoff.
+///
+/// Each proof is deferred and cancelled independently; the second failure must
+/// retain the first failure's history instead of restarting at zero.
 #[test]
 fn test_repeated_deferred_handshake_failures_accumulate_backoff() {
     let local = did(0);
@@ -246,6 +269,10 @@ fn test_repeated_deferred_handshake_failures_accumulate_backoff() {
     assert_eq!(projection.retry_not_before_ms, Some(7_004));
 }
 
+/// Prove cancellation releases a deferred proof and applies failure backoff.
+///
+/// The matching token relinquishes admission ownership but cannot issue another
+/// lookup until the production delay has elapsed.
 #[test]
 fn test_cancelled_handshake_releases_deferred_proof_with_backoff() {
     let local = did(0);

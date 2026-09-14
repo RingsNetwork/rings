@@ -31,7 +31,11 @@ async fn transport_with_routable_peer(
 }
 
 #[cfg(feature = "dummy")]
-/// Prepare a live finger-fix request for tests that exercise transport admission.
+/// Prepare a live finger-fix request for lifecycle/transport admission tests.
+///
+/// The helper enters the same `AwaitingReport` state used by production and
+/// fails explicitly if `slot` cannot begin a request, preventing a test from
+/// manufacturing an uncorrelated token.
 fn finger_request(transport: &SwarmTransport, slot: usize) -> Result<FingerFixRequest> {
     transport
         .dht
@@ -369,6 +373,10 @@ fn test_terminal_send_marker_is_generation_scoped_and_survives_until_retirement(
 }
 
 #[cfg(feature = "dummy")]
+/// Prove a send-terminal generation cannot re-enter predecessor or finger topology.
+///
+/// Both topology entry points execute after terminal send evidence is recorded,
+/// so neither notification nor a valid finger report may restore the peer.
 #[tokio::test]
 async fn test_terminal_send_generation_cannot_reenter_topology() -> Result<()> {
     let (transport, peer, attempt) = transport_with_routable_peer().await?;
@@ -935,6 +943,11 @@ async fn test_routable_join_serializes_with_generation_retirement() -> Result<()
 }
 
 #[cfg(feature = "dummy")]
+/// Prove correlated topology stabilization serializes with generation retirement.
+///
+/// The test holds the lifecycle gate after report confirmation, queues
+/// retirement behind it, and verifies retirement removes every committed peer
+/// reference once the stabilization transition finishes.
 #[tokio::test]
 async fn test_topology_report_serializes_with_generation_retirement() -> Result<()> {
     let (transport, peer, attempt) = transport_with_routable_peer().await?;
@@ -996,4 +1009,8 @@ async fn test_predecessor_notification_serializes_with_generation_retirement() -
 }
 
 #[cfg(feature = "dummy")]
+/// Finger-specific transport lifecycle regression tests.
+///
+/// The child module checks that deferred proofs follow the exact connection
+/// generation that owns admission, cancellation, or retirement.
 mod finger;

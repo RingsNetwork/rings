@@ -7,6 +7,25 @@
 //! `AwaitingReport -> Idle` is also allowed for direct application, timeout,
 //! cancellation, or topology invalidation. There is no representation in
 //! which a lookup and an admission proof are active simultaneously.
+//!
+//! # Algorithm flow
+//!
+//! ```text
+//! Idle
+//!   | emit request(slot, UUID, epoch, deadline)
+//!   v
+//! AwaitingReport
+//!   |---- timeout / cancel / invalidation ----------------------> Idle
+//!   | validate exact token and deadline
+//!   v
+//! Report proof source
+//!   |---- direct commit ----------------------------------------> Idle
+//!   | retain validated proof and admission deadline
+//!   v
+//! AwaitingAdmission
+//!   |---- admit / retire / timeout -----------------------------> Idle
+//!   +---- mismatched duplicate ----------------------------> unchanged
+//! ```
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -20,10 +39,16 @@ use crate::dht::Did;
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub(super) struct PendingFingerLookup {
     /// Correlation token emitted with the lookup.
+    ///
+    /// Both its slot and UUID must match before a report can consume ownership.
     request: FingerFixRequest,
     /// Evidence epoch observed when the lookup was issued.
+    ///
+    /// Later hint changes use this snapshot to reject stale slot updates.
     issued_epoch: u64,
     /// Monotonic deadline after which the report is no longer current.
+    ///
+    /// It is compared only against caller-supplied process-monotonic time.
     expires_at_ms: u64,
 }
 
@@ -31,8 +56,12 @@ pub(super) struct PendingFingerLookup {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub(super) struct AdmissionFingerProof {
     /// Range proof already checked against Chord geometry and evidence epochs.
+    ///
+    /// The value binds admission to its request, successor, epoch, and range.
     proof: FingerRangeProof,
     /// Monotonic deadline for assigning the candidate to a connection.
+    ///
+    /// Expiry releases ownership and becomes retry pressure in the outer state.
     expires_at_ms: u64,
 }
 
@@ -43,47 +72,80 @@ pub(super) enum FingerAttempt {
     #[default]
     Idle,
     /// A lookup was emitted and is waiting for its correlated report.
-    AwaitingReport(PendingFingerLookup),
+    AwaitingReport(
+        /// Owned report-phase data binding the request to its issue epoch and
+        /// process-monotonic deadline.
+        PendingFingerLookup,
+    ),
     /// A timely report is retained while its candidate is admitted.
-    AwaitingAdmission(AdmissionFingerProof),
+    AwaitingAdmission(
+        /// Owned admission-phase data binding a validated proof to its bounded
+        /// transport decision window.
+        AdmissionFingerProof,
+    ),
 }
 
 /// Attempt information needed to validate a reported successor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum FingerProofSource {
     /// A fresh report needs the Chord range lemma applied to it.
+    ///
+    /// Ownership and expiry are checked, but geometry and evidence remain for
+    /// the caller to validate.
     Report {
         /// Evidence epoch captured when the lookup left the state machine.
+        ///
+        /// This value bounds the hint revisions the resulting proof may update.
         issued_epoch: u64,
     },
     /// A previously validated report already owns its proved range.
-    Admission(FingerRangeProof),
+    ///
+    /// It may be committed after exact admission ownership and deadline checks.
+    Admission(
+        /// Complete retained range proof whose request and successor already
+        /// matched the active admission lease.
+        FingerRangeProof,
+    ),
 }
 
 /// Scheduler-facing projection of the active attempt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum FingerAttemptStatus {
     /// No request or admission lease exists.
+    ///
+    /// Emission still depends on evidence and retry pacing outside this enum.
     Idle,
     /// A lookup report has not arrived yet.
+    ///
+    /// Additional lookups are suppressed until this phase is consumed or expires.
     AwaitingReport {
         /// Saturating duration until the report deadline.
+        ///
+        /// Zero signals expiry without allowing arithmetic underflow.
         remaining_ms: u64,
     },
     /// A report was validated and is waiting for transport admission.
+    ///
+    /// No hint is committed until the outer transport accepts the candidate.
     AwaitingAdmission {
         /// Saturating duration until the admission lease deadline.
+        ///
+        /// Zero signals expiry without exposing an absolute clock origin.
         remaining_ms: u64,
     },
 }
 
 impl FingerAttempt {
     /// Return true only when no token owns convergence work.
+    ///
+    /// This pure phase predicate does not inspect evidence, pacing, or expiry.
     pub(super) const fn is_idle(self) -> bool {
         matches!(self, Self::Idle)
     }
 
     /// Return the token that owns the active phase, if any.
+    ///
+    /// Admission ownership returns the request embedded in its retained proof.
     pub(super) const fn request(self) -> Option<FingerFixRequest> {
         match self {
             Self::Idle => None,
@@ -98,6 +160,7 @@ impl FingerAttempt {
     /// owns any geometrically valid answer. Once retained for admission, both
     /// token and successor are fixed; a conflicting duplicate must not evict
     /// the retained proof.
+    /// Expiry, geometry, and evidence are intentionally checked elsewhere.
     pub(super) fn can_consume(self, request: FingerFixRequest, successor: Did) -> bool {
         match self {
             Self::Idle => false,
@@ -109,6 +172,9 @@ impl FingerAttempt {
     }
 
     /// Construct a newly emitted lookup phase.
+    ///
+    /// The epoch snapshots evidence freshness, while `expires_at_ms` is the
+    /// absolute process-monotonic report deadline supplied by the caller.
     pub(super) const fn awaiting_report(
         request: FingerFixRequest,
         issued_epoch: u64,
@@ -122,6 +188,9 @@ impl FingerAttempt {
     }
 
     /// Drop or clamp restored ownership state after a table-width change.
+    ///
+    /// Out-of-range requests and reversed ranges are discarded. A valid
+    /// admission proof keeps its lower slot and clamps its upper slot.
     pub(super) fn normalize(&mut self, slot_count: usize) {
         let Some(request) = self.request() else {
             return;
@@ -140,6 +209,9 @@ impl FingerAttempt {
     }
 
     /// Return the active phase and its remaining lease from `now_ms`.
+    ///
+    /// Saturating subtraction projects overdue phases as zero without mutating
+    /// or implicitly expiring ownership.
     pub(super) const fn status(self, now_ms: u64) -> FingerAttemptStatus {
         match self {
             Self::Idle => FingerAttemptStatus::Idle,
@@ -153,6 +225,8 @@ impl FingerAttempt {
     }
 
     /// Return whether the active phase has reached its monotonic deadline.
+    ///
+    /// Idle never expires; an active phase expires at or after its deadline.
     pub(super) const fn is_expired(self, now_ms: u64) -> bool {
         match self {
             Self::Idle => false,
@@ -167,6 +241,8 @@ impl FingerAttempt {
     /// this is the first place a reported successor can be evaluated. For
     /// `AwaitingAdmission`, the successor is part of the retained proof and
     /// must match exactly before the caller may consume the lease.
+    /// Matching expired ownership returns `Expired`; all mismatches return
+    /// `Stale` without changing this value.
     pub(super) fn proof_source(
         self,
         request: FingerFixRequest,
@@ -199,6 +275,9 @@ impl FingerAttempt {
     }
 
     /// Replace lookup ownership with an admission lease for the same proof.
+    ///
+    /// The proof must already satisfy token, geometry, and evidence validation.
+    /// This transition stores no transport handle and performs no side effect.
     pub(super) fn retain_for_admission(&mut self, proof: FingerRangeProof, expires_at_ms: u64) {
         *self = Self::AwaitingAdmission(AdmissionFingerProof {
             proof,
@@ -207,6 +286,9 @@ impl FingerAttempt {
     }
 
     /// Return true when a duplicate admission path is already holding `proof`.
+    ///
+    /// Equality covers token, epoch, successor, and range end, so a conflicting
+    /// duplicate cannot share ownership.
     pub(super) fn already_retains(self, proof: FingerRangeProof) -> bool {
         matches!(
             self,
@@ -215,11 +297,17 @@ impl FingerAttempt {
     }
 
     /// Release any active ownership phase.
+    ///
+    /// Evidence and retry state are untouched; the outer convergence transition
+    /// decides whether release represents failure or progress.
     pub(super) fn clear(&mut self) {
         *self = Self::Idle;
     }
 
     /// Release ownership only if `request` matches the active token.
+    ///
+    /// The return value is true exactly when a phase was cleared. Stale tokens
+    /// are no-ops and cannot cancel newer work.
     pub(super) fn clear_if_owned(&mut self, request: FingerFixRequest) -> bool {
         if self.request() == Some(request) {
             self.clear();
@@ -230,6 +318,9 @@ impl FingerAttempt {
     }
 
     /// Release ownership if its lower slot has been verified elsewhere.
+    ///
+    /// The inclusive range acts as equivalent local proof. The result tells the
+    /// caller whether active ownership was superseded.
     pub(super) fn clear_if_slot_in(&mut self, start: usize, end: usize) -> bool {
         if self
             .request()
@@ -243,6 +334,9 @@ impl FingerAttempt {
     }
 
     /// Project active ownership into simple fields for state-machine tests.
+    ///
+    /// Report and admission fields cannot both be populated, preserving phase
+    /// exclusivity while exposing copied values only.
     #[cfg(test)]
     pub(super) const fn projection(
         self,

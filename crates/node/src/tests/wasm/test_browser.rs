@@ -39,6 +39,13 @@ async fn test_two_provider_connect_and_list() {
     assert_eq!(peers.len(), 0);
 }
 
+/// Verifies that browser listener generations serialize startup and release
+/// the provider gate after cooperative shutdown.
+///
+/// The test first holds the gate as a synthetic old generation and proves the
+/// replacement's `started` promise stays pending. It then releases the gate,
+/// waits for startup, stops the listener, and repeats the full lifecycle three
+/// times to prove cleanup does not leave the gate permanently owned.
 #[wasm_bindgen_test]
 async fn test_provider_listener_handle_requests_stop() {
     let provider = new_provider().await;

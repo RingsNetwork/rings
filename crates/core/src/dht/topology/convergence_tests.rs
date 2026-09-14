@@ -1,4 +1,7 @@
 //! End-to-end convergence tests for the pure topology and finger operators.
+//!
+//! The fixtures compare each production transition with a complete membership
+//! oracle while counting routed lookups and exercising retry boundaries.
 
 use num_bigint::BigUint;
 
@@ -6,17 +9,23 @@ use super::*;
 use crate::dht::finger::FingerApplyOutcome;
 use crate::dht::finger::FingerReportRejection;
 
-/// Compact DID fixture for small integer rings.
+/// Convert a small integer into the deterministic DID used by compact rings.
+///
+/// The helper keeps topology examples readable without changing DID ordering.
 fn did(value: u32) -> Did {
     Did::from(value)
 }
 
-/// Deterministic UUID fixture used as a correlation token.
+/// Convert an integer into a deterministic request-correlation UUID.
+///
+/// Distinct inputs model distinct effect-boundary identities without randomness.
 fn request_id(value: u128) -> uuid::Uuid {
     uuid::Uuid::from_u128(value)
 }
 
-/// Build a finger-convergence tick whose request ID is derived from `now_ms`.
+/// Build a finger-convergence tick at `now_ms` with a matching deterministic ID.
+///
+/// Tests needing an identity independent of time construct the event directly.
 fn advance(now_ms: u64) -> TopologyEvent {
     TopologyEvent::AdvanceFingerConvergence {
         now_ms,
@@ -24,7 +33,10 @@ fn advance(now_ms: u64) -> TopologyEvent {
     }
 }
 
-/// Build a topology state with fresh finger-convergence metadata.
+/// Build a topology state from explicit ring views and fresh convergence metadata.
+///
+/// The production constructor initializes proof, retry, and in-flight state;
+/// `fix_finger_index` supplies only the persisted legacy cursor.
 fn state(
     local: Did,
     successors: Vec<Did>,
@@ -35,7 +47,10 @@ fn state(
     TopologyState::new(local, successors, predecessor, fingers, fix_finger_index)
 }
 
-/// Extract the single finger lookup request emitted by a topology step.
+/// Extract the only finger lookup request emitted by a topology transition.
+///
+/// The helper fails when action cardinality or type differs because either shape
+/// violates the fixture's single-emission contract.
 fn emitted_finger_request(output: &TopologyStep) -> FingerFixRequest {
     match output.actions.as_slice() {
         [TopologyAction::FindSuccessorForFix { request, .. }] => *request,
@@ -43,7 +58,10 @@ fn emitted_finger_request(output: &TopologyStep) -> FingerFixRequest {
     }
 }
 
-/// Drive stabilization plus finger lookups against an oracle membership set.
+/// Drive production stabilization and finger lookup transitions to convergence.
+///
+/// The membership slice supplies only oracle answers; all mutation passes through
+/// [`step`]. The returned count witnesses the lookup-per-proved-range bound.
 fn converge_with_oracle(mut current: TopologyState, all: &[Did]) -> (TopologyState, usize) {
     let mut lookups = 0usize;
     // A sparse bootstrap seed may first require up to one stabilization head
@@ -130,7 +148,9 @@ fn converge_with_oracle(mut current: TopologyState, all: &[Did]) -> (TopologySta
     (current, lookups)
 }
 
-/// Count contiguous runs in a sparse finger table.
+/// Count contiguous equal-value runs in a sparse finger table.
+///
+/// Each run is one range coverable by a successor proof, including unknown slots.
 fn distinct_ranges(fingers: &[Option<Did>]) -> usize {
     fingers
         .iter()
@@ -144,6 +164,10 @@ fn distinct_ranges(fingers: &[Option<Did>]) -> usize {
         .count()
 }
 
+/// Prove a five-node bootstrap needs one stabilization proof and one lookup.
+///
+/// The fixture straddles the highest finger boundary so exactly two ranges expose
+/// any redundant routed convergence request.
 #[test]
 fn test_five_node_bootstrap_uses_one_stabilization_proof_and_one_routed_lookup() {
     let local = Did::from(BigUint::from(0u8));
@@ -174,6 +198,10 @@ fn test_five_node_bootstrap_uses_one_stabilization_proof_and_one_routed_lookup()
     assert_eq!(lookups, 1);
 }
 
+/// Prove joining from isolation invalidates every formerly unknown range proof.
+///
+/// A far peer hidden from the seed must become visible after joining, showing that
+/// isolated-state evidence is never reused as verified.
 #[test]
 fn test_join_after_isolation_revalidates_every_previously_unknown_range() {
     let local = Did::from(BigUint::from(0u8));
@@ -210,6 +238,10 @@ fn test_join_after_isolation_revalidates_every_previously_unknown_range() {
     assert_eq!(lookups, 1);
 }
 
+/// Prove rejoining after successor loss discards old empty-range evidence.
+///
+/// The node reconverges against a different ring whose far member requires at
+/// least one fresh routed lookup.
 #[test]
 fn test_finger_rejoin_after_losing_last_successor_discards_old_empty_range_proofs() {
     let local = did(0);
@@ -262,6 +294,10 @@ fn test_finger_rejoin_after_losing_last_successor_discards_old_empty_range_proof
     assert!(lookups >= 1);
 }
 
+/// Prove restart creates a new request identity and rejects the old report.
+///
+/// Reconstructed topology hints omit scheduler ownership, so delayed traffic
+/// from the previous process cannot mutate the new table.
 #[test]
 fn test_restart_uses_a_new_request_identity_and_rejects_the_old_report() {
     let local = did(0);
@@ -300,6 +336,10 @@ fn test_restart_uses_a_new_request_identity_and_rejects_the_old_report() {
     assert_eq!(current_outcome, FingerApplyOutcome::Applied { end: 3 });
 }
 
+/// Prove a report received exactly at its deadline expires without a timer poll.
+///
+/// Boundary-time delivery preserves slots, clears ownership, and enters the same
+/// bounded backoff as explicit timeout cleanup.
 #[test]
 fn test_finger_report_at_deadline_expires_without_a_scheduler_poll() {
     let local = did(0);
@@ -337,6 +377,10 @@ fn test_finger_report_at_deadline_expires_without_a_scheduler_poll() {
     );
 }
 
+/// Prove dense-ring convergence emits at most one lookup per finger range.
+///
+/// A member at every power-of-two boundary makes redundant requests observable
+/// while the final table remains directly comparable with the oracle.
 #[test]
 fn test_dense_ring_converges_with_at_most_one_remote_lookup_per_range() {
     let local = did(0);
@@ -362,6 +406,10 @@ fn test_dense_ring_converges_with_at_most_one_remote_lookup_per_range() {
     assert_eq!(lookups, distinct_ranges(&expected).saturating_sub(1));
 }
 
+/// Prove insertion and removal invalidate only slots whose oracle value changes.
+///
+/// Unaffected slots retain verified evidence while changed ranges reconverge to
+/// the exact membership-derived table.
 #[test]
 fn test_insertion_and_removal_invalidate_only_changed_finger_slots() {
     let local = did(0);
@@ -409,14 +457,19 @@ fn test_insertion_and_removal_invalidate_only_changed_finger_slots() {
     );
 }
 
-/// Oracle finger table truncated to the test table width.
+/// Compute the oracle finger table at the configured fixture width.
+///
+/// Truncation occurs only after the shared full-ring oracle selects successors.
 fn expected_fingers(all: &[Did], local: Did, slot_count: usize) -> Vec<Option<Did>> {
     let mut expected = finger_table(all, local);
     expected.truncate(slot_count);
     expected
 }
 
-/// Fully converged topology state predicted directly from the membership oracle.
+/// Build a fully converged topology state from the membership oracle.
+///
+/// Successors, predecessor, and fingers are derived independently of the reducer
+/// under test, providing a stable mutation starting point.
 fn oracle_state(all: &[Did], local: Did, slot_count: usize) -> TopologyState {
     state(
         local,
@@ -427,6 +480,10 @@ fn oracle_state(all: &[Did], local: Did, slot_count: usize) -> TopologyState {
     )
 }
 
+/// Prove sparse and dense mutation matrices converge to the same oracle law.
+///
+/// Shared broad ranges and one-node-per-slot ranges exercise proof reuse and
+/// fine-grained invalidation under identical joins and removals.
 #[test]
 fn test_sparse_and_dense_mutation_matrix_converges_to_finger_table_oracle() {
     let local = did(0);
@@ -482,6 +539,10 @@ fn test_sparse_and_dense_mutation_matrix_converges_to_finger_table_oracle() {
     }
 }
 
+/// Prove join and removal preserve oracle convergence across the ring wrap point.
+///
+/// A local DID near `2^160` forces modular successor intervals to cross zero for
+/// both insertion and subsequent removal.
 #[test]
 fn test_wrapped_ring_mutations_converge_to_the_finger_table_oracle() {
     // Start near the end of Z/2^160 so the local successor interval wraps.
@@ -527,6 +588,10 @@ fn test_wrapped_ring_mutations_converge_to_the_finger_table_oracle() {
     assert_eq!(after_remove.fingers, finger_table(&initial_members, local));
 }
 
+/// Prove topology mutation rejects a lookup result issued for the previous view.
+///
+/// A closer peer invalidates the in-flight range before delivery, so the stale
+/// report must preserve the replacement finger and all current state.
 #[test]
 fn test_topology_change_rejects_an_in_flight_stale_range_result() {
     let local = did(0);
@@ -564,6 +629,10 @@ fn test_topology_change_rejects_an_in_flight_stale_range_result() {
     assert_eq!(stale.fingers.get(1).copied().flatten(), Some(closer));
 }
 
+/// Prove only one lookup may be in flight and retry emission is time bounded.
+///
+/// Requests remain suppressed through expiry and backoff, then exactly one newly
+/// correlated lookup is emitted at the eligible boundary.
 #[test]
 fn test_finger_lookup_has_one_in_flight_request_and_a_bounded_retry() {
     let local = did(0);
@@ -599,6 +668,10 @@ fn test_finger_lookup_has_one_in_flight_request_and_a_bounded_retry() {
     assert_ne!(first, retry);
 }
 
+/// Prove periodic revalidation verifies a locally covered range without routing.
+///
+/// A new pass invalidates prior evidence, but the successor head immediately
+/// proves its slots and therefore emits no network action.
 #[test]
 fn test_periodic_revalidation_marks_a_range_without_emitting_a_lookup() {
     let local = did(0);
@@ -641,6 +714,10 @@ fn test_periodic_revalidation_marks_a_range_without_emitting_a_lookup() {
     );
 }
 
+/// Prove cancellation cannot bypass the per-node minimum lookup interval.
+///
+/// Clearing ownership does not permit immediate re-emission; both the rate floor
+/// and cancellation backoff must allow the next request.
 #[test]
 fn test_cancelled_finger_lookup_still_obeys_the_per_node_rate_limit() {
     let local = did(0);
@@ -674,6 +751,10 @@ fn test_cancelled_finger_lookup_still_obeys_the_per_node_rate_limit() {
     );
 }
 
+/// Prove persistent send failures obey capped exponential retry scheduling.
+///
+/// Repeated cancellation models failed dispatch and compares every delay with the
+/// production backoff function through saturation.
 #[test]
 fn test_persistent_send_failures_have_a_capped_exponential_emission_bound() {
     let local = did(0);
@@ -735,6 +816,10 @@ fn test_persistent_send_failures_have_a_capped_exponential_emission_bound() {
     assert_eq!(emission_count, 8);
 }
 
+/// Prove a successful range proof resets accumulated failure backoff.
+///
+/// After a cancelled attempt, a valid retry clears the failure streak so later
+/// work follows the normal minimum emission interval.
 #[test]
 fn test_proved_progress_resets_failure_backoff() {
     let local = did(0);

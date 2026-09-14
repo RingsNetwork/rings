@@ -541,12 +541,16 @@ fn discovery_model(all: Vec<Did>, rounds: u8) -> ActorModel<DiscoveryNode, Cfg, 
         )
 }
 
-// Stage 5 is split out because it executes the production topology transition
-// directly and carries its own finite environment alphabet.
+/// Finite production-transition model for finger retry and stabilization laws.
+///
+/// This stage owns its adversarial environment alphabet and checks the real
+/// topology reducer directly instead of duplicating transition semantics.
 mod finger_retry_model;
 mod storage_model;
-// Successor-list sync is a smaller token/effect witness than the finger retry
-// model, so keeping it separate makes its single-use claim law visible.
+/// Focused successor-list token and bounded connection-effect model.
+///
+/// Keeping this smaller state space separate makes exact, single-use claim
+/// ownership visible independently of the broader finger retry exploration.
 mod successor_sync_model;
 
 #[cfg(test)]

@@ -189,7 +189,11 @@ pub struct QueryForTopoInfoSend {
     pub did: Did,
     /// Handler path that will consume the response.
     pub then: QueryFor,
-    /// One-shot correlation identity echoed by the report.
+    /// One-shot identity that binds the response to this exact query attempt.
+    ///
+    /// The report must echo it unchanged. The receiver also checks the
+    /// authenticated reporter, so knowing this UUID alone does not authorize a
+    /// topology mutation or connection effect.
     pub request_id: uuid::Uuid,
 }
 
@@ -203,7 +207,11 @@ pub struct QueryForTopoInfoReport {
     pub info: TopoInfo,
     /// Handler path copied from the query.
     pub then: QueryFor,
-    /// One-shot correlation identity copied from the query.
+    /// One-shot identity copied unchanged from the triggering query.
+    ///
+    /// The receiver spends it at most once against the expected authenticated
+    /// reporter. Replayed, replaced, or post-churn values are ignored before
+    /// advertised peers can create transport work.
     pub request_id: uuid::Uuid,
 }
 
@@ -220,7 +228,9 @@ impl QueryForTopoInfoSend {
     /// Create a stabilization query for an already-registered request id.
     ///
     /// The caller supplies `request_id` because the DHT must register the
-    /// stabilization before the query is sent.
+    /// stabilization before the query is sent. The constructor preserves that
+    /// token verbatim and labels the response for the stabilization handler; it
+    /// performs no registration or transport effect itself.
     pub fn new_for_stab(did: Did, request_id: uuid::Uuid) -> Self {
         Self {
             did,
@@ -373,7 +383,11 @@ pub enum FindSuccessorReportHandler {
     Connect,
     /// - FixFingerTable: update one proved finger-table range.
     FixFingerTable {
-        /// Slot/range request that proves which finger lookup this report may satisfy.
+        /// Slot/range request that identifies the lookup this report may satisfy.
+        ///
+        /// The slot is the lower end of the potentially proved range and the
+        /// UUID names one attempt. Both values must match current convergence
+        /// ownership before the reported successor can update or defer a slot.
         request: crate::dht::FingerFixRequest,
     },
     /// - CustomCallback: custom callback handle by `custom_message` method.
@@ -857,6 +871,12 @@ mod tests {
         assert!(remote_report.reports_remote_successor(local));
     }
 
+    /// Proves that the finger report handler preserves both components of its
+    /// correlation token across wire serialization.
+    ///
+    /// The decoded variant must remain `FixFingerTable`, and its lower slot and
+    /// UUID must equal the original request exactly; otherwise a report could
+    /// escape the convergence state machine's ownership checks.
     #[test]
     fn test_finger_fix_report_handler_round_trips_its_correlation_token() -> Result<()> {
         let request =

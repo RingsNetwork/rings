@@ -88,8 +88,16 @@ pub struct TopologyState {
     /// Next finger index maintained by the periodic finger fixer.
     pub fix_finger_index: usize,
     /// Per-slot proof, lookup, retry, and admission state for finger convergence.
+    ///
+    /// This metadata is kept beside `fingers` so every pure transition updates
+    /// the visible hints and the evidence authorizing them atomically. Its width
+    /// is normalized to `fingers.len()` whenever a shell snapshot is restored.
     finger_convergence: FingerConvergenceState,
     /// Exact stabilization report currently allowed to refine this state.
+    ///
+    /// At most one successor-head report may be `Requested` or `Processing`.
+    /// Moving the successor head clears the token, preventing delayed reports
+    /// from mutating the new topology or proving its local finger range.
     pending_stabilization: Option<StabilizationRequest>,
 }
 
@@ -97,11 +105,20 @@ pub struct TopologyState {
 /// current successor view.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(crate) struct StabilizationRequest {
-    /// Successor head that was queried.
+    /// Successor head that was queried when this request was created.
+    ///
+    /// The reporter must still be the current head when the response is claimed
+    /// and applied; otherwise topology churn has made the evidence stale.
     reporter: Did,
     /// Fresh correlation token that the authenticated report must echo.
+    ///
+    /// Equality on this token separates overlapping rounds sent to the same
+    /// reporter and prevents replay of an earlier authenticated response.
     request_id: uuid::Uuid,
     /// Whether the report has been reserved by the effect handler.
+    ///
+    /// `Requested` permits one exact claim; `Processing` permits the bounded
+    /// connection plan and final stabilization transition owned by that claim.
     phase: StabilizationPhase,
 }
 
@@ -138,7 +155,10 @@ impl TopologyState {
     /// Restore a state snapshot from the mutable peer-ring shell.
     ///
     /// The finger convergence state is normalized to the current table width so
-    /// a resized table cannot retain out-of-range proof or lookup metadata.
+    /// a resized table cannot retain out-of-range proof or lookup metadata. All
+    /// other values are copied verbatim because the shell already owns their
+    /// transport and persistence validation; this constructor only restores the
+    /// pure transition model's atomic snapshot.
     pub(crate) fn restore(
         local: Did,
         successors: Vec<Did>,
@@ -160,12 +180,20 @@ impl TopologyState {
         }
     }
 
-    /// Pending stabilization token that must be written back to the peer-ring shell.
+    /// Return the pending stabilization token for peer-ring persistence.
+    ///
+    /// The value includes reporter, request identity, and claim phase, allowing
+    /// the mutable shell to round-trip the pure model without widening field
+    /// visibility or reconstructing correlation state from transport events.
     pub(crate) const fn pending_stabilization(&self) -> Option<StabilizationRequest> {
         self.pending_stabilization
     }
 
     /// Whether an authenticated report may claim this exact stabilization token.
+    ///
+    /// The predicate accepts only a byte-for-byte reporter/token match in the
+    /// `Requested` phase. Reports for a superseded round and replays of a report
+    /// already moved to `Processing` both return `false`.
     pub(crate) fn can_claim_stabilization_report(
         &self,
         reporter: Did,
@@ -180,6 +208,10 @@ impl TopologyState {
     }
 
     /// Whether a claimed report is still allowed to perform connection effects.
+    ///
+    /// The predicate requires the exact reporter/token pair to remain in the
+    /// `Processing` phase. Connection plans re-evaluate it before every effect,
+    /// so cancellation or head churn revokes unspent work immediately.
     pub(crate) fn is_processing_stabilization_report(
         &self,
         reporter: Did,
@@ -193,18 +225,30 @@ impl TopologyState {
             })
     }
 
-    /// Finger convergence metadata attached to this topology snapshot.
+    /// Borrow the finger convergence metadata attached to this topology snapshot.
+    ///
+    /// Callers receive an immutable view so proof ranges, in-flight ownership,
+    /// and retry deadlines can be persisted or inspected without changing them
+    /// independently of the corresponding topology state.
     pub(crate) fn finger_convergence_state(&self) -> &FingerConvergenceState {
         &self.finger_convergence
     }
 
     #[cfg(test)]
-    /// Whether any finger slot still lacks current proof in test projections.
+    /// Report whether any finger slot still lacks current proof in tests.
+    ///
+    /// This test-only semantic projection avoids exposing the convergence
+    /// representation. It is true whenever at least one slot remains pending,
+    /// regardless of whether that slot is waiting, in flight, or backing off.
     pub(crate) fn finger_convergence_pending(&self) -> bool {
         self.finger_convergence.is_pending()
     }
 
-    /// Scheduling status for finger convergence from this topology snapshot.
+    /// Compute scheduling status for finger convergence from this topology snapshot.
+    ///
+    /// Stabilization-proved local slots are excluded from routed lookup work. A
+    /// node with no successor head is reported inactive; otherwise the result
+    /// describes whether a remote slot is due now or at a later monotonic time.
     pub(crate) fn finger_convergence_status(&self, now_ms: u64) -> FingerConvergenceStatus {
         match local_successor_range_end(self).map(|end| end.saturating_add(1)) {
             Some(first_routable_slot) => self
@@ -215,7 +259,11 @@ impl TopologyState {
     }
 
     #[cfg(test)]
-    /// Test-only projection of internal finger convergence state.
+    /// Return a stable test projection of internal finger convergence state.
+    ///
+    /// The projection exposes proof, lookup, and retry facts needed by model
+    /// tests while withholding mutable implementation details. Production code
+    /// cannot call this method because it is compiled only for tests.
     pub(crate) fn finger_convergence_projection(
         &self,
     ) -> super::finger::FingerConvergenceProjection {
@@ -275,7 +323,10 @@ pub enum TopologyEvent {
         peer: Did,
         /// Finger slots whose lookup completed while the peer was handshaking.
         fixed_fingers: Vec<ConditionalFingerUpdate>,
-        /// Current time used to pace any rejected deferred finger evidence.
+        /// Current process-monotonic time used to pace rejected deferred evidence.
+        ///
+        /// Admission itself does not read a clock; the effect boundary supplies
+        /// this value so stale proofs can schedule deterministic retry state.
         now_ms: u64,
     },
     /// A peer is removed from successor, predecessor, and finger state.
@@ -297,20 +348,32 @@ pub enum TopologyEvent {
     },
     /// Start one stabilization query against the current successor head.
     BeginStabilize {
-        /// Fresh request identity that the response must echo.
+        /// Fresh request identity that the authenticated response must echo.
+        ///
+        /// The transition binds this token to the current successor head before
+        /// emitting the topology query, making overlapping rounds distinguishable.
         request_id: uuid::Uuid,
     },
     /// Claim one matching response before it may cause connection effects.
     ClaimStabilize {
-        /// Authenticated report origin.
+        /// Authenticated DID that produced the topology report.
+        ///
+        /// It must equal the successor head captured by `BeginStabilize`; message
+        /// authentication is established before this pure event is constructed.
         reporter: Did,
-        /// Correlation identity echoed by the report.
+        /// Correlation identity echoed by the authenticated report.
+        ///
+        /// Only an exact token still in `Requested` phase may advance to
+        /// `Processing`, so duplicate and delayed reports cannot claim work.
         request_id: uuid::Uuid,
     },
     /// HMCC/Zave stabilize input: topological information returned by the
     /// current successor.
     Stabilize {
         /// Peer whose authenticated topology report drives this transition.
+        ///
+        /// Token-bearing transitions require this DID to own the current
+        /// `Processing` claim and remain the successor head.
         reporter: Did,
         /// Correlation identity echoed by the authenticated report. `None` is
         /// reserved for the public compatibility transition and cannot prove
@@ -326,40 +389,72 @@ pub enum TopologyEvent {
     BeginFingerRevalidation,
     /// Independently paced transition that advances pending finger convergence.
     AdvanceFingerConvergence {
-        /// Current process-monotonic time used only for lookup rate and expiry bounds.
+        /// Current process-monotonic time used for lookup pacing and expiry.
+        ///
+        /// The pure transition compares this supplied value with stored
+        /// deadlines; it never reads ambient wall-clock or process time.
         now_ms: u64,
         /// Fresh UUID correlation identifier allocated by the effect boundary.
+        ///
+        /// When a lookup is reserved, this identifier becomes part of the exact
+        /// [`FingerFixRequest`] that every result path must echo.
         request_id: uuid::Uuid,
     },
     /// Apply a reported successor to every slot proved by one current lookup.
     ApplyFinger {
-        /// Correlation token echoed by the lookup report.
+        /// Exact correlation token echoed by the authenticated lookup report.
+        ///
+        /// It identifies the reserved source slot, lookup round, and proof range
+        /// that may be committed; stale tokens are rejected without slot changes.
         request: FingerFixRequest,
         /// Successor reported for the request's lowest slot.
+        ///
+        /// The convergence algorithm verifies that this candidate proves the
+        /// requested contiguous range before replacing any finger hints.
         successor: Did,
-        /// Current time used to pace a rejected or non-progressing result.
+        /// Current process-monotonic time for expiry and retry accounting.
+        ///
+        /// Rejected or non-progressing evidence begins deterministic backoff
+        /// from this supplied value rather than reading an ambient clock.
         now_ms: u64,
     },
     /// Retain a timely finger proof while its candidate transport is handshaking.
     DeferFinger {
         /// Correlation token whose report arrived before lookup expiry.
+        ///
+        /// Ownership moves from this live lookup token to an admission lease;
+        /// the exact request is later required to apply or retire the evidence.
         request: FingerFixRequest,
         /// Successor proved by the report and awaiting transport admission.
+        ///
+        /// No finger hint changes until this candidate becomes routable and the
+        /// deferred proof is consumed by an `Admit` transition.
         successor: Did,
         /// Current process-monotonic time used to validate report expiry.
+        ///
+        /// Evidence arriving after the request deadline is rejected and cannot
+        /// gain admission ownership.
         now_ms: u64,
     },
     /// Cancel an in-flight request after its outbound send failed.
     CancelFinger {
-        /// Correlation token of the failed request.
+        /// Correlation token of the failed outbound lookup request.
+        ///
+        /// Exact matching prevents an old transport failure from cancelling a
+        /// newer lookup that happens to target the same finger slot.
         request: FingerFixRequest,
-        /// Current time from which the retry backoff begins.
+        /// Process-monotonic time from which retry backoff begins.
+        ///
+        /// Supplying time as event data keeps cancellation deterministic and the
+        /// pure topology transition free from clock side effects.
         now_ms: u64,
     },
     /// Retire a stabilization request whose transport send failed.
     CancelStabilize {
-        /// Exact request identity to retire; older failures cannot cancel a
-        /// newer request.
+        /// Exact stabilization request identity to retire.
+        ///
+        /// Cancellation removes the pending request only when this token still
+        /// matches it; an older send failure cannot cancel a newer round.
         request_id: uuid::Uuid,
     },
 }
@@ -369,6 +464,10 @@ pub enum TopologyEvent {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConditionalFingerUpdate {
     /// Correlation token returned while the successor was handshaking.
+    ///
+    /// Admission replays this exact request against the deferred convergence
+    /// lease. If its source slot or generation changed during the handshake,
+    /// application is rejected instead of overwriting newer finger evidence.
     pub request: FingerFixRequest,
 }
 
@@ -401,6 +500,9 @@ pub enum TopologyAction {
         /// DID being searched.
         did: Did,
         /// Token the report must echo before it may update the range.
+        ///
+        /// It binds the outbound routing action to the reserved slot and lookup
+        /// generation recorded in the next topology state.
         request: FingerFixRequest,
     },
     /// Query this improved successor for its successor list.
@@ -409,9 +511,15 @@ pub enum TopologyAction {
     Notify(Did),
     /// Query the current successor's topology with an exact response token.
     QuerySuccessorTopology {
-        /// Current successor head.
+        /// Current successor head selected as the report source.
+        ///
+        /// The resulting response is valid only while this DID remains the head
+        /// captured by the pending stabilization request.
         successor: Did,
-        /// Correlation token the report must echo.
+        /// Correlation token the authenticated report must echo.
+        ///
+        /// The claim transition uses it to reject duplicate, delayed, or
+        /// overlapping stabilization responses from the same successor.
         request_id: uuid::Uuid,
     },
     /// The successor head moved to this node (see the head law).

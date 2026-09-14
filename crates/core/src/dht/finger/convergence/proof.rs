@@ -21,6 +21,32 @@
 //! lemma above is a direct consequence of that definition. Zave's correctness
 //! work explains why fingers remain an optimization rather than a ring-safety
 //! premise: <https://arxiv.org/abs/1502.06461>.
+//!
+//! # Algorithm flow
+//!
+//! ```text
+//! request slot i + authenticated successor s
+//!        |
+//!        v
+//! validate i < configured slot count
+//!        |
+//!        +--> false ----------------------------> reject
+//!        |
+//!        v
+//! s == local?
+//!        | yes                                  | no
+//!        v                                      v
+//! prove i..last                      distance d = clockwise(local, s)
+//!                                               |
+//!                                               v
+//!                                   d >= 2^i ?
+//!                                      | no          | yes
+//!                                      v             v
+//!                                    reject   end = floor(log2(d))
+//!                                                    |
+//!                                                    v
+//!                                          clamp end to last slot
+//! ```
 
 use num_bigint::BigUint;
 use serde::Deserialize;
@@ -38,13 +64,22 @@ use crate::dht::Did;
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct FingerFixRequest {
     /// Zero-based lower slot requested by this lookup.
+    ///
+    /// The `u16` representation is the serialized protocol form; construction
+    /// rejects local indices that cannot be represented without truncation.
     pub(crate) slot: u16,
     /// Unique correlation value for this lookup attempt.
+    ///
+    /// The state machine requires an exact UUID match so delayed reports for an
+    /// earlier lookup of the same slot cannot consume current ownership.
     pub(crate) request_id: uuid::Uuid,
 }
 
 impl FingerFixRequest {
     /// Build a request when `slot` can be represented on the wire.
+    ///
+    /// Returns `None` rather than truncating when `slot` exceeds `u16`. The
+    /// supplied UUID is preserved verbatim as the attempt correlation token.
     pub(crate) fn new(slot: usize, request_id: uuid::Uuid) -> Option<Self> {
         Some(Self {
             slot: u16::try_from(slot).ok()?,
@@ -52,17 +87,26 @@ impl FingerFixRequest {
         })
     }
 
-    /// Lowest finger slot whose successor this request proves.
+    /// Return the lowest finger slot whose successor this request asks to prove.
+    ///
+    /// The value remains in its serialized `u16` representation; local vector
+    /// indexing should use the checked construction-backed `Self::slot_index`.
     pub const fn slot(self) -> u16 {
         self.slot
     }
 
-    /// Fresh UUID allocated for this lookup.
+    /// Return the fresh UUID allocated for this lookup.
+    ///
+    /// Consumers echo this token in reports and cancellations to establish
+    /// exact ownership of the active attempt.
     pub const fn request_id(self) -> uuid::Uuid {
         self.request_id
     }
 
-    /// Zero-based slot index for indexing local vectors.
+    /// Return the zero-based slot index used by local vectors.
+    ///
+    /// Conversion from `u16` to `usize` is lossless on every Rust target and
+    /// cannot produce an index different from the serialized request slot.
     pub(crate) fn slot_index(self) -> usize {
         usize::from(self.slot)
     }
@@ -80,8 +124,10 @@ pub(crate) enum FingerReportRejection {
 }
 
 impl FingerReportRejection {
-    /// Invalid and expired current attempts are network failures; stale
-    /// reports are harmless reorderings and must not increase retry pressure.
+    /// Return whether this rejection should increase retry pressure.
+    ///
+    /// Invalid and expired current attempts are network failures. Stale reports
+    /// are harmless reorderings and must not delay a newer attempt.
     pub(super) const fn counts_as_failure(self) -> bool {
         matches!(self, Self::Invalid | Self::Expired)
     }
@@ -91,18 +137,32 @@ impl FingerReportRejection {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FingerApplyOutcome {
     /// At least one still-current slot in this proved range was committed.
-    Applied { end: usize },
+    Applied {
+        /// Inclusive upper slot of the validated range, even if newer evidence
+        /// caused individual slots inside the range to be skipped.
+        end: usize,
+    },
     /// The report was rejected without changing a finger hint.
-    Rejected(FingerReportRejection),
+    Rejected(
+        /// Exact validation reason; the caller uses it to distinguish retryable
+        /// current failure from harmless stale reordering.
+        FingerReportRejection,
+    ),
 }
 
 /// Outcome of retaining a report for transport admission.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FingerDeferOutcome {
     /// The timely proof is owned by the admission lease through this slot.
-    Deferred { end: usize },
+    Deferred {
+        /// Inclusive upper slot retained with the validated admission proof.
+        end: usize,
+    },
     /// The report was rejected and no admission work should start.
-    Rejected(FingerReportRejection),
+    Rejected(
+        /// Exact validation reason explaining why no admission lease was created.
+        FingerReportRejection,
+    ),
 }
 
 /// Outcome of retiring a reported candidate that transport cannot use.
@@ -112,19 +172,35 @@ pub(crate) enum FingerRetireOutcome {
     Retired,
     /// Candidate validation failed. A stale conflicting report is left without
     /// effect; an invalid or expired current report retires into backoff.
-    Rejected(FingerReportRejection),
+    Rejected(
+        /// Exact validation reason; stale conflicts preserve ownership, while
+        /// invalid or expired current reports retire into retry backoff.
+        FingerReportRejection,
+    ),
 }
 
 /// Validated range carried between the attempt and evidence layers.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub(super) struct FingerRangeProof {
     /// Original lookup token at the lower end of the proved range.
+    ///
+    /// Its slot is the inclusive lower bound and its UUID identifies the exact
+    /// attempt that produced this proof.
     pub(super) request: FingerFixRequest,
     /// Evidence epoch observed when the lookup was issued.
+    ///
+    /// Slots changed under a later epoch are skipped during application so the
+    /// proof cannot roll back newer topology information.
     pub(super) issued_epoch: u64,
     /// Authenticated successor returned for the lookup target.
+    ///
+    /// The same successor is applied across every still-current covered slot;
+    /// the local node is represented as an absent remote hint.
     pub(super) successor: Did,
     /// Inclusive upper slot proved by the same successor.
+    ///
+    /// Validation guarantees this is at least the request slot and below the
+    /// configured table width before the proof enters production state.
     pub(super) end: usize,
 }
 
@@ -133,6 +209,8 @@ impl FingerRangeProof {
     ///
     /// Checked subtraction makes restored local state fail closed if its range
     /// is ever malformed; a valid proof always has `end >= request.slot`.
+    /// The returned count is inclusive of both range endpoints and is zero for
+    /// a malformed reversed range.
     pub(super) fn covered_slot_count(self) -> usize {
         self.end
             .checked_sub(self.request.slot_index())
@@ -149,6 +227,10 @@ impl FingerRangeProof {
 /// Postcondition: every slot `j` in `start..=end` has the same successor in
 /// the membership view that answered the lookup. Epoch validation performed by
 /// the evidence layer prevents this proof from overwriting a later hint.
+///
+/// Returns `None` when the start slot is outside the table, the successor lies
+/// before the first requested target, or an integer conversion cannot preserve
+/// the computed upper bound. Returning the local node proves the complete tail.
 pub(crate) fn finger_proof_end(
     local: Did,
     successor: Did,
@@ -179,9 +261,15 @@ pub(crate) fn finger_proof_end(
 }
 
 #[cfg(test)]
+/// Unit tests for the Chord range-bound lemma and its rejection boundaries.
 mod tests {
     use super::*;
 
+    /// Verify the range-bound lemma at exact power-of-two boundaries.
+    ///
+    /// The cases witness an interior distance, an exact power of two, ring
+    /// wraparound to the local node, an invalid predecessor, and an out-of-range
+    /// slot. Together they pin both inclusive range semantics and rejection.
     #[test]
     fn range_bound_follows_the_chord_power_of_two_definition() {
         let local = Did::from(0u32);

@@ -3,10 +3,10 @@
 //! This module coordinates four independent concerns and deliberately owns no
 //! network, lock, clock, or random-number effects:
 //!
-//! - [`proof`] derives which consecutive slots one Chord lookup proves;
-//! - [`evidence`] versions the knowledge attached to each local finger hint;
-//! - [`attempt`] gives one lookup exactly one ownership phase;
-//! - [`retry`] records the deterministic lower bound for the next emission.
+//! - `proof` derives which consecutive slots one Chord lookup proves;
+//! - `evidence` versions the knowledge attached to each local finger hint;
+//! - `attempt` gives one lookup exactly one ownership phase;
+//! - `retry` records the deterministic lower bound for the next emission.
 //!
 //! The runtime supplies `now_ms` and fresh UUIDs, interprets returned actions,
 //! and adds jitter. Keeping that boundary outside this module makes every
@@ -24,6 +24,31 @@
 //! 4. A failure increases the retry floor. Only committed evidence (or an
 //!    equivalent locally confirmed range) resets it; merely starting a
 //!    handshake is not progress.
+//!
+//! # Algorithm flow
+//!
+//! ```text
+//! topology hint change -> version affected evidence -> retire invalid owner
+//!                                                        |
+//! scheduler tick -> expire old owner -> apply retry floor |
+//!        |                                               |
+//!        v                                               |
+//! choose first unverified routable slot                  |
+//!        |                                               |
+//!        v                                               |
+//! issue (slot, UUID, evidence epoch)                     |
+//!        |                                               |
+//!        v                                               |
+//! validate token -> deadline -> geometry -> epoch        |
+//!        | reject                                        |
+//!        +------------------------> retire/backoff       |
+//!        | accept                                        |
+//!        v                                               |
+//! apply now OR retain for admission                      |
+//!        |                                               |
+//!        v                                               |
+//! verify still-current range -> clear retry pressure ----+
+//! ```
 
 /// Attempt ownership for in-flight reports and retained admission proofs.
 mod attempt;
@@ -60,6 +85,9 @@ pub(crate) use self::status::FingerConvergenceStatus;
 use crate::dht::Did;
 
 /// Time after which an unanswered lookup ceases to own the convergence slot.
+///
+/// Once this process-monotonic interval elapses, the request is retired and a
+/// retry failure is recorded before another lookup may be emitted.
 const FINGER_LOOKUP_TIMEOUT_MS: u64 = 10_000;
 
 /// Maximum time a timely proof may wait for transport admission.
@@ -73,10 +101,19 @@ pub(crate) const FINGER_ADMISSION_TIMEOUT_MS: u64 = 180_000;
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub(crate) struct FingerConvergenceState {
     /// Per-slot verification bits plus the hint-change epoch they belong to.
+    ///
+    /// A report may update a slot only when its captured epoch is at least the
+    /// slot's last-change epoch, which prevents stale hint restoration.
     evidence: FingerEvidence,
     /// The one lookup or admission proof currently owned by this state.
+    ///
+    /// Its enum form makes report waiting and admission waiting mutually
+    /// exclusive ownership phases.
     attempt: FingerAttempt,
     /// Deterministic retry floor applied before the scheduler adds jitter.
+    ///
+    /// It tracks failures and minimum issue spacing but contains no timer or
+    /// random-number side effect.
     retry: FingerRetryState,
 }
 
@@ -85,25 +122,44 @@ pub(crate) struct FingerConvergenceState {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct FingerConvergenceProjection {
     /// Snapshot of each slot's verified bit in table order.
+    ///
+    /// Its length equals the normalized finger-table width.
     pub(crate) verified: Vec<bool>,
     /// Request waiting for a successor report.
+    ///
+    /// Present only while the attempt is in the report-waiting phase.
     pub(crate) in_flight: Option<FingerFixRequest>,
     /// Request whose proof is held while transport admission finishes.
+    ///
+    /// Mutually exclusive with `in_flight` because one attempt owns one phase.
     pub(crate) deferred: Option<FingerFixRequest>,
     /// Admission lease deadline for `deferred`, when present.
+    ///
+    /// Model tests compare this process-monotonic value with simulated time.
     pub(crate) deferred_expires_at_ms: Option<u64>,
     /// Report deadline for `in_flight`, when present.
+    ///
+    /// Absent outside the report-waiting phase.
     pub(crate) expires_at_ms: Option<u64>,
     /// Monotonic timestamp of the last emitted automatic lookup.
+    ///
+    /// It witnesses enforcement of the hard minimum issue interval.
     pub(crate) last_issued_at_ms: Option<u64>,
     /// Number of consecutive current-attempt failures since last progress.
+    ///
+    /// Stale reports do not increment it; accepted evidence resets it.
     pub(crate) failure_streak: u8,
     /// Earliest deterministic retry timestamp after failures.
+    ///
+    /// Scheduler jitter is intentionally excluded from this pure projection.
     pub(crate) retry_not_before_ms: Option<u64>,
 }
 
 impl FingerConvergenceState {
     /// Create fully unverified convergence state for a table width.
+    ///
+    /// `slot_count` fixes the evidence-vector width. The result owns no request
+    /// and has no retry history, so its first eligible tick may select work.
     pub(crate) fn new(slot_count: usize) -> Self {
         Self {
             evidence: FingerEvidence::new(slot_count),
@@ -117,6 +173,7 @@ impl FingerConvergenceState {
     /// Retry timestamps are left intact because they are clock-relative
     /// scheduler policy; evidence and owned proofs are the width-dependent
     /// parts that can otherwise point outside the resized table.
+    /// All valid in-range evidence and ownership are preserved.
     pub(crate) fn normalized(mut self, slot_count: usize) -> Self {
         self.evidence.normalize(slot_count);
         self.attempt.normalize(slot_count);
@@ -128,6 +185,7 @@ impl FingerConvergenceState {
     /// `first_routable_slot` excludes the local successor range already proved
     /// by stabilization, so a node does not keep issuing Chord lookups for
     /// slots whose target is known to resolve locally.
+    /// `now_ms` computes a saturating remaining lease without mutating state.
     pub(crate) fn status_after(
         &self,
         first_routable_slot: usize,
@@ -153,6 +211,7 @@ impl FingerConvergenceState {
     /// A change at the active request's lower slot destroys the premise of its
     /// range proof, so that attempt is retired. Changes elsewhere are recorded
     /// by epoch and will be skipped if an older range result later arrives.
+    /// The snapshots are compared only across the normalized evidence width.
     pub(crate) fn invalidate_hint_changes(
         &mut self,
         before: &[Option<Did>],
@@ -170,6 +229,9 @@ impl FingerConvergenceState {
     }
 
     /// Forget every proof after a membership discontinuity.
+    ///
+    /// The transition advances evidence freshness, marks every slot unverified,
+    /// and releases ownership. It is idempotent at the idle, unverified state.
     pub(crate) fn invalidate_all_evidence(&mut self) {
         if self.attempt.is_idle() && self.evidence.all_unverified() {
             return;
@@ -179,6 +241,9 @@ impl FingerConvergenceState {
     }
 
     /// Reopen one consecutive hint range after a completed convergence pass.
+    ///
+    /// Revalidation begins after `cursor` and affects only the following run of
+    /// equal hints. Active or incomplete passes remain unchanged.
     pub(crate) fn begin_revalidation(&mut self, fingers: &[Option<Did>], cursor: usize) {
         if self.attempt.is_idle() && self.evidence.all_verified() {
             self.evidence.reopen_next_range(fingers, cursor);
@@ -190,6 +255,8 @@ impl FingerConvergenceState {
     /// Timeout processing happens before reservation. This call intentionally
     /// returns `None` on the timeout turn: the scheduler must observe the new
     /// backoff deadline instead of emitting a catch-up request immediately.
+    /// Success captures the current epoch, owns the returned token, and records
+    /// `now_ms` as an emission.
     pub(crate) fn prepare_lookup(
         &mut self,
         fingers: &[Option<Did>],
@@ -226,6 +293,9 @@ impl FingerConvergenceState {
     }
 
     /// Retain a timely report while the transport admits its candidate.
+    ///
+    /// The exact token, deadline, Chord geometry, and current evidence are
+    /// validated first. Success starts a bounded lease without editing hints.
     pub(crate) fn defer_result(
         &mut self,
         local: Did,
@@ -249,6 +319,9 @@ impl FingerConvergenceState {
     }
 
     /// Commit an authenticated report to every still-current slot it proves.
+    ///
+    /// Eligible slots receive the successor and become verified; slots changed
+    /// after issuance are skipped. Any committed slot resets retry pressure.
     pub(crate) fn apply_result(
         &mut self,
         local: Did,
@@ -278,6 +351,8 @@ impl FingerConvergenceState {
     /// Candidate validation and ownership retirement are one pure transition.
     /// In particular, a duplicate carrying the current UUID but a different
     /// successor cannot cancel a proof already retained for admission.
+    /// A valid current candidate records failure because transport could not use
+    /// it, while stale conflicting input leaves ownership unchanged.
     pub(crate) fn retire_result(
         &mut self,
         local: Did,
@@ -300,6 +375,9 @@ impl FingerConvergenceState {
     }
 
     /// Accept equivalent evidence produced by another local topology step.
+    ///
+    /// The inclusive range is clamped to table width. New proof bits or a
+    /// superseded request count as progress and clear retry pressure.
     pub(crate) fn confirm_range(&mut self, start: usize, end: usize) -> bool {
         let newly_verified = self.evidence.confirm_range(start, end);
         // A local proof of the active slot supersedes the network lookup just
@@ -313,6 +391,9 @@ impl FingerConvergenceState {
     }
 
     /// Cancel only the exact attempt owned by `request`.
+    ///
+    /// Matching ownership is released and counted as a failure at `now_ms`.
+    /// Stale tokens are no-ops and cannot retire newer work.
     pub(crate) fn cancel(&mut self, request: FingerFixRequest, now_ms: u64) {
         if self.attempt.clear_if_owned(request) {
             self.retry.record_failure(now_ms);
@@ -320,6 +401,9 @@ impl FingerConvergenceState {
     }
 
     /// Validate token ownership first, then the Chord range and evidence epoch.
+    ///
+    /// Fresh reports become geometric range proofs. Retained admission proofs
+    /// skip repeated geometry work but still require exact ownership and lease.
     fn validated_proof(
         &self,
         local: Did,
@@ -351,6 +435,9 @@ impl FingerConvergenceState {
     }
 
     /// Retire a consumed current token. Reordering is not a network failure.
+    ///
+    /// Only a matching token and successor may clear the phase. Invalid or
+    /// expired current input adds retry pressure; stale input is ignored.
     fn retire_rejected_current(
         &mut self,
         request: FingerFixRequest,
@@ -371,16 +458,25 @@ impl FingerConvergenceState {
 #[cfg(test)]
 impl FingerConvergenceState {
     /// Whether tests should continue driving convergence transitions.
+    ///
+    /// The result remains true while an attempt owns work or any slot lacks
+    /// proof, so model tests stop only at the true fixed point.
     pub(crate) fn is_pending(&self) -> bool {
         !self.attempt.is_idle() || !self.evidence.all_verified()
     }
 
     /// Status helper for tests that do not model the scheduler clock boundary.
+    ///
+    /// It projects from slot zero at time zero while preserving production phase
+    /// selection and avoiding a wall-clock dependency.
     pub(crate) fn status(&self) -> FingerConvergenceStatus {
         self.status_after(0, 0)
     }
 
     /// Lossless test projection of private state-machine fields.
+    ///
+    /// Algebraic ownership and retry state are flattened into comparable values
+    /// without exposing mutable production internals.
     pub(crate) fn projection(&self) -> FingerConvergenceProjection {
         let (in_flight, deferred, deferred_expires_at_ms, expires_at_ms) =
             self.attempt.projection();
@@ -398,6 +494,9 @@ impl FingerConvergenceState {
     }
 
     /// Force exactly one slot back to unverified and reserve it for tests.
+    ///
+    /// Other slots become verified, ownership and issue spacing are cleared, and
+    /// the real preparation path runs. An invalid slot returns `None`.
     #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn prepare_slot_for_test(
         &mut self,
@@ -416,21 +515,29 @@ impl FingerConvergenceState {
     }
 
     /// Return per-slot verification bits for assertions.
+    ///
+    /// The copy preserves table order and cannot mutate production evidence.
     pub(crate) fn verified_for_test(&self) -> Vec<bool> {
         self.evidence.verified()
     }
 
     /// Replace verification bits from the front of the table for tests.
+    ///
+    /// Slots beyond `values` are reset to unverified for deterministic fixtures.
     pub(crate) fn set_verified_for_test(&mut self, values: &[bool]) {
         self.evidence.set_verified(values);
     }
 
     /// Set every slot's verification bit for tests.
+    ///
+    /// Epochs, ownership, and retry state remain unchanged.
     pub(crate) fn fill_verified_for_test(&mut self, verified: bool) {
         self.evidence.fill_verified(verified);
     }
 
     /// Set one slot's verification bit for tests, returning false if missing.
+    ///
+    /// A valid index updates one bit; an invalid index is an explicit no-op.
     pub(crate) fn set_slot_verified_for_test(&mut self, slot: usize, verified: bool) -> bool {
         self.evidence.set_slot_verified(slot, verified)
     }

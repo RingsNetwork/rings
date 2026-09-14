@@ -66,15 +66,30 @@ pub struct PeerRing {
     storage_virtual_node_config: VirtualNodeConfig,
     /// Serializes topology transitions that must observe and publish one coherent state snapshot.
     topology_transition: Mutex<()>,
-    /// The single stabilization report currently admitted by its UUID correlation token.
+    /// Stabilization request whose authenticated report may mutate topology.
+    ///
+    /// The value moves from requested to processing under
+    /// `topology_transition`; consuming or cancelling the matching UUID removes
+    /// its authority, so stale reports cannot start connection work.
     pending_stabilization: Mutex<Option<topology::StabilizationRequest>>,
-    /// Successor-sync request ownership that is kept outside [`TopologyState`] because it mirrors
-    /// the mutable successor list guarded by [`SuccessorSeq`].
+    /// Per-successor ownership of outstanding successor-list queries.
+    ///
+    /// This state remains outside [`TopologyState`] because validity depends on
+    /// the mutable [`SuccessorSeq`]. Every successor-list change invalidates
+    /// these tokens while holding `topology_transition`.
     pending_successor_sync: Mutex<topology::SuccessorSyncState>,
-    /// Monotonic origin for finger lookup deadlines and retry backoff inside this node lifecycle.
+    /// Monotonic origin for finger lookup deadlines and retry backoff.
+    ///
+    /// All convergence timestamps are elapsed milliseconds from this instant;
+    /// wall-clock changes therefore cannot extend or prematurely expire an
+    /// in-flight lookup during this node lifecycle.
     finger_clock_origin: Instant,
-    /// Stable per-lifecycle entropy used to phase automatic finger maintenance without changing
-    /// phase on every browser listener restart.
+    /// Lazily initialized entropy used to phase automatic finger maintenance.
+    ///
+    /// The UUID is stable for the lifetime of this ring, including browser
+    /// listener restarts, but changes when the provider constructs a new ring.
+    /// This spreads periodic work without allowing each listener restart to
+    /// reroll its schedule.
     finger_jitter_entropy: OnceLock<uuid::Uuid>,
     /// Serializes every read-modify-write of a storage slot (see `chord::storage`).
     pub(super) storage_transition: FuturesMutex<()>,
@@ -309,6 +324,15 @@ impl PeerRing {
     /// Some events need the same monotonic timestamp that is read after the transition lock is held.
     /// The factory keeps those events cheap to build and ensures that all lock-protected state used
     /// by [`topology::step`] comes from a single current snapshot.
+    ///
+    /// The method serializes snapshot, observation, pure transition, and state
+    /// projection. A successor-list change also invalidates every pending
+    /// successor-sync token before the lock is released.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a transition lock or backing state lock is
+    /// poisoned, or when successor state cannot be read or replaced.
     fn transition_topology_with_factory(
         &self,
         event: impl FnOnce() -> TopologyEvent,
@@ -407,7 +431,11 @@ impl PeerRing {
         )
     }
 
-    /// Return elapsed monotonic milliseconds for finger lookup deadlines.
+    /// Return elapsed monotonic milliseconds for finger convergence deadlines.
+    ///
+    /// The value is measured from `finger_clock_origin` and saturates at
+    /// [`u64::MAX`] if the platform duration cannot fit. It never reads wall
+    /// time and therefore remains monotonic within one `PeerRing` lifecycle.
     fn finger_now_ms(&self) -> u64 {
         u64::try_from(self.finger_clock_origin.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
@@ -418,11 +446,22 @@ impl PeerRing {
     /// the ring. Keeping this value on the ring prevents every listener restart
     /// from rerolling its phase while still assigning a new phase after a full
     /// provider reconstruction.
+    /// Concurrent callers receive the same UUID because [`OnceLock`] performs
+    /// at most one initialization.
     pub(crate) fn finger_jitter_entropy(&self) -> uuid::Uuid {
         *self.finger_jitter_entropy.get_or_init(new_uuid)
     }
 
-    /// Read the scheduler-facing finger convergence status from the current topology snapshot.
+    /// Read the scheduler-facing finger convergence status from one coherent snapshot.
+    ///
+    /// The projection combines the current convergence phase with the monotonic
+    /// deadline remaining at call time. It does not advance or otherwise mutate
+    /// finger state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if topology state cannot be snapshotted because a
+    /// backing lock is poisoned.
     pub(crate) fn finger_convergence_status(&self) -> Result<FingerConvergenceStatus> {
         let now_ms = self.finger_now_ms();
         // The closure is intentionally pure: it borrows the restored topology snapshot and derives
@@ -430,19 +469,47 @@ impl PeerRing {
         self.with_topology_state(|state| state.finger_convergence_status(now_ms))
     }
 
-    /// Mark every finger slot as needing fresh evidence without emitting the first lookup.
+    /// Begin a new finger-table revalidation pass without emitting a lookup.
+    ///
+    /// The transition marks ranges that need fresh evidence while preserving
+    /// the separation between state invalidation and paced network work. The
+    /// caller must invoke [`Self::advance_finger_convergence`] to emit at most
+    /// one next action.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the topology transition cannot acquire or project
+    /// its backing state.
     pub(crate) fn begin_finger_revalidation(&self) -> Result<PeerRingAction> {
         let next = self.transition_topology(TopologyEvent::BeginFingerRevalidation)?;
         Ok(self.topology_leaf_actions(next.actions))
     }
 
-    /// Start one UUID-correlated stabilization round.
+    /// Start one UUID-correlated stabilization round against the current head.
+    ///
+    /// With a successor head, the transition records `(head, request_id)` and
+    /// returns the query action that must carry the same token. With no
+    /// successor, it records no pending authority and returns no remote work.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when topology state cannot be read or committed.
     pub(crate) fn begin_stabilization(&self, request_id: uuid::Uuid) -> Result<PeerRingAction> {
         let next = self.transition_topology(TopologyEvent::BeginStabilize { request_id })?;
         Ok(self.topology_leaf_actions(next.actions))
     }
 
-    /// Apply a valid finger proof that names an already connected successor.
+    /// Validate and apply a finger report for an already connected successor.
+    ///
+    /// The exact `request` must still own the active lookup. A valid Chord range
+    /// proof updates every still-current slot it covers; stale, expired, or
+    /// geometrically invalid evidence is returned as a rejected outcome without
+    /// overwriting newer state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only when the ring's transition or backing-state locks
+    /// cannot be acquired.
     pub(crate) fn apply_fixed_finger(
         &self,
         request: FingerFixRequest,
@@ -453,7 +520,17 @@ impl PeerRing {
         })
     }
 
-    /// Retain a valid finger proof while its successor is being admitted by transport.
+    /// Retain a valid finger proof while transport admits its successor.
+    ///
+    /// This consumes a timely lookup report into an admission lease instead of
+    /// writing an unconnected DID into the table. The returned outcome states
+    /// whether the proof was deferred or rejected as stale, expired, or
+    /// geometrically invalid.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the transition snapshot or projection cannot lock
+    /// its backing state.
     pub(crate) fn defer_fixed_finger(
         &self,
         request: FingerFixRequest,
@@ -464,7 +541,16 @@ impl PeerRing {
         })
     }
 
-    /// Release a retained finger proof after the candidate cannot complete admission.
+    /// Retire a retained finger proof after candidate admission cannot complete.
+    ///
+    /// Only the matching `request` and `successor` may release the lease. A
+    /// matching retirement advances retry accounting; a stale call leaves a
+    /// newer proof untouched and reports that disposition to the caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the serialized topology state cannot be read or
+    /// committed.
     pub(crate) fn retire_finger_candidate(
         &self,
         request: FingerFixRequest,
@@ -475,7 +561,17 @@ impl PeerRing {
         })
     }
 
-    /// Apply a finger-result transition and return the transition-specific outcome.
+    /// Execute one finger-result transition under the topology serialization lock.
+    ///
+    /// The supplied pure transition receives one coherent topology snapshot and
+    /// a monotonic timestamp. Its next state is projected before the associated
+    /// outcome is returned, so callers cannot observe an outcome whose state was
+    /// not committed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the topology lock is poisoned or if snapshot or
+    /// projection of any backing field fails.
     fn transition_finger_result<Outcome>(
         &self,
         transition: impl FnOnce(&TopologyState, u64) -> (TopologyStep, Outcome),
@@ -491,7 +587,15 @@ impl PeerRing {
         Ok(disposition)
     }
 
-    /// Apply a successor topology report from the node that owns the matching stabilization token.
+    /// Apply a topology report from the owner of the matching stabilization token.
+    ///
+    /// The pure topology layer rechecks `reporter` and `request_id`, merges the
+    /// reported successor/predecessor evidence, and returns every follow-up
+    /// action as a batch. A stale token yields no state-authorizing work.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when topology state cannot be read or committed.
     pub(crate) fn stabilize_reported_by(
         &self,
         reporter: Did,
@@ -507,7 +611,17 @@ impl PeerRing {
         Ok(self.topology_multi_actions(next.actions))
     }
 
-    /// Atomically claim a stabilization report token before the async handler starts candidate work.
+    /// Atomically claim a stabilization token before asynchronous candidate work.
+    ///
+    /// The claim succeeds exactly once when both authenticated `reporter` and
+    /// `request_id` match the requested round. The observation and transition
+    /// share one lock, preventing duplicate handlers from both spending the
+    /// report's connection budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the topology transition cannot snapshot or commit
+    /// its backing state.
     pub(crate) fn claim_stabilization_report(
         &self,
         reporter: Did,
@@ -524,7 +638,15 @@ impl PeerRing {
         Ok(claimed)
     }
 
-    /// Reserve the next bounded stabilization candidate against the latest topology state.
+    /// Reserve the next bounded stabilization candidate against current topology.
+    ///
+    /// Each call revalidates the plan's reporter and token before advancing its
+    /// cursor. It returns `Stale` without another network effect after churn,
+    /// `Connect` for one authorized candidate, or `Complete` when exhausted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a coherent topology snapshot cannot be acquired.
     pub(crate) fn advance_stabilization_connection_plan(
         &self,
         plan: &mut topology::StabilizationConnectionPlan,
@@ -532,13 +654,29 @@ impl PeerRing {
         self.with_topology_state(|state| plan.advance(state))
     }
 
-    /// Cancel the stabilization request identified by `request_id`.
+    /// Cancel only the stabilization request identified by `request_id`.
+    ///
+    /// An older cancellation cannot retire a newer request because the pure
+    /// transition compares the token before clearing pending authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when topology state cannot be read or committed.
     pub(crate) fn cancel_stabilization(&self, request_id: uuid::Uuid) -> Result<()> {
         self.transition_topology(TopologyEvent::CancelStabilize { request_id })
             .map(|_| ())
     }
 
-    /// Record that `reporter` is the current owner of a successor-sync report token.
+    /// Register one successor-sync token for a current successor reporter.
+    ///
+    /// Registration succeeds only while `reporter` belongs to the current
+    /// successor list. A successful call replaces that reporter's older token;
+    /// failure creates no report authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if transition, successor, or pending-request state
+    /// cannot be locked.
     pub(crate) fn begin_successor_sync(
         &self,
         reporter: Did,
@@ -556,7 +694,16 @@ impl PeerRing {
         Ok(pending.begin(&successors, reporter, request_id))
     }
 
-    /// Claim a successor-sync report once, rejecting stale, duplicate, or post-churn tokens.
+    /// Claim one matching successor-sync report before it can create effects.
+    ///
+    /// The call succeeds once for the exact `(reporter, request_id)` pair while
+    /// the reporter remains a successor. Duplicate, replaced, and post-churn
+    /// reports return `false` without acquiring a connection budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if transition, successor, or pending-request state
+    /// cannot be locked.
     pub(crate) fn claim_successor_sync_report(
         &self,
         reporter: Did,
@@ -574,7 +721,16 @@ impl PeerRing {
         Ok(pending.claim(&successors, reporter, request_id))
     }
 
-    /// Reserve the next bounded successor-sync candidate against the current successor list.
+    /// Reserve one successor-sync candidate after revalidating live ownership.
+    ///
+    /// The plan cursor advances only for a still-processing token whose reporter
+    /// remains in the successor list. The result permits one connection,
+    /// reports exhaustion, or revokes the remaining work as stale.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if transition, successor, or pending-request state
+    /// cannot be locked.
     pub(crate) fn advance_successor_sync_connection_plan(
         &self,
         plan: &mut topology::SuccessorSyncConnectionPlan,
@@ -591,7 +747,16 @@ impl PeerRing {
         Ok(plan.advance(&pending, &successors))
     }
 
-    /// Cancel a successor-sync token without mutating the topology graph.
+    /// Cancel one exact successor-sync token without mutating topology.
+    ///
+    /// Cancellation removes authority only when `reporter` and `request_id`
+    /// match the stored request. It is therefore safe for delayed send or join
+    /// failures to race with a newer synchronization round.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if transition or pending-request state cannot be
+    /// locked.
     pub(crate) fn cancel_successor_sync(
         &self,
         reporter: Did,
@@ -609,7 +774,15 @@ impl PeerRing {
         Ok(())
     }
 
-    /// Cancel an outstanding finger lookup and charge it as an explicit failed attempt.
+    /// Cancel an outstanding finger lookup and charge a matching attempt as failed.
+    ///
+    /// The event uses the current monotonic timestamp to start retry backoff.
+    /// A stale token cannot cancel or penalize the newer lookup that replaced
+    /// it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when topology state cannot be read or committed.
     pub(crate) fn cancel_finger_lookup(&self, request: FingerFixRequest) -> Result<()> {
         self.transition_topology_with_factory(
             || TopologyEvent::CancelFinger {
@@ -621,7 +794,15 @@ impl PeerRing {
         .map(|_| ())
     }
 
-    /// Advance automatic finger convergence by at most one lookup or local proof step.
+    /// Advance automatic finger convergence by at most one externally visible step.
+    ///
+    /// The pure transition receives a fresh request UUID and current monotonic
+    /// time. It may emit one lookup, apply one local proof, wait for a deadline,
+    /// or report no work; it never fans out multiple finger lookups per call.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when topology state cannot be read or committed.
     pub(crate) fn advance_finger_convergence(&self) -> Result<PeerRingAction> {
         let next = self.transition_topology_with_factory(
             || TopologyEvent::AdvanceFingerConvergence {
