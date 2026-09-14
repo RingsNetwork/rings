@@ -49,7 +49,11 @@ fn converge_with_oracle(mut current: TopologyState, all: &[Did]) -> (TopologySta
                 finger(all, current.local, request.slot_index()).unwrap_or(current.local);
             current = step(
                 &current,
-                TopologyEvent::ApplyFinger { request, successor },
+                TopologyEvent::ApplyFinger {
+                    request,
+                    successor,
+                    now_ms,
+                },
                 DEFAULT_SUCCESSOR_CAPACITY,
             )
             .state;
@@ -279,11 +283,19 @@ fn test_topology_change_rejects_an_in_flight_stale_range_result() {
         DEFAULT_SUCCESSOR_CAPACITY,
     )
     .state;
+    assert_eq!(changed.finger_convergence.status().failure_streak(), 1);
+    let early_retry = step(
+        &changed,
+        TopologyEvent::AdvanceFingerConvergence { now_ms: 2_999 },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+    assert!(early_retry.actions.is_empty());
     let stale = step(
         &changed,
         TopologyEvent::ApplyFinger {
             request,
             successor: seed,
+            now_ms: 1_500,
         },
         DEFAULT_SUCCESSOR_CAPACITY,
     )
@@ -321,9 +333,27 @@ fn test_finger_lookup_has_one_in_flight_request_and_a_bounded_retry() {
     );
     assert!(blocked.actions.is_empty());
 
-    let retried = step(
+    let expired = step(
         &blocked.state,
         TopologyEvent::AdvanceFingerConvergence { now_ms: 11_000 },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+    assert!(expired.actions.is_empty());
+    assert_eq!(
+        expired.state.finger_convergence.status().failure_streak(),
+        1
+    );
+
+    let still_backing_off = step(
+        &expired.state,
+        TopologyEvent::AdvanceFingerConvergence { now_ms: 12_999 },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+    assert!(still_backing_off.actions.is_empty());
+
+    let retried = step(
+        &still_backing_off.state,
+        TopologyEvent::AdvanceFingerConvergence { now_ms: 13_000 },
         DEFAULT_SUCCESSOR_CAPACITY,
     );
     let retry = retried.actions.iter().find_map(|action| match action {
@@ -389,23 +419,188 @@ fn test_cancelled_finger_lookup_still_obeys_the_per_node_rate_limit() {
     };
     let cancelled = step(
         &issued.state,
-        TopologyEvent::CancelFinger { request },
+        TopologyEvent::CancelFinger {
+            request,
+            now_ms: 1_000,
+        },
         DEFAULT_SUCCESSOR_CAPACITY,
     );
 
     let early = step(
         &cancelled.state,
-        TopologyEvent::AdvanceFingerConvergence { now_ms: 1_999 },
+        TopologyEvent::AdvanceFingerConvergence { now_ms: 2_999 },
         DEFAULT_SUCCESSOR_CAPACITY,
     );
     assert!(early.actions.is_empty());
     let due = step(
         &early.state,
-        TopologyEvent::AdvanceFingerConvergence { now_ms: 2_000 },
+        TopologyEvent::AdvanceFingerConvergence { now_ms: 3_000 },
         DEFAULT_SUCCESSOR_CAPACITY,
     );
     assert_eq!(
         due.actions
+            .iter()
+            .filter(|action| matches!(action, TopologyAction::FindSuccessorForFix { .. }))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn test_persistent_send_failures_have_a_capped_exponential_emission_bound() {
+    let local = did(0);
+    let seed = did(128);
+    let mut current = step(
+        &state(local, Vec::new(), None, vec![None; 8], 0),
+        TopologyEvent::Join { peer: seed },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    )
+    .state;
+    let mut issued_at_ms = 1_000u64;
+    let first = step(
+        &current,
+        TopologyEvent::AdvanceFingerConvergence {
+            now_ms: issued_at_ms,
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+    let mut request = first.actions.iter().find_map(|action| match action {
+        TopologyAction::FindSuccessorForFix { request, .. } => Some(*request),
+        _ => None,
+    });
+    assert!(request.is_some());
+    current = first.state;
+
+    let retry_floors_ms = [2_000u64, 4_000, 8_000, 16_000, 32_000, 60_000, 60_000];
+    let mut emission_count = 1usize;
+    for (index, retry_floor_ms) in retry_floors_ms.into_iter().enumerate() {
+        let Some(current_request) = request else {
+            assert!(
+                request.is_some(),
+                "failure model lost its in-flight request"
+            );
+            return;
+        };
+        let cancelled = step(
+            &current,
+            TopologyEvent::CancelFinger {
+                request: current_request,
+                now_ms: issued_at_ms,
+            },
+            DEFAULT_SUCCESSOR_CAPACITY,
+        );
+        assert_eq!(
+            cancelled.state.finger_convergence.status().failure_streak(),
+            u8::try_from(index).unwrap_or(u8::MAX).saturating_add(1)
+        );
+
+        let retry_at_ms = issued_at_ms.saturating_add(retry_floor_ms);
+        let early = step(
+            &cancelled.state,
+            TopologyEvent::AdvanceFingerConvergence {
+                now_ms: retry_at_ms.saturating_sub(1),
+            },
+            DEFAULT_SUCCESSOR_CAPACITY,
+        );
+        assert!(early.actions.is_empty());
+
+        let due = step(
+            &early.state,
+            TopologyEvent::AdvanceFingerConvergence {
+                now_ms: retry_at_ms,
+            },
+            DEFAULT_SUCCESSOR_CAPACITY,
+        );
+        request = due.actions.iter().find_map(|action| match action {
+            TopologyAction::FindSuccessorForFix { request, .. } => Some(*request),
+            _ => None,
+        });
+        assert_eq!(
+            due.actions
+                .iter()
+                .filter(|action| matches!(action, TopologyAction::FindSuccessorForFix { .. }))
+                .count(),
+            1
+        );
+        emission_count = emission_count.saturating_add(1);
+        current = due.state;
+        issued_at_ms = retry_at_ms;
+    }
+
+    assert_eq!(issued_at_ms, 183_000);
+    assert_eq!(emission_count, 8);
+}
+
+#[test]
+fn test_proved_progress_resets_failure_backoff() {
+    let local = did(0);
+    let seed = did(128);
+    let initial = step(
+        &state(local, Vec::new(), None, vec![None; 8], 0),
+        TopologyEvent::Join { peer: seed },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    )
+    .state;
+    let first = step(
+        &initial,
+        TopologyEvent::AdvanceFingerConvergence { now_ms: 1_000 },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+    let request = first.actions.iter().find_map(|action| match action {
+        TopologyAction::FindSuccessorForFix { request, .. } => Some(*request),
+        _ => None,
+    });
+    let Some(request) = request else {
+        assert!(first.actions.is_empty(), "expected a finger lookup action");
+        return;
+    };
+    let cancelled = step(
+        &first.state,
+        TopologyEvent::CancelFinger {
+            request,
+            now_ms: 1_000,
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+    let retry = step(
+        &cancelled.state,
+        TopologyEvent::AdvanceFingerConvergence { now_ms: 3_000 },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+    let retry_request = retry.actions.iter().find_map(|action| match action {
+        TopologyAction::FindSuccessorForFix { request, .. } => Some(*request),
+        _ => None,
+    });
+    let Some(retry_request) = retry_request else {
+        assert!(retry.actions.is_empty(), "expected a retry action");
+        return;
+    };
+    let progressed = step(
+        &retry.state,
+        TopologyEvent::ApplyFinger {
+            request: retry_request,
+            successor: did(8),
+            now_ms: 3_001,
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+
+    assert_eq!(
+        progressed
+            .state
+            .finger_convergence
+            .status()
+            .failure_streak(),
+        0
+    );
+    let next_range = step(
+        &progressed.state,
+        TopologyEvent::AdvanceFingerConvergence { now_ms: 4_000 },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+    assert_eq!(
+        next_range
+            .actions
             .iter()
             .filter(|action| matches!(action, TopologyAction::FindSuccessorForFix { .. }))
             .count(),

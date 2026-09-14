@@ -31,6 +31,10 @@
 //!   * Stage 4 — hand-off cleanup safety for #614 S2'. It abstracts one
 //!     placement key through copy -> ack -> delete and checks that local
 //!     deletion is reachable only after the successor state contains the key.
+//!   * Stage 5 — finger retry resource safety. A finite transition model covers
+//!     issue, progress, invalid response, cancellation, loss, timeout, topology
+//!     change, duplicate delivery, and restart. It checks one logical emission
+//!     per issue, the per-node interval, and progress-sensitive retry backoff.
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;
@@ -293,7 +297,8 @@ fn notify_model(all: Vec<Did>) -> ActorModel<ChordNode, Cfg, ()> {
 //     single hop); production routes via `successors().min()` then
 //     `finger.closest_predecessor`. The `Found -> Lookup` iteration models the
 //     multi-hop refinement, but this is a routing *abstraction*, not the real fn.
-//   * There is no `fix_fingers`/`FindSuccessorForFix` action.
+//   * There is no `fix_fingers`/`FindSuccessorForFix` action in this discovery
+//     abstraction. Stage 5 models its retry/resource state separately.
 //   * It runs N=3, K=3, so every node's successor capacity spans all peers —
 //     it does NOT reproduce the production regime behind the 6-node integration
 //     flake (six clustered DIDs, K=3, successor truncation + high-index finger
@@ -535,6 +540,7 @@ fn discovery_model(all: Vec<Did>, rounds: u8) -> ActorModel<DiscoveryNode, Cfg, 
         )
 }
 
+mod finger_retry_model;
 mod storage_model;
 
 #[cfg(test)]

@@ -266,6 +266,7 @@ fn test_admit_step_commits_join_and_pending_fingers_in_one_state() {
         TopologyEvent::Admit {
             peer,
             fixed_fingers: vec![ConditionalFingerUpdate { request }],
+            now_ms: 1_100,
         },
         DEFAULT_SUCCESSOR_CAPACITY,
     );
@@ -305,6 +306,7 @@ fn test_admit_step_does_not_overwrite_finger_changed_after_update_was_deferred()
         TopologyEvent::Admit {
             peer,
             fixed_fingers: vec![ConditionalFingerUpdate { request }],
+            now_ms: 1_100,
         },
         DEFAULT_SUCCESSOR_CAPACITY,
     );
@@ -393,7 +395,11 @@ fn test_apply_finger_step_updates_every_slot_proved_by_distance() {
     let request = issue_request(&mut current, 2, 1_000);
     let next = step(
         &current,
-        TopologyEvent::ApplyFinger { request, successor },
+        TopologyEvent::ApplyFinger {
+            request,
+            successor,
+            now_ms: 1_100,
+        },
         DEFAULT_SUCCESSOR_CAPACITY,
     );
 
@@ -417,6 +423,7 @@ fn test_apply_finger_step_rejects_stale_and_invalid_results() {
         TopologyEvent::ApplyFinger {
             request,
             successor: did(4),
+            now_ms: 1_100,
         },
         DEFAULT_SUCCESSOR_CAPACITY,
     );
@@ -425,6 +432,7 @@ fn test_apply_finger_step_rejects_stale_and_invalid_results() {
         TopologyEvent::ApplyFinger {
             request,
             successor: did(8),
+            now_ms: 1_200,
         },
         DEFAULT_SUCCESSOR_CAPACITY,
     );
@@ -437,11 +445,16 @@ fn test_apply_finger_step_rejects_stale_and_invalid_results() {
         TopologyEvent::ApplyFinger {
             request: out_of_range,
             successor: did(9),
+            now_ms: 1_100,
         },
         DEFAULT_SUCCESSOR_CAPACITY,
     );
 
     assert_eq!(invalid.state.fingers, current.fingers);
+    assert_eq!(
+        invalid.state.finger_convergence.status().failure_streak(),
+        1
+    );
     assert_eq!(stale.state, invalid.state);
     assert_eq!(ignored.state, current);
 }
@@ -613,6 +626,7 @@ fn test_admit_step_reports_head_change_only_when_the_head_moves() {
         TopologyEvent::Admit {
             peer: did(20),
             fixed_fingers: Vec::new(),
+            now_ms: 1_000,
         },
         DEFAULT_SUCCESSOR_CAPACITY,
     );
@@ -627,6 +641,7 @@ fn test_admit_step_reports_head_change_only_when_the_head_moves() {
         TopologyEvent::Admit {
             peer: did(40),
             fixed_fingers: Vec::new(),
+            now_ms: 1_000,
         },
         DEFAULT_SUCCESSOR_CAPACITY,
     );
@@ -693,6 +708,7 @@ fn test_predecessor_and_finger_steps_never_report_a_head_change() {
         TopologyEvent::ApplyFinger {
             request,
             successor: did(40),
+            now_ms: 1_000,
         },
         TopologyEvent::UpdateSuccessor { successor: did(30) },
     ] {

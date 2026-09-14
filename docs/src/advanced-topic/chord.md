@@ -39,6 +39,20 @@ range. A topology change invalidates only slots whose hints changed.
 
 Each node keeps at most one finger lookup in flight. Reports echo a node-local request identifier;
 results from an expired request or from a request invalidated by a topology change cannot overwrite
-newer state. Automatic attempts are separated by at least one second and scheduled with
-deterministic per-node jitter. Missed deadlines schedule one future attempt rather than catch-up
-bursts, and topology stabilization and storage repair take priority over finger convergence.
+newer state. A fleet's first automatic attempt is spread over a deterministic 10-second per-node
+phase window. Send cancellation, invalid reports, timeouts, and topology changes that invalidate an
+in-flight proof increase a progress-sensitive retry floor through 2, 4, 8, 16, 32, and 60 seconds;
+each retry is additionally spread across a full jitter window of the same size. Only an applied
+range proof resets that failure level. Missed
+deadlines schedule one future attempt rather than catch-up bursts, and topology stabilization and
+storage repair take priority over finger convergence.
+
+One due node emits one routed lookup, not a broadcast or recursive fan-out. Its normal completion is
+one routed report; discovering an unconnected result may additionally require one routed connection
+offer and answer. The per-message relay hop budget and the retry schedule therefore bound each
+attempt and persistent-failure traffic separately.
+
+These are per-node bounds: aggregate healthy bootstrap work still scales with the number of nodes.
+The phase window smooths a synchronized start but is not an N-independent destination rate limit.
+The destination's bounded inbound mailbox limits retained concurrent work; its origin quota remains
+per origin and therefore must not be counted as a global many-origin convergence cap.

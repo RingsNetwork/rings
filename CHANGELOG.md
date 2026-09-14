@@ -13,9 +13,11 @@
 - Finger-table convergence distinguishes inferred hints from verified ranges. One lookup proves
   every consecutive slot owned by the reported successor; topology changes invalidate only the
   affected slots, and correlated request epochs reject stale in-flight results.
-- Automatic convergence permits one lookup per node at a time, retries unanswered lookups after a
-  fixed timeout, enforces a one-second minimum emission interval, and adds deterministic per-node
-  jitter without catch-up bursts. Stabilization and storage repair retain scheduling priority.
+- Automatic convergence permits one lookup per node at a time, spreads simultaneous fleet starts
+  over a deterministic 10-second phase window, and has no catch-up bursts. Send failure, invalid
+  reports, timeouts, and topology invalidation of an in-flight proof use a
+  2/4/8/16/32/60-second exponential retry floor plus a full jitter window; only an applied range
+  proof resets the failure level. Stabilization and storage repair retain scheduling priority.
 
 ## 0.25.0
 

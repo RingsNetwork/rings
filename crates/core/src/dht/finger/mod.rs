@@ -10,7 +10,9 @@ use crate::dht::Did;
 
 mod convergence;
 
+pub(crate) use convergence::finger_lookup_backoff_ms;
 pub(crate) use convergence::FingerConvergenceState;
+pub(crate) use convergence::FingerConvergenceStatus;
 pub use convergence::FingerFixRequest;
 pub(crate) use convergence::FingerResultDisposition;
 #[cfg(test)]
@@ -172,7 +174,7 @@ impl FingerTable {
         &self.convergence
     }
 
-    #[cfg(all(test, not(target_family = "wasm")))]
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn prepare_request_for_test(
         &mut self,
         slot: usize,

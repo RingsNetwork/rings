@@ -10,9 +10,11 @@ use futures::FutureExt;
 use futures::StreamExt;
 use rings_transport::connections::dummy_controlled;
 
+use crate::consts::MAX_RELAY_HOPS;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
+use crate::dht::finger_schedule_deadline_for_test;
 use crate::dht::Chord;
 use crate::dht::PeerRingAction;
 use crate::dht::StorageRepairOutcome;
@@ -71,6 +73,10 @@ const QUIESCENT_POLLS: usize = 8;
 // inbound work pending, and disables it before bounded recovery is measured.
 const VIRTUAL_SERVICE_BYTES_PER_MS: usize = 256;
 const MAX_FRAME_SERVICE_MS: u64 = 64;
+const FINGER_INITIAL_PHASE_MS: u64 = 10_000;
+const FINGER_MAX_RETRY_FLOOR_MS: u64 = 60_000;
+const FINGER_ROUTED_LEGS_PER_ATTEMPT: usize = 4;
+const FINGER_MODEL_MAX_LINK_HOPS_PER_BUCKET: usize = 2_048;
 
 const MODEL_LIMITS: SimLimits = SimLimits {
     node_bytes: 128 * 1024 * 1024,
@@ -83,6 +89,73 @@ const MODEL_LIMITS: SimLimits = SimLimits {
 enum ScenarioTopology {
     Ring,
     Hotspot,
+}
+
+fn peak_deadline_bucket(deadlines: &[u64], origin_ms: u64, bucket_ms: u64) -> usize {
+    let mut buckets = BTreeMap::<u64, usize>::new();
+    for deadline in deadlines {
+        let bucket = deadline.saturating_sub(origin_ms) / bucket_ms;
+        let count = buckets.entry(bucket).or_default();
+        *count = count.saturating_add(1);
+    }
+    buckets.values().copied().max().unwrap_or(0)
+}
+
+/// Finger convergence shares no broadcast action: one due node emits one
+/// routed request, followed by one routed report and, only for a missing peer,
+/// one routed offer/answer pair. This gate budgets the worst four routed legs
+/// at the relay-hop limit and checks representative N/N+1 fleet projections.
+#[test]
+fn test_finger_convergence_network_budget_under_synchronous_start_and_failure() {
+    let mut previous_initial_peak = 0usize;
+    let mut previous_retry_peak = 0usize;
+    for node_count in [10usize, 11, 25, 26, 50, 51] {
+        let initial_deadlines = (0..node_count)
+            .map(|index| {
+                finger_schedule_deadline_for_test(
+                    crate::dht::Did::from(u32::try_from(index).unwrap_or(u32::MAX)),
+                    0,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(initial_deadlines
+            .iter()
+            .all(|deadline| (1_000..=1_000 + FINGER_INITIAL_PHASE_MS).contains(deadline)));
+        let initial_peak = peak_deadline_bucket(&initial_deadlines, 1_000, 500);
+
+        let retry_deadlines = (0..node_count)
+            .map(|index| {
+                finger_schedule_deadline_for_test(
+                    crate::dht::Did::from(u32::try_from(index).unwrap_or(u32::MAX)),
+                    u8::MAX,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(retry_deadlines.iter().all(|deadline| {
+            (FINGER_MAX_RETRY_FLOOR_MS..=FINGER_MAX_RETRY_FLOOR_MS.saturating_mul(2))
+                .contains(deadline)
+        }));
+        let retry_peak = peak_deadline_bucket(&retry_deadlines, FINGER_MAX_RETRY_FLOOR_MS, 1_000);
+
+        let allowed_peak = node_count.saturating_add(9) / 10 + 1;
+        assert!(initial_peak <= allowed_peak);
+        assert!(retry_peak <= allowed_peak);
+        let worst_initial_link_hops = initial_peak
+            .saturating_mul(FINGER_ROUTED_LEGS_PER_ATTEMPT)
+            .saturating_mul(usize::from(MAX_RELAY_HOPS));
+        let worst_retry_link_hops = retry_peak
+            .saturating_mul(FINGER_ROUTED_LEGS_PER_ATTEMPT)
+            .saturating_mul(usize::from(MAX_RELAY_HOPS));
+        assert!(worst_initial_link_hops <= FINGER_MODEL_MAX_LINK_HOPS_PER_BUCKET);
+        assert!(worst_retry_link_hops <= FINGER_MODEL_MAX_LINK_HOPS_PER_BUCKET);
+
+        if matches!(node_count, 11 | 26 | 51) {
+            assert!(initial_peak <= previous_initial_peak.saturating_add(1));
+            assert!(retry_peak <= previous_retry_peak.saturating_add(1));
+        }
+        previous_initial_peak = initial_peak;
+        previous_retry_peak = retry_peak;
+    }
 }
 
 impl ScenarioTopology {

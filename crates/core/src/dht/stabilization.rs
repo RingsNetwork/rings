@@ -960,6 +960,8 @@ fn elapsed_since(started_at: Instant) -> i64 {
 }
 
 mod maintenance;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use maintenance::finger_schedule_deadline_for_test;
 #[cfg(all(test, target_family = "wasm"))]
 pub(crate) use maintenance::maintenance_phase_trace_for_test;
 #[cfg(all(test, target_family = "wasm"))]

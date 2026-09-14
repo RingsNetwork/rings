@@ -5,8 +5,11 @@
 //! - `slot_epoch[i]` records that last change and prevents a range result from
 //!   overwriting a slot changed after the lookup was issued.
 //! - `in_flight` contains at most one request; only its exact token may apply.
-//! - `last_issued_at_ms` enforces a hard per-node emission interval, while the
-//!   runtime scheduler adds jitter and never performs catch-up bursts.
+//! - `last_issued_at_ms` enforces a hard per-node emission interval.
+//! - `failure_streak` and `retry_not_before_ms` make loss, invalid reports,
+//!   timeouts, and send cancellation progress-sensitive. Only a proved range
+//!   resets the streak; the runtime scheduler adds full-window deterministic
+//!   jitter and never performs catch-up bursts.
 
 use num_bigint::BigUint;
 use serde::Deserialize;
@@ -18,8 +21,22 @@ use crate::dht::Did;
 /// Minimum wall-clock separation between automatic finger lookup emissions.
 pub(crate) const FINGER_LOOKUP_MIN_INTERVAL_MS: u64 = 1_000;
 
+/// Maximum base delay between retries after repeated failures.
+pub(crate) const FINGER_LOOKUP_MAX_BACKOFF_MS: u64 = 60_000;
+
 /// Time after which an unanswered finger lookup no longer blocks convergence.
 const FINGER_LOOKUP_TIMEOUT_MS: u64 = 10_000;
+
+const FINGER_LOOKUP_MAX_BACKOFF_EXPONENT: u8 = 6;
+
+/// Exponential retry floor for one node after `failure_streak` failures.
+pub(crate) fn finger_lookup_backoff_ms(failure_streak: u8) -> u64 {
+    let exponent = u32::from(failure_streak.min(FINGER_LOOKUP_MAX_BACKOFF_EXPONENT));
+    FINGER_LOOKUP_MIN_INTERVAL_MS
+        .checked_shl(exponent)
+        .unwrap_or(FINGER_LOOKUP_MAX_BACKOFF_MS)
+        .min(FINGER_LOOKUP_MAX_BACKOFF_MS)
+}
 
 /// Correlation token for one range-aware finger lookup.
 ///
@@ -62,6 +79,34 @@ struct PendingFingerLookup {
     expires_at_ms: u64,
 }
 
+/// Scheduler-visible projection of the convergence state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct FingerConvergenceStatus {
+    pending: bool,
+    failure_streak: u8,
+}
+
+impl FingerConvergenceStatus {
+    pub(crate) const fn new(pending: bool, failure_streak: u8) -> Self {
+        Self {
+            pending,
+            failure_streak,
+        }
+    }
+
+    pub(crate) const fn inactive() -> Self {
+        Self::new(false, 0)
+    }
+
+    pub(crate) const fn pending(self) -> bool {
+        self.pending
+    }
+
+    pub(crate) const fn failure_streak(self) -> u8 {
+        self.failure_streak
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct FingerConvergenceState {
     epoch: u64,
@@ -70,6 +115,8 @@ pub(crate) struct FingerConvergenceState {
     in_flight: Option<PendingFingerLookup>,
     next_request_id: Option<u64>,
     last_issued_at_ms: Option<u64>,
+    failure_streak: u8,
+    retry_not_before_ms: Option<u64>,
     exhausted: bool,
 }
 
@@ -89,6 +136,8 @@ impl FingerConvergenceState {
             in_flight: None,
             next_request_id: Some(1),
             last_issued_at_ms: None,
+            failure_streak: 0,
+            retry_not_before_ms: None,
             exhausted: false,
         }
     }
@@ -107,6 +156,21 @@ impl FingerConvergenceState {
 
     pub(crate) fn is_pending(&self) -> bool {
         self.in_flight.is_some() || self.verified.iter().any(|verified| !verified)
+    }
+
+    pub(crate) fn status(&self) -> FingerConvergenceStatus {
+        FingerConvergenceStatus::new(self.is_pending(), self.failure_streak)
+    }
+
+    fn record_failure(&mut self, now_ms: u64) {
+        self.failure_streak = self.failure_streak.saturating_add(1);
+        self.retry_not_before_ms =
+            Some(now_ms.saturating_add(finger_lookup_backoff_ms(self.failure_streak)));
+    }
+
+    fn record_progress(&mut self) {
+        self.failure_streak = 0;
+        self.retry_not_before_ms = None;
     }
 
     fn request_is_current(&self, request: FingerFixRequest) -> bool {
@@ -147,13 +211,19 @@ impl FingerConvergenceState {
             }
         }
 
-        if self.in_flight.is_some_and(|pending| {
+        let invalidated_in_flight = self.in_flight.is_some_and(|pending| {
             changed
                 .get(pending.request.slot_index())
                 .copied()
                 .unwrap_or(true)
-        }) {
+        });
+        if invalidated_in_flight {
             self.in_flight = None;
+            // This transition has no clock input. Anchor the pure retry floor
+            // at the last emission; the runtime scheduler observes the higher
+            // failure level and adds a fresh full-jitter delay from its current
+            // monotonic time.
+            self.record_failure(self.last_issued_at_ms.unwrap_or(0));
         }
     }
 
@@ -200,6 +270,8 @@ impl FingerConvergenceState {
             .is_some_and(|pending| now_ms >= pending.expires_at_ms)
         {
             self.in_flight = None;
+            self.record_failure(now_ms);
+            return None;
         }
         if self.in_flight.is_some() {
             return None;
@@ -210,6 +282,12 @@ impl FingerConvergenceState {
         if self
             .last_issued_at_ms
             .is_some_and(|last| now_ms.saturating_sub(last) < FINGER_LOOKUP_MIN_INTERVAL_MS)
+        {
+            return None;
+        }
+        if self
+            .retry_not_before_ms
+            .is_some_and(|deadline| now_ms < deadline)
         {
             return None;
         }
@@ -231,7 +309,7 @@ impl FingerConvergenceState {
         Some(request)
     }
 
-    #[cfg(all(test, not(target_family = "wasm")))]
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn prepare_slot_for_test(
         &mut self,
         fingers: &[Option<Did>],
@@ -252,12 +330,22 @@ impl FingerConvergenceState {
         request: FingerFixRequest,
         successor: Did,
     ) -> FingerResultDisposition {
-        if !self.request_is_current(request) {
+        let Some(pending) = self.in_flight.filter(|pending| pending.request == request) else {
             return FingerResultDisposition::Stale;
-        }
-        match finger_proof_end(local, successor, request.slot_index(), slot_count) {
-            Some(end) => FingerResultDisposition::Applied { end },
-            None => FingerResultDisposition::Invalid,
+        };
+        let Some(end) = finger_proof_end(local, successor, request.slot_index(), slot_count) else {
+            return FingerResultDisposition::Invalid;
+        };
+        let applicable = self
+            .slot_epoch
+            .iter()
+            .skip(request.slot_index())
+            .take(end.saturating_sub(request.slot_index()).saturating_add(1))
+            .any(|slot_epoch| *slot_epoch <= pending.issued_epoch);
+        if applicable {
+            FingerResultDisposition::Applied { end }
+        } else {
+            FingerResultDisposition::Stale
         }
     }
 
@@ -267,6 +355,7 @@ impl FingerConvergenceState {
         fingers: &mut [Option<Did>],
         request: FingerFixRequest,
         successor: Did,
+        now_ms: u64,
     ) -> FingerResultDisposition {
         let Some(pending) = self.in_flight.filter(|pending| pending.request == request) else {
             return FingerResultDisposition::Stale;
@@ -274,10 +363,12 @@ impl FingerConvergenceState {
         self.in_flight = None;
         let Some(end) = finger_proof_end(local, successor, request.slot_index(), fingers.len())
         else {
+            self.record_failure(now_ms);
             return FingerResultDisposition::Invalid;
         };
         let replacement = (successor != local).then_some(successor);
         let count = end.saturating_sub(request.slot_index()).saturating_add(1);
+        let mut applied = false;
         for ((finger, slot_epoch), verified) in fingers
             .iter_mut()
             .zip(&self.slot_epoch)
@@ -288,14 +379,22 @@ impl FingerConvergenceState {
             if *slot_epoch <= pending.issued_epoch {
                 *finger = replacement;
                 *verified = true;
+                applied = true;
             }
         }
-        FingerResultDisposition::Applied { end }
+        if applied {
+            self.record_progress();
+            FingerResultDisposition::Applied { end }
+        } else {
+            self.record_failure(now_ms);
+            FingerResultDisposition::Stale
+        }
     }
 
-    pub(crate) fn cancel(&mut self, request: FingerFixRequest) {
+    pub(crate) fn cancel(&mut self, request: FingerFixRequest, now_ms: u64) {
         if self.request_is_current(request) {
             self.in_flight = None;
+            self.record_failure(now_ms);
         }
     }
 }

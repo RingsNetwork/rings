@@ -34,6 +34,7 @@ use std::collections::BTreeSet;
 use num_bigint::BigUint;
 
 use super::finger::FingerConvergenceState;
+use super::finger::FingerConvergenceStatus;
 use super::finger::FingerResultDisposition;
 #[cfg(test)]
 use super::finger::FINGER_LOOKUP_MIN_INTERVAL_MS;
@@ -105,8 +106,13 @@ impl TopologyState {
         &self.finger_convergence
     }
 
+    #[cfg(test)]
     pub(crate) fn finger_convergence_pending(&self) -> bool {
         self.finger_convergence.is_pending()
+    }
+
+    pub(crate) fn finger_convergence_status(&self) -> FingerConvergenceStatus {
+        self.finger_convergence.status()
     }
 
     pub(crate) fn finger_result_disposition(
@@ -175,6 +181,8 @@ pub enum TopologyEvent {
         peer: Did,
         /// Finger slots whose lookup completed while the peer was handshaking.
         fixed_fingers: Vec<ConditionalFingerUpdate>,
+        /// Current time used to pace any rejected deferred finger evidence.
+        now_ms: u64,
     },
     /// A peer is removed from successor, predecessor, and finger state.
     Remove {
@@ -215,11 +223,15 @@ pub enum TopologyEvent {
         request: FingerFixRequest,
         /// Successor reported for the request's lowest slot.
         successor: Did,
+        /// Current time used to pace a rejected or non-progressing result.
+        now_ms: u64,
     },
     /// Cancel an in-flight request after its outbound send failed.
     CancelFinger {
         /// Correlation token of the failed request.
         request: FingerFixRequest,
+        /// Current time from which the retry backoff begins.
+        now_ms: u64,
     },
 }
 
@@ -550,6 +562,7 @@ fn step_admit(
     state: &TopologyState,
     peer: Did,
     fixed_fingers: &[ConditionalFingerUpdate],
+    now_ms: u64,
     capacity: usize,
 ) -> TopologyStep {
     if peer == state.local {
@@ -561,7 +574,7 @@ fn step_admit(
 
     let mut verified = state.clone();
     for update in fixed_fingers {
-        verified = apply_finger_result(&verified, update.request, peer);
+        verified = apply_finger_result(&verified, update.request, peer, now_ms);
     }
     let successors = update_successors(state.local, &state.successors, peer, capacity);
     let inserted = !state.successors.contains(&peer) && successors.contains(&peer);
@@ -671,7 +684,7 @@ fn step_fix_finger(state: &TopologyState, now_ms: u64) -> TopologyStep {
     };
     match finger_verification_route(state, did) {
         FindSuccessorStep::Local(successor) => TopologyStep {
-            state: apply_finger_result(&prepared, request, successor),
+            state: apply_finger_result(&prepared, request, successor, now_ms),
             actions: Vec::new(),
         },
         FindSuccessorStep::Remote { next, did } => TopologyStep {
@@ -694,11 +707,12 @@ fn apply_finger_result(
     state: &TopologyState,
     request: FingerFixRequest,
     successor: Did,
+    now_ms: u64,
 ) -> TopologyState {
     let mut fingers = state.fingers.clone();
     let mut finger_convergence = state.finger_convergence.clone();
     let disposition =
-        finger_convergence.apply_result(state.local, &mut fingers, request, successor);
+        finger_convergence.apply_result(state.local, &mut fingers, request, successor, now_ms);
     let fix_finger_index = match disposition {
         FingerResultDisposition::Applied { end } => end,
         FingerResultDisposition::Invalid | FingerResultDisposition::Stale => state.fix_finger_index,
@@ -711,9 +725,13 @@ fn apply_finger_result(
     }
 }
 
-fn cancel_finger_result(state: &TopologyState, request: FingerFixRequest) -> TopologyState {
+fn cancel_finger_result(
+    state: &TopologyState,
+    request: FingerFixRequest,
+    now_ms: u64,
+) -> TopologyState {
     let mut finger_convergence = state.finger_convergence.clone();
-    finger_convergence.cancel(request);
+    finger_convergence.cancel(request, now_ms);
     TopologyState {
         finger_convergence,
         ..state.clone()
@@ -744,7 +762,8 @@ fn step_event(state: &TopologyState, event: TopologyEvent, capacity: usize) -> T
         TopologyEvent::Admit {
             peer,
             fixed_fingers,
-        } => step_admit(state, peer, &fixed_fingers, capacity),
+            now_ms,
+        } => step_admit(state, peer, &fixed_fingers, now_ms, capacity),
         TopologyEvent::Remove { peer, successor } => step_remove(state, peer, successor, capacity),
         TopologyEvent::UpdateSuccessor { successor } => {
             step_update_successor(state, successor, capacity)
@@ -797,12 +816,16 @@ fn step_event(state: &TopologyState, event: TopologyEvent, capacity: usize) -> T
             actions: Vec::new(),
         },
         TopologyEvent::AdvanceFingerConvergence { now_ms } => step_fix_finger(state, now_ms),
-        TopologyEvent::ApplyFinger { request, successor } => TopologyStep {
-            state: apply_finger_result(state, request, successor),
+        TopologyEvent::ApplyFinger {
+            request,
+            successor,
+            now_ms,
+        } => TopologyStep {
+            state: apply_finger_result(state, request, successor, now_ms),
             actions: Vec::new(),
         },
-        TopologyEvent::CancelFinger { request } => TopologyStep {
-            state: cancel_finger_result(state, request),
+        TopologyEvent::CancelFinger { request, now_ms } => TopologyStep {
+            state: cancel_finger_result(state, request, now_ms),
             actions: Vec::new(),
         },
     }

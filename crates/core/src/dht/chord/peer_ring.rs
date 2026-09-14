@@ -11,6 +11,7 @@ use super::TopoInfo;
 use crate::consts::LOCAL_CACHE_CAPACITY;
 use crate::dht::did::BiasId;
 use crate::dht::entry::Entry;
+use crate::dht::finger::FingerConvergenceStatus;
 use crate::dht::finger::FingerResultDisposition;
 use crate::dht::finger::DEFAULT_FINGER_TABLE_SIZE;
 use crate::dht::successor::SuccessorReader;
@@ -327,8 +328,8 @@ impl PeerRing {
         )
     }
 
-    pub(crate) fn finger_convergence_pending(&self) -> Result<bool> {
-        self.with_topology_state(TopologyState::finger_convergence_pending)
+    pub(crate) fn finger_convergence_status(&self) -> Result<FingerConvergenceStatus> {
+        self.with_topology_state(TopologyState::finger_convergence_status)
     }
 
     pub(crate) fn finger_result_disposition(
@@ -344,16 +345,22 @@ impl PeerRing {
         request: FingerFixRequest,
         successor: Did,
     ) -> Result<FingerResultDisposition> {
+        let now_ms = u64::try_from(get_epoch_ms()).unwrap_or(u64::MAX);
         let mut disposition = FingerResultDisposition::Stale;
         self.transition_topology_with_observer(
-            TopologyEvent::ApplyFinger { request, successor },
+            TopologyEvent::ApplyFinger {
+                request,
+                successor,
+                now_ms,
+            },
             |state| disposition = state.finger_result_disposition(request, successor),
         )?;
         Ok(disposition)
     }
 
     pub(crate) fn cancel_finger_lookup(&self, request: FingerFixRequest) -> Result<()> {
-        self.transition_topology(TopologyEvent::CancelFinger { request })
+        let now_ms = u64::try_from(get_epoch_ms()).unwrap_or(u64::MAX);
+        self.transition_topology(TopologyEvent::CancelFinger { request, now_ms })
             .map(|_| ())
     }
 
@@ -368,9 +375,11 @@ impl PeerRing {
         peer: Did,
         fixed_fingers: Vec<topology::ConditionalFingerUpdate>,
     ) -> Result<PeerRingAction> {
+        let now_ms = u64::try_from(get_epoch_ms()).unwrap_or(u64::MAX);
         let next = self.transition_topology(TopologyEvent::Admit {
             peer,
             fixed_fingers,
+            now_ms,
         })?;
         Ok(self.topology_multi_actions(next.actions))
     }
