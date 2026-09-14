@@ -36,7 +36,42 @@ fn emitted_finger_request(output: &TopologyStep) -> FingerFixRequest {
 
 fn converge_with_oracle(mut current: TopologyState, all: &[Did]) -> (TopologyState, usize) {
     let mut lookups = 0usize;
-    for round in 0..=RING_BITS {
+    // A sparse bootstrap seed may first require up to one stabilization head
+    // refinement per ring bit before the local successor range can be proved;
+    // finger range lookups then require at most one further table width.
+    for round in 0..=RING_BITS.saturating_mul(2) {
+        if let Some(reporter) = successor_head(&current) {
+            let stabilize_request_id =
+                request_id(u128::try_from(round).unwrap_or(u128::MAX).saturating_add(1));
+            current = step(
+                &current,
+                TopologyEvent::BeginStabilize {
+                    request_id: stabilize_request_id,
+                },
+                DEFAULT_SUCCESSOR_CAPACITY,
+            )
+            .state;
+            current = step(
+                &current,
+                TopologyEvent::ClaimStabilize {
+                    reporter,
+                    request_id: stabilize_request_id,
+                },
+                DEFAULT_SUCCESSOR_CAPACITY,
+            )
+            .state;
+            let stabilized = step(
+                &current,
+                TopologyEvent::Stabilize {
+                    reporter,
+                    request_id: Some(stabilize_request_id),
+                    successors: Vec::new(),
+                    predecessor: predecessor(all, reporter),
+                },
+                DEFAULT_SUCCESSOR_CAPACITY,
+            );
+            current = stabilized.state;
+        }
         if !current.finger_convergence_pending() {
             return (current, lookups);
         }
@@ -75,7 +110,8 @@ fn converge_with_oracle(mut current: TopologyState, all: &[Did]) -> (TopologySta
     }
     assert!(
         !current.finger_convergence_pending(),
-        "finger convergence exceeded the fixed table width"
+        "finger convergence exceeded the stabilization plus finger-width bound: {:?}",
+        current.finger_convergence_projection()
     );
     (current, lookups)
 }
@@ -94,7 +130,7 @@ fn distinct_ranges(fingers: &[Option<Did>]) -> usize {
 }
 
 #[test]
-fn test_five_node_bootstrap_converges_in_two_proved_range_lookups() {
+fn test_five_node_bootstrap_uses_one_stabilization_proof_and_one_routed_lookup() {
     let local = Did::from(BigUint::from(0u8));
     let lower = (BigUint::from(1u8) << 159) - BigUint::from(1u8);
     let upper = BigUint::from(1u8) << 159;
@@ -118,7 +154,7 @@ fn test_five_node_bootstrap_converges_in_two_proved_range_lookups() {
 
     assert_eq!(converged.fingers, expected);
     assert_eq!(distinct_ranges(&expected), 2);
-    assert_eq!(lookups, 2);
+    assert_eq!(lookups, 1);
 }
 
 #[test]
@@ -136,7 +172,7 @@ fn test_join_after_isolation_revalidates_every_previously_unknown_range() {
     .state;
 
     assert!(isolated.finger_convergence_pending());
-    assert!(!isolated.finger_convergence_status().pending());
+    assert!(!isolated.finger_convergence_status(0).pending());
     assert!(isolated
         .finger_convergence
         .verified
@@ -152,7 +188,7 @@ fn test_join_after_isolation_revalidates_every_previously_unknown_range() {
     let (converged, lookups) = converge_with_oracle(joined, &[local, seed, far]);
 
     assert_eq!(converged.fingers, finger_table(&[local, seed, far], local));
-    assert_eq!(lookups, 2);
+    assert_eq!(lookups, 1);
 }
 
 #[test]
@@ -191,7 +227,7 @@ fn test_finger_rejoin_after_losing_last_successor_discards_old_empty_range_proof
         .verified
         .iter()
         .all(|verified| !verified));
-    assert!(!isolated.finger_convergence_status().pending());
+    assert!(!isolated.finger_convergence_status(0).pending());
 
     let rejoined = step(
         &isolated,
@@ -204,13 +240,13 @@ fn test_finger_rejoin_after_losing_last_successor_discards_old_empty_range_proof
     expected.truncate(reconverged.fingers.len());
 
     assert_eq!(reconverged.fingers, expected);
-    assert!(lookups >= 2);
+    assert!(lookups >= 1);
 }
 
 #[test]
 fn test_restart_uses_a_new_request_identity_and_rejects_the_old_report() {
     let local = did(0);
-    let seed = did(128);
+    let seed = did(1);
     let hinted = step(
         &state(local, Vec::new(), None, vec![None; 8], 0),
         TopologyEvent::Join { peer: seed },
@@ -252,7 +288,7 @@ fn test_restart_uses_a_new_request_identity_and_rejects_the_old_report() {
 #[test]
 fn test_finger_report_at_deadline_expires_without_a_scheduler_poll() {
     let local = did(0);
-    let seed = did(128);
+    let seed = did(1);
     let hinted = step(
         &state(local, Vec::new(), None, vec![None; 8], 0),
         TopologyEvent::Join { peer: seed },
@@ -475,8 +511,8 @@ fn test_wrapped_ring_mutations_converge_to_the_finger_table_oracle() {
 #[test]
 fn test_topology_change_rejects_an_in_flight_stale_range_result() {
     let local = did(0);
-    let seed = did(128);
-    let closer = did(8);
+    let seed = did(1);
+    let closer = did(2);
     let hinted = step(
         &state(local, Vec::new(), None, vec![None; 8], 0),
         TopologyEvent::Join { peer: seed },
@@ -491,9 +527,9 @@ fn test_topology_change_rejects_an_in_flight_stale_range_result() {
         DEFAULT_SUCCESSOR_CAPACITY,
     )
     .state;
-    assert_eq!(changed.finger_convergence.status().failure_streak(), 1);
-    let early_retry = step(&changed, advance(2_999), DEFAULT_SUCCESSOR_CAPACITY);
-    assert!(early_retry.actions.is_empty());
+    assert_eq!(changed.finger_convergence.status().failure_streak(), 0);
+    let retry = step(&changed, advance(2_000), DEFAULT_SUCCESSOR_CAPACITY);
+    assert_eq!(retry.actions.len(), 1);
     let stale = step(
         &changed,
         TopologyEvent::ApplyFinger {
@@ -506,13 +542,13 @@ fn test_topology_change_rejects_an_in_flight_stale_range_result() {
     .state;
 
     assert_eq!(stale, changed);
-    assert_eq!(stale.fingers.first().copied().flatten(), Some(closer));
+    assert_eq!(stale.fingers.get(1).copied().flatten(), Some(closer));
 }
 
 #[test]
 fn test_finger_lookup_has_one_in_flight_request_and_a_bounded_retry() {
     let local = did(0);
-    let seed = did(128);
+    let seed = did(1);
     let hinted = step(
         &state(local, Vec::new(), None, vec![None; 8], 0),
         TopologyEvent::Join { peer: seed },
@@ -547,8 +583,24 @@ fn test_finger_lookup_has_one_in_flight_request_and_a_bounded_retry() {
 #[test]
 fn test_periodic_revalidation_marks_a_range_without_emitting_a_lookup() {
     let local = did(0);
-    let seed = did(128);
-    let mut stable = state(local, vec![seed], None, vec![Some(seed); 8], 0);
+    let seed = did(1);
+    let remote = did(8);
+    let mut stable = state(
+        local,
+        vec![seed],
+        None,
+        vec![
+            Some(seed),
+            Some(remote),
+            Some(remote),
+            Some(remote),
+            None,
+            None,
+            None,
+            None,
+        ],
+        0,
+    );
     stable.finger_convergence.verified.fill(true);
 
     let marked = step(
@@ -573,7 +625,7 @@ fn test_periodic_revalidation_marks_a_range_without_emitting_a_lookup() {
 #[test]
 fn test_cancelled_finger_lookup_still_obeys_the_per_node_rate_limit() {
     let local = did(0);
-    let seed = did(128);
+    let seed = did(1);
     let hinted = step(
         &state(local, Vec::new(), None, vec![None; 8], 0),
         TopologyEvent::Join { peer: seed },
@@ -606,7 +658,7 @@ fn test_cancelled_finger_lookup_still_obeys_the_per_node_rate_limit() {
 #[test]
 fn test_persistent_send_failures_have_a_capped_exponential_emission_bound() {
     let local = did(0);
-    let seed = did(128);
+    let seed = did(1);
     let mut current = step(
         &state(local, Vec::new(), None, vec![None; 8], 0),
         TopologyEvent::Join { peer: seed },
@@ -667,7 +719,7 @@ fn test_persistent_send_failures_have_a_capped_exponential_emission_bound() {
 #[test]
 fn test_proved_progress_resets_failure_backoff() {
     let local = did(0);
-    let seed = did(128);
+    let seed = did(1);
     let initial = step(
         &state(local, Vec::new(), None, vec![None; 8], 0),
         TopologyEvent::Join { peer: seed },

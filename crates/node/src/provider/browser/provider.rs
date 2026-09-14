@@ -7,7 +7,6 @@ use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use futures::channel::oneshot;
 use js_sys;
 use js_sys::Uint8Array;
 use rings_core::dht::entry;
@@ -15,7 +14,6 @@ use rings_core::dht::entry::Entry;
 use rings_core::dht::Did;
 use rings_core::dht::EntryStorage;
 use rings_core::ecc::PublicKey;
-use rings_core::lifecycle::StopSource;
 use rings_core::measure::PeerQuality;
 use rings_core::message::DhtProtocolMode;
 use rings_core::message::MessageSigner;
@@ -63,7 +61,9 @@ use crate::provider::Provider;
 use crate::provider::RemoteRpcEndpoint;
 use crate::provider::Signer;
 
+mod listener;
 mod onion_proxy;
+pub use listener::ProviderListener;
 
 /// AddressType enum contains `DEFAULT` and `ED25519`.
 #[wasm_export]
@@ -85,40 +85,6 @@ impl ProviderRef {
     /// get wrapped arc, this is useful for wasm case
     pub fn inner(&self) -> Arc<Provider> {
         self.inner.clone()
-    }
-}
-
-/// Browser listener lifecycle handle returned by [`Provider::listen`].
-#[derive(Clone)]
-#[wasm_export]
-pub struct ProviderListener {
-    stop: StopSource,
-    started: js_sys::Promise,
-    task: js_sys::Promise,
-}
-
-#[wasm_export]
-impl ProviderListener {
-    /// Request cooperative shutdown for the listener task.
-    pub fn stop(&self) {
-        self.stop.request_stop();
-    }
-
-    /// Return whether shutdown was requested through this handle.
-    pub fn is_stopped(&self) -> bool {
-        self.stop.is_stop_requested()
-    }
-
-    /// Return a promise that resolves once the listener task enters its run loop.
-    pub fn started(&self) -> js_sys::Promise {
-        self.started.clone()
-    }
-
-    /// Return the underlying listener task promise.
-    ///
-    /// It resolves only after [`ProviderListener::stop`] requests cooperative shutdown.
-    pub fn task(&self) -> js_sys::Promise {
-        self.task.clone()
     }
 }
 
@@ -709,33 +675,6 @@ impl Provider {
                 .map_err(JsError::from)?;
             Ok(js_value::serialize(&ret).map_err(JsError::from)?)
         })
-    }
-
-    /// Start the long-running listener and return its lifecycle handle.
-    pub fn listen(&self) -> ProviderListener {
-        let p = self.processor.clone();
-        let stop = StopSource::new();
-        let token = stop.token();
-        let (started_sender, started_receiver) = oneshot::channel::<()>();
-
-        let started = future_to_promise(async move {
-            started_receiver
-                .await
-                .map_err(|_| JsError::new("provider listener exited before start"))?;
-            Ok(JsValue::null())
-        });
-
-        let task = future_to_promise(async move {
-            let _sent = started_sender.send(());
-            p.listen_with(token).await;
-            Ok(JsValue::null())
-        });
-
-        ProviderListener {
-            stop,
-            started,
-            task,
-        }
     }
 
     /// connect peer with remote jsonrpc server url

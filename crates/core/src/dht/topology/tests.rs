@@ -36,6 +36,7 @@ fn issue_request(current: &mut TopologyState, slot: usize, now_ms: u64) -> Finge
     }
     let request = current.finger_convergence.prepare_lookup(
         &current.fingers,
+        0,
         now_ms,
         request_id(u128::from(now_ms)),
     );
@@ -116,6 +117,8 @@ fn test_stabilize_step_refines_successor_distance_vector() {
     let next = step(
         &current,
         TopologyEvent::Stabilize {
+            reporter: did(40),
+            request_id: None,
             successors: vec![did(50), did(60)],
             predecessor: Some(did(10)),
         },
@@ -309,10 +312,24 @@ fn test_admit_step_does_not_overwrite_finger_changed_after_update_was_deferred()
     let peer = did(32);
     let mut current = state(local, vec![peer], None, vec![Some(peer); 5], 0);
     let request = issue_request(&mut current, 4, 1_000);
-    let changed = step(
+    let deferred = step(
         &current,
+        TopologyEvent::DeferFinger {
+            request,
+            successor: peer,
+            now_ms: 1_001,
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+    let changed = step(
+        &deferred.state,
         TopologyEvent::Join { peer: fresher },
         DEFAULT_SUCCESSOR_CAPACITY,
+    );
+    assert_eq!(changed.state.finger_convergence_projection().deferred, None);
+    assert_eq!(
+        changed.state.finger_convergence_projection().failure_streak,
+        0
     );
     let next = step(
         &changed.state,
@@ -339,7 +356,7 @@ fn test_fix_finger_step_keeps_isolated_sparse_range_unverified_and_dormant() {
     assert_eq!(next.state.fix_finger_index, 2);
     assert_eq!(next.state.fingers, vec![None; 4]);
     assert!(next.state.finger_convergence_pending());
-    assert!(!next.state.finger_convergence_status().pending());
+    assert!(!next.state.finger_convergence_status(0).pending());
     assert!(next.actions.is_empty());
 }
 
@@ -478,6 +495,126 @@ fn test_find_successor_falls_back_to_successor_head_when_no_finger_precedes_targ
         next: head,
         did: far
     });
+}
+
+#[test]
+fn test_local_successor_range_waits_for_stabilization_instead_of_routing_around_ring() {
+    let local = did(0);
+    let head = did(4);
+    let mut current = state(
+        local,
+        vec![head],
+        None,
+        vec![Some(head), Some(head), Some(head), None],
+        0,
+    );
+    current.finger_convergence.verified = vec![false, false, false, true];
+
+    assert!(!current.finger_convergence_status(0).pending());
+    let dormant = step(&current, advance(1_000), DEFAULT_SUCCESSOR_CAPACITY);
+    assert!(dormant.actions.is_empty());
+    assert_eq!(dormant.state.finger_convergence.verified, vec![
+        false, false, false, true
+    ]);
+
+    let request_id = request_id(2_000);
+    let begun = step(
+        &dormant.state,
+        TopologyEvent::BeginStabilize { request_id },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+    let claimed = step(
+        &begun.state,
+        TopologyEvent::ClaimStabilize {
+            reporter: head,
+            request_id,
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+    let stabilized = step(
+        &claimed.state,
+        TopologyEvent::Stabilize {
+            reporter: head,
+            request_id: Some(request_id),
+            successors: Vec::new(),
+            predecessor: Some(local),
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+    assert!(stabilized
+        .actions
+        .iter()
+        .all(|action| !matches!(action, TopologyAction::FindSuccessorForFix { .. })));
+    assert_eq!(stabilized.state.finger_convergence.verified, vec![
+        true, true, true, true
+    ]);
+}
+
+#[test]
+fn test_stale_stabilization_report_cannot_verify_the_local_successor_range() {
+    let local = did(0);
+    let head = did(4);
+    let mut current = state(
+        local,
+        vec![head],
+        None,
+        vec![Some(head), Some(head), Some(head), None],
+        0,
+    );
+    current.finger_convergence.verified = vec![false, false, false, true];
+    let old_request = request_id(10);
+    let current_request = request_id(11);
+    let first = step(
+        &current,
+        TopologyEvent::BeginStabilize {
+            request_id: old_request,
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+    let superseded = step(
+        &first.state,
+        TopologyEvent::BeginStabilize {
+            request_id: current_request,
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+    let stale = step(
+        &superseded.state,
+        TopologyEvent::Stabilize {
+            reporter: head,
+            request_id: Some(old_request),
+            successors: Vec::new(),
+            predecessor: Some(local),
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+
+    assert_eq!(stale.state, superseded.state);
+    assert_eq!(stale.state.finger_convergence.verified, vec![
+        false, false, false, true
+    ]);
+
+    let claimed = step(
+        &stale.state,
+        TopologyEvent::ClaimStabilize {
+            reporter: head,
+            request_id: current_request,
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+    let fresh = step(
+        &claimed.state,
+        TopologyEvent::Stabilize {
+            reporter: head,
+            request_id: Some(current_request),
+            successors: Vec::new(),
+            predecessor: Some(local),
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+    assert_eq!(fresh.state.finger_convergence.verified, vec![
+        true, true, true, true
+    ]);
 }
 
 /// Law: every `Remote { next, did }` step satisfies `next != n` and
@@ -661,6 +798,8 @@ fn test_stabilize_step_reports_head_change_when_reported_predecessor_precedes_he
     let next = step(
         &current,
         TopologyEvent::Stabilize {
+            reporter: did(30),
+            request_id: None,
             successors: vec![did(30), did(40)],
             predecessor: Some(did(20)),
         },
@@ -760,3 +899,5 @@ fn test_rectify_never_adopts_the_local_node_as_predecessor() {
     assert_eq!(notified_by_itself.state.predecessor, Some(did(5)));
     assert!(is_responsible_for(&notified_by_itself.state, did(7)));
 }
+
+mod admission_tests;

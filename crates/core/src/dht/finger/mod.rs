@@ -11,12 +11,15 @@ use crate::dht::Did;
 mod convergence;
 
 pub(crate) use convergence::finger_lookup_backoff_ms;
+pub(crate) use convergence::finger_proof_end;
+pub(crate) use convergence::FingerConvergencePhase;
 #[cfg(test)]
 pub(crate) use convergence::FingerConvergenceProjection;
 pub(crate) use convergence::FingerConvergenceState;
 pub(crate) use convergence::FingerConvergenceStatus;
 pub use convergence::FingerFixRequest;
 pub(crate) use convergence::FingerResultDisposition;
+pub(crate) use convergence::FINGER_ADMISSION_TIMEOUT_MS;
 #[cfg(test)]
 pub(crate) use convergence::FINGER_LOOKUP_MIN_INTERVAL_MS;
 
@@ -25,7 +28,7 @@ pub const DEFAULT_FINGER_TABLE_SIZE: usize = 160;
 
 /// Finger table of Chord DHT
 /// Ring's finger table is implemented with BiasRing
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct FingerTable {
     did: Did,
     size: usize,
@@ -33,14 +36,6 @@ pub struct FingerTable {
     pub(super) fix_finger_index: usize,
     convergence: FingerConvergenceState,
 }
-
-impl PartialEq for FingerTable {
-    fn eq(&self, other: &Self) -> bool {
-        self.did == other.did && self.size == other.size && self.finger == other.finger
-    }
-}
-
-impl Eq for FingerTable {}
 
 impl FingerTable {
     /// builder
@@ -75,10 +70,11 @@ impl FingerTable {
         self.finger.get(index).copied().flatten()
     }
 
-    fn write_slot(&mut self, index: usize, did: Option<Did>) {
-        if let Some(slot) = self.finger.get_mut(index) {
-            *slot = did;
-        }
+    fn mutate_hints(&mut self, mutation: impl FnOnce(&mut Vec<Option<Did>>)) {
+        let before = self.finger.clone();
+        mutation(&mut self.finger);
+        self.convergence
+            .invalidate_hint_changes(&before, &self.finger);
     }
 
     /// setter
@@ -92,10 +88,11 @@ impl FingerTable {
             tracing::trace!("set finger table with self did, ignore it");
             return;
         }
-        let before = self.finger.clone();
-        self.write_slot(index, Some(did));
-        self.convergence
-            .invalidate_hint_changes(&before, &self.finger);
+        self.mutate_hints(|fingers| {
+            if let Some(slot) = fingers.get_mut(index) {
+                *slot = Some(did);
+            }
+        });
     }
 
     /// setter for fix_finger_index
@@ -106,35 +103,36 @@ impl FingerTable {
 
     /// remove a node from dht finger table
     pub fn remove(&mut self, did: Did) {
-        let before = self.finger.clone();
-        self.finger = crate::dht::topology::remove_finger_peer(&self.finger, did);
-        self.convergence
-            .invalidate_hint_changes(&before, &self.finger);
+        self.mutate_hints(|fingers| {
+            *fingers = crate::dht::topology::remove_finger_peer(fingers, did);
+        });
     }
 
     /// Join FingerTable
     pub fn join(&mut self, did: Did) {
-        let before = self.finger.clone();
         let observer = self.did;
         let bias = did.bias(observer);
+        let size = self.size;
 
-        for k in 0..self.size {
-            let pos = Did::power_of_two(k);
+        self.mutate_hints(|fingers| {
+            for k in 0..size {
+                let pos = Did::power_of_two(k);
 
-            if bias.pos() < pos {
-                continue;
-            }
-
-            if let Some(v) = self.finger.get(k).copied().flatten() {
-                if BiasId::cmp_from_observer(observer, did, v) == std::cmp::Ordering::Greater {
+                if bias.pos() < pos {
                     continue;
                 }
-            }
 
-            self.write_slot(k, Some(did));
-        }
-        self.convergence
-            .invalidate_hint_changes(&before, &self.finger);
+                if let Some(v) = fingers.get(k).copied().flatten() {
+                    if BiasId::cmp_from_observer(observer, did, v) == std::cmp::Ordering::Greater {
+                        continue;
+                    }
+                }
+
+                if let Some(slot) = fingers.get_mut(k) {
+                    *slot = Some(did);
+                }
+            }
+        });
     }
 
     /// Check finger is contains some node

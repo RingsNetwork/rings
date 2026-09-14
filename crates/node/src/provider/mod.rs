@@ -56,6 +56,8 @@ pub struct Provider {
     onion_https_runtime: Arc<Mutex<Option<Arc<crate::onion::https::OnionHttpsRuntime>>>>,
     #[cfg(all(feature = "browser", target_family = "wasm"))]
     onion_directory_endpoint: Arc<Mutex<Option<RemoteRpcEndpoint>>>,
+    #[cfg(all(feature = "browser", target_family = "wasm"))]
+    listener_gate: Arc<futures::lock::Mutex<()>>,
 }
 
 #[cfg(all(feature = "browser", target_family = "wasm"))]
@@ -99,6 +101,8 @@ impl Provider {
             onion_https_runtime: Arc::new(Mutex::new(None)),
             #[cfg(all(feature = "browser", target_family = "wasm"))]
             onion_directory_endpoint: Arc::new(Mutex::new(None)),
+            #[cfg(all(feature = "browser", target_family = "wasm"))]
+            listener_gate: Arc::new(futures::lock::Mutex::new(())),
         }
     }
 
@@ -217,6 +221,8 @@ impl Provider {
             onion_https_runtime: Arc::new(Mutex::new(None)),
             #[cfg(all(feature = "browser", target_family = "wasm"))]
             onion_directory_endpoint: Arc::new(Mutex::new(None)),
+            #[cfg(all(feature = "browser", target_family = "wasm"))]
+            listener_gate: Arc::new(futures::lock::Mutex::new(())),
         })
     }
 

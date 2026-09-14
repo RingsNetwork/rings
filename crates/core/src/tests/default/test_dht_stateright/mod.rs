@@ -543,6 +543,7 @@ fn discovery_model(all: Vec<Did>, rounds: u8) -> ActorModel<DiscoveryNode, Cfg, 
 
 mod finger_retry_model;
 mod storage_model;
+mod successor_sync_model;
 
 #[cfg(test)]
 mod tests {

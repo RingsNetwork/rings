@@ -21,6 +21,33 @@ fn test_stabilize_handles_empty_successor_info() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn test_stabilization_report_claim_is_single_use() -> Result<()> {
+    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
+    let successor = Did::from(4u32);
+    let request_id = uuid::Uuid::from_u128(1);
+    let _ = node.join(successor)?;
+    let _ = node.begin_stabilization(request_id)?;
+
+    assert!(node.claim_stabilization_report(successor, request_id)?);
+    assert!(!node.claim_stabilization_report(successor, request_id)?);
+    Ok(())
+}
+
+#[test]
+fn test_successor_change_invalidates_an_outstanding_sync_report() -> Result<()> {
+    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
+    let reporter = Did::from(4u32);
+    let request_id = uuid::Uuid::from_u128(1);
+    let _ = node.join(reporter)?;
+    assert!(node.begin_successor_sync(reporter, request_id)?);
+
+    let _ = node.join(Did::from(8u32))?;
+
+    assert!(!node.claim_successor_sync_report(reporter, request_id)?);
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_correct_chord_maintains_expected_successors() -> Result<()> {
     fn has_successor(dht: &PeerRing, did: Did) -> bool {

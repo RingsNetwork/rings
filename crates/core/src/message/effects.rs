@@ -218,6 +218,13 @@ pub(crate) enum CoreEffect<'payload> {
         /// Direct destination and next hop.
         destination: Did,
     },
+    /// Register and send one exactly correlated successor-list query.
+    SendSuccessorQuery {
+        /// Query whose request identity authorizes one report.
+        query: QueryForTopoInfoSend,
+        /// Current successor that must report the result.
+        destination: Did,
+    },
     /// Establish an idempotent DHT-driven transport connection.
     ConnectDhtPeer {
         /// Peer to connect.
@@ -278,6 +285,14 @@ impl<'payload> CoreEffect<'payload> {
         }
     }
 
+    /// Create a correlated successor-list query effect.
+    pub(crate) const fn send_successor_query(
+        query: QueryForTopoInfoSend,
+        destination: Did,
+    ) -> Self {
+        Self::SendSuccessorQuery { query, destination }
+    }
+
     /// Create a DHT connection effect.
     pub(crate) const fn connect_dht_peer(peer: Did) -> Self {
         Self::ConnectDhtPeer { peer }
@@ -330,8 +345,8 @@ pub(crate) fn lower_dht_action<'payload>(
         )),
         PeerRingAction::RemoteAction(successor, PeerRingRemoteAction::QueryForSuccessorList) => {
             Ok(Some(if is_connected(*successor) {
-                CoreEffect::send_direct_message(
-                    Message::QueryForTopoInfoSend(QueryForTopoInfoSend::new_for_sync(*successor)),
+                CoreEffect::send_successor_query(
+                    QueryForTopoInfoSend::new_for_sync(*successor),
                     *successor,
                 )
             } else {
@@ -410,6 +425,26 @@ impl<'handler> CoreEffectInterpreter<'handler> {
                     .await?;
                 Ok(())
             }
+            CoreEffect::SendSuccessorQuery { query, destination } => {
+                if !self
+                    .transport
+                    .dht
+                    .begin_successor_sync(destination, query.request_id)?
+                {
+                    return Ok(());
+                }
+                if let Err(error) = self
+                    .transport
+                    .send_direct_message(Message::QueryForTopoInfoSend(query), destination)
+                    .await
+                {
+                    self.transport
+                        .dht
+                        .cancel_successor_sync(destination, query.request_id)?;
+                    return Err(error);
+                }
+                Ok(())
+            }
             CoreEffect::ConnectDhtPeer { peer } => {
                 if self.connection_is_satisfied(peer) {
                     return Ok(());
@@ -469,11 +504,27 @@ mod tests {
     use std::task::Waker;
 
     use super::*;
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    use crate::dht::types::Chord;
     use crate::ecc::SecretKey;
     use crate::message::types::QueryFor;
     use crate::message::MessageSigner;
     use crate::session::SessionSk;
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    use crate::swarm::callback::SwarmCallback;
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    use crate::tests::default::prepare_node;
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    use crate::tests::default::wait_for_connection_state;
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    use crate::tests::manually_establish_connection;
     use crate::tests::TEST_NETWORK_ID;
+
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    struct NoopCallback;
+
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    impl SwarmCallback for NoopCallback {}
 
     fn did() -> Did {
         SecretKey::random().address().into()
@@ -740,31 +791,67 @@ mod tests {
         ))?;
 
         match effect {
-            CoreEffect::SendDirectMessage { msg, destination } => match *msg {
-                Message::QueryForTopoInfoSend(msg) => {
-                    assert_eq!(destination, target);
-                    assert_eq!(msg.did, target);
-                    match msg.then {
-                        QueryFor::SyncSuccessor => {}
-                        then => {
-                            return Err(Error::InvalidMessage(format!(
-                                "expected SyncSuccessor query, got {then:?}"
-                            )))
-                        }
+            CoreEffect::SendSuccessorQuery { query, destination } => {
+                assert_eq!(destination, target);
+                assert_eq!(query.did, target);
+                match query.then {
+                    QueryFor::SyncSuccessor => {}
+                    then => {
+                        return Err(Error::InvalidMessage(format!(
+                            "expected SyncSuccessor query, got {then:?}"
+                        )))
                     }
                 }
-                msg => {
-                    return Err(Error::InvalidMessage(format!(
-                        "expected QueryForTopoInfoSend, got {msg:?}"
-                    )))
-                }
-            },
+            }
             effect => {
                 return Err(Error::InvalidMessage(format!(
-                    "expected SendDirectMessage QueryForTopoInfoSend, got {effect:?}"
+                    "expected SendSuccessorQuery, got {effect:?}"
                 )))
             }
         }
+        Ok(())
+    }
+
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    #[tokio::test]
+    async fn test_successor_query_effect_registers_before_send_and_cancels_send_failure(
+    ) -> Result<()> {
+        let first = prepare_node(SecretKey::random()).await;
+        let second = prepare_node(SecretKey::random()).await;
+        manually_establish_connection(&first.swarm, &second.swarm).await;
+        wait_for_connection_state(
+            &first,
+            second.did(),
+            rings_transport::core::transport::WebrtcConnectionState::Connected,
+        )
+        .await?;
+        first.dht().join(second.did())?;
+
+        let callback: SharedSwarmCallback = Arc::new(NoopCallback);
+        let interpreter = CoreEffectInterpreter::new(&first.swarm.transport, &callback);
+        let sent = QueryForTopoInfoSend::new_for_sync(second.did());
+        let sent_request_id = sent.request_id;
+        interpreter
+            .run(CoreEffect::send_successor_query(sent, second.did()))
+            .await?;
+        assert!(first
+            .dht()
+            .claim_successor_sync_report(second.did(), sent_request_id)?);
+        first
+            .dht()
+            .cancel_successor_sync(second.did(), sent_request_id)?;
+
+        let missing = did();
+        first.dht().join(missing)?;
+        let failed = QueryForTopoInfoSend::new_for_sync(missing);
+        let failed_request_id = failed.request_id;
+        assert!(interpreter
+            .run(CoreEffect::send_successor_query(failed, missing))
+            .await
+            .is_err());
+        assert!(!first
+            .dht()
+            .claim_successor_sync_report(missing, failed_request_id)?);
         Ok(())
     }
 

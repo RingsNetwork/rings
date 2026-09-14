@@ -1,4 +1,17 @@
 use super::*;
+
+#[test]
+fn test_equality_includes_convergence_and_cursor_state() {
+    let did = Did::from(1u32);
+    let baseline = FingerTable::new(did, 3);
+    let mut different_cursor = baseline.clone();
+    different_cursor.fix_finger_index = 1;
+    assert_ne!(baseline, different_cursor);
+
+    let mut progressed = baseline.clone();
+    progressed.convergence.verified.fill(true);
+    assert_ne!(baseline, progressed);
+}
 use crate::dht::tests::gen_ordered_dids;
 
 #[test]

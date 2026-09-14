@@ -6,6 +6,7 @@ use super::Stabilizer;
 use super::STABILIZATION_STEP_TIMEOUT;
 use super::STABILIZATION_STOP_POLL_INTERVAL;
 use crate::dht::finger::finger_lookup_backoff_ms;
+use crate::dht::finger::FingerConvergencePhase;
 use crate::dht::finger::FingerConvergenceStatus;
 use crate::lifecycle::StopToken;
 use crate::swarm::transport::DATA_CHANNEL_SEND_ACCEPT_BUDGET;
@@ -142,7 +143,7 @@ struct MaintenanceSchedule {
     repair_admission_budget_ms: u64,
     repair_turn_reserved: bool,
     next_finger_ms: u64,
-    finger_pending_last_poll: bool,
+    finger_phase_last_poll: FingerConvergencePhase,
     finger_failure_streak: u8,
     finger_jitter_state: u64,
     finger_priority_deferrals: u8,
@@ -169,7 +170,7 @@ impl MaintenanceSchedule {
             repair_admission_budget_ms: duration_ms(STORAGE_REPAIR_ADMISSION_BUDGET),
             repair_turn_reserved: false,
             next_finger_ms: u64::MAX,
-            finger_pending_last_poll: false,
+            finger_phase_last_poll: FingerConvergencePhase::Inactive,
             finger_failure_streak: 0,
             finger_jitter_state: finger_jitter_seed(local, jitter_entropy),
             finger_priority_deferrals: 0,
@@ -196,7 +197,7 @@ impl MaintenanceSchedule {
         let reserved_repair_ready = self.reserved_repair_ready(now_ms, effective_repair_pending);
         let stabilization_due = now_ms >= self.next_stabilize_ms;
         let repair_has_window = effective_repair_pending && self.can_start_storage_repair(now_ms);
-        let finger_ready = finger_status.pending() && now_ms >= self.next_finger_ms;
+        let finger_ready = finger_status.may_advance() && now_ms >= self.next_finger_ms;
         let finger_turn_reserved =
             finger_ready && self.finger_priority_deferrals >= MAX_FINGER_PRIORITY_DEFERRALS;
         let task = if finger_turn_reserved {
@@ -267,31 +268,48 @@ impl MaintenanceSchedule {
         status: FingerConvergenceStatus,
     ) {
         self.last_observed_ms = self.last_observed_ms.max(completed_at_ms);
-        self.finger_pending_last_poll = status.pending();
+        self.finger_phase_last_poll = status.phase();
         self.finger_failure_streak = status.failure_streak();
-        self.next_finger_ms = if status.pending() {
-            completed_at_ms.saturating_add(self.next_finger_delay_ms(status.failure_streak()))
-        } else {
-            u64::MAX
+        self.next_finger_ms = match status.phase() {
+            FingerConvergencePhase::Inactive => u64::MAX,
+            FingerConvergencePhase::AwaitingReport { remaining_ms } => {
+                completed_at_ms.saturating_add(remaining_ms)
+            }
+            FingerConvergencePhase::AwaitingAdmission { remaining_ms } => {
+                completed_at_ms.saturating_add(remaining_ms)
+            }
+            FingerConvergencePhase::Runnable => {
+                completed_at_ms.saturating_add(self.next_finger_delay_ms(status.failure_streak()))
+            }
         };
     }
 
     fn reconcile_finger_status(&mut self, now_ms: u64, status: FingerConvergenceStatus) {
         let pace_changed = status.failure_streak() != self.finger_failure_streak;
-        if status.pending() && !self.finger_pending_last_poll {
-            let delay_ms = if status.failure_streak() == 0 {
-                self.next_initial_finger_delay_ms()
-            } else {
-                self.next_finger_delay_ms(status.failure_streak())
-            };
-            self.next_finger_ms = now_ms.saturating_add(delay_ms);
-        } else if status.pending() && pace_changed {
-            self.next_finger_ms =
-                now_ms.saturating_add(self.next_finger_delay_ms(status.failure_streak()));
-        } else if !status.pending() {
-            self.next_finger_ms = u64::MAX;
+        let phase_changed = status.phase() != self.finger_phase_last_poll;
+        match status.phase() {
+            FingerConvergencePhase::Inactive => self.next_finger_ms = u64::MAX,
+            FingerConvergencePhase::AwaitingReport { remaining_ms } => {
+                self.next_finger_ms = now_ms.saturating_add(remaining_ms);
+            }
+            FingerConvergencePhase::AwaitingAdmission { remaining_ms } => {
+                self.next_finger_ms = now_ms.saturating_add(remaining_ms);
+            }
+            FingerConvergencePhase::Runnable if phase_changed => {
+                let delay_ms = if status.failure_streak() == 0 {
+                    self.next_initial_finger_delay_ms()
+                } else {
+                    self.next_finger_delay_ms(status.failure_streak())
+                };
+                self.next_finger_ms = now_ms.saturating_add(delay_ms);
+            }
+            FingerConvergencePhase::Runnable if pace_changed => {
+                self.next_finger_ms =
+                    now_ms.saturating_add(self.next_finger_delay_ms(status.failure_streak()));
+            }
+            FingerConvergencePhase::Runnable => {}
         }
-        self.finger_pending_last_poll = status.pending();
+        self.finger_phase_last_poll = status.phase();
         self.finger_failure_streak = status.failure_streak();
     }
 
@@ -302,7 +320,7 @@ impl MaintenanceSchedule {
         status: FingerConvergenceStatus,
     ) {
         let stale_by_ms = now_ms.saturating_sub(self.next_finger_ms);
-        if status.pending()
+        if matches!(status.phase(), FingerConvergencePhase::Runnable)
             && self.next_finger_ms != u64::MAX
             && observation_gap_ms >= duration_ms(FINGER_CONVERGENCE_RESUME_REPHASE_THRESHOLD)
             && stale_by_ms >= duration_ms(FINGER_CONVERGENCE_RESUME_REPHASE_THRESHOLD)
@@ -402,6 +420,21 @@ pub(crate) fn finger_schedule_deadline_for_test(
     schedule.next_finger_ms
 }
 
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(crate) fn finger_awaiting_report_deadline_for_test(
+    listener_now_ms: u64,
+    status: FingerConvergenceStatus,
+) -> u64 {
+    let mut schedule = MaintenanceSchedule::new(
+        listener_now_ms,
+        Duration::from_secs(15),
+        crate::dht::Did::from(1u32),
+        uuid::Uuid::from_u128(1),
+    );
+    let _ = schedule.poll(listener_now_ms, false, status);
+    schedule.next_finger_ms
+}
+
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) fn finger_schedule_resumed_deadline_for_test(
     local: crate::dht::Did,
@@ -487,74 +520,70 @@ impl Stabilizer {
                 );
             }
 
-            match decision.task {
-                Some(MaintenanceTask::Stabilize) => {
-                    record_maintenance_phase_for_test(
-                        self.dht.did,
-                        MaintenanceTask::Stabilize,
-                        now_ms,
-                    );
-                    self.stabilize_scheduled_topology_with_step_timeout(STABILIZATION_STEP_TIMEOUT)
-                        .await;
-                    let periodic_repair_due = schedule.complete_stabilization(
-                        monotonic_elapsed_ms(&origin),
-                        self.transport.storage_repair_requested(),
-                    );
-                    if periodic_repair_due {
-                        self.transport.request_storage_repair();
-                    }
+            if let Some(task) = decision.task {
+                self.run_maintenance_task(task, now_ms, finger_status, &origin, &mut schedule)
+                    .await;
+            } else {
+                let deadline_ms = schedule.next_wake_ms(
+                    now_ms,
+                    self.transport.storage_repair_requested(),
+                    finger_status.may_advance(),
+                );
+                if !sleep_until_or_stop(&origin, deadline_ms, &stop).await {
+                    return;
                 }
-                Some(MaintenanceTask::Repair) => {
-                    record_maintenance_phase_for_test(
-                        self.dht.did,
-                        MaintenanceTask::Repair,
-                        now_ms,
-                    );
-                    if let Some(outcome) = self.run_requested_storage_maintenance().await {
-                        schedule
-                            .complete_repair(monotonic_elapsed_ms(&origin), outcome.is_complete());
-                    }
+            }
+        }
+    }
+
+    async fn run_maintenance_task(
+        &self,
+        task: MaintenanceTask,
+        now_ms: u64,
+        finger_status: FingerConvergenceStatus,
+        origin: &Instant,
+        schedule: &mut MaintenanceSchedule,
+    ) {
+        record_maintenance_phase_for_test(self.dht.did, task, now_ms);
+        match task {
+            MaintenanceTask::Stabilize => {
+                self.stabilize_scheduled_topology_with_step_timeout(STABILIZATION_STEP_TIMEOUT)
+                    .await;
+                let periodic_repair_due = schedule.complete_stabilization(
+                    monotonic_elapsed_ms(origin),
+                    self.transport.storage_repair_requested(),
+                );
+                if periodic_repair_due {
+                    self.transport.request_storage_repair();
                 }
-                Some(MaintenanceTask::ConvergeFingers) => {
-                    record_maintenance_phase_for_test(
-                        self.dht.did,
-                        MaintenanceTask::ConvergeFingers,
-                        now_ms,
-                    );
-                    let step_completed = self
-                        .run_step(
-                            "converge_fingers",
-                            STABILIZATION_STEP_TIMEOUT,
-                            self.advance_finger_convergence(),
-                        )
-                        .await
-                        .is_some();
-                    let completed_status = self
-                        .dht
-                        .finger_convergence_status()
-                        .unwrap_or(finger_status);
-                    tracing::debug!(
-                        target: "rings_core::dht::stabilization",
-                        local = %self.dht.did,
-                        step_completed,
-                        failure_streak = completed_status.failure_streak(),
-                        "STABILIZATION finger convergence paced after outcome"
-                    );
-                    schedule.complete_finger_convergence(
-                        monotonic_elapsed_ms(&origin),
-                        completed_status,
-                    );
+            }
+            MaintenanceTask::Repair => {
+                if let Some(outcome) = self.run_requested_storage_maintenance().await {
+                    schedule.complete_repair(monotonic_elapsed_ms(origin), outcome.is_complete());
                 }
-                None => {
-                    let deadline_ms = schedule.next_wake_ms(
-                        now_ms,
-                        self.transport.storage_repair_requested(),
-                        finger_status.pending(),
-                    );
-                    if !sleep_until_or_stop(&origin, deadline_ms, &stop).await {
-                        return;
-                    }
-                }
+            }
+            MaintenanceTask::ConvergeFingers => {
+                let step_completed = self
+                    .run_step(
+                        "converge_fingers",
+                        STABILIZATION_STEP_TIMEOUT,
+                        self.advance_finger_convergence(),
+                    )
+                    .await
+                    .is_some();
+                let completed_status = self
+                    .dht
+                    .finger_convergence_status()
+                    .unwrap_or(finger_status);
+                tracing::debug!(
+                    target: "rings_core::dht::stabilization",
+                    local = %self.dht.did,
+                    step_completed,
+                    failure_streak = completed_status.failure_streak(),
+                    "STABILIZATION finger convergence paced after outcome"
+                );
+                schedule
+                    .complete_finger_convergence(monotonic_elapsed_ms(origin), completed_status);
             }
         }
     }
@@ -857,6 +886,31 @@ mod tests {
     }
 
     #[test]
+    fn test_in_flight_finger_lookup_wakes_only_at_its_exact_expiry() {
+        let mut schedule = schedule(0, PERIOD, crate::dht::Did::from(11u32));
+        let awaiting = FingerConvergenceStatus::awaiting_report(10_000, 0);
+
+        assert_eq!(schedule.poll(0, false, awaiting).task, None);
+        assert_eq!(schedule.next_finger_ms, 10_000);
+        assert_eq!(
+            schedule
+                .poll(9_999, false, FingerConvergenceStatus::awaiting_report(1, 0))
+                .task,
+            None
+        );
+        assert_eq!(
+            schedule
+                .poll(
+                    10_000,
+                    false,
+                    FingerConvergenceStatus::awaiting_report(0, 0)
+                )
+                .task,
+            Some(MaintenanceTask::ConvergeFingers)
+        );
+    }
+
+    #[test]
     fn test_initial_finger_jitter_uses_replayable_node_lifecycle_entropy() {
         let local = crate::dht::Did::from(4u32);
         let entropy = uuid::Uuid::from_u128(1);
@@ -872,18 +926,6 @@ mod tests {
         assert_ne!(first.next_finger_ms, another_lifecycle.next_finger_ms);
         assert!((1_000..=11_000).contains(&first.next_finger_ms));
         assert!((1_000..=11_000).contains(&another_lifecycle.next_finger_ms));
-    }
-
-    #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_family = "wasm"), test)]
-    fn test_peer_ring_reuses_finger_jitter_entropy_across_listener_restarts() {
-        let ring = crate::dht::PeerRing::new_with_storage(
-            crate::dht::Did::from(4u32),
-            3,
-            Box::new(crate::storage::MemStorage::new()),
-        );
-
-        assert_eq!(ring.finger_jitter_entropy(), ring.finger_jitter_entropy());
     }
 
     #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
@@ -912,90 +954,7 @@ mod tests {
             );
         }
     }
-
-    #[test]
-    fn test_long_maintenance_completion_does_not_rephase_a_reserved_finger_turn() {
-        let mut schedule = MaintenanceSchedule::new(
-            0,
-            Duration::from_secs(3_600),
-            crate::dht::Did::from(11u32),
-            uuid::Uuid::from_u128(1),
-        );
-        schedule.next_stabilize_ms = 1_000;
-        schedule.next_finger_ms = 1_000;
-        schedule.finger_pending_last_poll = true;
-
-        assert_eq!(
-            schedule.poll(1_000, false, finger_status(true)).task,
-            Some(MaintenanceTask::Stabilize)
-        );
-        assert!(!schedule.complete_stabilization(30_000, false));
-        assert_eq!(
-            schedule.poll(30_000, false, finger_status(true)).task,
-            Some(MaintenanceTask::ConvergeFingers)
-        );
-    }
-
-    #[test]
-    fn test_failure_outcome_expands_the_retry_floor_and_full_jitter_window() {
-        let mut schedule = schedule(0, PERIOD, crate::dht::Did::from(11u32));
-        let _ = schedule.poll(0, false, finger_status(true));
-
-        for failure_streak in [1u8, 2, 3, 4, 5, 6, u8::MAX] {
-            schedule
-                .complete_finger_convergence(0, FingerConvergenceStatus::new(true, failure_streak));
-            let floor_ms = finger_lookup_backoff_ms(failure_streak);
-            assert!((floor_ms..=floor_ms.saturating_mul(2)).contains(&schedule.next_finger_ms));
-        }
-    }
-
-    #[test]
-    fn test_async_failure_rearms_a_not_yet_due_finger_attempt() {
-        let mut schedule = schedule(0, PERIOD, crate::dht::Did::from(7u32));
-        let _ = schedule.poll(0, false, finger_status(true));
-        let initial_deadline = schedule.next_finger_ms;
-
-        assert_eq!(
-            schedule
-                .poll(500, false, FingerConvergenceStatus::new(true, 1))
-                .task,
-            None
-        );
-        assert!((2_500..=4_500).contains(&schedule.next_finger_ms));
-        assert_ne!(schedule.next_finger_ms, initial_deadline);
-    }
-
-    #[test]
-    fn test_capped_failure_jitter_keeps_every_boot_inside_the_retry_window() {
-        let local = crate::dht::Did::from(0u32);
-        for entropy in 1..=50u128 {
-            let mut schedule =
-                MaintenanceSchedule::new(0, PERIOD, local, uuid::Uuid::from_u128(entropy));
-            let _ = schedule.poll(0, false, FingerConvergenceStatus::new(true, u8::MAX));
-            assert!((60_000..=120_000).contains(&schedule.next_finger_ms));
-        }
-    }
-
-    #[test]
-    fn test_finger_convergence_yields_twice_then_gets_a_reserved_turn() {
-        let mut schedule = schedule(0, PERIOD, crate::dht::Did::from(0u32));
-        schedule.next_finger_ms = 15_000;
-        schedule.finger_pending_last_poll = true;
-        assert_eq!(
-            schedule.poll(15_000, false, finger_status(true)).task,
-            Some(MaintenanceTask::Stabilize)
-        );
-
-        assert!(!schedule.complete_stabilization(15_000, false));
-        schedule.next_finger_ms = 20_000;
-        assert_eq!(
-            schedule.poll(20_000, false, finger_status(true)).task,
-            Some(MaintenanceTask::Repair)
-        );
-        assert_eq!(
-            schedule.poll(20_000, true, finger_status(true)).task,
-            Some(MaintenanceTask::ConvergeFingers)
-        );
-        assert_eq!(schedule.finger_priority_deferrals, 0);
-    }
 }
+
+#[cfg(test)]
+mod schedule_tests;

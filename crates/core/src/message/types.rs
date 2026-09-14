@@ -186,6 +186,8 @@ pub struct QueryForTopoInfoSend {
     pub did: Did,
     /// The reason of query successor's TopoInfo
     pub then: QueryFor,
+    /// Correlation identity echoed by the report.
+    pub request_id: uuid::Uuid,
 }
 
 /// MessageType for handle [crate::dht::PeerRingRemoteAction::QueryForSuccessorList]
@@ -195,6 +197,8 @@ pub struct QueryForTopoInfoReport {
     pub info: TopoInfo,
     /// The reason of query successor's TopoInfo
     pub then: QueryFor,
+    /// Correlation identity copied from the query.
+    pub request_id: uuid::Uuid,
 }
 
 impl QueryForTopoInfoSend {
@@ -203,14 +207,16 @@ impl QueryForTopoInfoSend {
         Self {
             did,
             then: QueryFor::SyncSuccessor,
+            request_id: crate::utils::new_uuid(),
         }
     }
 
     /// Create new instance with QueryFor::Stabilization
-    pub fn new_for_stab(did: Did) -> Self {
+    pub fn new_for_stab(did: Did, request_id: uuid::Uuid) -> Self {
         Self {
             did,
             then: QueryFor::Stabilization,
+            request_id,
         }
     }
 
@@ -219,6 +225,7 @@ impl QueryForTopoInfoSend {
         QueryForTopoInfoReport {
             info,
             then: self.then,
+            request_id: self.request_id,
         }
     }
 
@@ -719,6 +726,7 @@ mod tests {
     sample_message_body!(QueryForTopoInfoSend, |fixture| QueryForTopoInfoSend {
         did: fixture.did,
         then: QueryFor::Stabilization,
+        request_id: uuid::Uuid::nil(),
     });
     sample_message_body!(QueryForTopoInfoReport, |fixture| QueryForTopoInfoReport {
         info: TopoInfo {
@@ -726,6 +734,7 @@ mod tests {
             predecessor: Some(fixture.did),
         },
         then: QueryFor::Stabilization,
+        request_id: uuid::Uuid::nil(),
     });
     sample_message_body!(Chunk, |fixture| Chunk {
         chunk: [0, 1],

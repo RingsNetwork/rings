@@ -68,8 +68,12 @@ pub enum RemoteAction {
     },
     /// Fetch the recipient's successor list.
     QueryForSuccessorList,
-    /// Fetch the recipient's successor list and predecessor.
-    QueryForSuccessorListAndPred,
+    /// Fetch the recipient's successor list and predecessor for one exact
+    /// stabilization request.
+    QueryForSuccessorListAndPred {
+        /// Correlation token the response must echo.
+        request_id: uuid::Uuid,
+    },
     /// Try to connect to the recipient.
     TryConnect,
 }
@@ -100,6 +104,42 @@ impl TopoInfo {
     /// Return whether any reported topology position survived confirmation.
     pub(crate) fn has_confirmed_peer(&self) -> bool {
         self.predecessor.is_some() || !self.successors.is_empty()
+    }
+
+    /// Bounded, duplicate-free non-local successors that one sync report may
+    /// ask the transport to admit.
+    pub(crate) fn successor_connection_candidates(
+        &self,
+        local: Did,
+        successor_capacity: usize,
+    ) -> Vec<Did> {
+        let mut candidates = Vec::with_capacity(successor_capacity);
+        for candidate in self.successors.iter().copied() {
+            if candidates.len() == successor_capacity {
+                break;
+            }
+            if candidate != local && !candidates.contains(&candidate) {
+                candidates.push(candidate);
+            }
+        }
+        candidates
+    }
+
+    /// Bounded, duplicate-free peers that one stabilization report may ask
+    /// the transport to admit. The predecessor gets one independent slot;
+    /// successor candidates are capped by the local successor-list capacity.
+    pub(crate) fn connection_candidates(&self, local: Did, successor_capacity: usize) -> Vec<Did> {
+        let mut candidates = Vec::with_capacity(successor_capacity.saturating_add(1));
+        for candidate in self
+            .predecessor
+            .into_iter()
+            .chain(self.successor_connection_candidates(local, successor_capacity))
+        {
+            if candidate != local && !candidates.contains(&candidate) {
+                candidates.push(candidate);
+            }
+        }
+        candidates
     }
 }
 

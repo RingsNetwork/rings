@@ -28,6 +28,8 @@ pub use did::Did;
 pub use finger::FingerFixRequest;
 pub use finger::FingerTable;
 pub use finger::DEFAULT_FINGER_TABLE_SIZE;
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(crate) use stabilization::finger_awaiting_report_deadline_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use stabilization::finger_schedule_deadline_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]

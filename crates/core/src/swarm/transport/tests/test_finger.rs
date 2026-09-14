@@ -1,4 +1,5 @@
 use super::*;
+use crate::dht::finger::FingerConvergencePhase;
 use crate::dht::FingerFixRequest;
 
 fn finger_request(transport: &SwarmTransport, slot: usize) -> Result<FingerFixRequest> {
@@ -9,7 +10,7 @@ fn finger_request(transport: &SwarmTransport, slot: usize) -> Result<FingerFixRe
         .ok_or_else(|| Error::InvalidMessage("failed to prepare test finger request".to_owned()))
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_pending_finger_update_is_applied_when_attempt_is_admitted() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
@@ -26,6 +27,16 @@ async fn test_pending_finger_update_is_applied_when_attempt_is_admitted() -> Res
         FingerUpdateDisposition::Queued
     );
     assert_eq!(transport.dht.lock_finger()?.get(finger_index), None);
+    assert!(matches!(
+        transport
+            .dht
+            .lock_finger()?
+            .convergence_state()
+            .status()
+            .phase(),
+        crate::dht::finger::FingerConvergencePhase::AwaitingAdmission { .. }
+    ));
+    tokio::time::advance(std::time::Duration::from_millis(11_000)).await;
     open_dummy_data_channel_before_ice_connected(&transport, peer).await?;
 
     let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback))
@@ -39,6 +50,30 @@ async fn test_pending_finger_update_is_applied_when_attempt_is_admitted() -> Res
     assert!(transport.is_admitted_connection(peer));
 
     transport.disconnect(peer).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_pending_handshake_cancellation_releases_its_finger_proof() -> Result<()> {
+    let transport = Arc::new(transport_with_measure(Arc::new(
+        RecordingMeasure::default(),
+    ))?);
+    let peer = SecretKey::random().address().into();
+    let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback));
+    let (attempt, _offer) = transport
+        .prepare_connection_offer_with_attempt(peer, callback)
+        .await?;
+
+    let request = finger_request(&transport, 0)?;
+    assert_eq!(
+        transport.record_finger_candidate(peer, request)?,
+        FingerUpdateDisposition::Queued
+    );
+    assert!(transport.cancel_pending_connection(attempt).await?);
+
+    let finger = transport.dht.lock_finger()?;
+    assert_eq!(finger.get(0), None);
+    assert_eq!(finger.convergence_state().status().failure_streak(), 1);
     Ok(())
 }
 
@@ -100,7 +135,7 @@ async fn test_pending_finger_update_applies_if_admission_wins_queue_race() -> Re
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_finger_candidate_distinguishes_missing_and_unroutable_connections() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
@@ -111,7 +146,30 @@ async fn test_finger_candidate_distinguishes_missing_and_unroutable_connections(
         transport.record_finger_candidate(missing, missing_request)?,
         FingerUpdateDisposition::Missing
     );
+    assert!(matches!(
+        transport
+            .dht
+            .lock_finger()?
+            .convergence_state()
+            .status()
+            .phase(),
+        FingerConvergencePhase::AwaitingAdmission { .. }
+    ));
 
+    tokio::time::advance(std::time::Duration::from_millis(11_000)).await;
+    let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback));
+    let (missing_attempt, _offer) = transport
+        .prepare_connection_offer_with_attempt(missing, callback)
+        .await?;
+    assert_eq!(
+        transport.record_finger_candidate(missing, missing_request)?,
+        FingerUpdateDisposition::Queued
+    );
+    assert!(transport.cancel_pending_connection(missing_attempt).await?);
+
+    let transport = Arc::new(transport_with_measure(Arc::new(
+        RecordingMeasure::default(),
+    ))?);
     let peer = SecretKey::random().address().into();
     let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback));
     let (attempt, _offer) = transport

@@ -906,7 +906,7 @@ impl Stabilizer {
         match self.dht.pre_stabilize()? {
             PeerRingAction::RemoteAction(
                 next,
-                PeerRingRemoteAction::QueryForSuccessorListAndPred,
+                PeerRingRemoteAction::QueryForSuccessorListAndPred { request_id },
             ) => {
                 let next_hop_state = self
                     .transport
@@ -922,7 +922,9 @@ impl Stabilizer {
                 match self
                     .transport
                     .send_direct_message(
-                        Message::QueryForTopoInfoSend(QueryForTopoInfoSend::new_for_stab(next)),
+                        Message::QueryForTopoInfoSend(QueryForTopoInfoSend::new_for_stab(
+                            next, request_id,
+                        )),
                         next,
                     )
                     .await
@@ -935,6 +937,7 @@ impl Stabilizer {
                         "STABILIZATION correct_stabilize query complete"
                     ),
                     Err(e) => {
+                        self.dht.cancel_stabilization(request_id)?;
                         tracing::error!(
                             target: "rings_core::dht::stabilization",
                             local = %self.dht.did,
@@ -965,6 +968,8 @@ fn elapsed_since(started_at: Instant) -> i64 {
 }
 
 mod maintenance;
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(crate) use maintenance::finger_awaiting_report_deadline_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use maintenance::finger_schedule_deadline_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]

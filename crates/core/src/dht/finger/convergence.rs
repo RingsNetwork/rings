@@ -4,7 +4,8 @@
 //! - `verified[i]` means slot `i` was proved after its last hint change.
 //! - `slot_epoch[i]` records that last change and prevents a range result from
 //!   overwriting a slot changed after the lookup was issued.
-//! - `in_flight` contains at most one request; only its exact token may apply.
+//! - Exactly one lookup may be `in_flight` or retained as a `deferred` proof;
+//!   only its exact token may apply.
 //! - `last_issued_at_ms` enforces a hard per-node emission interval on the
 //!   process-monotonic clock supplied by the effect boundary.
 //! - `failure_streak` and `retry_not_before_ms` make loss, invalid reports,
@@ -29,6 +30,11 @@ pub(crate) const FINGER_LOOKUP_MAX_BACKOFF_MS: u64 = 60_000;
 /// Time after which an unanswered finger lookup no longer blocks convergence.
 const FINGER_LOOKUP_TIMEOUT_MS: u64 = 10_000;
 
+/// Maximum time a timely proof may wait for transport admission. This matches
+/// the pending WebRTC generation lease while also covering the interval before
+/// a generation has been allocated.
+pub(crate) const FINGER_ADMISSION_TIMEOUT_MS: u64 = 180_000;
+
 const FINGER_LOOKUP_MAX_BACKOFF_EXPONENT: u8 = 6;
 
 /// Exponential retry floor for one node after `failure_streak` failures.
@@ -43,9 +49,10 @@ pub(crate) fn finger_lookup_backoff_ms(failure_streak: u8) -> u64 {
 /// Correlation token for one range-aware finger lookup.
 ///
 /// The token is echoed in the lookup report. A report may mutate local state
-/// only while this exact request remains in flight, so a topology change or a
-/// retry cannot be overwritten by an older result.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+/// only while this exact request remains in flight or is retained for its
+/// candidate's admission, so a topology change or retry cannot be overwritten
+/// by an older result.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct FingerFixRequest {
     pub(crate) slot: u16,
     pub(crate) request_id: uuid::Uuid,
@@ -74,24 +81,68 @@ impl FingerFixRequest {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 struct PendingFingerLookup {
     request: FingerFixRequest,
     issued_epoch: u64,
     expires_at_ms: u64,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+struct DeferredFingerProof {
+    request: FingerFixRequest,
+    issued_epoch: u64,
+    successor: Did,
+    end: usize,
+    expires_at_ms: u64,
+}
+
+/// Scheduler-visible phase of one node's finger convergence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FingerConvergencePhase {
+    /// No automatic work is currently required.
+    Inactive,
+    /// An unverified range can issue a lookup when its paced deadline arrives.
+    Runnable,
+    /// One emitted lookup is waiting for its report for at most this much longer.
+    ///
+    /// This is a remaining duration, rather than the lookup clock's absolute
+    /// timestamp, so a restarted maintenance listener cannot interpret it in
+    /// a different monotonic-clock domain.
+    AwaitingReport { remaining_ms: u64 },
+    /// A timely report is retained until admission or its bounded lease expires.
+    AwaitingAdmission { remaining_ms: u64 },
+}
+
 /// Scheduler-visible projection of the convergence state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct FingerConvergenceStatus {
-    pending: bool,
+    phase: FingerConvergencePhase,
     failure_streak: u8,
 }
 
 impl FingerConvergenceStatus {
     pub(crate) const fn new(pending: bool, failure_streak: u8) -> Self {
         Self {
-            pending,
+            phase: if pending {
+                FingerConvergencePhase::Runnable
+            } else {
+                FingerConvergencePhase::Inactive
+            },
+            failure_streak,
+        }
+    }
+
+    pub(crate) const fn awaiting_report(remaining_ms: u64, failure_streak: u8) -> Self {
+        Self {
+            phase: FingerConvergencePhase::AwaitingReport { remaining_ms },
+            failure_streak,
+        }
+    }
+
+    pub(crate) const fn awaiting_admission(remaining_ms: u64, failure_streak: u8) -> Self {
+        Self {
+            phase: FingerConvergencePhase::AwaitingAdmission { remaining_ms },
             failure_streak,
         }
     }
@@ -100,8 +151,22 @@ impl FingerConvergenceStatus {
         Self::new(false, 0)
     }
 
+    #[cfg(test)]
     pub(crate) const fn pending(self) -> bool {
-        self.pending
+        !matches!(self.phase, FingerConvergencePhase::Inactive)
+    }
+
+    pub(crate) const fn phase(self) -> FingerConvergencePhase {
+        self.phase
+    }
+
+    pub(crate) const fn may_advance(self) -> bool {
+        matches!(
+            self.phase,
+            FingerConvergencePhase::Runnable
+                | FingerConvergencePhase::AwaitingReport { .. }
+                | FingerConvergencePhase::AwaitingAdmission { .. }
+        )
     }
 
     pub(crate) const fn failure_streak(self) -> u8 {
@@ -109,12 +174,13 @@ impl FingerConvergenceStatus {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub(crate) struct FingerConvergenceState {
     epoch: u64,
     slot_epoch: Vec<u64>,
     pub(crate) verified: Vec<bool>,
     in_flight: Option<PendingFingerLookup>,
+    deferred: Option<DeferredFingerProof>,
     last_issued_at_ms: Option<u64>,
     failure_streak: u8,
     retry_not_before_ms: Option<u64>,
@@ -132,7 +198,10 @@ pub(crate) enum FingerResultDisposition {
 #[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct FingerConvergenceProjection {
+    pub(crate) verified: Vec<bool>,
     pub(crate) in_flight: Option<FingerFixRequest>,
+    pub(crate) deferred: Option<FingerFixRequest>,
+    pub(crate) deferred_expires_at_ms: Option<u64>,
     pub(crate) expires_at_ms: Option<u64>,
     pub(crate) last_issued_at_ms: Option<u64>,
     pub(crate) failure_streak: u8,
@@ -146,6 +215,7 @@ impl FingerConvergenceState {
             slot_epoch: vec![0; slot_count],
             verified: vec![false; slot_count],
             in_flight: None,
+            deferred: None,
             last_issued_at_ms: None,
             failure_streak: 0,
             retry_not_before_ms: None,
@@ -161,21 +231,62 @@ impl FingerConvergenceState {
         {
             self.in_flight = None;
         }
+        if self
+            .deferred
+            .is_some_and(|proof| proof.request.slot_index() >= slot_count)
+        {
+            self.deferred = None;
+        } else if let Some(proof) = &mut self.deferred {
+            proof.end = proof.end.min(slot_count.saturating_sub(1));
+        }
         self
     }
 
+    #[cfg(test)]
     pub(crate) fn is_pending(&self) -> bool {
-        self.in_flight.is_some() || self.verified.iter().any(|verified| !verified)
+        self.in_flight.is_some()
+            || self.deferred.is_some()
+            || self.verified.iter().any(|verified| !verified)
     }
 
+    #[cfg(test)]
     pub(crate) fn status(&self) -> FingerConvergenceStatus {
-        FingerConvergenceStatus::new(self.is_pending(), self.failure_streak)
+        self.status_after(0, 0)
+    }
+
+    pub(crate) fn status_after(
+        &self,
+        first_routable_slot: usize,
+        now_ms: u64,
+    ) -> FingerConvergenceStatus {
+        if let Some(pending) = self.in_flight {
+            FingerConvergenceStatus::awaiting_report(
+                pending.expires_at_ms.saturating_sub(now_ms),
+                self.failure_streak,
+            )
+        } else if let Some(proof) = self.deferred {
+            FingerConvergenceStatus::awaiting_admission(
+                proof.expires_at_ms.saturating_sub(now_ms),
+                self.failure_streak,
+            )
+        } else {
+            FingerConvergenceStatus::new(
+                self.verified
+                    .iter()
+                    .skip(first_routable_slot)
+                    .any(|verified| !verified),
+                self.failure_streak,
+            )
+        }
     }
 
     #[cfg(test)]
     pub(crate) fn projection(&self) -> FingerConvergenceProjection {
         FingerConvergenceProjection {
+            verified: self.verified.clone(),
             in_flight: self.in_flight.map(|pending| pending.request),
+            deferred: self.deferred.map(|proof| proof.request),
+            deferred_expires_at_ms: self.deferred.map(|proof| proof.expires_at_ms),
             expires_at_ms: self.in_flight.map(|pending| pending.expires_at_ms),
             last_issued_at_ms: self.last_issued_at_ms,
             failure_streak: self.failure_streak,
@@ -197,6 +308,7 @@ impl FingerConvergenceState {
     fn request_is_current(&self, request: FingerFixRequest) -> bool {
         self.in_flight
             .is_some_and(|pending| pending.request == request)
+            || self.deferred.is_some_and(|proof| proof.request == request)
     }
 
     pub(crate) fn invalidate_hint_changes(
@@ -215,6 +327,7 @@ impl FingerConvergenceState {
 
         let Some(next_epoch) = self.epoch.checked_add(1) else {
             self.in_flight = None;
+            self.deferred = None;
             self.verified.fill(false);
             return;
         };
@@ -239,16 +352,23 @@ impl FingerConvergenceState {
         });
         if invalidated_in_flight {
             self.in_flight = None;
-            // This transition has no clock input. Anchor the pure retry floor
-            // at the last emission; the runtime scheduler observes the higher
-            // failure level and adds a fresh full-jitter delay from its current
-            // monotonic time.
-            self.record_failure(self.last_issued_at_ms.unwrap_or(0));
+        }
+        let invalidated_deferred = self.deferred.is_some_and(|proof| {
+            changed
+                .get(proof.request.slot_index())
+                .copied()
+                .unwrap_or(true)
+        });
+        if invalidated_deferred {
+            self.deferred = None;
         }
     }
 
     pub(crate) fn invalidate_all_evidence(&mut self) {
-        if self.in_flight.is_none() && self.verified.iter().all(|verified| !verified) {
+        if self.in_flight.is_none()
+            && self.deferred.is_none()
+            && self.verified.iter().all(|verified| !verified)
+        {
             return;
         }
 
@@ -256,11 +376,9 @@ impl FingerConvergenceState {
             self.epoch = next_epoch;
             self.slot_epoch.fill(next_epoch);
         }
-        let invalidated_in_flight = self.in_flight.take().is_some();
+        self.in_flight = None;
+        self.deferred = None;
         self.verified.fill(false);
-        if invalidated_in_flight {
-            self.record_failure(self.last_issued_at_ms.unwrap_or(0));
-        }
     }
 
     fn refresh_next_range(&mut self, fingers: &[Option<Did>], cursor: usize) {
@@ -285,7 +403,10 @@ impl FingerConvergenceState {
     }
 
     pub(crate) fn begin_revalidation(&mut self, fingers: &[Option<Did>], cursor: usize) {
-        if self.in_flight.is_none() && self.verified.iter().all(|verified| *verified) {
+        if self.in_flight.is_none()
+            && self.deferred.is_none()
+            && self.verified.iter().all(|verified| *verified)
+        {
             self.refresh_next_range(fingers, cursor);
         }
     }
@@ -293,6 +414,7 @@ impl FingerConvergenceState {
     pub(crate) fn prepare_lookup(
         &mut self,
         fingers: &[Option<Did>],
+        first_slot: usize,
         now_ms: u64,
         request_id: uuid::Uuid,
     ) -> Option<FingerFixRequest> {
@@ -307,7 +429,15 @@ impl FingerConvergenceState {
             self.record_failure(now_ms);
             return None;
         }
-        if self.in_flight.is_some() {
+        if self
+            .deferred
+            .is_some_and(|proof| now_ms >= proof.expires_at_ms)
+        {
+            self.deferred = None;
+            self.record_failure(now_ms);
+            return None;
+        }
+        if self.in_flight.is_some() || self.deferred.is_some() {
             return None;
         }
         if self.verified.iter().all(|verified| *verified) {
@@ -326,7 +456,12 @@ impl FingerConvergenceState {
             return None;
         }
 
-        let slot = self.verified.iter().position(|verified| !verified)?;
+        let slot = self
+            .verified
+            .iter()
+            .enumerate()
+            .skip(first_slot)
+            .find_map(|(slot, verified)| (!verified).then_some(slot))?;
         let request = FingerFixRequest::new(slot, request_id)?;
         self.in_flight = Some(PendingFingerLookup {
             request,
@@ -349,7 +484,38 @@ impl FingerConvergenceState {
         *self.verified.get_mut(slot)? = false;
         self.in_flight = None;
         self.last_issued_at_ms = None;
-        self.prepare_lookup(fingers, now_ms, request_id)
+        self.deferred = None;
+        self.prepare_lookup(fingers, 0, now_ms, request_id)
+    }
+
+    fn checked_report(
+        &self,
+        local: Did,
+        slot_count: usize,
+        request: FingerFixRequest,
+        successor: Did,
+        now_ms: u64,
+    ) -> Result<(PendingFingerLookup, usize), FingerResultDisposition> {
+        let pending = self
+            .in_flight
+            .filter(|pending| pending.request == request)
+            .ok_or(FingerResultDisposition::Stale)?;
+        if now_ms >= pending.expires_at_ms {
+            return Err(FingerResultDisposition::Expired);
+        }
+        let end = finger_proof_end(local, successor, request.slot_index(), slot_count)
+            .ok_or(FingerResultDisposition::Invalid)?;
+        let applicable = self
+            .slot_epoch
+            .iter()
+            .skip(request.slot_index())
+            .take(end.saturating_sub(request.slot_index()).saturating_add(1))
+            .any(|slot_epoch| *slot_epoch <= pending.issued_epoch);
+        if applicable {
+            Ok((pending, end))
+        } else {
+            Err(FingerResultDisposition::Stale)
+        }
     }
 
     pub(crate) fn result_disposition(
@@ -360,25 +526,69 @@ impl FingerConvergenceState {
         successor: Did,
         now_ms: u64,
     ) -> FingerResultDisposition {
-        let Some(pending) = self.in_flight.filter(|pending| pending.request == request) else {
-            return FingerResultDisposition::Stale;
-        };
-        if now_ms >= pending.expires_at_ms {
-            return FingerResultDisposition::Expired;
+        if let Some(proof) = self
+            .deferred
+            .filter(|proof| proof.request == request && proof.successor == successor)
+        {
+            return if now_ms >= proof.expires_at_ms {
+                FingerResultDisposition::Expired
+            } else {
+                FingerResultDisposition::Applied { end: proof.end }
+            };
         }
-        let Some(end) = finger_proof_end(local, successor, request.slot_index(), slot_count) else {
-            return FingerResultDisposition::Invalid;
-        };
-        let applicable = self
-            .slot_epoch
-            .iter()
-            .skip(request.slot_index())
-            .take(end.saturating_sub(request.slot_index()).saturating_add(1))
-            .any(|slot_epoch| *slot_epoch <= pending.issued_epoch);
-        if applicable {
-            FingerResultDisposition::Applied { end }
-        } else {
-            FingerResultDisposition::Stale
+        self.checked_report(local, slot_count, request, successor, now_ms)
+            .map_or_else(
+                |disposition| disposition,
+                |(_, end)| FingerResultDisposition::Applied { end },
+            )
+    }
+
+    pub(crate) fn defer_result(
+        &mut self,
+        local: Did,
+        slot_count: usize,
+        request: FingerFixRequest,
+        successor: Did,
+        now_ms: u64,
+    ) -> FingerResultDisposition {
+        if let Some(proof) = self
+            .deferred
+            .filter(|proof| proof.request == request && proof.successor == successor)
+        {
+            if now_ms >= proof.expires_at_ms {
+                self.deferred = None;
+                self.record_failure(now_ms);
+                return FingerResultDisposition::Expired;
+            }
+            return FingerResultDisposition::Applied { end: proof.end };
+        }
+        match self.checked_report(local, slot_count, request, successor, now_ms) {
+            Ok((pending, end)) => {
+                self.in_flight = None;
+                self.deferred = Some(DeferredFingerProof {
+                    request,
+                    issued_epoch: pending.issued_epoch,
+                    successor,
+                    end,
+                    expires_at_ms: now_ms.saturating_add(FINGER_ADMISSION_TIMEOUT_MS),
+                });
+                FingerResultDisposition::Applied { end }
+            }
+            Err(disposition) => {
+                if self
+                    .in_flight
+                    .is_some_and(|pending| pending.request == request)
+                {
+                    self.in_flight = None;
+                    if matches!(
+                        disposition,
+                        FingerResultDisposition::Expired | FingerResultDisposition::Invalid
+                    ) {
+                        self.record_failure(now_ms);
+                    }
+                }
+                disposition
+            }
         }
     }
 
@@ -390,18 +600,43 @@ impl FingerConvergenceState {
         successor: Did,
         now_ms: u64,
     ) -> FingerResultDisposition {
-        let Some(pending) = self.in_flight.filter(|pending| pending.request == request) else {
-            return FingerResultDisposition::Stale;
+        let validated = if let Some(proof) = self
+            .deferred
+            .filter(|proof| proof.request == request && proof.successor == successor)
+        {
+            self.deferred = None;
+            if now_ms >= proof.expires_at_ms {
+                self.record_failure(now_ms);
+                Err(FingerResultDisposition::Expired)
+            } else {
+                Ok((proof.issued_epoch, proof.end))
+            }
+        } else {
+            match self.checked_report(local, fingers.len(), request, successor, now_ms) {
+                Ok((pending, end)) => {
+                    self.in_flight = None;
+                    Ok((pending.issued_epoch, end))
+                }
+                Err(disposition) => {
+                    if self
+                        .in_flight
+                        .is_some_and(|pending| pending.request == request)
+                    {
+                        self.in_flight = None;
+                        if matches!(
+                            disposition,
+                            FingerResultDisposition::Expired | FingerResultDisposition::Invalid
+                        ) {
+                            self.record_failure(now_ms);
+                        }
+                    }
+                    Err(disposition)
+                }
+            }
         };
-        self.in_flight = None;
-        if now_ms >= pending.expires_at_ms {
-            self.record_failure(now_ms);
-            return FingerResultDisposition::Expired;
-        }
-        let Some(end) = finger_proof_end(local, successor, request.slot_index(), fingers.len())
-        else {
-            self.record_failure(now_ms);
-            return FingerResultDisposition::Invalid;
+        let (issued_epoch, end) = match validated {
+            Ok(validated) => validated,
+            Err(disposition) => return disposition,
         };
         let replacement = (successor != local).then_some(successor);
         let count = end.saturating_sub(request.slot_index()).saturating_add(1);
@@ -413,7 +648,7 @@ impl FingerConvergenceState {
             .skip(request.slot_index())
             .take(count)
         {
-            if *slot_epoch <= pending.issued_epoch {
+            if *slot_epoch <= issued_epoch {
                 *finger = replacement;
                 *verified = true;
                 applied = true;
@@ -423,20 +658,60 @@ impl FingerConvergenceState {
             self.record_progress();
             FingerResultDisposition::Applied { end }
         } else {
-            self.record_failure(now_ms);
             FingerResultDisposition::Stale
         }
+    }
+
+    pub(crate) fn confirm_range(&mut self, start: usize, end: usize) -> bool {
+        if start > end || start >= self.verified.len() {
+            return false;
+        }
+        let end = end.min(self.verified.len().saturating_sub(1));
+        let newly_verified = self
+            .verified
+            .iter()
+            .skip(start)
+            .take(end.saturating_sub(start).saturating_add(1))
+            .any(|verified| !verified);
+        self.verified
+            .iter_mut()
+            .skip(start)
+            .take(end.saturating_sub(start).saturating_add(1))
+            .for_each(|verified| *verified = true);
+        let superseded_in_flight = self
+            .in_flight
+            .is_some_and(|pending| (start..=end).contains(&pending.request.slot_index()));
+        if superseded_in_flight {
+            self.in_flight = None;
+        }
+        let superseded_deferred = self
+            .deferred
+            .is_some_and(|proof| (start..=end).contains(&proof.request.slot_index()));
+        if superseded_deferred {
+            self.deferred = None;
+        }
+        let progressed = newly_verified || superseded_in_flight || superseded_deferred;
+        if progressed {
+            self.record_progress();
+        }
+        progressed
     }
 
     pub(crate) fn cancel(&mut self, request: FingerFixRequest, now_ms: u64) {
         if self.request_is_current(request) {
             self.in_flight = None;
+            self.deferred = None;
             self.record_failure(now_ms);
         }
     }
 }
 
-fn finger_proof_end(local: Did, successor: Did, start: usize, slot_count: usize) -> Option<usize> {
+pub(crate) fn finger_proof_end(
+    local: Did,
+    successor: Did,
+    start: usize,
+    slot_count: usize,
+) -> Option<usize> {
     let last = slot_count.checked_sub(1)?;
     if start > last {
         return None;

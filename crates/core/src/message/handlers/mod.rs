@@ -86,22 +86,6 @@ impl MessageHandler {
         self.run_effects([CoreEffect::connect_dht_peer(peer)]).await
     }
 
-    /// Idempotently establish DHT-driven transport connections in local quality order.
-    pub(crate) async fn connect_dht_peers(
-        &self,
-        peers: impl IntoIterator<Item = Did>,
-    ) -> Result<()> {
-        for (peer, has_next) in
-            core_actor_steps(self.transport.order_dht_candidates_by_quality(peers).await)
-        {
-            self.connect_dht_peer(peer).await?;
-            if has_next {
-                yield_core_actor_step().await;
-            }
-        }
-        Ok(())
-    }
-
     pub(crate) async fn join_dht(&self, peer: Did) -> Result<()> {
         // Default HMCC/Zave join path: maps to the JoinThenSync operation in
         // the CorrectChord spec (see tests/default/test_dht_convergence.rs).

@@ -43,12 +43,35 @@ async fn test_two_provider_connect_and_list() {
 async fn test_provider_listener_handle_requests_stop() {
     let provider = new_provider().await;
 
-    let listener = provider.listen();
-    assert!(!listener.is_stopped());
+    let listener_gate = provider.listener_gate_for_test();
+    let old_cleanup = listener_gate.lock().await;
+    let waiting_listener = provider.listen();
+    let started = Box::pin(JsFuture::from(waiting_listener.started()));
+    let short_delay = Box::pin(utils::js_utils::window_sleep(10));
+    let pending_started = match futures::future::select(started, short_delay).await {
+        futures::future::Either::Left(_) => {
+            waiting_listener.stop();
+            panic!("a new listener started while the previous generation still held the gate");
+        }
+        futures::future::Either::Right((delay, pending_started)) => {
+            delay.unwrap();
+            pending_started
+        }
+    };
+    drop(old_cleanup);
+    pending_started.await.unwrap();
+    waiting_listener.stop();
+    JsFuture::from(waiting_listener.task()).await.unwrap();
 
-    listener.stop();
-    assert!(listener.is_stopped());
-    utils::js_utils::window_sleep(10).await.unwrap();
+    for _ in 0..3 {
+        let listener = provider.listen();
+        JsFuture::from(listener.started()).await.unwrap();
+        assert!(!listener.is_stopped());
+
+        listener.stop();
+        assert!(listener.is_stopped());
+        JsFuture::from(listener.task()).await.unwrap();
+    }
 }
 
 #[wasm_bindgen_test]

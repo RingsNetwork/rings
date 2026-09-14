@@ -4,8 +4,12 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use rings_transport::core::transport::TransportInterface;
+mod finger;
 mod registry;
 
+use finger::finger_candidate_admission;
+use finger::FingerCandidateAdmission;
+pub(crate) use finger::FingerUpdateDisposition;
 pub(super) use registry::ActiveConnectionSet;
 pub(super) use registry::ConnectionLifecycleRegistry;
 pub(super) use registry::LifecycleBounds;
@@ -28,6 +32,9 @@ use crate::utils::get_epoch_ms_i64;
 pub(crate) const DEFAULT_PENDING_CONNECTION_CAPACITY: usize = 32;
 
 pub(super) const PENDING_CONNECTION_TIMEOUT_MS: i64 = 180_000;
+const _: () = assert!(
+    PENDING_CONNECTION_TIMEOUT_MS as u64 == crate::dht::finger::FINGER_ADMISSION_TIMEOUT_MS
+);
 
 pub(super) type SharedConnectionLifecycles = Arc<Mutex<ConnectionLifecycleRegistry>>;
 pub(super) type PendingFingerUpdates =
@@ -111,62 +118,6 @@ impl PendingConnectionAttempt {
 pub(crate) enum ConnectionEventDisposition {
     Deliver,
     Suppress { active: PendingConnectionAttempt },
-}
-
-/// Result of reconciling one reported finger with connection ownership.
-///
-/// The variants make the state transition exhaustive: a candidate is either
-/// committed, retained by the current handshake, absent, or owned by an active
-/// transport that is not presently routable.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum FingerUpdateDisposition {
-    /// The candidate was committed to the finger table.
-    Applied,
-    /// The candidate was attached to the current pending generation.
-    Queued,
-    /// No logical connection generation exists for the candidate.
-    Missing,
-    /// An active generation exists, but its transport cannot make progress.
-    Unroutable,
-    /// The report did not prove the requested finger threshold.
-    Invalid,
-    /// The report arrived after the current request deadline.
-    Expired,
-    /// The report no longer matches the node's current in-flight request.
-    Stale,
-}
-
-impl FingerUpdateDisposition {
-    /// Whether the caller should start a connection before retrying admission.
-    pub(crate) const fn needs_connection(self) -> bool {
-        matches!(self, Self::Missing)
-    }
-}
-
-/// Pure plan for reconciling one finger candidate with a lifecycle snapshot.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FingerCandidateAdmission {
-    Apply,
-    Queue(PendingConnectionAttempt),
-    Missing,
-    Unroutable,
-}
-
-// Pre: `is_routable` describes the transport owned by `lifecycle`.
-// Post: every lifecycle state maps to exactly one effect plan.
-fn finger_candidate_admission(
-    lifecycle: Option<PeerConnectionLifecycle>,
-    is_routable: bool,
-) -> FingerCandidateAdmission {
-    match lifecycle {
-        Some(
-            PeerConnectionLifecycle::Pending { attempt, .. }
-            | PeerConnectionLifecycle::Admitting { attempt, .. },
-        ) => FingerCandidateAdmission::Queue(attempt),
-        Some(PeerConnectionLifecycle::Active(_)) if is_routable => FingerCandidateAdmission::Apply,
-        Some(PeerConnectionLifecycle::Active(_)) => FingerCandidateAdmission::Unroutable,
-        None => FingerCandidateAdmission::Missing,
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -261,6 +212,17 @@ impl SwarmTransport {
         self.pending_finger_updates
             .lock()
             .map_err(|_| Error::SwarmConnectionLifecycleLock)
+    }
+
+    fn cancel_pending_finger_updates(&self, attempt: PendingConnectionAttempt) -> Result<()> {
+        let requests = self
+            .pending_finger_updates()?
+            .remove(&attempt)
+            .unwrap_or_default();
+        for request in requests {
+            self.dht.cancel_finger_lookup(request)?;
+        }
+        Ok(())
     }
 
     pub(super) fn get_raw_connection(&self, peer: Did) -> Option<SwarmConnection> {
@@ -635,7 +597,7 @@ impl SwarmTransport {
         let _lifecycle = self.connection_lifecycle()?;
         let removed = self.peer_lifecycles()?.remove_pending(attempt);
         if removed {
-            self.pending_finger_updates()?.remove(&attempt);
+            self.cancel_pending_finger_updates(attempt)?;
         }
         Ok(removed)
     }
@@ -734,22 +696,24 @@ impl SwarmTransport {
         match self.dht.finger_result_disposition(request, peer)? {
             FingerResultDisposition::Stale => return Ok(FingerUpdateDisposition::Stale),
             FingerResultDisposition::Invalid => {
-                let _ = self.dht.apply_fixed_finger(request, peer)?;
-                return Ok(FingerUpdateDisposition::Invalid);
+                return self
+                    .dht
+                    .apply_fixed_finger(request, peer)
+                    .map(FingerUpdateDisposition::from);
             }
             FingerResultDisposition::Expired => {
-                let _ = self.dht.apply_fixed_finger(request, peer)?;
-                return Ok(FingerUpdateDisposition::Expired);
+                return self
+                    .dht
+                    .apply_fixed_finger(request, peer)
+                    .map(FingerUpdateDisposition::from);
             }
             FingerResultDisposition::Applied { .. } => {}
         }
         if peer == self.dht.did {
-            return Ok(match self.dht.apply_fixed_finger(request, peer)? {
-                FingerResultDisposition::Applied { .. } => FingerUpdateDisposition::Applied,
-                FingerResultDisposition::Invalid => FingerUpdateDisposition::Invalid,
-                FingerResultDisposition::Expired => FingerUpdateDisposition::Expired,
-                FingerResultDisposition::Stale => FingerUpdateDisposition::Stale,
-            });
+            return self
+                .dht
+                .apply_fixed_finger(request, peer)
+                .map(FingerUpdateDisposition::from);
         }
         let (lifecycle, active) = {
             let lifecycles = self.peer_lifecycles()?;
@@ -759,22 +723,30 @@ impl SwarmTransport {
         match finger_candidate_admission(lifecycle, is_routable) {
             FingerCandidateAdmission::Queue(current) => {
                 observe_admission();
-                self.pending_finger_updates()?
-                    .entry(current)
-                    .or_default()
-                    .insert(request);
-                Ok(FingerUpdateDisposition::Queued)
+                let mut pending_updates = self.pending_finger_updates()?;
+                let disposition = self.dht.defer_fixed_finger(request, peer)?;
+                if matches!(disposition, FingerResultDisposition::Applied { .. }) {
+                    pending_updates.entry(current).or_default().insert(request);
+                    Ok(FingerUpdateDisposition::Queued)
+                } else {
+                    Ok(disposition.into())
+                }
             }
             FingerCandidateAdmission::Apply => {
                 observe_admission();
-                Ok(match self.dht.apply_fixed_finger(request, peer)? {
-                    FingerResultDisposition::Applied { .. } => FingerUpdateDisposition::Applied,
-                    FingerResultDisposition::Invalid => FingerUpdateDisposition::Invalid,
-                    FingerResultDisposition::Expired => FingerUpdateDisposition::Expired,
-                    FingerResultDisposition::Stale => FingerUpdateDisposition::Stale,
-                })
+                self.dht
+                    .apply_fixed_finger(request, peer)
+                    .map(FingerUpdateDisposition::from)
             }
-            FingerCandidateAdmission::Missing => Ok(FingerUpdateDisposition::Missing),
+            FingerCandidateAdmission::Missing => {
+                observe_admission();
+                self.dht
+                    .defer_fixed_finger(request, peer)
+                    .map(|disposition| match disposition {
+                        FingerResultDisposition::Applied { .. } => FingerUpdateDisposition::Missing,
+                        disposition => disposition.into(),
+                    })
+            }
             FingerCandidateAdmission::Unroutable => Ok(FingerUpdateDisposition::Unroutable),
         }
     }
@@ -821,7 +793,7 @@ impl SwarmTransport {
         if !self.peer_lifecycles()?.remove_unadmitted(attempt) {
             return Ok(None);
         }
-        self.pending_finger_updates()?.remove(&attempt);
+        self.cancel_pending_finger_updates(attempt)?;
         Ok(Some(RetiredPendingConnection {
             connection: self.get_raw_connection(attempt.peer),
         }))
@@ -851,7 +823,7 @@ impl SwarmTransport {
             expired
                 .into_iter()
                 .map(|expired| {
-                    self.pending_finger_updates()?.remove(&expired.attempt);
+                    self.cancel_pending_finger_updates(expired.attempt)?;
                     let connection = self.get_raw_connection(expired.attempt.peer);
                     Ok((expired, connection))
                 })

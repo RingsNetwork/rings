@@ -5,8 +5,8 @@
 ### Breaking changes
 
 - Finger-table lookup reports now carry a fresh UUID correlation token instead of a bare slot
-  index. The wire format is incompatible with 0.25.x, so every node in an overlay must upgrade
-  together.
+  index, and topology query requests/reports carry a mandatory UUID correlation token. The wire
+  format is incompatible with 0.25.x, so every node in an overlay must upgrade together.
 
 ### Added
 
@@ -17,11 +17,16 @@
 - Automatic convergence permits one lookup per node at a time, spreads simultaneous fleet starts
   over a node-lifecycle-randomized 10-second phase window, reuses that phase across repeated browser
   listener restarts, rephases deadlines left stale by browser suspension, and has no catch-up
-  bursts. Send failure, invalid
-  reports, timeouts, and topology invalidation of an in-flight proof use a
+  bursts. Send or handshake failure, invalid reports, lookup timeout, and admission-lease expiry use a
   2/4/8/16/32/60-second exponential retry floor plus a full jitter window; only an applied range
-  proof resets the failure level. A due convergence turn may yield to at most two topology or
-  storage phases before it is reserved.
+  proof resets the failure level. Normal topology churn invalidates stale evidence without being
+  counted as a network failure. Timely lookup proofs may wait up to 180 seconds for transport
+  admission, after which the lease is released into the same bounded retry schedule. A due
+  convergence turn may yield to at most two topology or storage phases before it is reserved.
+- Stabilization and successor-list reports are bound to one current reporter and UUID and atomically
+  claimed before connection effects. Candidates are deduplicated; successor-list sync is capped by successor
+  capacity, while stabilization may additionally admit one predecessor. Browser listener generations
+  are serialized so rapid `stop`/`listen` cycles cannot run duplicate maintenance daemons.
 
 ## 0.25.0
 

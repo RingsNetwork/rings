@@ -59,6 +59,8 @@ pub struct PeerRing {
     pub cache: EntryStorage,
     storage_virtual_node_config: VirtualNodeConfig,
     topology_transition: Mutex<()>,
+    pending_stabilization: Mutex<Option<topology::StabilizationRequest>>,
+    pending_successor_sync: Mutex<topology::SuccessorSyncState>,
     finger_clock_origin: Instant,
     finger_jitter_entropy: OnceLock<uuid::Uuid>,
     /// Serializes every read-modify-write of a storage slot (see `chord::storage`).
@@ -111,6 +113,8 @@ impl PeerRing {
             cache: Box::new(MemStorage::bounded(LOCAL_CACHE_CAPACITY)),
             storage_virtual_node_config: virtual_nodes,
             topology_transition: Mutex::new(()),
+            pending_stabilization: Mutex::new(None),
+            pending_successor_sync: Mutex::new(topology::SuccessorSyncState::default()),
             finger_clock_origin: Instant::now(),
             finger_jitter_entropy: OnceLock::new(),
             storage_transition: FuturesMutex::new(()),
@@ -220,6 +224,10 @@ impl PeerRing {
         let successors = self.successor_seq.list()?;
         let predecessor = *self.lock_predecessor_state()?;
         let finger = self.lock_finger_state()?;
+        let pending_stabilization = *self
+            .pending_stabilization
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?;
         Ok(TopologyState::restore(
             self.did,
             successors,
@@ -227,6 +235,7 @@ impl PeerRing {
             finger.list().clone(),
             finger.fix_finger_index(),
             finger.convergence_state().clone(),
+            pending_stabilization,
         ))
     }
 
@@ -283,12 +292,22 @@ impl PeerRing {
         observe_snapshot(&current);
         let next = topology::step(&current, event(), self.successor_seq.capacity());
         self.interpret_topology_state_unlocked(&next.state)?;
+        if next.state.successors != current.successors {
+            self.pending_successor_sync
+                .lock()
+                .map_err(|_| Error::LockPoisoned)?
+                .invalidate();
+        }
         Ok(next)
     }
 
     fn interpret_topology_state_unlocked(&self, next: &TopologyState) -> Result<()> {
         let mut predecessor = self.lock_predecessor_state()?;
         let mut finger = self.lock_finger_state()?;
+        let mut pending_stabilization = self
+            .pending_stabilization
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?;
         self.successor_seq.replace_state(&next.successors)?;
         *predecessor = next.predecessor;
         finger.replace_state(
@@ -296,6 +315,7 @@ impl PeerRing {
             next.fix_finger_index,
             next.finger_convergence_state().clone(),
         );
+        *pending_stabilization = next.pending_stabilization();
         Ok(())
     }
 
@@ -316,6 +336,13 @@ impl PeerRing {
             TopologyAction::Notify(did) => {
                 PeerRingAction::RemoteAction(did, RemoteAction::Notify(self.did))
             }
+            TopologyAction::QuerySuccessorTopology {
+                successor,
+                request_id,
+            } => PeerRingAction::RemoteAction(
+                successor,
+                RemoteAction::QueryForSuccessorListAndPred { request_id },
+            ),
             // The pass reads the current head when it runs, so the head is not carried.
             TopologyAction::SuccessorHeadChanged(_) => PeerRingAction::StorageRepairDue,
         }
@@ -357,11 +384,17 @@ impl PeerRing {
     }
 
     pub(crate) fn finger_convergence_status(&self) -> Result<FingerConvergenceStatus> {
-        self.with_topology_state(TopologyState::finger_convergence_status)
+        let now_ms = self.finger_now_ms();
+        self.with_topology_state(|state| state.finger_convergence_status(now_ms))
     }
 
     pub(crate) fn begin_finger_revalidation(&self) -> Result<PeerRingAction> {
         let next = self.transition_topology(TopologyEvent::BeginFingerRevalidation)?;
+        Ok(self.topology_leaf_actions(next.actions))
+    }
+
+    pub(crate) fn begin_stabilization(&self, request_id: uuid::Uuid) -> Result<PeerRingAction> {
+        let next = self.transition_topology(TopologyEvent::BeginStabilize { request_id })?;
         Ok(self.topology_leaf_actions(next.actions))
     }
 
@@ -380,24 +413,144 @@ impl PeerRing {
         request: FingerFixRequest,
         successor: Did,
     ) -> Result<FingerResultDisposition> {
+        self.transition_finger_result(|state, now_ms| {
+            topology::apply_finger(state, request, successor, now_ms)
+        })
+    }
+
+    pub(crate) fn defer_fixed_finger(
+        &self,
+        request: FingerFixRequest,
+        successor: Did,
+    ) -> Result<FingerResultDisposition> {
+        self.transition_finger_result(|state, now_ms| {
+            topology::defer_finger(state, request, successor, now_ms)
+        })
+    }
+
+    fn transition_finger_result(
+        &self,
+        transition: impl FnOnce(&TopologyState, u64) -> (TopologyStep, FingerResultDisposition),
+    ) -> Result<FingerResultDisposition> {
         let _transition = self
             .topology_transition
             .lock()
             .map_err(|_| Error::LockPoisoned)?;
         let current = self.topology_state_unlocked()?;
         let now_ms = self.finger_now_ms();
-        let disposition = current.finger_result_disposition(request, successor, now_ms);
-        let next = topology::step(
-            &current,
-            TopologyEvent::ApplyFinger {
-                request,
-                successor,
-                now_ms,
-            },
-            self.successor_seq.capacity(),
-        );
+        let (next, disposition) = transition(&current, now_ms);
         self.interpret_topology_state_unlocked(&next.state)?;
         Ok(disposition)
+    }
+
+    pub(crate) fn stabilize_reported_by(
+        &self,
+        reporter: Did,
+        request_id: uuid::Uuid,
+        info: TopoInfo,
+    ) -> Result<PeerRingAction> {
+        let next = self.transition_topology(TopologyEvent::Stabilize {
+            reporter,
+            request_id: Some(request_id),
+            successors: info.successors,
+            predecessor: info.predecessor,
+        })?;
+        Ok(self.topology_multi_actions(next.actions))
+    }
+
+    pub(crate) fn claim_stabilization_report(
+        &self,
+        reporter: Did,
+        request_id: uuid::Uuid,
+    ) -> Result<bool> {
+        let mut claimed = false;
+        let _ = self.transition_topology_with_observer(
+            TopologyEvent::ClaimStabilize {
+                reporter,
+                request_id,
+            },
+            |state| claimed = state.can_claim_stabilization_report(reporter, request_id),
+        )?;
+        Ok(claimed)
+    }
+
+    pub(crate) fn advance_stabilization_connection_plan(
+        &self,
+        plan: &mut topology::StabilizationConnectionPlan,
+    ) -> Result<topology::StabilizationConnectionStep> {
+        self.with_topology_state(|state| plan.advance(state))
+    }
+
+    pub(crate) fn cancel_stabilization(&self, request_id: uuid::Uuid) -> Result<()> {
+        self.transition_topology(TopologyEvent::CancelStabilize { request_id })
+            .map(|_| ())
+    }
+
+    pub(crate) fn begin_successor_sync(
+        &self,
+        reporter: Did,
+        request_id: uuid::Uuid,
+    ) -> Result<bool> {
+        let _transition = self
+            .topology_transition
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?;
+        let successors = self.successor_seq.list()?;
+        let mut pending = self
+            .pending_successor_sync
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?;
+        Ok(pending.begin(&successors, reporter, request_id))
+    }
+
+    pub(crate) fn claim_successor_sync_report(
+        &self,
+        reporter: Did,
+        request_id: uuid::Uuid,
+    ) -> Result<bool> {
+        let _transition = self
+            .topology_transition
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?;
+        let successors = self.successor_seq.list()?;
+        let mut pending = self
+            .pending_successor_sync
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?;
+        Ok(pending.claim(&successors, reporter, request_id))
+    }
+
+    pub(crate) fn advance_successor_sync_connection_plan(
+        &self,
+        plan: &mut topology::SuccessorSyncConnectionPlan,
+    ) -> Result<topology::SuccessorSyncConnectionStep> {
+        let _transition = self
+            .topology_transition
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?;
+        let successors = self.successor_seq.list()?;
+        let pending = self
+            .pending_successor_sync
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?;
+        Ok(plan.advance(&pending, &successors))
+    }
+
+    pub(crate) fn cancel_successor_sync(
+        &self,
+        reporter: Did,
+        request_id: uuid::Uuid,
+    ) -> Result<()> {
+        let _transition = self
+            .topology_transition
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?;
+        let mut pending = self
+            .pending_successor_sync
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?;
+        pending.cancel(reporter, request_id);
+        Ok(())
     }
 
     pub(crate) fn cancel_finger_lookup(&self, request: FingerFixRequest) -> Result<()> {
@@ -517,19 +670,14 @@ impl CorrectChord<PeerRingAction> for PeerRing {
     }
 
     fn pre_stabilize(&self) -> Result<PeerRingAction> {
-        let successor = self.successors();
-        if successor.is_empty()? {
-            return Ok(PeerRingAction::None);
-        }
-        let head = successor.min()?;
-        Ok(PeerRingAction::RemoteAction(
-            head,
-            RemoteAction::QueryForSuccessorListAndPred,
-        ))
+        self.begin_stabilization(new_uuid())
     }
 
     fn stabilize(&self, info: TopoInfo) -> Result<PeerRingAction> {
+        let reporter = topology::successor_head(&self.topology_state()?).unwrap_or(self.did);
         let next = self.transition_topology(TopologyEvent::Stabilize {
+            reporter,
+            request_id: None,
             successors: info.successors,
             predecessor: info.predecessor,
         })?;

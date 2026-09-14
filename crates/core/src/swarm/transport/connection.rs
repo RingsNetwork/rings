@@ -19,7 +19,6 @@ use super::SwarmTransport;
 use super::TRANSPORT_TIMEOUT_PROFILE;
 use crate::dht::did::BiasId;
 use crate::dht::Chord;
-use crate::dht::CorrectChord;
 use crate::dht::Did;
 use crate::dht::PeerRingAction;
 use crate::dht::TopoInfo;
@@ -343,35 +342,52 @@ impl SwarmTransport {
     /// boundary, so retirement cannot invalidate the evidence between them.
     pub(crate) fn stabilize_routable_topology(
         &self,
+        reporter: Did,
+        request_id: uuid::Uuid,
         reported: &TopoInfo,
     ) -> Result<Option<PeerRingAction>> {
-        self.stabilize_routable_topology_with_observer(reported, || {})
+        self.stabilize_routable_topology_with_observer(reporter, request_id, reported, || {})
     }
 
     fn stabilize_routable_topology_with_observer(
         &self,
+        reporter: Did,
+        request_id: uuid::Uuid,
         reported: &TopoInfo,
         observe_confirmation: impl FnOnce(),
     ) -> Result<Option<PeerRingAction>> {
         self.with_connection_lifecycle(|| {
             let active = self.active_connections()?;
-            let confirmed =
-                reported.confirmed_by(|peer| self.is_routable_active_candidate(peer, &active));
+            if !self.is_routable_active_candidate(reporter, &active) {
+                return Ok(None);
+            }
+            let confirmed = reported.confirmed_by(|peer| {
+                peer == self.dht.did || self.is_routable_active_candidate(peer, &active)
+            });
             if !confirmed.has_confirmed_peer() {
                 return Ok(None);
             }
             observe_confirmation();
-            self.dht.stabilize(confirmed).map(Some)
+            self.dht
+                .stabilize_reported_by(reporter, request_id, confirmed)
+                .map(Some)
         })
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn stabilize_routable_topology_with_observer_for_test(
         &self,
+        reporter: Did,
+        request_id: uuid::Uuid,
         reported: &TopoInfo,
         observe_confirmation: impl FnOnce(),
     ) -> Result<Option<PeerRingAction>> {
-        self.stabilize_routable_topology_with_observer(reported, observe_confirmation)
+        self.stabilize_routable_topology_with_observer(
+            reporter,
+            request_id,
+            reported,
+            observe_confirmation,
+        )
     }
 
     /// Get DIDs of active, routable connections.

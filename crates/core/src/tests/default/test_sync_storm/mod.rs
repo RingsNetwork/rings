@@ -13,9 +13,6 @@ use rings_transport::connections::dummy_controlled;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
-use crate::dht::finger::FINGER_LOOKUP_MIN_INTERVAL_MS;
-use crate::dht::finger_schedule_deadline_for_test;
-use crate::dht::finger_schedule_resumed_deadline_for_test;
 use crate::dht::successor::SuccessorReader;
 use crate::dht::Chord;
 use crate::dht::PeerRingAction;
@@ -76,9 +73,6 @@ const QUIESCENT_POLLS: usize = 8;
 // inbound work pending, and disables it before bounded recovery is measured.
 const VIRTUAL_SERVICE_BYTES_PER_MS: usize = 256;
 const MAX_FRAME_SERVICE_MS: u64 = 64;
-const FINGER_INITIAL_PHASE_MS: u64 = 10_000;
-const FINGER_MAX_RETRY_FLOOR_MS: u64 = 60_000;
-const FINGER_MAX_FIXTURE_NODES_PER_SECOND: usize = 30;
 
 const MODEL_LIMITS: SimLimits = SimLimits {
     node_bytes: 128 * 1024 * 1024,
@@ -93,67 +87,50 @@ enum ScenarioTopology {
     Hotspot,
 }
 
-/// Law: lifecycle entropy, rather than a grindable DID alone, selects a
-/// deadline inside the explicit per-node initial and retry windows. Browser
-/// resume rephases stale work over the same fleet window instead of emitting
-/// one immediate request per resumed node.
-#[test]
-fn test_finger_convergence_schedule_has_per_node_churn_bounds_and_lifecycle_entropy() {
-    let mut first_lifecycle_deadlines = BTreeSet::new();
-    let mut resumed_delays = BTreeSet::new();
-    let mut initial_bucket_counts = BTreeMap::<u64, usize>::new();
-    let mut resumed_bucket_counts = BTreeMap::<u64, usize>::new();
-    let mut entropy_changed_deadline = 0usize;
-    for identity in 0..200u32 {
-        let local = crate::dht::Did::from(identity);
-        let first_boot = uuid::Uuid::from_u128(u128::from(identity).saturating_add(1));
-        let second_boot = uuid::Uuid::from_u128(u128::from(identity).saturating_add(10_001));
-        let initial = finger_schedule_deadline_for_test(local, first_boot, 0);
-        let another_initial = finger_schedule_deadline_for_test(local, second_boot, 0);
-        let retry = finger_schedule_deadline_for_test(local, first_boot, u8::MAX);
-        let (resumed_at, resumed_deadline) =
-            finger_schedule_resumed_deadline_for_test(local, first_boot);
+mod finger_schedule_tests;
 
-        assert!((1_000..=1_000 + FINGER_INITIAL_PHASE_MS).contains(&initial));
-        assert!((1_000..=1_000 + FINGER_INITIAL_PHASE_MS).contains(&another_initial));
-        assert!(
-            (FINGER_MAX_RETRY_FLOOR_MS..=FINGER_MAX_RETRY_FLOOR_MS.saturating_mul(2))
-                .contains(&retry)
-        );
-        assert!(resumed_deadline > resumed_at);
-        assert!((1_000..=1_000 + FINGER_INITIAL_PHASE_MS)
-            .contains(&resumed_deadline.saturating_sub(resumed_at)));
-        first_lifecycle_deadlines.insert(initial);
-        let resumed_delay = resumed_deadline.saturating_sub(resumed_at);
-        resumed_delays.insert(resumed_delay);
-        *initial_bucket_counts.entry(initial / 1_000).or_default() += 1;
-        *resumed_bucket_counts
-            .entry(resumed_delay / 1_000)
-            .or_default() += 1;
-        entropy_changed_deadline =
-            entropy_changed_deadline.saturating_add(usize::from(initial != another_initial));
-    }
-    assert!(
-        first_lifecycle_deadlines.len() >= 190,
-        "lifecycle fixture clustered 200 nodes into only {} deadlines",
-        first_lifecycle_deadlines.len()
-    );
-    assert!(
-        resumed_delays.len() >= 190,
-        "resume fixture clustered 200 nodes into only {} delays",
-        resumed_delays.len()
-    );
-    assert!(
-        initial_bucket_counts
-            .values()
-            .chain(resumed_bucket_counts.values())
-            .all(|count| *count <= FINGER_MAX_FIXTURE_NODES_PER_SECOND),
-        "lifecycle or resume fixture exceeded {FINGER_MAX_FIXTURE_NODES_PER_SECOND} due nodes in one second"
-    );
-    assert!(
-        entropy_changed_deadline >= 190,
-        "lifecycle entropy changed only {entropy_changed_deadline} of 200 deadlines"
-    );
+/// Five active dummy transports witness that revalidating the local successor
+/// interval stays local instead of traversing the ring and reporting back.
+#[tokio::test(start_paused = true)]
+async fn test_five_node_local_successor_range_emits_no_finger_submission() {
+    let runtime = SimulationRuntimeGuard::enter(767, TEST_EPOCH_MS, ProtectionProfile::ALL_ENABLED)
+        .expect("local-range simulation runtime must install");
+    let nodes = build_finger_nodes(&[3, 1, 10, 17, 29]);
+    establish_topology(&runtime, &nodes, ScenarioTopology::Ring).await;
+    install_chord_view(&nodes, ScenarioTopology::Ring);
+    let observer = sorted_indices(&nodes).first().copied().unwrap_or(0);
+    let request = nodes[observer]
+        .dht()
+        .lock_finger()
+        .expect("observer finger table must be readable")
+        .prepare_request_for_test(0)
+        .expect("local successor slot must be a valid test request");
+    nodes[observer]
+        .dht()
+        .cancel_finger_lookup(request)
+        .expect("test request cancellation must succeed");
+    runtime
+        .advance(Duration::from_millis(2_000))
+        .await
+        .expect("finger retry floor must advance on the simulation clock");
+
+    reset_outbound_submit_count_for_test();
+    nodes[observer]
+        .swarm
+        .stabilizer()
+        .converge_fingers_for_simulation()
+        .await
+        .expect("local successor range convergence must remain local");
+    drain_untraced(&runtime, &nodes).await;
+    assert_eq!(outbound_submit_count_for_test(), 0);
+
+    let generations = connection_endpoints(&nodes)
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    close_nodes(&runtime, &nodes, &generations).await;
+    drop(nodes);
+    drop(runtime);
 }
 
 /// Production-path budget witness for one lookup that discovers a missing
@@ -161,7 +138,7 @@ fn test_finger_convergence_schedule_has_per_node_churn_bounds_and_lifecycle_entr
 /// and every admission follow-up caused while the new connection quiesces.
 #[tokio::test(start_paused = true)]
 async fn test_finger_discovery_measures_the_complete_transport_cascade() {
-    const MAX_CAUSAL_CONTROL_SUBMISSIONS: usize = 20;
+    const THREE_NODE_FIXTURE_MAX_CONTROL_SUBMISSIONS: usize = 20;
 
     let runtime = SimulationRuntimeGuard::enter(768, TEST_EPOCH_MS, ProtectionProfile::ALL_ENABLED)
         .expect("finger simulation runtime must install");
@@ -184,30 +161,13 @@ async fn test_finger_discovery_measures_the_complete_transport_cascade() {
         .get_connection(nodes[candidate].did())
         .is_none());
 
-    nodes[observer]
-        .swarm
-        .stabilizer()
-        .converge_fingers_for_simulation()
-        .await
-        .expect("first production finger range must start");
-    drain_untraced(&runtime, &nodes).await;
-    assert!(nodes[observer]
-        .swarm
-        .transport
-        .get_connection(nodes[candidate].did())
-        .is_none());
-
-    runtime
-        .advance(Duration::from_millis(FINGER_LOOKUP_MIN_INTERVAL_MS))
-        .await
-        .expect("finger interval must advance on the simulation clock");
     reset_outbound_submit_count_for_test();
     nodes[observer]
         .swarm
         .stabilizer()
         .converge_fingers_for_simulation()
         .await
-        .expect("candidate-producing production finger range must start");
+        .expect("first routed production finger range must start");
     drain_untraced(&runtime, &nodes).await;
     let submissions = outbound_submit_count_for_test();
 
@@ -228,12 +188,8 @@ async fn test_finger_discovery_measures_the_complete_transport_cascade() {
             .list()
             .expect("seed successors must be readable"));
     assert!(
-        submissions > 4,
-        "real admission cascade unexpectedly fit the obsolete four-leg model"
-    );
-    assert!(
-        submissions <= MAX_CAUSAL_CONTROL_SUBMISSIONS,
-        "one three-node finger discovery emitted {submissions} control submissions"
+        submissions <= THREE_NODE_FIXTURE_MAX_CONTROL_SUBMISSIONS,
+        "three-node finger discovery emitted {submissions} control submissions; fixture regression limit is {THREE_NODE_FIXTURE_MAX_CONTROL_SUBMISSIONS}"
     );
 
     let generations = connection_endpoints(&nodes)
