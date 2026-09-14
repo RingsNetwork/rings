@@ -128,3 +128,48 @@ async fn test_finger_candidate_distinguishes_missing_and_unroutable_connections(
     transport.disconnect(peer).await?;
     Ok(())
 }
+
+#[tokio::test(start_paused = true)]
+async fn test_expired_finger_candidate_never_enters_connection_admission() -> Result<()> {
+    let transport = Arc::new(transport_with_measure(Arc::new(
+        RecordingMeasure::default(),
+    ))?);
+    let peer = SecretKey::random().address().into();
+    let request = finger_request(&transport, 0)?;
+
+    tokio::time::advance(std::time::Duration::from_millis(11_000)).await;
+    let expired = transport.record_finger_candidate(peer, request)?;
+
+    assert_eq!(expired, FingerUpdateDisposition::Expired);
+    assert!(!expired.needs_connection());
+    assert!(transport.unadmitted_attempt(peer)?.is_none());
+    assert!(transport.get_connection(peer).is_none());
+    assert_eq!(transport.dht.lock_finger()?.get(0), None);
+    assert_eq!(
+        transport.record_finger_candidate(peer, request)?,
+        FingerUpdateDisposition::Stale
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_invalid_finger_candidate_never_enters_connection_admission() -> Result<()> {
+    let transport = Arc::new(transport_with_measure(Arc::new(
+        RecordingMeasure::default(),
+    ))?);
+    let peer = transport.dht.did + crate::dht::Did::power_of_two(0);
+    let request = finger_request(&transport, 1)?;
+
+    let invalid = transport.record_finger_candidate(peer, request)?;
+
+    assert_eq!(invalid, FingerUpdateDisposition::Invalid);
+    assert!(!invalid.needs_connection());
+    assert!(transport.unadmitted_attempt(peer)?.is_none());
+    assert!(transport.get_connection(peer).is_none());
+    assert_eq!(transport.dht.lock_finger()?.get(1), None);
+    assert_eq!(
+        transport.record_finger_candidate(peer, request)?,
+        FingerUpdateDisposition::Stale
+    );
+    Ok(())
+}

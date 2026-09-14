@@ -429,6 +429,50 @@ fn test_sparse_and_dense_mutation_matrix_converges_to_finger_table_oracle() {
 }
 
 #[test]
+fn test_wrapped_ring_mutations_converge_to_the_finger_table_oracle() {
+    let ring_size = BigUint::from(1u8) << RING_BITS;
+    let local = Did::from(&ring_size - BigUint::from(16u8));
+    let near = did(1);
+    let inserted = did(32);
+    let far = Did::from(BigUint::from(1u8) << 159);
+    let initial_members = vec![local, near, far];
+    let initial = step(
+        &state(local, Vec::new(), None, vec![None; RING_BITS], 0),
+        TopologyEvent::Join { peer: near },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    )
+    .state;
+    let (stable, _) = converge_with_oracle(initial, &initial_members);
+
+    assert_eq!(stable.fingers, finger_table(&initial_members, local));
+
+    let mut with_inserted = initial_members.clone();
+    with_inserted.push(inserted);
+    let joined = step(
+        &stable,
+        TopologyEvent::Join { peer: inserted },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    )
+    .state;
+    let (after_join, _) = converge_with_oracle(joined, &with_inserted);
+
+    assert_eq!(after_join.fingers, finger_table(&with_inserted, local));
+
+    let removed = step(
+        &after_join,
+        TopologyEvent::Remove {
+            peer: inserted,
+            successor: SuccessorRemoval::Preserve,
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    )
+    .state;
+    let (after_remove, _) = converge_with_oracle(removed, &initial_members);
+
+    assert_eq!(after_remove.fingers, finger_table(&initial_members, local));
+}
+
+#[test]
 fn test_topology_change_rejects_an_in_flight_stale_range_result() {
     let local = did(0);
     let seed = did(128);
@@ -440,19 +484,7 @@ fn test_topology_change_rejects_an_in_flight_stale_range_result() {
     )
     .state;
     let issued = step(&hinted, advance(1_000), DEFAULT_SUCCESSOR_CAPACITY);
-    let request = match issued.actions.as_slice() {
-        [TopologyAction::FindSuccessorForFix { request, .. }] => *request,
-        actions => {
-            assert!(
-                actions.is_empty(),
-                "expected one lookup action, got {actions:?}"
-            );
-            FingerFixRequest {
-                slot: u16::MAX,
-                request_id: uuid::Uuid::nil(),
-            }
-        }
-    };
+    let request = emitted_finger_request(&issued);
     let changed = step(
         &issued.state,
         TopologyEvent::Join { peer: closer },
