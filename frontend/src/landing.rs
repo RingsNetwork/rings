@@ -4,6 +4,9 @@ use yew::prelude::*;
 
 use crate::controls::ShellPage;
 use crate::links::ProjectLink;
+use crate::project_content::PROJECT_INTRODUCTION;
+use crate::project_content::PROJECT_NAME;
+use crate::project_content::PROJECT_TAGLINE;
 
 pub(crate) fn page(
     navigate_page: Callback<ShellPage>,
@@ -29,10 +32,10 @@ fn hero_section(open_console: Callback<MouseEvent>) -> Html {
     html! {
         <section class="landing-hero" aria-labelledby="landing-title">
             <div class="landing-hero-copy">
-                <p class="landing-kicker">{ "Rings Network" }</p>
-                <h2 id="landing-title">{ "A P2P network for the sovereign age." }</h2>
+                <p class="landing-kicker">{ PROJECT_NAME }</p>
+                <h2 id="landing-title">{ PROJECT_TAGLINE }</h2>
                 <p class="landing-lede">
-                    { "Rings is a browser-native, structured peer-to-peer network for applications that need their own network layer instead of a server-owned data path. Browser tabs and native daemons can join the same overlay, discover peers by DID, and exchange messages over direct WebRTC datachannels routed by a Chord DHT." }
+                    { PROJECT_INTRODUCTION }
                 </p>
                 <div class="landing-actions" aria-label="Primary actions">
                     <button class="landing-primary-action" type="button" onclick={open_console}>

@@ -271,6 +271,9 @@ jobs:
       - name: Build Rings frontend extension package
         run: npm run package:frontend-extension
 
+      - name: Test Rings frontend static shell
+        run: npm run test:frontend-static-shell
+
       - name: Test Rings extension Onion WebView
         run: |
           xvfb-run -a node frontend/.generated/scripts/test-extension-webview.mjs

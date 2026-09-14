@@ -6,6 +6,7 @@
     <title>Rings - A P2P network for the sovereign age</title>
     <link data-trunk rel="copy-dir" href="assets" />
     <link data-trunk rel="copy-file" href="rings-webview-service-worker.js" />
+    <link data-trunk rel="css" href="static-shell.css" />
     <link rel="icon" type="image/svg+xml" href="assets/icons/favicon.svg" />
     <meta name="theme-color" content="#020c10" />
     <!-- Link previews (Open Graph, Twitter cards). Crawlers do not run the app, so the shell is
@@ -28,8 +29,92 @@
     <meta name="twitter:description" content="Browser tabs and native daemons join one overlay, find each other by DID, and talk over direct WebRTC datachannels routed by a Chord DHT." />
     <meta name="twitter:image" content="https://rings.rs/assets/social/rings-card.png" />
     <meta name="twitter:image:alt" content="Rings Network: a P2P network for the sovereign age" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareSourceCode",
+        "name": "Rings Network",
+        "alternateName": "Rings",
+        "description": "Rings is a browser-native, structured peer-to-peer network for applications that need their own network layer instead of a server-owned data path.",
+        "url": "https://rings.rs/",
+        "codeRepository": "https://github.com/RingsNetwork/rings",
+        "license": "https://github.com/RingsNetwork/rings/blob/master/LICENSE",
+        "programmingLanguage": "Rust",
+        "runtimePlatform": ["WebAssembly", "native"],
+        "isAccessibleForFree": true,
+        "publisher": {
+          "@type": "Organization",
+          "name": "Rings Network",
+          "url": "https://rings.rs/"
+        }
+      }
+    </script>
   </head>
   <body>
+    <!-- Yew's CSR renderer replaces the body on a successful mount. Until then, this is the
+         complete project introduction for people and crawlers that do not execute JS/WASM. -->
+    <main id="static-project-introduction" class="static-site" data-static-project-introduction>
+      <header class="static-header">
+        <a class="static-brand" href="https://rings.rs/" aria-label="Rings Network home">
+          <img src="assets/icons/rings.svg" alt="" width="36" height="36" />
+          <span>Rings Network</span>
+        </a>
+        <nav class="static-nav" aria-label="Project resources">
+          <a href="https://rings.rs/docs/">Docs</a>
+          <a href="https://github.com/RingsNetwork/rings">GitHub</a>
+          <a href="https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf">Whitepaper</a>
+        </nav>
+      </header>
+
+      <article>
+        <section class="static-hero" aria-labelledby="static-landing-title">
+          <div>
+            <p class="static-kicker" data-project-content="name">Rings Network</p>
+            <h1 id="static-landing-title" data-project-content="tagline">A P2P network for the sovereign age.</h1>
+            <p class="static-lede" data-project-content="introduction">Rings is a browser-native, structured peer-to-peer network for applications that need their own network layer instead of a server-owned data path. Browser tabs and native daemons can join the same overlay, discover peers by DID, and exchange messages over direct WebRTC datachannels routed by a Chord DHT.</p>
+            <div class="static-actions" aria-label="Learn about Rings">
+              <a class="static-primary-action" href="https://rings.rs/docs/">Read the docs</a>
+              <a href="https://rings.rs/llms.txt">llms.txt</a>
+            </div>
+          </div>
+        </section>
+
+        <section class="static-section" aria-labelledby="static-features-title">
+          <p class="static-kicker">Features</p>
+          <h2 id="static-features-title">One network layer across browser and native peers.</h2>
+          <div class="static-feature-grid">
+            <section>
+              <h3>Browser-native peers</h3>
+              <p>Rings runs in browsers through WebAssembly and web_sys, and on native hosts through the same Rust node stack. WebRTC datachannels carry direct peer traffic without an application server in the data path.</p>
+            </section>
+            <section>
+              <h3>DID identity and cryptography</h3>
+              <p>Peers use decentralized identifiers backed by selectable signature schemes, bridging browser, daemon, and wallet identity workflows without binding the network to one key system.</p>
+            </section>
+            <section>
+              <h3>Structured peer routing</h3>
+              <p>A Chord DHT provides peer discovery, successor and finger-table routing, message relay, stabilization, and network isolation for independent overlays.</p>
+            </section>
+            <section>
+              <h3>Protocol runtime</h3>
+              <p>Applications register namespace-scoped protocols. Pure state transitions stay separate from side effects performed by an interpreter through scoped capabilities.</p>
+            </section>
+          </div>
+        </section>
+
+        <section class="static-section static-architecture" aria-labelledby="static-architecture-title">
+          <p class="static-kicker">Architecture</p>
+          <h2 id="static-architecture-title">Applications over protocols, Chord, WebRTC, and DID.</h2>
+          <p>Rings separates application behavior, protocol state, overlay routing, transport, and identity. Applications address peers and namespaces while the lower layers establish direct connectivity and route authenticated messages across the structured overlay.</p>
+          <p>The interactive browser node adds wallet login, SDP and HTTP connectivity, topology inspection, onion proxy requests, and custom messages when JavaScript and WebAssembly are available.</p>
+        </section>
+      </article>
+
+      <footer class="static-footer">
+        <span>AGPL-3.0-only</span>
+        <span>Built with Rust, Yew, and WebAssembly</span>
+      </footer>
+    </main>
     <script src="/assets/webview-host.js"></script>
     <script src="/assets/webview-overlay.js"></script>
   </body>
