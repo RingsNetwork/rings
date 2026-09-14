@@ -1,0 +1,5 @@
+# Security update required by RUSTSEC-2026-0285; all older compatible
+# rustls releases remain vulnerable.
+[[allow.exact]]
+crate = "rustls"
+version = "0.23.45"
