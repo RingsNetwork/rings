@@ -95,6 +95,8 @@ enum ScenarioTopology {
 /// inside the explicit per-node initial and retry windows.
 #[test]
 fn test_finger_convergence_schedule_has_per_node_bounds_and_boot_entropy() {
+    let mut first_boot_deadlines = BTreeSet::new();
+    let mut entropy_changed_deadline = 0usize;
     for identity in 0..200u32 {
         let local = crate::dht::Did::from(identity);
         let first_boot = uuid::Uuid::from_u128(u128::from(identity).saturating_add(1));
@@ -109,7 +111,19 @@ fn test_finger_convergence_schedule_has_per_node_bounds_and_boot_entropy() {
             (FINGER_MAX_RETRY_FLOOR_MS..=FINGER_MAX_RETRY_FLOOR_MS.saturating_mul(2))
                 .contains(&retry)
         );
+        first_boot_deadlines.insert(initial);
+        entropy_changed_deadline =
+            entropy_changed_deadline.saturating_add(usize::from(initial != another_initial));
     }
+    assert!(
+        first_boot_deadlines.len() >= 190,
+        "boot fixture clustered 200 nodes into only {} deadlines",
+        first_boot_deadlines.len()
+    );
+    assert!(
+        entropy_changed_deadline >= 190,
+        "boot entropy changed only {entropy_changed_deadline} of 200 deadlines"
+    );
 }
 
 /// Production-path budget witness for one lookup that discovers a missing
