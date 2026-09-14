@@ -264,13 +264,21 @@ impl PeerRing {
         event: TopologyEvent,
         observe_snapshot: impl FnOnce(&TopologyState),
     ) -> Result<TopologyStep> {
+        self.transition_topology_with_factory(|| event, observe_snapshot)
+    }
+
+    fn transition_topology_with_factory(
+        &self,
+        event: impl FnOnce() -> TopologyEvent,
+        observe_snapshot: impl FnOnce(&TopologyState),
+    ) -> Result<TopologyStep> {
         let _transition = self
             .topology_transition
             .lock()
             .map_err(|_| Error::LockPoisoned)?;
         let current = self.topology_state_unlocked()?;
         observe_snapshot(&current);
-        let next = topology::step(&current, event, self.successor_seq.capacity());
+        let next = topology::step(&current, event(), self.successor_seq.capacity());
         self.interpret_topology_state_unlocked(&next.state)?;
         Ok(next)
     }
@@ -357,13 +365,12 @@ impl PeerRing {
         request: FingerFixRequest,
         successor: Did,
     ) -> Result<FingerResultDisposition> {
-        let now_ms = self.finger_now_ms();
         let mut disposition = FingerResultDisposition::Stale;
-        self.transition_topology_with_observer(
-            TopologyEvent::ApplyFinger {
+        self.transition_topology_with_factory(
+            || TopologyEvent::ApplyFinger {
                 request,
                 successor,
-                now_ms,
+                now_ms: self.finger_now_ms(),
             },
             |state| disposition = state.finger_result_disposition(request, successor),
         )?;
@@ -371,17 +378,24 @@ impl PeerRing {
     }
 
     pub(crate) fn cancel_finger_lookup(&self, request: FingerFixRequest) -> Result<()> {
-        let now_ms = self.finger_now_ms();
-        self.transition_topology(TopologyEvent::CancelFinger { request, now_ms })
-            .map(|_| ())
+        self.transition_topology_with_factory(
+            || TopologyEvent::CancelFinger {
+                request,
+                now_ms: self.finger_now_ms(),
+            },
+            |_| {},
+        )
+        .map(|_| ())
     }
 
     pub(crate) fn advance_finger_convergence(&self) -> Result<PeerRingAction> {
-        let now_ms = self.finger_now_ms();
-        let next = self.transition_topology(TopologyEvent::AdvanceFingerConvergence {
-            now_ms,
-            request_id: new_uuid(),
-        })?;
+        let next = self.transition_topology_with_factory(
+            || TopologyEvent::AdvanceFingerConvergence {
+                now_ms: self.finger_now_ms(),
+                request_id: new_uuid(),
+            },
+            |_| {},
+        )?;
         Ok(self.topology_leaf_actions(next.actions))
     }
 
@@ -390,12 +404,14 @@ impl PeerRing {
         peer: Did,
         fixed_fingers: Vec<topology::ConditionalFingerUpdate>,
     ) -> Result<PeerRingAction> {
-        let now_ms = self.finger_now_ms();
-        let next = self.transition_topology(TopologyEvent::Admit {
-            peer,
-            fixed_fingers,
-            now_ms,
-        })?;
+        let next = self.transition_topology_with_factory(
+            move || TopologyEvent::Admit {
+                peer,
+                fixed_fingers,
+                now_ms: self.finger_now_ms(),
+            },
+            |_| {},
+        )?;
         Ok(self.topology_multi_actions(next.actions))
     }
 }
