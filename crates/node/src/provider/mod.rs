@@ -57,6 +57,7 @@ pub struct Provider {
     #[cfg(all(feature = "browser", target_family = "wasm"))]
     onion_directory_endpoint: Arc<Mutex<Option<RemoteRpcEndpoint>>>,
     #[cfg(all(feature = "browser", target_family = "wasm"))]
+    /// Browser-only gate that serializes long-running `listen` tasks for this provider.
     listener_gate: Arc<futures::lock::Mutex<()>>,
 }
 

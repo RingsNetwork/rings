@@ -170,39 +170,45 @@ pub struct NotifyPredecessorReport {
     pub did: Did,
 }
 
-/// The reason of query successor's TopoInfo
+/// Reason a peer requested another node's topology view.
 #[derive(Debug, Deserialize, Serialize, Copy, Clone)]
 pub enum QueryFor {
-    /// For sync successor list from successor
+    /// Synchronize the current successor list from an already-known successor.
     SyncSuccessor,
-    /// For stabilization
+    /// Validate and apply a periodic stabilization report.
     Stabilization,
 }
 
-/// MessageType for handle [crate::dht::PeerRingRemoteAction::QueryForSuccessorList]
+/// Request one topology snapshot from a specific node.
+///
+/// Reports are accepted only when `request_id` matches an in-flight DHT request
+/// for the peer that produced the report.
 #[derive(Debug, Deserialize, Serialize, Copy, Clone)]
 pub struct QueryForTopoInfoSend {
-    /// The did for query target
+    /// Peer whose topology state is being queried.
     pub did: Did,
-    /// The reason of query successor's TopoInfo
+    /// Handler path that will consume the response.
     pub then: QueryFor,
-    /// Correlation identity echoed by the report.
+    /// One-shot correlation identity echoed by the report.
     pub request_id: uuid::Uuid,
 }
 
-/// MessageType for handle [crate::dht::PeerRingRemoteAction::QueryForSuccessorList]
+/// Topology snapshot returned for [`QueryForTopoInfoSend`].
+///
+/// The sender copies the request id from the query. The receiver spends that id
+/// before opening any advertised connection or mutating its local ring state.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct QueryForTopoInfoReport {
-    /// The did for query target
+    /// Reported successor and predecessor view.
     pub info: TopoInfo,
-    /// The reason of query successor's TopoInfo
+    /// Handler path copied from the query.
     pub then: QueryFor,
-    /// Correlation identity copied from the query.
+    /// One-shot correlation identity copied from the query.
     pub request_id: uuid::Uuid,
 }
 
 impl QueryForTopoInfoSend {
-    /// Create new instance with QueryFor::SyncSuccessor
+    /// Create a successor-sync query with a fresh correlation id.
     pub fn new_for_sync(did: Did) -> Self {
         Self {
             did,
@@ -211,7 +217,10 @@ impl QueryForTopoInfoSend {
         }
     }
 
-    /// Create new instance with QueryFor::Stabilization
+    /// Create a stabilization query for an already-registered request id.
+    ///
+    /// The caller supplies `request_id` because the DHT must register the
+    /// stabilization before the query is sent.
     pub fn new_for_stab(did: Did, request_id: uuid::Uuid) -> Self {
         Self {
             did,
@@ -220,7 +229,7 @@ impl QueryForTopoInfoSend {
         }
     }
 
-    /// response a send with QueryForTopoInfoSend
+    /// Build the report that answers this query and preserves its correlation id.
     pub fn resp(&self, info: TopoInfo) -> QueryForTopoInfoReport {
         QueryForTopoInfoReport {
             info,
@@ -364,7 +373,7 @@ pub enum FindSuccessorReportHandler {
     Connect,
     /// - FixFingerTable: update one proved finger-table range.
     FixFingerTable {
-        /// Correlation token for the original range lookup.
+        /// Slot/range request that proves which finger lookup this report may satisfy.
         request: crate::dht::FingerFixRequest,
     },
     /// - CustomCallback: custom callback handle by `custom_message` method.

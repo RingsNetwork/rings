@@ -9,6 +9,7 @@ pub mod did;
 pub mod entry;
 /// Finger table for Rings
 pub mod finger;
+/// Periodic DHT topology, storage, and finger maintenance runner.
 mod stabilization;
 mod storage;
 pub mod successor;
@@ -25,13 +26,17 @@ pub use chord::RemoteAction as PeerRingRemoteAction;
 pub(crate) use chord::StorageKey;
 pub use chord::TopoInfo;
 pub use did::Did;
+/// Correlation token used by asynchronous finger lookup reports.
 pub use finger::FingerFixRequest;
 pub use finger::FingerTable;
 pub use finger::DEFAULT_FINGER_TABLE_SIZE;
+/// Test helper exposing the scheduler deadline for an in-flight finger lookup.
 #[cfg(all(test, not(target_family = "wasm")))]
 pub(crate) use stabilization::finger_awaiting_report_deadline_for_test;
+/// Test helper exposing deterministic first finger convergence deadlines.
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use stabilization::finger_schedule_deadline_for_test;
+/// Test helper exposing the deadline after stale browser-resume rephasing.
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use stabilization::finger_schedule_resumed_deadline_for_test;
 #[cfg(all(test, target_family = "wasm"))]

@@ -4,10 +4,13 @@ use super::*;
 fn test_equality_includes_convergence_and_cursor_state() {
     let did = Did::from(1u32);
     let baseline = FingerTable::new(did, 3);
+
+    // Equality now covers maintenance position, not only visible hints.
     let mut different_cursor = baseline.clone();
     different_cursor.fix_finger_index = 1;
     assert_ne!(baseline, different_cursor);
 
+    // Verified evidence is serialized protocol state and must affect equality.
     let mut progressed = baseline.clone();
     progressed.convergence.fill_verified_for_test(true);
     assert_ne!(baseline, progressed);

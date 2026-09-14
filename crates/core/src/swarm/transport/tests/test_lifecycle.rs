@@ -12,6 +12,7 @@ use crate::dht::StorageSyncDestination;
 use crate::dht::TopoInfo;
 
 #[cfg(feature = "dummy")]
+/// Build a transport whose peer is active, connected, and data-channel ready.
 async fn transport_with_routable_peer(
 ) -> Result<(Arc<SwarmTransport>, Did, PendingConnectionAttempt)> {
     let transport = Arc::new(transport_with_measure(Arc::new(
@@ -30,6 +31,7 @@ async fn transport_with_routable_peer(
 }
 
 #[cfg(feature = "dummy")]
+/// Prepare a live finger-fix request for tests that exercise transport admission.
 fn finger_request(transport: &SwarmTransport, slot: usize) -> Result<FingerFixRequest> {
     transport
         .dht
@@ -39,8 +41,11 @@ fn finger_request(transport: &SwarmTransport, slot: usize) -> Result<FingerFixRe
 }
 
 #[cfg(feature = "dummy")]
+/// Join handle with a timeout-backed result channel for lock-contention tests.
 struct BoundedThread<T> {
+    /// Receives the worker result without blocking indefinitely on thread join.
     completion: std::sync::mpsc::Receiver<T>,
+    /// Worker that is joined only after the bounded result is received.
     thread: std::thread::JoinHandle<()>,
 }
 
@@ -68,8 +73,11 @@ impl<T: Send + 'static> BoundedThread<T> {
 }
 
 #[cfg(feature = "dummy")]
+/// Test handle for a deliberately held lifecycle critical section.
 struct LifecycleGateController {
+    /// Fires after the observed operation enters the lifecycle gate.
     entered: std::sync::mpsc::Receiver<()>,
+    /// Releases the held operation so a contending retirement can proceed.
     release: std::sync::mpsc::SyncSender<()>,
 }
 
@@ -93,6 +101,7 @@ impl LifecycleGateController {
 }
 
 #[cfg(feature = "dummy")]
+/// Create an observer that proves an operation holds the lifecycle gate until released.
 fn lifecycle_test_gate() -> (impl FnOnce() + Send + 'static, LifecycleGateController) {
     let (entered_tx, entered) = std::sync::mpsc::sync_channel(0);
     let (release, release_rx) = std::sync::mpsc::sync_channel(0);
@@ -108,8 +117,11 @@ fn lifecycle_test_gate() -> (impl FnOnce() + Send + 'static, LifecycleGateContro
 }
 
 #[cfg(feature = "dummy")]
+/// Retirement worker that must block behind another lifecycle operation.
 struct BlockedRetirement {
+    /// Notifies the test when retirement is waiting on the lifecycle gate.
     waiter_registered: std::sync::mpsc::Receiver<()>,
+    /// Worker running the retirement operation under test.
     worker: BoundedThread<Result<Option<()>>>,
 }
 
@@ -927,6 +939,7 @@ async fn test_routable_join_serializes_with_generation_retirement() -> Result<()
 async fn test_topology_report_serializes_with_generation_retirement() -> Result<()> {
     let (transport, peer, attempt) = transport_with_routable_peer().await?;
     transport.dht.join(peer)?;
+    // Seed the same stabilization request id that the report below will spend.
     let request_id = uuid::Uuid::from_u128(1);
     let _ = transport.dht.begin_stabilization(request_id)?;
     assert!(transport.dht.claim_stabilization_report(peer, request_id)?);

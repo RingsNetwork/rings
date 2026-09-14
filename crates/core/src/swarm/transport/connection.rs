@@ -26,10 +26,14 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::utils::sleep;
 
+/// Maximum wait for the data channel to open after the peer connection is usable.
 const DATA_CHANNEL_OPEN_TIMEOUT: Duration = Duration::from_secs(8);
+/// Poll cadence while waiting for the combined WebRTC/data-channel readiness snapshot.
 const TRANSPORT_READINESS_POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// Maximum wait for a close operation before lifecycle cleanup continues.
 pub(super) const DATA_CHANNEL_CLOSE_TIMEOUT: Duration = TRANSPORT_TIMEOUT_PROFILE.close;
 
+/// Await a transport close future without letting a slow backend block lifecycle cleanup forever.
 pub(super) async fn await_bounded_connection_close(
     close: impl Future<Output = Result<()>>,
 ) -> Result<bool> {
@@ -43,7 +47,9 @@ pub(super) async fn await_bounded_connection_close(
 }
 
 enum DhtPeerRemoval {
+    /// Remove the peer without selecting a replacement successor.
     Ordinary,
+    /// Remove the peer as unreachable and allow the DHT to promote live replacements.
     Unavailable,
 }
 
@@ -68,9 +74,13 @@ pub(super) enum UnreferencedRetirement {
 /// [`Self::with_current_connection`].
 #[derive(Clone)]
 pub(crate) struct AdmittedConnection {
+    /// Generation token that must still own the active slot before sends proceed.
     attempt: PendingConnectionAttempt,
+    /// Physical transport connection associated with `attempt`.
     connection: SwarmConnection,
+    /// Shared gate preventing send admission from crossing retirement.
     lifecycle_boundary: ConnectionLifecycleBoundary,
+    /// Registry used to revalidate that `attempt` is still sendable.
     lifecycles: SharedConnectionLifecycles,
 }
 
@@ -146,6 +156,7 @@ impl AdmittedConnection {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct PeerRemovalOutcome {
+    /// First live successor replacement selected while the peer was removed.
     fallback: Option<Did>,
 }
 
@@ -336,10 +347,12 @@ impl SwarmTransport {
         self.notify_admitted_predecessor_with_observer(peer, observe_admission)
     }
 
-    /// Apply one reported topology using only peers that are still routable.
+    /// Apply one correlated topology report using only peers that are still routable.
     ///
     /// Filtering and the DHT transition share the connection lifecycle
     /// boundary, so retirement cannot invalidate the evidence between them.
+    /// `reporter` and `request_id` must match the stabilization slot already
+    /// claimed by the message handler.
     pub(crate) fn stabilize_routable_topology(
         &self,
         reporter: Did,
@@ -349,6 +362,7 @@ impl SwarmTransport {
         self.stabilize_routable_topology_with_observer(reporter, request_id, reported, || {})
     }
 
+    /// Stabilize with a test observer placed after confirmation and before DHT mutation.
     fn stabilize_routable_topology_with_observer(
         &self,
         reporter: Did,
@@ -358,9 +372,13 @@ impl SwarmTransport {
     ) -> Result<Option<PeerRingAction>> {
         self.with_connection_lifecycle(|| {
             let active = self.active_connections()?;
+            // A report from a retired or terminal peer cannot validate any
+            // successor/predecessor evidence, even if its request id is correct.
             if !self.is_routable_active_candidate(reporter, &active) {
                 return Ok(None);
             }
+            // Keep only peers that are either local or still have a routable
+            // active transport generation at the instant of commit.
             let confirmed = reported.confirmed_by(|peer| {
                 peer == self.dht.did || self.is_routable_active_candidate(peer, &active)
             });

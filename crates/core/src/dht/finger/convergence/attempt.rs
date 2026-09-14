@@ -16,16 +16,23 @@ use super::proof::FingerRangeProof;
 use super::proof::FingerReportRejection;
 use crate::dht::Did;
 
+/// Lookup ownership while the query is waiting for its successor report.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub(super) struct PendingFingerLookup {
+    /// Correlation token emitted with the lookup.
     request: FingerFixRequest,
+    /// Evidence epoch observed when the lookup was issued.
     issued_epoch: u64,
+    /// Monotonic deadline after which the report is no longer current.
     expires_at_ms: u64,
 }
 
+/// Validated proof retained while transport admission decides usability.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub(super) struct AdmissionFingerProof {
+    /// Range proof already checked against Chord geometry and evidence epochs.
     proof: FingerRangeProof,
+    /// Monotonic deadline for assigning the candidate to a connection.
     expires_at_ms: u64,
 }
 
@@ -45,7 +52,10 @@ pub(super) enum FingerAttempt {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum FingerProofSource {
     /// A fresh report needs the Chord range lemma applied to it.
-    Report { issued_epoch: u64 },
+    Report {
+        /// Evidence epoch captured when the lookup left the state machine.
+        issued_epoch: u64,
+    },
     /// A previously validated report already owns its proved range.
     Admission(FingerRangeProof),
 }
@@ -53,16 +63,27 @@ pub(super) enum FingerProofSource {
 /// Scheduler-facing projection of the active attempt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum FingerAttemptStatus {
+    /// No request or admission lease exists.
     Idle,
-    AwaitingReport { remaining_ms: u64 },
-    AwaitingAdmission { remaining_ms: u64 },
+    /// A lookup report has not arrived yet.
+    AwaitingReport {
+        /// Saturating duration until the report deadline.
+        remaining_ms: u64,
+    },
+    /// A report was validated and is waiting for transport admission.
+    AwaitingAdmission {
+        /// Saturating duration until the admission lease deadline.
+        remaining_ms: u64,
+    },
 }
 
 impl FingerAttempt {
+    /// Return true only when no token owns convergence work.
     pub(super) const fn is_idle(self) -> bool {
         matches!(self, Self::Idle)
     }
 
+    /// Return the token that owns the active phase, if any.
     pub(super) const fn request(self) -> Option<FingerFixRequest> {
         match self {
             Self::Idle => None,
@@ -87,6 +108,7 @@ impl FingerAttempt {
         }
     }
 
+    /// Construct a newly emitted lookup phase.
     pub(super) const fn awaiting_report(
         request: FingerFixRequest,
         issued_epoch: u64,
@@ -99,6 +121,7 @@ impl FingerAttempt {
         })
     }
 
+    /// Drop or clamp restored ownership state after a table-width change.
     pub(super) fn normalize(&mut self, slot_count: usize) {
         let Some(request) = self.request() else {
             return;
@@ -116,6 +139,7 @@ impl FingerAttempt {
         }
     }
 
+    /// Return the active phase and its remaining lease from `now_ms`.
     pub(super) const fn status(self, now_ms: u64) -> FingerAttemptStatus {
         match self {
             Self::Idle => FingerAttemptStatus::Idle,
@@ -128,6 +152,7 @@ impl FingerAttempt {
         }
     }
 
+    /// Return whether the active phase has reached its monotonic deadline.
     pub(super) const fn is_expired(self, now_ms: u64) -> bool {
         match self {
             Self::Idle => false,
@@ -136,6 +161,12 @@ impl FingerAttempt {
         }
     }
 
+    /// Resolve the current token into either raw report data or retained proof.
+    ///
+    /// For `AwaitingReport`, the successor is intentionally not matched here:
+    /// this is the first place a reported successor can be evaluated. For
+    /// `AwaitingAdmission`, the successor is part of the retained proof and
+    /// must match exactly before the caller may consume the lease.
     pub(super) fn proof_source(
         self,
         request: FingerFixRequest,
@@ -167,6 +198,7 @@ impl FingerAttempt {
         }
     }
 
+    /// Replace lookup ownership with an admission lease for the same proof.
     pub(super) fn retain_for_admission(&mut self, proof: FingerRangeProof, expires_at_ms: u64) {
         *self = Self::AwaitingAdmission(AdmissionFingerProof {
             proof,
@@ -174,6 +206,7 @@ impl FingerAttempt {
         });
     }
 
+    /// Return true when a duplicate admission path is already holding `proof`.
     pub(super) fn already_retains(self, proof: FingerRangeProof) -> bool {
         matches!(
             self,
@@ -181,10 +214,12 @@ impl FingerAttempt {
         )
     }
 
+    /// Release any active ownership phase.
     pub(super) fn clear(&mut self) {
         *self = Self::Idle;
     }
 
+    /// Release ownership only if `request` matches the active token.
     pub(super) fn clear_if_owned(&mut self, request: FingerFixRequest) -> bool {
         if self.request() == Some(request) {
             self.clear();
@@ -194,6 +229,7 @@ impl FingerAttempt {
         }
     }
 
+    /// Release ownership if its lower slot has been verified elsewhere.
     pub(super) fn clear_if_slot_in(&mut self, start: usize, end: usize) -> bool {
         if self
             .request()
@@ -206,6 +242,7 @@ impl FingerAttempt {
         }
     }
 
+    /// Project active ownership into simple fields for state-machine tests.
     #[cfg(test)]
     pub(super) const fn projection(
         self,

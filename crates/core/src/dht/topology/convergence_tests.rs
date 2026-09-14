@@ -1,17 +1,22 @@
+//! End-to-end convergence tests for the pure topology and finger operators.
+
 use num_bigint::BigUint;
 
 use super::*;
 use crate::dht::finger::FingerApplyOutcome;
 use crate::dht::finger::FingerReportRejection;
 
+/// Compact DID fixture for small integer rings.
 fn did(value: u32) -> Did {
     Did::from(value)
 }
 
+/// Deterministic UUID fixture used as a correlation token.
 fn request_id(value: u128) -> uuid::Uuid {
     uuid::Uuid::from_u128(value)
 }
 
+/// Build a finger-convergence tick whose request ID is derived from `now_ms`.
 fn advance(now_ms: u64) -> TopologyEvent {
     TopologyEvent::AdvanceFingerConvergence {
         now_ms,
@@ -19,6 +24,7 @@ fn advance(now_ms: u64) -> TopologyEvent {
     }
 }
 
+/// Build a topology state with fresh finger-convergence metadata.
 fn state(
     local: Did,
     successors: Vec<Did>,
@@ -29,6 +35,7 @@ fn state(
     TopologyState::new(local, successors, predecessor, fingers, fix_finger_index)
 }
 
+/// Extract the single finger lookup request emitted by a topology step.
 fn emitted_finger_request(output: &TopologyStep) -> FingerFixRequest {
     match output.actions.as_slice() {
         [TopologyAction::FindSuccessorForFix { request, .. }] => *request,
@@ -36,6 +43,7 @@ fn emitted_finger_request(output: &TopologyStep) -> FingerFixRequest {
     }
 }
 
+/// Drive stabilization plus finger lookups against an oracle membership set.
 fn converge_with_oracle(mut current: TopologyState, all: &[Did]) -> (TopologyState, usize) {
     let mut lookups = 0usize;
     // A sparse bootstrap seed may first require up to one stabilization head
@@ -43,6 +51,8 @@ fn converge_with_oracle(mut current: TopologyState, all: &[Did]) -> (TopologySta
     // finger range lookups then require at most one further table width.
     for round in 0..=RING_BITS.saturating_mul(2) {
         if let Some(reporter) = successor_head(&current) {
+            // Stabilization uses a fresh token per round so stale reports cannot
+            // accidentally prove the local successor range.
             let stabilize_request_id =
                 request_id(u128::try_from(round).unwrap_or(u128::MAX).saturating_add(1));
             current = step(
@@ -77,6 +87,8 @@ fn converge_with_oracle(mut current: TopologyState, all: &[Did]) -> (TopologySta
         if !current.finger_convergence_pending() {
             return (current, lookups);
         }
+        // Advance time by the minimum lookup interval to avoid testing the rate
+        // limiter instead of topology convergence.
         let now_ms = u64::try_from(round)
             .unwrap_or(u64::MAX)
             .saturating_add(1)
@@ -118,6 +130,7 @@ fn converge_with_oracle(mut current: TopologyState, all: &[Did]) -> (TopologySta
     (current, lookups)
 }
 
+/// Count contiguous runs in a sparse finger table.
 fn distinct_ranges(fingers: &[Option<Did>]) -> usize {
     fingers
         .iter()
@@ -134,6 +147,8 @@ fn distinct_ranges(fingers: &[Option<Did>]) -> usize {
 #[test]
 fn test_five_node_bootstrap_uses_one_stabilization_proof_and_one_routed_lookup() {
     let local = Did::from(BigUint::from(0u8));
+    // Place the bootstrap seed just below 2^159 and the rest just above it, so
+    // stabilization proves the lower half and one routed lookup proves the upper half.
     let lower = (BigUint::from(1u8) << 159) - BigUint::from(1u8);
     let upper = BigUint::from(1u8) << 159;
     let seed = Did::from(lower);
@@ -162,6 +177,8 @@ fn test_five_node_bootstrap_uses_one_stabilization_proof_and_one_routed_lookup()
 #[test]
 fn test_join_after_isolation_revalidates_every_previously_unknown_range() {
     let local = Did::from(BigUint::from(0u8));
+    // `lower` is the only initial membership witness; `far` is invisible until
+    // convergence revalidates the sparse ranges after joining.
     let lower = (BigUint::from(1u8) << 159) - BigUint::from(1u8);
     let upper = BigUint::from(1u8) << 159;
     let seed = Did::from(lower);
@@ -392,12 +409,14 @@ fn test_insertion_and_removal_invalidate_only_changed_finger_slots() {
     );
 }
 
+/// Oracle finger table truncated to the test table width.
 fn expected_fingers(all: &[Did], local: Did, slot_count: usize) -> Vec<Option<Did>> {
     let mut expected = finger_table(all, local);
     expected.truncate(slot_count);
     expected
 }
 
+/// Fully converged topology state predicted directly from the membership oracle.
 fn oracle_state(all: &[Did], local: Did, slot_count: usize) -> TopologyState {
     state(
         local,
@@ -411,6 +430,8 @@ fn oracle_state(all: &[Did], local: Did, slot_count: usize) -> TopologyState {
 #[test]
 fn test_sparse_and_dense_mutation_matrix_converges_to_finger_table_oracle() {
     let local = did(0);
+    // Run the same insert/remove matrix once on broad sparse ranges and once on
+    // one-node-per-slot dense ranges.
     let sparse = vec![local, did(3), did(63), did(200)];
     let mut dense = vec![local];
     dense.extend((0..8).map(|bit| Did::from(BigUint::from(1u8) << bit)));
@@ -463,6 +484,7 @@ fn test_sparse_and_dense_mutation_matrix_converges_to_finger_table_oracle() {
 
 #[test]
 fn test_wrapped_ring_mutations_converge_to_the_finger_table_oracle() {
+    // Start near the end of Z/2^160 so the local successor interval wraps.
     let ring_size = BigUint::from(1u8) << RING_BITS;
     let local = Did::from(&ring_size - BigUint::from(16u8));
     let near = did(1);

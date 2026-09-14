@@ -1,16 +1,23 @@
+//! Correlation state for successor-list synchronization effects.
+
 use std::collections::BTreeMap;
 
 use super::Did;
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 enum SuccessorSyncPhase {
+    /// Query was sent and the first matching report may claim it.
     Requested,
+    /// A report claimed the token and may spend its bounded connection budget.
     Processing,
 }
 
+/// Exact successor-sync request tracked for one reporter.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 struct SuccessorSyncRequest {
+    /// Fresh correlation token that the authenticated report must echo.
     request_id: uuid::Uuid,
+    /// Whether the report has been reserved by the effect handler.
     phase: SuccessorSyncPhase,
 }
 
@@ -21,9 +28,13 @@ struct SuccessorSyncRequest {
 /// per-report effect bound.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub(crate) struct SuccessorSyncConnectionPlan {
+    /// Successor that produced the claimed successor-list report.
     reporter: Did,
+    /// Correlation token echoed by that report.
     request_id: uuid::Uuid,
+    /// Bounded, deduplicated peers reported by the successor.
     candidates: Vec<Did>,
+    /// Cursor for the next candidate whose connection effect may run.
     next_candidate: usize,
 }
 
@@ -39,6 +50,7 @@ pub(crate) enum SuccessorSyncConnectionStep {
 }
 
 impl SuccessorSyncConnectionPlan {
+    /// Create a bounded candidate cursor for one claimed successor-sync report.
     pub(crate) fn new(
         reporter: Did,
         request_id: uuid::Uuid,
@@ -63,6 +75,7 @@ impl SuccessorSyncConnectionPlan {
         }
     }
 
+    /// Return the next candidate only while the report claim is still current.
     pub(crate) fn advance(
         &mut self,
         state: &SuccessorSyncState,
@@ -86,10 +99,12 @@ impl SuccessorSyncConnectionPlan {
 /// atomically claim the exact token before any connection effect is allowed.
 #[derive(Clone, Debug, Default, Hash, PartialEq, Eq)]
 pub(crate) struct SuccessorSyncState {
+    /// Pending request by reporter DID.
     pending: BTreeMap<Did, SuccessorSyncRequest>,
 }
 
 impl SuccessorSyncState {
+    /// Drop requests for peers that are no longer current successors.
     fn retain_current(&mut self, current_successors: &[Did]) {
         self.pending
             .retain(|reporter, _| current_successors.contains(reporter));
@@ -136,6 +151,7 @@ impl SuccessorSyncState {
         true
     }
 
+    /// Whether this exact successor report still owns its connection budget.
     fn is_processing(
         &self,
         current_successors: &[Did],
@@ -167,6 +183,7 @@ impl SuccessorSyncState {
     }
 
     #[cfg(test)]
+    /// Number of retained successor-sync requests in tests.
     pub(crate) fn pending_count(&self) -> usize {
         self.pending.len()
     }
@@ -174,6 +191,8 @@ impl SuccessorSyncState {
 
 #[cfg(test)]
 mod tests {
+    //! Unit tests for successor-sync request claims and bounded effect cursors.
+
     use super::SuccessorSyncConnectionPlan;
     use super::SuccessorSyncConnectionStep;
     use super::SuccessorSyncState;

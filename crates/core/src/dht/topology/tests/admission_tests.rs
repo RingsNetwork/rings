@@ -1,3 +1,5 @@
+//! Regression tests for finger proofs that wait on transport admission.
+
 use super::*;
 use crate::dht::finger::FingerConvergencePhase;
 use crate::dht::finger::FingerReportRejection;
@@ -34,6 +36,8 @@ fn test_timely_finger_proof_survives_a_long_handshake_until_atomic_admission() {
         FingerConvergencePhase::AwaitingAdmission { .. }
     ));
 
+    // Once deferred, the proof is owned by the admission lease rather than the
+    // original lookup deadline.
     let after_original_lookup_deadline = step(
         &deferred.state,
         advance(180_999),
@@ -80,6 +84,8 @@ fn test_conflicting_duplicate_cannot_evict_a_retained_finger_proof() {
         DEFAULT_SUCCESSOR_CAPACITY,
     );
 
+    // A second report with the same token but a different candidate is stale
+    // and must not evict the first candidate's retained proof.
     let conflicting = step(
         &deferred.state,
         TopologyEvent::DeferFinger {
@@ -124,6 +130,8 @@ fn test_unroutable_conflicting_duplicate_cannot_retire_admission_owner() {
         DEFAULT_SUCCESSOR_CAPACITY,
     );
 
+    // Retiring the wrong candidate is treated as stale; only the owner of the
+    // deferred admission lease can consume it.
     let (conflicting, outcome) =
         retire_finger_candidate(&deferred.state, request, conflicting_candidate, 1_002);
     assert_eq!(
@@ -188,6 +196,8 @@ fn test_repeated_deferred_handshake_failures_accumulate_backoff() {
         0,
     );
 
+    // Two admission failures for the same slot should grow the same retry
+    // counter used by direct lookup send/report failures.
     let first_request = issue_request(&mut current, 3, 1_000);
     current = step(
         &current,

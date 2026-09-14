@@ -541,8 +541,12 @@ fn discovery_model(all: Vec<Did>, rounds: u8) -> ActorModel<DiscoveryNode, Cfg, 
         )
 }
 
+// Stage 5 is split out because it executes the production topology transition
+// directly and carries its own finite environment alphabet.
 mod finger_retry_model;
 mod storage_model;
+// Successor-list sync is a smaller token/effect witness than the finger retry
+// model, so keeping it separate makes its single-use claim law visible.
 mod successor_sync_model;
 
 #[cfg(test)]

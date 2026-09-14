@@ -33,18 +33,26 @@ use crate::dht::topology::DEFAULT_SUCCESSOR_CAPACITY;
 use crate::dht::Did;
 use crate::dht::FingerFixRequest;
 
+// Deep enough to cover timeout, deferred admission, retry, topology churn, and
+// restart interleavings without exploding the finite state space.
 const MODEL_DEPTH: usize = 9;
+// A stabilization proof may admit the configured successor list plus one
+// predecessor candidate. More effects would be unbounded fan-out.
 const MAX_STABILIZATION_CONNECTION_EFFECTS: u8 =
     (DEFAULT_SUCCESSOR_CAPACITY as u8).saturating_add(1);
 
+/// Logical model obligations touched by a topology event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FormalModelScope {
     DhtTopology,
     FingerRetry,
 }
 
+// Events that mutate only the Chord topology model.
 const DHT_ONLY: &[FormalModelScope] = &[FormalModelScope::DhtTopology];
+// Events that mutate only the finger retry/convergence model.
 const FINGER_ONLY: &[FormalModelScope] = &[FormalModelScope::FingerRetry];
+// Events whose effects must preserve both topology and finger retry invariants.
 const DHT_AND_FINGER: &[FormalModelScope] =
     &[FormalModelScope::DhtTopology, FormalModelScope::FingerRetry];
 
@@ -73,16 +81,18 @@ fn formal_model_scopes(event: &TopologyEvent) -> &'static [FormalModelScope] {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct FingerRetryState {
-    topology: TopologyState,
-    now_ms: u64,
-    emissions: Vec<(uuid::Uuid, u64, u64)>,
-    delayed_reports: Vec<FingerFixRequest>,
-    next_request_id: u128,
-    next_topology_mutation: u8,
-    run_generation: u64,
+    topology: TopologyState, // The production state transition under test.
+    now_ms: u64,             // Model time in the same monotonic units as topology events.
+    emissions: Vec<(uuid::Uuid, u64, u64)>, // request_id, issued_at_ms, process generation.
+    delayed_reports: Vec<FingerFixRequest>, // Reports the environment may replay later.
+    next_request_id: u128,   // Effect-boundary UUID source, not topology state.
+    next_topology_mutation: u8, // Cursor through representative churn events.
+    run_generation: u64,     // Restarts reset the clock but not cross-run identity checks.
 }
 
 impl FingerRetryState {
+    /// Initial state contains one admitted successor so finger convergence is
+    /// runnable without modeling unrelated bootstrap liveness.
     fn initial() -> Self {
         let local = Did::from(0u32);
         let joined = step(
@@ -103,19 +113,25 @@ impl FingerRetryState {
         }
     }
 
+    // Request accessors read the public projection each time so the checker
+    // witnesses production-visible convergence state, not shadow model state.
     fn current_request(&self) -> Option<FingerFixRequest> {
         let projection = self.topology.finger_convergence_projection();
         projection.in_flight.or(projection.deferred)
     }
 
+    /// Request currently waiting for a report, if the production state exposes one.
     fn in_flight_request(&self) -> Option<FingerFixRequest> {
         self.topology.finger_convergence_projection().in_flight
     }
 
+    /// Request currently waiting for admission, if the production state exposes one.
     fn deferred_request(&self) -> Option<FingerFixRequest> {
         self.topology.finger_convergence_projection().deferred
     }
 
+    /// Earliest scheduler-visible instant across report expiry, retained proof
+    /// lease expiry, retry backoff, and the per-process emission interval.
     fn next_deadline_ms(&self) -> u64 {
         let projection = self.topology.finger_convergence_projection();
         if let Some(expires_at_ms) = projection.expires_at_ms {
@@ -135,6 +151,7 @@ impl FingerRetryState {
             .max(self.now_ms)
     }
 
+    /// Advance the production transition at a chosen model timestamp.
     fn advance_at(&self, now_ms: u64) -> Self {
         let request_id = uuid::Uuid::from_u128(self.next_request_id);
         let output = step(
@@ -145,6 +162,8 @@ impl FingerRetryState {
         let mut next = self.clone();
         next.topology = output.state;
         next.now_ms = now_ms;
+        // Only an emitted lookup consumes a fresh UUID. A due transition that
+        // merely waits or cleans up must not burn request identity space.
         let mut emitted = false;
         for action in output.actions {
             if let TopologyAction::FindSuccessorForFix { request, .. } = action {
@@ -159,10 +178,13 @@ impl FingerRetryState {
         next
     }
 
+    /// Deliver a current report at the current model timestamp.
     fn apply_current(&self, successor: Did) -> Self {
         self.apply_current_at(successor, self.now_ms)
     }
 
+    /// Delivers a report for the exact in-flight request and records that same
+    /// request as replayable delayed traffic.
     fn apply_current_at(&self, successor: Did, now_ms: u64) -> Self {
         let Some(request) = self.in_flight_request() else {
             return self.clone();
@@ -183,6 +205,7 @@ impl FingerRetryState {
         next
     }
 
+    /// Move the current valid report into the admission-lease phase.
     fn defer_current(&self) -> Self {
         let Some(request) = self.in_flight_request() else {
             return self.clone();
@@ -203,6 +226,7 @@ impl FingerRetryState {
         next
     }
 
+    /// Complete the pending admission and apply the retained proof.
     fn admit_deferred(&self) -> Self {
         let Some(request) = self.deferred_request() else {
             return self.clone();
@@ -222,6 +246,7 @@ impl FingerRetryState {
         next
     }
 
+    /// Try to advance immediately before the next deadline to prove no early emission occurs.
     fn advance_before_deadline(&self) -> Self {
         let deadline = self.next_deadline_ms();
         if deadline > self.now_ms {
@@ -231,6 +256,7 @@ impl FingerRetryState {
         }
     }
 
+    /// Deliver a report that proves the requested lower-bound slot.
     fn apply_progress(&self) -> Self {
         let Some(request) = self.in_flight_request() else {
             return self.clone();
@@ -238,6 +264,8 @@ impl FingerRetryState {
         self.apply_current(self.topology.local + Did::power_of_two(request.slot_index()))
     }
 
+    /// Valid correlation with an invalid range: it should fail like network
+    /// progress failure without proving the requested finger slot.
     fn apply_invalid_report(&self) -> Self {
         let Some(request) = self.in_flight_request() else {
             return self.clone();
@@ -248,6 +276,7 @@ impl FingerRetryState {
         self.apply_current(self.topology.local + Did::power_of_two(previous_slot))
     }
 
+    /// A report delivered exactly at expiry is stale for mutation purposes.
     fn apply_late_report(&self) -> Self {
         let projection = self.topology.finger_convergence_projection();
         let (Some(request), Some(expires_at_ms)) = (projection.in_flight, projection.expires_at_ms)
@@ -260,6 +289,7 @@ impl FingerRetryState {
         )
     }
 
+    /// Cancel the active request and make its old token replayable.
     fn cancel_current(&self) -> Self {
         let Some(request) = self.current_request() else {
             return self.clone();
@@ -278,6 +308,7 @@ impl FingerRetryState {
         next
     }
 
+    /// Replay the most recent delayed report as duplicate or stale traffic.
     fn deliver_duplicate(&self) -> Self {
         let Some(request) = self.delayed_reports.last().copied() else {
             return self.clone();
@@ -296,6 +327,8 @@ impl FingerRetryState {
         next
     }
 
+    /// Cycles through topology events that can invalidate finger evidence while
+    /// staying independent from retry failure accounting.
     fn change_topology(&self) -> Self {
         let event = match self.next_topology_mutation {
             0 => TopologyEvent::Join {
@@ -337,6 +370,8 @@ impl FingerRetryState {
         next
     }
 
+    /// Process restart keeps serialized topology hints but drops in-flight
+    /// scheduler state, forcing any delayed report to prove its old UUID.
     fn restart(&self) -> Self {
         let mut next = self.clone();
         next.topology = TopologyState::new(
@@ -354,6 +389,7 @@ impl FingerRetryState {
         next
     }
 
+    /// Interpret one adversarial retry action against the model state.
     fn transition(&self, action: FingerRetryAction) -> Self {
         match action {
             FingerRetryAction::AdvanceBeforeDeadline => self.advance_before_deadline(),
@@ -371,6 +407,7 @@ impl FingerRetryState {
         }
     }
 
+    /// Check that one process generation never emits two lookups inside the minimum interval.
     fn preserves_emission_interval(&self) -> bool {
         self.emissions.windows(2).all(|window| {
             window.first().zip(window.get(1)).is_some_and(
@@ -382,6 +419,7 @@ impl FingerRetryState {
         })
     }
 
+    /// Check that emitted lookup UUIDs are never reused.
     fn uses_unique_request_ids(&self) -> bool {
         let identities = self
             .emissions
@@ -392,6 +430,7 @@ impl FingerRetryState {
     }
 }
 
+/// Environment actions for the adversarial retry scheduler.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FingerRetryAction {
     AdvanceBeforeDeadline,
@@ -408,6 +447,7 @@ enum FingerRetryAction {
     Restart,
 }
 
+// Exhaustive action alphabet for the finite retry search.
 const ACTIONS: [FingerRetryAction; 12] = [
     FingerRetryAction::AdvanceBeforeDeadline,
     FingerRetryAction::AdvanceToDeadline,
@@ -423,6 +463,7 @@ const ACTIONS: [FingerRetryAction; 12] = [
     FingerRetryAction::Restart,
 ];
 
+/// Environment actions around claimed stabilization reports and their effects.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StabilizationAction {
     Begin,
@@ -436,6 +477,7 @@ enum StabilizationAction {
     MoveSuccessorHead,
 }
 
+// Exhaustive action alphabet for the finite stabilization-effect search.
 const STABILIZATION_ACTIONS: [StabilizationAction; 9] = [
     StabilizationAction::Begin,
     StabilizationAction::ClaimCurrentProof,
@@ -450,17 +492,18 @@ const STABILIZATION_ACTIONS: [StabilizationAction; 9] = [
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct StabilizationModelState {
-    topology: TopologyState,
-    current: Option<(Did, uuid::Uuid, bool)>,
-    current_plan: Option<StabilizationConnectionPlan>,
-    superseded: Vec<(Did, uuid::Uuid)>,
-    superseded_plans: Vec<StabilizationConnectionPlan>,
-    reserved_connection_effects: Vec<uuid::Uuid>,
-    connection_effects: Vec<(uuid::Uuid, u8)>,
-    next_request_id: u128,
+    topology: TopologyState, // Production topology plus stabilization token state.
+    current: Option<(Did, uuid::Uuid, bool)>, // reporter, request_id, claimed.
+    current_plan: Option<StabilizationConnectionPlan>, // Candidate iterator after claim.
+    superseded: Vec<(Did, uuid::Uuid)>, // Old proofs the environment may replay.
+    superseded_plans: Vec<StabilizationConnectionPlan>, // Old candidate iterators to poke.
+    reserved_connection_effects: Vec<uuid::Uuid>, // Permits issued before completion.
+    connection_effects: Vec<(uuid::Uuid, u8)>, // Executed effects per request id.
+    next_request_id: u128,   // Effect-boundary UUID source for topology queries.
 }
 
 impl StabilizationModelState {
+    /// Initial stabilization model with one successor and no owned report token.
     fn initial() -> Self {
         let local = Did::from(0u32);
         let joined = step(
@@ -482,6 +525,7 @@ impl StabilizationModelState {
         }
     }
 
+    /// Begin a correlated stabilization query and supersede any older proof.
     fn begin(&self) -> Self {
         let request_id = uuid::Uuid::from_u128(self.next_request_id);
         let output = step(
@@ -498,6 +542,8 @@ impl StabilizationModelState {
         });
         let mut next = self.clone();
         next.topology = output.state;
+        // A new query supersedes the older proof but keeps it replayable, so
+        // stale delivery is checked instead of assumed impossible.
         if let Some((reporter, request_id, _)) = self.current {
             next.superseded.push((reporter, request_id));
         }
@@ -510,6 +556,7 @@ impl StabilizationModelState {
         next
     }
 
+    /// Claim the current report token and create its bounded candidate plan.
     fn claim_current(&self) -> Self {
         let Some((reporter, request_id, false)) = self.current else {
             return self.clone();
@@ -535,16 +582,21 @@ impl StabilizationModelState {
         next
     }
 
+    /// Commit a claimed report when no reserved connection effect is still pending.
     fn complete(&self, request: Option<(Did, uuid::Uuid, bool)>) -> Self {
         let Some((reporter, request_id, true)) = request else {
             return self.clone();
         };
+        // Commit is blocked while a connection permit is reserved; otherwise a
+        // single report could both admit peers and prove ranges twice.
         if self.reserved_connection_effects.contains(&request_id) {
             return self.clone();
         }
         self.deliver((reporter, request_id))
     }
 
+    /// Split reservation from execution so churn between permit issue and
+    /// connection completion has a concrete interleaving.
     fn reserve_current_candidate(&self) -> Self {
         let mut next = self.clone();
         let Some((_, current_request_id, true)) = next.current else {
@@ -567,6 +619,7 @@ impl StabilizationModelState {
         next
     }
 
+    /// Execute one previously reserved candidate effect.
     fn execute_reserved_candidate(&self) -> Self {
         let mut next = self.clone();
         if let Some(request_id) = next.reserved_connection_effects.pop() {
@@ -575,6 +628,8 @@ impl StabilizationModelState {
         next
     }
 
+    /// The environment may still try an old plan after supersession; the
+    /// production plan must reject new side effects from it.
     fn attempt_superseded_candidate(&self) -> Self {
         let mut next = self.clone();
         let Some(plan) = next.superseded_plans.last_mut() else {
@@ -588,6 +643,7 @@ impl StabilizationModelState {
         next
     }
 
+    /// Count a candidate connection effect against the request id that reserved it.
     fn record_connection_effect(&mut self, request_id: uuid::Uuid) {
         match self
             .connection_effects
@@ -599,6 +655,7 @@ impl StabilizationModelState {
         }
     }
 
+    /// Cancel the current stabilization token and retain it only as stale replay input.
     fn cancel_current(&self) -> Self {
         let Some((reporter, request_id, _)) = self.current else {
             return self.clone();
@@ -619,6 +676,7 @@ impl StabilizationModelState {
         next
     }
 
+    /// Deliver a stabilization report for either current or superseded token state.
     fn deliver(&self, request: (Did, uuid::Uuid)) -> Self {
         let (reporter, request_id) = request;
         let output = step(
@@ -640,6 +698,7 @@ impl StabilizationModelState {
         next
     }
 
+    /// Interpret one adversarial stabilization action against the model state.
     fn transition(&self, action: StabilizationAction) -> Self {
         match action {
             StabilizationAction::Begin => self.begin(),
@@ -655,6 +714,8 @@ impl StabilizationModelState {
                 .copied()
                 .map_or_else(|| self.clone(), |request| self.deliver(request)),
             StabilizationAction::MoveSuccessorHead => {
+                // A closer successor invalidates the reporter binding even if
+                // the old proof arrives later.
                 let previous_head = successor_head(&self.topology);
                 let output = step(
                     &self.topology,

@@ -1,11 +1,16 @@
+//! Cross-module tests for maintenance scheduling behavior that depends on PeerRing.
+
 use super::*;
 
+/// Default test period with a visible topology/storage phase offset.
 const PERIOD: Duration = Duration::from_secs(15);
 
+/// Build a deterministic schedule for one test node.
 fn schedule(now_ms: u64, local: crate::dht::Did) -> MaintenanceSchedule {
     MaintenanceSchedule::new(now_ms, PERIOD, local, uuid::Uuid::from_u128(1))
 }
 
+/// Compact pending/inactive finger status fixture with no failures.
 const fn finger_status(pending: bool) -> FingerConvergenceStatus {
     FingerConvergenceStatus::new(pending, 0)
 }
@@ -30,6 +35,7 @@ fn test_long_maintenance_completion_does_not_rephase_a_reserved_finger_turn() {
         crate::dht::Did::from(11u32),
         uuid::Uuid::from_u128(1),
     );
+    // Force stabilization and finger convergence to be simultaneously due.
     schedule.next_stabilize_ms = 1_000;
     schedule.next_finger_ms = 1_000;
     schedule.finger_phase_last_poll = FingerConvergencePhase::Runnable;
@@ -87,6 +93,8 @@ fn test_capped_failure_jitter_keeps_every_boot_inside_the_retry_window() {
 #[test]
 fn test_finger_convergence_yields_twice_then_gets_a_reserved_turn() {
     let mut schedule = schedule(0, crate::dht::Did::from(0u32));
+    // Put the finger deadline on the same tick as stabilization, then on the
+    // storage-repair offset, to exercise the two-yield reservation cap.
     schedule.next_finger_ms = 15_000;
     schedule.finger_phase_last_poll = FingerConvergencePhase::Runnable;
     assert_eq!(
@@ -110,6 +118,8 @@ fn test_finger_convergence_yields_twice_then_gets_a_reserved_turn() {
 #[test]
 fn test_pending_handshake_stays_dormant_until_lease_expiry() {
     let mut schedule = schedule(0, crate::dht::Did::from(11u32));
+    // Admission leases use an absolute expiry from the lookup domain, not a
+    // fresh jittered deadline on every scheduler resume.
     let expires_at_ms = 180_000_u64;
 
     for resumed_at_ms in [0_u64, 60_000, 120_000] {

@@ -40,8 +40,11 @@ use super::finger::FINGER_LOOKUP_MIN_INTERVAL_MS;
 use super::Did;
 use super::FingerFixRequest;
 
+/// Finger convergence adapters for the pure topology state.
 mod finger;
+/// HMCC/Zave successor and predecessor stabilization transitions.
 mod stabilization;
+/// Correlation state for successor-list synchronization reports.
 mod successor_sync;
 use finger::advance as step_fix_finger;
 pub(crate) use finger::apply as apply_finger;
@@ -84,7 +87,9 @@ pub struct TopologyState {
     pub fingers: Vec<Option<Did>>,
     /// Next finger index maintained by the periodic finger fixer.
     pub fix_finger_index: usize,
+    /// Per-slot proof, lookup, retry, and admission state for finger convergence.
     finger_convergence: FingerConvergenceState,
+    /// Exact stabilization report currently allowed to refine this state.
     pending_stabilization: Option<StabilizationRequest>,
 }
 
@@ -92,14 +97,20 @@ pub struct TopologyState {
 /// current successor view.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(crate) struct StabilizationRequest {
+    /// Successor head that was queried.
     reporter: Did,
+    /// Fresh correlation token that the authenticated report must echo.
     request_id: uuid::Uuid,
+    /// Whether the report has been reserved by the effect handler.
     phase: StabilizationPhase,
 }
 
+/// Claim phase for a stabilization report token.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 enum StabilizationPhase {
+    /// Query was sent and the first matching report may claim it.
     Requested,
+    /// A report claimed the token and may spend its bounded connection budget.
     Processing,
 }
 
@@ -124,6 +135,10 @@ impl TopologyState {
         }
     }
 
+    /// Restore a state snapshot from the mutable peer-ring shell.
+    ///
+    /// The finger convergence state is normalized to the current table width so
+    /// a resized table cannot retain out-of-range proof or lookup metadata.
     pub(crate) fn restore(
         local: Did,
         successors: Vec<Did>,
@@ -145,10 +160,12 @@ impl TopologyState {
         }
     }
 
+    /// Pending stabilization token that must be written back to the peer-ring shell.
     pub(crate) const fn pending_stabilization(&self) -> Option<StabilizationRequest> {
         self.pending_stabilization
     }
 
+    /// Whether an authenticated report may claim this exact stabilization token.
     pub(crate) fn can_claim_stabilization_report(
         &self,
         reporter: Did,
@@ -162,6 +179,7 @@ impl TopologyState {
             })
     }
 
+    /// Whether a claimed report is still allowed to perform connection effects.
     pub(crate) fn is_processing_stabilization_report(
         &self,
         reporter: Did,
@@ -175,15 +193,18 @@ impl TopologyState {
             })
     }
 
+    /// Finger convergence metadata attached to this topology snapshot.
     pub(crate) fn finger_convergence_state(&self) -> &FingerConvergenceState {
         &self.finger_convergence
     }
 
     #[cfg(test)]
+    /// Whether any finger slot still lacks current proof in test projections.
     pub(crate) fn finger_convergence_pending(&self) -> bool {
         self.finger_convergence.is_pending()
     }
 
+    /// Scheduling status for finger convergence from this topology snapshot.
     pub(crate) fn finger_convergence_status(&self, now_ms: u64) -> FingerConvergenceStatus {
         match local_successor_range_end(self).map(|end| end.saturating_add(1)) {
             Some(first_routable_slot) => self
@@ -194,6 +215,7 @@ impl TopologyState {
     }
 
     #[cfg(test)]
+    /// Test-only projection of internal finger convergence state.
     pub(crate) fn finger_convergence_projection(
         &self,
     ) -> super::finger::FingerConvergenceProjection {
@@ -410,12 +432,15 @@ pub fn dist(a: Did, b: Did) -> BigUint {
     BigUint::from(b - a)
 }
 
+/// Append a candidate DID if this small successor/finger worklist does not contain it.
 fn push_unique(xs: &mut Vec<Did>, x: Did) {
     if !xs.contains(&x) {
         xs.push(x);
     }
 }
 
+/// Normalize successor candidates by removing `local`, sorting by clockwise
+/// distance, deduplicating, and applying the configured capacity.
 fn sorted_successors(mut candidates: Vec<Did>, local: Did, capacity: usize) -> Vec<Did> {
     candidates.retain(|&did| did != local);
     candidates.sort_by_key(|&did| dist(local, did));
@@ -461,6 +486,7 @@ pub fn update_successors(local: Did, current: &[Did], candidate: Did, capacity: 
     sorted_successors(candidates, local, capacity)
 }
 
+/// Refine sparse/no-wrap finger hints after learning one peer.
 fn finger_join(local: Did, current: &[Option<Did>], peer: Did) -> Vec<Option<Did>> {
     let bias = dist(local, peer);
     current
@@ -563,6 +589,7 @@ pub fn find_successor(state: &TopologyState, did: Did) -> FindSuccessorStep {
     FindSuccessorStep::Remote { next, did }
 }
 
+/// Pure transition for introducing a connected or discovered peer.
 fn step_join(state: &TopologyState, peer: Did, capacity: usize) -> TopologyStep {
     if peer == state.local {
         return TopologyStep {
@@ -587,6 +614,7 @@ fn step_join(state: &TopologyState, peer: Did, capacity: usize) -> TopologyStep 
     }
 }
 
+/// Pure transition for atomically admitting a transport-validated peer.
 fn step_admit(
     state: &TopologyState,
     peer: Did,
@@ -601,11 +629,14 @@ fn step_admit(
         };
     }
 
+    // Deferred finger proofs are replayed before `peer` is inserted, so they
+    // cannot overwrite a slot that changed while admission was in progress.
     let mut verified = state.clone();
     for update in fixed_fingers {
         verified = apply_finger_result(&verified, update.request, peer, now_ms).0;
     }
     let successors = update_successors(state.local, &state.successors, peer, capacity);
+    // Only a newly retained successor needs a follow-up successor-list query.
     let inserted = !state.successors.contains(&peer) && successors.contains(&peer);
     let fingers = finger_join(state.local, &verified.fingers, peer);
     let mut finger_convergence = verified.finger_convergence.clone();
@@ -630,12 +661,15 @@ fn step_admit(
     }
 }
 
+/// Pure transition for removing a peer from successor, predecessor, and finger state.
 fn step_remove(
     state: &TopologyState,
     peer: Did,
     successor: SuccessorRemoval,
     capacity: usize,
 ) -> TopologyStep {
+    // Head removals may replace the entire successor list with transport-
+    // validated evidence; non-head removals preserve the existing successor tail.
     let removed_head = state.successors.first().copied() == Some(peer);
     let mut next_successors = state
         .successors
@@ -674,8 +708,10 @@ fn step_remove(
     }
 }
 
+/// Pure transition for accepting one successor candidate from the effect layer.
 fn step_update_successor(state: &TopologyState, successor: Did, capacity: usize) -> TopologyStep {
     let next_successors = update_successors(state.local, &state.successors, successor, capacity);
+    // Query the candidate's successor list only if it survived capacity truncation.
     let inserted = !state.successors.contains(&successor) && next_successors.contains(&successor);
     let fingers = finger_join(state.local, &state.fingers, successor);
     let mut finger_convergence = state.finger_convergence.clone();
@@ -706,6 +742,7 @@ pub fn step(state: &TopologyState, event: TopologyEvent, capacity: usize) -> Top
     let previous_head = successor_head(state);
     let next_head = successor_head(&next.state);
     if previous_head != next_head {
+        // A stabilization proof is tied to the successor head that was queried.
         next.state.pending_stabilization = None;
     }
     if let Some(head) = next_head.filter(|head| previous_head != Some(*head)) {
@@ -786,7 +823,9 @@ fn step_event(state: &TopologyState, event: TopologyEvent, capacity: usize) -> T
     }
 }
 
+/// Convergence properties for topology and finger-table fixpoints.
 #[cfg(test)]
 mod convergence_tests;
+/// Unit tests for individual pure topology transitions.
 #[cfg(test)]
 mod tests;

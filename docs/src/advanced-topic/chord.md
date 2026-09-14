@@ -98,6 +98,13 @@ the complete causal submission trace instead of multiplying a fixed message-leg 
 per-message relay hop budget bounds each carrier, while the retry schedule bounds only the originating
 node's finger emissions.
 
+The model and integration witnesses intentionally separate propositions. The finite topology model
+checks correlation tokens, retry resource bounds, stale proof rejection, and single-use connection
+permits over an exhaustive action alphabet. The sync-storm fixtures run the production transport
+cascade and count effects that the finite model abstracts away. Together they document bounded
+resource behavior; they do not claim all-order convergence for every possible production network
+schedule.
+
 These are per-node bounds: aggregate healthy bootstrap work still scales with the number of nodes.
 The phase window smooths a synchronized start but is not an N-independent destination rate limit.
 The destination's bounded inbound mailbox limits retained concurrent work; its origin quota remains

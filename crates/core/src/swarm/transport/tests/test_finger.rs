@@ -1,7 +1,10 @@
+//! Transport-level tests for finger-fix reports that depend on connection lifecycle state.
+
 use super::*;
 use crate::dht::finger::FingerConvergencePhase;
 use crate::dht::FingerFixRequest;
 
+/// Prepare the exact request token that a production finger lookup would place in the DHT.
 fn finger_request(transport: &SwarmTransport, slot: usize) -> Result<FingerFixRequest> {
     transport
         .dht
@@ -36,9 +39,12 @@ async fn test_pending_finger_update_is_applied_when_attempt_is_admitted() -> Res
             .phase(),
         crate::dht::finger::FingerConvergencePhase::AwaitingAdmission { .. }
     ));
+    // Move past the retry cooldown while staying inside the shared admission timeout.
     tokio::time::advance(std::time::Duration::from_millis(11_000)).await;
     open_dummy_data_channel_before_ice_connected(&transport, peer).await?;
 
+    // Reuse the original attempt token so the synthetic data-channel callback
+    // can promote only the generation that queued the finger proof.
     let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback))
         .with_pending_connection_attempt(attempt);
     callback
@@ -64,6 +70,8 @@ async fn test_pending_handshake_cancellation_releases_its_finger_proof() -> Resu
         .prepare_connection_offer_with_attempt(peer, callback)
         .await?;
 
+    // The queued request transfers from AwaitingReport to AwaitingAdmission
+    // and should be cancelled when the pending handshake is cancelled.
     let request = finger_request(&transport, 0)?;
     assert_eq!(
         transport.record_finger_candidate(peer, request)?,
@@ -141,6 +149,8 @@ async fn test_finger_candidate_distinguishes_missing_and_unroutable_connections(
         RecordingMeasure::default(),
     ))?);
     let missing = SecretKey::random().address().into();
+    // The same request is reused after the caller opens a missing connection;
+    // this models the handler's second admission attempt after `connect_dht_peer`.
     let missing_request = finger_request(&transport, 0)?;
     assert_eq!(
         transport.record_finger_candidate(missing, missing_request)?,
@@ -167,6 +177,8 @@ async fn test_finger_candidate_distinguishes_missing_and_unroutable_connections(
     );
     assert!(transport.cancel_pending_connection(missing_attempt).await?);
 
+    // Use a fresh DHT so the unroutable branch is not affected by the retained
+    // proof and failure counter from the missing-connection branch above.
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
     ))?);
@@ -202,6 +214,8 @@ async fn test_expired_finger_candidate_never_enters_connection_admission() -> Re
         RecordingMeasure::default(),
     ))?);
     let peer = SecretKey::random().address().into();
+    // Created before time advances; after the timeout it should be rejected
+    // without creating any pending transport state.
     let request = finger_request(&transport, 0)?;
 
     tokio::time::advance(std::time::Duration::from_millis(11_000)).await;
@@ -224,6 +238,8 @@ async fn test_invalid_finger_candidate_never_enters_connection_admission() -> Re
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
     ))?);
+    // Slot 1's threshold is not proved by the immediate slot-0 successor, so
+    // the report is invalid even though it names a plausible ring position.
     let peer = transport.dht.did + crate::dht::Did::power_of_two(0);
     let request = finger_request(&transport, 1)?;
 

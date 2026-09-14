@@ -2,8 +2,11 @@ use super::*;
 use crate::dht::finger_schedule_deadline_for_test;
 use crate::dht::finger_schedule_resumed_deadline_for_test;
 
+/// Fleet smoothing window for a fresh lifecycle.
 const FINGER_INITIAL_PHASE_MS: u64 = 10_000;
+/// Saturated retry floor; the jitter window extends up to twice this value.
 const FINGER_MAX_RETRY_FLOOR_MS: u64 = 60_000;
+/// Fixture-level bound for one-second buckets across 200 deterministic nodes.
 const FINGER_MAX_FIXTURE_NODES_PER_SECOND: usize = 30;
 
 /// Law: lifecycle entropy, rather than a grindable DID alone, selects a
@@ -12,10 +15,14 @@ const FINGER_MAX_FIXTURE_NODES_PER_SECOND: usize = 30;
 /// one immediate request per resumed node.
 #[test]
 fn test_finger_convergence_schedule_has_per_node_churn_bounds_and_lifecycle_entropy() {
+    // Sets witness spread across exact deadlines; buckets witness per-second
+    // fleet pressure instead of uniqueness alone.
     let mut first_lifecycle_deadlines = BTreeSet::new();
     let mut resumed_delays = BTreeSet::new();
     let mut initial_bucket_counts = BTreeMap::<u64, usize>::new();
     let mut resumed_bucket_counts = BTreeMap::<u64, usize>::new();
+    // Same DID, different lifecycle UUID. This catches grindable identity-only
+    // schedules that would let an operator preselect its maintenance slot.
     let mut entropy_changed_deadline = 0usize;
     for identity in 0..200u32 {
         let local = crate::dht::Did::from(identity);

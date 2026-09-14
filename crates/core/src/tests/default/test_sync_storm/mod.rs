@@ -87,6 +87,8 @@ enum ScenarioTopology {
     Hotspot,
 }
 
+// Isolated schedule-law tests share the storm fixture imports but do not run
+// the full production network simulation.
 mod finger_schedule_tests;
 
 /// Five active dummy transports witness that revalidating the local successor
@@ -99,6 +101,8 @@ async fn test_five_node_local_successor_range_emits_no_finger_submission() {
     establish_topology(&runtime, &nodes, ScenarioTopology::Ring).await;
     install_chord_view(&nodes, ScenarioTopology::Ring);
     let observer = sorted_indices(&nodes).first().copied().unwrap_or(0);
+    // Cancel the prepared local-successor request so the next convergence turn
+    // exercises retry scheduling while the range remains locally provable.
     let request = nodes[observer]
         .dht()
         .lock_finger()
@@ -138,6 +142,7 @@ async fn test_five_node_local_successor_range_emits_no_finger_submission() {
 /// and every admission follow-up caused while the new connection quiesces.
 #[tokio::test(start_paused = true)]
 async fn test_finger_discovery_measures_the_complete_transport_cascade() {
+    // Upper bound for this fixture's routed lookup, report, and admission follow-ups.
     const THREE_NODE_FIXTURE_MAX_CONTROL_SUBMISSIONS: usize = 20;
 
     let runtime = SimulationRuntimeGuard::enter(768, TEST_EPOCH_MS, ProtectionProfile::ALL_ENABLED)
@@ -145,6 +150,8 @@ async fn test_finger_discovery_measures_the_complete_transport_cascade() {
     let nodes = build_finger_nodes(&[3, 1, 10]);
     let (observer, seed, candidate) = finger_discovery_path(&nodes);
 
+    // Build a two-hop knowledge path: observer can route to seed, seed knows
+    // candidate, and observer has not already opened that connection.
     manually_establish_connection(&nodes[observer].swarm, &nodes[seed].swarm).await;
     drain_bootstrap(&runtime, &nodes).await;
     manually_establish_connection(&nodes[seed].swarm, &nodes[candidate].swarm).await;
@@ -169,6 +176,8 @@ async fn test_finger_discovery_measures_the_complete_transport_cascade() {
         .await
         .expect("first routed production finger range must start");
     drain_untraced(&runtime, &nodes).await;
+    // This is the complete production cascade, not just the lookup message and
+    // its report.
     let submissions = outbound_submit_count_for_test();
 
     assert!(nodes[observer]
@@ -201,6 +210,9 @@ async fn test_finger_discovery_measures_the_complete_transport_cascade() {
     drop(runtime);
 }
 
+/// Select observer -> seed -> candidate such that the candidate sits in a
+/// farther finger range than the seed. That makes the fixture prove routed
+/// discovery instead of a direct successor/local-range update.
 fn finger_discovery_path(nodes: &[Node]) -> (usize, usize, usize) {
     let sorted = sorted_indices(nodes);
     let observer = sorted.first().copied().unwrap_or(0);
@@ -468,6 +480,8 @@ fn build_repair_nodes(count: usize) -> Vec<Node> {
         .collect()
 }
 
+/// Build deterministic DIDs selected by index so finger tests can choose the
+/// ordering relation they need without random key search.
 fn build_finger_nodes(key_indices: &[usize]) -> Vec<Node> {
     key_indices
         .iter()

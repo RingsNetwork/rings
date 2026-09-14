@@ -29,6 +29,13 @@
   claimed before connection effects. Candidates are deduplicated; successor-list sync is capped by successor
   capacity, while stabilization may additionally admit one predecessor. Browser listener generations
   are serialized so rapid `stop`/`listen` cycles cannot run duplicate maintenance daemons.
+- Release metadata for workspace crates, examples, the npm package, and lockfiles now records
+  `0.26.0` as one protocol generation so path consumers do not describe a mixed 0.25/0.26 tree.
+
+### Security
+
+- Updated `rustls` to the RUSTSEC-2026-0285 fixed release and documented the cooldown allowlist
+  entry as a security exception rather than a dependency pin.
 
 ## 0.25.0
 

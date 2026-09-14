@@ -61,7 +61,9 @@ use crate::provider::Provider;
 use crate::provider::RemoteRpcEndpoint;
 use crate::provider::Signer;
 
+/// Browser listener lifecycle handle and serialized `listen` entrypoint.
 mod listener;
+/// Browser onion-proxy helpers exposed by the provider API.
 mod onion_proxy;
 pub use listener::ProviderListener;
 

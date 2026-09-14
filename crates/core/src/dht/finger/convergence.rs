@@ -25,10 +25,15 @@
 //!    equivalent locally confirmed range) resets it; merely starting a
 //!    handshake is not progress.
 
+/// Attempt ownership for in-flight reports and retained admission proofs.
 mod attempt;
+/// Evidence epochs and per-slot verification bits for finger hints.
 mod evidence;
+/// Chord range proofs and request/rejection wire types.
 mod proof;
+/// Deterministic retry floor for failed finger lookups.
 mod retry;
+/// Scheduler-facing convergence status projection.
 mod status;
 
 use serde::Deserialize;
@@ -67,8 +72,11 @@ pub(crate) const FINGER_ADMISSION_TIMEOUT_MS: u64 = 180_000;
 /// Serializable protocol state for one node's local finger convergence.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub(crate) struct FingerConvergenceState {
+    /// Per-slot verification bits plus the hint-change epoch they belong to.
     evidence: FingerEvidence,
+    /// The one lookup or admission proof currently owned by this state.
     attempt: FingerAttempt,
+    /// Deterministic retry floor applied before the scheduler adds jitter.
     retry: FingerRetryState,
 }
 
@@ -76,17 +84,26 @@ pub(crate) struct FingerConvergenceState {
 #[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct FingerConvergenceProjection {
+    /// Snapshot of each slot's verified bit in table order.
     pub(crate) verified: Vec<bool>,
+    /// Request waiting for a successor report.
     pub(crate) in_flight: Option<FingerFixRequest>,
+    /// Request whose proof is held while transport admission finishes.
     pub(crate) deferred: Option<FingerFixRequest>,
+    /// Admission lease deadline for `deferred`, when present.
     pub(crate) deferred_expires_at_ms: Option<u64>,
+    /// Report deadline for `in_flight`, when present.
     pub(crate) expires_at_ms: Option<u64>,
+    /// Monotonic timestamp of the last emitted automatic lookup.
     pub(crate) last_issued_at_ms: Option<u64>,
+    /// Number of consecutive current-attempt failures since last progress.
     pub(crate) failure_streak: u8,
+    /// Earliest deterministic retry timestamp after failures.
     pub(crate) retry_not_before_ms: Option<u64>,
 }
 
 impl FingerConvergenceState {
+    /// Create fully unverified convergence state for a table width.
     pub(crate) fn new(slot_count: usize) -> Self {
         Self {
             evidence: FingerEvidence::new(slot_count),
@@ -95,12 +112,22 @@ impl FingerConvergenceState {
         }
     }
 
+    /// Clamp restored state to the current table width.
+    ///
+    /// Retry timestamps are left intact because they are clock-relative
+    /// scheduler policy; evidence and owned proofs are the width-dependent
+    /// parts that can otherwise point outside the resized table.
     pub(crate) fn normalized(mut self, slot_count: usize) -> Self {
         self.evidence.normalize(slot_count);
         self.attempt.normalize(slot_count);
         self
     }
 
+    /// Convert internal evidence and attempt ownership into scheduler state.
+    ///
+    /// `first_routable_slot` excludes the local successor range already proved
+    /// by stabilization, so a node does not keep issuing Chord lookups for
+    /// slots whose target is known to resolve locally.
     pub(crate) fn status_after(
         &self,
         first_routable_slot: usize,
@@ -131,6 +158,8 @@ impl FingerConvergenceState {
         before: &[Option<Did>],
         after: &[Option<Did>],
     ) {
+        // The lower slot is the premise of the proof range; if that exact hint
+        // changed, an otherwise current token must stop owning the lookup.
         let active_hint_changed = self.attempt.request().is_some_and(|request| {
             FingerEvidence::hint_changed_at(before, after, request.slot_index())
         });
@@ -183,6 +212,8 @@ impl FingerConvergenceState {
             return None;
         }
 
+        // `first_slot` may skip the local successor interval; evidence decides
+        // the next unverified slot at or after that boundary.
         let slot = self.evidence.first_unverified_from(first_slot)?;
         let request = FingerFixRequest::new(slot, request_id)?;
         self.attempt = FingerAttempt::awaiting_report(
@@ -271,6 +302,8 @@ impl FingerConvergenceState {
     /// Accept equivalent evidence produced by another local topology step.
     pub(crate) fn confirm_range(&mut self, start: usize, end: usize) -> bool {
         let newly_verified = self.evidence.confirm_range(start, end);
+        // A local proof of the active slot supersedes the network lookup just
+        // like a committed report would; it is progress, not cancellation.
         let superseded_attempt = self.attempt.clear_if_slot_in(start, end);
         let progressed = newly_verified || superseded_attempt;
         if progressed {
@@ -296,6 +329,9 @@ impl FingerConvergenceState {
         now_ms: u64,
     ) -> Result<FingerRangeProof, FingerReportRejection> {
         match self.attempt.proof_source(request, successor, now_ms)? {
+            // Admission proofs already passed Chord geometry and epoch checks
+            // when they were retained, so only token/successor/expiry had to be
+            // rechecked by `proof_source`.
             FingerProofSource::Admission(proof) => Ok(proof),
             FingerProofSource::Report { issued_epoch } => {
                 let end = finger_proof_end(local, successor, request.slot_index(), slot_count)
@@ -334,14 +370,17 @@ impl FingerConvergenceState {
 
 #[cfg(test)]
 impl FingerConvergenceState {
+    /// Whether tests should continue driving convergence transitions.
     pub(crate) fn is_pending(&self) -> bool {
         !self.attempt.is_idle() || !self.evidence.all_verified()
     }
 
+    /// Status helper for tests that do not model the scheduler clock boundary.
     pub(crate) fn status(&self) -> FingerConvergenceStatus {
         self.status_after(0, 0)
     }
 
+    /// Lossless test projection of private state-machine fields.
     pub(crate) fn projection(&self) -> FingerConvergenceProjection {
         let (in_flight, deferred, deferred_expires_at_ms, expires_at_ms) =
             self.attempt.projection();
@@ -358,6 +397,7 @@ impl FingerConvergenceState {
         }
     }
 
+    /// Force exactly one slot back to unverified and reserve it for tests.
     #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn prepare_slot_for_test(
         &mut self,
@@ -375,18 +415,22 @@ impl FingerConvergenceState {
         self.prepare_lookup(fingers, 0, now_ms, request_id)
     }
 
+    /// Return per-slot verification bits for assertions.
     pub(crate) fn verified_for_test(&self) -> Vec<bool> {
         self.evidence.verified()
     }
 
+    /// Replace verification bits from the front of the table for tests.
     pub(crate) fn set_verified_for_test(&mut self, values: &[bool]) {
         self.evidence.set_verified(values);
     }
 
+    /// Set every slot's verification bit for tests.
     pub(crate) fn fill_verified_for_test(&mut self, verified: bool) {
         self.evidence.fill_verified(verified);
     }
 
+    /// Set one slot's verification bit for tests, returning false if missing.
     pub(crate) fn set_slot_verified_for_test(&mut self, slot: usize, verified: bool) -> bool {
         self.evidence.set_slot_verified(slot, verified)
     }

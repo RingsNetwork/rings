@@ -20,13 +20,17 @@ use serde::Serialize;
 use super::proof::FingerRangeProof;
 use crate::dht::Did;
 
+/// Verification state for one finger-table slot.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 struct FingerSlotEvidence {
+    /// Epoch in which the slot's inferred hint last changed.
     changed_at: u64,
+    /// Whether a lookup or equivalent local proof has verified this slot.
     verified: bool,
 }
 
 impl FingerSlotEvidence {
+    /// Create unverified evidence tied to a specific hint-change epoch.
     const fn unverified(changed_at: u64) -> Self {
         Self {
             changed_at,
@@ -44,13 +48,17 @@ pub(super) enum EvidenceInvalidation {
     EpochExhausted,
 }
 
+/// Versioned evidence for the complete local finger table.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub(super) struct FingerEvidence {
+    /// Monotonic counter bumped whenever one or more hints change.
     epoch: u64,
+    /// One evidence record per finger slot.
     slots: Vec<FingerSlotEvidence>,
 }
 
 impl FingerEvidence {
+    /// Create unverified evidence for a table width.
     pub(super) fn new(slot_count: usize) -> Self {
         Self {
             epoch: 0,
@@ -58,23 +66,28 @@ impl FingerEvidence {
         }
     }
 
+    /// Resize restored evidence to match the current table width.
     pub(super) fn normalize(&mut self, slot_count: usize) {
         self.slots
             .resize(slot_count, FingerSlotEvidence::unverified(self.epoch));
     }
 
+    /// Current hint-change epoch.
     pub(super) const fn epoch(&self) -> u64 {
         self.epoch
     }
 
+    /// Return true when every slot has current proof evidence.
     pub(super) fn all_verified(&self) -> bool {
         self.slots.iter().all(|slot| slot.verified)
     }
 
+    /// Return true when no slot has current proof evidence.
     pub(super) fn all_unverified(&self) -> bool {
         self.slots.iter().all(|slot| !slot.verified)
     }
 
+    /// Return whether any slot at or after `first_slot` still needs proof.
     pub(super) fn any_unverified_from(&self, first_slot: usize) -> bool {
         self.slots
             .iter()
@@ -82,6 +95,7 @@ impl FingerEvidence {
             .any(|slot| !slot.verified)
     }
 
+    /// Return the first slot at or after `first_slot` that needs proof.
     pub(super) fn first_unverified_from(&self, first_slot: usize) -> Option<usize> {
         self.slots
             .iter()
@@ -110,6 +124,8 @@ impl FingerEvidence {
         before: &[Option<Did>],
         after: &[Option<Did>],
     ) -> EvidenceInvalidation {
+        // Compare only slots tracked by evidence; extra restored hints are
+        // normalized elsewhere before they can become proof targets.
         let has_change =
             (0..self.slots.len()).any(|index| Self::hint_changed_at(before, after, index));
         if !has_change {
@@ -129,6 +145,7 @@ impl FingerEvidence {
         EvidenceInvalidation::Advanced
     }
 
+    /// Mark every slot unverified after a discontinuity in membership view.
     pub(super) fn invalidate_all(&mut self) {
         if let Some(next_epoch) = self.epoch.checked_add(1) {
             self.epoch = next_epoch;
@@ -145,6 +162,8 @@ impl FingerEvidence {
             return;
         }
         let start = cursor.saturating_add(1) % slot_count;
+        // `value` may be `None`: consecutive empty hints also need periodic
+        // revalidation because absence is only local inferred state.
         let Some(value) = fingers.get(start).copied() else {
             return;
         };
@@ -179,6 +198,8 @@ impl FingerEvidence {
         local: Did,
         proof: FingerRangeProof,
     ) -> bool {
+        // A self-successor proof means this node owns the target range; the
+        // table stores that as no remote finger hint.
         let replacement = (proof.successor != local).then_some(proof.successor);
         let mut applied = false;
         for (finger, evidence) in fingers
@@ -196,6 +217,7 @@ impl FingerEvidence {
         applied
     }
 
+    /// Confirm a range using evidence obtained outside finger lookup traffic.
     pub(super) fn confirm_range(&mut self, start: usize, end: usize) -> bool {
         if start > end || start >= self.slots.len() {
             return false;
@@ -214,11 +236,13 @@ impl FingerEvidence {
         changed
     }
 
+    /// Return verification bits for state-machine assertions.
     #[cfg(test)]
     pub(super) fn verified(&self) -> Vec<bool> {
         self.slots.iter().map(|slot| slot.verified).collect()
     }
 
+    /// Replace verification bits from the front of the table for tests.
     #[cfg(test)]
     pub(super) fn set_verified(&mut self, values: &[bool]) {
         self.fill_verified(false);
@@ -227,6 +251,7 @@ impl FingerEvidence {
         }
     }
 
+    /// Set every verification bit for tests.
     #[cfg(test)]
     pub(super) fn fill_verified(&mut self, verified: bool) {
         self.slots
@@ -234,6 +259,7 @@ impl FingerEvidence {
             .for_each(|slot| slot.verified = verified);
     }
 
+    /// Set one verification bit for tests, returning false if out of range.
     #[cfg(test)]
     pub(super) fn set_slot_verified(&mut self, slot: usize, verified: bool) -> bool {
         let Some(slot) = self.slots.get_mut(slot) else {

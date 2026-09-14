@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use rings_transport::core::transport::TransportInterface;
+/// Finger-table proof admission at the pending/active transport boundary.
 mod finger;
 mod registry;
 
@@ -32,14 +33,21 @@ use crate::utils::get_epoch_ms_i64;
 /// Maximum number of peers that may be handshaking before a data channel opens.
 pub(crate) const DEFAULT_PENDING_CONNECTION_CAPACITY: usize = 32;
 
+/// Maximum lifetime of a pending or admitting connection generation.
 pub(super) const PENDING_CONNECTION_TIMEOUT_MS: i64 = 180_000;
+// A deferred finger proof expires on the same clock as the handshake that can
+// claim it. If these drift apart, a pending connection could commit a proof
+// that the DHT has already considered dead, or cancel a still-live proof.
 const _: () = assert!(
     PENDING_CONNECTION_TIMEOUT_MS as u64 == crate::dht::finger::FINGER_ADMISSION_TIMEOUT_MS
 );
 
+/// Shared registry of per-peer pending, admitting, and active connection generations.
 pub(super) type SharedConnectionLifecycles = Arc<Mutex<ConnectionLifecycleRegistry>>;
+/// Finger-fix requests retained until the owning pending connection commits.
 pub(super) type PendingFingerUpdates =
     BTreeMap<PendingConnectionAttempt, BTreeSet<FingerFixRequest>>;
+/// Guard for the deferred finger-proof map.
 type PendingFingerUpdatesGuard<'transport> =
     std::sync::MutexGuard<'transport, PendingFingerUpdates>;
 
@@ -49,8 +57,10 @@ type PendingFingerUpdatesGuard<'transport> =
 /// prevents admission, retirement, and final send admission from crossing.
 #[derive(Clone)]
 pub(super) struct ConnectionLifecycleBoundary {
+    /// Mutex that serializes admission, retirement, and final send checks.
     inner: Arc<Mutex<()>>,
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    /// Test-only count of threads waiting to acquire the lifecycle gate.
     waiting: Arc<std::sync::atomic::AtomicUsize>,
 }
 
@@ -101,7 +111,9 @@ impl ConnectionLifecycleBoundary {
 /// the newer handshake into the active routing set.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct PendingConnectionAttempt {
+    /// Peer this logical connection generation is trying to own.
     pub(super) peer: Did,
+    /// Monotonic per-peer generation used to reject stale callbacks.
     pub(super) generation: u64,
 }
 
@@ -117,14 +129,22 @@ impl PendingConnectionAttempt {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ConnectionEventDisposition {
+    /// Deliver the callback because it still belongs to the current generation or no owner exists.
     Deliver,
-    Suppress { active: PendingConnectionAttempt },
+    /// Drop the callback because another active generation already owns the peer.
+    Suppress {
+        /// Current active generation that superseded the callback source.
+        active: PendingConnectionAttempt,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum RawConnectionOwner {
+    /// Raw transport belongs to a still-unadmitted logical attempt.
     Pending(PendingConnectionAttempt),
+    /// Raw transport is owned by an admitting or active logical attempt.
     Owned,
+    /// Raw transport exists after its logical lifecycle slot was removed.
     Orphan,
 }
 
@@ -144,11 +164,15 @@ fn event_disposition(
 }
 
 struct RetiredPendingConnection {
+    /// Raw transport released by retirement, if it still exists in the backend.
     connection: Option<SwarmConnection>,
 }
 
+/// Transport object paired with the pending generation that owns its callbacks.
 pub(super) struct PendingTransportConnection {
+    /// Logical generation created before the backend transport object.
     attempt: PendingConnectionAttempt,
+    /// Raw transport connection created for `attempt`.
     connection: SwarmConnection,
 }
 
@@ -197,6 +221,7 @@ impl SwarmTransport {
         })
     }
 
+    /// Lock the full connection lifecycle registry for compound lifecycle decisions.
     pub(super) fn peer_lifecycles(
         &self,
     ) -> Result<std::sync::MutexGuard<'_, ConnectionLifecycleRegistry>> {
@@ -215,6 +240,7 @@ impl SwarmTransport {
             .map_err(|_| Error::SwarmConnectionLifecycleLock)
     }
 
+    /// Cancel every deferred finger proof owned by a pending connection attempt.
     fn cancel_pending_finger_updates(&self, attempt: PendingConnectionAttempt) -> Result<()> {
         let requests = self
             .pending_finger_updates()?
@@ -567,6 +593,8 @@ impl SwarmTransport {
         connection.readiness().ensure_can_make_progress()?;
 
         let mut pending_finger_updates = self.pending_finger_updates()?;
+        // These requests have already been validated by DHT report handling.
+        // They are applied in the same DHT transition that admits the peer.
         let fixed_fingers = pending_finger_updates
             .get(&attempt)
             .map(|updates| {
@@ -678,7 +706,11 @@ impl SwarmTransport {
         self.connection_lifecycle.waiting_for_test()
     }
 
-    /// Apply one finger candidate or retain it until its current handshake commits.
+    /// Apply one finger candidate or retain its proof until its current handshake commits.
+    ///
+    /// `request` identifies the specific finger lookup being satisfied. The
+    /// returned disposition tells the message handler whether it should open a
+    /// transport connection or cancel a proof that could not gain an owner.
     pub(crate) fn record_finger_candidate(
         &self,
         peer: Did,
@@ -687,6 +719,7 @@ impl SwarmTransport {
         self.record_finger_candidate_with_observer(peer, request, || {})
     }
 
+    /// Classify and either apply, retain, or reject a reported finger candidate.
     fn record_finger_candidate_with_observer(
         &self,
         peer: Did,
@@ -864,6 +897,8 @@ impl SwarmTransport {
         attempt: PendingConnectionAttempt,
         callback: InnerSwarmCallback,
     ) -> Result<PendingTransportConnection> {
+        // The per-peer creation lease prevents two async backend calls from
+        // racing to install different raw transports for one logical peer.
         let creation = self.connection_creation.lease(attempt.peer);
         let _guard = creation.acquire().await;
         match self.is_current_connection_attempt(attempt) {
@@ -909,6 +944,8 @@ impl SwarmTransport {
                 return Err(Error::Transport(error));
             }
         };
+        // Backend creation awaited outside the lifecycle gate, so re-check
+        // generation ownership before exposing the raw transport to callbacks.
         let still_current = match self.is_current_connection_attempt(attempt) {
             Ok(still_current) => still_current,
             Err(error) => {

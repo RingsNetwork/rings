@@ -218,11 +218,16 @@ pub(crate) enum CoreEffect<'payload> {
         /// Direct destination and next hop.
         destination: Did,
     },
-    /// Register and send one exactly correlated successor-list query.
+    /// Register and send one successor-list query that must be answered with
+    /// the same request id.
+    ///
+    /// The DHT claim is part of the effect, not the message constructor,
+    /// because a request id should become admissible only when the transport
+    /// actually attempts to send the query to the current successor.
     SendSuccessorQuery {
-        /// Query whose request identity authorizes one report.
+        /// Query whose request identity authorizes exactly one successor-sync report.
         query: QueryForTopoInfoSend,
-        /// Current successor that must report the result.
+        /// Current successor that must report the result with `query.request_id`.
         destination: Did,
     },
     /// Establish an idempotent DHT-driven transport connection.
@@ -285,7 +290,7 @@ impl<'payload> CoreEffect<'payload> {
         }
     }
 
-    /// Create a correlated successor-list query effect.
+    /// Create a successor-list query effect with deferred DHT claim registration.
     pub(crate) const fn send_successor_query(
         query: QueryForTopoInfoSend,
         destination: Did,
@@ -426,6 +431,8 @@ impl<'handler> CoreEffectInterpreter<'handler> {
                 Ok(())
             }
             CoreEffect::SendSuccessorQuery { query, destination } => {
+                // Register the request id before the message is visible on the
+                // network. A same-turn report can then be claimed deterministically.
                 if !self
                     .transport
                     .dht
@@ -438,6 +445,8 @@ impl<'handler> CoreEffectInterpreter<'handler> {
                     .send_direct_message(Message::QueryForTopoInfoSend(query), destination)
                     .await
                 {
+                    // The request id never left this node successfully, so no
+                    // later report may spend it.
                     self.transport
                         .dht
                         .cancel_successor_sync(destination, query.request_id)?;
@@ -521,6 +530,7 @@ mod tests {
     use crate::tests::TEST_NETWORK_ID;
 
     #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    /// Swarm callback used when a test needs only the effect interpreter's transport side effects.
     struct NoopCallback;
 
     #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
@@ -830,6 +840,8 @@ mod tests {
         let callback: SharedSwarmCallback = Arc::new(NoopCallback);
         let interpreter = CoreEffectInterpreter::new(&first.swarm.transport, &callback);
         let sent = QueryForTopoInfoSend::new_for_sync(second.did());
+        // Keep the id before the query is moved into the effect; the assertion
+        // below proves the interpreter registered this exact request.
         let sent_request_id = sent.request_id;
         interpreter
             .run(CoreEffect::send_successor_query(sent, second.did()))
@@ -844,6 +856,7 @@ mod tests {
         let missing = did();
         first.dht().join(missing)?;
         let failed = QueryForTopoInfoSend::new_for_sync(missing);
+        // Failed sends must remove the otherwise claimable successor-sync slot.
         let failed_request_id = failed.request_id;
         assert!(interpreter
             .run(CoreEffect::send_successor_query(failed, missing))

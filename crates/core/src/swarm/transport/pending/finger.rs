@@ -1,4 +1,9 @@
 //! Finger-proof ownership at the transport-admission boundary.
+//!
+//! Finger reports arrive through DHT messages, but a reported successor is only
+//! useful after there is a transport generation that can carry traffic to it.
+//! This module keeps the pure lifecycle classification separate from the DHT
+//! proof transitions in `pending.rs`.
 
 use super::PeerConnectionLifecycle;
 use super::PendingConnectionAttempt;
@@ -16,15 +21,20 @@ pub(crate) enum FingerUpdateDisposition {
     Applied,
     /// The candidate was attached to the current pending generation.
     Queued,
-    /// No logical connection generation exists for the candidate.
+    /// No logical connection generation exists for the candidate, so the caller
+    /// may attempt to open one.
     Missing,
-    /// An active generation exists, but its transport cannot make progress.
+    /// An active generation exists, but its transport cannot make progress and
+    /// the retained proof has been retired.
     Unroutable,
-    /// The report did not prove the requested finger threshold.
+    /// The report did not prove the requested finger threshold and must not
+    /// trigger connection admission.
     Invalid,
-    /// The report arrived after the current request deadline.
+    /// The report arrived after the current request deadline and must not
+    /// trigger connection admission.
     Expired,
-    /// The report no longer matches the node's current in-flight request.
+    /// The report no longer matches the node's current in-flight request and
+    /// must not trigger connection admission.
     Stale,
 }
 
@@ -42,7 +52,10 @@ impl FingerUpdateDisposition {
 }
 
 impl From<FingerReportRejection> for FingerUpdateDisposition {
+    /// Map DHT proof rejection into a transport-level non-admission disposition.
     fn from(rejection: FingerReportRejection) -> Self {
+        // Rejections are terminal for transport admission: none of these states
+        // should cause the caller to open or retain a connection.
         match rejection {
             FingerReportRejection::Invalid => Self::Invalid,
             FingerReportRejection::Expired => Self::Expired,
@@ -52,7 +65,10 @@ impl From<FingerReportRejection> for FingerUpdateDisposition {
 }
 
 impl From<FingerApplyOutcome> for FingerUpdateDisposition {
+    /// Map a direct DHT apply outcome into the message handler's transport decision.
     fn from(outcome: FingerApplyOutcome) -> Self {
+        // `Applied` is the only success state; DHT-level validation failures
+        // remain visible to the message handler as non-connection dispositions.
         match outcome {
             FingerApplyOutcome::Applied { .. } => Self::Applied,
             FingerApplyOutcome::Rejected(rejection) => rejection.into(),
@@ -63,9 +79,13 @@ impl From<FingerApplyOutcome> for FingerUpdateDisposition {
 /// Pure plan for reconciling one finger candidate with a lifecycle snapshot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum FingerCandidateAdmission {
+    /// Apply the proof immediately because the active transport is routable.
     Apply,
+    /// Attach the proof to this pending or admitting generation.
     Queue(PendingConnectionAttempt),
+    /// No generation owns the peer, so the caller may open a connection.
     Missing,
+    /// A generation owns the peer but cannot carry traffic.
     Unroutable,
 }
 

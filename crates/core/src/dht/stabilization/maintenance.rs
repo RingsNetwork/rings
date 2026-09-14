@@ -1,3 +1,5 @@
+//! Timed maintenance scheduler for topology, storage repair, and finger convergence.
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,40 +30,54 @@ const FINGER_CONVERGENCE_RESUME_REPHASE_THRESHOLD: Duration = Duration::from_sec
 const MAX_FINGER_PRIORITY_DEFERRALS: u8 = 2;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MaintenanceTask {
+    /// Run the topology phase: clean peers, notify, start stabilization, and
+    /// optionally mark a finger range for later convergence.
     Stabilize,
+    /// Run storage repair and inbox delivery for a pending repair intent.
     Repair,
+    /// Advance independently paced finger convergence by one lookup/result step.
     ConvergeFingers,
 }
 
 #[cfg(all(test, target_family = "wasm"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MaintenancePhaseKind {
+    /// Recorded topology phase.
     Stabilize,
+    /// Recorded storage repair phase.
     Repair,
+    /// Recorded finger convergence phase.
     ConvergeFingers,
 }
 
 #[cfg(all(test, target_family = "wasm"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct MaintenancePhaseEvent {
+    /// Node whose maintenance loop emitted the trace event.
     pub(crate) local: crate::dht::Did,
+    /// Maintenance phase that started.
     pub(crate) kind: MaintenancePhaseKind,
+    /// Milliseconds since that loop's monotonic origin.
     pub(crate) started_at_ms: u64,
 }
 
 #[cfg(all(test, target_family = "wasm"))]
 thread_local! {
+    /// Per-thread phase trace used only by wasm tests, where separate node loops
+    /// share one JavaScript event loop.
     static MAINTENANCE_PHASE_TRACE: std::cell::RefCell<Vec<MaintenancePhaseEvent>> = const {
         std::cell::RefCell::new(Vec::new())
     };
 }
 
 #[cfg(all(test, target_family = "wasm"))]
+/// Clear the wasm-only maintenance phase trace before a test scenario.
 pub(crate) fn reset_maintenance_phase_trace_for_test() {
     MAINTENANCE_PHASE_TRACE.with(|trace| trace.borrow_mut().clear());
 }
 
 #[cfg(all(test, target_family = "wasm"))]
+/// Return phase trace entries for one local DID.
 pub(crate) fn maintenance_phase_trace_for_test(
     local: crate::dht::Did,
 ) -> Vec<MaintenancePhaseEvent> {
@@ -76,6 +92,7 @@ pub(crate) fn maintenance_phase_trace_for_test(
 }
 
 #[cfg(all(test, target_family = "wasm"))]
+/// Append one wasm-only maintenance phase trace event.
 fn record_maintenance_phase_for_test(
     local: crate::dht::Did,
     task: MaintenanceTask,
@@ -96,6 +113,7 @@ fn record_maintenance_phase_for_test(
 }
 
 #[cfg(not(all(test, target_family = "wasm")))]
+/// Non-wasm builds do not record phase traces.
 fn record_maintenance_phase_for_test(
     _local: crate::dht::Did,
     _task: MaintenanceTask,
@@ -105,8 +123,11 @@ fn record_maintenance_phase_for_test(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct MaintenanceDecision {
+    /// The single task selected for this poll, if any.
     task: Option<MaintenanceTask>,
+    /// Whether an elapsed periodic repair deadline created a repair intent.
     periodic_repair_due: bool,
+    /// Whether repair is pending but cannot fit before the next topology phase.
     repair_deferred_for_window: bool,
 }
 
@@ -135,21 +156,35 @@ struct MaintenanceDecision {
 ///   higher-priority phases before it is reserved, so topology and storage work
 ///   cannot starve convergence indefinitely.
 struct MaintenanceSchedule {
+    /// Shared period for stabilization and periodic storage-repair deadlines.
     period_ms: u64,
+    /// Last loop timestamp observed by [`MaintenanceSchedule::poll`].
     last_observed_ms: u64,
+    /// Absolute timestamp for the next topology phase.
     next_stabilize_ms: u64,
+    /// Absolute timestamp at which periodic storage repair becomes due.
     next_repair_ms: u64,
+    /// Earliest timestamp at which a pending repair may start.
     repair_not_before_ms: u64,
+    /// Admission window the storage phase reserves before the next topology phase.
     repair_admission_budget_ms: u64,
+    /// Whether stabilization reserved the next available turn for pending repair.
     repair_turn_reserved: bool,
+    /// Absolute timestamp for the next independently paced finger turn.
     next_finger_ms: u64,
+    /// Finger convergence phase seen during the previous poll.
     finger_phase_last_poll: FingerConvergencePhase,
+    /// Consecutive finger lookup failures seen during the previous poll.
     finger_failure_streak: u8,
+    /// Deterministic per-node jitter state advanced for every finger delay.
     finger_jitter_state: u64,
+    /// Count of due finger turns yielded to higher-priority phases.
     finger_priority_deferrals: u8,
 }
 
 impl MaintenanceSchedule {
+    /// Create a schedule whose first topology phase starts after `interval` and
+    /// whose first storage phase is offset from topology by a bounded window.
     fn new(
         now_ms: u64,
         interval: Duration,
@@ -185,19 +220,27 @@ impl MaintenanceSchedule {
         repair_pending: bool,
         finger_status: FingerConvergenceStatus,
     ) -> MaintenanceDecision {
+        // A large observation gap usually means the browser or host suspended
+        // the maintenance loop rather than that every missed finger slot is due.
         let observation_gap_ms = now_ms.saturating_sub(self.last_observed_ms);
         self.last_observed_ms = self.last_observed_ms.max(now_ms);
         self.reconcile_finger_status(now_ms, finger_status);
         self.rephase_stale_finger_deadline(now_ms, observation_gap_ms, finger_status);
+        // Convert elapsed periodic repair deadlines into sticky transport-level
+        // intents so an overrunning topology phase does not drop storage repair.
         let periodic_repair_due = self.advance_repair_deadline_if_due(now_ms);
         let effective_repair_pending = repair_pending || periodic_repair_due;
         if !effective_repair_pending {
             self.repair_turn_reserved = false;
         }
+        // A reserved repair turn can start as soon as its quiet gap has elapsed,
+        // even if timer jitter woke the loop after the originally reserved point.
         let reserved_repair_ready = self.reserved_repair_ready(now_ms, effective_repair_pending);
         let stabilization_due = now_ms >= self.next_stabilize_ms;
         let repair_has_window = effective_repair_pending && self.can_start_storage_repair(now_ms);
         let finger_ready = finger_status.may_advance() && now_ms >= self.next_finger_ms;
+        // After a bounded number of yields, finger convergence gets a turn even
+        // when topology or storage are also due.
         let finger_turn_reserved =
             finger_ready && self.finger_priority_deferrals >= MAX_FINGER_PRIORITY_DEFERRALS;
         let task = if finger_turn_reserved {
@@ -249,6 +292,8 @@ impl MaintenanceSchedule {
         periodic_repair_due
     }
 
+    /// Reconcile deadlines after one storage phase, preserving a retry intent
+    /// only when the repair did not finish.
     fn complete_repair(&mut self, completed_at_ms: u64, succeeded: bool) {
         self.last_observed_ms = self.last_observed_ms.max(completed_at_ms);
         self.repair_turn_reserved = false;
@@ -262,6 +307,7 @@ impl MaintenanceSchedule {
         };
     }
 
+    /// Reconcile the next finger deadline after one finger convergence turn.
     fn complete_finger_convergence(
         &mut self,
         completed_at_ms: u64,
@@ -284,7 +330,10 @@ impl MaintenanceSchedule {
         };
     }
 
+    /// Align the schedule to the current finger convergence state.
     fn reconcile_finger_status(&mut self, now_ms: u64, status: FingerConvergenceStatus) {
+        // A pace change means the retry floor changed; a phase change means a
+        // different scheduler clock now owns the next finger wake.
         let pace_changed = status.failure_streak() != self.finger_failure_streak;
         let phase_changed = status.phase() != self.finger_phase_last_poll;
         match status.phase() {
@@ -313,12 +362,14 @@ impl MaintenanceSchedule {
         self.finger_failure_streak = status.failure_streak();
     }
 
+    /// Rephase a stale runnable finger deadline after a long observation gap.
     fn rephase_stale_finger_deadline(
         &mut self,
         now_ms: u64,
         observation_gap_ms: u64,
         status: FingerConvergenceStatus,
     ) {
+        // `stale_by_ms` ignores future deadlines via saturating subtraction.
         let stale_by_ms = now_ms.saturating_sub(self.next_finger_ms);
         if matches!(status.phase(), FingerConvergencePhase::Runnable)
             && self.next_finger_ms != u64::MAX
@@ -330,12 +381,14 @@ impl MaintenanceSchedule {
         }
     }
 
+    /// Return the next retry delay for a failed or continuing finger lookup.
     fn next_finger_delay_ms(&mut self, failure_streak: u8) -> u64 {
         self.finger_jitter_state = mix_jitter(self.finger_jitter_state);
         let retry_floor_ms = finger_lookup_backoff_ms(failure_streak);
         retry_floor_ms.saturating_add(self.finger_jitter_state % retry_floor_ms.saturating_add(1))
     }
 
+    /// Return the first finger delay for a new runnable phase.
     fn next_initial_finger_delay_ms(&mut self) -> u64 {
         self.finger_jitter_state = mix_jitter(self.finger_jitter_state);
         let initial_jitter_ms = duration_ms(FINGER_CONVERGENCE_INITIAL_JITTER);
@@ -343,6 +396,7 @@ impl MaintenanceSchedule {
             .saturating_add(self.finger_jitter_state % initial_jitter_ms.saturating_add(1))
     }
 
+    /// Advance the periodic repair deadline if this poll crossed it.
     fn advance_repair_deadline_if_due(&mut self, now_ms: u64) -> bool {
         if now_ms < self.next_repair_ms {
             return false;
@@ -351,27 +405,33 @@ impl MaintenanceSchedule {
         true
     }
 
+    /// Whether repair can start now and still keep the required quiet gap.
     fn can_start_storage_repair(&self, now_ms: u64) -> bool {
         now_ms >= self.repair_not_before_ms && self.has_storage_repair_window(now_ms)
     }
 
+    /// Whether a repair turn reserved by stabilization is ready to run.
     fn reserved_repair_ready(&self, now_ms: u64, repair_pending: bool) -> bool {
         self.repair_turn_reserved && repair_pending && now_ms >= self.repair_not_before_ms
     }
 
+    /// Whether the time before the next topology phase can fit storage repair.
     fn has_storage_repair_window(&self, now_ms: u64) -> bool {
         self.storage_repair_window_ms(now_ms) >= self.required_repair_window_ms()
     }
 
+    /// Minimum time reserved for storage admission plus a cooperative quiet gap.
     fn required_repair_window_ms(&self) -> u64 {
         self.repair_admission_budget_ms
             .saturating_add(duration_ms(MAINTENANCE_QUIET_GAP))
     }
 
+    /// Available time before the next topology phase begins.
     fn storage_repair_window_ms(&self, now_ms: u64) -> u64 {
         self.next_stabilize_ms.saturating_sub(now_ms)
     }
 
+    /// Next absolute timestamp the maintenance loop should wake for.
     fn next_wake_ms(&self, now_ms: u64, repair_pending: bool, finger_pending: bool) -> u64 {
         let mut next_ms = self.next_stabilize_ms.min(self.next_repair_ms);
         if finger_pending {
@@ -392,6 +452,7 @@ impl MaintenanceSchedule {
     }
 }
 
+/// Deterministically derive a per-node jitter seed from the DID and lifecycle entropy.
 fn finger_jitter_seed(local: crate::dht::Did, entropy: uuid::Uuid) -> u64 {
     local
         .as_bytes()
@@ -402,6 +463,7 @@ fn finger_jitter_seed(local: crate::dht::Did, entropy: uuid::Uuid) -> u64 {
         })
 }
 
+/// Advance the small xorshift state used for replayable finger scheduling jitter.
 fn mix_jitter(mut value: u64) -> u64 {
     value ^= value << 13;
     value ^= value >> 7;
@@ -410,6 +472,7 @@ fn mix_jitter(mut value: u64) -> u64 {
 }
 
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+/// First runnable finger deadline for a test node and failure level.
 pub(crate) fn finger_schedule_deadline_for_test(
     local: crate::dht::Did,
     jitter_entropy: uuid::Uuid,
@@ -421,6 +484,7 @@ pub(crate) fn finger_schedule_deadline_for_test(
 }
 
 #[cfg(all(test, not(target_family = "wasm")))]
+/// Deadline used when a finger lookup is already awaiting its report.
 pub(crate) fn finger_awaiting_report_deadline_for_test(
     listener_now_ms: u64,
     status: FingerConvergenceStatus,
@@ -436,6 +500,7 @@ pub(crate) fn finger_awaiting_report_deadline_for_test(
 }
 
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+/// Simulate a stale browser-resume poll and return the rephased finger deadline.
 pub(crate) fn finger_schedule_resumed_deadline_for_test(
     local: crate::dht::Did,
     jitter_entropy: uuid::Uuid,
@@ -451,10 +516,12 @@ pub(crate) fn finger_schedule_resumed_deadline_for_test(
     (resumed_at_ms, schedule.next_finger_ms)
 }
 
+/// Convert a duration to milliseconds, saturating at `u64::MAX`.
 fn duration_ms(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
+/// First periodic deadline strictly after `now_ms`.
 fn next_deadline_after(deadline_ms: u64, period_ms: u64, now_ms: u64) -> u64 {
     let elapsed_ms = now_ms.saturating_sub(deadline_ms);
     let periods = elapsed_ms
@@ -490,6 +557,8 @@ impl Stabilizer {
             }
 
             let now_ms = monotonic_elapsed_ms(&origin);
+            // Finger status is advisory for scheduling; failure to inspect it
+            // should not stop topology and storage maintenance.
             let finger_status = match self.dht.finger_convergence_status() {
                 Ok(status) => status,
                 Err(error) => {
@@ -524,6 +593,8 @@ impl Stabilizer {
                 self.run_maintenance_task(task, now_ms, finger_status, &origin, &mut schedule)
                     .await;
             } else {
+                // Recompute the sleep deadline after recording any repair intent,
+                // so a newly pending repair can wake before the next period.
                 let deadline_ms = schedule.next_wake_ms(
                     now_ms,
                     self.transport.storage_repair_requested(),
@@ -536,6 +607,8 @@ impl Stabilizer {
         }
     }
 
+    /// Execute one selected maintenance task and reconcile its schedule from the
+    /// actual completion timestamp.
     async fn run_maintenance_task(
         &self,
         task: MaintenanceTask,
@@ -619,10 +692,12 @@ impl Stabilizer {
     }
 }
 
+/// Milliseconds since the loop origin according to the monotonic clock.
 fn monotonic_elapsed_ms(origin: &Instant) -> u64 {
     duration_ms(origin.elapsed())
 }
 
+/// Sleep cooperatively until an absolute loop deadline or a stop request.
 async fn sleep_until_or_stop(origin: &Instant, deadline_ms: u64, stop: &StopToken) -> bool {
     loop {
         if stop.should_stop() {
@@ -639,20 +714,26 @@ async fn sleep_until_or_stop(origin: &Instant, deadline_ms: u64, stop: &StopToke
     }
 }
 
+/// Remaining delay before an absolute loop deadline.
 fn remaining_delay(deadline_ms: u64, now_ms: u64) -> Duration {
     Duration::from_millis(deadline_ms.saturating_sub(now_ms))
 }
 
 #[cfg(test)]
 mod tests {
+    //! Unit tests for the pure maintenance schedule.
+
     use super::*;
 
+    /// Default test period with a visible topology/storage phase offset.
     const PERIOD: Duration = Duration::from_secs(15);
 
+    /// Build a deterministic schedule for unit tests.
     fn schedule(now_ms: u64, interval: Duration, local: crate::dht::Did) -> MaintenanceSchedule {
         MaintenanceSchedule::new(now_ms, interval, local, uuid::Uuid::from_u128(1))
     }
 
+    /// Compact pending/inactive finger status fixture with no failures.
     const fn finger_status(pending: bool) -> FingerConvergenceStatus {
         FingerConvergenceStatus::new(pending, 0)
     }
@@ -956,5 +1037,6 @@ mod tests {
     }
 }
 
+/// Additional schedule tests that require crate-level test fixtures.
 #[cfg(test)]
 mod schedule_tests;

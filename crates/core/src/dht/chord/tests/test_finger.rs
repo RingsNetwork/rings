@@ -36,6 +36,7 @@ async fn test_finger_table_tracks_clockwise_and_wrapped_joins() -> Result<()> {
     assert!(BigUint::from(b) > BigUint::from(2u16).pow(156));
     assert!(BigUint::from(b) < BigUint::from(2u16).pow(157));
 
+    // `b` covers slots below its highest set bit; larger slots remain unknown.
     let mut expected = std::iter::repeat_n(Some(b), 157).collect::<Vec<_>>();
     expected.extend(std::iter::repeat_n(None, 3));
     assert_eq!(node_a.lock_finger()?.list(), &expected);
@@ -54,6 +55,7 @@ async fn test_finger_table_tracks_clockwise_and_wrapped_joins() -> Result<()> {
     assert!(BigUint::from(c) > BigUint::from(2u16).pow(159));
     assert!(BigUint::from(c) < BigUint::from(2u16).pow(160));
 
+    // `c` is farther away, so it only refines the high sparse/no-wrap slots.
     let mut expected = std::iter::repeat_n(Some(b), 157).collect::<Vec<_>>();
     expected.extend(std::iter::repeat_n(Some(c), 3));
     assert_eq!(node_a.lock_finger()?.list(), &expected);
@@ -106,7 +108,11 @@ async fn test_finger_table_tracks_clockwise_and_wrapped_joins() -> Result<()> {
 
 #[test]
 fn test_public_fix_fingers_advances_one_range() -> Result<()> {
+    // This public API regression protects the legacy `fix_fingers()` contract: a caller that asks
+    // for one repair pass should both begin revalidation and issue the first routable lookup, not
+    // only mark the table stale for a later maintenance tick.
     let local = Did::from(0u32);
+    // The seed is the only remote evidence, so the first public fix routes to it.
     let seed = Did::from(8u32);
     let dht = PeerRing::new_with_storage(local, 3, Box::new(MemStorage::new()));
     let _ = dht.join(seed)?;
@@ -124,6 +130,7 @@ fn test_public_fix_fingers_advances_one_range() -> Result<()> {
 #[test]
 fn test_begin_finger_revalidation_does_not_emit_a_lookup() -> Result<()> {
     let local = Did::from(0u32);
+    // Revalidation only marks a range; scheduling emits the lookup separately.
     let seed = Did::from(8u32);
     let dht = PeerRing::new_with_storage(local, 3, Box::new(MemStorage::new()));
     let _ = dht.join(seed)?;

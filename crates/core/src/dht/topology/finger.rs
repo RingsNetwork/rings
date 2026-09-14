@@ -30,6 +30,8 @@ pub(super) fn advance(state: &TopologyState, now_ms: u64, request_id: uuid::Uuid
     }
 
     let mut convergence = state.finger_convergence.clone();
+    // Slots at or before the successor head are proved by stabilization, so
+    // routed finger lookups begin with the first slot outside that local range.
     let first_remote_slot = local_successor_range_end(state)
         .map(|end| end.saturating_add(1))
         .unwrap_or(0);
@@ -45,6 +47,7 @@ pub(super) fn advance(state: &TopologyState, now_ms: u64, request_id: uuid::Uuid
         };
     };
 
+    // Finger lookups probe the ring position relative to the local node.
     let target = state.local + Did::power_of_two(request.slot_index());
     let prepared = TopologyState {
         finger_convergence: convergence,
@@ -116,6 +119,7 @@ fn defer_result(
     )
 }
 
+/// Wrap [`apply_result`] as a pure topology step with no side effects.
 pub(crate) fn apply(
     state: &TopologyState,
     request: FingerFixRequest,
@@ -132,6 +136,7 @@ pub(crate) fn apply(
     )
 }
 
+/// Wrap [`defer_result`] as a pure topology step with no side effects.
 pub(crate) fn defer(
     state: &TopologyState,
     request: FingerFixRequest,
@@ -170,6 +175,7 @@ pub(crate) fn retire_candidate(
     )
 }
 
+/// Cancel an in-flight or deferred finger proof and start its retry backoff.
 pub(super) fn cancel(
     state: &TopologyState,
     request: FingerFixRequest,

@@ -37,11 +37,14 @@ use crate::dht::Did;
 /// machine.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct FingerFixRequest {
+    /// Zero-based lower slot requested by this lookup.
     pub(crate) slot: u16,
+    /// Unique correlation value for this lookup attempt.
     pub(crate) request_id: uuid::Uuid,
 }
 
 impl FingerFixRequest {
+    /// Build a request when `slot` can be represented on the wire.
     pub(crate) fn new(slot: usize, request_id: uuid::Uuid) -> Option<Self> {
         Some(Self {
             slot: u16::try_from(slot).ok()?,
@@ -59,6 +62,7 @@ impl FingerFixRequest {
         self.request_id
     }
 
+    /// Zero-based slot index for indexing local vectors.
     pub(crate) fn slot_index(self) -> usize {
         usize::from(self.slot)
     }
@@ -114,9 +118,13 @@ pub(crate) enum FingerRetireOutcome {
 /// Validated range carried between the attempt and evidence layers.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub(super) struct FingerRangeProof {
+    /// Original lookup token at the lower end of the proved range.
     pub(super) request: FingerFixRequest,
+    /// Evidence epoch observed when the lookup was issued.
     pub(super) issued_epoch: u64,
+    /// Authenticated successor returned for the lookup target.
     pub(super) successor: Did,
+    /// Inclusive upper slot proved by the same successor.
     pub(super) end: usize,
 }
 

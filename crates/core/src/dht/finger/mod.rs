@@ -8,6 +8,7 @@ use serde::Serialize;
 use crate::dht::did::BiasId;
 use crate::dht::Did;
 
+/// Range-aware convergence state machine for this finger table.
 mod convergence;
 
 pub(crate) use convergence::finger_lookup_backoff_ms;
@@ -36,10 +37,15 @@ pub const DEFAULT_FINGER_TABLE_SIZE: usize = 160;
 /// state. Call [`Self::list`] when only routing hints should be compared.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct FingerTable {
+    /// Local node whose outgoing fingers this table describes.
     did: Did,
+    /// Fixed number of address-space slots maintained by this table.
     size: usize,
+    /// Current inferred routing hint for each slot; `None` can mean self or unknown.
     finger: Vec<Option<Did>>,
+    /// Cursor used by periodic maintenance to resume range revalidation.
     pub(super) fix_finger_index: usize,
+    /// Verification and retry state attached to the inferred hints.
     convergence: FingerConvergenceState,
 }
 
@@ -76,6 +82,7 @@ impl FingerTable {
         self.finger.get(index).copied().flatten()
     }
 
+    /// Apply a hint mutation and invalidate only evidence touched by it.
     fn mutate_hints(&mut self, mutation: impl FnOnce(&mut Vec<Option<Did>>)) {
         let before = self.finger.clone();
         mutation(&mut self.finger);
@@ -117,6 +124,8 @@ impl FingerTable {
     /// Join FingerTable
     pub fn join(&mut self, did: Did) {
         let observer = self.did;
+        // `bias` is the candidate's clockwise distance from this table owner;
+        // it determines the lowest power-of-two slot the candidate can cover.
         let bias = did.bias(observer);
         let size = self.size;
 
@@ -176,10 +185,12 @@ impl FingerTable {
         self.fix_finger_index
     }
 
+    /// Borrow the convergence state associated with these finger hints.
     pub(crate) fn convergence_state(&self) -> &FingerConvergenceState {
         &self.convergence
     }
 
+    /// Prepare an exact slot request through the real convergence path.
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn prepare_request_for_test(
         &mut self,
@@ -198,7 +209,9 @@ impl FingerTable {
     ///
     /// Post: the table keeps its fixed slot count; entries beyond that count
     /// are ignored, missing entries become `None`, and the fix cursor is
-    /// clamped to a valid slot when the table is non-empty.
+    /// clamped to a valid slot when the table is non-empty. Convergence state
+    /// is normalized to the same width so restored proofs cannot address a
+    /// slot that no longer exists.
     pub(crate) fn replace_state(
         &mut self,
         fingers: &[Option<Did>],

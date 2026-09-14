@@ -1,17 +1,22 @@
+//! Unit tests for pure topology transitions and local Chord lookup laws.
+
 use std::collections::BTreeSet;
 
 use num_bigint::BigUint;
 
 use super::*;
 
+/// Compact DID fixture for small integer rings.
 fn did(value: u32) -> Did {
     Did::from(value)
 }
 
+/// Deterministic UUID fixture used as a correlation token.
 fn request_id(value: u128) -> uuid::Uuid {
     uuid::Uuid::from_u128(value)
 }
 
+/// Build a finger-convergence tick whose request ID is derived from `now_ms`.
 fn advance(now_ms: u64) -> TopologyEvent {
     TopologyEvent::AdvanceFingerConvergence {
         now_ms,
@@ -19,6 +24,7 @@ fn advance(now_ms: u64) -> TopologyEvent {
     }
 }
 
+/// Build a topology state with fresh finger-convergence metadata.
 fn state(
     local: Did,
     successors: Vec<Did>,
@@ -29,7 +35,10 @@ fn state(
     TopologyState::new(local, successors, predecessor, fingers, fix_finger_index)
 }
 
+/// Prepare one artificial in-flight finger lookup for a selected slot.
 fn issue_request(current: &mut TopologyState, slot: usize, now_ms: u64) -> FingerFixRequest {
+    // Mark every other slot verified so the requested slot is the only eligible
+    // lookup target for this fixture.
     current.finger_convergence.fill_verified_for_test(true);
     assert!(current
         .finger_convergence
@@ -47,6 +56,7 @@ fn issue_request(current: &mut TopologyState, slot: usize, now_ms: u64) -> Finge
     })
 }
 
+/// Successor distance vector padded with infinity for missing successor slots.
 fn successor_distances(local: Did, successors: &[Did], capacity: usize) -> Vec<BigUint> {
     let infinity = BigUint::from(1u8) << RING_BITS;
     (0..capacity)
@@ -59,6 +69,7 @@ fn successor_distances(local: Did, successors: &[Did], capacity: usize) -> Vec<B
         .collect()
 }
 
+/// Whether `after` is component-wise no farther than `before`.
 fn refines_successor_distances(before: &TopologyState, after: &TopologyState) -> bool {
     let before_distances =
         successor_distances(before.local, &before.successors, DEFAULT_SUCCESSOR_CAPACITY);
@@ -321,6 +332,7 @@ fn test_admit_step_does_not_overwrite_finger_changed_after_update_was_deferred()
         },
         DEFAULT_SUCCESSOR_CAPACITY,
     );
+    // Joining `fresher` invalidates the deferred proof before admission replays it.
     let changed = step(
         &deferred.state,
         TopologyEvent::Join { peer: fresher },
@@ -523,6 +535,8 @@ fn test_local_successor_range_waits_for_stabilization_instead_of_routing_around_
         false, false, false, true
     ]);
 
+    // The head's authenticated `pred(head) == local` report proves the local
+    // successor range without routing a lookup around the ring.
     let request_id = request_id(2_000);
     let begun = step(
         &dormant.state,
@@ -911,4 +925,9 @@ fn test_rectify_never_adopts_the_local_node_as_predecessor() {
     assert!(is_responsible_for(&notified_by_itself.state, did(7)));
 }
 
+/// Admission-focused regression tests for deferred finger proofs.
+///
+/// The submodule keeps timeout, duplicate, and supersession cases close to the
+/// topology reducer while separating them from the broader ring-shape tests in
+/// this file.
 mod admission_tests;

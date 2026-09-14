@@ -1,5 +1,6 @@
-# Security update required by RUSTSEC-2026-0285; all older compatible
-# rustls releases remain vulnerable.
+# This is a cooldown-gate exception, not a build pin. The fresh release is
+# admitted early because it carries the RUSTSEC-2026-0285 fix; all older
+# compatible rustls releases remain vulnerable.
 [[allow.exact]]
 crate = "rustls"
 version = "0.23.45"

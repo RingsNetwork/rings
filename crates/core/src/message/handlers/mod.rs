@@ -64,10 +64,12 @@ impl MessageHandler {
         }
     }
 
+    /// Build the callback handle passed into a newly created transport connection.
     fn inner_callback(&self) -> InnerSwarmCallback {
         InnerSwarmCallback::new(self.transport.clone(), self.swarm_callback.clone())
     }
 
+    /// Interpret already-lowered core effects against this handler's transport.
     pub(crate) async fn run_effects<'payload>(
         &self,
         effects: impl IntoIterator<Item = CoreEffect<'payload>>,
@@ -146,6 +148,7 @@ impl MessageHandler {
         Ok(())
     }
 
+    /// Flatten a nested DHT action into its transport effects without executing them.
     fn collect_dht_effects(
         &self,
         act: &PeerRingAction,
@@ -169,8 +172,17 @@ impl MessageHandler {
         }
     }
 
+    /// Run connection effects first in local quality order, then all other effects.
+    ///
+    /// Multi-action DHT updates can contain several peers competing for pending
+    /// connection capacity. Splitting the phases makes that contention use the
+    /// same quality policy as direct connection plans while preserving the
+    /// original order of non-connection effects.
     async fn run_prioritized_dht_effects(&self, effects: Vec<CoreEffect<'static>>) -> Result<()> {
+        // Peers in this list may allocate scarce pending-connection slots.
         let mut connection_peers = Vec::new();
+        // Everything else stays in original effect order and runs after the
+        // connection phase has yielded between attempts.
         let mut other_effects = Vec::new();
         for effect in effects {
             match effect {
@@ -181,6 +193,8 @@ impl MessageHandler {
             }
         }
 
+        // Ordering is evaluated once for the batch so the later awaits do not
+        // reshuffle peers as measurements change.
         let ordered_peers = self
             .transport
             .order_dht_candidates_by_quality(connection_peers)
@@ -206,6 +220,7 @@ impl MessageHandler {
         Ok(())
     }
 
+    /// Lower and execute follow-up effects emitted by a DHT state transition.
     pub(crate) async fn handle_dht_events(&self, act: &PeerRingAction) -> Result<()> {
         if matches!(act, PeerRingAction::MultiActions(_)) {
             let mut effects = Vec::new();

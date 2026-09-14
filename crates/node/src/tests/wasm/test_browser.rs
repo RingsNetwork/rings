@@ -43,9 +43,12 @@ async fn test_two_provider_connect_and_list() {
 async fn test_provider_listener_handle_requests_stop() {
     let provider = new_provider().await;
 
+    // Hold the provider-level gate to model a previous listener generation
+    // still cleaning up after `stop`.
     let listener_gate = provider.listener_gate_for_test();
     let old_cleanup = listener_gate.lock().await;
     let waiting_listener = provider.listen();
+    // `started` must remain pending while `old_cleanup` owns the gate.
     let started = Box::pin(JsFuture::from(waiting_listener.started()));
     let short_delay = Box::pin(utils::js_utils::window_sleep(10));
     let pending_started = match futures::future::select(started, short_delay).await {
@@ -58,11 +61,14 @@ async fn test_provider_listener_handle_requests_stop() {
             pending_started
         }
     };
+    // Releasing the old generation should allow the queued listener to publish
+    // its started signal and later finish through cooperative stop.
     drop(old_cleanup);
     pending_started.await.unwrap();
     waiting_listener.stop();
     JsFuture::from(waiting_listener.task()).await.unwrap();
 
+    // Repeated start/stop cycles prove the same gate is released by each task.
     for _ in 0..3 {
         let listener = provider.listen();
         JsFuture::from(listener.started()).await.unwrap();

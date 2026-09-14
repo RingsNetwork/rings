@@ -12,6 +12,8 @@ async-trait = { workspace = true }
 base64 = "0.13"
 bytes = "1.2.1"
 rings-core = { workspace = true }
+# Explicit version stays lockstep with the workspace protocol release even
+# though this example resolves the crate through the local path.
 rings-node = { path = "../../crates/node", version = "0.26.0", default-features = false, features = ["node"] }
 rings-rpc = { workspace = true }
 serde_json = "1.0.70"

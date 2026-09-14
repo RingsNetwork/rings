@@ -25,6 +25,7 @@ fn test_stabilize_handles_empty_successor_info() -> Result<()> {
 fn test_stabilization_report_claim_is_single_use() -> Result<()> {
     let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
     let successor = Did::from(4u32);
+    // The same authenticated response may reserve its connection budget once.
     let request_id = uuid::Uuid::from_u128(1);
     let _ = node.join(successor)?;
     let _ = node.begin_stabilization(request_id)?;
@@ -38,6 +39,8 @@ fn test_stabilization_report_claim_is_single_use() -> Result<()> {
 fn test_successor_change_invalidates_an_outstanding_sync_report() -> Result<()> {
     let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
     let reporter = Did::from(4u32);
+    // Successor-sync reports are tied to the exact successor list observed when
+    // the query was sent.
     let request_id = uuid::Uuid::from_u128(1);
     let _ = node.join(reporter)?;
     assert!(node.begin_successor_sync(reporter, request_id)?);
@@ -91,6 +94,8 @@ async fn test_correct_chord_maintains_expected_successors() -> Result<()> {
         }
     }
 
+    // Joining through an already live seed emits both remote topology work and,
+    // when the head changes, a storage-repair intent.
     let PeerRingAction::MultiActions(actions) = n5.join_then_sync(n1.did).await.unwrap() else {
         panic!("wrong action");
     };

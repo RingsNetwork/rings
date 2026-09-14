@@ -18,6 +18,7 @@ use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 
+/// Shared topology-report admission helpers for connection handlers.
 mod topology_view;
 
 use topology_view::connect_successor_hint;
@@ -217,12 +218,21 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
 
         match &msg.handler {
             FindSuccessorReportHandler::FixFingerTable { request } => {
+                // First classify the reported successor against the current
+                // transport generation. This may apply the finger immediately,
+                // queue it behind an existing handshake, or retain an
+                // admission proof while the missing connection is opened below.
                 let disposition = self.transport.record_finger_candidate(msg.did, *request)?;
                 if disposition.needs_connection() && msg.reports_remote_successor(self.dht.did) {
                     if let Err(error) = self.connect_dht_peer(msg.did).await {
                         self.dht.cancel_finger_lookup(*request)?;
                         return Err(error);
                     }
+                    // The async connect may have admitted the same peer,
+                    // replaced the pending slot, or failed after a partial
+                    // lifecycle transition. Re-run admission with the same
+                    // request id so the deferred proof either gains an owner or
+                    // is explicitly cancelled.
                     let admitted = self.transport.record_finger_candidate(msg.did, *request)?;
                     if admitted.leaves_deferred_unowned() {
                         self.dht.cancel_finger_lookup(*request)?;

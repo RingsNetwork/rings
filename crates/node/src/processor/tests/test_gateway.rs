@@ -53,7 +53,9 @@ use crate::onion::tcp::NativeOnionCircuitHandle;
 use crate::onion::tcp::NativeOnionTcpExitConfig;
 use crate::onion::NativeOnionGatewayConnector;
 
+/// Public HTTP port used by the ignored gateway smoke tests.
 const PUBLIC_HTTP_PORT: u16 = 80;
+/// Literal public IPv4 target used by the ignored gateway smoke tests.
 const PUBLIC_HTTP_IPV4: Ipv4Addr = Ipv4Addr::new(1, 1, 1, 1);
 const CLIENT_PORT: u16 = 41_000;
 
@@ -112,6 +114,7 @@ impl TcpObservation {
     }
 }
 
+/// Builds the default gateway config for the literal public smoke-test target.
 fn gateway_config() -> GatewayConfig {
     gateway_config_for(&["1.1.1.1/32"])
 }
@@ -127,11 +130,16 @@ fn gateway_config_for(included_routes: &[&str]) -> GatewayConfig {
             mtu: Mtu::try_from(1_280).expect("gateway MTU"),
         },
         max_flows: 8,
-        flow_idle_timeout: Duration::from_secs(30),
+        flow_idle_timeout: Duration::from_secs(90),
         tcp_buffer_bytes: 64 * 1_024,
     }
 }
 
+/// Builds one synthetic IPv4/TCP packet for the in-memory gateway device.
+///
+/// The packet looks like traffic from a client behind the virtual gateway
+/// interface and targets the ignored public HTTP endpoint used by the gateway
+/// smoke tests.
 fn client_packet(
     target: Ipv4Addr,
     control: TcpControl,
@@ -139,6 +147,8 @@ fn client_packet(
     acknowledgment: Option<TcpSeqNumber>,
     payload: &[u8],
 ) -> Vec<u8> {
+    // The source address is inside the gateway's test-only carrier-grade NAT
+    // block, making it routable only within the synthetic packet fixture.
     let source = Ipv4Addr::new(100, 64, 0, 2);
     let tcp = TcpRepr {
         src_port: CLIENT_PORT,
@@ -225,9 +235,11 @@ struct TwoHopGatewayFixture {
     _providers: Vec<Provider>,
 }
 
+/// Builds three native processors wired as client, relay, and TCP exit.
 async fn prepare_two_hop_public_gateway(config: GatewayConfig) -> Result<TwoHopGatewayFixture> {
-    // Use a literal global address so host DNS proxies and fake-IP modes cannot turn this into a
-    // synthetic 198.18.0.0/15 target that the exit policy must reject.
+    // Use a literal global address so host DNS proxies and fake-IP modes cannot
+    // turn this into a synthetic 198.18.0.0/15 target that the exit policy must
+    // reject.
     let authority = format!("{PUBLIC_HTTP_IPV4}:{PUBLIC_HTTP_PORT}");
     let mut exit_policy = onion_policy(&[authority.as_str()], &[])?;
     exit_policy.max_circuits = 8;
@@ -543,6 +555,8 @@ fn linux_namespace_http_request() -> std::result::Result<Vec<u8>, String> {
 #[ignore = "requires public network access and three native WebRTC processors"]
 async fn captured_tcp_reaches_public_http_only_through_two_hop_onion_route() -> Result<()> {
     let _network_guard = network_test_guard().await;
+    // The target is the same literal public address admitted by the exit
+    // policy, which keeps DNS and fake-IP proxies out of the assertion.
     let target = PUBLIC_HTTP_IPV4;
     let TwoHopGatewayFixture {
         mut runtime,
@@ -578,7 +592,7 @@ async fn captured_tcp_reaches_public_http_only_through_two_hop_onion_route() -> 
         .await
         .expect("send captured SYN");
     let syn_ack = receive_tcp(&mut egress_rx, |packet| {
-        packet.acknowledgment.is_some() && packet.payload.is_empty() && !packet.fin
+        packet.acknowledgment.is_some() && packet.payload.is_empty() && !packet.fin && !packet.rst
     })
     .await;
     let server_next = syn_ack.sequence + 1;
@@ -593,6 +607,8 @@ async fn captured_tcp_reaches_public_http_only_through_two_hop_onion_route() -> 
         .await
         .expect("send captured handshake ACK");
 
+    // The public target returns a stable redirect and gives the test a compact
+    // HTTP payload marker without relying on a DNS hostname.
     let request = b"GET / HTTP/1.1\r\nHost: 1.1.1.1\r\nConnection: close\r\n\r\n";
     ingress_tx
         .send(client_packet(
@@ -604,7 +620,10 @@ async fn captured_tcp_reaches_public_http_only_through_two_hop_onion_route() -> 
         ))
         .await
         .expect("send captured HTTP request");
-    let response = tokio::time::timeout(Duration::from_secs(35), async {
+    // The gateway flow timeout is intentionally longer than this response
+    // deadline so a slow CI runner cannot reset a live captured flow before the
+    // test's own wait budget expires.
+    let response = tokio::time::timeout(Duration::from_secs(75), async {
         loop {
             let packet = egress_rx.recv().await.expect("gateway egress remains open");
             let observation = TcpObservation::parse(&packet);
