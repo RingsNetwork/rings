@@ -6,6 +6,17 @@ fn did(value: u32) -> Did {
     Did::from(value)
 }
 
+fn request_id(value: u128) -> uuid::Uuid {
+    uuid::Uuid::from_u128(value)
+}
+
+fn advance(now_ms: u64) -> TopologyEvent {
+    TopologyEvent::AdvanceFingerConvergence {
+        now_ms,
+        request_id: request_id(u128::from(now_ms)),
+    }
+}
+
 fn state(
     local: Did,
     successors: Vec<Did>,
@@ -26,11 +37,7 @@ fn converge_with_oracle(mut current: TopologyState, all: &[Did]) -> (TopologySta
             .unwrap_or(u64::MAX)
             .saturating_add(1)
             .saturating_mul(FINGER_LOOKUP_MIN_INTERVAL_MS);
-        let advanced = step(
-            &current,
-            TopologyEvent::AdvanceFingerConvergence { now_ms },
-            DEFAULT_SUCCESSOR_CAPACITY,
-        );
+        let advanced = step(&current, advance(now_ms), DEFAULT_SUCCESSOR_CAPACITY);
         let request = match advanced.actions.as_slice() {
             [TopologyAction::FindSuccessorForFix { request, .. }] => Some(*request),
             [] => None,
@@ -105,6 +112,158 @@ fn test_five_node_bootstrap_converges_in_two_proved_range_lookups() {
     assert_eq!(converged.fingers, expected);
     assert_eq!(distinct_ranges(&expected), 2);
     assert_eq!(lookups, 2);
+}
+
+#[test]
+fn test_join_after_isolation_revalidates_every_previously_unknown_range() {
+    let local = Did::from(BigUint::from(0u8));
+    let lower = (BigUint::from(1u8) << 159) - BigUint::from(1u8);
+    let upper = BigUint::from(1u8) << 159;
+    let seed = Did::from(lower);
+    let far = Did::from(&upper + BigUint::from(7u8));
+    let isolated = step(
+        &state(local, Vec::new(), None, vec![None; RING_BITS], 0),
+        advance(1_000),
+        DEFAULT_SUCCESSOR_CAPACITY,
+    )
+    .state;
+
+    assert!(isolated.finger_convergence_pending());
+    assert!(!isolated.finger_convergence_status().pending());
+    assert!(isolated
+        .finger_convergence
+        .verified
+        .iter()
+        .all(|verified| !verified));
+
+    let joined = step(
+        &isolated,
+        TopologyEvent::Join { peer: seed },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    )
+    .state;
+    let (converged, lookups) = converge_with_oracle(joined, &[local, seed, far]);
+
+    assert_eq!(converged.fingers, finger_table(&[local, seed, far], local));
+    assert_eq!(lookups, 2);
+}
+
+#[test]
+fn test_finger_rejoin_after_losing_last_successor_discards_old_empty_range_proofs() {
+    let local = did(0);
+    let old_seed = did(8);
+    let new_seed = did(4);
+    let far = did(200);
+    let joined = step(
+        &state(local, Vec::new(), None, vec![None; 8], 0),
+        TopologyEvent::Join { peer: old_seed },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    )
+    .state;
+    let (converged, _) = converge_with_oracle(joined, &[local, old_seed]);
+
+    assert!(converged
+        .finger_convergence
+        .verified
+        .iter()
+        .all(|verified| *verified));
+    assert!(converged.fingers.last().is_some_and(Option::is_none));
+
+    let isolated = step(
+        &converged,
+        TopologyEvent::Remove {
+            peer: old_seed,
+            successor: SuccessorRemoval::Preserve,
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    )
+    .state;
+    assert!(isolated.successors.is_empty());
+    assert!(isolated
+        .finger_convergence
+        .verified
+        .iter()
+        .all(|verified| !verified));
+    assert!(!isolated.finger_convergence_status().pending());
+
+    let rejoined = step(
+        &isolated,
+        TopologyEvent::Join { peer: new_seed },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    )
+    .state;
+    let (reconverged, lookups) = converge_with_oracle(rejoined, &[local, new_seed, far]);
+    let mut expected = finger_table(&[local, new_seed, far], local);
+    expected.truncate(reconverged.fingers.len());
+
+    assert_eq!(reconverged.fingers, expected);
+    assert!(lookups >= 2);
+}
+
+#[test]
+fn test_restart_uses_a_new_request_identity_and_rejects_the_old_report() {
+    let local = did(0);
+    let seed = did(128);
+    let hinted = step(
+        &state(local, Vec::new(), None, vec![None; 8], 0),
+        TopologyEvent::Join { peer: seed },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    )
+    .state;
+    let before_restart = step(&hinted, advance(1_000), DEFAULT_SUCCESSOR_CAPACITY);
+    let old_request = before_restart
+        .actions
+        .iter()
+        .find_map(|action| match action {
+            TopologyAction::FindSuccessorForFix { request, .. } => Some(*request),
+            _ => None,
+        });
+    let Some(old_request) = old_request else {
+        assert!(
+            before_restart.actions.is_empty(),
+            "expected pre-restart request"
+        );
+        return;
+    };
+
+    let restarted = state(
+        local,
+        before_restart.state.successors.clone(),
+        before_restart.state.predecessor,
+        before_restart.state.fingers.clone(),
+        before_restart.state.fix_finger_index,
+    );
+    let after_restart = step(&restarted, advance(2_000), DEFAULT_SUCCESSOR_CAPACITY);
+    let new_request = after_restart
+        .actions
+        .iter()
+        .find_map(|action| match action {
+            TopologyAction::FindSuccessorForFix { request, .. } => Some(*request),
+            _ => None,
+        });
+    let Some(new_request) = new_request else {
+        assert!(
+            after_restart.actions.is_empty(),
+            "expected post-restart request"
+        );
+        return;
+    };
+    assert_ne!(old_request, new_request);
+
+    let stale = step(
+        &after_restart.state,
+        TopologyEvent::ApplyFinger {
+            request: old_request,
+            successor: did(8),
+            now_ms: 2_001,
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+    assert_eq!(stale.state, after_restart.state);
+    assert_eq!(
+        stale.state.finger_result_disposition(new_request, did(8)),
+        FingerResultDisposition::Applied { end: 3 }
+    );
 }
 
 #[test]
@@ -259,11 +418,7 @@ fn test_topology_change_rejects_an_in_flight_stale_range_result() {
         DEFAULT_SUCCESSOR_CAPACITY,
     )
     .state;
-    let issued = step(
-        &hinted,
-        TopologyEvent::AdvanceFingerConvergence { now_ms: 1_000 },
-        DEFAULT_SUCCESSOR_CAPACITY,
-    );
+    let issued = step(&hinted, advance(1_000), DEFAULT_SUCCESSOR_CAPACITY);
     let request = match issued.actions.as_slice() {
         [TopologyAction::FindSuccessorForFix { request, .. }] => *request,
         actions => {
@@ -273,7 +428,7 @@ fn test_topology_change_rejects_an_in_flight_stale_range_result() {
             );
             FingerFixRequest {
                 slot: u16::MAX,
-                request_id: u64::MAX,
+                request_id: uuid::Uuid::nil(),
             }
         }
     };
@@ -284,11 +439,7 @@ fn test_topology_change_rejects_an_in_flight_stale_range_result() {
     )
     .state;
     assert_eq!(changed.finger_convergence.status().failure_streak(), 1);
-    let early_retry = step(
-        &changed,
-        TopologyEvent::AdvanceFingerConvergence { now_ms: 2_999 },
-        DEFAULT_SUCCESSOR_CAPACITY,
-    );
+    let early_retry = step(&changed, advance(2_999), DEFAULT_SUCCESSOR_CAPACITY);
     assert!(early_retry.actions.is_empty());
     let stale = step(
         &changed,
@@ -315,45 +466,29 @@ fn test_finger_lookup_has_one_in_flight_request_and_a_bounded_retry() {
         DEFAULT_SUCCESSOR_CAPACITY,
     )
     .state;
-    let issued = step(
-        &hinted,
-        TopologyEvent::AdvanceFingerConvergence { now_ms: 1_000 },
-        DEFAULT_SUCCESSOR_CAPACITY,
-    );
+    let issued = step(&hinted, advance(1_000), DEFAULT_SUCCESSOR_CAPACITY);
     let first = issued.actions.iter().find_map(|action| match action {
         TopologyAction::FindSuccessorForFix { request, .. } => Some(*request),
         _ => None,
     });
     assert!(first.is_some());
 
-    let blocked = step(
-        &issued.state,
-        TopologyEvent::AdvanceFingerConvergence { now_ms: 10_999 },
-        DEFAULT_SUCCESSOR_CAPACITY,
-    );
+    let blocked = step(&issued.state, advance(10_999), DEFAULT_SUCCESSOR_CAPACITY);
     assert!(blocked.actions.is_empty());
 
-    let expired = step(
-        &blocked.state,
-        TopologyEvent::AdvanceFingerConvergence { now_ms: 11_000 },
-        DEFAULT_SUCCESSOR_CAPACITY,
-    );
+    let expired = step(&blocked.state, advance(11_000), DEFAULT_SUCCESSOR_CAPACITY);
     assert!(expired.actions.is_empty());
     assert_eq!(
         expired.state.finger_convergence.status().failure_streak(),
         1
     );
 
-    let still_backing_off = step(
-        &expired.state,
-        TopologyEvent::AdvanceFingerConvergence { now_ms: 12_999 },
-        DEFAULT_SUCCESSOR_CAPACITY,
-    );
+    let still_backing_off = step(&expired.state, advance(12_999), DEFAULT_SUCCESSOR_CAPACITY);
     assert!(still_backing_off.actions.is_empty());
 
     let retried = step(
         &still_backing_off.state,
-        TopologyEvent::AdvanceFingerConvergence { now_ms: 13_000 },
+        advance(13_000),
         DEFAULT_SUCCESSOR_CAPACITY,
     );
     let retry = retried.actions.iter().find_map(|action| match action {
@@ -379,11 +514,7 @@ fn test_periodic_revalidation_marks_a_range_without_emitting_a_lookup() {
     assert!(marked.actions.is_empty());
     assert!(marked.state.finger_convergence_pending());
 
-    let advanced = step(
-        &marked.state,
-        TopologyEvent::AdvanceFingerConvergence { now_ms: 1_000 },
-        DEFAULT_SUCCESSOR_CAPACITY,
-    );
+    let advanced = step(&marked.state, advance(1_000), DEFAULT_SUCCESSOR_CAPACITY);
     assert_eq!(
         advanced
             .actions
@@ -404,11 +535,7 @@ fn test_cancelled_finger_lookup_still_obeys_the_per_node_rate_limit() {
         DEFAULT_SUCCESSOR_CAPACITY,
     )
     .state;
-    let issued = step(
-        &hinted,
-        TopologyEvent::AdvanceFingerConvergence { now_ms: 1_000 },
-        DEFAULT_SUCCESSOR_CAPACITY,
-    );
+    let issued = step(&hinted, advance(1_000), DEFAULT_SUCCESSOR_CAPACITY);
     let request = issued.actions.iter().find_map(|action| match action {
         TopologyAction::FindSuccessorForFix { request, .. } => Some(*request),
         _ => None,
@@ -426,17 +553,9 @@ fn test_cancelled_finger_lookup_still_obeys_the_per_node_rate_limit() {
         DEFAULT_SUCCESSOR_CAPACITY,
     );
 
-    let early = step(
-        &cancelled.state,
-        TopologyEvent::AdvanceFingerConvergence { now_ms: 2_999 },
-        DEFAULT_SUCCESSOR_CAPACITY,
-    );
+    let early = step(&cancelled.state, advance(2_999), DEFAULT_SUCCESSOR_CAPACITY);
     assert!(early.actions.is_empty());
-    let due = step(
-        &early.state,
-        TopologyEvent::AdvanceFingerConvergence { now_ms: 3_000 },
-        DEFAULT_SUCCESSOR_CAPACITY,
-    );
+    let due = step(&early.state, advance(3_000), DEFAULT_SUCCESSOR_CAPACITY);
     assert_eq!(
         due.actions
             .iter()
@@ -457,13 +576,7 @@ fn test_persistent_send_failures_have_a_capped_exponential_emission_bound() {
     )
     .state;
     let mut issued_at_ms = 1_000u64;
-    let first = step(
-        &current,
-        TopologyEvent::AdvanceFingerConvergence {
-            now_ms: issued_at_ms,
-        },
-        DEFAULT_SUCCESSOR_CAPACITY,
-    );
+    let first = step(&current, advance(issued_at_ms), DEFAULT_SUCCESSOR_CAPACITY);
     let mut request = first.actions.iter().find_map(|action| match action {
         TopologyAction::FindSuccessorForFix { request, .. } => Some(*request),
         _ => None,
@@ -497,18 +610,14 @@ fn test_persistent_send_failures_have_a_capped_exponential_emission_bound() {
         let retry_at_ms = issued_at_ms.saturating_add(retry_floor_ms);
         let early = step(
             &cancelled.state,
-            TopologyEvent::AdvanceFingerConvergence {
-                now_ms: retry_at_ms.saturating_sub(1),
-            },
+            advance(retry_at_ms.saturating_sub(1)),
             DEFAULT_SUCCESSOR_CAPACITY,
         );
         assert!(early.actions.is_empty());
 
         let due = step(
             &early.state,
-            TopologyEvent::AdvanceFingerConvergence {
-                now_ms: retry_at_ms,
-            },
+            advance(retry_at_ms),
             DEFAULT_SUCCESSOR_CAPACITY,
         );
         request = due.actions.iter().find_map(|action| match action {
@@ -541,11 +650,7 @@ fn test_proved_progress_resets_failure_backoff() {
         DEFAULT_SUCCESSOR_CAPACITY,
     )
     .state;
-    let first = step(
-        &initial,
-        TopologyEvent::AdvanceFingerConvergence { now_ms: 1_000 },
-        DEFAULT_SUCCESSOR_CAPACITY,
-    );
+    let first = step(&initial, advance(1_000), DEFAULT_SUCCESSOR_CAPACITY);
     let request = first.actions.iter().find_map(|action| match action {
         TopologyAction::FindSuccessorForFix { request, .. } => Some(*request),
         _ => None,
@@ -562,11 +667,7 @@ fn test_proved_progress_resets_failure_backoff() {
         },
         DEFAULT_SUCCESSOR_CAPACITY,
     );
-    let retry = step(
-        &cancelled.state,
-        TopologyEvent::AdvanceFingerConvergence { now_ms: 3_000 },
-        DEFAULT_SUCCESSOR_CAPACITY,
-    );
+    let retry = step(&cancelled.state, advance(3_000), DEFAULT_SUCCESSOR_CAPACITY);
     let retry_request = retry.actions.iter().find_map(|action| match action {
         TopologyAction::FindSuccessorForFix { request, .. } => Some(*request),
         _ => None,
@@ -595,7 +696,7 @@ fn test_proved_progress_resets_failure_backoff() {
     );
     let next_range = step(
         &progressed.state,
-        TopologyEvent::AdvanceFingerConvergence { now_ms: 4_000 },
+        advance(4_000),
         DEFAULT_SUCCESSOR_CAPACITY,
     );
     assert_eq!(

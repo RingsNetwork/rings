@@ -5,10 +5,11 @@
 //! - `slot_epoch[i]` records that last change and prevents a range result from
 //!   overwriting a slot changed after the lookup was issued.
 //! - `in_flight` contains at most one request; only its exact token may apply.
-//! - `last_issued_at_ms` enforces a hard per-node emission interval.
+//! - `last_issued_at_ms` enforces a hard per-node emission interval on the
+//!   process-monotonic clock supplied by the effect boundary.
 //! - `failure_streak` and `retry_not_before_ms` make loss, invalid reports,
 //!   timeouts, and send cancellation progress-sensitive. Only a proved range
-//!   resets the streak; the runtime scheduler adds full-window deterministic
+//!   resets the streak; the runtime scheduler adds boot-randomized full-window
 //!   jitter and never performs catch-up bursts.
 
 use num_bigint::BigUint;
@@ -18,7 +19,7 @@ use serde::Serialize;
 use crate::dht::topology::dist;
 use crate::dht::Did;
 
-/// Minimum wall-clock separation between automatic finger lookup emissions.
+/// Minimum process-monotonic separation between automatic finger lookup emissions.
 pub(crate) const FINGER_LOOKUP_MIN_INTERVAL_MS: u64 = 1_000;
 
 /// Maximum base delay between retries after repeated failures.
@@ -46,11 +47,11 @@ pub(crate) fn finger_lookup_backoff_ms(failure_streak: u8) -> u64 {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct FingerFixRequest {
     pub(crate) slot: u16,
-    pub(crate) request_id: u64,
+    pub(crate) request_id: uuid::Uuid,
 }
 
 impl FingerFixRequest {
-    pub(crate) fn new(slot: usize, request_id: u64) -> Option<Self> {
+    pub(crate) fn new(slot: usize, request_id: uuid::Uuid) -> Option<Self> {
         Some(Self {
             slot: u16::try_from(slot).ok()?,
             request_id,
@@ -62,8 +63,8 @@ impl FingerFixRequest {
         self.slot
     }
 
-    /// Node-local monotonic request identifier.
-    pub const fn request_id(self) -> u64 {
+    /// Fresh UUID request identifier supplied by the effect boundary.
+    pub const fn request_id(self) -> uuid::Uuid {
         self.request_id
     }
 
@@ -113,11 +114,9 @@ pub(crate) struct FingerConvergenceState {
     slot_epoch: Vec<u64>,
     pub(crate) verified: Vec<bool>,
     in_flight: Option<PendingFingerLookup>,
-    next_request_id: Option<u64>,
     last_issued_at_ms: Option<u64>,
     failure_streak: u8,
     retry_not_before_ms: Option<u64>,
-    exhausted: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -127,6 +126,17 @@ pub(crate) enum FingerResultDisposition {
     Stale,
 }
 
+/// Test-only projection used to model-check the production retry transition.
+#[cfg(all(test, not(target_family = "wasm")))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FingerConvergenceProjection {
+    pub(crate) in_flight: Option<FingerFixRequest>,
+    pub(crate) expires_at_ms: Option<u64>,
+    pub(crate) last_issued_at_ms: Option<u64>,
+    pub(crate) failure_streak: u8,
+    pub(crate) retry_not_before_ms: Option<u64>,
+}
+
 impl FingerConvergenceState {
     pub(crate) fn new(slot_count: usize) -> Self {
         Self {
@@ -134,11 +144,9 @@ impl FingerConvergenceState {
             slot_epoch: vec![0; slot_count],
             verified: vec![false; slot_count],
             in_flight: None,
-            next_request_id: Some(1),
             last_issued_at_ms: None,
             failure_streak: 0,
             retry_not_before_ms: None,
-            exhausted: false,
         }
     }
 
@@ -160,6 +168,17 @@ impl FingerConvergenceState {
 
     pub(crate) fn status(&self) -> FingerConvergenceStatus {
         FingerConvergenceStatus::new(self.is_pending(), self.failure_streak)
+    }
+
+    #[cfg(all(test, not(target_family = "wasm")))]
+    pub(crate) fn projection(&self) -> FingerConvergenceProjection {
+        FingerConvergenceProjection {
+            in_flight: self.in_flight.map(|pending| pending.request),
+            expires_at_ms: self.in_flight.map(|pending| pending.expires_at_ms),
+            last_issued_at_ms: self.last_issued_at_ms,
+            failure_streak: self.failure_streak,
+            retry_not_before_ms: self.retry_not_before_ms,
+        }
     }
 
     fn record_failure(&mut self, now_ms: u64) {
@@ -193,7 +212,6 @@ impl FingerConvergenceState {
         }
 
         let Some(next_epoch) = self.epoch.checked_add(1) else {
-            self.exhausted = true;
             self.in_flight = None;
             self.verified.fill(false);
             return;
@@ -227,6 +245,22 @@ impl FingerConvergenceState {
         }
     }
 
+    pub(crate) fn invalidate_all_evidence(&mut self) {
+        if self.in_flight.is_none() && self.verified.iter().all(|verified| !verified) {
+            return;
+        }
+
+        if let Some(next_epoch) = self.epoch.checked_add(1) {
+            self.epoch = next_epoch;
+            self.slot_epoch.fill(next_epoch);
+        }
+        let invalidated_in_flight = self.in_flight.take().is_some();
+        self.verified.fill(false);
+        if invalidated_in_flight {
+            self.record_failure(self.last_issued_at_ms.unwrap_or(0));
+        }
+    }
+
     fn refresh_next_range(&mut self, fingers: &[Option<Did>], cursor: usize) {
         let slot_count = fingers.len();
         if slot_count == 0 {
@@ -249,10 +283,7 @@ impl FingerConvergenceState {
     }
 
     pub(crate) fn begin_revalidation(&mut self, fingers: &[Option<Did>], cursor: usize) {
-        if !self.exhausted
-            && self.in_flight.is_none()
-            && self.verified.iter().all(|verified| *verified)
-        {
+        if self.in_flight.is_none() && self.verified.iter().all(|verified| *verified) {
             self.refresh_next_range(fingers, cursor);
         }
     }
@@ -261,8 +292,9 @@ impl FingerConvergenceState {
         &mut self,
         fingers: &[Option<Did>],
         now_ms: u64,
+        request_id: uuid::Uuid,
     ) -> Option<FingerFixRequest> {
-        if self.exhausted || fingers.is_empty() {
+        if fingers.is_empty() {
             return None;
         }
         if self
@@ -293,13 +325,7 @@ impl FingerConvergenceState {
         }
 
         let slot = self.verified.iter().position(|verified| !verified)?;
-        let request_id = self.next_request_id?;
         let request = FingerFixRequest::new(slot, request_id)?;
-        self.next_request_id = request_id.checked_add(1);
-        if self.next_request_id.is_none() {
-            self.exhausted = true;
-            return None;
-        }
         self.in_flight = Some(PendingFingerLookup {
             request,
             issued_epoch: self.epoch,
@@ -315,12 +341,13 @@ impl FingerConvergenceState {
         fingers: &[Option<Did>],
         slot: usize,
         now_ms: u64,
+        request_id: uuid::Uuid,
     ) -> Option<FingerFixRequest> {
         self.verified.fill(true);
         *self.verified.get_mut(slot)? = false;
         self.in_flight = None;
         self.last_issued_at_ms = None;
-        self.prepare_lookup(fingers, now_ms)
+        self.prepare_lookup(fingers, now_ms, request_id)
     }
 
     pub(crate) fn result_disposition(

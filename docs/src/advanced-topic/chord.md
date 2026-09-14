@@ -35,22 +35,29 @@ Rings treats entries learned from admission, successor changes, and peer removal
 not as proof that a finger slot is current. A lookup for slot `i` verifies the consecutive range
 from `i` through the highest slot whose target is no farther than the returned successor. This
 reduces sparse-table convergence from one lookup per bit to one lookup per distinct successor
-range. A topology change invalidates only slots whose hints changed.
+range. A topology change invalidates only slots whose hints changed. A node with no admitted
+successor keeps its ranges unverified but dormant: temporary isolation is not proof that the global
+membership set is empty, and the first successor admission activates the pending pass.
 
-Each node keeps at most one finger lookup in flight. Reports echo a node-local request identifier;
+Each node keeps at most one finger lookup in flight. Reports echo a fresh 128-bit UUID request
+identifier allocated at the effect boundary;
 results from an expired request or from a request invalidated by a topology change cannot overwrite
-newer state. A fleet's first automatic attempt is spread over a deterministic 10-second per-node
-phase window. Send cancellation, invalid reports, timeouts, and topology changes that invalidate an
+newer state, including after a process restart. A fleet's first automatic attempt is spread over a
+boot-randomized 10-second per-node phase window, so an identity cannot preselect its time bucket.
+Send cancellation, invalid reports, timeouts, and topology changes that invalidate an
 in-flight proof increase a progress-sensitive retry floor through 2, 4, 8, 16, 32, and 60 seconds;
 each retry is additionally spread across a full jitter window of the same size. Only an applied
 range proof resets that failure level. Missed
-deadlines schedule one future attempt rather than catch-up bursts, and topology stabilization and
-storage repair take priority over finger convergence.
+deadlines schedule one future attempt rather than catch-up bursts. Finger convergence may yield to
+at most two due topology/storage phases before its turn is reserved.
 
-One due node emits one routed lookup, not a broadcast or recursive fan-out. Its normal completion is
-one routed report; discovering an unconnected result may additionally require one routed connection
-offer and answer. The per-message relay hop budget and the retry schedule therefore bound each
-attempt and persistent-failure traffic separately.
+One due node emits one routed lookup rather than a broadcast. Its normal completion is one routed
+report. Discovering an unconnected result also runs connection admission, which sends a connect
+lookup and may query the new successor's bounded successor list; those peers can in turn require
+connections. The sync-storm gate therefore executes the real effect and transport path and counts
+the complete causal submission trace instead of multiplying a fixed message-leg estimate. The
+per-message relay hop budget bounds each carrier, while the retry schedule bounds only the originating
+node's finger emissions.
 
 These are per-node bounds: aggregate healthy bootstrap work still scales with the number of nodes.
 The phase window smooths a synchronized start but is not an N-independent destination rate limit.

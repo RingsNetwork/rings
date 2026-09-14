@@ -112,7 +112,18 @@ impl TopologyState {
     }
 
     pub(crate) fn finger_convergence_status(&self) -> FingerConvergenceStatus {
-        self.finger_convergence.status()
+        if successor_head(self).is_none() {
+            FingerConvergenceStatus::inactive()
+        } else {
+            self.finger_convergence.status()
+        }
+    }
+
+    #[cfg(all(test, not(target_family = "wasm")))]
+    pub(crate) fn finger_convergence_projection(
+        &self,
+    ) -> super::finger::FingerConvergenceProjection {
+        self.finger_convergence.projection()
     }
 
     pub(crate) fn finger_result_disposition(
@@ -214,8 +225,10 @@ pub enum TopologyEvent {
     BeginFingerRevalidation,
     /// Independently paced transition that advances pending finger convergence.
     AdvanceFingerConvergence {
-        /// Current wall-clock time used only for lookup rate and expiry bounds.
+        /// Current process-monotonic time used only for lookup rate and expiry bounds.
         now_ms: u64,
+        /// Fresh UUID correlation identifier allocated by the effect boundary.
+        request_id: uuid::Uuid,
     },
     /// Apply a reported successor to every slot proved by one current lookup.
     ApplyFinger {
@@ -412,8 +425,9 @@ fn closest_preceding_finger(state: &TopologyState, target: &BigUint) -> Option<D
 ///
 /// A local `find_successor` answer based only on the current successor head is
 /// still a hint: a closer node may exist behind that head. The exact target
-/// node is self-proving, and a node with no successor can prove only the empty
-/// sparse range; every other lookup crosses one admitted transport boundary.
+/// node is self-proving; every other lookup crosses one admitted transport
+/// boundary. A node without a successor does not enter this operation because
+/// temporary isolation proves nothing about global membership.
 fn finger_verification_route(state: &TopologyState, target: Did) -> FindSuccessorStep {
     match find_successor(state, target) {
         FindSuccessorStep::Local(successor) if successor != state.local && successor != target => {
@@ -614,9 +628,6 @@ fn step_remove(
         .copied()
         .filter(|&did| did != peer)
         .collect::<Vec<_>>();
-    let fingers = remove_finger_peer(&state.fingers, peer);
-    let mut finger_convergence = state.finger_convergence.clone();
-    finger_convergence.invalidate_hint_changes(&state.fingers, &fingers);
     if removed_head {
         match successor {
             SuccessorRemoval::Preserve => {}
@@ -625,6 +636,16 @@ fn step_remove(
                 next_successors = sorted_successors(validated, state.local, capacity);
             }
         }
+    }
+    let fingers = remove_finger_peer(&state.fingers, peer);
+    let mut finger_convergence = state.finger_convergence.clone();
+    if next_successors.is_empty() {
+        // Losing the last membership witness invalidates even slots whose
+        // `None` hint did not change: those empty ranges were proved only in
+        // the previous topology.
+        finger_convergence.invalidate_all_evidence();
+    } else {
+        finger_convergence.invalidate_hint_changes(&state.fingers, &fingers);
     }
     TopologyStep {
         state: TopologyState {
@@ -659,15 +680,19 @@ fn step_update_successor(state: &TopologyState, successor: Did, capacity: usize)
     }
 }
 
-fn step_fix_finger(state: &TopologyState, now_ms: u64) -> TopologyStep {
-    if state.fingers.is_empty() {
+fn step_fix_finger(state: &TopologyState, now_ms: u64, request_id: uuid::Uuid) -> TopologyStep {
+    // A temporarily isolated node has no membership evidence from which it can
+    // prove an empty finger range. Keep every slot unverified but dormant; a
+    // later successor admission makes the existing state pending again.
+    if state.fingers.is_empty() || successor_head(state).is_none() {
         return TopologyStep {
             state: state.clone(),
             actions: Vec::new(),
         };
     }
     let mut finger_convergence = state.finger_convergence.clone();
-    let Some(request) = finger_convergence.prepare_lookup(&state.fingers, now_ms) else {
+    let Some(request) = finger_convergence.prepare_lookup(&state.fingers, now_ms, request_id)
+    else {
         return TopologyStep {
             state: TopologyState {
                 finger_convergence,
@@ -815,7 +840,9 @@ fn step_event(state: &TopologyState, event: TopologyEvent, capacity: usize) -> T
             state: begin_finger_revalidation(state),
             actions: Vec::new(),
         },
-        TopologyEvent::AdvanceFingerConvergence { now_ms } => step_fix_finger(state, now_ms),
+        TopologyEvent::AdvanceFingerConvergence { now_ms, request_id } => {
+            step_fix_finger(state, now_ms, request_id)
+        }
         TopologyEvent::ApplyFinger {
             request,
             successor,

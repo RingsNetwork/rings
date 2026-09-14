@@ -9,6 +9,7 @@ use crate::dht::finger::finger_lookup_backoff_ms;
 use crate::dht::finger::FingerConvergenceStatus;
 use crate::lifecycle::StopToken;
 use crate::swarm::transport::DATA_CHANNEL_SEND_ACCEPT_BUDGET;
+use crate::utils::new_uuid;
 use crate::utils::try_sleep;
 use crate::utils::Instant;
 
@@ -20,6 +21,8 @@ const STORAGE_REPAIR_ADMISSION_BUDGET: Duration = DATA_CHANNEL_SEND_ACCEPT_BUDGE
 const MAINTENANCE_QUIET_GAP: Duration = STABILIZATION_STOP_POLL_INTERVAL;
 /// Fleet-start phase window before the first independently paced finger attempt.
 const FINGER_CONVERGENCE_INITIAL_JITTER: Duration = Duration::from_secs(10);
+/// A due finger turn may yield to at most stabilization plus its reserved repair.
+const MAX_FINGER_PRIORITY_DEFERRALS: u8 = 2;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MaintenanceTask {
     Stabilize,
@@ -122,8 +125,10 @@ struct MaintenanceDecision {
 ///   estimate, this serial loop cannot overlap it with stabilization and
 ///   reconciles the next deadline from actual completion.
 /// - finger retries use the convergence state's consecutive-failure level.
-///   Their deterministic full-jitter window grows with exponential backoff;
-///   only applied finger evidence resets that level.
+///   Their boot-randomized full-jitter window grows with exponential backoff;
+///   only applied finger evidence resets that level. A due turn may yield to at
+///   most two higher-priority phases before it is reserved, so topology and
+///   storage work cannot starve convergence indefinitely.
 struct MaintenanceSchedule {
     period_ms: u64,
     next_stabilize_ms: u64,
@@ -135,10 +140,20 @@ struct MaintenanceSchedule {
     finger_pending_last_poll: bool,
     finger_failure_streak: u8,
     finger_jitter_state: u64,
+    finger_priority_deferrals: u8,
 }
 
 impl MaintenanceSchedule {
     fn new(now_ms: u64, interval: Duration, local: crate::dht::Did) -> Self {
+        Self::new_with_jitter_entropy(now_ms, interval, local, new_uuid())
+    }
+
+    fn new_with_jitter_entropy(
+        now_ms: u64,
+        interval: Duration,
+        local: crate::dht::Did,
+        jitter_entropy: uuid::Uuid,
+    ) -> Self {
         let period_ms = duration_ms(interval).max(2);
         let offset_ms = duration_ms(STORAGE_REPAIR_PHASE_OFFSET)
             .min(period_ms / 2)
@@ -154,7 +169,8 @@ impl MaintenanceSchedule {
             next_finger_ms: u64::MAX,
             finger_pending_last_poll: false,
             finger_failure_streak: 0,
-            finger_jitter_state: finger_jitter_seed(local),
+            finger_jitter_state: finger_jitter_seed(local, jitter_entropy),
+            finger_priority_deferrals: 0,
         }
     }
 
@@ -175,16 +191,27 @@ impl MaintenanceSchedule {
         let reserved_repair_ready = self.reserved_repair_ready(now_ms, effective_repair_pending);
         let stabilization_due = now_ms >= self.next_stabilize_ms;
         let repair_has_window = effective_repair_pending && self.can_start_storage_repair(now_ms);
-        let task = if reserved_repair_ready {
+        let finger_ready = finger_status.pending() && now_ms >= self.next_finger_ms;
+        let finger_turn_reserved =
+            finger_ready && self.finger_priority_deferrals >= MAX_FINGER_PRIORITY_DEFERRALS;
+        let task = if finger_turn_reserved {
+            Some(MaintenanceTask::ConvergeFingers)
+        } else if reserved_repair_ready {
             Some(MaintenanceTask::Repair)
         } else if stabilization_due {
             Some(MaintenanceTask::Stabilize)
         } else if repair_has_window {
             Some(MaintenanceTask::Repair)
-        } else if finger_status.pending() && now_ms >= self.next_finger_ms {
+        } else if finger_ready {
             Some(MaintenanceTask::ConvergeFingers)
         } else {
             None
+        };
+
+        self.finger_priority_deferrals = match (finger_ready, task) {
+            (_, Some(MaintenanceTask::ConvergeFingers)) | (false, _) => 0,
+            (true, Some(_)) => self.finger_priority_deferrals.saturating_add(1),
+            (true, None) => self.finger_priority_deferrals,
         };
 
         MaintenanceDecision {
@@ -322,10 +349,11 @@ impl MaintenanceSchedule {
     }
 }
 
-fn finger_jitter_seed(local: crate::dht::Did) -> u64 {
+fn finger_jitter_seed(local: crate::dht::Did, entropy: uuid::Uuid) -> u64 {
     local
         .as_bytes()
         .iter()
+        .chain(entropy.as_bytes())
         .fold(0xcbf2_9ce4_8422_2325, |seed, byte| {
             seed.wrapping_mul(0x0000_0100_0000_01b3) ^ u64::from(*byte)
         })
@@ -339,8 +367,17 @@ fn mix_jitter(mut value: u64) -> u64 {
 }
 
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(crate) fn finger_schedule_deadline_for_test(local: crate::dht::Did, failure_streak: u8) -> u64 {
-    let mut schedule = MaintenanceSchedule::new(0, Duration::from_secs(15), local);
+pub(crate) fn finger_schedule_deadline_for_test(
+    local: crate::dht::Did,
+    jitter_entropy: uuid::Uuid,
+    failure_streak: u8,
+) -> u64 {
+    let mut schedule = MaintenanceSchedule::new_with_jitter_entropy(
+        0,
+        Duration::from_secs(15),
+        local,
+        jitter_entropy,
+    );
     let _ = schedule.poll(0, false, FingerConvergenceStatus::new(true, failure_streak));
     schedule.next_finger_ms
 }
@@ -542,9 +579,6 @@ fn remaining_delay(deadline_ms: u64, now_ms: u64) -> Duration {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-    use std::collections::BTreeSet;
-
     use super::*;
 
     const PERIOD: Duration = Duration::from_secs(15);
@@ -784,29 +818,25 @@ mod tests {
     }
 
     #[test]
-    fn test_initial_finger_jitter_spreads_a_fifty_node_fleet() {
-        let mut deadlines = Vec::new();
-        for local in 0..50u32 {
-            let mut schedule = MaintenanceSchedule::new(0, PERIOD, crate::dht::Did::from(local));
-            let _ = schedule.poll(0, false, finger_status(true));
-            deadlines.push(schedule.next_finger_ms);
-        }
-
-        let unique = deadlines.iter().copied().collect::<BTreeSet<_>>();
-        assert_eq!(unique.len(), deadlines.len());
-        let mut half_second_buckets = BTreeMap::<u64, usize>::new();
-        for deadline in deadlines {
-            let bucket = deadline.saturating_sub(1_000) / 500;
-            let count = half_second_buckets.entry(bucket).or_default();
-            *count = count.saturating_add(1);
-        }
-        assert!(half_second_buckets.values().all(|count| *count <= 4));
-
-        let mut first = MaintenanceSchedule::new(0, PERIOD, crate::dht::Did::from(4u32));
-        let mut replay = MaintenanceSchedule::new(0, PERIOD, crate::dht::Did::from(4u32));
+    fn test_initial_finger_jitter_uses_replayable_boot_entropy() {
+        let local = crate::dht::Did::from(4u32);
+        let entropy = uuid::Uuid::from_u128(1);
+        let mut first = MaintenanceSchedule::new_with_jitter_entropy(0, PERIOD, local, entropy);
+        let mut replay = MaintenanceSchedule::new_with_jitter_entropy(0, PERIOD, local, entropy);
+        let mut another_boot = MaintenanceSchedule::new_with_jitter_entropy(
+            0,
+            PERIOD,
+            local,
+            uuid::Uuid::from_u128(2),
+        );
         let _ = first.poll(0, false, finger_status(true));
         let _ = replay.poll(0, false, finger_status(true));
+        let _ = another_boot.poll(0, false, finger_status(true));
+
         assert_eq!(first.next_finger_ms, replay.next_finger_ms);
+        assert_ne!(first.next_finger_ms, another_boot.next_finger_ms);
+        assert!((1_000..=11_000).contains(&first.next_finger_ms));
+        assert!((1_000..=11_000).contains(&another_boot.next_finger_ms));
     }
 
     #[test]
@@ -839,22 +869,22 @@ mod tests {
     }
 
     #[test]
-    fn test_capped_failure_jitter_limits_fifty_node_hotspot_density() {
-        let mut one_second_buckets = BTreeMap::<u64, usize>::new();
-        for local in 0..50u32 {
-            let mut schedule = MaintenanceSchedule::new(0, PERIOD, crate::dht::Did::from(local));
+    fn test_capped_failure_jitter_keeps_every_boot_inside_the_retry_window() {
+        let local = crate::dht::Did::from(0u32);
+        for entropy in 1..=50u128 {
+            let mut schedule = MaintenanceSchedule::new_with_jitter_entropy(
+                0,
+                PERIOD,
+                local,
+                uuid::Uuid::from_u128(entropy),
+            );
             let _ = schedule.poll(0, false, FingerConvergenceStatus::new(true, u8::MAX));
             assert!((60_000..=120_000).contains(&schedule.next_finger_ms));
-            let bucket = schedule.next_finger_ms.saturating_sub(60_000) / 1_000;
-            let count = one_second_buckets.entry(bucket).or_default();
-            *count = count.saturating_add(1);
         }
-
-        assert!(one_second_buckets.values().all(|count| *count <= 5));
     }
 
     #[test]
-    fn test_topology_and_storage_phases_take_priority_over_finger_convergence() {
+    fn test_finger_convergence_yields_twice_then_gets_a_reserved_turn() {
         let mut schedule = MaintenanceSchedule::new(0, PERIOD, crate::dht::Did::from(0u32));
         schedule.next_finger_ms = 15_000;
         schedule.finger_pending_last_poll = true;
@@ -869,5 +899,10 @@ mod tests {
             schedule.poll(20_000, false, finger_status(true)).task,
             Some(MaintenanceTask::Repair)
         );
+        assert_eq!(
+            schedule.poll(20_000, true, finger_status(true)).task,
+            Some(MaintenanceTask::ConvergeFingers)
+        );
+        assert_eq!(schedule.finger_priority_deferrals, 0);
     }
 }

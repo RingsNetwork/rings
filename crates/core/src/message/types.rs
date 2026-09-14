@@ -841,9 +841,10 @@ mod tests {
 
     #[test]
     fn test_finger_fix_report_handler_round_trips_its_correlation_token() -> Result<()> {
-        let request = crate::dht::FingerFixRequest::new(17, 42).ok_or_else(|| {
-            crate::error::Error::InvalidMessage("invalid test request".to_owned())
-        })?;
+        let request =
+            crate::dht::FingerFixRequest::new(17, uuid::Uuid::from_u128(42)).ok_or_else(|| {
+                crate::error::Error::InvalidMessage("invalid test request".to_owned())
+            })?;
         let handler = FindSuccessorReportHandler::FixFingerTable { request };
         let wire = rings_codec::serialize(&handler).map_err(crate::error::Error::CodecSerialize)?;
         let decoded: FindSuccessorReportHandler =

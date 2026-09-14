@@ -31,10 +31,11 @@
 //!   * Stage 4 — hand-off cleanup safety for #614 S2'. It abstracts one
 //!     placement key through copy -> ack -> delete and checks that local
 //!     deletion is reachable only after the successor state contains the key.
-//!   * Stage 5 — finger retry resource safety. A finite transition model covers
-//!     issue, progress, invalid response, cancellation, loss, timeout, topology
-//!     change, duplicate delivery, and restart. It checks one logical emission
-//!     per issue, the per-node interval, and progress-sensitive retry backoff.
+//!   * Stage 5 — finger retry resource safety. A finite checker executes the
+//!     production topology transition across progress, invalid response,
+//!     cancellation, loss, timeout, topology change, duplicate delivery, and
+//!     restart. It checks non-reused request correlation, one logical
+//!     emission per transition, the per-process interval, and retry backoff.
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;

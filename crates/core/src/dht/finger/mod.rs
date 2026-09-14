@@ -11,6 +11,8 @@ use crate::dht::Did;
 mod convergence;
 
 pub(crate) use convergence::finger_lookup_backoff_ms;
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(crate) use convergence::FingerConvergenceProjection;
 pub(crate) use convergence::FingerConvergenceState;
 pub(crate) use convergence::FingerConvergenceStatus;
 pub use convergence::FingerFixRequest;
@@ -180,7 +182,7 @@ impl FingerTable {
         slot: usize,
     ) -> Option<crate::dht::FingerFixRequest> {
         self.convergence
-            .prepare_slot_for_test(&self.finger, slot, 1_000)
+            .prepare_slot_for_test(&self.finger, slot, 1_000, crate::utils::new_uuid())
     }
 
     /// get finger list

@@ -4,7 +4,7 @@
 
 ### Breaking changes
 
-- Finger-table lookup reports now carry a node-local correlation token instead of a bare slot
+- Finger-table lookup reports now carry a fresh UUID correlation token instead of a bare slot
   index. The wire format is incompatible with 0.25.x, so every node in an overlay must upgrade
   together.
 
@@ -12,12 +12,14 @@
 
 - Finger-table convergence distinguishes inferred hints from verified ranges. One lookup proves
   every consecutive slot owned by the reported successor; topology changes invalidate only the
-  affected slots, and correlated request epochs reject stale in-flight results.
+  affected slots, losing the last successor invalidates all membership evidence, and correlated
+  request epochs reject stale in-flight results.
 - Automatic convergence permits one lookup per node at a time, spreads simultaneous fleet starts
-  over a deterministic 10-second phase window, and has no catch-up bursts. Send failure, invalid
+  over a boot-randomized 10-second phase window, and has no catch-up bursts. Send failure, invalid
   reports, timeouts, and topology invalidation of an in-flight proof use a
   2/4/8/16/32/60-second exponential retry floor plus a full jitter window; only an applied range
-  proof resets the failure level. Stabilization and storage repair retain scheduling priority.
+  proof resets the failure level. A due convergence turn may yield to at most two topology or
+  storage phases before it is reserved.
 
 ## 0.25.0
 

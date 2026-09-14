@@ -165,7 +165,7 @@ async fn test_failed_dht_retirement_preserves_active_peer_state() -> Result<()> 
     let attempt = transport.reserve_pending_connection(peer).await?;
     assert!(transport.activate_connection_for_test(attempt)?);
     transport.mark_peer_liveness_connected(attempt);
-    let request = FingerFixRequest::new(3, 1)
+    let request = FingerFixRequest::new(3, uuid::Uuid::from_u128(1))
         .ok_or_else(|| Error::InvalidMessage("invalid test finger request".to_owned()))?;
     transport
         .pending_finger_updates

@@ -34,7 +34,8 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::storage::KvStorageInterface;
 use crate::storage::MemStorage;
-use crate::utils::get_epoch_ms;
+use crate::utils::new_uuid;
+use crate::utils::Instant;
 
 /// Storage accepted by [`PeerRing::new_with_storage`].
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
@@ -57,6 +58,7 @@ pub struct PeerRing {
     pub cache: EntryStorage,
     storage_virtual_node_config: VirtualNodeConfig,
     topology_transition: Mutex<()>,
+    finger_clock_origin: Instant,
     /// Serializes every read-modify-write of a storage slot (see `chord::storage`).
     pub(super) storage_transition: FuturesMutex<()>,
 }
@@ -107,6 +109,7 @@ impl PeerRing {
             cache: Box::new(MemStorage::bounded(LOCAL_CACHE_CAPACITY)),
             storage_virtual_node_config: virtual_nodes,
             topology_transition: Mutex::new(()),
+            finger_clock_origin: Instant::now(),
             storage_transition: FuturesMutex::new(()),
             did,
         }
@@ -328,8 +331,17 @@ impl PeerRing {
         )
     }
 
+    fn finger_now_ms(&self) -> u64 {
+        u64::try_from(self.finger_clock_origin.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
     pub(crate) fn finger_convergence_status(&self) -> Result<FingerConvergenceStatus> {
         self.with_topology_state(TopologyState::finger_convergence_status)
+    }
+
+    pub(crate) fn begin_finger_revalidation(&self) -> Result<PeerRingAction> {
+        let next = self.transition_topology(TopologyEvent::BeginFingerRevalidation)?;
+        Ok(self.topology_leaf_actions(next.actions))
     }
 
     pub(crate) fn finger_result_disposition(
@@ -345,7 +357,7 @@ impl PeerRing {
         request: FingerFixRequest,
         successor: Did,
     ) -> Result<FingerResultDisposition> {
-        let now_ms = u64::try_from(get_epoch_ms()).unwrap_or(u64::MAX);
+        let now_ms = self.finger_now_ms();
         let mut disposition = FingerResultDisposition::Stale;
         self.transition_topology_with_observer(
             TopologyEvent::ApplyFinger {
@@ -359,14 +371,17 @@ impl PeerRing {
     }
 
     pub(crate) fn cancel_finger_lookup(&self, request: FingerFixRequest) -> Result<()> {
-        let now_ms = u64::try_from(get_epoch_ms()).unwrap_or(u64::MAX);
+        let now_ms = self.finger_now_ms();
         self.transition_topology(TopologyEvent::CancelFinger { request, now_ms })
             .map(|_| ())
     }
 
     pub(crate) fn advance_finger_convergence(&self) -> Result<PeerRingAction> {
-        let now_ms = u64::try_from(get_epoch_ms()).unwrap_or(u64::MAX);
-        let next = self.transition_topology(TopologyEvent::AdvanceFingerConvergence { now_ms })?;
+        let now_ms = self.finger_now_ms();
+        let next = self.transition_topology(TopologyEvent::AdvanceFingerConvergence {
+            now_ms,
+            request_id: new_uuid(),
+        })?;
         Ok(self.topology_leaf_actions(next.actions))
     }
 
@@ -375,7 +390,7 @@ impl PeerRing {
         peer: Did,
         fixed_fingers: Vec<topology::ConditionalFingerUpdate>,
     ) -> Result<PeerRingAction> {
-        let now_ms = u64::try_from(get_epoch_ms()).unwrap_or(u64::MAX);
+        let now_ms = self.finger_now_ms();
         let next = self.transition_topology(TopologyEvent::Admit {
             peer,
             fixed_fingers,
@@ -417,8 +432,8 @@ impl Chord<PeerRingAction> for PeerRing {
     }
 
     fn fix_fingers(&self) -> Result<PeerRingAction> {
-        let next = self.transition_topology(TopologyEvent::BeginFingerRevalidation)?;
-        Ok(self.topology_leaf_actions(next.actions))
+        self.begin_finger_revalidation()?;
+        self.advance_finger_convergence()
     }
 }
 

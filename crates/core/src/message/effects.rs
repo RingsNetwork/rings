@@ -665,7 +665,7 @@ mod tests {
     fn test_dht_find_successor_for_fix_echoes_range_request() -> Result<()> {
         let next = did();
         let target = did();
-        let request = crate::dht::FingerFixRequest::new(11, 7)
+        let request = crate::dht::FingerFixRequest::new(11, uuid::Uuid::from_u128(7))
             .ok_or_else(|| Error::InvalidMessage("invalid test finger request".to_owned()))?;
 
         let effect = single_effect(lower_dht_action(

@@ -10,11 +10,12 @@ use futures::FutureExt;
 use futures::StreamExt;
 use rings_transport::connections::dummy_controlled;
 
-use crate::consts::MAX_RELAY_HOPS;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
+use crate::dht::finger::FINGER_LOOKUP_MIN_INTERVAL_MS;
 use crate::dht::finger_schedule_deadline_for_test;
+use crate::dht::successor::SuccessorReader;
 use crate::dht::Chord;
 use crate::dht::PeerRingAction;
 use crate::dht::StorageRepairOutcome;
@@ -49,6 +50,7 @@ use crate::simulation::SimulationRuntimeGuard;
 use crate::simulation::CONTROL_DEADLINE_MS;
 use crate::storage::MemStorage;
 use crate::swarm::transport::outbound_submit_count_for_test;
+use crate::swarm::transport::reset_outbound_submit_count_for_test;
 use crate::swarm::transport::TrackedStorageSyncOutcome;
 use crate::swarm::transport::OUTBOUND_CONTROL_BURST;
 use crate::swarm::transport::OUTBOUND_GLOBAL_BYTE_CAPACITY;
@@ -75,8 +77,6 @@ const VIRTUAL_SERVICE_BYTES_PER_MS: usize = 256;
 const MAX_FRAME_SERVICE_MS: u64 = 64;
 const FINGER_INITIAL_PHASE_MS: u64 = 10_000;
 const FINGER_MAX_RETRY_FLOOR_MS: u64 = 60_000;
-const FINGER_ROUTED_LEGS_PER_ATTEMPT: usize = 4;
-const FINGER_MODEL_MAX_LINK_HOPS_PER_BUCKET: usize = 2_048;
 
 const MODEL_LIMITS: SimLimits = SimLimits {
     node_bytes: 128 * 1024 * 1024,
@@ -91,71 +91,130 @@ enum ScenarioTopology {
     Hotspot,
 }
 
-fn peak_deadline_bucket(deadlines: &[u64], origin_ms: u64, bucket_ms: u64) -> usize {
-    let mut buckets = BTreeMap::<u64, usize>::new();
-    for deadline in deadlines {
-        let bucket = deadline.saturating_sub(origin_ms) / bucket_ms;
-        let count = buckets.entry(bucket).or_default();
-        *count = count.saturating_add(1);
+/// Law: boot entropy, rather than a grindable DID alone, selects a deadline
+/// inside the explicit per-node initial and retry windows.
+#[test]
+fn test_finger_convergence_schedule_has_per_node_bounds_and_boot_entropy() {
+    for identity in 0..200u32 {
+        let local = crate::dht::Did::from(identity);
+        let first_boot = uuid::Uuid::from_u128(u128::from(identity).saturating_add(1));
+        let second_boot = uuid::Uuid::from_u128(u128::from(identity).saturating_add(10_001));
+        let initial = finger_schedule_deadline_for_test(local, first_boot, 0);
+        let another_initial = finger_schedule_deadline_for_test(local, second_boot, 0);
+        let retry = finger_schedule_deadline_for_test(local, first_boot, u8::MAX);
+
+        assert!((1_000..=1_000 + FINGER_INITIAL_PHASE_MS).contains(&initial));
+        assert!((1_000..=1_000 + FINGER_INITIAL_PHASE_MS).contains(&another_initial));
+        assert!(
+            (FINGER_MAX_RETRY_FLOOR_MS..=FINGER_MAX_RETRY_FLOOR_MS.saturating_mul(2))
+                .contains(&retry)
+        );
     }
-    buckets.values().copied().max().unwrap_or(0)
 }
 
-/// Finger convergence shares no broadcast action: one due node emits one
-/// routed request, followed by one routed report and, only for a missing peer,
-/// one routed offer/answer pair. This gate budgets the worst four routed legs
-/// at the relay-hop limit and checks representative N/N+1 fleet projections.
-#[test]
-fn test_finger_convergence_network_budget_under_synchronous_start_and_failure() {
-    let mut previous_initial_peak = 0usize;
-    let mut previous_retry_peak = 0usize;
-    for node_count in [10usize, 11, 25, 26, 50, 51] {
-        let initial_deadlines = (0..node_count)
-            .map(|index| {
-                finger_schedule_deadline_for_test(
-                    crate::dht::Did::from(u32::try_from(index).unwrap_or(u32::MAX)),
-                    0,
-                )
-            })
-            .collect::<Vec<_>>();
-        assert!(initial_deadlines
-            .iter()
-            .all(|deadline| (1_000..=1_000 + FINGER_INITIAL_PHASE_MS).contains(deadline)));
-        let initial_peak = peak_deadline_bucket(&initial_deadlines, 1_000, 500);
+/// Production-path budget witness for one lookup that discovers a missing
+/// finger peer. The measured submissions include lookup routing, its report,
+/// and every admission follow-up caused while the new connection quiesces.
+#[tokio::test(start_paused = true)]
+async fn test_finger_discovery_measures_the_complete_transport_cascade() {
+    const MAX_CAUSAL_CONTROL_SUBMISSIONS: usize = 20;
 
-        let retry_deadlines = (0..node_count)
-            .map(|index| {
-                finger_schedule_deadline_for_test(
-                    crate::dht::Did::from(u32::try_from(index).unwrap_or(u32::MAX)),
-                    u8::MAX,
-                )
-            })
-            .collect::<Vec<_>>();
-        assert!(retry_deadlines.iter().all(|deadline| {
-            (FINGER_MAX_RETRY_FLOOR_MS..=FINGER_MAX_RETRY_FLOOR_MS.saturating_mul(2))
-                .contains(deadline)
-        }));
-        let retry_peak = peak_deadline_bucket(&retry_deadlines, FINGER_MAX_RETRY_FLOOR_MS, 1_000);
+    let runtime = SimulationRuntimeGuard::enter(768, TEST_EPOCH_MS, ProtectionProfile::ALL_ENABLED)
+        .expect("finger simulation runtime must install");
+    let nodes = build_finger_nodes(&[3, 1, 10]);
+    let (observer, seed, candidate) = finger_discovery_path(&nodes);
 
-        let allowed_peak = node_count.saturating_add(9) / 10 + 1;
-        assert!(initial_peak <= allowed_peak);
-        assert!(retry_peak <= allowed_peak);
-        let worst_initial_link_hops = initial_peak
-            .saturating_mul(FINGER_ROUTED_LEGS_PER_ATTEMPT)
-            .saturating_mul(usize::from(MAX_RELAY_HOPS));
-        let worst_retry_link_hops = retry_peak
-            .saturating_mul(FINGER_ROUTED_LEGS_PER_ATTEMPT)
-            .saturating_mul(usize::from(MAX_RELAY_HOPS));
-        assert!(worst_initial_link_hops <= FINGER_MODEL_MAX_LINK_HOPS_PER_BUCKET);
-        assert!(worst_retry_link_hops <= FINGER_MODEL_MAX_LINK_HOPS_PER_BUCKET);
+    manually_establish_connection(&nodes[observer].swarm, &nodes[seed].swarm).await;
+    drain_bootstrap(&runtime, &nodes).await;
+    manually_establish_connection(&nodes[seed].swarm, &nodes[candidate].swarm).await;
+    drain_bootstrap(&runtime, &nodes).await;
+    assert!(nodes[seed]
+        .dht()
+        .successors()
+        .list()
+        .expect("seed successor view must be readable")
+        .contains(&nodes[candidate].did()));
+    assert!(nodes[observer]
+        .swarm
+        .transport
+        .get_connection(nodes[candidate].did())
+        .is_none());
 
-        if matches!(node_count, 11 | 26 | 51) {
-            assert!(initial_peak <= previous_initial_peak.saturating_add(1));
-            assert!(retry_peak <= previous_retry_peak.saturating_add(1));
+    nodes[observer]
+        .swarm
+        .stabilizer()
+        .converge_fingers_for_simulation()
+        .await
+        .expect("first production finger range must start");
+    drain_untraced(&runtime, &nodes).await;
+    assert!(nodes[observer]
+        .swarm
+        .transport
+        .get_connection(nodes[candidate].did())
+        .is_none());
+
+    runtime
+        .advance(Duration::from_millis(FINGER_LOOKUP_MIN_INTERVAL_MS))
+        .await
+        .expect("finger interval must advance on the simulation clock");
+    reset_outbound_submit_count_for_test();
+    nodes[observer]
+        .swarm
+        .stabilizer()
+        .converge_fingers_for_simulation()
+        .await
+        .expect("candidate-producing production finger range must start");
+    drain_untraced(&runtime, &nodes).await;
+    let submissions = outbound_submit_count_for_test();
+
+    assert!(nodes[observer]
+        .swarm
+        .transport
+        .get_connection(nodes[candidate].did())
+        .is_some(),
+        "candidate was not connected: observer_fingers={:?} seed_successors={:?} submissions={submissions}",
+        nodes[observer]
+            .dht()
+            .lock_finger()
+            .expect("observer finger table must be readable")
+            .list(),
+        nodes[seed]
+            .dht()
+            .successors()
+            .list()
+            .expect("seed successors must be readable"));
+    assert!(
+        submissions > 4,
+        "real admission cascade unexpectedly fit the obsolete four-leg model"
+    );
+    assert!(
+        submissions <= MAX_CAUSAL_CONTROL_SUBMISSIONS,
+        "one three-node finger discovery emitted {submissions} control submissions"
+    );
+
+    let generations = connection_endpoints(&nodes)
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    close_nodes(&runtime, &nodes, &generations).await;
+    drop(nodes);
+    drop(runtime);
+}
+
+fn finger_discovery_path(nodes: &[Node]) -> (usize, usize, usize) {
+    let sorted = sorted_indices(nodes);
+    let observer = sorted.first().copied().unwrap_or(0);
+    for (seed_position, seed) in sorted.iter().copied().enumerate().skip(1) {
+        let seed_bits = crate::dht::topology::dist(nodes[observer].did(), nodes[seed].did()).bits();
+        for candidate in sorted.iter().copied().skip(seed_position.saturating_add(1)) {
+            let candidate_bits =
+                crate::dht::topology::dist(nodes[observer].did(), nodes[candidate].did()).bits();
+            if candidate_bits > seed_bits {
+                return (observer, seed, candidate);
+            }
         }
-        previous_initial_peak = initial_peak;
-        previous_retry_peak = retry_peak;
     }
+    panic!("deterministic node fixture must contain two distinct finger ranges");
 }
 
 impl ScenarioTopology {
@@ -402,6 +461,26 @@ fn build_repair_nodes(count: usize) -> Vec<Node> {
                 session,
             )
             .dht_storage_redundancy(2)
+            .dht_virtual_nodes(0)
+            .build();
+            Node::new(Arc::new(swarm))
+        })
+        .collect()
+}
+
+fn build_finger_nodes(key_indices: &[usize]) -> Vec<Node> {
+    key_indices
+        .iter()
+        .copied()
+        .map(|index| {
+            let session = SessionSk::new_with_seckey(&deterministic_key(index))
+                .expect("deterministic finger-node session must be valid");
+            let swarm = SwarmBuilder::new(
+                0,
+                "stun://stun.l.google.com:19302",
+                Box::new(MemStorage::new()),
+                session,
+            )
             .dht_virtual_nodes(0)
             .build();
             Node::new(Arc::new(swarm))

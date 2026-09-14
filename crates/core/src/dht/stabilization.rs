@@ -18,7 +18,6 @@ use rings_transport::core::transport::WebrtcConnectionState;
 pub use self::storage_repair::StorageRepairOutcome;
 use crate::dht::successor::SuccessorReader;
 use crate::dht::types::CorrectChord;
-use crate::dht::Chord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::dht::PeerRingAction;
@@ -796,12 +795,18 @@ impl Stabilizer {
     }
 
     async fn begin_finger_revalidation(&self) -> Result<()> {
-        self.interpret_finger_action(self.dht.fix_fingers()).await
+        self.interpret_finger_action(self.dht.begin_finger_revalidation())
+            .await
     }
 
     async fn advance_finger_convergence(&self) -> Result<()> {
         self.interpret_finger_action(self.dht.advance_finger_convergence())
             .await
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) async fn converge_fingers_for_simulation(&self) -> Result<()> {
+        self.advance_finger_convergence().await
     }
 
     async fn interpret_finger_action(&self, action: Result<PeerRingAction>) -> Result<()> {
@@ -852,7 +857,7 @@ impl Stabilizer {
                         next_hop_state = ?next_hop_state,
                         finger_did = %finger_did,
                         finger_slot = request.slot(),
-                        request_id = request.request_id(),
+                        request_id = %request.request_id(),
                         tx_id = %tx_id,
                         "STABILIZATION fix_fingers send start"
                     );
@@ -864,7 +869,7 @@ impl Stabilizer {
                             next_hop_state = ?next_hop_state,
                             finger_did = %finger_did,
                             finger_slot = request.slot(),
-                            request_id = request.request_id(),
+                            request_id = %request.request_id(),
                             tx_id = %tx_id,
                             error = ?e,
                             "STABILIZATION fix_fingers send failed"
@@ -878,7 +883,7 @@ impl Stabilizer {
                         next_hop = %closest_predecessor,
                         finger_did = %finger_did,
                         finger_slot = request.slot(),
-                        request_id = request.request_id(),
+                        request_id = %request.request_id(),
                         tx_id = %tx_id,
                         "STABILIZATION fix_fingers send complete"
                     );
@@ -973,34 +978,4 @@ pub(crate) use maintenance::MaintenancePhaseKind;
 mod storage_repair;
 
 #[cfg(test)]
-mod tests {
-    use std::sync::atomic::AtomicBool;
-    use std::sync::atomic::Ordering;
-
-    use super::*;
-
-    struct DropWitness(Arc<AtomicBool>);
-
-    impl Drop for DropWitness {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::Release);
-        }
-    }
-
-    #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_family = "wasm"), tokio::test)]
-    async fn test_step_deadline_drops_work_that_does_not_complete() {
-        let dropped = Arc::new(AtomicBool::new(false));
-        let witness = dropped.clone();
-        let future = async move {
-            let _witness = DropWitness(witness);
-            futures::future::pending::<()>().await;
-            Ok(())
-        };
-
-        let result = await_step_deadline(future, Duration::from_millis(1)).await;
-
-        assert!(matches!(result, StepDeadline::TimedOut));
-        assert!(dropped.load(Ordering::Acquire));
-    }
-}
+mod deadline_tests;

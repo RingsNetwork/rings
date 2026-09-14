@@ -103,3 +103,35 @@ async fn test_finger_table_tracks_clockwise_and_wrapped_joins() -> Result<()> {
     assert_eq!(node_d.successors().list()?, vec![a]);
     Ok(())
 }
+
+#[test]
+fn test_public_fix_fingers_advances_one_range() -> Result<()> {
+    let local = Did::from(0u32);
+    let seed = Did::from(8u32);
+    let dht = PeerRing::new_with_storage(local, 3, Box::new(MemStorage::new()));
+    let _ = dht.join(seed)?;
+
+    assert!(matches!(
+        dht.fix_fingers()?,
+        PeerRingAction::RemoteAction(
+            next,
+            RemoteAction::FindSuccessorForFix { .. }
+        ) if next == seed
+    ));
+    Ok(())
+}
+
+#[test]
+fn test_begin_finger_revalidation_does_not_emit_a_lookup() -> Result<()> {
+    let local = Did::from(0u32);
+    let seed = Did::from(8u32);
+    let dht = PeerRing::new_with_storage(local, 3, Box::new(MemStorage::new()));
+    let _ = dht.join(seed)?;
+
+    assert!(matches!(
+        dht.begin_finger_revalidation()?,
+        PeerRingAction::None
+    ));
+    assert!(dht.finger_convergence_status()?.pending());
+    Ok(())
+}
