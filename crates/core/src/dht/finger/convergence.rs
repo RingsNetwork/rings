@@ -1,0 +1,317 @@
+//! Range-aware convergence state for the sparse Chord finger table.
+//!
+//! State relation:
+//! - `verified[i]` means slot `i` was proved after its last hint change.
+//! - `slot_epoch[i]` records that last change and prevents a range result from
+//!   overwriting a slot changed after the lookup was issued.
+//! - `in_flight` contains at most one request; only its exact token may apply.
+//! - `last_issued_at_ms` enforces a hard per-node emission interval, while the
+//!   runtime scheduler adds jitter and never performs catch-up bursts.
+
+use num_bigint::BigUint;
+use serde::Deserialize;
+use serde::Serialize;
+
+use crate::dht::topology::dist;
+use crate::dht::Did;
+
+/// Minimum wall-clock separation between automatic finger lookup emissions.
+pub(crate) const FINGER_LOOKUP_MIN_INTERVAL_MS: u64 = 1_000;
+
+/// Time after which an unanswered finger lookup no longer blocks convergence.
+const FINGER_LOOKUP_TIMEOUT_MS: u64 = 10_000;
+
+/// Correlation token for one range-aware finger lookup.
+///
+/// The token is echoed in the lookup report. A report may mutate local state
+/// only while this exact request remains in flight, so a topology change or a
+/// retry cannot be overwritten by an older result.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct FingerFixRequest {
+    pub(crate) slot: u16,
+    pub(crate) request_id: u64,
+}
+
+impl FingerFixRequest {
+    pub(crate) fn new(slot: usize, request_id: u64) -> Option<Self> {
+        Some(Self {
+            slot: u16::try_from(slot).ok()?,
+            request_id,
+        })
+    }
+
+    /// Lowest finger slot whose successor this request proves.
+    pub const fn slot(self) -> u16 {
+        self.slot
+    }
+
+    /// Node-local monotonic request identifier.
+    pub const fn request_id(self) -> u64 {
+        self.request_id
+    }
+
+    pub(crate) fn slot_index(self) -> usize {
+        usize::from(self.slot)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct PendingFingerLookup {
+    request: FingerFixRequest,
+    issued_epoch: u64,
+    expires_at_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct FingerConvergenceState {
+    epoch: u64,
+    slot_epoch: Vec<u64>,
+    pub(crate) verified: Vec<bool>,
+    in_flight: Option<PendingFingerLookup>,
+    next_request_id: Option<u64>,
+    last_issued_at_ms: Option<u64>,
+    exhausted: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FingerResultDisposition {
+    Applied { end: usize },
+    Invalid,
+    Stale,
+}
+
+impl FingerConvergenceState {
+    pub(crate) fn new(slot_count: usize) -> Self {
+        Self {
+            epoch: 0,
+            slot_epoch: vec![0; slot_count],
+            verified: vec![false; slot_count],
+            in_flight: None,
+            next_request_id: Some(1),
+            last_issued_at_ms: None,
+            exhausted: false,
+        }
+    }
+
+    pub(crate) fn normalized(mut self, slot_count: usize) -> Self {
+        self.slot_epoch.resize(slot_count, self.epoch);
+        self.verified.resize(slot_count, false);
+        if self
+            .in_flight
+            .is_some_and(|pending| pending.request.slot_index() >= slot_count)
+        {
+            self.in_flight = None;
+        }
+        self
+    }
+
+    pub(crate) fn is_pending(&self) -> bool {
+        self.in_flight.is_some() || self.verified.iter().any(|verified| !verified)
+    }
+
+    fn request_is_current(&self, request: FingerFixRequest) -> bool {
+        self.in_flight
+            .is_some_and(|pending| pending.request == request)
+    }
+
+    pub(crate) fn invalidate_hint_changes(
+        &mut self,
+        before: &[Option<Did>],
+        after: &[Option<Did>],
+    ) {
+        let changed = before
+            .iter()
+            .zip(after)
+            .map(|(before, after)| before != after)
+            .collect::<Vec<_>>();
+        if !changed.iter().any(|changed| *changed) {
+            return;
+        }
+
+        let Some(next_epoch) = self.epoch.checked_add(1) else {
+            self.exhausted = true;
+            self.in_flight = None;
+            self.verified.fill(false);
+            return;
+        };
+        self.epoch = next_epoch;
+        for ((slot_epoch, verified), changed) in self
+            .slot_epoch
+            .iter_mut()
+            .zip(&mut self.verified)
+            .zip(&changed)
+        {
+            if *changed {
+                *slot_epoch = next_epoch;
+                *verified = false;
+            }
+        }
+
+        if self.in_flight.is_some_and(|pending| {
+            changed
+                .get(pending.request.slot_index())
+                .copied()
+                .unwrap_or(true)
+        }) {
+            self.in_flight = None;
+        }
+    }
+
+    fn refresh_next_range(&mut self, fingers: &[Option<Did>], cursor: usize) {
+        let slot_count = fingers.len();
+        if slot_count == 0 {
+            return;
+        }
+        let start = cursor.saturating_add(1) % slot_count;
+        let Some(value) = fingers.get(start).copied() else {
+            return;
+        };
+        for (finger, verified) in fingers
+            .iter()
+            .skip(start)
+            .zip(self.verified.iter_mut().skip(start))
+        {
+            if *finger != value {
+                break;
+            }
+            *verified = false;
+        }
+    }
+
+    pub(crate) fn begin_revalidation(&mut self, fingers: &[Option<Did>], cursor: usize) {
+        if !self.exhausted
+            && self.in_flight.is_none()
+            && self.verified.iter().all(|verified| *verified)
+        {
+            self.refresh_next_range(fingers, cursor);
+        }
+    }
+
+    pub(crate) fn prepare_lookup(
+        &mut self,
+        fingers: &[Option<Did>],
+        now_ms: u64,
+    ) -> Option<FingerFixRequest> {
+        if self.exhausted || fingers.is_empty() {
+            return None;
+        }
+        if self
+            .in_flight
+            .is_some_and(|pending| now_ms >= pending.expires_at_ms)
+        {
+            self.in_flight = None;
+        }
+        if self.in_flight.is_some() {
+            return None;
+        }
+        if self.verified.iter().all(|verified| *verified) {
+            return None;
+        }
+        if self
+            .last_issued_at_ms
+            .is_some_and(|last| now_ms.saturating_sub(last) < FINGER_LOOKUP_MIN_INTERVAL_MS)
+        {
+            return None;
+        }
+
+        let slot = self.verified.iter().position(|verified| !verified)?;
+        let request_id = self.next_request_id?;
+        let request = FingerFixRequest::new(slot, request_id)?;
+        self.next_request_id = request_id.checked_add(1);
+        if self.next_request_id.is_none() {
+            self.exhausted = true;
+            return None;
+        }
+        self.in_flight = Some(PendingFingerLookup {
+            request,
+            issued_epoch: self.epoch,
+            expires_at_ms: now_ms.saturating_add(FINGER_LOOKUP_TIMEOUT_MS),
+        });
+        self.last_issued_at_ms = Some(now_ms);
+        Some(request)
+    }
+
+    #[cfg(all(test, not(target_family = "wasm")))]
+    pub(crate) fn prepare_slot_for_test(
+        &mut self,
+        fingers: &[Option<Did>],
+        slot: usize,
+        now_ms: u64,
+    ) -> Option<FingerFixRequest> {
+        self.verified.fill(true);
+        *self.verified.get_mut(slot)? = false;
+        self.in_flight = None;
+        self.last_issued_at_ms = None;
+        self.prepare_lookup(fingers, now_ms)
+    }
+
+    pub(crate) fn result_disposition(
+        &self,
+        local: Did,
+        slot_count: usize,
+        request: FingerFixRequest,
+        successor: Did,
+    ) -> FingerResultDisposition {
+        if !self.request_is_current(request) {
+            return FingerResultDisposition::Stale;
+        }
+        match finger_proof_end(local, successor, request.slot_index(), slot_count) {
+            Some(end) => FingerResultDisposition::Applied { end },
+            None => FingerResultDisposition::Invalid,
+        }
+    }
+
+    pub(crate) fn apply_result(
+        &mut self,
+        local: Did,
+        fingers: &mut [Option<Did>],
+        request: FingerFixRequest,
+        successor: Did,
+    ) -> FingerResultDisposition {
+        let Some(pending) = self.in_flight.filter(|pending| pending.request == request) else {
+            return FingerResultDisposition::Stale;
+        };
+        self.in_flight = None;
+        let Some(end) = finger_proof_end(local, successor, request.slot_index(), fingers.len())
+        else {
+            return FingerResultDisposition::Invalid;
+        };
+        let replacement = (successor != local).then_some(successor);
+        let count = end.saturating_sub(request.slot_index()).saturating_add(1);
+        for ((finger, slot_epoch), verified) in fingers
+            .iter_mut()
+            .zip(&self.slot_epoch)
+            .zip(&mut self.verified)
+            .skip(request.slot_index())
+            .take(count)
+        {
+            if *slot_epoch <= pending.issued_epoch {
+                *finger = replacement;
+                *verified = true;
+            }
+        }
+        FingerResultDisposition::Applied { end }
+    }
+
+    pub(crate) fn cancel(&mut self, request: FingerFixRequest) {
+        if self.request_is_current(request) {
+            self.in_flight = None;
+        }
+    }
+}
+
+fn finger_proof_end(local: Did, successor: Did, start: usize, slot_count: usize) -> Option<usize> {
+    let last = slot_count.checked_sub(1)?;
+    if start > last {
+        return None;
+    }
+    if successor == local {
+        return Some(last);
+    }
+    let distance = dist(local, successor);
+    if distance < (BigUint::from(1u8) << start) {
+        return None;
+    }
+    let highest = usize::try_from(distance.bits().saturating_sub(1)).ok()?;
+    Some(highest.min(last))
+}

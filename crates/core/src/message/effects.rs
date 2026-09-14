@@ -322,11 +322,11 @@ pub(crate) fn lower_dht_action<'payload>(
         }
         PeerRingAction::RemoteAction(
             next,
-            PeerRingRemoteAction::FindSuccessorForFix { did, index },
+            PeerRingRemoteAction::FindSuccessorForFix { did, request },
         ) => Ok(find_successor_effect(
             *next,
             *did,
-            FindSuccessorReportHandler::FixFingerTable { index: *index },
+            FindSuccessorReportHandler::FixFingerTable { request: *request },
         )),
         PeerRingAction::RemoteAction(successor, PeerRingRemoteAction::QueryForSuccessorList) => {
             Ok(Some(if is_connected(*successor) {
@@ -662,15 +662,16 @@ mod tests {
     }
 
     #[test]
-    fn test_dht_find_successor_for_fix_sends_direct_indexed_report() -> Result<()> {
+    fn test_dht_find_successor_for_fix_echoes_range_request() -> Result<()> {
         let next = did();
         let target = did();
-        let index = 11;
+        let request = crate::dht::FingerFixRequest::new(11, 7)
+            .ok_or_else(|| Error::InvalidMessage("invalid test finger request".to_owned()))?;
 
         let effect = single_effect(lower_dht_action(
             &PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessorForFix {
                 did: target,
-                index,
+                request,
             }),
             |_| true,
         ))?;
@@ -683,8 +684,8 @@ mod tests {
                     assert!(!msg.strict);
                     match msg.then {
                         FindSuccessorThen::Report(FindSuccessorReportHandler::FixFingerTable {
-                            index: reported_index,
-                        }) => assert_eq!(reported_index, index),
+                            request: reported_request,
+                        }) => assert_eq!(reported_request, request),
                         handler => {
                             return Err(Error::InvalidMessage(format!(
                                 "expected fix-finger report handler, got {handler:?}"

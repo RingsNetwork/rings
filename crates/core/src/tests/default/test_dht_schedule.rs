@@ -33,11 +33,11 @@
 //!       ⇒ more messages" is false. (`pred` still converges, because a node's
 //!       immediate predecessor always keeps it as successor #1 and so never
 //!       stops notifying it — but that is a separate argument, not monotonicity.)
-//!   (2) the finger table is part of the asserted state, and `fix_fingers`
-//!       mutates it through an N-slot ROTATING index — sequential state, not a
-//!       single join. Production uses 160 slots; this controlled schedule uses a
-//!       smaller configured table to keep the async integration test bounded
-//!       while still asserting the full configured DHT state.
+//!   (2) the finger table is part of the asserted state, and range-aware
+//!       `fix_fingers` advances through correlated lookup results — sequential
+//!       state, not a single join. Production uses 160 slots; this controlled
+//!       schedule uses a smaller configured table to keep the async integration
+//!       test bounded while still asserting the full configured DHT state.
 //! A rigorous all-orders theorem would have to model truncation + the finger
 //! actions; we do not claim it. Exhaustive interleaving exploration lives in the
 //! stage-2 Stateright model (on its abstraction).

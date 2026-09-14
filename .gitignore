@@ -25,7 +25,7 @@ debug
 dev_docs
 # project
 .vscode/
-.claude/settings.local.json
+.claude/
 
 # Tests
 *.log

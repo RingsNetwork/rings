@@ -28,3 +28,17 @@ Correct Chord is derived from Pamela Zave's work on Chord, and it encompasses tw
 * The Chord Paper defined the maintenance and use of `ﬁnger tables`, which improve lookup speed by providing pointers that cross the ring like chords of a circle. **Because ﬁnger tables are an optimization and they are built from successors and predecessors, correctness does not depend on them.**
 
 Rings Network builds upon Correct Chord and incorporates several modifications, including support for multiple successors and improved stabilization algorithms, among other enhancements.
+
+## Finger-table convergence
+
+Rings treats entries learned from admission, successor changes, and peer removal as routing hints,
+not as proof that a finger slot is current. A lookup for slot `i` verifies the consecutive range
+from `i` through the highest slot whose target is no farther than the returned successor. This
+reduces sparse-table convergence from one lookup per bit to one lookup per distinct successor
+range. A topology change invalidates only slots whose hints changed.
+
+Each node keeps at most one finger lookup in flight. Reports echo a node-local request identifier;
+results from an expired request or from a request invalidated by a topology change cannot overwrite
+newer state. Automatic attempts are separated by at least one second and scheduled with
+deterministic per-node jitter. Missed deadlines schedule one future attempt rather than catch-up
+bursts, and topology stabilization and storage repair take priority over finger convergence.

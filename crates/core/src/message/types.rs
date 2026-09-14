@@ -355,10 +355,10 @@ pub enum FindSuccessorReportHandler {
     None,
     /// - Connect: connect origin node.
     Connect,
-    /// - FixFingerTable: update one finger table slot.
+    /// - FixFingerTable: update one proved finger-table range.
     FixFingerTable {
-        /// Finger slot that the original lookup was fixing.
-        index: usize,
+        /// Correlation token for the original range lookup.
+        request: crate::dht::FingerFixRequest,
     },
     /// - CustomCallback: custom callback handle by `custom_message` method.
     CustomCallback(u8),
@@ -837,6 +837,29 @@ mod tests {
             handler: FindSuccessorReportHandler::Connect,
         };
         assert!(remote_report.reports_remote_successor(local));
+    }
+
+    #[test]
+    fn test_finger_fix_report_handler_round_trips_its_correlation_token() -> Result<()> {
+        let request = crate::dht::FingerFixRequest::new(17, 42).ok_or_else(|| {
+            crate::error::Error::InvalidMessage("invalid test request".to_owned())
+        })?;
+        let handler = FindSuccessorReportHandler::FixFingerTable { request };
+        let wire = rings_codec::serialize(&handler).map_err(crate::error::Error::CodecSerialize)?;
+        let decoded: FindSuccessorReportHandler =
+            rings_codec::deserialize(&wire).map_err(crate::error::Error::CodecDeserialize)?;
+
+        match decoded {
+            FindSuccessorReportHandler::FixFingerTable { request: decoded } => {
+                assert_eq!(decoded, request);
+            }
+            _ => {
+                return Err(crate::error::Error::InvalidMessage(
+                    "finger correlation token changed variant on wire round trip".to_owned(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     #[test]

@@ -8,6 +8,14 @@ use serde::Serialize;
 use crate::dht::did::BiasId;
 use crate::dht::Did;
 
+mod convergence;
+
+pub(crate) use convergence::FingerConvergenceState;
+pub use convergence::FingerFixRequest;
+pub(crate) use convergence::FingerResultDisposition;
+#[cfg(test)]
+pub(crate) use convergence::FINGER_LOOKUP_MIN_INTERVAL_MS;
+
 /// Default number of Chord finger slots for a 160-bit `Did`.
 pub const DEFAULT_FINGER_TABLE_SIZE: usize = 160;
 
@@ -19,6 +27,7 @@ pub struct FingerTable {
     size: usize,
     finger: Vec<Option<Did>>,
     pub(super) fix_finger_index: usize,
+    convergence: FingerConvergenceState,
 }
 
 impl PartialEq for FingerTable {
@@ -43,6 +52,7 @@ impl FingerTable {
             size,
             finger: vec![None; size],
             fix_finger_index: 0,
+            convergence: FingerConvergenceState::new(size),
         }
     }
 
@@ -78,7 +88,10 @@ impl FingerTable {
             tracing::trace!("set finger table with self did, ignore it");
             return;
         }
+        let before = self.finger.clone();
         self.write_slot(index, Some(did));
+        self.convergence
+            .invalidate_hint_changes(&before, &self.finger);
     }
 
     /// setter for fix_finger_index
@@ -89,11 +102,15 @@ impl FingerTable {
 
     /// remove a node from dht finger table
     pub fn remove(&mut self, did: Did) {
+        let before = self.finger.clone();
         self.finger = crate::dht::topology::remove_finger_peer(&self.finger, did);
+        self.convergence
+            .invalidate_hint_changes(&before, &self.finger);
     }
 
     /// Join FingerTable
     pub fn join(&mut self, did: Did) {
+        let before = self.finger.clone();
         let observer = self.did;
         let bias = did.bias(observer);
 
@@ -112,6 +129,8 @@ impl FingerTable {
 
             self.write_slot(k, Some(did));
         }
+        self.convergence
+            .invalidate_hint_changes(&before, &self.finger);
     }
 
     /// Check finger is contains some node
@@ -149,6 +168,19 @@ impl FingerTable {
         self.fix_finger_index
     }
 
+    pub(crate) fn convergence_state(&self) -> &FingerConvergenceState {
+        &self.convergence
+    }
+
+    #[cfg(all(test, not(target_family = "wasm")))]
+    pub(crate) fn prepare_request_for_test(
+        &mut self,
+        slot: usize,
+    ) -> Option<crate::dht::FingerFixRequest> {
+        self.convergence
+            .prepare_slot_for_test(&self.finger, slot, 1_000)
+    }
+
     /// get finger list
     pub fn list(&self) -> &Vec<Option<Did>> {
         &self.finger
@@ -159,7 +191,12 @@ impl FingerTable {
     /// Post: the table keeps its fixed slot count; entries beyond that count
     /// are ignored, missing entries become `None`, and the fix cursor is
     /// clamped to a valid slot when the table is non-empty.
-    pub(crate) fn replace_state(&mut self, fingers: &[Option<Did>], fix_finger_index: usize) {
+    pub(crate) fn replace_state(
+        &mut self,
+        fingers: &[Option<Did>],
+        fix_finger_index: usize,
+        convergence: FingerConvergenceState,
+    ) {
         self.finger = fingers.iter().copied().take(self.size).collect();
         self.finger.resize(self.size, None);
         self.fix_finger_index = if self.size == 0 {
@@ -167,12 +204,14 @@ impl FingerTable {
         } else {
             fix_finger_index % self.size
         };
+        self.convergence = convergence.normalized(self.size);
     }
 
     /// Reset finger table to empty vector
     #[cfg(test)]
     pub fn reset_finger(&mut self) {
-        self.finger = vec![None; self.size]
+        self.finger = vec![None; self.size];
+        self.convergence = FingerConvergenceState::new(self.size);
     }
 
     /// Clone a finger table

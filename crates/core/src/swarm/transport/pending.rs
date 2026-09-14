@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -14,7 +15,9 @@ pub(super) use registry::ReservationVerdict;
 
 use super::SwarmConnection;
 use super::SwarmTransport;
+use crate::dht::finger::FingerResultDisposition;
 use crate::dht::Did;
+use crate::dht::FingerFixRequest;
 use crate::dht::PeerRingAction;
 use crate::error::Error;
 use crate::error::Result;
@@ -28,7 +31,7 @@ pub(super) const PENDING_CONNECTION_TIMEOUT_MS: i64 = 180_000;
 
 pub(super) type SharedConnectionLifecycles = Arc<Mutex<ConnectionLifecycleRegistry>>;
 pub(super) type PendingFingerUpdates =
-    BTreeMap<PendingConnectionAttempt, BTreeMap<usize, Option<Did>>>;
+    BTreeMap<PendingConnectionAttempt, BTreeSet<FingerFixRequest>>;
 type PendingFingerUpdatesGuard<'transport> =
     std::sync::MutexGuard<'transport, PendingFingerUpdates>;
 
@@ -125,6 +128,10 @@ pub(crate) enum FingerUpdateDisposition {
     Missing,
     /// An active generation exists, but its transport cannot make progress.
     Unroutable,
+    /// The report did not prove the requested finger threshold.
+    Invalid,
+    /// The report no longer matches the node's current in-flight request.
+    Stale,
 }
 
 impl FingerUpdateDisposition {
@@ -600,12 +607,8 @@ impl SwarmTransport {
             .map(|updates| {
                 updates
                     .iter()
-                    .map(
-                        |(index, expected)| crate::dht::topology::ConditionalFingerUpdate {
-                            index: *index,
-                            expected: *expected,
-                        },
-                    )
+                    .copied()
+                    .map(|request| crate::dht::topology::ConditionalFingerUpdate { request })
                     .collect()
             })
             .unwrap_or_default();
@@ -714,18 +717,33 @@ impl SwarmTransport {
     pub(crate) fn record_finger_candidate(
         &self,
         peer: Did,
-        index: usize,
+        request: FingerFixRequest,
     ) -> Result<FingerUpdateDisposition> {
-        self.record_finger_candidate_with_observer(peer, index, || {})
+        self.record_finger_candidate_with_observer(peer, request, || {})
     }
 
     fn record_finger_candidate_with_observer(
         &self,
         peer: Did,
-        index: usize,
+        request: FingerFixRequest,
         observe_admission: impl FnOnce(),
     ) -> Result<FingerUpdateDisposition> {
         let _lifecycle = self.connection_lifecycle()?;
+        match self.dht.finger_result_disposition(request, peer)? {
+            FingerResultDisposition::Stale => return Ok(FingerUpdateDisposition::Stale),
+            FingerResultDisposition::Invalid => {
+                let _ = self.dht.apply_fixed_finger(request, peer)?;
+                return Ok(FingerUpdateDisposition::Invalid);
+            }
+            FingerResultDisposition::Applied { .. } => {}
+        }
+        if peer == self.dht.did {
+            return Ok(match self.dht.apply_fixed_finger(request, peer)? {
+                FingerResultDisposition::Applied { .. } => FingerUpdateDisposition::Applied,
+                FingerResultDisposition::Invalid => FingerUpdateDisposition::Invalid,
+                FingerResultDisposition::Stale => FingerUpdateDisposition::Stale,
+            });
+        }
         let (lifecycle, active) = {
             let lifecycles = self.peer_lifecycles()?;
             (lifecycles.state(peer), lifecycles.active_connections())
@@ -734,24 +752,19 @@ impl SwarmTransport {
         match finger_candidate_admission(lifecycle, is_routable) {
             FingerCandidateAdmission::Queue(current) => {
                 observe_admission();
-                let expected = self
-                    .dht
-                    .topology_state()?
-                    .fingers
-                    .get(index)
-                    .copied()
-                    .flatten();
                 self.pending_finger_updates()?
                     .entry(current)
                     .or_default()
-                    .entry(index)
-                    .or_insert(expected);
+                    .insert(request);
                 Ok(FingerUpdateDisposition::Queued)
             }
             FingerCandidateAdmission::Apply => {
                 observe_admission();
-                self.dht.apply_fixed_finger(index, peer)?;
-                Ok(FingerUpdateDisposition::Applied)
+                Ok(match self.dht.apply_fixed_finger(request, peer)? {
+                    FingerResultDisposition::Applied { .. } => FingerUpdateDisposition::Applied,
+                    FingerResultDisposition::Invalid => FingerUpdateDisposition::Invalid,
+                    FingerResultDisposition::Stale => FingerUpdateDisposition::Stale,
+                })
             }
             FingerCandidateAdmission::Missing => Ok(FingerUpdateDisposition::Missing),
             FingerCandidateAdmission::Unroutable => Ok(FingerUpdateDisposition::Unroutable),
@@ -762,10 +775,10 @@ impl SwarmTransport {
     pub(crate) fn record_finger_candidate_with_observer_for_test(
         &self,
         peer: Did,
-        index: usize,
+        request: FingerFixRequest,
         observe_admission: impl FnOnce(),
     ) -> Result<FingerUpdateDisposition> {
-        self.record_finger_candidate_with_observer(peer, index, observe_admission)
+        self.record_finger_candidate_with_observer(peer, request, observe_admission)
     }
 
     /// Cancel a current pending or admitting handshake and release its transport object.

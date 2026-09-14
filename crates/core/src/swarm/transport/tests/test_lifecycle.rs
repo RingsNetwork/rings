@@ -5,6 +5,8 @@ use rings_transport::connections::dummy_controlled;
 use super::super::delivery::SendCompletionOutcome;
 use super::*;
 #[cfg(feature = "dummy")]
+use crate::dht::FingerFixRequest;
+#[cfg(feature = "dummy")]
 use crate::dht::StorageSyncDestination;
 #[cfg(feature = "dummy")]
 use crate::dht::TopoInfo;
@@ -25,6 +27,15 @@ async fn transport_with_routable_peer(
         .force_peer_connection_state_without_callback(peer, WebrtcConnectionState::Connected)?;
     transport.force_peer_data_channel_open_without_callback(peer, Some(true))?;
     Ok((transport, peer, attempt))
+}
+
+#[cfg(feature = "dummy")]
+fn finger_request(transport: &SwarmTransport, slot: usize) -> Result<FingerFixRequest> {
+    transport
+        .dht
+        .lock_finger()?
+        .prepare_request_for_test(slot)
+        .ok_or_else(|| Error::InvalidMessage("failed to prepare test finger request".to_owned()))
 }
 
 #[cfg(feature = "dummy")]
@@ -357,11 +368,12 @@ async fn test_terminal_send_generation_cannot_reenter_topology() -> Result<()> {
 
     assert_eq!(transport.notify_admitted_predecessor(peer)?, None);
     assert_ne!(*transport.dht.lock_predecessor()?, Some(peer));
+    let request = finger_request(&transport, 0)?;
     assert_eq!(
-        transport.record_finger_candidate(peer, 1)?,
+        transport.record_finger_candidate(peer, request)?,
         FingerUpdateDisposition::Unroutable
     );
-    assert_eq!(transport.dht.lock_finger()?.get(1), None);
+    assert_eq!(transport.dht.lock_finger()?.get(0), None);
     Ok(())
 }
 
@@ -966,13 +978,14 @@ async fn test_predecessor_notification_serializes_with_generation_retirement() -
 #[tokio::test]
 async fn test_finger_update_serializes_with_generation_retirement() -> Result<()> {
     let (transport, peer, attempt) = transport_with_routable_peer().await?;
-    let finger_index = 3;
+    let finger_index = 0;
+    let request = finger_request(&transport, finger_index)?;
     let (hold_lifecycle, lifecycle_gate) = lifecycle_test_gate();
     let finger_transport = Arc::clone(&transport);
     let finger_thread = BoundedThread::spawn(move || {
         finger_transport.record_finger_candidate_with_observer_for_test(
             peer,
-            finger_index,
+            request,
             hold_lifecycle,
         )
     });

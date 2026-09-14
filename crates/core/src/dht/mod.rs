@@ -25,6 +25,7 @@ pub use chord::RemoteAction as PeerRingRemoteAction;
 pub(crate) use chord::StorageKey;
 pub use chord::TopoInfo;
 pub use did::Did;
+pub use finger::FingerFixRequest;
 pub use finger::FingerTable;
 pub use finger::DEFAULT_FINGER_TABLE_SIZE;
 #[cfg(all(test, target_family = "wasm"))]

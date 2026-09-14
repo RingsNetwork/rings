@@ -33,7 +33,12 @@ use std::collections::BTreeSet;
 
 use num_bigint::BigUint;
 
+use super::finger::FingerConvergenceState;
+use super::finger::FingerResultDisposition;
+#[cfg(test)]
+use super::finger::FINGER_LOOKUP_MIN_INTERVAL_MS;
 use super::Did;
+use super::FingerFixRequest;
 
 /// Ring bit-width; `Did` is `Z/2^160`.
 pub const RING_BITS: usize = 160;
@@ -54,6 +59,7 @@ pub struct TopologyState {
     pub fingers: Vec<Option<Did>>,
     /// Next finger index maintained by the periodic finger fixer.
     pub fix_finger_index: usize,
+    finger_convergence: FingerConvergenceState,
 }
 
 impl TopologyState {
@@ -65,13 +71,55 @@ impl TopologyState {
         fingers: Vec<Option<Did>>,
         fix_finger_index: usize,
     ) -> Self {
+        let finger_convergence = FingerConvergenceState::new(fingers.len());
         Self {
             local,
             successors,
             predecessor,
             fingers,
             fix_finger_index,
+            finger_convergence,
         }
+    }
+
+    pub(crate) fn restore(
+        local: Did,
+        successors: Vec<Did>,
+        predecessor: Option<Did>,
+        fingers: Vec<Option<Did>>,
+        fix_finger_index: usize,
+        finger_convergence: FingerConvergenceState,
+    ) -> Self {
+        let slot_count = fingers.len();
+        Self {
+            local,
+            successors,
+            predecessor,
+            fingers,
+            fix_finger_index,
+            finger_convergence: finger_convergence.normalized(slot_count),
+        }
+    }
+
+    pub(crate) fn finger_convergence_state(&self) -> &FingerConvergenceState {
+        &self.finger_convergence
+    }
+
+    pub(crate) fn finger_convergence_pending(&self) -> bool {
+        self.finger_convergence.is_pending()
+    }
+
+    pub(crate) fn finger_result_disposition(
+        &self,
+        request: FingerFixRequest,
+        successor: Did,
+    ) -> FingerResultDisposition {
+        self.finger_convergence.result_disposition(
+            self.local,
+            self.fingers.len(),
+            request,
+            successor,
+        )
     }
 
     /// Every occupied successor, predecessor, and finger slot other than `local`.
@@ -153,14 +201,25 @@ pub enum TopologyEvent {
         /// Predecessor reported by the successor.
         predecessor: Option<Did>,
     },
-    /// Periodic finger-fix transition.
-    FixFinger,
-    /// Apply a reported successor to a fixed finger slot.
+    /// Periodic transition that marks one proven finger range for independently paced
+    /// revalidation.
+    BeginFingerRevalidation,
+    /// Independently paced transition that advances pending finger convergence.
+    AdvanceFingerConvergence {
+        /// Current wall-clock time used only for lookup rate and expiry bounds.
+        now_ms: u64,
+    },
+    /// Apply a reported successor to every slot proved by one current lookup.
     ApplyFinger {
-        /// Finger slot to update.
-        index: usize,
-        /// Successor reported for that slot.
+        /// Correlation token echoed by the lookup report.
+        request: FingerFixRequest,
+        /// Successor reported for the request's lowest slot.
         successor: Did,
+    },
+    /// Cancel an in-flight request after its outbound send failed.
+    CancelFinger {
+        /// Correlation token of the failed request.
+        request: FingerFixRequest,
     },
 }
 
@@ -168,10 +227,8 @@ pub enum TopologyEvent {
 /// changed since the lookup result was queued.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConditionalFingerUpdate {
-    /// Finger slot returned by the lookup.
-    pub index: usize,
-    /// Slot value observed when the update was deferred.
-    pub expected: Option<Did>,
+    /// Correlation token returned while the successor was handshaking.
+    pub request: FingerFixRequest,
 }
 
 /// Successor-list evidence attached to a peer-removal transition.
@@ -202,8 +259,8 @@ pub enum TopologyAction {
         next: Did,
         /// DID being searched.
         did: Did,
-        /// Finger slot to update when the report returns.
-        index: usize,
+        /// Token the report must echo before it may update the range.
+        request: FingerFixRequest,
     },
     /// Query this improved successor for its successor list.
     QuerySuccessorList(Did),
@@ -321,21 +378,6 @@ pub(crate) fn remove_finger_peer(current: &[Option<Did>], peer: Did) -> Vec<Opti
     next
 }
 
-fn finger_set(
-    local: Did,
-    current: &[Option<Did>],
-    index: usize,
-    successor: Did,
-) -> Vec<Option<Did>> {
-    let mut next = current.to_vec();
-    if successor != local {
-        if let Some(slot) = next.get_mut(index) {
-            *slot = Some(successor);
-        }
-    }
-    next
-}
-
 /// `Precedes(n, p, id)`: `p` lies on the open arc `(n, id)`, so forwarding to
 /// `p` makes strict clockwise progress toward `id`.
 fn precedes(local: Did, peer: Did, target: &BigUint) -> bool {
@@ -352,6 +394,24 @@ fn closest_preceding_finger(state: &TopologyState, target: &BigUint) -> Option<D
         .flatten()
         .copied()
         .find(|peer| precedes(state.local, *peer, target))
+}
+
+/// Route a verification lookup beyond the local inferred-successor boundary.
+///
+/// A local `find_successor` answer based only on the current successor head is
+/// still a hint: a closer node may exist behind that head. The exact target
+/// node is self-proving, and a node with no successor can prove only the empty
+/// sparse range; every other lookup crosses one admitted transport boundary.
+fn finger_verification_route(state: &TopologyState, target: Did) -> FindSuccessorStep {
+    match find_successor(state, target) {
+        FindSuccessorStep::Local(successor) if successor != state.local && successor != target => {
+            FindSuccessorStep::Remote {
+                next: successor,
+                did: target,
+            }
+        }
+        result => result,
+    }
 }
 
 /// `head(s)`: the nearest successor other than `local`, the upper end of the
@@ -469,10 +529,14 @@ fn step_join(state: &TopologyState, peer: Did, capacity: usize) -> TopologyStep 
             actions: Vec::new(),
         };
     }
+    let fingers = finger_join(state.local, &state.fingers, peer);
+    let mut finger_convergence = state.finger_convergence.clone();
+    finger_convergence.invalidate_hint_changes(&state.fingers, &fingers);
     TopologyStep {
         state: TopologyState {
             successors: update_successors(state.local, &state.successors, peer, capacity),
-            fingers: finger_join(state.local, &state.fingers, peer),
+            fingers,
+            finger_convergence,
             ..state.clone()
         },
         actions: vec![TopologyAction::FindSuccessorForConnect {
@@ -495,14 +559,15 @@ fn step_admit(
         };
     }
 
+    let mut verified = state.clone();
+    for update in fixed_fingers {
+        verified = apply_finger_result(&verified, update.request, peer);
+    }
     let successors = update_successors(state.local, &state.successors, peer, capacity);
     let inserted = !state.successors.contains(&peer) && successors.contains(&peer);
-    let mut fingers = finger_join(state.local, &state.fingers, peer);
-    for update in fixed_fingers {
-        if state.fingers.get(update.index).copied().flatten() == update.expected {
-            fingers = finger_set(state.local, &fingers, update.index, peer);
-        }
-    }
+    let fingers = finger_join(state.local, &verified.fingers, peer);
+    let mut finger_convergence = verified.finger_convergence.clone();
+    finger_convergence.invalidate_hint_changes(&verified.fingers, &fingers);
 
     let mut actions = Vec::new();
     if inserted {
@@ -516,7 +581,8 @@ fn step_admit(
         state: TopologyState {
             successors,
             fingers,
-            ..state.clone()
+            finger_convergence,
+            ..verified
         },
         actions,
     }
@@ -536,6 +602,8 @@ fn step_remove(
         .filter(|&did| did != peer)
         .collect::<Vec<_>>();
     let fingers = remove_finger_peer(&state.fingers, peer);
+    let mut finger_convergence = state.finger_convergence.clone();
+    finger_convergence.invalidate_hint_changes(&state.fingers, &fingers);
     if removed_head {
         match successor {
             SuccessorRemoval::Preserve => {}
@@ -550,6 +618,7 @@ fn step_remove(
             successors: next_successors,
             predecessor: state.predecessor.filter(|&did| did != peer),
             fingers,
+            finger_convergence,
             ..state.clone()
         },
         actions: Vec::new(),
@@ -559,9 +628,14 @@ fn step_remove(
 fn step_update_successor(state: &TopologyState, successor: Did, capacity: usize) -> TopologyStep {
     let next_successors = update_successors(state.local, &state.successors, successor, capacity);
     let inserted = !state.successors.contains(&successor) && next_successors.contains(&successor);
+    let fingers = finger_join(state.local, &state.fingers, successor);
+    let mut finger_convergence = state.finger_convergence.clone();
+    finger_convergence.invalidate_hint_changes(&state.fingers, &fingers);
     TopologyStep {
         state: TopologyState {
             successors: next_successors,
+            fingers,
+            finger_convergence,
             ..state.clone()
         },
         actions: if inserted {
@@ -572,31 +646,77 @@ fn step_update_successor(state: &TopologyState, successor: Did, capacity: usize)
     }
 }
 
-fn step_fix_finger(state: &TopologyState) -> TopologyStep {
+fn step_fix_finger(state: &TopologyState, now_ms: u64) -> TopologyStep {
     if state.fingers.is_empty() {
         return TopologyStep {
             state: state.clone(),
             actions: Vec::new(),
         };
     }
-    let index = (state.fix_finger_index + 1) % state.fingers.len();
-    let did = state.local + Did::power_of_two(index);
-    match find_successor(state, did) {
-        FindSuccessorStep::Local(successor) => TopologyStep {
+    let mut finger_convergence = state.finger_convergence.clone();
+    let Some(request) = finger_convergence.prepare_lookup(&state.fingers, now_ms) else {
+        return TopologyStep {
             state: TopologyState {
-                fingers: finger_set(state.local, &state.fingers, index, successor),
-                fix_finger_index: index,
+                finger_convergence,
                 ..state.clone()
             },
             actions: Vec::new(),
+        };
+    };
+    let index = request.slot_index();
+    let did = state.local + Did::power_of_two(index);
+    let prepared = TopologyState {
+        finger_convergence,
+        ..state.clone()
+    };
+    match finger_verification_route(state, did) {
+        FindSuccessorStep::Local(successor) => TopologyStep {
+            state: apply_finger_result(&prepared, request, successor),
+            actions: Vec::new(),
         },
         FindSuccessorStep::Remote { next, did } => TopologyStep {
-            state: TopologyState {
-                fix_finger_index: index,
-                ..state.clone()
-            },
-            actions: vec![TopologyAction::FindSuccessorForFix { next, did, index }],
+            state: prepared,
+            actions: vec![TopologyAction::FindSuccessorForFix { next, did, request }],
         },
+    }
+}
+
+fn begin_finger_revalidation(state: &TopologyState) -> TopologyState {
+    let mut finger_convergence = state.finger_convergence.clone();
+    finger_convergence.begin_revalidation(&state.fingers, state.fix_finger_index);
+    TopologyState {
+        finger_convergence,
+        ..state.clone()
+    }
+}
+
+fn apply_finger_result(
+    state: &TopologyState,
+    request: FingerFixRequest,
+    successor: Did,
+) -> TopologyState {
+    let mut fingers = state.fingers.clone();
+    let mut finger_convergence = state.finger_convergence.clone();
+    let disposition =
+        finger_convergence.apply_result(state.local, &mut fingers, request, successor);
+    let fix_finger_index = match disposition {
+        FingerResultDisposition::Applied { end } => end,
+        FingerResultDisposition::Invalid | FingerResultDisposition::Stale => state.fix_finger_index,
+    };
+    TopologyState {
+        fingers,
+        fix_finger_index,
+        finger_convergence,
+        ..state.clone()
+    }
+}
+
+fn cancel_finger_result(state: &TopologyState, request: FingerFixRequest) -> TopologyState {
+    let mut finger_convergence = state.finger_convergence.clone();
+    finger_convergence.cancel(request);
+    TopologyState {
+        finger_convergence,
+        ..state.clone()
     }
 }
 
@@ -654,24 +774,41 @@ fn step_event(state: &TopologyState, event: TopologyEvent, capacity: usize) -> T
             if let Some(notify) = stabilize_notify(state.local, &next_successors) {
                 actions.push(TopologyAction::Notify(notify));
             }
+            let fingers = next_successors
+                .iter()
+                .copied()
+                .fold(state.fingers.clone(), |fingers, successor| {
+                    finger_join(state.local, &fingers, successor)
+                });
+            let mut finger_convergence = state.finger_convergence.clone();
+            finger_convergence.invalidate_hint_changes(&state.fingers, &fingers);
             TopologyStep {
                 state: TopologyState {
                     successors: next_successors,
+                    fingers,
+                    finger_convergence,
                     ..state.clone()
                 },
                 actions,
             }
         }
-        TopologyEvent::FixFinger => step_fix_finger(state),
-        TopologyEvent::ApplyFinger { index, successor } => TopologyStep {
-            state: TopologyState {
-                fingers: finger_set(state.local, &state.fingers, index, successor),
-                ..state.clone()
-            },
+        TopologyEvent::BeginFingerRevalidation => TopologyStep {
+            state: begin_finger_revalidation(state),
+            actions: Vec::new(),
+        },
+        TopologyEvent::AdvanceFingerConvergence { now_ms } => step_fix_finger(state, now_ms),
+        TopologyEvent::ApplyFinger { request, successor } => TopologyStep {
+            state: apply_finger_result(state, request, successor),
+            actions: Vec::new(),
+        },
+        TopologyEvent::CancelFinger { request } => TopologyStep {
+            state: cancel_finger_result(state, request),
             actions: Vec::new(),
         },
     }
 }
 
+#[cfg(test)]
+mod convergence_tests;
 #[cfg(test)]
 mod tests;

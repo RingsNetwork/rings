@@ -11,6 +11,7 @@ use super::TopoInfo;
 use crate::consts::LOCAL_CACHE_CAPACITY;
 use crate::dht::did::BiasId;
 use crate::dht::entry::Entry;
+use crate::dht::finger::FingerResultDisposition;
 use crate::dht::finger::DEFAULT_FINGER_TABLE_SIZE;
 use crate::dht::successor::SuccessorReader;
 use crate::dht::successor::SuccessorSeq;
@@ -25,12 +26,14 @@ use crate::dht::types::Chord;
 use crate::dht::types::CorrectChord;
 use crate::dht::virtual_node::VirtualNodeConfig;
 use crate::dht::Did;
+use crate::dht::FingerFixRequest;
 use crate::dht::FingerTable;
 use crate::dht::LiveDid;
 use crate::error::Error;
 use crate::error::Result;
 use crate::storage::KvStorageInterface;
 use crate::storage::MemStorage;
+use crate::utils::get_epoch_ms;
 
 /// Storage accepted by [`PeerRing::new_with_storage`].
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
@@ -210,12 +213,13 @@ impl PeerRing {
         let successors = self.successor_seq.list()?;
         let predecessor = *self.lock_predecessor_state()?;
         let finger = self.lock_finger_state()?;
-        Ok(TopologyState::new(
+        Ok(TopologyState::restore(
             self.did,
             successors,
             predecessor,
             finger.list().clone(),
             finger.fix_finger_index(),
+            finger.convergence_state().clone(),
         ))
     }
 
@@ -272,7 +276,11 @@ impl PeerRing {
         let mut finger = self.lock_finger_state()?;
         self.successor_seq.replace_state(&next.successors)?;
         *predecessor = next.predecessor;
-        finger.replace_state(&next.fingers, next.fix_finger_index);
+        finger.replace_state(
+            &next.fingers,
+            next.fix_finger_index,
+            next.finger_convergence_state().clone(),
+        );
         Ok(())
     }
 
@@ -281,8 +289,11 @@ impl PeerRing {
             TopologyAction::FindSuccessorForConnect { next, did } => {
                 PeerRingAction::RemoteAction(next, RemoteAction::FindSuccessorForConnect(did))
             }
-            TopologyAction::FindSuccessorForFix { next, did, index } => {
-                PeerRingAction::RemoteAction(next, RemoteAction::FindSuccessorForFix { did, index })
+            TopologyAction::FindSuccessorForFix { next, did, request } => {
+                PeerRingAction::RemoteAction(next, RemoteAction::FindSuccessorForFix {
+                    did,
+                    request,
+                })
             }
             TopologyAction::QuerySuccessorList(did) => {
                 PeerRingAction::RemoteAction(did, RemoteAction::QueryForSuccessorList)
@@ -316,9 +327,40 @@ impl PeerRing {
         )
     }
 
-    pub(crate) fn apply_fixed_finger(&self, index: usize, successor: Did) -> Result<()> {
-        self.transition_topology(TopologyEvent::ApplyFinger { index, successor })
+    pub(crate) fn finger_convergence_pending(&self) -> Result<bool> {
+        self.with_topology_state(TopologyState::finger_convergence_pending)
+    }
+
+    pub(crate) fn finger_result_disposition(
+        &self,
+        request: FingerFixRequest,
+        successor: Did,
+    ) -> Result<FingerResultDisposition> {
+        self.with_topology_state(|state| state.finger_result_disposition(request, successor))
+    }
+
+    pub(crate) fn apply_fixed_finger(
+        &self,
+        request: FingerFixRequest,
+        successor: Did,
+    ) -> Result<FingerResultDisposition> {
+        let mut disposition = FingerResultDisposition::Stale;
+        self.transition_topology_with_observer(
+            TopologyEvent::ApplyFinger { request, successor },
+            |state| disposition = state.finger_result_disposition(request, successor),
+        )?;
+        Ok(disposition)
+    }
+
+    pub(crate) fn cancel_finger_lookup(&self, request: FingerFixRequest) -> Result<()> {
+        self.transition_topology(TopologyEvent::CancelFinger { request })
             .map(|_| ())
+    }
+
+    pub(crate) fn advance_finger_convergence(&self) -> Result<PeerRingAction> {
+        let now_ms = u64::try_from(get_epoch_ms()).unwrap_or(u64::MAX);
+        let next = self.transition_topology(TopologyEvent::AdvanceFingerConvergence { now_ms })?;
+        Ok(self.topology_leaf_actions(next.actions))
     }
 
     pub(crate) fn admit_connected(
@@ -366,7 +408,7 @@ impl Chord<PeerRingAction> for PeerRing {
     }
 
     fn fix_fingers(&self) -> Result<PeerRingAction> {
-        let next = self.transition_topology(TopologyEvent::FixFinger)?;
+        let next = self.transition_topology(TopologyEvent::BeginFingerRevalidation)?;
         Ok(self.topology_leaf_actions(next.actions))
     }
 }

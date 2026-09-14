@@ -4,6 +4,7 @@ use rings_transport::core::transport::TransportInterface;
 use super::*;
 #[cfg(feature = "dummy")]
 use crate::dht::Chord;
+use crate::dht::FingerFixRequest;
 
 #[cfg(feature = "dummy")]
 #[derive(Default)]
@@ -164,13 +165,15 @@ async fn test_failed_dht_retirement_preserves_active_peer_state() -> Result<()> 
     let attempt = transport.reserve_pending_connection(peer).await?;
     assert!(transport.activate_connection_for_test(attempt)?);
     transport.mark_peer_liveness_connected(attempt);
+    let request = FingerFixRequest::new(3, 1)
+        .ok_or_else(|| Error::InvalidMessage("invalid test finger request".to_owned()))?;
     transport
         .pending_finger_updates
         .lock()
         .map_err(|_| Error::SwarmConnectionLifecycleLock)?
         .entry(attempt)
         .or_default()
-        .insert(3, None);
+        .insert(request);
 
     let result = transport.retire_active_connection_with(attempt, |_| -> Result<()> {
         Err(Error::InvalidMessage(

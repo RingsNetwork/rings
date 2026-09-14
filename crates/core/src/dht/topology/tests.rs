@@ -18,6 +18,21 @@ fn state(
     TopologyState::new(local, successors, predecessor, fingers, fix_finger_index)
 }
 
+fn issue_request(current: &mut TopologyState, slot: usize, now_ms: u64) -> FingerFixRequest {
+    current.finger_convergence.verified.fill(true);
+    if let Some(verified) = current.finger_convergence.verified.get_mut(slot) {
+        *verified = false;
+    }
+    let request = current
+        .finger_convergence
+        .prepare_lookup(&current.fingers, now_ms);
+    assert!(request.is_some(), "test request must be issued");
+    request.unwrap_or(FingerFixRequest {
+        slot: u16::MAX,
+        request_id: u64::MAX,
+    })
+}
+
 fn successor_distances(local: Did, successors: &[Did], capacity: usize) -> Vec<BigUint> {
     let infinity = BigUint::from(1u8) << RING_BITS;
     (0..capacity)
@@ -244,14 +259,13 @@ fn test_remove_step_replaces_unavailable_head_with_validated_successors_only() {
 fn test_admit_step_commits_join_and_pending_fingers_in_one_state() {
     let local = did(0);
     let peer = did(16);
+    let mut current = state(local, Vec::new(), None, vec![None; 5], 0);
+    let request = issue_request(&mut current, 4, 1_000);
     let next = step(
-        &state(local, Vec::new(), None, vec![None; 5], 0),
+        &current,
         TopologyEvent::Admit {
             peer,
-            fixed_fingers: vec![ConditionalFingerUpdate {
-                index: 4,
-                expected: None,
-            }],
+            fixed_fingers: vec![ConditionalFingerUpdate { request }],
         },
         DEFAULT_SUCCESSOR_CAPACITY,
     );
@@ -277,16 +291,20 @@ fn test_admit_step_commits_join_and_pending_fingers_in_one_state() {
 #[test]
 fn test_admit_step_does_not_overwrite_finger_changed_after_update_was_deferred() {
     let local = did(0);
-    let fresher = did(8);
-    let peer = did(16);
+    let fresher = did(20);
+    let peer = did(32);
+    let mut current = state(local, vec![peer], None, vec![Some(peer); 5], 0);
+    let request = issue_request(&mut current, 4, 1_000);
+    let changed = step(
+        &current,
+        TopologyEvent::Join { peer: fresher },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
     let next = step(
-        &state(local, vec![fresher], None, vec![Some(fresher); 5], 0),
+        &changed.state,
         TopologyEvent::Admit {
             peer,
-            fixed_fingers: vec![ConditionalFingerUpdate {
-                index: 4,
-                expected: None,
-            }],
+            fixed_fingers: vec![ConditionalFingerUpdate { request }],
         },
         DEFAULT_SUCCESSOR_CAPACITY,
     );
@@ -295,42 +313,46 @@ fn test_admit_step_does_not_overwrite_finger_changed_after_update_was_deferred()
 }
 
 #[test]
-fn test_fix_finger_step_updates_local_successor_slot() {
+fn test_fix_finger_step_marks_empty_sparse_range_when_alone() {
     let local = did(0);
-    let successor = did(8);
     let next = step(
-        &state(local, vec![successor], None, vec![None; 4], 2),
-        TopologyEvent::FixFinger,
+        &state(local, Vec::new(), None, vec![None; 4], 2),
+        TopologyEvent::AdvanceFingerConvergence { now_ms: 1_000 },
         DEFAULT_SUCCESSOR_CAPACITY,
     );
 
     assert_eq!(next.state.fix_finger_index, 3);
-    assert_eq!(next.state.fingers, vec![None, None, None, Some(successor)]);
+    assert_eq!(next.state.fingers, vec![None; 4]);
+    assert!(!next.state.finger_convergence_pending());
     assert!(next.actions.is_empty());
 }
 
 #[test]
-fn test_fix_finger_step_emits_indexed_remote_action() {
+fn test_fix_finger_step_emits_correlated_remote_action() {
     let local = did(0);
     let successor = did(4);
     let next_hop = did(6);
+    let mut current = state(
+        local,
+        vec![successor],
+        None,
+        vec![None, None, Some(next_hop), None],
+        2,
+    );
+    current.finger_convergence.verified = vec![true, true, true, false];
     let next = step(
-        &state(
-            local,
-            vec![successor],
-            None,
-            vec![None, None, Some(next_hop), None],
-            2,
-        ),
-        TopologyEvent::FixFinger,
+        &current,
+        TopologyEvent::AdvanceFingerConvergence { now_ms: 1_000 },
         DEFAULT_SUCCESSOR_CAPACITY,
     );
 
-    assert_eq!(next.state.fix_finger_index, 3);
     assert_eq!(next.actions, vec![TopologyAction::FindSuccessorForFix {
         next: next_hop,
         did: Did::power_of_two(3),
-        index: 3
+        request: FingerFixRequest::new(3, 1).unwrap_or(FingerFixRequest {
+            slot: u16::MAX,
+            request_id: u64::MAX,
+        })
     }]);
 }
 
@@ -339,66 +361,89 @@ fn test_fix_finger_step_queries_local_relative_probe() {
     let local = did(100);
     let successor = did(104);
     let next_hop = did(106);
+    let mut current = state(
+        local,
+        vec![successor],
+        None,
+        vec![None, None, Some(next_hop), None],
+        2,
+    );
+    current.finger_convergence.verified = vec![true, true, true, false];
     let next = step(
-        &state(
-            local,
-            vec![successor],
-            None,
-            vec![None, None, Some(next_hop), None],
-            2,
-        ),
-        TopologyEvent::FixFinger,
+        &current,
+        TopologyEvent::AdvanceFingerConvergence { now_ms: 1_000 },
         DEFAULT_SUCCESSOR_CAPACITY,
     );
 
-    assert_eq!(next.state.fix_finger_index, 3);
     assert_eq!(next.actions, vec![TopologyAction::FindSuccessorForFix {
         next: next_hop,
         did: local + Did::power_of_two(3),
-        index: 3
+        request: FingerFixRequest::new(3, 1).unwrap_or(FingerFixRequest {
+            slot: u16::MAX,
+            request_id: u64::MAX,
+        })
     }]);
 }
 
 #[test]
-fn test_apply_finger_step_updates_exact_slot() {
+fn test_apply_finger_step_updates_every_slot_proved_by_distance() {
     let local = did(0);
     let successor = did(8);
+    let mut current = state(local, vec![], None, vec![None; 4], 0);
+    let request = issue_request(&mut current, 2, 1_000);
     let next = step(
-        &state(local, vec![], None, vec![None; 4], 0),
-        TopologyEvent::ApplyFinger {
-            index: 2,
-            successor,
-        },
+        &current,
+        TopologyEvent::ApplyFinger { request, successor },
         DEFAULT_SUCCESSOR_CAPACITY,
     );
 
-    assert_eq!(next.state.fingers, vec![None, None, Some(successor), None]);
+    assert_eq!(next.state.fingers, vec![
+        None,
+        None,
+        Some(successor),
+        Some(successor)
+    ]);
+    assert_eq!(next.state.fix_finger_index, 3);
     assert!(next.actions.is_empty());
 }
 
 #[test]
-fn test_apply_finger_step_ignores_self_and_out_of_range_slot() {
+fn test_apply_finger_step_rejects_stale_and_invalid_results() {
     let local = did(0);
-    let current = state(local, vec![], None, vec![None; 2], 0);
-    let self_update = step(
+    let mut current = state(local, vec![], None, vec![None; 4], 0);
+    let request = issue_request(&mut current, 3, 1_000);
+    let invalid = step(
         &current,
         TopologyEvent::ApplyFinger {
-            index: 1,
-            successor: local,
+            request,
+            successor: did(4),
         },
         DEFAULT_SUCCESSOR_CAPACITY,
     );
-    let out_of_range = step(
+    let stale = step(
+        &invalid.state,
+        TopologyEvent::ApplyFinger {
+            request,
+            successor: did(8),
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+    let out_of_range = FingerFixRequest::new(9, 2).unwrap_or(FingerFixRequest {
+        slot: u16::MAX,
+        request_id: u64::MAX,
+    });
+    let ignored = step(
         &current,
         TopologyEvent::ApplyFinger {
-            index: 9,
+            request: out_of_range,
             successor: did(9),
         },
         DEFAULT_SUCCESSOR_CAPACITY,
     );
 
-    assert_eq!(self_update.state, current);
-    assert_eq!(out_of_range.state, current);
+    assert_eq!(invalid.state.fingers, current.fingers);
+    assert_eq!(stale.state, invalid.state);
+    assert_eq!(ignored.state, current);
 }
 
 /// A sparse finger table with no hint preceding the target forwards to the
@@ -483,17 +528,21 @@ fn test_find_successor_treats_local_successor_entry_as_absent() {
 fn test_fix_finger_step_forwards_to_successor_head_when_fingers_are_sparse() {
     let local = did(0);
     let successor = did(4);
+    let mut current = state(local, vec![successor], None, vec![None; 4], 2);
+    current.finger_convergence.verified = vec![true, true, true, false];
     let next = step(
-        &state(local, vec![successor], None, vec![None; 4], 2),
-        TopologyEvent::FixFinger,
+        &current,
+        TopologyEvent::AdvanceFingerConvergence { now_ms: 1_000 },
         DEFAULT_SUCCESSOR_CAPACITY,
     );
 
-    assert_eq!(next.state.fix_finger_index, 3);
     assert_eq!(next.actions, vec![TopologyAction::FindSuccessorForFix {
         next: successor,
         did: Did::power_of_two(3),
-        index: 3
+        request: FingerFixRequest::new(3, 1).unwrap_or(FingerFixRequest {
+            slot: u16::MAX,
+            request_id: u64::MAX,
+        })
     }]);
 }
 
@@ -632,13 +681,17 @@ fn test_remove_step_reports_head_change_to_the_surviving_successor() {
 fn test_predecessor_and_finger_steps_never_report_a_head_change() {
     let local = did(0);
     let current = state(local, vec![did(30)], None, vec![None; 5], 0);
+    let request = FingerFixRequest::new(2, 1).unwrap_or(FingerFixRequest {
+        slot: u16::MAX,
+        request_id: u64::MAX,
+    });
     for event in [
         TopologyEvent::Notify {
             predecessor: did(90),
         },
-        TopologyEvent::FixFinger,
+        TopologyEvent::BeginFingerRevalidation,
         TopologyEvent::ApplyFinger {
-            index: 2,
+            request,
             successor: did(40),
         },
         TopologyEvent::UpdateSuccessor { successor: did(30) },

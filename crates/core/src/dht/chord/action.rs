@@ -59,12 +59,12 @@ pub enum RemoteAction {
     },
     /// Find a successor and report it for connection establishment.
     FindSuccessorForConnect(Did),
-    /// Find a successor and report it for one finger-table slot.
+    /// Find a successor and report its proved finger-table range.
     FindSuccessorForFix {
-        /// DID whose successor should populate the finger slot.
+        /// DID whose successor begins the proved finger range.
         did: Did,
-        /// Finger slot that should be updated by the report.
-        index: usize,
+        /// Correlation token the report must echo before updating the range.
+        request: crate::dht::FingerFixRequest,
     },
     /// Fetch the recipient's successor list.
     QueryForSuccessorList,

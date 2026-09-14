@@ -45,6 +45,12 @@ use crate::utils::get_epoch_ms_i64;
 use crate::utils::sleep;
 use crate::utils::Instant;
 
+#[derive(Clone, Copy)]
+enum FingerMaintenanceMode {
+    Immediate,
+    Jittered,
+}
+
 const STABILIZATION_STEP_TIMEOUT: Duration =
     TRACKED_PAYLOAD_COMPLETION_BOUND.saturating_add(Duration::from_secs(1));
 const STABILIZATION_STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -238,6 +244,20 @@ impl Stabilizer {
     }
 
     async fn stabilize_topology_with_step_timeout(&self, timeout: Duration) {
+        self.stabilize_topology_with_finger_mode(timeout, FingerMaintenanceMode::Immediate)
+            .await;
+    }
+
+    async fn stabilize_scheduled_topology_with_step_timeout(&self, timeout: Duration) {
+        self.stabilize_topology_with_finger_mode(timeout, FingerMaintenanceMode::Jittered)
+            .await;
+    }
+
+    async fn stabilize_topology_with_finger_mode(
+        &self,
+        timeout: Duration,
+        finger_mode: FingerMaintenanceMode,
+    ) {
         self.run_step(
             "clean_unavailable_connections",
             timeout,
@@ -246,8 +266,20 @@ impl Stabilizer {
         .await;
         self.run_step("notify_predecessor", timeout, self.notify_predecessor())
             .await;
-        self.run_step("fix_fingers", timeout, self.fix_fingers())
-            .await;
+        match finger_mode {
+            FingerMaintenanceMode::Immediate => {
+                self.run_step("fix_fingers", timeout, self.fix_fingers())
+                    .await;
+            }
+            FingerMaintenanceMode::Jittered => {
+                self.run_step(
+                    "schedule_finger_revalidation",
+                    timeout,
+                    self.begin_finger_revalidation(),
+                )
+                .await;
+            }
+        }
         self.run_step("probe_peer_liveness", timeout, self.probe_peer_liveness())
             .await;
         // Default HMCC/Zave stabilization path. The pure operation is specified
@@ -759,7 +791,21 @@ impl Stabilizer {
 
     /// Fix fingers from finger table, this is a DHT operation.
     async fn fix_fingers(&self) -> Result<()> {
-        match self.dht.fix_fingers() {
+        self.begin_finger_revalidation().await?;
+        self.advance_finger_convergence().await
+    }
+
+    async fn begin_finger_revalidation(&self) -> Result<()> {
+        self.interpret_finger_action(self.dht.fix_fingers()).await
+    }
+
+    async fn advance_finger_convergence(&self) -> Result<()> {
+        self.interpret_finger_action(self.dht.advance_finger_convergence())
+            .await
+    }
+
+    async fn interpret_finger_action(&self, action: Result<PeerRingAction>) -> Result<()> {
+        match action {
             Ok(action) => match action {
                 PeerRingAction::None => {
                     tracing::debug!(
@@ -773,20 +819,27 @@ impl Stabilizer {
                     closest_predecessor,
                     PeerRingRemoteAction::FindSuccessorForFix {
                         did: finger_did,
-                        index,
+                        request,
                     },
                 ) => {
                     let msg = Message::FindSuccessorSend(FindSuccessorSend {
                         did: finger_did,
                         then: FindSuccessorThen::Report(
-                            FindSuccessorReportHandler::FixFingerTable { index },
+                            FindSuccessorReportHandler::FixFingerTable { request },
                         ),
                         strict: false,
                     });
-                    let payload = self
+                    let payload = match self
                         .transport
                         .signed_payload(msg.clone(), closest_predecessor, closest_predecessor)
-                        .await?;
+                        .await
+                    {
+                        Ok(payload) => payload,
+                        Err(error) => {
+                            let _ = self.dht.cancel_finger_lookup(request);
+                            return Err(error);
+                        }
+                    };
                     let tx_id = payload.transaction.tx_id;
                     let next_hop_state = self
                         .transport
@@ -798,7 +851,8 @@ impl Stabilizer {
                         next_hop = %closest_predecessor,
                         next_hop_state = ?next_hop_state,
                         finger_did = %finger_did,
-                        index,
+                        finger_slot = request.slot(),
+                        request_id = request.request_id(),
                         tx_id = %tx_id,
                         "STABILIZATION fix_fingers send start"
                     );
@@ -809,11 +863,13 @@ impl Stabilizer {
                             next_hop = %closest_predecessor,
                             next_hop_state = ?next_hop_state,
                             finger_did = %finger_did,
-                            index,
+                            finger_slot = request.slot(),
+                            request_id = request.request_id(),
                             tx_id = %tx_id,
                             error = ?e,
                             "STABILIZATION fix_fingers send failed"
                         );
+                        let _ = self.dht.cancel_finger_lookup(request);
                         return Err(e);
                     }
                     tracing::debug!(
@@ -821,7 +877,8 @@ impl Stabilizer {
                         local = %self.dht.did,
                         next_hop = %closest_predecessor,
                         finger_did = %finger_did,
-                        index,
+                        finger_slot = request.slot(),
+                        request_id = request.request_id(),
                         tx_id = %tx_id,
                         "STABILIZATION fix_fingers send complete"
                     );

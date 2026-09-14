@@ -256,11 +256,11 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
         }
 
         match &msg.handler {
-            FindSuccessorReportHandler::FixFingerTable { index } => {
-                let disposition = self.transport.record_finger_candidate(msg.did, *index)?;
+            FindSuccessorReportHandler::FixFingerTable { request } => {
+                let disposition = self.transport.record_finger_candidate(msg.did, *request)?;
                 if disposition.needs_connection() && msg.reports_remote_successor(self.dht.did) {
                     self.connect_dht_peer(msg.did).await?;
-                    let _ = self.transport.record_finger_candidate(msg.did, *index)?;
+                    let _ = self.transport.record_finger_candidate(msg.did, *request)?;
                 }
             }
             FindSuccessorReportHandler::Connect if msg.reports_remote_successor(self.dht.did) => {

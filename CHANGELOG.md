@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.26.0
+
+### Breaking changes
+
+- Finger-table lookup reports now carry a node-local correlation token instead of a bare slot
+  index. The wire format is incompatible with 0.25.x, so every node in an overlay must upgrade
+  together.
+
+### Added
+
+- Finger-table convergence distinguishes inferred hints from verified ranges. One lookup proves
+  every consecutive slot owned by the reported successor; topology changes invalidate only the
+  affected slots, and correlated request epochs reject stale in-flight results.
+- Automatic convergence permits one lookup per node at a time, retries unanswered lookups after a
+  fixed timeout, enforces a one-second minimum emission interval, and adds deterministic per-node
+  jitter without catch-up bursts. Stabilization and storage repair retain scheduling priority.
+
 ## 0.25.0
 
 ### Breaking changes
