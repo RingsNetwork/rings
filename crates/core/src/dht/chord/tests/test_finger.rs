@@ -108,18 +108,18 @@ async fn test_finger_table_tracks_clockwise_and_wrapped_joins() -> Result<()> {
     Ok(())
 }
 
-/// Proves that the public `fix_fingers` operation starts revalidation and
-/// advances exactly far enough to emit its first routable range lookup.
+/// The public `fix_fingers()` contract: one call both begins revalidation and
+/// emits the first due lookup, rather than only marking the table stale for a
+/// later maintenance tick.
 ///
-/// The fixture has one remote seed, making the expected next hop unambiguous;
-/// observing `FindSuccessorForFix` witnesses the legacy one-call contract.
+/// Since 0.26 the two halves are separate transitions
+/// (`begin_finger_revalidation` then `advance_finger_convergence`); this test
+/// pins their composition behind the legacy entry point. The fixture has one
+/// remote seed, so the lookup's next hop is unambiguous: seeing
+/// `FindSuccessorForFix` routed to the seed witnesses the whole contract.
 #[test]
 fn test_public_fix_fingers_advances_one_range() -> Result<()> {
-    // This public API regression protects the legacy `fix_fingers()` contract: a caller that asks
-    // for one repair pass should both begin revalidation and issue the first routable lookup, not
-    // only mark the table stale for a later maintenance tick.
     let local = Did::from(0u32);
-    // The seed is the only remote evidence, so the first public fix routes to it.
     let seed = Did::from(8u32);
     let dht = PeerRing::new_with_storage(local, 3, Box::new(MemStorage::new()));
     let _ = dht.join(seed)?;
@@ -134,15 +134,14 @@ fn test_public_fix_fingers_advances_one_range() -> Result<()> {
     Ok(())
 }
 
-/// Proves that beginning revalidation changes convergence state without
-/// bypassing the independently paced lookup scheduler.
+/// Beginning revalidation only marks ranges stale; it emits no lookup, because
+/// network work is paced separately by `advance_finger_convergence`.
 ///
-/// The test expects no immediate remote action, then checks that pending work
-/// is visible for a later `advance_finger_convergence` call.
+/// The test expects no remote action from the begin step, and then that the
+/// marked work is visible as pending to the scheduler.
 #[test]
 fn test_begin_finger_revalidation_does_not_emit_a_lookup() -> Result<()> {
     let local = Did::from(0u32);
-    // Revalidation only marks a range; scheduling emits the lookup separately.
     let seed = Did::from(8u32);
     let dht = PeerRing::new_with_storage(local, 3, Box::new(MemStorage::new()));
     let _ = dht.join(seed)?;
