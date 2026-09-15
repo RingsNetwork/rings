@@ -422,12 +422,7 @@ pub(super) async fn wait_processors_connected(
 }
 
 pub(super) fn processor_has_connected_peer(processor: &Processor, peer: Did) -> bool {
-    let peer = peer.to_string();
-    processor
-        .swarm
-        .peers()
-        .into_iter()
-        .any(|conn| conn.did == peer && conn.state == "Connected")
+    processor.swarm.is_peer_connected(peer)
 }
 
 pub(super) async fn wait_for_mutual_dht_topology(

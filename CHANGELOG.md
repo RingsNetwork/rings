@@ -17,9 +17,10 @@
   progress. A key in the node's own successor range is refuted locally without a probe. Invalid
   targets (unparsable DID, non-public URL, one DID with differing endpoints, or the node itself)
   stop `rings run` before it listens; an entry repeated verbatim is merged.
-- `Swarm::is_peer_connected` exposes the strict direct-transport readiness predicate, and the
-  node `Backend` accepts a `BackendObserver` that receives decoded Chord lookup reports and
-  connection state changes without a second payload decode.
+- `Swarm::is_peer_connected` exposes the strict direct-transport readiness predicate,
+  `WebrtcConnectionState::is_terminal` is public, and the node `Backend` accepts a
+  `BackendObserver` that receives decoded Chord lookup reports and connection state changes
+  without a second payload decode.
 
 ## 0.26.0
 

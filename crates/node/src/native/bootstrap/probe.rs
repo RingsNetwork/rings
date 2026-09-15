@@ -69,7 +69,7 @@ pub(crate) const EARLY_REPORT_CAPACITY: usize = 32;
 
 /// Rendezvous between lookup probes and the reports they wait for.
 #[derive(Default)]
-pub struct LookupReportLedger {
+pub(crate) struct LookupReportLedger {
     state: Mutex<LedgerState>,
 }
 
