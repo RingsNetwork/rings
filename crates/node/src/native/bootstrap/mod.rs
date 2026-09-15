@@ -72,7 +72,7 @@ mod schedule;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use self::probe::ProcessorPort;
+pub use self::probe::ProcessorPort;
 
 /// The `bootstrap` section of the native config: targets `rings run` keeps reachable.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -181,7 +181,7 @@ impl BootstrapTargets {
     }
 
     /// DIDs of every target, the filter for transport-drop signals.
-    pub fn dids(&self) -> BTreeSet<Did> {
+    pub(crate) fn dids(&self) -> BTreeSet<Did> {
         self.0.iter().map(ManagedTarget::did).collect()
     }
 }
@@ -198,7 +198,7 @@ pub trait BootstrapPort: Send + Sync + 'static {
 
 /// Terminal transport losses of managed targets, recorded by the swarm callback and drained by
 /// the supervisor. Bounded by the target set.
-pub struct TransportDrops {
+pub(crate) struct TransportDrops {
     targets: BTreeSet<Did>,
     dropped: Mutex<BTreeSet<Did>>,
     wake: Notify,
@@ -215,9 +215,10 @@ impl TransportDrops {
     }
 
     /// Record `state` for `peer` when it is terminal and `peer` is a managed target, waking the
-    /// supervisor. Other peers and non-terminal states are ignored.
+    /// supervisor. Other peers and non-terminal states (`Disconnected` is transient ICE that
+    /// often recovers, and the core keeps the peer's DHT entry through it) are ignored.
     pub(crate) fn observe(&self, peer: Did, state: WebrtcConnectionState) -> Result<()> {
-        if !is_terminal_transport_state(state) || !self.targets.contains(&peer) {
+        if !state.is_terminal() || !self.targets.contains(&peer) {
             return Ok(());
         }
         lock(&self.dropped)?.insert(peer);
@@ -229,15 +230,6 @@ impl TransportDrops {
     fn take(&self) -> Result<BTreeSet<Did>> {
         Ok(std::mem::take(&mut *lock(&self.dropped)?))
     }
-}
-
-/// Whether `state` is a terminal WebRTC state, after which the core leaves the peer's DHT
-/// entry. `Disconnected` is transient ICE and often recovers, so it is not one.
-const fn is_terminal_transport_state(state: WebrtcConnectionState) -> bool {
-    matches!(
-        state,
-        WebrtcConnectionState::Failed | WebrtcConnectionState::Closed
-    )
 }
 
 /// Swarm-side feed for the supervisor: lookup reports and transport drops.
@@ -312,17 +304,22 @@ impl Turns {
         self.targets.insert(handle.id(), index);
     }
 
-    /// The next finished turn, or `None` while none is in flight (the caller's select disables
-    /// this branch rather than completing it).
+    /// The next finished turn, or `None` once none is in flight (the caller's select disables
+    /// this branch rather than completing it). A task the map does not know is skipped rather
+    /// than allowed to stall the branch.
     async fn next(&mut self) -> Option<(TargetIndex, TurnOutcome)> {
-        let (id, outcome) = match self.tasks.join_next_with_id().await? {
-            Ok((id, outcome)) => (id, outcome),
-            Err(error) => {
-                tracing::error!(%error, "bootstrap turn did not complete");
-                (error.id(), TurnOutcome::DialFailed)
+        loop {
+            let (id, outcome) = match self.tasks.join_next_with_id().await? {
+                Ok((id, outcome)) => (id, outcome),
+                Err(error) => {
+                    tracing::error!(%error, "bootstrap turn did not complete");
+                    (error.id(), TurnOutcome::DialFailed)
+                }
+            };
+            if let Some(index) = self.targets.remove(&id) {
+                return Some((index, outcome));
             }
-        };
-        self.targets.remove(&id).map(|index| (index, outcome))
+        }
     }
 }
 
