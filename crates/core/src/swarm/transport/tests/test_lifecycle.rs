@@ -5,11 +5,14 @@ use rings_transport::connections::dummy_controlled;
 use super::super::delivery::SendCompletionOutcome;
 use super::*;
 #[cfg(feature = "dummy")]
+use crate::dht::FingerFixRequest;
+#[cfg(feature = "dummy")]
 use crate::dht::StorageSyncDestination;
 #[cfg(feature = "dummy")]
 use crate::dht::TopoInfo;
 
 #[cfg(feature = "dummy")]
+/// Build a transport whose peer is active, connected, and data-channel ready.
 async fn transport_with_routable_peer(
 ) -> Result<(Arc<SwarmTransport>, Did, PendingConnectionAttempt)> {
     let transport = Arc::new(transport_with_measure(Arc::new(
@@ -28,8 +31,25 @@ async fn transport_with_routable_peer(
 }
 
 #[cfg(feature = "dummy")]
+/// Prepare a live finger-fix request for lifecycle/transport admission tests.
+///
+/// The helper enters the same `AwaitingReport` state used by production and
+/// fails explicitly if `slot` cannot begin a request, preventing a test from
+/// manufacturing an uncorrelated token.
+fn finger_request(transport: &SwarmTransport, slot: usize) -> Result<FingerFixRequest> {
+    transport
+        .dht
+        .lock_finger()?
+        .prepare_request_for_test(slot)
+        .ok_or_else(|| Error::InvalidMessage("failed to prepare test finger request".to_owned()))
+}
+
+#[cfg(feature = "dummy")]
+/// Join handle with a timeout-backed result channel for lock-contention tests.
 struct BoundedThread<T> {
+    /// Receives the worker result without blocking indefinitely on thread join.
     completion: std::sync::mpsc::Receiver<T>,
+    /// Worker that is joined only after the bounded result is received.
     thread: std::thread::JoinHandle<()>,
 }
 
@@ -57,8 +77,11 @@ impl<T: Send + 'static> BoundedThread<T> {
 }
 
 #[cfg(feature = "dummy")]
+/// Test handle for a deliberately held lifecycle critical section.
 struct LifecycleGateController {
+    /// Fires after the observed operation enters the lifecycle gate.
     entered: std::sync::mpsc::Receiver<()>,
+    /// Releases the held operation so a contending retirement can proceed.
     release: std::sync::mpsc::SyncSender<()>,
 }
 
@@ -82,6 +105,7 @@ impl LifecycleGateController {
 }
 
 #[cfg(feature = "dummy")]
+/// Create an observer that proves an operation holds the lifecycle gate until released.
 fn lifecycle_test_gate() -> (impl FnOnce() + Send + 'static, LifecycleGateController) {
     let (entered_tx, entered) = std::sync::mpsc::sync_channel(0);
     let (release, release_rx) = std::sync::mpsc::sync_channel(0);
@@ -97,8 +121,11 @@ fn lifecycle_test_gate() -> (impl FnOnce() + Send + 'static, LifecycleGateContro
 }
 
 #[cfg(feature = "dummy")]
+/// Retirement worker that must block behind another lifecycle operation.
 struct BlockedRetirement {
+    /// Notifies the test when retirement is waiting on the lifecycle gate.
     waiter_registered: std::sync::mpsc::Receiver<()>,
+    /// Worker running the retirement operation under test.
     worker: BoundedThread<Result<Option<()>>>,
 }
 
@@ -346,6 +373,10 @@ fn test_terminal_send_marker_is_generation_scoped_and_survives_until_retirement(
 }
 
 #[cfg(feature = "dummy")]
+/// Prove a send-terminal generation cannot re-enter predecessor or finger topology.
+///
+/// Both topology entry points execute after terminal send evidence is recorded,
+/// so neither notification nor a valid finger report may restore the peer.
 #[tokio::test]
 async fn test_terminal_send_generation_cannot_reenter_topology() -> Result<()> {
     let (transport, peer, attempt) = transport_with_routable_peer().await?;
@@ -357,11 +388,12 @@ async fn test_terminal_send_generation_cannot_reenter_topology() -> Result<()> {
 
     assert_eq!(transport.notify_admitted_predecessor(peer)?, None);
     assert_ne!(*transport.dht.lock_predecessor()?, Some(peer));
+    let request = finger_request(&transport, 0)?;
     assert_eq!(
-        transport.record_finger_candidate(peer, 1)?,
+        transport.record_finger_candidate(peer, request)?,
         FingerUpdateDisposition::Unroutable
     );
-    assert_eq!(transport.dht.lock_finger()?.get(1), None);
+    assert_eq!(transport.dht.lock_finger()?.get(0), None);
     Ok(())
 }
 
@@ -911,9 +943,22 @@ async fn test_routable_join_serializes_with_generation_retirement() -> Result<()
 }
 
 #[cfg(feature = "dummy")]
+/// Prove correlated topology stabilization serializes with generation retirement.
+///
+/// The test holds the lifecycle gate after report confirmation, queues
+/// retirement behind it, and verifies retirement removes every committed peer
+/// reference once the stabilization transition finishes.
 #[tokio::test]
 async fn test_topology_report_serializes_with_generation_retirement() -> Result<()> {
     let (transport, peer, attempt) = transport_with_routable_peer().await?;
+    transport.dht.join(peer)?;
+    // Seed the same stabilization request id that the report below will spend.
+    let request_id = uuid::Uuid::from_u128(1);
+    let _ = transport.dht.begin_stabilization(request_id)?;
+    // The claim must stay alive until the report is applied below: dropping
+    // it would release the token and make the transition stale.
+    let claim = transport.dht.claim_stabilization_report(peer, request_id)?;
+    assert!(claim.is_some());
     let reported = TopoInfo {
         successors: vec![peer],
         predecessor: Some(peer),
@@ -921,8 +966,12 @@ async fn test_topology_report_serializes_with_generation_retirement() -> Result<
     let (hold_lifecycle, lifecycle_gate) = lifecycle_test_gate();
     let stabilization_transport = Arc::clone(&transport);
     let stabilization_thread = BoundedThread::spawn(move || {
-        stabilization_transport
-            .stabilize_routable_topology_with_observer_for_test(&reported, hold_lifecycle)
+        stabilization_transport.stabilize_routable_topology_with_observer_for_test(
+            peer,
+            request_id,
+            &reported,
+            hold_lifecycle,
+        )
     });
     lifecycle_gate.wait_until_entered()?;
     let retirement = BlockedRetirement::spawn(Arc::clone(&transport), peer, attempt);
@@ -963,30 +1012,8 @@ async fn test_predecessor_notification_serializes_with_generation_retirement() -
 }
 
 #[cfg(feature = "dummy")]
-#[tokio::test]
-async fn test_finger_update_serializes_with_generation_retirement() -> Result<()> {
-    let (transport, peer, attempt) = transport_with_routable_peer().await?;
-    let finger_index = 3;
-    let (hold_lifecycle, lifecycle_gate) = lifecycle_test_gate();
-    let finger_transport = Arc::clone(&transport);
-    let finger_thread = BoundedThread::spawn(move || {
-        finger_transport.record_finger_candidate_with_observer_for_test(
-            peer,
-            finger_index,
-            hold_lifecycle,
-        )
-    });
-    lifecycle_gate.wait_until_entered()?;
-    let retirement = BlockedRetirement::spawn(Arc::clone(&transport), peer, attempt);
-    retirement.wait_until_registered(&transport)?;
-
-    lifecycle_gate.release()?;
-    assert_eq!(
-        finger_thread.finish("finger update")??,
-        FingerUpdateDisposition::Applied
-    );
-    assert_eq!(retirement.finish()?, Some(()));
-    assert!(!transport.is_admitted_connection(peer));
-    assert!(!transport.dht.lock_finger()?.contains(Some(peer)));
-    Ok(())
-}
+/// Finger-specific transport lifecycle regression tests.
+///
+/// The child module checks that deferred proofs follow the exact connection
+/// generation that owns admission, cancellation, or retirement.
+mod finger;

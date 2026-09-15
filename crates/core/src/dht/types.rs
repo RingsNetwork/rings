@@ -160,16 +160,15 @@ pub trait ChordStorageCache<Action>: Chord<Action> {
 /// Based on the above facts, trait CorrectChord only focuses on handling join and stabilization
 /// operations of Chord.
 ///
-/// This trait defines three operations referred to in the paper:
+/// This trait defines the Join and Rectify operations referred to in the paper
+/// and the first half of the Stabilize operation, `pre_stabilize`, which
+/// queries the successor. The second half, applying the successor's report, is
+/// not on this trait: a report may change topology only when it echoes the
+/// correlation token that `pre_stabilize` issued, so it enters through the
+/// token-checked report path of the implementing ring rather than through a
+/// public method that would accept any `TopoInfo`.
 ///
-/// - Join Operation
-/// - Rectify Operation
-/// - Stabilize Operation
-///
-/// This trait also defines two more methods:
-///
-/// - The `pre_stabilize` is the precondition of Stabilize Operation.
-/// - `topo_info` is a helper function to get the topological info of the chord.
+/// `topo_info` is a helper function to get the topological info of the chord.
 ///
 /// Some methods return an `Action`. The reason is the same as [Chord].
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
@@ -201,18 +200,14 @@ pub trait CorrectChord<Action>: Chord<Action> {
     ///
     /// When a node fails or leaves, it ceases to stabilize, notify, or respond to queries
     /// from other nodes. When a node rejoins, it re-initializes its Chord variables. The node
-    /// (self) queries its successor for its successor's predecessor and successor list.
-    fn pre_stabilize(&self) -> Result<Action>;
-
-    /// Stabilize operation in the paper.
+    /// (self) queries its successor for its successor's predecessor and successor list; the
+    /// returned action carries the correlation token that the successor's report must echo.
     ///
-    /// The node first updates its successor list with its successor's list. It then checks
-    /// to see if the new pointer it has learned, its successor's predecessor, is an improved
-    /// successor. If so, and if new successor is live, it adopts newSucc as its new successor.
-    /// Thus the stabilize operation requires one or two queries for each traversal of the
-    /// outer loop. Whether or not there is a live improved successor, the node notifies its
-    /// successor of its own identity.
-    fn stabilize(&self, succ: TopoInfo) -> Result<Action>;
+    /// The Stabilize operation proper (the paper's update of the successor list from the
+    /// successor's list, adoption of an improved successor, and notification of the
+    /// successor) is applied by the implementing ring when that report arrives with its
+    /// token.
+    fn pre_stabilize(&self) -> Result<Action>;
 
     /// A helper function to get the topological
     /// info about the chord.

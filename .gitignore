@@ -25,7 +25,8 @@ debug
 dev_docs
 # project
 .vscode/
-.claude/settings.local.json
+# Per-developer Claude state may contain local tool/session configuration.
+.claude/
 
 # Tests
 *.log

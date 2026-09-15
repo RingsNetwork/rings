@@ -28,3 +28,102 @@ Correct Chord is derived from Pamela Zave's work on Chord, and it encompasses tw
 * The Chord Paper defined the maintenance and use of `ﬁnger tables`, which improve lookup speed by providing pointers that cross the ring like chords of a circle. **Because ﬁnger tables are an optimization and they are built from successors and predecessors, correctness does not depend on them.**
 
 Rings Network builds upon Correct Chord and incorporates several modifications, including support for multiple successors and improved stabilization algorithms, among other enhancements.
+
+## Finger-table convergence
+
+### Algorithmic basis and Rings policy
+
+Chord defines finger slot `i` as the successor of `local + 2^i`. The batching
+lemma Rings relies on is Chord's own: in the
+[SIGCOMM 2001 paper](https://pdos.csail.mit.edu/papers/chord:sigcomm01/chord_sigcomm.pdf),
+section 4.4, `init_finger_table` (Figure 6) checks whether `finger[i].node` is
+also the correct `finger[i+1]` entry, which holds exactly when no node lies in
+`finger[i].interval`; one lookup therefore answers every consecutive slot whose
+target is no farther than the returned successor, and the paper derives its
+`O(log N)` expected-lookup bound from that check. The same section's advice to
+copy a neighbour's finger table as initial hints is the origin of the
+inferred-hint model below. The
+[ToN 2003 revision](https://pdos.csail.mit.edu/papers/ton:chord/paper-ton.pdf)
+dropped both in favour of randomized `fix_fingers`. Rings-specific are only the
+convergence state machine around that lemma: UUID correlation, per-slot
+evidence epochs, cyclic slot selection, admission leases, exponential retry,
+jitter, and browser lifecycle handling.
+[Pamela Zave's Chord correctness work](https://arxiv.org/abs/1502.06461)
+supports the separation used here: ring correctness depends
+on a valid successor structure; fingers are replaceable routing optimization.
+
+Rings treats entries learned from admission, successor changes, and peer removal as routing hints,
+not as proof that a finger slot is current. A lookup for slot `i` verifies the consecutive range
+from `i` through the highest slot whose target is no farther than the returned successor. This
+reduces sparse-table convergence from one lookup per bit to one lookup per distinct successor
+range. Lookups are issued for unverified ranges in cyclic order, resuming after the range the
+previous attempt proved or failed, so a range whose successor never completes a handshake costs one
+attempt per rotation rather than blocking every range above it; periodic revalidation of proved
+ranges is deferred by pending work only while that work is succeeding. A topology change invalidates
+only slots whose hints changed. A node with no admitted successor keeps its ranges unverified but
+dormant: temporary isolation is not proof that the global membership set is empty, and the first
+successor admission activates the pending pass. The current successor's authenticated stabilization
+report proves the local successor interval only when it echoes the current stabilization UUID and
+reports the local node as its predecessor; a superseded or reordered report is ignored, and there is
+no token-less path by which a report can change the successor list. A new stabilization round is not
+started while the head's previous report is still being processed, and a handler releases its claim
+on every exit path, so a slow candidate handshake neither loses the report nor blocks the next round
+for longer than the handshake. Successor-list synchronization likewise accepts only one report whose
+reporter and UUID match an outstanding query to a current successor; unsolicited, duplicate, and
+superseded reports, and reports from a reporter that has left the successor list, are dropped before
+they can start connection admission. Both paths revalidate that claim before each candidate: a
+report keeps its remaining candidate budget while its reporter stays a successor (its own
+admissions extend the list without revoking it), and loses it once the reporter leaves. One
+candidate permit already issued before that may still finish its connection and admission; no later
+candidate from that report is permitted. Candidate lists are deduplicated and ordered by transport
+quality: successor-list sync admits at most the local successor capacity, while stabilization may
+additionally admit one predecessor. Those locally proven finger slots never send a lookup around the
+ring.
+
+Each node keeps at most one finger operation outstanding, either awaiting a lookup report or retaining
+a timely proof while its returned peer completes transport admission. Reports echo a fresh 128-bit
+UUID request identifier allocated at the effect boundary. Lookup expiry is checked and the proof is
+retained before connection setup is awaited, so the shorter lookup deadline cannot expire during the
+longer handshake. The retained proof has its own admission lease of 210 seconds, longer than the
+180-second handshake generation that will own it, so the lease is only a backstop for a proof that
+never gains a generation; if the handler is cancelled or transport admission never completes, expiry
+releases the slot and increases the retry backoff. Results from an expired request or from a request invalidated by a topology change
+cannot overwrite newer state, including after a process restart. A fleet's first automatic attempt is spread over a
+node-lifecycle-randomized 10-second per-node phase window, so an identity cannot preselect its time
+bucket. Repeated `stop`/`listen` cycles on the same browser provider reuse that phase instead of
+rerolling it. When browser suspension leaves a runnable finger deadline at least 10 seconds overdue,
+the node spreads the stale attempt over a new 1--11 second delay rather than emitting on resume; a
+retained admission proof stays dormant until that lease expires, and a full provider reconstruction
+is a new lifecycle and selects new entropy. Listener generations on one browser provider are serialized,
+so a new `listen` waits for a stopped generation's cooperative cleanup instead of running duplicate
+maintenance daemons. An in-flight lookup exposes its remaining timeout to the listener instead of an
+absolute timestamp from another clock origin, so repeated listener restarts still wake at the same
+physical expiry.
+Send or handshake cancellation, invalid reports, lookup timeouts, and admission-lease expiry increase a progress-sensitive
+retry floor through 2, 4, 8, 16, 32, and 60 seconds. A topology change invalidates superseded evidence
+without classifying normal churn as a network failure;
+each retry is additionally spread across a full jitter window of the same size. Only progress
+resets that failure level: an applied range proof, or a stabilization report that locally proves the
+range the active attempt was verifying. Other missed
+deadlines schedule one future attempt rather than catch-up bursts. Finger convergence may yield to
+at most two due topology/storage phases before its turn is reserved.
+
+One due node emits one routed lookup rather than a broadcast. Its normal completion is one routed
+report. Discovering an unconnected result also runs connection admission, which sends a connect
+lookup and may query the new successor's bounded successor list; those peers can in turn require
+connections. The sync-storm gate therefore executes the real effect and transport path and counts
+the complete causal submission trace instead of multiplying a fixed message-leg estimate. The
+per-message relay hop budget bounds each carrier, while the retry schedule bounds only the originating
+node's finger emissions.
+
+The model and integration witnesses intentionally separate propositions. The finite topology model
+checks correlation tokens, retry resource bounds, stale proof rejection, and single-use connection
+permits over an exhaustive action alphabet. The sync-storm fixtures run the production transport
+cascade and count effects that the finite model abstracts away. Together they document bounded
+resource behavior; they do not claim all-order convergence for every possible production network
+schedule.
+
+These are per-node bounds: aggregate healthy bootstrap work still scales with the number of nodes.
+The phase window smooths a synchronized start but is not an N-independent destination rate limit.
+The destination's bounded inbound mailbox limits retained concurrent work; its origin quota remains
+per origin and therefore must not be counted as a global many-origin convergence cap.

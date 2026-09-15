@@ -9,10 +9,14 @@ This directory contains the repository-owned Rings paper copies.
 - `dranking.pdf`: compiled DRanking protocol paper.
 - `dranking.tex`: LaTeX source for the DRanking protocol paper (supersedes the 2023 *Ranking Protocol* draft).
 - `dranking.bib`: bibliography used by `dranking.tex`.
+- `finger-convergence.pdf`: compiled specification of range-proved finger convergence (Rings 0.26.0).
+- `finger-convergence.tex`: LaTeX source for the finger-convergence specification.
+- `finger-convergence.bib`: bibliography used by `finger-convergence.tex`.
 
 Build with:
 
 ```sh
 latexmk -xelatex rings.tex
 latexmk -xelatex dranking.tex
+latexmk -xelatex finger-convergence.tex
 ```

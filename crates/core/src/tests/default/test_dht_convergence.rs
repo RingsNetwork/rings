@@ -322,6 +322,9 @@ fn dht_with_successors(me: Did, successors: &[Did]) -> PeerRing {
     dht
 }
 
+/// Run one correlated stabilization round against the current head and check
+/// the applied report against the spec: the report enters through the same
+/// begin, claim, and apply path as production, carrying the round's token.
 fn assert_correct_stabilize_matches_spec(
     me: Did,
     current_successors: &[Did],
@@ -329,8 +332,16 @@ fn assert_correct_stabilize_matches_spec(
     topo_predecessor: Option<Did>,
 ) {
     let dht = dht_with_successors(me, current_successors);
+    let head = spec::head(me, current_successors).expect("stabilization needs a successor head");
+    let request_id = uuid::Uuid::from_u128(1);
+    let _ = dht.begin_stabilization(request_id).unwrap();
+    let claim = dht.claim_stabilization_report(head, request_id).unwrap();
+    assert!(
+        claim.is_some(),
+        "the head's report claims the round's token"
+    );
     let action = dht
-        .stabilize(TopoInfo {
+        .stabilize_reported_by(head, request_id, TopoInfo {
             successors: topo_successors.to_vec(),
             predecessor: topo_predecessor,
         })
@@ -542,9 +553,21 @@ fn test_correct_stabilize_ignores_last_topo_successor() {
     assert_correct_stabilize_matches_spec(dids[0], &[dids[4]], &[dids[5], dids[1]], None);
 }
 
-/// Empty TopoInfo is a no-op when the node has no successor to notify.
+/// A node without a successor has nobody to query, so no stabilization round
+/// begins and no report can be applied.
 #[test]
-fn test_correct_stabilize_empty_topo_without_successor_is_noop() {
+fn test_correct_stabilize_without_successor_begins_no_round() {
     let dids = Layout::Even(2).dids();
-    assert_correct_stabilize_matches_spec(dids[0], &[], &[], None);
+    let dht = dht_with_successors(dids[0], &[]);
+    let request_id = uuid::Uuid::from_u128(1);
+
+    assert_eq!(
+        dht.begin_stabilization(request_id).unwrap(),
+        PeerRingAction::None
+    );
+    assert!(dht
+        .claim_stabilization_report(dids[1], request_id)
+        .unwrap()
+        .is_none());
+    assert!(dht.successors().list().unwrap().is_empty());
 }

@@ -13,6 +13,8 @@ fn connect_and_hand_off(peer: Did, local: Did) -> PeerRingAction {
     ])
 }
 
+/// Verifies that joins update finger hints in clockwise order across both the
+/// ordinary interval and the identifier-space wraparound boundary.
 #[tokio::test]
 async fn test_finger_table_tracks_clockwise_and_wrapped_joins() -> Result<()> {
     let a = Did::from_str("0x00E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
@@ -36,6 +38,7 @@ async fn test_finger_table_tracks_clockwise_and_wrapped_joins() -> Result<()> {
     assert!(BigUint::from(b) > BigUint::from(2u16).pow(156));
     assert!(BigUint::from(b) < BigUint::from(2u16).pow(157));
 
+    // `b` covers slots below its highest set bit; larger slots remain unknown.
     let mut expected = std::iter::repeat_n(Some(b), 157).collect::<Vec<_>>();
     expected.extend(std::iter::repeat_n(None, 3));
     assert_eq!(node_a.lock_finger()?.list(), &expected);
@@ -54,6 +57,7 @@ async fn test_finger_table_tracks_clockwise_and_wrapped_joins() -> Result<()> {
     assert!(BigUint::from(c) > BigUint::from(2u16).pow(159));
     assert!(BigUint::from(c) < BigUint::from(2u16).pow(160));
 
+    // `c` is farther away, so it only refines the high sparse/no-wrap slots.
     let mut expected = std::iter::repeat_n(Some(b), 157).collect::<Vec<_>>();
     expected.extend(std::iter::repeat_n(Some(c), 3));
     assert_eq!(node_a.lock_finger()?.list(), &expected);
@@ -101,5 +105,51 @@ async fn test_finger_table_tracks_clockwise_and_wrapped_joins() -> Result<()> {
     expected.extend(std::iter::repeat_n(None, 3));
     assert_eq!(node_d.lock_finger()?.list(), &expected);
     assert_eq!(node_d.successors().list()?, vec![a]);
+    Ok(())
+}
+
+/// The public `fix_fingers()` contract: one call both begins revalidation and
+/// emits the first due lookup, rather than only marking the table stale for a
+/// later maintenance tick.
+///
+/// Since 0.26 the two halves are separate transitions
+/// (`begin_finger_revalidation` then `advance_finger_convergence`); this test
+/// pins their composition behind the legacy entry point. The fixture has one
+/// remote seed, so the lookup's next hop is unambiguous: seeing
+/// `FindSuccessorForFix` routed to the seed witnesses the whole contract.
+#[test]
+fn test_public_fix_fingers_advances_one_range() -> Result<()> {
+    let local = Did::from(0u32);
+    let seed = Did::from(8u32);
+    let dht = PeerRing::new_with_storage(local, 3, Box::new(MemStorage::new()));
+    let _ = dht.join(seed)?;
+
+    assert!(matches!(
+        dht.fix_fingers()?,
+        PeerRingAction::RemoteAction(
+            next,
+            RemoteAction::FindSuccessorForFix { .. }
+        ) if next == seed
+    ));
+    Ok(())
+}
+
+/// Beginning revalidation only marks ranges stale; it emits no lookup, because
+/// network work is paced separately by `advance_finger_convergence`.
+///
+/// The test expects no remote action from the begin step, and then that the
+/// marked work is visible as pending to the scheduler.
+#[test]
+fn test_begin_finger_revalidation_does_not_emit_a_lookup() -> Result<()> {
+    let local = Did::from(0u32);
+    let seed = Did::from(8u32);
+    let dht = PeerRing::new_with_storage(local, 3, Box::new(MemStorage::new()));
+    let _ = dht.join(seed)?;
+
+    assert!(matches!(
+        dht.begin_finger_revalidation()?,
+        PeerRingAction::None
+    ));
+    assert!(dht.finger_convergence_status()?.may_advance());
     Ok(())
 }

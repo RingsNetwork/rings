@@ -59,17 +59,32 @@ pub enum RemoteAction {
     },
     /// Find a successor and report it for connection establishment.
     FindSuccessorForConnect(Did),
-    /// Find a successor and report it for one finger-table slot.
+    /// Find a successor and report its proved finger-table range.
     FindSuccessorForFix {
-        /// DID whose successor should populate the finger slot.
+        /// Ring position whose successor proves the request's lowest finger slot.
+        ///
+        /// The recipient resolves this position without changing it; the
+        /// returned successor may cover later slots only after the receiver
+        /// validates the Chord range proof.
         did: Did,
-        /// Finger slot that should be updated by the report.
-        index: usize,
+        /// Correlation token that owns this lookup until its report is consumed.
+        ///
+        /// It binds the requested slot to a unique attempt, preventing a late
+        /// or duplicate response from updating a newer convergence round.
+        request: crate::dht::FingerFixRequest,
     },
     /// Fetch the recipient's successor list.
     QueryForSuccessorList,
-    /// Fetch the recipient's successor list and predecessor.
-    QueryForSuccessorListAndPred,
+    /// Fetch the recipient's successor list and predecessor for one exact
+    /// stabilization request.
+    QueryForSuccessorListAndPred {
+        /// Correlation token that authorizes exactly one topology report.
+        ///
+        /// The queried successor echoes this value unchanged; the requester
+        /// rejects reports whose token or authenticated sender no longer owns
+        /// the active stabilization round.
+        request_id: uuid::Uuid,
+    },
     /// Try to connect to the recipient.
     TryConnect,
 }

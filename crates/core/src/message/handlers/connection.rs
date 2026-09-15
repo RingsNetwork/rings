@@ -11,22 +11,22 @@ use crate::message::types::ConnectNodeSend;
 use crate::message::types::FindSuccessorReport;
 use crate::message::types::FindSuccessorSend;
 use crate::message::types::Message;
-use crate::message::types::QueryForTopoInfoReport;
 use crate::message::types::QueryForTopoInfoSend;
-use crate::message::types::Then;
 use crate::message::FindSuccessorReportHandler;
 use crate::message::FindSuccessorThen;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 
+/// Correlated topology-report admission and bounded candidate processing.
+///
+/// The submodule owns the request-token checks and connection-plan state
+/// machine used by topology reports. Keeping that flow separate prevents the
+/// general connection dispatcher from mutating DHT topology before transport
+/// evidence is current.
 mod topology_view;
 
-#[cfg(all(test, not(target_family = "wasm")))]
-use topology_view::confirmed_topology;
 use topology_view::connect_successor_hint;
-#[cfg(all(test, not(target_family = "wasm")))]
-use topology_view::topology_has_confirmed_peer;
 
 /// QueryForTopoInfoSend is direct message
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
@@ -40,40 +40,6 @@ impl HandleMsg<QueryForTopoInfoSend> for MessageHandler {
                 Message::QueryForTopoInfoReport(msg.resp(info)),
             )])
             .await?
-        }
-        Ok(())
-    }
-}
-
-/// Try join received node into DHT after received from TopoInfo.
-#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
-#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
-impl HandleMsg<QueryForTopoInfoReport> for MessageHandler {
-    async fn handle(&self, _ctx: &MessagePayload, msg: &QueryForTopoInfoReport) -> Result<()> {
-        match msg.then {
-            <QueryForTopoInfoReport as Then>::Then::SyncSuccessor => {
-                let successors = msg.info.successors.clone();
-                self.connect_dht_peers(successors.iter().copied()).await?;
-                for peer in successors {
-                    if self.transport.get_connection(peer).is_some() {
-                        self.join_dht(peer).await?;
-                    }
-                }
-            }
-            <QueryForTopoInfoReport as Then>::Then::Stabilization => {
-                // Candidates begin as non-routable pending handshakes. Only
-                // peers whose data channel has opened may enter the DHT view.
-                let candidates = msg
-                    .info
-                    .predecessor
-                    .into_iter()
-                    .chain(msg.info.successors.iter().copied());
-                self.connect_dht_peers(candidates).await?;
-
-                if let Some(ev) = self.transport.stabilize_routable_topology(&msg.info)? {
-                    self.handle_dht_events(&ev).await?;
-                }
-            }
         }
         Ok(())
     }
@@ -256,11 +222,26 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
         }
 
         match &msg.handler {
-            FindSuccessorReportHandler::FixFingerTable { index } => {
-                let disposition = self.transport.record_finger_candidate(msg.did, *index)?;
-                if disposition.needs_connection() && msg.reports_remote_successor(self.dht.did) {
-                    self.connect_dht_peer(msg.did).await?;
-                    let _ = self.transport.record_finger_candidate(msg.did, *index)?;
+            FindSuccessorReportHandler::FixFingerTable { request } => {
+                // First classify the reported successor against the current
+                // transport generation. This may apply the finger immediately,
+                // queue it behind an existing handshake, or retain an
+                // admission proof while the missing connection is opened below.
+                let disposition = self.transport.record_finger_candidate(msg.did, *request)?;
+                if disposition.proof_awaits_owner() && msg.reports_remote_successor(self.dht.did) {
+                    if let Err(error) = self.connect_dht_peer(msg.did).await {
+                        self.dht.cancel_finger_lookup(*request)?;
+                        return Err(error);
+                    }
+                    // The async connect may have admitted the same peer,
+                    // replaced the pending slot, or failed after a partial
+                    // lifecycle transition. Re-run admission with the same
+                    // request id so the deferred proof either gains an owner or
+                    // is explicitly released.
+                    let admitted = self.transport.record_finger_candidate(msg.did, *request)?;
+                    if admitted.proof_awaits_owner() {
+                        self.dht.cancel_finger_lookup(*request)?;
+                    }
                 }
             }
             FindSuccessorReportHandler::Connect if msg.reports_remote_successor(self.dht.did) => {
@@ -285,6 +266,8 @@ pub mod tests {
     use crate::dht::successor::SuccessorReader;
     use crate::ecc::tests::gen_ordered_keys;
     use crate::ecc::SecretKey;
+    use crate::message::types::QueryForTopoInfoReport;
+    use crate::message::types::Then;
     use crate::tests::default::assert_no_more_msg;
     use crate::tests::default::gen_pure_dht;
     use crate::tests::default::prepare_node;
@@ -293,24 +276,6 @@ pub mod tests {
     use crate::tests::default::wait_for_successor;
     use crate::tests::default::Node;
     use crate::tests::manually_establish_connection;
-
-    #[test]
-    fn test_topology_report_keeps_only_confirmed_peers() {
-        let active = SecretKey::random().address().into();
-        let pending_successor = SecretKey::random().address().into();
-        let pending_predecessor = SecretKey::random().address().into();
-        let confirmed = confirmed_topology(
-            &TopoInfo {
-                successors: vec![active, pending_successor],
-                predecessor: Some(pending_predecessor),
-            },
-            |peer| peer == active,
-        );
-
-        assert_eq!(confirmed.successors, vec![active]);
-        assert_eq!(confirmed.predecessor, None);
-        assert!(topology_has_confirmed_peer(&confirmed));
-    }
 
     #[test]
     fn test_connect_successor_hint_skips_requester_self_report() -> Result<()> {
@@ -330,8 +295,14 @@ pub mod tests {
         Ok(())
     }
 
+    /// Proves that an advertised successor is connected only after the report
+    /// spends a registered token owned by its authenticated sender.
+    ///
+    /// The stale report is delivered first and must have no effect. The second
+    /// report uses an exact in-flight token and must connect and admit the
+    /// advertised successor.
     #[tokio::test]
-    async fn test_sync_successor_report_connects_advertised_successor() -> Result<()> {
+    async fn test_sync_successor_report_requires_token_before_connecting_successor() -> Result<()> {
         let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys::<3>();
         let node1 = prepare_node(key1).await;
         let node2 = prepare_node(key2).await;
@@ -358,6 +329,26 @@ pub mod tests {
                         predecessor: None,
                     },
                     then: <QueryForTopoInfoReport as Then>::Then::SyncSuccessor,
+                    request_id: uuid::Uuid::from_u128(404),
+                }),
+                node1.did(),
+            )
+            .await?;
+        wait_for_msgs([&node1, &node2, &node3]).await;
+        assert!(node1.swarm.transport.get_connection(node3.did()).is_none());
+
+        let request_id = uuid::Uuid::from_u128(405);
+        assert!(node1.dht().begin_successor_sync(node2.did(), request_id)?);
+        node2
+            .swarm
+            .send_direct_message(
+                Message::QueryForTopoInfoReport(QueryForTopoInfoReport {
+                    info: TopoInfo {
+                        successors: vec![node3.did()],
+                        predecessor: None,
+                    },
+                    then: <QueryForTopoInfoReport as Then>::Then::SyncSuccessor,
+                    request_id,
                 }),
                 node1.did(),
             )
@@ -366,6 +357,49 @@ pub mod tests {
         wait_for_connection_state(&node1, node3.did(), WebrtcConnectionState::Connected).await?;
         wait_for_successor(&node1, node3.did()).await?;
         wait_for_msgs([&node1, &node2, &node3]).await;
+        assert_no_more_msg([&node1, &node2, &node3]).await;
+        Ok(())
+    }
+
+    /// Proves that an uncorrelated stabilization report cannot trigger
+    /// transport admission or alter the local successor list.
+    ///
+    /// Node 2 advertises Node 3 with a token Node 1 never issued. After message
+    /// processing, Node 3 must remain disconnected and absent from Node 1's DHT.
+    #[tokio::test]
+    async fn test_stale_stabilization_report_does_not_start_advertised_connections() -> Result<()> {
+        let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys::<3>();
+        let node1 = prepare_node(key1).await;
+        let node2 = prepare_node(key2).await;
+        let node3 = prepare_node(key3).await;
+
+        manually_establish_connection(&node1.swarm, &node2.swarm).await;
+        wait_for_msgs([&node1, &node2, &node3]).await;
+        manually_establish_connection(&node2.swarm, &node3.swarm).await;
+        wait_for_msgs([&node1, &node2, &node3]).await;
+        if node1.swarm.transport.get_connection(node3.did()).is_some() {
+            node1.swarm.disconnect(node3.did()).await?;
+            wait_for_msgs([&node1, &node2, &node3]).await;
+        }
+
+        node2
+            .swarm
+            .send_direct_message(
+                Message::QueryForTopoInfoReport(QueryForTopoInfoReport {
+                    info: TopoInfo {
+                        successors: vec![node3.did()],
+                        predecessor: Some(node1.did()),
+                    },
+                    then: <QueryForTopoInfoReport as Then>::Then::Stabilization,
+                    request_id: uuid::Uuid::from_u128(404),
+                }),
+                node1.did(),
+            )
+            .await?;
+
+        wait_for_msgs([&node1, &node2, &node3]).await;
+        assert!(node1.swarm.transport.get_connection(node3.did()).is_none());
+        assert!(!node1.dht().successors().contains(&node3.did())?);
         assert_no_more_msg([&node1, &node2, &node3]).await;
         Ok(())
     }

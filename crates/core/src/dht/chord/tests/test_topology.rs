@@ -38,7 +38,7 @@ fn test_topology_transitions_serialize_remove_and_notify() -> Result<()> {
     let remove_node = Arc::clone(&node);
     let remove_thread = thread::spawn(move || {
         remove_node
-            .transition_topology_with_observer(
+            .transition_topology_holding(
                 TopologyEvent::Remove {
                     peer: removed,
                     successor: SuccessorRemoval::Preserve,
@@ -108,7 +108,7 @@ fn test_topology_snapshot_waits_for_complete_transition_commit() -> Result<()> {
     let transition_node = Arc::clone(&node);
     let transition_thread = thread::spawn(move || {
         transition_node
-            .transition_topology_with_observer(
+            .transition_topology_holding(
                 TopologyEvent::Remove {
                     peer: removed,
                     successor: SuccessorRemoval::Preserve,

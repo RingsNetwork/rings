@@ -170,55 +170,82 @@ pub struct NotifyPredecessorReport {
     pub did: Did,
 }
 
-/// The reason of query successor's TopoInfo
+/// Reason a peer requested another node's topology view.
 #[derive(Debug, Deserialize, Serialize, Copy, Clone)]
 pub enum QueryFor {
-    /// For sync successor list from successor
+    /// Synchronize the current successor list from an already-known successor.
     SyncSuccessor,
-    /// For stabilization
+    /// Validate and apply a periodic stabilization report.
     Stabilization,
 }
 
-/// MessageType for handle [crate::dht::PeerRingRemoteAction::QueryForSuccessorList]
+/// Request one topology snapshot from a specific node.
+///
+/// Reports are accepted only when `request_id` matches an in-flight DHT request
+/// for the peer that produced the report.
 #[derive(Debug, Deserialize, Serialize, Copy, Clone)]
 pub struct QueryForTopoInfoSend {
-    /// The did for query target
+    /// Peer whose topology state is being queried.
     pub did: Did,
-    /// The reason of query successor's TopoInfo
+    /// Handler path that will consume the response.
     pub then: QueryFor,
+    /// One-shot identity that binds the response to this exact query attempt.
+    ///
+    /// The report must echo it unchanged. The receiver also checks the
+    /// authenticated reporter, so knowing this UUID alone does not authorize a
+    /// topology mutation or connection effect.
+    pub request_id: uuid::Uuid,
 }
 
-/// MessageType for handle [crate::dht::PeerRingRemoteAction::QueryForSuccessorList]
+/// Topology snapshot returned for [`QueryForTopoInfoSend`].
+///
+/// The sender copies the request id from the query. The receiver spends that id
+/// before opening any advertised connection or mutating its local ring state.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct QueryForTopoInfoReport {
-    /// The did for query target
+    /// Reported successor and predecessor view.
     pub info: TopoInfo,
-    /// The reason of query successor's TopoInfo
+    /// Handler path copied from the query.
     pub then: QueryFor,
+    /// One-shot identity copied unchanged from the triggering query.
+    ///
+    /// The receiver spends it at most once against the expected authenticated
+    /// reporter. Replayed or replaced values, and values from a reporter that
+    /// has left the successor list, are ignored before advertised peers can
+    /// create transport work.
+    pub request_id: uuid::Uuid,
 }
 
 impl QueryForTopoInfoSend {
-    /// Create new instance with QueryFor::SyncSuccessor
+    /// Create a successor-sync query with a fresh correlation id.
     pub fn new_for_sync(did: Did) -> Self {
         Self {
             did,
             then: QueryFor::SyncSuccessor,
+            request_id: crate::utils::new_uuid(),
         }
     }
 
-    /// Create new instance with QueryFor::Stabilization
-    pub fn new_for_stab(did: Did) -> Self {
+    /// Create a stabilization query for an already-registered request id.
+    ///
+    /// The caller supplies `request_id` because the DHT must register the
+    /// stabilization before the query is sent. The constructor preserves that
+    /// token verbatim and labels the response for the stabilization handler; it
+    /// performs no registration or transport effect itself.
+    pub fn new_for_stab(did: Did, request_id: uuid::Uuid) -> Self {
         Self {
             did,
             then: QueryFor::Stabilization,
+            request_id,
         }
     }
 
-    /// response a send with QueryForTopoInfoSend
+    /// Build the report that answers this query and preserves its correlation id.
     pub fn resp(&self, info: TopoInfo) -> QueryForTopoInfoReport {
         QueryForTopoInfoReport {
             info,
             then: self.then,
+            request_id: self.request_id,
         }
     }
 
@@ -355,10 +382,14 @@ pub enum FindSuccessorReportHandler {
     None,
     /// - Connect: connect origin node.
     Connect,
-    /// - FixFingerTable: update one finger table slot.
+    /// - FixFingerTable: update one proved finger-table range.
     FixFingerTable {
-        /// Finger slot that the original lookup was fixing.
-        index: usize,
+        /// Slot/range request that identifies the lookup this report may satisfy.
+        ///
+        /// The slot is the lower end of the potentially proved range and the
+        /// UUID names one attempt. Both values must match current convergence
+        /// ownership before the reported successor can update or defer a slot.
+        request: crate::dht::FingerFixRequest,
     },
     /// - CustomCallback: custom callback handle by `custom_message` method.
     CustomCallback(u8),
@@ -719,6 +750,7 @@ mod tests {
     sample_message_body!(QueryForTopoInfoSend, |fixture| QueryForTopoInfoSend {
         did: fixture.did,
         then: QueryFor::Stabilization,
+        request_id: uuid::Uuid::nil(),
     });
     sample_message_body!(QueryForTopoInfoReport, |fixture| QueryForTopoInfoReport {
         info: TopoInfo {
@@ -726,6 +758,7 @@ mod tests {
             predecessor: Some(fixture.did),
         },
         then: QueryFor::Stabilization,
+        request_id: uuid::Uuid::nil(),
     });
     sample_message_body!(Chunk, |fixture| Chunk {
         chunk: [0, 1],
@@ -837,6 +870,36 @@ mod tests {
             handler: FindSuccessorReportHandler::Connect,
         };
         assert!(remote_report.reports_remote_successor(local));
+    }
+
+    /// Proves that the finger report handler preserves both components of its
+    /// correlation token across wire serialization.
+    ///
+    /// The decoded variant must remain `FixFingerTable`, and its lower slot and
+    /// UUID must equal the original request exactly; otherwise a report could
+    /// escape the convergence state machine's ownership checks.
+    #[test]
+    fn test_finger_fix_report_handler_round_trips_its_correlation_token() -> Result<()> {
+        let request =
+            crate::dht::FingerFixRequest::new(17, uuid::Uuid::from_u128(42)).ok_or_else(|| {
+                crate::error::Error::InvalidMessage("invalid test request".to_owned())
+            })?;
+        let handler = FindSuccessorReportHandler::FixFingerTable { request };
+        let wire = rings_codec::serialize(&handler).map_err(crate::error::Error::CodecSerialize)?;
+        let decoded: FindSuccessorReportHandler =
+            rings_codec::deserialize(&wire).map_err(crate::error::Error::CodecDeserialize)?;
+
+        match decoded {
+            FindSuccessorReportHandler::FixFingerTable { request: decoded } => {
+                assert_eq!(decoded, request);
+            }
+            _ => {
+                return Err(crate::error::Error::InvalidMessage(
+                    "finger correlation token changed variant on wire round trip".to_owned(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     #[test]

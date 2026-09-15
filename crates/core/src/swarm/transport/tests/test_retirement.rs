@@ -4,6 +4,7 @@ use rings_transport::core::transport::TransportInterface;
 use super::*;
 #[cfg(feature = "dummy")]
 use crate::dht::Chord;
+use crate::dht::FingerFixRequest;
 
 #[cfg(feature = "dummy")]
 #[derive(Default)]
@@ -157,6 +158,10 @@ async fn test_retirement_shuts_down_outbound_scheduler_for_departed_peer() -> Re
     Ok(())
 }
 
+/// Prove a failed DHT retirement leaves connection and deferred-proof ownership intact.
+///
+/// The injected transition error must preserve the active generation, liveness
+/// record, and its pending finger request so the operation is transaction-like.
 #[tokio::test]
 async fn test_failed_dht_retirement_preserves_active_peer_state() -> Result<()> {
     let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
@@ -164,13 +169,15 @@ async fn test_failed_dht_retirement_preserves_active_peer_state() -> Result<()> 
     let attempt = transport.reserve_pending_connection(peer).await?;
     assert!(transport.activate_connection_for_test(attempt)?);
     transport.mark_peer_liveness_connected(attempt);
+    // Seed one deferred finger proof by hand so a failed DHT retirement must
+    // prove it leaves all local lifecycle side tables untouched.
+    let request = FingerFixRequest::new(3, uuid::Uuid::from_u128(1))
+        .ok_or_else(|| Error::InvalidMessage("invalid test finger request".to_owned()))?;
     transport
         .pending_finger_updates
         .lock()
         .map_err(|_| Error::SwarmConnectionLifecycleLock)?
-        .entry(attempt)
-        .or_default()
-        .insert(3, None);
+        .insert(attempt, request);
 
     let result = transport.retire_active_connection_with(attempt, |_| -> Result<()> {
         Err(Error::InvalidMessage(

@@ -19,7 +19,6 @@ use super::SwarmTransport;
 use super::TRANSPORT_TIMEOUT_PROFILE;
 use crate::dht::did::BiasId;
 use crate::dht::Chord;
-use crate::dht::CorrectChord;
 use crate::dht::Did;
 use crate::dht::PeerRingAction;
 use crate::dht::TopoInfo;
@@ -27,10 +26,14 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::utils::sleep;
 
+/// Maximum wait for the data channel to open after the peer connection is usable.
 const DATA_CHANNEL_OPEN_TIMEOUT: Duration = Duration::from_secs(8);
+/// Poll cadence while waiting for the combined WebRTC/data-channel readiness snapshot.
 const TRANSPORT_READINESS_POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// Maximum wait for a close operation before lifecycle cleanup continues.
 pub(super) const DATA_CHANNEL_CLOSE_TIMEOUT: Duration = TRANSPORT_TIMEOUT_PROFILE.close;
 
+/// Await a transport close future without letting a slow backend block lifecycle cleanup forever.
 pub(super) async fn await_bounded_connection_close(
     close: impl Future<Output = Result<()>>,
 ) -> Result<bool> {
@@ -44,7 +47,9 @@ pub(super) async fn await_bounded_connection_close(
 }
 
 enum DhtPeerRemoval {
+    /// Remove the peer without selecting a replacement successor.
     Ordinary,
+    /// Remove the peer as unreachable and allow the DHT to promote live replacements.
     Unavailable,
 }
 
@@ -69,9 +74,13 @@ pub(super) enum UnreferencedRetirement {
 /// [`Self::with_current_connection`].
 #[derive(Clone)]
 pub(crate) struct AdmittedConnection {
+    /// Generation token that must still own the active slot before sends proceed.
     attempt: PendingConnectionAttempt,
+    /// Physical transport connection associated with `attempt`.
     connection: SwarmConnection,
+    /// Shared gate preventing send admission from crossing retirement.
     lifecycle_boundary: ConnectionLifecycleBoundary,
+    /// Registry used to revalidate that `attempt` is still sendable.
     lifecycles: SharedConnectionLifecycles,
 }
 
@@ -147,6 +156,7 @@ impl AdmittedConnection {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct PeerRemovalOutcome {
+    /// First live successor replacement selected while the peer was removed.
     fallback: Option<Did>,
 }
 
@@ -291,7 +301,7 @@ impl SwarmTransport {
                 return Ok(None);
             }
             observe_admission();
-            self.dht.admit_connected(peer, Vec::new()).map(Some)
+            self.dht.admit_connected(peer, None).map(Some)
         })
     }
 
@@ -337,41 +347,70 @@ impl SwarmTransport {
         self.notify_admitted_predecessor_with_observer(peer, observe_admission)
     }
 
-    /// Apply one reported topology using only peers that are still routable.
+    /// Apply one correlated topology report using only peers that are still routable.
     ///
     /// Filtering and the DHT transition share the connection lifecycle
     /// boundary, so retirement cannot invalidate the evidence between them.
+    /// `reporter` and `request_id` must match the stabilization slot already
+    /// claimed by the message handler.
     pub(crate) fn stabilize_routable_topology(
         &self,
+        reporter: Did,
+        request_id: uuid::Uuid,
         reported: &TopoInfo,
     ) -> Result<Option<PeerRingAction>> {
-        self.stabilize_routable_topology_with_observer(reported, || {})
+        self.stabilize_routable_topology_with_observer(reporter, request_id, reported, || {})
     }
 
+    /// Commit a correlated topology report while its transport evidence remains valid.
+    ///
+    /// The lifecycle gate prevents reporter retirement between readiness
+    /// validation and DHT mutation. The observer is a test synchronization hook
+    /// called after all reported peers are filtered but before the correlated
+    /// stabilization transition consumes `request_id`.
     fn stabilize_routable_topology_with_observer(
         &self,
+        reporter: Did,
+        request_id: uuid::Uuid,
         reported: &TopoInfo,
         observe_confirmation: impl FnOnce(),
     ) -> Result<Option<PeerRingAction>> {
         self.with_connection_lifecycle(|| {
             let active = self.active_connections()?;
-            let confirmed =
-                reported.confirmed_by(|peer| self.is_routable_active_candidate(peer, &active));
+            // A report from a retired or terminal peer cannot validate any
+            // successor/predecessor evidence, even if its request id is correct.
+            if !self.is_routable_active_candidate(reporter, &active) {
+                return Ok(None);
+            }
+            // Keep only peers that are either local or still have a routable
+            // active transport generation at the instant of commit.
+            let confirmed = reported.confirmed_by(|peer| {
+                peer == self.dht.did || self.is_routable_active_candidate(peer, &active)
+            });
             if !confirmed.has_confirmed_peer() {
                 return Ok(None);
             }
             observe_confirmation();
-            self.dht.stabilize(confirmed).map(Some)
+            self.dht
+                .stabilize_reported_by(reporter, request_id, confirmed)
+                .map(Some)
         })
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn stabilize_routable_topology_with_observer_for_test(
         &self,
+        reporter: Did,
+        request_id: uuid::Uuid,
         reported: &TopoInfo,
         observe_confirmation: impl FnOnce(),
     ) -> Result<Option<PeerRingAction>> {
-        self.stabilize_routable_topology_with_observer(reported, observe_confirmation)
+        self.stabilize_routable_topology_with_observer(
+            reporter,
+            request_id,
+            reported,
+            observe_confirmation,
+        )
     }
 
     /// Get DIDs of active, routable connections.

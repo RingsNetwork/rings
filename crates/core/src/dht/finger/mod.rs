@@ -8,26 +8,48 @@ use serde::Serialize;
 use crate::dht::did::BiasId;
 use crate::dht::Did;
 
+/// Range-aware convergence state machine for this finger table.
+mod convergence;
+
+pub(crate) use convergence::finger_lookup_backoff_ms;
+pub(crate) use convergence::finger_proof_end;
+pub(crate) use convergence::FingerApplyOutcome;
+pub(crate) use convergence::FingerConvergencePhase;
+#[cfg(test)]
+pub(crate) use convergence::FingerConvergenceProjection;
+pub(crate) use convergence::FingerConvergenceState;
+pub(crate) use convergence::FingerConvergenceStatus;
+pub(crate) use convergence::FingerDeferOutcome;
+pub use convergence::FingerFixRequest;
+pub(crate) use convergence::FingerReportRejection;
+pub(crate) use convergence::FingerRetireOutcome;
+pub(crate) use convergence::FINGER_ADMISSION_TIMEOUT_MS;
+#[cfg(test)]
+pub(crate) use convergence::FINGER_LOOKUP_MIN_INTERVAL_MS;
+
 /// Default number of Chord finger slots for a 160-bit `Did`.
 pub const DEFAULT_FINGER_TABLE_SIZE: usize = 160;
 
-/// Finger table of Chord DHT
-/// Ring's finger table is implemented with BiasRing
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Finger table of the Rings Chord DHT.
+///
+/// Equality compares the complete serializable protocol state, including the
+/// maintenance cursor, convergence ownership, evidence epochs, and retry
+/// state. Call [`Self::list`] when only routing hints should be compared.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct FingerTable {
+    /// Local node whose outgoing fingers this table describes.
     did: Did,
+    /// Fixed number of address-space slots maintained by this table.
     size: usize,
+    /// Current inferred routing hint for each slot; `None` can mean self or unknown.
     finger: Vec<Option<Did>>,
-    pub(super) fix_finger_index: usize,
+    /// Verification and retry state attached to the inferred hints.
+    ///
+    /// This serialized state binds every hint to freshness evidence, owns at
+    /// most one maintenance request, and preserves retry pacing across topology
+    /// transitions.
+    convergence: FingerConvergenceState,
 }
-
-impl PartialEq for FingerTable {
-    fn eq(&self, other: &Self) -> bool {
-        self.did == other.did && self.size == other.size && self.finger == other.finger
-    }
-}
-
-impl Eq for FingerTable {}
 
 impl FingerTable {
     /// builder
@@ -42,7 +64,7 @@ impl FingerTable {
             did,
             size,
             finger: vec![None; size],
-            fix_finger_index: 0,
+            convergence: FingerConvergenceState::new(size),
         }
     }
 
@@ -61,14 +83,21 @@ impl FingerTable {
         self.finger.get(index).copied().flatten()
     }
 
-    fn write_slot(&mut self, index: usize, did: Option<Did>) {
-        if let Some(slot) = self.finger.get_mut(index) {
-            *slot = did;
-        }
+    /// Replace the hint vector and invalidate only the evidence it changed.
+    ///
+    /// Production hints change only through the pure topology transition,
+    /// which commits them with [`Self::replace_state`]; this test seam applies
+    /// the same hint-change law to a table mutated in place.
+    #[cfg(test)]
+    fn mutate_hints(&mut self, next: Vec<Option<Did>>) {
+        self.convergence
+            .invalidate_hint_changes(&self.finger, &next);
+        self.finger = next;
     }
 
-    /// setter
-    pub fn set(&mut self, index: usize, did: Did) {
+    /// Seed one slot with a hint (test fixtures only).
+    #[cfg(test)]
+    pub(crate) fn set(&mut self, index: usize, did: Did) {
         tracing::debug!("set finger table index: {} did: {}", index, did);
         if index >= self.finger.len() {
             tracing::error!("set finger index out of range, index: {}", index);
@@ -78,40 +107,18 @@ impl FingerTable {
             tracing::trace!("set finger table with self did, ignore it");
             return;
         }
-        self.write_slot(index, Some(did));
-    }
-
-    /// setter for fix_finger_index
-    pub fn set_fix(&mut self, did: Did) {
-        let index = self.fix_finger_index;
-        self.set(index, did)
-    }
-
-    /// remove a node from dht finger table
-    pub fn remove(&mut self, did: Did) {
-        self.finger = crate::dht::topology::remove_finger_peer(&self.finger, did);
-    }
-
-    /// Join FingerTable
-    pub fn join(&mut self, did: Did) {
-        let observer = self.did;
-        let bias = did.bias(observer);
-
-        for k in 0..self.size {
-            let pos = Did::power_of_two(k);
-
-            if bias.pos() < pos {
-                continue;
-            }
-
-            if let Some(v) = self.finger.get(k).copied().flatten() {
-                if BiasId::cmp_from_observer(observer, did, v) == std::cmp::Ordering::Greater {
-                    continue;
-                }
-            }
-
-            self.write_slot(k, Some(did));
+        let mut next = self.finger.clone();
+        if let Some(slot) = next.get_mut(index) {
+            *slot = Some(did);
         }
+        self.mutate_hints(next);
+    }
+
+    /// Remove a peer's hints in place (test fixtures only); the law is
+    /// [`crate::dht::topology::remove_finger_peer`].
+    #[cfg(test)]
+    pub(crate) fn remove(&mut self, did: Did) {
+        self.mutate_hints(crate::dht::topology::remove_finger_peer(&self.finger, did));
     }
 
     /// Check finger is contains some node
@@ -144,9 +151,27 @@ impl FingerTable {
         self.size
     }
 
-    /// Get the next finger index maintained by the periodic fixer.
-    pub fn fix_finger_index(&self) -> usize {
-        self.fix_finger_index
+    /// Borrow the convergence state associated with these finger hints.
+    ///
+    /// The immutable borrow lets topology and scheduling code inspect evidence,
+    /// ownership, and retry projections without bypassing `FingerTable`'s hint
+    /// mutation boundary.
+    pub(crate) fn convergence_state(&self) -> &FingerConvergenceState {
+        &self.convergence
+    }
+
+    /// Prepare an exact slot request through the real convergence path.
+    ///
+    /// Test fixtures use a fixed monotonic timestamp and fresh UUID while the
+    /// production state machine handles verification flags, attempt ownership,
+    /// and pacing. An invalid slot returns `None` without creating work.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) fn prepare_request_for_test(
+        &mut self,
+        slot: usize,
+    ) -> Option<crate::dht::FingerFixRequest> {
+        self.convergence
+            .prepare_slot_for_test(&self.finger, slot, 1_000, crate::utils::new_uuid())
     }
 
     /// get finger list
@@ -157,22 +182,24 @@ impl FingerTable {
     /// Replace the full finger state with a value produced by the pure topology transition.
     ///
     /// Post: the table keeps its fixed slot count; entries beyond that count
-    /// are ignored, missing entries become `None`, and the fix cursor is
-    /// clamped to a valid slot when the table is non-empty.
-    pub(crate) fn replace_state(&mut self, fingers: &[Option<Did>], fix_finger_index: usize) {
+    /// are ignored and missing entries become `None`. Convergence state is
+    /// normalized to the same width so restored proofs cannot address a slot
+    /// that no longer exists.
+    pub(crate) fn replace_state(
+        &mut self,
+        fingers: &[Option<Did>],
+        convergence: FingerConvergenceState,
+    ) {
         self.finger = fingers.iter().copied().take(self.size).collect();
         self.finger.resize(self.size, None);
-        self.fix_finger_index = if self.size == 0 {
-            0
-        } else {
-            fix_finger_index % self.size
-        };
+        self.convergence = convergence.normalized(self.size);
     }
 
     /// Reset finger table to empty vector
     #[cfg(test)]
     pub fn reset_finger(&mut self) {
-        self.finger = vec![None; self.size]
+        self.finger = vec![None; self.size];
+        self.convergence = FingerConvergenceState::new(self.size);
     }
 
     /// Clone a finger table

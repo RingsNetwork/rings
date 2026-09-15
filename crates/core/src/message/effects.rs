@@ -112,7 +112,7 @@ impl Drop for BrowserTaskYieldGuard {
 ///
 /// Native tasks yield for one executor poll. Browser tasks do the same cheap
 /// yield and additionally cross a `MessageChannel` task boundary every
-/// [`CORE_ACTOR_BROWSER_YIELD_INTERVAL`] steps, bounding event-loop starvation
+/// `CORE_ACTOR_BROWSER_YIELD_INTERVAL` steps, bounding event-loop starvation
 /// without the nested-timer clamp of `setTimeout(0)`.
 pub(crate) async fn yield_core_actor_step() {
     yield_executor_once().await;
@@ -218,6 +218,26 @@ pub(crate) enum CoreEffect<'payload> {
         /// Direct destination and next hop.
         destination: Did,
     },
+    /// Register and send one successor-list query that must be answered with
+    /// the same request id.
+    ///
+    /// The DHT claim is part of the effect, not the message constructor,
+    /// because a request id should become admissible only when the transport
+    /// actually attempts to send the query to the current successor.
+    SendSuccessorQuery {
+        /// Topology query whose identity authorizes one successor-sync report.
+        ///
+        /// The interpreter registers `query.request_id` before moving this
+        /// value onto the transport, so an immediate authenticated response can
+        /// claim the exact request without a registration race.
+        query: QueryForTopoInfoSend,
+        /// Current successor that owns the registered response token.
+        ///
+        /// This DID is both the direct transport destination and the reporter
+        /// expected by the DHT claim. A successor change invalidates the claim
+        /// before any later report can create connection effects.
+        destination: Did,
+    },
     /// Establish an idempotent DHT-driven transport connection.
     ConnectDhtPeer {
         /// Peer to connect.
@@ -278,6 +298,19 @@ impl<'payload> CoreEffect<'payload> {
         }
     }
 
+    /// Create a successor-list query whose claim is registered at interpretation time.
+    ///
+    /// Construction is pure: it stores `query` and `destination` without
+    /// mutating DHT state. [`CoreEffectInterpreter`] later registers the exact
+    /// request before sending it and cancels that registration if transport
+    /// delivery fails.
+    pub(crate) const fn send_successor_query(
+        query: QueryForTopoInfoSend,
+        destination: Did,
+    ) -> Self {
+        Self::SendSuccessorQuery { query, destination }
+    }
+
     /// Create a DHT connection effect.
     pub(crate) const fn connect_dht_peer(peer: Did) -> Self {
         Self::ConnectDhtPeer { peer }
@@ -322,16 +355,16 @@ pub(crate) fn lower_dht_action<'payload>(
         }
         PeerRingAction::RemoteAction(
             next,
-            PeerRingRemoteAction::FindSuccessorForFix { did, index },
+            PeerRingRemoteAction::FindSuccessorForFix { did, request },
         ) => Ok(find_successor_effect(
             *next,
             *did,
-            FindSuccessorReportHandler::FixFingerTable { index: *index },
+            FindSuccessorReportHandler::FixFingerTable { request: *request },
         )),
         PeerRingAction::RemoteAction(successor, PeerRingRemoteAction::QueryForSuccessorList) => {
             Ok(Some(if is_connected(*successor) {
-                CoreEffect::send_direct_message(
-                    Message::QueryForTopoInfoSend(QueryForTopoInfoSend::new_for_sync(*successor)),
+                CoreEffect::send_successor_query(
+                    QueryForTopoInfoSend::new_for_sync(*successor),
                     *successor,
                 )
             } else {
@@ -410,6 +443,30 @@ impl<'handler> CoreEffectInterpreter<'handler> {
                     .await?;
                 Ok(())
             }
+            CoreEffect::SendSuccessorQuery { query, destination } => {
+                // Register the request id before the message is visible on the
+                // network. A same-turn report can then be claimed deterministically.
+                if !self
+                    .transport
+                    .dht
+                    .begin_successor_sync(destination, query.request_id)?
+                {
+                    return Ok(());
+                }
+                if let Err(error) = self
+                    .transport
+                    .send_direct_message(Message::QueryForTopoInfoSend(query), destination)
+                    .await
+                {
+                    // The request id never left this node successfully, so no
+                    // later report may spend it.
+                    self.transport
+                        .dht
+                        .cancel_successor_sync(destination, query.request_id)?;
+                    return Err(error);
+                }
+                Ok(())
+            }
             CoreEffect::ConnectDhtPeer { peer } => {
                 if self.connection_is_satisfied(peer) {
                     return Ok(());
@@ -469,11 +526,32 @@ mod tests {
     use std::task::Waker;
 
     use super::*;
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    use crate::dht::types::Chord;
     use crate::ecc::SecretKey;
     use crate::message::types::QueryFor;
     use crate::message::MessageSigner;
     use crate::session::SessionSk;
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    use crate::swarm::callback::SwarmCallback;
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    use crate::tests::default::prepare_node;
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    use crate::tests::default::wait_for_connection_state;
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    use crate::tests::manually_establish_connection;
     use crate::tests::TEST_NETWORK_ID;
+
+    /// Callback fixture for tests that exercise only interpreter-owned transport effects.
+    ///
+    /// It intentionally implements no event behavior, ensuring assertions
+    /// observe request registration, delivery, and cancellation rather than a
+    /// callback-generated DHT transition.
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    struct NoopCallback;
+
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    impl SwarmCallback for NoopCallback {}
 
     fn did() -> Did {
         SecretKey::random().address().into()
@@ -661,16 +739,22 @@ mod tests {
         Ok(())
     }
 
+    /// Proves that lowering a finger lookup preserves its complete range token.
+    ///
+    /// The test checks the remote hop, lookup position, strictness flag, slot,
+    /// and UUID after lowering, preventing the effect layer from degrading a
+    /// range-aware request back into an uncorrelated slot update.
     #[test]
-    fn test_dht_find_successor_for_fix_sends_direct_indexed_report() -> Result<()> {
+    fn test_dht_find_successor_for_fix_echoes_range_request() -> Result<()> {
         let next = did();
         let target = did();
-        let index = 11;
+        let request = crate::dht::FingerFixRequest::new(11, uuid::Uuid::from_u128(7))
+            .ok_or_else(|| Error::InvalidMessage("invalid test finger request".to_owned()))?;
 
         let effect = single_effect(lower_dht_action(
             &PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessorForFix {
                 did: target,
-                index,
+                request,
             }),
             |_| true,
         ))?;
@@ -683,8 +767,8 @@ mod tests {
                     assert!(!msg.strict);
                     match msg.then {
                         FindSuccessorThen::Report(FindSuccessorReportHandler::FixFingerTable {
-                            index: reported_index,
-                        }) => assert_eq!(reported_index, index),
+                            request: reported_request,
+                        }) => assert_eq!(reported_request, request),
                         handler => {
                             return Err(Error::InvalidMessage(format!(
                                 "expected fix-finger report handler, got {handler:?}"
@@ -729,6 +813,8 @@ mod tests {
         Ok(())
     }
 
+    /// Verifies that lowering a successor-list query for an admitted peer emits
+    /// one correlated send effect addressed to that exact peer.
     #[test]
     fn test_dht_query_successor_list_sends_when_connected() -> Result<()> {
         let target = did();
@@ -739,31 +825,75 @@ mod tests {
         ))?;
 
         match effect {
-            CoreEffect::SendDirectMessage { msg, destination } => match *msg {
-                Message::QueryForTopoInfoSend(msg) => {
-                    assert_eq!(destination, target);
-                    assert_eq!(msg.did, target);
-                    match msg.then {
-                        QueryFor::SyncSuccessor => {}
-                        then => {
-                            return Err(Error::InvalidMessage(format!(
-                                "expected SyncSuccessor query, got {then:?}"
-                            )))
-                        }
+            CoreEffect::SendSuccessorQuery { query, destination } => {
+                assert_eq!(destination, target);
+                assert_eq!(query.did, target);
+                match query.then {
+                    QueryFor::SyncSuccessor => {}
+                    then => {
+                        return Err(Error::InvalidMessage(format!(
+                            "expected SyncSuccessor query, got {then:?}"
+                        )))
                     }
                 }
-                msg => {
-                    return Err(Error::InvalidMessage(format!(
-                        "expected QueryForTopoInfoSend, got {msg:?}"
-                    )))
-                }
-            },
+            }
             effect => {
                 return Err(Error::InvalidMessage(format!(
-                    "expected SendDirectMessage QueryForTopoInfoSend, got {effect:?}"
+                    "expected SendSuccessorQuery, got {effect:?}"
                 )))
             }
         }
+        Ok(())
+    }
+
+    /// Proves that successor-sync authority is installed before delivery and
+    /// removed when delivery fails.
+    ///
+    /// A successful send leaves the exact reporter/token pair claimable. A send
+    /// to a missing peer returns an error and leaves the same pair unclaimable,
+    /// witnessing both sides of the interpreter's transactional boundary.
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    #[tokio::test]
+    async fn test_successor_query_effect_registers_before_send_and_cancels_send_failure(
+    ) -> Result<()> {
+        let first = prepare_node(SecretKey::random()).await;
+        let second = prepare_node(SecretKey::random()).await;
+        manually_establish_connection(&first.swarm, &second.swarm).await;
+        wait_for_connection_state(
+            &first,
+            second.did(),
+            rings_transport::core::transport::WebrtcConnectionState::Connected,
+        )
+        .await?;
+        first.dht().join(second.did())?;
+
+        let callback: SharedSwarmCallback = Arc::new(NoopCallback);
+        let interpreter = CoreEffectInterpreter::new(&first.swarm.transport, &callback);
+        let sent = QueryForTopoInfoSend::new_for_sync(second.did());
+        // Keep the id before the query is moved into the effect; the assertion
+        // below proves the interpreter registered this exact request.
+        let sent_request_id = sent.request_id;
+        interpreter
+            .run(CoreEffect::send_successor_query(sent, second.did()))
+            .await?;
+        assert!(first
+            .dht()
+            .claim_successor_sync_report(second.did(), sent_request_id)?
+            .is_some());
+
+        let missing = did();
+        first.dht().join(missing)?;
+        let failed = QueryForTopoInfoSend::new_for_sync(missing);
+        // Failed sends must remove the otherwise claimable successor-sync slot.
+        let failed_request_id = failed.request_id;
+        assert!(interpreter
+            .run(CoreEffect::send_successor_query(failed, missing))
+            .await
+            .is_err());
+        assert!(first
+            .dht()
+            .claim_successor_sync_report(missing, failed_request_id)?
+            .is_none());
         Ok(())
     }
 

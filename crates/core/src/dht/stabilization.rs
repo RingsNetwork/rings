@@ -18,7 +18,6 @@ use rings_transport::core::transport::WebrtcConnectionState;
 pub use self::storage_repair::StorageRepairOutcome;
 use crate::dht::successor::SuccessorReader;
 use crate::dht::types::CorrectChord;
-use crate::dht::Chord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::dht::PeerRingAction;
@@ -45,8 +44,30 @@ use crate::utils::get_epoch_ms_i64;
 use crate::utils::sleep;
 use crate::utils::Instant;
 
+/// Selects whether a topology pass also advances finger convergence or only
+/// publishes the intent for the independently paced maintenance phase.
+///
+/// The distinction preserves the eager semantics of direct stabilization
+/// callers while preventing the long-running scheduler from coupling finger
+/// lookup traffic to the topology period.
+#[derive(Clone, Copy)]
+enum FingerMaintenanceMode {
+    /// Start revalidation and advance its first effect in the same pass.
+    ///
+    /// Direct callers use this mode so one explicit stabilization request keeps
+    /// the pre-scheduler behavior of making immediate finger-table progress.
+    Immediate,
+    /// Mark a range for revalidation without issuing its lookup in this pass.
+    ///
+    /// The maintenance scheduler later advances that range after applying the
+    /// node-specific initial jitter or failure backoff.
+    Jittered,
+}
+
+/// Maximum wall-clock budget for one stabilization sub-step.
 const STABILIZATION_STEP_TIMEOUT: Duration =
     TRACKED_PAYLOAD_COMPLETION_BOUND.saturating_add(Duration::from_secs(1));
+/// Cooperative polling interval used while sleeping for the next maintenance phase.
 const STABILIZATION_STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// How long a transport may stay in a non-productive state before it is
 /// reclaimed: disconnected here, unreferenced under admission pressure in
@@ -56,52 +77,84 @@ pub(crate) const DISCONNECTED_CONNECTION_GRACE_MS: i64 = 30_000;
 /// data-channel admission wait, and tracked completion prevents a chunk tail
 /// from escaping into the following topology phase.
 pub(crate) const STORAGE_REPAIR_MAX_DELIVERIES_PER_STEP: usize = 1;
+/// New storage destinations are allowed one grace window before repair treats
+/// the admission as unavailable.
 pub(crate) const STORAGE_REPAIR_FRESH_CONNECTION_GRACE_MS: i64 = 30_000;
 
+/// Liveness probe data after signing but before the send is recorded.
 struct PreparedLivenessProbe {
+    /// Transport attempt whose state owns the probe.
     attempt: PendingConnectionAttempt,
+    /// Challenge registered against the outbound payload transaction.
     request: ProbeRequest,
+    /// Signed probe payload ready for transport delivery.
     payload: MessagePayload,
+    /// Best-effort state snapshot for diagnostics around the send.
     peer_state: Option<WebrtcConnectionState>,
 }
 
+/// Reason the stabilization cleaner decided a peer should leave local topology
+/// and possibly the transport map.
 #[derive(Clone, Copy, Debug)]
 enum TopologyPeerRemovalReason {
+    /// The peer is referenced by DHT state but no admitted transport attempt exists.
     NoAdmittedTransport,
+    /// The attempt remains admitted but the connection object has already gone away.
     MissingTransportObject,
+    /// The payload layer marked this attempt as permanently unable to send.
     SendTerminal,
+    /// The WebRTC connection itself reached a terminal state.
     TerminalTransport(WebrtcConnectionState),
+    /// WebRTC is connected, but its data channel is not usable for payloads.
     DataChannelNotOpen(WebrtcConnectionState),
+    /// The peer remained disconnected longer than the configured grace period.
     DisconnectedGraceElapsed {
+        /// Milliseconds elapsed since the attempt was first observed disconnected.
         disconnected_for_ms: i64,
+        /// Grace period that had to elapse before full removal.
         grace_ms: i64,
     },
+    /// The disconnected successor head has a live successor fallback ready.
     DisconnectedSuccessorFailover {
+        /// Milliseconds elapsed since the attempt was first observed disconnected.
         disconnected_for_ms: i64,
     },
+    /// The peer is disconnected and appears only in non-head topology hints.
     DisconnectedTopologyPrune {
+        /// Milliseconds elapsed since the attempt was first observed disconnected.
         disconnected_for_ms: i64,
     },
+    /// A registered liveness probe was not answered before its timeout.
     UnansweredLivenessProbe {
+        /// Milliseconds elapsed since the liveness probe was sent.
         unanswered_for_ms: i64,
+        /// Probe timeout that was exceeded.
         timeout_ms: i64,
     },
 }
 
+/// Snapshot of one admitted transport attempt used for a cleaner decision.
 #[derive(Clone, Copy)]
 struct AdmittedPeerState {
+    /// Stable attempt identity used to avoid removing a superseding connection.
     attempt: PendingConnectionAttempt,
+    /// Readiness snapshot, or `None` when the connection object is missing.
     readiness: Option<TransportReadiness>,
+    /// Whether the payload layer has recorded terminal send evidence.
     send_terminal: bool,
 }
 
+/// Exact topology/transport removal selected from one cleaner snapshot.
 #[derive(Clone, Copy)]
 struct TopologyPeerRemoval {
+    /// Transport attempt to disconnect or prune, absent for topology-only ghosts.
     attempt: Option<PendingConnectionAttempt>,
+    /// Diagnostic and policy reason for the removal.
     reason: TopologyPeerRemovalReason,
 }
 
 impl TopologyPeerRemovalReason {
+    /// Stable log label for this removal class.
     const fn as_str(self) -> &'static str {
         match self {
             Self::NoAdmittedTransport => "no_admitted_transport",
@@ -116,6 +169,7 @@ impl TopologyPeerRemovalReason {
         }
     }
 
+    /// WebRTC state to include in logs when the reason came from readiness.
     const fn transport_state(self) -> Option<WebrtcConnectionState> {
         match self {
             Self::TerminalTransport(state) | Self::DataChannelNotOpen(state) => Some(state),
@@ -123,6 +177,7 @@ impl TopologyPeerRemovalReason {
         }
     }
 
+    /// Disconnected duration carried by reasons that depend on a disconnected peer.
     const fn disconnected_for_ms(self) -> Option<i64> {
         match self {
             Self::DisconnectedGraceElapsed {
@@ -139,6 +194,7 @@ impl TopologyPeerRemovalReason {
         }
     }
 
+    /// Configured disconnected grace period, when that exact threshold fired.
     const fn disconnected_grace_ms(self) -> Option<i64> {
         match self {
             Self::DisconnectedGraceElapsed { grace_ms, .. } => Some(grace_ms),
@@ -146,6 +202,7 @@ impl TopologyPeerRemovalReason {
         }
     }
 
+    /// Probe age carried by unanswered-liveness decisions.
     const fn liveness_unanswered_for_ms(self) -> Option<i64> {
         match self {
             Self::UnansweredLivenessProbe {
@@ -155,6 +212,7 @@ impl TopologyPeerRemovalReason {
         }
     }
 
+    /// Probe timeout carried by unanswered-liveness decisions.
     const fn liveness_timeout_ms(self) -> Option<i64> {
         match self {
             Self::UnansweredLivenessProbe { timeout_ms, .. } => Some(timeout_ms),
@@ -162,6 +220,7 @@ impl TopologyPeerRemovalReason {
         }
     }
 
+    /// Whether this reason owns transport teardown in addition to topology removal.
     const fn should_disconnect_transport(self) -> bool {
         !matches!(
             self,
@@ -170,11 +229,15 @@ impl TopologyPeerRemovalReason {
     }
 }
 
+/// Result of racing one stabilization sub-step against its deadline.
 enum StepDeadline<T> {
+    /// The sub-step completed before the timeout future fired.
     Completed(Result<T>),
+    /// The timeout future fired first and the sub-step future was dropped.
     TimedOut,
 }
 
+/// Await a sub-step until either it completes or its wall-clock deadline fires.
 async fn await_step_deadline<F, T>(future: F, timeout: Duration) -> StepDeadline<T>
 where F: Future<Output = Result<T>> {
     let future = future.fuse();
@@ -230,6 +293,7 @@ impl Stabilizer {
             .await
     }
 
+    /// Run one full eager stabilization pass with a caller-supplied per-step timeout.
     pub(crate) async fn stabilize_with_step_timeout(&self, timeout: Duration) -> Result<()> {
         self.stabilize_topology_with_step_timeout(timeout).await;
         self.transport.claim_storage_repair();
@@ -237,7 +301,34 @@ impl Stabilizer {
         Ok(())
     }
 
+    /// Run topology maintenance with the eager finger-maintenance behavior.
     async fn stabilize_topology_with_step_timeout(&self, timeout: Duration) {
+        self.stabilize_topology_with_finger_mode(timeout, FingerMaintenanceMode::Immediate)
+            .await;
+    }
+
+    /// Run the topology portion of scheduled maintenance without coupling a
+    /// finger lookup to the topology deadline.
+    ///
+    /// The pass may mark one range as pending, but the scheduler owns the later
+    /// call that advances it. Each topology sub-step still has the supplied
+    /// deadline and logs its own failure without aborting subsequent steps.
+    async fn stabilize_scheduled_topology_with_step_timeout(&self, timeout: Duration) {
+        self.stabilize_topology_with_finger_mode(timeout, FingerMaintenanceMode::Jittered)
+            .await;
+    }
+
+    /// Execute the ordered topology sub-steps under a selected finger policy.
+    ///
+    /// Cleaning and predecessor notification run before finger maintenance;
+    /// liveness probing and Chord stabilization run afterward. [`Self::run_step`]
+    /// contains errors and timeouts per sub-step, so one failed effect cannot
+    /// prevent the remaining topology obligations from being attempted.
+    async fn stabilize_topology_with_finger_mode(
+        &self,
+        timeout: Duration,
+        finger_mode: FingerMaintenanceMode,
+    ) {
         self.run_step(
             "clean_unavailable_connections",
             timeout,
@@ -246,8 +337,20 @@ impl Stabilizer {
         .await;
         self.run_step("notify_predecessor", timeout, self.notify_predecessor())
             .await;
-        self.run_step("fix_fingers", timeout, self.fix_fingers())
-            .await;
+        match finger_mode {
+            FingerMaintenanceMode::Immediate => {
+                self.run_step("fix_fingers", timeout, self.fix_fingers())
+                    .await;
+            }
+            FingerMaintenanceMode::Jittered => {
+                self.run_step(
+                    "schedule_finger_revalidation",
+                    timeout,
+                    self.begin_finger_revalidation(),
+                )
+                .await;
+            }
+        }
         self.run_step("probe_peer_liveness", timeout, self.probe_peer_liveness())
             .await;
         // Default HMCC/Zave stabilization path. The pure operation is specified
@@ -256,6 +359,7 @@ impl Stabilizer {
             .await;
     }
 
+    /// Run one named stabilization sub-step, logging success, failure, and timeout.
     async fn run_step<F, T>(&self, step: &'static str, timeout: Duration, future: F) -> Option<T>
     where F: Future<Output = Result<T>> {
         let started_at = Instant::now();
@@ -303,6 +407,8 @@ impl Stabilizer {
         }
     }
 
+    /// Log the topology and admitted transports observed after a step exceeded
+    /// its configured deadline.
     fn log_step_timeout(&self, step: &'static str, timeout: Duration, elapsed_ms: i64) {
         let topology = TopoInfo::try_from(self.dht.as_ref()).ok();
         let mut connections: Vec<(Did, WebrtcConnectionState)> = self
@@ -354,6 +460,8 @@ impl Stabilizer {
     pub async fn clean_unavailable_connections(&self) -> Result<()> {
         self.transport.expire_pending_connections().await?;
         let admitted_states = self.admitted_connection_states()?;
+        // Include both topology references and admitted transports so either a
+        // dangling DHT slot or an unreferenced broken connection can be cleaned.
         let mut candidates = self.dht.topology_state()?.referenced_peers();
         candidates.extend(self.transport.admitted_connection_ids());
         let now_ms = get_epoch_ms_i64();
@@ -370,6 +478,7 @@ impl Stabilizer {
         Ok(())
     }
 
+    /// Snapshot every admitted attempt into the compact state needed by the cleaner.
     fn admitted_connection_states(&self) -> Result<BTreeMap<Did, AdmittedPeerState>> {
         self.transport
             .admitted_connection_snapshots()?
@@ -386,6 +495,7 @@ impl Stabilizer {
             .collect()
     }
 
+    /// Decide whether one referenced or admitted peer should be removed.
     async fn topology_peer_removal_reason(
         &self,
         did: Did,
@@ -398,6 +508,8 @@ impl Stabilizer {
                 reason: TopologyPeerRemovalReason::NoAdmittedTransport,
             }));
         };
+        // Preserve the attempt identity observed in this snapshot; the transport
+        // removal path rejects it if a newer connection superseded the evidence.
         let removal = |reason| {
             Some(TopologyPeerRemoval {
                 attempt: Some(admitted.attempt),
@@ -448,6 +560,7 @@ impl Stabilizer {
         Ok(None)
     }
 
+    /// Decide the policy for one admitted peer currently observed as disconnected.
     async fn disconnected_peer_removal_reason(
         &self,
         did: Did,
@@ -500,9 +613,12 @@ impl Stabilizer {
         })
     }
 
+    /// Apply the selected removal while preserving superseding connection evidence.
     async fn remove_unavailable_peer(&self, did: Did, removal: TopologyPeerRemoval) -> Result<()> {
         let reason = removal.reason;
         let should_repair = self.dht.peer_may_share_storage_responsibility(did)?;
+        // Logged before teardown so diagnostics show what failover evidence
+        // justified removing or pruning the topology peer.
         let fallback_snapshot = self.transport.live_successor_fallback(did)?;
         tracing::info!(
             target: "rings_core::dht::stabilization",
@@ -596,8 +712,11 @@ impl Stabilizer {
         Ok(())
     }
 
+    /// Send liveness probes for idle admitted peers that do not already have one pending.
     async fn probe_peer_liveness(&self) -> Result<()> {
         let now_ms = get_epoch_ms_i64();
+        // Probe epochs use wall-clock seconds; topology deadlines use the
+        // monotonic ring clock elsewhere.
         let unix_seconds = u64::try_from(now_ms).unwrap_or(0) / 1_000;
         let epoch = ProvisionalEpoch::from_unix_seconds(unix_seconds);
         let candidates = self.transport.liveness_probe_candidates(now_ms)?;
@@ -608,6 +727,7 @@ impl Stabilizer {
             .await
     }
 
+    /// Build and sign one liveness probe before it is registered as pending.
     async fn prepare_liveness_probe(
         &self,
         attempt: PendingConnectionAttempt,
@@ -631,6 +751,8 @@ impl Stabilizer {
         })
     }
 
+    /// Register the probe transaction; returns `None` if another current probe
+    /// already owns this attempt.
     fn register_liveness_probe(
         &self,
         probe: PreparedLivenessProbe,
@@ -644,6 +766,7 @@ impl Stabilizer {
             .map(|registered| registered.then_some(probe))
     }
 
+    /// Send a registered probe and either mark it sent or cancel the pending record.
     async fn send_registered_liveness_probe(
         &self,
         probe: PreparedLivenessProbe,
@@ -696,6 +819,7 @@ impl Stabilizer {
         Ok(())
     }
 
+    /// Test-only hook that exposes liveness probing to the simulator.
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) async fn probe_peer_liveness_for_simulation(&self) -> Result<()> {
         self.probe_peer_liveness().await
@@ -759,7 +883,51 @@ impl Stabilizer {
 
     /// Fix fingers from finger table, this is a DHT operation.
     async fn fix_fingers(&self) -> Result<()> {
-        match self.dht.fix_fingers() {
+        self.begin_finger_revalidation().await?;
+        self.advance_finger_convergence().await
+    }
+
+    /// Ask the peer-ring state machine to mark its next unproved finger range.
+    ///
+    /// This boundary does not choose scheduling delay. It only converts the
+    /// local state transition into the restricted action vocabulary accepted by
+    /// [`Self::interpret_finger_action`]; a no-op means no range currently needs
+    /// work.
+    async fn begin_finger_revalidation(&self) -> Result<()> {
+        self.interpret_finger_action(self.dht.begin_finger_revalidation())
+            .await
+    }
+
+    /// Advance finger convergence by at most one state-machine effect.
+    ///
+    /// A runnable range may emit one `FindSuccessorForFix` request, while an
+    /// inactive or still-waiting range emits no network work. The emitted action
+    /// is interpreted through the same signing, send, and cancellation boundary
+    /// as eager stabilization.
+    async fn advance_finger_convergence(&self) -> Result<()> {
+        self.interpret_finger_action(self.dht.advance_finger_convergence())
+            .await
+    }
+
+    /// Advance one scheduled finger turn from a native dummy-network simulation.
+    ///
+    /// The hook deliberately exposes the production transition unchanged so
+    /// model tests can control phase ordering without running the wall-clock
+    /// maintenance loop.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) async fn converge_fingers_for_simulation(&self) -> Result<()> {
+        self.advance_finger_convergence().await
+    }
+
+    /// Interpret the closed set of peer-ring actions emitted by finger convergence.
+    ///
+    /// `None` completes locally. `FindSuccessorForFix` is signed and sent to the
+    /// selected predecessor. A signing or send failure cancels the matching
+    /// lookup lease before the error is returned, preventing an unsent request
+    /// from leaving the range stuck in an awaiting-report phase. Any other action
+    /// is rejected as an internal protocol mismatch.
+    async fn interpret_finger_action(&self, action: Result<PeerRingAction>) -> Result<()> {
+        match action {
             Ok(action) => match action {
                 PeerRingAction::None => {
                     tracing::debug!(
@@ -773,20 +941,27 @@ impl Stabilizer {
                     closest_predecessor,
                     PeerRingRemoteAction::FindSuccessorForFix {
                         did: finger_did,
-                        index,
+                        request,
                     },
                 ) => {
                     let msg = Message::FindSuccessorSend(FindSuccessorSend {
                         did: finger_did,
                         then: FindSuccessorThen::Report(
-                            FindSuccessorReportHandler::FixFingerTable { index },
+                            FindSuccessorReportHandler::FixFingerTable { request },
                         ),
                         strict: false,
                     });
-                    let payload = self
+                    let payload = match self
                         .transport
                         .signed_payload(msg.clone(), closest_predecessor, closest_predecessor)
-                        .await?;
+                        .await
+                    {
+                        Ok(payload) => payload,
+                        Err(error) => {
+                            let _ = self.dht.cancel_finger_lookup(request);
+                            return Err(error);
+                        }
+                    };
                     let tx_id = payload.transaction.tx_id;
                     let next_hop_state = self
                         .transport
@@ -798,7 +973,8 @@ impl Stabilizer {
                         next_hop = %closest_predecessor,
                         next_hop_state = ?next_hop_state,
                         finger_did = %finger_did,
-                        index,
+                        finger_slot = request.slot(),
+                        request_id = %request.request_id(),
                         tx_id = %tx_id,
                         "STABILIZATION fix_fingers send start"
                     );
@@ -809,11 +985,13 @@ impl Stabilizer {
                             next_hop = %closest_predecessor,
                             next_hop_state = ?next_hop_state,
                             finger_did = %finger_did,
-                            index,
+                            finger_slot = request.slot(),
+                            request_id = %request.request_id(),
                             tx_id = %tx_id,
                             error = ?e,
                             "STABILIZATION fix_fingers send failed"
                         );
+                        let _ = self.dht.cancel_finger_lookup(request);
                         return Err(e);
                     }
                     tracing::debug!(
@@ -821,7 +999,8 @@ impl Stabilizer {
                         local = %self.dht.did,
                         next_hop = %closest_predecessor,
                         finger_did = %finger_did,
-                        index,
+                        finger_slot = request.slot(),
+                        request_id = %request.request_id(),
                         tx_id = %tx_id,
                         "STABILIZATION fix_fingers send complete"
                     );
@@ -844,7 +1023,7 @@ impl Stabilizer {
         match self.dht.pre_stabilize()? {
             PeerRingAction::RemoteAction(
                 next,
-                PeerRingRemoteAction::QueryForSuccessorListAndPred,
+                PeerRingRemoteAction::QueryForSuccessorListAndPred { request_id },
             ) => {
                 let next_hop_state = self
                     .transport
@@ -860,7 +1039,9 @@ impl Stabilizer {
                 match self
                     .transport
                     .send_direct_message(
-                        Message::QueryForTopoInfoSend(QueryForTopoInfoSend::new_for_stab(next)),
+                        Message::QueryForTopoInfoSend(QueryForTopoInfoSend::new_for_stab(
+                            next, request_id,
+                        )),
                         next,
                     )
                     .await
@@ -873,6 +1054,7 @@ impl Stabilizer {
                         "STABILIZATION correct_stabilize query complete"
                     ),
                     Err(e) => {
+                        self.dht.cancel_stabilization(request_id)?;
                         tracing::error!(
                             target: "rings_core::dht::stabilization",
                             local = %self.dht.did,
@@ -898,11 +1080,19 @@ impl Stabilizer {
     }
 }
 
+/// Monotonic elapsed milliseconds since `started_at`, saturating for diagnostics.
 fn elapsed_since(started_at: Instant) -> i64 {
     i64::try_from(started_at.elapsed().as_millis()).unwrap_or(i64::MAX)
 }
 
+/// Scheduled topology, storage, and finger maintenance loop.
 mod maintenance;
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(crate) use maintenance::finger_awaiting_report_deadline_for_test;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use maintenance::finger_schedule_deadline_for_test;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use maintenance::finger_schedule_resumed_deadline_for_test;
 #[cfg(all(test, target_family = "wasm"))]
 pub(crate) use maintenance::maintenance_phase_trace_for_test;
 #[cfg(all(test, target_family = "wasm"))]
@@ -913,35 +1103,6 @@ pub(crate) use maintenance::MaintenancePhaseEvent;
 pub(crate) use maintenance::MaintenancePhaseKind;
 mod storage_repair;
 
+/// Deadline behavior for stabilization sub-steps.
 #[cfg(test)]
-mod tests {
-    use std::sync::atomic::AtomicBool;
-    use std::sync::atomic::Ordering;
-
-    use super::*;
-
-    struct DropWitness(Arc<AtomicBool>);
-
-    impl Drop for DropWitness {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::Release);
-        }
-    }
-
-    #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_family = "wasm"), tokio::test)]
-    async fn test_step_deadline_drops_work_that_does_not_complete() {
-        let dropped = Arc::new(AtomicBool::new(false));
-        let witness = dropped.clone();
-        let future = async move {
-            let _witness = DropWitness(witness);
-            futures::future::pending::<()>().await;
-            Ok(())
-        };
-
-        let result = await_step_deadline(future, Duration::from_millis(1)).await;
-
-        assert!(matches!(result, StepDeadline::TimedOut));
-        assert!(dropped.load(Ordering::Acquire));
-    }
-}
+mod deadline_tests;
