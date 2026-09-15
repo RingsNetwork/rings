@@ -341,12 +341,20 @@ pub enum TopologyEvent {
         /// Peer learned by the local node.
         peer: Did,
     },
-    /// Atomically admit a transport-validated peer and its pending finger continuations.
+    /// Atomically admit a transport-validated peer and the finger proof, if
+    /// any, that waited on it.
     Admit {
         /// Peer whose data channel is open.
         peer: Did,
-        /// Finger slots whose lookup completed while the peer was handshaking.
-        fixed_fingers: Vec<ConditionalFingerUpdate>,
+        /// Correlation token of the proof deferred while the peer was
+        /// handshaking.
+        ///
+        /// Admission replays this exact request against the deferred
+        /// convergence lease. If its slot changed or the lease expired during
+        /// the handshake, application is rejected instead of overwriting newer
+        /// finger evidence. At most one proof exists because the ring owns at
+        /// most one attempt.
+        deferred_proof: Option<FingerFixRequest>,
         /// Current process-monotonic time used to pace rejected deferred evidence.
         ///
         /// Admission itself does not read a clock; the effect boundary supplies
@@ -480,18 +488,6 @@ pub enum TopologyEvent {
         /// matches it; an older send failure cannot cancel a newer round.
         request_id: uuid::Uuid,
     },
-}
-
-/// A deferred finger update that may commit only if its source slot has not
-/// changed since the lookup result was queued.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ConditionalFingerUpdate {
-    /// Correlation token returned while the successor was handshaking.
-    ///
-    /// Admission replays this exact request against the deferred convergence
-    /// lease. If its source slot or generation changed during the handshake,
-    /// application is rejected instead of overwriting newer finger evidence.
-    pub request: FingerFixRequest,
 }
 
 /// Successor-list evidence attached to a peer-removal transition.
@@ -765,7 +761,7 @@ fn step_join(state: &TopologyState, peer: Did, capacity: usize) -> TopologyStep 
 fn step_admit(
     state: &TopologyState,
     peer: Did,
-    fixed_fingers: &[ConditionalFingerUpdate],
+    deferred_proof: Option<FingerFixRequest>,
     now_ms: u64,
     capacity: usize,
 ) -> TopologyStep {
@@ -776,12 +772,12 @@ fn step_admit(
         };
     }
 
-    // Deferred finger proofs are replayed before `peer` is inserted, so they
-    // cannot overwrite a slot that changed while admission was in progress.
-    let mut verified = state.clone();
-    for update in fixed_fingers {
-        verified = apply_finger_result(&verified, update.request, peer, now_ms).0;
-    }
+    // The deferred proof is replayed before `peer` is inserted, so it cannot
+    // overwrite a slot that changed while admission was in progress.
+    let verified = deferred_proof.map_or_else(
+        || state.clone(),
+        |request| apply_finger_result(state, request, peer, now_ms).0,
+    );
     let successors = update_successors(state.local, &state.successors, peer, capacity);
     // Only a newly retained successor needs a follow-up successor-list query.
     let inserted = !state.successors.contains(&peer) && successors.contains(&peer);
@@ -900,9 +896,9 @@ fn step_event(state: &TopologyState, event: TopologyEvent, capacity: usize) -> T
         TopologyEvent::Join { peer } => step_join(state, peer, capacity),
         TopologyEvent::Admit {
             peer,
-            fixed_fingers,
+            deferred_proof,
             now_ms,
-        } => step_admit(state, peer, &fixed_fingers, now_ms, capacity),
+        } => step_admit(state, peer, deferred_proof, now_ms, capacity),
         TopologyEvent::Remove { peer, successor } => step_remove(state, peer, successor, capacity),
         TopologyEvent::UpdateSuccessor { successor } => {
             step_update_successor(state, successor, capacity)

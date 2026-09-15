@@ -102,8 +102,9 @@ physical expiry.
 Send or handshake cancellation, invalid reports, lookup timeouts, and admission-lease expiry increase a progress-sensitive
 retry floor through 2, 4, 8, 16, 32, and 60 seconds. A topology change invalidates superseded evidence
 without classifying normal churn as a network failure;
-each retry is additionally spread across a full jitter window of the same size. Only an applied
-range proof resets that failure level. Other missed
+each retry is additionally spread across a full jitter window of the same size. Only progress
+resets that failure level: an applied range proof, or a stabilization report that locally proves the
+range the active attempt was verifying. Other missed
 deadlines schedule one future attempt rather than catch-up bursts. Finger convergence may yield to
 at most two due topology/storage phases before its turn is reserved.
 

@@ -342,16 +342,10 @@ impl MaintenanceSchedule {
         self.finger_phase_last_poll = status.phase();
         self.finger_failure_streak = status.failure_streak();
         self.next_finger_ms = match status.phase() {
-            FingerConvergencePhase::Dormant | FingerConvergencePhase::Converged => u64::MAX,
-            FingerConvergencePhase::AwaitingReport { remaining_ms } => {
-                completed_at_ms.saturating_add(remaining_ms)
-            }
-            FingerConvergencePhase::AwaitingAdmission { remaining_ms } => {
-                completed_at_ms.saturating_add(remaining_ms)
-            }
             FingerConvergencePhase::Runnable => {
                 completed_at_ms.saturating_add(self.next_finger_delay_ms(status.failure_streak()))
             }
+            phase => lease_deadline_ms(phase, completed_at_ms).unwrap_or(u64::MAX),
         };
     }
 
@@ -373,15 +367,6 @@ impl MaintenanceSchedule {
         let phase_changed = status.phase() != self.finger_phase_last_poll;
         let activated = matches!(self.finger_phase_last_poll, FingerConvergencePhase::Dormant);
         match status.phase() {
-            FingerConvergencePhase::Dormant | FingerConvergencePhase::Converged => {
-                self.next_finger_ms = u64::MAX;
-            }
-            FingerConvergencePhase::AwaitingReport { remaining_ms } => {
-                self.next_finger_ms = now_ms.saturating_add(remaining_ms);
-            }
-            FingerConvergencePhase::AwaitingAdmission { remaining_ms } => {
-                self.next_finger_ms = now_ms.saturating_add(remaining_ms);
-            }
             FingerConvergencePhase::Runnable if phase_changed => {
                 let delay_ms = if activated && status.failure_streak() == 0 {
                     self.next_initial_finger_delay_ms()
@@ -395,6 +380,7 @@ impl MaintenanceSchedule {
                     now_ms.saturating_add(self.next_finger_delay_ms(status.failure_streak()));
             }
             FingerConvergencePhase::Runnable => {}
+            phase => self.next_finger_ms = lease_deadline_ms(phase, now_ms).unwrap_or(u64::MAX),
         }
         self.finger_phase_last_poll = status.phase();
         self.finger_failure_streak = status.failure_streak();
@@ -509,6 +495,23 @@ impl MaintenanceSchedule {
 /// the same phase, while a new lifecycle UUID produces a different schedule.
 /// Wrapping multiplication is intentional because the state is entropy for
 /// pacing, not a cryptographic digest.
+/// The wake time a lease dictates from `base_ms`: the awaiting phases wake
+/// exactly at lease expiry; no other phase carries a lease.
+///
+/// The quiescent phases have no wake at all, and `Runnable`'s wake is a
+/// scheduler decision (initial window or retry delay) made by the caller.
+fn lease_deadline_ms(phase: FingerConvergencePhase, base_ms: u64) -> Option<u64> {
+    match phase {
+        FingerConvergencePhase::AwaitingReport { remaining_ms }
+        | FingerConvergencePhase::AwaitingAdmission { remaining_ms } => {
+            Some(base_ms.saturating_add(remaining_ms))
+        }
+        FingerConvergencePhase::Dormant
+        | FingerConvergencePhase::Converged
+        | FingerConvergencePhase::Runnable => None,
+    }
+}
+
 fn finger_jitter_seed(local: crate::dht::Did, entropy: uuid::Uuid) -> u64 {
     local
         .as_bytes()

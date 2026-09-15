@@ -446,15 +446,16 @@ impl PeerRing {
 
 /// Membership: admitting connected peers and removing unreachable ones.
 impl PeerRing {
-    /// Atomically admit a connected peer and any finger proofs waiting on it.
+    /// Atomically admit a connected peer and the finger proof, if any, that
+    /// waited on it.
     pub(crate) fn admit_connected(
         &self,
         peer: Did,
-        fixed_fingers: Vec<topology::ConditionalFingerUpdate>,
+        deferred_proof: Option<FingerFixRequest>,
     ) -> Result<PeerRingAction> {
         let next = self.transition_topology_at(|now_ms| TopologyEvent::Admit {
             peer,
-            fixed_fingers,
+            deferred_proof,
             now_ms,
         })?;
         Ok(self.topology_multi_actions(next.actions))
@@ -1034,7 +1035,7 @@ impl CorrectChord<PeerRingAction> for PeerRing {
         if !did.live().await {
             return Ok(PeerRingAction::None);
         }
-        self.admit_connected(did.into(), Vec::new())
+        self.admit_connected(did.into(), None)
     }
 
     fn rectify(&self, pred: Did) -> Result<()> {

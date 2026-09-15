@@ -601,15 +601,10 @@ impl SwarmTransport {
         connection.readiness().ensure_can_make_progress()?;
 
         let mut pending_finger_updates = self.pending_finger_updates()?;
-        // These requests have already been validated by DHT report handling.
-        // They are applied in the same DHT transition that admits the peer.
-        let fixed_fingers = pending_finger_updates
-            .get(&attempt)
-            .copied()
-            .map(|request| crate::dht::topology::ConditionalFingerUpdate { request })
-            .into_iter()
-            .collect();
-        let action = self.dht.admit_connected(attempt.peer, fixed_fingers)?;
+        // The retained proof was validated by DHT report handling; it is
+        // applied in the same DHT transition that admits the peer.
+        let deferred_proof = pending_finger_updates.get(&attempt).copied();
+        let action = self.dht.admit_connected(attempt.peer, deferred_proof)?;
 
         admitting.activate();
         pending_finger_updates.remove(&attempt);

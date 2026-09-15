@@ -331,7 +331,7 @@ fn test_admit_step_commits_join_and_pending_fingers_in_one_state() {
         &current,
         TopologyEvent::Admit {
             peer,
-            fixed_fingers: vec![ConditionalFingerUpdate { request }],
+            deferred_proof: Some(request),
             now_ms: 1_100,
         },
         DEFAULT_SUCCESSOR_CAPACITY,
@@ -388,7 +388,7 @@ fn test_admit_step_does_not_overwrite_finger_changed_after_update_was_deferred()
         &changed.state,
         TopologyEvent::Admit {
             peer,
-            fixed_fingers: vec![ConditionalFingerUpdate { request }],
+            deferred_proof: Some(request),
             now_ms: 1_100,
         },
         DEFAULT_SUCCESSOR_CAPACITY,
@@ -846,7 +846,7 @@ fn test_admit_step_reports_head_change_only_when_the_head_moves() {
         &current,
         TopologyEvent::Admit {
             peer: did(20),
-            fixed_fingers: Vec::new(),
+            deferred_proof: None,
             now_ms: 1_000,
         },
         DEFAULT_SUCCESSOR_CAPACITY,
@@ -861,7 +861,7 @@ fn test_admit_step_reports_head_change_only_when_the_head_moves() {
         &current,
         TopologyEvent::Admit {
             peer: did(40),
-            fixed_fingers: Vec::new(),
+            deferred_proof: None,
             now_ms: 1_000,
         },
         DEFAULT_SUCCESSOR_CAPACITY,

@@ -301,7 +301,7 @@ impl SwarmTransport {
                 return Ok(None);
             }
             observe_admission();
-            self.dht.admit_connected(peer, Vec::new()).map(Some)
+            self.dht.admit_connected(peer, None).map(Some)
         })
     }
 

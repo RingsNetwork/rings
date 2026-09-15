@@ -66,7 +66,7 @@ fn test_timely_finger_proof_survives_a_long_handshake_until_atomic_admission() {
         &after_original_lookup_deadline.state,
         TopologyEvent::Admit {
             peer: candidate,
-            fixed_fingers: vec![ConditionalFingerUpdate { request }],
+            deferred_proof: Some(request),
             now_ms: lease_expiry_ms - 1,
         },
         DEFAULT_SUCCESSOR_CAPACITY,
@@ -115,7 +115,7 @@ fn test_conflicting_duplicate_cannot_evict_a_retained_finger_proof() {
         &conflicting.state,
         TopologyEvent::Admit {
             peer: candidate,
-            fixed_fingers: vec![ConditionalFingerUpdate { request }],
+            deferred_proof: Some(request),
             now_ms: 1_003,
         },
         DEFAULT_SUCCESSOR_CAPACITY,

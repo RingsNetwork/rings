@@ -44,7 +44,6 @@ use crate::dht::finger::FINGER_LOOKUP_MIN_INTERVAL_MS;
 use crate::dht::finger_awaiting_report_deadline_for_test;
 use crate::dht::topology::step;
 use crate::dht::topology::successor_head;
-use crate::dht::topology::ConditionalFingerUpdate;
 use crate::dht::topology::StabilizationConnectionPlan;
 use crate::dht::topology::StabilizationConnectionStep;
 use crate::dht::topology::SuccessorRemoval;
@@ -257,7 +256,7 @@ impl FingerRetryState {
             &self.topology,
             TopologyEvent::Admit {
                 peer,
-                fixed_fingers: vec![ConditionalFingerUpdate { request }],
+                deferred_proof: Some(request),
                 now_ms: self.now_ms,
             },
             DEFAULT_SUCCESSOR_CAPACITY,
@@ -378,7 +377,7 @@ impl FingerRetryState {
             },
             1 => TopologyEvent::Admit {
                 peer: Did::from(6u32),
-                fixed_fingers: Vec::new(),
+                deferred_proof: None,
                 now_ms: self.now_ms,
             },
             2 => TopologyEvent::UpdateSuccessor {

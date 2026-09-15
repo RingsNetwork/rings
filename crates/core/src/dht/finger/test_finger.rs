@@ -1,4 +1,5 @@
 use super::*;
+use crate::dht::tests::gen_ordered_dids;
 
 /// Verify that structural equality includes maintenance state, not only hints.
 ///
@@ -20,7 +21,6 @@ fn test_equality_includes_convergence_and_cursor_state() {
     progressed.convergence.fill_verified_for_test(true);
     assert_ne!(baseline, progressed);
 }
-use crate::dht::tests::gen_ordered_dids;
 
 /// Verify constructor bounds for the fixed-width 160-bit Chord address space.
 ///
