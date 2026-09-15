@@ -153,6 +153,9 @@ smoltcp = { version = "0.14.0", default-features = false, features = [
 tower = "0.5"
 wasm-bindgen-test = { workspace = true }
 
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+tokio = { version = "1.13.0", features = ["test-util"] }
+
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 libc = "0.2"
 

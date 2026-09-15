@@ -26,6 +26,8 @@ use crate::provider::Provider;
 use crate::tests::native::prepare_processor;
 
 mod common;
+#[cfg(rings_native)]
+mod test_bootstrap_probe;
 mod test_config;
 #[cfg(rings_native)]
 mod test_gateway;

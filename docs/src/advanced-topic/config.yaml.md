@@ -55,6 +55,8 @@ gateway:
   onion_service: tcp
   onion_hop_count: 0
   onion_allow_short_paths: false
+bootstrap:
+  peers: []
 dht_virtual_nodes: 160
 origin_quota:
   dht_control:
@@ -179,6 +181,28 @@ gateway starts ⟺ section present ∧ (enabled = true ∨ rings run --gateway)
 * `status_refresh_secs`: refresh interval of onion-exit availability in `/gateway/status`.
 * `onion_service`, `onion_hop_count`, `onion_allow_short_paths`: exit service and route length
   used for captured flows.
+
+## Bootstrap
+
+The `bootstrap` section lists peers that `rings run` keeps reachable for the life of the
+process. `rings connect node` and `rings connect seed` connect once; a managed target is redialed
+through its HTTP endpoint whenever the node can no longer reach it through the overlay, so a
+long-running node that loses its transport to a seed rejoins without a restart.
+
+* `peers`: managed targets, each `{ did, url }` with an optional `api_token`, the same shape as
+  an entry of a seed document. Every `did` must parse, every `url` must be a public HTTP(S)
+  endpoint, and the node's own DID is rejected; an entry repeated verbatim is merged, while a
+  DID listed with differing endpoints is rejected as ambiguous. A violation stops `rings run`
+  before it listens. `rings run --bootstrap-seed <file-or-url>` appends the peers of a seed
+  document to this list for one run.
+
+Reachability is assessed by a routed successor lookup for the target's DID; a target the node is
+directly connected to, or that some peer can route to, is left alone, so a target is never forced
+into a direct edge merely because it is not a finger. An unreachable target is redialed five times
+two seconds apart, then once every five minutes plus up to thirty seconds of jitter, until it is
+reachable again; a later loss restarts the burst. The loss of a direct transport to a target
+triggers an immediate reassessment. At most one handshake per target is in flight, targets retry
+independently, and shutdown cancels any handshake in progress.
 
 ## Storage
 
