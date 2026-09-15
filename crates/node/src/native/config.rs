@@ -10,6 +10,7 @@ use serde::Serialize;
 
 use crate::error::Error;
 use crate::error::Result;
+use crate::native::bootstrap::BootstrapConfig;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionExitService;
 use crate::onion::OnionServiceName;
@@ -239,6 +240,10 @@ pub struct Config {
     /// without the section load as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway: Option<NativeGatewayConfig>,
+    /// Managed bootstrap targets `rings run` keeps reachable for the life of the process;
+    /// `rings init` writes the section empty. See [`crate::native::bootstrap`].
+    #[serde(default)]
+    pub bootstrap: BootstrapConfig,
     /// Virtual DHT positions per storage owner.
     #[serde(default = "default_storage_virtual_positions_per_owner")]
     pub dht_virtual_nodes: u16,
@@ -367,6 +372,7 @@ impl Config {
             onion_http_proxy_max_connections:
                 crate::onion::proxy::http::default_max_connect_connections(),
             gateway: Some(NativeGatewayConfig::disabled_default()),
+            bootstrap: BootstrapConfig::default(),
             dht_virtual_nodes: DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER,
             origin_quota: OriginQuotaConfig::default(),
             external_ip: None,
@@ -589,6 +595,42 @@ gateway:
         assert_eq!(gateway.runtime.validate(), Ok(()));
         assert!(restored.enabled_gateway().is_none());
         assert_eq!(restored.origin_quota, OriginQuotaConfig::default());
+    }
+
+    /// `rings init` states the bootstrap section explicitly, with no managed targets.
+    #[test]
+    fn generated_config_writes_an_empty_bootstrap_section() {
+        let document = match serde_yaml::to_string(&Config::new("session_sk")) {
+            Ok(document) => document,
+            Err(error) => panic!("generated config must serialize: {error}"),
+        };
+        assert!(document.contains("bootstrap:\n  peers: []\n"));
+        assert_eq!(
+            Config::new("session_sk").bootstrap,
+            BootstrapConfig::default()
+        );
+    }
+
+    /// A config written before the section existed loads with no managed targets, and an
+    /// explicit section round-trips its peers including an optional token.
+    #[test]
+    fn bootstrap_section_defaults_to_empty_and_round_trips_peers() {
+        let base = serde_yaml::to_string(&Config::new("session_sk")).unwrap_or_default();
+        let without = base.replace("bootstrap:\n  peers: []\n", "");
+        assert!(!without.contains("bootstrap:"));
+        assert!(config_from(&without).bootstrap.peers.is_empty());
+
+        let with = base.replace(
+            "bootstrap:\n  peers: []\n",
+            "bootstrap:\n  peers:\n  - did: 0x1\n    url: https://seed.example.org/\n  - did: \
+             0x2\n    url: https://seed2.example.org/\n    api_token: secret\n",
+        );
+        let peers = config_from(&with).bootstrap.peers;
+        assert_eq!(peers.len(), 2);
+        assert_eq!(peers[0].did, "0x1");
+        assert_eq!(peers[0].url, "https://seed.example.org/");
+        assert_eq!(peers[0].api_token, None);
+        assert_eq!(peers[1].api_token.as_deref(), Some("secret"));
     }
 
     #[test]

@@ -14,7 +14,7 @@ pub struct Seed {
 }
 
 /// SeedPeer contain `Did` and `endpoint`.
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SeedPeer {
     /// an unique identify.
     pub did: String,

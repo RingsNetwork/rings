@@ -12,6 +12,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 pub use builder::SwarmBuilder;
+use rings_transport::core::transport::WebrtcConnectionState;
 
 use self::callback::InnerSwarmCallback;
 use crate::dht::Did;
@@ -168,6 +169,19 @@ impl Swarm {
     /// List DIDs whose direct WebRTC transport connection is active.
     pub fn connected_peer_dids(&self) -> Vec<Did> {
         self.transport.get_connection_ids()
+    }
+
+    /// Whether `peer` has an admitted direct transport in the `Connected` state.
+    ///
+    /// Law: `is_peer_connected(p) ⟹ p ∈ peer_dids()`. The converse fails while a routable
+    /// transport is still `Connecting`, so this is the strict readiness predicate rather than
+    /// the routability one.
+    pub fn is_peer_connected(&self, peer: Did) -> bool {
+        self.transport
+            .get_connection(peer)
+            .is_some_and(|connection| {
+                connection.webrtc_connection_state() == WebrtcConnectionState::Connected
+            })
     }
 
     /// Return local measurement counters for `peer`, if observed.

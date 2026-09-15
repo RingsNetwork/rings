@@ -103,6 +103,22 @@ rings connect accept <answer>     # or `-`
 
 [Exchange SDP](advanced-topic/exchange-sdp.md) explains what each message carries.
 
+### Keeping a bootstrap peer reachable
+
+Each `rings connect` form connects once. A node that later loses its transport to that peer,
+and every other peer with it, stays partitioned until something reconnects it. For peers the
+node should always be able to reach, list them under `bootstrap.peers` in
+[config.yaml](advanced-topic/config.yaml.md#bootstrap), or hand `rings run` a seed document for
+one run:
+
+```bash
+rings run --bootstrap-seed ./seed.json
+```
+
+`rings run` then supervises those targets: whenever one is no longer reachable through the
+overlay it is redialed through its HTTP endpoint, in a short burst first and then every five
+minutes, until it is reachable again. A target that other peers can route to is left alone.
+
 ## Peers
 
 ```bash
