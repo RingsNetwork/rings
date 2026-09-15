@@ -14,8 +14,9 @@
   restarts after each loss; the loss of a direct transport to a target triggers an immediate
   reassessment. At most one handshake per target is in flight, targets retry independently,
   the endpoint must answer as the configured DID, and shutdown cancels any handshake in
-  progress. Invalid targets (unparsable DID, non-public URL, duplicate, or the node itself)
-  stop `rings run` before it listens.
+  progress. A key in the node's own successor range is refuted locally without a probe. Invalid
+  targets (unparsable DID, non-public URL, one DID with differing endpoints, or the node itself)
+  stop `rings run` before it listens; an entry repeated verbatim is merged.
 - `Swarm::is_peer_connected` exposes the strict direct-transport readiness predicate, and the
   node `Backend` accepts a `BackendObserver` that receives decoded Chord lookup reports and
   connection state changes without a second payload decode.

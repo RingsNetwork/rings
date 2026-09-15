@@ -244,14 +244,17 @@ pub(crate) fn duration_ms(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
+/// Whether `instant_ms` lies exactly one slow-cadence delay after `from_ms`, that is within
+/// `[from + BASE_INTERVAL, from + BASE_INTERVAL + JITTER_WINDOW]`.
+#[cfg(test)]
+pub(crate) fn is_one_slow_delay_after(from_ms: u64, instant_ms: u64) -> bool {
+    let floor = from_ms.saturating_add(duration_ms(BASE_INTERVAL));
+    (floor..=floor.saturating_add(duration_ms(JITTER_WINDOW))).contains(&instant_ms)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Inclusive lower bound of one slow-cadence delay in milliseconds.
-    const SLOW_MIN_MS: u64 = 300_000;
-    /// Inclusive upper bound of one slow-cadence delay in milliseconds.
-    const SLOW_MAX_MS: u64 = 330_000;
 
     /// Run one failed turn at `now_ms` and return the resulting `not_before_ms`.
     fn fail_turn(schedule: &mut BootstrapSchedule, now_ms: u64) -> u64 {
@@ -286,9 +289,9 @@ mod tests {
             now_ms = next;
         }
         let slow = fail_turn(&mut schedule, now_ms);
-        assert!((now_ms + SLOW_MIN_MS..=now_ms + SLOW_MAX_MS).contains(&slow));
+        assert!(is_one_slow_delay_after(now_ms, slow));
         let slower = fail_turn(&mut schedule, slow);
-        assert!((slow + SLOW_MIN_MS..=slow + SLOW_MAX_MS).contains(&slower));
+        assert!(is_one_slow_delay_after(slow, slower));
     }
 
     /// Reset-on-success law: a reachable settlement forgets failures and a drop restarts the burst.
@@ -304,7 +307,7 @@ mod tests {
         let Some(TargetPhase::Reachable { recheck_at_ms }) = schedule.phase(0) else {
             panic!("a reachable outcome must settle into Reachable");
         };
-        assert!((now_ms + SLOW_MIN_MS..=now_ms + SLOW_MAX_MS).contains(&recheck_at_ms));
+        assert!(is_one_slow_delay_after(now_ms, recheck_at_ms));
         assert!(schedule.notice_drop(0, recheck_at_ms - 1));
         assert_eq!(
             schedule.phase(0),
@@ -395,7 +398,7 @@ mod tests {
             let l = left.slow_delay_ms();
             let r = right.slow_delay_ms();
             assert_eq!(l, r);
-            assert!((SLOW_MIN_MS..=SLOW_MAX_MS).contains(&l));
+            assert!(is_one_slow_delay_after(0, l));
         }
     }
 

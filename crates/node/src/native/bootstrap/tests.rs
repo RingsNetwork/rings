@@ -19,12 +19,13 @@ use tokio::time::Instant;
 
 use super::probe::LookupReportLedger;
 use super::probe::EARLY_REPORT_CAPACITY;
+use super::schedule::is_one_slow_delay_after;
 use super::BootstrapConfig;
 use super::BootstrapPort;
-use super::BootstrapSignals;
 use super::BootstrapSupervisor;
 use super::BootstrapTargets;
 use super::ManagedTarget;
+use super::TransportDrops;
 use crate::error::Error;
 use crate::error::Result;
 use crate::prelude::StopSource;
@@ -32,10 +33,6 @@ use crate::seed::SeedPeer;
 
 /// Fixed jitter seed so slow-cadence instants replay identically.
 const JITTER_SEED: u64 = 7;
-/// Inclusive lower bound of one slow-cadence delay in milliseconds.
-const SLOW_MIN_MS: u64 = 300_000;
-/// Inclusive upper bound of one slow-cadence delay in milliseconds.
-const SLOW_MAX_MS: u64 = 330_000;
 /// DID of the node under test; never a target.
 const LOCAL: u32 = 0xFFFF;
 
@@ -55,10 +52,10 @@ enum DialScript {
 /// One recorded port call.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CallKind {
-    /// A reachability assessment and its answer.
-    Probe(bool),
-    /// A dial and the script it followed.
-    Dial(DialScript),
+    /// A reachability assessment.
+    Probe,
+    /// A dial.
+    Dial,
 }
 
 /// One recorded port call with its virtual instant.
@@ -141,7 +138,7 @@ impl ScriptedPort {
         self.state()
             .log
             .iter()
-            .filter(|call| call.target == target && matches!(call.kind, CallKind::Dial(_)))
+            .filter(|call| call.target == target && call.kind == CallKind::Dial)
             .map(|call| call.at_ms)
             .collect()
     }
@@ -151,7 +148,7 @@ impl ScriptedPort {
         self.state()
             .log
             .iter()
-            .filter(|call| call.target == target && matches!(call.kind, CallKind::Probe(_)))
+            .filter(|call| call.target == target && call.kind == CallKind::Probe)
             .map(|call| call.at_ms)
             .collect()
     }
@@ -172,7 +169,7 @@ impl BootstrapPort for ScriptedPort {
         state.log.push(Call {
             at_ms,
             target: target.did(),
-            kind: CallKind::Probe(reachable),
+            kind: CallKind::Probe,
         });
         reachable
     }
@@ -190,7 +187,7 @@ impl BootstrapPort for ScriptedPort {
             state.log.push(Call {
                 at_ms,
                 target: target.did(),
-                kind: CallKind::Dial(script),
+                kind: CallKind::Dial,
             });
             script
         };
@@ -236,7 +233,7 @@ fn targets(peers: &[SeedPeer]) -> BootstrapTargets {
 /// A running supervisor over a scripted port.
 struct Running {
     port: Arc<ScriptedPort>,
-    signals: Arc<BootstrapSignals>,
+    drops: Arc<TransportDrops>,
     stop: StopSource,
     task: JoinHandle<()>,
 }
@@ -245,15 +242,15 @@ impl Running {
     /// Spawn a supervisor over `peers` with `port` already scripted.
     fn spawn(port: Arc<ScriptedPort>, peers: &[SeedPeer]) -> Self {
         let targets = targets(peers);
-        let observer = super::BootstrapObserver::new(targets.dids());
-        let signals = observer.signals();
+        let observer = super::BootstrapObserver::new(&targets);
+        let drops = observer.drops();
         let stop = StopSource::new();
         let supervisor =
-            BootstrapSupervisor::new(targets, port.clone(), signals.clone(), JITTER_SEED);
+            BootstrapSupervisor::new(targets, port.clone(), drops.clone(), JITTER_SEED);
         let task = tokio::spawn(supervisor.run(stop.token()));
         Self {
             port,
-            signals,
+            drops,
             stop,
             task,
         }
@@ -262,9 +259,9 @@ impl Running {
     /// Report a terminal transport state for `target` and make it unreachable.
     fn drop_transport(&self, target: Did, state: WebrtcConnectionState) {
         self.port.set_reachable(target, false);
-        self.signals
+        self.drops
             .observe(target, state)
-            .expect("signals must accept a drop");
+            .expect("drops must accept a terminal state");
     }
 
     /// Request stop and wait for the run to return.
@@ -275,11 +272,6 @@ impl Running {
             .expect("run must return promptly after stop")
             .expect("run task must not panic");
     }
-}
-
-/// Whether `instant` lies one slow-cadence delay after `from`.
-fn one_slow_delay_after(from: u64, instant: u64) -> bool {
-    (from + SLOW_MIN_MS..=from + SLOW_MAX_MS).contains(&instant)
 }
 
 /// An unreachable target from start-up is dialed at 0, 2, 4, 6, 8 s and then once per slow delay.
@@ -296,7 +288,7 @@ async fn initial_failure_bursts_then_falls_back_to_the_slow_cadence() {
     let dials = port.dial_times(target);
     assert_eq!(dials.len(), 6, "exactly one slow attempt follows the burst");
     assert!(
-        one_slow_delay_after(8_000, dials[5]),
+        is_one_slow_delay_after(8_000, dials[5]),
         "sixth dial at {}",
         dials[5]
     );
@@ -304,7 +296,7 @@ async fn initial_failure_bursts_then_falls_back_to_the_slow_cadence() {
     tokio::time::sleep(Duration::from_millis(340_000)).await;
     let dials = port.dial_times(target);
     assert_eq!(dials.len(), 7);
-    assert!(one_slow_delay_after(dials[5], dials[6]));
+    assert!(is_one_slow_delay_after(dials[5], dials[6]));
     running.shutdown().await;
 }
 
@@ -329,7 +321,7 @@ async fn recovery_resets_the_burst_and_rechecks_without_dialing() {
         "three failing turns plus one periodic recheck"
     );
     assert!(
-        one_slow_delay_after(4_000, probes[3]),
+        is_one_slow_delay_after(4_000, probes[3]),
         "recheck at {}",
         probes[3]
     );
@@ -378,9 +370,9 @@ async fn a_transient_disconnect_and_an_unmanaged_drop_are_ignored() {
     tokio::time::sleep(Duration::from_millis(1_000)).await;
     running.drop_transport(target, WebrtcConnectionState::Disconnected);
     running
-        .signals
+        .drops
         .observe(Did::from(2), WebrtcConnectionState::Closed)
-        .expect("signals must accept any peer");
+        .expect("drops must accept any peer");
     tokio::time::sleep(Duration::from_millis(100_000)).await;
     assert_eq!(
         port.probe_times(target),
@@ -483,8 +475,24 @@ fn targets_validate_dids_urls_duplicates_and_self() {
         ..peer(1)
     }])
     .contains("Unsafe"));
-    assert!(rejected(vec![peer(1), peer(1)]).contains("twice"));
+    assert!(rejected(vec![
+        SeedPeer {
+            url: "https://other.example.com/".to_string(),
+            ..peer(1)
+        },
+        peer(1)
+    ])
+    .contains("differing endpoints"));
     assert!(rejected(vec![peer(LOCAL)]).contains("itself"));
+
+    let merged = BootstrapTargets::from_config(
+        &BootstrapConfig {
+            peers: vec![peer(1), peer(2), peer(1)],
+        },
+        local,
+    )
+    .expect("a verbatim repeat is merged");
+    assert_eq!(merged.len(), 2);
     assert!(
         BootstrapTargets::from_config(&BootstrapConfig::default(), local)
             .expect("an empty section validates")

@@ -12,25 +12,26 @@
 //!
 //! - `schedule::BootstrapSchedule` (private) — the retry state machine, a function of explicit
 //!   time; its module docs carry the phase diagram and laws.
-//! - [`BootstrapPort`] — the two effects a turn needs: assess reachability and dial.
+//! - [`BootstrapPort`] — the two effects a turn needs: assess reachability and dial;
+//!   `ProcessorPort` is the production port over a live processor.
 //! - [`BootstrapSupervisor`] — the shell: wakes on deadlines, transport drops and finished
 //!   turns; runs at most one turn per target; exits on the run's stop token.
-//! - [`BootstrapObserver`] — the swarm-side feed: lookup reports for the probe and connection
-//!   state changes for prompt reassessment, both delivered by the [`Backend`] through
+//! - [`BootstrapObserver`] — the swarm-side feed: lookup reports for the probe and transport
+//!   drops for prompt reassessment, both delivered by the [`Backend`] through
 //!   [`BackendObserver`].
 //!
 //! ```text
 //!                    ┌────────────────────────── run loop ──────────────────────────┐
 //!  StopToken ──stop─▶│ drain drops ─▶ notice_drop ─▶ ∀ due target: begin ─▶ spawn turn│
-//!  Signals ────wake─▶│ wait { stop | wake | turn finished | next deadline } ─▶ settle │
+//!  Drops ──────wake─▶│ wait { stop | wake | turn finished | next deadline } ─▶ settle │
 //!                    └──────────────────────────────────────────────────────────────┘
 //!
 //!  turn(t) := reachable(t) ? Reachable : (dial(t) = Ok ? Reachable : DialFailed)
 //! ```
 //!
-//! Shutdown: the loop returns on the first stop observation; dropping its task set aborts any
-//! in-flight turn, so no probe or handshake outlives the run. Transient failures stay inside
-//! the loop; only configuration is validated up front and fails fast.
+//! Shutdown: the loop returns on the first stop observation; dropping its turns aborts any
+//! in-flight probe or handshake, so none outlives the run. Transient failures stay inside the
+//! loop; only configuration is validated up front and fails fast.
 //!
 //! [`Backend`]: crate::extension::Backend
 //! [`BackendObserver`]: crate::extension::BackendObserver
@@ -38,6 +39,7 @@
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::fmt;
+use std::future::Future;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -49,12 +51,10 @@ use rings_transport::core::transport::WebrtcConnectionState;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::sync::Notify;
-use tokio::task::JoinError;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
 use self::probe::LookupReportLedger;
-use self::probe::ProcessorPort;
 use self::schedule::BootstrapSchedule;
 use self::schedule::TargetIndex;
 use self::schedule::TurnOutcome;
@@ -67,10 +67,12 @@ use crate::rpc_impl::validate_remote_rpc_url;
 use crate::seed::SeedPeer;
 use crate::sync_lock::lock;
 
-pub mod probe;
+mod probe;
 mod schedule;
 #[cfg(test)]
 mod tests;
+
+pub(crate) use self::probe::ProcessorPort;
 
 /// The `bootstrap` section of the native config: targets `rings run` keeps reachable.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -81,7 +83,6 @@ pub struct BootstrapConfig {
 }
 
 /// One validated managed target: a parsed DID and a public HTTP(S) handshake endpoint.
-#[derive(Clone)]
 pub struct ManagedTarget {
     did: Did,
     url: String,
@@ -134,16 +135,22 @@ impl TryFrom<&SeedPeer> for ManagedTarget {
     }
 }
 
-/// Validated, duplicate-free managed targets that exclude the local node.
-#[derive(Clone, Debug, Default)]
+/// Validated managed targets: one per DID, none of them the local node.
+#[derive(Debug, Default)]
 pub struct BootstrapTargets(Vec<ManagedTarget>);
 
 impl BootstrapTargets {
     /// Validate `config` for the node `local`: every DID parses, every URL passes the remote
-    /// RPC endpoint policy, no DID repeats, and none is `local` itself.
+    /// RPC endpoint policy, and none is `local` itself. An entry repeated verbatim (as when the
+    /// same seed document feeds both the config and `--bootstrap-seed`) is merged; a DID listed
+    /// with a different endpoint or token is rejected as ambiguous.
     pub fn from_config(config: &BootstrapConfig, local: Did) -> Result<Self> {
+        let mut seen: Vec<&SeedPeer> = Vec::with_capacity(config.peers.len());
         let mut targets: Vec<ManagedTarget> = Vec::with_capacity(config.peers.len());
         for peer in &config.peers {
+            if seen.contains(&peer) {
+                continue;
+            }
             let target = ManagedTarget::try_from(peer)?;
             if target.did == local {
                 return Err(Error::InvalidConfig(format!(
@@ -153,10 +160,11 @@ impl BootstrapTargets {
             }
             if targets.iter().any(|known| known.did == target.did) {
                 return Err(Error::InvalidConfig(format!(
-                    "bootstrap peer {} is listed twice",
+                    "bootstrap peer {} is listed with differing endpoints",
                     target.did
                 )));
             }
+            seen.push(peer);
             targets.push(target);
         }
         Ok(Self(targets))
@@ -188,15 +196,16 @@ pub trait BootstrapPort: Send + Sync + 'static {
     async fn dial(&self, target: &ManagedTarget) -> Result<()>;
 }
 
-/// Transport-drop signals from the swarm to the supervisor, bounded by the target set.
-pub struct BootstrapSignals {
+/// Terminal transport losses of managed targets, recorded by the swarm callback and drained by
+/// the supervisor. Bounded by the target set.
+pub struct TransportDrops {
     targets: BTreeSet<Did>,
     dropped: Mutex<BTreeSet<Did>>,
     wake: Notify,
 }
 
-impl BootstrapSignals {
-    /// Signals that record drops for `targets` only.
+impl TransportDrops {
+    /// Drops recorded for `targets` only.
     fn new(targets: BTreeSet<Did>) -> Self {
         Self {
             targets,
@@ -205,9 +214,9 @@ impl BootstrapSignals {
         }
     }
 
-    /// Record a terminal transport state for `peer` when it is a managed target, waking the
+    /// Record `state` for `peer` when it is terminal and `peer` is a managed target, waking the
     /// supervisor. Other peers and non-terminal states are ignored.
-    pub fn observe(&self, peer: Did, state: WebrtcConnectionState) -> Result<()> {
+    pub(crate) fn observe(&self, peer: Did, state: WebrtcConnectionState) -> Result<()> {
         if !is_terminal_transport_state(state) || !self.targets.contains(&peer) {
             return Ok(());
         }
@@ -217,7 +226,7 @@ impl BootstrapSignals {
     }
 
     /// Take every drop recorded since the previous call.
-    fn take_dropped(&self) -> Result<BTreeSet<Did>> {
+    fn take(&self) -> Result<BTreeSet<Did>> {
         Ok(std::mem::take(&mut *lock(&self.dropped)?))
     }
 }
@@ -234,26 +243,26 @@ const fn is_terminal_transport_state(state: WebrtcConnectionState) -> bool {
 /// Swarm-side feed for the supervisor: lookup reports and transport drops.
 pub struct BootstrapObserver {
     reports: Arc<LookupReportLedger>,
-    signals: Arc<BootstrapSignals>,
+    drops: Arc<TransportDrops>,
 }
 
 impl BootstrapObserver {
-    /// An observer that forwards drops of `targets` and every lookup report.
-    pub fn new(targets: BTreeSet<Did>) -> Self {
+    /// An observer that records drops of `targets` and every lookup report.
+    pub fn new(targets: &BootstrapTargets) -> Self {
         Self {
             reports: Arc::new(LookupReportLedger::default()),
-            signals: Arc::new(BootstrapSignals::new(targets)),
+            drops: Arc::new(TransportDrops::new(targets.dids())),
         }
     }
 
     /// Shared lookup-report ledger.
-    pub fn reports(&self) -> Arc<LookupReportLedger> {
+    pub(crate) fn reports(&self) -> Arc<LookupReportLedger> {
         self.reports.clone()
     }
 
-    /// Shared transport-drop signals.
-    pub fn signals(&self) -> Arc<BootstrapSignals> {
-        self.signals.clone()
+    /// Shared transport drops.
+    pub(crate) fn drops(&self) -> Arc<TransportDrops> {
+        self.drops.clone()
     }
 }
 
@@ -265,10 +274,10 @@ impl BackendObserver for BootstrapObserver {
         }
     }
 
-    /// Hand the transition to the drop signals; a poisoned signal set is logged, never propagated.
+    /// Hand the transition to the drop record; a poisoned record is logged, never propagated.
     fn connection_state(&self, peer: Did, state: WebrtcConnectionState) {
-        if let Err(error) = self.signals.observe(peer, state) {
-            tracing::error!(%peer, %error, "bootstrap drop signals unavailable");
+        if let Err(error) = self.drops.observe(peer, state) {
+            tracing::error!(%peer, %error, "bootstrap drop record unavailable");
         }
     }
 }
@@ -277,9 +286,44 @@ impl BackendObserver for BootstrapObserver {
 pub struct BootstrapSupervisor<P> {
     targets: Vec<Arc<ManagedTarget>>,
     port: Arc<P>,
-    signals: Arc<BootstrapSignals>,
+    drops: Arc<TransportDrops>,
     schedule: BootstrapSchedule,
     origin: Instant,
+}
+
+/// In-flight turns: a task set plus the target each task serves.
+///
+/// Invariant: `keys(targets) = ids(tasks)`, so a task that ends without a result (aborted or
+/// panicked) still resolves to its target and settles as a failed dial.
+#[derive(Default)]
+struct Turns {
+    tasks: JoinSet<TurnOutcome>,
+    targets: HashMap<tokio::task::Id, TargetIndex>,
+}
+
+impl Turns {
+    /// Spawn `turn` on behalf of `index`.
+    fn spawn(
+        &mut self,
+        index: TargetIndex,
+        turn: impl Future<Output = TurnOutcome> + Send + 'static,
+    ) {
+        let handle = self.tasks.spawn(turn);
+        self.targets.insert(handle.id(), index);
+    }
+
+    /// The next finished turn, or `None` while none is in flight (the caller's select disables
+    /// this branch rather than completing it).
+    async fn next(&mut self) -> Option<(TargetIndex, TurnOutcome)> {
+        let (id, outcome) = match self.tasks.join_next_with_id().await? {
+            Ok((id, outcome)) => (id, outcome),
+            Err(error) => {
+                tracing::error!(%error, "bootstrap turn did not complete");
+                (error.id(), TurnOutcome::DialFailed)
+            }
+        };
+        self.targets.remove(&id).map(|index| (index, outcome))
+    }
 }
 
 /// What woke the run loop.
@@ -287,9 +331,9 @@ enum Wake {
     /// The run's stop token was observed.
     Stop,
     /// A transport drop was recorded.
-    Signal,
-    /// A turn finished, keyed by its task id.
-    Turn(std::result::Result<(tokio::task::Id, (TargetIndex, TurnOutcome)), JoinError>),
+    Drop,
+    /// A turn finished for the target.
+    Turn(TargetIndex, TurnOutcome),
     /// The next scheduled deadline passed.
     Deadline,
 }
@@ -305,24 +349,24 @@ impl BootstrapSupervisor<ProcessorPort> {
             return None;
         }
         let port = Arc::new(ProcessorPort::new(processor, observer.reports()));
-        Some(Self::new(targets, port, observer.signals(), rand::random()))
+        Some(Self::new(targets, port, observer.drops(), rand::random()))
     }
 }
 
 impl<P: BootstrapPort> BootstrapSupervisor<P> {
     /// Supervisor over `port` with every target due immediately and jitter seeded by
     /// `jitter_seed`.
-    pub fn new(
+    pub(crate) fn new(
         targets: BootstrapTargets,
         port: Arc<P>,
-        signals: Arc<BootstrapSignals>,
+        drops: Arc<TransportDrops>,
         jitter_seed: u64,
     ) -> Self {
         let schedule = BootstrapSchedule::new(targets.len(), jitter_seed);
         Self {
             targets: targets.0.into_iter().map(Arc::new).collect(),
             port,
-            signals,
+            drops,
             schedule,
             origin: Instant::now(),
         }
@@ -330,29 +374,18 @@ impl<P: BootstrapPort> BootstrapSupervisor<P> {
 
     /// Run until `stop` is observed; never returns otherwise.
     pub async fn run(mut self, stop: StopToken) {
-        let mut turns: JoinSet<(TargetIndex, TurnOutcome)> = JoinSet::new();
-        let mut inflight: HashMap<tokio::task::Id, TargetIndex> = HashMap::new();
+        let mut turns = Turns::default();
         loop {
             self.drain_drops();
-            self.start_due_turns(&mut turns, &mut inflight);
+            self.start_due_turns(&mut turns);
             let deadline = self.schedule.next_deadline_ms().and_then(|deadline_ms| {
                 self.origin.checked_add(Duration::from_millis(deadline_ms))
             });
-            match wait_for_wake(&stop, self.signals.as_ref(), &mut turns, deadline).await {
+            match wait_for_wake(&stop, self.drops.as_ref(), &mut turns, deadline).await {
                 Wake::Stop => return,
-                Wake::Signal | Wake::Deadline => {}
-                Wake::Turn(Ok((id, (index, outcome)))) => {
-                    inflight.remove(&id);
+                Wake::Drop | Wake::Deadline => {}
+                Wake::Turn(index, outcome) => {
                     self.schedule.settle(index, outcome, self.now_ms());
-                }
-                Wake::Turn(Err(error)) => {
-                    // A turn neither panics (denied by lints) nor is aborted before shutdown,
-                    // so this is unreachable in practice; settle as a failure to stay total.
-                    if let Some(index) = inflight.remove(&error.id()) {
-                        tracing::error!(%error, "bootstrap turn did not complete");
-                        self.schedule
-                            .settle(index, TurnOutcome::DialFailed, self.now_ms());
-                    }
                 }
             }
         }
@@ -365,10 +398,10 @@ impl<P: BootstrapPort> BootstrapSupervisor<P> {
 
     /// Fold every recorded transport drop into the schedule.
     fn drain_drops(&mut self) {
-        let dropped = match self.signals.take_dropped() {
+        let dropped = match self.drops.take() {
             Ok(dropped) => dropped,
             Err(error) => {
-                tracing::error!(%error, "bootstrap drop signals unavailable");
+                tracing::error!(%error, "bootstrap drop record unavailable");
                 return;
             }
         };
@@ -384,11 +417,7 @@ impl<P: BootstrapPort> BootstrapSupervisor<P> {
     }
 
     /// Spawn one turn for every target that is due.
-    fn start_due_turns(
-        &mut self,
-        turns: &mut JoinSet<(TargetIndex, TurnOutcome)>,
-        inflight: &mut HashMap<tokio::task::Id, TargetIndex>,
-    ) {
+    fn start_due_turns(&mut self, turns: &mut Turns) {
         let due: Vec<TargetIndex> = self.schedule.due(self.now_ms()).collect();
         for index in due {
             let Some(target) = self.targets.get(index) else {
@@ -397,26 +426,22 @@ impl<P: BootstrapPort> BootstrapSupervisor<P> {
             if !self.schedule.begin(index) {
                 continue;
             }
-            let handle = turns.spawn(turn(self.port.clone(), target.clone(), index));
-            inflight.insert(handle.id(), index);
+            turns.spawn(index, turn(self.port.clone(), target.clone()));
         }
     }
 }
 
 /// Block until the run should act again.
-///
-/// An empty task set disables its branch rather than completing, so an idle supervisor sleeps
-/// until its deadline, a drop signal, or the stop token.
 async fn wait_for_wake(
     stop: &StopToken,
-    signals: &BootstrapSignals,
-    turns: &mut JoinSet<(TargetIndex, TurnOutcome)>,
+    drops: &TransportDrops,
+    turns: &mut Turns,
     deadline: Option<Instant>,
 ) -> Wake {
     tokio::select! {
         _ = stop.stopped() => Wake::Stop,
-        _ = signals.wake.notified() => Wake::Signal,
-        Some(joined) = turns.join_next_with_id() => Wake::Turn(joined),
+        _ = drops.wake.notified() => Wake::Drop,
+        Some((index, outcome)) = turns.next() => Wake::Turn(index, outcome),
         _ = sleep_until_or_forever(deadline) => Wake::Deadline,
     }
 }
@@ -430,19 +455,15 @@ async fn sleep_until_or_forever(deadline: Option<Instant>) {
 }
 
 /// One turn: assess reachability and, only when unreachable, redial.
-async fn turn<P: BootstrapPort>(
-    port: Arc<P>,
-    target: Arc<ManagedTarget>,
-    index: TargetIndex,
-) -> (TargetIndex, TurnOutcome) {
+async fn turn<P: BootstrapPort>(port: Arc<P>, target: Arc<ManagedTarget>) -> TurnOutcome {
     if port.reachable(target.as_ref()).await {
         tracing::debug!(target = %target.did, "bootstrap target reachable");
-        return (index, TurnOutcome::Reachable);
+        return TurnOutcome::Reachable;
     }
     match port.dial(target.as_ref()).await {
         Ok(()) => {
             tracing::info!(target = %target.did, url = %target.url, "bootstrap target redialed");
-            (index, TurnOutcome::Reachable)
+            TurnOutcome::Reachable
         }
         Err(error) => {
             tracing::warn!(
@@ -451,7 +472,7 @@ async fn turn<P: BootstrapPort>(
                 %error,
                 "bootstrap redial failed"
             );
-            (index, TurnOutcome::DialFailed)
+            TurnOutcome::DialFailed
         }
     }
 }
