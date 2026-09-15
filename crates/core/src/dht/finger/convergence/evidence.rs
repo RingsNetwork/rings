@@ -17,24 +17,43 @@
 //! # Algorithm flow
 //!
 //! ```text
+//! Event A: a local topology transition changes inferred hints
+//!
 //! old hints + new hints -> compare tracked slots
 //!        | unchanged                    | changed
 //!        v                              v
-//! keep epoch and proof bits       increment evidence epoch
-//!                                      |
-//!                         +------------+------------+
-//!                         | available               | overflow
-//!                         v                         v
-//!              stamp changed slots          unverify every slot
-//!                         |
-//!                         v
-//!              receive validated range proof
-//!                         |
-//!                         v
-//!          changed_at <= proof.issued_epoch?
-//!                 | yes                 | no
-//!                 v                     v
-//!          write hint + verify     preserve newer slot
+//! keep epoch and verification      increment evidence epoch
+//!                                             |
+//!                                +------------+------------+
+//!                                | available               | overflow
+//!                                v                         v
+//!                     stamp changed slots          unverify every slot
+//!
+//! Event B: a later scheduler/network round obtains fresh evidence
+//!
+//! issue lookup(slot, UUID, current epoch)
+//!                  |
+//!                  v
+//! receive authenticated successor report
+//!                  |
+//!                  v
+//! parent validates token + deadline + Chord geometry
+//!                  |
+//!                  v
+//! derive local FingerRangeProof for covered slots
+//!                  |
+//!                  v
+//! for each slot: changed_at <= proof.issued_epoch?
+//!                  | yes                         | no
+//!                  v                             v
+//!          write hint + verify            preserve newer slot
+//!                  |
+//!                  v
+//! more unverified ranges? -- yes --> later scheduler/network round
+//!                  |
+//!                  no
+//!                  v
+//!            convergence complete
 //! ```
 
 use serde::Deserialize;
