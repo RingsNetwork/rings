@@ -36,15 +36,17 @@ fn advance(now_ms: u64) -> TopologyEvent {
 /// Build a topology state from explicit ring views and fresh convergence metadata.
 ///
 /// The production constructor initializes proof, retry, and in-flight state;
-/// `fix_finger_index` supplies only the persisted legacy cursor.
+/// `cursor` places the slot at which selection and revalidation resume.
 fn state(
     local: Did,
     successors: Vec<Did>,
     predecessor: Option<Did>,
     fingers: Vec<Option<Did>>,
-    fix_finger_index: usize,
+    cursor: usize,
 ) -> TopologyState {
-    TopologyState::new(local, successors, predecessor, fingers, fix_finger_index)
+    let mut state = TopologyState::new(local, successors, predecessor, fingers);
+    state.finger_convergence.set_cursor_for_test(cursor);
+    state
 }
 
 /// Extract the only finger lookup request emitted by a topology transition.
@@ -691,7 +693,7 @@ fn test_periodic_revalidation_marks_a_range_without_emitting_a_lookup() {
             None,
             None,
         ],
-        0,
+        1,
     );
     stable.finger_convergence.fill_verified_for_test(true);
 
@@ -809,7 +811,7 @@ fn test_revalidation_is_deferred_only_by_succeeding_work() {
             Some(did(64)),
             Some(did(64)),
         ],
-        3,
+        4,
     );
     current.finger_convergence.fill_verified_for_test(true);
     for slot in 1..=3 {

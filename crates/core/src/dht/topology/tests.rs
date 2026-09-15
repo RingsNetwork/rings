@@ -34,9 +34,11 @@ fn state(
     successors: Vec<Did>,
     predecessor: Option<Did>,
     fingers: Vec<Option<Did>>,
-    fix_finger_index: usize,
+    cursor: usize,
 ) -> TopologyState {
-    TopologyState::new(local, successors, predecessor, fingers, fix_finger_index)
+    let mut state = TopologyState::new(local, successors, predecessor, fingers);
+    state.finger_convergence.set_cursor_for_test(cursor);
+    state
 }
 
 /// Prepare one artificial in-flight finger lookup for a selected slot.
@@ -410,7 +412,7 @@ fn test_fix_finger_step_keeps_isolated_sparse_range_unverified_and_dormant() {
         DEFAULT_SUCCESSOR_CAPACITY,
     );
 
-    assert_eq!(next.state.fix_finger_index, 2);
+    assert_eq!(next.state.finger_convergence_projection().cursor, 2);
     assert_eq!(next.state.fingers, vec![None; 4]);
     assert!(next.state.finger_convergence_pending());
     assert!(!next.state.finger_convergence_status(0).may_advance());
@@ -497,7 +499,7 @@ fn test_apply_finger_step_updates_every_slot_proved_by_distance() {
         Some(successor),
         Some(successor)
     ]);
-    assert_eq!(next.state.fix_finger_index, 3);
+    assert_eq!(next.state.finger_convergence_projection().cursor, 4);
     assert!(next.actions.is_empty());
 }
 

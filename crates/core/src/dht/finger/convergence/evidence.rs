@@ -276,16 +276,17 @@ impl FingerEvidence {
         }
     }
 
-    /// Reopen the next consecutive hint range for periodic revalidation.
+    /// Reopen the consecutive hint range at `cursor` for periodic revalidation.
     ///
-    /// Selection begins after `cursor`, wraps once, and clears only the run that
-    /// shares the first selected hint value. Empty tables remain unchanged.
+    /// The run starting at `cursor` (wrapping once past the table end) is
+    /// cleared; only slots sharing its first hint value are affected. Empty
+    /// tables remain unchanged.
     pub(super) fn reopen_next_range(&mut self, fingers: &[Option<Did>], cursor: usize) {
         let slot_count = fingers.len();
         if slot_count == 0 {
             return;
         }
-        let start = cursor.saturating_add(1) % slot_count;
+        let start = cursor % slot_count;
         // The run may consist of `None` hints: consecutive empty hints also need
         // periodic revalidation because absence is only local inferred state.
         let end = Self::hint_run_end(fingers, start);

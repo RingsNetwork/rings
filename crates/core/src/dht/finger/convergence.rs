@@ -128,7 +128,10 @@ pub(crate) struct FingerConvergenceState {
     /// Slot after the range the last attempt proved or failed.
     ///
     /// [`Self::prepare_lookup`] resumes selection here (cyclically), so the
-    /// unverified slots are served round-robin rather than lowest-first.
+    /// unverified slots are served round-robin rather than lowest-first, and
+    /// [`Self::begin_revalidation`] reopens the run that starts here, so
+    /// revalidation and selection walk the table in the same direction. It is
+    /// the only cursor the table has.
     cursor: usize,
 }
 
@@ -168,6 +171,8 @@ pub(crate) struct FingerConvergenceProjection {
     ///
     /// Scheduler jitter is intentionally excluded from this pure projection.
     pub(crate) retry_not_before_ms: Option<u64>,
+    /// Slot at which selection and revalidation resume.
+    pub(crate) cursor: usize,
 }
 
 impl FingerConvergenceState {
@@ -258,22 +263,22 @@ impl FingerConvergenceState {
 
     /// Reopen one consecutive hint range for periodic revalidation.
     ///
-    /// Revalidation begins after `cursor` and affects only the following run of
-    /// equal hints. It is deferred while an attempt is active or while
-    /// routable work (at or after `first_routable_slot`) is still pending and
-    /// succeeding. Pending work that is failing (`failure_streak > 0`) does not
-    /// defer it: otherwise one slot whose successor never admits would block
+    /// Revalidation reopens the run of equal hints that starts at the cursor,
+    /// the slot after the last range an attempt proved or failed, wrapping
+    /// once. It is deferred while an attempt is active or while routable work
+    /// (at or after `first_routable_slot`) is still pending and succeeding.
+    /// Pending work that is failing (`failure_streak > 0`) does not defer it:
+    /// otherwise one slot whose successor never admits would block
     /// revalidation of every other range for as long as it keeps failing.
     pub(crate) fn begin_revalidation(
         &mut self,
         fingers: &[Option<Did>],
-        cursor: usize,
         first_routable_slot: usize,
     ) {
         let succeeding_work_pending = self.evidence.any_unverified_from(first_routable_slot)
             && self.retry.failure_streak() == 0;
         if self.attempt.is_idle() && !succeeding_work_pending {
-            self.evidence.reopen_next_range(fingers, cursor);
+            self.evidence.reopen_next_range(fingers, self.cursor);
         }
     }
 
@@ -413,12 +418,18 @@ impl FingerConvergenceState {
     /// Accept equivalent evidence produced by another local topology step.
     ///
     /// The inclusive range is clamped to table width. New proof bits or a
-    /// superseded request count as progress and clear retry pressure.
+    /// superseded request count as progress and clear retry pressure. A
+    /// superseded attempt also moves the cursor past the confirmed range, as
+    /// its own applied proof would have; an untouched attempt keeps the
+    /// cursor where it is, so the rotation is not restarted from the low end.
     pub(crate) fn confirm_range(&mut self, start: usize, end: usize) -> bool {
         let newly_verified = self.evidence.confirm_range(start, end);
         // A local proof of the active slot supersedes the network lookup just
         // like a committed report would; it is progress, not cancellation.
         let superseded_attempt = self.attempt.clear_if_slot_in(start, end);
+        if superseded_attempt {
+            self.cursor = end.saturating_add(1);
+        }
         let progressed = newly_verified || superseded_attempt;
         if progressed {
             self.retry.record_progress();
@@ -544,7 +555,13 @@ impl FingerConvergenceState {
             last_issued_at_ms,
             failure_streak,
             retry_not_before_ms,
+            cursor: self.cursor,
         }
+    }
+
+    /// Place the selection and revalidation cursor for a test fixture.
+    pub(crate) fn set_cursor_for_test(&mut self, cursor: usize) {
+        self.cursor = cursor;
     }
 
     /// Force exactly one slot back to unverified and reserve it for tests.

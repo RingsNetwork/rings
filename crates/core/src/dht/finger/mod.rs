@@ -43,8 +43,6 @@ pub struct FingerTable {
     size: usize,
     /// Current inferred routing hint for each slot; `None` can mean self or unknown.
     finger: Vec<Option<Did>>,
-    /// Cursor used by periodic maintenance to resume range revalidation.
-    pub(super) fix_finger_index: usize,
     /// Verification and retry state attached to the inferred hints.
     ///
     /// This serialized state binds every hint to freshness evidence, owns at
@@ -66,7 +64,6 @@ impl FingerTable {
             did,
             size,
             finger: vec![None; size],
-            fix_finger_index: 0,
             convergence: FingerConvergenceState::new(size),
         }
     }
@@ -154,11 +151,6 @@ impl FingerTable {
         self.size
     }
 
-    /// Get the next finger index maintained by the periodic fixer.
-    pub fn fix_finger_index(&self) -> usize {
-        self.fix_finger_index
-    }
-
     /// Borrow the convergence state associated with these finger hints.
     ///
     /// The immutable borrow lets topology and scheduling code inspect evidence,
@@ -190,23 +182,16 @@ impl FingerTable {
     /// Replace the full finger state with a value produced by the pure topology transition.
     ///
     /// Post: the table keeps its fixed slot count; entries beyond that count
-    /// are ignored, missing entries become `None`, and the fix cursor is
-    /// clamped to a valid slot when the table is non-empty. Convergence state
-    /// is normalized to the same width so restored proofs cannot address a
-    /// slot that no longer exists.
+    /// are ignored and missing entries become `None`. Convergence state is
+    /// normalized to the same width so restored proofs cannot address a slot
+    /// that no longer exists.
     pub(crate) fn replace_state(
         &mut self,
         fingers: &[Option<Did>],
-        fix_finger_index: usize,
         convergence: FingerConvergenceState,
     ) {
         self.finger = fingers.iter().copied().take(self.size).collect();
         self.finger.resize(self.size, None);
-        self.fix_finger_index = if self.size == 0 {
-            0
-        } else {
-            fix_finger_index % self.size
-        };
         self.convergence = convergence.normalized(self.size);
     }
 

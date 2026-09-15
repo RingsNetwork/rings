@@ -85,8 +85,6 @@ pub struct TopologyState {
     pub predecessor: Option<Did>,
     /// Sparse/no-wrap finger table.
     pub fingers: Vec<Option<Did>>,
-    /// Next finger index maintained by the periodic finger fixer.
-    pub fix_finger_index: usize,
     /// Per-slot proof, lookup, retry, and admission state for finger convergence.
     ///
     /// This metadata is kept beside `fingers` so every pure transition updates
@@ -138,7 +136,6 @@ impl TopologyState {
         successors: Vec<Did>,
         predecessor: Option<Did>,
         fingers: Vec<Option<Did>>,
-        fix_finger_index: usize,
     ) -> Self {
         let finger_convergence = FingerConvergenceState::new(fingers.len());
         Self {
@@ -146,7 +143,6 @@ impl TopologyState {
             successors,
             predecessor,
             fingers,
-            fix_finger_index,
             finger_convergence,
             pending_stabilization: None,
         }
@@ -164,7 +160,6 @@ impl TopologyState {
         successors: Vec<Did>,
         predecessor: Option<Did>,
         fingers: Vec<Option<Did>>,
-        fix_finger_index: usize,
         finger_convergence: FingerConvergenceState,
         pending_stabilization: Option<StabilizationRequest>,
     ) -> Self {
@@ -174,7 +169,6 @@ impl TopologyState {
             successors,
             predecessor,
             fingers,
-            fix_finger_index,
             finger_convergence: finger_convergence.normalized(slot_count),
             pending_stabilization,
         }

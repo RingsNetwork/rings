@@ -13,7 +13,7 @@ fn test_equality_includes_convergence_and_cursor_state() {
 
     // Equality now covers maintenance position, not only visible hints.
     let mut different_cursor = baseline.clone();
-    different_cursor.fix_finger_index = 1;
+    different_cursor.convergence.set_cursor_for_test(1);
     assert_ne!(baseline, different_cursor);
 
     // Verified evidence is serialized protocol state and must affect equality.

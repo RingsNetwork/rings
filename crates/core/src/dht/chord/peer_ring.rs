@@ -314,7 +314,6 @@ impl PeerRing {
             successors,
             predecessor,
             finger.list().clone(),
-            finger.fix_finger_index(),
             finger.convergence_state().clone(),
             pending_stabilization,
         ))
@@ -329,11 +328,7 @@ impl PeerRing {
         let mut pending_stabilization = self.lock_pending_stabilization()?;
         self.successor_seq.replace_state(&next.successors)?;
         *predecessor = next.predecessor;
-        finger.replace_state(
-            &next.fingers,
-            next.fix_finger_index,
-            next.finger_convergence_state().clone(),
-        );
+        finger.replace_state(&next.fingers, next.finger_convergence_state().clone());
         *pending_stabilization = next.pending_stabilization();
         Ok(())
     }

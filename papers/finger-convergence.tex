@@ -292,7 +292,8 @@ is admitted again.
 Applying Lemma~\ref{lem:local} sets $\ver_j\gets\top$ for
 $j\le\lfloor\log_2\dist(n,h)\rfloor$ without a lookup; if the active
 attempt's slot lies in that range it is superseded as progress, not
-failure.
+failure, and the cursor of Definition~\ref{def:cursor} moves past the
+confirmed range as it would after that attempt's own proof.
 \end{law}
 
 \section{Attempt Ownership}\label{sec:attempt}
@@ -447,9 +448,8 @@ emitted per tick.
 
 \begin{law}[Revalidation gate]\label{law:revalidate}
 A periodic revalidation reopens (sets $\ver\gets\bot$ on) the run of equal
-hints following the persisted cursor $x$ (the ``\texttt{fix\_finger\_index}''
-of the table, moved to $\mathrm{end}$ by each applied proof), wrapping once,
-iff the attempt is $\Idle$ and
+hints starting at the cursor $c$ of Definition~\ref{def:cursor}, wrapping
+once, iff the attempt is $\Idle$ and
 \[
 \neg\bigl(\exists j\ge r:\neg\ver_j\bigr)\;\vee\;k>0 .
 \]

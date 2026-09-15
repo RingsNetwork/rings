@@ -392,17 +392,13 @@ pub(super) fn step_stabilize(
             .for_each(|finger| *finger = Some(reporter));
     }
     let (fingers, mut finger_convergence) = rehint(state, fingers);
-    // Confirmation only advances the public cursor when it proves a range that
-    // was not already current.
-    let fix_finger_index = match successor_proof_end {
-        Some(end) if finger_convergence.confirm_range(0, end) => end,
-        _ => state.fix_finger_index,
-    };
+    if let Some(end) = successor_proof_end {
+        finger_convergence.confirm_range(0, end);
+    }
     TopologyStep {
         state: TopologyState {
             successors: next_successors,
             fingers,
-            fix_finger_index,
             finger_convergence,
             pending_stabilization: None,
             ..state.clone()

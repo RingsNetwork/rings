@@ -94,7 +94,7 @@ impl FingerRetryState {
     fn initial() -> Self {
         let local = Did::from(0u32);
         let joined = step(
-            &TopologyState::new(local, Vec::new(), None, vec![None; 4], 0),
+            &TopologyState::new(local, Vec::new(), None, vec![None; 4]),
             TopologyEvent::Join {
                 peer: Did::from(1u32),
             },
@@ -442,13 +442,12 @@ impl FingerRetryState {
     /// and replay history remain continuous.
     fn restart(&self) -> Self {
         let mut next = self.clone();
-        let fresh = TopologyState::new(
-            self.topology.local,
-            Vec::new(),
-            None,
-            vec![None; self.topology.fingers.len()],
-            0,
-        );
+        let fresh = TopologyState::new(self.topology.local, Vec::new(), None, vec![
+            None;
+            self.topology
+                .fingers
+                .len()
+        ]);
         next.topology = match successor_head(&self.topology) {
             Some(seed) => {
                 step(
@@ -633,7 +632,7 @@ impl StabilizationModelState {
     fn initial() -> Self {
         let local = Did::from(0u32);
         let joined = step(
-            &TopologyState::new(local, Vec::new(), None, vec![None; 4], 0),
+            &TopologyState::new(local, Vec::new(), None, vec![None; 4]),
             TopologyEvent::Join {
                 peer: Did::from(4u32),
             },

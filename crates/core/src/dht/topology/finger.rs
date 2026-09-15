@@ -112,7 +112,7 @@ fn first_remote_slot(state: &TopologyState) -> usize {
         .unwrap_or(0)
 }
 
-/// Reopen the range after the current cursor without emitting network work.
+/// Reopen the range at the convergence cursor without emitting network work.
 ///
 /// The transition invalidates only the convergence proof range selected by
 /// [`FingerConvergenceState::begin_revalidation`](crate::dht::finger::FingerConvergenceState::begin_revalidation).
@@ -120,24 +120,20 @@ fn first_remote_slot(state: &TopologyState) -> usize {
 /// reservation to [`advance`].
 pub(super) fn begin_revalidation(state: &TopologyState) -> TopologyState {
     let mut convergence = state.finger_convergence.clone();
-    convergence.begin_revalidation(
-        &state.fingers,
-        state.fix_finger_index,
-        first_remote_slot(state),
-    );
+    convergence.begin_revalidation(&state.fingers, first_remote_slot(state));
     TopologyState {
         finger_convergence: convergence,
         ..state.clone()
     }
 }
 
-/// Apply a proved range and advance the periodic cursor only on real progress.
+/// Apply a proved range.
 ///
 /// The request token, successor, and timestamp are validated by the convergence
 /// state before any finger slot changes. An accepted proof rewrites the proved
-/// range and moves `fix_finger_index` to its inclusive end; a rejected proof
-/// preserves the prior public cursor while retaining any retry metadata emitted
-/// by the convergence algorithm.
+/// range and moves the convergence cursor past it; a rejected proof leaves the
+/// hints unchanged while retaining any retry metadata emitted by the
+/// convergence algorithm.
 pub(super) fn apply_result(
     state: &TopologyState,
     request: FingerFixRequest,
@@ -147,14 +143,9 @@ pub(super) fn apply_result(
     let mut fingers = state.fingers.clone();
     let mut convergence = state.finger_convergence.clone();
     let outcome = convergence.apply_result(state.local, &mut fingers, request, successor, now_ms);
-    let fix_finger_index = match outcome {
-        FingerApplyOutcome::Applied { end } => end,
-        FingerApplyOutcome::Rejected(_) => state.fix_finger_index,
-    };
     (
         TopologyState {
             fingers,
-            fix_finger_index,
             finger_convergence: convergence,
             ..state.clone()
         },

@@ -15,6 +15,9 @@
 - `FingerTable::set`, `remove`, and `set_fix` are no longer public. Finger hints change only
   through the topology transition, which is the single owner of the hint-join and removal laws;
   the in-place mutators remain as test fixtures.
+- `FingerTable::fix_finger_index` and the `fix_finger_index` field of `TopologyState` are
+  removed, and `TopologyState::new` no longer takes a cursor. The finger table has one cursor,
+  owned by the convergence state, at which both lookup selection and periodic revalidation resume.
 
 ### Added
 
