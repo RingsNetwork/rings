@@ -29,18 +29,35 @@
 \newcommand{\succf}{\operatorname{succ}}
 \newcommand{\pred}{\operatorname{pred}}
 \newcommand{\head}{\operatorname{head}}
+\newcommand{\run}{\operatorname{run}}
+\newcommand{\sel}{\operatorname{sel}}
+\newcommand{\pend}{\operatorname{end}}
 \newcommand{\hint}{\mathsf{hint}}
 \newcommand{\ver}{\mathsf{ver}}
 \newcommand{\chg}{\mathsf{chg}}
+\newcommand{\tok}{\mathsf{tok}}
 \newcommand{\Idle}{\mathsf{Idle}}
-\newcommand{\AwR}{\mathsf{AwaitingReport}}
-\newcommand{\AwA}{\mathsf{AwaitingAdmission}}
-\newcommand{\Req}{\mathsf{Requested}}
-\newcommand{\Proc}{\mathsf{Processing}}
+\newcommand{\AwR}{\mathsf{AwR}}
+\newcommand{\AwA}{\mathsf{AwA}}
+\newcommand{\Req}{\mathsf{Req}}
+\newcommand{\Proc}{\mathsf{Proc}}
+\newcommand{\Dormant}{\mathsf{Dormant}}
+\newcommand{\Converged}{\mathsf{Converged}}
+\newcommand{\Runnable}{\mathsf{Runnable}}
+\newcommand{\Stale}{\mathsf{Stale}}
+\newcommand{\Invalid}{\mathsf{Invalid}}
+\newcommand{\Expired}{\mathsf{Expired}}
+\newcommand{\Fail}{\textsc{Fail}}
+\newcommand{\Admit}{\textsc{Admit}}
+\newcommand{\Retire}{\textsc{Retire}}
+\newcommand{\Progress}{\textsc{Progress}}
+\newcommand{\att}{\alpha}
+\newcommand{\U}{\mathcal{U}}
+\algnewcommand{\LineComment}[1]{\State \(\triangleright\) #1}
 
 \author{Ryan~J.~Kung%
 \thanks{Ryan J. Kung can be reached at ryankung@ieee.org.
-Manuscript created September 15, 2026. This document specifies the
+Manuscript created September 15, 2026.  This document specifies the
 finger-table maintenance shipped in Rings 0.26.0 (\texttt{rings-core},
 modules \texttt{dht::finger::convergence} and \texttt{dht::topology}).}}
 \title{\huge Range-Proved Finger Convergence:\\
@@ -52,140 +69,98 @@ under Transport Admission and Browser Churn}
 \vspace{0.5\baselineskip}%
 \noindent\hfill
 \parbox{0.90\textwidth}{%
-\centering\bfseries Abstract\\[0.5\baselineskip]%
-\normalfont
-Chord maintains $m$ finger entries per node by refreshing one entry per
-stabilization round, so a $160$-bit table takes of the order of $160$
-rounds to converge and any entry learned from a join is indistinguishable
-from a verified one.  This paper specifies the finger maintenance of Rings, a
-Chord ring whose members are mostly browsers reachable only through a
-WebRTC handshake that may take minutes or fail.  The design separates
-\emph{hints} (entries inferred from admission and churn) from
-\emph{verified ranges} (entries proved by an authenticated lookup), and
-applies Chord's own batching lemma: one lookup for slot $i$ that returns a
-successor at clockwise distance $d$ proves every slot $j$ with $2^j\le d$.
-Around that lemma it builds a pure state machine with five obligations:
-per-slot evidence epochs that make a late result unable to overwrite a
-newer hint; a single algebraic attempt owner
-$\Idle\mid\AwR\mid\AwA$ correlated by a fresh UUID; a
-cyclic selection cursor that serves unverified slots round-robin, so one
-slot whose successor never admits costs one attempt per rotation instead of
-starving the table; a deterministic retry floor with full jitter; and
-single-use, RAII-released claims on stabilization and successor-list
-reports with a candidate budget of $K{+}1$ and $K$ connections per report.
-We state the state relation, prove the range and starvation-freedom
-propositions, bound the per-node message cost, and list the obligations
-discharged by the shipped model checker.}}
+{\centering\bfseries Abstract\par}%
+\vspace{0.4\baselineskip}%
+\noindent
+Chord refreshes one finger per stabilization round, so a $160$-slot table
+needs of the order of $160$ rounds and a hinted entry is indistinguishable
+from a proved one.  Rings runs Chord over browsers whose WebRTC handshakes
+take minutes or fail.  We specify its finger maintenance as one pure
+transition $\mathrm{step}:(S,\mathrm{Event})\to(S,\mathrm{Actions})$ built
+on Chord's range lemma (a lookup at slot $i$ answered at distance $d$
+proves every slot $j$ with $2^{j}\le d$) and four disciplines: per-slot
+evidence epochs, a single attempt owner $\Idle\mid\AwR\mid\AwA$ keyed by a
+fresh UUID, cyclic starvation-free selection with a deterministic retry
+floor, and single-use claims that bound each topology report to $K{+}1$
+connections.  We state the laws, prove range, starvation-freedom, and
+effect bounds, bound the per-node cost, and list the obligations
+discharged by the shipped model checker.\par\vspace{0.6\baselineskip}}}
 
 \begin{document}
 \maketitle
 
 \section{Introduction}
 
-Chord~\cite{Stoica2001} routes in $O(\log N)$ hops because every node keeps
-a finger table: entry $i$ is the successor of $n+2^i$.  The 2003 journal
-revision~\cite{Stoica2003} maintains that table with a randomized
-\texttt{fix\_fingers} that refreshes one entry per period; convergence of an
-$m$-bit table therefore needs of the order of $m$ periods, and the paper
-treats entries as either present or absent, never as \emph{unproved}.
+Chord~\cite{Stoica2001} routes in $O(\log N)$ hops because node $n$ keeps
+finger $i=\succf(n+2^{i})$.  The journal revision~\cite{Stoica2003}
+refreshes one random finger per period; an $m$-bit table converges in
+$\Theta(m)$ periods, and an entry copied from a neighbour is never
+distinguished from a proved one.  Rings differs on two axes: members are
+browsers, so a routing entry is usable only after a WebRTC handshake that
+takes seconds to minutes and often fails; and $N\ll 2^{160}$, so a
+$160$-slot table has only $O(\log N)$ distinct values.  Table~\ref{tab:delta}
+summarizes what this design changes; the rest of the paper states each
+change as a law over $\mathrm{step}$ and proves the bound it buys.
 
-Rings runs Chord over a membership that is unusual in two ways.  Most nodes
-are browsers: a routing entry is usable only after a WebRTC handshake that
-takes seconds to minutes and frequently fails outright, and a browser tab
-suspends and resumes its maintenance loop without notice.  And the ring is
-sparse in identifier space: $N\ll 2^{160}$, so a $160$-slot table has only
-$O(\log N)$ \emph{distinct} successors, most of them the immediate successor.
-Refreshing one slot per period spends $160$ rounds to learn $\log N$ facts.
-
-The maintenance shipped before 0.26.0 had three defects that this design
-removes.  It advanced one slot per round.  It wrote the peer learned from a
-join into every slot that peer could own and could never tell such a
-\emph{hint} from a proved entry, so a hint written from a stale view survived
-until its slot happened to be refreshed.  And it matched lookup results to
-slots by slot index alone, so a result from before a topology change, or
-from before a process restart, could overwrite newer state.
-
-The design here is a pure state machine over the finger table with an
-explicit effect boundary.  Its content is:
-\begin{enumerate}[leftmargin=*]
-\item the \emph{range lemma} (Section~\ref{sec:range}), which is Chord's own
-  \texttt{init\_finger\_table} check~\cite[\S4.4]{Stoica2001} restated as a
-  proof rule: one lookup proves a consecutive range of slots, and the
-  current successor's stabilization report proves the local range without
-  any lookup;
-\item \emph{evidence epochs} (Section~\ref{sec:evidence}) that version every
-  hint change and make a result issued under an older epoch unable to
-  overwrite it;
-\item a single \emph{attempt owner} (Section~\ref{sec:attempt}) with
-  algebraic phases, a fresh UUID per lookup, a report deadline, and an
-  admission lease that outlives the transport handshake it backs;
-\item \emph{cyclic selection} and a deterministic \emph{retry floor}
-  (Section~\ref{sec:selection}) that are starvation-free by construction;
-\item single-use, RAII-released \emph{report claims} for stabilization and
-  successor-list synchronization with a bounded connection budget
-  (Section~\ref{sec:claims}); and
-\item a \emph{scheduler} (Section~\ref{sec:scheduler}) that adds jitter and
-  survives browser suspension without catch-up bursts.
-\end{enumerate}
-Section~\ref{sec:spec} collects the state relation as invariants,
-Section~\ref{sec:cost} bounds the cost, Section~\ref{sec:security} treats
-the adversary, and Section~\ref{sec:verification} lists what the shipped
-tests and model checker discharge.
-
-We claim no new routing theory.  The lemma is Chord's; Zave's
-work~\cite{Zave2015,Zave2017} settles that ring correctness rests on the
-successor structure alone and fingers are a replaceable optimization, which
-is exactly the licence this design takes to treat every finger entry as
-revocable evidence.  What is new is the evidence, ownership, selection, and
-claim discipline around the lemma, and the fact that each of them is stated
-as a law over a pure transition that the implementation executes verbatim.
+\begin{table}[t]
+\caption{Chord finger maintenance versus this design}
+\label{tab:delta}
+\centering\footnotesize
+\setlength{\tabcolsep}{2pt}
+\begin{tabular}{@{}lll@{}}
+\toprule
+concern & Chord 2003~\cite{Stoica2003} & here \\
+\midrule
+refresh unit & one slot per period & one range per lookup (Lem.~\ref{lem:range}) \\
+local range & routed lookups & proved by stabilization (Lem.~\ref{lem:local}) \\
+hinted entry & $=$ proved entry & $\ver_j=\bot$ until proved (\S\ref{sec:evidence}) \\
+correlation & slot index & $(i,\mathrm{id},e)$ (Law~\ref{law:consume}) \\
+selection & random & cyclic cursor (Prop.~\ref{prop:starve}) \\
+report fan-out & unbounded & $\le K{+}1$ (Prop.~\ref{prop:effects}) \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \section{Model}\label{sec:model}
 
 \begin{definition}[Ring]\label{def:ring}
-Identifiers are $\mathbb{Z}/2^{m}$ with $m=160$.  For $a,b$ the clockwise
-distance is $\dist(a,b)=(b-a)\bmod 2^{m}$.  A membership view $V$ is a
-finite set of identifiers; $\succf_V(x)$ is the member $s\in V$ minimizing
-$\dist(x,s)$, and $\pred_V(x)$ the member maximizing it.  Node $n$'s
-successor list is the $K$ members nearest clockwise ($K=3$ by default);
-its \emph{head} $\head(n)$ is the first entry other than $n$, or $\bot$.
+Identifiers are $\mathbb{Z}/2^{m}$, $m=160$; $\dist(a,b)=(b-a)\bmod 2^{m}$.
+For a membership view $V$, $\succf_V(x)=\arg\min_{s\in V}\dist(x,s)$ and
+$\pred_V(x)=\arg\max_{s\in V}\dist(x,s)$.  Node $n$ keeps the $K$ nearest
+clockwise members ($K=3$); $\head(n)$ is the first of them other than $n$,
+or $\bot$.
 \end{definition}
 
 \begin{definition}[Finger slot]\label{def:slot}
-Slot $i\in[0,L)$ of node $n$, with $L\le m$ the configured width, has
-target $t_i=n+2^{i}$ and true value $\succf_V(t_i)$.  The table is
-\emph{sparse and no-wrap}: it stores $\hint_i\in V\cup\{\bot\}$ where $\bot$
-means ``unknown or $n$ itself''.  A value equal to $n$ is stored as $\bot$.
+Slot $i\in[0,L)$, $L\le m$, has target $t_i=n+2^{i}$ and true value
+$\succf_V(t_i)$.  The table stores $\hint_i\in V\cup\{\bot\}$; a value equal
+to $n$ is stored as $\bot$.
 \end{definition}
 
 \begin{definition}[Hint join]\label{def:join}
-Learning a peer $p\ne n$ with $d=\dist(n,p)$ refines the table
-slot-wise: for every $i$ with $2^{i}\le d$, $\hint_i\gets p$ if
-$\hint_i=\bot$ or $\dist(n,\hint_i)>d$; other slots are unchanged.  Removing
-$p$ clears every slot holding it and fills the gap from the nearest
+For a learned peer $p\ne n$ with $d=\dist(n,p)$:
+\[
+\forall i:\ 2^{i}\le d\wedge(\hint_i=\bot\vee\dist(n,\hint_i)>d)
+\Rightarrow\hint_i\gets p .
+\]
+Removing $p$ clears every slot holding it and refills from the nearest
 surviving hint above.  Neither operation produces proof.
 \end{definition}
 
 \begin{assumption}[Authenticated reports]\label{as:auth}
-Every lookup report and topology report is signed by its origin; the
-transport rejects a report whose origin does not match the peer the query
-was addressed to.  A report is therefore attributable but not necessarily
-\emph{solicited}: solicitation is what the tokens of
-Sections~\ref{sec:attempt} and~\ref{sec:claims} establish.
+Every report is signed by its origin and rejected unless the origin is the
+peer queried.  Attribution is transport's; \emph{solicitation} is what the
+tokens of \S\ref{sec:attempt} and \S\ref{sec:claims} establish.
 \end{assumption}
 
 \begin{assumption}[Clocks]\label{as:clock}
-Each node has a process-monotonic clock; all deadlines in the finger state
-machine are milliseconds elapsed from the node's construction.  The
-transport's handshake generations are timed on wall-clock epoch
-milliseconds.  The two are never compared directly
-(Section~\ref{sec:attempt}).
+Finger deadlines are process-monotonic milliseconds; transport handshake
+generations are wall-clock.  The two are never compared.
 \end{assumption}
 
 \begin{assumption}[Effect boundary]\label{as:effects}
-The state machine is a function
-$\mathrm{step}:(S,\mathrm{Event})\to(S,\mathrm{Actions})$.  Clock readings
-and fresh UUIDs~\cite{RFC9562} enter as event fields; network sends,
+$\mathrm{step}:(S,\mathrm{Event})\to(S,\mathrm{Actions})$ is pure.  Clock
+readings and fresh UUIDs~\cite{RFC9562} arrive as event fields; sends,
 locks, and randomness happen only in the interpreter of the returned
 actions.  Every law below is a property of $\mathrm{step}$ alone.
 \end{assumption}
@@ -193,422 +168,390 @@ actions.  Every law below is a property of $\mathrm{step}$ alone.
 \section{The Range Lemma}\label{sec:range}
 
 \begin{lemma}[Chord range lemma~\cite{Stoica2001}]\label{lem:range}
-Let $s=\succf_V(t_i)$ and $d=\dist(n,s)$.  Then for every $j\ge i$ with
-$2^{j}\le d$, $\succf_V(t_j)=s$.
+Let $s=\succf_V(t_i)$ and $d=\dist(n,s)$.  Then
+\[
+\forall j\ge i:\quad 2^{j}\le d\ \Rightarrow\ \succf_V(t_j)=s .
+\]
 \end{lemma}
 \begin{proof}
-By definition of $\succf_V$, the half-open arc $[t_i,s)$ contains no member
-of $V$.  For $j\ge i$ with $2^{j}\le d$ we have
-$\dist(n,t_i)=2^{i}\le 2^{j}=\dist(n,t_j)\le d=\dist(n,s)$, so
-$t_j\in[t_i,s]$; the first member at or after $t_j$ is therefore $s$.
+$[t_i,s)\cap V=\emptyset$ by definition of $\succf_V$.  For such $j$,
+$2^{i}\le 2^{j}\le d$ gives $t_j\in[t_i,s]$, so the first member at or after
+$t_j$ is $s$.
 \end{proof}
 
-This is the check Chord's \texttt{init\_finger\_table} performs
-(``$\mathit{finger}[i].\mathit{node}\ge\mathit{finger}[i{+}1].\mathit{start}$'',
-\cite[Fig.~6]{Stoica2001}) and the source of its $O(\log N)$
-expected-lookup bound for table construction; the journal
-revision~\cite{Stoica2003} dropped it in favour of random refresh.  We use
-it as a proof rule.
+This is Chord's \texttt{init\_finger\_table} test
+$\mathit{finger}[i].\mathit{node}\ge\mathit{finger}[i{+}1].\mathit{start}$
+\cite[Fig.~6]{Stoica2001}, used here as a proof rule.
 
 \begin{definition}[Range proof]\label{def:proof}
-A lookup for slot $i$ answered by $s$ yields the proof
-$\pi=(i,\mathrm{id},e,s,\mathrm{end})$ where $\mathrm{id}$ is the lookup's
-UUID, $e$ the evidence epoch at issue time (Section~\ref{sec:evidence}), and
+A lookup for slot $i$ answered by $s$ yields
+$\pi=(i,\mathrm{id},e_\pi,s,\pend)$, with $\mathrm{id}$ the lookup UUID,
+$e_\pi$ the epoch at issue (\S\ref{sec:evidence}), and
 \[
-\mathrm{end}=
+\pend(i,s)=
 \begin{cases}
 L-1 & s=n,\\
-\min(L-1,\lfloor\log_2\dist(n,s)\rfloor) & 2^{i}\le\dist(n,s),\\
-\text{rejected as }\mathsf{Invalid} & \text{otherwise.}
+\min(L{-}1,\lfloor\log_2\dist(n,s)\rfloor) & 2^{i}\le\dist(n,s),\\
+\Invalid & \text{otherwise.}
 \end{cases}
 \]
-The proof covers slots $i..\mathrm{end}$.  The case $s=n$ means the arc
-from $t_i$ wrapped back to $n$ without meeting a member, so $n$ owns every
-remaining target.
+$\pi$ covers slots $i..\pend$; $s=n$ means the arc from $t_i$ wrapped to
+$n$ without meeting a member.
 \end{definition}
 
 \begin{corollary}[Lookups per pass]\label{cor:lookups}
-A full pass over a table whose true values partition the slots into $R$
-maximal runs of equal successor needs at most $R$ routed lookups, and
-$R\le\min(L,|V|)$; under Chord's uniform-identifier analysis
-$\mathbb{E}[R]=O(\log N)$.
+If the true values partition the slots into $R$ maximal runs of equal
+successor, a full pass needs at most $R$ routed lookups, and
+$R\le\min(L,|V|)$; under uniform identifiers $\mathbb{E}[R]=O(\log N)$.
 \end{corollary}
 
 \begin{lemma}[Local range]\label{lem:local}
-Let $h=\head(n)$ and let $n$ hold a stabilization report from $h$, sent in
-answer to $n$'s query and stating $\pred(h)=n$.  Then $h=\succf_V(n+1)$
-and every slot $j$ with $2^{j}\le\dist(n,h)$ has value $h$.
+Let $h=\head(n)$ and let $n$ hold a stabilization report from $h$,
+answering $n$'s own query, stating $\pred(h)=n$.  Then
+$\forall j:\ 2^{j}\le\dist(n,h)\Rightarrow\succf_V(t_j)=h$.
 \end{lemma}
 \begin{proof}
-$\pred(h)=n$ says no member lies in $(n,h)$, so $h$ is the successor of
-every target in $(n,h]$, and $t_j\in(n,h]$ iff $2^{j}\le\dist(n,h)$.
+$\pred(h)=n$ gives $(n,h)\cap V=\emptyset$; $t_j\in(n,h]$ iff
+$2^{j}\le\dist(n,h)$.
 \end{proof}
 
-Lemma~\ref{lem:local} is the reason the local range never sends a lookup.
-A routed lookup for a target in $(n,h]$ would be forwarded by $h$ around
-the whole ring back to $n$ (Chord's \texttt{find\_successor} has no
-``you are responsible'' shortcut for the querier), costing $2\,O(\log N)$
-hops per period for a fact the stabilization exchange already carries.
-The proof requires the report to echo the current stabilization token and
-$h$ to be both the queried head and the head after the report is applied;
-a report from a superseded head proves nothing.
+A routed lookup for $t_j\in(n,h]$ would travel the whole ring
+($2\,O(\log N)$ hops) for a fact the stabilization exchange already
+carries, so the local range never sends one.  The report must echo the
+current stabilization token and $h$ must be the head both when queried and
+after the report is applied.
 
 \section{Evidence Epochs}\label{sec:evidence}
 
 \begin{definition}[Evidence]\label{def:evidence}
-The evidence state is $(e,(\chg_j,\ver_j)_{j<L})$: a global epoch
-$e\in\mathbb{N}$ and per slot the epoch $\chg_j$ at which $\hint_j$ last
-changed and a bit $\ver_j$.  A fresh table has $e=0$, $\chg_j=0$,
-$\ver_j=\bot$.
+The evidence state is $(e,(\chg_j,\ver_j)_{j<L})$, $e\in\mathbb{N}$ the
+epoch, $\chg_j$ the epoch at which $\hint_j$ last changed, $\ver_j$ a bit.
+Initially $e=0$, $\chg_j=0$, $\ver_j=\bot$.
 \end{definition}
 
 \begin{law}[Hint change]\label{law:change}
-When a topology transition changes the hint vector from $H$ to $H'$ and
-$C=\{j: H_j\ne H'_j\}\ne\emptyset$, then $e\gets e+1$ and for $j\in C$,
-$(\chg_j,\ver_j)\gets(e,\bot)$.  If $e+1$ overflows, every $\ver_j\gets\bot$
-and the active attempt is retired instead.
+For a topology transition $H\to H'$ with $C=\{j:H_j\ne H'_j\}\ne\emptyset$:
+$e\gets e+1$ and $\forall j\in C:\ (\chg_j,\ver_j)\gets(e,\bot)$.  On
+overflow of $e$: $\forall j:\ \ver_j\gets\bot$ and the attempt is retired.
 \end{law}
 
 \begin{law}[Admission]\label{law:admit}
-A proof $\pi$ issued at epoch $e_\pi$ may write slot $j\in[i,\mathrm{end}]$
-iff $\chg_j\le e_\pi$.  It is \emph{accepted} iff at least one slot of its
-range admits it; an accepted proof writes $\hint_j\gets s$ (or $\bot$ if
-$s=n$) and $\ver_j\gets\top$ for exactly the admitting slots, and skips the
-rest without rolling them back.
+Proof $\pi$ may write slot $j\in[\pi.i,\pi.\pend]$ iff $\chg_j\le e_\pi$.
+It is accepted iff some slot admits it (Algorithm~\ref{alg:admit}); admitted
+slots are written, the rest are skipped, none is rolled back.  Acceptance
+and commit are the same per-slot predicate, so an accepted proof always
+writes.
 \end{law}
 
-The acceptance predicate and the commit loop are the same per-slot
-comparison, so acceptance implies at least one committed slot; there is no
-``accepted but nothing written'' outcome.
+\begin{algorithm}[t]
+\caption{$\Admit(\pi)$: commit a range proof slot-wise}
+\label{alg:admit}
+\begin{algorithmic}[1]
+\Require $\pi=(i,\mathrm{id},e_\pi,s,\pend)$, evidence $(e,(\chg_j,\ver_j))$
+\State $A(\pi)\gets\{\,j\in[i,\pend]:\chg_j\le e_\pi\,\}$
+\If{$A(\pi)=\emptyset$} \State \Return $\Stale$ \EndIf
+\ForAll{$j\in A(\pi)$}
+  \State $\hint_j\gets(s=n\ ?\ \bot:s)$;\quad $\ver_j\gets\top$
+\EndFor
+\State \Return $\mathrm{Applied}(\pend)$
+\end{algorithmic}
+\end{algorithm}
 
 \begin{law}[Discontinuity]\label{law:discontinuity}
-Losing the last successor invalidates all evidence: $e\gets e+1$, every
-slot unverified, the attempt retired.  Isolation is not proof that a range
-is empty; the ranges stay unverified but \emph{dormant} until a successor
-is admitted again.
+Losing the last successor sets $e\gets e+1$, $\forall j:\ \ver_j\gets\bot$,
+$\att\gets\Idle$.  Ranges stay unverified but $\Dormant$ until a
+successor is admitted again; isolation is not proof of emptiness.
 \end{law}
 
 \begin{law}[Local confirmation]\label{law:confirm}
 Applying Lemma~\ref{lem:local} sets $\ver_j\gets\top$ for
-$j\le\lfloor\log_2\dist(n,h)\rfloor$ without a lookup; if the active
-attempt's slot lies in that range it is superseded as progress, not
-failure, and the cursor of Definition~\ref{def:cursor} moves past the
-confirmed range as it would after that attempt's own proof.
+$j\le\lfloor\log_2\dist(n,h)\rfloor$ with no lookup.  If $\att$'s slot lies in that
+range, $\Progress(\lfloor\log_2\dist(n,h)\rfloor)$ (Law~\ref{law:outcomes}):
+superseded, not failed.
 \end{law}
 
 \section{Attempt Ownership}\label{sec:attempt}
 
 \begin{definition}[Attempt]\label{def:attempt}
-At most one attempt exists, in one of three phases:
+At most one attempt $\att$ exists:
 \[
-\Idle\mid\AwR(\rho,e_\rho,\tau_r)\mid\AwA(\pi,\tau_a),
+\att\in\ \Idle\ \mid\ \AwR(\rho,e_\rho,\tau_r)\ \mid\ \AwA(\pi,\tau_a),
 \]
-where $\rho=(i,\mathrm{id})$ is the request (slot and fresh UUID),
-$e_\rho$ the epoch at issue, $\tau_r$ the report deadline, $\pi$ a validated
-proof, and $\tau_a$ the admission lease deadline.  Two owners are not
-representable.
+$\rho=(i,\mathrm{id})$ the request, $e_\rho$ the epoch at issue, $\tau_r$
+the report deadline, $\pi$ a validated proof, $\tau_a$ the admission lease.
+Two owners are not representable.
 \end{definition}
 
 \begin{law}[Consumption]\label{law:consume}
-A report $(\rho',s')$ may consume the attempt iff the attempt is
-$\AwR(\rho,\cdot,\cdot)$ with $\rho'=\rho$, or $\AwA(\pi,\cdot)$ with
-$\rho'=\pi.\rho$ and $s'=\pi.s$.  Any other report is \emph{stale}: it
-changes no state and records no failure.
+A report $(\rho',s')$ consumes the attempt iff
+\[
+\bigl[\AwR(\rho,\cdot,\cdot)\wedge\rho'=\rho\bigr]\ \vee\
+\bigl[\AwA(\pi,\cdot)\wedge\rho'=\pi.\rho\wedge s'=\pi.s\bigr].
+\]
+Any other report is $\Stale$: no state change, no failure.
 \end{law}
-
-The second clause is what keeps a duplicate report that carries the current
-UUID but a different successor from evicting a proof already retained for
-admission.
 
 \begin{law}[Deadlines]\label{law:deadlines}
-$\tau_r=\mathrm{issued}+T_r$ with $T_r=10\,\mathrm{s}$.
-$\tau_a=\mathrm{deferred}+T_a$ with $T_a=210\,\mathrm{s}$.  The transport's
-handshake generation expires after $T_h=180\,\mathrm{s}$ of wall-clock time
-from reservation, and $T_a>T_h$.
+\begin{gather*}
+\tau_r=\mathrm{issued}+T_r,\qquad \tau_a=\mathrm{deferred}+T_a,\\
+T_r=10\,\mathrm{s},\qquad T_h=180\,\mathrm{s},\qquad T_a=T_h+30\,\mathrm{s}.
+\end{gather*}
+$T_h$ is the transport's handshake-generation lifetime.
 \end{law}
 
-The lease is a backstop, not the handshake's clock.  A proof is
-\emph{deferred} (moved to $\AwA$) the moment a timely report names a peer
-that is not yet connected, before the asynchronous handshake is awaited, so
-a handler that is cancelled between the two cannot strand it.  Once the
-handshake generation exists, the proof is attached to that generation and
-is released by the generation's own admission or expiry.  The lease
-therefore only has to \emph{outlast} the generation; because the lease
-starts at report arrival on the monotonic clock and the generation at
-reservation on the wall clock, $T_a=T_h+30\,\mathrm{s}$ leaves the
-reservation gap as margin.  A lease that could expire first would charge a
-failure and discard a proof whose handshake later succeeds; the converse
-hazard, committing a proof the state machine has released, is excluded by
-Law~\ref{law:consume} since a released proof owns nothing.
+A proof is deferred to $\AwA$ the moment a timely report names an
+unconnected peer, before any handshake is awaited, so a cancelled handler
+cannot strand it; the generation, once reserved, releases the proof by its
+own admission or expiry.  $T_a>T_h$ makes the lease a backstop that cannot
+expire first and discard a proof whose handshake later succeeds; the
+converse (committing a released proof) is excluded by Law~\ref{law:consume}.
 
 \begin{law}[Outcomes]\label{law:outcomes}
 A consuming report is validated in the order token, deadline, geometry
-(Definition~\ref{def:proof}), epoch (Law~\ref{law:admit}).  The outcomes and
-their effect on the attempt and on the failure streak $k$
-(Section~\ref{sec:selection}) are:
-\begin{center}
-\small
-\begin{tabular}{@{}lll@{}}
-\toprule
-outcome & attempt & $k$ \\
-\midrule
-applied (connected peer) & $\Idle$ & $0$ \\
-deferred (peer not connected) & $\AwA$ & same \\
-retired (active, unroutable) & $\Idle$ & $k{+}1$ \\
-cancelled (send/handshake fail) & $\Idle$ & $k{+}1$ \\
-expired ($\tau_r$ or $\tau_a$) & $\Idle$ & $k{+}1$ \\
-$\mathsf{Invalid}$/$\mathsf{Expired}$ report & $\Idle$ & $k{+}1$ \\
-$\mathsf{Stale}$ report & same & same \\
-hint change at slot $i$ & $\Idle$ & same \\
-\bottomrule
-\end{tabular}
-\end{center}
+(Definition~\ref{def:proof}), epoch (Law~\ref{law:admit});
+Algorithm~\ref{alg:report} gives the transitions in terms of the failure
+streak $k$ and retry floor $\nu$ of Definition~\ref{def:retry} and three
+named transitions on $(\att,c,k,\nu)$:
+\begin{align*}
+\Fail(i)&:\ (\Idle,\ \run(i)+1,\ k+1,\ t+f(k+1))\\
+\Retire(\pend)&:\ (\Idle,\ \pend+1,\ k+1,\ t+f(k+1))\\
+\Progress(\pend)&:\ (\Idle,\ \pend+1,\ 0,\ \bot).
+\end{align*}
 \end{law}
 
-Topology churn is not a network failure: a hint change at the attempt's
-lower slot destroys the premise of its range proof and retires the owner,
-but does not raise the retry floor, following the principle in
-Bamboo~\cite{Rhea2004} that backing off on new evidence feeds churn back
-into maintenance latency.
+\begin{algorithm}[t]
+\caption{Report$(\rho'=(i,\mathrm{id}'),s',t,a)$; $a$ is the transport's
+verdict on $s'$}
+\label{alg:report}
+\begin{algorithmic}[1]
+\If{$\neg\,\mathrm{consumes}(\att,\rho',s')$} \State \Return $\Stale$ \Comment{Law~\ref{law:consume}} \EndIf
+\If{$t\ge\tau$} \State $\Fail(i)$;\ \Return $\Expired$ \EndIf
+\If{$\att=\AwA(\pi,\cdot)$} \State $\pi'\gets\pi$ \Comment{already validated}
+\Else
+  \State $\pend\gets\pend(i,s')$
+  \If{$\pend=\Invalid$} \State $\Fail(i)$;\ \Return $\Invalid$ \EndIf
+  \State $\pi'\gets(i,\mathrm{id}',e_\rho,s',\pend)$
+  \If{$A(\pi')=\emptyset$} \State $\att\gets\Idle$;\ \Return $\Stale$ \Comment{churn, not failure} \EndIf
+\EndIf
+\If{$a=\mathrm{Connected}$} \State $\Admit(\pi')$;\ $\Progress(\pend)$
+\ElsIf{$a=\mathrm{Pending}$} \State $\att\gets\AwA(\pi',t+T_a)$ \Comment{deferred}
+\Else \State $\Retire(\pend)$ \Comment{unroutable}
+\EndIf
+\end{algorithmic}
+\end{algorithm}
+
+A hint change at the attempt's lower slot (Law~\ref{law:change}) destroys
+the premise of its proof and retires the owner without raising $k$: churn is
+new evidence, not a network failure~\cite{Rhea2004}.
 
 \section{Selection and Retry}\label{sec:selection}
 
 \begin{definition}[Routable region]\label{def:routable}
-With $h=\head(n)$ the first routable slot is
-$r=\lfloor\log_2\dist(n,h)\rfloor+1$ (or $0$ if $h=\bot$).  Slots below
-$r$ are the local range of Lemma~\ref{lem:local} and are never selected
-for a lookup.
+With $h=\head(n)$, the first routable slot is
+$r=\lfloor\log_2\dist(n,h)\rfloor+1$ ($r=0$ if $h=\bot$).  Slots below $r$
+are the local range and are never selected.
 \end{definition}
 
-\begin{definition}[Cursor]\label{def:cursor}
-The state carries a cursor $c\in\mathbb{N}$, initially $0$.  Selection
-picks
-\[
-\mathrm{sel}(c)=
-\begin{cases}
-\min A & A\ne\emptyset,\\
-\min B & \text{otherwise},
-\end{cases}
-\]
-with $A=\{j\ge\max(c,r):\neg\ver_j\}$ and $B=\{j\in[r,\max(c,r)):\neg\ver_j\}$,
-i.e. the first unverified routable slot cyclically from $c$.  After an
-applied proof with range end $\mathrm{end}$, or a retirement of a validated
-proof, $c\gets\mathrm{end}+1$.  After a failure at slot $i$ without a
-proof (cancel, report timeout, invalid or expired report),
-$c\gets\mathrm{run}(i)+1$ where $\mathrm{run}(i)$ is the last index of the
-maximal run of hints equal to $\hint_i$ starting at $i$.
+\begin{definition}[Cursor and runs]\label{def:cursor}
+The state carries $c\in\mathbb{N}$, initially $0$.  With
+$A=\{j\ge\max(c,r):\neg\ver_j\}$ and $B=\{j\in[r,\max(c,r)):\neg\ver_j\}$,
+\begin{gather*}
+\sel(c)=\begin{cases}\min A & A\ne\emptyset\\ \min B & B\ne\emptyset\\ \bot & \text{otherwise,}\end{cases}\\
+\run(i)=\max\{\,j\ge i:\forall l\in[i,j],\ \hint_l=\hint_i\,\}.
+\end{gather*}
+After an applied proof or a retired validated proof, $c\gets\pend+1$; after
+$\Fail(i)$, $c\gets\run(i)+1$, because slots sharing a hint expect the same
+successor.
 \end{definition}
-
-The run skip encodes that slots sharing an inferred hint expect the same
-successor: retrying the next slot of the run would repeat the failure it
-just recorded.
-
-\begin{proposition}[Starvation freedom]\label{prop:starve}
-Let $U$ be the set of routable slots that remain unverified throughout a
-sequence of attempts.  Between two selections of the same slot $u\in U$,
-every other slot of $U$ is selected at least once.
-\end{proposition}
-\begin{proof}
-Each attempt at slot $j$ moves $c$ strictly past $j$ (to $\mathrm{end}+1$
-or $\mathrm{run}(j)+1$, both $>j$).  $\mathrm{sel}$ scans cyclically from
-$c$ over the routable region and returns the first unverified slot, so the
-sequence of selected slots visits the unverified slots in cyclic index
-order.  Slots of $U$ are unverified at every selection, hence each is
-visited exactly once per full cycle, and $u$ is revisited only after the
-cycle has passed every other member of $U$.
-\end{proof}
-
-The proposition is the correction of the design that shipped first, which
-selected the lowest unverified slot: a slot whose true successor is alive
-but never admits (the common NAT case) then monopolized the single attempt
-forever and left every higher range unverified.
 
 \begin{definition}[Retry floor]\label{def:retry}
-The retry state is $(\ell,k,\nu)$: last issue time $\ell$, failure streak
-$k\in[0,255]$, and earliest retry $\nu$.  An issue is permitted at time $t$
-iff $t-\ell\ge T_{\min}=1\,\mathrm{s}$ and $t\ge\nu$.  A failure sets
-$k\gets k+1$ (saturating) and $\nu\gets t+f(k)$ with
-$f(k)=\min(2^{\min(k,6)}\,\mathrm{s},\,60\,\mathrm{s})$, i.e.\
-$2,4,8,16,32,60,60,\dots$ seconds.  Progress (an applied proof or a local
-confirmation that verifies a slot or supersedes the attempt) sets
-$k\gets0$, $\nu\gets\bot$; $\ell$ is kept, so progress never bypasses
-$T_{\min}$.
+Retry state $(\ell,k,\nu)$: last issue time, failure streak
+$k\in[0,255]$ (saturating), earliest retry.  Issue at $t$ is permitted iff
+\[
+t-\ell\ge T_{\min}=1\,\mathrm{s}\ \wedge\ t\ge\nu,\quad
+f(k)=\min(2^{\min(k,6)}\,\mathrm{s},\,60\,\mathrm{s}).
+\]
+Progress sets $k\gets0$, $\nu\gets\bot$ and keeps $\ell$, so progress never
+bypasses $T_{\min}$.
 \end{definition}
 
 \begin{law}[Issue]\label{law:issue}
-A tick at time $t$ with fresh UUID $\mathrm{id}$ first retires an expired
-attempt (as a failure, returning no action on that tick so the scheduler
-observes the new floor), then, if the attempt is $\Idle$, the table is not
-fully verified, and Definition~\ref{def:retry} permits, selects
-$i=\mathrm{sel}(c)$ and sets the attempt to $\AwR((i,\mathrm{id}),e,t+T_r)$
-and $\ell\gets t$.  If $t_i$ resolves locally the proof is applied at once;
-otherwise exactly one routed lookup is emitted.  At most one lookup is
-emitted per tick.
+A tick is Algorithm~\ref{alg:tick}.  At most one lookup is emitted per
+tick; the expiry tick emits none so the scheduler observes the new floor.
 \end{law}
 
+\begin{algorithm}[t]
+\caption{Tick$(t,\mathrm{id})$: retire an expired attempt, else issue}
+\label{alg:tick}
+\begin{algorithmic}[1]
+\If{$\att\ne\Idle\ \wedge\ t\ge\tau$} \State $\Fail(\att.i)$;\ \Return $\emptyset$ \EndIf
+\If{$\att\ne\Idle\ \vee\ \forall j\,\ver_j\ \vee\ t-\ell<T_{\min}\ \vee\ t<\nu$} \State \Return $\emptyset$ \EndIf
+\State $i\gets\sel(c)$;\ \textbf{if} $i=\bot$ \textbf{then return} $\emptyset$
+\State $\att\gets\AwR((i,\mathrm{id}),e,t+T_r)$;\ $\ell\gets t$
+\If{$t_i\in(n,\head(n)]$} \State apply Law~\ref{law:confirm};\ \Return $\emptyset$
+\Else \State \Return $\{\mathrm{Lookup}(i,\mathrm{id})\}$ \EndIf
+\end{algorithmic}
+\end{algorithm}
+
+\begin{proposition}[Starvation freedom]\label{prop:starve}
+Let $U$ be the routable slots that stay unverified across a sequence of
+attempts.  Between two selections of $u\in U$, every other slot of $U$ is
+selected at least once.
+\end{proposition}
+\begin{proof}
+Each attempt at $j$ moves $c$ strictly past $j$ ($\pend+1$ or $\run(j)+1$,
+both $>j$), and $\sel$ returns the first unverified routable slot cyclically
+from $c$.  Members of $U$ are unverified at every selection, so the
+selected sequence visits $U$ in cyclic index order, once per cycle.
+\end{proof}
+
+The first shipped design selected $\min\{j\ge r:\neg\ver_j\}$; one slot
+whose successor never admits (the NAT case) then held the single attempt
+forever.
+
 \begin{law}[Revalidation gate]\label{law:revalidate}
-A periodic revalidation reopens (sets $\ver\gets\bot$ on) the run of equal
-hints starting at the cursor $c$ of Definition~\ref{def:cursor}, wrapping
-once, iff the attempt is $\Idle$ and
+A periodic revalidation sets $\ver_j\gets\bot$ for $j\in[c',\run(c')]$,
+$c'=c\bmod L$, iff
 \[
-\neg\bigl(\exists j\ge r:\neg\ver_j\bigr)\;\vee\;k>0 .
+\att=\Idle\ \wedge\ \bigl(\neg\exists j\ge r:\neg\ver_j\ \vee\ k>0\bigr).
 \]
 \end{law}
 
-Pending routable work defers revalidation only while it is succeeding.
-If the only pending work is failing ($k>0$), revalidation proceeds, and by
-Proposition~\ref{prop:starve} the reopened range is served before the
-failing slot is retried; without the $k>0$ disjunct one permanently failing
-slot would freeze the revalidation of every proved range.
+Pending routable work defers revalidation only while succeeding.  Without
+the $k>0$ disjunct one permanently failing slot would freeze the
+revalidation of every proved range; with it, Proposition~\ref{prop:starve}
+serves the reopened range before the failing slot is retried.
 
 \section{Report Claims}\label{sec:claims}
 
-Two other report-driven flows may change topology: the stabilization report
-(the head's successor list and predecessor, answering the periodic query)
-and the successor-list synchronization report (a successor's list,
-requested on join).  Both may cause the node to open connections to
-advertised peers, and both were previously accepted from any origin at any
-time.  Each is now correlated by a token with two phases.
+Two other report-driven flows may open connections: the stabilization
+report (the head's successor list and predecessor) and the successor-list
+synchronization report.  Each is correlated by a two-phase token.
 
-\begin{definition}[Stabilization token]\label{def:stab-token}
-The state holds at most one $(h,\mathrm{id},\phi)$ with $h$ the head
-queried, $\mathrm{id}$ a fresh UUID, and $\phi\in\{\Req,\Proc\}$.
+\begin{definition}[Tokens]\label{def:tokens}
+The stabilization token is at most one $\tok=(h,\mathrm{id},\phi)$,
+$\phi\in\{\Req,\Proc\}$.  Sync tokens form a map $p\mapsto(\mathrm{id},\phi)$
+with at most one entry per current successor.
 \end{definition}
 
 \begin{law}[Stabilization round]\label{law:stab}
-\begin{enumerate}[leftmargin=*]
-\item \emph{Begin.}  With no head, the token is cleared and nothing is sent.
-  While the current token is $\Proc$, nothing changes and nothing is sent.
-  Otherwise the token becomes $(\head(n),\mathrm{id},\Req)$ and the query
-  carrying $\mathrm{id}$ is sent to the head.
-\item \emph{Claim.}  A report from origin $h'$ with token $\mathrm{id}'$
-  claims iff $(h',\mathrm{id}',\Req)$ equals the stored token; the claim
-  moves it to $\Proc$.  The predicate and the move are one transition, so
-  two deliveries of one report cannot both claim.
-\item \emph{Candidates.}  The report's predecessor and successors, in that
-  order, are reduced to the first $K{+}1$ distinct peers other than $n$
-  before any per-candidate work, then ordered by transport quality.  Before
-  each connection the token is re-checked to be
-  $(h',\mathrm{id}',\Proc)$; a mismatch ends the plan with no further
-  effect.
-\item \emph{Apply.}  A report is applied iff the stored token is
-  $(h',\mathrm{id}',\Proc)$; application merges the successor list, emits
-  the improvement query and the notify, applies Lemma~\ref{lem:local} when
-  $h'$ is still the head and reported $\pred(h')=n$, and clears the token.
-  There is no token-less application path.
-\item \emph{Release.}  The claim is a guard released when the handler
-  leaves by any path (completion, error, cancellation); release clears the
-  token only if it still carries $\mathrm{id}'$.  A head change clears the
-  token unconditionally.
-\end{enumerate}
+The round is Algorithm~\ref{alg:stab}.  Claim is one transition (predicate
+and phase move), so two deliveries of one report cannot both claim.  Candidates
+are ordered by transport quality.  The release guard is constructed only by
+a successful claim; a head change clears $\tok$ unconditionally.
 \end{law}
 
-Clause~1's $\Proc$ case and clause~5 are a pair.  Beginning a new round
-every period while a handler was mid-way through its candidate budget made
-the handler observe a stale token and abandon the round without applying
-the report; with one candidate whose handshake outlasts the period, the
-report was never applied.  Not superseding a $\Proc$ token is safe only
-because clause~5 guarantees that a token cannot remain $\Proc$ after its
-handler is gone.  The guard must be constructed lazily: constructing it for
-a failed claim and dropping it would release a token the caller never
-owned.
-
-\begin{definition}[Sync tokens]\label{def:sync-token}
-The state holds a map from reporter $p$ to $(\mathrm{id},\phi)$, at most one
-entry per current successor.
-\end{definition}
+\begin{algorithm}[t]
+\caption{Stabilization round for reporter $h'$, token $\mathrm{id}'$}
+\label{alg:stab}
+\begin{algorithmic}[1]
+\Procedure{Begin}{$\mathrm{id}$}
+  \If{$\head(n)=\bot$} \State $\tok\gets\bot$;\ \Return $\emptyset$ \EndIf
+  \If{$\tok.\phi=\Proc$} \State \Return $\emptyset$ \Comment{never revoke a live claim} \EndIf
+  \State $\tok\gets(\head(n),\mathrm{id},\Req)$;\ \Return $\{\mathrm{Query}(\tok)\}$
+\EndProcedure
+\Procedure{Handle}{$h',\mathrm{id}',\pred',\mathrm{succs}'$}
+  \If{$\tok\ne(h',\mathrm{id}',\Req)$} \State \Return \Comment{unclaimed: dropped} \EndIf
+  \State $\tok.\phi\gets\Proc$;\ guard $\gets$ \Call{Release}{$\mathrm{id}'$} on every exit
+  \State $C\gets$ first $K{+}1$ distinct of $(\pred',\mathrm{succs}')\setminus\{n\}$
+  \ForAll{$x\in C$}
+    \If{$\tok\ne(h',\mathrm{id}',\Proc)$} \State \Return \EndIf
+    \State await $\mathrm{Connect}(x)$
+  \EndFor
+  \If{$\tok=(h',\mathrm{id}',\Proc)$}
+    \State merge $\mathrm{succs}'$;\ emit improvement query, notify
+    \If{$\head(n)=h'\ \wedge\ \pred'=n$} \State confirm $[0,\lfloor\log_2\dist(n,h')\rfloor]$ \Comment{Lem.~\ref{lem:local}} \EndIf
+    \State $\tok\gets\bot$
+  \EndIf
+\EndProcedure
+\Procedure{Release}{$\mathrm{id}'$}
+  \If{$\tok.\mathrm{id}=\mathrm{id}'$} \State $\tok\gets\bot$ \EndIf
+\EndProcedure
+\end{algorithmic}
+\end{algorithm}
 
 \begin{law}[Sync round]\label{law:sync}
 Begin registers $(\mathrm{id},\Req)$ for $p$ iff $p$ is a current successor
-and $p$'s entry is not $\Proc$; it supersedes an unanswered entry.  Claim
-and per-candidate re-check are as in Law~\ref{law:stab} with the successor
-list in place of the head and budget $K$.  Every successor-list commit
-\emph{prunes} entries whose reporter is no longer a successor and keeps the
-rest; a plan therefore keeps its remaining budget while its reporter stays,
-including when its own admissions extend the list, and loses it when the
-reporter leaves.
+and $p$'s entry is not $\Proc$, superseding an unanswered entry.  Claim and
+per-candidate re-check follow Algorithm~\ref{alg:stab} with budget $K$.
+Every successor-list commit prunes entries whose reporter left the list and
+keeps the rest, so a plan keeps its budget while its reporter stays,
+including when its own admissions extend the list.
 \end{law}
-
-The prune replaces a clear-on-any-change that revoked a plan by its own
-first admission, so that realised fan-in per report was between $1$ and
-$K$ depending on interleaving.
 
 \begin{proposition}[Effect bound]\label{prop:effects}
 One stabilization report causes at most $K{+}1$ connection attempts and one
-topology commit; one sync report at most $K$ connection attempts.  After a
-token is cleared, at most the one connection already permitted may
-complete; no further candidate is issued.
+topology commit; one sync report at most $K$.  After a token is cleared,
+at most the one connection already permitted completes.
 \end{proposition}
 \begin{proof}
-The candidate list is bounded before any per-candidate effect and each
-candidate is consumed once by a cursor that advances only on a successful
-re-check; clearing the token makes every later re-check fail.  Apply
-requires $\Proc$ and clears the token, so it happens at most once.
+$C$ is bounded before any per-candidate effect; the cursor over $C$ advances
+only on a successful re-check, and a cleared token fails every later
+re-check.  Apply requires $\Proc$ and clears the token, so it happens at
+most once.
 \end{proof}
 
 \section{Scheduler}\label{sec:scheduler}
 
-The scheduler is the only place that reads a wall clock or draws
-randomness, and it draws from a replayable mixed state seeded by the node's
-identifier and a per-lifecycle UUID.
+The scheduler is the only reader of a wall clock and the only source of
+randomness, drawn from a replayable state seeded by the node identifier
+and a per-lifecycle UUID.
 
 \begin{law}[Wake time]\label{law:wake}
-The finger status at poll time $t$ is one of five phases, $\mathsf{Dormant}$
-(no successor head), $\mathsf{Converged}$ (no unverified routable slot and
-no attempt), $\mathsf{Runnable}$, $\AwR$, $\AwA$, together with $k$.
-\begin{itemize}[leftmargin=*]
-\item $\AwR$ or $\AwA$ with remaining lease $\Delta$: next wake $t+\Delta$;
-  no jitter.
-\item Activation, entering $\mathsf{Runnable}$ from $\mathsf{Dormant}$ with
-  $k=0$ (the first successor was admitted): next wake
-  $t+1\,\mathrm{s}+J$, $J\sim[0,10\,\mathrm{s}]$.
-\item Any other entry into $\mathsf{Runnable}$, including revalidation
-  reopening a $\mathsf{Converged}$ table, or a change of $k$: next wake
-  $t+f(k)+J'$, $J'\sim[0,f(k)]$ with $f(0)=1\,\mathrm{s}$.
-\item $\mathsf{Runnable}$ and unchanged: keep the existing wake, so polling
-  cannot postpone work.
-\end{itemize}
-Completing a finger turn at time $t'$ schedules $t'+f(k)+J'$ from the
-completion, never from the missed deadline.
+The finger phase at poll time $t$ is one of $\Dormant$ (no head),
+$\Converged$ (no unverified routable slot, no attempt), $\Runnable$, $\AwR$,
+$\AwA$, with streak $k$ and remaining lease $\Delta$.  With
+$f(0)=1\,\mathrm{s}$ and $\U[0,x]$ a uniform jitter draw,
+\[
+\mathrm{wake}(t)=
+\begin{cases}
+t+\Delta & \text{(a) } \AwR\vee\AwA,\\
+t+1\,\mathrm{s}+\U[0,10\,\mathrm{s}] & \text{(b) activation},\\
+t+f(k)+\U[0,f(k)] & \text{(c) re-entry},\\
+\text{unchanged} & \text{(d) otherwise,}
+\end{cases}
+\]
+where (b) is $\Dormant\to\Runnable$ with $k=0$ (first successor admitted),
+(c) any other entry into $\Runnable$ or a change of $k$, and (d)
+$\Runnable$ unchanged, so polling cannot postpone work.
+A finger turn completing at $t'$ schedules $t'+f(k)+\U[0,f(k)]$ from $t'$,
+never from the missed deadline.
 \end{law}
 
 \begin{law}[Suspension]\label{law:suspend}
-If both the gap since the last poll and the lateness of a runnable finger
-deadline are at least $10\,\mathrm{s}$, the deadline is redrawn as
-$t+1\,\mathrm{s}+J$ and priority deferrals are reset.  A retained admission
-proof stays dormant until its lease expires.  The lifecycle UUID is owned
-by the ring, not the listener, so stopping and restarting a browser
-listener replays the same phase; constructing a new ring draws a new one.
+If the gap since the last poll and the lateness of a runnable finger
+deadline are both $\ge10\,\mathrm{s}$, the deadline is redrawn as
+$t+1\,\mathrm{s}+\U[0,10\,\mathrm{s}]$ and priority deferrals reset.  A
+retained proof stays dormant until $\tau_a$.  The lifecycle UUID belongs to
+the ring, not the listener: restarting a listener replays the phase; a new
+ring draws a new one.  A finger turn yields to a simultaneously due
+topology or storage phase at most twice.
 \end{law}
-
-A finger turn yields to a simultaneously due topology or storage phase at
-most twice before it is reserved.
 
 \section{State Relation}\label{sec:spec}
 
 The following hold in every reachable state of $\mathrm{step}$.
 
 \begin{invariant}[Proof freshness]\label{inv:fresh}
-$\ver_j=\top$ implies that a proof $\pi$ with $j\in[\pi.i,\pi.\mathrm{end}]$
-and $\pi.e\ge\chg_j$ was applied, or Law~\ref{law:confirm} confirmed $j$,
-after the last change of $\hint_j$.
+$\ver_j=\top\Rightarrow$ some $\pi$ with $j\in[\pi.i,\pi.\pend]$ and
+$\pi.e\ge\chg_j$ was applied, or Law~\ref{law:confirm} confirmed $j$, after
+the last change of $\hint_j$.
 \end{invariant}
 
 \begin{invariant}[Single owner]\label{inv:owner}
-The attempt is exactly one of $\Idle$, $\AwR$, $\AwA$; the request
-identifiers of all attempts ever issued by one process are distinct; two
-attempts issued by one process are at least $T_{\min}$ apart.
+$\att$ is exactly one of $\Idle,\AwR,\AwA$; request identifiers issued
+by one process are distinct; consecutive issues are $\ge T_{\min}$ apart.
 \end{invariant}
 
 \begin{invariant}[Exact consumption]\label{inv:consume}
-A state change caused by a report is caused by a report satisfying
-Law~\ref{law:consume}; a stale report changes neither state nor $k$.
+Every report-caused state change is caused by a report satisfying
+Law~\ref{law:consume}; a $\Stale$ report changes neither state nor $k$.
 \end{invariant}
 
 \begin{invariant}[Failure accounting]\label{inv:failure}
-$k$ increases only by the rows of Law~\ref{law:outcomes} marked $k{+}1$
-and returns to $0$ only on progress; $\nu$ is set only together with an
-increase of $k$.
+$k$ increases only by $\Fail$ or $\Retire$, returns to $0$ only by
+$\Progress$ or Law~\ref{law:confirm}, and $\nu$ is set only together with
+an increase of $k$.
 \end{invariant}
 
 \begin{invariant}[Cyclic service]\label{inv:cyclic}
@@ -620,155 +563,100 @@ Selected slots form a cyclic sequence over the unverified routable slots
 A stabilization or sync report is applied, or opens a connection, only
 while its exact $(\text{reporter},\mathrm{id})$ is $\Proc$; a token is
 $\Proc$ only while a live handler holds its claim; a head change or the
-reporter leaving the successor list clears the token.
+reporter leaving the successor list clears it.
 \end{invariant}
 
 \begin{invariant}[Head law]\label{inv:head}
-The action $\mathsf{SuccessorHeadChanged}(h)$ is the last action of a
-transition iff the head moved to $h$; the stabilization token is cleared
-in exactly those transitions.
+$\mathsf{SuccessorHeadChanged}(h)$ is the last action of a transition iff the
+head moved to $h$; the stabilization token is cleared in exactly those
+transitions.
 \end{invariant}
 
 \section{Cost}\label{sec:cost}
 
 \begin{proposition}[Per-node cost]\label{prop:cost}
-Per node and per full pass over the table, the routed finger lookups number
-at most $R$ (Corollary~\ref{cor:lookups}) plus the number of ranges reopened
-by revalidation during the pass, each lookup costing $O(\log N)$ forwarding
-hops and one report; the local range costs zero lookups.  Emissions are at
-least $T_{\min}$ apart and, after $k$ consecutive failures, at least $f(k)$
-apart.  Per stabilization period a node sends one head query and at most
-$K{+}1$ connection attempts; per sync report at most $K$.
+Per full pass, routed finger lookups number at most $R$
+(Corollary~\ref{cor:lookups}) plus the ranges reopened by revalidation
+during the pass, each $O(\log N)$ hops and one report; the local range
+costs zero.  Emissions are $\ge T_{\min}$ apart and, after $k$ failures,
+$\ge f(k)$ apart.  Per stabilization period: one head query and $\le K{+}1$
+connection attempts; per sync report $\le K$.
 \end{proposition}
 
-The remaining cost that this design bounds but does not remove is a slot
-whose successor never admits.  Each rotation spends one attempt on it: a
-lookup, a deferral, and a handshake that occupies the single attempt for
-up to $T_h$ before it is retired.  Proposition~\ref{prop:starve} guarantees
-that the rest of the table converges once per rotation regardless; shortening
-the rotation's cost requires the transport to remember unreachable peers
-across attempts, which is outside the finger state machine.
-
-Aggregate startup work over a fleet is $O(N\log N)$ lookups, spread per node
-over the $[1,11]\,\mathrm{s}$ activation window.  The window smooths a
-synchronized start; it is a per-node bound, not a global rate limit on a
-seed.
+A slot whose successor never admits costs one attempt per rotation (a
+lookup, a deferral, and up to $T_h$ of handshake); by
+Proposition~\ref{prop:starve} the rest of the table still converges once
+per rotation.  Fleet startup is $O(N\log N)$ lookups, each node's spread
+over its own $[1,11]\,\mathrm{s}$ activation window; this is a per-node
+bound, not a global rate limit on a seed.
 
 \section{Security}\label{sec:security}
 
-The adversary controls any number of identifiers, the network's delivery
-order and timing, and any node other than $n$; it cannot forge signatures
-(Assumption~\ref{as:auth}).  Identifier count is not bounded here (Sybil
-resistance is the subject of a separate protocol).
+The adversary controls any number of identifiers, delivery order and
+timing, and every node other than $n$; it cannot forge signatures
+(Assumption~\ref{as:auth}).  Sybil count is out of scope.
+Table~\ref{tab:threats} lists what each mechanism bounds.
 
-\emph{Unsolicited reports.}  A finger report is applied only if it consumes
-the attempt (Law~\ref{law:consume}); a topology report only under
-Invariant~\ref{inv:token}.  An adversary who is not the queried peer cannot
-match the origin; the queried peer can answer only the one query it was
-sent, once.
-
-\emph{Replay and reordering.}  A delayed report carries a UUID the state no
-longer owns and is stale.  A report issued under epoch $e$ arriving after a
-hint change at epoch $e'>e$ is rejected slot-wise (Law~\ref{law:admit}),
-so it cannot restore the pre-change hint.  After a process restart the
-table and the attempt are rebuilt empty; a pre-restart report can match no
-post-restart request.  Numeric request counters that restart at zero were
-exactly the hole this closes.
-
-\emph{Wrong answers.}  A queried peer may answer with any $s$.  If
-$2^{i}>\dist(n,s)$ the report is $\mathsf{Invalid}$ and charged as a
-failure; otherwise it is admitted as a hint for its range and verified
-\emph{relative to that peer's view}.  A lying successor can therefore
-plant fingers, as in any Chord; by Zave's result~\cite{Zave2017} this
-affects routing efficiency, never ring safety, and the range is
-revalidated periodically.
-
-\emph{Amplification.}  A report of any length yields at most $K{+}1$ (or
-$K$) connection attempts, bounded before any per-candidate work; one finger
-report yields at most one handshake, and one attempt is outstanding per
-node.  A peer that answers and then refuses the handshake costs its victim
-one attempt per rotation, bounded by Proposition~\ref{prop:starve}.
-
-\emph{Clock manipulation.}  Deadlines are on the process-monotonic clock
-(Assumption~\ref{as:clock}); a wall-clock change can neither extend nor
-prematurely expire an attempt.
+\begin{table}[t]
+\caption{Threats and the law that bounds each}
+\label{tab:threats}
+\centering\small
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.25\columnwidth}>{\raggedright\arraybackslash}p{0.68\columnwidth}@{}}
+\toprule
+threat & bound \\
+\midrule
+unsolicited report & finger: must consume the attempt (Law~\ref{law:consume}); topology: Invariant~\ref{inv:token}.  Only the queried peer matches the origin, and it may answer its one query once. \\
+replay, reordering & a delayed report carries an unowned UUID ($\Stale$); one issued under $e<e'$ after a hint change is rejected slot-wise (Law~\ref{law:admit}); a restart rebuilds table and attempt empty, so no pre-restart report matches. \\
+wrong answer & $2^{i}>\dist(n,s)\Rightarrow\Invalid$, charged as failure; otherwise a hint verified relative to that peer's view.  A lying successor affects routing efficiency, never ring safety~\cite{Zave2017}, and the range is revalidated. \\
+amplification & one report $\Rightarrow\le K{+}1$ (or $K$) connections, bounded before any effect; one finger report $\Rightarrow\le1$ handshake; one attempt outstanding per node; a refusing peer costs one attempt per rotation (Prop.~\ref{prop:starve}). \\
+clock manipulation & deadlines are process-monotonic (Assumption~\ref{as:clock}); wall-clock changes neither extend nor expire an attempt. \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \section{Verification}\label{sec:verification}
 
-The implementation executes the transition of Assumption~\ref{as:effects}
-directly; the following obligations are discharged against that
-transition, not against a shadow model.
+The implementation executes $\mathrm{step}$ directly; the obligations of
+Table~\ref{tab:obligations} are discharged against it, not against a shadow
+model.
 
-\begin{obligation}[Oracle convergence]
-For sparse, dense, wrapped, and mutation-matrix rings, driving
-$\mathrm{step}$ with oracle answers reaches the finger table of the
-membership view with at most $R$ routed lookups.
-\end{obligation}
-
-\begin{obligation}[Bounded resource laws]
-A finite explorer over the actions \{advance before deadline, advance to
-deadline, progress, invalid report, late report, cancel, defer, admit
-deferred, lose, duplicate, topology change, restart\} to depth $9$ checks
-Invariants~\ref{inv:owner}--\ref{inv:failure}, the exact deadline cleanup,
-and backoff growth, with restart modelled as production rebuilds: an empty
-table rejoining the previous head.
-\end{obligation}
-
-\begin{obligation}[Claim discipline]
-A finite explorer over \{begin, claim, reserve candidate, execute
-candidate, attempt superseded candidate, cancel, complete, deliver
-superseded proof, deliver unclaimed proof, move head\} checks
-Proposition~\ref{prop:effects}, that a report against a $\Req$ token
-changes nothing, and that begin never revokes a $\Proc$ claim.
-\end{obligation}
-
-\begin{obligation}[Starvation and gate]
-A cancelled attempt at the first remote range is followed by an attempt at
-the next range, selection wraps to the failing range only after every other
-range is proved, and revalidation reopens a range while the only pending
-work is failing.
-\end{obligation}
-
-\begin{obligation}[Transport cascade]
-A three-node dummy-transport ring drains the full missing-finger admission
-cascade to quiescence within $20$ control submissions; a five-node ring
-whose finger targets all lie in local ranges emits zero finger submissions.
-\end{obligation}
-
-\begin{obligation}[Schedule]
-Over $200$ deterministic nodes, activation deadlines lie in
-$[1,11]\,\mathrm{s}$, saturated-retry deadlines in $[60,120]\,\mathrm{s}$,
-no one-second bucket holds more than $30$ nodes, and changing only the
-lifecycle UUID changes the deadline; returning to runnable from an awaited
-report or from a converged table draws $[1,2]\,\mathrm{s}$, not the
-activation window.
-\end{obligation}
+\begin{table}[t]
+\caption{Obligations discharged by the shipped tests}
+\label{tab:obligations}
+\centering\small
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.2\columnwidth}>{\raggedright\arraybackslash}p{0.73\columnwidth}@{}}
+\toprule
+obligation & driver and checked property \\
+\midrule
+oracle convergence & sparse, dense, wrapped, and mutation-matrix rings driven with oracle answers reach $\succf_V$ on every slot with $\le R$ routed lookups \\
+resource laws & explorer over \{advance, advance to deadline, progress, invalid, late, cancel, defer, admit deferred, lose, duplicate, topology change, restart\} to depth $9$ checks Invariants~\ref{inv:owner}--\ref{inv:failure}, deadline cleanup, and backoff growth; restart $=$ empty table rejoining the previous head \\
+claim discipline & explorer over \{begin, claim, reserve, execute, superseded candidate, cancel, complete, superseded proof, unclaimed proof, move head\} checks Proposition~\ref{prop:effects}, that a report against a $\Req$ token changes nothing, and that begin never revokes $\Proc$ \\
+starvation, gate & a cancelled attempt at the first remote range is followed by the next range; selection wraps to the failing range only after every other is proved; revalidation reopens a range while the only pending work is failing \\
+transport cascade & a 3-node dummy-transport ring drains the missing-finger cascade within $20$ control submissions; a 5-node ring with all targets local emits $0$ finger submissions \\
+schedule & over $200$ deterministic nodes: activation in $[1,11]\,\mathrm{s}$, saturated retry in $[60,120]\,\mathrm{s}$, $\le30$ nodes per one-second bucket, the lifecycle UUID alone changes the deadline, and re-entry from $\AwR$ or $\Converged$ draws $[1,2]\,\mathrm{s}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \section{Related Work}\label{sec:related}
 
-Chord's original paper~\cite{Stoica2001} contains both the range lemma and
-the hint model (``ask an immediate neighbor for a copy of its finger
-table''); its journal revision~\cite{Stoica2003} replaced both with
-randomized refresh, which is the behaviour most implementations inherit.
-Zave~\cite{Zave2015,Zave2017} proved that Chord's ring maintenance is
-correct only under the successor-list discipline and that fingers are
-irrelevant to safety, which this design relies on to treat fingers as
-revocable evidence.  Bamboo~\cite{Rhea2004} established that maintenance
-under churn should back off on timeouts and never on new evidence, the rule
-behind Law~\ref{law:outcomes}'s last row.  Kademlia~\cite{Maymounkov2002}
-avoids the problem by making every lookup refresh the buckets it touches;
-its $k$-buckets are the closest analogue of a proved range, though without
-an epoch or an owner.  The evidence epoch is a version vector of length one
-per slot~\cite{Fidge1988}; the claim guard is the standard
-resource-acquisition-is-initialization idiom applied to a protocol token.
+Chord's conference paper~\cite{Stoica2001} contains both the range lemma
+and the hint model; its journal revision~\cite{Stoica2003} replaced both
+with randomized refresh.  Zave~\cite{Zave2015,Zave2017} proved ring
+correctness rests on the successor list alone and fingers are irrelevant
+to safety, the licence under which this design treats every finger as
+revocable evidence.  Bamboo~\cite{Rhea2004} set the rule that maintenance
+backs off on timeouts, never on new evidence (last branch of
+Algorithm~\ref{alg:report}).  Kademlia's $k$-buckets~\cite{Maymounkov2002}
+are the nearest analogue of a proved range, without epoch or owner.  The
+evidence epoch is a length-one version vector per slot~\cite{Fidge1988}.
 
 \section{Conclusion}
 
-Finger convergence in Rings is Chord's range lemma wrapped in four
-disciplines that the original paper did not need: evidence epochs, a single
-correlated attempt owner, cyclic selection with a deterministic retry
-floor, and single-use released claims on the reports that may open
-connections.  Each is a law over one pure transition, each law is checked
+Finger convergence in Rings is Chord's range lemma under four disciplines
+the original did not need: evidence epochs, one correlated attempt owner,
+cyclic selection with a deterministic retry floor, and single-use claims on
+connection-opening reports.  Each is a law over one pure transition, checked
 against that transition, and together they bound what one node sends, what
 one report can cause, and how long one unreachable peer can delay the rest
 of the table.
