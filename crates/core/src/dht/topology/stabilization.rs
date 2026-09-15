@@ -10,6 +10,10 @@
 //!             |
 //!            yes
 //!             v
+//! [head's report being processed?] -- yes --> [keep it, emit nothing]
+//!             |
+//!            no
+//!             v
 //! [store Requested(reporter, request_id)]
 //!             |
 //!             v
@@ -45,6 +49,7 @@
 //!                 [retire correlated token]
 //! ```
 
+use super::bounded_connection_candidates;
 use super::dist;
 use super::successors;
 use super::Did;
@@ -74,7 +79,7 @@ pub(crate) struct StabilizationConnectionPlan {
     request_id: uuid::Uuid,
     /// Bounded, deduplicated peers reported by the successor.
     ///
-    /// Construction removes `local`, preserves first-seen order, and caps the
+    /// Construction removes `local`, preserves the order given, and caps the
     /// list at one predecessor candidate plus the successor-list capacity.
     candidates: Vec<Did>,
     /// Cursor for the next candidate whose connection effect may run.
@@ -109,10 +114,11 @@ pub(crate) enum StabilizationConnectionStep {
 impl StabilizationConnectionPlan {
     /// Create a bounded candidate cursor for one claimed stabilization report.
     ///
-    /// Candidates are consumed in report order after removing the local DID and
-    /// duplicates. The stored list is capped at `successor_capacity + 1`, which
-    /// gives the reported predecessor one possible slot without permitting an
-    /// unbounded number of connection effects from one report.
+    /// Candidates are consumed in the order given (the handler orders them by
+    /// transport quality) after removing the local DID and duplicates. The
+    /// stored list is capped at `successor_capacity + 1`, which gives the
+    /// reported predecessor one possible slot without permitting an unbounded
+    /// number of connection effects from one report.
     pub(crate) fn new(
         reporter: Did,
         request_id: uuid::Uuid,
@@ -120,24 +126,22 @@ impl StabilizationConnectionPlan {
         local: Did,
         successor_capacity: usize,
     ) -> Self {
-        // The predecessor is allowed one slot in addition to the local
-        // successor-list capacity.
-        let capacity = successor_capacity.saturating_add(1);
-        let mut bounded = Vec::with_capacity(capacity);
-        for candidate in candidates {
-            if bounded.len() == capacity {
-                break;
-            }
-            if candidate != local && !bounded.contains(&candidate) {
-                bounded.push(candidate);
-            }
-        }
         Self {
             reporter,
             request_id,
-            candidates: bounded,
+            candidates: bounded_connection_candidates(
+                local,
+                Self::candidate_capacity(successor_capacity),
+                candidates,
+            ),
             next_candidate: 0,
         }
+    }
+
+    /// The connection budget of one stabilization report: the successor-list
+    /// capacity plus one slot for the reported predecessor.
+    pub(crate) const fn candidate_capacity(successor_capacity: usize) -> usize {
+        successor_capacity.saturating_add(1)
     }
 
     /// Return the next candidate only while the report claim is still current.
@@ -267,8 +271,13 @@ pub(super) fn stabilized_successor_proof_end(
 /// Start a stabilization query against the current successor head.
 ///
 /// A state with no remote head clears any obsolete request and emits no action.
+/// While the head's previous report is still `Processing`, the round is
+/// skipped: the handler owning that claim is mid-way through its bounded
+/// candidate budget, and superseding it every maintenance period would leave
+/// the report unapplied whenever one candidate handshake outlasts the period.
 /// Otherwise the exact `(reporter, request_id)` pair is stored in `Requested`
-/// phase before the matching topology query is emitted.
+/// phase, superseding an unanswered round, before the matching topology query
+/// is emitted.
 pub(super) fn step_begin(state: &TopologyState, request_id: uuid::Uuid) -> TopologyStep {
     let Some(reporter) = successor_head(state) else {
         return TopologyStep {
@@ -279,6 +288,15 @@ pub(super) fn step_begin(state: &TopologyState, request_id: uuid::Uuid) -> Topol
             actions: Vec::new(),
         };
     };
+    if state
+        .pending_stabilization
+        .is_some_and(|pending| pending.phase == StabilizationPhase::Processing)
+    {
+        return TopologyStep {
+            state: state.clone(),
+            actions: Vec::new(),
+        };
+    }
     TopologyStep {
         state: TopologyState {
             pending_stabilization: Some(StabilizationRequest {
@@ -321,27 +339,23 @@ pub(super) fn step_claim(
     }
 }
 
-/// Apply a successor topology report after optional token correlation.
+/// Apply a successor topology report that owns the current claim.
 ///
-/// Token-bearing reports must already own the current `Processing` claim or the
-/// entire transition is ignored. A valid report normalizes successor evidence,
-/// emits improvement and notification actions, updates finger hints, and proves
-/// the local finger range only when the reporter remains the head and reports
-/// `local` as its predecessor. The compatibility path without a token may refine
-/// successors but cannot establish finger proof.
+/// The report must own the current `Processing` claim or the entire transition
+/// is ignored: there is no token-less path by which an unsolicited report can
+/// refine successors. A valid report normalizes successor evidence, emits
+/// improvement and notification actions, updates finger hints, proves the
+/// local finger range when the reporter remains the head and reports `local`
+/// as its predecessor, and retires the token.
 pub(super) fn step_stabilize(
     state: &TopologyState,
     reporter: Did,
-    request_id: Option<uuid::Uuid>,
+    request_id: uuid::Uuid,
     topo_successors: &[Did],
     topo_predecessor: Option<Did>,
     capacity: usize,
 ) -> TopologyStep {
-    // Only exact claimed reports may verify local finger ranges; the public
-    // compatibility path (`request_id == None`) may still refine successors.
-    let correlated = request_id
-        .is_some_and(|request_id| state.is_processing_stabilization_report(reporter, request_id));
-    if request_id.is_some() && !correlated {
+    if !state.is_processing_stabilization_report(reporter, request_id) {
         return TopologyStep {
             state: state.clone(),
             actions: Vec::new(),
@@ -367,13 +381,10 @@ pub(super) fn step_stabilize(
         .fold(state.fingers.clone(), |fingers, successor| {
             super::finger_join(state.local, &fingers, successor)
         });
-    // A correlated head report with `pred(head) == local` proves every finger
-    // slot whose target lies inside the local successor range.
-    let successor_proof_end = correlated
-        .then(|| {
-            stabilized_successor_proof_end(state, reporter, &next_successors, topo_predecessor)
-        })
-        .flatten();
+    // A head report with `pred(head) == local` proves every finger slot whose
+    // target lies inside the local successor range.
+    let successor_proof_end =
+        stabilized_successor_proof_end(state, reporter, &next_successors, topo_predecessor);
     if let Some(end) = successor_proof_end {
         fingers
             .iter_mut()
@@ -384,12 +395,9 @@ pub(super) fn step_stabilize(
     finger_convergence.invalidate_hint_changes(&state.fingers, &fingers);
     // Confirmation only advances the public cursor when it proves a range that
     // was not already current.
-    let local_range_progressed =
-        successor_proof_end.is_some_and(|end| finger_convergence.confirm_range(0, end));
-    let fix_finger_index = if local_range_progressed {
-        successor_proof_end.unwrap_or(state.fix_finger_index)
-    } else {
-        state.fix_finger_index
+    let fix_finger_index = match successor_proof_end {
+        Some(end) if finger_convergence.confirm_range(0, end) => end,
+        _ => state.fix_finger_index,
     };
     TopologyStep {
         state: TopologyState {
@@ -397,11 +405,7 @@ pub(super) fn step_stabilize(
             fingers,
             fix_finger_index,
             finger_convergence,
-            pending_stabilization: if correlated {
-                None
-            } else {
-                state.pending_stabilization
-            },
+            pending_stabilization: None,
             ..state.clone()
         },
         actions,

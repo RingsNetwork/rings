@@ -9,18 +9,25 @@
 //!
 //! `i ..= floor(log2(d))`.
 //!
-//! This is a lemma derived from the Chord finger definition, not a new routing
-//! assumption. This module computes only the geometric bound. Correlation,
-//! topology epochs, expiry, and transport admission are separate layers.
+//! This module computes only that geometric bound. Correlation, topology
+//! epochs, expiry, and transport admission are separate layers.
 //!
-//! Algorithmic source: Stoica et al., *Chord: A Scalable Peer-to-peer Lookup
-//! Service for Internet Applications*, section 4 defines
-//! `finger[k] = successor(n + 2^(k-1))`:
-//! <https://pdos.csail.mit.edu/papers/ton:chord/paper-ton.pdf>. The paper does
-//! not specify this batched maintenance state machine; the consecutive-range
-//! lemma above is a direct consequence of that definition. Zave's correctness
-//! work explains why fingers remain an optimization rather than a ring-safety
-//! premise: <https://arxiv.org/abs/1502.06461>.
+//! Algorithmic source: the lemma is Chord's own. Stoica et al., *Chord: A
+//! Scalable Peer-to-peer Lookup Service for Internet Applications*, SIGCOMM
+//! 2001, section 4.4, Figure 6, `init_finger_table`: node `n` checks whether
+//! `finger[i].node` is also the correct `finger[i+1]` entry, which holds
+//! exactly when `finger[i].interval` contains no node, and so
+//! `finger[i].node >= finger[i+1].start`; the paper derives the `O(log N)`
+//! expected-lookup bound from it. The same section's advice to copy a
+//! neighbour's finger table as initial hints is the source of the
+//! inferred-hint model that the `evidence` module versions.
+//! <https://pdos.csail.mit.edu/papers/chord:sigcomm01/chord_sigcomm.pdf>. The
+//! IEEE/ACM ToN 2003 revision dropped both in favour of randomized
+//! `fix_fingers`, which is why the batching is easy to mistake for a new
+//! result. Rings-specific are only the evidence epochs, UUID correlation,
+//! admission lease, retry floor with jitter, and browser lifecycle policy.
+//! Zave's correctness work explains why fingers remain an optimization rather
+//! than a ring-safety premise: <https://arxiv.org/abs/1502.06461>.
 //!
 //! # Algorithm flow
 //!

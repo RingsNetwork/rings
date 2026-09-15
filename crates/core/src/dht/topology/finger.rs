@@ -18,7 +18,7 @@
 //! [skip slots proved by successor stabilization]
 //!            |
 //!            v
-//! [reserve first due, unproved remote range] -- none --> [persist pacing state]
+//! [reserve next due, unproved remote range after the cursor] -- none --> [persist pacing state]
 //!            |
 //!            v
 //! [find_successor(range target)]
@@ -52,11 +52,12 @@ use crate::dht::finger::FingerRetireOutcome;
 use crate::dht::Did;
 use crate::dht::FingerFixRequest;
 
-/// Reserve and route at most one lookup for the first unverified remote slot.
+/// Reserve and route at most one lookup for the next unverified remote slot.
 ///
 /// Slots covered by the current successor interval are left to stabilization.
-/// For the first due slot outside that interval, this transition records the
-/// exact request token before resolving the lookup target. A locally resolved
+/// For the next due slot outside that interval (cyclically after the previous
+/// attempt), this transition records the exact request token before resolving
+/// the lookup target. A locally resolved
 /// target is applied immediately; a remote target emits exactly one
 /// [`TopologyAction::FindSuccessorForFix`] carrying the same token. Isolated
 /// nodes and states with no due work are returned without network actions.
@@ -71,13 +72,8 @@ pub(super) fn advance(state: &TopologyState, now_ms: u64, request_id: uuid::Uuid
     }
 
     let mut convergence = state.finger_convergence.clone();
-    // Slots at or before the successor head are proved by stabilization, so
-    // routed finger lookups begin with the first slot outside that local range.
-    let first_remote_slot = local_successor_range_end(state)
-        .map(|end| end.saturating_add(1))
-        .unwrap_or(0);
     let Some(request) =
-        convergence.prepare_lookup(&state.fingers, first_remote_slot, now_ms, request_id)
+        convergence.prepare_lookup(&state.fingers, first_remote_slot(state), now_ms, request_id)
     else {
         return TopologyStep {
             state: TopologyState {
@@ -106,6 +102,16 @@ pub(super) fn advance(state: &TopologyState, now_ms: u64, request_id: uuid::Uuid
     }
 }
 
+/// First slot whose target lies outside the local successor interval.
+///
+/// Slots at or before that boundary are proved by stabilization, so routed
+/// finger lookups and the revalidation gate consider only slots from here on.
+fn first_remote_slot(state: &TopologyState) -> usize {
+    local_successor_range_end(state)
+        .map(|end| end.saturating_add(1))
+        .unwrap_or(0)
+}
+
 /// Reopen the range after the current cursor without emitting network work.
 ///
 /// The transition invalidates only the convergence proof range selected by
@@ -114,7 +120,11 @@ pub(super) fn advance(state: &TopologyState, now_ms: u64, request_id: uuid::Uuid
 /// reservation to [`advance`].
 pub(super) fn begin_revalidation(state: &TopologyState) -> TopologyState {
     let mut convergence = state.finger_convergence.clone();
-    convergence.begin_revalidation(&state.fingers, state.fix_finger_index);
+    convergence.begin_revalidation(
+        &state.fingers,
+        state.fix_finger_index,
+        first_remote_slot(state),
+    );
     TopologyState {
         finger_convergence: convergence,
         ..state.clone()
@@ -165,8 +175,7 @@ fn defer_result(
     now_ms: u64,
 ) -> (TopologyState, FingerDeferOutcome) {
     let mut convergence = state.finger_convergence.clone();
-    let outcome =
-        convergence.defer_result(state.local, state.fingers.len(), request, successor, now_ms);
+    let outcome = convergence.defer_result(state.local, &state.fingers, request, successor, now_ms);
     (
         TopologyState {
             finger_convergence: convergence,
@@ -233,7 +242,7 @@ pub(crate) fn retire_candidate(
 ) -> (TopologyStep, FingerRetireOutcome) {
     let mut convergence = state.finger_convergence.clone();
     let outcome =
-        convergence.retire_result(state.local, state.fingers.len(), request, successor, now_ms);
+        convergence.retire_result(state.local, &state.fingers, request, successor, now_ms);
     (
         TopologyStep {
             state: TopologyState {
@@ -258,7 +267,7 @@ pub(super) fn cancel(
     now_ms: u64,
 ) -> TopologyState {
     let mut convergence = state.finger_convergence.clone();
-    convergence.cancel(request, now_ms);
+    convergence.cancel(&state.fingers, request, now_ms);
     TopologyState {
         finger_convergence: convergence,
         ..state.clone()

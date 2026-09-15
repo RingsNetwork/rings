@@ -228,7 +228,7 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
                 // queue it behind an existing handshake, or retain an
                 // admission proof while the missing connection is opened below.
                 let disposition = self.transport.record_finger_candidate(msg.did, *request)?;
-                if disposition.needs_connection() && msg.reports_remote_successor(self.dht.did) {
+                if disposition.proof_awaits_owner() && msg.reports_remote_successor(self.dht.did) {
                     if let Err(error) = self.connect_dht_peer(msg.did).await {
                         self.dht.cancel_finger_lookup(*request)?;
                         return Err(error);
@@ -237,9 +237,9 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
                     // replaced the pending slot, or failed after a partial
                     // lifecycle transition. Re-run admission with the same
                     // request id so the deferred proof either gains an owner or
-                    // is explicitly cancelled.
+                    // is explicitly released.
                     let admitted = self.transport.record_finger_candidate(msg.did, *request)?;
-                    if admitted.leaves_deferred_unowned() {
+                    if admitted.proof_awaits_owner() {
                         self.dht.cancel_finger_lookup(*request)?;
                     }
                 }

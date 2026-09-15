@@ -358,14 +358,22 @@ impl MaintenanceSchedule {
     /// Align the scheduler-owned wake time with the peer-ring convergence phase.
     ///
     /// Awaiting phases copy their remaining lease into an absolute deadline.
-    /// Entering `Runnable` chooses initial jitter, while a changed failure streak
-    /// chooses retry backoff. An unchanged runnable phase keeps its existing
-    /// deadline so ordinary polling cannot continuously postpone work.
+    /// Becoming runnable from `Inactive` with no failure history (the node's
+    /// first successor was admitted, the fleet-start case) chooses the initial
+    /// jitter window; every other entry into `Runnable`, and a changed failure
+    /// streak, chooses the ordinary retry delay for the current streak, the
+    /// same delay [`Self::complete_finger_convergence`] uses. An unchanged
+    /// runnable phase keeps its existing deadline so ordinary polling cannot
+    /// continuously postpone work.
     fn reconcile_finger_status(&mut self, now_ms: u64, status: FingerConvergenceStatus) {
         // A pace change means the retry floor changed; a phase change means a
         // different scheduler clock now owns the next finger wake.
         let pace_changed = status.failure_streak() != self.finger_failure_streak;
         let phase_changed = status.phase() != self.finger_phase_last_poll;
+        let activated = matches!(
+            self.finger_phase_last_poll,
+            FingerConvergencePhase::Inactive
+        );
         match status.phase() {
             FingerConvergencePhase::Inactive => self.next_finger_ms = u64::MAX,
             FingerConvergencePhase::AwaitingReport { remaining_ms } => {
@@ -375,7 +383,7 @@ impl MaintenanceSchedule {
                 self.next_finger_ms = now_ms.saturating_add(remaining_ms);
             }
             FingerConvergencePhase::Runnable if phase_changed => {
-                let delay_ms = if status.failure_streak() == 0 {
+                let delay_ms = if activated && status.failure_streak() == 0 {
                     self.next_initial_finger_delay_ms()
                 } else {
                     self.next_finger_delay_ms(status.failure_streak())
@@ -1053,6 +1061,25 @@ mod tests {
                 .task,
             Some(MaintenanceTask::ConvergeFingers)
         );
+    }
+
+    /// Proves that only activation from `Inactive` draws the initial jitter
+    /// window.
+    ///
+    /// A report applied between polls moves the ring from `AwaitingReport` back
+    /// to `Runnable`; the scheduler must then use the ordinary zero-failure
+    /// delay, the same one completing a turn uses, not the 1..=11 second
+    /// fleet-start window.
+    #[test]
+    fn test_returning_to_runnable_uses_the_retry_delay_not_the_initial_window() {
+        let mut schedule = schedule(0, PERIOD, crate::dht::Did::from(11u32));
+        let awaiting = FingerConvergenceStatus::awaiting_report(10_000, 0);
+        let _ = schedule.poll(0, false, awaiting);
+        assert_eq!(schedule.next_finger_ms, 10_000);
+
+        let _ = schedule.poll(5_000, false, finger_status(true));
+
+        assert!((6_000..=7_000).contains(&schedule.next_finger_ms));
     }
 
     /// Proves that an awaiting-report phase is governed by its lease expiry.

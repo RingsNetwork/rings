@@ -3,21 +3,22 @@ use std::str::FromStr;
 use async_trait::async_trait;
 
 use super::*;
+use crate::dht::topology;
 use crate::dht::LiveDid;
 use crate::tests::default::gen_sorted_dht;
 
+/// An isolated node has no head to query: beginning a round records no token
+/// and emits nothing, and a report from anyone is not claimable.
 #[test]
-fn test_stabilize_handles_empty_successor_info() -> Result<()> {
+fn test_isolated_node_begins_no_stabilization_round() -> Result<()> {
     let did = Did::from_str("0x051cf4f8d020cb910474bef3e17f153fface2b5f").unwrap();
     let node = PeerRing::new_with_storage(did, 3, Box::new(MemStorage::new()));
+    let request_id = uuid::Uuid::from_u128(1);
 
-    assert_eq!(
-        node.stabilize(TopoInfo {
-            successors: vec![],
-            predecessor: None,
-        })?,
-        PeerRingAction::MultiActions(vec![])
-    );
+    assert_eq!(node.begin_stabilization(request_id)?, PeerRingAction::None);
+    assert!(node
+        .claim_stabilization_report(Did::from(4u32), request_id)?
+        .is_none());
     Ok(())
 }
 
@@ -35,29 +36,81 @@ fn test_stabilization_report_claim_is_single_use() -> Result<()> {
     let _ = node.join(successor)?;
     let _ = node.begin_stabilization(request_id)?;
 
-    assert!(node.claim_stabilization_report(successor, request_id)?);
-    assert!(!node.claim_stabilization_report(successor, request_id)?);
+    let claim = node.claim_stabilization_report(successor, request_id)?;
+    assert!(claim.is_some());
+    assert!(node
+        .claim_stabilization_report(successor, request_id)?
+        .is_none());
+    // The failed duplicate released nothing: the first claim still owns the
+    // report and may spend its budget.
+    let mut plan = topology::StabilizationConnectionPlan::new(
+        successor,
+        request_id,
+        [Did::from(8u32)],
+        node.did,
+        3,
+    );
+    assert!(matches!(
+        node.advance_stabilization_connection_plan(&mut plan)?,
+        topology::StabilizationConnectionStep::Connect { .. }
+    ));
+    // Dropping the claim releases the token; a released token is claimable by
+    // nobody, because release retires it rather than reopening it.
+    drop(claim);
+    assert!(node
+        .claim_stabilization_report(successor, request_id)?
+        .is_none());
+    assert!(matches!(
+        node.advance_stabilization_connection_plan(&mut plan)?,
+        topology::StabilizationConnectionStep::Stale
+    ));
     Ok(())
 }
 
-/// Proves that successor-list churn revokes reports registered against the
-/// previous successor snapshot.
-///
-/// The test registers a sync request, changes the successor set, and verifies
-/// that the old reporter/token pair can no longer be claimed.
+/// Proves the successor-churn law for sync tokens through the peer ring: a
+/// token survives a successor-list change that keeps its reporter, and is
+/// revoked by one that removes the reporter.
 #[test]
-fn test_successor_change_invalidates_an_outstanding_sync_report() -> Result<()> {
+fn test_successor_change_revokes_a_sync_report_only_when_its_reporter_leaves() -> Result<()> {
     let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
     let reporter = Did::from(4u32);
-    // Successor-sync reports are tied to the exact successor list observed when
-    // the query was sent.
     let request_id = uuid::Uuid::from_u128(1);
     let _ = node.join(reporter)?;
     assert!(node.begin_successor_sync(reporter, request_id)?);
 
+    // The list grows, the reporter stays: the token is still claimable, once.
     let _ = node.join(Did::from(8u32))?;
+    let claim = node.claim_successor_sync_report(reporter, request_id)?;
+    assert!(claim.is_some());
+    assert!(node
+        .claim_successor_sync_report(reporter, request_id)?
+        .is_none());
+    // The failed duplicate released nothing: the first claim still owns the
+    // report and may spend its budget.
+    let mut plan = topology::SuccessorSyncConnectionPlan::new(
+        reporter,
+        request_id,
+        [Did::from(12u32)],
+        node.did,
+        3,
+    );
+    assert_eq!(
+        node.advance_successor_sync_connection_plan(&mut plan)?,
+        topology::SuccessorSyncConnectionStep::Connect(Did::from(12u32))
+    );
+    drop(claim);
+    assert_eq!(
+        node.advance_successor_sync_connection_plan(&mut plan)?,
+        topology::SuccessorSyncConnectionStep::Stale
+    );
 
-    assert!(!node.claim_successor_sync_report(reporter, request_id)?);
+    // A new round for the same reporter, then the reporter leaves: revoked.
+    let next_request_id = uuid::Uuid::from_u128(2);
+    assert!(node.begin_successor_sync(reporter, next_request_id)?);
+    node.remove(reporter)?;
+    assert!(node
+        .claim_successor_sync_report(reporter, next_request_id)?
+        .is_none());
     Ok(())
 }
 

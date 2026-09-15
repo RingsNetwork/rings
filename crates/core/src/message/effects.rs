@@ -878,10 +878,8 @@ mod tests {
             .await?;
         assert!(first
             .dht()
-            .claim_successor_sync_report(second.did(), sent_request_id)?);
-        first
-            .dht()
-            .cancel_successor_sync(second.did(), sent_request_id)?;
+            .claim_successor_sync_report(second.did(), sent_request_id)?
+            .is_some());
 
         let missing = did();
         first.dht().join(missing)?;
@@ -892,9 +890,10 @@ mod tests {
             .run(CoreEffect::send_successor_query(failed, missing))
             .await
             .is_err());
-        assert!(!first
+        assert!(first
             .dht()
-            .claim_successor_sync_report(missing, failed_request_id)?);
+            .claim_successor_sync_report(missing, failed_request_id)?
+            .is_none());
         Ok(())
     }
 

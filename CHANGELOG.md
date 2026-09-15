@@ -9,26 +9,38 @@
   format is incompatible with 0.25.x, so every node in an overlay must upgrade together.
 - `FingerTable` equality now covers its complete serialized maintenance and convergence state.
   Callers that need hint-only equality should compare `FingerTable::list()` instead.
+- `CorrectChord::stabilize` is removed. A successor's topology report changes the successor list
+  only when it echoes the correlation token issued by `pre_stabilize`; there is no token-less path
+  by which an arbitrary `TopoInfo` can refine successors.
 
 ### Added
 
 - Finger-table convergence distinguishes inferred hints from verified ranges. One lookup proves
   every consecutive slot owned by the reported successor; topology changes invalidate only the
   affected slots, losing the last successor invalidates all membership evidence, and correlated
-  request epochs reject stale or expired in-flight results at commit time.
+  request epochs reject stale or expired in-flight results at commit time. Lookups are issued for
+  unverified ranges in cyclic order, resuming after the range the previous attempt proved or
+  failed, so a range whose successor never completes a handshake costs one attempt per rotation
+  instead of starving every range above it, and periodic revalidation is deferred by pending work
+  only while that work is succeeding.
 - Automatic convergence permits one lookup per node at a time, spreads simultaneous fleet starts
   over a node-lifecycle-randomized 10-second phase window, reuses that phase across repeated browser
   listener restarts, rephases deadlines left stale by browser suspension, and has no catch-up
   bursts. Send or handshake failure, invalid reports, lookup timeout, and admission-lease expiry use a
   2/4/8/16/32/60-second exponential retry floor plus a full jitter window; only an applied range
   proof resets the failure level. Normal topology churn invalidates stale evidence without being
-  counted as a network failure. Timely lookup proofs may wait up to 180 seconds for transport
-  admission, after which the lease is released into the same bounded retry schedule. A due
+  counted as a network failure. Timely lookup proofs may wait up to 210 seconds for transport
+  admission (longer than the 180-second handshake generation that owns them once reserved), after
+  which the lease is released into the same bounded retry schedule. A due
   convergence turn may yield to at most two topology or storage phases before it is reserved.
 - Stabilization and successor-list reports are bound to one current reporter and UUID and atomically
-  claimed before connection effects. Candidates are deduplicated; successor-list sync is capped by successor
-  capacity, while stabilization may additionally admit one predecessor. Browser listener generations
-  are serialized so rapid `stop`/`listen` cycles cannot run duplicate maintenance daemons.
+  claimed before connection effects. A claim is released on every exit path of its handler, a new
+  round does not supersede a report that is still being processed, and a claimed report keeps its
+  remaining candidate budget while its reporter stays a successor (its own admissions extend the
+  list without revoking it). Candidates are deduplicated and ordered by transport quality;
+  successor-list sync is capped by successor capacity, while stabilization may additionally admit
+  one predecessor. Browser listener generations are serialized so rapid `stop`/`listen` cycles
+  cannot run duplicate maintenance daemons.
 - Release metadata for workspace crates, examples, the npm package, and lockfiles now records
   `0.26.0` as one protocol generation so path consumers do not describe a mixed 0.25/0.26 tree.
 

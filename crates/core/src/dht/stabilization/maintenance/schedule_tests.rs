@@ -25,22 +25,6 @@ const fn finger_status(pending: bool) -> FingerConvergenceStatus {
     FingerConvergenceStatus::new(pending, 0)
 }
 
-/// Proves a peer ring retains one jitter entropy value for its whole lifecycle.
-///
-/// Repeated reads model maintenance-listener restarts on the same ring. Equality
-/// ensures those restarts cannot silently rephase the node's initial finger turn.
-#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_family = "wasm"), test)]
-fn test_peer_ring_reuses_finger_jitter_entropy_across_listener_restarts() {
-    let ring = crate::dht::PeerRing::new_with_storage(
-        crate::dht::Did::from(4u32),
-        3,
-        Box::new(crate::storage::MemStorage::new()),
-    );
-
-    assert_eq!(ring.finger_jitter_entropy(), ring.finger_jitter_entropy());
-}
-
 /// Proves long stabilization does not erase an already due finger reservation.
 ///
 /// Stabilization wins the simultaneous initial decision, but completing it well

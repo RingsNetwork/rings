@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::dht::finger::FingerConvergencePhase;
+use crate::dht::finger::FingerReportRejection;
 use crate::dht::FingerFixRequest;
 
 /// Prepare the exact request token that production finger lookup would place in the DHT.
@@ -249,14 +250,17 @@ async fn test_expired_finger_candidate_never_enters_connection_admission() -> Re
     tokio::time::advance(std::time::Duration::from_millis(11_000)).await;
     let expired = transport.record_finger_candidate(peer, request)?;
 
-    assert_eq!(expired, FingerUpdateDisposition::Expired);
-    assert!(!expired.needs_connection());
+    assert_eq!(
+        expired,
+        FingerUpdateDisposition::Rejected(FingerReportRejection::Expired)
+    );
+    assert!(!expired.proof_awaits_owner());
     assert!(transport.unadmitted_attempt(peer)?.is_none());
     assert!(transport.get_connection(peer).is_none());
     assert_eq!(transport.dht.lock_finger()?.get(0), None);
     assert_eq!(
         transport.record_finger_candidate(peer, request)?,
-        FingerUpdateDisposition::Stale
+        FingerUpdateDisposition::Rejected(FingerReportRejection::Stale)
     );
     Ok(())
 }
@@ -277,14 +281,17 @@ async fn test_invalid_finger_candidate_never_enters_connection_admission() -> Re
 
     let invalid = transport.record_finger_candidate(peer, request)?;
 
-    assert_eq!(invalid, FingerUpdateDisposition::Invalid);
-    assert!(!invalid.needs_connection());
+    assert_eq!(
+        invalid,
+        FingerUpdateDisposition::Rejected(FingerReportRejection::Invalid)
+    );
+    assert!(!invalid.proof_awaits_owner());
     assert!(transport.unadmitted_attempt(peer)?.is_none());
     assert!(transport.get_connection(peer).is_none());
     assert_eq!(transport.dht.lock_finger()?.get(1), None);
     assert_eq!(
         transport.record_finger_candidate(peer, request)?,
-        FingerUpdateDisposition::Stale
+        FingerUpdateDisposition::Rejected(FingerReportRejection::Stale)
     );
     Ok(())
 }

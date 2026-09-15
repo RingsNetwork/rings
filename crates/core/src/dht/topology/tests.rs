@@ -128,22 +128,49 @@ fn test_join_step_refines_successor_distance_vector() {
     assert!(refines_successor_distances(&current, &next.state));
 }
 
+/// Apply one claimed stabilization report from the current head: the round is
+/// begun and claimed with one token, and the report carries that token.
+fn claimed_stabilize(
+    current: &TopologyState,
+    successors: Vec<Did>,
+    predecessor: Option<Did>,
+) -> TopologyStep {
+    let reporter = successor_head(current).expect("stabilization needs a head");
+    let request_id = uuid::Uuid::from_u128(1);
+    let begun = step(
+        current,
+        TopologyEvent::BeginStabilize { request_id },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    )
+    .state;
+    let claimed = step(
+        &begun,
+        TopologyEvent::ClaimStabilize {
+            reporter,
+            request_id,
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    )
+    .state;
+    step(
+        &claimed,
+        TopologyEvent::Stabilize {
+            reporter,
+            request_id,
+            successors,
+            predecessor,
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    )
+}
+
 /// Verifies that stabilization replaces a farther successor with a reported
 /// predecessor and strictly refines the clockwise successor-distance vector.
 #[test]
 fn test_stabilize_step_refines_successor_distance_vector() {
     let local = did(0);
     let current = state(local, vec![did(40)], None, vec![None; 5], 0);
-    let next = step(
-        &current,
-        TopologyEvent::Stabilize {
-            reporter: did(40),
-            request_id: None,
-            successors: vec![did(50), did(60)],
-            predecessor: Some(did(10)),
-        },
-        DEFAULT_SUCCESSOR_CAPACITY,
-    );
+    let next = claimed_stabilize(&current, vec![did(50), did(60)], Some(did(10)));
 
     assert!(refines_successor_distances(&current, &next.state));
 }
@@ -590,7 +617,7 @@ fn test_local_successor_range_waits_for_stabilization_instead_of_routing_around_
         &claimed.state,
         TopologyEvent::Stabilize {
             reporter: head,
-            request_id: Some(request_id),
+            request_id,
             successors: Vec::new(),
             predecessor: Some(local),
         },
@@ -644,7 +671,7 @@ fn test_stale_stabilization_report_cannot_verify_the_local_successor_range() {
         &superseded.state,
         TopologyEvent::Stabilize {
             reporter: head,
-            request_id: Some(old_request),
+            request_id: old_request,
             successors: Vec::new(),
             predecessor: Some(local),
         },
@@ -668,7 +695,7 @@ fn test_stale_stabilization_report_cannot_verify_the_local_successor_range() {
         &claimed.state,
         TopologyEvent::Stabilize {
             reporter: head,
-            request_id: Some(current_request),
+            request_id: current_request,
             successors: Vec::new(),
             predecessor: Some(local),
         },
@@ -863,16 +890,7 @@ fn test_admit_step_reports_head_change_only_when_the_head_moves() {
 fn test_stabilize_step_reports_head_change_when_reported_predecessor_precedes_head() {
     let local = did(0);
     let current = state(local, vec![did(30)], None, vec![None; 5], 0);
-    let next = step(
-        &current,
-        TopologyEvent::Stabilize {
-            reporter: did(30),
-            request_id: None,
-            successors: vec![did(30), did(40)],
-            predecessor: Some(did(20)),
-        },
-        DEFAULT_SUCCESSOR_CAPACITY,
-    );
+    let next = claimed_stabilize(&current, vec![did(30), did(40)], Some(did(20)));
 
     assert_eq!(next.state.successors, vec![did(20), did(30)]);
     assert_head_law(&current, &next);

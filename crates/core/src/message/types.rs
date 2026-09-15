@@ -210,8 +210,9 @@ pub struct QueryForTopoInfoReport {
     /// One-shot identity copied unchanged from the triggering query.
     ///
     /// The receiver spends it at most once against the expected authenticated
-    /// reporter. Replayed, replaced, or post-churn values are ignored before
-    /// advertised peers can create transport work.
+    /// reporter. Replayed or replaced values, and values from a reporter that
+    /// has left the successor list, are ignored before advertised peers can
+    /// create transport work.
     pub request_id: uuid::Uuid,
 }
 

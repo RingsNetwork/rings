@@ -20,9 +20,9 @@
 //! for the same reason.
 //!
 //! Successor-list synchronization tokens are the one piece of state kept
-//! beside the model rather than inside it. Their validity is a function of the
-//! current successor list, so the transition core invalidates them whenever a
-//! commit changes that list.
+//! beside the model rather than inside it. A token is valid only while its
+//! reporter is a successor, so the transition core prunes the tokens of
+//! departed reporters whenever a commit changes the successor list.
 //!
 //! The `impl` blocks below are grouped by concern: construction, read-only
 //! views, the transition core, membership, finger convergence, stabilization
@@ -106,8 +106,8 @@ pub struct PeerRing {
     /// Per-successor ownership of outstanding successor-list queries.
     ///
     /// Kept beside the pure model because a token is valid only while its
-    /// reporter is still a successor; the transition core invalidates every
-    /// token when a commit changes the successor list.
+    /// reporter is still a successor; the transition core prunes departed
+    /// reporters' tokens when a commit changes the successor list.
     pending_successor_sync: Mutex<topology::SuccessorSyncState>,
     /// Origin of the monotonic clock behind every finger deadline and retry
     /// floor.
@@ -345,8 +345,8 @@ impl PeerRing {
     /// outcome the caller wants to report (a finger disposition, a claim
     /// result). The next state is committed before either is returned, so no
     /// caller can observe an outcome whose state did not land. A commit that
-    /// changes the successor list also invalidates every successor-sync token
-    /// (see the module documentation).
+    /// changes the successor list also prunes the successor-sync tokens of
+    /// reporters that are no longer successors (see the module documentation).
     ///
     /// # Errors
     ///
@@ -361,7 +361,8 @@ impl PeerRing {
         let (next, outcome) = transition(&current, self.now_ms());
         self.commit_unlocked(&next.state)?;
         if next.state.successors != current.successors {
-            self.lock_pending_successor_sync()?.invalidate();
+            self.lock_pending_successor_sync()?
+                .retain_current(&next.state.successors);
         }
         Ok((next, outcome))
     }
@@ -628,6 +629,56 @@ impl PeerRing {
     }
 }
 
+/// The exclusive right to spend one claimed stabilization report's candidate
+/// budget and commit it.
+///
+/// Dropping the claim releases the token, on every exit path of the handler
+/// holding it, so a failed or cancelled handler cannot leave the report in
+/// `Processing` and block the head's next round (which
+/// [`PeerRing::begin_stabilization`] skips while a report is being processed).
+/// Release is idempotent: the pure model clears only a token with this exact
+/// identity, so a claim whose report was already applied releases nothing.
+#[must_use = "dropping the claim releases the report"]
+pub(crate) struct StabilizationClaim<'ring> {
+    ring: &'ring PeerRing,
+    request_id: uuid::Uuid,
+}
+
+impl StabilizationClaim<'_> {
+    /// The token this claim owns.
+    pub(crate) const fn request_id(&self) -> uuid::Uuid {
+        self.request_id
+    }
+}
+
+impl Drop for StabilizationClaim<'_> {
+    fn drop(&mut self) {
+        // A poisoned lock is the only possible failure, and a destructor has
+        // no caller to report it to.
+        let _ = self.ring.cancel_stabilization(self.request_id);
+    }
+}
+
+/// The exclusive right to spend one claimed successor-sync report's
+/// candidate budget.
+///
+/// Dropping the claim releases the token, on every exit path of the handler
+/// holding it; see [`StabilizationClaim`] for why that matters.
+#[must_use = "dropping the claim releases the report"]
+pub(crate) struct SuccessorSyncClaim<'ring> {
+    ring: &'ring PeerRing,
+    reporter: Did,
+    request_id: uuid::Uuid,
+}
+
+impl Drop for SuccessorSyncClaim<'_> {
+    fn drop(&mut self) {
+        let _ = self
+            .ring
+            .cancel_successor_sync(self.reporter, self.request_id);
+    }
+}
+
 /// Stabilization rounds.
 ///
 /// A round is correlated by a fresh UUID recorded against the successor head
@@ -635,10 +686,12 @@ impl PeerRing {
 /// UUID may change topology. In order of occurrence:
 ///
 /// 1. [`Self::begin_stabilization`] records `(head, request_id)` as
-///    `Requested` and returns the query action.
+///    `Requested` and returns the query action. While the head's previous
+///    report is still being processed it records nothing and emits nothing.
 /// 2. [`Self::claim_stabilization_report`] moves the token to `Processing`
 ///    exactly once, so duplicate deliveries of one report cannot both spend
-///    its connection budget.
+///    its connection budget, and hands the caller a [`StabilizationClaim`]
+///    that releases the token when dropped.
 /// 3. [`Self::advance_stabilization_connection_plan`] hands out at most one
 ///    candidate per call, re-checking the token each time; churn revokes the
 ///    remaining budget.
@@ -667,7 +720,7 @@ impl PeerRing {
     /// The claim predicate and the claiming step see the same snapshot, so two
     /// handlers racing on one report cannot both succeed: the first commit
     /// moves the token to `Processing`, and the second predicate evaluates
-    /// against that state. Returns whether this caller won the claim.
+    /// against that state. Returns the claim when this caller won it.
     ///
     /// # Errors
     ///
@@ -676,7 +729,7 @@ impl PeerRing {
         &self,
         reporter: Did,
         request_id: uuid::Uuid,
-    ) -> Result<bool> {
+    ) -> Result<Option<StabilizationClaim<'_>>> {
         self.transition(|state, _| {
             let claimable = state.can_claim_stabilization_report(reporter, request_id);
             let step = self.step(state, TopologyEvent::ClaimStabilize {
@@ -685,7 +738,14 @@ impl PeerRing {
             });
             (step, claimable)
         })
-        .map(|(_, claimed)| claimed)
+        // Lazily: constructing a guard for a failed claim would drop it at
+        // once and release a token this caller never owned.
+        .map(|(_, claimed)| {
+            claimed.then(|| StabilizationClaim {
+                ring: self,
+                request_id,
+            })
+        })
     }
 
     /// Reserve the next stabilization candidate against the current topology.
@@ -721,7 +781,7 @@ impl PeerRing {
     ) -> Result<PeerRingAction> {
         let next = self.transition_topology(TopologyEvent::Stabilize {
             reporter,
-            request_id: Some(request_id),
+            request_id,
             successors: info.successors,
             predecessor: info.predecessor,
         })?;
@@ -747,8 +807,8 @@ impl PeerRing {
 /// Each successor may have one outstanding successor-list query, owned by a
 /// `(reporter, request_id)` token in [`topology::SuccessorSyncState`]. A
 /// token is valid only while its reporter is still a successor: the
-/// transition core invalidates every token when a commit changes the
-/// successor list, and each operation here reads the list under the same
+/// transition core prunes departed reporters' tokens when a commit changes
+/// the successor list, and each operation here reads the list under the same
 /// lock it uses to touch the tokens.
 impl PeerRing {
     /// Operate on the sync tokens and the successor list they are judged
@@ -765,8 +825,9 @@ impl PeerRing {
 
     /// Register one sync token for a current successor.
     ///
-    /// Succeeds only while `reporter` is a successor, replacing that
-    /// reporter's older token; failure creates no report authority.
+    /// Succeeds only while `reporter` is a successor and its previous report
+    /// is not still being processed, replacing an unanswered older token;
+    /// failure creates no report authority.
     ///
     /// # Errors
     ///
@@ -784,8 +845,10 @@ impl PeerRing {
     /// Claim one matching sync report before it can create effects.
     ///
     /// Succeeds once for the exact `(reporter, request_id)` pair while the
-    /// reporter is still a successor. Duplicate, replaced, and post-churn
-    /// reports return `false` and acquire no connection budget.
+    /// reporter is still a successor, handing the caller a
+    /// [`SuccessorSyncClaim`] that releases the token when dropped. Duplicate,
+    /// replaced, and departed-reporter reports return `None` and acquire no
+    /// connection budget.
     ///
     /// # Errors
     ///
@@ -794,9 +857,17 @@ impl PeerRing {
         &self,
         reporter: Did,
         request_id: uuid::Uuid,
-    ) -> Result<bool> {
+    ) -> Result<Option<SuccessorSyncClaim<'_>>> {
+        // Lazily: a guard built for a failed claim would drop inside the lock
+        // and its release would deadlock on it.
         self.with_successor_sync(|pending, successors| {
-            pending.claim(successors, reporter, request_id)
+            pending
+                .claim(successors, reporter, request_id)
+                .then(|| SuccessorSyncClaim {
+                    ring: self,
+                    reporter,
+                    request_id,
+                })
         })
     }
 
@@ -973,22 +1044,6 @@ impl CorrectChord<PeerRingAction> for PeerRing {
 
     fn pre_stabilize(&self) -> Result<PeerRingAction> {
         self.begin_stabilization(new_uuid())
-    }
-
-    /// Untokened stabilization: the current head is the implied reporter, read
-    /// from the same snapshot the report is applied to.
-    fn stabilize(&self, info: TopoInfo) -> Result<PeerRingAction> {
-        let (next, ()) = self.transition(|state, _| {
-            let reporter = topology::successor_head(state).unwrap_or(state.local);
-            let step = self.step(state, TopologyEvent::Stabilize {
-                reporter,
-                request_id: None,
-                successors: info.successors,
-                predecessor: info.predecessor,
-            });
-            (step, ())
-        })?;
-        Ok(self.topology_multi_actions(next.actions))
     }
 
     fn topo_info(&self) -> Result<TopoInfo> {

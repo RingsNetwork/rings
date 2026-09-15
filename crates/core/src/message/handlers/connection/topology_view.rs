@@ -39,7 +39,7 @@
 //!       [stab: revalidate routability and commit]
 //!                  |
 //!                  v
-//!             [cancel token]
+//!    [claim dropped: token released on every exit path]
 //! ```
 
 use async_trait::async_trait;
@@ -74,8 +74,9 @@ impl HandleMsg<QueryForTopoInfoReport> for MessageHandler {
     ///
     /// Successor-sync claims are single-use and revalidated before every
     /// bounded candidate. Each connected candidate is joined before the cursor
-    /// advances; any connection or join failure cancels the token. A stale plan
-    /// returns without emitting additional effects. Stabilization reports are
+    /// advances. The claim is released when it drops, so a connection or join
+    /// failure releases the token by leaving the handler. A stale plan returns
+    /// without emitting additional effects. Stabilization reports are
     /// delegated to `handle_stabilization_report`.
     ///
     /// # Errors
@@ -89,46 +90,44 @@ impl HandleMsg<QueryForTopoInfoReport> for MessageHandler {
                 // The transaction origin is the only peer allowed to spend the
                 // successor-sync request id registered by `SendSuccessorQuery`.
                 let reporter = ctx.transaction.origin();
-                if !self
+                let Some(_claim) = self
                     .dht
                     .claim_successor_sync_report(reporter, msg.request_id)?
-                {
+                else {
                     return Ok(());
-                }
+                };
+                // The candidate budget is bounded before any per-candidate
+                // work, including the quality ordering below, so an untrusted
+                // report length cannot cost more than the budget.
+                let capacity = self.dht.successors().capacity();
+                let candidates = topology::bounded_connection_candidates(
+                    self.dht.did,
+                    capacity,
+                    msg.info.successors.iter().copied(),
+                );
+                let candidates = self
+                    .transport
+                    .order_dht_candidates_by_quality(candidates)
+                    .await;
                 // The plan owns the bounded candidate cursor. The DHT advances
                 // it between async connection attempts so each step can detect
                 // cancellation or replacement before doing more work.
                 let mut plan = SuccessorSyncConnectionPlan::new(
                     reporter,
                     msg.request_id,
-                    msg.info.successors.iter().copied(),
+                    candidates,
                     self.dht.did,
-                    self.dht.successors().capacity(),
+                    capacity,
                 );
-                loop {
-                    match self.dht.advance_successor_sync_connection_plan(&mut plan)? {
-                        SuccessorSyncConnectionStep::Connect(peer) => {
-                            if let Err(error) = self.connect_dht_peer(peer).await {
-                                // A failed connection means this report cannot
-                                // complete; release the request id immediately.
-                                self.dht.cancel_successor_sync(reporter, msg.request_id)?;
-                                return Err(error);
-                            }
-                            if self.transport.get_connection(peer).is_some() {
-                                if let Err(error) = self.join_dht(peer).await {
-                                    // Joining can fail after the transport is
-                                    // ready, so the in-flight successor-sync
-                                    // claim still needs explicit cleanup.
-                                    self.dht.cancel_successor_sync(reporter, msg.request_id)?;
-                                    return Err(error);
-                                }
-                            }
-                        }
-                        SuccessorSyncConnectionStep::Complete => {
-                            self.dht.cancel_successor_sync(reporter, msg.request_id)?;
-                            break;
-                        }
-                        SuccessorSyncConnectionStep::Stale => return Ok(()),
+                // `Complete` and `Stale` both end the loop; the claim drops
+                // with the handler either way. A connection or join failure
+                // leaves the handler, and leaving releases the claim.
+                while let SuccessorSyncConnectionStep::Connect(peer) =
+                    self.dht.advance_successor_sync_connection_plan(&mut plan)?
+                {
+                    self.connect_dht_peer(peer).await?;
+                    if self.transport.get_connection(peer).is_some() {
+                        self.join_dht(peer).await?;
                     }
                 }
             }
@@ -150,15 +149,16 @@ impl MessageHandler {
     ///
     /// Every candidate reservation rechecks that the reporter still owns the
     /// processing token. Completion revalidates transport routability, commits
-    /// at most one topology transition, and retires the token before follow-up
-    /// DHT effects execute.
+    /// at most one topology transition, and releases the claim before
+    /// follow-up DHT effects execute. Leaving on any error path releases the
+    /// claim as well, so a failed handler never leaves the head's token in
+    /// `Processing`.
     ///
     /// # Errors
     ///
     /// Returns an error when claim/plan state cannot be read, a candidate
     /// connection fails, routable topology cannot be committed, or a resulting
-    /// DHT action cannot be interpreted. Connection failures cancel the active
-    /// stabilization token before returning.
+    /// DHT action cannot be interpreted.
     async fn handle_stabilization_report(
         &self,
         ctx: &MessagePayload,
@@ -167,17 +167,24 @@ impl MessageHandler {
         // Only the peer that received the original stabilization query may
         // answer with this request id.
         let reporter = ctx.transaction.origin();
-        if !self
+        let Some(claim) = self
             .dht
             .claim_stabilization_report(reporter, msg.request_id)?
-        {
+        else {
             return Ok(());
-        }
-        // Candidate order is transport-local quality policy; candidate count is
-        // still bounded by successor capacity before any connection attempt.
-        let candidates = msg
-            .info
-            .connection_candidates(self.dht.did, self.dht.successors().capacity());
+        };
+        // The candidate budget (successor capacity plus the predecessor) is
+        // bounded before the per-candidate quality ordering, so an untrusted
+        // report length cannot cost more than the budget.
+        let capacity = self.dht.successors().capacity();
+        let candidates = topology::bounded_connection_candidates(
+            self.dht.did,
+            StabilizationConnectionPlan::candidate_capacity(capacity),
+            msg.info
+                .predecessor
+                .into_iter()
+                .chain(msg.info.successors.iter().copied()),
+        );
         let candidates = self
             .transport
             .order_dht_candidates_by_quality(candidates)
@@ -186,20 +193,17 @@ impl MessageHandler {
         // stale request before the next advertised candidate is opened.
         let mut plan = StabilizationConnectionPlan::new(
             reporter,
-            msg.request_id,
+            claim.request_id(),
             candidates,
             self.dht.did,
-            self.dht.successors().capacity(),
+            capacity,
         );
         loop {
             match self.dht.advance_stabilization_connection_plan(&mut plan)? {
                 StabilizationConnectionStep::Connect { candidate, .. } => {
-                    if let Err(error) = self.connect_dht_peer(candidate).await {
-                        // The pending stabilization cannot be completed after a
-                        // connection failure, so its request id is released.
-                        self.dht.cancel_stabilization(msg.request_id)?;
-                        return Err(error);
-                    }
+                    // A connection failure leaves the handler, and leaving
+                    // releases the claim.
+                    self.connect_dht_peer(candidate).await?;
                 }
                 StabilizationConnectionStep::Complete => break,
                 StabilizationConnectionStep::Stale => return Ok(()),
@@ -208,11 +212,12 @@ impl MessageHandler {
 
         // This is the only point where the reported topology can mutate the
         // local ring. The transport layer revalidates `reporter`, `request_id`,
-        // and routability under the lifecycle lock.
+        // and routability under the lifecycle lock; applying the report
+        // retires the token, and dropping the claim afterwards is a no-op.
         let stabilized =
             self.transport
-                .stabilize_routable_topology(reporter, msg.request_id, &msg.info)?;
-        self.dht.cancel_stabilization(msg.request_id)?;
+                .stabilize_routable_topology(reporter, claim.request_id(), &msg.info)?;
+        drop(claim);
         if let Some(event) = stabilized {
             self.handle_dht_events(&event).await?;
         }

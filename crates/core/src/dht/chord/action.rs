@@ -116,50 +116,6 @@ impl TopoInfo {
     pub(crate) fn has_confirmed_peer(&self) -> bool {
         self.predecessor.is_some() || !self.successors.is_empty()
     }
-
-    /// Select bounded, duplicate-free, non-local successor candidates.
-    ///
-    /// Selection preserves the report's first-seen order, skips the local DID,
-    /// and stops after `successor_capacity` accepted peers. The result is the
-    /// complete connection budget for one successor-sync report, so untrusted
-    /// report length cannot create unbounded transport work.
-    pub(crate) fn successor_connection_candidates(
-        &self,
-        local: Did,
-        successor_capacity: usize,
-    ) -> Vec<Did> {
-        let mut candidates = Vec::with_capacity(successor_capacity);
-        for candidate in self.successors.iter().copied() {
-            if candidates.len() == successor_capacity {
-                break;
-            }
-            if candidate != local && !candidates.contains(&candidate) {
-                candidates.push(candidate);
-            }
-        }
-        candidates
-    }
-
-    /// Select the bounded peer candidates for one stabilization report.
-    ///
-    /// The reported predecessor is considered first and receives one
-    /// independent budget slot. Successors then retain first-seen order and are
-    /// capped by `successor_capacity`; local and duplicate DIDs are removed
-    /// across both sources. The result therefore contains at most
-    /// `successor_capacity + 1` peers.
-    pub(crate) fn connection_candidates(&self, local: Did, successor_capacity: usize) -> Vec<Did> {
-        let mut candidates = Vec::with_capacity(successor_capacity.saturating_add(1));
-        for candidate in self
-            .predecessor
-            .into_iter()
-            .chain(self.successor_connection_candidates(local, successor_capacity))
-        {
-            if candidate != local && !candidates.contains(&candidate) {
-                candidates.push(candidate);
-            }
-        }
-        candidates
-    }
 }
 
 impl TryFrom<&PeerRing> for TopoInfo {

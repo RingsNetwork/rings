@@ -955,7 +955,10 @@ async fn test_topology_report_serializes_with_generation_retirement() -> Result<
     // Seed the same stabilization request id that the report below will spend.
     let request_id = uuid::Uuid::from_u128(1);
     let _ = transport.dht.begin_stabilization(request_id)?;
-    assert!(transport.dht.claim_stabilization_report(peer, request_id)?);
+    // The claim must stay alive until the report is applied below: dropping
+    // it would release the token and make the transition stale.
+    let claim = transport.dht.claim_stabilization_report(peer, request_id)?;
+    assert!(claim.is_some());
     let reported = TopoInfo {
         successors: vec![peer],
         predecessor: Some(peer),

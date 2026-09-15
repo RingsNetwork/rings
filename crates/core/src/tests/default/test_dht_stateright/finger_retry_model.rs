@@ -67,46 +67,6 @@ const MODEL_DEPTH: usize = 9;
 const MAX_STABILIZATION_CONNECTION_EFFECTS: u8 =
     (DEFAULT_SUCCESSOR_CAPACITY as u8).saturating_add(1);
 
-/// Logical model obligations touched by a topology event.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FormalModelScope {
-    /// Chord successor, predecessor, and membership topology obligations.
-    DhtTopology,
-    /// Finger proof, request-correlation, and retry scheduler obligations.
-    FingerRetry,
-}
-
-/// Scope set for events that mutate only Chord topology.
-const DHT_ONLY: &[FormalModelScope] = &[FormalModelScope::DhtTopology];
-/// Scope set for events that mutate only finger retry and convergence state.
-const FINGER_ONLY: &[FormalModelScope] = &[FormalModelScope::FingerRetry];
-/// Scope set for events preserving both topology and finger retry invariants.
-const DHT_AND_FINGER: &[FormalModelScope] =
-    &[FormalModelScope::DhtTopology, FormalModelScope::FingerRetry];
-
-/// Scope-routing manifest for model composition. This exhaustive match keeps
-/// event classification current, but is deliberately not treated as a model
-/// completeness proof. Concrete action coverage and network effects are
-/// checked by the transition explorations and production-path tests below.
-fn formal_model_scopes(event: &TopologyEvent) -> &'static [FormalModelScope] {
-    match event {
-        TopologyEvent::Join { .. }
-        | TopologyEvent::Admit { .. }
-        | TopologyEvent::Remove { .. }
-        | TopologyEvent::UpdateSuccessor { .. }
-        | TopologyEvent::Stabilize { .. } => DHT_AND_FINGER,
-        TopologyEvent::Notify { .. }
-        | TopologyEvent::BeginStabilize { .. }
-        | TopologyEvent::ClaimStabilize { .. }
-        | TopologyEvent::CancelStabilize { .. } => DHT_ONLY,
-        TopologyEvent::BeginFingerRevalidation
-        | TopologyEvent::AdvanceFingerConvergence { .. }
-        | TopologyEvent::ApplyFinger { .. }
-        | TopologyEvent::DeferFinger { .. }
-        | TopologyEvent::CancelFinger { .. } => FINGER_ONLY,
-    }
-}
-
 /// Complete finite-checker state for adversarial finger retry schedules.
 ///
 /// Production topology is retained verbatim; other fields model environment
@@ -424,17 +384,7 @@ impl FingerRetryState {
             2 => TopologyEvent::UpdateSuccessor {
                 successor: Did::from(16u32),
             },
-            3 => TopologyEvent::Stabilize {
-                reporter: self
-                    .topology
-                    .successors
-                    .first()
-                    .copied()
-                    .unwrap_or(Did::from(8u32)),
-                request_id: None,
-                successors: vec![Did::from(32u32)],
-                predecessor: Some(Did::from(2u32)),
-            },
+            3 => return self.stabilize_from_head(),
             _ => TopologyEvent::Remove {
                 peer: self
                     .topology
@@ -452,20 +402,65 @@ impl FingerRetryState {
         next
     }
 
-    /// Process restart keeps serialized topology hints but drops in-flight
-    /// scheduler state, forcing any delayed report to prove its old UUID.
+    /// Apply one complete correlated stabilization round from the current head.
+    ///
+    /// Production accepts a report only through `BeginStabilize`, `ClaimStabilize`
+    /// and a `Stabilize` carrying the same token, so the mutation runs all three.
+    /// Without a head there is no round and the cycle simply advances.
+    fn stabilize_from_head(&self) -> Self {
+        let mut next = self.clone();
+        next.next_topology_mutation = self.next_topology_mutation.saturating_add(1) % 5;
+        let Some(reporter) = successor_head(&self.topology) else {
+            return next;
+        };
+        let request_id = uuid::Uuid::from_u128(self.next_request_id);
+        next.next_request_id = self.next_request_id.saturating_add(1);
+        for event in [
+            TopologyEvent::BeginStabilize { request_id },
+            TopologyEvent::ClaimStabilize {
+                reporter,
+                request_id,
+            },
+            TopologyEvent::Stabilize {
+                reporter,
+                request_id,
+                successors: vec![Did::from(32u32)],
+                predecessor: Some(Did::from(2u32)),
+            },
+        ] {
+            next.topology = step(&next.topology, event, DEFAULT_SUCCESSOR_CAPACITY).state;
+        }
+        next
+    }
+
+    /// Process restart rebuilds the ring exactly as production does: nothing
+    /// about topology or convergence is persisted, so the node starts from an
+    /// empty table and rejoins its previous successor head as its seed. Any
+    /// delayed report from before the restart must then prove its old UUID
+    /// against the new process.
     ///
     /// Model time resets and the process epoch advances while identity generation
     /// and replay history remain continuous.
     fn restart(&self) -> Self {
         let mut next = self.clone();
-        next.topology = TopologyState::new(
+        let fresh = TopologyState::new(
             self.topology.local,
-            self.topology.successors.clone(),
-            self.topology.predecessor,
-            self.topology.fingers.clone(),
-            self.topology.fix_finger_index,
+            Vec::new(),
+            None,
+            vec![None; self.topology.fingers.len()],
+            0,
         );
+        next.topology = match successor_head(&self.topology) {
+            Some(seed) => {
+                step(
+                    &fresh,
+                    TopologyEvent::Join { peer: seed },
+                    DEFAULT_SUCCESSOR_CAPACITY,
+                )
+                .state
+            }
+            None => fresh,
+        };
         if let Some(request) = self.current_request() {
             next.delayed_reports.push(request);
         }
@@ -587,12 +582,14 @@ enum StabilizationAction {
     CompleteCurrentProof,
     /// Replay a proof retired by cancellation or supersession.
     DeliverSupersededProof,
+    /// Deliver the current proof before any handler has claimed it.
+    DeliverUnclaimedProof,
     /// Insert a closer successor to invalidate reporter ownership.
     MoveSuccessorHead,
 }
 
 /// Exhaustive environment alphabet for stabilization-effect exploration.
-const STABILIZATION_ACTIONS: [StabilizationAction; 9] = [
+const STABILIZATION_ACTIONS: [StabilizationAction; 10] = [
     StabilizationAction::Begin,
     StabilizationAction::ClaimCurrentProof,
     StabilizationAction::ReserveCurrentCandidate,
@@ -601,6 +598,7 @@ const STABILIZATION_ACTIONS: [StabilizationAction; 9] = [
     StabilizationAction::CancelCurrent,
     StabilizationAction::CompleteCurrentProof,
     StabilizationAction::DeliverSupersededProof,
+    StabilizationAction::DeliverUnclaimedProof,
     StabilizationAction::MoveSuccessorHead,
 ];
 
@@ -654,10 +652,12 @@ impl StabilizationModelState {
         }
     }
 
-    /// Begin a correlated stabilization query and supersede any older proof.
+    /// Begin a correlated stabilization query and supersede an unanswered proof.
     ///
-    /// Retired proofs and plans remain available only to adversarial replay actions;
-    /// the current owner is replaced by the query action emitted from production.
+    /// Production emits no query while the current proof is claimed, and the
+    /// model then keeps that owner. Otherwise retired proofs and plans remain
+    /// available only to adversarial replay actions; the current owner is
+    /// replaced by the query action emitted from production.
     fn begin(&self) -> Self {
         let request_id = uuid::Uuid::from_u128(self.next_request_id);
         let output = step(
@@ -674,6 +674,9 @@ impl StabilizationModelState {
         });
         let mut next = self.clone();
         next.topology = output.state;
+        if issued.is_none() && matches!(self.current, Some((_, _, true))) {
+            return next;
+        }
         // A new query supersedes the older proof but keeps it replayable, so
         // stale delivery is checked instead of assumed impossible.
         if let Some((reporter, request_id, _)) = self.current {
@@ -839,7 +842,7 @@ impl StabilizationModelState {
             &self.topology,
             TopologyEvent::Stabilize {
                 reporter,
-                request_id: Some(request_id),
+                request_id,
                 successors: vec![reporter],
                 predecessor: Some(self.topology.local),
             },
@@ -872,6 +875,10 @@ impl StabilizationModelState {
                 .last()
                 .copied()
                 .map_or_else(|| self.clone(), |request| self.deliver(request)),
+            StabilizationAction::DeliverUnclaimedProof => match self.current {
+                Some((reporter, request_id, false)) => self.deliver((reporter, request_id)),
+                _ => self.clone(),
+            },
             StabilizationAction::MoveSuccessorHead => {
                 // A closer successor invalidates the reporter binding even if
                 // the old proof arrives later.
@@ -901,74 +908,6 @@ impl StabilizationModelState {
     }
 }
 
-/// Prove every production topology event is assigned at least one model scope.
-///
-/// Representative events cover every enum variant and assert the intended split
-/// between DHT-only, finger-only, and cross-model transition obligations.
-#[test]
-fn test_topology_event_scope_routing_is_exhaustive() {
-    let request = FingerFixRequest::new(0, uuid::Uuid::from_u128(1)).unwrap_or(FingerFixRequest {
-        slot: u16::MAX,
-        request_id: uuid::Uuid::nil(),
-    });
-    let local = Did::from(0u32);
-    let peer = Did::from(1u32);
-    let events = [
-        TopologyEvent::Join { peer },
-        TopologyEvent::Admit {
-            peer,
-            fixed_fingers: vec![ConditionalFingerUpdate { request }],
-            now_ms: 1,
-        },
-        TopologyEvent::Remove {
-            peer,
-            successor: SuccessorRemoval::Preserve,
-        },
-        TopologyEvent::UpdateSuccessor { successor: peer },
-        TopologyEvent::Notify { predecessor: peer },
-        TopologyEvent::BeginStabilize {
-            request_id: uuid::Uuid::from_u128(3),
-        },
-        TopologyEvent::ClaimStabilize {
-            reporter: peer,
-            request_id: uuid::Uuid::from_u128(3),
-        },
-        TopologyEvent::Stabilize {
-            reporter: peer,
-            request_id: None,
-            successors: vec![peer],
-            predecessor: Some(peer),
-        },
-        TopologyEvent::BeginFingerRevalidation,
-        TopologyEvent::AdvanceFingerConvergence {
-            now_ms: 1,
-            request_id: uuid::Uuid::from_u128(2),
-        },
-        TopologyEvent::ApplyFinger {
-            request,
-            successor: local,
-            now_ms: 1,
-        },
-        TopologyEvent::DeferFinger {
-            request,
-            successor: local,
-            now_ms: 1,
-        },
-        TopologyEvent::CancelFinger { request, now_ms: 1 },
-        TopologyEvent::CancelStabilize {
-            request_id: uuid::Uuid::from_u128(3),
-        },
-    ];
-
-    for event in &events {
-        assert!(!formal_model_scopes(event).is_empty());
-    }
-    assert_eq!(formal_model_scopes(&events[0]), DHT_AND_FINGER);
-    assert_eq!(formal_model_scopes(&events[1]), DHT_AND_FINGER);
-    assert_eq!(formal_model_scopes(&events[4]), DHT_ONLY);
-    assert_eq!(formal_model_scopes(&events[9]), FINGER_ONLY);
-}
-
 /// Prove a stabilization plan has bounded fan-out and loses authority when stale.
 ///
 /// The test exhausts one claimed plan, then supersedes another between reservation
@@ -993,7 +932,10 @@ fn test_production_stabilization_effect_plan_caps_and_stops_after_supersession()
         .transition(StabilizationAction::Begin)
         .transition(StabilizationAction::ClaimCurrentProof)
         .transition(StabilizationAction::ReserveCurrentCandidate);
-    let superseded = reserved.transition(StabilizationAction::Begin);
+    // A new maintenance round cannot supersede the claimed report; a head
+    // change can.
+    assert_eq!(reserved.transition(StabilizationAction::Begin), reserved);
+    let superseded = reserved.transition(StabilizationAction::MoveSuccessorHead);
     let permitted_after_supersession =
         superseded.transition(StabilizationAction::ExecuteReservedCandidate);
     assert_eq!(permitted_after_supersession.connection_effects[0].1, 1);
@@ -1028,6 +970,21 @@ fn test_production_stabilization_tokens_gate_verified_range_proofs() {
                     && state.superseded.last().is_some()
                 {
                     assert_eq!(next.topology, state.topology);
+                }
+                // A report whose token is still `Requested` has not been
+                // claimed by any handler and must not change topology.
+                if matches!(action, StabilizationAction::DeliverUnclaimedProof)
+                    && matches!(state.current, Some((_, _, false)))
+                {
+                    assert_eq!(next.topology, state.topology);
+                }
+                // A new round never revokes a claimed report; only head
+                // movement or cancellation retires it.
+                if matches!(action, StabilizationAction::Begin)
+                    && matches!(state.current, Some((_, _, true)))
+                {
+                    assert_eq!(next.current, state.current);
+                    assert_eq!(next.current_plan, state.current_plan);
                 }
                 if matches!(action, StabilizationAction::AttemptSupersededCandidate) {
                     assert_eq!(next.connection_effects, state.connection_effects);

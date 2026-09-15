@@ -38,12 +38,17 @@ pub(crate) const DEFAULT_PENDING_CONNECTION_CAPACITY: usize = 32;
 
 /// Maximum lifetime of a pending or admitting connection generation.
 pub(super) const PENDING_CONNECTION_TIMEOUT_MS: i64 = 180_000;
-// A deferred finger proof expires on the same clock as the handshake that can
-// claim it. If these drift apart, a pending connection could commit a proof
-// that the DHT has already considered dead, or cancel a still-live proof.
-const _: () = assert!(
-    PENDING_CONNECTION_TIMEOUT_MS as u64 == crate::dht::finger::FINGER_ADMISSION_TIMEOUT_MS
-);
+// A deferred finger proof and the handshake generation that can claim it run
+// on different clocks (the ring's monotonic origin versus wall-clock epoch
+// milliseconds) and start at different instants (report arrival versus
+// reservation). The generation owns the proof once it is attached, and its
+// expiry cancels the proof explicitly, so the DHT lease only has to outlast
+// the generation: a lease that expired first would charge a failure and
+// discard a proof whose handshake could still succeed. Nothing can commit a
+// proof the DHT has already released, because commit re-validates token
+// ownership.
+const _: () =
+    assert!(crate::dht::finger::FINGER_ADMISSION_TIMEOUT_MS > PENDING_CONNECTION_TIMEOUT_MS as u64);
 
 /// Shared registry of per-peer pending, admitting, and active connection generations.
 pub(super) type SharedConnectionLifecycles = Arc<Mutex<ConnectionLifecycleRegistry>>;
@@ -766,7 +771,9 @@ impl SwarmTransport {
                         pending_updates.entry(current).or_default().insert(request);
                         Ok(FingerUpdateDisposition::Queued)
                     }
-                    FingerDeferOutcome::Rejected(rejection) => Ok(rejection.into()),
+                    FingerDeferOutcome::Rejected(rejection) => {
+                        Ok(FingerUpdateDisposition::Rejected(rejection))
+                    }
                 }
             }
             FingerCandidateAdmission::Apply => {
@@ -784,7 +791,9 @@ impl SwarmTransport {
                     .defer_fixed_finger(request, peer)
                     .map(|outcome| match outcome {
                         FingerDeferOutcome::Deferred { .. } => FingerUpdateDisposition::Missing,
-                        FingerDeferOutcome::Rejected(rejection) => rejection.into(),
+                        FingerDeferOutcome::Rejected(rejection) => {
+                            FingerUpdateDisposition::Rejected(rejection)
+                        }
                     })
             }
             FingerCandidateAdmission::Unroutable => {
@@ -794,7 +803,9 @@ impl SwarmTransport {
                 // a different successor's retained admission proof.
                 match self.dht.retire_finger_candidate(request, peer)? {
                     FingerRetireOutcome::Retired => Ok(FingerUpdateDisposition::Unroutable),
-                    FingerRetireOutcome::Rejected(rejection) => Ok(rejection.into()),
+                    FingerRetireOutcome::Rejected(rejection) => {
+                        Ok(FingerUpdateDisposition::Rejected(rejection))
+                    }
                 }
             }
         }

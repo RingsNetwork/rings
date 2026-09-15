@@ -295,6 +295,30 @@ impl TopologyState {
     }
 }
 
+/// The bounded connection budget of one topology report.
+///
+/// Keeps the first `capacity` distinct peers of `candidates`, in the order
+/// given, skipping `local`. Every report-driven connection plan is built from
+/// this one definition, so an untrusted report of any length can cause at most
+/// `capacity` connection effects: the successor capacity for a successor-list
+/// sync report, one more for a stabilization report's predecessor.
+pub(crate) fn bounded_connection_candidates(
+    local: Did,
+    capacity: usize,
+    candidates: impl IntoIterator<Item = Did>,
+) -> Vec<Did> {
+    let mut bounded = Vec::with_capacity(capacity);
+    for candidate in candidates {
+        if bounded.len() == capacity {
+            break;
+        }
+        if candidate != local && !bounded.contains(&candidate) {
+            bounded.push(candidate);
+        }
+    }
+    bounded
+}
+
 /// Pure result of looking up the owner of a DID in local topology state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FindSuccessorStep {
@@ -372,13 +396,12 @@ pub enum TopologyEvent {
     Stabilize {
         /// Peer whose authenticated topology report drives this transition.
         ///
-        /// Token-bearing transitions require this DID to own the current
-        /// `Processing` claim and remain the successor head.
+        /// The transition requires this DID to own the current `Processing`
+        /// claim; a report from any other peer, or with any other token, is
+        /// ignored.
         reporter: Did,
-        /// Correlation identity echoed by the authenticated report. `None` is
-        /// reserved for the public compatibility transition and cannot prove
-        /// finger-table ranges.
-        request_id: Option<uuid::Uuid>,
+        /// Correlation identity echoed by the authenticated report.
+        request_id: uuid::Uuid,
         /// Successor list reported by the successor.
         successors: Vec<Did>,
         /// Predecessor reported by the successor.

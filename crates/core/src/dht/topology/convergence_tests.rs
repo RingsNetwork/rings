@@ -94,7 +94,7 @@ fn converge_with_oracle(mut current: TopologyState, all: &[Did]) -> (TopologySta
                 &current,
                 TopologyEvent::Stabilize {
                     reporter,
-                    request_id: Some(stabilize_request_id),
+                    request_id: stabilize_request_id,
                     successors: Vec::new(),
                     predecessor: predecessor(all, reporter),
                 },
@@ -712,6 +712,146 @@ fn test_periodic_revalidation_marks_a_range_without_emitting_a_lookup() {
             .count(),
         1
     );
+}
+
+/// Prove that a range whose attempt fails does not starve the other ranges.
+///
+/// After the attempt for the first remote range is cancelled, the next lookup
+/// is issued for the following range rather than for the same slot; once every
+/// other range is proved, selection wraps back to the failing one, so it costs
+/// one attempt per rotation instead of blocking the table.
+#[test]
+fn test_failed_range_does_not_starve_the_next_range() {
+    let local = did(0);
+    let seed = did(1);
+    let far = did(8);
+    let hinted = [seed, far].into_iter().fold(
+        state(local, Vec::new(), None, vec![None; 8], 0),
+        |current, peer| {
+            step(
+                &current,
+                TopologyEvent::Join { peer },
+                DEFAULT_SUCCESSOR_CAPACITY,
+            )
+            .state
+        },
+    );
+    // Slot 0 lies in the local successor range; `far` hints slots 1..=3 and
+    // slots 4..=7 are unknown: two remote ranges.
+    assert_eq!(hinted.fingers, vec![
+        Some(seed),
+        Some(far),
+        Some(far),
+        Some(far),
+        None,
+        None,
+        None,
+        None
+    ]);
+
+    let first = step(&hinted, advance(1_000), DEFAULT_SUCCESSOR_CAPACITY);
+    let failing = emitted_finger_request(&first);
+    assert_eq!(failing.slot_index(), 1);
+    let cancelled = step(
+        &first.state,
+        TopologyEvent::CancelFinger {
+            request: failing,
+            now_ms: 1_000,
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+
+    // The retry goes to the next range, past the whole run of `far` hints.
+    let retried = step(&cancelled.state, advance(3_000), DEFAULT_SUCCESSOR_CAPACITY);
+    let next_range = emitted_finger_request(&retried);
+    assert_eq!(next_range.slot_index(), 4);
+    let proved = step(
+        &retried.state,
+        TopologyEvent::ApplyFinger {
+            request: next_range,
+            successor: did(200),
+            now_ms: 3_001,
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+    let projection = proved.state.finger_convergence_projection();
+    assert_eq!(projection.verified[4..], [true, true, true, true]);
+    assert_eq!(projection.failure_streak, 0);
+
+    // Only the failing range is left, so selection wraps back to it.
+    let wrapped = step(&proved.state, advance(4_001), DEFAULT_SUCCESSOR_CAPACITY);
+    assert_eq!(emitted_finger_request(&wrapped).slot_index(), 1);
+}
+
+/// Prove periodic revalidation is deferred by pending work only while that
+/// work is succeeding.
+///
+/// With an unverified remote range and no failure, revalidation waits for the
+/// pass to finish. Once the pending range is failing, revalidation reopens the
+/// next range anyway, so a slot whose successor never admits cannot freeze the
+/// revalidation of every proved range.
+#[test]
+fn test_revalidation_is_deferred_only_by_succeeding_work() {
+    let local = did(0);
+    let seed = did(1);
+    let far = did(8);
+    let mut current = state(
+        local,
+        vec![seed, far],
+        None,
+        vec![
+            Some(seed),
+            Some(far),
+            Some(far),
+            Some(far),
+            Some(did(64)),
+            Some(did(64)),
+            Some(did(64)),
+            Some(did(64)),
+        ],
+        3,
+    );
+    current.finger_convergence.fill_verified_for_test(true);
+    for slot in 1..=3 {
+        assert!(current
+            .finger_convergence
+            .set_slot_verified_for_test(slot, false));
+    }
+
+    let deferred = step(
+        &current,
+        TopologyEvent::BeginFingerRevalidation,
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+    assert!(deferred.state.finger_convergence_projection().verified[4]);
+
+    let issued = step(&deferred.state, advance(1_000), DEFAULT_SUCCESSOR_CAPACITY);
+    let failing = emitted_finger_request(&issued);
+    assert_eq!(failing.slot_index(), 1);
+    let cancelled = step(
+        &issued.state,
+        TopologyEvent::CancelFinger {
+            request: failing,
+            now_ms: 1_000,
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+    assert_eq!(
+        cancelled
+            .state
+            .finger_convergence_projection()
+            .failure_streak,
+        1
+    );
+
+    let reopened = step(
+        &cancelled.state,
+        TopologyEvent::BeginFingerRevalidation,
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+    let verified = reopened.state.finger_convergence_projection().verified;
+    assert_eq!(verified[4..], [false, false, false, false]);
+    assert!(verified[0]);
 }
 
 /// Prove cancellation cannot bypass the per-node minimum lookup interval.

@@ -1,7 +1,6 @@
 use super::PeerRing;
 use super::PeerRingAction;
 use super::RemoteAction;
-use super::TopoInfo;
 use crate::dht::topology::SuccessorRemoval;
 use crate::dht::topology::TopologyEvent;
 use crate::dht::types::Chord;

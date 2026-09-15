@@ -547,11 +547,6 @@ fn discovery_model(all: Vec<Did>, rounds: u8) -> ActorModel<DiscoveryNode, Cfg, 
 /// topology reducer directly instead of duplicating transition semantics.
 mod finger_retry_model;
 mod storage_model;
-/// Focused successor-list token and bounded connection-effect model.
-///
-/// Keeping this smaller state space separate makes exact, single-use claim
-/// ownership visible independently of the broader finger retry exploration.
-mod successor_sync_model;
 
 #[cfg(test)]
 mod tests {

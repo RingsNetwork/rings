@@ -24,6 +24,10 @@
 //! 4. A failure increases the retry floor. Only committed evidence (or an
 //!    equivalent locally confirmed range) resets it; merely starting a
 //!    handshake is not progress.
+//! 5. Slot selection is cyclic: the next lookup starts after the range the
+//!    previous attempt proved or failed, wrapping to the first routable slot.
+//!    One slot whose successor never admits therefore costs one attempt per
+//!    rotation instead of monopolizing the single attempt forever.
 //!
 //! # Algorithm flow
 //!
@@ -33,7 +37,7 @@
 //! scheduler tick -> expire old owner -> apply retry floor |
 //!        |                                               |
 //!        v                                               |
-//! choose first unverified routable slot                  |
+//! choose next unverified routable slot after the cursor  |
 //!        |                                               |
 //!        v                                               |
 //! issue (slot, UUID, evidence epoch)                     |
@@ -92,10 +96,16 @@ const FINGER_LOOKUP_TIMEOUT_MS: u64 = 10_000;
 
 /// Maximum time a timely proof may wait for transport admission.
 ///
-/// This matches the pending WebRTC generation lease and also bounds the window
-/// before a connection generation has been allocated. Expiry counts as a
-/// failed attempt and therefore enters exponential backoff.
-pub(crate) const FINGER_ADMISSION_TIMEOUT_MS: u64 = 180_000;
+/// The lease is a backstop for a proof that never gains a connection
+/// generation to own it (the handler died between deferring the proof and
+/// reserving the handshake). A proof that is attached to a generation is
+/// released by that generation's own expiry or admission, so the lease must
+/// outlast a full handshake generation: it is the handshake timeout plus a
+/// margin covering the gap between report arrival (when this lease starts, on
+/// the ring's monotonic clock) and handshake reservation (when the generation's
+/// wall-clock timeout starts). Expiry counts as a failed attempt and therefore
+/// enters exponential backoff.
+pub(crate) const FINGER_ADMISSION_TIMEOUT_MS: u64 = 210_000;
 
 /// Serializable protocol state for one node's local finger convergence.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -115,6 +125,11 @@ pub(crate) struct FingerConvergenceState {
     /// It tracks failures and minimum issue spacing but contains no timer or
     /// random-number side effect.
     retry: FingerRetryState,
+    /// Slot after the range the last attempt proved or failed.
+    ///
+    /// [`Self::prepare_lookup`] resumes selection here (cyclically), so the
+    /// unverified slots are served round-robin rather than lowest-first.
+    cursor: usize,
 }
 
 /// Test-only observation used by the retry and interleaving models.
@@ -165,6 +180,7 @@ impl FingerConvergenceState {
             evidence: FingerEvidence::new(slot_count),
             attempt: FingerAttempt::Idle,
             retry: FingerRetryState::default(),
+            cursor: 0,
         }
     }
 
@@ -240,12 +256,23 @@ impl FingerConvergenceState {
         self.attempt.clear();
     }
 
-    /// Reopen one consecutive hint range after a completed convergence pass.
+    /// Reopen one consecutive hint range for periodic revalidation.
     ///
     /// Revalidation begins after `cursor` and affects only the following run of
-    /// equal hints. Active or incomplete passes remain unchanged.
-    pub(crate) fn begin_revalidation(&mut self, fingers: &[Option<Did>], cursor: usize) {
-        if self.attempt.is_idle() && self.evidence.all_verified() {
+    /// equal hints. It is deferred while an attempt is active or while
+    /// routable work (at or after `first_routable_slot`) is still pending and
+    /// succeeding. Pending work that is failing (`failure_streak > 0`) does not
+    /// defer it: otherwise one slot whose successor never admits would block
+    /// revalidation of every other range for as long as it keeps failing.
+    pub(crate) fn begin_revalidation(
+        &mut self,
+        fingers: &[Option<Did>],
+        cursor: usize,
+        first_routable_slot: usize,
+    ) {
+        let succeeding_work_pending = self.evidence.any_unverified_from(first_routable_slot)
+            && self.retry.failure_streak() == 0;
+        if self.attempt.is_idle() && !succeeding_work_pending {
             self.evidence.reopen_next_range(fingers, cursor);
         }
     }
@@ -268,8 +295,9 @@ impl FingerConvergenceState {
             return None;
         }
         if self.attempt.is_expired(now_ms) {
-            self.attempt.clear();
-            self.retry.record_failure(now_ms);
+            if let Some(request) = self.attempt.request() {
+                self.fail_attempt(fingers, request.slot_index(), now_ms);
+            }
             return None;
         }
         if !self.attempt.is_idle()
@@ -280,8 +308,11 @@ impl FingerConvergenceState {
         }
 
         // `first_slot` may skip the local successor interval; evidence decides
-        // the next unverified slot at or after that boundary.
-        let slot = self.evidence.first_unverified_from(first_slot)?;
+        // the next unverified slot at or after that boundary, resuming after
+        // the previous attempt so no single slot can starve the rest.
+        let slot = self
+            .evidence
+            .next_unverified_cyclic(first_slot, self.cursor)?;
         let request = FingerFixRequest::new(slot, request_id)?;
         self.attempt = FingerAttempt::awaiting_report(
             request,
@@ -299,15 +330,15 @@ impl FingerConvergenceState {
     pub(crate) fn defer_result(
         &mut self,
         local: Did,
-        slot_count: usize,
+        fingers: &[Option<Did>],
         request: FingerFixRequest,
         successor: Did,
         now_ms: u64,
     ) -> FingerDeferOutcome {
-        let proof = match self.validated_proof(local, slot_count, request, successor, now_ms) {
+        let proof = match self.validated_proof(local, fingers.len(), request, successor, now_ms) {
             Ok(proof) => proof,
             Err(rejection) => {
-                self.retire_rejected_current(request, successor, rejection, now_ms);
+                self.retire_rejected_current(fingers, request, successor, rejection, now_ms);
                 return FingerDeferOutcome::Rejected(rejection);
             }
         };
@@ -333,17 +364,17 @@ impl FingerConvergenceState {
         let proof = match self.validated_proof(local, fingers.len(), request, successor, now_ms) {
             Ok(proof) => proof,
             Err(rejection) => {
-                self.retire_rejected_current(request, successor, rejection, now_ms);
+                self.retire_rejected_current(fingers, request, successor, rejection, now_ms);
                 return FingerApplyOutcome::Rejected(rejection);
             }
         };
         self.attempt.clear_if_owned(request);
-        if self.evidence.apply(fingers, local, proof) {
-            self.retry.record_progress();
-            FingerApplyOutcome::Applied { end: proof.end }
-        } else {
-            FingerApplyOutcome::Rejected(FingerReportRejection::Stale)
-        }
+        // `validated_proof` established that the proof is accepted by at least
+        // one slot of its range, so application always commits.
+        self.evidence.apply(fingers, local, proof);
+        self.cursor = proof.end.saturating_add(1);
+        self.retry.record_progress();
+        FingerApplyOutcome::Applied { end: proof.end }
     }
 
     /// Retire a current, valid report whose candidate transport cannot use.
@@ -356,20 +387,25 @@ impl FingerConvergenceState {
     pub(crate) fn retire_result(
         &mut self,
         local: Did,
-        slot_count: usize,
+        fingers: &[Option<Did>],
         request: FingerFixRequest,
         successor: Did,
         now_ms: u64,
     ) -> FingerRetireOutcome {
-        if let Err(rejection) = self.validated_proof(local, slot_count, request, successor, now_ms)
-        {
-            self.retire_rejected_current(request, successor, rejection, now_ms);
-            return FingerRetireOutcome::Rejected(rejection);
-        }
+        let proof = match self.validated_proof(local, fingers.len(), request, successor, now_ms) {
+            Ok(proof) => proof,
+            Err(rejection) => {
+                self.retire_rejected_current(fingers, request, successor, rejection, now_ms);
+                return FingerRetireOutcome::Rejected(rejection);
+            }
+        };
 
         // `validated_proof` established exact ownership of this token and, for
         // an admission proof, this successor. Retiring it is therefore safe.
+        // The whole proved range failed with this candidate, so selection
+        // resumes after it.
         self.attempt.clear();
+        self.cursor = proof.end.saturating_add(1);
         self.retry.record_failure(now_ms);
         FingerRetireOutcome::Retired
     }
@@ -394,10 +430,26 @@ impl FingerConvergenceState {
     ///
     /// Matching ownership is released and counted as a failure at `now_ms`.
     /// Stale tokens are no-ops and cannot retire newer work.
-    pub(crate) fn cancel(&mut self, request: FingerFixRequest, now_ms: u64) {
+    pub(crate) fn cancel(
+        &mut self,
+        fingers: &[Option<Did>],
+        request: FingerFixRequest,
+        now_ms: u64,
+    ) {
         if self.attempt.clear_if_owned(request) {
-            self.retry.record_failure(now_ms);
+            self.fail_attempt(fingers, request.slot_index(), now_ms);
         }
+    }
+
+    /// Record one failed attempt at `slot` and move selection past its hint run.
+    ///
+    /// The slots sharing `slot`'s inferred hint expect the same successor, so
+    /// retrying them next would repeat the same failure; the cursor skips the
+    /// run and the retry floor rises.
+    fn fail_attempt(&mut self, fingers: &[Option<Did>], slot: usize, now_ms: u64) {
+        self.attempt.clear();
+        self.cursor = FingerEvidence::hint_run_end(fingers, slot).saturating_add(1);
+        self.retry.record_failure(now_ms);
     }
 
     /// Validate token ownership first, then the Chord range and evidence epoch.
@@ -440,6 +492,7 @@ impl FingerConvergenceState {
     /// expired current input adds retry pressure; stale input is ignored.
     fn retire_rejected_current(
         &mut self,
+        fingers: &[Option<Did>],
         request: FingerFixRequest,
         successor: Did,
         rejection: FingerReportRejection,
@@ -448,9 +501,10 @@ impl FingerConvergenceState {
         if !self.attempt.can_consume(request, successor) {
             return;
         }
-        self.attempt.clear();
         if rejection.counts_as_failure() {
-            self.retry.record_failure(now_ms);
+            self.fail_attempt(fingers, request.slot_index(), now_ms);
+        } else {
+            self.attempt.clear();
         }
     }
 }

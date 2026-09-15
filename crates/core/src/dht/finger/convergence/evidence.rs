@@ -85,6 +85,12 @@ impl FingerSlotEvidence {
             verified: false,
         }
     }
+
+    /// Whether `proof` may write this slot: the hint did not change after the
+    /// proof's lookup was issued (`changed_at <= issued_epoch`).
+    const fn admits(self, proof: FingerRangeProof) -> bool {
+        self.changed_at <= proof.issued_epoch
+    }
 }
 
 /// Result of advancing evidence after hint changes.
@@ -168,11 +174,49 @@ impl FingerEvidence {
     ///
     /// Search is ascending; `None` means the requested suffix is fully verified.
     pub(super) fn first_unverified_from(&self, first_slot: usize) -> Option<usize> {
+        self.first_unverified_in(first_slot..self.slots.len())
+    }
+
+    /// Return the first slot in `range` that needs proof.
+    fn first_unverified_in(&self, range: std::ops::Range<usize>) -> Option<usize> {
         self.slots
             .iter()
             .enumerate()
-            .skip(first_slot)
+            .take(range.end)
+            .skip(range.start)
             .find_map(|(index, slot)| (!slot.verified).then_some(index))
+    }
+
+    /// Return the next unverified slot in cyclic order from `cursor`, never
+    /// selecting a slot below `first_slot`.
+    ///
+    /// The search covers `[max(cursor, first_slot), len)` and then wraps to
+    /// `[first_slot, cursor)`. Resuming after the previous attempt instead of
+    /// always at the lowest unverified slot is what keeps one persistently
+    /// failing slot from monopolizing the single in-flight attempt: every
+    /// unverified slot is selected once per rotation.
+    pub(super) fn next_unverified_cyclic(&self, first_slot: usize, cursor: usize) -> Option<usize> {
+        let start = cursor.max(first_slot);
+        self.first_unverified_from(start)
+            .or_else(|| self.first_unverified_in(first_slot..start))
+    }
+
+    /// Inclusive end of the run of equal hints that starts at `slot`.
+    ///
+    /// Slots sharing one inferred hint have one expected successor, so a proof
+    /// or a failure for `slot` is evidence about the whole run.
+    pub(super) fn hint_run_end(fingers: &[Option<Did>], slot: usize) -> usize {
+        let Some(value) = fingers.get(slot) else {
+            return slot;
+        };
+        fingers
+            .iter()
+            .enumerate()
+            .skip(slot)
+            .take_while(|(_, finger)| *finger == value)
+            .map(|(index, _)| index)
+            .last()
+            .unwrap_or(slot)
     }
 
     /// Return whether the hint at `slot` changed between two topology snapshots.
@@ -232,7 +276,7 @@ impl FingerEvidence {
         }
     }
 
-    /// Reopen the next consecutive hint range after a completed pass.
+    /// Reopen the next consecutive hint range for periodic revalidation.
     ///
     /// Selection begins after `cursor`, wraps once, and clears only the run that
     /// shares the first selected hint value. Empty tables remain unchanged.
@@ -242,19 +286,15 @@ impl FingerEvidence {
             return;
         }
         let start = cursor.saturating_add(1) % slot_count;
-        // `value` may be `None`: consecutive empty hints also need periodic
-        // revalidation because absence is only local inferred state.
-        let Some(value) = fingers.get(start).copied() else {
-            return;
-        };
-        for (finger, evidence) in fingers
-            .iter()
+        // The run may consist of `None` hints: consecutive empty hints also need
+        // periodic revalidation because absence is only local inferred state.
+        let end = Self::hint_run_end(fingers, start);
+        for evidence in self
+            .slots
+            .iter_mut()
+            .take(end.saturating_add(1))
             .skip(start)
-            .zip(self.slots.iter_mut().skip(start))
         {
-            if *finger != value {
-                break;
-            }
             evidence.verified = false;
         }
     }
@@ -262,43 +302,42 @@ impl FingerEvidence {
     /// Check that a proof can still update at least one slot in its range.
     ///
     /// One slot whose change epoch is no newer than the issue epoch is enough to
-    /// admit a partial, non-rollback commit.
+    /// admit a partial, non-rollback commit. This is the same per-slot
+    /// predicate that [`Self::apply`] commits by, so an accepted proof always
+    /// commits at least one slot.
     pub(super) fn accepts(&self, proof: FingerRangeProof) -> bool {
         self.slots
             .iter()
             .skip(proof.request.slot_index())
             .take(proof.covered_slot_count())
-            .any(|slot| slot.changed_at <= proof.issued_epoch)
+            .any(|slot| slot.admits(proof))
     }
 
     /// Apply a validated range without overwriting evidence from a newer epoch.
     ///
-    /// Post: every eligible slot in the range contains the reported successor
-    /// and is marked verified. A newer slot is skipped rather than rolled back.
-    /// The return value is true only when at least one slot was committed.
+    /// Post: every slot in the range that admits the proof contains the
+    /// reported successor and is marked verified. A newer slot is skipped
+    /// rather than rolled back.
     pub(super) fn apply(
         &mut self,
         fingers: &mut [Option<Did>],
         local: Did,
         proof: FingerRangeProof,
-    ) -> bool {
+    ) {
         // A self-successor proof means this node owns the target range; the
         // table stores that as no remote finger hint.
         let replacement = (proof.successor != local).then_some(proof.successor);
-        let mut applied = false;
         for (finger, evidence) in fingers
             .iter_mut()
             .zip(&mut self.slots)
             .skip(proof.request.slot_index())
             .take(proof.covered_slot_count())
         {
-            if evidence.changed_at <= proof.issued_epoch {
+            if evidence.admits(proof) {
                 *finger = replacement;
                 evidence.verified = true;
-                applied = true;
             }
         }
-        applied
     }
 
     /// Confirm a range using evidence obtained outside finger lookup traffic.

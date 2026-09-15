@@ -7,6 +7,7 @@ use super::*;
 use crate::dht::finger::FingerConvergencePhase;
 use crate::dht::finger::FingerReportRejection;
 use crate::dht::finger::FingerRetireOutcome;
+use crate::dht::finger::FINGER_ADMISSION_TIMEOUT_MS;
 
 /// Prove a timely proof remains valid throughout a long transport handshake.
 ///
@@ -44,10 +45,12 @@ fn test_timely_finger_proof_survives_a_long_handshake_until_atomic_admission() {
     ));
 
     // Once deferred, the proof is owned by the admission lease rather than the
-    // original lookup deadline.
+    // original lookup deadline: it survives until the last millisecond of the
+    // lease that started when it was deferred.
+    let lease_expiry_ms = 1_001 + FINGER_ADMISSION_TIMEOUT_MS;
     let after_original_lookup_deadline = step(
         &deferred.state,
-        advance(180_999),
+        advance(lease_expiry_ms - 2),
         DEFAULT_SUCCESSOR_CAPACITY,
     );
     assert!(after_original_lookup_deadline.actions.is_empty());
@@ -64,7 +67,7 @@ fn test_timely_finger_proof_survives_a_long_handshake_until_atomic_admission() {
         TopologyEvent::Admit {
             peer: candidate,
             fixed_fingers: vec![ConditionalFingerUpdate { request }],
-            now_ms: 181_000,
+            now_ms: lease_expiry_ms - 1,
         },
         DEFAULT_SUCCESSOR_CAPACITY,
     );
@@ -189,9 +192,10 @@ fn test_abandoned_deferred_finger_proof_expires_into_backoff() {
         DEFAULT_SUCCESSOR_CAPACITY,
     );
 
+    let lease_expiry_ms = 1_001 + FINGER_ADMISSION_TIMEOUT_MS;
     let expired = step(
         &deferred.state,
-        advance(181_001),
+        advance(lease_expiry_ms),
         DEFAULT_SUCCESSOR_CAPACITY,
     );
     let projection = expired.state.finger_convergence_projection();
@@ -199,7 +203,10 @@ fn test_abandoned_deferred_finger_proof_expires_into_backoff() {
     assert!(expired.actions.is_empty());
     assert_eq!(projection.deferred, None);
     assert_eq!(projection.failure_streak, 1);
-    assert_eq!(projection.retry_not_before_ms, Some(183_001));
+    assert_eq!(
+        projection.retry_not_before_ms,
+        Some(lease_expiry_ms + 2_000)
+    );
 }
 
 /// Prove consecutive deferred-handshake failures accumulate exponential backoff.

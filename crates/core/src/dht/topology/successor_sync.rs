@@ -13,7 +13,11 @@
 //!                         |
 //!                        yes
 //!                         v
-//!              [store Requested token]
+//!              [reporter's report being processed?] -- yes --> [keep it, reject]
+//!                         |
+//!                        no
+//!                         v
+//!              [store Requested token, superseding an unanswered one]
 //!                         |
 //!                         v
 //! [claim(reporter, request_id)] -- mismatch --> [reject as stale]
@@ -34,11 +38,13 @@
 //!           [Stale]          [next candidate or Complete]
 //!                                        |
 //!                                        v
-//!                         [cancel/invalidate removes ownership]
+//!                    [cancel removes ownership; successor churn prunes
+//!                     the tokens of reporters that left]
 //! ```
 
 use std::collections::BTreeMap;
 
+use super::bounded_connection_candidates;
 use super::Did;
 
 /// Ownership phase of one successor-list synchronization token.
@@ -87,8 +93,8 @@ pub(crate) struct SuccessorSyncConnectionPlan {
     request_id: uuid::Uuid,
     /// Bounded, deduplicated peers reported by the successor.
     ///
-    /// Construction removes `local`, preserves first-seen report order, and
-    /// truncates the collection to the local successor-list capacity.
+    /// Construction removes `local`, preserves the order given, and truncates
+    /// the collection to the local successor-list capacity.
     candidates: Vec<Did>,
     /// Cursor for the next candidate whose connection effect may run.
     ///
@@ -115,7 +121,8 @@ impl SuccessorSyncConnectionPlan {
     /// Create a bounded candidate cursor for one claimed successor-sync report.
     ///
     /// The constructor retains the first unique, non-local candidates up to
-    /// `successor_capacity`. It does not itself verify the claim; every emitted
+    /// `successor_capacity`, in the order given (the handler orders them by
+    /// transport quality). It does not itself verify the claim; every emitted
     /// effect is guarded again by [`Self::advance`] against live sync state.
     pub(crate) fn new(
         reporter: Did,
@@ -124,19 +131,10 @@ impl SuccessorSyncConnectionPlan {
         local: Did,
         successor_capacity: usize,
     ) -> Self {
-        let mut bounded = Vec::with_capacity(successor_capacity);
-        for candidate in candidates {
-            if bounded.len() == successor_capacity {
-                break;
-            }
-            if candidate != local && !bounded.contains(&candidate) {
-                bounded.push(candidate);
-            }
-        }
         Self {
             reporter,
             request_id,
-            candidates: bounded,
+            candidates: bounded_connection_candidates(local, successor_capacity, candidates),
             next_candidate: 0,
         }
     }
@@ -165,8 +163,9 @@ impl SuccessorSyncConnectionPlan {
 /// Bounded correlation state for successor-list synchronization requests.
 ///
 /// At most one request is retained per current successor. Beginning a newer
-/// request for the same reporter supersedes the older token, and a report must
-/// atomically claim the exact token before any connection effect is allowed.
+/// request for the same reporter supersedes an unanswered token but never a
+/// claimed one, and a report must atomically claim the exact token before any
+/// connection effect is allowed.
 #[derive(Clone, Debug, Default, Hash, PartialEq, Eq)]
 pub(crate) struct SuccessorSyncState {
     /// Pending request keyed by reporter DID.
@@ -179,10 +178,14 @@ pub(crate) struct SuccessorSyncState {
 impl SuccessorSyncState {
     /// Drop requests for peers that are no longer current successors.
     ///
-    /// This is the topology-churn boundary shared by request creation and report
-    /// claiming. Retaining only live reporters prevents a removed successor from
+    /// This is the topology-churn boundary: the peer ring applies it whenever a
+    /// commit changes the successor list, and request creation and report
+    /// claiming apply it again. A token of a reporter that is still a successor
+    /// survives churn elsewhere in the list, so a claimed report keeps its
+    /// remaining candidate budget when its own admissions extend the list.
+    /// Retaining only live reporters prevents a removed successor from
     /// preserving authority through an otherwise valid old token.
-    fn retain_current(&mut self, current_successors: &[Did]) {
+    pub(crate) fn retain_current(&mut self, current_successors: &[Did]) {
         self.pending
             .retain(|reporter, _| current_successors.contains(reporter));
     }
@@ -190,8 +193,11 @@ impl SuccessorSyncState {
     /// Register the exact request sent to a current successor.
     ///
     /// Existing entries for removed successors are pruned first. A non-successor
-    /// reporter is rejected; a current reporter receives a new `Requested` token
-    /// that deliberately supersedes any older round for the same DID.
+    /// reporter is rejected. A reporter whose previous report is still being
+    /// processed keeps that claim and the new request is rejected, so a
+    /// maintenance round cannot revoke the candidate budget of a handler that
+    /// is mid-way through it. Otherwise the reporter receives a new `Requested`
+    /// token that deliberately supersedes an unanswered older round.
     pub(crate) fn begin(
         &mut self,
         current_successors: &[Did],
@@ -200,6 +206,13 @@ impl SuccessorSyncState {
     ) -> bool {
         self.retain_current(current_successors);
         if !current_successors.contains(&reporter) {
+            return false;
+        }
+        if self
+            .pending
+            .get(&reporter)
+            .is_some_and(|pending| pending.phase == SuccessorSyncPhase::Processing)
+        {
             return false;
         }
         self.pending.insert(reporter, SuccessorSyncRequest {
@@ -270,15 +283,6 @@ impl SuccessorSyncState {
         }
     }
 
-    /// Invalidate every request claim when the local successor view changes.
-    ///
-    /// Clearing the map revokes both unclaimed reports and partially consumed
-    /// connection plans. Their next call to `advance` observes missing ownership
-    /// and returns `Stale` before another network effect can run.
-    pub(crate) fn invalidate(&mut self) {
-        self.pending.clear();
-    }
-
     #[cfg(test)]
     /// Number of retained successor-sync requests in tests.
     ///
@@ -292,56 +296,129 @@ impl SuccessorSyncState {
 #[cfg(test)]
 /// Unit tests for exact successor-sync ownership and bounded candidate plans.
 ///
-/// The child module exercises stale-token rejection, single-use claims,
-/// topology-churn invalidation, and per-report connection-effect bounds.
+/// The cases exercise stale-token rejection, single-use claims, the
+/// processing-claim protection against a newer round, churn pruning, and the
+/// per-report connection-effect bound.
 mod tests {
     use super::SuccessorSyncConnectionPlan;
     use super::SuccessorSyncConnectionStep;
     use super::SuccessorSyncState;
+    use crate::dht::topology::DEFAULT_SUCCESSOR_CAPACITY;
     use crate::dht::Did;
 
-    /// Verifies single-use exact-token claims, per-candidate revocation, and
-    /// pruning of requests whose reporters leave the current successor set.
-    ///
-    /// The test first proves that an older token and a replay cannot claim a
-    /// newer round, then invalidates a partially consumed plan and checks that no
-    /// second candidate is emitted. Finally it witnesses churn pruning and full
-    /// invalidation across two reporters.
+    /// Verifies single-use exact-token claims: a superseded token and a replay
+    /// of a claimed token are both rejected.
     #[test]
-    fn exact_claim_is_single_use_and_churn_prunes_old_reporters() {
+    fn exact_claim_is_single_use() {
         let first = Did::from(1u32);
-        let second = Did::from(2u32);
-        let old = uuid::Uuid::from_u128(1);
+        let stale = uuid::Uuid::from_u128(1);
         let current = uuid::Uuid::from_u128(2);
         let mut state = SuccessorSyncState::default();
 
-        assert!(state.begin(&[first], first, old));
+        // Two begins for the same reporter leave exactly one claimable token.
+        assert!(state.begin(&[first], first, stale));
         assert!(state.begin(&[first], first, current));
-        assert!(!state.claim(&[first], first, old));
+        assert!(!state.claim(&[first], first, stale));
         assert!(state.claim(&[first], first, current));
         assert!(!state.claim(&[first], first, current));
+    }
+
+    /// Verifies that a newer round cannot supersede a report that is being
+    /// processed, and that the claim's cancellation reopens the reporter.
+    #[test]
+    fn begin_keeps_a_processing_claim() {
+        let first = Did::from(1u32);
+        let claimed = uuid::Uuid::from_u128(1);
+        let newer = uuid::Uuid::from_u128(2);
+        let mut state = SuccessorSyncState::default();
+
+        assert!(state.begin(&[first], first, claimed));
+        assert!(state.claim(&[first], first, claimed));
+        assert!(!state.begin(&[first], first, newer));
         let mut plan = SuccessorSyncConnectionPlan::new(
             first,
-            current,
-            [second, Did::from(3u32)],
+            claimed,
+            [Did::from(2u32)],
             Did::from(0u32),
-            2,
+            DEFAULT_SUCCESSOR_CAPACITY,
         );
         assert_eq!(
             plan.advance(&state, &[first]),
-            SuccessorSyncConnectionStep::Connect(second)
-        );
-        state.invalidate();
-        assert_eq!(
-            plan.advance(&state, &[first]),
-            SuccessorSyncConnectionStep::Stale
+            SuccessorSyncConnectionStep::Connect(Did::from(2u32))
         );
 
-        assert!(state.begin(&[first], first, old));
-        assert!(state.begin(&[second], second, current));
-        assert_eq!(state.pending_count(), 1);
-        assert!(!state.claim(&[second], first, old));
-        state.invalidate();
-        assert!(!state.claim(&[second], second, current));
+        state.cancel(first, claimed);
+        assert!(state.begin(&[first], first, newer));
+    }
+
+    /// Verifies the churn law: a plan survives successor-list changes that keep
+    /// its reporter (its own admissions extend the list), and is revoked once
+    /// the reporter leaves.
+    #[test]
+    fn churn_prunes_only_departed_reporters() {
+        let local = Did::from(0u32);
+        let reporter = Did::from(1u32);
+        let admitted = Did::from(2u32);
+        let request_id = uuid::Uuid::from_u128(1);
+        let mut state = SuccessorSyncState::default();
+        assert!(state.begin(&[reporter], reporter, request_id));
+        assert!(state.claim(&[reporter], reporter, request_id));
+        let mut plan = SuccessorSyncConnectionPlan::new(
+            reporter,
+            request_id,
+            [admitted, Did::from(3u32)],
+            local,
+            DEFAULT_SUCCESSOR_CAPACITY,
+        );
+        assert_eq!(
+            plan.advance(&state, &[reporter]),
+            SuccessorSyncConnectionStep::Connect(admitted)
+        );
+
+        // Admitting the first candidate changes the successor list; the plan
+        // keeps its remaining budget because the reporter is still current.
+        state.retain_current(&[reporter, admitted]);
+        assert_eq!(
+            plan.advance(&state, &[reporter, admitted]),
+            SuccessorSyncConnectionStep::Connect(Did::from(3u32))
+        );
+
+        // Once the reporter leaves, the token is gone and the plan is stale.
+        state.retain_current(&[admitted]);
+        assert_eq!(state.pending_count(), 0);
+        assert_eq!(
+            plan.advance(&state, &[admitted]),
+            SuccessorSyncConnectionStep::Stale
+        );
+        assert!(!state.claim(&[admitted], reporter, request_id));
+    }
+
+    /// Verifies that one report admits at most the successor capacity even
+    /// when it carries a longer candidate list.
+    #[test]
+    fn plan_is_bounded_by_successor_capacity() {
+        let reporter = Did::from(1u32);
+        let request_id = uuid::Uuid::from_u128(1);
+        let mut state = SuccessorSyncState::default();
+        assert!(state.begin(&[reporter], reporter, request_id));
+        assert!(state.claim(&[reporter], reporter, request_id));
+        let mut plan = SuccessorSyncConnectionPlan::new(
+            reporter,
+            request_id,
+            (2..=10u32).map(Did::from),
+            Did::from(0u32),
+            DEFAULT_SUCCESSOR_CAPACITY,
+        );
+
+        for _ in 0..DEFAULT_SUCCESSOR_CAPACITY {
+            assert!(matches!(
+                plan.advance(&state, &[reporter]),
+                SuccessorSyncConnectionStep::Connect(_)
+            ));
+        }
+        assert_eq!(
+            plan.advance(&state, &[reporter]),
+            SuccessorSyncConnectionStep::Complete
+        );
     }
 }
