@@ -1,6 +1,7 @@
 //! Real-network check of the bootstrap reachability probe: the routed successor lookup issued
 //! by `ProcessorPort::reachable` reports a present target as its own successor, reports a
-//! different node for an absent key, and is short-circuited by a direct edge.
+//! different node for an absent key, is short-circuited by a direct edge, and is decided
+//! locally for a key in this node's own range.
 //!
 //! Topology: `C — B — A`, with keys chosen so that `A` is `B`'s successor head (clockwise from
 //! `B`, `A` precedes `C`). `C`'s only peer is `B`, so every lookup `C` issues goes to `B`, which
@@ -13,10 +14,11 @@ use rings_core::ecc::SecretKey;
 use super::common::*;
 use super::*;
 use crate::extension::Backend;
-use crate::native::bootstrap::probe::ProcessorPort;
 use crate::native::bootstrap::BootstrapObserver;
 use crate::native::bootstrap::BootstrapPort;
+use crate::native::bootstrap::BootstrapTargets;
 use crate::native::bootstrap::ManagedTarget;
+use crate::native::bootstrap::ProcessorPort;
 use crate::seed::SeedPeer;
 
 /// Swarm callback that dispatches through the real [`Backend`] (so lookup reports reach the
@@ -91,7 +93,7 @@ async fn probe_processor(
     Arc<SwarmCallbackInstance>,
 ) {
     let processor = Arc::new(prepare_processor_with_identity_key(key).await);
-    let observer = Arc::new(BootstrapObserver::new(Default::default()));
+    let observer = Arc::new(BootstrapObserver::new(&BootstrapTargets::default()));
     let fixture = test_callback();
     let provider = Arc::new(Provider::from_processor(processor.clone()));
     let backend = Backend::new(provider).observed_by(observer.clone());
@@ -105,8 +107,8 @@ async fn probe_processor(
     (processor, observer, fixture)
 }
 
-/// Present targets are reachable through one hop, an absent key is not, and a direct peer
-/// needs no lookup at all.
+/// Present targets are reachable through one hop, an absent key is not, a direct peer needs
+/// no lookup at all, and a key in `C`'s own range is refuted without leaving `C`.
 #[tokio::test]
 async fn routed_probe_reports_presence_through_one_hop() {
     let _guard = network_test_guard().await;
@@ -132,5 +134,17 @@ async fn routed_probe_reports_presence_through_one_hop() {
     assert!(
         !port.reachable(&target(absent)).await,
         "an absent key is answered by another node's successor"
+    );
+    let own_range = c.did() + Did::from(1);
+    assert_ne!(own_range, b.did());
+    let before = c_observer.reports().len().expect("ledger readable");
+    assert!(
+        !port.reachable(&target(own_range)).await,
+        "a key succeeded by C's own successor is refuted locally"
+    );
+    assert_eq!(
+        c_observer.reports().len().expect("ledger readable"),
+        before,
+        "the local refutation registers no probe"
     );
 }

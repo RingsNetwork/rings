@@ -191,7 +191,8 @@ long-running node that loses its transport to a seed rejoins without a restart.
 
 * `peers`: managed targets, each `{ did, url }` with an optional `api_token`, the same shape as
   an entry of a seed document. Every `did` must parse, every `url` must be a public HTTP(S)
-  endpoint, no DID may repeat, and the node's own DID is rejected; a violation stops `rings run`
+  endpoint, and the node's own DID is rejected; an entry repeated verbatim is merged, while a
+  DID listed with differing endpoints is rejected as ambiguous. A violation stops `rings run`
   before it listens. `rings run --bootstrap-seed <file-or-url>` appends the peers of a seed
   document to this list for one run.
 

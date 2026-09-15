@@ -969,7 +969,7 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
     // Managed bootstrap targets fail fast on invalid configuration; their reachability
     // supervisor is spawned with the other run-owned tasks below.
     let bootstrap_targets = BootstrapTargets::from_config(&c.bootstrap, processor.did())?;
-    let bootstrap_observer = Arc::new(BootstrapObserver::new(bootstrap_targets.dids()));
+    let bootstrap_observer = Arc::new(BootstrapObserver::new(&bootstrap_targets));
     // The Backend decodes inbound custom messages as namespaced envelopes and routes
     // them to the protocol registry; lookup reports and connection state changes go to
     // the bootstrap observer.
