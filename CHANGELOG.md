@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.27.0
+
+### Added
+
+- `rings run` owns a set of managed bootstrap targets for the life of the process. The new
+  `bootstrap.peers` config section (written empty by `rings init`) and `rings run --bootstrap-seed
+  <file-or-url>` name them in the seed-document shape; `rings connect node|seed` keep their
+  one-shot semantics. A target's reachability is a routed successor lookup for its DID, so a
+  target that is directly connected or that other peers can route to is never forced into a
+  direct edge. An unreachable target is redialed through its HTTP endpoint five times two
+  seconds apart, then every five minutes plus up to thirty seconds of jitter, and the burst
+  restarts after each loss; the loss of a direct transport to a target triggers an immediate
+  reassessment. At most one handshake per target is in flight, targets retry independently,
+  the endpoint must answer as the configured DID, and shutdown cancels any handshake in
+  progress. Invalid targets (unparsable DID, non-public URL, duplicate, or the node itself)
+  stop `rings run` before it listens.
+- `Swarm::is_peer_connected` exposes the strict direct-transport readiness predicate, and the
+  node `Backend` accepts a `BackendObserver` that receives decoded Chord lookup reports and
+  connection state changes without a second payload decode.
+
 ## 0.26.0
 
 ### Breaking changes

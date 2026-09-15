@@ -110,7 +110,9 @@ impl HandleRpc<ConnectWithSeedRequest, ConnectWithSeedResponse> for Processor {
     }
 }
 
-fn validate_remote_rpc_url(url: &str) -> std::result::Result<reqwest::Url, ServerError> {
+/// Parse `url` as a public HTTP(S) RPC endpoint: no credentials, no fragment, and a host the
+/// network policy permits.
+pub(crate) fn validate_remote_rpc_url(url: &str) -> std::result::Result<reqwest::Url, ServerError> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|error| ServerError::UnsafeRemoteRpcTarget(error.to_string()))?;
     if !matches!(parsed.scheme(), "http" | "https") {

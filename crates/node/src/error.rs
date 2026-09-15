@@ -192,6 +192,17 @@ pub enum Error {
     /// Loading or explicitly flushing local peer measurements failed.
     #[error("Measurement runtime error: {0}")]
     MeasurementRuntime(#[from] crate::measure::MeasureRuntimeError) = 816,
+    /// The HTTP handshake to a managed bootstrap target failed.
+    #[error("bootstrap handshake failed: {0}")]
+    BootstrapHandshake(String) = 817,
+    /// A managed bootstrap target's endpoint answered as a DID other than the configured one.
+    #[error("bootstrap target {expected} answered as {actual}")]
+    BootstrapDidMismatch {
+        /// DID the target is configured with.
+        expected: Did,
+        /// DID the endpoint reported.
+        actual: String,
+    } = 818,
     /// Creating a file on disk failed.
     #[error("Create File Error: {0}")]
     CreateFileError(String) = 900,
