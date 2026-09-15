@@ -150,6 +150,6 @@ fn test_begin_finger_revalidation_does_not_emit_a_lookup() -> Result<()> {
         dht.begin_finger_revalidation()?,
         PeerRingAction::None
     ));
-    assert!(dht.finger_convergence_status()?.pending());
+    assert!(dht.finger_convergence_status()?.may_advance());
     Ok(())
 }

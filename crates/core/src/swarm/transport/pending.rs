@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -52,9 +51,8 @@ const _: () =
 
 /// Shared registry of per-peer pending, admitting, and active connection generations.
 pub(super) type SharedConnectionLifecycles = Arc<Mutex<ConnectionLifecycleRegistry>>;
-/// Finger-fix requests retained until the owning pending connection commits.
-pub(super) type PendingFingerUpdates =
-    BTreeMap<PendingConnectionAttempt, BTreeSet<FingerFixRequest>>;
+/// The finger proof each pending generation retains until it commits or ends.
+pub(super) type PendingFingerUpdates = BTreeMap<PendingConnectionAttempt, FingerFixRequest>;
 /// Guard for the deferred finger-proof map.
 type PendingFingerUpdatesGuard<'transport> =
     std::sync::MutexGuard<'transport, PendingFingerUpdates>;
@@ -255,11 +253,8 @@ impl SwarmTransport {
     /// lookup. After success, no deferred proof remains owned by `attempt`.
     /// Lock poisoning or a failed DHT transition is returned to the caller.
     fn cancel_pending_finger_updates(&self, attempt: PendingConnectionAttempt) -> Result<()> {
-        let requests = self
-            .pending_finger_updates()?
-            .remove(&attempt)
-            .unwrap_or_default();
-        for request in requests {
+        let retained = self.pending_finger_updates()?.remove(&attempt);
+        if let Some(request) = retained {
             self.dht.cancel_finger_lookup(request)?;
         }
         Ok(())
@@ -610,14 +605,10 @@ impl SwarmTransport {
         // They are applied in the same DHT transition that admits the peer.
         let fixed_fingers = pending_finger_updates
             .get(&attempt)
-            .map(|updates| {
-                updates
-                    .iter()
-                    .copied()
-                    .map(|request| crate::dht::topology::ConditionalFingerUpdate { request })
-                    .collect()
-            })
-            .unwrap_or_default();
+            .copied()
+            .map(|request| crate::dht::topology::ConditionalFingerUpdate { request })
+            .into_iter()
+            .collect();
         let action = self.dht.admit_connected(attempt.peer, fixed_fingers)?;
 
         admitting.activate();
@@ -768,7 +759,10 @@ impl SwarmTransport {
                 let mut pending_updates = self.pending_finger_updates()?;
                 match self.dht.defer_fixed_finger(request, peer)? {
                     FingerDeferOutcome::Deferred { .. } => {
-                        pending_updates.entry(current).or_default().insert(request);
+                        // The DHT owns one attempt at a time, so a generation
+                        // retains one proof; a newer request replaces one the
+                        // DHT has already released.
+                        pending_updates.insert(current, request);
                         Ok(FingerUpdateDisposition::Queued)
                     }
                     FingerDeferOutcome::Rejected(rejection) => {

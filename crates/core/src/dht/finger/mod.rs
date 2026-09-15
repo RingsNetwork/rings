@@ -86,21 +86,21 @@ impl FingerTable {
         self.finger.get(index).copied().flatten()
     }
 
-    /// Apply a hint mutation and invalidate only evidence touched by it.
+    /// Replace the hint vector and invalidate only the evidence it changed.
     ///
-    /// The complete pre-mutation hint vector is retained long enough to compare
-    /// each slot after `mutation` runs. The convergence state then advances only
-    /// evidence whose corresponding hint changed and retires ownership when its
-    /// proof premise was invalidated.
-    fn mutate_hints(&mut self, mutation: impl FnOnce(&mut Vec<Option<Did>>)) {
-        let before = self.finger.clone();
-        mutation(&mut self.finger);
+    /// Production hints change only through the pure topology transition,
+    /// which commits them with [`Self::replace_state`]; this test seam applies
+    /// the same hint-change law to a table mutated in place.
+    #[cfg(test)]
+    fn mutate_hints(&mut self, next: Vec<Option<Did>>) {
         self.convergence
-            .invalidate_hint_changes(&before, &self.finger);
+            .invalidate_hint_changes(&self.finger, &next);
+        self.finger = next;
     }
 
-    /// setter
-    pub fn set(&mut self, index: usize, did: Did) {
+    /// Seed one slot with a hint (test fixtures only).
+    #[cfg(test)]
+    pub(crate) fn set(&mut self, index: usize, did: Did) {
         tracing::debug!("set finger table index: {} did: {}", index, did);
         if index >= self.finger.len() {
             tracing::error!("set finger index out of range, index: {}", index);
@@ -110,53 +110,18 @@ impl FingerTable {
             tracing::trace!("set finger table with self did, ignore it");
             return;
         }
-        self.mutate_hints(|fingers| {
-            if let Some(slot) = fingers.get_mut(index) {
-                *slot = Some(did);
-            }
-        });
+        let mut next = self.finger.clone();
+        if let Some(slot) = next.get_mut(index) {
+            *slot = Some(did);
+        }
+        self.mutate_hints(next);
     }
 
-    /// setter for fix_finger_index
-    pub fn set_fix(&mut self, did: Did) {
-        let index = self.fix_finger_index;
-        self.set(index, did)
-    }
-
-    /// remove a node from dht finger table
-    pub fn remove(&mut self, did: Did) {
-        self.mutate_hints(|fingers| {
-            *fingers = crate::dht::topology::remove_finger_peer(fingers, did);
-        });
-    }
-
-    /// Join FingerTable
-    pub fn join(&mut self, did: Did) {
-        let observer = self.did;
-        // `bias` is the candidate's clockwise distance from this table owner;
-        // it determines the lowest power-of-two slot the candidate can cover.
-        let bias = did.bias(observer);
-        let size = self.size;
-
-        self.mutate_hints(|fingers| {
-            for k in 0..size {
-                let pos = Did::power_of_two(k);
-
-                if bias.pos() < pos {
-                    continue;
-                }
-
-                if let Some(v) = fingers.get(k).copied().flatten() {
-                    if BiasId::cmp_from_observer(observer, did, v) == std::cmp::Ordering::Greater {
-                        continue;
-                    }
-                }
-
-                if let Some(slot) = fingers.get_mut(k) {
-                    *slot = Some(did);
-                }
-            }
-        });
+    /// Remove a peer's hints in place (test fixtures only); the law is
+    /// [`crate::dht::topology::remove_finger_peer`].
+    #[cfg(test)]
+    pub(crate) fn remove(&mut self, did: Did) {
+        self.mutate_hints(crate::dht::topology::remove_finger_peer(&self.finger, did));
     }
 
     /// Check finger is contains some node

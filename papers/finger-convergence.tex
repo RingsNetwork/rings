@@ -553,16 +553,20 @@ randomness, and it draws from a replayable mixed state seeded by the node's
 identifier and a per-lifecycle UUID.
 
 \begin{law}[Wake time]\label{law:wake}
-Let the finger status at poll time $t$ be the attempt phase and $k$.
+The finger status at poll time $t$ is one of five phases, $\mathsf{Dormant}$
+(no successor head), $\mathsf{Converged}$ (no unverified routable slot and
+no attempt), $\mathsf{Runnable}$, $\AwR$, $\AwA$, together with $k$.
 \begin{itemize}[leftmargin=*]
 \item $\AwR$ or $\AwA$ with remaining lease $\Delta$: next wake $t+\Delta$;
   no jitter.
-\item Entering runnable from inactive (first successor admitted) with
-  $k=0$: next wake $t+1\,\mathrm{s}+J$, $J\sim[0,10\,\mathrm{s}]$.
-\item Any other entry into runnable, or a change of $k$: next wake
+\item Activation, entering $\mathsf{Runnable}$ from $\mathsf{Dormant}$ with
+  $k=0$ (the first successor was admitted): next wake
+  $t+1\,\mathrm{s}+J$, $J\sim[0,10\,\mathrm{s}]$.
+\item Any other entry into $\mathsf{Runnable}$, including revalidation
+  reopening a $\mathsf{Converged}$ table, or a change of $k$: next wake
   $t+f(k)+J'$, $J'\sim[0,f(k)]$ with $f(0)=1\,\mathrm{s}$.
-\item Runnable and unchanged: keep the existing wake, so polling cannot
-  postpone work.
+\item $\mathsf{Runnable}$ and unchanged: keep the existing wake, so polling
+  cannot postpone work.
 \end{itemize}
 Completing a finger turn at time $t'$ schedules $t'+f(k)+J'$ from the
 completion, never from the missed deadline.
@@ -736,7 +740,8 @@ Over $200$ deterministic nodes, activation deadlines lie in
 $[1,11]\,\mathrm{s}$, saturated-retry deadlines in $[60,120]\,\mathrm{s}$,
 no one-second bucket holds more than $30$ nodes, and changing only the
 lifecycle UUID changes the deadline; returning to runnable from an awaited
-report draws $[1,2]\,\mathrm{s}$, not the activation window.
+report or from a converged table draws $[1,2]\,\mathrm{s}$, not the
+activation window.
 \end{obligation}
 
 \section{Related Work}\label{sec:related}

@@ -43,6 +43,11 @@ fn state(
 ///
 /// All other slots are marked verified so production selection must issue the
 /// requested slot and provide a valid owner token for report tests.
+/// The exact request token for `slot`; every test slot fits the wire width.
+fn fix_request(slot: usize, request_id: uuid::Uuid) -> FingerFixRequest {
+    FingerFixRequest::new(slot, request_id).expect("test slot fits the u16 wire width")
+}
+
 fn issue_request(current: &mut TopologyState, slot: usize, now_ms: u64) -> FingerFixRequest {
     // Mark every other slot verified so the requested slot is the only eligible
     // lookup target for this fixture.
@@ -56,11 +61,7 @@ fn issue_request(current: &mut TopologyState, slot: usize, now_ms: u64) -> Finge
         now_ms,
         request_id(u128::from(now_ms)),
     );
-    assert!(request.is_some(), "test request must be issued");
-    request.unwrap_or(FingerFixRequest {
-        slot: u16::MAX,
-        request_id: uuid::Uuid::nil(),
-    })
+    request.expect("test request must be issued")
 }
 
 /// Successor distance vector padded with infinity for missing successor slots.
@@ -412,7 +413,7 @@ fn test_fix_finger_step_keeps_isolated_sparse_range_unverified_and_dormant() {
     assert_eq!(next.state.fix_finger_index, 2);
     assert_eq!(next.state.fingers, vec![None; 4]);
     assert!(next.state.finger_convergence_pending());
-    assert!(!next.state.finger_convergence_status(0).pending());
+    assert!(!next.state.finger_convergence_status(0).may_advance());
     assert!(next.actions.is_empty());
 }
 
@@ -440,10 +441,7 @@ fn test_fix_finger_step_emits_correlated_remote_action() {
     assert_eq!(next.actions, vec![TopologyAction::FindSuccessorForFix {
         next: next_hop,
         did: Did::power_of_two(3),
-        request: FingerFixRequest::new(3, request_id(1_000)).unwrap_or(FingerFixRequest {
-            slot: u16::MAX,
-            request_id: uuid::Uuid::nil(),
-        })
+        request: fix_request(3, request_id(1_000))
     }]);
 }
 
@@ -469,10 +467,7 @@ fn test_fix_finger_step_queries_local_relative_probe() {
     assert_eq!(next.actions, vec![TopologyAction::FindSuccessorForFix {
         next: next_hop,
         did: local + Did::power_of_two(3),
-        request: FingerFixRequest::new(3, request_id(1_000)).unwrap_or(FingerFixRequest {
-            slot: u16::MAX,
-            request_id: uuid::Uuid::nil(),
-        })
+        request: fix_request(3, request_id(1_000))
     }]);
 }
 
@@ -533,10 +528,7 @@ fn test_apply_finger_step_rejects_stale_and_invalid_results() {
         },
         DEFAULT_SUCCESSOR_CAPACITY,
     );
-    let out_of_range = FingerFixRequest::new(9, request_id(2)).unwrap_or(FingerFixRequest {
-        slot: u16::MAX,
-        request_id: uuid::Uuid::nil(),
-    });
+    let out_of_range = fix_request(9, request_id(2));
     let ignored = step(
         &current,
         TopologyEvent::ApplyFinger {
@@ -590,7 +582,7 @@ fn test_local_successor_range_waits_for_stabilization_instead_of_routing_around_
         .finger_convergence
         .set_verified_for_test(&[false, false, false, true]);
 
-    assert!(!current.finger_convergence_status(0).pending());
+    assert!(!current.finger_convergence_status(0).may_advance());
     let dormant = step(&current, advance(1_000), DEFAULT_SUCCESSOR_CAPACITY);
     assert!(dormant.actions.is_empty());
     assert_eq!(dormant.state.finger_convergence.verified_for_test(), vec![
@@ -782,10 +774,7 @@ fn test_fix_finger_step_forwards_to_successor_head_when_fingers_are_sparse() {
     assert_eq!(next.actions, vec![TopologyAction::FindSuccessorForFix {
         next: successor,
         did: Did::power_of_two(3),
-        request: FingerFixRequest::new(3, request_id(1_000)).unwrap_or(FingerFixRequest {
-            slot: u16::MAX,
-            request_id: uuid::Uuid::nil(),
-        })
+        request: fix_request(3, request_id(1_000))
     }]);
 }
 
@@ -925,10 +914,7 @@ fn test_remove_step_reports_head_change_to_the_surviving_successor() {
 fn test_predecessor_and_finger_steps_never_report_a_head_change() {
     let local = did(0);
     let current = state(local, vec![did(30)], None, vec![None; 5], 0);
-    let request = FingerFixRequest::new(2, request_id(1)).unwrap_or(FingerFixRequest {
-        slot: u16::MAX,
-        request_id: uuid::Uuid::nil(),
-    });
+    let request = fix_request(2, request_id(1));
     for event in [
         TopologyEvent::Notify {
             predecessor: did(90),

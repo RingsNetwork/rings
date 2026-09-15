@@ -177,9 +177,7 @@ async fn test_failed_dht_retirement_preserves_active_peer_state() -> Result<()> 
         .pending_finger_updates
         .lock()
         .map_err(|_| Error::SwarmConnectionLifecycleLock)?
-        .entry(attempt)
-        .or_default()
-        .insert(request);
+        .insert(attempt, request);
 
     let result = transport.retire_active_connection_with(attempt, |_| -> Result<()> {
         Err(Error::InvalidMessage(

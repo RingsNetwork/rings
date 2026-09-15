@@ -12,6 +12,9 @@
 - `CorrectChord::stabilize` is removed. A successor's topology report changes the successor list
   only when it echoes the correlation token issued by `pre_stabilize`; there is no token-less path
   by which an arbitrary `TopoInfo` can refine successors.
+- `FingerTable::set`, `remove`, and `set_fix` are no longer public. Finger hints change only
+  through the topology transition, which is the single owner of the hint-join and removal laws;
+  the in-place mutators remain as test fixtures.
 
 ### Added
 

@@ -51,6 +51,8 @@
 
 use super::bounded_connection_candidates;
 use super::dist;
+use super::push_unique;
+use super::rehint;
 use super::successors;
 use super::Did;
 use super::StabilizationPhase;
@@ -216,9 +218,7 @@ pub fn stabilize_successors(
             .copied()
             .take(topo_successors.len().saturating_sub(1)),
     ) {
-        if !known.contains(&candidate) {
-            known.push(candidate);
-        }
+        push_unique(&mut known, candidate);
     }
     successors(&known, local, capacity)
 }
@@ -391,8 +391,7 @@ pub(super) fn step_stabilize(
             .take(end.saturating_add(1))
             .for_each(|finger| *finger = Some(reporter));
     }
-    let mut finger_convergence = state.finger_convergence.clone();
-    finger_convergence.invalidate_hint_changes(&state.fingers, &fingers);
+    let (fingers, mut finger_convergence) = rehint(state, fingers);
     // Confirmation only advances the public cursor when it proves a range that
     // was not already current.
     let fix_finger_index = match successor_proof_end {

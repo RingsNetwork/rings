@@ -10,13 +10,16 @@
 //! convergence evidence + attempt + retry streak
 //!        |
 //!        v
+//! successor head?  -- no --> Dormant
+//!   | yes
+//!   v
 //! active attempt?
 //!   | no                    | report             | admission
 //!   v                       v                    v
 //! unverified work?     remaining report ms  remaining admission ms
 //!   | yes    | no            |                    |
 //!   v        v               v                    v
-//! Runnable Inactive   AwaitingReport       AwaitingAdmission
+//! Runnable Converged  AwaitingReport       AwaitingAdmission
 //!        \___________________|____________________/
 //!                            |
 //!                            v
@@ -26,11 +29,17 @@
 /// Scheduler-visible phase of one node's finger convergence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FingerConvergencePhase {
-    /// No automatic work is currently required.
+    /// The node has no successor head, so no range can be proved.
     ///
-    /// All routable evidence is verified and no request or admission lease owns
-    /// outstanding work.
-    Inactive,
+    /// Leaving this phase is activation: the first successor was admitted and
+    /// the scheduler spreads the node's first attempt over the fleet-start
+    /// window.
+    Dormant,
+    /// Every routable slot is verified and nothing owns outstanding work.
+    ///
+    /// Periodic revalidation reopens ranges from here; leaving this phase is
+    /// ordinary continuation, paced by the retry delay, not activation.
+    Converged,
     /// An unverified range can issue a lookup when pacing permits.
     ///
     /// The scheduler must still honor minimum spacing, failure backoff, and its
@@ -76,7 +85,7 @@ pub(crate) struct FingerConvergenceStatus {
 }
 
 impl FingerConvergenceStatus {
-    /// Build either `Runnable` or `Inactive` from the pending-evidence bit.
+    /// Build either `Runnable` or `Converged` from the pending-evidence bit.
     ///
     /// `pending` describes unverified routable evidence when no attempt owns
     /// work. The supplied failure streak is preserved in either phase.
@@ -85,7 +94,7 @@ impl FingerConvergenceStatus {
             phase: if pending {
                 FingerConvergencePhase::Runnable
             } else {
-                FingerConvergencePhase::Inactive
+                FingerConvergencePhase::Converged
             },
             failure_streak,
         }
@@ -113,21 +122,15 @@ impl FingerConvergenceStatus {
         }
     }
 
-    /// Build an inactive zero-failure status for absent finger tables.
+    /// Build the dormant status of a node without a successor head.
     ///
-    /// Callers use this neutral value when no convergence state exists; it
-    /// reports neither runnable work nor historical retry pressure.
-    pub(crate) const fn inactive() -> Self {
-        Self::new(false, 0)
-    }
-
-    /// Test helper for whether any convergence phase may still run.
-    ///
-    /// Awaiting phases count as pending even though they cannot issue immediately,
-    /// because model execution must still drive their completion or expiry.
-    #[cfg(test)]
-    pub(crate) const fn pending(self) -> bool {
-        !matches!(self.phase, FingerConvergencePhase::Inactive)
+    /// The value carries no failure history: a node that cannot prove any
+    /// range has nothing to back off from.
+    pub(crate) const fn dormant() -> Self {
+        Self {
+            phase: FingerConvergencePhase::Dormant,
+            failure_streak: 0,
+        }
     }
 
     /// Return the scheduler phase without exposing internal convergence state.
@@ -140,10 +143,13 @@ impl FingerConvergenceStatus {
 
     /// Return whether polling this status can produce useful finger work.
     ///
-    /// Runnable and awaiting phases return true; only the fixed-point
-    /// `Inactive` phase returns false.
+    /// Runnable and awaiting phases return true; the two quiescent phases,
+    /// `Dormant` and `Converged`, return false.
     pub(crate) const fn may_advance(self) -> bool {
-        !matches!(self.phase, FingerConvergencePhase::Inactive)
+        !matches!(
+            self.phase,
+            FingerConvergencePhase::Dormant | FingerConvergencePhase::Converged
+        )
     }
 
     /// Return consecutive current-attempt failures since last progress.

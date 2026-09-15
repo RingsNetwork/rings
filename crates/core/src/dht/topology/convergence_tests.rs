@@ -219,7 +219,7 @@ fn test_join_after_isolation_revalidates_every_previously_unknown_range() {
     .state;
 
     assert!(isolated.finger_convergence_pending());
-    assert!(!isolated.finger_convergence_status(0).pending());
+    assert!(!isolated.finger_convergence_status(0).may_advance());
     assert!(isolated
         .finger_convergence
         .verified_for_test()
@@ -278,7 +278,7 @@ fn test_finger_rejoin_after_losing_last_successor_discards_old_empty_range_proof
         .verified_for_test()
         .iter()
         .all(|verified| !verified));
-    assert!(!isolated.finger_convergence_status(0).pending());
+    assert!(!isolated.finger_convergence_status(0).may_advance());
 
     let rejoined = step(
         &isolated,
@@ -296,8 +296,9 @@ fn test_finger_rejoin_after_losing_last_successor_discards_old_empty_range_proof
 
 /// Prove restart creates a new request identity and rejects the old report.
 ///
-/// Reconstructed topology hints omit scheduler ownership, so delayed traffic
-/// from the previous process cannot mutate the new table.
+/// A restarted process rebuilds an empty table and rejoins its seed, exactly
+/// as `PeerRing` is constructed; delayed traffic from the previous process
+/// then owns nothing in the new one.
 #[test]
 fn test_restart_uses_a_new_request_identity_and_rejects_the_old_report() {
     let local = did(0);
@@ -311,13 +312,12 @@ fn test_restart_uses_a_new_request_identity_and_rejects_the_old_report() {
     let before_restart = step(&hinted, advance(1_000), DEFAULT_SUCCESSOR_CAPACITY);
     let old_request = emitted_finger_request(&before_restart);
 
-    let restarted = state(
-        local,
-        before_restart.state.successors.clone(),
-        before_restart.state.predecessor,
-        before_restart.state.fingers.clone(),
-        before_restart.state.fix_finger_index,
-    );
+    let restarted = step(
+        &state(local, Vec::new(), None, vec![None; 8], 0),
+        TopologyEvent::Join { peer: seed },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    )
+    .state;
     let after_restart = step(&restarted, advance(2_000), DEFAULT_SUCCESSOR_CAPACITY);
     let new_request = emitted_finger_request(&after_restart);
     assert_ne!(old_request, new_request);

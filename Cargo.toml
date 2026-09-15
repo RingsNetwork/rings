@@ -10,8 +10,6 @@ exclude = [
 ]
 
 [workspace.package]
-# 0.26.0 is a lockstep protocol release: workspace crate versions, lockfiles,
-# and the changelog must describe one wire-format generation.
 version = "0.26.0"
 edition = "2021"
 license = "AGPL-3.0-only"
@@ -22,8 +20,6 @@ repository = "https://github.com/RingsNetwork/rings"
 async-trait = "0.1.77"
 js-sys = "0.3.98"
 jsonrpc-core = "18.0.0"
-# Local Rings crates keep explicit matching versions even when resolved by path
-# so every workspace consumer records the same protocol generation.
 rings-codec = { path = "crates/codec", version = "0.26.0" }
 rings-core = { path = "crates/core", version = "0.26.0", default-features = false }
 rings-derive = { path = "crates/derive", version = "0.26.0", default-features = false }

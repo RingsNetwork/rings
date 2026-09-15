@@ -237,40 +237,31 @@ impl FingerAttempt {
 
     /// Resolve the current token into either raw report data or retained proof.
     ///
-    /// For `AwaitingReport`, the successor is intentionally not matched here:
-    /// this is the first place a reported successor can be evaluated. For
-    /// `AwaitingAdmission`, the successor is part of the retained proof and
-    /// must match exactly before the caller may consume the lease.
-    /// Matching expired ownership returns `Expired`; all mismatches return
-    /// `Stale` without changing this value.
+    /// Ownership is decided by [`Self::can_consume`] (for `AwaitingReport` the
+    /// successor is not matched, since this is the first place a reported
+    /// successor can be evaluated; for `AwaitingAdmission` it is part of the
+    /// retained proof) and expiry by [`Self::is_expired`]. Mismatches return
+    /// `Stale`, an owned but overdue phase returns `Expired`; neither changes
+    /// this value.
     pub(super) fn proof_source(
         self,
         request: FingerFixRequest,
         successor: Did,
         now_ms: u64,
     ) -> Result<FingerProofSource, FingerReportRejection> {
+        if !self.can_consume(request, successor) {
+            return Err(FingerReportRejection::Stale);
+        }
+        if self.is_expired(now_ms) {
+            return Err(FingerReportRejection::Expired);
+        }
         match self {
-            Self::AwaitingReport(pending) if pending.request == request => {
-                if now_ms >= pending.expires_at_ms {
-                    Err(FingerReportRejection::Expired)
-                } else {
-                    Ok(FingerProofSource::Report {
-                        issued_epoch: pending.issued_epoch,
-                    })
-                }
-            }
-            Self::AwaitingAdmission(admission)
-                if admission.proof.request == request && admission.proof.successor == successor =>
-            {
-                if now_ms >= admission.expires_at_ms {
-                    Err(FingerReportRejection::Expired)
-                } else {
-                    Ok(FingerProofSource::Admission(admission.proof))
-                }
-            }
-            Self::Idle | Self::AwaitingReport(_) | Self::AwaitingAdmission(_) => {
-                Err(FingerReportRejection::Stale)
-            }
+            Self::AwaitingReport(pending) => Ok(FingerProofSource::Report {
+                issued_epoch: pending.issued_epoch,
+            }),
+            Self::AwaitingAdmission(admission) => Ok(FingerProofSource::Admission(admission.proof)),
+            // `can_consume` is false for `Idle`.
+            Self::Idle => Err(FingerReportRejection::Stale),
         }
     }
 

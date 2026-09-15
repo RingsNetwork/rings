@@ -254,7 +254,7 @@ impl TopologyState {
             Some(first_routable_slot) => self
                 .finger_convergence
                 .status_after(first_routable_slot, now_ms),
-            None => FingerConvergenceStatus::inactive(),
+            None => FingerConvergenceStatus::dormant(),
         }
     }
 
@@ -312,8 +312,8 @@ pub(crate) fn bounded_connection_candidates(
         if bounded.len() == capacity {
             break;
         }
-        if candidate != local && !bounded.contains(&candidate) {
-            bounded.push(candidate);
+        if candidate != local {
+            push_unique(&mut bounded, candidate);
         }
     }
     bounded
@@ -564,10 +564,27 @@ pub fn dist(a: Did, b: Did) -> BigUint {
 }
 
 /// Append a candidate DID if this small successor/finger worklist does not contain it.
-fn push_unique(xs: &mut Vec<Did>, x: Did) {
+/// Append `x` unless it is already present: the single dedupe rule behind
+/// successor merging and candidate bounding.
+pub(super) fn push_unique(xs: &mut Vec<Did>, x: Did) {
     if !xs.contains(&x) {
         xs.push(x);
     }
+}
+
+/// Replace the hint vector of `state` and version the evidence it changed.
+///
+/// Every transition that derives new hints goes through this one function, so
+/// the hint-change law (a changed slot is stamped with a fresh epoch and
+/// unverified, and an attempt whose lower slot changed is retired) has a
+/// single owner.
+pub(super) fn rehint(
+    state: &TopologyState,
+    fingers: Vec<Option<Did>>,
+) -> (Vec<Option<Did>>, FingerConvergenceState) {
+    let mut finger_convergence = state.finger_convergence.clone();
+    finger_convergence.invalidate_hint_changes(&state.fingers, &fingers);
+    (fingers, finger_convergence)
 }
 
 /// Normalize successor candidates by removing `local`, sorting by clockwise
@@ -728,9 +745,8 @@ fn step_join(state: &TopologyState, peer: Did, capacity: usize) -> TopologyStep 
             actions: Vec::new(),
         };
     }
-    let fingers = finger_join(state.local, &state.fingers, peer);
-    let mut finger_convergence = state.finger_convergence.clone();
-    finger_convergence.invalidate_hint_changes(&state.fingers, &fingers);
+    let (fingers, finger_convergence) =
+        rehint(state, finger_join(state.local, &state.fingers, peer));
     TopologyStep {
         state: TopologyState {
             successors: update_successors(state.local, &state.successors, peer, capacity),
@@ -769,9 +785,8 @@ fn step_admit(
     let successors = update_successors(state.local, &state.successors, peer, capacity);
     // Only a newly retained successor needs a follow-up successor-list query.
     let inserted = !state.successors.contains(&peer) && successors.contains(&peer);
-    let fingers = finger_join(state.local, &verified.fingers, peer);
-    let mut finger_convergence = verified.finger_convergence.clone();
-    finger_convergence.invalidate_hint_changes(&verified.fingers, &fingers);
+    let (fingers, finger_convergence) =
+        rehint(&verified, finger_join(state.local, &verified.fingers, peer));
 
     let mut actions = Vec::new();
     if inserted {
@@ -817,15 +832,12 @@ fn step_remove(
             }
         }
     }
-    let fingers = remove_finger_peer(&state.fingers, peer);
-    let mut finger_convergence = state.finger_convergence.clone();
+    let (fingers, mut finger_convergence) = rehint(state, remove_finger_peer(&state.fingers, peer));
     if next_successors.is_empty() {
         // Losing the last membership witness invalidates even slots whose
         // `None` hint did not change: those empty ranges were proved only in
         // the previous topology.
         finger_convergence.invalidate_all_evidence();
-    } else {
-        finger_convergence.invalidate_hint_changes(&state.fingers, &fingers);
     }
     TopologyStep {
         state: TopologyState {
@@ -844,9 +856,8 @@ fn step_update_successor(state: &TopologyState, successor: Did, capacity: usize)
     let next_successors = update_successors(state.local, &state.successors, successor, capacity);
     // Query the candidate's successor list only if it survived capacity truncation.
     let inserted = !state.successors.contains(&successor) && next_successors.contains(&successor);
-    let fingers = finger_join(state.local, &state.fingers, successor);
-    let mut finger_convergence = state.finger_convergence.clone();
-    finger_convergence.invalidate_hint_changes(&state.fingers, &fingers);
+    let (fingers, finger_convergence) =
+        rehint(state, finger_join(state.local, &state.fingers, successor));
     TopologyStep {
         state: TopologyState {
             successors: next_successors,

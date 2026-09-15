@@ -9,8 +9,6 @@ publish = false
 
 [dependencies]
 rings-core = { workspace = true }
-# Explicit version stays lockstep with the workspace protocol release even
-# though this example resolves the crate through the local path.
 rings-node = { path = "../../crates/node", version = "0.26.0", default-features = false, features = ["node"] }
 tokio = { version = "1.13.0", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
 
