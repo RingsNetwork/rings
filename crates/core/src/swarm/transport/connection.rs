@@ -589,6 +589,7 @@ impl SwarmTransport {
             fallback = ?fallback,
             "removed peer from DHT"
         );
+        self.emit_peer_retired(attempt.peer).await;
         if let Some(connection) = connection {
             self.close_connection_for_disconnect(&connection).await?;
         }
@@ -623,6 +624,7 @@ impl SwarmTransport {
             Some(None) => return Ok(UnreferencedRetirement::Referenced),
             Some(Some(())) => {}
         }
+        self.emit_peer_retired(attempt.peer).await;
         if let Some(connection) = connection {
             if let Err(error) = self.close_connection_for_disconnect(&connection).await {
                 tracing::warn!(

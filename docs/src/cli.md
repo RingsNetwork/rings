@@ -55,7 +55,7 @@ token takes `--remote-api-token-file <FILE>`.
 ### Through a seed
 
 ```bash
-rings connect seed ./seed.json
+rings connect seed file:///etc/rings/seed.json
 rings connect seed https://example.org/seed.json
 ```
 
@@ -112,12 +112,13 @@ node should always be able to reach, list them under `bootstrap.peers` in
 one run:
 
 ```bash
-rings run --bootstrap-seed ./seed.json
+rings run --bootstrap-seed file:///etc/rings/seed.json
 ```
 
 `rings run` then supervises those targets: whenever one is no longer reachable through the
-overlay it is redialed through its HTTP endpoint, in a short burst first and then every five
-minutes, until it is reachable again. A target that other peers can route to is left alone.
+overlay it is redialed through its HTTP endpoint, in a short burst first and then about every
+five minutes, until it is admitted again. A target that other peers can route to is left
+alone.
 
 ## Peers
 

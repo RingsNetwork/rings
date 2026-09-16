@@ -129,8 +129,11 @@ impl MessageHandler {
             .peer_may_share_storage_responsibility(attempt.peer())?;
         let removed = if self.transport.disconnect_attempt(attempt).await? {
             true
+        } else if self.transport.remove_retired_attempt_topology(attempt)? {
+            self.transport.emit_peer_retired(attempt.peer()).await;
+            true
         } else {
-            self.transport.remove_retired_attempt_topology(attempt)?
+            false
         };
         if removed && should_repair {
             self.transport.request_storage_repair();

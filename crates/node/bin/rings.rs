@@ -25,7 +25,6 @@ use rings_node::native::api_auth::load_or_create_api_token;
 use rings_node::native::api_auth::ApiSecurity;
 use rings_node::native::bootstrap::BootstrapSupervisor;
 use rings_node::native::bootstrap::BootstrapTargets;
-use rings_node::native::bootstrap::ReachabilityEvidence;
 use rings_node::native::cli::Client;
 use rings_node::native::config;
 use rings_node::native::endpoint::run_external_api;
@@ -966,15 +965,18 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
     let gateway_status = gateway_runner
         .as_ref()
         .map(NativeGatewayRunner::status_handle);
-    // Managed bootstrap targets fail fast on invalid configuration; their reachability
-    // supervisor is spawned with the other run-owned tasks below.
-    let bootstrap_targets = BootstrapTargets::from_config(&c.bootstrap, processor.did())?;
-    let reachability_evidence = Arc::new(ReachabilityEvidence::new(&bootstrap_targets));
+    // Managed bootstrap targets fail fast on invalid configuration; their supervisor is spawned
+    // with the other run-owned tasks below and its evidence is the backend's observer.
+    let bootstrap_targets = BootstrapTargets::from_config(c.bootstrap.clone(), processor.did())?;
+    let bootstrap = BootstrapSupervisor::over_processor(bootstrap_targets, processor.clone());
     // The Backend decodes inbound custom messages as namespaced envelopes and routes
-    // them to the protocol registry; lookup reports and transport losses are written to
-    // the reachability evidence the supervisor reads.
-    let backend = Arc::new(Backend::new(provider).observed_by(reachability_evidence.clone()));
-    processor.swarm.set_callback(backend)?;
+    // them to the protocol registry.
+    let backend = Backend::new(provider);
+    let backend = match bootstrap.as_ref() {
+        Some((evidence, _)) => backend.observed_by(evidence.clone()),
+        None => backend,
+    };
+    processor.swarm.set_callback(Arc::new(backend))?;
 
     let stop = StopSource::new();
     let gateway_configured = gateway_runner.is_some();
@@ -1022,14 +1024,10 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
             .await
             .context("external API stopped")
     });
-    if let Some(supervisor) = BootstrapSupervisor::over_processor(
-        bootstrap_targets,
-        processor.clone(),
-        reachability_evidence.as_ref(),
-    ) {
+    if let Some((_, supervisor)) = bootstrap {
         let bootstrap_stop = stop.token();
         tasks.spawn(async move {
-            // Returns only once the stop token is observed, after the select below has exited.
+            // Returns only on stop, which the select below requests before aborting the set.
             supervisor.run(bootstrap_stop).await;
             Ok(())
         });

@@ -288,7 +288,9 @@ impl SwarmCallback for CountingSwarmCallback {
         &self,
         event: &SwarmEvent,
     ) -> std::result::Result<(), crate::error::CallbackError> {
-        let SwarmEvent::ConnectionStateChange { state, .. } = event;
+        let SwarmEvent::ConnectionStateChange { state, .. } = event else {
+            return Ok(());
+        };
         match self.events.lock() {
             Ok(mut events) => events.push(*state),
             Err(_) => tracing::error!("CountingSwarmCallback events mutex is poisoned"),
@@ -398,7 +400,9 @@ impl SwarmCallback for BlockingEventSwarmCallback {
         &self,
         event: &SwarmEvent,
     ) -> std::result::Result<(), crate::error::CallbackError> {
-        let SwarmEvent::ConnectionStateChange { peer, state } = event;
+        let SwarmEvent::ConnectionStateChange { peer, state } = event else {
+            return Ok(());
+        };
         match self.events.lock() {
             Ok(mut events) => events.push((*peer, *state)),
             Err(_) => tracing::error!("BlockingEventSwarmCallback events mutex is poisoned"),

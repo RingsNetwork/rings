@@ -1,11 +1,10 @@
-//! Real-network check of the bootstrap reachability probe: the routed successor lookup issued
-//! by `ProcessorPort::reachable` reports a present target as its own successor, reports a
-//! different node for an absent key, is short-circuited by a direct edge, and is decided
-//! locally for a key in this node's own range.
+//! Real-network checks of the bootstrap plumbing: the routed successor lookup issued by
+//! `ProcessorPort::reachable`, the backend's translation of swarm events into reachability
+//! evidence, and the core's `PeerRetired` event on a locally decided disconnect.
 //!
-//! Topology: `C — B — A`, with keys chosen so that `A` is `B`'s successor head (clockwise from
-//! `B`, `A` precedes `C`). `C`'s only peer is `B`, so every lookup `C` issues goes to `B`, which
-//! answers `A` for any key in `(B, A]`.
+//! Topology for the probe: `C — B — A`, with keys chosen so that `A` is `B`'s successor head
+//! (clockwise from `B`, `A` precedes `C`). `C`'s only peer is `B`, so every lookup `C` issues
+//! goes to `B`, which answers `A` for any key in `(B, A]`.
 
 use std::sync::Arc;
 
@@ -14,17 +13,22 @@ use rings_core::ecc::SecretKey;
 use super::common::*;
 use super::*;
 use crate::extension::Backend;
-use crate::native::bootstrap::BootstrapConfig;
 use crate::native::bootstrap::BootstrapPort;
 use crate::native::bootstrap::BootstrapTargets;
 use crate::native::bootstrap::ManagedTarget;
 use crate::native::bootstrap::ProcessorPort;
 use crate::native::bootstrap::ReachabilityEvidence;
+use crate::native::config::BootstrapConfig;
 use crate::seed::SeedPeer;
 
-/// Swarm callback that dispatches through the real [`Backend`] (so lookup reports reach the
-/// reachability evidence exactly as in `rings run`) while keeping the test fixture's
-/// connection notifications.
+/// Draws of random identity keys before giving up on a chain layout.
+const CHAIN_KEY_DRAWS: usize = 512;
+/// An endpoint that validates as public and is never dialed.
+const NEVER_DIALED: &str = "https://never-dialed.example.org:50001/";
+
+/// Swarm callback that dispatches through the real [`Backend`] (so lookup reports and swarm
+/// events reach the reachability evidence exactly as in `rings run`) while keeping the test
+/// fixture's connection notifications.
 struct ProbeTestCallback {
     backend: Backend,
     fixture: Arc<SwarmCallbackInstance>,
@@ -41,7 +45,7 @@ impl SwarmCallback for ProbeTestCallback {
         self.fixture.on_inbound(payload).await
     }
 
-    /// Forward events to both the backend (which records transport losses) and the fixture's
+    /// Forward events to both the backend (which writes the evidence) and the fixture's
     /// connection notifier.
     async fn on_event(
         &self,
@@ -52,129 +56,93 @@ impl SwarmCallback for ProbeTestCallback {
     }
 }
 
-/// Clockwise ring distance from `from` to `to`.
-fn clockwise(from: Did, to: Did) -> Did {
-    to - from
+/// One node of the probe topology.
+struct ProbeNode {
+    processor: Arc<Processor>,
+    evidence: Arc<ReachabilityEvidence>,
+    fixture: Arc<SwarmCallbackInstance>,
 }
 
-/// Three identity keys whose DIDs satisfy `clockwise(B, A) < clockwise(B, C)`, so `A` is `B`'s
-/// successor head once both are connected to `B`.
+impl ProbeNode {
+    /// A node over `key` whose swarm callback dispatches through a backend that writes fresh
+    /// reachability evidence.
+    async fn new(key: SecretKey) -> Self {
+        let processor = Arc::new(prepare_processor_with_identity_key(key).await);
+        let evidence = Arc::new(ReachabilityEvidence::default());
+        let fixture = test_callback();
+        let provider = Arc::new(Provider::from_processor(processor.clone()));
+        let backend = Backend::new(provider).observed_by(evidence.clone());
+        processor
+            .swarm
+            .set_callback(Arc::new(ProbeTestCallback {
+                backend,
+                fixture: fixture.clone(),
+            }))
+            .expect("callback installs");
+        Self {
+            processor,
+            evidence,
+            fixture,
+        }
+    }
+
+    /// DID of this node.
+    fn did(&self) -> Did {
+        self.processor.did()
+    }
+}
+
+/// Three identity keys whose DIDs satisfy `A - B < C - B` (clockwise ring distance, the `Sub`
+/// on `Did`), so `A` is `B`'s successor head once both are connected to `B`.
 fn chain_keys() -> (SecretKey, SecretKey, SecretKey) {
-    loop {
+    for _ in 0..CHAIN_KEY_DRAWS {
         let a = SecretKey::random();
         let b = SecretKey::random();
         let c = SecretKey::random();
-        let (a_did, b_did, c_did) = (
-            Did::from(a.address()),
-            Did::from(b.address()),
-            Did::from(c.address()),
-        );
-        if clockwise(b_did, a_did) < clockwise(b_did, c_did) {
+        let b_did = Did::from(b.address());
+        if Did::from(a.address()) - b_did < Did::from(c.address()) - b_did {
             return (a, b, c);
         }
     }
+    panic!("no chain layout in {CHAIN_KEY_DRAWS} draws; the ordering has probability 1/2");
 }
 
-/// A managed target for `did` with a syntactically valid endpoint that is never dialed.
-fn target(did: Did) -> ManagedTarget {
-    ManagedTarget::try_from(&SeedPeer {
+/// A seed entry for `did` at the never-dialed endpoint.
+fn never_dialed(did: Did) -> SeedPeer {
+    SeedPeer {
         did: did.to_string(),
-        url: "https://never-dialed.example.org:50001/".to_string(),
+        url: NEVER_DIALED.to_string(),
         api_token: None,
-    })
-    .expect("a public endpoint validates")
-}
-
-/// A processor over `key` whose swarm callback dispatches through a backend that writes
-/// fresh reachability evidence.
-async fn probe_processor(
-    key: SecretKey,
-) -> (
-    Arc<Processor>,
-    Arc<ReachabilityEvidence>,
-    Arc<SwarmCallbackInstance>,
-) {
-    let processor = Arc::new(prepare_processor_with_identity_key(key).await);
-    let evidence = Arc::new(ReachabilityEvidence::new(&BootstrapTargets::default()));
-    let fixture = test_callback();
-    let provider = Arc::new(Provider::from_processor(processor.clone()));
-    let backend = Backend::new(provider).observed_by(evidence.clone());
-    processor
-        .swarm
-        .set_callback(Arc::new(ProbeTestCallback {
-            backend,
-            fixture: fixture.clone(),
-        }))
-        .expect("callback installs");
-    (processor, evidence, fixture)
-}
-
-/// The backend translates connection state changes into transport-neutral losses: only a
-/// terminal state of a managed target is recorded, never a transient `Disconnected`.
-#[tokio::test]
-async fn backend_records_only_terminal_states_of_managed_targets() {
-    let processor = Arc::new(prepare_processor().await);
-    let managed = Did::from(1);
-    let targets = BootstrapTargets::from_config(
-        &BootstrapConfig {
-            peers: vec![SeedPeer {
-                did: managed.to_string(),
-                url: "https://never-dialed.example.org:50001/".to_string(),
-                api_token: None,
-            }],
-        },
-        processor.did(),
-    )
-    .expect("one public target validates");
-    let evidence = Arc::new(ReachabilityEvidence::new(&targets));
-    let provider = Arc::new(Provider::from_processor(processor));
-    let backend = Backend::new(provider).observed_by(evidence.clone());
-    let event =
-        |peer: Did, state: WebrtcConnectionState| SwarmEvent::ConnectionStateChange { peer, state };
-
-    for state in [
-        WebrtcConnectionState::Connecting,
-        WebrtcConnectionState::Connected,
-        WebrtcConnectionState::Disconnected,
-    ] {
-        backend
-            .on_event(&event(managed, state))
-            .await
-            .expect("events are accepted");
     }
-    backend
-        .on_event(&event(Did::from(2), WebrtcConnectionState::Closed))
-        .await
-        .expect("events are accepted");
-    assert!(evidence.drops().take().expect("drops readable").is_empty());
-
-    backend
-        .on_event(&event(managed, WebrtcConnectionState::Failed))
-        .await
-        .expect("events are accepted");
-    assert_eq!(
-        evidence.drops().take().expect("drops readable"),
-        [managed].into_iter().collect()
-    );
 }
 
-/// Present targets are reachable through one hop, an absent key is not, a direct peer needs
-/// no lookup at all, and a key in `C`'s own range is refuted without leaving `C`.
+/// A managed target for `did` at the never-dialed endpoint.
+fn target(did: Did) -> ManagedTarget {
+    ManagedTarget::try_from(never_dialed(did)).expect("a public endpoint validates")
+}
+
+/// Present targets are reachable through one hop (verified to be routed, not direct), an
+/// absent key is not, a direct peer needs no lookup at all, and a key in `C`'s successor
+/// interval is refuted without leaving `C`.
 #[tokio::test]
 async fn routed_probe_reports_presence_through_one_hop() {
     let _guard = network_test_guard().await;
     let (a_key, b_key, c_key) = chain_keys();
-    let (a, _, a_fixture) = probe_processor(a_key).await;
-    let (b, _, b_fixture) = probe_processor(b_key).await;
-    let (c, c_evidence, c_fixture) = probe_processor(c_key).await;
+    let a = ProbeNode::new(a_key).await;
+    let b = ProbeNode::new(b_key).await;
+    let c = ProbeNode::new(c_key).await;
 
-    connect_processors(&b, &a, &b_fixture, &a_fixture).await;
-    connect_processors(&c, &b, &c_fixture, &b_fixture).await;
+    connect_processors(&b.processor, &a.processor, &b.fixture, &a.fixture).await;
+    connect_processors(&c.processor, &b.processor, &c.fixture, &b.fixture).await;
 
-    let port = ProcessorPort::new(c.clone(), c_evidence.reports());
+    let port = ProcessorPort::new(c.processor.clone(), c.evidence.clone());
     assert!(
         port.reachable(&target(b.did())).await,
         "a directly connected target is reachable without a lookup"
+    );
+    assert!(
+        !c.processor.swarm.is_peer_connected(a.did()),
+        "the probe for A must be routed, not short-circuited"
     );
     assert!(
         port.reachable(&target(a.did())).await,
@@ -182,20 +150,119 @@ async fn routed_probe_reports_presence_through_one_hop() {
     );
     let absent = b.did() + Did::from(1);
     assert_ne!(absent, a.did());
+    assert_ne!(absent, c.did());
     assert!(
         !port.reachable(&target(absent)).await,
         "an absent key is answered by another node's successor"
     );
-    let own_range = c.did() + Did::from(1);
-    assert_ne!(own_range, b.did());
-    let before = c_evidence.reports().len().expect("ledger readable");
+    let own_interval = c.did() + Did::from(1);
+    assert_ne!(own_interval, b.did());
+    let before = c.evidence.reports().len().expect("ledger readable");
     assert!(
-        !port.reachable(&target(own_range)).await,
-        "a key succeeded by C's own successor is refuted locally"
+        !port.reachable(&target(own_interval)).await,
+        "a key in C's successor interval is refuted locally"
     );
     assert_eq!(
-        c_evidence.reports().len().expect("ledger readable"),
+        c.evidence.reports().len().expect("ledger readable"),
         before,
         "the local refutation registers no probe"
     );
+}
+
+/// The backend translates swarm events into evidence: `Connected` resolves an admission
+/// waiter, `PeerRetired` records a loss, and other physical states record nothing.
+#[tokio::test]
+async fn backend_translates_admission_and_retirement_only() {
+    let processor = Arc::new(prepare_processor().await);
+    let managed = Did::from(1);
+    let evidence = Arc::new(ReachabilityEvidence::default());
+    let provider = Arc::new(Provider::from_processor(processor));
+    let backend = Backend::new(provider).observed_by(evidence.clone());
+    let state_change = |state: WebrtcConnectionState| SwarmEvent::ConnectionStateChange {
+        peer: managed,
+        state,
+    };
+
+    let mut admitted = evidence
+        .admissions()
+        .await_admission(managed)
+        .expect("admissions readable");
+    for state in [
+        WebrtcConnectionState::Connecting,
+        WebrtcConnectionState::Disconnected,
+        WebrtcConnectionState::Failed,
+        WebrtcConnectionState::Closed,
+    ] {
+        backend
+            .on_event(&state_change(state))
+            .await
+            .expect("events are accepted");
+    }
+    assert!(evidence
+        .losses()
+        .take()
+        .expect("losses readable")
+        .is_empty());
+    assert!(
+        admitted.try_recv().is_err(),
+        "no physical state other than Connected admits"
+    );
+
+    backend
+        .on_event(&state_change(WebrtcConnectionState::Connected))
+        .await
+        .expect("events are accepted");
+    assert_eq!(admitted.await, Ok(()));
+
+    backend
+        .on_event(&SwarmEvent::PeerRetired { peer: managed })
+        .await
+        .expect("events are accepted");
+    assert_eq!(
+        evidence.losses().take().expect("losses readable"),
+        [managed].into_iter().collect()
+    );
+}
+
+/// A disconnect decided by the local node retires the peer through the core's single
+/// departure funnel and reaches the evidence as a loss, without any physical terminal state.
+#[tokio::test]
+async fn a_local_disconnect_is_reported_as_a_peer_retirement() {
+    let _guard = network_test_guard().await;
+    let a = ProbeNode::new(SecretKey::random()).await;
+    let b = ProbeNode::new(SecretKey::random()).await;
+    connect_processors(&a.processor, &b.processor, &a.fixture, &b.fixture).await;
+    assert!(a
+        .evidence
+        .losses()
+        .take()
+        .expect("losses readable")
+        .is_empty());
+
+    a.processor
+        .swarm
+        .disconnect(b.did())
+        .await
+        .expect("disconnect succeeds");
+    assert_eq!(
+        a.evidence.losses().take().expect("losses readable"),
+        [b.did()].into_iter().collect(),
+        "the retirement is observed before disconnect returns"
+    );
+}
+
+/// The bootstrap validation of a real node's own DID.
+#[tokio::test]
+async fn targets_reject_the_local_node() {
+    let processor = prepare_processor().await;
+    let error = BootstrapTargets::from_config(
+        BootstrapConfig {
+            peers: vec![never_dialed(processor.did())],
+        },
+        processor.did(),
+    )
+    .err()
+    .map(|error| error.to_string())
+    .unwrap_or_default();
+    assert!(error.contains("itself"));
 }

@@ -9,19 +9,26 @@
   <file-or-url>` name them in the seed-document shape; `rings connect node|seed` keep their
   one-shot semantics. A target's reachability is a routed successor lookup for its DID, so a
   target that is directly connected or that other peers can route to is never forced into a
-  direct edge. An unreachable target is redialed through its HTTP endpoint five times two
-  seconds apart, then every five minutes plus up to thirty seconds of jitter, and the burst
-  restarts after each loss; the loss of a direct transport to a target triggers an immediate
-  reassessment. At most one handshake per target is in flight, targets retry independently,
-  the endpoint must answer as the configured DID, and shutdown cancels any handshake in
-  progress. A key in the node's own successor range is refuted locally without a probe. Invalid
-  targets (unparsable DID, non-public URL, one DID with differing endpoints, or the node itself)
-  stop `rings run` before it listens; an entry repeated verbatim is merged.
+  direct edge, and a key in the local successor interval is refuted without a probe. An
+  unreachable target is redialed through its HTTP endpoint five times, each attempt at least
+  two seconds after the previous one settled, then every five minutes plus up to thirty seconds
+  of jitter; a redial succeeds only once the swarm admits the peer, an endpoint answering as a
+  different DID is refused before any offer is created, and a redial that finds a handshake
+  already in flight waits two seconds without counting. A target leaving the local DHT,
+  whatever caused it, triggers an immediate reassessment and restarts the burst. At most one
+  handshake per target is in flight, targets retry independently, and shutdown cancels any
+  handshake in progress. Invalid targets (unparsable DID, non-public URL, one DID with differing
+  endpoints, one endpoint under two DIDs, or the node itself) stop `rings run` before it
+  listens; an entry repeated verbatim is merged.
+- `SwarmEvent::PeerRetired` reports every departure of an admitted peer from the local DHT
+  (remote terminal state, data-channel close, liveness or stabilization removal, eviction,
+  explicit disconnect) through the same ordered per-peer delivery as connection state events;
+  `ConnectionStateChange { Connected }` is documented as the admission fact.
 - `Swarm::is_peer_connected` exposes the per-peer form of the transport-neutral
-  admission-and-readiness filter, `WebrtcConnectionState::is_terminal` is public, and the node
-  `Backend` accepts a `BackendObserver` that receives decoded Chord lookup reports and
-  transport losses (terminal states only, stated without physical-state vocabulary) without a
-  second payload decode.
+  admission-and-readiness filter; `Processor::connect_peer_via_http` performs the HTTP
+  handshake with the answering DID pinned before any offer is created (the JSON-RPC handler
+  delegates to it); the node `Backend` accepts a `BackendObserver` that receives application
+  lookup reports, admissions and departures from its single payload decode.
 
 ## 0.26.0
 

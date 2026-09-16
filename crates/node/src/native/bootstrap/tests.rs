@@ -1,32 +1,33 @@
 //! Supervisor shell tests over a scripted port under tokio's paused clock, plus target
-//! validation and lookup-ledger tests.
+//! validation and evidence-record tests.
 //!
 //! Every timing assertion below is in paused virtual time: the runtime advances the clock only
 //! when no task can make progress, so attempt instants are exact, not approximate.
 
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
 use rings_core::dht::Did;
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
-use super::probe::LookupReportLedger;
-use super::probe::EARLY_REPORT_CAPACITY;
+use super::evidence::Admissions;
+use super::evidence::LookupReportLedger;
+use super::evidence::EARLY_REPORT_CAPACITY;
+use super::schedule::duration_ms;
 use super::schedule::is_one_slow_delay_after;
-use super::BootstrapConfig;
 use super::BootstrapPort;
 use super::BootstrapSupervisor;
 use super::BootstrapTargets;
 use super::ManagedTarget;
-use super::TransportDrops;
+use super::ReachabilityEvidence;
 use crate::error::Error;
 use crate::error::Result;
+use crate::native::config::BootstrapConfig;
 use crate::prelude::StopSource;
 use crate::seed::SeedPeer;
 
@@ -42,7 +43,9 @@ enum DialScript {
     Succeed,
     /// The handshake fails.
     Fail,
-    /// The handshake never returns; only abort ends it.
+    /// The core reports a handshake to the target already in flight.
+    InFlight,
+    /// The handshake never returns; only cancellation ends it.
     Hang,
     /// The handshake completes after the given virtual milliseconds.
     SucceedAfter(u64),
@@ -71,30 +74,33 @@ struct PortState {
     reachable: BTreeMap<Did, bool>,
     dials: BTreeMap<Did, VecDeque<DialScript>>,
     log: Vec<Call>,
+    hanging: usize,
 }
 
 /// A [`BootstrapPort`] driven entirely by the test.
 struct ScriptedPort {
     origin: Instant,
     state: Mutex<PortState>,
-    hanging: Arc<AtomicUsize>,
+    hang_released: Notify,
 }
 
-/// Counts a hanging dial while its future is alive, so abort is observable.
-struct HangGuard(Arc<AtomicUsize>);
+/// Counts a hanging dial while its future is alive and announces its cancellation, so the
+/// shutdown test waits for the event rather than for a scheduler pass.
+struct HangGuard<'a>(&'a ScriptedPort);
 
-impl HangGuard {
+impl<'a> HangGuard<'a> {
     /// Register one hanging dial.
-    fn new(counter: &Arc<AtomicUsize>) -> Self {
-        counter.fetch_add(1, Ordering::SeqCst);
-        Self(counter.clone())
+    fn new(port: &'a ScriptedPort) -> Self {
+        port.state().hanging += 1;
+        Self(port)
     }
 }
 
-impl Drop for HangGuard {
-    /// Unregister the hanging dial, also when its future is aborted.
+impl Drop for HangGuard<'_> {
+    /// Unregister the hanging dial and announce it, also when its future is dropped.
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
+        self.0.state().hanging -= 1;
+        self.0.hang_released.notify_one();
     }
 }
 
@@ -104,13 +110,13 @@ impl ScriptedPort {
         Arc::new(Self {
             origin: Instant::now(),
             state: Mutex::new(PortState::default()),
-            hanging: Arc::new(AtomicUsize::new(0)),
+            hang_released: Notify::new(),
         })
     }
 
     /// Virtual milliseconds since the port was created.
     fn now_ms(&self) -> u64 {
-        u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX)
+        duration_ms(self.origin.elapsed())
     }
 
     /// Lock the scripted state.
@@ -132,29 +138,19 @@ impl ScriptedPort {
             .extend(scripts);
     }
 
-    /// Instants of every dial of `target`, in order.
-    fn dial_times(&self, target: Did) -> Vec<u64> {
+    /// Instants of every call of `kind` on `target`, in order.
+    fn call_times(&self, target: Did, kind: CallKind) -> Vec<u64> {
         self.state()
             .log
             .iter()
-            .filter(|call| call.target == target && call.kind == CallKind::Dial)
-            .map(|call| call.at_ms)
-            .collect()
-    }
-
-    /// Instants of every probe of `target`, in order.
-    fn probe_times(&self, target: Did) -> Vec<u64> {
-        self.state()
-            .log
-            .iter()
-            .filter(|call| call.target == target && call.kind == CallKind::Probe)
+            .filter(|call| call.target == target && call.kind == kind)
             .map(|call| call.at_ms)
             .collect()
     }
 
     /// Dials whose future is currently alive and hanging.
     fn hanging(&self) -> usize {
-        self.hanging.load(Ordering::SeqCst)
+        self.state().hanging
     }
 }
 
@@ -195,9 +191,12 @@ impl BootstrapPort for ScriptedPort {
                 self.set_reachable(target.did(), true);
                 Ok(())
             }
-            DialScript::Fail => Err(Error::BootstrapHandshake("scripted failure".to_string())),
+            DialScript::Fail => Err(Error::AdmissionTimedOut { peer: target.did() }),
+            DialScript::InFlight => Err(Error::CreateOffer(
+                rings_core::error::Error::AlreadyConnected,
+            )),
             DialScript::Hang => {
-                let _guard = HangGuard::new(&self.hanging);
+                let _guard = HangGuard::new(self);
                 std::future::pending().await
             }
             DialScript::SucceedAfter(delay_ms) => {
@@ -219,48 +218,42 @@ fn peer(n: u32) -> SeedPeer {
 }
 
 /// Validated targets for `peers`, for a local node that is none of them.
-fn targets(peers: &[SeedPeer]) -> BootstrapTargets {
-    BootstrapTargets::from_config(
-        &BootstrapConfig {
-            peers: peers.to_vec(),
-        },
-        Did::from(LOCAL),
-    )
-    .expect("test targets must validate")
+fn targets(peers: Vec<SeedPeer>) -> BootstrapTargets {
+    BootstrapTargets::from_config(BootstrapConfig { peers }, Did::from(LOCAL))
+        .expect("test targets must validate")
 }
 
 /// A running supervisor over a scripted port.
 struct Running {
     port: Arc<ScriptedPort>,
-    drops: Arc<TransportDrops>,
+    evidence: Arc<ReachabilityEvidence>,
     stop: StopSource,
     task: JoinHandle<()>,
 }
 
 impl Running {
     /// Spawn a supervisor over `peers` with `port` already scripted.
-    fn spawn(port: Arc<ScriptedPort>, peers: &[SeedPeer]) -> Self {
-        let targets = targets(peers);
-        let evidence = super::ReachabilityEvidence::new(&targets);
-        let drops = evidence.drops();
+    fn spawn(port: Arc<ScriptedPort>, peers: Vec<SeedPeer>) -> Self {
+        let evidence = Arc::new(ReachabilityEvidence::default());
         let stop = StopSource::new();
         let supervisor =
-            BootstrapSupervisor::new(targets, port.clone(), drops.clone(), JITTER_SEED);
+            BootstrapSupervisor::new(targets(peers), port.clone(), evidence.clone(), JITTER_SEED);
         let task = tokio::spawn(supervisor.run(stop.token()));
         Self {
             port,
-            drops,
+            evidence,
             stop,
             task,
         }
     }
 
-    /// Report the loss of the transport to `target` and make it unreachable.
-    fn drop_transport(&self, target: Did) {
+    /// Report that `target` left the overlay and make it unreachable.
+    fn lose(&self, target: Did) {
         self.port.set_reachable(target, false);
-        self.drops
+        self.evidence
+            .losses()
             .observe(target)
-            .expect("drops must accept a loss");
+            .expect("losses must accept a departure");
     }
 
     /// Request stop and wait for the run to return.
@@ -278,22 +271,20 @@ impl Running {
 async fn initial_failure_bursts_then_falls_back_to_the_slow_cadence() {
     let target = Did::from(1);
     let port = ScriptedPort::new();
-    let running = Running::spawn(port.clone(), &[peer(1)]);
+    let running = Running::spawn(port.clone(), vec![peer(1)]);
 
     tokio::time::sleep(Duration::from_millis(9_000)).await;
-    assert_eq!(port.dial_times(target), vec![0, 2_000, 4_000, 6_000, 8_000]);
+    assert_eq!(port.call_times(target, CallKind::Dial), vec![
+        0, 2_000, 4_000, 6_000, 8_000
+    ]);
 
     tokio::time::sleep(Duration::from_millis(340_000)).await;
-    let dials = port.dial_times(target);
+    let dials = port.call_times(target, CallKind::Dial);
     assert_eq!(dials.len(), 6, "exactly one slow attempt follows the burst");
-    assert!(
-        is_one_slow_delay_after(8_000, dials[5]),
-        "sixth dial at {}",
-        dials[5]
-    );
+    assert!(is_one_slow_delay_after(8_000, dials[5]));
 
     tokio::time::sleep(Duration::from_millis(340_000)).await;
-    let dials = port.dial_times(target);
+    let dials = port.call_times(target, CallKind::Dial);
     assert_eq!(dials.len(), 7);
     assert!(is_one_slow_delay_after(dials[5], dials[6]));
     running.shutdown().await;
@@ -309,94 +300,121 @@ async fn recovery_resets_the_burst_and_rechecks_without_dialing() {
         DialScript::Fail,
         DialScript::Succeed,
     ]);
-    let running = Running::spawn(port.clone(), &[peer(1)]);
+    let running = Running::spawn(port.clone(), vec![peer(1)]);
 
     tokio::time::sleep(Duration::from_millis(400_000)).await;
-    assert_eq!(port.dial_times(target), vec![0, 2_000, 4_000]);
-    let probes = port.probe_times(target);
+    assert_eq!(port.call_times(target, CallKind::Dial), vec![
+        0, 2_000, 4_000
+    ]);
+    let probes = port.call_times(target, CallKind::Probe);
     assert_eq!(
         probes.len(),
         4,
         "three failing turns plus one periodic recheck"
     );
-    assert!(
-        is_one_slow_delay_after(4_000, probes[3]),
-        "recheck at {}",
-        probes[3]
-    );
+    assert!(is_one_slow_delay_after(4_000, probes[3]));
     running.shutdown().await;
 }
 
-/// A terminal transport state triggers an immediate probe and dial; a second loss restarts from the short delay.
+/// A departure triggers an immediate probe and dial; a second loss restarts from the short delay.
 #[tokio::test(start_paused = true)]
-async fn a_transport_drop_reassesses_at_once_and_a_second_drop_restarts_the_burst() {
+async fn a_loss_reassesses_at_once_and_a_second_loss_restarts_the_burst() {
     let target = Did::from(1);
     let port = ScriptedPort::new();
     port.set_reachable(target, true);
-    let running = Running::spawn(port.clone(), &[peer(1)]);
+    let running = Running::spawn(port.clone(), vec![peer(1)]);
 
     tokio::time::sleep(Duration::from_millis(10_000)).await;
-    assert!(port.dial_times(target).is_empty());
-    running.drop_transport(target);
+    assert!(port.call_times(target, CallKind::Dial).is_empty());
+    running.lose(target);
     port.script_dials(target, [
         DialScript::Fail,
         DialScript::Fail,
         DialScript::Succeed,
     ]);
     tokio::time::sleep(Duration::from_millis(10_000)).await;
-    assert_eq!(port.dial_times(target), vec![10_000, 12_000, 14_000]);
+    assert_eq!(port.call_times(target, CallKind::Dial), vec![
+        10_000, 12_000, 14_000
+    ]);
 
     tokio::time::sleep(Duration::from_millis(80_000)).await;
-    running.drop_transport(target);
+    running.lose(target);
     port.script_dials(target, [DialScript::Fail, DialScript::Succeed]);
     tokio::time::sleep(Duration::from_millis(10_000)).await;
     assert_eq!(
-        port.dial_times(target),
+        port.call_times(target, CallKind::Dial),
         vec![10_000, 12_000, 14_000, 100_000, 102_000],
         "the second loss starts a fresh burst from the short delay"
     );
     running.shutdown().await;
 }
 
-/// A loss of a peer outside the target set causes no reassessment.
+/// A loss recorded while a target waits in the slow cadence restarts its burst at once.
 #[tokio::test(start_paused = true)]
-async fn an_unmanaged_loss_is_ignored() {
+async fn a_loss_while_pending_restarts_the_burst() {
     let target = Did::from(1);
     let port = ScriptedPort::new();
-    port.set_reachable(target, true);
-    let running = Running::spawn(port.clone(), &[peer(1)]);
+    let running = Running::spawn(port.clone(), vec![peer(1)]);
 
-    tokio::time::sleep(Duration::from_millis(1_000)).await;
-    running
-        .drops
-        .observe(Did::from(2))
-        .expect("drops must accept any peer");
-    tokio::time::sleep(Duration::from_millis(100_000)).await;
+    tokio::time::sleep(Duration::from_millis(20_000)).await;
+    assert_eq!(port.call_times(target, CallKind::Dial).len(), 5);
+    running.lose(target);
+    tokio::time::sleep(Duration::from_millis(9_000)).await;
     assert_eq!(
-        port.probe_times(target),
-        vec![0],
-        "no reassessment before the recheck"
+        port.call_times(target, CallKind::Dial),
+        vec![0, 2_000, 4_000, 6_000, 8_000, 20_000, 22_000, 24_000, 26_000, 28_000],
+        "the slow wait is abandoned for a fresh burst"
     );
-    assert!(port.dial_times(target).is_empty());
     running.shutdown().await;
 }
 
-/// A target whose dial hangs is never dialed again while busy, and does not delay another target's burst.
+/// A dial refused because a handshake is already in flight waits one short delay without
+/// counting as a failure, so the burst is not consumed by the node's own attempt.
+#[tokio::test(start_paused = true)]
+async fn an_in_flight_handshake_defers_without_counting() {
+    let target = Did::from(1);
+    let port = ScriptedPort::new();
+    port.script_dials(target, [
+        DialScript::Fail,
+        DialScript::Fail,
+        DialScript::InFlight,
+        DialScript::InFlight,
+        DialScript::InFlight,
+        DialScript::Fail,
+        DialScript::Fail,
+        DialScript::Fail,
+    ]);
+    let running = Running::spawn(port.clone(), vec![peer(1)]);
+
+    tokio::time::sleep(Duration::from_millis(15_000)).await;
+    let dials = port.call_times(target, CallKind::Dial);
+    assert_eq!(
+        dials,
+        vec![0, 2_000, 4_000, 6_000, 8_000, 10_000, 12_000, 14_000],
+        "deferrals keep the short delay"
+    );
+    tokio::time::sleep(Duration::from_millis(340_000)).await;
+    let dials = port.call_times(target, CallKind::Dial);
+    assert_eq!(dials.len(), 9);
+    assert!(
+        is_one_slow_delay_after(14_000, dials[8]),
+        "the fifth counted failure, not the eighth call, enters the slow cadence"
+    );
+    running.shutdown().await;
+}
+
+/// A hanging dial is never dialed again while busy, and does not delay another target's burst.
 #[tokio::test(start_paused = true)]
 async fn targets_retry_independently_and_never_overlap() {
     let hanging = Did::from(1);
     let failing = Did::from(2);
     let port = ScriptedPort::new();
     port.script_dials(hanging, [DialScript::Hang]);
-    let running = Running::spawn(port.clone(), &[peer(1), peer(2)]);
+    let running = Running::spawn(port.clone(), vec![peer(1), peer(2)]);
 
     tokio::time::sleep(Duration::from_millis(9_000)).await;
-    assert_eq!(
-        port.dial_times(hanging),
-        vec![0],
-        "a hanging dial is never overlapped"
-    );
-    assert_eq!(port.dial_times(failing), vec![
+    assert_eq!(port.call_times(hanging, CallKind::Dial), vec![0]);
+    assert_eq!(port.call_times(failing, CallKind::Dial), vec![
         0, 2_000, 4_000, 6_000, 8_000
     ]);
     assert_eq!(port.hanging(), 1);
@@ -405,60 +423,53 @@ async fn targets_retry_independently_and_never_overlap() {
 
 /// Requesting stop returns the run promptly and drops the hanging dial future.
 #[tokio::test(start_paused = true)]
-async fn shutdown_aborts_an_in_flight_dial() {
+async fn shutdown_cancels_an_in_flight_dial() {
     let target = Did::from(1);
     let port = ScriptedPort::new();
     port.script_dials(target, [DialScript::Hang]);
-    let running = Running::spawn(port.clone(), &[peer(1)]);
+    let running = Running::spawn(port.clone(), vec![peer(1)]);
 
     tokio::time::sleep(Duration::from_millis(1_000)).await;
     assert_eq!(port.hanging(), 1);
+    let released = port.hang_released.notified();
     running.shutdown().await;
-    tokio::task::yield_now().await;
-    assert_eq!(port.hanging(), 0, "dropping the run aborts its turns");
+    tokio::time::timeout(Duration::from_secs(1), released)
+        .await
+        .expect("dropping the run cancels its turns");
+    assert_eq!(port.hanging(), 0);
 }
 
-/// A drop that races a slow dial is reassessed the instant that dial settles, not one slow delay later.
+/// A loss that races a slow dial is reassessed the instant that dial settles, not one slow
+/// delay later.
 #[tokio::test(start_paused = true)]
-async fn a_drop_during_a_turn_is_reassessed_as_soon_as_the_turn_settles() {
+async fn a_loss_during_a_turn_is_reassessed_as_soon_as_the_turn_settles() {
     let target = Did::from(1);
     let port = ScriptedPort::new();
     port.script_dials(target, [DialScript::SucceedAfter(5_000)]);
-    let running = Running::spawn(port.clone(), &[peer(1)]);
+    let running = Running::spawn(port.clone(), vec![peer(1)]);
     tokio::time::sleep(Duration::from_millis(1_000)).await;
 
-    // The drop lands while the slow dial is in flight: it must neither overlap the busy turn
-    // nor wait for the slow recheck once that turn settles as reachable.
-    running.drop_transport(target);
+    running.lose(target);
     tokio::time::sleep(Duration::from_millis(10_000)).await;
-    assert_eq!(port.dial_times(target), vec![0]);
+    assert_eq!(port.call_times(target, CallKind::Dial), vec![0]);
     assert_eq!(
-        port.probe_times(target),
+        port.call_times(target, CallKind::Probe),
         vec![0, 5_000],
         "reassessed at the instant the raced turn settled"
     );
     running.shutdown().await;
 }
 
-/// Target validation accepts distinct public peers and rejects bad DIDs, non-public URLs, duplicates and self.
+/// Target validation accepts distinct public peers and rejects bad DIDs, non-public URLs, one
+/// DID under two endpoints, one endpoint under two DIDs, and self; a verbatim repeat merges.
 #[test]
 fn targets_validate_dids_urls_duplicates_and_self() {
     let local = Did::from(LOCAL);
-    let valid = BootstrapTargets::from_config(
-        &BootstrapConfig {
-            peers: vec![peer(1), peer(2)],
-        },
-        local,
-    )
-    .expect("distinct public peers validate");
+    let valid = targets(vec![peer(1), peer(2)]);
     assert_eq!(valid.len(), 2);
-    assert_eq!(valid.dids().into_iter().collect::<Vec<_>>(), vec![
-        Did::from(1),
-        Did::from(2)
-    ]);
 
     let rejected = |peers: Vec<SeedPeer>| {
-        BootstrapTargets::from_config(&BootstrapConfig { peers }, local)
+        BootstrapTargets::from_config(BootstrapConfig { peers }, local)
             .err()
             .map(|error| error.to_string())
             .unwrap_or_default()
@@ -481,18 +492,17 @@ fn targets_validate_dids_urls_duplicates_and_self() {
         peer(1)
     ])
     .contains("differing endpoints"));
+    assert!(rejected(vec![peer(1), SeedPeer {
+        did: Did::from(2).to_string(),
+        ..peer(1)
+    }])
+    .contains("under two DIDs"));
     assert!(rejected(vec![peer(LOCAL)]).contains("itself"));
 
-    let merged = BootstrapTargets::from_config(
-        &BootstrapConfig {
-            peers: vec![peer(1), peer(2), peer(1)],
-        },
-        local,
-    )
-    .expect("a verbatim repeat is merged");
-    assert_eq!(merged.len(), 2);
+    let merged = targets(vec![peer(1), peer(2), peer(1)]);
+    assert_eq!(merged.len(), 2, "a verbatim repeat is merged");
     assert!(
-        BootstrapTargets::from_config(&BootstrapConfig::default(), local)
+        BootstrapTargets::from_config(BootstrapConfig::default(), local)
             .expect("an empty section validates")
             .is_empty()
     );
@@ -501,7 +511,7 @@ fn targets_validate_dids_urls_duplicates_and_self() {
 /// The `Debug` rendering of a target never contains its bearer token.
 #[test]
 fn managed_target_debug_redacts_the_token() {
-    let target = ManagedTarget::try_from(&SeedPeer {
+    let target = ManagedTarget::try_from(SeedPeer {
         api_token: Some("0123456789abcdef".to_string()),
         ..peer(1)
     })
@@ -512,7 +522,8 @@ fn managed_target_debug_redacts_the_token() {
     assert_eq!(target.api_token(), Some("0123456789abcdef"));
 }
 
-/// The ledger resolves a waiter whether the report arrived before or after it, and `forget` closes a waiter.
+/// The ledger resolves a waiter whether the report arrived before or after it, and `forget`
+/// closes a waiter.
 #[tokio::test]
 async fn ledger_resolves_in_either_order_and_forgets() {
     let ledger = LookupReportLedger::default();
@@ -547,4 +558,22 @@ async fn ledger_bounds_early_reports_by_evicting_the_oldest() {
     let waiter = ledger.await_report(oldest).unwrap();
     ledger.forget(oldest).unwrap();
     assert!(waiter.await.is_err(), "the evicted report is gone");
+}
+
+/// An admission resolves the waiter registered for its peer, replaces an earlier waiter for
+/// the same peer, and `forget` closes a waiter.
+#[tokio::test]
+async fn admissions_resolve_the_registered_waiter_and_forget() {
+    let admissions = Admissions::default();
+    let peer = Did::from(1);
+    let stale = admissions.await_admission(peer).unwrap();
+    let waiter = admissions.await_admission(peer).unwrap();
+    admissions.observe(Did::from(2)).unwrap();
+    admissions.observe(peer).unwrap();
+    assert!(stale.await.is_err(), "the replaced waiter is closed");
+    assert_eq!(waiter.await, Ok(()));
+
+    let waiter = admissions.await_admission(peer).unwrap();
+    admissions.forget(peer).unwrap();
+    assert!(waiter.await.is_err(), "a forgotten waiter is closed");
 }

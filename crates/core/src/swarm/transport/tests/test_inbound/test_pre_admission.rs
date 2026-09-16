@@ -31,7 +31,9 @@ impl SwarmCallback for FailingConnectedSwarmCallback {
         &self,
         event: &SwarmEvent,
     ) -> std::result::Result<(), crate::error::CallbackError> {
-        let SwarmEvent::ConnectionStateChange { state, .. } = event;
+        let SwarmEvent::ConnectionStateChange { state, .. } = event else {
+            return Ok(());
+        };
         if *state == WebrtcConnectionState::Connected {
             return Err(std::io::Error::other("connected callback failure").into());
         }

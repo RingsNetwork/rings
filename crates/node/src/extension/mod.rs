@@ -9,11 +9,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use rings_core::dht::Did;
 use rings_core::message::CustomMessage;
+use rings_core::message::FindSuccessorReportHandler;
 use rings_core::message::Message;
 use rings_core::message::MessagePayload;
 use rings_core::message::MessageVerificationExt;
 use rings_core::swarm::callback::SwarmCallback;
 use rings_core::swarm::callback::SwarmEvent;
+use rings_transport::core::transport::WebrtcConnectionState;
 
 use crate::extension::ext::Envelope;
 use crate::extension::ext::Extensions;
@@ -22,18 +24,20 @@ use crate::provider::Provider;
 
 /// Observer of swarm facts the [`Backend`] decodes or receives but does not act on itself.
 ///
-/// The backend decodes each inbound payload exactly once and hands the observer the decoded
-/// fact synchronously, before any await, so a later callback for the same peer observes it.
-/// Facts are stated in transport-neutral terms: the observer never sees a physical connection
-/// state, only what the swarm concluded from it.
+/// The backend hands the observer each fact synchronously, before any await, so a later
+/// callback for the same peer observes it. Facts are the swarm's logical conclusions, never a
+/// physical connection state: the backend is the one place that translates.
 pub trait BackendObserver: Send + Sync {
-    /// A Chord successor lookup report addressed to this node: `successor` is the reported
-    /// successor of the key queried under transaction `tx_id`.
+    /// A successor lookup report addressed to this node for a lookup that requested no core
+    /// action (`FindSuccessorReportHandler::None`), i.e. an application-issued lookup:
+    /// `successor` is the reported successor of the key queried under transaction `tx_id`.
     fn lookup_report(&self, tx_id: uuid::Uuid, successor: Did);
 
-    /// The direct transport to `peer` ended: its physical state is terminal, after which the
-    /// swarm leaves the peer's DHT entry. Transient states that may recover are not reported.
-    fn transport_lost(&self, peer: Did);
+    /// `peer` was admitted: its transport is ready and it joined the local DHT.
+    fn peer_admitted(&self, peer: Did);
+
+    /// `peer` left the local DHT, whichever physical event or local decision caused it.
+    fn peer_retired(&self, peer: Did);
 }
 
 /// Backend handles inbound custom messages from the Swarm, routing each decoded
@@ -43,7 +47,7 @@ pub trait BackendObserver: Send + Sync {
 /// namespace-scoped [`Scope`](ext::Scope); the underlying router capability is internal.
 /// Dispatch owns a detached task so a swarm callback deadline stops waiting without
 /// cancelling an already committed protocol transition or its ordered effect trace.
-/// Core lookup reports and transport losses are not dispatched; they are handed to the
+/// Core lookup reports, admissions and departures are not dispatched; they are handed to the
 /// optional [`BackendObserver`].
 pub struct Backend {
     extensions: Extensions,
@@ -59,7 +63,7 @@ impl Backend {
         }
     }
 
-    /// Attach the observer that receives decoded lookup reports and transport losses.
+    /// Attach the observer that receives application lookup reports, admissions and departures.
     pub fn observed_by(mut self, observer: Arc<dyn BackendObserver>) -> Self {
         self.observer = Some(observer);
         self
@@ -78,7 +82,9 @@ impl SwarmCallback for Backend {
         let msg = match data {
             Message::CustomMessage(CustomMessage(msg)) => msg,
             Message::FindSuccessorReport(report) => {
-                if let Some(observer) = &self.observer {
+                if let (Some(observer), FindSuccessorReportHandler::None) =
+                    (&self.observer, &report.handler)
+                {
                     observer.lookup_report(payload.transaction.tx_id, report.did);
                 }
                 return Ok(());
@@ -96,14 +102,19 @@ impl SwarmCallback for Backend {
         Ok(())
     }
 
+    /// Translate the swarm's events into the observer's facts: an admission and a departure.
     async fn on_event(&self, event: &SwarmEvent) -> Result<(), rings_core::error::CallbackError> {
         let Some(observer) = &self.observer else {
             return Ok(());
         };
-        if let SwarmEvent::ConnectionStateChange { peer, state } = event {
-            if state.is_terminal() {
-                observer.transport_lost(*peer);
-            }
+        match *event {
+            // The swarm emits `Connected` exactly once per admission.
+            SwarmEvent::ConnectionStateChange {
+                peer,
+                state: WebrtcConnectionState::Connected,
+            } => observer.peer_admitted(peer),
+            SwarmEvent::PeerRetired { peer } => observer.peer_retired(peer),
+            _ => {}
         }
         Ok(())
     }

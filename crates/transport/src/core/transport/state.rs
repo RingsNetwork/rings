@@ -48,9 +48,8 @@ impl WebrtcConnectionState {
         matches!(self, Self::New | Self::Connecting | Self::Connected)
     }
 
-    /// Whether this state ends the connection: `Failed` or `Closed`. `Disconnected` is a
-    /// transient ICE state that may recover, so it is not terminal.
-    pub const fn is_terminal(self) -> bool {
+    #[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
+    pub(crate) const fn is_terminal(self) -> bool {
         matches!(self, Self::Failed | Self::Closed)
     }
 }

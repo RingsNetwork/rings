@@ -27,10 +27,12 @@ use rings_core::message::e2e::E2eHandshakeRequest;
 use rings_core::message::e2e::E2eHandshakeResponse;
 use rings_core::message::e2e::E2eStreamDecryptor;
 use rings_core::message::e2e::E2eStreamFrame;
+use rings_core::message::Decoder;
 use rings_core::message::DhtProtocolMode;
 use rings_core::message::Encoded;
 use rings_core::message::Encoder;
 use rings_core::message::Message;
+use rings_core::message::MessagePayload;
 use rings_core::message::OriginQuotaConfig;
 use rings_core::message::OriginQuotaCounters;
 use rings_core::message::ReplayStorage;
@@ -524,6 +526,55 @@ impl Processor {
             Ok(()) | Err(rings_core::error::Error::AlreadyConnected) => Ok(()),
             Err(error) => Err(Error::ConnectError(error)),
         }
+    }
+
+    /// Handshake with the node behind `url` over its public HTTP API: learn its DID and, when
+    /// `expected` is given, refuse before creating any offer if the endpoint answers as another
+    /// node; then create, exchange and accept the offer. Returns the answering DID once the
+    /// answer is accepted. Admission of the resulting transport completes asynchronously and is
+    /// reported through the swarm callback.
+    pub async fn connect_peer_via_http(
+        &self,
+        url: &reqwest::Url,
+        api_token: Option<&str>,
+        expected: Option<Did>,
+    ) -> Result<Did> {
+        let client =
+            crate::rpc_impl::remote_rpc_client(url.as_str(), api_token.map(str::to_owned)).await?;
+        let answered = client
+            .node_did(&NodeDidRequest {})
+            .await
+            .map_err(|error| Error::RemoteRpcError(error.to_string()))?
+            .did;
+        let actual = Did::from_str(answered.as_str()).map_err(|_| {
+            Error::RemoteRpcError(format!("endpoint answered with a malformed DID {answered}"))
+        })?;
+        if let Some(expected) = expected {
+            if actual != expected {
+                return Err(Error::HandshakePeerMismatch { expected, actual });
+            }
+        }
+        let offer = self
+            .swarm
+            .create_offer(actual)
+            .await
+            .map_err(Error::CreateOffer)?
+            .encode()
+            .map_err(|_| Error::EncodeError)?;
+        let answer = client
+            .answer_offer(&AnswerOfferRequest {
+                offer: offer.to_string(),
+            })
+            .await
+            .map_err(|error| Error::RemoteRpcError(error.to_string()))?
+            .answer;
+        let answer =
+            MessagePayload::from_encoded(&Encoded::from(answer)).map_err(|_| Error::DecodeError)?;
+        self.swarm
+            .accept_answer(answer)
+            .await
+            .map_err(Error::AcceptAnswer)?;
+        Ok(actual)
     }
 
     /// Disconnect a peer with web3 did.

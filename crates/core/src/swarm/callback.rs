@@ -49,6 +49,10 @@ use inbound::InboundMailbox;
 use inbound::ReassemblyClock;
 use pre_admission::PreAdmissionHold;
 
+/// The callback a swarm delivers to until the application sets its own: every hook is a no-op.
+pub(crate) struct DefaultCallback;
+impl SwarmCallback for DefaultCallback {}
+
 /// The application the swarm currently delivers to, replaceable through `Swarm::set_callback`;
 /// every delivery resolves it at delivery time.
 ///
@@ -154,11 +158,25 @@ pub type SharedSwarmCallback = Arc<dyn SwarmCallback + Send + Sync>;
 #[non_exhaustive]
 pub enum SwarmEvent {
     /// Indicates that the connection state of a peer has changed.
+    ///
+    /// `Connected` is emitted exactly once per admission, when the peer's data channel is open
+    /// and the peer has joined the local DHT; it is therefore the application-level fact
+    /// "peer admitted". Terminal states are emitted only for the admitted generation, so a
+    /// transport the swarm retired itself never reports one; see [`SwarmEvent::PeerRetired`].
     ConnectionStateChange {
         /// The did of remote peer.
         peer: Did,
         /// The final state of the connection.
         state: WebrtcConnectionState,
+    },
+    /// A peer left the local DHT: its topology entry was removed and, when it held an admitted
+    /// connection, that record was retired and its transport is being closed. Emitted on every
+    /// departure path — remote terminal state, data-channel close, liveness or stabilization
+    /// removal, capacity eviction, and explicit disconnect — so the application observes the
+    /// logical fact regardless of which physical event or local decision caused it.
+    PeerRetired {
+        /// The did of the departed peer.
+        peer: Did,
     },
 }
 

@@ -193,16 +193,20 @@ long-running node that loses its transport to a seed rejoins without a restart.
   an entry of a seed document. Every `did` must parse, every `url` must be a public HTTP(S)
   endpoint, and the node's own DID is rejected; an entry repeated verbatim is merged, while a
   DID listed with differing endpoints is rejected as ambiguous. A violation stops `rings run`
-  before it listens. `rings run --bootstrap-seed <file-or-url>` appends the peers of a seed
-  document to this list for one run.
+  before it listens. `rings run --bootstrap-seed <url>` appends the peers of a seed document
+  (a `file://` or `http(s)://` URL) to this list for one run.
 
 Reachability is assessed by a routed successor lookup for the target's DID; a target the node is
 directly connected to, or that some peer can route to, is left alone, so a target is never forced
-into a direct edge merely because it is not a finger. An unreachable target is redialed five times
-two seconds apart, then once every five minutes plus up to thirty seconds of jitter, until it is
-reachable again; a later loss restarts the burst. The loss of a direct transport to a target
-triggers an immediate reassessment. At most one handshake per target is in flight, targets retry
-independently, and shutdown cancels any handshake in progress.
+into a direct edge merely because it is not a finger. An unreachable target is redialed five
+times, each attempt at least two seconds after the previous one settled, then once per five
+minutes plus up to thirty seconds of jitter, until the peer is admitted again; a redial counts as
+successful only once the swarm admits the peer, and an endpoint answering as a different DID is
+refused before any offer is created. A target leaving the local DHT, whatever caused the loss,
+triggers an immediate reassessment, and a later loss restarts the burst. A redial that finds a
+handshake to the target already in flight waits two seconds without counting as a failure. At
+most one handshake per target is in flight, targets retry independently, and shutdown cancels any
+handshake in progress.
 
 ## Storage
 

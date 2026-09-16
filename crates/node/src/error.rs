@@ -192,16 +192,20 @@ pub enum Error {
     /// Loading or explicitly flushing local peer measurements failed.
     #[error("Measurement runtime error: {0}")]
     MeasurementRuntime(#[from] crate::measure::MeasureRuntimeError) = 816,
-    /// The HTTP handshake to a managed bootstrap target failed.
-    #[error("bootstrap handshake failed: {0}")]
-    BootstrapHandshake(String) = 817,
-    /// A managed bootstrap target's endpoint answered as a DID other than the configured one.
-    #[error("bootstrap target {expected} answered as {actual}")]
-    BootstrapDidMismatch {
-        /// DID the target is configured with.
+    /// A handshake was accepted but the swarm did not admit the peer within the dial's window.
+    #[error("peer {peer} was not admitted within the handshake admission window")]
+    AdmissionTimedOut {
+        /// Peer the handshake was accepted with.
+        peer: Did,
+    } = 817,
+    /// The endpoint answered as a DID other than the one the handshake was pinned to; no offer
+    /// was created.
+    #[error("handshake pinned to {expected} but the endpoint answered as {actual}")]
+    HandshakePeerMismatch {
+        /// DID the handshake was pinned to.
         expected: Did,
-        /// DID the endpoint reported.
-        actual: String,
+        /// DID the endpoint answered as.
+        actual: Did,
     } = 818,
     /// Creating a file on disk failed.
     #[error("Create File Error: {0}")]
@@ -315,6 +319,20 @@ impl Error {
     /// Returns the stable numeric error code for JSON-RPC error conversion.
     pub fn code(&self) -> u32 {
         self.discriminant()
+    }
+}
+
+impl Error {
+    /// Whether a handshake failed only because the core already holds a connection attempt to
+    /// the peer, pending or admitted, so the caller should wait rather than count a failure.
+    pub fn is_handshake_in_flight(&self) -> bool {
+        matches!(
+            self,
+            Self::CreateOffer(
+                rings_core::error::Error::AlreadyConnected
+                    | rings_core::error::Error::ConnectionAttemptSuperseded { .. }
+            )
+        )
     }
 }
 

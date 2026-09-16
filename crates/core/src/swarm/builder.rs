@@ -19,15 +19,10 @@ use crate::message::ReplayStorage;
 use crate::message::TransactionReplay;
 use crate::session::SessionSk;
 use crate::swarm::callback::SharedSwarmCallback;
-use crate::swarm::callback::SwarmCallback;
-use crate::swarm::callback::SwarmCallbackSlot;
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::transport::SwarmTransportSettings;
 use crate::swarm::transport::SwarmWebrtcConfig;
 use crate::swarm::Swarm;
-
-struct DefaultCallback;
-impl SwarmCallback for DefaultCallback {}
 
 /// Creates a SwarmBuilder to configure a Swarm.
 pub struct SwarmBuilder {
@@ -179,11 +174,6 @@ impl SwarmBuilder {
             ),
         );
 
-        let callback = SwarmCallbackSlot::new(
-            self.callback
-                .unwrap_or_else(|| Arc::new(DefaultCallback {})),
-        );
-
         let transport = Arc::new(SwarmTransport::new(
             self.network_id,
             SwarmWebrtcConfig::new(
@@ -204,6 +194,14 @@ impl SwarmBuilder {
                 self.reassembly_limits,
             ),
         ));
+        // The transport owns the slot so it can deliver departures itself; the swarm shares
+        // it. A freshly created lock cannot be poisoned, so the replacement cannot fail here.
+        let callback = transport.callback_slot();
+        if let Some(application) = self.callback {
+            if let Err(error) = callback.replace(application) {
+                tracing::error!(%error, "swarm callback slot unavailable at build");
+            }
+        }
 
         Swarm {
             dht,

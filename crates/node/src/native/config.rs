@@ -10,7 +10,6 @@ use serde::Serialize;
 
 use crate::error::Error;
 use crate::error::Result;
-use crate::native::bootstrap::BootstrapConfig;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionExitService;
 use crate::onion::OnionServiceName;
@@ -22,6 +21,7 @@ use crate::prelude::rings_core::message::OriginQuotaConfig;
 use crate::prelude::SessionSk;
 use crate::processor::ProcessorConfig;
 use crate::processor::ProcessorConfigSerialized;
+use crate::seed::SeedPeer;
 use crate::util::ensure_parent_dir;
 use crate::util::expand_home;
 
@@ -155,6 +155,15 @@ where P: AsRef<std::path::Path> {
     storage_path.to_string_lossy().to_string()
 }
 
+/// The `bootstrap` section: targets `rings run` keeps reachable for the life of the process.
+/// `rings init` writes it empty; see [`crate::native::bootstrap`].
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct BootstrapConfig {
+    /// Managed targets, in the same shape as the entries of a seed document.
+    #[serde(default)]
+    pub peers: Vec<SeedPeer>,
+}
+
 /// Serializable native-node configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
@@ -240,8 +249,7 @@ pub struct Config {
     /// without the section load as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway: Option<NativeGatewayConfig>,
-    /// Managed bootstrap targets `rings run` keeps reachable for the life of the process;
-    /// `rings init` writes the section empty. See [`crate::native::bootstrap`].
+    /// Managed bootstrap targets `rings run` keeps reachable for the life of the process.
     #[serde(default)]
     pub bootstrap: BootstrapConfig,
     /// Virtual DHT positions per storage owner.

@@ -3,7 +3,6 @@
 //! For the native environment, we use jsonrpc_core to handle requests.
 //! For the browser environment, we use `InternalRpcHandler` to process the requests.
 
-use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::str::FromStr;
 
@@ -43,28 +42,13 @@ impl HandleRpc<ConnectPeerViaHttpRequest, ConnectPeerViaHttpResponse> for Proces
         req: ConnectPeerViaHttpRequest,
     ) -> Result<ConnectPeerViaHttpResponse> {
         let ConnectPeerViaHttpRequest { url, api_token } = req;
-        let client = remote_rpc_client(&url, api_token).await?;
-
-        let did = client
-            .node_did(&NodeDidRequest {})
-            .await
-            .map_err(|e| ServerError::RemoteRpcError(e.to_string()))?
-            .did;
-
-        let offer = self
-            .handle_rpc(CreateOfferRequest { did: did.clone() })
-            .await?
-            .offer;
-
-        let answer = client
-            .answer_offer(&AnswerOfferRequest { offer })
-            .await
-            .map_err(|e| ServerError::RemoteRpcError(e.to_string()))?
-            .answer;
-
-        self.handle_rpc(AcceptAnswerRequest { answer }).await?;
-
-        Ok(ConnectPeerViaHttpResponse { did })
+        let url = validate_remote_rpc_url(url.as_str())?;
+        let did = self
+            .connect_peer_via_http(&url, api_token.as_deref(), None)
+            .await?;
+        Ok(ConnectPeerViaHttpResponse {
+            did: did.to_string(),
+        })
     }
 }
 
@@ -84,14 +68,16 @@ impl HandleRpc<ConnectWithSeedRequest, ConnectWithSeedResponse> for Processor {
     async fn handle_rpc(&self, req: ConnectWithSeedRequest) -> Result<ConnectWithSeedResponse> {
         let seed: Seed = Seed::try_from(req)?;
 
-        let mut connected: HashSet<String> =
-            HashSet::from_iter(self.swarm.peers().into_iter().map(|peer| peer.did));
-        connected.insert(self.swarm.did().to_string());
+        let local = self.swarm.did();
+        let already_connected = |peer: &crate::seed::SeedPeer| {
+            Did::from_str(peer.did.as_str())
+                .is_ok_and(|did| did == local || self.swarm.is_peer_connected(did))
+        };
 
         let tasks = seed
             .peers
             .into_iter()
-            .filter(|x| !connected.contains(&x.did))
+            .filter(|peer| !already_connected(peer))
             .map(|x| {
                 self.handle_rpc(ConnectPeerViaHttpRequest {
                     url: x.url,
@@ -130,8 +116,11 @@ pub(crate) fn validate_remote_rpc_url(url: &str) -> std::result::Result<reqwest:
     Ok(parsed)
 }
 
+/// A JSON-RPC client for the public endpoint at `url`: HTTP(S) only, no proxy, no redirects,
+/// with the host pinned to the addresses the public-target resolver returned, and the bearer
+/// token attached when given.
 #[cfg(rings_native)]
-async fn remote_rpc_client(
+pub(crate) async fn remote_rpc_client(
     url: &str,
     api_token: Option<String>,
 ) -> std::result::Result<rings_rpc::jsonrpc::Client, ServerError> {
@@ -186,8 +175,10 @@ struct RemoteRpcResolutionTarget {
     pin_host: String,
 }
 
+/// A JSON-RPC client for the public endpoint at `url`, with the bearer token attached when
+/// given; the browser enforces its own origin policy.
 #[cfg(rings_browser)]
-async fn remote_rpc_client(
+pub(crate) async fn remote_rpc_client(
     url: &str,
     api_token: Option<String>,
 ) -> std::result::Result<rings_rpc::jsonrpc::Client, ServerError> {

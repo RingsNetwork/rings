@@ -54,7 +54,10 @@ use crate::message::PayloadSender;
 use crate::message::TransactionReplay;
 use crate::session::Session;
 use crate::session::SessionSk;
+use crate::swarm::callback::DefaultCallback;
 use crate::swarm::callback::InnerSwarmCallback;
+use crate::swarm::callback::SwarmCallbackSlot;
+use crate::swarm::callback::SwarmEvent;
 use crate::utils::get_epoch_ms_i64;
 
 mod connection;
@@ -135,6 +138,7 @@ pub struct SwarmTransport {
     inbound_capacity: Arc<InboundCapacity>,
     connection_lifecycle: ConnectionLifecycleBoundary,
     swarm_event_delivery: SwarmEventDeliveryLocks,
+    callback: SwarmCallbackSlot,
     connection_creation: PeerOperationLocks,
     peer_lifecycles: SharedConnectionLifecycles,
     pending_finger_updates: Mutex<PendingFingerUpdates>,
@@ -257,6 +261,7 @@ impl SwarmTransport {
             inbound_capacity: Arc::new(InboundCapacity::new()),
             connection_lifecycle: ConnectionLifecycleBoundary::new(),
             swarm_event_delivery: SwarmEventDeliveryLocks::new(),
+            callback: SwarmCallbackSlot::new(Arc::new(DefaultCallback)),
             connection_creation: PeerOperationLocks::new(),
             peer_lifecycles: Arc::new(Mutex::new(self::pending::ConnectionLifecycleRegistry::new(
                 lifecycle_bounds,
@@ -417,6 +422,35 @@ impl SwarmTransport {
 
     pub(crate) fn swarm_event_delivery_lock(&self, peer: Did) -> SwarmEventDeliveryLock {
         self.swarm_event_delivery.lock(peer)
+    }
+
+    /// The application callback slot this transport delivers swarm events through; the swarm
+    /// shares it so `Swarm::set_callback` replaces the target of both.
+    pub(crate) fn callback_slot(&self) -> SwarmCallbackSlot {
+        self.callback.clone()
+    }
+
+    /// Deliver [`SwarmEvent::PeerRetired`] for `peer` to the application, in the peer's ordered
+    /// start sequence shared with its connection state events.
+    ///
+    /// Every path by which an admitted peer leaves the DHT calls this after the record is
+    /// retired, so the application observes one logical departure per admission. A failing
+    /// application callback is logged, never propagated: the departure has already happened.
+    pub(crate) async fn emit_peer_retired(&self, peer: Did) {
+        let delivery = self.swarm_event_delivery_lock(peer);
+        let delivered: std::result::Result<(), String> = async {
+            let turn = delivery.acquire().await;
+            let callback = self.callback.current().map_err(|error| error.to_string())?;
+            let event = SwarmEvent::PeerRetired { peer };
+            turn.poll_once_then_release(callback.on_event(&event))
+                .await
+                .map_err(|error| error.to_string())
+        }
+        .await;
+        self.prune_swarm_event_delivery_lock(peer, &delivery);
+        if let Err(error) = delivered {
+            tracing::error!(%peer, %error, "peer retirement callback failed");
+        }
     }
 
     pub(crate) fn prune_swarm_event_delivery_lock(
