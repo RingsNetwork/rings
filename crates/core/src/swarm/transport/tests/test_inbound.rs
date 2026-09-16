@@ -219,7 +219,7 @@ async fn test_pending_message_rechecks_admission_after_async_validation() -> Res
 
     app_callback.wait_for_first_validate_started().await;
     assert!(matches!(
-        transport.retire_active_connection_with(attempt, |_| Ok(())),
+        transport.retire_active_connection_for_test(attempt, |_| Ok(())),
         Ok(Some(()))
     ));
     app_callback.release_first_validate();
@@ -420,8 +420,8 @@ async fn test_pre_admission_drain_returns_before_application_validation_complete
         .map_err(|_| Error::InvalidMessage("data-channel open waited on validation".to_string()))?
         .map_err(|_| Error::InvalidMessage("data-channel-open task panicked".to_string()))??;
 
-    assert!(transport.is_admitted_connection(peer));
-    assert!(transport.is_admitted_connection_attempt(attempt));
+    assert!(transport.has_active_connection(peer));
+    assert!(transport.is_active_connection_attempt(attempt));
     tokio::time::timeout(
         Duration::from_secs(1),
         app_callback.wait_for_first_validate_started(),

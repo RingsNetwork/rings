@@ -61,8 +61,8 @@ async fn test_full_registry_evicts_most_idle_unreferenced_peer_for_a_newcomer() 
 
     let attempt = transport.reserve_pending_connection(newcomer).await?;
 
-    assert!(transport.is_admitted_connection_attempt(older_but_active));
-    assert!(!transport.is_admitted_connection(younger_but_idle.peer));
+    assert!(transport.is_active_connection_attempt(older_but_active));
+    assert!(!transport.has_active_connection(younger_but_idle.peer));
     assert!(transport.is_pending_connection_attempt(attempt)?);
     assert_eq!(transport.pending_connection_count()?, 1);
     Ok(())
@@ -79,8 +79,8 @@ async fn test_full_registry_evicts_send_terminal_peer_before_any_live_peer() -> 
 
     transport.reserve_pending_connection(newcomer).await?;
 
-    assert!(transport.is_admitted_connection_attempt(idle_live));
-    assert!(!transport.is_admitted_connection(dead_young.peer));
+    assert!(transport.is_active_connection_attempt(idle_live));
+    assert!(!transport.has_active_connection(dead_young.peer));
     Ok(())
 }
 
@@ -96,9 +96,9 @@ async fn test_full_registry_keeps_topology_referenced_peer_over_idler_unreferenc
 
     transport.reserve_pending_connection(newcomer).await?;
 
-    assert!(transport.is_admitted_connection_attempt(referenced));
+    assert!(transport.is_active_connection_attempt(referenced));
     assert!(transport.dht.successors().contains(&referenced.peer)?);
-    assert!(!transport.is_admitted_connection(unreferenced.peer));
+    assert!(!transport.has_active_connection(unreferenced.peer));
     Ok(())
 }
 
@@ -115,8 +115,8 @@ async fn test_full_registry_does_not_evict_for_a_peer_that_already_owns_a_record
     let result = transport.reserve_pending_connection(old.peer).await;
 
     assert!(matches!(result, Err(Error::AlreadyConnected)));
-    assert!(transport.is_admitted_connection_attempt(older));
-    assert!(transport.is_admitted_connection_attempt(old));
+    assert!(transport.is_active_connection_attempt(older));
+    assert!(transport.is_active_connection_attempt(old));
     Ok(())
 }
 
@@ -140,7 +140,7 @@ async fn test_pending_saturated_registry_rejects_without_evicting() -> Result<()
         result,
         Err(Error::PendingConnectionCapacityExceeded { capacity: 1 })
     ));
-    assert!(transport.is_admitted_connection_attempt(admitted));
+    assert!(transport.is_active_connection_attempt(admitted));
     Ok(())
 }
 
@@ -164,8 +164,8 @@ async fn test_eviction_skips_candidate_referenced_after_the_plan() -> Result<()>
         })
         .await?;
 
-    assert!(transport.is_admitted_connection_attempt(most_idle));
-    assert!(!transport.is_admitted_connection(less_idle.peer));
+    assert!(transport.is_active_connection_attempt(most_idle));
+    assert!(!transport.has_active_connection(less_idle.peer));
     Ok(())
 }
 
@@ -190,7 +190,7 @@ async fn test_eviction_skips_candidate_superseded_after_the_plan() -> Result<()>
         .await?;
 
     let replacement = replacement.ok_or(Error::SwarmMissTransport(most_idle.peer))?;
-    assert!(transport.is_admitted_connection_attempt(replacement));
-    assert!(!transport.is_admitted_connection(less_idle.peer));
+    assert!(transport.is_active_connection_attempt(replacement));
+    assert!(!transport.has_active_connection(less_idle.peer));
     Ok(())
 }

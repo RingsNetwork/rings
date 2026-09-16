@@ -38,13 +38,25 @@ fn test_event_disposition_is_defined_by_the_active_generation_only() -> Result<(
         ConnectionEventDisposition::Deliver
     );
     assert_eq!(
-        event_disposition(Some(PeerConnectionLifecycle::Active(replacement)), source,),
+        event_disposition(
+            Some(PeerConnectionLifecycle::Active {
+                attempt: replacement,
+                announced: false
+            }),
+            source,
+        ),
         ConnectionEventDisposition::Suppress {
             active: replacement
         }
     );
     assert_eq!(
-        event_disposition(Some(PeerConnectionLifecycle::Active(source)), source),
+        event_disposition(
+            Some(PeerConnectionLifecycle::Active {
+                attempt: source,
+                announced: false
+            }),
+            source
+        ),
         ConnectionEventDisposition::Deliver
     );
     Ok(())
@@ -93,12 +105,18 @@ fn test_finger_candidate_admission_is_total_over_lifecycle_and_routability() {
             FingerCandidateAdmission::Queue(attempt),
         ),
         (
-            Some(PeerConnectionLifecycle::Active(attempt)),
+            Some(PeerConnectionLifecycle::Active {
+                attempt,
+                announced: false,
+            }),
             false,
             FingerCandidateAdmission::Unroutable,
         ),
         (
-            Some(PeerConnectionLifecycle::Active(attempt)),
+            Some(PeerConnectionLifecycle::Active {
+                attempt,
+                announced: false,
+            }),
             true,
             FingerCandidateAdmission::Apply,
         ),
@@ -388,7 +406,7 @@ impl LifecycleImplementation {
             Some(PeerConnectionLifecycle::Admitting { attempt, .. }) => {
                 PeerLifecycle::Admitting(attempt.generation)
             }
-            Some(PeerConnectionLifecycle::Active(attempt)) => {
+            Some(PeerConnectionLifecycle::Active { attempt, .. }) => {
                 PeerLifecycle::Active(attempt.generation)
             }
             None => PeerLifecycle::Absent,

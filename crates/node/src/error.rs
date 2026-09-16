@@ -192,6 +192,32 @@ pub enum Error {
     /// Loading or explicitly flushing local peer measurements failed.
     #[error("Measurement runtime error: {0}")]
     MeasurementRuntime(#[from] crate::measure::MeasureRuntimeError) = 816,
+    /// A handshake was accepted but the swarm did not admit the peer within the dial's window.
+    #[cfg(rings_native)]
+    #[error("peer {peer} was not admitted within the handshake admission window")]
+    AdmissionTimedOut {
+        /// Peer the handshake was accepted with.
+        peer: Did,
+    } = 817,
+    /// The endpoint answered as a DID other than the one the handshake was pinned to; no offer
+    /// was created.
+    #[error("handshake pinned to {expected} but the endpoint answered as {actual}")]
+    HandshakePeerMismatch {
+        /// DID the handshake was pinned to.
+        expected: Did,
+        /// DID the endpoint answered as.
+        actual: Did,
+    } = 818,
+    /// A handshake was refused because the peer's slot is owned by another attempt: a handshake
+    /// in flight, whichever side started it, or an admission not yet announced.
+    #[error("a handshake with {peer} is already in flight")]
+    HandshakeInFlight {
+        /// The peer whose slot is owned.
+        peer: Did,
+    } = 819,
+    /// A seed entry failed validation.
+    #[error(transparent)]
+    SeedPeer(#[from] crate::seed::SeedPeerError) = 820,
     /// Creating a file on disk failed.
     #[error("Create File Error: {0}")]
     CreateFileError(String) = 900,
@@ -314,6 +340,13 @@ impl From<Error> for jsonrpc_core::Error {
             message: e.to_string(),
             data: None,
         }
+    }
+}
+
+impl From<rings_rpc::jsonrpc::RpcError> for Error {
+    /// A remote node's JSON-RPC call failed: transport, decoding or an error the node returned.
+    fn from(error: rings_rpc::jsonrpc::RpcError) -> Self {
+        Error::RemoteRpcError(error.to_string())
     }
 }
 

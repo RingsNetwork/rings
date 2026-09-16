@@ -96,12 +96,7 @@ impl InboundProcessor {
         let Some(attempt) = self.pending_attempt() else {
             return Authentication::Unauthenticated;
         };
-        if attempt.peer() == peer
-            && self
-                .logical
-                .transport
-                .is_admitted_connection_attempt(attempt)
-        {
+        if attempt.peer() == peer && self.logical.transport.is_active_connection_attempt(attempt) {
             Authentication::Authenticated
         } else {
             Authentication::Unauthenticated
@@ -144,16 +139,12 @@ impl InboundProcessor {
             );
             self.logical
                 .transport
-                .cancel_pending_connection(attempt)
+                .cancel_unadmitted_connection(attempt)
                 .await?;
             self.discard_pre_admission_hold();
             return Ok(InboundGate::Refused);
         }
-        if self
-            .logical
-            .transport
-            .is_admitted_connection_attempt(attempt)
-        {
+        if self.logical.transport.is_active_connection_attempt(attempt) {
             Ok(InboundGate::Admitted)
         } else {
             Ok(InboundGate::Unadmitted)
@@ -171,11 +162,8 @@ impl InboundProcessor {
 
     /// Whether the handshake bound to this callback, if any, has been admitted by now.
     pub(super) fn pending_attempt_admitted(&self) -> bool {
-        self.pending_attempt().is_none_or(|attempt| {
-            self.logical
-                .transport
-                .is_admitted_connection_attempt(attempt)
-        })
+        self.pending_attempt()
+            .is_none_or(|attempt| self.logical.transport.is_active_connection_attempt(attempt))
     }
 
     pub(super) async fn decode_verified_payload(

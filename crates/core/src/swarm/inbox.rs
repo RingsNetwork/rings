@@ -24,23 +24,18 @@ use crate::dht::StorageKey;
 use crate::error::Result;
 use crate::message::handlers::storage::operate_entry;
 use crate::swarm::callback::LocalDelivery;
-use crate::swarm::callback::SwarmCallbackSlot;
 use crate::swarm::transport::SwarmTransport;
 use crate::utils::get_epoch_ms;
 
 /// Delivery of this node's inbox to whichever application the swarm currently serves.
 pub(crate) struct SwarmInboxDelivery {
     transport: Arc<SwarmTransport>,
-    callback: SwarmCallbackSlot,
 }
 
 impl SwarmInboxDelivery {
-    /// Deliver through `transport` to the application in `callback` at delivery time.
-    pub(crate) fn new(transport: Arc<SwarmTransport>, callback: SwarmCallbackSlot) -> Self {
-        Self {
-            transport,
-            callback,
-        }
+    /// Deliver through `transport` to the application it serves at delivery time.
+    pub(crate) fn new(transport: Arc<SwarmTransport>) -> Self {
+        Self { transport }
     }
 
     /// Tombstone `removal` at the carrier's owner.
@@ -73,7 +68,10 @@ impl InboxDelivery for SwarmInboxDelivery {
             );
             self.retire(drain.rejected).await?;
         }
-        let delivery = LocalDelivery::new(self.transport.clone(), self.callback.current()?);
+        let delivery = LocalDelivery::new(
+            self.transport.clone(),
+            self.transport.callback_slot().current()?,
+        );
         for element in drain.deliverable {
             if let Err(error) = delivery.deliver(&element.payload).await {
                 tracing::warn!(

@@ -55,6 +55,8 @@ gateway:
   onion_service: tcp
   onion_hop_count: 0
   onion_allow_short_paths: false
+bootstrap:
+  peers: []
 dht_virtual_nodes: 160
 origin_quota:
   dht_control:
@@ -179,6 +181,38 @@ gateway starts ⟺ section present ∧ (enabled = true ∨ rings run --gateway)
 * `status_refresh_secs`: refresh interval of onion-exit availability in `/gateway/status`.
 * `onion_service`, `onion_hop_count`, `onion_allow_short_paths`: exit service and route length
   used for captured flows.
+
+## Bootstrap
+
+The `bootstrap` section lists peers that `rings run` keeps reachable for the life of the
+process. `rings connect node` and `rings connect seed` connect once; a managed target is redialed
+through its HTTP endpoint whenever the node can no longer reach it through the overlay, so a
+long-running node that loses its transport to a seed rejoins without a restart.
+
+* `peers`: managed targets, each `{ did, url }` with an optional `api_token`, the same shape as
+  an entry of a seed document. Every `did` must parse, every `url` must be a public HTTP(S)
+  endpoint, and the node's own DID is skipped; an entry repeated verbatim is merged, while a
+  DID listed with conflicting entries, or an endpoint listed under two DIDs, is rejected as
+  ambiguous. A violation stops `rings run` before it listens. `rings run --bootstrap-seed <url>`
+  appends the peers of a seed document (a `file://` or `http(s)://` URL, read once at startup)
+  to this list for one run.
+
+How a managed target is supervised:
+
+* Reachability is a routed successor lookup for the target's DID. A target whose admission was
+  announced, or one that some peer can route to, is left alone, so a target is never forced
+  into a direct edge merely because it is not a finger.
+* An unreachable target is redialed five times, each attempt at least two seconds after the
+  previous one settled, then every five minutes plus up to thirty seconds of jitter, until the
+  peer is admitted again.
+* A redial counts as successful only once the swarm admits the peer. An endpoint answering as a
+  different DID is refused before any offer is created. A redial refused because a handshake to
+  the target is already in flight, whichever side started it, is not an error, but consumes a
+  turn of the burst like a failed dial.
+* A target leaving the local DHT, whatever caused the loss, triggers an immediate reassessment,
+  and a later loss restarts the burst.
+* At most one handshake per target is in flight, targets retry independently, and shutdown
+  cancels any handshake in progress.
 
 ## Storage
 

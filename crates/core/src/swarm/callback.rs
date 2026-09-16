@@ -49,6 +49,10 @@ use inbound::InboundMailbox;
 use inbound::ReassemblyClock;
 use pre_admission::PreAdmissionHold;
 
+/// The callback a swarm delivers to until the application sets its own: every hook is a no-op.
+pub(crate) struct DefaultCallback;
+impl SwarmCallback for DefaultCallback {}
+
 /// The application the swarm currently delivers to, replaceable through `Swarm::set_callback`;
 /// every delivery resolves it at delivery time.
 ///
@@ -150,16 +154,66 @@ pub type SharedSwarmCallback = Arc<dyn SwarmCallback>;
 pub type SharedSwarmCallback = Arc<dyn SwarmCallback + Send + Sync>;
 
 /// Used to notify the application of events that occur in the swarm.
-#[derive(Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum SwarmEvent {
     /// Indicates that the connection state of a peer has changed.
+    ///
+    /// `Connected` is emitted at most once per admission, when the peer's data channel is open
+    /// and the peer has joined the local DHT; it is therefore the application-level fact
+    /// "peer admitted". Terminal states are reported only for the admitted generation, and
+    /// then after its [`SwarmEvent::PeerRetired`]; a generation the swarm retired for its own
+    /// reasons reports no terminal state at all.
     ConnectionStateChange {
         /// The did of remote peer.
         peer: Did,
         /// The final state of the connection.
         state: WebrtcConnectionState,
     },
+    /// An admitted peer's connection record was retired and its transport is being closed: the
+    /// peer left the local DHT. Emitted from the one retirement transition, whatever reached it
+    /// — remote terminal state, data-channel close, liveness or stabilization removal, capacity
+    /// eviction, explicit disconnect — so the application observes the logical fact regardless
+    /// of the physical event or local decision behind it. Law: for every retired generation,
+    /// `Connected` started ⟺ `PeerRetired` started, with `start(Connected) <
+    /// start(PeerRetired)` under the peer's ordered delivery (see
+    /// [`SwarmCallback::on_event`]); the law is over starts, since a callback releases its
+    /// turn at its first poll. A topology prune that keeps the record (a `Disconnected`
+    /// transport allowed to recover) emits nothing. `PeerRetired` resolves the callback set at
+    /// delivery time, while `ConnectionStateChange` goes to the callback set when the connection
+    /// was created; the law is stated per delivery, so replacing the callback between an
+    /// admission and its retirement splits the pair across the two callbacks.
+    PeerRetired {
+        /// The did of the retired peer.
+        peer: Did,
+    },
+}
+
+/// The two halves of the retirement law, as an application reads them off the event stream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PeerTransition {
+    /// The peer was admitted: `ConnectionStateChange { Connected }` started.
+    Admitted,
+    /// The peer's admitted record was retired: [`SwarmEvent::PeerRetired`] started.
+    Retired,
+}
+
+impl SwarmEvent {
+    /// The logical transition this event carries, if any: `Connected` is the physical state
+    /// whose delivery is the fact "peer admitted", so its interpretation lives here, beside
+    /// the retirement it is paired with. Law: for every retired generation, as seen by a
+    /// callback held across it, the stream carries at most one `Admitted` and, iff it did,
+    /// exactly one later `Retired` for that peer.
+    pub fn peer_transition(&self) -> Option<(Did, PeerTransition)> {
+        match *self {
+            Self::ConnectionStateChange {
+                peer,
+                state: WebrtcConnectionState::Connected,
+            } => Some((peer, PeerTransition::Admitted)),
+            Self::PeerRetired { peer } => Some((peer, PeerTransition::Retired)),
+            Self::ConnectionStateChange { .. } => None,
+        }
+    }
 }
 
 /// Any object that implements this trait can be used as a callback for the swarm.

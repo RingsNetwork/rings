@@ -116,8 +116,10 @@ pub(super) fn finger_candidate_admission(
             PeerConnectionLifecycle::Pending { attempt, .. }
             | PeerConnectionLifecycle::Admitting { attempt, .. },
         ) => FingerCandidateAdmission::Queue(attempt),
-        Some(PeerConnectionLifecycle::Active(_)) if is_routable => FingerCandidateAdmission::Apply,
-        Some(PeerConnectionLifecycle::Active(_)) => FingerCandidateAdmission::Unroutable,
+        Some(PeerConnectionLifecycle::Active { .. }) if is_routable => {
+            FingerCandidateAdmission::Apply
+        }
+        Some(PeerConnectionLifecycle::Active { .. }) => FingerCandidateAdmission::Unroutable,
         None => FingerCandidateAdmission::Missing,
     }
 }

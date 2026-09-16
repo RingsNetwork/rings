@@ -1,5 +1,67 @@
 # Changelog
 
+## 0.27.0
+
+### Added
+
+- `rings run` owns a set of managed bootstrap targets for the life of the process. The new
+  `bootstrap.peers` config section (written empty by `rings init`) and `rings run --bootstrap-seed
+  <url>` name them in the seed-document shape; `rings connect node|seed` keep their one-shot
+  semantics.
+  - Reachability is a routed successor lookup for the target's DID. A target whose admission
+    was announced, ready or recovering, is left to the swarm; a target other peers can route to
+    is never forced into a direct edge; a key in the local successor interval is refuted
+    without a probe.
+  - An unreachable target is redialed through its HTTP endpoint five times, each attempt at
+    least two seconds after the previous one settled, then every five minutes plus up to thirty
+    seconds of jitter.
+  - A redial succeeds only once the swarm admits the peer. An endpoint answering as a different
+    DID is refused before any offer is created. A redial refused because the target's slot is
+    owned by another attempt (a handshake in flight, whichever side started it, or an admission
+    not yet announced) is not an error, but consumes a turn of the burst like a failed dial,
+    so a handshake the peer keeps in flight cannot hold the target in the rapid cadence. A
+    failed exchange or an admission timeout cancels the generation the redial reserved, and
+    only while it is still pending.
+  - A target leaving the local DHT, whatever caused it, triggers an immediate reassessment and
+    restarts the burst. At most one handshake per target is in flight, targets retry
+    independently, and shutdown cancels any handshake in progress.
+  - Invalid targets stop `rings run` before it listens: an unparsable DID, a URL failing the
+    remote endpoint policy, one DID listed with conflicting entries, one endpoint listed under
+    two DIDs (`SeedPeerError`, error 820). An entry repeated verbatim is merged, and an entry
+    naming the node itself is skipped, as `connect seed` skips it.
+- `SwarmEvent::PeerRetired` reports the retirement of an admitted connection whose admission
+  was announced as `ConnectionStateChange { Connected }`, whichever path retired it (remote
+  terminal state, data-channel close, liveness or stabilization removal, eviction, explicit
+  disconnect), through the same ordered per-peer delivery and before any terminal state event.
+  A topology prune that keeps the record emits nothing.
+- `Swarm::offer_connection`, `Swarm::accept_answer_for` and `Swarm::cancel_connection_attempt`
+  run a handshake pinned to the connection generation the offer reserved, so an answer is never
+  applied to, and a cancellation never hits, a handshake the peer started meanwhile; the
+  cancellation releases the generation only while it is still pending. `Swarm::is_peer_admitted`
+  (an admission announced to the application, whose retirement is therefore promised) and
+  `Swarm::has_unadmitted_connection` expose admission and handshake facts;
+  `Swarm::lookup_successor` takes the local step of a successor lookup and routes it, through
+  the hop that step chose, when the local topology cannot decide; `SwarmEvent::peer_transition`
+  reads the admission and the retirement off the event stream as one `PeerTransition`.
+- `RemoteRpcEndpoint` is the validated form of a remote node's public RPC URL; native clients
+  are built from it with a request and resolution timeout. `SeedPeerError` (error 820) is the
+  typed refusal of a seed entry or of an ambiguous seed set, shared by `connect seed` and the
+  managed targets. `HandshakeInFlight` (error 819) reports a handshake refused because the
+  peer's slot is owned by another attempt.
+- `Processor::connect_peer_via_http` performs the HTTP handshake with the answering DID
+  optionally pinned, refuses a pinned handshake the local core already holds, and returns the
+  connection generation it reserved; the JSON-RPC handlers delegate to it.
+- The node `Backend` accepts a `BackendObserver` that receives application lookup reports from
+  its single payload decode, and admissions and retirements from its swarm events.
+
+### Changed
+
+- `rings connect seed` validates the document as a set before dialing any entry (a verbatim
+  repeat is dialed once, conflicting entries are refused), skips peers that are admitted,
+  treats a handshake the local core finds in flight as the peer being taken care of rather than
+  as a failure, and pins each handshake to the entry's DID, so an endpoint answering as another
+  node is refused before an offer is created.
+
 ## 0.26.0
 
 ### Breaking changes

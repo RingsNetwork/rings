@@ -62,7 +62,7 @@ async fn test_pending_finger_update_is_applied_when_attempt_is_admitted() -> Res
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
 
     assert_eq!(transport.dht.lock_finger()?.get(finger_index), Some(peer));
-    assert!(transport.is_admitted_connection(peer));
+    assert!(transport.has_active_connection(peer));
 
     transport.disconnect(peer).await?;
     Ok(())
@@ -90,7 +90,7 @@ async fn test_pending_handshake_cancellation_releases_its_finger_proof() -> Resu
         transport.record_finger_candidate(peer, request)?,
         FingerUpdateDisposition::Queued
     );
-    assert!(transport.cancel_pending_connection(attempt).await?);
+    assert!(transport.cancel_unadmitted_connection(attempt).await?);
 
     let finger = transport.dht.lock_finger()?;
     assert_eq!(finger.get(0), None);
@@ -129,7 +129,7 @@ async fn test_admitting_finger_update_is_retained_until_atomic_commit() -> Resul
     assert!(transport.commit_connection_admission(attempt)?.is_some());
 
     assert_eq!(transport.dht.lock_finger()?.get(finger_index), Some(peer));
-    assert!(transport.is_admitted_connection_attempt(attempt));
+    assert!(transport.is_active_connection_attempt(attempt));
     transport.disconnect(peer).await?;
     Ok(())
 }
@@ -160,7 +160,7 @@ async fn test_pending_finger_update_applies_if_admission_wins_queue_race() -> Re
     );
 
     assert_eq!(transport.dht.lock_finger()?.get(finger_index), Some(peer));
-    assert!(transport.is_admitted_connection(peer));
+    assert!(transport.has_active_connection(peer));
     Ok(())
 }
 
@@ -200,7 +200,11 @@ async fn test_finger_candidate_distinguishes_missing_and_unroutable_connections(
         transport.record_finger_candidate(missing, missing_request)?,
         FingerUpdateDisposition::Queued
     );
-    assert!(transport.cancel_pending_connection(missing_attempt).await?);
+    assert!(
+        transport
+            .cancel_unadmitted_connection(missing_attempt)
+            .await?
+    );
 
     // Use a fresh DHT so the unroutable branch is not affected by the retained
     // proof and failure counter from the missing-connection branch above.

@@ -51,6 +51,8 @@ Options:
           Your ECDSA key. If not provided, use ECDSA_KEY in env or ecdsa_key in config file [env: ECDSA_KEY=]
       --stabilize-interval <STABILIZE_INTERVAL>
           Stabilization interval in seconds. If not provided, use stabilize_interval in config file or 15 [env: STABILIZE_INTERVAL=]
+      --bootstrap-seed <BOOTSTRAP_SEED>
+          Seed document URL (file:// or http(s)://) whose peers join the managed bootstrap targets of the config's bootstrap section; the run redials each target through its HTTP endpoint whenever it stops being reachable through the overlay [env: BOOTSTRAP_SEED=]
       --external-ip <EXTERNAL_IP>
           external ip address [env: EXTERNAL_IP=]
       --webrtc-udp-port-min <WEBRTC_UDP_PORT_MIN>

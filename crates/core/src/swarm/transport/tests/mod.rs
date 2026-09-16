@@ -49,8 +49,10 @@ use crate::storage::MemStorage;
 use crate::swarm::callback::max_on_message_recursion_depth_for_test;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::swarm::callback::reset_on_message_recursion_depth_for_test;
+use crate::swarm::callback::DefaultCallback;
 use crate::swarm::callback::InnerSwarmCallback;
 use crate::swarm::callback::SwarmCallback;
+use crate::swarm::callback::SwarmCallbackSlot;
 #[cfg(feature = "dummy")]
 use crate::swarm::callback::SwarmEvent;
 use crate::swarm::SwarmBuilder;
@@ -71,6 +73,7 @@ mod test_readiness;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 mod test_retention;
 mod test_retirement;
+mod test_retirement_events;
 
 /// Latched test event: set by the system under test, awaited by event.
 ///
@@ -206,6 +209,48 @@ impl BehaviourJudgement for RecordingMeasure {
 
 struct NoopSwarmCallback;
 
+/// Records every swarm event the application was told about, in start order.
+#[derive(Default)]
+struct EventLog {
+    events: Mutex<Vec<SwarmEvent>>,
+}
+
+impl EventLog {
+    /// Every event so far, in start order.
+    fn events(&self) -> Vec<SwarmEvent> {
+        self.events
+            .lock()
+            .expect("event log is never poisoned")
+            .clone()
+    }
+
+    /// Peers reported retired so far, in start order.
+    fn retired(&self) -> Vec<Did> {
+        self.events()
+            .into_iter()
+            .filter_map(|event| match event {
+                SwarmEvent::PeerRetired { peer } => Some(peer),
+                SwarmEvent::ConnectionStateChange { .. } => None,
+            })
+            .collect()
+    }
+}
+
+#[async_trait]
+impl SwarmCallback for EventLog {
+    /// Record the event.
+    async fn on_event(
+        &self,
+        event: &SwarmEvent,
+    ) -> std::result::Result<(), crate::error::CallbackError> {
+        self.events
+            .lock()
+            .expect("event log is never poisoned")
+            .push(event.clone());
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl SwarmCallback for NoopSwarmCallback {}
 
@@ -288,7 +333,9 @@ impl SwarmCallback for CountingSwarmCallback {
         &self,
         event: &SwarmEvent,
     ) -> std::result::Result<(), crate::error::CallbackError> {
-        let SwarmEvent::ConnectionStateChange { state, .. } = event;
+        let SwarmEvent::ConnectionStateChange { state, .. } = event else {
+            return Ok(());
+        };
         match self.events.lock() {
             Ok(mut events) => events.push(*state),
             Err(_) => tracing::error!("CountingSwarmCallback events mutex is poisoned"),
@@ -398,7 +445,9 @@ impl SwarmCallback for BlockingEventSwarmCallback {
         &self,
         event: &SwarmEvent,
     ) -> std::result::Result<(), crate::error::CallbackError> {
-        let SwarmEvent::ConnectionStateChange { peer, state } = event;
+        let SwarmEvent::ConnectionStateChange { peer, state } = event else {
+            return Ok(());
+        };
         match self.events.lock() {
             Ok(mut events) => events.push((*peer, *state)),
             Err(_) => tracing::error!("BlockingEventSwarmCallback events mutex is poisoned"),
@@ -427,17 +476,18 @@ fn transport_with_key_measure_and_reassembly_limits(
         Box::new(MemStorage::new()),
         DEFAULT_FINGER_TABLE_SIZE,
     ));
-    Ok(SwarmTransport::new(
-        0,
-        SwarmWebrtcConfig::new("".to_string(), None, None),
+    Ok(SwarmTransport::new(SwarmTransportParts {
+        network_id: 0,
+        webrtc: SwarmWebrtcConfig::new("".to_string(), None, None),
         session_sk,
         dht,
-        Some(measure),
-        Arc::new(crate::message::TransactionReplay::new(Box::new(
+        measure: Some(measure),
+        transaction_replay: Arc::new(crate::message::TransactionReplay::new(Box::new(
             crate::storage::MemStorage::new(),
         ))),
-        SwarmTransportSettings::new(1, VirtualNodeConfig::disabled(), reassembly_limits),
-    ))
+        settings: SwarmTransportSettings::new(1, VirtualNodeConfig::disabled(), reassembly_limits),
+        callback: SwarmCallbackSlot::new(Arc::new(DefaultCallback)),
+    }))
 }
 
 fn transport_with_measure(measure: MeasureImpl) -> Result<SwarmTransport> {
@@ -571,7 +621,7 @@ async fn test_data_channel_open_admits_successor_before_ice_connected() -> Resul
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
 
-    assert!(transport.is_admitted_connection(peer));
+    assert!(transport.has_active_connection(peer));
     assert!(transport.get_connection(peer).is_some());
     assert!(
         transport.dht.successors().contains(&peer)?,
@@ -668,7 +718,7 @@ async fn test_pending_callback_messages_are_held_until_admission() -> Result<()>
     let counters = measure.snapshot_counters()?;
     assert!(counters.contains(&(pending.peer, MeasureCounter::Connect)));
     assert!(counters.contains(&(pending.peer, MeasureCounter::Received)));
-    assert!(transport.is_admitted_connection(pending.peer));
+    assert!(transport.has_active_connection(pending.peer));
 
     let late = pending.custom_message_wire(&transport, b"message-after-admission")?;
     pending.receive(&late).await?;
@@ -942,7 +992,7 @@ async fn test_pending_disconnected_before_data_channel_open_is_not_reported() ->
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
 
-    assert!(transport.is_admitted_connection_attempt(attempt));
+    assert!(transport.is_active_connection_attempt(attempt));
     let events = app_callback.events()?;
     assert_eq!(events, vec![
         WebrtcConnectionState::Connecting,
@@ -980,7 +1030,7 @@ async fn test_terminal_event_during_pending_admission_prevents_late_dht_join() -
     });
 
     measure.wait_for_connect_started().await;
-    assert!(transport.is_admitted_connection_attempt(attempt));
+    assert!(transport.is_active_connection_attempt(attempt));
 
     let terminal_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone())
         .with_pending_connection_attempt(attempt);
@@ -994,7 +1044,7 @@ async fn test_terminal_event_during_pending_admission_prevents_late_dht_join() -
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))??;
 
-    assert!(!transport.is_admitted_connection_attempt(attempt));
+    assert!(!transport.is_active_connection_attempt(attempt));
     assert!(!transport.dht.successors().contains(&peer)?);
     let events = app_callback.events()?;
     assert!(events.contains(&WebrtcConnectionState::Closed));

@@ -55,7 +55,7 @@ token takes `--remote-api-token-file <FILE>`.
 ### Through a seed
 
 ```bash
-rings connect seed ./seed.json
+rings connect seed file:///etc/rings/seed.json
 rings connect seed https://example.org/seed.json
 ```
 
@@ -102,6 +102,26 @@ rings connect accept <answer>     # or `-`
 ```
 
 [Exchange SDP](advanced-topic/exchange-sdp.md) explains what each message carries.
+
+### Keeping a bootstrap peer reachable
+
+Each `rings connect` form connects once. A node that later loses its transport to that peer,
+and every other peer with it, stays partitioned until something reconnects it. For peers the
+node should always be able to reach, list them under `bootstrap.peers` in
+[config.yaml](advanced-topic/config.yaml.md#bootstrap), or hand `rings run` a seed document for
+one run:
+
+```bash
+rings run --bootstrap-seed file:///etc/rings/seed.json
+```
+
+A `file://` document is read at startup; an `http(s)://` document is fetched once at startup,
+so the node does not start while the document's host is unreachable.
+
+`rings run` then supervises those targets: whenever one is no longer reachable through the
+overlay it is redialed through its HTTP endpoint, in a short burst first and then every five
+minutes plus up to thirty seconds of jitter, until it is admitted again. A target that other
+peers can route to is left alone.
 
 ## Peers
 

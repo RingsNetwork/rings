@@ -402,8 +402,7 @@ pub(super) async fn wait_processors_connected(
 ) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        if processor_has_connected_peer(p1, p2.did()) && processor_has_connected_peer(p2, p1.did())
-        {
+        if processor_has_admitted_peer(p1, p2.did()) && processor_has_admitted_peer(p2, p1.did()) {
             return;
         }
 
@@ -421,13 +420,8 @@ pub(super) async fn wait_processors_connected(
     }
 }
 
-pub(super) fn processor_has_connected_peer(processor: &Processor, peer: Did) -> bool {
-    let peer = peer.to_string();
-    processor
-        .swarm
-        .peers()
-        .into_iter()
-        .any(|conn| conn.did == peer && conn.state == "Connected")
+pub(super) fn processor_has_admitted_peer(processor: &Processor, peer: Did) -> bool {
+    processor.swarm.peer_dids().contains(&peer)
 }
 
 pub(super) async fn wait_for_mutual_dht_topology(

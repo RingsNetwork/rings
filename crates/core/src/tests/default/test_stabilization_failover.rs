@@ -42,14 +42,14 @@ async fn assert_unavailable_successor_fails_over(
         .clean_unavailable_connections()
         .await?;
 
-    assert!(!node1.swarm.transport.is_admitted_connection(node2.did()));
+    assert!(!node1.swarm.transport.has_active_connection(node2.did()));
     assert!(node1.swarm.transport.get_connection(node2.did()).is_none());
     assert!(!node1.dht().successors().contains(&node2.did())?);
     assert!(node1.dht().successors().contains(&node3.did())?);
     assert_eq!(*node1.dht().lock_predecessor()?, None);
     assert!(!node1.dht().lock_finger()?.contains(Some(node2.did())));
     assert!(node1.dht().lock_finger()?.contains(Some(node3.did())));
-    assert!(node1.swarm.transport.is_admitted_connection(node3.did()));
+    assert!(node1.swarm.transport.has_active_connection(node3.did()));
     assert!(node1.swarm.transport.storage_repair_requested());
     assert_eq!(
         node1

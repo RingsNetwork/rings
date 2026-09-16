@@ -31,7 +31,9 @@ impl SwarmCallback for FailingConnectedSwarmCallback {
         &self,
         event: &SwarmEvent,
     ) -> std::result::Result<(), crate::error::CallbackError> {
-        let SwarmEvent::ConnectionStateChange { state, .. } = event;
+        let SwarmEvent::ConnectionStateChange { state, .. } = event else {
+            return Ok(());
+        };
         if *state == WebrtcConnectionState::Connected {
             return Err(std::io::Error::other("connected callback failure").into());
         }
@@ -84,7 +86,7 @@ async fn test_pre_admission_drain_runs_after_connected_event_error() -> Result<(
 
     assert_eq!(callback.pre_admission_held_count_for_test(), 0);
     assert_eq!(app_callback.inbounds(), 1);
-    assert!(transport.is_admitted_connection_attempt(attempt));
+    assert!(transport.is_active_connection_attempt(attempt));
     transport.disconnect(peer).await?;
     Ok(())
 }
@@ -119,7 +121,7 @@ async fn test_retired_frame_waiting_on_lane_ticket_does_not_record_receive() -> 
         .await;
     assert_eq!(successful_receive_count(&measure, peer)?, 0);
     assert_eq!(
-        transport.retire_active_connection_with(attempt, |_| Ok(()))?,
+        transport.retire_active_connection_for_test(attempt, |_| Ok(()))?,
         Some(())
     );
     drop(admission_turn);

@@ -1,0 +1,287 @@
+//! What the swarm reports about the managed targets, as three records written by the
+//! [`Backend`] and read by the probe, the dial and the supervisor.
+//!
+//! ```text
+//!   BackendObserver::lookup_report(tx, s) ─▶ reports: Rendezvous<Uuid, Did> ─▶ probe waiting for tx
+//!   BackendObserver::peer_admitted(p)     ─▶ admissions: Rendezvous<Did, ()> ─▶ dial waiting for p
+//!   BackendObserver::peer_retired(p)      ─▶ losses: PeerLosses            ─▶ supervisor drain + wake
+//! ```
+//!
+//! "Retired" is the swarm's word for the fact; "loss" is the supervisor's word for what it means
+//! to a managed target. The translation happens here, once, in `peer_retired`.
+//!
+//! Each record is bounded: a rendezvous by its early-value capacity plus one waiter per key in
+//! flight (one per probe, one per dial), losses by the distinct peers that leave between two
+//! drains. Writers never block and never fail the swarm callback: a poisoned record is logged
+//! at the observer boundary.
+//!
+//! [`Backend`]: crate::extension::Backend
+
+use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::collections::VecDeque;
+use std::future::Future;
+use std::hash::Hash;
+use std::ops::DerefMut;
+use std::pin::Pin;
+use std::sync::Mutex;
+use std::task::Context;
+use std::task::Poll;
+
+use rings_core::dht::Did;
+use tokio::sync::futures::Notified;
+use tokio::sync::oneshot;
+use tokio::sync::Notify;
+
+use crate::error::Result;
+use crate::extension::BackendObserver;
+use crate::sync_lock::lock;
+
+/// Reports retained while no probe has registered for them, so a report that overtakes the
+/// return path of its own send is not lost. Older entries are evicted first; only reports of
+/// application lookups reach the record, so the buffer is not diluted by core maintenance.
+pub(super) const EARLY_REPORT_CAPACITY: usize = 32;
+
+/// Rendezvous between one waiter per key and the value observed for that key, in either order:
+///
+/// ```text
+///   wait_for(k) ─┬─ early value buffered? ─▶ resolved at once
+///                └─ else register waiter ─▶ observe(k, v) ─▶ resolved
+///   observe(k, v) with no waiter ─▶ buffered as an early value (bounded FIFO; dropped at 0)
+///   drop(Waiter(k)) ─▶ waiter forgotten; idempotent, so a resolved waiter may drop too
+/// ```
+///
+/// A second `wait_for` on the same key replaces the first waiter, which is then closed. Each
+/// registration carries a ticket and a waiter forgets only its own registration, so dropping a
+/// replaced or resolved waiter never touches its successor; a turn dropped mid-wait (at
+/// shutdown) leaves no registration behind.
+pub(crate) struct Rendezvous<K, V> {
+    state: Mutex<RendezvousState<K, V>>,
+    early_capacity: usize,
+}
+
+/// Rendezvous state: one waiter per key and a bounded FIFO of early values.
+struct RendezvousState<K, V> {
+    /// One waiter per key, with the ticket that identifies its registration.
+    awaiting: HashMap<K, (u64, oneshot::Sender<V>)>,
+    early: VecDeque<(K, V)>,
+    /// Ticket of the next registration.
+    next_ticket: u64,
+}
+
+impl<K: Copy + Eq + Hash, V> Rendezvous<K, V> {
+    /// A rendezvous that buffers up to `early_capacity` values observed before their waiter.
+    pub(super) fn new(early_capacity: usize) -> Self {
+        Self {
+            state: Mutex::new(RendezvousState {
+                awaiting: HashMap::new(),
+                early: VecDeque::new(),
+                next_ticket: 0,
+            }),
+            early_capacity,
+        }
+    }
+
+    /// Deliver `value` for `key`: to its waiter when one is registered, otherwise into the
+    /// early buffer.
+    pub(super) fn observe(&self, key: K, value: V) -> Result<()> {
+        let mut state = lock(&self.state)?;
+        match state.awaiting.remove(&key) {
+            // A waiter that already gave up and dropped its receiver is simply satisfied late.
+            Some((_, waiter)) => {
+                let _ = waiter.send(value);
+            }
+            // Law: the oldest early values are dropped so that at most `early_capacity` are
+            // kept; a capacity of zero keeps none.
+            None => {
+                state.early.push_back((key, value));
+                if state.early.len() > self.early_capacity {
+                    state.early.pop_front();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Await the value for `key`; resolves at once when the value arrived first. The waiter
+    /// forgets its registration when dropped.
+    pub(crate) fn wait_for(&self, key: K) -> Result<Waiter<'_, K, V>> {
+        let mut state = lock(&self.state)?;
+        let (sender, receiver) = oneshot::channel();
+        let early = state
+            .early
+            .iter()
+            .position(|(early_key, _)| *early_key == key)
+            .and_then(|position| state.early.remove(position));
+        let ticket = state.next_ticket;
+        state.next_ticket = state.next_ticket.wrapping_add(1);
+        match early {
+            Some((_, value)) => {
+                let _ = sender.send(value);
+            }
+            None => {
+                state.awaiting.insert(key, (ticket, sender));
+            }
+        }
+        Ok(Waiter {
+            rendezvous: self,
+            key,
+            ticket,
+            receiver,
+        })
+    }
+
+    /// Drop the registration `ticket` under `key`; a no-op when the value already resolved it
+    /// or a later waiter replaced it. A poisoned record is left alone: nothing can be registered
+    /// in it either.
+    fn forget(&self, key: K, ticket: u64) {
+        if let Ok(mut state) = lock(&self.state) {
+            if state
+                .awaiting
+                .get(&key)
+                .is_some_and(|(registered, _)| *registered == ticket)
+            {
+                state.awaiting.remove(&key);
+            }
+        }
+    }
+
+    /// Number of outstanding waiters plus buffered early values.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> Result<usize> {
+        let state = lock(&self.state)?;
+        Ok(state.awaiting.len() + state.early.len())
+    }
+}
+
+/// A registered waiter: resolves to the value observed for its key, and forgets its
+/// registration on drop.
+pub(crate) struct Waiter<'a, K: Copy + Eq + Hash, V> {
+    rendezvous: &'a Rendezvous<K, V>,
+    key: K,
+    ticket: u64,
+    receiver: oneshot::Receiver<V>,
+}
+
+impl<K: Copy + Eq + Hash, V> Waiter<'_, K, V> {
+    /// The value if it has arrived, `Empty` while it has not, `Closed` once this waiter was
+    /// replaced.
+    #[cfg(test)]
+    pub(crate) fn try_recv(&mut self) -> std::result::Result<V, oneshot::error::TryRecvError> {
+        self.receiver.try_recv()
+    }
+}
+
+impl<K: Copy + Eq + Hash + Unpin, V> Future for Waiter<'_, K, V> {
+    type Output = std::result::Result<V, oneshot::error::RecvError>;
+
+    /// Poll the underlying receiver.
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.get_mut().receiver).poll(context)
+    }
+}
+
+impl<K: Copy + Eq + Hash, V> Drop for Waiter<'_, K, V> {
+    /// Forget this registration, whether or not it resolved; a successor's is left alone.
+    fn drop(&mut self) {
+        self.rendezvous.forget(self.key, self.ticket);
+    }
+}
+
+/// Successor lookup reports keyed by the transaction id of their request.
+pub(super) type LookupReportLedger = Rendezvous<uuid::Uuid, Did>;
+
+/// Admissions keyed by peer; a dial checks the transport directly after registering, so no
+/// early buffer is needed.
+pub(super) type Admissions = Rendezvous<Did, ()>;
+
+/// Peers that left the local DHT since the supervisor last drained, with a wake for the
+/// supervisor. `notify_one` stores a permit when nobody waits, so a loss recorded while the
+/// supervisor is between its drain and its wait is not lost.
+#[derive(Default)]
+pub(crate) struct PeerLosses {
+    lost: Mutex<BTreeSet<Did>>,
+    wake: Notify,
+}
+
+impl PeerLosses {
+    /// Record the retirement of `peer` as a loss and wake the supervisor.
+    pub(super) fn observe(&self, peer: Did) -> Result<()> {
+        lock(&self.lost)?.insert(peer);
+        self.wake.notify_one();
+        Ok(())
+    }
+
+    /// Take every loss recorded since the previous call.
+    pub(crate) fn take(&self) -> Result<BTreeSet<Did>> {
+        Ok(std::mem::take(lock(&self.lost)?.deref_mut()))
+    }
+
+    /// Resolves once a loss has been recorded since the previous wake.
+    pub(super) fn woken(&self) -> Notified<'_> {
+        self.wake.notified()
+    }
+}
+
+/// What the swarm reports about the managed targets: the successor lookup reports the probe
+/// waits for, the admissions the dial waits for, and the retirements the supervisor reacts to.
+/// Installed on the [`Backend`] as its [`BackendObserver`].
+///
+/// [`Backend`]: crate::extension::Backend
+pub(crate) struct ReachabilityEvidence {
+    reports: LookupReportLedger,
+    admissions: Admissions,
+    losses: PeerLosses,
+}
+
+impl Default for ReachabilityEvidence {
+    /// Empty records with the report buffer at [`EARLY_REPORT_CAPACITY`].
+    fn default() -> Self {
+        Self {
+            reports: Rendezvous::new(EARLY_REPORT_CAPACITY),
+            admissions: Rendezvous::new(0),
+            losses: PeerLosses::default(),
+        }
+    }
+}
+
+impl ReachabilityEvidence {
+    /// The lookup-report rendezvous.
+    pub(crate) fn reports(&self) -> &LookupReportLedger {
+        &self.reports
+    }
+
+    /// The admission rendezvous.
+    pub(crate) fn admissions(&self) -> &Admissions {
+        &self.admissions
+    }
+
+    /// The record of retired targets.
+    pub(crate) fn losses(&self) -> &PeerLosses {
+        &self.losses
+    }
+}
+
+impl BackendObserver for ReachabilityEvidence {
+    /// Hand the report to the ledger; a poisoned record is logged, never propagated.
+    fn lookup_report(&self, tx_id: uuid::Uuid, successor: Did) {
+        if let Err(error) = self.reports.observe(tx_id, successor) {
+            tracing::error!(%tx_id, %error, "bootstrap lookup record unavailable");
+        }
+    }
+
+    /// Resolve a dial waiting for this admission; a poisoned record is logged, never propagated.
+    fn peer_admitted(&self, peer: Did) {
+        if let Err(error) = self.admissions.observe(peer, ()) {
+            tracing::error!(%peer, %error, "bootstrap admission record unavailable");
+        }
+    }
+
+    /// Record the retirement as a loss for the supervisor; a poisoned record is logged, never
+    /// propagated.
+    fn peer_retired(&self, peer: Did) {
+        if let Err(error) = self.losses.observe(peer) {
+            tracing::error!(%peer, %error, "bootstrap loss record unavailable");
+        }
+    }
+}

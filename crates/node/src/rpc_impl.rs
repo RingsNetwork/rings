@@ -3,7 +3,6 @@
 //! For the native environment, we use jsonrpc_core to handle requests.
 //! For the browser environment, we use `InternalRpcHandler` to process the requests.
 
-use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::str::FromStr;
 
@@ -25,11 +24,11 @@ use rings_rpc::protos::rings_node::*;
 use rings_rpc::protos::rings_node_handler::HandleRpc;
 
 use crate::error::Error as ServerError;
-#[cfg(rings_native)]
-use crate::onion::target::resolve_public_target;
-#[cfg(rings_native)]
-use crate::onion::OnionProxyTarget;
+use crate::processor::HandshakeFailure;
+use crate::processor::HandshakePeer;
 use crate::processor::Processor;
+use crate::remote_endpoint::RemoteRpcEndpoint;
+use crate::seed::validate_seed_peers;
 use crate::seed::Seed;
 
 const DEFAULT_PEER_MEASUREMENT_PAGE_SIZE: u32 = 100;
@@ -43,28 +42,14 @@ impl HandleRpc<ConnectPeerViaHttpRequest, ConnectPeerViaHttpResponse> for Proces
         req: ConnectPeerViaHttpRequest,
     ) -> Result<ConnectPeerViaHttpResponse> {
         let ConnectPeerViaHttpRequest { url, api_token } = req;
-        let client = remote_rpc_client(&url, api_token).await?;
-
-        let did = client
-            .node_did(&NodeDidRequest {})
+        let endpoint = RemoteRpcEndpoint::parse(url.as_str())?;
+        let attempt = self
+            .connect_peer_via_http(&endpoint, api_token.as_deref(), HandshakePeer::Any)
             .await
-            .map_err(|e| ServerError::RemoteRpcError(e.to_string()))?
-            .did;
-
-        let offer = self
-            .handle_rpc(CreateOfferRequest { did: did.clone() })
-            .await?
-            .offer;
-
-        let answer = client
-            .answer_offer(&AnswerOfferRequest { offer })
-            .await
-            .map_err(|e| ServerError::RemoteRpcError(e.to_string()))?
-            .answer;
-
-        self.handle_rpc(AcceptAnswerRequest { answer }).await?;
-
-        Ok(ConnectPeerViaHttpResponse { did })
+            .map_err(ServerError::from)?;
+        Ok(ConnectPeerViaHttpResponse {
+            did: attempt.peer().to_string(),
+        })
     }
 }
 
@@ -84,192 +69,33 @@ impl HandleRpc<ConnectWithSeedRequest, ConnectWithSeedResponse> for Processor {
     async fn handle_rpc(&self, req: ConnectWithSeedRequest) -> Result<ConnectWithSeedResponse> {
         let seed: Seed = Seed::try_from(req)?;
 
-        let mut connected: HashSet<String> =
-            HashSet::from_iter(self.swarm.peers().into_iter().map(|peer| peer.did));
-        connected.insert(self.swarm.did().to_string());
+        // The document is validated as a set before any entry is dialed: an invalid or
+        // ambiguous document dials nothing, and a peer listed twice is dialed once.
+        let peers = validate_seed_peers(seed.peers).map_err(ServerError::from)?;
 
-        let tasks = seed
-            .peers
-            .into_iter()
-            .filter(|x| !connected.contains(&x.did))
-            .map(|x| {
-                self.handle_rpc(ConnectPeerViaHttpRequest {
-                    url: x.url,
-                    api_token: x.api_token,
-                })
+        let mut tasks = Vec::with_capacity(peers.len());
+        for peer in peers {
+            if !self.owes_seed_dial(peer.did())? {
+                continue;
+            }
+            tasks.push(async move {
+                match self
+                    .connect_peer_via_http(
+                        peer.endpoint(),
+                        peer.api_token(),
+                        HandshakePeer::Pinned(peer.did()),
+                    )
+                    .await
+                {
+                    // A peer whose slot is owned by another attempt is being taken care of.
+                    Ok(_) | Err(HandshakeFailure::InFlight { .. }) => Ok(()),
+                    Err(HandshakeFailure::Failed(error)) => Err(Error::from(error)),
+                }
             });
-
-        let results = join_all(tasks).await;
-
-        let first_err = results.into_iter().find(|x| x.is_err());
-        if let Some(err) = first_err {
-            err?;
         }
 
+        join_all(tasks).await.into_iter().collect::<Result<()>>()?;
         Ok(ConnectWithSeedResponse {})
-    }
-}
-
-fn validate_remote_rpc_url(url: &str) -> std::result::Result<reqwest::Url, ServerError> {
-    let parsed = reqwest::Url::parse(url)
-        .map_err(|error| ServerError::UnsafeRemoteRpcTarget(error.to_string()))?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Err(ServerError::UnsafeRemoteRpcTarget(
-            "only HTTP(S) endpoints are supported".to_string(),
-        ));
-    }
-    if !parsed.username().is_empty() || parsed.password().is_some() || parsed.fragment().is_some() {
-        return Err(ServerError::UnsafeRemoteRpcTarget(
-            "credentials and fragments are not permitted in an RPC endpoint URL".to_string(),
-        ));
-    }
-    rings_network_policy::validate_public_url_host(&parsed)
-        .map_err(|error| ServerError::UnsafeRemoteRpcTarget(error.to_string()))?;
-    Ok(parsed)
-}
-
-#[cfg(rings_native)]
-async fn remote_rpc_client(
-    url: &str,
-    api_token: Option<String>,
-) -> std::result::Result<rings_rpc::jsonrpc::Client, ServerError> {
-    let parsed = validate_remote_rpc_url(url)?;
-    let mut builder = reqwest::Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none());
-    if let Some(target) = remote_rpc_resolution_target(&parsed)? {
-        let addresses = resolve_public_target(&target.resolution_target).await?;
-        builder = builder.resolve_to_addrs(&target.pin_host, &addresses);
-    }
-    let http_client = builder
-        .build()
-        .map_err(|error| ServerError::RemoteRpcError(error.to_string()))?;
-    let client = rings_rpc::jsonrpc::Client::with_http_client(parsed.as_str(), http_client);
-    Ok(match api_token {
-        Some(token) => client.with_bearer_token(token),
-        None => client,
-    })
-}
-
-#[cfg(rings_native)]
-fn remote_rpc_resolution_target(
-    parsed: &reqwest::Url,
-) -> std::result::Result<Option<RemoteRpcResolutionTarget>, ServerError> {
-    let port = parsed.port_or_known_default().ok_or_else(|| {
-        ServerError::UnsafeRemoteRpcTarget("endpoint URL has no usable port".to_string())
-    })?;
-    match parsed
-        .host()
-        .ok_or_else(|| ServerError::UnsafeRemoteRpcTarget("endpoint URL has no host".to_string()))?
-    {
-        url::Host::Domain(host) => {
-            let pin_host = parsed.host_str().ok_or_else(|| {
-                ServerError::UnsafeRemoteRpcTarget("endpoint URL has no host".to_string())
-            })?;
-            OnionProxyTarget::new(host, port).map(|resolution_target| {
-                Some(RemoteRpcResolutionTarget {
-                    resolution_target,
-                    pin_host: pin_host.to_string(),
-                })
-            })
-        }
-        url::Host::Ipv4(_) | url::Host::Ipv6(_) => Ok(None),
-    }
-}
-
-#[cfg(rings_native)]
-#[derive(Debug, Eq, PartialEq)]
-struct RemoteRpcResolutionTarget {
-    resolution_target: OnionProxyTarget,
-    pin_host: String,
-}
-
-#[cfg(rings_browser)]
-async fn remote_rpc_client(
-    url: &str,
-    api_token: Option<String>,
-) -> std::result::Result<rings_rpc::jsonrpc::Client, ServerError> {
-    let parsed = validate_remote_rpc_url(url)?;
-    let client = rings_rpc::jsonrpc::Client::new(parsed.as_str());
-    Ok(match api_token {
-        Some(token) => client.with_bearer_token(token),
-        None => client,
-    })
-}
-
-#[cfg(test)]
-mod remote_rpc_security_tests {
-    use super::*;
-
-    #[test]
-    fn remote_rpc_url_rejects_local_targets_and_url_credentials() {
-        for target in [
-            "http://127.0.0.1:50001/",
-            "http://169.254.169.254/latest/meta-data/",
-            "https://intranet:50001/",
-            "https://token@example.com:50001/",
-            "file:///tmp/socket",
-        ] {
-            assert!(matches!(
-                validate_remote_rpc_url(target),
-                Err(ServerError::UnsafeRemoteRpcTarget(_))
-            ));
-        }
-    }
-
-    #[test]
-    fn remote_rpc_url_accepts_public_http_and_https_targets() {
-        for target in [
-            "http://example.com:50001/",
-            "https://1.1.1.1/rpc",
-            "https://[2606:4700:4700::1111]/rpc",
-        ] {
-            assert!(validate_remote_rpc_url(target).is_ok());
-        }
-    }
-
-    #[cfg(rings_native)]
-    #[test]
-    fn remote_rpc_literals_skip_dns_pinning_target() -> std::result::Result<(), ServerError> {
-        for target in ["https://1.1.1.1/rpc", "https://[2606:4700:4700::1111]/rpc"] {
-            let parsed = validate_remote_rpc_url(target)?;
-            assert_eq!(remote_rpc_resolution_target(&parsed)?, None);
-        }
-        Ok(())
-    }
-
-    #[cfg(rings_native)]
-    #[test]
-    fn remote_rpc_domains_preserve_connect_time_host_for_dns_pin(
-    ) -> std::result::Result<(), ServerError> {
-        let parsed = validate_remote_rpc_url("https://example.com:8443/rpc")?;
-        let target = remote_rpc_resolution_target(&parsed)?;
-
-        assert!(matches!(
-            target,
-            Some(target)
-                if target.resolution_target.host() == "example.com"
-                    && target.resolution_target.port() == 8443
-                    && target.pin_host == "example.com"
-        ));
-        Ok(())
-    }
-
-    #[cfg(rings_native)]
-    #[test]
-    fn remote_rpc_trailing_dot_domains_keep_dotted_dns_pin_key(
-    ) -> std::result::Result<(), ServerError> {
-        let parsed = validate_remote_rpc_url("https://example.com.:8443/rpc")?;
-        let target = remote_rpc_resolution_target(&parsed)?;
-
-        assert!(matches!(
-            target,
-            Some(target)
-                if target.resolution_target.host() == "example.com"
-                    && target.resolution_target.port() == 8443
-                    && target.pin_host == "example.com."
-        ));
-        Ok(())
     }
 }
 

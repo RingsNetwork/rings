@@ -43,10 +43,10 @@ async fn test_disconnected_open_transport_cannot_commit_admission() -> Result<()
             data_channel_open: true,
         })
     ));
-    assert!(!transport.is_admitted_connection(peer));
+    assert!(!transport.has_active_connection(peer));
     assert!(!transport.dht.successors().contains(&peer)?);
 
-    assert!(transport.cancel_pending_connection(attempt).await?);
+    assert!(transport.cancel_unadmitted_connection(attempt).await?);
     Ok(())
 }
 
@@ -72,7 +72,7 @@ async fn test_data_channel_open_before_peer_state_converges_preserves_pending_ad
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
 
     assert_eq!(transport.unadmitted_attempt(peer)?, Some(attempt));
-    assert!(!transport.is_admitted_connection(peer));
+    assert!(!transport.has_active_connection(peer));
     assert!(!transport.dht.successors().contains(&peer)?);
     assert!(transport.get_raw_connection(peer).is_some());
 
@@ -83,7 +83,7 @@ async fn test_data_channel_open_before_peer_state_converges_preserves_pending_ad
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
 
-    assert!(transport.is_admitted_connection_attempt(attempt));
+    assert!(transport.is_active_connection_attempt(attempt));
     assert!(transport.dht.successors().contains(&peer)?);
     transport.disconnect(peer).await?;
     Ok(())
@@ -97,7 +97,7 @@ async fn test_non_ready_transport_is_admitted_but_not_routable_or_live() -> Resu
         .force_peer_connection_state_without_callback(peer, WebrtcConnectionState::Disconnected)?;
     transport.force_peer_data_channel_open_without_callback(peer, Some(true))?;
 
-    assert!(transport.is_admitted_connection(peer));
+    assert!(transport.has_active_connection(peer));
     assert!(transport.get_connection(peer).is_none());
     assert!(!PayloadSender::is_connected(transport.as_ref(), peer));
     let raw = transport

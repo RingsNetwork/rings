@@ -23,6 +23,8 @@ use rings_node::native::api_auth::load_api_token;
 use rings_node::native::api_auth::load_api_token_file;
 use rings_node::native::api_auth::load_or_create_api_token;
 use rings_node::native::api_auth::ApiSecurity;
+use rings_node::native::bootstrap::BootstrapSupervisor;
+use rings_node::native::bootstrap::BootstrapTargets;
 use rings_node::native::cli::Client;
 use rings_node::native::config;
 use rings_node::native::endpoint::run_external_api;
@@ -46,8 +48,10 @@ use rings_node::prelude::StopSource;
 use rings_node::processor::ProcessorBuilder;
 use rings_node::processor::ProcessorConfig;
 use rings_node::provider::Provider;
+use rings_node::seed::Seed;
 use rings_node::util::ensure_parent_dir;
 use rings_node::util::expand_home;
+use rings_node::util::loader::ResourceLoader;
 use tokio::io;
 use tokio::io::AsyncBufReadExt;
 use tokio::task::JoinError;
@@ -326,6 +330,13 @@ struct RunCommand {
         env
     )]
     pub stabilize_interval: Option<u64>,
+
+    #[arg(
+        long,
+        help = "Seed document URL (file:// or http(s)://) whose peers join the managed bootstrap targets of the config's bootstrap section; the run redials each target through its HTTP endpoint whenever it stops being reachable through the overlay",
+        env
+    )]
+    pub bootstrap_seed: Option<String>,
 
     #[arg(long, help = "external ip address", env)]
     pub external_ip: Option<String>,
@@ -774,6 +785,12 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
     if let Some(stabilize_interval) = args.stabilize_interval {
         c.stabilize_interval = stabilize_interval;
     }
+    if let Some(source) = args.bootstrap_seed {
+        let seed = Seed::load(source.as_str())
+            .await
+            .with_context(|| format!("loading bootstrap seed {source}"))?;
+        c.bootstrap.peers.extend(seed.peers);
+    }
     if let Some(external_api_addr) = args.external_api_addr {
         c.external_api_addr = external_api_addr;
     }
@@ -948,10 +965,18 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
     let gateway_status = gateway_runner
         .as_ref()
         .map(NativeGatewayRunner::status_handle);
+    // Managed bootstrap targets fail fast on invalid configuration; their supervisor is spawned
+    // with the other run-owned tasks below and its evidence is the backend's observer.
+    let bootstrap_targets = BootstrapTargets::from_config(c.bootstrap, processor.did())?;
+    let bootstrap = BootstrapSupervisor::over_processor(bootstrap_targets, processor.clone());
     // The Backend decodes inbound custom messages as namespaced envelopes and routes
     // them to the protocol registry.
-    let backend = Arc::new(Backend::new(provider));
-    processor.swarm.set_callback(backend)?;
+    let backend = Backend::new(provider);
+    let backend = match bootstrap.as_ref() {
+        Some(supervisor) => backend.observed_by(supervisor.observer()),
+        None => backend,
+    };
+    processor.swarm.set_callback(Arc::new(backend))?;
 
     let stop = StopSource::new();
     let gateway_configured = gateway_runner.is_some();
@@ -999,6 +1024,14 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
             .await
             .context("external API stopped")
     });
+    if let Some(supervisor) = bootstrap {
+        let bootstrap_stop = stop.token();
+        tasks.spawn(async move {
+            // Returns only on stop, which the select below requests before aborting the set.
+            supervisor.run(bootstrap_stop).await;
+            Ok(())
+        });
+    }
     if let Some(onion_http_proxy_addr) = onion_http_proxy_addr {
         let onion_http_proxy_addr = onion_http_proxy_addr.parse::<SocketAddr>()?;
         let proxy_options = OnionHttpProxyOptions {

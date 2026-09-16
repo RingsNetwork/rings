@@ -482,7 +482,7 @@ async fn test_pending_promotion_is_atomic_under_lifecycle_lock() -> Result<()> {
             .map_err(|_| Error::InvalidMessage("reservation thread panicked".to_string()))?,
         Err(Error::AlreadyConnected)
     ));
-    assert!(transport.is_admitted_connection_attempt(attempt));
+    assert!(transport.is_active_connection_attempt(attempt));
     Ok(())
 }
 
@@ -500,7 +500,7 @@ async fn test_admitting_peer_remains_unroutable_until_commit() -> Result<()> {
             assert!(transport
                 .is_admitting_connection_attempt(attempt)
                 .expect("lifecycle registry must remain readable"));
-            assert!(!transport.is_admitted_connection_attempt(attempt));
+            assert!(!transport.is_active_connection_attempt(attempt));
             assert!(!transport
                 .dht
                 .successors()
@@ -514,7 +514,7 @@ async fn test_admitting_peer_remains_unroutable_until_commit() -> Result<()> {
     assert!(transport.get_connection(peer).is_none());
     assert!(!transport.dht.successors().contains(&peer)?);
     assert_eq!(transport.pending_connection_count()?, 1);
-    assert!(transport.cancel_pending_connection(attempt).await?);
+    assert!(transport.cancel_unadmitted_connection(attempt).await?);
     assert_eq!(transport.pending_connection_count()?, 0);
     Ok(())
 }
@@ -527,7 +527,9 @@ async fn test_pending_offer_is_not_routable_or_visible_to_dht() -> Result<()> {
     let peer = SecretKey::random().address().into();
     let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback));
 
-    let _offer = transport.prepare_connection_offer(peer, callback).await?;
+    let _offer = transport
+        .prepare_connection_offer_with_attempt(peer, callback)
+        .await?;
 
     assert!(transport.get_connection(peer).is_none());
     assert_eq!(transport.pending_connection_count()?, 1);
@@ -576,13 +578,13 @@ async fn test_incoming_offer_replaces_an_unroutable_admitted_generation() -> Res
         .pending_attempt(peer_did)?
         .ok_or(Error::SwarmMissTransport(peer_did))?;
     assert_ne!(replacement, old);
-    assert!(!local.is_admitted_connection_attempt(old));
+    assert!(!local.is_active_connection_attempt(old));
     assert!(
         !local.dht.successors().contains(&peer_did)?,
         "the retired generation must leave topology before replacement admission"
     );
 
-    assert!(local.cancel_pending_connection(replacement).await?);
+    assert!(local.cancel_unadmitted_connection(replacement).await?);
     peer.disconnect(local.dht.did).await?;
     Ok(())
 }
@@ -628,7 +630,7 @@ async fn test_incoming_offer_replaces_an_orphaned_physical_connection() -> Resul
         RawConnectionOwner::Pending(replacement)
     );
 
-    assert!(local.cancel_pending_connection(replacement).await?);
+    assert!(local.cancel_unadmitted_connection(replacement).await?);
     peer.disconnect(local.dht.did).await?;
     Ok(())
 }
@@ -671,7 +673,7 @@ async fn test_physical_connection_creation_serializes_replaced_generations() -> 
 
     assert!(transport.is_pending_connection_attempt(replacement)?);
     assert!(transport.get_raw_connection(peer).is_some());
-    assert!(transport.cancel_pending_connection(replacement).await?);
+    assert!(transport.cancel_unadmitted_connection(replacement).await?);
     Ok(())
 }
 
@@ -724,7 +726,7 @@ async fn test_final_send_admission_serializes_generation_route_and_readiness() -
     let retirement_transport = Arc::clone(&transport);
     let retirement_thread = std::thread::spawn(move || {
         let _ = retirement_started_tx.send(());
-        let result = retirement_transport.retire_active_connection_with(attempt, |_| Ok(()));
+        let result = retirement_transport.retire_active_connection_for_test(attempt, |_| Ok(()));
         let _ = retirement_done_tx.send(());
         result
     });
@@ -769,7 +771,7 @@ async fn test_final_send_admission_serializes_generation_route_and_readiness() -
         .join()
         .map_err(|_| Error::InvalidMessage("topology thread panicked".to_string()))??;
 
-    assert!(!transport.is_admitted_connection(peer));
+    assert!(!transport.has_active_connection(peer));
     assert!(!transport.dht.successors().contains(&peer)?);
     Ok(())
 }
@@ -789,7 +791,7 @@ async fn test_stale_send_after_retirement_does_not_recreate_outbound_scheduler()
     let outcome = transport
         .send_payload_detached_observing_scheduler_submit_for_test(payload, move || {
             assert!(matches!(
-                retire_transport.retire_active_connection_with(attempt, |_| Ok(())),
+                retire_transport.retire_active_connection_for_test(attempt, |_| Ok(())),
                 Ok(Some(()))
             ));
         })
@@ -937,7 +939,7 @@ async fn test_routable_join_serializes_with_generation_retirement() -> Result<()
     lifecycle_gate.release()?;
     assert!(join_thread.finish("routable join")??.is_some());
     assert_eq!(retirement.finish()?, Some(()));
-    assert!(!transport.is_admitted_connection(peer));
+    assert!(!transport.has_active_connection(peer));
     assert!(!transport.dht.successors().contains(&peer)?);
     Ok(())
 }
@@ -980,7 +982,7 @@ async fn test_topology_report_serializes_with_generation_retirement() -> Result<
     lifecycle_gate.release()?;
     assert!(stabilization_thread.finish("topology report")??.is_some());
     assert_eq!(retirement.finish()?, Some(()));
-    assert!(!transport.is_admitted_connection(peer));
+    assert!(!transport.has_active_connection(peer));
     assert!(!transport.dht.successors().contains(&peer)?);
     assert_ne!(*transport.dht.lock_predecessor()?, Some(peer));
     Ok(())
@@ -1006,7 +1008,7 @@ async fn test_predecessor_notification_serializes_with_generation_retirement() -
         Some(peer)
     );
     assert_eq!(retirement.finish()?, Some(()));
-    assert!(!transport.is_admitted_connection(peer));
+    assert!(!transport.has_active_connection(peer));
     assert_ne!(*transport.dht.lock_predecessor()?, Some(peer));
     Ok(())
 }

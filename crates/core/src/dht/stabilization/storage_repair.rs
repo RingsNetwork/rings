@@ -274,7 +274,7 @@ impl Stabilizer {
         let Some(next_hop) = next_hop else {
             return Ok(Some(StorageRepairDeferReason::MissingNextHop));
         };
-        if !self.transport.is_admitted_connection(next_hop) {
+        if !self.transport.has_active_connection(next_hop) {
             return Ok(Some(StorageRepairDeferReason::NextHopNotAdmitted));
         }
         let Some(next_hop_connection) = self.transport.admitted_connection(next_hop)? else {

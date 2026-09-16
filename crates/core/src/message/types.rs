@@ -150,6 +150,12 @@ impl FindSuccessorSend {
 }
 
 impl FindSuccessorReport {
+    /// Whether this report answers a lookup that requested no core action, i.e. one issued by
+    /// the application rather than by finger maintenance or connection setup.
+    pub fn is_application_lookup(&self) -> bool {
+        matches!(self.handler, FindSuccessorReportHandler::None)
+    }
+
     /// Returns whether the reported successor is remote from `local`.
     pub(crate) fn reports_remote_successor(&self, local: Did) -> bool {
         self.did != local

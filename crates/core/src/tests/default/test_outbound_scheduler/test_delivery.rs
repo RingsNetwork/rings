@@ -134,7 +134,7 @@ async fn test_delivery_timeout_marks_generation_terminal_before_releasing_fifo_l
         node1.swarm.transport.get_connection(peer).is_none()
     })
     .await?;
-    assert!(node1.swarm.transport.is_admitted_connection(peer));
+    assert!(node1.swarm.transport.has_active_connection(peer));
 
     dummy_controlled::release_delivery_future_gate();
     let second_result = timeout(Duration::from_secs(2), second_send)
@@ -158,6 +158,6 @@ async fn test_delivery_timeout_marks_generation_terminal_before_releasing_fifo_l
     )
     .await
     .map_err(|_| invalid_test_state("terminal generation cleanup stayed pending"))??;
-    assert!(!node1.swarm.transport.is_admitted_connection(peer));
+    assert!(!node1.swarm.transport.has_active_connection(peer));
     Ok(())
 }
