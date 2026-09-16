@@ -28,9 +28,12 @@ use crate::message::SyncEntriesWithSuccessor;
 use crate::session::SessionSk;
 use crate::storage::KvStorageInterface;
 use crate::storage::MemStorage;
+use crate::swarm::callback::DefaultCallback;
 use crate::swarm::callback::InnerSwarmCallback;
 use crate::swarm::callback::SwarmCallback;
+use crate::swarm::callback::SwarmCallbackSlot;
 use crate::swarm::transport::SwarmTransport;
+use crate::swarm::transport::SwarmTransportParts;
 use crate::swarm::transport::SwarmTransportSettings;
 use crate::swarm::transport::SwarmWebrtcConfig;
 use crate::tests::live_entry;
@@ -124,21 +127,22 @@ async fn test_inbound_storage_batch_yields_to_control_between_persistence_steps(
         }),
         DEFAULT_FINGER_TABLE_SIZE,
     ));
-    let transport = Arc::new(SwarmTransport::new(
-        0,
-        SwarmWebrtcConfig::new("".to_string(), None, None),
-        local_session,
+    let transport = Arc::new(SwarmTransport::new(SwarmTransportParts {
+        network_id: 0,
+        webrtc: SwarmWebrtcConfig::new("".to_string(), None, None),
+        session_sk: local_session,
         dht,
-        Some(Arc::new(RecordingMeasure::default())),
-        Arc::new(crate::message::TransactionReplay::new(Box::new(
+        measure: Some(Arc::new(RecordingMeasure::default())),
+        transaction_replay: Arc::new(crate::message::TransactionReplay::new(Box::new(
             crate::storage::MemStorage::new(),
         ))),
-        SwarmTransportSettings::new(
+        settings: SwarmTransportSettings::new(
             1,
             VirtualNodeConfig::disabled(),
             ReassemblyLimits::production(),
         ),
-    ));
+        callback: SwarmCallbackSlot::new(Arc::new(DefaultCallback)),
+    }));
     let callback = Arc::new(InnerSwarmCallback::new(
         Arc::clone(&transport),
         Arc::new(InterleaveCallback {
