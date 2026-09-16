@@ -714,7 +714,7 @@ impl SwarmTransport {
 
     /// Unconditional retirement for tests that assert the retirement itself; the announcement
     /// witness is projected away.
-    #[cfg(test)]
+    #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
     pub(super) fn retire_active_connection_for_test<T>(
         &self,
         attempt: PendingConnectionAttempt,
