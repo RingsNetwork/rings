@@ -23,9 +23,9 @@ use rings_node::native::api_auth::load_api_token;
 use rings_node::native::api_auth::load_api_token_file;
 use rings_node::native::api_auth::load_or_create_api_token;
 use rings_node::native::api_auth::ApiSecurity;
-use rings_node::native::bootstrap::BootstrapObserver;
 use rings_node::native::bootstrap::BootstrapSupervisor;
 use rings_node::native::bootstrap::BootstrapTargets;
+use rings_node::native::bootstrap::ReachabilityEvidence;
 use rings_node::native::cli::Client;
 use rings_node::native::config;
 use rings_node::native::endpoint::run_external_api;
@@ -969,11 +969,11 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
     // Managed bootstrap targets fail fast on invalid configuration; their reachability
     // supervisor is spawned with the other run-owned tasks below.
     let bootstrap_targets = BootstrapTargets::from_config(&c.bootstrap, processor.did())?;
-    let bootstrap_observer = Arc::new(BootstrapObserver::new(&bootstrap_targets));
+    let reachability_evidence = Arc::new(ReachabilityEvidence::new(&bootstrap_targets));
     // The Backend decodes inbound custom messages as namespaced envelopes and routes
-    // them to the protocol registry; lookup reports and connection state changes go to
-    // the bootstrap observer.
-    let backend = Arc::new(Backend::new(provider).observed_by(bootstrap_observer.clone()));
+    // them to the protocol registry; lookup reports and transport losses are written to
+    // the reachability evidence the supervisor reads.
+    let backend = Arc::new(Backend::new(provider).observed_by(reachability_evidence.clone()));
     processor.swarm.set_callback(backend)?;
 
     let stop = StopSource::new();
@@ -1025,7 +1025,7 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
     if let Some(supervisor) = BootstrapSupervisor::over_processor(
         bootstrap_targets,
         processor.clone(),
-        bootstrap_observer.as_ref(),
+        reachability_evidence.as_ref(),
     ) {
         let bootstrap_stop = stop.token();
         tasks.spawn(async move {

@@ -13,7 +13,6 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use rings_core::dht::Did;
-use rings_transport::core::transport::WebrtcConnectionState;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
@@ -242,8 +241,8 @@ impl Running {
     /// Spawn a supervisor over `peers` with `port` already scripted.
     fn spawn(port: Arc<ScriptedPort>, peers: &[SeedPeer]) -> Self {
         let targets = targets(peers);
-        let observer = super::BootstrapObserver::new(&targets);
-        let drops = observer.drops();
+        let evidence = super::ReachabilityEvidence::new(&targets);
+        let drops = evidence.drops();
         let stop = StopSource::new();
         let supervisor =
             BootstrapSupervisor::new(targets, port.clone(), drops.clone(), JITTER_SEED);
@@ -256,12 +255,12 @@ impl Running {
         }
     }
 
-    /// Report a terminal transport state for `target` and make it unreachable.
-    fn drop_transport(&self, target: Did, state: WebrtcConnectionState) {
+    /// Report the loss of the transport to `target` and make it unreachable.
+    fn drop_transport(&self, target: Did) {
         self.port.set_reachable(target, false);
         self.drops
-            .observe(target, state)
-            .expect("drops must accept a terminal state");
+            .observe(target)
+            .expect("drops must accept a loss");
     }
 
     /// Request stop and wait for the run to return.
@@ -338,7 +337,7 @@ async fn a_transport_drop_reassesses_at_once_and_a_second_drop_restarts_the_burs
 
     tokio::time::sleep(Duration::from_millis(10_000)).await;
     assert!(port.dial_times(target).is_empty());
-    running.drop_transport(target, WebrtcConnectionState::Closed);
+    running.drop_transport(target);
     port.script_dials(target, [
         DialScript::Fail,
         DialScript::Fail,
@@ -348,7 +347,7 @@ async fn a_transport_drop_reassesses_at_once_and_a_second_drop_restarts_the_burs
     assert_eq!(port.dial_times(target), vec![10_000, 12_000, 14_000]);
 
     tokio::time::sleep(Duration::from_millis(80_000)).await;
-    running.drop_transport(target, WebrtcConnectionState::Failed);
+    running.drop_transport(target);
     port.script_dials(target, [DialScript::Fail, DialScript::Succeed]);
     tokio::time::sleep(Duration::from_millis(10_000)).await;
     assert_eq!(
@@ -359,19 +358,18 @@ async fn a_transport_drop_reassesses_at_once_and_a_second_drop_restarts_the_burs
     running.shutdown().await;
 }
 
-/// `Disconnected` and drops of peers outside the target set cause no reassessment.
+/// A loss of a peer outside the target set causes no reassessment.
 #[tokio::test(start_paused = true)]
-async fn a_transient_disconnect_and_an_unmanaged_drop_are_ignored() {
+async fn an_unmanaged_loss_is_ignored() {
     let target = Did::from(1);
     let port = ScriptedPort::new();
     port.set_reachable(target, true);
     let running = Running::spawn(port.clone(), &[peer(1)]);
 
     tokio::time::sleep(Duration::from_millis(1_000)).await;
-    running.drop_transport(target, WebrtcConnectionState::Disconnected);
     running
         .drops
-        .observe(Did::from(2), WebrtcConnectionState::Closed)
+        .observe(Did::from(2))
         .expect("drops must accept any peer");
     tokio::time::sleep(Duration::from_millis(100_000)).await;
     assert_eq!(
@@ -431,7 +429,7 @@ async fn a_drop_during_a_turn_is_reassessed_as_soon_as_the_turn_settles() {
 
     // The drop lands while the slow dial is in flight: it must neither overlap the busy turn
     // nor wait for the slow recheck once that turn settles as reachable.
-    running.drop_transport(target, WebrtcConnectionState::Closed);
+    running.drop_transport(target);
     tokio::time::sleep(Duration::from_millis(10_000)).await;
     assert_eq!(port.dial_times(target), vec![0]);
     assert_eq!(

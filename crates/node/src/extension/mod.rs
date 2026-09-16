@@ -14,7 +14,6 @@ use rings_core::message::MessagePayload;
 use rings_core::message::MessageVerificationExt;
 use rings_core::swarm::callback::SwarmCallback;
 use rings_core::swarm::callback::SwarmEvent;
-use rings_transport::core::transport::WebrtcConnectionState;
 
 use crate::extension::ext::Envelope;
 use crate::extension::ext::Extensions;
@@ -25,13 +24,16 @@ use crate::provider::Provider;
 ///
 /// The backend decodes each inbound payload exactly once and hands the observer the decoded
 /// fact synchronously, before any await, so a later callback for the same peer observes it.
+/// Facts are stated in transport-neutral terms: the observer never sees a physical connection
+/// state, only what the swarm concluded from it.
 pub trait BackendObserver: Send + Sync {
     /// A Chord successor lookup report addressed to this node: `successor` is the reported
     /// successor of the key queried under transaction `tx_id`.
     fn lookup_report(&self, tx_id: uuid::Uuid, successor: Did);
 
-    /// The direct transport to `peer` reached `state`.
-    fn connection_state(&self, peer: Did, state: WebrtcConnectionState);
+    /// The direct transport to `peer` ended: its physical state is terminal, after which the
+    /// swarm leaves the peer's DHT entry. Transient states that may recover are not reported.
+    fn transport_lost(&self, peer: Did);
 }
 
 /// Backend handles inbound custom messages from the Swarm, routing each decoded
@@ -41,8 +43,8 @@ pub trait BackendObserver: Send + Sync {
 /// namespace-scoped [`Scope`](ext::Scope); the underlying router capability is internal.
 /// Dispatch owns a detached task so a swarm callback deadline stops waiting without
 /// cancelling an already committed protocol transition or its ordered effect trace.
-/// Core lookup reports and connection state changes are not dispatched; they are handed to
-/// the optional [`BackendObserver`].
+/// Core lookup reports and transport losses are not dispatched; they are handed to the
+/// optional [`BackendObserver`].
 pub struct Backend {
     extensions: Extensions,
     observer: Option<Arc<dyn BackendObserver>>,
@@ -57,7 +59,7 @@ impl Backend {
         }
     }
 
-    /// Attach the observer that receives decoded lookup reports and connection state changes.
+    /// Attach the observer that receives decoded lookup reports and transport losses.
     pub fn observed_by(mut self, observer: Arc<dyn BackendObserver>) -> Self {
         self.observer = Some(observer);
         self
@@ -99,7 +101,9 @@ impl SwarmCallback for Backend {
             return Ok(());
         };
         if let SwarmEvent::ConnectionStateChange { peer, state } = event {
-            observer.connection_state(*peer, *state);
+            if state.is_terminal() {
+                observer.transport_lost(*peer);
+            }
         }
         Ok(())
     }

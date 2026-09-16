@@ -16,9 +16,9 @@
 //!   `ProcessorPort` is the production port over a live processor.
 //! - [`BootstrapSupervisor`] — the shell: wakes on deadlines, transport drops and finished
 //!   turns; runs at most one turn per target; exits on the run's stop token.
-//! - [`BootstrapObserver`] — the swarm-side feed: lookup reports for the probe and transport
-//!   drops for prompt reassessment, both delivered by the [`Backend`] through
-//!   [`BackendObserver`].
+//! - [`ReachabilityEvidence`] — what the swarm reports about the targets: lookup reports for
+//!   the probe and transport losses for prompt reassessment, both written by the [`Backend`]
+//!   through [`BackendObserver`] and read by the port and the supervisor.
 //!
 //! ```text
 //!                    ┌────────────────────────── run loop ──────────────────────────┐
@@ -47,7 +47,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rings_core::dht::Did;
-use rings_transport::core::transport::WebrtcConnectionState;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::sync::Notify;
@@ -196,8 +195,8 @@ pub trait BootstrapPort: Send + Sync + 'static {
     async fn dial(&self, target: &ManagedTarget) -> Result<()>;
 }
 
-/// Terminal transport losses of managed targets, recorded by the swarm callback and drained by
-/// the supervisor. Bounded by the target set.
+/// Transport losses of managed targets, recorded by the swarm callback and drained by the
+/// supervisor. Bounded by the target set.
 pub(crate) struct TransportDrops {
     targets: BTreeSet<Did>,
     dropped: Mutex<BTreeSet<Did>>,
@@ -214,11 +213,10 @@ impl TransportDrops {
         }
     }
 
-    /// Record `state` for `peer` when it is terminal and `peer` is a managed target, waking the
-    /// supervisor. Other peers and non-terminal states (`Disconnected` is transient ICE that
-    /// often recovers, and the core keeps the peer's DHT entry through it) are ignored.
-    pub(crate) fn observe(&self, peer: Did, state: WebrtcConnectionState) -> Result<()> {
-        if !state.is_terminal() || !self.targets.contains(&peer) {
+    /// Record the loss of the transport to `peer` when it is a managed target, waking the
+    /// supervisor; other peers are ignored.
+    pub(crate) fn observe(&self, peer: Did) -> Result<()> {
+        if !self.targets.contains(&peer) {
             return Ok(());
         }
         lock(&self.dropped)?.insert(peer);
@@ -227,19 +225,23 @@ impl TransportDrops {
     }
 
     /// Take every drop recorded since the previous call.
-    fn take(&self) -> Result<BTreeSet<Did>> {
+    pub(crate) fn take(&self) -> Result<BTreeSet<Did>> {
         Ok(std::mem::take(&mut *lock(&self.dropped)?))
     }
 }
 
-/// Swarm-side feed for the supervisor: lookup reports and transport drops.
-pub struct BootstrapObserver {
+/// What the swarm reports about the managed targets: the successor lookup reports the probe
+/// waits for, and the losses of direct transports. Written by the [`Backend`] as its
+/// [`BackendObserver`]; read by `ProcessorPort` (reports) and the supervisor (drops).
+///
+/// [`Backend`]: crate::extension::Backend
+pub struct ReachabilityEvidence {
     reports: Arc<LookupReportLedger>,
     drops: Arc<TransportDrops>,
 }
 
-impl BootstrapObserver {
-    /// An observer that records drops of `targets` and every lookup report.
+impl ReachabilityEvidence {
+    /// Evidence that records losses of `targets` and every lookup report.
     pub fn new(targets: &BootstrapTargets) -> Self {
         Self {
             reports: Arc::new(LookupReportLedger::default()),
@@ -258,7 +260,7 @@ impl BootstrapObserver {
     }
 }
 
-impl BackendObserver for BootstrapObserver {
+impl BackendObserver for ReachabilityEvidence {
     /// Hand the report to the ledger; a poisoned ledger is logged, never propagated.
     fn lookup_report(&self, tx_id: uuid::Uuid, successor: Did) {
         if let Err(error) = self.reports.observe(tx_id, successor) {
@@ -266,9 +268,9 @@ impl BackendObserver for BootstrapObserver {
         }
     }
 
-    /// Hand the transition to the drop record; a poisoned record is logged, never propagated.
-    fn connection_state(&self, peer: Did, state: WebrtcConnectionState) {
-        if let Err(error) = self.drops.observe(peer, state) {
+    /// Hand the loss to the drop record; a poisoned record is logged, never propagated.
+    fn transport_lost(&self, peer: Did) {
+        if let Err(error) = self.drops.observe(peer) {
             tracing::error!(%peer, %error, "bootstrap drop record unavailable");
         }
     }
@@ -340,13 +342,13 @@ impl BootstrapSupervisor<ProcessorPort> {
     pub fn over_processor(
         targets: BootstrapTargets,
         processor: Arc<Processor>,
-        observer: &BootstrapObserver,
+        evidence: &ReachabilityEvidence,
     ) -> Option<Self> {
         if targets.is_empty() {
             return None;
         }
-        let port = Arc::new(ProcessorPort::new(processor, observer.reports()));
-        Some(Self::new(targets, port, observer.drops(), rand::random()))
+        let port = Arc::new(ProcessorPort::new(processor, evidence.reports()));
+        Some(Self::new(targets, port, evidence.drops(), rand::random()))
     }
 }
 
