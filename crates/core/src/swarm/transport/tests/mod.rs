@@ -209,6 +209,48 @@ impl BehaviourJudgement for RecordingMeasure {
 
 struct NoopSwarmCallback;
 
+/// Records every swarm event the application was told about, in start order.
+#[derive(Default)]
+struct EventLog {
+    events: Mutex<Vec<SwarmEvent>>,
+}
+
+impl EventLog {
+    /// Every event so far, in start order.
+    fn events(&self) -> Vec<SwarmEvent> {
+        self.events
+            .lock()
+            .expect("event log is never poisoned")
+            .clone()
+    }
+
+    /// Peers reported retired so far, in start order.
+    fn retired(&self) -> Vec<Did> {
+        self.events()
+            .into_iter()
+            .filter_map(|event| match event {
+                SwarmEvent::PeerRetired { peer } => Some(peer),
+                SwarmEvent::ConnectionStateChange { .. } => None,
+            })
+            .collect()
+    }
+}
+
+#[async_trait]
+impl SwarmCallback for EventLog {
+    /// Record the event.
+    async fn on_event(
+        &self,
+        event: &SwarmEvent,
+    ) -> std::result::Result<(), crate::error::CallbackError> {
+        self.events
+            .lock()
+            .expect("event log is never poisoned")
+            .push(event.clone());
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl SwarmCallback for NoopSwarmCallback {}
 
@@ -579,7 +621,7 @@ async fn test_data_channel_open_admits_successor_before_ice_connected() -> Resul
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
 
-    assert!(transport.is_admitted_connection(peer));
+    assert!(transport.has_active_connection(peer));
     assert!(transport.get_connection(peer).is_some());
     assert!(
         transport.dht.successors().contains(&peer)?,
@@ -676,7 +718,7 @@ async fn test_pending_callback_messages_are_held_until_admission() -> Result<()>
     let counters = measure.snapshot_counters()?;
     assert!(counters.contains(&(pending.peer, MeasureCounter::Connect)));
     assert!(counters.contains(&(pending.peer, MeasureCounter::Received)));
-    assert!(transport.is_admitted_connection(pending.peer));
+    assert!(transport.has_active_connection(pending.peer));
 
     let late = pending.custom_message_wire(&transport, b"message-after-admission")?;
     pending.receive(&late).await?;

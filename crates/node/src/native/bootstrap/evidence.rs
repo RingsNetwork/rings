@@ -51,8 +51,9 @@ pub(super) const EARLY_REPORT_CAPACITY: usize = 32;
 ///   drop(Waiter(k)) ─▶ waiter forgotten; idempotent, so a resolved waiter may drop too
 /// ```
 ///
-/// A second `wait_for` on the same key replaces the first waiter, which is then closed; the
-/// callers keep one waiter per key. The waiter is a guard, so a turn dropped mid-wait (at
+/// A second `wait_for` on the same key replaces the first waiter, which is then closed. Each
+/// registration carries a ticket and a waiter forgets only its own registration, so dropping a
+/// replaced or resolved waiter never touches its successor; a turn dropped mid-wait (at
 /// shutdown) leaves no registration behind.
 pub(crate) struct Rendezvous<K, V> {
     state: Mutex<RendezvousState<K, V>>,
@@ -61,8 +62,11 @@ pub(crate) struct Rendezvous<K, V> {
 
 /// Rendezvous state: one waiter per key and a bounded FIFO of early values.
 struct RendezvousState<K, V> {
-    awaiting: HashMap<K, oneshot::Sender<V>>,
+    /// One waiter per key, with the ticket that identifies its registration.
+    awaiting: HashMap<K, (u64, oneshot::Sender<V>)>,
     early: VecDeque<(K, V)>,
+    /// Ticket of the next registration.
+    next_ticket: u64,
 }
 
 impl<K: Copy + Eq + Hash, V> Rendezvous<K, V> {
@@ -72,6 +76,7 @@ impl<K: Copy + Eq + Hash, V> Rendezvous<K, V> {
             state: Mutex::new(RendezvousState {
                 awaiting: HashMap::new(),
                 early: VecDeque::new(),
+                next_ticket: 0,
             }),
             early_capacity,
         }
@@ -79,11 +84,11 @@ impl<K: Copy + Eq + Hash, V> Rendezvous<K, V> {
 
     /// Deliver `value` for `key`: to its waiter when one is registered, otherwise into the
     /// early buffer.
-    pub(crate) fn observe(&self, key: K, value: V) -> Result<()> {
+    pub(super) fn observe(&self, key: K, value: V) -> Result<()> {
         let mut state = lock(&self.state)?;
         match state.awaiting.remove(&key) {
             // A waiter that already gave up and dropped its receiver is simply satisfied late.
-            Some(waiter) => {
+            Some((_, waiter)) => {
                 let _ = waiter.send(value);
             }
             // Law: the oldest early values are dropped so that at most `early_capacity` are
@@ -108,26 +113,36 @@ impl<K: Copy + Eq + Hash, V> Rendezvous<K, V> {
             .iter()
             .position(|(early_key, _)| *early_key == key)
             .and_then(|position| state.early.remove(position));
+        let ticket = state.next_ticket;
+        state.next_ticket = state.next_ticket.wrapping_add(1);
         match early {
             Some((_, value)) => {
                 let _ = sender.send(value);
             }
             None => {
-                state.awaiting.insert(key, sender);
+                state.awaiting.insert(key, (ticket, sender));
             }
         }
         Ok(Waiter {
             rendezvous: self,
             key,
+            ticket,
             receiver,
         })
     }
 
-    /// Drop the waiter for `key`; a no-op when the value already resolved it. A poisoned record
-    /// is left alone: nothing can be registered in it either.
-    fn forget(&self, key: K) {
+    /// Drop the registration `ticket` under `key`; a no-op when the value already resolved it
+    /// or a later waiter replaced it. A poisoned record is left alone: nothing can be registered
+    /// in it either.
+    fn forget(&self, key: K, ticket: u64) {
         if let Ok(mut state) = lock(&self.state) {
-            state.awaiting.remove(&key);
+            if state
+                .awaiting
+                .get(&key)
+                .is_some_and(|(registered, _)| *registered == ticket)
+            {
+                state.awaiting.remove(&key);
+            }
         }
     }
 
@@ -144,6 +159,7 @@ impl<K: Copy + Eq + Hash, V> Rendezvous<K, V> {
 pub(crate) struct Waiter<'a, K: Copy + Eq + Hash, V> {
     rendezvous: &'a Rendezvous<K, V>,
     key: K,
+    ticket: u64,
     receiver: oneshot::Receiver<V>,
 }
 
@@ -166,18 +182,18 @@ impl<K: Copy + Eq + Hash + Unpin, V> Future for Waiter<'_, K, V> {
 }
 
 impl<K: Copy + Eq + Hash, V> Drop for Waiter<'_, K, V> {
-    /// Forget the registration, whether or not it resolved.
+    /// Forget this registration, whether or not it resolved; a successor's is left alone.
     fn drop(&mut self) {
-        self.rendezvous.forget(self.key);
+        self.rendezvous.forget(self.key, self.ticket);
     }
 }
 
 /// Successor lookup reports keyed by the transaction id of their request.
-pub(crate) type LookupReportLedger = Rendezvous<uuid::Uuid, Did>;
+pub(super) type LookupReportLedger = Rendezvous<uuid::Uuid, Did>;
 
 /// Admissions keyed by peer; a dial checks the transport directly after registering, so no
 /// early buffer is needed.
-pub(crate) type Admissions = Rendezvous<Did, ()>;
+pub(super) type Admissions = Rendezvous<Did, ()>;
 
 /// Peers that left the local DHT since the supervisor last drained, with a wake for the
 /// supervisor. `notify_one` stores a permit when nobody waits, so a loss recorded while the
@@ -190,7 +206,7 @@ pub(crate) struct PeerLosses {
 
 impl PeerLosses {
     /// Record the retirement of `peer` as a loss and wake the supervisor.
-    pub(crate) fn observe(&self, peer: Did) -> Result<()> {
+    pub(super) fn observe(&self, peer: Did) -> Result<()> {
         lock(&self.lost)?.insert(peer);
         self.wake.notify_one();
         Ok(())
@@ -202,7 +218,7 @@ impl PeerLosses {
     }
 
     /// Resolves once a loss has been recorded since the previous wake.
-    pub(crate) fn woken(&self) -> Notified<'_> {
+    pub(super) fn woken(&self) -> Notified<'_> {
         self.wake.notified()
     }
 }

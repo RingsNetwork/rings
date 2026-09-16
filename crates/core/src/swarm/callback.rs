@@ -174,7 +174,7 @@ pub enum SwarmEvent {
     /// peer left the local DHT. Emitted from the one retirement transition, whatever reached it
     /// — remote terminal state, data-channel close, liveness or stabilization removal, capacity
     /// eviction, explicit disconnect — so the application observes the logical fact regardless
-    /// of the physical event or local decision behind it. Law: for every generation,
+    /// of the physical event or local decision behind it. Law: for every retired generation,
     /// `Connected` started ⟺ `PeerRetired` started, with `start(Connected) <
     /// start(PeerRetired)` under the peer's ordered delivery (see
     /// [`SwarmCallback::on_event`]); the law is over starts, since a callback releases its
@@ -201,8 +201,9 @@ pub enum PeerTransition {
 impl SwarmEvent {
     /// The logical transition this event carries, if any: `Connected` is the physical state
     /// whose delivery is the fact "peer admitted", so its interpretation lives here, beside
-    /// the retirement it is paired with. Law: for every generation the stream carries exactly
-    /// one `Admitted` and, iff it did, one later `Retired` for that peer.
+    /// the retirement it is paired with. Law: for every retired generation, as seen by a
+    /// callback held across it, the stream carries at most one `Admitted` and, iff it did,
+    /// exactly one later `Retired` for that peer.
     pub fn peer_transition(&self) -> Option<(Did, PeerTransition)> {
         match *self {
             Self::ConnectionStateChange {

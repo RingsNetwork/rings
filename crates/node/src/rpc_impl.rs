@@ -24,6 +24,7 @@ use rings_rpc::protos::rings_node::*;
 use rings_rpc::protos::rings_node_handler::HandleRpc;
 
 use crate::error::Error as ServerError;
+use crate::processor::HandshakeFailure;
 use crate::processor::HandshakePeer;
 use crate::processor::Processor;
 use crate::remote_endpoint::RemoteRpcEndpoint;
@@ -42,11 +43,12 @@ impl HandleRpc<ConnectPeerViaHttpRequest, ConnectPeerViaHttpResponse> for Proces
     ) -> Result<ConnectPeerViaHttpResponse> {
         let ConnectPeerViaHttpRequest { url, api_token } = req;
         let endpoint = RemoteRpcEndpoint::parse(url.as_str())?;
-        let handshake = self
+        let attempt = self
             .connect_peer_via_http(&endpoint, api_token.as_deref(), HandshakePeer::Any)
-            .await?;
+            .await
+            .map_err(ServerError::from)?;
         Ok(ConnectPeerViaHttpResponse {
-            did: handshake.peer.to_string(),
+            did: attempt.peer().to_string(),
         })
     }
 }
@@ -71,36 +73,23 @@ impl HandleRpc<ConnectWithSeedRequest, ConnectWithSeedResponse> for Processor {
         // ambiguous document dials nothing, and a peer listed twice is dialed once.
         let peers = validate_seed_peers(seed.peers).map_err(ServerError::from)?;
 
-        let local = self.swarm.did();
         let mut tasks = Vec::with_capacity(peers.len());
         for peer in peers {
-            let did = peer.did();
-            let settled = did == local
-                || self
-                    .swarm
-                    .has_unadmitted_connection(did)
-                    .map_err(ServerError::from)?
-                || self
-                    .swarm
-                    .is_peer_admitted(did)
-                    .map_err(ServerError::from)?;
-            if settled {
+            if !self.owes_seed_dial(peer.did())? {
                 continue;
             }
             tasks.push(async move {
-                // A handshake found in flight when the dial reaches the core is left to run,
-                // like one found before the dial.
                 match self
                     .connect_peer_via_http(
                         peer.endpoint(),
                         peer.api_token(),
-                        HandshakePeer::Pinned(did),
+                        HandshakePeer::Pinned(peer.did()),
                     )
                     .await
                 {
-                    Ok(_) => Ok(()),
-                    Err(error) if error.is_handshake_in_flight() => Ok(()),
-                    Err(error) => Err(Error::from(error)),
+                    // A peer whose slot is owned by another attempt is being taken care of.
+                    Ok(_) | Err(HandshakeFailure::InFlight { .. }) => Ok(()),
+                    Err(HandshakeFailure::Failed(error)) => Err(Error::from(error)),
                 }
             });
         }

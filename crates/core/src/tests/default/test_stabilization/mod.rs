@@ -299,7 +299,7 @@ async fn test_get_and_check_connection_times_out_wedged_data_channel_wait() -> R
     .map_err(|_| Error::PromiseStateTimeout)?;
 
     assert!(conn.is_none());
-    assert!(!node1.swarm.transport.is_admitted_connection(node2.did()));
+    assert!(!node1.swarm.transport.has_active_connection(node2.did()));
     assert!(!node1.dht().successors().contains(&node2.did())?);
     Ok(())
 }
@@ -334,7 +334,7 @@ async fn test_get_and_check_connection_waits_for_disconnected_open_transport() -
     .map_err(|_| Error::PromiseStateTimeout)?;
 
     assert!(conn.is_none());
-    assert!(!node1.swarm.transport.is_admitted_connection(node2.did()));
+    assert!(!node1.swarm.transport.has_active_connection(node2.did()));
     assert!(!node1.dht().successors().contains(&node2.did())?);
     Ok(())
 }
@@ -493,7 +493,7 @@ async fn test_clean_unavailable_connections_observes_disconnected_peer_without_c
         .clean_unavailable_connections()
         .await?;
 
-    assert!(node1.swarm.transport.is_admitted_connection(node2.did()));
+    assert!(node1.swarm.transport.has_active_connection(node2.did()));
     assert!(node1.dht().successors().contains(&node2.did())?);
     assert_eq!(*node1.dht().lock_predecessor()?, Some(node2.did()));
     assert!(node1.dht().lock_finger()?.contains(Some(node2.did())));
@@ -514,7 +514,7 @@ async fn test_clean_unavailable_connections_observes_disconnected_peer_without_c
         .clean_unavailable_connections()
         .await?;
 
-    assert!(!node1.swarm.transport.is_admitted_connection(node2.did()));
+    assert!(!node1.swarm.transport.has_active_connection(node2.did()));
     assert!(node1.swarm.transport.get_connection(node2.did()).is_none());
     assert!(!node1.dht().successors().contains(&node2.did())?);
     assert_eq!(*node1.dht().lock_predecessor()?, None);
@@ -557,7 +557,7 @@ async fn test_clean_unavailable_connections_fails_over_to_live_successor_tail() 
     assert!(!node1
         .swarm
         .transport
-        .is_admitted_connection(disconnected_head));
+        .has_active_connection(disconnected_head));
     assert!(node1
         .swarm
         .transport
@@ -619,11 +619,11 @@ async fn test_clean_unavailable_connections_prunes_disconnected_non_head_slots()
         .clean_unavailable_connections()
         .await?;
 
-    assert!(node1.swarm.transport.is_admitted_connection(live_head));
+    assert!(node1.swarm.transport.has_active_connection(live_head));
     assert!(node1
         .swarm
         .transport
-        .is_admitted_connection(disconnected_tail));
+        .has_active_connection(disconnected_tail));
     assert!(node1.dht().successors().contains(&live_head)?);
     assert!(!node1.dht().successors().contains(&disconnected_tail)?);
     assert_eq!(*node1.dht().lock_predecessor()?, None);
@@ -688,7 +688,7 @@ async fn test_clean_unavailable_connections_does_not_fail_over_to_disconnected_f
         .clean_unavailable_connections()
         .await?;
 
-    assert!(node1.swarm.transport.is_admitted_connection(node2.did()));
+    assert!(node1.swarm.transport.has_active_connection(node2.did()));
     assert!(node1.dht().successors().contains(&node2.did())?);
     assert!(!node1.dht().successors().contains(&node3.did())?);
     assert_eq!(*node1.dht().lock_predecessor()?, Some(node2.did()));
@@ -742,7 +742,7 @@ async fn test_clean_unavailable_connections_prunes_disconnected_finger() -> Resu
         .clean_unavailable_connections()
         .await?;
 
-    assert!(node1.swarm.transport.is_admitted_connection(node2.did()));
+    assert!(node1.swarm.transport.has_active_connection(node2.did()));
     assert_eq!(
         node1
             .swarm
@@ -772,7 +772,7 @@ async fn test_clean_unavailable_connections_prunes_disconnected_finger() -> Resu
         .clean_unavailable_connections()
         .await?;
 
-    assert!(!node1.swarm.transport.is_admitted_connection(node2.did()));
+    assert!(!node1.swarm.transport.has_active_connection(node2.did()));
     assert!(node1.swarm.transport.get_connection(node2.did()).is_none());
 
     Ok(())
@@ -795,7 +795,7 @@ async fn test_clean_unavailable_connections_removes_stale_topology_peer() -> Res
     assert!(node.dht().successors().contains(&stale)?);
     assert_eq!(*node.dht().lock_predecessor()?, Some(stale));
     assert!(node.dht().lock_finger()?.contains(Some(stale)));
-    assert!(!node.swarm.transport.is_admitted_connection(stale));
+    assert!(!node.swarm.transport.has_active_connection(stale));
 
     node.swarm
         .stabilizer()

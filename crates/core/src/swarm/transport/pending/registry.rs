@@ -27,7 +27,7 @@ pub(in crate::swarm::transport) enum PeerConnectionLifecycle {
         /// Whether the admission was announced to the application. Set by `mark_announced`
         /// in the delivery turn that then starts `Connected`, and read by `retire_active_if`,
         /// the one production retirement, under the same lock; those two facts give, for
-        /// every generation, `start(Connected) ⟺ start(PeerRetired)`.
+        /// every retired generation, `start(Connected) ⟺ start(PeerRetired)`.
         announced: bool,
     },
 }
@@ -48,7 +48,7 @@ impl PeerConnectionLifecycle {
 /// [`SwarmEvent::PeerRetired`](crate::swarm::callback::SwarmEvent::PeerRetired) exactly when
 /// the admission was; `retire_announced_if` is the single production path from a retirement
 /// to its announcement.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub(in crate::swarm::transport) struct Retirement {
     announced_admission: bool,
 }

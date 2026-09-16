@@ -1,57 +1,11 @@
-//! The retirement law: for every connection generation, `Connected` started ⟺ `PeerRetired`
-//! started, and a topology prune that keeps the record delivers nothing.
+//! The retirement law: for every retired connection generation, `Connected` started ⟺
+//! `PeerRetired` started, and a topology prune that keeps the record delivers nothing.
 
 use std::sync::Arc;
-use std::sync::Mutex;
-
-use async_trait::async_trait;
 
 use super::pending::RetirementOutcome;
 use super::*;
 use crate::dht::Chord;
-use crate::swarm::callback::SwarmEvent;
-
-/// Records every swarm event the application was told about, in start order.
-#[derive(Default)]
-struct EventLog {
-    events: Mutex<Vec<SwarmEvent>>,
-}
-
-impl EventLog {
-    /// Every event so far, in start order.
-    fn events(&self) -> Vec<SwarmEvent> {
-        self.events
-            .lock()
-            .expect("event log is never poisoned")
-            .clone()
-    }
-
-    /// Peers reported retired so far, in start order.
-    fn retired(&self) -> Vec<Did> {
-        self.events()
-            .into_iter()
-            .filter_map(|event| match event {
-                SwarmEvent::PeerRetired { peer } => Some(peer),
-                SwarmEvent::ConnectionStateChange { .. } => None,
-            })
-            .collect()
-    }
-}
-
-#[async_trait]
-impl SwarmCallback for EventLog {
-    /// Record the event.
-    async fn on_event(
-        &self,
-        event: &SwarmEvent,
-    ) -> std::result::Result<(), crate::error::CallbackError> {
-        self.events
-            .lock()
-            .expect("event log is never poisoned")
-            .push(event.clone());
-        Ok(())
-    }
-}
 
 /// A transport whose application callback is a fresh event log.
 fn transport_with_log() -> Result<(SwarmTransport, Arc<EventLog>)> {
@@ -61,8 +15,8 @@ fn transport_with_log() -> Result<(SwarmTransport, Arc<EventLog>)> {
     Ok((transport, log))
 }
 
-/// An admission that was announced is reported retired exactly once, whichever retirement
-/// path ends it.
+/// An admission that was announced is reported retired exactly once; a second retirement of
+/// the same attempt is not one.
 #[tokio::test]
 async fn test_announced_admission_is_reported_retired_once() -> Result<()> {
     let (transport, log) = transport_with_log()?;

@@ -551,16 +551,13 @@ impl SwarmTransport {
 
     /// Retire `attempt` if `action` decides to, announcing the retirement in the peer's ordered
     /// delivery. The delivery turn is taken before the record is retired, so a later admission
-    /// of the same peer cannot announce ahead of this retirement; the turn's sequence is pruned
-    /// on every exit.
+    /// of the same peer cannot announce ahead of this retirement.
     async fn retire_announced_if<T>(
         &self,
         attempt: PendingConnectionAttempt,
         action: impl FnOnce(&ActiveConnectionSet) -> Result<Option<T>>,
     ) -> Result<RetirementOutcome<T>> {
-        let delivery = self.swarm_event_delivery_lock(attempt.peer);
-        let outcome = async {
-            let turn = delivery.acquire().await;
+        self.with_delivery_turn(attempt.peer, |turn| async move {
             Ok(match self.retire_active_connection_if(attempt, action)? {
                 RetirementOutcome::Superseded => RetirementOutcome::Superseded,
                 RetirementOutcome::Declined => RetirementOutcome::Declined,
@@ -570,22 +567,8 @@ impl SwarmTransport {
                     RetirementOutcome::Retired(value)
                 }
             })
-        }
-        .await;
-        self.prune_swarm_event_delivery_lock(attempt.peer, &delivery);
-        outcome
-    }
-
-    /// Retire `attempt` unconditionally once `action` commits, announcing the retirement;
-    /// `None` iff `attempt` no longer owned the active slot.
-    async fn retire_announced<T>(
-        &self,
-        attempt: PendingConnectionAttempt,
-        action: impl FnOnce(&ActiveConnectionSet) -> Result<T>,
-    ) -> Result<Option<T>> {
-        self.retire_announced_if(attempt, |active| action(active).map(Some))
-            .await
-            .map(RetirementOutcome::retired)
+        })
+        .await
     }
 
     async fn disconnect_with_removal(
@@ -594,21 +577,23 @@ impl SwarmTransport {
         removal: DhtPeerRemoval,
     ) -> Result<Option<PeerRemovalOutcome>> {
         let connection = self.get_raw_connection(attempt.peer);
+        // Removal never declines: the action always commits.
         let Some(fallback) = self
-            .retire_announced(attempt, |active| match removal {
+            .retire_announced_if(attempt, |active| match removal {
                 DhtPeerRemoval::Ordinary => {
                     self.dht.remove(attempt.peer)?;
-                    Ok(None)
+                    Ok(Some(None))
                 }
                 DhtPeerRemoval::Unavailable => {
                     let replacements =
                         self.live_successor_replacements_from_active(attempt.peer, active)?;
                     let fallback = replacements.first().copied();
                     self.dht.remove_unavailable(attempt.peer, replacements)?;
-                    Ok(fallback)
+                    Ok(Some(fallback))
                 }
             })
             .await?
+            .retired()
         else {
             return Ok(None);
         };
@@ -650,16 +635,14 @@ impl SwarmTransport {
                 Ok(Some(()))
             })
             .await?;
-        if outcome.is_retired() {
-            if let Some(connection) = connection {
-                if let Err(error) = self.close_connection_for_disconnect(&connection).await {
-                    tracing::warn!(
-                        peer = %attempt.peer,
-                        generation = attempt.generation,
-                        error = ?error,
-                        "evicted connection failed to close after retirement"
-                    );
-                }
+        if let (true, Some(connection)) = (outcome.is_retired(), connection) {
+            if let Err(error) = self.close_connection_for_disconnect(&connection).await {
+                tracing::warn!(
+                    peer = %attempt.peer,
+                    generation = attempt.generation,
+                    error = ?error,
+                    "evicted connection failed to close after retirement"
+                );
             }
         }
         Ok(outcome)

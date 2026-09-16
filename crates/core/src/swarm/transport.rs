@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -106,9 +107,9 @@ pub(crate) use self::outbound::OUTBOUND_DATA_TRANSFER_CAPACITY;
 pub(crate) use self::outbound::OUTBOUND_GLOBAL_BYTE_CAPACITY;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::OUTBOUND_TRANSFER_QUEUE_CAPACITY;
+use self::pending::AnswerSlot;
 pub(crate) use self::pending::ConnectionEventDisposition;
 use self::pending::ConnectionLifecycleBoundary;
-use self::pending::PeerConnectionLifecycle;
 pub(crate) use self::pending::PendingConnectionAttempt;
 use self::pending::PendingFingerUpdates;
 use self::pending::RawConnectionOwner;
@@ -445,14 +446,14 @@ impl SwarmTransport {
         self.inbound_capacity.admitted_count_for_test()
     }
 
-    pub(crate) fn swarm_event_delivery_lock(&self, peer: Did) -> SwarmEventDeliveryLock {
+    fn swarm_event_delivery_lock(&self, peer: Did) -> SwarmEventDeliveryLock {
         self.swarm_event_delivery.lock(peer)
     }
 
     /// The application callback slot this transport delivers swarm events through; the swarm
     /// shares it so `Swarm::set_callback` replaces the target of both.
-    pub(super) fn callback_slot(&self) -> SwarmCallbackSlot {
-        self.callback.clone()
+    pub(super) fn callback_slot(&self) -> &SwarmCallbackSlot {
+        &self.callback
     }
 
     /// Announce a retirement through `turn`, the peer's ordered delivery turn acquired before
@@ -486,11 +487,23 @@ impl SwarmTransport {
             .await
     }
 
-    pub(crate) fn prune_swarm_event_delivery_lock(
+    /// Run `deliver` under `peer`'s ordered delivery turn: the turn is acquired before `deliver`
+    /// runs, and the turn's sequence is pruned once it returns, whatever it returns.
+    pub(crate) async fn with_delivery_turn<T, Fut>(
         &self,
         peer: Did,
-        delivery: &SwarmEventDeliveryLock,
-    ) {
+        deliver: impl FnOnce(SwarmEventDeliveryTurn) -> Fut,
+    ) -> T
+    where
+        Fut: Future<Output = T>,
+    {
+        let delivery = self.swarm_event_delivery_lock(peer);
+        let outcome = deliver(delivery.acquire().await).await;
+        self.prune_swarm_event_delivery_lock(peer, &delivery);
+        outcome
+    }
+
+    fn prune_swarm_event_delivery_lock(&self, peer: Did, delivery: &SwarmEventDeliveryLock) {
         self.swarm_event_delivery
             .prune(peer, delivery, self.connection_epoch_exists(peer));
     }
@@ -790,7 +803,7 @@ impl SwarmTransport {
             IncomingOfferAdmittedPeer::Routable => return Err(Error::AlreadyConnected),
             IncomingOfferAdmittedPeer::Unroutable(attempt) => {
                 if self.disconnect_unavailable(attempt).await?.is_none()
-                    && self.is_admitted_connection(peer)
+                    && self.has_active_connection(peer)
                 {
                     return Err(Error::AlreadyConnected);
                 }
@@ -932,25 +945,20 @@ impl SwarmTransport {
 
         let answer: String = serde_json::from_str(&answer_msg.sdp).map_err(Error::Deserialize)?;
 
-        let (owner, pending) = self.with_connection_lifecycle(|| {
-            let state = self.peer_lifecycles()?.state(peer);
-            let pending = match state {
-                Some(PeerConnectionLifecycle::Pending { attempt, .. }) => self
-                    .get_raw_connection(peer)
-                    .map(|connection| (attempt, connection)),
-                _ => None,
-            };
-            Ok((state.map(PeerConnectionLifecycle::attempt), pending))
-        })?;
-        if let Some(expected) = expected {
-            if owner.is_some_and(|owner| owner != expected) {
+        let (attempt, conn) = match (expected, self.answer_slot(peer)?) {
+            (Some(expected), AnswerSlot::Pending(owner, _) | AnswerSlot::Owned(owner))
+                if owner != expected =>
+            {
                 return Err(Error::ConnectionAttemptSuperseded {
                     peer,
                     generation: expected.generation,
                 });
             }
-        }
-        let (attempt, conn) = pending.ok_or(Error::SwarmMissTransport(peer))?;
+            (_, AnswerSlot::Pending(attempt, conn)) => (attempt, conn),
+            (_, AnswerSlot::Vacant | AnswerSlot::Owned(_)) => {
+                return Err(Error::SwarmMissTransport(peer));
+            }
+        };
         tracing::trace!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,

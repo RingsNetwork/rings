@@ -12,6 +12,7 @@ use rings_core::dht::EntryStorage;
 use rings_core::dht::DEFAULT_FINGER_TABLE_SIZE;
 use rings_core::ecc::PublicKey;
 use rings_core::ecc::SecretKey;
+use rings_core::error::Error as CoreError;
 use rings_core::lifecycle::StopSource;
 use rings_core::lifecycle::StopToken;
 use rings_core::measure::EvidenceCounters;
@@ -145,21 +146,57 @@ async fn sleep_registration_interval_with_stop(
 
 /// Which node a handshake over HTTP must end up connected to.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum HandshakePeer {
+pub(crate) enum HandshakePeer {
     /// Whatever DID the endpoint answers as.
     Any,
     /// Only this DID; any other answer is refused before an offer is created.
     Pinned(Did),
 }
 
-/// An accepted HTTP handshake: the DID the endpoint answered as and the connection generation
-/// this node reserved for it, whose admission the swarm reports asynchronously.
-#[derive(Clone, Copy, Debug)]
-pub struct Handshake {
-    /// DID the endpoint answered as.
-    pub peer: Did,
-    /// The generation the offer reserved; cancel it, not the peer, to abandon this handshake.
-    pub attempt: ConnectionAttempt,
+/// Why a handshake over HTTP did not reach an accepted answer.
+#[derive(Debug)]
+pub(crate) enum HandshakeFailure {
+    /// The peer's slot is owned by another attempt (a handshake in flight, whichever side
+    /// started it, or an admission not yet announced): refused before any request when the
+    /// local core already holds an unadmitted handshake, or by the local core during the
+    /// exchange. Nothing is wrong; a later attempt may succeed.
+    InFlight {
+        /// The peer whose slot is owned.
+        peer: Did,
+    },
+    /// The handshake failed.
+    Failed(Error),
+}
+
+impl HandshakeFailure {
+    /// Sort a core refusal of one handshake stage: an offer refused because the peer already
+    /// holds a record, or an attempt superseded by the peer's own offer, is `InFlight`; any
+    /// other error is `Failed` under the stage's wrapper.
+    fn from_stage(peer: Did, stage: fn(CoreError) -> Error, error: CoreError) -> Self {
+        match error {
+            CoreError::AlreadyConnected | CoreError::ConnectionAttemptSuperseded { .. } => {
+                Self::InFlight { peer }
+            }
+            other => Self::Failed(stage(other)),
+        }
+    }
+}
+
+impl From<Error> for HandshakeFailure {
+    /// Every error that is not a core refusal of a handshake stage is a failure.
+    fn from(error: Error) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl From<HandshakeFailure> for Error {
+    /// A refusal is reported as `HandshakeInFlight`; a failure as itself.
+    fn from(failure: HandshakeFailure) -> Self {
+        match failure {
+            HandshakeFailure::InFlight { peer } => Error::HandshakeInFlight { peer },
+            HandshakeFailure::Failed(error) => error,
+        }
+    }
 }
 
 /// Processor for rings-node rpc server.
@@ -551,72 +588,93 @@ impl Processor {
     }
 
     /// Handshake with the node behind `endpoint` over its public HTTP API: learn its DID, and
-    /// when `peer` is pinned refuse before creating any offer if the endpoint answers as another
-    /// node; then create, exchange and accept the offer. Returns the [`Handshake`] once the
-    /// answer is accepted; admission of the resulting transport completes asynchronously and is
-    /// reported through the swarm callback. The exchange is pinned to the generation the offer
-    /// reserved, so a handshake the peer started meanwhile is neither answered nor cancelled by
-    /// this one; a failure after the offer was created cancels that generation iff it is still
-    /// pending.
-    pub async fn connect_peer_via_http(
+    /// when `peer` is pinned refuse before any request if the local core already holds an
+    /// unadmitted handshake to it, and before any offer if the endpoint answers as another
+    /// node; then create, exchange and accept the offer. Returns the generation the offer
+    /// reserved once the answer is accepted; admission of the resulting transport completes
+    /// asynchronously and is reported through the swarm callback. The exchange is pinned to
+    /// that generation, so a handshake the peer started meanwhile is neither answered nor
+    /// cancelled by this one; a failure after the offer was created cancels the generation iff
+    /// it is still pending.
+    pub(crate) async fn connect_peer_via_http(
         &self,
         endpoint: &RemoteRpcEndpoint,
         api_token: Option<&str>,
         peer: HandshakePeer,
-    ) -> Result<Handshake> {
-        let client = remote_rpc_client(endpoint, api_token).await?;
-        let answered = client.node_did(&NodeDidRequest {}).await?.did;
-        let actual = Did::from_str(answered.as_str()).map_err(|_| Error::InvalidDid(answered))?;
-        if let HandshakePeer::Pinned(expected) = peer {
-            if actual != expected {
-                tracing::error!(
-                    %endpoint,
-                    %expected,
-                    %actual,
-                    "endpoint answered as another node; handshake refused"
-                );
-                return Err(Error::HandshakePeerMismatch { expected, actual });
+    ) -> std::result::Result<ConnectionAttempt, HandshakeFailure> {
+        if let HandshakePeer::Pinned(pinned) = peer {
+            if self
+                .swarm
+                .has_unadmitted_connection(pinned)
+                .map_err(Error::ConnectError)?
+            {
+                return Err(HandshakeFailure::InFlight { peer: pinned });
             }
         }
+        let learned = async {
+            let client = remote_rpc_client(endpoint, api_token).await?;
+            let answered = client.node_did(&NodeDidRequest {}).await?.did;
+            let actual =
+                Did::from_str(answered.as_str()).map_err(|_| Error::InvalidDid(answered))?;
+            if let HandshakePeer::Pinned(expected) = peer {
+                if actual != expected {
+                    tracing::error!(
+                        %endpoint,
+                        %expected,
+                        %actual,
+                        "endpoint answered as another node; handshake refused"
+                    );
+                    return Err(Error::HandshakePeerMismatch { expected, actual });
+                }
+            }
+            Ok((client, actual))
+        };
+        let (client, actual) = learned.await?;
         let (attempt, offer) = self
             .swarm
             .offer_connection(actual)
             .await
-            .map_err(Error::CreateOffer)?;
-        let offer = offer.encode().map_err(|_| Error::EncodeError)?;
+            .map_err(|error| HandshakeFailure::from_stage(actual, Error::CreateOffer, error))?;
         let exchange = async {
+            let offer = offer.encode().map_err(|_| Error::EncodeError)?;
             let answer = client
                 .answer_offer(&AnswerOfferRequest {
                     offer: offer.to_string(),
                 })
-                .await?
+                .await
+                .map_err(Error::from)?
                 .answer;
             let answer = MessagePayload::from_encoded(&Encoded::from(answer))
                 .map_err(|_| Error::DecodeError)?;
             self.swarm
                 .accept_answer_for(attempt, answer)
                 .await
-                .map_err(Error::AcceptAnswer)
+                .map_err(|error| HandshakeFailure::from_stage(actual, Error::AcceptAnswer, error))
         };
         match exchange.await {
-            Ok(()) => Ok(Handshake {
-                peer: actual,
-                attempt,
-            }),
-            Err(error) => {
+            Ok(()) => Ok(attempt),
+            Err(failure) => {
                 self.abandon_handshake(attempt).await;
-                Err(error)
+                Err(failure)
             }
         }
     }
 
-    /// Cancel the generation `attempt` reserved iff it is still pending, that is, no answer was
-    /// applied; one admitting, admitted or superseded meanwhile is left alone, and a failure to
-    /// cancel is logged since the core expires an unadmitted attempt on its own.
+    /// Cancel the generation `attempt` reserved iff it is still pending, that is, no data
+    /// channel has opened on it; one admitting, admitted or superseded meanwhile is left alone,
+    /// and a failure to cancel is logged since the core expires an unadmitted attempt on its
+    /// own.
     pub(crate) async fn abandon_handshake(&self, attempt: ConnectionAttempt) {
-        if let Err(error) = self.swarm.cancel_connection_attempt(attempt).await {
+        if let Err(error) = self.swarm.cancel_pending_connection_attempt(attempt).await {
             tracing::warn!(?attempt, %error, "failed to cancel the abandoned handshake");
         }
+    }
+
+    /// Whether a seed document owes `peer` a dial: it is not this node and its admission was
+    /// not announced. A peer with a handshake in flight is dialed and refused by the core,
+    /// which `connect seed` reads as the peer being taken care of.
+    pub(crate) fn owes_seed_dial(&self, peer: Did) -> Result<bool> {
+        Ok(peer != self.swarm.did() && !self.swarm.is_peer_admitted(peer)?)
     }
 
     /// Disconnect a peer with web3 did.

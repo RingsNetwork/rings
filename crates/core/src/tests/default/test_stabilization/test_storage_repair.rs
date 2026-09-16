@@ -262,7 +262,7 @@ async fn test_native_wait_with_repairs_storage_before_connection_retirement() ->
             .physical_close_witness()?;
         node1.swarm.disconnect(node2.did()).await?;
         assert!(node1.swarm.transport.get_connection(node2.did()).is_none());
-        assert!(!node1.swarm.transport.is_admitted_connection(node2.did()));
+        assert!(!node1.swarm.transport.has_active_connection(node2.did()));
         assert!(!node1.dht().successors().contains(&node2.did())?);
         assert_eq!(
             node1
@@ -388,7 +388,7 @@ async fn test_repair_storage_defers_disconnected_open_transport_without_sending(
             .await?,
         None
     );
-    assert!(node1.swarm.transport.is_admitted_connection(node2.did()));
+    assert!(node1.swarm.transport.has_active_connection(node2.did()));
     Ok(())
 }
 

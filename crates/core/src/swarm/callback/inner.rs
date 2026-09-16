@@ -235,36 +235,22 @@ impl InnerSwarmCallback {
         did: Did,
         attempt: PendingConnectionAttempt,
     ) -> Result<bool, CallbackError> {
-        let delivery = self
-            .processor
-            .logical
-            .transport
-            .swarm_event_delivery_lock(did);
-        let result = async {
-            let delivery_turn = delivery.acquire().await;
-            if !self
-                .processor
-                .logical
-                .transport
-                .mark_admission_announced(attempt)?
-            {
-                tracing::debug!("suppressing connected event for {did}; connection was retired before event delivery");
-                return Ok(false);
-            }
-            self.emit_connection_state_change_after_ordered_start(
-                delivery_turn,
-                did,
-                WebrtcConnectionState::Connected,
-            )
-            .await?;
-            Ok(true)
-        }
-        .await;
-        self.processor
-            .logical
-            .transport
-            .prune_swarm_event_delivery_lock(did, &delivery);
-        result
+        let transport = &self.processor.logical.transport;
+        transport
+            .with_delivery_turn(did, |delivery_turn| async move {
+                if !transport.mark_admission_announced(attempt)? {
+                    tracing::debug!("suppressing connected event for {did}; connection was retired before event delivery");
+                    return Ok(false);
+                }
+                self.emit_connection_state_change_after_ordered_start(
+                    delivery_turn,
+                    did,
+                    WebrtcConnectionState::Connected,
+                )
+                .await?;
+                Ok(true)
+            })
+            .await
     }
 
     async fn emit_connection_state_change(
@@ -273,42 +259,28 @@ impl InnerSwarmCallback {
         state: WebrtcConnectionState,
         attempt: Option<PendingConnectionAttempt>,
     ) -> Result<(), CallbackError> {
-        let delivery = self
-            .processor
-            .logical
-            .transport
-            .swarm_event_delivery_lock(did);
-        let result = async {
-            let delivery_turn = delivery.acquire().await;
-            if let Some(attempt) = attempt {
-                match self
-                    .processor
-                    .logical
-                    .transport
-                    .connection_event_disposition(attempt)?
-                {
-                    ConnectionEventDisposition::Deliver => {}
-                    ConnectionEventDisposition::Suppress { active } => {
-                        tracing::debug!(
-                            peer = %did,
-                            generation = attempt.generation(),
-                            active_generation = active.generation(),
-                            state = ?state,
-                            "suppressing connection event from superseded generation"
-                        );
-                        return Ok(());
+        let transport = &self.processor.logical.transport;
+        transport
+            .with_delivery_turn(did, |delivery_turn| async move {
+                if let Some(attempt) = attempt {
+                    match transport.connection_event_disposition(attempt)? {
+                        ConnectionEventDisposition::Deliver => {}
+                        ConnectionEventDisposition::Suppress { active } => {
+                            tracing::debug!(
+                                peer = %did,
+                                generation = attempt.generation(),
+                                active_generation = active.generation(),
+                                state = ?state,
+                                "suppressing connection event from superseded generation"
+                            );
+                            return Ok(());
+                        }
                     }
                 }
-            }
-            self.emit_connection_state_change_after_ordered_start(delivery_turn, did, state)
-                .await
-        }
-        .await;
-        self.processor
-            .logical
-            .transport
-            .prune_swarm_event_delivery_lock(did, &delivery);
-        result
+                self.emit_connection_state_change_after_ordered_start(delivery_turn, did, state)
+                    .await
+            })
+            .await
     }
 
     async fn emit_connection_state_change_after_ordered_start(
@@ -720,7 +692,7 @@ impl TransportCallback for InnerSwarmCallback {
             .admit_pending_connection(did)
             .await
             .map_err(into_transport_callback_error)?
-            && !self.processor.logical.transport.is_admitted_connection(did)
+            && !self.processor.logical.transport.has_active_connection(did)
         {
             tracing::debug!("ignoring late data-channel open for {did}");
         }

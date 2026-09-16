@@ -62,7 +62,7 @@ async fn test_full_registry_evicts_most_idle_unreferenced_peer_for_a_newcomer() 
     let attempt = transport.reserve_pending_connection(newcomer).await?;
 
     assert!(transport.is_active_connection_attempt(older_but_active));
-    assert!(!transport.is_admitted_connection(younger_but_idle.peer));
+    assert!(!transport.has_active_connection(younger_but_idle.peer));
     assert!(transport.is_pending_connection_attempt(attempt)?);
     assert_eq!(transport.pending_connection_count()?, 1);
     Ok(())
@@ -80,7 +80,7 @@ async fn test_full_registry_evicts_send_terminal_peer_before_any_live_peer() -> 
     transport.reserve_pending_connection(newcomer).await?;
 
     assert!(transport.is_active_connection_attempt(idle_live));
-    assert!(!transport.is_admitted_connection(dead_young.peer));
+    assert!(!transport.has_active_connection(dead_young.peer));
     Ok(())
 }
 
@@ -98,7 +98,7 @@ async fn test_full_registry_keeps_topology_referenced_peer_over_idler_unreferenc
 
     assert!(transport.is_active_connection_attempt(referenced));
     assert!(transport.dht.successors().contains(&referenced.peer)?);
-    assert!(!transport.is_admitted_connection(unreferenced.peer));
+    assert!(!transport.has_active_connection(unreferenced.peer));
     Ok(())
 }
 
@@ -165,7 +165,7 @@ async fn test_eviction_skips_candidate_referenced_after_the_plan() -> Result<()>
         .await?;
 
     assert!(transport.is_active_connection_attempt(most_idle));
-    assert!(!transport.is_admitted_connection(less_idle.peer));
+    assert!(!transport.has_active_connection(less_idle.peer));
     Ok(())
 }
 
@@ -191,6 +191,6 @@ async fn test_eviction_skips_candidate_superseded_after_the_plan() -> Result<()>
 
     let replacement = replacement.ok_or(Error::SwarmMissTransport(most_idle.peer))?;
     assert!(transport.is_active_connection_attempt(replacement));
-    assert!(!transport.is_admitted_connection(less_idle.peer));
+    assert!(!transport.has_active_connection(less_idle.peer));
     Ok(())
 }

@@ -188,7 +188,7 @@ async fn test_late_terminal_callback_cannot_remove_replacement_active_slot() -> 
     ))?);
     let peer = SecretKey::random().address().into();
     let old_attempt = transport.reserve_pending_connection(peer).await?;
-    assert!(transport.retire_pending_connection(old_attempt)?);
+    assert!(transport.cancel_pending_connection(old_attempt).await?);
     let current_attempt = transport.reserve_pending_connection(peer).await?;
     assert!(transport.activate_connection_for_test(current_attempt)?);
     let late_callback =

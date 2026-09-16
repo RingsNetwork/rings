@@ -16,7 +16,7 @@ pub(crate) use finger::FingerUpdateDisposition;
 pub(super) use registry::ActiveConnectionSet;
 pub(super) use registry::ConnectionLifecycleRegistry;
 pub(super) use registry::LifecycleBounds;
-pub(super) use registry::PeerConnectionLifecycle;
+use registry::PeerConnectionLifecycle;
 #[cfg(all(test, not(target_family = "wasm")))]
 pub(super) use registry::ReservationVerdict;
 pub(super) use registry::Retirement;
@@ -171,10 +171,28 @@ fn event_disposition(
     }
 }
 
+/// The retired value of an outcome, its announcement witness projected away; for tests that
+/// assert the retirement itself.
+#[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
+fn retired_value<T>(outcome: RetirementOutcome<(T, Retirement)>) -> Option<T> {
+    outcome.retired().map(|(value, _witness)| value)
+}
+
+/// A peer's slot as an answer to this node's offer finds it.
+pub(super) enum AnswerSlot {
+    /// No record.
+    Vacant,
+    /// A pending generation with the transport object the answer applies to.
+    Pending(PendingConnectionAttempt, SwarmConnection),
+    /// A generation an answer cannot apply to: past pending, or pending without a transport
+    /// object.
+    Owned(PendingConnectionAttempt),
+}
+
 /// Which unadmitted phases a cancellation may release, in the registry's vocabulary.
 enum CancellationScope {
-    /// `Pending` only: no answer was applied, so only the reservation and its offer's transport
-    /// object are released.
+    /// `Pending` only: no data channel has opened, so only the record and its transport object
+    /// are released.
     Pending,
     /// `Pending` or `Admitting`.
     Unadmitted,
@@ -298,7 +316,7 @@ impl SwarmTransport {
     /// This remains true while a terminal callback removes the peer, so
     /// lifecycle cleanup can evict it from the DHT even after WebRTC reports
     /// `Closed`.
-    pub(crate) fn is_admitted_connection(&self, peer: Did) -> bool {
+    pub(crate) fn has_active_connection(&self, peer: Did) -> bool {
         self.peer_lifecycles()
             .map(|lifecycles| lifecycles.active_attempt(peer).is_some())
             .unwrap_or(false)
@@ -401,6 +419,23 @@ impl SwarmTransport {
     /// way to change that; a message for it cannot be handed to a connection.
     pub(crate) fn has_connection_attempt(&self, peer: Did) -> Result<bool> {
         Ok(self.peer_lifecycles()?.contains(peer))
+    }
+
+    /// The slot of `peer` as an answer finds it, read once under the lifecycle boundary
+    /// together with the transport object an answer applies to.
+    pub(super) fn answer_slot(&self, peer: Did) -> Result<AnswerSlot> {
+        self.with_connection_lifecycle(|| {
+            Ok(match self.peer_lifecycles()?.state(peer) {
+                None => AnswerSlot::Vacant,
+                Some(PeerConnectionLifecycle::Pending { attempt, .. }) => {
+                    match self.get_raw_connection(peer) {
+                        Some(connection) => AnswerSlot::Pending(attempt, connection),
+                        None => AnswerSlot::Owned(attempt),
+                    }
+                }
+                Some(state) => AnswerSlot::Owned(state.attempt()),
+            })
+        })
     }
 
     /// The active generation of `peer` whose admission was announced to the application.
@@ -618,16 +653,14 @@ impl SwarmTransport {
         Ok(Some(action))
     }
 
+    /// Release the record of `attempt` iff it is still pending, leaving its transport object,
+    /// if any, in place: the `Pending` arm of the one cancellation transition without the close.
     pub(super) fn retire_pending_connection(
         &self,
         attempt: PendingConnectionAttempt,
     ) -> Result<bool> {
-        let _lifecycle = self.connection_lifecycle()?;
-        let removed = self.peer_lifecycles()?.remove_pending(attempt);
-        if removed {
-            self.cancel_pending_finger_updates(attempt)?;
-        }
-        Ok(removed)
+        self.retire_pending_connection_for_close(attempt, CancellationScope::Pending)
+            .map(|retired| retired.is_some())
     }
 
     /// Mark the admission of `attempt` as announced to the application, iff `attempt` still
@@ -688,10 +721,8 @@ impl SwarmTransport {
         attempt: PendingConnectionAttempt,
         action: impl FnOnce(&ActiveConnectionSet) -> Result<T>,
     ) -> Result<Option<T>> {
-        Ok(self
-            .retire_active_connection_if(attempt, |active| action(active).map(Some))?
-            .retired()
-            .map(|(value, _witness)| value))
+        self.retire_active_connection_if(attempt, |active| action(active).map(Some))
+            .map(retired_value)
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -704,10 +735,8 @@ impl SwarmTransport {
         let _lifecycle = self
             .connection_lifecycle
             .lock_with_waiter_observer_for_test(before_lifecycle_gate)?;
-        Ok(self
-            .retire_active_connection_locked(attempt, |active| action(active).map(Some))?
-            .retired()
-            .map(|(value, _witness)| value))
+        self.retire_active_connection_locked(attempt, |active| action(active).map(Some))
+            .map(retired_value)
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -829,7 +858,7 @@ impl SwarmTransport {
             .await
     }
 
-    /// Cancel `attempt` iff it is still pending, that is, no answer has been applied to it, and
+    /// Cancel `attempt` iff it is still pending, that is, no data channel has opened on it, and
     /// release its transport object. An admitting generation has a data channel open and its
     /// DHT admission in flight; it is left to complete, or to fail on its own path.
     pub(crate) async fn cancel_pending_connection(

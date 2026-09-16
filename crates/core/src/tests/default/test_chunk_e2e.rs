@@ -391,7 +391,7 @@ async fn test_spawned_storage_sync_tail_cancels_when_transport_loses_readiness()
         1,
         "a recovering transport must cancel the chunk tail before another admission"
     );
-    assert!(node1.swarm.transport.is_admitted_connection(node2.did()));
+    assert!(node1.swarm.transport.has_active_connection(node2.did()));
     assert!(node1.dht().successors().contains(&node2.did())?);
     assert_eq!(
         measure.count(node2.did(), MeasureCounter::FailedToSend),

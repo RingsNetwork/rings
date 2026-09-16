@@ -62,7 +62,7 @@ async fn test_pending_finger_update_is_applied_when_attempt_is_admitted() -> Res
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
 
     assert_eq!(transport.dht.lock_finger()?.get(finger_index), Some(peer));
-    assert!(transport.is_admitted_connection(peer));
+    assert!(transport.has_active_connection(peer));
 
     transport.disconnect(peer).await?;
     Ok(())
@@ -160,7 +160,7 @@ async fn test_pending_finger_update_applies_if_admission_wins_queue_race() -> Re
     );
 
     assert_eq!(transport.dht.lock_finger()?.get(finger_index), Some(peer));
-    assert!(transport.is_admitted_connection(peer));
+    assert!(transport.has_active_connection(peer));
     Ok(())
 }
 

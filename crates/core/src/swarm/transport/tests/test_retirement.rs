@@ -116,7 +116,7 @@ async fn test_retirement_serializes_with_liveness_generation_updates() -> Result
         .map_err(|_| Error::InvalidMessage("retirement thread panicked".to_string()))?;
     assert_eq!(retirement_result, Some(()));
 
-    assert!(!transport.is_admitted_connection(peer));
+    assert!(!transport.has_active_connection(peer));
     assert_eq!(transport.peer_liveness_count_for_test()?, 0);
     Ok(())
 }

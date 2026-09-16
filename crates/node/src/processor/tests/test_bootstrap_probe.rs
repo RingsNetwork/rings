@@ -6,6 +6,7 @@
 //! (clockwise from `B`, `A` precedes `C`). `C`'s only peer is `B`, so every lookup `C` issues
 //! goes to `B`, which answers `A` for any key in `(B, A]`.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use rings_core::ecc::SecretKey;
@@ -237,7 +238,7 @@ async fn backend_translates_admission_and_retirement_only() {
         .expect("events are accepted");
     assert_eq!(
         evidence.losses().take().expect("record readable"),
-        [managed].into_iter().collect()
+        BTreeSet::from([managed])
     );
 }
 
@@ -275,16 +276,15 @@ async fn a_local_disconnect_is_reported_as_a_peer_retirement() {
         .expect("disconnect succeeds");
     assert_eq!(
         a.evidence.losses().take().expect("record readable"),
-        [b.did()].into_iter().collect(),
+        BTreeSet::from([b.did()]),
         "the retirement is observed before disconnect returns"
     );
 }
 
-/// A pending handshake to the target, here one this node reserved by offering, makes a dial a
-/// deferral before any request leaves: the never-dialed endpoint would otherwise fail to
-/// resolve.
+/// A pending handshake to the target, here one this node reserved by offering, refuses a dial
+/// before any request leaves: the never-dialed endpoint would otherwise fail to resolve.
 #[tokio::test]
-async fn a_pending_handshake_defers_the_dial_without_a_request() {
+async fn a_pending_handshake_refuses_the_dial_without_a_request() {
     let _guard = network_test_guard().await;
     let a = ProbeNode::new(SecretKey::random()).await;
     let b = ProbeNode::new(SecretKey::random()).await;
@@ -302,7 +302,7 @@ async fn a_pending_handshake_defers_the_dial_without_a_request() {
     assert!(a
         .processor
         .swarm
-        .cancel_connection_attempt(attempt)
+        .cancel_pending_connection_attempt(attempt)
         .await
         .expect("records readable"));
 }

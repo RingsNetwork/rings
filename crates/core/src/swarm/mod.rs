@@ -59,6 +59,13 @@ pub enum SuccessorLookup {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ConnectionAttempt(PendingConnectionAttempt);
 
+impl ConnectionAttempt {
+    /// The peer this generation was reserved for.
+    pub fn peer(&self) -> Did {
+        self.0.peer()
+    }
+}
+
 /// The transport and dht management.
 pub struct Swarm {
     /// Reference of DHT.
@@ -129,10 +136,7 @@ impl Swarm {
     pub fn stabilizer(&self) -> Stabilizer {
         Stabilizer::new(
             self.transport.clone(),
-            Arc::new(SwarmInboxDelivery::new(
-                self.transport.clone(),
-                self.transport.callback_slot(),
-            )),
+            Arc::new(SwarmInboxDelivery::new(self.transport.clone())),
         )
     }
 
@@ -191,7 +195,9 @@ impl Swarm {
     }
 
     /// Whether the transport holds an unadmitted handshake to `peer` (pending or admitting),
-    /// whichever side started it. A new offer to such a peer is refused as `AlreadyConnected`.
+    /// whichever side started it. A new offer to such a peer is refused as `AlreadyConnected`
+    /// while the handshake is inside the pending timeout; a stale one is expired by the
+    /// reservation instead.
     pub fn has_unadmitted_connection(&self, peer: Did) -> Result<bool> {
         Ok(self.transport.unadmitted_attempt(peer)?.is_some())
     }
@@ -206,10 +212,13 @@ impl Swarm {
         Ok(self.transport.announced_attempt(peer)?.is_some())
     }
 
-    /// Cancel the handshake `attempt` iff it is still pending, that is, no answer has been
-    /// applied to it; one that is admitting, admitted or superseded meanwhile is left alone.
+    /// Cancel the handshake `attempt` iff it is still pending, that is, no data channel has
+    /// opened on it; one that is admitting, admitted or superseded meanwhile is left alone.
     /// Returns whether it was cancelled.
-    pub async fn cancel_connection_attempt(&self, attempt: ConnectionAttempt) -> Result<bool> {
+    pub async fn cancel_pending_connection_attempt(
+        &self,
+        attempt: ConnectionAttempt,
+    ) -> Result<bool> {
         self.transport.cancel_pending_connection(attempt.0).await
     }
 

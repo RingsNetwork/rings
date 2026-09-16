@@ -256,10 +256,12 @@ mod tests {
                 .err(),
             Some(SeedPeerError::ConflictingEntries(Did::from(1)))
         );
-        assert!(matches!(
-            validate_seed_peers([a.clone(), entry(Did::from(3), "https://a.example.com/")]),
-            Err(SeedPeerError::EndpointUnderTwoDids(_))
-        ));
+        assert_eq!(
+            validate_seed_peers([a.clone(), entry(Did::from(3), "https://a.example.com/")]).err(),
+            Some(SeedPeerError::EndpointUnderTwoDids(
+                RemoteRpcEndpoint::parse("https://a.example.com/").expect("a public endpoint")
+            ))
+        );
         assert_eq!(
             validate_seed_peers([a, b, entry(Did::from(2), "https://a.example.com/")]).err(),
             Some(SeedPeerError::ConflictingEntries(Did::from(2))),

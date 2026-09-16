@@ -771,7 +771,7 @@ async fn test_final_send_admission_serializes_generation_route_and_readiness() -
         .join()
         .map_err(|_| Error::InvalidMessage("topology thread panicked".to_string()))??;
 
-    assert!(!transport.is_admitted_connection(peer));
+    assert!(!transport.has_active_connection(peer));
     assert!(!transport.dht.successors().contains(&peer)?);
     Ok(())
 }
@@ -939,7 +939,7 @@ async fn test_routable_join_serializes_with_generation_retirement() -> Result<()
     lifecycle_gate.release()?;
     assert!(join_thread.finish("routable join")??.is_some());
     assert_eq!(retirement.finish()?, Some(()));
-    assert!(!transport.is_admitted_connection(peer));
+    assert!(!transport.has_active_connection(peer));
     assert!(!transport.dht.successors().contains(&peer)?);
     Ok(())
 }
@@ -982,7 +982,7 @@ async fn test_topology_report_serializes_with_generation_retirement() -> Result<
     lifecycle_gate.release()?;
     assert!(stabilization_thread.finish("topology report")??.is_some());
     assert_eq!(retirement.finish()?, Some(()));
-    assert!(!transport.is_admitted_connection(peer));
+    assert!(!transport.has_active_connection(peer));
     assert!(!transport.dht.successors().contains(&peer)?);
     assert_ne!(*transport.dht.lock_predecessor()?, Some(peer));
     Ok(())
@@ -1008,7 +1008,7 @@ async fn test_predecessor_notification_serializes_with_generation_retirement() -
         Some(peer)
     );
     assert_eq!(retirement.finish()?, Some(()));
-    assert!(!transport.is_admitted_connection(peer));
+    assert!(!transport.has_active_connection(peer));
     assert_ne!(*transport.dht.lock_predecessor()?, Some(peer));
     Ok(())
 }

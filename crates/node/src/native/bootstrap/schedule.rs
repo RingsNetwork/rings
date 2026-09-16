@@ -10,13 +10,14 @@
 //!               begin_if_due                       settle(Reachable) ∧ ¬lost
 //!  ┌───────────┐ ──────────▶ ┌───────────────┐ ───────────────────────────▶ ┌────────────────┐
 //!  │  Pending  │             │     Busy      │                              │   Reachable    │
-//!  │  f, t₀    │ ◀────────── │   f, lost     │ ◀─────────────────────────── │   recheck_at   │
+//!  │  m, t₀    │ ◀────────── │   m, lost     │ ◀─────────────────────────── │   recheck_at   │
 //!  └───────────┘  settle     └───────────────┘ begin_if_due (recheck_at ≤ now)└────────────────┘
 //!     ▲    ▲     (Unreachable)      │                                              │
-//!     │    │     f ↦ f + 1          │ settle(_) ∧ lost                             │ notice_loss
-//!     │    │     t₀ ↦ now+delay(f+1)│ f ↦ 0, t₀ ↦ now                              │ f ↦ 0, t₀ ↦ now
+//!     │    │     ∧ ¬lost            │ settle(_) ∧ lost                             │ notice_loss
+//!     │    │     m ↦ m + 1          │ m ↦ 0, t₀ ↦ now                              │ m ↦ 0, t₀ ↦ now
+//!     │    │     t₀ ↦ now+delay(m+1)│                                              │
 //!     │    └────────────────────────┴──────────────────────────────────────────────┘
-//!     └── notice_loss: f ↦ 0, t₀ ↦ now   (the target was admitted since, and left again)
+//!     └── notice_loss: m ↦ 0, t₀ ↦ now   (the target was admitted since, and left again)
 //!
 //!  due(Pending)   ⟺ t₀ ≤ now        due(Reachable) ⟺ recheck_at ≤ now        due(Busy) = ⊥
 //!  delay(k)       = BURST_DELAY                          if k < BURST_ATTEMPTS  (rapid burst)
@@ -27,13 +28,13 @@
 //!
 //! - *No overlap*: `begin_if_due` is the only entry into `Busy` and refuses a target that is not
 //!   due, and a `Busy` target is never due, so at most one turn per target is in flight.
-//! - *Bounded burst*: a target with `f` consecutive misses waits `delay(f)` before its next
+//! - *Bounded burst*: a target with `m` consecutive misses waits `delay(m)` before its next
 //!   turn, measured from the settlement of the previous one, so a loss is followed by at most
 //!   `BURST_ATTEMPTS` turns `BURST_DELAY` apart and then by turns `BASE_INTERVAL` apart. A miss
 //!   is any turn that did not find the target reachable: a failed dial, or one refused because
 //!   the target's slot is owned by another attempt; the budget counts turns, not causes, so a
 //!   handshake the peer keeps in flight cannot hold the target in the rapid cadence.
-//! - *Reset on success*: `Reachable` carries no failure count; a later loss restarts the burst.
+//! - *Reset on success*: `Reachable` carries no miss count; a later loss restarts the burst.
 //! - *Losses are never lost*: a loss makes the target pending at once with the burst restarted,
 //!   whether it is noticed while `Reachable`, while `Pending` (the target was admitted by
 //!   stabilization meanwhile and left again), or while `Busy` — in which case the settlement of
@@ -54,15 +55,14 @@ use rings_core::dht::Did;
 const BURST_ATTEMPTS: u8 = 5;
 /// Delay between consecutive attempts inside the rapid burst.
 const BURST_DELAY: Duration = Duration::from_secs(2);
-// The timelines in this module's tests and the shell's spell the burst delay as `2_000`.
-const _: () = assert!(BURST_DELAY.as_millis() == 2_000);
 /// Base cadence once the burst is exhausted, and the recheck period of a reachable target.
 const BASE_INTERVAL: Duration = Duration::from_secs(300);
 /// Inclusive upper bound of the uniform jitter added to every `BASE_INTERVAL` delay, so a fleet
 /// that lost the same target at the same instant does not redial it in lockstep.
 const JITTER_WINDOW: Duration = Duration::from_secs(30);
 
-/// Lifecycle phase of one managed target; see the module diagram.
+/// Lifecycle phase of one managed target; see the module diagram. The transitions are
+/// functions of the phase and explicit time; the schedule only keys them by target.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TargetPhase {
     /// Waiting for its next turn after `misses` consecutive turns that did not find the target
@@ -87,6 +87,88 @@ enum TargetPhase {
     },
 }
 
+impl TargetPhase {
+    /// The phase every target starts in: due at once, with no misses.
+    const INITIAL: Self = Self::Pending {
+        misses: 0,
+        not_before_ms: 0,
+    };
+
+    /// Whether this phase is due at `now_ms`.
+    fn is_due(self, now_ms: u64) -> bool {
+        self.deadline_ms()
+            .is_some_and(|deadline| deadline <= now_ms)
+    }
+
+    /// The instant this phase becomes due, or `None` while busy.
+    fn deadline_ms(self) -> Option<u64> {
+        match self {
+            Self::Pending { not_before_ms, .. } => Some(not_before_ms),
+            Self::Reachable { recheck_at_ms } => Some(recheck_at_ms),
+            Self::Busy { .. } => None,
+        }
+    }
+
+    /// Enter `Busy` iff due at `now_ms`; `None` when busy or not yet due.
+    fn begin_if_due(self, now_ms: u64) -> Option<Self> {
+        if !self.is_due(now_ms) {
+            return None;
+        }
+        let misses = match self {
+            Self::Pending { misses, .. } => misses,
+            Self::Reachable { .. } => 0,
+            Self::Busy { .. } => return None,
+        };
+        Some(Self::Busy {
+            misses,
+            lost: false,
+        })
+    }
+
+    /// Leave `Busy` with `outcome` at `now_ms`, drawing the next delay from `delays`; `None`
+    /// when no turn is in flight.
+    fn settle(self, outcome: TurnOutcome, now_ms: u64, delays: &mut DelaySampler) -> Option<Self> {
+        let Self::Busy { misses, lost } = self else {
+            return None;
+        };
+        Some(if lost {
+            Self::Pending {
+                misses: 0,
+                not_before_ms: now_ms,
+            }
+        } else {
+            match outcome {
+                TurnOutcome::Reachable => Self::Reachable {
+                    recheck_at_ms: now_ms.saturating_add(delays.slow_delay_ms()),
+                },
+                TurnOutcome::Unreachable => {
+                    let misses = misses.saturating_add(1);
+                    Self::Pending {
+                        misses,
+                        not_before_ms: now_ms.saturating_add(delays.delay_ms(misses)),
+                    }
+                }
+            }
+        })
+    }
+
+    /// Record at `now_ms` that the target left the local DHT; `None` when the running turn
+    /// already noted a loss.
+    fn notice_loss(self, now_ms: u64) -> Option<Self> {
+        match self {
+            Self::Reachable { .. } | Self::Pending { .. } => Some(Self::Pending {
+                misses: 0,
+                not_before_ms: now_ms,
+            }),
+            Self::Busy {
+                misses,
+                lost: false,
+            } => Some(Self::Busy { misses, lost: true }),
+            Self::Busy { lost: true, .. } => None,
+        }
+    }
+}
+
 /// Result of one supervisor turn, as reported by the shell.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum TurnOutcome {
@@ -97,11 +179,12 @@ pub(super) enum TurnOutcome {
     Unreachable,
 }
 
-/// The delay law: a rapid burst, then a jittered slow cadence drawn from a seeded generator.
+/// Samples the delay law: a rapid burst, then a jittered slow cadence drawn from a seeded
+/// generator.
 #[derive(Debug)]
-struct DelayLaw(StdRng);
+struct DelaySampler(StdRng);
 
-impl DelayLaw {
+impl DelaySampler {
     /// Delay before the turn that follows the `misses`-th consecutive miss.
     fn delay_ms(&mut self, misses: u8) -> u64 {
         if misses < BURST_ATTEMPTS {
@@ -118,11 +201,11 @@ impl DelayLaw {
     }
 }
 
-/// Retry schedule over every managed target.
+/// Retry schedule over every managed target: the phase machine keyed by target DID.
 #[derive(Debug)]
 pub(super) struct BootstrapSchedule {
     phases: BTreeMap<Did, TargetPhase>,
-    delays: DelayLaw,
+    delays: DelaySampler,
 }
 
 impl BootstrapSchedule {
@@ -132,14 +215,9 @@ impl BootstrapSchedule {
         Self {
             phases: targets
                 .into_iter()
-                .map(|target| {
-                    (target, TargetPhase::Pending {
-                        misses: 0,
-                        not_before_ms: 0,
-                    })
-                })
+                .map(|target| (target, TargetPhase::INITIAL))
                 .collect(),
-            delays: DelayLaw(StdRng::seed_from_u64(jitter_seed)),
+            delays: DelaySampler(StdRng::seed_from_u64(jitter_seed)),
         }
     }
 
@@ -158,80 +236,42 @@ impl BootstrapSchedule {
             .map(|(target, _)| *target)
     }
 
-    /// Enter `Busy` for `target` iff it is due at `now_ms`; `false` when the target is unknown,
-    /// busy, or not yet due.
-    pub(super) fn begin_if_due(&mut self, target: Did, now_ms: u64) -> bool {
+    /// Apply `transition` to `target`'s phase; `false` when the DID is unknown or the transition
+    /// is the identity on the current phase.
+    fn transition(
+        &mut self,
+        target: Did,
+        transition: impl FnOnce(TargetPhase, &mut DelaySampler) -> Option<TargetPhase>,
+    ) -> bool {
         let Some(phase) = self.phases.get_mut(&target) else {
             return false;
         };
-        if !phase.is_due(now_ms) {
-            return false;
+        match transition(*phase, &mut self.delays) {
+            Some(next) => {
+                *phase = next;
+                true
+            }
+            None => false,
         }
-        let misses = match *phase {
-            TargetPhase::Pending { misses, .. } => misses,
-            TargetPhase::Reachable { .. } => 0,
-            TargetPhase::Busy { .. } => return false,
-        };
-        *phase = TargetPhase::Busy {
-            misses,
-            lost: false,
-        };
-        true
+    }
+
+    /// Enter `Busy` for `target` iff it is due at `now_ms`; `false` when the target is unknown,
+    /// busy, or not yet due.
+    pub(super) fn begin_if_due(&mut self, target: Did, now_ms: u64) -> bool {
+        self.transition(target, |phase, _| phase.begin_if_due(now_ms))
     }
 
     /// Leave `Busy` for `target` with `outcome` at `now_ms`; `false` when no turn was in flight.
     pub(super) fn settle(&mut self, target: Did, outcome: TurnOutcome, now_ms: u64) -> bool {
-        let Some(phase) = self.phases.get_mut(&target) else {
-            return false;
-        };
-        let TargetPhase::Busy { misses, lost } = *phase else {
-            return false;
-        };
-        *phase = if lost {
-            TargetPhase::Pending {
-                misses: 0,
-                not_before_ms: now_ms,
-            }
-        } else {
-            match outcome {
-                TurnOutcome::Reachable => TargetPhase::Reachable {
-                    recheck_at_ms: now_ms.saturating_add(self.delays.slow_delay_ms()),
-                },
-                TurnOutcome::Unreachable => {
-                    let misses = misses.saturating_add(1);
-                    TargetPhase::Pending {
-                        misses,
-                        not_before_ms: now_ms.saturating_add(self.delays.delay_ms(misses)),
-                    }
-                }
-            }
-        };
-        true
+        self.transition(target, |phase, delays| {
+            phase.settle(outcome, now_ms, delays)
+        })
     }
 
     /// Record at `now_ms` that `target` left the local DHT; `false` when the running turn
     /// already noted a loss or the DID is unknown.
     pub(super) fn notice_loss(&mut self, target: Did, now_ms: u64) -> bool {
-        let Some(phase) = self.phases.get_mut(&target) else {
-            return false;
-        };
-        match *phase {
-            TargetPhase::Reachable { .. } | TargetPhase::Pending { .. } => {
-                *phase = TargetPhase::Pending {
-                    misses: 0,
-                    not_before_ms: now_ms,
-                };
-                true
-            }
-            TargetPhase::Busy {
-                misses,
-                lost: false,
-            } => {
-                *phase = TargetPhase::Busy { misses, lost: true };
-                true
-            }
-            TargetPhase::Busy { lost: true, .. } => false,
-        }
+        self.transition(target, |phase, _| phase.notice_loss(now_ms))
     }
 
     /// Earliest instant at which some target becomes due, or `None` while every target is busy
@@ -242,23 +282,6 @@ impl BootstrapSchedule {
             .copied()
             .filter_map(TargetPhase::deadline_ms)
             .min()
-    }
-}
-
-impl TargetPhase {
-    /// Whether this phase is due at `now_ms`.
-    fn is_due(self, now_ms: u64) -> bool {
-        self.deadline_ms()
-            .is_some_and(|deadline| deadline <= now_ms)
-    }
-
-    /// The instant this phase becomes due, or `None` while busy.
-    fn deadline_ms(self) -> Option<u64> {
-        match self {
-            Self::Pending { not_before_ms, .. } => Some(not_before_ms),
-            Self::Reachable { recheck_at_ms } => Some(recheck_at_ms),
-            Self::Busy { .. } => None,
-        }
     }
 }
 
@@ -278,6 +301,9 @@ pub(super) fn is_one_slow_delay_after(from_ms: u64, instant_ms: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The timelines in this module's tests and the shell's spell the burst delay as `2_000`.
+    const _: () = assert!(BURST_DELAY.as_millis() == 2_000);
 
     /// The single target of most tests.
     const TARGET: u32 = 1;
@@ -376,7 +402,10 @@ mod tests {
         }
         assert!(matches!(
             schedule.phase(target),
-            Some(TargetPhase::Pending { misses: 5, .. })
+            Some(TargetPhase::Pending {
+                misses: BURST_ATTEMPTS,
+                ..
+            })
         ));
         assert!(schedule.notice_loss(target, 20));
         assert_eq!(
@@ -477,9 +506,9 @@ mod tests {
         }
     }
 
-    /// The failure count saturates at `u8::MAX` instead of wrapping.
+    /// The miss count saturates at `u8::MAX` instead of wrapping.
     #[test]
-    fn failure_count_saturates() {
+    fn miss_count_saturates() {
         let mut schedule = schedule(1);
         let mut now_ms = 0;
         for _ in 0..(u8::MAX as usize + 2) {

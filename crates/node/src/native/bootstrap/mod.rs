@@ -84,11 +84,14 @@ pub struct BootstrapTargets(Vec<ValidatedSeedPeer>);
 impl BootstrapTargets {
     /// Validate `config` for the node `local`: the entries validate as a seed set (every entry
     /// validates, a verbatim repeat is merged, a DID with conflicting entries or an endpoint
-    /// under two DIDs is refused) and none is `local` itself.
+    /// under two DIDs is refused). An entry naming `local` itself is skipped with a log line,
+    /// as `connect seed` skips it: the shared seed document a seed node supervises the other
+    /// seeds from lists that node too.
     pub fn from_config(config: BootstrapConfig, local: Did) -> Result<Self> {
-        let targets = validate_seed_peers(config.peers)?;
+        let mut targets = validate_seed_peers(config.peers)?;
         if targets.iter().any(|target| target.did() == local) {
-            return Err(Error::BootstrapTargetIsLocalNode(local));
+            tracing::info!(peer = %local, "bootstrap target is this node; skipped");
+            targets.retain(|target| target.did() != local);
         }
         Ok(Self(targets))
     }
@@ -110,7 +113,8 @@ impl BootstrapTargets {
 pub(crate) enum DialFailure {
     /// The target's slot is owned by another attempt (a handshake in flight, whichever side
     /// started it, or an admission not yet announced): refused before any request when the
-    /// core already holds an unadmitted handshake, or by the core during the exchange.
+    /// local core already holds an unadmitted handshake, or by the local core during the
+    /// exchange. A refusal by the remote core arrives as an RPC error and is a failure.
     InFlight,
     /// The handshake or its admission failed.
     Failed(Error),
@@ -227,7 +231,7 @@ impl BootstrapSupervisor {
         let now_ms = self.now_ms();
         for target in lost {
             if self.schedule.notice_loss(target, now_ms) {
-                tracing::info!(%target, "bootstrap target left the local DHT; reassessing");
+                tracing::info!(peer = %target, "bootstrap target left the local DHT; reassessing");
             }
         }
     }
@@ -277,20 +281,20 @@ async fn sleep_until_or_forever(deadline: Option<Instant>) {
 async fn turn(port: Arc<dyn BootstrapPort>, target: Arc<ValidatedSeedPeer>) -> (Did, TurnOutcome) {
     let did = target.did();
     if port.reachable(did).await {
-        tracing::debug!(target = %did, "bootstrap target reachable");
+        tracing::debug!(peer = %did, "bootstrap target reachable");
         return (did, TurnOutcome::Reachable);
     }
     match port.dial(target.as_ref()).await {
         Ok(()) => {
-            tracing::info!(target = %did, endpoint = %target.endpoint(), "bootstrap target redialed");
+            tracing::info!(peer = %did, endpoint = %target.endpoint(), "bootstrap target redialed");
             (did, TurnOutcome::Reachable)
         }
         Err(DialFailure::InFlight) => {
-            tracing::debug!(target = %did, "bootstrap redial refused: the target's slot is owned by another attempt");
+            tracing::debug!(peer = %did, "bootstrap redial refused: the target's slot is owned by another attempt");
             (did, TurnOutcome::Unreachable)
         }
         Err(DialFailure::Failed(error)) => {
-            tracing::warn!(target = %did, endpoint = %target.endpoint(), %error, "bootstrap redial failed");
+            tracing::warn!(peer = %did, endpoint = %target.endpoint(), %error, "bootstrap redial failed");
             (did, TurnOutcome::Unreachable)
         }
     }

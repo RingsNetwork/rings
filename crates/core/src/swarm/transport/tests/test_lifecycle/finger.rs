@@ -33,7 +33,7 @@ async fn test_finger_update_serializes_with_generation_retirement() -> Result<()
         FingerUpdateDisposition::Applied
     );
     assert_eq!(retirement.finish()?, Some(()));
-    assert!(!transport.is_admitted_connection(peer));
+    assert!(!transport.has_active_connection(peer));
     assert!(!transport.dht.lock_finger()?.contains(Some(peer)));
     Ok(())
 }

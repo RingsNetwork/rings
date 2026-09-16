@@ -477,9 +477,9 @@ async fn a_loss_during_a_turn_is_reassessed_as_soon_as_the_turn_settles() {
 }
 
 /// Target validation accepts distinct public peers, reports a seed entry's own refusal
-/// unchanged (the set laws are tested with the seed module), and rejects the node itself.
+/// unchanged (the set laws are tested with the seed module), and skips the node itself.
 #[test]
-fn targets_validate_as_a_seed_set_and_reject_self() {
+fn targets_validate_as_a_seed_set_and_skip_self() {
     let local = Did::from(LOCAL);
     assert_eq!(targets(vec![peer(1), peer(2)]).len(), 2);
     assert!(matches!(
@@ -489,10 +489,11 @@ fn targets_validate_as_a_seed_set_and_reject_self() {
         }]),
         Error::SeedPeer(SeedPeerError::NotADid(did)) if did == "not-a-did"
     ));
-    assert!(matches!(
-        rejection(vec![peer(1), peer(2), peer(LOCAL)]),
-        Error::BootstrapTargetIsLocalNode(did) if did == local
-    ));
+    assert_eq!(
+        targets(vec![peer(1), peer(2), peer(LOCAL)]).len(),
+        2,
+        "the node itself is skipped, not refused"
+    );
     assert!(
         BootstrapTargets::from_config(BootstrapConfig::default(), local)
             .expect("an empty section validates")
@@ -500,8 +501,9 @@ fn targets_validate_as_a_seed_set_and_reject_self() {
     );
 }
 
-/// A rendezvous resolves a waiter whether the value arrived before or after it, replaces an
-/// earlier waiter for the same key, and `forget` closes a waiter.
+/// A rendezvous resolves a waiter whether the value arrived before or after it; a later waiter
+/// for the same key replaces the earlier one, whose drop leaves the replacement registered; a
+/// dropped waiter forgets its own registration.
 #[tokio::test]
 async fn rendezvous_resolves_in_either_order_replaces_and_forgets() {
     let rendezvous: Rendezvous<u8, Did> = Rendezvous::new(EARLY_REPORT_CAPACITY);
@@ -510,11 +512,19 @@ async fn rendezvous_resolves_in_either_order_replaces_and_forgets() {
     let waiter = rendezvous.wait_for(1).unwrap();
     assert_eq!(waiter.await, Ok(Did::from(1)));
 
-    let stale = rendezvous.wait_for(2).unwrap();
+    let mut stale = rendezvous.wait_for(2).unwrap();
     let waiter = rendezvous.wait_for(2).unwrap();
+    assert!(
+        matches!(stale.try_recv(), Err(TryRecvError::Closed)),
+        "the replaced waiter is closed"
+    );
+    drop(stale);
     rendezvous.observe(2, Did::from(2)).unwrap();
-    assert!(stale.await.is_err(), "the replaced waiter is closed");
-    assert_eq!(waiter.await, Ok(Did::from(2)));
+    assert_eq!(
+        waiter.await,
+        Ok(Did::from(2)),
+        "dropping the replaced waiter leaves the replacement registered"
+    );
 
     let waiter = rendezvous.wait_for(3).unwrap();
     assert_eq!(rendezvous.len().unwrap(), 1);
