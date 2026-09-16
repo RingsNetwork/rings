@@ -967,8 +967,7 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
         .map(NativeGatewayRunner::status_handle);
     // Managed bootstrap targets fail fast on invalid configuration; their supervisor is spawned
     // with the other run-owned tasks below and its evidence is the backend's observer.
-    let bootstrap_targets =
-        BootstrapTargets::from_config(std::mem::take(&mut c.bootstrap), processor.did())?;
+    let bootstrap_targets = BootstrapTargets::from_config(c.bootstrap, processor.did())?;
     let bootstrap = BootstrapSupervisor::over_processor(bootstrap_targets, processor.clone());
     // The Backend decodes inbound custom messages as namespaced envelopes and routes
     // them to the protocol registry.

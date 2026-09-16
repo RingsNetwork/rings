@@ -209,7 +209,7 @@ pub enum Error {
     } = 818,
     /// A managed bootstrap target failed validation.
     #[cfg(rings_native)]
-    #[error("{0}")]
+    #[error(transparent)]
     BootstrapTarget(#[from] crate::native::bootstrap::BootstrapTargetError) = 819,
     /// Creating a file on disk failed.
     #[error("Create File Error: {0}")]
@@ -333,6 +333,13 @@ impl From<Error> for jsonrpc_core::Error {
             message: e.to_string(),
             data: None,
         }
+    }
+}
+
+impl From<rings_rpc::jsonrpc::RpcError> for Error {
+    /// A remote node's JSON-RPC call failed: transport, decoding or an error the node returned.
+    fn from(error: rings_rpc::jsonrpc::RpcError) -> Self {
+        Error::RemoteRpcError(error.to_string())
     }
 }
 

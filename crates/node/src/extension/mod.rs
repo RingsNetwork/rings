@@ -46,7 +46,7 @@ pub trait BackendObserver: Send + Sync {
 /// namespace-scoped [`Scope`](ext::Scope); the underlying router capability is internal.
 /// Dispatch owns a detached task so a swarm callback deadline stops waiting without
 /// cancelling an already committed protocol transition or its ordered effect trace.
-/// Core lookup reports, admissions and departures are not dispatched; they are handed to the
+/// Core lookup reports, admissions and retirements are not dispatched; they are handed to the
 /// optional [`BackendObserver`].
 pub struct Backend {
     extensions: Extensions,
@@ -62,7 +62,7 @@ impl Backend {
         }
     }
 
-    /// Attach the observer that receives application lookup reports, admissions and departures.
+    /// Attach the observer that receives application lookup reports, admissions and retirements.
     pub fn observed_by(mut self, observer: Arc<dyn BackendObserver>) -> Self {
         self.observer = Some(observer);
         self
@@ -99,9 +99,9 @@ impl SwarmCallback for Backend {
         Ok(())
     }
 
-    /// Translate the swarm's events into the observer's facts: an admission and a departure.
+    /// Translate the swarm's events into the observer's facts: an admission and a retirement.
     async fn on_event(&self, event: &SwarmEvent) -> Result<(), rings_core::error::CallbackError> {
-        let Some(observer) = &self.observer else {
+        let Some(observer) = self.observer.as_deref() else {
             return Ok(());
         };
         match *event {

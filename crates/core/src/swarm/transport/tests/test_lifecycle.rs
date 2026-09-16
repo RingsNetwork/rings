@@ -135,18 +135,16 @@ impl BlockedRetirement {
         let (waiter_tx, waiter_registered) = std::sync::mpsc::sync_channel(0);
         let action_transport = Arc::clone(&transport);
         let worker = BoundedThread::spawn(move || {
-            transport
-                .retire_active_connection_with_observer_for_test(
-                    attempt,
-                    || {
-                        let _ = waiter_tx.send(());
-                    },
-                    |_| {
-                        action_transport.dht.remove(peer)?;
-                        Ok(())
-                    },
-                )
-                .map(|retired| retired.map(|(value, _retirement)| value))
+            transport.retire_active_connection_with_observer_for_test(
+                attempt,
+                || {
+                    let _ = waiter_tx.send(());
+                },
+                |_| {
+                    action_transport.dht.remove(peer)?;
+                    Ok(())
+                },
+            )
         });
         Self {
             waiter_registered,
@@ -726,7 +724,7 @@ async fn test_final_send_admission_serializes_generation_route_and_readiness() -
     let retirement_transport = Arc::clone(&transport);
     let retirement_thread = std::thread::spawn(move || {
         let _ = retirement_started_tx.send(());
-        let result = retirement_transport.retire_active_connection_with(attempt, |_| Ok(()));
+        let result = retirement_transport.retire_active_connection_for_test(attempt, |_| Ok(()));
         let _ = retirement_done_tx.send(());
         result
     });
@@ -764,8 +762,7 @@ async fn test_final_send_admission_serializes_generation_route_and_readiness() -
     assert_eq!(
         retirement_thread
             .join()
-            .map_err(|_| Error::InvalidMessage("retirement thread panicked".to_string()))??
-            .map(|(value, _retirement)| value),
+            .map_err(|_| Error::InvalidMessage("retirement thread panicked".to_string()))??,
         Some(())
     );
     topology_thread
@@ -792,8 +789,8 @@ async fn test_stale_send_after_retirement_does_not_recreate_outbound_scheduler()
     let outcome = transport
         .send_payload_detached_observing_scheduler_submit_for_test(payload, move || {
             assert!(matches!(
-                retire_transport.retire_active_connection_with(attempt, |_| Ok(())),
-                Ok(Some(((), _)))
+                retire_transport.retire_active_connection_for_test(attempt, |_| Ok(())),
+                Ok(Some(()))
             ));
         })
         .await?;

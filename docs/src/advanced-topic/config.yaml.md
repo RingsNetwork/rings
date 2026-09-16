@@ -192,21 +192,27 @@ long-running node that loses its transport to a seed rejoins without a restart.
 * `peers`: managed targets, each `{ did, url }` with an optional `api_token`, the same shape as
   an entry of a seed document. Every `did` must parse, every `url` must be a public HTTP(S)
   endpoint, and the node's own DID is rejected; an entry repeated verbatim is merged, while a
-  DID listed with differing endpoints is rejected as ambiguous. A violation stops `rings run`
-  before it listens. `rings run --bootstrap-seed <url>` appends the peers of a seed document
-  (a `file://` or `http(s)://` URL) to this list for one run.
+  DID listed with conflicting entries, or an endpoint listed under two DIDs, is rejected as
+  ambiguous. A violation stops `rings run` before it listens. `rings run --bootstrap-seed <url>`
+  appends the peers of a seed document (a `file://` or `http(s)://` URL, read once at startup)
+  to this list for one run.
 
-Reachability is assessed by a routed successor lookup for the target's DID; a target the node is
-directly connected to, or that some peer can route to, is left alone, so a target is never forced
-into a direct edge merely because it is not a finger. An unreachable target is redialed five
-times, each attempt at least two seconds after the previous one settled, then once per five
-minutes plus up to thirty seconds of jitter, until the peer is admitted again; a redial counts as
-successful only once the swarm admits the peer, and an endpoint answering as a different DID is
-refused before any offer is created. A target leaving the local DHT, whatever caused the loss,
-triggers an immediate reassessment, and a later loss restarts the burst. A redial that finds a
-handshake to the target already in flight waits two seconds without counting as a failure. At
-most one handshake per target is in flight, targets retry independently, and shutdown cancels any
-handshake in progress.
+How a managed target is supervised:
+
+* Reachability is a routed successor lookup for the target's DID. A target with an admitted
+  connection record, or one that some peer can route to, is left alone, so a target is never
+  forced into a direct edge merely because it is not a finger.
+* An unreachable target is redialed five times, each attempt at least two seconds after the
+  previous one settled, then every five minutes plus up to thirty seconds of jitter, until the
+  peer is admitted again.
+* A redial counts as successful only once the swarm admits the peer. An endpoint answering as a
+  different DID is refused before any offer is created. A handshake to the target already
+  pending, whichever side started it, defers the redial for two seconds without counting as a
+  failure.
+* A target leaving the local DHT, whatever caused the loss, triggers an immediate reassessment,
+  and a later loss restarts the burst.
+* At most one handshake per target is in flight, targets retry independently, and shutdown
+  cancels any handshake in progress.
 
 ## Storage
 

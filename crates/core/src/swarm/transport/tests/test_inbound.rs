@@ -219,8 +219,8 @@ async fn test_pending_message_rechecks_admission_after_async_validation() -> Res
 
     app_callback.wait_for_first_validate_started().await;
     assert!(matches!(
-        transport.retire_active_connection_with(attempt, |_| Ok(())),
-        Ok(Some(((), _)))
+        transport.retire_active_connection_for_test(attempt, |_| Ok(())),
+        Ok(Some(()))
     ));
     app_callback.release_first_validate();
     delivery

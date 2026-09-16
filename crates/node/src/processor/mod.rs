@@ -37,6 +37,7 @@ use rings_core::message::OriginQuotaConfig;
 use rings_core::message::OriginQuotaCounters;
 use rings_core::message::ReplayStorage;
 use rings_core::storage::MemStorage;
+use rings_core::swarm::ConnectionAttempt;
 use rings_core::swarm::Swarm;
 use rings_core::swarm::SwarmBuilder;
 use rings_core::utils::get_epoch_ms;
@@ -149,6 +150,16 @@ pub enum HandshakePeer {
     Any,
     /// Only this DID; any other answer is refused before an offer is created.
     Pinned(Did),
+}
+
+/// An accepted HTTP handshake: the DID the endpoint answered as and the connection generation
+/// this node reserved for it, whose admission the swarm reports asynchronously.
+#[derive(Clone, Copy, Debug)]
+pub struct Handshake {
+    /// DID the endpoint answered as.
+    pub peer: Did,
+    /// The generation the offer reserved; cancel it, not the peer, to abandon this handshake.
+    pub attempt: ConnectionAttempt,
 }
 
 /// Processor for rings-node rpc server.
@@ -544,63 +555,66 @@ impl Processor {
     /// node; then create, exchange and accept the offer. Returns the answering DID once the
     /// answer is accepted; admission of the resulting transport completes asynchronously and is
     /// reported through the swarm callback. A failure after the offer was created cancels this
-    /// node's own pending attempt, so a later handshake with the same peer is not refused as
-    /// already in flight.
+    /// generation this node reserved, so a handshake the peer started meanwhile is neither
+    /// answered nor cancelled by this one.
     pub async fn connect_peer_via_http(
         &self,
         endpoint: &RemoteRpcEndpoint,
         api_token: Option<&str>,
         peer: HandshakePeer,
-    ) -> Result<Did> {
+    ) -> Result<Handshake> {
         let client = remote_rpc_client(endpoint, api_token).await?;
-        let answered = client
-            .node_did(&NodeDidRequest {})
-            .await
-            .map_err(|error| Error::RemoteRpcError(error.to_string()))?
-            .did;
+        let answered = client.node_did(&NodeDidRequest {}).await?.did;
         let actual = Did::from_str(answered.as_str()).map_err(|_| Error::InvalidDid(answered))?;
         if let HandshakePeer::Pinned(expected) = peer {
             if actual != expected {
+                tracing::error!(
+                    %endpoint,
+                    %expected,
+                    %actual,
+                    "endpoint answered as another node; handshake refused"
+                );
                 return Err(Error::HandshakePeerMismatch { expected, actual });
             }
         }
-        let offer = self
+        let (attempt, offer) = self
             .swarm
-            .create_offer(actual)
+            .offer_connection(actual)
             .await
-            .map_err(Error::CreateOffer)?
-            .encode()
-            .map_err(|_| Error::EncodeError)?;
+            .map_err(Error::CreateOffer)?;
+        let offer = offer.encode().map_err(|_| Error::EncodeError)?;
         let exchange = async {
             let answer = client
                 .answer_offer(&AnswerOfferRequest {
                     offer: offer.to_string(),
                 })
-                .await
-                .map_err(|error| Error::RemoteRpcError(error.to_string()))?
+                .await?
                 .answer;
             let answer = MessagePayload::from_encoded(&Encoded::from(answer))
                 .map_err(|_| Error::DecodeError)?;
             self.swarm
-                .accept_answer(answer)
+                .accept_answer_for(attempt, answer)
                 .await
                 .map_err(Error::AcceptAnswer)
         };
         match exchange.await {
-            Ok(()) => Ok(actual),
+            Ok(()) => Ok(Handshake {
+                peer: actual,
+                attempt,
+            }),
             Err(error) => {
-                self.abandon_handshake(actual).await;
+                self.abandon_handshake(attempt).await;
                 Err(error)
             }
         }
     }
 
-    /// Cancel this node's own unadmitted attempt to `peer` after a failed exchange; an attempt
-    /// that was admitted meanwhile is left alone, and a failure to cancel is logged since the
-    /// core expires the attempt on its own.
-    async fn abandon_handshake(&self, peer: Did) {
-        if let Err(error) = self.swarm.cancel_pending_connection(peer).await {
-            tracing::warn!(%peer, %error, "failed to cancel the abandoned handshake");
+    /// Cancel the generation `attempt` reserved, if it is still pending; one that was admitted
+    /// or superseded meanwhile is left alone, and a failure to cancel is logged since the core
+    /// expires the attempt on its own.
+    pub(crate) async fn abandon_handshake(&self, attempt: ConnectionAttempt) {
+        if let Err(error) = self.swarm.cancel_connection_attempt(attempt).await {
+            tracing::warn!(?attempt, %error, "failed to cancel the abandoned handshake");
         }
     }
 

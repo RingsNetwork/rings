@@ -1,4 +1,4 @@
-//! The departure law: for every connection generation, `Connected` delivered ⟺ `PeerRetired`
+//! The retirement law: for every connection generation, `Connected` delivered ⟺ `PeerRetired`
 //! delivered, and a topology prune that keeps the record delivers nothing.
 
 use std::sync::Arc;
@@ -6,6 +6,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 
+use super::connection::UnreferencedRetirement;
 use super::*;
 use crate::dht::Chord;
 use crate::swarm::callback::SwarmEvent;
@@ -21,8 +22,8 @@ impl RetirementLog {
     fn retired(&self) -> Vec<Did> {
         self.retired
             .lock()
-            .map(|retired| retired.clone())
-            .unwrap_or_default()
+            .expect("retirement log is never poisoned")
+            .clone()
     }
 }
 
@@ -34,9 +35,10 @@ impl SwarmCallback for RetirementLog {
         event: &SwarmEvent,
     ) -> std::result::Result<(), crate::error::CallbackError> {
         if let SwarmEvent::PeerRetired { peer } = event {
-            if let Ok(mut retired) = self.retired.lock() {
-                retired.push(*peer);
-            }
+            self.retired
+                .lock()
+                .expect("retirement log is never poisoned")
+                .push(*peer);
         }
         Ok(())
     }
@@ -58,7 +60,7 @@ async fn announced_admission_is_reported_retired_once() -> Result<()> {
     let peer = SecretKey::random().address().into();
     let attempt = transport.reserve_pending_connection(peer).await?;
     assert!(transport.activate_connection_for_test(attempt)?);
-    assert!(transport.begin_connected_announcement(attempt)?);
+    assert!(transport.mark_admission_announced(attempt)?);
 
     assert!(transport.disconnect_attempt(attempt).await?);
     assert_eq!(log.retired(), vec![peer]);
@@ -94,9 +96,9 @@ async fn announcement_is_bound_to_the_active_generation() -> Result<()> {
     let peer = SecretKey::random().address().into();
     let old = transport.reserve_pending_connection(peer).await?;
     assert!(transport.activate_connection_for_test(old)?);
-    assert!(transport.begin_connected_announcement(old)?);
+    assert!(transport.mark_admission_announced(old)?);
     assert!(transport.disconnect_attempt(old).await?);
-    assert!(!transport.begin_connected_announcement(old)?);
+    assert!(!transport.mark_admission_announced(old)?);
 
     let replacement = transport.reserve_pending_connection(peer).await?;
     assert!(transport.activate_connection_for_test(replacement)?);
@@ -110,14 +112,14 @@ async fn announcement_is_bound_to_the_active_generation() -> Result<()> {
 }
 
 /// A topology prune that keeps the connection record (a `Disconnected` transport allowed to
-/// recover) reports nothing; the departure is reported once the record itself is retired.
+/// recover) reports nothing; the retirement is reported once the record itself is retired.
 #[tokio::test]
 async fn topology_prune_keeps_the_record_and_reports_nothing() -> Result<()> {
     let (transport, log) = transport_with_log()?;
     let peer = SecretKey::random().address().into();
     let attempt = transport.reserve_pending_connection(peer).await?;
     assert!(transport.activate_connection_for_test(attempt)?);
-    assert!(transport.begin_connected_announcement(attempt)?);
+    assert!(transport.mark_admission_announced(attempt)?);
     transport.dht.join(peer)?;
 
     assert!(transport
@@ -128,5 +130,35 @@ async fn topology_prune_keeps_the_record_and_reports_nothing() -> Result<()> {
 
     assert!(transport.disconnect_attempt(attempt).await?);
     assert_eq!(log.retired(), vec![peer]);
+    Ok(())
+}
+
+/// Capacity eviction of an admitted peer the topology no longer references retires the record
+/// through the same transition and is reported like any other retirement; a referenced peer is
+/// kept and reports nothing.
+#[tokio::test]
+async fn eviction_of_an_unreferenced_peer_is_reported_retired() -> Result<()> {
+    let (transport, log) = transport_with_log()?;
+    let referenced = SecretKey::random().address().into();
+    let unreferenced = SecretKey::random().address().into();
+    let kept = transport.reserve_pending_connection(referenced).await?;
+    assert!(transport.activate_connection_for_test(kept)?);
+    assert!(transport.mark_admission_announced(kept)?);
+    transport.dht.join(referenced)?;
+    let evicted = transport.reserve_pending_connection(unreferenced).await?;
+    assert!(transport.activate_connection_for_test(evicted)?);
+    assert!(transport.mark_admission_announced(evicted)?);
+
+    assert!(matches!(
+        transport.retire_unless_referenced(kept).await?,
+        UnreferencedRetirement::Referenced
+    ));
+    assert!(log.retired().is_empty());
+    assert!(matches!(
+        transport.retire_unless_referenced(evicted).await?,
+        UnreferencedRetirement::Retired
+    ));
+    assert_eq!(log.retired(), vec![unreferenced]);
+    assert!(!transport.is_admitted_connection_attempt(evicted));
     Ok(())
 }

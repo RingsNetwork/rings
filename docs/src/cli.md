@@ -115,10 +115,13 @@ one run:
 rings run --bootstrap-seed file:///etc/rings/seed.json
 ```
 
+A `file://` document is read at startup; an `http(s)://` document is fetched once at startup,
+so the node does not start while the document's host is unreachable.
+
 `rings run` then supervises those targets: whenever one is no longer reachable through the
-overlay it is redialed through its HTTP endpoint, in a short burst first and then about every
-five minutes, until it is admitted again. A target that other peers can route to is left
-alone.
+overlay it is redialed through its HTTP endpoint, in a short burst first and then every five
+minutes plus up to thirty seconds of jitter, until it is admitted again. A target that other
+peers can route to is left alone.
 
 ## Peers
 

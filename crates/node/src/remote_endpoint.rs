@@ -53,7 +53,7 @@ impl fmt::Display for RemoteRpcEndpoint {
 /// Bound on every HTTP request to a remote endpoint, so an endpoint that accepts a connection
 /// and never answers cannot hold a caller indefinitely.
 #[cfg(rings_native)]
-pub(crate) const REMOTE_RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const REMOTE_RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// A JSON-RPC client for `endpoint`: no proxy, no redirects, a request timeout, the host pinned
 /// to the addresses the public-target resolver returned, and the bearer token attached when
@@ -68,8 +68,7 @@ pub(crate) async fn remote_rpc_client(
         .redirect(reqwest::redirect::Policy::none())
         .timeout(REMOTE_RPC_TIMEOUT);
     if let Some(target) = resolution_target(&endpoint.0)? {
-        let addresses =
-            crate::onion::target::resolve_public_target(&target.resolution_target).await?;
+        let addresses = crate::onion::target::resolve_public_target(&target.lookup).await?;
         builder = builder.resolve_to_addrs(&target.pin_host, &addresses);
     }
     let http_client = builder
@@ -97,9 +96,9 @@ fn resolution_target(parsed: &reqwest::Url) -> Result<Option<ResolutionTarget>> 
             let pin_host = parsed.host_str().ok_or_else(|| {
                 Error::UnsafeRemoteRpcTarget("endpoint URL has no host".to_string())
             })?;
-            crate::onion::OnionProxyTarget::new(host, port).map(|resolution_target| {
+            crate::onion::OnionProxyTarget::new(host, port).map(|lookup| {
                 Some(ResolutionTarget {
-                    resolution_target,
+                    lookup,
                     pin_host: pin_host.to_string(),
                 })
             })
@@ -112,7 +111,9 @@ fn resolution_target(parsed: &reqwest::Url) -> Result<Option<ResolutionTarget>> 
 #[cfg(rings_native)]
 #[derive(Debug, Eq, PartialEq)]
 struct ResolutionTarget {
-    resolution_target: crate::onion::OnionProxyTarget,
+    /// The canonical host and port the public-target resolver looks up.
+    lookup: crate::onion::OnionProxyTarget,
+    /// The host name exactly as the HTTP client connects with it, the key its pin lives under.
     pin_host: String,
 }
 
@@ -183,8 +184,8 @@ mod tests {
         assert!(matches!(
             target,
             Some(target)
-                if target.resolution_target.host() == "example.com"
-                    && target.resolution_target.port() == 8443
+                if target.lookup.host() == "example.com"
+                    && target.lookup.port() == 8443
                     && target.pin_host == "example.com"
         ));
         Ok(())
@@ -200,8 +201,8 @@ mod tests {
         assert!(matches!(
             target,
             Some(target)
-                if target.resolution_target.host() == "example.com"
-                    && target.resolution_target.port() == 8443
+                if target.lookup.host() == "example.com"
+                    && target.lookup.port() == 8443
                     && target.pin_host == "example.com."
         ));
         Ok(())

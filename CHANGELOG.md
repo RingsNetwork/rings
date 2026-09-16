@@ -7,35 +7,101 @@
 - `rings run` owns a set of managed bootstrap targets for the life of the process. The new
   `bootstrap.peers` config section (written empty by `rings init`) and `rings run --bootstrap-seed
   <url>` name them in the seed-document shape; `rings connect node|seed` keep their one-shot
-  semantics, and `connect seed` now pins the handshake to each entry's DID.
-  - Reachability is a routed successor lookup for the target's DID, so a target that is directly
-    connected or that other peers can route to is never forced into a direct edge, and a key in
-    the local successor interval is refuted without a probe.
+  semantics.
+  - Reachability is a routed successor lookup for the target's DID. A target with an admitted
+    connection record, ready or recovering, is left to the swarm; a target other peers can route
+    to is never forced into a direct edge; a key in the local successor interval is refuted
+    without a probe.
   - An unreachable target is redialed through its HTTP endpoint five times, each attempt at
     least two seconds after the previous one settled, then every five minutes plus up to thirty
-    seconds of jitter. A redial succeeds only once the swarm admits the peer; an endpoint
-    answering as a different DID is refused before any offer is created; a handshake already in
-    flight defers the attempt for two seconds without counting; a failed exchange or admission
-    timeout cancels the node's own pending attempt.
+    seconds of jitter.
+  - A redial succeeds only once the swarm admits the peer. An endpoint answering as a different
+    DID is refused before any offer is created. A handshake already pending, whichever side
+    started it, defers the attempt for two seconds without counting. A failed exchange or an
+    admission timeout cancels the generation the redial reserved, and no other.
   - A target leaving the local DHT, whatever caused it, triggers an immediate reassessment and
     restarts the burst. At most one handshake per target is in flight, targets retry
     independently, and shutdown cancels any handshake in progress.
-  - Invalid targets (unparsable DID, non-public URL, one DID with differing endpoints, one
-    endpoint under two DIDs, or the node itself) stop `rings run` before it listens; an entry
-    repeated verbatim is merged.
+  - Invalid targets stop `rings run` before it listens: an unparsable DID, a URL failing the
+    remote endpoint policy, one DID listed with conflicting entries, one endpoint listed under
+    two DIDs, or the node itself. An entry repeated verbatim is merged.
 - `SwarmEvent::PeerRetired` reports the retirement of an admitted connection whose admission
   was announced as `ConnectionStateChange { Connected }`, whichever path retired it (remote
   terminal state, data-channel close, liveness or stabilization removal, eviction, explicit
-  disconnect), through the same ordered per-peer delivery and before any terminal state event;
-  a topology prune that keeps the record emits nothing.
-- `Swarm::is_peer_connected`, `Swarm::has_connection_attempt` and
-  `Swarm::cancel_pending_connection` expose the transport's readiness, record and cancellation
-  facts; `RemoteRpcEndpoint` is the validated form of a remote node's public RPC URL and every
-  remote client is built from it with a request timeout; `Processor::connect_peer_via_http`
-  performs the HTTP handshake with the answering DID optionally pinned (the JSON-RPC handler
-  delegates to it); the node `Backend` accepts a `BackendObserver` that receives application
-  lookup reports from its single payload decode, and admissions and departures from its swarm
-  events.
+  disconnect), through the same ordered per-peer delivery and before any terminal state event.
+  A topology prune that keeps the record emits nothing.
+- `Swarm::offer_connection`, `Swarm::accept_answer_for` and `Swarm::cancel_connection_attempt`
+  run a handshake pinned to the connection generation the offer reserved, so an answer is never
+  applied to, and a cancellation never hits, a handshake the peer started meanwhile.
+  `Swarm::is_peer_connected`, `Swarm::is_peer_admitted` and `Swarm::has_pending_connection`
+  expose readiness, admission and pending-handshake facts.
+- `RemoteRpcEndpoint` is the validated form of a remote node's public RPC URL; every remote
+  client is built from it with a request timeout.
+- `Processor::connect_peer_via_http` performs the HTTP handshake with the answering DID
+  optionally pinned and returns the accepted `Handshake`; the JSON-RPC handlers delegate to it.
+- The node `Backend` accepts a `BackendObserver` that receives application lookup reports from
+  its single payload decode, and admissions and retirements from its swarm events.
+
+### Changed
+
+- `rings connect seed` validates every entry of the document before dialing any, skips peers
+  that are already admitted, and pins each handshake to the entry's DID, so an endpoint
+  answering as another node is refused before an offer is created.
+
+### Security
+
+- Updated `rustls` to the RUSTSEC-2026-0285 fixed release and documented the cooldown allowlist
+  entry as a security exception rather than a dependency pin.
+
+## 0.26.0
+
+### Breaking changes
+
+- Finger-table lookup reports now carry a fresh UUID correlation token instead of a bare slot
+  index, and topology query requests/reports carry a mandatory UUID correlation token. The wire
+  format is incompatible with 0.25.x, so every node in an overlay must upgrade together.
+- `FingerTable` equality now covers its complete serialized maintenance and convergence state.
+  Callers that need hint-only equality should compare `FingerTable::list()` instead.
+- `CorrectChord::stabilize` is removed. A successor's topology report changes the successor list
+  only when it echoes the correlation token issued by `pre_stabilize`; there is no token-less path
+  by which an arbitrary `TopoInfo` can refine successors.
+- `FingerTable::set`, `remove`, and `set_fix` are no longer public. Finger hints change only
+  through the topology transition, which is the single owner of the hint-join and removal laws;
+  the in-place mutators remain as test fixtures.
+- `FingerTable::fix_finger_index` and the `fix_finger_index` field of `TopologyState` are
+  removed, and `TopologyState::new` no longer takes a cursor. The finger table has one cursor,
+  owned by the convergence state, at which both lookup selection and periodic revalidation resume.
+
+### Added
+
+- Finger-table convergence distinguishes inferred hints from verified ranges. One lookup proves
+  every consecutive slot owned by the reported successor; topology changes invalidate only the
+  affected slots, losing the last successor invalidates all membership evidence, and correlated
+  request epochs reject stale or expired in-flight results at commit time. Lookups are issued for
+  unverified ranges in cyclic order, resuming after the range the previous attempt proved or
+  failed, so a range whose successor never completes a handshake costs one attempt per rotation
+  instead of starving every range above it, and periodic revalidation is deferred by pending work
+  only while that work is succeeding.
+- Automatic convergence permits one lookup per node at a time, spreads simultaneous fleet starts
+  over a node-lifecycle-randomized 10-second phase window, reuses that phase across repeated browser
+  listener restarts, rephases deadlines left stale by browser suspension, and has no catch-up
+  bursts. Send or handshake failure, invalid reports, lookup timeout, and admission-lease expiry use a
+  2/4/8/16/32/60-second exponential retry floor plus a full jitter window; only an applied range
+  proof resets the failure level. Normal topology churn invalidates stale evidence without being
+  counted as a network failure. Timely lookup proofs may wait up to 210 seconds for transport
+  admission (longer than the 180-second handshake generation that owns them once reserved), after
+  which the lease is released into the same bounded retry schedule. A due
+  convergence turn may yield to at most two topology or storage phases before it is reserved.
+- Stabilization and successor-list reports are bound to one current reporter and UUID and atomically
+  claimed before connection effects. A claim is released on every exit path of its handler, a new
+  round does not supersede a report that is still being processed, and a claimed report keeps its
+  remaining candidate budget while its reporter stays a successor (its own admissions extend the
+  list without revoking it). Candidates are deduplicated and ordered by transport quality;
+  successor-list sync is capped by successor capacity, while stabilization may additionally admit
+  one predecessor. Browser listener generations are serialized so rapid `stop`/`listen` cycles
+  cannot run duplicate maintenance daemons.
+- Release metadata for workspace crates, examples, the npm package, and lockfiles now records
+  `0.26.0` as one protocol generation so path consumers do not describe a mixed 0.25/0.26 tree.
 
 ### Security
 

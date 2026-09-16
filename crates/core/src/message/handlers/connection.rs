@@ -145,7 +145,11 @@ impl HandleMsg<ConnectNodeReport> for MessageHandler {
                 sdp_bytes = msg.sdp.len(),
                 "CONNECT_NODE answer accept start"
             );
-            match self.transport.accept_remote_connection(peer, msg).await {
+            match self
+                .transport
+                .accept_remote_connection(peer, msg, None)
+                .await
+            {
                 Ok(()) => {
                     tracing::trace!(
                         local = %self.dht.did,

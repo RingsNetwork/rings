@@ -53,14 +53,14 @@ use rand::SeedableRng;
 use rings_core::dht::Did;
 
 /// Attempts in the rapid burst that follows a loss of reachability.
-pub(crate) const BURST_ATTEMPTS: u8 = 5;
+const BURST_ATTEMPTS: u8 = 5;
 /// Delay between consecutive attempts inside the rapid burst, and after a deferred turn.
-pub(crate) const BURST_DELAY: Duration = Duration::from_secs(2);
+const BURST_DELAY: Duration = Duration::from_secs(2);
 /// Base cadence once the burst is exhausted, and the recheck period of a reachable target.
-pub(crate) const BASE_INTERVAL: Duration = Duration::from_secs(300);
+const BASE_INTERVAL: Duration = Duration::from_secs(300);
 /// Inclusive upper bound of the uniform jitter added to every `BASE_INTERVAL` delay, so a fleet
 /// that lost the same target at the same instant does not redial it in lockstep.
-pub(crate) const JITTER_WINDOW: Duration = Duration::from_secs(30);
+const JITTER_WINDOW: Duration = Duration::from_secs(30);
 
 /// Lifecycle phase of one managed target; see the module diagram.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -73,7 +73,7 @@ pub(crate) enum TargetPhase {
         /// Earliest instant of the next turn.
         not_before_ms: u64,
     },
-    /// A turn is in flight; `lost` records a departure of the target noticed meanwhile.
+    /// A turn is in flight; `lost` records a retirement of the target noticed meanwhile.
     Busy {
         /// Consecutive failed dials carried into this turn.
         failures: u8,

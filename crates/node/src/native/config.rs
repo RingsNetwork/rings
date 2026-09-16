@@ -623,7 +623,7 @@ gateway:
     /// explicit section round-trips its peers including an optional token.
     #[test]
     fn bootstrap_section_defaults_to_empty_and_round_trips_peers() {
-        let base = serde_yaml::to_string(&Config::new("session_sk")).unwrap_or_default();
+        let base = serde_yaml::to_string(&Config::new("session_sk")).expect("config serializes");
         let without = base.replace("bootstrap:\n  peers: []\n", "");
         assert!(!without.contains("bootstrap:"));
         assert!(config_from(&without).bootstrap.peers.is_empty());

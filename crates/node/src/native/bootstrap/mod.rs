@@ -83,12 +83,20 @@ pub enum BootstrapTargetError {
     /// The entry's `did` does not parse.
     #[error("bootstrap peer did is not a DID: {0}")]
     NotADid(String),
+    /// The entry's `url` fails the remote RPC endpoint policy.
+    #[error("bootstrap peer {did} has an unusable endpoint: {reason}")]
+    UnusableEndpoint {
+        /// The entry's DID.
+        did: Did,
+        /// The policy's refusal.
+        reason: String,
+    },
     /// The entry names the node itself.
     #[error("bootstrap peer {0} is this node itself")]
     LocalNode(Did),
     /// The DID is listed again with a different endpoint or token.
-    #[error("bootstrap peer {0} is listed with differing endpoints")]
-    DifferingEndpoints(Did),
+    #[error("bootstrap peer {0} is listed with conflicting entries")]
+    ConflictingEntries(Did),
     /// The endpoint is listed again under a different DID.
     #[error("bootstrap endpoint {0} is listed under two DIDs")]
     EndpointUnderTwoDids(RemoteRpcEndpoint),
@@ -96,9 +104,9 @@ pub enum BootstrapTargetError {
 
 /// One validated managed target: a parsed DID and a public HTTP(S) handshake endpoint.
 #[derive(Eq, PartialEq)]
-pub struct ManagedTarget {
+pub(crate) struct ManagedTarget {
     did: Did,
-    url: RemoteRpcEndpoint,
+    endpoint: RemoteRpcEndpoint,
     api_token: Option<String>,
 }
 
@@ -120,8 +128,8 @@ impl ManagedTarget {
     }
 
     /// Validated handshake endpoint.
-    pub(crate) fn url(&self) -> &RemoteRpcEndpoint {
-        &self.url
+    pub(crate) fn endpoint(&self) -> &RemoteRpcEndpoint {
+        &self.endpoint
     }
 
     /// Bearer token for a peer that gates its handshake, never logged.
@@ -135,7 +143,7 @@ impl ManagedTarget {
             Some(Overlap::Verbatim)
         } else if self.did == other.did {
             Some(Overlap::SameDid)
-        } else if self.url == other.url {
+        } else if self.endpoint == other.endpoint {
             Some(Overlap::SameEndpoint)
         } else {
             None
@@ -149,7 +157,7 @@ impl fmt::Debug for ManagedTarget {
         formatter
             .debug_struct("ManagedTarget")
             .field("did", &self.did)
-            .field("url", &self.url.as_str())
+            .field("endpoint", &self.endpoint.as_str())
             .field("api_token", &self.api_token.as_ref().map(|_| "[REDACTED]"))
             .finish()
     }
@@ -162,17 +170,22 @@ impl TryFrom<SeedPeer> for ManagedTarget {
     fn try_from(peer: SeedPeer) -> Result<Self> {
         let did = Did::from_str(peer.did.as_str())
             .map_err(|_| BootstrapTargetError::NotADid(peer.did))?;
-        let url = RemoteRpcEndpoint::parse(peer.url.as_str())?;
+        let endpoint = RemoteRpcEndpoint::parse(peer.url.as_str()).map_err(|error| {
+            BootstrapTargetError::UnusableEndpoint {
+                did,
+                reason: error.to_string(),
+            }
+        })?;
         Ok(Self {
             did,
-            url,
+            endpoint,
             api_token: peer.api_token,
         })
     }
 }
 
 /// Validated managed targets: one per DID, one per endpoint, none of them the local node.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct BootstrapTargets(Vec<ManagedTarget>);
 
 impl BootstrapTargets {
@@ -191,10 +204,10 @@ impl BootstrapTargets {
             match targets.iter().find_map(|known| known.overlap(&target)) {
                 Some(Overlap::Verbatim) => continue,
                 Some(Overlap::SameDid) => {
-                    return Err(BootstrapTargetError::DifferingEndpoints(target.did).into());
+                    return Err(BootstrapTargetError::ConflictingEntries(target.did).into());
                 }
                 Some(Overlap::SameEndpoint) => {
-                    return Err(BootstrapTargetError::EndpointUnderTwoDids(target.url).into());
+                    return Err(BootstrapTargetError::EndpointUnderTwoDids(target.endpoint).into());
                 }
                 None => targets.push(target),
             }
@@ -387,7 +400,7 @@ async fn turn(port: Arc<dyn BootstrapPort>, target: Arc<ManagedTarget>) -> (Did,
     }
     match port.dial(target.as_ref()).await {
         Ok(()) => {
-            tracing::info!(target = %did, url = %target.url, "bootstrap target redialed");
+            tracing::info!(target = %did, endpoint = %target.endpoint, "bootstrap target redialed");
             (did, TurnOutcome::Reachable)
         }
         Err(DialFailure::InFlight) => {
@@ -395,7 +408,7 @@ async fn turn(port: Arc<dyn BootstrapPort>, target: Arc<ManagedTarget>) -> (Did,
             (did, TurnOutcome::Deferred)
         }
         Err(DialFailure::Failed(error)) => {
-            tracing::warn!(target = %did, url = %target.url, %error, "bootstrap redial failed");
+            tracing::warn!(target = %did, endpoint = %target.endpoint, %error, "bootstrap redial failed");
             (did, TurnOutcome::DialFailed)
         }
     }

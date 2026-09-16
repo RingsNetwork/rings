@@ -80,12 +80,13 @@ impl<K: Copy + Eq + Hash, V> Rendezvous<K, V> {
             Some(waiter) => {
                 let _ = waiter.send(value);
             }
-            None if self.early_capacity == 0 => {}
+            // Law: the oldest early values are dropped so that at most `early_capacity` are
+            // kept; a capacity of zero keeps none.
             None => {
-                if state.early.len() >= self.early_capacity {
+                state.early.push_back((key, value));
+                if state.early.len() > self.early_capacity {
                     state.early.pop_front();
                 }
-                state.early.push_back((key, value));
             }
         }
         Ok(())
@@ -142,7 +143,7 @@ pub(crate) struct PeerLosses {
 }
 
 impl PeerLosses {
-    /// Record the departure of `peer` and wake the supervisor.
+    /// Record the retirement of `peer` as a loss and wake the supervisor.
     pub(crate) fn observe(&self, peer: Did) -> Result<()> {
         lock(&self.lost)?.insert(peer);
         self.wake.notify_one();
@@ -161,7 +162,7 @@ impl PeerLosses {
 }
 
 /// What the swarm reports about the managed targets: the successor lookup reports the probe
-/// waits for, the admissions the dial waits for, and the departures the supervisor reacts to.
+/// waits for, the admissions the dial waits for, and the retirements the supervisor reacts to.
 /// Installed on the [`Backend`] as its [`BackendObserver`].
 ///
 /// [`Backend`]: crate::extension::Backend
@@ -193,7 +194,7 @@ impl ReachabilityEvidence {
         &self.admissions
     }
 
-    /// The departure record.
+    /// The record of retired targets.
     pub(crate) fn losses(&self) -> &PeerLosses {
         &self.losses
     }
@@ -214,7 +215,7 @@ impl BackendObserver for ReachabilityEvidence {
         }
     }
 
-    /// Record the departure as a loss for the supervisor; a poisoned record is logged, never
+    /// Record the retirement as a loss for the supervisor; a poisoned record is logged, never
     /// propagated.
     fn peer_retired(&self, peer: Did) {
         if let Err(error) = self.losses.observe(peer) {

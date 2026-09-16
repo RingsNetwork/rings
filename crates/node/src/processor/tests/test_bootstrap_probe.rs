@@ -16,6 +16,7 @@ use crate::extension::Backend;
 use crate::native::bootstrap::BootstrapPort;
 use crate::native::bootstrap::BootstrapTargetError;
 use crate::native::bootstrap::BootstrapTargets;
+use crate::native::bootstrap::DialFailure;
 use crate::native::bootstrap::ManagedTarget;
 use crate::native::bootstrap::ProcessorPort;
 use crate::native::bootstrap::ReachabilityEvidence;
@@ -142,7 +143,10 @@ async fn routed_probe_reports_presence_through_one_hop() {
         "a directly connected target is reachable without a lookup"
     );
     assert!(
-        !c.processor.swarm.is_peer_connected(a.did()),
+        !c.processor
+            .swarm
+            .is_peer_admitted(a.did())
+            .expect("records readable"),
         "the probe for A must be routed, not short-circuited"
     );
     assert!(
@@ -228,7 +232,7 @@ async fn backend_translates_admission_and_retirement_only() {
 /// A disconnect decided by the local node retires the peer through the core's single
 /// retirement transition and reaches the evidence as a loss, without any physical terminal
 /// state. The disconnect follows the admission *event*, not merely transport readiness: by the
-/// departure law a retirement before the admission was announced is silent.
+/// retirement law a retirement before the admission was announced is silent.
 #[tokio::test]
 async fn a_local_disconnect_is_reported_as_a_peer_retirement() {
     let _guard = network_test_guard().await;
@@ -262,6 +266,33 @@ async fn a_local_disconnect_is_reported_as_a_peer_retirement() {
         [b.did()].into_iter().collect(),
         "the retirement is observed before disconnect returns"
     );
+}
+
+/// A pending handshake to the target, here one this node reserved by offering, makes a dial a
+/// deferral before any request leaves: the never-dialed endpoint would otherwise fail to
+/// resolve.
+#[tokio::test]
+async fn a_pending_handshake_defers_the_dial_without_a_request() {
+    let _guard = network_test_guard().await;
+    let a = ProbeNode::new(SecretKey::random()).await;
+    let b = ProbeNode::new(SecretKey::random()).await;
+    let (attempt, _offer) = a
+        .processor
+        .swarm
+        .offer_connection(b.did())
+        .await
+        .expect("offer reserves a generation");
+    let port = ProcessorPort::new(a.processor.clone(), a.evidence.clone());
+    assert!(matches!(
+        port.dial(&target(b.did())).await,
+        Err(DialFailure::InFlight)
+    ));
+    assert!(a
+        .processor
+        .swarm
+        .cancel_connection_attempt(attempt)
+        .await
+        .expect("records readable"));
 }
 
 /// The bootstrap validation of a real node's own DID.

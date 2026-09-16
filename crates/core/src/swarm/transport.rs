@@ -129,7 +129,7 @@ use super::callback::InboundCapacity;
 
 /// Everything a [`SwarmTransport`] is constructed from.
 pub(crate) struct SwarmTransportParts {
-    /// Overlay the transport signs for and admits peers of.
+    /// Overlay whose peers this transport admits and signs for.
     pub(crate) network_id: u32,
     /// WebRTC ICE and address configuration.
     pub(crate) webrtc: SwarmWebrtcConfig,
@@ -143,8 +143,7 @@ pub(crate) struct SwarmTransportParts {
     pub(crate) transaction_replay: Arc<TransactionReplay>,
     /// Storage, virtual-node and reassembly settings.
     pub(crate) settings: SwarmTransportSettings,
-    /// The application the transport delivers swarm events to; shared with the swarm so
-    /// `Swarm::set_callback` replaces the target of both.
+    /// The application callback slot; see `SwarmTransport::callback_slot`.
     pub(crate) callback: SwarmCallbackSlot,
 }
 
@@ -459,16 +458,15 @@ impl SwarmTransport {
 
     /// Announce a retirement through `turn`, the peer's ordered delivery turn acquired before
     /// the record was retired: [`SwarmEvent::PeerRetired`] is delivered iff the admission it
-    /// ends was announced, so the application sees one departure per admission it saw, in
+    /// ends was announced, so the application sees one retirement per admission it saw, in
     /// the order the swarm decided them. A failing application callback is logged, never
-    /// propagated: the departure has already happened.
+    /// propagated: the retirement has already happened.
     pub(crate) async fn announce_retirement(
         &self,
         turn: SwarmEventDeliveryTurn,
         retirement: Retirement,
     ) {
         if !retirement.announced_admission {
-            drop(turn);
             return;
         }
         let peer = retirement.peer;
@@ -736,7 +734,9 @@ impl SwarmTransport {
             .map(|(_, offer)| offer)
     }
 
-    async fn prepare_connection_offer_with_attempt(
+    /// Reserve a connection generation for `peer` and produce its offer; the attempt names the
+    /// generation so the caller can accept or cancel exactly what it reserved.
+    pub(crate) async fn prepare_connection_offer_with_attempt(
         &self,
         peer: Did,
         callback: InnerSwarmCallback,
@@ -926,10 +926,15 @@ impl SwarmTransport {
     }
 
     /// Accept the answer of remote connection.
-    pub async fn accept_remote_connection(
+    ///
+    /// With `expected`, the answer is applied only to that generation: a pending record that is
+    /// another generation (the peer's own offer superseded ours) is refused as
+    /// `ConnectionAttemptSuperseded` before the transport is touched.
+    pub(crate) async fn accept_remote_connection(
         &self,
         peer: Did,
         answer_msg: &ConnectNodeReport,
+        expected: Option<PendingConnectionAttempt>,
     ) -> Result<()> {
         if !self.accepts_connection_answer(answer_msg) {
             return Err(Error::InvalidMessage(
@@ -942,6 +947,14 @@ impl SwarmTransport {
         let (attempt, conn) = self
             .pending_connection_with_attempt(peer)?
             .ok_or(Error::SwarmMissTransport(peer))?;
+        if let Some(expected) = expected {
+            if expected != attempt {
+                return Err(Error::ConnectionAttemptSuperseded {
+                    peer,
+                    generation: expected.generation,
+                });
+            }
+        }
         tracing::trace!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,

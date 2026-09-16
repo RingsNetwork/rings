@@ -35,7 +35,13 @@ use crate::message::PayloadSender;
 use crate::message::ReplayCounters;
 use crate::swarm::callback::SharedSwarmCallback;
 use crate::swarm::inbox::SwarmInboxDelivery;
+use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
+
+/// An opaque handle to one connection generation this node reserved by offering; accepted or
+/// cancelled only through the swarm that issued it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ConnectionAttempt(PendingConnectionAttempt);
 
 /// The transport and dht management.
 pub struct Swarm {
@@ -168,22 +174,24 @@ impl Swarm {
         self.transport.get_connection_ids()
     }
 
-    /// Whether the transport holds any connection record for `peer`: a handshake pending or
-    /// admitting, or an admitted connection. A new offer to such a peer is refused as
-    /// `AlreadyConnected`, so a caller that would dial checks this first.
-    pub fn has_connection_attempt(&self, peer: Did) -> Result<bool> {
-        Ok(self.transport.unadmitted_attempt(peer)?.is_some()
-            || self.transport.active_attempt(peer)?.is_some())
+    /// Whether the transport holds an unadmitted handshake to `peer` (pending or admitting),
+    /// whichever side started it. A new offer to such a peer is refused as `AlreadyConnected`.
+    pub fn has_pending_connection(&self, peer: Did) -> Result<bool> {
+        Ok(self.transport.unadmitted_attempt(peer)?.is_some())
     }
 
-    /// Cancel this node's own unadmitted handshake to `peer`, when one is pending or
-    /// admitting; an admitted connection is left alone. Returns whether an attempt was
+    /// Whether `peer` holds an admitted connection record, ready or recovering. Its transport
+    /// is the swarm's to heal or retire; a retirement is reported as
+    /// [`SwarmEvent::PeerRetired`](callback::SwarmEvent::PeerRetired).
+    pub fn is_peer_admitted(&self, peer: Did) -> Result<bool> {
+        Ok(self.transport.active_attempt(peer)?.is_some())
+    }
+
+    /// Cancel the unadmitted handshake `attempt`, if it still owns its peer's slot; an attempt
+    /// that was superseded or admitted meanwhile is left alone. Returns whether it was
     /// cancelled.
-    pub async fn cancel_pending_connection(&self, peer: Did) -> Result<bool> {
-        let Some(attempt) = self.transport.unadmitted_attempt(peer)? else {
-            return Ok(false);
-        };
-        self.transport.cancel_pending_connection(attempt).await
+    pub async fn cancel_connection_attempt(&self, attempt: ConnectionAttempt) -> Result<bool> {
+        self.transport.cancel_pending_connection(attempt.0).await
     }
 
     /// Whether `peer` has an admitted direct transport that is ready to carry payloads.
@@ -235,9 +243,18 @@ impl Swarm {
     /// Create new connection and its answer. This function will wrap the offer inside a payload
     /// with verification.
     pub async fn create_offer(&self, peer: Did) -> Result<MessagePayload> {
-        let offer_msg = self
+        self.offer_connection(peer)
+            .await
+            .map(|(_, payload)| payload)
+    }
+
+    /// Reserve a connection generation for `peer` and create its offer, returning the attempt
+    /// that names the generation so the caller can accept the answer for it or cancel it
+    /// without touching a handshake the peer started meanwhile.
+    pub async fn offer_connection(&self, peer: Did) -> Result<(ConnectionAttempt, MessagePayload)> {
+        let (attempt, offer_msg) = self
             .transport
-            .prepare_connection_offer(peer, self.inner_callback()?)
+            .prepare_connection_offer_with_attempt(peer, self.inner_callback()?)
             .await?;
 
         // This payload has fake next_hop.
@@ -247,7 +264,7 @@ impl Swarm {
             .signed_payload(Message::ConnectNodeSend(offer_msg), self.did(), peer)
             .await?;
 
-        Ok(payload)
+        Ok((ConnectionAttempt(attempt), payload))
     }
 
     /// Answer the offer of remote connection. This function will verify the answer payload and
@@ -290,6 +307,28 @@ impl Swarm {
     /// Accept the answer of remote connection. This function will verify the answer payload and
     /// will return its did with the connection.
     pub async fn accept_answer(&self, answer_payload: MessagePayload) -> Result<()> {
+        self.accept_answer_with(None, answer_payload).await
+    }
+
+    /// Accept the answer of remote connection for the generation `attempt` reserved by
+    /// [`Swarm::offer_connection`]; refused as `ConnectionAttemptSuperseded` when the peer's slot
+    /// now holds another generation, so the answer is never applied to a handshake the peer
+    /// started.
+    pub async fn accept_answer_for(
+        &self,
+        attempt: ConnectionAttempt,
+        answer_payload: MessagePayload,
+    ) -> Result<()> {
+        self.accept_answer_with(Some(attempt.0), answer_payload)
+            .await
+    }
+
+    /// Verify the answer payload and apply it to the pending generation, or to `expected` only.
+    async fn accept_answer_with(
+        &self,
+        expected: Option<PendingConnectionAttempt>,
+        answer_payload: MessagePayload,
+    ) -> Result<()> {
         if !answer_payload.verify_transaction_and_payload(self.network_id()) {
             return Err(Error::VerifySignatureFailed);
         }
@@ -309,6 +348,8 @@ impl Swarm {
             .await?;
 
         let peer = answer_payload.transaction.signer();
-        self.transport.accept_remote_connection(peer, msg).await
+        self.transport
+            .accept_remote_connection(peer, msg, expected)
+            .await
     }
 }

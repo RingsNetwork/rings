@@ -41,11 +41,11 @@ impl HandleRpc<ConnectPeerViaHttpRequest, ConnectPeerViaHttpResponse> for Proces
     ) -> Result<ConnectPeerViaHttpResponse> {
         let ConnectPeerViaHttpRequest { url, api_token } = req;
         let endpoint = RemoteRpcEndpoint::parse(url.as_str())?;
-        let did = self
+        let handshake = self
             .connect_peer_via_http(&endpoint, api_token.as_deref(), HandshakePeer::Any)
             .await?;
         Ok(ConnectPeerViaHttpResponse {
-            did: did.to_string(),
+            did: handshake.peer.to_string(),
         })
     }
 }
@@ -66,17 +66,28 @@ impl HandleRpc<ConnectWithSeedRequest, ConnectWithSeedResponse> for Processor {
     async fn handle_rpc(&self, req: ConnectWithSeedRequest) -> Result<ConnectWithSeedResponse> {
         let seed: Seed = Seed::try_from(req)?;
 
-        let local = self.swarm.did();
-        let is_self_or_connected = |did: Did| did == local || self.swarm.is_peer_connected(did);
+        // Every entry is validated before any is dialed, so an invalid document dials nothing.
+        let entries = seed
+            .peers
+            .into_iter()
+            .map(|peer| {
+                let did = s2d(peer.did.as_str())?;
+                let endpoint = RemoteRpcEndpoint::parse(peer.url.as_str())?;
+                Ok((did, endpoint, peer.api_token))
+            })
+            .collect::<Result<Vec<_>>>()?;
 
-        let mut tasks = Vec::with_capacity(seed.peers.len());
-        for peer in seed.peers {
-            let did = s2d(peer.did.as_str())?;
-            if is_self_or_connected(did) {
+        let local = self.swarm.did();
+        let mut tasks = Vec::with_capacity(entries.len());
+        for (did, endpoint, api_token) in entries {
+            if did == local
+                || self
+                    .swarm
+                    .is_peer_admitted(did)
+                    .map_err(ServerError::from)?
+            {
                 continue;
             }
-            let endpoint = RemoteRpcEndpoint::parse(peer.url.as_str())?;
-            let api_token = peer.api_token;
             tasks.push(async move {
                 self.connect_peer_via_http(
                     &endpoint,
@@ -84,14 +95,12 @@ impl HandleRpc<ConnectWithSeedRequest, ConnectWithSeedResponse> for Processor {
                     HandshakePeer::Pinned(did),
                 )
                 .await
+                .map(|_| ())
                 .map_err(Error::from)
             });
         }
 
-        let results = join_all(tasks).await;
-        if let Some(failed) = results.into_iter().find(Result::is_err) {
-            failed?;
-        }
+        join_all(tasks).await.into_iter().collect::<Result<()>>()?;
 
         Ok(ConnectWithSeedResponse {})
     }

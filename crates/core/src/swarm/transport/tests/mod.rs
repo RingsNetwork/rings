@@ -62,7 +62,6 @@ use crate::utils::GenerationWitness;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::utils::Witness;
 
-mod test_departure_events;
 mod test_events;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 mod test_finger;
@@ -74,6 +73,7 @@ mod test_readiness;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 mod test_retention;
 mod test_retirement;
+mod test_retirement_events;
 
 /// Latched test event: set by the system under test, awaited by event.
 ///

@@ -270,7 +270,7 @@ impl Running {
         self.evidence
             .losses()
             .observe(target)
-            .expect("losses must accept a departure");
+            .expect("losses must accept a retirement");
     }
 
     /// Request stop and wait for the run to return.
@@ -333,7 +333,7 @@ async fn recovery_resets_the_burst_and_rechecks_without_dialing() {
     running.shutdown().await;
 }
 
-/// A departure triggers an immediate probe and dial; a second loss restarts from the short delay.
+/// A retirement triggers an immediate probe and dial; a second loss restarts from the short delay.
 #[tokio::test(start_paused = true)]
 async fn a_loss_reassesses_at_once_and_a_second_loss_restarts_the_burst() {
     let target = Did::from(1);
@@ -493,16 +493,11 @@ fn targets_validate_dids_urls_duplicates_and_self() {
         Some(BootstrapTargetError::NotADid("not-a-did".to_string()))
     );
     assert!(matches!(
-        BootstrapTargets::from_config(
-            BootstrapConfig {
-                peers: vec![SeedPeer {
-                    url: "http://127.0.0.1:50001/".to_string(),
-                    ..peer(1)
-                }],
-            },
-            local,
-        ),
-        Err(Error::UnsafeRemoteRpcTarget(_))
+        rejection(vec![SeedPeer {
+            url: "http://127.0.0.1:50001/".to_string(),
+            ..peer(1)
+        }]),
+        Some(BootstrapTargetError::UnusableEndpoint { did, .. }) if did == Did::from(1)
     ));
     assert_eq!(
         rejection(vec![
@@ -512,7 +507,7 @@ fn targets_validate_dids_urls_duplicates_and_self() {
             },
             peer(1),
         ]),
-        Some(BootstrapTargetError::DifferingEndpoints(Did::from(1)))
+        Some(BootstrapTargetError::ConflictingEntries(Did::from(1)))
     );
     assert!(matches!(
         rejection(vec![peer(1), SeedPeer {

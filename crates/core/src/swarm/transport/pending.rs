@@ -110,11 +110,6 @@ impl ConnectionLifecycleBoundary {
     }
 }
 
-/// Identifies one pending handshake for a peer.
-///
-/// A peer can have a replacement handshake after a timeout. Callbacks carry
-/// this token so a late callback from the replaced connection cannot promote
-/// the newer handshake into the active routing set.
 /// Witness that an admitted connection record was retired under the lifecycle boundary.
 ///
 /// It must be announced through `SwarmTransport::announce_retirement`, which delivers
@@ -122,12 +117,17 @@ impl ConnectionLifecycleBoundary {
 /// the admission it ends was itself announced. Law: for every generation,
 /// `Connected` delivered ⟺ `PeerRetired` delivered.
 #[must_use = "a retirement must be announced through announce_retirement"]
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub(crate) struct Retirement {
     pub(super) peer: Did,
     pub(super) announced_admission: bool,
 }
 
+/// Identifies one pending handshake for a peer.
+///
+/// A peer can have a replacement handshake after a timeout. Callbacks carry
+/// this token so a late callback from the replaced connection cannot promote
+/// the newer handshake into the active routing set.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct PendingConnectionAttempt {
     /// Peer this logical connection generation is trying to own.
@@ -644,9 +644,9 @@ impl SwarmTransport {
     }
 
     /// Mark the admission of `attempt` as announced to the application, iff `attempt` still
-    /// owns the active slot. Atomic with retirement under the lifecycle boundary, so exactly
-    /// one of {`Connected` delivered, `PeerRetired` suppressed} holds for every generation.
-    pub(crate) fn begin_connected_announcement(
+    /// owns the active slot. Atomic with retirement under the lifecycle boundary, so for every
+    /// generation `Connected` delivered ⟺ `PeerRetired` delivered.
+    pub(crate) fn mark_admission_announced(
         &self,
         attempt: PendingConnectionAttempt,
     ) -> Result<bool> {
@@ -659,21 +659,12 @@ impl SwarmTransport {
         Ok(true)
     }
 
-    pub(super) fn retire_active_connection_with<T>(
-        &self,
-        attempt: PendingConnectionAttempt,
-        action: impl FnOnce(&ActiveConnectionSet) -> Result<T>,
-    ) -> Result<Option<(T, Retirement)>> {
-        let _lifecycle = self.connection_lifecycle()?;
-        self.retire_active_connection_locked(attempt, |active| action(active).map(Some))
-            .map(Option::flatten)
-    }
-
     /// Retire `attempt` only if `action` decides to, under the lifecycle boundary.
     ///
     /// Post: `Ok(None)` iff `attempt` was not the active generation;
     /// `Ok(Some(None))` iff `action` declined and no local state changed;
-    /// `Ok(Some(Some(value)))` iff `action` committed and the record was retired.
+    /// `Ok(Some(Some((value, retirement))))` iff `action` committed and the record was
+    /// retired, with the witness the caller must announce.
     pub(super) fn retire_active_connection_if<T>(
         &self,
         attempt: PendingConnectionAttempt,
@@ -706,7 +697,7 @@ impl SwarmTransport {
         };
 
         // These mutations are infallible after the DHT action commits. If the
-        // action fails or declines, all four guards drop without changing
+        // action fails or declines, all five guards drop without changing
         // local state.
         lifecycles.remove_active(attempt);
         pending_finger_updates.retain(|pending, _| pending.peer != attempt.peer);
@@ -721,18 +712,30 @@ impl SwarmTransport {
         }))))
     }
 
+    /// Unconditional retirement for tests that assert the retirement itself; the announcement
+    /// witness is projected away.
+    #[cfg(test)]
+    pub(super) fn retire_active_connection_for_test<T>(
+        &self,
+        attempt: PendingConnectionAttempt,
+        action: impl FnOnce(&ActiveConnectionSet) -> Result<T>,
+    ) -> Result<Option<T>> {
+        self.retire_active_connection_if(attempt, |active| action(active).map(Some))
+            .map(|retired| retired.flatten().map(|(value, _witness)| value))
+    }
+
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(super) fn retire_active_connection_with_observer_for_test<T>(
         &self,
         attempt: PendingConnectionAttempt,
         before_lifecycle_gate: impl FnOnce(),
         action: impl FnOnce(&ActiveConnectionSet) -> Result<T>,
-    ) -> Result<Option<(T, Retirement)>> {
+    ) -> Result<Option<T>> {
         let _lifecycle = self
             .connection_lifecycle
             .lock_with_waiter_observer_for_test(before_lifecycle_gate)?;
         self.retire_active_connection_locked(attempt, |active| action(active).map(Some))
-            .map(Option::flatten)
+            .map(|retired| retired.flatten().map(|(value, _witness)| value))
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]

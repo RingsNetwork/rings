@@ -177,9 +177,12 @@ pub enum SwarmEvent {
     /// of the physical event or local decision behind it. Law: for every generation,
     /// `Connected` was delivered ⟺ `PeerRetired` is delivered, and in that order under the
     /// peer's ordered delivery. A topology prune that keeps the record (a `Disconnected`
-    /// transport allowed to recover) emits nothing.
+    /// transport allowed to recover) emits nothing. `PeerRetired` resolves the callback set at
+    /// delivery time, while `ConnectionStateChange` goes to the callback set when the connection
+    /// was created; the law is stated per delivery, so replacing the callback between an
+    /// admission and its retirement splits the pair across the two callbacks.
     PeerRetired {
-        /// The did of the departed peer.
+        /// The did of the retired peer.
         peer: Did,
     },
 }

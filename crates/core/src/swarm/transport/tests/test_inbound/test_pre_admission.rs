@@ -121,9 +121,7 @@ async fn test_retired_frame_waiting_on_lane_ticket_does_not_record_receive() -> 
         .await;
     assert_eq!(successful_receive_count(&measure, peer)?, 0);
     assert_eq!(
-        transport
-            .retire_active_connection_with(attempt, |_| Ok(()))?
-            .map(|(value, _retirement)| value),
+        transport.retire_active_connection_for_test(attempt, |_| Ok(()))?,
         Some(())
     );
     drop(admission_turn);
