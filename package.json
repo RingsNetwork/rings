@@ -1,7 +1,7 @@
 {
   "name": "@ringsnetwork/rings-node",
   "collaborators": [
-    "RND <dev@ringsnetwork.io>"
+    "RND <dev@rings.rs>"
   ],
   "description": "Rings is a structured peer-to-peer network implementation using WebRTC, Chord algorithm, and full WebAssembly (WASM) support.\n",
   "version": "0.27.0",
