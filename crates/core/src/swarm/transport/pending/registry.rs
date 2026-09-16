@@ -24,9 +24,10 @@ pub(in crate::swarm::transport) enum PeerConnectionLifecycle {
     },
     Active {
         attempt: PendingConnectionAttempt,
-        /// Whether the admission was announced to the application. Set under the same lock
-        /// that retires the record, so for every generation `Connected` delivered ⟺
-        /// `PeerRetired` delivered.
+        /// Whether the admission was announced to the application. Set by `mark_announced`
+        /// in the delivery turn that then starts `Connected`, and read by `retire_active_if`,
+        /// the one production retirement, under the same lock; those two facts give, for
+        /// every generation, `start(Connected) ⟺ start(PeerRetired)`.
         announced: bool,
     },
 }
@@ -42,15 +43,21 @@ impl PeerConnectionLifecycle {
 }
 
 /// Witness that an admitted connection record was retired under the lifecycle boundary,
-/// carrying whether its admission had been announced. Announced through
-/// `SwarmTransport::announce_retirement`, which delivers
+/// carrying whether its admission had been announced. Only `retire_active_if` constructs one.
+/// It is announced through `SwarmTransport::announce_retirement`, which delivers
 /// [`SwarmEvent::PeerRetired`](crate::swarm::callback::SwarmEvent::PeerRetired) exactly when
 /// the admission was; `retire_announced_if` is the single production path from a retirement
 /// to its announcement.
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub(in crate::swarm::transport) struct Retirement {
-    pub(in crate::swarm::transport) peer: Did,
-    pub(in crate::swarm::transport) announced_admission: bool,
+    announced_admission: bool,
+}
+
+impl Retirement {
+    /// Whether the admission this retirement ends had been announced to the application.
+    pub(in crate::swarm::transport) fn announced_admission(&self) -> bool {
+        self.announced_admission
+    }
 }
 
 /// Outcome of a retirement decided under the lifecycle boundary: `Superseded` when the
@@ -64,6 +71,21 @@ pub(in crate::swarm::transport) enum RetirementOutcome<T> {
     Declined,
     /// The record was retired; carries the action's value.
     Retired(T),
+}
+
+impl<T> RetirementOutcome<T> {
+    /// The retired value, if the record was retired.
+    pub(in crate::swarm::transport) fn retired(self) -> Option<T> {
+        match self {
+            Self::Retired(value) => Some(value),
+            Self::Superseded | Self::Declined => None,
+        }
+    }
+
+    /// Whether the record was retired.
+    pub(in crate::swarm::transport) fn is_retired(&self) -> bool {
+        matches!(self, Self::Retired(_))
+    }
 }
 
 pub(in crate::swarm::transport) struct AdmittingConnection<'state> {
@@ -184,11 +206,11 @@ impl ReservationVerdict {
 
 /// Registry of mutually exclusive pending, admitting, and active generations.
 ///
-/// Model: `State = (Did ->?
-/// (Pending(attempt, started_at) | Admitting(attempt, started_at) | Active(attempt)), Terminal)`.
-/// Initial state is the empty map. The complete next-state relation is
-/// `reserve | begin_admission | activate | mark_send_terminal | remove_unadmitted |
-/// remove_active | expire`.
+/// Model: `State = (Did ->? (Pending(attempt, started_at) | Admitting(attempt, started_at) |
+/// Active(attempt, announced)), Terminal)`. Initial state is the empty map. The complete
+/// next-state relation is `reserve | begin_admission | activate | mark_send_terminal |
+/// mark_announced | remove_pending | remove_unadmitted | retire_active_if | expire`;
+/// `remove_active` is the test-only unconditional form of `retire_active_if`.
 ///
 /// Invariant: every peer has at most one generation and one lifecycle phase.
 /// `Active` belongs to the admitted projection; send-terminal generations are
@@ -540,7 +562,6 @@ impl ConnectionLifecycleRegistry {
         self.peers.remove(&attempt.peer);
         self.send_terminal.remove(&attempt);
         Ok(RetirementOutcome::Retired((value, Retirement {
-            peer: attempt.peer,
             announced_admission: announced,
         })))
     }

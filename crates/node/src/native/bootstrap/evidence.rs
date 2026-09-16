@@ -20,9 +20,13 @@
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::future::Future;
 use std::hash::Hash;
 use std::ops::DerefMut;
+use std::pin::Pin;
 use std::sync::Mutex;
+use std::task::Context;
+use std::task::Poll;
 
 use rings_core::dht::Did;
 use tokio::sync::futures::Notified;
@@ -36,7 +40,7 @@ use crate::sync_lock::lock;
 /// Reports retained while no probe has registered for them, so a report that overtakes the
 /// return path of its own send is not lost. Older entries are evicted first; only reports of
 /// application lookups reach the record, so the buffer is not diluted by core maintenance.
-pub(crate) const EARLY_REPORT_CAPACITY: usize = 32;
+pub(super) const EARLY_REPORT_CAPACITY: usize = 32;
 
 /// Rendezvous between one waiter per key and the value observed for that key, in either order:
 ///
@@ -44,10 +48,12 @@ pub(crate) const EARLY_REPORT_CAPACITY: usize = 32;
 ///   wait_for(k) ─┬─ early value buffered? ─▶ resolved at once
 ///                └─ else register waiter ─▶ observe(k, v) ─▶ resolved
 ///   observe(k, v) with no waiter ─▶ buffered as an early value (bounded FIFO; dropped at 0)
-///   forget(k) ─▶ waiter dropped; idempotent, so a resolved waiter may forget too
+///   drop(Waiter(k)) ─▶ waiter forgotten; idempotent, so a resolved waiter may drop too
 /// ```
 ///
-/// A second `wait_for` on the same key replaces the first waiter, which is then closed.
+/// A second `wait_for` on the same key replaces the first waiter, which is then closed; the
+/// callers keep one waiter per key. The waiter is a guard, so a turn dropped mid-wait (at
+/// shutdown) leaves no registration behind.
 pub(crate) struct Rendezvous<K, V> {
     state: Mutex<RendezvousState<K, V>>,
     early_capacity: usize,
@@ -59,9 +65,9 @@ struct RendezvousState<K, V> {
     early: VecDeque<(K, V)>,
 }
 
-impl<K: Eq + Hash, V> Rendezvous<K, V> {
+impl<K: Copy + Eq + Hash, V> Rendezvous<K, V> {
     /// A rendezvous that buffers up to `early_capacity` values observed before their waiter.
-    pub(crate) fn new(early_capacity: usize) -> Self {
+    pub(super) fn new(early_capacity: usize) -> Self {
         Self {
             state: Mutex::new(RendezvousState {
                 awaiting: HashMap::new(),
@@ -92,8 +98,9 @@ impl<K: Eq + Hash, V> Rendezvous<K, V> {
         Ok(())
     }
 
-    /// Await the value for `key`; resolves at once when the value arrived first.
-    pub(crate) fn wait_for(&self, key: K) -> Result<oneshot::Receiver<V>> {
+    /// Await the value for `key`; resolves at once when the value arrived first. The waiter
+    /// forgets its registration when dropped.
+    pub(crate) fn wait_for(&self, key: K) -> Result<Waiter<'_, K, V>> {
         let mut state = lock(&self.state)?;
         let (sender, receiver) = oneshot::channel();
         let early = state
@@ -109,13 +116,19 @@ impl<K: Eq + Hash, V> Rendezvous<K, V> {
                 state.awaiting.insert(key, sender);
             }
         }
-        Ok(receiver)
+        Ok(Waiter {
+            rendezvous: self,
+            key,
+            receiver,
+        })
     }
 
-    /// Drop the waiter for `key`; a no-op when the value already resolved it.
-    pub(crate) fn forget(&self, key: K) -> Result<()> {
-        lock(&self.state)?.awaiting.remove(&key);
-        Ok(())
+    /// Drop the waiter for `key`; a no-op when the value already resolved it. A poisoned record
+    /// is left alone: nothing can be registered in it either.
+    fn forget(&self, key: K) {
+        if let Ok(mut state) = lock(&self.state) {
+            state.awaiting.remove(&key);
+        }
     }
 
     /// Number of outstanding waiters plus buffered early values.
@@ -123,6 +136,39 @@ impl<K: Eq + Hash, V> Rendezvous<K, V> {
     pub(crate) fn len(&self) -> Result<usize> {
         let state = lock(&self.state)?;
         Ok(state.awaiting.len() + state.early.len())
+    }
+}
+
+/// A registered waiter: resolves to the value observed for its key, and forgets its
+/// registration on drop.
+pub(crate) struct Waiter<'a, K: Copy + Eq + Hash, V> {
+    rendezvous: &'a Rendezvous<K, V>,
+    key: K,
+    receiver: oneshot::Receiver<V>,
+}
+
+impl<K: Copy + Eq + Hash, V> Waiter<'_, K, V> {
+    /// The value if it has arrived, `Empty` while it has not, `Closed` once this waiter was
+    /// replaced.
+    #[cfg(test)]
+    pub(crate) fn try_recv(&mut self) -> std::result::Result<V, oneshot::error::TryRecvError> {
+        self.receiver.try_recv()
+    }
+}
+
+impl<K: Copy + Eq + Hash + Unpin, V> Future for Waiter<'_, K, V> {
+    type Output = std::result::Result<V, oneshot::error::RecvError>;
+
+    /// Poll the underlying receiver.
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.get_mut().receiver).poll(context)
+    }
+}
+
+impl<K: Copy + Eq + Hash, V> Drop for Waiter<'_, K, V> {
+    /// Forget the registration, whether or not it resolved.
+    fn drop(&mut self) {
+        self.rendezvous.forget(self.key);
     }
 }
 

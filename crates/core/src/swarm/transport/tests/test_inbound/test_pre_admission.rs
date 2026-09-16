@@ -86,7 +86,7 @@ async fn test_pre_admission_drain_runs_after_connected_event_error() -> Result<(
 
     assert_eq!(callback.pre_admission_held_count_for_test(), 0);
     assert_eq!(app_callback.inbounds(), 1);
-    assert!(transport.is_admitted_connection_attempt(attempt));
+    assert!(transport.is_active_connection_attempt(attempt));
     transport.disconnect(peer).await?;
     Ok(())
 }

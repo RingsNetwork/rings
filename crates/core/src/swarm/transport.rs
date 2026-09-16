@@ -108,6 +108,7 @@ pub(crate) use self::outbound::OUTBOUND_GLOBAL_BYTE_CAPACITY;
 pub(crate) use self::outbound::OUTBOUND_TRANSFER_QUEUE_CAPACITY;
 pub(crate) use self::pending::ConnectionEventDisposition;
 use self::pending::ConnectionLifecycleBoundary;
+use self::pending::PeerConnectionLifecycle;
 pub(crate) use self::pending::PendingConnectionAttempt;
 use self::pending::PendingFingerUpdates;
 use self::pending::RawConnectionOwner;
@@ -459,20 +460,30 @@ impl SwarmTransport {
     /// ends was announced, so the application sees one retirement per admission it saw, in
     /// the order the swarm decided them. A failing application callback is logged, never
     /// propagated: the retirement has already happened.
-    async fn announce_retirement(&self, turn: SwarmEventDeliveryTurn, retirement: Retirement) {
-        if !retirement.announced_admission {
+    async fn announce_retirement(
+        &self,
+        turn: SwarmEventDeliveryTurn,
+        peer: Did,
+        retirement: Retirement,
+    ) {
+        if !retirement.announced_admission() {
             return;
         }
-        let peer = retirement.peer;
-        let delivered: std::result::Result<(), CallbackError> = async {
-            let callback = self.callback.current()?;
-            turn.poll_once_then_release(callback.on_event(&SwarmEvent::PeerRetired { peer }))
-                .await
-        }
-        .await;
-        if let Err(error) = delivered {
+        if let Err(error) = self.deliver_retirement(turn, peer).await {
             tracing::error!(%peer, %error, "peer retirement callback failed");
         }
+    }
+
+    /// Start [`SwarmEvent::PeerRetired`] for `peer` on the current application callback under
+    /// `turn`.
+    async fn deliver_retirement(
+        &self,
+        turn: SwarmEventDeliveryTurn,
+        peer: Did,
+    ) -> std::result::Result<(), CallbackError> {
+        let callback = self.callback.current()?;
+        turn.poll_once_then_release(callback.on_event(&SwarmEvent::PeerRetired { peer }))
+            .await
     }
 
     pub(crate) fn prune_swarm_event_delivery_lock(
@@ -485,14 +496,12 @@ impl SwarmTransport {
     }
 
     fn connection_epoch_exists(&self, peer: Did) -> bool {
-        self.peer_lifecycles()
-            .map(|lifecycles| lifecycles.contains(peer))
-            .unwrap_or(false)
+        self.has_connection_attempt(peer).unwrap_or(false)
     }
 
     /// Record that `peer` reached an open data channel.
     pub(crate) async fn record_peer_connected(&self, attempt: PendingConnectionAttempt) {
-        if !self.is_admitted_connection_attempt(attempt) {
+        if !self.is_active_connection_attempt(attempt) {
             return;
         }
         self.mark_peer_liveness_connected(attempt);
@@ -798,7 +807,7 @@ impl SwarmTransport {
                         == WebrtcConnectionState::New
                         && self.dht.did > peer =>
                 {
-                    if !self.cancel_pending_connection(attempt).await? {
+                    if !self.cancel_unadmitted_connection(attempt).await? {
                         return Err(Error::AlreadyConnected);
                     }
                 }
@@ -906,7 +915,9 @@ impl SwarmTransport {
     /// With `expected`, the answer is applied only to that generation: a slot owned by another
     /// generation in any phase (the peer's own offer superseded ours, pending, admitting or
     /// already admitted) is refused as `ConnectionAttemptSuperseded` before the transport is
-    /// touched; a slot with no record at all is `SwarmMissTransport`.
+    /// touched; otherwise, when no pending record with a transport object exists (the
+    /// generation was cancelled or expired, or is past pending), `SwarmMissTransport`. The
+    /// slot is read once, so one history classifies one way.
     pub(crate) async fn accept_remote_connection(
         &self,
         peer: Did,
@@ -921,24 +932,25 @@ impl SwarmTransport {
 
         let answer: String = serde_json::from_str(&answer_msg.sdp).map_err(Error::Deserialize)?;
 
-        let superseded = |expected: PendingConnectionAttempt| Error::ConnectionAttemptSuperseded {
-            peer,
-            generation: expected.generation,
-        };
-        let (attempt, conn) = match self.pending_connection_with_attempt(peer)? {
-            Some(pending) => pending,
-            None => {
-                return Err(match (expected, self.slot_attempt(peer)?) {
-                    (Some(expected), Some(owner)) if owner != expected => superseded(expected),
-                    _ => Error::SwarmMissTransport(peer),
+        let (owner, pending) = self.with_connection_lifecycle(|| {
+            let state = self.peer_lifecycles()?.state(peer);
+            let pending = match state {
+                Some(PeerConnectionLifecycle::Pending { attempt, .. }) => self
+                    .get_raw_connection(peer)
+                    .map(|connection| (attempt, connection)),
+                _ => None,
+            };
+            Ok((state.map(PeerConnectionLifecycle::attempt), pending))
+        })?;
+        if let Some(expected) = expected {
+            if owner.is_some_and(|owner| owner != expected) {
+                return Err(Error::ConnectionAttemptSuperseded {
+                    peer,
+                    generation: expected.generation,
                 });
             }
-        };
-        if let Some(expected) = expected {
-            if expected != attempt {
-                return Err(superseded(expected));
-            }
         }
+        let (attempt, conn) = pending.ok_or(Error::SwarmMissTransport(peer))?;
         tracing::trace!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,

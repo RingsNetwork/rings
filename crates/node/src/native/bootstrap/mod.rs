@@ -27,15 +27,15 @@
 //!  Losses ─────wake─▶│ wait { stop | wake | turn finished | next deadline } ─▶ settle │
 //!                    └──────────────────────────────────────────────────────────────┘
 //!
-//!  turn(t) := reachable(t) ? Reachable
-//!           : dial(t) = Ok ? Reachable : (handshake already in flight ? Deferred : DialFailed)
+//!  turn(t) := reachable(t) ? Reachable : dial(t) = Ok ? Reachable : Unreachable
 //! ```
 //!
 //! Lost-wakeup freedom: every wait is preceded by a drain of the loss record, and a loss
 //! recorded between the drain and the wait leaves a stored permit, so no loss is missed. A turn
 //! is bounded: the port bounds its probe, the endpoint's resolution, each of its two HTTP
 //! requests and the admission wait with a timeout of its own, and the core bounds the offer
-//! (ICE gathering) and the routed send it performs on the port's behalf.
+//! (ICE gathering) and the routed send it performs on the port's behalf; the one await without
+//! a bound of its own is the transport close a cancelled handshake performs.
 //!
 //! Shutdown: the loop returns on the first stop observation and its in-flight turns are
 //! dropped with it, cancelling any probe or handshake in progress. A pending connection attempt
@@ -65,8 +65,7 @@ use crate::extension::BackendObserver;
 use crate::native::config::BootstrapConfig;
 use crate::prelude::StopToken;
 use crate::processor::Processor;
-use crate::remote_endpoint::RemoteRpcEndpoint;
-use crate::seed::SeedPeerError;
+use crate::seed::validate_seed_peers;
 use crate::seed::ValidatedSeedPeer;
 
 mod evidence;
@@ -78,79 +77,18 @@ mod tests;
 pub(crate) use self::evidence::ReachabilityEvidence;
 pub(crate) use self::probe::ProcessorPort;
 
-/// Why a seed entry cannot be a managed target.
-#[derive(Debug, thiserror::Error, Eq, PartialEq)]
-pub enum BootstrapTargetError {
-    /// The entry cannot be dialed at all.
-    #[error(transparent)]
-    Peer(#[from] SeedPeerError),
-    /// The entry names the node itself.
-    #[error("bootstrap peer {0} is this node itself")]
-    LocalNode(Did),
-    /// The DID is listed again with a different endpoint or token.
-    #[error("bootstrap peer {0} is listed with conflicting entries")]
-    ConflictingEntries(Did),
-    /// The endpoint is listed again under a different DID.
-    #[error("bootstrap endpoint {0} is listed under two DIDs")]
-    EndpointUnderTwoDids(RemoteRpcEndpoint),
-}
-
-/// How two managed targets overlap, in decreasing order of agreement.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Overlap {
-    /// Same DID, endpoint and token: one target listed twice.
-    Verbatim,
-    /// Same DID behind another endpoint or token.
-    SameDid,
-    /// Same endpoint claimed for another DID.
-    SameEndpoint,
-}
-
-/// How `target` overlaps with `known`, if at all.
-fn overlap(known: &ValidatedSeedPeer, target: &ValidatedSeedPeer) -> Option<Overlap> {
-    if known == target {
-        Some(Overlap::Verbatim)
-    } else if known.did() == target.did() {
-        Some(Overlap::SameDid)
-    } else if known.endpoint() == target.endpoint() {
-        Some(Overlap::SameEndpoint)
-    } else {
-        None
-    }
-}
-
 /// Validated managed targets: one per DID, one per endpoint, none of them the local node.
 #[derive(Debug)]
 pub struct BootstrapTargets(Vec<ValidatedSeedPeer>);
 
 impl BootstrapTargets {
-    /// Validate `config` for the node `local`: every entry validates as a seed peer and none
-    /// is `local` itself. An entry repeated verbatim (as when the same seed document feeds both
-    /// the config and `--bootstrap-seed`) is merged; a DID listed with a different endpoint or
-    /// token, or an endpoint listed under two DIDs, is rejected as ambiguous, since one
-    /// endpoint answers as exactly one DID. Endpoint identity is the full URL: two nodes may
-    /// share an origin behind path routing, and an entry whose endpoint answers as another node
-    /// is refused at dial time by the DID pin.
+    /// Validate `config` for the node `local`: the entries validate as a seed set (every entry
+    /// validates, a verbatim repeat is merged, a DID with conflicting entries or an endpoint
+    /// under two DIDs is refused) and none is `local` itself.
     pub fn from_config(config: BootstrapConfig, local: Did) -> Result<Self> {
-        let mut targets: Vec<ValidatedSeedPeer> = Vec::with_capacity(config.peers.len());
-        for peer in config.peers {
-            let target = ValidatedSeedPeer::try_from(peer).map_err(BootstrapTargetError::Peer)?;
-            if target.did() == local {
-                return Err(BootstrapTargetError::LocalNode(target.did()).into());
-            }
-            match targets.iter().find_map(|known| overlap(known, &target)) {
-                Some(Overlap::Verbatim) => continue,
-                Some(Overlap::SameDid) => {
-                    return Err(BootstrapTargetError::ConflictingEntries(target.did()).into());
-                }
-                Some(Overlap::SameEndpoint) => {
-                    return Err(BootstrapTargetError::EndpointUnderTwoDids(
-                        target.endpoint().clone(),
-                    )
-                    .into());
-                }
-                None => targets.push(target),
-            }
+        let targets = validate_seed_peers(config.peers)?;
+        if targets.iter().any(|target| target.did() == local) {
+            return Err(Error::BootstrapTargetIsLocalNode(local));
         }
         Ok(Self(targets))
     }
@@ -170,7 +108,9 @@ impl BootstrapTargets {
 /// Why a dial did not connect the target.
 #[derive(Debug)]
 pub(crate) enum DialFailure {
-    /// The core already holds a connection attempt to the target; nothing was attempted.
+    /// The target's slot is owned by another attempt (a handshake in flight, whichever side
+    /// started it, or an admission not yet announced): refused before any request when the
+    /// core already holds an unadmitted handshake, or by the core during the exchange.
     InFlight,
     /// The handshake or its admission failed.
     Failed(Error),
@@ -180,7 +120,7 @@ pub(crate) enum DialFailure {
 #[async_trait]
 pub(crate) trait BootstrapPort: Send + Sync {
     /// Whether `target` is reachable through the overlay right now.
-    async fn reachable(&self, target: &ValidatedSeedPeer) -> bool;
+    async fn reachable(&self, target: Did) -> bool;
 
     /// Redial `target` through its HTTP endpoint; `Ok` once the peer is admitted.
     async fn dial(&self, target: &ValidatedSeedPeer) -> std::result::Result<(), DialFailure>;
@@ -307,8 +247,9 @@ impl BootstrapSupervisor {
 ///
 /// An empty turn set yields `None` at once, which disables its branch rather than completing
 /// it, so an idle supervisor sleeps until its deadline, a loss, or the stop token. Every future
-/// here is cancel-safe: the stop and loss waits register before re-checking, the turn stream
-/// hands back completed turns one at a time, and the sleep holds no state.
+/// here is cancel-safe: the stop wait registers before re-checking, the loss wait consumes a
+/// permit `notify_one` stores when nobody waits, the turn stream hands back completed turns one
+/// at a time, and the sleep holds no state.
 async fn wait_for_wake(
     stop: &StopToken,
     losses: &PeerLosses,
@@ -331,10 +272,11 @@ async fn sleep_until_or_forever(deadline: Option<Instant>) {
     }
 }
 
-/// One turn: assess reachability and, only when unreachable, redial.
+/// One turn: assess reachability and, only when unreachable, redial. A refused dial is logged
+/// as such and, like a failed one, is a miss for the schedule.
 async fn turn(port: Arc<dyn BootstrapPort>, target: Arc<ValidatedSeedPeer>) -> (Did, TurnOutcome) {
     let did = target.did();
-    if port.reachable(target.as_ref()).await {
+    if port.reachable(did).await {
         tracing::debug!(target = %did, "bootstrap target reachable");
         return (did, TurnOutcome::Reachable);
     }
@@ -344,12 +286,12 @@ async fn turn(port: Arc<dyn BootstrapPort>, target: Arc<ValidatedSeedPeer>) -> (
             (did, TurnOutcome::Reachable)
         }
         Err(DialFailure::InFlight) => {
-            tracing::debug!(target = %did, "bootstrap redial deferred: handshake in flight");
-            (did, TurnOutcome::Deferred)
+            tracing::debug!(target = %did, "bootstrap redial refused: the target's slot is owned by another attempt");
+            (did, TurnOutcome::Unreachable)
         }
         Err(DialFailure::Failed(error)) => {
             tracing::warn!(target = %did, endpoint = %target.endpoint(), %error, "bootstrap redial failed");
-            (did, TurnOutcome::DialFailed)
+            (did, TurnOutcome::Unreachable)
         }
     }
 }

@@ -154,7 +154,7 @@ pub type SharedSwarmCallback = Arc<dyn SwarmCallback>;
 pub type SharedSwarmCallback = Arc<dyn SwarmCallback + Send + Sync>;
 
 /// Used to notify the application of events that occur in the swarm.
-#[derive(Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum SwarmEvent {
     /// Indicates that the connection state of a peer has changed.
@@ -175,9 +175,10 @@ pub enum SwarmEvent {
     /// — remote terminal state, data-channel close, liveness or stabilization removal, capacity
     /// eviction, explicit disconnect — so the application observes the logical fact regardless
     /// of the physical event or local decision behind it. Law: for every generation,
-    /// `Connected` delivered ⟺ `PeerRetired` delivered, with `start(Connected) <
+    /// `Connected` started ⟺ `PeerRetired` started, with `start(Connected) <
     /// start(PeerRetired)` under the peer's ordered delivery (see
-    /// [`SwarmCallback::on_event`]). A topology prune that keeps the record (a `Disconnected`
+    /// [`SwarmCallback::on_event`]); the law is over starts, since a callback releases its
+    /// turn at its first poll. A topology prune that keeps the record (a `Disconnected`
     /// transport allowed to recover) emits nothing. `PeerRetired` resolves the callback set at
     /// delivery time, while `ConnectionStateChange` goes to the callback set when the connection
     /// was created; the law is stated per delivery, so replacing the callback between an
@@ -188,18 +189,28 @@ pub enum SwarmEvent {
     },
 }
 
+/// The two halves of the retirement law, as an application reads them off the event stream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PeerTransition {
+    /// The peer was admitted: `ConnectionStateChange { Connected }` started.
+    Admitted,
+    /// The peer's admitted record was retired: [`SwarmEvent::PeerRetired`] started.
+    Retired,
+}
+
 impl SwarmEvent {
-    /// The peer this event admits, if it is the admission event: `Connected` is the physical
-    /// state whose delivery is the logical fact "peer admitted", so this is where that
-    /// interpretation lives. Law: `admitted_peer() = Some(p)` for exactly the event whose
-    /// [`SwarmEvent::PeerRetired`] partner the retirement law promises.
-    pub fn admitted_peer(&self) -> Option<Did> {
+    /// The logical transition this event carries, if any: `Connected` is the physical state
+    /// whose delivery is the fact "peer admitted", so its interpretation lives here, beside
+    /// the retirement it is paired with. Law: for every generation the stream carries exactly
+    /// one `Admitted` and, iff it did, one later `Retired` for that peer.
+    pub fn peer_transition(&self) -> Option<(Did, PeerTransition)> {
         match *self {
             Self::ConnectionStateChange {
                 peer,
                 state: WebrtcConnectionState::Connected,
-            } => Some(peer),
-            Self::ConnectionStateChange { .. } | Self::PeerRetired { .. } => None,
+            } => Some((peer, PeerTransition::Admitted)),
+            Self::PeerRetired { peer } => Some((peer, PeerTransition::Retired)),
+            Self::ConnectionStateChange { .. } => None,
         }
     }
 }

@@ -57,7 +57,7 @@ async fn test_terminal_event_starts_in_order_without_waiting_for_connected_callb
         WebrtcConnectionState::Connected,
         WebrtcConnectionState::Closed
     ]);
-    assert!(!transport.is_admitted_connection_attempt(attempt));
+    assert!(!transport.is_active_connection_attempt(attempt));
     assert!(!transport.dht.successors().contains(&peer)?);
     Ok(())
 }
@@ -200,7 +200,7 @@ async fn test_late_terminal_callback_cannot_remove_replacement_active_slot() -> 
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
 
-    assert!(transport.is_admitted_connection_attempt(current_attempt));
+    assert!(transport.is_active_connection_attempt(current_attempt));
     assert_eq!(transport.admitted_connection_ids(), vec![peer]);
     Ok(())
 }

@@ -27,8 +27,8 @@ use crate::error::Error as ServerError;
 use crate::processor::HandshakePeer;
 use crate::processor::Processor;
 use crate::remote_endpoint::RemoteRpcEndpoint;
+use crate::seed::validate_seed_peers;
 use crate::seed::Seed;
-use crate::seed::ValidatedSeedPeer;
 
 const DEFAULT_PEER_MEASUREMENT_PAGE_SIZE: u32 = 100;
 const MAX_PEER_MEASUREMENT_PAGE_SIZE: u32 = 1_000;
@@ -67,39 +67,45 @@ impl HandleRpc<ConnectWithSeedRequest, ConnectWithSeedResponse> for Processor {
     async fn handle_rpc(&self, req: ConnectWithSeedRequest) -> Result<ConnectWithSeedResponse> {
         let seed: Seed = Seed::try_from(req)?;
 
-        // Every entry is validated before any is dialed, so an invalid document dials nothing.
-        let peers = seed
-            .peers
-            .into_iter()
-            .map(|peer| ValidatedSeedPeer::try_from(peer).map_err(ServerError::from))
-            .collect::<std::result::Result<Vec<_>, ServerError>>()?;
+        // The document is validated as a set before any entry is dialed: an invalid or
+        // ambiguous document dials nothing, and a peer listed twice is dialed once.
+        let peers = validate_seed_peers(seed.peers).map_err(ServerError::from)?;
 
         let local = self.swarm.did();
         let mut tasks = Vec::with_capacity(peers.len());
         for peer in peers {
             let did = peer.did();
-            if did == local
+            let settled = did == local
+                || self
+                    .swarm
+                    .has_unadmitted_connection(did)
+                    .map_err(ServerError::from)?
                 || self
                     .swarm
                     .is_peer_admitted(did)
-                    .map_err(ServerError::from)?
-            {
+                    .map_err(ServerError::from)?;
+            if settled {
                 continue;
             }
             tasks.push(async move {
-                self.connect_peer_via_http(
-                    peer.endpoint(),
-                    peer.api_token(),
-                    HandshakePeer::Pinned(did),
-                )
-                .await
-                .map(|_| ())
-                .map_err(Error::from)
+                // A handshake found in flight when the dial reaches the core is left to run,
+                // like one found before the dial.
+                match self
+                    .connect_peer_via_http(
+                        peer.endpoint(),
+                        peer.api_token(),
+                        HandshakePeer::Pinned(did),
+                    )
+                    .await
+                {
+                    Ok(_) => Ok(()),
+                    Err(error) if error.is_handshake_in_flight() => Ok(()),
+                    Err(error) => Err(Error::from(error)),
+                }
             });
         }
 
         join_all(tasks).await.into_iter().collect::<Result<()>>()?;
-
         Ok(ConnectWithSeedResponse {})
     }
 }

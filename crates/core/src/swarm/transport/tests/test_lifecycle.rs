@@ -482,7 +482,7 @@ async fn test_pending_promotion_is_atomic_under_lifecycle_lock() -> Result<()> {
             .map_err(|_| Error::InvalidMessage("reservation thread panicked".to_string()))?,
         Err(Error::AlreadyConnected)
     ));
-    assert!(transport.is_admitted_connection_attempt(attempt));
+    assert!(transport.is_active_connection_attempt(attempt));
     Ok(())
 }
 
@@ -500,7 +500,7 @@ async fn test_admitting_peer_remains_unroutable_until_commit() -> Result<()> {
             assert!(transport
                 .is_admitting_connection_attempt(attempt)
                 .expect("lifecycle registry must remain readable"));
-            assert!(!transport.is_admitted_connection_attempt(attempt));
+            assert!(!transport.is_active_connection_attempt(attempt));
             assert!(!transport
                 .dht
                 .successors()
@@ -514,7 +514,7 @@ async fn test_admitting_peer_remains_unroutable_until_commit() -> Result<()> {
     assert!(transport.get_connection(peer).is_none());
     assert!(!transport.dht.successors().contains(&peer)?);
     assert_eq!(transport.pending_connection_count()?, 1);
-    assert!(transport.cancel_pending_connection(attempt).await?);
+    assert!(transport.cancel_unadmitted_connection(attempt).await?);
     assert_eq!(transport.pending_connection_count()?, 0);
     Ok(())
 }
@@ -578,13 +578,13 @@ async fn test_incoming_offer_replaces_an_unroutable_admitted_generation() -> Res
         .pending_attempt(peer_did)?
         .ok_or(Error::SwarmMissTransport(peer_did))?;
     assert_ne!(replacement, old);
-    assert!(!local.is_admitted_connection_attempt(old));
+    assert!(!local.is_active_connection_attempt(old));
     assert!(
         !local.dht.successors().contains(&peer_did)?,
         "the retired generation must leave topology before replacement admission"
     );
 
-    assert!(local.cancel_pending_connection(replacement).await?);
+    assert!(local.cancel_unadmitted_connection(replacement).await?);
     peer.disconnect(local.dht.did).await?;
     Ok(())
 }
@@ -630,7 +630,7 @@ async fn test_incoming_offer_replaces_an_orphaned_physical_connection() -> Resul
         RawConnectionOwner::Pending(replacement)
     );
 
-    assert!(local.cancel_pending_connection(replacement).await?);
+    assert!(local.cancel_unadmitted_connection(replacement).await?);
     peer.disconnect(local.dht.did).await?;
     Ok(())
 }
@@ -673,7 +673,7 @@ async fn test_physical_connection_creation_serializes_replaced_generations() -> 
 
     assert!(transport.is_pending_connection_attempt(replacement)?);
     assert!(transport.get_raw_connection(peer).is_some());
-    assert!(transport.cancel_pending_connection(replacement).await?);
+    assert!(transport.cancel_unadmitted_connection(replacement).await?);
     Ok(())
 }
 

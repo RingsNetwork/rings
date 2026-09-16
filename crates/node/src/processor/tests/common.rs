@@ -402,8 +402,7 @@ pub(super) async fn wait_processors_connected(
 ) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        if processor_has_connected_peer(p1, p2.did()) && processor_has_connected_peer(p2, p1.did())
-        {
+        if processor_has_admitted_peer(p1, p2.did()) && processor_has_admitted_peer(p2, p1.did()) {
             return;
         }
 
@@ -421,7 +420,7 @@ pub(super) async fn wait_processors_connected(
     }
 }
 
-pub(super) fn processor_has_connected_peer(processor: &Processor, peer: Did) -> bool {
+pub(super) fn processor_has_admitted_peer(processor: &Processor, peer: Did) -> bool {
     processor.swarm.peer_dids().contains(&peer)
 }
 

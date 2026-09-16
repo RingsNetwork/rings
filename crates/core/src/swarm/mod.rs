@@ -49,7 +49,8 @@ use crate::swarm::transport::SwarmTransport;
 pub enum SuccessorLookup {
     /// The successor of the key as the local topology knows it.
     Local(Did),
-    /// The lookup was routed; its report returns under this transaction id.
+    /// The lookup was routed through the hop the local step chose; its report returns under
+    /// this transaction id.
     Routed(uuid::Uuid),
 }
 
@@ -191,7 +192,7 @@ impl Swarm {
 
     /// Whether the transport holds an unadmitted handshake to `peer` (pending or admitting),
     /// whichever side started it. A new offer to such a peer is refused as `AlreadyConnected`.
-    pub fn has_pending_connection(&self, peer: Did) -> Result<bool> {
+    pub fn has_unadmitted_connection(&self, peer: Did) -> Result<bool> {
         Ok(self.transport.unadmitted_attempt(peer)?.is_some())
     }
 
@@ -209,7 +210,7 @@ impl Swarm {
     /// applied to it; one that is admitting, admitted or superseded meanwhile is left alone.
     /// Returns whether it was cancelled.
     pub async fn cancel_connection_attempt(&self, attempt: ConnectionAttempt) -> Result<bool> {
-        self.transport.cancel_offered_connection(attempt.0).await
+        self.transport.cancel_pending_connection(attempt.0).await
     }
 
     /// Take the local step of a successor lookup for `key`, and route the lookup when the
@@ -219,20 +220,23 @@ impl Swarm {
     /// for `key` answers `key` exactly when `key` is in the overlay, as far as the answering
     /// node's successor list is current. The local step decides `Local(head)` when `key` lies
     /// in the local successor interval `(n, head]`, and `Local(n)` when this node has no
-    /// successor; otherwise the request `FindSuccessorSend { did: key, strict: false }` is
-    /// routed toward `key` and the answer returns as a `FindSuccessorReport` under the returned
-    /// transaction id, recognisable by
+    /// successor; otherwise the request `FindSuccessorSend { did: key, strict: false }` is sent
+    /// to the hop that same step chose, never to `key` itself even when `key` is a direct peer
+    /// (`key` would answer with its own successor), and the answer returns as a
+    /// `FindSuccessorReport` under the returned transaction id, recognisable by
     /// [`FindSuccessorReport::is_application_lookup`](crate::message::FindSuccessorReport::is_application_lookup).
+    /// The step and the hop come from one topology snapshot.
     pub async fn lookup_successor(&self, key: Did) -> Result<SuccessorLookup> {
         match self.dht.find_successor(key)? {
             PeerRingAction::Some(successor) => Ok(SuccessorLookup::Local(successor)),
-            PeerRingAction::RemoteAction(..) => {
+            PeerRingAction::RemoteAction(next, _) => {
                 let request = Message::FindSuccessorSend(FindSuccessorSend {
                     did: key,
                     strict: false,
                     then: FindSuccessorThen::Report(FindSuccessorReportHandler::None),
                 });
-                self.send_message(request, key)
+                self.transport
+                    .send_message_by_hop(request, key, next)
                     .await
                     .map(SuccessorLookup::Routed)
             }

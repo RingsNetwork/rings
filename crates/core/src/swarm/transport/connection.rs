@@ -417,7 +417,7 @@ impl SwarmTransport {
     /// the underlying WebRTC object is released.
     pub async fn disconnect(&self, peer: Did) -> Result<()> {
         if let Some(attempt) = self.unadmitted_attempt(peer)? {
-            if self.cancel_pending_connection(attempt).await? {
+            if self.cancel_unadmitted_connection(attempt).await? {
                 return Ok(());
             }
             return self
@@ -565,7 +565,8 @@ impl SwarmTransport {
                 RetirementOutcome::Superseded => RetirementOutcome::Superseded,
                 RetirementOutcome::Declined => RetirementOutcome::Declined,
                 RetirementOutcome::Retired((value, retirement)) => {
-                    self.announce_retirement(turn, retirement).await;
+                    self.announce_retirement(turn, attempt.peer, retirement)
+                        .await;
                     RetirementOutcome::Retired(value)
                 }
             })
@@ -575,28 +576,40 @@ impl SwarmTransport {
         outcome
     }
 
+    /// Retire `attempt` unconditionally once `action` commits, announcing the retirement;
+    /// `None` iff `attempt` no longer owned the active slot.
+    async fn retire_announced<T>(
+        &self,
+        attempt: PendingConnectionAttempt,
+        action: impl FnOnce(&ActiveConnectionSet) -> Result<T>,
+    ) -> Result<Option<T>> {
+        self.retire_announced_if(attempt, |active| action(active).map(Some))
+            .await
+            .map(RetirementOutcome::retired)
+    }
+
     async fn disconnect_with_removal(
         &self,
         attempt: PendingConnectionAttempt,
         removal: DhtPeerRemoval,
     ) -> Result<Option<PeerRemovalOutcome>> {
         let connection = self.get_raw_connection(attempt.peer);
-        let outcome = self
-            .retire_announced_if(attempt, |active| match removal {
+        let Some(fallback) = self
+            .retire_announced(attempt, |active| match removal {
                 DhtPeerRemoval::Ordinary => {
                     self.dht.remove(attempt.peer)?;
-                    Ok(Some(None))
+                    Ok(None)
                 }
                 DhtPeerRemoval::Unavailable => {
                     let replacements =
                         self.live_successor_replacements_from_active(attempt.peer, active)?;
                     let fallback = replacements.first().copied();
                     self.dht.remove_unavailable(attempt.peer, replacements)?;
-                    Ok(Some(fallback))
+                    Ok(fallback)
                 }
             })
-            .await?;
-        let RetirementOutcome::Retired(fallback) = outcome else {
+            .await?
+        else {
             return Ok(None);
         };
 
@@ -637,14 +650,16 @@ impl SwarmTransport {
                 Ok(Some(()))
             })
             .await?;
-        if let (RetirementOutcome::Retired(()), Some(connection)) = (&outcome, connection) {
-            if let Err(error) = self.close_connection_for_disconnect(&connection).await {
-                tracing::warn!(
-                    peer = %attempt.peer,
-                    generation = attempt.generation,
-                    error = ?error,
-                    "evicted connection failed to close after retirement"
-                );
+        if outcome.is_retired() {
+            if let Some(connection) = connection {
+                if let Err(error) = self.close_connection_for_disconnect(&connection).await {
+                    tracing::warn!(
+                        peer = %attempt.peer,
+                        generation = attempt.generation,
+                        error = ?error,
+                        "evicted connection failed to close after retirement"
+                    );
+                }
             }
         }
         Ok(outcome)

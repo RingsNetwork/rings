@@ -46,7 +46,7 @@ async fn test_disconnected_open_transport_cannot_commit_admission() -> Result<()
     assert!(!transport.is_admitted_connection(peer));
     assert!(!transport.dht.successors().contains(&peer)?);
 
-    assert!(transport.cancel_pending_connection(attempt).await?);
+    assert!(transport.cancel_unadmitted_connection(attempt).await?);
     Ok(())
 }
 
@@ -83,7 +83,7 @@ async fn test_data_channel_open_before_peer_state_converges_preserves_pending_ad
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
 
-    assert!(transport.is_admitted_connection_attempt(attempt));
+    assert!(transport.is_active_connection_attempt(attempt));
     assert!(transport.dht.successors().contains(&peer)?);
     transport.disconnect(peer).await?;
     Ok(())

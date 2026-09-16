@@ -209,8 +209,8 @@ async fn connect_gateway_edge(first: &Processor, second: &Processor, label: &str
         .await
         .expect("accept gateway edge answer");
     tokio::time::timeout(Duration::from_secs(20), async {
-        while !processor_has_connected_peer(first, second.did())
-            || !processor_has_connected_peer(second, first.did())
+        while !processor_has_admitted_peer(first, second.did())
+            || !processor_has_admitted_peer(second, first.did())
         {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }

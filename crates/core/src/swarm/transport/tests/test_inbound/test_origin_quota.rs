@@ -108,8 +108,8 @@ async fn quota_is_shared_across_relays_but_isolated_between_origins() -> Result<
 
     assert_eq!(app_callback.validates(), 2);
     assert_eq!(app_callback.inbounds(), 2);
-    assert!(transport.is_admitted_connection_attempt(attempt_a));
-    assert!(transport.is_admitted_connection_attempt(attempt_b));
+    assert!(transport.is_active_connection_attempt(attempt_a));
+    assert!(transport.is_active_connection_attempt(attempt_b));
     assert_eq!(
         swarm
             .origin_quota_counters()
@@ -207,6 +207,6 @@ async fn normal_and_reassembled_messages_each_consume_one_logical_byte_cost() ->
             .byte_rate_exhausted,
         1
     );
-    assert!(transport.is_admitted_connection_attempt(attempt));
+    assert!(transport.is_active_connection_attempt(attempt));
     Ok(())
 }

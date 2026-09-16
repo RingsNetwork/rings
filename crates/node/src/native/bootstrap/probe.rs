@@ -13,13 +13,13 @@
 //! Two cases are decided without any network round trip. A target admitted as the application
 //! sees it is reachable: ready or recovering, its transport is the swarm's to heal or retire,
 //! its retirement will be reported, and a dial would be refused as already connected. A lookup
-//! the local topology decides, `Local(head)`, never confirms: `head` is an admitted peer, so
-//! either `head ≠ t` and `t` is absent, or `head = t` whose admission is not yet announced;
-//! both read as unreachable, and in the second case the dial that follows is refused as already
-//! connected and deferred, not counted, until the announcement lands. Otherwise the lookup is
-//! routed toward `t` and `t` is reachable iff the report that returns under the same
-//! transaction id names `t`. A partition that lost `t` answers with the node now succeeding
-//! `t`'s position.
+//! the local topology decides, `Local(head)`, never confirms: either `head` is an admitted peer
+//! other than `t`, so `t` is absent from the interval; or `head = t` whose admission was not
+//! announced at the first read, in which case the dial that follows is refused as already
+//! connected and settles as a miss until the announcement lands; or `head` is this node, which
+//! has no successor and is not `t`. Otherwise the lookup is routed toward `t` and `t` is
+//! reachable iff the report that returns under the same transaction id names `t`. A partition
+//! that lost `t` answers with the node now succeeding `t`'s position.
 //!
 //! The answer is only as current as the reporter's successor list, in both directions: a
 //! predecessor that has not yet adopted a freshly joined `t` refutes it (one redial that, with
@@ -29,10 +29,10 @@
 //! already trusts them.
 //!
 //! A dial is refused without any request when the core already holds an unadmitted handshake
-//! to the target, whichever side started it, so an in-flight handshake is never charged as a
-//! failure; the same holds when the exchange itself is refused because the target's slot is
-//! owned by another generation. Otherwise the handshake pins the answering DID before any
-//! offer is created, and the port then waits for the swarm to admit the peer, bounded by
+//! to the target, whichever side started it, and reported as `InFlight` rather than as a
+//! failure; the same holds when the core refuses the exchange because the target's slot is
+//! owned by another attempt. Otherwise the handshake pins the answering DID before any offer
+//! is created, and the port then waits for the swarm to admit the peer, bounded by
 //! [`DIAL_ADMISSION_TIMEOUT`]; on timeout the generation this dial reserved is cancelled iff it
 //! is still pending, so a handshake that is admitting at that instant completes on its own and
 //! the next attempt can otherwise handshake afresh.
@@ -42,6 +42,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rings_core::dht::Did;
+use rings_core::error::Error as CoreError;
 use rings_core::swarm::SuccessorLookup;
 use rings_core::swarm::Swarm;
 
@@ -77,29 +78,35 @@ impl ProcessorPort {
     }
 }
 
+/// A core error surfaced by a dial, as a failure of that dial.
+fn core_failure(error: CoreError) -> DialFailure {
+    DialFailure::Failed(Error::ConnectError(error))
+}
+
 #[async_trait]
 impl BootstrapPort for ProcessorPort {
     /// An announced admission short-circuits; otherwise the lookup decides.
-    async fn reachable(&self, target: &ValidatedSeedPeer) -> bool {
+    async fn reachable(&self, target: Did) -> bool {
         let swarm = &self.processor.swarm;
-        match swarm.is_peer_admitted(target.did()) {
-            Ok(true) => return true,
-            Ok(false) => {}
+        match swarm.is_peer_admitted(target) {
+            Ok(true) => true,
+            Ok(false) => lookup_reaches(swarm, self.evidence.reports(), target).await,
             Err(error) => {
-                tracing::error!(target = %target.did(), %error, "connection records unavailable");
-                return false;
+                tracing::error!(%target, %error, "connection records unavailable");
+                false
             }
         }
-        lookup_reaches(swarm, self.evidence.reports(), target.did()).await
     }
 
-    /// Refuse while a handshake is pending; else handshake pinned to the target's DID, then
+    /// Refuse while a handshake is unadmitted; else handshake pinned to the target's DID, then
     /// wait for its admission.
     async fn dial(&self, target: &ValidatedSeedPeer) -> std::result::Result<(), DialFailure> {
         let peer = target.did();
         let swarm = &self.processor.swarm;
-        let core_failure = |error| DialFailure::Failed(Error::ConnectError(error));
-        if swarm.has_pending_connection(peer).map_err(core_failure)? {
+        if swarm
+            .has_unadmitted_connection(peer)
+            .map_err(core_failure)?
+        {
             return Err(DialFailure::InFlight);
         }
         let handshake = self
@@ -110,9 +117,15 @@ impl BootstrapPort for ProcessorPort {
                 HandshakePeer::Pinned(peer),
             )
             .await
-            .map_err(classify_handshake_error)?;
+            .map_err(|error| {
+                if error.is_handshake_in_flight() {
+                    DialFailure::InFlight
+                } else {
+                    DialFailure::Failed(error)
+                }
+            })?;
         // The waiter is registered before the record is checked, which closes the window: an
-        // admission landing before the check is seen by it, one landing after resolves the
+        // admission announced before the check is seen by it, one announced after resolves the
         // waiter. A closed waiter is unreachable under one turn per target; it reads as the
         // timeout it would otherwise become.
         let waiter = self
@@ -125,10 +138,6 @@ impl BootstrapPort for ProcessorPort {
                 tokio::time::timeout(DIAL_ADMISSION_TIMEOUT, waiter).await,
                 Ok(Ok(()))
             );
-        self.evidence
-            .admissions()
-            .forget(peer)
-            .map_err(DialFailure::Failed)?;
         if admitted {
             return Ok(());
         }
@@ -137,22 +146,6 @@ impl BootstrapPort for ProcessorPort {
         // admitted by the next probe.
         self.processor.abandon_handshake(handshake.attempt).await;
         Err(DialFailure::Failed(Error::AdmissionTimedOut { peer }))
-    }
-}
-
-/// Sort a handshake error: the core refusing because it already holds an attempt to the peer
-/// (reserved concurrently, or superseded by the peer's own offer) is a deferral, anything else
-/// a failure.
-fn classify_handshake_error(error: Error) -> DialFailure {
-    match error {
-        Error::CreateOffer(
-            rings_core::error::Error::AlreadyConnected
-            | rings_core::error::Error::ConnectionAttemptSuperseded { .. },
-        )
-        | Error::AcceptAnswer(rings_core::error::Error::ConnectionAttemptSuperseded { .. }) => {
-            DialFailure::InFlight
-        }
-        other => DialFailure::Failed(other),
     }
 }
 
@@ -175,44 +168,8 @@ async fn lookup_reaches(swarm: &Swarm, reports: &LookupReportLedger, target: Did
             return false;
         }
     };
-    let outcome = tokio::time::timeout(LOOKUP_PROBE_TIMEOUT, waiter).await;
-    if let Err(error) = reports.forget(tx_id) {
-        tracing::error!(%target, %error, "bootstrap lookup record unavailable");
-    }
-    matches!(outcome, Ok(Ok(successor)) if successor == target)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The core refusing an offer, or superseding this node's attempt with the peer's own
-    /// offer, is a deferral; every other failure counts.
-    #[test]
-    fn handshake_errors_sort_into_deferral_and_failure() {
-        let superseded = || rings_core::error::Error::ConnectionAttemptSuperseded {
-            peer: Did::from(1),
-            generation: 1,
-        };
-        for deferred in [
-            Error::CreateOffer(rings_core::error::Error::AlreadyConnected),
-            Error::CreateOffer(superseded()),
-            Error::AcceptAnswer(superseded()),
-        ] {
-            assert!(matches!(
-                classify_handshake_error(deferred),
-                DialFailure::InFlight
-            ));
-        }
-        assert!(matches!(
-            classify_handshake_error(Error::AdmissionTimedOut { peer: Did::from(1) }),
-            DialFailure::Failed(Error::AdmissionTimedOut { .. })
-        ));
-        assert!(matches!(
-            classify_handshake_error(Error::AcceptAnswer(
-                rings_core::error::Error::AlreadyConnected
-            )),
-            DialFailure::Failed(Error::AcceptAnswer(_))
-        ));
-    }
+    matches!(
+        tokio::time::timeout(LOOKUP_PROBE_TIMEOUT, waiter).await,
+        Ok(Ok(successor)) if successor == target
+    )
 }

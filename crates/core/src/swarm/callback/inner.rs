@@ -164,7 +164,7 @@ impl InnerSwarmCallback {
             self.processor
                 .logical
                 .transport
-                .cancel_pending_connection(attempt)
+                .cancel_unadmitted_connection(attempt)
                 .await?;
             return Ok(false);
         }
@@ -191,7 +191,7 @@ impl InnerSwarmCallback {
                     .processor
                     .logical
                     .transport
-                    .cancel_pending_connection(attempt)
+                    .cancel_unadmitted_connection(attempt)
                     .await
                 {
                     tracing::warn!(
@@ -214,7 +214,7 @@ impl InnerSwarmCallback {
             .processor
             .logical
             .transport
-            .is_admitted_connection_attempt(attempt)
+            .is_active_connection_attempt(attempt)
         {
             return Ok(false);
         }
@@ -223,7 +223,7 @@ impl InnerSwarmCallback {
             .processor
             .logical
             .transport
-            .is_admitted_connection_attempt(attempt)
+            .is_active_connection_attempt(attempt)
         {
             self.start_pre_admission_drain().await;
         }
@@ -332,7 +332,7 @@ impl InnerSwarmCallback {
                 .processor
                 .logical
                 .transport
-                .is_admitted_connection_attempt(attempt)
+                .is_active_connection_attempt(attempt)
     }
 
     fn is_local_did_event(&self, did: Did, operation: &str) -> bool {
@@ -362,7 +362,7 @@ impl InnerSwarmCallback {
             .processor
             .logical
             .transport
-            .cancel_pending_connection(attempt)
+            .cancel_unadmitted_connection(attempt)
             .await?
         {
             self.processor.discard_pre_admission_hold();
@@ -387,7 +387,7 @@ impl InnerSwarmCallback {
             .processor
             .logical
             .transport
-            .cancel_pending_connection(attempt)
+            .cancel_unadmitted_connection(attempt)
             .await?
         {
             self.processor.discard_pre_admission_hold();
@@ -402,7 +402,7 @@ impl InnerSwarmCallback {
             .processor
             .logical
             .transport
-            .is_admitted_connection_attempt(attempt)
+            .is_active_connection_attempt(attempt)
         {
             return Ok(false);
         }
@@ -644,7 +644,7 @@ impl TransportCallback for InnerSwarmCallback {
                     .processor
                     .logical
                     .transport
-                    .is_admitted_connection_attempt(attempt)
+                    .is_active_connection_attempt(attempt)
                 {
                     return Ok(());
                 }
@@ -763,7 +763,7 @@ impl TransportCallback for InnerSwarmCallback {
             .processor
             .logical
             .transport
-            .is_admitted_connection_attempt(attempt)
+            .is_active_connection_attempt(attempt)
         {
             return Ok(());
         }

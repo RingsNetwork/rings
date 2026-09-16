@@ -421,7 +421,7 @@ async fn test_pre_admission_drain_returns_before_application_validation_complete
         .map_err(|_| Error::InvalidMessage("data-channel-open task panicked".to_string()))??;
 
     assert!(transport.is_admitted_connection(peer));
-    assert!(transport.is_admitted_connection_attempt(attempt));
+    assert!(transport.is_active_connection_attempt(attempt));
     tokio::time::timeout(
         Duration::from_secs(1),
         app_callback.wait_for_first_validate_started(),

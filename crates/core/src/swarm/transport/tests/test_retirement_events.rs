@@ -1,5 +1,5 @@
-//! The retirement law: for every connection generation, `Connected` delivered ⟺ `PeerRetired`
-//! delivered, and a topology prune that keeps the record delivers nothing.
+//! The retirement law: for every connection generation, `Connected` started ⟺ `PeerRetired`
+//! started, and a topology prune that keeps the record delivers nothing.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -11,43 +11,52 @@ use super::*;
 use crate::dht::Chord;
 use crate::swarm::callback::SwarmEvent;
 
-/// Records the peers whose retirement the application was told about.
+/// Records every swarm event the application was told about, in start order.
 #[derive(Default)]
-struct RetirementLog {
-    retired: Mutex<Vec<Did>>,
+struct EventLog {
+    events: Mutex<Vec<SwarmEvent>>,
 }
 
-impl RetirementLog {
-    /// Peers reported retired so far, in delivery order.
-    fn retired(&self) -> Vec<Did> {
-        self.retired
+impl EventLog {
+    /// Every event so far, in start order.
+    fn events(&self) -> Vec<SwarmEvent> {
+        self.events
             .lock()
-            .expect("retirement log is never poisoned")
+            .expect("event log is never poisoned")
             .clone()
+    }
+
+    /// Peers reported retired so far, in start order.
+    fn retired(&self) -> Vec<Did> {
+        self.events()
+            .into_iter()
+            .filter_map(|event| match event {
+                SwarmEvent::PeerRetired { peer } => Some(peer),
+                SwarmEvent::ConnectionStateChange { .. } => None,
+            })
+            .collect()
     }
 }
 
 #[async_trait]
-impl SwarmCallback for RetirementLog {
-    /// Record `PeerRetired`; every other event is irrelevant to the law under test.
+impl SwarmCallback for EventLog {
+    /// Record the event.
     async fn on_event(
         &self,
         event: &SwarmEvent,
     ) -> std::result::Result<(), crate::error::CallbackError> {
-        if let SwarmEvent::PeerRetired { peer } = event {
-            self.retired
-                .lock()
-                .expect("retirement log is never poisoned")
-                .push(*peer);
-        }
+        self.events
+            .lock()
+            .expect("event log is never poisoned")
+            .push(event.clone());
         Ok(())
     }
 }
 
-/// A transport whose application callback is a fresh retirement log.
-fn transport_with_log() -> Result<(SwarmTransport, Arc<RetirementLog>)> {
+/// A transport whose application callback is a fresh event log.
+fn transport_with_log() -> Result<(SwarmTransport, Arc<EventLog>)> {
     let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
-    let log = Arc::new(RetirementLog::default());
+    let log = Arc::new(EventLog::default());
     transport.callback_slot().replace(log.clone())?;
     Ok((transport, log))
 }
@@ -55,7 +64,7 @@ fn transport_with_log() -> Result<(SwarmTransport, Arc<RetirementLog>)> {
 /// An admission that was announced is reported retired exactly once, whichever retirement
 /// path ends it.
 #[tokio::test]
-async fn announced_admission_is_reported_retired_once() -> Result<()> {
+async fn test_announced_admission_is_reported_retired_once() -> Result<()> {
     let (transport, log) = transport_with_log()?;
     let peer = SecretKey::random().address().into();
     let attempt = transport.reserve_pending_connection(peer).await?;
@@ -77,7 +86,7 @@ async fn announced_admission_is_reported_retired_once() -> Result<()> {
 /// An admission that was never announced retires silently, so the application never sees a
 /// departure without an admission.
 #[tokio::test]
-async fn unannounced_admission_retires_silently() -> Result<()> {
+async fn test_unannounced_admission_retires_silently() -> Result<()> {
     let (transport, log) = transport_with_log()?;
     let peer = SecretKey::random().address().into();
     let attempt = transport.reserve_pending_connection(peer).await?;
@@ -91,7 +100,7 @@ async fn unannounced_admission_retires_silently() -> Result<()> {
 /// The announcement mark is per generation: once the record is retired, the same attempt can
 /// no longer be announced, and a later generation starts unannounced.
 #[tokio::test]
-async fn announcement_is_bound_to_the_active_generation() -> Result<()> {
+async fn test_announcement_is_bound_to_the_active_generation() -> Result<()> {
     let (transport, log) = transport_with_log()?;
     let peer = SecretKey::random().address().into();
     let old = transport.reserve_pending_connection(peer).await?;
@@ -114,7 +123,7 @@ async fn announcement_is_bound_to_the_active_generation() -> Result<()> {
 /// A topology prune that keeps the connection record (a `Disconnected` transport allowed to
 /// recover) reports nothing; the retirement is reported once the record itself is retired.
 #[tokio::test]
-async fn topology_prune_keeps_the_record_and_reports_nothing() -> Result<()> {
+async fn test_topology_prune_keeps_the_record_and_reports_nothing() -> Result<()> {
     let (transport, log) = transport_with_log()?;
     let peer = SecretKey::random().address().into();
     let attempt = transport.reserve_pending_connection(peer).await?;
@@ -125,7 +134,7 @@ async fn topology_prune_keeps_the_record_and_reports_nothing() -> Result<()> {
     assert!(transport
         .remove_unavailable_topology(peer, Some(attempt))?
         .is_some());
-    assert!(transport.is_admitted_connection_attempt(attempt));
+    assert!(transport.is_active_connection_attempt(attempt));
     assert!(log.retired().is_empty());
 
     assert!(transport.disconnect_attempt(attempt).await?);
@@ -137,7 +146,7 @@ async fn topology_prune_keeps_the_record_and_reports_nothing() -> Result<()> {
 /// through the same transition and is reported like any other retirement; a referenced peer is
 /// kept and reports nothing.
 #[tokio::test]
-async fn eviction_of_an_unreferenced_peer_is_reported_retired() -> Result<()> {
+async fn test_eviction_of_an_unreferenced_peer_is_reported_retired() -> Result<()> {
     let (transport, log) = transport_with_log()?;
     let referenced = SecretKey::random().address().into();
     let unreferenced = SecretKey::random().address().into();
@@ -159,48 +168,8 @@ async fn eviction_of_an_unreferenced_peer_is_reported_retired() -> Result<()> {
         RetirementOutcome::Retired(())
     );
     assert_eq!(log.retired(), vec![unreferenced]);
-    assert!(!transport.is_admitted_connection_attempt(evicted));
+    assert!(!transport.is_active_connection_attempt(evicted));
     Ok(())
-}
-
-/// What the application observed for one peer, in start order.
-#[cfg(feature = "dummy")]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Observed {
-    /// `ConnectionStateChange` with this state.
-    State(WebrtcConnectionState),
-    /// `PeerRetired`.
-    Retired,
-}
-
-/// Records every swarm event for one peer, in start order.
-#[cfg(feature = "dummy")]
-struct EventSequence {
-    peer: Did,
-    observed: Mutex<Vec<Observed>>,
-}
-
-#[cfg(feature = "dummy")]
-#[async_trait]
-impl SwarmCallback for EventSequence {
-    /// Record the event if it concerns the observed peer.
-    async fn on_event(
-        &self,
-        event: &SwarmEvent,
-    ) -> std::result::Result<(), crate::error::CallbackError> {
-        let observed = match *event {
-            SwarmEvent::ConnectionStateChange { peer, state } if peer == self.peer => {
-                Observed::State(state)
-            }
-            SwarmEvent::PeerRetired { peer } if peer == self.peer => Observed::Retired,
-            _ => return Ok(()),
-        };
-        self.observed
-            .lock()
-            .expect("event sequence is never poisoned")
-            .push(observed);
-        Ok(())
-    }
 }
 
 /// Through the production admission and terminal paths, the application observes
@@ -209,46 +178,37 @@ impl SwarmCallback for EventSequence {
 /// `Connecting` while its data channel opens, before the admission.
 #[cfg(feature = "dummy")]
 #[tokio::test]
-async fn retirement_is_reported_between_admission_and_terminal_state() -> Result<()> {
+async fn test_retirement_is_reported_between_admission_and_terminal_state() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
     ))?);
     let peer = SecretKey::random().address().into();
-    let sequence = Arc::new(EventSequence {
-        peer,
-        observed: Mutex::new(Vec::new()),
-    });
-    transport.callback_slot().replace(sequence.clone())?;
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport), sequence.clone());
+    let log = Arc::new(EventLog::default());
+    transport.callback_slot().replace(log.clone())?;
+    let callback = InnerSwarmCallback::new(Arc::clone(&transport), log.clone());
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, callback)
         .await?;
     open_dummy_data_channel_before_ice_connected(&transport, peer).await?;
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport), sequence.clone())
+    let callback = InnerSwarmCallback::new(Arc::clone(&transport), log.clone())
         .with_pending_connection_attempt(attempt);
     callback
         .on_data_channel_open(&peer.to_string())
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
-    assert!(transport.is_admitted_connection_attempt(attempt));
+    assert!(transport.is_active_connection_attempt(attempt));
 
     callback
         .on_peer_connection_state_change(&peer.to_string(), WebrtcConnectionState::Failed)
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
-    assert!(!transport.is_admitted_connection_attempt(attempt));
-    assert_eq!(
-        sequence
-            .observed
-            .lock()
-            .expect("event sequence is never poisoned")
-            .clone(),
-        vec![
-            Observed::State(WebrtcConnectionState::Connecting),
-            Observed::State(WebrtcConnectionState::Connected),
-            Observed::Retired,
-            Observed::State(WebrtcConnectionState::Failed),
-        ]
-    );
+    assert!(!transport.is_active_connection_attempt(attempt));
+    let state = |state| SwarmEvent::ConnectionStateChange { peer, state };
+    assert_eq!(log.events(), vec![
+        state(WebrtcConnectionState::Connecting),
+        state(WebrtcConnectionState::Connected),
+        SwarmEvent::PeerRetired { peer },
+        state(WebrtcConnectionState::Failed),
+    ]);
     Ok(())
 }

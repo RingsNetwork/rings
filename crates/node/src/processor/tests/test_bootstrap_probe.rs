@@ -150,7 +150,7 @@ async fn routed_probe_reports_presence_through_one_hop() {
 
     let port = ProcessorPort::new(c.processor.clone(), c.evidence.clone());
     assert!(
-        port.reachable(&target(b.did())).await,
+        port.reachable(b.did()).await,
         "an announced admission is reachable without a lookup"
     );
     assert!(
@@ -161,14 +161,14 @@ async fn routed_probe_reports_presence_through_one_hop() {
         "the probe for A must be routed, not short-circuited"
     );
     assert!(
-        port.reachable(&target(a.did())).await,
+        port.reachable(a.did()).await,
         "a target one hop away answers as its own successor"
     );
     let absent = b.did() + Did::from(1);
     assert_ne!(absent, a.did());
     assert_ne!(absent, c.did());
     assert!(
-        !port.reachable(&target(absent)).await,
+        !port.reachable(absent).await,
         "an absent key is answered by another node's successor"
     );
     let own_interval = c.did() + Did::from(1);
@@ -181,7 +181,7 @@ async fn routed_probe_reports_presence_through_one_hop() {
         "a key in C's successor interval is decided locally, by C's successor head"
     );
     assert!(
-        !port.reachable(&target(own_interval)).await,
+        !port.reachable(own_interval).await,
         "a locally decided lookup is a refutation"
     );
 }

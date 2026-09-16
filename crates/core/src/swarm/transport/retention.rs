@@ -48,7 +48,6 @@ use std::collections::BTreeSet;
 use super::pending::LifecycleBounds;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 use super::pending::ReservationVerdict;
-use super::pending::RetirementOutcome;
 use super::pending::DEFAULT_PENDING_CONNECTION_CAPACITY;
 use super::PendingConnectionAttempt;
 use super::SwarmTransport;
@@ -211,9 +210,8 @@ impl SwarmTransport {
         let plan = self.unreferenced_eviction_order(now_ms)?;
         observe_plan(&plan);
         for attempt in plan {
-            match self.retire_unless_referenced(attempt).await? {
-                RetirementOutcome::Declined | RetirementOutcome::Superseded => continue,
-                RetirementOutcome::Retired(()) => {}
+            if !self.retire_unless_referenced(attempt).await?.is_retired() {
+                continue;
             }
             tracing::info!(
                 target: "rings_core::swarm::transport::retention",

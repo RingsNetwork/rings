@@ -12,6 +12,7 @@ use rings_core::message::CustomMessage;
 use rings_core::message::Message;
 use rings_core::message::MessagePayload;
 use rings_core::message::MessageVerificationExt;
+use rings_core::swarm::callback::PeerTransition;
 use rings_core::swarm::callback::SwarmCallback;
 use rings_core::swarm::callback::SwarmEvent;
 
@@ -103,12 +104,10 @@ impl SwarmCallback for Backend {
         let Some(observer) = self.observer.as_deref() else {
             return Ok(());
         };
-        // The swarm delivers the admission event at most once per admission, and `PeerRetired`
-        // exactly for the admissions it delivered.
-        if let Some(peer) = event.admitted_peer() {
-            observer.peer_admitted(peer);
-        } else if let SwarmEvent::PeerRetired { peer } = *event {
-            observer.peer_retired(peer);
+        match event.peer_transition() {
+            Some((peer, PeerTransition::Admitted)) => observer.peer_admitted(peer),
+            Some((peer, PeerTransition::Retired)) => observer.peer_retired(peer),
+            None => {}
         }
         Ok(())
     }

@@ -950,7 +950,7 @@ async fn test_pending_disconnected_before_data_channel_open_is_not_reported() ->
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
 
-    assert!(transport.is_admitted_connection_attempt(attempt));
+    assert!(transport.is_active_connection_attempt(attempt));
     let events = app_callback.events()?;
     assert_eq!(events, vec![
         WebrtcConnectionState::Connecting,
@@ -988,7 +988,7 @@ async fn test_terminal_event_during_pending_admission_prevents_late_dht_join() -
     });
 
     measure.wait_for_connect_started().await;
-    assert!(transport.is_admitted_connection_attempt(attempt));
+    assert!(transport.is_active_connection_attempt(attempt));
 
     let terminal_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone())
         .with_pending_connection_attempt(attempt);
@@ -1002,7 +1002,7 @@ async fn test_terminal_event_during_pending_admission_prevents_late_dht_join() -
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))??;
 
-    assert!(!transport.is_admitted_connection_attempt(attempt));
+    assert!(!transport.is_active_connection_attempt(attempt));
     assert!(!transport.dht.successors().contains(&peer)?);
     let events = app_callback.events()?;
     assert!(events.contains(&WebrtcConnectionState::Closed));

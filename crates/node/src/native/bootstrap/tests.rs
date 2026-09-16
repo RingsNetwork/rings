@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use rings_core::dht::Did;
 use tokio::sync::futures::Notified;
+use tokio::sync::oneshot::error::TryRecvError;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -23,7 +24,6 @@ use super::schedule::duration_ms;
 use super::schedule::is_one_slow_delay_after;
 use super::BootstrapPort;
 use super::BootstrapSupervisor;
-use super::BootstrapTargetError;
 use super::BootstrapTargets;
 use super::DialFailure;
 use crate::error::Error;
@@ -167,13 +167,13 @@ impl ScriptedPort {
 #[async_trait::async_trait]
 impl BootstrapPort for ScriptedPort {
     /// Answer from the scripted reachability table (unknown targets are unreachable) and log it.
-    async fn reachable(&self, target: &ValidatedSeedPeer) -> bool {
+    async fn reachable(&self, target: Did) -> bool {
         let at_ms = self.now_ms();
         let mut state = self.state();
-        let reachable = state.reachable.get(&target.did()).copied().unwrap_or(false);
+        let reachable = state.reachable.get(&target).copied().unwrap_or(false);
         state.log.push(Call {
             at_ms,
-            target: target.did(),
+            target,
             kind: CallKind::Probe,
         });
         reachable
@@ -233,11 +233,11 @@ fn targets(peers: Vec<SeedPeer>) -> BootstrapTargets {
         .expect("test targets must validate")
 }
 
-/// The target error `peers` are rejected with.
-fn rejection(peers: Vec<SeedPeer>) -> Option<BootstrapTargetError> {
+/// The error `peers` are rejected with.
+fn rejection(peers: Vec<SeedPeer>) -> Error {
     match BootstrapTargets::from_config(BootstrapConfig { peers }, Did::from(LOCAL)) {
-        Err(Error::BootstrapTarget(error)) => Some(error),
-        _ => None,
+        Err(error) => error,
+        Ok(targets) => panic!("peers must be rejected, got {targets:?}"),
     }
 }
 
@@ -386,37 +386,35 @@ async fn a_loss_wakes_a_target_sleeping_to_its_slow_deadline() {
     running.shutdown().await;
 }
 
-/// A dial refused because a handshake is already in flight waits one short delay without
-/// counting as a failure, so the burst is not consumed by the node's own attempt.
+/// A dial refused because the target's slot is owned by another attempt is a miss like a failed
+/// one: it consumes a burst turn, so a handshake the peer keeps in flight cannot hold the target
+/// in the rapid cadence.
 #[tokio::test(start_paused = true)]
-async fn an_in_flight_handshake_defers_without_counting() {
+async fn a_refused_dial_consumes_a_burst_turn() {
     let target = Did::from(1);
     let port = ScriptedPort::new();
     port.script_dials(target, [
         DialScript::Fail,
-        DialScript::Fail,
         DialScript::InFlight,
         DialScript::InFlight,
         DialScript::InFlight,
-        DialScript::Fail,
-        DialScript::Fail,
-        DialScript::Fail,
+        DialScript::InFlight,
+        DialScript::InFlight,
     ]);
     let running = Running::spawn(port.clone(), vec![peer(1)]);
 
-    tokio::time::sleep(Duration::from_millis(15_000)).await;
-    let dials = port.call_times(target, CallKind::Dial);
+    tokio::time::sleep(Duration::from_millis(9_000)).await;
     assert_eq!(
-        dials,
-        vec![0, 2_000, 4_000, 6_000, 8_000, 10_000, 12_000, 14_000],
-        "deferrals keep the short delay"
+        port.call_times(target, CallKind::Dial),
+        vec![0, 2_000, 4_000, 6_000, 8_000],
+        "refusals and failures share the burst"
     );
     tokio::time::sleep(Duration::from_millis(340_000)).await;
     let dials = port.call_times(target, CallKind::Dial);
-    assert_eq!(dials.len(), 9);
+    assert_eq!(dials.len(), 6);
     assert!(
-        is_one_slow_delay_after(14_000, dials[8]),
-        "the fifth counted failure, not the eighth call, enters the slow cadence"
+        is_one_slow_delay_after(8_000, dials[5]),
+        "the fifth miss enters the slow cadence"
     );
     running.shutdown().await;
 }
@@ -478,58 +476,23 @@ async fn a_loss_during_a_turn_is_reassessed_as_soon_as_the_turn_settles() {
     running.shutdown().await;
 }
 
-/// Target validation accepts distinct public peers and rejects, by typed reason, bad DIDs,
-/// non-public URLs, one DID under two endpoints, one endpoint under two DIDs, and self; a
-/// verbatim repeat merges.
+/// Target validation accepts distinct public peers, reports a seed entry's own refusal
+/// unchanged (the set laws are tested with the seed module), and rejects the node itself.
 #[test]
-fn targets_validate_dids_urls_duplicates_and_self() {
+fn targets_validate_as_a_seed_set_and_reject_self() {
     let local = Did::from(LOCAL);
     assert_eq!(targets(vec![peer(1), peer(2)]).len(), 2);
-
-    assert_eq!(
+    assert!(matches!(
         rejection(vec![SeedPeer {
             did: "not-a-did".to_string(),
             ..peer(1)
         }]),
-        Some(BootstrapTargetError::Peer(SeedPeerError::NotADid(
-            "not-a-did".to_string()
-        )))
-    );
-    assert!(matches!(
-        rejection(vec![SeedPeer {
-            url: "http://127.0.0.1:50001/".to_string(),
-            ..peer(1)
-        }]),
-        Some(BootstrapTargetError::Peer(SeedPeerError::UnusableEndpoint { did, .. }))
-            if did == Did::from(1)
+        Error::SeedPeer(SeedPeerError::NotADid(did)) if did == "not-a-did"
     ));
-    assert_eq!(
-        rejection(vec![
-            SeedPeer {
-                url: "https://other.example.com/".to_string(),
-                ..peer(1)
-            },
-            peer(1),
-        ]),
-        Some(BootstrapTargetError::ConflictingEntries(Did::from(1)))
-    );
     assert!(matches!(
-        rejection(vec![peer(1), SeedPeer {
-            did: Did::from(2).to_string(),
-            ..peer(1)
-        },]),
-        Some(BootstrapTargetError::EndpointUnderTwoDids(_))
+        rejection(vec![peer(1), peer(2), peer(LOCAL)]),
+        Error::BootstrapTargetIsLocalNode(did) if did == local
     ));
-    assert_eq!(
-        rejection(vec![peer(LOCAL)]),
-        Some(BootstrapTargetError::LocalNode(local))
-    );
-
-    assert_eq!(
-        targets(vec![peer(1), peer(2), peer(1)]).len(),
-        2,
-        "a verbatim repeat is merged"
-    );
     assert!(
         BootstrapTargets::from_config(BootstrapConfig::default(), local)
             .expect("an empty section validates")
@@ -554,9 +517,13 @@ async fn rendezvous_resolves_in_either_order_replaces_and_forgets() {
     assert_eq!(waiter.await, Ok(Did::from(2)));
 
     let waiter = rendezvous.wait_for(3).unwrap();
-    rendezvous.forget(3).unwrap();
-    assert!(waiter.await.is_err(), "a forgotten waiter is closed");
-    assert_eq!(rendezvous.len().unwrap(), 0);
+    assert_eq!(rendezvous.len().unwrap(), 1);
+    drop(waiter);
+    assert_eq!(
+        rendezvous.len().unwrap(),
+        0,
+        "a dropped waiter forgets its registration"
+    );
 }
 
 /// Early values are bounded by the capacity, evicting the oldest first, and a capacity of
@@ -568,9 +535,12 @@ async fn rendezvous_bounds_early_values() {
         rendezvous.observe(key, ()).unwrap();
     }
     assert_eq!(rendezvous.len().unwrap(), 2);
-    let evicted = rendezvous.wait_for(1).unwrap();
-    rendezvous.forget(1).unwrap();
-    assert!(evicted.await.is_err(), "the evicted value is gone");
+    let mut evicted = rendezvous.wait_for(1).unwrap();
+    assert!(
+        matches!(evicted.try_recv(), Err(TryRecvError::Empty)),
+        "the evicted value is gone"
+    );
+    drop(evicted);
     assert_eq!(rendezvous.wait_for(3).unwrap().await, Ok(()));
 
     let unbuffered: Rendezvous<u8, ()> = Rendezvous::new(0);

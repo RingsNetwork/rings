@@ -186,7 +186,7 @@ async fn test_failed_dht_retirement_preserves_active_peer_state() -> Result<()> 
     });
 
     assert!(matches!(result, Err(Error::InvalidMessage(_))));
-    assert!(transport.is_admitted_connection_attempt(attempt));
+    assert!(transport.is_active_connection_attempt(attempt));
     assert!(transport
         .peer_connected_for_ms(peer, crate::utils::get_epoch_ms_i64())?
         .is_some());
@@ -223,7 +223,7 @@ async fn test_stale_active_evidence_cannot_retire_replacement_generation() -> Re
         .disconnect_unavailable(old_attempt)
         .await?
         .is_none());
-    assert!(transport.is_admitted_connection_attempt(replacement));
+    assert!(transport.is_active_connection_attempt(replacement));
     assert!(transport.dht.successors().contains(&peer)?);
     Ok(())
 }
@@ -291,7 +291,7 @@ async fn test_stale_pending_close_cannot_remove_replacement_transport() -> Resul
     );
     assert!(transport.is_pending_connection_attempt(replacement)?);
     assert!(transport.get_raw_connection(peer).is_some());
-    transport.cancel_pending_connection(replacement).await?;
+    transport.cancel_unadmitted_connection(replacement).await?;
     Ok(())
 }
 
@@ -333,7 +333,7 @@ async fn test_stale_terminal_callback_cannot_report_replacement_closed() -> Resu
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))??;
 
-    assert!(transport.is_admitted_connection_attempt(replacement));
+    assert!(transport.is_active_connection_attempt(replacement));
     assert!(transport.dht.successors().contains(&peer)?);
     assert!(!callback.events()?.contains(&WebrtcConnectionState::Closed));
     Ok(())
@@ -376,8 +376,8 @@ async fn test_pending_replacement_does_not_suppress_retired_generation_closed() 
         .map_err(|error| Error::InvalidMessage(error.to_string()))??;
 
     assert!(transport.is_pending_connection_attempt(replacement)?);
-    assert!(!transport.is_admitted_connection_attempt(replacement));
+    assert!(!transport.is_active_connection_attempt(replacement));
     assert!(callback.events()?.contains(&WebrtcConnectionState::Closed));
-    assert!(transport.cancel_pending_connection(replacement).await?);
+    assert!(transport.cancel_unadmitted_connection(replacement).await?);
     Ok(())
 }

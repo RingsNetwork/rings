@@ -443,7 +443,7 @@ async fn test_spawned_chunk_tail_cancels_when_same_peer_is_readmitted() -> Resul
         node1
             .swarm
             .transport
-            .is_admitted_connection_attempt(replacement),
+            .is_active_connection_attempt(replacement),
         "the replacement generation must remain admitted"
     );
     assert_eq!(

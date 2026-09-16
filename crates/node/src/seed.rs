@@ -55,12 +55,58 @@ pub enum SeedPeerError {
         /// The policy's refusal.
         reason: String,
     },
+    /// The DID is listed again with a different endpoint or token.
+    #[error("seed peer {0} is listed with conflicting entries")]
+    ConflictingEntries(Did),
+    /// The endpoint is listed again under a different DID.
+    #[error("seed endpoint {0} is listed under two DIDs")]
+    EndpointUnderTwoDids(RemoteRpcEndpoint),
+}
+
+/// How two validated seed peers overlap, ordered by agreement: a verbatim repeat agrees more
+/// than a shared DID, which agrees more than a shared endpoint.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum Overlap {
+    /// Same endpoint claimed for another DID.
+    SameEndpoint,
+    /// Same DID behind another endpoint or token.
+    SameDid,
+    /// Same DID, endpoint and token: one peer listed twice.
+    Verbatim,
+}
+
+/// Validate `peers` as a set: every entry validates, an entry repeated verbatim is merged, and
+/// a DID listed with a different endpoint or token, or an endpoint listed under two DIDs, is
+/// refused as ambiguous, since one endpoint answers as exactly one DID. Endpoint identity is
+/// the full URL: two nodes may share an origin behind path routing, and an entry whose
+/// endpoint answers as another node is refused at dial time by the DID pin. Against the peers
+/// already accepted, the overlap of highest agreement decides.
+pub(crate) fn validate_seed_peers(
+    peers: impl IntoIterator<Item = SeedPeer>,
+) -> Result<Vec<ValidatedSeedPeer>, SeedPeerError> {
+    let mut validated: Vec<ValidatedSeedPeer> = Vec::new();
+    for peer in peers {
+        let peer = ValidatedSeedPeer::try_from(peer)?;
+        match validated
+            .iter()
+            .filter_map(|known| known.overlap(&peer))
+            .max()
+        {
+            Some(Overlap::Verbatim) => continue,
+            Some(Overlap::SameDid) => return Err(SeedPeerError::ConflictingEntries(peer.did)),
+            Some(Overlap::SameEndpoint) => {
+                return Err(SeedPeerError::EndpointUnderTwoDids(peer.endpoint));
+            }
+            None => validated.push(peer),
+        }
+    }
+    Ok(validated)
 }
 
 /// A seed entry that passed validation: a parsed DID and a public HTTP(S) handshake endpoint.
 /// The proof travels as a type, so every dial of a seed peer runs the same checks once, where
 /// the entry enters.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub(crate) struct ValidatedSeedPeer {
     did: Did,
     endpoint: RemoteRpcEndpoint,
@@ -81,6 +127,19 @@ impl ValidatedSeedPeer {
     /// Bearer token for a peer that gates its handshake, never logged.
     pub(crate) fn api_token(&self) -> Option<&str> {
         self.api_token.as_deref()
+    }
+
+    /// How `other` overlaps with this peer, if at all.
+    fn overlap(&self, other: &Self) -> Option<Overlap> {
+        if self == other {
+            Some(Overlap::Verbatim)
+        } else if self.did == other.did {
+            Some(Overlap::SameDid)
+        } else if self.endpoint == other.endpoint {
+            Some(Overlap::SameEndpoint)
+        } else {
+            None
+        }
     }
 }
 
@@ -167,6 +226,45 @@ mod tests {
         let rendered = format!("{peer:?}");
         assert!(!rendered.contains("0123456789abcdef"));
         assert!(rendered.contains("[REDACTED]"));
+    }
+
+    /// A seed entry for `did` at `url`.
+    fn entry(did: Did, url: &str) -> SeedPeer {
+        SeedPeer {
+            did: did.to_string(),
+            url: url.to_string(),
+            api_token: None,
+        }
+    }
+
+    /// Distinct peers validate; a verbatim repeat merges; a DID with two endpoints and an
+    /// endpoint under two DIDs are refused; against several accepted peers the overlap of
+    /// highest agreement names the refusal.
+    #[test]
+    fn seed_peer_sets_merge_repeats_and_refuse_conflicts() {
+        let a = entry(Did::from(1), "https://a.example.com/");
+        let b = entry(Did::from(2), "https://b.example.com/");
+        assert_eq!(
+            validate_seed_peers([a.clone(), b.clone(), a.clone()])
+                .expect("distinct peers validate")
+                .len(),
+            2,
+            "a verbatim repeat is merged"
+        );
+        assert_eq!(
+            validate_seed_peers([a.clone(), entry(Did::from(1), "https://other.example.com/")])
+                .err(),
+            Some(SeedPeerError::ConflictingEntries(Did::from(1)))
+        );
+        assert!(matches!(
+            validate_seed_peers([a.clone(), entry(Did::from(3), "https://a.example.com/")]),
+            Err(SeedPeerError::EndpointUnderTwoDids(_))
+        ));
+        assert_eq!(
+            validate_seed_peers([a, b, entry(Did::from(2), "https://a.example.com/")]).err(),
+            Some(SeedPeerError::ConflictingEntries(Did::from(2))),
+            "a shared DID outranks a shared endpoint"
+        );
     }
 
     /// A malformed DID and a non-public endpoint are refused by typed reason.

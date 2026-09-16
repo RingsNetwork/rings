@@ -199,16 +199,16 @@ long-running node that loses its transport to a seed rejoins without a restart.
 
 How a managed target is supervised:
 
-* Reachability is a routed successor lookup for the target's DID. A target with an admitted
-  connection record, or one that some peer can route to, is left alone, so a target is never
-  forced into a direct edge merely because it is not a finger.
+* Reachability is a routed successor lookup for the target's DID. A target whose admission was
+  announced, or one that some peer can route to, is left alone, so a target is never forced
+  into a direct edge merely because it is not a finger.
 * An unreachable target is redialed five times, each attempt at least two seconds after the
   previous one settled, then every five minutes plus up to thirty seconds of jitter, until the
   peer is admitted again.
 * A redial counts as successful only once the swarm admits the peer. An endpoint answering as a
-  different DID is refused before any offer is created. A handshake to the target already
-  pending, whichever side started it, defers the redial without counting as a failure, for the
-  delay the failure count prescribes.
+  different DID is refused before any offer is created. A redial refused because a handshake to
+  the target is already in flight, whichever side started it, is not an error, but consumes a
+  turn of the burst like a failed dial.
 * A target leaving the local DHT, whatever caused the loss, triggers an immediate reassessment,
   and a later loss restarts the burst.
 * At most one handshake per target is in flight, targets retry independently, and shutdown

@@ -193,6 +193,7 @@ pub enum Error {
     #[error("Measurement runtime error: {0}")]
     MeasurementRuntime(#[from] crate::measure::MeasureRuntimeError) = 816,
     /// A handshake was accepted but the swarm did not admit the peer within the dial's window.
+    #[cfg(rings_native)]
     #[error("peer {peer} was not admitted within the handshake admission window")]
     AdmissionTimedOut {
         /// Peer the handshake was accepted with.
@@ -207,10 +208,10 @@ pub enum Error {
         /// DID the endpoint answered as.
         actual: Did,
     } = 818,
-    /// A managed bootstrap target failed validation.
+    /// A managed bootstrap target names the node itself.
     #[cfg(rings_native)]
-    #[error(transparent)]
-    BootstrapTarget(#[from] crate::native::bootstrap::BootstrapTargetError) = 819,
+    #[error("bootstrap peer {0} is this node itself")]
+    BootstrapTargetIsLocalNode(Did) = 819,
     /// A seed entry failed validation.
     #[error(transparent)]
     SeedPeer(#[from] crate::seed::SeedPeerError) = 820,
@@ -339,6 +340,23 @@ impl From<Error> for jsonrpc_core::Error {
     }
 }
 
+impl Error {
+    /// Whether a handshake did not complete only because the peer's slot is owned by another
+    /// attempt: the core refused a new offer (`AlreadyConnected`) or superseded ours
+    /// (`ConnectionAttemptSuperseded`). That is a handshake in flight, whichever side started
+    /// it, or an admission not yet announced; a later attempt may succeed without anything
+    /// having been wrong.
+    pub fn is_handshake_in_flight(&self) -> bool {
+        matches!(
+            self,
+            Error::CreateOffer(
+                rings_core::error::Error::AlreadyConnected
+                    | rings_core::error::Error::ConnectionAttemptSuperseded { .. }
+            ) | Error::AcceptAnswer(rings_core::error::Error::ConnectionAttemptSuperseded { .. })
+        )
+    }
+}
+
 impl From<rings_rpc::jsonrpc::RpcError> for Error {
     /// A remote node's JSON-RPC call failed: transport, decoding or an error the node returned.
     fn from(error: rings_rpc::jsonrpc::RpcError) -> Self {
@@ -368,6 +386,30 @@ impl From<Error> for wasm_bindgen::JsValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The core refusing an offer, or superseding this node's attempt with the peer's own
+    /// offer, is a handshake in flight; every other failure is not.
+    #[test]
+    fn handshake_in_flight_is_a_refused_or_superseded_attempt() {
+        let superseded = || rings_core::error::Error::ConnectionAttemptSuperseded {
+            peer: Did::from(1),
+            generation: 1,
+        };
+        assert!(
+            Error::CreateOffer(rings_core::error::Error::AlreadyConnected).is_handshake_in_flight()
+        );
+        assert!(Error::CreateOffer(superseded()).is_handshake_in_flight());
+        assert!(Error::AcceptAnswer(superseded()).is_handshake_in_flight());
+        assert!(
+            !Error::AcceptAnswer(rings_core::error::Error::AlreadyConnected)
+                .is_handshake_in_flight()
+        );
+        assert!(!Error::HandshakePeerMismatch {
+            expected: Did::from(1),
+            actual: Did::from(2),
+        }
+        .is_handshake_in_flight());
+    }
+
     #[test]
     fn test_error_code() {
         let err = Error::RemoteRpcError("Test".to_string());

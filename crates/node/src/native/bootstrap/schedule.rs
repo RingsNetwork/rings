@@ -12,11 +12,9 @@
 //!  │  Pending  │             │     Busy      │                              │   Reachable    │
 //!  │  f, t₀    │ ◀────────── │   f, lost     │ ◀─────────────────────────── │   recheck_at   │
 //!  └───────────┘  settle     └───────────────┘ begin_if_due (recheck_at ≤ now)└────────────────┘
-//!     ▲    ▲     (DialFailed)       │                                              │
+//!     ▲    ▲     (Unreachable)      │                                              │
 //!     │    │     f ↦ f + 1          │ settle(_) ∧ lost                             │ notice_loss
 //!     │    │     t₀ ↦ now+delay(f+1)│ f ↦ 0, t₀ ↦ now                              │ f ↦ 0, t₀ ↦ now
-//!     │    │     settle(Deferred)   │                                              │
-//!     │    │     t₀ ↦ now+delay(f)                                                │
 //!     │    └────────────────────────┴──────────────────────────────────────────────┘
 //!     └── notice_loss: f ↦ 0, t₀ ↦ now   (the target was admitted since, and left again)
 //!
@@ -29,12 +27,12 @@
 //!
 //! - *No overlap*: `begin_if_due` is the only entry into `Busy` and refuses a target that is not
 //!   due, and a `Busy` target is never due, so at most one turn per target is in flight.
-//! - *Bounded burst*: a target with `f` consecutive failures waits `delay(f)` before its next
-//!   attempt, measured from the settlement of the previous one, so the first `BURST_ATTEMPTS`
-//!   attempts are at least `BURST_DELAY` apart and every later attempt at least `BASE_INTERVAL`
-//!   apart, whatever the outcomes in between.
-//! - *Deferral is not failure*: a turn that found a handshake to the target already in flight
-//!   keeps its failure count `f` and waits `delay(f)`, like the attempt it stands in for.
+//! - *Bounded burst*: a target with `f` consecutive misses waits `delay(f)` before its next
+//!   turn, measured from the settlement of the previous one, so a loss is followed by at most
+//!   `BURST_ATTEMPTS` turns `BURST_DELAY` apart and then by turns `BASE_INTERVAL` apart. A miss
+//!   is any turn that did not find the target reachable: a failed dial, or one refused because
+//!   the target's slot is owned by another attempt; the budget counts turns, not causes, so a
+//!   handshake the peer keeps in flight cannot hold the target in the rapid cadence.
 //! - *Reset on success*: `Reachable` carries no failure count; a later loss restarts the burst.
 //! - *Losses are never lost*: a loss makes the target pending at once with the burst restarted,
 //!   whether it is noticed while `Reachable`, while `Pending` (the target was admitted by
@@ -56,6 +54,8 @@ use rings_core::dht::Did;
 const BURST_ATTEMPTS: u8 = 5;
 /// Delay between consecutive attempts inside the rapid burst.
 const BURST_DELAY: Duration = Duration::from_secs(2);
+// The timelines in this module's tests and the shell's spell the burst delay as `2_000`.
+const _: () = assert!(BURST_DELAY.as_millis() == 2_000);
 /// Base cadence once the burst is exhausted, and the recheck period of a reachable target.
 const BASE_INTERVAL: Duration = Duration::from_secs(300);
 /// Inclusive upper bound of the uniform jitter added to every `BASE_INTERVAL` delay, so a fleet
@@ -64,19 +64,19 @@ const JITTER_WINDOW: Duration = Duration::from_secs(30);
 
 /// Lifecycle phase of one managed target; see the module diagram.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum TargetPhase {
-    /// Waiting for its next turn after `failures` consecutive failed dials; due once
-    /// `not_before_ms` has passed.
+enum TargetPhase {
+    /// Waiting for its next turn after `misses` consecutive turns that did not find the target
+    /// reachable; due once `not_before_ms` has passed.
     Pending {
-        /// Consecutive failed dials since the target was last reachable.
-        failures: u8,
+        /// Consecutive misses since the target was last reachable.
+        misses: u8,
         /// Earliest instant of the next turn.
         not_before_ms: u64,
     },
     /// A turn is in flight; `lost` records a retirement of the target noticed meanwhile.
     Busy {
-        /// Consecutive failed dials carried into this turn.
-        failures: u8,
+        /// Consecutive misses carried into this turn.
+        misses: u8,
         /// Whether the target left the local DHT while the turn ran.
         lost: bool,
     },
@@ -89,23 +89,22 @@ pub(crate) enum TargetPhase {
 
 /// Result of one supervisor turn, as reported by the shell.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum TurnOutcome {
+pub(super) enum TurnOutcome {
     /// The target was reachable through the overlay, or the redial completed with admission.
     Reachable,
-    /// A handshake to the target was already in flight; nothing was attempted.
-    Deferred,
-    /// The target was unreachable and the redial failed.
-    DialFailed,
+    /// The turn did not find the target reachable: the redial failed, or was refused because
+    /// the target's slot is owned by another attempt.
+    Unreachable,
 }
 
-/// The jittered delay law over a seeded generator.
+/// The delay law: a rapid burst, then a jittered slow cadence drawn from a seeded generator.
 #[derive(Debug)]
-struct Jitter(StdRng);
+struct DelayLaw(StdRng);
 
-impl Jitter {
-    /// Delay before the attempt that follows the `failures`-th consecutive failure.
-    fn delay_ms(&mut self, failures: u8) -> u64 {
-        if failures < BURST_ATTEMPTS {
+impl DelayLaw {
+    /// Delay before the turn that follows the `misses`-th consecutive miss.
+    fn delay_ms(&mut self, misses: u8) -> u64 {
+        if misses < BURST_ATTEMPTS {
             duration_ms(BURST_DELAY)
         } else {
             self.slow_delay_ms()
@@ -121,38 +120,38 @@ impl Jitter {
 
 /// Retry schedule over every managed target.
 #[derive(Debug)]
-pub(crate) struct BootstrapSchedule {
+pub(super) struct BootstrapSchedule {
     phases: BTreeMap<Did, TargetPhase>,
-    jitter: Jitter,
+    delays: DelayLaw,
 }
 
 impl BootstrapSchedule {
     /// A schedule in which each of `targets` is due immediately, with jitter drawn from a
     /// generator seeded by `jitter_seed`.
-    pub(crate) fn new(targets: impl IntoIterator<Item = Did>, jitter_seed: u64) -> Self {
+    pub(super) fn new(targets: impl IntoIterator<Item = Did>, jitter_seed: u64) -> Self {
         Self {
             phases: targets
                 .into_iter()
                 .map(|target| {
                     (target, TargetPhase::Pending {
-                        failures: 0,
+                        misses: 0,
                         not_before_ms: 0,
                     })
                 })
                 .collect(),
-            jitter: Jitter(StdRng::seed_from_u64(jitter_seed)),
+            delays: DelayLaw(StdRng::seed_from_u64(jitter_seed)),
         }
     }
 
     /// Current phase of `target`, or `None` for a DID outside the target set.
     #[cfg(test)]
-    pub(crate) fn phase(&self, target: Did) -> Option<TargetPhase> {
+    fn phase(&self, target: Did) -> Option<TargetPhase> {
         self.phases.get(&target).copied()
     }
 
     /// Targets whose phase is due at `now_ms`, in DID order.
     #[cfg(test)]
-    pub(crate) fn due(&self, now_ms: u64) -> impl Iterator<Item = Did> + '_ {
+    fn due(&self, now_ms: u64) -> impl Iterator<Item = Did> + '_ {
         self.phases
             .iter()
             .filter(move |(_, phase)| phase.is_due(now_ms))
@@ -161,52 +160,48 @@ impl BootstrapSchedule {
 
     /// Enter `Busy` for `target` iff it is due at `now_ms`; `false` when the target is unknown,
     /// busy, or not yet due.
-    pub(crate) fn begin_if_due(&mut self, target: Did, now_ms: u64) -> bool {
+    pub(super) fn begin_if_due(&mut self, target: Did, now_ms: u64) -> bool {
         let Some(phase) = self.phases.get_mut(&target) else {
             return false;
         };
         if !phase.is_due(now_ms) {
             return false;
         }
-        let failures = match *phase {
-            TargetPhase::Pending { failures, .. } => failures,
+        let misses = match *phase {
+            TargetPhase::Pending { misses, .. } => misses,
             TargetPhase::Reachable { .. } => 0,
             TargetPhase::Busy { .. } => return false,
         };
         *phase = TargetPhase::Busy {
-            failures,
+            misses,
             lost: false,
         };
         true
     }
 
     /// Leave `Busy` for `target` with `outcome` at `now_ms`; `false` when no turn was in flight.
-    pub(crate) fn settle(&mut self, target: Did, outcome: TurnOutcome, now_ms: u64) -> bool {
+    pub(super) fn settle(&mut self, target: Did, outcome: TurnOutcome, now_ms: u64) -> bool {
         let Some(phase) = self.phases.get_mut(&target) else {
             return false;
         };
-        let TargetPhase::Busy { failures, lost } = *phase else {
+        let TargetPhase::Busy { misses, lost } = *phase else {
             return false;
         };
         *phase = if lost {
             TargetPhase::Pending {
-                failures: 0,
+                misses: 0,
                 not_before_ms: now_ms,
             }
         } else {
             match outcome {
                 TurnOutcome::Reachable => TargetPhase::Reachable {
-                    recheck_at_ms: now_ms.saturating_add(self.jitter.slow_delay_ms()),
+                    recheck_at_ms: now_ms.saturating_add(self.delays.slow_delay_ms()),
                 },
-                TurnOutcome::Deferred => TargetPhase::Pending {
-                    failures,
-                    not_before_ms: now_ms.saturating_add(self.jitter.delay_ms(failures)),
-                },
-                TurnOutcome::DialFailed => {
-                    let failures = failures.saturating_add(1);
+                TurnOutcome::Unreachable => {
+                    let misses = misses.saturating_add(1);
                     TargetPhase::Pending {
-                        failures,
-                        not_before_ms: now_ms.saturating_add(self.jitter.delay_ms(failures)),
+                        misses,
+                        not_before_ms: now_ms.saturating_add(self.delays.delay_ms(misses)),
                     }
                 }
             }
@@ -216,26 +211,23 @@ impl BootstrapSchedule {
 
     /// Record at `now_ms` that `target` left the local DHT; `false` when the running turn
     /// already noted a loss or the DID is unknown.
-    pub(crate) fn notice_loss(&mut self, target: Did, now_ms: u64) -> bool {
+    pub(super) fn notice_loss(&mut self, target: Did, now_ms: u64) -> bool {
         let Some(phase) = self.phases.get_mut(&target) else {
             return false;
         };
         match *phase {
             TargetPhase::Reachable { .. } | TargetPhase::Pending { .. } => {
                 *phase = TargetPhase::Pending {
-                    failures: 0,
+                    misses: 0,
                     not_before_ms: now_ms,
                 };
                 true
             }
             TargetPhase::Busy {
-                failures,
+                misses,
                 lost: false,
             } => {
-                *phase = TargetPhase::Busy {
-                    failures,
-                    lost: true,
-                };
+                *phase = TargetPhase::Busy { misses, lost: true };
                 true
             }
             TargetPhase::Busy { lost: true, .. } => false,
@@ -244,7 +236,7 @@ impl BootstrapSchedule {
 
     /// Earliest instant at which some target becomes due, or `None` while every target is busy
     /// or the set is empty.
-    pub(crate) fn next_deadline_ms(&self) -> Option<u64> {
+    pub(super) fn next_deadline_ms(&self) -> Option<u64> {
         self.phases
             .values()
             .copied()
@@ -271,14 +263,14 @@ impl TargetPhase {
 }
 
 /// Whole milliseconds of `duration`, saturating at `u64::MAX`.
-pub(crate) fn duration_ms(duration: Duration) -> u64 {
+pub(super) fn duration_ms(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Whether `instant_ms` lies exactly one slow-cadence delay after `from_ms`, that is within
 /// `[from + BASE_INTERVAL, from + BASE_INTERVAL + JITTER_WINDOW]`.
 #[cfg(test)]
-pub(crate) fn is_one_slow_delay_after(from_ms: u64, instant_ms: u64) -> bool {
+pub(super) fn is_one_slow_delay_after(from_ms: u64, instant_ms: u64) -> bool {
     let floor = from_ms.saturating_add(duration_ms(BASE_INTERVAL));
     (floor..=floor.saturating_add(duration_ms(JITTER_WINDOW))).contains(&instant_ms)
 }
@@ -295,14 +287,14 @@ mod tests {
         BootstrapSchedule::new((1..=count).map(Did::from), 1)
     }
 
-    /// Run one failed turn for the target at `now_ms` and return the resulting `not_before_ms`.
-    fn fail_turn(schedule: &mut BootstrapSchedule, now_ms: u64) -> u64 {
+    /// Run one missed turn for the target at `now_ms` and return the resulting `not_before_ms`.
+    fn miss_turn(schedule: &mut BootstrapSchedule, now_ms: u64) -> u64 {
         let target = Did::from(TARGET);
         assert!(schedule.begin_if_due(target, now_ms));
-        assert!(schedule.settle(target, TurnOutcome::DialFailed, now_ms));
+        assert!(schedule.settle(target, TurnOutcome::Unreachable, now_ms));
         match schedule.phase(target) {
             Some(TargetPhase::Pending { not_before_ms, .. }) => not_before_ms,
-            other => panic!("failed turn must leave the target pending, got {other:?}"),
+            other => panic!("a missed turn must leave the target pending, got {other:?}"),
         }
     }
 
@@ -318,29 +310,19 @@ mod tests {
         assert_eq!(schedule.next_deadline_ms(), Some(0));
     }
 
-    /// The timelines in these tests and the shell's spell the burst delay as `2_000`.
+    /// Bounded-burst law: turns 1..BURST_ATTEMPTS wait BURST_DELAY, later ones one slow delay.
     #[test]
-    fn burst_delay_is_two_seconds() {
-        assert_eq!(duration_ms(BURST_DELAY), 2_000);
-    }
-
-    /// Bounded-burst law: attempts 1..BURST_ATTEMPTS wait BURST_DELAY, later ones one slow delay.
-    #[test]
-    fn burst_attempts_are_two_seconds_apart_then_slow_down() {
+    fn burst_turns_are_two_seconds_apart_then_slow_down() {
         let mut schedule = schedule(1);
         let mut now_ms = 0;
-        for attempt in 1..BURST_ATTEMPTS {
-            let next = fail_turn(&mut schedule, now_ms);
-            assert_eq!(
-                next,
-                now_ms + 2_000,
-                "attempt {attempt} must wait BURST_DELAY"
-            );
+        for turn in 1..BURST_ATTEMPTS {
+            let next = miss_turn(&mut schedule, now_ms);
+            assert_eq!(next, now_ms + 2_000, "turn {turn} must wait BURST_DELAY");
             now_ms = next;
         }
-        let slow = fail_turn(&mut schedule, now_ms);
+        let slow = miss_turn(&mut schedule, now_ms);
         assert!(is_one_slow_delay_after(now_ms, slow));
-        let slower = fail_turn(&mut schedule, slow);
+        let slower = miss_turn(&mut schedule, slow);
         assert!(is_one_slow_delay_after(slow, slower));
     }
 
@@ -349,39 +331,19 @@ mod tests {
     fn a_target_cannot_begin_before_it_is_due() {
         let target = Did::from(TARGET);
         let mut schedule = schedule(1);
-        let next = fail_turn(&mut schedule, 0);
+        let next = miss_turn(&mut schedule, 0);
         assert!(!schedule.begin_if_due(target, next - 1));
         assert!(schedule.begin_if_due(target, next));
     }
 
-    /// Deferral law: a deferred turn waits BURST_DELAY and keeps its failure count.
+    /// Reset-on-success law: a reachable settlement forgets misses and a loss restarts the burst.
     #[test]
-    fn a_deferred_turn_keeps_its_failure_count() {
+    fn success_resets_the_miss_count() {
         let target = Did::from(TARGET);
         let mut schedule = schedule(1);
         let mut now_ms = 0;
         for _ in 0..3 {
-            now_ms = fail_turn(&mut schedule, now_ms);
-        }
-        assert!(schedule.begin_if_due(target, now_ms));
-        assert!(schedule.settle(target, TurnOutcome::Deferred, now_ms));
-        assert_eq!(
-            schedule.phase(target),
-            Some(TargetPhase::Pending {
-                failures: 3,
-                not_before_ms: now_ms + 2_000
-            })
-        );
-    }
-
-    /// Reset-on-success law: a reachable settlement forgets failures and a loss restarts the burst.
-    #[test]
-    fn success_resets_the_failure_count() {
-        let target = Did::from(TARGET);
-        let mut schedule = schedule(1);
-        let mut now_ms = 0;
-        for _ in 0..3 {
-            now_ms = fail_turn(&mut schedule, now_ms);
+            now_ms = miss_turn(&mut schedule, now_ms);
         }
         assert!(schedule.begin_if_due(target, now_ms));
         assert!(schedule.settle(target, TurnOutcome::Reachable, now_ms));
@@ -393,12 +355,12 @@ mod tests {
         assert_eq!(
             schedule.phase(target),
             Some(TargetPhase::Pending {
-                failures: 0,
+                misses: 0,
                 not_before_ms: recheck_at_ms - 1
             })
         );
         assert_eq!(
-            fail_turn(&mut schedule, recheck_at_ms),
+            miss_turn(&mut schedule, recheck_at_ms),
             recheck_at_ms + 2_000
         );
     }
@@ -410,23 +372,23 @@ mod tests {
         let mut schedule = schedule(1);
         let mut now_ms = 0;
         for _ in 0..BURST_ATTEMPTS {
-            now_ms = fail_turn(&mut schedule, now_ms);
+            now_ms = miss_turn(&mut schedule, now_ms);
         }
         assert!(matches!(
             schedule.phase(target),
-            Some(TargetPhase::Pending { failures: 5, .. })
+            Some(TargetPhase::Pending { misses: 5, .. })
         ));
         assert!(schedule.notice_loss(target, 20));
         assert_eq!(
             schedule.phase(target),
             Some(TargetPhase::Pending {
-                failures: 0,
+                misses: 0,
                 not_before_ms: 20
             })
         );
     }
 
-    /// A reachable target is due exactly at its recheck instant and begins with zero failures.
+    /// A reachable target is due exactly at its recheck instant and begins with zero misses.
     #[test]
     fn a_reachable_target_is_rechecked_when_its_deadline_passes() {
         let target = Did::from(TARGET);
@@ -442,7 +404,7 @@ mod tests {
         assert_eq!(
             schedule.phase(target),
             Some(TargetPhase::Busy {
-                failures: 0,
+                misses: 0,
                 lost: false
             })
         );
@@ -453,15 +415,11 @@ mod tests {
     #[test]
     fn a_loss_during_a_turn_restarts_the_burst_on_settlement() {
         let target = Did::from(TARGET);
-        for outcome in [
-            TurnOutcome::Reachable,
-            TurnOutcome::Deferred,
-            TurnOutcome::DialFailed,
-        ] {
+        for outcome in [TurnOutcome::Reachable, TurnOutcome::Unreachable] {
             let mut schedule = schedule(1);
             let mut now_ms = 0;
             for _ in 0..BURST_ATTEMPTS {
-                now_ms = fail_turn(&mut schedule, now_ms);
+                now_ms = miss_turn(&mut schedule, now_ms);
             }
             assert!(schedule.begin_if_due(target, now_ms));
             assert!(schedule.notice_loss(target, now_ms + 5));
@@ -473,7 +431,7 @@ mod tests {
             assert_eq!(
                 schedule.phase(target),
                 Some(TargetPhase::Pending {
-                    failures: 0,
+                    misses: 0,
                     not_before_ms: now_ms + 10
                 }),
                 "outcome {outcome:?} must not override the loss"
@@ -512,8 +470,8 @@ mod tests {
         let mut left = BootstrapSchedule::new([Did::from(TARGET)], 42);
         let mut right = BootstrapSchedule::new([Did::from(TARGET)], 42);
         for _ in 0..8 {
-            let left_delay = left.jitter.slow_delay_ms();
-            let right_delay = right.jitter.slow_delay_ms();
+            let left_delay = left.delays.slow_delay_ms();
+            let right_delay = right.delays.slow_delay_ms();
             assert_eq!(left_delay, right_delay);
             assert!(is_one_slow_delay_after(0, left_delay));
         }
@@ -525,12 +483,12 @@ mod tests {
         let mut schedule = schedule(1);
         let mut now_ms = 0;
         for _ in 0..(u8::MAX as usize + 2) {
-            now_ms = fail_turn(&mut schedule, now_ms);
+            now_ms = miss_turn(&mut schedule, now_ms);
         }
         assert!(matches!(
             schedule.phase(Did::from(TARGET)),
             Some(TargetPhase::Pending {
-                failures: u8::MAX,
+                misses: u8::MAX,
                 ..
             })
         ));

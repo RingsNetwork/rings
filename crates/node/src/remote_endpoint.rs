@@ -94,19 +94,16 @@ fn resolution_target(parsed: &reqwest::Url) -> Result<Option<ResolutionTarget>> 
     let port = parsed.port_or_known_default().ok_or_else(|| {
         Error::UnsafeRemoteRpcTarget("endpoint URL has no usable port".to_string())
     })?;
-    match (parsed.host(), parsed.host_str()) {
-        (Some(url::Host::Domain(host)), Some(pin_host)) => {
-            crate::onion::OnionProxyTarget::new(host, port).map(|lookup| {
-                Some(ResolutionTarget {
-                    lookup,
-                    pin_host: pin_host.to_string(),
-                })
+    let no_host = || Error::UnsafeRemoteRpcTarget("endpoint URL has no host".to_string());
+    let pin_host = parsed.host_str().ok_or_else(no_host)?;
+    match parsed.host().ok_or_else(no_host)? {
+        url::Host::Domain(host) => crate::onion::OnionProxyTarget::new(host, port).map(|lookup| {
+            Some(ResolutionTarget {
+                lookup,
+                pin_host: pin_host.to_string(),
             })
-        }
-        (Some(url::Host::Ipv4(_) | url::Host::Ipv6(_)), _) => Ok(None),
-        (None, _) | (Some(url::Host::Domain(_)), None) => Err(Error::UnsafeRemoteRpcTarget(
-            "endpoint URL has no host".to_string(),
-        )),
+        }),
+        url::Host::Ipv4(_) | url::Host::Ipv6(_) => Ok(None),
     }
 }
 
