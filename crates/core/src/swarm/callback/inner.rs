@@ -246,7 +246,7 @@ impl InnerSwarmCallback {
                 .processor
                 .logical
                 .transport
-                .is_admitted_connection_attempt(attempt)
+                .begin_connected_announcement(attempt)?
             {
                 tracing::debug!("suppressing connected event for {did}; connection was retired before event delivery");
                 return Ok(false);

@@ -9,7 +9,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use rings_core::dht::Did;
 use rings_core::message::CustomMessage;
-use rings_core::message::FindSuccessorReportHandler;
 use rings_core::message::Message;
 use rings_core::message::MessagePayload;
 use rings_core::message::MessageVerificationExt;
@@ -81,10 +80,8 @@ impl SwarmCallback for Backend {
 
         let msg = match data {
             Message::CustomMessage(CustomMessage(msg)) => msg,
-            Message::FindSuccessorReport(report) => {
-                if let (Some(observer), FindSuccessorReportHandler::None) =
-                    (&self.observer, &report.handler)
-                {
+            Message::FindSuccessorReport(report) if report.is_application_lookup() => {
+                if let Some(observer) = self.observer.as_deref() {
                     observer.lookup_report(payload.transaction.tx_id, report.did);
                 }
                 return Ok(());

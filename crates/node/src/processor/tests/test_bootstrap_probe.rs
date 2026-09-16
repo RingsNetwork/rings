@@ -14,6 +14,7 @@ use super::common::*;
 use super::*;
 use crate::extension::Backend;
 use crate::native::bootstrap::BootstrapPort;
+use crate::native::bootstrap::BootstrapTargetError;
 use crate::native::bootstrap::BootstrapTargets;
 use crate::native::bootstrap::ManagedTarget;
 use crate::native::bootstrap::ProcessorPort;
@@ -157,13 +158,13 @@ async fn routed_probe_reports_presence_through_one_hop() {
     );
     let own_interval = c.did() + Did::from(1);
     assert_ne!(own_interval, b.did());
-    let before = c.evidence.reports().len().expect("ledger readable");
+    let before = c.evidence.reports().len().expect("record readable");
     assert!(
         !port.reachable(&target(own_interval)).await,
         "a key in C's successor interval is refuted locally"
     );
     assert_eq!(
-        c.evidence.reports().len().expect("ledger readable"),
+        c.evidence.reports().len().expect("record readable"),
         before,
         "the local refutation registers no probe"
     );
@@ -185,8 +186,8 @@ async fn backend_translates_admission_and_retirement_only() {
 
     let mut admitted = evidence
         .admissions()
-        .await_admission(managed)
-        .expect("admissions readable");
+        .wait_for(managed)
+        .expect("record readable");
     for state in [
         WebrtcConnectionState::Connecting,
         WebrtcConnectionState::Disconnected,
@@ -201,7 +202,7 @@ async fn backend_translates_admission_and_retirement_only() {
     assert!(evidence
         .losses()
         .take()
-        .expect("losses readable")
+        .expect("record readable")
         .is_empty());
     assert!(
         admitted.try_recv().is_err(),
@@ -219,24 +220,36 @@ async fn backend_translates_admission_and_retirement_only() {
         .await
         .expect("events are accepted");
     assert_eq!(
-        evidence.losses().take().expect("losses readable"),
+        evidence.losses().take().expect("record readable"),
         [managed].into_iter().collect()
     );
 }
 
 /// A disconnect decided by the local node retires the peer through the core's single
-/// departure funnel and reaches the evidence as a loss, without any physical terminal state.
+/// retirement transition and reaches the evidence as a loss, without any physical terminal
+/// state. The disconnect follows the admission *event*, not merely transport readiness: by the
+/// departure law a retirement before the admission was announced is silent.
 #[tokio::test]
 async fn a_local_disconnect_is_reported_as_a_peer_retirement() {
     let _guard = network_test_guard().await;
     let a = ProbeNode::new(SecretKey::random()).await;
     let b = ProbeNode::new(SecretKey::random()).await;
+    let admitted = a
+        .evidence
+        .admissions()
+        .wait_for(b.did())
+        .expect("record readable");
     connect_processors(&a.processor, &b.processor, &a.fixture, &b.fixture).await;
+    assert_eq!(
+        admitted.await,
+        Ok(()),
+        "the admission of B is announced to A"
+    );
     assert!(a
         .evidence
         .losses()
         .take()
-        .expect("losses readable")
+        .expect("record readable")
         .is_empty());
 
     a.processor
@@ -245,7 +258,7 @@ async fn a_local_disconnect_is_reported_as_a_peer_retirement() {
         .await
         .expect("disconnect succeeds");
     assert_eq!(
-        a.evidence.losses().take().expect("losses readable"),
+        a.evidence.losses().take().expect("record readable"),
         [b.did()].into_iter().collect(),
         "the retirement is observed before disconnect returns"
     );
@@ -255,14 +268,14 @@ async fn a_local_disconnect_is_reported_as_a_peer_retirement() {
 #[tokio::test]
 async fn targets_reject_the_local_node() {
     let processor = prepare_processor().await;
-    let error = BootstrapTargets::from_config(
+    let rejected = BootstrapTargets::from_config(
         BootstrapConfig {
             peers: vec![never_dialed(processor.did())],
         },
         processor.did(),
-    )
-    .err()
-    .map(|error| error.to_string())
-    .unwrap_or_default();
-    assert!(error.contains("itself"));
+    );
+    assert!(matches!(
+        rejected,
+        Err(Error::BootstrapTarget(BootstrapTargetError::LocalNode(did))) if did == processor.did()
+    ));
 }

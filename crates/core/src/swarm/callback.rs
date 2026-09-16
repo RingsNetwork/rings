@@ -159,21 +159,25 @@ pub type SharedSwarmCallback = Arc<dyn SwarmCallback + Send + Sync>;
 pub enum SwarmEvent {
     /// Indicates that the connection state of a peer has changed.
     ///
-    /// `Connected` is emitted exactly once per admission, when the peer's data channel is open
+    /// `Connected` is emitted at most once per admission, when the peer's data channel is open
     /// and the peer has joined the local DHT; it is therefore the application-level fact
-    /// "peer admitted". Terminal states are emitted only for the admitted generation, so a
-    /// transport the swarm retired itself never reports one; see [`SwarmEvent::PeerRetired`].
+    /// "peer admitted". Terminal states are reported only for the admitted generation, and
+    /// then after its [`SwarmEvent::PeerRetired`]; a generation the swarm retired for its own
+    /// reasons reports no terminal state at all.
     ConnectionStateChange {
         /// The did of remote peer.
         peer: Did,
         /// The final state of the connection.
         state: WebrtcConnectionState,
     },
-    /// A peer left the local DHT: its topology entry was removed and, when it held an admitted
-    /// connection, that record was retired and its transport is being closed. Emitted on every
-    /// departure path — remote terminal state, data-channel close, liveness or stabilization
-    /// removal, capacity eviction, and explicit disconnect — so the application observes the
-    /// logical fact regardless of which physical event or local decision caused it.
+    /// An admitted peer's connection record was retired and its transport is being closed: the
+    /// peer left the local DHT. Emitted from the one retirement transition, whatever reached it
+    /// — remote terminal state, data-channel close, liveness or stabilization removal, capacity
+    /// eviction, explicit disconnect — so the application observes the logical fact regardless
+    /// of the physical event or local decision behind it. Law: for every generation,
+    /// `Connected` was delivered ⟺ `PeerRetired` is delivered, and in that order under the
+    /// peer's ordered delivery. A topology prune that keeps the record (a `Disconnected`
+    /// transport allowed to recover) emits nothing.
     PeerRetired {
         /// The did of the departed peer.
         peer: Did,

@@ -3,17 +3,17 @@
 //! The schedule is a total function of explicit monotonic time (`now_ms`): it owns no timers,
 //! performs no IO, and draws jitter from a seeded generator, so the supervisor shell can replay
 //! any turn sequence deterministically. One [`TargetPhase`] per managed target, keyed by the
-//! target's DID, evolves under three explicit transitions, `begin`, `settle` and
+//! target's DID, evolves under three explicit transitions, `begin_if_due`, `settle` and
 //! `notice_loss`, plus the passage of time that makes a phase *due*:
 //!
 //! ```text
-//!                begin                              settle(Reachable) ∧ ¬lost
+//!               begin_if_due                       settle(Reachable) ∧ ¬lost
 //!  ┌───────────┐ ──────────▶ ┌───────────────┐ ───────────────────────────▶ ┌────────────────┐
 //!  │  Pending  │             │     Busy      │                              │   Reachable    │
 //!  │  f, t₀    │ ◀────────── │   f, lost     │ ◀─────────────────────────── │   recheck_at   │
-//!  └───────────┘  settle     └───────────────┘   begin  (recheck_at ≤ now)  └────────────────┘
+//!  └───────────┘  settle     └───────────────┘ begin_if_due (recheck_at ≤ now)└────────────────┘
 //!     ▲    ▲     (DialFailed)       │                                              │
-//!     │    │     f ↦ f + 1          │ settle(Reachable) ∧ lost                     │ notice_loss
+//!     │    │     f ↦ f + 1          │ settle(_) ∧ lost                             │ notice_loss
 //!     │    │     t₀ ↦ now+delay(f+1)│ f ↦ 0, t₀ ↦ now                              │ f ↦ 0, t₀ ↦ now
 //!     │    │     settle(Deferred)   │                                              │
 //!     │    │     t₀ ↦ now+BURST_DELAY                                              │
@@ -27,9 +27,8 @@
 //!
 //! Laws:
 //!
-//! - *No overlap*: `begin` is the only entry into `Busy`, and a `Busy` target is never due, so
-//!   at most one turn per target is in flight. Precondition of `begin`: the target is due; the
-//!   shell only calls it on the output of `due`.
+//! - *No overlap*: `begin_if_due` is the only entry into `Busy` and refuses a target that is not
+//!   due, and a `Busy` target is never due, so at most one turn per target is in flight.
 //! - *Bounded burst*: after the k-th consecutive failure the next attempt waits `delay(k)`, so
 //!   the first `BURST_ATTEMPTS` attempts are at least `BURST_DELAY` apart (measured from the
 //!   settlement of the previous attempt) and every later attempt is at least `BASE_INTERVAL`
@@ -37,9 +36,11 @@
 //! - *Deferral is not failure*: a turn that found a handshake to the target already in flight
 //!   waits `BURST_DELAY` and keeps its failure count.
 //! - *Reset on success*: `Reachable` carries no failure count; a later loss restarts the burst.
-//! - *Losses are never lost*: a loss noticed while `Busy` turns the next `Reachable` settlement
-//!   into an immediate `Pending`; a loss noticed while `Pending` (the target was admitted by
-//!   stabilization meanwhile and left again) restarts the burst at once.
+//! - *Losses are never lost*: a loss makes the target pending at once with the burst restarted,
+//!   whether it is noticed while `Reachable`, while `Pending` (the target was admitted by
+//!   stabilization meanwhile and left again), or while `Busy` — in which case the settlement of
+//!   that turn, whatever its outcome, is the restart. The loss and the settlement therefore
+//!   commute.
 //! - *Totality*: every transition on a non-matching phase or unknown DID is the identity and
 //!   reports `false`.
 
@@ -150,6 +151,7 @@ impl BootstrapSchedule {
     }
 
     /// Targets whose phase is due at `now_ms`, in DID order.
+    #[cfg(test)]
     pub(crate) fn due(&self, now_ms: u64) -> impl Iterator<Item = Did> + '_ {
         self.phases
             .iter()
@@ -157,11 +159,15 @@ impl BootstrapSchedule {
             .map(|(target, _)| *target)
     }
 
-    /// Enter `Busy` for `target`; `false` when the target is unknown or already busy.
-    pub(crate) fn begin(&mut self, target: Did) -> bool {
+    /// Enter `Busy` for `target` iff it is due at `now_ms`; `false` when the target is unknown,
+    /// busy, or not yet due.
+    pub(crate) fn begin_if_due(&mut self, target: Did, now_ms: u64) -> bool {
         let Some(phase) = self.phases.get_mut(&target) else {
             return false;
         };
+        if !phase.is_due(now_ms) {
+            return false;
+        }
         let failures = match *phase {
             TargetPhase::Pending { failures, .. } => failures,
             TargetPhase::Reachable { .. } => 0,
@@ -182,31 +188,34 @@ impl BootstrapSchedule {
         let TargetPhase::Busy { failures, lost } = *phase else {
             return false;
         };
-        *phase = match outcome {
-            TurnOutcome::Reachable if lost => TargetPhase::Pending {
+        *phase = if lost {
+            TargetPhase::Pending {
                 failures: 0,
                 not_before_ms: now_ms,
-            },
-            TurnOutcome::Reachable => TargetPhase::Reachable {
-                recheck_at_ms: now_ms.saturating_add(self.jitter.slow_delay_ms()),
-            },
-            TurnOutcome::Deferred => TargetPhase::Pending {
-                failures,
-                not_before_ms: now_ms.saturating_add(duration_ms(BURST_DELAY)),
-            },
-            TurnOutcome::DialFailed => {
-                let failures = failures.saturating_add(1);
-                TargetPhase::Pending {
+            }
+        } else {
+            match outcome {
+                TurnOutcome::Reachable => TargetPhase::Reachable {
+                    recheck_at_ms: now_ms.saturating_add(self.jitter.slow_delay_ms()),
+                },
+                TurnOutcome::Deferred => TargetPhase::Pending {
                     failures,
-                    not_before_ms: now_ms.saturating_add(self.jitter.delay_ms(failures)),
+                    not_before_ms: now_ms.saturating_add(duration_ms(BURST_DELAY)),
+                },
+                TurnOutcome::DialFailed => {
+                    let failures = failures.saturating_add(1);
+                    TargetPhase::Pending {
+                        failures,
+                        not_before_ms: now_ms.saturating_add(self.jitter.delay_ms(failures)),
+                    }
                 }
             }
         };
         true
     }
 
-    /// Record at `now_ms` that `target` left the local DHT; `false` when the phase already
-    /// accounts for it or the DID is unknown.
+    /// Record at `now_ms` that `target` left the local DHT; `false` when the running turn
+    /// already noted a loss or the DID is unknown.
     pub(crate) fn notice_loss(&mut self, target: Did, now_ms: u64) -> bool {
         let Some(phase) = self.phases.get_mut(&target) else {
             return false;
@@ -289,7 +298,7 @@ mod tests {
     /// Run one failed turn for the target at `now_ms` and return the resulting `not_before_ms`.
     fn fail_turn(schedule: &mut BootstrapSchedule, now_ms: u64) -> u64 {
         let target = Did::from(TARGET);
-        assert!(schedule.begin(target));
+        assert!(schedule.begin_if_due(target, now_ms));
         assert!(schedule.settle(target, TurnOutcome::DialFailed, now_ms));
         match schedule.phase(target) {
             Some(TargetPhase::Pending { not_before_ms, .. }) => not_before_ms,
@@ -329,6 +338,16 @@ mod tests {
         assert!(is_one_slow_delay_after(slow, slower));
     }
 
+    /// No-overlap law: a target that is not yet due cannot begin.
+    #[test]
+    fn a_target_cannot_begin_before_it_is_due() {
+        let target = Did::from(TARGET);
+        let mut schedule = schedule(1);
+        let next = fail_turn(&mut schedule, 0);
+        assert!(!schedule.begin_if_due(target, next - 1));
+        assert!(schedule.begin_if_due(target, next));
+    }
+
     /// Deferral law: a deferred turn waits BURST_DELAY and keeps its failure count.
     #[test]
     fn a_deferred_turn_keeps_its_failure_count() {
@@ -338,7 +357,7 @@ mod tests {
         for _ in 0..3 {
             now_ms = fail_turn(&mut schedule, now_ms);
         }
-        assert!(schedule.begin(target));
+        assert!(schedule.begin_if_due(target, now_ms));
         assert!(schedule.settle(target, TurnOutcome::Deferred, now_ms));
         assert_eq!(
             schedule.phase(target),
@@ -358,7 +377,7 @@ mod tests {
         for _ in 0..3 {
             now_ms = fail_turn(&mut schedule, now_ms);
         }
-        assert!(schedule.begin(target));
+        assert!(schedule.begin_if_due(target, now_ms));
         assert!(schedule.settle(target, TurnOutcome::Reachable, now_ms));
         let Some(TargetPhase::Reachable { recheck_at_ms }) = schedule.phase(target) else {
             panic!("a reachable outcome must settle into Reachable");
@@ -406,14 +425,14 @@ mod tests {
     fn a_reachable_target_is_rechecked_when_its_deadline_passes() {
         let target = Did::from(TARGET);
         let mut schedule = schedule(1);
-        assert!(schedule.begin(target));
+        assert!(schedule.begin_if_due(target, 0));
         assert!(schedule.settle(target, TurnOutcome::Reachable, 0));
         let deadline = schedule
             .next_deadline_ms()
             .expect("a reachable target has a deadline");
         assert!(schedule.due(deadline - 1).next().is_none());
         assert_eq!(schedule.due(deadline).collect::<Vec<_>>(), vec![target]);
-        assert!(schedule.begin(target));
+        assert!(schedule.begin_if_due(target, deadline));
         assert_eq!(
             schedule.phase(target),
             Some(TargetPhase::Busy {
@@ -423,37 +442,49 @@ mod tests {
         );
     }
 
-    /// Losses-are-never-lost law: a loss noticed while busy makes the reachable settlement pending now.
+    /// Losses-are-never-lost law: a loss noticed while busy makes every settlement pending now
+    /// with the burst restarted, whatever the outcome.
     #[test]
-    fn a_loss_during_a_turn_forces_an_immediate_reassessment() {
+    fn a_loss_during_a_turn_restarts_the_burst_on_settlement() {
         let target = Did::from(TARGET);
-        let mut schedule = schedule(1);
-        assert!(schedule.begin(target));
-        assert!(schedule.notice_loss(target, 5));
-        assert!(
-            !schedule.notice_loss(target, 6),
-            "a second loss is already accounted for"
-        );
-        assert!(schedule.settle(target, TurnOutcome::Reachable, 10));
-        assert_eq!(
-            schedule.phase(target),
-            Some(TargetPhase::Pending {
-                failures: 0,
-                not_before_ms: 10
-            })
-        );
+        for outcome in [
+            TurnOutcome::Reachable,
+            TurnOutcome::Deferred,
+            TurnOutcome::DialFailed,
+        ] {
+            let mut schedule = schedule(1);
+            let mut now_ms = 0;
+            for _ in 0..BURST_ATTEMPTS {
+                now_ms = fail_turn(&mut schedule, now_ms);
+            }
+            assert!(schedule.begin_if_due(target, now_ms));
+            assert!(schedule.notice_loss(target, now_ms + 5));
+            assert!(
+                !schedule.notice_loss(target, now_ms + 6),
+                "a second loss is already accounted for"
+            );
+            assert!(schedule.settle(target, outcome, now_ms + 10));
+            assert_eq!(
+                schedule.phase(target),
+                Some(TargetPhase::Pending {
+                    failures: 0,
+                    not_before_ms: now_ms + 10
+                }),
+                "outcome {outcome:?} must not override the loss"
+            );
+        }
     }
 
     /// No-overlap law: a busy target cannot begin again, is never due, and has no deadline.
     #[test]
     fn a_busy_target_is_neither_due_nor_restartable() {
         let mut schedule = schedule(2);
-        assert!(schedule.begin(Did::from(1)));
-        assert!(!schedule.begin(Did::from(1)));
+        assert!(schedule.begin_if_due(Did::from(1), 0));
+        assert!(!schedule.begin_if_due(Did::from(1), u64::MAX));
         assert_eq!(schedule.due(u64::MAX).collect::<Vec<_>>(), vec![Did::from(
             2
         )]);
-        assert!(schedule.begin(Did::from(2)));
+        assert!(schedule.begin_if_due(Did::from(2), 0));
         assert_eq!(schedule.next_deadline_ms(), None);
     }
 
@@ -462,7 +493,7 @@ mod tests {
     fn transitions_are_total_over_unknown_dids_and_phases() {
         let unknown = Did::from(7);
         let mut schedule = schedule(1);
-        assert!(!schedule.begin(unknown));
+        assert!(!schedule.begin_if_due(unknown, u64::MAX));
         assert!(!schedule.settle(unknown, TurnOutcome::Reachable, 0));
         assert!(!schedule.notice_loss(unknown, 0));
         assert!(!schedule.settle(Did::from(TARGET), TurnOutcome::Reachable, 0));

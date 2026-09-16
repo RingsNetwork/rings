@@ -207,6 +207,10 @@ pub enum Error {
         /// DID the endpoint answered as.
         actual: Did,
     } = 818,
+    /// A managed bootstrap target failed validation.
+    #[cfg(rings_native)]
+    #[error("{0}")]
+    BootstrapTarget(#[from] crate::native::bootstrap::BootstrapTargetError) = 819,
     /// Creating a file on disk failed.
     #[error("Create File Error: {0}")]
     CreateFileError(String) = 900,
@@ -319,20 +323,6 @@ impl Error {
     /// Returns the stable numeric error code for JSON-RPC error conversion.
     pub fn code(&self) -> u32 {
         self.discriminant()
-    }
-}
-
-impl Error {
-    /// Whether a handshake failed only because the core already holds a connection attempt to
-    /// the peer, pending or admitted, so the caller should wait rather than count a failure.
-    pub fn is_handshake_in_flight(&self) -> bool {
-        matches!(
-            self,
-            Self::CreateOffer(
-                rings_core::error::Error::AlreadyConnected
-                    | rings_core::error::Error::ConnectionAttemptSuperseded { .. }
-            )
-        )
     }
 }
 

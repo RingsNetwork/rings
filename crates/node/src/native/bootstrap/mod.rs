@@ -16,9 +16,10 @@
 //!   dial; `ProcessorPort` is the production port over a live processor.
 //! - [`BootstrapSupervisor`] — the shell: wakes on deadlines, target losses and finished turns;
 //!   runs at most one turn per target; exits on the run's stop token.
-//! - [`ReachabilityEvidence`] — what the swarm reports about the targets: lookup reports for
-//!   the probe, admissions the dial waits for, and departures for prompt reassessment; written
-//!   by the [`Backend`] through [`BackendObserver`], read by the port and the supervisor.
+//! - `evidence::ReachabilityEvidence` (crate-private) — what the swarm reports about the
+//!   targets: lookup reports for the probe, admissions the dial waits for, and retirements the
+//!   supervisor reads as losses; written by the [`Backend`] through [`BackendObserver`], which
+//!   the supervisor hands out as [`BootstrapSupervisor::observer`].
 //!
 //! ```text
 //!                    ┌────────────────────────── run loop ──────────────────────────┐
@@ -31,7 +32,8 @@
 //! ```
 //!
 //! Lost-wakeup freedom: every wait is preceded by a drain of the loss record, and a loss
-//! recorded between the drain and the wait leaves a stored permit, so no loss is missed.
+//! recorded between the drain and the wait leaves a stored permit, so no loss is missed. A turn
+//! is bounded by its port: one probe timeout, two HTTP request timeouts, one admission timeout.
 //!
 //! Shutdown: the loop returns on the first stop observation and its in-flight turns are
 //! dropped with it, cancelling any probe or handshake in progress. A pending connection attempt
@@ -59,10 +61,11 @@ use self::schedule::BootstrapSchedule;
 use self::schedule::TurnOutcome;
 use crate::error::Error;
 use crate::error::Result;
+use crate::extension::BackendObserver;
 use crate::native::config::BootstrapConfig;
 use crate::prelude::StopToken;
 use crate::processor::Processor;
-use crate::rpc_impl::validate_remote_rpc_url;
+use crate::remote_endpoint::RemoteRpcEndpoint;
 use crate::seed::SeedPeer;
 
 mod evidence;
@@ -71,24 +74,53 @@ mod schedule;
 #[cfg(test)]
 mod tests;
 
-pub use self::evidence::ReachabilityEvidence;
+pub(crate) use self::evidence::ReachabilityEvidence;
 pub(crate) use self::probe::ProcessorPort;
 
+/// Why a seed entry cannot be a managed target.
+#[derive(Debug, thiserror::Error, Eq, PartialEq)]
+pub enum BootstrapTargetError {
+    /// The entry's `did` does not parse.
+    #[error("bootstrap peer did is not a DID: {0}")]
+    NotADid(String),
+    /// The entry names the node itself.
+    #[error("bootstrap peer {0} is this node itself")]
+    LocalNode(Did),
+    /// The DID is listed again with a different endpoint or token.
+    #[error("bootstrap peer {0} is listed with differing endpoints")]
+    DifferingEndpoints(Did),
+    /// The endpoint is listed again under a different DID.
+    #[error("bootstrap endpoint {0} is listed under two DIDs")]
+    EndpointUnderTwoDids(RemoteRpcEndpoint),
+}
+
 /// One validated managed target: a parsed DID and a public HTTP(S) handshake endpoint.
+#[derive(Eq, PartialEq)]
 pub struct ManagedTarget {
     did: Did,
-    url: reqwest::Url,
+    url: RemoteRpcEndpoint,
     api_token: Option<String>,
+}
+
+/// How two managed targets overlap, in decreasing order of agreement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Overlap {
+    /// Same DID, endpoint and token: one target listed twice.
+    Verbatim,
+    /// Same DID behind another endpoint or token.
+    SameDid,
+    /// Same endpoint claimed for another DID.
+    SameEndpoint,
 }
 
 impl ManagedTarget {
     /// DID the endpoint must answer as.
-    pub fn did(&self) -> Did {
+    pub(crate) fn did(&self) -> Did {
         self.did
     }
 
     /// Validated handshake endpoint.
-    pub fn url(&self) -> &reqwest::Url {
+    pub(crate) fn url(&self) -> &RemoteRpcEndpoint {
         &self.url
     }
 
@@ -97,9 +129,17 @@ impl ManagedTarget {
         self.api_token.as_deref()
     }
 
-    /// Whether `other` names the same target verbatim: same DID, endpoint and token.
-    fn is_verbatim(&self, other: &Self) -> bool {
-        self.did == other.did && self.url == other.url && self.api_token == other.api_token
+    /// How `other` overlaps with this target, if at all.
+    fn overlap(&self, other: &Self) -> Option<Overlap> {
+        if self == other {
+            Some(Overlap::Verbatim)
+        } else if self.did == other.did {
+            Some(Overlap::SameDid)
+        } else if self.url == other.url {
+            Some(Overlap::SameEndpoint)
+        } else {
+            None
+        }
     }
 }
 
@@ -120,10 +160,9 @@ impl TryFrom<SeedPeer> for ManagedTarget {
 
     /// Parse the DID and apply the remote RPC endpoint policy to the URL.
     fn try_from(peer: SeedPeer) -> Result<Self> {
-        let did = Did::from_str(peer.did.as_str()).map_err(|_| {
-            Error::InvalidConfig(format!("bootstrap peer did is not a DID: {}", peer.did))
-        })?;
-        let url = validate_remote_rpc_url(peer.url.as_str())?;
+        let did = Did::from_str(peer.did.as_str())
+            .map_err(|_| BootstrapTargetError::NotADid(peer.did))?;
+        let url = RemoteRpcEndpoint::parse(peer.url.as_str())?;
         Ok(Self {
             did,
             url,
@@ -147,27 +186,18 @@ impl BootstrapTargets {
         for peer in config.peers {
             let target = ManagedTarget::try_from(peer)?;
             if target.did == local {
-                return Err(Error::InvalidConfig(format!(
-                    "bootstrap peer {} is this node itself",
-                    target.did
-                )));
+                return Err(BootstrapTargetError::LocalNode(target.did).into());
             }
-            if targets.iter().any(|known| known.is_verbatim(&target)) {
-                continue;
+            match targets.iter().find_map(|known| known.overlap(&target)) {
+                Some(Overlap::Verbatim) => continue,
+                Some(Overlap::SameDid) => {
+                    return Err(BootstrapTargetError::DifferingEndpoints(target.did).into());
+                }
+                Some(Overlap::SameEndpoint) => {
+                    return Err(BootstrapTargetError::EndpointUnderTwoDids(target.url).into());
+                }
+                None => targets.push(target),
             }
-            if targets.iter().any(|known| known.did == target.did) {
-                return Err(Error::InvalidConfig(format!(
-                    "bootstrap peer {} is listed with differing endpoints",
-                    target.did
-                )));
-            }
-            if targets.iter().any(|known| known.url == target.url) {
-                return Err(Error::InvalidConfig(format!(
-                    "bootstrap endpoint {} is listed under two DIDs",
-                    target.url
-                )));
-            }
-            targets.push(target);
         }
         Ok(Self(targets))
     }
@@ -178,9 +208,19 @@ impl BootstrapTargets {
     }
 
     /// Number of managed targets.
-    pub fn len(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
         self.0.len()
     }
+}
+
+/// Why a dial did not connect the target.
+#[derive(Debug)]
+pub(crate) enum DialFailure {
+    /// The core already holds a connection attempt to the target; nothing was attempted.
+    InFlight,
+    /// The handshake or its admission failed.
+    Failed(Error),
 }
 
 /// Effects one supervisor turn performs on a target.
@@ -190,7 +230,7 @@ pub(crate) trait BootstrapPort: Send + Sync {
     async fn reachable(&self, target: &ManagedTarget) -> bool;
 
     /// Redial `target` through its HTTP endpoint; `Ok` once the peer is admitted.
-    async fn dial(&self, target: &ManagedTarget) -> Result<()>;
+    async fn dial(&self, target: &ManagedTarget) -> std::result::Result<(), DialFailure>;
 }
 
 /// The run-owned supervisor; see the module diagram.
@@ -218,20 +258,15 @@ enum Wake {
 }
 
 impl BootstrapSupervisor {
-    /// Supervision of `targets` over a live processor: the evidence the daemon must install as
-    /// the backend's observer, and the supervisor to run. `None` when there is nothing to
+    /// Supervision of `targets` over a live processor, or `None` when there is nothing to
     /// supervise, in which case no observer is needed either.
-    pub fn over_processor(
-        targets: BootstrapTargets,
-        processor: Arc<Processor>,
-    ) -> Option<(Arc<ReachabilityEvidence>, Self)> {
+    pub fn over_processor(targets: BootstrapTargets, processor: Arc<Processor>) -> Option<Self> {
         if targets.is_empty() {
             return None;
         }
         let evidence = Arc::new(ReachabilityEvidence::default());
         let port = Arc::new(ProcessorPort::new(processor, evidence.clone()));
-        let supervisor = Self::new(targets, port, evidence.clone(), rand::random());
-        Some((evidence, supervisor))
+        Some(Self::new(targets, port, evidence, rand::random()))
     }
 
     /// Supervisor over `port` reading `evidence`, with every target due immediately and jitter
@@ -255,6 +290,12 @@ impl BootstrapSupervisor {
             schedule,
             origin: Instant::now(),
         }
+    }
+
+    /// The observer the daemon installs on its backend so the swarm's reports reach this
+    /// supervisor.
+    pub fn observer(&self) -> Arc<dyn BackendObserver> {
+        self.evidence.clone()
     }
 
     /// Run until `stop` is observed; never returns otherwise.
@@ -300,15 +341,11 @@ impl BootstrapSupervisor {
 
     /// Push one turn for every target that is due.
     fn start_due_turns(&mut self, turns: &mut Turns) {
-        let due: Vec<Did> = self.schedule.due(self.now_ms()).collect();
-        for did in due {
-            let Some(target) = self.targets.get(&did) else {
-                continue;
-            };
-            if !self.schedule.begin(did) {
-                continue;
+        let now_ms = self.now_ms();
+        for (did, target) in &self.targets {
+            if self.schedule.begin_if_due(*did, now_ms) {
+                turns.push(Box::pin(turn(self.port.clone(), target.clone())));
             }
-            turns.push(Box::pin(turn(self.port.clone(), target.clone())));
         }
     }
 }
@@ -353,11 +390,11 @@ async fn turn(port: Arc<dyn BootstrapPort>, target: Arc<ManagedTarget>) -> (Did,
             tracing::info!(target = %did, url = %target.url, "bootstrap target redialed");
             (did, TurnOutcome::Reachable)
         }
-        Err(error) if error.is_handshake_in_flight() => {
-            tracing::debug!(target = %did, %error, "bootstrap redial deferred");
+        Err(DialFailure::InFlight) => {
+            tracing::debug!(target = %did, "bootstrap redial deferred: handshake in flight");
             (did, TurnOutcome::Deferred)
         }
-        Err(error) => {
+        Err(DialFailure::Failed(error)) => {
             tracing::warn!(target = %did, url = %target.url, %error, "bootstrap redial failed");
             (did, TurnOutcome::DialFailed)
         }

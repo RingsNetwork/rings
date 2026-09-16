@@ -92,6 +92,8 @@ use crate::registration::validate_online_node_registration_timing;
 use crate::registration::OnlineNodeRegistration;
 use crate::registration::RegistrationContext;
 use crate::registration::RegistrationTask;
+use crate::remote_endpoint::remote_rpc_client;
+use crate::remote_endpoint::RemoteRpcEndpoint;
 
 const MEASUREMENT_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -138,6 +140,15 @@ async fn sleep_registration_interval_with_stop(
         remaining = remaining.saturating_sub(step);
     }
     Ok(!(stop.should_stop() || sibling_stop.should_stop()))
+}
+
+/// Which node a handshake over HTTP must end up connected to.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HandshakePeer {
+    /// Whatever DID the endpoint answers as.
+    Any,
+    /// Only this DID; any other answer is refused before an offer is created.
+    Pinned(Did),
 }
 
 /// Processor for rings-node rpc server.
@@ -528,28 +539,27 @@ impl Processor {
         }
     }
 
-    /// Handshake with the node behind `url` over its public HTTP API: learn its DID and, when
-    /// `expected` is given, refuse before creating any offer if the endpoint answers as another
+    /// Handshake with the node behind `endpoint` over its public HTTP API: learn its DID, and
+    /// when `peer` is pinned refuse before creating any offer if the endpoint answers as another
     /// node; then create, exchange and accept the offer. Returns the answering DID once the
-    /// answer is accepted. Admission of the resulting transport completes asynchronously and is
-    /// reported through the swarm callback.
+    /// answer is accepted; admission of the resulting transport completes asynchronously and is
+    /// reported through the swarm callback. A failure after the offer was created cancels this
+    /// node's own pending attempt, so a later handshake with the same peer is not refused as
+    /// already in flight.
     pub async fn connect_peer_via_http(
         &self,
-        url: &reqwest::Url,
+        endpoint: &RemoteRpcEndpoint,
         api_token: Option<&str>,
-        expected: Option<Did>,
+        peer: HandshakePeer,
     ) -> Result<Did> {
-        let client =
-            crate::rpc_impl::remote_rpc_client(url.as_str(), api_token.map(str::to_owned)).await?;
+        let client = remote_rpc_client(endpoint, api_token).await?;
         let answered = client
             .node_did(&NodeDidRequest {})
             .await
             .map_err(|error| Error::RemoteRpcError(error.to_string()))?
             .did;
-        let actual = Did::from_str(answered.as_str()).map_err(|_| {
-            Error::RemoteRpcError(format!("endpoint answered with a malformed DID {answered}"))
-        })?;
-        if let Some(expected) = expected {
+        let actual = Did::from_str(answered.as_str()).map_err(|_| Error::InvalidDid(answered))?;
+        if let HandshakePeer::Pinned(expected) = peer {
             if actual != expected {
                 return Err(Error::HandshakePeerMismatch { expected, actual });
             }
@@ -561,20 +571,37 @@ impl Processor {
             .map_err(Error::CreateOffer)?
             .encode()
             .map_err(|_| Error::EncodeError)?;
-        let answer = client
-            .answer_offer(&AnswerOfferRequest {
-                offer: offer.to_string(),
-            })
-            .await
-            .map_err(|error| Error::RemoteRpcError(error.to_string()))?
-            .answer;
-        let answer =
-            MessagePayload::from_encoded(&Encoded::from(answer)).map_err(|_| Error::DecodeError)?;
-        self.swarm
-            .accept_answer(answer)
-            .await
-            .map_err(Error::AcceptAnswer)?;
-        Ok(actual)
+        let exchange = async {
+            let answer = client
+                .answer_offer(&AnswerOfferRequest {
+                    offer: offer.to_string(),
+                })
+                .await
+                .map_err(|error| Error::RemoteRpcError(error.to_string()))?
+                .answer;
+            let answer = MessagePayload::from_encoded(&Encoded::from(answer))
+                .map_err(|_| Error::DecodeError)?;
+            self.swarm
+                .accept_answer(answer)
+                .await
+                .map_err(Error::AcceptAnswer)
+        };
+        match exchange.await {
+            Ok(()) => Ok(actual),
+            Err(error) => {
+                self.abandon_handshake(actual).await;
+                Err(error)
+            }
+        }
+    }
+
+    /// Cancel this node's own unadmitted attempt to `peer` after a failed exchange; an attempt
+    /// that was admitted meanwhile is left alone, and a failure to cancel is logged since the
+    /// core expires the attempt on its own.
+    async fn abandon_handshake(&self, peer: Did) {
+        if let Err(error) = self.swarm.cancel_pending_connection(peer).await {
+            tracing::warn!(%peer, %error, "failed to cancel the abandoned handshake");
+        }
     }
 
     /// Disconnect a peer with web3 did.

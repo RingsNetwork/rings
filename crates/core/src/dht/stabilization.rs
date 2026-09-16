@@ -674,13 +674,10 @@ impl Stabilizer {
                 reason = reason.as_str(),
                 "STABILIZATION clean_unavailable topology remove start"
             );
-            let outcome = self
+            let Some(outcome) = self
                 .transport
-                .remove_unavailable_topology(did, removal.attempt)?;
-            if outcome.is_some() {
-                self.transport.emit_peer_retired(did).await;
-            }
-            let Some(outcome) = outcome else {
+                .remove_unavailable_topology(did, removal.attempt)?
+            else {
                 tracing::debug!(
                     target: "rings_core::dht::stabilization",
                     local = %self.dht.did,

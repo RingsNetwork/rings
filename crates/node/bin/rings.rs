@@ -333,7 +333,7 @@ struct RunCommand {
 
     #[arg(
         long,
-        help = "Seed document (file path or URL) whose peers join the managed bootstrap targets of the config's bootstrap section; the run redials each target through its HTTP endpoint whenever it stops being reachable through the overlay",
+        help = "Seed document URL (file:// or http(s)://) whose peers join the managed bootstrap targets of the config's bootstrap section; the run redials each target through its HTTP endpoint whenever it stops being reachable through the overlay",
         env
     )]
     pub bootstrap_seed: Option<String>,
@@ -786,7 +786,7 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
         c.stabilize_interval = stabilize_interval;
     }
     if let Some(source) = args.bootstrap_seed {
-        let seed = Seed::load(&source)
+        let seed = Seed::load(source.as_str())
             .await
             .with_context(|| format!("loading bootstrap seed {source}"))?;
         c.bootstrap.peers.extend(seed.peers);
@@ -967,13 +967,14 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
         .map(NativeGatewayRunner::status_handle);
     // Managed bootstrap targets fail fast on invalid configuration; their supervisor is spawned
     // with the other run-owned tasks below and its evidence is the backend's observer.
-    let bootstrap_targets = BootstrapTargets::from_config(c.bootstrap.clone(), processor.did())?;
+    let bootstrap_targets =
+        BootstrapTargets::from_config(std::mem::take(&mut c.bootstrap), processor.did())?;
     let bootstrap = BootstrapSupervisor::over_processor(bootstrap_targets, processor.clone());
     // The Backend decodes inbound custom messages as namespaced envelopes and routes
     // them to the protocol registry.
     let backend = Backend::new(provider);
     let backend = match bootstrap.as_ref() {
-        Some((evidence, _)) => backend.observed_by(evidence.clone()),
+        Some(supervisor) => backend.observed_by(supervisor.observer()),
         None => backend,
     };
     processor.swarm.set_callback(Arc::new(backend))?;
@@ -1024,7 +1025,7 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
             .await
             .context("external API stopped")
     });
-    if let Some((_, supervisor)) = bootstrap {
+    if let Some(supervisor) = bootstrap {
         let bootstrap_stop = stop.token();
         tasks.spawn(async move {
             // Returns only on stop, which the select below requests before aborting the set.

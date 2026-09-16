@@ -114,7 +114,10 @@ async fn test_retirement_serializes_with_liveness_generation_updates() -> Result
     retirement_thread
         .join()
         .map_err(|_| Error::InvalidMessage("retirement thread panicked".to_string()))?;
-    assert_eq!(retirement_result, Some(()));
+    assert_eq!(
+        retirement_result.map(|(value, _retirement)| value),
+        Some(())
+    );
 
     assert!(!transport.is_admitted_connection(peer));
     assert_eq!(transport.peer_liveness_count_for_test()?, 0);
@@ -132,7 +135,9 @@ async fn test_retirement_clears_disconnect_epoch_for_departed_peer() -> Result<(
     assert!(transport.measured_disconnects()?.contains_key(&peer));
 
     assert_eq!(
-        transport.retire_active_connection_with(attempt, |_| Ok(()))?,
+        transport
+            .retire_active_connection_with(attempt, |_| Ok(()))?
+            .map(|(value, _retirement)| value),
         Some(())
     );
     assert!(!transport.measured_disconnects()?.contains_key(&peer));
@@ -150,7 +155,9 @@ async fn test_retirement_shuts_down_outbound_scheduler_for_departed_peer() -> Re
     assert_eq!(transport.outbound_schedulers.peer_count_for_test(), 1);
 
     assert_eq!(
-        transport.retire_active_connection_with(attempt, |_| Ok(()))?,
+        transport
+            .retire_active_connection_with(attempt, |_| Ok(()))?
+            .map(|(value, _retirement)| value),
         Some(())
     );
 
@@ -208,10 +215,12 @@ async fn test_stale_active_evidence_cannot_retire_replacement_generation() -> Re
     transport.dht.join(peer)?;
 
     assert_eq!(
-        transport.retire_active_connection_with(old_attempt, |_| {
-            transport.dht.remove(peer)?;
-            Ok(())
-        })?,
+        transport
+            .retire_active_connection_with(old_attempt, |_| {
+                transport.dht.remove(peer)?;
+                Ok(())
+            })?
+            .map(|(value, _retirement)| value),
         Some(())
     );
 
@@ -243,7 +252,9 @@ async fn test_stale_inbound_observation_cannot_refresh_replacement_liveness() ->
         .is_some());
 
     assert_eq!(
-        transport.retire_active_connection_with(old_attempt, |_| Ok(()))?,
+        transport
+            .retire_active_connection_with(old_attempt, |_| Ok(()))?
+            .map(|(value, _retirement)| value),
         Some(())
     );
     let replacement = transport.reserve_pending_connection(peer).await?;
@@ -318,10 +329,12 @@ async fn test_stale_terminal_callback_cannot_report_replacement_closed() -> Resu
 
     measure.wait_for_disconnect_started().await;
     assert_eq!(
-        transport.retire_active_connection_with(old_attempt, |_| {
-            transport.dht.remove(peer)?;
-            Ok(())
-        })?,
+        transport
+            .retire_active_connection_with(old_attempt, |_| {
+                transport.dht.remove(peer)?;
+                Ok(())
+            })?
+            .map(|(value, _retirement)| value),
         Some(())
     );
     let replacement = transport.reserve_pending_connection(peer).await?;
@@ -362,10 +375,12 @@ async fn test_pending_replacement_does_not_suppress_retired_generation_closed() 
 
     measure.wait_for_disconnect_started().await;
     assert_eq!(
-        transport.retire_active_connection_with(old_attempt, |_| {
-            transport.dht.remove(peer)?;
-            Ok(())
-        })?,
+        transport
+            .retire_active_connection_with(old_attempt, |_| {
+                transport.dht.remove(peer)?;
+                Ok(())
+            })?
+            .map(|(value, _retirement)| value),
         Some(())
     );
     let replacement = transport.reserve_pending_connection(peer).await?;

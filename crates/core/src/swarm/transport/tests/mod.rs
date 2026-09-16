@@ -49,8 +49,10 @@ use crate::storage::MemStorage;
 use crate::swarm::callback::max_on_message_recursion_depth_for_test;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::swarm::callback::reset_on_message_recursion_depth_for_test;
+use crate::swarm::callback::DefaultCallback;
 use crate::swarm::callback::InnerSwarmCallback;
 use crate::swarm::callback::SwarmCallback;
+use crate::swarm::callback::SwarmCallbackSlot;
 #[cfg(feature = "dummy")]
 use crate::swarm::callback::SwarmEvent;
 use crate::swarm::SwarmBuilder;
@@ -60,6 +62,7 @@ use crate::utils::GenerationWitness;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::utils::Witness;
 
+mod test_departure_events;
 mod test_events;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 mod test_finger;
@@ -431,17 +434,18 @@ fn transport_with_key_measure_and_reassembly_limits(
         Box::new(MemStorage::new()),
         DEFAULT_FINGER_TABLE_SIZE,
     ));
-    Ok(SwarmTransport::new(
-        0,
-        SwarmWebrtcConfig::new("".to_string(), None, None),
+    Ok(SwarmTransport::new(SwarmTransportParts {
+        network_id: 0,
+        webrtc: SwarmWebrtcConfig::new("".to_string(), None, None),
         session_sk,
         dht,
-        Some(measure),
-        Arc::new(crate::message::TransactionReplay::new(Box::new(
+        measure: Some(measure),
+        transaction_replay: Arc::new(crate::message::TransactionReplay::new(Box::new(
             crate::storage::MemStorage::new(),
         ))),
-        SwarmTransportSettings::new(1, VirtualNodeConfig::disabled(), reassembly_limits),
-    ))
+        settings: SwarmTransportSettings::new(1, VirtualNodeConfig::disabled(), reassembly_limits),
+        callback: SwarmCallbackSlot::new(Arc::new(DefaultCallback)),
+    }))
 }
 
 fn transport_with_measure(measure: MeasureImpl) -> Result<SwarmTransport> {

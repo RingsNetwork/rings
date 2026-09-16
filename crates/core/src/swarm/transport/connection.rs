@@ -566,6 +566,10 @@ impl SwarmTransport {
         removal: DhtPeerRemoval,
     ) -> Result<Option<PeerRemovalOutcome>> {
         let connection = self.get_raw_connection(attempt.peer);
+        // The delivery turn is taken before the record is retired, so a later admission of the
+        // same peer cannot announce ahead of this departure.
+        let delivery = self.swarm_event_delivery_lock(attempt.peer);
+        let turn = delivery.acquire().await;
         let retirement = self.retire_active_connection_with(attempt, |active| match removal {
             DhtPeerRemoval::Ordinary => {
                 self.dht.remove(attempt.peer)?;
@@ -579,7 +583,9 @@ impl SwarmTransport {
                 Ok(fallback)
             }
         })?;
-        let Some(fallback) = retirement else {
+        let Some((fallback, retirement)) = retirement else {
+            drop(turn);
+            self.prune_swarm_event_delivery_lock(attempt.peer, &delivery);
             return Ok(None);
         };
 
@@ -589,7 +595,8 @@ impl SwarmTransport {
             fallback = ?fallback,
             "removed peer from DHT"
         );
-        self.emit_peer_retired(attempt.peer).await;
+        self.announce_retirement(turn, retirement).await;
+        self.prune_swarm_event_delivery_lock(attempt.peer, &delivery);
         if let Some(connection) = connection {
             self.close_connection_for_disconnect(&connection).await?;
         }
@@ -609,6 +616,8 @@ impl SwarmTransport {
         attempt: PendingConnectionAttempt,
     ) -> Result<UnreferencedRetirement> {
         let connection = self.get_raw_connection(attempt.peer);
+        let delivery = self.swarm_event_delivery_lock(attempt.peer);
+        let turn = delivery.acquire().await;
         let retirement = self.retire_active_connection_if(attempt, |_| {
             if self
                 .dht
@@ -619,12 +628,21 @@ impl SwarmTransport {
             self.dht.remove(attempt.peer)?;
             Ok(Some(()))
         })?;
-        match retirement {
-            None => return Ok(UnreferencedRetirement::Superseded),
-            Some(None) => return Ok(UnreferencedRetirement::Referenced),
-            Some(Some(())) => {}
-        }
-        self.emit_peer_retired(attempt.peer).await;
+        let retirement = match retirement {
+            None => {
+                drop(turn);
+                self.prune_swarm_event_delivery_lock(attempt.peer, &delivery);
+                return Ok(UnreferencedRetirement::Superseded);
+            }
+            Some(None) => {
+                drop(turn);
+                self.prune_swarm_event_delivery_lock(attempt.peer, &delivery);
+                return Ok(UnreferencedRetirement::Referenced);
+            }
+            Some(Some(((), retirement))) => retirement,
+        };
+        self.announce_retirement(turn, retirement).await;
+        self.prune_swarm_event_delivery_lock(attempt.peer, &delivery);
         if let Some(connection) = connection {
             if let Err(error) = self.close_connection_for_disconnect(&connection).await {
                 tracing::warn!(

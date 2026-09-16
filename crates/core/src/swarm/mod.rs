@@ -34,7 +34,6 @@ use crate::message::OriginQuotaLane;
 use crate::message::PayloadSender;
 use crate::message::ReplayCounters;
 use crate::swarm::callback::SharedSwarmCallback;
-use crate::swarm::callback::SwarmCallbackSlot;
 use crate::swarm::inbox::SwarmInboxDelivery;
 use crate::swarm::transport::SwarmTransport;
 
@@ -44,7 +43,6 @@ pub struct Swarm {
     pub(crate) dht: Arc<PeerRing>,
     /// Swarm transport.
     pub(crate) transport: Arc<SwarmTransport>,
-    callback: SwarmCallbackSlot,
 }
 
 impl Swarm {
@@ -89,7 +87,7 @@ impl Swarm {
     }
 
     fn callback(&self) -> Result<SharedSwarmCallback> {
-        self.callback.current()
+        self.transport.callback_slot().current()
     }
 
     fn inner_callback(&self) -> Result<InnerSwarmCallback> {
@@ -101,7 +99,7 @@ impl Swarm {
 
     /// Set callback for swarm.
     pub fn set_callback(&self, callback: SharedSwarmCallback) -> Result<()> {
-        self.callback.replace(callback)
+        self.transport.callback_slot().replace(callback)
     }
 
     /// Create [Stabilizer] for swarm; its inbox-delivery intent is interpreted here, toward
@@ -111,7 +109,7 @@ impl Swarm {
             self.transport.clone(),
             Arc::new(SwarmInboxDelivery::new(
                 self.transport.clone(),
-                self.callback.clone(),
+                self.transport.callback_slot(),
             )),
         )
     }
@@ -168,6 +166,24 @@ impl Swarm {
     /// List DIDs whose direct WebRTC transport connection is active.
     pub fn connected_peer_dids(&self) -> Vec<Did> {
         self.transport.get_connection_ids()
+    }
+
+    /// Whether the transport holds any connection record for `peer`: a handshake pending or
+    /// admitting, or an admitted connection. A new offer to such a peer is refused as
+    /// `AlreadyConnected`, so a caller that would dial checks this first.
+    pub fn has_connection_attempt(&self, peer: Did) -> Result<bool> {
+        Ok(self.transport.unadmitted_attempt(peer)?.is_some()
+            || self.transport.active_attempt(peer)?.is_some())
+    }
+
+    /// Cancel this node's own unadmitted handshake to `peer`, when one is pending or
+    /// admitting; an admitted connection is left alone. Returns whether an attempt was
+    /// cancelled.
+    pub async fn cancel_pending_connection(&self, peer: Did) -> Result<bool> {
+        let Some(attempt) = self.transport.unadmitted_attempt(peer)? else {
+            return Ok(false);
+        };
+        self.transport.cancel_pending_connection(attempt).await
     }
 
     /// Whether `peer` has an admitted direct transport that is ready to carry payloads.

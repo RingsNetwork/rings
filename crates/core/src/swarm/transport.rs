@@ -42,6 +42,7 @@ use crate::dht::LiveDid;
 use crate::dht::PeerRing;
 use crate::dht::StorageSyncDeliveryCursor;
 use crate::dht::VirtualNodeConfig;
+use crate::error::CallbackError;
 use crate::error::Error;
 use crate::error::Result;
 use crate::measure::MeasureImpl;
@@ -54,7 +55,6 @@ use crate::message::PayloadSender;
 use crate::message::TransactionReplay;
 use crate::session::Session;
 use crate::session::SessionSk;
-use crate::swarm::callback::DefaultCallback;
 use crate::swarm::callback::InnerSwarmCallback;
 use crate::swarm::callback::SwarmCallbackSlot;
 use crate::swarm::callback::SwarmEvent;
@@ -111,6 +111,7 @@ use self::pending::ConnectionLifecycleBoundary;
 pub(crate) use self::pending::PendingConnectionAttempt;
 use self::pending::PendingFingerUpdates;
 use self::pending::RawConnectionOwner;
+use self::pending::Retirement;
 use self::pending::SharedConnectionLifecycles;
 #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
 use self::pending::PENDING_CONNECTION_TIMEOUT_MS;
@@ -126,6 +127,27 @@ pub(crate) use self::timeouts::TRACKED_PAYLOAD_COMPLETION_BOUND;
 use self::timeouts::TRANSPORT_TIMEOUT_PROFILE;
 use super::callback::InboundCapacity;
 
+/// Everything a [`SwarmTransport`] is constructed from.
+pub(crate) struct SwarmTransportParts {
+    /// Overlay the transport signs for and admits peers of.
+    pub(crate) network_id: u32,
+    /// WebRTC ICE and address configuration.
+    pub(crate) webrtc: SwarmWebrtcConfig,
+    /// Session key that signs every payload.
+    pub(crate) session_sk: SessionSk,
+    /// Local DHT the transport keeps in step with its admitted peers.
+    pub(crate) dht: Arc<PeerRing>,
+    /// Optional measurement sink.
+    pub(crate) measure: Option<MeasureImpl>,
+    /// Destination-scoped replay protection.
+    pub(crate) transaction_replay: Arc<TransactionReplay>,
+    /// Storage, virtual-node and reassembly settings.
+    pub(crate) settings: SwarmTransportSettings,
+    /// The application the transport delivers swarm events to; shared with the swarm so
+    /// `Swarm::set_callback` replaces the target of both.
+    pub(crate) callback: SwarmCallbackSlot,
+}
+
 pub struct SwarmTransport {
     pub(crate) network_id: u32,
     transport: Transport,
@@ -139,6 +161,7 @@ pub struct SwarmTransport {
     connection_lifecycle: ConnectionLifecycleBoundary,
     swarm_event_delivery: SwarmEventDeliveryLocks,
     callback: SwarmCallbackSlot,
+    announced_admissions: Mutex<BTreeMap<Did, u64>>,
     connection_creation: PeerOperationLocks,
     peer_lifecycles: SharedConnectionLifecycles,
     pending_finger_updates: Mutex<PendingFingerUpdates>,
@@ -235,15 +258,18 @@ impl SwarmTransport {
             .map_err(|_| Error::SwarmConnectionLifecycleLock)
     }
 
-    pub(crate) fn new(
-        network_id: u32,
-        webrtc: SwarmWebrtcConfig,
-        session_sk: SessionSk,
-        dht: Arc<PeerRing>,
-        measure: Option<MeasureImpl>,
-        transaction_replay: Arc<TransactionReplay>,
-        settings: SwarmTransportSettings,
-    ) -> Self {
+    /// Build the transport from its parts; see [`SwarmTransportParts`].
+    pub(crate) fn new(parts: SwarmTransportParts) -> Self {
+        let SwarmTransportParts {
+            network_id,
+            webrtc,
+            session_sk,
+            dht,
+            measure,
+            transaction_replay,
+            settings,
+            callback,
+        } = parts;
         let lifecycle_bounds = self::retention::lifecycle_bounds(dht.successors().capacity());
         Self {
             network_id,
@@ -261,7 +287,8 @@ impl SwarmTransport {
             inbound_capacity: Arc::new(InboundCapacity::new()),
             connection_lifecycle: ConnectionLifecycleBoundary::new(),
             swarm_event_delivery: SwarmEventDeliveryLocks::new(),
-            callback: SwarmCallbackSlot::new(Arc::new(DefaultCallback)),
+            callback,
+            announced_admissions: Mutex::new(BTreeMap::new()),
             connection_creation: PeerOperationLocks::new(),
             peer_lifecycles: Arc::new(Mutex::new(self::pending::ConnectionLifecycleRegistry::new(
                 lifecycle_bounds,
@@ -430,27 +457,37 @@ impl SwarmTransport {
         self.callback.clone()
     }
 
-    /// Deliver [`SwarmEvent::PeerRetired`] for `peer` to the application, in the peer's ordered
-    /// start sequence shared with its connection state events.
-    ///
-    /// Every path by which an admitted peer leaves the DHT calls this after the record is
-    /// retired, so the application observes one logical departure per admission. A failing
-    /// application callback is logged, never propagated: the departure has already happened.
-    pub(crate) async fn emit_peer_retired(&self, peer: Did) {
-        let delivery = self.swarm_event_delivery_lock(peer);
-        let delivered: std::result::Result<(), String> = async {
-            let turn = delivery.acquire().await;
-            let callback = self.callback.current().map_err(|error| error.to_string())?;
-            let event = SwarmEvent::PeerRetired { peer };
-            turn.poll_once_then_release(callback.on_event(&event))
+    /// Announce a retirement through `turn`, the peer's ordered delivery turn acquired before
+    /// the record was retired: [`SwarmEvent::PeerRetired`] is delivered iff the admission it
+    /// ends was announced, so the application sees one departure per admission it saw, in
+    /// the order the swarm decided them. A failing application callback is logged, never
+    /// propagated: the departure has already happened.
+    pub(crate) async fn announce_retirement(
+        &self,
+        turn: SwarmEventDeliveryTurn,
+        retirement: Retirement,
+    ) {
+        if !retirement.announced_admission {
+            drop(turn);
+            return;
+        }
+        let peer = retirement.peer;
+        let delivered: std::result::Result<(), CallbackError> = async {
+            let callback = self.callback.current()?;
+            turn.poll_once_then_release(callback.on_event(&SwarmEvent::PeerRetired { peer }))
                 .await
-                .map_err(|error| error.to_string())
         }
         .await;
-        self.prune_swarm_event_delivery_lock(peer, &delivery);
         if let Err(error) = delivered {
             tracing::error!(%peer, %error, "peer retirement callback failed");
         }
+    }
+
+    /// Lock the per-peer record of the generation whose admission was announced.
+    fn announced_admissions(&self) -> Result<MutexGuard<'_, BTreeMap<Did, u64>>> {
+        self.announced_admissions
+            .lock()
+            .map_err(|_| Error::LockPoisoned)
     }
 
     pub(crate) fn prune_swarm_event_delivery_lock(

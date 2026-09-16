@@ -115,6 +115,19 @@ impl ConnectionLifecycleBoundary {
 /// A peer can have a replacement handshake after a timeout. Callbacks carry
 /// this token so a late callback from the replaced connection cannot promote
 /// the newer handshake into the active routing set.
+/// Witness that an admitted connection record was retired under the lifecycle boundary.
+///
+/// It must be announced through `SwarmTransport::announce_retirement`, which delivers
+/// [`SwarmEvent::PeerRetired`](crate::swarm::callback::SwarmEvent::PeerRetired) exactly when
+/// the admission it ends was itself announced. Law: for every generation,
+/// `Connected` delivered ⟺ `PeerRetired` delivered.
+#[must_use = "a retirement must be announced through announce_retirement"]
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct Retirement {
+    pub(super) peer: Did,
+    pub(super) announced_admission: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct PendingConnectionAttempt {
     /// Peer this logical connection generation is trying to own.
@@ -630,11 +643,27 @@ impl SwarmTransport {
         Ok(removed)
     }
 
+    /// Mark the admission of `attempt` as announced to the application, iff `attempt` still
+    /// owns the active slot. Atomic with retirement under the lifecycle boundary, so exactly
+    /// one of {`Connected` delivered, `PeerRetired` suppressed} holds for every generation.
+    pub(crate) fn begin_connected_announcement(
+        &self,
+        attempt: PendingConnectionAttempt,
+    ) -> Result<bool> {
+        let _lifecycle = self.connection_lifecycle()?;
+        if self.peer_lifecycles()?.active_attempt(attempt.peer) != Some(attempt) {
+            return Ok(false);
+        }
+        self.announced_admissions()?
+            .insert(attempt.peer, attempt.generation);
+        Ok(true)
+    }
+
     pub(super) fn retire_active_connection_with<T>(
         &self,
         attempt: PendingConnectionAttempt,
         action: impl FnOnce(&ActiveConnectionSet) -> Result<T>,
-    ) -> Result<Option<T>> {
+    ) -> Result<Option<(T, Retirement)>> {
         let _lifecycle = self.connection_lifecycle()?;
         self.retire_active_connection_locked(attempt, |active| action(active).map(Some))
             .map(Option::flatten)
@@ -649,7 +678,7 @@ impl SwarmTransport {
         &self,
         attempt: PendingConnectionAttempt,
         action: impl FnOnce(&ActiveConnectionSet) -> Result<Option<T>>,
-    ) -> Result<Option<Option<T>>> {
+    ) -> Result<Option<Option<(T, Retirement)>>> {
         let _lifecycle = self.connection_lifecycle()?;
         self.retire_active_connection_locked(attempt, action)
     }
@@ -658,7 +687,7 @@ impl SwarmTransport {
         &self,
         attempt: PendingConnectionAttempt,
         action: impl FnOnce(&ActiveConnectionSet) -> Result<Option<T>>,
-    ) -> Result<Option<Option<T>>> {
+    ) -> Result<Option<Option<(T, Retirement)>>> {
         let mut lifecycles = self.peer_lifecycles()?;
         if lifecycles.active_attempt(attempt.peer) != Some(attempt) {
             return Ok(None);
@@ -671,6 +700,7 @@ impl SwarmTransport {
         let mut pending_finger_updates = self.pending_finger_updates()?;
         let mut peer_liveness = self.peer_liveness()?;
         let mut measured_disconnects = self.measured_disconnects()?;
+        let mut announced_admissions = self.announced_admissions()?;
         let Some(result) = action(&active)? else {
             return Ok(Some(None));
         };
@@ -682,8 +712,13 @@ impl SwarmTransport {
         pending_finger_updates.retain(|pending, _| pending.peer != attempt.peer);
         peer_liveness.remove(attempt.peer);
         measured_disconnects.remove(&attempt.peer);
+        let announced_admission =
+            announced_admissions.remove(&attempt.peer) == Some(attempt.generation);
         self.outbound_schedulers.shutdown(attempt.peer);
-        Ok(Some(Some(result)))
+        Ok(Some(Some((result, Retirement {
+            peer: attempt.peer,
+            announced_admission,
+        }))))
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -692,7 +727,7 @@ impl SwarmTransport {
         attempt: PendingConnectionAttempt,
         before_lifecycle_gate: impl FnOnce(),
         action: impl FnOnce(&ActiveConnectionSet) -> Result<T>,
-    ) -> Result<Option<T>> {
+    ) -> Result<Option<(T, Retirement)>> {
         let _lifecycle = self
             .connection_lifecycle
             .lock_with_waiter_observer_for_test(before_lifecycle_gate)?;

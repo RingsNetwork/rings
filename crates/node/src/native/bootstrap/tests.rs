@@ -11,22 +11,23 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use rings_core::dht::Did;
+use tokio::sync::futures::Notified;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
-use super::evidence::Admissions;
-use super::evidence::LookupReportLedger;
+use super::evidence::ReachabilityEvidence;
+use super::evidence::Rendezvous;
 use super::evidence::EARLY_REPORT_CAPACITY;
 use super::schedule::duration_ms;
 use super::schedule::is_one_slow_delay_after;
 use super::BootstrapPort;
 use super::BootstrapSupervisor;
+use super::BootstrapTargetError;
 use super::BootstrapTargets;
+use super::DialFailure;
 use super::ManagedTarget;
-use super::ReachabilityEvidence;
 use crate::error::Error;
-use crate::error::Result;
 use crate::native::config::BootstrapConfig;
 use crate::prelude::StopSource;
 use crate::seed::SeedPeer;
@@ -68,7 +69,8 @@ struct Call {
     kind: CallKind,
 }
 
-/// Scripted state: reachability per target, queued dial scripts, and the call log.
+/// Scripted state: reachability per target, queued dial scripts, the call log, and the count
+/// of dials currently hanging.
 #[derive(Default)]
 struct PortState {
     reachable: BTreeMap<Did, bool>,
@@ -86,21 +88,23 @@ struct ScriptedPort {
 
 /// Counts a hanging dial while its future is alive and announces its cancellation, so the
 /// shutdown test waits for the event rather than for a scheduler pass.
-struct HangGuard<'a>(&'a ScriptedPort);
+struct HangGuard<'port> {
+    port: &'port ScriptedPort,
+}
 
-impl<'a> HangGuard<'a> {
+impl<'port> HangGuard<'port> {
     /// Register one hanging dial.
-    fn new(port: &'a ScriptedPort) -> Self {
+    fn new(port: &'port ScriptedPort) -> Self {
         port.state().hanging += 1;
-        Self(port)
+        Self { port }
     }
 }
 
 impl Drop for HangGuard<'_> {
     /// Unregister the hanging dial and announce it, also when its future is dropped.
     fn drop(&mut self) {
-        self.0.state().hanging -= 1;
-        self.0.hang_released.notify_one();
+        self.port.state().hanging -= 1;
+        self.port.hang_released.notify_one();
     }
 }
 
@@ -152,6 +156,11 @@ impl ScriptedPort {
     fn hanging(&self) -> usize {
         self.state().hanging
     }
+
+    /// Resolves once a hanging dial's future is dropped.
+    fn released(&self) -> Notified<'_> {
+        self.hang_released.notified()
+    }
 }
 
 #[async_trait::async_trait]
@@ -170,7 +179,7 @@ impl BootstrapPort for ScriptedPort {
     }
 
     /// Follow the next queued script for the target (an exhausted queue fails) and log it.
-    async fn dial(&self, target: &ManagedTarget) -> Result<()> {
+    async fn dial(&self, target: &ManagedTarget) -> std::result::Result<(), DialFailure> {
         let at_ms = self.now_ms();
         let script = {
             let mut state = self.state();
@@ -191,10 +200,10 @@ impl BootstrapPort for ScriptedPort {
                 self.set_reachable(target.did(), true);
                 Ok(())
             }
-            DialScript::Fail => Err(Error::AdmissionTimedOut { peer: target.did() }),
-            DialScript::InFlight => Err(Error::CreateOffer(
-                rings_core::error::Error::AlreadyConnected,
-            )),
+            DialScript::Fail => Err(DialFailure::Failed(Error::AdmissionTimedOut {
+                peer: target.did(),
+            })),
+            DialScript::InFlight => Err(DialFailure::InFlight),
             DialScript::Hang => {
                 let _guard = HangGuard::new(self);
                 std::future::pending().await
@@ -221,6 +230,14 @@ fn peer(n: u32) -> SeedPeer {
 fn targets(peers: Vec<SeedPeer>) -> BootstrapTargets {
     BootstrapTargets::from_config(BootstrapConfig { peers }, Did::from(LOCAL))
         .expect("test targets must validate")
+}
+
+/// The target error `peers` are rejected with.
+fn rejection(peers: Vec<SeedPeer>) -> Option<BootstrapTargetError> {
+    match BootstrapTargets::from_config(BootstrapConfig { peers }, Did::from(LOCAL)) {
+        Err(Error::BootstrapTarget(error)) => Some(error),
+        _ => None,
+    }
 }
 
 /// A running supervisor over a scripted port.
@@ -431,7 +448,7 @@ async fn shutdown_cancels_an_in_flight_dial() {
 
     tokio::time::sleep(Duration::from_millis(1_000)).await;
     assert_eq!(port.hanging(), 1);
-    let released = port.hang_released.notified();
+    let released = port.released();
     running.shutdown().await;
     tokio::time::timeout(Duration::from_secs(1), released)
         .await
@@ -460,47 +477,60 @@ async fn a_loss_during_a_turn_is_reassessed_as_soon_as_the_turn_settles() {
     running.shutdown().await;
 }
 
-/// Target validation accepts distinct public peers and rejects bad DIDs, non-public URLs, one
-/// DID under two endpoints, one endpoint under two DIDs, and self; a verbatim repeat merges.
+/// Target validation accepts distinct public peers and rejects, by typed reason, bad DIDs,
+/// non-public URLs, one DID under two endpoints, one endpoint under two DIDs, and self; a
+/// verbatim repeat merges.
 #[test]
 fn targets_validate_dids_urls_duplicates_and_self() {
     let local = Did::from(LOCAL);
-    let valid = targets(vec![peer(1), peer(2)]);
-    assert_eq!(valid.len(), 2);
+    assert_eq!(targets(vec![peer(1), peer(2)]).len(), 2);
 
-    let rejected = |peers: Vec<SeedPeer>| {
-        BootstrapTargets::from_config(BootstrapConfig { peers }, local)
-            .err()
-            .map(|error| error.to_string())
-            .unwrap_or_default()
-    };
-    assert!(rejected(vec![SeedPeer {
-        did: "not-a-did".to_string(),
-        ..peer(1)
-    }])
-    .contains("not a DID"));
-    assert!(rejected(vec![SeedPeer {
-        url: "http://127.0.0.1:50001/".to_string(),
-        ..peer(1)
-    }])
-    .contains("Unsafe"));
-    assert!(rejected(vec![
-        SeedPeer {
-            url: "https://other.example.com/".to_string(),
+    assert_eq!(
+        rejection(vec![SeedPeer {
+            did: "not-a-did".to_string(),
             ..peer(1)
-        },
-        peer(1)
-    ])
-    .contains("differing endpoints"));
-    assert!(rejected(vec![peer(1), SeedPeer {
-        did: Did::from(2).to_string(),
-        ..peer(1)
-    }])
-    .contains("under two DIDs"));
-    assert!(rejected(vec![peer(LOCAL)]).contains("itself"));
+        }]),
+        Some(BootstrapTargetError::NotADid("not-a-did".to_string()))
+    );
+    assert!(matches!(
+        BootstrapTargets::from_config(
+            BootstrapConfig {
+                peers: vec![SeedPeer {
+                    url: "http://127.0.0.1:50001/".to_string(),
+                    ..peer(1)
+                }],
+            },
+            local,
+        ),
+        Err(Error::UnsafeRemoteRpcTarget(_))
+    ));
+    assert_eq!(
+        rejection(vec![
+            SeedPeer {
+                url: "https://other.example.com/".to_string(),
+                ..peer(1)
+            },
+            peer(1),
+        ]),
+        Some(BootstrapTargetError::DifferingEndpoints(Did::from(1)))
+    );
+    assert!(matches!(
+        rejection(vec![peer(1), SeedPeer {
+            did: Did::from(2).to_string(),
+            ..peer(1)
+        },]),
+        Some(BootstrapTargetError::EndpointUnderTwoDids(_))
+    ));
+    assert_eq!(
+        rejection(vec![peer(LOCAL)]),
+        Some(BootstrapTargetError::LocalNode(local))
+    );
 
-    let merged = targets(vec![peer(1), peer(2), peer(1)]);
-    assert_eq!(merged.len(), 2, "a verbatim repeat is merged");
+    assert_eq!(
+        targets(vec![peer(1), peer(2), peer(1)]).len(),
+        2,
+        "a verbatim repeat is merged"
+    );
     assert!(
         BootstrapTargets::from_config(BootstrapConfig::default(), local)
             .expect("an empty section validates")
@@ -522,58 +552,43 @@ fn managed_target_debug_redacts_the_token() {
     assert_eq!(target.api_token(), Some("0123456789abcdef"));
 }
 
-/// The ledger resolves a waiter whether the report arrived before or after it, and `forget`
-/// closes a waiter.
+/// A rendezvous resolves a waiter whether the value arrived before or after it, replaces an
+/// earlier waiter for the same key, and `forget` closes a waiter.
 #[tokio::test]
-async fn ledger_resolves_in_either_order_and_forgets() {
-    let ledger = LookupReportLedger::default();
-    let early = uuid::Uuid::new_v4();
-    let late = uuid::Uuid::new_v4();
-    let forgotten = uuid::Uuid::new_v4();
+async fn rendezvous_resolves_in_either_order_replaces_and_forgets() {
+    let rendezvous: Rendezvous<u8, Did> = Rendezvous::new(EARLY_REPORT_CAPACITY);
 
-    ledger.observe(early, Did::from(1)).unwrap();
-    let waiter = ledger.await_report(early).unwrap();
+    rendezvous.observe(1, Did::from(1)).unwrap();
+    let waiter = rendezvous.wait_for(1).unwrap();
     assert_eq!(waiter.await, Ok(Did::from(1)));
 
-    let waiter = ledger.await_report(late).unwrap();
-    ledger.observe(late, Did::from(2)).unwrap();
+    let stale = rendezvous.wait_for(2).unwrap();
+    let waiter = rendezvous.wait_for(2).unwrap();
+    rendezvous.observe(2, Did::from(2)).unwrap();
+    assert!(stale.await.is_err(), "the replaced waiter is closed");
     assert_eq!(waiter.await, Ok(Did::from(2)));
 
-    let waiter = ledger.await_report(forgotten).unwrap();
-    ledger.forget(forgotten).unwrap();
+    let waiter = rendezvous.wait_for(3).unwrap();
+    rendezvous.forget(3).unwrap();
     assert!(waiter.await.is_err(), "a forgotten waiter is closed");
-    assert_eq!(ledger.len().unwrap(), 0);
+    assert_eq!(rendezvous.len().unwrap(), 0);
 }
 
-/// Early reports are bounded by `EARLY_REPORT_CAPACITY`, evicting the oldest first.
+/// Early values are bounded by the capacity, evicting the oldest first, and a capacity of
+/// zero buffers nothing.
 #[tokio::test]
-async fn ledger_bounds_early_reports_by_evicting_the_oldest() {
-    let ledger = LookupReportLedger::default();
-    let oldest = uuid::Uuid::new_v4();
-    ledger.observe(oldest, Did::from(1)).unwrap();
-    for _ in 0..EARLY_REPORT_CAPACITY {
-        ledger.observe(uuid::Uuid::new_v4(), Did::from(2)).unwrap();
+async fn rendezvous_bounds_early_values() {
+    let rendezvous: Rendezvous<u8, ()> = Rendezvous::new(2);
+    for key in 1..=3 {
+        rendezvous.observe(key, ()).unwrap();
     }
-    assert_eq!(ledger.len().unwrap(), EARLY_REPORT_CAPACITY);
-    let waiter = ledger.await_report(oldest).unwrap();
-    ledger.forget(oldest).unwrap();
-    assert!(waiter.await.is_err(), "the evicted report is gone");
-}
+    assert_eq!(rendezvous.len().unwrap(), 2);
+    let evicted = rendezvous.wait_for(1).unwrap();
+    rendezvous.forget(1).unwrap();
+    assert!(evicted.await.is_err(), "the evicted value is gone");
+    assert_eq!(rendezvous.wait_for(3).unwrap().await, Ok(()));
 
-/// An admission resolves the waiter registered for its peer, replaces an earlier waiter for
-/// the same peer, and `forget` closes a waiter.
-#[tokio::test]
-async fn admissions_resolve_the_registered_waiter_and_forget() {
-    let admissions = Admissions::default();
-    let peer = Did::from(1);
-    let stale = admissions.await_admission(peer).unwrap();
-    let waiter = admissions.await_admission(peer).unwrap();
-    admissions.observe(Did::from(2)).unwrap();
-    admissions.observe(peer).unwrap();
-    assert!(stale.await.is_err(), "the replaced waiter is closed");
-    assert_eq!(waiter.await, Ok(()));
-
-    let waiter = admissions.await_admission(peer).unwrap();
-    admissions.forget(peer).unwrap();
-    assert!(waiter.await.is_err(), "a forgotten waiter is closed");
+    let unbuffered: Rendezvous<u8, ()> = Rendezvous::new(0);
+    unbuffered.observe(1, ()).unwrap();
+    assert_eq!(unbuffered.len().unwrap(), 0);
 }
