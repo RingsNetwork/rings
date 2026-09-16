@@ -22,7 +22,13 @@ pub(in crate::swarm::transport) enum PeerConnectionLifecycle {
         attempt: PendingConnectionAttempt,
         started_at_ms: i64,
     },
-    Active(PendingConnectionAttempt),
+    Active {
+        attempt: PendingConnectionAttempt,
+        /// Whether the admission was announced to the application. Set under the same lock
+        /// that retires the record, so for every generation `Connected` delivered ⟺
+        /// `PeerRetired` delivered.
+        announced: bool,
+    },
 }
 
 impl PeerConnectionLifecycle {
@@ -30,9 +36,34 @@ impl PeerConnectionLifecycle {
         match self {
             Self::Pending { attempt, .. }
             | Self::Admitting { attempt, .. }
-            | Self::Active(attempt) => attempt,
+            | Self::Active { attempt, .. } => attempt,
         }
     }
+}
+
+/// Witness that an admitted connection record was retired under the lifecycle boundary,
+/// carrying whether its admission had been announced. Announced through
+/// `SwarmTransport::announce_retirement`, which delivers
+/// [`SwarmEvent::PeerRetired`](crate::swarm::callback::SwarmEvent::PeerRetired) exactly when
+/// the admission was; `retire_announced_if` is the single production path from a retirement
+/// to its announcement.
+#[derive(Debug)]
+pub(in crate::swarm::transport) struct Retirement {
+    pub(in crate::swarm::transport) peer: Did,
+    pub(in crate::swarm::transport) announced_admission: bool,
+}
+
+/// Outcome of a retirement decided under the lifecycle boundary: `Superseded` when the
+/// generation no longer owned the active slot, `Declined` when the deciding action kept the
+/// record, `Retired` with the action's value once the record is gone.
+#[derive(Debug, Eq, PartialEq)]
+pub(in crate::swarm::transport) enum RetirementOutcome<T> {
+    /// The generation no longer owned the active slot; nothing changed.
+    Superseded,
+    /// The action declined; no local state changed.
+    Declined,
+    /// The record was retired; carries the action's value.
+    Retired(T),
 }
 
 pub(in crate::swarm::transport) struct AdmittingConnection<'state> {
@@ -41,8 +72,12 @@ pub(in crate::swarm::transport) struct AdmittingConnection<'state> {
 }
 
 impl AdmittingConnection<'_> {
+    /// Apply `Admitting(attempt) -> Active(attempt, unannounced)`.
     pub(in crate::swarm::transport) fn activate(self) {
-        *self.state = PeerConnectionLifecycle::Active(self.attempt);
+        *self.state = PeerConnectionLifecycle::Active {
+            attempt: self.attempt,
+            announced: false,
+        };
     }
 }
 
@@ -260,7 +295,7 @@ impl ConnectionLifecycleRegistry {
         match self.state(peer) {
             Some(PeerConnectionLifecycle::Pending { attempt, .. }) => Some(attempt),
             Some(PeerConnectionLifecycle::Admitting { .. })
-            | Some(PeerConnectionLifecycle::Active(_))
+            | Some(PeerConnectionLifecycle::Active { .. })
             | None => None,
         }
     }
@@ -272,7 +307,7 @@ impl ConnectionLifecycleRegistry {
         match self.state(peer) {
             Some(PeerConnectionLifecycle::Pending { attempt, .. })
             | Some(PeerConnectionLifecycle::Admitting { attempt, .. }) => Some(attempt),
-            Some(PeerConnectionLifecycle::Active(_)) | None => None,
+            Some(PeerConnectionLifecycle::Active { .. }) | None => None,
         }
     }
 
@@ -284,7 +319,7 @@ impl ConnectionLifecycleRegistry {
         match self.state(peer) {
             Some(PeerConnectionLifecycle::Admitting { attempt, .. }) => Some(attempt),
             Some(PeerConnectionLifecycle::Pending { .. })
-            | Some(PeerConnectionLifecycle::Active(_))
+            | Some(PeerConnectionLifecycle::Active { .. })
             | None => None,
         }
     }
@@ -294,7 +329,7 @@ impl ConnectionLifecycleRegistry {
         peer: Did,
     ) -> Option<PendingConnectionAttempt> {
         match self.state(peer) {
-            Some(PeerConnectionLifecycle::Active(attempt)) => Some(attempt),
+            Some(PeerConnectionLifecycle::Active { attempt, .. }) => Some(attempt),
             Some(PeerConnectionLifecycle::Pending { .. })
             | Some(PeerConnectionLifecycle::Admitting { .. })
             | None => None,
@@ -335,12 +370,12 @@ impl ConnectionLifecycleRegistry {
                 .peers
                 .iter()
                 .filter_map(|(peer, state)| match state {
-                    PeerConnectionLifecycle::Active(attempt)
+                    PeerConnectionLifecycle::Active { attempt, .. }
                         if !self.send_terminal.contains(attempt) =>
                     {
                         Some((*peer, *attempt))
                     }
-                    PeerConnectionLifecycle::Active(_) => None,
+                    PeerConnectionLifecycle::Active { .. } => None,
                     PeerConnectionLifecycle::Pending { .. }
                     | PeerConnectionLifecycle::Admitting { .. } => None,
                 })
@@ -354,7 +389,7 @@ impl ConnectionLifecycleRegistry {
                 .peers
                 .iter()
                 .filter_map(|(peer, state)| match state {
-                    PeerConnectionLifecycle::Active(attempt) => Some((*peer, *attempt)),
+                    PeerConnectionLifecycle::Active { attempt, .. } => Some((*peer, *attempt)),
                     PeerConnectionLifecycle::Pending { .. }
                     | PeerConnectionLifecycle::Admitting { .. } => None,
                 })
@@ -449,7 +484,70 @@ impl ConnectionLifecycleRegistry {
         true
     }
 
-    /// Apply `Active(attempt) -> Absent`.
+    /// Apply `Active(attempt, _) -> Active(attempt, announced)`; `false` when `attempt` does
+    /// not own the active slot.
+    pub(in crate::swarm::transport) fn mark_announced(
+        &mut self,
+        attempt: PendingConnectionAttempt,
+    ) -> bool {
+        match self.peers.get_mut(&attempt.peer) {
+            Some(PeerConnectionLifecycle::Active {
+                attempt: current,
+                announced,
+            }) if *current == attempt => {
+                *announced = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The active generation of `peer` whose admission was announced, if any: the peer the
+    /// application has been told about and will be told the retirement of.
+    pub(in crate::swarm::transport) fn announced_attempt(
+        &self,
+        peer: Did,
+    ) -> Option<PendingConnectionAttempt> {
+        match self.state(peer) {
+            Some(PeerConnectionLifecycle::Active {
+                attempt,
+                announced: true,
+            }) => Some(attempt),
+            _ => None,
+        }
+    }
+
+    /// Apply `Active(attempt, announced) -> Absent` iff `attempt` owns the active slot and
+    /// `action`, given the active set, commits; the witness carries `announced`.
+    ///
+    /// Post: `Superseded` iff `attempt` was not the active generation; `Declined` iff `action`
+    /// declined and no state changed; `Retired` iff `action` committed and the record is gone.
+    pub(in crate::swarm::transport) fn retire_active_if<T>(
+        &mut self,
+        attempt: PendingConnectionAttempt,
+        action: impl FnOnce(&ActiveConnectionSet) -> Result<Option<T>>,
+    ) -> Result<RetirementOutcome<(T, Retirement)>> {
+        let announced = match self.state(attempt.peer) {
+            Some(PeerConnectionLifecycle::Active {
+                attempt: current,
+                announced,
+            }) if current == attempt => announced,
+            _ => return Ok(RetirementOutcome::Superseded),
+        };
+        let Some(value) = action(&self.active_connections())? else {
+            return Ok(RetirementOutcome::Declined);
+        };
+        self.peers.remove(&attempt.peer);
+        self.send_terminal.remove(&attempt);
+        Ok(RetirementOutcome::Retired((value, Retirement {
+            peer: attempt.peer,
+            announced_admission: announced,
+        })))
+    }
+
+    /// Apply `Active(attempt, _) -> Absent`; the test-only unconditional form of
+    /// `retire_active_if`.
+    #[cfg(test)]
     pub(in crate::swarm::transport) fn remove_active(
         &mut self,
         attempt: PendingConnectionAttempt,
@@ -487,7 +585,7 @@ impl ConnectionLifecycleRegistry {
                         attempt,
                         started_at_ms,
                     } => (attempt, started_at_ms, UnadmittedPhase::Admitting),
-                    PeerConnectionLifecycle::Active(_) => return None,
+                    PeerConnectionLifecycle::Active { .. } => return None,
                 };
                 let age_ms = now_ms.saturating_sub(*started_at_ms);
                 (age_ms >= PENDING_CONNECTION_TIMEOUT_MS).then_some(ExpiredUnadmittedPeer {

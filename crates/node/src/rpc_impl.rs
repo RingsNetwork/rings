@@ -28,6 +28,7 @@ use crate::processor::HandshakePeer;
 use crate::processor::Processor;
 use crate::remote_endpoint::RemoteRpcEndpoint;
 use crate::seed::Seed;
+use crate::seed::ValidatedSeedPeer;
 
 const DEFAULT_PEER_MEASUREMENT_PAGE_SIZE: u32 = 100;
 const MAX_PEER_MEASUREMENT_PAGE_SIZE: u32 = 1_000;
@@ -67,19 +68,16 @@ impl HandleRpc<ConnectWithSeedRequest, ConnectWithSeedResponse> for Processor {
         let seed: Seed = Seed::try_from(req)?;
 
         // Every entry is validated before any is dialed, so an invalid document dials nothing.
-        let entries = seed
+        let peers = seed
             .peers
             .into_iter()
-            .map(|peer| {
-                let did = s2d(peer.did.as_str())?;
-                let endpoint = RemoteRpcEndpoint::parse(peer.url.as_str())?;
-                Ok((did, endpoint, peer.api_token))
-            })
-            .collect::<Result<Vec<_>>>()?;
+            .map(|peer| ValidatedSeedPeer::try_from(peer).map_err(ServerError::from))
+            .collect::<std::result::Result<Vec<_>, ServerError>>()?;
 
         let local = self.swarm.did();
-        let mut tasks = Vec::with_capacity(entries.len());
-        for (did, endpoint, api_token) in entries {
+        let mut tasks = Vec::with_capacity(peers.len());
+        for peer in peers {
+            let did = peer.did();
             if did == local
                 || self
                     .swarm
@@ -90,8 +88,8 @@ impl HandleRpc<ConnectWithSeedRequest, ConnectWithSeedResponse> for Processor {
             }
             tasks.push(async move {
                 self.connect_peer_via_http(
-                    &endpoint,
-                    api_token.as_deref(),
+                    peer.endpoint(),
+                    peer.api_token(),
                     HandshakePeer::Pinned(did),
                 )
                 .await

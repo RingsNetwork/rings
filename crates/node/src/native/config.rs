@@ -605,13 +605,15 @@ gateway:
         assert_eq!(restored.origin_quota, OriginQuotaConfig::default());
     }
 
+    /// The document `rings init` writes for a fresh session key.
+    fn generated_document() -> String {
+        serde_yaml::to_string(&Config::new("session_sk")).expect("generated config serializes")
+    }
+
     /// `rings init` states the bootstrap section explicitly, with no managed targets.
     #[test]
     fn generated_config_writes_an_empty_bootstrap_section() {
-        let document = match serde_yaml::to_string(&Config::new("session_sk")) {
-            Ok(document) => document,
-            Err(error) => panic!("generated config must serialize: {error}"),
-        };
+        let document = generated_document();
         assert!(document.contains("bootstrap:\n  peers: []\n"));
         assert_eq!(
             Config::new("session_sk").bootstrap,
@@ -623,7 +625,7 @@ gateway:
     /// explicit section round-trips its peers including an optional token.
     #[test]
     fn bootstrap_section_defaults_to_empty_and_round_trips_peers() {
-        let base = serde_yaml::to_string(&Config::new("session_sk")).expect("config serializes");
+        let base = generated_document();
         let without = base.replace("bootstrap:\n  peers: []\n", "");
         assert!(!without.contains("bootstrap:"));
         assert!(config_from(&without).bootstrap.peers.is_empty());

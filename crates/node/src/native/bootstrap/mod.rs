@@ -33,7 +33,9 @@
 //!
 //! Lost-wakeup freedom: every wait is preceded by a drain of the loss record, and a loss
 //! recorded between the drain and the wait leaves a stored permit, so no loss is missed. A turn
-//! is bounded by its port: one probe timeout, two HTTP request timeouts, one admission timeout.
+//! is bounded: the port bounds its probe, the endpoint's resolution, each of its two HTTP
+//! requests and the admission wait with a timeout of its own, and the core bounds the offer
+//! (ICE gathering) and the routed send it performs on the port's behalf.
 //!
 //! Shutdown: the loop returns on the first stop observation and its in-flight turns are
 //! dropped with it, cancelling any probe or handshake in progress. A pending connection attempt
@@ -44,8 +46,6 @@
 //! [`BackendObserver`]: crate::extension::BackendObserver
 
 use std::collections::BTreeMap;
-use std::fmt;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -66,7 +66,8 @@ use crate::native::config::BootstrapConfig;
 use crate::prelude::StopToken;
 use crate::processor::Processor;
 use crate::remote_endpoint::RemoteRpcEndpoint;
-use crate::seed::SeedPeer;
+use crate::seed::SeedPeerError;
+use crate::seed::ValidatedSeedPeer;
 
 mod evidence;
 mod probe;
@@ -80,17 +81,9 @@ pub(crate) use self::probe::ProcessorPort;
 /// Why a seed entry cannot be a managed target.
 #[derive(Debug, thiserror::Error, Eq, PartialEq)]
 pub enum BootstrapTargetError {
-    /// The entry's `did` does not parse.
-    #[error("bootstrap peer did is not a DID: {0}")]
-    NotADid(String),
-    /// The entry's `url` fails the remote RPC endpoint policy.
-    #[error("bootstrap peer {did} has an unusable endpoint: {reason}")]
-    UnusableEndpoint {
-        /// The entry's DID.
-        did: Did,
-        /// The policy's refusal.
-        reason: String,
-    },
+    /// The entry cannot be dialed at all.
+    #[error(transparent)]
+    Peer(#[from] SeedPeerError),
     /// The entry names the node itself.
     #[error("bootstrap peer {0} is this node itself")]
     LocalNode(Did),
@@ -100,14 +93,6 @@ pub enum BootstrapTargetError {
     /// The endpoint is listed again under a different DID.
     #[error("bootstrap endpoint {0} is listed under two DIDs")]
     EndpointUnderTwoDids(RemoteRpcEndpoint),
-}
-
-/// One validated managed target: a parsed DID and a public HTTP(S) handshake endpoint.
-#[derive(Eq, PartialEq)]
-pub(crate) struct ManagedTarget {
-    did: Did,
-    endpoint: RemoteRpcEndpoint,
-    api_token: Option<String>,
 }
 
 /// How two managed targets overlap, in decreasing order of agreement.
@@ -121,93 +106,48 @@ enum Overlap {
     SameEndpoint,
 }
 
-impl ManagedTarget {
-    /// DID the endpoint must answer as.
-    pub(crate) fn did(&self) -> Did {
-        self.did
-    }
-
-    /// Validated handshake endpoint.
-    pub(crate) fn endpoint(&self) -> &RemoteRpcEndpoint {
-        &self.endpoint
-    }
-
-    /// Bearer token for a peer that gates its handshake, never logged.
-    pub(crate) fn api_token(&self) -> Option<&str> {
-        self.api_token.as_deref()
-    }
-
-    /// How `other` overlaps with this target, if at all.
-    fn overlap(&self, other: &Self) -> Option<Overlap> {
-        if self == other {
-            Some(Overlap::Verbatim)
-        } else if self.did == other.did {
-            Some(Overlap::SameDid)
-        } else if self.endpoint == other.endpoint {
-            Some(Overlap::SameEndpoint)
-        } else {
-            None
-        }
-    }
-}
-
-impl fmt::Debug for ManagedTarget {
-    /// Render every field but the bearer token, which is replaced by `[REDACTED]`.
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ManagedTarget")
-            .field("did", &self.did)
-            .field("endpoint", &self.endpoint.as_str())
-            .field("api_token", &self.api_token.as_ref().map(|_| "[REDACTED]"))
-            .finish()
-    }
-}
-
-impl TryFrom<SeedPeer> for ManagedTarget {
-    type Error = Error;
-
-    /// Parse the DID and apply the remote RPC endpoint policy to the URL.
-    fn try_from(peer: SeedPeer) -> Result<Self> {
-        let did = Did::from_str(peer.did.as_str())
-            .map_err(|_| BootstrapTargetError::NotADid(peer.did))?;
-        let endpoint = RemoteRpcEndpoint::parse(peer.url.as_str()).map_err(|error| {
-            BootstrapTargetError::UnusableEndpoint {
-                did,
-                reason: error.to_string(),
-            }
-        })?;
-        Ok(Self {
-            did,
-            endpoint,
-            api_token: peer.api_token,
-        })
+/// How `target` overlaps with `known`, if at all.
+fn overlap(known: &ValidatedSeedPeer, target: &ValidatedSeedPeer) -> Option<Overlap> {
+    if known == target {
+        Some(Overlap::Verbatim)
+    } else if known.did() == target.did() {
+        Some(Overlap::SameDid)
+    } else if known.endpoint() == target.endpoint() {
+        Some(Overlap::SameEndpoint)
+    } else {
+        None
     }
 }
 
 /// Validated managed targets: one per DID, one per endpoint, none of them the local node.
 #[derive(Debug)]
-pub struct BootstrapTargets(Vec<ManagedTarget>);
+pub struct BootstrapTargets(Vec<ValidatedSeedPeer>);
 
 impl BootstrapTargets {
-    /// Validate `config` for the node `local`: every DID parses, every URL passes the remote
-    /// RPC endpoint policy, and none is `local` itself. An entry repeated verbatim (as when the
-    /// same seed document feeds both the config and `--bootstrap-seed`) is merged; a DID listed
-    /// with a different endpoint or token, or an endpoint listed under two DIDs, is rejected
-    /// as ambiguous, since one endpoint answers as exactly one DID.
+    /// Validate `config` for the node `local`: every entry validates as a seed peer and none
+    /// is `local` itself. An entry repeated verbatim (as when the same seed document feeds both
+    /// the config and `--bootstrap-seed`) is merged; a DID listed with a different endpoint or
+    /// token, or an endpoint listed under two DIDs, is rejected as ambiguous, since one
+    /// endpoint answers as exactly one DID. Endpoint identity is the full URL: two nodes may
+    /// share an origin behind path routing, and an entry whose endpoint answers as another node
+    /// is refused at dial time by the DID pin.
     pub fn from_config(config: BootstrapConfig, local: Did) -> Result<Self> {
-        let mut targets: Vec<ManagedTarget> = Vec::with_capacity(config.peers.len());
+        let mut targets: Vec<ValidatedSeedPeer> = Vec::with_capacity(config.peers.len());
         for peer in config.peers {
-            let target = ManagedTarget::try_from(peer)?;
-            if target.did == local {
-                return Err(BootstrapTargetError::LocalNode(target.did).into());
+            let target = ValidatedSeedPeer::try_from(peer).map_err(BootstrapTargetError::Peer)?;
+            if target.did() == local {
+                return Err(BootstrapTargetError::LocalNode(target.did()).into());
             }
-            match targets.iter().find_map(|known| known.overlap(&target)) {
+            match targets.iter().find_map(|known| overlap(known, &target)) {
                 Some(Overlap::Verbatim) => continue,
                 Some(Overlap::SameDid) => {
-                    return Err(BootstrapTargetError::ConflictingEntries(target.did).into());
+                    return Err(BootstrapTargetError::ConflictingEntries(target.did()).into());
                 }
                 Some(Overlap::SameEndpoint) => {
-                    return Err(BootstrapTargetError::EndpointUnderTwoDids(target.endpoint).into());
+                    return Err(BootstrapTargetError::EndpointUnderTwoDids(
+                        target.endpoint().clone(),
+                    )
+                    .into());
                 }
                 None => targets.push(target),
             }
@@ -240,15 +180,15 @@ pub(crate) enum DialFailure {
 #[async_trait]
 pub(crate) trait BootstrapPort: Send + Sync {
     /// Whether `target` is reachable through the overlay right now.
-    async fn reachable(&self, target: &ManagedTarget) -> bool;
+    async fn reachable(&self, target: &ValidatedSeedPeer) -> bool;
 
     /// Redial `target` through its HTTP endpoint; `Ok` once the peer is admitted.
-    async fn dial(&self, target: &ManagedTarget) -> std::result::Result<(), DialFailure>;
+    async fn dial(&self, target: &ValidatedSeedPeer) -> std::result::Result<(), DialFailure>;
 }
 
 /// The run-owned supervisor; see the module diagram.
 pub struct BootstrapSupervisor {
-    targets: BTreeMap<Did, Arc<ManagedTarget>>,
+    targets: BTreeMap<Did, Arc<ValidatedSeedPeer>>,
     port: Arc<dyn BootstrapPort>,
     evidence: Arc<ReachabilityEvidence>,
     schedule: BootstrapSchedule,
@@ -290,10 +230,10 @@ impl BootstrapSupervisor {
         evidence: Arc<ReachabilityEvidence>,
         jitter_seed: u64,
     ) -> Self {
-        let targets: BTreeMap<Did, Arc<ManagedTarget>> = targets
+        let targets: BTreeMap<Did, Arc<ValidatedSeedPeer>> = targets
             .0
             .into_iter()
-            .map(|target| (target.did, Arc::new(target)))
+            .map(|target| (target.did(), Arc::new(target)))
             .collect();
         let schedule = BootstrapSchedule::new(targets.keys().copied(), jitter_seed);
         Self {
@@ -347,7 +287,7 @@ impl BootstrapSupervisor {
         let now_ms = self.now_ms();
         for target in lost {
             if self.schedule.notice_loss(target, now_ms) {
-                tracing::info!(%target, "bootstrap target left the overlay; reassessing");
+                tracing::info!(%target, "bootstrap target left the local DHT; reassessing");
             }
         }
     }
@@ -392,7 +332,7 @@ async fn sleep_until_or_forever(deadline: Option<Instant>) {
 }
 
 /// One turn: assess reachability and, only when unreachable, redial.
-async fn turn(port: Arc<dyn BootstrapPort>, target: Arc<ManagedTarget>) -> (Did, TurnOutcome) {
+async fn turn(port: Arc<dyn BootstrapPort>, target: Arc<ValidatedSeedPeer>) -> (Did, TurnOutcome) {
     let did = target.did();
     if port.reachable(target.as_ref()).await {
         tracing::debug!(target = %did, "bootstrap target reachable");
@@ -400,7 +340,7 @@ async fn turn(port: Arc<dyn BootstrapPort>, target: Arc<ManagedTarget>) -> (Did,
     }
     match port.dial(target.as_ref()).await {
         Ok(()) => {
-            tracing::info!(target = %did, endpoint = %target.endpoint, "bootstrap target redialed");
+            tracing::info!(target = %did, endpoint = %target.endpoint(), "bootstrap target redialed");
             (did, TurnOutcome::Reachable)
         }
         Err(DialFailure::InFlight) => {
@@ -408,7 +348,7 @@ async fn turn(port: Arc<dyn BootstrapPort>, target: Arc<ManagedTarget>) -> (Did,
             (did, TurnOutcome::Deferred)
         }
         Err(DialFailure::Failed(error)) => {
-            tracing::warn!(target = %did, endpoint = %target.endpoint, %error, "bootstrap redial failed");
+            tracing::warn!(target = %did, endpoint = %target.endpoint(), %error, "bootstrap redial failed");
             (did, TurnOutcome::DialFailed)
         }
     }

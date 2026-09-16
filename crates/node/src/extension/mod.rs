@@ -14,7 +14,6 @@ use rings_core::message::MessagePayload;
 use rings_core::message::MessageVerificationExt;
 use rings_core::swarm::callback::SwarmCallback;
 use rings_core::swarm::callback::SwarmEvent;
-use rings_transport::core::transport::WebrtcConnectionState;
 
 use crate::extension::ext::Envelope;
 use crate::extension::ext::Extensions;
@@ -104,14 +103,12 @@ impl SwarmCallback for Backend {
         let Some(observer) = self.observer.as_deref() else {
             return Ok(());
         };
-        match *event {
-            // The swarm emits `Connected` exactly once per admission.
-            SwarmEvent::ConnectionStateChange {
-                peer,
-                state: WebrtcConnectionState::Connected,
-            } => observer.peer_admitted(peer),
-            SwarmEvent::PeerRetired { peer } => observer.peer_retired(peer),
-            _ => {}
+        // The swarm delivers the admission event at most once per admission, and `PeerRetired`
+        // exactly for the admissions it delivered.
+        if let Some(peer) = event.admitted_peer() {
+            observer.peer_admitted(peer);
+        } else if let SwarmEvent::PeerRetired { peer } = *event {
+            observer.peer_retired(peer);
         }
         Ok(())
     }

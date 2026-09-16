@@ -26,11 +26,12 @@ use super::BootstrapSupervisor;
 use super::BootstrapTargetError;
 use super::BootstrapTargets;
 use super::DialFailure;
-use super::ManagedTarget;
 use crate::error::Error;
 use crate::native::config::BootstrapConfig;
 use crate::prelude::StopSource;
 use crate::seed::SeedPeer;
+use crate::seed::SeedPeerError;
+use crate::seed::ValidatedSeedPeer;
 
 /// Fixed jitter seed so slow-cadence instants replay identically.
 const JITTER_SEED: u64 = 7;
@@ -166,7 +167,7 @@ impl ScriptedPort {
 #[async_trait::async_trait]
 impl BootstrapPort for ScriptedPort {
     /// Answer from the scripted reachability table (unknown targets are unreachable) and log it.
-    async fn reachable(&self, target: &ManagedTarget) -> bool {
+    async fn reachable(&self, target: &ValidatedSeedPeer) -> bool {
         let at_ms = self.now_ms();
         let mut state = self.state();
         let reachable = state.reachable.get(&target.did()).copied().unwrap_or(false);
@@ -179,7 +180,7 @@ impl BootstrapPort for ScriptedPort {
     }
 
     /// Follow the next queued script for the target (an exhausted queue fails) and log it.
-    async fn dial(&self, target: &ManagedTarget) -> std::result::Result<(), DialFailure> {
+    async fn dial(&self, target: &ValidatedSeedPeer) -> std::result::Result<(), DialFailure> {
         let at_ms = self.now_ms();
         let script = {
             let mut state = self.state();
@@ -264,7 +265,7 @@ impl Running {
         }
     }
 
-    /// Report that `target` left the overlay and make it unreachable.
+    /// Report that `target` left the local DHT and make it unreachable.
     fn lose(&self, target: Did) {
         self.port.set_reachable(target, false);
         self.evidence
@@ -368,7 +369,7 @@ async fn a_loss_reassesses_at_once_and_a_second_loss_restarts_the_burst() {
 
 /// A loss recorded while a target waits in the slow cadence restarts its burst at once.
 #[tokio::test(start_paused = true)]
-async fn a_loss_while_pending_restarts_the_burst() {
+async fn a_loss_wakes_a_target_sleeping_to_its_slow_deadline() {
     let target = Did::from(1);
     let port = ScriptedPort::new();
     let running = Running::spawn(port.clone(), vec![peer(1)]);
@@ -490,14 +491,17 @@ fn targets_validate_dids_urls_duplicates_and_self() {
             did: "not-a-did".to_string(),
             ..peer(1)
         }]),
-        Some(BootstrapTargetError::NotADid("not-a-did".to_string()))
+        Some(BootstrapTargetError::Peer(SeedPeerError::NotADid(
+            "not-a-did".to_string()
+        )))
     );
     assert!(matches!(
         rejection(vec![SeedPeer {
             url: "http://127.0.0.1:50001/".to_string(),
             ..peer(1)
         }]),
-        Some(BootstrapTargetError::UnusableEndpoint { did, .. }) if did == Did::from(1)
+        Some(BootstrapTargetError::Peer(SeedPeerError::UnusableEndpoint { did, .. }))
+            if did == Did::from(1)
     ));
     assert_eq!(
         rejection(vec![
@@ -531,20 +535,6 @@ fn targets_validate_dids_urls_duplicates_and_self() {
             .expect("an empty section validates")
             .is_empty()
     );
-}
-
-/// The `Debug` rendering of a target never contains its bearer token.
-#[test]
-fn managed_target_debug_redacts_the_token() {
-    let target = ManagedTarget::try_from(SeedPeer {
-        api_token: Some("0123456789abcdef".to_string()),
-        ..peer(1)
-    })
-    .expect("a token-bearing peer validates");
-    let rendered = format!("{target:?}");
-    assert!(!rendered.contains("0123456789abcdef"));
-    assert!(rendered.contains("[REDACTED]"));
-    assert_eq!(target.api_token(), Some("0123456789abcdef"));
 }
 
 /// A rendezvous resolves a waiter whether the value arrived before or after it, replaces an

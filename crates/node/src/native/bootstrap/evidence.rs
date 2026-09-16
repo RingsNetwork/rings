@@ -59,7 +59,7 @@ struct RendezvousState<K, V> {
     early: VecDeque<(K, V)>,
 }
 
-impl<K: Copy + Eq + Hash, V> Rendezvous<K, V> {
+impl<K: Eq + Hash, V> Rendezvous<K, V> {
     /// A rendezvous that buffers up to `early_capacity` values observed before their waiter.
     pub(crate) fn new(early_capacity: usize) -> Self {
         Self {

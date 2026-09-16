@@ -160,7 +160,6 @@ pub struct SwarmTransport {
     connection_lifecycle: ConnectionLifecycleBoundary,
     swarm_event_delivery: SwarmEventDeliveryLocks,
     callback: SwarmCallbackSlot,
-    announced_admissions: Mutex<BTreeMap<Did, u64>>,
     connection_creation: PeerOperationLocks,
     peer_lifecycles: SharedConnectionLifecycles,
     pending_finger_updates: Mutex<PendingFingerUpdates>,
@@ -287,7 +286,6 @@ impl SwarmTransport {
             connection_lifecycle: ConnectionLifecycleBoundary::new(),
             swarm_event_delivery: SwarmEventDeliveryLocks::new(),
             callback,
-            announced_admissions: Mutex::new(BTreeMap::new()),
             connection_creation: PeerOperationLocks::new(),
             peer_lifecycles: Arc::new(Mutex::new(self::pending::ConnectionLifecycleRegistry::new(
                 lifecycle_bounds,
@@ -452,7 +450,7 @@ impl SwarmTransport {
 
     /// The application callback slot this transport delivers swarm events through; the swarm
     /// shares it so `Swarm::set_callback` replaces the target of both.
-    pub(crate) fn callback_slot(&self) -> SwarmCallbackSlot {
+    pub(super) fn callback_slot(&self) -> SwarmCallbackSlot {
         self.callback.clone()
     }
 
@@ -461,11 +459,7 @@ impl SwarmTransport {
     /// ends was announced, so the application sees one retirement per admission it saw, in
     /// the order the swarm decided them. A failing application callback is logged, never
     /// propagated: the retirement has already happened.
-    pub(crate) async fn announce_retirement(
-        &self,
-        turn: SwarmEventDeliveryTurn,
-        retirement: Retirement,
-    ) {
+    async fn announce_retirement(&self, turn: SwarmEventDeliveryTurn, retirement: Retirement) {
         if !retirement.announced_admission {
             return;
         }
@@ -479,13 +473,6 @@ impl SwarmTransport {
         if let Err(error) = delivered {
             tracing::error!(%peer, %error, "peer retirement callback failed");
         }
-    }
-
-    /// Lock the per-peer record of the generation whose admission was announced.
-    fn announced_admissions(&self) -> Result<MutexGuard<'_, BTreeMap<Did, u64>>> {
-        self.announced_admissions
-            .lock()
-            .map_err(|_| Error::LockPoisoned)
     }
 
     pub(crate) fn prune_swarm_event_delivery_lock(
@@ -723,20 +710,9 @@ impl SwarmTransport {
         Ok(())
     }
 
-    /// Create new connection and its offer.
-    pub async fn prepare_connection_offer(
-        &self,
-        peer: Did,
-        callback: InnerSwarmCallback,
-    ) -> Result<ConnectNodeSend> {
-        self.prepare_connection_offer_with_attempt(peer, callback)
-            .await
-            .map(|(_, offer)| offer)
-    }
-
     /// Reserve a connection generation for `peer` and produce its offer; the attempt names the
     /// generation so the caller can accept or cancel exactly what it reserved.
-    pub(crate) async fn prepare_connection_offer_with_attempt(
+    pub(super) async fn prepare_connection_offer_with_attempt(
         &self,
         peer: Did,
         callback: InnerSwarmCallback,
@@ -927,9 +903,10 @@ impl SwarmTransport {
 
     /// Accept the answer of remote connection.
     ///
-    /// With `expected`, the answer is applied only to that generation: a pending record that is
-    /// another generation (the peer's own offer superseded ours) is refused as
-    /// `ConnectionAttemptSuperseded` before the transport is touched.
+    /// With `expected`, the answer is applied only to that generation: a slot owned by another
+    /// generation in any phase (the peer's own offer superseded ours, pending, admitting or
+    /// already admitted) is refused as `ConnectionAttemptSuperseded` before the transport is
+    /// touched; a slot with no record at all is `SwarmMissTransport`.
     pub(crate) async fn accept_remote_connection(
         &self,
         peer: Did,
@@ -944,15 +921,22 @@ impl SwarmTransport {
 
         let answer: String = serde_json::from_str(&answer_msg.sdp).map_err(Error::Deserialize)?;
 
-        let (attempt, conn) = self
-            .pending_connection_with_attempt(peer)?
-            .ok_or(Error::SwarmMissTransport(peer))?;
+        let superseded = |expected: PendingConnectionAttempt| Error::ConnectionAttemptSuperseded {
+            peer,
+            generation: expected.generation,
+        };
+        let (attempt, conn) = match self.pending_connection_with_attempt(peer)? {
+            Some(pending) => pending,
+            None => {
+                return Err(match (expected, self.slot_attempt(peer)?) {
+                    (Some(expected), Some(owner)) if owner != expected => superseded(expected),
+                    _ => Error::SwarmMissTransport(peer),
+                });
+            }
+        };
         if let Some(expected) = expected {
             if expected != attempt {
-                return Err(Error::ConnectionAttemptSuperseded {
-                    peer,
-                    generation: expected.generation,
-                });
+                return Err(superseded(expected));
             }
         }
         tracing::trace!(

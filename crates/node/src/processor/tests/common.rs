@@ -422,7 +422,7 @@ pub(super) async fn wait_processors_connected(
 }
 
 pub(super) fn processor_has_connected_peer(processor: &Processor, peer: Did) -> bool {
-    processor.swarm.is_peer_connected(peer)
+    processor.swarm.peer_dids().contains(&peer)
 }
 
 pub(super) async fn wait_for_mutual_dht_topology(

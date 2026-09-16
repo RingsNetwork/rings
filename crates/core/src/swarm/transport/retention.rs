@@ -45,10 +45,10 @@
 use std::cmp::Reverse;
 use std::collections::BTreeSet;
 
-use super::connection::UnreferencedRetirement;
 use super::pending::LifecycleBounds;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 use super::pending::ReservationVerdict;
+use super::pending::RetirementOutcome;
 use super::pending::DEFAULT_PENDING_CONNECTION_CAPACITY;
 use super::PendingConnectionAttempt;
 use super::SwarmTransport;
@@ -212,10 +212,8 @@ impl SwarmTransport {
         observe_plan(&plan);
         for attempt in plan {
             match self.retire_unless_referenced(attempt).await? {
-                UnreferencedRetirement::Referenced | UnreferencedRetirement::Superseded => {
-                    continue;
-                }
-                UnreferencedRetirement::Retired => {}
+                RetirementOutcome::Declined | RetirementOutcome::Superseded => continue,
+                RetirementOutcome::Retired(()) => {}
             }
             tracing::info!(
                 target: "rings_core::swarm::transport::retention",

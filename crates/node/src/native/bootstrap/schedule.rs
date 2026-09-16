@@ -16,7 +16,7 @@
 //!     │    │     f ↦ f + 1          │ settle(_) ∧ lost                             │ notice_loss
 //!     │    │     t₀ ↦ now+delay(f+1)│ f ↦ 0, t₀ ↦ now                              │ f ↦ 0, t₀ ↦ now
 //!     │    │     settle(Deferred)   │                                              │
-//!     │    │     t₀ ↦ now+BURST_DELAY                                              │
+//!     │    │     t₀ ↦ now+delay(f)                                                │
 //!     │    └────────────────────────┴──────────────────────────────────────────────┘
 //!     └── notice_loss: f ↦ 0, t₀ ↦ now   (the target was admitted since, and left again)
 //!
@@ -29,18 +29,18 @@
 //!
 //! - *No overlap*: `begin_if_due` is the only entry into `Busy` and refuses a target that is not
 //!   due, and a `Busy` target is never due, so at most one turn per target is in flight.
-//! - *Bounded burst*: after the k-th consecutive failure the next attempt waits `delay(k)`, so
-//!   the first `BURST_ATTEMPTS` attempts are at least `BURST_DELAY` apart (measured from the
-//!   settlement of the previous attempt) and every later attempt is at least `BASE_INTERVAL`
-//!   apart.
+//! - *Bounded burst*: a target with `f` consecutive failures waits `delay(f)` before its next
+//!   attempt, measured from the settlement of the previous one, so the first `BURST_ATTEMPTS`
+//!   attempts are at least `BURST_DELAY` apart and every later attempt at least `BASE_INTERVAL`
+//!   apart, whatever the outcomes in between.
 //! - *Deferral is not failure*: a turn that found a handshake to the target already in flight
-//!   waits `BURST_DELAY` and keeps its failure count.
+//!   keeps its failure count `f` and waits `delay(f)`, like the attempt it stands in for.
 //! - *Reset on success*: `Reachable` carries no failure count; a later loss restarts the burst.
 //! - *Losses are never lost*: a loss makes the target pending at once with the burst restarted,
 //!   whether it is noticed while `Reachable`, while `Pending` (the target was admitted by
 //!   stabilization meanwhile and left again), or while `Busy` — in which case the settlement of
-//!   that turn, whatever its outcome, is the restart. The loss and the settlement therefore
-//!   commute.
+//!   that turn, whatever its outcome, is the restart. Loss and settlement therefore commute up
+//!   to the due instant, which is the instant of whichever came second.
 //! - *Totality*: every transition on a non-matching phase or unknown DID is the identity and
 //!   reports `false`.
 
@@ -54,7 +54,7 @@ use rings_core::dht::Did;
 
 /// Attempts in the rapid burst that follows a loss of reachability.
 const BURST_ATTEMPTS: u8 = 5;
-/// Delay between consecutive attempts inside the rapid burst, and after a deferred turn.
+/// Delay between consecutive attempts inside the rapid burst.
 const BURST_DELAY: Duration = Duration::from_secs(2);
 /// Base cadence once the burst is exhausted, and the recheck period of a reachable target.
 const BASE_INTERVAL: Duration = Duration::from_secs(300);
@@ -200,7 +200,7 @@ impl BootstrapSchedule {
                 },
                 TurnOutcome::Deferred => TargetPhase::Pending {
                     failures,
-                    not_before_ms: now_ms.saturating_add(duration_ms(BURST_DELAY)),
+                    not_before_ms: now_ms.saturating_add(self.jitter.delay_ms(failures)),
                 },
                 TurnOutcome::DialFailed => {
                     let failures = failures.saturating_add(1);
@@ -316,6 +316,12 @@ mod tests {
             Did::from(3)
         ]);
         assert_eq!(schedule.next_deadline_ms(), Some(0));
+    }
+
+    /// The timelines in these tests and the shell's spell the burst delay as `2_000`.
+    #[test]
+    fn burst_delay_is_two_seconds() {
+        assert_eq!(duration_ms(BURST_DELAY), 2_000);
     }
 
     /// Bounded-burst law: attempts 1..BURST_ATTEMPTS wait BURST_DELAY, later ones one slow delay.

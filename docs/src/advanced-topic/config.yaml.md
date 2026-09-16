@@ -207,8 +207,8 @@ How a managed target is supervised:
   peer is admitted again.
 * A redial counts as successful only once the swarm admits the peer. An endpoint answering as a
   different DID is refused before any offer is created. A handshake to the target already
-  pending, whichever side started it, defers the redial for two seconds without counting as a
-  failure.
+  pending, whichever side started it, defers the redial without counting as a failure, for the
+  delay the failure count prescribes.
 * A target leaving the local DHT, whatever caused the loss, triggers an immediate reassessment,
   and a later loss restarts the burst.
 * At most one handshake per target is in flight, targets retry independently, and shutdown

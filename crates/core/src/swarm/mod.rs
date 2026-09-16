@@ -14,8 +14,10 @@ use std::sync::Arc;
 pub use builder::SwarmBuilder;
 
 use self::callback::InnerSwarmCallback;
+use crate::dht::Chord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
+use crate::dht::PeerRingAction;
 use crate::dht::Stabilizer;
 use crate::ecc::PublicKey;
 use crate::ecc::VerificationPublicKey;
@@ -26,6 +28,9 @@ use crate::inspect::SwarmInspect;
 use crate::measure::PeerMeasurement;
 use crate::measure::PeerMeasurementPage;
 use crate::message::DhtProtocolMode;
+use crate::message::FindSuccessorReportHandler;
+use crate::message::FindSuccessorSend;
+use crate::message::FindSuccessorThen;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
@@ -37,6 +42,16 @@ use crate::swarm::callback::SharedSwarmCallback;
 use crate::swarm::inbox::SwarmInboxDelivery;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
+
+/// How a successor lookup was decided: from the local topology, or routed under a
+/// transaction id whose report answers it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SuccessorLookup {
+    /// The successor of the key as the local topology knows it.
+    Local(Did),
+    /// The lookup was routed; its report returns under this transaction id.
+    Routed(uuid::Uuid),
+}
 
 /// An opaque handle to one connection generation this node reserved by offering; accepted or
 /// cancelled only through the swarm that issued it.
@@ -180,28 +195,49 @@ impl Swarm {
         Ok(self.transport.unadmitted_attempt(peer)?.is_some())
     }
 
-    /// Whether `peer` holds an admitted connection record, ready or recovering. Its transport
-    /// is the swarm's to heal or retire; a retirement is reported as
-    /// [`SwarmEvent::PeerRetired`](callback::SwarmEvent::PeerRetired).
+    /// Whether `peer` is admitted as the application sees it: its connection record is active
+    /// and the admission was announced as `ConnectionStateChange { Connected }`. Ready or
+    /// recovering, its transport is the swarm's to heal or retire. Law:
+    /// `is_peer_admitted(p) ⟹` the record's retirement is delivered as
+    /// [`SwarmEvent::PeerRetired`](callback::SwarmEvent::PeerRetired). A record admitted but
+    /// not yet announced is not counted, since its retirement would be silent.
     pub fn is_peer_admitted(&self, peer: Did) -> Result<bool> {
-        Ok(self.transport.active_attempt(peer)?.is_some())
+        Ok(self.transport.announced_attempt(peer)?.is_some())
     }
 
-    /// Cancel the unadmitted handshake `attempt`, if it still owns its peer's slot; an attempt
-    /// that was superseded or admitted meanwhile is left alone. Returns whether it was
-    /// cancelled.
+    /// Cancel the handshake `attempt` iff it is still pending, that is, no answer has been
+    /// applied to it; one that is admitting, admitted or superseded meanwhile is left alone.
+    /// Returns whether it was cancelled.
     pub async fn cancel_connection_attempt(&self, attempt: ConnectionAttempt) -> Result<bool> {
-        self.transport.cancel_pending_connection(attempt.0).await
+        self.transport.cancel_offered_connection(attempt.0).await
     }
 
-    /// Whether `peer` has an admitted direct transport that is ready to carry payloads.
+    /// Take the local step of a successor lookup for `key`, and route the lookup when the
+    /// local topology cannot decide it.
     ///
-    /// Readiness is the transport-neutral product of a connection's physical state and its
-    /// data channel, so the predicate holds for any transport kind that reports `Ready`, not
-    /// only WebRTC. Law: `is_peer_connected(p) ⟺ p ∈ peer_dids()`; this is the per-peer form
-    /// of the same admission-and-readiness filter.
-    pub fn is_peer_connected(&self, peer: Did) -> bool {
-        self.transport.get_connection(peer).is_some()
+    /// Law: in a ring every present node is the successor of its own identifier, so a lookup
+    /// for `key` answers `key` exactly when `key` is in the overlay, as far as the answering
+    /// node's successor list is current. The local step decides `Local(head)` when `key` lies
+    /// in the local successor interval `(n, head]`, and `Local(n)` when this node has no
+    /// successor; otherwise the request `FindSuccessorSend { did: key, strict: false }` is
+    /// routed toward `key` and the answer returns as a `FindSuccessorReport` under the returned
+    /// transaction id, recognisable by
+    /// [`FindSuccessorReport::is_application_lookup`](crate::message::FindSuccessorReport::is_application_lookup).
+    pub async fn lookup_successor(&self, key: Did) -> Result<SuccessorLookup> {
+        match self.dht.find_successor(key)? {
+            PeerRingAction::Some(successor) => Ok(SuccessorLookup::Local(successor)),
+            PeerRingAction::RemoteAction(..) => {
+                let request = Message::FindSuccessorSend(FindSuccessorSend {
+                    did: key,
+                    strict: false,
+                    then: FindSuccessorThen::Report(FindSuccessorReportHandler::None),
+                });
+                self.send_message(request, key)
+                    .await
+                    .map(SuccessorLookup::Routed)
+            }
+            action => Err(Error::PeerRingUnexpectedAction(Box::new(action))),
+        }
     }
 
     /// Return local measurement counters for `peer`, if observed.

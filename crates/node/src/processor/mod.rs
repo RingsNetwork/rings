@@ -552,11 +552,12 @@ impl Processor {
 
     /// Handshake with the node behind `endpoint` over its public HTTP API: learn its DID, and
     /// when `peer` is pinned refuse before creating any offer if the endpoint answers as another
-    /// node; then create, exchange and accept the offer. Returns the answering DID once the
+    /// node; then create, exchange and accept the offer. Returns the [`Handshake`] once the
     /// answer is accepted; admission of the resulting transport completes asynchronously and is
-    /// reported through the swarm callback. A failure after the offer was created cancels this
-    /// generation this node reserved, so a handshake the peer started meanwhile is neither
-    /// answered nor cancelled by this one.
+    /// reported through the swarm callback. The exchange is pinned to the generation the offer
+    /// reserved, so a handshake the peer started meanwhile is neither answered nor cancelled by
+    /// this one; a failure after the offer was created cancels that generation iff it is still
+    /// pending.
     pub async fn connect_peer_via_http(
         &self,
         endpoint: &RemoteRpcEndpoint,
@@ -609,9 +610,9 @@ impl Processor {
         }
     }
 
-    /// Cancel the generation `attempt` reserved, if it is still pending; one that was admitted
-    /// or superseded meanwhile is left alone, and a failure to cancel is logged since the core
-    /// expires the attempt on its own.
+    /// Cancel the generation `attempt` reserved iff it is still pending, that is, no answer was
+    /// applied; one admitting, admitted or superseded meanwhile is left alone, and a failure to
+    /// cancel is logged since the core expires an unadmitted attempt on its own.
     pub(crate) async fn abandon_handshake(&self, attempt: ConnectionAttempt) {
         if let Err(error) = self.swarm.cancel_connection_attempt(attempt).await {
             tracing::warn!(?attempt, %error, "failed to cancel the abandoned handshake");

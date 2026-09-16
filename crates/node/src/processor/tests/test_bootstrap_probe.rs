@@ -9,19 +9,18 @@
 use std::sync::Arc;
 
 use rings_core::ecc::SecretKey;
+use rings_core::swarm::SuccessorLookup;
+use tokio::sync::oneshot::error::TryRecvError;
 
 use super::common::*;
 use super::*;
 use crate::extension::Backend;
 use crate::native::bootstrap::BootstrapPort;
-use crate::native::bootstrap::BootstrapTargetError;
-use crate::native::bootstrap::BootstrapTargets;
 use crate::native::bootstrap::DialFailure;
-use crate::native::bootstrap::ManagedTarget;
 use crate::native::bootstrap::ProcessorPort;
 use crate::native::bootstrap::ReachabilityEvidence;
-use crate::native::config::BootstrapConfig;
 use crate::seed::SeedPeer;
+use crate::seed::ValidatedSeedPeer;
 
 /// Draws of random identity keys before giving up on a chain layout.
 const CHAIN_KEY_DRAWS: usize = 512;
@@ -119,8 +118,8 @@ fn never_dialed(did: Did) -> SeedPeer {
 }
 
 /// A managed target for `did` at the never-dialed endpoint.
-fn target(did: Did) -> ManagedTarget {
-    ManagedTarget::try_from(never_dialed(did)).expect("a public endpoint validates")
+fn target(did: Did) -> ValidatedSeedPeer {
+    ValidatedSeedPeer::try_from(never_dialed(did)).expect("a public endpoint validates")
 }
 
 /// Present targets are reachable through one hop (verified to be routed, not direct), an
@@ -135,12 +134,24 @@ async fn routed_probe_reports_presence_through_one_hop() {
     let c = ProbeNode::new(c_key).await;
 
     connect_processors(&b.processor, &a.processor, &b.fixture, &a.fixture).await;
+    // The admission of B is what makes B reachable to C without a lookup, so the test waits
+    // for the event, not merely for transport readiness.
+    let b_admitted = c
+        .evidence
+        .admissions()
+        .wait_for(b.did())
+        .expect("record readable");
     connect_processors(&c.processor, &b.processor, &c.fixture, &b.fixture).await;
+    assert_eq!(
+        b_admitted.await,
+        Ok(()),
+        "the admission of B is announced to C"
+    );
 
     let port = ProcessorPort::new(c.processor.clone(), c.evidence.clone());
     assert!(
         port.reachable(&target(b.did())).await,
-        "a directly connected target is reachable without a lookup"
+        "an announced admission is reachable without a lookup"
     );
     assert!(
         !c.processor
@@ -162,15 +173,16 @@ async fn routed_probe_reports_presence_through_one_hop() {
     );
     let own_interval = c.did() + Did::from(1);
     assert_ne!(own_interval, b.did());
-    let before = c.evidence.reports().len().expect("record readable");
+    assert!(
+        matches!(
+            c.processor.swarm.lookup_successor(own_interval).await,
+            Ok(SuccessorLookup::Local(head)) if head == b.did()
+        ),
+        "a key in C's successor interval is decided locally, by C's successor head"
+    );
     assert!(
         !port.reachable(&target(own_interval)).await,
-        "a key in C's successor interval is refuted locally"
-    );
-    assert_eq!(
-        c.evidence.reports().len().expect("record readable"),
-        before,
-        "the local refutation registers no probe"
+        "a locally decided lookup is a refutation"
     );
 }
 
@@ -209,7 +221,7 @@ async fn backend_translates_admission_and_retirement_only() {
         .expect("record readable")
         .is_empty());
     assert!(
-        admitted.try_recv().is_err(),
+        matches!(admitted.try_recv(), Err(TryRecvError::Empty)),
         "no physical state other than Connected admits"
     );
 
@@ -293,20 +305,4 @@ async fn a_pending_handshake_defers_the_dial_without_a_request() {
         .cancel_connection_attempt(attempt)
         .await
         .expect("records readable"));
-}
-
-/// The bootstrap validation of a real node's own DID.
-#[tokio::test]
-async fn targets_reject_the_local_node() {
-    let processor = prepare_processor().await;
-    let rejected = BootstrapTargets::from_config(
-        BootstrapConfig {
-            peers: vec![never_dialed(processor.did())],
-        },
-        processor.did(),
-    );
-    assert!(matches!(
-        rejected,
-        Err(Error::BootstrapTarget(BootstrapTargetError::LocalNode(did))) if did == processor.did()
-    ));
 }

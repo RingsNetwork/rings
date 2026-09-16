@@ -1,25 +1,25 @@
 //! The production port over a live [`Processor`]: overlay reachability probe and HTTP redial.
 //!
-//! Reachability is a routed Chord lookup, not a direct-edge check. In a Chord ring every present
-//! node is the successor of its own identifier, so a successor lookup for the target `t` answers
-//! `t` exactly when `t` is in the overlay. With the local step taken at one snapshot of the
-//! local topology and the answer at one snapshot of the reporter's:
+//! Reachability is a routed Chord lookup, not a direct-edge check: `Swarm::lookup_successor`
+//! answers the target `t` exactly when `t` is in the overlay, as far as the answering node's
+//! successor list is current. With the local step taken at one snapshot of the local topology
+//! and the answer at one snapshot of the reporter's:
 //!
 //! ```text
 //!   reachable(t)  ⟺  is_peer_admitted(t)
-//!                  ∨  find_successor(t) ∈ RemoteAction ∧ report(tx).successor = t
+//!                  ∨  lookup_successor(t) = Routed(tx) ∧ report(tx).successor = t
 //! ```
 //!
-//! Two cases are decided without any network round trip. A target with an admitted
-//! connection record is reachable: ready or recovering, its transport is the swarm's to heal or
-//! retire, and a dial would be refused as already connected. A target whose identifier falls
-//! in the local successor interval `(n, head]` gets `Some(head)` from the local step: `head`
-//! is admitted, so `head ≠ t` and `t` is absent, and the routed request would only travel the
-//! ring to say the same.
-//! Otherwise the probe sends `FindSuccessorSend { did: t, strict: false }` toward `t` and
-//! accepts `t` as reachable iff the report that returns under the same transaction id names
-//! `t`. A partition that lost `t` answers with the node now succeeding `t`'s position; a node
-//! without successors decides locally and sends nothing.
+//! Two cases are decided without any network round trip. A target admitted as the application
+//! sees it is reachable: ready or recovering, its transport is the swarm's to heal or retire,
+//! its retirement will be reported, and a dial would be refused as already connected. A lookup
+//! the local topology decides, `Local(head)`, never confirms: `head` is an admitted peer, so
+//! either `head ≠ t` and `t` is absent, or `head = t` whose admission is not yet announced;
+//! both read as unreachable, and in the second case the dial that follows is refused as already
+//! connected and deferred, not counted, until the announcement lands. Otherwise the lookup is
+//! routed toward `t` and `t` is reachable iff the report that returns under the same
+//! transaction id names `t`. A partition that lost `t` answers with the node now succeeding
+//! `t`'s position.
 //!
 //! The answer is only as current as the reporter's successor list, in both directions: a
 //! predecessor that has not yet adopted a freshly joined `t` refutes it (one redial that, with
@@ -30,32 +30,29 @@
 //!
 //! A dial is refused without any request when the core already holds an unadmitted handshake
 //! to the target, whichever side started it, so an in-flight handshake is never charged as a
-//! failure. Otherwise the handshake pins the answering DID before any offer is created, and
-//! the port then waits for the swarm to admit the peer, bounded by [`DIAL_ADMISSION_TIMEOUT`];
-//! on timeout the generation this dial reserved is cancelled, and no other, so the next
-//! attempt can handshake afresh.
+//! failure; the same holds when the exchange itself is refused because the target's slot is
+//! owned by another generation. Otherwise the handshake pins the answering DID before any
+//! offer is created, and the port then waits for the swarm to admit the peer, bounded by
+//! [`DIAL_ADMISSION_TIMEOUT`]; on timeout the generation this dial reserved is cancelled iff it
+//! is still pending, so a handshake that is admitting at that instant completes on its own and
+//! the next attempt can otherwise handshake afresh.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rings_core::dht::Chord;
 use rings_core::dht::Did;
-use rings_core::dht::PeerRingAction;
-use rings_core::message::FindSuccessorReportHandler;
-use rings_core::message::FindSuccessorSend;
-use rings_core::message::FindSuccessorThen;
-use rings_core::message::Message;
+use rings_core::swarm::SuccessorLookup;
 use rings_core::swarm::Swarm;
 
 use super::evidence::LookupReportLedger;
 use super::evidence::ReachabilityEvidence;
 use super::BootstrapPort;
 use super::DialFailure;
-use super::ManagedTarget;
 use crate::error::Error;
 use crate::processor::HandshakePeer;
 use crate::processor::Processor;
+use crate::seed::ValidatedSeedPeer;
 
 /// Longest a routed lookup probe waits for its report before the target counts as unreachable.
 const LOOKUP_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -82,8 +79,8 @@ impl ProcessorPort {
 
 #[async_trait]
 impl BootstrapPort for ProcessorPort {
-    /// An admitted connection record short-circuits; otherwise the lookup decides.
-    async fn reachable(&self, target: &ManagedTarget) -> bool {
+    /// An announced admission short-circuits; otherwise the lookup decides.
+    async fn reachable(&self, target: &ValidatedSeedPeer) -> bool {
         let swarm = &self.processor.swarm;
         match swarm.is_peer_admitted(target.did()) {
             Ok(true) => return true,
@@ -98,7 +95,7 @@ impl BootstrapPort for ProcessorPort {
 
     /// Refuse while a handshake is pending; else handshake pinned to the target's DID, then
     /// wait for its admission.
-    async fn dial(&self, target: &ManagedTarget) -> std::result::Result<(), DialFailure> {
+    async fn dial(&self, target: &ValidatedSeedPeer) -> std::result::Result<(), DialFailure> {
         let peer = target.did();
         let swarm = &self.processor.swarm;
         let core_failure = |error| DialFailure::Failed(Error::ConnectError(error));
@@ -135,8 +132,9 @@ impl BootstrapPort for ProcessorPort {
         if admitted {
             return Ok(());
         }
-        // Only the generation this dial reserved is cancelled; one admitted after the timeout
-        // is left alone and found admitted by the next probe.
+        // Only the generation this dial reserved is cancelled, and only while it is still
+        // pending; one admitting or admitted at this instant completes on its own and is found
+        // admitted by the next probe.
         self.processor.abandon_handshake(handshake.attempt).await;
         Err(DialFailure::Failed(Error::AdmissionTimedOut { peer }))
     }
@@ -158,31 +156,15 @@ fn classify_handshake_error(error: Error) -> DialFailure {
     }
 }
 
-/// Whether a successor lookup for `target` answers `target` itself, deciding locally when the
-/// target's position lies in the local successor interval and otherwise by a routed request
-/// that must report within [`LOOKUP_PROBE_TIMEOUT`].
+/// Whether a successor lookup for `target` answers `target` itself: a lookup the local topology
+/// decides is refuted (see the module doc), a routed one must report within
+/// [`LOOKUP_PROBE_TIMEOUT`].
 async fn lookup_reaches(swarm: &Swarm, reports: &LookupReportLedger, target: Did) -> bool {
-    match swarm.dht().find_successor(target) {
-        Ok(PeerRingAction::RemoteAction(..)) => {}
-        Ok(PeerRingAction::Some(_)) => return false,
-        Ok(action) => {
-            tracing::debug!(%target, ?action, "bootstrap lookup took no routable step");
-            return false;
-        }
+    let tx_id = match swarm.lookup_successor(target).await {
+        Ok(SuccessorLookup::Routed(tx_id)) => tx_id,
+        Ok(SuccessorLookup::Local(_)) => return false,
         Err(error) => {
-            tracing::debug!(%target, %error, "bootstrap lookup could not take its local step");
-            return false;
-        }
-    }
-    let request = Message::FindSuccessorSend(FindSuccessorSend {
-        did: target,
-        strict: false,
-        then: FindSuccessorThen::Report(FindSuccessorReportHandler::None),
-    });
-    let tx_id = match swarm.send_message(request, target).await {
-        Ok(tx_id) => tx_id,
-        Err(error) => {
-            tracing::debug!(%target, %error, "bootstrap lookup probe could not be routed");
+            tracing::debug!(%target, %error, "bootstrap lookup could not be issued");
             return false;
         }
     };

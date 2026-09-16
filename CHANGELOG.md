@@ -17,8 +17,9 @@
     seconds of jitter.
   - A redial succeeds only once the swarm admits the peer. An endpoint answering as a different
     DID is refused before any offer is created. A handshake already pending, whichever side
-    started it, defers the attempt for two seconds without counting. A failed exchange or an
-    admission timeout cancels the generation the redial reserved, and no other.
+    started it, defers the attempt without counting, for the delay its failure count
+    prescribes. A failed exchange or an admission timeout cancels the generation the redial
+    reserved, and only while it is still pending.
   - A target leaving the local DHT, whatever caused it, triggers an immediate reassessment and
     restarts the burst. At most one handshake per target is in flight, targets retry
     independently, and shutdown cancels any handshake in progress.
@@ -32,11 +33,16 @@
   A topology prune that keeps the record emits nothing.
 - `Swarm::offer_connection`, `Swarm::accept_answer_for` and `Swarm::cancel_connection_attempt`
   run a handshake pinned to the connection generation the offer reserved, so an answer is never
-  applied to, and a cancellation never hits, a handshake the peer started meanwhile.
-  `Swarm::is_peer_connected`, `Swarm::is_peer_admitted` and `Swarm::has_pending_connection`
-  expose readiness, admission and pending-handshake facts.
-- `RemoteRpcEndpoint` is the validated form of a remote node's public RPC URL; every remote
-  client is built from it with a request timeout.
+  applied to, and a cancellation never hits, a handshake the peer started meanwhile; the
+  cancellation releases the generation only while it is still pending. `Swarm::is_peer_admitted`
+  (an admission announced to the application, whose retirement is therefore promised) and
+  `Swarm::has_pending_connection` expose admission and pending-handshake facts;
+  `Swarm::lookup_successor` takes the local step of a successor lookup and routes it when the
+  local topology cannot decide; `SwarmEvent::admitted_peer` names the event whose delivery is
+  the admission.
+- `RemoteRpcEndpoint` is the validated form of a remote node's public RPC URL; native clients
+  are built from it with a request and resolution timeout. `SeedPeerError` (error 820) is the
+  typed refusal of a seed entry, shared by `connect seed` and the managed targets.
 - `Processor::connect_peer_via_http` performs the HTTP handshake with the answering DID
   optionally pinned and returns the accepted `Handshake`; the JSON-RPC handlers delegate to it.
 - The node `Backend` accepts a `BackendObserver` that receives application lookup reports from

@@ -211,6 +211,9 @@ pub enum Error {
     #[cfg(rings_native)]
     #[error(transparent)]
     BootstrapTarget(#[from] crate::native::bootstrap::BootstrapTargetError) = 819,
+    /// A seed entry failed validation.
+    #[error(transparent)]
+    SeedPeer(#[from] crate::seed::SeedPeerError) = 820,
     /// Creating a file on disk failed.
     #[error("Create File Error: {0}")]
     CreateFileError(String) = 900,

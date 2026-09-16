@@ -50,8 +50,9 @@ impl fmt::Display for RemoteRpcEndpoint {
     }
 }
 
-/// Bound on every HTTP request to a remote endpoint, so an endpoint that accepts a connection
-/// and never answers cannot hold a caller indefinitely.
+/// Bound on every HTTP request to a remote endpoint, and on the resolution of its host, so an
+/// endpoint that accepts a connection and never answers, or a resolver that never does, cannot
+/// hold a caller indefinitely.
 #[cfg(rings_native)]
 const REMOTE_RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -68,7 +69,12 @@ pub(crate) async fn remote_rpc_client(
         .redirect(reqwest::redirect::Policy::none())
         .timeout(REMOTE_RPC_TIMEOUT);
     if let Some(target) = resolution_target(&endpoint.0)? {
-        let addresses = crate::onion::target::resolve_public_target(&target.lookup).await?;
+        let addresses = tokio::time::timeout(
+            REMOTE_RPC_TIMEOUT,
+            crate::onion::target::resolve_public_target(&target.lookup),
+        )
+        .await
+        .map_err(|_| Error::RemoteRpcError("endpoint resolution timed out".to_string()))??;
         builder = builder.resolve_to_addrs(&target.pin_host, &addresses);
     }
     let http_client = builder
@@ -88,14 +94,8 @@ fn resolution_target(parsed: &reqwest::Url) -> Result<Option<ResolutionTarget>> 
     let port = parsed.port_or_known_default().ok_or_else(|| {
         Error::UnsafeRemoteRpcTarget("endpoint URL has no usable port".to_string())
     })?;
-    match parsed
-        .host()
-        .ok_or_else(|| Error::UnsafeRemoteRpcTarget("endpoint URL has no host".to_string()))?
-    {
-        url::Host::Domain(host) => {
-            let pin_host = parsed.host_str().ok_or_else(|| {
-                Error::UnsafeRemoteRpcTarget("endpoint URL has no host".to_string())
-            })?;
+    match (parsed.host(), parsed.host_str()) {
+        (Some(url::Host::Domain(host)), Some(pin_host)) => {
             crate::onion::OnionProxyTarget::new(host, port).map(|lookup| {
                 Some(ResolutionTarget {
                     lookup,
@@ -103,7 +103,10 @@ fn resolution_target(parsed: &reqwest::Url) -> Result<Option<ResolutionTarget>> 
                 })
             })
         }
-        url::Host::Ipv4(_) | url::Host::Ipv6(_) => Ok(None),
+        (Some(url::Host::Ipv4(_) | url::Host::Ipv6(_)), _) => Ok(None),
+        (None, _) | (Some(url::Host::Domain(_)), None) => Err(Error::UnsafeRemoteRpcTarget(
+            "endpoint URL has no host".to_string(),
+        )),
     }
 }
 

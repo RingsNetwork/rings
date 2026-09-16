@@ -6,7 +6,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 
-use super::connection::UnreferencedRetirement;
+use super::pending::RetirementOutcome;
 use super::*;
 use crate::dht::Chord;
 use crate::swarm::callback::SwarmEvent;
@@ -149,16 +149,106 @@ async fn eviction_of_an_unreferenced_peer_is_reported_retired() -> Result<()> {
     assert!(transport.activate_connection_for_test(evicted)?);
     assert!(transport.mark_admission_announced(evicted)?);
 
-    assert!(matches!(
+    assert_eq!(
         transport.retire_unless_referenced(kept).await?,
-        UnreferencedRetirement::Referenced
-    ));
+        RetirementOutcome::Declined
+    );
     assert!(log.retired().is_empty());
-    assert!(matches!(
+    assert_eq!(
         transport.retire_unless_referenced(evicted).await?,
-        UnreferencedRetirement::Retired
-    ));
+        RetirementOutcome::Retired(())
+    );
     assert_eq!(log.retired(), vec![unreferenced]);
     assert!(!transport.is_admitted_connection_attempt(evicted));
+    Ok(())
+}
+
+/// What the application observed for one peer, in start order.
+#[cfg(feature = "dummy")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Observed {
+    /// `ConnectionStateChange` with this state.
+    State(WebrtcConnectionState),
+    /// `PeerRetired`.
+    Retired,
+}
+
+/// Records every swarm event for one peer, in start order.
+#[cfg(feature = "dummy")]
+struct EventSequence {
+    peer: Did,
+    observed: Mutex<Vec<Observed>>,
+}
+
+#[cfg(feature = "dummy")]
+#[async_trait]
+impl SwarmCallback for EventSequence {
+    /// Record the event if it concerns the observed peer.
+    async fn on_event(
+        &self,
+        event: &SwarmEvent,
+    ) -> std::result::Result<(), crate::error::CallbackError> {
+        let observed = match *event {
+            SwarmEvent::ConnectionStateChange { peer, state } if peer == self.peer => {
+                Observed::State(state)
+            }
+            SwarmEvent::PeerRetired { peer } if peer == self.peer => Observed::Retired,
+            _ => return Ok(()),
+        };
+        self.observed
+            .lock()
+            .expect("event sequence is never poisoned")
+            .push(observed);
+        Ok(())
+    }
+}
+
+/// Through the production admission and terminal paths, the application observes
+/// `Connected`, then `PeerRetired`, then the terminal state: the retirement is decided and
+/// announced before the physical terminal event is reported. The dummy transport reports
+/// `Connecting` while its data channel opens, before the admission.
+#[cfg(feature = "dummy")]
+#[tokio::test]
+async fn retirement_is_reported_between_admission_and_terminal_state() -> Result<()> {
+    let transport = Arc::new(transport_with_measure(Arc::new(
+        RecordingMeasure::default(),
+    ))?);
+    let peer = SecretKey::random().address().into();
+    let sequence = Arc::new(EventSequence {
+        peer,
+        observed: Mutex::new(Vec::new()),
+    });
+    transport.callback_slot().replace(sequence.clone())?;
+    let callback = InnerSwarmCallback::new(Arc::clone(&transport), sequence.clone());
+    let (attempt, _offer) = transport
+        .prepare_connection_offer_with_attempt(peer, callback)
+        .await?;
+    open_dummy_data_channel_before_ice_connected(&transport, peer).await?;
+    let callback = InnerSwarmCallback::new(Arc::clone(&transport), sequence.clone())
+        .with_pending_connection_attempt(attempt);
+    callback
+        .on_data_channel_open(&peer.to_string())
+        .await
+        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+    assert!(transport.is_admitted_connection_attempt(attempt));
+
+    callback
+        .on_peer_connection_state_change(&peer.to_string(), WebrtcConnectionState::Failed)
+        .await
+        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+    assert!(!transport.is_admitted_connection_attempt(attempt));
+    assert_eq!(
+        sequence
+            .observed
+            .lock()
+            .expect("event sequence is never poisoned")
+            .clone(),
+        vec![
+            Observed::State(WebrtcConnectionState::Connecting),
+            Observed::State(WebrtcConnectionState::Connected),
+            Observed::Retired,
+            Observed::State(WebrtcConnectionState::Failed),
+        ]
+    );
     Ok(())
 }

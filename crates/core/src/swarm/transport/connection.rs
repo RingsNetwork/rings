@@ -12,6 +12,7 @@ use rings_transport::core::transport::WebrtcConnectionState;
 
 use super::pending::ActiveConnectionSet;
 use super::pending::ConnectionLifecycleBoundary;
+use super::pending::RetirementOutcome;
 use super::pending::SharedConnectionLifecycles;
 use super::PendingConnectionAttempt;
 use super::SwarmConnection;
@@ -51,30 +52,6 @@ enum DhtPeerRemoval {
     Ordinary,
     /// Remove the peer as unreachable and allow the DHT to promote live replacements.
     Unavailable,
-}
-
-/// Outcome of retiring an admitted generation only if the topology no longer
-/// references it, decided under the lifecycle boundary.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-/// Outcome of a retirement decided under the lifecycle boundary and announced in the peer's
-/// ordered delivery.
-pub(super) enum RetirementOutcome<T> {
-    /// `attempt` no longer owned the active slot; nothing changed.
-    Superseded,
-    /// The action declined; no local state changed.
-    Declined,
-    /// The record was retired and the retirement announced iff its admission had been; carries
-    /// the action's value.
-    Retired(T),
-}
-
-pub(super) enum UnreferencedRetirement {
-    /// The record was retired and the peer removed from the DHT.
-    Retired,
-    /// A topology slot referenced the peer at retirement time; nothing changed.
-    Referenced,
-    /// The generation no longer owned the active slot; nothing changed.
-    Superseded,
 }
 
 /// Proof that one physical connection belongs to the current admitted
@@ -584,14 +561,14 @@ impl SwarmTransport {
         let delivery = self.swarm_event_delivery_lock(attempt.peer);
         let outcome = async {
             let turn = delivery.acquire().await;
-            match self.retire_active_connection_if(attempt, action)? {
-                None => Ok(RetirementOutcome::Superseded),
-                Some(None) => Ok(RetirementOutcome::Declined),
-                Some(Some((value, retirement))) => {
+            Ok(match self.retire_active_connection_if(attempt, action)? {
+                RetirementOutcome::Superseded => RetirementOutcome::Superseded,
+                RetirementOutcome::Declined => RetirementOutcome::Declined,
+                RetirementOutcome::Retired((value, retirement)) => {
                     self.announce_retirement(turn, retirement).await;
-                    Ok(RetirementOutcome::Retired(value))
+                    RetirementOutcome::Retired(value)
                 }
-            }
+            })
         }
         .await;
         self.prune_swarm_event_delivery_lock(attempt.peer, &delivery);
@@ -646,7 +623,7 @@ impl SwarmTransport {
     pub(super) async fn retire_unless_referenced(
         &self,
         attempt: PendingConnectionAttempt,
-    ) -> Result<UnreferencedRetirement> {
+    ) -> Result<RetirementOutcome<()>> {
         let connection = self.get_raw_connection(attempt.peer);
         let outcome = self
             .retire_announced_if(attempt, |_| {
@@ -660,12 +637,7 @@ impl SwarmTransport {
                 Ok(Some(()))
             })
             .await?;
-        match outcome {
-            RetirementOutcome::Superseded => return Ok(UnreferencedRetirement::Superseded),
-            RetirementOutcome::Declined => return Ok(UnreferencedRetirement::Referenced),
-            RetirementOutcome::Retired(()) => {}
-        }
-        if let Some(connection) = connection {
+        if let (RetirementOutcome::Retired(()), Some(connection)) = (&outcome, connection) {
             if let Err(error) = self.close_connection_for_disconnect(&connection).await {
                 tracing::warn!(
                     peer = %attempt.peer,
@@ -675,7 +647,7 @@ impl SwarmTransport {
                 );
             }
         }
-        Ok(UnreferencedRetirement::Retired)
+        Ok(outcome)
     }
 
     async fn close_connection_for_disconnect(&self, connection: &SwarmConnection) -> Result<()> {

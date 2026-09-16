@@ -527,7 +527,9 @@ async fn test_pending_offer_is_not_routable_or_visible_to_dht() -> Result<()> {
     let peer = SecretKey::random().address().into();
     let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback));
 
-    let _offer = transport.prepare_connection_offer(peer, callback).await?;
+    let _offer = transport
+        .prepare_connection_offer_with_attempt(peer, callback)
+        .await?;
 
     assert!(transport.get_connection(peer).is_none());
     assert_eq!(transport.pending_connection_count()?, 1);

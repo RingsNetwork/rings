@@ -19,6 +19,8 @@ pub(super) use registry::LifecycleBounds;
 use registry::PeerConnectionLifecycle;
 #[cfg(all(test, not(target_family = "wasm")))]
 pub(super) use registry::ReservationVerdict;
+pub(super) use registry::Retirement;
+pub(super) use registry::RetirementOutcome;
 
 use super::SwarmConnection;
 use super::SwarmTransport;
@@ -110,19 +112,6 @@ impl ConnectionLifecycleBoundary {
     }
 }
 
-/// Witness that an admitted connection record was retired under the lifecycle boundary.
-///
-/// It must be announced through `SwarmTransport::announce_retirement`, which delivers
-/// [`SwarmEvent::PeerRetired`](crate::swarm::callback::SwarmEvent::PeerRetired) exactly when
-/// the admission it ends was itself announced. Law: for every generation,
-/// `Connected` delivered ⟺ `PeerRetired` delivered.
-#[must_use = "a retirement must be announced through announce_retirement"]
-#[derive(Debug)]
-pub(crate) struct Retirement {
-    pub(super) peer: Did,
-    pub(super) announced_admission: bool,
-}
-
 /// Identifies one pending handshake for a peer.
 ///
 /// A peer can have a replacement handshake after a timeout. Callbacks carry
@@ -172,14 +161,23 @@ fn event_disposition(
     source: PendingConnectionAttempt,
 ) -> ConnectionEventDisposition {
     match state {
-        Some(PeerConnectionLifecycle::Active(active)) if active != source => {
-            ConnectionEventDisposition::Suppress { active }
-        }
+        Some(PeerConnectionLifecycle::Active {
+            attempt: active, ..
+        }) if active != source => ConnectionEventDisposition::Suppress { active },
         Some(PeerConnectionLifecycle::Pending { .. })
         | Some(PeerConnectionLifecycle::Admitting { .. })
-        | Some(PeerConnectionLifecycle::Active(_))
+        | Some(PeerConnectionLifecycle::Active { .. })
         | None => ConnectionEventDisposition::Deliver,
     }
+}
+
+/// Which unadmitted phases a cancellation may release.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CancellationScope {
+    /// `Pending` only: no answer was applied, so nothing but the reservation is lost.
+    Offered,
+    /// `Pending` or `Admitting`.
+    Unadmitted,
 }
 
 struct RetiredPendingConnection {
@@ -289,7 +287,7 @@ impl SwarmTransport {
                 RawConnectionOwner::Pending(attempt)
             }
             Some(
-                PeerConnectionLifecycle::Admitting { .. } | PeerConnectionLifecycle::Active(_),
+                PeerConnectionLifecycle::Admitting { .. } | PeerConnectionLifecycle::Active { .. },
             ) => RawConnectionOwner::Owned,
             None => RawConnectionOwner::Orphan,
         })
@@ -416,9 +414,20 @@ impl SwarmTransport {
     /// Post: `false` means `peer` is unreachable from this node right now and nothing is under
     /// way to change that; a message for it cannot be handed to a connection.
     pub(crate) fn has_connection_attempt(&self, peer: Did) -> Result<bool> {
-        let lifecycles = self.peer_lifecycles()?;
-        Ok(lifecycles.active_attempt(peer).is_some()
-            || lifecycles.unadmitted_attempt(peer).is_some())
+        Ok(self.slot_attempt(peer)?.is_some())
+    }
+
+    /// The generation owning `peer`'s slot in any phase, if one exists.
+    pub(super) fn slot_attempt(&self, peer: Did) -> Result<Option<PendingConnectionAttempt>> {
+        Ok(self
+            .peer_lifecycles()?
+            .state(peer)
+            .map(PeerConnectionLifecycle::attempt))
+    }
+
+    /// The active generation of `peer` whose admission was announced to the application.
+    pub(crate) fn announced_attempt(&self, peer: Did) -> Result<Option<PendingConnectionAttempt>> {
+        Ok(self.peer_lifecycles()?.announced_attempt(peer))
     }
 
     #[cfg(all(test, feature = "dummy"))]
@@ -651,65 +660,45 @@ impl SwarmTransport {
         attempt: PendingConnectionAttempt,
     ) -> Result<bool> {
         let _lifecycle = self.connection_lifecycle()?;
-        if self.peer_lifecycles()?.active_attempt(attempt.peer) != Some(attempt) {
-            return Ok(false);
-        }
-        self.announced_admissions()?
-            .insert(attempt.peer, attempt.generation);
-        Ok(true)
+        Ok(self.peer_lifecycles()?.mark_announced(attempt))
     }
 
-    /// Retire `attempt` only if `action` decides to, under the lifecycle boundary.
-    ///
-    /// Post: `Ok(None)` iff `attempt` was not the active generation;
-    /// `Ok(Some(None))` iff `action` declined and no local state changed;
-    /// `Ok(Some(Some((value, retirement))))` iff `action` committed and the record was
-    /// retired, with the witness the caller must announce.
+    /// Retire `attempt` only if `action` decides to, under the lifecycle boundary; see
+    /// `ConnectionLifecycleRegistry::retire_active_if` for the post-conditions. The witness in
+    /// a `Retired` outcome is the caller's to announce.
     pub(super) fn retire_active_connection_if<T>(
         &self,
         attempt: PendingConnectionAttempt,
         action: impl FnOnce(&ActiveConnectionSet) -> Result<Option<T>>,
-    ) -> Result<Option<Option<(T, Retirement)>>> {
+    ) -> Result<RetirementOutcome<(T, Retirement)>> {
         let _lifecycle = self.connection_lifecycle()?;
         self.retire_active_connection_locked(attempt, action)
     }
 
+    /// The retirement transition under an already held lifecycle boundary: the registry
+    /// decides, and the per-peer side tables follow a `Retired` decision.
     fn retire_active_connection_locked<T>(
         &self,
         attempt: PendingConnectionAttempt,
         action: impl FnOnce(&ActiveConnectionSet) -> Result<Option<T>>,
-    ) -> Result<Option<Option<(T, Retirement)>>> {
+    ) -> Result<RetirementOutcome<(T, Retirement)>> {
         let mut lifecycles = self.peer_lifecycles()?;
-        if lifecycles.active_attempt(attempt.peer) != Some(attempt) {
-            return Ok(None);
-        }
-        let active = lifecycles.active_connections();
-
-        // Acquire every fallible local-state guard before mutating the DHT.
-        // The lifecycle lock prevents admission or retirement from changing
-        // `active` while the action validates a successor fallback against it.
+        // Acquire every fallible local-state guard before the action mutates the DHT, so the
+        // side-table mutations after a commit are infallible; if the action fails or declines,
+        // all four guards drop without changing local state. The lifecycle lock prevents
+        // admission or retirement from changing the active set while the action validates a
+        // successor fallback against it.
         let mut pending_finger_updates = self.pending_finger_updates()?;
         let mut peer_liveness = self.peer_liveness()?;
         let mut measured_disconnects = self.measured_disconnects()?;
-        let mut announced_admissions = self.announced_admissions()?;
-        let Some(result) = action(&active)? else {
-            return Ok(Some(None));
-        };
-
-        // These mutations are infallible after the DHT action commits. If the
-        // action fails or declines, all five guards drop without changing
-        // local state.
-        lifecycles.remove_active(attempt);
-        pending_finger_updates.retain(|pending, _| pending.peer != attempt.peer);
-        peer_liveness.remove(attempt.peer);
-        measured_disconnects.remove(&attempt.peer);
-        let announced_admission =
-            announced_admissions.remove(&attempt.peer) == Some(attempt.generation);
-        self.outbound_schedulers.shutdown(attempt.peer);
-        Ok(Some(Some((result, Retirement {
-            peer: attempt.peer,
-            announced_admission,
-        }))))
+        let outcome = lifecycles.retire_active_if(attempt, action)?;
+        if let RetirementOutcome::Retired(_) = &outcome {
+            pending_finger_updates.retain(|pending, _| pending.peer != attempt.peer);
+            peer_liveness.remove(attempt.peer);
+            measured_disconnects.remove(&attempt.peer);
+            self.outbound_schedulers.shutdown(attempt.peer);
+        }
+        Ok(outcome)
     }
 
     /// Unconditional retirement for tests that assert the retirement itself; the announcement
@@ -720,8 +709,12 @@ impl SwarmTransport {
         attempt: PendingConnectionAttempt,
         action: impl FnOnce(&ActiveConnectionSet) -> Result<T>,
     ) -> Result<Option<T>> {
-        self.retire_active_connection_if(attempt, |active| action(active).map(Some))
-            .map(|retired| retired.flatten().map(|(value, _witness)| value))
+        Ok(
+            match self.retire_active_connection_if(attempt, |active| action(active).map(Some))? {
+                RetirementOutcome::Retired((value, _witness)) => Some(value),
+                RetirementOutcome::Superseded | RetirementOutcome::Declined => None,
+            },
+        )
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -734,8 +727,14 @@ impl SwarmTransport {
         let _lifecycle = self
             .connection_lifecycle
             .lock_with_waiter_observer_for_test(before_lifecycle_gate)?;
-        self.retire_active_connection_locked(attempt, |active| action(active).map(Some))
-            .map(|retired| retired.flatten().map(|(value, _witness)| value))
+        Ok(
+            match self
+                .retire_active_connection_locked(attempt, |active| action(active).map(Some))?
+            {
+                RetirementOutcome::Retired((value, _witness)) => Some(value),
+                RetirementOutcome::Superseded | RetirementOutcome::Declined => None,
+            },
+        )
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -853,7 +852,29 @@ impl SwarmTransport {
         &self,
         attempt: PendingConnectionAttempt,
     ) -> Result<bool> {
-        let Some(retired) = self.retire_pending_connection_for_close(attempt)? else {
+        self.cancel_connection(attempt, CancellationScope::Unadmitted)
+            .await
+    }
+
+    /// Cancel `attempt` iff it is still pending, that is, no answer has been applied to it, and
+    /// release its transport object. An admitting generation has a data channel open and its
+    /// DHT admission in flight; it is left to complete, or to fail on its own path.
+    pub(crate) async fn cancel_offered_connection(
+        &self,
+        attempt: PendingConnectionAttempt,
+    ) -> Result<bool> {
+        self.cancel_connection(attempt, CancellationScope::Offered)
+            .await
+    }
+
+    /// Release the unadmitted record of `attempt` within `scope` and close its transport
+    /// object; `false` when `attempt` owns no record in that scope.
+    async fn cancel_connection(
+        &self,
+        attempt: PendingConnectionAttempt,
+        scope: CancellationScope,
+    ) -> Result<bool> {
+        let Some(retired) = self.retire_pending_connection_for_close(attempt, scope)? else {
             return Ok(false);
         };
         tracing::debug!(
@@ -875,11 +896,18 @@ impl SwarmTransport {
     fn retire_pending_connection_for_close(
         &self,
         attempt: PendingConnectionAttempt,
+        scope: CancellationScope,
     ) -> Result<Option<RetiredPendingConnection>> {
         let _lifecycle = self.connection_lifecycle()?;
-        if !self.peer_lifecycles()?.remove_unadmitted(attempt) {
+        let mut lifecycles = self.peer_lifecycles()?;
+        let removed = match scope {
+            CancellationScope::Offered => lifecycles.remove_pending(attempt),
+            CancellationScope::Unadmitted => lifecycles.remove_unadmitted(attempt),
+        };
+        if !removed {
             return Ok(None);
         }
+        drop(lifecycles);
         self.cancel_pending_finger_updates(attempt)?;
         Ok(Some(RetiredPendingConnection {
             connection: self.get_raw_connection(attempt.peer),

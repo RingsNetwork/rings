@@ -175,8 +175,9 @@ pub enum SwarmEvent {
     /// — remote terminal state, data-channel close, liveness or stabilization removal, capacity
     /// eviction, explicit disconnect — so the application observes the logical fact regardless
     /// of the physical event or local decision behind it. Law: for every generation,
-    /// `Connected` was delivered ⟺ `PeerRetired` is delivered, and in that order under the
-    /// peer's ordered delivery. A topology prune that keeps the record (a `Disconnected`
+    /// `Connected` delivered ⟺ `PeerRetired` delivered, with `start(Connected) <
+    /// start(PeerRetired)` under the peer's ordered delivery (see
+    /// [`SwarmCallback::on_event`]). A topology prune that keeps the record (a `Disconnected`
     /// transport allowed to recover) emits nothing. `PeerRetired` resolves the callback set at
     /// delivery time, while `ConnectionStateChange` goes to the callback set when the connection
     /// was created; the law is stated per delivery, so replacing the callback between an
@@ -185,6 +186,22 @@ pub enum SwarmEvent {
         /// The did of the retired peer.
         peer: Did,
     },
+}
+
+impl SwarmEvent {
+    /// The peer this event admits, if it is the admission event: `Connected` is the physical
+    /// state whose delivery is the logical fact "peer admitted", so this is where that
+    /// interpretation lives. Law: `admitted_peer() = Some(p)` for exactly the event whose
+    /// [`SwarmEvent::PeerRetired`] partner the retirement law promises.
+    pub fn admitted_peer(&self) -> Option<Did> {
+        match *self {
+            Self::ConnectionStateChange {
+                peer,
+                state: WebrtcConnectionState::Connected,
+            } => Some(peer),
+            Self::ConnectionStateChange { .. } | Self::PeerRetired { .. } => None,
+        }
+    }
 }
 
 /// Any object that implements this trait can be used as a callback for the swarm.
