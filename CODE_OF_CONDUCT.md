@@ -41,7 +41,7 @@ when someone officially represents Rings Network in public.
 
 ## Reporting
 
-Report conduct concerns privately to [dev@ringsnetwork.io](mailto:dev@ringsnetwork.io)
+Report conduct concerns privately to [dev@rings.rs](mailto:dev@rings.rs)
 with `Code of Conduct` in the subject. Do not open a public issue containing
 sensitive details.
 

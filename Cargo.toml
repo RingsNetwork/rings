@@ -13,7 +13,7 @@ exclude = [
 version = "0.27.0"
 edition = "2021"
 license = "AGPL-3.0-only"
-authors = ["RND <dev@ringsnetwork.io>"]
+authors = ["RND <dev@rings.rs>"]
 repository = "https://github.com/RingsNetwork/rings"
 
 [workspace.dependencies]
