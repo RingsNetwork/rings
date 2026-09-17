@@ -199,6 +199,32 @@ where S: Borrow<SessionSk>
     }
 }
 
+/// The stamp `(ts_ms, ttl_ms)` a proof is issued under: the interval it may be accepted in.
+///
+/// It is a value of its own because a frame's stamp is readable before the session that signed
+/// it is known, while [`MessageVerification`] exists only once that session is resolved; both
+/// judge liveness by this one predicate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ProofLifetime {
+    ts_ms: u128,
+    ttl_ms: u64,
+}
+
+impl ProofLifetime {
+    /// The lifetime stamped `(ts_ms, ttl_ms)`.
+    pub(crate) const fn new(ts_ms: u128, ttl_ms: u64) -> Self {
+        Self { ts_ms, ttl_ms }
+    }
+
+    /// Return whether the stamp describes a proof that is live at `now_ms`: the one liveness
+    /// predicate, whose contract [`MessageVerification::is_live_at`] states.
+    pub(crate) fn is_live_at(self, now_ms: u128) -> bool {
+        self.ttl_ms <= MAX_TTL_MS
+            && self.ts_ms.saturating_sub(TS_OFFSET_TOLERANCE_MS) <= now_ms
+            && now_ms <= self.ts_ms.saturating_add(u128::from(self.ttl_ms))
+    }
+}
+
 /// Message Verification is based on session, and sig.
 /// it also included ttl time and created ts.
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
@@ -242,15 +268,18 @@ impl MessageVerification {
         !self.is_live_at(get_epoch_ms())
     }
 
+    /// The stamp this proof was issued under.
+    const fn lifetime(&self) -> ProofLifetime {
+        ProofLifetime::new(self.ts_ms, self.ttl_ms)
+    }
+
     /// Return whether the verification timestamp and TTL describe a currently live proof.
     ///
     /// Pre: `now_ms` is the receiver's current wall-clock time.
     /// Post: `true` implies `ttl_ms <= MAX_TTL_MS`, the timestamp is not beyond the accepted future
     /// skew, and `now_ms` has not passed `ts_ms + ttl_ms`.
     pub fn is_live_at(&self, now_ms: u128) -> bool {
-        self.ttl_ms <= MAX_TTL_MS
-            && self.ts_ms.saturating_sub(TS_OFFSET_TOLERANCE_MS) <= now_ms
-            && now_ms <= self.ts_ms.saturating_add(self.ttl_ms as u128)
+        self.lifetime().is_live_at(now_ms)
     }
 
     /// Verify the signature only when the proof is live now.

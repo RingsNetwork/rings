@@ -92,8 +92,9 @@ closed on storage errors. Counters expose `Replay`, `Fork`, `Stale`, and persist
 
 0.24.0 is a network-wide protocol cutover. The sequence field is mandatory, transaction
 signatures use the `rings-core:message-verification:transaction:v2` domain, and the payload wire
-encoding begins with the `RINGS-TX-V2` marker. Unprefixed 0.23.x payloads are rejected before
-deserialization. There is no dual decoder, negotiation, feature flag, downgrade path, or legacy
+encoding begins with a marker (`RINGS-TX-V2` until 0.27.x; `RINGS-PAYLOAD-V3` since 0.28.0, see
+[Session References](session-references.md)). Payloads without the current marker are rejected
+before deserialization. There is no dual decoder, negotiation, feature flag, downgrade path, or legacy
 fallback. Mixed-version overlays are unsupported.
 
 ## Non-guarantees

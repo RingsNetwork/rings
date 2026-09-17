@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.28.0
+
+### Breaking changes
+
+- A link sends each session delegation once and references it afterwards (#738). The payload
+  wire encoding carries, in each of its two session slots, either the `Session` inline or its
+  20-byte content address (`SessionDigest`, the trailing bytes of `keccak256` over the encoded
+  session). Payload frames begin with the `RINGS-PAYLOAD-V3` marker; `RINGS-TX-V2` frames of
+  0.24.0 to 0.27.x fail closed before decoding. Transaction signatures and signing domains are
+  unchanged. Mixed-version overlays are unsupported.
+  - A steady-state relayed payload carries two 20-byte digests and two 65-byte signatures of
+    identity material, where it carried two full delegations.
+  - References are scoped to one direction of one admitted connection generation. The sender
+    references a session only after the transport accepted a frame carrying it inline; the
+    receiver learns a session only from a frame that verified, or from an announcement it asked
+    for whose delegation verified. Each table holds at most 64 sessions and dies with the
+    connection, so a restart needs no resynchronisation.
+  - A forwarding hop re-encodes the origin slot for its own next link, so a destination that
+    never met the origin receives the origin's session inline from its last hop. No node asks
+    the origin for a session.
+  - A reference the receiver cannot resolve holds the frame, and the frames behind it, in
+    arrival order (at most 32 per connection) while the link repairs the miss with the new
+    unsigned link-control frames (`RINGS-LINK-V1`): a request for one digest, answered by
+    exactly one announcement or disclaimer.
+  - An expired session is evicted from both tables; a reference to it is a miss, and
+    re-announcing the expired delegation is refused as it is inline.
+  - `MessagePayload::to_wire`/`from_wire` remain the self-contained encoding (both sessions
+    inline), used for handshake payloads, chunked payloads, and inbox carriers; a referenced
+    session there is `Error::SessionReferenceUnresolved`.
+
+### Added
+
+- `rings_transport` `ConnectionInterface::frame_delivery` reports whether a connection delivers
+  accepted frames exactly once and in order (`FrameDelivery::Sequenced`, the WebRTC data
+  channels) or may reorder or drop them while it stays up (`FrameDelivery::Unsequenced`).
+  Session references are used only over sequenced delivery.
+- `Session::digest` and `SessionDigest` in `rings_core`: the content address of one exact
+  delegation.
+
 ## 0.27.0
 
 ### Added

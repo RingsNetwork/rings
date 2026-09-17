@@ -16,6 +16,7 @@ mod test_callback_failure;
 mod test_capacity_handoff;
 mod test_origin_quota;
 mod test_pre_admission;
+mod test_session_reference;
 mod test_storage_interleave;
 
 #[derive(Default)]

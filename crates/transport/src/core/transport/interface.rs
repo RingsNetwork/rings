@@ -17,7 +17,21 @@ use crate::delivery::DeliveryFuture;
 
 macro_rules! define_transport_messages {
     ($( $(#[$docs:meta])* $variant:ident ),+ $(,)?) => {
-        /// Wrapper for the data that is sent over the data channel.
+        /// What a connection guarantees about frames it accepted for sending, while it stays up.
+///
+/// A protocol may keep state that one frame establishes and a later frame relies on (a
+/// reference to something an earlier frame carried) only over [`Self::Sequenced`] delivery;
+/// over [`Self::Unsequenced`] delivery every frame has to be self-contained.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameDelivery {
+    /// Every accepted frame is delivered exactly once and in acceptance order, or the connection
+    /// ends: a reliable, ordered data channel.
+    Sequenced,
+    /// An accepted frame may be delivered out of order, or never, while the connection stays up.
+    Unsequenced,
+}
+
+/// Wrapper for the data that is sent over the data channel.
         #[derive(Deserialize, Serialize, Debug, Clone)]
         pub enum TransportMessage {
             $(
@@ -141,6 +155,9 @@ pub trait ConnectionInterface {
     /// message at or below this; larger payloads have to be chunked. Reported per-channel so a
     /// constrained channel (which can negotiate a smaller limit) is respected.
     fn max_message_size(&self) -> usize;
+
+    /// What this connection guarantees about the frames it accepted; see [`FrameDelivery`].
+    fn frame_delivery(&self) -> FrameDelivery;
 
     /// This is a debug method to dump the stats of webrtc connection.
     async fn get_stats(&self) -> Vec<String>;

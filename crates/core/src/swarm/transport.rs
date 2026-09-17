@@ -28,6 +28,7 @@ use rings_transport::connections::WebrtcConnection as ConnectionOwner;
 ))]
 use rings_transport::connections::WebrtcTransport as Transport;
 use rings_transport::core::transport::ConnectionInterface;
+use rings_transport::core::transport::FrameDelivery;
 use rings_transport::core::transport::SendPermit;
 use rings_transport::core::transport::TransportInterface;
 use rings_transport::core::transport::TransportMessage;
@@ -94,6 +95,8 @@ pub(crate) use self::liveness::PEER_LIVENESS_TIMEOUT_MS;
 pub(crate) use self::outbound::outbound_submit_count_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::reset_outbound_submit_count_for_test;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::outbound::session_announcement_count_for_test;
 use self::outbound::OutboundSchedulers;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::OUTBOUND_COMMAND_DRAIN_BUDGET;
@@ -1029,6 +1032,12 @@ impl SwarmConnection {
         &self,
     ) -> Result<rings_transport::connections::NativePhysicalCloseWitness> {
         self.connection.physical_close_witness().map_err(Into::into)
+    }
+
+    /// What this connection guarantees about accepted frames: whether a frame may rely on an
+    /// earlier one, as a session reference does.
+    pub(crate) fn frame_delivery(&self) -> FrameDelivery {
+        self.connection.frame_delivery()
     }
 
     /// The largest single data-channel message this connection can carry — the negotiated

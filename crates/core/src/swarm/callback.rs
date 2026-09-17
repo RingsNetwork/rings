@@ -16,11 +16,13 @@ use crate::message::Message;
 use crate::message::MessageHandler;
 use crate::message::MessageKind;
 use crate::message::MessagePayload;
+use crate::swarm::session_link::ReferencedSessions;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 
 mod inbound;
 mod inner;
+mod link_stage;
 mod logical;
 mod pre_admission;
 mod processor;
@@ -274,6 +276,17 @@ pub(super) struct InboundProcessor {
     /// Verified frames that arrived before this end admitted the connection; bounded by the
     /// per-peer inbound capacity, so an unadmitted peer holds no more than an admitted one.
     pre_admission: Arc<Mutex<PreAdmissionHold<HeldInboundFrame>>>,
+    /// The receiving end of this connection's session references: the sessions the peer has
+    /// announced on it and the frames waiting for one. It lives and dies with the connection,
+    /// and its hold is bounded by the same per-peer inbound capacity.
+    session_link: Arc<Mutex<ReferencedSessions<UnresolvedInboundFrame>>>,
+}
+
+/// What travels with a frame whose session slots are not yet resolved: the raw bytes, for their
+/// length and their memory accounting, and the transport capacity they still occupy.
+pub(super) struct UnresolvedInboundFrame {
+    bytes: Bytes,
+    transport_capacity: Option<InboundFrameCapacityLease>,
 }
 
 /// One verified frame waiting for admission, with everything its delivery needs.

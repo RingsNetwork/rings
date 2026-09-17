@@ -137,9 +137,13 @@ pub enum Error {
     #[error(transparent)]
     ProvisionalEvidence(#[from] rings_measure::EvidenceError),
 
-    /// The payload does not carry the v2 hard-cutover wire marker.
+    /// The frame carries neither the current payload marker nor the link-control marker.
     #[error("Legacy transaction wire format is not accepted")]
     LegacyTransactionWireFormat,
+
+    /// A payload that travels outside any link referenced a session instead of carrying it.
+    #[error("Session reference {0:?} cannot be resolved outside the link that announced it")]
+    SessionReferenceUnresolved(crate::session::SessionDigest),
 
     /// E2E frame received after the authenticated final frame
     #[error("E2E frame received after the authenticated final frame")]

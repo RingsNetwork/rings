@@ -38,6 +38,7 @@ use crate::core::transport::stored_max_message_size;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::ConnectionStateCell;
 use crate::core::transport::ConnectionStateSnapshot;
+use crate::core::transport::FrameDelivery;
 use crate::core::transport::IrrevocableSendGuard;
 use crate::core::transport::SendPermit;
 use crate::core::transport::TransportInterface;
@@ -563,6 +564,11 @@ impl ConnectionInterface for WebrtcConnection {
 
     fn data_channel_is_open(&self) -> Result<bool> {
         Ok(self.connection_state.snapshot().data_channel_open())
+    }
+
+    /// The data channels are created with the default options: reliable and ordered.
+    fn frame_delivery(&self) -> FrameDelivery {
+        FrameDelivery::Sequenced
     }
 
     fn max_message_size(&self) -> usize {

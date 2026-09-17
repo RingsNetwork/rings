@@ -129,6 +129,28 @@ The obligations of this layer are leak-minimization obligations:
 - every signature bound to `network_id` and to a per-message-family domain tag, so
   an observation in one overlay is not a credential in another.
 
+Session references do not change what a hop learns. A link sends each session
+delegation once and afterwards its 20-byte content address (the trailing bytes of
+`keccak256` over the encoded `Session`); the receiver resolves the address to the
+exact delegation that would have travelled inline, then verifies both proofs as
+before. The address names the whole delegation, not the session key, because a
+session key can carry several delegations and any account can sign one for a key it
+does not hold. The cache behind the references is scoped to one direction of one
+admitted connection generation and obeys these rules:
+
+- it is populated only by the peer at the other end, with sessions of frames that
+  verified or with an announcement this end asked for and whose delegation verified;
+  an unsolicited announcement is ignored, so an unauthenticated party cannot fill it;
+- it holds at most 64 sessions and at most 32 unresolved frames per connection, and
+  both die with the connection generation;
+- a miss is repaired on the link by one unsigned request and exactly one unsigned
+  answer, scheduled under the ordinary per-peer control capacity; no hop asks the
+  origin for anything, and a peer that never answers stalls only its own link;
+- an expired session is evicted, a reference to it is a miss, and re-announcing the
+  expired delegation is refused exactly as it is inline;
+- references are used only over sequenced delivery; elsewhere every frame is
+  self-contained.
+
 ### Transaction replay boundary
 
 Signed transactions use a destination-scoped sequence stream keyed by `network_id`, the origin
