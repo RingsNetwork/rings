@@ -70,6 +70,8 @@ mod test_inbound;
 mod test_lifecycle;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 mod test_readiness;
+#[cfg(not(target_family = "wasm"))]
+mod test_rejoin_model;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 mod test_retention;
 mod test_retirement;

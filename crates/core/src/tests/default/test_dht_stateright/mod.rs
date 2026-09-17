@@ -36,6 +36,18 @@
 //!     cancellation, loss, timeout, topology change, duplicate delivery, and
 //!     restart. It checks non-reused request correlation, one logical
 //!     emission per transition, the per-process interval, and retry backoff.
+//!   * Stage 6 — disconnect/rejoin across connection generations (#772). The
+//!     composition the stages above leave out: a peer disconnects, is removed
+//!     with successor replacement, rejoins under a newer local generation, and
+//!     the retired generation's callbacks and reports arrive afterwards. Its
+//!     carrier holds the production `TopologyState` *and* the production
+//!     `ConnectionLifecycleRegistry`, which is visible only inside
+//!     `swarm::transport`, so the model lives at
+//!     `swarm::transport::tests::test_rejoin_model`; its module docs carry the
+//!     TLA+-style specification, the fairness assumption, the scope limits,
+//!     and the bounds table (peers, successor capacity, state counts, CI
+//!     wall-clock limit). The topology laws it checks are the named predicates
+//!     of `dht::topology::invariants`, shared with any later churn simulator.
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;

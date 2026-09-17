@@ -42,6 +42,8 @@ use super::FingerFixRequest;
 
 /// Finger convergence adapters for the pure topology state.
 mod finger;
+/// Named well-formedness, routing, and fixpoint predicates of [`TopologyState`].
+mod invariants;
 /// HMCC/Zave successor and predecessor stabilization transitions.
 mod stabilization;
 /// Correlation state for successor-list synchronization reports.
