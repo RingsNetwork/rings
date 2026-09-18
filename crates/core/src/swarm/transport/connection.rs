@@ -47,7 +47,10 @@ pub(super) async fn await_bounded_connection_close(
     }
 }
 
-enum DhtPeerRemoval {
+/// Which topology removal a retirement performs. The rejoin model composes
+/// the same two removals, so it names them with this type.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::swarm::transport) enum DhtPeerRemoval {
     /// Remove the peer without selecting a replacement successor.
     Ordinary,
     /// Remove the peer as unreachable and allow the DHT to promote live replacements.

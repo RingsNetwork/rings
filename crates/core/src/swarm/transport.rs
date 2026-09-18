@@ -1052,5 +1052,9 @@ impl From<SwarmConnection> for Did {
     }
 }
 
+/// Stage 6 model check (#772): rejoin races across connection generations.
+/// Built for every test target, so the browser build checks the same model.
+#[cfg(test)]
+mod test_rejoin_model;
 #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
 mod tests;
