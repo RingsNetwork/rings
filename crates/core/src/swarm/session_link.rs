@@ -7,56 +7,52 @@
 //! slots repeat for the life of the link, so each direction of a link keeps one table:
 //!
 //! ```text
-//!   sender   S : AnnouncedSessions    "sessions this link has carried inline, as I sent them"
-//!   receiver R : ReferencedSessions   "sessions this link has carried inline, as I verified them"
+//!   sender   S : AnnouncedSessions    "sessions I sent inline, and which of them the peer confirmed"
+//!   receiver R : ReferencedSessions   "sessions this link carried inline, as I verified them"
 //! ```
 //!
-//! The sender replaces a slot by its digest iff the digest is live in `S`; the receiver resolves
-//! a digest from `R`. The scope is the link on purpose:
-//!
-//! - *Who may populate `R`*: only the peer at the other end, only with sessions of frames that
-//!   verified, or with a solicited announcement whose delegation verified. A peer can therefore
-//!   spend only its own table, which is bounded, and nothing an unrelated party says is cached.
-//! - *Relay hops*: a forwarding hop re-encodes the origin slot for its own next link, from its
-//!   own `S`; the origin's signature does not cover the slot. No hop ever asks the origin for
-//!   anything, so a miss costs one round trip on one link, never a routed lookup.
-//! - *Restart*: both tables die with the connection generation, so a restarted end and its peer
-//!   start from empty tables together.
-//!
-//! The tables agree when frames arrive in the order they were accepted for sending. Agreement
-//! is an optimisation, not an assumption: a digest `R` cannot resolve is a *miss*, repaired on
-//! the link itself.
+//! The link is a datagram link for all this module assumes: an accepted frame may arrive late,
+//! out of order, or never. Nothing here relies on ordering; ordering only makes the tables agree
+//! sooner.
 //!
 //! ```text
-//!   arrive(frame)
-//!     │ hold empty ∧ every digest live in R ───────────────▶ Resolved ──verify──▶ admit inline
-//!     │ otherwise, hold below capacity ─▶ Held ─▶ drain
-//!     │ otherwise ─▶ Overflow (frame dropped; the caller drains, which asks again)
+//!   sender: session s in slot ─┬─ acknowledged(s) ──▶ Digest(s)
+//!                              └─ otherwise ───────▶ Inline(s)      (admit s as pending)
 //!
-//!   drain: release_next
-//!     │ head lapsed ─────────────────────────▶ Lapsed (frame dropped), continue
-//!     │ head resolvable ─────────────────────▶ Resolved, continue
-//!     │ head misses D ─▶ Blocked{D} ──Request(d) for d ∈ D ──▶ peer
-//!     │ empty ───────────────────────────────▶ Drained
+//!   receiver: frame arrives ─┬─ every Digest live in R ─▶ Resolved ──verify──▶ admit inline
+//!                            │                                          └──▶ Known(d) per inline slot
+//!                            ├─ hold below capacity ──▶ Held{request}   (ask for what is missing)
+//!                            └─ otherwise ───────────▶ Overflow{request} (frame dropped, ask again)
 //!
-//!   peer answers from S:  Announce(s) ─▶ announce ─▶ drain
-//!                         Unknown(d)  ─▶ unknown  ─▶ frames missing d dropped ─▶ drain
+//!   sender:   Known(d) ─▶ acknowledge d ─▶ later frames reference d
+//!   receiver: Announce(s) ─▶ admitted iff awaited ∧ delegation verifies ─▶ release what resolves
+//!             Unknown(d)  ─▶ frames awaiting d dropped
 //! ```
 //!
-//! Law (order): frames leave the receiver in arrival order; a frame that arrives while the hold
-//! is occupied or draining queues behind it. Law (bound): `R` and `S` hold at most
-//! [`SESSION_TABLE_CAPACITY`] sessions and the hold at most its capacity in frames. Law
-//! (questions): only the head's missing digests are ever requested, once per drain attempt, and
-//! drain attempts are caused only by arrivals and answers; there is no timer, and a peer that
-//! never answers stalls only its own link. Law (expiry): an expired session is absent from both
-//! tables, so a reference to it is a miss and its re-announcement is judged like any other: by
-//! [`Session::verify_self_at`], which refuses it. Expiry therefore forces a fresh delegation to
-//! be announced and never resurrects an old one.
+//! Law (soundness): the sender references `d` only after the receiver confirmed `d`, and the
+//! receiver confirms only sessions of frames that verified. Hence on a lossless link, however
+//! frames are reordered, a reference never misses: the confirmation left the receiver after the
+//! session was learned, and the reference was sent after the confirmation arrived. A miss
+//! needs the receiver to have *forgotten* (capacity eviction, expiry), and is repaired on the
+//! link. Until the confirmation arrives the sender stays inline, and the receiver confirms
+//! every inline arrival of a session it knows, so a lost confirmation costs inline frames, never
+//! a stall.
+//!
+//! Law (admission): `R` learns only from frames that verified, or from an announcement some
+//! held frame awaits whose delegation verifies; `S` marks only digests it announced. Nothing an
+//! unrelated party says reaches either table. Law (bound): `R` and `S` hold at most
+//! [`SESSION_TABLE_CAPACITY`] sessions and the hold at most its capacity in frames; a held frame
+//! is released or dropped, never reordered against anything, because the link promises no
+//! order. Law (questions): a question is asked for a missing digest when the first frame awaiting
+//! it is held, and again when the hold overflows; answers are one frame per question. There is
+//! no timer: a peer that never answers stalls only its own held frames, which lapse with their
+//! proofs. Law (expiry): an expired session is absent from both tables, so a reference to it is
+//! a miss and its re-announcement is judged like any other: by [`Session::verify_self_at`],
+//! which refuses it. Expiry forces a fresh delegation and never resurrects an old one.
 //!
 //! Time is an argument of every step, never read here.
 
 use std::borrow::Cow;
-use std::cmp::Ordering;
 use std::collections::VecDeque;
 
 use crate::error::Error;
@@ -74,17 +70,26 @@ use crate::session::SessionDigest;
 /// first, so the working set of a busy link stays resident.
 pub(crate) const SESSION_TABLE_CAPACITY: usize = 64;
 
-/// A bounded map `SessionDigest ⇀ Session`, ordered from least to most recently referenced.
+/// A bounded map `SessionDigest ⇀ Session × A`, ordered from least to most recently
+/// referenced, where `A` is what one end of the link annotates a session with.
 ///
 /// Invariant: `entries.len() <= capacity`, digests are pairwise distinct, and every entry
 /// satisfies `entry.digest = entry.session.digest()`.
 #[derive(Debug)]
-struct SessionTable {
-    entries: VecDeque<(SessionDigest, Session)>,
+struct SessionTable<A> {
+    entries: VecDeque<TableEntry<A>>,
     capacity: usize,
 }
 
-impl SessionTable {
+/// One session the table holds.
+#[derive(Debug)]
+struct TableEntry<A> {
+    digest: SessionDigest,
+    session: Session,
+    annotation: A,
+}
+
+impl<A> SessionTable<A> {
     /// The empty table that keeps at most `capacity` sessions.
     const fn new(capacity: usize) -> Self {
         Self {
@@ -93,40 +98,51 @@ impl SessionTable {
         }
     }
 
-    /// The session addressed by `digest`, if the table holds it and it is live at `now_ms`.
-    fn live(&self, digest: SessionDigest, now_ms: u128) -> Option<&Session> {
+    /// The entry addressed by `digest`, if the table holds it and its session is live at
+    /// `now_ms`.
+    fn live(&self, digest: SessionDigest, now_ms: u128) -> Option<&TableEntry<A>> {
         self.entries
             .iter()
-            .find(|(held, _)| *held == digest)
-            .map(|(_, session)| session)
-            .filter(|session| !session.is_expired_at(now_ms))
+            .find(|entry| entry.digest == digest)
+            .filter(|entry| !entry.session.is_expired_at(now_ms))
     }
 
     /// Record a reference to `digest`: it becomes the most recently referenced entry.
     fn touch(&mut self, digest: SessionDigest) {
-        if let Some(position) = self.entries.iter().position(|(held, _)| *held == digest) {
+        if let Some(position) = self.entries.iter().position(|entry| entry.digest == digest) {
             if let Some(entry) = self.entries.remove(position) {
                 self.entries.push_back(entry);
             }
         }
     }
 
-    /// Hold `session` under `digest` as the most recently referenced entry, evicting the least
-    /// recently referenced one when full. Idempotent on the set of entries.
+    /// Hold `session` under `digest` with `annotation` as the most recently referenced entry,
+    /// evicting the least recently referenced one when full. Idempotent on the set of digests.
     ///
     /// Pre: `digest = session.digest()`.
-    fn admit(&mut self, digest: SessionDigest, session: Session) {
-        self.entries.retain(|(held, _)| *held != digest);
+    fn admit(&mut self, digest: SessionDigest, session: Session, annotation: A) {
+        self.entries.retain(|entry| entry.digest != digest);
         if self.entries.len() >= self.capacity {
             self.entries.pop_front();
         }
-        self.entries.push_back((digest, session));
+        self.entries.push_back(TableEntry {
+            digest,
+            session,
+            annotation,
+        });
+    }
+
+    /// Change the annotation of `digest`, if held.
+    fn annotate(&mut self, digest: SessionDigest, annotation: A) {
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.digest == digest) {
+            entry.annotation = annotation;
+        }
     }
 
     /// Forget every session expired at `now_ms`.
     fn evict_expired(&mut self, now_ms: u128) {
         self.entries
-            .retain(|(_, session)| !session.is_expired_at(now_ms));
+            .retain(|entry| !entry.session.is_expired_at(now_ms));
     }
 
     /// Forget everything.
@@ -141,63 +157,28 @@ impl SessionTable {
     }
 }
 
-/// How the sender fills one slot of one frame.
-#[derive(Debug, PartialEq, Eq)]
-enum SlotPlan {
-    /// The link already carried this session: send its digest.
-    Reference(SessionDigest),
-    /// The link has not carried this session, or it lapsed: send it inline. The copy is what
-    /// the table will hold once the frame is accepted.
-    Announce(SessionDigest, Box<Session>),
+/// What the sender knows about one session it sent inline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Acknowledgement {
+    /// Sent inline; the peer has not confirmed it, so it still travels inline.
+    Pending,
+    /// The peer confirmed it: it travels by reference.
+    Acknowledged,
 }
 
-/// The sender's decision for one frame: data returned by [`AnnouncedSessions::plan`] and given
-/// back to [`AnnouncedSessions::commit`] once the frame is accepted for sending.
-#[derive(Debug)]
-pub(crate) struct FramePlan {
-    generation: u64,
-    slots: PerSlot<SlotPlan>,
-}
-
-impl FramePlan {
-    /// The references that realise this plan over `payload`.
-    ///
-    /// Pre: this plan was made for `payload`.
-    pub(crate) fn session_refs<'a>(&self, payload: &'a MessagePayload) -> PerSlot<SessionRef<'a>> {
-        self.slots
-            .as_ref()
-            .zip(payload.sessions())
-            .map(|(plan, session)| plan.session_ref(session))
-    }
-}
-
-impl SlotPlan {
-    /// The reference this plan puts in a slot holding `session`.
-    fn session_ref<'a>(&self, session: &'a Session) -> SessionRef<'a> {
-        match self {
-            Self::Reference(digest) => SessionRef::Digest(*digest),
-            Self::Announce(..) => SessionRef::Inline(Cow::Borrowed(session)),
-        }
-    }
-}
-
-/// The sending end of one link: the sessions it has carried inline, as the sender knows it.
-///
-/// `plan` is pure and `commit` applies it, so a frame that was planned but never accepted for
-/// sending (cancelled, failed, superseded) announces nothing:
+/// The sending end of one link: the sessions it has sent inline, and which of them the peer
+/// confirmed.
 ///
 /// ```text
-///   plan   : S × Generation × Payload × Time → FramePlan
-///   commit : S × FramePlan × Time → S
+///   encode      : S × Generation × Payload × Time → S × PerSlot<SessionRef>
+///   acknowledge : S × Generation × SessionDigest → S
+///   answer      : S × Generation × SessionDigest × Time → SessionControl
 /// ```
-///
-/// Law (soundness): `commit` is applied only to accepted frames, in acceptance order, so every
-/// digest `plan` emits was carried inline by an earlier accepted frame of the same generation.
 #[derive(Debug)]
 pub(crate) struct AnnouncedSessions {
     /// The connection generation the table belongs to.
     generation: u64,
-    announced: SessionTable,
+    announced: SessionTable<Acknowledgement>,
 }
 
 impl AnnouncedSessions {
@@ -209,61 +190,82 @@ impl AnnouncedSessions {
         }
     }
 
+    /// Make the table the one of `generation`: a newer generation is a new link with an empty
+    /// table, an older one is a link that no longer exists. Post: `true` iff `generation` is
+    /// the current one afterwards.
+    fn enter(&mut self, generation: u64) -> bool {
+        if generation > self.generation {
+            self.generation = generation;
+            self.announced.clear();
+        }
+        self.generation == generation
+    }
+
     /// The table as `generation` sees it: this generation's table, or nothing, because what
     /// another generation announced was announced on another link.
-    fn announced_on(&self, generation: u64) -> Option<&SessionTable> {
+    fn announced_on(&self, generation: u64) -> Option<&SessionTable<Acknowledgement>> {
         (self.generation == generation).then_some(&self.announced)
     }
 
-    /// The session `digest` addresses, if `generation` announced it and it is live at `now_ms`.
-    fn live_on(&self, generation: u64, digest: SessionDigest, now_ms: u128) -> Option<&Session> {
+    /// The entry `digest` addresses, if `generation` announced it and it is live at `now_ms`.
+    fn live_on(
+        &self,
+        generation: u64,
+        digest: SessionDigest,
+        now_ms: u128,
+    ) -> Option<&TableEntry<Acknowledgement>> {
         self.announced_on(generation)
             .and_then(|announced| announced.live(digest, now_ms))
     }
 
-    /// Decide how each slot of `payload` travels on `generation` at `now_ms`.
-    pub(crate) fn plan(
-        &self,
+    /// Decide how each slot of `payload` travels on `generation` at `now_ms`, and remember
+    /// what was sent inline.
+    ///
+    /// A slot whose session the peer confirmed travels by digest; every other slot travels
+    /// inline, and the session enters the table as pending if it was not held.
+    pub(crate) fn encode<'a>(
+        &mut self,
         generation: u64,
-        payload: &MessagePayload,
+        payload: &'a MessagePayload,
         now_ms: u128,
-    ) -> Result<FramePlan> {
-        let plan_slot = |session: &Session| -> Result<SlotPlan> {
-            let digest = session.digest()?;
-            Ok(match self.live_on(generation, digest, now_ms) {
-                Some(_) => SlotPlan::Reference(digest),
-                None => SlotPlan::Announce(digest, Box::new(session.clone())),
-            })
-        };
+    ) -> Result<PerSlot<SessionRef<'a>>> {
+        if !self.enter(generation) {
+            return Ok(payload.sessions().map(inline));
+        }
+        self.announced.evict_expired(now_ms);
         let sessions = payload.sessions();
-        Ok(FramePlan {
-            generation,
-            slots: PerSlot {
-                origin: plan_slot(sessions.origin)?,
-                hop: plan_slot(sessions.hop)?,
-            },
+        Ok(PerSlot {
+            origin: self.encode_slot(sessions.origin, now_ms)?,
+            hop: self.encode_slot(sessions.hop, now_ms)?,
         })
     }
 
-    /// Record that the frame planned as `plan` was accepted for sending at `now_ms`.
-    ///
-    /// A plan of a newer generation starts that generation's table; a plan of an older one is
-    /// about a link that no longer exists and records nothing.
-    pub(crate) fn commit(&mut self, plan: FramePlan, now_ms: u128) {
-        match plan.generation.cmp(&self.generation) {
-            Ordering::Less => return,
-            Ordering::Equal => {}
-            Ordering::Greater => {
-                self.generation = plan.generation;
-                self.announced.clear();
+    /// [`Self::encode`] for one slot of the current generation.
+    fn encode_slot<'a>(&mut self, session: &'a Session, now_ms: u128) -> Result<SessionRef<'a>> {
+        let digest = session.digest()?;
+        match self.announced.live(digest, now_ms) {
+            Some(entry) if entry.annotation == Acknowledgement::Acknowledged => {
+                self.announced.touch(digest);
+                Ok(SessionRef::Digest(digest))
+            }
+            Some(_) => {
+                self.announced.touch(digest);
+                Ok(inline(session))
+            }
+            None => {
+                self.announced
+                    .admit(digest, session.clone(), Acknowledgement::Pending);
+                Ok(inline(session))
             }
         }
-        self.announced.evict_expired(now_ms);
-        for slot in plan.slots.into_array() {
-            match slot {
-                SlotPlan::Reference(digest) => self.announced.touch(digest),
-                SlotPlan::Announce(digest, session) => self.announced.admit(digest, *session),
-            }
+    }
+
+    /// The peer confirmed `digest` on `generation`. A confirmation of a digest this end never
+    /// announced, or announced on another generation, marks nothing.
+    pub(crate) fn acknowledge(&mut self, generation: u64, digest: SessionDigest) {
+        if self.generation == generation {
+            self.announced
+                .annotate(digest, Acknowledgement::Acknowledged);
         }
     }
 
@@ -277,10 +279,15 @@ impl AnnouncedSessions {
         now_ms: u128,
     ) -> SessionControl {
         self.live_on(generation, digest, now_ms)
-            .map_or(SessionControl::Unknown(digest), |session| {
-                SessionControl::Announce(session.clone())
+            .map_or(SessionControl::Unknown(digest), |entry| {
+                SessionControl::Announce(entry.session.clone())
             })
     }
+}
+
+/// `session`, inline.
+fn inline(session: &Session) -> SessionRef<'_> {
+    SessionRef::Inline(Cow::Borrowed(session))
 }
 
 /// A frame the receiver resolved, with everything the rest of the inbound pipeline needs.
@@ -295,24 +302,28 @@ pub(crate) struct ResolvedFrame<F> {
 
 /// The verdict on one arriving frame.
 pub(crate) enum FrameArrival<F> {
-    /// Nothing is ahead of the frame and every slot resolved.
+    /// Every slot resolved.
     Resolved(Box<ResolvedFrame<F>>),
-    /// The frame is queued: behind a miss of its own, or behind earlier held frames.
-    Held,
-    /// The hold is full; the frame is handed back undelivered.
-    Overflow(F),
+    /// The frame waits for the sessions it misses; `request` names those nothing held before
+    /// it was already waiting for.
+    Held {
+        /// The digests to ask the peer for.
+        request: Vec<SessionDigest>,
+    },
+    /// The hold is full; the frame is dropped, and every awaited digest is asked for again,
+    /// since a full hold means an answer is overdue.
+    Overflow {
+        /// The digests to ask the peer for.
+        request: Vec<SessionDigest>,
+    },
 }
 
-/// One step of a drain.
+/// One held frame leaving the hold.
 pub(crate) enum FrameRelease<F> {
-    /// The head resolved: deliver it, then continue.
+    /// The frame resolved: deliver it.
     Resolved(Box<ResolvedFrame<F>>),
-    /// The head's proof lifetime lapsed while it waited: it is dropped; continue.
+    /// The frame's proof lifetime lapsed while it waited: it is dropped.
     Lapsed(F),
-    /// The head misses these digests: ask the peer for them. The drain is over.
-    Blocked(Vec<SessionDigest>),
-    /// Nothing is held. The drain is over.
-    Drained,
 }
 
 /// A frame waiting in the hold.
@@ -324,17 +335,15 @@ struct HeldFrame<F> {
 /// The receiving end of one link: the sessions it has carried inline, as the receiver verified
 /// them, and the frames waiting for one of them. See the module documentation for the laws.
 pub(crate) struct ReferencedSessions<F> {
-    known: SessionTable,
-    held: VecDeque<HeldFrame<F>>,
-    /// One drainer is releasing held frames; arrivals queue behind them.
-    draining: bool,
+    known: SessionTable<()>,
+    held: Vec<HeldFrame<F>>,
     hold_capacity: usize,
 }
 
-/// The digests among `frame`'s slots that are not live in `known` at `now_ms`.
+/// The digests among `frame`'s slots that are not live in `known` at `now_ms`, each once.
 fn missing_digests(
     frame: &WirePayload<'_>,
-    known: &SessionTable,
+    known: &SessionTable<()>,
     now_ms: u128,
 ) -> Vec<SessionDigest> {
     frame
@@ -346,12 +355,15 @@ fn missing_digests(
             SessionRef::Digest(digest) => Some(*digest),
         })
         .filter(|digest| known.live(*digest, now_ms).is_none())
-        .fold(Vec::new(), |mut missing, digest| {
-            if !missing.contains(&digest) {
-                missing.push(digest);
-            }
-            missing
-        })
+        .fold(Vec::new(), push_distinct)
+}
+
+/// `digests` with `digest` appended unless already present: a set kept as an ordered vector.
+fn push_distinct(mut digests: Vec<SessionDigest>, digest: SessionDigest) -> Vec<SessionDigest> {
+    if !digests.contains(&digest) {
+        digests.push(digest);
+    }
+    digests
 }
 
 impl<F> ReferencedSessions<F> {
@@ -360,8 +372,7 @@ impl<F> ReferencedSessions<F> {
     pub(crate) const fn new(hold_capacity: usize) -> Self {
         Self {
             known: SessionTable::new(SESSION_TABLE_CAPACITY),
-            held: VecDeque::new(),
-            draining: false,
+            held: Vec::new(),
             hold_capacity,
         }
     }
@@ -386,7 +397,7 @@ impl<F> ReferencedSessions<F> {
                 SessionRef::Digest(digest) => {
                     let session = known
                         .live(digest, now_ms)
-                        .cloned()
+                        .map(|entry| entry.session.clone())
                         .ok_or(Error::SessionReferenceUnresolved(digest))?;
                     known.touch(digest);
                     Ok(session)
@@ -400,6 +411,14 @@ impl<F> ReferencedSessions<F> {
         }))
     }
 
+    /// Every digest some held frame misses at `now_ms`, each once, in hold order.
+    fn awaited_digests(&self, now_ms: u128) -> Vec<SessionDigest> {
+        self.held
+            .iter()
+            .flat_map(|held| missing_digests(held.frame.as_ref(), &self.known, now_ms))
+            .fold(Vec::new(), push_distinct)
+    }
+
     /// Judge one arriving frame at `now_ms`.
     pub(crate) fn arrive(
         &mut self,
@@ -407,20 +426,29 @@ impl<F> ReferencedSessions<F> {
         carrier: F,
         now_ms: u128,
     ) -> Result<FrameArrival<F>> {
-        let nothing_ahead = self.held.is_empty() && !self.draining;
-        if nothing_ahead && missing_digests(frame.as_ref(), &self.known, now_ms).is_empty() {
+        let missing = missing_digests(frame.as_ref(), &self.known, now_ms);
+        if missing.is_empty() {
             return self
                 .resolve(frame, carrier, now_ms)
                 .map(FrameArrival::Resolved);
         }
+        let awaited = self.awaited_digests(now_ms);
         if self.held.len() >= self.hold_capacity {
-            return Ok(FrameArrival::Overflow(carrier));
+            return Ok(FrameArrival::Overflow {
+                request: missing.into_iter().fold(awaited, push_distinct),
+            });
         }
-        self.held.push_back(HeldFrame { frame, carrier });
-        Ok(FrameArrival::Held)
+        let request = missing
+            .into_iter()
+            .filter(|digest| !awaited.contains(digest))
+            .collect();
+        self.held.push(HeldFrame { frame, carrier });
+        Ok(FrameArrival::Held { request })
     }
 
-    /// Learn the inline sessions of a frame that verified.
+    /// Learn the inline sessions of a frame that verified, and name the digests to confirm to
+    /// the peer: every inline slot's, so a sender that keeps sending a known session inline
+    /// (its confirmation lost or still in flight) is confirmed again.
     ///
     /// Pre: `payload` verified at `now_ms`, so each of its sessions is a live, authorized
     /// delegation; `inline` is the [`ResolvedFrame::inline`] it was resolved with.
@@ -429,27 +457,28 @@ impl<F> ReferencedSessions<F> {
         payload: &MessagePayload,
         inline: PerSlot<bool>,
         now_ms: u128,
-    ) -> Result<()> {
+    ) -> Result<Vec<SessionDigest>> {
         self.known.evict_expired(now_ms);
+        let mut confirm = Vec::new();
         for (session, arrived_inline) in payload.sessions().zip(inline).into_array() {
             if arrived_inline {
-                self.known.admit(session.digest()?, session.clone());
+                let digest = session.digest()?;
+                self.known.admit(digest, session.clone(), ());
+                confirm = push_distinct(confirm, digest);
             }
         }
-        Ok(())
+        Ok(confirm)
     }
 
     /// Whether some held frame misses `digest` at `now_ms`: the only announcements and
     /// disclaimers this end asked for.
     fn is_awaited(&self, digest: SessionDigest, now_ms: u128) -> bool {
-        self.held
-            .iter()
-            .any(|held| missing_digests(held.frame.as_ref(), &self.known, now_ms).contains(&digest))
+        self.awaited_digests(now_ms).contains(&digest)
     }
 
     /// Drop every held frame that misses `digest` at `now_ms`.
     fn drop_awaiting(&mut self, digest: SessionDigest, now_ms: u128) -> Vec<F> {
-        let (dropped, kept): (VecDeque<_>, VecDeque<_>) = std::mem::take(&mut self.held)
+        let (dropped, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.held)
             .into_iter()
             .partition(|held| {
                 missing_digests(held.frame.as_ref(), &self.known, now_ms).contains(&digest)
@@ -462,7 +491,7 @@ impl<F> ReferencedSessions<F> {
     ///
     /// ```text
     ///   not awaited ───────────────────────▶ Ok([])   ignored: nothing unsolicited is cached
-    ///   awaited ∧ delegation verifies ─────▶ Ok([])   admitted; the caller drains
+    ///   awaited ∧ delegation verifies ─────▶ Ok([])   admitted; the caller releases
     ///   awaited ∧ delegation refused ──────▶ Ok(F*)   frames awaiting it, to be failed
     /// ```
     pub(crate) fn announce(&mut self, session: Session, now_ms: u128) -> Result<Vec<F>> {
@@ -474,7 +503,7 @@ impl<F> ReferencedSessions<F> {
             return Ok(self.drop_awaiting(digest, now_ms));
         }
         self.known.evict_expired(now_ms);
-        self.known.admit(digest, session);
+        self.known.admit(digest, session, ());
         Ok(Vec::new())
     }
 
@@ -484,46 +513,22 @@ impl<F> ReferencedSessions<F> {
         self.drop_awaiting(digest, now_ms)
     }
 
-    /// Claim the drain.
-    ///
-    /// Post: `true` implies the caller is the only drainer until [`Self::release_next`] returns
-    /// [`FrameRelease::Blocked`] or [`FrameRelease::Drained`]; `false` means another drainer is active or
-    /// nothing is held.
-    pub(crate) fn begin_drain(&mut self) -> bool {
-        if self.draining || self.held.is_empty() {
-            return false;
-        }
-        self.draining = true;
-        true
-    }
-
-    /// The next step of the drain at `now_ms`, in arrival order.
-    ///
-    /// Pre: the caller holds the drain granted by [`Self::begin_drain`]. An error ends the drain
-    /// as [`FrameRelease::Blocked`] does, so the hold is never left claimed by nobody.
-    pub(crate) fn release_next(&mut self, now_ms: u128) -> Result<FrameRelease<F>> {
-        let Some(head) = self.held.front() else {
-            self.draining = false;
-            return Ok(FrameRelease::Drained);
+    /// The next held frame that can leave at `now_ms`: one whose proof lapsed, else one that
+    /// resolves now; `None` when every held frame still waits.
+    pub(crate) fn release_next(&mut self, now_ms: u128) -> Result<Option<FrameRelease<F>>> {
+        let releasable = self.held.iter().position(|held| {
+            !held.frame.hop_proof_lifetime().is_live_at(now_ms)
+                || missing_digests(held.frame.as_ref(), &self.known, now_ms).is_empty()
+        });
+        let Some(position) = releasable else {
+            return Ok(None);
         };
-        let lapsed = !head.frame.hop_proof_lifetime().is_live_at(now_ms);
-        let missing = missing_digests(head.frame.as_ref(), &self.known, now_ms);
-        if !lapsed && !missing.is_empty() {
-            self.draining = false;
-            return Ok(FrameRelease::Blocked(missing));
+        let HeldFrame { frame, carrier } = self.held.swap_remove(position);
+        if !frame.hop_proof_lifetime().is_live_at(now_ms) {
+            return Ok(Some(FrameRelease::Lapsed(carrier)));
         }
-        let Some(HeldFrame { frame, carrier }) = self.held.pop_front() else {
-            self.draining = false;
-            return Ok(FrameRelease::Drained);
-        };
-        if lapsed {
-            return Ok(FrameRelease::Lapsed(carrier));
-        }
-        let resolved = self.resolve(frame, carrier, now_ms);
-        if resolved.is_err() {
-            self.draining = false;
-        }
-        resolved.map(FrameRelease::Resolved)
+        self.resolve(frame, carrier, now_ms)
+            .map(|resolved| Some(FrameRelease::Resolved(resolved)))
     }
 
     /// The frames currently held.

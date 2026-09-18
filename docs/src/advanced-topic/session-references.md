@@ -35,7 +35,7 @@ table of at most 64 sessions, least recently referenced first out:
 
 | End | Table | Populated by |
 | --- | --- | --- |
-| sender | sessions this link carried inline | frames the transport accepted, in acceptance order |
+| sender | sessions it sent inline, and which of them the peer confirmed | its own frames; confirmations from the peer |
 | receiver | sessions this link carried inline | frames that verified, and solicited announcements whose delegation verified |
 
 Consequences of the scope:
@@ -44,40 +44,59 @@ Consequences of the scope:
   its own bounded share. Nothing an unrelated party says is cached, and an announcement nobody
   asked for is ignored.
 - A relay keeps the origin sessions of the traffic it forwards in the table of each outgoing
-  link. A destination that never met the origin gets the origin's session inline in the first
-  frame its last hop forwards for that origin. No node ever asks the origin for anything.
+  link. A destination that never met the origin gets the origin's session inline from its last
+  hop until it confirms it. No node ever asks the origin for anything.
 - Both tables die with the connection generation. A restarted node and its peer start from
   empty tables together; there is no state to resynchronise.
-- References are used only over sequenced delivery (a reliable, ordered data channel). A
-  transport that may reorder or drop accepted frames while the connection stays up carries
-  every frame self-contained.
+
+## The link is a datagram link
+
+Nothing assumes that frames arrive in order, or at all. WebRTC data channels happen to be
+reliable and ordered; the protocol does not use that, so a transport built on QUIC datagrams or
+plain UDP would carry it unchanged.
+
+The sender switches a session from inline to reference only after the receiver has confirmed it:
+
+```text
+sender                                      receiver
+  frame, session s inline        ───────▶   verifies; learns s
+                                 ◀───────   Known(digest(s))
+  frame, Digest(s)               ───────▶   resolves from its table
+```
+
+- Until the confirmation arrives, every frame carries `s` inline, and the receiver confirms
+  every inline arrival of a session it knows. A lost inline frame, a lost confirmation, or any
+  reordering costs inline frames, never a stall and never a miss: the reference is sent after
+  the confirmation, which was sent after the session was learned.
+- A reference therefore misses only when the receiver has *forgotten* the session (capacity
+  eviction, expiry). That is repaired on the link.
 
 ## Miss
-
-The tables agree when frames arrive in the order they were accepted for sending. That is an
-optimisation, not an assumption. A digest the receiver cannot resolve is repaired on the link:
 
 ```text
 receiver                                   sender
   frame references d, d unknown
-  hold frame (and frames behind it)
-  Request(d)                   ───────▶   look d up in the sender table
+  hold the frame; Request(d)   ───────▶   look d up in the sender table
                                ◀───────   Announce(session)  or  Unknown(d)
-  announce: delegation verifies → release held frames in arrival order
-  unknown / refused delegation  → fail the frames that await d, release the rest
+  announce: delegation verifies → release the frames that now resolve
+  unknown / refused delegation  → fail the frames that await d
 ```
 
-- The hold keeps at most 32 frames per connection, in arrival order; the frame that would
-  exceed it is dropped, and its arrival asks the head's question again.
-- Only the head's missing digests are requested, once per drain attempt. Drain attempts are
-  caused by arrivals and answers; there is no timer. A peer that never answers stalls only its
-  own link, and a held frame whose proof lifetime lapses is dropped.
+- Held frames are independent of each other and of everything else: a frame that resolves is
+  never queued behind one that does not, because the link promises no order to preserve. A held
+  frame leaves when a later frame or an announcement teaches the session it awaits, or is
+  dropped when its proof lifetime lapses.
+- The hold keeps at most 32 frames per connection. A digest is asked for when the first frame
+  awaiting it is held; a frame that finds the hold full is dropped and every awaited digest is
+  asked for again, since a full hold means an answer is overdue. There is no timer, and a peer
+  that never answers stalls only its own held frames.
 - The sender answers each question with exactly one frame, scheduled like any control transfer
   under the same per-peer and global capacity.
 
-Link-control frames are unsigned. They are meaningful only on the authenticated connection they
-arrive on, an announced session authenticates itself through its account signature, and a
-digest names a value rather than asserting one.
+Link-control frames (`Known`, `Request`, `Announce`, `Unknown`) are unsigned and idempotent.
+They are meaningful only on the authenticated connection they arrive on, an announced session
+authenticates itself through its account signature, and a digest names a value rather than
+asserting one; a duplicate or a stale one changes nothing.
 
 ## Expiry
 

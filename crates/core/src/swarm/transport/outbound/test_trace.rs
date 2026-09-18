@@ -10,13 +10,19 @@ use std::sync::Mutex;
 use super::Did;
 use super::TransferClass;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+use crate::message::PerSlot;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::message::SessionControl;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+use crate::message::SessionRef;
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 thread_local! {
     static OUTBOUND_SUBMIT_COUNT: Cell<usize> = const { Cell::new(0) };
     /// Session questions this thread's nodes answered with an announcement.
     static SESSION_ANNOUNCEMENT_COUNT: Cell<usize> = const { Cell::new(0) };
+    /// Payload frames this thread's nodes encoded with at least one session by reference.
+    static REFERENCED_FRAME_COUNT: Cell<usize> = const { Cell::new(0) };
 }
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
@@ -39,6 +45,23 @@ pub(super) fn record_outbound_submit() {
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 pub(crate) fn session_announcement_count_for_test() -> usize {
     SESSION_ANNOUNCEMENT_COUNT.with(Cell::get)
+}
+
+/// The payload frames encoded with at least one session slot by reference on this test thread
+/// so far: the observable that a link switched from inline to references.
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+pub(crate) fn referenced_frame_count_for_test() -> usize {
+    REFERENCED_FRAME_COUNT.with(Cell::get)
+}
+
+/// Count a frame encoded as `sessions` on this test thread if any slot is a reference.
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+pub(super) fn record_encoded_frame(sessions: &PerSlot<SessionRef<'_>>) {
+    let referenced = matches!(sessions.origin, SessionRef::Digest(_))
+        || matches!(sessions.hop, SessionRef::Digest(_));
+    if referenced {
+        REFERENCED_FRAME_COUNT.with(|count| count.set(count.get().saturating_add(1)));
+    }
 }
 
 /// Count `answer` on this test thread if it is an announcement.

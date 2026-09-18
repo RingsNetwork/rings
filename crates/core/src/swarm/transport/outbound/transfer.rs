@@ -39,13 +39,13 @@ pub(super) enum OutboundFrame {
     /// sending, so the encoding order is the order frames are accepted in.
     Payload(Box<MessagePayload>),
     /// A link-control frame, already encoded: it has no session slots.
-    SessionControl(Bytes),
+    Control(Bytes),
 }
 
 enum FrameSource {
     Whole(Option<Box<MessagePayload>>),
     Chunked(ChunkedFrameSource),
-    SessionControl(Option<Bytes>),
+    LinkControl(Option<Bytes>),
 }
 
 pub(in crate::swarm::transport) struct ChunkedFrameSource {
@@ -74,9 +74,9 @@ impl FrameSource {
             Self::Whole(frame) => Ok(frame
                 .take()
                 .map(|payload| (OutboundFrame::Payload(payload), "whole_message"))),
-            Self::SessionControl(frame) => Ok(frame
+            Self::LinkControl(frame) => Ok(frame
                 .take()
-                .map(|bytes| (OutboundFrame::SessionControl(bytes), "link_control"))),
+                .map(|bytes| (OutboundFrame::Control(bytes), "link_control"))),
             Self::Chunked(ChunkedFrameSource {
                 signer,
                 chunks,
@@ -220,7 +220,7 @@ impl OutboundTransfer {
     ) -> (Self, oneshot::Receiver<Result<SendCompletionOutcome>>) {
         Self::new(
             route,
-            FrameSource::SessionControl(Some(frame)),
+            FrameSource::LinkControl(Some(frame)),
             0,
             OutboundCompletion::Detached,
             StopToken::never(),
@@ -289,6 +289,12 @@ impl OutboundTransfer {
 
     pub(super) fn next_frame(&mut self) -> Result<Option<(OutboundFrame, &'static str)>> {
         self.source.next_frame(self.did)
+    }
+
+    /// Whether this transfer carries a link-control frame rather than a message.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(super) fn is_link_control(&self) -> bool {
+        matches!(self.source, FrameSource::LinkControl(_))
     }
 
     pub(super) fn is_before_first_frame(&self) -> bool {

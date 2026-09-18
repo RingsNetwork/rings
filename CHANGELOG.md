@@ -13,17 +13,18 @@
   - A steady-state relayed payload carries two 20-byte digests and two 65-byte signatures of
     identity material, where it carried two full delegations.
   - References are scoped to one direction of one admitted connection generation. The sender
-    references a session only after the transport accepted a frame carrying it inline; the
-    receiver learns a session only from a frame that verified, or from an announcement it asked
-    for whose delegation verified. Each table holds at most 64 sessions and dies with the
-    connection, so a restart needs no resynchronisation.
+    references a session only after the receiver confirmed it with an unsigned `Known` frame;
+    the receiver confirms every inline session it verified, so loss or reordering on the link
+    costs inline frames and never a stall. The link is treated as a datagram link: nothing
+    relies on ordered or reliable delivery. Each table holds at most 64 sessions and dies with
+    the connection, so a restart needs no resynchronisation.
   - A forwarding hop re-encodes the origin slot for its own next link, so a destination that
     never met the origin receives the origin's session inline from its last hop. No node asks
     the origin for a session.
-  - A reference the receiver cannot resolve holds the frame, and the frames behind it, in
-    arrival order (at most 32 per connection) while the link repairs the miss with the new
-    unsigned link-control frames (`RINGS-LINK-V1`): a request for one digest, answered by
-    exactly one announcement or disclaimer.
+  - A reference the receiver cannot resolve (it forgot a confirmed session) holds that frame
+    alone, at most 32 per connection, while the link repairs the miss with the unsigned
+    link-control frames (`RINGS-LINK-V1`): a request for one digest, answered by exactly one
+    announcement or disclaimer. Frames that resolve are never queued behind held ones.
   - An expired session is evicted from both tables; a reference to it is a miss, and
     re-announcing the expired delegation is refused as it is inline.
   - `MessagePayload::to_wire`/`from_wire` remain the self-contained encoding (both sessions
@@ -32,10 +33,6 @@
 
 ### Added
 
-- `rings_transport` `ConnectionInterface::frame_delivery` reports whether a connection delivers
-  accepted frames exactly once and in order (`FrameDelivery::Sequenced`, the WebRTC data
-  channels) or may reorder or drop them while it stays up (`FrameDelivery::Unsequenced`).
-  Session references are used only over sequenced delivery.
 - `Session::digest` and `SessionDigest` in `rings_core`: the content address of one exact
   delegation.
 

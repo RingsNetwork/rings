@@ -45,7 +45,6 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::lifecycle::StopSource;
 use crate::measure::MeasureImpl;
-use crate::swarm::session_link::FramePlan;
 use crate::utils::get_epoch_ms;
 
 mod admission;
@@ -62,6 +61,8 @@ mod spawn;
 mod test_trace;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use test_trace::outbound_submit_count_for_test;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use test_trace::referenced_frame_count_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use test_trace::reset_outbound_submit_count_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -95,7 +96,6 @@ use queue::RunnableTransfer;
 use queue::TransferQueues;
 #[cfg(test)]
 pub(crate) use queue::OUTBOUND_CONTROL_BURST;
-use session_encoding::OutboundLink;
 use session_encoding::SharedAnnouncedSessions;
 use spawn::spawn_worker;
 pub(super) use transfer::ChunkFrames;
@@ -159,9 +159,6 @@ enum ActiveFrameStep {
         before_first_frame: bool,
         bytes: bytes::Bytes,
         context: &'static str,
-        /// What the frame announces on this link once it is accepted; `None` for a frame with
-        /// no session slots.
-        plan: Option<FramePlan>,
     },
 }
 
@@ -239,6 +236,8 @@ impl OutboundPeerHandle {
             return Err(Error::ChannelSendMessageFailed);
         }
         let mut transfer = transfer;
+        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+        let is_control = transfer.is_link_control();
         transfer.bind_scheduler_stop(self.state.stop.token());
         let scheduled = ScheduledTransfer::new(transfer, capacity_permit);
         if self.state.stop.is_stop_requested() {
@@ -263,7 +262,7 @@ impl OutboundPeerHandle {
             Err(_) => (Err(Error::ChannelSendMessageFailed), false),
         };
         #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-        if submitted {
+        if submitted && !is_control {
             test_trace::record_outbound_submit();
             test_trace::record_submission(self.state.peer);
         }
@@ -744,27 +743,23 @@ impl OutboundWorker {
             return Some(ActiveFrameStep::Stopped);
         }
         let before_first_frame = transfer.is_before_first_frame();
-        let link = OutboundLink {
-            generation: transfer.admitted.attempt().generation(),
-            delivery: transfer.admitted.connection().frame_delivery(),
-        };
+        let generation = transfer.admitted.attempt().generation();
         let announced = &self.announced;
         let encoded = transfer.next_frame().and_then(|frame| {
             frame
                 .map(|(frame, context)| {
                     announced
-                        .encode(link, frame, get_epoch_ms())
-                        .map(|(bytes, plan)| (bytes, plan, context))
+                        .encode(generation, frame, get_epoch_ms())
+                        .map(|bytes| (bytes, context))
                 })
                 .transpose()
         });
         Some(match encoded {
-            Ok(Some((bytes, plan, context))) => ActiveFrameStep::Send {
+            Ok(Some((bytes, context))) => ActiveFrameStep::Send {
                 class,
                 before_first_frame,
                 bytes,
                 context,
-                plan,
             },
             Ok(None) => ActiveFrameStep::Complete,
             Err(error) => ActiveFrameStep::Failed(error),
@@ -808,7 +803,6 @@ impl OutboundWorker {
                 before_first_frame,
                 bytes,
                 context,
-                plan,
             } => {
                 let Some(runnable) = self.active.as_ref() else {
                     tracing::error!("outbound worker lost its active transfer before send");
@@ -832,10 +826,6 @@ impl OutboundWorker {
                         self.finalize_stopped_active_admission(before_first_frame, admission);
                     self.shutdown_with_results(final_results);
                     return;
-                }
-                // Only a frame the transport accepted is on the link, so only it announces.
-                if let (ChunkSendProgress::Ready(Ok(_)), Some(plan)) = (&admission, plan) {
-                    self.announced.commit(plan, get_epoch_ms());
                 }
                 self.finish_active_admission(class, before_first_frame, admission);
             }

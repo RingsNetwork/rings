@@ -124,13 +124,12 @@ fn generated_link_frame_decode_boundary_inputs_keep_the_receiver_bounded() {
             Ok(LinkFrame::Control(SessionControl::Unknown(digest))) => {
                 let _unavailable = receiver.unknown(digest, now_ms);
             }
-            Ok(LinkFrame::Control(SessionControl::Request(_))) | Err(_) => {}
+            Ok(LinkFrame::Control(SessionControl::Request(_) | SessionControl::Known(_)))
+            | Err(_) => {}
         }
-        if receiver.begin_drain() {
-            while let Ok(FrameRelease::Resolved(_) | FrameRelease::Lapsed(_)) =
-                receiver.release_next(now_ms)
-            {}
-        }
+        while let Ok(Some(FrameRelease::Resolved(_) | FrameRelease::Lapsed(_))) =
+            receiver.release_next(now_ms)
+        {}
         assert!(receiver.held_len() <= LINK_HOLD_CAPACITY);
         assert!(receiver.known_len() <= SESSION_TABLE_CAPACITY);
     }
@@ -144,7 +143,10 @@ fn generated_link_frame(generator: &mut DecodeBoundaryGenerator) -> Option<Vec<u
         0 => SessionControl::Announce(sessions.origin.clone()).to_wire(),
         1 => SessionControl::Unknown(sessions.origin.digest().ok()?).to_wire(),
         2 => SessionControl::Request(sessions.origin.digest().ok()?).to_wire(),
-        3 => payload.to_wire(),
+        3 => match generator.usize(2) {
+            0 => SessionControl::Known(sessions.origin.digest().ok()?).to_wire(),
+            _ => payload.to_wire(),
+        },
         _ => {
             let references = PerSlot {
                 origin: SessionRef::Digest(sessions.origin.digest().ok()?),

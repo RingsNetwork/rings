@@ -12,8 +12,6 @@ use crate::core::transport::ConnectionInterface;
 #[cfg(all(test, not(target_family = "wasm")))]
 use crate::core::transport::ConnectionStateSnapshot;
 #[cfg(all(test, not(target_family = "wasm")))]
-use crate::core::transport::FrameDelivery;
-#[cfg(all(test, not(target_family = "wasm")))]
 use crate::core::transport::WebrtcConnectionState;
 use crate::error::Error;
 use crate::error::Result;
@@ -258,10 +256,6 @@ mod tests {
 
         fn data_channel_is_open(&self) -> Result<bool> {
             Ok(false)
-        }
-
-        fn frame_delivery(&self) -> FrameDelivery {
-            FrameDelivery::Sequenced
         }
 
         fn max_message_size(&self) -> usize {

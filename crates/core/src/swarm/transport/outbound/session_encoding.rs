@@ -1,12 +1,12 @@
-//! The sessions this end has announced to one peer: the table the outbound worker encodes
-//! frames against, shared with the inbound side that answers the peer's questions about it.
+//! The sessions this end has sent one peer inline: the table the outbound worker encodes frames
+//! against, shared with the inbound side that marks the peer's confirmations and answers its
+//! questions about it.
 
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
 
 use bytes::Bytes;
-use rings_transport::core::transport::FrameDelivery;
 
 use super::transfer::OutboundFrame;
 use super::OutboundSchedulers;
@@ -16,15 +16,6 @@ use crate::message::SessionControl;
 use crate::message::WirePayload;
 use crate::session::SessionDigest;
 use crate::swarm::session_link::AnnouncedSessions;
-use crate::swarm::session_link::FramePlan;
-
-/// The link a frame is about to be sent on: the connection generation its table belongs to, and
-/// what the transport guarantees about the frames it accepts.
-#[derive(Clone, Copy)]
-pub(super) struct OutboundLink {
-    pub(super) generation: u64,
-    pub(super) delivery: FrameDelivery,
-}
 
 /// The one handle on a peer's [`AnnouncedSessions`]: every access is one pure step under the
 /// lock.
@@ -48,46 +39,47 @@ impl SharedAnnouncedSessions {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// The bytes of `frame` on `link` at `now_ms`, and what sending them announces.
+    /// The bytes of `frame` on the link of `generation` at `now_ms`.
     ///
-    /// ```text
-    ///   SessionControl(bytes) ──────────────▶ (bytes, nothing announced)
-    ///   Payload over Unsequenced ────────▶ (inline encoding, nothing announced)
-    ///   Payload over Sequenced ──plan────▶ (encoding with the planned references, the plan)
-    /// ```
-    ///
-    /// A reference relies on an earlier frame having arrived, which only sequenced delivery
-    /// promises; elsewhere every frame stays self-contained and the table is left alone. The
-    /// worker calls this immediately before the send, so the order of these decisions is the
-    /// order of acceptance the table's soundness law needs.
+    /// A control frame is already bytes. A payload's session slots are decided by the table:
+    /// confirmed sessions travel by digest, every other session inline.
     pub(super) fn encode(
         &self,
-        link: OutboundLink,
+        generation: u64,
         frame: OutboundFrame,
         now_ms: u128,
-    ) -> Result<(Bytes, Option<FramePlan>)> {
-        match (frame, link.delivery) {
-            (OutboundFrame::SessionControl(bytes), _) => Ok((bytes, None)),
-            (OutboundFrame::Payload(payload), FrameDelivery::Unsequenced) => {
-                payload.to_wire().map(|bytes| (bytes, None))
-            }
-            (OutboundFrame::Payload(payload), FrameDelivery::Sequenced) => {
+    ) -> Result<Bytes> {
+        match frame {
+            OutboundFrame::Control(bytes) => Ok(bytes),
+            OutboundFrame::Payload(payload) => {
                 let payload = payload.as_ref();
-                let plan = self.lock().plan(link.generation, payload, now_ms)?;
-                let bytes = WirePayload::view(payload, plan.session_refs(payload)).to_wire()?;
-                Ok((bytes, Some(plan)))
+                let sessions = self.lock().encode(generation, payload, now_ms)?;
+                #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+                super::test_trace::record_encoded_frame(&sessions);
+                WirePayload::view(payload, sessions).to_wire()
             }
         }
-    }
-
-    /// Record that the frame planned as `plan` was accepted by the transport at `now_ms`: only
-    /// then is it on the link, and only then has it announced anything.
-    pub(super) fn commit(&self, plan: FramePlan, now_ms: u128) {
-        self.lock().commit(plan, now_ms);
     }
 }
 
 impl OutboundSchedulers {
+    /// The peer confirmed `digest` on the link of `generation`: later frames to it reference
+    /// the session. A peer this end has no scheduler for was sent nothing.
+    pub(in crate::swarm::transport) fn acknowledge_session(
+        &self,
+        peer: Did,
+        generation: u64,
+        digest: SessionDigest,
+    ) {
+        if let Some(handle) = self.lock_registry().peers.get(&peer).cloned() {
+            handle
+                .state
+                .announced
+                .lock()
+                .acknowledge(generation, digest);
+        }
+    }
+
     /// Answer `peer`'s question about `digest` on the link of `generation` at `now_ms`. A peer
     /// this end has no scheduler for was sent nothing, so nothing is known to it.
     pub(in crate::swarm::transport) fn answer_session_request(

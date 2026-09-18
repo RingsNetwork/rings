@@ -9,7 +9,6 @@ use serde::Serialize;
 
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::ConnectionStateSnapshot;
-use crate::core::transport::FrameDelivery;
 use crate::core::transport::SendPermit;
 use crate::core::transport::TransportMessage;
 use crate::core::transport::WebrtcConnectionState;
@@ -145,13 +144,6 @@ where
         }
     }
 
-    // A released reference delivers nothing; `Unsequenced` is the answer that lets a caller rely
-    // on nothing, for the same reason `max_message_size` answers with a default below.
-    fn frame_delivery(&self) -> FrameDelivery {
-        self.upgrade()
-            .map_or(FrameDelivery::Unsequenced, |c| c.frame_delivery())
-    }
-
     // On a released reference this reports the interop default rather than an error, by deliberate
     // design: `ConnectionInterface::max_message_size` returns `usize` (it feeds the framing
     // planner), and threading a `Result` through it and every backend for this one edge would add
@@ -211,10 +203,6 @@ mod tests {
     impl ConnectionInterface for Mock {
         type Sdp = String;
         type Error = Error;
-
-        fn frame_delivery(&self) -> FrameDelivery {
-            FrameDelivery::Sequenced
-        }
 
         fn max_message_size(&self) -> usize {
             4242

@@ -22,7 +22,9 @@
 //! A frame is either a payload or a [`SessionControl`]; the two are told apart by a marker before
 //! any decoding. A control frame is unsigned: it is meaningful only on the authenticated edge it
 //! arrives on, an announced session authenticates itself (its account signature), and a digest
-//! names a value rather than asserting one.
+//! names a value rather than asserting one. The link is treated as a datagram link: control
+//! frames and payload frames may arrive in any order or not at all, and every control frame is
+//! idempotent, so a duplicate or a stale one changes nothing.
 
 use std::borrow::Cow;
 
@@ -66,14 +68,6 @@ impl<T> PerSlot<T> {
         let origin = f(self.origin);
         let hop = f(self.hop);
         PerSlot { origin, hop }
-    }
-
-    /// Both slots by reference: `&(a, b) ↦ (&a, &b)`.
-    pub(crate) const fn as_ref(&self) -> PerSlot<&T> {
-        PerSlot {
-            origin: &self.origin,
-            hop: &self.hop,
-        }
     }
 
     /// The slots paired pointwise: `(a, b) × (c, d) ↦ ((a, c), (b, d))`.
@@ -271,10 +265,12 @@ impl<'a> WirePayload<'a> {
     }
 }
 
-/// A request or an answer about one session reference, exchanged between the two ends of one
-/// link. See the module documentation for why these are unsigned.
+/// What the two ends of one link tell each other about session references. See the module
+/// documentation for why these are unsigned.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub(crate) enum SessionControl {
+    /// "A frame of yours carried this session inline and it verified: you may reference it."
+    Known(SessionDigest),
     /// "A frame of yours references this digest and I cannot resolve it."
     Request(SessionDigest),
     /// "This is a session you asked for." The receiver recomputes the digest; it is never

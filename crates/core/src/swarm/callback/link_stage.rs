@@ -25,6 +25,7 @@ use crate::message::SessionControl;
 use crate::session::SessionDigest;
 use crate::swarm::session_link::FrameArrival;
 use crate::swarm::session_link::FrameRelease;
+use crate::swarm::transport::PendingConnectionAttempt;
 use crate::utils::get_epoch_ms;
 
 impl InnerSwarmCallback {
@@ -32,9 +33,10 @@ impl InnerSwarmCallback {
     ///
     /// ```text
     ///   bytes ─decode─┬─ SessionControl ──▶ handle_link_control
-    ///                 └─ Payload ─arrive─┬─ Resolved ─▶ admit_resolved_frame
-    ///                                    ├─ Held ─────▶ drain (asks the peer for the head's misses)
-    ///                                    └─ Overflow ─▶ dropped, then drain (asks again)
+    ///                 └─ Payload ─arrive─┬─ Resolved ─▶ admit_resolved_frame ─▶ confirm what it taught,
+    ///                                    │                                     release what awaited it
+    ///                                    ├─ Held ─────▶ ask the peer for what the frame misses
+    ///                                    └─ Overflow ─▶ dropped; ask again for everything awaited
     /// ```
     pub(super) async fn submit_inbound_message(
         &self,
@@ -69,19 +71,21 @@ impl InnerSwarmCallback {
             .session_link()
             .arrive(frame, carrier, get_epoch_ms());
         match arrival {
-            Ok(FrameArrival::Resolved(resolved)) => self.admit_resolved_frame(peer, resolved).await,
-            Ok(FrameArrival::Held) => {
-                self.drain_session_hold(peer).await;
+            Ok(FrameArrival::Resolved(resolved)) => {
+                let learned = self.admit_resolved_frame(peer, resolved).await?;
+                self.learned_sessions(peer, learned).await;
                 Ok(())
             }
-            Ok(FrameArrival::Overflow(_)) => {
+            Ok(FrameArrival::Held { request }) => {
+                self.request_sessions(peer, request).await;
+                Ok(())
+            }
+            Ok(FrameArrival::Overflow { request }) => {
                 tracing::debug!(
                     peer = ?peer,
                     "dropping message; the hold for unresolved session references is full"
                 );
-                // The hold is full because its head is still unanswered: ask again, so a lost
-                // question cannot wedge the link while frames keep arriving.
-                self.drain_session_hold(peer).await;
+                self.request_sessions(peer, request).await;
                 Ok(())
             }
             Err(error) => {
@@ -101,45 +105,62 @@ impl InnerSwarmCallback {
             .await;
     }
 
-    /// Release held frames in arrival order until the hold is empty or its head misses a
-    /// session, then ask the peer for what the head misses.
+    /// Deliver every held frame that can leave now: one that resolves, or one whose proof
+    /// lapsed, which is dropped.
     ///
-    /// A failure on one released frame is logged and does not stop the drain: the frame was
-    /// accepted from the transport when it arrived, and the frames behind it are independent of
-    /// it. A question that cannot be sent is not retried here; the next arrival or answer
-    /// drains again.
-    async fn drain_session_hold(&self, peer: Option<Did>) {
-        if !self.processor.session_link().begin_drain() {
-            return;
-        }
+    /// A failure on one released frame is logged and does not stop the release: the frame was
+    /// accepted from the transport when it arrived, and the others are independent of it.
+    async fn release_held_frames(&self, peer: Option<Did>) {
         loop {
             let release = self.processor.session_link().release_next(get_epoch_ms());
             match release {
-                Ok(FrameRelease::Resolved(resolved)) => {
-                    if let Err(error) = self.admit_resolved_frame(peer, resolved).await {
+                Ok(Some(FrameRelease::Resolved(resolved))) => {
+                    // The loop re-scans the hold, so what this frame taught is applied to the
+                    // frames still held without recursing.
+                    let learned = self.admit_resolved_frame(peer, resolved).await;
+                    let learned = learned.unwrap_or_else(|error| {
                         tracing::warn!(
                             peer = ?peer,
                             error = ?error,
                             "failed to deliver a message held for a session reference"
                         );
-                    }
+                        Vec::new()
+                    });
+                    self.confirm_sessions(peer, learned).await;
                 }
-                Ok(FrameRelease::Lapsed(_)) => {
+                Ok(Some(FrameRelease::Lapsed(_))) => {
                     tracing::debug!(
                         peer = ?peer,
                         "dropping a message whose proof lapsed while its session was unresolved"
                     );
                 }
-                Ok(FrameRelease::Blocked(request)) => {
-                    self.request_sessions(peer, request).await;
-                    return;
-                }
-                Ok(FrameRelease::Drained) => return,
+                Ok(None) => return,
                 Err(error) => {
-                    tracing::warn!(peer = ?peer, error = ?error, "session hold drain failed");
+                    tracing::warn!(peer = ?peer, error = ?error, "releasing a held message failed");
                     return;
                 }
             }
+        }
+    }
+
+    /// The link learned `learned` from a frame that arrived: confirm them to `peer`, and let
+    /// the held frames that awaited one of them leave.
+    async fn learned_sessions(&self, peer: Option<Did>, learned: Vec<SessionDigest>) {
+        let releases = !learned.is_empty();
+        self.confirm_sessions(peer, learned).await;
+        if releases {
+            self.release_held_frames(peer).await;
+        }
+    }
+
+    /// Tell `peer` that the sessions behind `confirm` verified here, so it may reference them.
+    async fn confirm_sessions(&self, peer: Option<Did>, confirm: Vec<SessionDigest>) {
+        let Some(peer) = peer else {
+            return;
+        };
+        for digest in confirm {
+            self.send_session_control(peer, SessionControl::Known(digest))
+                .await;
         }
     }
 
@@ -150,25 +171,32 @@ impl InnerSwarmCallback {
             return;
         };
         for digest in request {
-            let question = SessionControl::Request(digest);
-            if let Err(error) = self
-                .processor
-                .logical
-                .transport
-                .send_link_control(peer, &question)
-                .await
-            {
-                tracing::debug!(peer = %peer, error = ?error, "failed to request a session");
-            }
+            self.send_session_control(peer, SessionControl::Request(digest))
+                .await;
+        }
+    }
+
+    /// Send one control frame to `peer`; a failure is logged, since the next arrival repeats
+    /// the question or the confirmation.
+    async fn send_session_control(&self, peer: Did, control: SessionControl) {
+        if let Err(error) = self
+            .processor
+            .logical
+            .transport
+            .send_link_control(peer, &control)
+            .await
+        {
+            tracing::debug!(peer = %peer, error = ?error, control = ?control, "failed to send session control");
         }
     }
 
     /// Act on one link-control frame from `peer`.
     ///
     /// ```text
-    ///   Request(d)  ─▶ answer from the announced table of this connection generation
-    ///   Announce(s) ─▶ announce ─▶ fail refused frames ─▶ drain
-    ///   Unknown(d)  ─▶ unknown  ─▶ fail awaiting frames ─▶ drain
+    ///   Known(d)    ─▶ mark d confirmed in the announced table of this connection generation
+    ///   Request(d)  ─▶ answer from that table
+    ///   Announce(s) ─▶ announce ─▶ fail refused frames ─▶ release what resolves
+    ///   Unknown(d)  ─▶ unknown  ─▶ fail awaiting frames
     /// ```
     async fn handle_link_control(&self, peer: Option<Did>, control: SessionControl) {
         let Some(peer) = peer else {
@@ -176,6 +204,10 @@ impl InnerSwarmCallback {
             return;
         };
         let unavailable = match control {
+            SessionControl::Known(digest) => {
+                self.acknowledge_session(peer, digest);
+                return;
+            }
             SessionControl::Request(digest) => {
                 self.answer_session_request(peer, digest).await;
                 return;
@@ -203,16 +235,31 @@ impl InnerSwarmCallback {
                 tracing::warn!(peer = %peer, error = ?error, "failed to judge a session answer");
             }
         }
-        self.drain_session_hold(Some(peer)).await;
+        self.release_held_frames(Some(peer)).await;
+    }
+
+    /// The connection generation this callback is bound to, if it is `peer`'s.
+    fn bound_attempt(&self, peer: Did) -> Option<PendingConnectionAttempt> {
+        self.pending_attempt()
+            .filter(|attempt| attempt.peer() == peer)
+    }
+
+    /// `peer` confirmed `digest`: mark it in what this connection generation announced.
+    fn acknowledge_session(&self, peer: Did, digest: SessionDigest) {
+        let Some(attempt) = self.bound_attempt(peer) else {
+            tracing::debug!(peer = %peer, "ignoring a session confirmation outside a bound connection");
+            return;
+        };
+        self.processor
+            .logical
+            .transport
+            .acknowledge_session(attempt, digest);
     }
 
     /// Answer `peer`'s question about `digest` from what this connection generation announced.
     /// A callback bound to no handshake, or to another peer's, has announced nothing to `peer`.
     async fn answer_session_request(&self, peer: Did, digest: SessionDigest) {
-        let Some(attempt) = self
-            .pending_attempt()
-            .filter(|attempt| attempt.peer() == peer)
-        else {
+        let Some(attempt) = self.bound_attempt(peer) else {
             tracing::debug!(peer = %peer, "ignoring a session request outside a bound connection");
             return;
         };

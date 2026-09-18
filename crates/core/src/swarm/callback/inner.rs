@@ -4,9 +4,9 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 use bytes::Bytes;
 use rings_transport::core::callback::AdmittedInboundMessage;
+use rings_transport::core::callback::InboundFrameCapacityLease;
 use rings_transport::core::callback::TransportCallback;
 use rings_transport::core::transport::WebrtcConnectionState;
 
@@ -21,12 +21,14 @@ use super::HeldInboundFrame;
 use super::InboundGate;
 use super::InboundProcessor;
 use super::InnerSwarmCallback;
+use super::PreparedInboundFrame;
 use super::SharedSwarmCallback;
 use super::SwarmEvent;
 use super::TransportCallbackError;
 use super::UnresolvedInboundFrame;
 use crate::dht::Did;
 use crate::measure::Authentication;
+use crate::session::SessionDigest;
 use crate::swarm::session_link::ResolvedFrame;
 use crate::swarm::transport::ConnectionEventDisposition;
 use crate::swarm::transport::PendingConnectionAttempt;
@@ -394,12 +396,13 @@ impl InnerSwarmCallback {
 
 impl InnerSwarmCallback {
     /// Verify one resolved frame, let the link learn the sessions it carried inline, and pass
-    /// it to the admission gate.
+    /// it to the admission gate. Post: the digests the link learned, for the caller to confirm
+    /// to the peer and to release held frames against.
     pub(super) async fn admit_resolved_frame(
         &self,
         peer: Option<Did>,
         resolved: Box<ResolvedFrame<UnresolvedInboundFrame>>,
-    ) -> Result<(), TransportCallbackError> {
+    ) -> Result<Vec<SessionDigest>, TransportCallbackError> {
         let ResolvedFrame {
             payload,
             carrier:
@@ -426,9 +429,26 @@ impl InnerSwarmCallback {
                 return Err(error.into());
             }
         };
-        self.processor
-            .session_link()
-            .admit_verified(&prepared.payload, inline, get_epoch_ms())?;
+        let learned = self.processor.session_link().admit_verified(
+            &prepared.payload,
+            inline,
+            get_epoch_ms(),
+        )?;
+        self.gate_prepared_frame(peer, authentication, msg, prepared, transport_capacity)
+            .await
+            .map(|()| learned)
+    }
+
+    /// Pass one verified frame through the pending-connection gate and the pre-admission hold
+    /// to the inbound actor.
+    async fn gate_prepared_frame(
+        &self,
+        peer: Option<Did>,
+        authentication: Authentication,
+        msg: Bytes,
+        prepared: PreparedInboundFrame,
+        transport_capacity: Option<InboundFrameCapacityLease>,
+    ) -> Result<(), TransportCallbackError> {
         let admitted = match self.processor.pending_connection_gate(peer).await? {
             InboundGate::Admitted => true,
             InboundGate::Unadmitted => false,

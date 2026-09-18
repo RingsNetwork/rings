@@ -20,7 +20,6 @@ use crate::core::callback::BoxedTransportCallback;
 use crate::core::transport::stored_max_message_size;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::ConnectionStateSnapshot;
-use crate::core::transport::FrameDelivery;
 use crate::core::transport::IrrevocableSendGuard;
 use crate::core::transport::SendPermit;
 use crate::core::transport::TransportInterface;
@@ -875,17 +874,6 @@ impl ConnectionInterface for DummyConnection {
 
     fn data_channel_is_open(&self) -> Result<bool> {
         Ok(self.connection_state_snapshot().data_channel_open())
-    }
-
-    /// Immediate delivery hands every frame over in send order. The controlled scheduler lets
-    /// a test deliver queued frames in any order, or discard them, on a connection that stays
-    /// up: that is unsequenced delivery, and it is declared as such.
-    fn frame_delivery(&self) -> FrameDelivery {
-        if controlled::is_enabled() {
-            FrameDelivery::Unsequenced
-        } else {
-            FrameDelivery::Sequenced
-        }
     }
 
     fn max_message_size(&self) -> usize {

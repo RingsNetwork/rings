@@ -311,6 +311,16 @@ impl SwarmTransport {
         handle?.submit(transfer, capacity_permit)
     }
 
+    /// `attempt`'s peer confirmed `digest`: frames to it may reference the session from now on.
+    pub(crate) fn acknowledge_session(
+        &self,
+        attempt: PendingConnectionAttempt,
+        digest: SessionDigest,
+    ) {
+        self.outbound_schedulers
+            .acknowledge_session(attempt.peer(), attempt.generation(), digest);
+    }
+
     /// Answer the question `attempt`'s peer asked about `digest`: exactly one link-control
     /// frame per question, taken from what this generation announced.
     pub(crate) async fn answer_session_request(

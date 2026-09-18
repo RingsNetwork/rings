@@ -5,10 +5,13 @@
 use std::borrow::Cow;
 
 use super::*;
+use crate::message::HopBudget;
 use crate::message::MessagePayload;
+use crate::message::MessageRelay;
 use crate::message::PerSlot;
 use crate::message::SessionControl;
 use crate::message::SessionRef;
+use crate::message::Transaction;
 use crate::message::WirePayload;
 
 /// The frame bytes of `payload` with both session slots sent by reference.
@@ -34,6 +37,29 @@ fn hop_referenced_wire(payload: &MessagePayload) -> Result<Vec<u8>> {
     WirePayload::view(payload, references)
         .to_wire()
         .map(|wire| wire.to_vec())
+}
+
+/// A custom message from a stranger, carried one hop by `pending`'s peer to the local node: a
+/// session this connection learns only if told.
+fn stranger_payload(
+    pending: &PendingPeer,
+    transport: &SwarmTransport,
+    stranger: &SessionSk,
+    data: &[u8],
+) -> Result<MessagePayload> {
+    let transaction = Transaction::new(
+        transport.dht.did,
+        crate::utils::new_uuid(),
+        0,
+        Message::custom(data)?,
+        MessageSigner::new(stranger, TEST_NETWORK_ID),
+    )?;
+    let relay = MessageRelay::new(transport.dht.did, transport.dht.did, HopBudget::MAX);
+    MessagePayload::new(
+        transaction,
+        MessageSigner::new(&pending.session, TEST_NETWORK_ID),
+        relay,
+    )
 }
 
 /// A custom message from `pending`'s peer to the local node.
@@ -77,9 +103,8 @@ async fn test_referenced_session_resolves_after_a_verified_inline_frame() -> Res
     Ok(())
 }
 
-/// Miss, then announcement: a frame that references sessions this connection never carried is
-/// held, not failed; frames behind it wait their turn; the peer's announcement releases them in
-/// arrival order.
+/// Miss, then announcement: a frame that references a session this connection never carried is
+/// held, not failed; a frame that resolves passes it; the peer's announcement releases it.
 #[tokio::test]
 async fn test_missed_session_holds_frames_until_the_peer_announces_it() -> Result<()> {
     let measure = Arc::new(RecordingMeasure::default());
@@ -88,25 +113,27 @@ async fn test_missed_session_holds_frames_until_the_peer_announces_it() -> Resul
     let pending = pending_peer(&transport, &app_callback).await?;
     pending.admit(&transport).await?;
 
-    let missed = custom_payload(&pending, &transport, b"missed")?;
+    let stranger = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let missed = stranger_payload(&pending, &transport, &stranger, b"missed")?;
     pending.receive(&referenced_wire(&missed)?).await?;
     pending
-        .receive(&pending.custom_message_wire(&transport, b"behind")?)
+        .receive(&pending.custom_message_wire(&transport, b"passing")?)
         .await?;
-    assert_eq!(pending.callback.session_hold_count_for_test(), 2);
-    assert_eq!(app_callback.inbounds(), 0);
+    app_callback.wait_for_inbounds_at_least(1).await;
+    assert_eq!(pending.callback.session_hold_count_for_test(), 1);
+    assert_eq!(app_callback.inbounds(), 1);
     assert!(!measure
         .snapshot_counters()?
         .contains(&(pending.peer, MeasureCounter::FailedToReceive)));
 
-    let announcement = SessionControl::Announce(pending.session.session()).to_wire()?;
+    let announcement = SessionControl::Announce(stranger.session()).to_wire()?;
     pending.receive(announcement.as_ref()).await?;
     app_callback.wait_for_inbounds_at_least(2).await;
 
     assert_eq!(pending.callback.session_hold_count_for_test(), 0);
     assert_eq!(app_callback.inbound_custom_data()?, vec![
+        b"passing".to_vec(),
         b"missed".to_vec(),
-        b"behind".to_vec(),
     ]);
     transport.disconnect(pending.peer).await?;
     Ok(())
@@ -138,7 +165,7 @@ async fn test_missed_hop_session_is_repaired_by_announcement() -> Result<()> {
 }
 
 /// A peer that disclaims the session it referenced fails the frames that await it, and the
-/// failure is charged to that peer; the frames behind them are delivered.
+/// failure is charged to that peer; frames that resolve are unaffected.
 #[tokio::test]
 async fn test_disclaimed_session_fails_awaiting_frames_and_releases_the_rest() -> Result<()> {
     let measure = Arc::new(RecordingMeasure::default());
@@ -147,23 +174,24 @@ async fn test_disclaimed_session_fails_awaiting_frames_and_releases_the_rest() -
     let pending = pending_peer(&transport, &app_callback).await?;
     pending.admit(&transport).await?;
 
-    let missed = custom_payload(&pending, &transport, b"never-resolved")?;
-    let digest = missed.sessions().origin.digest()?;
+    let stranger = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let missed = stranger_payload(&pending, &transport, &stranger, b"never-resolved")?;
+    let digest = stranger.session().digest()?;
     pending.receive(&referenced_wire(&missed)?).await?;
     pending
-        .receive(&pending.custom_message_wire(&transport, b"behind")?)
+        .receive(&pending.custom_message_wire(&transport, b"passing")?)
         .await?;
-    assert_eq!(pending.callback.session_hold_count_for_test(), 2);
+    app_callback.wait_for_inbounds_at_least(1).await;
+    assert_eq!(pending.callback.session_hold_count_for_test(), 1);
 
     let disclaimer = SessionControl::Unknown(digest).to_wire()?;
     pending.receive(disclaimer.as_ref()).await?;
-    app_callback.wait_for_inbounds_at_least(1).await;
 
     assert_eq!(pending.callback.session_hold_count_for_test(), 0);
-    assert_eq!(
-        app_callback.inbound_custom_data()?,
-        vec![b"behind".to_vec()]
-    );
+    assert_eq!(app_callback.inbounds(), 1);
+    assert_eq!(app_callback.inbound_custom_data()?, vec![
+        b"passing".to_vec()
+    ]);
     assert!(measure
         .snapshot_counters()?
         .contains(&(pending.peer, MeasureCounter::FailedToReceive)));
