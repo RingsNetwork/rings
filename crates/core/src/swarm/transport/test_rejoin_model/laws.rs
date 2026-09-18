@@ -18,16 +18,34 @@
 //! - `RetiredEventAwaitsBesideNewerGeneration`
 //! - `SuccessorListIsTruncated`
 //!
-//! Liveness is stated in `fairness`, over [`is_converged`] and
+//! Liveness is stated in `search`, over [`is_converged`] and
 //! [`retains_successor_paths`].
 
 use std::collections::BTreeSet;
 
-use stateright::Property;
-
 use super::overlay::Overlay;
 use super::overlay::OverlayState;
 use crate::dht::Did;
+
+/// What a law claims about the reachable states.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Expectation {
+    /// `□`: every reachable state satisfies the predicate.
+    Always,
+    /// `◇`: some reachable state satisfies the predicate (coverage).
+    Sometimes,
+}
+
+/// One checked proposition over the composed carrier.
+#[derive(Clone, Copy)]
+pub(super) struct Law {
+    /// Name used in verdicts and by the mutation tests.
+    pub(super) name: &'static str,
+    /// Whether the predicate must hold everywhere or somewhere.
+    pub(super) expectation: Expectation,
+    /// The predicate.
+    pub(super) holds: fn(&Overlay, &OverlayState) -> bool,
+}
 
 /// Name of the retired-generation law, shared with the mutation tests.
 pub(super) const RETIRED_GENERATIONS_ARE_INERT: &str = "retired generations are inert";
@@ -151,22 +169,37 @@ fn reachable_over_successors(state: &OverlayState, origin: Did) -> BTreeSet<Did>
 }
 
 /// Every checked proposition, in report order.
-pub(super) fn properties() -> Vec<Property<Overlay>> {
-    vec![
-        Property::always(RETIRED_GENERATIONS_ARE_INERT, retired_generations_are_inert),
-        Property::always("topologies are well formed", topologies_are_well_formed),
-        Property::always("routing advances clockwise", routing_advances_clockwise),
-        Property::always(
-            TOPOLOGY_REFERENCES_ONLY_ADMITTED,
-            topology_references_only_admitted,
-        ),
-        Property::sometimes(
-            "a retired generation's event awaits beside a newer admitted generation",
-            retired_event_awaits_beside_newer_generation,
-        ),
-        Property::sometimes(
-            "the successor list is truncated",
-            successor_list_is_truncated,
-        ),
+pub(super) fn laws() -> [Law; 6] {
+    [
+        Law {
+            name: RETIRED_GENERATIONS_ARE_INERT,
+            expectation: Expectation::Always,
+            holds: retired_generations_are_inert,
+        },
+        Law {
+            name: "topologies are well formed",
+            expectation: Expectation::Always,
+            holds: topologies_are_well_formed,
+        },
+        Law {
+            name: "routing advances clockwise",
+            expectation: Expectation::Always,
+            holds: routing_advances_clockwise,
+        },
+        Law {
+            name: TOPOLOGY_REFERENCES_ONLY_ADMITTED,
+            expectation: Expectation::Always,
+            holds: topology_references_only_admitted,
+        },
+        Law {
+            name: "a retired generation's event awaits beside a newer admitted generation",
+            expectation: Expectation::Sometimes,
+            holds: retired_event_awaits_beside_newer_generation,
+        },
+        Law {
+            name: "the successor list is truncated",
+            expectation: Expectation::Sometimes,
+            holds: successor_list_is_truncated,
+        },
     ]
 }

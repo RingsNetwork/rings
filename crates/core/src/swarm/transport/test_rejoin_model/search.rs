@@ -1,8 +1,13 @@
-//! Conditional liveness of the quiescent suffix, decided on the explicit
-//! state graph.
+//! The exhaustive search: safety, coverage, and conditional liveness decided
+//! on one explicit state graph.
 //!
-//! Stateright's `eventually` is sound only on acyclic behaviours, and the
-//! stabilization protocol is periodic, so liveness is decided here instead.
+//! The graph is built breadth-first from `Init` by the model's own
+//! `actions`/`next_state`, single-threaded and allocation-only, so the same
+//! search runs natively and in the browser test job. Breadth-first order
+//! makes the first state that violates an `Always` law a minimal
+//! counterexample; a trace is recovered by replaying action indices.
+//!
+//! # Liveness
 //!
 //! Let `G` be the reachable graph of the model and `G_q ⊆ G` its subgraph of
 //! *protocol* edges (no environment step). A behaviour whose churn has stopped
@@ -25,13 +30,13 @@
 //! Decision procedure:
 //!
 //! ```text
-//! explore G breadth-first ──▶ per state: protocol edges, Converged, Premise
+//! explore G breadth-first ──▶ per state: laws, protocol edges, Converged, Premise
 //!          │
 //!          ▼
-//! [Converged closed under protocol edges?] ── no ──▶ Unstable
-//!          │ yes: a violating behaviour stays in ¬Converged forever
+//! Stable = Converged minus the protocol ancestors of ¬Converged
+//!          │ a violating behaviour stays in ¬Stable forever
 //!          ▼
-//! traps(S), S = ¬Converged:           \* Streett emptiness, by recursion
+//! traps(S), S = ¬Stable:              \* Streett emptiness, by recursion
 //!   for each SCC C of G_q ∩ S with a cycle:
 //!     [∃ weak a enabled throughout C, labelling no edge inside C?] ──▶ no fair cycle in C
 //!     B = { strong a enabled somewhere in C, labelling no edge inside C }
@@ -47,9 +52,8 @@
 //! taken in it is starved by every cycle of `C`; a strong label in `B` is
 //! starved by exactly the cycles that visit a state enabling it; and when
 //! neither obstruction exists, the path that tours all of `C` forever is
-//! fair. States are identified by a 64-bit fingerprint, as in Stateright, so
-//! the graph of a million states stays in memory; a trace is recovered by
-//! replaying action indices.
+//! fair. States are identified by a 64-bit fingerprint, so the graph of a
+//! million states stays in memory.
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::BTreeSet;
@@ -58,9 +62,8 @@ use std::collections::VecDeque;
 use std::hash::Hash;
 use std::hash::Hasher;
 
-use stateright::Model;
-
 use super::laws;
+use super::laws::Expectation;
 use super::overlay::Overlay;
 use super::overlay::OverlayAction;
 use super::overlay::OverlayState;
@@ -69,6 +72,16 @@ use super::overlay::OverlayState;
 type StateIndex = usize;
 /// Interned protocol action label.
 type Label = usize;
+
+/// A reachable state that violates an `Always` law, with the minimal trace
+/// that reaches it.
+#[derive(Debug)]
+pub(super) struct SafetyViolation {
+    /// The violated law.
+    pub(super) law: &'static str,
+    /// Actions from `Init` to the violating state.
+    pub(super) trace: Vec<OverlayAction>,
+}
 
 /// A premise state from which a fair behaviour never stabilizes, with its
 /// replayable trace.
@@ -80,27 +93,40 @@ pub(super) struct LivenessViolation {
     pub(super) quiescent_suffix: Vec<OverlayAction>,
 }
 
-/// Outcome of the analysis, with the counts that show it was not vacuous.
+/// Outcome of one exhaustive search, with the counts that show it was not
+/// vacuous.
 #[derive(Debug)]
-pub(super) struct SuffixAnalysis {
-    /// `|G|`.
+pub(super) struct Verdict {
+    /// `|G|`, or the states visited before the safety violation.
     pub(super) states: usize,
+    /// Longest breadth-first level explored.
+    pub(super) max_depth: usize,
+    /// The first `Always` law violated, with a minimal trace.
+    pub(super) safety: Option<SafetyViolation>,
+    /// `Sometimes` laws no reachable state satisfied.
+    pub(super) uncovered: Vec<&'static str>,
     /// States satisfying the premise: the quiescent roots the claim covers.
     pub(super) premise_states: usize,
     /// Premise states outside `Stable`, so the claim had work to do.
     pub(super) unstable_premise_states: usize,
     /// `|Stable|`: the target is inhabited.
     pub(super) stable_states: usize,
-    /// The first violation found, if any.
-    pub(super) violation: Option<LivenessViolation>,
+    /// The first liveness violation found, if any.
+    pub(super) liveness: Option<LivenessViolation>,
 }
 
-/// The explored graph: its vertices and which labels are strongly fair.
+/// The explored graph: its vertices, which labels are strongly fair, and
+/// what the laws found.
 struct Graph {
     /// States in exploration order.
     vertices: Vec<Vertex>,
     /// `strong[a]`: label `a` is periodic, so its fairness is strong.
     strong: Vec<bool>,
+    /// First `Always` violation: `(state, law)`; exploration stopped there.
+    violation: Option<(StateIndex, &'static str)>,
+    /// `covered[i]`: some state satisfied the `i`th law (meaningful for
+    /// `Sometimes` laws).
+    covered: Vec<bool>,
 }
 
 /// One explored state: where it came from, what it satisfies, and its
@@ -112,6 +138,8 @@ struct Vertex {
     converged: bool,
     /// `Premise(s)`.
     premise: bool,
+    /// Breadth-first level.
+    depth: usize,
     /// Protocol edges `(label, action index, target)`.
     protocol: Vec<(Label, usize, StateIndex)>,
 }
@@ -123,54 +151,71 @@ fn fingerprint(state: &OverlayState) -> u64 {
     hasher.finish()
 }
 
-/// Explore `G` breadth-first from `Init`.
+/// Explore `G` breadth-first from `Init`, evaluating the laws at every
+/// state; the exploration stops at the first `Always` violation.
 fn explore(overlay: &Overlay, premise: fn(&OverlayState) -> bool) -> Graph {
+    let laws = laws::laws();
+    let mut graph = Graph {
+        vertices: Vec::new(),
+        strong: Vec::new(),
+        violation: None,
+        covered: vec![false; laws.len()],
+    };
     let mut indices = HashMap::<u64, StateIndex>::new();
     let mut labels = HashMap::<OverlayAction, Label>::new();
-    let mut strong = Vec::<bool>::new();
-    let mut vertices = Vec::<Vertex>::new();
     let mut queue = VecDeque::<(StateIndex, OverlayState)>::new();
-    for init in overlay.init_states() {
-        indices.insert(fingerprint(&init), vertices.len());
-        queue.push_back((vertices.len(), init.clone()));
-        vertices.push(Vertex {
-            origin: None,
-            converged: laws::is_converged(overlay, &init),
-            premise: premise(&init),
+    let admit = |graph: &mut Graph,
+                 queue: &mut VecDeque<(StateIndex, OverlayState)>,
+                 state: OverlayState,
+                 origin: Option<(StateIndex, usize)>,
+                 depth: usize| {
+        let index = graph.vertices.len();
+        for (position, law) in laws.iter().enumerate() {
+            let holds = (law.holds)(overlay, &state);
+            graph.covered[position] |= holds;
+            if law.expectation == Expectation::Always && !holds && graph.violation.is_none() {
+                graph.violation = Some((index, law.name));
+            }
+        }
+        graph.vertices.push(Vertex {
+            origin,
+            converged: laws::is_converged(overlay, &state),
+            premise: premise(&state),
+            depth,
             protocol: Vec::new(),
         });
-    }
+        queue.push_back((index, state));
+    };
+    let init = overlay.converged_mesh();
+    indices.insert(fingerprint(&init), 0);
+    admit(&mut graph, &mut queue, init, None, 0);
     while let Some((index, state)) = queue.pop_front() {
-        let mut enabled = Vec::new();
-        overlay.actions(&state, &mut enabled);
-        for (position, action) in enabled.into_iter().enumerate() {
+        if graph.violation.is_some() {
+            break;
+        }
+        let depth = graph.vertices[index].depth + 1;
+        for (position, action) in overlay.actions(&state).into_iter().enumerate() {
             let Some(next) = overlay.next_state(&state, action.clone()) else {
                 continue;
             };
-            let discovered = vertices.len();
+            let discovered = graph.vertices.len();
             let target = *indices.entry(fingerprint(&next)).or_insert(discovered);
             if target == discovered {
-                vertices.push(Vertex {
-                    origin: Some((index, position)),
-                    converged: laws::is_converged(overlay, &next),
-                    premise: premise(&next),
-                    protocol: Vec::new(),
-                });
-                queue.push_back((target, next));
+                admit(&mut graph, &mut queue, next, Some((index, position)), depth);
             }
             if !action.is_environmental() {
                 let fresh = labels.len();
                 if !labels.contains_key(&action) {
-                    strong.push(action.is_periodic());
+                    graph.strong.push(action.is_periodic());
                 }
                 let label = *labels.entry(action).or_insert(fresh);
-                if let Some(vertex) = vertices.get_mut(index) {
-                    vertex.protocol.push((label, position, target));
-                }
+                graph.vertices[index]
+                    .protocol
+                    .push((label, position, target));
             }
         }
     }
-    Graph { vertices, strong }
+    graph
 }
 
 /// The strongly connected components of `G_q` restricted to the states in
@@ -238,7 +283,9 @@ fn components_within(vertices: &[Vertex], within: &[bool]) -> Vec<Vec<StateIndex
 /// The states of `within` that lie on a fair cycle contained in `within`:
 /// the recursion of the module-level decision procedure.
 fn fair_traps(graph: &Graph, within: &[bool]) -> Vec<StateIndex> {
-    let Graph { vertices, strong } = graph;
+    let Graph {
+        vertices, strong, ..
+    } = graph;
     let mut traps = Vec::new();
     // A transition always changes the state, so a singleton has no cycle.
     let cyclic = components_within(vertices, within)
@@ -346,9 +393,7 @@ fn replay_positions(
     let mut state = from;
     let mut trace = Vec::new();
     for position in positions {
-        let mut enabled = Vec::new();
-        overlay.actions(&state, &mut enabled);
-        let Some(action) = enabled.into_iter().nth(*position) else {
+        let Some(action) = overlay.actions(&state).into_iter().nth(*position) else {
             break;
         };
         let Some(next) = overlay.next_state(&state, action.clone()) else {
@@ -410,24 +455,44 @@ fn protocol_ancestors(vertices: &[Vertex], targets: &[StateIndex]) -> Vec<bool> 
     reaches
 }
 
-/// Decide the conditional-liveness claim for `overlay` under `premise`.
-pub(super) fn analyze_quiescent_suffixes(
-    overlay: &Overlay,
-    premise: fn(&OverlayState) -> bool,
-) -> SuffixAnalysis {
+/// Search `overlay` exhaustively and decide every law, then the
+/// conditional-liveness claim under `premise`.
+pub(super) fn check(overlay: &Overlay, premise: fn(&OverlayState) -> bool) -> Verdict {
     let graph = explore(overlay, premise);
     let vertices = graph.vertices.as_slice();
+    let init = overlay.converged_mesh();
+    let max_depth = vertices
+        .iter()
+        .map(|vertex| vertex.depth)
+        .max()
+        .unwrap_or(0);
+    let uncovered = laws::laws()
+        .iter()
+        .zip(graph.covered.iter())
+        .filter(|(law, covered)| law.expectation == Expectation::Sometimes && !**covered)
+        .map(|(law, _)| law.name)
+        .collect();
+    if let Some((index, law)) = graph.violation {
+        let trace = replay_positions(overlay, init, &path_from_init(vertices, index)).0;
+        return Verdict {
+            states: vertices.len(),
+            max_depth,
+            safety: Some(SafetyViolation { law, trace }),
+            uncovered,
+            premise_states: 0,
+            unstable_premise_states: 0,
+            stable_states: 0,
+            liveness: None,
+        };
+    }
     let stable = stable_states(vertices);
     let starving = starvation_states(&graph, &stable);
     let reaches = protocol_ancestors(vertices, &starving);
-    let violation = (0..vertices.len())
+    let liveness = (0..vertices.len())
         .find(|index| vertices[*index].premise && reaches[*index])
         .map(|root| {
-            let (churn_prefix, stopped) = replay_positions(
-                overlay,
-                overlay.converged_mesh(),
-                &path_from_init(vertices, root),
-            );
+            let (churn_prefix, stopped) =
+                replay_positions(overlay, init, &path_from_init(vertices, root));
             let suffix = protocol_path(vertices, root, &starving.iter().copied().collect());
             LivenessViolation {
                 churn_prefix,
@@ -435,14 +500,17 @@ pub(super) fn analyze_quiescent_suffixes(
             }
         });
     let premise = |index: &usize| vertices[*index].premise;
-    SuffixAnalysis {
+    Verdict {
         states: vertices.len(),
+        max_depth,
+        safety: None,
+        uncovered,
         premise_states: (0..vertices.len()).filter(premise).count(),
         unstable_premise_states: (0..vertices.len())
             .filter(premise)
             .filter(|index| !stable[*index])
             .count(),
         stable_states: stable.iter().filter(|stable| **stable).count(),
-        violation,
+        liveness,
     }
 }

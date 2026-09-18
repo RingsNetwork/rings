@@ -43,11 +43,15 @@
 //!     carrier holds the production `TopologyState` *and* the production
 //!     `ConnectionLifecycleRegistry`, which is visible only inside
 //!     `swarm::transport`, so the model lives at
-//!     `swarm::transport::tests::test_rejoin_model`; its module docs carry the
-//!     TLA+-style specification, the fairness assumption, the scope limits,
-//!     and the bounds table (peers, successor capacity, state counts, CI
-//!     wall-clock limit). The topology laws it checks are the named predicates
-//!     of `dht::topology::invariants`, shared with any later churn simulator.
+//!     `swarm::transport::test_rejoin_model`. Unlike the stages here it does
+//!     not use Stateright: its own breadth-first search decides safety,
+//!     coverage, and fair-suffix liveness in one pass and is plain
+//!     single-threaded Rust, so the browser test job runs the same exhaustive
+//!     checks against the wasm build. Its module docs carry the TLA+-style
+//!     specification, the fairness assumption, the scope limits, and the
+//!     bounds table (peers, successor capacity, state counts, CI wall-clock
+//!     limit). The topology laws it checks are the named predicates of
+//!     `dht::topology::invariants`, shared with any later churn simulator.
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;

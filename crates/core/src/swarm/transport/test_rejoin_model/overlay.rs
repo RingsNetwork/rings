@@ -20,12 +20,10 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use num_bigint::BigUint;
-use stateright::Model;
-use stateright::Property;
 
-use super::laws;
 use super::node::Callback;
 use super::node::Effect;
 use super::node::Frame;
@@ -195,10 +193,15 @@ pub(super) struct StaleEffect {
 }
 
 /// The carrier of the model.
+///
+/// Peers are shared between a state and its successors (`Arc`): a transition
+/// copies only the peer it changes, so a breadth-first frontier of a hundred
+/// thousand states holds each unchanged peer once. Equality and hashing see
+/// through the sharing.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct OverlayState {
     /// Peers that are up.
-    pub(super) nodes: BTreeMap<Did, NodeState>,
+    pub(super) nodes: BTreeMap<Did, Arc<NodeState>>,
     /// Physical links that are alive.
     pub(super) links: BTreeSet<Link>,
     /// Envelopes in flight.
@@ -335,7 +338,7 @@ impl Overlay {
             nodes: self
                 .ring
                 .iter()
-                .map(|peer| (*peer, NodeState::started(*peer, self)))
+                .map(|peer| (*peer, Arc::new(NodeState::started(*peer, self))))
                 .collect(),
             links: BTreeSet::new(),
             network: BTreeSet::new(),
@@ -362,9 +365,8 @@ impl Overlay {
     /// `Init`.
     fn settled(&self, mut state: OverlayState) -> OverlayState {
         loop {
-            let mut enabled = Vec::new();
-            self.actions(&state, &mut enabled);
-            let Some(next) = enabled
+            let Some(next) = self
+                .actions(&state)
                 .into_iter()
                 .filter(|action| {
                     matches!(
@@ -395,8 +397,9 @@ impl Overlay {
         let Some(node) = next.nodes.remove(&peer) else {
             return next;
         };
-        let NodeStep { node, effects } = apply(node);
-        next.nodes.insert(peer, node);
+        let owned = Arc::try_unwrap(node).unwrap_or_else(|shared| shared.as_ref().clone());
+        let NodeStep { node, effects } = apply(owned);
+        next.nodes.insert(peer, Arc::new(node));
         for effect in effects {
             next.route(peer, effect);
         }
@@ -553,7 +556,7 @@ impl OverlayState {
     /// Queue `callback` at `peer`, if it is up.
     fn raise(&mut self, peer: Did, callback: Callback) {
         if let Some(node) = self.nodes.get_mut(&peer) {
-            node.callbacks.insert(callback);
+            Arc::make_mut(node).callbacks.insert(callback);
         }
     }
 
@@ -609,10 +612,17 @@ impl OverlayState {
         for link in severed {
             self.sever(link);
         }
-        for node in self.nodes.values_mut() {
-            if let Some(unadmitted) = node.lifecycles.unadmitted_attempt(peer) {
-                node.callbacks.insert(Callback::Closed(unadmitted));
-            }
+        let handshaking = self
+            .nodes
+            .iter()
+            .filter_map(|(holder, node)| {
+                node.lifecycles
+                    .unadmitted_attempt(peer)
+                    .map(|unadmitted| (*holder, unadmitted))
+            })
+            .collect::<Vec<_>>();
+        for (holder, unadmitted) in handshaking {
+            self.raise(holder, Callback::Closed(unadmitted));
         }
         self.network.retain(|envelope| {
             envelope.addressee() != peer
@@ -621,18 +631,17 @@ impl OverlayState {
     }
 }
 
-impl Model for Overlay {
-    type State = OverlayState;
-    type Action = OverlayAction;
-
-    fn init_states(&self) -> Vec<Self::State> {
-        vec![self.converged_mesh()]
-    }
-
-    fn actions(&self, state: &Self::State, actions: &mut Vec<Self::Action>) {
+/// The next-state relation, as the enabled actions of a state and their
+/// results. The search enumerates `actions` in this order, so a trace is
+/// replayable from action indices.
+impl Overlay {
+    /// The actions enabled at `state`, in canonical order.
+    ///
+    /// A recorded violation is terminal: the trace ends at its witness.
+    pub(super) fn actions(&self, state: &OverlayState) -> Vec<OverlayAction> {
+        let mut actions = Vec::new();
         if state.stale_effect.is_some() {
-            // A recorded violation is terminal: the trace ends at its witness.
-            return;
+            return actions;
         }
         if state.remaining.departures > 0 {
             actions.extend(state.nodes.keys().copied().map(OverlayAction::Depart));
@@ -689,9 +698,16 @@ impl Model for Overlay {
                 actions.push(OverlayAction::Stabilize(*peer));
             }
         }
+        actions
     }
 
-    fn next_state(&self, state: &Self::State, action: Self::Action) -> Option<Self::State> {
+    /// The state `action` leads to from `state`, or `None` when the action
+    /// is disabled after all (an unbudgeted refusal) or changes nothing.
+    pub(super) fn next_state(
+        &self,
+        state: &OverlayState,
+        action: OverlayAction,
+    ) -> Option<OverlayState> {
         let next = match action {
             OverlayAction::Depart(peer) => {
                 let mut next = state.clone();
@@ -702,7 +718,8 @@ impl Model for Overlay {
             OverlayAction::Rejoin(peer) => {
                 let mut next = state.clone();
                 next.remaining.rejoins = next.remaining.rejoins.checked_sub(1)?;
-                next.nodes.insert(peer, NodeState::started(peer, self));
+                next.nodes
+                    .insert(peer, Arc::new(NodeState::started(peer, self)));
                 next
             }
             OverlayAction::Cut(link) => {
@@ -739,9 +756,5 @@ impl Model for Overlay {
             }
         };
         (next != *state).then_some(next)
-    }
-
-    fn properties(&self) -> Vec<Property<Self>> {
-        laws::properties()
     }
 }

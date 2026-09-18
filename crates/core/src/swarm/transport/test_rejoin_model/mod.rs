@@ -60,12 +60,16 @@
 //!   `TopoInfo::confirmed_by`. The carrier stores those production values, so
 //!   there is no snapshot or shadow state machine to keep equal to them.
 //! - What the model owns is the composition `SwarmTransport` performs under
-//!   its lifecycle boundary (`node`), and the physical world (`overlay`).
+//!   its lifecycle boundary (`node`), the physical world (`overlay`), and the
+//!   search (`search`).
 //!   Each composed step names the production path it interprets. The one
 //!   place it hands `step` a differently shaped argument than production does
 //!   (replacement candidates) is proved observationally equal below.
 //! - The model does not distinguish wasm from native peers: a rejoin is a
-//!   lifecycle transition of an ordinary peer.
+//!   lifecycle transition of an ordinary peer. The search itself is plain
+//!   single-threaded Rust, so the browser test job runs the same exhaustive
+//!   checks against the wasm build of the production transitions; only the
+//!   shell conformance test needs the native `SwarmTransport` harness.
 //!
 //! # Scope limits
 //!
@@ -85,20 +89,17 @@
 //!
 //! Every search is exhaustive: there is no depth cut-off, and it ends when
 //! the budgets are spent and the protocol closure is complete. `W = 3` finger
-//! slots throughout. Each exhaustive test asserts its exact unique-state
-//! count, so a carrier that grows fails deterministically instead of slowing
-//! CI silently. Depth is the longest breadth-first level (it varies by one
-//! with thread scheduling).
+//! slots throughout. One breadth-first exploration per configuration decides
+//! safety, coverage, and liveness; each test asserts its exact state count,
+//! so a carrier that grows fails deterministically instead of slowing CI
+//! silently. Depth is the longest breadth-first level.
 //!
 //! | configuration | peers | K | budget                                  | states    | depth | checked            |
 //! |---------------|-------|---|-----------------------------------------|-----------|-------|--------------------|
-//! | departure     | 3     | 1 | 1 departure                             | 5 834     | —     | premise necessity  |
-//! | truncation    | 4     | 2 | 1 cut                                   | 233 488   | 39    | safety, liveness   |
-//! | restart       | 3     | 1 | 1 departure, 1 rejoin                   | 552 309   | 52    | safety, liveness   |
-//! | lossy flap    | 3     | 1 | 1 cut, 1 loss, 1 duplication, 1 refusal | 1 057 016 | 51    | safety, liveness\* |
-//!
-//! \* The lossy-flap liveness analysis (a single-threaded pass over a
-//! million-state graph) runs only in the `--release` test job.
+//! | departure     | 3     | 1 | 1 departure                             | 5 834     | 28    | premise necessity  |
+//! | truncation    | 4     | 2 | 1 cut                                   | 233 488   | 36    | all laws           |
+//! | restart       | 3     | 1 | 1 departure, 1 rejoin                   | 552 309   | 47    | all laws           |
+//! | lossy flap    | 3     | 1 | 1 cut, 1 loss, 1 duplication, 1 refusal | 1 057 016 | 42    | all laws, release  |
 //!
 //! The premise of the liveness claim is necessary, not decorative. When a
 //! peer's only successor goes down and its close callback wins the race with
@@ -108,31 +109,28 @@
 //! successor path and `test_without_the_successor_path_premise_a_suffix_starves`
 //! exhibits the starved suffix. Re-joining such a peer is the subject of #775.
 //!
-//! CI wall-clock limit: 10 minutes for this module. Measured on an 8-core
-//! laptop with the tests in parallel and the search on half the cores: 30 s
-//! in release (13 tests), about 2.5 minutes in the dev profile (12 tests);
-//! the longest single test is the restart liveness analysis, 18 s in release
-//! and 135 s in dev.
-
+//! CI wall-clock limit: 10 minutes for this module in every test job.
+//! Measured on an Apple M-series laptop, one search per test, tests in
+//! parallel: native `--release` 52 s for the module (restart 13 s and
+//! 450 MB peak, truncation 8 s and 245 MB, lossy flap 30 s and 625 MB);
+//! native dev profile 139 s (lossy flap skipped, restart 135 s of it);
+//! headless Chrome (`wasm32`, release, tests
+//! run serially) 37 s for the module.
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 mod conformance;
-mod fairness;
 mod laws;
 mod node;
 mod overlay;
+mod search;
 
-use std::collections::BTreeSet;
-use std::time::Instant;
-
-use fairness::analyze_quiescent_suffixes;
 use node::Callback;
 use overlay::Budgets;
 use overlay::Overlay;
 use overlay::OverlayAction;
 use overlay::OverlayState;
 use overlay::ShellMutation;
-use stateright::Checker;
-use stateright::HasDiscoveries;
-use stateright::Model;
+use search::check;
+use search::Verdict;
 
 use crate::dht::topology::step;
 use crate::dht::topology::successors;
@@ -147,6 +145,8 @@ const RESTART_STATES: usize = 552_309;
 const TRUNCATION_STATES: usize = 233_488;
 /// `|G|` of the `lossy flap` configuration.
 const LOSSY_FLAP_STATES: usize = 1_057_016;
+/// `|G|` of the `departure` configuration.
+const DEPARTURE_STATES: usize = 5_834;
 
 /// Finger slots of every modeled table.
 const FINGER_SLOTS: usize = 3;
@@ -215,56 +215,45 @@ fn lossy_flap(mutation: ShellMutation) -> Overlay {
     Overlay::new(Did::from(0u32), 3, 1, FINGER_SLOTS, budgets, mutation)
 }
 
-/// Worker threads for an exhaustive search: half the cores, so the search
-/// does not starve the timing-sensitive transport tests that run beside it.
-fn search_threads() -> usize {
-    std::thread::available_parallelism().map_or(1, |cores| cores.get().div_ceil(2))
-}
-
-/// Check every law over the complete reachable graph of `overlay`, whose
-/// size must be exactly `states`.
-fn assert_laws_hold_exhaustively(name: &str, overlay: Overlay, states: usize) {
-    let started = Instant::now();
-    let checker = overlay
-        .checker()
-        .threads(search_threads())
-        .spawn_bfs()
-        .join();
+/// Decide every law and the conditional-liveness claim over the complete
+/// reachable graph of `overlay`, whose size must be exactly `states`, and
+/// require that neither claim was vacuous.
+fn assert_laws_hold_exhaustively(name: &str, overlay: &Overlay, states: usize) {
+    let verdict = check(overlay, laws::retains_successor_paths);
     println!(
-        "{name}: {} unique states, depth {}, {:?}",
-        checker.unique_state_count(),
-        checker.max_depth(),
-        started.elapsed(),
+        "{name}: {} states, depth {}, {} stable, {} premise states ({} not yet stable)",
+        verdict.states,
+        verdict.max_depth,
+        verdict.stable_states,
+        verdict.premise_states,
+        verdict.unstable_premise_states,
     );
-    checker.assert_properties();
-    assert_eq!(checker.unique_state_count(), states, "stale bounds table");
-}
-
-/// Decide conditional liveness for `overlay`, whose graph must have exactly
-/// `states` states, and require that the claim was not vacuous.
-fn assert_fair_quiescent_suffixes_converge(name: &str, overlay: &Overlay, states: usize) {
-    let started = Instant::now();
-    let analysis = analyze_quiescent_suffixes(overlay, laws::retains_successor_paths);
-    println!(
-        "{name}: {} states, {} stable, {} premise states ({} not yet stable), {:?}",
-        analysis.states,
-        analysis.stable_states,
-        analysis.premise_states,
-        analysis.unstable_premise_states,
-        started.elapsed(),
+    assert!(verdict.safety.is_none(), "{name}: {:#?}", verdict.safety);
+    assert!(
+        verdict.uncovered.is_empty(),
+        "{name}: {:?}",
+        verdict.uncovered
     );
-    assert_eq!(analysis.states, states, "stale bounds table");
-    assert!(analysis.unstable_premise_states > 0, "vacuous premise");
-    assert!(analysis.stable_states > 0, "unreachable target");
-    assert!(analysis.violation.is_none(), "{:#?}", analysis.violation);
+    assert_eq!(verdict.states, states, "{name}: stale bounds table");
+    assert!(
+        verdict.unstable_premise_states > 0,
+        "{name}: vacuous premise"
+    );
+    assert!(verdict.stable_states > 0, "{name}: unreachable target");
+    assert!(
+        verdict.liveness.is_none(),
+        "{name}: {:#?}",
+        verdict.liveness
+    );
 }
 
 /// Apply `action`, requiring that the model enables it: a scripted trace is a
 /// behaviour of the model, not a sequence of forced writes.
 fn enabled_step(overlay: &Overlay, state: &OverlayState, action: OverlayAction) -> OverlayState {
-    let mut enabled = Vec::new();
-    overlay.actions(state, &mut enabled);
-    assert!(enabled.contains(&action), "not enabled: {action:?}");
+    assert!(
+        overlay.actions(state).contains(&action),
+        "not enabled: {action:?}"
+    );
     overlay
         .next_state(state, action.clone())
         .unwrap_or_else(|| panic!("no state change: {action:?}"))
@@ -280,23 +269,18 @@ fn replay(overlay: &Overlay, trace: &[OverlayAction]) -> OverlayState {
         })
 }
 
-/// The shortest counterexample to the law `name` under a mutated shell,
-/// found single-threaded so breadth-first order makes it minimal.
-fn minimal_counterexample(overlay: &Overlay, name: &'static str) -> Vec<OverlayAction> {
-    overlay
-        .clone()
-        .checker()
-        .finish_when(HasDiscoveries::AnyOf(BTreeSet::from([name])))
-        .spawn_bfs()
-        .join()
-        .discovery(name)
-        .unwrap_or_else(|| panic!("the mutated shell must violate: {name}"))
-        .into_actions()
+/// The minimal counterexample to the law `name` under a mutated shell.
+fn minimal_counterexample(overlay: &Overlay, name: &str) -> Vec<OverlayAction> {
+    let Verdict { safety, .. } = check(overlay, laws::retains_successor_paths);
+    let violation = safety.unwrap_or_else(|| panic!("the mutated shell must violate: {name}"));
+    assert_eq!(violation.law, name);
+    violation.trace
 }
 
 /// Law: `Init` is the Chord fixpoint of the whole ring, satisfies the
 /// liveness premise, and has nothing in flight.
-#[test]
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), test)]
 fn test_initial_mesh_is_the_converged_fixpoint() {
     for overlay in [
         restart(ShellMutation::Faithful),
@@ -310,30 +294,42 @@ fn test_initial_mesh_is_the_converged_fixpoint() {
     }
 }
 
-/// Safety over every behaviour in which a peer restarts: the retired
-/// generation is inert, topologies stay well formed, routing advances, and
-/// topology evidence is backed by admitted generations.
-#[test]
-fn test_safety_holds_when_a_peer_restarts_under_a_newer_generation() {
-    assert_laws_hold_exhaustively("restart", restart(ShellMutation::Faithful), RESTART_STATES);
+/// Every law and conditional liveness over every behaviour in which a peer
+/// restarts: the retired generation is inert, topologies stay well formed,
+/// routing advances, topology evidence is backed by admitted generations,
+/// and every fair churn-free suffix that retains successor paths reaches,
+/// and stays in, the Chord fixpoint of the live set.
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), test)]
+fn test_laws_hold_when_a_peer_restarts_under_a_newer_generation() {
+    assert_laws_hold_exhaustively("restart", &restart(ShellMutation::Faithful), RESTART_STATES);
 }
 
-/// Safety with more eligible successors than capacity.
-#[test]
-fn test_safety_holds_when_successors_exceed_capacity() {
+/// Every law and conditional liveness with more eligible successors than
+/// capacity.
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), test)]
+fn test_laws_hold_when_successors_exceed_capacity() {
     assert_laws_hold_exhaustively(
         "truncation",
-        truncation(ShellMutation::Faithful),
+        &truncation(ShellMutation::Faithful),
         TRUNCATION_STATES,
     );
 }
 
-/// Safety with frame loss, duplication, reordering, and a refused offer.
-#[test]
-fn test_safety_holds_under_loss_duplication_and_refusal() {
+/// Every law and conditional liveness with frame loss, duplication,
+/// reordering, and a refused offer: a lost query or report is superseded by
+/// the next round.
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), test)]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "a million-state graph: decided by the release test jobs"
+)]
+fn test_laws_hold_under_loss_duplication_and_refusal() {
     assert_laws_hold_exhaustively(
         "lossy flap",
-        lossy_flap(ShellMutation::Faithful),
+        &lossy_flap(ShellMutation::Faithful),
         LOSSY_FLAP_STATES,
     );
 }
@@ -341,7 +337,8 @@ fn test_safety_holds_under_loss_duplication_and_refusal() {
 /// The acceptance trace, step by step: disconnect, removal with successor
 /// replacement, restart, re-admission under a newer generation, and then the
 /// retired generation's close, which must change nothing.
-#[test]
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), test)]
 fn test_retired_close_after_rejoin_changes_neither_lifecycle_nor_topology() {
     let overlay = restart(ShellMutation::Faithful);
     let [observer, departed, _] = <[Did; 3]>::try_from(overlay.ring().to_vec()).unwrap();
@@ -394,9 +391,10 @@ fn test_retired_close_after_rejoin_changes_neither_lifecycle_nor_topology() {
 }
 
 /// Non-vacuity of `RetiredGenerationsAreInert`: with the exact-generation
-/// guard removed, the checker finds a minimal trace in which a retired
+/// guard removed, the search finds a minimal trace in which a retired
 /// generation's callback revokes the newer one, and the trace replays.
-#[test]
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), test)]
 fn test_removing_the_generation_guard_yields_a_replayable_counterexample() {
     let overlay = restart(ShellMutation::CallbackIgnoresGeneration);
     let trace = minimal_counterexample(&overlay, laws::RETIRED_GENERATIONS_ARE_INERT);
@@ -418,9 +416,10 @@ fn test_removing_the_generation_guard_yields_a_replayable_counterexample() {
 }
 
 /// Non-vacuity of `TopologyReferencesOnlyAdmitted`: with head replacement
-/// drawing on peers that hold no admitted generation, the checker finds a
+/// drawing on peers that hold no admitted generation, the search finds a
 /// minimal trace that installs unvalidated successor evidence.
-#[test]
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), test)]
 fn test_removing_the_replacement_invariant_yields_a_replayable_counterexample() {
     let overlay = departure_then_flap(ShellMutation::ReplacementIgnoresLifecycle);
     let trace = minimal_counterexample(&overlay, laws::TOPOLOGY_REFERENCES_ONLY_ADMITTED);
@@ -440,7 +439,8 @@ fn test_removing_the_replacement_invariant_yields_a_replayable_counterexample() 
 /// and the transition normalizes them again; the model passes them
 /// unnormalized. Both agree on every candidate subset and every removed peer,
 /// so the model's argument shape is unobservable.
-#[test]
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), test)]
 fn test_replacement_normalization_is_absorbed_by_the_production_remove() {
     let overlay = truncation(ShellMutation::Faithful);
     let capacity = overlay.successor_capacity();
@@ -470,43 +470,16 @@ fn test_replacement_normalization_is_absorbed_by_the_production_remove() {
     }
 }
 
-/// Conditional liveness when a peer restarts: from every reachable state
-/// that retains successor paths, every fair churn-free behaviour reaches,
-/// and stays in, the Chord fixpoint of the live set.
-#[test]
-fn test_every_fair_quiescent_suffix_converges_after_a_restart() {
-    let overlay = restart(ShellMutation::Faithful);
-    assert_fair_quiescent_suffixes_converge("restart", &overlay, RESTART_STATES);
-}
-
-/// Conditional liveness with more eligible successors than capacity.
-#[test]
-fn test_every_fair_quiescent_suffix_converges_under_truncation() {
-    let overlay = truncation(ShellMutation::Faithful);
-    assert_fair_quiescent_suffixes_converge("truncation", &overlay, TRUNCATION_STATES);
-}
-
-/// Conditional liveness after loss, duplication, and a refused offer: a lost
-/// query or report is superseded by the next round.
-#[test]
-#[cfg_attr(
-    debug_assertions,
-    ignore = "a million-state graph: decided by the --release test job"
-)]
-fn test_every_fair_quiescent_suffix_converges_after_loss_and_duplication() {
-    let overlay = lossy_flap(ShellMutation::Faithful);
-    assert_fair_quiescent_suffixes_converge("lossy flap", &overlay, LOSSY_FLAP_STATES);
-}
-
 /// Non-vacuity of the liveness analysis and necessity of its premise: with
 /// the premise dropped, a peer whose only successor closed is left without a
 /// successor path, and the analysis reports the starved suffix, which replays.
-#[test]
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), test)]
 fn test_without_the_successor_path_premise_a_suffix_starves() {
     let overlay = departure(ShellMutation::Faithful);
-    let analysis = analyze_quiescent_suffixes(&overlay, |_| true);
-    println!("departure: {} states", analysis.states);
-    let violation = analysis.violation.unwrap();
+    let verdict = check(&overlay, |_| true);
+    assert_eq!(verdict.states, DEPARTURE_STATES, "stale bounds table");
+    let violation = verdict.liveness.unwrap();
     println!("premise dropped: {violation:#?}");
     assert!(violation
         .quiescent_suffix

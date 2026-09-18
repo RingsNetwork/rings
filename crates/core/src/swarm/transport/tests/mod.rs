@@ -70,8 +70,6 @@ mod test_inbound;
 mod test_lifecycle;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 mod test_readiness;
-#[cfg(not(target_family = "wasm"))]
-mod test_rejoin_model;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 mod test_retention;
 mod test_retirement;
@@ -90,7 +88,7 @@ type TestLatch = Witness<bool>;
 type TestCounter = Witness<usize>;
 
 #[derive(Default)]
-struct RecordingMeasure {
+pub(super) struct RecordingMeasure {
     counters: Mutex<Vec<(Did, MeasureCounter)>>,
     measurements: Mutex<Vec<(Did, MeasurementEvent)>>,
     qualities: Mutex<BTreeMap<Did, PeerQuality>>,
@@ -462,7 +460,10 @@ impl SwarmCallback for BlockingEventSwarmCallback {
     }
 }
 
-fn transport_with_key_and_measure(key: &SecretKey, measure: MeasureImpl) -> Result<SwarmTransport> {
+pub(super) fn transport_with_key_and_measure(
+    key: &SecretKey,
+    measure: MeasureImpl,
+) -> Result<SwarmTransport> {
     transport_with_key_measure_and_reassembly_limits(key, measure, ReassemblyLimits::production())
 }
 
