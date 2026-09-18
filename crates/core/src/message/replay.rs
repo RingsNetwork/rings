@@ -43,7 +43,7 @@ const TRANSACTION_REPLAY_WINDOW_U64: u64 = 32;
 const TRANSACTION_REPLAY_BACKTRACK: u64 = 31;
 /// Maximum sender streams and maximum receiver streams retained by one runtime.
 pub const TRANSACTION_REPLAY_STREAM_CAPACITY: usize = 4096;
-const TRANSACTION_REPLAY_SNAPSHOT_KEY: &str = "rings-core:transaction-replay:v2";
+const TRANSACTION_REPLAY_SNAPSHOT_KEY: &str = "rings-core:transaction-replay";
 
 /// A destination-scoped transaction stream.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]

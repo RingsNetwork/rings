@@ -25,3 +25,20 @@ impl OutboundSchedulers {
         Ok(lower_class_overload)
     }
 }
+
+impl crate::swarm::transport::SwarmTransport {
+    pub(crate) fn outbound_admitted_transfer_count_for_test(&self, peer: Did) -> Option<usize> {
+        self.outbound_schedulers
+            .admitted_transfer_count_for_test(peer)
+    }
+
+    /// Exercise the live peer scheduler under lower-class saturation and record
+    /// whether an actual control reservation is rejected.
+    pub(crate) fn exercise_class_reservation_pressure_for_simulation(
+        &self,
+        peer: Did,
+    ) -> Result<Error> {
+        self.outbound_schedulers
+            .exercise_class_reservation_pressure(peer)
+    }
+}

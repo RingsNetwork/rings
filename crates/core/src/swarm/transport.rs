@@ -93,7 +93,11 @@ pub(crate) use self::liveness::PEER_LIVENESS_TIMEOUT_MS;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::outbound_submit_count_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::outbound::referenced_frame_count_for_test;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::reset_outbound_submit_count_for_test;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::outbound::session_announcement_count_for_test;
 use self::outbound::OutboundSchedulers;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::OUTBOUND_COMMAND_DRAIN_BUDGET;

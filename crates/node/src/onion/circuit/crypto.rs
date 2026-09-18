@@ -50,7 +50,7 @@ use crate::onion::OnionServiceName;
 
 /// Message family of the exit's backward-payload signature.
 const ONION_BACKWARD_PAYLOAD_DOMAIN_TAG: DomainTag =
-    domain_tag!("rings-node:onion-backward-payload:v1");
+    domain_tag!("rings-node:onion-backward-payload");
 
 /// Encode the first forward frame for `route`.
 ///

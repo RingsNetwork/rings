@@ -13,6 +13,7 @@ use super::InboundProcessor;
 use super::LogicalInbound;
 use super::PreparedInboundFrame;
 use super::SharedSwarmCallback;
+use super::UnresolvedInboundFrame;
 use crate::chunk::MessageReassembler;
 use crate::dht::Did;
 use crate::measure::Authentication;
@@ -20,6 +21,7 @@ use crate::message::Message;
 use crate::message::MessageKind;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
+use crate::swarm::session_link::ReferencedSessions;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 
@@ -59,7 +61,22 @@ impl InboundProcessor {
             reassembly_clock,
             pending_attempt: Arc::new(Mutex::new(None)),
             pre_admission: Arc::new(Mutex::new(PreAdmissionHold::new(inbound::peer_capacity()))),
+            session_link: Arc::new(Mutex::new(
+                ReferencedSessions::new(inbound::peer_capacity()),
+            )),
         }
+    }
+
+    /// The receiving end of this connection's session references.
+    ///
+    /// Lock law: held for one pure step and never across a suspension point; a poisoned lock
+    /// still guards a well-formed state, since no step panics between two writes.
+    pub(super) fn session_link(
+        &self,
+    ) -> std::sync::MutexGuard<'_, ReferencedSessions<UnresolvedInboundFrame>> {
+        self.session_link
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub(super) fn pre_admission(
@@ -227,14 +244,18 @@ impl InboundProcessor {
     }
 }
 
-pub(super) fn prepare_transport_frame(
+/// Verify one resolved frame of `wire_bytes` bytes and decode the message it carries.
+///
+/// The payload is self-contained by now: whether a session slot travelled inline or by
+/// reference, this is the verification it always was.
+pub(super) fn prepare_resolved_frame(
     network_id: u32,
     peer: Option<Did>,
-    bytes: &[u8],
+    payload: MessagePayload,
+    wire_bytes: usize,
 ) -> crate::error::Result<PreparedInboundFrame> {
-    let payload = MessagePayload::from_wire(bytes)?;
     if !payload.verify_transaction_and_payload(network_id) {
-        log_inbound_verification_failure(peer, &payload, bytes.len());
+        log_inbound_verification_failure(peer, &payload, wire_bytes);
         return Err(crate::error::Error::InvalidMessage(
             "message verification failed or message expired".to_string(),
         ));
@@ -255,5 +276,6 @@ pub(crate) fn prepare_transport_frame_lane_for_test(
     network_id: u32,
     bytes: &[u8],
 ) -> crate::error::Result<InboundLane> {
-    prepare_transport_frame(network_id, None, bytes).map(|prepared| prepared.lane)
+    let payload = MessagePayload::from_wire(bytes)?;
+    prepare_resolved_frame(network_id, None, payload, bytes.len()).map(|prepared| prepared.lane)
 }

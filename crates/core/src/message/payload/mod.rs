@@ -37,17 +37,24 @@ use crate::domain_tag;
 use crate::ecc::keccak256;
 use crate::error::Error;
 use crate::error::Result;
+use crate::session::Session;
 use crate::session::SessionSk;
+
+mod wire;
+
+pub(crate) use self::wire::LinkFrame;
+pub(crate) use self::wire::PerSlot;
+pub(crate) use self::wire::SessionControl;
+pub(crate) use self::wire::SessionRef;
+pub(crate) use self::wire::WirePayload;
 
 /// Message family of the [`Transaction`] signature: the origin's authorship of a message.
 const TRANSACTION_DOMAIN_TAG: DomainTag =
-    domain_tag!("rings-core:message-verification:transaction:v2");
+    domain_tag!("rings-core:message-verification:transaction");
 /// Message family of the [`MessagePayload`] signature: one hop's authorship of a forwarded
 /// envelope. Distinct from [`TRANSACTION_DOMAIN_TAG`] so the two signatures over the same
 /// transaction hash are never interchangeable.
-const PAYLOAD_DOMAIN_TAG: DomainTag = domain_tag!("rings-core:message-verification:payload:v1");
-/// Prefix that makes the v2 transaction cutover unambiguous before decoding any legacy shape.
-const TRANSACTION_V2_WIRE_PREFIX: &[u8] = b"RINGS-TX-V2\0";
+const PAYLOAD_DOMAIN_TAG: DomainTag = domain_tag!("rings-core:message-verification:payload");
 #[cfg(test)]
 static TEST_TRANSACTION_SEQUENCES: LazyLock<Mutex<std::collections::BTreeMap<StreamKey, u64>>> =
     LazyLock::new(|| Mutex::new(std::collections::BTreeMap::new()));
@@ -275,35 +282,39 @@ impl MessagePayload {
         Self::new_send_with_sequence(data, signer, next_hop, destination, sequence)
     }
 
-    /// Deserializes a `MessagePayload` instance from the Rings wire encoding.
+    /// The sessions in the two slots of this payload: the origin's and the current hop's.
+    pub(crate) const fn sessions(&self) -> PerSlot<&Session> {
+        PerSlot {
+            origin: &self.transaction.verification.session,
+            hop: &self.verification.session,
+        }
+    }
+
+    /// Deserializes a self-contained `MessagePayload` from the Rings wire encoding: a payload
+    /// frame with both sessions inline.
+    ///
+    /// A frame that references a session is meaningful only on the link that announced it, and
+    /// is refused here with [`Error::SessionReferenceUnresolved`]; a link resolves such frames
+    /// before they reach a `MessagePayload`.
     pub fn from_wire(data: &[u8]) -> Result<Self> {
-        let body = data
-            .strip_prefix(TRANSACTION_V2_WIRE_PREFIX)
-            .ok_or(Error::LegacyTransactionWireFormat)?;
-        rings_codec::deserialize(body).map_err(Error::CodecDeserialize)
+        match LinkFrame::from_wire(data)? {
+            LinkFrame::Payload(frame) => frame.resolve(wire::resolve_inline),
+            LinkFrame::Control(_) => Err(Error::InvalidMessage(
+                "expected a payload frame, found a link-control frame".to_string(),
+            )),
+        }
     }
 
-    /// Serializes the `MessagePayload` instance into the Rings wire encoding.
+    /// Serializes the `MessagePayload` into the self-contained Rings wire encoding: a payload
+    /// frame with both sessions inline, valid on any link and outside one.
     pub fn to_wire(&self) -> Result<Bytes> {
-        let body = rings_codec::serialize(self).map_err(Error::CodecSerialize)?;
-        let capacity = TRANSACTION_V2_WIRE_PREFIX
-            .len()
-            .checked_add(body.len())
-            .ok_or(Error::MessageSizeOverflow)?;
-        let mut wire = Vec::with_capacity(capacity);
-        wire.extend_from_slice(TRANSACTION_V2_WIRE_PREFIX);
-        wire.extend_from_slice(&body);
-        Ok(Bytes::from(wire))
+        WirePayload::inline(self).to_wire()
     }
 
-    /// Return the exact Rings wire size without allocating the wire buffer.
+    /// The exact length of [`Self::to_wire`], without allocating the wire buffer. A link may
+    /// send fewer bytes (a referenced session is shorter than an inline one), never more.
     pub(crate) fn wire_size(&self) -> Result<usize> {
-        let bytes = rings_codec::serialized_size(self).map_err(Error::CodecSerialize)?;
-        let body = usize::try_from(bytes).map_err(|_| Error::MessageSizeOverflow)?;
-        TRANSACTION_V2_WIRE_PREFIX
-            .len()
-            .checked_add(body)
-            .ok_or(Error::MessageSizeOverflow)
+        WirePayload::inline(self).wire_size()
     }
 
     /// Returns whether `local` is the relay destination of this payload.

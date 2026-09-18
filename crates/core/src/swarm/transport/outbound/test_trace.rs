@@ -1,3 +1,5 @@
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+use std::cell::Cell;
 use std::collections::BTreeMap;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use std::collections::BTreeSet;
@@ -7,6 +9,68 @@ use std::sync::Mutex;
 
 use super::Did;
 use super::TransferClass;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+use crate::message::PerSlot;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+use crate::message::SessionControl;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+use crate::message::SessionRef;
+
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+thread_local! {
+    static OUTBOUND_SUBMIT_COUNT: Cell<usize> = const { Cell::new(0) };
+    /// Session questions this thread's nodes answered with an announcement.
+    static SESSION_ANNOUNCEMENT_COUNT: Cell<usize> = const { Cell::new(0) };
+    /// Payload frames this thread's nodes encoded with at least one session by reference.
+    static REFERENCED_FRAME_COUNT: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+pub(crate) fn reset_outbound_submit_count_for_test() {
+    OUTBOUND_SUBMIT_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+pub(crate) fn outbound_submit_count_for_test() -> usize {
+    OUTBOUND_SUBMIT_COUNT.with(Cell::get)
+}
+
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+pub(super) fn record_outbound_submit() {
+    OUTBOUND_SUBMIT_COUNT.with(|count| count.set(count.get().saturating_add(1)));
+}
+
+/// The session questions answered with an announcement on this test thread so far: the
+/// observable that a miss was repaired by the link, not avoided.
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+pub(crate) fn session_announcement_count_for_test() -> usize {
+    SESSION_ANNOUNCEMENT_COUNT.with(Cell::get)
+}
+
+/// The payload frames encoded with at least one session slot by reference on this test thread
+/// so far: the observable that a link switched from inline to references.
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+pub(crate) fn referenced_frame_count_for_test() -> usize {
+    REFERENCED_FRAME_COUNT.with(Cell::get)
+}
+
+/// Count a frame encoded as `sessions` on this test thread if any slot is a reference.
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+pub(super) fn record_encoded_frame(sessions: &PerSlot<SessionRef<'_>>) {
+    let referenced = matches!(sessions.origin, SessionRef::Digest(_))
+        || matches!(sessions.hop, SessionRef::Digest(_));
+    if referenced {
+        REFERENCED_FRAME_COUNT.with(|count| count.set(count.get().saturating_add(1)));
+    }
+}
+
+/// Count `answer` on this test thread if it is an announcement.
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+pub(super) fn record_session_answer(answer: &SessionControl) {
+    if matches!(answer, SessionControl::Announce(_)) {
+        SESSION_ANNOUNCEMENT_COUNT.with(|count| count.set(count.get().saturating_add(1)));
+    }
+}
 
 type FrameAdmission = (TransferClass, u64, usize);
 
@@ -194,4 +258,11 @@ fn test_replacement_workers_receive_disjoint_transfer_id_ranges() {
 
     assert_ne!(first, second);
     assert!(first.abs_diff(second) >= WORKER_ID_STRIDE);
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl crate::swarm::transport::SwarmTransport {
+    pub(crate) fn outbound_admitted_transfer_total_for_test(&self) -> usize {
+        self.outbound_schedulers.admitted_transfer_total_for_test()
+    }
 }

@@ -9,9 +9,9 @@ use super::with_runtime_mut;
 use super::SimulationRuntimeError;
 use super::SimulationRuntimeState;
 use super::CONTROL_DEADLINE_MS;
+use crate::message::LinkFrame;
 use crate::message::MessageClass;
 use crate::message::MessageKind;
-use crate::message::MessagePayload;
 
 /// Delivery classes visible to deterministic schedule policies.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
@@ -123,7 +123,7 @@ fn inspect_delivery(
         | QueuedDeliveryKind::DataChannelClose => (ScheduledDeliveryClass::Lifecycle, 0, None),
         QueuedDeliveryKind::Message(bytes) => {
             let (class, transaction_id) = inspect_message(queued.sequence(), bytes)?;
-            (class, bytes.len(), Some(transaction_id))
+            (class, bytes.len(), transaction_id)
         }
     };
     let enqueued_virtual_ms = transaction_id
@@ -141,18 +141,25 @@ fn inspect_delivery(
     })
 }
 
+/// Classify one queued frame as the production link would, without resolving its session slots:
+/// the class and transaction id of a payload are readable whatever its slots hold, and a
+/// link-control frame is control traffic that belongs to no transaction.
 pub(super) fn inspect_message(
     sequence: u64,
     bytes: &[u8],
-) -> Result<(ScheduledDeliveryClass, uuid::Uuid), SimulationRuntimeError> {
-    let payload = MessagePayload::from_wire(bytes).map_err(|error| {
+) -> Result<(ScheduledDeliveryClass, Option<uuid::Uuid>), SimulationRuntimeError> {
+    let frame = LinkFrame::from_wire(bytes).map_err(|error| {
         SimulationRuntimeError::UndecodableQueuedMessage {
             sequence,
             reason: error.to_string(),
         }
     })?;
-    let transaction_id = payload.transaction.tx_id;
-    let kind = MessageKind::from_wire(&payload.transaction.data).map_err(|error| {
+    let payload = match frame {
+        LinkFrame::Control(_) => return Ok((ScheduledDeliveryClass::Control, None)),
+        LinkFrame::Payload(payload) => payload,
+    };
+    let transaction_id = Some(payload.transaction_id());
+    let kind = MessageKind::from_wire(payload.transaction_data()).map_err(|error| {
         SimulationRuntimeError::UndecodableQueuedMessage {
             sequence,
             reason: error.to_string(),

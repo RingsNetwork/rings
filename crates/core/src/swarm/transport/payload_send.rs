@@ -21,9 +21,11 @@ use super::outbound::OutboundPeerHandle;
 use super::outbound::OutboundTransfer;
 use super::outbound::OutboundTransferRoute;
 use super::outbound::TransferCapacityPermit;
+use super::outbound::TransferClass;
 use super::timeouts::OUTBOUND_PAYLOAD_CLEANUP_GRACE;
 use super::timeouts::TRACKED_PAYLOAD_COMPLETION_BOUND;
 use super::AdmittedConnection;
+use super::PendingConnectionAttempt;
 use super::SwarmTransport;
 use super::DATA_CHANNEL_SEND_ACCEPT_BUDGET;
 use super::TRANSPORT_TIMEOUT_PROFILE;
@@ -41,7 +43,10 @@ use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::MessageSigner;
 use crate::message::PayloadSender;
+use crate::message::SessionControl;
+use crate::session::SessionDigest;
 use crate::session::SessionSk;
+use crate::utils::get_epoch_ms;
 use crate::utils::sleep;
 
 const TRACKED_PAYLOAD_TIMEOUT: Duration = TRANSPORT_TIMEOUT_PROFILE.tracked_payload;
@@ -249,14 +254,11 @@ impl SwarmTransport {
     async fn reserve_outbound_capacity(
         &self,
         peer: Did,
-        kind: OutboundMessageKind,
+        class: TransferClass,
         bytes: usize,
         completion: OutboundCompletion,
     ) -> Result<TransferCapacityPermit> {
-        let reserve = self
-            .outbound_schedulers
-            .reserve(peer, kind.class(), bytes)
-            .fuse();
+        let reserve = self.outbound_schedulers.reserve(peer, class, bytes).fuse();
         if completion == OutboundCompletion::Tracked {
             return reserve.await;
         }
@@ -269,6 +271,70 @@ impl SwarmTransport {
                 timeout_ms: DATA_CHANNEL_SEND_ACCEPT_BUDGET.as_millis(),
             }),
         }
+    }
+
+    /// Send one link-control frame to `peer` over its admitted connection, detached.
+    ///
+    /// The frame is scheduled like any transfer of the control class, so it is bounded by the
+    /// same per-peer and global capacity and cannot starve behind data. Post: `Ok` means the
+    /// scheduler owns the frame, or the connection generation was revoked and there is no link
+    /// left to speak on.
+    pub(crate) async fn send_link_control(
+        &self,
+        peer: Did,
+        control: &SessionControl,
+    ) -> Result<()> {
+        let frame = control.to_wire()?;
+        let Some(admitted) = self.admitted_send_connection(peer)? else {
+            return Err(Error::SwarmMissDidInTable(peer));
+        };
+        let capacity_permit = self
+            .reserve_outbound_capacity(
+                peer,
+                TransferClass::DhtControl,
+                outbound_memory_reservation(frame.len()),
+                OutboundCompletion::Detached,
+            )
+            .await?;
+        let Some(handle) =
+            admitted.with_current_connection(|_| self.outbound_schedulers.handle(peer))?
+        else {
+            return Ok(());
+        };
+        let route = OutboundTransferRoute::new(
+            TransferClass::DhtControl,
+            peer,
+            admitted,
+            ChunkSendPermit::Always,
+        );
+        let (transfer, _completion) = OutboundTransfer::link_control(route, frame);
+        handle?.submit(transfer, capacity_permit)
+    }
+
+    /// `attempt`'s peer confirmed `digest`: frames to it may reference the session from now on.
+    pub(crate) fn acknowledge_session(
+        &self,
+        attempt: PendingConnectionAttempt,
+        digest: SessionDigest,
+    ) {
+        self.outbound_schedulers
+            .acknowledge_session(attempt.peer(), attempt.generation(), digest);
+    }
+
+    /// Answer the question `attempt`'s peer asked about `digest`: exactly one link-control
+    /// frame per question, taken from what this generation announced.
+    pub(crate) async fn answer_session_request(
+        &self,
+        attempt: PendingConnectionAttempt,
+        digest: SessionDigest,
+    ) -> Result<()> {
+        let answer = self.outbound_schedulers.answer_session_request(
+            attempt.peer(),
+            attempt.generation(),
+            digest,
+            get_epoch_ms(),
+        );
+        self.send_link_control(attempt.peer(), &answer).await
     }
 
     /// Send a maintenance payload and return only after all of its frames stop.
@@ -571,7 +637,7 @@ impl SwarmTransport {
         let capacity_permit = self
             .reserve_outbound_capacity(
                 did,
-                message_kind,
+                message_kind.class(),
                 outbound_memory_reservation(wire_bytes),
                 completion,
             )
@@ -605,7 +671,6 @@ impl SwarmTransport {
             return Err(Error::PeerMaxMessageSizeTooSmall(max_message_size));
         };
         admitted.ensure_current()?;
-        let data = payload.to_wire()?;
         tracing::debug!(
             local = %self.dht.did,
             next_hop = %preparation.next_hop,
@@ -618,18 +683,19 @@ impl SwarmTransport {
             framing = ?plan,
             "send payload start"
         );
+        let logical_sequence = payload.transaction.sequence;
         let framed = self.frame_outbound_transfer(
             OutboundTransferRoute::new(message_kind.class(), did, admitted.clone(), permit),
-            data,
+            payload,
             plan,
             OutboundTransferProperties {
-                logical_sequence: payload.transaction.sequence,
+                logical_sequence,
                 useful_bytes,
                 completion,
                 stop,
                 detached_admission,
             },
-        );
+        )?;
         Ok(Some(PreparedOutboundTransfer {
             admitted,
             handle,
@@ -693,13 +759,19 @@ impl SwarmTransport {
         Ok(preparation)
     }
 
+    /// Build the transfer that carries `payload` under `framing`.
+    ///
+    /// A whole payload travels as one link frame, its session slots encoded by the worker. A
+    /// chunked payload is cut from its self-contained encoding, because the receiver decodes it
+    /// after reassembly, outside the order of the link; the chunk frames that carry it are link
+    /// frames like any other.
     fn frame_outbound_transfer(
         &self,
         route: OutboundTransferRoute,
-        data: bytes::Bytes,
+        payload: MessagePayload,
         framing: Framing,
         properties: OutboundTransferProperties,
-    ) -> FramedOutboundTransfer {
+    ) -> Result<FramedOutboundTransfer> {
         let OutboundTransferProperties {
             logical_sequence,
             useful_bytes,
@@ -710,14 +782,15 @@ impl SwarmTransport {
         let (transfer, receiver) = match framing {
             Framing::Whole => OutboundTransfer::whole(
                 route,
-                data,
+                payload,
                 useful_bytes,
                 completion,
                 stop,
                 detached_admission,
             ),
             Framing::Chunked { chunk_size } => {
-                let chunks: ChunkFrames = Box::new(ChunkList::stream(data, chunk_size));
+                let chunks: ChunkFrames =
+                    Box::new(ChunkList::stream(payload.to_wire()?, chunk_size));
                 OutboundTransfer::chunked(
                     route,
                     ChunkedFrameSource::new(self.message_signer(), chunks, logical_sequence),
@@ -728,7 +801,7 @@ impl SwarmTransport {
                 )
             }
         };
-        FramedOutboundTransfer { transfer, receiver }
+        Ok(FramedOutboundTransfer { transfer, receiver })
     }
 
     async fn submit_prepared_outbound_transfer(

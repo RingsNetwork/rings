@@ -25,7 +25,7 @@ use crate::error::Result;
 use crate::onion::OnionRouteError;
 
 const CELL_LENGTH_PREFIX_BYTES: usize = size_of::<u32>();
-const ONION_CELL_AEAD_NAMESPACE: &[u8] = b"rings-node:onion-cell:v1";
+const ONION_CELL_AEAD_NAMESPACE: &[u8] = b"rings-node:onion-cell";
 
 /// Public size classes used by encrypted onion cells.
 ///

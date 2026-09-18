@@ -17,7 +17,7 @@ The origin is recovered from `Transaction.verification.session.account_did()`. I
 delegated session DID and not an intermediate relay. Rotating a session key therefore preserves
 the same account-to-destination stream, while two destinations advance independently.
 
-Every transaction carries a mandatory `u64` sequence. The transaction v2 signature transcript
+Every transaction carries a mandatory `u64` sequence. The transaction signature transcript
 binds the receiver-selected `network_id` through the signing domain and binds `destination`,
 `tx_id`, `sequence`, and `data` through the transaction hash. `ts_ms` and `ttl_ms` remain session
 authorization and message-liveness inputs; neither is used to order replay state.
@@ -90,11 +90,14 @@ closed on storage errors. Counters expose `Replay`, `Fork`, `Stale`, and persist
 
 ## Hard cutover
 
-0.24.0 is a network-wide protocol cutover. The sequence field is mandatory, transaction
-signatures use the `rings-core:message-verification:transaction:v2` domain, and the payload wire
-encoding begins with the `RINGS-TX-V2` marker. Unprefixed 0.23.x payloads are rejected before
-deserialization. There is no dual decoder, negotiation, feature flag, downgrade path, or legacy
-fallback. Mixed-version overlays are unsupported.
+0.24.0 was a network-wide protocol cutover: the sequence field became mandatory and the
+transaction signing domain and payload marker changed with it. 0.28.0 is the next one: the
+signing domain is `rings-core:message-verification:transaction`, the payload wire encoding
+begins with the `RINGS-PAYLOAD` marker, and the replay store key is
+`rings-core:transaction-replay` (see [Session References](session-references.md)). Payloads
+without the current marker are rejected before deserialization. There is no dual decoder,
+negotiation, feature flag, downgrade path, or legacy fallback, and no version behind any of these
+names: the protocol is not versioned before 1.0. Mixed-version overlays are unsupported.
 
 ## Non-guarantees
 

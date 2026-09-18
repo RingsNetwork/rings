@@ -43,11 +43,13 @@
 
 mod account;
 mod builder;
+mod digest;
 mod model;
 mod signing_key;
 
 pub use account::Account;
 pub use builder::SessionSkBuilder;
+pub use digest::SessionDigest;
 pub use model::Session;
 pub use signing_key::SessionSk;
 
