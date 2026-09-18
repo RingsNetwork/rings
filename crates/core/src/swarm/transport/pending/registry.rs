@@ -12,7 +12,8 @@ use crate::error::Result;
 /// Absence is represented by the peer not appearing in
 /// [`ConnectionLifecycleRegistry::peers`]. A present peer therefore has exactly
 /// one state and cannot be pending, admitting, and active at the same time.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(test, derive(Hash))]
 pub(in crate::swarm::transport) enum PeerConnectionLifecycle {
     Pending {
         attempt: PendingConnectionAttempt,
@@ -150,7 +151,8 @@ impl ActiveConnectionSet {
 ///
 /// Invariant: `pending <= total`, so a handshake slot always fits inside the
 /// total and a pending-saturated registry is never mistaken for a full one.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(test, derive(Hash))]
 pub(in crate::swarm::transport) struct LifecycleBounds {
     pending: usize,
     total: usize,

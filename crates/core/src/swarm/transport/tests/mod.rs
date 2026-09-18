@@ -88,7 +88,7 @@ type TestLatch = Witness<bool>;
 type TestCounter = Witness<usize>;
 
 #[derive(Default)]
-pub(super) struct RecordingMeasure {
+struct RecordingMeasure {
     counters: Mutex<Vec<(Did, MeasureCounter)>>,
     measurements: Mutex<Vec<(Did, MeasurementEvent)>>,
     qualities: Mutex<BTreeMap<Did, PeerQuality>>,
@@ -207,7 +207,7 @@ impl BehaviourJudgement for RecordingMeasure {
     }
 }
 
-struct NoopSwarmCallback;
+pub(super) struct NoopSwarmCallback;
 
 /// Records every swarm event the application was told about, in start order.
 #[derive(Default)]
@@ -460,10 +460,7 @@ impl SwarmCallback for BlockingEventSwarmCallback {
     }
 }
 
-pub(super) fn transport_with_key_and_measure(
-    key: &SecretKey,
-    measure: MeasureImpl,
-) -> Result<SwarmTransport> {
+fn transport_with_key_and_measure(key: &SecretKey, measure: MeasureImpl) -> Result<SwarmTransport> {
     transport_with_key_measure_and_reassembly_limits(key, measure, ReassemblyLimits::production())
 }
 
@@ -497,6 +494,12 @@ fn transport_with_measure(measure: MeasureImpl) -> Result<SwarmTransport> {
     transport_with_key_and_measure(&SecretKey::random(), measure)
 }
 
+/// A transport whose identity is derived from `key`, for tests that must
+/// place the local peer at a known ring position.
+pub(super) fn transport_with_key(key: &SecretKey) -> Result<SwarmTransport> {
+    transport_with_key_and_measure(key, Arc::new(RecordingMeasure::default()))
+}
+
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 fn transport_with_measure_and_reassembly_limits(
     measure: MeasureImpl,
@@ -510,7 +513,7 @@ fn transport_with_measure_and_reassembly_limits(
 }
 
 #[cfg(feature = "dummy")]
-async fn open_dummy_data_channel_before_ice_connected(
+pub(super) async fn open_dummy_data_channel_before_ice_connected(
     transport: &SwarmTransport,
     peer: Did,
 ) -> Result<()> {

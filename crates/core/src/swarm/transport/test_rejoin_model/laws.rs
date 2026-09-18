@@ -8,24 +8,36 @@
 //! Safety (`□`, every reachable state):
 //! - `RetiredGenerationsAreInert`: no event of a generation `g` with
 //!   `¬Owns(g)` changed `(topology, lifecycles)`.
-//! - `TopologiesAreWellFormed`: `SuccessorsWellFormed ∧ PredecessorWellFormed
-//!   ∧ FingersWellFormed` at every live peer.
-//! - `RoutingAdvancesClockwise`: `RoutesClockwise(s, id)` for every live peer
-//!   and every ring identity `id`.
+//! - `UnavailableHeadsAreReplaced`: an `Unavailable` retirement of the head
+//!   left `succ = Successors(Sendable ∖ {head}, n, K)`.
 //! - `TopologyReferencesOnlyAdmitted`: `Referenced(n, p) ⇒ Active(n, p)`.
+//! - `TopologiesAreWellFormed`: `SuccessorsWellFormed ∧ PredecessorWellFormed
+//!   ∧ FingersWellFormed` at every live peer. Every topology write of the
+//!   shell goes through `step`, which normalizes its arguments, so this law
+//!   is falsifiable only by a defect of `step` itself (the subject of the
+//!   topology unit tests), not by a shell mutation; it is checked here so
+//!   the composition inherits the invariant it relies on.
+//!
+//! `RoutesClockwise` is not listed: it is the unconditional postcondition of
+//! `find_successor`, true of every representable state, so no reachable
+//! state could falsify it.
 //!
 //! Coverage (`◇`, some reachable state), so the safety laws are not vacuous:
 //! - `RetiredEventAwaitsBesideNewerGeneration`
-//! - `SuccessorListIsTruncated`
+//! - `HeadReplacementFillsCapacity`: the head's `RetireUnavailable` is
+//!   pending while at least `K` other sendable peers remain, so the
+//!   replacement chooses a full list; with more than `K` (the
+//!   `replacement` configuration) it truncates.
 //!
 //! Liveness is stated in `search`, over [`is_converged`] and
-//! [`retains_successor_paths`].
+//! [`retains_live_heads`].
 
-use std::collections::BTreeSet;
+use std::fmt;
 
+use super::node::LifecycleEvent;
 use super::overlay::Overlay;
 use super::overlay::OverlayState;
-use crate::dht::Did;
+use crate::dht::topology::successor_head;
 
 /// What a law claims about the reachable states.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,22 +48,55 @@ pub(super) enum Expectation {
     Sometimes,
 }
 
+/// The identity of a law, as verdicts and mutation tests refer to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum LawName {
+    /// `□`: a retired generation's event changes nothing protected.
+    RetiredGenerationsAreInert,
+    /// `□`: an unavailable head is replaced by the sendable admitted
+    /// successors.
+    UnavailableHeadsAreReplaced,
+    /// `□`: topology evidence is backed by an admitted generation.
+    TopologyReferencesOnlyAdmitted,
+    /// `□`: the topology well-formedness invariants.
+    TopologiesAreWellFormed,
+    /// `◇`: a retired generation's event awaits beside a newer admitted
+    /// generation.
+    RetiredEventAwaitsBesideNewerGeneration,
+    /// `◇`: a head replacement has at least as many sendable candidates as
+    /// capacity.
+    HeadReplacementFillsCapacity,
+}
+
+impl fmt::Display for LawName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::RetiredGenerationsAreInert => "retired generations are inert",
+            Self::UnavailableHeadsAreReplaced => {
+                "an unavailable head is replaced by the sendable admitted successors"
+            }
+            Self::TopologyReferencesOnlyAdmitted => "topology references only admitted generations",
+            Self::TopologiesAreWellFormed => "topologies are well formed",
+            Self::RetiredEventAwaitsBesideNewerGeneration => {
+                "a retired generation's event awaits beside a newer admitted generation"
+            }
+            Self::HeadReplacementFillsCapacity => {
+                "a head replacement has at least as many sendable candidates as capacity"
+            }
+        })
+    }
+}
+
 /// One checked proposition over the composed carrier.
 #[derive(Clone, Copy)]
 pub(super) struct Law {
-    /// Name used in verdicts and by the mutation tests.
-    pub(super) name: &'static str,
+    /// Identity used in verdicts and by the mutation tests.
+    pub(super) name: LawName,
     /// Whether the predicate must hold everywhere or somewhere.
     pub(super) expectation: Expectation,
     /// The predicate.
     pub(super) holds: fn(&Overlay, &OverlayState) -> bool,
 }
-
-/// Name of the retired-generation law, shared with the mutation tests.
-pub(super) const RETIRED_GENERATIONS_ARE_INERT: &str = "retired generations are inert";
-/// Name of the successor-replacement law, shared with the mutation tests.
-pub(super) const TOPOLOGY_REFERENCES_ONLY_ADMITTED: &str =
-    "topology references only admitted generations";
 
 /// `□ stale_effect = None`: the history variable never records a retired
 /// generation's event changing protected state.
@@ -59,25 +104,14 @@ fn retired_generations_are_inert(_: &Overlay, state: &OverlayState) -> bool {
     state.stale_effect.is_none()
 }
 
-/// `□ ∀n. SuccessorsWellFormed(n, k) ∧ PredecessorWellFormed(n) ∧
-/// FingersWellFormed(n)`.
-fn topologies_are_well_formed(overlay: &Overlay, state: &OverlayState) -> bool {
-    state.nodes.values().all(|node| {
-        node.topology
-            .successors_are_well_formed(overlay.successor_capacity())
-            && node.topology.predecessor_is_well_formed()
-            && node.topology.fingers_are_well_formed()
-    })
-}
-
-/// `□ ∀n, id ∈ ring. RoutesClockwise(n, id)`.
-fn routing_advances_clockwise(overlay: &Overlay, state: &OverlayState) -> bool {
-    state.nodes.values().all(|node| {
-        overlay
-            .ring()
-            .iter()
-            .all(|target| node.topology.routes_clockwise_toward(*target))
-    })
+/// `□ ∀n. unreplaced_head(n) = None`: the history variable never records an
+/// unavailable head retired without the sendable admitted successors taking
+/// its place.
+fn unavailable_heads_are_replaced(_: &Overlay, state: &OverlayState) -> bool {
+    state
+        .nodes
+        .values()
+        .all(|node| node.unreplaced_head.is_none())
 }
 
 /// `□ ∀n, p. Referenced(n, p) ⇒ Active(n, p)`: every successor, predecessor,
@@ -92,30 +126,56 @@ fn topology_references_only_admitted(_: &Overlay, state: &OverlayState) -> bool 
     })
 }
 
-/// `◇ ∃n, g, g'. Callback(g) ∈ callbacks(n) ∧ Active(n, g') ∧ g'.peer = g.peer
-/// ∧ g' > g`: the rejoin race the model exists to explore is reachable, and
-/// the next step delivers the retired event under the safety laws.
+/// `□ ∀n. SuccessorsWellFormed(n, K) ∧ PredecessorWellFormed(n) ∧
+/// FingersWellFormed(n)`.
+fn topologies_are_well_formed(overlay: &Overlay, state: &OverlayState) -> bool {
+    state.nodes.values().all(|node| {
+        node.topology
+            .successors_are_well_formed(overlay.successor_capacity())
+            && node.topology.predecessor_is_well_formed()
+            && node.topology.fingers_are_well_formed()
+    })
+}
+
+/// `◇ ∃n, g, g'. Event(g) ∈ events(n) ∧ Active(n, g') ∧ g'.peer = g.peer ∧
+/// g' > g`: the rejoin race the model exists to explore is reachable, and the
+/// next step delivers the retired event under the safety laws.
 fn retired_event_awaits_beside_newer_generation(_: &Overlay, state: &OverlayState) -> bool {
     state.nodes.values().any(|node| {
-        node.callbacks.iter().any(|callback| {
-            let retired = callback.attempt();
+        node.events.iter().any(|event| {
+            let retired = event.attempt();
             node.lifecycles
-                .active_attempt(retired.peer)
-                .is_some_and(|admitted| admitted.generation > retired.generation)
+                .active_attempt(retired.peer())
+                .is_some_and(|admitted| admitted.generation() > retired.generation())
         })
     })
 }
 
-/// `◇ ∃n. |succ(n)| = k ∧ |Sendable(n)| > k`: more eligible peers than
-/// successor capacity, so truncation and replacement choose among them.
-fn successor_list_is_truncated(overlay: &Overlay, state: &OverlayState) -> bool {
+/// `◇ ∃n, g. RetireUnavailable(g) ∈ events(n) ∧ g.peer = head(n) ∧
+/// |Sendable(n) ∖ {g.peer}| ≥ K`: the next step replaces a head from enough
+/// candidates to fill the list, so `UnavailableHeadsAreReplaced` is checked
+/// on a replacement that chooses (and, above `K`, truncates).
+fn head_replacement_fills_capacity(overlay: &Overlay, state: &OverlayState) -> bool {
     state.nodes.values().any(|node| {
-        node.topology.successors.len() == overlay.successor_capacity()
-            && node.lifecycles.active_connections().iter().count() > overlay.successor_capacity()
+        node.events.iter().any(|event| match event {
+            LifecycleEvent::RetireUnavailable(head) => {
+                successor_head(&node.topology) == Some(head.peer())
+                    && node
+                        .lifecycles
+                        .active_connections()
+                        .iter()
+                        .filter(|candidate| candidate.peer() != head.peer())
+                        .nth(overlay.successor_capacity().saturating_sub(1))
+                        .is_some()
+            }
+            LifecycleEvent::ChannelOpened(_)
+            | LifecycleEvent::SendTerminal(_)
+            | LifecycleEvent::Closed(_) => false,
+        })
     })
 }
 
-/// `Converged(s)`: `∀n ∈ M. ChordFixpoint(n, M, k)` for the live set `M`.
+/// `Converged(s)`: `∀n ∈ M. ChordFixpoint(n, M, K)` for the live set `M`.
 pub(super) fn is_converged(overlay: &Overlay, state: &OverlayState) -> bool {
     let members = state.members();
     state.nodes.values().all(|node| {
@@ -124,82 +184,59 @@ pub(super) fn is_converged(overlay: &Overlay, state: &OverlayState) -> bool {
     })
 }
 
-/// `RetainsSuccessorPaths(s)`: in the digraph on the live set with an edge
-/// `n → p` iff `p ∈ succ(n)` over a sendable generation whose link is alive,
-/// every live peer reaches every live peer.
+/// `RetainsLiveHeads(s)`: every live peer's successor head is live, sendable,
+/// and its link is alive.
 ///
-/// This is the premise of conditional liveness. It is a statement about the
-/// physical overlay at the instant churn stops, so no later protocol step can
-/// falsify it: the quiescent suffix kills no link.
-pub(super) fn retains_successor_paths(state: &OverlayState) -> bool {
-    state
-        .nodes
-        .keys()
-        .all(|origin| reachable_over_successors(state, *origin).len() == state.nodes.len())
-}
-
-/// The peers reachable from `origin` over live successor edges, `origin`
-/// included: the least fixpoint of one-step expansion.
-fn reachable_over_successors(state: &OverlayState, origin: Did) -> BTreeSet<Did> {
-    let mut reached = BTreeSet::from([origin]);
-    let mut frontier = vec![origin];
-    while let Some(peer) = frontier.pop() {
-        let Some(node) = state.nodes.get(&peer) else {
-            continue;
-        };
-        let live_successors = node
-            .topology
-            .successors
-            .iter()
-            .copied()
-            .filter(|successor| {
-                state.nodes.contains_key(successor)
-                    && node
-                        .lifecycles
-                        .sendable_attempt(*successor)
-                        .is_some_and(|under| state.is_linked(peer, under))
-            });
-        for successor in live_successors {
-            if reached.insert(successor) {
-                frontier.push(successor);
-            }
-        }
-    }
-    reached
+/// This is the premise of conditional liveness, evaluated at the state where
+/// churn stops. It is the weakest statement of "the remaining overlay keeps
+/// a reachable successor path" this model can make: a peer whose head is
+/// gone has no successor edge at all (the #775 orphan), and a peer whose
+/// head is live but stale is repaired by stabilization. It is a statement
+/// about that instant only; a later `Stabilize` may swap the head for a
+/// confirmed peer whose link is already dead, and the claim covers those
+/// behaviours too.
+pub(super) fn retains_live_heads(state: &OverlayState) -> bool {
+    state.nodes.iter().all(|(peer, node)| {
+        successor_head(&node.topology).is_some_and(|head| {
+            state.nodes.contains_key(&head)
+                && node
+                    .lifecycles
+                    .sendable_attempt(head)
+                    .is_some_and(|under| state.far_end_of(*peer, under).is_some())
+        })
+    })
 }
 
 /// Every checked proposition, in report order.
-pub(super) fn laws() -> [Law; 6] {
-    [
-        Law {
-            name: RETIRED_GENERATIONS_ARE_INERT,
-            expectation: Expectation::Always,
-            holds: retired_generations_are_inert,
-        },
-        Law {
-            name: "topologies are well formed",
-            expectation: Expectation::Always,
-            holds: topologies_are_well_formed,
-        },
-        Law {
-            name: "routing advances clockwise",
-            expectation: Expectation::Always,
-            holds: routing_advances_clockwise,
-        },
-        Law {
-            name: TOPOLOGY_REFERENCES_ONLY_ADMITTED,
-            expectation: Expectation::Always,
-            holds: topology_references_only_admitted,
-        },
-        Law {
-            name: "a retired generation's event awaits beside a newer admitted generation",
-            expectation: Expectation::Sometimes,
-            holds: retired_event_awaits_beside_newer_generation,
-        },
-        Law {
-            name: "the successor list is truncated",
-            expectation: Expectation::Sometimes,
-            holds: successor_list_is_truncated,
-        },
-    ]
-}
+pub(super) const LAWS: [Law; 6] = [
+    Law {
+        name: LawName::RetiredGenerationsAreInert,
+        expectation: Expectation::Always,
+        holds: retired_generations_are_inert,
+    },
+    Law {
+        name: LawName::UnavailableHeadsAreReplaced,
+        expectation: Expectation::Always,
+        holds: unavailable_heads_are_replaced,
+    },
+    Law {
+        name: LawName::TopologyReferencesOnlyAdmitted,
+        expectation: Expectation::Always,
+        holds: topology_references_only_admitted,
+    },
+    Law {
+        name: LawName::TopologiesAreWellFormed,
+        expectation: Expectation::Always,
+        holds: topologies_are_well_formed,
+    },
+    Law {
+        name: LawName::RetiredEventAwaitsBesideNewerGeneration,
+        expectation: Expectation::Sometimes,
+        holds: retired_event_awaits_beside_newer_generation,
+    },
+    Law {
+        name: LawName::HeadReplacementFillsCapacity,
+        expectation: Expectation::Sometimes,
+        holds: head_replacement_fills_capacity,
+    },
+];

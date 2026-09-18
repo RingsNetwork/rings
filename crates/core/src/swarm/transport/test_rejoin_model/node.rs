@@ -4,20 +4,21 @@
 //!
 //! Nothing here re-implements a production state machine. Every topology
 //! change is `topology::step`, every lifecycle change is a
-//! [`ConnectionLifecycleRegistry`] method, and the bounded candidate budget is
-//! the production [`StabilizationConnectionPlan`]. What this module owns is the
+//! [`ConnectionLifecycleRegistry`] method, the bounded candidate budget is
+//! the production [`StabilizationConnectionPlan`], and the removal flavours
+//! are the production [`DhtPeerRemoval`]. What this module owns is the
 //! *composition* that production performs inside `SwarmTransport` under the
 //! lifecycle boundary, written as pure functions `NodeState × Input →
 //! NodeState × [Effect]`:
 //!
 //! ```text
-//! callback(attempt) ──▶ [registry: does `attempt` own the slot?] ── no ──▶ inert
-//!                                   │ yes
-//!                                   ▼
-//!                 [registry transition] ⨯ [topology::step] (one atomic step)
-//!                                   │
-//!                                   ▼
-//!                        [effects: frames, offers]
+//! event(g) ──▶ [registry: does `g` own the slot?] ── no ──▶ inert
+//!                             │ yes
+//!                             ▼
+//!           [registry transition] ⨯ [topology::step] (one atomic step)
+//!                             │
+//!                             ▼
+//!                  [effects: messages, offers]
 //! ```
 //!
 //! Each function names the production path it interprets, so a reviewer can
@@ -28,6 +29,8 @@ use std::collections::BTreeSet;
 use super::overlay::Overlay;
 use super::overlay::ShellMutation;
 use crate::dht::topology::step;
+use crate::dht::topology::successor_head;
+use crate::dht::topology::successors;
 use crate::dht::topology::StabilizationConnectionPlan;
 use crate::dht::topology::StabilizationConnectionStep;
 use crate::dht::topology::SuccessorRemoval;
@@ -36,6 +39,7 @@ use crate::dht::topology::TopologyEvent;
 use crate::dht::topology::TopologyState;
 use crate::dht::Did;
 use crate::dht::TopoInfo;
+use crate::swarm::transport::connection::DhtPeerRemoval;
 use crate::swarm::transport::pending::ActiveConnectionSet;
 use crate::swarm::transport::pending::ConnectionLifecycleRegistry;
 use crate::swarm::transport::pending::LifecycleBounds;
@@ -57,11 +61,11 @@ const ADMITTED_AT_MS: u64 = 0;
 
 /// A local event of one connection generation, delivered at any later time.
 ///
-/// `Callback(g)` is addressed to generation `g`, not to a peer: the receiving
+/// An event is addressed to generation `g`, not to a peer: the receiving
 /// shell must decide whether `g` still owns the peer's slot. That decision is
 /// the exact-generation guard under test.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(super) enum Callback {
+pub(super) enum LifecycleEvent {
     /// The data channel of this generation opened (`on_data_channel_open`).
     ChannelOpened(PendingConnectionAttempt),
     /// A send on this generation failed terminally (`mark_send_terminal`).
@@ -70,12 +74,13 @@ pub(super) enum Callback {
     /// (`disconnect_unavailable`).
     RetireUnavailable(PendingConnectionAttempt),
     /// The transport of this generation reached `Failed`/`Closed`
-    /// (`leave_dht_attempt`), or its handshake was refused.
+    /// (`leave_dht_attempt`), or its offer was refused and the generation
+    /// expired.
     Closed(PendingConnectionAttempt),
 }
 
-impl Callback {
-    /// The generation this callback was bound to when its connection was made.
+impl LifecycleEvent {
+    /// The generation this event was bound to when its connection was made.
     pub(super) const fn attempt(self) -> PendingConnectionAttempt {
         match self {
             Self::ChannelOpened(attempt)
@@ -85,8 +90,8 @@ impl Callback {
         }
     }
 
-    /// The same callback re-addressed to `attempt`: the functorial action of a
-    /// generation substitution on callbacks, used only by the mutated shell.
+    /// The same event re-addressed to `attempt`: the functorial action of a
+    /// generation substitution on events, used only by the mutated shell.
     const fn readdressed(self, attempt: PendingConnectionAttempt) -> Self {
         match self {
             Self::ChannelOpened(_) => Self::ChannelOpened(attempt),
@@ -97,9 +102,9 @@ impl Callback {
     }
 }
 
-/// A stabilization-protocol frame carried by an admitted connection.
+/// A stabilization-protocol message carried by an admitted connection.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(super) enum Frame {
+pub(super) enum ProtocolMessage {
     /// `QueryForTopoInfoSend` for stabilization, with its correlation token.
     TopologyQuery {
         /// Token the report must echo.
@@ -119,14 +124,14 @@ pub(super) enum Frame {
 }
 
 /// An effect requested by a node transition, as data.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub(super) enum Effect {
-    /// Send `frame` on the sendable generation `under`.
-    Frame {
+    /// Send `message` on the sendable generation `under`.
+    Message {
         /// Local generation the send was admitted under.
         under: PendingConnectionAttempt,
         /// Payload.
-        frame: Frame,
+        message: ProtocolMessage,
     },
     /// Signal an offer for the freshly reserved generation `offered`.
     Offer {
@@ -135,18 +140,29 @@ pub(super) enum Effect {
     },
 }
 
-/// Which production removal a retirement performs on the topology.
+/// How the shell answers an offer from a peer for which it holds an
+/// unadmitted generation of its own (simultaneous offers).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Removal {
-    /// `DhtPeerRemoval::Ordinary`: `SuccessorRemoval::Preserve`.
-    Ordinary,
-    /// `DhtPeerRemoval::Unavailable`: `SuccessorRemoval::ReplaceWith` the
-    /// admitted, sendable peers.
-    Unavailable,
+pub(super) enum OwnOfferState {
+    /// The own generation was dialed and not yet answered: its raw connection
+    /// is still `New`, so production may abandon it.
+    Unanswered,
+    /// The own generation is paired with a link (answered, channel opening):
+    /// production keeps it and refuses the incoming offer.
+    Answered,
+}
+
+/// The witness that an unavailable head was not replaced by the sendable
+/// admitted successors: the history variable of the head-replacement law.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) struct UnreplacedHead {
+    /// The head that was retired as unavailable.
+    pub(super) removed: Did,
 }
 
 /// One live peer: production topology × production lifecycle registry, plus
-/// the local events raised but not yet delivered to its shell.
+/// the local events raised but not yet delivered to its shell, and the
+/// history variable of the head-replacement law.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct NodeState {
     /// Production pure topology state.
@@ -154,22 +170,28 @@ pub(super) struct NodeState {
     /// Production connection lifecycle registry.
     pub(super) lifecycles: ConnectionLifecycleRegistry,
     /// Local events raised but not yet delivered.
-    pub(super) callbacks: BTreeSet<Callback>,
+    pub(super) events: BTreeSet<LifecycleEvent>,
+    /// Set when an unavailable head's retirement left a successor sequence
+    /// other than the sendable admitted successors; never set by the
+    /// faithful shell.
+    pub(super) unreplaced_head: Option<UnreplacedHead>,
 }
 
 /// Result of one node transition: `NodeState × [Effect]`.
 pub(super) struct NodeStep {
     /// Next node state.
     pub(super) node: NodeState,
-    /// Effects for the environment to route.
+    /// Effects for the environment to dispatch.
     pub(super) effects: Vec<Effect>,
 }
 
 impl NodeState {
     /// A freshly started peer: empty topology, empty registry.
     ///
-    /// A restart is a new process, so generations restart too; no callback of
-    /// the previous process survives to collide with them.
+    /// A restart is a new process, so generations restart too; no event of
+    /// the previous process survives to collide with them. The registry
+    /// bounds equal the ring size, so its capacity verdicts are unreachable
+    /// and `reserve` can fail only with `AlreadyConnected`.
     pub(super) fn started(local: Did, overlay: &Overlay) -> Self {
         let peers = overlay.ring().len();
         Self {
@@ -178,7 +200,8 @@ impl NodeState {
                 overlay.finger_slots()
             ]),
             lifecycles: ConnectionLifecycleRegistry::new(LifecycleBounds::new(peers, peers)),
-            callbacks: BTreeSet::new(),
+            events: BTreeSet::new(),
+            unreplaced_head: None,
         }
     }
 
@@ -188,24 +211,32 @@ impl NodeState {
     /// bound to such a `g` must be inert.
     pub(super) fn owns(&self, attempt: PendingConnectionAttempt) -> bool {
         self.lifecycles
-            .state(attempt.peer)
+            .state(attempt.peer())
             .is_some_and(|lifecycle| lifecycle.attempt() == attempt)
     }
 
     /// `Holds(g)`: `g` owns its slot but is not yet admitted, so production
-    /// parks its inbound frames in the pre-admission hold.
+    /// parks its inbound frames in the pre-admission hold
+    /// (`InboundGate::Unadmitted`).
     pub(super) fn holds_before_admission(&self, attempt: PendingConnectionAttempt) -> bool {
-        self.lifecycles.unadmitted_attempt(attempt.peer) == Some(attempt)
+        self.lifecycles.unadmitted_attempt(attempt.peer()) == Some(attempt)
     }
 
     /// `Admits(g)`: `g` is the admitted generation of its peer, the inbound
-    /// gate of `InboundProcessor::pending_connection_gate`.
+    /// gate of `InboundProcessor::pending_connection_gate`
+    /// (`InboundGate::Admitted`).
     fn admits(&self, attempt: PendingConnectionAttempt) -> bool {
-        self.lifecycles.active_attempt(attempt.peer) == Some(attempt)
+        self.lifecycles.active_attempt(attempt.peer()) == Some(attempt)
     }
 
-    /// `Isolated`: no lifecycle record exists, so only a bootstrap dial can
-    /// reconnect this peer.
+    /// `Sendable(g)`: `g` is admitted and not send-terminal, the production
+    /// routability of a peer up to transport readiness.
+    fn sendable(&self, attempt: PendingConnectionAttempt) -> bool {
+        self.lifecycles.sendable_attempt(attempt.peer()) == Some(attempt)
+    }
+
+    /// `Isolated`: no lifecycle record exists for any ring identity, so only
+    /// a bootstrap dial can reconnect this peer.
     pub(super) fn is_isolated(&self, overlay: &Overlay) -> bool {
         overlay
             .ring()
@@ -213,9 +244,9 @@ impl NodeState {
             .all(|peer| !self.lifecycles.contains(*peer))
     }
 
-    /// The observable of the retired-generation law: everything a stale event
-    /// is forbidden to change.
-    pub(super) fn protected(&self) -> (&TopologyState, &ConnectionLifecycleRegistry) {
+    /// The observable of the retired-generation law: everything a retired
+    /// generation's event is forbidden to change.
+    pub(super) fn retirement_observable(&self) -> (&TopologyState, &ConnectionLifecycleRegistry) {
         (&self.topology, &self.lifecycles)
     }
 
@@ -226,12 +257,12 @@ impl NodeState {
         next.actions
     }
 
-    /// `frame` addressed to `peer`, iff a sendable generation exists
+    /// `message` addressed to `peer`, iff a sendable generation exists
     /// (`sendable_attempt`, the production send gate).
-    fn frame_to(&self, peer: Did, frame: Frame) -> Option<Effect> {
+    fn message_to(&self, peer: Did, message: ProtocolMessage) -> Option<Effect> {
         self.lifecycles
             .sendable_attempt(peer)
-            .map(|under| Effect::Frame { under, frame })
+            .map(|under| Effect::Message { under, message })
     }
 
     /// Interpret topology actions as effects.
@@ -246,14 +277,17 @@ impl NodeState {
                 TopologyAction::QuerySuccessorTopology {
                     successor,
                     request_id,
-                } => match self.frame_to(successor, Frame::TopologyQuery { request_id }) {
-                    Some(effect) => effects.push(effect),
-                    None => {
-                        self.advance(TopologyEvent::CancelStabilize { request_id }, overlay);
+                } => {
+                    match self.message_to(successor, ProtocolMessage::TopologyQuery { request_id })
+                    {
+                        Some(effect) => effects.push(effect),
+                        None => {
+                            self.advance(TopologyEvent::CancelStabilize { request_id }, overlay);
+                        }
                     }
-                },
+                }
                 TopologyAction::Notify(successor) => {
-                    effects.extend(self.frame_to(successor, Frame::NotifyPredecessor));
+                    effects.extend(self.message_to(successor, ProtocolMessage::NotifyPredecessor));
                 }
                 TopologyAction::FindSuccessorForConnect { .. }
                 | TopologyAction::FindSuccessorForFix { .. }
@@ -265,8 +299,10 @@ impl NodeState {
     }
 
     /// `SwarmTransport::connect`: reserve a generation and signal its offer.
-    /// A peer that already owns a record yields no effect (`AlreadyConnected`
-    /// is success for `connect_dht_peer`).
+    ///
+    /// A peer that already owns a record yields no effect: `AlreadyConnected`
+    /// is success for `connect_dht_peer`, and it is the only failure the
+    /// registry can report under the modeled bounds (see [`Self::started`]).
     fn offer_to(&mut self, peer: Did) -> Option<Effect> {
         self.lifecycles
             .reserve(peer, RESERVED_AT_MS)
@@ -289,26 +325,32 @@ impl NodeState {
     /// [admitted record?] ── sendable ──▶ refuse (AlreadyConnected)
     ///        │ send-terminal: retire it as unavailable
     ///        ▼
-    /// [unadmitted record?] ── Pending ∧ local > offerer ──▶ abandon own offer
-    ///        │ otherwise ─────────────────────────────────▶ refuse
+    /// [unadmitted record?] ── Pending ∧ unanswered ∧ local > offerer ──▶ abandon own offer
+    ///        │ otherwise ────────────────────────────────────────────▶ refuse
     ///        ▼
     /// reserve(offerer) ──▶ answer under the new generation
     /// ```
     ///
-    /// Returns the answering generation, or `None` when the offer is refused.
+    /// Production abandons its own pending offer only while that raw
+    /// connection is still `New`; the environment reports that as
+    /// `own_offer`, since only it knows whether the pending generation was
+    /// paired with a link. Returns the answering generation, or `None` when
+    /// the offer is refused.
     pub(super) fn answer_offer(
         mut self,
         offerer: Did,
+        own_offer: OwnOfferState,
         overlay: &Overlay,
     ) -> (Self, Option<PendingConnectionAttempt>) {
         if let Some(admitted) = self.lifecycles.active_attempt(offerer) {
             if self.lifecycles.sendable_attempt(offerer).is_some() {
                 return (self, None);
             }
-            self.retire(admitted, Removal::Unavailable, overlay);
+            self.retire(admitted, DhtPeerRemoval::Unavailable, overlay);
         }
         if let Some(unadmitted) = self.lifecycles.unadmitted_attempt(offerer) {
             let abandons_own_offer = self.lifecycles.pending_attempt(offerer) == Some(unadmitted)
+                && own_offer == OwnOfferState::Unanswered
                 && self.topology.local > offerer;
             if !abandons_own_offer {
                 return (self, None);
@@ -319,35 +361,40 @@ impl NodeState {
         (self, answered)
     }
 
-    /// Deliver one local callback.
+    /// Deliver one local event.
     ///
-    /// Under [`ShellMutation::CallbackIgnoresGeneration`] the callback is first
+    /// Under [`ShellMutation::CallbackIgnoresGeneration`] the event is first
     /// re-addressed to whatever generation currently owns the peer, which is
-    /// the defect the exact-generation guard exists to exclude.
-    pub(super) fn observe(mut self, callback: Callback, overlay: &Overlay) -> NodeStep {
-        self.callbacks.remove(&callback);
-        let callback = match overlay.mutation() {
+    /// the defect the exact-generation guard exists to exclude. `Closed` of
+    /// a generation that owns nothing is inert here; production's
+    /// `remove_retired_attempt_topology` fallback would then remove a peer
+    /// no admitted generation backs, which `TopologyReferencesOnlyAdmitted`
+    /// proves is never referenced, so the fallback is a no-op.
+    pub(super) fn observe(mut self, event: LifecycleEvent, overlay: &Overlay) -> NodeStep {
+        self.events.remove(&event);
+        let event = match overlay.mutation() {
             ShellMutation::CallbackIgnoresGeneration => self
                 .lifecycles
-                .state(callback.attempt().peer)
-                .map_or(callback, |lifecycle| {
-                    callback.readdressed(lifecycle.attempt())
-                }),
-            ShellMutation::Faithful | ShellMutation::ReplacementIgnoresLifecycle => callback,
+                .state(event.attempt().peer())
+                .map_or(event, |lifecycle| event.readdressed(lifecycle.attempt())),
+            ShellMutation::Faithful
+            | ShellMutation::ReplacementPreserves
+            | ShellMutation::AdmitBeforeActivation => event,
         };
-        match callback {
-            Callback::ChannelOpened(attempt) => self.admit(attempt, overlay),
-            Callback::SendTerminal(attempt) => {
+        match event {
+            LifecycleEvent::ChannelOpened(attempt) => self.admit(attempt, overlay),
+            LifecycleEvent::SendTerminal(attempt) => {
                 if self.lifecycles.mark_send_terminal(attempt) {
-                    self.callbacks.insert(Callback::RetireUnavailable(attempt));
+                    self.events
+                        .insert(LifecycleEvent::RetireUnavailable(attempt));
                 }
             }
-            Callback::RetireUnavailable(attempt) => {
-                self.retire(attempt, Removal::Unavailable, overlay);
+            LifecycleEvent::RetireUnavailable(attempt) => {
+                self.retire(attempt, DhtPeerRemoval::Unavailable, overlay);
             }
-            Callback::Closed(attempt) => {
+            LifecycleEvent::Closed(attempt) => {
                 if !self.lifecycles.remove_unadmitted(attempt) {
-                    self.retire(attempt, Removal::Ordinary, overlay);
+                    self.retire(attempt, DhtPeerRemoval::Ordinary, overlay);
                 }
             }
         }
@@ -359,6 +406,13 @@ impl NodeState {
 
     /// `commit_connection_admission`: `Pending(g) → Admitting(g)`, then the
     /// topology `Admit` and `Admitting(g) → Active(g)` as one step.
+    ///
+    /// Production also requires transport readiness at commit; the model
+    /// admits a generation whose link died before the channel-open event was
+    /// delivered and retires it on the queued close, a superset schedule.
+    /// Under [`ShellMutation::AdmitBeforeActivation`] the topology admits the
+    /// peer while its generation stays `Admitting`, so the ring references a
+    /// peer no admitted generation backs.
     fn admit(&mut self, attempt: PendingConnectionAttempt, overlay: &Overlay) {
         self.lifecycles.begin_admission(attempt);
         let Some(admitting) = self.lifecycles.admitting_connection(attempt) else {
@@ -367,39 +421,53 @@ impl NodeState {
         let next = step(
             &self.topology,
             TopologyEvent::Admit {
-                peer: attempt.peer,
+                peer: attempt.peer(),
                 deferred_proof: None,
                 now_ms: ADMITTED_AT_MS,
             },
             overlay.successor_capacity(),
         );
-        admitting.activate();
+        if overlay.mutation() != ShellMutation::AdmitBeforeActivation {
+            admitting.activate();
+        }
         self.topology = next.state;
     }
 
     /// `retire_active_if(g, …)` composed with the topology `Remove`: the
     /// registry decides, under one borrow, whether `g` still owns the active
     /// slot, and only then does the topology change.
-    fn retire(&mut self, attempt: PendingConnectionAttempt, removal: Removal, overlay: &Overlay) {
+    ///
+    /// Post (head-replacement law): an `Unavailable` retirement of the head
+    /// leaves `succ' = Successors(Sendable ∖ {removed}, n, K)`, the sendable
+    /// admitted successors; any other result is recorded in
+    /// `unreplaced_head`.
+    fn retire(
+        &mut self,
+        attempt: PendingConnectionAttempt,
+        removal: DhtPeerRemoval,
+        overlay: &Overlay,
+    ) {
         let topology = &self.topology;
-        let retired =
-            self.lifecycles.retire_active_if(attempt, |active| {
-                let successor =
-                    match removal {
-                        Removal::Ordinary => SuccessorRemoval::Preserve,
-                        Removal::Unavailable => SuccessorRemoval::ReplaceWith(
-                            replacement_candidates(topology.local, attempt.peer, active, overlay),
-                        ),
-                    };
-                let event = TopologyEvent::Remove {
-                    peer: attempt.peer,
-                    successor,
-                };
-                Ok(Some(
-                    step(topology, event, overlay.successor_capacity()).state,
-                ))
-            });
-        if let Ok(RetirementOutcome::Retired((topology, _announcement))) = retired {
+        let removed = attempt.peer();
+        let retired = self.lifecycles.retire_active_if(attempt, |active| {
+            let successor = match removal {
+                DhtPeerRemoval::Ordinary => SuccessorRemoval::Preserve,
+                DhtPeerRemoval::Unavailable => replacement_evidence(removed, active, overlay),
+            };
+            let expected_after_head_replacement = (removal == DhtPeerRemoval::Unavailable
+                && successor_head(topology) == Some(removed))
+            .then(|| sendable_successors(topology.local, removed, active, overlay));
+            let event = TopologyEvent::Remove {
+                peer: removed,
+                successor,
+            };
+            let next = step(topology, event, overlay.successor_capacity()).state;
+            Ok(Some((next, expected_after_head_replacement)))
+        });
+        if let Ok(RetirementOutcome::Retired(((topology, expected), _announcement))) = retired {
+            if expected.is_some_and(|expected| expected != topology.successors) {
+                self.unreplaced_head = Some(UnreplacedHead { removed });
+            }
             self.topology = topology;
         }
     }
@@ -408,7 +476,7 @@ impl NodeState {
     /// head.
     ///
     /// The periodic `notify_predecessor` broadcast is not modeled separately:
-    /// toward the head it re-sends the frame the committed report already
+    /// toward the head it re-sends the message the committed report already
     /// emits (`TopologyAction::Notify`), and the model's rounds repeat.
     pub(super) fn stabilize(mut self, request_id: uuid::Uuid, overlay: &Overlay) -> NodeStep {
         let actions = self.advance(TopologyEvent::BeginStabilize { request_id }, overlay);
@@ -419,37 +487,42 @@ impl NodeState {
         }
     }
 
-    /// Deliver one inbound frame that arrived on generation `via`.
+    /// Deliver one inbound message that arrived on generation `via`.
     ///
-    /// A frame whose generation is not the admitted one is consumed without
-    /// effect (`InboundGate::Refused`); the caller keeps a frame whose
-    /// generation is still in the pre-admission hold.
+    /// A message whose generation is not the admitted one is consumed
+    /// without effect: production parks such a frame in the pre-admission
+    /// hold and discards the hold when the retired generation's close is
+    /// torn down. The caller keeps a message whose generation is still in
+    /// the hold. A `Notify` additionally requires the sender to be sendable
+    /// (`notify_admitted_predecessor`).
     pub(super) fn receive(
         mut self,
         via: PendingConnectionAttempt,
-        frame: Frame,
+        message: ProtocolMessage,
         overlay: &Overlay,
     ) -> NodeStep {
         let mut effects = Vec::new();
         if self.admits(via) {
-            match frame {
-                Frame::TopologyQuery { request_id } => {
-                    let report = Frame::TopologyReport {
+            match message {
+                ProtocolMessage::TopologyQuery { request_id } => {
+                    let report = ProtocolMessage::TopologyReport {
                         request_id,
                         successors: self.topology.successors.clone(),
                         predecessor: self.topology.predecessor,
                     };
-                    effects.extend(self.frame_to(via.peer, report));
+                    effects.extend(self.message_to(via.peer(), report));
                 }
-                Frame::NotifyPredecessor => {
-                    self.advance(
-                        TopologyEvent::Notify {
-                            predecessor: via.peer,
-                        },
-                        overlay,
-                    );
+                ProtocolMessage::NotifyPredecessor => {
+                    if self.sendable(via) {
+                        self.advance(
+                            TopologyEvent::Notify {
+                                predecessor: via.peer(),
+                            },
+                            overlay,
+                        );
+                    }
                 }
-                Frame::TopologyReport {
+                ProtocolMessage::TopologyReport {
                     request_id,
                     successors,
                     predecessor,
@@ -458,7 +531,7 @@ impl NodeState {
                         successors,
                         predecessor,
                     };
-                    effects = self.stabilize_reported_by(via.peer, request_id, reported, overlay);
+                    effects = self.stabilize_reported_by(via.peer(), request_id, reported, overlay);
                 }
             }
         }
@@ -484,11 +557,11 @@ impl NodeState {
     /// CancelStabilize (a no-op once Stabilize retired the token)
     /// ```
     ///
-    /// Production awaits each candidate handshake between the claim and the
-    /// commit; committing at once is the schedule in which no handshake has
-    /// finished, and a candidate admitted later is confirmed by the next
-    /// round instead. The per-candidate revalidation of the plan under churn
-    /// is the subject of the finger-retry model (Stage 5).
+    /// Production's `connect_dht_peer` awaits only the offer send, so the
+    /// commit follows the offers without waiting for a handshake; a candidate
+    /// admitted later is confirmed by the next round. The per-candidate
+    /// revalidation of the plan under churn is the subject of the
+    /// finger-retry model (Stage 5).
     fn stabilize_reported_by(
         &mut self,
         reporter: Did,
@@ -545,8 +618,24 @@ impl NodeState {
     }
 }
 
-/// `live_successor_replacements_from_active`: the peers a removed head may be
-/// replaced with.
+/// `Successors(Sendable ∖ {removed}, n, K)`: what production's
+/// `live_successor_replacements_from_active` computes for a removed head, up
+/// to transport readiness. The post-state of the head-replacement law.
+fn sendable_successors(
+    local: Did,
+    removed: Did,
+    active: &ActiveConnectionSet,
+    overlay: &Overlay,
+) -> Vec<Did> {
+    let candidates = active
+        .iter()
+        .map(PendingConnectionAttempt::peer)
+        .filter(|peer| *peer != removed)
+        .collect::<Vec<_>>();
+    successors(&candidates, local, overlay.successor_capacity())
+}
+
+/// The successor evidence an `Unavailable` retirement hands to `Remove`.
 ///
 /// Production sorts the sendable admitted peers clockwise, drops `removed`,
 /// and truncates to capacity, and only when `removed` is the head. `step`'s
@@ -555,25 +644,23 @@ impl NodeState {
 /// set is observationally equal (witnessed by
 /// `test_replacement_normalization_is_absorbed_by_the_production_remove`).
 ///
-/// Under [`ShellMutation::ReplacementIgnoresLifecycle`] the candidates are the
-/// whole ring instead: evidence that was never transport-validated.
-fn replacement_candidates(
-    local: Did,
+/// Under [`ShellMutation::ReplacementPreserves`] the head is not replaced at
+/// all: the `Ordinary` flavour where production selects `Unavailable`.
+fn replacement_evidence(
     removed: Did,
     active: &ActiveConnectionSet,
     overlay: &Overlay,
-) -> Vec<Did> {
+) -> SuccessorRemoval {
     match overlay.mutation() {
-        ShellMutation::ReplacementIgnoresLifecycle => overlay
-            .ring()
-            .iter()
-            .copied()
-            .filter(|peer| *peer != local && *peer != removed)
-            .collect(),
-        ShellMutation::Faithful | ShellMutation::CallbackIgnoresGeneration => active
-            .iter()
-            .map(PendingConnectionAttempt::peer)
-            .filter(|peer| *peer != removed)
-            .collect(),
+        ShellMutation::ReplacementPreserves => SuccessorRemoval::Preserve,
+        ShellMutation::Faithful
+        | ShellMutation::CallbackIgnoresGeneration
+        | ShellMutation::AdmitBeforeActivation => SuccessorRemoval::ReplaceWith(
+            active
+                .iter()
+                .map(PendingConnectionAttempt::peer)
+                .filter(|peer| *peer != removed)
+                .collect(),
+        ),
     }
 }

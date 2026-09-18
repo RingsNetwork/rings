@@ -2,20 +2,20 @@
 //!
 //! The environment owns exactly what no peer owns: which peers are up, which
 //! physical links exist, which envelopes are in flight, and how much
-//! adversarial budget remains. It never decides a protocol question; it routes
-//! the effects that [`NodeState`] transitions request and raises the callbacks
-//! a physical change makes observable.
+//! adversarial budget remains. It never decides a protocol question; it
+//! dispatches the effects that [`NodeState`] transitions request and raises
+//! the lifecycle events a physical change makes observable.
 //!
 //! ```text
 //!            environment action                     protocol action
-//!   Depart │ Rejoin │ Cut │ Lose │ Duplicate   Dial │ Deliver │ Observe │ Stabilize
+//!   Depart │ Rejoin │ Cut │ Lose │ Duplicate      Dial │ Deliver │ Observe │ Stabilize
 //!                  │                                         │
 //!                  ▼                                         ▼
-//!     [links, network, callbacks raised]        [NodeState transition ⇒ effects]
+//!     [links, network, events raised]           [NodeState transition ⇒ effects]
 //!                  │                                         │
 //!                  └──────────────▶ OverlayState ◀───────────┘
 //!                                        │
-//!                  [stale event changed (topology, lifecycles)?] ⇒ history variable
+//!             [retired event changed (topology, lifecycles)?] ⇒ history variable
 //! ```
 
 use std::collections::BTreeMap;
@@ -24,15 +24,27 @@ use std::sync::Arc;
 
 use num_bigint::BigUint;
 
-use super::node::Callback;
 use super::node::Effect;
-use super::node::Frame;
+use super::node::LifecycleEvent;
 use super::node::NodeState;
 use super::node::NodeStep;
+use super::node::OwnOfferState;
+use super::node::ProtocolMessage;
 use crate::dht::topology::successor_head;
 use crate::dht::topology::RING_BITS;
 use crate::dht::Did;
 use crate::swarm::transport::pending::PendingConnectionAttempt;
+
+/// The one stabilization token the model ever issues.
+///
+/// Production draws a random UUID per round so a delayed report of an earlier
+/// round cannot claim a later one. Under the one-round-at-a-time bound
+/// ([`Overlay::may_stabilize`]) no query, report, or notification of an
+/// earlier round is in flight when a round begins, so token equality across
+/// rounds is unobservable and one constant is a faithful representative. The
+/// cross-round stale-token paths (`can_claim_stabilization_report`) are the
+/// subject of the finger-retry model (Stage 5).
+const STABILIZATION_REQUEST_ID: uuid::Uuid = uuid::Uuid::from_u128(1);
 
 /// A deliberate defect of the shell interpretation.
 ///
@@ -43,27 +55,47 @@ use crate::swarm::transport::pending::PendingConnectionAttempt;
 pub(super) enum ShellMutation {
     /// The production composition.
     Faithful,
-    /// Callbacks are resolved by peer instead of by generation: the
+    /// Lifecycle events are resolved by peer instead of by generation: the
     /// exact-generation guard is removed.
     CallbackIgnoresGeneration,
-    /// Head replacement draws on peers that hold no admitted generation: the
+    /// An unavailable head is removed without replacement: the
     /// successor-replacement invariant is removed.
-    ReplacementIgnoresLifecycle,
+    ReplacementPreserves,
+    /// The topology admits a peer before its generation is activated: the
+    /// admission order of the lifecycle boundary is removed.
+    AdmitBeforeActivation,
 }
 
-/// Remaining adversarial budget; the only unbounded resource of the
-/// environment made finite.
+/// An adversarial resource the environment spends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Resource {
+    /// A peer goes down.
+    Departure,
+    /// A departed peer starts again.
+    Rejoin,
+    /// A link dies between two live peers.
+    Cut,
+    /// The network drops a message.
+    Loss,
+    /// The network delivers a message twice.
+    Duplication,
+    /// An offer reaches an addressee that refuses it.
+    Refusal,
+}
+
+/// Remaining adversarial budget per resource; the only unbounded behaviour
+/// of the environment made finite.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(super) struct Budgets {
+pub(super) struct Budget {
     /// Peers that may still go down.
     pub(super) departures: u8,
     /// Departed peers that may still start again.
     pub(super) rejoins: u8,
     /// Links that may still die between two live peers.
     pub(super) cuts: u8,
-    /// Frames the network may still drop.
+    /// Messages the network may still drop.
     pub(super) loss: u8,
-    /// Frames the network may still deliver twice.
+    /// Messages the network may still deliver twice.
     pub(super) duplication: u8,
     /// Offers that may still reach an addressee that refuses them.
     ///
@@ -73,6 +105,51 @@ pub(super) struct Budgets {
     /// its addressee would answer it, which is what the retry schedule of a
     /// real offerer converges to.
     pub(super) refusal: u8,
+}
+
+impl Budget {
+    /// The remaining amount of `resource`.
+    const fn remaining(self, resource: Resource) -> u8 {
+        match resource {
+            Resource::Departure => self.departures,
+            Resource::Rejoin => self.rejoins,
+            Resource::Cut => self.cuts,
+            Resource::Loss => self.loss,
+            Resource::Duplication => self.duplication,
+            Resource::Refusal => self.refusal,
+        }
+    }
+
+    /// `Permits(r)`: at least one unit of `resource` remains.
+    pub(super) const fn permits(self, resource: Resource) -> bool {
+        self.remaining(resource) > 0
+    }
+
+    /// The budget after spending one unit of `resource`, or `None` when none
+    /// remains: the environment step is then disabled.
+    fn spent(self, resource: Resource) -> Option<Self> {
+        let left = self.remaining(resource).checked_sub(1)?;
+        Some(match resource {
+            Resource::Departure => Self {
+                departures: left,
+                ..self
+            },
+            Resource::Rejoin => Self {
+                rejoins: left,
+                ..self
+            },
+            Resource::Cut => Self { cuts: left, ..self },
+            Resource::Loss => Self { loss: left, ..self },
+            Resource::Duplication => Self {
+                duplication: left,
+                ..self
+            },
+            Resource::Refusal => Self {
+                refusal: left,
+                ..self
+            },
+        })
+    }
 }
 
 /// A physical connection: the two generations, one per endpoint, that were
@@ -100,8 +177,8 @@ impl Link {
     /// Both `(holder, end)` incidences of the link.
     fn incidences(self) -> [(Did, PendingConnectionAttempt); 2] {
         [
-            (self.greater.peer, self.lesser),
-            (self.lesser.peer, self.greater),
+            (self.greater.peer(), self.lesser),
+            (self.lesser.peer(), self.greater),
         ]
     }
 
@@ -134,18 +211,18 @@ pub(super) enum Envelope {
     Offer {
         /// Peer that reserved `offered`.
         offerer: Did,
-        /// Offerer's generation; `offered.peer` is the addressee.
+        /// Offerer's generation; `offered.peer()` is the addressee.
         offered: PendingConnectionAttempt,
     },
-    /// A frame on a link, tagged with the receiver-local generation `via` it
-    /// arrives on; `via.peer` is the sender.
-    Frame {
+    /// A protocol message on a link, tagged with the receiver-local
+    /// generation `via` it arrives on; `via.peer()` is the sender.
+    Message {
         /// Addressee.
         to: Did,
         /// Receiver's generation of the carrying link.
         via: PendingConnectionAttempt,
         /// Payload.
-        frame: Frame,
+        message: ProtocolMessage,
     },
 }
 
@@ -153,32 +230,15 @@ impl Envelope {
     /// The peer that would process this envelope.
     fn addressee(&self) -> Did {
         match self {
-            Self::Offer { offered, .. } => offered.peer,
-            Self::Frame { to, .. } => *to,
+            Self::Offer { offered, .. } => offered.peer(),
+            Self::Message { to, .. } => *to,
         }
     }
 
     /// Whether this envelope belongs to a stabilization round: its query,
     /// its report, or the notification its commit emits.
     const fn carries_stabilization_round(&self) -> bool {
-        matches!(self, Self::Frame { .. })
-    }
-
-    /// The stabilization token this envelope could still echo to `requester`.
-    fn echoes_token_of(&self, requester: Did) -> Option<uuid::Uuid> {
-        match self {
-            Self::Frame {
-                via,
-                frame: Frame::TopologyQuery { request_id },
-                ..
-            } if via.peer == requester => Some(*request_id),
-            Self::Frame {
-                to,
-                frame: Frame::TopologyReport { request_id, .. },
-                ..
-            } if *to == requester => Some(*request_id),
-            Self::Offer { .. } | Self::Frame { .. } => None,
-        }
+        matches!(self, Self::Message { .. })
     }
 }
 
@@ -187,7 +247,7 @@ impl Envelope {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) struct StaleEffect {
     /// Peer whose protected state changed.
-    pub(super) node: Did,
+    pub(super) peer: Did,
     /// The retired generation the event was bound to.
     pub(super) retired: PendingConnectionAttempt,
 }
@@ -207,7 +267,7 @@ pub(super) struct OverlayState {
     /// Envelopes in flight.
     pub(super) network: BTreeSet<Envelope>,
     /// Remaining adversarial budget.
-    pub(super) remaining: Budgets,
+    pub(super) remaining: Budget,
     /// History variable of the retired-generation law.
     pub(super) stale_effect: Option<StaleEffect>,
 }
@@ -221,9 +281,9 @@ pub(super) enum OverlayAction {
     Rejoin(Did),
     /// A link dies while both endpoints stay up.
     Cut(Link),
-    /// The network drops one frame.
+    /// The network drops one message.
     Lose(Envelope),
-    /// The network delivers one frame and keeps a copy.
+    /// The network delivers one message and keeps a copy.
     Duplicate(Envelope),
     /// An isolated peer dials a bootstrap contact.
     Dial {
@@ -234,12 +294,12 @@ pub(super) enum OverlayAction {
     },
     /// The network delivers one envelope and consumes it.
     Deliver(Envelope),
-    /// A peer's shell delivers one local callback.
+    /// A peer's shell delivers one local event.
     Observe {
-        /// Peer whose callback fires.
-        node: Did,
-        /// The callback.
-        callback: Callback,
+        /// Peer whose event fires.
+        peer: Did,
+        /// The event.
+        event: LifecycleEvent,
     },
     /// One maintenance period of a peer.
     Stabilize(Did),
@@ -264,7 +324,7 @@ impl OverlayAction {
 }
 
 /// The model: a ring of peer identities and the bounds of the search.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(super) struct Overlay {
     /// Every modeled identity, evenly spaced on `Z/2^160` from the origin.
     ring: Vec<Did>,
@@ -273,7 +333,7 @@ pub(super) struct Overlay {
     /// Width of each modeled finger table.
     finger_slots: usize,
     /// Initial adversarial budget.
-    budgets: Budgets,
+    budget: Budget,
     /// Shell defect under test, `Faithful` for the verified model.
     mutation: ShellMutation,
 }
@@ -281,11 +341,13 @@ pub(super) struct Overlay {
 impl Overlay {
     /// A ring of `peers` identities at `origin + i · 2^160 / peers`.
     ///
+    /// Pre: `peers ≥ 1`; the divisor is clamped so the constructor is total.
+    ///
     /// Even spacing makes every finger threshold `2^i` below the modeled
     /// width smaller than any inter-peer distance when the table is narrow,
     /// so each narrow finger's fixpoint is the successor head: the part of
     /// the finger table stabilization itself proves. Remote finger ranges
-    /// belong to the finger-convergence model (Stage 5). The protocol is
+    /// belong to the finger-retry model (Stage 5). The protocol is
     /// equivariant under rotation, so `origin` only matters when the ring has
     /// to contain a given production identity.
     pub(super) fn new(
@@ -293,7 +355,7 @@ impl Overlay {
         peers: u32,
         successor_capacity: usize,
         finger_slots: usize,
-        budgets: Budgets,
+        budget: Budget,
         mutation: ShellMutation,
     ) -> Self {
         let ring = (0..peers)
@@ -305,7 +367,7 @@ impl Overlay {
             ring,
             successor_capacity,
             finger_slots,
-            budgets,
+            budget,
             mutation,
         }
     }
@@ -342,7 +404,7 @@ impl Overlay {
                 .collect(),
             links: BTreeSet::new(),
             network: BTreeSet::new(),
-            remaining: self.budgets,
+            remaining: self.budget,
             stale_effect: None,
         };
         let pairs = self
@@ -351,23 +413,23 @@ impl Overlay {
             .flat_map(|from| self.ring.iter().map(move |to| (*from, *to)))
             .filter(|(from, to)| from < to);
         for (from, to) in pairs {
-            state = self.settled(self.transition(&state, from, |node| node.dial(to)));
+            state = self.delivered_closure(self.transition(&state, from, |node| node.dial(to)));
         }
         for peer in self.ring.iter().copied() {
-            let round = self.next_state(&state, OverlayAction::Stabilize(peer));
-            state = self.settled(round.unwrap_or(state));
+            let round = self.next_state(&state, &OverlayAction::Stabilize(peer));
+            state = self.delivered_closure(round.unwrap_or(state));
         }
         state
     }
 
-    /// Deliver every envelope and callback until none is left, in
-    /// action order: a deterministic churn-free schedule, used only to build
-    /// `Init`.
-    fn settled(&self, mut state: OverlayState) -> OverlayState {
+    /// Deliver every envelope and event until none is left, in action
+    /// order: a deterministic churn-free schedule in which no peer dials or
+    /// starts a period, used only to build `Init`.
+    fn delivered_closure(&self, mut state: OverlayState) -> OverlayState {
         loop {
             let Some(next) = self
                 .actions(&state)
-                .into_iter()
+                .iter()
                 .filter(|action| {
                     matches!(
                         action,
@@ -382,11 +444,12 @@ impl Overlay {
         }
     }
 
-    /// Apply a node transition at `peer` and route its effects.
+    /// Apply a node transition at `peer` and dispatch its effects.
     ///
     /// This is the one place a node's state is replaced, so it is also the
     /// one place the retired-generation law is observed (see
-    /// [`Self::transition_bound_to`]).
+    /// [`Self::transition_bound_to`]). The peer is shared with the previous
+    /// state, so the transition works on a copy of it.
     fn transition(
         &self,
         state: &OverlayState,
@@ -397,20 +460,19 @@ impl Overlay {
         let Some(node) = next.nodes.remove(&peer) else {
             return next;
         };
-        let owned = Arc::try_unwrap(node).unwrap_or_else(|shared| shared.as_ref().clone());
-        let NodeStep { node, effects } = apply(owned);
+        let NodeStep { node, effects } = apply(node.as_ref().clone());
         next.nodes.insert(peer, Arc::new(node));
         for effect in effects {
-            next.route(peer, effect);
+            next.dispatch(peer, effect);
         }
         next
     }
 
     /// [`Self::transition`] for an input bound to generation `bound`.
     ///
-    /// Law (retired generations are inert): `¬Owns(bound) ⇒ protected' =
-    /// protected`. A violation is recorded in the history variable rather than
-    /// asserted, so the checker reports it with a minimal trace.
+    /// Law (retired generations are inert): `¬Owns(bound) ⇒ observable' =
+    /// observable`. A violation is recorded in the history variable rather
+    /// than asserted, so the search reports it with a minimal trace.
     fn transition_bound_to(
         &self,
         state: &OverlayState,
@@ -421,36 +483,17 @@ impl Overlay {
         let mut next = self.transition(state, peer, apply);
         let changed_by_retired = state.nodes.get(&peer).is_some_and(|before| {
             !before.owns(bound)
-                && next
-                    .nodes
-                    .get(&peer)
-                    .is_some_and(|after| after.protected() != before.protected())
+                && next.nodes.get(&peer).is_some_and(|after| {
+                    after.retirement_observable() != before.retirement_observable()
+                })
         });
         if changed_by_retired {
             next.stale_effect = Some(StaleEffect {
-                node: peer,
+                peer,
                 retired: bound,
             });
         }
         next
-    }
-
-    /// The least token no in-flight artifact of `requester` can echo: the
-    /// ascending fold skips exactly the initial run `1, 2, …` that is in use.
-    ///
-    /// Production draws a random UUID; only equality with outstanding tokens
-    /// is observable, so the least unused value is a canonical representative
-    /// that keeps the carrier finite.
-    fn fresh_request_id(state: &OverlayState, requester: Did) -> uuid::Uuid {
-        let least_unused = state
-            .network
-            .iter()
-            .filter_map(|envelope| envelope.echoes_token_of(requester))
-            .map(|token| token.as_u128())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .fold(1u128, |least, used| least + u128::from(used == least));
-        uuid::Uuid::from_u128(least_unused)
     }
 
     /// Whether `peer` may start a maintenance period: it has a head to query
@@ -458,12 +501,13 @@ impl Overlay {
     ///
     /// One round at a time is a bound of the search, not of the protocol:
     /// rounds of different peers touch disjoint topology states and read each
-    /// other only through a report, whose content the claim-to-commit window
-    /// does not change, so their interleavings add states without adding
-    /// lifecycle races. Every lifecycle event still interleaves with the
-    /// round. The bound also makes the token space finite; a lost query
-    /// leaves nothing in flight, so the next period supersedes it as
-    /// production does.
+    /// other only through a report, so serializing them loses the races in
+    /// which one peer queries a head whose predecessor another peer's
+    /// notification is about to change — races that reorder convergence, not
+    /// lifecycle evidence. Every lifecycle event still interleaves with the
+    /// round. The bound also makes the token space trivial
+    /// ([`STABILIZATION_REQUEST_ID`]); a lost query leaves nothing in flight,
+    /// so the next period supersedes it as production does.
     fn may_stabilize(state: &OverlayState, node: &NodeState) -> bool {
         successor_head(&node.topology).is_some()
             && !state
@@ -474,13 +518,13 @@ impl Overlay {
 
     /// Deliver `envelope` to its addressee; `None` when the environment has
     /// no budget for the refusal it would cause.
-    fn delivered(&self, state: &OverlayState, envelope: Envelope) -> Option<OverlayState> {
+    fn delivered(&self, state: &OverlayState, envelope: &Envelope) -> Option<OverlayState> {
         match envelope {
-            Envelope::Offer { offerer, offered } => self.offer_delivered(state, offerer, offered),
-            Envelope::Frame { to, via, frame } => {
-                Some(
-                    self.transition_bound_to(state, to, via, |node| node.receive(via, frame, self)),
-                )
+            Envelope::Offer { offerer, offered } => self.offer_delivered(state, *offerer, *offered),
+            Envelope::Message { to, via, message } => {
+                Some(self.transition_bound_to(state, *to, *via, |node| {
+                    node.receive(*via, message.clone(), self)
+                }))
             }
         }
     }
@@ -489,7 +533,9 @@ impl Overlay {
     ///
     /// An offer *stands* while its offerer is up and still owns the offered
     /// generation; one that does not is void, and signaling drops it without
-    /// consulting the addressee.
+    /// consulting the addressee. A refusal has no reply in production; the
+    /// offerer's generation later expires. The model raises that expiry as
+    /// the offered generation's `Closed`, deliverable at any later time.
     ///
     /// ```text
     /// [offer stands?] ── no ──▶ dropped
@@ -516,9 +562,16 @@ impl Overlay {
         if !stands {
             return Some(state.clone());
         }
+        let addressee = offered.peer();
+        let own_offer = state
+            .nodes
+            .get(&addressee)
+            .and_then(|node| node.lifecycles.pending_attempt(offerer))
+            .filter(|pending| state.far_end_of(addressee, *pending).is_some())
+            .map_or(OwnOfferState::Unanswered, |_| OwnOfferState::Answered);
         let mut answered = None;
-        let mut next = self.transition(state, offered.peer, |node| {
-            let (node, answer) = node.answer_offer(offerer, self);
+        let mut next = self.transition(state, addressee, |node| {
+            let (node, answer) = node.answer_offer(offerer, own_offer, self);
             answered = answer;
             NodeStep {
                 node,
@@ -528,12 +581,12 @@ impl Overlay {
         match answered {
             Some(answer) => {
                 next.links.insert(Link::pairing(offered, answer));
-                next.raise(offerer, Callback::ChannelOpened(offered));
-                next.raise(offered.peer, Callback::ChannelOpened(answer));
+                next.queue_event(offerer, LifecycleEvent::ChannelOpened(offered));
+                next.queue_event(addressee, LifecycleEvent::ChannelOpened(answer));
             }
             None => {
-                next.remaining.refusal = next.remaining.refusal.checked_sub(1)?;
-                next.raise(offerer, Callback::Closed(offered));
+                next.remaining = next.remaining.spent(Resource::Refusal)?;
+                next.queue_event(offerer, LifecycleEvent::Closed(offered));
             }
         }
         Some(next)
@@ -546,26 +599,41 @@ impl OverlayState {
         self.nodes.keys().copied().collect()
     }
 
-    /// Whether the link whose end `near` is held by `holder` is alive.
-    pub(super) fn is_linked(&self, holder: Did, near: PendingConnectionAttempt) -> bool {
+    /// The far end of the live link whose end `near` is held by `holder`, if
+    /// that link is alive.
+    pub(super) fn far_end_of(
+        &self,
+        holder: Did,
+        near: PendingConnectionAttempt,
+    ) -> Option<PendingConnectionAttempt> {
         self.links
             .iter()
-            .any(|link| link.far_end(holder, near).is_some())
+            .find_map(|link| link.far_end(holder, near))
     }
 
-    /// Queue `callback` at `peer`, if it is up.
-    fn raise(&mut self, peer: Did, callback: Callback) {
+    /// Whether a recorded violation ended this behaviour: the trace stops at
+    /// its witness.
+    pub(super) fn has_recorded_violation(&self) -> bool {
+        self.stale_effect.is_some()
+            || self
+                .nodes
+                .values()
+                .any(|node| node.unreplaced_head.is_some())
+    }
+
+    /// Queue `event` at `peer`, if it is up.
+    fn queue_event(&mut self, peer: Did, event: LifecycleEvent) {
         if let Some(node) = self.nodes.get_mut(&peer) {
-            Arc::make_mut(node).callbacks.insert(callback);
+            Arc::make_mut(node).events.insert(event);
         }
     }
 
-    /// Route one effect of `sender`.
+    /// Dispatch one effect of `sender`.
     ///
-    /// A frame sent under a generation whose link is already dead is lost: the
-    /// sender has not yet observed the failure that the raised callbacks will
-    /// report.
-    fn route(&mut self, sender: Did, effect: Effect) {
+    /// A message sent under a generation whose link is already dead is lost:
+    /// the sender has not yet observed the failure that the raised events
+    /// will report.
+    fn dispatch(&mut self, sender: Did, effect: Effect) {
         match effect {
             Effect::Offer { offered } => {
                 self.network.insert(Envelope::Offer {
@@ -573,16 +641,12 @@ impl OverlayState {
                     offered,
                 });
             }
-            Effect::Frame { under, frame } => {
-                let via = self
-                    .links
-                    .iter()
-                    .find_map(|link| link.far_end(sender, under));
-                if let Some(via) = via {
-                    self.network.insert(Envelope::Frame {
-                        to: under.peer,
+            Effect::Message { under, message } => {
+                if let Some(via) = self.far_end_of(sender, under) {
+                    self.network.insert(Envelope::Message {
+                        to: under.peer(),
                         via,
-                        frame,
+                        message,
                     });
                 }
             }
@@ -591,11 +655,16 @@ impl OverlayState {
 
     /// A link dies: both holders will observe a send failure and a close of
     /// exactly the generation that carried it.
-    fn sever(&mut self, link: Link) {
+    ///
+    /// Production marks send-terminal only when a send fails, and its sweep
+    /// may retire a dead link's generation while it is still sendable; the
+    /// two orders reach the same state (retirement clears the send-terminal
+    /// mark), so raising both events is the more general schedule.
+    fn cut(&mut self, link: Link) {
         self.links.remove(&link);
         for (holder, end) in link.incidences() {
-            self.raise(holder, Callback::SendTerminal(end));
-            self.raise(holder, Callback::Closed(end));
+            self.queue_event(holder, LifecycleEvent::SendTerminal(end));
+            self.queue_event(holder, LifecycleEvent::Closed(end));
         }
     }
 
@@ -610,7 +679,7 @@ impl OverlayState {
             .filter(|link| link.touches(peer))
             .collect::<Vec<_>>();
         for link in severed {
-            self.sever(link);
+            self.cut(link);
         }
         let handshaking = self
             .nodes
@@ -622,7 +691,7 @@ impl OverlayState {
             })
             .collect::<Vec<_>>();
         for (holder, unadmitted) in handshaking {
-            self.raise(holder, Callback::Closed(unadmitted));
+            self.queue_event(holder, LifecycleEvent::Closed(unadmitted));
         }
         self.network.retain(|envelope| {
             envelope.addressee() != peer
@@ -637,16 +706,18 @@ impl OverlayState {
 impl Overlay {
     /// The actions enabled at `state`, in canonical order.
     ///
-    /// A recorded violation is terminal: the trace ends at its witness.
+    /// A recorded violation is terminal: the trace ends at its witness. An
+    /// offer whose refusal is unbudgeted is listed here and disabled by
+    /// [`Self::next_state`], which alone can tell whether it is refused.
     pub(super) fn actions(&self, state: &OverlayState) -> Vec<OverlayAction> {
         let mut actions = Vec::new();
-        if state.stale_effect.is_some() {
+        if state.has_recorded_violation() {
             return actions;
         }
-        if state.remaining.departures > 0 {
+        if state.remaining.permits(Resource::Departure) {
             actions.extend(state.nodes.keys().copied().map(OverlayAction::Depart));
         }
-        if state.remaining.rejoins > 0 {
+        if state.remaining.permits(Resource::Rejoin) {
             actions.extend(
                 self.ring
                     .iter()
@@ -655,7 +726,7 @@ impl Overlay {
                     .map(OverlayAction::Rejoin),
             );
         }
-        if state.remaining.cuts > 0 {
+        if state.remaining.permits(Resource::Cut) {
             actions.extend(state.links.iter().copied().map(OverlayAction::Cut));
         }
         for envelope in state.network.iter() {
@@ -663,29 +734,24 @@ impl Overlay {
                 continue;
             };
             match envelope {
-                // `next_state` disables an offer whose refusal is unbudgeted.
                 Envelope::Offer { .. } => actions.push(OverlayAction::Deliver(envelope.clone())),
-                Envelope::Frame { via, .. } if addressee.holds_before_admission(*via) => {}
-                Envelope::Frame { .. } => {
+                Envelope::Message { via, .. } if addressee.holds_before_admission(*via) => {}
+                Envelope::Message { .. } => {
                     actions.push(OverlayAction::Deliver(envelope.clone()));
-                    if state.remaining.loss > 0 {
+                    if state.remaining.permits(Resource::Loss) {
                         actions.push(OverlayAction::Lose(envelope.clone()));
                     }
-                    if state.remaining.duplication > 0 {
+                    if state.remaining.permits(Resource::Duplication) {
                         actions.push(OverlayAction::Duplicate(envelope.clone()));
                     }
                 }
             }
         }
         for (peer, node) in state.nodes.iter() {
-            actions.extend(
-                node.callbacks
-                    .iter()
-                    .map(|callback| OverlayAction::Observe {
-                        node: *peer,
-                        callback: *callback,
-                    }),
-            );
+            actions.extend(node.events.iter().map(|event| OverlayAction::Observe {
+                peer: *peer,
+                event: *event,
+            }));
             if node.is_isolated(self) {
                 actions.extend(state.nodes.keys().filter(|contact| *contact != peer).map(
                     |contact| OverlayAction::Dial {
@@ -706,54 +772,55 @@ impl Overlay {
     pub(super) fn next_state(
         &self,
         state: &OverlayState,
-        action: OverlayAction,
+        action: &OverlayAction,
     ) -> Option<OverlayState> {
         let next = match action {
             OverlayAction::Depart(peer) => {
                 let mut next = state.clone();
-                next.remaining.departures = next.remaining.departures.checked_sub(1)?;
-                next.depart(peer);
+                next.remaining = next.remaining.spent(Resource::Departure)?;
+                next.depart(*peer);
                 next
             }
             OverlayAction::Rejoin(peer) => {
                 let mut next = state.clone();
-                next.remaining.rejoins = next.remaining.rejoins.checked_sub(1)?;
+                next.remaining = next.remaining.spent(Resource::Rejoin)?;
                 next.nodes
-                    .insert(peer, Arc::new(NodeState::started(peer, self)));
+                    .insert(*peer, Arc::new(NodeState::started(*peer, self)));
                 next
             }
             OverlayAction::Cut(link) => {
                 let mut next = state.clone();
-                next.remaining.cuts = next.remaining.cuts.checked_sub(1)?;
-                next.sever(link);
+                next.remaining = next.remaining.spent(Resource::Cut)?;
+                next.cut(*link);
                 next
             }
             OverlayAction::Lose(envelope) => {
                 let mut next = state.clone();
-                next.remaining.loss = next.remaining.loss.checked_sub(1)?;
-                next.network.remove(&envelope);
+                next.remaining = next.remaining.spent(Resource::Loss)?;
+                next.network.remove(envelope);
                 next
             }
             OverlayAction::Duplicate(envelope) => {
                 let mut next = self.delivered(state, envelope)?;
-                next.remaining.duplication = next.remaining.duplication.checked_sub(1)?;
+                next.remaining = next.remaining.spent(Resource::Duplication)?;
                 next
             }
             OverlayAction::Deliver(envelope) => {
-                let mut next = self.delivered(state, envelope.clone())?;
-                next.network.remove(&envelope);
+                let mut next = self.delivered(state, envelope)?;
+                next.network.remove(envelope);
                 next
             }
-            OverlayAction::Dial { from, to } => self.transition(state, from, |node| node.dial(to)),
-            OverlayAction::Observe { node, callback } => {
-                self.transition_bound_to(state, node, callback.attempt(), |current| {
-                    current.observe(callback, self)
+            OverlayAction::Dial { from, to } => {
+                self.transition(state, *from, |node| node.dial(*to))
+            }
+            OverlayAction::Observe { peer, event } => {
+                self.transition_bound_to(state, *peer, event.attempt(), |node| {
+                    node.observe(*event, self)
                 })
             }
-            OverlayAction::Stabilize(peer) => {
-                let request_id = Self::fresh_request_id(state, peer);
-                self.transition(state, peer, |node| node.stabilize(request_id, self))
-            }
+            OverlayAction::Stabilize(peer) => self.transition(state, *peer, |node| {
+                node.stabilize(STABILIZATION_REQUEST_ID, self)
+            }),
         };
         (next != *state).then_some(next)
     }

@@ -17,9 +17,17 @@
 //!   operators [`successors`], [`predecessor`], and [`finger`] on the member
 //!   set `M`.
 //!
-//! The first four are safety invariants of [`step`](super::step): they hold in
-//! every state reachable from a well-formed state. The last is the target of
-//! stabilization, not an invariant.
+//! The module is compiled for test builds only: its consumers are the model
+//! checkers and the churn simulator, and the laws it states are checked, not
+//! consulted, by production.
+//!
+//! The first three are invariants of the membership and stabilization
+//! transitions of [`step`](super::step) (`Join`, `Admit`, `Remove`, `Notify`,
+//! and the stabilization events), witnessed by the rejoin model in
+//! `swarm::transport::test_rejoin_model`; the finger-lookup events are the
+//! subject of the finger-retry model. `RoutesClockwise` is the unconditional
+//! postcondition of [`find_successor`], true of every representable state.
+//! `ChordFixpoint` is the target of stabilization, not an invariant.
 
 use num_bigint::BigUint;
 
@@ -40,11 +48,12 @@ impl TopologyState {
     /// Strict monotonicity of the clockwise distance subsumes the three
     /// pointwise laws: the sequence is clockwise ordered, its entries are
     /// distinct, and none is `n` (whose distance is `0`).
-    pub fn successors_are_well_formed(&self, capacity: usize) -> bool {
+    pub(crate) fn successors_are_well_formed(&self, capacity: usize) -> bool {
         let distances = self
             .successors
             .iter()
-            .map(|successor| dist(self.local, *successor))
+            .copied()
+            .map(|successor| dist(self.local, successor))
             .collect::<Vec<_>>();
         self.successors.len() <= capacity
             && distances
@@ -58,7 +67,7 @@ impl TopologyState {
 
     /// `PredecessorWellFormed(s)`: `pred ≠ n`, so the responsibility interval
     /// `(pred, n]` is never emptied by a self reference.
-    pub fn predecessor_is_well_formed(&self) -> bool {
+    pub(crate) fn predecessor_is_well_formed(&self) -> bool {
         self.predecessor != Some(self.local)
     }
 
@@ -69,7 +78,7 @@ impl TopologyState {
     /// distance `0 < 2^i`); the second says a higher slot never points nearer
     /// than a lower one, which is what lets `closest_preceding_finger` scan
     /// from the top.
-    pub fn fingers_are_well_formed(&self) -> bool {
+    pub(crate) fn fingers_are_well_formed(&self) -> bool {
         let occupied = self
             .fingers
             .iter()
@@ -78,7 +87,7 @@ impl TopologyState {
             .collect::<Vec<_>>();
         occupied
             .iter()
-            .all(|(slot, distance)| *distance >= BigUint::from(1u8) << *slot)
+            .all(|(slot, distance)| distance >= &(BigUint::from(1u8) << slot))
             && occupied
                 .iter()
                 .zip(occupied.iter().skip(1))
@@ -91,7 +100,7 @@ impl TopologyState {
     /// A local answer satisfies the proposition vacuously; a remote hop must
     /// make strict clockwise progress, which is what bounds a routed lookup by
     /// the number of members.
-    pub fn routes_clockwise_toward(&self, target: Did) -> bool {
+    pub(crate) fn routes_clockwise_toward(&self, target: Did) -> bool {
         match find_successor(self, target) {
             FindSuccessorStep::Local(_) => true,
             FindSuccessorStep::Remote { next, .. } => {
@@ -105,7 +114,7 @@ impl TopologyState {
     ///
     /// `M` is the member set the overlay is judged against (the live nodes);
     /// the finger clause ranges over the slots this state actually carries.
-    pub fn is_chord_fixpoint_of(&self, members: &[Did], capacity: usize) -> bool {
+    pub(crate) fn is_chord_fixpoint_of(&self, members: &[Did], capacity: usize) -> bool {
         self.successors == successors(members, self.local, capacity)
             && self.predecessor == predecessor(members, self.local)
             && self
