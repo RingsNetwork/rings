@@ -213,8 +213,8 @@ beneficiary then sign the same canonical claim under different role domains, and
 returns the complete receipt in an acknowledgement. Account DIDs define the roles; delegated
 session rotation neither changes a role nor creates a distinct receipt identity.
 
-The `V1` wire markers and signing domains are protocol-domain separators, not compatibility
-fallbacks. Only `Probe` is accepted. Unknown service kinds, noncanonical bytes, a unit count
+The wire markers and signing domains are protocol-domain separators, not compatibility
+fallbacks, and carry no version: the protocol is not versioned before 1.0. Only `Probe` is accepted. Unknown service kinds, noncanonical bytes, a unit count
 other than one, same-account roles, digest or role mismatches, stale epochs, and expired delegated
 proofs fail closed during live admission. The old unsigned liveness probe/report wire is removed.
 

@@ -43,12 +43,14 @@ use crate::message::protocols::ProofLifetime;
 use crate::session::Session;
 use crate::session::SessionDigest;
 
-/// Marker of a payload frame: the third payload wire encoding, the first whose session slots
-/// hold references. Earlier encodings are refused before any decoding.
-const PAYLOAD_FRAME_MARKER: &[u8] = b"RINGS-PAYLOAD-V3\0";
+/// Marker of a payload frame. A frame without it is refused before any decoding; there is no
+/// version behind the marker, because the protocol is not versioned before 1.0: every wire
+/// change is a total cutover, and the marker only tells a frame from foreign bytes and from the
+/// link-control marker.
+const PAYLOAD_FRAME_MARKER: &[u8] = b"RINGS-PAYLOAD\0";
 /// Marker of a link-control frame. Distinct from [`PAYLOAD_FRAME_MARKER`] in its first
 /// differing byte, so neither marker is a prefix of the other.
-const LINK_CONTROL_FRAME_MARKER: &[u8] = b"RINGS-LINK-V1\0";
+const LINK_CONTROL_FRAME_MARKER: &[u8] = b"RINGS-LINK\0";
 
 /// The two session slots of a payload, as a product: `PerSlot<T> ≅ T × T`.
 ///

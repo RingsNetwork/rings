@@ -102,8 +102,7 @@ impl OnionExitEpoch {
 const DEFAULT_ONION_EXIT_HEARTBEAT_INTERVAL_SECS: u64 = 30;
 const DEFAULT_ONION_EXIT_TTL_SECS: u64 = 90;
 /// Message family of the onion-exit descriptor signature.
-const ONION_EXIT_DESCRIPTOR_DOMAIN_TAG: DomainTag =
-    domain_tag!("rings-node:onion-exit-descriptor:v1");
+const ONION_EXIT_DESCRIPTOR_DOMAIN_TAG: DomainTag = domain_tag!("rings-node:onion-exit-descriptor");
 
 /// Default onion-exit registry heartbeat interval in seconds.
 pub(crate) const fn default_onion_exit_heartbeat_interval_secs() -> u64 {

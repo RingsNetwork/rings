@@ -113,8 +113,15 @@ A frame that references a session is refused there with `SessionReferenceUnresol
 
 ## Hard cutover
 
-0.28.0 is a network-wide protocol cutover. Payload frames begin with the `RINGS-PAYLOAD-V3`
-marker and link-control frames with `RINGS-LINK-V1`; a frame with neither, including every
-`RINGS-TX-V2` frame of 0.24.0 to 0.27.x, is rejected before deserialization. There is no dual
-decoder, negotiation, or downgrade path. Transaction signatures and their signing domains are
-unchanged.
+0.28.0 is a network-wide protocol cutover. Payload frames begin with the `RINGS-PAYLOAD` marker
+and link-control frames with `RINGS-LINK`; a frame with neither, including every frame of
+0.27.x and earlier, is rejected before deserialization. There is no dual decoder, negotiation,
+or downgrade path.
+
+The protocol is not versioned before 1.0. Markers, signing domains, AEAD namespaces, and storage
+keys carry no version suffix: each of them names one domain, and a change to a domain is a
+total cutover, not a new version beside an old one. The version suffixes earlier releases had
+put on these names are removed in 0.28.0, so every signing domain (`rings-core:message-verification:transaction`,
+`rings-core:message-verification:payload`, the inbox, receipt, descriptor and onion domains)
+and the transaction-replay storage key change with it; a replay window persisted by 0.27.x is
+not read, which loses nothing, since no 0.27.x frame is accepted either.

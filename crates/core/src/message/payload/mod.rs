@@ -50,11 +50,11 @@ pub(crate) use self::wire::WirePayload;
 
 /// Message family of the [`Transaction`] signature: the origin's authorship of a message.
 const TRANSACTION_DOMAIN_TAG: DomainTag =
-    domain_tag!("rings-core:message-verification:transaction:v2");
+    domain_tag!("rings-core:message-verification:transaction");
 /// Message family of the [`MessagePayload`] signature: one hop's authorship of a forwarded
 /// envelope. Distinct from [`TRANSACTION_DOMAIN_TAG`] so the two signatures over the same
 /// transaction hash are never interchangeable.
-const PAYLOAD_DOMAIN_TAG: DomainTag = domain_tag!("rings-core:message-verification:payload:v1");
+const PAYLOAD_DOMAIN_TAG: DomainTag = domain_tag!("rings-core:message-verification:payload");
 #[cfg(test)]
 static TEST_TRANSACTION_SEQUENCES: LazyLock<Mutex<std::collections::BTreeMap<StreamKey, u64>>> =
     LazyLock::new(|| Mutex::new(std::collections::BTreeMap::new()));

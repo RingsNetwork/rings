@@ -353,8 +353,8 @@ mod tests {
     use super::*;
     use crate::ecc::SecretKey;
 
-    const FIXTURE_TAG: DomainTag = domain_tag!("rings-core:test:fixture:v1");
-    const OTHER_TAG: DomainTag = domain_tag!("rings-core:test:other:v1");
+    const FIXTURE_TAG: DomainTag = domain_tag!("rings-core:test:fixture");
+    const OTHER_TAG: DomainTag = domain_tag!("rings-core:test:other");
     const NETWORK_ID: u32 = 7;
 
     struct VerifiedFixture {
@@ -454,7 +454,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "domain tag label must fit its one-byte length prefix")]
     fn test_domain_tag_rejects_label_beyond_length_prefix() {
-        const LONG: &str = "rings-core:test:long-label:v1 - 0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789";
+        const LONG: &str = "rings-core:test:long-label - 0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789";
         assert!(LONG.len() > usize::from(u8::MAX));
         let _ = DomainTag::new(LONG);
     }

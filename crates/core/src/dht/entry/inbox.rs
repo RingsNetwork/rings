@@ -65,7 +65,7 @@ use crate::session::SessionSk;
 
 /// The message family of a holder's signature over a held payload.
 pub(crate) const HELD_MESSAGE_DOMAIN_TAG: DomainTag =
-    crate::domain_tag!("rings-core:relay-inbox:held-message:v1");
+    crate::domain_tag!("rings-core:relay-inbox:held-message");
 
 /// The relay-inbox carrier of `destination`: the ring position just after it.
 pub(crate) fn inbox_key(destination: Did) -> Did {

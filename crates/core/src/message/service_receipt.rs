@@ -22,12 +22,12 @@ use crate::domain_tag;
 use crate::ecc::keccak256;
 use crate::error::Result;
 
-const CLAIM_WIRE_PREFIX: &[u8] = b"RINGS-PROVISIONAL-SERVICE-CLAIM-V1\0";
-const RECEIPT_WIRE_PREFIX: &[u8] = b"RINGS-PROVISIONAL-SERVICE-RECEIPT-V1\0";
+const CLAIM_WIRE_PREFIX: &[u8] = b"RINGS-PROVISIONAL-SERVICE-CLAIM\0";
+const RECEIPT_WIRE_PREFIX: &[u8] = b"RINGS-PROVISIONAL-SERVICE-RECEIPT\0";
 const PROVIDER_DOMAIN: super::DomainTag =
-    domain_tag!("rings-core:service-receipt:provisional:provider:v1");
+    domain_tag!("rings-core:service-receipt:provisional:provider");
 const BENEFICIARY_DOMAIN: super::DomainTag =
-    domain_tag!("rings-core:service-receipt:provisional:beneficiary:v1");
+    domain_tag!("rings-core:service-receipt:provisional:beneficiary");
 
 /// Width of one provisional wall-clock epoch.
 pub const PROVISIONAL_RECEIPT_EPOCH_SECS: u64 = 300;
