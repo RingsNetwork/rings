@@ -103,7 +103,9 @@ names: the protocol is not versioned before 1.0. Mixed-version overlays are unsu
 
 - No cross-account or global order.
 - No claim that a sequence gap identifies loss or a dishonest relay.
-- No retransmission, acknowledgement, or head-of-line blocking protocol.
+- No retransmission, acknowledgement, or head-of-line blocking protocol for transactions (the
+  link's session confirmations and repairs are about session references, not about
+  transactions).
 - No exactly-once application side effects.
 - No recognition of messages older than a deliberately deleted replay store.
 - No reputation or slashing consequence for fork evidence.

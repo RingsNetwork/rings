@@ -4,9 +4,9 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 use bytes::Bytes;
 use rings_transport::core::callback::AdmittedInboundMessage;
-use rings_transport::core::callback::InboundFrameCapacityLease;
 use rings_transport::core::callback::TransportCallback;
 use rings_transport::core::transport::WebrtcConnectionState;
 
@@ -17,7 +17,9 @@ use super::into_transport_callback_error;
 use super::pre_admission::Arrival;
 use super::processor::prepare_resolved_frame;
 use super::CallbackError;
+use super::Completion;
 use super::HeldInboundFrame;
+use super::InboundFrameLease;
 use super::InboundGate;
 use super::InboundProcessor;
 use super::InnerSwarmCallback;
@@ -25,15 +27,13 @@ use super::PreparedInboundFrame;
 use super::SharedSwarmCallback;
 use super::SwarmEvent;
 use super::TransportCallbackError;
-use super::UnresolvedInboundFrame;
 use crate::dht::Did;
 use crate::measure::Authentication;
-use crate::session::SessionDigest;
+use crate::swarm::session_link::Digests;
 use crate::swarm::session_link::ResolvedFrame;
 use crate::swarm::transport::ConnectionEventDisposition;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
-use crate::utils::get_epoch_ms;
 
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 fn spawn_pre_admission_drain(drainer: InnerSwarmCallback) -> bool {
@@ -398,28 +398,27 @@ impl InnerSwarmCallback {
     /// Verify one resolved frame, let the link learn the sessions it carried inline, and pass
     /// it to the admission gate. Post: the digests the link learned, for the caller to confirm
     /// to the peer and to release held frames against.
+    ///
+    /// Learning precedes the gate on purpose: a session is the peer's delegation whatever the
+    /// state of the handshake, and a frame the gate refuses was still a verified frame of the
+    /// peer at the other end of this connection.
     pub(super) async fn admit_resolved_frame(
         &self,
         peer: Option<Did>,
-        resolved: Box<ResolvedFrame<UnresolvedInboundFrame>>,
-    ) -> Result<Vec<SessionDigest>, TransportCallbackError> {
+        resolved: Box<ResolvedFrame<InboundFrameLease>>,
+        completion: Completion,
+    ) -> Result<Digests, TransportCallbackError> {
         let ResolvedFrame {
             payload,
-            carrier:
-                UnresolvedInboundFrame {
-                    bytes: msg,
-                    transport_capacity,
-                },
-            inline,
+            carrier: lease,
+            encoding,
         } = *resolved;
-        let authentication = peer.map_or(Authentication::Unauthenticated, |peer| {
-            self.processor.peer_authentication(peer)
-        });
+        let authentication = self.processor.authentication_of(peer);
         let prepared = match prepare_resolved_frame(
             self.processor.logical.transport.network_id,
             peer,
             payload,
-            msg.len(),
+            lease.bytes.len(),
         ) {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -431,23 +430,23 @@ impl InnerSwarmCallback {
         };
         let learned = self.processor.session_link().admit_verified(
             &prepared.payload,
-            inline,
-            get_epoch_ms(),
+            encoding,
+            self.processor.now_ms(),
         )?;
-        self.gate_prepared_frame(peer, authentication, msg, prepared, transport_capacity)
+        self.gate_prepared_frame(peer, authentication, prepared, lease, completion)
             .await
             .map(|()| learned)
     }
 
     /// Pass one verified frame through the pending-connection gate and the pre-admission hold
-    /// to the inbound actor.
+    /// to the inbound actor, waiting for its logical completion or not as `completion` says.
     async fn gate_prepared_frame(
         &self,
         peer: Option<Did>,
         authentication: Authentication,
-        msg: Bytes,
         prepared: PreparedInboundFrame,
-        transport_capacity: Option<InboundFrameCapacityLease>,
+        lease: InboundFrameLease,
+        completion: Completion,
     ) -> Result<(), TransportCallbackError> {
         let admitted = match self.processor.pending_connection_gate(peer).await? {
             InboundGate::Admitted => true,
@@ -455,8 +454,7 @@ impl InnerSwarmCallback {
             InboundGate::Refused => return Ok(()),
         };
         let Some(peer) = peer else {
-            let submission =
-                InboundSubmission::new(None, authentication, msg, prepared, transport_capacity);
+            let submission = InboundSubmission::new(None, authentication, lease, prepared);
             return self
                 .inbound
                 .submit_prepared(&self.processor, submission)
@@ -465,13 +463,15 @@ impl InnerSwarmCallback {
         };
         let frame = HeldInboundFrame {
             peer,
-            bytes: msg,
             prepared,
-            transport_capacity,
+            lease,
         };
         let arrival = self.processor.pre_admission().arrive(frame, admitted);
         match arrival {
-            Arrival::Pass(frame) => self.deliver_held_frame(frame).await.map_err(Into::into),
+            Arrival::Pass(frame) => match completion {
+                Completion::Awaited => self.deliver_held_frame(frame).await.map_err(Into::into),
+                Completion::Detached => self.enqueue_held_frame(frame).await.map_err(Into::into),
+            },
             Arrival::Held => {
                 // The judgement and the admission commit are not one atomic step: admission may
                 // have committed, and drained, between them. Re-reading admission after the frame
@@ -496,18 +496,11 @@ impl InnerSwarmCallback {
     async fn deliver_held_frame(&self, frame: HeldInboundFrame) -> crate::error::Result<()> {
         let HeldInboundFrame {
             peer,
-            bytes,
             prepared,
-            transport_capacity,
+            lease,
         } = frame;
         let authentication = self.processor.peer_authentication(peer);
-        let submission = InboundSubmission::new(
-            Some(peer),
-            authentication,
-            bytes,
-            prepared,
-            transport_capacity,
-        );
+        let submission = InboundSubmission::new(Some(peer), authentication, lease, prepared);
         self.inbound
             .submit_prepared(&self.processor, submission)
             .await
@@ -517,18 +510,11 @@ impl InnerSwarmCallback {
     async fn enqueue_held_frame(&self, frame: HeldInboundFrame) -> crate::error::Result<()> {
         let HeldInboundFrame {
             peer,
-            bytes,
             prepared,
-            transport_capacity,
+            lease,
         } = frame;
         let authentication = self.processor.peer_authentication(peer);
-        let submission = InboundSubmission::new(
-            Some(peer),
-            authentication,
-            bytes,
-            prepared,
-            transport_capacity,
-        );
+        let submission = InboundSubmission::new(Some(peer), authentication, lease, prepared);
         self.inbound
             .submit_prepared_detached(&self.processor, peer, submission)
             .await
@@ -598,9 +584,7 @@ impl TransportCallback for InnerSwarmCallback {
 
     async fn on_invalid_inbound_frame(&self, cid: &str) -> Result<(), TransportCallbackError> {
         let peer = Did::from_str(cid).ok();
-        let authentication = peer.map_or(Authentication::Unauthenticated, |peer| {
-            self.processor.peer_authentication(peer)
-        });
+        let authentication = self.processor.authentication_of(peer);
         self.processor
             .record_receive_failure(peer, authentication)
             .await;

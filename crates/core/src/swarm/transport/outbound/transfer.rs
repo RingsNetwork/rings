@@ -6,7 +6,6 @@
 //! Shutdown batches retain all sources until their capacity permits are dropped,
 //! then publish collected results.
 
-use bytes::Bytes;
 use futures::channel::oneshot;
 
 use super::frame_chunk;
@@ -32,20 +31,9 @@ pub(in crate::swarm::transport) type ChunkFrames = Box<dyn Iterator<Item = Chunk
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
 pub(in crate::swarm::transport) type ChunkFrames = Box<dyn Iterator<Item = Chunk>>;
 
-/// One frame as the worker receives it: a payload whose session slots are still to be encoded
-/// for this link, or bytes that are already a frame.
-pub(super) enum OutboundFrame {
-    /// A payload; the worker encodes it against the link's announced sessions just before
-    /// sending, so the encoding order is the order frames are accepted in.
-    Payload(Box<MessagePayload>),
-    /// A link-control frame, already encoded: it has no session slots.
-    Control(Bytes),
-}
-
 enum FrameSource {
     Whole(Option<Box<MessagePayload>>),
     Chunked(ChunkedFrameSource),
-    LinkControl(Option<Bytes>),
 }
 
 pub(in crate::swarm::transport) struct ChunkedFrameSource {
@@ -69,14 +57,11 @@ impl ChunkedFrameSource {
 }
 
 impl FrameSource {
-    fn next_frame(&mut self, did: Did) -> Result<Option<(OutboundFrame, &'static str)>> {
+    /// The next payload of this source; the worker encodes it for the link just before sending,
+    /// so its session slots follow the order frames are accepted in.
+    fn next_frame(&mut self, did: Did) -> Result<Option<(Box<MessagePayload>, &'static str)>> {
         match self {
-            Self::Whole(frame) => Ok(frame
-                .take()
-                .map(|payload| (OutboundFrame::Payload(payload), "whole_message"))),
-            Self::LinkControl(frame) => Ok(frame
-                .take()
-                .map(|bytes| (OutboundFrame::Control(bytes), "link_control"))),
+            Self::Whole(frame) => Ok(frame.take().map(|payload| (payload, "whole_message"))),
             Self::Chunked(ChunkedFrameSource {
                 signer,
                 chunks,
@@ -92,7 +77,7 @@ impl FrameSource {
                     "chunked_tail"
                 };
                 frame_chunk(signer.by_ref(), did, chunk, *logical_sequence)
-                    .map(|payload| Some((OutboundFrame::Payload(Box::new(payload)), context)))
+                    .map(|payload| Some((Box::new(payload), context)))
             }
         }
     }
@@ -212,22 +197,6 @@ impl OutboundTransfer {
         )
     }
 
-    /// A transfer of one link-control frame: no useful bytes, detached, and stopped only by the
-    /// scheduler, since nothing upstream waits for it.
-    pub(in crate::swarm::transport) fn link_control(
-        route: OutboundTransferRoute,
-        frame: Bytes,
-    ) -> (Self, oneshot::Receiver<Result<SendCompletionOutcome>>) {
-        Self::new(
-            route,
-            FrameSource::LinkControl(Some(frame)),
-            0,
-            OutboundCompletion::Detached,
-            StopToken::never(),
-            None,
-        )
-    }
-
     /// A chunked transfer re-signs every chunk envelope, so it keeps its own copy of the
     /// signing authority for the whole transfer.
     pub(in crate::swarm::transport) fn chunked(
@@ -287,14 +256,8 @@ impl OutboundTransfer {
         self.useful_bytes
     }
 
-    pub(super) fn next_frame(&mut self) -> Result<Option<(OutboundFrame, &'static str)>> {
+    pub(super) fn next_frame(&mut self) -> Result<Option<(Box<MessagePayload>, &'static str)>> {
         self.source.next_frame(self.did)
-    }
-
-    /// Whether this transfer carries a link-control frame rather than a message.
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(super) fn is_link_control(&self) -> bool {
-        matches!(self.source, FrameSource::LinkControl(_))
     }
 
     pub(super) fn is_before_first_frame(&self) -> bool {

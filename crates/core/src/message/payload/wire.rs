@@ -19,7 +19,7 @@
 //! slot was encoded. Neither signature covers the session slot (both sign the transaction
 //! hash), so re-encoding a slot per link leaves the origin's signature intact.
 //!
-//! A frame is either a payload or a [`SessionControl`]; the two are told apart by a marker before
+//! A frame is either a payload or a [`LinkControl`]; the two are told apart by a marker before
 //! any decoding. A control frame is unsigned: it is meaningful only on the authenticated edge it
 //! arrives on, an announced session authenticates itself (its account signature), and a digest
 //! names a value rather than asserting one. The link is treated as a datagram link: control
@@ -93,6 +93,25 @@ pub(crate) enum SessionRef<'a> {
     Inline(Cow<'a, Session>),
     /// The content address of a session this link already carried inline.
     Digest(SessionDigest),
+}
+
+/// How a slot travelled: the shape of a [`SessionRef`] without its content.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SlotEncoding {
+    /// The session was carried inline.
+    Inline,
+    /// The session was carried as its digest.
+    Referenced,
+}
+
+impl SessionRef<'_> {
+    /// How this slot travelled.
+    pub(crate) const fn encoding(&self) -> SlotEncoding {
+        match self {
+            Self::Inline(_) => SlotEncoding::Inline,
+            Self::Digest(_) => SlotEncoding::Referenced,
+        }
+    }
 }
 
 /// The wire form of a [`MessageVerification`]: the proof with its session slot as a reference.
@@ -269,8 +288,8 @@ impl<'a> WirePayload<'a> {
 
 /// What the two ends of one link tell each other about session references. See the module
 /// documentation for why these are unsigned.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-pub(crate) enum SessionControl {
+#[derive(Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub(crate) enum LinkControl {
     /// "A frame of yours carried this session inline and it verified: you may reference it."
     Known(SessionDigest),
     /// "A frame of yours references this digest and I cannot resolve it."
@@ -282,7 +301,7 @@ pub(crate) enum SessionControl {
     Unknown(SessionDigest),
 }
 
-impl SessionControl {
+impl LinkControl {
     /// The frame bytes: the control marker, then the encoded body.
     pub(crate) fn to_wire(&self) -> Result<Bytes> {
         let body = rings_codec::serialize(self).map_err(Error::CodecSerialize)?;
@@ -295,7 +314,7 @@ pub(crate) enum LinkFrame {
     /// A payload whose session slots may still be references.
     Payload(Box<WirePayload<'static>>),
     /// A link-control frame.
-    Control(SessionControl),
+    Control(LinkControl),
 }
 
 impl LinkFrame {

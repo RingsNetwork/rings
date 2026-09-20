@@ -6,10 +6,10 @@ use std::borrow::Cow;
 
 use super::*;
 use crate::message::HopBudget;
+use crate::message::LinkControl;
 use crate::message::MessagePayload;
 use crate::message::MessageRelay;
 use crate::message::PerSlot;
-use crate::message::SessionControl;
 use crate::message::SessionRef;
 use crate::message::Transaction;
 use crate::message::WirePayload;
@@ -126,7 +126,7 @@ async fn test_missed_session_holds_frames_until_the_peer_announces_it() -> Resul
         .snapshot_counters()?
         .contains(&(pending.peer, MeasureCounter::FailedToReceive)));
 
-    let announcement = SessionControl::Announce(stranger.session()).to_wire()?;
+    let announcement = LinkControl::Announce(stranger.session()).to_wire()?;
     pending.receive(announcement.as_ref()).await?;
     app_callback.wait_for_inbounds_at_least(2).await;
 
@@ -153,7 +153,7 @@ async fn test_missed_hop_session_is_repaired_by_announcement() -> Result<()> {
     pending.receive(&hop_referenced_wire(&missed)?).await?;
     assert_eq!(pending.callback.session_hold_count_for_test(), 1);
 
-    let announcement = SessionControl::Announce(pending.session.session()).to_wire()?;
+    let announcement = LinkControl::Announce(pending.session.session()).to_wire()?;
     pending.receive(announcement.as_ref()).await?;
     app_callback.wait_for_inbounds_at_least(1).await;
 
@@ -184,7 +184,7 @@ async fn test_disclaimed_session_fails_awaiting_frames_and_releases_the_rest() -
     app_callback.wait_for_inbounds_at_least(1).await;
     assert_eq!(pending.callback.session_hold_count_for_test(), 1);
 
-    let disclaimer = SessionControl::Unknown(digest).to_wire()?;
+    let disclaimer = LinkControl::Unknown(digest).to_wire()?;
     pending.receive(disclaimer.as_ref()).await?;
 
     assert_eq!(pending.callback.session_hold_count_for_test(), 0);
@@ -210,7 +210,7 @@ async fn test_unsolicited_announcement_does_not_populate_the_link() -> Result<()
     let pending = pending_peer(&transport, &app_callback).await?;
     pending.admit(&transport).await?;
 
-    let announcement = SessionControl::Announce(pending.session.session()).to_wire()?;
+    let announcement = LinkControl::Announce(pending.session.session()).to_wire()?;
     pending.receive(announcement.as_ref()).await?;
     let referenced = custom_payload(&pending, &transport, b"referenced")?;
     pending.receive(&referenced_wire(&referenced)?).await?;
@@ -218,5 +218,57 @@ async fn test_unsolicited_announcement_does_not_populate_the_link() -> Result<()
     assert_eq!(pending.callback.session_hold_count_for_test(), 1);
     assert_eq!(app_callback.inbounds(), 0);
     transport.disconnect(pending.peer).await?;
+    Ok(())
+}
+
+/// Law (bound in time): a frame held for a session the peer never supplies is dropped by the
+/// inbound actor's periodic sweep once it waited past the hold timeout, charged to the peer as
+/// a receive failure, and its transport lease goes with it. The sweep reads the injected clock,
+/// so advancing it past the timeout is the whole event; the wait is on the cleanup pass.
+#[tokio::test]
+async fn test_frames_held_past_the_timeout_are_swept_and_charged() -> Result<()> {
+    let measure = Arc::new(RecordingMeasure::default());
+    let transport = Arc::new(transport_with_measure(measure.clone())?);
+    let peer_key = SecretKey::random();
+    let peer: Did = peer_key.address().into();
+    let peer_session = SessionSk::new_with_seckey(&peer_key)?;
+    let now_ms = Arc::new(Mutex::new(crate::utils::get_epoch_ms()));
+    let app_callback = Arc::new(CountingSwarmCallback::default());
+    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
+    let (attempt, _offer) = transport
+        .prepare_connection_offer_with_attempt(peer, offer_callback)
+        .await?;
+    assert!(transport.activate_connection_for_test(attempt)?);
+    let callback = InnerSwarmCallback::new_with_reassembly_clock_for_test(
+        Arc::clone(&transport),
+        app_callback.clone(),
+        Arc::clone(&now_ms),
+    )
+    .with_pending_connection_attempt(attempt);
+
+    let stranger = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let pending = PendingPeer {
+        peer,
+        session: peer_session,
+        callback,
+    };
+    let missed = stranger_payload(&pending, &transport, &stranger, b"never-answered")?;
+    pending.receive(&referenced_wire(&missed)?).await?;
+    assert_eq!(pending.callback.session_hold_count_for_test(), 1);
+    let passes_before = pending.callback.reassembly_cleanup_passes_for_test();
+
+    *now_ms.lock().map_err(|_| Error::LockPoisoned)? +=
+        crate::swarm::transport::SESSION_HOLD_TIMEOUT.as_millis() + 1;
+    pending
+        .callback
+        .await_reassembly_cleanup_passes_for_test(|passes| passes > passes_before)
+        .await;
+
+    assert_eq!(pending.callback.session_hold_count_for_test(), 0);
+    assert!(measure
+        .snapshot_counters()?
+        .contains(&(peer, MeasureCounter::FailedToReceive)));
+    assert_eq!(app_callback.inbounds(), 0);
+    transport.disconnect(peer).await?;
     Ok(())
 }

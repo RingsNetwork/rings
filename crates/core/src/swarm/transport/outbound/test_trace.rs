@@ -1,5 +1,7 @@
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use std::cell::Cell;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use std::collections::BTreeSet;
@@ -10,19 +12,23 @@ use std::sync::Mutex;
 use super::Did;
 use super::TransferClass;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+use crate::message::LinkControl;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::message::PerSlot;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-use crate::message::SessionControl;
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::message::SessionRef;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+use crate::message::SlotEncoding;
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 thread_local! {
     static OUTBOUND_SUBMIT_COUNT: Cell<usize> = const { Cell::new(0) };
-    /// Session questions this thread's nodes answered with an announcement.
-    static SESSION_ANNOUNCEMENT_COUNT: Cell<usize> = const { Cell::new(0) };
-    /// Payload frames this thread's nodes encoded with at least one session by reference.
-    static REFERENCED_FRAME_COUNT: Cell<usize> = const { Cell::new(0) };
+    /// Session questions this thread's nodes answered, with an announcement or a disclaimer.
+    static SESSION_ANSWER_COUNT: Cell<usize> = const { Cell::new(0) };
+    /// Per link peer, the payload frames this thread's nodes encoded with each slot by
+    /// reference.
+    static REFERENCED_SLOTS: RefCell<BTreeMap<Did, PerSlot<usize>>> =
+        const { RefCell::new(BTreeMap::new()) };
 }
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
@@ -40,36 +46,60 @@ pub(super) fn record_outbound_submit() {
     OUTBOUND_SUBMIT_COUNT.with(|count| count.set(count.get().saturating_add(1)));
 }
 
-/// The session questions answered with an announcement on this test thread so far: the
-/// observable that a miss was repaired by the link, not avoided.
+/// The session questions answered on this test thread so far, announcements and disclaimers
+/// alike: the observable that the miss path ran, whichever way it ended.
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-pub(crate) fn session_announcement_count_for_test() -> usize {
-    SESSION_ANNOUNCEMENT_COUNT.with(Cell::get)
+pub(crate) fn session_answer_count_for_test() -> usize {
+    SESSION_ANSWER_COUNT.with(Cell::get)
 }
 
-/// The payload frames encoded with at least one session slot by reference on this test thread
-/// so far: the observable that a link switched from inline to references.
+/// Per link peer, how many payload frames this thread's nodes encoded with the origin slot and
+/// with the hop slot by reference: the observable that a link switched from inline to
+/// references, slot by slot.
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-pub(crate) fn referenced_frame_count_for_test() -> usize {
-    REFERENCED_FRAME_COUNT.with(Cell::get)
+pub(crate) fn referenced_slots_for_test(peer: Did) -> PerSlot<usize> {
+    REFERENCED_SLOTS.with(|slots| {
+        slots
+            .borrow()
+            .get(&peer)
+            .copied()
+            .unwrap_or(PerSlot { origin: 0, hop: 0 })
+    })
 }
 
-/// Count a frame encoded as `sessions` on this test thread if any slot is a reference.
+/// The payload frames encoded with at least one slot by reference on this test thread so far,
+/// over every link: the observable that references ran at all.
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-pub(super) fn record_encoded_frame(sessions: &PerSlot<SessionRef<'_>>) {
-    let referenced = matches!(sessions.origin, SessionRef::Digest(_))
-        || matches!(sessions.hop, SessionRef::Digest(_));
-    if referenced {
-        REFERENCED_FRAME_COUNT.with(|count| count.set(count.get().saturating_add(1)));
-    }
+pub(crate) fn referenced_frame_total_for_test() -> usize {
+    REFERENCED_SLOTS.with(|slots| {
+        slots
+            .borrow()
+            .values()
+            .map(|counts| counts.origin.max(counts.hop))
+            .sum()
+    })
 }
 
-/// Count `answer` on this test thread if it is an announcement.
+/// Count a frame encoded as `sessions` for `peer` on this test thread, slot by slot.
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-pub(super) fn record_session_answer(answer: &SessionControl) {
-    if matches!(answer, SessionControl::Announce(_)) {
-        SESSION_ANNOUNCEMENT_COUNT.with(|count| count.set(count.get().saturating_add(1)));
-    }
+pub(super) fn record_encoded_frame(peer: Did, sessions: &PerSlot<SessionRef<'_>>) {
+    REFERENCED_SLOTS.with(|slots| {
+        let mut slots = slots.borrow_mut();
+        let counts = slots.entry(peer).or_insert(PerSlot { origin: 0, hop: 0 });
+        if sessions.origin.encoding() == SlotEncoding::Referenced {
+            counts.origin = counts.origin.saturating_add(1);
+        }
+        if sessions.hop.encoding() == SlotEncoding::Referenced {
+            counts.hop = counts.hop.saturating_add(1);
+        }
+    });
+}
+
+/// Count `answer` on this test thread.
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+pub(super) fn record_session_answer(answer: &LinkControl) {
+    let _answer = answer;
+    SESSION_ANSWER_COUNT.with(|count| count.set(count.get().saturating_add(1)));
 }
 
 type FrameAdmission = (TransferClass, u64, usize);

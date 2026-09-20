@@ -947,6 +947,12 @@ async fn conclude_healthy_liveness(
 fn assert_enabled_outcome(outcome: &ScenarioOutcome) {
     let diagnostic = outcome.diagnostic();
     let snapshot = outcome.state.snapshot();
+    // The storm ran over links that reached session references, so the reference protocol,
+    // not the all-inline encoding, is what the adversarial schedule exercised.
+    assert!(
+        crate::swarm::transport::referenced_frame_total_for_test() > 0,
+        "no payload frame was sent by reference during the scenario; {diagnostic}"
+    );
     assert!(
         outcome.capacity_observations.validate().is_ok(),
         "{}; {diagnostic}",

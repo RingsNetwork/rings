@@ -93,11 +93,13 @@ pub(crate) use self::liveness::PEER_LIVENESS_TIMEOUT_MS;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::outbound_submit_count_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(crate) use self::outbound::referenced_frame_count_for_test;
+pub(crate) use self::outbound::referenced_frame_total_for_test;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::outbound::referenced_slots_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::reset_outbound_submit_count_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(crate) use self::outbound::session_announcement_count_for_test;
+pub(crate) use self::outbound::session_answer_count_for_test;
 use self::outbound::OutboundSchedulers;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::OUTBOUND_COMMAND_DRAIN_BUDGET;
@@ -129,6 +131,7 @@ use self::storage_lookup::StorageLookupObservationMap;
 pub(crate) use self::storage_lookup::STORAGE_LOOKUP_OBSERVATION_CAPACITY;
 pub(crate) use self::storage_sync::TrackedStorageSyncOutcome;
 pub(crate) use self::timeouts::DATA_CHANNEL_SEND_ACCEPT_BUDGET;
+pub(crate) use self::timeouts::SESSION_HOLD_TIMEOUT;
 pub(crate) use self::timeouts::TRACKED_PAYLOAD_COMPLETION_BOUND;
 use self::timeouts::TRANSPORT_TIMEOUT_PROFILE;
 use super::callback::InboundCapacity;

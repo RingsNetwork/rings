@@ -31,12 +31,17 @@ re-encodes the origin slot for its own next link without touching the origin's s
 ## Scope: one link, one direction
 
 A link is one admitted connection generation between two nodes. Each direction keeps one bounded
-table of at most 64 sessions, least recently referenced first out:
+table, least recently referenced first out:
 
-| End | Table | Populated by |
-| --- | --- | --- |
-| sender | sessions it sent inline, and which of them the peer confirmed | its own frames; confirmations from the peer |
-| receiver | sessions this link carried inline | frames that verified, and solicited announcements whose delegation verified |
+| End | Table | Capacity | Populated by |
+| --- | --- | --- | --- |
+| sender | sessions it sent inline, and which of them the peer confirmed | 64 | its own frames; confirmations from the peer |
+| receiver | sessions this link carried inline | 128 | frames that verified, and solicited announcements whose delegation verified |
+
+The receiver keeps twice as many as the sender under the same least-recently-referenced order
+over the same frames, so the sender stops referencing a session (and sends it inline again)
+before the receiver could have forgotten it. A miss therefore needs something outside the
+tables: the two ends disagreeing on expiry, or a peer that does not follow the protocol.
 
 Consequences of the scope:
 
@@ -82,16 +87,23 @@ receiver                                   sender
   unknown / refused delegation  → fail the frames that await d
 ```
 
-- Held frames are independent of each other and of everything else: a frame that resolves is
-  never queued behind one that does not, because the link promises no order to preserve. A held
-  frame leaves when a later frame or an announcement teaches the session it awaits, or is
-  dropped when its proof lifetime lapses.
-- The hold keeps at most 32 frames per connection. A digest is asked for when the first frame
-  awaiting it is held; a frame that finds the hold full is dropped and every awaited digest is
-  asked for again, since a full hold means an answer is overdue. There is no timer, and a peer
-  that never answers stalls only its own held frames.
-- The sender answers each question with exactly one frame, scheduled like any control transfer
-  under the same per-peer and global capacity.
+- Held frames are independent of everything that resolves: a frame that resolves is never
+  queued behind one that does not, because the link promises no order to preserve. Held frames
+  leave in arrival order relative to each other, when a later frame or an announcement teaches
+  the session they await.
+- The hold keeps at most 16 frames per connection (half the pre-admission hold, so the two
+  holds together leave a quarter of the transport's per-peer frames for the control frames that
+  release them), each for at most twice the transport's delivery timeout. The inbound actor's
+  periodic cleanup drops what waited longer, or whose proof lapsed: a frame a peer never backs
+  occupies this end for a bounded time whatever lifetime its proof claims.
+- Every held frame asks for its own missing digests once, on arrival, so one lost question is
+  repaired by the next frame that misses the same digest. A frame that finds the hold full is
+  dropped, and the oldest held frame's question is asked again. The sender answers each
+  question with exactly one frame.
+- Every frame the link drops is charged to the peer as a receive failure, as a frame that
+  fails verification is: it referenced a session the peer did not back in time, whether the
+  hold overflowed, the peer disclaimed or could not validly announce the session, or the frame
+  waited past the hold timeout.
 
 Link-control frames (`Known`, `Request`, `Announce`, `Unknown`) are unsigned and idempotent.
 They are meaningful only on the authenticated connection they arrive on, an announced session

@@ -145,12 +145,15 @@ generation and obeys these rules:
 - the sender references only what the receiver confirmed, so loss or reordering on
   the link costs inline frames and never a stall; the link is treated as a datagram
   link throughout;
-- it holds at most 64 sessions and at most 32 unresolved frames per connection, and
-  both die with the connection generation;
-- a miss (the receiver forgot a confirmed session) is repaired on the link by one
-  unsigned request and exactly one unsigned answer, scheduled under the ordinary
-  per-peer control capacity; no hop asks the origin for anything, and a peer that
-  never answers stalls only its own held frames;
+- the sender remembers at most 64 sessions and the receiver 128, under one
+  least-recently-referenced order, so the sender goes back to inline before the
+  receiver could have forgotten; both tables die with the connection generation;
+- a miss (the two ends disagree on expiry, or the peer misbehaves) holds that frame
+  alone, at most 16 per connection and for at most twice the delivery timeout, and
+  is repaired on the link by one unsigned request per held frame and exactly one
+  unsigned answer per question, both sent straight on the data channel; every frame
+  the link drops (hold overflow, disclaimed or invalid announcement, hold timeout) is
+  charged to the peer as a receive failure; no hop asks the origin for anything;
 - an expired session is evicted, a reference to it is a miss, and re-announcing the
   expired delegation is refused exactly as it is inline.
 
@@ -214,7 +217,8 @@ returns the complete receipt in an acknowledgement. Account DIDs define the role
 session rotation neither changes a role nor creates a distinct receipt identity.
 
 The wire markers and signing domains are protocol-domain separators, not compatibility
-fallbacks, and carry no version: the protocol is not versioned before 1.0. Only `Probe` is accepted. Unknown service kinds, noncanonical bytes, a unit count
+fallbacks, and carry no version: the protocol is not versioned before 1.0. Only `Probe` is
+accepted. Unknown service kinds, noncanonical bytes, a unit count
 other than one, same-account roles, digest or role mismatches, stale epochs, and expired delegated
 proofs fail closed during live admission. The old unsigned liveness probe/report wire is removed.
 

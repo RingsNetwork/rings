@@ -2,48 +2,56 @@
 //!
 //! A frame is a payload, whose session slots may be references that this connection's
 //! [`ReferencedSessions`](crate::swarm::session_link::ReferencedSessions) resolves, or a
-//! link-control frame, which asks about or answers such a reference. This module is the
-//! imperative shell around that pure state: it reads the clock, interprets the effects the
-//! steps return (deliver, drop, ask the peer), and hands every resolved frame to
+//! link-control frame, which asks about, confirms or answers such a reference. This module is
+//! the imperative shell around that pure state: it reads the inbound clock, interprets the
+//! effects the steps return (deliver, drop, ask, confirm), and hands every resolved frame to
 //! [`InnerSwarmCallback::admit_resolved_frame`], where verification and admission are what they
 //! were before references existed.
+//!
+//! Charging law: every frame this stage drops is charged to the peer as a receive failure, in
+//! the same way a frame that fails verification is. Each such frame referenced a session the
+//! peer did not back in time: the hold overflowed (the peer's references outran its answers),
+//! the peer disclaimed or could not validly announce the session, or the frame waited past the
+//! hold timeout (the sweep in
+//! [`InboundProcessor::sweep_session_hold_at`](super::InboundProcessor::sweep_session_hold_at)).
 
 use std::str::FromStr;
 
 use bytes::Bytes;
 use rings_transport::core::callback::InboundFrameCapacityLease;
 
+use super::Completion;
+use super::InboundFrameLease;
 use super::InnerSwarmCallback;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 use super::OnMessageRecursionDepthGuard;
 use super::TransportCallbackError;
-use super::UnresolvedInboundFrame;
 use crate::dht::Did;
-use crate::measure::Authentication;
+use crate::error::Result;
+use crate::message::LinkControl;
 use crate::message::LinkFrame;
-use crate::message::SessionControl;
 use crate::session::SessionDigest;
+use crate::swarm::session_link::Digests;
 use crate::swarm::session_link::FrameArrival;
-use crate::swarm::session_link::FrameRelease;
 use crate::swarm::transport::PendingConnectionAttempt;
-use crate::utils::get_epoch_ms;
 
 impl InnerSwarmCallback {
     /// Take one frame from the transport through the link stage.
     ///
     /// ```text
-    ///   bytes ─decode─┬─ SessionControl ──▶ handle_link_control
+    ///   bytes ─decode─┬─ LinkControl ─────▶ handle_link_control
     ///                 └─ Payload ─arrive─┬─ Resolved ─▶ admit_resolved_frame ─▶ confirm what it taught,
     ///                                    │                                     release what awaited it
     ///                                    ├─ Held ─────▶ ask the peer for what the frame misses
-    ///                                    └─ Overflow ─▶ dropped; ask again for everything awaited
+    ///                                    └─ Overflow ─▶ dropped and charged; the oldest held frame's
+    ///                                                   question asked again
     /// ```
     pub(super) async fn submit_inbound_message(
         &self,
         cid: &str,
         msg: Bytes,
         transport_capacity: Option<InboundFrameCapacityLease>,
-    ) -> Result<(), TransportCallbackError> {
+    ) -> std::result::Result<(), TransportCallbackError> {
         #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
         let _depth_guard = OnMessageRecursionDepthGuard::enter();
 
@@ -62,17 +70,19 @@ impl InnerSwarmCallback {
             }
             LinkFrame::Payload(frame) => frame,
         };
-        let carrier = UnresolvedInboundFrame {
+        let lease = InboundFrameLease {
             bytes: msg,
             transport_capacity,
         };
         let arrival = self
             .processor
             .session_link()
-            .arrive(frame, carrier, get_epoch_ms());
+            .arrive(frame, lease, self.processor.now_ms());
         match arrival {
             Ok(FrameArrival::Resolved(resolved)) => {
-                let learned = self.admit_resolved_frame(peer, resolved).await?;
+                let learned = self
+                    .admit_resolved_frame(peer, resolved, Completion::Awaited)
+                    .await?;
                 self.learned_sessions(peer, learned).await;
                 Ok(())
             }
@@ -80,11 +90,13 @@ impl InnerSwarmCallback {
                 self.request_sessions(peer, request).await;
                 Ok(())
             }
-            Ok(FrameArrival::Overflow { request }) => {
+            Ok(FrameArrival::Overflow { carrier, request }) => {
                 tracing::debug!(
                     peer = ?peer,
                     "dropping message; the hold for unresolved session references is full"
                 );
+                drop(carrier);
+                self.record_receive_failure_now(peer).await;
                 self.request_sessions(peer, request).await;
                 Ok(())
             }
@@ -97,55 +109,51 @@ impl InnerSwarmCallback {
 
     /// Record a receive failure against `peer` under its authentication as of now.
     async fn record_receive_failure_now(&self, peer: Option<Did>) {
-        let authentication = peer.map_or(Authentication::Unauthenticated, |peer| {
-            self.processor.peer_authentication(peer)
-        });
+        let authentication = self.processor.authentication_of(peer);
         self.processor
             .record_receive_failure(peer, authentication)
             .await;
     }
 
-    /// Deliver every held frame that can leave now: one that resolves, or one whose proof
-    /// lapsed, which is dropped.
+    /// Deliver every held frame that resolves now, detached, so the transport's read loop is
+    /// not paced by each one's handlers.
     ///
     /// A failure on one released frame is logged and does not stop the release: the frame was
-    /// accepted from the transport when it arrived, and the others are independent of it.
+    /// accepted from the transport when it arrived, and the others are independent of it. The
+    /// loop re-scans the hold after each frame, so what a released frame taught is applied to
+    /// the frames still held without recursing.
     async fn release_held_frames(&self, peer: Option<Did>) {
         loop {
-            let release = self.processor.session_link().release_next(get_epoch_ms());
-            match release {
-                Ok(Some(FrameRelease::Resolved(resolved))) => {
-                    // The loop re-scans the hold, so what this frame taught is applied to the
-                    // frames still held without recursing.
-                    let learned = self.admit_resolved_frame(peer, resolved).await;
-                    let learned = learned.unwrap_or_else(|error| {
-                        tracing::warn!(
-                            peer = ?peer,
-                            error = ?error,
-                            "failed to deliver a message held for a session reference"
-                        );
-                        Vec::new()
-                    });
-                    self.confirm_sessions(peer, learned).await;
-                }
-                Ok(Some(FrameRelease::Lapsed(_))) => {
-                    tracing::debug!(
-                        peer = ?peer,
-                        "dropping a message whose proof lapsed while its session was unresolved"
-                    );
-                }
+            let release = self
+                .processor
+                .session_link()
+                .release_next(self.processor.now_ms());
+            let resolved = match release {
+                Ok(Some(resolved)) => resolved,
                 Ok(None) => return,
                 Err(error) => {
                     tracing::warn!(peer = ?peer, error = ?error, "releasing a held message failed");
                     return;
                 }
-            }
+            };
+            let learned = self
+                .admit_resolved_frame(peer, resolved, Completion::Detached)
+                .await;
+            let learned = learned.unwrap_or_else(|error| {
+                tracing::warn!(
+                    peer = ?peer,
+                    error = ?error,
+                    "failed to deliver a message held for a session reference"
+                );
+                Digests::new()
+            });
+            self.confirm_sessions(peer, learned).await;
         }
     }
 
     /// The link learned `learned` from a frame that arrived: confirm them to `peer`, and let
     /// the held frames that awaited one of them leave.
-    async fn learned_sessions(&self, peer: Option<Did>, learned: Vec<SessionDigest>) {
+    async fn learned_sessions(&self, peer: Option<Did>, learned: Digests) {
         let releases = !learned.is_empty();
         self.confirm_sessions(peer, learned).await;
         if releases {
@@ -154,31 +162,31 @@ impl InnerSwarmCallback {
     }
 
     /// Tell `peer` that the sessions behind `confirm` verified here, so it may reference them.
-    async fn confirm_sessions(&self, peer: Option<Did>, confirm: Vec<SessionDigest>) {
+    async fn confirm_sessions(&self, peer: Option<Did>, confirm: Digests) {
         let Some(peer) = peer else {
             return;
         };
         for digest in confirm {
-            self.send_session_control(peer, SessionControl::Known(digest))
+            self.emit_link_control(peer, LinkControl::Known(digest))
                 .await;
         }
     }
 
     /// Ask `peer` for the sessions behind `request`.
-    async fn request_sessions(&self, peer: Option<Did>, request: Vec<SessionDigest>) {
+    async fn request_sessions(&self, peer: Option<Did>, request: Digests) {
         let Some(peer) = peer else {
             tracing::warn!("cannot ask an unparsable peer for a session");
             return;
         };
         for digest in request {
-            self.send_session_control(peer, SessionControl::Request(digest))
+            self.emit_link_control(peer, LinkControl::Request(digest))
                 .await;
         }
     }
 
-    /// Send one control frame to `peer`; a failure is logged, since the next arrival repeats
-    /// the question or the confirmation.
-    async fn send_session_control(&self, peer: Did, control: SessionControl) {
+    /// Send one control frame to `peer`; a failure is logged, since the next frame that misses
+    /// or teaches the same session repeats the question or the confirmation.
+    async fn emit_link_control(&self, peer: Did, control: LinkControl) {
         if let Err(error) = self
             .processor
             .logical
@@ -186,7 +194,7 @@ impl InnerSwarmCallback {
             .send_link_control(peer, &control)
             .await
         {
-            tracing::debug!(peer = %peer, error = ?error, control = ?control, "failed to send session control");
+            tracing::debug!(peer = %peer, error = ?error, control = ?control, "failed to send link control");
         }
     }
 
@@ -198,32 +206,38 @@ impl InnerSwarmCallback {
     ///   Announce(s) ─▶ announce ─▶ fail refused frames ─▶ release what resolves
     ///   Unknown(d)  ─▶ unknown  ─▶ fail awaiting frames
     /// ```
-    async fn handle_link_control(&self, peer: Option<Did>, control: SessionControl) {
+    async fn handle_link_control(&self, peer: Option<Did>, control: LinkControl) {
         let Some(peer) = peer else {
             tracing::warn!("ignoring link control from an unparsable peer");
             return;
         };
-        let unavailable = match control {
-            SessionControl::Known(digest) => {
-                self.acknowledge_session(peer, digest);
-                return;
+        match control {
+            LinkControl::Known(digest) => self.acknowledge_session(peer, digest),
+            LinkControl::Request(digest) => self.answer_session_request(peer, digest).await,
+            LinkControl::Announce(session) => {
+                let refused = self
+                    .processor
+                    .session_link()
+                    .announce(session, self.processor.now_ms());
+                self.fail_unavailable(peer, refused).await;
+                self.release_held_frames(Some(peer)).await;
             }
-            SessionControl::Request(digest) => {
-                self.answer_session_request(peer, digest).await;
-                return;
+            LinkControl::Unknown(digest) => {
+                let awaiting = self
+                    .processor
+                    .session_link()
+                    .unknown(digest, self.processor.now_ms());
+                self.fail_unavailable(peer, Ok(awaiting)).await;
             }
-            SessionControl::Announce(session) => self
-                .processor
-                .session_link()
-                .announce(session, get_epoch_ms()),
-            SessionControl::Unknown(digest) => Ok(self
-                .processor
-                .session_link()
-                .unknown(digest, get_epoch_ms())),
-        };
+        }
+    }
+
+    /// Charge `peer` for every frame in `unavailable`: each awaited a session the peer could
+    /// not, or did not validly, supply.
+    async fn fail_unavailable(&self, peer: Did, unavailable: Result<Vec<InboundFrameLease>>) {
         match unavailable {
             Ok(unavailable) => {
-                for _frame in unavailable {
+                for _lease in unavailable {
                     tracing::warn!(
                         peer = %peer,
                         "dropping a message whose referenced session the peer could not supply"
@@ -235,7 +249,6 @@ impl InnerSwarmCallback {
                 tracing::warn!(peer = %peer, error = ?error, "failed to judge a session answer");
             }
         }
-        self.release_held_frames(Some(peer)).await;
     }
 
     /// The connection generation this callback is bound to, if it is `peer`'s.

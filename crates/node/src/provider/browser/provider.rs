@@ -452,13 +452,12 @@ impl Provider {
         let measure_storage =
             open_browser_measure_storage(&format!("{storage_name}/measure")).await;
         let evidence_storage = Some(
-            open_browser_evidence_storage(&format!("{storage_name}/provisional-evidence-v1"))
-                .await?,
+            open_browser_evidence_storage(&format!("{storage_name}/provisional-evidence")).await?,
         );
         let onion_entry_guard_storage =
             open_browser_entry_guard_storage(&format!("{storage_name}/onion-entry-guards")).await;
         let replay_storage =
-            open_browser_replay_storage(&format!("{storage_name}/transaction-replay-v2")).await?;
+            open_browser_replay_storage(&format!("{storage_name}/transaction-replay")).await?;
 
         let provider = Self::new_provider_with_storage_internal(
             config,
@@ -512,11 +511,11 @@ impl Provider {
             let entry_storage = open_browser_entry_storage_or_memory("rings-node").await;
             let measure_storage = open_browser_measure_storage("rings-node/measure").await;
             let evidence_storage =
-                Some(open_browser_evidence_storage("rings-node/provisional-evidence-v1").await?);
+                Some(open_browser_evidence_storage("rings-node/provisional-evidence").await?);
             let onion_entry_guard_storage =
                 open_browser_entry_guard_storage("rings-node/onion-entry-guards").await;
             let replay_storage =
-                open_browser_replay_storage("rings-node/transaction-replay-v2").await?;
+                open_browser_replay_storage("rings-node/transaction-replay").await?;
 
             let provider = Provider::new_provider_internal(
                 network_id,
@@ -560,11 +559,11 @@ impl Provider {
             let entry_storage = open_browser_entry_storage_or_memory("rings-node").await;
             let measure_storage = open_browser_measure_storage("rings-node/measure").await;
             let evidence_storage =
-                Some(open_browser_evidence_storage("rings-node/provisional-evidence-v1").await?);
+                Some(open_browser_evidence_storage("rings-node/provisional-evidence").await?);
             let onion_entry_guard_storage =
                 open_browser_entry_guard_storage("rings-node/onion-entry-guards").await;
             let replay_storage =
-                open_browser_replay_storage("rings-node/transaction-replay-v2").await?;
+                open_browser_replay_storage("rings-node/transaction-replay").await?;
 
             let config_policy = policy.clone();
             let provider = Provider::new_provider_internal_with_config(

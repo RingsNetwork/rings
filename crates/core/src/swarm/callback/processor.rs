@@ -7,13 +7,13 @@ use super::inbound;
 use super::inbound::ReassemblyClock;
 use super::pre_admission::PreAdmissionHold;
 use super::HeldInboundFrame;
+use super::InboundFrameLease;
 use super::InboundGate;
 use super::InboundLane;
 use super::InboundProcessor;
 use super::LogicalInbound;
 use super::PreparedInboundFrame;
 use super::SharedSwarmCallback;
-use super::UnresolvedInboundFrame;
 use crate::chunk::MessageReassembler;
 use crate::dht::Did;
 use crate::measure::Authentication;
@@ -24,6 +24,7 @@ use crate::message::MessageVerificationExt;
 use crate::swarm::session_link::ReferencedSessions;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
+use crate::swarm::transport::SESSION_HOLD_TIMEOUT;
 
 fn log_inbound_verification_failure(
     peer: Option<Did>,
@@ -61,9 +62,41 @@ impl InboundProcessor {
             reassembly_clock,
             pending_attempt: Arc::new(Mutex::new(None)),
             pre_admission: Arc::new(Mutex::new(PreAdmissionHold::new(inbound::peer_capacity()))),
-            session_link: Arc::new(Mutex::new(
-                ReferencedSessions::new(inbound::peer_capacity()),
-            )),
+            session_link: Arc::new(Mutex::new(ReferencedSessions::new(
+                super::session_hold_capacity(),
+                SESSION_HOLD_TIMEOUT.as_millis(),
+            ))),
+        }
+    }
+
+    /// The instant every link step is judged at: the inbound clock, so a test can drive the
+    /// hold timeout deterministically.
+    pub(super) fn now_ms(&self) -> u128 {
+        self.reassembly_clock.now_ms()
+    }
+
+    /// The authentication of `peer` as of now, `Unauthenticated` for an unparsable peer.
+    pub(super) fn authentication_of(&self, peer: Option<Did>) -> Authentication {
+        peer.map_or(Authentication::Unauthenticated, |peer| {
+            self.peer_authentication(peer)
+        })
+    }
+
+    /// Drop every frame held past the session-hold timeout, or whose proof lapsed, as of
+    /// `now_ms`, charging each to the peer: it referenced a session it did not back in time.
+    pub(super) async fn sweep_session_hold_at(&self, now_ms: u128) {
+        let stale = self.session_link().sweep(now_ms);
+        if stale.is_empty() {
+            return;
+        }
+        let peer = self.pending_attempt().map(PendingConnectionAttempt::peer);
+        let authentication = self.authentication_of(peer);
+        for _lease in stale {
+            tracing::debug!(
+                peer = ?peer,
+                "dropping a message whose referenced session the peer did not supply in time"
+            );
+            self.record_receive_failure(peer, authentication).await;
         }
     }
 
@@ -73,7 +106,7 @@ impl InboundProcessor {
     /// still guards a well-formed state, since no step panics between two writes.
     pub(super) fn session_link(
         &self,
-    ) -> std::sync::MutexGuard<'_, ReferencedSessions<UnresolvedInboundFrame>> {
+    ) -> std::sync::MutexGuard<'_, ReferencedSessions<InboundFrameLease>> {
         self.session_link
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

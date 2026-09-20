@@ -7,10 +7,12 @@ use futures::future::FutureExt;
 use futures::pin_mut;
 use futures::select;
 use rings_transport::core::drop_guard::ArmedDropGuard;
+use rings_transport::core::transport::SendPermit;
 
 use super::delivery::terminate_accepted_connection;
 use super::delivery::ChunkSendPermit;
 use super::delivery::SendCompletionOutcome;
+use super::delivery::DATA_CHANNEL_SEND_ACCEPT_TIMEOUT;
 use super::outbound::ChunkFrames;
 use super::outbound::ChunkedFrameSource;
 use super::outbound::DetachedAdmission;
@@ -26,6 +28,7 @@ use super::timeouts::OUTBOUND_PAYLOAD_CLEANUP_GRACE;
 use super::timeouts::TRACKED_PAYLOAD_COMPLETION_BOUND;
 use super::AdmittedConnection;
 use super::PendingConnectionAttempt;
+use super::SwarmConnection;
 use super::SwarmTransport;
 use super::DATA_CHANNEL_SEND_ACCEPT_BUDGET;
 use super::TRANSPORT_TIMEOUT_PROFILE;
@@ -39,11 +42,11 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::lifecycle::StopSource;
 use crate::lifecycle::StopToken;
+use crate::message::LinkControl;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::MessageSigner;
 use crate::message::PayloadSender;
-use crate::message::SessionControl;
 use crate::session::SessionDigest;
 use crate::session::SessionSk;
 use crate::utils::get_epoch_ms;
@@ -273,42 +276,36 @@ impl SwarmTransport {
         }
     }
 
-    /// Send one link-control frame to `peer` over its admitted connection, detached.
+    /// Send one link-control frame to `peer` on its admitted connection, at once.
     ///
-    /// The frame is scheduled like any transfer of the control class, so it is bounded by the
-    /// same per-peer and global capacity and cannot starve behind data. Post: `Ok` means the
-    /// scheduler owns the frame, or the connection generation was revoked and there is no link
-    /// left to speak on.
-    pub(crate) async fn send_link_control(
-        &self,
-        peer: Did,
-        control: &SessionControl,
-    ) -> Result<()> {
+    /// A link-control frame is a link-layer signal, not a message: it is idempotent, needs no
+    /// order against anything, and is answered by nothing this end waits for. It therefore
+    /// bypasses the transfer lanes (which serialize a class behind each frame's flush) and goes
+    /// straight to the data channel, bounded by the send-accept timeout. Its rate is bounded by
+    /// the inbound frames that cause it: at most one confirmation or question per frame this
+    /// end verified or held, and one answer per question the peer asked. Post: `Ok` means the
+    /// data channel accepted the bytes; the flush is not awaited, since nothing depends on it.
+    pub(crate) async fn send_link_control(&self, peer: Did, control: &LinkControl) -> Result<()> {
         let frame = control.to_wire()?;
         let Some(admitted) = self.admitted_send_connection(peer)? else {
             return Err(Error::SwarmMissDidInTable(peer));
         };
-        let capacity_permit = self
-            .reserve_outbound_capacity(
-                peer,
-                TransferClass::DhtControl,
-                outbound_memory_reservation(frame.len()),
-                OutboundCompletion::Detached,
-            )
-            .await?;
-        let Some(handle) =
-            admitted.with_current_connection(|_| self.outbound_schedulers.handle(peer))?
-        else {
+        let Some(connection) = admitted.with_current_connection(SwarmConnection::clone)? else {
             return Ok(());
         };
-        let route = OutboundTransferRoute::new(
-            TransferClass::DhtControl,
-            peer,
-            admitted,
-            ChunkSendPermit::Always,
-        );
-        let (transfer, _completion) = OutboundTransfer::link_control(route, frame);
-        handle?.submit(transfer, capacity_permit)
+        let bytes = frame.len();
+        let send = connection.send_data(frame, SendPermit::always()).fuse();
+        let timeout = sleep(DATA_CHANNEL_SEND_ACCEPT_TIMEOUT).fuse();
+        pin_mut!(send, timeout);
+        select! {
+            delivery = send => delivery.map(drop),
+            _ = timeout => Err(Error::DataChannelSendQueueTimeout {
+                peer,
+                timeout_ms: DATA_CHANNEL_SEND_ACCEPT_TIMEOUT.as_millis(),
+                bytes,
+                context: "link_control",
+            }),
+        }
     }
 
     /// `attempt`'s peer confirmed `digest`: frames to it may reference the session from now on.

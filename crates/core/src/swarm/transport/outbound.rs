@@ -62,11 +62,13 @@ mod test_trace;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use test_trace::outbound_submit_count_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(crate) use test_trace::referenced_frame_count_for_test;
+pub(crate) use test_trace::referenced_frame_total_for_test;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use test_trace::referenced_slots_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use test_trace::reset_outbound_submit_count_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(crate) use test_trace::session_announcement_count_for_test;
+pub(crate) use test_trace::session_answer_count_for_test;
 mod transfer;
 
 pub(super) use admission::DetachedAdmission;
@@ -236,8 +238,6 @@ impl OutboundPeerHandle {
             return Err(Error::ChannelSendMessageFailed);
         }
         let mut transfer = transfer;
-        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-        let is_control = transfer.is_link_control();
         transfer.bind_scheduler_stop(self.state.stop.token());
         let scheduled = ScheduledTransfer::new(transfer, capacity_permit);
         if self.state.stop.is_stop_requested() {
@@ -262,7 +262,7 @@ impl OutboundPeerHandle {
             Err(_) => (Err(Error::ChannelSendMessageFailed), false),
         };
         #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-        if submitted && !is_control {
+        if submitted {
             test_trace::record_outbound_submit();
             test_trace::record_submission(self.state.peer);
         }
@@ -747,9 +747,9 @@ impl OutboundWorker {
         let announced = &self.announced;
         let encoded = transfer.next_frame().and_then(|frame| {
             frame
-                .map(|(frame, context)| {
+                .map(|(payload, context)| {
                     announced
-                        .encode(generation, frame, get_epoch_ms())
+                        .encode(generation, payload.as_ref(), get_epoch_ms())
                         .map(|bytes| (bytes, context))
                 })
                 .transpose()

@@ -42,10 +42,11 @@ use crate::session::SessionSk;
 
 mod wire;
 
+pub(crate) use self::wire::LinkControl;
 pub(crate) use self::wire::LinkFrame;
 pub(crate) use self::wire::PerSlot;
-pub(crate) use self::wire::SessionControl;
 pub(crate) use self::wire::SessionRef;
+pub(crate) use self::wire::SlotEncoding;
 pub(crate) use self::wire::WirePayload;
 
 /// Message family of the [`Transaction`] signature: the origin's authorship of a message.
@@ -299,9 +300,7 @@ impl MessagePayload {
     pub fn from_wire(data: &[u8]) -> Result<Self> {
         match LinkFrame::from_wire(data)? {
             LinkFrame::Payload(frame) => frame.resolve(wire::resolve_inline),
-            LinkFrame::Control(_) => Err(Error::InvalidMessage(
-                "expected a payload frame, found a link-control frame".to_string(),
-            )),
+            LinkFrame::Control(_) => Err(Error::LinkControlOutsideLink),
         }
     }
 

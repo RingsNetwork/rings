@@ -28,10 +28,15 @@
   - A forwarding hop re-encodes the origin slot for its own next link, so a destination that
     never met the origin receives the origin's session inline from its last hop. No node asks
     the origin for a session.
-  - A reference the receiver cannot resolve (it forgot a confirmed session) holds that frame
-    alone, at most 32 per connection, while the link repairs the miss with the unsigned
-    link-control frames (`RINGS-LINK-V1`): a request for one digest, answered by exactly one
-    announcement or disclaimer. Frames that resolve are never queued behind held ones.
+  - The receiver's table holds 128 sessions to the sender's 64 under one least-recently-
+    referenced order, so the sender goes back to inline before the receiver could have
+    forgotten. A reference the receiver still cannot resolve holds that frame alone, at most
+    16 per connection and for at most twice the transport's delivery timeout (swept by the
+    inbound actor's periodic cleanup), while the link repairs the miss with the unsigned
+    link-control frames (`RINGS-LINK`): one request per held frame, answered by exactly one
+    announcement or disclaimer, sent straight on the data channel rather than through the
+    transfer lanes. Frames that resolve are never queued behind held ones; every frame the
+    link drops is charged to the peer as a receive failure.
   - An expired session is evicted from both tables; a reference to it is a miss, and
     re-announcing the expired delegation is refused as it is inline.
   - `MessagePayload::to_wire`/`from_wire` remain the self-contained encoding (both sessions

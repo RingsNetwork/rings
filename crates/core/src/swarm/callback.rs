@@ -274,17 +274,22 @@ pub(super) struct InboundProcessor {
     reassembly_clock: ReassemblyClock,
     pending_attempt: Arc<Mutex<Option<PendingConnectionAttempt>>>,
     /// Verified frames that arrived before this end admitted the connection; bounded by the
-    /// per-peer inbound capacity, so an unadmitted peer holds no more than an admitted one.
+    /// per-peer inbound capacity. With the session hold below, an unadmitted peer occupies at
+    /// most one and a half of an admitted peer's frame budgets, and a quarter of the transport's
+    /// per-peer frames stays free for the control frames that release either hold.
     pre_admission: Arc<Mutex<PreAdmissionHold<HeldInboundFrame>>>,
     /// The receiving end of this connection's session references: the sessions the peer has
-    /// announced on it and the frames waiting for one. It lives and dies with the connection,
-    /// and its hold is bounded by the same per-peer inbound capacity.
-    session_link: Arc<Mutex<ReferencedSessions<UnresolvedInboundFrame>>>,
+    /// announced on it and the frames waiting for one. It lives and dies with the connection;
+    /// its hold is bounded by [`session_hold_capacity`] frames and by
+    /// [`SESSION_HOLD_TIMEOUT`](crate::swarm::transport::SESSION_HOLD_TIMEOUT), swept by the
+    /// inbound actor's periodic cleanup.
+    session_link: Arc<Mutex<ReferencedSessions<InboundFrameLease>>>,
 }
 
-/// What travels with a frame whose session slots are not yet resolved: the raw bytes, for their
-/// length and their memory accounting, and the transport capacity they still occupy.
-pub(super) struct UnresolvedInboundFrame {
+/// What the transport handed over with one frame and takes back when the frame is done: the
+/// raw bytes, for their length and their memory accounting, and the transport capacity they
+/// occupy until the inbound actor releases it.
+pub(super) struct InboundFrameLease {
     bytes: Bytes,
     transport_capacity: Option<InboundFrameCapacityLease>,
 }
@@ -295,9 +300,28 @@ pub(super) struct UnresolvedInboundFrame {
 /// was waiting for has been admitted.
 struct HeldInboundFrame {
     peer: Did,
-    bytes: Bytes,
     prepared: PreparedInboundFrame,
-    transport_capacity: Option<InboundFrameCapacityLease>,
+    lease: InboundFrameLease,
+}
+
+/// Frames one connection may hold for a session the peer has not backed yet: half the
+/// pre-admission hold, so both holds together leave a quarter of the transport's per-peer
+/// frames for the link-control frames that release them.
+pub(super) const fn session_hold_capacity() -> usize {
+    inbound::peer_capacity() / 2
+}
+
+/// Whether a delivery to the inbound actor waits for the frame's logical completion.
+///
+/// A frame the transport just handed over is awaited, so the transport's read loop paces this
+/// end; a frame released from a hold is detached, so releasing many frames at once does not
+/// stall the read loop behind each one's handlers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Completion {
+    /// Return once the frame's handlers and `on_inbound` completed.
+    Awaited,
+    /// Return once the inbound actor owns the frame.
+    Detached,
 }
 
 /// How the pending handshake bound to a callback disposes of a frame from `peer`.

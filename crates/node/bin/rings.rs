@@ -81,7 +81,7 @@ fn transaction_replay_storage_path(data_storage_path: &str) -> String {
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     parent
-        .join("transaction-replay-v2")
+        .join("transaction-replay")
         .to_string_lossy()
         .to_string()
 }
@@ -93,7 +93,7 @@ fn provisional_evidence_storage_path(measure_storage_path: &str) -> String {
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     parent
-        .join("provisional-evidence-v1")
+        .join("provisional-evidence")
         .to_string_lossy()
         .to_string()
 }
@@ -1466,11 +1466,11 @@ mod tests {
     fn test_transaction_replay_storage_is_sibling_of_data_storage() {
         assert_eq!(
             transaction_replay_storage_path(".rings/data"),
-            ".rings/transaction-replay-v2"
+            ".rings/transaction-replay"
         );
         assert_eq!(
             transaction_replay_storage_path("/tmp/rings/data"),
-            "/tmp/rings/transaction-replay-v2"
+            "/tmp/rings/transaction-replay"
         );
     }
 
@@ -1478,11 +1478,11 @@ mod tests {
     fn test_provisional_evidence_storage_is_sibling_of_measure_storage() {
         assert_eq!(
             provisional_evidence_storage_path(".rings/measure"),
-            ".rings/provisional-evidence-v1"
+            ".rings/provisional-evidence"
         );
         assert_eq!(
             provisional_evidence_storage_path("/tmp/rings/measure"),
-            "/tmp/rings/provisional-evidence-v1"
+            "/tmp/rings/provisional-evidence"
         );
     }
 

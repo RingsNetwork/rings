@@ -14,20 +14,19 @@ use crate::dht::Did;
 use crate::ecc::SecretKey;
 use crate::message::Encoded;
 use crate::message::Encoder;
+use crate::message::LinkControl;
 use crate::message::LinkFrame;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::MessageSigner;
 use crate::message::MessageVerificationExt;
 use crate::message::PerSlot;
-use crate::message::SessionControl;
 use crate::message::SessionRef;
 use crate::message::WirePayload;
 use crate::session::SessionSk;
 use crate::swarm::session_link::FrameArrival;
-use crate::swarm::session_link::FrameRelease;
 use crate::swarm::session_link::ReferencedSessions;
-use crate::swarm::session_link::SESSION_TABLE_CAPACITY;
+use crate::swarm::session_link::REFERENCED_TABLE_CAPACITY;
 use crate::tests::TEST_NETWORK_ID;
 use crate::utils::get_epoch_ms;
 
@@ -36,6 +35,8 @@ const CASES_ENV: &str = "RINGS_DECODE_BOUNDARY_CASES";
 const DEFAULT_CASES: usize = 128;
 /// Frames the generated link receiver may hold: small, so the bound is reached often.
 const LINK_HOLD_CAPACITY: usize = 4;
+/// How long the generated link receiver holds a frame.
+const LINK_HOLD_TIMEOUT_MS: u128 = 1_000;
 
 #[test]
 fn generated_message_decode_boundary_inputs_are_total() {
@@ -93,7 +94,7 @@ fn generated_chunk_decode_boundary_sequences_respect_bounds() {
 fn generated_link_frame_decode_boundary_inputs_keep_the_receiver_bounded() {
     let mut generator = DecodeBoundaryGenerator::named("core-link-frame");
     let cases = generated_case_count();
-    let mut receiver = ReferencedSessions::new(LINK_HOLD_CAPACITY);
+    let mut receiver = ReferencedSessions::new(LINK_HOLD_CAPACITY, LINK_HOLD_TIMEOUT_MS);
     eprintln!(
         "{SEED_ENV}={} {CASES_ENV}={cases} target=core-link-frame",
         generator.seed()
@@ -114,24 +115,24 @@ fn generated_link_frame_decode_boundary_inputs_keep_the_receiver_bounded() {
                         .verify_transaction_and_payload(TEST_NETWORK_ID)
                     {
                         let _admitted =
-                            receiver.admit_verified(&resolved.payload, resolved.inline, now_ms);
+                            receiver.admit_verified(&resolved.payload, resolved.encoding, now_ms);
                     }
                 }
             }
-            Ok(LinkFrame::Control(SessionControl::Announce(session))) => {
+            Ok(LinkFrame::Control(LinkControl::Announce(session))) => {
                 let _unavailable = receiver.announce(session, now_ms);
             }
-            Ok(LinkFrame::Control(SessionControl::Unknown(digest))) => {
+            Ok(LinkFrame::Control(LinkControl::Unknown(digest))) => {
                 let _unavailable = receiver.unknown(digest, now_ms);
             }
-            Ok(LinkFrame::Control(SessionControl::Request(_) | SessionControl::Known(_)))
-            | Err(_) => {}
+            Ok(LinkFrame::Control(LinkControl::Request(_) | LinkControl::Known(_))) | Err(_) => {}
         }
-        while let Ok(Some(FrameRelease::Resolved(_) | FrameRelease::Lapsed(_))) =
-            receiver.release_next(now_ms)
-        {}
+        while let Ok(Some(_)) = receiver.release_next(now_ms) {}
+        if generator.one_in(7) {
+            let _swept = receiver.sweep(now_ms + LINK_HOLD_TIMEOUT_MS + 1);
+        }
         assert!(receiver.held_len() <= LINK_HOLD_CAPACITY);
-        assert!(receiver.known_len() <= SESSION_TABLE_CAPACITY);
+        assert!(receiver.known_len() <= REFERENCED_TABLE_CAPACITY);
     }
 }
 
@@ -140,11 +141,11 @@ fn generated_link_frame(generator: &mut DecodeBoundaryGenerator) -> Option<Vec<u
     let payload = generated_payload(generator)?;
     let sessions = payload.sessions();
     let wire = match generator.usize(5) {
-        0 => SessionControl::Announce(sessions.origin.clone()).to_wire(),
-        1 => SessionControl::Unknown(sessions.origin.digest().ok()?).to_wire(),
-        2 => SessionControl::Request(sessions.origin.digest().ok()?).to_wire(),
+        0 => LinkControl::Announce(sessions.origin.clone()).to_wire(),
+        1 => LinkControl::Unknown(sessions.origin.digest().ok()?).to_wire(),
+        2 => LinkControl::Request(sessions.origin.digest().ok()?).to_wire(),
         3 => match generator.usize(2) {
-            0 => SessionControl::Known(sessions.origin.digest().ok()?).to_wire(),
+            0 => LinkControl::Known(sessions.origin.digest().ok()?).to_wire(),
             _ => payload.to_wire(),
         },
         _ => {

@@ -145,6 +145,10 @@ pub enum Error {
     #[error("Session reference {0:?} cannot be resolved outside the link that announced it")]
     SessionReferenceUnresolved(crate::session::SessionDigest),
 
+    /// A link-control frame was decoded where a payload was expected: outside any link.
+    #[error("Link-control frame is meaningful only on the connection it arrived on")]
+    LinkControlOutsideLink,
+
     /// E2E frame received after the authenticated final frame
     #[error("E2E frame received after the authenticated final frame")]
     E2eFrameAfterFinal,

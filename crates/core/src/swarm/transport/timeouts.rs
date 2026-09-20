@@ -34,6 +34,14 @@ pub(super) const TRANSPORT_TIMEOUT_PROFILE: TransportTimeoutProfile =
 pub(super) const TRANSPORT_TIMEOUT_PROFILE: TransportTimeoutProfile =
     PRODUCTION_TRANSPORT_TIMEOUT_PROFILE;
 
+/// How long a frame may wait for the session it references before the link gives it up: the
+/// question and its answer are each one delivery away, so twice the delivery timeout bounds an
+/// answer that is coming; a frame that waited longer references something the peer will not
+/// back.
+pub(crate) const SESSION_HOLD_TIMEOUT: Duration = TRANSPORT_TIMEOUT_PROFILE
+    .delivery
+    .saturating_add(TRANSPORT_TIMEOUT_PROFILE.delivery);
+
 const fn assert_common_profile_laws(profile: &TransportTimeoutProfile) {
     assert!(profile.send_accept.as_millis() < profile.first_frame_admission.as_millis());
     assert!(

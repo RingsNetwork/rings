@@ -289,6 +289,31 @@ fn test_transaction_sequence_is_inside_both_signature_transcripts() {
     assert!(!payload.verify(TEST_NETWORK_ID));
 }
 
+/// Law: outside a link a payload is self-contained; a frame that references a session, or a
+/// link-control frame, is refused with its own error before any verification.
+#[test]
+fn test_self_contained_decoding_refuses_link_only_frames() -> Result<()> {
+    let next_hop = SecretKey::random().address().into();
+    let payload = new_test_payload(next_hop);
+    let sessions = payload.sessions();
+    let referenced = super::WirePayload::view(&payload, super::PerSlot {
+        origin: super::SessionRef::Digest(sessions.origin.digest()?),
+        hop: super::SessionRef::Inline(std::borrow::Cow::Borrowed(sessions.hop)),
+    })
+    .to_wire()?;
+    assert!(matches!(
+        MessagePayload::from_wire(&referenced),
+        Err(Error::SessionReferenceUnresolved(digest)) if digest == sessions.origin.digest()?
+    ));
+
+    let control = super::LinkControl::Known(sessions.hop.digest()?).to_wire()?;
+    assert!(matches!(
+        MessagePayload::from_wire(&control),
+        Err(Error::LinkControlOutsideLink)
+    ));
+    Ok(())
+}
+
 #[test]
 fn test_unprefixed_transaction_shape_is_rejected_by_hard_cutover() -> Result<()> {
     let next_hop = SecretKey::random().address().into();
