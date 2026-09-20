@@ -66,6 +66,22 @@ pub(super) enum ShellMutation {
     AdmitBeforeActivation,
 }
 
+/// The shape of `Init`: how the peers are connected before the search
+/// starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Bootstrap {
+    /// Every peer up, a full mesh of admitted links, one settled
+    /// maintenance period per peer: the Chord fixpoint of the whole ring.
+    /// Successor lists are then computed from admitted peers, so a report
+    /// never carries a peer the requester lacks.
+    ConvergedMesh,
+    /// Every peer up, each peer admitted only to the one it dialed
+    /// (`ring[i]` dials `ring[i - 1]`), no maintenance period run: a
+    /// requester learns its remaining successors only through reports and
+    /// the connection plans they drive.
+    Chain,
+}
+
 /// An adversarial resource the environment spends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Resource {
@@ -334,6 +350,8 @@ pub(super) struct Overlay {
     finger_slots: usize,
     /// Initial adversarial budget.
     budget: Budget,
+    /// Shape of `Init`.
+    bootstrap: Bootstrap,
     /// Shell defect under test, `Faithful` for the verified model.
     mutation: ShellMutation,
 }
@@ -356,6 +374,7 @@ impl Overlay {
         successor_capacity: usize,
         finger_slots: usize,
         budget: Budget,
+        bootstrap: Bootstrap,
         mutation: ShellMutation,
     ) -> Self {
         let ring = (0..peers)
@@ -368,6 +387,7 @@ impl Overlay {
             successor_capacity,
             finger_slots,
             budget,
+            bootstrap,
             mutation,
         }
     }
@@ -392,10 +412,8 @@ impl Overlay {
         self.mutation
     }
 
-    /// `Init`: every peer up, a full mesh of admitted links, and one settled
-    /// maintenance period per peer: the Chord fixpoint of the whole ring,
-    /// built by the same transitions the search uses.
-    pub(super) fn converged_mesh(&self) -> OverlayState {
+    /// `Init`, by the same transitions the search uses.
+    pub(super) fn init(&self) -> OverlayState {
         let mut state = OverlayState {
             nodes: self
                 .ring
@@ -407,17 +425,28 @@ impl Overlay {
             remaining: self.budget,
             stale_effect: None,
         };
-        let pairs = self
-            .ring
-            .iter()
-            .flat_map(|from| self.ring.iter().map(move |to| (*from, *to)))
-            .filter(|(from, to)| from < to);
-        for (from, to) in pairs {
+        let dials: Vec<(Did, Did)> = match self.bootstrap {
+            Bootstrap::ConvergedMesh => self
+                .ring
+                .iter()
+                .flat_map(|from| self.ring.iter().map(move |to| (*from, *to)))
+                .filter(|(from, to)| from < to)
+                .collect(),
+            Bootstrap::Chain => self
+                .ring
+                .iter()
+                .zip(self.ring.iter().skip(1))
+                .map(|(contact, joiner)| (*joiner, *contact))
+                .collect(),
+        };
+        for (from, to) in dials {
             state = self.delivered_closure(self.transition(&state, from, |node| node.dial(to)));
         }
-        for peer in self.ring.iter().copied() {
-            let round = self.next_state(&state, &OverlayAction::Stabilize(peer));
-            state = self.delivered_closure(round.unwrap_or(state));
+        if self.bootstrap == Bootstrap::ConvergedMesh {
+            for peer in self.ring.iter().copied() {
+                let round = self.next_state(&state, &OverlayAction::Stabilize(peer));
+                state = self.delivered_closure(round.unwrap_or(state));
+            }
         }
         state
     }

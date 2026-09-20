@@ -25,6 +25,7 @@ use std::sync::Arc;
 
 use super::enabled_step;
 use super::node::LifecycleEvent;
+use super::overlay::Bootstrap;
 use super::overlay::Budget;
 use super::overlay::Overlay;
 use super::overlay::OverlayAction;
@@ -92,6 +93,7 @@ fn ring_around(transport: &SwarmTransport) -> Overlay {
         DEFAULT_SUCCESSOR_CAPACITY,
         DEFAULT_FINGER_TABLE_SIZE,
         budget,
+        Bootstrap::ConvergedMesh,
         ShellMutation::Faithful,
     )
 }
@@ -146,7 +148,7 @@ async fn test_model_agrees_with_the_production_shell_on_the_close_path() -> Resu
     };
 
     // Init: both peers admitted in ring order, predecessor notified.
-    let model = overlay.converged_mesh();
+    let model = overlay.init();
     admit_unlinked(&transport, successor).await?;
     let retired = admit_unlinked(&transport, departed).await?;
     transport.dht.notify(departed)?;
@@ -221,7 +223,7 @@ async fn test_model_agrees_with_the_production_shell_on_the_unavailable_path() -
     };
 
     // Init: both peers admitted and routable; the head is the departing peer.
-    let model = overlay.converged_mesh();
+    let model = overlay.init();
     let retired = admit_routable(&transport, head).await?;
     admit_routable(&transport, other).await?;
     transport.dht.notify(other)?;

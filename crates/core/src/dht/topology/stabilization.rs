@@ -201,9 +201,15 @@ pub fn rectify_predecessor(local: Did, current: Option<Did>, candidate: Did) -> 
 /// Correct successor list after one HMCC/Zave stabilize transition.
 ///
 /// The candidate set combines the local node, current successors, the reported
-/// predecessor, and every reported successor except the reporter's terminal
-/// self entry. [`successors`] then removes duplicates, orders candidates by
-/// clockwise distance, and enforces `capacity`.
+/// predecessor, and every reported successor. [`successors`] then removes
+/// duplicates, orders candidates by clockwise distance, and enforces
+/// `capacity`: it is the only truncation, as in Chord's
+/// `succ_list ← [s] ++ s.succ_list` followed by keeping `r` entries.
+///
+/// Law: `∀p ∈ reported. rank(local, known, p) ≤ capacity ⇒ p ∈ result`. A
+/// reported list carries no terminal self entry (the reporter answers with
+/// its successor sequence verbatim), so dropping its last entry would lose a
+/// real successor whenever that list is shorter than `capacity` (#786).
 pub fn stabilize_successors(
     local: Did,
     current: &[Did],
@@ -212,12 +218,12 @@ pub fn stabilize_successors(
     capacity: usize,
 ) -> Vec<Did> {
     let mut known = vec![local];
-    for candidate in current.iter().copied().chain(topo_predecessor).chain(
-        topo_successors
-            .iter()
-            .copied()
-            .take(topo_successors.len().saturating_sub(1)),
-    ) {
+    for candidate in current
+        .iter()
+        .copied()
+        .chain(topo_predecessor)
+        .chain(topo_successors.iter().copied())
+    {
         push_unique(&mut known, candidate);
     }
     successors(&known, local, capacity)

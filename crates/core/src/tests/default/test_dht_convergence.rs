@@ -167,8 +167,8 @@ pub(super) mod spec {
     }
 
     /// `CorrectStabilize` successor update: merge current successors with the
-    /// successor's predecessor and all but the last entry of the successor's
-    /// successor list, then keep the K nearest forward nodes.
+    /// successor's predecessor and the successor's whole successor list, then
+    /// keep the K nearest forward nodes.
     pub fn correct_stabilize_successors(
         me: Did,
         current: &[Did],

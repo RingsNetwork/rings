@@ -353,7 +353,7 @@ fn explore(overlay: &Overlay, premise: fn(&OverlayState) -> bool) -> Graph {
         queue.push_back((index, state));
         index
     };
-    let init = overlay.converged_mesh();
+    let init = overlay.init();
     let init_fingerprint = fingerprint(&init);
     let init_index = discover(&mut graph, &mut queue, init, None, 0);
     indices.insert(init_fingerprint, init_index);
@@ -641,11 +641,8 @@ fn analyze_liveness(overlay: &Overlay, graph: &Graph) -> LivenessAnalysis {
         .states()
         .find(|index| graph.vertices[*index].premise && reaches[*index])
         .map(|root| {
-            let (churn_prefix, stopped) = replay_positions(
-                overlay,
-                overlay.converged_mesh(),
-                &path_from_init(graph, root),
-            );
+            let (churn_prefix, stopped) =
+                replay_positions(overlay, overlay.init(), &path_from_init(graph, root));
             let suffix = protocol_path(graph, root, &starving.iter().copied().collect());
             LivenessViolation {
                 churn_prefix,
@@ -670,12 +667,7 @@ fn analyze_liveness(overlay: &Overlay, graph: &Graph) -> LivenessAnalysis {
 pub(super) fn check(overlay: &Overlay, premise: fn(&OverlayState) -> bool) -> SearchReport {
     let graph = explore(overlay, premise);
     if let Some((index, law)) = graph.violation {
-        let trace = replay_positions(
-            overlay,
-            overlay.converged_mesh(),
-            &path_from_init(&graph, index),
-        )
-        .0;
+        let trace = replay_positions(overlay, overlay.init(), &path_from_init(&graph, index)).0;
         return SearchReport::Unsafe {
             states: graph.vertices.len(),
             violation: SafetyViolation { law, trace },

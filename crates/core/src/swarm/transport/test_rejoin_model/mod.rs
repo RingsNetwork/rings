@@ -27,7 +27,8 @@
 //!            remaining: Budget
 //!            stale    : history variable of the retired-generation law
 //!
-//! Init  ≜ every peer up ∧ full mesh of admitted links ∧ Converged
+//! Init  ≜ every peer up ∧ (full mesh of admitted links ∧ Converged
+//!                          ∨ chain of admitted links, ring[i] dialed ring[i-1])
 //!
 //! Next  ≜ Env ∨ Protocol
 //! Env   ≜ Depart(p) ∨ Rejoin(p) ∨ Cut(l) ∨ Lose(e) ∨ Duplicate(e)   \* each spends Budget
@@ -113,8 +114,9 @@
 //! | configuration | peers | K | budget                                  | states    | depth | premise states (unsettled) | checked            |
 //! |---------------|-------|---|-----------------------------------------|-----------|-------|----------------------------|--------------------|
 //! | departure     | 3     | 1 | 1 departure                             | 5 834     | 21    | —                          | premise necessity  |
+//! | chain         | 4     | 2 | none (chain bootstrap)                  | 509 815   | 60    | 509 815 (495 191)          | all laws, no churn |
 //! | replacement   | 4     | 1 | 1 cut                                   | 114 640   | 35    | 92 464 (26 624)            | all laws           |
-//! | truncation    | 4     | 2 | 1 cut                                   | 233 488   | 36    | 213 904 (168 608)          | all laws           |
+//! | truncation    | 4     | 2 | 1 cut                                   | 242 128   | 36    | 222 544 (176 928)          | all laws           |
 //! | restart       | 3     | 1 | 1 departure, 1 rejoin                   | 552 309   | 47    | 466 396 (409 952)          | all laws           |
 //! | lossy flap    | 3     | 1 | 1 cut, 1 loss, 1 duplication, 1 refusal | 1 057 016 | 42    | 895 946 (658 944)          | all laws, release  |
 //!
@@ -122,7 +124,11 @@
 //! claim is made; "unsettled" those of them outside `Stable`, where the
 //! claim has work to do. `replacement` is the configuration in which a head
 //! replacement has more sendable candidates than capacity; `truncation`
-//! truncates at admission and fills exactly at replacement.
+//! truncates at admission and fills exactly at replacement. `chain` starts
+//! from a chain of links instead of the converged mesh, so successor lists
+//! are not computed from admitted peers but discovered through reports and
+//! the connection plans they drive (the regime of #786); its two churn
+//! witnesses are unsatisfiable by construction and asserted so.
 //!
 //! The premise of the liveness claim is necessary, not decorative. When a
 //! peer's only successor goes down and its close event wins the race with
@@ -151,6 +157,7 @@ mod search;
 
 use laws::LawName;
 use node::LifecycleEvent;
+use overlay::Bootstrap;
 use overlay::Budget;
 use overlay::Overlay;
 use overlay::OverlayAction;
@@ -170,11 +177,13 @@ use crate::dht::Did;
 /// `(|G|, depth)` of the `restart` configuration.
 const RESTART_BOUNDS: (usize, usize) = (552_309, 47);
 /// `(|G|, depth)` of the `truncation` configuration.
-const TRUNCATION_BOUNDS: (usize, usize) = (233_488, 36);
+const TRUNCATION_BOUNDS: (usize, usize) = (242_128, 36);
 /// `(|G|, depth)` of the `lossy flap` configuration.
 const LOSSY_FLAP_BOUNDS: (usize, usize) = (1_057_016, 42);
 /// `(|G|, depth)` of the `departure` configuration.
 const DEPARTURE_BOUNDS: (usize, usize) = (5_834, 21);
+/// `(|G|, depth)` of the `chain` configuration.
+const CHAIN_BOUNDS: (usize, usize) = (509_815, 60);
 /// `(|G|, depth)` of the `replacement` configuration.
 const REPLACEMENT_BOUNDS: (usize, usize) = (114_640, 35);
 
@@ -191,9 +200,33 @@ const QUIET: Budget = Budget {
     refusal: 0,
 };
 
-/// A ring at the origin with `peers` identities and successor capacity `k`.
+/// A converged mesh at the origin with `peers` identities and successor
+/// capacity `k`.
 fn configuration(peers: u32, k: usize, budget: Budget, mutation: ShellMutation) -> Overlay {
-    Overlay::new(Did::from(0u32), peers, k, FINGER_SLOTS, budget, mutation)
+    Overlay::new(
+        Did::from(0u32),
+        peers,
+        k,
+        FINGER_SLOTS,
+        budget,
+        Bootstrap::ConvergedMesh,
+        mutation,
+    )
+}
+
+/// Four peers, `K = 2`, bootstrapped as a chain with no churn: every peer
+/// but the seed's neighbours must learn a successor it never dialed from a
+/// head's report, so report-driven discovery is under the check.
+fn chain(mutation: ShellMutation) -> Overlay {
+    Overlay::new(
+        Did::from(0u32),
+        4,
+        2,
+        FINGER_SLOTS,
+        QUIET,
+        Bootstrap::Chain,
+        mutation,
+    )
 }
 
 /// Three peers, `K = 1`: one peer goes down for good. The smallest
@@ -243,10 +276,23 @@ fn lossy_flap(mutation: ShellMutation) -> Overlay {
     configuration(3, 1, budget, mutation)
 }
 
+/// The `Sometimes` laws a configuration cannot satisfy: those that witness
+/// churn, in a configuration without any.
+const CHURN_WITNESSES: [LawName; 2] = [
+    LawName::RetiredEventAwaitsBesideNewerGeneration,
+    LawName::HeadReplacementFillsCapacity,
+];
+
 /// Decide every law and the conditional-liveness claim over the complete
 /// reachable graph of `overlay`, whose size and depth must be exactly
-/// `bounds`, and require that neither claim was vacuous.
-fn assert_laws_hold_exhaustively(name: &str, overlay: &Overlay, bounds: (usize, usize)) {
+/// `bounds`, whose unsatisfied `Sometimes` laws must be exactly
+/// `expected_uncovered`, and require that neither claim was vacuous.
+fn assert_laws_hold_exhaustively(
+    name: &str,
+    overlay: &Overlay,
+    bounds: (usize, usize),
+    expected_uncovered: &[LawName],
+) {
     let report = check(overlay, laws::retains_live_heads);
     let SearchReport::Safe {
         states,
@@ -267,7 +313,7 @@ fn assert_laws_hold_exhaustively(name: &str, overlay: &Overlay, bounds: (usize, 
         "{name}: {states} states, depth {max_depth}, {stable_states} stable, \
          {premise_states} premise states ({unstable_premise_states} not yet stable)"
     );
-    assert!(uncovered.is_empty(), "{name}: uncovered {uncovered:?}");
+    assert_eq!(uncovered, expected_uncovered, "{name}: coverage");
     assert_eq!((states, max_depth), bounds, "{name}: stale bounds table");
     assert!(unstable_premise_states > 0, "{name}: vacuous premise");
     assert!(stable_states > 0, "{name}: unreachable target");
@@ -288,12 +334,9 @@ fn enabled_step(overlay: &Overlay, state: &OverlayState, action: OverlayAction) 
 
 /// Deterministic replay: fold a recorded trace from `Init`.
 fn replay(overlay: &Overlay, trace: &[OverlayAction]) -> OverlayState {
-    trace
-        .iter()
-        .cloned()
-        .fold(overlay.converged_mesh(), |state, action| {
-            enabled_step(overlay, &state, action)
-        })
+    trace.iter().cloned().fold(overlay.init(), |state, action| {
+        enabled_step(overlay, &state, action)
+    })
 }
 
 /// The minimal counterexample to the law `name` under a mutated shell, which
@@ -325,17 +368,19 @@ fn minimal_counterexample(
     violation.trace
 }
 
-/// Law: `Init` is the Chord fixpoint of the whole ring, satisfies the
-/// liveness premise, and has nothing in flight.
+/// Law: the mesh `Init` is the Chord fixpoint of the whole ring, and the
+/// chain `Init` is not; both satisfy the liveness premise and have nothing
+/// in flight.
 #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_family = "wasm"), test)]
-fn test_initial_mesh_is_the_converged_fixpoint() {
-    for overlay in [
-        restart(ShellMutation::Faithful),
-        truncation(ShellMutation::Faithful),
+fn test_initial_states_satisfy_the_premise_and_only_the_mesh_is_converged() {
+    for (overlay, converged) in [
+        (restart(ShellMutation::Faithful), true),
+        (truncation(ShellMutation::Faithful), true),
+        (chain(ShellMutation::Faithful), false),
     ] {
-        let init = overlay.converged_mesh();
-        assert!(laws::is_converged(&overlay, &init));
+        let init = overlay.init();
+        assert_eq!(laws::is_converged(&overlay, &init), converged);
         assert!(laws::retains_live_heads(&init));
         assert!(init.network.is_empty());
         assert!(init.nodes.values().all(|node| node.events.is_empty()));
@@ -350,7 +395,12 @@ fn test_initial_mesh_is_the_converged_fixpoint() {
 #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_family = "wasm"), test)]
 fn test_laws_hold_when_a_peer_restarts_under_a_newer_generation() {
-    assert_laws_hold_exhaustively("restart", &restart(ShellMutation::Faithful), RESTART_BOUNDS);
+    assert_laws_hold_exhaustively(
+        "restart",
+        &restart(ShellMutation::Faithful),
+        RESTART_BOUNDS,
+        &[],
+    );
 }
 
 /// Every law and conditional liveness with more eligible successors than
@@ -362,6 +412,20 @@ fn test_laws_hold_when_successors_exceed_capacity() {
         "truncation",
         &truncation(ShellMutation::Faithful),
         TRUNCATION_BOUNDS,
+        &[],
+    );
+}
+
+/// Every law and conditional liveness from a chain bootstrap: successors a
+/// peer never dialed are discovered only through reports.
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), test)]
+fn test_laws_hold_from_a_chain_bootstrap() {
+    assert_laws_hold_exhaustively(
+        "chain",
+        &chain(ShellMutation::Faithful),
+        CHAIN_BOUNDS,
+        &CHURN_WITNESSES,
     );
 }
 
@@ -373,6 +437,7 @@ fn test_laws_hold_when_head_replacement_truncates() {
         "replacement",
         &replacement(ShellMutation::Faithful),
         REPLACEMENT_BOUNDS,
+        &[],
     );
 }
 
@@ -390,6 +455,7 @@ fn test_laws_hold_under_loss_duplication_and_refusal() {
         "lossy flap",
         &lossy_flap(ShellMutation::Faithful),
         LOSSY_FLAP_BOUNDS,
+        &[],
     );
 }
 
@@ -401,7 +467,7 @@ fn test_laws_hold_under_loss_duplication_and_refusal() {
 fn test_retired_close_after_rejoin_changes_neither_lifecycle_nor_topology() {
     let overlay = restart(ShellMutation::Faithful);
     let [observer, departed, _] = <[Did; 3]>::try_from(overlay.ring()).unwrap();
-    let init = overlay.converged_mesh();
+    let init = overlay.init();
     let retired = init.nodes[&observer]
         .lifecycles
         .active_attempt(departed)
