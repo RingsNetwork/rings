@@ -1068,6 +1068,14 @@ fn test_production_finger_retry_transition_preserves_bounded_resource_laws() {
                 let next = state.transition(action);
                 assert!(next.preserves_emission_interval());
                 assert!(next.uses_unique_request_ids());
+                // The topology well-formedness laws (`dht::topology::invariants`)
+                // hold across the finger-lookup events, which the rejoin model
+                // (Stage 6) does not drive.
+                assert!(next
+                    .topology
+                    .successors_are_well_formed(DEFAULT_SUCCESSOR_CAPACITY));
+                assert!(next.topology.predecessor_is_well_formed());
+                assert!(next.topology.fingers_are_well_formed());
                 let projection = next.topology.finger_convergence_projection();
                 assert!(projection.in_flight.is_none() || projection.deferred.is_none());
 

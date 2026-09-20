@@ -2,9 +2,9 @@
 //!
 //! Every predicate is a proposition over one [`TopologyState`] `s` with
 //! `n = s.local`, written against the clockwise metric `d(a, b) = (b - a) mod 2^160`
-//! ([`dist`]). They are the single statement of the topology invariants, so a
-//! model checker, a churn simulator, and a unit test all quote the same law
-//! instead of re-deriving it from raw comparisons:
+//! ([`dist`]). They are the one statement of the topology invariants for the
+//! model checkers and simulators, which quote the same law instead of
+//! re-deriving it from raw comparisons:
 //!
 //! - `SuccessorsWellFormed(s, k)`: the successor sequence is a strictly
 //!   `d(n, ·)`-increasing chain of at most `k` remote peers.
@@ -21,13 +21,13 @@
 //! checkers and the churn simulator, and the laws it states are checked, not
 //! consulted, by production.
 //!
-//! The first three are invariants of the membership and stabilization
-//! transitions of [`step`](super::step) (`Join`, `Admit`, `Remove`, `Notify`,
-//! and the stabilization events), witnessed by the rejoin model in
-//! `swarm::transport::test_rejoin_model`; the finger-lookup events are the
-//! subject of the finger-retry model. `RoutesClockwise` is the unconditional
-//! postcondition of [`find_successor`], true of every representable state.
-//! `ChordFixpoint` is the target of stabilization, not an invariant.
+//! The first three are invariants of [`step`](super::step): the rejoin model
+//! in `swarm::transport::test_rejoin_model` witnesses them across the
+//! membership and stabilization events, and the finger-retry model in
+//! `tests::default::test_dht_stateright` across the finger-lookup events.
+//! `RoutesClockwise` is the unconditional postcondition of
+//! [`find_successor`], true of every representable state. `ChordFixpoint` is
+//! the target of stabilization, not an invariant.
 
 use num_bigint::BigUint;
 

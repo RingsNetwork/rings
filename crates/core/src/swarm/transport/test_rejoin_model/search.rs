@@ -64,11 +64,15 @@
 //! inhabited target: every behaviour that enters it has settled.
 
 use std::collections::hash_map::DefaultHasher;
+use std::collections::hash_map::Entry;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::hash::Hash;
 use std::hash::Hasher;
+use std::marker::PhantomData;
+use std::ops::Index;
+use std::ops::IndexMut;
 
 use super::laws;
 use super::laws::Expectation;
@@ -77,17 +81,100 @@ use super::overlay::Overlay;
 use super::overlay::OverlayAction;
 use super::overlay::OverlayState;
 
-/// Index of a state in exploration order.
-type StateIndex = usize;
-/// Interned protocol action label.
-type Label = usize;
-
 /// Upper bound on the explored states: the largest documented configuration
 /// with headroom. Exceeding it is a failure of the bounds, not a slow test.
 const EXPLORATION_BOUND: usize = 2_000_000;
 
 /// The domain-separation salt of the second fingerprint half.
 const SECOND_HALF_SALT: u64 = 0x9e37_79b9_7f4a_7c15;
+
+/// Index of a state in exploration order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct StateIndex(usize);
+
+/// Interned protocol action label, the unit of fairness.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct Label(usize);
+
+/// A key of one of the dense per-state or per-label tables.
+trait TableKey: Copy {
+    /// The position this key denotes.
+    fn position(self) -> usize;
+}
+
+impl TableKey for StateIndex {
+    fn position(self) -> usize {
+        self.0
+    }
+}
+
+impl TableKey for Label {
+    fn position(self) -> usize {
+        self.0
+    }
+}
+
+/// A dense table keyed by one index type, so a state index cannot address a
+/// per-label table or vice versa.
+struct Table<K, T> {
+    /// Entries in key order.
+    entries: Vec<T>,
+    /// The key type, carried for the type checker only.
+    key: PhantomData<K>,
+}
+
+impl<K: TableKey, T> Table<K, T> {
+    /// An empty table.
+    const fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            key: PhantomData,
+        }
+    }
+
+    /// A table of `len` copies of `value`.
+    fn filled(value: T, len: usize) -> Self
+    where T: Clone {
+        Self {
+            entries: vec![value; len],
+            key: PhantomData,
+        }
+    }
+
+    /// Number of entries.
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Append `value` and return its key.
+    fn push(&mut self, value: T, key: impl FnOnce(usize) -> K) -> K {
+        let position = self.entries.len();
+        self.entries.push(value);
+        key(position)
+    }
+
+    /// `(key, entry)` pairs in key order.
+    fn iter(&self, key: impl Fn(usize) -> K) -> impl Iterator<Item = (K, &T)> {
+        self.entries
+            .iter()
+            .enumerate()
+            .map(move |(position, entry)| (key(position), entry))
+    }
+}
+
+impl<K: TableKey, T> Index<K> for Table<K, T> {
+    type Output = T;
+
+    fn index(&self, key: K) -> &T {
+        &self.entries[key.position()]
+    }
+}
+
+impl<K: TableKey, T> IndexMut<K> for Table<K, T> {
+    fn index_mut(&mut self, key: K) -> &mut T {
+        &mut self.entries[key.position()]
+    }
+}
 
 /// A reachable state that violates an `Always` law, with the minimal trace
 /// that reaches it.
@@ -157,7 +244,7 @@ struct Origin {
 /// One protocol edge of the graph.
 #[derive(Clone, Copy)]
 struct ProtocolEdge {
-    /// Interned action label, the unit of fairness.
+    /// Interned action label.
     label: Label,
     /// Index of the action in the source's enabled list, for replay.
     position: usize,
@@ -191,14 +278,26 @@ impl Vertex {
 /// what the laws found.
 struct Graph {
     /// States in exploration order.
-    vertices: Vec<Vertex>,
+    vertices: Table<StateIndex, Vertex>,
     /// `strong[a]`: label `a` is periodic, so its fairness is strong.
-    strong: Vec<bool>,
+    strong: Table<Label, bool>,
     /// First `Always` violation: `(state, law)`; exploration stopped there.
     violation: Option<(StateIndex, LawName)>,
     /// `covered[i]`: some state satisfied the `i`th law (meaningful for
     /// `Sometimes` laws).
     covered: Vec<bool>,
+}
+
+impl Graph {
+    /// Every state index in exploration order.
+    fn states(&self) -> impl Iterator<Item = StateIndex> {
+        (0..self.vertices.len()).map(StateIndex)
+    }
+
+    /// A per-state table of `value`.
+    fn per_state<T: Clone>(&self, value: T) -> Table<StateIndex, T> {
+        Table::filled(value, self.vertices.len())
+    }
 }
 
 /// Deterministic 128-bit fingerprint of a state (`DefaultHasher` has fixed
@@ -219,8 +318,8 @@ fn fingerprint(state: &OverlayState) -> u128 {
 /// a bounds regression and stops the search with that diagnosis.
 fn explore(overlay: &Overlay, premise: fn(&OverlayState) -> bool) -> Graph {
     let mut graph = Graph {
-        vertices: Vec::new(),
-        strong: Vec::new(),
+        vertices: Table::new(),
+        strong: Table::new(),
         violation: None,
         covered: vec![false; laws::LAWS.len()],
     };
@@ -232,11 +331,18 @@ fn explore(overlay: &Overlay, premise: fn(&OverlayState) -> bool) -> Graph {
                     state: OverlayState,
                     origin: Option<Origin>,
                     depth: usize| {
-        let index = graph.vertices.len();
         assert!(
-            index < EXPLORATION_BOUND,
+            graph.vertices.len() < EXPLORATION_BOUND,
             "the reachable graph exceeds {EXPLORATION_BOUND} states at depth {depth}"
         );
+        let vertex = Vertex {
+            origin,
+            converged: laws::is_converged(overlay, &state),
+            premise: premise(&state),
+            depth,
+            protocol: Vec::new(),
+        };
+        let index = graph.vertices.push(vertex, StateIndex);
         for (position, law) in laws::LAWS.iter().enumerate() {
             let holds = (law.holds)(overlay, &state);
             graph.covered[position] |= holds;
@@ -244,18 +350,13 @@ fn explore(overlay: &Overlay, premise: fn(&OverlayState) -> bool) -> Graph {
                 graph.violation = Some((index, law.name));
             }
         }
-        graph.vertices.push(Vertex {
-            origin,
-            converged: laws::is_converged(overlay, &state),
-            premise: premise(&state),
-            depth,
-            protocol: Vec::new(),
-        });
         queue.push_back((index, state));
+        index
     };
     let init = overlay.converged_mesh();
-    indices.insert(fingerprint(&init), 0);
-    discover(&mut graph, &mut queue, init, None, 0);
+    let init_fingerprint = fingerprint(&init);
+    let init_index = discover(&mut graph, &mut queue, init, None, 0);
+    indices.insert(init_fingerprint, init_index);
     'search: while let Some((index, state)) = queue.pop_front() {
         let depth = graph.vertices[index].depth + 1;
         for (position, action) in overlay.actions(&state).into_iter().enumerate() {
@@ -265,23 +366,22 @@ fn explore(overlay: &Overlay, premise: fn(&OverlayState) -> bool) -> Graph {
             let Some(next) = overlay.next_state(&state, &action) else {
                 continue;
             };
-            let discovered = graph.vertices.len();
-            let target = *indices.entry(fingerprint(&next)).or_insert(discovered);
-            if target == discovered {
-                let origin = Origin {
-                    parent: index,
-                    position,
-                };
-                discover(&mut graph, &mut queue, next, Some(origin), depth);
-            }
+            let target = match indices.entry(fingerprint(&next)) {
+                Entry::Occupied(known) => *known.get(),
+                Entry::Vacant(vacant) => {
+                    let origin = Origin {
+                        parent: index,
+                        position,
+                    };
+                    *vacant.insert(discover(&mut graph, &mut queue, next, Some(origin), depth))
+                }
+            };
             if !action.is_environmental() {
-                let label = match labels.get(&action) {
-                    Some(label) => *label,
-                    None => {
-                        graph.strong.push(action.is_periodic());
-                        let label = labels.len();
-                        labels.insert(action, label);
-                        label
+                let label = match labels.entry(action) {
+                    Entry::Occupied(known) => *known.get(),
+                    Entry::Vacant(vacant) => {
+                        let periodic = vacant.key().is_periodic();
+                        *vacant.insert(graph.strong.push(periodic, Label))
                     }
                 };
                 graph.vertices[index].protocol.push(ProtocolEdge {
@@ -300,15 +400,16 @@ fn explore(overlay: &Overlay, premise: fn(&OverlayState) -> bool) -> Graph {
 ///
 /// `usize::MAX` marks an unvisited state: the arrays are dense and hot, and
 /// the sentinel keeps them one word per state.
-fn components_within(vertices: &[Vertex], within: &[bool]) -> Vec<Vec<StateIndex>> {
+fn components_within(graph: &Graph, within: &Table<StateIndex, bool>) -> Vec<Vec<StateIndex>> {
+    let vertices = &graph.vertices;
     let unvisited = usize::MAX;
-    let mut order = vec![unvisited; vertices.len()];
-    let mut low = vec![unvisited; vertices.len()];
+    let mut order = graph.per_state(unvisited);
+    let mut low = graph.per_state(unvisited);
+    let mut on_stack = graph.per_state(false);
     let mut components = Vec::new();
-    let mut on_stack = vec![false; vertices.len()];
     let mut stack = Vec::new();
     let mut next_order = 0usize;
-    for root in 0..vertices.len() {
+    for root in graph.states() {
         if !within[root] || order[root] != unvisited {
             continue;
         }
@@ -362,17 +463,15 @@ fn components_within(vertices: &[Vertex], within: &[bool]) -> Vec<Vec<StateIndex
 /// The fair traps contained in `within`: the strongly connected sets on
 /// which a fair behaviour can remain forever, as member lists. The
 /// recursion of the module-level decision procedure.
-fn fair_traps(graph: &Graph, within: &[bool]) -> Vec<Vec<StateIndex>> {
-    let Graph {
-        vertices, strong, ..
-    } = graph;
+fn fair_traps(graph: &Graph, within: &Table<StateIndex, bool>) -> Vec<Vec<StateIndex>> {
+    let vertices = &graph.vertices;
     let mut traps = Vec::new();
     // A transition always changes the state, so a singleton has no cycle.
-    let cyclic = components_within(vertices, within)
+    let cyclic = components_within(graph, within)
         .into_iter()
         .filter(|members| members.len() > 1);
     for members in cyclic {
-        let mut inside = vec![false; vertices.len()];
+        let mut inside = graph.per_state(false);
         for member in members.iter() {
             inside[*member] = true;
         }
@@ -392,7 +491,7 @@ fn fair_traps(graph: &Graph, within: &[bool]) -> Vec<Vec<StateIndex>> {
         );
         let starves_weak = enabled_throughout
             .iter()
-            .any(|label| !strong[*label] && !taken.contains(label));
+            .any(|label| !graph.strong[*label] && !taken.contains(label));
         if starves_weak {
             continue;
         }
@@ -400,7 +499,7 @@ fn fair_traps(graph: &Graph, within: &[bool]) -> Vec<Vec<StateIndex>> {
             .iter()
             .flatten()
             .copied()
-            .filter(|label| strong[*label] && !taken.contains(label))
+            .filter(|label| graph.strong[*label] && !taken.contains(label))
             .collect::<BTreeSet<_>>();
         if starved_strong.is_empty() {
             traps.push(members);
@@ -418,15 +517,13 @@ fn fair_traps(graph: &Graph, within: &[bool]) -> Vec<Vec<StateIndex>> {
 /// in `Converged`: the members of fair traps that contain an unconverged
 /// state, and the dead unconverged states.
 fn starvation_states(graph: &Graph) -> Vec<StateIndex> {
-    let everything = vec![true; graph.vertices.len()];
     let unconverged = |index: &StateIndex| !graph.vertices[*index].converged;
     let dead = graph
         .vertices
-        .iter()
-        .enumerate()
+        .iter(StateIndex)
         .filter(|(_, vertex)| !vertex.converged && vertex.protocol.is_empty())
         .map(|(index, _)| index);
-    fair_traps(graph, &everything)
+    fair_traps(graph, &graph.per_state(true))
         .into_iter()
         .filter(|trap| trap.iter().any(unconverged))
         .flatten()
@@ -436,21 +533,23 @@ fn starvation_states(graph: &Graph) -> Vec<StateIndex> {
 
 /// `Stable`: the converged states from which no protocol path leaves
 /// `Converged`.
-fn stable_states(vertices: &[Vertex]) -> Vec<bool> {
-    let unconverged = (0..vertices.len())
-        .filter(|index| !vertices[*index].converged)
+fn stable_states(graph: &Graph) -> Table<StateIndex, bool> {
+    let unconverged = graph
+        .states()
+        .filter(|index| !graph.vertices[*index].converged)
         .collect::<Vec<_>>();
-    protocol_ancestors(vertices, &unconverged)
-        .into_iter()
-        .map(|leaves_converged| !leaves_converged)
-        .collect()
+    let mut stable = protocol_ancestors(graph, &unconverged);
+    for index in graph.states() {
+        stable[index] = !stable[index];
+    }
+    stable
 }
 
 /// The action indices leading from `Init` to `target`, by parent pointers.
-fn path_from_init(vertices: &[Vertex], target: StateIndex) -> Vec<usize> {
+fn path_from_init(graph: &Graph, target: StateIndex) -> Vec<usize> {
     let mut positions = Vec::new();
     let mut cursor = target;
-    while let Some(origin) = vertices[cursor].origin {
+    while let Some(origin) = graph.vertices[cursor].origin {
         positions.push(origin.position);
         cursor = origin.parent;
     }
@@ -484,11 +583,7 @@ fn replay_positions(
 }
 
 /// A shortest protocol path from `root` into `targets`, as action indices.
-fn protocol_path(
-    vertices: &[Vertex],
-    root: StateIndex,
-    targets: &BTreeSet<StateIndex>,
-) -> Vec<usize> {
+fn protocol_path(graph: &Graph, root: StateIndex, targets: &BTreeSet<StateIndex>) -> Vec<usize> {
     let mut origin = HashMap::<StateIndex, Origin>::new();
     let mut queue = VecDeque::from([root]);
     let mut reached = None;
@@ -497,7 +592,7 @@ fn protocol_path(
             reached = Some(vertex);
             break;
         }
-        for edge in vertices[vertex].protocol.iter() {
+        for edge in graph.vertices[vertex].protocol.iter() {
             if edge.target != root && !origin.contains_key(&edge.target) {
                 origin.insert(edge.target, Origin {
                     parent: vertex,
@@ -518,14 +613,14 @@ fn protocol_path(
 }
 
 /// The states from which `targets` is reachable over protocol edges.
-fn protocol_ancestors(vertices: &[Vertex], targets: &[StateIndex]) -> Vec<bool> {
-    let mut reversed = vec![Vec::new(); vertices.len()];
-    for (index, vertex) in vertices.iter().enumerate() {
+fn protocol_ancestors(graph: &Graph, targets: &[StateIndex]) -> Table<StateIndex, bool> {
+    let mut reversed = graph.per_state(Vec::new());
+    for (index, vertex) in graph.vertices.iter(StateIndex) {
         for edge in vertex.protocol.iter() {
             reversed[edge.target].push(index);
         }
     }
-    let mut reaches = vec![false; vertices.len()];
+    let mut reaches = graph.per_state(false);
     let mut frontier = targets.to_vec();
     while let Some(vertex) = frontier.pop() {
         if std::mem::replace(&mut reaches[vertex], true) {
@@ -539,32 +634,33 @@ fn protocol_ancestors(vertices: &[Vertex], targets: &[StateIndex]) -> Vec<bool> 
 /// Decide the conditional-liveness claim over a graph in which every
 /// `Always` law held.
 fn analyze_liveness(overlay: &Overlay, graph: &Graph) -> LivenessAnalysis {
-    let vertices = graph.vertices.as_slice();
-    let stable = stable_states(vertices);
+    let stable = stable_states(graph);
     let starving = starvation_states(graph);
-    let reaches = protocol_ancestors(vertices, &starving);
-    let violation = (0..vertices.len())
-        .find(|index| vertices[*index].premise && reaches[*index])
+    let reaches = protocol_ancestors(graph, &starving);
+    let violation = graph
+        .states()
+        .find(|index| graph.vertices[*index].premise && reaches[*index])
         .map(|root| {
             let (churn_prefix, stopped) = replay_positions(
                 overlay,
                 overlay.converged_mesh(),
-                &path_from_init(vertices, root),
+                &path_from_init(graph, root),
             );
-            let suffix = protocol_path(vertices, root, &starving.iter().copied().collect());
+            let suffix = protocol_path(graph, root, &starving.iter().copied().collect());
             LivenessViolation {
                 churn_prefix,
                 quiescent_suffix: replay_positions(overlay, stopped, &suffix).0,
             }
         });
-    let premise = |index: &usize| vertices[*index].premise;
+    let premise = |index: &StateIndex| graph.vertices[*index].premise;
     LivenessAnalysis {
-        premise_states: (0..vertices.len()).filter(premise).count(),
-        unstable_premise_states: (0..vertices.len())
+        premise_states: graph.states().filter(premise).count(),
+        unstable_premise_states: graph
+            .states()
             .filter(premise)
             .filter(|index| !stable[*index])
             .count(),
-        stable_states: stable.iter().filter(|stable| **stable).count(),
+        stable_states: graph.states().filter(|index| stable[*index]).count(),
         violation,
     }
 }
@@ -573,24 +669,24 @@ fn analyze_liveness(overlay: &Overlay, graph: &Graph) -> LivenessAnalysis {
 /// conditional-liveness claim under `premise`.
 pub(super) fn check(overlay: &Overlay, premise: fn(&OverlayState) -> bool) -> SearchReport {
     let graph = explore(overlay, premise);
-    let vertices = graph.vertices.as_slice();
     if let Some((index, law)) = graph.violation {
         let trace = replay_positions(
             overlay,
             overlay.converged_mesh(),
-            &path_from_init(vertices, index),
+            &path_from_init(&graph, index),
         )
         .0;
         return SearchReport::Unsafe {
-            states: vertices.len(),
+            states: graph.vertices.len(),
             violation: SafetyViolation { law, trace },
         };
     }
     SearchReport::Safe {
-        states: vertices.len(),
-        max_depth: vertices
-            .iter()
-            .map(|vertex| vertex.depth)
+        states: graph.vertices.len(),
+        max_depth: graph
+            .vertices
+            .iter(StateIndex)
+            .map(|(_, vertex)| vertex.depth)
             .max()
             .unwrap_or(0),
         uncovered: laws::LAWS
