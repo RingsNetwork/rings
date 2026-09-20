@@ -837,7 +837,7 @@ mod tests {
     #[cfg(all(feature = "wasm", target_family = "wasm"))]
     #[wasm_bindgen_test::wasm_bindgen_test]
     async fn browser_storage_round_trip_retains_nonempty_replay_state() {
-        const STORAGE_NAME: &str = "rings-core/replay-snapshot-round-trip-v2";
+        const STORAGE_NAME: &str = "rings-core/replay-snapshot-round-trip";
         let storage = crate::storage::idb::IdbStorage::new_with_cap_and_name(2, STORAGE_NAME)
             .await
             .expect("IndexedDB opens");

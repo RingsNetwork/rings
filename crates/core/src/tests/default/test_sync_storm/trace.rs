@@ -61,19 +61,16 @@ impl TraceDriver {
             if self.admissions.contains_key(&delivery.sequence) {
                 continue;
             }
-            // A payload frame retains its transaction identity whatever its session slots hold.
-            // A link-control frame belongs to no transaction: the link itself submits it, so
-            // its enqueue instant is the transport's and there is no outbound submission
-            // boundary to compare it with.
-            if let Some(transaction_id) = delivery.transaction_id {
-                assert_eq!(
-                    runtime
-                        .outbound_submission_ms(transaction_id)
-                        .expect("production submission observation must remain visible"),
-                    Some(delivery.enqueued_virtual_ms),
-                    "SubmitFrame must originate at the real outbound submission boundary"
-                );
-            }
+            let transaction_id = delivery
+                .transaction_id
+                .expect("production frame must retain its transaction identity");
+            assert_eq!(
+                runtime
+                    .outbound_submission_ms(transaction_id)
+                    .expect("production submission observation must remain visible"),
+                Some(delivery.enqueued_virtual_ms),
+                "SubmitFrame must originate at the real outbound submission boundary"
+            );
             let bytes = u64::try_from(delivery.bytes).expect("wire size must fit u64");
             let (local_did, peer_did) = self
                 .endpoints
@@ -142,11 +139,10 @@ impl TraceDriver {
             })
             .expect("delivery must match its dispatched frame");
         self.state = state;
-        // A delivered control transaction is what a later liveness verdict names as its probe;
-        // a link-control frame names no transaction and answers to no verdict.
-        if let (ScheduledDeliveryClass::Control, Some(transaction_id)) =
-            (delivery.class, delivery.transaction_id)
-        {
+        if delivery.class == ScheduledDeliveryClass::Control {
+            let transaction_id = delivery
+                .transaction_id
+                .expect("delivered control must retain its transaction identity");
             self.delivered_controls.insert(
                 (delivery.connection_generation.clone(), transaction_id),
                 output.event_id,

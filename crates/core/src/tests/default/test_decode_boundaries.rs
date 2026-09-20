@@ -23,6 +23,7 @@ use crate::message::MessageVerificationExt;
 use crate::message::PerSlot;
 use crate::message::SessionRef;
 use crate::message::WirePayload;
+use crate::session::Session;
 use crate::session::SessionSk;
 use crate::swarm::session_link::FrameArrival;
 use crate::swarm::session_link::ReferencedSessions;
@@ -95,13 +96,16 @@ fn generated_link_frame_decode_boundary_inputs_keep_the_receiver_bounded() {
     let mut generator = DecodeBoundaryGenerator::named("core-link-frame");
     let cases = generated_case_count();
     let mut receiver = ReferencedSessions::new(LINK_HOLD_CAPACITY, LINK_HOLD_TIMEOUT_MS);
+    // Sessions earlier frames referenced: an announcement of one of them is awaited, so the
+    // announce, release and sweep paths run under generated input, not only the refusals.
+    let mut referenced: Vec<Session> = Vec::new();
     eprintln!(
         "{SEED_ENV}={} {CASES_ENV}={cases} target=core-link-frame",
         generator.seed()
     );
 
     for case in 0..cases {
-        let Some(wire) = generated_link_frame(&mut generator) else {
+        let Some(wire) = generated_link_frame(&mut generator, &mut referenced) else {
             continue;
         };
         let wire = generator.mutated(wire);
@@ -136,12 +140,22 @@ fn generated_link_frame_decode_boundary_inputs_keep_the_receiver_bounded() {
     }
 }
 
-/// One valid link frame: a payload with generated slot encodings, or a control frame.
-fn generated_link_frame(generator: &mut DecodeBoundaryGenerator) -> Option<Vec<u8>> {
+/// One valid link frame: a payload with generated slot encodings, or a control frame. An
+/// announcement names a session some earlier referenced frame awaits when there is one.
+fn generated_link_frame(
+    generator: &mut DecodeBoundaryGenerator,
+    referenced: &mut Vec<Session>,
+) -> Option<Vec<u8>> {
     let payload = generated_payload(generator)?;
     let sessions = payload.sessions();
     let wire = match generator.usize(5) {
-        0 => LinkControl::Announce(sessions.origin.clone()).to_wire(),
+        0 => {
+            let announced = match referenced.len() {
+                0 => sessions.origin.clone(),
+                len => referenced[generator.usize(len)].clone(),
+            };
+            LinkControl::Announce(announced).to_wire()
+        }
         1 => LinkControl::Unknown(sessions.origin.digest().ok()?).to_wire(),
         2 => LinkControl::Request(sessions.origin.digest().ok()?).to_wire(),
         3 => match generator.usize(2) {
@@ -153,6 +167,10 @@ fn generated_link_frame(generator: &mut DecodeBoundaryGenerator) -> Option<Vec<u
                 origin: SessionRef::Digest(sessions.origin.digest().ok()?),
                 hop: SessionRef::Digest(sessions.hop.digest().ok()?),
             };
+            referenced.push(sessions.origin.clone());
+            if referenced.len() > LINK_HOLD_CAPACITY {
+                referenced.remove(0);
+            }
             WirePayload::view(&payload, references).to_wire()
         }
     };

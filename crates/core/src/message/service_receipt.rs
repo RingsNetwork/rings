@@ -32,7 +32,7 @@ const BENEFICIARY_DOMAIN: super::DomainTag =
 /// Width of one provisional wall-clock epoch.
 pub const PROVISIONAL_RECEIPT_EPOCH_SECS: u64 = 300;
 
-/// Service kinds accepted by the v1 provisional receipt wire.
+/// Service kinds accepted by the provisional receipt wire.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum ServiceKind {
     /// One authenticated request/response probe.
@@ -61,7 +61,7 @@ impl ProvisionalEpoch {
     }
 }
 
-/// Canonical v1 provisional service claim.
+/// Canonical provisional service claim.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProvisionalServiceClaim {
     /// Overlay in which the receipt signatures are valid.
@@ -85,7 +85,7 @@ pub struct ProvisionalServiceClaim {
 }
 
 impl ProvisionalServiceClaim {
-    /// Construct the only v1 service profile, a one-unit probe.
+    /// Construct the only service profile, a one-unit probe.
     pub const fn probe(
         network_id: u32,
         provider_account: Did,
@@ -121,13 +121,13 @@ impl ProvisionalServiceClaim {
         }
     }
 
-    /// Serialize the claim under its explicit v1 marker.
+    /// Serialize the claim under its explicit marker.
     pub fn canonical_bytes(&self) -> std::result::Result<Vec<u8>, ServiceReceiptError> {
         self.validate()?;
         encode_prefixed(CLAIM_WIRE_PREFIX, self)
     }
 
-    /// Parse only the canonical v1 claim representation.
+    /// Parse only the canonical claim representation.
     pub fn from_canonical_bytes(bytes: &[u8]) -> std::result::Result<Self, ServiceReceiptError> {
         let claim: Self = decode_prefixed(CLAIM_WIRE_PREFIX, bytes)?;
         claim.validate()?;
@@ -268,13 +268,13 @@ impl ProvisionalServiceReceipt {
         Ok(receipt)
     }
 
-    /// Serialize the receipt under its explicit provisional v1 marker.
+    /// Serialize the receipt under its explicit provisional marker.
     pub fn canonical_bytes(&self) -> std::result::Result<Vec<u8>, ServiceReceiptError> {
         self.claim.validate()?;
         encode_prefixed(RECEIPT_WIRE_PREFIX, self)
     }
 
-    /// Parse only the canonical provisional v1 representation.
+    /// Parse only the canonical provisional representation.
     pub fn from_canonical_bytes(bytes: &[u8]) -> std::result::Result<Self, ServiceReceiptError> {
         let receipt: Self = decode_prefixed(RECEIPT_WIRE_PREFIX, bytes)?;
         receipt.claim.validate()?;

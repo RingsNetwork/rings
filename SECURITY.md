@@ -146,14 +146,18 @@ generation and obeys these rules:
   the link costs inline frames and never a stall; the link is treated as a datagram
   link throughout;
 - the sender remembers at most 64 sessions and the receiver 128, under one
-  least-recently-referenced order, so the sender goes back to inline before the
-  receiver could have forgotten; both tables die with the connection generation;
-- a miss (the two ends disagree on expiry, or the peer misbehaves) holds that frame
-  alone, at most 16 per connection and for at most twice the delivery timeout, and
-  is repaired on the link by one unsigned request per held frame and exactly one
-  unsigned answer per question, both sent straight on the data channel; every frame
-  the link drops (hold overflow, disclaimed or invalid announcement, hold timeout) is
-  charged to the peer as a receive failure; no hop asks the origin for anything;
+  least-recently-referenced order over the frames both ends saw, so on a lossless
+  link the sender goes back to inline before the receiver could have forgotten;
+  both tables are scoped to the connection generation;
+- a miss (a frame lost between the two orders, the two ends disagreeing on expiry,
+  or a misbehaving peer) holds that frame alone, at most 16 per connection and for
+  at most twice the delivery timeout plus one period of the inbound actor's sweep,
+  and is repaired on the link by one unsigned request per missing session of a held
+  frame and exactly one unsigned answer per question, each emitted on the connection
+  generation it was judged on, in a task of its own rather than from the transport's
+  read loop; every frame the link drops (hold overflow, disclaimed or invalid
+  announcement, hold timeout) is charged to the peer as a receive failure; no hop
+  asks the origin for anything;
 - an expired session is evicted, a reference to it is a miss, and re-announcing the
   expired delegation is refused exactly as it is inline.
 

@@ -280,7 +280,7 @@ pub(super) struct InboundProcessor {
     pre_admission: Arc<Mutex<PreAdmissionHold<HeldInboundFrame>>>,
     /// The receiving end of this connection's session references: the sessions the peer has
     /// announced on it and the frames waiting for one. It lives and dies with the connection;
-    /// its hold is bounded by [`session_hold_capacity`] frames and by
+    /// its hold is bounded by [`SESSION_HOLD_CAPACITY`] frames and by
     /// [`SESSION_HOLD_TIMEOUT`](crate::swarm::transport::SESSION_HOLD_TIMEOUT), swept by the
     /// inbound actor's periodic cleanup.
     session_link: Arc<Mutex<ReferencedSessions<InboundFrameLease>>>,
@@ -307,17 +307,15 @@ struct HeldInboundFrame {
 /// Frames one connection may hold for a session the peer has not backed yet: half the
 /// pre-admission hold, so both holds together leave a quarter of the transport's per-peer
 /// frames for the link-control frames that release them.
-pub(super) const fn session_hold_capacity() -> usize {
-    inbound::peer_capacity() / 2
-}
+pub(super) const SESSION_HOLD_CAPACITY: usize = inbound::peer_capacity() / 2;
 
 /// Whether a delivery to the inbound actor waits for the frame's logical completion.
 ///
 /// A frame the transport just handed over is awaited, so the transport's read loop paces this
 /// end; a frame released from a hold is detached, so releasing many frames at once does not
 /// stall the read loop behind each one's handlers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Completion {
+#[derive(Clone, Copy, Debug)]
+pub(super) enum LogicalCompletion {
     /// Return once the frame's handlers and `on_inbound` completed.
     Awaited,
     /// Return once the inbound actor owns the frame.

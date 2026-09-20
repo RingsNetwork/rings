@@ -63,7 +63,7 @@ impl InboundProcessor {
             pending_attempt: Arc::new(Mutex::new(None)),
             pre_admission: Arc::new(Mutex::new(PreAdmissionHold::new(inbound::peer_capacity()))),
             session_link: Arc::new(Mutex::new(ReferencedSessions::new(
-                super::session_hold_capacity(),
+                super::SESSION_HOLD_CAPACITY,
                 SESSION_HOLD_TIMEOUT.as_millis(),
             ))),
         }
@@ -75,15 +75,25 @@ impl InboundProcessor {
         self.reassembly_clock.now_ms()
     }
 
-    /// The authentication of `peer` as of now, `Unauthenticated` for an unparsable peer.
+    /// The authentication of `peer` as of now: authenticated iff it is the peer of the
+    /// handshake this callback is bound to and that handshake's generation is still active.
+    /// An unparsable peer is unauthenticated.
     pub(super) fn authentication_of(&self, peer: Option<Did>) -> Authentication {
-        peer.map_or(Authentication::Unauthenticated, |peer| {
-            self.peer_authentication(peer)
-        })
+        let (Some(peer), Some(attempt)) = (peer, self.pending_attempt()) else {
+            return Authentication::Unauthenticated;
+        };
+        if attempt.peer() == peer && self.logical.transport.is_active_connection_attempt(attempt) {
+            Authentication::Authenticated
+        } else {
+            Authentication::Unauthenticated
+        }
     }
 
     /// Drop every frame held past the session-hold timeout, or whose proof lapsed, as of
-    /// `now_ms`, charging each to the peer: it referenced a session it did not back in time.
+    /// `now_ms`, charging each to the link's peer: it referenced a session it did not back in
+    /// time. The link's peer is the bound handshake's, the one identity every held frame was
+    /// admitted to the hold under (see the link law of
+    /// [`link_stage`](super::link_stage)).
     pub(super) async fn sweep_session_hold_at(&self, now_ms: u128) {
         let stale = self.session_link().sweep(now_ms);
         if stale.is_empty() {
@@ -140,17 +150,6 @@ impl InboundProcessor {
             .pending_attempt
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(attempt);
-    }
-
-    pub(super) fn peer_authentication(&self, peer: Did) -> Authentication {
-        let Some(attempt) = self.pending_attempt() else {
-            return Authentication::Unauthenticated;
-        };
-        if attempt.peer() == peer && self.logical.transport.is_active_connection_attempt(attempt) {
-            Authentication::Authenticated
-        } else {
-            Authentication::Unauthenticated
-        }
     }
 
     pub(super) async fn record_receive_failure(

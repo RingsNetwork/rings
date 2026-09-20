@@ -95,6 +95,13 @@ pub(crate) enum SessionRef<'a> {
     Digest(SessionDigest),
 }
 
+impl SessionRef<'_> {
+    /// `session` inline, borrowed for the frame being built.
+    pub(crate) const fn inline(session: &Session) -> SessionRef<'_> {
+        SessionRef::Inline(Cow::Borrowed(session))
+    }
+}
+
 /// How a slot travelled: the shape of a [`SessionRef`] without its content.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SlotEncoding {
@@ -142,8 +149,8 @@ struct WireTransaction<'a> {
     verification: WireVerification<'a>,
 }
 
-/// The wire form of a [`MessagePayload`]: the same fields in the same order, with each session
-/// slot a [`SessionRef`]. Borrowed when built by [`Self::view`], owned when decoded.
+/// The wire form of a [`MessagePayload`]: each session slot a [`SessionRef`]. Borrowed when
+/// built by [`Self::view`], owned when decoded.
 #[derive(Deserialize, Serialize)]
 pub(crate) struct WirePayload<'a> {
     /// The origin's transaction.
@@ -208,12 +215,7 @@ impl<'a> WirePayload<'a> {
     /// View `payload` with both sessions inline: the self-contained frame, valid on any link and
     /// in any context that has no link at all.
     pub(crate) fn inline(payload: &'a MessagePayload) -> Self {
-        Self::view(
-            payload,
-            payload
-                .sessions()
-                .map(|session| SessionRef::Inline(Cow::Borrowed(session))),
-        )
+        Self::view(payload, payload.sessions().map(SessionRef::inline))
     }
 
     /// The frame bytes: the payload marker, then the encoded body.
@@ -265,13 +267,28 @@ impl<'a> WirePayload<'a> {
         self,
         mut resolve: impl FnMut(SessionRef<'a>) -> std::result::Result<Session, E>,
     ) -> std::result::Result<MessagePayload, E> {
+        self.resolve_slots(&mut resolve)
+    }
+
+    /// The payload, with every slot required inline: the self-contained reading, valid outside
+    /// any link. A slot sent by reference is refused as
+    /// [`Error::SessionReferenceUnresolved`].
+    pub(crate) fn into_self_contained(self) -> Result<MessagePayload> {
+        self.resolve_slots(&mut resolve_inline)
+    }
+
+    /// [`Self::resolve`] over a borrowed resolver.
+    fn resolve_slots<E>(
+        self,
+        resolve: &mut impl FnMut(SessionRef<'a>) -> std::result::Result<Session, E>,
+    ) -> std::result::Result<MessagePayload, E> {
         let Self {
             transaction,
             relay,
             verification,
         } = self;
-        let origin = transaction.verification.resolve(&mut resolve)?;
-        let hop = verification.resolve(&mut resolve)?;
+        let origin = transaction.verification.resolve(resolve)?;
+        let hop = verification.resolve(resolve)?;
         Ok(MessagePayload {
             transaction: Transaction {
                 destination: transaction.destination,
@@ -288,7 +305,7 @@ impl<'a> WirePayload<'a> {
 
 /// What the two ends of one link tell each other about session references. See the module
 /// documentation for why these are unsigned.
-#[derive(Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub(crate) enum LinkControl {
     /// "A frame of yours carried this session inline and it verified: you may reference it."
     Known(SessionDigest),
@@ -323,7 +340,7 @@ impl LinkFrame {
     /// ```text
     ///   bytes ─┬─ PAYLOAD marker ──▶ Payload(decode body)
     ///          ├─ LINK marker ─────▶ Control(decode body)
-    ///          └─ otherwise ───────▶ LegacyTransactionWireFormat
+    ///          └─ otherwise ───────▶ UnmarkedFrame
     /// ```
     pub(crate) fn from_wire(bytes: &[u8]) -> Result<Self> {
         if let Some(body) = bytes.strip_prefix(PAYLOAD_FRAME_MARKER) {
@@ -337,7 +354,7 @@ impl LinkFrame {
                 .map(Self::Control)
                 .map_err(Error::CodecDeserialize);
         }
-        Err(Error::LegacyTransactionWireFormat)
+        Err(Error::UnmarkedFrame)
     }
 }
 
@@ -354,7 +371,7 @@ fn frame_bytes(marker: &[u8], body: &[u8]) -> Result<Bytes> {
 }
 
 /// Resolve a slot of a frame that travels outside any link: only an inline session resolves.
-pub(super) fn resolve_inline(session: SessionRef<'_>) -> Result<Session> {
+fn resolve_inline(session: SessionRef<'_>) -> Result<Session> {
     match session {
         SessionRef::Inline(session) => Ok(session.into_owned()),
         SessionRef::Digest(digest) => Err(Error::SessionReferenceUnresolved(digest)),

@@ -299,7 +299,7 @@ impl MessagePayload {
     /// before they reach a `MessagePayload`.
     pub fn from_wire(data: &[u8]) -> Result<Self> {
         match LinkFrame::from_wire(data)? {
-            LinkFrame::Payload(frame) => frame.resolve(wire::resolve_inline),
+            LinkFrame::Payload(frame) => frame.into_self_contained(),
             LinkFrame::Control(_) => Err(Error::LinkControlOutsideLink),
         }
     }

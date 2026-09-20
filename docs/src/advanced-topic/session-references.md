@@ -39,9 +39,14 @@ table, least recently referenced first out:
 | receiver | sessions this link carried inline | 128 | frames that verified, and solicited announcements whose delegation verified |
 
 The receiver keeps twice as many as the sender under the same least-recently-referenced order
-over the same frames, so the sender stops referencing a session (and sends it inline again)
-before the receiver could have forgotten it. A miss therefore needs something outside the
-tables: the two ends disagreeing on expiry, or a peer that does not follow the protocol.
+over the frames both ends saw: the sender touches a session on every frame it encodes, the
+receiver on every frame it resolved or verified. On a lossless link the sender therefore stops
+referencing a session (and sends it inline again) before the receiver could have forgotten it.
+A frame lost on the link touches the sender's order and not the receiver's, so under loss the
+two drift and the receiver may evict a session the sender still references; that miss is
+answered from the sender's table, which still holds it, at the cost of one round trip and no
+charge. A miss the sender cannot answer needs something outside the tables: the two ends
+disagreeing on expiry, or a peer that does not follow the protocol.
 
 Consequences of the scope:
 
@@ -51,8 +56,11 @@ Consequences of the scope:
 - A relay keeps the origin sessions of the traffic it forwards in the table of each outgoing
   link. A destination that never met the origin gets the origin's session inline from its last
   hop until it confirms it. No node ever asks the origin for anything.
-- Both tables die with the connection generation. A restarted node and its peer start from
-  empty tables together; there is no state to resynchronise.
+- Both tables are scoped to the connection generation: the receiver's lives in the callback
+  of one connection, the sender's is emptied by the first frame of a newer generation. A
+  restarted node and its peer start from empty tables together; there is no state to
+  resynchronise, and a control frame is emitted only on the generation it was judged on, so a
+  late one never confirms or disclaims on a generation whose tables never saw it.
 
 ## The link is a datagram link
 
@@ -70,7 +78,7 @@ sender                                      receiver
 ```
 
 - Until the confirmation arrives, every frame carries `s` inline, and the receiver confirms
-  every inline arrival of a session it knows. A lost inline frame, a lost confirmation, or any
+  every inline arrival that verified. A lost inline frame, a lost confirmation, or any
   reordering costs inline frames, never a stall and never a miss: the reference is sent after
   the confirmation, which was sent after the session was learned.
 - A reference therefore misses only when the receiver has *forgotten* the session (capacity
@@ -88,14 +96,16 @@ receiver                                   sender
 ```
 
 - Held frames are independent of everything that resolves: a frame that resolves is never
-  queued behind one that does not, because the link promises no order to preserve. Held frames
-  leave in arrival order relative to each other, when a later frame or an announcement teaches
-  the session they await.
+  queued behind one that does not, and a held frame never waits for one held before it,
+  because the link promises no order to preserve. Among the held frames that resolve at one
+  instant, when a later frame or an announcement teaches the session they await, the earliest
+  arrival leaves first; nothing downstream may rely on more than this.
 - The hold keeps at most 16 frames per connection (half the pre-admission hold, so the two
   holds together leave a quarter of the transport's per-peer frames for the control frames that
-  release them), each for at most twice the transport's delivery timeout. The inbound actor's
-  periodic cleanup drops what waited longer, or whose proof lapsed: a frame a peer never backs
-  occupies this end for a bounded time whatever lifetime its proof claims.
+  release them), each for at most twice the transport's delivery timeout plus one period of the
+  inbound actor's periodic cleanup, which drops what waited longer, or whose proof lapsed: a
+  frame a peer never backs occupies this end for a bounded time whatever lifetime its proof
+  claims.
 - Every held frame asks for its own missing digests once, on arrival, so one lost question is
   repaired by the next frame that misses the same digest. A frame that finds the hold full is
   dropped, and the oldest held frame's question is asked again. The sender answers each
@@ -106,9 +116,11 @@ receiver                                   sender
   waited past the hold timeout.
 
 Link-control frames (`Known`, `Request`, `Announce`, `Unknown`) are unsigned and idempotent.
-They are meaningful only on the authenticated connection they arrive on, an announced session
-authenticates itself through its account signature, and a digest names a value rather than
-asserting one; a duplicate or a stale one changes nothing.
+They are meaningful only on the authenticated connection generation they arrive on, an
+announced session authenticates itself through its account signature, and a digest names a
+value rather than asserting one; a duplicate or a stale one changes nothing. They are emitted
+in a task of their own, never awaited from the transport's read loop, and never through the
+transfer lanes; their rate is bounded by the inbound frames that cause them.
 
 ## Expiry
 
@@ -121,7 +133,9 @@ Expiry therefore forces a fresh delegation to be announced; it never resurrects 
 `MessagePayload::to_wire` and `from_wire` remain the self-contained encoding, both sessions
 inline: handshake offers and answers exchanged out of band, the payload cut into chunks (it is
 decoded after reassembly, outside the order of the link), and payloads held in a relay inbox.
-A frame that references a session is refused there with `SessionReferenceUnresolved`.
+A frame that references a session is refused there with `SessionReferenceUnresolved`. So is a
+frame on a connection from a peer other than the one its handshake is bound to: it arrived on no
+link, and is judged as self-contained.
 
 ## Hard cutover
 

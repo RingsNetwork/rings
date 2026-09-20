@@ -17,18 +17,17 @@ use super::into_transport_callback_error;
 use super::pre_admission::Arrival;
 use super::processor::prepare_resolved_frame;
 use super::CallbackError;
-use super::Completion;
 use super::HeldInboundFrame;
 use super::InboundFrameLease;
 use super::InboundGate;
 use super::InboundProcessor;
 use super::InnerSwarmCallback;
+use super::LogicalCompletion;
 use super::PreparedInboundFrame;
 use super::SharedSwarmCallback;
 use super::SwarmEvent;
 use super::TransportCallbackError;
 use crate::dht::Did;
-use crate::measure::Authentication;
 use crate::swarm::session_link::Digests;
 use crate::swarm::session_link::ResolvedFrame;
 use crate::swarm::transport::ConnectionEventDisposition;
@@ -52,6 +51,14 @@ fn spawn_pre_admission_drain(drainer: InnerSwarmCallback) -> bool {
         drainer.drain_claimed_pre_admission_hold().await;
     });
     true
+}
+
+/// A frame the link verified and learned from, on its way to the admission gate.
+pub(super) struct VerifiedFrame {
+    pub(super) prepared: PreparedInboundFrame,
+    pub(super) lease: InboundFrameLease,
+    /// The digests the link learned from the frame's inline slots.
+    pub(super) learned: Digests,
 }
 
 impl InnerSwarmCallback {
@@ -395,25 +402,25 @@ impl InnerSwarmCallback {
 }
 
 impl InnerSwarmCallback {
-    /// Verify one resolved frame, let the link learn the sessions it carried inline, and pass
-    /// it to the admission gate. Post: the digests the link learned, for the caller to confirm
-    /// to the peer and to release held frames against.
+    /// Verify one resolved frame and let the link learn the sessions it carried inline. Post:
+    /// the frame, ready for the admission gate, with the digests the link learned, for the
+    /// caller to confirm to the peer and to release held frames against before the frame
+    /// itself is gated. The two are independent: a frame held for one of those sessions must
+    /// not wait on the fate of the frame that taught it.
     ///
     /// Learning precedes the gate on purpose: a session is the peer's delegation whatever the
-    /// state of the handshake, and a frame the gate refuses was still a verified frame of the
-    /// peer at the other end of this connection.
-    pub(super) async fn admit_resolved_frame(
+    /// state of the handshake, and a frame the gate refuses was still a verified frame that
+    /// arrived on this connection.
+    pub(super) async fn verify_resolved_frame(
         &self,
         peer: Option<Did>,
         resolved: Box<ResolvedFrame<InboundFrameLease>>,
-        completion: Completion,
-    ) -> Result<Digests, TransportCallbackError> {
+    ) -> Result<VerifiedFrame, TransportCallbackError> {
         let ResolvedFrame {
             payload,
             carrier: lease,
             encoding,
         } = *resolved;
-        let authentication = self.processor.authentication_of(peer);
         let prepared = match prepare_resolved_frame(
             self.processor.logical.transport.network_id,
             peer,
@@ -422,6 +429,7 @@ impl InnerSwarmCallback {
         ) {
             Ok(prepared) => prepared,
             Err(error) => {
+                let authentication = self.processor.authentication_of(peer);
                 self.processor
                     .record_receive_failure(peer, authentication)
                     .await;
@@ -433,21 +441,23 @@ impl InnerSwarmCallback {
             encoding,
             self.processor.now_ms(),
         )?;
-        self.gate_prepared_frame(peer, authentication, prepared, lease, completion)
-            .await
-            .map(|()| learned)
+        Ok(VerifiedFrame {
+            prepared,
+            lease,
+            learned,
+        })
     }
 
     /// Pass one verified frame through the pending-connection gate and the pre-admission hold
     /// to the inbound actor, waiting for its logical completion or not as `completion` says.
-    async fn gate_prepared_frame(
+    pub(super) async fn gate_prepared_frame(
         &self,
         peer: Option<Did>,
-        authentication: Authentication,
         prepared: PreparedInboundFrame,
         lease: InboundFrameLease,
-        completion: Completion,
+        completion: LogicalCompletion,
     ) -> Result<(), TransportCallbackError> {
+        let authentication = self.processor.authentication_of(peer);
         let admitted = match self.processor.pending_connection_gate(peer).await? {
             InboundGate::Admitted => true,
             InboundGate::Unadmitted => false,
@@ -469,8 +479,12 @@ impl InnerSwarmCallback {
         let arrival = self.processor.pre_admission().arrive(frame, admitted);
         match arrival {
             Arrival::Pass(frame) => match completion {
-                Completion::Awaited => self.deliver_held_frame(frame).await.map_err(Into::into),
-                Completion::Detached => self.enqueue_held_frame(frame).await.map_err(Into::into),
+                LogicalCompletion::Awaited => {
+                    self.deliver_held_frame(frame).await.map_err(Into::into)
+                }
+                LogicalCompletion::Detached => {
+                    self.enqueue_held_frame(frame).await.map_err(Into::into)
+                }
             },
             Arrival::Held => {
                 // The judgement and the admission commit are not one atomic step: admission may
@@ -499,7 +513,7 @@ impl InnerSwarmCallback {
             prepared,
             lease,
         } = frame;
-        let authentication = self.processor.peer_authentication(peer);
+        let authentication = self.processor.authentication_of(Some(peer));
         let submission = InboundSubmission::new(Some(peer), authentication, lease, prepared);
         self.inbound
             .submit_prepared(&self.processor, submission)
@@ -513,7 +527,7 @@ impl InnerSwarmCallback {
             prepared,
             lease,
         } = frame;
-        let authentication = self.processor.peer_authentication(peer);
+        let authentication = self.processor.authentication_of(Some(peer));
         let submission = InboundSubmission::new(Some(peer), authentication, lease, prepared);
         self.inbound
             .submit_prepared_detached(&self.processor, peer, submission)

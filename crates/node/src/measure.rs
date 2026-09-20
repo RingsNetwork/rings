@@ -43,8 +43,8 @@ use rings_measure::UnixTime;
 
 // Legacy `PeriodicMeasure/counters/...` values intentionally remain unread:
 // a bare count proves neither byte-credit direction nor a live epoch timestamp.
-const SNAPSHOT_KEY: &str = "MeasurementLedger/v1";
-const EVIDENCE_SNAPSHOT_KEY: &str = "ProvisionalEvidence/v1";
+const SNAPSHOT_KEY: &str = "MeasurementLedger";
+const EVIDENCE_SNAPSHOT_KEY: &str = "ProvisionalEvidence";
 const PERSISTENCE_WAKE_CAPACITY: usize = 1;
 const PERSISTENCE_SHUTDOWN_ATTEMPTS: usize = 3;
 const PRUNE_INTERVAL_SECONDS: u64 = 60 * 60;

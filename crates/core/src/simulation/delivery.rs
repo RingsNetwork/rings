@@ -20,6 +20,10 @@ pub(crate) enum ScheduledDeliveryClass {
     Lifecycle,
     /// Chord or liveness control payload.
     Control,
+    /// A link-control frame of the session references (a confirmation, question or answer):
+    /// a frame of the link itself, belonging to no transaction and to no transfer lane, whose
+    /// delay costs inline frames and never liveness, so it carries no deadline.
+    LinkControl,
     /// Storage synchronization payload.
     Storage,
     /// One chunk frame requiring reassembly.
@@ -143,7 +147,7 @@ fn inspect_delivery(
 
 /// Classify one queued frame as the production link would, without resolving its session slots:
 /// the class and transaction id of a payload are readable whatever its slots hold, and a
-/// link-control frame is control traffic that belongs to no transaction.
+/// link-control frame is the link's own, belonging to no transaction.
 pub(super) fn inspect_message(
     sequence: u64,
     bytes: &[u8],
@@ -155,7 +159,7 @@ pub(super) fn inspect_message(
         }
     })?;
     let payload = match frame {
-        LinkFrame::Control(_) => return Ok((ScheduledDeliveryClass::Control, None)),
+        LinkFrame::Control(_) => return Ok((ScheduledDeliveryClass::LinkControl, None)),
         LinkFrame::Payload(payload) => payload,
     };
     let transaction_id = Some(payload.transaction_id());

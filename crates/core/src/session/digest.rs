@@ -11,8 +11,6 @@ use crate::error::Result;
 const SESSION_DIGEST_BYTES: usize = 20;
 /// Width of the keccak256 output a [`SessionDigest`] is cut from.
 const KECCAK256_BYTES: usize = 32;
-/// Where the digest starts inside the hash: the trailing bytes, as an account address is cut.
-const SESSION_DIGEST_OFFSET: usize = KECCAK256_BYTES - SESSION_DIGEST_BYTES;
 
 /// Content address of one exact [`Session`] value: the trailing `SESSION_DIGEST_BYTES` of
 /// `keccak256(encode(session))`, where `encode` is the canonical Rings wire encoding.
@@ -45,11 +43,7 @@ impl Session {
     pub fn digest(&self) -> Result<SessionDigest> {
         let encoded = rings_codec::serialize(self).map_err(Error::CodecSerialize)?;
         let hash: [u8; KECCAK256_BYTES] = keccak256(encoded.as_slice());
-        let mut address = [0u8; SESSION_DIGEST_BYTES];
-        let trailing = hash.iter().skip(SESSION_DIGEST_OFFSET).copied();
-        for (slot, byte) in address.iter_mut().zip(trailing) {
-            *slot = byte;
-        }
+        let [_, _, _, _, _, _, _, _, _, _, _, _, address @ ..] = hash;
         Ok(SessionDigest(address))
     }
 }

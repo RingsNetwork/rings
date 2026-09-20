@@ -64,6 +64,7 @@ use crate::utils::get_epoch_ms_i64;
 mod connection;
 mod delivery;
 mod event_delivery;
+mod link_control;
 mod liveness;
 mod measurement;
 mod outbound;
@@ -91,9 +92,13 @@ pub(crate) use self::liveness::PEER_LIVENESS_IDLE_MS;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::liveness::PEER_LIVENESS_TIMEOUT_MS;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::outbound::emitted_link_control_for_test;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::outbound_submit_count_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(crate) use self::outbound::referenced_frame_total_for_test;
+pub(crate) use self::outbound::referenced_links_for_test;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::outbound::referenced_origins_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::referenced_slots_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]

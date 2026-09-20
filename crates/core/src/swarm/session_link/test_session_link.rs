@@ -1,8 +1,6 @@
 //! Laws of the two link tables, checked over explicit instants: every step takes the instant it
 //! is judged at, and no test waits.
 
-use std::borrow::Cow;
-
 use super::AnnouncedSessions;
 use super::Digests;
 use super::FrameArrival;
@@ -78,11 +76,6 @@ fn received<'a>(
     }
 }
 
-/// `session` inline.
-fn inline(session: &Session) -> SessionRef<'_> {
-    SessionRef::Inline(Cow::Borrowed(session))
-}
-
 /// `session` by reference.
 fn by_digest(session: &Session) -> Result<SessionRef<'static>> {
     session.digest().map(SessionRef::Digest)
@@ -93,7 +86,7 @@ fn origin_referenced(payload: &MessagePayload) -> Result<Box<WirePayload<'static
     let sessions = payload.sessions();
     received(payload, PerSlot {
         origin: by_digest(sessions.origin)?,
-        hop: inline(sessions.hop),
+        hop: SessionRef::inline(sessions.hop),
     })
 }
 
@@ -296,14 +289,14 @@ fn test_sender_table_is_scoped_to_its_generation() -> Result<()> {
     );
 
     let next = sender.encode(GENERATION + 1, &payload, now_ms)?;
-    assert_eq!(next, payload.sessions().map(inline));
+    assert_eq!(next, payload.sessions().map(SessionRef::inline));
     assert_eq!(
         sender.answer(GENERATION, digest, now_ms),
         LinkControl::Unknown(digest)
     );
     sender.acknowledge(GENERATION, digest);
     let stale = sender.encode(GENERATION, &payload, now_ms)?;
-    assert_eq!(stale, payload.sessions().map(inline));
+    assert_eq!(stale, payload.sessions().map(SessionRef::inline));
     assert_eq!(
         encoding(sent(&mut sender, &payload, now_ms)?.as_ref()),
         BOTH_INLINE
@@ -422,8 +415,8 @@ fn test_receiver_table_is_bounded_and_outlasts_the_sender_table() -> Result<()> 
     let late = relayed_payload(&first_origin, &hop, 1)?;
     expect_resolved(receiver.arrive(origin_referenced(&late)?, 2, now_ms)?);
 
-    // That reference refreshed it; only the receiver's whole capacity of other sessions after
-    // it makes the receiver forget too.
+    // That reference refreshed it: the receiver forgets it only once its whole capacity of
+    // other sessions was referenced after it (the hop's session is always among them).
     relay_others(&mut sender, &mut receiver, REFERENCED_TABLE_CAPACITY)?;
     assert_eq!(receiver.known_len(), REFERENCED_TABLE_CAPACITY);
     let stale = relayed_payload(&first_origin, &hop, 2)?;
@@ -543,7 +536,7 @@ fn test_hop_session_miss_is_repaired_by_announcement() -> Result<()> {
     let hop = SessionSk::new_with_seckey(&SecretKey::random())?;
     let payload = relayed_payload(&origin, &hop, 0)?;
     let frame = received(&payload, PerSlot {
-        origin: inline(&origin.session()),
+        origin: SessionRef::inline(&origin.session()),
         hop: by_digest(&hop.session())?,
     })?;
     let mut receiver = receiver();
@@ -588,10 +581,12 @@ fn test_miss_is_answered_from_the_sender_table() -> Result<()> {
     Ok(())
 }
 
-/// Law (order): a frame that resolves passes whatever is held; held frames leave as their
-/// sessions arrive, in arrival order relative to each other.
+/// Law (order): a frame that resolves passes whatever is held, and a held frame never waits
+/// for one held before it (the second frame stays while the first and third leave); among the
+/// frames resolvable at one instant, the earliest arrival leaves first.
 #[test]
-fn test_held_frames_do_not_block_resolvable_ones_and_leave_in_arrival_order() -> Result<()> {
+fn test_held_frames_never_wait_for_each_other_and_resolvable_ones_leave_earliest_first(
+) -> Result<()> {
     let now_ms = get_epoch_ms();
     let first_stranger = SessionSk::new_with_seckey(&SecretKey::random())?;
     let second_stranger = SessionSk::new_with_seckey(&SecretKey::random())?;
@@ -615,7 +610,7 @@ fn test_held_frames_do_not_block_resolvable_ones_and_leave_in_arrival_order() ->
         expect_held(receiver.arrive(origin_referenced(&third)?, 3u8, now_ms)?),
         digests([first_stranger.session().digest()?])
     );
-    let ready_frame = received(&ready, ready.sessions().map(inline))?;
+    let ready_frame = received(&ready, ready.sessions().map(SessionRef::inline))?;
     expect_resolved(receiver.arrive(ready_frame, 4u8, now_ms)?);
     assert_eq!(receiver.held_len(), 3);
 
@@ -779,10 +774,11 @@ fn test_sweep_drops_frames_past_the_hold_timeout_or_their_proof() -> Result<()> 
     assert_eq!(receiver.sweep(later_ms + 1), vec![0]);
     assert_eq!(receiver.held_len(), 1);
 
-    // The late frame's proof lapses long before its hold timeout would matter again.
+    // A hold timeout longer than the proof's lifetime: the proof lapses first.
     let lapsed_ms = late.verification.ts_ms + u128::from(late.verification.ttl_ms) + 1;
+    let hold_outlasting_the_proof_ms = u128::from(late.verification.ttl_ms).saturating_mul(2);
     let mut lapsed_receiver: ReferencedSessions<u8> =
-        ReferencedSessions::new(HOLD_CAPACITY, lapsed_ms.saturating_mul(2));
+        ReferencedSessions::new(HOLD_CAPACITY, hold_outlasting_the_proof_ms);
     expect_held(lapsed_receiver.arrive(origin_referenced(&late)?, 2u8, now_ms)?);
     assert!(lapsed_receiver.sweep(lapsed_ms - 1).is_empty());
     assert_eq!(lapsed_receiver.sweep(lapsed_ms), vec![2]);

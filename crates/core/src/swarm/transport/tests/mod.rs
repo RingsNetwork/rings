@@ -645,7 +645,18 @@ async fn pending_peer(
     transport: &Arc<SwarmTransport>,
     app_callback: &Arc<CountingSwarmCallback>,
 ) -> Result<PendingPeer> {
-    let peer_key = SecretKey::random();
+    pending_peer_with_key(transport, app_callback, SecretKey::random()).await
+}
+
+/// A pending handshake with the peer behind `peer_key`, on a fresh connection generation and a
+/// fresh callback bound to it: called twice with one key, the second is the next generation
+/// of the same peer.
+#[cfg(feature = "dummy")]
+async fn pending_peer_with_key(
+    transport: &Arc<SwarmTransport>,
+    app_callback: &Arc<CountingSwarmCallback>,
+    peer_key: SecretKey,
+) -> Result<PendingPeer> {
     let peer: Did = peer_key.address().into();
     let session = SessionSk::new_with_seckey(&peer_key)?;
     let offer_callback = InnerSwarmCallback::new(Arc::clone(transport), app_callback.clone());

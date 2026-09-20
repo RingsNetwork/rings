@@ -60,9 +60,15 @@ mod spawn;
 #[cfg(test)]
 mod test_trace;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use test_trace::emitted_link_control_for_test;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use test_trace::outbound_submit_count_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(crate) use test_trace::referenced_frame_total_for_test;
+pub(super) use test_trace::record_emitted_link_control;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use test_trace::referenced_links_for_test;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use test_trace::referenced_origins_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use test_trace::referenced_slots_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -355,6 +361,10 @@ impl OutboundSchedulers {
         let (sender, receiver) = mailbox::channel();
         let stop = StopSource::new();
         let cancel_requested = Arc::new(AtomicBool::new(false));
+        // A worker replaced under an unchanged connection generation starts with an empty
+        // announced table while the peer's table still holds what the old worker sent: the
+        // peer resolves those references as before, and a question about one is answered
+        // `Unknown` from the new table, which the miss path takes as any disclaimer.
         let announced = SharedAnnouncedSessions::new();
         let state = Arc::new(OutboundPeerState {
             #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]

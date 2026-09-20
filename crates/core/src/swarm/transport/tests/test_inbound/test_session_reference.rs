@@ -2,8 +2,6 @@
 //! hold behind a miss, and the link-control frames that repair it. Every wait is on the
 //! application callback's delivery event.
 
-use std::borrow::Cow;
-
 use super::*;
 use crate::message::HopBudget;
 use crate::message::LinkControl;
@@ -13,6 +11,8 @@ use crate::message::PerSlot;
 use crate::message::SessionRef;
 use crate::message::Transaction;
 use crate::message::WirePayload;
+use crate::swarm::callback::SESSION_HOLD_CAPACITY;
+use crate::swarm::transport::emitted_link_control_for_test;
 
 /// The frame bytes of `payload` with both session slots sent by reference.
 fn referenced_wire(payload: &MessagePayload) -> Result<Vec<u8>> {
@@ -31,7 +31,7 @@ fn referenced_wire(payload: &MessagePayload) -> Result<Vec<u8>> {
 fn hop_referenced_wire(payload: &MessagePayload) -> Result<Vec<u8>> {
     let sessions = payload.sessions();
     let references = PerSlot {
-        origin: SessionRef::Inline(Cow::Borrowed(sessions.origin)),
+        origin: SessionRef::inline(sessions.origin),
         hop: SessionRef::Digest(sessions.hop.digest()?),
     };
     WirePayload::view(payload, references)
@@ -139,7 +139,9 @@ async fn test_missed_session_holds_frames_until_the_peer_announces_it() -> Resul
     Ok(())
 }
 
-/// Miss on the hop slot alone is held and repaired the same way.
+/// Miss on the hop slot alone is held and repaired the same way, and the released frame's
+/// inline slot is confirmed to the peer as an arriving frame's would be: the question it
+/// raised is asked once, on arrival, and the confirmation is emitted on release.
 #[tokio::test]
 async fn test_missed_hop_session_is_repaired_by_announcement() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
@@ -148,10 +150,16 @@ async fn test_missed_hop_session_is_repaired_by_announcement() -> Result<()> {
     let app_callback = Arc::new(CountingSwarmCallback::default());
     let pending = pending_peer(&transport, &app_callback).await?;
     pending.admit(&transport).await?;
+    let digest = pending.session.session().digest()?;
+    let emitted_before = emitted_link_control_for_test().len();
 
     let missed = custom_payload(&pending, &transport, b"hop-missed")?;
     pending.receive(&hop_referenced_wire(&missed)?).await?;
     assert_eq!(pending.callback.session_hold_count_for_test(), 1);
+    assert_eq!(
+        emitted_link_control_for_test().split_off(emitted_before),
+        vec![(pending.peer, LinkControl::Request(digest))]
+    );
 
     let announcement = LinkControl::Announce(pending.session.session()).to_wire()?;
     pending.receive(announcement.as_ref()).await?;
@@ -160,14 +168,119 @@ async fn test_missed_hop_session_is_repaired_by_announcement() -> Result<()> {
     assert_eq!(app_callback.inbound_custom_data()?, vec![
         b"hop-missed".to_vec()
     ]);
+    assert_eq!(
+        emitted_link_control_for_test().split_off(emitted_before),
+        vec![
+            (pending.peer, LinkControl::Request(digest)),
+            (pending.peer, LinkControl::Known(digest)),
+        ]
+    );
     transport.disconnect(pending.peer).await?;
+    Ok(())
+}
+
+/// Law (bound): a frame that finds the hold full is dropped and charged to the peer, and the
+/// oldest held frame's question is asked again; what is held stays held.
+#[tokio::test]
+async fn test_hold_overflow_drops_the_newcomer_charged_and_asks_the_oldest_question_again(
+) -> Result<()> {
+    let measure = Arc::new(RecordingMeasure::default());
+    let transport = Arc::new(transport_with_measure(measure.clone())?);
+    let app_callback = Arc::new(CountingSwarmCallback::default());
+    let pending = pending_peer(&transport, &app_callback).await?;
+    pending.admit(&transport).await?;
+    // The peer's own session is taught first, so each held frame misses its origin alone.
+    pending
+        .receive(&pending.custom_message_wire(&transport, b"teach-the-hop")?)
+        .await?;
+    app_callback.wait_for_inbounds_at_least(1).await;
+    let emitted_before = emitted_link_control_for_test().len();
+
+    let oldest_stranger = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let oldest_digest = oldest_stranger.session().digest()?;
+    let oldest = stranger_payload(&pending, &transport, &oldest_stranger, b"oldest")?;
+    pending.receive(&referenced_wire(&oldest)?).await?;
+    for held in 1..SESSION_HOLD_CAPACITY {
+        let stranger = SessionSk::new_with_seckey(&SecretKey::random())?;
+        let data = format!("held-{held}");
+        let missed = stranger_payload(&pending, &transport, &stranger, data.as_bytes())?;
+        pending.receive(&referenced_wire(&missed)?).await?;
+    }
+    assert_eq!(
+        pending.callback.session_hold_count_for_test(),
+        SESSION_HOLD_CAPACITY
+    );
+    assert!(!measure
+        .snapshot_counters()?
+        .contains(&(pending.peer, MeasureCounter::FailedToReceive)));
+
+    let newcomer_stranger = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let newcomer = stranger_payload(&pending, &transport, &newcomer_stranger, b"newcomer")?;
+    pending.receive(&referenced_wire(&newcomer)?).await?;
+
+    assert_eq!(
+        pending.callback.session_hold_count_for_test(),
+        SESSION_HOLD_CAPACITY
+    );
+    assert!(measure
+        .snapshot_counters()?
+        .contains(&(pending.peer, MeasureCounter::FailedToReceive)));
+    assert_eq!(
+        emitted_link_control_for_test().last(),
+        Some(&(pending.peer, LinkControl::Request(oldest_digest)))
+    );
+    assert!(!emitted_link_control_for_test()
+        .split_off(emitted_before)
+        .contains(&(
+            pending.peer,
+            LinkControl::Request(newcomer_stranger.session().digest()?)
+        )));
+    assert_eq!(app_callback.inbounds(), 1);
+    transport.disconnect(pending.peer).await?;
+    Ok(())
+}
+
+/// Law (scope): the receiver's table lives in the callback of one connection generation. A
+/// session the peer's previous generation carried inline is unknown to the next generation of
+/// the same peer: a reference to it there is a miss, held and asked about, never resolved
+/// from the old generation's table.
+#[tokio::test]
+async fn test_receiver_table_does_not_outlive_the_connection_generation() -> Result<()> {
+    let transport = Arc::new(transport_with_measure(Arc::new(
+        RecordingMeasure::default(),
+    ))?);
+    let app_callback = Arc::new(CountingSwarmCallback::default());
+    let peer_key = SecretKey::random();
+    let first = pending_peer_with_key(&transport, &app_callback, peer_key.clone()).await?;
+    first.admit(&transport).await?;
+    first
+        .receive(&first.custom_message_wire(&transport, b"inline")?)
+        .await?;
+    app_callback.wait_for_inbounds_at_least(1).await;
+    transport.disconnect(first.peer).await?;
+
+    let next = pending_peer_with_key(&transport, &app_callback, peer_key).await?;
+    next.admit(&transport).await?;
+    let digest = next.session.session().digest()?;
+    let emitted_before = emitted_link_control_for_test().len();
+    let referenced = custom_payload(&next, &transport, b"referenced-on-the-next-generation")?;
+    next.receive(&referenced_wire(&referenced)?).await?;
+
+    assert_eq!(next.callback.session_hold_count_for_test(), 1);
+    assert_eq!(app_callback.inbounds(), 1);
+    assert_eq!(
+        emitted_link_control_for_test().split_off(emitted_before),
+        vec![(next.peer, LinkControl::Request(digest))]
+    );
+    transport.disconnect(next.peer).await?;
     Ok(())
 }
 
 /// A peer that disclaims the session it referenced fails the frames that await it, and the
 /// failure is charged to that peer; frames that resolve are unaffected.
 #[tokio::test]
-async fn test_disclaimed_session_fails_awaiting_frames_and_releases_the_rest() -> Result<()> {
+async fn test_disclaimed_session_fails_awaiting_frames_and_leaves_resolved_ones_unaffected(
+) -> Result<()> {
     let measure = Arc::new(RecordingMeasure::default());
     let transport = Arc::new(transport_with_measure(measure.clone())?);
     let app_callback = Arc::new(CountingSwarmCallback::default());
@@ -224,7 +337,9 @@ async fn test_unsolicited_announcement_does_not_populate_the_link() -> Result<()
 /// Law (bound in time): a frame held for a session the peer never supplies is dropped by the
 /// inbound actor's periodic sweep once it waited past the hold timeout, charged to the peer as
 /// a receive failure, and its transport lease goes with it. The sweep reads the injected clock,
-/// so advancing it past the timeout is the whole event; the wait is on the cleanup pass.
+/// so advancing it past the timeout is the whole event; the wait is for two cleanup passes,
+/// since the one in progress may have read the clock before it advanced, and the one after it
+/// began after it did.
 #[tokio::test]
 async fn test_frames_held_past_the_timeout_are_swept_and_charged() -> Result<()> {
     let measure = Arc::new(RecordingMeasure::default());
@@ -261,7 +376,7 @@ async fn test_frames_held_past_the_timeout_are_swept_and_charged() -> Result<()>
         crate::swarm::transport::SESSION_HOLD_TIMEOUT.as_millis() + 1;
     pending
         .callback
-        .await_reassembly_cleanup_passes_for_test(|passes| passes > passes_before)
+        .await_reassembly_cleanup_passes_for_test(|passes| passes >= passes_before + 2)
         .await;
 
     assert_eq!(pending.callback.session_hold_count_for_test(), 0);

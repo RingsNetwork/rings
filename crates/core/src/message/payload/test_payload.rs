@@ -322,7 +322,7 @@ fn test_unprefixed_transaction_shape_is_rejected_by_hard_cutover() -> Result<()>
 
     assert!(matches!(
         MessagePayload::from_wire(&legacy_wire),
-        Err(Error::LegacyTransactionWireFormat)
+        Err(Error::UnmarkedFrame)
     ));
     Ok(())
 }

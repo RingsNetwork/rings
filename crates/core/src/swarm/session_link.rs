@@ -40,11 +40,15 @@
 //!
 //! Law (superset): `R` keeps [`REFERENCED_TABLE_CAPACITY`] sessions and `S` only
 //! [`ANNOUNCED_TABLE_CAPACITY`], half as many, under the same least-recently-referenced order
-//! over the same frames. `S` therefore stops referencing a session (and sends it inline again)
-//! before `R` could have forgotten it, so a miss needs something outside the tables: the two
+//! over the frames both ends saw: `S` touches a session on every frame it encodes, `R` on every
+//! frame it resolved or verified. On a lossless link `S` therefore stops referencing a session
+//! (and sends it inline again) before `R` could have forgotten it. A frame lost on the link
+//! touches `S` and not `R`, so under loss the two orders drift and `R` may evict a session `S`
+//! still references; that miss is answered from `S`, which still holds it, and costs one round
+//! trip and no charge. A miss `S` cannot answer needs something outside the tables: the two
 //! ends disagreeing on expiry, or a peer that does not follow the protocol. The miss path is
-//! that safety net, and it is repaired on the link: the held frame asks, the sender answers
-//! from `S` (which still holds whatever it referenced recently) or disclaims.
+//! the safety net for all of these, and it is repaired on the link: the held frame asks, the
+//! sender answers from `S` or disclaims.
 //!
 //! Law (admission): `R` learns only from frames that verified, or from an announcement some
 //! held frame awaits whose delegation verifies; `S` marks only digests it announced. Nothing an
@@ -54,15 +58,16 @@
 //! claims. Law (questions): every held frame asks for its own missing digests once, on arrival
 //! (one lost question is repaired by the next frame that misses the same digest), and a frame
 //! that finds the hold full asks the oldest held frame's question again; answers are one frame
-//! per question. Law (order): held frames leave in arrival order relative to each other, and
-//! never block a frame that resolves, because the link promises no order. Law (expiry): an
+//! per question. Law (order): a held frame never waits for a frame held before it, and never
+//! blocks a frame that resolves; among the frames resolvable at one instant, the earliest
+//! arrival leaves first. The link promises no order, so nothing downstream may rely on more
+//! than this. Law (expiry): an
 //! expired session is absent from both tables, so a reference to it is a miss and its
 //! re-announcement is judged like any other: by [`Session::verify_self_at`], which refuses it.
 //! Expiry forces a fresh delegation and never resurrects an old one.
 //!
 //! Time is an argument of every step, never read here.
 
-use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
 
@@ -87,6 +92,9 @@ pub(crate) const REFERENCED_TABLE_CAPACITY: usize = 2 * ANNOUNCED_TABLE_CAPACITY
 
 /// The digests of a set of sessions: what a frame asks for, awaits, or confirms.
 pub(crate) type Digests = BTreeSet<SessionDigest>;
+
+/// The receiver's table: what it knows carries no annotation.
+type KnownSessions = SessionTable<()>;
 
 /// A bounded map `SessionDigest ⇀ Session × A`, ordered from least to most recently
 /// referenced, where `A` is what one end of the link annotates a session with.
@@ -254,7 +262,7 @@ impl AnnouncedSessions {
         now_ms: u128,
     ) -> Result<PerSlot<SessionRef<'a>>> {
         if !self.enter(generation) {
-            return Ok(payload.sessions().map(inline));
+            return Ok(payload.sessions().map(SessionRef::inline));
         }
         self.announced.evict_expired(now_ms);
         let sessions = payload.sessions();
@@ -276,7 +284,7 @@ impl AnnouncedSessions {
         Ok(if acknowledged {
             SessionRef::Digest(digest)
         } else {
-            inline(session)
+            SessionRef::inline(session)
         })
     }
 
@@ -303,11 +311,6 @@ impl AnnouncedSessions {
                 LinkControl::Announce(entry.session.clone())
             })
     }
-}
-
-/// `session`, inline.
-fn inline(session: &Session) -> SessionRef<'_> {
-    SessionRef::Inline(Cow::Borrowed(session))
 }
 
 /// A frame the receiver resolved, with everything the rest of the inbound pipeline needs.
@@ -348,22 +351,41 @@ struct HeldFrame<F> {
 }
 
 impl<F> HeldFrame<F> {
-    /// The digests this frame misses in `known` at `now_ms`.
-    fn missing(&self, known: &SessionTable<()>, now_ms: u128) -> Digests {
-        missing_digests(self.frame.as_ref(), known, now_ms)
+    /// The digests this frame misses in `known` at `now_ms`: its question.
+    fn missing(&self, known: &KnownSessions, now_ms: u128) -> Digests {
+        missing_references(self.frame.as_ref(), known, now_ms).collect()
     }
 
-    /// Whether the frame has waited past `hold_timeout_ms` at `now_ms`, or its proof lapsed.
-    fn is_stale_at(&self, now_ms: u128, hold_timeout_ms: u128) -> bool {
+    /// Whether `digest` is one of the sessions this frame misses in `known` at `now_ms`.
+    fn awaits(&self, digest: SessionDigest, known: &KnownSessions, now_ms: u128) -> bool {
+        missing_references(self.frame.as_ref(), known, now_ms).any(|missing| missing == digest)
+    }
+
+    /// Whether every reference of this frame resolves in `known` at `now_ms`.
+    fn is_resolvable(&self, known: &KnownSessions, now_ms: u128) -> bool {
+        missing_references(self.frame.as_ref(), known, now_ms)
+            .next()
+            .is_none()
+    }
+
+    /// Whether the frame has waited past `hold_timeout_ms` at `now_ms`.
+    fn waited_past(&self, hold_timeout_ms: u128, now_ms: u128) -> bool {
         now_ms.saturating_sub(self.held_at_ms) > hold_timeout_ms
-            || !self.frame.hop_proof_lifetime().is_live_at(now_ms)
+    }
+
+    /// Whether the frame's hop proof, the peer's own, lapsed at `now_ms`. The hop proof is the
+    /// only one judged here: it is the peer's promise about this frame, and a lapsed one would
+    /// fail verification on release whatever the origin's says. The origin's proof is judged
+    /// on release, as inline.
+    fn proof_lapsed_at(&self, now_ms: u128) -> bool {
+        !self.frame.hop_proof_lifetime().is_live_at(now_ms)
     }
 }
 
 /// The receiving end of one link: the sessions it has carried inline, as the receiver verified
 /// them, and the frames waiting for one of them. See the module documentation for the laws.
 pub(crate) struct ReferencedSessions<F> {
-    known: SessionTable<()>,
+    known: KnownSessions,
     held: VecDeque<HeldFrame<F>>,
     hold_capacity: usize,
     /// How long a frame may wait for an answer: the answer is one round trip away, so a frame
@@ -372,7 +394,13 @@ pub(crate) struct ReferencedSessions<F> {
 }
 
 /// The digests among `frame`'s slots that are not live in `known` at `now_ms`.
-fn missing_digests(frame: &WirePayload<'_>, known: &SessionTable<()>, now_ms: u128) -> Digests {
+/// The referenced sessions of `frame` that `known` does not hold live at `now_ms`, origin slot
+/// first.
+fn missing_references<'a>(
+    frame: &'a WirePayload<'_>,
+    known: &'a KnownSessions,
+    now_ms: u128,
+) -> impl Iterator<Item = SessionDigest> + 'a {
     frame
         .session_refs()
         .into_array()
@@ -381,8 +409,19 @@ fn missing_digests(frame: &WirePayload<'_>, known: &SessionTable<()>, now_ms: u1
             SessionRef::Inline(_) => None,
             SessionRef::Digest(digest) => Some(*digest),
         })
-        .filter(|digest| known.live(*digest, now_ms).is_none())
-        .collect()
+        .filter(move |digest| known.live(*digest, now_ms).is_none())
+}
+
+/// Remove every frame of `held` satisfying `dropped`, keeping the order of the rest, and
+/// return the carriers of the removed frames in their arrival order.
+fn drop_held<F>(
+    held: &mut VecDeque<HeldFrame<F>>,
+    dropped: impl Fn(&HeldFrame<F>) -> bool,
+) -> Vec<F> {
+    let (dropped, kept): (VecDeque<_>, VecDeque<_>) =
+        std::mem::take(held).into_iter().partition(dropped);
+    *held = kept;
+    dropped.into_iter().map(|held| held.carrier).collect()
 }
 
 impl<F> ReferencedSessions<F> {
@@ -399,7 +438,7 @@ impl<F> ReferencedSessions<F> {
 
     /// Resolve `frame` against the table at `now_ms`, recording each reference.
     ///
-    /// Pre: `missing_digests(frame, known, now_ms)` is empty; otherwise the first missing digest
+    /// Pre: `missing_references(frame, known, now_ms)` is empty; otherwise the first missing digest
     /// is reported as [`Error::SessionReferenceUnresolved`].
     fn resolve(
         &mut self,
@@ -436,7 +475,7 @@ impl<F> ReferencedSessions<F> {
         carrier: F,
         now_ms: u128,
     ) -> Result<FrameArrival<F>> {
-        let missing = missing_digests(frame.as_ref(), &self.known, now_ms);
+        let missing: Digests = missing_references(frame.as_ref(), &self.known, now_ms).collect();
         if missing.is_empty() {
             return self
                 .resolve(frame, carrier, now_ms)
@@ -487,18 +526,7 @@ impl<F> ReferencedSessions<F> {
     fn is_awaited(&self, digest: SessionDigest, now_ms: u128) -> bool {
         self.held
             .iter()
-            .any(|held| held.missing(&self.known, now_ms).contains(&digest))
-    }
-
-    /// Remove every held frame satisfying `dropped`, given the table, keeping the order of the
-    /// rest.
-    fn drop_held(&mut self, dropped: impl Fn(&SessionTable<()>, &HeldFrame<F>) -> bool) -> Vec<F> {
-        let known = &self.known;
-        let (dropped, kept): (VecDeque<_>, VecDeque<_>) = std::mem::take(&mut self.held)
-            .into_iter()
-            .partition(|held| dropped(known, held));
-        self.held = kept;
-        dropped.into_iter().map(|held| held.carrier).collect()
+            .any(|held| held.awaits(digest, &self.known, now_ms))
     }
 
     /// The peer announced `session` at `now_ms`.
@@ -524,24 +552,27 @@ impl<F> ReferencedSessions<F> {
     /// The peer disclaimed `digest` at `now_ms`: the frames awaiting it, to be failed. A
     /// disclaimer of a digest nothing awaits drops nothing.
     pub(crate) fn unknown(&mut self, digest: SessionDigest, now_ms: u128) -> Vec<F> {
-        self.drop_held(|known, held| held.missing(known, now_ms).contains(&digest))
+        let known = &self.known;
+        drop_held(&mut self.held, |held| held.awaits(digest, known, now_ms))
     }
 
     /// Drop every frame that has waited past the hold timeout at `now_ms`, or whose proof
     /// lapsed: the frames to be failed. This is the sweep the module's bound law names.
     pub(crate) fn sweep(&mut self, now_ms: u128) -> Vec<F> {
         let hold_timeout_ms = self.hold_timeout_ms;
-        self.drop_held(|_, held| held.is_stale_at(now_ms, hold_timeout_ms))
+        drop_held(&mut self.held, |held| {
+            held.waited_past(hold_timeout_ms, now_ms) || held.proof_lapsed_at(now_ms)
+        })
     }
 
-    /// The oldest held frame that resolves at `now_ms`; `None` when every held frame still
-    /// waits.
+    /// The earliest-arrived held frame that resolves at `now_ms`; `None` when every held frame
+    /// still waits. See the order law.
     pub(crate) fn release_next(&mut self, now_ms: u128) -> Result<Option<Box<ResolvedFrame<F>>>> {
         let known = &self.known;
         let Some(position) = self
             .held
             .iter()
-            .position(|held| held.missing(known, now_ms).is_empty())
+            .position(|held| held.is_resolvable(known, now_ms))
         else {
             return Ok(None);
         };

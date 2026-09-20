@@ -49,7 +49,13 @@ impl SharedAnnouncedSessions {
     ) -> Result<Bytes> {
         let sessions = self.lock().encode(generation, payload, now_ms)?;
         #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-        super::test_trace::record_encoded_frame(payload.relay.next_hop, &sessions);
+        super::test_trace::record_encoded_frame(
+            (
+                crate::message::MessageVerificationExt::signer(payload),
+                payload.relay.next_hop,
+            ),
+            &sessions,
+        );
         WirePayload::view(payload, sessions).to_wire()
     }
 }
@@ -92,7 +98,7 @@ impl OutboundSchedulers {
                 announced.lock().answer(generation, digest, now_ms)
             });
         #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-        super::test_trace::record_session_answer(&answer);
+        super::test_trace::record_session_answer();
         answer
     }
 }

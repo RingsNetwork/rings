@@ -15,6 +15,7 @@ use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::successor::SuccessorReader;
 use crate::dht::Chord;
+use crate::dht::Did;
 use crate::dht::PeerRingAction;
 use crate::dht::StorageRepairOutcome;
 use crate::dht::StorageSyncDestination;
@@ -48,6 +49,7 @@ use crate::simulation::SimulationRuntimeGuard;
 use crate::simulation::CONTROL_DEADLINE_MS;
 use crate::storage::MemStorage;
 use crate::swarm::transport::outbound_submit_count_for_test;
+use crate::swarm::transport::referenced_links_for_test;
 use crate::swarm::transport::reset_outbound_submit_count_for_test;
 use crate::swarm::transport::TrackedStorageSyncOutcome;
 use crate::swarm::transport::OUTBOUND_CONTROL_BURST;
@@ -258,6 +260,8 @@ struct ScenarioOutcome {
     pressure_snapshot: serde_json::Value,
     recovery_elapsed_ms: u128,
     overload_witness: &'static str,
+    /// The link directions on which some payload frame went by reference during the scenario.
+    referenced_links: BTreeSet<(Did, Did)>,
 }
 
 impl ScenarioOutcome {
@@ -440,7 +444,7 @@ async fn drain_teardown(runtime: &SimulationRuntimeGuard, nodes: &[Node]) {
 
 fn model_class(class: ScheduledDeliveryClass) -> Option<SimTransferClass> {
     match class {
-        ScheduledDeliveryClass::Lifecycle => None,
+        ScheduledDeliveryClass::Lifecycle | ScheduledDeliveryClass::LinkControl => None,
         ScheduledDeliveryClass::Control => Some(SimTransferClass::Control),
         ScheduledDeliveryClass::Storage => Some(SimTransferClass::Storage),
         ScheduledDeliveryClass::Reassembly => Some(SimTransferClass::Reassembly),
@@ -948,9 +952,11 @@ fn assert_enabled_outcome(outcome: &ScenarioOutcome) {
     let diagnostic = outcome.diagnostic();
     let snapshot = outcome.state.snapshot();
     // The storm ran over links that reached session references, so the reference protocol,
-    // not the all-inline encoding, is what the adversarial schedule exercised.
+    // not the all-inline encoding, is what the adversarial schedule exercised. Every link
+    // direction of the topology carries the join traffic and then the storm, so every one of
+    // them switched; the set is the scenario's own, not the thread's.
     assert!(
-        crate::swarm::transport::referenced_frame_total_for_test() > 0,
+        !outcome.referenced_links.is_empty(),
         "no payload frame was sent by reference during the scenario; {diagnostic}"
     );
     assert!(

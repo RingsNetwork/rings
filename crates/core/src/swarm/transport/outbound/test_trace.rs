@@ -18,17 +18,24 @@ use crate::message::PerSlot;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::message::SessionRef;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-use crate::message::SlotEncoding;
+use crate::session::SessionDigest;
+
+/// One direction of one link, as the sending end names it: `(this node, next hop)`.
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+pub(crate) type LinkDirection = (Did, Did);
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 thread_local! {
     static OUTBOUND_SUBMIT_COUNT: Cell<usize> = const { Cell::new(0) };
     /// Session questions this thread's nodes answered, with an announcement or a disclaimer.
     static SESSION_ANSWER_COUNT: Cell<usize> = const { Cell::new(0) };
-    /// Per link peer, the payload frames this thread's nodes encoded with each slot by
-    /// reference.
-    static REFERENCED_SLOTS: RefCell<BTreeMap<Did, PerSlot<usize>>> =
+    /// Per link direction, the digests this thread's nodes put in each slot of a payload frame,
+    /// one entry per frame whose slot went by reference.
+    static REFERENCED_SLOTS: RefCell<BTreeMap<LinkDirection, PerSlot<Vec<SessionDigest>>>> =
         const { RefCell::new(BTreeMap::new()) };
+    /// Every link-control frame this thread's nodes emitted, with the peer it went to.
+    static EMITTED_LINK_CONTROL: RefCell<Vec<(Did, LinkControl)>> =
+        const { RefCell::new(Vec::new()) };
 }
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
@@ -53,53 +60,101 @@ pub(crate) fn session_answer_count_for_test() -> usize {
     SESSION_ANSWER_COUNT.with(Cell::get)
 }
 
-/// Per link peer, how many payload frames this thread's nodes encoded with the origin slot and
-/// with the hop slot by reference: the observable that a link switched from inline to
-/// references, slot by slot.
+/// Per link direction, how many payload frames went with the origin slot and with the hop slot
+/// by reference: the observable that a link switched from inline to references, slot by slot.
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-pub(crate) fn referenced_slots_for_test(peer: Did) -> PerSlot<usize> {
+pub(crate) fn referenced_slots_for_test(link: LinkDirection) -> PerSlot<usize> {
     REFERENCED_SLOTS.with(|slots| {
         slots
             .borrow()
-            .get(&peer)
-            .copied()
-            .unwrap_or(PerSlot { origin: 0, hop: 0 })
+            .get(&link)
+            .map_or(PerSlot { origin: 0, hop: 0 }, |digests| PerSlot {
+                origin: digests.origin.len(),
+                hop: digests.hop.len(),
+            })
     })
 }
 
-/// The payload frames encoded with at least one slot by reference on this test thread so far,
-/// over every link: the observable that references ran at all.
+/// The sessions that went by reference in the origin slot on `link`: the observable that a
+/// forwarding hop referenced a session that is not its own.
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-pub(crate) fn referenced_frame_total_for_test() -> usize {
+pub(crate) fn referenced_origins_for_test(link: LinkDirection) -> BTreeSet<SessionDigest> {
     REFERENCED_SLOTS.with(|slots| {
         slots
             .borrow()
-            .values()
-            .map(|counts| counts.origin.max(counts.hop))
-            .sum()
+            .get(&link)
+            .map(|digests| digests.origin.iter().copied().collect())
+            .unwrap_or_default()
     })
 }
 
-/// Count a frame encoded as `sessions` for `peer` on this test thread, slot by slot.
+/// Per link direction, the referenced-slot counts of [`referenced_slots_for_test`], for every
+/// link this test thread has seen. The counts only grow, so a scenario that reads them before
+/// and after itself learns on which links references happened during it, whatever earlier
+/// scenarios on the same thread, with the same deterministic node keys, did.
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-pub(super) fn record_encoded_frame(peer: Did, sessions: &PerSlot<SessionRef<'_>>) {
+pub(crate) fn referenced_links_for_test() -> BTreeMap<LinkDirection, PerSlot<usize>> {
+    REFERENCED_SLOTS.with(|slots| {
+        slots
+            .borrow()
+            .iter()
+            .map(|(link, digests)| {
+                (*link, PerSlot {
+                    origin: digests.origin.len(),
+                    hop: digests.hop.len(),
+                })
+            })
+            .collect()
+    })
+}
+
+/// Every link-control frame emitted on this test thread so far, in emission order, with the
+/// peer it was addressed to.
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+pub(crate) fn emitted_link_control_for_test() -> Vec<(Did, LinkControl)> {
+    EMITTED_LINK_CONTROL.with(|emitted| emitted.borrow().clone())
+}
+
+/// The digest a slot was sent as, if it went by reference.
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+fn referenced_digest(slot: &SessionRef<'_>) -> Option<SessionDigest> {
+    match slot {
+        SessionRef::Digest(digest) => Some(*digest),
+        SessionRef::Inline(_) => None,
+    }
+}
+
+/// Count the referenced slots of a frame encoded as `sessions` on `link`.
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+pub(super) fn record_encoded_frame(link: LinkDirection, sessions: &PerSlot<SessionRef<'_>>) {
+    let referenced = PerSlot {
+        origin: referenced_digest(&sessions.origin),
+        hop: referenced_digest(&sessions.hop),
+    };
+    if referenced.origin.is_none() && referenced.hop.is_none() {
+        return;
+    }
     REFERENCED_SLOTS.with(|slots| {
         let mut slots = slots.borrow_mut();
-        let counts = slots.entry(peer).or_insert(PerSlot { origin: 0, hop: 0 });
-        if sessions.origin.encoding() == SlotEncoding::Referenced {
-            counts.origin = counts.origin.saturating_add(1);
-        }
-        if sessions.hop.encoding() == SlotEncoding::Referenced {
-            counts.hop = counts.hop.saturating_add(1);
-        }
+        let digests = slots.entry(link).or_insert(PerSlot {
+            origin: Vec::new(),
+            hop: Vec::new(),
+        });
+        digests.origin.extend(referenced.origin);
+        digests.hop.extend(referenced.hop);
     });
 }
 
-/// Count `answer` on this test thread.
+/// Count one answered session question on this test thread.
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-pub(super) fn record_session_answer(answer: &LinkControl) {
-    let _answer = answer;
+pub(super) fn record_session_answer() {
     SESSION_ANSWER_COUNT.with(|count| count.set(count.get().saturating_add(1)));
+}
+
+/// Record `control` as emitted to `peer` on this test thread.
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+pub(crate) fn record_emitted_link_control(peer: Did, control: &LinkControl) {
+    EMITTED_LINK_CONTROL.with(|emitted| emitted.borrow_mut().push((peer, control.clone())));
 }
 
 type FrameAdmission = (TransferClass, u64, usize);
@@ -290,6 +345,8 @@ fn test_replacement_workers_receive_disjoint_transfer_id_ranges() {
     assert!(first.abs_diff(second) >= WORKER_ID_STRIDE);
 }
 
+/// The default test build has no `simulation_pressure` module, so this accessor lives with the
+/// other test-only observables that every native test build compiles.
 #[cfg(not(target_family = "wasm"))]
 impl crate::swarm::transport::SwarmTransport {
     pub(crate) fn outbound_admitted_transfer_total_for_test(&self) -> usize {

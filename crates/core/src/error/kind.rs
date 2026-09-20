@@ -137,9 +137,9 @@ pub enum Error {
     #[error(transparent)]
     ProvisionalEvidence(#[from] rings_measure::EvidenceError),
 
-    /// The frame carries neither the current payload marker nor the link-control marker.
-    #[error("Legacy transaction wire format is not accepted")]
-    LegacyTransactionWireFormat,
+    /// The frame carries neither the payload marker nor the link-control marker.
+    #[error("Frame carries no rings marker")]
+    UnmarkedFrame,
 
     /// A payload that travels outside any link referenced a session instead of carrying it.
     #[error("Session reference {0:?} cannot be resolved outside the link that announced it")]
