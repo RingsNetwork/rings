@@ -47,7 +47,12 @@ pub(super) async fn await_bounded_connection_close(
     }
 }
 
-enum DhtPeerRemoval {
+/// Which topology removal a retirement performs: an ordinary leave keeps the
+/// surviving successor tail, an unavailable head is replaced by the routable
+/// admitted successors. Visible to the transport module so the rejoin model
+/// composes the same two removals.
+#[cfg_attr(test, derive(Clone, Copy, Debug, Eq, PartialEq))]
+pub(in crate::swarm::transport) enum DhtPeerRemoval {
     /// Remove the peer without selecting a replacement successor.
     Ordinary,
     /// Remove the peer as unreachable and allow the DHT to promote live replacements.

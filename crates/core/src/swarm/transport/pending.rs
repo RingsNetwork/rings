@@ -118,6 +118,7 @@ impl ConnectionLifecycleBoundary {
 /// this token so a late callback from the replaced connection cannot promote
 /// the newer handshake into the active routing set.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[cfg_attr(test, derive(Hash))]
 pub(crate) struct PendingConnectionAttempt {
     /// Peer this logical connection generation is trying to own.
     pub(super) peer: Did,
