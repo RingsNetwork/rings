@@ -26,7 +26,7 @@ use crate::message::Encoded;
 use crate::message::Encoder;
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 use crate::message::Message;
-use crate::message::MessageClass;
+use crate::message::MessageCategory;
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 use crate::message::MessagePayload;
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
@@ -177,8 +177,8 @@ pub fn multi_frame_storage_sync_entries() -> Result<Vec<PlacedEntry>> {
 }
 
 pub fn control_interleaves_transfer(
-    trace: &[(MessageClass, u64, usize)],
-    data_class: MessageClass,
+    trace: &[(MessageCategory, u64, usize)],
+    data_class: MessageCategory,
 ) -> bool {
     trace.iter().enumerate().any(|(first_index, first)| {
         first.0 == data_class
@@ -192,14 +192,14 @@ pub fn control_interleaves_transfer(
                         && later.2 > first.2
                         && trace[first_index.saturating_add(1)..later_index]
                             .iter()
-                            .any(|event| event.0 == MessageClass::DhtControl)
+                            .any(|event| event.0 == MessageCategory::DhtControl)
                 })
     })
 }
 
 pub fn assert_control_interleaves_transfer(
-    trace: &[(MessageClass, u64, usize)],
-    data_class: MessageClass,
+    trace: &[(MessageCategory, u64, usize)],
+    data_class: MessageCategory,
 ) {
     assert!(
         control_interleaves_transfer(trace, data_class),

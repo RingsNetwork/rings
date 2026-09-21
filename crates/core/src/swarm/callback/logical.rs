@@ -95,7 +95,7 @@ impl LogicalInbound {
     ) -> crate::error::Result<()> {
         if self.is_local_destination(payload) {
             let quota_lane = lane
-                .origin_quota_lane()
+                .class()
                 .ok_or(crate::error::Error::InboundActorInvariantViolation)?;
             self.transport
                 .admit_final_transaction(&payload.transaction, quota_lane)

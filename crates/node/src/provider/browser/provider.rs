@@ -142,7 +142,7 @@ impl BrowserOnionDirectoryReader {
         let local = self.processor.did();
         self.processor
             .swarm
-            .connected_peer_dids()
+            .peer_dids()
             .into_iter()
             .filter(|did| *did != local)
             .collect()

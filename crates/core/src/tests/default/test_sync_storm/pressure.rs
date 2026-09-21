@@ -59,7 +59,7 @@ async fn submit_yield_pressure(
         })
         .await
         .expect("yield-pressure sync must enter the real scheduler");
-    let TrackedStorageSyncOutcome::Delivered(storage_tx) = outcome else {
+    let StorageSyncOutcome::Sent(storage_tx) = outcome else {
         panic!("yield-pressure sync must be delivered remotely: {outcome:?}");
     };
     (receiver, keys, storage_tx)
@@ -340,7 +340,7 @@ async fn start_barrier_backlog<'a>(
     FuturesUnordered<ControlledDelivery<'a>>,
     Vec<ScheduledDelivery>,
 ) {
-    dummy_controlled::set_max_message_size(crate::consts::TRANSPORT_MTU);
+    dummy_controlled::set_max_message_size(super::CHUNKED_MAX_MESSAGE_SIZE);
     let large_application = Message::custom(&vec![0x5a; BARRIER_PAYLOAD_BYTES])
         .expect("chunked barrier payload must encode");
     let mut application_send = nodes[sender]

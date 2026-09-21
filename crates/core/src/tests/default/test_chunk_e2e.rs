@@ -33,11 +33,11 @@ use crate::measure::MeasurementEvent;
 use crate::measure::PeerQuality;
 use crate::message::test_probe_request;
 use crate::message::Message;
-use crate::message::MessageClass;
+use crate::message::MessageCategory;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
 use crate::message::SyncEntriesWithSuccessor;
-use crate::swarm::transport::TrackedStorageSyncOutcome;
+use crate::swarm::transport::StorageSyncOutcome;
 use crate::tests::assert_control_interleaves_transfer;
 use crate::tests::default::dummy_hooks::MaxMessageSizeGuard;
 use crate::tests::default::dummy_hooks::PausedDeliveryGuard;
@@ -544,7 +544,7 @@ async fn test_storage_sync_waiting_at_dispatch_defers_when_its_route_disappears(
         .await
         .expect("route cancellation must wake the gated send")
         .expect("the storage sync task must not panic")?;
-    assert_eq!(outcome, TrackedStorageSyncOutcome::Deferred);
+    assert_eq!(outcome, StorageSyncOutcome::Deferred);
     assert_eq!(
         dummy_controlled::sent_count(),
         0,
@@ -599,7 +599,7 @@ async fn test_storage_sync_waiting_at_dispatch_defers_when_transport_loses_readi
         .await
         .expect("readiness cancellation must wake the gated send")
         .expect("the storage sync task must not panic")?;
-    assert_eq!(outcome, TrackedStorageSyncOutcome::Deferred);
+    assert_eq!(outcome, StorageSyncOutcome::Deferred);
     assert_eq!(
         dummy_controlled::sent_count(),
         0,
@@ -694,7 +694,7 @@ async fn test_tracked_storage_sync_does_not_finish_while_a_chunk_tail_is_pending
         .await
         .expect("route cancellation should release the tracked chunk tail")
         .expect("tracked storage sync task should not panic");
-    assert_eq!(send_result?, TrackedStorageSyncOutcome::Deferred);
+    assert_eq!(send_result?, StorageSyncOutcome::Deferred);
     assert_eq!(
         dummy_controlled::sent_count(),
         1,
@@ -726,7 +726,7 @@ async fn test_tracked_storage_sync_timeout_closes_stalled_delivery_generation() 
     .await
     .expect("tracked delivery deadline must bound a stuck delivery future")?;
 
-    assert_eq!(outcome, TrackedStorageSyncOutcome::Deferred);
+    assert_eq!(outcome, StorageSyncOutcome::Deferred);
     assert_eq!(dummy_controlled::sent_count(), 1);
     assert!(node1.swarm.transport.get_connection(node2.did()).is_none());
     assert!(
@@ -926,7 +926,7 @@ async fn test_dht_control_frame_runs_while_storage_transfer_waits_for_delivery()
                 .transport
                 .outbound_frame_trace_for_test(node2.did())
                 .iter()
-                .filter(|(class, _, _)| *class == MessageClass::Storage)
+                .filter(|(class, _, _)| *class == MessageCategory::Storage)
                 .count()
                 >= 2
         },
@@ -936,7 +936,7 @@ async fn test_dht_control_frame_runs_while_storage_transfer_waits_for_delivery()
         .swarm
         .transport
         .take_outbound_frame_trace_for_test(node2.did());
-    assert_control_interleaves_transfer(&trace, MessageClass::Storage);
+    assert_control_interleaves_transfer(&trace, MessageCategory::Storage);
     Ok(())
 }
 

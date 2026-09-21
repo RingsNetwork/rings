@@ -116,8 +116,6 @@ static PAUSED_WORKERS: Mutex<BTreeSet<Did>> = Mutex::new(BTreeSet::new());
 static ACTIVE_TRANSFERS: Mutex<BTreeMap<Did, usize>> = Mutex::new(BTreeMap::new());
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 static SUBMITTED_TRANSFERS: Mutex<BTreeMap<Did, usize>> = Mutex::new(BTreeMap::new());
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-static HANDLED_TRANSFERS: Mutex<BTreeMap<Did, usize>> = Mutex::new(BTreeMap::new());
 static NEXT_WORKER_ID: AtomicU64 = AtomicU64::new(0);
 const WORKER_ID_STRIDE: u64 = 1 << 32;
 
@@ -187,7 +185,6 @@ fn lock_counts(
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 pub(super) fn pause_worker(peer: Did) {
     lock_counts(&SUBMITTED_TRANSFERS).insert(peer, 0);
-    lock_counts(&HANDLED_TRANSFERS).insert(peer, 0);
     lock_paused_workers().insert(peer);
 }
 
@@ -206,26 +203,6 @@ pub(super) fn record_submission(peer: Did) {
     let mut submitted = lock_counts(&SUBMITTED_TRANSFERS);
     let count = submitted.entry(peer).or_default();
     *count = count.saturating_add(1);
-}
-
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-pub(super) fn record_handled_submission(peer: Did) {
-    let mut handled = lock_counts(&HANDLED_TRANSFERS);
-    let count = handled.entry(peer).or_default();
-    *count = count.saturating_add(1);
-}
-
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-fn buffered_submissions(peer: Did) -> usize {
-    let submitted = lock_counts(&SUBMITTED_TRANSFERS)
-        .get(&peer)
-        .copied()
-        .unwrap_or_default();
-    let handled = lock_counts(&HANDLED_TRANSFERS)
-        .get(&peer)
-        .copied()
-        .unwrap_or_default();
-    submitted.saturating_sub(handled)
 }
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
@@ -255,11 +232,6 @@ impl super::super::SwarmTransport {
     #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn resume_outbound_worker_for_test(&self, peer: Did) {
         resume_worker(peer);
-    }
-
-    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) fn outbound_buffered_submissions_for_test(&self, peer: Did) -> usize {
-        buffered_submissions(peer)
     }
 
     #[cfg(all(feature = "dummy", not(target_family = "wasm")))]

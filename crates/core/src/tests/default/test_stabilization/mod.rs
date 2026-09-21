@@ -298,9 +298,11 @@ async fn test_get_and_check_connection_times_out_wedged_data_channel_wait() -> R
     .await
     .map_err(|_| Error::PromiseStateTimeout)?;
 
+    // The send is refused; retirement belongs to stabilization, so the
+    // connection and the successor slot survive one impatient sender.
     assert!(conn.is_none());
-    assert!(!node1.swarm.transport.has_active_connection(node2.did()));
-    assert!(!node1.dht().successors().contains(&node2.did())?);
+    assert!(node1.swarm.transport.has_active_connection(node2.did()));
+    assert!(node1.dht().successors().contains(&node2.did())?);
     Ok(())
 }
 
@@ -333,9 +335,11 @@ async fn test_get_and_check_connection_waits_for_disconnected_open_transport() -
     .await
     .map_err(|_| Error::PromiseStateTimeout)?;
 
+    // The send is refused; retirement belongs to stabilization, so the
+    // connection and the successor slot survive one impatient sender.
     assert!(conn.is_none());
-    assert!(!node1.swarm.transport.has_active_connection(node2.did()));
-    assert!(!node1.dht().successors().contains(&node2.did())?);
+    assert!(node1.swarm.transport.has_active_connection(node2.did()));
+    assert!(node1.dht().successors().contains(&node2.did())?);
     Ok(())
 }
 

@@ -49,24 +49,6 @@ fn admit_raw_frame(
     }
 }
 
-fn retain_remaining_raw_capacity(
-    callback: &InnerTransportCallback,
-    raw: &bytes::Bytes,
-) -> Result<Vec<AdmittedInboundFrame>> {
-    let mut retained = Vec::new();
-    loop {
-        match callback.admit_inbound_frame(raw.clone()) {
-            InboundFrameAdmission::Admitted(frame) => retained.push(frame),
-            InboundFrameAdmission::CapacityExceeded => return Ok(retained),
-            _ => {
-                return Err(Error::InvalidMessage(
-                    "valid raw transport frame became invalid".to_string(),
-                ));
-            }
-        }
-    }
-}
-
 /// Await the core handoff that releases the dispatched frame's raw lease, then
 /// witness the freed capacity with one admission. The lease drop releases
 /// synchronously before the handoff is published, so no retry is needed.
@@ -120,25 +102,21 @@ async fn test_raw_transport_lease_is_held_until_core_capacity_admission() -> Res
     ));
     let frame = admit_raw_frame(&transport_callback, raw.clone())?;
     let dispatch_callback = Arc::clone(&transport_callback);
-    let mut dispatch = Box::pin(async move {
+    let dispatch = tokio::spawn(async move {
         dispatch_callback.handle_admitted_frame(frame).await;
     });
 
-    assert!(futures::poll!(&mut dispatch).is_pending());
+    // The raw lease is released at the core handoff, once core capacity admits
+    // the decoded frame and before the application sees it: the application
+    // lane is still held, so `on_validate` has not started.
+    let released = wait_for_raw_capacity_release(&core_callback, &transport_callback, &raw).await?;
     assert_eq!(core_callback.inbound_admitted_count_for_test(), 1);
-    let dispatch = tokio::spawn(dispatch);
-    let retained = retain_remaining_raw_capacity(&transport_callback, &raw)?;
-    assert!(!retained.is_empty());
-    assert!(matches!(
-        transport_callback.admit_inbound_frame(raw.clone()),
-        InboundFrameAdmission::CapacityExceeded
-    ));
+    assert!(!application.started.is_set());
+    drop(released);
 
     drop(admission_blocker);
     application.started.wait().await;
     assert_eq!(core_callback.inbound_admitted_count_for_test(), 1);
-    let released = wait_for_raw_capacity_release(&core_callback, &transport_callback, &raw).await?;
-    drop((released, retained));
     application.release.set();
     dispatch
         .await
