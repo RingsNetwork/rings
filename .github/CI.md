@@ -50,7 +50,10 @@ stream to `scripts/run-ci-tests.py`. The helper:
   names, and rejects empty selections and ambiguous target names.
 - Saves target, package, profile, features, executable, working directory, all
   test names, ignored names, and the selected names in an inventory artifact.
-- Starts each harness from its Cargo package directory and propagates failures.
+- Starts each harness from its Cargo package directory, restores native dynamic-
+  library search paths (including the active toolchain's `libstd`), and propagates
+  failures. Builds and execution must use the same Rust toolchain;
+  `--target-libdir` can explicitly select its target library directory.
 - Uses no Cargo command during execution. The native job's ignored tests reuse
   exactly the workspace build's executables instead of rebuilding smaller feature
   graphs. A privileged invocation requires one target and one exact ignored test;
@@ -58,12 +61,13 @@ stream to `scripts/run-ci-tests.py`. The helper:
 
 These are native, standard libtest harnesses. The helper does not support custom
 harness protocols, benchmark-only inventories, cross-target runners, or doctests;
-those require a separate explicit execution path. If a dynamically linked test
-target is introduced, its runtime library search environment must also be provided
-explicitly; the current workspace tests use the native executable path.
+those require a separate explicit execution path. Native build-script library paths
+inside the Cargo target directory are preserved. After `sudo`, only the explicit
+loader search variable is restored with `env`; the entire caller environment is
+not forwarded.
 
 Run `python3 scripts/test-ci-tests.py` to check failure guards and exercise a real
-Rust fixture through ordinary, ignored, and failing test selections. Native and
+dynamically linked Rust fixture through ordinary, ignored, and failing selections. Native and
 dummy harness concurrency is capped at two tests per process to limit concurrent
 large searches. This cap is a conservative scheduling choice, not a measured
 memory bound for every future model.

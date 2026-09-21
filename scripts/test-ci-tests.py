@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import ANY
 from unittest.mock import patch
 
 # Load the executable helper without requiring a Python package in scripts/.
@@ -34,13 +35,13 @@ class CoverageGuards(unittest.TestCase):
         }
         self.artifacts.write_text(json.dumps(event) + "\n" + json.dumps(event) + "\n")
         self.args = argparse.Namespace(
-            artifacts=self.artifacts, inventory=self.inventory, target=None,
+            artifacts=self.artifacts, inventory=self.inventory, target=None, target_libdir=self.root / "rustlib",
             filter="", exact=False, ignored=False, sudo=False, nocapture=False, skip=[],
             skip_file=None, require_file=None, list_only=False,
         )
         self.tests = ["unit::fast", "model::large", "gateway::privileged"]
         self.ignored = ["gateway::privileged"]
-        self.listing = patch.object(ci_tests, "test_names", side_effect=lambda artifact, ignored=False: self.ignored if ignored else self.tests)
+        self.listing = patch.object(ci_tests, "test_names", side_effect=lambda artifact, environment, ignored=False: self.ignored if ignored else self.tests)
         self.listing.start()
         self.addCleanup(self.listing.stop)
         self.execution = patch.object(ci_tests.subprocess, "run")
@@ -50,7 +51,7 @@ class CoverageGuards(unittest.TestCase):
     def test_artifact_is_reused_once_with_package_cwd(self):
         """Duplicate Cargo events must not duplicate execution or change package cwd."""
         ci_tests.run(self.args)
-        self.run_mock.assert_called_once_with([str(self.root / "tests")], cwd=str(self.root), check=True)
+        self.run_mock.assert_called_once_with([str(self.root / "tests")], cwd=str(self.root), env=ANY, check=True)
         saved = json.loads(self.inventory.read_text())
         self.assertEqual(saved[0]["selected"], ["model::large", "unit::fast"])
         self.assertEqual(saved[0]["ignored"], self.ignored)
@@ -101,8 +102,8 @@ class CoverageGuards(unittest.TestCase):
         self.args.exact = self.args.ignored = self.args.sudo = True
         ci_tests.run(self.args)
         self.run_mock.assert_called_once_with(
-            ["sudo", "--", str(self.root / "tests"), "gateway::privileged", "--exact", "--ignored"],
-            cwd=str(self.root), check=True,
+            ["sudo", "--", "env", ANY, str(self.root / "tests"), "gateway::privileged", "--exact", "--ignored"],
+            cwd=str(self.root), env=ANY, check=True,
         )
 
     def test_broad_privileged_execution_fails(self):
@@ -154,7 +155,7 @@ fn explicitly_selected() {}
 fn deliberate_failure() { panic!("propagate test failure"); }
 ''')
             binary = root / "fixture"
-            subprocess.run(["rustc", "--test", str(source), "-o", str(binary)], check=True)
+            subprocess.run(["rustc", "--test", "-C", "prefer-dynamic", str(source), "-o", str(binary)], check=True)
             artifacts = root / "artifacts.jsonl"
             artifacts.write_text(json.dumps({
                 "reason": "compiler-artifact", "executable": str(binary),
