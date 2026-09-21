@@ -27,7 +27,7 @@ use super::AdmittedConnection;
 use super::SwarmTransport;
 use super::DATA_CHANNEL_SEND_ACCEPT_BUDGET;
 use super::TRANSPORT_TIMEOUT_PROFILE;
-use crate::chunk::ChunkList;
+use crate::chunk::Chunk;
 use crate::chunk::Framing;
 use crate::chunk::WireReserves;
 use crate::consts::TRANSPORT_MAX_SIZE;
@@ -723,8 +723,7 @@ impl SwarmTransport {
                 detached_admission,
             ),
             Framing::Chunked { chunk_size } => {
-                let chunks: ChunkFrames =
-                    Box::new(ChunkList::stream(payload.to_wire()?, chunk_size));
+                let chunks: ChunkFrames = Box::new(Chunk::stream(payload.to_wire()?, chunk_size));
                 OutboundTransfer::chunked(
                     route,
                     ChunkedFrameSource::new(self.message_signer(), chunks, logical_sequence),

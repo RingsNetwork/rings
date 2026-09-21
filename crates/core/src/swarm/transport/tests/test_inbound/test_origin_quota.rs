@@ -173,7 +173,7 @@ async fn normal_and_reassembled_messages_each_consume_one_logical_byte_cost() ->
     let callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone())
         .with_pending_connection_attempt(attempt);
 
-    let chunks: Vec<Chunk> = ChunkList::split(&reassembled.to_wire()?, 32).into();
+    let chunks: Vec<Chunk> = Chunk::stream(reassembled.to_wire()?, 32).collect();
     assert!(chunks.len() > 1);
     let chunk_count = chunks.len();
     for chunk in chunks {

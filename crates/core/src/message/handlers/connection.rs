@@ -56,7 +56,7 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
                 origin = %ctx.transaction.origin(),
                 relay_destination = %ctx.relay.destination,
                 transaction_destination = %ctx.transaction.destination,
-                mode = ?msg.dht_protocol_mode(),
+                mode = ?msg.dht_protocol_mode,
                 "CONNECT_NODE offer rejected by DHT protocol mismatch"
             );
             return Ok(());
@@ -270,8 +270,8 @@ pub mod tests {
     use crate::dht::successor::SuccessorReader;
     use crate::ecc::tests::gen_ordered_keys;
     use crate::ecc::SecretKey;
+    use crate::message::types::QueryFor;
     use crate::message::types::QueryForTopoInfoReport;
-    use crate::message::types::Then;
     use crate::tests::default::assert_no_more_msg;
     use crate::tests::default::gen_pure_dht;
     use crate::tests::default::prepare_node;
@@ -332,7 +332,7 @@ pub mod tests {
                         successors: vec![node3.did()],
                         predecessor: None,
                     },
-                    then: <QueryForTopoInfoReport as Then>::Then::SyncSuccessor,
+                    then: QueryFor::SyncSuccessor,
                     request_id: uuid::Uuid::from_u128(404),
                 }),
                 node1.did(),
@@ -351,7 +351,7 @@ pub mod tests {
                         successors: vec![node3.did()],
                         predecessor: None,
                     },
-                    then: <QueryForTopoInfoReport as Then>::Then::SyncSuccessor,
+                    then: QueryFor::SyncSuccessor,
                     request_id,
                 }),
                 node1.did(),
@@ -394,7 +394,7 @@ pub mod tests {
                         successors: vec![node3.did()],
                         predecessor: Some(node1.did()),
                     },
-                    then: <QueryForTopoInfoReport as Then>::Then::Stabilization,
+                    then: QueryFor::Stabilization,
                     request_id: uuid::Uuid::from_u128(404),
                 }),
                 node1.did(),

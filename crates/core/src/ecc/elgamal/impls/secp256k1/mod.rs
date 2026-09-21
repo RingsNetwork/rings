@@ -1,11 +1,10 @@
 //! secp256k1 plaintext and ciphertext adapter for ElGamal.
 //!
-//! The generic ElGamal implementation encrypts group elements. Existing Rings
-//! callers encrypt strings and exchange `PublicKey<33>` values, so this module
-//! provides the compatibility layer:
+//! The generic ElGamal implementation encrypts group elements. Rings callers
+//! encrypt bytes and exchange `PublicKey<33>` values, so this module provides
+//! the adapter:
 //!
-//! - map UTF-8 bytes into secp256k1 points with a reversible x-coordinate
-//!   encoding;
+//! - map bytes into secp256k1 points with a reversible x-coordinate encoding;
 //! - call [`crate::ecc::elgamal::ElGamal`] over `Point<Secp256k1>`;
 //! - serialize ciphertext points back into `CurveEle<33>` pairs.
 //!
@@ -25,9 +24,6 @@
 //! lies on secp256k1. Decoding therefore ignores byte `0` and validates the
 //! marker, length, and zero padding before returning bytes `3..3+len`. This is
 //! why embedded NUL bytes are preserved instead of being trimmed.
-
-use std::convert::TryFrom;
-use std::convert::TryInto;
 
 use chacha20poly1305::aead::Aead;
 use chacha20poly1305::aead::KeyInit;
@@ -157,114 +153,12 @@ struct AeadTranscript<'a> {
     aad: &'a [u8],
 }
 
-/// Plaintext input before it is mapped into secp256k1 group elements.
-pub struct Plaintext<'a>(&'a str);
-
-/// Binary plaintext input before it is mapped into secp256k1 group elements.
-pub struct PlaintextBytes<'a>(&'a [u8]);
-
-/// secp256k1 group elements that encode one plaintext message.
-pub struct MessagePoints(Vec<Point<Secp256k1>>);
-
-impl<'a> Plaintext<'a> {
-    /// Plaintext string before group encoding.
-    pub fn as_str(&self) -> &'a str {
-        self.0
-    }
-}
-
-impl<'a> PlaintextBytes<'a> {
-    /// Plaintext bytes before group encoding.
-    pub fn as_bytes(&self) -> &'a [u8] {
-        self.0
-    }
-}
-
-impl MessagePoints {
-    /// Group elements after plaintext encoding.
-    pub fn into_vec(self) -> Vec<Point<Secp256k1>> {
-        self.0
-    }
-}
-
-impl<'a> From<&'a str> for Plaintext<'a> {
-    fn from(message: &'a str) -> Self {
-        Self(message)
-    }
-}
-
-impl<'a> From<&'a [u8]> for PlaintextBytes<'a> {
-    fn from(message: &'a [u8]) -> Self {
-        Self(message)
-    }
-}
-
-impl From<Vec<Point<Secp256k1>>> for MessagePoints {
-    fn from(points: Vec<Point<Secp256k1>>) -> Self {
-        Self(points)
-    }
-}
-
-impl IntoIterator for MessagePoints {
-    type IntoIter = std::vec::IntoIter<Point<Secp256k1>>;
-    type Item = Point<Secp256k1>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
-    }
-}
-
-impl<'a> TryFrom<Plaintext<'a>> for MessagePoints {
-    type Error = Error;
-
-    fn try_from(message: Plaintext<'a>) -> Result<Self> {
-        MessagePoints::try_from(PlaintextBytes::from(message.as_str().as_bytes()))
-    }
-}
-
-impl<'a> TryFrom<PlaintextBytes<'a>> for MessagePoints {
-    type Error = Error;
-
-    fn try_from(message: PlaintextBytes<'a>) -> Result<Self> {
-        Ok(bytes_to_affine(message.as_bytes())?
-            .into_iter()
-            .map(Point::<Secp256k1>::from)
-            .collect::<Vec<_>>()
-            .into())
-    }
-}
-
-impl TryFrom<MessagePoints> for String {
-    type Error = Error;
-
-    fn try_from(points: MessagePoints) -> Result<Self> {
-        String::from_utf8(Vec::<u8>::try_from(points)?).map_err(Error::Utf8Encoding)
-    }
-}
-
-impl TryFrom<MessagePoints> for Vec<u8> {
-    type Error = Error;
-
-    fn try_from(points: MessagePoints) -> Result<Self> {
-        let affines = points
-            .into_iter()
-            .map(Affine::from)
-            .collect::<Vec<Affine>>();
-        Ok(affine_to_bytes(&affines))
-    }
-}
-
-/// Convert a string into field elements using the adapter encoding.
+/// Convert bytes into field elements using the adapter encoding.
 ///
 /// Each plaintext chunk is at most 29 bytes so the field candidate can carry
 /// `0xFF || 0x52 || len || chunk || zero padding`. The first byte is only a
 /// search bias for `lift_x`; the marker and length bytes make the mapping
 /// reversible and preserve leading or embedded NUL bytes.
-pub fn str_to_field(s: &str) -> Vec<Field> {
-    bytes_to_field(s.as_bytes())
-}
-
-/// Convert arbitrary bytes into field elements using the adapter encoding.
 pub fn bytes_to_field(bytes: &[u8]) -> Vec<Field> {
     bytes
         .chunks(PLAINTEXT_BLOCK_SIZE)
@@ -288,11 +182,6 @@ fn encode_field_candidate(chunk: &[u8]) -> [u8; 32] {
         payload.copy_from_slice(source);
     }
     data
-}
-
-/// Decode field elements produced by [`str_to_field`].
-pub fn field_to_str(f: &[Field]) -> Result<String> {
-    String::from_utf8(field_to_bytes(f)).map_err(Error::Utf8Encoding)
 }
 
 /// Decode field elements produced by [`bytes_to_field`].
@@ -354,22 +243,12 @@ fn decompress_x(x: [u8; 32], y_is_odd: bool) -> Option<Affine> {
     Affine::decompress(&k256::FieldBytes::from(x), Choice::from(y_is_odd as u8)).into()
 }
 
-/// Convert a string into secp256k1 points using the adapter encoding.
-pub fn str_to_affine(s: &str) -> Result<Vec<Affine>> {
-    bytes_to_affine(s.as_bytes())
-}
-
-/// Convert arbitrary bytes into secp256k1 points using the adapter encoding.
+/// Convert bytes into secp256k1 points using the adapter encoding.
 pub fn bytes_to_affine(bytes: &[u8]) -> Result<Vec<Affine>> {
     bytes_to_field(bytes)
         .into_iter()
         .map(|a| lift_x(&a))
         .collect::<Result<Vec<Affine>>>()
-}
-
-/// Decode secp256k1 points produced by `str_to_affine`.
-pub fn affine_to_str(a: &[Affine]) -> Result<String> {
-    String::from_utf8(affine_to_bytes(a)).map_err(Error::Utf8Encoding)
 }
 
 /// Decode secp256k1 points produced by [`bytes_to_affine`].
@@ -386,45 +265,24 @@ pub fn affine_to_bytes(a: &[Affine]) -> Vec<u8> {
     )
 }
 
-/// Encrypt a string with the current secp256k1 compatibility adapter.
-pub fn encrypt(s: &str, k: PublicKey<33>) -> Result<Vec<CiphertextBlock>> {
-    let public_key = ElGamalPublicKey::<Point<Secp256k1>>::from_element(k.try_into()?);
-    let points = MessagePoints::try_from(Plaintext::from(s))?;
-    ElGamal::<Point<Secp256k1>>::encrypt(points, &public_key)
-        .into_iter()
-        .map(|(c1, c2)| Ok((c1.try_into()?, c2.try_into()?)))
-        .collect()
-}
-
-/// Encrypt a string with caller-supplied randomness for ElGamal ephemerals.
-pub fn encrypt_with_rng(
-    s: &str,
-    k: PublicKey<33>,
-    rng: &mut impl RngCore,
-) -> Result<Vec<CiphertextBlock>> {
-    encrypt_bytes_with_rng(s.as_bytes(), k, rng)
-}
-
-/// Encrypt arbitrary bytes with caller-supplied randomness for ElGamal ephemerals.
+/// Encrypt bytes with caller-supplied randomness for ElGamal ephemerals: one
+/// ciphertext block per [`PLAINTEXT_BLOCK_SIZE`] bytes of input.
 pub fn encrypt_bytes_with_rng(
     bytes: &[u8],
     k: PublicKey<33>,
     rng: &mut impl RngCore,
 ) -> Result<Vec<CiphertextBlock>> {
     let public_key = ElGamalPublicKey::<Point<Secp256k1>>::from_element(k.try_into()?);
-    let points = MessagePoints::try_from(PlaintextBytes::from(bytes))?;
+    let points = bytes_to_affine(bytes)?
+        .into_iter()
+        .map(Point::<Secp256k1>::from);
     ElGamal::<Point<Secp256k1>>::encrypt_with_rng(points, &public_key, rng)
         .into_iter()
         .map(|(c1, c2)| Ok((c1.try_into()?, c2.try_into()?)))
         .collect()
 }
 
-/// Decrypt ciphertext produced by the current secp256k1 compatibility adapter.
-pub fn decrypt(m: &[CiphertextBlock], k: &SecretKey) -> Result<String> {
-    String::from_utf8(decrypt_bytes(m, k)?).map_err(Error::Utf8Encoding)
-}
-
-/// Decrypt arbitrary bytes produced by [`encrypt_bytes_with_rng`].
+/// Decrypt bytes produced by [`encrypt_bytes_with_rng`].
 pub fn decrypt_bytes(m: &[CiphertextBlock], k: &SecretKey) -> Result<Vec<u8>> {
     let secret_key =
         ElGamalSecretKey::<Point<Secp256k1>>::from_scalar(GroupScalar::<Secp256k1>::try_from(k)?);
@@ -432,8 +290,11 @@ pub fn decrypt_bytes(m: &[CiphertextBlock], k: &SecretKey) -> Result<Vec<u8>> {
         .iter()
         .map(|(c1, c2)| Ok(((*c1).try_into()?, (*c2).try_into()?)))
         .collect::<Result<Vec<(Point<Secp256k1>, Point<Secp256k1>)>>>()?;
-    let points = ElGamal::<Point<Secp256k1>>::decrypt(&ciphertext, &secret_key);
-    Vec::<u8>::try_from(MessagePoints::from(points))
+    let points = ElGamal::<Point<Secp256k1>>::decrypt(&ciphertext, &secret_key)
+        .into_iter()
+        .map(Affine::from)
+        .collect::<Vec<Affine>>();
+    Ok(affine_to_bytes(&points))
 }
 
 /// Encrypt bytes with an ElGamal-wrapped ChaCha20-Poly1305 content key.

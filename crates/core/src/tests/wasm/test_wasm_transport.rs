@@ -160,12 +160,12 @@ async fn seed_remote_repair_entries(node1: &Swarm, node2: &Swarm, node3: &Swarm)
     // next read and would never be republished.
     let head_entry = live_entry(
         head_key,
-        vec!["repair-head".encode().unwrap()],
+        vec![b"repair-head".as_slice().encode().unwrap()],
         EntryKind::Data,
     );
     let tail_entry = live_entry(
         tail_key,
-        vec!["repair-tail".encode().unwrap()],
+        vec![b"repair-tail".as_slice().encode().unwrap()],
         EntryKind::Data,
     );
     let expected_head = head_entry.clone().try_into_storage_entry().unwrap();

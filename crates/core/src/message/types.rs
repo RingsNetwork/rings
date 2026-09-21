@@ -54,70 +54,29 @@ impl DhtProtocolMode {
     }
 }
 
-/// The `Then` trait is used to associate a type with a "then" scenario.
-pub trait Then {
-    /// associated type
-    type Then;
-}
-
 /// MessageType use to ask for connection, send to remote with transport_uuid and handshake_info.
+///
+/// Wire law: the codec writes a struct as its fields in order with no framing, so
+/// `{sdp, dht_protocol_mode}` encodes byte-for-byte as `{sdp, network_id, storage_redundancy,
+/// dht_virtual_nodes}` (see the tests).
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ConnectNodeSend {
     /// sdp offer of webrtc
     pub sdp: String,
-    /// The network_id is used to distinguish different networks.
-    /// Use 1 for main network.
-    pub network_id: u32,
-    /// Storage redundancy required by this DHT protocol mode.
-    pub storage_redundancy: u16,
-    /// Storage virtual-node positions required by this DHT protocol mode.
-    pub dht_virtual_nodes: u16,
+    /// The DHT protocol the offering node runs; the receiver answers only a matching one.
+    pub dht_protocol_mode: DhtProtocolMode,
 }
 
 /// MessageType report to origin with own transport_uuid and handshake_info.
+///
+/// Same wire law as [`ConnectNodeSend`].
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ConnectNodeReport {
     /// sdp answer of webrtc
     pub sdp: String,
-    /// The network_id is used to distinguish different networks.
-    /// Use 1 for main network.
-    pub network_id: u32,
-    /// Storage redundancy required by this DHT protocol mode.
-    pub storage_redundancy: u16,
-    /// Storage virtual-node positions required by this DHT protocol mode.
-    pub dht_virtual_nodes: u16,
+    /// The DHT protocol the answering node runs; the initiator admits only a matching one.
+    pub dht_protocol_mode: DhtProtocolMode,
 }
-
-macro_rules! impl_dht_protocol_advertisement {
-    ($message:ty, $mode_doc:literal, $match_doc:literal) => {
-        impl $message {
-            #[doc = $mode_doc]
-            pub const fn dht_protocol_mode(&self) -> DhtProtocolMode {
-                DhtProtocolMode::new(
-                    self.network_id,
-                    self.storage_redundancy,
-                    self.dht_virtual_nodes,
-                )
-            }
-
-            #[doc = $match_doc]
-            pub fn matches_dht_protocol(&self, expected: DhtProtocolMode) -> bool {
-                self.dht_protocol_mode().matches(expected)
-            }
-        }
-    };
-}
-
-impl_dht_protocol_advertisement!(
-    ConnectNodeSend,
-    "Return the DHT protocol mode advertised by this offer.",
-    "Return whether this offer belongs to the receiver's DHT protocol mode."
-);
-impl_dht_protocol_advertisement!(
-    ConnectNodeReport,
-    "Return the DHT protocol mode advertised by this answer.",
-    "Return whether this answer belongs to the initiator's DHT protocol mode."
-);
 
 /// MessageType use to find successor in a chord ring.
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -259,14 +218,6 @@ impl QueryForTopoInfoSend {
     pub(crate) fn targets(&self, local: Did) -> bool {
         self.did == local
     }
-}
-
-impl Then for QueryForTopoInfoReport {
-    type Then = QueryFor;
-}
-
-impl Then for QueryForTopoInfoSend {
-    type Then = QueryFor;
 }
 
 /// MessageType used to search a DHT storage entry.
@@ -668,15 +619,11 @@ mod tests {
 
     sample_message_body!(ConnectNodeSend, |_fixture| ConnectNodeSend {
         sdp: String::new(),
-        network_id: 1,
-        storage_redundancy: 1,
-        dht_virtual_nodes: 1,
+        dht_protocol_mode: DhtProtocolMode::new(1, 1, 1),
     });
     sample_message_body!(ConnectNodeReport, |_fixture| ConnectNodeReport {
         sdp: String::new(),
-        network_id: 1,
-        storage_redundancy: 1,
-        dht_virtual_nodes: 1,
+        dht_protocol_mode: DhtProtocolMode::new(1, 1, 1),
     });
     sample_message_body!(FindSuccessorSend, |fixture| FindSuccessorSend {
         did: fixture.did,
@@ -931,6 +878,47 @@ mod tests {
                 message.storage_sync_destination().is_some()
             );
         }
+        Ok(())
+    }
+
+    /// The embedded [`DhtProtocolMode`] encodes exactly as the three fields it replaced did:
+    /// the codec writes a struct as its fields in declaration order with no framing, so
+    /// nesting changes nothing on the wire.
+    #[test]
+    fn test_connect_node_advertisement_encodes_as_its_flattened_fields() -> Result<()> {
+        #[derive(Serialize)]
+        struct Flattened {
+            sdp: String,
+            network_id: u32,
+            storage_redundancy: u16,
+            dht_virtual_nodes: u16,
+        }
+
+        let flattened = Flattened {
+            sdp: "v=0".to_string(),
+            network_id: 7,
+            storage_redundancy: 3,
+            dht_virtual_nodes: 160,
+        };
+        let mode = DhtProtocolMode::new(7, 3, 160);
+        let offer = ConnectNodeSend {
+            sdp: "v=0".to_string(),
+            dht_protocol_mode: mode,
+        };
+        let answer = ConnectNodeReport {
+            sdp: "v=0".to_string(),
+            dht_protocol_mode: mode,
+        };
+
+        let expected = rings_codec::serialize(&flattened).map_err(Error::CodecSerialize)?;
+        assert_eq!(
+            rings_codec::serialize(&offer).map_err(Error::CodecSerialize)?,
+            expected
+        );
+        assert_eq!(
+            rings_codec::serialize(&answer).map_err(Error::CodecSerialize)?,
+            expected
+        );
         Ok(())
     }
 }

@@ -27,7 +27,6 @@ impl Error {
             || matches!(
                 self,
                 Self::ConnectionAttemptSuperseded { .. }
-                    | Self::RTCDataChannelStateNotOpen
                     | Self::TransportNotReady { .. }
                     | Self::SwarmMissDidInTable(_)
                     | Self::Transport(rings_transport::error::Error::SendPermitRevoked)

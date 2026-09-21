@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Removed
+
+- Subtraction round, message / ecc / utils section and `rings-derive` (#787). Forty-six
+  `rings_core::error::Error` variants that nothing constructs since the transport split (#471),
+  the report-return removal (#745) and the base58 `Encoder` (#122), with the `url`, `flate2` and
+  `webrtc` dependencies that existed only for them; the gzip helpers on the payload module; the
+  ElGamal string adapter (`encrypt(&str)`, `decrypt -> String`, `str_to_field`, `Plaintext`,
+  `MessagePoints`), leaving the byte and AEAD API that #608 required; the `poll!` macro,
+  `js_utils::spawn_interval` and the `js_func::of!` wrappers; the core copy of the JavaScript
+  global-scope detection, now `rings_transport::js_global` for both crates; the eager
+  `ChunkList` (`Chunk::stream` is the one framing function; `Chunk::from_wire` stays for #741);
+  the `Then` trait; the `impl_dht_protocol_advertisement!` macro and the three flattened fields
+  on `ConnectNodeSend`/`ConnectNodeReport`, which now embed `DhtProtocolMode` (the codec writes
+  a struct as its fields in order, so the wire bytes are unchanged; a test pins this);
+  `Transaction::origin` delegates to `MessageVerificationExt::signer`; the hop-budget argument
+  of `MessageRelay::report` (a report is a fresh carrier at `HopBudget::MAX`),
+  `TryFrom<Vec<u8>> for Encoded`, `Encoder for &str`, `PublicKey::try_from_b58m_uncheck`,
+  `SessionSkBuilder::validate_account` and `ServiceReceiptDigest::new`; and the
+  `JudgeConnection` derive in `rings-derive`, whose trait #561 removed.
+
 ## 0.28.0
 
 ### Breaking changes

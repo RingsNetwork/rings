@@ -118,7 +118,7 @@ fn test_chunk_envelope_fits_reserve() {
     use rings_transport::core::transport::TransportMessage;
     use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 
-    use crate::chunk::ChunkList;
+    use crate::chunk::Chunk;
     use crate::consts::MAX_CHUNK_ENVELOPE_OVERHEAD;
     use crate::consts::TRANSPORT_CUSTOM_OVERHEAD;
 
@@ -126,10 +126,7 @@ fn test_chunk_envelope_fits_reserve() {
     let chunk_size =
         MAX_DATA_CHANNEL_MESSAGE_SIZE - (MAX_CHUNK_ENVELOPE_OVERHEAD + TRANSPORT_CUSTOM_OVERHEAD);
     let data: Bytes = vec![0xab; chunk_size].into();
-    let chunk = ChunkList::split(&data, chunk_size)
-        .to_vec()
-        .pop()
-        .expect("one chunk");
+    let chunk = Chunk::stream(data, chunk_size).next().expect("one chunk");
 
     // The bytes actually handed to SCTP: rings codec(Custom(rings codec(MessagePayload))).
     let payload_bytes = new_payload(Message::Chunk(chunk), next_hop)

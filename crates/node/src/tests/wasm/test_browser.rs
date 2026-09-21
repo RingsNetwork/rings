@@ -151,8 +151,8 @@ async fn test_handle_backend_message() {
         .unwrap();
     console_log!("send backend hello world done");
     utils::js_utils::window_sleep(3000).await.unwrap();
-    let global = rings_core::utils::js_utils::global().unwrap();
-    if let rings_core::utils::js_utils::Global::Window(window) = global {
+    let global = rings_transport::js_global::global().unwrap();
+    if let rings_transport::js_global::Global::Window(window) = global {
         let ret = window
             .get("recentMsg")
             .unwrap()

@@ -76,7 +76,6 @@ pub fn test_session_rejects_invalid_secp256r1_account_key() {
     let builder = SessionSkBuilder::new(account_entity, "secp256r1".to_string())
         .set_session_sig(vec![0u8; 64]);
 
-    assert!(!builder.validate_account());
     assert!(builder.build().is_err());
 }
 

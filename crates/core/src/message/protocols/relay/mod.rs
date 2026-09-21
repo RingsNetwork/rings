@@ -122,20 +122,15 @@ impl MessageRelay {
         })
     }
 
-    /// The fresh carrier of a report `current` sends for the request carried by `self`.
+    /// The fresh carrier of a report `current` sends for the request carried by `self`: it
+    /// holds [`HopBudget::MAX`], as every fresh carrier does, whatever `self` has left.
     ///
     /// Pre: `self` was addressed to `current`; `next_hop` was inferred by the caller from
     /// `destination`.
-    pub fn report(
-        &self,
-        current: Did,
-        destination: Did,
-        next_hop: Did,
-        hop_budget: HopBudget,
-    ) -> Result<Self> {
+    pub fn report(&self, current: Did, destination: Did, next_hop: Did) -> Result<Self> {
         self.validate(current)?;
 
-        Ok(Self::new(next_hop, destination, hop_budget))
+        Ok(Self::new(next_hop, destination, HopBudget::MAX))
     }
 
     /// The same carrier aimed at `destination`.

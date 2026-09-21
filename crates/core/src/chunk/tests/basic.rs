@@ -22,25 +22,25 @@ fn test_constrained_reassembly_limits_are_smaller_than_production() {
 #[test]
 fn test_data_chunks() {
     let data = "helloworld".repeat(2).into();
-    let ret: Vec<Chunk> = ChunkList::split(&data, 32).into();
+    let ret: Vec<Chunk> = chunks_of(&data, 32);
     assert_eq!(ret.len(), 1);
     assert_eq!(ret[ret.len() - 1].chunk, [0, 1]);
 
     let data = "helloworld".repeat(1024).into();
-    let ret: Vec<Chunk> = ChunkList::split(&data, 32).into();
+    let ret: Vec<Chunk> = chunks_of(&data, 32);
     assert_eq!(ret.len(), 10 * 1024 / 32);
     assert_eq!(ret[ret.len() - 1].chunk, [319, 320]);
 }
 
 #[test]
-fn test_split_empty_yields_no_chunks() {
-    assert!(ChunkList::split(&Bytes::new(), 32).to_vec().is_empty());
+fn test_stream_empty_yields_no_chunks() {
+    assert!(chunks_of(&Bytes::new(), 32).is_empty());
 }
 
 #[test]
-fn test_split_exact_multiple_all_full() {
+fn test_stream_exact_multiple_all_full() {
     let data: Bytes = vec![0u8; 64].into();
-    let chunks = ChunkList::split(&data, 32).to_vec();
+    let chunks = chunks_of(&data, 32);
     assert_eq!(chunks.len(), 2);
     assert!(chunks.iter().all(|c| c.data.len() == 32));
     assert_eq!(chunks[0].chunk, [0, 2]);
@@ -48,9 +48,9 @@ fn test_split_exact_multiple_all_full() {
 }
 
 #[test]
-fn test_split_non_multiple_last_is_remainder() {
+fn test_stream_non_multiple_last_is_remainder() {
     let data: Bytes = vec![0u8; 70].into();
-    let chunks = ChunkList::split(&data, 32).to_vec();
+    let chunks = chunks_of(&data, 32);
     assert_eq!(chunks.len(), 3);
     assert_eq!(chunks[0].data.len(), 32);
     assert_eq!(chunks[1].data.len(), 32);
@@ -58,25 +58,25 @@ fn test_split_non_multiple_last_is_remainder() {
 }
 
 #[test]
-fn test_split_larger_than_data_is_single_chunk() {
+fn test_stream_larger_than_data_is_single_chunk() {
     let data: Bytes = vec![0u8; 10].into();
-    let chunks = ChunkList::split(&data, 1024).to_vec();
+    let chunks = chunks_of(&data, 1024);
     assert_eq!(chunks.len(), 1);
     assert_eq!(chunks[0].chunk, [0, 1]);
 }
 
 #[test]
-fn test_split_zero_size_is_clamped_to_one() {
+fn test_stream_zero_size_is_clamped_to_one() {
     let data: Bytes = vec![0u8; 4].into();
-    let chunks = ChunkList::split(&data, 0).to_vec();
+    let chunks = chunks_of(&data, 0);
     assert_eq!(chunks.len(), 4);
     assert!(chunks.iter().all(|c| c.data.len() == 1));
 }
 
 #[test]
-fn test_split_chunks_share_one_message_id() {
+fn test_stream_chunks_share_one_message_id() {
     let data: Bytes = vec![0u8; 100].into();
-    let chunks = ChunkList::split(&data, 32).to_vec();
+    let chunks = chunks_of(&data, 32);
     let id = chunks[0].meta.id;
     assert!(chunks.iter().all(|c| c.meta.id == id));
 }
@@ -84,7 +84,7 @@ fn test_split_chunks_share_one_message_id() {
 /// Cutting at any size and feeding the pieces back through the reassembler (in order) yields the
 /// original bytes — across exact multiples, remainders, single-chunk, and one-byte cuts.
 #[test]
-fn test_split_then_reassemble_round_trips() {
+fn test_stream_then_reassemble_round_trips() {
     for (len, size) in [
         (1usize, 7usize),
         (7, 7),
@@ -96,7 +96,7 @@ fn test_split_then_reassemble_round_trips() {
         let data: Bytes = (0..len).map(|i| i as u8).collect::<Vec<u8>>().into();
         let mut r = MessageReassembler::new();
         let mut out = None;
-        for c in ChunkList::split(&data, size) {
+        for c in Chunk::stream(data.clone(), size) {
             out = r.handle(c).or(out);
         }
         assert_eq!(out.unwrap(), data, "len={len} size={size}");
@@ -404,7 +404,7 @@ fn test_oversize_chunk_data_is_rejected() {
 fn test_buffered_cost_returns_to_zero_after_completion() {
     let data: Bytes = "helloworld".repeat(100).into();
     let mut r = MessageReassembler::new();
-    for c in ChunkList::split(&data, 32) {
+    for c in Chunk::stream(data.clone(), 32) {
         r.handle(c);
     }
     assert_eq!(r.pending_count(), 0);

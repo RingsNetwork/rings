@@ -22,6 +22,35 @@ pub struct Chunk {
 }
 
 impl Chunk {
+    /// The chunks of one message, sender side: `bytes` cut into pieces of at most `chunk_size`
+    /// data bytes, tagged `[i, total]` and sharing one [`ChunkMeta`].
+    ///
+    /// ```text
+    ///   stream(bytes, k) = [Chunk{ chunk=[i, n], data=bytes[ik .. min((i+1)k, |bytes|)] } | i in 0..n]
+    ///   where n = ceil(|bytes| / k)
+    /// ```
+    ///
+    /// The chunks are yielded lazily and each `data` is a zero-copy [`Bytes::slice`] of the
+    /// input, so a sender frames and flushes one chunk at a time with bounded memory. `chunk_size`
+    /// comes from the connection's negotiated `max_message_size` minus the envelope reserve
+    /// ([`WireReserves::plan`] never yields an unusable size); it is clamped to at least 1 only so
+    /// a degenerate value still terminates. Empty input yields no chunks. Reassembly is the
+    /// receiver's job: see [`super::MessageReassembler`].
+    pub fn stream(bytes: Bytes, chunk_size: usize) -> impl Iterator<Item = Chunk> {
+        let chunk_size = chunk_size.max(1);
+        let total = bytes.len().div_ceil(chunk_size);
+        let meta = ChunkMeta::default();
+        (0..total).map(move |i| {
+            let start = i * chunk_size;
+            let end = start.saturating_add(chunk_size).min(bytes.len());
+            Chunk {
+                meta,
+                chunk: [i, total],
+                data: bytes.slice(start..end),
+            }
+        })
+    }
+
     /// Serialize chunk to the Rings wire encoding.
     pub fn to_wire(&self) -> Result<Bytes> {
         rings_codec::serialize(self)
@@ -56,105 +85,6 @@ impl Default for ChunkMeta {
     }
 }
 
-/// Sender side: an ordered list of [`Chunk`]s for one message. Build it from the payload with
-/// [`ChunkList::split`], passing the per-message data size to cut at (the connection's negotiated
-/// `max_message_size` minus the envelope reserve), then iterate (or convert to `Vec<Chunk>`) to put
-/// each chunk on the wire. The cut size is a runtime argument rather than a type parameter because
-/// it is decided per connection from the negotiated limit. Reassembly is the receiver's job - see
-/// [`super::MessageReassembler`].
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct ChunkList(Vec<Chunk>);
-
-impl ChunkList {
-    /// Eagerly split `bytes` into chunks of at most `chunk_size` data bytes each, tagged
-    /// `[i, total]`. A **test/helper** constructor (the production send path uses
-    /// [`stream`](Self::stream), and [`WireReserves::plan`] never yields an unusable `chunk_size` -
-    /// it returns `None` instead). `chunk_size` is clamped to at least 1 only as a defensive guard
-    /// against a caller passing `0`; it is not a sanctioned way to produce 1-byte chunks on the
-    /// wire.
-    pub fn split(bytes: &Bytes, chunk_size: usize) -> Self {
-        let chunk_size = chunk_size.max(1);
-        let chunks: Vec<Bytes> = bytes
-            .chunks(chunk_size)
-            .map(|c| c.to_vec().into())
-            .collect();
-        let chunks_len: usize = chunks.len();
-        let meta = ChunkMeta::default();
-        Self(
-            chunks
-                .into_iter()
-                .enumerate()
-                .map(|(i, data)| Chunk {
-                    meta,
-                    chunk: [i, chunks_len],
-                    data,
-                })
-                .collect::<Vec<Chunk>>(),
-        )
-    }
-
-    /// Stream `bytes` into chunks of at most `chunk_size` data bytes each **without materializing
-    /// the whole list**: each chunk's `data` is a zero-copy [`Bytes::slice`] of the input, and the
-    /// chunks are yielded lazily, so a sender can frame and flush one chunk at a time with bounded
-    /// memory (rather than allocating every chunk up front). All chunks share one `[i, total]`
-    /// numbering and one [`ChunkMeta`]. `chunk_size` is clamped to at least 1 so a degenerate value
-    /// still terminates; empty input yields **no** chunks, agreeing with [`split`](Self::split).
-    pub fn stream(bytes: Bytes, chunk_size: usize) -> impl Iterator<Item = Chunk> {
-        let chunk_size = chunk_size.max(1);
-        let total = bytes.len().div_ceil(chunk_size);
-        let meta = ChunkMeta::default();
-        (0..total).map(move |i| {
-            let start = i * chunk_size;
-            let end = start.saturating_add(chunk_size).min(bytes.len());
-            Chunk {
-                meta,
-                chunk: [i, total],
-                data: bytes.slice(start..end),
-            }
-        })
-    }
-
-    /// Clone out the chunks.
-    pub fn to_vec(&self) -> Vec<Chunk> {
-        self.0.clone()
-    }
-
-    /// Borrow the chunks.
-    pub fn as_vec(&self) -> &Vec<Chunk> {
-        &self.0
-    }
-}
-
-impl IntoIterator for &ChunkList {
-    type Item = Chunk;
-    type IntoIter = std::vec::IntoIter<Chunk>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.to_vec().into_iter()
-    }
-}
-
-impl IntoIterator for ChunkList {
-    type Item = Chunk;
-    type IntoIter = std::vec::IntoIter<Chunk>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
-    }
-}
-
-impl From<ChunkList> for Vec<Chunk> {
-    fn from(l: ChunkList) -> Self {
-        l.0
-    }
-}
-
-impl From<Vec<Chunk>> for ChunkList {
-    fn from(data: Vec<Chunk>) -> Self {
-        Self(data)
-    }
-}
-
 /// How one payload should be framed for a size-limited connection: sent whole, or split.
 ///
 /// This is the *decision* only - a value, with no I/O - so the sender's effectful path
@@ -165,7 +95,7 @@ pub enum Framing {
     /// The payload is within the connection's limit; send it as a single message, unchanged.
     Whole,
     /// The payload exceeds the limit; split it into [`Chunk`]s of at most `chunk_size` data bytes
-    /// each (via [`ChunkList::split`]), each then re-wrapped in its own envelope.
+    /// each (via [`Chunk::stream`]), each then re-wrapped in its own envelope.
     Chunked {
         /// Maximum data bytes per chunk.
         chunk_size: usize,
