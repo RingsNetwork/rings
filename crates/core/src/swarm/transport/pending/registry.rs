@@ -13,6 +13,7 @@ use crate::error::Result;
 /// [`ConnectionLifecycleRegistry::peers`]. A present peer therefore has exactly
 /// one state and cannot be pending, admitting, and active at the same time.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(test, derive(Hash))]
 pub(in crate::swarm::transport) enum PeerConnectionLifecycle {
     Pending {
         attempt: PendingConnectionAttempt,
@@ -151,6 +152,7 @@ impl ActiveConnectionSet {
 /// Invariant: `pending <= total`, so a handshake slot always fits inside the
 /// total and a pending-saturated registry is never mistaken for a full one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(test, derive(Hash))]
 pub(in crate::swarm::transport) struct LifecycleBounds {
     pending: usize,
     total: usize,
@@ -220,8 +222,12 @@ impl ReservationVerdict {
 /// Preservation: `reserve` is the only transition that grows the map and it
 /// checks both bounds; every other transition keeps or shrinks the map, so an
 /// activation never exceeds the bound its reservation was admitted under.
+///
+/// Test builds derive structural equality and hashing (`next_generation` included, so equal
+/// registries have equal futures): a model checker carries this registry itself as a state
+/// component instead of a shadow of it.
 #[derive(Debug)]
-#[cfg_attr(test, derive(Clone))]
+#[cfg_attr(test, derive(Clone, Eq, Hash, PartialEq))]
 pub(in crate::swarm::transport) struct ConnectionLifecycleRegistry {
     bounds: LifecycleBounds,
     next_generation: u64,

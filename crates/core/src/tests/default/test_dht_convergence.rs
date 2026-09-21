@@ -71,7 +71,6 @@
 //! \* CorrectChord stabilize operation (HMCC/Zave path). This is the default
 //! \* production path: `Stabilizer::stabilize` calls `correct_stabilize`, and
 //! \* message handling applies `PeerRing::stabilize` to the successor's TopoInfo.
-//! ButLast(s) == IF Len(s) = 0 THEN <<>> ELSE SubSeq(s, 1, Len(s)-1)
 //! InsertKnown(n, cur, candidates) ==
 //!   LET Known == {n} \cup SeqSet(cur) \cup candidates IN
 //!     SuccessorsOver(Known, n)
@@ -81,7 +80,7 @@
 //!   /\ (Len(cur) = 0 \/ dist(n, p) < dist(n, Head(cur)))
 //! CorrectStabilize(n, cur, topoSucc, topoPred) ==
 //!   LET predSet == IF topoPred = none THEN {} ELSE {topoPred}
-//!       cand == SeqSet(ButLast(topoSucc)) \cup predSet
+//!       cand == SeqSet(topoSucc) \cup predSet
 //!       next == InsertKnown(n, cur, cand) IN
 //!   /\ succ'[n] = next
 //!   /\ query'  = IF Improved(n, cur, topoPred) THEN <<topoPred>> ELSE <<>>
@@ -167,8 +166,8 @@ pub(super) mod spec {
     }
 
     /// `CorrectStabilize` successor update: merge current successors with the
-    /// successor's predecessor and all but the last entry of the successor's
-    /// successor list, then keep the K nearest forward nodes.
+    /// successor's predecessor and the successor's whole successor list, then
+    /// keep the K nearest forward nodes.
     pub fn correct_stabilize_successors(
         me: Did,
         current: &[Did],
@@ -544,11 +543,10 @@ fn test_correct_stabilize_deduplicates_self_and_truncates_candidates() {
     );
 }
 
-/// `CorrectStabilize` imports all but the last entry from the successor's
-/// successor list. A close node in the last position must not be learned from
-/// this operation.
+/// `CorrectStabilize` imports the successor's whole successor list: a close
+/// node in the last position is learned from this operation (#786).
 #[test]
-fn test_correct_stabilize_ignores_last_topo_successor() {
+fn test_correct_stabilize_learns_the_last_topo_successor() {
     let dids = Layout::Even(6).dids();
     assert_correct_stabilize_matches_spec(dids[0], &[dids[4]], &[dids[5], dids[1]], None);
 }

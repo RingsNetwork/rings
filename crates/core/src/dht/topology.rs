@@ -42,6 +42,10 @@ use super::FingerFixRequest;
 
 /// Finger convergence adapters for the pure topology state.
 mod finger;
+/// Named well-formedness, routing, and fixpoint predicates of [`TopologyState`],
+/// for the model checkers and simulators of the test build.
+#[cfg(test)]
+mod invariants;
 /// HMCC/Zave successor and predecessor stabilization transitions.
 mod stabilization;
 /// Correlation state for successor-list synchronization reports.
@@ -714,7 +718,8 @@ pub fn is_responsible_for(state: &TopologyState, id: Did) -> bool {
 ///
 /// Post: `Remote { next, .. }` satisfies `precedes(n, next, dist(n, did))` for
 /// every state, so every remote step is a strict clockwise advance and never a
-/// self hop.
+/// self hop; `TopologyState::routes_clockwise_toward` (test build) names this
+/// proposition.
 pub fn find_successor(state: &TopologyState, did: Did) -> FindSuccessorStep {
     let Some(head) = successor_head(state) else {
         return FindSuccessorStep::Local(state.local);

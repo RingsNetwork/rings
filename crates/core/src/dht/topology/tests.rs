@@ -883,7 +883,8 @@ fn test_stabilize_step_reports_head_change_when_reported_predecessor_precedes_he
     let current = state(local, vec![did(30)], None, vec![None; 5], 0);
     let next = claimed_stabilize(&current, vec![did(30), did(40)], Some(did(20)));
 
-    assert_eq!(next.state.successors, vec![did(20), did(30)]);
+    // The reported list's last entry is a real successor and fits capacity.
+    assert_eq!(next.state.successors, vec![did(20), did(30), did(40)]);
     assert_head_law(&current, &next);
     assert_eq!(
         next.actions.last(),
@@ -982,3 +983,4 @@ fn test_rectify_never_adopts_the_local_node_as_predecessor() {
 /// topology reducer while separating them from the broader ring-shape tests in
 /// this file.
 mod admission_tests;
+mod stabilization_tests;
