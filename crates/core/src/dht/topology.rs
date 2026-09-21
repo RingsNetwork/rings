@@ -66,10 +66,6 @@ use stabilization::step_begin;
 use stabilization::step_claim;
 use stabilization::step_stabilize;
 pub use stabilization::successor_head;
-pub(crate) use stabilization::StabilizationConnectionPlan;
-pub(crate) use stabilization::StabilizationConnectionStep;
-pub(crate) use successor_sync::SuccessorSyncConnectionPlan;
-pub(crate) use successor_sync::SuccessorSyncConnectionStep;
 pub(crate) use successor_sync::SuccessorSyncState;
 
 /// Ring bit-width; `Did` is `Z/2^160`.
@@ -92,8 +88,8 @@ pub struct TopologyState {
     /// Per-slot proof, lookup, retry, and admission state for finger convergence.
     ///
     /// This metadata is kept beside `fingers` so every pure transition updates
-    /// the visible hints and the evidence authorizing them atomically. Its width
-    /// is normalized to `fingers.len()` whenever a shell snapshot is restored.
+    /// the visible hints and the evidence authorizing them atomically; both
+    /// share the fixed width of the finger table.
     finger_convergence: FingerConvergenceState,
     /// Exact stabilization report currently allowed to refine this state.
     ///
@@ -118,18 +114,17 @@ pub(crate) struct StabilizationRequest {
     /// reporter and prevents replay of an earlier authenticated response.
     request_id: uuid::Uuid,
     /// Whether the report has been reserved by the effect handler.
-    ///
-    /// `Requested` permits one exact claim; `Processing` permits the bounded
-    /// connection plan and final stabilization transition owned by that claim.
-    phase: StabilizationPhase,
+    phase: ClaimPhase,
 }
 
-/// Claim phase for a stabilization report token.
+/// Claim phase of a report token, shared by the stabilization and
+/// successor-sync token machines.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-enum StabilizationPhase {
+pub(crate) enum ClaimPhase {
     /// Query was sent and the first matching report may claim it.
     Requested,
-    /// A report claimed the token and may spend its bounded connection budget.
+    /// A report claimed the token and may spend its bounded connection budget
+    /// and, for stabilization, the final topology transition.
     Processing,
 }
 
@@ -154,11 +149,9 @@ impl TopologyState {
 
     /// Restore a state snapshot from the mutable peer-ring shell.
     ///
-    /// The finger convergence state is normalized to the current table width so
-    /// a resized table cannot retain out-of-range proof or lookup metadata. All
-    /// other values are copied verbatim because the shell already owns their
-    /// transport and persistence validation; this constructor only restores the
-    /// pure transition model's atomic snapshot.
+    /// Every value is copied verbatim: the shell owns transport validation and
+    /// the finger width is fixed at construction, so this constructor only
+    /// restores the pure transition model's atomic snapshot.
     pub(crate) fn restore(
         local: Did,
         successors: Vec<Did>,
@@ -167,13 +160,12 @@ impl TopologyState {
         finger_convergence: FingerConvergenceState,
         pending_stabilization: Option<StabilizationRequest>,
     ) -> Self {
-        let slot_count = fingers.len();
         Self {
             local,
             successors,
             predecessor,
             fingers,
-            finger_convergence: finger_convergence.normalized(slot_count),
+            finger_convergence,
             pending_stabilization,
         }
     }
@@ -201,7 +193,7 @@ impl TopologyState {
             == Some(StabilizationRequest {
                 reporter,
                 request_id,
-                phase: StabilizationPhase::Requested,
+                phase: ClaimPhase::Requested,
             })
     }
 
@@ -219,7 +211,7 @@ impl TopologyState {
             == Some(StabilizationRequest {
                 reporter,
                 request_id,
-                phase: StabilizationPhase::Processing,
+                phase: ClaimPhase::Processing,
             })
     }
 
@@ -317,6 +309,96 @@ pub(crate) fn bounded_connection_candidates(
     bounded
 }
 
+/// The connection budget of one stabilization report: the successor-list
+/// capacity plus one slot for the reported predecessor.
+pub(crate) const fn stabilization_connection_budget(successor_capacity: usize) -> usize {
+    successor_capacity.saturating_add(1)
+}
+
+/// Bounded connection-effect cursor for one claimed topology report.
+///
+/// The handlers and the formal models both consume this production
+/// transition. The claim predicate is supplied by the token machine that owns
+/// the report (stabilization or successor sync) and is re-evaluated before
+/// every candidate, so a superseded round can emit no further effect; the plan
+/// itself owns the hard per-report effect bound.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub(crate) struct ConnectionPlan {
+    /// Successor that produced the claimed topology report.
+    reporter: Did,
+    /// Correlation token echoed by the authenticated topology report.
+    ///
+    /// The token distinguishes this plan from older and newer rounds that
+    /// queried the same reporter.
+    request_id: uuid::Uuid,
+    /// Bounded, deduplicated peers reported by the successor, in the order the
+    /// handler ranked them.
+    candidates: Vec<Did>,
+    /// Cursor for the next candidate whose connection effect may run.
+    ///
+    /// The cursor advances only after the claim is revalidated and a candidate
+    /// is returned, so each bounded candidate is emitted at most once.
+    next_candidate: usize,
+}
+
+/// Next permitted effect for a connection plan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConnectionStep {
+    /// Connect this bounded candidate, then re-enter the transition.
+    Connect(Did),
+    /// Every candidate was consumed while the claim remained current.
+    Complete,
+    /// The report was superseded; no further network effect is permitted.
+    Stale,
+}
+
+impl ConnectionPlan {
+    /// Create a bounded candidate cursor for one claimed report.
+    ///
+    /// Candidates are consumed in the order given after removing the local DID
+    /// and duplicates; the stored list is capped at `budget`, so one report can
+    /// cause at most `budget` connection effects.
+    pub(crate) fn new(
+        reporter: Did,
+        request_id: uuid::Uuid,
+        candidates: impl IntoIterator<Item = Did>,
+        local: Did,
+        budget: usize,
+    ) -> Self {
+        Self {
+            reporter,
+            request_id,
+            candidates: bounded_connection_candidates(local, budget, candidates),
+            next_candidate: 0,
+        }
+    }
+
+    /// The token whose budget this plan spends.
+    #[cfg(all(test, not(target_family = "wasm")))]
+    pub(crate) const fn request_id(&self) -> uuid::Uuid {
+        self.request_id
+    }
+
+    /// Return the next candidate only while `still_processing(reporter, request_id)`.
+    ///
+    /// A superseded claim yields [`ConnectionStep::Stale`] without advancing the
+    /// cursor. A valid exhausted plan yields `Complete`; otherwise exactly one
+    /// candidate is returned and the cursor advances once.
+    pub(crate) fn advance(
+        &mut self,
+        still_processing: impl FnOnce(Did, uuid::Uuid) -> bool,
+    ) -> ConnectionStep {
+        if !still_processing(self.reporter, self.request_id) {
+            return ConnectionStep::Stale;
+        }
+        let Some(candidate) = self.candidates.get(self.next_candidate).copied() else {
+            return ConnectionStep::Complete;
+        };
+        self.next_candidate = self.next_candidate.saturating_add(1);
+        ConnectionStep::Connect(candidate)
+    }
+}
+
 /// Pure result of looking up the owner of a DID in local topology state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FindSuccessorStep {
@@ -334,11 +416,6 @@ pub enum FindSuccessorStep {
 /// Pure topology input event.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TopologyEvent {
-    /// A connected peer is introduced to the topology state.
-    Join {
-        /// Peer learned by the local node.
-        peer: Did,
-    },
     /// Atomically admit a transport-validated peer and the finger proof, if
     /// any, that waited on it.
     Admit {
@@ -365,11 +442,6 @@ pub enum TopologyEvent {
         peer: Did,
         /// Successor-list transition justified by the caller's evidence.
         successor: SuccessorRemoval,
-    },
-    /// A successor candidate was accepted by the liveness/interpreter boundary.
-    UpdateSuccessor {
-        /// Candidate successor.
-        successor: Did,
     },
     /// HMCC/Zave notify input: one candidate predecessor notified this node.
     Notify {
@@ -732,30 +804,6 @@ pub fn find_successor(state: &TopologyState, did: Did) -> FindSuccessorStep {
     FindSuccessorStep::Remote { next, did }
 }
 
-/// Pure transition for introducing a connected or discovered peer.
-fn step_join(state: &TopologyState, peer: Did, capacity: usize) -> TopologyStep {
-    if peer == state.local {
-        return TopologyStep {
-            state: state.clone(),
-            actions: Vec::new(),
-        };
-    }
-    let (fingers, finger_convergence) =
-        rehint(state, finger_join(state.local, &state.fingers, peer));
-    TopologyStep {
-        state: TopologyState {
-            successors: update_successors(state.local, &state.successors, peer, capacity),
-            fingers,
-            finger_convergence,
-            ..state.clone()
-        },
-        actions: vec![TopologyAction::FindSuccessorForConnect {
-            next: peer,
-            did: state.local,
-        }],
-    }
-}
-
 /// Pure transition for atomically admitting a transport-validated peer.
 fn step_admit(
     state: &TopologyState,
@@ -846,28 +894,6 @@ fn step_remove(
     }
 }
 
-/// Pure transition for accepting one successor candidate from the effect layer.
-fn step_update_successor(state: &TopologyState, successor: Did, capacity: usize) -> TopologyStep {
-    let next_successors = update_successors(state.local, &state.successors, successor, capacity);
-    // Query the candidate's successor list only if it survived capacity truncation.
-    let inserted = !state.successors.contains(&successor) && next_successors.contains(&successor);
-    let (fingers, finger_convergence) =
-        rehint(state, finger_join(state.local, &state.fingers, successor));
-    TopologyStep {
-        state: TopologyState {
-            successors: next_successors,
-            fingers,
-            finger_convergence,
-            ..state.clone()
-        },
-        actions: if inserted {
-            vec![TopologyAction::QuerySuccessorList(successor)]
-        } else {
-            Vec::new()
-        },
-    }
-}
-
 /// Apply one pure topology transition.
 ///
 /// Post: the returned state depends only on `state` and `event`; no locks,
@@ -892,16 +918,12 @@ pub fn step(state: &TopologyState, event: TopologyEvent, capacity: usize) -> Top
 /// The event's own transition, before the head law is applied.
 fn step_event(state: &TopologyState, event: TopologyEvent, capacity: usize) -> TopologyStep {
     match event {
-        TopologyEvent::Join { peer } => step_join(state, peer, capacity),
         TopologyEvent::Admit {
             peer,
             deferred_proof,
             now_ms,
         } => step_admit(state, peer, deferred_proof, now_ms, capacity),
         TopologyEvent::Remove { peer, successor } => step_remove(state, peer, successor, capacity),
-        TopologyEvent::UpdateSuccessor { successor } => {
-            step_update_successor(state, successor, capacity)
-        }
         TopologyEvent::Notify { predecessor } => TopologyStep {
             state: TopologyState {
                 predecessor: rectify_predecessor(state.local, state.predecessor, predecessor),

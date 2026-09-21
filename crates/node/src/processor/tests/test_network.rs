@@ -1,5 +1,6 @@
 use super::common::*;
 use super::*;
+use crate::consts::DATA_REDUNDANT;
 
 const LISTENER_START_YIELD: Duration = Duration::from_millis(100);
 const LISTENER_STOP_TIMEOUT: Duration = Duration::from_secs(2);

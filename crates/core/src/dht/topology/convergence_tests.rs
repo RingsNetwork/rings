@@ -187,7 +187,11 @@ fn test_five_node_bootstrap_uses_one_stabilization_proof_and_one_routed_lookup()
     ];
     let initial = step(
         &state(local, Vec::new(), None, vec![None; RING_BITS], 0),
-        TopologyEvent::Join { peer: seed },
+        TopologyEvent::Admit {
+            peer: seed,
+            deferred_proof: None,
+            now_ms: 0,
+        },
         DEFAULT_SUCCESSOR_CAPACITY,
     )
     .state;
@@ -230,7 +234,11 @@ fn test_join_after_isolation_revalidates_every_previously_unknown_range() {
 
     let joined = step(
         &isolated,
-        TopologyEvent::Join { peer: seed },
+        TopologyEvent::Admit {
+            peer: seed,
+            deferred_proof: None,
+            now_ms: 0,
+        },
         DEFAULT_SUCCESSOR_CAPACITY,
     )
     .state;
@@ -252,7 +260,11 @@ fn test_finger_rejoin_after_losing_last_successor_discards_old_empty_range_proof
     let far = did(200);
     let joined = step(
         &state(local, Vec::new(), None, vec![None; 8], 0),
-        TopologyEvent::Join { peer: old_seed },
+        TopologyEvent::Admit {
+            peer: old_seed,
+            deferred_proof: None,
+            now_ms: 0,
+        },
         DEFAULT_SUCCESSOR_CAPACITY,
     )
     .state;
@@ -284,7 +296,11 @@ fn test_finger_rejoin_after_losing_last_successor_discards_old_empty_range_proof
 
     let rejoined = step(
         &isolated,
-        TopologyEvent::Join { peer: new_seed },
+        TopologyEvent::Admit {
+            peer: new_seed,
+            deferred_proof: None,
+            now_ms: 0,
+        },
         DEFAULT_SUCCESSOR_CAPACITY,
     )
     .state;
@@ -307,7 +323,11 @@ fn test_restart_uses_a_new_request_identity_and_rejects_the_old_report() {
     let seed = did(1);
     let hinted = step(
         &state(local, Vec::new(), None, vec![None; 8], 0),
-        TopologyEvent::Join { peer: seed },
+        TopologyEvent::Admit {
+            peer: seed,
+            deferred_proof: None,
+            now_ms: 0,
+        },
         DEFAULT_SUCCESSOR_CAPACITY,
     )
     .state;
@@ -316,7 +336,11 @@ fn test_restart_uses_a_new_request_identity_and_rejects_the_old_report() {
 
     let restarted = step(
         &state(local, Vec::new(), None, vec![None; 8], 0),
-        TopologyEvent::Join { peer: seed },
+        TopologyEvent::Admit {
+            peer: seed,
+            deferred_proof: None,
+            now_ms: 0,
+        },
         DEFAULT_SUCCESSOR_CAPACITY,
     )
     .state;
@@ -335,7 +359,7 @@ fn test_restart_uses_a_new_request_identity_and_rejects_the_old_report() {
     );
     assert_eq!(stale.state, after_restart.state);
     let (_, current_outcome) = apply_finger(&stale.state, new_request, did(8), 2_001);
-    assert_eq!(current_outcome, FingerApplyOutcome::Applied { end: 3 });
+    assert_eq!(current_outcome, FingerApplyOutcome::Applied);
 }
 
 /// Prove a report received exactly at its deadline expires without a timer poll.
@@ -348,7 +372,11 @@ fn test_finger_report_at_deadline_expires_without_a_scheduler_poll() {
     let seed = did(1);
     let hinted = step(
         &state(local, Vec::new(), None, vec![None; 8], 0),
-        TopologyEvent::Join { peer: seed },
+        TopologyEvent::Admit {
+            peer: seed,
+            deferred_proof: None,
+            now_ms: 0,
+        },
         DEFAULT_SUCCESSOR_CAPACITY,
     )
     .state;
@@ -394,7 +422,11 @@ fn test_dense_ring_converges_with_at_most_one_remote_lookup_per_range() {
     let seed = peers.last().copied().unwrap_or(local);
     let initial = step(
         &state(local, Vec::new(), None, vec![None; RING_BITS], 0),
-        TopologyEvent::Join { peer: seed },
+        TopologyEvent::Admit {
+            peer: seed,
+            deferred_proof: None,
+            now_ms: 0,
+        },
         DEFAULT_SUCCESSOR_CAPACITY,
     )
     .state;
@@ -419,7 +451,11 @@ fn test_insertion_and_removal_invalidate_only_changed_finger_slots() {
     let closer = did(16);
     let initial = step(
         &state(local, Vec::new(), None, vec![None; 8], 0),
-        TopologyEvent::Join { peer: seed },
+        TopologyEvent::Admit {
+            peer: seed,
+            deferred_proof: None,
+            now_ms: 0,
+        },
         DEFAULT_SUCCESSOR_CAPACITY,
     )
     .state;
@@ -427,7 +463,11 @@ fn test_insertion_and_removal_invalidate_only_changed_finger_slots() {
 
     let inserted = step(
         &stable,
-        TopologyEvent::Join { peer: closer },
+        TopologyEvent::Admit {
+            peer: closer,
+            deferred_proof: None,
+            now_ms: 0,
+        },
         DEFAULT_SUCCESSOR_CAPACITY,
     )
     .state;
@@ -508,7 +548,11 @@ fn test_sparse_and_dense_mutation_matrix_converges_to_finger_table_oracle() {
             members.push(inserted);
             let joined = step(
                 &stable,
-                TopologyEvent::Join { peer: inserted },
+                TopologyEvent::Admit {
+                    peer: inserted,
+                    deferred_proof: None,
+                    now_ms: 0,
+                },
                 DEFAULT_SUCCESSOR_CAPACITY,
             )
             .state;
@@ -556,7 +600,11 @@ fn test_wrapped_ring_mutations_converge_to_the_finger_table_oracle() {
     let initial_members = vec![local, near, far];
     let initial = step(
         &state(local, Vec::new(), None, vec![None; RING_BITS], 0),
-        TopologyEvent::Join { peer: near },
+        TopologyEvent::Admit {
+            peer: near,
+            deferred_proof: None,
+            now_ms: 0,
+        },
         DEFAULT_SUCCESSOR_CAPACITY,
     )
     .state;
@@ -568,7 +616,11 @@ fn test_wrapped_ring_mutations_converge_to_the_finger_table_oracle() {
     with_inserted.push(inserted);
     let joined = step(
         &stable,
-        TopologyEvent::Join { peer: inserted },
+        TopologyEvent::Admit {
+            peer: inserted,
+            deferred_proof: None,
+            now_ms: 0,
+        },
         DEFAULT_SUCCESSOR_CAPACITY,
     )
     .state;
@@ -601,7 +653,11 @@ fn test_topology_change_rejects_an_in_flight_stale_range_result() {
     let closer = did(2);
     let hinted = step(
         &state(local, Vec::new(), None, vec![None; 8], 0),
-        TopologyEvent::Join { peer: seed },
+        TopologyEvent::Admit {
+            peer: seed,
+            deferred_proof: None,
+            now_ms: 0,
+        },
         DEFAULT_SUCCESSOR_CAPACITY,
     )
     .state;
@@ -609,7 +665,11 @@ fn test_topology_change_rejects_an_in_flight_stale_range_result() {
     let request = emitted_finger_request(&issued);
     let changed = step(
         &issued.state,
-        TopologyEvent::Join { peer: closer },
+        TopologyEvent::Admit {
+            peer: closer,
+            deferred_proof: None,
+            now_ms: 0,
+        },
         DEFAULT_SUCCESSOR_CAPACITY,
     )
     .state;
@@ -641,7 +701,11 @@ fn test_finger_lookup_has_one_in_flight_request_and_a_bounded_retry() {
     let seed = did(1);
     let hinted = step(
         &state(local, Vec::new(), None, vec![None; 8], 0),
-        TopologyEvent::Join { peer: seed },
+        TopologyEvent::Admit {
+            peer: seed,
+            deferred_proof: None,
+            now_ms: 0,
+        },
         DEFAULT_SUCCESSOR_CAPACITY,
     )
     .state;
@@ -732,7 +796,11 @@ fn test_failed_range_does_not_starve_the_next_range() {
         |current, peer| {
             step(
                 &current,
-                TopologyEvent::Join { peer },
+                TopologyEvent::Admit {
+                    peer,
+                    deferred_proof: None,
+                    now_ms: 0,
+                },
                 DEFAULT_SUCCESSOR_CAPACITY,
             )
             .state
@@ -866,7 +934,11 @@ fn test_cancelled_finger_lookup_still_obeys_the_per_node_rate_limit() {
     let seed = did(1);
     let hinted = step(
         &state(local, Vec::new(), None, vec![None; 8], 0),
-        TopologyEvent::Join { peer: seed },
+        TopologyEvent::Admit {
+            peer: seed,
+            deferred_proof: None,
+            now_ms: 0,
+        },
         DEFAULT_SUCCESSOR_CAPACITY,
     )
     .state;
@@ -903,7 +975,11 @@ fn test_persistent_send_failures_have_a_capped_exponential_emission_bound() {
     let seed = did(1);
     let mut current = step(
         &state(local, Vec::new(), None, vec![None; 8], 0),
-        TopologyEvent::Join { peer: seed },
+        TopologyEvent::Admit {
+            peer: seed,
+            deferred_proof: None,
+            now_ms: 0,
+        },
         DEFAULT_SUCCESSOR_CAPACITY,
     )
     .state;
@@ -968,7 +1044,11 @@ fn test_proved_progress_resets_failure_backoff() {
     let seed = did(1);
     let initial = step(
         &state(local, Vec::new(), None, vec![None; 8], 0),
-        TopologyEvent::Join { peer: seed },
+        TopologyEvent::Admit {
+            peer: seed,
+            deferred_proof: None,
+            now_ms: 0,
+        },
         DEFAULT_SUCCESSOR_CAPACITY,
     )
     .state;

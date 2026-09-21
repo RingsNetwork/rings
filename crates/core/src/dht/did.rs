@@ -18,10 +18,10 @@
 //! observer's position the local zero point and lets a total byte order witness
 //! clockwise ordering from that observer.
 //!
-//! [`BiasId`] is the domain type for that translated view. It is used when a
-//! caller needs to compare identifiers relative to a reference point instead of
+//! [`Did::cmp_from_observer`] is that translated comparison. It is used when a
+//! caller needs to order identifiers relative to a reference point instead of
 //! comparing their raw encodings. The raw [`Did`] order remains the canonical
-//! representation order; biased order is a separate protocol proposition.
+//! representation order; observed order is a separate protocol proposition.
 //!
 //! ## Placement model
 //!
@@ -33,8 +33,8 @@
 //!
 //! ## Boundary
 //!
-//! `Did` owns parsing, serialization, display, biasing, range checks, fixed
-//! width arithmetic, and DHT placement. Protocol handlers depend on `Did`
+//! `Did` owns parsing, serialization, display, observer-relative comparison,
+//! fixed width arithmetic, and DHT placement. Protocol handlers depend on `Did`
 //! operations and do not perform byte-level arithmetic.
 
 use std::cmp::Ordering;
@@ -56,9 +56,6 @@ use crate::ecc::HashStr;
 use crate::error::Error;
 use crate::error::Result;
 
-/// Non-zero witness for the 360-degree denominator used by [`Rotate`].
-const FULL_ROTATION_DENOMINATOR: NonZeroU32 = NonZeroU32::MIN.saturating_add(359);
-
 /// DHT identity over the `Z / 2^160` identifier ring.
 ///
 /// Invariant: the inner [`H160`] is the canonical 20-byte big-endian encoding
@@ -79,100 +76,16 @@ impl std::fmt::Display for Did {
     }
 }
 
-/// DHT identity observed from a reference point.
-///
-/// Chord interval comparisons are relative to an observer. Given raw
-/// identifiers `a` and `b`, there is no single protocol answer to "which is
-/// closer" until a reference identifier `x` is chosen. `BiasId` records that
-/// reference and stores `did - x`, so the reference point becomes zero in the
-/// lifted ring order.
-///
-/// Invariant: `did` is always stored as `raw_did - bias`.
-///
-/// Law: `BiasId::new(x, y).to_did() == y`.
-///
-/// `BiasId` intentionally has no total [`Ord`] implementation. Values with
-/// different observers live in different reference frames, so callers must
-/// either compare same-observer values or name the observer explicitly.
-#[derive(Copy, Clone, Eq, PartialEq, Debug, Serialize, Deserialize, Hash)]
-pub struct BiasId {
-    /// the zero point for determine order of Did.
-    bias: Did,
-    /// did data without bias.
-    did: Did,
-}
-
-/// Affine rotation on the 160-bit Chord circle.
-///
-/// For [`Did`], degrees are mapped to the dyadic ring offset
-/// `floor(2^160 * angle / 360)`.
-pub trait Rotate<Rhs = u16> {
-    /// output type of rotate operation
-    type Output;
-    /// rotate a Did with given angle
-    fn rotate(&self, angle: Rhs) -> Self::Output;
-}
-
-impl Rotate<u16> for Did {
-    type Output = Self;
-    fn rotate(&self, angle: u16) -> Self::Output {
-        *self + Did::dyadic_fraction(angle.into(), FULL_ROTATION_DENOMINATOR)
-    }
-}
-
-impl BiasId {
-    /// Wrap a Did into BiasDid with given bias.
-    pub fn new(bias: Did, did: Did) -> BiasId {
-        BiasId {
-            bias,
-            did: did - bias,
-        }
-    }
-
-    /// Get wrapped biased value from did
-    pub fn to_did(self) -> Did {
-        self.did + self.bias
-    }
-
-    /// Get unwrap value from a BiasDid
-    pub fn pos(&self) -> Did {
-        self.did
-    }
-
-    /// Compare two biased identifiers only when they share the same observer.
-    pub fn cmp_same_observer(&self, other: &Self) -> Option<Ordering> {
-        (self.bias == other.bias).then(|| self.did.cmp(&other.did))
-    }
-
-    /// Compare two raw identifiers from one explicit Chord observer.
+impl Did {
+    /// Compare two identifiers from one explicit Chord observer.
+    ///
+    /// Chord interval comparisons are relative to an observer: given raw
+    /// identifiers `left` and `right` there is no protocol answer to "which is
+    /// closer" until the reference identifier is chosen. Re-centring the ring at
+    /// `observer` makes clockwise distance the total order, so
+    /// `cmp_from_observer(x, a, b) == (a - x).cmp(&(b - x))`.
     pub fn cmp_from_observer(observer: Did, left: Did, right: Did) -> Ordering {
-        let (left, right) = (left - observer, right - observer);
-        left.cmp(&right)
-    }
-}
-
-impl PartialOrd for BiasId {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        self.cmp_same_observer(other)
-    }
-}
-
-impl PartialEq<Did> for BiasId {
-    fn eq(&self, rhs: &Did) -> bool {
-        let id: Did = self.into();
-        id == *rhs
-    }
-}
-
-impl From<BiasId> for Did {
-    fn from(id: BiasId) -> Did {
-        BiasId::to_did(id)
-    }
-}
-
-impl From<&BiasId> for Did {
-    fn from(id: &BiasId) -> Did {
-        BiasId::to_did(*id)
+        (left - observer).cmp(&(right - observer))
     }
 }
 
@@ -207,22 +120,6 @@ impl Did {
 
     fn to_be_bytes(self) -> [u8; Self::BYTE_LEN] {
         self.0.to_fixed_bytes()
-    }
-
-    /// Test whether this identity is inside the open clockwise interval
-    /// `(a, b)` observed from `base_id`.
-    ///
-    /// Post: returns `true` exactly when `self - base_id` is strictly after
-    /// `a - base_id` and strictly before `b - base_id` in the canonical ring
-    /// order.
-    pub fn in_range(&self, base_id: Self, a: Self, b: Self) -> bool {
-        // Test x > a && b > x
-        *self - base_id > a - base_id && b - base_id > *self - base_id
-    }
-
-    /// Transform this identity into the view whose zero point is `did`.
-    pub fn bias(&self, did: Self) -> BiasId {
-        BiasId::new(did, *self)
     }
 
     /// Rotate this DID into a redundant placement vector.
@@ -324,22 +221,6 @@ impl Did {
         }
 
         Self::from_be_bytes(out)
-    }
-}
-
-/// Ordering with a did reference
-/// This trait defines necessary method for sorting based on did.
-pub trait SortRing {
-    /// Sort a impl SortRing with given did
-    fn sort(&mut self, did: Did);
-}
-
-impl SortRing for Vec<Did> {
-    fn sort(&mut self, did: Did) {
-        self.sort_by(|a, b| {
-            let (da, db) = (*a - did, *b - did);
-            da.cmp(&db)
-        });
     }
 }
 
@@ -535,70 +416,17 @@ mod tests {
     }
 
     #[test]
-    fn test_sort() {
-        let a = Did::from_str("0xaaE807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
-        let b = Did::from_str("0xbb9999cf1046e68e36E1aA2E0E07105eDDD1f08E").unwrap();
-        let c = Did::from_str("0xccffee254729296a45a3885639AC7E10F9d54979").unwrap();
-        let d = Did::from_str("0xdddfee254729296a45a3885639AC7E10F9d54979").unwrap();
-        let mut v = vec![c, b, a, d];
-        v.sort(a);
-        assert_eq!(v, vec![a, b, c, d]);
-        v.sort(b);
-        assert_eq!(v, vec![b, c, d, a]);
-        v.sort(c);
-        assert_eq!(v, vec![c, d, a, b]);
-        v.sort(d);
-        assert_eq!(v, vec![d, a, b, c]);
-    }
-
-    fn former_mixed_observer_cmp(left: BiasId, right: BiasId) -> Ordering {
-        let right_raw = right.to_did();
-        let right_in_left_observer = BiasId::new(left.bias, right_raw);
-        left.pos().cmp(&right_in_left_observer.pos())
-    }
-
-    #[test]
-    fn test_bias_id_orders_same_observer() {
+    fn test_cmp_from_observer_is_clockwise_distance() {
         let observer = Did::from(10u32);
-        let near = BiasId::new(observer, Did::from(11u32));
-        let far = BiasId::new(observer, Did::from(12u32));
-
-        assert_eq!(near.cmp_same_observer(&far), Some(Ordering::Less));
-        assert_eq!(far.cmp_same_observer(&near), Some(Ordering::Greater));
-        assert_eq!(near.partial_cmp(&far), Some(Ordering::Less));
         assert_eq!(
-            BiasId::cmp_from_observer(observer, Did::from(11u32), Did::from(12u32)),
+            Did::cmp_from_observer(observer, Did::from(11u32), Did::from(12u32)),
             Ordering::Less
         );
-    }
-
-    #[test]
-    fn test_bias_id_rejects_mixed_observer_ordering() {
-        let a = BiasId::new(Did::from(0u32), Did::from(1u32));
-        let b = BiasId::new(
-            Did::power_of_two(159),
-            Did::from(ring_size() - BigUint::from(1u8)),
+        // Wrapping: the identifier just behind the observer is the farthest.
+        assert_eq!(
+            Did::cmp_from_observer(observer, Did::from(9u32), Did::from(11u32)),
+            Ordering::Greater
         );
-
-        assert_eq!(former_mixed_observer_cmp(a, b), Ordering::Less);
-        assert_eq!(former_mixed_observer_cmp(b, a), Ordering::Less);
-        assert_eq!(a.partial_cmp(&b), None);
-        assert_eq!(b.partial_cmp(&a), None);
-    }
-
-    #[test]
-    fn test_rotate_transformation() {
-        assert_eq!(Did::from(0u32), Did::from(BigUint::from(2u16).pow(160)));
-        let did = Did::from(10u32);
-        let result = did.rotate(360);
-        assert_eq!(result, did);
-    }
-
-    #[test]
-    fn test_right_shift() {
-        let did = Did::from(10u32);
-        let ret: Did = did.rotate(180);
-        assert_eq!(ret, did + Did::from(BigUint::from(2u16).pow(159)));
     }
 
     #[test]
@@ -621,17 +449,6 @@ mod tests {
     }
 
     #[test]
-    fn test_did_rotate_matches_biguint_dyadic_offset_oracle() {
-        let did = Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
-
-        for angle in [0u16, 1, 90, 180, 359, 360, 361, u16::MAX] {
-            let expected_offset =
-                Did::from(ring_size() * BigUint::from(angle) / BigUint::from(360u32));
-            assert_eq!(did.rotate(angle), did + expected_offset);
-        }
-    }
-
-    #[test]
     fn test_did_power_of_two_matches_biguint_oracle() {
         for bit in [0usize, 1, 8, 31, 32, 63, 64, 127, 128, 159, 160, 255] {
             let expected = Did::from(BigUint::from(1u8) << bit);
@@ -644,12 +461,13 @@ mod tests {
         let did = Did::from(10u32);
         let affine_dids = did.rotate_affine(4)?;
         assert_eq!(affine_dids.len(), 4);
-        assert_eq!(affine_dids, vec![
-            did.rotate(0),
-            did.rotate(90),
-            did.rotate(180),
-            did.rotate(270)
-        ]);
+        let quarter = NonZeroU32::new(4).unwrap();
+        assert_eq!(
+            affine_dids,
+            (0..4)
+                .map(|i| did + Did::dyadic_fraction(i, quarter))
+                .collect::<Vec<_>>()
+        );
         Ok(())
     }
 

@@ -69,7 +69,7 @@
 //!
 //! - Every topology change is `topology::step`; every lifecycle change is a
 //!   method of the production registry; the candidate budget of a report is
-//!   the production `StabilizationConnectionPlan`; report confirmation is
+//!   the production `ConnectionPlan`; report confirmation is
 //!   `TopoInfo::confirmed_by`; the removal flavours are the production
 //!   `DhtPeerRemoval`. The carrier stores those production values, so there
 //!   is no snapshot or shadow state machine to keep equal to them.
@@ -96,8 +96,7 @@
 //!   so every modeled finger's fixpoint is the successor head, the range
 //!   stabilization itself proves.
 //! - Not modeled: connection-capacity eviction, successor-list sync, connect
-//!   lookups, the `NotifyPredecessorReport` reconnection, the periodic
-//!   notification of successors other than the head, storage repair, and
+//!   lookups, storage repair, and
 //!   bootstrap redial pacing and seed selection (#763): an isolated peer
 //!   dials any live peer. Handshake expiry appears only as the close of a
 //!   refused offer's generation. Signaling is reliable; loss and duplication

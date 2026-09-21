@@ -3,7 +3,7 @@
 use super::confirmed_topology;
 use super::topology_has_confirmed_peer;
 use crate::dht::topology::bounded_connection_candidates;
-use crate::dht::topology::StabilizationConnectionPlan;
+use crate::dht::topology::stabilization_connection_budget;
 use crate::dht::Did;
 use crate::dht::TopoInfo;
 use crate::ecc::SecretKey;
@@ -55,7 +55,7 @@ fn test_stabilization_candidate_effects_are_deduplicated_and_capacity_bounded() 
 
     let candidates = bounded_connection_candidates(
         local,
-        StabilizationConnectionPlan::candidate_capacity(3),
+        stabilization_connection_budget(3),
         report
             .predecessor
             .into_iter()

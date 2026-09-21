@@ -1,7 +1,6 @@
 use rings_transport::core::transport::WebrtcConnectionState;
 
 use super::test_stabilization::replace_observed_topology;
-use crate::dht::successor::SuccessorReader;
 use crate::ecc::SecretKey;
 use crate::error::Result;
 use crate::tests::default::prepare_node;

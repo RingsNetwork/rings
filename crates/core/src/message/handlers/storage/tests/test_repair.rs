@@ -15,8 +15,6 @@ use crate::dht::entry::EntryKind;
 use crate::dht::entry::EntryOperation;
 use crate::dht::entry::PlacedEntryOperation;
 use crate::dht::entry::PlacementMiss;
-use crate::dht::successor::SuccessorReader;
-use crate::dht::successor::SuccessorWriter;
 use crate::dht::Did;
 use crate::ecc::tests::gen_ordered_keys;
 use crate::ecc::SecretKey;
@@ -33,7 +31,6 @@ use crate::message::MessageVerificationExt;
 use crate::session::SessionSk;
 use crate::storage::MemStorage;
 use crate::swarm::transport::STORAGE_LOOKUP_OBSERVATION_CAPACITY;
-use crate::swarm::Swarm;
 use crate::swarm::SwarmBuilder;
 use crate::tests::default::assert_no_more_msg;
 #[cfg(feature = "dummy")]
@@ -182,22 +179,6 @@ async fn test_found_entry_read_repair_backpressure_is_deferred() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_storage_api_rejects_redundancy_mismatch() -> Result<()> {
-    let node = prepare_node(SecretKey::random()).await;
-
-    let result = <Swarm as ChordStorageInterface<2>>::storage_fetch(&node.swarm, node.did()).await;
-
-    assert!(matches!(
-        result,
-        Err(Error::StorageRedundancyMismatch {
-            configured: 1,
-            requested: 2
-        })
-    ));
-    Ok(())
-}
-
-#[tokio::test]
 async fn test_placed_entry_operation_rejects_non_affine_placement() -> Result<()> {
     let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
@@ -250,7 +231,7 @@ async fn test_remote_redundant_store_writes_split_replica_at_affine_placement() 
     let writer = nodes[primary_owner];
     let remote_replica_owner = nodes[replica_owner];
 
-    <Swarm as ChordStorageInterface<2>>::storage_store(&writer.swarm, entry.clone()).await?;
+    writer.swarm.storage_store(entry.clone()).await?;
 
     next_payload_matching(
         remote_replica_owner,
@@ -331,7 +312,7 @@ async fn test_local_hit_read_repair_sends_no_search_for_unknown_replicas() -> Re
         .put(&first_key.to_string(), &entry)
         .await?;
 
-    <Swarm as ChordStorageInterface<2>>::storage_fetch(&node.swarm, entry.did).await?;
+    node.swarm.storage_fetch(entry.did).await?;
 
     assert_eq!(node.swarm.storage_check_cache(entry.did).await, Some(entry));
     assert_no_more_msg([&node]).await;

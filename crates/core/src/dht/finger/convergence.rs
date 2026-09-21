@@ -65,11 +65,7 @@ mod retry;
 /// Scheduler-facing convergence status projection.
 mod status;
 
-use serde::Deserialize;
-use serde::Serialize;
-
 use self::attempt::FingerAttempt;
-use self::attempt::FingerAttemptStatus;
 use self::attempt::FingerProofSource;
 use self::evidence::EvidenceInvalidation;
 use self::evidence::FingerEvidence;
@@ -108,7 +104,7 @@ const FINGER_LOOKUP_TIMEOUT_MS: u64 = 10_000;
 pub(crate) const FINGER_ADMISSION_TIMEOUT_MS: u64 = 210_000;
 
 /// Serializable protocol state for one node's local finger convergence.
-#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct FingerConvergenceState {
     /// Per-slot verification bits plus the hint-change epoch they belong to.
     ///
@@ -189,18 +185,6 @@ impl FingerConvergenceState {
         }
     }
 
-    /// Clamp restored state to the current table width.
-    ///
-    /// Retry timestamps are left intact because they are clock-relative
-    /// scheduler policy; evidence and owned proofs are the width-dependent
-    /// parts that can otherwise point outside the resized table.
-    /// All valid in-range evidence and ownership are preserved.
-    pub(crate) fn normalized(mut self, slot_count: usize) -> Self {
-        self.evidence.normalize(slot_count);
-        self.attempt.normalize(slot_count);
-        self
-    }
-
     /// Convert internal evidence and attempt ownership into scheduler state.
     ///
     /// `first_routable_slot` excludes the local successor range already proved
@@ -212,19 +196,13 @@ impl FingerConvergenceState {
         first_routable_slot: usize,
         now_ms: u64,
     ) -> FingerConvergenceStatus {
-        let failure_streak = self.retry.failure_streak();
-        match self.attempt.status(now_ms) {
-            FingerAttemptStatus::Idle => FingerConvergenceStatus::new(
+        FingerConvergenceStatus::new(
+            self.attempt.phase(
+                now_ms,
                 self.evidence.any_unverified_from(first_routable_slot),
-                failure_streak,
             ),
-            FingerAttemptStatus::AwaitingReport { remaining_ms } => {
-                FingerConvergenceStatus::awaiting_report(remaining_ms, failure_streak)
-            }
-            FingerAttemptStatus::AwaitingAdmission { remaining_ms } => {
-                FingerConvergenceStatus::awaiting_admission(remaining_ms, failure_streak)
-            }
-        }
+            self.retry.failure_streak(),
+        )
     }
 
     /// Invalidate only evidence whose inferred finger hint changed.
@@ -351,7 +329,7 @@ impl FingerConvergenceState {
             self.attempt
                 .retain_for_admission(proof, now_ms.saturating_add(FINGER_ADMISSION_TIMEOUT_MS));
         }
-        FingerDeferOutcome::Deferred { end: proof.end }
+        FingerDeferOutcome::Deferred
     }
 
     /// Commit an authenticated report to every still-current slot it proves.
@@ -379,7 +357,7 @@ impl FingerConvergenceState {
         self.evidence.apply(fingers, local, proof);
         self.cursor = proof.end.saturating_add(1);
         self.retry.record_progress();
-        FingerApplyOutcome::Applied { end: proof.end }
+        FingerApplyOutcome::Applied
     }
 
     /// Retire a current, valid report whose candidate transport cannot use.

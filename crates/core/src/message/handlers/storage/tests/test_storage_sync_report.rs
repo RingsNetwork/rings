@@ -11,9 +11,6 @@ use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
-use crate::dht::successor::SuccessorReader;
-use crate::dht::successor::SuccessorWriter;
-use crate::dht::Chord;
 use crate::dht::Did;
 use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
@@ -219,7 +216,7 @@ async fn test_sync_entries_handler_skips_entries_owned_by_another_virtual_owner(
     manually_establish_connection(&sender.swarm, &receiver.swarm).await;
     wait_for_msgs([&sender, &receiver]).await;
     assert_no_more_msg([&sender, &receiver]).await;
-    let _ = receiver.dht().join(sender.did())?;
+    let _ = receiver.dht().admit_connected(sender.did(), None)?;
 
     let placement_key = receiver
         .dht()
@@ -304,7 +301,7 @@ async fn test_sync_entries_physical_destination_routes_by_physical_did_not_stora
         peers.push(next_generated_key(&mut keys)?.address().into());
     }
     for peer in peers.iter().copied() {
-        let _ = node.dht().join(peer)?;
+        let _ = node.dht().admit_connected(peer, None)?;
     }
 
     let dht = node.dht();

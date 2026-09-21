@@ -73,7 +73,7 @@ async fn test_local_hit_lookup_has_no_read_repair_targets() -> Result<()> {
         .ok_or_else(|| Error::InvalidMessage("expected first placement".to_string()))?;
     node.storage.put(&first_key.to_string(), &entry).await?;
 
-    let action = <PeerRing as ChordStorage<_, 2>>::entry_lookup(&node, entry.did).await?;
+    let action = node.entry_lookup(entry.did, 2).await?;
     let evidence = match action {
         PeerRingAction::SomeEntry(evidence) => evidence,
         action => return Err(Error::unexpected_peer_ring_action(action)),
@@ -104,7 +104,7 @@ async fn test_read_repair_targets_only_observed_missing_placements() -> Result<(
         .ok_or_else(|| Error::InvalidMessage("expected third placement".to_string()))?;
     node.storage.put(&second_key.to_string(), &entry).await?;
 
-    let action = <PeerRing as ChordStorage<_, 3>>::entry_lookup(&node, entry.did).await?;
+    let action = node.entry_lookup(entry.did, 3).await?;
     let evidence = match action {
         PeerRingAction::SomeEntry(evidence) => evidence,
         action => return Err(Error::unexpected_peer_ring_action(action)),

@@ -2,10 +2,6 @@
 
 #![deny(missing_docs)]
 
-use serde::Deserialize;
-use serde::Serialize;
-
-use crate::dht::did::BiasId;
 use crate::dht::Did;
 
 /// Range-aware convergence state machine for this finger table.
@@ -35,7 +31,7 @@ pub const DEFAULT_FINGER_TABLE_SIZE: usize = 160;
 /// Equality compares the complete serializable protocol state, including the
 /// maintenance cursor, convergence ownership, evidence epochs, and retry
 /// state. Call [`Self::list`] when only routing hints should be compared.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FingerTable {
     /// Local node whose outgoing fingers this table describes.
     did: Did,
@@ -73,7 +69,7 @@ impl FingerTable {
         self.len() == 0
     }
 
-    /// Get first element from Finger Table
+    /// The first occupied finger hint, if any.
     pub fn first(&self) -> Option<Did> {
         self.finger.iter().flatten().next().copied()
     }
@@ -126,22 +122,7 @@ impl FingerTable {
         self.finger.contains(&v)
     }
 
-    /// get closest predecessor
-    pub fn closest_predecessor(&self, did: Did) -> Did {
-        let observer = self.did;
-
-        for i in (0..self.size).rev() {
-            if let Some(v) = self.finger.get(i).copied().flatten() {
-                if BiasId::cmp_from_observer(observer, v, did) == std::cmp::Ordering::Less {
-                    return v;
-                }
-            }
-        }
-
-        self.did
-    }
-
-    /// get length of finger
+    /// The number of occupied finger hints.
     pub fn len(&self) -> usize {
         self.finger.iter().flatten().count()
     }
@@ -181,18 +162,15 @@ impl FingerTable {
 
     /// Replace the full finger state with a value produced by the pure topology transition.
     ///
-    /// Post: the table keeps its fixed slot count; entries beyond that count
-    /// are ignored and missing entries become `None`. Convergence state is
-    /// normalized to the same width so restored proofs cannot address a slot
-    /// that no longer exists.
+    /// Pre: the transition mapped over this table's own `fingers`, so the
+    /// width is unchanged; the table has no resize path.
     pub(crate) fn replace_state(
         &mut self,
         fingers: &[Option<Did>],
         convergence: FingerConvergenceState,
     ) {
-        self.finger = fingers.iter().copied().take(self.size).collect();
-        self.finger.resize(self.size, None);
-        self.convergence = convergence.normalized(self.size);
+        self.finger = fingers.to_vec();
+        self.convergence = convergence;
     }
 
     /// Reset finger table to empty vector

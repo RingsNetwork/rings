@@ -21,9 +21,6 @@ use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::PlacementMiss;
 use crate::dht::entry::SyncedEntryAck;
 use crate::dht::stabilization::STORAGE_REPAIR_MAX_DELIVERIES_PER_STEP;
-use crate::dht::successor::SuccessorWriter;
-use crate::dht::Chord;
-use crate::dht::ChordStorage;
 use crate::dht::ChordStorageCache;
 use crate::dht::ChordStorageRepair;
 use crate::dht::ChordStorageSync;
@@ -299,7 +296,7 @@ async fn test_entry_lookup_reports_local_storage_failure() -> Result<()> {
     let did = Did::from(1u32);
     let node = PeerRing::new_with_storage(did, 3, Box::new(FailingGetStorageFixture));
 
-    let result = <PeerRing as ChordStorage<_, 1>>::entry_lookup(&node, did).await;
+    let result = node.entry_lookup(did, 1).await;
 
     assert!(matches!(
         result,
@@ -319,14 +316,12 @@ async fn test_virtual_storage_owner_routes_operate_to_physical_owner() -> Result
         8,
         VirtualNodeConfig::new(7, 2),
     );
-    let _ = node.join(remote)?;
+    let _ = node.admit_connected(remote, None)?;
     let placement = first_virtual_position(&node, remote)?;
 
-    let act = <PeerRing as ChordStorage<_, 1>>::entry_operate(
-        &node,
-        EntryOperation::Overwrite(data_entry(placement)),
-    )
-    .await?;
+    let act = node
+        .entry_operate(EntryOperation::Overwrite(data_entry(placement)), 1)
+        .await?;
 
     let PeerRingAction::MultiActions(actions) = act else {
         return Err(Error::unexpected_peer_ring_action(act));
@@ -357,14 +352,12 @@ async fn test_virtual_storage_owner_routes_interval_key_to_successor_position() 
         8,
         VirtualNodeConfig::new(7, 2),
     );
-    let _ = node.join(remote)?;
+    let _ = node.admit_connected(remote, None)?;
     let placement = interval_key_with_virtual_successor(&node, remote)?;
 
-    let act = <PeerRing as ChordStorage<_, 1>>::entry_operate(
-        &node,
-        EntryOperation::Overwrite(data_entry(placement)),
-    )
-    .await?;
+    let act = node
+        .entry_operate(EntryOperation::Overwrite(data_entry(placement)), 1)
+        .await?;
 
     let PeerRingAction::MultiActions(actions) = act else {
         return Err(Error::unexpected_peer_ring_action(act));
@@ -393,11 +386,9 @@ async fn test_virtual_storage_owner_stores_local_position_locally() -> Result<()
     );
     let placement = first_virtual_position(&node, local)?;
 
-    let act = <PeerRing as ChordStorage<_, 1>>::entry_operate(
-        &node,
-        EntryOperation::Overwrite(data_entry(placement)),
-    )
-    .await?;
+    let act = node
+        .entry_operate(EntryOperation::Overwrite(data_entry(placement)), 1)
+        .await?;
 
     assert_eq!(act, PeerRingAction::None);
     assert!(node.storage.get(&placement.to_string()).await?.is_some());
@@ -415,10 +406,10 @@ async fn test_local_fetch_falls_back_when_local_virtual_owner_has_no_entry() -> 
         8,
         VirtualNodeConfig::new(7, 2),
     );
-    let _ = node.join(remote)?;
+    let _ = node.admit_connected(remote, None)?;
     let placement = first_virtual_position(&node, local)?;
 
-    let remote_lookup = <PeerRing as ChordStorage<_, 1>>::entry_lookup(&node, placement).await?;
+    let remote_lookup = node.entry_lookup(placement, 1).await?;
     assert_eq!(
         remote_lookup,
         PeerRingAction::MultiActions(vec![PeerRingAction::EntryMisses(vec![PlacementMiss::new(
@@ -448,7 +439,7 @@ async fn test_virtual_storage_sync_copies_entries_to_observed_virtual_owner() ->
         8,
         VirtualNodeConfig::new(7, 2),
     );
-    let _ = node.join(remote)?;
+    let _ = node.admit_connected(remote, None)?;
     let placement = first_virtual_position(&node, remote)?;
     let entry = data_entry_with_data(placement, "handoff");
     node.storage.put(&placement.to_string(), &entry).await?;
@@ -481,7 +472,7 @@ fn test_physical_owner_route_permits_a_nonlocal_owner_through_the_current_next_h
         8,
         VirtualNodeConfig::new(7, 2),
     );
-    let _ = node.join(next_hop)?;
+    let _ = node.admit_connected(next_hop, None)?;
     let destination = StorageSyncDestination::PhysicalOwner(remote_owner);
 
     assert_eq!(node.next_hop_for_storage_sync(destination)?, Some(next_hop));
@@ -500,7 +491,7 @@ fn test_physical_owner_route_cancels_when_its_direct_next_hop_leaves_topology() 
         8,
         VirtualNodeConfig::new(7, 2),
     );
-    let _ = node.join(remote_owner)?;
+    let _ = node.admit_connected(remote_owner, None)?;
     let destination = StorageSyncDestination::PhysicalOwner(remote_owner);
 
     assert!(node.storage_sync_route_still_permits(destination, remote_owner)?);
@@ -523,7 +514,7 @@ fn test_physical_owner_route_cancels_when_its_next_hop_changes() -> Result<()> {
         8,
         VirtualNodeConfig::new(7, 2),
     );
-    let _ = node.join(old_next_hop)?;
+    let _ = node.admit_connected(old_next_hop, None)?;
     let destination = StorageSyncDestination::PhysicalOwner(old_next_hop);
 
     assert_eq!(
@@ -532,7 +523,7 @@ fn test_physical_owner_route_cancels_when_its_next_hop_changes() -> Result<()> {
     );
     assert!(node.storage_sync_route_still_permits(destination, old_next_hop)?);
 
-    let _ = node.join(new_next_hop)?;
+    let _ = node.admit_connected(new_next_hop, None)?;
 
     assert_eq!(
         node.next_hop_for_storage_sync(destination)?,
@@ -553,7 +544,7 @@ fn test_placement_key_route_uses_one_virtual_owner_topology_snapshot() -> Result
         8,
         VirtualNodeConfig::new(7, 2),
     );
-    let _ = node.join(remote)?;
+    let _ = node.admit_connected(remote, None)?;
     let placement_key = node
         .storage_virtual_positions(remote)?
         .into_iter()

@@ -18,7 +18,6 @@ use super::PendingConnectionAttempt;
 use super::SwarmConnection;
 use super::SwarmTransport;
 use super::TRANSPORT_TIMEOUT_PROFILE;
-use crate::dht::did::BiasId;
 use crate::dht::Chord;
 use crate::dht::Did;
 use crate::dht::PeerRingAction;
@@ -521,7 +520,7 @@ impl SwarmTransport {
             .filter(|candidate| *candidate != self.dht.did && *candidate != removed)
             .collect::<Vec<_>>();
         let observer = self.dht.did;
-        candidates.sort_by(|left, right| BiasId::cmp_from_observer(observer, *left, *right));
+        candidates.sort_by(|left, right| Did::cmp_from_observer(observer, *left, *right));
         candidates.dedup();
 
         let capacity = self.dht.successors().capacity();

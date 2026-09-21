@@ -1,6 +1,7 @@
 use rings_core::message::MessageSigner;
 
 use super::*;
+use crate::consts::DATA_REDUNDANT;
 
 // Native WebRTC tests share process-global ICE/UDP resources and timing-sensitive
 // connection callbacks; run them serially so one test's candidates or callbacks
@@ -424,11 +425,21 @@ pub(super) fn processor_has_admitted_peer(processor: &Processor, peer: Did) -> b
     processor.swarm.peer_dids().contains(&peer)
 }
 
+/// Run one stabilize round on both nodes, then wait for the mutual successor and
+/// predecessor view it produces.
+///
+/// A round is issued once: `begin_stabilization` supersedes an unanswered round,
+/// so re-issuing while the head's report is in flight would make every report
+/// stale and the head notify (the only predecessor-propagation path) never fire.
 pub(super) async fn wait_for_mutual_dht_topology(
     processor: &Processor,
     other: &Processor,
 ) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(10);
+    let stabilizer = processor.swarm.stabilizer();
+    let other_stabilizer = other.swarm.stabilizer();
+    futures::try_join!(stabilizer.stabilize(), other_stabilizer.stabilize(),)
+        .map_err(Error::CoreError)?;
     loop {
         let inspect = processor.swarm.inspect().await;
         let other_inspect = other.swarm.inspect().await;
@@ -450,10 +461,6 @@ pub(super) async fn wait_for_mutual_dht_topology(
             return Ok(());
         }
 
-        let stabilizer = processor.swarm.stabilizer();
-        let other_stabilizer = other.swarm.stabilizer();
-        futures::try_join!(stabilizer.stabilize(), other_stabilizer.stabilize(),)
-            .map_err(Error::CoreError)?;
         let remaining = deadline
             .checked_duration_since(Instant::now())
             .unwrap_or_else(|| {

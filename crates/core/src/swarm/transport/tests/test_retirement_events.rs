@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use super::pending::RetirementOutcome;
 use super::*;
-use crate::dht::Chord;
 
 /// A transport whose application callback is a fresh event log.
 fn transport_with_log() -> Result<(SwarmTransport, Arc<EventLog>)> {
@@ -83,7 +82,7 @@ async fn test_topology_prune_keeps_the_record_and_reports_nothing() -> Result<()
     let attempt = transport.reserve_pending_connection(peer).await?;
     assert!(transport.activate_connection_for_test(attempt)?);
     assert!(transport.mark_admission_announced(attempt)?);
-    transport.dht.join(peer)?;
+    transport.dht.admit_connected(peer, None)?;
 
     assert!(transport
         .remove_unavailable_topology(peer, Some(attempt))?
@@ -107,7 +106,7 @@ async fn test_eviction_of_an_unreferenced_peer_is_reported_retired() -> Result<(
     let kept = transport.reserve_pending_connection(referenced).await?;
     assert!(transport.activate_connection_for_test(kept)?);
     assert!(transport.mark_admission_announced(kept)?);
-    transport.dht.join(referenced)?;
+    transport.dht.admit_connected(referenced, None)?;
     let evicted = transport.reserve_pending_connection(unreferenced).await?;
     assert!(transport.activate_connection_for_test(evicted)?);
     assert!(transport.mark_admission_announced(evicted)?);

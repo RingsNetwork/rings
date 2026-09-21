@@ -85,8 +85,6 @@ pub enum RemoteAction {
         /// the active stabilization round.
         request_id: uuid::Uuid,
     },
-    /// Try to connect to the recipient.
-    TryConnect,
 }
 
 /// Information about a node's successors and predecessor.
@@ -131,16 +129,6 @@ impl TryFrom<&PeerRing> for TopoInfo {
 }
 
 impl PeerRingAction {
-    /// Returns `true` if the action is [`PeerRingAction::None`].
-    pub fn is_none(&self) -> bool {
-        matches!(self, Self::None)
-    }
-
-    /// Returns `true` if the action is [`PeerRingAction::Some`].
-    pub fn is_some(&self) -> bool {
-        matches!(self, Self::Some(_))
-    }
-
     /// Returns `true` if the action is [`PeerRingAction::SomeEntry`].
     pub fn is_some_entry(&self) -> bool {
         matches!(self, Self::SomeEntry(_))
@@ -149,11 +137,6 @@ impl PeerRingAction {
     /// Returns `true` if the action is [`PeerRingAction::RemoteAction`].
     pub fn is_remote(&self) -> bool {
         matches!(self, Self::RemoteAction(..))
-    }
-
-    /// Returns `true` if the action is [`PeerRingAction::MultiActions`].
-    pub fn is_multi(&self) -> bool {
-        matches!(self, Self::MultiActions(..))
     }
 }
 

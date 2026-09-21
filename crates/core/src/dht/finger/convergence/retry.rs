@@ -38,9 +38,6 @@
 //!                         set retry_not_before
 //! ```
 
-use serde::Deserialize;
-use serde::Serialize;
-
 /// Minimum process-monotonic separation between automatic finger emissions.
 ///
 /// This hard floor applies even without failures and prevents repeated
@@ -75,7 +72,7 @@ pub(crate) fn finger_lookup_backoff_ms(failure_streak: u8) -> u64 {
 }
 
 /// Deterministic retry state for automatic finger lookups.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub(super) struct FingerRetryState {
     /// Last automatic lookup emission, used for the hard minimum interval.
     ///

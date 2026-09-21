@@ -85,41 +85,46 @@ pub(crate) struct FingerConvergenceStatus {
 }
 
 impl FingerConvergenceStatus {
+    /// Pair a phase with the retry failure streak it was observed under.
+    pub(crate) const fn new(phase: FingerConvergencePhase, failure_streak: u8) -> Self {
+        Self {
+            phase,
+            failure_streak,
+        }
+    }
+
     /// Build either `Runnable` or `Converged` from the pending-evidence bit.
     ///
     /// `pending` describes unverified routable evidence when no attempt owns
     /// work. The supplied failure streak is preserved in either phase.
-    pub(crate) const fn new(pending: bool, failure_streak: u8) -> Self {
-        Self {
-            phase: if pending {
+    #[cfg(test)]
+    pub(crate) const fn idle(pending: bool, failure_streak: u8) -> Self {
+        Self::new(
+            if pending {
                 FingerConvergencePhase::Runnable
             } else {
                 FingerConvergencePhase::Converged
             },
             failure_streak,
-        }
+        )
     }
 
     /// Build status for a lookup that is still waiting on a report.
-    ///
-    /// `remaining_ms` is already saturated against the caller's clock and is
-    /// stored unchanged with the current retry failure streak.
+    #[cfg(test)]
     pub(crate) const fn awaiting_report(remaining_ms: u64, failure_streak: u8) -> Self {
-        Self {
-            phase: FingerConvergencePhase::AwaitingReport { remaining_ms },
+        Self::new(
+            FingerConvergencePhase::AwaitingReport { remaining_ms },
             failure_streak,
-        }
+        )
     }
 
     /// Build status for a proof retained during transport admission.
-    ///
-    /// This phase prevents the scheduler from issuing another lookup while the
-    /// transport owns a bounded decision window.
+    #[cfg(test)]
     pub(crate) const fn awaiting_admission(remaining_ms: u64, failure_streak: u8) -> Self {
-        Self {
-            phase: FingerConvergencePhase::AwaitingAdmission { remaining_ms },
+        Self::new(
+            FingerConvergencePhase::AwaitingAdmission { remaining_ms },
             failure_streak,
-        }
+        )
     }
 
     /// Build the dormant status of a node without a successor head.

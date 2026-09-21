@@ -295,49 +295,6 @@ async fn test_native_wait_with_repairs_storage_before_connection_retirement() ->
     Ok(())
 }
 
-#[tokio::test]
-async fn test_repair_storage_defers_sync_to_fresh_next_hop() -> Result<()> {
-    let (key1, key2) = repair_test_keys()?;
-    let node1 = prepare_repair_node(key1)?;
-    let node2 = prepare_repair_node(key2)?;
-    manually_establish_connection(&node1.swarm, &node2.swarm).await;
-
-    wait_for_successor(&node1, node2.did()).await?;
-    wait_for_msgs([&node1, &node2]).await;
-    let connected_for_ms = node1
-        .swarm
-        .transport
-        .peer_connected_for_ms(node2.did(), get_epoch_ms_i64())?
-        .ok_or_else(|| Error::InvalidMessage("missing peer admission age".to_string()))?;
-    assert!(
-        connected_for_ms < 30_000,
-        "test must exercise a fresh connection; observed age {connected_for_ms}ms"
-    );
-
-    let (entry, remote_placement) = entry_for_remote_repair_placement(&node1, node2.did())?;
-    node1
-        .dht()
-        .storage
-        .put(&entry.did.to_string(), &entry)
-        .await?;
-
-    assert_eq!(
-        node1.swarm.stabilizer().repair_storage().await?,
-        StorageRepairOutcome::Deferred
-    );
-
-    assert_no_more_msg([&node2]).await;
-    assert_eq!(
-        node2
-            .dht()
-            .storage
-            .get(&remote_placement.to_string())
-            .await?,
-        None
-    );
-    Ok(())
-}
-
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 #[tokio::test]
 async fn test_repair_storage_defers_disconnected_open_transport_without_sending() -> Result<()> {

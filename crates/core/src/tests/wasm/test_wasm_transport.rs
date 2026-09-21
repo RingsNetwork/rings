@@ -16,7 +16,6 @@ use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::maintenance_phase_trace_for_test;
 use crate::dht::reset_maintenance_phase_trace_for_test;
-use crate::dht::successor::SuccessorWriter;
 use crate::dht::topology;
 use crate::dht::MaintenancePhaseEvent;
 use crate::dht::MaintenancePhaseKind;

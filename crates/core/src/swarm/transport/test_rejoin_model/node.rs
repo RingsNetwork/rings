@@ -5,7 +5,7 @@
 //! Nothing here re-implements a production state machine. Every topology
 //! change is `topology::step`, every lifecycle change is a
 //! [`ConnectionLifecycleRegistry`] method, the bounded candidate budget is
-//! the production [`StabilizationConnectionPlan`], and the removal flavours
+//! the production [`ConnectionPlan`], and the removal flavours
 //! are the production [`DhtPeerRemoval`]. What this module owns is the
 //! *composition* that production performs inside `SwarmTransport` under the
 //! lifecycle boundary, written as pure functions `NodeState × Input →
@@ -28,11 +28,12 @@ use std::collections::BTreeSet;
 
 use super::overlay::Overlay;
 use super::overlay::ShellMutation;
+use crate::dht::topology::stabilization_connection_budget;
 use crate::dht::topology::step;
 use crate::dht::topology::successor_head;
 use crate::dht::topology::successors;
-use crate::dht::topology::StabilizationConnectionPlan;
-use crate::dht::topology::StabilizationConnectionStep;
+use crate::dht::topology::ConnectionPlan;
+use crate::dht::topology::ConnectionStep;
 use crate::dht::topology::SuccessorRemoval;
 use crate::dht::topology::TopologyAction;
 use crate::dht::topology::TopologyEvent;
@@ -585,7 +586,7 @@ impl NodeState {
             overlay,
         );
         let local = self.topology.local;
-        let mut plan = StabilizationConnectionPlan::new(
+        let mut plan = ConnectionPlan::new(
             reporter,
             request_id,
             reported
@@ -593,12 +594,13 @@ impl NodeState {
                 .into_iter()
                 .chain(reported.successors.iter().copied()),
             local,
-            overlay.successor_capacity(),
+            stabilization_connection_budget(overlay.successor_capacity()),
         );
         let mut effects = Vec::new();
-        while let StabilizationConnectionStep::Connect { candidate, .. } =
-            plan.advance(&self.topology)
-        {
+        while let ConnectionStep::Connect(candidate) = plan.advance(|reporter, request_id| {
+            self.topology
+                .is_processing_stabilization_report(reporter, request_id)
+        }) {
             effects.extend(self.offer_to(candidate));
         }
         let confirmed = reported

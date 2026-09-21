@@ -1,64 +1,36 @@
+//! Successor list of the local node.
+//!
+//! The list is the committed projection of [`TopologyState::successors`](crate::dht::topology::TopologyState):
+//! every value it holds was produced by [`topology::step`](crate::dht::topology::step),
+//! which is the sole owner of its order, deduplication, and capacity law
+//! (`successors(known, local, capacity)`). The container only serialises reads
+//! against the transition commit; it never re-derives that law.
 #![deny(missing_docs)]
-//! Successor Sequence for PeerRing
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::RwLockReadGuard;
 
-use crate::dht::did::BiasId;
-use crate::dht::did::SortRing;
+#[cfg(test)]
+use crate::dht::topology;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
 
-/// A sequence of successors for a node on the ring.
-/// It's necessary to have multiple successors to prevent a single point of failure.
-/// Note the successors are in order of a clockwise distance from the node.
-/// See also [super::did::BiasId].
+/// Committed successor list with a fixed capacity `r`.
+///
+/// Invariant: the held vector is exactly the last `successors` value the
+/// topology transition committed; it is sorted by clockwise distance from the
+/// local node, contains neither duplicates nor the local node, and holds at
+/// most `capacity()` entries.
 #[derive(Debug, Clone)]
 pub struct SuccessorSeq {
-    /// The identifier of a node
     did: Did,
-    /// The maximum number of successors
     max: u8,
-    /// The list of successor nodes
     successors: Arc<RwLock<Vec<Did>>>,
 }
 
-/// Interface for reading from a `SuccessorSeq`
-pub trait SuccessorReader {
-    /// Check if the sequence is empty
-    fn is_empty(&self) -> Result<bool>;
-    /// Check if the sequence is full
-    fn is_full(&self) -> Result<bool>;
-    /// Retrieve an element at a given index
-    fn get(&self, index: usize) -> Result<Did>;
-    /// Get the length of the sequence
-    fn len(&self) -> Result<usize>;
-    /// Get the element with the minimum value
-    fn min(&self) -> Result<Did>;
-    /// Get the element with the maximum value
-    fn max(&self) -> Result<Did>;
-    /// Get the list of successors
-    fn list(&self) -> Result<Vec<Did>>;
-    /// Check if a given identifier exists in the list
-    fn contains(&self, did: &Did) -> Result<bool>;
-    /// Perform a dry run update
-    fn update_dry(&self, did: &[Did]) -> Result<Vec<Did>>;
-}
-
-/// Interface for writing to a `SuccessorSeq`
-#[cfg(test)]
-pub(crate) trait SuccessorWriter {
-    /// Update a successor in the sequence
-    fn update(&self, successor: Did) -> Result<Option<Did>>;
-    /// Extend the sequence with a list of successors
-    fn extend(&self, succ_list: &[Did]) -> Result<Vec<Did>>;
-    /// Remove a successor from the sequence
-    fn remove(&self, did: Did) -> Result<()>;
-}
-
 impl SuccessorSeq {
-    /// Constructor for `SuccessorSeq`
+    /// An empty list for `did` with capacity `max`.
     pub fn new(did: Did, max: u8) -> Self {
         Self {
             did,
@@ -67,75 +39,41 @@ impl SuccessorSeq {
         }
     }
 
-    /// Returns the list of successors in a read lock.
-    pub fn successors(&self) -> Result<RwLockReadGuard<'_, Vec<Did>>> {
+    fn successors(&self) -> Result<RwLockReadGuard<'_, Vec<Did>>> {
         self.successors
             .read()
             .map_err(|_| Error::FailedToReadSuccessors)
     }
 
-    /// Calculate bias of a node on the ring.
-    pub fn bias(&self, did: Did) -> BiasId {
-        BiasId::new(self.did, did)
-    }
-
-    /// Maximum number of successors retained by this sequence.
+    /// The capacity `r` of the list.
     pub fn capacity(&self) -> usize {
         self.max.into()
     }
 
-    /// Replace the complete successor state with one normalized sequence.
+    /// Commit the successor list of one topology transition.
+    ///
+    /// Pre: `successors` is the normalised list produced by
+    /// [`topology::step`](crate::dht::topology::step).
     pub(crate) fn replace_state(&self, successors: &[Did]) -> Result<()> {
-        let mut next = successors.to_vec();
-        next.retain(|did| *did != self.did);
-        next.sort(self.did);
-        next.dedup();
-        next.truncate(self.max.into());
         *self
             .successors
             .write()
-            .map_err(|_| Error::FailedToWriteSuccessors)? = next;
+            .map_err(|_| Error::FailedToWriteSuccessors)? = successors.to_vec();
         Ok(())
     }
 
-    /// Check if a node should be inserted into the sequence.
-    pub fn should_insert(&self, did: Did) -> Result<bool> {
-        if (self.contains(&did)?) || (did == self.did) {
-            return Ok(false);
-        }
-
-        if self.is_full()? {
-            let max = self.max()?;
-            if BiasId::cmp_from_observer(self.did, did, max) != std::cmp::Ordering::Less {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-}
-
-// Implementation of the SuccessorReader trait for SuccessorSeq
-impl SuccessorReader for SuccessorSeq {
-    /// Check if the specified Distributed Identifier (DID) exists in the successors list
-    fn contains(&self, did: &Did) -> Result<bool> {
-        let succs = self.successors()?;
-        Ok(succs.contains(did))
+    /// Whether `did` is a committed successor.
+    pub fn contains(&self, did: &Did) -> Result<bool> {
+        Ok(self.successors()?.contains(did))
     }
 
-    /// Check if the successors list is empty
-    fn is_empty(&self) -> Result<bool> {
-        let succs = self.successors()?;
-        Ok(succs.is_empty())
+    /// Whether the node currently knows no successor.
+    pub fn is_empty(&self) -> Result<bool> {
+        Ok(self.successors()?.is_empty())
     }
 
-    /// Check if the successors list has reached its maximum capacity
-    fn is_full(&self) -> Result<bool> {
-        let succs = self.successors()?;
-        Ok(succs.len() as u8 >= self.max)
-    }
-
-    /// Retrieve a successor from the list by index
-    fn get(&self, index: usize) -> Result<Did> {
+    /// The successor at `index` in clockwise order.
+    pub fn get(&self, index: usize) -> Result<Did> {
         let succs = self.successors()?;
         succs
             .get(index)
@@ -146,90 +84,51 @@ impl SuccessorReader for SuccessorSeq {
             })
     }
 
-    /// Return the length of the successors list
-    fn len(&self) -> Result<usize> {
-        let succs = self.successors()?;
-        Ok(succs.len())
+    /// The successor head, or the local node when the list is empty.
+    pub fn min(&self) -> Result<Did> {
+        Ok(self.successors()?.first().copied().unwrap_or(self.did))
     }
 
-    /// Retrieve the first successor in the list if not empty, otherwise return the node's DID
-    fn min(&self) -> Result<Did> {
-        if self.is_empty()? {
-            Ok(self.did)
-        } else {
-            Ok(self.get(0)?)
-        }
-    }
-
-    /// Retrieve the last successor in the list if not empty, otherwise return the node's DID
-    fn max(&self) -> Result<Did> {
-        if self.is_empty()? {
-            Ok(self.did)
-        } else {
-            self.get(self.len()? - 1)
-        }
-    }
-
-    /// Return a copy of the entire successors list
-    fn list(&self) -> Result<Vec<Did>> {
-        let succs = self.successors()?;
-        Ok(succs.clone())
-    }
-
-    /// Simulate an update to the list and return the new DIDs that would be added
-    fn update_dry(&self, dids: &[Did]) -> Result<Vec<Did>> {
-        let mut ret = vec![];
-        for did in dids {
-            if self.should_insert(*did)? {
-                ret.push(*did)
-            }
-        }
-        Ok(ret)
+    /// A copy of the committed list.
+    pub fn list(&self) -> Result<Vec<Did>> {
+        Ok(self.successors()?.clone())
     }
 }
 
-/// Implementation of `SuccessorWriter` for `SuccessorSeq`
+/// Direct test setup that bypasses the topology transition.
+///
+/// Every write is normalised by the same [`topology::successors`] law the
+/// transition uses, so a test fixture can never hold a list `step` would not
+/// produce.
 #[cfg(test)]
-impl SuccessorWriter for SuccessorSeq {
-    /// Update the successors list by adding a new successor, sorting the list, and truncating if necessary
-    fn update(&self, successor: Did) -> Result<Option<Did>> {
-        if !(self.should_insert(successor)?) {
-            return Ok(None);
-        }
-        let mut succs = self
-            .successors
-            .write()
-            .map_err(|_| Error::FailedToWriteSuccessors)?;
-
-        succs.push(successor);
-        succs.sort(self.did);
-        succs.truncate(self.max.into());
-        if succs.contains(&successor) {
-            Ok(Some(successor))
-        } else {
-            Ok(None)
-        }
+impl SuccessorSeq {
+    /// Insert `successor`; `Some` when it was retained under the capacity.
+    pub(crate) fn update(&self, successor: Did) -> Result<Option<Did>> {
+        let retained = self.extend(&[successor])?;
+        Ok(retained.into_iter().next())
     }
 
-    /// Extend the successors list with a list of new successors
-    fn extend(&self, succ_list: &[Did]) -> Result<Vec<Did>> {
-        let mut ret = vec![];
-        for s in succ_list {
-            if let Some(r) = self.update(*s)? {
-                ret.push(r);
-            }
-        }
-        Ok(ret)
+    /// Insert every candidate; returns the newly retained ones in list order.
+    pub(crate) fn extend(&self, candidates: &[Did]) -> Result<Vec<Did>> {
+        let before = self.list()?;
+        let mut known = before.clone();
+        known.extend_from_slice(candidates);
+        let next = topology::successors(&known, self.did, self.capacity());
+        self.replace_state(&next)?;
+        Ok(next
+            .into_iter()
+            .filter(|did| !before.contains(did))
+            .collect())
     }
 
-    /// Remove a successor from the successors list
-    fn remove(&self, did: Did) -> Result<()> {
-        let mut succs = self
-            .successors
-            .write()
-            .map_err(|_| Error::FailedToWriteSuccessors)?;
-        succs.retain(|&v| v != did);
-        Ok(())
+    /// Drop `did` from the list.
+    pub(crate) fn remove(&self, did: Did) -> Result<()> {
+        let next = self
+            .list()?
+            .into_iter()
+            .filter(|current| *current != did)
+            .collect::<Vec<_>>();
+        self.replace_state(&next)
     }
 }
 
@@ -239,92 +138,35 @@ mod tests {
     use crate::dht::tests::gen_ordered_dids;
 
     #[test]
-    fn test_successor_update() {
-        let dids = gen_ordered_dids(6);
-
+    fn test_replace_state_commits_the_transition_value_verbatim() -> Result<()> {
+        let dids = gen_ordered_dids(4);
         let succ = SuccessorSeq::new(dids[0], 3);
-        assert!(succ.is_empty().unwrap());
+        assert!(succ.is_empty()?);
+        assert_eq!(succ.min()?, dids[0]);
 
-        succ.update(dids[2]).unwrap();
-        assert_eq!(succ.list().unwrap(), dids[2..3]);
-
-        succ.update(dids[3]).unwrap();
-        assert_eq!(succ.list().unwrap(), dids[2..4]);
-
-        succ.update(dids[4]).unwrap();
-        assert_eq!(succ.list().unwrap(), dids[2..5]);
-
-        succ.update(dids[5]).unwrap();
-        assert_eq!(succ.list().unwrap(), dids[2..5]);
-
-        succ.update(dids[1]).unwrap();
-        assert_eq!(succ.list().unwrap(), dids[1..4]);
-    }
-
-    #[test]
-    fn test_successor_extend_sorts_unordered_input() -> Result<()> {
-        let dids = gen_ordered_dids(6);
-        let succ = SuccessorSeq::new(dids[0], 3);
-
-        succ.extend(&[dids[4], dids[2], dids[5], dids[1], dids[3]])?;
+        succ.replace_state(&dids[1..4])?;
 
         assert_eq!(succ.list()?, dids[1..4]);
         assert_eq!(succ.min()?, dids[1]);
+        assert_eq!(succ.get(2)?, dids[3]);
+        assert!(succ.contains(&dids[2])?);
+        assert_eq!(succ.capacity(), 3);
         Ok(())
     }
 
     #[test]
-    fn test_successor_extend_is_order_independent() -> Result<()> {
-        let dids = gen_ordered_dids(7);
-        let expected = vec![dids[1], dids[2], dids[3]];
-        let orders = [
-            vec![dids[6], dids[5], dids[4], dids[3], dids[2], dids[1]],
-            vec![dids[1], dids[2], dids[3], dids[4], dids[5], dids[6]],
-            vec![
-                dids[0], dids[3], dids[1], dids[6], dids[2], dids[1], dids[5],
-            ],
-            vec![dids[4], dids[2], dids[6], dids[1], dids[3], dids[0]],
-        ];
-
-        for order in orders {
-            let succ = SuccessorSeq::new(dids[0], 3);
-            succ.extend(&order)?;
-            assert_eq!(succ.list()?, expected, "order was {order:?}");
-            assert_eq!(succ.min()?, dids[1]);
-            assert_eq!(succ.max()?, dids[3]);
-            assert!(!succ.contains(&dids[0])?, "self must never be a successor");
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_successor_extend_sorts_across_ring_wrap() -> Result<()> {
+    fn test_writer_follows_the_transition_law() -> Result<()> {
         let dids = gen_ordered_dids(7);
         let succ = SuccessorSeq::new(dids[4], 3);
 
         succ.extend(&[dids[2], dids[6], dids[0], dids[5], dids[3], dids[1]])?;
-
         assert_eq!(succ.list()?, vec![dids[5], dids[6], dids[0]]);
-        assert_eq!(succ.min()?, dids[5]);
-        assert_eq!(succ.max()?, dids[0]);
-        Ok(())
-    }
 
-    #[test]
-    fn test_successor_remove() -> Result<()> {
-        let dids = gen_ordered_dids(4);
-
-        let succ = SuccessorSeq::new(dids[0], 3);
-        assert!(succ.is_empty()?);
-
-        succ.update(dids[1])?.unwrap();
-        succ.update(dids[2])?.unwrap();
-        succ.update(dids[3])?.unwrap();
-        assert_eq!(succ.list()?, dids[1..4]);
-
-        succ.remove(dids[2])?;
-        assert_eq!(succ.list()?, vec![dids[1], dids[3]]);
+        assert_eq!(succ.update(dids[1])?, None);
+        succ.remove(dids[6])?;
+        assert_eq!(succ.list()?, vec![dids[5], dids[0]]);
+        assert_eq!(succ.update(dids[6])?, Some(dids[6]));
+        assert_eq!(succ.list()?, vec![dids[5], dids[6], dids[0]]);
         Ok(())
     }
 

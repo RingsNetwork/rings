@@ -461,6 +461,7 @@ impl SwarmTransport {
     }
 
     /// Return how long an admitted peer has owned its current active generation.
+    #[cfg(all(test, not(target_family = "wasm")))]
     pub(crate) fn peer_connected_for_ms(&self, peer: Did, now_ms: i64) -> Result<Option<i64>> {
         self.with_connection_lifecycle(|| {
             let Some(attempt) = self.active_attempt(peer)? else {

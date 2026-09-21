@@ -11,7 +11,6 @@ use std::time::Instant;
 use crate::dht::entry::EntryKind;
 use crate::dht::Did;
 use crate::dht::StorageKey;
-use crate::dht::STORAGE_REPAIR_FRESH_CONNECTION_GRACE_MS;
 use crate::ecc::tests::gen_ordered_keys;
 use crate::error::Error;
 use crate::error::Result;
@@ -30,7 +29,6 @@ use crate::tests::default::Node;
 use crate::tests::default::TEST_WAIT_TIMEOUT;
 use crate::tests::manually_establish_connection;
 use crate::utils::get_epoch_ms;
-use crate::utils::get_epoch_ms_i64;
 
 const HELD_MESSAGE: &[u8] = b"held while offline";
 
@@ -96,15 +94,10 @@ async fn hold_message_for_offline_peer(node1: &Node, node3: &Node, offline: Did)
 
 /// Phase 2: the owner's storage repair pass hands the inbox carrier to the returned peer. The
 /// peer accepts a relay carrier only from its predecessor, so the owner's notify must have
-/// reached it first; the pass defers to a connection younger than the fresh-connection grace, so
-/// the connection is aged past it; the acknowledgement then removes the owner's copy.
+/// reached it first; the acknowledgement then removes the owner's copy.
 async fn hand_off_inbox(owner: &Node, peer: &Node) -> Result<()> {
     owner.swarm.stabilizer().stabilize().await?;
     wait_for_predecessor(peer, owner.did()).await?;
-    owner.swarm.transport.force_peer_connected_at(
-        peer.did(),
-        get_epoch_ms_i64() - STORAGE_REPAIR_FRESH_CONNECTION_GRACE_MS - 1,
-    )?;
     owner.swarm.stabilizer().stabilize().await?;
     let inbox = StorageKey::inbox_of(peer.did());
     wait_for_storage_entry(peer, inbox).await?;

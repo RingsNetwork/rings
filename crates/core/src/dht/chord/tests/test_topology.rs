@@ -31,7 +31,7 @@ fn test_topology_transitions_serialize_remove_and_notify() -> Result<()> {
         3,
         Box::new(MemStorage::new()),
     ));
-    node.join(removed)?;
+    node.admit_connected(removed, None)?;
 
     let (snapshot_tx, snapshot_rx) = mpsc::sync_channel(0);
     let (release_tx, release_rx) = mpsc::sync_channel(0);
@@ -101,7 +101,7 @@ fn test_topology_snapshot_waits_for_complete_transition_commit() -> Result<()> {
         3,
         Box::new(MemStorage::new()),
     ));
-    node.join(removed)?;
+    node.admit_connected(removed, None)?;
 
     let (snapshot_tx, snapshot_rx) = mpsc::sync_channel(0);
     let (release_tx, release_rx) = mpsc::sync_channel(0);
@@ -168,7 +168,7 @@ fn test_unavailable_successor_promotes_verified_fallback_in_interpreted_state() 
     let node = PeerRing::new_with_storage(local, 4, Box::new(MemStorage::new()));
 
     for peer in [removed, unverified_nearer, verified_fallback, verified_tail] {
-        node.join(peer)?;
+        node.admit_connected(peer, None)?;
     }
     assert_eq!(node.successors().list()?, vec![
         removed,

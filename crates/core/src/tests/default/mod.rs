@@ -11,7 +11,6 @@ use tokio::time::sleep;
 use tokio::time::Duration;
 
 use crate::dht::entry::Entry;
-use crate::dht::successor::SuccessorReader;
 use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::dht::StorageKey;

@@ -10,7 +10,6 @@ use crate::dht::entry::EntryKind;
 use crate::dht::entry::EntryOperation;
 use crate::dht::entry::PlacedEntryOperation;
 use crate::dht::entry::SyncedEntryAck;
-use crate::dht::ChordStorage;
 use crate::dht::ChordStorageCache;
 use crate::dht::ChordStorageRepair;
 use crate::dht::ChordStorageSync;
@@ -42,15 +41,13 @@ use crate::utils::get_epoch_ms;
 /// ChordStorageInterface should imply necessary method for DHT storage
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
-pub trait ChordStorageInterface<const REDUNDANT: u16> {
+pub trait ChordStorageInterface {
     /// Fetch an entry from DHT storage.
     async fn storage_fetch(&self, entry_key: Did) -> Result<()>;
     /// Store an entry on DHT storage.
     async fn storage_store(&self, entry: Entry) -> Result<()>;
     /// Append data to a Data kind entry.
     async fn storage_append_data(&self, topic: &str, data: Encoded) -> Result<()>;
-    /// Append data to a Data kind entry uniquely.
-    async fn storage_touch_data(&self, topic: &str, data: Encoded) -> Result<()>;
     /// Tombstone observed data in a Data kind entry.
     async fn storage_tombstone_data(&self, topic: &str, data: Encoded) -> Result<()>;
     /// Compact a Data kind entry after removing listed payloads.
@@ -289,14 +286,6 @@ async fn handle_storage_search_act(
     }
 }
 
-async fn operate_entry_under_redundancy<const REDUNDANT: u16>(
-    swarm: &Swarm,
-    operation: EntryOperation,
-) -> Result<()> {
-    swarm.transport.ensure_storage_redundancy::<REDUNDANT>()?;
-    operate_entry(swarm.transport.clone(), operation).await
-}
-
 /// Apply `operation` under the transport's configured redundancy: locally where this node is
 /// an accepted placement and by `OperateEntry` toward every remote one.
 pub(crate) async fn operate_entry(
@@ -305,7 +294,7 @@ pub(crate) async fn operate_entry(
 ) -> Result<()> {
     let action = transport
         .dht
-        .entry_operate_with_redundancy(operation, transport.storage_redundancy())
+        .entry_operate(operation, transport.storage_redundancy())
         .await?;
     handle_storage_store_act(transport, action).await
 }
@@ -360,11 +349,10 @@ impl ChordStorageInterfaceCacheChecker for Swarm {
 
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
-impl<const REDUNDANT: u16> ChordStorageInterface<REDUNDANT> for Swarm {
+impl ChordStorageInterface for Swarm {
     /// Fetch an entry. If it exists in local storage, copy it to the cache;
     /// otherwise query the responsible remote node.
     async fn storage_fetch(&self, entry_key: Did) -> Result<()> {
-        self.transport.ensure_storage_redundancy::<REDUNDANT>()?;
         let transport = self.transport.clone();
         let redundancy = transport.storage_redundancy();
         transport.start_storage_lookup(entry_key, redundancy)?;
@@ -377,27 +365,22 @@ impl<const REDUNDANT: u16> ChordStorageInterface<REDUNDANT> for Swarm {
 
     /// Store Entry, `TryInto<Entry>` is implemented for alot of types
     async fn storage_store(&self, entry: Entry) -> Result<()> {
-        operate_entry_under_redundancy::<REDUNDANT>(self, EntryOperation::Overwrite(entry)).await
+        operate_entry(self.transport.clone(), EntryOperation::Overwrite(entry)).await
     }
 
     async fn storage_append_data(&self, topic: &str, data: Encoded) -> Result<()> {
         let entry: Entry = (topic.to_string(), data).try_into()?;
-        operate_entry_under_redundancy::<REDUNDANT>(self, EntryOperation::Extend(entry)).await
-    }
-
-    async fn storage_touch_data(&self, topic: &str, data: Encoded) -> Result<()> {
-        let entry: Entry = (topic.to_string(), data).try_into()?;
-        operate_entry_under_redundancy::<REDUNDANT>(self, EntryOperation::Touch(entry)).await
+        operate_entry(self.transport.clone(), EntryOperation::Extend(entry)).await
     }
 
     async fn storage_tombstone_data(&self, topic: &str, data: Encoded) -> Result<()> {
         let entry: Entry = (topic.to_string(), data).try_into()?;
-        operate_entry_under_redundancy::<REDUNDANT>(self, EntryOperation::Tombstone(entry)).await
+        operate_entry(self.transport.clone(), EntryOperation::Tombstone(entry)).await
     }
 
     async fn storage_compact_data(&self, topic: &str, removals: Vec<Encoded>) -> Result<()> {
         let entry = Entry::new(Entry::gen_did(topic)?, removals, EntryKind::Data);
-        operate_entry_under_redundancy::<REDUNDANT>(self, EntryOperation::CompactData(entry)).await
+        operate_entry(self.transport.clone(), EntryOperation::CompactData(entry)).await
     }
 }
 
@@ -408,7 +391,7 @@ impl HandleMsg<SearchEntry> for MessageHandler {
     /// If a Entry is storead local, it will response immediately.(See Chordstorageinterface::storage_fetch)
     async fn handle(&self, ctx: &MessagePayload, msg: &SearchEntry) -> Result<()> {
         // For relay message, set redundant to 1
-        match <PeerRing as ChordStorage<_, 1>>::entry_lookup(&self.dht, msg.placement).await {
+        match self.dht.entry_lookup(msg.placement, 1).await {
             Ok(action) => {
                 handle_storage_search_act(self, ctx, action, msg.resource, msg.redundancy).await
             }

@@ -16,10 +16,9 @@ use tokio::time::Duration;
 
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
-use crate::dht::successor::SuccessorReader;
-use crate::dht::successor::SuccessorWriter;
 use crate::dht::Did;
 use crate::dht::PeerRingAction;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::dht::StorageRepairOutcome;
 use crate::ecc::SecretKey;
 use crate::error::Error;
@@ -45,6 +44,7 @@ use crate::swarm::transport::PEER_LIVENESS_IDLE_MS;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::swarm::transport::PEER_LIVENESS_TIMEOUT_MS;
 use crate::swarm::SwarmBuilder;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::tests::default::assert_no_more_msg;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::tests::default::dummy_hooks::PendingSendGuard;

@@ -56,14 +56,11 @@
 //!            convergence complete
 //! ```
 
-use serde::Deserialize;
-use serde::Serialize;
-
 use super::proof::FingerRangeProof;
 use crate::dht::Did;
 
 /// Verification state for one finger-table slot.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct FingerSlotEvidence {
     /// Epoch in which the slot's inferred hint last changed.
     ///
@@ -107,7 +104,7 @@ pub(super) enum EvidenceInvalidation {
 }
 
 /// Versioned evidence for the complete local finger table.
-#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(super) struct FingerEvidence {
     /// Monotonic counter bumped whenever one or more hints change.
     ///
@@ -128,15 +125,6 @@ impl FingerEvidence {
             epoch: 0,
             slots: vec![FingerSlotEvidence::unverified(0); slot_count],
         }
-    }
-
-    /// Resize restored evidence to match the current table width.
-    ///
-    /// Existing in-range records survive; appended records inherit the current
-    /// epoch but begin unverified, and truncated records are discarded.
-    pub(super) fn normalize(&mut self, slot_count: usize) {
-        self.slots
-            .resize(slot_count, FingerSlotEvidence::unverified(self.epoch));
     }
 
     /// Return the current hint-change epoch.
