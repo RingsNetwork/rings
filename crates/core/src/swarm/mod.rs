@@ -5,7 +5,9 @@
 mod builder;
 /// Callback interface for swarm
 pub mod callback;
+mod detached;
 mod inbox;
+pub(crate) mod session_link;
 pub(crate) mod transport;
 
 use std::num::NonZeroUsize;

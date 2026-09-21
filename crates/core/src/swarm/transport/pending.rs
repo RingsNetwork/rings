@@ -131,6 +131,11 @@ impl PendingConnectionAttempt {
         self.peer
     }
 
+    /// Whether this generation is a handshake with `peer`.
+    pub(crate) fn is_with(self, peer: Did) -> bool {
+        self.peer == peer
+    }
+
     pub(crate) const fn generation(self) -> u64 {
         self.generation
     }

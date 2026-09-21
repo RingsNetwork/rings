@@ -7,6 +7,7 @@ use super::inbound;
 use super::inbound::ReassemblyClock;
 use super::pre_admission::PreAdmissionHold;
 use super::HeldInboundFrame;
+use super::InboundFrameLease;
 use super::InboundGate;
 use super::InboundLane;
 use super::InboundProcessor;
@@ -20,8 +21,11 @@ use crate::message::Message;
 use crate::message::MessageKind;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
+use crate::swarm::session_link::ReferencedSessions;
+use crate::swarm::session_link::Swept;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
+use crate::swarm::transport::SESSION_HOLD_TIMEOUT;
 
 fn log_inbound_verification_failure(
     peer: Option<Did>,
@@ -43,6 +47,28 @@ fn log_inbound_verification_failure(
     );
 }
 
+/// Why the link stage drops a held frame and charges the peer for it: the peer did not back a
+/// session it referenced. See the charging law of [`link_stage`](super::link_stage).
+#[derive(Clone, Copy, Debug)]
+pub(super) enum HeldFrameDrop {
+    /// The peer disclaimed the session.
+    Disclaimed,
+    /// The peer announced a delegation that does not verify.
+    AnnouncementRefused,
+    /// The peer was asked and did not answer within the hold timeout.
+    HoldTimeout,
+}
+
+impl std::fmt::Display for HeldFrameDrop {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Disclaimed => "the peer disclaimed the session it referenced",
+            Self::AnnouncementRefused => "the peer announced a delegation that does not verify",
+            Self::HoldTimeout => "the peer did not supply the session within the hold timeout",
+        })
+    }
+}
+
 impl InboundProcessor {
     pub(super) fn new(
         transport: Arc<SwarmTransport>,
@@ -59,7 +85,92 @@ impl InboundProcessor {
             reassembly_clock,
             pending_attempt: Arc::new(Mutex::new(None)),
             pre_admission: Arc::new(Mutex::new(PreAdmissionHold::new(inbound::peer_capacity()))),
+            session_link: Arc::new(Mutex::new(ReferencedSessions::new(
+                super::SESSION_HOLD_CAPACITY,
+                SESSION_HOLD_TIMEOUT.as_millis(),
+            ))),
         }
+    }
+
+    /// The instant every link step is judged at: the inbound clock, so a test can drive the
+    /// hold timeout deterministically.
+    pub(super) fn now_ms(&self) -> u128 {
+        self.reassembly_clock.now_ms()
+    }
+
+    /// The authentication of `peer` as of now: authenticated iff it is the peer of the
+    /// handshake this callback is bound to and that handshake's generation is still active.
+    /// An unparsable peer is unauthenticated.
+    pub(super) fn authentication_of(&self, peer: Option<Did>) -> Authentication {
+        let (Some(peer), Some(attempt)) = (peer, self.pending_attempt()) else {
+            return Authentication::Unauthenticated;
+        };
+        if attempt.is_with(peer) && self.logical.transport.is_active_connection_attempt(attempt) {
+            Authentication::Authenticated
+        } else {
+            Authentication::Unauthenticated
+        }
+    }
+
+    /// Charge `peer` one receive failure under its authentication as of now.
+    pub(super) async fn record_receive_failure_now(&self, peer: Option<Did>) {
+        let authentication = self.authentication_of(peer);
+        self.record_receive_failure(peer, authentication).await;
+    }
+
+    /// Charge `peer` one receive failure per frame in `dropped`, all under its authentication
+    /// as of now, each for `reason`: the charging law of [`link_stage`](super::link_stage) in
+    /// one place. Dropping the leases is the other effect.
+    pub(super) async fn charge_dropped_frames(
+        &self,
+        peer: Option<Did>,
+        dropped: Vec<InboundFrameLease>,
+        reason: HeldFrameDrop,
+    ) {
+        let authentication = self.authentication_of(peer);
+        let count = dropped.len();
+        drop(dropped);
+        for _ in 0..count {
+            tracing::debug!(peer = ?peer, "dropping message: {reason}");
+            self.record_receive_failure(peer, authentication).await;
+        }
+    }
+
+    /// Drop every frame held past the session-hold timeout, or whose proof lapsed, as of
+    /// `now_ms`, charging each to the link's peer: it referenced a session it did not back in
+    /// time. The link's peer is the bound handshake's, the one identity every held frame was
+    /// admitted to the hold under (see the link law of
+    /// [`link_stage`](super::link_stage)).
+    pub(super) async fn sweep_session_hold_at(&self, now_ms: u128) {
+        let Swept {
+            unanswered,
+            unasked,
+        } = self.session_link().sweep(now_ms);
+        let peer = self.pending_attempt().map(PendingConnectionAttempt::peer);
+        if !unasked.is_empty() {
+            tracing::debug!(
+                peer = ?peer,
+                dropped = unasked.len(),
+                "dropping messages held for a session this end never managed to ask about"
+            );
+            drop(unasked);
+        }
+        if !unanswered.is_empty() {
+            self.charge_dropped_frames(peer, unanswered, HeldFrameDrop::HoldTimeout)
+                .await;
+        }
+    }
+
+    /// The receiving end of this connection's session references.
+    ///
+    /// Lock law: held for one pure step and never across a suspension point; a poisoned lock
+    /// still guards a well-formed state, since no step panics between two writes.
+    pub(super) fn session_link(
+        &self,
+    ) -> std::sync::MutexGuard<'_, ReferencedSessions<InboundFrameLease>> {
+        self.session_link
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub(super) fn pre_admission(
@@ -92,17 +203,6 @@ impl InboundProcessor {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(attempt);
     }
 
-    pub(super) fn peer_authentication(&self, peer: Did) -> Authentication {
-        let Some(attempt) = self.pending_attempt() else {
-            return Authentication::Unauthenticated;
-        };
-        if attempt.peer() == peer && self.logical.transport.is_active_connection_attempt(attempt) {
-            Authentication::Authenticated
-        } else {
-            Authentication::Unauthenticated
-        }
-    }
-
     pub(super) async fn record_receive_failure(
         &self,
         peer: Option<Did>,
@@ -132,7 +232,7 @@ impl InboundProcessor {
             );
             return Ok(InboundGate::Refused);
         };
-        if attempt.peer() != peer {
+        if !attempt.is_with(peer) {
             tracing::warn!(
                 "ignoring message from {peer}; pending attempt belongs to {}",
                 attempt.peer()
@@ -146,8 +246,14 @@ impl InboundProcessor {
         }
         if self.logical.transport.is_active_connection_attempt(attempt) {
             Ok(InboundGate::Admitted)
-        } else {
+        } else if self
+            .logical
+            .transport
+            .is_current_connection_attempt(attempt)?
+        {
             Ok(InboundGate::Unadmitted)
+        } else {
+            Ok(InboundGate::Superseded)
         }
     }
 
@@ -216,7 +322,7 @@ impl InboundProcessor {
         let useful_bytes = u64::try_from(payload.transaction.data.len())
             .map_err(|_| crate::error::Error::MessageSizeOverflow)?;
         if let (Some(peer), Some(attempt)) = (peer, self.pending_attempt()) {
-            if attempt.peer() == peer {
+            if attempt.is_with(peer) {
                 self.logical
                     .transport
                     .record_peer_message_received(attempt, authentication, useful_bytes)
@@ -227,14 +333,18 @@ impl InboundProcessor {
     }
 }
 
-pub(super) fn prepare_transport_frame(
+/// Verify one resolved frame of `wire_bytes` bytes and decode the message it carries.
+///
+/// The payload is self-contained by now: whether a session slot travelled inline or by
+/// reference, this is the verification it always was.
+pub(super) fn prepare_resolved_frame(
     network_id: u32,
     peer: Option<Did>,
-    bytes: &[u8],
+    payload: MessagePayload,
+    wire_bytes: usize,
 ) -> crate::error::Result<PreparedInboundFrame> {
-    let payload = MessagePayload::from_wire(bytes)?;
     if !payload.verify_transaction_and_payload(network_id) {
-        log_inbound_verification_failure(peer, &payload, bytes.len());
+        log_inbound_verification_failure(peer, &payload, wire_bytes);
         return Err(crate::error::Error::InvalidMessage(
             "message verification failed or message expired".to_string(),
         ));
@@ -255,5 +365,6 @@ pub(crate) fn prepare_transport_frame_lane_for_test(
     network_id: u32,
     bytes: &[u8],
 ) -> crate::error::Result<InboundLane> {
-    prepare_transport_frame(network_id, None, bytes).map(|prepared| prepared.lane)
+    let payload = MessagePayload::from_wire(bytes)?;
+    prepare_resolved_frame(network_id, None, payload, bytes.len()).map(|prepared| prepared.lane)
 }

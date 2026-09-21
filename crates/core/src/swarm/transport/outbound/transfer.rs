@@ -6,7 +6,6 @@
 //! Shutdown batches retain all sources until their capacity permits are dropped,
 //! then publish collected results.
 
-use bytes::Bytes;
 use futures::channel::oneshot;
 
 use super::frame_chunk;
@@ -21,6 +20,7 @@ use crate::chunk::Chunk;
 use crate::dht::Did;
 use crate::error::Result;
 use crate::lifecycle::StopToken;
+use crate::message::MessagePayload;
 use crate::message::MessageSigner;
 use crate::session::SessionSk;
 
@@ -32,7 +32,7 @@ pub(in crate::swarm::transport) type ChunkFrames = Box<dyn Iterator<Item = Chunk
 pub(in crate::swarm::transport) type ChunkFrames = Box<dyn Iterator<Item = Chunk>>;
 
 enum FrameSource {
-    Whole(Option<Bytes>),
+    Whole(Option<Box<MessagePayload>>),
     Chunked(ChunkedFrameSource),
 }
 
@@ -57,9 +57,11 @@ impl ChunkedFrameSource {
 }
 
 impl FrameSource {
-    fn next_frame(&mut self, did: Did) -> Result<Option<(Bytes, &'static str)>> {
+    /// The next payload of this source; the worker encodes it for the link just before sending,
+    /// so its session slots follow the order frames are accepted in.
+    fn next_frame(&mut self, did: Did) -> Result<Option<(Box<MessagePayload>, &'static str)>> {
         match self {
-            Self::Whole(frame) => Ok(frame.take().map(|bytes| (bytes, "whole_message"))),
+            Self::Whole(frame) => Ok(frame.take().map(|payload| (payload, "whole_message"))),
             Self::Chunked(ChunkedFrameSource {
                 signer,
                 chunks,
@@ -75,7 +77,7 @@ impl FrameSource {
                     "chunked_tail"
                 };
                 frame_chunk(signer.by_ref(), did, chunk, *logical_sequence)
-                    .map(|bytes| Some((bytes, context)))
+                    .map(|payload| Some((Box::new(payload), context)))
             }
         }
     }
@@ -176,9 +178,10 @@ impl OutboundTransferRoute {
 }
 
 impl OutboundTransfer {
+    /// A transfer of one payload that fits one frame.
     pub(in crate::swarm::transport) fn whole(
         route: OutboundTransferRoute,
-        data: Bytes,
+        payload: MessagePayload,
         useful_bytes: u64,
         completion: OutboundCompletion,
         stop: StopToken,
@@ -186,7 +189,7 @@ impl OutboundTransfer {
     ) -> (Self, oneshot::Receiver<Result<SendCompletionOutcome>>) {
         Self::new(
             route,
-            FrameSource::Whole(Some(data)),
+            FrameSource::Whole(Some(Box::new(payload))),
             useful_bytes,
             completion,
             stop,
@@ -253,7 +256,7 @@ impl OutboundTransfer {
         self.useful_bytes
     }
 
-    pub(super) fn next_frame(&mut self) -> Result<Option<(Bytes, &'static str)>> {
+    pub(super) fn next_frame(&mut self) -> Result<Option<(Box<MessagePayload>, &'static str)>> {
         self.source.next_frame(self.did)
     }
 

@@ -16,11 +16,13 @@ use crate::message::Message;
 use crate::message::MessageHandler;
 use crate::message::MessageKind;
 use crate::message::MessagePayload;
+use crate::swarm::session_link::ReferencedSessions;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 
 mod inbound;
 mod inner;
+mod link_stage;
 mod logical;
 mod pre_admission;
 mod processor;
@@ -272,8 +274,24 @@ pub(super) struct InboundProcessor {
     reassembly_clock: ReassemblyClock,
     pending_attempt: Arc<Mutex<Option<PendingConnectionAttempt>>>,
     /// Verified frames that arrived before this end admitted the connection; bounded by the
-    /// per-peer inbound capacity, so an unadmitted peer holds no more than an admitted one.
+    /// per-peer inbound capacity. With the session hold below, an unadmitted peer occupies at
+    /// most one and a half of an admitted peer's frame budgets, and a quarter of the transport's
+    /// per-peer frames stays free for the control frames that release either hold.
     pre_admission: Arc<Mutex<PreAdmissionHold<HeldInboundFrame>>>,
+    /// The receiving end of this connection's session references: the sessions the peer has
+    /// announced on it and the frames waiting for one. It lives and dies with the connection;
+    /// its hold is bounded by [`SESSION_HOLD_CAPACITY`] frames and by
+    /// [`SESSION_HOLD_TIMEOUT`](crate::swarm::transport::SESSION_HOLD_TIMEOUT), swept by the
+    /// inbound actor's periodic cleanup.
+    session_link: Arc<Mutex<ReferencedSessions<InboundFrameLease>>>,
+}
+
+/// What the transport handed over with one frame and takes back when the frame is done: the
+/// raw bytes, for their length and their memory accounting, and the transport capacity they
+/// occupy until the inbound actor releases it.
+pub(super) struct InboundFrameLease {
+    bytes: Bytes,
+    transport_capacity: Option<InboundFrameCapacityLease>,
 }
 
 /// One verified frame waiting for admission, with everything its delivery needs.
@@ -282,9 +300,42 @@ pub(super) struct InboundProcessor {
 /// was waiting for has been admitted.
 struct HeldInboundFrame {
     peer: Did,
-    bytes: Bytes,
     prepared: PreparedInboundFrame,
-    transport_capacity: Option<InboundFrameCapacityLease>,
+    lease: InboundFrameLease,
+}
+
+/// Frames one connection may hold for a session the peer has not backed yet: half the
+/// pre-admission hold, so both holds together leave a quarter of the transport's per-peer
+/// frames for the link-control frames that release them.
+pub(super) const SESSION_HOLD_CAPACITY: usize = inbound::peer_capacity() / 2;
+
+/// Where a verified frame comes from, which decides how far its delivery is waited for and
+/// what its learning does.
+///
+/// A frame the transport just handed over is awaited to its logical completion, so the
+/// transport's read loop paces this end, and what it teaches the link releases the held
+/// frames that awaited it. A frame released from a hold is waited for only until the inbound
+/// actor owns it, so releasing many frames at once does not stall the read loop behind each
+/// one's handlers, and what it teaches is confirmed but releases nothing itself: the release
+/// that freed it re-scans the hold.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum FrameProvenance {
+    /// Handed over by the transport just now.
+    Arrived,
+    /// Left the pre-admission hold or the session hold.
+    Released,
+}
+
+impl FrameProvenance {
+    /// Whether what the frame teaches the link releases held frames: an arrived frame's
+    /// learning does; a released frame's learning is applied by the release that freed it,
+    /// which re-scans the hold.
+    pub(super) const fn releases_what_it_teaches(self) -> bool {
+        match self {
+            Self::Arrived => true,
+            Self::Released => false,
+        }
+    }
 }
 
 /// How the pending handshake bound to a callback disposes of a frame from `peer`.
@@ -294,6 +345,9 @@ enum InboundGate {
     Admitted,
     /// The handshake is with this peer and not yet admitted: the frame is early, not wrong.
     Unadmitted,
+    /// The handshake is with this peer but its generation is no longer the peer's: the frame
+    /// is late, and there is nothing to hold it for.
+    Superseded,
     /// The frame does not belong to the pending handshake: it is refused.
     Refused,
 }

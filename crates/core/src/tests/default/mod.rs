@@ -50,6 +50,8 @@ mod test_message_handler;
 mod test_native_transport;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 mod test_outbound_scheduler;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+mod test_session_link;
 mod test_stabilization;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 mod test_stabilization_failover;

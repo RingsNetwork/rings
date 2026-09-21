@@ -21,9 +21,10 @@ epoch, nonce, units, request digest, and completion digest. Provider and benefic
 use different domains. Roles are account DIDs recovered from delegated session proofs, so a
 session-key rotation does not change the account role.
 
-`V1` is part of the canonical marker and signing domains. It prevents a signature over this field
-layout from being interpreted as another receipt protocol. The release is still a hard cutover:
-there is no legacy probe/report decoder, negotiation, or dual format.
+The canonical marker and the signing domains name this field layout, so a signature over it
+cannot be interpreted as another receipt protocol; they carry no version, since the protocol is
+not versioned before 1.0. The release is still a hard cutover: there is no legacy probe/report
+decoder, negotiation, or dual format.
 
 ## Verification boundaries
 

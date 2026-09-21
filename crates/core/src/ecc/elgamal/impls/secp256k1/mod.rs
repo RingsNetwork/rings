@@ -92,8 +92,8 @@ const AEAD_VERSION: u8 = 1;
 const AEAD_KEY_LEN: usize = 32;
 const AEAD_WRAPPED_KEY_BLOCKS: usize = AEAD_KEY_LEN.div_ceil(PLAINTEXT_BLOCK_SIZE);
 const AEAD_NONCE_LEN: usize = 12;
-const AEAD_HKDF_SALT: &[u8] = b"rings-core:secp256k1-elgamal-aead:salt:v1";
-const AEAD_HKDF_INFO: &[u8] = b"rings-core:secp256k1-elgamal-aead:chacha20poly1305:v1";
+const AEAD_HKDF_SALT: &[u8] = b"rings-core:secp256k1-elgamal-aead:salt";
+const AEAD_HKDF_INFO: &[u8] = b"rings-core:secp256k1-elgamal-aead:chacha20poly1305";
 
 /// KEM/DEM ciphertext using secp256k1 ElGamal to wrap a ChaCha20-Poly1305 key.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

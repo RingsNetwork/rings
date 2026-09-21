@@ -22,9 +22,15 @@ pub use payload::decode_gzip_data;
 pub use payload::encode_data_gzip;
 pub use payload::from_gzipped_data;
 pub use payload::gzip_data;
+pub(crate) use payload::LinkControl;
+pub(crate) use payload::LinkFrame;
 pub use payload::MessagePayload;
 pub use payload::PayloadSender;
+pub(crate) use payload::PerSlot;
+pub(crate) use payload::SessionRef;
+pub(crate) use payload::SlotEncoding;
 pub use payload::Transaction;
+pub(crate) use payload::WirePayload;
 
 mod quota;
 pub use quota::OriginQuota;

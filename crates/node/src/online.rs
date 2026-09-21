@@ -30,7 +30,7 @@ pub const ONLINE_NODES_TOPIC: &str = "online_nodes";
 pub const ONLINE_NODE_CAPABILITY_STORAGE: &str = "storage";
 /// Message family of the online-node descriptor signature.
 const ONLINE_NODE_DESCRIPTOR_DOMAIN_TAG: DomainTag =
-    domain_tag!("rings-node:online-node-descriptor:v1");
+    domain_tag!("rings-node:online-node-descriptor");
 
 /// Runtime family advertised by a node descriptor.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]

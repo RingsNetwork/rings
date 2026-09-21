@@ -129,6 +129,48 @@ The obligations of this layer are leak-minimization obligations:
 - every signature bound to `network_id` and to a per-message-family domain tag, so
   an observation in one overlay is not a credential in another.
 
+Session references do not change what a hop learns. A link sends each session
+delegation inline until the receiver confirms it, and its 20-byte content address
+(the trailing bytes of `keccak256` over the encoded `Session`) afterwards; the
+receiver resolves the address to the exact delegation that would have travelled
+inline, then verifies both proofs as before. The address names the whole
+delegation, not the session key, because a session key can carry several
+delegations and any account can sign one for a key it does not hold. The cache
+behind the references is scoped to one direction of one admitted connection
+generation and obeys these rules:
+
+- it is populated only by the peer at the other end, with sessions of frames that
+  verified on the link (a frame from any other peer, or on a callback bound to no
+  handshake, is judged self-contained and a reference in it refused) or with an
+  announcement this end asked for and whose delegation verified; an unsolicited
+  announcement is ignored, so an unauthenticated party cannot fill it; what a
+  verified frame teaches is applied before that frame is gated, so a held frame
+  never waits on the fate of the frame that taught it;
+- the sender references only what the receiver confirmed, so loss or reordering on
+  the link costs inline frames and never a stall; the link is treated as a datagram
+  link throughout;
+- the sender remembers at most 64 sessions and the receiver 128, under one
+  least-recently-referenced order over the frames both ends saw, so on a lossless
+  link the sender goes back to inline before the receiver could have forgotten;
+  both tables are scoped to the connection generation;
+- a miss (a frame lost between the two orders, the two ends disagreeing on expiry,
+  or a misbehaving peer) holds that frame alone, at most 16 per connection and for
+  at most twice the delivery timeout plus one period of the inbound actor's sweep,
+  and is repaired on the link by one unsigned request per missing session of a held
+  frame (or of the oldest held frame, when a frame finds the hold full) and exactly
+  one unsigned answer per question; each control frame is emitted on the connection
+  generation it was judged on, in a task of its own rather than from the transport's
+  read loop, and at most 128 of them are in flight to one peer, twice the raw frames
+  that peer may have in flight at this end's transport, so their cost is bounded by
+  the frames accepted from the peer; a frame the peer was asked about and did not
+  back (disclaimed or invalid announcement, hold timeout, failure on release) is
+  charged to the peer as a receive failure, while a frame that finds the hold full,
+  or whose question this end never managed to send, is dropped uncharged, as one the
+  pre-admission hold cannot take is; a frame released after its connection generation
+  was superseded is dropped, never delivered; no hop asks the origin for anything;
+- an expired session is evicted, a reference to it is a miss, and re-announcing the
+  expired delegation is refused exactly as it is inline.
+
 ### Transaction replay boundary
 
 Signed transactions use a destination-scoped sequence stream keyed by `network_id`, the origin
@@ -188,8 +230,9 @@ beneficiary then sign the same canonical claim under different role domains, and
 returns the complete receipt in an acknowledgement. Account DIDs define the roles; delegated
 session rotation neither changes a role nor creates a distinct receipt identity.
 
-The `V1` wire markers and signing domains are protocol-domain separators, not compatibility
-fallbacks. Only `Probe` is accepted. Unknown service kinds, noncanonical bytes, a unit count
+The wire markers and signing domains are protocol-domain separators, not compatibility
+fallbacks, and carry no version: the protocol is not versioned before 1.0. Only `Probe` is
+accepted. Unknown service kinds, noncanonical bytes, a unit count
 other than one, same-account roles, digest or role mismatches, stale epochs, and expired delegated
 proofs fail closed during live admission. The old unsigned liveness probe/report wire is removed.
 

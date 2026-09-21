@@ -20,7 +20,7 @@ use crate::error::Error;
 use crate::error::Result;
 
 const ENTRY_GUARD_SCHEMA_VERSION: u16 = 1;
-const ENTRY_GUARD_KEY_PREFIX: &str = "rings-node:onion-entry-guards:v1";
+const ENTRY_GUARD_KEY_PREFIX: &str = "rings-node:onion-entry-guards";
 const DEFAULT_ENTRY_GUARD_COUNT: usize = 3;
 
 /// Serialized local entry-guard snapshot.

@@ -803,6 +803,7 @@ mod tests {
                 ScheduledDeliveryClass::Application,
             ),
         ];
+        let fixtures_len = fixtures.len() as u64;
         for (sequence, (message, expected)) in fixtures.into_iter().enumerate() {
             let wire = MessagePayload::new_send(
                 message,
@@ -819,6 +820,16 @@ mod tests {
                 expected
             );
         }
+        // A link-control frame is the link's own: its class carries no deadline and it names no
+        // transaction.
+        let digest = session.session().digest().expect("session must digest");
+        let control = crate::message::LinkControl::Request(digest)
+            .to_wire()
+            .expect("control frame must encode");
+        assert_eq!(
+            inspect_message(fixtures_len, &control).expect("control frame must classify"),
+            (ScheduledDeliveryClass::LinkControl, None)
+        );
         for strategy in [
             DeliveryStrategy::Fifo,
             DeliveryStrategy::Lifo,

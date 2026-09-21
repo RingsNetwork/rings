@@ -17,14 +17,13 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use bytes::Bytes;
 use futures::channel::mpsc;
 use futures::channel::oneshot;
 use futures::stream::FuturesUnordered;
 use futures::FutureExt;
 use futures::StreamExt;
-use rings_transport::core::callback::InboundFrameCapacityLease;
 
+use super::InboundFrameLease;
 use super::InboundProcessor;
 use super::LogicalInbound;
 use super::PreparedInboundFrame;
@@ -134,25 +133,22 @@ struct InboundEvent {
 pub(super) struct InboundSubmission {
     peer: Option<Did>,
     authentication: Authentication,
-    bytes: Bytes,
     prepared: PreparedInboundFrame,
-    transport_capacity: Option<InboundFrameCapacityLease>,
+    lease: InboundFrameLease,
 }
 
 impl InboundSubmission {
     pub(super) const fn new(
         peer: Option<Did>,
         authentication: Authentication,
-        bytes: Bytes,
+        lease: InboundFrameLease,
         prepared: PreparedInboundFrame,
-        transport_capacity: Option<InboundFrameCapacityLease>,
     ) -> Self {
         Self {
             peer,
             authentication,
-            bytes,
             prepared,
-            transport_capacity,
+            lease,
         }
     }
 }
@@ -252,9 +248,12 @@ impl InboundMailbox {
         let InboundSubmission {
             peer,
             authentication,
-            bytes,
             prepared,
-            transport_capacity,
+            lease:
+                InboundFrameLease {
+                    bytes,
+                    transport_capacity,
+                },
         } = submission;
         let lane = prepared.lane;
         if !prepared.kind.is_chunk() {
@@ -640,6 +639,7 @@ impl InboundActor {
     async fn cleanup_expired_reassembly(&mut self) {
         let now_ms = self.reassembly_clock.now_ms();
         self.processor.remove_expired_reassembly_at(now_ms).await;
+        self.processor.sweep_session_hold_at(now_ms).await;
         self.next_reassembly_cleanup = Instant::now() + REASSEMBLY_CLEANUP_INTERVAL;
         self.cleanup_passes.bump();
     }
@@ -872,7 +872,7 @@ fn finish_completion(
                 tracing::warn!(
                     peer = %peer,
                     error = ?error,
-                    "failed to deliver a message held until admission"
+                    "failed to deliver a message released from a hold"
                 );
             }
         }

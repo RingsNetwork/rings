@@ -393,8 +393,9 @@ pub(super) async fn record_measurement(
     }
 }
 
-/// Frame one chunk into the bytes a data-channel send carries: wrap it in a `MessagePayload`
-/// addressed to `did` and serialize it. Pure (the only failure is serialization).
+/// Frame one chunk into the payload a data-channel send carries: wrap it in a `MessagePayload`
+/// addressed to `did`. The outbound worker encodes it for the link. Pure (the only failure is
+/// signing).
 ///
 /// A chunk crosses exactly the edge it is sent on and is reassembled by `did`, so its carrier
 /// holds no forwards.
@@ -403,7 +404,7 @@ pub(super) fn frame_chunk(
     did: Did,
     chunk: Chunk,
     sequence: u64,
-) -> Result<Bytes> {
+) -> Result<MessagePayload> {
     let transaction = Transaction::new(
         did,
         crate::utils::new_uuid(),
@@ -415,7 +416,7 @@ pub(super) fn frame_chunk(
     let payload = MessagePayload::new(transaction, signer, relay)?;
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     crate::simulation::record_outbound_submission(payload.transaction.tx_id);
-    payload.to_wire()
+    Ok(payload)
 }
 
 fn chunk_send_cancel_reason(

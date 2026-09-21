@@ -43,7 +43,7 @@ const TRANSACTION_REPLAY_WINDOW_U64: u64 = 32;
 const TRANSACTION_REPLAY_BACKTRACK: u64 = 31;
 /// Maximum sender streams and maximum receiver streams retained by one runtime.
 pub const TRANSACTION_REPLAY_STREAM_CAPACITY: usize = 4096;
-const TRANSACTION_REPLAY_SNAPSHOT_KEY: &str = "rings-core:transaction-replay:v2";
+const TRANSACTION_REPLAY_SNAPSHOT_KEY: &str = "rings-core:transaction-replay";
 
 /// A destination-scoped transaction stream.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -837,7 +837,7 @@ mod tests {
     #[cfg(all(feature = "wasm", target_family = "wasm"))]
     #[wasm_bindgen_test::wasm_bindgen_test]
     async fn browser_storage_round_trip_retains_nonempty_replay_state() {
-        const STORAGE_NAME: &str = "rings-core/replay-snapshot-round-trip-v2";
+        const STORAGE_NAME: &str = "rings-core/replay-snapshot-round-trip";
         let storage = crate::storage::idb::IdbStorage::new_with_cap_and_name(2, STORAGE_NAME)
             .await
             .expect("IndexedDB opens");

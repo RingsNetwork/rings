@@ -1,4 +1,9 @@
 //! Deterministic multi-node sync-storm scenarios for issue #686.
+//!
+//! Session references run in every scenario. The sender's tables are judged on the system clock
+//! and the receiver's on the inbound clock, both under paused tokio time here; replay identity
+//! holds because no scenario holds a frame (a handful of sessions against tables of 64 and 128,
+//! over a lossless dummy link), so no verdict depends on either clock.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -48,7 +53,9 @@ use crate::simulation::SimulationRuntimeGuard;
 use crate::simulation::CONTROL_DEADLINE_MS;
 use crate::storage::MemStorage;
 use crate::swarm::transport::outbound_submit_count_for_test;
+use crate::swarm::transport::referenced_slots_for_test;
 use crate::swarm::transport::reset_outbound_submit_count_for_test;
+use crate::swarm::transport::LinkDirection;
 use crate::swarm::transport::TrackedStorageSyncOutcome;
 use crate::swarm::transport::OUTBOUND_CONTROL_BURST;
 use crate::swarm::transport::OUTBOUND_GLOBAL_BYTE_CAPACITY;
@@ -258,6 +265,8 @@ struct ScenarioOutcome {
     pressure_snapshot: serde_json::Value,
     recovery_elapsed_ms: u128,
     overload_witness: &'static str,
+    /// The link directions on which some payload frame went by reference during the scenario.
+    referenced_links: BTreeSet<LinkDirection>,
 }
 
 impl ScenarioOutcome {
@@ -440,7 +449,7 @@ async fn drain_teardown(runtime: &SimulationRuntimeGuard, nodes: &[Node]) {
 
 fn model_class(class: ScheduledDeliveryClass) -> Option<SimTransferClass> {
     match class {
-        ScheduledDeliveryClass::Lifecycle => None,
+        ScheduledDeliveryClass::Lifecycle | ScheduledDeliveryClass::LinkControl => None,
         ScheduledDeliveryClass::Control => Some(SimTransferClass::Control),
         ScheduledDeliveryClass::Storage => Some(SimTransferClass::Storage),
         ScheduledDeliveryClass::Reassembly => Some(SimTransferClass::Reassembly),
@@ -947,6 +956,14 @@ async fn conclude_healthy_liveness(
 fn assert_enabled_outcome(outcome: &ScenarioOutcome) {
     let diagnostic = outcome.diagnostic();
     let snapshot = outcome.state.snapshot();
+    // The storm ran over links that reached session references, so the reference protocol,
+    // not the all-inline encoding, is what the adversarial schedule exercised: some link
+    // direction of this scenario (the set is the scenario's own, not the thread's) went by
+    // reference. Which directions switch, and when, is the adversary's to delay.
+    assert!(
+        !outcome.referenced_links.is_empty(),
+        "no payload frame was sent by reference during the scenario; {diagnostic}"
+    );
     assert!(
         outcome.capacity_observations.validate().is_ok(),
         "{}; {diagnostic}",

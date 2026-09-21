@@ -14,8 +14,6 @@
 //! command channel synchronously; the worker then cancels every admitted
 //! transfer and drops outstanding delivery futures.
 
-#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -47,18 +45,35 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::lifecycle::StopSource;
 use crate::measure::MeasureImpl;
+use crate::utils::get_epoch_ms;
 
 mod admission;
 mod capacity;
+mod link_state;
 mod mailbox;
 mod measurement;
 mod model;
 mod queue;
+mod session_encoding;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 mod simulation_pressure;
 mod spawn;
 #[cfg(test)]
 mod test_trace;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use link_state::LINK_CONTROL_IN_FLIGHT_CAPACITY;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use test_trace::dispatched_link_control_for_test;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use test_trace::outbound_submit_count_for_test;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(super) use test_trace::record_dispatched_link_control;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use test_trace::referenced_slots_for_test;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use test_trace::reset_outbound_submit_count_for_test;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use test_trace::LinkDirection;
 mod transfer;
 
 pub(super) use admission::DetachedAdmission;
@@ -75,6 +90,8 @@ pub(crate) use capacity::OUTBOUND_DATA_TRANSFER_CAPACITY;
 pub(crate) use capacity::OUTBOUND_GLOBAL_BYTE_CAPACITY;
 #[cfg(test)]
 pub(crate) use capacity::OUTBOUND_TRANSFER_QUEUE_CAPACITY;
+pub(super) use link_state::LinkControlPermit;
+use link_state::PeerLinkState;
 use mailbox::MailboxLane;
 use mailbox::MailboxReceiver;
 use mailbox::MailboxSender;
@@ -83,11 +100,12 @@ use measurement::MeasurementRecorder;
 use measurement::OutboundMeasurement;
 pub(super) use model::OutboundCompletion;
 pub(super) use model::OutboundMessageKind;
-use model::TransferClass;
+pub(super) use model::TransferClass;
 use queue::RunnableTransfer;
 use queue::TransferQueues;
 #[cfg(test)]
 pub(crate) use queue::OUTBOUND_CONTROL_BURST;
+use session_encoding::SharedAnnouncedSessions;
 use spawn::spawn_worker;
 pub(super) use transfer::ChunkFrames;
 pub(super) use transfer::ChunkedFrameSource;
@@ -97,26 +115,6 @@ pub(super) use transfer::OutboundTransferRoute;
 use transfer::ShutdownBatch;
 
 pub(crate) const OUTBOUND_COMMAND_DRAIN_BUDGET: usize = 32;
-#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-thread_local! {
-    static OUTBOUND_SUBMIT_COUNT: Cell<usize> = const { Cell::new(0) };
-}
-
-#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(crate) fn reset_outbound_submit_count_for_test() {
-    OUTBOUND_SUBMIT_COUNT.with(|count| count.set(0));
-}
-
-#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(crate) fn outbound_submit_count_for_test() -> usize {
-    OUTBOUND_SUBMIT_COUNT.with(Cell::get)
-}
-
-#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-fn record_outbound_submit_for_test() {
-    OUTBOUND_SUBMIT_COUNT.with(|count| count.set(count.get().saturating_add(1)));
-}
-
 struct ScheduledTransfer<T = OutboundTransfer, P = TransferCapacityPermit> {
     transfer: T,
     capacity_permit: Option<P>,
@@ -196,6 +194,8 @@ struct OutboundPeerState {
     peer: Did,
     sender: MailboxSender<OutboundCommand>,
     cancel_requested: Arc<AtomicBool>,
+    /// The link's tables, kept across worker replacements under one generation.
+    link: PeerLinkState,
     // Strong lifetime anchor; the peer registry intentionally stores only a Weak reference.
     _capacity_anchor: TransferCapacityAnchor,
     stop: StopSource,
@@ -271,7 +271,7 @@ impl OutboundPeerHandle {
         };
         #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
         if submitted {
-            record_outbound_submit_for_test();
+            test_trace::record_outbound_submit();
             test_trace::record_submission(self.state.peer);
         }
         #[cfg(not(all(test, feature = "dummy", not(target_family = "wasm"))))]
@@ -356,9 +356,17 @@ impl OutboundSchedulers {
         {
             return Ok(handle.clone());
         }
-        if let Some(stopped) = registry.peers.remove(&peer) {
-            stopped.shutdown();
-        }
+        // A worker replaced under an unchanged connection generation keeps the link's tables:
+        // what the old worker announced stays answerable, and the sends still in flight stay
+        // counted. A newer generation empties the announced table by itself on its first frame.
+        let link = match registry.peers.remove(&peer) {
+            Some(stopped) => {
+                let link = stopped.state.link.clone();
+                stopped.shutdown();
+                link
+            }
+            None => PeerLinkState::new(),
+        };
         let capacity = registry.capacity(peer, &self.global_capacity);
         let (sender, receiver) = mailbox::channel();
         let stop = StopSource::new();
@@ -368,6 +376,7 @@ impl OutboundSchedulers {
             peer,
             sender,
             cancel_requested: cancel_requested.clone(),
+            link: link.clone(),
             _capacity_anchor: TransferCapacityAnchor::new(capacity),
             stop: stop.clone(),
         });
@@ -375,7 +384,14 @@ impl OutboundSchedulers {
         let (measurements, measurement_receiver) =
             MeasurementRecorder::channel(self.measure.clone(), peer);
         spawn_worker(
-            OutboundWorker::new(receiver, stop, measurements, peer, cancel_requested),
+            OutboundWorker::new(
+                receiver,
+                stop,
+                measurements,
+                peer,
+                cancel_requested,
+                link.announced,
+            ),
             measurement_receiver,
         )?;
         registry.peers.insert(peer, handle.clone());
@@ -450,31 +466,6 @@ impl Drop for OutboundSchedulers {
     }
 }
 
-#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-impl super::SwarmTransport {
-    pub(crate) fn outbound_admitted_transfer_count_for_test(&self, peer: Did) -> Option<usize> {
-        self.outbound_schedulers
-            .admitted_transfer_count_for_test(peer)
-    }
-
-    /// Exercise the live peer scheduler under lower-class saturation and record
-    /// whether an actual control reservation is rejected.
-    pub(crate) fn exercise_class_reservation_pressure_for_simulation(
-        &self,
-        peer: Did,
-    ) -> Result<Error> {
-        self.outbound_schedulers
-            .exercise_class_reservation_pressure(peer)
-    }
-}
-
-#[cfg(all(test, not(target_family = "wasm")))]
-impl super::SwarmTransport {
-    pub(crate) fn outbound_admitted_transfer_total_for_test(&self) -> usize {
-        self.outbound_schedulers.admitted_transfer_total_for_test()
-    }
-}
-
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 type DeliveryWaitFuture = Pin<Box<dyn Future<Output = DeliveryEvent> + Send>>;
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
@@ -487,6 +478,7 @@ struct OutboundWorker {
     cancel_requested: Arc<AtomicBool>,
     ready: TransferQueues<QueuedTransfer>,
     active: Option<RunnableTransfer<QueuedTransfer>>,
+    announced: SharedAnnouncedSessions,
     deliveries: FuturesUnordered<DeliveryWaitFuture>,
     measurements: MeasurementRecorder,
     stop: StopSource,
@@ -502,6 +494,7 @@ impl OutboundWorker {
         measurements: MeasurementRecorder,
         peer: Did,
         cancel_requested: Arc<AtomicBool>,
+        announced: SharedAnnouncedSessions,
     ) -> Self {
         #[cfg(not(test))]
         let _ = peer;
@@ -516,6 +509,7 @@ impl OutboundWorker {
             cancel_requested,
             ready: TransferQueues::default(),
             active: None,
+            announced,
             deliveries: FuturesUnordered::new(),
             measurements,
             stop,
@@ -764,7 +758,18 @@ impl OutboundWorker {
             return Some(ActiveFrameStep::Stopped);
         }
         let before_first_frame = transfer.is_before_first_frame();
-        Some(match transfer.next_frame() {
+        let generation = transfer.admitted.attempt().generation();
+        let announced = &self.announced;
+        let encoded = transfer.next_frame().and_then(|frame| {
+            frame
+                .map(|(payload, context)| {
+                    announced
+                        .encode(generation, payload.as_ref(), get_epoch_ms())
+                        .map(|bytes| (bytes, context))
+                })
+                .transpose()
+        });
+        Some(match encoded {
             Ok(Some((bytes, context))) => ActiveFrameStep::Send {
                 class,
                 before_first_frame,

@@ -1,5 +1,64 @@
 # Changelog
 
+## 0.28.0
+
+### Breaking changes
+
+- A link sends each session delegation once and references it afterwards (#738). The payload
+  wire encoding carries, in each of its two session slots, either the `Session` inline or its
+  20-byte content address (`SessionDigest`, the trailing bytes of `keccak256` over the encoded
+  session). Payload frames begin with the `RINGS-PAYLOAD` marker and link-control frames with
+  `RINGS-LINK`; every 0.27.x frame fails closed before decoding. Mixed-version overlays are
+  unsupported.
+- The protocol is not versioned before 1.0. The version suffixes on wire markers (payload,
+  provisional service claim and receipt), signing
+  domains (`rings-core:message-verification:transaction`, `...:payload`, the inbox, receipt,
+  descriptor and onion domains), AEAD namespaces, HKDF labels and storage keys
+  (`rings-core:transaction-replay`, `rings-node:onion-entry-guards`) are removed: each name is
+  one domain, and a change to it is a total cutover. Every signature domain therefore changes in
+  this release; a replay window, entry-guard set, measurement ledger or provisional-evidence
+  store persisted by 0.27.x is not read (the node's `MeasurementLedger` and
+  `ProvisionalEvidence` storage keys lose their suffix too).
+
+  The reference protocol, in detail:
+  - A steady-state relayed payload carries two 20-byte digests and two 65-byte signatures of
+    identity material, where it carried two full delegations.
+  - References are scoped to one direction of one admitted connection generation. The sender
+    references a session only after the receiver confirmed it with an unsigned `Known` frame;
+    the receiver confirms every inline session it verified, so loss or reordering on the link
+    costs inline frames and never a stall. The link is treated as a datagram link: nothing
+    relies on ordered or reliable delivery. Both tables are scoped to the connection
+    generation, so a restart needs no resynchronisation.
+  - A forwarding hop re-encodes the origin slot for its own next link, so a destination that
+    never met the origin receives the origin's session inline from its last hop. No node asks
+    the origin for a session.
+  - The receiver's table holds 128 sessions to the sender's 64 under one least-recently-
+    referenced order over the frames both ends saw, so on a lossless link the sender goes
+    back to inline before the receiver could have forgotten. A reference the receiver cannot
+    resolve holds that frame alone, at most 16 per connection and for at most twice the
+    transport's delivery timeout plus one period of the inbound actor's periodic sweep, while
+    the link repairs the miss with the unsigned link-control frames (`RINGS-LINK`): one
+    request per missing session of a held frame, answered by exactly one announcement or
+    disclaimer. Link-control frames are emitted on the connection generation they were judged
+    on, in a task of their own, straight on the data channel rather than through the transfer
+    lanes, at most 128 in flight to one peer (twice the transport's per-peer raw-frame bound).
+    Frames that resolve are never queued behind held ones; a frame the peer was asked about
+    and did not back (disclaimed or invalid announcement, hold timeout, failure on release) is
+    charged to the peer as a receive failure, and a frame that finds the hold full, or whose
+    question was never sent, is dropped uncharged. A reference resolves only on the link a
+    connection's callback is bound to; a frame from any other peer is judged self-contained,
+    and a frame released after its generation was superseded is dropped.
+  - An expired session is evicted from both tables; a reference to it is a miss, and
+    re-announcing the expired delegation is refused as it is inline.
+  - `MessagePayload::to_wire`/`from_wire` remain the self-contained encoding (both sessions
+    inline), used for handshake payloads, chunked payloads, and inbox carriers; a referenced
+    session there is `Error::SessionReferenceUnresolved`.
+
+### Added
+
+- `Session::digest` and `SessionDigest` in `rings_core`: the content address of one exact
+  delegation.
+
 ## 0.27.0
 
 ### Added

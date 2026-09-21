@@ -49,8 +49,11 @@ impl Session {
     }
 
     /// Check whether the session had expired at the instant `at_ms`.
+    ///
+    /// Total over every stamp: a lifetime that overflows the clock saturates, so a delegation
+    /// that arrives unsigned on a link (an announcement) cannot make this end panic.
     pub fn is_expired_at(&self, at_ms: u128) -> bool {
-        at_ms > self.ts_ms + self.ttl_ms as u128
+        at_ms > self.ts_ms.saturating_add(u128::from(self.ttl_ms))
     }
 
     /// Verify that the account authorized this unexpired session.

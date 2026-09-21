@@ -137,9 +137,25 @@ pub enum Error {
     #[error(transparent)]
     ProvisionalEvidence(#[from] rings_measure::EvidenceError),
 
-    /// The payload does not carry the v2 hard-cutover wire marker.
-    #[error("Legacy transaction wire format is not accepted")]
-    LegacyTransactionWireFormat,
+    /// The frame carries neither the payload marker nor the link-control marker.
+    #[error("Frame carries no rings marker")]
+    UnmarkedFrame,
+
+    /// A payload that travels outside any link referenced a session instead of carrying it.
+    #[error("Session reference {0:?} cannot be resolved outside the link that announced it")]
+    SessionReferenceUnresolved(crate::session::SessionDigest),
+
+    /// A link-control frame was decoded where a payload was expected: outside any link.
+    #[error("Link-control frame is meaningful only on the connection it arrived on")]
+    LinkControlOutsideLink,
+
+    /// No runtime is current to carry a link-control send detached from the read loop.
+    #[error("Link-control send needs a runtime to run detached")]
+    LinkControlRuntimeUnavailable,
+
+    /// The peer already has the most link-control sends this end keeps in flight for it.
+    #[error("Link-control sends in flight to {0} are at capacity")]
+    LinkControlInFlightCapacity(crate::dht::Did),
 
     /// E2E frame received after the authenticated final frame
     #[error("E2E frame received after the authenticated final frame")]

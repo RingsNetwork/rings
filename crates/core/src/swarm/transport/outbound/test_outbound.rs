@@ -475,6 +475,7 @@ fn test_shutdown_closes_channel_without_worker_owned_sender() {
             peer: Did::from(42_u32),
             sender,
             cancel_requested: Arc::new(AtomicBool::new(false)),
+            link: PeerLinkState::new(),
             _capacity_anchor: TransferCapacityAnchor::new(Arc::new(TransferCapacity::new(
                 Arc::new(GlobalTransferCapacity::new()),
             ))),
@@ -500,6 +501,7 @@ fn test_worker_drop_stops_generation_and_closes_ingress_without_a_normal_run_exi
         measurements,
         peer,
         Arc::new(AtomicBool::new(false)),
+        SharedAnnouncedSessions::new(),
     );
 
     drop(worker);
@@ -526,6 +528,7 @@ async fn test_worker_drop_allows_registry_to_replace_the_stopped_generation() {
             peer,
             sender,
             cancel_requested: Arc::new(AtomicBool::new(false)),
+            link: PeerLinkState::new(),
             _capacity_anchor: TransferCapacityAnchor::new(capacity),
             stop: stop.clone(),
         }),
@@ -538,6 +541,7 @@ async fn test_worker_drop_allows_registry_to_replace_the_stopped_generation() {
         measurements,
         peer,
         Arc::new(AtomicBool::new(false)),
+        SharedAnnouncedSessions::new(),
     );
 
     drop(worker);
@@ -547,6 +551,8 @@ async fn test_worker_drop_allows_registry_to_replace_the_stopped_generation() {
 
     assert!(!Arc::ptr_eq(&stale.state, &replacement.state));
     assert!(!replacement.state.stop.is_stop_requested());
+    // The link's tables outlive the worker: what the stale one announced stays answerable.
+    assert!(replacement.state.link.is_same_link(&stale.state.link));
     schedulers.shutdown(peer);
 }
 
@@ -619,6 +625,7 @@ fn test_final_handle_drop_requests_stop_before_channel_close() {
             peer: Did::from(42_u32),
             sender,
             cancel_requested: Arc::new(AtomicBool::new(false)),
+            link: PeerLinkState::new(),
             _capacity_anchor: TransferCapacityAnchor::new(Arc::new(TransferCapacity::new(
                 Arc::new(GlobalTransferCapacity::new()),
             ))),

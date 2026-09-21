@@ -605,7 +605,6 @@ impl SwarmTransport {
             return Err(Error::PeerMaxMessageSizeTooSmall(max_message_size));
         };
         admitted.ensure_current()?;
-        let data = payload.to_wire()?;
         tracing::debug!(
             local = %self.dht.did,
             next_hop = %preparation.next_hop,
@@ -618,18 +617,19 @@ impl SwarmTransport {
             framing = ?plan,
             "send payload start"
         );
+        let logical_sequence = payload.transaction.sequence;
         let framed = self.frame_outbound_transfer(
             OutboundTransferRoute::new(message_kind.class(), did, admitted.clone(), permit),
-            data,
+            payload,
             plan,
             OutboundTransferProperties {
-                logical_sequence: payload.transaction.sequence,
+                logical_sequence,
                 useful_bytes,
                 completion,
                 stop,
                 detached_admission,
             },
-        );
+        )?;
         Ok(Some(PreparedOutboundTransfer {
             admitted,
             handle,
@@ -693,13 +693,19 @@ impl SwarmTransport {
         Ok(preparation)
     }
 
+    /// Build the transfer that carries `payload` under `framing`.
+    ///
+    /// A whole payload travels as one link frame, its session slots encoded by the worker. A
+    /// chunked payload is cut from its self-contained encoding, because the receiver decodes it
+    /// after reassembly, outside the order of the link; the chunk frames that carry it are link
+    /// frames like any other.
     fn frame_outbound_transfer(
         &self,
         route: OutboundTransferRoute,
-        data: bytes::Bytes,
+        payload: MessagePayload,
         framing: Framing,
         properties: OutboundTransferProperties,
-    ) -> FramedOutboundTransfer {
+    ) -> Result<FramedOutboundTransfer> {
         let OutboundTransferProperties {
             logical_sequence,
             useful_bytes,
@@ -710,14 +716,15 @@ impl SwarmTransport {
         let (transfer, receiver) = match framing {
             Framing::Whole => OutboundTransfer::whole(
                 route,
-                data,
+                payload,
                 useful_bytes,
                 completion,
                 stop,
                 detached_admission,
             ),
             Framing::Chunked { chunk_size } => {
-                let chunks: ChunkFrames = Box::new(ChunkList::stream(data, chunk_size));
+                let chunks: ChunkFrames =
+                    Box::new(ChunkList::stream(payload.to_wire()?, chunk_size));
                 OutboundTransfer::chunked(
                     route,
                     ChunkedFrameSource::new(self.message_signer(), chunks, logical_sequence),
@@ -728,7 +735,7 @@ impl SwarmTransport {
                 )
             }
         };
-        FramedOutboundTransfer { transfer, receiver }
+        Ok(FramedOutboundTransfer { transfer, receiver })
     }
 
     async fn submit_prepared_outbound_transfer(

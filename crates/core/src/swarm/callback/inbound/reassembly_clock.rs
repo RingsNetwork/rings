@@ -27,7 +27,7 @@ impl ReassemblyClock {
         Self::Controlled(now_ms)
     }
 
-    pub(super) fn now_ms(&self) -> u128 {
+    pub(in crate::swarm::callback) fn now_ms(&self) -> u128 {
         match self {
             Self::System => crate::utils::get_epoch_ms(),
             #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
