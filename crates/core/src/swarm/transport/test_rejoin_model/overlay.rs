@@ -65,6 +65,10 @@ pub(super) enum ShellMutation {
     /// reference to its peer: the atomicity of the lifecycle boundary is
     /// removed.
     RetireWithoutRemove,
+    /// Every retirement requests a storage repair round, whether or not a
+    /// slot referenced its peer: the placement guard on the request is
+    /// removed.
+    RepairOnEveryRetirement,
 }
 
 /// The shape of `Init`: how the peers are connected before the search
@@ -658,6 +662,11 @@ impl OverlayState {
     /// will report.
     fn dispatch(&mut self, sender: Did, effect: Effect) {
         match effect {
+            // The repair round itself (a placement scan) is outside the
+            // carrier: the request is the step's output, compared with
+            // production's in `conformance`, and its law is the history
+            // variable `misdirected_repair`.
+            Effect::StorageRepair => {}
             Effect::Offer { offered } => {
                 self.network.insert(Envelope::Offer {
                     offerer: sender,

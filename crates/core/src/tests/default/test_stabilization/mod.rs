@@ -16,10 +16,9 @@ use tokio::time::Duration;
 
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
-use crate::dht::successor::SuccessorReader;
-use crate::dht::successor::SuccessorWriter;
 use crate::dht::Did;
 use crate::dht::PeerRingAction;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::dht::StorageRepairOutcome;
 use crate::ecc::SecretKey;
 use crate::error::Error;
@@ -45,6 +44,7 @@ use crate::swarm::transport::PEER_LIVENESS_IDLE_MS;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::swarm::transport::PEER_LIVENESS_TIMEOUT_MS;
 use crate::swarm::SwarmBuilder;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::tests::default::assert_no_more_msg;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::tests::default::dummy_hooks::PendingSendGuard;
@@ -448,6 +448,43 @@ async fn test_clean_unavailable_connections_removes_silent_connected_peer() -> R
     assert!(!node1.dht().successors().contains(&node2.did())?);
     assert_eq!(*node1.dht().lock_predecessor()?, None);
     assert!(!node1.dht().lock_finger()?.contains(Some(node2.did())));
+
+    Ok(())
+}
+
+/// The cleaner also removes admitted connections no topology slot references; such a removal
+/// changes no placement, so it must not request a storage repair round.
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+#[tokio::test]
+async fn test_clean_unavailable_connections_requests_no_repair_for_unreferenced_peer() -> Result<()>
+{
+    let node1 = prepare_node(SecretKey::random()).await;
+    let node2 = prepare_node(SecretKey::random()).await;
+
+    manually_establish_connection(&node1.swarm, &node2.swarm).await;
+    wait_for_successor(&node1, node2.did()).await?;
+
+    // The connection stays admitted while every slot that referenced it is vacated.
+    node1.dht().remove(node2.did())?;
+    assert!(!node1.dht().topology_state()?.references(node2.did()));
+    assert!(node1.swarm.transport.has_active_connection(node2.did()));
+    node1.swarm.transport.claim_storage_repair();
+
+    let stale_probe_sent_at = get_epoch_ms_i64() - PEER_LIVENESS_TIMEOUT_MS - 1;
+    node1
+        .swarm
+        .transport
+        .force_peer_liveness_probe_sent_at(node2.did(), stale_probe_sent_at)?;
+
+    let _drop_messages = DropMessagesGuard::new();
+    node1
+        .swarm
+        .stabilizer()
+        .clean_unavailable_connections()
+        .await?;
+
+    assert!(!node1.swarm.transport.has_active_connection(node2.did()));
+    assert!(!node1.swarm.transport.storage_repair_requested());
 
     Ok(())
 }

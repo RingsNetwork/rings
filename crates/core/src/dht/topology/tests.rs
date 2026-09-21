@@ -92,12 +92,16 @@ fn refines_successor_distances(before: &TopologyState, after: &TopologyState) ->
 }
 
 #[test]
-fn test_join_step_updates_successors_fingers_and_connect_action() {
+fn test_admit_step_updates_successors_fingers_and_connect_action() {
     let local = did(0);
     let peer = did(8);
     let next = step(
         &state(local, vec![], None, vec![None; 5], 0),
-        TopologyEvent::Join { peer },
+        TopologyEvent::Admit {
+            peer,
+            deferred_proof: None,
+            now_ms: 0,
+        },
         DEFAULT_SUCCESSOR_CAPACITY,
     );
 
@@ -110,6 +114,7 @@ fn test_join_step_updates_successors_fingers_and_connect_action() {
         None
     ]);
     assert_eq!(next.actions, vec![
+        TopologyAction::QuerySuccessorList(peer),
         TopologyAction::FindSuccessorForConnect {
             next: peer,
             did: local
@@ -119,12 +124,16 @@ fn test_join_step_updates_successors_fingers_and_connect_action() {
 }
 
 #[test]
-fn test_join_step_refines_successor_distance_vector() {
+fn test_admit_step_refines_successor_distance_vector() {
     let local = did(0);
     let current = state(local, vec![did(20), did(40)], None, vec![None; 5], 0);
     let next = step(
         &current,
-        TopologyEvent::Join { peer: did(10) },
+        TopologyEvent::Admit {
+            peer: did(10),
+            deferred_proof: None,
+            now_ms: 0,
+        },
         DEFAULT_SUCCESSOR_CAPACITY,
     );
 
@@ -378,7 +387,11 @@ fn test_admit_step_does_not_overwrite_finger_changed_after_update_was_deferred()
     // Joining `fresher` invalidates the deferred proof before admission replays it.
     let changed = step(
         &deferred.state,
-        TopologyEvent::Join { peer: fresher },
+        TopologyEvent::Admit {
+            peer: fresher,
+            deferred_proof: None,
+            now_ms: 0,
+        },
         DEFAULT_SUCCESSOR_CAPACITY,
     );
     assert_eq!(changed.state.finger_convergence_projection().deferred, None);
@@ -928,7 +941,6 @@ fn test_predecessor_and_finger_steps_never_report_a_head_change() {
             successor: did(40),
             now_ms: 1_000,
         },
-        TopologyEvent::UpdateSuccessor { successor: did(30) },
     ] {
         let next = step(&current, event, DEFAULT_SUCCESSOR_CAPACITY);
         assert_head_law(&current, &next);

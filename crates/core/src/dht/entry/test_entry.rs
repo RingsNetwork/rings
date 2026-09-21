@@ -159,16 +159,16 @@ fn test_relay_message_set_satisfies_join_semilattice_laws() -> Result<()> {
     let did = Did::from(10u32);
     let a = Entry::new(did, vec![encoded("a")?], EntryKind::RelayMessage)
         .stamp_delta(version(1))?
-        .relay_set()?;
+        .topic_buffer()?;
     let b = Entry::new(did, vec![encoded("b")?], EntryKind::RelayMessage)
         .stamp_delta(version(2))?
-        .relay_set()?;
+        .topic_buffer()?;
     let ab = Entry::new(did, vec![], EntryKind::RelayMessage)
         .join(relay_delta(did, "a", 1)?)?
         .join(relay_delta(did, "b", 2)?)?;
-    let tombstoned_a = ab.tombstone(relay_delta(did, "a", 1)?)?.relay_set()?;
+    let tombstoned_a = ab.tombstone(relay_delta(did, "a", 1)?)?.topic_buffer()?;
 
-    assert_join_semilattice_laws(&[RelayMessageSet::default(), a, b, tombstoned_a]);
+    assert_join_semilattice_laws(&[DataTopicBuffer::default(), a, b, tombstoned_a]);
     Ok(())
 }
 
@@ -283,9 +283,10 @@ fn test_crdt_constructors_normalize_carrier_invariants() -> Result<()> {
     assert_eq!(buffer.values.len(), 1);
     assert!(buffer.values.contains_key(&live));
 
-    let relay = RelayMessageSet::new(buffer, BTreeSet::from([live_dot]));
-    assert!(relay.adds.values.is_empty());
-    assert!(relay.removes.contains(&live_dot));
+    let tombstoned =
+        DataTopicBuffer::new(buffer.register, buffer.values, BTreeSet::from([live_dot]));
+    assert!(tombstoned.values.is_empty());
+    assert!(tombstoned.removes.contains(&live_dot));
     Ok(())
 }
 
@@ -438,29 +439,26 @@ fn test_extend_caps_incoming_payloads_larger_than_max_len() -> Result<()> {
     assert_entry_keeps_recent_overflow(&updated, incoming_count, overflow)
 }
 
-/// Extend is the element-set join for both carriers, so a relay inbox grows by extension;
-/// touch remains a data-topic operation.
+/// Extend is the element-set join for both carriers, so a relay inbox grows by extension.
 #[test]
-fn test_extend_grows_relay_inbox_but_touch_rejects_it() -> Result<()> {
+fn test_extend_grows_relay_inbox() -> Result<()> {
     let inbox = relay_entry();
     let delta = relay_delta(inbox.did, "m1", 1)?;
 
     let extended = inbox.extend(NOW_MS, delta.clone(), actor())?;
     assert_eq!(extended.data, delta.data);
-    assert!(matches!(
-        inbox.touch(NOW_MS, delta, actor()),
-        Err(Error::EntryNotAppendable)
-    ));
     Ok(())
 }
 
+/// Re-extending an existing payload moves it to the end: the element set keeps
+/// the maximal dot per value and materialises in dot order.
 #[test]
-fn test_touch_moves_existing_items_to_end_once() -> Result<()> {
+fn test_extend_moves_existing_items_to_end_once() -> Result<()> {
     let entry = data_entry("topic", "a")?
         .extend(NOW_MS, data_entry("topic", "b")?, actor())?
         .extend(NOW_MS, data_entry("topic", "c")?, actor())?;
     let touched = data_entry("topic", "b")?;
-    let updated = entry.touch(NOW_MS, touched, actor())?;
+    let updated = entry.extend(NOW_MS, touched, actor())?;
     assert_eq!(decode_entry_data(&updated)?, vec![
         String::from("a"),
         String::from("c"),
@@ -470,12 +468,12 @@ fn test_touch_moves_existing_items_to_end_once() -> Result<()> {
 }
 
 #[test]
-fn test_touch_trims_oldest_non_touched_items_at_max_len() -> Result<()> {
+fn test_extend_of_existing_item_at_max_len_moves_it_to_end() -> Result<()> {
     let mut entry = data_entry("topic", "test0")?;
     for i in 1..ENTRY_DATA_MAX_LEN {
         entry = entry.extend(NOW_MS, data_entry("topic", &format!("test{i}"))?, actor())?;
     }
-    let updated = entry.touch(NOW_MS, data_entry("topic", "test0")?, actor())?;
+    let updated = entry.extend(NOW_MS, data_entry("topic", "test0")?, actor())?;
     assert_eq!(updated.data.len(), ENTRY_DATA_MAX_LEN);
     let decoded = decode_entry_data(&updated)?;
     assert_eq!(decoded.first(), Some(&String::from("test1")));
@@ -655,11 +653,11 @@ fn test_delayed_data_compaction_preserves_newer_register_floor() -> Result<()> {
 }
 
 #[test]
-fn test_touch_caps_incoming_payloads_larger_than_max_len() -> Result<()> {
+fn test_extend_caps_incoming_payloads_larger_than_max_len_over_base() -> Result<()> {
     let overflow = 3;
     let (incoming, incoming_count) = overflowing_data_entry("topic", overflow)?;
     let entry = data_entry("topic", "base")?;
-    let updated = entry.touch(NOW_MS, incoming, actor())?;
+    let updated = entry.extend(NOW_MS, incoming, actor())?;
     assert_entry_keeps_recent_overflow(&updated, incoming_count, overflow)
 }
 
@@ -705,7 +703,6 @@ fn test_stamped_assigns_default_lifetime_and_preserves_existing() -> Result<()> 
     let ops = [
         EntryOperation::Overwrite(unstamped.clone()),
         EntryOperation::Extend(unstamped.clone()),
-        EntryOperation::Touch(unstamped.clone()),
         EntryOperation::Tombstone(unstamped.clone()),
         EntryOperation::CompactData(unstamped.clone()),
     ];

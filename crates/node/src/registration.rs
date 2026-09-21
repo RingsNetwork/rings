@@ -277,7 +277,7 @@ impl DhtRegistrationPublisher {
             context.ensure_running()?;
             context
                 .processor
-                .storage_touch_data(&self.topic, value.clone())
+                .storage_append_data(&self.topic, value.clone())
                 .await?;
         }
         for stale_value in stale_values {
@@ -336,7 +336,7 @@ impl DhtRegistrationPublisher {
             context.ensure_running()?;
             context
                 .processor
-                .storage_touch_data(&self.topic, value.clone())
+                .storage_append_data(&self.topic, value.clone())
                 .await?;
         }
         for stale_value in stale_values {

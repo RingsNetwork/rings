@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
 
-use async_trait::async_trait;
 use bytes::Bytes;
 use rings_transport::connection_ref::ConnectionRef;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
@@ -39,7 +38,6 @@ use self::storage_sync::StorageSyncAckMap;
 use crate::chunk::ReassemblyBudget;
 use crate::chunk::ReassemblyLimits;
 use crate::dht::Did;
-use crate::dht::LiveDid;
 use crate::dht::PeerRing;
 use crate::dht::StorageSyncDeliveryCursor;
 use crate::dht::VirtualNodeConfig;
@@ -646,13 +644,8 @@ impl SwarmTransport {
         .map(|_| ())
     }
 
-    /// Ensure the storage API redundancy matches repair redundancy.
-    pub(crate) fn ensure_storage_redundancy<const REDUNDANT: u16>(&self) -> Result<()> {
-        self.ensure_storage_redundancy_value(REDUNDANT)
-    }
-
     /// Validate that a runtime storage message uses this transport's redundancy.
-    pub(crate) fn ensure_storage_redundancy_value(&self, redundancy: u16) -> Result<()> {
+    pub(crate) fn ensure_storage_redundancy(&self, redundancy: u16) -> Result<()> {
         if self.storage_redundancy == redundancy {
             Ok(())
         } else {
@@ -1045,14 +1038,6 @@ impl SwarmConnection {
     /// `max_message_size`. Used to size payload chunks so each wrapped chunk stays within the limit.
     pub fn max_message_size(&self) -> usize {
         self.connection.max_message_size()
-    }
-}
-
-#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
-#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
-impl LiveDid for SwarmConnection {
-    async fn live(&self) -> bool {
-        self.readiness().can_make_progress()
     }
 }
 

@@ -1,10 +1,7 @@
 use std::str::FromStr;
 
-use async_trait::async_trait;
-
 use super::*;
 use crate::dht::topology;
-use crate::dht::LiveDid;
 use crate::tests::default::gen_sorted_dht;
 
 /// An isolated node has no head to query: beginning a round records no token
@@ -33,7 +30,7 @@ fn test_stabilization_report_claim_is_single_use() -> Result<()> {
     let successor = Did::from(4u32);
     // The same authenticated response may reserve its connection budget once.
     let request_id = uuid::Uuid::from_u128(1);
-    let _ = node.join(successor)?;
+    let _ = node.admit_connected(successor, None)?;
     let _ = node.begin_stabilization(request_id)?;
 
     let claim = node.claim_stabilization_report(successor, request_id)?;
@@ -43,16 +40,16 @@ fn test_stabilization_report_claim_is_single_use() -> Result<()> {
         .is_none());
     // The failed duplicate released nothing: the first claim still owns the
     // report and may spend its budget.
-    let mut plan = topology::StabilizationConnectionPlan::new(
+    let mut plan = topology::ConnectionPlan::new(
         successor,
         request_id,
         [Did::from(8u32)],
         node.did,
-        3,
+        topology::stabilization_connection_budget(3),
     );
     assert!(matches!(
         node.advance_stabilization_connection_plan(&mut plan)?,
-        topology::StabilizationConnectionStep::Connect { .. }
+        topology::ConnectionStep::Connect(_)
     ));
     // Dropping the claim releases the token; a released token is claimable by
     // nobody, because release retires it rather than reopening it.
@@ -62,7 +59,7 @@ fn test_stabilization_report_claim_is_single_use() -> Result<()> {
         .is_none());
     assert!(matches!(
         node.advance_stabilization_connection_plan(&mut plan)?,
-        topology::StabilizationConnectionStep::Stale
+        topology::ConnectionStep::Stale
     ));
     Ok(())
 }
@@ -75,11 +72,11 @@ fn test_successor_change_revokes_a_sync_report_only_when_its_reporter_leaves() -
     let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
     let reporter = Did::from(4u32);
     let request_id = uuid::Uuid::from_u128(1);
-    let _ = node.join(reporter)?;
+    let _ = node.admit_connected(reporter, None)?;
     assert!(node.begin_successor_sync(reporter, request_id)?);
 
     // The list grows, the reporter stays: the token is still claimable, once.
-    let _ = node.join(Did::from(8u32))?;
+    let _ = node.admit_connected(Did::from(8u32), None)?;
     let claim = node.claim_successor_sync_report(reporter, request_id)?;
     assert!(claim.is_some());
     assert!(node
@@ -87,21 +84,16 @@ fn test_successor_change_revokes_a_sync_report_only_when_its_reporter_leaves() -
         .is_none());
     // The failed duplicate released nothing: the first claim still owns the
     // report and may spend its budget.
-    let mut plan = topology::SuccessorSyncConnectionPlan::new(
-        reporter,
-        request_id,
-        [Did::from(12u32)],
-        node.did,
-        3,
-    );
+    let mut plan =
+        topology::ConnectionPlan::new(reporter, request_id, [Did::from(12u32)], node.did, 3);
     assert_eq!(
         node.advance_successor_sync_connection_plan(&mut plan)?,
-        topology::SuccessorSyncConnectionStep::Connect(Did::from(12u32))
+        topology::ConnectionStep::Connect(Did::from(12u32))
     );
     drop(claim);
     assert_eq!(
         node.advance_successor_sync_connection_plan(&mut plan)?,
-        topology::SuccessorSyncConnectionStep::Stale
+        topology::ConnectionStep::Stale
     );
 
     // A new round for the same reporter, then the reporter leaves: revoked.
@@ -139,29 +131,20 @@ async fn test_correct_chord_maintains_expected_successors() -> Result<()> {
         panic!("wrong dhts length");
     };
 
-    n1.join(n2.did).unwrap();
-    n2.join(n1.did).unwrap();
+    n1.admit_connected(n2.did, None).unwrap();
+    n2.admit_connected(n1.did, None).unwrap();
     assert_mutual_successors(n1, n2);
 
-    n1.join(n3.did).unwrap();
-    n1.join(n4.did).unwrap();
+    n1.admit_connected(n3.did, None).unwrap();
+    n1.admit_connected(n4.did, None).unwrap();
     assert_successors_include(n1, &[n2.did, n3.did, n4.did]);
 
-    n1.join(n5.did).unwrap();
+    n1.admit_connected(n5.did, None).unwrap();
     assert!(!has_successor(n1, n5.did));
 
-    #[allow(non_local_definitions)]
-    #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
-    #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
-    impl LiveDid for Did {
-        async fn live(&self) -> bool {
-            true
-        }
-    }
-
-    // Joining through an already live seed emits both remote topology work and,
-    // when the head changes, a storage-repair intent.
-    let PeerRingAction::MultiActions(actions) = n5.join_then_sync(n1.did).await.unwrap() else {
+    // Admitting a live seed emits both remote topology work and, when the head
+    // changes, a storage-repair intent.
+    let PeerRingAction::MultiActions(actions) = n5.admit_connected(n1.did, None).unwrap() else {
         panic!("wrong action");
     };
     for action in actions {

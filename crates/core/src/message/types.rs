@@ -169,13 +169,6 @@ pub struct NotifyPredecessorSend {
     pub did: Did,
 }
 
-/// MessageType use to tell the real predecessor of current node.
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct NotifyPredecessorReport {
-    /// The real predecessor of current node after compare.
-    pub did: Did,
-}
-
 /// Reason a peer requested another node's topology view.
 #[derive(Debug, Deserialize, Serialize, Copy, Clone)]
 pub enum QueryFor {
@@ -414,38 +407,36 @@ macro_rules! with_message_variants {
             3 => FindSuccessorReport(FindSuccessorReport): DhtControl, NoStorageRoute,
             /// Remote message of notify a predecessor.
             4 => NotifyPredecessorSend(NotifyPredecessorSend): DhtControl, NoStorageRoute,
-            /// Response of NotifyPredecessorSend.
-            5 => NotifyPredecessorReport(NotifyPredecessorReport): DhtControl, NoStorageRoute,
             /// Beneficiary request initiating the provisional Probe transcript.
-            6 => ProbeRequest(ProbeRequest): DhtControl, NoStorageRoute,
+            5 => ProbeRequest(ProbeRequest): DhtControl, NoStorageRoute,
             /// Provider offer carrying the signed request, completion, and claim.
-            7 => ProbeOffer(Box<ProbeOffer>): DhtControl, NoStorageRoute,
+            6 => ProbeOffer(Box<ProbeOffer>): DhtControl, NoStorageRoute,
             /// Remote message for searching an entry.
-            8 => SearchEntry(SearchEntry): Storage, NoStorageRoute,
+            7 => SearchEntry(SearchEntry): Storage, NoStorageRoute,
             /// Response when entries are found.
-            9 => FoundEntry(FoundEntry): Storage, NoStorageRoute,
+            8 => FoundEntry(FoundEntry): Storage, NoStorageRoute,
             /// Remote message for entry operations.
-            10 => OperateEntry(PlacedEntryOperation): Storage, NoStorageRoute,
+            9 => OperateEntry(PlacedEntryOperation): Storage, NoStorageRoute,
             /// Remote message for entry syncing.
-            11 => SyncEntriesWithSuccessor(SyncEntriesWithSuccessor): Storage, StorageRoute,
+            10 => SyncEntriesWithSuccessor(SyncEntriesWithSuccessor): Storage, StorageRoute,
             /// Response after synced entries are durably persisted.
-            12 => SyncEntriesWithSuccessorReport(SyncEntriesWithSuccessorReport): Storage, NoStorageRoute,
+            11 => SyncEntriesWithSuccessorReport(SyncEntriesWithSuccessorReport): Storage, NoStorageRoute,
             /// Custom messages.
-            13 => CustomMessage(CustomMessage): Application, NoStorageRoute,
+            12 => CustomMessage(CustomMessage): Application, NoStorageRoute,
             /// Request to negotiate E2E ElGamal encryption with a signed public key.
-            14 => E2eHandshakeRequest(E2eHandshakeRequest): E2e, NoStorageRoute,
+            13 => E2eHandshakeRequest(E2eHandshakeRequest): E2e, NoStorageRoute,
             /// Response accepting E2E ElGamal encryption with a signed public key.
-            15 => E2eHandshakeResponse(E2eHandshakeResponse): E2e, NoStorageRoute,
+            14 => E2eHandshakeResponse(E2eHandshakeResponse): E2e, NoStorageRoute,
             /// Direct ElGamal-encrypted E2E stream frame.
-            16 => E2eStreamFrame(E2eStreamFrame): E2e, NoStorageRoute,
+            15 => E2eStreamFrame(E2eStreamFrame): E2e, NoStorageRoute,
             /// Remote message of query topological info of a node.
-            17 => QueryForTopoInfoSend(QueryForTopoInfoSend): DhtControl, NoStorageRoute,
+            16 => QueryForTopoInfoSend(QueryForTopoInfoSend): DhtControl, NoStorageRoute,
             /// Response of QueryForTopoInfoSend.
-            18 => QueryForTopoInfoReport(QueryForTopoInfoReport): DhtControl, NoStorageRoute,
+            17 => QueryForTopoInfoReport(QueryForTopoInfoReport): DhtControl, NoStorageRoute,
             /// A chunk that can be deserialized to a payload.
-            19 => Chunk(Chunk): Application, NoStorageRoute,
+            18 => Chunk(Chunk): Application, NoStorageRoute,
             /// Beneficiary acknowledgement completing the provisional receipt.
-            20 => ProbeAcknowledgement(Box<ProbeAcknowledgement>): DhtControl, NoStorageRoute,
+            19 => ProbeAcknowledgement(Box<ProbeAcknowledgement>): DhtControl, NoStorageRoute,
         }
     };
 }
@@ -688,9 +679,6 @@ mod tests {
         handler: FindSuccessorReportHandler::None,
     });
     sample_message_body!(NotifyPredecessorSend, |fixture| NotifyPredecessorSend {
-        did: fixture.did,
-    });
-    sample_message_body!(NotifyPredecessorReport, |fixture| NotifyPredecessorReport {
         did: fixture.did,
     });
     sample_message_body!(ProbeRequest, |fixture| ProbeRequest {

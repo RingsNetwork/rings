@@ -22,7 +22,7 @@ fn schedule(now_ms: u64, local: crate::dht::Did) -> MaintenanceSchedule {
 /// `pending` maps to a runnable phase when true and an inactive phase when false,
 /// allowing tests to vary readiness without introducing retry backoff.
 const fn finger_status(pending: bool) -> FingerConvergenceStatus {
-    FingerConvergenceStatus::new(pending, 0)
+    FingerConvergenceStatus::idle(pending, 0)
 }
 
 /// Proves long stabilization does not erase an already due finger reservation.
@@ -64,7 +64,8 @@ fn test_failure_outcome_expands_the_retry_floor_and_full_jitter_window() {
     let _ = schedule.poll(0, false, finger_status(true));
 
     for failure_streak in [1u8, 2, 3, 4, 5, 6, u8::MAX] {
-        schedule.complete_finger_convergence(0, FingerConvergenceStatus::new(true, failure_streak));
+        schedule
+            .complete_finger_convergence(0, FingerConvergenceStatus::idle(true, failure_streak));
         let floor_ms = finger_lookup_backoff_ms(failure_streak);
         assert!((floor_ms..=floor_ms.saturating_mul(2)).contains(&schedule.next_finger_ms));
     }
@@ -83,7 +84,7 @@ fn test_async_failure_rearms_a_not_yet_due_finger_attempt() {
 
     assert_eq!(
         schedule
-            .poll(500, false, FingerConvergenceStatus::new(true, 1))
+            .poll(500, false, FingerConvergenceStatus::idle(true, 1))
             .task,
         None
     );
@@ -101,7 +102,7 @@ fn test_capped_failure_jitter_keeps_every_boot_inside_the_retry_window() {
     for entropy in 1..=50u128 {
         let mut schedule =
             MaintenanceSchedule::new(0, PERIOD, local, uuid::Uuid::from_u128(entropy));
-        let _ = schedule.poll(0, false, FingerConvergenceStatus::new(true, u8::MAX));
+        let _ = schedule.poll(0, false, FingerConvergenceStatus::idle(true, u8::MAX));
         assert!((60_000..=120_000).contains(&schedule.next_finger_ms));
     }
 }

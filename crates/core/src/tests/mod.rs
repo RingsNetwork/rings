@@ -13,7 +13,6 @@ use crate::dht::entry::PlacedEntry;
     all(feature = "dummy", not(target_family = "wasm")),
     all(feature = "wasm", target_family = "wasm")
 ))]
-use crate::dht::successor::SuccessorReader;
 #[cfg(any(
     all(feature = "dummy", not(target_family = "wasm")),
     all(feature = "wasm", target_family = "wasm")

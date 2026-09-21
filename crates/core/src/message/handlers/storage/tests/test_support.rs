@@ -9,7 +9,6 @@ use tokio::time::Instant;
 use super::super::ChordStorageInterfaceCacheChecker;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
-use crate::dht::successor::SuccessorWriter;
 use crate::dht::Chord;
 use crate::dht::Did;
 use crate::dht::PeerRing;

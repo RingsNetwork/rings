@@ -49,122 +49,17 @@
 //!                 [retire correlated token]
 //! ```
 
-use super::bounded_connection_candidates;
 use super::dist;
 use super::push_unique;
 use super::rehint;
 use super::successors;
+use super::ClaimPhase;
 use super::Did;
-use super::StabilizationPhase;
 use super::StabilizationRequest;
 use super::TopologyAction;
 use super::TopologyState;
 use super::TopologyStep;
 use crate::dht::finger::finger_proof_end;
-
-/// Bounded connection-effect cursor for one claimed stabilization report.
-///
-/// The handler and formal model both consume this production transition. It
-/// revalidates the claimed token before every candidate and owns the hard
-/// per-report effect bound.
-#[derive(Clone, Debug, Hash, PartialEq, Eq)]
-pub(crate) struct StabilizationConnectionPlan {
-    /// Successor that produced the claimed topology report.
-    ///
-    /// Every call to [`Self::advance`] rechecks that this DID remains the owner
-    /// of `request_id`; a successor-head change therefore makes the plan stale.
-    reporter: Did,
-    /// Correlation token echoed by the authenticated topology report.
-    ///
-    /// The token distinguishes this plan from older and newer stabilization
-    /// rounds that queried the same reporter.
-    request_id: uuid::Uuid,
-    /// Bounded, deduplicated peers reported by the successor.
-    ///
-    /// Construction removes `local`, preserves the order given, and caps the
-    /// list at one predecessor candidate plus the successor-list capacity.
-    candidates: Vec<Did>,
-    /// Cursor for the next candidate whose connection effect may run.
-    ///
-    /// The cursor advances only after the current claim is revalidated and a
-    /// candidate is returned, so each bounded candidate is emitted at most once.
-    next_candidate: usize,
-}
-
-/// Next permitted effect for a stabilization connection plan.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum StabilizationConnectionStep {
-    /// Connect this bounded candidate, then re-enter the transition.
-    Connect {
-        /// Candidate admitted by this step.
-        ///
-        /// The caller may perform one connection effect for this DID before
-        /// re-entering [`StabilizationConnectionPlan::advance`].
-        candidate: Did,
-        /// Claimed report whose budget owns the effect.
-        ///
-        /// Effect handlers propagate this token so a later state transition can
-        /// reject the connection if the stabilization round was superseded.
-        request_id: uuid::Uuid,
-    },
-    /// Every candidate was consumed while the claim remained current.
-    Complete,
-    /// The report was superseded; no further network effect is permitted.
-    Stale,
-}
-
-impl StabilizationConnectionPlan {
-    /// Create a bounded candidate cursor for one claimed stabilization report.
-    ///
-    /// Candidates are consumed in the order given (the handler orders them by
-    /// transport quality) after removing the local DID and duplicates. The
-    /// stored list is capped at `successor_capacity + 1`, which gives the
-    /// reported predecessor one possible slot without permitting an unbounded
-    /// number of connection effects from one report.
-    pub(crate) fn new(
-        reporter: Did,
-        request_id: uuid::Uuid,
-        candidates: impl IntoIterator<Item = Did>,
-        local: Did,
-        successor_capacity: usize,
-    ) -> Self {
-        Self {
-            reporter,
-            request_id,
-            candidates: bounded_connection_candidates(
-                local,
-                Self::candidate_capacity(successor_capacity),
-                candidates,
-            ),
-            next_candidate: 0,
-        }
-    }
-
-    /// The connection budget of one stabilization report: the successor-list
-    /// capacity plus one slot for the reported predecessor.
-    pub(crate) const fn candidate_capacity(successor_capacity: usize) -> usize {
-        successor_capacity.saturating_add(1)
-    }
-
-    /// Return the next candidate only while the report claim is still current.
-    ///
-    /// A superseded reporter/token pair yields [`StabilizationConnectionStep::Stale`]
-    /// without advancing the cursor. A valid exhausted plan yields `Complete`;
-    /// otherwise exactly one candidate is returned and the cursor advances once.
-    pub(crate) fn advance(&mut self, state: &TopologyState) -> StabilizationConnectionStep {
-        if !state.is_processing_stabilization_report(self.reporter, self.request_id) {
-            return StabilizationConnectionStep::Stale;
-        }
-        let Some(candidate) = self.candidates.get(self.next_candidate).copied() else {
-            return StabilizationConnectionStep::Complete;
-        };
-        self.next_candidate = self.next_candidate.saturating_add(1);
-        StabilizationConnectionStep::Connect {
-            candidate,
-            request_id: self.request_id,
-        }
-    }
-}
 
 /// `head(s)`: the nearest successor other than `local`, the upper end of the
 /// local placement interval `(local, head]`; `None` when the node stands alone.
@@ -298,7 +193,7 @@ pub(super) fn step_begin(state: &TopologyState, request_id: uuid::Uuid) -> Topol
     };
     if state
         .pending_stabilization
-        .is_some_and(|pending| pending.phase == StabilizationPhase::Processing)
+        .is_some_and(|pending| pending.phase == ClaimPhase::Processing)
     {
         return TopologyStep {
             state: state.clone(),
@@ -310,7 +205,7 @@ pub(super) fn step_begin(state: &TopologyState, request_id: uuid::Uuid) -> Topol
             pending_stabilization: Some(StabilizationRequest {
                 reporter,
                 request_id,
-                phase: StabilizationPhase::Requested,
+                phase: ClaimPhase::Requested,
             }),
             ..state.clone()
         },
@@ -338,7 +233,7 @@ pub(super) fn step_claim(
                 .then_some(StabilizationRequest {
                     reporter,
                     request_id,
-                    phase: StabilizationPhase::Processing,
+                    phase: ClaimPhase::Processing,
                 })
                 .or(state.pending_stabilization),
             ..state.clone()

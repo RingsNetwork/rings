@@ -33,36 +33,32 @@ use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::OnceLock;
 
-use async_trait::async_trait;
 use futures::lock::Mutex as FuturesMutex;
 
 use super::PeerRingAction;
 use super::RemoteAction;
 use super::TopoInfo;
 use crate::consts::LOCAL_CACHE_CAPACITY;
-use crate::dht::did::BiasId;
 use crate::dht::entry::Entry;
 use crate::dht::finger::FingerApplyOutcome;
 use crate::dht::finger::FingerConvergenceStatus;
 use crate::dht::finger::FingerDeferOutcome;
 use crate::dht::finger::FingerRetireOutcome;
 use crate::dht::finger::DEFAULT_FINGER_TABLE_SIZE;
-use crate::dht::successor::SuccessorReader;
 use crate::dht::successor::SuccessorSeq;
 use crate::dht::topology;
 use crate::dht::topology::FindSuccessorStep;
 use crate::dht::topology::SuccessorRemoval;
 use crate::dht::topology::TopologyAction;
 use crate::dht::topology::TopologyEvent;
+use crate::dht::topology::TopologyRemoval;
 use crate::dht::topology::TopologyState;
 use crate::dht::topology::TopologyStep;
 use crate::dht::types::Chord;
-use crate::dht::types::CorrectChord;
 use crate::dht::virtual_node::VirtualNodeConfig;
 use crate::dht::Did;
 use crate::dht::FingerFixRequest;
 use crate::dht::FingerTable;
-use crate::dht::LiveDid;
 use crate::error::Error;
 use crate::error::Result;
 use crate::storage::KvStorageInterface;
@@ -187,19 +183,8 @@ impl PeerRing {
 /// Every view observes one committed state and mutates nothing.
 impl PeerRing {
     /// Return the successor sequence.
-    #[deprecated(note = "use PeerRing::successors")]
-    pub fn lock_successor(&self) -> Result<SuccessorSeq> {
-        Ok(self.successor_seq.clone())
-    }
-
-    /// Return the successor sequence.
     pub fn successors(&self) -> SuccessorSeq {
         self.successor_seq.clone()
-    }
-
-    /// Calculate the DID's clockwise bias from this node.
-    pub fn bias(&self, did: Did) -> BiasId {
-        BiasId::new(self.did, did)
     }
 
     /// The overlay this ring belongs to; every stored value is admitted inside it.
@@ -457,24 +442,40 @@ impl PeerRing {
     }
 
     /// Remove a node from finger, predecessor, and successor state.
-    pub fn remove(&self, did: Did) -> Result<()> {
+    ///
+    /// Returns whether the node was referenced, decided under the transition
+    /// lock on the state the removal was applied to.
+    pub fn remove(&self, did: Did) -> Result<TopologyRemoval> {
         self.remove_with_successor_evidence(did, SuccessorRemoval::Preserve)
     }
 
     /// Remove an unavailable node using transport-validated successor evidence.
-    pub(crate) fn remove_unavailable(&self, did: Did, replacements: Vec<Did>) -> Result<()> {
+    pub(crate) fn remove_unavailable(
+        &self,
+        did: Did,
+        replacements: Vec<Did>,
+    ) -> Result<TopologyRemoval> {
         self.remove_with_successor_evidence(did, SuccessorRemoval::ReplaceWith(replacements))
     }
 
     /// Post: the emitted actions are dropped. A removal only widens `(self, head]` (a closer
     /// connected peer would already be the head), so its head change moves no placement out of
-    /// this node; the caller requests the storage repair round for the widened interval itself.
-    fn remove_with_successor_evidence(&self, did: Did, successor: SuccessorRemoval) -> Result<()> {
-        self.transition_topology(TopologyEvent::Remove {
-            peer: did,
-            successor,
-        })
-        .map(|_| ())
+    /// this node; the caller requests the storage repair round for the widened interval itself,
+    /// and only when the returned [`TopologyRemoval`] says a slot was vacated.
+    fn remove_with_successor_evidence(
+        &self,
+        did: Did,
+        successor: SuccessorRemoval,
+    ) -> Result<TopologyRemoval> {
+        let (_, removal) = self.transition(|state, _| {
+            let removal = TopologyRemoval::of(state, did);
+            let event = TopologyEvent::Remove {
+                peer: did,
+                successor,
+            };
+            (self.step(state, event), removal)
+        })?;
+        Ok(removal)
     }
 }
 
@@ -755,9 +756,13 @@ impl PeerRing {
     /// Returns an error when a backing lock is poisoned.
     pub(crate) fn advance_stabilization_connection_plan(
         &self,
-        plan: &mut topology::StabilizationConnectionPlan,
-    ) -> Result<topology::StabilizationConnectionStep> {
-        self.with_topology_state(|state| plan.advance(state))
+        plan: &mut topology::ConnectionPlan,
+    ) -> Result<topology::ConnectionStep> {
+        self.with_topology_state(|state| {
+            plan.advance(|reporter, request_id| {
+                state.is_processing_stabilization_report(reporter, request_id)
+            })
+        })
     }
 
     /// Apply a topology report from the owner of the matching stabilization token.
@@ -878,9 +883,13 @@ impl PeerRing {
     /// Returns an error when a backing lock is poisoned.
     pub(crate) fn advance_successor_sync_connection_plan(
         &self,
-        plan: &mut topology::SuccessorSyncConnectionPlan,
-    ) -> Result<topology::SuccessorSyncConnectionStep> {
-        self.with_successor_sync(|pending, successors| plan.advance(pending, successors))
+        plan: &mut topology::ConnectionPlan,
+    ) -> Result<topology::ConnectionStep> {
+        self.with_successor_sync(|pending, successors| {
+            plan.advance(|reporter, request_id| {
+                pending.is_processing(successors, reporter, request_id)
+            })
+        })
     }
 
     /// Release the exact sync token `(reporter, request_id)`.
@@ -961,11 +970,6 @@ impl PeerRing {
 }
 
 impl Chord<PeerRingAction> for PeerRing {
-    fn join(&self, did: Did) -> Result<PeerRingAction> {
-        let next = self.transition_topology(TopologyEvent::Join { peer: did })?;
-        Ok(self.topology_leaf_actions(next.actions))
-    }
-
     fn find_successor(&self, did: Did) -> Result<PeerRingAction> {
         let state = self.topology_state()?;
         let result = match topology::find_successor(&state, did) {
@@ -998,51 +1002,17 @@ impl Chord<PeerRingAction> for PeerRing {
     }
 }
 
-#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
-#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
-impl CorrectChord<PeerRingAction> for PeerRing {
-    async fn update_successor(&self, did: impl LiveDid) -> Result<PeerRingAction> {
-        if !did.live().await {
-            return Ok(PeerRingAction::RemoteAction(
-                did.into(),
-                RemoteAction::TryConnect,
-            ));
-        }
-        let next = self.transition_topology(TopologyEvent::UpdateSuccessor {
-            successor: did.into(),
-        })?;
-        Ok(self.topology_leaf_actions(next.actions))
-    }
-
-    async fn extend_successor(&self, dids: &[impl LiveDid]) -> Result<PeerRingAction> {
-        let mut actions = vec![];
-        for did in dids {
-            if let PeerRingAction::RemoteAction(recipient, action) =
-                self.update_successor(did.clone()).await?
-            {
-                actions.push(PeerRingAction::RemoteAction(recipient, action));
-            }
-        }
-        Ok(PeerRingAction::MultiActions(actions))
-    }
-
-    async fn join_then_sync(&self, did: impl LiveDid) -> Result<PeerRingAction> {
-        if !did.live().await {
-            return Ok(PeerRingAction::None);
-        }
-        self.admit_connected(did.into(), None)
-    }
-
-    fn rectify(&self, pred: Did) -> Result<()> {
-        self.transition_topology(TopologyEvent::Notify { predecessor: pred })
-            .map(|_| ())
-    }
-
-    fn pre_stabilize(&self) -> Result<PeerRingAction> {
+/// The first half of the HMCC/Zave stabilize operation.
+///
+/// The second half, applying the successor's report, enters only through the
+/// token-checked report path: a report changes topology exactly when it echoes
+/// the correlation token that this call issued.
+impl PeerRing {
+    /// Query the successor head for its predecessor and successor list.
+    ///
+    /// The returned action carries the correlation token the head's report
+    /// must echo.
+    pub fn pre_stabilize(&self) -> Result<PeerRingAction> {
         self.begin_stabilization(new_uuid())
-    }
-
-    fn topo_info(&self) -> Result<TopoInfo> {
-        self.try_into()
     }
 }

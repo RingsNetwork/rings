@@ -12,8 +12,6 @@ use crate::consts::ENTRY_DATA_MAX_LEN;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
-use crate::dht::successor::SuccessorReader;
-use crate::dht::successor::SuccessorWriter;
 use crate::dht::Did;
 use crate::dht::PeerRingAction;
 use crate::dht::StorageSyncDestination;

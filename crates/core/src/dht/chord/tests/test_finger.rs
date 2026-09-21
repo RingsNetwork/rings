@@ -4,13 +4,25 @@ use num_bigint::BigUint;
 
 use super::*;
 
-/// The actions of a join that makes `peer` the successor head: the connect lookup and, by the
-/// topology head law, the hand-off request toward the new head.
-fn connect_and_hand_off(peer: Did, local: Did) -> PeerRingAction {
-    PeerRingAction::MultiActions(vec![
-        PeerRingAction::RemoteAction(peer, RemoteAction::FindSuccessorForConnect(local)),
-        PeerRingAction::StorageRepairDue,
-    ])
+/// The batch an admission emits: the successor-list query when `peer` newly
+/// entered the successor list, the connect lookup, and, when `peer` became the
+/// successor head, the hand-off request the topology head law adds.
+fn admit_actions(peer: Did, local: Did, retained: bool, head_changed: bool) -> PeerRingAction {
+    let mut actions = Vec::new();
+    if retained {
+        actions.push(PeerRingAction::RemoteAction(
+            peer,
+            RemoteAction::QueryForSuccessorList,
+        ));
+    }
+    actions.push(PeerRingAction::RemoteAction(
+        peer,
+        RemoteAction::FindSuccessorForConnect(local),
+    ));
+    if head_changed {
+        actions.push(PeerRingAction::StorageRepairDue);
+    }
+    PeerRingAction::MultiActions(actions)
 }
 
 /// Verifies that joins update finger hints in clockwise order across both the
@@ -30,11 +42,17 @@ async fn test_finger_table_tracks_clockwise_and_wrapped_joins() -> Result<()> {
     assert!(node_a.successors().is_empty()?);
     assert!(node_a.lock_finger()?.is_empty());
 
-    assert_eq!(node_a.join(a)?, PeerRingAction::None);
+    assert_eq!(
+        node_a.admit_connected(a, None)?,
+        PeerRingAction::MultiActions(Vec::new())
+    );
     assert!(node_a.successors().is_empty()?);
     assert!(node_a.lock_finger()?.is_empty());
 
-    assert_eq!(node_a.join(b)?, connect_and_hand_off(b, a));
+    assert_eq!(
+        node_a.admit_connected(b, None)?,
+        admit_actions(b, a, true, true)
+    );
     assert!(BigUint::from(b) > BigUint::from(2u16).pow(156));
     assert!(BigUint::from(b) < BigUint::from(2u16).pow(157));
 
@@ -45,14 +63,14 @@ async fn test_finger_table_tracks_clockwise_and_wrapped_joins() -> Result<()> {
     assert_eq!(node_a.successors().list()?, vec![b]);
 
     for _ in 0..2 {
-        node_a.join(b)?;
+        node_a.admit_connected(b, None)?;
         assert_eq!(node_a.lock_finger()?.list(), &expected);
         assert_eq!(node_a.successors().list()?, vec![b]);
     }
 
     assert_eq!(
-        node_a.join(c)?,
-        PeerRingAction::RemoteAction(c, RemoteAction::FindSuccessorForConnect(a))
+        node_a.admit_connected(c, None)?,
+        admit_actions(c, a, true, false)
     );
     assert!(BigUint::from(c) > BigUint::from(2u16).pow(159));
     assert!(BigUint::from(c) < BigUint::from(2u16).pow(160));
@@ -72,19 +90,28 @@ async fn test_finger_table_tracks_clockwise_and_wrapped_joins() -> Result<()> {
     );
 
     let node_a = PeerRing::new_with_storage(a, 3, Box::new(MemStorage::new()));
-    assert_eq!(node_a.join(c)?, connect_and_hand_off(c, a));
+    assert_eq!(
+        node_a.admit_connected(c, None)?,
+        admit_actions(c, a, true, true)
+    );
     let expected = std::iter::repeat_n(Some(c), 160).collect::<Vec<_>>();
     assert_eq!(node_a.lock_finger()?.list(), &expected);
     assert_eq!(node_a.successors().list()?, vec![c]);
 
-    assert_eq!(node_a.join(b)?, connect_and_hand_off(b, a));
+    assert_eq!(
+        node_a.admit_connected(b, None)?,
+        admit_actions(b, a, true, true)
+    );
     let mut expected = std::iter::repeat_n(Some(b), 157).collect::<Vec<_>>();
     expected.extend(std::iter::repeat_n(Some(c), 3));
     assert_eq!(node_a.lock_finger()?.list(), &expected);
     assert_eq!(node_a.successors().list()?, vec![b, c]);
 
     let node_d = PeerRing::new_with_storage(d, 1, Box::new(MemStorage::new()));
-    assert_eq!(node_d.join(a)?, connect_and_hand_off(a, d));
+    assert_eq!(
+        node_d.admit_connected(a, None)?,
+        admit_actions(a, d, true, true)
+    );
     assert!(d + Did::from(BigUint::from(2u16).pow(151)) < a);
     assert!(d + Did::from(BigUint::from(2u16).pow(152)) > a);
 
@@ -94,8 +121,8 @@ async fn test_finger_table_tracks_clockwise_and_wrapped_joins() -> Result<()> {
     assert_eq!(node_d.successors().list()?, vec![a]);
 
     assert_eq!(
-        node_d.join(b)?,
-        PeerRingAction::RemoteAction(b, RemoteAction::FindSuccessorForConnect(d))
+        node_d.admit_connected(b, None)?,
+        admit_actions(b, d, false, false)
     );
     assert!(d + Did::from(BigUint::from(2u16).pow(156)) < b);
     assert!(d + Did::from(BigUint::from(2u16).pow(157)) > b);
@@ -122,7 +149,7 @@ fn test_public_fix_fingers_advances_one_range() -> Result<()> {
     let local = Did::from(0u32);
     let seed = Did::from(8u32);
     let dht = PeerRing::new_with_storage(local, 3, Box::new(MemStorage::new()));
-    let _ = dht.join(seed)?;
+    let _ = dht.admit_connected(seed, None)?;
 
     assert!(matches!(
         dht.fix_fingers()?,
@@ -144,7 +171,7 @@ fn test_begin_finger_revalidation_does_not_emit_a_lookup() -> Result<()> {
     let local = Did::from(0u32);
     let seed = Did::from(8u32);
     let dht = PeerRing::new_with_storage(local, 3, Box::new(MemStorage::new()));
-    let _ = dht.join(seed)?;
+    let _ = dht.admit_connected(seed, None)?;
 
     assert!(matches!(
         dht.begin_finger_revalidation()?,

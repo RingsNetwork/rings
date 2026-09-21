@@ -14,7 +14,6 @@ use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::EntryOperation;
 use crate::dht::entry::PlacedEntryOperation;
-use crate::dht::successor::SuccessorReader;
 #[cfg(feature = "dummy")]
 use crate::dht::PeerRingAction;
 #[cfg(feature = "dummy")]

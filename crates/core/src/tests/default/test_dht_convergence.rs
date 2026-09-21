@@ -121,10 +121,7 @@ use std::str::FromStr;
 
 use num_bigint::BigUint;
 
-use crate::dht::successor::SuccessorReader;
-use crate::dht::successor::SuccessorWriter;
 use crate::dht::Chord;
-use crate::dht::CorrectChord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::dht::PeerRingAction;
@@ -279,7 +276,7 @@ fn converged_dht(node: Did, all: &[Did]) -> PeerRing {
     let dht = PeerRing::new_with_storage(node, K as u8, Box::new(MemStorage::new()));
     for &other in all {
         if other != node {
-            dht.join(other).unwrap();
+            dht.admit_connected(other, None).unwrap();
             dht.notify(other).unwrap();
         }
     }
@@ -394,7 +391,7 @@ fn assert_correct_rectify_matches_spec(layout: &Layout) -> Result<()> {
             for pred in dids.iter().copied().filter(|&did| did != me) {
                 let dht = PeerRing::new_with_storage(me, K as u8, Box::new(MemStorage::new()));
                 for other in dids.iter().copied().filter(|&did| did != me) {
-                    let _ = dht.join(other)?;
+                    let _ = dht.admit_connected(other, None)?;
                 }
                 {
                     let mut predecessor = dht.lock_predecessor()?;
@@ -405,7 +402,7 @@ fn assert_correct_rectify_matches_spec(layout: &Layout) -> Result<()> {
                 let successors_before = dht.successors().list()?;
                 let fingers_before = dht.lock_finger()?.list().clone();
 
-                dht.rectify(pred)?;
+                dht.notify(pred)?;
 
                 assert_eq!(
                     *dht.lock_predecessor()?,

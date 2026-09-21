@@ -17,8 +17,8 @@ async fn test_two_nodes_install_each_other_in_successors_and_fingers() -> Result
     let node1 = PeerRing::new_with_storage(did1, 3, Box::new(MemStorage::new()));
     let node2 = PeerRing::new_with_storage(did2, 3, Box::new(MemStorage::new()));
 
-    node1.join(did2)?;
-    node2.join(did1)?;
+    node1.admit_connected(did2, None)?;
+    node2.admit_connected(did1, None)?;
     assert!(node1.successors().list()?.contains(&did2));
     assert!(node2.successors().list()?.contains(&did1));
     assert!(node1.lock_finger()?.contains(Some(did2)));
@@ -35,8 +35,8 @@ async fn test_two_node_wraparound_installs_expected_fingers() -> Result<()> {
 
     let node1 = PeerRing::new_with_storage(did1, 3, Box::new(MemStorage::new()));
     let node2 = PeerRing::new_with_storage(did2, 3, Box::new(MemStorage::new()));
-    node1.join(did2)?;
-    node2.join(did1)?;
+    node1.admit_connected(did2, None)?;
+    node2.admit_connected(did1, None)?;
 
     assert!(node1.successors().list()?.contains(&did2));
     assert!(node2.successors().list()?.contains(&did1));
