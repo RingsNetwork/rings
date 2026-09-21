@@ -20,8 +20,9 @@
 //! - Bound law: nothing here reserves lane or memory capacity. Each inbound frame causes at
 //!   most two of these frames (a confirmation or question per session slot of a frame this
 //!   end verified, held, or dropped for want of room, or one answer per question), and at
-//!   most `LINK_CONTROL_IN_FLIGHT_CAPACITY` of them, twice the frames the peer may have in
-//!   flight here ([`INBOUND_PEER_CAPACITY`](crate::swarm::callback::INBOUND_PEER_CAPACITY)),
+//!   most `LINK_CONTROL_IN_FLIGHT_CAPACITY` of them, twice the raw frames the peer may have in
+//!   flight at this end's transport
+//!   ([`INBOUND_PEER_FRAME_CAPACITY`](rings_transport::callback::INBOUND_PEER_FRAME_CAPACITY)),
 //!   are in flight to one peer at a time: a
 //!   send beyond that budget is refused, and repeated by the next frame that misses or
 //!   teaches the same session. So what this end spends on a peer's link control is bounded
@@ -110,7 +111,21 @@ impl SwarmTransport {
                 generation: attempt.generation(),
             });
         }
-        let permit = self.outbound_schedulers.link_control_permit(peer)?;
+        // The permit is taken while the generation cannot be retired, so no worker is looked
+        // up for a peer that retirement is removing.
+        let permit = admitted
+            .with_current_connection(|_| self.outbound_schedulers.link_control_permit(peer))?;
+        let permit = match permit {
+            None => {
+                return Err(Error::ConnectionAttemptSuperseded {
+                    peer,
+                    generation: attempt.generation(),
+                })
+            }
+            Some(None) => return Err(Error::SwarmMissDidInTable(peer)),
+            Some(Some(None)) => return Err(Error::LinkControlInFlightCapacity(peer)),
+            Some(Some(Some(permit))) => permit,
+        };
         if spawn_detached(Box::pin(deliver_link_control(admitted, frame, permit))).is_err() {
             return Err(Error::LinkControlRuntimeUnavailable);
         }

@@ -29,8 +29,7 @@ use super::SwarmEvent;
 use super::TransportCallbackError;
 use crate::dht::Did;
 use crate::message::MessagePayload;
-use crate::swarm::detached::spawn_detached;
-use crate::swarm::detached::DetachedTask;
+use crate::swarm::detached::run_detached_or_inline;
 use crate::swarm::transport::ConnectionEventDisposition;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
@@ -154,7 +153,7 @@ impl InnerSwarmCallback {
         let Some(attempt) = self.pending_attempt() else {
             return Ok(false);
         };
-        if attempt.peer() != did {
+        if !attempt.is_with(did) {
             tracing::warn!(
                 "ignoring data-channel open for {did}; pending attempt belongs to {}",
                 attempt.peer()
@@ -297,7 +296,7 @@ impl InnerSwarmCallback {
         let Some(attempt) = self.pending_attempt() else {
             return false;
         };
-        attempt.peer() == did
+        attempt.is_with(did)
             && !self
                 .processor
                 .logical
@@ -321,7 +320,7 @@ impl InnerSwarmCallback {
         let Some(attempt) = self.pending_attempt() else {
             return Ok(false);
         };
-        if attempt.peer() == did {
+        if attempt.is_with(did) {
             return Ok(false);
         }
         tracing::warn!(
@@ -421,6 +420,13 @@ impl InnerSwarmCallback {
         let admitted = match self.processor.pending_connection_gate(peer).await? {
             InboundGate::Admitted => true,
             InboundGate::Unadmitted => false,
+            InboundGate::Superseded => {
+                tracing::debug!(
+                    peer = ?peer,
+                    "dropping message; its connection generation is no longer the peer's"
+                );
+                return Ok(());
+            }
             InboundGate::Refused => return Ok(()),
         };
         let Some(peer) = peer else {
@@ -493,20 +499,18 @@ impl InnerSwarmCallback {
     /// Start releasing held frames in arrival order to the inbound actor.
     ///
     /// The caller claims the drain synchronously so later admitted arrivals join the same ordered
-    /// drain instead of racing past queued frames. Native and wasm runtimes run the drain in the
-    /// background; an unavailable native runtime falls back to the old inline drain so the claimed
-    /// queue is not left stuck.
+    /// drain instead of racing past queued frames. The drain runs detached, or inline when no
+    /// runtime is current, so the claimed queue is never left stuck (see
+    /// [`run_detached_or_inline`]).
     async fn start_pre_admission_drain(&self) {
         if !self.processor.pre_admission().begin_drain() {
             return;
         }
         let drainer = self.detached_handle();
-        let drain: DetachedTask = Box::pin(async move {
+        run_detached_or_inline(Box::pin(async move {
             drainer.drain_claimed_pre_admission_hold().await;
-        });
-        if let Err(drain) = spawn_detached(drain) {
-            drain.await;
-        }
+        }))
+        .await;
     }
 
     /// Release every frame from a claimed drain, once, to the inbound actor.
@@ -557,10 +561,7 @@ impl TransportCallback for InnerSwarmCallback {
 
     async fn on_invalid_inbound_frame(&self, cid: &str) -> Result<(), TransportCallbackError> {
         let peer = Did::from_str(cid).ok();
-        let authentication = self.processor.authentication_of(peer);
-        self.processor
-            .record_receive_failure(peer, authentication)
-            .await;
+        self.processor.record_receive_failure_now(peer).await;
         Ok(())
     }
 

@@ -49,6 +49,7 @@ use crate::utils::get_epoch_ms;
 
 mod admission;
 mod capacity;
+mod link_state;
 mod mailbox;
 mod measurement;
 mod model;
@@ -60,6 +61,8 @@ mod spawn;
 #[cfg(test)]
 mod test_trace;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use link_state::LINK_CONTROL_IN_FLIGHT_CAPACITY;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use test_trace::dispatched_link_control_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use test_trace::outbound_submit_count_for_test;
@@ -69,6 +72,8 @@ pub(super) use test_trace::record_dispatched_link_control;
 pub(crate) use test_trace::referenced_slots_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use test_trace::reset_outbound_submit_count_for_test;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use test_trace::LinkDirection;
 mod transfer;
 
 pub(super) use admission::DetachedAdmission;
@@ -85,6 +90,8 @@ pub(crate) use capacity::OUTBOUND_DATA_TRANSFER_CAPACITY;
 pub(crate) use capacity::OUTBOUND_GLOBAL_BYTE_CAPACITY;
 #[cfg(test)]
 pub(crate) use capacity::OUTBOUND_TRANSFER_QUEUE_CAPACITY;
+pub(super) use link_state::LinkControlPermit;
+use link_state::PeerLinkState;
 use mailbox::MailboxLane;
 use mailbox::MailboxReceiver;
 use mailbox::MailboxSender;
@@ -98,8 +105,6 @@ use queue::RunnableTransfer;
 use queue::TransferQueues;
 #[cfg(test)]
 pub(crate) use queue::OUTBOUND_CONTROL_BURST;
-use session_encoding::LinkControlBudget;
-pub(super) use session_encoding::LinkControlPermit;
 use session_encoding::SharedAnnouncedSessions;
 use spawn::spawn_worker;
 pub(super) use transfer::ChunkFrames;
@@ -189,8 +194,8 @@ struct OutboundPeerState {
     peer: Did,
     sender: MailboxSender<OutboundCommand>,
     cancel_requested: Arc<AtomicBool>,
-    announced: SharedAnnouncedSessions,
-    link_control: LinkControlBudget,
+    /// The link's tables, kept across worker replacements under one generation.
+    link: PeerLinkState,
     // Strong lifetime anchor; the peer registry intentionally stores only a Weak reference.
     _capacity_anchor: TransferCapacityAnchor,
     stop: StopSource,
@@ -354,16 +359,13 @@ impl OutboundSchedulers {
         // A worker replaced under an unchanged connection generation keeps the link's tables:
         // what the old worker announced stays answerable, and the sends still in flight stay
         // counted. A newer generation empties the announced table by itself on its first frame.
-        let (announced, link_control) = match registry.peers.remove(&peer) {
+        let link = match registry.peers.remove(&peer) {
             Some(stopped) => {
-                let tables = (
-                    stopped.state.announced.clone(),
-                    stopped.state.link_control.clone(),
-                );
+                let link = stopped.state.link.clone();
                 stopped.shutdown();
-                tables
+                link
             }
-            None => (SharedAnnouncedSessions::new(), LinkControlBudget::new()),
+            None => PeerLinkState::new(),
         };
         let capacity = registry.capacity(peer, &self.global_capacity);
         let (sender, receiver) = mailbox::channel();
@@ -374,8 +376,7 @@ impl OutboundSchedulers {
             peer,
             sender,
             cancel_requested: cancel_requested.clone(),
-            announced: announced.clone(),
-            link_control,
+            link: link.clone(),
             _capacity_anchor: TransferCapacityAnchor::new(capacity),
             stop: stop.clone(),
         });
@@ -389,7 +390,7 @@ impl OutboundSchedulers {
                 measurements,
                 peer,
                 cancel_requested,
-                announced,
+                link.announced,
             ),
             measurement_receiver,
         )?;

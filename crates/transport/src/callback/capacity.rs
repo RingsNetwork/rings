@@ -10,7 +10,9 @@ use bytes::Bytes;
 
 pub(super) const INBOUND_FRAME_CAPACITY: usize = 256;
 const INBOUND_FRAME_BYTE_CAPACITY: usize = 16 * 1024 * 1024;
-pub(super) const INBOUND_PEER_FRAME_CAPACITY: usize = 64;
+/// Raw frames one peer may have in flight at this end, admitted but not yet released by the
+/// protocol callback: the per-peer bound every protocol-side per-peer budget derives from.
+pub const INBOUND_PEER_FRAME_CAPACITY: usize = 64;
 pub(super) const INBOUND_PEER_BYTE_CAPACITY: usize = 4 * 1024 * 1024;
 
 #[cfg(any(test, feature = "native-webrtc", feature = "web-sys-webrtc"))]

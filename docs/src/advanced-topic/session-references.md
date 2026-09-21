@@ -115,11 +115,15 @@ receiver                                   sender
   repaired by the next frame that misses the same digest. A frame that finds the hold full is
   dropped, and the oldest held frame's question is asked again. The sender answers each
   question with exactly one frame.
-- A frame the peer did not back is charged to the peer as a receive failure, as a frame that
-  fails verification is: the peer disclaimed the session, announced a delegation that does not
-  verify, let the frame wait past the hold timeout, or the frame failed on release. A frame
-  that finds the hold full is a loss at this end's capacity, like a frame the pre-admission
-  hold cannot take, and is not charged: the peer has not yet had its round trip to answer.
+- A frame the peer was asked about and did not back is charged to the peer as a receive
+  failure, as a frame that fails verification is: the peer disclaimed the session, announced a
+  delegation that does not verify, let the frame wait past the hold timeout, or the frame
+  failed on release. A frame that finds the hold full is a loss at this end's capacity, like a
+  frame the pre-admission hold cannot take, and is not charged: the peer has not yet had its
+  round trip to answer. Nor is a frame whose question this end never managed to send (the
+  budget below was spent, or the generation ended): it is swept uncharged, since the peer was
+  never asked. A frame released after its connection generation was superseded is dropped,
+  never delivered.
 
 Link-control frames (`Known`, `Request`, `Announce`, `Unknown`) are unsigned and idempotent.
 They are meaningful only on the authenticated connection generation they arrive on, an
@@ -127,10 +131,12 @@ announced session authenticates itself through its account signature, and a dige
 value rather than asserting one; a duplicate or a stale one changes nothing. They are emitted
 in a task of their own (refused, never run inline, when no runtime can carry one), never
 awaited from the transport's read loop, and never through the transfer lanes. Each inbound
-frame causes at most two of them, and at most 64 are in flight to one peer at a time, twice
-the frames that peer may have in flight here; a send beyond that budget is dropped and repeated
-by the next frame that misses or teaches the same session. So what this end spends on a peer's
-link control is bounded by the frames it accepts from that peer.
+frame causes at most two of them, and at most 128 are in flight to one peer at a time, twice
+the raw frames that peer may have in flight at this end's transport; a send beyond that budget
+is dropped and repeated by the next frame that misses or teaches the same session. So what this
+end spends on a peer's link control is bounded by the frames it accepts from that peer. The
+sender's table and this budget survive a replacement of the outbound worker under an unchanged
+generation.
 
 ## Expiry
 

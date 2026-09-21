@@ -379,7 +379,7 @@ pub(super) const fn application_capacity_for_test() -> usize {
 
 /// The frames one peer may have in flight: the bound an admitted peer and a peer awaiting
 /// admission share.
-pub(crate) const fn peer_capacity() -> usize {
+pub(super) const fn peer_capacity() -> usize {
     INBOUND_PEER_CAPACITY
 }
 

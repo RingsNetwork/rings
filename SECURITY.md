@@ -160,12 +160,14 @@ generation and obeys these rules:
   frame (or of the oldest held frame, when a frame finds the hold full) and exactly
   one unsigned answer per question; each control frame is emitted on the connection
   generation it was judged on, in a task of its own rather than from the transport's
-  read loop, and at most 64 of them are in flight to one peer, twice the frames that
-  peer may have in flight here, so their cost is bounded by the frames accepted from
-  the peer; a frame the peer did not back (disclaimed or invalid announcement, hold
-  timeout, failure on release) is charged to the peer as a receive failure, while a
-  frame that finds the hold full is dropped uncharged, as one the pre-admission hold
-  cannot take is; no hop asks the origin for anything;
+  read loop, and at most 128 of them are in flight to one peer, twice the raw frames
+  that peer may have in flight at this end's transport, so their cost is bounded by
+  the frames accepted from the peer; a frame the peer was asked about and did not
+  back (disclaimed or invalid announcement, hold timeout, failure on release) is
+  charged to the peer as a receive failure, while a frame that finds the hold full,
+  or whose question this end never managed to send, is dropped uncharged, as one the
+  pre-admission hold cannot take is; a frame released after its connection generation
+  was superseded is dropped, never delivered; no hop asks the origin for anything;
 - an expired session is evicted, a reference to it is a miss, and re-announcing the
   expired delegation is refused exactly as it is inline.
 

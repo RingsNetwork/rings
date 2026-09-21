@@ -11,7 +11,7 @@
   `RINGS-LINK`; every 0.27.x frame fails closed before decoding. Mixed-version overlays are
   unsupported.
 - The protocol is not versioned before 1.0. The version suffixes on wire markers (payload,
-  link control, provisional service claim and receipt), signing
+  provisional service claim and receipt), signing
   domains (`rings-core:message-verification:transaction`, `...:payload`, the inbox, receipt,
   descriptor and onion domains), AEAD namespaces, HKDF labels and storage keys
   (`rings-core:transaction-replay`, `rings-node:onion-entry-guards`) are removed: each name is
@@ -41,11 +41,13 @@
     request per missing session of a held frame, answered by exactly one announcement or
     disclaimer. Link-control frames are emitted on the connection generation they were judged
     on, in a task of their own, straight on the data channel rather than through the transfer
-    lanes, at most 64 in flight to one peer. Frames that resolve are never queued behind held
-    ones; a frame the peer did not back (disclaimed or invalid announcement, hold timeout,
-    failure on release) is charged to the peer as a receive failure, and a frame that finds
-    the hold full is dropped uncharged. A reference resolves only on the link a connection's
-    callback is bound to; a frame from any other peer is judged self-contained.
+    lanes, at most 128 in flight to one peer (twice the transport's per-peer raw-frame bound).
+    Frames that resolve are never queued behind held ones; a frame the peer was asked about
+    and did not back (disclaimed or invalid announcement, hold timeout, failure on release) is
+    charged to the peer as a receive failure, and a frame that finds the hold full, or whose
+    question was never sent, is dropped uncharged. A reference resolves only on the link a
+    connection's callback is bound to; a frame from any other peer is judged self-contained,
+    and a frame released after its generation was superseded is dropped.
   - An expired session is evicted from both tables; a reference to it is a miss, and
     re-announcing the expired delegation is refused as it is inline.
   - `MessagePayload::to_wire`/`from_wire` remain the self-contained encoding (both sessions

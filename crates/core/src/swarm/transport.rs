@@ -99,7 +99,11 @@ pub(crate) use self::outbound::outbound_submit_count_for_test;
 pub(crate) use self::outbound::referenced_slots_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::reset_outbound_submit_count_for_test;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::outbound::LinkDirection;
 use self::outbound::OutboundSchedulers;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::outbound::LINK_CONTROL_IN_FLIGHT_CAPACITY;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::OUTBOUND_COMMAND_DRAIN_BUDGET;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]

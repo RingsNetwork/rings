@@ -15,6 +15,7 @@ use crate::message::PerSlot;
 use crate::session::SessionDigest;
 use crate::swarm::transport::dispatched_link_control_for_test;
 use crate::swarm::transport::referenced_slots_for_test;
+use crate::swarm::transport::LinkDirection;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;
 use crate::tests::default::wait_for_successor;
@@ -31,7 +32,7 @@ use crate::tests::TEST_NETWORK_ID;
 const SWITCH_WITHIN_MESSAGES: usize = 8;
 
 /// The digests that went by reference on `link` so far, per slot.
-fn referenced_on(link: (Did, Did)) -> PerSlot<Vec<SessionDigest>> {
+fn referenced_on(link: LinkDirection) -> PerSlot<Vec<SessionDigest>> {
     referenced_slots_for_test()
         .remove(&link)
         .unwrap_or(PerSlot {

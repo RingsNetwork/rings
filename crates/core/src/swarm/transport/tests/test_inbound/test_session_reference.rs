@@ -11,10 +11,20 @@ use crate::message::PerSlot;
 use crate::message::SessionRef;
 use crate::message::Transaction;
 use crate::message::WirePayload;
+use crate::session::SessionDigest;
 use crate::swarm::callback::SESSION_HOLD_CAPACITY;
 use crate::swarm::transport::dispatched_link_control_for_test;
-use crate::tests::default::dummy_hooks::PendingSendGuard;
+use crate::swarm::transport::LINK_CONTROL_IN_FLIGHT_CAPACITY;
+use crate::tests::default::dummy_hooks::PausedDispatchGuard;
 use crate::tests::session_sk_with_ttl;
+
+/// The typed refusal of a referenced frame outside a link, from the callback's boxed error.
+fn unresolved_reference(refusal: &(dyn std::error::Error + 'static)) -> Option<SessionDigest> {
+    match refusal.downcast_ref::<Error>() {
+        Some(Error::SessionReferenceUnresolved(digest)) => Some(*digest),
+        _ => None,
+    }
+}
 
 /// The frame bytes of `payload` with both session slots sent by reference.
 fn referenced_wire(payload: &MessagePayload) -> Result<Vec<u8>> {
@@ -386,9 +396,8 @@ async fn test_frames_held_past_the_timeout_are_swept_and_charged() -> Result<()>
 /// saw what it would confirm.
 #[tokio::test]
 async fn test_control_frames_judged_on_a_superseded_generation_are_not_sent() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
+    let measure = Arc::new(RecordingMeasure::default());
+    let transport = Arc::new(transport_with_measure(measure.clone())?);
     let app_callback = Arc::new(CountingSwarmCallback::default());
     let peer_key = SecretKey::random();
     let first = pending_peer_with_key(&transport, &app_callback, peer_key.clone()).await?;
@@ -397,19 +406,27 @@ async fn test_control_frames_judged_on_a_superseded_generation_are_not_sent() ->
     let next = pending_peer_with_key(&transport, &app_callback, peer_key).await?;
     next.admit(&transport).await?;
     let dispatched_before = dispatched_link_control_for_test().len();
+    let inbounds_before = app_callback.inbounds();
 
-    // The old generation's callback still verifies the frame and would confirm its session.
+    // The old generation's callback still verifies the frame (nothing is charged) and would
+    // confirm its session; the gate then drops the frame as superseded, so it is not delivered.
     let late = first.custom_message_wire(&transport, b"late-on-the-old-generation")?;
-    let _refused_by_the_gate = first.receive(&late).await;
+    first.receive(&late).await?;
 
     assert_eq!(dispatched_link_control_for_test().len(), dispatched_before);
+    assert!(!measure
+        .snapshot_counters()?
+        .contains(&(first.peer, MeasureCounter::FailedToReceive)));
+    assert_eq!(first.callback.pre_admission_held_count_for_test(), 0);
+    assert_eq!(app_callback.inbounds(), inbounds_before);
     transport.disconnect(next.peer).await?;
     Ok(())
 }
 
-/// Law (detachment): the read loop is never paced by a control-frame send. With every send on
-/// the dummy transport pending forever, an inline frame still completes its delivery and its
-/// confirmation is dispatched; the awaited send that used to sit here would never return.
+/// Law (detachment): the read loop is never paced by a control-frame send. With the dummy
+/// transport's dispatch gate closed, so that the confirmation's send cannot complete, an inline
+/// frame still completes its delivery; a send awaited in the read loop would sit behind the
+/// gate instead, and the frame with it. The gate is then opened and the send goes through.
 #[tokio::test]
 async fn test_control_frames_never_pace_the_read_loop() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
@@ -421,15 +438,112 @@ async fn test_control_frames_never_pace_the_read_loop() -> Result<()> {
     let digest = pending.session.session().digest()?;
     let dispatched_before = dispatched_link_control_for_test().len();
 
-    let _sends_pending = PendingSendGuard::new();
+    let dispatch_gate = PausedDispatchGuard::new();
     pending
         .receive(&pending.custom_message_wire(&transport, b"delivered-anyway")?)
         .await?;
-
     app_callback.wait_for_inbounds_at_least(1).await;
     assert_eq!(
         dispatched_link_control_for_test().split_off(dispatched_before),
         vec![(pending.peer, LinkControl::Known(digest))]
+    );
+    drop(dispatch_gate);
+
+    transport.disconnect(pending.peer).await?;
+    Ok(())
+}
+
+/// Law (bound): at most `LINK_CONTROL_IN_FLIGHT_CAPACITY` control sends are in flight to one
+/// peer. With the peer's whole budget held by sends in flight, an inline frame's confirmation
+/// is refused, not dispatched, while the frame itself is still delivered; once a send ends,
+/// the next frame that teaches the session confirms it.
+#[tokio::test]
+async fn test_control_sends_beyond_the_in_flight_budget_are_refused() -> Result<()> {
+    let transport = Arc::new(transport_with_measure(Arc::new(
+        RecordingMeasure::default(),
+    ))?);
+    let app_callback = Arc::new(CountingSwarmCallback::default());
+    let pending = pending_peer(&transport, &app_callback).await?;
+    pending.admit(&transport).await?;
+    let digest = pending.session.session().digest()?;
+    transport.outbound_schedulers.handle(pending.peer)?;
+    let in_flight = (0..LINK_CONTROL_IN_FLIGHT_CAPACITY)
+        .map(|_| {
+            transport
+                .outbound_schedulers
+                .link_control_permit(pending.peer)
+                .flatten()
+                .ok_or(Error::LinkControlInFlightCapacity(pending.peer))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let dispatched_before = dispatched_link_control_for_test().len();
+
+    pending
+        .receive(&pending.custom_message_wire(&transport, b"beyond-the-budget")?)
+        .await?;
+    app_callback.wait_for_inbounds_at_least(1).await;
+    assert_eq!(dispatched_link_control_for_test().len(), dispatched_before);
+
+    drop(in_flight);
+    pending
+        .receive(&pending.custom_message_wire(&transport, b"within-the-budget-again")?)
+        .await?;
+    app_callback.wait_for_inbounds_at_least(2).await;
+    assert_eq!(
+        dispatched_link_control_for_test().split_off(dispatched_before),
+        vec![(pending.peer, LinkControl::Known(digest))]
+    );
+    transport.disconnect(pending.peer).await?;
+    Ok(())
+}
+
+/// A question from the peer is answered from what this end announced on the link: the session
+/// itself when this end sent it inline, a disclaimer for a session it never sent.
+#[tokio::test]
+async fn test_a_request_is_answered_from_the_announced_table() -> Result<()> {
+    let transport = Arc::new(transport_with_measure(Arc::new(
+        RecordingMeasure::default(),
+    ))?);
+    let app_callback = Arc::new(CountingSwarmCallback::default());
+    let pending = pending_peer(&transport, &app_callback).await?;
+    pending.admit(&transport).await?;
+    let own_session = transport.session_sk.session();
+    let own_digest = own_session.digest()?;
+    // This end announces its session as the worker would, by encoding one frame to the peer.
+    let announced = MessagePayload::new_send(
+        Message::custom(b"announces-my-session")?,
+        MessageSigner::new(&transport.session_sk, TEST_NETWORK_ID),
+        transport.dht.did,
+        pending.peer,
+    )?;
+    let generation = transport
+        .active_attempt(pending.peer)?
+        .ok_or(Error::SwarmMissDidInTable(pending.peer))?
+        .generation();
+    let _announcing_frame = transport.outbound_schedulers.encode_for_test(
+        pending.peer,
+        generation,
+        &announced,
+        crate::utils::get_epoch_ms(),
+    )?;
+    let dispatched_before = dispatched_link_control_for_test().len();
+
+    pending
+        .receive(LinkControl::Request(own_digest).to_wire()?.as_ref())
+        .await?;
+    let never_sent = SessionSk::new_with_seckey(&SecretKey::random())?
+        .session()
+        .digest()?;
+    pending
+        .receive(LinkControl::Request(never_sent).to_wire()?.as_ref())
+        .await?;
+
+    assert_eq!(
+        dispatched_link_control_for_test().split_off(dispatched_before),
+        vec![
+            (pending.peer, LinkControl::Announce(own_session)),
+            (pending.peer, LinkControl::Unknown(never_sent)),
+        ]
     );
     transport.disconnect(pending.peer).await?;
     Ok(())
@@ -453,11 +567,9 @@ async fn test_referenced_frame_on_an_unbound_callback_is_refused() -> Result<()>
         .await;
 
     let refusal = refused.expect_err("a reference resolves only on a link");
-    assert!(
-        refusal
-            .to_string()
-            .contains("cannot be resolved outside the link"),
-        "{refusal}"
+    assert_eq!(
+        unresolved_reference(refusal.as_ref()),
+        Some(pending.session.session().digest()?)
     );
     assert_eq!(unbound.session_hold_count_for_test(), 0);
     assert_eq!(dispatched_link_control_for_test().len(), dispatched_before);
@@ -483,10 +595,11 @@ async fn test_frames_from_a_peer_other_than_the_bound_one_are_off_the_link() -> 
         .callback
         .on_admitted_message_for_test(&stranger_did.to_string(), &referenced_wire(&referenced)?)
         .await;
-    assert!(refused
-        .expect_err("a reference resolves only on the bound link")
-        .to_string()
-        .contains("cannot be resolved outside the link"));
+    let refusal = refused.expect_err("a reference resolves only on the bound link");
+    assert_eq!(
+        unresolved_reference(refusal.as_ref()),
+        Some(pending.session.session().digest()?)
+    );
     assert_eq!(pending.callback.session_hold_count_for_test(), 0);
 
     // A frame the bound peer sends by reference waits; the stranger's announcement of the very
@@ -545,6 +658,12 @@ async fn test_a_frame_teaches_the_link_before_it_is_gated() -> Result<()> {
 async fn test_an_expired_announcement_is_refused_and_charged() -> Result<()> {
     let measure = Arc::new(RecordingMeasure::default());
     let transport = Arc::new(transport_with_measure(measure.clone())?);
+    // Shorter than the hold timeout, so the announcement is judged expired while the frame is
+    // not yet sweepable, and long enough to sign under the system clock below. Stamped before
+    // the inbound clock is captured, so the clock advanced past the lifetime is past the
+    // delegation's end.
+    const SHORT_LIFETIME_MS: u64 = 900;
+    let short_lived = session_sk_with_ttl(SHORT_LIFETIME_MS)?;
     let now_ms = Arc::new(Mutex::new(crate::utils::get_epoch_ms()));
     let app_callback = Arc::new(CountingSwarmCallback::default());
     let pending = pending_peer_with(
@@ -556,10 +675,6 @@ async fn test_an_expired_announcement_is_refused_and_charged() -> Result<()> {
     .await?;
     pending.admit(&transport).await?;
 
-    // Long enough to sign under the system clock now, expired under the inbound clock once it
-    // is advanced past the lifetime.
-    const SHORT_LIFETIME_MS: u64 = 1_000;
-    let short_lived = session_sk_with_ttl(SHORT_LIFETIME_MS)?;
     let missed = stranger_payload(
         &pending,
         &transport,
@@ -569,10 +684,7 @@ async fn test_an_expired_announcement_is_refused_and_charged() -> Result<()> {
     pending.receive(&referenced_wire(&missed)?).await?;
     assert_eq!(pending.callback.session_hold_count_for_test(), 1);
 
-    // The delegation was stamped after the inbound clock was captured, so the clock is set from
-    // the system clock now, past the lifetime, rather than advanced from its capture.
-    *now_ms.lock().map_err(|_| Error::LockPoisoned)? =
-        crate::utils::get_epoch_ms() + u128::from(SHORT_LIFETIME_MS) + 1;
+    *now_ms.lock().map_err(|_| Error::LockPoisoned)? += u128::from(SHORT_LIFETIME_MS) + 1;
     let announcement = LinkControl::Announce(short_lived.session()).to_wire()?;
     pending.receive(announcement.as_ref()).await?;
 

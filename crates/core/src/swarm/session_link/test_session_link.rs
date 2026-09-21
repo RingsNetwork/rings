@@ -2,10 +2,12 @@
 //! is judged at, and no test waits.
 
 use super::AnnouncedSessions;
+use super::Announcement;
 use super::Digests;
 use super::FrameArrival;
 use super::ReferencedSessions;
 use super::ResolvedFrame;
+use super::Swept;
 use super::ANNOUNCED_TABLE_CAPACITY;
 use super::REFERENCED_TABLE_CAPACITY;
 use crate::dht::Did;
@@ -40,7 +42,6 @@ const SHORT_SESSION_TTL_MS: u64 = 60_000;
 /// The generation the tests' link runs under.
 const GENERATION: u64 = 3;
 
-/// A session key whose delegation lives `ttl_ms` from now.
 /// A payload whose transaction is signed by `origin` and whose carrier is signed by `hop`.
 fn relayed_payload(origin: &SessionSk, hop: &SessionSk, sequence: u64) -> Result<MessagePayload> {
     let destination: Did = SecretKey::random().address().into();
@@ -555,7 +556,10 @@ fn test_origin_session_miss_is_repaired_by_announcement() -> Result<()> {
     );
     assert!(receiver.release_next(now_ms)?.is_none());
 
-    assert!(receiver.announce(origin.session(), now_ms)?.is_empty());
+    assert!(matches!(
+        receiver.announce(origin.session(), now_ms)?,
+        Announcement::Admitted
+    ));
     assert_eq!(released(&mut receiver, now_ms)?, vec![(7, payload)]);
     assert_eq!(receiver.held_len(), 0);
     Ok(())
@@ -578,7 +582,10 @@ fn test_hop_session_miss_is_repaired_by_announcement() -> Result<()> {
         expect_held(receiver.arrive(frame, 7u8, now_ms)?),
         digests([hop.session().digest()?])
     );
-    assert!(receiver.announce(hop.session(), now_ms)?.is_empty());
+    assert!(matches!(
+        receiver.announce(hop.session(), now_ms)?,
+        Announcement::Admitted
+    ));
     assert_eq!(released(&mut receiver, now_ms)?, vec![(7, payload)]);
     Ok(())
 }
@@ -605,7 +612,10 @@ fn test_miss_is_answered_from_the_sender_table() -> Result<()> {
     for digest in request {
         match sender.answer(GENERATION, digest, now_ms) {
             LinkControl::Announce(session) => {
-                assert!(receiver.announce(session, now_ms)?.is_empty());
+                assert!(matches!(
+                    receiver.announce(session, now_ms)?,
+                    Announcement::Admitted
+                ));
             }
             answer => panic!("expected an announcement, got {answer:?}"),
         }
@@ -647,17 +657,19 @@ fn test_held_frames_never_wait_for_each_other_and_resolvable_ones_leave_earliest
     expect_resolved(receiver.arrive(ready_frame, 4u8, now_ms)?);
     assert_eq!(receiver.held_len(), 3);
 
-    assert!(receiver
-        .announce(first_stranger.session(), now_ms)?
-        .is_empty());
+    assert!(matches!(
+        receiver.announce(first_stranger.session(), now_ms)?,
+        Announcement::Admitted
+    ));
     assert_eq!(released(&mut receiver, now_ms)?, vec![
         (1, first),
         (3, third)
     ]);
     assert_eq!(receiver.held_len(), 1);
-    assert!(receiver
-        .announce(second_stranger.session(), now_ms)?
-        .is_empty());
+    assert!(matches!(
+        receiver.announce(second_stranger.session(), now_ms)?,
+        Announcement::Admitted
+    ));
     assert_eq!(released(&mut receiver, now_ms)?, vec![(2, second)]);
     Ok(())
 }
@@ -700,7 +712,10 @@ fn test_unsolicited_announcement_is_ignored_and_disclaimer_fails_awaiting_frames
     let hop = SessionSk::new_with_seckey(&SecretKey::random())?;
     let mut receiver = receiver();
 
-    assert!(receiver.announce(stranger.session(), now_ms)?.is_empty());
+    assert!(matches!(
+        receiver.announce(stranger.session(), now_ms)?,
+        Announcement::Ignored
+    ));
     assert_eq!(receiver.known_len(), 0);
 
     let payload = relayed_payload(&stranger, &hop, 0)?;
@@ -750,7 +765,10 @@ fn test_receiver_expiry_evicts_and_refuses_the_expired_delegation() -> Result<()
         expect_held(receiver.arrive(stale, 2u8, expired_ms)?),
         digests([digest])
     );
-    assert_eq!(receiver.announce(node.session(), expired_ms)?, vec![2]);
+    assert!(matches!(
+        receiver.announce(node.session(), expired_ms)?,
+        Announcement::Refused(ref refused) if refused == &vec![2]
+    ));
     assert_eq!(receiver.held_len(), 0);
 
     // A fresh delegation is a different value, hence a different digest: it travels inline.
@@ -787,9 +805,14 @@ fn test_reannouncing_a_known_session_is_idempotent() -> Result<()> {
     Ok(())
 }
 
+/// The carriers a sweep dropped, charged and uncharged.
+fn swept(swept: Swept<u8>) -> (Vec<u8>, Vec<u8>) {
+    (swept.unanswered, swept.unasked)
+}
+
 /// Law (bound in time): the sweep drops a held frame once it waited past the hold timeout,
 /// whatever lifetime its proof claims, and one whose proof lapsed sooner; a frame within both
-/// bounds stays.
+/// bounds stays. A frame whose question was sent is dropped as unanswered, to be charged.
 #[test]
 fn test_sweep_drops_frames_past_the_hold_timeout_or_their_proof() -> Result<()> {
     let now_ms = get_epoch_ms();
@@ -798,13 +821,14 @@ fn test_sweep_drops_frames_past_the_hold_timeout_or_their_proof() -> Result<()> 
     let mut receiver = receiver();
 
     let early = relayed_payload(&stranger, &hop, 0)?;
-    expect_held(receiver.arrive(origin_referenced(&early)?, 0u8, now_ms)?);
+    let question = expect_held(receiver.arrive(origin_referenced(&early)?, 0u8, now_ms)?);
+    receiver.note_asked(question);
     let later_ms = now_ms + HOLD_TIMEOUT_MS;
     let late = relayed_payload(&stranger, &hop, 1)?;
     expect_held(receiver.arrive(origin_referenced(&late)?, 1u8, later_ms)?);
 
-    assert!(receiver.sweep(later_ms).is_empty());
-    assert_eq!(receiver.sweep(later_ms + 1), vec![0]);
+    assert_eq!(swept(receiver.sweep(later_ms)), (vec![], vec![]));
+    assert_eq!(swept(receiver.sweep(later_ms + 1)), (vec![0], vec![]));
     assert_eq!(receiver.held_len(), 1);
 
     // A hold timeout longer than the proof's lifetime: the proof lapses first.
@@ -812,8 +836,44 @@ fn test_sweep_drops_frames_past_the_hold_timeout_or_their_proof() -> Result<()> 
     let hold_outlasting_the_proof_ms = u128::from(late.verification.ttl_ms).saturating_mul(2);
     let mut lapsed_receiver: ReferencedSessions<u8> =
         ReferencedSessions::new(HOLD_CAPACITY, hold_outlasting_the_proof_ms);
-    expect_held(lapsed_receiver.arrive(origin_referenced(&late)?, 2u8, now_ms)?);
-    assert!(lapsed_receiver.sweep(lapsed_ms - 1).is_empty());
-    assert_eq!(lapsed_receiver.sweep(lapsed_ms), vec![2]);
+    let question = expect_held(lapsed_receiver.arrive(origin_referenced(&late)?, 2u8, now_ms)?);
+    lapsed_receiver.note_asked(question);
+    assert_eq!(
+        swept(lapsed_receiver.sweep(lapsed_ms - 1)),
+        (vec![], vec![])
+    );
+    assert_eq!(swept(lapsed_receiver.sweep(lapsed_ms)), (vec![2], vec![]));
+    Ok(())
+}
+
+/// Law (charging): a held frame whose question this end never sent is swept uncharged, since
+/// the peer never had its round trip; once the question is noted as asked, the same frame is
+/// swept as unanswered. Learning the session clears the question.
+#[test]
+fn test_sweep_tells_unasked_frames_from_unanswered_ones() -> Result<()> {
+    let now_ms = get_epoch_ms();
+    let stranger = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let hop = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let mut receiver = receiver();
+    let stale_ms = now_ms + HOLD_TIMEOUT_MS + 1;
+
+    let unasked = relayed_payload(&stranger, &hop, 0)?;
+    expect_held(receiver.arrive(origin_referenced(&unasked)?, 0u8, now_ms)?);
+    assert_eq!(swept(receiver.sweep(stale_ms)), (vec![], vec![0]));
+
+    let asked = relayed_payload(&stranger, &hop, 1)?;
+    let question = expect_held(receiver.arrive(origin_referenced(&asked)?, 1u8, now_ms)?);
+    receiver.note_asked(question);
+    assert_eq!(swept(receiver.sweep(stale_ms)), (vec![1], vec![]));
+
+    // Once the session is learned the question is spent: a later miss on it starts unasked.
+    let again = relayed_payload(&stranger, &hop, 2)?;
+    let question = expect_held(receiver.arrive(origin_referenced(&again)?, 2u8, now_ms)?);
+    receiver.note_asked(question);
+    assert!(matches!(
+        receiver.announce(stranger.session(), now_ms)?,
+        Announcement::Admitted
+    ));
+    assert_eq!(released(&mut receiver, now_ms)?.len(), 1);
     Ok(())
 }

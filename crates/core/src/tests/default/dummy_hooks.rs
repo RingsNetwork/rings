@@ -45,10 +45,10 @@ impl Drop for PendingSendGuard {
     }
 }
 
-pub(super) struct PausedDispatchGuard;
+pub(crate) struct PausedDispatchGuard;
 
 impl PausedDispatchGuard {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         dummy_controlled::pause_send_message_at_dispatch();
         Self
     }

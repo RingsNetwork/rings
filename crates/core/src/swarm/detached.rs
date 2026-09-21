@@ -36,3 +36,15 @@ pub(crate) fn spawn_detached(task: DetachedTask) -> Result<(), DetachedTask> {
     wasm_bindgen_futures::spawn_local(task);
     Ok(())
 }
+
+/// Run `task` detached, or inline when no runtime is current.
+///
+/// Law: this is for a task whose omission would leave state this end has claimed, or would
+/// charge a peer for this end's inaction: a claimed pre-admission drain, a release of frames
+/// held for a session the link just learned. A task that is merely a convenience, repeated by
+/// the next cause (a link-control send), is refused instead, never run inline.
+pub(crate) async fn run_detached_or_inline(task: DetachedTask) {
+    if let Err(task) = spawn_detached(task) {
+        task.await;
+    }
+}

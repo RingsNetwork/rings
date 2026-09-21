@@ -22,6 +22,7 @@ use crate::message::MessageKind;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
 use crate::swarm::session_link::ReferencedSessions;
+use crate::swarm::session_link::Swept;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::transport::SESSION_HOLD_TIMEOUT;
@@ -44,6 +45,28 @@ fn log_inbound_verification_failure(
         wire_bytes,
         "inbound message verification failed or expired"
     );
+}
+
+/// Why the link stage drops a held frame and charges the peer for it: the peer did not back a
+/// session it referenced. See the charging law of [`link_stage`](super::link_stage).
+#[derive(Clone, Copy, Debug)]
+pub(super) enum HeldFrameDrop {
+    /// The peer disclaimed the session.
+    Disclaimed,
+    /// The peer announced a delegation that does not verify.
+    AnnouncementRefused,
+    /// The peer was asked and did not answer within the hold timeout.
+    HoldTimeout,
+}
+
+impl std::fmt::Display for HeldFrameDrop {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Disclaimed => "the peer disclaimed the session it referenced",
+            Self::AnnouncementRefused => "the peer announced a delegation that does not verify",
+            Self::HoldTimeout => "the peer did not supply the session within the hold timeout",
+        })
+    }
 }
 
 impl InboundProcessor {
@@ -96,16 +119,18 @@ impl InboundProcessor {
     }
 
     /// Charge `peer` one receive failure per frame in `dropped`, all under its authentication
-    /// as of now, logging `reason` for each: the charging law of
-    /// [`link_stage`](super::link_stage) in one place.
+    /// as of now, each for `reason`: the charging law of [`link_stage`](super::link_stage) in
+    /// one place. Dropping the leases is the other effect.
     pub(super) async fn charge_dropped_frames(
         &self,
         peer: Option<Did>,
         dropped: Vec<InboundFrameLease>,
-        reason: &'static str,
+        reason: HeldFrameDrop,
     ) {
         let authentication = self.authentication_of(peer);
-        for _lease in dropped {
+        let count = dropped.len();
+        drop(dropped);
+        for _ in 0..count {
             tracing::debug!(peer = ?peer, "dropping message: {reason}");
             self.record_receive_failure(peer, authentication).await;
         }
@@ -117,17 +142,23 @@ impl InboundProcessor {
     /// admitted to the hold under (see the link law of
     /// [`link_stage`](super::link_stage)).
     pub(super) async fn sweep_session_hold_at(&self, now_ms: u128) {
-        let stale = self.session_link().sweep(now_ms);
-        if stale.is_empty() {
-            return;
-        }
+        let Swept {
+            unanswered,
+            unasked,
+        } = self.session_link().sweep(now_ms);
         let peer = self.pending_attempt().map(PendingConnectionAttempt::peer);
-        self.charge_dropped_frames(
-            peer,
-            stale,
-            "its referenced session was not supplied within the hold timeout",
-        )
-        .await;
+        if !unasked.is_empty() {
+            tracing::debug!(
+                peer = ?peer,
+                dropped = unasked.len(),
+                "dropping messages held for a session this end never managed to ask about"
+            );
+            drop(unasked);
+        }
+        if !unanswered.is_empty() {
+            self.charge_dropped_frames(peer, unanswered, HeldFrameDrop::HoldTimeout)
+                .await;
+        }
     }
 
     /// The receiving end of this connection's session references.
@@ -215,8 +246,14 @@ impl InboundProcessor {
         }
         if self.logical.transport.is_active_connection_attempt(attempt) {
             Ok(InboundGate::Admitted)
-        } else {
+        } else if self
+            .logical
+            .transport
+            .is_current_connection_attempt(attempt)?
+        {
             Ok(InboundGate::Unadmitted)
+        } else {
+            Ok(InboundGate::Superseded)
         }
     }
 
@@ -285,7 +322,7 @@ impl InboundProcessor {
         let useful_bytes = u64::try_from(payload.transaction.data.len())
             .map_err(|_| crate::error::Error::MessageSizeOverflow)?;
         if let (Some(peer), Some(attempt)) = (peer, self.pending_attempt()) {
-            if attempt.peer() == peer {
+            if attempt.is_with(peer) {
                 self.logical
                     .transport
                     .record_peer_message_received(attempt, authentication, useful_bytes)

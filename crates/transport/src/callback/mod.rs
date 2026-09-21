@@ -19,8 +19,7 @@ use capacity::INBOUND_DATA_CHANNEL_CAPACITY;
 use capacity::INBOUND_FRAME_CAPACITY;
 #[cfg(test)]
 use capacity::INBOUND_PEER_BYTE_CAPACITY;
-#[cfg(test)]
-use capacity::INBOUND_PEER_FRAME_CAPACITY;
+pub use capacity::INBOUND_PEER_FRAME_CAPACITY;
 pub use inner::InnerTransportCallback;
 #[cfg(all(test, not(target_family = "wasm")))]
 use invalid_report::INVALID_FRAME_REPORT_BACKLOG_CAPACITY;

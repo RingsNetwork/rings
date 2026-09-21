@@ -1,4 +1,9 @@
 //! Deterministic multi-node sync-storm scenarios for issue #686.
+//!
+//! Session references run in every scenario. The sender's tables are judged on the system clock
+//! and the receiver's on the inbound clock, both under paused tokio time here; replay identity
+//! holds because no scenario holds a frame (a handful of sessions against tables of 64 and 128,
+//! over a lossless dummy link), so no verdict depends on either clock.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -15,7 +20,6 @@ use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::successor::SuccessorReader;
 use crate::dht::Chord;
-use crate::dht::Did;
 use crate::dht::PeerRingAction;
 use crate::dht::StorageRepairOutcome;
 use crate::dht::StorageSyncDestination;
@@ -51,6 +55,7 @@ use crate::storage::MemStorage;
 use crate::swarm::transport::outbound_submit_count_for_test;
 use crate::swarm::transport::referenced_slots_for_test;
 use crate::swarm::transport::reset_outbound_submit_count_for_test;
+use crate::swarm::transport::LinkDirection;
 use crate::swarm::transport::TrackedStorageSyncOutcome;
 use crate::swarm::transport::OUTBOUND_CONTROL_BURST;
 use crate::swarm::transport::OUTBOUND_GLOBAL_BYTE_CAPACITY;
@@ -261,7 +266,7 @@ struct ScenarioOutcome {
     recovery_elapsed_ms: u128,
     overload_witness: &'static str,
     /// The link directions on which some payload frame went by reference during the scenario.
-    referenced_links: BTreeSet<(Did, Did)>,
+    referenced_links: BTreeSet<LinkDirection>,
 }
 
 impl ScenarioOutcome {

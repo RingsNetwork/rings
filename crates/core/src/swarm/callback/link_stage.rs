@@ -21,8 +21,10 @@
 //!
 //! Learning law: what a verified frame teaches the link is confirmed to the peer, and the held
 //! frames that awaited it released, before the frame itself is gated: a held frame never
-//! waits on the fate of the frame that taught it. Released frames leave in a task of their
-//! own, so a release never paces the transport's read loop.
+//! waits on the fate of the frame that taught it. A release runs in a task of its own, so it
+//! does not pace the transport's read loop; only when no runtime is current does it run inline,
+//! since a release omitted would leave frames held for a session the link knows (see
+//! [`run_detached_or_inline`]).
 //!
 //! Charging law: a frame this stage drops because the peer did not back a session it
 //! referenced is charged to the peer as a receive failure, in the same way a frame that fails
@@ -38,6 +40,7 @@ use std::str::FromStr;
 use bytes::Bytes;
 use rings_transport::core::callback::InboundFrameCapacityLease;
 
+use super::processor::HeldFrameDrop;
 use super::FrameProvenance;
 use super::InboundFrameLease;
 use super::InnerSwarmCallback;
@@ -49,8 +52,9 @@ use crate::message::LinkControl;
 use crate::message::LinkFrame;
 use crate::message::WirePayload;
 use crate::session::SessionDigest;
-use crate::swarm::detached::spawn_detached;
+use crate::swarm::detached::run_detached_or_inline;
 use crate::swarm::detached::DetachedTask;
+use crate::swarm::session_link::Announcement;
 use crate::swarm::session_link::Digests;
 use crate::swarm::session_link::FrameArrival;
 use crate::swarm::session_link::ResolvedFrame;
@@ -109,7 +113,8 @@ impl InnerSwarmCallback {
                     .await
             }
             Ok(FrameArrival::Held { request }) => {
-                self.request_sessions(link, request).await;
+                let asked = self.request_sessions(link, request).await;
+                self.processor.session_link().note_asked(asked);
                 Ok(())
             }
             Ok(FrameArrival::Overflow { carrier, request }) => {
@@ -119,7 +124,8 @@ impl InnerSwarmCallback {
                 );
                 // Dropping the carrier is the effect: it releases the frame's transport lease.
                 drop(carrier);
-                self.request_sessions(link, request).await;
+                let asked = self.request_sessions(link, request).await;
+                self.processor.session_link().note_asked(asked);
                 Ok(())
             }
             Err(error) => {
@@ -145,12 +151,14 @@ impl InnerSwarmCallback {
             encoding,
         } = *resolved;
         let prepared = self.verify_frame(peer, payload, lease.bytes.len()).await?;
-        let learned = self.processor.session_link().admit_verified(
-            &prepared.payload,
-            encoding,
-            self.processor.now_ms(),
-        )?;
-        let releases = provenance == FrameProvenance::Arrived && !learned.is_empty();
+        let (learned, releases) = {
+            let now_ms = self.processor.now_ms();
+            let mut session_link = self.processor.session_link();
+            let learned = session_link.admit_verified(&prepared.payload, encoding, now_ms)?;
+            let releases =
+                provenance.releases_what_it_teaches() && session_link.awaits_any(&learned, now_ms);
+            (learned, releases)
+        };
         self.confirm_sessions(link, learned).await;
         if releases {
             self.start_release(link).await;
@@ -179,17 +187,16 @@ impl InnerSwarmCallback {
             .await
     }
 
-    /// Release every held frame that resolves now, detached from the caller: a runtime that
-    /// cannot carry the task runs it inline, as the pre-admission drain does.
+    /// Release every held frame that resolves now, detached from the caller, or inline when no
+    /// runtime is current (see [`run_detached_or_inline`]).
     async fn start_release(&self, link: PendingConnectionAttempt) {
-        if let Err(release) = spawn_detached(self.release_task(link)) {
-            release.await;
-        }
+        run_detached_or_inline(self.release_task(link)).await;
     }
 
-    /// The release of every held frame that resolves now, as a task of its own. Built outside
-    /// any future so that a release, which admits frames that may start a release, has a
-    /// future of finite type.
+    /// The release of every held frame that resolves now, as a task of its own. Built in a
+    /// plain function, not inside `start_release`'s future: a release admits frames that may
+    /// start a release, and boxing here is what keeps the `Send` proof of the task from
+    /// recursing through the future that would otherwise contain it.
     fn release_task(&self, link: PendingConnectionAttempt) -> DetachedTask {
         let releaser = self.detached_handle();
         Box::pin(async move {
@@ -213,14 +220,14 @@ impl InnerSwarmCallback {
                 Ok(Some(resolved)) => resolved,
                 Ok(None) => return,
                 Err(error) => {
-                    tracing::warn!(
+                    // Unreachable by construction: a frame is released only once every slot
+                    // resolves under the same lock. Reported, never charged, since the frame is
+                    // already out of the hold.
+                    tracing::error!(
                         peer = %link.peer(),
                         error = ?error,
-                        "a message held for a session reference failed to resolve on release"
+                        "a released message failed to resolve; the hold's invariant is broken"
                     );
-                    self.processor
-                        .record_receive_failure_now(Some(link.peer()))
-                        .await;
                     continue;
                 }
             };
@@ -240,35 +247,52 @@ impl InnerSwarmCallback {
     /// Tell the peer that the sessions behind `confirm` verified here, so it may reference them.
     async fn confirm_sessions(&self, link: PendingConnectionAttempt, confirm: Digests) {
         for digest in confirm {
-            self.emit_link_control(link, LinkControl::Known(digest))
+            let _dispatched = self
+                .emit_link_control(link, LinkControl::Known(digest))
                 .await;
         }
     }
 
-    /// Ask the peer for the sessions behind `request`.
-    async fn request_sessions(&self, link: PendingConnectionAttempt, request: Digests) {
+    /// Ask the peer for the sessions behind `request`. Post: the digests actually asked about,
+    /// for the hold to know which frames the peer may be charged for.
+    async fn request_sessions(&self, link: PendingConnectionAttempt, request: Digests) -> Digests {
+        let mut asked = Digests::new();
         for digest in request {
-            self.emit_link_control(link, LinkControl::Request(digest))
-                .await;
+            if self
+                .emit_link_control(link, LinkControl::Request(digest))
+                .await
+            {
+                asked.insert(digest);
+            }
         }
+        asked
     }
 
-    /// Emit one control frame on `link`; a refusal is logged, since the next frame that misses
-    /// or teaches the same session repeats the question or the confirmation.
-    async fn emit_link_control(&self, link: PendingConnectionAttempt, control: LinkControl) {
-        if let Err(error) = self
+    /// Emit one control frame on `link`. Post: whether it was dispatched; a refusal is logged,
+    /// since the next frame that misses or teaches the same session repeats the question or
+    /// the confirmation.
+    async fn emit_link_control(
+        &self,
+        link: PendingConnectionAttempt,
+        control: LinkControl,
+    ) -> bool {
+        match self
             .processor
             .logical
             .transport
             .send_link_control(link, &control)
             .await
         {
-            tracing::debug!(
-                peer = %link.peer(),
-                error = ?error,
-                control = ?control,
-                "link control not sent"
-            );
+            Ok(()) => true,
+            Err(error) => {
+                tracing::debug!(
+                    peer = %link.peer(),
+                    error = ?error,
+                    control = ?control,
+                    "link control not sent"
+                );
+                false
+            }
         }
     }
 
@@ -294,17 +318,19 @@ impl InnerSwarmCallback {
                 .acknowledge_session(link, digest),
             LinkControl::Request(digest) => self.answer_session_request(link, digest).await,
             LinkControl::Announce(session) => {
-                let refused = self
+                let verdict = self
                     .processor
                     .session_link()
                     .announce(session, self.processor.now_ms());
-                match refused {
-                    Ok(refused) => {
+                match verdict {
+                    Ok(Announcement::Ignored) => {}
+                    Ok(Announcement::Admitted) => self.start_release(link).await,
+                    Ok(Announcement::Refused(refused)) => {
                         self.processor
                             .charge_dropped_frames(
                                 Some(link.peer()),
                                 refused,
-                                "the peer announced a delegation that does not verify",
+                                HeldFrameDrop::AnnouncementRefused,
                             )
                             .await;
                     }
@@ -314,7 +340,6 @@ impl InnerSwarmCallback {
                         "failed to judge a session announcement"
                     ),
                 }
-                self.start_release(link).await;
             }
             LinkControl::Unknown(digest) => {
                 let awaiting = self
@@ -322,11 +347,7 @@ impl InnerSwarmCallback {
                     .session_link()
                     .unknown(digest, self.processor.now_ms());
                 self.processor
-                    .charge_dropped_frames(
-                        Some(link.peer()),
-                        awaiting,
-                        "the peer disclaimed the session it referenced",
-                    )
+                    .charge_dropped_frames(Some(link.peer()), awaiting, HeldFrameDrop::Disclaimed)
                     .await;
             }
         }

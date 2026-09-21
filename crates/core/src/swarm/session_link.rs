@@ -42,13 +42,15 @@
 //! [`ANNOUNCED_TABLE_CAPACITY`], half as many, under the same least-recently-referenced order
 //! over the frames both ends saw: `S` touches a session on every frame it encodes, `R` on every
 //! frame it resolved or verified. On a lossless link `S` therefore stops referencing a session
-//! (and sends it inline again) before `R` could have forgotten it. A frame lost on the link
-//! touches `S` and not `R`, so under loss the two orders drift and `R` may evict a session `S`
-//! still references; that miss is answered from `S`, which still holds it, and costs one round
-//! trip and no charge. A miss `S` cannot answer needs something outside the tables: the two
-//! ends disagreeing on expiry, or a peer that does not follow the protocol. The miss path is
-//! the safety net for all of these, and it is repaired on the link: the held frame asks, the
-//! sender answers from `S` or disclaims.
+//! (and sends it inline again) before `R` could have forgotten it. A frame `R` never sees
+//! resolved (lost on the link, refused at the transport, or dropped by `R` before it verified)
+//! touches `S` and not `R`, so the two orders drift and `R` may evict a session `S` still
+//! references; that miss is answered from `S`, which still holds it, and costs one round trip
+//! and no charge. `S` cannot answer only if it evicted the session too, between the reference
+//! and the question (a full sender table of newer sessions within one round trip), or if the
+//! two ends disagree on expiry, or the peer does not follow the protocol. The miss path is the
+//! safety net for all of these, and it is repaired on the link: the held frame asks, the sender
+//! answers from `S` or disclaims.
 //!
 //! Law (admission): `R` learns only from frames that verified, or from an announcement some
 //! held frame awaits whose delegation verifies; `S` marks only digests it announced. Nothing an
@@ -57,9 +59,13 @@
 //! never backs therefore occupies this end for a bounded time whatever lifetime its proof
 //! claims. Law (questions): every held frame asks for its own missing digests once, on arrival
 //! (one lost question is repaired by the next frame that misses the same digest), and a frame
-//! that finds the hold full asks the oldest held frame's question again; answers are one frame
-//! per question. A frame dropped for want of room is a loss at this end's capacity, not the
-//! peer's fault, and is not charged; a held frame the peer does not back is. Law (order): a
+//! that finds the hold full asks the oldest held frame's question again (a duplicate the
+//! sender may answer twice; it is the frame's only chance to be asked about); answers are one
+//! frame per question. A frame dropped for want of room is a loss at this end's capacity, not
+//! the peer's fault, and is not charged; a held frame the peer does not back is, and only
+//! once this end has asked: a held frame whose question was never sent (the shell reports
+//! what it sent through [`ReferencedSessions::note_asked`]) is dropped uncharged by the sweep,
+//! since the peer never had its round trip. Law (order): a
 //! held frame never waits for a frame held before it, and never
 //! blocks a frame that resolves; among the frames resolvable at one instant, the earliest
 //! arrival leaves first. The link promises no order, so nothing downstream may rely on more
@@ -310,9 +316,11 @@ impl AnnouncedSessions {
         digest: SessionDigest,
         now_ms: u128,
     ) -> LinkControl {
-        self.is_current(generation)
-            .then(|| self.announced.live(digest, now_ms))
-            .flatten()
+        if !self.is_current(generation) {
+            return LinkControl::Unknown(digest);
+        }
+        self.announced
+            .live(digest, now_ms)
             .map_or(LinkControl::Unknown(digest), |entry| {
                 LinkControl::Announce(entry.session.clone())
             })
@@ -339,7 +347,8 @@ pub(crate) enum FrameArrival<F> {
         request: Digests,
     },
     /// The hold is full; the frame is dropped, and the oldest held frame's question is asked
-    /// again, since a full hold means its answer is overdue.
+    /// again: a duplicate at worst, and the only chance the dropped frame's arrival gives the
+    /// hold to be heard.
     Overflow {
         /// The frame that found no room, for the caller to account for.
         carrier: F,
@@ -397,6 +406,28 @@ pub(crate) struct ReferencedSessions<F> {
     /// How long a frame may wait for an answer: the answer is one round trip away, so a frame
     /// that waited longer is one the peer will not back.
     hold_timeout_ms: u128,
+    /// The digests this end has asked the peer for and not yet learned or been refused: what
+    /// the sweep may charge a held frame for waiting on.
+    asked: Digests,
+}
+
+/// The verdict on one announcement.
+pub(crate) enum Announcement<F> {
+    /// Nothing held awaits the session: ignored, nothing unsolicited is cached.
+    Ignored,
+    /// Admitted; the caller releases what resolves now.
+    Admitted,
+    /// The delegation does not verify: the frames that awaited it, to be failed.
+    Refused(Vec<F>),
+}
+
+/// What one sweep dropped.
+pub(crate) struct Swept<F> {
+    /// Frames the peer was asked about and did not back in time: to be charged.
+    pub(crate) unanswered: Vec<F>,
+    /// Frames whose question this end never managed to send: dropped uncharged, since the
+    /// peer never had its round trip.
+    pub(crate) unasked: Vec<F>,
 }
 
 /// The referenced sessions of `frame` that `known` does not hold live at `now_ms`, origin slot
@@ -438,6 +469,7 @@ impl<F> ReferencedSessions<F> {
             held: VecDeque::new(),
             hold_capacity,
             hold_timeout_ms,
+            asked: Digests::new(),
         }
     }
 
@@ -516,10 +548,17 @@ impl<F> ReferencedSessions<F> {
             if encoding == SlotEncoding::Inline {
                 let digest = session.digest()?;
                 self.known.admit(digest, || session.clone(), ());
+                self.asked.remove(&digest);
                 confirm.insert(digest);
             }
         }
         Ok(confirm)
+    }
+
+    /// Record that the peer was asked for `digests`: a held frame awaiting one of them may
+    /// now be charged for waiting past the hold timeout.
+    pub(crate) fn note_asked(&mut self, digests: impl IntoIterator<Item = SessionDigest>) {
+        self.asked.extend(digests);
     }
 
     /// Whether some held frame misses `digest` at `now_ms`: the only announcements and
@@ -530,40 +569,70 @@ impl<F> ReferencedSessions<F> {
             .any(|held| held.awaits(digest, &self.known, now_ms))
     }
 
+    /// Whether some held frame misses one of `digests` at `now_ms`: whether learning them
+    /// releases anything.
+    pub(crate) fn awaits_any(&self, digests: &Digests, now_ms: u128) -> bool {
+        digests
+            .iter()
+            .any(|digest| self.is_awaited(*digest, now_ms))
+    }
+
     /// The peer announced `session` at `now_ms`.
     ///
     /// ```text
-    ///   not awaited ───────────────────────▶ Ok([])   ignored: nothing unsolicited is cached
-    ///   awaited ∧ delegation verifies ─────▶ Ok([])   admitted; the caller releases
-    ///   awaited ∧ delegation refused ──────▶ Ok(F*)   frames awaiting it, to be failed
+    ///   not awaited ───────────────────────▶ Ignored      nothing unsolicited is cached
+    ///   awaited ∧ delegation verifies ─────▶ Admitted     the caller releases
+    ///   awaited ∧ delegation refused ──────▶ Refused(F*)  frames awaiting it, to be failed
     /// ```
-    pub(crate) fn announce(&mut self, session: Session, now_ms: u128) -> Result<Vec<F>> {
+    pub(crate) fn announce(&mut self, session: Session, now_ms: u128) -> Result<Announcement<F>> {
         let digest = session.digest()?;
         if !self.is_awaited(digest, now_ms) {
-            return Ok(Vec::new());
+            return Ok(Announcement::Ignored);
         }
         if session.verify_self_at(now_ms).is_err() {
-            return Ok(self.unknown(digest, now_ms));
+            return Ok(Announcement::Refused(self.unknown(digest, now_ms)));
         }
         self.known.evict_expired(now_ms);
         self.known.admit(digest, || session, ());
-        Ok(Vec::new())
+        self.asked.remove(&digest);
+        Ok(Announcement::Admitted)
     }
 
     /// The peer disclaimed `digest` at `now_ms`: the frames awaiting it, to be failed. A
     /// disclaimer of a digest nothing awaits drops nothing.
     pub(crate) fn unknown(&mut self, digest: SessionDigest, now_ms: u128) -> Vec<F> {
+        self.asked.remove(&digest);
         let known = &self.known;
         drop_held(&mut self.held, |held| held.awaits(digest, known, now_ms))
     }
 
     /// Drop every frame that has waited past the hold timeout at `now_ms`, or whose proof
-    /// lapsed: the frames to be failed. This is the sweep the module's bound law names.
-    pub(crate) fn sweep(&mut self, now_ms: u128) -> Vec<F> {
+    /// lapsed, telling apart the frames this end asked about from those it never managed to
+    /// ask about. This is the sweep the module's bound law names.
+    pub(crate) fn sweep(&mut self, now_ms: u128) -> Swept<F> {
         let hold_timeout_ms = self.hold_timeout_ms;
-        drop_held(&mut self.held, |held| {
-            held.waited_past(hold_timeout_ms, now_ms) || held.proof_lapsed_at(now_ms)
-        })
+        let known = &self.known;
+        let asked = &self.asked;
+        let mut swept = Swept {
+            unanswered: Vec::new(),
+            unasked: Vec::new(),
+        };
+        let (stale, kept): (VecDeque<_>, VecDeque<_>) = std::mem::take(&mut self.held)
+            .into_iter()
+            .partition(|held| {
+                held.waited_past(hold_timeout_ms, now_ms) || held.proof_lapsed_at(now_ms)
+            });
+        self.held = kept;
+        for held in stale {
+            let was_asked = missing_references(held.frame.as_ref(), known, now_ms)
+                .all(|missing| asked.contains(&missing));
+            if was_asked {
+                swept.unanswered.push(held.carrier);
+            } else {
+                swept.unasked.push(held.carrier);
+            }
+        }
+        swept
     }
 
     /// The earliest-arrived held frame that resolves at `now_ms`; `None` when every held frame

@@ -304,14 +304,10 @@ struct HeldInboundFrame {
     lease: InboundFrameLease,
 }
 
-/// The frames one peer may have in flight at this end: the bound an admitted peer and a peer
-/// awaiting admission share, and the bound every per-peer budget below derives from.
-pub(crate) const INBOUND_PEER_CAPACITY: usize = inbound::peer_capacity();
-
 /// Frames one connection may hold for a session the peer has not backed yet: half the
 /// pre-admission hold, so both holds together leave a quarter of the transport's per-peer
 /// frames for the link-control frames that release them.
-pub(super) const SESSION_HOLD_CAPACITY: usize = INBOUND_PEER_CAPACITY / 2;
+pub(super) const SESSION_HOLD_CAPACITY: usize = inbound::peer_capacity() / 2;
 
 /// Where a verified frame comes from, which decides how far its delivery is waited for and
 /// what its learning does.
@@ -322,12 +318,24 @@ pub(super) const SESSION_HOLD_CAPACITY: usize = INBOUND_PEER_CAPACITY / 2;
 /// actor owns it, so releasing many frames at once does not stall the read loop behind each
 /// one's handlers, and what it teaches is confirmed but releases nothing itself: the release
 /// that freed it re-scans the hold.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 pub(super) enum FrameProvenance {
     /// Handed over by the transport just now.
     Arrived,
     /// Left the pre-admission hold or the session hold.
     Released,
+}
+
+impl FrameProvenance {
+    /// Whether what the frame teaches the link releases held frames: an arrived frame's
+    /// learning does; a released frame's learning is applied by the release that freed it,
+    /// which re-scans the hold.
+    pub(super) const fn releases_what_it_teaches(self) -> bool {
+        match self {
+            Self::Arrived => true,
+            Self::Released => false,
+        }
+    }
 }
 
 /// How the pending handshake bound to a callback disposes of a frame from `peer`.
@@ -337,6 +345,9 @@ enum InboundGate {
     Admitted,
     /// The handshake is with this peer and not yet admitted: the frame is early, not wrong.
     Unadmitted,
+    /// The handshake is with this peer but its generation is no longer the peer's: the frame
+    /// is late, and there is nothing to hold it for.
+    Superseded,
     /// The frame does not belong to the pending handshake: it is refused.
     Refused,
 }
