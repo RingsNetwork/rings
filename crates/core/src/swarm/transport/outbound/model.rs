@@ -1,4 +1,4 @@
-pub(in crate::swarm::transport) use crate::message::MessageClass as TransferClass;
+pub(in crate::swarm::transport) use crate::message::MessageCategory as TransferClass;
 pub(in crate::swarm::transport) use crate::message::MessageKind as OutboundMessageKind;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

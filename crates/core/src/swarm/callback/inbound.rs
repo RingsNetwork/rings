@@ -565,7 +565,7 @@ impl InboundActor {
                 && reassembly_barrier.is_some_and(|barrier| sequence > barrier);
             if waits_for_reassembly {
                 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-                if lane == InboundLane::from_class(crate::message::MessageClass::DhtControl) {
+                if lane == InboundLane::from_class(crate::message::MessageCategory::DhtControl) {
                     crate::simulation::record_barrier_control_blocked();
                 }
                 continue;

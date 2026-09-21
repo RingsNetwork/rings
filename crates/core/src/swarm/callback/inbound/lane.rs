@@ -1,7 +1,7 @@
-use crate::message::MessageClass;
+use crate::message::MessageCategory;
 use crate::message::MessageKind;
 
-pub(super) const INBOUND_LANE_COUNT: usize = MessageClass::COUNT + 1;
+pub(super) const INBOUND_LANE_COUNT: usize = MessageCategory::COUNT + 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum InboundLane {
@@ -21,12 +21,12 @@ impl InboundLane {
         Self::Reassembly,
     ];
 
-    pub(super) const fn from_class(class: MessageClass) -> Self {
+    pub(super) const fn from_class(class: MessageCategory) -> Self {
         match class {
-            MessageClass::DhtControl => Self::DhtControl,
-            MessageClass::Storage => Self::Storage,
-            MessageClass::E2e => Self::E2e,
-            MessageClass::Application => Self::Application,
+            MessageCategory::DhtControl => Self::DhtControl,
+            MessageCategory::Storage => Self::Storage,
+            MessageCategory::E2e => Self::E2e,
+            MessageCategory::Application => Self::Application,
         }
     }
 
@@ -43,7 +43,7 @@ impl InboundLane {
             Self::Storage => 1,
             Self::E2e => 2,
             Self::Application => 3,
-            Self::Reassembly => MessageClass::COUNT,
+            Self::Reassembly => MessageCategory::COUNT,
         }
     }
 
@@ -53,12 +53,12 @@ impl InboundLane {
 
     /// The message class this lane carries; the reassembly lane's class is
     /// unknown until the reassembled message is decoded.
-    pub(in crate::swarm::callback) const fn class(self) -> Option<MessageClass> {
+    pub(in crate::swarm::callback) const fn class(self) -> Option<MessageCategory> {
         match self {
-            Self::DhtControl => Some(MessageClass::DhtControl),
-            Self::Storage => Some(MessageClass::Storage),
-            Self::E2e => Some(MessageClass::E2e),
-            Self::Application => Some(MessageClass::Application),
+            Self::DhtControl => Some(MessageCategory::DhtControl),
+            Self::Storage => Some(MessageCategory::Storage),
+            Self::E2e => Some(MessageCategory::E2e),
+            Self::Application => Some(MessageCategory::Application),
             Self::Reassembly => None,
         }
     }

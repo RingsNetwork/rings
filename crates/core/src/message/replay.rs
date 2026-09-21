@@ -29,7 +29,7 @@ use crate::error::Result;
 use crate::message::quota::quota_admission_error;
 use crate::message::quota::OriginQuotaCounterState;
 use crate::message::quota::OriginQuotaTable;
-use crate::message::types::MessageClass;
+use crate::message::types::MessageCategory;
 use crate::message::OriginQuotaConfig;
 use crate::message::OriginQuotaCounters;
 use crate::message::OriginQuotaInstant;
@@ -467,7 +467,7 @@ impl TransactionReplay {
         key: StreamKey,
         sequence: u64,
         digest: TransactionDigest,
-        lane: MessageClass,
+        lane: MessageCategory,
         byte_cost: usize,
     ) -> Result<SequenceVerdict> {
         let now = OriginQuotaInstant::from_nanos(
@@ -484,7 +484,7 @@ impl TransactionReplay {
         key: StreamKey,
         sequence: u64,
         digest: TransactionDigest,
-        lane: MessageClass,
+        lane: MessageCategory,
         byte_cost: usize,
         now: OriginQuotaInstant,
     ) -> Result<SequenceVerdict> {
@@ -568,7 +568,7 @@ impl TransactionReplay {
             key,
             sequence,
             digest,
-            MessageClass::Application,
+            MessageCategory::Application,
             0,
             OriginQuotaInstant::ZERO,
         )

@@ -2,7 +2,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
 use super::*;
-use crate::message::MessageClass;
+use crate::message::MessageCategory;
 use crate::message::OriginQuotaLaneConfig;
 use crate::storage::MemStorage;
 
@@ -45,7 +45,7 @@ async fn admit_at(
             key,
             sequence,
             digest,
-            MessageClass::Application,
+            MessageCategory::Application,
             1,
             OriginQuotaInstant::from_nanos(now),
         )
@@ -116,7 +116,7 @@ async fn quota_rejection_does_not_advance_replay_and_retry_can_commit() -> Resul
     assert_eq!(
         runtime
             .quota_counters()
-            .lane(MessageClass::Application)
+            .lane(MessageCategory::Application)
             .message_rate_exhausted,
         1
     );
@@ -143,7 +143,7 @@ async fn capacity_rejection_preserves_replay_until_an_idle_slot_is_safe() -> Res
         admit_at(&runtime, waiting, 0, digest(2), 0).await,
         Err(Error::OriginQuota(
             crate::message::OriginQuotaError::TableCapacityExhausted {
-                lane: MessageClass::Application,
+                lane: MessageCategory::Application,
                 capacity: 1,
             }
         ))
@@ -151,7 +151,7 @@ async fn capacity_rejection_preserves_replay_until_an_idle_slot_is_safe() -> Res
     assert_eq!(
         runtime
             .quota_counters()
-            .lane(MessageClass::Application)
+            .lane(MessageCategory::Application)
             .capacity_exhausted,
         1
     );

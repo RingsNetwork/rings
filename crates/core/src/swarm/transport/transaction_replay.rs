@@ -6,7 +6,7 @@ use std::ops::RangeInclusive;
 use super::SwarmTransport;
 use crate::dht::Did;
 use crate::error::Result;
-use crate::message::MessageClass;
+use crate::message::MessageCategory;
 use crate::message::MessagePayload;
 use crate::message::OriginQuotaCounters;
 use crate::message::PayloadSender;
@@ -48,7 +48,7 @@ impl SwarmTransport {
     pub(crate) async fn admit_final_transaction(
         &self,
         transaction: &Transaction,
-        lane: MessageClass,
+        lane: MessageCategory,
     ) -> Result<()> {
         let key = transaction.stream_key(self.network_id);
         let digest = transaction.digest()?;

@@ -513,9 +513,9 @@ macro_rules! define_message_model {
                 }
             }
 
-            pub(crate) const fn class(self) -> MessageClass {
+            pub(crate) const fn class(self) -> MessageCategory {
                 match self {
-                    $(Self::$variant => MessageClass::$class),+
+                    $(Self::$variant => MessageCategory::$class),+
                 }
             }
 
@@ -558,10 +558,11 @@ macro_rules! define_message_model {
 
 with_message_variants!(define_message_model);
 
-/// The class of a wire message: its inbound lane, its outbound transfer
-/// class, and its final-destination quota lane are one partition.
+/// Traffic category shared by inbound scheduling, outbound scheduling, and
+/// final-destination quotas. Each category groups multiple concrete message kinds;
+/// it is local policy metadata and does not change the wire message encoding.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum MessageClass {
+pub enum MessageCategory {
     /// Chord maintenance, connection negotiation, and topology queries.
     DhtControl,
     /// DHT entry lookup, mutation, and synchronization.
@@ -572,9 +573,11 @@ pub enum MessageClass {
     Application,
 }
 
-impl MessageClass {
+impl MessageCategory {
+    /// Number of disjoint traffic categories used to size lane tables.
     pub(crate) const COUNT: usize = 4;
 
+    /// Stable local lane index shared by scheduling and quota tables.
     pub(crate) const fn index(self) -> usize {
         match self {
             Self::DhtControl => 0,

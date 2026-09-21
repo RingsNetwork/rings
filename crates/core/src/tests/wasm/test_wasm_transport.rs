@@ -26,7 +26,7 @@ use crate::ecc::SecretKey;
 use crate::lifecycle::StopSource;
 use crate::message::Encoder;
 use crate::message::Message;
-use crate::message::MessageClass;
+use crate::message::MessageCategory;
 use crate::message::NotifyPredecessorSend;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::swarm::transport::Transport;
@@ -235,13 +235,13 @@ async fn exercise_contended_browser_storage(node1: &Swarm, node2: &Swarm) {
             .unwrap_or_else(|error| panic!("control round {round} failed: {error}"));
         sleep(SOAK_POLL_INTERVAL).await;
         let trace = node1.transport.outbound_frame_trace_for_test(node2.did());
-        if control_interleaves_transfer(&trace, MessageClass::Storage) {
+        if control_interleaves_transfer(&trace, MessageCategory::Storage) {
             break;
         }
     }
     for _ in 0..SOAK_POLL_ATTEMPTS {
         let trace = node1.transport.outbound_frame_trace_for_test(node2.did());
-        if control_interleaves_transfer(&trace, MessageClass::Storage) {
+        if control_interleaves_transfer(&trace, MessageCategory::Storage) {
             break;
         }
         sleep(SOAK_POLL_INTERVAL).await;
@@ -249,7 +249,7 @@ async fn exercise_contended_browser_storage(node1: &Swarm, node2: &Swarm) {
     let trace = node1
         .transport
         .take_outbound_frame_trace_for_test(node2.did());
-    assert_control_interleaves_transfer(&trace, MessageClass::Storage);
+    assert_control_interleaves_transfer(&trace, MessageCategory::Storage);
 }
 
 async fn wait_for_repair_and_convergence(nodes: &[&Swarm; 3], fixture: &RepairFixture) {

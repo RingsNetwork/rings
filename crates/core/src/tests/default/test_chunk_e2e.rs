@@ -34,7 +34,7 @@ use crate::measure::MeasurementEvent;
 use crate::measure::PeerQuality;
 use crate::message::test_probe_request;
 use crate::message::Message;
-use crate::message::MessageClass;
+use crate::message::MessageCategory;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
 use crate::message::SyncEntriesWithSuccessor;
@@ -927,7 +927,7 @@ async fn test_dht_control_frame_runs_while_storage_transfer_waits_for_delivery()
                 .transport
                 .outbound_frame_trace_for_test(node2.did())
                 .iter()
-                .filter(|(class, _, _)| *class == MessageClass::Storage)
+                .filter(|(class, _, _)| *class == MessageCategory::Storage)
                 .count()
                 >= 2
         },
@@ -937,7 +937,7 @@ async fn test_dht_control_frame_runs_while_storage_transfer_waits_for_delivery()
         .swarm
         .transport
         .take_outbound_frame_trace_for_test(node2.did());
-    assert_control_interleaves_transfer(&trace, MessageClass::Storage);
+    assert_control_interleaves_transfer(&trace, MessageCategory::Storage);
     Ok(())
 }
 

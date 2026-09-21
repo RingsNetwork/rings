@@ -1,14 +1,14 @@
 use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 
 use super::*;
-use crate::message::MessageClass;
+use crate::message::MessageCategory;
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 use crate::swarm::callback::CallbackError;
 
-const DHT_CONTROL_LANE: InboundLane = InboundLane::from_class(MessageClass::DhtControl);
-const STORAGE_LANE: InboundLane = InboundLane::from_class(MessageClass::Storage);
-const E2E_LANE: InboundLane = InboundLane::from_class(MessageClass::E2e);
-const APPLICATION_LANE: InboundLane = InboundLane::from_class(MessageClass::Application);
+const DHT_CONTROL_LANE: InboundLane = InboundLane::from_class(MessageCategory::DhtControl);
+const STORAGE_LANE: InboundLane = InboundLane::from_class(MessageCategory::Storage);
+const E2E_LANE: InboundLane = InboundLane::from_class(MessageCategory::E2e);
+const APPLICATION_LANE: InboundLane = InboundLane::from_class(MessageCategory::Application);
 const REASSEMBLY_LANE: InboundLane = InboundLane::Reassembly;
 
 #[test]
@@ -16,7 +16,7 @@ fn test_inbound_lane_mapping_is_total_and_reserves_one_extra_lane() {
     let lanes = [DHT_CONTROL_LANE, STORAGE_LANE, E2E_LANE, APPLICATION_LANE];
 
     assert_eq!(lanes.map(InboundLane::index), [0, 1, 2, 3]);
-    assert_eq!(REASSEMBLY_LANE.index(), MessageClass::COUNT);
+    assert_eq!(REASSEMBLY_LANE.index(), MessageCategory::COUNT);
     assert!(!DHT_CONTROL_LANE.is_logical_data());
     assert!(!REASSEMBLY_LANE.is_logical_data());
     assert!(lanes

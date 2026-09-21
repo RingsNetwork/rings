@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Fixed
+
+- Preserve cancellation commands that arrive while the outbound worker is cancelling queued
+  transfers (#789). Cancellation scans no longer drain the mailbox themselves, so a stopped
+  successor releases its capacity without waiting for its lane head to finish delivery.
+
 ### Removed
 
 - Subtraction round, swarm section (#787). The send path no longer retires a peer whose data
@@ -15,7 +21,7 @@
   lane order is the sequence-numbered `Pending`/`Ready` protocol alone, and a lane's frames
   decode in parallel. Also removed: the duplicate data-lane check inside
   `ReassemblyHandoffBarrier::blocks` (the actor's barrier sequence carries it), the
-  `OriginQuotaLane` enum (the quota lane is the public `MessageClass`), the tracked/detached
+  `OriginQuotaLane` enum (the quota lane is the public `MessageCategory`), the tracked/detached
   storage-sync outcome twins (one `StorageSyncOutcome`), `Swarm::connected_peer_dids`
   (identical to `peer_dids`), the cross-profile inequalities in the transport timeout profile,
   `TRANSPORT_MTU` (the frame size is negotiated per connection since #601; `TRANSPORT_MAX_SIZE`

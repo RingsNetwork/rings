@@ -40,7 +40,7 @@ use crate::measure::MeasureError;
 use crate::measure::MeasurementBatch;
 use crate::measure::PeerQuality;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-use crate::message::MessageClass;
+use crate::message::MessageCategory;
 use crate::message::MessagePayload;
 #[cfg(feature = "dummy")]
 use crate::message::MessageSigner;
@@ -915,7 +915,7 @@ async fn test_missing_peer_error_precedes_outbound_capacity_admission() -> Resul
         permits.push(
             transport
                 .outbound_schedulers
-                .reserve(peer, MessageClass::Application, 1)
+                .reserve(peer, MessageCategory::Application, 1)
                 .await?,
         );
     }

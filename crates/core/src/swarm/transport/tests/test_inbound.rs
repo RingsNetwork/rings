@@ -977,7 +977,7 @@ async fn test_reassembled_control_shape_is_verified_before_lane_transition() -> 
     tampered.transaction.data.push(0);
     assert_eq!(
         crate::message::MessageKind::from_wire(&tampered.transaction.data)?.class(),
-        crate::message::MessageClass::DhtControl
+        crate::message::MessageCategory::DhtControl
     );
     let tampered_wire = tampered.to_wire()?;
     let chunks: Vec<Chunk> = ChunkList::split(&tampered_wire, 32).into();

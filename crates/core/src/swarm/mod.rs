@@ -34,7 +34,7 @@ use crate::message::FindSuccessorReportHandler;
 use crate::message::FindSuccessorSend;
 use crate::message::FindSuccessorThen;
 use crate::message::Message;
-use crate::message::MessageClass;
+use crate::message::MessageCategory;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
 use crate::message::OriginQuotaCounters;
@@ -331,7 +331,7 @@ impl Swarm {
             ));
         }
         self.transport
-            .admit_final_transaction(&offer_payload.transaction, MessageClass::DhtControl)
+            .admit_final_transaction(&offer_payload.transaction, MessageCategory::DhtControl)
             .await?;
 
         let peer = offer_payload.transaction.origin();
@@ -390,7 +390,7 @@ impl Swarm {
             ));
         }
         self.transport
-            .admit_final_transaction(&answer_payload.transaction, MessageClass::DhtControl)
+            .admit_final_transaction(&answer_payload.transaction, MessageCategory::DhtControl)
             .await?;
 
         let peer = answer_payload.transaction.signer();
