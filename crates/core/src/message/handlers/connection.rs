@@ -267,7 +267,6 @@ pub mod tests {
     use tokio::time::Duration;
 
     use super::*;
-    use crate::dht::successor::SuccessorReader;
     use crate::ecc::tests::gen_ordered_keys;
     use crate::ecc::SecretKey;
     use crate::message::types::QueryFor;
@@ -290,9 +289,9 @@ pub mod tests {
         let tail = keys[3].address().into();
         let dht = gen_pure_dht(local);
 
-        dht.join(next)?;
-        dht.join(tail)?;
-        dht.join(requester)?;
+        dht.admit_connected(next, None)?;
+        dht.admit_connected(tail, None)?;
+        dht.admit_connected(requester, None)?;
 
         assert_eq!(dht.successors().list()?, vec![requester, next, tail]);
         assert_eq!(connect_successor_hint(&dht, requester, requester)?, next);

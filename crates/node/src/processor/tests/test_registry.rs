@@ -545,7 +545,7 @@ async fn test_online_node_registry_lists_multiple_nodes() -> Result<()> {
     let other_descriptor = other.online_node_descriptor_at(get_epoch_ms())?;
 
     processor
-        .storage_touch_data(
+        .storage_append_data(
             ONLINE_NODES_TOPIC,
             other_descriptor.encode().map_err(Error::CoreError)?,
         )

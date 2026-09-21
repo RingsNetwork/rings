@@ -324,7 +324,7 @@ mod tests {
                 let dht = gen_schedule_dht(swarm.did());
                 for other in swarms {
                     if dht.did != other.did() {
-                        dht.join(other.did()).unwrap();
+                        dht.admit_connected(other.did(), None).unwrap();
                         dht.notify(other.did()).unwrap();
                     }
                 }

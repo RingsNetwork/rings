@@ -77,7 +77,7 @@ impl From<FingerApplyOutcome> for FingerUpdateDisposition {
     /// Map a direct DHT apply result into the message handler's transport decision.
     fn from(outcome: FingerApplyOutcome) -> Self {
         match outcome {
-            FingerApplyOutcome::Applied { .. } => Self::Applied,
+            FingerApplyOutcome::Applied => Self::Applied,
             FingerApplyOutcome::Rejected(rejection) => Self::Rejected(rejection),
         }
     }

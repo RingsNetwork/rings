@@ -80,12 +80,6 @@ async fn test_continuous_storage_repair_reaches_remote_owners_across_three_nodes
         (0, head.did()),
         (3, tail.did()),
     ])?;
-    for peer in [head.did(), tail.did()] {
-        node1
-            .swarm
-            .transport
-            .force_peer_connected_at(peer, get_epoch_ms_i64() - 31_000)?;
-    }
 
     let head_key = midpoint_storage_key(node1.did(), head.did(), tail.did());
     let tail_key = tail_storage_key(node1.did(), tail.did());
@@ -197,10 +191,6 @@ async fn test_native_wait_with_repairs_storage_before_connection_retirement() ->
         0,
         node1.did(),
     )])?;
-    node1
-        .swarm
-        .transport
-        .force_peer_connected_at(node2.did(), get_epoch_ms_i64() - 31_000)?;
 
     let (entry, remote_placement) = entry_for_remote_repair_placement(&node1, node2.did())?;
     let expected = entry.clone().try_into_storage_entry()?;
@@ -295,15 +285,20 @@ async fn test_native_wait_with_repairs_storage_before_connection_retirement() ->
     Ok(())
 }
 
+/// Law: a newly admitted, ready next hop can persist a replica immediately;
+/// elapsed connection age is not an additional storage-repair prerequisite.
 #[tokio::test]
-async fn test_repair_storage_defers_sync_to_fresh_next_hop() -> Result<()> {
+async fn test_repair_storage_persists_replica_through_fresh_next_hop() -> Result<()> {
+    // Ordered identities give the source a placement owned by the second node.
     let (key1, key2) = repair_test_keys()?;
+    // The source starts with the entry; the receiver must acquire it through repair.
     let node1 = prepare_repair_node(key1)?;
     let node2 = prepare_repair_node(key2)?;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
-
     wait_for_successor(&node1, node2.did()).await?;
     wait_for_msgs([&node1, &node2]).await;
+
+    // The fixture must exercise the removed 30-second deferral window.
     let connected_for_ms = node1
         .swarm
         .transport
@@ -311,22 +306,18 @@ async fn test_repair_storage_defers_sync_to_fresh_next_hop() -> Result<()> {
         .ok_or_else(|| Error::InvalidMessage("missing peer admission age".to_string()))?;
     assert!(
         connected_for_ms < 30_000,
-        "test must exercise a fresh connection; observed age {connected_for_ms}ms"
+        "test requires a fresh connection, observed {connected_for_ms}ms"
     );
 
+    // The remote affine placement is absent before the bounded repair pass.
     let (entry, remote_placement) = entry_for_remote_repair_placement(&node1, node2.did())?;
+    // Compare the receiver's persisted canonical CRDT representation.
+    let expected = entry.clone().try_into_storage_entry()?;
     node1
         .dht()
         .storage
         .put(&entry.did.to_string(), &entry)
         .await?;
-
-    assert_eq!(
-        node1.swarm.stabilizer().repair_storage().await?,
-        StorageRepairOutcome::Deferred
-    );
-
-    assert_no_more_msg([&node2]).await;
     assert_eq!(
         node2
             .dht()
@@ -334,6 +325,17 @@ async fn test_repair_storage_defers_sync_to_fresh_next_hop() -> Result<()> {
             .get(&remote_placement.to_string())
             .await?,
         None
+    );
+    assert_eq!(
+        node1.swarm.stabilizer().repair_storage().await?,
+        crate::dht::StorageRepairOutcome::Complete
+    );
+
+    // Delivery completion alone does not prove that the receiving handler stored it.
+    let slot = crate::dht::StorageKey::new(EntryKind::Data, remote_placement);
+    assert_eq!(
+        crate::tests::default::wait_for_storage_entry(&node2, slot).await?,
+        expected
     );
     Ok(())
 }
@@ -347,10 +349,6 @@ async fn test_repair_storage_defers_disconnected_open_transport_without_sending(
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
     wait_for_successor(&node1, node2.did()).await?;
     wait_for_msgs([&node1, &node2]).await;
-    node1
-        .swarm
-        .transport
-        .force_peer_connected_at(node2.did(), get_epoch_ms_i64() - 31_000)?;
 
     let (entry, remote_placement) = entry_for_remote_repair_placement(&node1, node2.did())?;
     node1
@@ -405,10 +403,6 @@ async fn test_repair_storage_backpressure_defers_without_degrading_or_removing_p
 
     wait_for_successor(&node1, node2.did()).await?;
     wait_for_msgs([&node1, &node2]).await;
-    node1
-        .swarm
-        .transport
-        .force_peer_connected_at(node2.did(), get_epoch_ms_i64() - 31_000)?;
 
     node1.dht().successors().extend(&[node2.did()])?;
     *node1.dht().lock_predecessor()? = Some(node2.did());

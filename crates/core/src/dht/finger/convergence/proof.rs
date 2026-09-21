@@ -144,11 +144,7 @@ impl FingerReportRejection {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FingerApplyOutcome {
     /// At least one still-current slot in this proved range was committed.
-    Applied {
-        /// Inclusive upper slot of the validated range, even if newer evidence
-        /// caused individual slots inside the range to be skipped.
-        end: usize,
-    },
+    Applied,
     /// The report was rejected without changing a finger hint.
     Rejected(
         /// Exact validation reason; the caller uses it to distinguish retryable
@@ -160,11 +156,8 @@ pub(crate) enum FingerApplyOutcome {
 /// Outcome of retaining a report for transport admission.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FingerDeferOutcome {
-    /// The timely proof is owned by the admission lease through this slot.
-    Deferred {
-        /// Inclusive upper slot retained with the validated admission proof.
-        end: usize,
-    },
+    /// The timely proof is owned by the admission lease.
+    Deferred,
     /// The report was rejected and no admission work should start.
     Rejected(
         /// Exact validation reason explaining why no admission lease was created.
@@ -187,7 +180,7 @@ pub(crate) enum FingerRetireOutcome {
 }
 
 /// Validated range carried between the attempt and evidence layers.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) struct FingerRangeProof {
     /// Original lookup token at the lower end of the proved range.
     ///

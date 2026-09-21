@@ -3,8 +3,6 @@ use async_trait::async_trait;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::effects::CoreEffect;
-use crate::message::types::Message;
-use crate::message::types::NotifyPredecessorReport;
 use crate::message::types::NotifyPredecessorSend;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
@@ -21,19 +19,13 @@ impl HandleMsg<NotifyPredecessorSend> for MessageHandler {
         }
 
         let origin = self.verified_notify_predecessor_origin(ctx, msg)?;
-        let Some(predecessor) = self.transport.notify_admitted_predecessor(origin)? else {
+        if self
+            .transport
+            .notify_admitted_predecessor(origin)?
+            .is_none()
+        {
             return Err(Error::NotifyPredecessorOriginNotAdmitted { origin });
-        };
-
-        if predecessor != origin {
-            return self
-                .run_effects([CoreEffect::send_report_message(
-                    ctx,
-                    Message::NotifyPredecessorReport(NotifyPredecessorReport { did: predecessor }),
-                )])
-                .await;
         }
-
         Ok(())
     }
 }
@@ -52,18 +44,6 @@ impl MessageHandler {
             });
         }
         Ok(origin)
-    }
-}
-
-#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
-#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
-impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
-    /// The successor reports the node that now precedes it: connect to it. Adopting it as the
-    /// successor head is the admission's topology transition, and the storage hand-off that
-    /// follows is the stabilizer's placement invariant, not this message's.
-    async fn handle(&self, _ctx: &MessagePayload, msg: &NotifyPredecessorReport) -> Result<()> {
-        self.run_effects([CoreEffect::connect_dht_peer(msg.did)])
-            .await
     }
 }
 

@@ -71,8 +71,6 @@ use stateright::Model;
 
 use super::test_dht_convergence::spec;
 use super::test_dht_convergence::K;
-use crate::dht::successor::SuccessorReader;
-use crate::dht::successor::SuccessorWriter;
 use crate::dht::Chord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
@@ -305,8 +303,8 @@ fn notify_model(all: Vec<Did>) -> ActorModel<ChordNode, Cfg, ()> {
 //
 // Unlike stage 1, each node's connected-peer set grows DYNAMICALLY: the hub
 // learns a spoke only when that spoke's join lookup arrives, so the connect-time
-// `find_successor(self)` race is modelled, and the join lookups + notify/report
-// chain must drive discovery.
+// `find_successor(self)` race is modelled, and the join lookups + stabilize
+// query/report chain must drive discovery.
 //
 // SCOPE / FIDELITY (important):
 //   * Routing is NOT the production `PeerRing::find_successor`. `successor_of`
@@ -332,10 +330,14 @@ enum DMsg {
     Lookup { origin: usize },
     /// Reply to a `Lookup`: `node` is the discovered successor to connect to.
     Found { node: usize },
-    /// `NotifyPredecessorSend`.
+    /// `QueryForTopoInfoSend`: the stabilizing node asks its successor head
+    /// for the head's predecessor.
+    QueryTopo,
+    /// `QueryForTopoInfoReport`: the head's current predecessor, if any. The
+    /// requester connects to it and then notifies the head.
+    TopoReport { pred: Option<usize> },
+    /// `NotifyPredecessorSend`: the sender proposes itself as predecessor.
     NotifyPred { from: usize },
-    /// `NotifyPredecessorReport`: the sender connects to the reported predecessor.
-    NotifyPredReport { pred: usize },
 }
 
 /// The periodic stabilization tick.
@@ -351,8 +353,8 @@ struct DState {
     pred: Option<usize>,
     /// Stabilization rounds elapsed. Exhaustive liveness checking of a retry
     /// protocol over an accumulating network is not finite, so the periodic
-    /// notify is bounded (`DiscoveryNode::rounds`); the model then verifies a
-    /// decidable claim about convergence *within that bound*.
+    /// stabilize query is bounded (`DiscoveryNode::rounds`); the model then
+    /// verifies a decidable claim about convergence *within that bound*.
     ticks: u8,
 }
 
@@ -438,16 +440,15 @@ impl Actor for DiscoveryNode {
             return;
         }
         let me = usize::from(id);
-        for s in self.successors(me, &state.connected) {
-            if s != me {
-                o.send(Id::from(s), DMsg::NotifyPred { from: me });
-            }
+        // `pre_stabilize`: one query to the successor head per round.
+        if let Some(&head) = self.successors(me, &state.connected).first() {
+            o.send(Id::from(head), DMsg::QueryTopo);
         }
         state.to_mut().ticks += 1;
         o.set_timer(DTimer::Stabilize, model_timeout());
     }
 
-    fn on_msg(&self, id: Id, state: &mut Cow<DState>, _src: Id, msg: DMsg, o: &mut Out<Self>) {
+    fn on_msg(&self, id: Id, state: &mut Cow<DState>, src: Id, msg: DMsg, o: &mut Out<Self>) {
         let me = usize::from(id);
         match msg {
             DMsg::Lookup { origin } => {
@@ -467,19 +468,24 @@ impl Actor for DiscoveryNode {
                     o.send(Id::from(node), DMsg::Lookup { origin: me });
                 }
             }
+            DMsg::QueryTopo => {
+                o.send(src, DMsg::TopoReport { pred: state.pred });
+            }
+            DMsg::TopoReport { pred } => {
+                // The report's predecessor is a bounded connection candidate;
+                // applying the report then notifies the head (`Notify(head)`).
+                if let Some(pred) = pred {
+                    if pred != me && !state.connected.contains(&pred) {
+                        state.to_mut().connected.insert(pred);
+                        o.send(Id::from(pred), DMsg::Lookup { origin: me });
+                    }
+                }
+                o.send(src, DMsg::NotifyPred { from: me });
+            }
             DMsg::NotifyPred { from } => {
                 let new_pred = self.notify(me, state.pred, from);
                 if state.pred != Some(new_pred) {
                     state.to_mut().pred = Some(new_pred);
-                }
-                if new_pred != from {
-                    o.send(Id::from(from), DMsg::NotifyPredReport { pred: new_pred });
-                }
-            }
-            DMsg::NotifyPredReport { pred } => {
-                if pred != me && !state.connected.contains(&pred) {
-                    state.to_mut().connected.insert(pred);
-                    o.send(Id::from(pred), DMsg::Lookup { origin: me });
                 }
             }
         }
@@ -574,7 +580,7 @@ mod tests {
         let dht = PeerRing::new_with_storage(node, K as u8, Box::new(MemStorage::new()));
         for &other in all {
             if other != node {
-                dht.join(other).unwrap();
+                dht.admit_connected(other, None).unwrap();
                 dht.notify(other).unwrap();
             }
         }
@@ -642,7 +648,7 @@ mod tests {
 
                 let dht = PeerRing::new_with_storage(all[me], K as u8, Box::new(MemStorage::new()));
                 for &c in &connected {
-                    let _ = dht.join(all[c]);
+                    let _ = dht.admit_connected(all[c], None);
                 }
                 let real = dht.successors().list().unwrap();
 

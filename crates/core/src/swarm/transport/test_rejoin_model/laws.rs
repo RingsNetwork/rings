@@ -56,6 +56,14 @@ pub(super) enum LawName {
     /// itself (the subject of the topology unit tests); it is checked so the
     /// composition inherits the invariant it relies on.
     TopologiesAreWellFormed,
+    /// `□`: a retirement requests the storage repair round iff it vacated a
+    /// slot, `Slots(topology') ≠ Slots(topology)`. The request is
+    /// production's `TopologyRemoval` of the pre-state; the law checks it
+    /// against the change the production `Remove` actually made, so an
+    /// admitted peer that outlived every slot referencing it (the
+    /// `RepairOnEveryRetirement` mutation, and the defect it reproduces)
+    /// requests no placement scan.
+    StorageRepairFollowsVacatedSlots,
     /// `◇`: a retired generation's event awaits beside a newer admitted
     /// generation of the same peer, so the next step delivers it under the
     /// safety laws.
@@ -75,6 +83,9 @@ impl fmt::Display for LawName {
             }
             Self::TopologyReferencesOnlyAdmitted => "topology references only admitted generations",
             Self::TopologiesAreWellFormed => "topologies are well formed",
+            Self::StorageRepairFollowsVacatedSlots => {
+                "a storage repair round is requested iff the retirement vacated a slot"
+            }
             Self::RetiredEventAwaitsBesideNewerGeneration => {
                 "a retired generation's event awaits beside a newer admitted generation"
             }
@@ -130,6 +141,16 @@ fn topologies_are_well_formed(overlay: &Overlay, state: &OverlayState) -> bool {
         .nodes
         .values()
         .all(|node| node.topology.is_well_formed(overlay.successor_capacity()))
+}
+
+/// `□ ∀n. misdirected_repair(n) = None`: the history variable never records
+/// a retirement whose storage-repair request disagreed with the slots it
+/// vacated.
+fn storage_repair_follows_vacated_slots(_: &Overlay, state: &OverlayState) -> bool {
+    state
+        .nodes
+        .values()
+        .all(|node| node.misdirected_repair.is_none())
 }
 
 /// `◇ ∃n, g, g'. Event(g) ∈ events(n) ∧ Active(n, g') ∧ g'.peer = g.peer ∧
@@ -203,7 +224,7 @@ pub(super) fn retains_live_heads(state: &OverlayState) -> bool {
 }
 
 /// Every checked proposition, in report order.
-pub(super) const LAWS: [Law; 6] = [
+pub(super) const LAWS: [Law; 7] = [
     Law {
         name: LawName::RetiredGenerationsAreInert,
         expectation: Expectation::Always,
@@ -223,6 +244,11 @@ pub(super) const LAWS: [Law; 6] = [
         name: LawName::TopologiesAreWellFormed,
         expectation: Expectation::Always,
         holds: topologies_are_well_formed,
+    },
+    Law {
+        name: LawName::StorageRepairFollowsVacatedSlots,
+        expectation: Expectation::Always,
+        holds: storage_repair_follows_vacated_slots,
     },
     Law {
         name: LawName::RetiredEventAwaitsBesideNewerGeneration,

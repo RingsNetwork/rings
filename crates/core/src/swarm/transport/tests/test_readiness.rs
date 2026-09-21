@@ -1,5 +1,4 @@
 use super::*;
-use crate::dht::LiveDid;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
@@ -103,14 +102,14 @@ async fn test_non_ready_transport_is_admitted_but_not_routable_or_live() -> Resu
     let raw = transport
         .get_raw_connection(peer)
         .ok_or(Error::SwarmMissTransport(peer))?;
-    assert!(!raw.live().await);
+    assert!(!raw.readiness().can_make_progress());
 
     transport
         .force_peer_connection_state_without_callback(peer, WebrtcConnectionState::Connected)?;
     transport.force_peer_data_channel_open_without_callback(peer, Some(false))?;
     assert!(transport.get_connection(peer).is_none());
     assert!(!PayloadSender::is_connected(transport.as_ref(), peer));
-    assert!(!raw.live().await);
+    assert!(!raw.readiness().can_make_progress());
 
     transport.disconnect(peer).await?;
     Ok(())

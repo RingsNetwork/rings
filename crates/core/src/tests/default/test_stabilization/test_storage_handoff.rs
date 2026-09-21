@@ -6,7 +6,6 @@
 use super::*;
 use crate::dht::entry::EntryKind;
 use crate::dht::StorageKey;
-use crate::dht::STORAGE_REPAIR_FRESH_CONNECTION_GRACE_MS;
 use crate::ecc::tests::gen_ordered_keys;
 use crate::message::Encoder;
 use crate::tests::default::wait_for_msgs;
@@ -15,8 +14,8 @@ use crate::tests::default::wait_for_storage_entry;
 use crate::tests::live_entry;
 
 /// After a direct connection moves the successor head, admission requests a repair pass, and the
-/// owner's pass hands the entries placed beyond the new head over to it once the connection has
-/// outlived the fresh-connection grace. No notify report is involved, and the local copy is
+/// owner's pass hands the entries placed beyond the new head over the newly admitted connection.
+/// No connection-age grace or notify report is involved, and the local copy is
 /// removed only by the receiver's acknowledgement.
 #[tokio::test]
 async fn test_repair_pass_hands_off_entries_beyond_a_directly_connected_head() -> Result<()> {
@@ -52,12 +51,6 @@ async fn test_repair_pass_hands_off_entries_beyond_a_directly_connected_head() -
     wait_for_successor(&node1, node2.did()).await?;
     assert!(node1.swarm.transport.storage_repair_requested());
 
-    // The pass defers to a connection younger than the grace, which is what outlives the peer's
-    // own admission of this node; age the connection past it, then run the requested pass.
-    node1.swarm.transport.force_peer_connected_at(
-        node2.did(),
-        get_epoch_ms_i64() - STORAGE_REPAIR_FRESH_CONNECTION_GRACE_MS - 1,
-    )?;
     assert_eq!(
         node1
             .swarm

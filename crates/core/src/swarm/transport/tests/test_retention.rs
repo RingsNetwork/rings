@@ -1,7 +1,6 @@
 use super::pending::LifecycleBounds;
 use super::pending::ReservationVerdict;
 use super::*;
-use crate::dht::Chord;
 use crate::utils::get_epoch_ms_i64;
 
 fn bounded_transport(pending: usize, total: usize) -> Result<SwarmTransport> {
@@ -90,7 +89,7 @@ async fn test_full_registry_keeps_topology_referenced_peer_over_idler_unreferenc
     let transport = bounded_transport(2, 2)?;
     let grace = UNREFERENCED_CONNECTION_GRACE_MS;
     let referenced = admit_peer(&transport, grace * 2, grace * 4).await?;
-    transport.dht.join(referenced.peer)?;
+    transport.dht.admit_connected(referenced.peer, None)?;
     let unreferenced = admit_peer(&transport, grace, grace).await?;
     let newcomer = SecretKey::random().address().into();
 
@@ -159,7 +158,7 @@ async fn test_eviction_skips_candidate_referenced_after_the_plan() -> Result<()>
             assert_eq!(plan, [most_idle, less_idle]);
             transport
                 .dht
-                .join(most_idle.peer)
+                .admit_connected(most_idle.peer, None)
                 .expect("test join must succeed");
         })
         .await?;

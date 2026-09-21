@@ -1,5 +1,6 @@
 use super::config::validate_onion_role_config;
 use super::*;
+use crate::consts::DATA_REDUNDANT;
 
 /// ProcessorBuilder is used to initialize a [Processor] instance.
 pub struct ProcessorBuilder {

@@ -18,7 +18,7 @@ use super::PendingConnectionAttempt;
 use super::SwarmConnection;
 use super::SwarmTransport;
 use super::TRANSPORT_TIMEOUT_PROFILE;
-use crate::dht::did::BiasId;
+use crate::dht::topology::TopologyRemoval;
 use crate::dht::Chord;
 use crate::dht::Did;
 use crate::dht::PeerRingAction;
@@ -152,11 +152,17 @@ impl AdmittedConnection {
 pub(crate) struct PeerRemovalOutcome {
     /// First live successor replacement selected while the peer was removed.
     fallback: Option<Did>,
+    /// Whether the topology referenced the peer when it was removed.
+    removal: TopologyRemoval,
 }
 
 impl PeerRemovalOutcome {
     pub(crate) const fn fallback(self) -> Option<Did> {
         self.fallback
+    }
+
+    pub(crate) const fn removal(self) -> TopologyRemoval {
+        self.removal
     }
 }
 
@@ -454,14 +460,16 @@ impl SwarmTransport {
             .await
     }
 
+    /// Disconnect an admitted peer, reporting whether the topology referenced
+    /// it; `None` when `attempt` is no longer the admitted generation.
     pub(crate) async fn disconnect_attempt(
         &self,
         attempt: PendingConnectionAttempt,
-    ) -> Result<bool> {
+    ) -> Result<Option<TopologyRemoval>> {
         Ok(self
             .disconnect_with_removal(attempt, DhtPeerRemoval::Ordinary)
             .await?
-            .is_some())
+            .map(PeerRemovalOutcome::removal))
     }
 
     pub(crate) fn remove_unavailable_topology(
@@ -478,21 +486,22 @@ impl SwarmTransport {
             }
             let replacements = self.live_successor_replacements(peer)?;
             let fallback = replacements.first().copied();
-            self.dht.remove_unavailable(peer, replacements)?;
-            Ok(Some(PeerRemovalOutcome { fallback }))
+            let removal = self.dht.remove_unavailable(peer, replacements)?;
+            Ok(Some(PeerRemovalOutcome { fallback, removal }))
         })
     }
 
+    /// Remove the topology references of a peer whose generation is already
+    /// retired; `None` when a newer generation of the peer is admitted.
     pub(crate) fn remove_retired_attempt_topology(
         &self,
         attempt: PendingConnectionAttempt,
-    ) -> Result<bool> {
+    ) -> Result<Option<TopologyRemoval>> {
         self.with_connection_lifecycle(|| {
             if self.active_attempt(attempt.peer)?.is_some() {
-                return Ok(false);
+                return Ok(None);
             }
-            self.dht.remove(attempt.peer)?;
-            Ok(true)
+            Ok(Some(self.dht.remove(attempt.peer)?))
         })
     }
 
@@ -521,7 +530,7 @@ impl SwarmTransport {
             .filter(|candidate| *candidate != self.dht.did && *candidate != removed)
             .collect::<Vec<_>>();
         let observer = self.dht.did;
-        candidates.sort_by(|left, right| BiasId::cmp_from_observer(observer, *left, *right));
+        candidates.sort_by(|left, right| Did::cmp_from_observer(observer, *left, *right));
         candidates.dedup();
 
         let capacity = self.dht.successors().capacity();
@@ -583,18 +592,18 @@ impl SwarmTransport {
     ) -> Result<Option<PeerRemovalOutcome>> {
         let connection = self.get_raw_connection(attempt.peer);
         // Removal never declines: the action always commits.
-        let Some(fallback) = self
+        let Some(outcome) = self
             .retire_announced_if(attempt, |active| match removal {
-                DhtPeerRemoval::Ordinary => {
-                    self.dht.remove(attempt.peer)?;
-                    Ok(Some(None))
-                }
+                DhtPeerRemoval::Ordinary => Ok(Some(PeerRemovalOutcome {
+                    fallback: None,
+                    removal: self.dht.remove(attempt.peer)?,
+                })),
                 DhtPeerRemoval::Unavailable => {
                     let replacements =
                         self.live_successor_replacements_from_active(attempt.peer, active)?;
                     let fallback = replacements.first().copied();
-                    self.dht.remove_unavailable(attempt.peer, replacements)?;
-                    Ok(Some(fallback))
+                    let removal = self.dht.remove_unavailable(attempt.peer, replacements)?;
+                    Ok(Some(PeerRemovalOutcome { fallback, removal }))
                 }
             })
             .await?
@@ -606,13 +615,14 @@ impl SwarmTransport {
         tracing::info!(
             peer = %attempt.peer,
             generation = attempt.generation,
-            fallback = ?fallback,
+            fallback = ?outcome.fallback(),
+            removal = ?outcome.removal(),
             "removed peer from DHT"
         );
         if let Some(connection) = connection {
             self.close_connection_for_disconnect(&connection).await?;
         }
-        Ok(Some(PeerRemovalOutcome { fallback }))
+        Ok(Some(outcome))
     }
 
     /// Retire `attempt` unless the local topology references its peer.

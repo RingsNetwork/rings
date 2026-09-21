@@ -44,12 +44,10 @@
 
 use async_trait::async_trait;
 
-use crate::dht::successor::SuccessorReader;
 use crate::dht::topology;
-use crate::dht::topology::StabilizationConnectionPlan;
-use crate::dht::topology::StabilizationConnectionStep;
-use crate::dht::topology::SuccessorSyncConnectionPlan;
-use crate::dht::topology::SuccessorSyncConnectionStep;
+use crate::dht::topology::stabilization_connection_budget;
+use crate::dht::topology::ConnectionPlan;
+use crate::dht::topology::ConnectionStep;
 use crate::dht::Did;
 use crate::dht::PeerRing;
 #[cfg(all(test, not(target_family = "wasm")))]
@@ -112,7 +110,7 @@ impl HandleMsg<QueryForTopoInfoReport> for MessageHandler {
                 // The plan owns the bounded candidate cursor. The DHT advances
                 // it between async connection attempts so each step can detect
                 // cancellation or replacement before doing more work.
-                let mut plan = SuccessorSyncConnectionPlan::new(
+                let mut plan = ConnectionPlan::new(
                     reporter,
                     msg.request_id,
                     candidates,
@@ -122,7 +120,7 @@ impl HandleMsg<QueryForTopoInfoReport> for MessageHandler {
                 // `Complete` and `Stale` both end the loop; the claim drops
                 // with the handler either way. A connection or join failure
                 // leaves the handler, and leaving releases the claim.
-                while let SuccessorSyncConnectionStep::Connect(peer) =
+                while let ConnectionStep::Connect(peer) =
                     self.dht.advance_successor_sync_connection_plan(&mut plan)?
                 {
                     self.connect_dht_peer(peer).await?;
@@ -179,7 +177,7 @@ impl MessageHandler {
         let capacity = self.dht.successors().capacity();
         let candidates = topology::bounded_connection_candidates(
             self.dht.did,
-            StabilizationConnectionPlan::candidate_capacity(capacity),
+            stabilization_connection_budget(capacity),
             msg.info
                 .predecessor
                 .into_iter()
@@ -191,22 +189,22 @@ impl MessageHandler {
             .await;
         // The plan is re-advanced after each await, which lets the DHT reject a
         // stale request before the next advertised candidate is opened.
-        let mut plan = StabilizationConnectionPlan::new(
+        let mut plan = ConnectionPlan::new(
             reporter,
             claim.request_id(),
             candidates,
             self.dht.did,
-            capacity,
+            stabilization_connection_budget(capacity),
         );
         loop {
             match self.dht.advance_stabilization_connection_plan(&mut plan)? {
-                StabilizationConnectionStep::Connect { candidate, .. } => {
+                ConnectionStep::Connect(candidate) => {
                     // A connection failure leaves the handler, and leaving
                     // releases the claim.
                     self.connect_dht_peer(candidate).await?;
                 }
-                StabilizationConnectionStep::Complete => break,
-                StabilizationConnectionStep::Stale => return Ok(()),
+                ConnectionStep::Complete => break,
+                ConnectionStep::Stale => return Ok(()),
             }
         }
 

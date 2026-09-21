@@ -557,7 +557,7 @@ async fn test_incoming_offer_replaces_an_unroutable_admitted_generation() -> Res
         .prepare_connection_offer_with_attempt(peer_did, old_callback)
         .await?;
     assert!(local.activate_connection_for_test(old)?);
-    local.dht.join(peer_did)?;
+    local.dht.admit_connected(peer_did, None)?;
     local.force_peer_connection_state_without_callback(
         peer_did,
         WebrtcConnectionState::Disconnected,
@@ -681,7 +681,7 @@ async fn test_physical_connection_creation_serializes_replaced_generations() -> 
 #[tokio::test]
 async fn test_final_send_admission_serializes_generation_route_and_readiness() -> Result<()> {
     let (transport, peer, attempt) = transport_with_routable_peer().await?;
-    transport.dht.join(peer)?;
+    transport.dht.admit_connected(peer, None)?;
 
     let admitted = transport
         .admitted_send_connection(peer)?
@@ -953,7 +953,7 @@ async fn test_routable_join_serializes_with_generation_retirement() -> Result<()
 #[tokio::test]
 async fn test_topology_report_serializes_with_generation_retirement() -> Result<()> {
     let (transport, peer, attempt) = transport_with_routable_peer().await?;
-    transport.dht.join(peer)?;
+    transport.dht.admit_connected(peer, None)?;
     // Seed the same stabilization request id that the report below will spend.
     let request_id = uuid::Uuid::from_u128(1);
     let _ = transport.dht.begin_stabilization(request_id)?;

@@ -798,7 +798,7 @@ impl SwarmTransport {
                 // than becoming an admission proof with no transport owner.
                 let mut pending_updates = self.pending_finger_updates()?;
                 match self.dht.defer_fixed_finger(request, peer)? {
-                    FingerDeferOutcome::Deferred { .. } => {
+                    FingerDeferOutcome::Deferred => {
                         // The DHT owns one attempt at a time, so a generation
                         // retains one proof; a newer request replaces one the
                         // DHT has already released.
@@ -824,7 +824,7 @@ impl SwarmTransport {
                 self.dht
                     .defer_fixed_finger(request, peer)
                     .map(|outcome| match outcome {
-                        FingerDeferOutcome::Deferred { .. } => FingerUpdateDisposition::Missing,
+                        FingerDeferOutcome::Deferred => FingerUpdateDisposition::Missing,
                         FingerDeferOutcome::Rejected(rejection) => {
                             FingerUpdateDisposition::Rejected(rejection)
                         }

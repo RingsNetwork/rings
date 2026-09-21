@@ -2,8 +2,6 @@
 use rings_transport::connections::dummy_controlled;
 use rings_transport::core::transport::WebrtcConnectionState;
 
-#[cfg(feature = "dummy")]
-use crate::dht::successor::SuccessorReader;
 use crate::ecc::tests::gen_ordered_keys;
 use crate::ecc::SecretKey;
 use crate::error::Error;

@@ -371,9 +371,6 @@ pub(crate) fn lower_dht_action<'payload>(
                 CoreEffect::connect_dht_peer(*successor)
             }))
         }
-        PeerRingAction::RemoteAction(peer, PeerRingRemoteAction::TryConnect) => {
-            Ok(Some(CoreEffect::connect_dht_peer(*peer)))
-        }
         PeerRingAction::StorageRepairDue => Ok(Some(CoreEffect::request_storage_repair())),
         PeerRingAction::RemoteAction(target, PeerRingRemoteAction::Notify(predecessor)) => {
             let (target, predecessor) = (*target, *predecessor);
@@ -526,8 +523,6 @@ mod tests {
     use std::task::Waker;
 
     use super::*;
-    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-    use crate::dht::types::Chord;
     use crate::ecc::SecretKey;
     use crate::message::types::QueryFor;
     use crate::message::MessageSigner;
@@ -614,9 +609,7 @@ mod tests {
         let payload = payload(destination)?;
         let effect = CoreEffect::send_report_message(
             &payload,
-            Message::NotifyPredecessorReport(crate::message::NotifyPredecessorReport {
-                did: destination,
-            }),
+            Message::NotifyPredecessorSend(NotifyPredecessorSend { did: destination }),
         );
 
         match effect {
@@ -626,10 +619,10 @@ mod tests {
             } => {
                 assert!(std::ptr::eq(effect_payload, &payload));
                 match *msg {
-                    Message::NotifyPredecessorReport(report) => assert_eq!(report.did, destination),
+                    Message::NotifyPredecessorSend(notify) => assert_eq!(notify.did, destination),
                     msg => {
                         return Err(Error::InvalidMessage(format!(
-                            "expected NotifyPredecessorReport, got {msg:?}"
+                            "expected NotifyPredecessorSend, got {msg:?}"
                         )))
                     }
                 }
@@ -865,7 +858,7 @@ mod tests {
             rings_transport::core::transport::WebrtcConnectionState::Connected,
         )
         .await?;
-        first.dht().join(second.did())?;
+        first.dht().admit_connected(second.did(), None)?;
 
         let callback: SharedSwarmCallback = Arc::new(NoopCallback);
         let interpreter = CoreEffectInterpreter::new(&first.swarm.transport, &callback);
@@ -882,7 +875,7 @@ mod tests {
             .is_some());
 
         let missing = did();
-        first.dht().join(missing)?;
+        first.dht().admit_connected(missing, None)?;
         let failed = QueryForTopoInfoSend::new_for_sync(missing);
         // Failed sends must remove the otherwise claimable successor-sync slot.
         let failed_request_id = failed.request_id;

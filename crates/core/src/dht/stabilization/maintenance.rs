@@ -546,7 +546,11 @@ pub(crate) fn finger_schedule_deadline_for_test(
     failure_streak: u8,
 ) -> u64 {
     let mut schedule = MaintenanceSchedule::new(0, Duration::from_secs(15), local, jitter_entropy);
-    let _ = schedule.poll(0, false, FingerConvergenceStatus::new(true, failure_streak));
+    let _ = schedule.poll(
+        0,
+        false,
+        FingerConvergenceStatus::idle(true, failure_streak),
+    );
     schedule.next_finger_ms
 }
 
@@ -581,7 +585,7 @@ pub(crate) fn finger_schedule_resumed_deadline_for_test(
     jitter_entropy: uuid::Uuid,
 ) -> (u64, u64) {
     let mut schedule = MaintenanceSchedule::new(0, Duration::from_secs(15), local, jitter_entropy);
-    let status = FingerConvergenceStatus::new(true, 0);
+    let status = FingerConvergenceStatus::idle(true, 0);
     let _ = schedule.poll(0, false, status);
     let resumed_at_ms = schedule
         .next_finger_ms
@@ -814,7 +818,7 @@ mod tests {
 
     /// Compact pending/inactive finger status fixture with no failures.
     const fn finger_status(pending: bool) -> FingerConvergenceStatus {
-        FingerConvergenceStatus::new(pending, 0)
+        FingerConvergenceStatus::idle(pending, 0)
     }
 
     /// Verifies that stabilization and storage repair occupy distinct offsets

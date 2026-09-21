@@ -42,10 +42,11 @@ use crate::dht::finger::finger_lookup_backoff_ms;
 use crate::dht::finger::finger_proof_end;
 use crate::dht::finger::FINGER_LOOKUP_MIN_INTERVAL_MS;
 use crate::dht::finger_awaiting_report_deadline_for_test;
+use crate::dht::topology::stabilization_connection_budget;
 use crate::dht::topology::step;
 use crate::dht::topology::successor_head;
-use crate::dht::topology::StabilizationConnectionPlan;
-use crate::dht::topology::StabilizationConnectionStep;
+use crate::dht::topology::ConnectionPlan;
+use crate::dht::topology::ConnectionStep;
 use crate::dht::topology::SuccessorRemoval;
 use crate::dht::topology::TopologyAction;
 use crate::dht::topology::TopologyEvent;
@@ -95,8 +96,10 @@ impl FingerRetryState {
         let local = Did::from(0u32);
         let joined = step(
             &TopologyState::new(local, Vec::new(), None, vec![None; 4]),
-            TopologyEvent::Join {
+            TopologyEvent::Admit {
                 peer: Did::from(1u32),
+                deferred_proof: None,
+                now_ms: 0,
             },
             DEFAULT_SUCCESSOR_CAPACITY,
         );
@@ -368,22 +371,21 @@ impl FingerRetryState {
     /// Cycles through topology events that can invalidate finger evidence while
     /// staying independent from retry failure accounting.
     ///
-    /// The bounded cycle covers join, admission, successor change, stabilization,
-    /// and removal without unboundedly expanding the action alphabet.
+    /// The bounded cycle covers two admissions, stabilization, and removal
+    /// without unboundedly expanding the action alphabet.
     fn change_topology(&self) -> Self {
         let event = match self.next_topology_mutation {
-            0 => TopologyEvent::Join {
+            0 => TopologyEvent::Admit {
                 peer: Did::from(4u32),
+                deferred_proof: None,
+                now_ms: self.now_ms,
             },
             1 => TopologyEvent::Admit {
                 peer: Did::from(6u32),
                 deferred_proof: None,
                 now_ms: self.now_ms,
             },
-            2 => TopologyEvent::UpdateSuccessor {
-                successor: Did::from(16u32),
-            },
-            3 => return self.stabilize_from_head(),
+            2 => return self.stabilize_from_head(),
             _ => TopologyEvent::Remove {
                 peer: self
                     .topology
@@ -397,7 +399,7 @@ impl FingerRetryState {
         let output = step(&self.topology, event, DEFAULT_SUCCESSOR_CAPACITY);
         let mut next = self.clone();
         next.topology = output.state;
-        next.next_topology_mutation = self.next_topology_mutation.saturating_add(1) % 5;
+        next.next_topology_mutation = self.next_topology_mutation.saturating_add(1) % 4;
         next
     }
 
@@ -408,7 +410,7 @@ impl FingerRetryState {
     /// Without a head there is no round and the cycle simply advances.
     fn stabilize_from_head(&self) -> Self {
         let mut next = self.clone();
-        next.next_topology_mutation = self.next_topology_mutation.saturating_add(1) % 5;
+        next.next_topology_mutation = self.next_topology_mutation.saturating_add(1) % 4;
         let Some(reporter) = successor_head(&self.topology) else {
             return next;
         };
@@ -452,7 +454,11 @@ impl FingerRetryState {
             Some(seed) => {
                 step(
                     &fresh,
-                    TopologyEvent::Join { peer: seed },
+                    TopologyEvent::Admit {
+                        peer: seed,
+                        deferred_proof: None,
+                        now_ms: 0,
+                    },
                     DEFAULT_SUCCESSOR_CAPACITY,
                 )
                 .state
@@ -611,11 +617,11 @@ struct StabilizationModelState {
     /// Current `(reporter, request_id, claimed)` proof owner, when present.
     current: Option<(Did, uuid::Uuid, bool)>,
     /// Bounded candidate iterator created after the current proof is claimed.
-    current_plan: Option<StabilizationConnectionPlan>,
+    current_plan: Option<ConnectionPlan>,
     /// Retired proofs retained only for stale-delivery actions.
     superseded: Vec<(Did, uuid::Uuid)>,
     /// Retired plans retained to verify they cannot emit new effects.
-    superseded_plans: Vec<StabilizationConnectionPlan>,
+    superseded_plans: Vec<ConnectionPlan>,
     /// Request IDs with a permitted but not yet executed connection effect.
     reserved_connection_effects: Vec<uuid::Uuid>,
     /// Executed effect counts grouped by the request that authorized them.
@@ -633,8 +639,10 @@ impl StabilizationModelState {
         let local = Did::from(0u32);
         let joined = step(
             &TopologyState::new(local, Vec::new(), None, vec![None; 4]),
-            TopologyEvent::Join {
+            TopologyEvent::Admit {
                 peer: Did::from(4u32),
+                deferred_proof: None,
+                now_ms: 0,
             },
             DEFAULT_SUCCESSOR_CAPACITY,
         );
@@ -708,12 +716,12 @@ impl StabilizationModelState {
         let mut next = self.clone();
         next.topology = output.state;
         next.current = Some((reporter, request_id, true));
-        next.current_plan = Some(StabilizationConnectionPlan::new(
+        next.current_plan = Some(ConnectionPlan::new(
             reporter,
             request_id,
             (1..=10u32).map(Did::from),
             self.topology.local,
-            DEFAULT_SUCCESSOR_CAPACITY,
+            stabilization_connection_budget(DEFAULT_SUCCESSOR_CAPACITY),
         ));
         next
     }
@@ -753,10 +761,11 @@ impl StabilizationModelState {
         let Some(plan) = next.current_plan.as_mut() else {
             return next;
         };
-        if let StabilizationConnectionStep::Connect { request_id, .. } =
-            plan.advance(&next.topology)
-        {
-            next.reserved_connection_effects.push(request_id);
+        let topology = &next.topology;
+        if let ConnectionStep::Connect(_) = plan.advance(|reporter, request_id| {
+            topology.is_processing_stabilization_report(reporter, request_id)
+        }) {
+            next.reserved_connection_effects.push(plan.request_id());
         }
         next
     }
@@ -783,9 +792,11 @@ impl StabilizationModelState {
         let Some(plan) = next.superseded_plans.last_mut() else {
             return next;
         };
-        if let StabilizationConnectionStep::Connect { request_id, .. } =
-            plan.advance(&next.topology)
-        {
+        let topology = &next.topology;
+        if let ConnectionStep::Connect(_) = plan.advance(|reporter, request_id| {
+            topology.is_processing_stabilization_report(reporter, request_id)
+        }) {
+            let request_id = plan.request_id();
             next.record_connection_effect(request_id);
         }
         next
@@ -883,8 +894,10 @@ impl StabilizationModelState {
                 let previous_head = successor_head(&self.topology);
                 let output = step(
                     &self.topology,
-                    TopologyEvent::Join {
+                    TopologyEvent::Admit {
                         peer: Did::from(2u32),
+                        deferred_proof: None,
+                        now_ms: 0,
                     },
                     DEFAULT_SUCCESSOR_CAPACITY,
                 );
