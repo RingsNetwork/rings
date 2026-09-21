@@ -338,62 +338,111 @@ jobs:
       - name: Cache cargo registry and build artifacts
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
-      - name: Build
-        run: cargo build --all --verbose
+      # Keep one feature graph and artifact set for ordinary and privileged tests.
+      - name: Compile native test executables once
+        run: |
+          mkdir -p target/ci-evidence
+          cargo test --locked --profile ci --workspace --all-targets --no-run --timings --message-format=json > target/ci-evidence/native.jsonl
 
-      - name: Run doc tests
-        run: cargo test --doc
-
-      - name: Run dummy tests
-        run: cargo test -p rings-core --features dummy --verbose
-
-      - name: Run transport dummy tests
-        run: cargo test -p rings-transport --no-default-features --features dummy --verbose
-
-      - name: Run tests
-        run: cargo test --release --all --all-targets --verbose
+      - name: Run native tests and require the complete model gate
+        env:
+          # Large exhaustive searches share this runner; cap concurrent harness tests.
+          RUST_TEST_THREADS: 2
+        run: >-
+          python3 scripts/run-ci-tests.py target/ci-evidence/native.jsonl
+          --inventory target/ci-evidence/native-inventory.json
+          --require-file scripts/ci-native-model-tests.txt
 
       - name: Exercise captured TCP through a two-hop Onion public exit
-        run: |
-          cargo test --release -p rings-node \
-            processor::tests::test_gateway::captured_tcp_reaches_public_http_only_through_two_hop_onion_route \
-            -- --ignored --exact --nocapture
+        run: >-
+          python3 scripts/run-ci-tests.py target/ci-evidence/native.jsonl
+          --inventory target/ci-evidence/captured-tcp-inventory.json
+          --target rings_node --ignored --exact --nocapture
+          --filter processor::tests::test_gateway::captured_tcp_reaches_public_http_only_through_two_hop_onion_route
 
       - name: Exercise privileged Linux TUN and route cleanup
-        run: |
-          set -euo pipefail
-          gateway_test="$(
-            cargo test --release -p rings-gateway --test native_gateway --no-run --message-format=json |
-              python3 scripts/find-cargo-test-binary.py native_gateway
-          )"
-          test -n "$gateway_test"
-          sudo "$gateway_test" \
-            privileged_native_tunnel_establishes_and_cleans_up \
-            --ignored --exact --nocapture
+        run: >-
+          python3 scripts/run-ci-tests.py target/ci-evidence/native.jsonl
+          --inventory target/ci-evidence/tun-inventory.json
+          --target native_gateway --ignored --exact --nocapture --sudo
+          --filter privileged_native_tunnel_establishes_and_cleans_up
 
       - name: Exercise privileged Linux helper, fd retention, and disconnect recovery
-        run: |
-          set -euo pipefail
-          helper_test="$(
-            cargo test --release -p rings-gateway --test unix_helper --no-run --message-format=json |
-              python3 scripts/find-cargo-test-binary.py unix_helper
-          )"
-          test -n "$helper_test"
-          sudo "$helper_test" \
-            privileged_helper_retains_and_recovers_a_disconnected_lease \
-            --ignored --exact --nocapture
+        run: >-
+          python3 scripts/run-ci-tests.py target/ci-evidence/native.jsonl
+          --inventory target/ci-evidence/helper-inventory.json
+          --target unix_helper --ignored --exact --nocapture --sudo
+          --filter privileged_helper_retains_and_recovers_a_disconnected_lease
 
       - name: Exercise kernel TCP through Linux TUN and two-hop Onion exit
+        run: >-
+          python3 scripts/run-ci-tests.py target/ci-evidence/native.jsonl
+          --inventory target/ci-evidence/kernel-tcp-inventory.json
+          --target rings_node --ignored --exact --nocapture --sudo
+          --filter processor::tests::test_gateway::real_linux_tun_tcp_reaches_public_http_through_two_hop_onion_route
+
+      - name: Upload native timings and test inventory
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-test-evidence
+          path: |
+            target/ci-evidence/
+            target/cargo-timings/
+
+  native_build_docs:
+    name: Native debug build and doctests
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
+      - name: Setup Rust
         run: |
-          set -euo pipefail
-          node_test="$(
-            cargo test --release -p rings-node --lib --no-run --message-format=json |
-              python3 scripts/find-cargo-test-binary.py rings_node
-          )"
-          test -n "$node_test"
-          sudo "$node_test" \
-            processor::tests::test_gateway::real_linux_tun_tcp_reaches_public_http_through_two_hop_onion_route \
-            --ignored --exact --nocapture
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Preserve native debug build coverage
+        run: cargo build --locked --workspace
+      - name: Run default and dummy doctests
+        run: |
+          cargo test --locked --doc
+          cargo test --locked -p rings-core --features dummy --doc
+          cargo test --locked -p rings-transport --no-default-features --features dummy --doc
+
+  dummy_tests:
+    name: Dummy transport tests
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
+      - name: Setup Rust
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Compile and run core dummy tests
+        env:
+          RUST_TEST_THREADS: 2
+        run: |
+          mkdir -p target/ci-evidence
+          cargo test --locked --profile ci -p rings-core --features dummy --no-run --timings --message-format=json > target/ci-evidence/core-dummy.jsonl
+          python3 scripts/run-ci-tests.py target/ci-evidence/core-dummy.jsonl \
+            --inventory target/ci-evidence/core-dummy-inventory.json \
+            --skip-file scripts/ci-native-model-tests.txt \
+            --skip tests::default::test_sync_storm::
+      - name: Compile and run transport dummy tests
+        run: |
+          cargo test --locked --profile ci -p rings-transport --no-default-features --features dummy --no-run --timings --message-format=json > target/ci-evidence/transport-dummy.jsonl
+          python3 scripts/run-ci-tests.py target/ci-evidence/transport-dummy.jsonl \
+            --inventory target/ci-evidence/transport-dummy-inventory.json
+      - name: Upload dummy timings and test inventory
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dummy-test-evidence
+          path: |
+            target/ci-evidence/
+            target/cargo-timings/
 
   build_ffi:
     name: Build and test for examples
@@ -533,6 +582,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
+
+      - name: Test CI selection and artifact reuse guards
+        run: python3 scripts/test-ci-tests.py
 
       - name: Check typos
         uses: crate-ci/typos@37bb98842b0d8c4ffebdb75301a13db0267cef89 # v1.47.2

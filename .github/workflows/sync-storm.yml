@@ -5,14 +5,18 @@ on:
     branches:
       - master
       - develop
-    paths:
-      - ".github/workflows/sync-storm.yml"
-      - "crates/core/**"
-      - "crates/transport/**"
-      - "scripts/check-sync-storm-time-leaks.sh"
+  push:
+    branches:
+      - master
   schedule:
     - cron: "23 19 * * *"
   workflow_dispatch:
+
+# This is the sole PR/master owner of the storm suite. Do not path-filter it:
+# Cargo features, workspace dependencies, and helper changes can affect these tests.
+concurrency:
+  group: sync-storm-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -24,7 +28,7 @@ env:
 jobs:
   sync-storm-pr:
     name: Ring and hotspot deterministic replay
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
     timeout-minutes: 20
     runs-on: ubuntu-latest
     env:
@@ -35,22 +39,34 @@ jobs:
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
           rustup default "$RUST_TOOLCHAIN"
+      - name: Cache Rust dependencies and test artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Compile storm executable once
+        run: |
+          mkdir -p target/ci-evidence
+          cargo test --locked --profile ci -p rings-core --features dummy --no-default-features --no-run --timings --message-format=json > target/ci-evidence/storm.jsonl
       - name: Reject simulation system-time leaks
         run: bash scripts/check-sync-storm-time-leaks.sh
       - name: Run PR sync-storm gate
         run: >-
-          cargo test -p rings-core --features dummy --no-default-features
-          test_sync_storm -- --nocapture
+          python3 scripts/run-ci-tests.py target/ci-evidence/storm.jsonl
+          --inventory target/ci-evidence/storm-inventory.json --nocapture
+          --filter tests::default::test_sync_storm::
       - name: Run PR N=10/25/50 scale gate
         run: >-
-          cargo test -p rings-core --features dummy --no-default-features
-          test_pr_ring_and_hotspot_size_matrix -- --ignored --nocapture
+          python3 scripts/run-ci-tests.py target/ci-evidence/storm.jsonl
+          --inventory target/ci-evidence/scale-inventory.json
+          --ignored --exact --nocapture
+          --filter tests::default::test_sync_storm::cases::test_pr_ring_and_hotspot_size_matrix
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         name: Upload PR sync-storm traces
         with:
-          name: sync-storm-pr-traces-${{ github.event.pull_request.number }}
-          path: target/sync-storm-traces
+          name: sync-storm-pr-traces-${{ github.run_id }}
+          path: |
+            target/sync-storm-traces/
+            target/ci-evidence/
+            target/cargo-timings/
           if-no-files-found: error
 
   sync-storm-nightly:
@@ -66,14 +82,22 @@ jobs:
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
           rustup default "$RUST_TOOLCHAIN"
+      - name: Cache Rust dependencies and test artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Compile storm executable once
+        run: |
+          mkdir -p target/ci-evidence
+          cargo test --locked --profile ci -p rings-core --features dummy --no-default-features --no-run --timings --message-format=json > target/ci-evidence/storm.jsonl
       - name: Reject simulation system-time leaks
         run: bash scripts/check-sync-storm-time-leaks.sh
       - name: Run nightly size and seed matrices
         run: |
-          cargo test -p rings-core --features dummy --no-default-features \
-            test_pr_ring_and_hotspot_size_matrix -- --ignored --nocapture
-          cargo test -p rings-core --features dummy --no-default-features \
-            test_nightly_extended_seed_matrix -- --ignored --nocapture
+          python3 scripts/run-ci-tests.py target/ci-evidence/storm.jsonl \
+            --inventory target/ci-evidence/scale-inventory.json --ignored --exact --nocapture \
+            --filter tests::default::test_sync_storm::cases::test_pr_ring_and_hotspot_size_matrix
+          python3 scripts/run-ci-tests.py target/ci-evidence/storm.jsonl \
+            --inventory target/ci-evidence/seeds-inventory.json --ignored --exact --nocapture \
+            --filter tests::default::test_sync_storm::cases::test_nightly_extended_seed_matrix
       - name: Publish replay index
         if: always()
         run: |
@@ -87,5 +111,8 @@ jobs:
         name: Upload sync-storm traces
         with:
           name: sync-storm-traces
-          path: target/sync-storm-traces
+          path: |
+            target/sync-storm-traces/
+            target/ci-evidence/
+            target/cargo-timings/
           if-no-files-found: ignore

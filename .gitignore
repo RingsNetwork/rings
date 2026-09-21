@@ -56,3 +56,8 @@ frontend/.generated/
 
 # mdBook output of docs/
 docs/book/
+
+# CI execution and coverage-ownership helpers.
+!scripts/run-ci-tests.py
+!scripts/ci-native-model-tests.txt
+!scripts/test-ci-tests.py
