@@ -75,7 +75,7 @@ impl SwarmTransport {
         resource: Did,
         redundancy: u16,
     ) -> Result<StorageLookupObservationKey> {
-        self.ensure_storage_redundancy_value(redundancy)?;
+        self.ensure_storage_redundancy(redundancy)?;
         Ok(StorageLookupObservationKey {
             resource,
             redundancy,

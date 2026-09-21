@@ -5,7 +5,6 @@
 //! placement, storage virtual-node ownership, read repair, and sync hand-off.
 
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -312,15 +311,12 @@ impl PeerRing {
     }
 
     fn storage_virtual_nodes_for_topology(&self, state: &TopologyState) -> StorageVirtualNodes {
-        let mut owners = BTreeSet::new();
         // Pre: `state` is this node's authenticated topology view.
-        // Post: the virtual-owner set is exactly the physical DIDs currently
-        // visible to storage routing: local, successors, predecessor, and
-        // fingers. It is an observed view, not a global registry.
+        // Post: the virtual-owner set is `{local} ∪ { p | Referenced(n, p) }`,
+        // the physical DIDs currently visible to storage routing. It is an
+        // observed view, not a global registry.
+        let mut owners = state.referenced_peers();
         owners.insert(state.local);
-        owners.extend(state.successors.iter().copied());
-        owners.extend(state.predecessor);
-        owners.extend(state.fingers.iter().flatten().copied());
         StorageVirtualNodes::from_owners(self.storage_virtual_node_config(), owners)
     }
 
@@ -423,11 +419,9 @@ impl PeerRing {
             && self.next_hop_for_storage_sync_in(state, destination) == Some(next_hop)
     }
 
+    /// `Referenced(n, p)`, extended to the local node: a route may terminate here.
     fn routing_peer_registered_in(state: &TopologyState, peer: Did) -> bool {
-        peer == state.local
-            || state.successors.contains(&peer)
-            || state.predecessor == Some(peer)
-            || state.fingers.iter().flatten().any(|did| *did == peer)
+        peer == state.local || state.references(peer)
     }
 
     // Pre: `state` is one authenticated topology snapshot.

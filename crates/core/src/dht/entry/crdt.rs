@@ -7,9 +7,9 @@
 //!
 //! Semilattice laws:
 //! - `DataTopicBuffer` join is idempotent, commutative, and associative over
-//!   normalized LWW element sets.
-//! - `RelayMessageSet` join is idempotent, commutative, and associative over
-//!   normalized two-phase sets.
+//!   normalized LWW element sets with two-phase tombstones; a data topic and a
+//!   relay inbox are the same carrier, their per-kind authority and tombstone
+//!   cap are enforced by the entry, not by a second set type.
 //!
 //! Constructor postconditions:
 //! - `DataTopicBuffer::new` preserves only values whose dot is at or after the
@@ -157,29 +157,5 @@ impl JoinSemilattice for DataTopicBuffer {
                 .or_insert(dot);
         }
         Self::new(self.register, self.values, self.removes)
-    }
-}
-
-/// Two-phase set used by relay-message storage.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct RelayMessageSet {
-    pub(super) adds: DataTopicBuffer,
-    pub(super) removes: BTreeSet<EntryDot>,
-}
-
-impl RelayMessageSet {
-    pub(super) fn new(mut adds: DataTopicBuffer, removes: BTreeSet<EntryDot>) -> Self {
-        let mut removes = removes;
-        removes.extend(adds.removes.iter().copied());
-        adds = DataTopicBuffer::new(adds.register, adds.values, removes.clone());
-        Self { adds, removes }
-    }
-}
-
-impl JoinSemilattice for RelayMessageSet {
-    fn join(mut self, other: Self) -> Self {
-        self.adds = self.adds.join(other.adds);
-        self.removes.extend(other.removes);
-        Self::new(self.adds, self.removes)
     }
 }

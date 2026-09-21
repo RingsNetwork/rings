@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use super::pending::RetirementOutcome;
 use super::*;
-use crate::dht::Chord;
+use crate::dht::topology::TopologyRemoval;
 
 /// A transport whose application callback is a fresh event log.
 fn transport_with_log() -> Result<(SwarmTransport, Arc<EventLog>)> {
@@ -25,10 +25,10 @@ async fn test_announced_admission_is_reported_retired_once() -> Result<()> {
     assert!(transport.activate_connection_for_test(attempt)?);
     assert!(transport.mark_admission_announced(attempt)?);
 
-    assert!(transport.disconnect_attempt(attempt).await?);
+    assert!(transport.disconnect_attempt(attempt).await?.is_some());
     assert_eq!(log.retired(), vec![peer]);
 
-    assert!(!transport.disconnect_attempt(attempt).await?);
+    assert!(transport.disconnect_attempt(attempt).await?.is_none());
     assert_eq!(
         log.retired(),
         vec![peer],
@@ -46,7 +46,7 @@ async fn test_unannounced_admission_retires_silently() -> Result<()> {
     let attempt = transport.reserve_pending_connection(peer).await?;
     assert!(transport.activate_connection_for_test(attempt)?);
 
-    assert!(transport.disconnect_attempt(attempt).await?);
+    assert!(transport.disconnect_attempt(attempt).await?.is_some());
     assert!(log.retired().is_empty());
     Ok(())
 }
@@ -60,16 +60,41 @@ async fn test_announcement_is_bound_to_the_active_generation() -> Result<()> {
     let old = transport.reserve_pending_connection(peer).await?;
     assert!(transport.activate_connection_for_test(old)?);
     assert!(transport.mark_admission_announced(old)?);
-    assert!(transport.disconnect_attempt(old).await?);
+    assert!(transport.disconnect_attempt(old).await?.is_some());
     assert!(!transport.mark_admission_announced(old)?);
 
     let replacement = transport.reserve_pending_connection(peer).await?;
     assert!(transport.activate_connection_for_test(replacement)?);
-    assert!(transport.disconnect_attempt(replacement).await?);
+    assert!(transport.disconnect_attempt(replacement).await?.is_some());
     assert_eq!(
         log.retired(),
         vec![peer],
         "the unannounced replacement generation retires silently"
+    );
+    Ok(())
+}
+
+/// A disconnect reports whether the topology referenced the peer in the state the removal was
+/// applied to: an admitted peer no slot holds is removed as `Unreferenced`, an admitted
+/// successor as `Referenced`.
+#[tokio::test]
+async fn test_disconnect_reports_whether_the_topology_referenced_the_peer() -> Result<()> {
+    let (transport, _log) = transport_with_log()?;
+    let unreferenced = SecretKey::random().address().into();
+    let attempt = transport.reserve_pending_connection(unreferenced).await?;
+    assert!(transport.activate_connection_for_test(attempt)?);
+    assert_eq!(
+        transport.disconnect_attempt(attempt).await?,
+        Some(TopologyRemoval::Unreferenced)
+    );
+
+    let referenced = SecretKey::random().address().into();
+    let attempt = transport.reserve_pending_connection(referenced).await?;
+    assert!(transport.activate_connection_for_test(attempt)?);
+    transport.dht.admit_connected(referenced, None)?;
+    assert_eq!(
+        transport.disconnect_attempt(attempt).await?,
+        Some(TopologyRemoval::Referenced)
     );
     Ok(())
 }
@@ -83,7 +108,7 @@ async fn test_topology_prune_keeps_the_record_and_reports_nothing() -> Result<()
     let attempt = transport.reserve_pending_connection(peer).await?;
     assert!(transport.activate_connection_for_test(attempt)?);
     assert!(transport.mark_admission_announced(attempt)?);
-    transport.dht.join(peer)?;
+    transport.dht.admit_connected(peer, None)?;
 
     assert!(transport
         .remove_unavailable_topology(peer, Some(attempt))?
@@ -91,7 +116,7 @@ async fn test_topology_prune_keeps_the_record_and_reports_nothing() -> Result<()
     assert!(transport.is_active_connection_attempt(attempt));
     assert!(log.retired().is_empty());
 
-    assert!(transport.disconnect_attempt(attempt).await?);
+    assert!(transport.disconnect_attempt(attempt).await?.is_some());
     assert_eq!(log.retired(), vec![peer]);
     Ok(())
 }
@@ -107,7 +132,7 @@ async fn test_eviction_of_an_unreferenced_peer_is_reported_retired() -> Result<(
     let kept = transport.reserve_pending_connection(referenced).await?;
     assert!(transport.activate_connection_for_test(kept)?);
     assert!(transport.mark_admission_announced(kept)?);
-    transport.dht.join(referenced)?;
+    transport.dht.admit_connected(referenced, None)?;
     let evicted = transport.reserve_pending_connection(unreferenced).await?;
     assert!(transport.activate_connection_for_test(evicted)?);
     assert!(transport.mark_admission_announced(evicted)?);

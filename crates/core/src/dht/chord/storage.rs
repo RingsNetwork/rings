@@ -16,7 +16,7 @@ use crate::dht::entry::EntryOperation;
 use crate::dht::entry::PlacedEntryOperation;
 use crate::dht::entry::PlacementMiss;
 use crate::dht::entry::SyncedEntryAck;
-use crate::dht::types::ChordStorage;
+use crate::dht::topology;
 use crate::dht::types::ChordStorageCache;
 use crate::dht::Did;
 use crate::dht::EntryStorage;
@@ -243,11 +243,7 @@ impl PeerRing {
     }
 
     fn storage_fetch_fallback_successor(&self) -> Result<Option<Did>> {
-        Ok(self
-            .topology_state()?
-            .successors
-            .into_iter()
-            .find(|successor| *successor != self.did))
+        Ok(topology::successor_head(&self.topology_state()?))
     }
 
     async fn entry_lookup_inner(
@@ -332,7 +328,7 @@ impl PeerRing {
     /// owner for an existing placement before sync has copied historical data
     /// locally. Local fetches may ask a known successor for that placement so
     /// read repair can converge instead of treating the fresh local miss as
-    /// authoritative. Remote `SearchEntry` handling uses [`ChordStorage`] and
+    /// authoritative. Remote `SearchEntry` handling uses [`Self::entry_lookup`] and
     /// intentionally does not enable this fallback.
     pub(crate) async fn entry_lookup_for_fetch(
         &self,
@@ -342,9 +338,24 @@ impl PeerRing {
         self.entry_lookup_inner(entry_key, true, redundancy).await
     }
 
+    /// Look up an [`Entry`] by its ring key under `redundancy` placements, always
+    /// through the DHT and never the local cache.
+    ///
+    /// An [`Entry`] key has the same representation as a node [`Did`], but it is
+    /// not a node identity: it only chooses the node responsible for storing the
+    /// entry. The returned action forwards the lookup when the storing node is
+    /// not this one.
+    pub(crate) async fn entry_lookup(
+        &self,
+        entry_key: Did,
+        redundancy: u16,
+    ) -> Result<PeerRingAction> {
+        self.entry_lookup_inner(entry_key, false, redundancy).await
+    }
+
     /// Apply `op` under a runtime `redundancy`: locally at every accepted placement, and as a
     /// [`RemoteAction::FindEntryForOperate`] toward every remote one.
-    pub(crate) async fn entry_operate_with_redundancy(
+    pub(crate) async fn entry_operate(
         &self,
         op: EntryOperation,
         redundancy: u16,
@@ -379,18 +390,6 @@ impl PeerRing {
             }
         }
         Ok(ret.into())
-    }
-}
-
-#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
-#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
-impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing {
-    async fn entry_lookup(&self, entry_key: Did) -> Result<PeerRingAction> {
-        self.entry_lookup_inner(entry_key, false, REDUNDANT).await
-    }
-
-    async fn entry_operate(&self, op: EntryOperation) -> Result<PeerRingAction> {
-        self.entry_operate_with_redundancy(op, REDUNDANT).await
     }
 }
 

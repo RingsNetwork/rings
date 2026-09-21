@@ -84,14 +84,6 @@ use crate::dht::Did;
 use crate::error::Result;
 use crate::utils::get_epoch_ms;
 
-fn merge_actions(actions: Vec<PeerRingAction>) -> PeerRingAction {
-    if actions.is_empty() {
-        PeerRingAction::None
-    } else {
-        PeerRingAction::MultiActions(actions)
-    }
-}
-
 fn push_action(actions: &mut Vec<PeerRingAction>, action: PeerRingAction) {
     match action {
         PeerRingAction::None => {}
@@ -105,25 +97,6 @@ fn push_action(actions: &mut Vec<PeerRingAction>, action: PeerRingAction) {
 }
 
 impl PeerRing {
-    /// `StorageResponsible(n, p)`: removing or evicting `p` may leave locally
-    /// held entries under-replicated, so the caller should schedule repair.
-    ///
-    /// Law: `StorageResponsible(n, p) ⟺ Referenced(n, p)`. The virtual-owner
-    /// set is built from exactly the successor, predecessor, and finger slots
-    /// (`storage_virtual_nodes_for_topology`), and every placement witness
-    /// produced by `find_successor` is the successor head or a finger, so no
-    /// storage scan can name a peer outside those slots. The predicate keeps
-    /// its storage-facing name because that is the proposition callers decide
-    /// on; its evidence is the topology alone.
-    // Pre: peer is a terminal, departing, or eviction-candidate DID under the
-    // caller's routing view.
-    // Post: true iff peer occupies a routing slot that storage placement can
-    // resolve to. Preservation S1: this predicate performs no storage
-    // writes/removes and reads no entries.
-    pub(crate) fn peer_may_share_storage_responsibility(&self, peer: Did) -> Result<bool> {
-        Ok(self.topology_state()?.references(peer))
-    }
-
     async fn copy_entry_to_placement(
         &self,
         now_ms: u128,
@@ -204,7 +177,7 @@ impl PeerRing {
                 .await?;
             push_action(&mut actions, action);
         }
-        Ok(merge_actions(actions))
+        Ok(PeerRingAction::from(actions))
     }
 }
 
@@ -230,7 +203,7 @@ impl ChordStorageRepair<PeerRingAction> for PeerRing {
             let action = self.republish_entry(now_ms, entry, redundancy).await?;
             push_action(&mut actions, action);
         }
-        Ok(merge_actions(actions))
+        Ok(PeerRingAction::from(actions))
     }
 
     async fn read_repair_entry(
@@ -259,6 +232,6 @@ impl ChordStorageRepair<PeerRingAction> for PeerRing {
                 .await?;
             push_action(&mut actions, action);
         }
-        Ok(merge_actions(actions))
+        Ok(PeerRingAction::from(actions))
     }
 }

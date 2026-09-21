@@ -23,9 +23,6 @@ use super::*;
 use crate::chunk::Chunk;
 #[cfg(feature = "dummy")]
 use crate::chunk::ChunkMeta;
-use crate::dht::successor::SuccessorReader;
-#[cfg(feature = "dummy")]
-use crate::dht::Chord;
 use crate::dht::VirtualNodeConfig;
 use crate::dht::DEFAULT_FINGER_TABLE_SIZE;
 use crate::dht::DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
@@ -593,7 +590,7 @@ async fn test_successor_failover_considers_active_peer_outside_topology_hints() 
         open_dummy_data_channel_before_ice_connected(&transport, peer).await?;
         assert!(transport.activate_connection_for_test(attempt)?);
     }
-    transport.dht.join(removed)?;
+    transport.dht.admit_connected(removed, None)?;
     assert_eq!(transport.dht.successors().list()?, vec![removed]);
     assert!(!transport.dht.lock_finger()?.contains(Some(replacement)));
 

@@ -374,7 +374,7 @@ async fn observe_repair_feedback(
         .did();
     nodes[observer]
         .dht()
-        .join(remaining_peer)
+        .admit_connected(remaining_peer, None)
         .expect("remaining repair peer must be routable");
     nodes[observer]
         .dht()

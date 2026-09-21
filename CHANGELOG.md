@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Breaking changes
+
+- Subtraction round, DHT section (#787). Pre-CorrectChord defaults that #604 replaced are
+  removed: the `NotifyPredecessorReport` reply (message variant 5; later wire indices shift down
+  by one, a total cutover), the periodic predecessor notify to every successor (the stabilize
+  step notifies the head, as the paper specifies), and the `CorrectChord`/`LiveDid`/`TryConnect`
+  trait shell whose operations live on as `admit_connected`, `TopologyEvent::Notify` and
+  `begin_stabilization`. `EntryOperation::Touch` is folded into `Extend` (a lattice join since
+  #628): `storage_touch_data` is gone and callers use `storage_append_data`. The const-generic
+  `ChordStorage<_, REDUNDANT>` and `ChordStorageInterface<REDUNDANT>` become the plain
+  `ChordStorageInterface` over the transport's configured redundancy; the API mismatch error is
+  no longer reachable from it.
+
 ### Fixed
 
 - Preserve cancellation commands that arrive while the outbound worker is cancelling queued
@@ -26,6 +39,18 @@
   (identical to `peer_dids`), the cross-profile inequalities in the transport timeout profile,
   `TRANSPORT_MTU` (the frame size is negotiated per connection since #601; `TRANSPORT_MAX_SIZE`
   is the literal 60 MB ceiling), `BACKEND_MTU`, and the second storage-lookup eviction loop.
+
+- `rings_core::dht`: the fresh-connection storage repair grace (closed by the #745 pre-admission
+  hold), `RelayMessageSet` (`DataTopicBuffer` carries the tombstone set),
+  `peer_may_share_storage_responsibility` (the removal transition itself reports whether the
+  peer was referenced, as `TopologyRemoval`, and only that outcome requests the repair round;
+  the pre-removal read is gone), the `SuccessorReader` trait and `SortRing` (the successor
+  list is the committed value of `topology::step`), the dead `Did`/`BiasId` algebra (only
+  `Did::cmp_from_observer` survives), the mutable `StorageVirtualNodes` registry API,
+  `FingerTable::closest_predecessor`, and the #770 residue (`FingerAttemptStatus`, the twin
+  claim phases and connection plans, unread outcome payloads, restore-width normalisation and
+  serde on finger convergence state). One `ClaimPhase` and one `ConnectionPlan` serve both the
+  stabilization and successor-sync token machines.
 
 ## 0.28.0
 

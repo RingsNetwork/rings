@@ -9,7 +9,6 @@ use crate::consts::MAX_CHUNK_ENVELOPE_OVERHEAD;
 use crate::consts::TRANSPORT_CUSTOM_OVERHEAD;
 use crate::dht::chord::PeerRing;
 use crate::dht::chord::PeerRingAction;
-use crate::dht::did::BiasId;
 use crate::dht::entry::Entry;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
@@ -198,7 +197,7 @@ impl PeerRing {
     /// `key ∉ (self, head]`: the placement lies beyond this node's interval up to `head`, so
     /// `head` (or a node past it) owns it now.
     fn placed_beyond(&self, key: Did, head: Did) -> bool {
-        BiasId::cmp_from_observer(self.did, key, head) == std::cmp::Ordering::Greater
+        Did::cmp_from_observer(self.did, key, head) == std::cmp::Ordering::Greater
     }
 
     fn copy_entries_to_observed_virtual_storage_owners(

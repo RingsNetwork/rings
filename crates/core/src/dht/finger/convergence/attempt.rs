@@ -27,16 +27,14 @@
 //!   +---- mismatched duplicate ----------------------------> unchanged
 //! ```
 
-use serde::Deserialize;
-use serde::Serialize;
-
 use super::proof::FingerFixRequest;
 use super::proof::FingerRangeProof;
 use super::proof::FingerReportRejection;
+use super::status::FingerConvergencePhase;
 use crate::dht::Did;
 
 /// Lookup ownership while the query is waiting for its successor report.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) struct PendingFingerLookup {
     /// Correlation token emitted with the lookup.
     ///
@@ -53,7 +51,7 @@ pub(super) struct PendingFingerLookup {
 }
 
 /// Validated proof retained while transport admission decides usability.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) struct AdmissionFingerProof {
     /// Range proof already checked against Chord geometry and evidence epochs.
     ///
@@ -66,7 +64,7 @@ pub(super) struct AdmissionFingerProof {
 }
 
 /// Exactly one transport-independent ownership phase for finger convergence.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub(super) enum FingerAttempt {
     /// No lookup or retained proof is owned by the state machine.
     #[default]
@@ -106,33 +104,6 @@ pub(super) enum FingerProofSource {
         /// matched the active admission lease.
         FingerRangeProof,
     ),
-}
-
-/// Scheduler-facing projection of the active attempt.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum FingerAttemptStatus {
-    /// No request or admission lease exists.
-    ///
-    /// Emission still depends on evidence and retry pacing outside this enum.
-    Idle,
-    /// A lookup report has not arrived yet.
-    ///
-    /// Additional lookups are suppressed until this phase is consumed or expires.
-    AwaitingReport {
-        /// Saturating duration until the report deadline.
-        ///
-        /// Zero signals expiry without allowing arithmetic underflow.
-        remaining_ms: u64,
-    },
-    /// A report was validated and is waiting for transport admission.
-    ///
-    /// No hint is committed until the outer transport accepts the candidate.
-    AwaitingAdmission {
-        /// Saturating duration until the admission lease deadline.
-        ///
-        /// Zero signals expiry without exposing an absolute clock origin.
-        remaining_ms: u64,
-    },
 }
 
 impl FingerAttempt {
@@ -187,38 +158,20 @@ impl FingerAttempt {
         })
     }
 
-    /// Drop or clamp restored ownership state after a table-width change.
+    /// Project the active phase into the scheduler's vocabulary.
     ///
-    /// Out-of-range requests and reversed ranges are discarded. A valid
-    /// admission proof keeps its lower slot and clamps its upper slot.
-    pub(super) fn normalize(&mut self, slot_count: usize) {
-        let Some(request) = self.request() else {
-            return;
-        };
-        if request.slot_index() >= slot_count {
-            *self = Self::Idle;
-            return;
-        }
-        if let Self::AwaitingAdmission(admission) = self {
-            if admission.proof.end < request.slot_index() {
-                *self = Self::Idle;
-                return;
-            }
-            admission.proof.end = admission.proof.end.min(slot_count.saturating_sub(1));
-        }
-    }
-
-    /// Return the active phase and its remaining lease from `now_ms`.
-    ///
-    /// Saturating subtraction projects overdue phases as zero without mutating
-    /// or implicitly expiring ownership.
-    pub(super) const fn status(self, now_ms: u64) -> FingerAttemptStatus {
+    /// `runnable` decides how an idle attempt reads: convergence work remains
+    /// (`Runnable`) or every slot is proved (`Converged`). Saturating
+    /// subtraction projects an overdue lease as zero without mutating or
+    /// implicitly expiring ownership.
+    pub(super) const fn phase(self, now_ms: u64, runnable: bool) -> FingerConvergencePhase {
         match self {
-            Self::Idle => FingerAttemptStatus::Idle,
-            Self::AwaitingReport(pending) => FingerAttemptStatus::AwaitingReport {
+            Self::Idle if runnable => FingerConvergencePhase::Runnable,
+            Self::Idle => FingerConvergencePhase::Converged,
+            Self::AwaitingReport(pending) => FingerConvergencePhase::AwaitingReport {
                 remaining_ms: pending.expires_at_ms.saturating_sub(now_ms),
             },
-            Self::AwaitingAdmission(admission) => FingerAttemptStatus::AwaitingAdmission {
+            Self::AwaitingAdmission(admission) => FingerConvergencePhase::AwaitingAdmission {
                 remaining_ms: admission.expires_at_ms.saturating_sub(now_ms),
             },
         }

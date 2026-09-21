@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::dht::successor::SuccessorReader;
 use crate::ecc::tests::gen_ordered_keys;
 use crate::ecc::SecretKey;
 use crate::error::Error;
+use crate::message::Message;
 use crate::message::MessageSigner;
 use crate::session::SessionSk;
 use crate::swarm::callback::SwarmCallback;
@@ -302,7 +302,9 @@ async fn test_triple_desc_ordered_nodes_stabilization(
     Ok(())
 }
 
+/// One stabilize round: query the successor head; applying its report notifies
+/// the head, which is the only predecessor-propagation path.
 async fn run_stabilization_once(swarm: Arc<Swarm>) -> Result<()> {
     let stab = swarm.stabilizer();
-    stab.notify_predecessor().await
+    stab.correct_stabilize().await
 }

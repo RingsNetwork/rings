@@ -48,7 +48,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use uuid;
 
-use crate::consts::DATA_REDUNDANT;
 use crate::error::Error;
 use crate::error::Result;
 use crate::measure::PeriodicMeasure;
@@ -865,60 +864,42 @@ impl Processor {
 
     /// Fetch an entry from DHT storage
     pub async fn storage_fetch(&self, entry_key: Did) -> Result<()> {
-        <Swarm as ChordStorageInterface<DATA_REDUNDANT>>::storage_fetch(&self.swarm, entry_key)
+        self.swarm
+            .storage_fetch(entry_key)
             .await
             .map_err(Error::EntryError)
     }
 
     /// Store an entry on DHT storage
     pub async fn storage_store(&self, entry: entry::Entry) -> Result<()> {
-        <Swarm as ChordStorageInterface<DATA_REDUNDANT>>::storage_store(&self.swarm, entry)
+        self.swarm
+            .storage_store(entry)
             .await
             .map_err(Error::EntryError)
     }
 
     /// Append data to an entry on DHT storage
     pub async fn storage_append_data(&self, topic: &str, data: Encoded) -> Result<()> {
-        <Swarm as ChordStorageInterface<DATA_REDUNDANT>>::storage_append_data(
-            &self.swarm,
-            topic,
-            data,
-        )
-        .await
-        .map_err(Error::EntryError)
-    }
-
-    /// Touch data in an entry on DHT storage, moving existing equal payloads to the end.
-    pub async fn storage_touch_data(&self, topic: &str, data: Encoded) -> Result<()> {
-        <Swarm as ChordStorageInterface<DATA_REDUNDANT>>::storage_touch_data(
-            &self.swarm,
-            topic,
-            data,
-        )
-        .await
-        .map_err(Error::EntryError)
+        self.swarm
+            .storage_append_data(topic, data)
+            .await
+            .map_err(Error::EntryError)
     }
 
     /// Tombstone observed data in an entry on DHT storage.
     pub async fn storage_tombstone_data(&self, topic: &str, data: Encoded) -> Result<()> {
-        <Swarm as ChordStorageInterface<DATA_REDUNDANT>>::storage_tombstone_data(
-            &self.swarm,
-            topic,
-            data,
-        )
-        .await
-        .map_err(Error::EntryError)
+        self.swarm
+            .storage_tombstone_data(topic, data)
+            .await
+            .map_err(Error::EntryError)
     }
 
     /// Compact observed data in an entry on DHT storage.
     pub async fn storage_compact_data(&self, topic: &str, removals: Vec<Encoded>) -> Result<()> {
-        <Swarm as ChordStorageInterface<DATA_REDUNDANT>>::storage_compact_data(
-            &self.swarm,
-            topic,
-            removals,
-        )
-        .await
-        .map_err(Error::EntryError)
+        self.swarm
+            .storage_compact_data(topic, removals)
+            .await
+            .map_err(Error::EntryError)
     }
 
     /// Return local measurement counters for a peer, if observed.
@@ -977,7 +958,7 @@ impl Processor {
             .to_string()
             .encode()
             .map_err(Error::ServiceRegisterError)?;
-        self.storage_touch_data(name, encoded_did)
+        self.storage_append_data(name, encoded_did)
             .await
             .map_err(|error| match error {
                 Error::EntryError(error) => Error::ServiceRegisterError(error),

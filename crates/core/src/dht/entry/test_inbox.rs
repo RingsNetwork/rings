@@ -396,7 +396,6 @@ fn test_removal_authority_is_the_recipient_alone_and_nothing_else_is_allowed() -
     ));
     for op in [
         EntryOperation::Overwrite(carrier.clone()),
-        EntryOperation::Touch(carrier.clone()),
         EntryOperation::CompactData(carrier.clone()),
     ] {
         assert!(matches!(

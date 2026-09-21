@@ -332,9 +332,9 @@ impl EntryOperation {
                 }
                 entry.validate_inbox_witness(now_ms, network_id)
             }
-            EntryOperation::Overwrite(_)
-            | EntryOperation::Touch(_)
-            | EntryOperation::CompactData(_) => Err(Error::RelayInboxOperationNotAllowed),
+            EntryOperation::Overwrite(_) | EntryOperation::CompactData(_) => {
+                Err(Error::RelayInboxOperationNotAllowed)
+            }
         }
     }
 }

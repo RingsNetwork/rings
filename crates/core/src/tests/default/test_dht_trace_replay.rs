@@ -68,7 +68,7 @@ fn converged_rings(all: &[Did]) -> Vec<PeerRing> {
             let dht = PeerRing::new_with_storage(me, K as u8, Box::new(MemStorage::new()));
             for &other in all {
                 if other != me {
-                    let _ = dht.join(other);
+                    let _ = dht.admit_connected(other, None);
                 }
             }
             dht

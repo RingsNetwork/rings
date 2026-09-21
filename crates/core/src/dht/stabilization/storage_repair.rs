@@ -1,5 +1,4 @@
 use super::Stabilizer;
-use super::STORAGE_REPAIR_FRESH_CONNECTION_GRACE_MS;
 use super::STORAGE_REPAIR_MAX_DELIVERIES_PER_STEP;
 use crate::dht::topology;
 use crate::dht::types::ChordStorageRepair;
@@ -12,7 +11,6 @@ use crate::error::Result;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::swarm::transport::StorageSyncOutcome;
 use crate::swarm::transport::TransportReadiness;
-use crate::utils::get_epoch_ms_i64;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// Observable completion state for one bounded storage repair pass.
@@ -30,17 +28,12 @@ impl StorageRepairOutcome {
     }
 }
 
-struct PlannedStorageRepairDelivery {
-    delivery: StorageSyncDelivery,
-}
-
 #[derive(Clone, Copy, Debug)]
 enum StorageRepairDeferReason {
     MissingNextHop,
     NextHopNotAdmitted,
     NextHopTransportMissing,
     NextHopTransportNotReady(TransportReadiness),
-    NextHopFresh { connected_for_ms: i64 },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -56,14 +49,6 @@ impl StorageRepairDeferReason {
             Self::NextHopNotAdmitted => "next_hop_not_admitted",
             Self::NextHopTransportMissing => "next_hop_transport_missing",
             Self::NextHopTransportNotReady(_) => "next_hop_transport_not_ready",
-            Self::NextHopFresh { .. } => "next_hop_fresh",
-        }
-    }
-
-    const fn connected_for_ms(self) -> Option<i64> {
-        match self {
-            Self::NextHopFresh { connected_for_ms } => Some(connected_for_ms),
-            _ => None,
         }
     }
 
@@ -104,10 +89,7 @@ impl Stabilizer {
         let mut sent = 0usize;
         let mut deferred = 0usize;
         for planned in deliveries {
-            match self
-                .send_planned_storage_repair(planned, get_epoch_ms_i64())
-                .await?
-            {
+            match self.send_planned_storage_repair(planned).await? {
                 RepairDeliveryResult::Sent => sent = sent.saturating_add(1),
                 RepairDeliveryResult::Deferred => deferred = deferred.saturating_add(1),
             }
@@ -128,15 +110,14 @@ impl Stabilizer {
 
     async fn send_planned_storage_repair(
         &self,
-        planned: PlannedStorageRepairDelivery,
-        now_ms: i64,
+        delivery: StorageSyncDelivery,
     ) -> Result<RepairDeliveryResult> {
-        let msg = SyncEntriesWithSuccessor::from_delivery(planned.delivery);
+        let msg = SyncEntriesWithSuccessor::from_delivery(delivery);
         let purpose = msg.purpose;
         let destination = msg.destination;
         let entries = msg.data.len();
         let next_hop = self.dht.next_hop_for_storage_sync(destination)?;
-        if let Some(reason) = self.storage_repair_defer_reason(next_hop, now_ms)? {
+        if let Some(reason) = self.storage_repair_defer_reason(next_hop)? {
             self.log_storage_repair_deferred(destination, next_hop, entries, reason, None);
             return Ok(RepairDeliveryResult::Deferred);
         }
@@ -217,8 +198,6 @@ impl Stabilizer {
             entries,
             reason = reason.as_str(),
             transport_readiness = ?reason.transport_readiness(),
-            connected_for_ms = ?reason.connected_for_ms(),
-            grace_ms = STORAGE_REPAIR_FRESH_CONNECTION_GRACE_MS,
             error = ?error,
             "STABILIZATION storage repair deferred"
         );
@@ -227,7 +206,7 @@ impl Stabilizer {
     fn storage_repair_window(
         &self,
         deliveries: Vec<StorageSyncDelivery>,
-    ) -> Result<Vec<PlannedStorageRepairDelivery>> {
+    ) -> Result<Vec<StorageSyncDelivery>> {
         let total = deliveries.len();
         if total == 0 {
             return Ok(Vec::new());
@@ -250,7 +229,7 @@ impl Stabilizer {
         let next_cursor = keyed.last().map(|(cursor, _)| cursor.clone());
         let selected = keyed
             .into_iter()
-            .map(|(_, delivery)| PlannedStorageRepairDelivery { delivery })
+            .map(|(_, delivery)| delivery)
             .collect::<Vec<_>>();
         if let Some(cursor) = next_cursor {
             self.transport.advance_storage_repair_cursor(cursor)?;
@@ -269,7 +248,6 @@ impl Stabilizer {
     fn storage_repair_defer_reason(
         &self,
         next_hop: Option<Did>,
-        now_ms: i64,
     ) -> Result<Option<StorageRepairDeferReason>> {
         let Some(next_hop) = next_hop else {
             return Ok(Some(StorageRepairDeferReason::MissingNextHop));
@@ -286,31 +264,7 @@ impl Stabilizer {
                 readiness,
             )));
         }
-        if let Some(connected_for_ms) = self.peer_connected_for_ms(next_hop, now_ms) {
-            if connected_for_ms < STORAGE_REPAIR_FRESH_CONNECTION_GRACE_MS {
-                return Ok(Some(StorageRepairDeferReason::NextHopFresh {
-                    connected_for_ms,
-                }));
-            }
-        }
-
         Ok(None)
-    }
-
-    fn peer_connected_for_ms(&self, peer: Did, now_ms: i64) -> Option<i64> {
-        match self.transport.peer_connected_for_ms(peer, now_ms) {
-            Ok(age) => age,
-            Err(error) => {
-                tracing::warn!(
-                    target: "rings_core::dht::stabilization",
-                    local = %self.dht.did,
-                    peer = %peer,
-                    error = %error,
-                    "STABILIZATION storage repair connection age check failed"
-                );
-                None
-            }
-        }
     }
 
     /// One bounded pass restoring the placement invariant of local storage.
@@ -320,9 +274,10 @@ impl Stabilizer {
     /// whose local cleanup is ack-gated) and republishes local entries to missing affine owners
     /// (additive), then sends the deliveries through one repair window. Placement is a function
     /// of the ring state, so the pass is the same whichever input moved the head; a head change
-    /// only requests it, and the fresh-connection grace of the window outlives the peer's own
-    /// admission of this node, which a send at admission time would race. Repetition is
-    /// idempotent: deliveries are joins and every local removal is acknowledged first.
+    /// only requests it. A ready, locally admitted next hop needs no connection-age grace:
+    /// the receiver's bounded pre-admission hold queues early frames until its own admission
+    /// completes. Repetition is idempotent: deliveries are joins and every local removal is
+    /// acknowledged first.
     pub async fn repair_storage(&self) -> Result<StorageRepairOutcome> {
         tracing::debug!(
             target: "rings_core::dht::stabilization",
@@ -386,7 +341,7 @@ mod tests {
                 "repair window selected no delivery".to_string(),
             ));
         };
-        let destination = planned.delivery.into_message_parts().1.did();
+        let destination = planned.into_message_parts().1.did();
         Ok(destination)
     }
 

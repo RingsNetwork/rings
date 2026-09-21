@@ -127,55 +127,22 @@ pub struct StorageVirtualNodes {
 }
 
 impl StorageVirtualNodes {
-    /// Create an empty registry.
-    pub fn new(config: VirtualNodeConfig) -> Self {
-        Self {
-            config,
-            owners: BTreeSet::new(),
-        }
-    }
-
-    /// Create a registry from known physical owners.
-    pub fn from_owners(config: VirtualNodeConfig, owners: impl IntoIterator<Item = Did>) -> Self {
-        let mut registry = Self::new(config);
-        for owner in owners {
-            registry.register_owner(owner);
-        }
-        registry
-    }
-
-    /// Return the active configuration.
-    pub const fn config(&self) -> VirtualNodeConfig {
-        self.config
-    }
-
-    /// Returns whether this registry enables virtual storage ownership.
-    pub const fn is_enabled(&self) -> bool {
-        self.config.is_enabled()
-    }
-
-    /// Register one physical owner.
+    /// The registry of the physical owners currently visible to storage routing.
     ///
-    /// Post: if virtual nodes are disabled, the registry is unchanged.
-    pub fn register_owner(&mut self, owner_did: Did) {
-        if self.is_enabled() {
-            self.owners.insert(owner_did);
-        }
-    }
-
-    /// Remove one physical owner.
-    pub fn unregister_owner(&mut self, owner_did: Did) {
-        self.owners.remove(&owner_did);
-    }
-
-    /// Returns whether this physical owner is registered.
-    pub fn contains_owner(&self, owner_did: Did) -> bool {
-        self.owners.contains(&owner_did)
+    /// Post: with virtual nodes disabled the registry is empty, so every key
+    /// falls back to plain Chord placement.
+    pub fn from_owners(config: VirtualNodeConfig, owners: impl IntoIterator<Item = Did>) -> Self {
+        let owners = if config.is_enabled() {
+            owners.into_iter().collect()
+        } else {
+            BTreeSet::new()
+        };
+        Self { config, owners }
     }
 
     /// Return all virtual positions for `owner_did`.
     pub fn positions_for_owner(&self, owner_did: Did) -> Vec<VirtualNode> {
-        if !self.contains_owner(owner_did) {
+        if !self.owners.contains(&owner_did) {
             return Vec::new();
         }
         self.derive_owner_positions(owner_did)
@@ -288,16 +255,5 @@ mod tests {
         let key = left.vnode_did + Did::from(1u32);
         assert_eq!(registry.owner_for_key(key), Some(successor.owner_did));
         Ok(())
-    }
-
-    #[test]
-    fn test_unregister_owner_removes_virtual_positions() {
-        let owner = Did::from(10u32);
-        let mut registry = StorageVirtualNodes::new(VirtualNodeConfig::new(1, 3));
-        registry.register_owner(owner);
-        registry.unregister_owner(owner);
-
-        assert!(registry.positions().is_empty());
-        assert_eq!(registry.owner_for_key(Did::from(11u32)), None);
     }
 }

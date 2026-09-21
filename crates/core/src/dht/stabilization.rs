@@ -16,8 +16,6 @@ use futures::TryStreamExt;
 use rings_transport::core::transport::WebrtcConnectionState;
 
 pub use self::storage_repair::StorageRepairOutcome;
-use crate::dht::successor::SuccessorReader;
-use crate::dht::types::CorrectChord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::dht::PeerRingAction;
@@ -30,7 +28,6 @@ use crate::message::FindSuccessorSend;
 use crate::message::FindSuccessorThen;
 use crate::message::Message;
 use crate::message::MessagePayload;
-use crate::message::NotifyPredecessorSend;
 use crate::message::PayloadSender;
 use crate::message::ProbeRequest;
 use crate::message::ProvisionalEpoch;
@@ -77,9 +74,6 @@ pub(crate) const DISCONNECTED_CONNECTION_GRACE_MS: i64 = 30_000;
 /// data-channel admission wait, and tracked completion prevents a chunk tail
 /// from escaping into the following topology phase.
 pub(crate) const STORAGE_REPAIR_MAX_DELIVERIES_PER_STEP: usize = 1;
-/// New storage destinations are allowed one grace window before repair treats
-/// the admission as unavailable.
-pub(crate) const STORAGE_REPAIR_FRESH_CONNECTION_GRACE_MS: i64 = 30_000;
 
 /// Liveness probe data after signing but before the send is recorded.
 struct PreparedLivenessProbe {
@@ -335,8 +329,6 @@ impl Stabilizer {
             self.clean_unavailable_connections(),
         )
         .await;
-        self.run_step("notify_predecessor", timeout, self.notify_predecessor())
-            .await;
         match finger_mode {
             FingerMaintenanceMode::Immediate => {
                 self.run_step("fix_fingers", timeout, self.fix_fingers())
@@ -616,7 +608,6 @@ impl Stabilizer {
     /// Apply the selected removal while preserving superseding connection evidence.
     async fn remove_unavailable_peer(&self, did: Did, removal: TopologyPeerRemoval) -> Result<()> {
         let reason = removal.reason;
-        let should_repair = self.dht.peer_may_share_storage_responsibility(did)?;
         // Logged before teardown so diagnostics show what failover evidence
         // justified removing or pruning the topology peer.
         let fallback_snapshot = self.transport.live_successor_fallback(did)?;
@@ -631,11 +622,10 @@ impl Stabilizer {
             fallback = ?fallback_snapshot,
             liveness_unanswered_for_ms = ?reason.liveness_unanswered_for_ms(),
             liveness_timeout_ms = ?reason.liveness_timeout_ms(),
-            should_repair,
             "STABILIZATION clean_unavailable selected peer"
         );
 
-        if reason.should_disconnect_transport() {
+        let outcome = if reason.should_disconnect_transport() {
             tracing::debug!(
                 target: "rings_core::dht::stabilization",
                 local = %self.dht.did,
@@ -657,15 +647,16 @@ impl Stabilizer {
                 );
                 return Ok(());
             };
-            let fallback = outcome.fallback();
             tracing::debug!(
                 target: "rings_core::dht::stabilization",
                 local = %self.dht.did,
                 peer = %did,
                 reason = reason.as_str(),
-                fallback = ?fallback,
+                fallback = ?outcome.fallback(),
+                removal = ?outcome.removal(),
                 "STABILIZATION clean_unavailable disconnect complete"
             );
+            outcome
         } else {
             tracing::debug!(
                 target: "rings_core::dht::stabilization",
@@ -687,18 +678,22 @@ impl Stabilizer {
                 );
                 return Ok(());
             };
-            let fallback = outcome.fallback();
             tracing::debug!(
                 target: "rings_core::dht::stabilization",
                 local = %self.dht.did,
                 peer = %did,
                 reason = reason.as_str(),
-                fallback = ?fallback,
+                fallback = ?outcome.fallback(),
+                removal = ?outcome.removal(),
                 "STABILIZATION clean_unavailable topology remove complete"
             );
-        }
+            outcome
+        };
 
-        if should_repair {
+        // `StorageResponsible(n, p) ⟺ Referenced(n, p)`: the cleaner also
+        // removes admitted peers no slot references, and those change no
+        // placement, so only a vacated slot makes a repair round due (#612).
+        if outcome.removal().storage_repair_due() {
             self.transport.request_storage_repair();
             tracing::debug!(
                 target: "rings_core::dht::stabilization",
@@ -823,62 +818,6 @@ impl Stabilizer {
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) async fn probe_peer_liveness_for_simulation(&self) -> Result<()> {
         self.probe_peer_liveness().await
-    }
-
-    /// Notify predecessor, this is a DHT operation.
-    pub async fn notify_predecessor(&self) -> Result<()> {
-        let (successor_min, successor_list) = {
-            let successor = self.dht.successors();
-            (successor.min()?, successor.list()?)
-        };
-
-        let msg = Message::NotifyPredecessorSend(NotifyPredecessorSend { did: self.dht.did });
-        if self.dht.did != successor_min {
-            for s in successor_list {
-                let payload = self.transport.signed_payload(msg.clone(), s, s).await?;
-                let tx_id = payload.transaction.tx_id;
-                let target_state = self
-                    .transport
-                    .get_connection(s)
-                    .map(|conn| conn.webrtc_connection_state());
-                tracing::debug!(
-                    target: "rings_core::dht::stabilization",
-                    local = %self.dht.did,
-                    successor = %s,
-                    tx_id = %tx_id,
-                    target_state = ?target_state,
-                    "STABILIZATION notify_predecessor send start"
-                );
-                if let Err(e) = self.transport.send_payload(payload).await {
-                    tracing::error!(
-                        target: "rings_core::dht::stabilization",
-                        local = %self.dht.did,
-                        successor = %s,
-                        tx_id = %tx_id,
-                        target_state = ?target_state,
-                        error = ?e,
-                        "STABILIZATION notify_predecessor send failed"
-                    );
-                    return Err(e);
-                }
-                tracing::debug!(
-                    target: "rings_core::dht::stabilization",
-                    local = %self.dht.did,
-                    successor = %s,
-                    tx_id = %tx_id,
-                    "STABILIZATION notify_predecessor send complete"
-                );
-            }
-            Ok(())
-        } else {
-            tracing::debug!(
-                target: "rings_core::dht::stabilization",
-                local = %self.dht.did,
-                successor = %successor_min,
-                "STABILIZATION notify_predecessor skip local successor"
-            );
-            Ok(())
-        }
     }
 
     /// Fix fingers from finger table, this is a DHT operation.

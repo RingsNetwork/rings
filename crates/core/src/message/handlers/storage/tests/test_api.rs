@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 use super::super::ChordStorageInterface;
 use super::super::ChordStorageInterfaceCacheChecker;
 use super::test_support::assert_cached_data_values;
@@ -6,16 +8,21 @@ use super::test_support::next_payload_matching;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryOperation;
 use crate::dht::entry::PlacedEntryOperation;
+use crate::dht::Did;
 use crate::ecc::tests::gen_ordered_keys;
 use crate::error::Result;
 use crate::message::types::Message;
 use crate::message::Encoder;
 use crate::message::MessageVerificationExt;
-use crate::swarm::Swarm;
 use crate::tests::default::assert_no_more_msg;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;
 use crate::tests::manually_establish_connection;
+
+/// Whether `key` lies in the open clockwise interval `(lower, upper)`.
+fn key_strictly_between(key: Did, lower: Did, upper: Did) -> bool {
+    key != lower && Did::cmp_from_observer(lower, key, upper) == Ordering::Less
+}
 
 #[tokio::test]
 async fn test_storage_store_fetches_remote_entry_into_cache() -> Result<()> {
@@ -33,7 +40,7 @@ async fn test_storage_store_fetches_remote_entry_into_cache() -> Result<()> {
     let entry: Entry = data.clone().try_into()?;
     let entry_key = entry.did;
 
-    let (node1, node2) = if entry_key.in_range(node2.did(), node2.did(), node1.did()) {
+    let (node1, node2) = if key_strictly_between(entry_key, node2.did(), node1.did()) {
         (node1, node2)
     } else {
         (node2, node1)
@@ -44,7 +51,7 @@ async fn test_storage_store_fetches_remote_entry_into_cache() -> Result<()> {
     assert!(node1.swarm.storage_check_cache(entry_key).await.is_none());
     assert!(node2.swarm.storage_check_cache(entry_key).await.is_none());
 
-    <Swarm as ChordStorageInterface<1>>::storage_store(&node1.swarm, entry.clone()).await?;
+    node1.swarm.storage_store(entry.clone()).await?;
     next_payload_matching(&node2, "remote overwrite operation", |payload| {
         Ok(payload.transaction.signer() == node1.did()
             && payload.transaction.destination == node2.did()
@@ -64,7 +71,7 @@ async fn test_storage_store_fetches_remote_entry_into_cache() -> Result<()> {
     assert!(node1.dht().storage.count().await? == 0);
     assert!(node2.dht().storage.count().await? != 0);
 
-    <Swarm as ChordStorageInterface<1>>::storage_fetch(&node1.swarm, entry_key).await?;
+    node1.swarm.storage_fetch(entry_key).await?;
 
     next_payload_matching(&node2, "remote entry search", |payload| {
         Ok(payload.transaction.signer() == node1.did()
@@ -112,7 +119,7 @@ async fn test_storage_append_data_preserves_entry_payload_order() -> Result<()> 
     let entry: Entry = topic.clone().try_into()?;
     let entry_key = entry.did;
 
-    let (node1, node2) = if entry_key.in_range(node2.did(), node2.did(), node1.did()) {
+    let (node1, node2) = if key_strictly_between(entry_key, node2.did(), node1.did()) {
         (node1, node2)
     } else {
         (node2, node1)
@@ -123,21 +130,17 @@ async fn test_storage_append_data_preserves_entry_payload_order() -> Result<()> 
     assert!(node1.swarm.storage_check_cache(entry_key).await.is_none());
     assert!(node2.swarm.storage_check_cache(entry_key).await.is_none());
 
-    <Swarm as ChordStorageInterface<1>>::storage_append_data(
-        &node1.swarm,
-        &topic,
-        "111".to_string().encode()?,
-    )
-    .await?;
+    node1
+        .swarm
+        .storage_append_data(&topic, "111".to_string().encode()?)
+        .await?;
     wait_for_msgs([&node1, &node2]).await;
     assert_no_more_msg([&node1, &node2]).await;
 
-    <Swarm as ChordStorageInterface<1>>::storage_append_data(
-        &node1.swarm,
-        &topic,
-        "222".to_string().encode()?,
-    )
-    .await?;
+    node1
+        .swarm
+        .storage_append_data(&topic, "222".to_string().encode()?)
+        .await?;
     wait_for_msgs([&node1, &node2]).await;
     assert_no_more_msg([&node1, &node2]).await;
 
@@ -146,22 +149,20 @@ async fn test_storage_append_data_preserves_entry_payload_order() -> Result<()> 
     assert!(node1.dht().storage.count().await? == 0);
     assert!(node2.dht().storage.count().await? != 0);
 
-    <Swarm as ChordStorageInterface<1>>::storage_fetch(&node1.swarm, entry_key).await?;
+    node1.swarm.storage_fetch(entry_key).await?;
     wait_for_msgs([&node1, &node2]).await;
     assert_no_more_msg([&node1, &node2]).await;
 
     assert_cached_data_values(&node1, entry_key, &["111", "222"]).await?;
 
-    <Swarm as ChordStorageInterface<1>>::storage_append_data(
-        &node1.swarm,
-        &topic,
-        "333".to_string().encode()?,
-    )
-    .await?;
+    node1
+        .swarm
+        .storage_append_data(&topic, "333".to_string().encode()?)
+        .await?;
     wait_for_msgs([&node1, &node2]).await;
     assert_no_more_msg([&node1, &node2]).await;
 
-    <Swarm as ChordStorageInterface<1>>::storage_fetch(&node1.swarm, entry_key).await?;
+    node1.swarm.storage_fetch(entry_key).await?;
     wait_for_msgs([&node1, &node2]).await;
     assert_no_more_msg([&node1, &node2]).await;
 
@@ -171,7 +172,7 @@ async fn test_storage_append_data_preserves_entry_payload_order() -> Result<()> 
 }
 
 #[tokio::test]
-async fn test_storage_touch_data_moves_existing_entry_payload_to_end_once() -> Result<()> {
+async fn test_storage_append_data_moves_existing_entry_payload_to_end_once() -> Result<()> {
     let mut keys = gen_ordered_keys::<2>().into_iter();
     let key1 = next_generated_key(&mut keys)?;
     let key2 = next_generated_key(&mut keys)?;
@@ -186,19 +187,17 @@ async fn test_storage_touch_data_moves_existing_entry_payload_to_end_once() -> R
     let entry: Entry = topic.clone().try_into()?;
     let entry_key = entry.did;
 
-    let (node1, node2) = if entry_key.in_range(node2.did(), node2.did(), node1.did()) {
+    let (node1, node2) = if key_strictly_between(entry_key, node2.did(), node1.did()) {
         (node1, node2)
     } else {
         (node2, node1)
     };
 
     for value in ["111", "222", "333", "222"] {
-        <Swarm as ChordStorageInterface<1>>::storage_touch_data(
-            &node1.swarm,
-            &topic,
-            value.to_string().encode()?,
-        )
-        .await?;
+        node1
+            .swarm
+            .storage_append_data(&topic, value.to_string().encode()?)
+            .await?;
         wait_for_msgs([&node1, &node2]).await;
         assert_no_more_msg([&node1, &node2]).await;
     }
@@ -208,7 +207,7 @@ async fn test_storage_touch_data_moves_existing_entry_payload_to_end_once() -> R
     assert_eq!(node1.dht().storage.count().await?, 0);
     assert_ne!(node2.dht().storage.count().await?, 0);
 
-    <Swarm as ChordStorageInterface<1>>::storage_fetch(&node1.swarm, entry_key).await?;
+    node1.swarm.storage_fetch(entry_key).await?;
     wait_for_msgs([&node1, &node2]).await;
     assert_no_more_msg([&node1, &node2]).await;
 
@@ -233,33 +232,29 @@ async fn test_storage_tombstone_data_removes_observed_payload() -> Result<()> {
     let entry: Entry = topic.clone().try_into()?;
     let entry_key = entry.did;
 
-    let (node1, node2) = if entry_key.in_range(node2.did(), node2.did(), node1.did()) {
+    let (node1, node2) = if key_strictly_between(entry_key, node2.did(), node1.did()) {
         (node1, node2)
     } else {
         (node2, node1)
     };
 
     for value in ["111", "222"] {
-        <Swarm as ChordStorageInterface<1>>::storage_touch_data(
-            &node1.swarm,
-            &topic,
-            value.to_string().encode()?,
-        )
-        .await?;
+        node1
+            .swarm
+            .storage_append_data(&topic, value.to_string().encode()?)
+            .await?;
         wait_for_msgs([&node1, &node2]).await;
         assert_no_more_msg([&node1, &node2]).await;
     }
 
-    <Swarm as ChordStorageInterface<1>>::storage_tombstone_data(
-        &node1.swarm,
-        &topic,
-        "111".to_string().encode()?,
-    )
-    .await?;
+    node1
+        .swarm
+        .storage_tombstone_data(&topic, "111".to_string().encode()?)
+        .await?;
     wait_for_msgs([&node1, &node2]).await;
     assert_no_more_msg([&node1, &node2]).await;
 
-    <Swarm as ChordStorageInterface<1>>::storage_fetch(&node1.swarm, entry_key).await?;
+    node1.swarm.storage_fetch(entry_key).await?;
     wait_for_msgs([&node1, &node2]).await;
     assert_no_more_msg([&node1, &node2]).await;
 
@@ -284,43 +279,37 @@ async fn test_storage_compact_data_prunes_tombstones_and_preserves_owner_values(
     let entry: Entry = topic.clone().try_into()?;
     let entry_key = entry.did;
 
-    let (node1, node2) = if entry_key.in_range(node2.did(), node2.did(), node1.did()) {
+    let (node1, node2) = if key_strictly_between(entry_key, node2.did(), node1.did()) {
         (node1, node2)
     } else {
         (node2, node1)
     };
 
     for value in ["111", "222", "333"] {
-        <Swarm as ChordStorageInterface<1>>::storage_touch_data(
-            &node1.swarm,
-            &topic,
-            value.to_string().encode()?,
-        )
-        .await?;
+        node1
+            .swarm
+            .storage_append_data(&topic, value.to_string().encode()?)
+            .await?;
         wait_for_msgs([&node1, &node2]).await;
         assert_no_more_msg([&node1, &node2]).await;
     }
 
-    <Swarm as ChordStorageInterface<1>>::storage_tombstone_data(
-        &node1.swarm,
-        &topic,
-        "111".to_string().encode()?,
-    )
-    .await?;
+    node1
+        .swarm
+        .storage_tombstone_data(&topic, "111".to_string().encode()?)
+        .await?;
     wait_for_msgs([&node1, &node2]).await;
     assert_no_more_msg([&node1, &node2]).await;
 
     let compact_removals = vec!["111".to_string().encode()?];
-    <Swarm as ChordStorageInterface<1>>::storage_compact_data(
-        &node1.swarm,
-        &topic,
-        compact_removals,
-    )
-    .await?;
+    node1
+        .swarm
+        .storage_compact_data(&topic, compact_removals)
+        .await?;
     wait_for_msgs([&node1, &node2]).await;
     assert_no_more_msg([&node1, &node2]).await;
 
-    <Swarm as ChordStorageInterface<1>>::storage_fetch(&node1.swarm, entry_key).await?;
+    node1.swarm.storage_fetch(entry_key).await?;
     wait_for_msgs([&node1, &node2]).await;
     assert_no_more_msg([&node1, &node2]).await;
 

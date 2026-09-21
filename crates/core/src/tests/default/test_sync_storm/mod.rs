@@ -18,7 +18,6 @@ use rings_transport::connections::dummy_controlled;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
-use crate::dht::successor::SuccessorReader;
 use crate::dht::Chord;
 use crate::dht::PeerRingAction;
 use crate::dht::StorageRepairOutcome;
@@ -574,7 +573,9 @@ fn install_chord_view(nodes: &[Node], kind: ScenarioTopology) {
     for node in nodes {
         for &did in &dids {
             if did != node.did() {
-                node.dht().join(did).expect("test Chord join must succeed");
+                node.dht()
+                    .admit_connected(did, None)
+                    .expect("test Chord join must succeed");
                 node.dht()
                     .notify(did)
                     .expect("test Chord notify must succeed");
@@ -590,7 +591,7 @@ fn install_hotspot_chord_view(nodes: &[Node], dids: &[crate::dht::Did]) {
         if did != center {
             nodes[center_index]
                 .dht()
-                .join(did)
+                .admit_connected(did, None)
                 .expect("hotspot center must know every leaf");
             nodes[center_index]
                 .dht()
@@ -608,7 +609,7 @@ fn install_hotspot_chord_view(nodes: &[Node], dids: &[crate::dht::Did]) {
             }
         }
         node.dht()
-            .join(center)
+            .admit_connected(center, None)
             .expect("hotspot leaf must route through center");
         node.dht()
             .notify(center)

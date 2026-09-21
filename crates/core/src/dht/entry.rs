@@ -24,7 +24,6 @@ pub use crdt::DataTopicBuffer;
 pub use crdt::EntryCrdt;
 pub use crdt::EntryDot;
 pub use crdt::EntryVersion;
-pub use crdt::RelayMessageSet;
 
 /// DHT storage entry categories.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,10 +106,6 @@ pub enum EntryOperation {
     /// Add payloads to a data topic or a relay inbox.
     /// This operation will create an [`Entry`] if it does not exist.
     Extend(Entry),
-    /// Extend data to a Data kind [`Entry`] uniquely.
-    /// If any element is already existed, move it to the end of the data vector.
-    /// This operation will create an [`Entry`] if it does not exist.
-    Touch(Entry),
     /// Tombstone observed data or relay-message payloads in a two-phase set.
     ///
     /// The payload identifies the entry carrier and the values to
@@ -183,7 +178,7 @@ fn placement_belongs_to_entry_key(
 
 /// A DHT storage entry with an [`EntryKind`] and a ring key represented as [`Did`].
 ///
-/// An [`Entry`] is data stored by [`ChordStorage`](super::ChordStorage). It is not a
+/// An [`Entry`] is data stored by Chord storage on a [`PeerRing`](super::PeerRing). It is not a
 /// Chord node and does not participate in successor, predecessor, or finger-table
 /// membership.
 ///
@@ -389,9 +384,7 @@ impl EntryOperation {
     const fn witness(&self) -> EntryWitness {
         match self {
             EntryOperation::Overwrite(_) => EntryWitness::Elements(EntryStampKind::Overwrite),
-            EntryOperation::Extend(_) | EntryOperation::Touch(_) => {
-                EntryWitness::Elements(EntryStampKind::Delta)
-            }
+            EntryOperation::Extend(_) => EntryWitness::Elements(EntryStampKind::Delta),
             EntryOperation::Tombstone(_) => EntryWitness::Reference,
             EntryOperation::CompactData(_) => EntryWitness::Register,
         }
@@ -402,7 +395,6 @@ impl EntryOperation {
         match self {
             EntryOperation::Overwrite(entry)
             | EntryOperation::Extend(entry)
-            | EntryOperation::Touch(entry)
             | EntryOperation::Tombstone(entry)
             | EntryOperation::CompactData(entry) => entry,
         }
@@ -413,7 +405,6 @@ impl EntryOperation {
         Ok(match self {
             EntryOperation::Overwrite(entry) => EntryOperation::Overwrite(f(entry)?),
             EntryOperation::Extend(entry) => EntryOperation::Extend(f(entry)?),
-            EntryOperation::Touch(entry) => EntryOperation::Touch(f(entry)?),
             EntryOperation::Tombstone(entry) => EntryOperation::Tombstone(f(entry)?),
             EntryOperation::CompactData(entry) => EntryOperation::CompactData(f(entry)?),
         })
@@ -583,13 +574,6 @@ impl Entry {
         ))
     }
 
-    fn relay_set(&self) -> Result<RelayMessageSet> {
-        Ok(RelayMessageSet::new(
-            self.topic_buffer()?,
-            self.crdt.tombstones.iter().copied().collect(),
-        ))
-    }
-
     fn materialize_elements(
         did: Did,
         kind: EntryKind,
@@ -641,17 +625,6 @@ impl Entry {
             buffer.register,
             buffer.values,
             buffer.removes,
-            expires_at_ms,
-        )
-    }
-
-    fn materialize_relay_set(&self, set: RelayMessageSet, expires_at_ms: Option<u128>) -> Self {
-        Self::materialize_elements(
-            self.did,
-            self.kind,
-            set.adds.register,
-            set.adds.values,
-            set.removes,
             expires_at_ms,
         )
     }
@@ -738,14 +711,10 @@ impl Entry {
     pub fn join(&self, other: Self) -> Result<Self> {
         self.validate_same_carrier(&other)?;
         let expires_at_ms = self.joined_lifetime(&other);
-        match self.kind {
-            EntryKind::Data => Ok(self.materialize_topic_buffer(
-                self.topic_buffer()?.join(other.topic_buffer()?),
-                expires_at_ms,
-            )),
-            EntryKind::RelayMessage => Ok(self
-                .materialize_relay_set(self.relay_set()?.join(other.relay_set()?), expires_at_ms)),
-        }
+        Ok(self.materialize_topic_buffer(
+            self.topic_buffer()?.join(other.topic_buffer()?),
+            expires_at_ms,
+        ))
     }
 
     /// Affine Transport entry to a list of affined did
@@ -786,16 +755,8 @@ impl Entry {
     /// Post: `result.data.len() == result.crdt.dots.len()` for Data and
     /// RelayMessage entries.
     pub fn try_into_storage_entry(self) -> Result<Self> {
-        match self.kind {
-            EntryKind::Data => {
-                let buffer = self.topic_buffer()?;
-                Ok(self.materialize_topic_buffer(buffer, self.expires_at_ms))
-            }
-            EntryKind::RelayMessage => {
-                let set = self.relay_set()?;
-                Ok(self.materialize_relay_set(set, self.expires_at_ms))
-            }
-        }
+        let buffer = self.topic_buffer()?;
+        Ok(self.materialize_topic_buffer(buffer, self.expires_at_ms))
     }
 
     /// The entry point of [EntryOperation] at the operation-boundary time `now_ms`, which
@@ -805,7 +766,6 @@ impl Entry {
         match op {
             EntryOperation::Overwrite(entry) => self.overwrite(now_ms, entry, actor),
             EntryOperation::Extend(entry) => self.extend(now_ms, entry, actor),
-            EntryOperation::Touch(entry) => self.touch(now_ms, entry, actor),
             EntryOperation::Tombstone(entry) => self.tombstone(entry),
             EntryOperation::CompactData(entry) => self.compact_data(now_ms, entry, actor),
         }
@@ -843,21 +803,6 @@ impl Entry {
         )?)
     }
 
-    /// This method is used to extend data to a Data kind [`Entry`] uniquely.
-    /// If any element is already existed, move it to the end of the data vector.
-    /// The handler of [EntryOperation::Touch].
-    pub fn touch(&self, now_ms: u128, other: Self, actor: Did) -> Result<Self> {
-        if !self.is_data_entry() {
-            return Err(Error::EntryNotAppendable);
-        }
-        self.join(other.ensure_stamp_after(
-            now_ms,
-            actor,
-            self.max_observed_version(),
-            EntryStampKind::Delta,
-        )?)
-    }
-
     /// Tombstone observed data or relay-message payloads.
     ///
     /// Pre: `self` and `other` are the same data or relay-message carrier.
@@ -873,30 +818,13 @@ impl Entry {
         let target_dots = other.crdt.dots.into_iter().collect::<BTreeSet<_>>();
         let has_dot_witness = !target_dots.is_empty();
 
-        match self.kind {
-            EntryKind::Data => {
-                let mut buffer = self.topic_buffer()?;
-                for (value, dot) in &buffer.values {
-                    if target_dots.contains(dot)
-                        || (!has_dot_witness && target_values.contains(value))
-                    {
-                        buffer.removes.insert(*dot);
-                    }
-                }
-                Ok(self.materialize_topic_buffer(buffer, expires_at_ms))
-            }
-            EntryKind::RelayMessage => {
-                let mut set = self.relay_set()?;
-                for (value, dot) in &set.adds.values {
-                    if target_dots.contains(dot)
-                        || (!has_dot_witness && target_values.contains(value))
-                    {
-                        set.removes.insert(*dot);
-                    }
-                }
-                Ok(self.materialize_relay_set(set, expires_at_ms))
+        let mut buffer = self.topic_buffer()?;
+        for (value, dot) in &buffer.values {
+            if target_dots.contains(dot) || (!has_dot_witness && target_values.contains(value)) {
+                buffer.removes.insert(*dot);
             }
         }
+        Ok(self.materialize_topic_buffer(buffer, expires_at_ms))
     }
 
     /// Compact a data topic using the receiver's current visible payloads.
