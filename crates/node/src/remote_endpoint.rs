@@ -77,14 +77,14 @@ pub(crate) async fn remote_rpc_client(
         .map_err(|_| Error::RemoteRpcError("endpoint resolution timed out".to_string()))??;
         builder = builder.resolve_to_addrs(&target.pin_host, &addresses);
     }
-    let http_client = builder
-        .build()
+    let client = rings_rpc::jsonrpc::Client::with_http_client_builder(endpoint.as_str(), builder)
         .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
-    let client = rings_rpc::jsonrpc::Client::with_http_client(endpoint.as_str(), http_client);
-    Ok(match api_token {
-        Some(token) => client.with_bearer_token(token.to_owned()),
-        None => client,
-    })
+    match api_token {
+        Some(token) => client
+            .with_bearer_token(token.to_owned())
+            .map_err(|error| Error::RemoteRpcError(error.to_string())),
+        None => Ok(client),
+    }
 }
 
 /// The DNS resolution to pin for a domain endpoint; `None` for an IP literal, which needs no
@@ -124,11 +124,14 @@ pub(crate) async fn remote_rpc_client(
     endpoint: &RemoteRpcEndpoint,
     api_token: Option<&str>,
 ) -> Result<rings_rpc::jsonrpc::Client> {
-    let client = rings_rpc::jsonrpc::Client::new(endpoint.as_str());
-    Ok(match api_token {
-        Some(token) => client.with_bearer_token(token.to_owned()),
-        None => client,
-    })
+    let client = rings_rpc::jsonrpc::Client::new(endpoint.as_str())
+        .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
+    match api_token {
+        Some(token) => client
+            .with_bearer_token(token.to_owned())
+            .map_err(|error| Error::RemoteRpcError(error.to_string())),
+        None => Ok(client),
+    }
 }
 
 #[cfg(test)]

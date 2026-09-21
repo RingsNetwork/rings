@@ -10,6 +10,23 @@ Rings RPC
 [![rings-node](https://github.com/RingsNetwork/rings/actions/workflows/auto-release.yml/badge.svg)](https://github.com/RingsNetwork/rings/actions/workflows/auto-release.yml)
 
 
+## Authenticated Rust clients
+
+`jsonrpc::Client::new` and `with_bearer_token` return `Result`. Bearer credentials
+require HTTPS, except HTTP to a parsed IPv4 loopback address (`127.0.0.0/8`) or
+IPv6 loopback (`::1`). HTTP hostnames, including `localhost`, are rejected; use
+`http://127.0.0.1:50000` or `http://[::1]:50000` for a local node. URL userinfo and
+fragments are also rejected for authenticated endpoints.
+
+Native RPC clients disable redirects and proxies. This prevents redirect downgrade
+and keeps the loopback HTTP exception from sending credentials through a proxy.
+Custom native DNS pins, TLS roots and timeouts are retained through
+`with_http_client_builder`; it replaces `with_http_client`, since an already-built
+transport cannot have its redirect policy secured. Normal TLS certificate
+validation remains enabled by default. Authenticated browser RPC uses Fetch with
+`redirect: "error"`; its transport settings are controlled by the browser rather
+than the supplied reqwest builder. Unauthenticated HTTP endpoints remain supported.
+
 # JSON-RPC API endpoints
 
 ### Make requests

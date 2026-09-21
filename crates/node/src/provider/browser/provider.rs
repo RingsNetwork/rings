@@ -157,7 +157,7 @@ impl BrowserOnionDirectoryReader {
         match &self.source {
             BrowserOnionDirectorySource::Local => self.processor.lookup_online_nodes(false).await,
             BrowserOnionDirectorySource::Remote(endpoint) => {
-                let response = authenticated_rpc_client(endpoint)
+                let response = authenticated_rpc_client(endpoint)?
                     .lookup_online_nodes(&LookupOnlineNodesRequest {
                         include_expired: false,
                     })
@@ -177,7 +177,7 @@ impl BrowserOnionDirectoryReader {
                 self.processor.lookup_onion_exits(service, false).await
             }
             BrowserOnionDirectorySource::Remote(endpoint) => {
-                let response = authenticated_rpc_client(endpoint)
+                let response = authenticated_rpc_client(endpoint)?
                     .lookup_onion_exits(&LookupOnionExitsRequest {
                         service: service.to_string(),
                         include_expired: false,
@@ -193,11 +193,15 @@ impl BrowserOnionDirectoryReader {
     }
 }
 
-fn authenticated_rpc_client(endpoint: &RemoteRpcEndpoint) -> RpcClient {
-    let client = RpcClient::new(endpoint.url.as_str());
+/// Builds a directory RPC client under the shared credential transport policy.
+fn authenticated_rpc_client(endpoint: &RemoteRpcEndpoint) -> NodeResult<RpcClient> {
+    let client = RpcClient::new(endpoint.url.as_str())
+        .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
     match &endpoint.api_token {
-        Some(token) => client.with_bearer_token(token.to_string()),
-        None => client,
+        Some(token) => client
+            .with_bearer_token(token.to_string())
+            .map_err(|error| Error::RemoteRpcError(error.to_string())),
+        None => Ok(client),
     }
 }
 
