@@ -15,7 +15,30 @@
   `ChordStorageInterface` over the transport's configured redundancy; the API mismatch error is
   no longer reachable from it.
 
+### Fixed
+
+- Preserve cancellation commands that arrive while the outbound worker is cancelling queued
+  transfers (#789). Cancellation scans no longer drain the mailbox themselves, so a stopped
+  successor releases its capacity without waiting for its lane head to finish delivery.
+
 ### Removed
+
+- Subtraction round, swarm section (#787). The send path no longer retires a peer whose data
+  channel does not open within its wait: an admitted connection that is not ready is a
+  transiently disconnected transport, and stabilization owns its retirement (the disconnected
+  grace, then the liveness probe); the send fails and is retried by its caller. The outbound
+  worker's second cancellation carrier (`cancel_requested`) and its two-lane command mailbox
+  with a per-drain budget are gone: one unbounded mailbox is drained whole into the transfer
+  queues, whose control-first burst law decides the next frame. The inbound ticket chain that
+  serialised same-lane frames between core admission and the transport-lease release is gone:
+  lane order is the sequence-numbered `Pending`/`Ready` protocol alone, and a lane's frames
+  decode in parallel. Also removed: the duplicate data-lane check inside
+  `ReassemblyHandoffBarrier::blocks` (the actor's barrier sequence carries it), the
+  `OriginQuotaLane` enum (the quota lane is the public `MessageCategory`), the tracked/detached
+  storage-sync outcome twins (one `StorageSyncOutcome`), `Swarm::connected_peer_dids`
+  (identical to `peer_dids`), the cross-profile inequalities in the transport timeout profile,
+  `TRANSPORT_MTU` (the frame size is negotiated per connection since #601; `TRANSPORT_MAX_SIZE`
+  is the literal 60 MB ceiling), `BACKEND_MTU`, and the second storage-lookup eviction loop.
 
 - Subtraction round, message / ecc / utils section and `rings-derive` (#787). Forty-six
   `rings_core::error::Error` variants that nothing constructs since the transport split (#471),

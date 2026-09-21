@@ -9,7 +9,7 @@ use crate::dht::StorageSyncDelivery;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::SyncEntriesWithSuccessor;
-use crate::swarm::transport::TrackedStorageSyncOutcome;
+use crate::swarm::transport::StorageSyncOutcome;
 use crate::swarm::transport::TransportReadiness;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -131,7 +131,7 @@ impl Stabilizer {
             "STABILIZATION storage repair send start"
         );
         match self.transport.send_storage_sync_tracked(msg).await {
-            Ok(TrackedStorageSyncOutcome::Delivered(tx_id)) => {
+            Ok(StorageSyncOutcome::Sent(tx_id)) => {
                 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
                 crate::simulation::record_repair_entries(entries);
                 tracing::debug!(
@@ -145,7 +145,7 @@ impl Stabilizer {
                 );
                 Ok(RepairDeliveryResult::Sent)
             }
-            Ok(TrackedStorageSyncOutcome::PersistedLocally) => {
+            Ok(StorageSyncOutcome::PersistedLocally) => {
                 tracing::debug!(
                     target: "rings_core::dht::stabilization",
                     local = %self.dht.did,
@@ -155,7 +155,7 @@ impl Stabilizer {
                 );
                 Ok(RepairDeliveryResult::Sent)
             }
-            Ok(TrackedStorageSyncOutcome::Deferred) => {
+            Ok(StorageSyncOutcome::Deferred) => {
                 tracing::warn!(
                     target: "rings_core::dht::stabilization",
                     local = %self.dht.did,

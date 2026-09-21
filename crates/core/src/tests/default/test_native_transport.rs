@@ -9,7 +9,7 @@ use crate::ecc::SecretKey;
 use crate::error::Result;
 use crate::message::test_probe_request;
 use crate::message::Message;
-use crate::message::MessageClass;
+use crate::message::MessageCategory;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::tests::assert_control_interleaves_transfer;
 use crate::tests::control_interleaves_transfer;
@@ -68,7 +68,7 @@ async fn test_native_webrtc_control_interleaves_the_shared_multiframe_storage_fi
                 .swarm
                 .transport
                 .outbound_frame_trace_for_test(node2.did()),
-            MessageClass::Storage,
+            MessageCategory::Storage,
         ) {
             break;
         }
@@ -80,7 +80,7 @@ async fn test_native_webrtc_control_interleaves_the_shared_multiframe_storage_fi
                 .swarm
                 .transport
                 .outbound_frame_trace_for_test(node2.did()),
-            MessageClass::Storage,
+            MessageCategory::Storage,
         ) {
             break;
         }
@@ -90,6 +90,6 @@ async fn test_native_webrtc_control_interleaves_the_shared_multiframe_storage_fi
         .swarm
         .transport
         .take_outbound_frame_trace_for_test(node2.did());
-    assert_control_interleaves_transfer(&trace, MessageClass::Storage);
+    assert_control_interleaves_transfer(&trace, MessageCategory::Storage);
     Ok(())
 }

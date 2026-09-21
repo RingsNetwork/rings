@@ -50,21 +50,18 @@ fn oldest_storage_lookup_observation_key(
 // now_ms.saturating_sub(bucket.observed_at_ms) <= STORAGE_LOOKUP_OBSERVATION_TTL_MS.
 // Preservation: removing expired buckets and then oldest buckets cannot create
 // a stale bucket or increase the number of buckets.
-fn evict_storage_lookup_observations(observations: &mut StorageLookupObservationMap, now_ms: i64) {
+// Post: observations.len() <= max_len; a caller about to insert passes
+// CAPACITY - 1 so the insertion keeps the capacity invariant.
+fn evict_storage_lookup_observations(
+    observations: &mut StorageLookupObservationMap,
+    now_ms: i64,
+    max_len: usize,
+) {
     observations.retain(|_, observation| {
         now_ms.saturating_sub(observation.observed_at_ms) <= STORAGE_LOOKUP_OBSERVATION_TTL_MS
     });
 
-    while observations.len() > STORAGE_LOOKUP_OBSERVATION_CAPACITY {
-        let Some(stale_key) = oldest_storage_lookup_observation_key(observations) else {
-            break;
-        };
-        observations.remove(&stale_key);
-    }
-}
-
-fn reserve_storage_lookup_observation_slot(observations: &mut StorageLookupObservationMap) {
-    while observations.len() >= STORAGE_LOOKUP_OBSERVATION_CAPACITY {
+    while observations.len() > max_len {
         let Some(stale_key) = oldest_storage_lookup_observation_key(observations) else {
             break;
         };
@@ -103,8 +100,11 @@ impl SwarmTransport {
             .lock()
             .map_err(|_| Error::LockPoisoned)?;
         let now = storage_lookup_observation_now_ms();
-        evict_storage_lookup_observations(&mut observations, now);
-        reserve_storage_lookup_observation_slot(&mut observations);
+        evict_storage_lookup_observations(
+            &mut observations,
+            now,
+            STORAGE_LOOKUP_OBSERVATION_CAPACITY.saturating_sub(1),
+        );
         observations.insert(key, StorageLookupObservation {
             observed_at_ms: now,
             misses: BTreeSet::new(),
@@ -126,7 +126,11 @@ impl SwarmTransport {
             .lock()
             .map_err(|_| Error::LockPoisoned)?;
         let now = storage_lookup_observation_now_ms();
-        evict_storage_lookup_observations(&mut observations, now);
+        evict_storage_lookup_observations(
+            &mut observations,
+            now,
+            STORAGE_LOOKUP_OBSERVATION_CAPACITY,
+        );
         if observations.contains_key(&key) {
             Ok(())
         } else {
@@ -158,7 +162,11 @@ impl SwarmTransport {
             .lock()
             .map_err(|_| Error::LockPoisoned)?;
         let now = storage_lookup_observation_now_ms();
-        evict_storage_lookup_observations(&mut observations, now);
+        evict_storage_lookup_observations(
+            &mut observations,
+            now,
+            STORAGE_LOOKUP_OBSERVATION_CAPACITY,
+        );
         let Some(observation) = observations.get_mut(&key) else {
             return Err(Error::InvalidMessage(
                 "storage miss observation has no active local lookup".to_string(),
@@ -166,7 +174,11 @@ impl SwarmTransport {
         };
         observation.observed_at_ms = now;
         observation.misses.extend(misses);
-        evict_storage_lookup_observations(&mut observations, now);
+        evict_storage_lookup_observations(
+            &mut observations,
+            now,
+            STORAGE_LOOKUP_OBSERVATION_CAPACITY,
+        );
         Ok(())
     }
 
@@ -189,7 +201,11 @@ impl SwarmTransport {
             .lock()
             .map_err(|_| Error::LockPoisoned)?;
         let now = storage_lookup_observation_now_ms();
-        evict_storage_lookup_observations(&mut observations, now);
+        evict_storage_lookup_observations(
+            &mut observations,
+            now,
+            STORAGE_LOOKUP_OBSERVATION_CAPACITY,
+        );
         let Some(observation) = observations.get_mut(&key) else {
             return Err(Error::InvalidMessage(
                 "storage repair has no active local lookup".to_string(),

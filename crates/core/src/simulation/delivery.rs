@@ -10,7 +10,7 @@ use super::SimulationRuntimeError;
 use super::SimulationRuntimeState;
 use super::CONTROL_DEADLINE_MS;
 use crate::message::LinkFrame;
-use crate::message::MessageClass;
+use crate::message::MessageCategory;
 use crate::message::MessageKind;
 
 /// Delivery classes visible to deterministic schedule policies.
@@ -174,10 +174,10 @@ pub(super) fn inspect_message(
         return Ok((ScheduledDeliveryClass::Reassembly, transaction_id));
     }
     let class = match kind.class() {
-        MessageClass::DhtControl => ScheduledDeliveryClass::Control,
-        MessageClass::Storage => ScheduledDeliveryClass::Storage,
-        MessageClass::E2e => ScheduledDeliveryClass::E2e,
-        MessageClass::Application => ScheduledDeliveryClass::Application,
+        MessageCategory::DhtControl => ScheduledDeliveryClass::Control,
+        MessageCategory::Storage => ScheduledDeliveryClass::Storage,
+        MessageCategory::E2e => ScheduledDeliveryClass::E2e,
+        MessageCategory::Application => ScheduledDeliveryClass::Application,
     };
     Ok((class, transaction_id))
 }

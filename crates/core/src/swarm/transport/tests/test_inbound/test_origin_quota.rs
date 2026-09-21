@@ -1,9 +1,9 @@
 use super::*;
 use crate::message::HopBudget;
+use crate::message::MessageCategory;
 use crate::message::MessageRelay;
 use crate::message::OriginQuotaConfig;
 use crate::message::OriginQuotaError;
-use crate::message::OriginQuotaLane;
 use crate::message::OriginQuotaLaneConfig;
 use crate::message::Transaction;
 
@@ -113,7 +113,7 @@ async fn quota_is_shared_across_relays_but_isolated_between_origins() -> Result<
     assert_eq!(
         swarm
             .origin_quota_counters()
-            .lane(OriginQuotaLane::Application)
+            .lane(MessageCategory::Application)
             .message_rate_exhausted,
         1
     );
@@ -203,7 +203,7 @@ async fn normal_and_reassembled_messages_each_consume_one_logical_byte_cost() ->
     assert_eq!(
         swarm
             .origin_quota_counters()
-            .lane(OriginQuotaLane::Application)
+            .lane(MessageCategory::Application)
             .byte_rate_exhausted,
         1
     );

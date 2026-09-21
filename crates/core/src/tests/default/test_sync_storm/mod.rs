@@ -55,7 +55,10 @@ use crate::swarm::transport::outbound_submit_count_for_test;
 use crate::swarm::transport::referenced_slots_for_test;
 use crate::swarm::transport::reset_outbound_submit_count_for_test;
 use crate::swarm::transport::LinkDirection;
-use crate::swarm::transport::TrackedStorageSyncOutcome;
+use crate::swarm::transport::StorageSyncOutcome;
+
+/// Dummy data-channel frame size that forces every storm payload through the chunk layer.
+pub(super) const CHUNKED_MAX_MESSAGE_SIZE: usize = 60_000;
 use crate::swarm::transport::OUTBOUND_CONTROL_BURST;
 use crate::swarm::transport::OUTBOUND_GLOBAL_BYTE_CAPACITY;
 use crate::swarm::transport::OUTBOUND_TRANSFER_QUEUE_CAPACITY;
@@ -670,7 +673,7 @@ async fn submit_workload(nodes: &[Node], kind: ScenarioTopology) {
             .await
             .expect("real storage sync submission must succeed");
         assert!(
-            matches!(outcome, TrackedStorageSyncOutcome::Delivered(_)),
+            matches!(outcome, StorageSyncOutcome::Sent(_)),
             "storm submission must be remotely admitted: {outcome:?}"
         );
         nodes[sender]

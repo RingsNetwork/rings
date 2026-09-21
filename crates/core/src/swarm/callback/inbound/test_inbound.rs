@@ -1,14 +1,14 @@
 use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 
 use super::*;
-use crate::message::MessageClass;
+use crate::message::MessageCategory;
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 use crate::swarm::callback::CallbackError;
 
-const DHT_CONTROL_LANE: InboundLane = InboundLane::from_class(MessageClass::DhtControl);
-const STORAGE_LANE: InboundLane = InboundLane::from_class(MessageClass::Storage);
-const E2E_LANE: InboundLane = InboundLane::from_class(MessageClass::E2e);
-const APPLICATION_LANE: InboundLane = InboundLane::from_class(MessageClass::Application);
+const DHT_CONTROL_LANE: InboundLane = InboundLane::from_class(MessageCategory::DhtControl);
+const STORAGE_LANE: InboundLane = InboundLane::from_class(MessageCategory::Storage);
+const E2E_LANE: InboundLane = InboundLane::from_class(MessageCategory::E2e);
+const APPLICATION_LANE: InboundLane = InboundLane::from_class(MessageCategory::Application);
 const REASSEMBLY_LANE: InboundLane = InboundLane::Reassembly;
 
 #[test]
@@ -16,7 +16,7 @@ fn test_inbound_lane_mapping_is_total_and_reserves_one_extra_lane() {
     let lanes = [DHT_CONTROL_LANE, STORAGE_LANE, E2E_LANE, APPLICATION_LANE];
 
     assert_eq!(lanes.map(InboundLane::index), [0, 1, 2, 3]);
-    assert_eq!(REASSEMBLY_LANE.index(), MessageClass::COUNT);
+    assert_eq!(REASSEMBLY_LANE.index(), MessageCategory::COUNT);
     assert!(!DHT_CONTROL_LANE.is_logical_data());
     assert!(!REASSEMBLY_LANE.is_logical_data());
     assert!(lanes
@@ -27,13 +27,18 @@ fn test_inbound_lane_mapping_is_total_and_reserves_one_extra_lane() {
 }
 
 #[test]
-fn test_reassembly_handoff_blocks_later_data_and_reassembly_until_first_poll() {
+fn test_reassembly_handoff_blocks_reassembly_and_orders_only_data_lanes() {
     let barrier = ReassemblyHandoffBarrier::new(7);
 
-    assert!(!barrier.blocks(APPLICATION_LANE, 7));
-    assert!(barrier.blocks(STORAGE_LANE, 8));
-    assert!(barrier.blocks(REASSEMBLY_LANE, 9));
-    assert!(!barrier.blocks(DHT_CONTROL_LANE, 10));
+    // The barrier itself gates only the reassembly lane; data lanes are ordered
+    // against it by the actor's barrier sequence, control lanes never wait.
+    assert!(barrier.blocks(REASSEMBLY_LANE));
+    assert!(!barrier.blocks(STORAGE_LANE));
+    assert!(!barrier.blocks(APPLICATION_LANE));
+    assert!(!barrier.blocks(DHT_CONTROL_LANE));
+    assert!(lane_waits_for_reassembly(STORAGE_LANE));
+    assert!(lane_waits_for_reassembly(APPLICATION_LANE));
+    assert!(!lane_waits_for_reassembly(DHT_CONTROL_LANE));
     assert!(!barrier.has_started());
 
     barrier.start_marker().store(true, Ordering::Release);
@@ -49,9 +54,7 @@ fn test_barrier_exemption_ablation_blocks_real_control_lane() {
         crate::simulation::ProtectionProfile::without_barrier_control_exemption(),
     )
     .expect("simulation runtime must install");
-    let barrier = ReassemblyHandoffBarrier::new(7);
-
-    assert!(barrier.blocks(DHT_CONTROL_LANE, 8));
+    assert!(lane_waits_for_reassembly(DHT_CONTROL_LANE));
 }
 
 #[test]

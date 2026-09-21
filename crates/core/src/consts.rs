@@ -36,10 +36,10 @@ pub const LOCAL_CACHE_CAPACITY: NonZeroU32 = match NonZeroU32::new(1024) {
 };
 /// Default session time-to-live in milliseconds.
 pub const DEFAULT_SESSION_TTL_MS: u64 = 30 * 24 * 3600 * 1000;
-/// 60k
-pub const TRANSPORT_MTU: usize = 60000;
-/// 60M
-pub const TRANSPORT_MAX_SIZE: usize = TRANSPORT_MTU * 1000;
+/// Ceiling on one logical message, 60 MB. The data-channel frame size is not
+/// derived from it: the transport negotiates `max_message_size` per connection
+/// and the chunk layer sizes frames to that.
+pub const TRANSPORT_MAX_SIZE: usize = 60_000_000;
 /// Bytes the transport adds when it serializes the data-channel frame: every send is wrapped in
 /// `rings_codec::serialize(TransportMessage::Custom(bytes))` before it reaches SCTP. The framing
 /// decision must account for this outer wrapper, not just the inner payload, or a payload sized

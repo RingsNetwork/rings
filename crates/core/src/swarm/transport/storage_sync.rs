@@ -33,18 +33,30 @@ pub(super) struct StorageSyncAckCapability {
     expected_acks: Vec<SyncedEntryAck>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum TrackedStorageSyncOutcome {
-    PersistedLocally,
-    Delivered(uuid::Uuid),
-    Deferred,
-}
-
+/// Outcome of one storage-sync send, detached or tracked: local persistence,
+/// remote submission (tracked: completion) under `tx_id`, or a cancelled
+/// data-plane admission that maintenance must recompute and retry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StorageSyncOutcome {
     PersistedLocally,
     Sent(uuid::Uuid),
     Deferred,
+}
+
+impl From<StorageSyncCompletion> for StorageSyncOutcome {
+    fn from(completion: StorageSyncCompletion) -> Self {
+        match completion {
+            StorageSyncCompletion::PersistedLocally => Self::PersistedLocally,
+            StorageSyncCompletion::Submitted {
+                tx_id,
+                outcome: SendCompletionOutcome::Succeeded,
+            } => Self::Sent(tx_id),
+            StorageSyncCompletion::Submitted {
+                outcome: SendCompletionOutcome::Cancelled,
+                ..
+            } => Self::Deferred,
+        }
+    }
 }
 
 impl StorageSyncOutcome {
@@ -555,50 +567,23 @@ impl SwarmTransport {
     }
 
     /// Send a storage-sync payload and register cleanup acks only for hand-off sync.
-    ///
-    /// The result distinguishes local persistence, remote submission, and a
-    /// cancelled data-plane admission that maintenance must recompute and retry.
     pub(crate) async fn send_storage_sync(
         &self,
         msg: SyncEntriesWithSuccessor,
     ) -> Result<StorageSyncOutcome> {
-        match self
-            .send_storage_sync_with_completion(msg, OutboundCompletion::Detached)
-            .await?
-        {
-            StorageSyncCompletion::PersistedLocally => Ok(StorageSyncOutcome::PersistedLocally),
-            StorageSyncCompletion::Submitted {
-                tx_id,
-                outcome: SendCompletionOutcome::Succeeded,
-            } => Ok(StorageSyncOutcome::Sent(tx_id)),
-            StorageSyncCompletion::Submitted {
-                outcome: SendCompletionOutcome::Cancelled,
-                ..
-            } => Ok(StorageSyncOutcome::Deferred),
-        }
+        self.send_storage_sync_with_completion(msg, OutboundCompletion::Detached)
+            .await
+            .map(StorageSyncOutcome::from)
     }
 
     /// Send storage repair and wait until every frame has completed or cancelled.
     pub(crate) async fn send_storage_sync_tracked(
         &self,
         msg: SyncEntriesWithSuccessor,
-    ) -> Result<TrackedStorageSyncOutcome> {
-        match self
-            .send_storage_sync_with_completion(msg, OutboundCompletion::Tracked)
-            .await?
-        {
-            StorageSyncCompletion::PersistedLocally => {
-                Ok(TrackedStorageSyncOutcome::PersistedLocally)
-            }
-            StorageSyncCompletion::Submitted {
-                tx_id,
-                outcome: SendCompletionOutcome::Succeeded,
-            } => Ok(TrackedStorageSyncOutcome::Delivered(tx_id)),
-            StorageSyncCompletion::Submitted {
-                outcome: SendCompletionOutcome::Cancelled,
-                ..
-            } => Ok(TrackedStorageSyncOutcome::Deferred),
-        }
+    ) -> Result<StorageSyncOutcome> {
+        self.send_storage_sync_with_completion(msg, OutboundCompletion::Tracked)
+            .await
+            .map(StorageSyncOutcome::from)
     }
 
     /// Send storage sync as a deferrable data-plane effect.

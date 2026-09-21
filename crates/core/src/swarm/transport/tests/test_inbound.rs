@@ -292,8 +292,11 @@ async fn test_inbound_control_lane_progresses_while_application_validation_is_bl
     Ok(())
 }
 
+/// The drain of pre-admission frames must not block the data-channel open, and an
+/// arrival admitted after it is queued in order behind the drained frame: both reach
+/// the application once the lane is released.
 #[tokio::test]
-async fn test_pre_admission_drain_does_not_block_open_or_admitted_arrivals() -> Result<()> {
+async fn test_pre_admission_drain_does_not_block_open_and_orders_admitted_arrivals() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
     ))?);
@@ -356,13 +359,17 @@ async fn test_pre_admission_drain_does_not_block_open_or_admitted_arrivals() -> 
             .await
             .map_err(|error| Error::InvalidMessage(error.to_string()))
     });
-    tokio::time::timeout(Duration::from_secs(1), late_delivery)
-        .await
-        .map_err(|_| Error::InvalidMessage("admitted arrival waited on active drain".to_string()))?
-        .map_err(|_| Error::InvalidMessage("admitted-arrival task panicked".to_string()))??;
+    // The late arrival's completion is the actor's validation, which the held
+    // lane defers: nothing reaches the application until the lane is released.
     assert_eq!(app_callback.inbounds(), 0);
 
     drop(application_admission);
+    tokio::time::timeout(Duration::from_secs(1), late_delivery)
+        .await
+        .map_err(|_| {
+            Error::InvalidMessage("admitted arrival waited beyond the lane release".to_string())
+        })?
+        .map_err(|_| Error::InvalidMessage("admitted-arrival task panicked".to_string()))??;
     app_callback.wait_for_inbounds_at_least(2).await;
     assert_eq!(callback.pre_admission_held_count_for_test(), 0);
     assert_eq!(app_callback.inbounds(), 2);
@@ -440,17 +447,25 @@ async fn test_pre_admission_drain_returns_before_application_validation_complete
     Ok(())
 }
 
+/// With the application lane saturated (every permit admitted and the lane
+/// held, so no frame is dispatched), work beyond the mailbox capacity is
+/// rejected with the typed error while a control frame is still admitted and
+/// delivered on its own lane; releasing the lane drains every held frame.
 #[tokio::test]
 async fn test_inbound_mailbox_reserves_control_capacity_under_application_saturation() -> Result<()>
 {
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
     ))?);
-    let app_callback = Arc::new(BlockingValidateSwarmCallback::default());
+    let app_callback = Arc::new(CountingSwarmCallback::default());
     let callback = Arc::new(InnerSwarmCallback::new(
         Arc::clone(&transport),
         app_callback.clone(),
     ));
+    // Held for the whole saturation: the lane's front sequence never becomes
+    // ready, so the actor dispatches no application frame and no permit is
+    // released while the capacity laws are observed.
+    let application_hold = callback.hold_application_admission_for_test()?;
     let peer_count = inbound_application_capacity_for_test() / inbound_peer_capacity_for_test();
     assert_eq!(
         peer_count * inbound_peer_capacity_for_test(),
@@ -523,16 +538,20 @@ async fn test_inbound_mailbox_reserves_control_capacity_under_application_satura
             if *capacity == inbound_mailbox_capacity_for_test()
     ));
 
-    // The reserved control lane either admits this frame or fails with a typed
-    // capacity error; a starved lane would surface as a hang bounded by the
-    // test harness, never as a sub-second race.
+    // The reserved control lane is independent of the held application lane:
+    // the control frame is admitted, validated, and delivered while every
+    // application permit stays held.
     callback
         .on_admitted_message_for_test(&control_cid, &control)
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
-    assert!(app_callback.validates() >= 2);
+    assert_eq!(app_callback.validates(), 1);
+    assert_eq!(
+        callback.inbound_admitted_count_for_test(),
+        inbound_application_capacity_for_test()
+    );
 
-    app_callback.release_first_validate();
+    drop(application_hold);
     for delivery in deliveries {
         delivery
             .await
@@ -957,7 +976,7 @@ async fn test_reassembled_control_shape_is_verified_before_lane_transition() -> 
     tampered.transaction.data.push(0);
     assert_eq!(
         crate::message::MessageKind::from_wire(&tampered.transaction.data)?.class(),
-        crate::message::MessageClass::DhtControl
+        crate::message::MessageCategory::DhtControl
     );
     let tampered_wire = tampered.to_wire()?;
     let chunks: Vec<Chunk> = Chunk::stream(tampered_wire, 32).collect();

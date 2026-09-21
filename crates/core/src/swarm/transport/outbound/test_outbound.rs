@@ -1,4 +1,3 @@
-use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
@@ -474,7 +473,6 @@ fn test_shutdown_closes_channel_without_worker_owned_sender() {
             #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
             peer: Did::from(42_u32),
             sender,
-            cancel_requested: Arc::new(AtomicBool::new(false)),
             link: PeerLinkState::new(),
             _capacity_anchor: TransferCapacityAnchor::new(Arc::new(TransferCapacity::new(
                 Arc::new(GlobalTransferCapacity::new()),
@@ -500,16 +498,13 @@ fn test_worker_drop_stops_generation_and_closes_ingress_without_a_normal_run_exi
         stop.clone(),
         measurements,
         peer,
-        Arc::new(AtomicBool::new(false)),
         SharedAnnouncedSessions::new(),
     );
 
     drop(worker);
 
     assert!(stop.is_stop_requested());
-    assert!(sender
-        .send(OutboundCommand::CancelStopped, MailboxLane::Priority)
-        .is_err());
+    assert!(sender.send(OutboundCommand::CancelStopped).is_err());
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -527,7 +522,6 @@ async fn test_worker_drop_allows_registry_to_replace_the_stopped_generation() {
             #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
             peer,
             sender,
-            cancel_requested: Arc::new(AtomicBool::new(false)),
             link: PeerLinkState::new(),
             _capacity_anchor: TransferCapacityAnchor::new(capacity),
             stop: stop.clone(),
@@ -540,7 +534,6 @@ async fn test_worker_drop_allows_registry_to_replace_the_stopped_generation() {
         stop,
         measurements,
         peer,
-        Arc::new(AtomicBool::new(false)),
         SharedAnnouncedSessions::new(),
     );
 
@@ -624,7 +617,6 @@ fn test_final_handle_drop_requests_stop_before_channel_close() {
             #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
             peer: Did::from(42_u32),
             sender,
-            cancel_requested: Arc::new(AtomicBool::new(false)),
             link: PeerLinkState::new(),
             _capacity_anchor: TransferCapacityAnchor::new(Arc::new(TransferCapacity::new(
                 Arc::new(GlobalTransferCapacity::new()),

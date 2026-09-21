@@ -4,8 +4,8 @@
 //! transfer finishes. Runnable heads use bounded DHT-control priority and
 //! round-robin service for storage, E2E, and application traffic.
 //! Cross-class order is not preserved; ordered sequences must stay in one class.
-//! Each iteration applies cancellation, drains a bounded command/completion
-//! batch, then admits at most one frame before choosing again.
+//! Each iteration handles the available command backlog and completed deliveries,
+//! then admits at most one frame before choosing again.
 //! This boundary can consume one send-accept budget and, after an irrevocable
 //! timeout, one bounded close interval before another lane runs.
 //!
@@ -17,8 +17,6 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
@@ -92,7 +90,6 @@ pub(crate) use capacity::OUTBOUND_GLOBAL_BYTE_CAPACITY;
 pub(crate) use capacity::OUTBOUND_TRANSFER_QUEUE_CAPACITY;
 pub(super) use link_state::LinkControlPermit;
 use link_state::PeerLinkState;
-use mailbox::MailboxLane;
 use mailbox::MailboxReceiver;
 use mailbox::MailboxSender;
 use measurement::MeasurementReceiver;
@@ -114,7 +111,6 @@ pub(super) use transfer::OutboundTransfer;
 pub(super) use transfer::OutboundTransferRoute;
 use transfer::ShutdownBatch;
 
-pub(crate) const OUTBOUND_COMMAND_DRAIN_BUDGET: usize = 32;
 struct ScheduledTransfer<T = OutboundTransfer, P = TransferCapacityPermit> {
     transfer: T,
     capacity_permit: Option<P>,
@@ -137,8 +133,15 @@ impl<T, P> Drop for ScheduledTransfer<T, P> {
     }
 }
 
+/// One mailbox command. The worker handles the backlog in submission order,
+/// through [`OutboundWorker::handle_command`]. Only shutdown bypasses that
+/// dispatcher, after closing ingress and cancelling all admitted transfers.
 enum OutboundCommand {
+    /// A transfer admitted by the submitter; rejected on arrival if its stop
+    /// token is already set.
     Submit(Box<ScheduledTransfer>),
+    /// Some transfer's stop token was set after it was submitted: cancel
+    /// every queued transfer whose token is set.
     CancelStopped,
 }
 
@@ -193,7 +196,6 @@ struct OutboundPeerState {
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     peer: Did,
     sender: MailboxSender<OutboundCommand>,
-    cancel_requested: Arc<AtomicBool>,
     /// The link's tables, kept across worker replacements under one generation.
     link: PeerLinkState,
     // Strong lifetime anchor; the peer registry intentionally stores only a Weak reference.
@@ -251,13 +253,8 @@ impl OutboundPeerHandle {
         if self.state.stop.is_stop_requested() {
             return Err(Error::ChannelSendMessageFailed);
         }
-        let lane = if scheduled.transfer.class() == TransferClass::DhtControl {
-            MailboxLane::Priority
-        } else {
-            MailboxLane::Regular
-        };
         let command = OutboundCommand::Submit(Box::new(scheduled));
-        let (result, submitted) = match self.state.sender.send_if(command, lane, |command| {
+        let (result, submitted) = match self.state.sender.send_if(command, |command| {
             matches!(command, OutboundCommand::Submit(scheduled) if !scheduled.transfer.is_stopped())
         }) {
             Ok(()) => (Ok(()), true),
@@ -280,11 +277,7 @@ impl OutboundPeerHandle {
     }
 
     pub(super) fn cancel_stopped(&self) {
-        self.state.cancel_requested.store(true, Ordering::Release);
-        let _ = self
-            .state
-            .sender
-            .send(OutboundCommand::CancelStopped, MailboxLane::Priority);
+        let _ = self.state.sender.send(OutboundCommand::CancelStopped);
     }
 
     fn shutdown(&self) {
@@ -370,12 +363,10 @@ impl OutboundSchedulers {
         let capacity = registry.capacity(peer, &self.global_capacity);
         let (sender, receiver) = mailbox::channel();
         let stop = StopSource::new();
-        let cancel_requested = Arc::new(AtomicBool::new(false));
         let state = Arc::new(OutboundPeerState {
             #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
             peer,
             sender,
-            cancel_requested: cancel_requested.clone(),
             link: link.clone(),
             _capacity_anchor: TransferCapacityAnchor::new(capacity),
             stop: stop.clone(),
@@ -384,14 +375,7 @@ impl OutboundSchedulers {
         let (measurements, measurement_receiver) =
             MeasurementRecorder::channel(self.measure.clone(), peer);
         spawn_worker(
-            OutboundWorker::new(
-                receiver,
-                stop,
-                measurements,
-                peer,
-                cancel_requested,
-                link.announced,
-            ),
+            OutboundWorker::new(receiver, stop, measurements, peer, link.announced),
             measurement_receiver,
         )?;
         registry.peers.insert(peer, handle.clone());
@@ -475,7 +459,6 @@ struct OutboundWorker {
     #[cfg(test)]
     peer: Did,
     receiver: MailboxReceiver<OutboundCommand>,
-    cancel_requested: Arc<AtomicBool>,
     ready: TransferQueues<QueuedTransfer>,
     active: Option<RunnableTransfer<QueuedTransfer>>,
     announced: SharedAnnouncedSessions,
@@ -493,7 +476,6 @@ impl OutboundWorker {
         stop: StopSource,
         measurements: MeasurementRecorder,
         peer: Did,
-        cancel_requested: Arc<AtomicBool>,
         announced: SharedAnnouncedSessions,
     ) -> Self {
         #[cfg(not(test))]
@@ -506,7 +488,6 @@ impl OutboundWorker {
             #[cfg(test)]
             peer,
             receiver,
-            cancel_requested,
             ready: TransferQueues::default(),
             active: None,
             announced,
@@ -533,7 +514,6 @@ impl OutboundWorker {
                 self.shutdown();
                 return;
             }
-            self.apply_pending_cancellation();
             self.drain_available();
             if self.stop.is_stop_requested() {
                 self.shutdown();
@@ -552,17 +532,16 @@ impl OutboundWorker {
         }
     }
 
+    /// Hand the whole command backlog to the transfer queues and observe every
+    /// completed delivery, so the next frame is chosen from the complete state.
     fn drain_available(&mut self) {
-        for command in self.receiver.drain_available(OUTBOUND_COMMAND_DRAIN_BUDGET) {
+        for command in self.receiver.drain_available() {
             self.handle_command(command);
         }
         self.input_closed = self.receiver.is_closed();
 
-        for _ in 0..OUTBOUND_COMMAND_DRAIN_BUDGET {
-            match self.deliveries.next().now_or_never() {
-                Some(Some(event)) => self.handle_delivery(event),
-                Some(None) | None => break,
-            }
+        while let Some(Some(event)) = self.deliveries.next().now_or_never() {
+            self.handle_delivery(event);
         }
     }
 
@@ -575,15 +554,8 @@ impl OutboundWorker {
 
     fn handle_command(&mut self, command: OutboundCommand) {
         match command {
-            OutboundCommand::Submit(transfer) => {
-                #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-                test_trace::record_handled_submission(self.peer);
-                self.accept_submission(*transfer);
-            }
-            OutboundCommand::CancelStopped => {
-                self.cancel_requested.store(false, Ordering::Release);
-                self.cancel_stopped_admitted();
-            }
+            OutboundCommand::Submit(transfer) => self.accept_submission(*transfer),
+            OutboundCommand::CancelStopped => self.cancel_stopped_admitted(),
         }
     }
 
@@ -597,12 +569,15 @@ impl OutboundWorker {
         }
     }
 
-    fn apply_pending_cancellation(&mut self) {
-        if self.cancel_requested.swap(false, Ordering::AcqRel) {
-            self.cancel_stopped_admitted();
-        }
-    }
-
+    /// `CancelStopped`: release every queued transfer whose stop token is set.
+    ///
+    /// Only the queues are scanned; the mailbox is not touched here. A
+    /// stopped transfer is either still in the mailbox, where its `Submit` is
+    /// rejected by [`Self::accept_submission`] when the worker's drain reaches
+    /// it, or already queued, where this scan finds it: the stop token is set
+    /// before the command is sent, and the worker handles the backlog in
+    /// order. A transfer stopped after this scan is followed by its own
+    /// `CancelStopped`, handled by the next drain like any other command.
     fn cancel_stopped_admitted(&mut self) {
         let cancelled = self
             .ready
@@ -612,13 +587,6 @@ impl OutboundWorker {
             .filter_map(|queued| Self::cancel_scheduled_transfer(queued.scheduled))
             .collect();
         Self::publish_released_results(final_results);
-
-        for command in self.receiver.drain_all() {
-            if let OutboundCommand::Submit(transfer) = command {
-                self.accept_submission(*transfer);
-            }
-        }
-        self.input_closed = self.receiver.is_closed();
     }
 
     fn terminate_transfer(
@@ -739,7 +707,7 @@ impl OutboundWorker {
     fn drain_buffered_transfers(&mut self) -> Vec<ScheduledTransfer> {
         let buffered = self
             .receiver
-            .drain_all()
+            .drain_available()
             .into_iter()
             .filter_map(|command| match command {
                 OutboundCommand::Submit(transfer) => Some(*transfer),
@@ -994,5 +962,7 @@ impl Drop for OutboundWorker {
     }
 }
 
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+mod test_cancellation;
 #[cfg(test)]
 mod test_outbound;
