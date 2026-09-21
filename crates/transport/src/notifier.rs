@@ -102,7 +102,7 @@ impl Notifier {
             timeout_notifier.wake();
         });
 
-        let Some(global) = js_utils::global() else {
+        let Some(global) = crate::js_global::global() else {
             fallback_notifier.wake();
             return;
         };
@@ -162,55 +162,6 @@ pub(crate) async fn wait_for_data_channel_open(
     all(feature = "native-webrtc", not(target_family = "wasm"))
 )))]
 mod native_timeout_scheduler;
-
-// This is copied from utils module of rings-core crate.
-#[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
-mod js_utils {
-    use wasm_bindgen::JsCast;
-    use wasm_bindgen::JsValue;
-
-    pub enum Global {
-        Window(web_sys::Window),
-        Worker(web_sys::WorkerGlobalScope),
-        ServiceWorker(web_sys::ServiceWorkerGlobalScope),
-    }
-
-    impl Global {
-        pub fn set_timeout_0(
-            &self,
-            callback: &js_sys::Function,
-            millis: i32,
-        ) -> Result<i32, JsValue> {
-            match self {
-                Global::Window(global) => {
-                    global.set_timeout_with_callback_and_timeout_and_arguments_0(callback, millis)
-                }
-                Global::Worker(global) => {
-                    global.set_timeout_with_callback_and_timeout_and_arguments_0(callback, millis)
-                }
-                Global::ServiceWorker(global) => {
-                    global.set_timeout_with_callback_and_timeout_and_arguments_0(callback, millis)
-                }
-            }
-        }
-    }
-
-    pub fn global() -> Option<Global> {
-        let obj = JsValue::from(js_sys::global());
-        if obj.has_type::<web_sys::Window>() {
-            return Some(Global::Window(web_sys::Window::from(obj)));
-        }
-        if obj.has_type::<web_sys::WorkerGlobalScope>() {
-            return Some(Global::Worker(web_sys::WorkerGlobalScope::from(obj)));
-        }
-        if obj.has_type::<web_sys::ServiceWorkerGlobalScope>() {
-            return Some(Global::ServiceWorker(
-                web_sys::ServiceWorkerGlobalScope::from(obj),
-            ));
-        }
-        None
-    }
-}
 
 #[cfg(all(test, not(target_family = "wasm")))]
 mod test_notifier;

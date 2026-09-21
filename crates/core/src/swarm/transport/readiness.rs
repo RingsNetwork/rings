@@ -288,7 +288,6 @@ mod tests {
                 peer,
                 generation: 1,
             },
-            Error::RTCDataChannelStateNotOpen,
             Error::TransportNotReady {
                 state: WebrtcConnectionState::Disconnected,
                 data_channel_open: true,

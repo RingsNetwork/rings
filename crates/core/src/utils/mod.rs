@@ -11,9 +11,6 @@ pub(crate) use time::try_sleep;
 pub(crate) use time::Instant;
 
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
-/// JavaScript function wrappers used by the WASM bindings.
-pub mod js_func;
-#[cfg(all(feature = "wasm", target_family = "wasm"))]
 /// JavaScript interop helpers used by the WASM bindings.
 pub mod js_utils;
 #[cfg(all(feature = "wasm", target_family = "wasm"))]

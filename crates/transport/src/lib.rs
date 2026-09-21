@@ -17,6 +17,8 @@ pub mod core;
 pub mod delivery;
 pub mod error;
 pub mod ice_server;
+#[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
+pub mod js_global;
 pub mod notifier;
 pub mod pool;
 pub mod webrtc_config;

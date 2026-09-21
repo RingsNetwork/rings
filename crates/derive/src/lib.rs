@@ -1,11 +1,6 @@
 //! Procedural macros shared by Rings crates.
 
 extern crate proc_macro;
-#[macro_use]
-extern crate quote;
-use syn::parse_macro_input;
-use syn::DeriveInput;
-mod derives;
 use proc_macro::TokenStream;
 
 /// If the feature is not "wasm", the macro does nothing; otherwise, it calls wasm_bindgen.
@@ -25,7 +20,7 @@ pub fn wasm_export(attr: TokenStream, input: TokenStream) -> TokenStream {
     #[cfg(feature = "wasm")]
     {
         let input: proc_macro2::TokenStream = input.into();
-        quote! {
+        quote::quote! {
             #[cfg_attr(target_family = "wasm", wasm_bindgen::prelude::wasm_bindgen)]
             #input
         }
@@ -34,11 +29,4 @@ pub fn wasm_export(attr: TokenStream, input: TokenStream) -> TokenStream {
 
     #[cfg(not(feature = "wasm"))]
     return input;
-}
-
-/// Derive connection classification implementations.
-#[proc_macro_derive(JudgeConnection)]
-pub fn impl_judege_connection(input: TokenStream) -> TokenStream {
-    let ast = parse_macro_input!(input as DeriveInput);
-    crate::derives::impl_judge_connection_traits(&ast).into()
 }

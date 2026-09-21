@@ -182,10 +182,6 @@ pub enum Error {
     #[error("ECDSA or EdDSA pubkey bad format")]
     PublicKeyBadFormat,
 
-    /// Failed to decode vector to bls affine
-    #[error("Failed to decode vector to bls affine")]
-    BlsAffineDecodeFailed,
-
     /// private bad format
     #[error("private bad format")]
     PrivateKeyBadFormat,
@@ -310,10 +306,6 @@ pub enum Error {
     #[error("Decode base58-encoded with 4 bytes checksum string into a byte vector")]
     Decode,
 
-    /// Couldn't decode data as UTF-8.
-    #[error("Couldn't decode data as UTF-8.")]
-    Utf8Encoding(#[from] std::string::FromUtf8Error),
-
     /// IOError
     #[error("IOError")]
     ServiceIOError(#[from] std::io::Error),
@@ -325,10 +317,6 @@ pub enum Error {
     /// Invalid rustc hexadecimal id in directory cache
     #[error("Invalid rustc hexadecimal id in directory cache")]
     BadCHexInCache,
-
-    /// URL parse error
-    #[error("URL parse error")]
-    URLParse(#[from] url::ParseError),
 
     /// Invalid hexadecimal id in directory cache
     #[error("Invalid hexadecimal id in directory cache")]
@@ -374,33 +362,9 @@ pub enum Error {
     #[error("Signature is not canonical")]
     NonCanonicalSignature,
 
-    /// Gzip encode error.
-    #[error("Gzip encode error.")]
-    GzipEncode,
-
-    /// Gzip decode error.
-    #[error("Gzip decode error.")]
-    GzipDecode,
-
-    /// Failed on promise, state is not succeeded
-    #[error("Failed on promise, state is not succeeded")]
-    PromiseStateFailed,
-
     /// promise timeout, state is not succeeded
     #[error("promise timeout, state is not succeeded")]
     PromiseStateTimeout,
-
-    /// Ice server scheme {0} has not supported yet
-    #[error("Ice server scheme {0} has not supported yet")]
-    IceServerSchemeNotSupport(String),
-
-    /// Ice server get url without host
-    #[error("Ice server get url without host")]
-    IceServerURLMissHost,
-
-    /// Cannot find next node by local DHT
-    #[error("Cannot find next node by local DHT")]
-    MessageHandlerMissNextNode,
 
     /// Found existing transport when answer offer from remote node
     #[error("Found existing transport when answer offer from remote node")]
@@ -650,120 +614,17 @@ pub enum Error {
     #[error("Failed on write successors")]
     FailedToWriteSuccessors,
 
-    /// Failed on TryInto Entry
-    #[error("Failed on TryInto Entry")]
-    PeerRingInvalidEntry,
-
     /// Unexpected PeerRingAction, {0:?}
     #[error("Unexpected PeerRingAction, {0:?}")]
     PeerRingUnexpectedAction(Box<crate::dht::PeerRingAction>),
-
-    /// PeerRing findsuccessor error, {0}
-    #[error("PeerRing findsuccessor error, {0}")]
-    PeerRingFindSuccessor(String),
-
-    /// PeerRing cannot find closest preceding node
-    #[error("PeerRing cannot find closest preceding node")]
-    PeerRingNotFindClosestNode,
-
-    /// PeerRing RWLock unlock failed
-    #[error("PeerRing RWLock unlock failed")]
-    PeerRingUnlockFailed,
 
     /// Cannot seek did in swarm table, {0}
     #[error("Cannot seek did in swarm table, {0}")]
     SwarmMissDidInTable(crate::dht::Did),
 
-    /// Cannot gather local candidate, {0}
-    #[error("Cannot gather local candidate, {0}")]
-    FailedOnGatherLocalCandidate(String),
-
-    /// Node behaviour bad
-    #[error("Node behaviour bad")]
-    NodeBehaviourBad(crate::dht::Did),
-
     /// Cannot get transport from did: {0}
     #[error("Cannot get transport from did: {0}")]
     SwarmMissTransport(crate::dht::Did),
-
-    /// Load message failed with message: {0}
-    #[error("Load message failed with message: {0}")]
-    SwarmLoadMessageRecvFailed(String),
-
-    /// Default transport is not connected
-    #[error("Default transport is not connected")]
-    SwarmDefaultTransportNotConnected,
-
-    /// call lock() failed
-    #[error("call lock() failed")]
-    SwarmPendingTransTryLockFailed,
-
-    /// transport not found
-    #[error("transport not found")]
-    SwarmPendingTransNotFound,
-
-    /// failed to close previous when registering, {0}
-    #[error("failed to close previous when registering, {0}")]
-    SwarmToClosePrevTransport(String),
-
-    /// call lock() failed
-    #[error("call lock() failed")]
-    SessionTryLockFailed,
-
-    /// Invalid peer type
-    #[error("Invalid peer type")]
-    InvalidPeerType,
-
-    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
-    /// RTC new peer connection failed
-    #[error("RTC new peer connection failed")]
-    RTCPeerConnectionCreateFailed(#[source] webrtc::Error),
-
-    /// RTC peer_connection not establish
-    #[error("RTC peer_connection not establish")]
-    RTCPeerConnectionNotEstablish,
-
-    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
-    /// RTC peer_connection fail to create offer
-    #[error("RTC peer_connection fail to create offer")]
-    RTCPeerConnectionCreateOfferFailed(#[source] webrtc::Error),
-
-    #[cfg(all(feature = "wasm", target_family = "wasm"))]
-    /// RTC peer_connection fail to create offer
-    #[error("RTC peer_connection fail to create offer")]
-    RTCPeerConnectionCreateOfferFailed(String),
-
-    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
-    /// RTC peer_connection fail to create answer
-    #[error("RTC peer_connection fail to create answer")]
-    RTCPeerConnectionCreateAnswerFailed(#[source] webrtc::Error),
-
-    #[cfg(all(feature = "wasm", target_family = "wasm"))]
-    /// RTC peer_connection fail to create answer
-    #[error("RTC peer_connection fail to create answer")]
-    RTCPeerConnectionCreateAnswerFailed(String),
-
-    /// DataChannel message size not match, {0} < {1}
-    #[error("DataChannel message size not match, {0} < {1}")]
-    RTCDataChannelMessageIncomplete(usize, usize),
-
-    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
-    /// DataChannel send text message failed
-    #[error("DataChannel send text message failed")]
-    RTCDataChannelSendTextFailed(#[source] webrtc::Error),
-
-    #[cfg(all(feature = "wasm", target_family = "wasm"))]
-    /// DataChannel send text message failed, {0}
-    #[error("DataChannel send text message failed, {0}")]
-    RTCDataChannelSendTextFailed(String),
-
-    /// DataChannel not ready
-    #[error("DataChannel not ready")]
-    RTCDataChannelNotReady,
-
-    /// DataChannel state not open
-    #[error("DataChannel state not open")]
-    RTCDataChannelStateNotOpen,
 
     /// The observed WebRTC/data-channel product state cannot make progress.
     #[error("Transport not ready: state {state:?}, data channel open: {data_channel_open}")]
@@ -774,60 +635,9 @@ pub enum Error {
         data_channel_open: bool,
     },
 
-    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
-    /// RTC peer_connection add ice candidate error
-    #[error("RTC peer_connection add ice candidate error")]
-    RTCPeerConnectionAddIceCandidateError(#[source] webrtc::Error),
-
-    #[cfg(all(feature = "wasm", target_family = "wasm"))]
-    /// RTC peer_connection add ice candidate error
-    #[error("RTC peer_connection add ice candidate error")]
-    RTCPeerConnectionAddIceCandidateError(String),
-
-    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
-    /// RTC peer_connection set local description failed
-    #[error("RTC peer_connection set local description failed")]
-    RTCPeerConnectionSetLocalDescFailed(#[source] webrtc::Error),
-
-    #[cfg(all(feature = "wasm", target_family = "wasm"))]
-    /// RTC peer_connection set local description failed
-    #[error("RTC peer_connection set local description failed")]
-    RTCPeerConnectionSetLocalDescFailed(String),
-
-    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
-    /// RTC peer_connection set remote description failed
-    #[error("RTC peer_connection set remote description failed")]
-    RTCPeerConnectionSetRemoteDescFailed(#[source] webrtc::Error),
-
-    #[cfg(all(feature = "wasm", target_family = "wasm"))]
-    /// RTC peer_connection set remote description failed
-    #[error("RTC peer_connection set remote description failed")]
-    RTCPeerConnectionSetRemoteDescFailed(String),
-
-    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
-    /// RTC peer_connection failed to close it
-    #[error("RTC peer_connection failed to close it")]
-    RTCPeerConnectionCloseFailed(#[source] webrtc::Error),
-
-    /// RTC unsupported sdp type
-    #[error("RTC unsupported sdp type")]
-    RTCSdpTypeNotMatch,
-
     /// Connection not Found
     #[error("Connection not Found")]
     ConnectionNotFound,
-
-    /// Invalid Transport Id
-    #[error("Invalid Transport Id")]
-    InvalidTransportUuid,
-
-    /// Unexpected encrypted data
-    #[error("Unexpected encrypted data")]
-    UnexpectedEncryptedData,
-
-    /// Failed to decrypt data
-    #[error("Failed to decrypt data")]
-    DecryptionError,
 
     /// Current node is not the next hop of message
     #[error("Current node is not the next hop of message")]
@@ -844,14 +654,6 @@ pub enum Error {
     /// Cannot get next hop when sending message
     #[error("Cannot get next hop when sending message")]
     NoNextHop,
-
-    /// To generate REPORT, you should provide SEND
-    #[error("To generate REPORT, you should provide SEND")]
-    ReportNeedSend,
-
-    /// Only SEND message can reset destination
-    #[error("Only SEND message can reset destination")]
-    ResetDestinationNeedSend,
 
     #[cfg(all(feature = "wasm", target_family = "wasm"))]
     /// IndexedDB error, {0}
@@ -870,18 +672,6 @@ pub enum Error {
         /// Total byte budget of the storage.
         capacity: u64,
     },
-
-    /// entry not found
-    #[error("entry not found")]
-    EntryNotFound,
-
-    /// IO error: {0}
-    #[error("IO error: {0}")]
-    IOError(std::io::Error),
-
-    /// Failed to build swarm: {0}
-    #[error("Failed to build swarm: {0}")]
-    SwarmBuildFailed(String),
 
     /// Message invalid: {0}
     #[error("Message invalid: {0}")]
@@ -970,24 +760,9 @@ pub enum Error {
     },
 
     #[cfg(all(feature = "wasm", target_family = "wasm"))]
-    /// Cannot get property {0} from JsValue
-    #[error("Cannot get property {0} from JsValue")]
-    FailedOnGetProperty(String),
-
-    #[cfg(all(feature = "wasm", target_family = "wasm"))]
-    /// Cannot set property {0} from JsValue
-    #[error("Cannot set property {0} from JsValue")]
-    FailedOnSetProperty(String),
-
-    #[cfg(all(feature = "wasm", target_family = "wasm"))]
     /// Error on ser/der JsValue
     #[error("Error on ser/der JsValue")]
     SerdeWasmBindgenError(#[from] serde_wasm_bindgen::Error),
-
-    #[cfg(all(feature = "wasm", target_family = "wasm"))]
-    /// Error create RTC connection: {0}
-    #[error("Error create RTC connection: {0}")]
-    CreateConnectionError(String),
 
     /// Session is expired
     #[error("Session is expired")]

@@ -3279,7 +3279,6 @@ dependencies = [
  "elliptic-curve",
  "ethereum-types",
  "event-listener 5.4.2",
- "flate2",
  "futures",
  "futures-timer",
  "hex",
@@ -3314,14 +3313,12 @@ dependencies = [
  "tracing-subscriber",
  "tracing-test",
  "tracing-wasm",
- "url",
  "uuid 0.8.2",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
  "web-sys",
  "web-time",
- "webrtc",
  "zeroize",
 ]
 

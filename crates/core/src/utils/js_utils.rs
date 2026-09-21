@@ -1,52 +1,12 @@
-use std::future::Future;
+//! Browser interop for the wasm build: a sleep over the JavaScript global scope.
+//!
+//! The scope detection itself ([`rings_transport::js_global`]) is the transport's, which needs
+//! it for its data-channel notifier; this module only schedules on it.
 
+use rings_transport::js_global::global;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
-
-/// JavaScript global scope variants supported by Rings wasm utilities.
-pub enum Global {
-    /// Browser window global scope.
-    Window(web_sys::Window),
-    /// Dedicated or shared worker global scope.
-    WorkerGlobal(web_sys::WorkerGlobalScope),
-    /// Service worker global scope.
-    ServiceWorkerGlobal(web_sys::ServiceWorkerGlobalScope),
-}
-
-impl Global {
-    /// Schedule a zero-argument timeout callback on this global scope.
-    pub fn set_timeout_0(&self, callback: &js_sys::Function, millis: i32) -> Result<i32, JsValue> {
-        match self {
-            Global::Window(global) => {
-                global.set_timeout_with_callback_and_timeout_and_arguments_0(callback, millis)
-            }
-            Global::WorkerGlobal(global) => {
-                global.set_timeout_with_callback_and_timeout_and_arguments_0(callback, millis)
-            }
-            Global::ServiceWorkerGlobal(global) => {
-                global.set_timeout_with_callback_and_timeout_and_arguments_0(callback, millis)
-            }
-        }
-    }
-}
-
-/// Detect the current JavaScript global scope.
-pub fn global() -> Option<Global> {
-    let obj = JsValue::from(js_sys::global());
-    if obj.has_type::<web_sys::Window>() {
-        return Some(Global::Window(web_sys::Window::from(obj)));
-    }
-    if obj.has_type::<web_sys::WorkerGlobalScope>() {
-        return Some(Global::WorkerGlobal(web_sys::WorkerGlobalScope::from(obj)));
-    }
-    if obj.has_type::<web_sys::ServiceWorkerGlobalScope>() {
-        return Some(Global::ServiceWorkerGlobal(
-            web_sys::ServiceWorkerGlobalScope::from(obj),
-        ));
-    }
-    None
-}
 
 fn resolve_sleep(resolve: &js_sys::Function) {
     if let Err(error) = resolve.call0(&JsValue::NULL) {
@@ -83,22 +43,4 @@ pub fn window_sleep(millis: i32) -> wasm_bindgen_futures::JsFuture {
         }),
     };
     wasm_bindgen_futures::JsFuture::from(promise)
-}
-
-/// Spawn a wasm-local interval loop that waits for each tick task to finish.
-pub fn spawn_interval<F, Fut>(millis: i32, mut task: F)
-where
-    F: FnMut() -> Fut + 'static,
-    Fut: Future<Output = ()> + 'static,
-{
-    wasm_bindgen_futures::spawn_local(async move {
-        loop {
-            if let Err(error) = window_sleep(millis).await {
-                tracing::error!("failed to wait for interval tick: {:?}", error);
-                return;
-            }
-
-            task().await;
-        }
-    });
 }

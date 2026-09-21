@@ -36,12 +36,6 @@ impl PublicKey<33> {
         Self::from_u8(value)
     }
 
-    /// monero style uncheck base56
-    pub fn try_from_b58m_uncheck(value: &str) -> Result<PublicKey<33>> {
-        let value: &[u8] = &base58_monero::decode(value).map_err(|_| Error::PublicKeyBadFormat)?;
-        Self::from_u8(value)
-    }
-
     /// from raw [u8], the length can be 32, or 33
     /// Odd flag can be "02" (odd), "03" (even) or "00" (unknown)
     /// The format is <odd_flat (1 bytes), x_coordinate (32 bytes)>

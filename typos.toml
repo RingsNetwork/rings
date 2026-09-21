@@ -12,6 +12,8 @@ Pease = "Pease"
 # JSON-RPC method name as documented in docs/src/jsonrpc.md.
 [default.extend-identifiers]
 listPendings = "listPendings"
+# Rust compression crate referenced by name in the changelog.
+flate2 = "flate2"
 
 # mdBook's own variable name, which docs/theme/rings.css must spell the same way to override it.
 [type.css]

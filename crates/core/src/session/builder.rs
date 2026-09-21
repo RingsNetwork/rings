@@ -38,16 +38,6 @@ impl SessionSkBuilder {
         }
     }
 
-    /// Return whether the configured account type and entity form a valid account.
-    pub fn validate_account(&self) -> bool {
-        Account::try_from((self.account_entity.clone(), self.account_type.clone()))
-            .map_err(|error| {
-                tracing::debug!(?error, "session account validation failed");
-                error
-            })
-            .is_ok()
-    }
-
     /// Construct the proof string that the external account must sign.
     pub fn unsigned_proof(&self) -> String {
         pack_session(self.sk.address().into(), self.ts_ms, self.ttl_ms)

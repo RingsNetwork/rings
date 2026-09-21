@@ -1,4 +1,5 @@
 use super::*;
+use crate::message::DhtProtocolMode;
 
 #[cfg(feature = "dummy")]
 #[tokio::test]
@@ -210,12 +211,10 @@ fn test_connection_offer_protocol_mode_includes_storage_redundancy() -> Result<(
     let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
     let matching = ConnectNodeSend {
         sdp: String::new(),
-        network_id: 0,
-        storage_redundancy: 1,
-        dht_virtual_nodes: 0,
+        dht_protocol_mode: DhtProtocolMode::new(0, 1, 0),
     };
     let mismatched_redundancy = ConnectNodeSend {
-        storage_redundancy: 2,
+        dht_protocol_mode: DhtProtocolMode::new(0, 2, 0),
         ..matching.clone()
     };
 
@@ -229,12 +228,10 @@ fn test_connection_answer_protocol_mode_includes_storage_redundancy() -> Result<
     let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
     let matching = ConnectNodeReport {
         sdp: String::new(),
-        network_id: 0,
-        storage_redundancy: 1,
-        dht_virtual_nodes: 0,
+        dht_protocol_mode: DhtProtocolMode::new(0, 1, 0),
     };
     let mismatched_redundancy = ConnectNodeReport {
-        storage_redundancy: 2,
+        dht_protocol_mode: DhtProtocolMode::new(0, 2, 0),
         ..matching.clone()
     };
 

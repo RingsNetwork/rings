@@ -18,10 +18,6 @@ pub(crate) use effects::yield_core_actor_step;
 pub(crate) use effects::CORE_ACTOR_BROWSER_YIELD_INTERVAL;
 
 mod payload;
-pub use payload::decode_gzip_data;
-pub use payload::encode_data_gzip;
-pub use payload::from_gzipped_data;
-pub use payload::gzip_data;
 pub(crate) use payload::LinkControl;
 pub(crate) use payload::LinkFrame;
 pub use payload::MessagePayload;
