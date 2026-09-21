@@ -58,7 +58,9 @@
 //! claims. Law (questions): every held frame asks for its own missing digests once, on arrival
 //! (one lost question is repaired by the next frame that misses the same digest), and a frame
 //! that finds the hold full asks the oldest held frame's question again; answers are one frame
-//! per question. Law (order): a held frame never waits for a frame held before it, and never
+//! per question. A frame dropped for want of room is a loss at this end's capacity, not the
+//! peer's fault, and is not charged; a held frame the peer does not back is. Law (order): a
+//! held frame never waits for a frame held before it, and never
 //! blocks a frame that resolves; among the frames resolvable at one instant, the earliest
 //! arrival leaves first. The link promises no order, so nothing downstream may rely on more
 //! than this. Law (expiry): an
@@ -145,6 +147,19 @@ impl<A> SessionTable<A> {
         true
     }
 
+    /// [`Self::live`] and [`Self::touch`] in one pass: the entry `digest` addresses, now the
+    /// most recently referenced, if the table holds it live at `now_ms`; an expired entry is
+    /// neither returned nor touched.
+    fn touch_live(&mut self, digest: SessionDigest, now_ms: u128) -> Option<&TableEntry<A>> {
+        let position = self
+            .entries
+            .iter()
+            .position(|entry| entry.digest == digest && !entry.session.is_expired_at(now_ms))?;
+        let entry = self.entries.remove(position)?;
+        self.entries.push_back(entry);
+        self.entries.back()
+    }
+
     /// Hold the session `digest` addresses as the most recently referenced entry: a reference
     /// if the table holds it, else `session()` with `annotation`, evicting the least recently
     /// referenced entry when full. The session is materialised only on first sight.
@@ -222,6 +237,12 @@ impl AnnouncedSessions {
         }
     }
 
+    /// Whether the table is `generation`'s: what another generation announced was announced
+    /// on another link.
+    fn is_current(&self, generation: u64) -> bool {
+        self.generation == Some(generation)
+    }
+
     /// Make the table the one of `generation`: a newer generation is a new link with an empty
     /// table, an older one is a link that no longer exists. Post: `true` iff `generation` is
     /// the current one afterwards.
@@ -230,24 +251,7 @@ impl AnnouncedSessions {
             self.generation = Some(generation);
             self.announced.clear();
         }
-        self.generation == Some(generation)
-    }
-
-    /// The table as `generation` sees it: this generation's table, or nothing, because what
-    /// another generation announced was announced on another link.
-    fn announced_on(&self, generation: u64) -> Option<&SessionTable<Acknowledgement>> {
-        (self.generation == Some(generation)).then_some(&self.announced)
-    }
-
-    /// The entry `digest` addresses, if `generation` announced it and it is live at `now_ms`.
-    fn live_on(
-        &self,
-        generation: u64,
-        digest: SessionDigest,
-        now_ms: u128,
-    ) -> Option<&TableEntry<Acknowledgement>> {
-        self.announced_on(generation)
-            .and_then(|announced| announced.live(digest, now_ms))
+        self.is_current(generation)
     }
 
     /// Decide how each slot of `payload` travels on `generation` at `now_ms`, and remember
@@ -275,23 +279,23 @@ impl AnnouncedSessions {
     /// [`Self::encode`] for one slot of the current generation.
     fn encode_slot<'a>(&mut self, session: &'a Session, now_ms: u128) -> Result<SessionRef<'a>> {
         let digest = session.digest()?;
-        let acknowledged = self
-            .announced
-            .live(digest, now_ms)
-            .is_some_and(|entry| entry.annotation == Acknowledgement::Acknowledged);
-        self.announced
-            .admit(digest, || session.clone(), Acknowledgement::Pending);
-        Ok(if acknowledged {
-            SessionRef::Digest(digest)
-        } else {
-            SessionRef::inline(session)
-        })
+        match self.announced.touch_live(digest, now_ms) {
+            Some(entry) if entry.annotation == Acknowledgement::Acknowledged => {
+                Ok(SessionRef::Digest(digest))
+            }
+            Some(_) => Ok(SessionRef::inline(session)),
+            None => {
+                self.announced
+                    .admit(digest, || session.clone(), Acknowledgement::Pending);
+                Ok(SessionRef::inline(session))
+            }
+        }
     }
 
     /// The peer confirmed `digest` on `generation`. A confirmation of a digest this end never
     /// announced, or announced on another generation, marks nothing.
     pub(crate) fn acknowledge(&mut self, generation: u64, digest: SessionDigest) {
-        if self.generation == Some(generation) {
+        if self.is_current(generation) {
             self.announced
                 .annotate(digest, Acknowledgement::Acknowledged);
         }
@@ -306,7 +310,9 @@ impl AnnouncedSessions {
         digest: SessionDigest,
         now_ms: u128,
     ) -> LinkControl {
-        self.live_on(generation, digest, now_ms)
+        self.is_current(generation)
+            .then(|| self.announced.live(digest, now_ms))
+            .flatten()
             .map_or(LinkControl::Unknown(digest), |entry| {
                 LinkControl::Announce(entry.session.clone())
             })
@@ -393,7 +399,6 @@ pub(crate) struct ReferencedSessions<F> {
     hold_timeout_ms: u128,
 }
 
-/// The digests among `frame`'s slots that are not live in `known` at `now_ms`.
 /// The referenced sessions of `frame` that `known` does not hold live at `now_ms`, origin slot
 /// first.
 fn missing_references<'a>(
@@ -451,14 +456,10 @@ impl<F> ReferencedSessions<F> {
         let payload = frame.resolve(|session| -> Result<Session> {
             match session {
                 SessionRef::Inline(session) => Ok(session.into_owned()),
-                SessionRef::Digest(digest) => {
-                    let session = known
-                        .live(digest, now_ms)
-                        .map(|entry| entry.session.clone())
-                        .ok_or(Error::SessionReferenceUnresolved(digest))?;
-                    known.touch(digest);
-                    Ok(session)
-                }
+                SessionRef::Digest(digest) => known
+                    .touch_live(digest, now_ms)
+                    .map(|entry| entry.session.clone())
+                    .ok_or(Error::SessionReferenceUnresolved(digest)),
             }
         })?;
         Ok(Box::new(ResolvedFrame {

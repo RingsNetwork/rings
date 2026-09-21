@@ -218,6 +218,13 @@ impl<'a> WirePayload<'a> {
         Self::view(payload, payload.sessions().map(SessionRef::inline))
     }
 
+    /// The payload, with every slot required inline: the self-contained reading, valid outside
+    /// any link. A slot sent by reference is refused as
+    /// [`Error::SessionReferenceUnresolved`].
+    pub(crate) fn into_self_contained(self) -> Result<MessagePayload> {
+        self.resolve(resolve_inline)
+    }
+
     /// The frame bytes: the payload marker, then the encoded body.
     pub(crate) fn to_wire(&self) -> Result<Bytes> {
         let body = rings_codec::serialize(self).map_err(Error::CodecSerialize)?;
@@ -267,28 +274,13 @@ impl<'a> WirePayload<'a> {
         self,
         mut resolve: impl FnMut(SessionRef<'a>) -> std::result::Result<Session, E>,
     ) -> std::result::Result<MessagePayload, E> {
-        self.resolve_slots(&mut resolve)
-    }
-
-    /// The payload, with every slot required inline: the self-contained reading, valid outside
-    /// any link. A slot sent by reference is refused as
-    /// [`Error::SessionReferenceUnresolved`].
-    pub(crate) fn into_self_contained(self) -> Result<MessagePayload> {
-        self.resolve_slots(&mut resolve_inline)
-    }
-
-    /// [`Self::resolve`] over a borrowed resolver.
-    fn resolve_slots<E>(
-        self,
-        resolve: &mut impl FnMut(SessionRef<'a>) -> std::result::Result<Session, E>,
-    ) -> std::result::Result<MessagePayload, E> {
         let Self {
             transaction,
             relay,
             verification,
         } = self;
-        let origin = transaction.verification.resolve(resolve)?;
-        let hop = verification.resolve(resolve)?;
+        let origin = transaction.verification.resolve(&mut resolve)?;
+        let hop = verification.resolve(&mut resolve)?;
         Ok(MessagePayload {
             transaction: Transaction {
                 destination: transaction.destination,

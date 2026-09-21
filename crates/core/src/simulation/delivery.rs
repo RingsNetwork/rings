@@ -21,8 +21,9 @@ pub(crate) enum ScheduledDeliveryClass {
     /// Chord or liveness control payload.
     Control,
     /// A link-control frame of the session references (a confirmation, question or answer):
-    /// a frame of the link itself, belonging to no transaction and to no transfer lane, whose
-    /// delay costs inline frames and never liveness, so it carries no deadline.
+    /// a frame of the link itself, belonging to no transaction and to no transfer lane. A
+    /// delayed confirmation costs inline frames and a delayed answer costs the held frame,
+    /// never a stall of anything that resolves, so it carries no deadline.
     LinkControl,
     /// Storage synchronization payload.
     Storage,

@@ -49,7 +49,7 @@ use crate::simulation::SimulationRuntimeGuard;
 use crate::simulation::CONTROL_DEADLINE_MS;
 use crate::storage::MemStorage;
 use crate::swarm::transport::outbound_submit_count_for_test;
-use crate::swarm::transport::referenced_links_for_test;
+use crate::swarm::transport::referenced_slots_for_test;
 use crate::swarm::transport::reset_outbound_submit_count_for_test;
 use crate::swarm::transport::TrackedStorageSyncOutcome;
 use crate::swarm::transport::OUTBOUND_CONTROL_BURST;
@@ -952,9 +952,9 @@ fn assert_enabled_outcome(outcome: &ScenarioOutcome) {
     let diagnostic = outcome.diagnostic();
     let snapshot = outcome.state.snapshot();
     // The storm ran over links that reached session references, so the reference protocol,
-    // not the all-inline encoding, is what the adversarial schedule exercised. Every link
-    // direction of the topology carries the join traffic and then the storm, so every one of
-    // them switched; the set is the scenario's own, not the thread's.
+    // not the all-inline encoding, is what the adversarial schedule exercised: some link
+    // direction of this scenario (the set is the scenario's own, not the thread's) went by
+    // reference. Which directions switch, and when, is the adversary's to delay.
     assert!(
         !outcome.referenced_links.is_empty(),
         "no payload frame was sent by reference during the scenario; {diagnostic}"

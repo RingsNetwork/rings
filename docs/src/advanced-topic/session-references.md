@@ -57,10 +57,15 @@ Consequences of the scope:
   link. A destination that never met the origin gets the origin's session inline from its last
   hop until it confirms it. No node ever asks the origin for anything.
 - Both tables are scoped to the connection generation: the receiver's lives in the callback
-  of one connection, the sender's is emptied by the first frame of a newer generation. A
-  restarted node and its peer start from empty tables together; there is no state to
-  resynchronise, and a control frame is emitted only on the generation it was judged on, so a
-  late one never confirms or disclaims on a generation whose tables never saw it.
+  of one connection, the sender's is emptied by the first frame of a newer generation (and
+  survives a replacement of the outbound worker under an unchanged generation). A restarted
+  node and its peer start from empty tables together; there is no state to resynchronise, and
+  a control frame is emitted only on the generation it was judged on, so a late one never
+  confirms or disclaims on a generation whose tables never saw it.
+- Only frames on the link teach the link's table, and what a verified frame teaches is applied
+  (confirmed to the peer, held frames released) before the frame itself is gated for
+  admission. A frame from any other peer, or on a callback bound to no handshake, is judged
+  self-contained: a reference in it is refused, and it teaches nothing.
 
 ## The link is a datagram link
 
@@ -110,17 +115,22 @@ receiver                                   sender
   repaired by the next frame that misses the same digest. A frame that finds the hold full is
   dropped, and the oldest held frame's question is asked again. The sender answers each
   question with exactly one frame.
-- Every frame the link drops is charged to the peer as a receive failure, as a frame that
-  fails verification is: it referenced a session the peer did not back in time, whether the
-  hold overflowed, the peer disclaimed or could not validly announce the session, or the frame
-  waited past the hold timeout.
+- A frame the peer did not back is charged to the peer as a receive failure, as a frame that
+  fails verification is: the peer disclaimed the session, announced a delegation that does not
+  verify, let the frame wait past the hold timeout, or the frame failed on release. A frame
+  that finds the hold full is a loss at this end's capacity, like a frame the pre-admission
+  hold cannot take, and is not charged: the peer has not yet had its round trip to answer.
 
 Link-control frames (`Known`, `Request`, `Announce`, `Unknown`) are unsigned and idempotent.
 They are meaningful only on the authenticated connection generation they arrive on, an
 announced session authenticates itself through its account signature, and a digest names a
 value rather than asserting one; a duplicate or a stale one changes nothing. They are emitted
-in a task of their own, never awaited from the transport's read loop, and never through the
-transfer lanes; their rate is bounded by the inbound frames that cause them.
+in a task of their own (refused, never run inline, when no runtime can carry one), never
+awaited from the transport's read loop, and never through the transfer lanes. Each inbound
+frame causes at most two of them, and at most 64 are in flight to one peer at a time, twice
+the frames that peer may have in flight here; a send beyond that budget is dropped and repeated
+by the next frame that misses or teaches the same session. So what this end spends on a peer's
+link control is bounded by the frames it accepts from that peer.
 
 ## Expiry
 

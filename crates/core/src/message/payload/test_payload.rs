@@ -324,5 +324,11 @@ fn test_unprefixed_transaction_shape_is_rejected_by_hard_cutover() -> Result<()>
         MessagePayload::from_wire(&legacy_wire),
         Err(Error::UnmarkedFrame)
     ));
+    // The 0.27.x marker is no marker either: every frame of that release fails closed.
+    let previous_release_wire = [b"RINGS-TX-V2\0".as_slice(), legacy_wire.as_slice()].concat();
+    assert!(matches!(
+        MessagePayload::from_wire(&previous_release_wire),
+        Err(Error::UnmarkedFrame)
+    ));
     Ok(())
 }

@@ -140,8 +140,12 @@ behind the references is scoped to one direction of one admitted connection
 generation and obeys these rules:
 
 - it is populated only by the peer at the other end, with sessions of frames that
-  verified or with an announcement this end asked for and whose delegation verified;
-  an unsolicited announcement is ignored, so an unauthenticated party cannot fill it;
+  verified on the link (a frame from any other peer, or on a callback bound to no
+  handshake, is judged self-contained and a reference in it refused) or with an
+  announcement this end asked for and whose delegation verified; an unsolicited
+  announcement is ignored, so an unauthenticated party cannot fill it; what a
+  verified frame teaches is applied before that frame is gated, so a held frame
+  never waits on the fate of the frame that taught it;
 - the sender references only what the receiver confirmed, so loss or reordering on
   the link costs inline frames and never a stall; the link is treated as a datagram
   link throughout;
@@ -153,11 +157,15 @@ generation and obeys these rules:
   or a misbehaving peer) holds that frame alone, at most 16 per connection and for
   at most twice the delivery timeout plus one period of the inbound actor's sweep,
   and is repaired on the link by one unsigned request per missing session of a held
-  frame and exactly one unsigned answer per question, each emitted on the connection
+  frame (or of the oldest held frame, when a frame finds the hold full) and exactly
+  one unsigned answer per question; each control frame is emitted on the connection
   generation it was judged on, in a task of its own rather than from the transport's
-  read loop; every frame the link drops (hold overflow, disclaimed or invalid
-  announcement, hold timeout) is charged to the peer as a receive failure; no hop
-  asks the origin for anything;
+  read loop, and at most 64 of them are in flight to one peer, twice the frames that
+  peer may have in flight here, so their cost is bounded by the frames accepted from
+  the peer; a frame the peer did not back (disclaimed or invalid announcement, hold
+  timeout, failure on release) is charged to the peer as a receive failure, while a
+  frame that finds the hold full is dropped uncharged, as one the pre-admission hold
+  cannot take is; no hop asks the origin for anything;
 - an expired session is evicted, a reference to it is a miss, and re-announcing the
   expired delegation is refused exactly as it is inline.
 

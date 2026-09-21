@@ -60,21 +60,15 @@ mod spawn;
 #[cfg(test)]
 mod test_trace;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(crate) use test_trace::emitted_link_control_for_test;
+pub(crate) use test_trace::dispatched_link_control_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use test_trace::outbound_submit_count_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(super) use test_trace::record_emitted_link_control;
-#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(crate) use test_trace::referenced_links_for_test;
-#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(crate) use test_trace::referenced_origins_for_test;
+pub(super) use test_trace::record_dispatched_link_control;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use test_trace::referenced_slots_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use test_trace::reset_outbound_submit_count_for_test;
-#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(crate) use test_trace::session_answer_count_for_test;
 mod transfer;
 
 pub(super) use admission::DetachedAdmission;
@@ -104,6 +98,8 @@ use queue::RunnableTransfer;
 use queue::TransferQueues;
 #[cfg(test)]
 pub(crate) use queue::OUTBOUND_CONTROL_BURST;
+use session_encoding::LinkControlBudget;
+pub(super) use session_encoding::LinkControlPermit;
 use session_encoding::SharedAnnouncedSessions;
 use spawn::spawn_worker;
 pub(super) use transfer::ChunkFrames;
@@ -194,6 +190,7 @@ struct OutboundPeerState {
     sender: MailboxSender<OutboundCommand>,
     cancel_requested: Arc<AtomicBool>,
     announced: SharedAnnouncedSessions,
+    link_control: LinkControlBudget,
     // Strong lifetime anchor; the peer registry intentionally stores only a Weak reference.
     _capacity_anchor: TransferCapacityAnchor,
     stop: StopSource,
@@ -354,24 +351,31 @@ impl OutboundSchedulers {
         {
             return Ok(handle.clone());
         }
-        if let Some(stopped) = registry.peers.remove(&peer) {
-            stopped.shutdown();
-        }
+        // A worker replaced under an unchanged connection generation keeps the link's tables:
+        // what the old worker announced stays answerable, and the sends still in flight stay
+        // counted. A newer generation empties the announced table by itself on its first frame.
+        let (announced, link_control) = match registry.peers.remove(&peer) {
+            Some(stopped) => {
+                let tables = (
+                    stopped.state.announced.clone(),
+                    stopped.state.link_control.clone(),
+                );
+                stopped.shutdown();
+                tables
+            }
+            None => (SharedAnnouncedSessions::new(), LinkControlBudget::new()),
+        };
         let capacity = registry.capacity(peer, &self.global_capacity);
         let (sender, receiver) = mailbox::channel();
         let stop = StopSource::new();
         let cancel_requested = Arc::new(AtomicBool::new(false));
-        // A worker replaced under an unchanged connection generation starts with an empty
-        // announced table while the peer's table still holds what the old worker sent: the
-        // peer resolves those references as before, and a question about one is answered
-        // `Unknown` from the new table, which the miss path takes as any disclaimer.
-        let announced = SharedAnnouncedSessions::new();
         let state = Arc::new(OutboundPeerState {
             #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
             peer,
             sender,
             cancel_requested: cancel_requested.clone(),
             announced: announced.clone(),
+            link_control,
             _capacity_anchor: TransferCapacityAnchor::new(capacity),
             stop: stop.clone(),
         });

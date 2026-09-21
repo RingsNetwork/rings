@@ -41,8 +41,11 @@
     request per missing session of a held frame, answered by exactly one announcement or
     disclaimer. Link-control frames are emitted on the connection generation they were judged
     on, in a task of their own, straight on the data channel rather than through the transfer
-    lanes. Frames that resolve are never queued behind held ones; every frame the link drops
-    is charged to the peer as a receive failure.
+    lanes, at most 64 in flight to one peer. Frames that resolve are never queued behind held
+    ones; a frame the peer did not back (disclaimed or invalid announcement, hold timeout,
+    failure on release) is charged to the peer as a receive failure, and a frame that finds
+    the hold full is dropped uncharged. A reference resolves only on the link a connection's
+    callback is bound to; a frame from any other peer is judged self-contained.
   - An expired session is evicted from both tables; a reference to it is a miss, and
     re-announcing the expired delegation is refused as it is inline.
   - `MessagePayload::to_wire`/`from_wire` remain the self-contained encoding (both sessions

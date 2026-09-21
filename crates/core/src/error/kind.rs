@@ -149,6 +149,14 @@ pub enum Error {
     #[error("Link-control frame is meaningful only on the connection it arrived on")]
     LinkControlOutsideLink,
 
+    /// No runtime is current to carry a link-control send detached from the read loop.
+    #[error("Link-control send needs a runtime to run detached")]
+    LinkControlRuntimeUnavailable,
+
+    /// The peer already has the most link-control sends this end keeps in flight for it.
+    #[error("Link-control sends in flight to {0} are at capacity")]
+    LinkControlInFlightCapacity(crate::dht::Did),
+
     /// E2E frame received after the authenticated final frame
     #[error("E2E frame received after the authenticated final frame")]
     E2eFrameAfterFinal,

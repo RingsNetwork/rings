@@ -26,7 +26,7 @@ use crate::message::WirePayload;
 use crate::session::Session;
 use crate::session::SessionDigest;
 use crate::session::SessionSk;
-use crate::session::SessionSkBuilder;
+use crate::tests::session_sk_with_ttl;
 use crate::tests::TEST_NETWORK_ID;
 use crate::utils::get_epoch_ms;
 
@@ -41,15 +41,6 @@ const SHORT_SESSION_TTL_MS: u64 = 60_000;
 const GENERATION: u64 = 3;
 
 /// A session key whose delegation lives `ttl_ms` from now.
-fn session_sk_with_ttl(ttl_ms: u64) -> Result<SessionSk> {
-    let account = SecretKey::random();
-    let account_did: Did = account.address().into();
-    let builder =
-        SessionSkBuilder::new(account_did.to_string(), "secp256k1".to_string()).set_ttl(ttl_ms);
-    let sig = account.sign(&builder.unsigned_proof())?.to_vec();
-    builder.set_session_sig(sig).build()
-}
-
 /// A payload whose transaction is signed by `origin` and whose carrier is signed by `hop`.
 fn relayed_payload(origin: &SessionSk, hop: &SessionSk, sequence: u64) -> Result<MessagePayload> {
     let destination: Did = SecretKey::random().address().into();
@@ -364,6 +355,48 @@ fn test_sender_table_is_bounded_and_forgets_least_recently_referenced() -> Resul
     assert_eq!(
         sender.answer(GENERATION, hop.session().digest()?, now_ms),
         LinkControl::Announce(hop.session())
+    );
+    Ok(())
+}
+
+/// Law (superset, under loss): a frame lost on the link touches the sender's order and not the
+/// receiver's, so the receiver may evict a session the sender still references; that miss is
+/// answered from the sender's table, which still holds the session.
+#[test]
+fn test_loss_drifts_the_orders_and_the_sender_still_answers_the_miss() -> Result<()> {
+    let now_ms = get_epoch_ms();
+    let hop = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let origin = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let origin_digest = origin.session().digest()?;
+    let mut sender = AnnouncedSessions::new();
+    let mut receiver = receiver();
+    let first = sent(&mut sender, &relayed_payload(&origin, &hop, 0)?, now_ms)?;
+    for digest in arrive_and_deliver(&mut receiver, first, 0, now_ms)? {
+        sender.acknowledge(GENERATION, digest);
+    }
+
+    // Each round delivers one other origin to both ends, then loses a frame that references
+    // `origin`: the sender keeps `origin` most recent, the receiver never sees it touched.
+    for _ in 0..REFERENCED_TABLE_CAPACITY {
+        let other = SessionSk::new_with_seckey(&SecretKey::random())?;
+        let delivered = sent(&mut sender, &relayed_payload(&other, &hop, 0)?, now_ms)?;
+        for digest in arrive_and_deliver(&mut receiver, delivered, 1, now_ms)? {
+            sender.acknowledge(GENERATION, digest);
+        }
+        let lost = sent(&mut sender, &relayed_payload(&origin, &hop, 1)?, now_ms)?;
+        assert_eq!(encoding(lost.as_ref()).origin, SlotEncoding::Referenced);
+    }
+
+    // The receiver forgot `origin`; the sender still references it and still answers for it.
+    let late = sent(&mut sender, &relayed_payload(&origin, &hop, 2)?, now_ms)?;
+    assert_eq!(encoding(late.as_ref()).origin, SlotEncoding::Referenced);
+    assert_eq!(
+        expect_held(receiver.arrive(late, 2, now_ms)?),
+        digests([origin_digest])
+    );
+    assert_eq!(
+        sender.answer(GENERATION, origin_digest, now_ms),
+        LinkControl::Announce(origin.session())
     );
     Ok(())
 }

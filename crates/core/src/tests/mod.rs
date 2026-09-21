@@ -42,6 +42,18 @@ use crate::utils::get_epoch_ms;
 /// Overlay every test fixture signs for and verifies against.
 pub(crate) const TEST_NETWORK_ID: u32 = 0;
 
+/// A session key delegated for `ttl_ms` by a fresh account: with a small `ttl_ms`, a delegation
+/// that expires under a clock advanced past it.
+pub(crate) fn session_sk_with_ttl(ttl_ms: u64) -> Result<crate::session::SessionSk> {
+    let account = crate::ecc::SecretKey::random();
+    let account_did: Did = account.address().into();
+    let builder =
+        crate::session::SessionSkBuilder::new(account_did.to_string(), "secp256k1".to_string())
+            .set_ttl(ttl_ms);
+    let sig = account.sign(&builder.unsigned_proof())?.to_vec();
+    builder.set_session_sig(sig).build()
+}
+
 /// Retention bound far enough ahead that a fixture stays live for a whole test.
 const FIXTURE_RETENTION_MS: u128 = 60 * 60 * 1_000;
 

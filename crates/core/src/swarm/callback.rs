@@ -304,22 +304,30 @@ struct HeldInboundFrame {
     lease: InboundFrameLease,
 }
 
+/// The frames one peer may have in flight at this end: the bound an admitted peer and a peer
+/// awaiting admission share, and the bound every per-peer budget below derives from.
+pub(crate) const INBOUND_PEER_CAPACITY: usize = inbound::peer_capacity();
+
 /// Frames one connection may hold for a session the peer has not backed yet: half the
 /// pre-admission hold, so both holds together leave a quarter of the transport's per-peer
 /// frames for the link-control frames that release them.
-pub(super) const SESSION_HOLD_CAPACITY: usize = inbound::peer_capacity() / 2;
+pub(super) const SESSION_HOLD_CAPACITY: usize = INBOUND_PEER_CAPACITY / 2;
 
-/// Whether a delivery to the inbound actor waits for the frame's logical completion.
+/// Where a verified frame comes from, which decides how far its delivery is waited for and
+/// what its learning does.
 ///
-/// A frame the transport just handed over is awaited, so the transport's read loop paces this
-/// end; a frame released from a hold is detached, so releasing many frames at once does not
-/// stall the read loop behind each one's handlers.
-#[derive(Clone, Copy, Debug)]
-pub(super) enum LogicalCompletion {
-    /// Return once the frame's handlers and `on_inbound` completed.
-    Awaited,
-    /// Return once the inbound actor owns the frame.
-    Detached,
+/// A frame the transport just handed over is awaited to its logical completion, so the
+/// transport's read loop paces this end, and what it teaches the link releases the held
+/// frames that awaited it. A frame released from a hold is waited for only until the inbound
+/// actor owns it, so releasing many frames at once does not stall the read loop behind each
+/// one's handlers, and what it teaches is confirmed but releases nothing itself: the release
+/// that freed it re-scans the hold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FrameProvenance {
+    /// Handed over by the transport just now.
+    Arrived,
+    /// Left the pre-admission hold or the session hold.
+    Released,
 }
 
 /// How the pending handshake bound to a callback disposes of a frame from `peer`.

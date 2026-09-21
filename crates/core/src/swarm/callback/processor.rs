@@ -82,10 +82,32 @@ impl InboundProcessor {
         let (Some(peer), Some(attempt)) = (peer, self.pending_attempt()) else {
             return Authentication::Unauthenticated;
         };
-        if attempt.peer() == peer && self.logical.transport.is_active_connection_attempt(attempt) {
+        if attempt.is_with(peer) && self.logical.transport.is_active_connection_attempt(attempt) {
             Authentication::Authenticated
         } else {
             Authentication::Unauthenticated
+        }
+    }
+
+    /// Charge `peer` one receive failure under its authentication as of now.
+    pub(super) async fn record_receive_failure_now(&self, peer: Option<Did>) {
+        let authentication = self.authentication_of(peer);
+        self.record_receive_failure(peer, authentication).await;
+    }
+
+    /// Charge `peer` one receive failure per frame in `dropped`, all under its authentication
+    /// as of now, logging `reason` for each: the charging law of
+    /// [`link_stage`](super::link_stage) in one place.
+    pub(super) async fn charge_dropped_frames(
+        &self,
+        peer: Option<Did>,
+        dropped: Vec<InboundFrameLease>,
+        reason: &'static str,
+    ) {
+        let authentication = self.authentication_of(peer);
+        for _lease in dropped {
+            tracing::debug!(peer = ?peer, "dropping message: {reason}");
+            self.record_receive_failure(peer, authentication).await;
         }
     }
 
@@ -100,14 +122,12 @@ impl InboundProcessor {
             return;
         }
         let peer = self.pending_attempt().map(PendingConnectionAttempt::peer);
-        let authentication = self.authentication_of(peer);
-        for _lease in stale {
-            tracing::debug!(
-                peer = ?peer,
-                "dropping a message whose referenced session the peer did not supply in time"
-            );
-            self.record_receive_failure(peer, authentication).await;
-        }
+        self.charge_dropped_frames(
+            peer,
+            stale,
+            "its referenced session was not supplied within the hold timeout",
+        )
+        .await;
     }
 
     /// The receiving end of this connection's session references.
@@ -181,7 +201,7 @@ impl InboundProcessor {
             );
             return Ok(InboundGate::Refused);
         };
-        if attempt.peer() != peer {
+        if !attempt.is_with(peer) {
             tracing::warn!(
                 "ignoring message from {peer}; pending attempt belongs to {}",
                 attempt.peer()

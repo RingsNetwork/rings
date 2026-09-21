@@ -6,13 +6,15 @@ use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::CustomMessage;
+use crate::message::LinkControl;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
 use crate::message::PayloadSender;
-use crate::swarm::transport::referenced_origins_for_test;
+use crate::message::PerSlot;
+use crate::session::SessionDigest;
+use crate::swarm::transport::dispatched_link_control_for_test;
 use crate::swarm::transport::referenced_slots_for_test;
-use crate::swarm::transport::session_answer_count_for_test;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;
 use crate::tests::default::wait_for_successor;
@@ -21,10 +23,31 @@ use crate::tests::manually_establish_connection;
 use crate::tests::TEST_NETWORK_ID;
 
 /// How many messages a link needs, at most, to be seen switching to references over the dummy
-/// transport's immediate delivery: the first message is confirmed once its awaited delivery
-/// returns, so the second already goes by reference; the bound leaves room for the overlay's
-/// own traffic to interleave.
+/// transport's immediate delivery. The confirmation crosses a fixed number of task hops (the
+/// receiver's spawned control send, the dummy's dispatch task, the sender's callback) and each
+/// awaited round trip below yields to every task spawned before it, so the switch is visible
+/// within a small constant number of messages; the bound leaves room for the overlay's own
+/// traffic to interleave.
 const SWITCH_WITHIN_MESSAGES: usize = 8;
+
+/// The digests that went by reference on `link` so far, per slot.
+fn referenced_on(link: (Did, Did)) -> PerSlot<Vec<SessionDigest>> {
+    referenced_slots_for_test()
+        .remove(&link)
+        .unwrap_or(PerSlot {
+            origin: Vec::new(),
+            hop: Vec::new(),
+        })
+}
+
+/// Whether any question was asked on this test thread since `dispatched_before` control frames
+/// had been dispatched.
+fn questions_asked_since(dispatched_before: usize) -> bool {
+    dispatched_link_control_for_test()
+        .split_off(dispatched_before)
+        .iter()
+        .any(|(_, control)| matches!(control, LinkControl::Request(_)))
+}
 
 /// The next custom message at `node` that `origin` signed and that carries `data`, skipping
 /// the overlay's own traffic.
@@ -80,15 +103,15 @@ async fn relay_custom(
 async fn test_link_reaches_references_without_a_question() -> Result<()> {
     let left = prepare_node(SecretKey::random()).await;
     let right = prepare_node(SecretKey::random()).await;
-    let answered_before = session_answer_count_for_test();
+    let dispatched_before = dispatched_link_control_for_test().len();
     establish_admitted_link(&left, &right).await?;
     let link = (left.did(), right.did());
-    let referenced_before = referenced_slots_for_test(link);
+    let referenced_before = referenced_on(link);
 
     // Confirmations travel as control frames after the join traffic; send until a frame goes
     // by reference, which the confirmation exchange guarantees within a few messages.
     let mut sent = 0;
-    while referenced_slots_for_test(link) == referenced_before {
+    while referenced_on(link) == referenced_before {
         assert!(
             sent < SWITCH_WITHIN_MESSAGES,
             "the link never switched to references"
@@ -100,7 +123,7 @@ async fn test_link_reaches_references_without_a_question() -> Result<()> {
         next_custom_message_from(&right, left.did(), b"steady").await?;
         sent += 1;
     }
-    assert_eq!(session_answer_count_for_test(), answered_before);
+    assert!(!questions_asked_since(dispatched_before));
     Ok(())
 }
 
@@ -115,7 +138,7 @@ async fn test_relayed_origin_session_needs_no_question() -> Result<()> {
     let destination = prepare_node(SecretKey::random()).await;
     establish_admitted_link(&origin, &relay).await?;
     establish_admitted_link(&relay, &destination).await?;
-    let answered_before = session_answer_count_for_test();
+    let dispatched_before = dispatched_link_control_for_test().len();
     let last_hop = (relay.did(), destination.did());
     let first = relay_custom(&origin, &relay, &destination, b"relayed").await?;
     let origin_digest = first.transaction.verification.session.digest()?;
@@ -124,7 +147,7 @@ async fn test_relayed_origin_session_needs_no_question() -> Result<()> {
     // by reference: within a few messages a frame on the last hop carries the origin's own
     // session, not one of the relay's, as a digest in its origin slot.
     let mut sent = 1;
-    while !referenced_origins_for_test(last_hop).contains(&origin_digest) {
+    while !referenced_on(last_hop).origin.contains(&origin_digest) {
         assert!(
             sent < SWITCH_WITHIN_MESSAGES,
             "the relay never referenced the origin's session"
@@ -132,6 +155,6 @@ async fn test_relayed_origin_session_needs_no_question() -> Result<()> {
         relay_custom(&origin, &relay, &destination, b"relayed").await?;
         sent += 1;
     }
-    assert_eq!(session_answer_count_for_test(), answered_before);
+    assert!(!questions_asked_since(dispatched_before));
     Ok(())
 }

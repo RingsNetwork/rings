@@ -153,7 +153,7 @@ pub(super) async fn run_scenario(
         )
         .expect("scenario artifact identity must install");
     let failure_guard = ScenarioFailureGuard::new(&runtime);
-    let referenced_links_before = referenced_links_for_test();
+    let referenced_before = referenced_slots_for_test();
     let nodes = build_nodes(count).await;
     establish_topology(&runtime, &nodes, kind).await;
     install_chord_view(&nodes, kind);
@@ -208,9 +208,9 @@ pub(super) async fn run_scenario(
         pressure_snapshot,
         recovery_elapsed_ms,
         overload_witness,
-        referenced_links: referenced_links_for_test()
+        referenced_links: referenced_slots_for_test()
             .into_iter()
-            .filter(|(link, counts)| referenced_links_before.get(link) != Some(counts))
+            .filter(|(link, digests)| referenced_before.get(link) != Some(digests))
             .map(|(link, _)| link)
             .collect(),
     };

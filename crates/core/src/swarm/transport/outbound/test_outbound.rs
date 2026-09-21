@@ -476,6 +476,7 @@ fn test_shutdown_closes_channel_without_worker_owned_sender() {
             sender,
             cancel_requested: Arc::new(AtomicBool::new(false)),
             announced: SharedAnnouncedSessions::new(),
+            link_control: LinkControlBudget::new(),
             _capacity_anchor: TransferCapacityAnchor::new(Arc::new(TransferCapacity::new(
                 Arc::new(GlobalTransferCapacity::new()),
             ))),
@@ -529,6 +530,7 @@ async fn test_worker_drop_allows_registry_to_replace_the_stopped_generation() {
             sender,
             cancel_requested: Arc::new(AtomicBool::new(false)),
             announced: SharedAnnouncedSessions::new(),
+            link_control: LinkControlBudget::new(),
             _capacity_anchor: TransferCapacityAnchor::new(capacity),
             stop: stop.clone(),
         }),
@@ -624,6 +626,7 @@ fn test_final_handle_drop_requests_stop_before_channel_close() {
             sender,
             cancel_requested: Arc::new(AtomicBool::new(false)),
             announced: SharedAnnouncedSessions::new(),
+            link_control: LinkControlBudget::new(),
             _capacity_anchor: TransferCapacityAnchor::new(Arc::new(TransferCapacity::new(
                 Arc::new(GlobalTransferCapacity::new()),
             ))),

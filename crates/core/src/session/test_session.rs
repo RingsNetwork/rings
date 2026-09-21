@@ -2,6 +2,7 @@ use std::str::FromStr;
 
 use super::SessionSk;
 use super::SessionSkBuilder;
+use crate::dht::Did;
 use crate::ecc::keys::SigningSecretKey;
 use crate::ecc::keys::VerificationPublicKey;
 use crate::ecc::signers;
@@ -130,4 +131,30 @@ pub fn test_dump_restore() {
     let dump = sm.dump().unwrap();
     let sm2 = SessionSk::from_str(&dump).unwrap();
     assert_eq!(sm, sm2);
+}
+
+/// The content address of a fixed delegation: the trailing twenty bytes of keccak256 over its
+/// postcard encoding. Frozen so a change to the encoding, the hash, or the cut is a failure
+/// here before it is a wire incompatibility.
+#[test]
+fn test_session_digest_golden_vector() {
+    let account = SecretKey::from_bytes([7u8; 32]).expect("fixed scalar must be a valid key");
+    let account_did: Did = account.address().into();
+    let session_key = SecretKey::from_bytes([9u8; 32]).expect("fixed scalar must be a valid key");
+    let session = super::model::Session {
+        session_id: session_key.address().into(),
+        account: super::account::Account::try_from((
+            account_did.to_string(),
+            "secp256k1".to_string(),
+        ))
+        .expect("fixed account must parse"),
+        ttl_ms: 600_000,
+        ts_ms: 1_700_000_000_000,
+        sig: vec![0x11; 65],
+    };
+    let digest = session.digest().expect("fixed session must digest");
+    assert_eq!(
+        hex::encode(digest.into_bytes()),
+        "c76a74b6e1c1f58a80eef20406d66157c64aad28"
+    );
 }

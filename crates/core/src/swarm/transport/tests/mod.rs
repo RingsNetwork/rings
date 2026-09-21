@@ -657,14 +657,33 @@ async fn pending_peer_with_key(
     app_callback: &Arc<CountingSwarmCallback>,
     peer_key: SecretKey,
 ) -> Result<PendingPeer> {
+    pending_peer_with(transport, app_callback, peer_key, None).await
+}
+
+/// [`pending_peer_with_key`], with the callback's inbound clock injected when `clock` is
+/// given, so a test drives the session hold's time itself.
+#[cfg(feature = "dummy")]
+async fn pending_peer_with(
+    transport: &Arc<SwarmTransport>,
+    app_callback: &Arc<CountingSwarmCallback>,
+    peer_key: SecretKey,
+    clock: Option<Arc<Mutex<u128>>>,
+) -> Result<PendingPeer> {
     let peer: Did = peer_key.address().into();
     let session = SessionSk::new_with_seckey(&peer_key)?;
     let offer_callback = InnerSwarmCallback::new(Arc::clone(transport), app_callback.clone());
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, offer_callback)
         .await?;
-    let callback = InnerSwarmCallback::new(Arc::clone(transport), app_callback.clone())
-        .with_pending_connection_attempt(attempt);
+    let callback = match clock {
+        Some(clock) => InnerSwarmCallback::new_with_reassembly_clock_for_test(
+            Arc::clone(transport),
+            app_callback.clone(),
+            clock,
+        ),
+        None => InnerSwarmCallback::new(Arc::clone(transport), app_callback.clone()),
+    }
+    .with_pending_connection_attempt(attempt);
     Ok(PendingPeer {
         peer,
         session,

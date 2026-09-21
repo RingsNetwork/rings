@@ -17,53 +17,35 @@ use super::into_transport_callback_error;
 use super::pre_admission::Arrival;
 use super::processor::prepare_resolved_frame;
 use super::CallbackError;
+use super::FrameProvenance;
 use super::HeldInboundFrame;
 use super::InboundFrameLease;
 use super::InboundGate;
 use super::InboundProcessor;
 use super::InnerSwarmCallback;
-use super::LogicalCompletion;
 use super::PreparedInboundFrame;
 use super::SharedSwarmCallback;
 use super::SwarmEvent;
 use super::TransportCallbackError;
 use crate::dht::Did;
-use crate::swarm::session_link::Digests;
-use crate::swarm::session_link::ResolvedFrame;
+use crate::message::MessagePayload;
+use crate::swarm::detached::spawn_detached;
+use crate::swarm::detached::DetachedTask;
 use crate::swarm::transport::ConnectionEventDisposition;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 
-#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
-fn spawn_pre_admission_drain(drainer: InnerSwarmCallback) -> bool {
-    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-        return false;
-    };
-    drop(runtime.spawn(async move {
-        drainer.drain_claimed_pre_admission_hold().await;
-    }));
-    true
-}
-
-#[cfg(all(feature = "wasm", target_family = "wasm"))]
-fn spawn_pre_admission_drain(drainer: InnerSwarmCallback) -> bool {
-    wasm_bindgen_futures::spawn_local(async move {
-        drainer.drain_claimed_pre_admission_hold().await;
-    });
-    true
-}
-
-/// A frame the link verified and learned from, on its way to the admission gate.
-pub(super) struct VerifiedFrame {
-    pub(super) prepared: PreparedInboundFrame,
-    pub(super) lease: InboundFrameLease,
-    /// The digests the link learned from the frame's inline slots.
-    pub(super) learned: Digests,
-}
-
 impl InnerSwarmCallback {
     pub(super) fn pending_attempt(&self) -> Option<PendingConnectionAttempt> {
         self.processor.pending_attempt()
+    }
+
+    /// A second handle on this callback's connection, for a task that runs on its own.
+    pub(super) fn detached_handle(&self) -> Self {
+        Self {
+            processor: self.processor.clone(),
+            inbound: self.inbound.clone(),
+        }
     }
 
     /// Create a new [InnerSwarmCallback] with the provided transport and callback.
@@ -402,60 +384,38 @@ impl InnerSwarmCallback {
 }
 
 impl InnerSwarmCallback {
-    /// Verify one resolved frame and let the link learn the sessions it carried inline. Post:
-    /// the frame, ready for the admission gate, with the digests the link learned, for the
-    /// caller to confirm to the peer and to release held frames against before the frame
-    /// itself is gated. The two are independent: a frame held for one of those sessions must
-    /// not wait on the fate of the frame that taught it.
-    ///
-    /// Learning precedes the gate on purpose: a session is the peer's delegation whatever the
-    /// state of the handshake, and a frame the gate refuses was still a verified frame that
-    /// arrived on this connection.
-    pub(super) async fn verify_resolved_frame(
+    /// Verify one self-contained payload of `wire_len` bytes from `peer`, charging a failure
+    /// to `peer`. Post: the frame, ready for the admission gate; nothing about the link is
+    /// touched, so the link stage decides what, if anything, the frame teaches it.
+    pub(super) async fn verify_frame(
         &self,
         peer: Option<Did>,
-        resolved: Box<ResolvedFrame<InboundFrameLease>>,
-    ) -> Result<VerifiedFrame, TransportCallbackError> {
-        let ResolvedFrame {
-            payload,
-            carrier: lease,
-            encoding,
-        } = *resolved;
-        let prepared = match prepare_resolved_frame(
+        payload: MessagePayload,
+        wire_len: usize,
+    ) -> Result<PreparedInboundFrame, TransportCallbackError> {
+        let prepared = prepare_resolved_frame(
             self.processor.logical.transport.network_id,
             peer,
             payload,
-            lease.bytes.len(),
-        ) {
-            Ok(prepared) => prepared,
+            wire_len,
+        );
+        match prepared {
+            Ok(prepared) => Ok(prepared),
             Err(error) => {
-                let authentication = self.processor.authentication_of(peer);
-                self.processor
-                    .record_receive_failure(peer, authentication)
-                    .await;
-                return Err(error.into());
+                self.processor.record_receive_failure_now(peer).await;
+                Err(error.into())
             }
-        };
-        let learned = self.processor.session_link().admit_verified(
-            &prepared.payload,
-            encoding,
-            self.processor.now_ms(),
-        )?;
-        Ok(VerifiedFrame {
-            prepared,
-            lease,
-            learned,
-        })
+        }
     }
 
     /// Pass one verified frame through the pending-connection gate and the pre-admission hold
-    /// to the inbound actor, waiting for its logical completion or not as `completion` says.
+    /// to the inbound actor, waiting for its logical completion or not as its provenance says.
     pub(super) async fn gate_prepared_frame(
         &self,
         peer: Option<Did>,
         prepared: PreparedInboundFrame,
         lease: InboundFrameLease,
-        completion: LogicalCompletion,
+        provenance: FrameProvenance,
     ) -> Result<(), TransportCallbackError> {
         let authentication = self.processor.authentication_of(peer);
         let admitted = match self.processor.pending_connection_gate(peer).await? {
@@ -478,14 +438,10 @@ impl InnerSwarmCallback {
         };
         let arrival = self.processor.pre_admission().arrive(frame, admitted);
         match arrival {
-            Arrival::Pass(frame) => match completion {
-                LogicalCompletion::Awaited => {
-                    self.deliver_held_frame(frame).await.map_err(Into::into)
-                }
-                LogicalCompletion::Detached => {
-                    self.enqueue_held_frame(frame).await.map_err(Into::into)
-                }
-            },
+            Arrival::Pass(frame) => self
+                .submit_held_frame(frame, provenance)
+                .await
+                .map_err(Into::into),
             Arrival::Held => {
                 // The judgement and the admission commit are not one atomic step: admission may
                 // have committed, and drained, between them. Re-reading admission after the frame
@@ -506,8 +462,13 @@ impl InnerSwarmCallback {
         }
     }
 
-    /// Deliver one frame past the admission gate.
-    async fn deliver_held_frame(&self, frame: HeldInboundFrame) -> crate::error::Result<()> {
+    /// Hand one frame past the admission gate to the inbound actor, waiting as its provenance
+    /// says, under the peer's authentication as of now.
+    async fn submit_held_frame(
+        &self,
+        frame: HeldInboundFrame,
+        provenance: FrameProvenance,
+    ) -> crate::error::Result<()> {
         let HeldInboundFrame {
             peer,
             prepared,
@@ -515,23 +476,18 @@ impl InnerSwarmCallback {
         } = frame;
         let authentication = self.processor.authentication_of(Some(peer));
         let submission = InboundSubmission::new(Some(peer), authentication, lease, prepared);
-        self.inbound
-            .submit_prepared(&self.processor, submission)
-            .await
-    }
-
-    /// Transfer one frame past the admission gate without waiting for logical completion.
-    async fn enqueue_held_frame(&self, frame: HeldInboundFrame) -> crate::error::Result<()> {
-        let HeldInboundFrame {
-            peer,
-            prepared,
-            lease,
-        } = frame;
-        let authentication = self.processor.authentication_of(Some(peer));
-        let submission = InboundSubmission::new(Some(peer), authentication, lease, prepared);
-        self.inbound
-            .submit_prepared_detached(&self.processor, peer, submission)
-            .await
+        match provenance {
+            FrameProvenance::Arrived => {
+                self.inbound
+                    .submit_prepared(&self.processor, submission)
+                    .await
+            }
+            FrameProvenance::Released => {
+                self.inbound
+                    .submit_prepared_detached(&self.processor, peer, submission)
+                    .await
+            }
+        }
     }
 
     /// Start releasing held frames in arrival order to the inbound actor.
@@ -544,12 +500,12 @@ impl InnerSwarmCallback {
         if !self.processor.pre_admission().begin_drain() {
             return;
         }
-        let drainer = Self {
-            processor: self.processor.clone(),
-            inbound: self.inbound.clone(),
-        };
-        if !spawn_pre_admission_drain(drainer) {
-            self.drain_claimed_pre_admission_hold().await;
+        let drainer = self.detached_handle();
+        let drain: DetachedTask = Box::pin(async move {
+            drainer.drain_claimed_pre_admission_hold().await;
+        });
+        if let Err(drain) = spawn_detached(drain) {
+            drain.await;
         }
     }
 
@@ -563,7 +519,10 @@ impl InnerSwarmCallback {
                 return;
             };
             let peer = frame.peer;
-            if let Err(error) = self.enqueue_held_frame(frame).await {
+            if let Err(error) = self
+                .submit_held_frame(frame, FrameProvenance::Released)
+                .await
+            {
                 tracing::warn!(
                     peer = %peer,
                     error = ?error,
