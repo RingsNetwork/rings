@@ -51,6 +51,7 @@ use crate::dht::topology::FindSuccessorStep;
 use crate::dht::topology::SuccessorRemoval;
 use crate::dht::topology::TopologyAction;
 use crate::dht::topology::TopologyEvent;
+use crate::dht::topology::TopologyRemoval;
 use crate::dht::topology::TopologyState;
 use crate::dht::topology::TopologyStep;
 use crate::dht::types::Chord;
@@ -441,24 +442,40 @@ impl PeerRing {
     }
 
     /// Remove a node from finger, predecessor, and successor state.
-    pub fn remove(&self, did: Did) -> Result<()> {
+    ///
+    /// Returns whether the node was referenced, decided under the transition
+    /// lock on the state the removal was applied to.
+    pub fn remove(&self, did: Did) -> Result<TopologyRemoval> {
         self.remove_with_successor_evidence(did, SuccessorRemoval::Preserve)
     }
 
     /// Remove an unavailable node using transport-validated successor evidence.
-    pub(crate) fn remove_unavailable(&self, did: Did, replacements: Vec<Did>) -> Result<()> {
+    pub(crate) fn remove_unavailable(
+        &self,
+        did: Did,
+        replacements: Vec<Did>,
+    ) -> Result<TopologyRemoval> {
         self.remove_with_successor_evidence(did, SuccessorRemoval::ReplaceWith(replacements))
     }
 
     /// Post: the emitted actions are dropped. A removal only widens `(self, head]` (a closer
     /// connected peer would already be the head), so its head change moves no placement out of
-    /// this node; the caller requests the storage repair round for the widened interval itself.
-    fn remove_with_successor_evidence(&self, did: Did, successor: SuccessorRemoval) -> Result<()> {
-        self.transition_topology(TopologyEvent::Remove {
-            peer: did,
-            successor,
-        })
-        .map(|_| ())
+    /// this node; the caller requests the storage repair round for the widened interval itself,
+    /// and only when the returned [`TopologyRemoval`] says a slot was vacated.
+    fn remove_with_successor_evidence(
+        &self,
+        did: Did,
+        successor: SuccessorRemoval,
+    ) -> Result<TopologyRemoval> {
+        let (_, removal) = self.transition(|state, _| {
+            let removal = TopologyRemoval::of(state, did);
+            let event = TopologyEvent::Remove {
+                peer: did,
+                successor,
+            };
+            (self.step(state, event), removal)
+        })?;
+        Ok(removal)
     }
 }
 

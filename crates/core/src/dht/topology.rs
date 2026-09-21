@@ -285,6 +285,37 @@ impl TopologyState {
     }
 }
 
+/// Whether a removed peer was `Referenced(n, p)` in the state the removal
+/// was applied to.
+///
+/// `StorageResponsible(n, p) ⟺ Referenced(n, p)`: only the removal of a
+/// referenced peer changes the placement view, so only it makes a storage
+/// repair round due. Removing an admitted but unreferenced peer is the
+/// identity on the topology and schedules nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TopologyRemoval {
+    /// The peer occupied a successor, predecessor, or finger slot.
+    Referenced,
+    /// No slot held the peer; the transition left the topology unchanged.
+    Unreferenced,
+}
+
+impl TopologyRemoval {
+    /// `Referenced(n, p)` evaluated on `state` before `peer` is removed.
+    pub fn of(state: &TopologyState, peer: Did) -> Self {
+        if state.references(peer) {
+            Self::Referenced
+        } else {
+            Self::Unreferenced
+        }
+    }
+
+    /// Whether the removal makes the accelerated storage repair round (#612) due.
+    pub const fn storage_repair_due(self) -> bool {
+        matches!(self, Self::Referenced)
+    }
+}
+
 /// The bounded connection budget of one topology report.
 ///
 /// Keeps the first `capacity` distinct peers of `candidates`, in the order

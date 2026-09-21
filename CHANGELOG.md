@@ -18,9 +18,10 @@
 ### Removed
 
 - `rings_core::dht`: the fresh-connection storage repair grace (closed by the #745 pre-admission
-  hold), `RelayMessageSet` (`DataTopicBuffer` carries the tombstone set), the `should_repair`
-  predicate on peer removal (always true by `StorageResponsible ⟺ Referenced`; removal requests
-  the repair round unconditionally), the `SuccessorReader` trait and `SortRing` (the successor
+  hold), `RelayMessageSet` (`DataTopicBuffer` carries the tombstone set),
+  `peer_may_share_storage_responsibility` (the removal transition itself reports whether the
+  peer was referenced, as `TopologyRemoval`, and only that outcome requests the repair round;
+  the pre-removal read is gone), the `SuccessorReader` trait and `SortRing` (the successor
   list is the committed value of `topology::step`), the dead `Did`/`BiasId` algebra (only
   `Did::cmp_from_observer` survives), the mutable `StorageVirtualNodes` registry API,
   `FingerTable::closest_predecessor`, and the #770 residue (`FingerAttemptStatus`, the twin

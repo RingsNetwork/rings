@@ -625,7 +625,7 @@ impl Stabilizer {
             "STABILIZATION clean_unavailable selected peer"
         );
 
-        if reason.should_disconnect_transport() {
+        let outcome = if reason.should_disconnect_transport() {
             tracing::debug!(
                 target: "rings_core::dht::stabilization",
                 local = %self.dht.did,
@@ -647,15 +647,16 @@ impl Stabilizer {
                 );
                 return Ok(());
             };
-            let fallback = outcome.fallback();
             tracing::debug!(
                 target: "rings_core::dht::stabilization",
                 local = %self.dht.did,
                 peer = %did,
                 reason = reason.as_str(),
-                fallback = ?fallback,
+                fallback = ?outcome.fallback(),
+                removal = ?outcome.removal(),
                 "STABILIZATION clean_unavailable disconnect complete"
             );
+            outcome
         } else {
             tracing::debug!(
                 target: "rings_core::dht::stabilization",
@@ -677,27 +678,31 @@ impl Stabilizer {
                 );
                 return Ok(());
             };
-            let fallback = outcome.fallback();
             tracing::debug!(
                 target: "rings_core::dht::stabilization",
                 local = %self.dht.did,
                 peer = %did,
                 reason = reason.as_str(),
-                fallback = ?fallback,
+                fallback = ?outcome.fallback(),
+                removal = ?outcome.removal(),
                 "STABILIZATION clean_unavailable topology remove complete"
             );
-        }
+            outcome
+        };
 
-        // `StorageResponsible(n, p) ⟺ Referenced(n, p)` and every removed peer
-        // was referenced, so a removal always makes a repair round due (#612).
-        self.transport.request_storage_repair();
-        tracing::debug!(
-            target: "rings_core::dht::stabilization",
-            local = %self.dht.did,
-            peer = %did,
-            reason = reason.as_str(),
-            "STABILIZATION clean_unavailable deferred storage repair to its scheduled phase"
-        );
+        // `StorageResponsible(n, p) ⟺ Referenced(n, p)`: the cleaner also
+        // removes admitted peers no slot references, and those change no
+        // placement, so only a vacated slot makes a repair round due (#612).
+        if outcome.removal().storage_repair_due() {
+            self.transport.request_storage_repair();
+            tracing::debug!(
+                target: "rings_core::dht::stabilization",
+                local = %self.dht.did,
+                peer = %did,
+                reason = reason.as_str(),
+                "STABILIZATION clean_unavailable deferred storage repair to its scheduled phase"
+            );
+        }
 
         Ok(())
     }

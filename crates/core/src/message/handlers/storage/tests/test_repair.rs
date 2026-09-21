@@ -107,6 +107,37 @@ async fn test_leave_dht_defers_repair_until_maintenance_runs() -> Result<()> {
     Ok(())
 }
 
+/// Disconnecting an admitted peer that no topology slot references leaves the placement
+/// view unchanged, so no repair round is requested; the departure of an admitted successor
+/// vacates a slot and requests one.
+#[tokio::test]
+async fn test_leave_dht_attempt_requests_repair_only_for_a_referenced_peer() -> Result<()> {
+    let node = prepare_node(SecretKey::random()).await;
+    let transport = node.swarm.transport.clone();
+    let handler = MessageHandler::new(transport.clone(), Arc::new(NoopCallback));
+
+    let unreferenced = SecretKey::random().address().into();
+    let attempt = transport
+        .reserve_pending_connection_with_observer_for_test(unreferenced, || {}, || {})
+        .await?;
+    assert!(transport.activate_connection_for_test(attempt)?);
+    handler.leave_dht_attempt(attempt).await?;
+    assert!(!transport.is_active_connection_attempt(attempt));
+    assert!(!transport.storage_repair_requested());
+
+    let referenced = SecretKey::random().address().into();
+    let attempt = transport
+        .reserve_pending_connection_with_observer_for_test(referenced, || {}, || {})
+        .await?;
+    assert!(transport.activate_connection_for_test(attempt)?);
+    transport.dht.admit_connected(referenced, None)?;
+    assert!(transport.dht.successors().contains(&referenced)?);
+    handler.leave_dht_attempt(attempt).await?;
+    assert!(!transport.dht.successors().contains(&referenced)?);
+    assert!(transport.storage_repair_requested());
+    Ok(())
+}
+
 #[cfg(feature = "dummy")]
 #[tokio::test]
 async fn test_found_entry_read_repair_backpressure_is_deferred() -> Result<()> {

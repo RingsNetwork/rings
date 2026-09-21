@@ -11,6 +11,7 @@ use super::effects::yield_core_actor_step;
 use super::effects::CoreEffect;
 use super::effects::CoreEffectInterpreter;
 use super::MessagePayload;
+use crate::dht::topology::TopologyRemoval;
 use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::dht::PeerRingAction;
@@ -124,13 +125,13 @@ impl MessageHandler {
     }
 
     pub(crate) async fn leave_dht_attempt(&self, attempt: PendingConnectionAttempt) -> Result<()> {
-        let removed = if self.transport.disconnect_attempt(attempt).await? {
-            true
-        } else {
-            self.transport.remove_retired_attempt_topology(attempt)?
+        let removal = match self.transport.disconnect_attempt(attempt).await? {
+            Some(removal) => Some(removal),
+            None => self.transport.remove_retired_attempt_topology(attempt)?,
         };
-        // Every removed peer was referenced, so its removal makes a repair round due.
-        if removed {
+        // An admitted peer may outlive every slot that referenced it; only a
+        // removal that vacates a slot changes the placement view.
+        if removal.is_some_and(TopologyRemoval::storage_repair_due) {
             self.transport.request_storage_repair();
         }
         Ok(())
@@ -138,8 +139,9 @@ impl MessageHandler {
 
     #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
     pub(crate) async fn leave_dht(&self, peer: Did) -> Result<()> {
-        self.dht.remove(peer)?;
-        self.transport.request_storage_repair();
+        if self.dht.remove(peer)?.storage_repair_due() {
+            self.transport.request_storage_repair();
+        }
         Ok(())
     }
 

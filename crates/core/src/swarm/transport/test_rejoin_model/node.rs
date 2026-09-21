@@ -37,6 +37,7 @@ use crate::dht::topology::ConnectionStep;
 use crate::dht::topology::SuccessorRemoval;
 use crate::dht::topology::TopologyAction;
 use crate::dht::topology::TopologyEvent;
+use crate::dht::topology::TopologyRemoval;
 use crate::dht::topology::TopologyState;
 use crate::dht::Did;
 use crate::dht::TopoInfo;
@@ -125,8 +126,12 @@ pub(super) enum ProtocolMessage {
 }
 
 /// An effect requested by a node transition, as data.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub(super) enum Effect {
+    /// Request the accelerated storage repair round
+    /// (`request_storage_repair`): the retirement vacated a slot, so the
+    /// placement view changed.
+    StorageRepair,
     /// Send `message` on the sendable generation `under`.
     Message {
         /// Local generation the send was admitted under.
@@ -149,9 +154,19 @@ pub(super) struct UnreplacedHead {
     pub(super) removed: Did,
 }
 
+/// The witness that a retirement's storage-repair request did not follow the
+/// slots it vacated: the history variable of the repair law.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) struct MisdirectedRepair {
+    /// The peer whose generation was retired.
+    pub(super) removed: Did,
+    /// Whether the shell requested a repair round.
+    pub(super) requested: bool,
+}
+
 /// One live peer: production topology × production lifecycle registry, plus
 /// the local events raised but not yet delivered to its shell, and the
-/// history variable of the head-replacement law.
+/// history variables of the head-replacement and repair laws.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct NodeState {
     /// Production pure topology state.
@@ -164,6 +179,10 @@ pub(super) struct NodeState {
     /// other than the sendable admitted successors; never set by the
     /// faithful shell.
     pub(super) unreplaced_head: Option<UnreplacedHead>,
+    /// Set when a retirement requested a storage repair round although no
+    /// slot referenced its peer, or vacated a slot without requesting one;
+    /// never set by the faithful shell.
+    pub(super) misdirected_repair: Option<MisdirectedRepair>,
 }
 
 /// Result of one node transition: `NodeState × [Effect]`.
@@ -191,6 +210,7 @@ impl NodeState {
             lifecycles: ConnectionLifecycleRegistry::new(LifecycleBounds::new(peers, peers)),
             events: BTreeSet::new(),
             unreplaced_head: None,
+            misdirected_repair: None,
         }
     }
 
@@ -373,28 +393,35 @@ impl NodeState {
                 .map_or(event, |lifecycle| event.readdressed(lifecycle.attempt())),
             ShellMutation::Faithful
             | ShellMutation::ReplacementPreserves
-            | ShellMutation::RetireWithoutRemove => event,
+            | ShellMutation::RetireWithoutRemove
+            | ShellMutation::RepairOnEveryRetirement => event,
         };
-        match event {
-            LifecycleEvent::ChannelOpened(attempt) => self.admit(attempt, overlay),
+        let effects = match event {
+            LifecycleEvent::ChannelOpened(attempt) => {
+                self.admit(attempt, overlay);
+                None
+            }
             LifecycleEvent::SendTerminal(attempt) => {
                 if self.lifecycles.mark_send_terminal(attempt) {
                     self.events
                         .insert(LifecycleEvent::RetireUnavailable(attempt));
                 }
+                None
             }
             LifecycleEvent::RetireUnavailable(attempt) => {
-                self.retire(attempt, DhtPeerRemoval::Unavailable, overlay);
+                self.retire(attempt, DhtPeerRemoval::Unavailable, overlay)
             }
             LifecycleEvent::Closed(attempt) => {
-                if !self.lifecycles.remove_unadmitted(attempt) {
-                    self.retire(attempt, DhtPeerRemoval::Ordinary, overlay);
+                if self.lifecycles.remove_unadmitted(attempt) {
+                    None
+                } else {
+                    self.retire(attempt, DhtPeerRemoval::Ordinary, overlay)
                 }
             }
-        }
+        };
         NodeStep {
             node: self,
-            effects: Vec::new(),
+            effects: effects.into_iter().collect(),
         }
     }
 
@@ -424,7 +451,8 @@ impl NodeState {
 
     /// `retire_active_if(g, …)` composed with the topology `Remove`: the
     /// registry decides, under one borrow, whether `g` still owns the active
-    /// slot, and only then does the topology change.
+    /// slot, and only then does the topology change. Returns the storage
+    /// repair request the retirement made, if any.
     ///
     /// Post (head-replacement law): an `Unavailable` retirement of the head
     /// leaves `succ' = Successors(Sendable ∖ {removed}, n, K)`, the sendable
@@ -433,12 +461,19 @@ impl NodeState {
     /// registry retires the generation but the topology keeps every
     /// reference to its peer: the composition the lifecycle boundary exists
     /// to make atomic, taken apart.
+    ///
+    /// Post (repair law): the request is production's [`TopologyRemoval`] of
+    /// the state the removal was applied to, and it must equal whether the
+    /// removal vacated a slot, `Slots(topology') ≠ Slots(topology)`; any
+    /// disagreement is recorded in `misdirected_repair`. Under
+    /// [`ShellMutation::RepairOnEveryRetirement`] every retirement requests
+    /// the round, the guard the placement view depends on taken away.
     fn retire(
         &mut self,
         attempt: PendingConnectionAttempt,
         removal: DhtPeerRemoval,
         overlay: &Overlay,
-    ) {
+    ) -> Option<Effect> {
         let topology = &self.topology;
         let removed = attempt.peer();
         let retired = self.lifecycles.retire_active_if(attempt, |active| {
@@ -457,18 +492,35 @@ impl NodeState {
                 ShellMutation::RetireWithoutRemove => topology.clone(),
                 ShellMutation::Faithful
                 | ShellMutation::CallbackIgnoresGeneration
-                | ShellMutation::ReplacementPreserves => {
+                | ShellMutation::ReplacementPreserves
+                | ShellMutation::RepairOnEveryRetirement => {
                     step(topology, event, overlay.successor_capacity()).state
                 }
             };
-            Ok(Some((next, expected_after_head_replacement)))
+            let requested = match overlay.mutation() {
+                ShellMutation::RepairOnEveryRetirement => true,
+                ShellMutation::Faithful
+                | ShellMutation::CallbackIgnoresGeneration
+                | ShellMutation::ReplacementPreserves
+                | ShellMutation::RetireWithoutRemove => {
+                    TopologyRemoval::of(topology, removed).storage_repair_due()
+                }
+            };
+            Ok(Some((next, expected_after_head_replacement, requested)))
         });
-        if let Ok(RetirementOutcome::Retired(((topology, expected), _announcement))) = retired {
-            if expected.is_some_and(|expected| expected != topology.successors) {
-                self.unreplaced_head = Some(UnreplacedHead { removed });
-            }
-            self.topology = topology;
+        let Ok(RetirementOutcome::Retired(((topology, expected, requested), _announcement))) =
+            retired
+        else {
+            return None;
+        };
+        if expected.is_some_and(|expected| expected != topology.successors) {
+            self.unreplaced_head = Some(UnreplacedHead { removed });
         }
+        if requested != (slots(&self.topology) != slots(&topology)) {
+            self.misdirected_repair = Some(MisdirectedRepair { removed, requested });
+        }
+        self.topology = topology;
+        requested.then_some(Effect::StorageRepair)
     }
 
     /// One maintenance period: `Stabilizer::correct_stabilize` against the
@@ -668,8 +720,20 @@ fn replacement_evidence(
         ShellMutation::ReplacementPreserves => SuccessorRemoval::Preserve,
         ShellMutation::Faithful
         | ShellMutation::CallbackIgnoresGeneration
-        | ShellMutation::RetireWithoutRemove => {
+        | ShellMutation::RetireWithoutRemove
+        | ShellMutation::RepairOnEveryRetirement => {
             SuccessorRemoval::ReplaceWith(sendable_candidates(removed, active))
         }
     }
+}
+
+/// `Slots(topology)`: the successor, predecessor, and finger slots, the
+/// carrier `Referenced(n, ·)` is defined over. A removal vacates a slot iff
+/// this projection changes.
+fn slots(topology: &TopologyState) -> (&[Did], Option<Did>, &[Option<Did>]) {
+    (
+        topology.successors.as_slice(),
+        topology.predecessor,
+        topology.fingers.as_slice(),
+    )
 }

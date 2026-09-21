@@ -49,6 +49,8 @@
 //!   TopologyReferencesOnlyAdmitted  ≜ ∀n, p. Referenced(n, p) ⇒ Active(n, p)
 //!   TopologiesAreWellFormed         ≜ ∀n. SuccessorsWellFormed(n, K) ∧ PredecessorWellFormed(n)
 //!                                      ∧ FingersWellFormed(n)
+//!   StorageRepairFollowsVacatedSlots ≜ a retirement requests the storage repair round
+//!                                      ⟺ Slots(topology'[n]) ≠ Slots(topology[n])
 //!
 //! Liveness:
 //!   Fairness ≜ ∀a ∈ {Dial(p,q), Deliver(e), Observe(p,ev)}. WF(a)   \* per instance
@@ -96,7 +98,9 @@
 //!   so every modeled finger's fixpoint is the successor head, the range
 //!   stabilization itself proves.
 //! - Not modeled: connection-capacity eviction, successor-list sync, connect
-//!   lookups, storage repair, and
+//!   lookups, the storage repair round itself (its *request* is the
+//!   `StorageRepair` effect of a retirement, production's `TopologyRemoval`
+//!   of the removed state), and
 //!   bootstrap redial pacing and seed selection (#763): an isolated peer
 //!   dials any live peer. Handshake expiry appears only as the close of a
 //!   refused offer's generation. Signaling is reliable; loss and duplication
@@ -175,6 +179,7 @@ use std::num::NonZeroU32;
 
 use laws::LawName;
 use node::LifecycleEvent;
+use node::MisdirectedRepair;
 use node::UnreplacedHead;
 use overlay::Bootstrap;
 use overlay::Budget;
@@ -706,6 +711,51 @@ fn test_retiring_without_removal_yields_a_replayable_counterexample() {
                 .any(|peer| node.lifecycles.active_attempt(peer).is_none())
         }),
         "{trace:#?}"
+    );
+}
+
+/// Non-vacuity of `StorageRepairFollowsVacatedSlots`: with every retirement
+/// requesting a repair round, the search finds a minimal trace in which an
+/// admitted peer that no slot references (the fourth peer of a `K = 1`
+/// ring, whose fingers all resolve to the head) is retired and a placement
+/// scan is requested for it; the trace replays to the violation under the
+/// mutated shell only.
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), test)]
+fn test_requesting_repair_on_every_retirement_yields_a_replayable_counterexample() {
+    let mutated = replacement(ShellMutation::RepairOnEveryRetirement);
+    let faithful = replacement(ShellMutation::Faithful);
+    let trace = minimal_counterexample(
+        &mutated,
+        &faithful,
+        LawName::StorageRepairFollowsVacatedSlots,
+    );
+    let Some((OverlayAction::Observe { peer, event }, prefix)) = trace.split_last() else {
+        panic!("the last step retires a generation: {trace:#?}");
+    };
+    let removed = event.attempt().peer();
+    assert!(
+        matches!(
+            event,
+            LifecycleEvent::Closed(_) | LifecycleEvent::RetireUnavailable(_)
+        ),
+        "the last step retires a generation: {trace:#?}"
+    );
+    let before = replay(&faithful, prefix);
+    assert!(
+        before.nodes[peer]
+            .lifecycles
+            .active_attempt(removed)
+            .is_some()
+            && !before.nodes[peer].topology.references(removed),
+        "the retired peer is admitted but unreferenced before the step: {trace:#?}"
+    );
+    assert_eq!(
+        replay(&mutated, &trace).nodes[peer].misdirected_repair,
+        Some(MisdirectedRepair {
+            removed,
+            requested: true,
+        })
     );
 }
 
