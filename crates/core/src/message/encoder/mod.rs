@@ -52,12 +52,6 @@ impl Decoder for String {
     }
 }
 
-impl Encoder for &str {
-    fn encode(&self) -> Result<Encoded> {
-        self.as_bytes().encode()
-    }
-}
-
 impl Encoder for &[u8] {
     fn encode(&self) -> Result<Encoded> {
         Ok(Encoded(
@@ -115,14 +109,6 @@ impl From<&str> for Encoded {
 impl From<Encoded> for Vec<u8> {
     fn from(a: Encoded) -> Self {
         a.to_string().as_bytes().to_vec()
-    }
-}
-
-impl TryFrom<Vec<u8>> for Encoded {
-    type Error = Error;
-    fn try_from(a: Vec<u8>) -> Result<Self> {
-        let s: String = String::from_utf8(a)?;
-        Ok(s.into())
     }
 }
 

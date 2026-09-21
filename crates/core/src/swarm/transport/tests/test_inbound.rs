@@ -2,7 +2,6 @@ use std::future::pending;
 use std::time::Duration;
 
 use super::*;
-use crate::chunk::ChunkList;
 use crate::message::CustomMessage;
 use crate::message::FoundEntry;
 use crate::message::MessageSigner;
@@ -675,7 +674,7 @@ async fn test_chunk_reassembly_records_one_exact_logical_receive() -> Result<()>
     )?;
     let expected_useful_bytes = u64::try_from(logical_payload.transaction.data.len())
         .map_err(|_| Error::MessageSizeOverflow)?;
-    let chunks: Vec<Chunk> = ChunkList::split(&logical_payload.to_wire()?, 32).into();
+    let chunks: Vec<Chunk> = Chunk::stream(logical_payload.to_wire()?, 32).collect();
     assert!(chunks.len() > 1);
 
     for chunk in chunks {
@@ -735,7 +734,7 @@ async fn test_reassembled_undecodable_message_records_one_failure_only() -> Resu
         transport.dht.did,
         transport.dht.did,
     )?;
-    let chunks: Vec<Chunk> = ChunkList::split(&undecodable.to_wire()?, 32).into();
+    let chunks: Vec<Chunk> = Chunk::stream(undecodable.to_wire()?, 32).collect();
     let final_index = chunks.len().saturating_sub(1);
     assert!(final_index > 0);
 
@@ -775,7 +774,7 @@ async fn test_reassembly_handoff_preserves_data_order_without_blocking_control()
         &peer_session,
         transport.dht.did,
     )?;
-    let chunks: Vec<Chunk> = ChunkList::split(&first_wire, 32).into();
+    let chunks: Vec<Chunk> = Chunk::stream(first_wire, 32).collect();
     assert!(chunks.len() > 1);
     let cid = peer.to_string();
 
@@ -872,7 +871,7 @@ async fn test_transport_preparation_authenticates_every_reserved_lane() -> Resul
         &peer_session,
         transport.dht.did,
     )?;
-    let chunks: Vec<Chunk> = ChunkList::split(&application, 32).into();
+    let chunks: Vec<Chunk> = Chunk::stream(application.clone(), 32).collect();
     let chunk = chunks
         .into_iter()
         .next()
@@ -961,7 +960,7 @@ async fn test_reassembled_control_shape_is_verified_before_lane_transition() -> 
         crate::message::MessageClass::DhtControl
     );
     let tampered_wire = tampered.to_wire()?;
-    let chunks: Vec<Chunk> = ChunkList::split(&tampered_wire, 32).into();
+    let chunks: Vec<Chunk> = Chunk::stream(tampered_wire, 32).collect();
     let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback));
     for chunk in &chunks[..chunks.len() - 1] {
         let frame = local_wire(Message::Chunk(chunk.clone()), &session, transport.dht.did)?;

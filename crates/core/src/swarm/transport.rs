@@ -428,12 +428,12 @@ impl SwarmTransport {
 
     /// Return whether an inbound connection offer matches this DHT protocol mode.
     pub(crate) fn accepts_connection_offer(&self, offer: &ConnectNodeSend) -> bool {
-        offer.matches_dht_protocol(self.dht_protocol_mode())
+        offer.dht_protocol_mode.matches(self.dht_protocol_mode())
     }
 
     /// Return whether an inbound connection answer matches this DHT protocol mode.
     pub(crate) fn accepts_connection_answer(&self, answer: &ConnectNodeReport) -> bool {
-        answer.matches_dht_protocol(self.dht_protocol_mode())
+        answer.dht_protocol_mode.matches(self.dht_protocol_mode())
     }
 
     /// Chunk reassembly limits enforced by inbound callbacks.
@@ -791,9 +791,7 @@ impl SwarmTransport {
         };
         let offer_msg = ConnectNodeSend {
             sdp: offer_str,
-            network_id: self.network_id,
-            storage_redundancy: self.storage_redundancy,
-            dht_virtual_nodes: self.dht_virtual_nodes,
+            dht_protocol_mode: self.dht_protocol_mode(),
         };
 
         Ok((attempt, offer_msg))
@@ -901,9 +899,7 @@ impl SwarmTransport {
         };
         let answer_msg = ConnectNodeReport {
             sdp: answer_str,
-            network_id: self.network_id,
-            storage_redundancy: self.storage_redundancy,
-            dht_virtual_nodes: self.dht_virtual_nodes,
+            dht_protocol_mode: self.dht_protocol_mode(),
         };
 
         Ok(answer_msg)

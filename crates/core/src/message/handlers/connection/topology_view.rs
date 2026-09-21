@@ -53,8 +53,8 @@ use crate::dht::PeerRing;
 #[cfg(all(test, not(target_family = "wasm")))]
 use crate::dht::TopoInfo;
 use crate::error::Result;
+use crate::message::types::QueryFor;
 use crate::message::types::QueryForTopoInfoReport;
-use crate::message::types::Then;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
@@ -84,7 +84,7 @@ impl HandleMsg<QueryForTopoInfoReport> for MessageHandler {
     /// is cancelled before propagating an effect failure.
     async fn handle(&self, ctx: &MessagePayload, msg: &QueryForTopoInfoReport) -> Result<()> {
         match msg.then {
-            <QueryForTopoInfoReport as Then>::Then::SyncSuccessor => {
+            QueryFor::SyncSuccessor => {
                 // The transaction origin is the only peer allowed to spend the
                 // successor-sync request id registered by `SendSuccessorQuery`.
                 let reporter = ctx.transaction.origin();
@@ -129,7 +129,7 @@ impl HandleMsg<QueryForTopoInfoReport> for MessageHandler {
                     }
                 }
             }
-            <QueryForTopoInfoReport as Then>::Then::Stabilization => {
+            QueryFor::Stabilization => {
                 self.handle_stabilization_report(ctx, msg).await?;
             }
         }

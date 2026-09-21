@@ -76,7 +76,6 @@ pub mod ecc;
 pub mod error;
 mod fair_admission;
 pub mod lifecycle;
-pub mod macros;
 pub mod message;
 pub mod session;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]

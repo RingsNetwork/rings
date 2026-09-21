@@ -230,11 +230,6 @@ impl ProvisionalServiceClaim {
 pub struct ServiceReceiptDigest([u8; 32]);
 
 impl ServiceReceiptDigest {
-    /// Construct a digest from canonical bytes.
-    pub const fn new(bytes: [u8; 32]) -> Self {
-        Self(bytes)
-    }
-
     /// Return the digest bytes.
     pub const fn into_bytes(self) -> [u8; 32] {
         self.0

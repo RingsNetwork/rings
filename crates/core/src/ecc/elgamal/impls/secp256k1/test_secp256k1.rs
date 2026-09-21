@@ -3,19 +3,25 @@ use std::time::Instant;
 
 use elliptic_curve::sec1::ToEncodedPoint;
 use k256::ProjectivePoint as K256ProjectivePoint;
-use rand::distributions::Alphanumeric;
-use rand::Rng;
+use rand::RngCore;
 use rand::SeedableRng;
 use rand_hc::Hc128Rng;
 
 use super::*;
 
-fn random(len: usize) -> String {
-    rand::thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(len)
-        .map(char::from)
-        .collect()
+/// `len` bytes from a seeded generator: no byte value is excluded, so the adapter's NUL and
+/// high-byte handling is exercised on every run.
+fn random_bytes(len: usize, seed: u64) -> Vec<u8> {
+    let mut bytes = vec![0u8; len];
+    Hc128Rng::seed_from_u64(seed).fill_bytes(&mut bytes);
+    bytes
+}
+
+/// Round-trip `payload` through the adapter under a seeded ElGamal ephemeral.
+fn round_trip(payload: &[u8], key: &SecretKey, seed: u64) -> Vec<u8> {
+    let mut rng = Hc128Rng::seed_from_u64(seed);
+    let ciphertext = encrypt_bytes_with_rng(payload, key.pubkey(), &mut rng).unwrap();
+    decrypt_bytes(&ciphertext, key).unwrap()
 }
 
 fn affine_xy(point: Affine) -> ([u8; 32], [u8; 32]) {
@@ -39,25 +45,22 @@ fn affine_x(point: Affine) -> [u8; 32] {
 }
 
 #[test]
-fn test_string_to_field() {
-    let t: String = random(1024);
-    assert_eq!(field_to_str(&str_to_field(&t)).unwrap(), t);
-
-    let t: String = random(127);
-    assert_eq!(field_to_str(&str_to_field(&t)).unwrap(), t);
+fn test_bytes_to_field_round_trips() {
+    for (len, seed) in [(1024, 1), (127, 2)] {
+        let payload = random_bytes(len, seed);
+        assert_eq!(field_to_bytes(&bytes_to_field(&payload)), payload);
+    }
 }
 
 #[test]
-fn test_string_to_field_keeps_nul_bytes() {
-    let leading_nul = "\0hello";
-    assert_eq!(
-        field_to_str(&str_to_field(leading_nul)).unwrap(),
-        leading_nul
-    );
+fn test_bytes_to_field_keeps_nul_bytes() {
+    let leading_nul = b"\0hello";
+    assert_eq!(field_to_bytes(&bytes_to_field(leading_nul)), leading_nul);
 
-    let chunk_boundary_nul = format!("{}\0tail", "a".repeat(FIELD_CHUNK_SIZE));
+    let mut chunk_boundary_nul = vec![b'a'; FIELD_CHUNK_SIZE];
+    chunk_boundary_nul.extend_from_slice(b"\0tail");
     assert_eq!(
-        field_to_str(&str_to_field(&chunk_boundary_nul)).unwrap(),
+        field_to_bytes(&bytes_to_field(&chunk_boundary_nul)),
         chunk_boundary_nul
     );
 }
@@ -71,12 +74,14 @@ fn test_bytes_to_field_keeps_binary_payload() {
 }
 
 #[test]
-fn test_string_to_affine() {
-    let t: String = random(1024);
-    assert_eq!(affine_to_str(&str_to_affine(&t).unwrap()).unwrap(), t);
-
-    let t: String = random(127);
-    assert_eq!(affine_to_str(&str_to_affine(&t).unwrap()).unwrap(), t);
+fn test_bytes_to_affine_round_trips() {
+    for (len, seed) in [(1024, 3), (127, 4)] {
+        let payload = random_bytes(len, seed);
+        assert_eq!(
+            affine_to_bytes(&bytes_to_affine(&payload).unwrap()),
+            payload
+        );
+    }
 }
 
 #[test]
@@ -106,10 +111,10 @@ fn test_algorithm() {
     let (got_pub_x, got_pub_y) = affine_xy(pub_point);
     assert_eq!(got_pub_x, pub_x);
     assert_eq!(got_pub_y, pub_y);
-    let test = "test";
-    let points = str_to_affine(test).unwrap();
+    let test = b"test";
+    let points = bytes_to_affine(test).unwrap();
     assert_eq!(points.len(), 1);
-    assert_eq!(affine_to_str(&str_to_affine(test).unwrap()).unwrap(), test);
+    assert_eq!(affine_to_bytes(&points), test);
     let m_point = points[0];
     let r = SecretKey::try_from("1f9275dbafdfba81942eb3330b07f38cbee4ebb86bdc2174af9648d5f5509a54")
         .unwrap();
@@ -190,9 +195,8 @@ fn test_encrypt_decrypt() {
     let key =
         SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0")
             .unwrap();
-    let pubkey = key.pubkey();
-    let t: String = random(1024);
-    assert_eq!(decrypt(&encrypt(&t, pubkey).unwrap(), &key).unwrap(), t)
+    let payload = random_bytes(1024, 5);
+    assert_eq!(round_trip(&payload, &key, 6), payload);
 }
 
 #[test]
@@ -200,12 +204,10 @@ fn test_encrypt_decrypt_keeps_nul_bytes() {
     let key =
         SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0")
             .unwrap();
-    let pubkey = key.pubkey();
-    let message = format!("\0{}{}", "a".repeat(FIELD_CHUNK_SIZE - 1), "\0tail");
-    assert_eq!(
-        decrypt(&encrypt(&message, pubkey).unwrap(), &key).unwrap(),
-        message
-    );
+    let mut message = vec![0u8];
+    message.extend(std::iter::repeat_n(b'a', FIELD_CHUNK_SIZE - 1));
+    message.extend_from_slice(b"\0tail");
+    assert_eq!(round_trip(&message, &key, 7), message);
 }
 
 #[test]
@@ -229,15 +231,17 @@ fn test_encrypt_with_rng_is_reproducible_for_same_seed() {
         SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0")
             .unwrap();
     let pubkey = key.pubkey();
-    let message = format!("prefix\0{}tail", "a".repeat(FIELD_CHUNK_SIZE));
+    let mut message = b"prefix\0".to_vec();
+    message.extend(std::iter::repeat_n(b'a', FIELD_CHUNK_SIZE));
+    message.extend_from_slice(b"tail");
     let mut rng_a = Hc128Rng::seed_from_u64(42);
     let mut rng_b = Hc128Rng::seed_from_u64(42);
 
-    let ciphertext_a = encrypt_with_rng(&message, pubkey, &mut rng_a).unwrap();
-    let ciphertext_b = encrypt_with_rng(&message, pubkey, &mut rng_b).unwrap();
+    let ciphertext_a = encrypt_bytes_with_rng(&message, pubkey, &mut rng_a).unwrap();
+    let ciphertext_b = encrypt_bytes_with_rng(&message, pubkey, &mut rng_b).unwrap();
 
     assert_eq!(ciphertext_a, ciphertext_b);
-    assert_eq!(decrypt(&ciphertext_a, &key).unwrap(), message);
+    assert_eq!(decrypt_bytes(&ciphertext_a, &key).unwrap(), message);
 }
 
 #[test]
@@ -246,8 +250,9 @@ fn test_encrypt_uses_fresh_ephemeral_point_per_block() {
         SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0")
             .unwrap();
     let pubkey = key.pubkey();
-    let message = random(FIELD_CHUNK_SIZE * 4);
-    let ciphertext = encrypt(&message, pubkey).unwrap();
+    let message = random_bytes(FIELD_CHUNK_SIZE * 4, 8);
+    let mut rng = Hc128Rng::seed_from_u64(9);
+    let ciphertext = encrypt_bytes_with_rng(&message, pubkey, &mut rng).unwrap();
 
     assert!(ciphertext.len() > 1);
     let unique_c1 = ciphertext
@@ -263,7 +268,7 @@ fn test_decrypt_malformed_ciphertext_returns_error() {
         SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0")
             .unwrap();
     let malformed = PublicKey([0u8; 33]);
-    let result = std::panic::catch_unwind(|| decrypt(&[(malformed, malformed)], &key));
+    let result = std::panic::catch_unwind(|| decrypt_bytes(&[(malformed, malformed)], &key));
 
     assert!(result.is_ok());
     assert!(result.unwrap().is_err());
@@ -382,13 +387,15 @@ fn test_bench_encrypt_decrypt_4kb() {
         SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0")
             .unwrap();
     let pubkey = key.pubkey();
-    let message = random(4 * 1024);
+    let message = random_bytes(4 * 1024, 10);
+    let mut rng = Hc128Rng::seed_from_u64(11);
     let rounds = 20;
     let start = Instant::now();
 
     for _ in 0..rounds {
-        let ciphertext = encrypt(std::hint::black_box(&message), pubkey).unwrap();
-        let plaintext = decrypt(std::hint::black_box(&ciphertext), &key).unwrap();
+        let ciphertext =
+            encrypt_bytes_with_rng(std::hint::black_box(&message), pubkey, &mut rng).unwrap();
+        let plaintext = decrypt_bytes(std::hint::black_box(&ciphertext), &key).unwrap();
         assert_eq!(plaintext, message);
     }
 

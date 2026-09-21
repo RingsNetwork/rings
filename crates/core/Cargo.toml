@@ -23,7 +23,6 @@ experimental = ["std"]
 default = ["std", "curve-ristretto255"]
 curve-ristretto255 = ["dep:curve25519-dalek"]
 std = [
-    "webrtc",
     "tokio",
     "uuid/v4",
     "uuid/serde",
@@ -70,7 +69,6 @@ ed25519-dalek = "2.2.0"
 elliptic-curve = "0.13.6"
 ethereum-types = "0.14.1"
 event-listener = "5.4.2"
-flate2 = "1.0.22"
 futures = "0.3.32"
 futures-timer = "3.0.2"
 hex = "0.4.3"
@@ -93,16 +91,12 @@ sha2 = "0.10.6"
 subtle = "2.4.1"
 thiserror = "1"
 tracing = "0.1.37"
-url = { version = "2", features = ["serde"] }
 web-time = "1.1.0"
 zeroize = "1.8.1"
 
-rings-derive = { workspace = true, optional = true, features = ["core_crate"] }
+rings-derive = { workspace = true, optional = true }
 tiny-keccak = { version = "2.0.1", features = ["keccak"] }
 uuid = { version = "0.8.2", optional = true }
-
-# default and dummy
-webrtc = { workspace = true, optional = true }
 
 # dummy
 lazy_static = { version = "1.4.0", optional = true }

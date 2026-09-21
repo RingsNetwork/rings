@@ -12,10 +12,9 @@
 //!
 //! Two halves, deliberately separated:
 //!
-//! - **Send** - [`ChunkList`] turns a [`bytes::Bytes`] into ordered [`Chunk`]s, where `chunk_size`
-//!   comes from the connection's negotiated `max_message_size`. The sender uses
-//!   [`ChunkList::stream`], which yields chunks lazily as zero-copy slices so one chunk is held in
-//!   flight at a time; [`ChunkList::split`] (eager `Vec`) remains for tests.
+//! - **Send** - [`Chunk::stream`] turns a [`bytes::Bytes`] into ordered [`Chunk`]s, where
+//!   `chunk_size` comes from the connection's negotiated `max_message_size`. The chunks are
+//!   yielded lazily as zero-copy slices so one chunk is held in flight at a time.
 //! - **Receive** - [`MessageReassembler`] collects incoming [`Chunk`]s keyed by message id and
 //!   yields the original payload once every position has arrived.
 //!
@@ -37,7 +36,6 @@ mod limits;
 mod reassembly;
 
 pub use framing::Chunk;
-pub use framing::ChunkList;
 pub use framing::ChunkMeta;
 pub use framing::Framing;
 pub use framing::WireReserves;

@@ -11,7 +11,7 @@ use crate::consts::TS_OFFSET_TOLERANCE_MS;
 use crate::utils::get_epoch_ms;
 
 fn chunks_of(data: &Bytes, mtu: usize) -> Vec<Chunk> {
-    ChunkList::split(data, mtu).into()
+    Chunk::stream(data.clone(), mtu).collect()
 }
 
 /// Tiny limits so the admission rule can be exercised without giant synthetic payloads.

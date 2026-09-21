@@ -1,7 +1,6 @@
 #![deny(missing_docs)]
 
 use std::fmt;
-use std::io::Write;
 use std::num::NonZeroU64;
 use std::sync::Arc;
 #[cfg(test)]
@@ -11,9 +10,6 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use flate2::write::GzDecoder;
-use flate2::write::GzEncoder;
-use flate2::Compression;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
@@ -74,38 +70,6 @@ fn next_test_transaction_sequence(key: StreamKey) -> Result<u64> {
         .ok_or(Error::TransactionSequenceExhausted { key })?;
     *last = next;
     Ok(next)
-}
-
-/// Compresses the given data byte slice using the gzip algorithm with the specified compression level.
-pub fn encode_data_gzip(data: &Bytes, level: u8) -> Result<Bytes> {
-    let mut ec = GzEncoder::new(Vec::new(), Compression::new(level as u32));
-    ec.write_all(data).map_err(|_| Error::GzipEncode)?;
-    ec.finish().map(Bytes::from).map_err(|_| Error::GzipEncode)
-}
-
-/// Serializes the given data using JSON and compresses it with gzip using the specified compression level.
-pub fn gzip_data<T>(data: &T, level: u8) -> Result<Bytes>
-where T: Serialize {
-    let json_bytes = serde_json::to_vec(data).map_err(|_| Error::SerializeToString)?;
-    encode_data_gzip(&json_bytes.into(), level)
-}
-
-/// Decompresses the given gzip-compressed byte slice and returns the decompressed byte slice.
-pub fn decode_gzip_data(data: &Bytes) -> Result<Bytes> {
-    let mut writer = Vec::new();
-    let mut decoder = GzDecoder::new(writer);
-    decoder.write_all(data).map_err(|_| Error::GzipDecode)?;
-    decoder.try_finish().map_err(|_| Error::GzipDecode)?;
-    writer = decoder.finish().map_err(|_| Error::GzipDecode)?;
-    Ok(writer.into())
-}
-
-/// From gzip data to deserialized
-pub fn from_gzipped_data<T>(data: &Bytes) -> Result<T>
-where T: DeserializeOwned {
-    let data = decode_gzip_data(data)?;
-    let m = serde_json::from_slice(&data).map_err(Error::Deserialize)?;
-    Ok(m)
 }
 
 fn hash_transaction(destination: Did, tx_id: uuid::Uuid, sequence: u64, data: &[u8]) -> [u8; 32] {
@@ -202,10 +166,11 @@ impl Transaction {
     }
 
     /// The origin of this transaction: the account that authorized the session it is signed
-    /// by. This is the ring position a request is authorized against and the address its report
-    /// is routed to; it is never the session id, which names a key, not a node.
+    /// by, i.e. [`MessageVerificationExt::signer`] under the name the routing layer uses for it.
+    /// This is the ring position a request is authorized against and the address its report is
+    /// routed to; it is never the session id, which names a key, not a node.
     pub fn origin(&self) -> Did {
-        self.verification.session.account_did()
+        self.signer()
     }
 
     /// Destination-scoped stream identity under the receiver's overlay.
@@ -460,9 +425,7 @@ pub trait PayloadSender {
     where T: Serialize + Send {
         let origin = payload.transaction.origin();
         let next_hop = self.infer_next_hop(origin, None)?;
-        let relay = payload
-            .relay
-            .report(self.dht().did, origin, next_hop, HopBudget::MAX)?;
+        let relay = payload.relay.report(self.dht().did, origin, next_hop)?;
 
         let signer = self.message_signer();
         let sequence = *self

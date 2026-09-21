@@ -83,7 +83,7 @@ fn test_reset_destination_keeps_the_budget() -> Result<()> {
     Ok(())
 }
 
-/// A report is a fresh carrier: it starts from the reporter's own budget, not the request's.
+/// A report is a fresh carrier: it holds the full budget, not what the request has left.
 #[test]
 fn test_report_is_a_fresh_carrier() -> Result<()> {
     let current = did(2);
@@ -91,13 +91,13 @@ fn test_report_is_a_fresh_carrier() -> Result<()> {
     let next_hop = did(4);
     let request = MessageRelay::new(current, current, HopBudget::EXHAUSTED);
 
-    let report = request.report(current, origin, next_hop, FIXTURE_BUDGET)?;
+    let report = request.report(current, origin, next_hop)?;
 
     assert_eq!(report.next_hop, next_hop);
     assert_eq!(report.destination, origin);
-    assert_eq!(report.hop_budget, FIXTURE_BUDGET);
+    assert_eq!(report.hop_budget, HopBudget::MAX);
     assert!(matches!(
-        request.report(did(3), origin, next_hop, FIXTURE_BUDGET),
+        request.report(did(3), origin, next_hop),
         Err(Error::InvalidNextHop)
     ));
     Ok(())
