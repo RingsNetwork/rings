@@ -347,6 +347,77 @@ async fn test_dropping_detached_caller_after_submit_cancels_queued_transfer() ->
     Ok(())
 }
 
+/// Every cancellation command in the backlog is applied: with the lane head
+/// waiting for delivery and the worker paused, two queued successors whose
+/// callers are dropped are both cancelled once the worker resumes, while the
+/// head keeps its permit and completes after delivery is released.
+#[tokio::test]
+async fn test_backlogged_cancellations_all_apply_behind_a_blocked_head() -> Result<()> {
+    let (node1, node2) = connected_nodes().await?;
+    let peer = node2.did();
+    let paused_delivery = PausedDeliveryGuard::new();
+    dummy_controlled::reset_sent_count();
+
+    node1
+        .swarm
+        .send_message(Message::custom(b"backlog-lane-head")?, peer)
+        .await?;
+    let successors = (0..2)
+        .map(|index| {
+            let swarm = node1.swarm.clone();
+            tokio::spawn(async move {
+                swarm
+                    .send_message(
+                        Message::custom(format!("backlog-successor-{index}").as_bytes())?,
+                        peer,
+                    )
+                    .await
+            })
+        })
+        .collect::<Vec<_>>();
+    wait_until("queued successors admitted behind the head", || {
+        node1
+            .swarm
+            .transport
+            .outbound_admitted_transfer_count_for_test(peer)
+            == Some(3)
+    })
+    .await?;
+
+    node1.swarm.transport.pause_outbound_worker_for_test(peer);
+    for successor in successors {
+        successor.abort();
+        // The aborted caller's drop sets the stop token and sends the
+        // cancellation; awaiting the handle observes that drop.
+        assert!(successor.await.is_err_and(|error| error.is_cancelled()));
+    }
+    node1.swarm.transport.resume_outbound_worker_for_test(peer);
+    wait_until("both queued successors cancelled", || {
+        node1
+            .swarm
+            .transport
+            .outbound_admitted_transfer_count_for_test(peer)
+            == Some(1)
+    })
+    .await?;
+
+    drop(paused_delivery);
+    wait_until("lane head completion", || {
+        node1
+            .swarm
+            .transport
+            .outbound_admitted_transfer_count_for_test(peer)
+            == Some(0)
+    })
+    .await?;
+    assert_eq!(
+        dummy_controlled::sent_count(),
+        1,
+        "only the head sends a frame; both successors stop before their first"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_cancelled_transfer_is_rejected_when_cancel_command_precedes_submit() -> Result<()> {
     let (node1, node2) = connected_nodes().await?;

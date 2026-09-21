@@ -133,8 +133,15 @@ impl<T, P> Drop for ScheduledTransfer<T, P> {
     }
 }
 
+/// One mailbox command. The worker handles the backlog in submission order,
+/// through [`OutboundWorker::handle_command`] only; no other path consumes a
+/// command, so none is lost.
 enum OutboundCommand {
+    /// A transfer admitted by the submitter; rejected on arrival if its stop
+    /// token is already set.
     Submit(Box<ScheduledTransfer>),
+    /// Some transfer's stop token was set after it was submitted: cancel
+    /// every queued transfer whose token is set.
     CancelStopped,
 }
 
@@ -562,6 +569,15 @@ impl OutboundWorker {
         }
     }
 
+    /// `CancelStopped`: release every queued transfer whose stop token is set.
+    ///
+    /// Only the queues are scanned; the mailbox is not touched here. A
+    /// stopped transfer is either still in the mailbox, where its `Submit` is
+    /// rejected by [`Self::accept_submission`] when the worker's drain reaches
+    /// it, or already queued, where this scan finds it: the stop token is set
+    /// before the command is sent, and the worker handles the backlog in
+    /// order. A transfer stopped after this scan is followed by its own
+    /// `CancelStopped`, handled by the next drain like any other command.
     fn cancel_stopped_admitted(&mut self) {
         let cancelled = self
             .ready
@@ -571,13 +587,6 @@ impl OutboundWorker {
             .filter_map(|queued| Self::cancel_scheduled_transfer(queued.scheduled))
             .collect();
         Self::publish_released_results(final_results);
-
-        for command in self.receiver.drain_available() {
-            if let OutboundCommand::Submit(transfer) = command {
-                self.accept_submission(*transfer);
-            }
-        }
-        self.input_closed = self.receiver.is_closed();
     }
 
     fn terminate_transfer(
