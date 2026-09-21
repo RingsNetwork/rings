@@ -743,11 +743,17 @@ impl SwarmTransport {
         };
 
         if let Some(reason) = failure {
+            // The send fails; the connection is not retired here. An admitted
+            // connection whose channel is not ready is a transiently
+            // disconnected transport, and stabilization owns its retirement
+            // (the disconnected grace, then the liveness probe), so one
+            // impatient sender cannot tear down a link WebRTC may still heal.
             let final_readiness = conn.readiness();
             tracing::warn!(
                 target: "rings_core::transport::data_channel",
                 local = %self.dht.did,
                 peer = %peer,
+                generation = attempt.generation(),
                 initial_state = ?initial_readiness.state(),
                 initial_readiness = initial_readiness.as_str(),
                 final_state = ?final_readiness.state(),
@@ -755,20 +761,8 @@ impl SwarmTransport {
                 final_data_channel_open = final_readiness.data_channel_open(),
                 timeout_ms = wait_timeout.as_millis(),
                 reason = %reason,
-                "send connection data channel not open, will be dropped"
+                "send connection data channel not open, send deferred to stabilization"
             );
-
-            let disconnect_result = self.disconnect_unavailable(attempt).await;
-            if let Err(e) = disconnect_result {
-                tracing::error!(
-                    target: "rings_core::transport::data_channel",
-                    local = %self.dht.did,
-                    peer = %peer,
-                    reason = %reason,
-                    "failed to close connection after data-channel wait failure: {e:?}"
-                );
-            }
-
             return None;
         };
 

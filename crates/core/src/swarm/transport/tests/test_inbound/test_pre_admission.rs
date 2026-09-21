@@ -91,8 +91,11 @@ async fn test_pre_admission_drain_runs_after_connected_event_error() -> Result<(
     Ok(())
 }
 
+/// A frame admitted by core while its generation was live is a verified
+/// receive; if the generation is retired before the actor dispatches it, the
+/// application never sees it.
 #[tokio::test]
-async fn test_retired_frame_waiting_on_lane_ticket_does_not_record_receive() -> Result<()> {
+async fn test_retired_frame_queued_on_lane_is_not_delivered() -> Result<()> {
     let measure = Arc::new(RecordingMeasure::default());
     let transport = Arc::new(transport_with_measure(measure.clone())?);
     let peer_key = SecretKey::random();
@@ -116,23 +119,30 @@ async fn test_retired_frame_waiting_on_lane_ticket_does_not_record_receive() -> 
     )?;
     let delivery = spawn_inbound_delivery(Arc::clone(&callback), peer.to_string(), frame);
 
-    callback
-        .await_inbound_admitted_count_for_test(|admitted| admitted >= 1)
+    // Core admission completes while the generation is live: the frame is
+    // verified, counted as received, and queued behind the held lane. The
+    // delivery itself completes only when the actor dispatches the frame.
+    measure
+        .await_recorded(|measure| {
+            successful_receive_count(measure, peer).is_ok_and(|count| count == 1)
+        })
         .await;
-    assert_eq!(successful_receive_count(&measure, peer)?, 0);
+    assert_eq!(callback.inbound_admitted_count_for_test(), 1);
     assert_eq!(
         transport.retire_active_connection_for_test(attempt, |_| Ok(()))?,
         Some(())
     );
     drop(admission_turn);
 
+    // The released lane dispatches the frame to a retired generation: the
+    // actor drops it, completes the delivery, and releases the permit.
     delivery
         .await
         .map_err(|_| Error::InvalidMessage("inbound mailbox task panicked".to_string()))??;
     callback
         .await_inbound_admitted_count_for_test(|admitted| admitted == 0)
         .await;
-    assert_eq!(successful_receive_count(&measure, peer)?, 0);
+    assert_eq!(successful_receive_count(&measure, peer)?, 1);
     assert_eq!(app_callback.validates(), 0);
     assert_eq!(app_callback.inbounds(), 0);
     Ok(())

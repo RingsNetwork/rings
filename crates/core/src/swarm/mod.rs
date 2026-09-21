@@ -34,10 +34,10 @@ use crate::message::FindSuccessorReportHandler;
 use crate::message::FindSuccessorSend;
 use crate::message::FindSuccessorThen;
 use crate::message::Message;
+use crate::message::MessageClass;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
 use crate::message::OriginQuotaCounters;
-use crate::message::OriginQuotaLane;
 use crate::message::PayloadSender;
 use crate::message::ReplayCounters;
 use crate::swarm::callback::SharedSwarmCallback;
@@ -191,11 +191,6 @@ impl Swarm {
         self.transport.get_connection_ids()
     }
 
-    /// List DIDs whose direct WebRTC transport connection is active.
-    pub fn connected_peer_dids(&self) -> Vec<Did> {
-        self.transport.get_connection_ids()
-    }
-
     /// Whether the transport holds an unadmitted handshake to `peer` (pending or admitting),
     /// whichever side started it. A new offer to such a peer is refused as `AlreadyConnected`
     /// while the handshake is inside the pending timeout; a stale one is expired by the
@@ -336,7 +331,7 @@ impl Swarm {
             ));
         }
         self.transport
-            .admit_final_transaction(&offer_payload.transaction, OriginQuotaLane::DhtControl)
+            .admit_final_transaction(&offer_payload.transaction, MessageClass::DhtControl)
             .await?;
 
         let peer = offer_payload.transaction.origin();
@@ -395,7 +390,7 @@ impl Swarm {
             ));
         }
         self.transport
-            .admit_final_transaction(&answer_payload.transaction, OriginQuotaLane::DhtControl)
+            .admit_final_transaction(&answer_payload.transaction, MessageClass::DhtControl)
             .await?;
 
         let peer = answer_payload.transaction.signer();

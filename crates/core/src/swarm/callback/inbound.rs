@@ -266,11 +266,10 @@ impl InboundMailbox {
                 .admit_final_transaction(&prepared.payload, lane)
                 .await?;
         }
-        let mut ticket = self.reserve_ticket(lane)?;
+        let ticket = self.reserve_ticket(lane)?;
         let permit = self
             .capacity
             .acquire(peer, lane, memory_reservation(bytes.len()))?;
-        ticket.wait_for_admission_turn().await;
         let PreparedInboundFrame {
             payload,
             message,
@@ -282,7 +281,6 @@ impl InboundMailbox {
         let wire_bytes = bytes.len();
         drop((bytes, transport_capacity));
         self.handoffs.bump();
-        ticket.release_admission_turn();
         if !processor.pending_connection_admits(peer).await? {
             finish_completion(completion, Ok(()));
             return Ok(());
@@ -557,7 +555,7 @@ impl InboundActor {
             if self
                 .reassembly_handoff_barrier
                 .as_ref()
-                .is_some_and(|barrier| barrier.blocks(lane, sequence))
+                .is_some_and(|barrier| barrier.blocks(lane))
             {
                 continue;
             }

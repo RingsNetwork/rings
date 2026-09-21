@@ -13,6 +13,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::dht::Did;
+use crate::message::types::MessageClass;
 
 const NANOS_PER_SECOND: u128 = 1_000_000_000;
 /// Default message rate admitted for one origin in one logical lane.
@@ -28,19 +29,6 @@ pub const DEFAULT_ORIGIN_QUOTA_BYTES_PER_SECOND: u64 = 4 * 1024 * 1024;
 pub const DEFAULT_ORIGIN_QUOTA_BYTE_BURST: u64 = 64 * 1024 * 1024;
 /// Default number of runtime-local origin records retained per logical lane.
 pub const DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE: usize = 1024;
-
-/// A final-destination logical admission lane.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum OriginQuotaLane {
-    /// Chord maintenance, connection negotiation, and topology queries.
-    DhtControl,
-    /// DHT entry lookup, mutation, and synchronization.
-    Storage,
-    /// End-to-end handshake and encrypted stream messages.
-    E2e,
-    /// Application-owned custom messages.
-    Application,
-}
 
 /// Validated token-bucket and record-table limits for one logical lane.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -198,12 +186,12 @@ impl OriginQuotaConfig {
     }
 
     /// Return the limits for `lane`.
-    pub const fn lane(self, lane: OriginQuotaLane) -> OriginQuotaLaneConfig {
+    pub const fn lane(self, lane: MessageClass) -> OriginQuotaLaneConfig {
         match lane {
-            OriginQuotaLane::DhtControl => self.dht_control,
-            OriginQuotaLane::Storage => self.storage,
-            OriginQuotaLane::E2e => self.e2e,
-            OriginQuotaLane::Application => self.application,
+            MessageClass::DhtControl => self.dht_control,
+            MessageClass::Storage => self.storage,
+            MessageClass::E2e => self.e2e,
+            MessageClass::Application => self.application,
         }
     }
 }
@@ -259,7 +247,7 @@ pub struct OriginQuotaKey {
     /// Final logical destination.
     pub destination: Did,
     /// Logical inbound lane selected from the verified message.
-    pub lane: OriginQuotaLane,
+    pub lane: MessageClass,
 }
 
 impl OriginQuotaKey {
@@ -268,7 +256,7 @@ impl OriginQuotaKey {
         network_id: u32,
         origin_account: Did,
         destination: Did,
-        lane: OriginQuotaLane,
+        lane: MessageClass,
     ) -> Self {
         Self {
             network_id,
@@ -456,7 +444,7 @@ pub enum OriginQuotaError {
     #[error("Origin quota table for {lane:?} exhausted its {capacity} records")]
     TableCapacityExhausted {
         /// Logical lane whose record bound was reached.
-        lane: OriginQuotaLane,
+        lane: MessageClass,
         /// Maximum retained records for that lane.
         capacity: usize,
     },
@@ -579,7 +567,7 @@ impl OriginQuotaTable {
 
     fn safe_victim(
         &self,
-        lane: OriginQuotaLane,
+        lane: MessageClass,
         config: OriginQuotaLaneConfig,
         now: OriginQuotaInstant,
     ) -> Result<Option<OriginQuotaKey>, OriginQuotaAdmissionError> {
@@ -631,13 +619,13 @@ pub struct OriginQuotaCounters {
 
 impl OriginQuotaCounters {
     /// Return aggregate drop counters for `lane`.
-    pub const fn lane(self, lane: OriginQuotaLane) -> OriginQuotaLaneCounters {
+    pub const fn lane(self, lane: MessageClass) -> OriginQuotaLaneCounters {
         let [dht_control, storage, e2e, application] = self.lanes;
         match lane {
-            OriginQuotaLane::DhtControl => dht_control,
-            OriginQuotaLane::Storage => storage,
-            OriginQuotaLane::E2e => e2e,
-            OriginQuotaLane::Application => application,
+            MessageClass::DhtControl => dht_control,
+            MessageClass::Storage => storage,
+            MessageClass::E2e => e2e,
+            MessageClass::Application => application,
         }
     }
 }
@@ -683,13 +671,13 @@ impl OriginQuotaCounterState {
         }
     }
 
-    pub(super) fn record(&self, lane: OriginQuotaLane, error: &OriginQuotaAdmissionError) {
+    pub(super) fn record(&self, lane: MessageClass, error: &OriginQuotaAdmissionError) {
         let [dht_control, storage, e2e, application] = &self.lanes;
         let counters = match lane {
-            OriginQuotaLane::DhtControl => dht_control,
-            OriginQuotaLane::Storage => storage,
-            OriginQuotaLane::E2e => e2e,
-            OriginQuotaLane::Application => application,
+            MessageClass::DhtControl => dht_control,
+            MessageClass::Storage => storage,
+            MessageClass::E2e => e2e,
+            MessageClass::Application => application,
         };
         match error {
             OriginQuotaAdmissionError::Verdict(OriginQuotaRejection::MessageRate) => {
@@ -760,7 +748,7 @@ mod tests {
         .expect("test quota configuration is valid")
     }
 
-    fn key(origin: u32, lane: OriginQuotaLane) -> OriginQuotaKey {
+    fn key(origin: u32, lane: MessageClass) -> OriginQuotaKey {
         OriginQuotaKey::new(7, Did::from(origin), Did::from(99_u32), lane)
     }
 
@@ -856,19 +844,19 @@ mod tests {
         let now = OriginQuotaInstant::ZERO;
 
         table
-            .reserve(key(1, OriginQuotaLane::Application), 1, now)
+            .reserve(key(1, MessageClass::Application), 1, now)
             .expect("origin A uses its application allowance");
         assert!(matches!(
-            table.reserve(key(1, OriginQuotaLane::Application), 1, now),
+            table.reserve(key(1, MessageClass::Application), 1, now),
             Err(OriginQuotaAdmissionError::Verdict(
                 OriginQuotaRejection::MessageRate
             ))
         ));
         table
-            .reserve(key(2, OriginQuotaLane::Application), 1, now)
+            .reserve(key(2, MessageClass::Application), 1, now)
             .expect("origin B keeps its application allowance");
         table
-            .reserve(key(1, OriginQuotaLane::Storage), 1, now)
+            .reserve(key(1, MessageClass::Storage), 1, now)
             .expect("origin A keeps its storage allowance");
     }
 
@@ -878,21 +866,21 @@ mod tests {
         let mut table = OriginQuotaTable::new(OriginQuotaConfig::new(lane, lane, lane, lane));
         table
             .reserve(
-                key(2, OriginQuotaLane::Application),
+                key(2, MessageClass::Application),
                 1,
                 OriginQuotaInstant::ZERO,
             )
             .expect("first record is admitted");
         table
             .reserve(
-                key(1, OriginQuotaLane::Application),
+                key(1, MessageClass::Application),
                 1,
                 OriginQuotaInstant::from_nanos(1),
             )
             .expect("second record is admitted");
         assert!(matches!(
             table.reserve(
-                key(3, OriginQuotaLane::Application),
+                key(3, MessageClass::Application),
                 1,
                 OriginQuotaInstant::from_nanos(2)
             ),
@@ -903,15 +891,15 @@ mod tests {
 
         table
             .reserve(
-                key(3, OriginQuotaLane::Application),
+                key(3, MessageClass::Application),
                 1,
                 OriginQuotaInstant::from_nanos(NANOS_PER_SECOND + 1),
             )
             .expect("oldest fully replenished record is reusable");
         assert_eq!(table.len(), 2);
-        assert!(table.get(key(1, OriginQuotaLane::Application)).is_some());
-        assert!(table.get(key(2, OriginQuotaLane::Application)).is_none());
-        assert!(table.get(key(3, OriginQuotaLane::Application)).is_some());
+        assert!(table.get(key(1, MessageClass::Application)).is_some());
+        assert!(table.get(key(2, MessageClass::Application)).is_none());
+        assert!(table.get(key(3, MessageClass::Application)).is_some());
     }
 
     #[test]
@@ -933,7 +921,7 @@ mod tests {
     #[test]
     fn counters_are_bounded_by_lane_and_reason() {
         let counters = OriginQuotaCounterState::default();
-        let lane = OriginQuotaLane::Application;
+        let lane = MessageClass::Application;
         counters.record(
             lane,
             &OriginQuotaAdmissionError::Verdict(OriginQuotaRejection::MessageRate),
@@ -947,7 +935,7 @@ mod tests {
             &OriginQuotaAdmissionError::Verdict(OriginQuotaRejection::Capacity { capacity: 1 }),
         );
         counters.record(
-            OriginQuotaLane::Storage,
+            MessageClass::Storage,
             &OriginQuotaAdmissionError::Arithmetic(
                 OriginQuotaArithmeticError::MonotonicTimeRegressed,
             ),
@@ -962,7 +950,7 @@ mod tests {
         assert_eq!(
             counters
                 .snapshot()
-                .lane(OriginQuotaLane::Storage)
+                .lane(MessageClass::Storage)
                 .arithmetic_failure,
             1
         );

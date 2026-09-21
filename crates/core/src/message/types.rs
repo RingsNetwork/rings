@@ -558,11 +558,17 @@ macro_rules! define_message_model {
 
 with_message_variants!(define_message_model);
 
+/// The class of a wire message: its inbound lane, its outbound transfer
+/// class, and its final-destination quota lane are one partition.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub(crate) enum MessageClass {
+pub enum MessageClass {
+    /// Chord maintenance, connection negotiation, and topology queries.
     DhtControl,
+    /// DHT entry lookup, mutation, and synchronization.
     Storage,
+    /// End-to-end handshake and encrypted stream messages.
     E2e,
+    /// Application-owned custom messages.
     Application,
 }
 

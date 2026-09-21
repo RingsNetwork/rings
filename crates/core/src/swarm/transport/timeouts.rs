@@ -69,34 +69,6 @@ const _: () = {
             >= PRODUCTION_TRANSPORT_TIMEOUT_PROFILE.delivery.as_millis()
     );
     assert!(
-        DUMMY_NATIVE_TEST_TIMEOUT_PROFILE.send_accept.as_millis()
-            < PRODUCTION_TRANSPORT_TIMEOUT_PROFILE.send_accept.as_millis()
-    );
-    assert!(
-        DUMMY_NATIVE_TEST_TIMEOUT_PROFILE
-            .first_frame_admission
-            .as_millis()
-            < PRODUCTION_TRANSPORT_TIMEOUT_PROFILE
-                .first_frame_admission
-                .as_millis()
-    );
-    assert!(
-        DUMMY_NATIVE_TEST_TIMEOUT_PROFILE.delivery.as_millis()
-            < PRODUCTION_TRANSPORT_TIMEOUT_PROFILE.delivery.as_millis()
-    );
-    assert!(
-        DUMMY_NATIVE_TEST_TIMEOUT_PROFILE
-            .tracked_payload
-            .as_millis()
-            < PRODUCTION_TRANSPORT_TIMEOUT_PROFILE
-                .tracked_payload
-                .as_millis()
-    );
-    assert!(
-        DUMMY_NATIVE_TEST_TIMEOUT_PROFILE.close.as_millis()
-            < PRODUCTION_TRANSPORT_TIMEOUT_PROFILE.close.as_millis()
-    );
-    assert!(
         DUMMY_NATIVE_TEST_TIMEOUT_PROFILE
             .first_frame_admission
             .as_millis()

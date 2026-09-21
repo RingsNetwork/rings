@@ -27,14 +27,11 @@ impl ReassemblyHandoffBarrier {
         self.started.load(Ordering::Acquire)
     }
 
-    pub(super) fn blocks(&self, lane: InboundLane, sequence: u64) -> bool {
-        let blocked = lane == InboundLane::Reassembly
-            || (lane_waits_for_reassembly(lane) && sequence > self.sequence);
-        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-        if blocked && lane == InboundLane::from_class(crate::message::MessageClass::DhtControl) {
-            crate::simulation::record_barrier_control_blocked();
-        }
-        blocked
+    /// The reassembly lane itself waits for the hand-off to start; logical
+    /// data lanes are ordered against it by the actor's reassembly barrier
+    /// sequence, which already includes this barrier.
+    pub(super) fn blocks(&self, lane: InboundLane) -> bool {
+        lane == InboundLane::Reassembly
     }
 }
 

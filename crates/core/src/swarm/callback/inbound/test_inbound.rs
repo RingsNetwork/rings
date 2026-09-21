@@ -27,13 +27,18 @@ fn test_inbound_lane_mapping_is_total_and_reserves_one_extra_lane() {
 }
 
 #[test]
-fn test_reassembly_handoff_blocks_later_data_and_reassembly_until_first_poll() {
+fn test_reassembly_handoff_blocks_reassembly_and_orders_only_data_lanes() {
     let barrier = ReassemblyHandoffBarrier::new(7);
 
-    assert!(!barrier.blocks(APPLICATION_LANE, 7));
-    assert!(barrier.blocks(STORAGE_LANE, 8));
-    assert!(barrier.blocks(REASSEMBLY_LANE, 9));
-    assert!(!barrier.blocks(DHT_CONTROL_LANE, 10));
+    // The barrier itself gates only the reassembly lane; data lanes are ordered
+    // against it by the actor's barrier sequence, control lanes never wait.
+    assert!(barrier.blocks(REASSEMBLY_LANE));
+    assert!(!barrier.blocks(STORAGE_LANE));
+    assert!(!barrier.blocks(APPLICATION_LANE));
+    assert!(!barrier.blocks(DHT_CONTROL_LANE));
+    assert!(lane_waits_for_reassembly(STORAGE_LANE));
+    assert!(lane_waits_for_reassembly(APPLICATION_LANE));
+    assert!(!lane_waits_for_reassembly(DHT_CONTROL_LANE));
     assert!(!barrier.has_started());
 
     barrier.start_marker().store(true, Ordering::Release);
@@ -49,9 +54,7 @@ fn test_barrier_exemption_ablation_blocks_real_control_lane() {
         crate::simulation::ProtectionProfile::without_barrier_control_exemption(),
     )
     .expect("simulation runtime must install");
-    let barrier = ReassemblyHandoffBarrier::new(7);
-
-    assert!(barrier.blocks(DHT_CONTROL_LANE, 8));
+    assert!(lane_waits_for_reassembly(DHT_CONTROL_LANE));
 }
 
 #[test]

@@ -41,7 +41,6 @@ pub use quota::OriginQuotaCounters;
 pub use quota::OriginQuotaError;
 pub use quota::OriginQuotaInstant;
 pub use quota::OriginQuotaKey;
-pub use quota::OriginQuotaLane;
 pub use quota::OriginQuotaLaneConfig;
 pub use quota::OriginQuotaLaneCounters;
 pub use quota::OriginQuotaVerdict;
@@ -50,6 +49,7 @@ pub use quota::DEFAULT_ORIGIN_QUOTA_BYTE_BURST;
 pub use quota::DEFAULT_ORIGIN_QUOTA_MESSAGES_PER_SECOND;
 pub use quota::DEFAULT_ORIGIN_QUOTA_MESSAGE_BURST;
 pub use quota::DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE;
+pub use types::MessageClass;
 
 mod replay;
 pub use replay::observe;

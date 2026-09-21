@@ -1,7 +1,3 @@
-use crate::prelude::rings_core::consts::*;
-
-/// Backend payload budget after reserving transport framing overhead.
-pub const BACKEND_MTU: usize = TRANSPORT_MAX_SIZE - TRANSPORT_MTU;
 /// Redundant setting of entry data storage
 pub const DATA_REDUNDANT: u16 = 6;
 /// Connect Behaviour

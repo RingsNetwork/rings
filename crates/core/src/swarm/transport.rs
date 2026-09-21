@@ -105,7 +105,6 @@ use self::outbound::OutboundSchedulers;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::LINK_CONTROL_IN_FLIGHT_CAPACITY;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(crate) use self::outbound::OUTBOUND_COMMAND_DRAIN_BUDGET;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::OUTBOUND_CONTROL_BURST;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -132,7 +131,7 @@ pub(crate) use self::retention::UNREFERENCED_CONNECTION_GRACE_MS;
 use self::storage_lookup::StorageLookupObservationMap;
 #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
 pub(crate) use self::storage_lookup::STORAGE_LOOKUP_OBSERVATION_CAPACITY;
-pub(crate) use self::storage_sync::TrackedStorageSyncOutcome;
+pub(crate) use self::storage_sync::StorageSyncOutcome;
 pub(crate) use self::timeouts::DATA_CHANNEL_SEND_ACCEPT_BUDGET;
 pub(crate) use self::timeouts::SESSION_HOLD_TIMEOUT;
 pub(crate) use self::timeouts::TRACKED_PAYLOAD_COMPLETION_BOUND;

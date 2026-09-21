@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Removed
+
+- Subtraction round, swarm section (#787). The send path no longer retires a peer whose data
+  channel does not open within its wait: an admitted connection that is not ready is a
+  transiently disconnected transport, and stabilization owns its retirement (the disconnected
+  grace, then the liveness probe); the send fails and is retried by its caller. The outbound
+  worker's second cancellation carrier (`cancel_requested`) and its two-lane command mailbox
+  with a per-drain budget are gone: one unbounded mailbox is drained whole into the transfer
+  queues, whose control-first burst law decides the next frame. The inbound ticket chain that
+  serialised same-lane frames between core admission and the transport-lease release is gone:
+  lane order is the sequence-numbered `Pending`/`Ready` protocol alone, and a lane's frames
+  decode in parallel. Also removed: the duplicate data-lane check inside
+  `ReassemblyHandoffBarrier::blocks` (the actor's barrier sequence carries it), the
+  `OriginQuotaLane` enum (the quota lane is the public `MessageClass`), the tracked/detached
+  storage-sync outcome twins (one `StorageSyncOutcome`), `Swarm::connected_peer_dids`
+  (identical to `peer_dids`), the cross-profile inequalities in the transport timeout profile,
+  `TRANSPORT_MTU` (the frame size is negotiated per connection since #601; `TRANSPORT_MAX_SIZE`
+  is the literal 60 MB ceiling), `BACKEND_MTU`, and the second storage-lookup eviction loop.
+
 ## 0.28.0
 
 ### Breaking changes

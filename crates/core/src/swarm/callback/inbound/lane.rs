@@ -1,6 +1,5 @@
 use crate::message::MessageClass;
 use crate::message::MessageKind;
-use crate::message::OriginQuotaLane;
 
 pub(super) const INBOUND_LANE_COUNT: usize = MessageClass::COUNT + 1;
 
@@ -52,12 +51,14 @@ impl InboundLane {
         matches!(self, Self::Storage | Self::E2e | Self::Application)
     }
 
-    pub(in crate::swarm::callback) const fn origin_quota_lane(self) -> Option<OriginQuotaLane> {
+    /// The message class this lane carries; the reassembly lane's class is
+    /// unknown until the reassembled message is decoded.
+    pub(in crate::swarm::callback) const fn class(self) -> Option<MessageClass> {
         match self {
-            Self::DhtControl => Some(OriginQuotaLane::DhtControl),
-            Self::Storage => Some(OriginQuotaLane::Storage),
-            Self::E2e => Some(OriginQuotaLane::E2e),
-            Self::Application => Some(OriginQuotaLane::Application),
+            Self::DhtControl => Some(MessageClass::DhtControl),
+            Self::Storage => Some(MessageClass::Storage),
+            Self::E2e => Some(MessageClass::E2e),
+            Self::Application => Some(MessageClass::Application),
             Self::Reassembly => None,
         }
     }

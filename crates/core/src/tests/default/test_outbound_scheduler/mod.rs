@@ -34,7 +34,6 @@ use crate::message::PayloadSender;
 use crate::swarm::transport::outbound_submit_count_for_test;
 use crate::swarm::transport::reset_outbound_submit_count_for_test;
 use crate::swarm::transport::SendCompletionOutcome;
-use crate::swarm::transport::OUTBOUND_COMMAND_DRAIN_BUDGET;
 use crate::swarm::transport::OUTBOUND_CONTROL_RESERVED_TRANSFERS;
 use crate::swarm::transport::OUTBOUND_DATA_TRANSFER_CAPACITY;
 use crate::swarm::transport::OUTBOUND_TRANSFER_QUEUE_CAPACITY;
@@ -382,6 +381,10 @@ async fn test_cancelled_transfer_is_rejected_when_cancel_command_precedes_submit
     Ok(())
 }
 
+/// Tearing the connection down under a full backlog of admitted tracked
+/// transfers cancels every one of them, and every shutdown permit is released
+/// before the first cancellation is published; a submission after the
+/// shutdown is rejected.
 #[tokio::test]
 async fn test_shutdown_releases_batch_before_first_tracked_completion() -> Result<()> {
     let (node1, node2) = connected_nodes().await?;
@@ -410,22 +413,21 @@ async fn test_shutdown_releases_batch_before_first_tracked_completion() -> Resul
             })
         })
         .collect::<Vec<_>>();
-    wait_until("tracked shutdown mailbox backlog", || {
+    // Every submission admits its permit at submit time; the paused worker
+    // holds the backlog (the command it was awaiting when paused is already
+    // queued, the rest wait in the mailbox).
+    wait_until("tracked shutdown permits admitted", || {
         node1
             .swarm
             .transport
-            .outbound_buffered_submissions_for_test(peer)
-            > OUTBOUND_COMMAND_DRAIN_BUDGET
+            .outbound_admitted_transfer_count_for_test(peer)
+            == Some(40)
     })
     .await?;
-    assert_eq!(
-        node1
-            .swarm
-            .transport
-            .outbound_admitted_transfer_count_for_test(peer),
-        Some(40)
-    );
 
+    // The resumed worker takes the whole backlog into its queues and starts
+    // the first transfer, which the paused dispatch holds: every permit is
+    // still admitted when the connection is torn down.
     node1.swarm.transport.resume_outbound_worker_for_test(peer);
     wait_until("active tracked shutdown transfer", || {
         node1
@@ -436,8 +438,8 @@ async fn test_shutdown_releases_batch_before_first_tracked_completion() -> Resul
             && node1
                 .swarm
                 .transport
-                .outbound_buffered_submissions_for_test(peer)
-                > 0
+                .outbound_admitted_transfer_count_for_test(peer)
+                == Some(40)
             && dummy_controlled::sent_count() == 0
     })
     .await?;

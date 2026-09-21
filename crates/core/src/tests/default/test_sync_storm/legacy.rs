@@ -83,7 +83,7 @@ async fn queue_legacy_storm(
     let peer = sorted[1];
     let peer_did = nodes[peer].did();
     let mut entries = Vec::new();
-    dummy_controlled::set_max_message_size(crate::consts::TRANSPORT_MTU);
+    dummy_controlled::set_max_message_size(super::CHUNKED_MAX_MESSAGE_SIZE);
     for index in 0..250 {
         let entry = entry_owned_by(&nodes[peer], &format!("legacy-loop-{index}"));
         entries.push(entry);
@@ -100,7 +100,7 @@ async fn queue_legacy_storm(
             .send_storage_sync_tracked(msg)
             .await
             .expect("legacy sync must enter the real scheduler"),
-        TrackedStorageSyncOutcome::Delivered(_)
+        StorageSyncOutcome::Sent(_)
     ));
     let initial_virtual_ms = u64::try_from(
         runtime
