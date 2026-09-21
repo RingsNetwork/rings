@@ -1,5 +1,11 @@
 //! rings-rpc client
 
+/// Destination-policy and transport regression witnesses.
+#[cfg(test)]
+mod tests;
+/// Credential transport policy and platform-specific redirect controls.
+mod transport;
+
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
@@ -9,8 +15,11 @@ use crate::protos::rings_node::*;
 
 /// Wrap json_client send request between nodes or browsers.
 pub struct Client {
+    /// Transport with redirects disabled on native targets.
     client: HttpClient,
+    /// Caller-selected endpoint, validated before attaching a credential.
     endpoint_url: String,
+    /// Credential attached only after endpoint policy validation.
     bearer_token: Option<String>,
 }
 
@@ -29,6 +38,22 @@ pub enum RpcError {
     /// A general client error.
     #[error("Client error: {0}")]
     Client(String),
+    /// The URL cannot be parsed as an authenticated RPC endpoint.
+    #[error("Invalid authenticated RPC endpoint")]
+    InvalidAuthenticatedEndpoint,
+    /// Credentials require HTTPS or a literal loopback HTTP address.
+    #[error("Authenticated RPC requires HTTPS or HTTP on a literal loopback IP address")]
+    InsecureAuthenticatedEndpoint,
+    /// A transport could not be constructed.
+    #[error("Failed to build RPC transport: {0}")]
+    TransportBuild(#[source] reqwest::Error),
+    /// Redirects are not permitted for RPC requests.
+    #[error("RPC redirects are not permitted")]
+    RedirectRejected,
+    /// Browser Fetch rejected the request without exposing a secret-bearing error.
+    #[cfg(target_family = "wasm")]
+    #[error("Authenticated browser RPC request failed")]
+    BrowserTransport,
     /// Not rpc specific errors.
     #[error("{0}")]
     Other(Box<dyn std::error::Error + Send>),
@@ -38,31 +63,40 @@ pub enum RpcError {
 type Result<T> = std::result::Result<T, RpcError>;
 
 impl Client {
-    /// Creates a new Client instance with the specified endpoint URL
-    pub fn new(endpoint_url: &str) -> Self {
-        Self {
-            client: HttpClient::default(),
-            endpoint_url: endpoint_url.to_string(),
-            bearer_token: None,
-        }
-    }
-
-    /// Creates a client using a caller-configured HTTP transport.
+    /// Creates an RPC client with redirects disabled on native targets.
     ///
-    /// Native callers use this boundary to pin a DNS snapshot and disable ambient proxies before
-    /// a security-sensitive request. The endpoint URL remains the authority used for TLS SNI.
-    pub fn with_http_client(endpoint_url: &str, client: HttpClient) -> Self {
-        Self {
-            client,
-            endpoint_url: endpoint_url.to_string(),
-            bearer_token: None,
-        }
+    /// Native transports bypass proxies so the loopback HTTP exception cannot send
+    /// credentials through an ambient proxy. Browser credentials use Fetch with
+    /// redirect mode `error` at the send boundary.
+    pub fn new(endpoint_url: &str) -> Result<Self> {
+        Self::with_http_client_builder(endpoint_url, HttpClient::builder())
     }
 
-    /// Attach the Bearer credential required by an authenticated RPC endpoint.
-    pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
+    /// Builds an RPC transport while retaining caller DNS pins, timeouts and TLS roots.
+    ///
+    /// Native proxy and redirect settings are always overridden: authenticated
+    /// traffic must stay on the endpoint whose policy was checked. Accepting a
+    /// builder, rather than an opaque client, makes those controls enforceable.
+    /// Authenticated browser requests use browser-controlled Fetch instead of this transport.
+    pub fn with_http_client_builder(
+        endpoint_url: &str,
+        builder: reqwest::ClientBuilder,
+    ) -> Result<Self> {
+        Ok(Self {
+            client: transport::build_client(builder)?,
+            endpoint_url: endpoint_url.to_string(),
+            bearer_token: None,
+        })
+    }
+
+    /// Attaches a credential only to HTTPS or literal loopback HTTP endpoints.
+    ///
+    /// HTTP hostnames, including `localhost`, are rejected rather than trusting
+    /// DNS to preserve the loopback exception. URL userinfo is not accepted.
+    pub fn with_bearer_token(mut self, token: impl Into<String>) -> Result<Self> {
+        transport::authenticated_endpoint(&self.endpoint_url)?;
         self.bearer_token = Some(token.into());
-        self
+        Ok(self)
     }
 
     /// Sends a typed JSON-RPC request and decodes the typed response body.
@@ -90,26 +124,14 @@ impl Client {
     async fn do_jsonrpc_request(&self, req: &jsonrpc_core::Request) -> Result<serde_json::Value> {
         let body = serde_json::to_string(req).map_err(|e| RpcError::Client(e.to_string()))?;
 
-        let req = self
-            .client
-            .post(self.endpoint_url.as_str())
-            .header("content-type", "application/json")
-            .header("accept", "application/json")
-            .body(body);
-        let req = match &self.bearer_token {
-            Some(token) => req.bearer_auth(token),
-            None => req,
-        };
-
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| RpcError::Client(e.to_string()))?
-            .error_for_status()
-            .map_err(|e| RpcError::Client(e.to_string()))?
-            .bytes()
-            .await
-            .map_err(|e| RpcError::ParseError(e.to_string(), Box::new(e)))?;
+        // The platform adapter owns endpoint validation and redirect enforcement.
+        let resp = transport::send(
+            &self.client,
+            &self.endpoint_url,
+            self.bearer_token.as_deref(),
+            body,
+        )
+        .await?;
 
         let jsonrpc_resp = jsonrpc_core::Response::from_json(&String::from_utf8_lossy(&resp))
             .map_err(|e| RpcError::ParseError(e.to_string(), Box::new(e)))?;

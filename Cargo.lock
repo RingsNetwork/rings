@@ -3468,12 +3468,21 @@ dependencies = [
  "base64 0.13.1",
  "bytes",
  "http 0.2.12",
+ "js-sys",
  "jsonrpc-core",
+ "rcgen",
  "reqwest",
  "rings-core",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+ "tokio",
+ "tokio-rustls",
+ "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-test",
+ "web-sys",
 ]
 
 [[package]]

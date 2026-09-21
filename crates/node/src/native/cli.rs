@@ -47,13 +47,16 @@ pub struct ClientOutput<T> {
 impl Client {
     /// Creates a new Client instance with the specified endpoint URL and signature.
     pub fn new(endpoint_url: &str) -> anyhow::Result<Self> {
-        let rpc_client = RpcClient::new(endpoint_url);
+        let rpc_client =
+            RpcClient::new(endpoint_url).map_err(|error| anyhow::anyhow!("{error}"))?;
         Ok(Self { client: rpc_client })
     }
 
     /// Creates a client for an endpoint protected by the supplied API Bearer token.
     pub fn with_api_token(endpoint_url: &str, api_token: String) -> anyhow::Result<Self> {
-        let rpc_client = RpcClient::new(endpoint_url).with_bearer_token(api_token);
+        let rpc_client = RpcClient::new(endpoint_url)
+            .and_then(|client| client.with_bearer_token(api_token))
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
         Ok(Self { client: rpc_client })
     }
 
@@ -319,5 +322,35 @@ impl<T> ClientOutput<T> {
     /// Prints the display value of this ClientOutput instance to the console.
     pub fn display(&self) {
         println!("{}", self.display);
+    }
+}
+
+/// CLI constructors must preserve the shared RPC credential transport boundary.
+#[cfg(test)]
+mod credential_transport_tests {
+    use super::Client;
+
+    /// An endpoint override cannot carry the API credential over remote cleartext HTTP.
+    #[test]
+    fn authenticated_cli_rejects_remote_http() {
+        for endpoint in [
+            "http://example.com",
+            "http://localhost.example.com",
+            "http://127.0.0.1.example.com",
+        ] {
+            assert!(Client::with_api_token(endpoint, "fixture-token".to_owned()).is_err());
+        }
+    }
+
+    /// Explicit loopback IP endpoints and HTTPS remain available through the CLI wrapper.
+    #[test]
+    fn authenticated_cli_accepts_https_and_literal_loopback() {
+        for endpoint in [
+            "https://example.com",
+            "http://127.0.0.1:50000",
+            "http://[::1]:50000",
+        ] {
+            assert!(Client::with_api_token(endpoint, "fixture-token".to_owned()).is_ok());
+        }
     }
 }
