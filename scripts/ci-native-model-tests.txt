@@ -1,0 +1,10 @@
+# These backend-independent searches run once in the default native CI suite.
+# The dummy suite retains conformance, cheap model laws, and transport tests.
+# Both owners validate this exact list, so a rename or ignored case fails CI.
+message::service_receipt::model::model_checks_all_bounded_time_and_network_schedules
+swarm::transport::test_rejoin_model::test_laws_hold_from_a_chain_bootstrap
+swarm::transport::test_rejoin_model::test_laws_hold_when_a_peer_restarts_under_a_newer_generation
+swarm::transport::test_rejoin_model::test_laws_hold_when_head_replacement_truncates
+swarm::transport::test_rejoin_model::test_laws_hold_when_successors_exceed_capacity
+swarm::transport::test_rejoin_model::test_laws_hold_under_loss_duplication_and_refusal
+tests::default::test_dht_stateright::finger_retry_model::test_production_finger_retry_transition_preserves_bounded_resource_laws
