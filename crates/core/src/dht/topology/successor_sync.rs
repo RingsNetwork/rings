@@ -47,6 +47,7 @@ use std::collections::BTreeMap;
 use super::ClaimPhase;
 use super::Did;
 
+/// Exact successor-sync request tracked for one reporter.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 struct SuccessorSyncRequest {
     /// Fresh correlation token that the authenticated report must echo.

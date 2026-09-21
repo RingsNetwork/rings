@@ -144,7 +144,7 @@ impl FingerRetryState {
 
     /// Project private retry fields for model assertions.
     ///
-    /// The tuple preserves all serialized retry state by copy and exposes no
+    /// The tuple preserves all in-memory retry state by copy and exposes no
     /// mutation path to production logic.
     #[cfg(test)]
     pub(super) const fn projection(self) -> (Option<u64>, u8, Option<u64>) {

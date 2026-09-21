@@ -108,11 +108,11 @@ pub(super) enum EvidenceInvalidation {
 pub(super) struct FingerEvidence {
     /// Monotonic counter bumped whenever one or more hints change.
     ///
-    /// This serialized revision order is unrelated to wall-clock time.
+    /// This in-memory revision order is unrelated to wall-clock time.
     epoch: u64,
     /// One evidence record per finger slot.
     ///
-    /// Its normalized length gives hints, requests, and evidence one index space.
+    /// Its fixed length gives hints, requests, and evidence one index space.
     slots: Vec<FingerSlotEvidence>,
 }
 
@@ -230,8 +230,8 @@ impl FingerEvidence {
         before: &[Option<Did>],
         after: &[Option<Did>],
     ) -> EvidenceInvalidation {
-        // Compare only slots tracked by evidence; extra restored hints are
-        // normalized elsewhere before they can become proof targets.
+        // Hints and evidence share the table width fixed at construction;
+        // every tracked slot is compared within that common index space.
         let has_change =
             (0..self.slots.len()).any(|index| Self::hint_changed_at(before, after, index));
         if !has_change {

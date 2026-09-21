@@ -274,9 +274,10 @@ impl Stabilizer {
     /// whose local cleanup is ack-gated) and republishes local entries to missing affine owners
     /// (additive), then sends the deliveries through one repair window. Placement is a function
     /// of the ring state, so the pass is the same whichever input moved the head; a head change
-    /// only requests it, and the fresh-connection grace of the window outlives the peer's own
-    /// admission of this node, which a send at admission time would race. Repetition is
-    /// idempotent: deliveries are joins and every local removal is acknowledged first.
+    /// only requests it. A ready, locally admitted next hop needs no connection-age grace:
+    /// the receiver's bounded pre-admission hold queues early frames until its own admission
+    /// completes. Repetition is idempotent: deliveries are joins and every local removal is
+    /// acknowledged first.
     pub async fn repair_storage(&self) -> Result<StorageRepairOutcome> {
         tracing::debug!(
             target: "rings_core::dht::stabilization",

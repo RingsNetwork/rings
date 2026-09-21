@@ -28,7 +28,7 @@ pub const DEFAULT_FINGER_TABLE_SIZE: usize = 160;
 
 /// Finger table of the Rings Chord DHT.
 ///
-/// Equality compares the complete serializable protocol state, including the
+/// Equality compares the complete in-memory protocol state, including the
 /// maintenance cursor, convergence ownership, evidence epochs, and retry
 /// state. Call [`Self::list`] when only routing hints should be compared.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -41,7 +41,7 @@ pub struct FingerTable {
     finger: Vec<Option<Did>>,
     /// Verification and retry state attached to the inferred hints.
     ///
-    /// This serialized state binds every hint to freshness evidence, owns at
+    /// This in-memory state binds every hint to freshness evidence, owns at
     /// most one maintenance request, and preserves retry pacing across topology
     /// transitions.
     convergence: FingerConvergenceState,

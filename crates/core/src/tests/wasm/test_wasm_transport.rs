@@ -39,7 +39,6 @@ use crate::tests::multi_frame_storage_sync_entries;
 use crate::tests::replace_observed_fingers;
 use crate::tests::ring_topology_converged;
 use crate::tests::tail_storage_key;
-use crate::utils::get_epoch_ms_i64;
 use crate::utils::sleep;
 
 const SOAK_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
@@ -138,13 +137,6 @@ async fn prepare_repair_mesh() -> [Arc<Swarm>; 3] {
         }
     }
     wait_for_ring_convergence(&swarms).await;
-    for node in swarms {
-        for peer in swarms.iter().filter(|peer| peer.did() != node.did()) {
-            node.transport
-                .force_peer_connected_at(peer.did(), get_epoch_ms_i64() - 31_000)
-                .unwrap();
-        }
-    }
     nodes
 }
 

@@ -297,7 +297,8 @@ impl PeerLivenessMap {
         true
     }
 
-    #[cfg(test)]
+    /// Override one generation's admission time for native retention tests.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     fn force_connected_at(&mut self, peer: Did, generation: u64, connected_at_ms: i64) -> bool {
         let Some(liveness) = self
             .peers
@@ -537,7 +538,8 @@ impl SwarmTransport {
         })
     }
 
-    #[cfg(test)]
+    /// Age the current generation for native retention and liveness fixtures.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn force_peer_connected_at(&self, peer: Did, connected_at_ms: i64) -> Result<()> {
         self.with_connection_lifecycle(|| {
             let Some(attempt) = self.active_attempt(peer)? else {

@@ -5,7 +5,7 @@ use crate::dht::tests::gen_ordered_dids;
 ///
 /// The test changes the fix cursor and convergence evidence independently from
 /// the visible finger vector. Each mutation must make the table unequal to the
-/// baseline, proving derived `PartialEq` covers the complete serialized state.
+/// baseline, proving derived `PartialEq` covers the complete in-memory state.
 #[test]
 fn test_equality_includes_convergence_and_cursor_state() {
     let did = Did::from(1u32);
@@ -16,7 +16,7 @@ fn test_equality_includes_convergence_and_cursor_state() {
     different_cursor.convergence.set_cursor_for_test(1);
     assert_ne!(baseline, different_cursor);
 
-    // Verified evidence is serialized protocol state and must affect equality.
+    // Verified evidence is in-memory protocol state and must affect equality.
     let mut progressed = baseline.clone();
     progressed.convergence.fill_verified_for_test(true);
     assert_ne!(baseline, progressed);

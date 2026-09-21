@@ -24,8 +24,11 @@ use crate::error::Result;
 /// most `capacity()` entries.
 #[derive(Debug, Clone)]
 pub struct SuccessorSeq {
+    /// Local identity defining clockwise order and the empty-list fallback.
     did: Did,
+    /// Fixed upper bound on the number of committed successors.
     max: u8,
+    /// Shared committed list; cloned views observe the same topology updates.
     successors: Arc<RwLock<Vec<Did>>>,
 }
 
@@ -39,6 +42,7 @@ impl SuccessorSeq {
         }
     }
 
+    /// Borrow the committed list, reporting poisoning at the read boundary.
     fn successors(&self) -> Result<RwLockReadGuard<'_, Vec<Did>>> {
         self.successors
             .read()

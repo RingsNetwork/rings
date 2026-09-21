@@ -103,7 +103,7 @@ const FINGER_LOOKUP_TIMEOUT_MS: u64 = 10_000;
 /// enters exponential backoff.
 pub(crate) const FINGER_ADMISSION_TIMEOUT_MS: u64 = 210_000;
 
-/// Serializable protocol state for one node's local finger convergence.
+/// In-memory protocol state for one node's local finger convergence.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct FingerConvergenceState {
     /// Per-slot verification bits plus the hint-change epoch they belong to.
@@ -137,7 +137,7 @@ pub(crate) struct FingerConvergenceState {
 pub(crate) struct FingerConvergenceProjection {
     /// Snapshot of each slot's verified bit in table order.
     ///
-    /// Its length equals the normalized finger-table width.
+    /// Its length equals the fixed finger-table width.
     pub(crate) verified: Vec<bool>,
     /// Request waiting for a successor report.
     ///
@@ -210,7 +210,7 @@ impl FingerConvergenceState {
     /// A change at the active request's lower slot destroys the premise of its
     /// range proof, so that attempt is retired. Changes elsewhere are recorded
     /// by epoch and will be skipped if an older range result later arrives.
-    /// The snapshots are compared only across the normalized evidence width.
+    /// The snapshots are compared only across the fixed evidence width.
     pub(crate) fn invalidate_hint_changes(
         &mut self,
         before: &[Option<Did>],
