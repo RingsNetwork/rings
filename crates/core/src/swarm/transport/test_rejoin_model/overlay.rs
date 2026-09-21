@@ -20,6 +20,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use num_bigint::BigUint;
@@ -28,7 +29,6 @@ use super::node::Effect;
 use super::node::LifecycleEvent;
 use super::node::NodeState;
 use super::node::NodeStep;
-use super::node::OwnOfferState;
 use super::node::ProtocolMessage;
 use crate::dht::topology::successor_head;
 use crate::dht::topology::RING_BITS;
@@ -61,9 +61,10 @@ pub(super) enum ShellMutation {
     /// An unavailable head is removed without replacement: the
     /// successor-replacement invariant is removed.
     ReplacementPreserves,
-    /// The topology admits a peer before its generation is activated: the
-    /// admission order of the lifecycle boundary is removed.
-    AdmitBeforeActivation,
+    /// The registry retires a generation while the topology keeps every
+    /// reference to its peer: the atomicity of the lifecycle boundary is
+    /// removed.
+    RetireWithoutRemove,
 }
 
 /// The shape of `Init`: how the peers are connected before the search
@@ -75,10 +76,11 @@ pub(super) enum Bootstrap {
     /// Successor lists are then computed from admitted peers, so a report
     /// never carries a peer the requester lacks.
     ConvergedMesh,
-    /// Every peer up, each peer admitted only to the one it dialed
-    /// (`ring[i]` dials `ring[i - 1]`), no maintenance period run: a
-    /// requester learns its remaining successors only through reports and
-    /// the connection plans they drive.
+    /// Every peer up, links only along the chain (`ring[i]` dials
+    /// `ring[i - 1]`, so an inner peer is admitted to both neighbours and an
+    /// end peer to one), no maintenance period run: every peer's successor
+    /// list differs from the fixpoint, and the missing peers are discovered
+    /// only through reports and the connection plans they drive.
     Chain,
 }
 
@@ -124,47 +126,29 @@ pub(super) struct Budget {
 }
 
 impl Budget {
-    /// The remaining amount of `resource`.
-    const fn remaining(self, resource: Resource) -> u8 {
+    /// The one field that counts `resource`.
+    fn slot_mut(&mut self, resource: Resource) -> &mut u8 {
         match resource {
-            Resource::Departure => self.departures,
-            Resource::Rejoin => self.rejoins,
-            Resource::Cut => self.cuts,
-            Resource::Loss => self.loss,
-            Resource::Duplication => self.duplication,
-            Resource::Refusal => self.refusal,
+            Resource::Departure => &mut self.departures,
+            Resource::Rejoin => &mut self.rejoins,
+            Resource::Cut => &mut self.cuts,
+            Resource::Loss => &mut self.loss,
+            Resource::Duplication => &mut self.duplication,
+            Resource::Refusal => &mut self.refusal,
         }
     }
 
     /// `Permits(r)`: at least one unit of `resource` remains.
-    pub(super) const fn permits(self, resource: Resource) -> bool {
-        self.remaining(resource) > 0
+    pub(super) fn permits(mut self, resource: Resource) -> bool {
+        *self.slot_mut(resource) > 0
     }
 
     /// The budget after spending one unit of `resource`, or `None` when none
     /// remains: the environment step is then disabled.
-    fn spent(self, resource: Resource) -> Option<Self> {
-        let left = self.remaining(resource).checked_sub(1)?;
-        Some(match resource {
-            Resource::Departure => Self {
-                departures: left,
-                ..self
-            },
-            Resource::Rejoin => Self {
-                rejoins: left,
-                ..self
-            },
-            Resource::Cut => Self { cuts: left, ..self },
-            Resource::Loss => Self { loss: left, ..self },
-            Resource::Duplication => Self {
-                duplication: left,
-                ..self
-            },
-            Resource::Refusal => Self {
-                refusal: left,
-                ..self
-            },
-        })
+    fn spent(mut self, resource: Resource) -> Option<Self> {
+        let slot = self.slot_mut(resource);
+        *slot = slot.checked_sub(1)?;
+        Some(self)
     }
 }
 
@@ -301,7 +285,9 @@ pub(super) enum OverlayAction {
     Lose(Envelope),
     /// The network delivers one message and keeps a copy.
     Duplicate(Envelope),
-    /// An isolated peer dials a bootstrap contact.
+    /// An isolated peer dials a bootstrap contact: any peer that is up
+    /// (production dials configured seeds; a dead seed is outside the
+    /// claim).
     Dial {
         /// The isolated peer.
         from: Did,
@@ -359,8 +345,6 @@ pub(super) struct Overlay {
 impl Overlay {
     /// A ring of `peers` identities at `origin + i · 2^160 / peers`.
     ///
-    /// Pre: `peers ≥ 1`; the divisor is clamped so the constructor is total.
-    ///
     /// Even spacing makes every finger threshold `2^i` below the modeled
     /// width smaller than any inter-peer distance when the table is narrow,
     /// so each narrow finger's fixpoint is the successor head: the part of
@@ -370,16 +354,16 @@ impl Overlay {
     /// to contain a given production identity.
     pub(super) fn new(
         origin: Did,
-        peers: u32,
+        peers: NonZeroU32,
         successor_capacity: usize,
         finger_slots: usize,
         budget: Budget,
         bootstrap: Bootstrap,
         mutation: ShellMutation,
     ) -> Self {
-        let ring = (0..peers)
+        let ring = (0..peers.get())
             .map(|position| {
-                origin + Did::from((BigUint::from(1u8) << RING_BITS) * position / peers.max(1))
+                origin + Did::from((BigUint::from(1u8) << RING_BITS) * position / peers.get())
             })
             .collect();
         Self {
@@ -412,8 +396,24 @@ impl Overlay {
         self.mutation
     }
 
-    /// `Init`, by the same transitions the search uses.
+    /// This model with the production composition: `Init` is built under it
+    /// whatever mutation the search applies, so a mutant's counterexample is
+    /// a behaviour of the search, never its starting state.
+    fn faithful_shell(&self) -> Self {
+        Self {
+            ring: self.ring.clone(),
+            successor_capacity: self.successor_capacity,
+            finger_slots: self.finger_slots,
+            budget: self.budget,
+            bootstrap: self.bootstrap,
+            mutation: ShellMutation::Faithful,
+        }
+    }
+
+    /// `Init`, by the same transitions the search uses, under the faithful
+    /// shell.
     pub(super) fn init(&self) -> OverlayState {
+        let shell = self.faithful_shell();
         let mut state = OverlayState {
             nodes: self
                 .ring
@@ -440,12 +440,12 @@ impl Overlay {
                 .collect(),
         };
         for (from, to) in dials {
-            state = self.delivered_closure(self.transition(&state, from, |node| node.dial(to)));
+            state = shell.delivered_closure(shell.transition(&state, from, |node| node.dial(to)));
         }
         if self.bootstrap == Bootstrap::ConvergedMesh {
             for peer in self.ring.iter().copied() {
-                let round = self.next_state(&state, &OverlayAction::Stabilize(peer));
-                state = self.delivered_closure(round.unwrap_or(state));
+                let round = shell.next_state(&state, &OverlayAction::Stabilize(peer));
+                state = shell.delivered_closure(round.unwrap_or(state));
             }
         }
         state
@@ -592,15 +592,9 @@ impl Overlay {
             return Some(state.clone());
         }
         let addressee = offered.peer();
-        let own_offer = state
-            .nodes
-            .get(&addressee)
-            .and_then(|node| node.lifecycles.pending_attempt(offerer))
-            .filter(|pending| state.far_end_of(addressee, *pending).is_some())
-            .map_or(OwnOfferState::Unanswered, |_| OwnOfferState::Answered);
         let mut answered = None;
         let mut next = self.transition(state, addressee, |node| {
-            let (node, answer) = node.answer_offer(offerer, own_offer, self);
+            let (node, answer) = node.answer_offer(offerer, self);
             answered = answer;
             NodeStep {
                 node,
@@ -610,12 +604,12 @@ impl Overlay {
         match answered {
             Some(answer) => {
                 next.links.insert(Link::pairing(offered, answer));
-                next.queue_event(offerer, LifecycleEvent::ChannelOpened(offered));
-                next.queue_event(addressee, LifecycleEvent::ChannelOpened(answer));
+                next.raise_event(offerer, LifecycleEvent::ChannelOpened(offered));
+                next.raise_event(addressee, LifecycleEvent::ChannelOpened(answer));
             }
             None => {
                 next.remaining = next.remaining.spent(Resource::Refusal)?;
-                next.queue_event(offerer, LifecycleEvent::Closed(offered));
+                next.raise_event(offerer, LifecycleEvent::Closed(offered));
             }
         }
         Some(next)
@@ -651,7 +645,7 @@ impl OverlayState {
     }
 
     /// Queue `event` at `peer`, if it is up.
-    fn queue_event(&mut self, peer: Did, event: LifecycleEvent) {
+    fn raise_event(&mut self, peer: Did, event: LifecycleEvent) {
         if let Some(node) = self.nodes.get_mut(&peer) {
             Arc::make_mut(node).events.insert(event);
         }
@@ -682,18 +676,24 @@ impl OverlayState {
         }
     }
 
-    /// A link dies: both holders will observe a send failure and a close of
-    /// exactly the generation that carried it.
+    /// A link dies: the messages it carried are lost with it, and both
+    /// holders will observe a send failure and a close of exactly the
+    /// generation that carried it.
     ///
     /// Production marks send-terminal only when a send fails, and its sweep
     /// may retire a dead link's generation while it is still sendable; the
-    /// two orders reach the same state (retirement clears the send-terminal
-    /// mark), so raising both events is the more general schedule.
+    /// model always passes through the send-terminal phase first. Both reach
+    /// the same post-state (retirement clears the send-terminal mark); the
+    /// sweep's direct retirement is not a separate schedule here.
     fn cut(&mut self, link: Link) {
         self.links.remove(&link);
+        self.network.retain(|envelope| match envelope {
+            Envelope::Message { to, via, .. } => link.far_end(*to, *via).is_none(),
+            Envelope::Offer { .. } => true,
+        });
         for (holder, end) in link.incidences() {
-            self.queue_event(holder, LifecycleEvent::SendTerminal(end));
-            self.queue_event(holder, LifecycleEvent::Closed(end));
+            self.raise_event(holder, LifecycleEvent::SendTerminal(end));
+            self.raise_event(holder, LifecycleEvent::Closed(end));
         }
     }
 
@@ -720,7 +720,7 @@ impl OverlayState {
             })
             .collect::<Vec<_>>();
         for (holder, unadmitted) in handshaking {
-            self.queue_event(holder, LifecycleEvent::Closed(unadmitted));
+            self.raise_event(holder, LifecycleEvent::Closed(unadmitted));
         }
         self.network.retain(|envelope| {
             envelope.addressee() != peer

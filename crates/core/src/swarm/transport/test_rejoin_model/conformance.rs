@@ -20,11 +20,14 @@
 //! send-terminal path (`Unavailable`), the composition whose argument shape
 //! differs from production's.
 
+use std::num::NonZeroU32;
 #[cfg(feature = "dummy")]
 use std::sync::Arc;
 
 use super::enabled_step;
+use super::model_rejoin;
 use super::node::LifecycleEvent;
+use super::observed_at;
 use super::overlay::Bootstrap;
 use super::overlay::Budget;
 use super::overlay::Overlay;
@@ -79,49 +82,27 @@ fn production_projection(transport: &SwarmTransport, peer: Did) -> Result<Projec
     })
 }
 
-/// The model ring of three peers around the transport's own identity, with
-/// the production table sizes and the restart budget.
-fn ring_around(transport: &SwarmTransport) -> Overlay {
+/// A transport at the fixed observer identity, the model ring of three
+/// peers around it with the production table sizes and the restart budget,
+/// and the ring's identities.
+fn observed_ring() -> Result<(SwarmTransport, Overlay, [Did; 3])> {
+    let transport = transport_with_key(&SecretKey::try_from(OBSERVER_KEY)?)?;
     let budget = Budget {
         departures: 1,
         rejoins: 1,
         ..super::QUIET
     };
-    Overlay::new(
+    let overlay = Overlay::new(
         transport.dht.did,
-        3,
+        NonZeroU32::new(3).unwrap_or(NonZeroU32::MIN),
         DEFAULT_SUCCESSOR_CAPACITY,
         DEFAULT_FINGER_TABLE_SIZE,
         budget,
         Bootstrap::ConvergedMesh,
         ShellMutation::Faithful,
-    )
-}
-
-/// The model's rejoin of `departed` through `observer`: restart, bootstrap
-/// dial, answer, and admission under the newer generation.
-fn model_rejoin(
-    overlay: &Overlay,
-    state: &OverlayState,
-    observer: Did,
-    departed: Did,
-) -> (OverlayState, PendingConnectionAttempt) {
-    let up = enabled_step(overlay, state, OverlayAction::Rejoin(departed));
-    let dialed = enabled_step(overlay, &up, OverlayAction::Dial {
-        from: departed,
-        to: observer,
-    });
-    let offer = dialed.network.first().cloned().unwrap();
-    let answered = enabled_step(overlay, &dialed, OverlayAction::Deliver(offer));
-    let newer = answered.nodes[&observer]
-        .lifecycles
-        .unadmitted_attempt(departed)
-        .unwrap();
-    let admitted = enabled_step(overlay, &answered, OverlayAction::Observe {
-        peer: observer,
-        event: LifecycleEvent::ChannelOpened(newer),
-    });
-    (admitted, newer)
+    );
+    let ring = <[Did; 3]>::try_from(overlay.ring()).unwrap();
+    Ok((transport, overlay, ring))
 }
 
 /// Production admission of `peer` without a transport object: reservation,
@@ -134,18 +115,31 @@ async fn admit_unlinked(transport: &SwarmTransport, peer: Did) -> Result<Pending
     Ok(attempt)
 }
 
+/// Law: the retired generation's late events are inert on both sides, whose
+/// projections about `peer` stay `admitted`.
+async fn assert_retired_generation_is_inert(
+    transport: &SwarmTransport,
+    retired: PendingConnectionAttempt,
+    model: &OverlayState,
+    observer: Did,
+    peer: Did,
+    admitted: &Projection,
+) -> Result<()> {
+    assert!(transport.disconnect_unavailable(retired).await?.is_none());
+    assert!(!transport.disconnect_attempt(retired).await?);
+    assert!(!transport.remove_retired_attempt_topology(retired)?);
+    assert_eq!(production_projection(transport, peer)?, *admitted);
+    assert_eq!(model_projection(model, observer, peer), *admitted);
+    Ok(())
+}
+
 /// Law: on the close path, the model's composed steps and the production
 /// shell agree on `π` after every step, and the retired generation's late
 /// events are inert in both.
 #[tokio::test]
 async fn test_model_agrees_with_the_production_shell_on_the_close_path() -> Result<()> {
-    let transport = transport_with_key(&SecretKey::try_from(OBSERVER_KEY)?)?;
-    let overlay = ring_around(&transport);
-    let [observer, successor, departed] = <[Did; 3]>::try_from(overlay.ring()).unwrap();
-    let observe = |event| OverlayAction::Observe {
-        peer: observer,
-        event,
-    };
+    let (transport, overlay, [observer, successor, departed]) = observed_ring()?;
+    let observe = observed_at(observer);
 
     // Init: both peers admitted in ring order, predecessor notified.
     let model = overlay.init();
@@ -168,30 +162,25 @@ async fn test_model_agrees_with_the_production_shell_on_the_close_path() -> Resu
 
     // Rejoin: the same peer is admitted under a newer generation.
     let (model, newer) = model_rejoin(&overlay, &model, observer, departed);
-    let production_newer = admit_unlinked(&transport, departed).await?;
-    assert_eq!(newer, production_newer);
+    assert_eq!(newer, admit_unlinked(&transport, departed).await?);
     assert!(newer.generation() > retired.generation());
     let admitted = production_projection(&transport, departed)?;
     assert_eq!(admitted, model_projection(&model, observer, departed));
 
-    // The retired generation's remaining event arrives: inert on both sides.
+    // The retired generation's remaining event arrives.
     let model = enabled_step(
         &overlay,
         &model,
         observe(LifecycleEvent::SendTerminal(retired)),
     );
-    assert!(transport.disconnect_unavailable(retired).await?.is_none());
-    assert!(!transport.disconnect_attempt(retired).await?);
-    assert!(!transport.remove_retired_attempt_topology(retired)?);
-    assert_eq!(production_projection(&transport, departed)?, admitted);
-    assert_eq!(model_projection(&model, observer, departed), admitted);
-    Ok(())
+    assert_retired_generation_is_inert(&transport, retired, &model, observer, departed, &admitted)
+        .await
 }
 
 /// Law: on the send-terminal path, the unavailable head is replaced by the
 /// routable admitted successors in both the model and the production shell,
 /// the rejoined head is re-admitted under the same newer generation, and the
-/// retired generation's sweep is inert in both.
+/// retired generation's late events are inert in both.
 #[cfg(feature = "dummy")]
 #[tokio::test]
 async fn test_model_agrees_with_the_production_shell_on_the_unavailable_path() -> Result<()> {
@@ -214,13 +203,9 @@ async fn test_model_agrees_with_the_production_shell_on_the_unavailable_path() -
         Ok(attempt)
     }
 
-    let transport = Arc::new(transport_with_key(&SecretKey::try_from(OBSERVER_KEY)?)?);
-    let overlay = ring_around(&transport);
-    let [observer, head, other] = <[Did; 3]>::try_from(overlay.ring()).unwrap();
-    let observe = |event| OverlayAction::Observe {
-        peer: observer,
-        event,
-    };
+    let (transport, overlay, [observer, head, other]) = observed_ring()?;
+    let transport = Arc::new(transport);
+    let observe = observed_at(observer);
 
     // Init: both peers admitted and routable; the head is the departing peer.
     let model = overlay.init();
@@ -254,16 +239,11 @@ async fn test_model_agrees_with_the_production_shell_on_the_unavailable_path() -
 
     // Rejoin: the head is re-admitted under the same newer generation.
     let (model, newer) = model_rejoin(&overlay, &model, observer, head);
-    let production_newer = admit_routable(&transport, head).await?;
-    assert_eq!(newer, production_newer);
+    assert_eq!(newer, admit_routable(&transport, head).await?);
     let admitted = production_projection(&transport, head)?;
     assert_eq!(admitted, model_projection(&model, observer, head));
 
-    // The retired generation's close arrives: inert on both sides.
+    // The retired generation's close arrives.
     let model = enabled_step(&overlay, &model, observe(LifecycleEvent::Closed(retired)));
-    assert!(transport.disconnect_unavailable(retired).await?.is_none());
-    assert!(!transport.disconnect_attempt(retired).await?);
-    assert_eq!(production_projection(&transport, head)?, admitted);
-    assert_eq!(model_projection(&model, observer, head), admitted);
-    Ok(())
+    assert_retired_generation_is_inert(&transport, retired, &model, observer, head, &admitted).await
 }

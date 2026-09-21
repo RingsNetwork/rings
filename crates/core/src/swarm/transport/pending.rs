@@ -117,7 +117,8 @@ impl ConnectionLifecycleBoundary {
 /// A peer can have a replacement handshake after a timeout. Callbacks carry
 /// this token so a late callback from the replaced connection cannot promote
 /// the newer handshake into the active routing set.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[cfg_attr(test, derive(Hash))]
 pub(crate) struct PendingConnectionAttempt {
     /// Peer this logical connection generation is trying to own.
     pub(super) peer: Did,

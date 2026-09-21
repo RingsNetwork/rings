@@ -5,29 +5,16 @@
 //! predicates here add only what needs the lifecycle registry or the
 //! environment to state.
 //!
-//! Safety (`□`, every reachable state):
-//! - `RetiredGenerationsAreInert`: no event of a generation `g` with
-//!   `¬Owns(g)` changed `(topology, lifecycles)`.
-//! - `UnavailableHeadsAreReplaced`: an `Unavailable` retirement of the head
-//!   left `succ = Successors(Sendable ∖ {head}, n, K)`.
-//! - `TopologyReferencesOnlyAdmitted`: `Referenced(n, p) ⇒ Active(n, p)`.
-//! - `TopologiesAreWellFormed`: `SuccessorsWellFormed ∧ PredecessorWellFormed
-//!   ∧ FingersWellFormed` at every live peer. Every topology write of the
-//!   shell goes through `step`, which normalizes its arguments, so this law
-//!   is falsifiable only by a defect of `step` itself (the subject of the
-//!   topology unit tests), not by a shell mutation; it is checked here so
-//!   the composition inherits the invariant it relies on.
+//! Each law is named by a [`LawName`] variant, whose doc states it; this
+//! header only sorts them. Safety (`□`): `RetiredGenerationsAreInert`,
+//! `UnavailableHeadsAreReplaced`, `TopologyReferencesOnlyAdmitted`,
+//! `TopologiesAreWellFormed`. Coverage (`◇`), so the safety laws are not
+//! vacuous: `RetiredEventAwaitsBesideNewerGeneration`,
+//! `HeadReplacementFillsCapacity`.
 //!
 //! `RoutesClockwise` is not listed: it is the unconditional postcondition of
 //! `find_successor`, true of every representable state, so no reachable
 //! state could falsify it.
-//!
-//! Coverage (`◇`, some reachable state), so the safety laws are not vacuous:
-//! - `RetiredEventAwaitsBesideNewerGeneration`
-//! - `HeadReplacementFillsCapacity`: the head's `RetireUnavailable` is
-//!   pending while at least `K` other sendable peers remain, so the
-//!   replacement chooses a full list; with more than `K` (the
-//!   `replacement` configuration) it truncates.
 //!
 //! Liveness is stated in `search`, over [`is_converged`] and
 //! [`retains_live_heads`].
@@ -53,18 +40,29 @@ pub(super) enum Expectation {
 pub(super) enum LawName {
     /// `□`: a retired generation's event changes nothing protected.
     RetiredGenerationsAreInert,
-    /// `□`: an unavailable head is replaced by the sendable admitted
-    /// successors.
+    /// `□`: an `Unavailable` retirement of the head leaves
+    /// `succ = Successors(Sendable ∖ {head}, n, K)`. Under the faithful shell
+    /// this reduces to the normalization law of `step`'s `Remove`; what it
+    /// witnesses is the shell's choice of removal flavour
+    /// (`ReplacementPreserves`), while production's candidate computation is
+    /// compared in `conformance`.
     UnavailableHeadsAreReplaced,
-    /// `□`: topology evidence is backed by an admitted generation.
+    /// `□`: `Referenced(n, p) ⇒ Active(n, p)`, topology evidence is backed
+    /// by an admitted generation.
     TopologyReferencesOnlyAdmitted,
-    /// `□`: the topology well-formedness invariants.
+    /// `□`: `WellFormed(topology[n], K)` at every live peer. Every topology
+    /// write of the shell goes through `step`, which normalizes its
+    /// arguments, so this law is falsifiable only by a defect of `step`
+    /// itself (the subject of the topology unit tests); it is checked so the
+    /// composition inherits the invariant it relies on.
     TopologiesAreWellFormed,
     /// `◇`: a retired generation's event awaits beside a newer admitted
-    /// generation.
+    /// generation of the same peer, so the next step delivers it under the
+    /// safety laws.
     RetiredEventAwaitsBesideNewerGeneration,
-    /// `◇`: a head replacement has at least as many sendable candidates as
-    /// capacity.
+    /// `◇`: the head's `RetireUnavailable` is pending while at least `K`
+    /// other sendable peers remain, so the replacement chooses a full list;
+    /// with more than `K` (the `replacement` configuration) it truncates.
     HeadReplacementFillsCapacity,
 }
 
@@ -126,15 +124,12 @@ fn topology_references_only_admitted(_: &Overlay, state: &OverlayState) -> bool 
     })
 }
 
-/// `□ ∀n. SuccessorsWellFormed(n, K) ∧ PredecessorWellFormed(n) ∧
-/// FingersWellFormed(n)`.
+/// `□ ∀n. WellFormed(topology[n], K)`.
 fn topologies_are_well_formed(overlay: &Overlay, state: &OverlayState) -> bool {
-    state.nodes.values().all(|node| {
-        node.topology
-            .successors_are_well_formed(overlay.successor_capacity())
-            && node.topology.predecessor_is_well_formed()
-            && node.topology.fingers_are_well_formed()
-    })
+    state
+        .nodes
+        .values()
+        .all(|node| node.topology.is_well_formed(overlay.successor_capacity()))
 }
 
 /// `◇ ∃n, g, g'. Event(g) ∈ events(n) ∧ Active(n, g') ∧ g'.peer = g.peer ∧
@@ -165,8 +160,8 @@ fn head_replacement_fills_capacity(overlay: &Overlay, state: &OverlayState) -> b
                         .active_connections()
                         .iter()
                         .filter(|candidate| candidate.peer() != head.peer())
-                        .nth(overlay.successor_capacity().saturating_sub(1))
-                        .is_some()
+                        .count()
+                        >= overlay.successor_capacity()
             }
             LifecycleEvent::ChannelOpened(_)
             | LifecycleEvent::SendTerminal(_)

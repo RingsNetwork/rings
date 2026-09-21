@@ -13,21 +13,22 @@
 //!   occupied slots are `d(n, ·)`-monotone in the slot index.
 //! - `RoutesClockwise(s, id)`: a remote hop toward `id` lies on the open arc
 //!   `(n, id)`.
+//! - `WellFormed(s, k)`: the conjunction of the three laws above.
 //! - `ChordFixpoint(s, M, k)`: `s` equals the image of the specification
 //!   operators [`successors`], [`predecessor`], and [`finger`] on the member
 //!   set `M`.
 //!
 //! The module is compiled for test builds only: its consumers are the model
-//! checkers and the churn simulator, and the laws it states are checked, not
-//! consulted, by production.
+//! checkers (and a churn simulator would be one), and the laws it states are
+//! checked, not consulted, by production.
 //!
 //! The first three are invariants of [`step`](super::step): the rejoin model
 //! in `swarm::transport::test_rejoin_model` witnesses them across the
 //! membership and stabilization events, and the finger-retry model in
-//! `tests::default::test_dht_stateright` across the finger-lookup events.
-//! `RoutesClockwise` is the unconditional postcondition of
-//! [`find_successor`], true of every representable state. `ChordFixpoint` is
-//! the target of stabilization, not an invariant.
+//! `tests::default::test_dht_stateright` across the finger-lookup events,
+//! where it also asserts `RoutesClockwise`, the unconditional postcondition
+//! of [`find_successor`] (true of every representable state). `ChordFixpoint`
+//! is the target of stabilization, not an invariant.
 
 use num_bigint::BigUint;
 
@@ -58,7 +59,7 @@ impl TopologyState {
         self.successors.len() <= capacity
             && distances
                 .first()
-                .is_none_or(|nearest| *nearest > BigUint::ZERO)
+                .is_none_or(|nearest| nearest.gt(&BigUint::ZERO))
             && distances
                 .iter()
                 .zip(distances.iter().skip(1))
@@ -87,11 +88,20 @@ impl TopologyState {
             .collect::<Vec<_>>();
         occupied
             .iter()
-            .all(|(slot, distance)| distance >= &(BigUint::from(1u8) << slot))
+            .all(|(slot, distance)| distance.ge(&(BigUint::from(1u8) << slot)))
             && occupied
                 .iter()
                 .zip(occupied.iter().skip(1))
                 .all(|((_, lower), (_, higher))| lower <= higher)
+    }
+
+    /// `WellFormed(s, k)`: `SuccessorsWellFormed(s, k) ∧ PredecessorWellFormed(s)
+    /// ∧ FingersWellFormed(s)`, the invariant the model checkers assert at
+    /// every reachable state.
+    pub(crate) fn is_well_formed(&self, capacity: usize) -> bool {
+        self.successors_are_well_formed(capacity)
+            && self.predecessor_is_well_formed()
+            && self.fingers_are_well_formed()
     }
 
     /// `RoutesClockwise(s, id)`: `find_successor(s, id) = Remote(next) ⇒
@@ -126,7 +136,6 @@ impl TopologyState {
 }
 
 /// Each predicate is falsifiable: one witness per clause it states.
-#[cfg(test)]
 mod tests {
     use super::Did;
     use super::TopologyState;
@@ -148,7 +157,8 @@ mod tests {
 
     /// Law: `SuccessorsWellFormed` rejects exactly an unordered, repeated,
     /// self-referencing, or over-capacity sequence.
-    #[test]
+    #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_family = "wasm"), test)]
     fn test_successor_well_formedness_rejects_each_violated_clause() {
         let cases = [
             (vec![], true),
@@ -168,7 +178,8 @@ mod tests {
     }
 
     /// Law: `PredecessorWellFormed` rejects exactly the self reference.
-    #[test]
+    #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_family = "wasm"), test)]
     fn test_predecessor_well_formedness_rejects_a_self_reference() {
         assert!(state(&[], None, &[]).predecessor_is_well_formed());
         assert!(state(&[], Some(7), &[]).predecessor_is_well_formed());
@@ -177,7 +188,8 @@ mod tests {
 
     /// Law: `FingersWellFormed` rejects a hint nearer than its slot's
     /// threshold and a higher slot that points nearer than a lower one.
-    #[test]
+    #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_family = "wasm"), test)]
     fn test_finger_well_formedness_rejects_each_violated_clause() {
         let cases = [
             (vec![None, None, None], true),
@@ -198,7 +210,8 @@ mod tests {
 
     /// Law: `RoutesClockwise` holds even for representable ill-formed states,
     /// because `find_successor` skips self entries and hints beyond the target.
-    #[test]
+    #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_family = "wasm"), test)]
     fn test_routing_advances_clockwise_from_ill_formed_states() {
         let ill_formed = state(&[0, 3], Some(0), &[Some(0), Some(9), Some(3)]);
         for target in 0..12u32 {
@@ -208,7 +221,8 @@ mod tests {
 
     /// Law: `ChordFixpoint` accepts the image of the specification operators
     /// and rejects a state that differs in any one component.
-    #[test]
+    #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_family = "wasm"), test)]
     fn test_chord_fixpoint_rejects_a_difference_in_any_component() {
         let members = [0u32, 1, 2, 4].map(Did::from);
         let fixpoint = state(&[1, 2], Some(4), &[Some(1), Some(2), Some(4)]);

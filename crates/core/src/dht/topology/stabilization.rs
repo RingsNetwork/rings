@@ -200,16 +200,18 @@ pub fn rectify_predecessor(local: Did, current: Option<Did>, candidate: Did) -> 
 
 /// Correct successor list after one HMCC/Zave stabilize transition.
 ///
-/// The candidate set combines the local node, current successors, the reported
-/// predecessor, and every reported successor. [`successors`] then removes
-/// duplicates, orders candidates by clockwise distance, and enforces
-/// `capacity`: it is the only truncation, as in Chord's
-/// `succ_list ← [s] ++ s.succ_list` followed by keeping `r` entries.
+/// The candidate set is the HMCC merge `known = {local} ∪ current ∪ {pred} ∪
+/// reported`: unlike Chord's replacement `succ_list ← [s] ++ s.succ_list`, a
+/// current entry the reporter has dropped survives until a removal retires
+/// it. [`successors`] then removes duplicates, orders candidates by clockwise
+/// distance, and enforces `capacity`; it is the only truncation, as Chord's
+/// keeping of `r` entries is.
 ///
-/// Law: `∀p ∈ reported. rank(local, known, p) ≤ capacity ⇒ p ∈ result`. A
-/// reported list carries no terminal self entry (the reporter answers with
-/// its successor sequence verbatim), so dropping its last entry would lose a
-/// real successor whenever that list is shorter than `capacity` (#786).
+/// Law: with `rank(p) = 1 + |{q ∈ known ∖ {local} : d(local, q) < d(local, p)}|`,
+/// `∀p ∈ reported. p ∈ result ⇔ rank(p) ≤ capacity`. A reported list carries
+/// no terminal self entry (the reporter answers with its successor sequence
+/// verbatim), so dropping its last entry would lose a real successor whenever
+/// that list is shorter than `capacity` (#786).
 pub fn stabilize_successors(
     local: Did,
     current: &[Did],

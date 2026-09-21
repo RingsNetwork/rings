@@ -7,13 +7,16 @@
 //! makes the first state that violates an `Always` law a minimal
 //! counterexample; a trace is recovered by replaying action indices.
 //!
-//! States are identified by a 128-bit fingerprint (two independent 64-bit
-//! hashes). A collision would merge two states and skip the second's
-//! subtree; at a million states the probability is below `2^-88`, and the
-//! exact state-count assertions of the tests pin the fingerprint function as
-//! much as the carrier. The graph is bounded by [`EXPLORATION_BOUND`], so a
-//! carrier that grows past its documented size fails deterministically
-//! instead of running until a job timeout.
+//! States are identified by a 128-bit fingerprint: two evaluations of the
+//! same keyed SipHash, the second over a salted input, treated as
+//! approximately independent. A collision would merge two states and skip
+//! the second's subtree; at a million states the probability is below
+//! `2^-88`. State counts and depths are invariant under any collision-free
+//! fingerprint, and the fingerprint itself differs between `wasm32` and
+//! 64-bit targets (`usize` hashes at its width), so the same counts on both
+//! are what excludes a collision. The graph is bounded by
+//! [`EXPLORATION_BOUND`], so a carrier that grows past its documented size
+//! fails deterministically instead of running until a job timeout.
 //!
 //! # Liveness
 //!
@@ -96,21 +99,32 @@ struct StateIndex(usize);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct Label(usize);
 
-/// A key of one of the dense per-state or per-label tables.
+/// A key of one of the dense per-state or per-label tables: an isomorphism
+/// with positions, `at ∘ position = id`.
 trait TableKey: Copy {
     /// The position this key denotes.
     fn position(self) -> usize;
+    /// The key of a position.
+    fn at(position: usize) -> Self;
 }
 
 impl TableKey for StateIndex {
     fn position(self) -> usize {
         self.0
     }
+
+    fn at(position: usize) -> Self {
+        Self(position)
+    }
 }
 
 impl TableKey for Label {
     fn position(self) -> usize {
         self.0
+    }
+
+    fn at(position: usize) -> Self {
+        Self(position)
     }
 }
 
@@ -147,18 +161,20 @@ impl<K: TableKey, T> Table<K, T> {
     }
 
     /// Append `value` and return its key.
-    fn push(&mut self, value: T, key: impl FnOnce(usize) -> K) -> K {
+    fn push(&mut self, value: T) -> K {
         let position = self.entries.len();
         self.entries.push(value);
-        key(position)
+        K::at(position)
+    }
+
+    /// Every key in order.
+    fn keys(&self) -> impl Iterator<Item = K> {
+        (0..self.entries.len()).map(K::at)
     }
 
     /// `(key, entry)` pairs in key order.
-    fn iter(&self, key: impl Fn(usize) -> K) -> impl Iterator<Item = (K, &T)> {
-        self.entries
-            .iter()
-            .enumerate()
-            .map(move |(position, entry)| (key(position), entry))
+    fn iter(&self) -> impl Iterator<Item = (K, &T)> {
+        self.keys().zip(self.entries.iter())
     }
 }
 
@@ -232,9 +248,9 @@ pub(super) enum SearchReport {
     },
 }
 
-/// Where a state was first reached from.
+/// The tree edge by which a state was first reached.
 #[derive(Clone, Copy)]
-struct Origin {
+struct ParentEdge {
     /// The state it was expanded from.
     parent: StateIndex,
     /// Index of the action in the parent's enabled list.
@@ -255,8 +271,8 @@ struct ProtocolEdge {
 /// One explored state: where it came from, what it satisfies, and its
 /// protocol edges.
 struct Vertex {
-    /// How the state was first reached; `None` for `Init`.
-    origin: Option<Origin>,
+    /// The tree edge by which the state was first reached; `None` for `Init`.
+    parent: Option<ParentEdge>,
     /// `Converged(s)`.
     converged: bool,
     /// `Premise(s)`.
@@ -291,12 +307,75 @@ struct Graph {
 impl Graph {
     /// Every state index in exploration order.
     fn states(&self) -> impl Iterator<Item = StateIndex> {
-        (0..self.vertices.len()).map(StateIndex)
+        self.vertices.keys()
     }
 
     /// A per-state table of `value`.
     fn per_state<T: Clone>(&self, value: T) -> Table<StateIndex, T> {
         Table::filled(value, self.vertices.len())
+    }
+}
+
+/// The breadth-first frontier: the graph under construction, the states
+/// awaiting expansion, and the fingerprint index that identifies them.
+struct Frontier {
+    /// The graph under construction.
+    graph: Graph,
+    /// States discovered but not yet expanded, with their indices.
+    queue: VecDeque<(StateIndex, OverlayState)>,
+    /// Fingerprint → state index.
+    indices: HashMap<u128, StateIndex>,
+    /// Action → label, the interning of fairness units.
+    labels: HashMap<OverlayAction, Label>,
+}
+
+impl Frontier {
+    /// Admit a newly discovered state: evaluate the laws, record it, and
+    /// queue it for expansion.
+    ///
+    /// Pre: the graph has fewer than [`EXPLORATION_BOUND`] states; reaching
+    /// the bound is a bounds regression and stops the search with that
+    /// diagnosis.
+    fn discover(
+        &mut self,
+        overlay: &Overlay,
+        premise: fn(&OverlayState) -> bool,
+        state: OverlayState,
+        parent: Option<ParentEdge>,
+        depth: usize,
+    ) -> StateIndex {
+        assert!(
+            self.graph.vertices.len() < EXPLORATION_BOUND,
+            "the reachable graph exceeds {EXPLORATION_BOUND} states at depth {depth}"
+        );
+        let vertex = Vertex {
+            parent,
+            converged: laws::is_converged(overlay, &state),
+            premise: premise(&state),
+            depth,
+            protocol: Vec::new(),
+        };
+        let index = self.graph.vertices.push(vertex);
+        for (position, law) in laws::LAWS.iter().enumerate() {
+            let holds = (law.holds)(overlay, &state);
+            self.graph.covered[position] |= holds;
+            if law.expectation == Expectation::Always && !holds && self.graph.violation.is_none() {
+                self.graph.violation = Some((index, law.name));
+            }
+        }
+        self.queue.push_back((index, state));
+        index
+    }
+
+    /// The label of a protocol action, interned on first sight.
+    fn label(&mut self, action: OverlayAction) -> Label {
+        match self.labels.entry(action) {
+            Entry::Occupied(known) => *known.get(),
+            Entry::Vacant(vacant) => {
+                let periodic = vacant.key().is_periodic();
+                *vacant.insert(self.graph.strong.push(periodic))
+            }
+        }
     }
 }
 
@@ -313,78 +392,48 @@ fn fingerprint(state: &OverlayState) -> u128 {
 
 /// Explore `G` breadth-first from `Init`, evaluating the laws at every
 /// state; the exploration stops at the first `Always` violation.
-///
-/// Pre: the graph has at most [`EXPLORATION_BOUND`] states; a larger one is
-/// a bounds regression and stops the search with that diagnosis.
 fn explore(overlay: &Overlay, premise: fn(&OverlayState) -> bool) -> Graph {
-    let mut graph = Graph {
-        vertices: Table::new(),
-        strong: Table::new(),
-        violation: None,
-        covered: vec![false; laws::LAWS.len()],
-    };
-    let mut indices = HashMap::<u128, StateIndex>::new();
-    let mut labels = HashMap::<OverlayAction, Label>::new();
-    let mut queue = VecDeque::<(StateIndex, OverlayState)>::new();
-    let discover = |graph: &mut Graph,
-                    queue: &mut VecDeque<(StateIndex, OverlayState)>,
-                    state: OverlayState,
-                    origin: Option<Origin>,
-                    depth: usize| {
-        assert!(
-            graph.vertices.len() < EXPLORATION_BOUND,
-            "the reachable graph exceeds {EXPLORATION_BOUND} states at depth {depth}"
-        );
-        let vertex = Vertex {
-            origin,
-            converged: laws::is_converged(overlay, &state),
-            premise: premise(&state),
-            depth,
-            protocol: Vec::new(),
-        };
-        let index = graph.vertices.push(vertex, StateIndex);
-        for (position, law) in laws::LAWS.iter().enumerate() {
-            let holds = (law.holds)(overlay, &state);
-            graph.covered[position] |= holds;
-            if law.expectation == Expectation::Always && !holds && graph.violation.is_none() {
-                graph.violation = Some((index, law.name));
-            }
-        }
-        queue.push_back((index, state));
-        index
+    let mut frontier = Frontier {
+        graph: Graph {
+            vertices: Table::new(),
+            strong: Table::new(),
+            violation: None,
+            covered: vec![false; laws::LAWS.len()],
+        },
+        queue: VecDeque::new(),
+        indices: HashMap::new(),
+        labels: HashMap::new(),
     };
     let init = overlay.init();
     let init_fingerprint = fingerprint(&init);
-    let init_index = discover(&mut graph, &mut queue, init, None, 0);
-    indices.insert(init_fingerprint, init_index);
-    'search: while let Some((index, state)) = queue.pop_front() {
-        let depth = graph.vertices[index].depth + 1;
+    let init_index = frontier.discover(overlay, premise, init, None, 0);
+    frontier.indices.insert(init_fingerprint, init_index);
+    'search: while let Some((index, state)) = frontier.queue.pop_front() {
+        let depth = frontier.graph.vertices[index].depth + 1;
         for (position, action) in overlay.actions(&state).into_iter().enumerate() {
-            if graph.violation.is_some() {
+            if frontier.graph.violation.is_some() {
                 break 'search;
             }
             let Some(next) = overlay.next_state(&state, &action) else {
                 continue;
             };
-            let target = match indices.entry(fingerprint(&next)) {
+            let target = match frontier.indices.entry(fingerprint(&next)) {
                 Entry::Occupied(known) => *known.get(),
                 Entry::Vacant(vacant) => {
-                    let origin = Origin {
+                    // The index is known before discovery: the next push.
+                    let discovered = *vacant.insert(StateIndex(frontier.graph.vertices.len()));
+                    let parent = ParentEdge {
                         parent: index,
                         position,
                     };
-                    *vacant.insert(discover(&mut graph, &mut queue, next, Some(origin), depth))
+                    let pushed = frontier.discover(overlay, premise, next, Some(parent), depth);
+                    assert_eq!(pushed, discovered, "discovery order is the push order");
+                    discovered
                 }
             };
             if !action.is_environmental() {
-                let label = match labels.entry(action) {
-                    Entry::Occupied(known) => *known.get(),
-                    Entry::Vacant(vacant) => {
-                        let periodic = vacant.key().is_periodic();
-                        *vacant.insert(graph.strong.push(periodic, Label))
-                    }
-                };
-                graph.vertices[index].protocol.push(ProtocolEdge {
+                let label = frontier.label(action);
+                frontier.graph.vertices[index].protocol.push(ProtocolEdge {
                     label,
                     position,
                     target,
@@ -392,7 +441,7 @@ fn explore(overlay: &Overlay, premise: fn(&OverlayState) -> bool) -> Graph {
             }
         }
     }
-    graph
+    frontier.graph
 }
 
 /// The strongly connected components of `G_q` restricted to the states in
@@ -520,7 +569,7 @@ fn starvation_states(graph: &Graph) -> Vec<StateIndex> {
     let unconverged = |index: &StateIndex| !graph.vertices[*index].converged;
     let dead = graph
         .vertices
-        .iter(StateIndex)
+        .iter()
         .filter(|(_, vertex)| !vertex.converged && vertex.protocol.is_empty())
         .map(|(index, _)| index);
     fair_traps(graph, &graph.per_state(true))
@@ -549,9 +598,9 @@ fn stable_states(graph: &Graph) -> Table<StateIndex, bool> {
 fn path_from_init(graph: &Graph, target: StateIndex) -> Vec<usize> {
     let mut positions = Vec::new();
     let mut cursor = target;
-    while let Some(origin) = graph.vertices[cursor].origin {
-        positions.push(origin.position);
-        cursor = origin.parent;
+    while let Some(edge) = graph.vertices[cursor].parent {
+        positions.push(edge.position);
+        cursor = edge.parent;
     }
     positions.reverse();
     positions
@@ -584,7 +633,7 @@ fn replay_positions(
 
 /// A shortest protocol path from `root` into `targets`, as action indices.
 fn protocol_path(graph: &Graph, root: StateIndex, targets: &BTreeSet<StateIndex>) -> Vec<usize> {
-    let mut origin = HashMap::<StateIndex, Origin>::new();
+    let mut origin = HashMap::<StateIndex, ParentEdge>::new();
     let mut queue = VecDeque::from([root]);
     let mut reached = None;
     while let Some(vertex) = queue.pop_front() {
@@ -594,7 +643,7 @@ fn protocol_path(graph: &Graph, root: StateIndex, targets: &BTreeSet<StateIndex>
         }
         for edge in graph.vertices[vertex].protocol.iter() {
             if edge.target != root && !origin.contains_key(&edge.target) {
-                origin.insert(edge.target, Origin {
+                origin.insert(edge.target, ParentEdge {
                     parent: vertex,
                     position: edge.position,
                 });
@@ -615,7 +664,7 @@ fn protocol_path(graph: &Graph, root: StateIndex, targets: &BTreeSet<StateIndex>
 /// The states from which `targets` is reachable over protocol edges.
 fn protocol_ancestors(graph: &Graph, targets: &[StateIndex]) -> Table<StateIndex, bool> {
     let mut reversed = graph.per_state(Vec::new());
-    for (index, vertex) in graph.vertices.iter(StateIndex) {
+    for (index, vertex) in graph.vertices.iter() {
         for edge in vertex.protocol.iter() {
             reversed[edge.target].push(index);
         }
@@ -677,7 +726,7 @@ pub(super) fn check(overlay: &Overlay, premise: fn(&OverlayState) -> bool) -> Se
         states: graph.vertices.len(),
         max_depth: graph
             .vertices
-            .iter(StateIndex)
+            .iter()
             .map(|(_, vertex)| vertex.depth)
             .max()
             .unwrap_or(0),
@@ -688,5 +737,133 @@ pub(super) fn check(overlay: &Overlay, premise: fn(&OverlayState) -> bool) -> Se
             .map(|(law, _)| law.name)
             .collect(),
         liveness: analyze_liveness(overlay, &graph),
+    }
+}
+
+/// The fair-trap decision on hand-built graphs: each branch of the
+/// module-level procedure has a graph that exercises it.
+mod tests {
+    use super::fair_traps;
+    use super::laws;
+    use super::starvation_states;
+    use super::Expectation;
+    use super::Graph;
+    use super::Label;
+    use super::ProtocolEdge;
+    use super::StateIndex;
+    use super::Table;
+    use super::Vertex;
+
+    /// A graph of `edges` `(source, label, target)` over `states` states,
+    /// with `strong` marking the strongly fair labels and `converged` the
+    /// converged states.
+    fn graph(
+        states: usize,
+        edges: &[(usize, usize, usize)],
+        strong: &[bool],
+        converged: &[usize],
+    ) -> Graph {
+        let mut vertices = Table::new();
+        for index in 0..states {
+            let protocol = edges
+                .iter()
+                .filter(|(source, _, _)| *source == index)
+                .map(|(_, label, target)| ProtocolEdge {
+                    label: Label(*label),
+                    position: 0,
+                    target: StateIndex(*target),
+                })
+                .collect();
+            vertices.push(Vertex {
+                parent: None,
+                converged: converged.contains(&index),
+                premise: true,
+                depth: 0,
+                protocol,
+            });
+        }
+        let mut strong_table = Table::new();
+        for periodic in strong {
+            strong_table.push(*periodic);
+        }
+        Graph {
+            vertices,
+            strong: strong_table,
+            violation: None,
+            covered: vec![
+                false;
+                laws::LAWS
+                    .iter()
+                    .filter(|law| law.expectation == Expectation::Sometimes)
+                    .count()
+            ],
+        }
+    }
+
+    /// Law: a plain cycle whose every enabled label is taken inside it is a
+    /// fair trap.
+    #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_family = "wasm"), test)]
+    fn test_a_cycle_taking_every_enabled_label_is_a_trap() {
+        let graph = graph(2, &[(0, 0, 1), (1, 1, 0)], &[false, false], &[]);
+        let traps = fair_traps(&graph, &graph.per_state(true));
+        assert_eq!(traps.len(), 1);
+        assert_eq!(traps[0].len(), 2);
+    }
+
+    /// Law: a weak label enabled throughout a cycle and never taken inside
+    /// it starves under `WF`, so the cycle is no trap.
+    #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_family = "wasm"), test)]
+    fn test_a_weak_label_enabled_throughout_and_untaken_starves_the_cycle() {
+        let graph = graph(
+            3,
+            &[(0, 0, 1), (1, 1, 0), (0, 2, 2), (1, 2, 2)],
+            &[false, false, false],
+            &[],
+        );
+        assert!(fair_traps(&graph, &graph.per_state(true)).is_empty());
+    }
+
+    /// Law: a strong label enabled at one member and never taken inside the
+    /// cycle prunes exactly that member; a residual cycle among the others
+    /// is a trap, and a residual path is not.
+    #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_family = "wasm"), test)]
+    fn test_a_strong_label_prunes_only_the_states_that_enable_it() {
+        // 0 → 1 → 2 → 0 with the strong label 9 leaving from 2 only: pruning
+        // 2 leaves the path 0 → 1, which has no cycle.
+        let path = graph(
+            4,
+            &[(0, 0, 1), (1, 1, 2), (2, 2, 0), (2, 9, 3)],
+            &[
+                false, false, false, false, false, false, false, false, false, true,
+            ],
+            &[],
+        );
+        assert!(fair_traps(&path, &path.per_state(true)).is_empty());
+        // 0 ⇄ 1 and 1 → 2 → 1 with the strong label 9 leaving from 2 only:
+        // pruning 2 leaves the cycle 0 ⇄ 1, a trap.
+        let residual = graph(
+            4,
+            &[(0, 0, 1), (1, 1, 0), (1, 2, 2), (2, 3, 1), (2, 9, 3)],
+            &[
+                false, false, false, false, false, false, false, false, false, true,
+            ],
+            &[],
+        );
+        let traps = fair_traps(&residual, &residual.per_state(true));
+        assert_eq!(traps, vec![vec![StateIndex(1), StateIndex(0)]]);
+    }
+
+    /// Law: a fair trap made of converged states only is not a starvation,
+    /// and a dead unconverged state is.
+    #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_family = "wasm"), test)]
+    fn test_only_traps_with_an_unconverged_member_and_dead_states_starve() {
+        let converged_trap = graph(3, &[(0, 0, 1), (1, 1, 0), (1, 2, 2)], &[false; 3], &[0, 1]);
+        assert_eq!(starvation_states(&converged_trap), vec![StateIndex(2)]);
+        let mixed_trap = graph(2, &[(0, 0, 1), (1, 1, 0)], &[false; 2], &[0]);
+        assert_eq!(starvation_states(&mixed_trap).len(), 2);
     }
 }

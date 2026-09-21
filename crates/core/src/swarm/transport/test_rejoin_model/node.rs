@@ -140,18 +140,6 @@ pub(super) enum Effect {
     },
 }
 
-/// How the shell answers an offer from a peer for which it holds an
-/// unadmitted generation of its own (simultaneous offers).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum OwnOfferState {
-    /// The own generation was dialed and not yet answered: its raw connection
-    /// is still `New`, so production may abandon it.
-    Unanswered,
-    /// The own generation is paired with a link (answered, channel opening):
-    /// production keeps it and refuses the incoming offer.
-    Answered,
-}
-
 /// The witness that an unavailable head was not replaced by the sendable
 /// admitted successors: the history variable of the head-replacement law.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -325,21 +313,25 @@ impl NodeState {
     /// [admitted record?] ── sendable ──▶ refuse (AlreadyConnected)
     ///        │ send-terminal: retire it as unavailable
     ///        ▼
-    /// [unadmitted record?] ── Pending ∧ unanswered ∧ local > offerer ──▶ abandon own offer
-    ///        │ otherwise ────────────────────────────────────────────▶ refuse
+    /// [unadmitted record?] ── Pending ∧ local > offerer ──▶ abandon own offer
+    ///        │ otherwise ─────────────────────────────────▶ refuse
     ///        ▼
     /// reserve(offerer) ──▶ answer under the new generation
     /// ```
     ///
     /// Production abandons its own pending offer only while that raw
-    /// connection is still `New`; the environment reports that as
-    /// `own_offer`, since only it knows whether the pending generation was
-    /// paired with a link. Returns the answering generation, or `None` when
-    /// the offer is refused.
+    /// connection is still `New`, i.e. unanswered. In the model a pending
+    /// generation that was answered is paired with a link whose far end the
+    /// offerer still owns, so the offerer cannot hold a second, standing
+    /// offer for it: at delivery the own offer is unanswered whenever it is
+    /// alive. The one divergence is a pending generation whose link has
+    /// already died: production refuses until its close is observed, the
+    /// model abandons it at once and later consumes that close inertly, a
+    /// superset schedule with the same end state. Returns the answering
+    /// generation, or `None` when the offer is refused.
     pub(super) fn answer_offer(
         mut self,
         offerer: Did,
-        own_offer: OwnOfferState,
         overlay: &Overlay,
     ) -> (Self, Option<PendingConnectionAttempt>) {
         if let Some(admitted) = self.lifecycles.active_attempt(offerer) {
@@ -350,7 +342,6 @@ impl NodeState {
         }
         if let Some(unadmitted) = self.lifecycles.unadmitted_attempt(offerer) {
             let abandons_own_offer = self.lifecycles.pending_attempt(offerer) == Some(unadmitted)
-                && own_offer == OwnOfferState::Unanswered
                 && self.topology.local > offerer;
             if !abandons_own_offer {
                 return (self, None);
@@ -369,7 +360,9 @@ impl NodeState {
     /// a generation that owns nothing is inert here; production's
     /// `remove_retired_attempt_topology` fallback would then remove a peer
     /// no admitted generation backs, which `TopologyReferencesOnlyAdmitted`
-    /// proves is never referenced, so the fallback is a no-op.
+    /// proves is never referenced, so the fallback changes no successor,
+    /// predecessor, or finger (it may still invalidate finger-convergence
+    /// evidence, which this model does not drive).
     pub(super) fn observe(mut self, event: LifecycleEvent, overlay: &Overlay) -> NodeStep {
         self.events.remove(&event);
         let event = match overlay.mutation() {
@@ -379,7 +372,7 @@ impl NodeState {
                 .map_or(event, |lifecycle| event.readdressed(lifecycle.attempt())),
             ShellMutation::Faithful
             | ShellMutation::ReplacementPreserves
-            | ShellMutation::AdmitBeforeActivation => event,
+            | ShellMutation::RetireWithoutRemove => event,
         };
         match event {
             LifecycleEvent::ChannelOpened(attempt) => self.admit(attempt, overlay),
@@ -410,9 +403,6 @@ impl NodeState {
     /// Production also requires transport readiness at commit; the model
     /// admits a generation whose link died before the channel-open event was
     /// delivered and retires it on the queued close, a superset schedule.
-    /// Under [`ShellMutation::AdmitBeforeActivation`] the topology admits the
-    /// peer while its generation stays `Admitting`, so the ring references a
-    /// peer no admitted generation backs.
     fn admit(&mut self, attempt: PendingConnectionAttempt, overlay: &Overlay) {
         self.lifecycles.begin_admission(attempt);
         let Some(admitting) = self.lifecycles.admitting_connection(attempt) else {
@@ -427,9 +417,7 @@ impl NodeState {
             },
             overlay.successor_capacity(),
         );
-        if overlay.mutation() != ShellMutation::AdmitBeforeActivation {
-            admitting.activate();
-        }
+        admitting.activate();
         self.topology = next.state;
     }
 
@@ -440,7 +428,10 @@ impl NodeState {
     /// Post (head-replacement law): an `Unavailable` retirement of the head
     /// leaves `succ' = Successors(Sendable ∖ {removed}, n, K)`, the sendable
     /// admitted successors; any other result is recorded in
-    /// `unreplaced_head`.
+    /// `unreplaced_head`. Under [`ShellMutation::RetireWithoutRemove`] the
+    /// registry retires the generation but the topology keeps every
+    /// reference to its peer: the composition the lifecycle boundary exists
+    /// to make atomic, taken apart.
     fn retire(
         &mut self,
         attempt: PendingConnectionAttempt,
@@ -461,7 +452,14 @@ impl NodeState {
                 peer: removed,
                 successor,
             };
-            let next = step(topology, event, overlay.successor_capacity()).state;
+            let next = match overlay.mutation() {
+                ShellMutation::RetireWithoutRemove => topology.clone(),
+                ShellMutation::Faithful
+                | ShellMutation::CallbackIgnoresGeneration
+                | ShellMutation::ReplacementPreserves => {
+                    step(topology, event, overlay.successor_capacity()).state
+                }
+            };
             Ok(Some((next, expected_after_head_replacement)))
         });
         if let Ok(RetirementOutcome::Retired(((topology, expected), _announcement))) = retired {
@@ -475,9 +473,13 @@ impl NodeState {
     /// One maintenance period: `Stabilizer::correct_stabilize` against the
     /// head.
     ///
-    /// The periodic `notify_predecessor` broadcast is not modeled separately:
-    /// toward the head it re-sends the message the committed report already
-    /// emits (`TopologyAction::Notify`), and the model's rounds repeat.
+    /// The periodic `notify_predecessor` broadcast (to every successor, every
+    /// period) is not modeled: toward the head it re-sends the message the
+    /// committed report already emits (`TopologyAction::Notify`), and the
+    /// model's rounds repeat; toward the tail it is omitted, which drops
+    /// protocol steps and so makes the liveness result conservative
+    /// (`rectify_predecessor` is monotone, so the extra notifications could
+    /// not unsettle a predecessor).
     pub(super) fn stabilize(mut self, request_id: uuid::Uuid, overlay: &Overlay) -> NodeStep {
         let actions = self.advance(TopologyEvent::BeginStabilize { request_id }, overlay);
         let effects = self.interpret(actions, overlay);
@@ -618,21 +620,30 @@ impl NodeState {
     }
 }
 
-/// `Successors(Sendable ∖ {removed}, n, K)`: what production's
-/// `live_successor_replacements_from_active` computes for a removed head, up
-/// to transport readiness. The post-state of the head-replacement law.
+/// `Sendable ∖ {removed}`: the peers an unavailable head may be replaced
+/// with, as production's `live_successor_replacements_from_active` gathers
+/// them before normalizing, up to transport readiness.
+fn sendable_candidates(removed: Did, active: &ActiveConnectionSet) -> Vec<Did> {
+    active
+        .iter()
+        .map(PendingConnectionAttempt::peer)
+        .filter(|peer| *peer != removed)
+        .collect()
+}
+
+/// `Successors(Sendable ∖ {removed}, n, K)`: the normalized image of
+/// [`sendable_candidates`], the post-state of the head-replacement law.
 fn sendable_successors(
     local: Did,
     removed: Did,
     active: &ActiveConnectionSet,
     overlay: &Overlay,
 ) -> Vec<Did> {
-    let candidates = active
-        .iter()
-        .map(PendingConnectionAttempt::peer)
-        .filter(|peer| *peer != removed)
-        .collect::<Vec<_>>();
-    successors(&candidates, local, overlay.successor_capacity())
+    successors(
+        &sendable_candidates(removed, active),
+        local,
+        overlay.successor_capacity(),
+    )
 }
 
 /// The successor evidence an `Unavailable` retirement hands to `Remove`.
@@ -640,8 +651,8 @@ fn sendable_successors(
 /// Production sorts the sendable admitted peers clockwise, drops `removed`,
 /// and truncates to capacity, and only when `removed` is the head. `step`'s
 /// `Remove` applies that same normalization to whatever it is given and
-/// ignores the list for a non-head, so handing it the unnormalized candidate
-/// set is observationally equal (witnessed by
+/// ignores the list for a non-head, so handing it the unnormalized
+/// [`sendable_candidates`] is observationally equal (witnessed by
 /// `test_replacement_normalization_is_absorbed_by_the_production_remove`).
 ///
 /// Under [`ShellMutation::ReplacementPreserves`] the head is not replaced at
@@ -655,12 +666,8 @@ fn replacement_evidence(
         ShellMutation::ReplacementPreserves => SuccessorRemoval::Preserve,
         ShellMutation::Faithful
         | ShellMutation::CallbackIgnoresGeneration
-        | ShellMutation::AdmitBeforeActivation => SuccessorRemoval::ReplaceWith(
-            active
-                .iter()
-                .map(PendingConnectionAttempt::peer)
-                .filter(|peer| *peer != removed)
-                .collect(),
-        ),
+        | ShellMutation::RetireWithoutRemove => {
+            SuccessorRemoval::ReplaceWith(sendable_candidates(removed, active))
+        }
     }
 }

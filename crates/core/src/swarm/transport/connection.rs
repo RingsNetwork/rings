@@ -47,9 +47,11 @@ pub(super) async fn await_bounded_connection_close(
     }
 }
 
-/// Which topology removal a retirement performs. The rejoin model composes
-/// the same two removals, so it names them with this type.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Which topology removal a retirement performs: an ordinary leave keeps the
+/// surviving successor tail, an unavailable head is replaced by the routable
+/// admitted successors. Visible to the transport module so the rejoin model
+/// composes the same two removals.
+#[cfg_attr(test, derive(Clone, Copy, Debug, Eq, PartialEq))]
 pub(in crate::swarm::transport) enum DhtPeerRemoval {
     /// Remove the peer without selecting a replacement successor.
     Ordinary,

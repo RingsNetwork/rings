@@ -983,35 +983,4 @@ fn test_rectify_never_adopts_the_local_node_as_predecessor() {
 /// topology reducer while separating them from the broader ring-shape tests in
 /// this file.
 mod admission_tests;
-
-/// Law: every reported successor that ranks within capacity among the
-/// candidates is retained by `stabilize_successors`, including the last
-/// entry of a report shorter than capacity (#786: a report carries no
-/// terminal self entry, so its last entry is a real successor).
-#[test]
-fn test_stabilize_retains_every_reported_successor_within_capacity() {
-    let local = did(0);
-    for reported in [vec![did(2)], vec![did(2), did(4)], vec![
-        did(2),
-        did(4),
-        did(6),
-    ]] {
-        let stabilized = stabilize_successors(local, &[did(8)], &reported, Some(did(1)), 3);
-        let known = [did(8), did(1)]
-            .into_iter()
-            .chain(reported.iter().copied())
-            .collect::<Vec<_>>();
-        for peer in reported.iter().copied() {
-            let rank = known
-                .iter()
-                .filter(|other| dist(local, **other) < dist(local, peer))
-                .count()
-                + 1;
-            assert_eq!(
-                stabilized.contains(&peer),
-                rank <= 3,
-                "reported {peer} ranks {rank} in {stabilized:?}"
-            );
-        }
-    }
-}
+mod stabilization_tests;

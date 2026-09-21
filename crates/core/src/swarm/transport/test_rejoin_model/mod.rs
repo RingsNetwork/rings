@@ -33,7 +33,8 @@
 //! Next  ≜ Env ∨ Protocol
 //! Env   ≜ Depart(p) ∨ Rejoin(p) ∨ Cut(l) ∨ Lose(e) ∨ Duplicate(e)   \* each spends Budget
 //! Protocol ≜ Dial(p, q)          \* isolated peer reserves a generation and offers
-//!          ∨ Deliver(offer)      \* answer ⇒ link ∧ ChannelOpened at both ends; refuse ⇒ Closed
+//!          ∨ Deliver(offer)      \* void ⇒ dropped; answer ⇒ link ∧ ChannelOpened at both ends;
+//!                                \* refuse ⇒ Closed, spending Budget.refusal
 //!          ∨ Deliver(message)    \* gated on the receiver's admitted generation
 //!          ∨ Observe(p, ev(g))   \* ChannelOpened | SendTerminal | RetireUnavailable | Closed
 //!          ∨ Stabilize(p)        \* BeginStabilize ⇒ query ⇒ report ⇒ claim, offers, Stabilize ⇒ notify
@@ -50,15 +51,19 @@
 //!                                      ∧ FingersWellFormed(n)
 //!
 //! Liveness:
-//!   Fairness ≜ WF(Dial ∨ Deliver ∨ Observe) ∧ SF(Stabilize)   \* no Env step in the suffix
+//!   Fairness ≜ ∀a ∈ {Dial(p,q), Deliver(e), Observe(p,ev)}. WF(a)   \* per instance
+//!            ∧ ∀p. SF(Stabilize(p))                                  \* no Env step in the suffix
 //!   ∀r reachable. RetainsLiveHeads(r) ⇒ (□[Protocol] ∧ Fairness ⇒ ◇□Converged)
 //!   Converged ≜ ∀n up. ChordFixpoint(topology[n], up peers, K)
 //! ```
 //!
-//! `Stabilize` is strongly fair because the search allows one round in
-//! flight overlay-wide: the production timer is continuously enabled, and
-//! weak fairness of a continuously enabled action is strong fairness of the
-//! same action under a bound that sometimes disables it (`search`).
+//! Fairness is per action instance: every buffered frame, every queued
+//! lifecycle event, and every isolated peer's dial is eventually processed,
+//! which is what production's queues provide. `Stabilize` is strongly fair
+//! because the search allows one round in flight overlay-wide: the
+//! production timer is continuously enabled, and weak fairness of a
+//! continuously enabled action is strong fairness of the same action under
+//! a bound that sometimes disables it (`search`).
 //!
 //! # Fidelity
 //!
@@ -91,10 +96,13 @@
 //!   so every modeled finger's fixpoint is the successor head, the range
 //!   stabilization itself proves.
 //! - Not modeled: connection-capacity eviction, successor-list sync, connect
-//!   lookups, the `NotifyPredecessorReport` reconnection, storage repair,
-//!   and bootstrap redial pacing (#763). Handshake expiry appears only as the
-//!   close of a refused offer's generation. Signaling is reliable; loss and
-//!   duplication apply to protocol messages.
+//!   lookups, the `NotifyPredecessorReport` reconnection, the periodic
+//!   notification of successors other than the head, storage repair, and
+//!   bootstrap redial pacing and seed selection (#763): an isolated peer
+//!   dials any live peer. Handshake expiry appears only as the close of a
+//!   refused offer's generation. Signaling is reliable; loss and duplication
+//!   apply to protocol messages, and a message on a link that dies is lost
+//!   with it.
 //! - At most one stabilization round is in flight overlay-wide; a report is
 //!   claimed and committed in one step; transport readiness is identified
 //!   with the registry's sendable projection, so a peer may be confirmed or
@@ -105,30 +113,35 @@
 //!
 //! Every search is exhaustive: there is no depth cut-off, and it ends when
 //! the budgets are spent and the protocol closure is complete. `W = 3` finger
-//! slots throughout. One breadth-first exploration per configuration decides
-//! safety, coverage, and liveness; each test asserts its exact state count
-//! and depth, so a carrier that grows fails deterministically instead of
-//! slowing CI silently, and the search aborts above `EXPLORATION_BOUND`
-//! (two million states).
+//! slots throughout the searches (the conformance replays use the production
+//! sizes). One breadth-first exploration per configuration decides safety,
+//! coverage, and liveness; each test asserts its exact state count, depth,
+//! and premise counts, so a carrier that grows fails deterministically
+//! instead of slowing CI silently, and the search aborts above
+//! `EXPLORATION_BOUND` (two million states).
 //!
 //! | configuration | peers | K | budget                                  | states    | depth | premise states (unsettled) | checked            |
 //! |---------------|-------|---|-----------------------------------------|-----------|-------|----------------------------|--------------------|
-//! | departure     | 3     | 1 | 1 departure                             | 5 834     | 21    | —                          | premise necessity  |
-//! | chain         | 4     | 2 | none (chain bootstrap)                  | 509 815   | 60    | 509 815 (495 191)          | all laws, no churn |
-//! | replacement   | 4     | 1 | 1 cut                                   | 114 640   | 35    | 92 464 (26 624)            | all laws           |
-//! | truncation    | 4     | 2 | 1 cut                                   | 242 128   | 36    | 222 544 (176 928)          | all laws           |
-//! | restart       | 3     | 1 | 1 departure, 1 rejoin                   | 552 309   | 47    | 466 396 (409 952)          | all laws           |
-//! | lossy flap    | 3     | 1 | 1 cut, 1 loss, 1 duplication, 1 refusal | 1 057 016 | 42    | 895 946 (658 944)          | all laws, release  |
+//! | departure     | 3     | 1 | 1 departure                             | 4 862     | 21    | —                          | premise necessity  |
+//! | chain         | 4     | 2 | none (chain bootstrap)                  | 509 815   | 60    | 509 815 (495 191)          | see below          |
+//! | replacement   | 4     | 1 | 1 cut                                   | 109 840   | 35    | 91 312 (25 472)            | all laws           |
+//! | truncation    | 4     | 2 | 1 cut                                   | 237 328   | 36    | 219 664 (174 048)          | all laws           |
+//! | restart       | 3     | 1 | 1 departure, 1 rejoin                   | 542 589   | 47    | 464 848 (408 404)          | all laws           |
+//! | lossy flap    | 3     | 1 | 1 cut, 1 loss, 1 duplication, 1 refusal | 1 034 264 | 42    | 890 762 (653 760)          | all laws, release  |
 //!
 //! "Premise states" counts the reachable states from which the liveness
 //! claim is made; "unsettled" those of them outside `Stable`, where the
 //! claim has work to do. `replacement` is the configuration in which a head
 //! replacement has more sendable candidates than capacity; `truncation`
 //! truncates at admission and fills exactly at replacement. `chain` starts
-//! from a chain of links instead of the converged mesh, so successor lists
-//! are not computed from admitted peers but discovered through reports and
-//! the connection plans they drive (the regime of #786); its two churn
-//! witnesses are unsatisfiable by construction and asserted so.
+//! from a chain of links instead of the converged mesh, so the missing
+//! successors are discovered through reports and the connection plans they
+//! drive, then installed by admission; it checks `TopologyReferencesOnlyAdmitted`,
+//! well-formedness, and liveness, while its retirement laws and churn
+//! witnesses are vacuous by construction (no generation is ever retired) and
+//! the witnesses are asserted uncovered. It does not distinguish the #786
+//! fix from the defect: a confirmed report entry that ranks within capacity
+//! is already admitted, so #786 is pinned by its unit law alone.
 //!
 //! The premise of the liveness claim is necessary, not decorative. When a
 //! peer's only successor goes down and its close event wins the race with
@@ -138,14 +151,18 @@
 //! live head and `test_without_the_live_head_premise_a_suffix_starves`
 //! exhibits the starved suffix. Re-joining such a peer is the subject of #775.
 //!
-//! Wall clock: nothing in CI bounds a single test of this module; the
-//! binding limits are the job timeouts (45 minutes) and, in the search
-//! itself, `EXPLORATION_BOUND`. Measured on an Apple M-series laptop, one
-//! search per test, tests in parallel: native `--release` 30 s for the
-//! module (restart 13 s and 450 MB peak, truncation 8 s and 245 MB, lossy
-//! flap 30 s and 625 MB); native dev profile within the 4 minutes of the
-//! whole core suite with lossy flap skipped, 8 minutes with it; headless
-//! Chrome (`wasm32`, release, tests run serially) 41 s for the module.
+//! Wall clock: no CI job bounds a single test of this module; the binding
+//! limits are the job timeouts (45 minutes) and, in the search itself,
+//! `EXPLORATION_BOUND`. The browser runner's `WASM_BINDGEN_TEST_TIMEOUT`
+//! (120 s) applies to asynchronous tests; these searches are synchronous.
+//! Measured on an Apple M-series laptop with the tests in parallel: native
+//! dev profile, the whole core suite with lossy flap skipped, 249 s (this
+//! module's searches are its longest tests; with lossy flap included the
+//! module alone is about 7 minutes); headless Chrome (`wasm32`, release,
+//! tests run serially, lossy flap included) 54 s for the module's sixteen
+//! tests. Native release timings, measured on an earlier revision with the
+//! same configurations up to a few percent of states: restart 13 s and
+//! 450 MB peak, truncation 8 s and 245 MB, lossy flap 30 s and 625 MB.
 //! Browser peak memory was not measured.
 
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
@@ -155,8 +172,11 @@ mod node;
 mod overlay;
 mod search;
 
+use std::num::NonZeroU32;
+
 use laws::LawName;
 use node::LifecycleEvent;
+use node::UnreplacedHead;
 use overlay::Bootstrap;
 use overlay::Budget;
 use overlay::Overlay;
@@ -173,19 +193,58 @@ use crate::dht::topology::SuccessorRemoval;
 use crate::dht::topology::TopologyEvent;
 use crate::dht::topology::TopologyState;
 use crate::dht::Did;
+use crate::swarm::transport::pending::PendingConnectionAttempt;
 
-/// `(|G|, depth)` of the `restart` configuration.
-const RESTART_BOUNDS: (usize, usize) = (552_309, 47);
-/// `(|G|, depth)` of the `truncation` configuration.
-const TRUNCATION_BOUNDS: (usize, usize) = (242_128, 36);
-/// `(|G|, depth)` of the `lossy flap` configuration.
-const LOSSY_FLAP_BOUNDS: (usize, usize) = (1_057_016, 42);
+/// The documented size of one configuration's reachable graph, asserted
+/// exactly so the bounds table cannot drift.
+struct Bounds {
+    /// `|G|`.
+    states: usize,
+    /// Longest breadth-first level.
+    depth: usize,
+    /// States satisfying the liveness premise.
+    premise_states: usize,
+    /// Premise states outside `Stable`.
+    unstable_premise_states: usize,
+}
+
+/// Bounds of the `restart` configuration.
+const RESTART_BOUNDS: Bounds = Bounds {
+    states: 542_589,
+    depth: 47,
+    premise_states: 464_848,
+    unstable_premise_states: 408_404,
+};
+/// Bounds of the `truncation` configuration.
+const TRUNCATION_BOUNDS: Bounds = Bounds {
+    states: 237_328,
+    depth: 36,
+    premise_states: 219_664,
+    unstable_premise_states: 174_048,
+};
+/// Bounds of the `lossy flap` configuration.
+const LOSSY_FLAP_BOUNDS: Bounds = Bounds {
+    states: 1_034_264,
+    depth: 42,
+    premise_states: 890_762,
+    unstable_premise_states: 653_760,
+};
+/// Bounds of the `replacement` configuration.
+const REPLACEMENT_BOUNDS: Bounds = Bounds {
+    states: 109_840,
+    depth: 35,
+    premise_states: 91_312,
+    unstable_premise_states: 25_472,
+};
+/// Bounds of the `chain` configuration.
+const CHAIN_BOUNDS: Bounds = Bounds {
+    states: 509_815,
+    depth: 60,
+    premise_states: 509_815,
+    unstable_premise_states: 495_191,
+};
 /// `(|G|, depth)` of the `departure` configuration.
-const DEPARTURE_BOUNDS: (usize, usize) = (5_834, 21);
-/// `(|G|, depth)` of the `chain` configuration.
-const CHAIN_BOUNDS: (usize, usize) = (509_815, 60);
-/// `(|G|, depth)` of the `replacement` configuration.
-const REPLACEMENT_BOUNDS: (usize, usize) = (114_640, 35);
+const DEPARTURE_BOUNDS: (usize, usize) = (4_862, 21);
 
 /// Finger slots of every modeled table.
 const FINGER_SLOTS: usize = 3;
@@ -200,33 +259,32 @@ const QUIET: Budget = Budget {
     refusal: 0,
 };
 
-/// A converged mesh at the origin with `peers` identities and successor
-/// capacity `k`.
-fn configuration(peers: u32, k: usize, budget: Budget, mutation: ShellMutation) -> Overlay {
+/// A ring at the origin with `peers` identities, successor capacity `k`,
+/// and the modeled finger width.
+fn configuration(
+    peers: u32,
+    k: usize,
+    budget: Budget,
+    bootstrap: Bootstrap,
+    mutation: ShellMutation,
+) -> Overlay {
+    let peers = NonZeroU32::new(peers).unwrap_or(NonZeroU32::MIN);
     Overlay::new(
         Did::from(0u32),
         peers,
         k,
         FINGER_SLOTS,
         budget,
-        Bootstrap::ConvergedMesh,
+        bootstrap,
         mutation,
     )
 }
 
-/// Four peers, `K = 2`, bootstrapped as a chain with no churn: every peer
-/// but the seed's neighbours must learn a successor it never dialed from a
-/// head's report, so report-driven discovery is under the check.
+/// Four peers, `K = 2`, bootstrapped as a chain with no churn: the peers
+/// missing from every successor list are discovered only through reports
+/// and the connection plans they drive.
 fn chain(mutation: ShellMutation) -> Overlay {
-    Overlay::new(
-        Did::from(0u32),
-        4,
-        2,
-        FINGER_SLOTS,
-        QUIET,
-        Bootstrap::Chain,
-        mutation,
-    )
+    configuration(4, 2, QUIET, Bootstrap::Chain, mutation)
 }
 
 /// Three peers, `K = 1`: one peer goes down for good. The smallest
@@ -236,7 +294,7 @@ fn departure(mutation: ShellMutation) -> Overlay {
         departures: 1,
         ..QUIET
     };
-    configuration(3, 1, budget, mutation)
+    configuration(3, 1, budget, Bootstrap::ConvergedMesh, mutation)
 }
 
 /// Three peers, `K = 1`: one peer goes down and starts again, so the same
@@ -248,19 +306,31 @@ fn restart(mutation: ShellMutation) -> Overlay {
         rejoins: 1,
         ..QUIET
     };
-    configuration(3, 1, budget, mutation)
+    configuration(3, 1, budget, Bootstrap::ConvergedMesh, mutation)
 }
 
 /// Four peers, `K = 2`: every peer has three eligible successors, one more
 /// than capacity, so admission truncates and head replacement chooses.
 fn truncation(mutation: ShellMutation) -> Overlay {
-    configuration(4, 2, Budget { cuts: 1, ..QUIET }, mutation)
+    configuration(
+        4,
+        2,
+        Budget { cuts: 1, ..QUIET },
+        Bootstrap::ConvergedMesh,
+        mutation,
+    )
 }
 
 /// Four peers, `K = 1`: a cut head has two sendable candidates for one
 /// slot, so head replacement truncates.
 fn replacement(mutation: ShellMutation) -> Overlay {
-    configuration(4, 1, Budget { cuts: 1, ..QUIET }, mutation)
+    configuration(
+        4,
+        1,
+        Budget { cuts: 1, ..QUIET },
+        Bootstrap::ConvergedMesh,
+        mutation,
+    )
 }
 
 /// Three peers, `K = 1`: one link flaps while the network may lose one
@@ -273,7 +343,7 @@ fn lossy_flap(mutation: ShellMutation) -> Overlay {
         refusal: 1,
         ..QUIET
     };
-    configuration(3, 1, budget, mutation)
+    configuration(3, 1, budget, Bootstrap::ConvergedMesh, mutation)
 }
 
 /// The `Sometimes` laws a configuration cannot satisfy: those that witness
@@ -284,13 +354,13 @@ const CHURN_WITNESSES: [LawName; 2] = [
 ];
 
 /// Decide every law and the conditional-liveness claim over the complete
-/// reachable graph of `overlay`, whose size and depth must be exactly
-/// `bounds`, whose unsatisfied `Sometimes` laws must be exactly
+/// reachable graph of `overlay`, whose size, depth, and premise counts must
+/// be exactly `bounds`, whose unsatisfied `Sometimes` laws must be exactly
 /// `expected_uncovered`, and require that neither claim was vacuous.
 fn assert_laws_hold_exhaustively(
     name: &str,
     overlay: &Overlay,
-    bounds: (usize, usize),
+    bounds: Bounds,
     expected_uncovered: &[LawName],
 ) {
     let report = check(overlay, laws::retains_live_heads);
@@ -314,10 +384,52 @@ fn assert_laws_hold_exhaustively(
          {premise_states} premise states ({unstable_premise_states} not yet stable)"
     );
     assert_eq!(uncovered, expected_uncovered, "{name}: coverage");
-    assert_eq!((states, max_depth), bounds, "{name}: stale bounds table");
+    assert_eq!(
+        (states, max_depth, premise_states, unstable_premise_states),
+        (
+            bounds.states,
+            bounds.depth,
+            bounds.premise_states,
+            bounds.unstable_premise_states
+        ),
+        "{name}: stale bounds table"
+    );
     assert!(unstable_premise_states > 0, "{name}: vacuous premise");
     assert!(stable_states > 0, "{name}: unreachable target");
     assert!(violation.is_none(), "{name}: {violation:#?}");
+}
+
+/// The `Observe` action of `peer`, as a function of the event.
+fn observed_at(peer: Did) -> impl Fn(LifecycleEvent) -> OverlayAction {
+    move |event| OverlayAction::Observe { peer, event }
+}
+
+/// The model's rejoin of `departed` through `observer`: restart, bootstrap
+/// dial, the offer's answer, and admission under the newer generation.
+/// Returns the state after admission and the newer generation.
+fn model_rejoin(
+    overlay: &Overlay,
+    state: &OverlayState,
+    observer: Did,
+    departed: Did,
+) -> (OverlayState, PendingConnectionAttempt) {
+    let up = enabled_step(overlay, state, OverlayAction::Rejoin(departed));
+    let dialed = enabled_step(overlay, &up, OverlayAction::Dial {
+        from: departed,
+        to: observer,
+    });
+    let offer = dialed.network.first().cloned().unwrap();
+    let answered = enabled_step(overlay, &dialed, OverlayAction::Deliver(offer));
+    let newer = answered.nodes[&observer]
+        .lifecycles
+        .unadmitted_attempt(departed)
+        .unwrap();
+    let admitted = enabled_step(
+        overlay,
+        &answered,
+        observed_at(observer)(LifecycleEvent::ChannelOpened(newer)),
+    );
+    (admitted, newer)
 }
 
 /// Apply `action`, requiring that the model enables it: a scripted trace is a
@@ -472,10 +584,7 @@ fn test_retired_close_after_rejoin_changes_neither_lifecycle_nor_topology() {
         .lifecycles
         .active_attempt(departed)
         .unwrap();
-    let observe = |event| OverlayAction::Observe {
-        peer: observer,
-        event,
-    };
+    let observe = observed_at(observer);
 
     let down = enabled_step(&overlay, &init, OverlayAction::Depart(departed));
     let terminal = enabled_step(
@@ -493,25 +602,10 @@ fn test_retired_close_after_rejoin_changes_neither_lifecycle_nor_topology() {
     assert!(!after_removal.topology.references(departed));
     assert!(after_removal
         .topology
-        .successors_are_well_formed(overlay.successor_capacity()));
+        .is_well_formed(overlay.successor_capacity()));
 
-    let up = enabled_step(&overlay, &removed, OverlayAction::Rejoin(departed));
-    let dialed = enabled_step(&overlay, &up, OverlayAction::Dial {
-        from: departed,
-        to: observer,
-    });
-    let offer = dialed.network.first().cloned().unwrap();
-    let answered = enabled_step(&overlay, &dialed, OverlayAction::Deliver(offer));
-    let newer = answered.nodes[&observer]
-        .lifecycles
-        .unadmitted_attempt(departed)
-        .unwrap();
+    let (admitted, newer) = model_rejoin(&overlay, &removed, observer, departed);
     assert!(newer.generation() > retired.generation());
-    let admitted = enabled_step(
-        &overlay,
-        &answered,
-        observe(LifecycleEvent::ChannelOpened(newer)),
-    );
     assert!(admitted.nodes[&observer].topology.references(departed));
 
     let stale = enabled_step(
@@ -564,28 +658,45 @@ fn test_removing_the_replacement_invariant_yields_a_replayable_counterexample() 
         &departure(ShellMutation::Faithful),
         LawName::UnavailableHeadsAreReplaced,
     );
+    let departed = trace
+        .iter()
+        .find_map(|action| match action {
+            OverlayAction::Depart(peer) => Some(*peer),
+            _ => None,
+        })
+        .unwrap();
     let violated = replay(&mutated, &trace);
     assert!(
-        violated
-            .nodes
-            .values()
-            .any(|node| { node.unreplaced_head.is_some() && node.topology.successors.is_empty() }),
-        "{trace:#?}"
+        violated.nodes.values().any(|node| {
+            node.unreplaced_head == Some(UnreplacedHead { removed: departed })
+                && node.topology.successors.is_empty()
+        }),
+        "the departed peer's head slot is left empty: {trace:#?}"
     );
 }
 
-/// Non-vacuity of `TopologyReferencesOnlyAdmitted`: with the topology
-/// admitting a peer before its generation is activated, the search finds a
-/// minimal trace in which the ring references a peer whose generation is
-/// still `Admitting`.
+/// Non-vacuity of `TopologyReferencesOnlyAdmitted`: with the registry
+/// retiring a generation while the topology keeps its peer, the search finds
+/// a minimal trace, ending in the retiring event, in which the ring
+/// references a peer no admitted generation backs.
 #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_family = "wasm"), test)]
-fn test_admitting_before_activation_yields_a_replayable_counterexample() {
-    let mutated = restart(ShellMutation::AdmitBeforeActivation);
+fn test_retiring_without_removal_yields_a_replayable_counterexample() {
+    let mutated = restart(ShellMutation::RetireWithoutRemove);
     let trace = minimal_counterexample(
         &mutated,
         &restart(ShellMutation::Faithful),
         LawName::TopologyReferencesOnlyAdmitted,
+    );
+    assert!(
+        matches!(
+            trace.last(),
+            Some(OverlayAction::Observe {
+                event: LifecycleEvent::RetireUnavailable(_) | LifecycleEvent::Closed(_),
+                ..
+            })
+        ),
+        "the last step retires a generation: {trace:#?}"
     );
     let violated = replay(&mutated, &trace);
     assert!(
