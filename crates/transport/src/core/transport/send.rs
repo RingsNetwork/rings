@@ -58,6 +58,12 @@ pub struct SendAcceptance {
 }
 
 impl SendAcceptance {
+    /// One coherent snapshot for the native lifecycle's pure failure decision.
+    #[cfg(feature = "native-webrtc")]
+    pub(crate) fn phase(&self) -> AdmissionPhase {
+        self.state.phase()
+    }
+
     /// Return whether the backend crossed its final cancellation-safe boundary.
     pub fn is_irrevocable(&self) -> bool {
         matches!(

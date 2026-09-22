@@ -55,11 +55,17 @@ use crate::notifier::Notifier;
 use crate::pool::Pool;
 use crate::webrtc_config::WebrtcUdpPortRange;
 
+mod close_actor;
 mod send_lifecycle;
+mod send_model;
 mod send_operation;
 mod send_runtime;
 #[cfg(test)]
+mod test_close_actor;
+#[cfg(test)]
 mod test_send_lifecycle;
+#[cfg(test)]
+mod test_send_model;
 
 use send_lifecycle::OwnedSend;
 use send_lifecycle::SendLifecycle;
@@ -261,11 +267,12 @@ impl RoundRobinPool<TrackedChannel> {
         // The primitive owns its bytes and channel reference. The QueueSend
         // wrapper separately retains the serialization lease and permit proof.
         let primitive = async move {
-            if let Err(error) = send_channel.send(&data).await {
-                tracing::error!("{:?}, Data size: {:?}", error, data.len());
-                return Err(Error::from(error));
-            }
-            Ok(())
+            send_channel
+                .send(&data)
+                .await
+                .inspect_err(|error| tracing::error!(%error, data_len, "native send failed"))
+                .map(|_| ())
+                .map_err(Error::from)
         };
         // Construct the complete resource owner before final admission. Its
         // first-poll boundary releases the gate before fencing a failure.
@@ -273,12 +280,14 @@ impl RoundRobinPool<TrackedChannel> {
             QueueSend::new(primitive, permit, guard, Arc::clone(&enqueued), data_len)?,
             lifecycle,
         );
-        let Some(admission) = retirement_fence.try_send_admission() else {
-            return Err(Error::SendPermitRevoked);
+        // End the synchronous lease scope before propagation or detached handoff.
+        let first_poll = match retirement_fence.try_send_admission() {
+            Some(admission) => send.poll_admitted(admission),
+            None => std::task::Poll::Ready(Err(Error::SendPermitRevoked)),
         };
         // The owner moves, unchanged, from inline first poll into its bounded
         // continuation. There is no permit-owned retirement closure.
-        let end_offset = match send.poll_admitted(admission) {
+        let end_offset = match first_poll {
             std::task::Poll::Ready(result) => result?,
             std::task::Poll::Pending => run_irrevocable_send(&runtime, send).await?,
         };

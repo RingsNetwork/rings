@@ -37,6 +37,13 @@ pub(super) struct NativeRetirementFence {
     waiting_retirements: Arc<std::sync::atomic::AtomicUsize>,
 }
 
+/// Non-forgeable evidence delivered only after the synchronous generation fence.
+/// No Clone/Copy: each delivered command is produced by an actual fence operation.
+pub(super) struct FencedCommand {
+    /// Private construction restricts issuance to NativeRetirementFence::commit.
+    _sealed: (),
+}
+
 /// Held only across final permit claim and the send primitive's first poll.
 pub(super) struct NativeSendAdmission<'a> {
     /// Lease excluding retirement until the guarded first poll returns.
@@ -61,10 +68,10 @@ impl NativeRetirementFence {
     /// Linearize final permit admission with connection-wide retirement.
     pub(super) fn try_send_admission(&self) -> Option<NativeSendAdmission<'_>> {
         let retired = lock_recover(&self.retired);
-        if *retired {
-            return None;
+        match *retired {
+            true => None,
+            false => Some(NativeSendAdmission { _retired: retired }),
         }
-        Some(NativeSendAdmission { _retired: retired })
     }
 
     /// Publish logical closure while holding exclusive generation admission.
@@ -78,6 +85,12 @@ impl NativeRetirementFence {
     pub(super) fn request(&self) {
         let mut retired = lock_recover(&self.retired);
         self.finish_retirement(&mut retired);
+    }
+
+    /// Commit fencing before issuing the actor command capability.
+    pub(super) fn commit(&self) -> FencedCommand {
+        self.request();
+        FencedCommand { _sealed: () }
     }
 
     #[cfg(test)]
@@ -111,7 +124,8 @@ pub(super) async fn run_native_close_task(
     runtime
         .spawn(close)
         .await
-        .map_err(Error::NativeConnectionCloseTask)?
+        .map_err(Error::NativeConnectionCloseTask)
+        .and_then(std::convert::identity)
 }
 
 /// Move the already-admitted resource owner into a bounded continuation.
@@ -150,7 +164,8 @@ where
             }
         })
         .await
-        .map_err(Error::NativeSendTask)?
+        .map_err(Error::NativeSendTask)
+        .and_then(std::convert::identity)
 }
 
 /// Preserve a human-readable panic payload without assuming its concrete type.
@@ -191,16 +206,19 @@ where
     T: Send + 'static,
     F: Future<Output = Result<T>> + Send + 'static,
 {
-    // The lifecycle alone owns cleanup; the caller and continuation only
-    // observe it. Construction cannot start a write before this owner exists.
+    // The actor alone owns cleanup; the caller and continuation share its address.
+    // Pre: the factory only constructs the unpolled future, without performing IO.
     let lifecycle = SendLifecycle::new(runtime.clone(), acceptance, retirement_fence, retirement);
     let send = OwnedSend::new(send(Arc::clone(&lifecycle)), Arc::clone(&lifecycle));
     let result = match catch_future_unwind(send).await {
         Ok(result) => result,
         Err(payload) => Err(Error::NativeSendPanic(panic_message(payload.as_ref()))),
     };
-    if result.is_err() {
-        lifecycle.wait_for_cleanup().await;
+    match result {
+        Err(error) => {
+            lifecycle.wait_for_cleanup().await;
+            Err(error)
+        }
+        Ok(value) => Ok(value),
     }
-    result
 }

@@ -94,8 +94,9 @@ Its notifier and the default/dummy notifier use `native_timeout_scheduler`, whic
 works without an entered Tokio runtime. The native WebRTC backend still requires
 Tokio for its send, close, and timer tasks.
 
-Native sends share one retirement authority between the caller and its detached
-continuation. It fences the generation before releasing send-owned resources and
-consumes the physical-close capability once per send. The ownership model,
-shutdown limits, and regression witnesses are documented in
-[native send ownership](docs/native-send-ownership.md).
+Native sends use a one-shot close actor with exclusive state and physical-close
+ownership. Caller and continuation report failures through a bounded mailbox only
+after synchronous generation fencing. Pure reducers govern failure observations
+and actor transitions; finite-state exploration and real actor conformance tests
+check the ownership laws. Architecture, verification scope and shutdown limits
+are documented in [native send ownership](docs/native-send-ownership.md).

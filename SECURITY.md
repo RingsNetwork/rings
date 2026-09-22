@@ -411,13 +411,17 @@ again and retire its replacement. Raw inbound frames retain callback-instance
 identity; matching that private identity also proves the immutable peer attached
 to the capacity lease, including when two callbacks share a peer ID.
 
-Each native send has one `SendLifecycle` retirement authority shared by its
-caller and detached continuation. The first failure observed after irrevocable
-admission fences the connection generation and consumes one physical-close
-capability. Repeated failure observations cannot spawn duplicate cleanup for that
-send; late acceptance cannot undo committed retirement. Distinct concurrent sends
-may still request close of the same generation, and explicit connection close
-remains generation-pinned.
+Each native send has one close actor with exclusive state and physical-close
+ownership. `SendLifecycle` shares only observation rights, a bounded mailbox
+address and the synchronous generation fence. Failure observed after irrevocable
+admission fences before producing the sealed actor command. Pure reducers govern
+failure and close transitions; duplicate commands cannot initiate close twice for
+that send, and late acceptance cannot reopen retirement. Distinct concurrent sends
+may still close the same generation; explicit close remains generation-pinned.
+The actor publishes distinct unused, succeeded, failed and interrupted outcomes.
+Finite-state exploration checks safety within a one-send/two-observer abstraction;
+actor conformance and lifecycle regressions check the IO boundaries. The model
+and its assumptions are documented in `crates/transport/docs/native-send-ownership.md`.
 
 `OwnedSend` retains the primitive and `QueueSend` retains its channel lease and
 acceptance proof outside the primitive's async stack. The first-poll boundary
