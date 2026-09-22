@@ -12,9 +12,7 @@ use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
 
-use tokio::sync::OwnedMutexGuard;
-
-use super::send_model::end_offset;
+use super::model::end_offset;
 use crate::core::transport::IrrevocableSendPermit;
 use crate::core::transport::SendPermit;
 use crate::error::Error;
@@ -45,25 +43,25 @@ impl QueueAdmission {
 }
 
 /// Own the serial channel lease and commit acceptance only after successful enqueue.
-pub(super) struct QueueSend<F> {
+pub(crate) struct QueueSend<F, L> {
     /// Primitive send, independently pinned without owning the channel lease.
     primitive: Pin<Box<F>>,
     /// One linear capability state; the primitive never owns its permit/proof.
     admission: QueueAdmission,
     /// Channel serialization lease; retained through the outer failure boundary.
-    _channel: OwnedMutexGuard<()>,
+    _channel: L,
     /// Successful queue-admission byte counter for this physical data channel.
     enqueued: Arc<AtomicU64>,
     /// Checked cumulative end offset published only after successful queue admission.
     end: u64,
 }
 
-impl<F: Future<Output = Result<()>>> QueueSend<F> {
+impl<F: Future<Output = Result<()>>, L: Unpin> QueueSend<F, L> {
     /// Assemble an unpolled operation; the first poll must hold generation admission.
-    pub(super) fn new(
+    pub(crate) fn new(
         primitive: F,
         permit: SendPermit,
-        channel: OwnedMutexGuard<()>,
+        channel: L,
         enqueued: Arc<AtomicU64>,
         bytes: u64,
     ) -> Result<Self> {
@@ -76,7 +74,7 @@ impl<F: Future<Output = Result<()>>> QueueSend<F> {
                 enqueued,
                 end,
             })
-            .ok_or(Error::NativeSendByteCountOverflow)
+            .ok_or(Error::SendByteCountOverflow)
     }
 
     /// Interpret one physical poll while retaining the channel lease in this struct.
@@ -103,7 +101,7 @@ impl<F: Future<Output = Result<()>>> QueueSend<F> {
     }
 }
 
-impl<F: Future<Output = Result<()>>> Future for QueueSend<F> {
+impl<F: Future<Output = Result<()>>, L: Unpin> Future for QueueSend<F, L> {
     type Output = Result<u64>;
 
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {

@@ -398,7 +398,7 @@ async fn exhausted_byte_accounting_cannot_start_a_physical_write() {
         Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
         1,
     );
-    assert!(matches!(queue, Err(Error::NativeSendByteCountOverflow)));
+    assert!(matches!(queue, Err(Error::SendByteCountOverflow)));
     assert!(!attempted.load(Ordering::Acquire));
     assert!(acceptance.try_cancel());
 }

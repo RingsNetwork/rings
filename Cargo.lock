@@ -3472,6 +3472,7 @@ dependencies = [
  "chrono",
  "dashmap 5.5.3",
  "futures",
+ "futures-channel",
  "js-sys",
  "lazy_static",
  "rand 0.8.6",

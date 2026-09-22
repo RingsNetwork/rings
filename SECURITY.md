@@ -411,7 +411,7 @@ again and retire its replacement. Raw inbound frames retain callback-instance
 identity; matching that private identity also proves the immutable peer attached
 to the capacity lease, including when two callbacks share a peer ID.
 
-Each native send has one close actor with exclusive state and physical-close
+Each native or WASM send has one close actor with exclusive state and physical-close
 ownership. `SendLifecycle` shares only observation rights, a bounded mailbox
 address and the synchronous generation fence. Failure observed after irrevocable
 admission fences before producing the sealed actor command. Pure reducers govern
@@ -420,7 +420,13 @@ that send, and late acceptance cannot reopen retirement. Distinct concurrent sen
 may still close the same generation; explicit close remains generation-pinned.
 The actor publishes distinct unused, succeeded, failed and interrupted outcomes.
 Finite-state exploration checks safety within a one-send/two-observer abstraction;
-actor conformance and lifecycle regressions check the IO boundaries.
+actor conformance and lifecycle regressions check the IO boundaries. Both backends
+use `core::send` for the lifecycle, resource owner, checked byte accounting and
+executor-neutral actor. WASM uses a one-shot mailbox and `spawn_local`; its fence
+is synchronous, while the actor invokes browser close in a later microtask. Browser
+close success means the local API returned, not remote acknowledgement. Native
+first-poll locking and timeouts remain platform effects. Abort/trap or browser
+context destruction cannot guarantee cleanup or delivery of a terminal snapshot.
 
 `OwnedSend` retains the primitive and `QueueSend` retains its channel lease and
 acceptance proof outside the primitive's async stack. The first-poll boundary

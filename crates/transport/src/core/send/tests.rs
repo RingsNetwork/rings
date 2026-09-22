@@ -5,13 +5,13 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 
-use super::send_model::close_step;
-use super::send_model::failure_effect;
-use super::send_model::CloseEffect;
-use super::send_model::CloseEvent;
-use super::send_model::CloseOutcome;
-use super::send_model::CloseState;
-use super::send_model::FailureEffect;
+use super::model::close_step;
+use super::model::failure_effect;
+use super::model::CloseEffect;
+use super::model::CloseEvent;
+use super::model::CloseOutcome;
+use super::model::CloseState;
+use super::model::FailureEffect;
 use crate::core::admission::AdmissionEvent;
 use crate::core::admission::AdmissionPhase;
 
@@ -410,14 +410,16 @@ fn explore(mutation: Mutation) -> Result<usize, Vec<&'static str>> {
     Ok(parents.len())
 }
 
-#[test]
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), test)]
 fn all_reachable_composed_ownership_states_preserve_safety() {
     let count =
         explore(Mutation::Faithful).expect("faithful reducer and boundaries preserve the laws");
     println!("explored {count} reachable ownership states to a fixed point");
 }
 
-#[test]
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), test)]
 fn mutations_expose_missing_fence_duplicate_close_and_false_shutdown_success() {
     for mutation in [
         Mutation::SkipFence,
@@ -431,12 +433,13 @@ fn mutations_expose_missing_fence_duplicate_close_and_false_shutdown_success() {
 }
 
 /// Every pair of poll/destruction observations reports at most one terminal failure.
-#[test]
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), test)]
 fn observation_algebra_is_total_and_terminal_states_are_absorbing() {
-    use super::send_model::observation_step;
-    use super::send_model::Observation;
-    use super::send_model::ObservationEffect;
-    use super::send_model::ObservationState;
+    use super::model::observation_step;
+    use super::model::Observation;
+    use super::model::ObservationEffect;
+    use super::model::ObservationState;
 
     let observations = [
         Observation::Pending,

@@ -17,3 +17,9 @@ pub mod drop_guard;
 pub mod pool;
 pub mod sdp;
 pub mod transport;
+
+#[cfg(any(
+    feature = "native-webrtc",
+    all(feature = "web-sys-webrtc", target_family = "wasm")
+))]
+pub(crate) mod send;

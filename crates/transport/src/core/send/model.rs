@@ -1,4 +1,4 @@
-//! Pure transition algebra for native send ownership and the one-shot close actor.
+//! Pure transition algebra for send ownership and the one-shot close actor.
 //!
 //! No locks, tasks, clocks, polling, atomics, or IO belong here. Adapters interpret
 //! effects; model exploration uses these same functions, not a second algorithm.
@@ -7,7 +7,7 @@ use crate::core::admission::AdmissionPhase;
 
 /// Immutable failure decision, derived from one atomic admission observation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub(super) enum FailureEffect {
+pub(crate) enum FailureEffect {
     /// No uncertain physical write was observed.
     Ignore,
     /// Synchronously fence before delivering the actor's coalescible command.
@@ -17,7 +17,7 @@ pub(super) enum FailureEffect {
 /// Pre: `admission` is one coherent snapshot of the shared permit machine.
 /// Post: FenceThenNotify iff that snapshot is Irrevocable, never Accepted.
 /// The decision remains valid if acceptance subsequently races with fencing.
-pub(super) const fn failure_effect(admission: AdmissionPhase) -> FailureEffect {
+pub(crate) const fn failure_effect(admission: AdmissionPhase) -> FailureEffect {
     match admission {
         AdmissionPhase::Irrevocable => FailureEffect::FenceThenNotify,
         AdmissionPhase::Pending | AdmissionPhase::Cancelled | AdmissionPhase::Accepted => {
@@ -28,7 +28,7 @@ pub(super) const fn failure_effect(admission: AdmissionPhase) -> FailureEffect {
 
 /// Terminal result of the actor, independent of the backend's physical-close witness.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub(super) enum CloseOutcome {
+pub(crate) enum CloseOutcome {
     /// All observation rights disappeared without requesting retirement.
     Unused,
     /// The injected physical-close operation returned success.
@@ -41,7 +41,7 @@ pub(super) enum CloseOutcome {
 
 /// Actor-local lifecycle state. Copy duplicates a mathematical value, not authority.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub(super) enum CloseState {
+pub(crate) enum CloseState {
     /// The actor exclusively owns the unpolled close capability.
     Idle,
     /// A fenced command consumed the unique right to start close.
@@ -52,7 +52,7 @@ pub(super) enum CloseState {
 
 impl CloseState {
     /// Project only terminal actor outcomes, without equating them with physical closure.
-    pub(super) const fn outcome(self) -> Option<CloseOutcome> {
+    pub(crate) const fn outcome(self) -> Option<CloseOutcome> {
         match self {
             Self::Finished(outcome) => Some(outcome),
             Self::Idle | Self::Closing => None,
@@ -62,7 +62,7 @@ impl CloseState {
 
 /// Inputs delivered by the mailbox, close adapter, or actor destruction boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub(super) enum CloseEvent {
+pub(crate) enum CloseEvent {
     /// The generation gate was synchronously fenced before enqueueing this command.
     Fenced,
     /// The mailbox is empty and every observer has released its sender.
@@ -77,7 +77,7 @@ pub(super) enum CloseEvent {
 
 /// Effects interpreted by the actor shell after committing the returned state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum CloseEffect {
+pub(crate) enum CloseEffect {
     /// Duplicate or inapplicable event; preserve state and ownership.
     None,
     /// Poll the actor-owned close future exactly once to completion or interruption.
@@ -91,7 +91,7 @@ pub(super) enum CloseEffect {
 /// Invariant: StartClose occurs only on Idle -> Closing. Finished is absorbing.
 /// Preservation: duplicates stutter; only Closing can publish close success/failure.
 /// RuntimeStopped publishes Interrupted and cannot manufacture physical success.
-pub(super) const fn close_step(state: CloseState, event: CloseEvent) -> (CloseState, CloseEffect) {
+pub(crate) const fn close_step(state: CloseState, event: CloseEvent) -> (CloseState, CloseEffect) {
     use CloseEffect::None;
     use CloseEffect::Publish;
     use CloseEffect::StartClose;
@@ -119,7 +119,7 @@ pub(super) const fn close_step(state: CloseState, event: CloseEvent) -> (CloseSt
 
 /// Local observation state; it carries no IO ownership.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ObservationState {
+pub(crate) enum ObservationState {
     /// Polling, failure, or abandonment can still affect the send.
     Active,
     /// A terminal poll result was already observed.
@@ -128,7 +128,7 @@ pub(super) enum ObservationState {
 
 /// Values reported by the polling/destruction adapter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum Observation {
+pub(crate) enum Observation {
     /// The primitive remains pending.
     Pending,
     /// A terminal successful result was returned.
@@ -143,7 +143,7 @@ pub(super) enum Observation {
 
 /// Effects interpreted at the synchronous resource-owner boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ObservationEffect {
+pub(crate) enum ObservationEffect {
     /// No failure needs to be reported.
     None,
     /// Read the permit snapshot and execute failure_effect before resource release.
@@ -151,7 +151,7 @@ pub(super) enum ObservationEffect {
 }
 
 /// Post: each observer reports at most one terminal failure; duplicates stutter.
-pub(super) const fn observation_step(
+pub(crate) const fn observation_step(
     state: ObservationState,
     event: Observation,
 ) -> (ObservationState, ObservationEffect) {
@@ -173,6 +173,6 @@ pub(super) const fn observation_step(
 }
 
 /// Pure checked offset arithmetic; the adapter owns the serialized counter access.
-pub(super) const fn end_offset(current: u64, bytes: u64) -> Option<u64> {
+pub(crate) const fn end_offset(current: u64, bytes: u64) -> Option<u64> {
     current.checked_add(bytes)
 }

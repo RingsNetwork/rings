@@ -33,12 +33,13 @@ use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
 use crate::core::pool::RoundRobin;
 use crate::core::pool::RoundRobinPool;
+use crate::core::send::operation::QueueSend;
+use crate::core::send::owner::OwnedSend;
 use crate::core::transport::effective_max_message_size;
 use crate::core::transport::stored_max_message_size;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::ConnectionStateCell;
 use crate::core::transport::ConnectionStateSnapshot;
-use crate::core::transport::IrrevocableSendGuard;
 use crate::core::transport::SendPermit;
 use crate::core::transport::TransportInterface;
 use crate::core::transport::TransportMessage;
@@ -56,6 +57,9 @@ use crate::notifier::wait_for_data_channel_open;
 use crate::notifier::Notifier;
 use crate::pool::Pool;
 use crate::webrtc_config::WebrtcUdpPortRange;
+
+mod send_lifecycle;
+use send_lifecycle::BrowserLifecycle;
 
 const WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT: u8 = 8; // seconds
 const WEBRTC_GATHER_TIMEOUT: u8 = 60; // seconds
@@ -99,48 +103,44 @@ fn delivery_future(
 }
 
 impl WebSysWebrtcConnection {
-    fn send_after_permit<T>(
+    /// Use the same permit, accounting and destruction boundary as the native backend.
+    /// Browser send is synchronous: this future completes its first poll without yielding.
+    async fn send_after_permit(
         &self,
         permit: SendPermit,
-        send: impl FnOnce() -> Result<T>,
-    ) -> Result<T> {
-        let retirement_state = self.connection_state.clone();
-        let retirement_connection = self.webrtc_conn.clone();
-        let mut retirement = IrrevocableSendGuard::new(permit.acceptance(), move || {
-            retirement_state.close();
-            retirement_connection.close();
-        });
-        let Some(proof) = permit.try_mark_irrevocable() else {
-            return Err(Error::SendPermitRevoked);
-        };
-        retirement.bind(proof);
-        let value = send()?;
-        retirement.mark_accepted();
-        Ok(value)
+        enqueued: Arc<AtomicU64>,
+        bytes: u64,
+        send: impl FnOnce() -> Result<()>,
+    ) -> Result<u64> {
+        // The actor owns the connection-close capture before final send admission.
+        let lifecycle = BrowserLifecycle::new(
+            permit.acceptance(),
+            self.connection_state.clone(),
+            self.webrtc_conn.clone(),
+        );
+        // Unit is the browser's channel lease: no await occurs inside synchronous JS send.
+        let queue = QueueSend::new(async move { send() }, permit, (), enqueued, bytes)?;
+        OwnedSend::new(queue, lifecycle).await
     }
 
-    fn send_with_permit(
+    /// Encode and account one browser send using the shared checked queue owner.
+    async fn send_with_permit(
         &self,
         msg: TransportMessage,
         permit: SendPermit,
     ) -> Result<DeliveryFuture> {
         let (channel, enqueued) = self.webrtc_data_channel.select()?;
         let data = rings_codec::serialize(&msg)?;
-        // `send_with_u8_array` is synchronous, so there's no interleaving to
-        // guard; just advance `enqueued` ONLY after a successful send. Advancing
-        // first would, on a rejected send, leave the counter ahead of the bytes
-        // actually buffered, making earlier messages' delivery futures resolve
-        // early on phantom bytes (`enqueued_total - buffered_amount`).
-        if let Err(e) = self.send_after_permit(permit, || {
-            channel
-                .send_with_u8_array(&data)
-                .map_err(Error::WebSysWebrtc)
-        }) {
-            tracing::error!("{:?}, Data size: {:?}", e, data.len());
-            return Err(e);
-        }
-        let end_offset =
-            enqueued.fetch_add(data.len() as u64, Ordering::SeqCst) + data.len() as u64;
+        let bytes = u64::try_from(data.len()).map_err(|_| Error::SendByteCountOverflow)?;
+        // The primitive runs only after shared queue admission; failures do not advance offsets.
+        let end_offset = self
+            .send_after_permit(permit, Arc::clone(&enqueued), bytes, || {
+                channel
+                    .send_with_u8_array(&data)
+                    .map_err(Error::WebSysWebrtc)
+            })
+            .await
+            .inspect_err(|error| tracing::error!(%error, bytes, "browser send failed"))?;
         Ok(delivery_future(channel, enqueued, end_offset))
     }
 }
@@ -252,7 +252,7 @@ impl ConnectionInterface for WebSysWebrtcConnection {
         permit: SendPermit,
     ) -> Result<DeliveryFuture> {
         self.webrtc_wait_for_data_channel_open().await?;
-        self.send_with_permit(msg, permit)
+        self.send_with_permit(msg, permit).await
     }
 
     fn webrtc_connection_state(&self) -> WebrtcConnectionState {
@@ -684,14 +684,21 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    fn test_rejected_permit_does_not_call_browser_send_primitive() {
+    async fn test_rejected_permit_does_not_call_browser_send_primitive() {
         let (_peer_connection, connection_state, connection) = test_backend();
         let called = Rc::new(Cell::new(false));
         let observed = called.clone();
-        let result = connection.send_after_permit(SendPermit::new(|| false), move || {
-            observed.set(true);
-            Ok(())
-        });
+        let result = connection
+            .send_after_permit(
+                SendPermit::new(|| false),
+                Arc::new(AtomicU64::new(0)),
+                1,
+                move || {
+                    observed.set(true);
+                    Ok(())
+                },
+            )
+            .await;
 
         assert!(matches!(result, Err(Error::SendPermitRevoked)));
         assert!(!called.get());
@@ -708,11 +715,13 @@ mod tests {
         connection_state.observe_outbound_data_channels(true);
         let permit = SendPermit::always();
         let acceptance = permit.acceptance();
-        let result = connection.send_after_permit(permit, || {
-            Err::<(), _>(Error::DataChannelMessage(
-                "injected browser send failure".to_string(),
-            ))
-        });
+        let result = connection
+            .send_after_permit(permit, Arc::new(AtomicU64::new(0)), 1, || {
+                Err::<(), _>(Error::DataChannelMessage(
+                    "injected browser send failure".to_string(),
+                ))
+            })
+            .await;
 
         assert!(matches!(result, Err(Error::DataChannelMessage(_))));
         assert!(!acceptance.is_accepted());
@@ -781,13 +790,36 @@ mod tests {
             ConnectionStateCell::new(),
         );
 
-        let result = backend.send_with_permit(
-            TransportMessage::Custom(Bytes::from_static(&[1, 2, 3])),
-            SendPermit::new(|| false),
-        );
+        let result = backend
+            .send_with_permit(
+                TransportMessage::Custom(Bytes::from_static(&[1, 2, 3])),
+                SendPermit::new(|| false),
+            )
+            .await;
 
         connection.close();
         assert!(matches!(result, Err(Error::SendPermitRevoked)));
         assert_eq!(enqueued.load(Ordering::SeqCst), 0);
+    }
+    /// Offset exhaustion must reject before browser IO and before irrevocable admission.
+    #[wasm_bindgen_test]
+    async fn test_browser_offset_exhaustion_preserves_generation_and_counter() {
+        let (_peer, state, connection) = test_backend();
+        let enqueued = Arc::new(AtomicU64::new(u64::MAX));
+        let permit = SendPermit::always();
+        let acceptance = permit.acceptance();
+        let called = Rc::new(Cell::new(false));
+        let observed = Rc::clone(&called);
+        let result = connection
+            .send_after_permit(permit, Arc::clone(&enqueued), 1, move || {
+                observed.set(true);
+                Ok(())
+            })
+            .await;
+        assert!(matches!(result, Err(Error::SendByteCountOverflow)));
+        assert!(!called.get());
+        assert!(!acceptance.is_irrevocable());
+        assert_ne!(state.snapshot().webrtc(), WebrtcConnectionState::Closed);
+        assert_eq!(enqueued.load(Ordering::SeqCst), u64::MAX);
     }
 }

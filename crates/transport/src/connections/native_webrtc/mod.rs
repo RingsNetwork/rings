@@ -57,15 +57,14 @@ use crate::webrtc_config::WebrtcUdpPortRange;
 
 mod close_actor;
 mod send_lifecycle;
-mod send_model;
-mod send_operation;
+#[cfg(test)]
+use crate::core::send::model as send_model;
+use crate::core::send::operation as send_operation;
 mod send_runtime;
 #[cfg(test)]
 mod test_close_actor;
 #[cfg(test)]
 mod test_send_lifecycle;
-#[cfg(test)]
-mod test_send_model;
 
 use send_lifecycle::OwnedSend;
 use send_lifecycle::SendLifecycle;
@@ -263,7 +262,7 @@ impl RoundRobinPool<TrackedChannel> {
         let guard = send_lock.lock_owned().await;
         let send_channel = Arc::clone(&channel);
         // The encoded size shares the existing u64 accounting domain.
-        let data_len = u64::try_from(data.len()).map_err(|_| Error::NativeSendByteCountOverflow)?;
+        let data_len = u64::try_from(data.len()).map_err(|_| Error::SendByteCountOverflow)?;
         // The primitive owns its bytes and channel reference. The QueueSend
         // wrapper separately retains the serialization lease and permit proof.
         let primitive = async move {
