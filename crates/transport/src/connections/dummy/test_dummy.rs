@@ -140,11 +140,17 @@ fn test_sequence_index_survives_arbitrary_removal() {
         vec![2]
     );
     assert_eq!(
-        state.inspect(0).map(|delivery| delivery.sequence()),
+        state
+            .inspect_after(None)
+            .first()
+            .map(|delivery| delivery.sequence()),
         Some(0)
     );
     assert_eq!(
-        state.inspect(1).map(|delivery| delivery.sequence()),
+        state
+            .inspect_after(None)
+            .get(1)
+            .map(|delivery| delivery.sequence()),
         Some(2)
     );
 }

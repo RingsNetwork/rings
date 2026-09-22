@@ -50,3 +50,13 @@ fn test_blank_ice_server_config_means_no_servers() {
     assert!(parse_ice_servers_or_warn("", "test").is_empty());
     assert!(parse_ice_servers_or_warn("   ", "test").is_empty());
 }
+
+/// Unsupported OAuth configuration is rejected instead of silently using passwords.
+#[test]
+fn test_oauth_credential_is_rejected() {
+    assert!(serde_json::from_str::<IceCredentialType>(r#""Oauth""#).is_err());
+    assert_eq!(
+        serde_json::from_str::<IceCredentialType>(r#""Password""#).unwrap(),
+        IceCredentialType::Password,
+    );
+}

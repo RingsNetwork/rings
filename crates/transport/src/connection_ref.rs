@@ -157,13 +157,6 @@ where
             .unwrap_or(MAX_DATA_CHANNEL_MESSAGE_SIZE)
     }
 
-    async fn get_stats(&self) -> Vec<String> {
-        let Ok(c) = self.upgrade() else {
-            return Vec::new();
-        };
-        c.get_stats().await
-    }
-
     async fn webrtc_create_offer(&self) -> Result<Self::Sdp> {
         self.upgrade()?.webrtc_create_offer().await
     }
@@ -225,9 +218,6 @@ mod tests {
             unreachable!()
         }
         fn data_channel_is_open(&self) -> Result<bool> {
-            unreachable!()
-        }
-        async fn get_stats(&self) -> Vec<String> {
             unreachable!()
         }
         async fn webrtc_create_offer(&self) -> Result<Self::Sdp> {

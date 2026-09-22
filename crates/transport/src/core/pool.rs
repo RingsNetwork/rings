@@ -102,19 +102,6 @@ impl<T: Clone> RoundRobin<T> for RoundRobinPool<T> {
     }
 }
 
-/// A trait for assessing the readiness of all resources in a pool.
-///
-/// Enhances `RoundRobin` with the ability to verify the operational readiness of pooled resources.
-/// It caters to use cases requiring assurance that all resources are prepared for task execution
-/// or data handling before proceeding with operations.
-pub trait StatusPool<T>: RoundRobin<T> {
-    /// Evaluates the readiness of all pooled resources.
-    ///
-    /// Determines whether every resource in the pool is ready for operations, facilitating decision-making
-    /// processes in resource management and task allocation.
-    fn all_ready(&self) -> Result<bool>;
-}
-
 #[cfg(test)]
 pub mod tests {
     //! Tests

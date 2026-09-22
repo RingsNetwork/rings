@@ -1,4 +1,6 @@
+#[cfg(feature = "tokio")]
 use std::sync::atomic::AtomicUsize;
+#[cfg(feature = "tokio")]
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -109,18 +111,22 @@ async fn test_admitted_frame_cannot_cross_callback_instances() {
             Arc::clone(&capacity),
         )
     };
-    let source = callback("source");
-    let destination = callback("destination");
-    let raw = rings_codec::serialize(&TransportMessage::Custom(Bytes::from_static(b"data")))
-        .expect("data frame must serialize");
-    let frame = match source.admit_inbound_frame(Bytes::from(raw)) {
-        InboundFrameAdmission::Admitted(frame) => frame,
-        _ => panic!("source callback must admit the frame"),
-    };
+    // Distinct identities must reject both another peer and a replacement callback
+    // for the same peer; the redundant peer-string comparison cannot prove this.
+    for destination_id in ["source", "destination"] {
+        let source = callback("source");
+        let destination = callback(destination_id);
+        let raw = rings_codec::serialize(&TransportMessage::Custom(Bytes::from_static(b"data")))
+            .expect("data frame must serialize");
+        let frame = match source.admit_inbound_frame(Bytes::from(raw)) {
+            InboundFrameAdmission::Admitted(frame) => frame,
+            _ => panic!("source callback must admit the frame"),
+        };
 
-    destination.handle_admitted_frame(frame).await;
-    assert!(admitted
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .is_empty());
+        destination.handle_admitted_frame(frame).await;
+        assert!(admitted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty());
+    }
 }
