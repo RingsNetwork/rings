@@ -479,7 +479,6 @@ impl WebviewHostRequest {
     }
 
     fn into_gateway_request(self, target: TargetUrl) -> GatewayRequest {
-        let source_origin = self.source_target.as_ref().map(target_origin);
         let source_target = self.source_target.map(TargetUrl::into_url);
         GatewayRequest {
             target: target.into_url(),
@@ -487,22 +486,11 @@ impl WebviewHostRequest {
             headers: self.headers,
             body: self.body,
             kind: self.kind,
-            source_origin,
             source_target,
             credentials: self.credentials,
             top_level_navigation: self.top_level_navigation,
         }
     }
-}
-
-fn target_origin(target: &TargetUrl) -> Url {
-    let mut origin = target.as_url().clone();
-    let _ = origin.set_username("");
-    let _ = origin.set_password(None);
-    origin.set_path("/");
-    origin.set_query(None);
-    origin.set_fragment(None);
-    origin
 }
 
 /// The only actions a controlled WebView host may take for one captured request.

@@ -3,7 +3,6 @@
 mod device;
 
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -99,7 +98,6 @@ pub struct TcpStack {
     device: PacketQueueDevice,
     sockets: SocketSet<'static>,
     endpoints: HashMap<FlowId, TcpEndpoint>,
-    owned_handles: HashSet<SocketHandle>,
     tcp_buffer_bytes: usize,
     flow_idle_timeout: Duration,
 }
@@ -107,7 +105,18 @@ pub struct TcpStack {
 impl TcpStack {
     /// Create a shared TCP stack from validated gateway configuration.
     pub fn new(config: &GatewayConfig, random_seed: u64) -> Result<Self, GatewayError> {
-        config.validate()?;
+        // Standalone callers pass through the same boundary as the composed runtime.
+        let validated = crate::config::ValidatedGatewayConfig::new(config)?;
+        Self::from_validated(&validated, random_seed)
+    }
+
+    /// Build TCP resources only while an immutable configuration proof is held.
+    pub(crate) fn from_validated(
+        validated: &crate::config::ValidatedGatewayConfig<'_>,
+        random_seed: u64,
+    ) -> Result<Self, GatewayError> {
+        // This borrow preserves validated bounds during socket-table allocation.
+        let config = validated.get();
         let (interface_address, prefix_len) = config.plan.first_ipv4_address()?;
         let mut device = PacketQueueDevice::new(usize::from(config.plan.mtu.get()));
         let mut interface_config = InterfaceConfig::new(HardwareAddress::Ip);
@@ -136,7 +145,6 @@ impl TcpStack {
             device,
             sockets: SocketSet::new(Vec::new()),
             endpoints: HashMap::with_capacity(config.max_flows),
-            owned_handles: HashSet::with_capacity(config.max_flows),
             tcp_buffer_bytes: config.tcp_buffer_bytes,
             flow_idle_timeout: config.flow_idle_timeout,
         })
@@ -165,7 +173,6 @@ impl TcpStack {
             return TcpFlowAdmission::Rejected(FlowRejectReason::ListenRejected);
         }
         let handle = self.sockets.add(socket);
-        self.owned_handles.insert(handle);
         self.endpoints.insert(segment.flow, TcpEndpoint {
             handle,
             pending_deadline: TcpEndpointState::Listening
@@ -347,13 +354,9 @@ impl TcpStack {
             .get(&flow)
             .map(|endpoint| endpoint.handle)
             .ok_or(TcpStackError::UnknownFlow(flow))?;
-        if !self.owned_handles.contains(&handle) {
-            return Err(TcpStackError::UnknownFlow(flow));
-        }
-        // Ownership invariant: every handle is inserted into `SocketSet`, `endpoints`, and
-        // `owned_handles` together, and `release_socket` removes it from all three together. This
-        // crate inserts only TCP sockets. The O(1) membership proof therefore satisfies both
-        // preconditions of smoltcp's O(1) typed accessor.
+        // Ownership invariant: endpoints contains exactly the live TCP handles in SocketSet.
+        // admit_flow inserts both together; release_socket removes both together. Successful
+        // endpoint lookup proves membership and socket type for smoltcp's typed accessor.
         Ok(self.sockets.get::<tcp::Socket<'static>>(handle))
     }
 
@@ -363,10 +366,7 @@ impl TcpStack {
             .get(&flow)
             .map(|endpoint| endpoint.handle)
             .ok_or(TcpStackError::UnknownFlow(flow))?;
-        if !self.owned_handles.contains(&handle) {
-            return Err(TcpStackError::UnknownFlow(flow));
-        }
-        // See `socket`: the three owned indexes share one private insertion/removal boundary.
+        // See `socket`: the endpoint index and socket set share one private insertion/removal boundary.
         Ok(self.sockets.get_mut::<tcp::Socket<'static>>(handle))
     }
 
@@ -376,13 +376,9 @@ impl TcpStack {
             .get(&flow)
             .map(|endpoint| endpoint.handle)
             .ok_or(TcpStackError::UnknownFlow(flow))?;
-        if !self.owned_handles.contains(&handle) {
-            return Err(TcpStackError::UnknownFlow(flow));
-        }
         // Membership proves that this handle was returned by this `SocketSet` and has not been
-        // removed. Remove the smoltcp entry before dropping the two ownership witnesses.
+        // removed. Remove the smoltcp entry before dropping its endpoint ownership witness.
         let _ = self.sockets.remove(handle);
-        self.owned_handles.remove(&handle);
         self.endpoints.remove(&flow);
         Ok(())
     }
@@ -570,8 +566,11 @@ mod tests {
         stack.reject_segment(packet, Duration::from_millis(1));
         assert!(stack.take_egress().iter().any(|packet| matches!(
             classify_ipv4_packet(packet),
-            PacketDisposition::Tcp(TcpSegment { flow: reply, rst: true, .. })
+            PacketDisposition::Tcp(TcpSegment { flow: reply, .. })
                 if reply.source == segment.flow.target && reply.target == segment.flow.source
+                    && Ipv4Packet::new_checked(packet.as_slice()).is_ok_and(|ipv4| {
+                        TcpPacket::new_checked(ipv4.payload()).is_ok_and(|tcp| tcp.rst())
+                    })
         )));
     }
 
@@ -681,6 +680,45 @@ mod tests {
             0,
             "a retransmission must not duplicate application bytes"
         );
+    }
+
+    /// Endpoint ownership fences removed sockets even when smoltcp reuses their slots.
+    #[test]
+    fn released_socket_cannot_be_accessed_or_removed_twice() {
+        // The endpoint table is the sole membership witness for typed socket access.
+        let mut stack = TcpStack::new(&config(), 7).expect("valid TCP stack");
+        let segment = ingest_tcp(
+            &mut stack,
+            tcp_packet(TcpControl::Syn, None),
+            Duration::ZERO,
+        );
+        stack.release_socket(segment.flow).expect("owned socket");
+        assert_eq!(stack.flow_count(), 0);
+        assert_eq!(stack.sockets.iter().count(), 0);
+        assert!(matches!(
+            stack.socket(segment.flow),
+            Err(TcpStackError::UnknownFlow(_))
+        ));
+        assert!(matches!(
+            stack.socket_mut(segment.flow),
+            Err(TcpStackError::UnknownFlow(_))
+        ));
+        assert_eq!(
+            stack.release_socket(segment.flow),
+            Err(TcpStackError::UnknownFlow(segment.flow))
+        );
+        ingest_tcp(
+            &mut stack,
+            tcp_packet(TcpControl::Syn, None),
+            Duration::from_millis(1),
+        );
+        assert_eq!(stack.flow_count(), 1);
+        assert_eq!(stack.sockets.iter().count(), 1);
+        assert!(stack.socket(segment.flow).is_ok());
+        stack
+            .release_socket(segment.flow)
+            .expect("replacement socket");
+        assert_eq!(stack.sockets.iter().count(), 0);
     }
 
     #[test]

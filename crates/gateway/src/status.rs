@@ -101,7 +101,7 @@ impl GatewayStatus {
             (GatewayState::Stopped, _) => GatewayHealth::Inactive,
             (GatewayState::Starting | GatewayState::Stopping, _) => GatewayHealth::Transitioning,
             (GatewayState::Active, ExitAvailability::Available) => GatewayHealth::Active,
-            (GatewayState::Active | GatewayState::Degraded, _) => GatewayHealth::Degraded,
+            (GatewayState::Active, _) => GatewayHealth::Degraded,
             (GatewayState::Failed, _) => GatewayHealth::Failed,
         };
         Self {

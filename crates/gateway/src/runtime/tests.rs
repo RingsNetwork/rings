@@ -326,7 +326,7 @@ fn malformed_fragmented_and_bad_checksum_packets_are_scoped_drops() {
             .expect("bad checksum is a drop outcome"),
         PacketOutcome::Dropped(crate::PacketDropReason::InvalidTcpChecksum)
     );
-    assert_eq!(runtime.status().active_flows, 0);
+    assert_eq!(runtime.status_handle().snapshot().active_flows, 0);
 }
 
 #[test]
@@ -374,11 +374,15 @@ fn stray_ack_and_capacity_refusal_emit_reset_without_failing_gateway() {
         },
         reason: FlowRejectReason::CapacityExhausted { limit: 1 },
     });
-    assert_eq!(runtime.status().active_flows, 1);
-    assert!(runtime.tcp.take_egress().iter().any(|packet| matches!(
-        crate::classify_ipv4_packet(packet),
-        PacketDisposition::Tcp(crate::TcpSegment { rst: true, .. })
-    )));
+    assert_eq!(runtime.status_handle().snapshot().active_flows, 1);
+    // RST remains in the packet consumed by smoltcp, not the admission metadata.
+    assert!(runtime.tcp.take_egress().iter().any(|packet| {
+        matches!(
+            crate::classify_ipv4_packet(packet),
+            PacketDisposition::Tcp(_)
+        ) && Ipv4Packet::new_checked(packet.as_slice())
+            .is_ok_and(|ipv4| TcpPacket::new_checked(ipv4.payload()).is_ok_and(|tcp| tcp.rst()))
+    }));
 }
 
 #[test]
@@ -397,7 +401,7 @@ fn pending_handshake_exit_clock_releases_flow_capacity() {
             Duration::ZERO,
         )
         .expect("capture pending handshake");
-    assert_eq!(runtime.status().active_flows, 1);
+    assert_eq!(runtime.status_handle().snapshot().active_flows, 1);
 
     let scope = runtime
         .process_input(LoopInput::Tick, &[], Duration::from_secs(2))
@@ -406,7 +410,7 @@ fn pending_handshake_exit_clock_releases_flow_capacity() {
     runtime
         .reconcile_all(Duration::from_secs(2))
         .expect("expired handshake is released");
-    assert_eq!(runtime.status().active_flows, 0);
+    assert_eq!(runtime.status_handle().snapshot().active_flows, 0);
     assert_eq!(runtime.tcp.flow_count(), 0);
 }
 
@@ -444,7 +448,7 @@ fn stream_io_failure_is_flow_scoped_not_exit_scoped() {
         )
         .expect("stream failure is contained to one flow");
 
-    let status = runtime.status();
+    let status = runtime.status_handle().snapshot();
     assert_eq!(status.exit_availability, ExitAvailability::Available);
     assert_eq!(status.reason, None);
     assert_eq!(status.active_flows, 0);
@@ -565,8 +569,11 @@ async fn runtime_opens_onion_only_after_tcp_handshake_and_stops_cleanly() {
         .expect("runtime stop deadline")
         .expect("runtime task");
     result.expect("clean runtime stop");
-    assert_eq!(runtime.status().health, GatewayHealth::Inactive);
-    assert_eq!(runtime.status().active_flows, 0);
+    assert_eq!(
+        runtime.status_handle().snapshot().health,
+        GatewayHealth::Inactive
+    );
+    assert_eq!(runtime.status_handle().snapshot().active_flows, 0);
 }
 
 #[tokio::test]
@@ -597,8 +604,11 @@ async fn runtime_preserves_primary_and_cleanup_errors_while_finishing_stop() {
         } if matches!(*runtime, GatewayError::PacketIo(_))
             && matches!(*cleanup, GatewayError::PacketIo(_))
     ));
-    assert_eq!(runtime.status().health, GatewayHealth::Inactive);
-    assert_eq!(runtime.status().active_flows, 0);
+    assert_eq!(
+        runtime.status_handle().snapshot().health,
+        GatewayHealth::Inactive
+    );
+    assert_eq!(runtime.status_handle().snapshot().active_flows, 0);
     assert_eq!(runtime.tcp.flow_count(), 0);
 }
 
@@ -693,7 +703,10 @@ async fn runtime_bridges_tcp_payload_and_both_half_closes() {
         .expect("runtime stop deadline")
         .expect("runtime task");
     result.expect("clean runtime stop");
-    assert_eq!(runtime.status().health, GatewayHealth::Inactive);
+    assert_eq!(
+        runtime.status_handle().snapshot().health,
+        GatewayHealth::Inactive
+    );
 }
 
 #[tokio::test]
@@ -761,8 +774,59 @@ async fn onion_open_failure_resets_captured_flow_without_fallback() {
         .expect("runtime stop deadline")
         .expect("runtime task");
     result.expect("clean runtime stop");
-    assert_eq!(runtime.status().active_flows, 0);
+    assert_eq!(runtime.status_handle().snapshot().active_flows, 0);
 }
 
 #[path = "late_events_tests.rs"]
 mod late_events_tests;
+
+/// All public construction paths reject the same invalid inputs before allocating TCP state.
+#[test]
+fn every_gateway_constructor_rejects_invalid_configuration() {
+    // Each candidate violates a separate runtime invariant.
+    let mut candidates = Vec::new();
+    let mut invalid = config();
+    invalid.max_flows = 0;
+    candidates.push(invalid);
+    let mut invalid = config();
+    invalid.tcp_buffer_bytes = 0;
+    candidates.push(invalid);
+    let mut invalid = config();
+    invalid.flow_idle_timeout = Duration::ZERO;
+    candidates.push(invalid);
+    let mut invalid = config();
+    invalid.plan.addresses.clear();
+    candidates.push(invalid);
+    for candidate in candidates {
+        // Connector creation has no network effects and must never be invoked here.
+        let (opened, mut observed) = mpsc::channel(1);
+        let connector = Arc::new(RecordingConnector { opened });
+        assert!(GatewayServer::new(candidate.clone()).is_err());
+        assert!(TcpStack::new(&candidate, 0).is_err());
+        assert!(GatewayRuntime::new(candidate, connector, 0).is_err());
+        assert!(observed.try_recv().is_err());
+    }
+}
+
+/// Exit health changes never create an alternate lifecycle or close packet admission.
+#[test]
+fn exit_loss_and_recovery_preserve_active_lifecycle() {
+    // The observation handle must see every health projection of the same active state.
+    let (opened, _observed) = mpsc::channel(1);
+    let connector = Arc::new(RecordingConnector { opened });
+    let mut runtime = GatewayRuntime::new(config(), connector, 0).expect("valid config");
+    runtime
+        .activate("test-ingress".to_string())
+        .expect("activate");
+    for (availability, health) in [
+        (ExitAvailability::Available, GatewayHealth::Active),
+        (ExitAvailability::Unavailable, GatewayHealth::Degraded),
+        (ExitAvailability::Unknown, GatewayHealth::Degraded),
+        (ExitAvailability::Available, GatewayHealth::Active),
+    ] {
+        runtime.set_exit_availability(availability, None);
+        assert_eq!(runtime.status_handle().snapshot().health, health);
+        assert_eq!(runtime.server.state(), GatewayState::Active);
+        assert!(runtime.server.state().admits_packets());
+    }
+}

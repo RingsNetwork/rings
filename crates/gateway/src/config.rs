@@ -297,6 +297,25 @@ impl GatewayConfig {
     }
 }
 
+/// Borrowed proof that every gateway configuration invariant was checked.
+///
+/// The immutable borrow prevents mutation between validation and component construction.
+/// Runtime composition shares this proof; standalone public constructors obtain their own.
+pub(crate) struct ValidatedGatewayConfig<'a>(&'a GatewayConfig);
+
+impl<'a> ValidatedGatewayConfig<'a> {
+    /// Validate once before allocation or platform effects.
+    pub(crate) fn new(config: &'a GatewayConfig) -> Result<Self, ConfigError> {
+        config.validate()?;
+        Ok(Self(config))
+    }
+
+    /// Read configuration while the validation proof's immutable borrow is held.
+    pub(crate) const fn get(&self) -> &'a GatewayConfig {
+        self.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::Ipv4Addr;

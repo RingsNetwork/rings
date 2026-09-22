@@ -49,6 +49,6 @@ fn late_bridge_events_for_a_released_flow_are_idempotent() {
         )
         .expect("late failure is ignored");
 
-    assert_eq!(runtime.status().active_flows, 0);
-    assert_eq!(runtime.status().reason, None);
+    assert_eq!(runtime.status_handle().snapshot().active_flows, 0);
+    assert_eq!(runtime.status_handle().snapshot().reason, None);
 }

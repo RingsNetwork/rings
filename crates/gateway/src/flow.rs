@@ -19,8 +19,6 @@ pub struct FlowId {
 /// Events accepted by the flow lifecycle.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FlowEvent {
-    /// The captured target passed admission and became immutable flow authority.
-    BindTarget,
     /// A valid route was selected and the onion stream is opening.
     Open,
     /// The exit confirmed that its public TCP connection is established.
@@ -36,8 +34,6 @@ pub enum FlowEvent {
 /// Lifecycle state for one captured TCP flow.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FlowState {
-    /// Packets exist but target admission has not completed.
-    Captured(FlowId),
     /// The immutable target passed admission.
     TargetBound(FlowId),
     /// The onion stream open handshake is in progress.
@@ -56,8 +52,7 @@ impl FlowState {
     /// Return the immutable five-tuple projection used by this TCP-only milestone.
     pub const fn id(self) -> FlowId {
         match self {
-            Self::Captured(id)
-            | Self::TargetBound(id)
+            Self::TargetBound(id)
             | Self::Opening(id)
             | Self::Established(id)
             | Self::HalfClosed(id)
@@ -70,14 +65,12 @@ impl FlowState {
     pub fn transition(self, event: FlowEvent) -> Result<Self, FlowTransitionError> {
         let id = self.id();
         match (self, event) {
-            (Self::Captured(_), FlowEvent::BindTarget) => Ok(Self::TargetBound(id)),
             (Self::TargetBound(_), FlowEvent::Open) => Ok(Self::Opening(id)),
             (Self::Opening(_), FlowEvent::Establish) => Ok(Self::Established(id)),
             (Self::Established(_), FlowEvent::HalfClose) => Ok(Self::HalfClosed(id)),
             (Self::Established(_) | Self::HalfClosed(_), FlowEvent::Close) => Ok(Self::Closed(id)),
             (
-                Self::Captured(_)
-                | Self::TargetBound(_)
+                Self::TargetBound(_)
                 | Self::Opening(_)
                 | Self::Established(_)
                 | Self::HalfClosed(_),
@@ -111,7 +104,6 @@ mod tests {
     fn legal_flow_trace_preserves_the_bound_target() {
         let id = flow();
         let events = [
-            FlowEvent::BindTarget,
             FlowEvent::Open,
             FlowEvent::Establish,
             FlowEvent::HalfClose,
@@ -119,20 +111,20 @@ mod tests {
         ];
         let terminal = events
             .into_iter()
-            .try_fold(FlowState::Captured(id), FlowState::transition)
+            .try_fold(FlowState::TargetBound(id), FlowState::transition)
             .expect("legal flow trace");
         assert_eq!(terminal, FlowState::Closed(id));
         assert_eq!(terminal.id().target, id.target);
     }
 
     #[test]
-    fn route_open_cannot_skip_target_admission() {
-        let state = FlowState::Captured(flow());
+    fn establishment_cannot_skip_stream_open() {
+        let state = FlowState::TargetBound(flow());
         assert_eq!(
-            state.transition(FlowEvent::Open),
+            state.transition(FlowEvent::Establish),
             Err(FlowTransitionError {
                 state,
-                event: FlowEvent::Open,
+                event: FlowEvent::Establish,
             })
         );
     }
