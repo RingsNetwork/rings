@@ -67,11 +67,11 @@ backend:
 The whole config file would be something like this:
 
 ```
-bind: 127.0.0.1:50000
+internal_api_port: 50000
 endpoint_url: http://127.0.0.1:50000
-ecdsa_key: <your-node0-private-key>
+session_sk: ./node0-session-sk
 ice_servers: stun://stun.l.google.com:19302
-stabilize_timeout: 20
+stabilize_interval: 20
 external_ip: null
 data_storage:
   path: <your-data-dir>
@@ -102,11 +102,11 @@ rings init --location ./node1-config.yaml
 The whole config file would be something like this:
 
 ```
-bind: 127.0.0.1:50001
+internal_api_port: 50001
 endpoint_url: http://127.0.0.1:50001
-ecdsa_key: <your-node0-private-key>
+session_sk: ./node1-session-sk
 ice_servers: stun://stun.l.google.com:19302
-stabilize_timeout: 20
+stabilize_interval: 20
 external_ip: null
 data_storage:
   path: <your-data-dir>

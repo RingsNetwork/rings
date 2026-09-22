@@ -18,7 +18,6 @@ use tokio::sync::Notify;
 
 use super::*;
 use crate::onion::OnionExitDescriptorBody;
-use crate::onion::OnionExitTransport;
 use crate::onion::OnionRouteError;
 use crate::online::OnlineNodeDescriptorBody;
 use crate::prelude::*;

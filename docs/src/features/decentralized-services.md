@@ -31,7 +31,6 @@ Arguments:
 
 Options:
   -u, --endpoint-url <ENDPOINT_URL>  rings-node endpoint url. If not provided, use endpoint_url in config file or http://127.0.0.1:50000 [env: ENDPOINT_URL=]
-  -k, --key <ECDSA_KEY>              Your ECDSA key. If not provided, use ECDSA_KEY in env or ecdsa_key in config file [env: ECDSA_KEY=]
   -c, --config <CONFIG>              Config file location [env: CONFIG=] [default: ~/.rings/config.yaml]
   -h, --help                         Print help
 ```
@@ -43,7 +42,7 @@ This command can also be accomplished through the JSON-RPC API.
 ## Replace NAME with the service name what you want to lookup in rings network
 curl -X POST \
 -H "Content-Type: application/json" \
--H "X-SIGNATURE: YOUR-SIGNATURE" \
+-H "Authorization: Bearer YOUR-API-TOKEN" \
 --data '{"jsonrpc": "2.0", "id": 1, "method": "lookupService", "params": ["NAME"]}' \
 "http://127.0.0.1:50000"
 ```
@@ -69,7 +68,6 @@ Arguments:
 
 Options:
   -u, --endpoint-url <ENDPOINT_URL>  rings-node endpoint url. If not provided, use endpoint_url in config file or http://127.0.0.1:50000 [env: ENDPOINT_URL=]
-  -k, --key <ECDSA_KEY>              Your ECDSA key. If not provided, use ECDSA_KEY in env or ecdsa_key in config file [env: ECDSA_KEY=]
   -c, --config <CONFIG>              Config file location [env: CONFIG=] [default: ~/.rings/config.yaml]
   -X, --method <METHOD>              request method [default: get]
   -H, --header <HEADERS>             headers append to the request
@@ -86,7 +84,7 @@ For curl (JSON-RPC) usage
 ## Replace HTTP-REQUEST-ARG with your request arguments
 curl -X POST \
 -H "Content-Type: application/json" \
--H "X-SIGNATURE: YOUR-SIGNATURE" \
+-H "Authorization: Bearer YOUR-API-TOKEN" \
 --data '{"jsonrpc": "2.0", "id": 1, "method": "sendSimpleTextMessage", "params": ["REMOTE-PEER-DID", {HTTP-REQUEST-ARG}]}' \
 "http://127.0.0.1:50000"
 ```
@@ -123,11 +121,11 @@ Now let's integrate it into the `config.yaml` file:
 ```bash
 # cat ./config.yaml
 
-bind: 127.0.0.1:50000
+internal_api_port: 50000
 endpoint_url: http://127.0.0.1:50000
-ecdsa_key: <your private key>
+session_sk: ~/.rings/session_sk
 ice_servers: stun://stun.l.google.com:19302
-stabilize_timeout: 3
+stabilize_interval: 3
 external_ip: null
 backend:
 - name: ipfs

@@ -61,16 +61,6 @@ impl OnionLink {
 /// Namespace used by route-aware onion circuit messages.
 pub const ONION_CIRCUIT_NAMESPACE: &str = "onion-circuit";
 
-/// Security mode implemented by the current circuit wire format.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum OnionCircuitSecurity {
-    /// Layered ElGamal-AEAD forward frames with client-encrypted backward payloads.
-    LayeredAead,
-}
-
-/// Current circuit security mode.
-pub const ONION_CIRCUIT_SECURITY: OnionCircuitSecurity = OnionCircuitSecurity::LayeredAead;
-
 /// Maximum route length encoded by local clients and maximum relay hop-budget value accepted per
 /// decrypted layer.
 pub const MAX_ONION_CIRCUIT_HOPS: u8 = 8;

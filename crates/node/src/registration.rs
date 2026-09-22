@@ -1,8 +1,7 @@
 //! Node-layer DHT registration tasks.
 //!
-//! A registration task is a periodic node-side publisher. The task decides what
-//! value to publish; [`DhtRegistrationPublisher`] owns the common DHT
-//! touch/tombstone mechanics so new registries do not reimplement that state.
+//! A registration task is a built-in periodic node-side publisher. The shared publisher owns
+//! DHT touch/tombstone mechanics for the online-node and onion-exit registries.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -28,7 +27,6 @@ use crate::online::OnlineNodeDescriptor;
 use crate::online::OnlineNodeDescriptorBody;
 use crate::online::OnlineNodeType;
 use crate::online::ONLINE_NODES_TOPIC;
-use crate::online::ONLINE_NODE_CAPABILITY_STORAGE;
 use crate::processor::Processor;
 
 const DEFAULT_ONLINE_NODE_HEARTBEAT_INTERVAL_SECS: u64 = 30;
@@ -103,7 +101,7 @@ pub(crate) async fn sleep_registration_interval(interval: Duration) -> Result<()
 ///
 /// The context exposes only the node facts and DHT publication operation that a
 /// registry needs. The task does not own the processor.
-pub struct RegistrationContext<'a> {
+pub(crate) struct RegistrationContext<'a> {
     processor: &'a Processor,
     stop: StopToken,
 }
@@ -118,7 +116,7 @@ impl<'a> RegistrationContext<'a> {
     }
 
     /// Return whether the owning registration daemon has requested shutdown.
-    pub fn should_stop(&self) -> bool {
+    pub(crate) fn should_stop(&self) -> bool {
         self.stop.should_stop()
     }
 
@@ -130,27 +128,27 @@ impl<'a> RegistrationContext<'a> {
     }
 
     /// Return the local node DID.
-    pub fn did(&self) -> Did {
+    pub(crate) fn did(&self) -> Did {
         self.processor.did()
     }
 
     /// Return the local network id.
-    pub fn network_id(&self) -> u32 {
+    pub(crate) fn network_id(&self) -> u32 {
         self.processor.swarm.network_id()
     }
 
     /// Return storage redundancy for the local DHT protocol mode.
-    pub fn storage_redundancy(&self) -> u16 {
+    pub(crate) fn storage_redundancy(&self) -> u16 {
         self.processor.swarm.storage_redundancy()
     }
 
     /// Return storage virtual-node positions for the local DHT protocol mode.
-    pub fn dht_virtual_nodes(&self) -> u16 {
+    pub(crate) fn dht_virtual_nodes(&self) -> u16 {
         self.processor.swarm.dht_virtual_nodes()
     }
 
     /// Return the account verification public key.
-    pub fn account_verification_pubkey(&self) -> Result<VerificationPublicKey> {
+    pub(crate) fn account_verification_pubkey(&self) -> Result<VerificationPublicKey> {
         self.processor
             .swarm
             .account_verification_pubkey()
@@ -158,12 +156,12 @@ impl<'a> RegistrationContext<'a> {
     }
 
     /// Return the local session signing key.
-    pub fn session_sk(&self) -> &SessionSk {
+    pub(crate) fn session_sk(&self) -> &SessionSk {
         self.processor.session_sk()
     }
 
     /// The authority that signs this node's descriptors: its session key inside its overlay.
-    pub fn message_signer(&self) -> MessageSigner<&SessionSk> {
+    pub(crate) fn message_signer(&self) -> MessageSigner<&SessionSk> {
         MessageSigner::new(self.session_sk(), self.network_id())
     }
 
@@ -176,7 +174,7 @@ impl<'a> RegistrationContext<'a> {
 
 /// Common publisher for DHT-backed registries.
 #[derive(Clone, Debug)]
-pub struct DhtRegistrationPublisher {
+pub(crate) struct DhtRegistrationPublisher {
     topic: String,
     publish_gate: Arc<AsyncMutex<()>>,
     published_values: Arc<Mutex<BTreeSet<Encoded>>>,
@@ -184,7 +182,7 @@ pub struct DhtRegistrationPublisher {
 
 impl DhtRegistrationPublisher {
     /// Create a publisher for `topic`.
-    pub fn new(topic: impl Into<String>) -> Self {
+    pub(crate) fn new(topic: impl Into<String>) -> Self {
         Self {
             topic: topic.into(),
             publish_gate: Arc::new(AsyncMutex::new(())),
@@ -192,43 +190,54 @@ impl DhtRegistrationPublisher {
         }
     }
 
-    /// Return the DHT topic used by this publisher.
-    pub fn topic(&self) -> &str {
-        &self.topic
-    }
-
-    /// Publish `value`, tombstoning older values previously published by this publisher.
-    pub async fn publish(&self, context: &RegistrationContext<'_>, value: Encoded) -> Result<()> {
-        self.publish_many(context, std::iter::once(value)).await
-    }
-
-    /// Publish the current value set, tombstoning older values previously published by this publisher.
-    ///
-    /// Invariant: after a successful call, DHT data previously emitted by this publisher is exactly
-    /// `values`. Preservation: every stale local value is tombstoned after every current value is
-    /// touched under the same publisher serialization lock.
-    pub async fn publish_many(
-        &self,
-        context: &RegistrationContext<'_>,
-        values: impl IntoIterator<Item = Encoded>,
-    ) -> Result<()> {
-        self.publish_many_with_replacement(context, values, false, |_| false)
-            .await
-    }
-
     /// Publish the current value set, tombstoning older observed values with the same registry key.
     ///
     /// Invariant: registry topics are keyed presence sets, not append-only heartbeat logs.
     /// Preservation: every observed value replaced by the current publish is tombstoned after the
     /// replacement value has been touched, while unrelated publisher keys stay joinable.
-    pub async fn publish_many_replacing(
+    pub(crate) async fn publish_replacing(
         &self,
         context: &RegistrationContext<'_>,
         values: impl IntoIterator<Item = Encoded>,
         replaces_observed_value: impl Fn(&Encoded) -> bool,
     ) -> Result<()> {
-        self.publish_many_with_replacement(context, values, true, replaces_observed_value)
-            .await
+        let current_values = values.into_iter().collect::<BTreeSet<_>>();
+        let _publish_turn = self.publish_gate.lock().await;
+        context.ensure_running()?;
+        let observed_values = self.observed_registry_values(context).await?;
+        let stale_values = {
+            let mut published_values = self.published_values.lock().map_err(|_| Error::Lock)?;
+            begin_registration_publish(
+                &mut published_values,
+                &current_values,
+                observed_values,
+                replaces_observed_value,
+            )
+        };
+
+        for value in &current_values {
+            context.ensure_running()?;
+            context
+                .processor
+                .storage_append_data(&self.topic, value.clone())
+                .await?;
+        }
+        for stale_value in stale_values {
+            context.ensure_running()?;
+            context
+                .processor
+                .storage_tombstone_data(&self.topic, stale_value.clone())
+                .await?;
+            self.published_values
+                .lock()
+                .map_err(|_| Error::Lock)?
+                .remove(&stale_value);
+        }
+        {
+            let mut published_values = self.published_values.lock().map_err(|_| Error::Lock)?;
+            finish_registration_publish(&mut published_values, current_values);
+        }
+        Ok(())
     }
 
     /// Publish values, tombstone stale observed registry values, and compact at the owner.
@@ -237,7 +246,7 @@ impl DhtRegistrationPublisher {
     /// snapshot. Compaction is requested with only the removable payloads, so the
     /// storage owner computes the final live set from its current local entry and
     /// preserves concurrent live writes.
-    pub async fn publish_many_replacing_and_compacting(
+    pub(crate) async fn publish_many_replacing_and_compacting(
         &self,
         context: &RegistrationContext<'_>,
         values: impl IntoIterator<Item = Encoded>,
@@ -297,58 +306,6 @@ impl DhtRegistrationPublisher {
                 .processor
                 .storage_compact_data(&self.topic, removals)
                 .await?;
-        }
-        {
-            let mut published_values = self.published_values.lock().map_err(|_| Error::Lock)?;
-            finish_registration_publish(&mut published_values, current_values);
-        }
-        Ok(())
-    }
-
-    async fn publish_many_with_replacement(
-        &self,
-        context: &RegistrationContext<'_>,
-        values: impl IntoIterator<Item = Encoded>,
-        load_observed_values: bool,
-        replaces_observed_value: impl Fn(&Encoded) -> bool,
-    ) -> Result<()> {
-        let current_values = values.into_iter().collect::<BTreeSet<_>>();
-        // This capability serializes the effect trace. The published-value state has a separate
-        // synchronous mutex whose guard is never carried across an external await.
-        let _publish_turn = self.publish_gate.lock().await;
-        context.ensure_running()?;
-        let observed_values = if load_observed_values {
-            self.observed_registry_values(context).await?
-        } else {
-            vec![]
-        };
-        let stale_values = {
-            let mut published_values = self.published_values.lock().map_err(|_| Error::Lock)?;
-            begin_registration_publish(
-                &mut published_values,
-                &current_values,
-                observed_values,
-                replaces_observed_value,
-            )
-        };
-
-        for value in &current_values {
-            context.ensure_running()?;
-            context
-                .processor
-                .storage_append_data(&self.topic, value.clone())
-                .await?;
-        }
-        for stale_value in stale_values {
-            context.ensure_running()?;
-            context
-                .processor
-                .storage_tombstone_data(&self.topic, stale_value.clone())
-                .await?;
-            self.published_values
-                .lock()
-                .map_err(|_| Error::Lock)?
-                .remove(&stale_value);
         }
         {
             let mut published_values = self.published_values.lock().map_err(|_| Error::Lock)?;
@@ -423,7 +380,7 @@ fn finish_registration_publish(
 /// Periodic node-layer registration.
 #[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
-pub trait RegistrationTask: MaybeSend {
+pub(crate) trait RegistrationTask: MaybeSend {
     /// Stable name used in logs.
     fn name(&self) -> &'static str;
 
@@ -434,55 +391,6 @@ pub trait RegistrationTask: MaybeSend {
     async fn register_once(&self, context: &RegistrationContext<'_>) -> Result<()>;
 }
 
-/// Shared online-node capability labels.
-#[derive(Clone, Debug)]
-pub struct OnlineNodeCapabilities {
-    labels: Arc<Mutex<Vec<String>>>,
-}
-
-impl OnlineNodeCapabilities {
-    fn new(additional_capabilities: Vec<String>) -> Self {
-        let mut labels = Self::default_labels();
-        Self::append_unique_many(&mut labels, additional_capabilities);
-        Self {
-            labels: Arc::new(Mutex::new(labels)),
-        }
-    }
-
-    fn default_labels() -> Vec<String> {
-        vec![ONLINE_NODE_CAPABILITY_STORAGE.to_string()]
-    }
-
-    fn append_unique_many<I, S>(labels: &mut Vec<String>, capabilities: I)
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        for capability in capabilities {
-            let capability = capability.into();
-            if !labels.iter().any(|known| known == &capability) {
-                labels.push(capability);
-            }
-        }
-    }
-
-    /// Add labels declared by registered extensions.
-    pub fn add_many<I>(&self, capabilities: I) -> Result<()>
-    where I: IntoIterator<Item = &'static str> {
-        let mut labels = self.labels.lock().map_err(|_| Error::Lock)?;
-        Self::append_unique_many(&mut labels, capabilities);
-        Ok(())
-    }
-
-    /// Current descriptor labels.
-    pub fn labels(&self) -> Result<Vec<String>> {
-        self.labels
-            .lock()
-            .map(|labels| labels.clone())
-            .map_err(|_| Error::Lock)
-    }
-}
-
 /// Online-node registry task.
 #[derive(Clone, Debug)]
 pub struct OnlineNodeRegistration {
@@ -491,7 +399,8 @@ pub struct OnlineNodeRegistration {
     node_type: OnlineNodeType,
     started_at_ms: u128,
     endpoint_hint: Option<String>,
-    capabilities: OnlineNodeCapabilities,
+    /// Immutable labels selected while the processor is built.
+    capabilities: Vec<String>,
     publisher: DhtRegistrationPublisher,
 }
 
@@ -502,7 +411,7 @@ impl OnlineNodeRegistration {
         ttl: Duration,
         node_type: OnlineNodeType,
         endpoint_hint: Option<String>,
-        additional_capabilities: Vec<String>,
+        capabilities: Vec<String>,
     ) -> Self {
         Self {
             heartbeat_interval,
@@ -510,34 +419,13 @@ impl OnlineNodeRegistration {
             node_type,
             started_at_ms: get_epoch_ms(),
             endpoint_hint,
-            capabilities: OnlineNodeCapabilities::new(additional_capabilities),
+            capabilities,
             publisher: DhtRegistrationPublisher::new(ONLINE_NODES_TOPIC),
         }
     }
 
-    /// Validate this registration's periodic schedule when it is enabled.
-    pub fn validate_enabled_schedule(&self) -> Result<()> {
-        validate_online_node_registration_timing(true, self.heartbeat_interval, self.ttl)
-    }
-
-    /// Return capability labels advertised by online-node descriptors.
-    pub fn default_capabilities() -> Vec<String> {
-        OnlineNodeCapabilities::default_labels()
-    }
-
-    /// Add extension-declared capability labels.
-    pub fn add_capabilities<I>(&self, capabilities: I) -> Result<()>
-    where I: IntoIterator<Item = &'static str> {
-        self.capabilities.add_many(capabilities)
-    }
-
-    /// Return capability labels advertised by this registration.
-    pub fn capabilities(&self) -> Result<Vec<String>> {
-        self.capabilities.labels()
-    }
-
     /// Build this node's signed descriptor at `now_ms`.
-    pub fn descriptor_at(
+    pub(crate) fn descriptor_at(
         &self,
         context: &RegistrationContext<'_>,
         now_ms: u128,
@@ -551,7 +439,7 @@ impl OnlineNodeRegistration {
                 network_id: context.network_id(),
                 storage_redundancy: context.storage_redundancy(),
                 dht_virtual_nodes: context.dht_virtual_nodes(),
-                capabilities: self.capabilities()?,
+                capabilities: self.capabilities.clone(),
                 endpoint_hint: self.endpoint_hint.clone(),
                 started_at_ms: self.started_at_ms,
                 heartbeat_at_ms: now_ms,
@@ -564,7 +452,7 @@ impl OnlineNodeRegistration {
     }
 
     /// Publish this node's signed online descriptor.
-    pub async fn publish_descriptor(
+    pub(crate) async fn publish_descriptor(
         &self,
         context: &RegistrationContext<'_>,
     ) -> Result<OnlineNodeDescriptor> {

@@ -3,8 +3,6 @@ use rings_core::message::MessageSigner;
 
 use super::super::*;
 use crate::onion::OnionExitDescriptorBody;
-use crate::onion::OnionExitService;
-use crate::onion::OnionExitTransport;
 use crate::onion::OnionServiceName;
 use crate::online::OnlineNodeType;
 use crate::sync_lock::lock;
@@ -30,7 +28,7 @@ fn exit_descriptor(session: &SessionSk) -> OnionExitDescriptor {
             process_epoch: crate::onion::OnionExitEpoch::new([19; 16]),
             node_type: OnlineNodeType::Native,
             network_id: TEST_NETWORK_ID,
-            service: OnionExitService::tcp(),
+            service: OnionServiceName::tcp(),
             policy: OnionExitPolicy::default(),
             started_at_ms: 0,
             heartbeat_at_ms: 0,
@@ -292,10 +290,13 @@ fn test_exit_runtime_rejects_replayed_forward_nonce() -> Result<()> {
     let nonce = OnionForwardNonce::new([2; 16]);
 
     assert!(runtime
+        .forward_replays
         .consume_forward_nonce(peer, circuit_id, nonce)
         .is_ok());
     assert!(matches!(
-        runtime.consume_forward_nonce(peer, circuit_id, nonce),
+        runtime
+            .forward_replays
+            .consume_forward_nonce(peer, circuit_id, nonce),
         Err(Error::OnionRouteError(_))
     ));
     Ok(())
@@ -330,21 +331,21 @@ fn test_one_peers_open_replay_partition_cannot_fill_another_peers_partition() ->
     let nonce = OnionForwardNonce::new([9; 16]);
 
     for value in 0_u128..4096 {
-        runtime.consume_forward_nonce(
+        runtime.forward_replays.consume_forward_nonce(
             busy_peer,
             OnionCircuitId::new(value.to_le_bytes()),
             nonce,
         )?;
     }
     assert!(matches!(
-        runtime.consume_forward_nonce(
+        runtime.forward_replays.consume_forward_nonce(
             busy_peer,
             OnionCircuitId::new(4096_u128.to_le_bytes()),
             nonce,
         ),
         Err(Error::NoPermission)
     ));
-    runtime.consume_forward_nonce(
+    runtime.forward_replays.consume_forward_nonce(
         other_peer,
         OnionCircuitId::new(4096_u128.to_le_bytes()),
         nonce,
@@ -381,37 +382,36 @@ fn test_tcp_payload_uses_selected_route_service() -> Result<()> {
     Ok(())
 }
 
+/// Native exit configuration rejects an empty service set and accepts canonical names.
 #[test]
-fn test_native_tcp_exit_config_rejects_empty_or_non_tcp_services() {
+fn test_native_tcp_exit_config_rejects_empty_services() {
     assert!(matches!(
         NativeOnionTcpExitConfig::new(Vec::new(), OnionExitPolicy::default()),
         Err(Error::InvalidConfig(_))
     ));
     assert!(NativeOnionTcpExitConfig::new(
-        vec![OnionExitService::https()],
+        vec![OnionServiceName::https()],
         OnionExitPolicy::default()
     )
     .is_ok());
-    assert!(matches!(
-        NativeOnionTcpExitConfig::new(
-            vec![OnionExitService::new("udp", OnionExitTransport::Udp).expect("valid service")],
-            OnionExitPolicy::default()
-        ),
-        Err(Error::InvalidConfig(_))
-    ));
+    assert!(NativeOnionTcpExitConfig::new(
+        vec![OnionServiceName::parse("custom").expect("valid service")],
+        OnionExitPolicy::default()
+    )
+    .is_ok());
 }
 
 #[test]
 fn test_native_https_proxy_requires_explicit_valid_exit_configuration() -> Result<()> {
     let configured =
-        NativeOnionTcpExitConfig::new(vec![OnionExitService::https()], OnionExitPolicy::default())?
+        NativeOnionTcpExitConfig::new(vec![OnionServiceName::https()], OnionExitPolicy::default())?
             .with_https_proxy("http://127.0.0.1:6152")?;
     assert_eq!(configured.https_proxy(), Some("http://127.0.0.1:6152"));
 
     for invalid in ["", "relative-proxy", "socks5://127.0.0.1:6152"] {
         assert!(matches!(
             NativeOnionTcpExitConfig::new(
-                vec![OnionExitService::https()],
+                vec![OnionServiceName::https()],
                 OnionExitPolicy::default(),
             )?
             .with_https_proxy(invalid),
@@ -425,7 +425,7 @@ fn test_native_https_proxy_requires_explicit_valid_exit_configuration() -> Resul
 fn test_exit_runtime_accepts_only_installed_tcp_services() -> Result<()> {
     let service = OnionServiceName::parse("web")?;
     let config = NativeOnionTcpExitConfig::new(
-        vec![OnionExitService::new("web", OnionExitTransport::Tcp)?],
+        vec![OnionServiceName::parse("web")?],
         OnionExitPolicy::default(),
     )?;
     let runtime = OnionTcpRuntime::new(session(), TEST_NETWORK_ID, Some(config));
@@ -434,9 +434,29 @@ fn test_exit_runtime_accepts_only_installed_tcp_services() -> Result<()> {
 
     assert!(matches!(
         runtime.decode_exit_payload(custom_payload)?,
-        Some((accepted, OnionTcpPayload::Close)) if accepted == service
+        Some((accepted, OnionTcpPayload::Close, _)) if accepted == service
     ));
     assert!(runtime.decode_exit_payload(tcp_payload)?.is_none());
+    Ok(())
+}
+
+/// TCP and HTTPS adapters reject a nonce consumed through either service surface.
+#[test]
+fn test_native_tcp_and_https_exits_share_forward_replay_witness() -> Result<()> {
+    let (tcp, https) = native_onion_runtimes(session(), TEST_NETWORK_ID, None);
+    let peer = Did::from(99_u32);
+    let circuit_id = OnionCircuitId::new([7; 16]);
+    let nonce = OnionForwardNonce::new([8; 16]);
+
+    tcp.forward_replays
+        .consume_forward_nonce(peer, circuit_id, nonce)?;
+
+    assert!(matches!(
+        https
+            .forward_replays
+            .consume_forward_nonce(peer, circuit_id, nonce),
+        Err(Error::OnionRouteError(OnionRouteError::ForwardReplay))
+    ));
     Ok(())
 }
 

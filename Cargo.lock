@@ -425,7 +425,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
 dependencies = [
  "axum-core",
- "base64 0.22.1",
  "bytes",
  "form_urlencoded",
  "futures-util",
@@ -444,10 +443,8 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "serde_urlencoded",
- "sha1",
  "sync_wrapper",
  "tokio",
- "tokio-tungstenite",
  "tower",
  "tower-layer",
  "tower-service",
@@ -901,15 +898,6 @@ name = "crc-catalog"
 version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19d374276b40fb8bbdee95aef7c7fa6b5316ec764510eb64b8dd0e2ed0d7e7f5"
-
-[[package]]
-name = "crc32fast"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
-dependencies = [
- "cfg-if",
-]
 
 [[package]]
 name = "crossbeam-utils"
@@ -1447,16 +1435,6 @@ dependencies = [
  "rand 0.8.6",
  "rustc-hex",
  "static_assertions",
-]
-
-[[package]]
-name = "flate2"
-version = "1.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a3d7db9596fecd151c5f638c0ee5d5bd487b6e0ea232e5dc96d5250f6f94b1d"
-dependencies = [
- "crc32fast",
- "miniz_oxide",
 ]
 
 [[package]]
@@ -3246,7 +3224,7 @@ dependencies = [
 
 [[package]]
 name = "rings-codec"
-version = "0.28.0"
+version = "0.29.0"
 dependencies = [
  "postcard",
  "serde",
@@ -3254,7 +3232,7 @@ dependencies = [
 
 [[package]]
 name = "rings-core"
-version = "0.28.0"
+version = "0.29.0"
 dependencies = [
  "ark-bls12-381",
  "ark-ec",
@@ -3324,7 +3302,7 @@ dependencies = [
 
 [[package]]
 name = "rings-derive"
-version = "0.28.0"
+version = "0.29.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3334,7 +3312,7 @@ dependencies = [
 
 [[package]]
 name = "rings-gateway"
-version = "0.28.0"
+version = "0.29.0"
 dependencies = [
  "async-trait",
  "ipnet",
@@ -3353,11 +3331,11 @@ dependencies = [
 
 [[package]]
 name = "rings-logo"
-version = "0.28.0"
+version = "0.29.0"
 
 [[package]]
 name = "rings-measure"
-version = "0.28.0"
+version = "0.29.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3367,7 +3345,7 @@ dependencies = [
 
 [[package]]
 name = "rings-native-example"
-version = "0.28.0"
+version = "0.29.0"
 dependencies = [
  "async-trait",
  "base64 0.13.1",
@@ -3382,7 +3360,7 @@ dependencies = [
 
 [[package]]
 name = "rings-network-policy"
-version = "0.28.0"
+version = "0.29.0"
 dependencies = [
  "thiserror 1.0.69",
  "url",
@@ -3390,7 +3368,7 @@ dependencies = [
 
 [[package]]
 name = "rings-node"
-version = "0.28.0"
+version = "0.29.0"
 dependencies = [
  "anyhow",
  "arrayref",
@@ -3407,7 +3385,6 @@ dependencies = [
  "console_error_panic_hook",
  "dashmap 5.5.3",
  "dotenvy",
- "flate2",
  "form_urlencoded",
  "futures",
  "futures-timer",
@@ -3454,7 +3431,7 @@ dependencies = [
 
 [[package]]
 name = "rings-relay-example"
-version = "0.28.0"
+version = "0.29.0"
 dependencies = [
  "rings-core",
  "rings-node",
@@ -3463,7 +3440,7 @@ dependencies = [
 
 [[package]]
 name = "rings-rpc"
-version = "0.28.0"
+version = "0.29.0"
 dependencies = [
  "async-trait",
  "base64 0.13.1",
@@ -3488,7 +3465,7 @@ dependencies = [
 
 [[package]]
 name = "rings-transport"
-version = "0.28.0"
+version = "0.29.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3515,7 +3492,7 @@ dependencies = [
 
 [[package]]
 name = "rings-webview"
-version = "0.28.0"
+version = "0.29.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4345,18 +4322,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tokio-tungstenite"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
-dependencies = [
- "futures-util",
- "log",
- "tokio",
- "tungstenite",
-]
-
-[[package]]
 name = "tokio-util"
 version = "0.7.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4605,22 +4570,6 @@ dependencies = [
  "widestring",
  "windows-sys 0.61.2",
  "winreg",
-]
-
-[[package]]
-name = "tungstenite"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c01152af293afb9c7c2a57e4b559c5620b421f6d133261c60dd2d0cdb38e6b8"
-dependencies = [
- "bytes",
- "data-encoding",
- "http 1.4.2",
- "httparse",
- "log",
- "rand 0.9.4",
- "sha1",
- "thiserror 2.0.18",
 ]
 
 [[package]]

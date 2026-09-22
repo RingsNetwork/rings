@@ -71,17 +71,17 @@ fn test_webrtc_udp_port_range_rejects_inverted_bounds() {
 fn test_online_node_timing_requires_heartbeat_interval_less_than_ttl_when_enabled() {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key).unwrap();
-    let serialized = ProcessorConfigSerialized::new(
+    let mut config = ProcessorConfig::new(
         0,
         "stun://stun.l.google.com:19302".to_string(),
-        session_sk.dump().unwrap(),
+        session_sk,
         3,
-    )
-    .online_node_heartbeat_interval_secs(90)
-    .online_node_ttl_secs(30);
+    );
+    config.online_node_heartbeat_interval = Duration::from_secs(90);
+    config.online_node_ttl = Duration::from_secs(30);
 
     assert!(matches!(
-        ProcessorConfig::try_from(serialized),
+        ProcessorBuilder::from_config(&config).and_then(ProcessorBuilder::build),
         Err(Error::InvalidConfig(message))
             if message.contains("online_node_heartbeat_interval")
                 && message.contains("online_node_ttl")
@@ -92,35 +92,35 @@ fn test_online_node_timing_requires_heartbeat_interval_less_than_ttl_when_enable
 fn test_presence_advertisement_can_be_disabled() {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key).unwrap();
-    let serialized = ProcessorConfigSerialized::new(
+    let mut config = ProcessorConfig::new(
         0,
         "stun://stun.l.google.com:19302".to_string(),
-        session_sk.dump().unwrap(),
+        session_sk,
         3,
-    )
-    .online_node_heartbeat_interval_secs(90)
-    .online_node_ttl_secs(30)
-    .advertise_presence(false);
+    );
+    config.online_node_heartbeat_interval = Duration::from_secs(90);
+    config.online_node_ttl = Duration::from_secs(30);
+    config.advertise_presence = false;
 
-    let config = ProcessorConfig::try_from(serialized).unwrap();
-    let builder = ProcessorBuilder::from_config(&config).unwrap();
+    let processor = ProcessorBuilder::from_config(&config)
+        .unwrap()
+        .build()
+        .unwrap();
 
-    assert!(!builder.advertise_presence);
-    assert!(builder.registration_tasks.is_empty());
+    assert!(processor.registration_tasks.is_empty());
 }
 
 #[test]
 fn test_presence_advertisement_is_enabled_by_default() {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key).unwrap();
-    let serialized = ProcessorConfigSerialized::new(
+    let config = ProcessorConfig::new(
         0,
         "stun://stun.l.google.com:19302".to_string(),
-        session_sk.dump().unwrap(),
+        session_sk,
         3,
     );
 
-    let config = ProcessorConfig::try_from(serialized).unwrap();
     let builder = ProcessorBuilder::from_config(&config).unwrap();
 
     assert!(builder.advertise_presence);
@@ -135,16 +135,16 @@ fn test_presence_advertisement_is_enabled_by_default() {
 fn test_dht_virtual_nodes_rejects_values_above_cost_bound() {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key).unwrap();
-    let serialized = ProcessorConfigSerialized::new(
+    let config = ProcessorConfig::new(
         0,
         "stun://stun.l.google.com:19302".to_string(),
-        session_sk.dump().unwrap(),
+        session_sk,
         3,
     )
     .dht_virtual_nodes(MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER.saturating_add(1));
 
     assert!(matches!(
-        ProcessorConfig::try_from(serialized),
+        ProcessorBuilder::from_config(&config).and_then(ProcessorBuilder::build),
         Err(Error::InvalidConfig(message))
             if message.contains("dht_virtual_nodes")
                 && message.contains(&MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER.to_string())
@@ -206,17 +206,17 @@ fn test_processor_construction_preserves_explicit_origin_quota() {
 fn test_onion_relay_requires_presence_advertisement() {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key).unwrap();
-    let serialized = ProcessorConfigSerialized::new(
+    let mut config = ProcessorConfig::new(
         0,
         "stun://stun.l.google.com:19302".to_string(),
-        session_sk.dump().unwrap(),
+        session_sk,
         3,
     )
-    .advertise_presence(false)
     .advertise_onion_relay(true);
+    config.advertise_presence = false;
 
     assert!(matches!(
-        ProcessorConfig::try_from(serialized),
+        ProcessorBuilder::from_config(&config).and_then(ProcessorBuilder::build),
         Err(Error::InvalidConfig(message))
             if message.contains("advertise_onion_relay")
                 && message.contains("advertise_presence")
@@ -227,16 +227,16 @@ fn test_onion_relay_requires_presence_advertisement() {
 fn test_advertised_onion_exit_requires_open_policy() {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key).unwrap();
-    let serialized = ProcessorConfigSerialized::new(
+    let config = ProcessorConfig::new(
         0,
         "stun://stun.l.google.com:19302".to_string(),
-        session_sk.dump().unwrap(),
+        session_sk,
         3,
     )
     .advertise_onion_exit(true);
 
     assert!(matches!(
-        ProcessorConfig::try_from(serialized),
+        ProcessorBuilder::from_config(&config).and_then(ProcessorBuilder::build),
         Err(Error::InvalidConfig(message)) if message.contains("allowed target")
     ));
 }
@@ -245,17 +245,15 @@ fn test_advertised_onion_exit_requires_open_policy() {
 fn test_onion_exit_registration_task_can_run_without_presence_advertisement() -> Result<()> {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key).unwrap();
-    let serialized = ProcessorConfigSerialized::new(
+    let mut config = ProcessorConfig::new(
         0,
         "stun://stun.l.google.com:19302".to_string(),
-        session_sk.dump().unwrap(),
+        session_sk,
         3,
     )
-    .advertise_presence(false)
     .advertise_onion_exit(true)
     .onion_exit_policy(onion_policy(&["example.com:443"], &[])?);
-
-    let config = ProcessorConfig::try_from(serialized).unwrap();
+    config.advertise_presence = false;
     let processor = ProcessorBuilder::from_config(&config)
         .unwrap()
         .storage(Box::new(MemStorage::new()))
@@ -324,13 +322,14 @@ fn test_default_onion_exit_config_uses_native_tcp_backed_services() {
     assert!(config.advertise_onion_exit);
     assert_eq!(config.onion_exit_services, default_onion_exit_services());
     assert_eq!(config.onion_exit_services, vec![
-        OnionExitService::tcp(),
-        OnionExitService::https()
+        OnionServiceName::tcp(),
+        OnionServiceName::https()
     ]);
 }
 
+/// The reserved HTTPS name is valid without a parallel transport discriminator.
 #[test]
-fn test_reserved_https_onion_exit_service_accepts_tcp_transport() -> Result<()> {
+fn test_reserved_https_onion_exit_service_is_accepted() -> Result<()> {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key).unwrap();
     let mut config = ProcessorConfig::new(
@@ -340,16 +339,18 @@ fn test_reserved_https_onion_exit_service_accepts_tcp_transport() -> Result<()> 
         3,
     )
     .advertise_onion_exit(true);
-    config.onion_exit_services =
-        vec![OnionExitService::new("https", OnionExitTransport::Tcp).expect("valid service")];
+    config.onion_exit_services = vec![OnionServiceName::https()];
     config.onion_exit_policy = onion_policy(&["example.com:443"], &[])?;
 
-    assert!(ProcessorBuilder::from_config(&config).is_ok());
+    assert!(ProcessorBuilder::from_config(&config)
+        .and_then(ProcessorBuilder::build)
+        .is_ok());
     Ok(())
 }
 
+/// Custom canonical service names remain valid on the singular native exit surface.
 #[test]
-fn test_custom_onion_exit_service_allows_explicit_transport() -> Result<()> {
+fn test_custom_onion_exit_service_is_accepted() -> Result<()> {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key).unwrap();
     let mut config = ProcessorConfig::new(
@@ -359,9 +360,11 @@ fn test_custom_onion_exit_service_allows_explicit_transport() -> Result<()> {
         3,
     )
     .advertise_onion_exit(true);
-    config.onion_exit_services = vec![OnionExitService::new("web", OnionExitTransport::Tcp)?];
+    config.onion_exit_services = vec![OnionServiceName::parse("web")?];
     config.onion_exit_policy = onion_policy(&["example.com:443"], &[])?;
 
-    assert!(ProcessorBuilder::from_config(&config).is_ok());
+    assert!(ProcessorBuilder::from_config(&config)
+        .and_then(ProcessorBuilder::build)
+        .is_ok());
     Ok(())
 }

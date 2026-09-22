@@ -18,7 +18,7 @@ use tokio::net::TcpListener;
 
 use super::super::*;
 use crate::onion::OnionExitDescriptorBody;
-use crate::onion::OnionExitService;
+use crate::onion::OnionServiceName;
 use crate::online::OnlineNodeType;
 use crate::tests::TEST_NETWORK_ID;
 
@@ -42,7 +42,7 @@ fn exit_descriptor(session: &SessionSk) -> OnionExitDescriptor {
             process_epoch: crate::onion::OnionExitEpoch::new([23; 16]),
             node_type: OnlineNodeType::Browser,
             network_id: TEST_NETWORK_ID,
-            service: OnionExitService::https(),
+            service: OnionServiceName::https(),
             policy: OnionExitPolicy::default(),
             started_at_ms: 0,
             heartbeat_at_ms: 0,
@@ -266,10 +266,13 @@ fn test_forward_nonce_is_consumed_once_for_https_exit_requests() {
     let nonce = OnionForwardNonce::new([2; 16]);
 
     assert!(runtime
+        .forward_replays
         .consume_forward_nonce(peer, circuit_id, nonce)
         .is_ok());
     assert!(matches!(
-        runtime.consume_forward_nonce(peer, circuit_id, nonce),
+        runtime
+            .forward_replays
+            .consume_forward_nonce(peer, circuit_id, nonce),
         Err(Error::OnionRouteError(_))
     ));
 }

@@ -23,7 +23,6 @@ use rings_core::dht::Did;
 
 use super::Ctx;
 use super::Envelope;
-use super::Inbound;
 use super::Interpret;
 use super::MaybeSend;
 use super::Protocol;
@@ -35,8 +34,7 @@ use crate::error::Result;
 use crate::processor::Processor;
 use crate::sync_lock::lock;
 
-/// Upper bound on re-injection iterations per inbound message, so a misbehaving
-/// protocol/effect cycle cannot diverge.
+/// Upper bound on synchronous feedback iterations within one protocol turn.
 const MAX_FIXPOINT_STEPS: u32 = 1024;
 
 /// Type-erased handler stored in the registry: native is `Send + Sync`, browser not.
@@ -53,9 +51,9 @@ type HandlerMap = RwLock<HashMap<String, Arc<DynHandler>>>;
 #[cfg_attr(rings_browser, async_trait::async_trait(?Send))]
 #[cfg_attr(rings_native, async_trait::async_trait)]
 pub(crate) trait Handler {
-    /// Decode → step (pure, committed) → run the protocol's effects, returning re-injected
-    /// messages. `handle : (from, payload) → IO [Inbound]`.
-    async fn handle(&self, core: &Core, from: Did, payload: Bytes) -> Result<Vec<Inbound>>;
+    /// Decode → step (pure, committed) → run the protocol's effects and synchronous
+    /// feedback. `handle : (from, payload) → IO ()`.
+    async fn handle(&self, core: &Core, from: Did, payload: Bytes) -> Result<()>;
 }
 
 /// The router-internal capability. Cloneable and `'static` so a long-running engine task can
@@ -99,8 +97,9 @@ impl Core {
             .await
     }
 
-    /// Route an inbound [`Envelope`] to its protocol and drive the bounded re-injection
-    /// fixpoint. Unknown namespaces are logged and dropped (non-fatal).
+    /// Route one inbound [`Envelope`] to its protocol. Unknown namespaces are logged and
+    /// dropped (non-fatal). Same-turn feedback is reduced inside the selected handler; later
+    /// lifecycle injection starts a new dispatch.
     ///
     /// This is the **authenticated ingress** capability: the caller chooses `from`, so a
     /// protocol's `decode` will attribute the resulting event to that DID (for the relay, a
@@ -110,34 +109,13 @@ impl Core {
     /// through [`inject`](Core::inject) (self-addressed, `from = self.did()`); it can never
     /// forge a remote `from`.
     pub(crate) async fn dispatch(&self, from: Did, envelope: Envelope) -> Result<()> {
-        let mut queue: VecDeque<Inbound> = VecDeque::new();
-        queue.push_back(Inbound {
-            namespace: envelope.namespace,
-            from,
-            payload: envelope.payload,
-        });
-
-        let mut budget = MAX_FIXPOINT_STEPS;
-        while let Some(Inbound {
-            namespace,
-            from,
-            payload,
-        }) = queue.pop_front()
-        {
-            if budget == 0 {
-                return Err(Error::ExtensionError(format!(
-                    "fixpoint budget ({MAX_FIXPOINT_STEPS}) exhausted; last namespace {namespace:?}"
-                )));
-            }
-            budget -= 1;
-
-            match self.handler(namespace.as_str()) {
-                Some(handler) => queue.extend(handler.handle(self, from, payload).await?),
-                None => tracing::debug!(
-                    "no protocol registered for namespace {:?}, dropping",
-                    namespace
-                ),
-            }
+        let namespace = envelope.namespace;
+        match self.handler(namespace.as_str()) {
+            Some(handler) => handler.handle(self, from, envelope.payload).await?,
+            None => tracing::debug!(
+                "no protocol registered for namespace {:?}, dropping",
+                namespace
+            ),
         }
         Ok(())
     }
@@ -269,7 +247,7 @@ where
     P::Effect: MaybeSend,
     I: Interpret<Effect = P::Effect> + MaybeSend + 'static,
 {
-    async fn handle(&self, core: &Core, from: Did, payload: Bytes) -> Result<Vec<Inbound>> {
+    async fn handle(&self, core: &Core, from: Did, payload: Bytes) -> Result<()> {
         // Boundary: decode raw bytes to a typed event. An undecodable/foreign message is an
         // explicit drop here, not a silent `Transition::pure` deep in `step`.
         let event = match self.protocol.decode(Wire {
@@ -280,7 +258,7 @@ where
             Ok(event) => event,
             Err(Reject(why)) => {
                 tracing::debug!("drop on {}: {why}", self.protocol.namespace());
-                return Ok(Vec::new());
+                return Ok(());
             }
         };
 
@@ -355,7 +333,7 @@ where
                 }
             }
         }
-        Ok(Vec::new())
+        Ok(())
     }
 }
 
@@ -426,10 +404,9 @@ impl Extensions {
         I: Interpret<Effect = P::Effect> + MaybeSend + 'static,
     {
         // Build (namespace, runner) outside the lock.
-        let prepared: Vec<(String, Arc<DynHandler>, Vec<&'static str>)> = items
+        let prepared: Vec<(String, Arc<DynHandler>)> = items
             .into_iter()
             .map(|(protocol, interpret)| {
-                let capabilities = protocol.capabilities().to_vec();
                 let namespace = protocol.namespace().to_string();
                 let state = Mutex::new(protocol.init());
                 let runner: Arc<DynHandler> = Arc::new(Runner {
@@ -444,30 +421,25 @@ impl Extensions {
                     #[cfg(all(test, rings_native))]
                     before_gate_wait_for_test: None,
                 });
-                (namespace, runner, capabilities)
+                (namespace, runner)
             })
             .collect();
 
         let mut handlers = self.core.handlers.write().map_err(|_| Error::Lock)?;
         // Check-all (existing table + intra-batch duplicates) before mutating anything.
-        for (index, (namespace, _, _)) in prepared.iter().enumerate() {
+        for (index, (namespace, _)) in prepared.iter().enumerate() {
             let duplicate_in_batch = prepared
                 .iter()
                 .take(index)
-                .any(|(seen, _, _)| seen == namespace);
+                .any(|(seen, _)| seen == namespace);
             if duplicate_in_batch || handlers.contains_key(namespace) {
                 return Err(Error::ExtensionError(format!(
                     "namespace {namespace:?} is already registered"
                 )));
             }
         }
-        self.core.processor.add_online_node_capabilities(
-            prepared
-                .iter()
-                .flat_map(|(_, _, capabilities)| capabilities.iter().copied()),
-        )?;
         // All free: insert the whole batch.
-        for (namespace, runner, _) in prepared {
+        for (namespace, runner) in prepared {
             handlers.insert(namespace, runner);
         }
         Ok(())
@@ -480,7 +452,6 @@ impl Extensions {
         P::Effect: MaybeSend,
         I: Interpret<Effect = P::Effect> + MaybeSend + 'static,
     {
-        let capabilities = protocol.capabilities();
         let namespace = protocol.namespace().to_string();
         let state = Mutex::new(protocol.init());
         let runner: Arc<DynHandler> = Arc::new(Runner {
@@ -501,9 +472,6 @@ impl Extensions {
                 "namespace {namespace:?} is already registered"
             )));
         }
-        self.core
-            .processor
-            .add_online_node_capabilities(capabilities.iter().copied())?;
         handlers.insert(namespace, runner);
         Ok(())
     }
@@ -529,7 +497,6 @@ impl Extensions {
 
 #[cfg(all(test, rings_native))]
 mod tests {
-    use std::collections::HashMap;
     use std::net::SocketAddr;
     use std::sync::Arc;
     use std::sync::Mutex;
@@ -537,6 +504,7 @@ mod tests {
     use async_trait::async_trait;
     use rings_core::ecc::SecretKey;
     use rings_core::session::SessionSk;
+    use tokio::net::TcpListener;
     use tokio::sync::Notify;
 
     use super::*;
@@ -545,6 +513,7 @@ mod tests {
     use crate::extension::protocols::relay::Relay;
     use crate::extension::protocols::relay::RelayCommand;
     use crate::extension::protocols::relay::RelayEffect;
+    use crate::extension::protocols::relay::RelayEvent;
     use crate::extension::protocols::relay::TCP;
     use crate::extension::transport::engine::TransportSessions;
     use crate::extension::transport::Frame;
@@ -816,13 +785,22 @@ mod tests {
             let decoded = Arc::clone(&decoded);
             Arc::new(move || decoded.notify_one()) as Arc<dyn Fn() + Send + Sync>
         };
-        let protocol = Relay::tcp(HashMap::from([(
-            "web".to_string(),
-            "127.0.0.1:80"
-                .parse::<SocketAddr>()
-                .map_err(|error| Error::ExtensionError(error.to_string()))?,
-        )]));
-        let state = protocol.init();
+        let protocol = Relay::tcp();
+        let initial = protocol.init();
+        let state = protocol
+            .step(
+                Ctx {
+                    did: extensions.core.did(),
+                    state: &initial,
+                },
+                RelayEvent::Command(RelayCommand::RegisterService {
+                    name: "web".to_string(),
+                    target: "127.0.0.1:80"
+                        .parse::<SocketAddr>()
+                        .map_err(|error| Error::ExtensionError(error.to_string()))?,
+                }),
+            )
+            .state;
         let runner: Arc<DynHandler> = Arc::new(Runner {
             protocol,
             interpret: Arc::clone(&interpreter),
@@ -904,6 +882,96 @@ mod tests {
                 initiator: Initiator::Local,
             }) if actual_peer == peer
         ));
+        Ok(())
+    }
+
+    /// A repeated `Connect` effect is an idempotent engine observation, not a
+    /// backend failure that may roll back the reducer's committed session.
+    #[tokio::test]
+    async fn test_repeated_connect_preserves_reducer_state_without_close_feedback() -> Result<()> {
+        let extensions = extensions()?;
+        let engine = Arc::new(TransportSessions::new());
+        let interpreter = NativeRelay::new(Arc::clone(&engine));
+        let effect_scope = EffectScope::new(Scope::new(extensions.core(), TCP.to_string()));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|error| Error::ExtensionError(format!("bind test listener: {error}")))?;
+        let target = listener
+            .local_addr()
+            .map_err(|error| Error::ExtensionError(format!("read test listener: {error}")))?;
+        let relay = Relay::tcp();
+        let did = extensions.core().did();
+        let peer = Did::from(7_u32);
+        let initial = relay.init();
+        let registered = relay.step(
+            Ctx {
+                did,
+                state: &initial,
+            },
+            RelayEvent::Command(RelayCommand::RegisterService {
+                name: "web".to_string(),
+                target,
+            }),
+        );
+        let opened = relay.step(
+            Ctx {
+                did,
+                state: &registered.state,
+            },
+            RelayEvent::Frame {
+                from: peer,
+                frame: Frame::Open {
+                    session: SessionId(9),
+                    service: "web".to_string(),
+                },
+            },
+        );
+        let (connect, key) = match opened.effects.as_slice() {
+            [effect @ RelayEffect::Connect { key, .. }] => (effect.clone(), key.clone()),
+            effects => {
+                return Err(Error::ExtensionError(format!(
+                    "expected one Connect effect, got {effects:?}"
+                )));
+            }
+        };
+
+        let first_feedback = interpreter.run(&effect_scope, connect.clone()).await?;
+        assert!(first_feedback.is_empty());
+        let repeated_feedback = interpreter.run(&effect_scope, connect).await?;
+
+        let mut state = opened.state;
+        let mut feedback_effects = Vec::new();
+        for payload in repeated_feedback {
+            let event = relay
+                .decode(Wire {
+                    from: did,
+                    me: did,
+                    payload: payload.as_ref(),
+                })
+                .map_err(|Reject(why)| Error::ExtensionError(why))?;
+            let transition = relay.step(Ctx { did, state: &state }, event);
+            state = transition.state;
+            feedback_effects.extend(transition.effects);
+        }
+        assert!(
+            feedback_effects
+                .iter()
+                .all(|effect| !matches!(effect, RelayEffect::SendClose { .. })),
+            "an occupied engine slot must not reduce to a peer Close"
+        );
+
+        let duplicate_open = relay.step(Ctx { did, state: &state }, RelayEvent::Frame {
+            from: peer,
+            frame: Frame::Open {
+                session: SessionId(9),
+                service: "web".to_string(),
+            },
+        });
+        assert!(
+            duplicate_open.effects.is_empty(),
+            "the reducer must still track the original session"
+        );
+        engine.close_for_effect(&key);
         Ok(())
     }
 

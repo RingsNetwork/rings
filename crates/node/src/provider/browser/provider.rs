@@ -112,6 +112,30 @@ pub struct BrowserOnionProxyResponse {
     pub route: OnionProxyRoute,
 }
 
+/// Browser-facing projection of an internally selected onion route.
+///
+/// This is intentionally separate from the removed `buildOnionRoute` JSON-RPC request and
+/// response. Browser proxy methods still return the route they actually used so their caller can
+/// render and audit the result.
+#[derive(serde::Serialize)]
+struct BrowserOnionRouteInfo {
+    /// Ordered DID hops ending with the exit.
+    hops: Vec<String>,
+    /// Canonical service selected by the route.
+    service: String,
+    /// Signed exit descriptor selected by the route.
+    exit: OnionExitDescriptorInfo,
+}
+
+/// Project a selected route into the browser API without recreating the removed RPC method.
+fn browser_onion_route_info(route: &crate::onion::OnionRoute) -> NodeResult<BrowserOnionRouteInfo> {
+    Ok(BrowserOnionRouteInfo {
+        hops: route.hops().iter().map(ToString::to_string).collect(),
+        service: route.service().to_string(),
+        exit: crate::rpc_dto::onion_exit_descriptor_info(route.exit().clone())?,
+    })
+}
+
 #[derive(Clone)]
 enum BrowserOnionDirectorySource {
     Local,
@@ -303,8 +327,7 @@ impl BrowserOnionProxy {
                 .route_http(&target_authority)
                 .await
                 .map_err(JsError::from)?;
-            let response =
-                crate::rpc_dto::onion_route_response(route.route).map_err(JsError::from)?;
+            let response = browser_onion_route_info(&route.route).map_err(JsError::from)?;
             let value = js_value::serialize(&response).map_err(JsError::from)?;
             Ok(value)
         })
@@ -332,8 +355,8 @@ impl BrowserOnionProxy {
                 .request_http(url.as_str(), request)
                 .await
                 .map_err(JsError::from)?;
-            let route_response = crate::rpc_dto::onion_route_response(response.route.route)
-                .map_err(JsError::from)?;
+            let route_response =
+                browser_onion_route_info(&response.route.route).map_err(JsError::from)?;
             let route_value = js_value::serialize(&route_response).map_err(JsError::from)?;
             let value = js_value::serialize(&response.response).map_err(JsError::from)?;
             js_sys::Reflect::set(&value, &JsValue::from_str("route"), &route_value)?;

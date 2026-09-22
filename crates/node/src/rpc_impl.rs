@@ -358,18 +358,6 @@ impl HandleRpc<LookupOnionExitsRequest, LookupOnionExitsResponse> for Processor 
 
 #[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
-impl HandleRpc<BuildOnionRouteRequest, BuildOnionRouteResponse> for Processor {
-    async fn handle_rpc(&self, req: BuildOnionRouteRequest) -> Result<BuildOnionRouteResponse> {
-        let route = self
-            .build_onion_route(req.service, req.hop_count as usize, req.allow_short_paths)
-            .await
-            .map_err(Error::from)?;
-        crate::rpc_dto::onion_route_response(route).map_err(Error::from)
-    }
-}
-
-#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
-#[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
 impl HandleRpc<NodeInfoRequest, NodeInfoResponse> for Processor {
     async fn handle_rpc(&self, _req: NodeInfoRequest) -> Result<NodeInfoResponse> {
         self.get_node_info()

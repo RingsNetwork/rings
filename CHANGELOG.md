@@ -13,6 +13,15 @@
 
 ### Breaking changes
 
+- Subtraction round, `rings-node` section (#787), targeting protocol cutover 0.29.0. Onion-exit
+  descriptors now sign one canonical service name instead of a `services` list containing a
+  second transport axis; the unused transport enum, descriptor and entry-guard schema numbers,
+  and `buildOnionRoute` RPC are removed. HTTPS remains a reserved service handled by the native
+  TCP exit runtime. Node configuration is total-cutover too: `session_sk` is a file path, the raw
+  session fallback and `ecdsa_key`/`session_manager` fields are rejected, and semantic role and
+  heartbeat validation runs once on the final processor builder state. Mixed 0.28/0.29 onion
+  descriptors are not supported.
+
 - Subtraction round, DHT section (#787). Pre-CorrectChord defaults that #604 replaced are
   removed: the `NotifyPredecessorReport` reply (message variant 5; later wire indices shift down
   by one, a total cutover), the periodic predecessor notify to every successor (the stabilize
@@ -31,6 +40,15 @@
   successor releases its capacity without waiting for its lane head to finish delivery.
 
 ### Removed
+
+- Subtraction round, `rings-node` implementation residue (#787): the extension dispatch
+  re-injection carrier; extension-mutated online capability storage; unreachable onion-exit
+  failures; duplicate route-selection wrappers and constant filters; the `/ws` sink and book
+  page; custom registration-task and old publisher surfaces; relay constructor service maps;
+  polling-based registration stop; duplicate engine replacement/cancellation; node gzip helpers;
+  unused timeout, gateway, provider, onion constructor, and circuit-security APIs; and the
+  `X-NODE-VERSION` response header. TCP and HTTPS exit adapters now share one forward-replay
+  witness, and duplicate engine opens preserve the already committed resource.
 
 - Subtraction round, swarm section (#787). The send path no longer retires a peer whose data
   channel does not open within its wait: an admitted connection that is not ready is a

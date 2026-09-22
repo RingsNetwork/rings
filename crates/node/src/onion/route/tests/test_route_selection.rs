@@ -15,10 +15,9 @@ use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitDescriptorBody;
 use crate::onion::OnionExitEpoch;
 use crate::onion::OnionExitPolicy;
-use crate::onion::OnionExitService;
 use crate::onion::OnionExitTarget;
-use crate::onion::OnionExitTransport;
 use crate::onion::OnionRouteError;
+use crate::onion::OnionServiceName;
 use crate::onion::ONION_RELAY_CAPABILITY;
 use crate::online::OnlineNodeDescriptor;
 use crate::online::OnlineNodeDescriptorBody;
@@ -27,8 +26,9 @@ use crate::online::OnlineNodeType;
 /// Stable non-zero process epoch used only to make signed route fixtures deterministic.
 const TEST_EXIT_PROCESS_EPOCH: OnionExitEpoch = OnionExitEpoch::new([29; 16]);
 
-fn service(name: &str) -> OnionExitService {
-    OnionExitService::new(name, OnionExitTransport::Tcp).expect("valid test service")
+/// Parse one canonical service name for route-selection fixtures.
+fn service(name: &str) -> OnionServiceName {
+    OnionServiceName::parse(name).expect("valid test service")
 }
 
 fn signed_exit_at(heartbeat_at_ms: u128, expires_at_ms: u128) -> Result<OnionExitDescriptor> {
@@ -142,11 +142,42 @@ fn route_request(
     hop_count: usize,
     allow_short_paths: bool,
 ) -> Result<OnionRouteRequest> {
-    OnionRouteRequest::new(service, hop_count, allow_short_paths)
+    Ok(OnionRouteRequest::from_service_name(
+        OnionServiceName::parse(service)?,
+        hop_count,
+        allow_short_paths,
+    ))
 }
 
 fn test_dht_protocol() -> DhtProtocolMode {
     DhtProtocolMode::new(1, DATA_REDUNDANT, 0)
+}
+
+/// Select a test route after applying the directory's descriptor-admission boundary.
+fn select_validated_route(
+    local: rings_core::dht::Did,
+    now_ms: u128,
+    request: &OnionRouteRequest,
+    online_nodes: impl IntoIterator<Item = OnlineNodeDescriptor>,
+    exits: impl IntoIterator<Item = OnionExitDescriptor>,
+    qualities: impl IntoIterator<Item = (rings_core::dht::Did, PeerQuality)>,
+) -> Result<OnionRoute> {
+    let candidates = OnionRouteCandidates::from_validated_descriptors(
+        local,
+        test_dht_protocol(),
+        now_ms,
+        request.service_name(),
+        online_nodes,
+        exits,
+    );
+    select_onion_route_from_candidates_with_first_hop_policy(
+        request,
+        candidates,
+        qualities,
+        &mut SystemRouteEntropy::new(),
+        |_| true,
+        |_| true,
+    )
 }
 
 struct FixedEntropy {
@@ -179,15 +210,8 @@ fn test_route_builder_uses_presence_relays_and_exit_registry() -> Result<()> {
     ];
     let request = route_request("web", 3, false)?;
 
-    let route = select_onion_route(
-        local,
-        test_dht_protocol(),
-        50,
-        &request,
-        online,
-        vec![exit.clone()],
-        Vec::new(),
-    )?;
+    let route =
+        select_validated_route(local, 50, &request, online, vec![exit.clone()], Vec::new())?;
 
     assert_eq!(route.hops().len(), 3);
     assert_eq!(route.exit_did(), exit.did);
@@ -202,15 +226,7 @@ fn test_route_builder_canonicalizes_service_before_constructing_route() -> Resul
     let exit = signed_exit_at(20, 100)?;
     let request = route_request("WeB", 1, false)?;
 
-    let route = select_onion_route(
-        local,
-        test_dht_protocol(),
-        50,
-        &request,
-        Vec::new(),
-        vec![exit],
-        Vec::new(),
-    )?;
+    let route = select_validated_route(local, 50, &request, Vec::new(), vec![exit], Vec::new())?;
 
     assert_eq!(route.service(), "web");
     Ok(())
@@ -267,9 +283,8 @@ fn test_route_builder_rejects_too_short_production_route() -> Result<()> {
     let exit = signed_exit_at(20, 100)?;
     let request = route_request("web", 3, false)?;
 
-    let result = select_onion_route(
+    let result = select_validated_route(
         local,
-        test_dht_protocol(),
         50,
         &request,
         vec![online_node_at(&relay, 20, 100).map_err(Error::CoreError)?],
@@ -293,9 +308,8 @@ fn test_route_builder_rejects_nodes_without_relay_capability() -> Result<()> {
     let exit = signed_exit_at(20, 100)?;
     let request = route_request("web", 2, false)?;
 
-    let result = select_onion_route(
+    let result = select_validated_route(
         local,
-        test_dht_protocol(),
         50,
         &request,
         vec![online_node_at_with_capabilities(&relay, 20, 100, vec![]).map_err(Error::CoreError)?],
@@ -321,11 +335,12 @@ fn test_route_builder_reports_no_live_exit_before_first_hop_filter() -> Result<(
     };
     let mut entropy = FixedEntropy::new([0]);
 
-    let result = select_onion_route_from_candidates_with_first_hop(
+    let result = select_onion_route_from_candidates_with_first_hop_policy(
         &request,
         candidates,
         Vec::new(),
         &mut entropy,
+        |_| false,
         |_| false,
     );
 
@@ -354,7 +369,7 @@ fn test_route_builder_samples_relays_by_quality_weight() -> Result<()> {
     };
     let mut entropy = FixedEntropy::new([1, 0]);
 
-    let route = select_onion_route_from_candidates(
+    let route = select_onion_route_from_candidates_with_first_hop_policy(
         &request,
         candidates,
         vec![
@@ -362,6 +377,8 @@ fn test_route_builder_samples_relays_by_quality_weight() -> Result<()> {
             (healthy.account_did(), PeerQuality::Healthy),
         ],
         &mut entropy,
+        |_| true,
+        |_| true,
     )?;
 
     assert_eq!(route.hops().first().copied(), Some(healthy.account_did()));
@@ -390,7 +407,14 @@ fn test_route_builder_entropy_can_select_second_unknown_relay() -> Result<()> {
     };
     let mut entropy = FixedEntropy::new([4, 0]);
 
-    let route = select_onion_route_from_candidates(&request, candidates, Vec::new(), &mut entropy)?;
+    let route = select_onion_route_from_candidates_with_first_hop_policy(
+        &request,
+        candidates,
+        Vec::new(),
+        &mut entropy,
+        |_| true,
+        |_| true,
+    )?;
 
     assert_eq!(route.hops().first().copied(), Some(second_sorted));
     Ok(())
@@ -413,11 +437,12 @@ fn test_route_builder_first_hop_filter_preserves_remote_later_relays() -> Result
     };
     let mut entropy = FixedEntropy::new([0, 0, 0]);
 
-    let route = select_onion_route_from_candidates_with_first_hop(
+    let route = select_onion_route_from_candidates_with_first_hop_policy(
         &request,
         candidates,
         Vec::new(),
         &mut entropy,
+        |did| did == direct_did,
         |did| did == direct_did,
     )?;
 
@@ -440,11 +465,12 @@ fn test_route_builder_does_not_consume_only_direct_relay_as_exit_first() -> Resu
     };
     let mut entropy = FixedEntropy::new([0, 0]);
 
-    let route = select_onion_route_from_candidates_with_first_hop(
+    let route = select_onion_route_from_candidates_with_first_hop_policy(
         &request,
         candidates,
         Vec::new(),
         &mut entropy,
+        |did| did == direct_did,
         |did| did == direct_did,
     )?;
 
@@ -467,11 +493,12 @@ fn test_route_builder_rejects_route_without_permitted_first_hop() -> Result<()> 
     };
     let mut entropy = FixedEntropy::new([0, 0]);
 
-    let result = select_onion_route_from_candidates_with_first_hop(
+    let result = select_onion_route_from_candidates_with_first_hop_policy(
         &request,
         candidates,
         Vec::new(),
         &mut entropy,
+        |did| did == permitted,
         |did| did == permitted,
     );
 
@@ -497,11 +524,12 @@ fn test_route_builder_shortens_to_permitted_exit_when_no_first_relay_is_allowed(
     };
     let mut entropy = FixedEntropy::new([0, 0]);
 
-    let route = select_onion_route_from_candidates_with_first_hop(
+    let route = select_onion_route_from_candidates_with_first_hop_policy(
         &request,
         candidates,
         Vec::new(),
         &mut entropy,
+        |did| did == exit_did,
         |did| did == exit_did,
     )?;
 

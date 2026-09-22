@@ -6,7 +6,6 @@ use rings_core::dht::Did;
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::OnionExitTransport;
 use crate::error::Error;
 
 /// Local route/circuit failure before any user-facing rendering.
@@ -14,8 +13,6 @@ use crate::error::Error;
 pub enum OnionRouteError {
     /// A route or circuit was unexpectedly empty.
     RouteHasNoHops,
-    /// The requested route service is empty after normalization.
-    EmptyRouteService,
     /// The requested or constructed hop count is outside the circuit bound.
     HopCountOutOfBounds {
         /// Requested or constructed hop count.
@@ -35,21 +32,14 @@ pub enum OnionRouteError {
         /// Requested service name.
         service: String,
     },
-    /// Live exits advertise the service name but none use the required transport.
-    NoExitWithTransport {
-        /// Requested service name.
-        service: String,
-        /// Required transport class.
-        transport: OnionExitTransport,
-    },
-    /// Live exits advertise the service transport, but none can serve the requested proxy protocol.
+    /// Live exits advertise the service, but none can serve the requested proxy protocol.
     NoExitForProxyProtocol {
         /// Requested service name.
         service: String,
         /// Requested proxy protocol label.
         protocol: String,
     },
-    /// Live exits advertise the service and transport, but no policy allows the target.
+    /// Live exits advertise the service, but no policy allows the target.
     NoExitAllowsTarget {
         /// Requested service name.
         service: String,
@@ -151,7 +141,6 @@ impl fmt::Display for OnionRouteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::RouteHasNoHops => f.write_str("onion route has no hops"),
-            Self::EmptyRouteService => f.write_str("onion route service must not be empty"),
             Self::HopCountOutOfBounds {
                 hop_count,
                 max_hops,
@@ -165,10 +154,6 @@ impl fmt::Display for OnionRouteError {
             Self::NoLiveExit { service } => {
                 write!(f, "no live onion exit offers service {service:?}")
             }
-            Self::NoExitWithTransport { service, transport } => write!(
-                f,
-                "no live onion exit offers service {service:?} over {transport:?}"
-            ),
             Self::NoExitForProxyProtocol { service, protocol } => write!(
                 f,
                 "no live onion exit offers service {service:?} for proxy protocol {protocol:?}"
@@ -269,8 +254,6 @@ impl fmt::Display for OnionRouteError {
 /// Recoverable failure reported by an onion exit to its client.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum OnionExitFailure {
-    /// The requested exit service is not enabled on the selected node.
-    ExitUnavailable,
     /// The exit policy or local limiter denied the operation.
     PermissionDenied,
     /// The target name could not be resolved.
@@ -306,7 +289,6 @@ impl OnionExitFailure {
 impl fmt::Display for OnionExitFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ExitUnavailable => f.write_str("onion exit service is not enabled locally"),
             Self::PermissionDenied => Error::NoPermission.fmt(f),
             Self::ResolveTarget => f.write_str("onion exit could not resolve target"),
             Self::ConnectTarget => f.write_str("onion exit could not connect to target"),

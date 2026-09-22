@@ -72,8 +72,7 @@ use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitEpoch;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionExitRegistration;
-use crate::onion::OnionExitService;
-use crate::onion::OnionRoute;
+use crate::onion::OnionServiceName;
 use crate::onion::ONION_EXITS_TOPIC;
 use crate::onion::ONION_RELAY_CAPABILITY;
 use crate::online::OnlineNodeDescriptor;
@@ -109,7 +108,6 @@ pub use config::ProcessorConfigSerialized;
 
 const DHT_LOOKUP_CACHE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DHT_LOOKUP_CACHE_POLL_ATTEMPTS: usize = 40;
-const REGISTRATION_STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[cfg(not(all(feature = "browser", target_family = "wasm")))]
 async fn sleep_dht_lookup_poll_interval(interval: Duration) -> Result<()> {
@@ -131,16 +129,24 @@ async fn sleep_registration_interval_with_stop(
     stop: &StopToken,
     sibling_stop: &StopToken,
 ) -> Result<bool> {
-    let mut remaining = interval;
-    while !remaining.is_zero() {
-        if stop.should_stop() || sibling_stop.should_stop() {
-            return Ok(false);
+    use futures::future::select;
+    use futures::pin_mut;
+
+    let stopped = async {
+        let own_stop = stop.stopped();
+        let maintenance_stop = sibling_stop.stopped();
+        pin_mut!(own_stop, maintenance_stop);
+        let _ = select(own_stop, maintenance_stop).await;
+    };
+    let interval_elapsed = sleep_registration_interval(interval);
+    pin_mut!(stopped, interval_elapsed);
+    match select(interval_elapsed, stopped).await {
+        futures::future::Either::Left((result, _)) => {
+            result?;
+            Ok(true)
         }
-        let step = std::cmp::min(remaining, REGISTRATION_STOP_POLL_INTERVAL);
-        sleep_registration_interval(step).await?;
-        remaining = remaining.saturating_sub(step);
+        futures::future::Either::Right(((), _)) => Ok(false),
     }
-    Ok(!(stop.should_stop() || sibling_stop.should_stop()))
 }
 
 /// Which node a handshake over HTTP must end up connected to.
@@ -249,11 +255,6 @@ impl Processor {
 
     fn registration_context_with_stop(&self, stop: StopToken) -> RegistrationContext<'_> {
         RegistrationContext::new_with_stop(self, stop)
-    }
-
-    pub(crate) fn add_online_node_capabilities<I>(&self, capabilities: I) -> Result<()>
-    where I: IntoIterator<Item = &'static str> {
-        self.online_node_registration.add_capabilities(capabilities)
     }
 
     #[cfg(all(test, feature = "node"))]
@@ -431,16 +432,6 @@ impl Processor {
             }
         }
         Ok(self.storage_check_cache(entry_key).await)
-    }
-
-    /// Build an onion route from live presence descriptors and live exit descriptors.
-    pub async fn build_onion_route(
-        &self,
-        service: String,
-        hop_count: usize,
-        allow_short_paths: bool,
-    ) -> Result<OnionRoute> {
-        directory::build_onion_route(self, service, hop_count, allow_short_paths).await
     }
 
     /// Build an onion proxy route for a client target through a target-agnostic proxy config.

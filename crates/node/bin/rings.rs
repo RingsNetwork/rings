@@ -35,9 +35,7 @@ use rings_node::onion::proxy::http::OnionHttpProxyOptions;
 use rings_node::onion::tcp::NativeOnionCircuitHandle;
 use rings_node::onion::tcp::NativeOnionTcpExitConfig;
 use rings_node::onion::OnionEntryGuardStorage;
-use rings_node::onion::OnionExitService;
 use rings_node::onion::OnionExitTarget;
-use rings_node::onion::OnionExitTransport;
 use rings_node::onion::OnionServiceName;
 use rings_node::prelude::rings_core::chunk::ReassemblyLimits;
 use rings_node::prelude::rings_core::dht::Did;
@@ -151,29 +149,12 @@ impl ReassemblyProfile {
     }
 }
 
-fn parse_onion_exit_service(raw: &str) -> Result<OnionExitService, String> {
-    let (name, transport) = raw
-        .split_once(':')
-        .map_or((raw, raw), |(name, transport)| (name, transport));
-    let name = name.trim();
-    if name.is_empty() {
-        return Err("onion exit service name must not be empty".to_string());
-    }
-    let transport = match transport.trim().to_ascii_lowercase().as_str() {
-        "tcp" => OnionExitTransport::Tcp,
-        "udp" => OnionExitTransport::Udp,
-        "webtransport" | "web-transport" => OnionExitTransport::WebTransport,
-        "requestresponse" | "request-response" => OnionExitTransport::RequestResponse,
-        "https" => OnionExitTransport::Tcp,
-        other => {
-            return Err(format!(
-                "unsupported onion exit transport {other:?}; expected tcp, udp, webtransport, request-response, or https (alias for tcp)"
-            ));
-        }
-    };
-    OnionExitService::new(name, transport).map_err(|error| error.to_string())
+/// Parse a singular onion-exit service name from the run command.
+fn parse_onion_exit_service(raw: &str) -> Result<OnionServiceName, String> {
+    OnionServiceName::parse(raw).map_err(|error| error.to_string())
 }
 
+/// Parse a canonical service name for client-side onion proxy options.
 fn parse_onion_service_name(raw: &str) -> Result<OnionServiceName, String> {
     OnionServiceName::parse(raw).map_err(|error| error.to_string())
 }
@@ -191,19 +172,6 @@ fn payload_arg_or_stdin(value: &str) -> anyhow::Result<String> {
     std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
         .context("failed to read handshake payload from stdin")?;
     Ok(buf.trim().to_string())
-}
-
-fn validate_native_onion_exit_services(services: &[OnionExitService]) -> anyhow::Result<()> {
-    for service in services {
-        if service.transport != OnionExitTransport::Tcp {
-            anyhow::bail!(
-                "native onion exits can serve only TCP transport; service {:?} uses {:?}",
-                service.name,
-                service.transport
-            );
-        }
-    }
-    Ok(())
 }
 
 #[derive(Subcommand, Debug)]
@@ -317,14 +285,6 @@ struct RunCommand {
     pub ice_servers: Option<String>,
 
     #[arg(
-        long = "key",
-        short = 'k',
-        help = "Your ECDSA key. If not provided, use ECDSA_KEY in env or ecdsa_key in config file",
-        env
-    )]
-    pub ecdsa_key: Option<SecretKey>,
-
-    #[arg(
         long,
         help = "Stabilization interval in seconds. If not provided, use stabilize_interval in config file or 15",
         env
@@ -398,10 +358,10 @@ struct RunCommand {
     #[arg(
         long,
         value_parser = parse_onion_exit_service,
-        help = "Exit service in name:transport form, e.g. https:tcp or web:tcp. May be repeated.",
+        help = "TCP-backed exit service name, e.g. https or web. May be repeated.",
         env
     )]
-    pub onion_exit_service: Vec<OnionExitService>,
+    pub onion_exit_service: Vec<OnionServiceName>,
 
     #[arg(
         long,
@@ -500,14 +460,6 @@ struct ClientArgs {
         env
     )]
     api_token_path: Option<String>,
-
-    #[arg(
-        long = "key",
-        short = 'k',
-        env,
-        help = "Your ECDSA key. If not provided, use ECDSA_KEY in env or ecdsa_key in config file"
-    )]
-    pub ecdsa_key: Option<SecretKey>,
 
     #[command(flatten)]
     config_args: ConfigArgs,
@@ -855,9 +807,6 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
             );
         };
         gateway.enabled = true;
-    }
-    if c.advertise_onion_exit {
-        validate_native_onion_exit_services(&c.onion_exit_services)?;
     }
     let pc = ProcessorConfig::try_from(c.clone())?;
     let api_security = configure_api_security(

@@ -26,8 +26,6 @@ use crate::descriptor::SignedDescriptorBody;
 
 /// DHT topic used for online-node registry descriptors.
 pub const ONLINE_NODES_TOPIC: &str = "online_nodes";
-/// Capability label for nodes that provide DHT storage.
-pub const ONLINE_NODE_CAPABILITY_STORAGE: &str = "storage";
 /// Message family of the online-node descriptor signature.
 const ONLINE_NODE_DESCRIPTOR_DOMAIN_TAG: DomainTag =
     domain_tag!("rings-node:online-node-descriptor");
@@ -359,7 +357,7 @@ mod tests {
                 network_id: 1,
                 storage_redundancy: 6,
                 dht_virtual_nodes: 0,
-                capabilities: vec![ONLINE_NODE_CAPABILITY_STORAGE.to_string()],
+                capabilities: Vec::new(),
                 endpoint_hint: None,
                 started_at_ms: 10,
                 heartbeat_at_ms,

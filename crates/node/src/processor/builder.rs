@@ -1,3 +1,4 @@
+use super::config::validate_dht_virtual_nodes;
 use super::config::validate_onion_role_config;
 use super::*;
 use crate::consts::DATA_REDUNDANT;
@@ -25,9 +26,8 @@ pub struct ProcessorBuilder {
     pub(in crate::processor) advertise_onion_exit: bool,
     pub(in crate::processor) onion_exit_heartbeat_interval: Duration,
     pub(in crate::processor) onion_exit_ttl: Duration,
-    pub(in crate::processor) onion_exit_services: Vec<OnionExitService>,
+    pub(in crate::processor) onion_exit_services: Vec<OnionServiceName>,
     pub(in crate::processor) onion_exit_policy: OnionExitPolicy,
-    pub(in crate::processor) registration_tasks: Vec<Arc<dyn RegistrationTask>>,
     pub(in crate::processor) dht_finger_table_size: usize,
     pub(in crate::processor) reassembly_limits: ReassemblyLimits,
 }
@@ -42,23 +42,6 @@ impl ProcessorBuilder {
 
     /// initialize a [ProcessorBuilder] with a [ProcessorConfig].
     pub fn from_config(config: &ProcessorConfig) -> Result<Self> {
-        validate_online_node_registration_timing(
-            config.advertise_presence,
-            config.online_node_heartbeat_interval,
-            config.online_node_ttl,
-        )?;
-        validate_onion_exit_registration_timing(
-            config.advertise_onion_exit,
-            config.onion_exit_heartbeat_interval,
-            config.onion_exit_ttl,
-        )?;
-        validate_onion_role_config(
-            config.advertise_presence,
-            config.advertise_onion_relay,
-            config.advertise_onion_exit,
-            &config.onion_exit_services,
-            &config.onion_exit_policy,
-        )?;
         Ok(Self {
             network_id: config.network_id,
             ice_servers: config.ice_servers.clone(),
@@ -83,7 +66,6 @@ impl ProcessorBuilder {
             onion_exit_ttl: config.onion_exit_ttl,
             onion_exit_services: config.onion_exit_services.clone(),
             onion_exit_policy: config.onion_exit_policy.clone(),
-            registration_tasks: Vec::new(),
             dht_finger_table_size: DEFAULT_FINGER_TABLE_SIZE,
             reassembly_limits: ReassemblyLimits::production(),
         })
@@ -167,21 +149,9 @@ impl ProcessorBuilder {
         self
     }
 
-    /// Add a custom periodic registration task.
-    pub fn registration_task<T>(mut self, task: T) -> Self
-    where T: RegistrationTask + 'static {
-        self.registration_tasks.push(Arc::new(task));
-        self
-    }
-
-    /// Add an already shared custom periodic registration task.
-    pub fn shared_registration_task(mut self, task: Arc<dyn RegistrationTask>) -> Self {
-        self.registration_tasks.push(task);
-        self
-    }
-
     /// Build the [Processor].
     pub fn build(self) -> Result<Processor> {
+        self.validate()?;
         self.session_sk
             .session()
             .verify_self()
@@ -207,9 +177,8 @@ impl ProcessorBuilder {
             endpoint_hint,
             online_node_capabilities,
         );
-        let mut registration_tasks = self.registration_tasks;
+        let mut registration_tasks: Vec<Arc<dyn RegistrationTask>> = Vec::new();
         if self.advertise_presence {
-            online_node_registration.validate_enabled_schedule()?;
             registration_tasks.push(Arc::new(online_node_registration.clone()));
         }
         if self.advertise_onion_exit {
@@ -221,7 +190,6 @@ impl ProcessorBuilder {
                 self.onion_exit_policy,
                 self.onion_exit_epoch,
             );
-            onion_exit_registration.validate_enabled_schedule()?;
             registration_tasks.push(Arc::new(onion_exit_registration));
         }
 
@@ -260,5 +228,31 @@ impl ProcessorBuilder {
             advertise_onion_relay: self.advertise_onion_relay,
             registration_tasks,
         })
+    }
+
+    /// Validate the complete builder state at the single runtime construction boundary.
+    ///
+    /// Performing these checks after all builder mutations guarantees that every
+    /// native, browser, and programmatic entrance rejects the same illegal role,
+    /// schedule, and virtual-node combinations.
+    fn validate(&self) -> Result<()> {
+        validate_dht_virtual_nodes(self.dht_virtual_nodes)?;
+        validate_online_node_registration_timing(
+            self.advertise_presence,
+            self.online_node_heartbeat_interval,
+            self.online_node_ttl,
+        )?;
+        validate_onion_exit_registration_timing(
+            self.advertise_onion_exit,
+            self.onion_exit_heartbeat_interval,
+            self.onion_exit_ttl,
+        )?;
+        validate_onion_role_config(
+            self.advertise_presence,
+            self.advertise_onion_relay,
+            self.advertise_onion_exit,
+            &self.onion_exit_services,
+            &self.onion_exit_policy,
+        )
     }
 }

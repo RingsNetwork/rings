@@ -320,31 +320,6 @@ pub struct LookupOnlineNodesResponse {
     pub nodes: Vec<OnlineNodeDescriptorInfo>,
 }
 
-/// Transport advertised by an onion exit service.
-#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
-pub enum OnionExitTransportInfo {
-    /// TCP stream exit transport.
-    #[default]
-    Tcp,
-    /// UDP datagram exit transport.
-    Udp,
-    /// WebTransport exit transport.
-    WebTransport,
-    /// Request-response protocol exit transport.
-    RequestResponse,
-    /// Legacy HTTPS exit marker retained for wire compatibility.
-    Https,
-}
-
-/// Service name and transport pair advertised by an onion exit.
-#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
-pub struct OnionExitServiceInfo {
-    /// Service name, such as `tcp` or `https`.
-    pub name: String,
-    /// Transport backing the service.
-    pub transport: OnionExitTransportInfo,
-}
-
 /// Policy advertised by an onion exit descriptor.
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct OnionExitPolicyInfo {
@@ -375,8 +350,8 @@ pub struct OnionExitDescriptorInfo {
     pub node_type: OnlineNodeTypeInfo,
     /// Overlay network identifier the exit belongs to.
     pub network_id: u32,
-    /// Services offered by the exit.
-    pub services: Vec<OnionExitServiceInfo>,
+    /// Service offered by this signed descriptor.
+    pub service: String,
     /// Target and resource policy enforced by the exit.
     pub policy: OnionExitPolicyInfo,
     /// Descriptor creation timestamp in Unix milliseconds.
@@ -407,30 +382,6 @@ pub struct LookupOnionExitsRequest {
 pub struct LookupOnionExitsResponse {
     /// Onion exit descriptors returned by the directory.
     pub exits: Vec<OnionExitDescriptorInfo>,
-}
-
-/// Request to build an onion route for a service.
-#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
-pub struct BuildOnionRouteRequest {
-    /// Service name requested by the route.
-    pub service: String,
-    /// Desired hop count including the exit. `0` means node default.
-    #[serde(default)]
-    pub hop_count: u32,
-    /// Allow route selection to return fewer hops when too few relays are live.
-    #[serde(default)]
-    pub allow_short_paths: bool,
-}
-
-/// Response containing a selected onion route and exit.
-#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
-pub struct BuildOnionRouteResponse {
-    /// Ordered DID hops, ending with the selected exit.
-    pub hops: Vec<String>,
-    /// Service name satisfied by the selected route.
-    pub service: String,
-    /// Onion exit selected for the route.
-    pub exit: OnionExitDescriptorInfo,
 }
 
 /// Request to inspect the local node.

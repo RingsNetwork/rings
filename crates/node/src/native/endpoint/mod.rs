@@ -6,17 +6,14 @@
 //! request to the route handler as a `DecodedJsonRpc` extension so that no later stage buffers
 //! or parses the body again.
 mod http_error;
-mod ws;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use axum::extract::ConnectInfo;
 use axum::extract::FromRequest;
 use axum::extract::Request;
 use axum::extract::State;
-use axum::extract::WebSocketUpgrade;
 use axum::http::header::CONTENT_TYPE;
 use axum::http::header::WWW_AUTHENTICATE;
 use axum::http::HeaderValue;
@@ -49,13 +46,6 @@ where M: jsonrpc_core::Middleware<Arc<Processor>>
 {
     processor: Arc<Processor>,
     io_handler: MetaIoHandler<Arc<Processor>, M>,
-}
-
-/// websocket state
-#[derive(Clone)]
-#[allow(dead_code)]
-pub struct WsState {
-    processor: Arc<Processor>,
 }
 
 /// Status state
@@ -106,15 +96,6 @@ impl DecodedJsonRpc {
 struct ExternalRpcMiddleware;
 struct InternalRpcMiddleware;
 
-/// Run a web server to handle jsonrpc request locally
-pub async fn run_internal_api(
-    port: u16,
-    processor: Arc<Processor>,
-    security: Arc<ApiSecurity>,
-) -> anyhow::Result<()> {
-    run_internal_api_with_gateway(port, processor, None, security).await
-}
-
 /// Run the local JSON-RPC server with an optional foreground-gateway status endpoint.
 pub async fn run_internal_api_with_gateway(
     port: u16,
@@ -128,7 +109,6 @@ pub async fn run_internal_api_with_gateway(
         .into_make_service_with_connect_info::<SocketAddr>();
 
     println!("JSON-RPC endpoint: http://{binding_addr}");
-    println!("WebSocket endpoint: http://{binding_addr}/ws");
     if gateway_configured {
         println!("Gateway status endpoint: http://{binding_addr}/gateway/status");
     }
@@ -154,7 +134,7 @@ pub async fn run_external_api(
     Ok(())
 }
 
-/// Build the operator's control router: JSON-RPC, WebSocket, status, and optional gateway status.
+/// Build the operator's control router: JSON-RPC, status, and optional gateway status.
 fn internal_router(
     processor: Arc<Processor>,
     gateway: Option<GatewayStatusHandle>,
@@ -164,14 +144,10 @@ fn internal_router(
         processor: processor.clone(),
         io_handler: MetaIoHandler::with_middleware(InternalRpcMiddleware),
     });
-    let ws_state = Arc::new(WsState {
-        processor: processor.clone(),
-    });
     let status_state = Arc::new(StatusState { processor });
 
     let mut router = Router::new()
         .route("/", post(jsonrpc_io_handler).with_state(jsonrpc_state))
-        .route("/ws", get(ws_handler).with_state(ws_state))
         .route("/status", get(status_handler).with_state(status_state));
     if let Some(status) = gateway {
         router = router.route(
@@ -199,7 +175,6 @@ fn external_router(processor: Arc<Processor>, security: Arc<ApiSecurity>) -> Rou
 fn secure_router(router: Router, policy: Arc<ApiSecurity>, listener: ApiListener) -> Router {
     let cors = policy.cors_layer();
     router
-        .layer(axum::middleware::from_fn(node_info_header))
         .layer(axum::middleware::from_fn_with_state(
             ListenerSecurity { policy, listener },
             enforce_api_security,
@@ -297,16 +272,6 @@ where
     Ok(JsonResponse(body))
 }
 
-async fn node_info_header(req: Request, next: axum::middleware::Next) -> axum::response::Response {
-    let mut res = next.run(req).await;
-    let headers = res.headers_mut();
-
-    if let Ok(version) = HeaderValue::from_str(crate::util::build_version().as_str()) {
-        headers.insert("X-NODE-VERSION", version);
-    }
-    res
-}
-
 async fn status_handler(
     State(state): State<Arc<StatusState>>,
 ) -> Result<axum::Json<NodeInfoResponse>, HttpError> {
@@ -332,15 +297,6 @@ impl IntoResponse for JsonResponse {
     fn into_response(self) -> axum::response::Response {
         ([("content-type", "application/json")], self.0).into_response()
     }
-}
-
-async fn ws_handler(
-    State(state): State<Arc<WsState>>,
-    ws: WebSocketUpgrade,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-) -> impl IntoResponse {
-    tracing::debug!("ws connected, remote: {}", addr);
-    ws.on_upgrade(move |socket| self::ws::handle_socket(state, socket))
 }
 
 mod jsonrpc_middleware_impl {
@@ -465,7 +421,6 @@ mod security_tests {
         let router = Router::new()
             .route("/", post(|| async { "accepted" }))
             .route("/status", get(|| async { "status" }))
-            .route("/ws", get(|| async { "websocket" }))
             .route("/gateway/status", get(|| async { "gateway status" }));
         secure_router(router, security, listener)
     }
@@ -527,7 +482,6 @@ mod security_tests {
             for (method, path) in [
                 (Method::POST, "/"),
                 (Method::GET, "/status"),
-                (Method::GET, "/ws"),
                 (Method::GET, "/gateway/status"),
             ] {
                 let request = Request::builder()

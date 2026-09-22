@@ -46,7 +46,7 @@ pub struct ProcessorConfig {
     /// Onion-exit registry descriptor TTL.
     pub(in crate::processor) onion_exit_ttl: Duration,
     /// Services this node publishes when onion exit advertisement is enabled.
-    pub(in crate::processor) onion_exit_services: Vec<OnionExitService>,
+    pub(in crate::processor) onion_exit_services: Vec<OnionServiceName>,
     /// Exit policy this node publishes when onion exit advertisement is enabled.
     pub(in crate::processor) onion_exit_policy: OnionExitPolicy,
 }
@@ -160,7 +160,7 @@ impl ProcessorConfig {
             && self
                 .onion_exit_services
                 .iter()
-                .any(|service| service.matches_route_service(ONION_PROXY_HTTPS_SERVICE)))
+                .any(|service| service.matches(ONION_PROXY_HTTPS_SERVICE)))
         .then(|| self.onion_exit_policy.clone())
     }
 }
@@ -180,192 +180,55 @@ impl FromStr for ProcessorConfig {
 pub struct ProcessorConfigSerialized {
     /// The network_id is used to distinguish different networks.
     /// Use 1 for main network.
-    network_id: u32,
+    pub(crate) network_id: u32,
     /// A string representing ICE servers for WebRTC
-    ice_servers: String,
+    pub(crate) ice_servers: String,
     /// An optional string representing the external address for WebRTC
-    external_address: Option<String>,
+    pub(crate) external_address: Option<String>,
     /// Inclusive lower native WebRTC UDP port bound.
-    webrtc_udp_port_min: Option<u16>,
+    pub(crate) webrtc_udp_port_min: Option<u16>,
     /// Inclusive upper native WebRTC UDP port bound.
-    webrtc_udp_port_max: Option<u16>,
+    pub(crate) webrtc_udp_port_max: Option<u16>,
     /// A string representing the dumped `SessionSk`.
-    session_sk: String,
+    pub(crate) session_sk: String,
     /// An unsigned integer representing the stabilization interval in seconds.
-    stabilize_interval: u64,
+    pub(crate) stabilize_interval: u64,
     /// Online-node registry heartbeat interval in seconds.
     #[serde(default = "default_online_node_heartbeat_interval_secs")]
-    online_node_heartbeat_interval_secs: u64,
+    pub(crate) online_node_heartbeat_interval_secs: u64,
     /// Online-node registry descriptor TTL in seconds.
     #[serde(default = "default_online_node_ttl_secs")]
-    online_node_ttl_secs: u64,
+    pub(crate) online_node_ttl_secs: u64,
     /// Runtime family advertised in the online-node registry.
     #[serde(default = "default_online_node_type")]
-    online_node_type: OnlineNodeType,
+    pub(crate) online_node_type: OnlineNodeType,
     /// Whether listen() advertises this node's presence.
     #[serde(default = "default_advertise_presence")]
-    advertise_presence: bool,
+    pub(crate) advertise_presence: bool,
     /// Storage-only virtual positions derived per physical peer.
     #[serde(default = "default_storage_virtual_positions_per_owner")]
-    dht_virtual_nodes: u16,
+    pub(crate) dht_virtual_nodes: u16,
     /// Runtime-local final-destination quotas keyed by verified origin and logical lane.
     #[serde(default)]
-    origin_quota: OriginQuotaConfig,
+    pub(crate) origin_quota: OriginQuotaConfig,
     /// Whether listen() advertises onion relay capability.
     #[serde(default = "default_advertise_onion_relay")]
-    advertise_onion_relay: bool,
+    pub(crate) advertise_onion_relay: bool,
     /// Whether listen() publishes an onion-exit descriptor.
     #[serde(default = "default_advertise_onion_exit")]
-    advertise_onion_exit: bool,
+    pub(crate) advertise_onion_exit: bool,
     /// Onion-exit registry heartbeat interval in seconds.
     #[serde(default = "default_onion_exit_heartbeat_interval_secs")]
-    onion_exit_heartbeat_interval_secs: u64,
+    pub(crate) onion_exit_heartbeat_interval_secs: u64,
     /// Onion-exit registry descriptor TTL in seconds.
     #[serde(default = "default_onion_exit_ttl_secs")]
-    onion_exit_ttl_secs: u64,
+    pub(crate) onion_exit_ttl_secs: u64,
     /// Exit services advertised by this node.
     #[serde(default = "default_onion_exit_services")]
-    onion_exit_services: Vec<OnionExitService>,
+    pub(crate) onion_exit_services: Vec<OnionServiceName>,
     /// Exit policy advertised by this node.
     #[serde(default = "default_onion_exit_policy")]
-    onion_exit_policy: OnionExitPolicy,
-}
-
-impl ProcessorConfigSerialized {
-    /// Creates a new `ProcessorConfigSerialized` instance without an external address.
-    pub fn new(
-        network_id: u32,
-        ice_servers: String,
-        session_sk: String,
-        stabilize_interval: u64,
-    ) -> Self {
-        Self {
-            network_id,
-            ice_servers,
-            external_address: None,
-            webrtc_udp_port_min: None,
-            webrtc_udp_port_max: None,
-            session_sk,
-            stabilize_interval,
-            online_node_heartbeat_interval_secs: default_online_node_heartbeat_interval_secs(),
-            online_node_ttl_secs: default_online_node_ttl_secs(),
-            online_node_type: default_online_node_type(),
-            advertise_presence: default_advertise_presence(),
-            dht_virtual_nodes: DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER,
-            origin_quota: OriginQuotaConfig::default(),
-            advertise_onion_relay: default_advertise_onion_relay(),
-            advertise_onion_exit: default_advertise_onion_exit(),
-            onion_exit_heartbeat_interval_secs: default_onion_exit_heartbeat_interval_secs(),
-            onion_exit_ttl_secs: default_onion_exit_ttl_secs(),
-            onion_exit_services: default_onion_exit_services(),
-            onion_exit_policy: default_onion_exit_policy(),
-        }
-    }
-
-    /// Sets up the external address for WebRTC.
-    /// This will be used to configure the transport to listen for WebRTC connections in "HOST" mode.
-    pub fn external_address(mut self, external_address: String) -> Self {
-        self.external_address = Some(external_address);
-        self
-    }
-
-    /// Sets the native WebRTC UDP port range bounds.
-    pub fn webrtc_udp_port_range(mut self, range: WebrtcUdpPortRange) -> Self {
-        self.webrtc_udp_port_min = Some(range.min());
-        self.webrtc_udp_port_max = Some(range.max());
-        self
-    }
-
-    /// Sets the online-node registry heartbeat interval in seconds.
-    pub fn online_node_heartbeat_interval_secs(mut self, interval_secs: u64) -> Self {
-        self.online_node_heartbeat_interval_secs = interval_secs;
-        self
-    }
-
-    /// Sets the online-node registry descriptor TTL in seconds.
-    pub fn online_node_ttl_secs(mut self, ttl_secs: u64) -> Self {
-        self.online_node_ttl_secs = ttl_secs;
-        self
-    }
-
-    /// Sets the runtime family advertised in the online-node registry.
-    pub fn online_node_type(mut self, node_type: OnlineNodeType) -> Self {
-        self.online_node_type = node_type;
-        self
-    }
-
-    /// Sets whether listen() advertises this node's presence.
-    pub fn advertise_presence(mut self, advertise: bool) -> Self {
-        self.advertise_presence = advertise;
-        self
-    }
-
-    /// Sets whether listen() advertises onion relay capability.
-    pub fn advertise_onion_relay(mut self, advertise: bool) -> Self {
-        self.advertise_onion_relay = advertise;
-        self
-    }
-
-    /// Sets storage-only virtual positions derived per physical peer.
-    ///
-    /// Serialized configs reject values above
-    /// [`MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER`]. This setter is infallible
-    /// for direct programmatic use; the core swarm builder normalizes the value
-    /// once before storage ownership and protocol advertisement are created.
-    pub fn dht_virtual_nodes(mut self, positions_per_peer: u16) -> Self {
-        self.dht_virtual_nodes = positions_per_peer;
-        self
-    }
-
-    /// Sets runtime-local final-destination quotas keyed by verified origin and logical lane.
-    pub fn origin_quota(mut self, config: OriginQuotaConfig) -> Self {
-        self.origin_quota = config;
-        self
-    }
-
-    /// Sets whether listen() publishes an onion-exit descriptor.
-    pub fn advertise_onion_exit(mut self, advertise: bool) -> Self {
-        self.advertise_onion_exit = advertise;
-        self
-    }
-
-    /// Sets the onion-exit registry heartbeat interval in seconds.
-    pub fn onion_exit_heartbeat_interval_secs(mut self, interval_secs: u64) -> Self {
-        self.onion_exit_heartbeat_interval_secs = interval_secs;
-        self
-    }
-
-    /// Sets the onion-exit registry descriptor TTL in seconds.
-    pub fn onion_exit_ttl_secs(mut self, ttl_secs: u64) -> Self {
-        self.onion_exit_ttl_secs = ttl_secs;
-        self
-    }
-
-    /// Sets the onion-exit services advertised by this node.
-    pub fn onion_exit_services(mut self, services: Vec<OnionExitService>) -> Self {
-        self.onion_exit_services = services;
-        self
-    }
-
-    /// Sets the onion-exit policy advertised by this node.
-    pub fn onion_exit_policy(mut self, policy: OnionExitPolicy) -> Self {
-        self.onion_exit_policy = policy;
-        self
-    }
-
-    /// Enables only the standard HTTPS-over-TCP onion exit service.
-    pub fn enable_https_onion_exit(mut self) -> Self {
-        self.advertise_onion_exit = true;
-        self.onion_exit_services = https_onion_exit_services();
-        self
-    }
-
-    /// Enables the default native onion exit services.
-    pub fn enable_default_onion_exit(mut self) -> Self {
-        self.advertise_onion_exit = true;
-        self.onion_exit_services = default_onion_exit_services();
-        self
-    }
+    pub(crate) onion_exit_policy: OnionExitPolicy,
 }
 
 pub(crate) fn parse_webrtc_udp_port_range(
@@ -381,7 +244,7 @@ pub(crate) fn parse_webrtc_udp_port_range(
     }
 }
 
-fn validate_dht_virtual_nodes(positions_per_peer: u16) -> Result<()> {
+pub(in crate::processor) fn validate_dht_virtual_nodes(positions_per_peer: u16) -> Result<()> {
     if VirtualNodeConfig::positions_per_owner_within_limit(positions_per_peer) {
         return Ok(());
     }
@@ -395,7 +258,7 @@ pub(in crate::processor) fn validate_onion_role_config(
     advertise_presence: bool,
     advertise_onion_relay: bool,
     advertise_onion_exit: bool,
-    onion_exit_services: &[OnionExitService],
+    onion_exit_services: &[OnionServiceName],
     onion_exit_policy: &OnionExitPolicy,
 ) -> Result<()> {
     if advertise_onion_relay && !advertise_presence {
@@ -410,17 +273,6 @@ pub(in crate::processor) fn validate_onion_role_config(
         ));
     }
     if advertise_onion_exit {
-        for service in onion_exit_services {
-            if let Some(expected) = OnionExitService::reserved_transport(service.name.as_str()) {
-                if service.transport == expected {
-                    continue;
-                }
-                return Err(Error::InvalidConfig(format!(
-                    "onion exit service {:?} must use {:?} transport, got {:?}",
-                    service.name, expected, service.transport
-                )));
-            }
-        }
         onion_exit_policy.validate_targets()?;
     }
     Ok(())
@@ -458,30 +310,12 @@ impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
     fn try_from(ins: ProcessorConfigSerialized) -> Result<Self> {
         let webrtc_udp_port_range =
             parse_webrtc_udp_port_range(ins.webrtc_udp_port_min, ins.webrtc_udp_port_max)?;
-        validate_dht_virtual_nodes(ins.dht_virtual_nodes)?;
         let online_node_heartbeat_interval =
             Duration::from_secs(ins.online_node_heartbeat_interval_secs);
         let online_node_ttl = Duration::from_secs(ins.online_node_ttl_secs);
         let onion_exit_heartbeat_interval =
             Duration::from_secs(ins.onion_exit_heartbeat_interval_secs);
         let onion_exit_ttl = Duration::from_secs(ins.onion_exit_ttl_secs);
-        validate_online_node_registration_timing(
-            ins.advertise_presence,
-            online_node_heartbeat_interval,
-            online_node_ttl,
-        )?;
-        validate_onion_exit_registration_timing(
-            ins.advertise_onion_exit,
-            onion_exit_heartbeat_interval,
-            onion_exit_ttl,
-        )?;
-        validate_onion_role_config(
-            ins.advertise_presence,
-            ins.advertise_onion_relay,
-            ins.advertise_onion_exit,
-            &ins.onion_exit_services,
-            &ins.onion_exit_policy,
-        )?;
         Ok(Self {
             network_id: ins.network_id,
             ice_servers: ins.ice_servers.clone(),

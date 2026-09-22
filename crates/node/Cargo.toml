@@ -39,7 +39,7 @@ node = [
     "async-stream",
     "backtrace",
     "lazy_static",
-    "axum/ws",
+    "dep:axum",
     "rings-core/default",
     "dep:rings-gateway",
     "rings-rpc/std",
@@ -118,7 +118,6 @@ tower-http = { version = "0.6.11", features = ["cors"], optional = true }
 
 # browser
 console_error_panic_hook = { version = "0.1.1", optional = true }
-flate2 = "1.0"
 js-sys = { workspace = true, optional = true }
 serde-wasm-bindgen = { workspace = true, optional = true }
 tracing-wasm = { version = "0.2.1", optional = true }

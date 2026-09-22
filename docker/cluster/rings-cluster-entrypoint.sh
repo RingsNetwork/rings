@@ -32,7 +32,7 @@ WEBRTC_UDP_PORT_MAX="${RINGS_WEBRTC_UDP_PORT_MAX:-}"
 STORAGE_CAPACITY="${RINGS_STORAGE_CAPACITY:-200000000}"
 ADVERTISE_ONION_RELAY="${RINGS_ADVERTISE_ONION_RELAY:-true}"
 ADVERTISE_ONION_EXIT="${RINGS_ADVERTISE_ONION_EXIT:-true}"
-ONION_EXIT_SERVICES="${RINGS_ONION_EXIT_SERVICES:-tcp:tcp,https:tcp}"
+ONION_EXIT_SERVICES="${RINGS_ONION_EXIT_SERVICES:-tcp,https}"
 ONION_EXIT_ALLOW_TARGETS="${RINGS_ONION_EXIT_ALLOW_TARGETS:-*:*}"
 ONION_EXIT_DENY_TARGETS="${RINGS_ONION_EXIT_DENY_TARGETS:-}"
 
@@ -142,17 +142,6 @@ external_ip_candidates() {
     printf '%s' "$candidates"
 }
 
-canonical_onion_transport() {
-    local raw="${1,,}"
-    case "$raw" in
-        tcp|https) printf 'Tcp' ;;
-        udp) printf 'Udp' ;;
-        webtransport|web-transport) printf 'WebTransport' ;;
-        requestresponse|request-response) printf 'RequestResponse' ;;
-        *) die "unsupported onion exit transport '$1'; expected tcp, udp, webtransport, request-response, or https (alias for tcp)" ;;
-    esac
-}
-
 write_yaml_csv_items() {
     local indent="$1"
     local csv="$2"
@@ -176,24 +165,13 @@ write_onion_exit_services_yaml() {
     local csv="$1"
     local any=false
     local entry=""
-    local name=""
-    local transport=""
     local old_ifs="$IFS"
     IFS=','
     for entry in $csv; do
         entry="$(trim "$entry")"
         [[ -z "$entry" ]] && continue
-        if [[ "$entry" == *:* ]]; then
-            name="$(trim "${entry%%:*}")"
-            transport="$(trim "${entry#*:}")"
-        else
-            name="$entry"
-            transport="$entry"
-        fi
-        [[ -n "$name" ]] || die "onion exit service name must not be empty"
-        transport="$(canonical_onion_transport "$transport")"
-        printf '  - name: %s\n' "$(yaml_quote "$name")"
-        printf '    transport: %s\n' "$transport"
+        [[ "$entry" != *:* ]] || die "RINGS_ONION_EXIT_SERVICES accepts service names only; remove the legacy ':transport' suffix from '$entry'"
+        printf '  - %s\n' "$(yaml_quote "$entry")"
         any=true
     done
     IFS="$old_ifs"

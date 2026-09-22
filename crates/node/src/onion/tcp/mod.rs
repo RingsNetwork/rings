@@ -36,6 +36,7 @@ use crate::onion::circuit::OnionCircuitPayload;
 use crate::onion::circuit::OnionCircuitProtocol;
 use crate::onion::circuit::OnionCircuitShell;
 use crate::onion::circuit::OnionClientReturn;
+#[cfg(test)]
 use crate::onion::circuit::OnionForwardNonce;
 use crate::onion::circuit::OnionForwardSequence;
 use crate::onion::circuit::OnionLinkSender;
@@ -45,10 +46,8 @@ use crate::onion::exit_accounting::OnionExitAccounting;
 use crate::onion::exit_accounting::OnionExitLease;
 use crate::onion::https::try_handle_https_exit_payload;
 use crate::onion::https::OnionHttpsRuntime;
-use crate::onion::replay::OnionForwardReplayKey;
-use crate::onion::replay::OnionForwardReplayPartitions;
+use crate::onion::replay::OnionForwardReplayWitness;
 use crate::onion::replay::OnionSequenceWindow;
-use crate::onion::replay::ReplayAdmission;
 use crate::onion::replay::SequenceAdmission;
 use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitFailure;
@@ -189,14 +188,20 @@ fn native_onion_runtimes(
 ) -> (Arc<OnionTcpRuntime>, Arc<OnionHttpsRuntime>) {
     let accounting = OnionExitAccounting::default();
     let link_sender = OnionLinkSender::default();
+    let forward_replays = OnionForwardReplayWitness::default();
     let runtime = Arc::new(OnionTcpRuntime::with_resources(
         session_sk,
         network_id,
         exit_config,
         accounting.clone(),
         link_sender.clone(),
+        forward_replays.clone(),
     ));
-    let https = Arc::new(OnionHttpsRuntime::with_resources(accounting, link_sender));
+    let https = Arc::new(OnionHttpsRuntime::with_resources(
+        accounting,
+        link_sender,
+        forward_replays,
+    ));
     (runtime, https)
 }
 
@@ -271,7 +276,8 @@ struct OnionTcpRuntime {
     signer: MessageSigner<SessionSk>,
     client_streams: Mutex<HashMap<TcpStreamKey, ClientStream>>,
     exit_streams: Mutex<HashMap<TcpStreamKey, ExitStream>>,
-    forward_replays: Mutex<OnionForwardReplayPartitions>,
+    /// Replay authority shared with the HTTPS adapter installed on this node.
+    forward_replays: OnionForwardReplayWitness,
     exit_config: Option<NativeOnionTcpExitConfig>,
     accounting: OnionExitAccounting,
     link_sender: OnionLinkSender,
@@ -290,6 +296,7 @@ impl OnionTcpRuntime {
             exit_config,
             OnionExitAccounting::default(),
             OnionLinkSender::default(),
+            OnionForwardReplayWitness::default(),
         )
     }
 
@@ -299,12 +306,13 @@ impl OnionTcpRuntime {
         exit_config: Option<NativeOnionTcpExitConfig>,
         accounting: OnionExitAccounting,
         link_sender: OnionLinkSender,
+        forward_replays: OnionForwardReplayWitness,
     ) -> Self {
         Self {
             signer: MessageSigner::new(session_sk, network_id),
             client_streams: Mutex::new(HashMap::new()),
             exit_streams: Mutex::new(HashMap::new()),
-            forward_replays: Mutex::new(OnionForwardReplayPartitions::default()),
+            forward_replays,
             exit_config,
             accounting,
             link_sender,
@@ -403,7 +411,7 @@ impl OnionTcpRuntime {
         let key = TcpStreamKey {
             circuit_id: frame.circuit_id,
         };
-        let Some((service, payload)) = self.decode_exit_payload(frame.payload)? else {
+        let Some((service, payload, policy)) = self.decode_exit_payload(frame.payload)? else {
             return Ok(());
         };
         match payload {
@@ -411,19 +419,26 @@ impl OnionTcpRuntime {
                 if frame.forward_sequence != OnionForwardSequence::FIRST {
                     return Err(Error::OnionRouteError(OnionRouteError::ForwardReplay));
                 }
-                self.consume_forward_nonce(frame.from, frame.circuit_id, frame.forward_nonce)?;
-                self.open_exit_stream(TcpExitOpen {
-                    scope,
-                    opened_at: Instant::now(),
-                    key,
-                    circuit_id: frame.circuit_id,
-                    return_peer: frame.return_peer,
-                    return_session_public_key: frame.return_session_public_key,
-                    client: frame.client,
-                    expected_forward_peer: frame.from,
-                    service,
-                    target,
-                })
+                self.forward_replays.consume_forward_nonce(
+                    frame.from,
+                    frame.circuit_id,
+                    frame.forward_nonce,
+                )?;
+                self.open_exit_stream(
+                    TcpExitOpen {
+                        scope,
+                        opened_at: Instant::now(),
+                        key,
+                        circuit_id: frame.circuit_id,
+                        return_peer: frame.return_peer,
+                        return_session_public_key: frame.return_session_public_key,
+                        client: frame.client,
+                        expected_forward_peer: frame.from,
+                        service,
+                        target,
+                    },
+                    policy,
+                )
                 .await
             }
             OnionTcpPayload::Data { bytes } => self.send_exit_inbound(
@@ -483,62 +498,33 @@ impl OnionTcpRuntime {
         }
     }
 
-    fn consume_forward_nonce(
-        &self,
-        from: Did,
-        circuit_id: OnionCircuitId,
-        nonce: OnionForwardNonce,
-    ) -> Result<()> {
-        let mut replays = lock(&self.forward_replays)?;
-        match replays.consume(
-            from,
-            OnionForwardReplayKey::new(circuit_id, nonce),
-            rings_core::utils::get_epoch_ms(),
-        ) {
-            ReplayAdmission::Consumed => Ok(()),
-            ReplayAdmission::Duplicate => {
-                Err(Error::OnionRouteError(OnionRouteError::ForwardReplay))
-            }
-            ReplayAdmission::Full => Err(Error::NoPermission),
-        }
-    }
-
     fn decode_exit_payload(
         &self,
         payload: OnionCircuitPayload,
-    ) -> Result<Option<(OnionServiceName, OnionTcpPayload)>> {
+    ) -> Result<Option<(OnionServiceName, OnionTcpPayload, OnionExitPolicy)>> {
         let service = payload.service_name().clone();
-        if !self.accepts_exit_service(&service) {
-            return Ok(None);
-        }
-        decode_tcp_payload_for_service(payload, &service)
-            .map(|payload| payload.map(|payload| (service, payload)))
-    }
-
-    fn accepts_exit_service(&self, service: &OnionServiceName) -> bool {
-        self.exit_config
+        let Some(exit_config) = self
+            .exit_config
             .as_ref()
-            .is_some_and(|config| config.allows_service(service))
+            .filter(|config| config.allows_service(&service))
+        else {
+            return Ok(None);
+        };
+        let policy = exit_config.policy().clone();
+        decode_tcp_payload_for_service(payload, &service)
+            .map(|payload| payload.map(|payload| (service, payload, policy)))
     }
 
-    async fn open_exit_stream(self: &Arc<Self>, request: TcpExitOpen) -> Result<()> {
-        let Some(exit_config) = &self.exit_config else {
-            return self
-                .reject_exit_open(&request, OnionExitFailure::ExitUnavailable)
-                .await;
-        };
-        if !exit_config.allows_service(&request.service) {
-            return self
-                .reject_exit_open(&request, OnionExitFailure::ExitUnavailable)
-                .await;
-        }
-        let policy = exit_config.policy();
-
-        let target = match admit_exit_target(policy, &request.target) {
+    async fn open_exit_stream(
+        self: &Arc<Self>,
+        request: TcpExitOpen,
+        policy: OnionExitPolicy,
+    ) -> Result<()> {
+        let target = match admit_exit_target(&policy, &request.target) {
             Ok(target) => target,
             Err(failure) => return self.reject_exit_open(&request, failure).await,
         };
-        let (rx, lease) = match self.reserve_exit_stream(&request, policy) {
+        let (rx, lease) = match self.reserve_exit_stream(&request, &policy) {
             Ok(reserved) => reserved,
             Err(error) => {
                 return self

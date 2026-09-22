@@ -53,8 +53,9 @@ async fn test_onion_exit_lookup_preserves_distinct_services_for_same_did() -> Re
     Ok(())
 }
 
+/// Proxy routing consumes presence relays without requiring relay exit descriptors.
 #[tokio::test]
-async fn test_onion_route_builder_uses_presence_relays_without_exit_descriptor() -> Result<()> {
+async fn test_onion_proxy_route_uses_presence_relays_without_exit_descriptor() -> Result<()> {
     let processor = prepare_processor().await;
     let first_relay = prepare_processor().await;
     let second_relay = prepare_processor().await;
@@ -76,8 +77,12 @@ async fn test_onion_route_builder_uses_presence_relays_without_exit_descriptor()
         .await?;
 
     let route = processor
-        .build_onion_route("web".to_string(), 3, false)
-        .await?;
+        .build_onion_proxy_route(
+            OnionProxyConfig::tcp_connect_service(OnionServiceName::parse("web")?, 3, false)?,
+            OnionProxyTarget::parse_authority("example.com:443")?,
+        )
+        .await?
+        .route;
 
     assert_eq!(route.hops().len(), 3);
     assert_eq!(route.exit_did(), exit.did());
@@ -119,13 +124,14 @@ async fn test_onion_proxy_route_uses_protocol_service_class() -> Result<()> {
     Ok(())
 }
 
+/// HTTPS route construction matches the singular canonical service descriptor.
 #[tokio::test]
-async fn test_onion_route_accepts_https_service_over_tcp_transport() -> Result<()> {
+async fn test_onion_route_accepts_https_service() -> Result<()> {
     let processor = prepare_processor().await;
     let exit = prepare_processor().await;
     let descriptor = onion_exit_descriptor_for_processor_with_service(
         &exit,
-        OnionExitService::new("https", OnionExitTransport::Tcp)?,
+        OnionServiceName::https(),
         get_epoch_ms(),
         {
             let mut policy = onion_policy(&["example.com:443"], &[])?;
@@ -141,21 +147,26 @@ async fn test_onion_route_accepts_https_service_over_tcp_transport() -> Result<(
         .await?;
 
     let route = processor
-        .build_onion_route("https".to_string(), 1, false)
-        .await?;
+        .build_onion_proxy_route(
+            OnionProxyConfig::https_proxy(1, false),
+            OnionProxyTarget::parse_authority("example.com:443")?,
+        )
+        .await?
+        .route;
 
     assert_eq!(route.exit_did(), exit.did());
     assert_eq!(route.service(), "https");
     Ok(())
 }
 
+/// The proxy route accepts an HTTPS service descriptor without a transport field.
 #[tokio::test]
-async fn test_onion_proxy_route_accepts_https_service_over_tcp_transport() -> Result<()> {
+async fn test_onion_proxy_route_accepts_https_service() -> Result<()> {
     let processor = prepare_processor().await;
     let exit = prepare_processor().await;
     let descriptor = onion_exit_descriptor_for_processor_with_service(
         &exit,
-        OnionExitService::new("https", OnionExitTransport::Tcp)?,
+        OnionServiceName::https(),
         get_epoch_ms(),
         {
             let mut policy = onion_policy(&["example.com:443"], &[])?;
@@ -177,7 +188,6 @@ async fn test_onion_proxy_route_accepts_https_service_over_tcp_transport() -> Re
 
     assert_eq!(route.exit_did(), exit.did());
     assert_eq!(route.exit_service(), "https");
-    assert_eq!(route.exit_transport(), OnionExitTransport::Tcp);
     Ok(())
 }
 
@@ -188,7 +198,7 @@ async fn test_tcp_connect_route_rejects_browser_https_exit_descriptor() -> Resul
     let descriptor = onion_exit_descriptor_for_processor_with_node_type_service(
         &browser_exit,
         OnlineNodeType::Browser,
-        OnionExitService::https(),
+        OnionServiceName::https(),
         get_epoch_ms(),
         {
             let mut policy = onion_policy(&["example.com:443"], &[])?;

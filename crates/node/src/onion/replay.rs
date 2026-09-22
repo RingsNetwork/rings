@@ -1,12 +1,18 @@
 //! Bounded replay cache for one-shot onion payloads.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use rings_core::dht::Did;
 
 use super::circuit::OnionCircuitId;
 use super::circuit::OnionForwardNonce;
 use super::circuit::ONION_FORWARD_MAX_VALIDITY_MS;
+use super::OnionRouteError;
+use crate::error::Error;
+use crate::error::Result;
+use crate::sync_lock::lock;
 
 const ONION_REPLAY_TTL_MS: u128 = ONION_FORWARD_MAX_VALIDITY_MS;
 const MAX_ONION_REPLAY_ENTRIES: usize = 4096;
@@ -35,6 +41,41 @@ pub(crate) enum ReplayAdmission {
     Duplicate,
     /// The cache is full after expired entries were purged.
     Full,
+}
+
+/// Node-wide one-shot witness shared by every installed exit adapter.
+///
+/// Invariant: a live `(circuit_id, nonce)` can authorize at most one exit effect regardless of
+/// whether the authenticated payload names the TCP or HTTPS service. Service decoding and policy
+/// admission remain in each adapter; this witness owns only cross-adapter replay uniqueness.
+#[derive(Clone, Default)]
+pub(crate) struct OnionForwardReplayWitness {
+    /// Shared partitions. The synchronous guard covers only the pure bounded-cache transition and
+    /// is never held across IO or an await.
+    partitions: Arc<Mutex<OnionForwardReplayPartitions>>,
+}
+
+impl OnionForwardReplayWitness {
+    /// Consume a forward nonce for the authenticated immediate sender.
+    pub(crate) fn consume_forward_nonce(
+        &self,
+        peer: Did,
+        circuit_id: OnionCircuitId,
+        nonce: OnionForwardNonce,
+    ) -> Result<()> {
+        let mut partitions = lock(&self.partitions)?;
+        match partitions.consume(
+            peer,
+            OnionForwardReplayKey::new(circuit_id, nonce),
+            rings_core::utils::get_epoch_ms(),
+        ) {
+            ReplayAdmission::Consumed => Ok(()),
+            ReplayAdmission::Duplicate => {
+                Err(Error::OnionRouteError(OnionRouteError::ForwardReplay))
+            }
+            ReplayAdmission::Full => Err(Error::NoPermission),
+        }
+    }
 }
 
 /// Admission result for a fixed-memory monotonic sequence window.

@@ -32,7 +32,6 @@ The client commands share these options:
 | `-c, --config <FILE>` | The node configuration to read | `~/.rings/config.yaml` |
 | `-u, --endpoint-url <URL>` | The node's internal JSON-RPC endpoint | `endpoint_url` from the config, `http://127.0.0.1:50000` |
 | `--api-token-path <FILE>` | Bearer token file of the node's internal API; a relative path resolves next to the config file | `api_token_path` from the config |
-| `-k, --key <HEX>` | The ECDSA key to sign requests with | `ECDSA_KEY` from the environment, then `ecdsa_key` from the config |
 
 Each option is also read from the environment variable of the same name in upper case
 (`ENDPOINT_URL`, `API_TOKEN_PATH`, ...).
@@ -136,8 +135,9 @@ rings peer disconnect <address>
 rings send message <to-did> <namespace> <data>
 ```
 
-Delivers `data` to the protocol the peer registered under `namespace`; see
-[External message handler](external-message-handler.md) for the receiving side.
+Delivers `data` to the protocol the peer registered under `namespace`. Receiving applications
+embed `rings-node` and install a namespaced extension protocol; the removed `/ws` endpoint is not
+an application-message boundary.
 
 ```bash
 rings pubsub <topic>
@@ -169,6 +169,7 @@ table.
 ## Sessions and keys
 
 `rings init` writes the configuration and a session secret key (`~/.rings/session_sk` unless
-`-s, --session-sk` says otherwise). `rings new-session` writes a fresh session key. The ECDSA
-key given with `-k` is the node's identity; when none is given a random one is generated. A
-native node stores that private key in plain text, so never use a key that holds assets.
+`-s, --session-sk` says otherwise). `rings new-session` writes a fresh session key. Those two
+session-creation commands accept `-k` or `--key-file` for the account signer; `rings run` and the
+RPC client commands do not. A native node stores the resulting delegated session key in plain
+text, so never derive it from a key that holds assets.

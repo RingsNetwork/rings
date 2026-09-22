@@ -8,7 +8,6 @@
 //! keeps the effect set from becoming a global command bus: a new extension brings its own
 //! effects and its own interpreter without ever touching the core.
 
-use bytes::Bytes;
 use rings_core::dht::Did;
 
 /// The raw boundary input handed to [`Protocol::decode`]: an inbound message's authenticated
@@ -42,24 +41,6 @@ pub struct Ctx<'a, S> {
     pub did: Did,
     /// Current protocol state (read-only here).
     pub state: &'a S,
-}
-
-/// A locally re-injected message: the output of an effect fed back into the router as a
-/// fresh inbound, re-decoded by the target namespace's protocol. `Inbound ≅ (Namespace,
-/// from, payload)` — the same shape the router takes from the wire, so re-injection and
-/// inbound delivery share one path.
-///
-/// The fields are `pub(crate)`: only the router constructs an `Inbound` (from an interpreter's
-/// scoped re-inject, with the namespace and `from` it controls), so an extension shell cannot
-/// fabricate one with an arbitrary namespace or a forged remote `from`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Inbound {
-    /// Target protocol namespace.
-    pub(crate) namespace: String,
-    /// Sender to attribute the re-injected message to (`this node` for self-events).
-    pub(crate) from: Did,
-    /// Payload bytes (re-decoded by the target protocol).
-    pub(crate) payload: Bytes,
 }
 
 /// The output of a step: the next state and the protocol's own effects to run.
@@ -113,11 +94,6 @@ pub trait Protocol {
 
     /// The namespace this protocol is registered and routed under.
     fn namespace(&self) -> &str;
-
-    /// Optional online-node capability labels advertised when this protocol is registered.
-    fn capabilities(&self) -> &'static [&'static str] {
-        &[]
-    }
 
     /// Initial state. `init : 1 → S`.
     fn init(&self) -> Self::State;

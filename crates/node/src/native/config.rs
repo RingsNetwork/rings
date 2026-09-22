@@ -11,13 +11,14 @@ use serde::Serialize;
 use crate::error::Error;
 use crate::error::Result;
 use crate::onion::OnionExitPolicy;
-use crate::onion::OnionExitService;
 use crate::onion::OnionServiceName;
 use crate::online::OnlineNodeType;
 use crate::prelude::rings_core::dht::default_storage_virtual_positions_per_owner;
 use crate::prelude::rings_core::dht::DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
+#[cfg(test)]
 use crate::prelude::rings_core::ecc::SecretKey;
 use crate::prelude::rings_core::message::OriginQuotaConfig;
+#[cfg(test)]
 use crate::prelude::SessionSk;
 use crate::processor::ProcessorConfig;
 use crate::processor::ProcessorConfigSerialized;
@@ -166,17 +167,12 @@ pub struct BootstrapConfig {
 
 /// Serializable native-node configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     /// Rings network identifier this node joins.
     pub network_id: u32,
-    /// Deprecated ECDSA key field retained for backward-compatible config reads.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ecdsa_key: Option<SecretKey>,
-    /// Deprecated session manager field retained for backward-compatible config reads.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_manager: Option<String>,
-    /// Session secret key file path or legacy raw session key string.
-    pub session_sk: Option<String>,
+    /// Session secret key file path.
+    pub session_sk: String,
     /// Internal JSON-RPC API port.
     pub internal_api_port: u16,
     /// External JSON-RPC listener address.
@@ -222,7 +218,7 @@ pub struct Config {
     pub onion_exit_ttl_secs: u64,
     /// Onion-exit services this node can publish.
     #[serde(default = "crate::onion::default_onion_exit_services")]
-    pub onion_exit_services: Vec<OnionExitService>,
+    pub onion_exit_services: Vec<OnionServiceName>,
     /// Onion-exit target and resource policy.
     #[serde(default = "crate::onion::default_onion_exit_policy")]
     pub onion_exit_policy: OnionExitPolicy,
@@ -276,61 +272,37 @@ pub struct Config {
 impl TryFrom<Config> for ProcessorConfigSerialized {
     type Error = Error;
     fn try_from(config: Config) -> Result<Self> {
-        // Support old version
-        let session_sk: String = if let Some(sk) = config.ecdsa_key {
-            tracing::warn!("Field `ecdsa_key` is deprecated, use `session_sk` instead.");
-            SessionSk::new_with_seckey(&sk)
-                .and_then(|session_sk| session_sk.dump())
-                .map_err(|e| Error::VerifyError(e.to_string()))?
-        } else if let Some(ssk) = config.session_manager {
-            tracing::warn!("Field `session_manager` is deprecated, use `session_sk` instead.");
-            ssk
-        } else {
-            let Some(ssk_file) = config.session_sk else {
-                return Err(Error::InvalidData);
-            };
-            let ssk_file_expand_home = expand_home(&ssk_file)?;
-            fs::read_to_string(ssk_file_expand_home).unwrap_or_else(|e| {
-                tracing::warn!("Read session_sk file failed: {e:?}. Handling it as raw session_sk string. This mode is deprecated. please use a file path.");
-                ssk_file
-            })
-        };
+        let session_path = expand_home(&config.session_sk)?;
+        let session_sk = fs::read_to_string(&session_path).map_err(|error| {
+            Error::OpenFileError(format!("{}: {error}", session_path.display()))
+        })?;
 
-        let mut cs = Self::new(
-            config.network_id,
-            config.ice_servers,
-            session_sk,
-            config.stabilize_interval,
-        )
-        .online_node_heartbeat_interval_secs(config.online_node_heartbeat_interval_secs)
-        .online_node_ttl_secs(config.online_node_ttl_secs)
-        .online_node_type(config.online_node_type)
-        .advertise_presence(config.advertise_presence)
-        .advertise_onion_relay(config.advertise_onion_relay)
-        .advertise_onion_exit(config.advertise_onion_exit)
-        .onion_exit_heartbeat_interval_secs(config.onion_exit_heartbeat_interval_secs)
-        .onion_exit_ttl_secs(config.onion_exit_ttl_secs)
-        .onion_exit_services(config.onion_exit_services)
-        .onion_exit_policy(config.onion_exit_policy)
-        .dht_virtual_nodes(config.dht_virtual_nodes)
-        .origin_quota(config.origin_quota);
-
-        cs = if let Some(ext_ip) = config.external_ip {
-            cs.external_address(ext_ip)
-        } else {
-            cs
-        };
         let udp_range = crate::processor::parse_webrtc_udp_port_range(
             config.webrtc_udp_port_min,
             config.webrtc_udp_port_max,
         )?;
-        cs = if let Some(range) = udp_range {
-            cs.webrtc_udp_port_range(range)
-        } else {
-            cs
-        };
 
-        Ok(cs)
+        Ok(Self {
+            network_id: config.network_id,
+            ice_servers: config.ice_servers,
+            external_address: config.external_ip,
+            webrtc_udp_port_min: udp_range.map(|range| range.min()),
+            webrtc_udp_port_max: udp_range.map(|range| range.max()),
+            session_sk,
+            stabilize_interval: config.stabilize_interval,
+            online_node_heartbeat_interval_secs: config.online_node_heartbeat_interval_secs,
+            online_node_ttl_secs: config.online_node_ttl_secs,
+            online_node_type: config.online_node_type,
+            advertise_presence: config.advertise_presence,
+            dht_virtual_nodes: config.dht_virtual_nodes,
+            origin_quota: config.origin_quota,
+            advertise_onion_relay: config.advertise_onion_relay,
+            advertise_onion_exit: config.advertise_onion_exit,
+            onion_exit_heartbeat_interval_secs: config.onion_exit_heartbeat_interval_secs,
+            onion_exit_ttl_secs: config.onion_exit_ttl_secs,
+            onion_exit_services: config.onion_exit_services,
+            onion_exit_policy: config.onion_exit_policy,
+        })
     }
 }
 
@@ -348,9 +320,7 @@ impl Config {
         let session_sk = session_sk.as_ref().to_string_lossy().to_string();
         Self {
             network_id: DEFAULT_NETWORK_ID,
-            ecdsa_key: None,
-            session_manager: None,
-            session_sk: Some(session_sk),
+            session_sk,
             internal_api_port: DEFAULT_INTERNAL_API_PORT,
             external_api_addr: DEFAULT_EXTERNAL_API_ADDR.to_string(),
             endpoint_url: DEFAULT_ENDPOINT_URL.to_string(),
@@ -457,6 +427,14 @@ mod tests {
             Ok(dump) => dump,
             Err(error) => panic!("session key dump failed: {error}"),
         }
+    }
+
+    /// Write a valid session key to an isolated file and return its config plus cleanup path.
+    fn config_with_session_file() -> (Config, PathBuf) {
+        let path =
+            std::env::temp_dir().join(format!("rings-session-{}.yaml", uuid::Uuid::new_v4()));
+        fs::write(&path, dumped_session_sk()).expect("write test session key");
+        (Config::new(&path), path)
     }
 
     #[test]
@@ -723,11 +701,12 @@ gateway:
 
     #[test]
     fn test_config_with_valid_webrtc_udp_range_builds_processor_config() {
-        let mut config = Config::new(dumped_session_sk());
+        let (mut config, session_path) = config_with_session_file();
         config.webrtc_udp_port_min = Some(49160);
         config.webrtc_udp_port_max = Some(49200);
 
         let processor_config = ProcessorConfig::try_from(config);
+        let _ = fs::remove_file(session_path);
 
         assert!(matches!(
             processor_config.and_then(|config| config.webrtc_udp_port_range()),
@@ -737,10 +716,11 @@ gateway:
 
     #[test]
     fn test_config_with_partial_webrtc_udp_range_is_rejected() {
-        let mut config = Config::new(dumped_session_sk());
+        let (mut config, session_path) = config_with_session_file();
         config.webrtc_udp_port_min = Some(49160);
 
         let processor_config = ProcessorConfig::try_from(config);
+        let _ = fs::remove_file(session_path);
 
         assert!(matches!(
             processor_config,
@@ -749,5 +729,30 @@ gateway:
                 max: None
             })
         ));
+    }
+
+    /// Raw session dumps are not reinterpreted after file lookup fails.
+    #[test]
+    fn test_raw_session_dump_is_not_treated_as_a_path_fallback() {
+        let result = ProcessorConfig::try_from(Config::new(dumped_session_sk()));
+
+        assert!(matches!(result, Err(Error::OpenFileError(_))));
+    }
+
+    /// Removed signer and session-manager fields fail deserialization under total cutover.
+    #[test]
+    fn test_removed_legacy_config_fields_are_rejected() {
+        for legacy_field in ["ecdsa_key", "session_manager"] {
+            let document = generated_document().replace(
+                "network_id:",
+                &format!("{legacy_field}: legacy\nnetwork_id:"),
+            );
+            let result = serde_yaml::from_str::<Config>(&document);
+
+            assert!(
+                result.is_err(),
+                "legacy field {legacy_field} must be rejected"
+            );
+        }
     }
 }

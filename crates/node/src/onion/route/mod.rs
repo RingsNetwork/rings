@@ -32,19 +32,6 @@ pub struct OnionRouteRequest {
 }
 
 impl OnionRouteRequest {
-    /// Build a route request from an untrusted service string.
-    pub fn new(
-        service: impl AsRef<str>,
-        hop_count: usize,
-        allow_short_paths: bool,
-    ) -> Result<Self> {
-        Ok(Self::from_service_name(
-            parse_route_service(service)?,
-            hop_count,
-            allow_short_paths,
-        ))
-    }
-
     /// Build a route request from an already canonical service name.
     pub fn from_service_name(
         service: OnionServiceName,
@@ -208,74 +195,12 @@ impl OnionRouteCandidates {
     }
 }
 
-/// Select an onion route from live presence and exit descriptors.
+/// Select a route from prevalidated candidates and explicit first-hop policies.
 ///
 /// Invariant: the returned hop list contains no duplicate DID and always ends
-/// in a descriptor from the exit registry.
-pub fn select_onion_route(
-    local: Did,
-    dht_protocol: DhtProtocolMode,
-    now_ms: u128,
-    request: &OnionRouteRequest,
-    online_nodes: impl IntoIterator<Item = OnlineNodeDescriptor>,
-    exits: impl IntoIterator<Item = OnionExitDescriptor>,
-    qualities: impl IntoIterator<Item = (Did, PeerQuality)>,
-) -> Result<OnionRoute> {
-    let candidates = OnionRouteCandidates {
-        relays: eligible_relay_dids(dht_protocol, now_ms, local, online_nodes)
-            .into_iter()
-            .collect(),
-        exits: eligible_exits(
-            dht_protocol.network_id,
-            now_ms,
-            request.service_name(),
-            exits,
-        )
-        .into_iter()
-        .filter(|descriptor| descriptor.did != local)
-        .collect(),
-    };
-    select_onion_route_from_candidates(
-        request,
-        candidates,
-        qualities,
-        &mut SystemRouteEntropy::new(),
-    )
-}
-
-pub(crate) fn select_onion_route_from_candidates(
-    request: &OnionRouteRequest,
-    candidates: OnionRouteCandidates,
-    qualities: impl IntoIterator<Item = (Did, PeerQuality)>,
-    entropy: &mut impl RouteEntropy,
-) -> Result<OnionRoute> {
-    select_onion_route_from_candidates_with_first_hop(
-        request,
-        candidates,
-        qualities,
-        entropy,
-        |_| true,
-    )
-}
-
-pub(crate) fn select_onion_route_from_candidates_with_first_hop(
-    request: &OnionRouteRequest,
-    candidates: OnionRouteCandidates,
-    qualities: impl IntoIterator<Item = (Did, PeerQuality)>,
-    entropy: &mut impl RouteEntropy,
-    first_hop_permitted: impl Fn(Did) -> bool,
-) -> Result<OnionRoute> {
-    let first_hop_permitted = &first_hop_permitted;
-    select_onion_route_from_candidates_with_first_hop_policy(
-        request,
-        candidates,
-        qualities,
-        entropy,
-        first_hop_permitted,
-        first_hop_permitted,
-    )
-}
-
+/// in a descriptor from the exit registry. Callers must explicitly state both
+/// the relay-first-hop and direct-exit policies so a permissive default cannot
+/// silently bypass entry-guard policy.
 pub(crate) fn select_onion_route_from_candidates_with_first_hop_policy(
     request: &OnionRouteRequest,
     candidates: OnionRouteCandidates,
@@ -551,14 +476,6 @@ fn validate_route_hops(
         return Err(Error::OnionRouteError(OnionRouteError::ExitServiceMismatch));
     }
     Ok(())
-}
-
-fn parse_route_service(service: impl AsRef<str>) -> Result<OnionServiceName> {
-    let service = service.as_ref();
-    if service.trim().is_empty() {
-        return Err(Error::OnionRouteError(OnionRouteError::EmptyRouteService));
-    }
-    OnionServiceName::parse(service)
 }
 
 #[cfg(test)]

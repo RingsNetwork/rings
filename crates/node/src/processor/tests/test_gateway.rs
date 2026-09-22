@@ -278,7 +278,7 @@ async fn prepare_two_hop_public_gateway(config: GatewayConfig) -> Result<TwoHopG
         .storage_store(Processor::onion_exit_registry_entry(vec![
             onion_exit_descriptor_for_processor_with_service(
                 &exit,
-                OnionExitService::tcp(),
+                OnionServiceName::tcp(),
                 now_ms,
                 exit_policy,
             )?,
