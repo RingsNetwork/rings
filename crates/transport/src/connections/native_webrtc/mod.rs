@@ -66,9 +66,10 @@ mod test_close_actor;
 #[cfg(test)]
 mod test_send_lifecycle;
 
+#[cfg(test)]
 use send_lifecycle::OwnedSend;
 use send_lifecycle::SendLifecycle;
-use send_operation::QueueSend;
+use send_operation::prepare_native;
 use send_runtime::native_send_runtime;
 use send_runtime::run_irrevocable_send;
 #[cfg(test)]
@@ -275,15 +276,18 @@ impl RoundRobinPool<TrackedChannel> {
         };
         // Construct the complete resource owner before final admission. Its
         // first-poll boundary releases the gate before fencing a failure.
-        let mut send = OwnedSend::new(
-            QueueSend::new(primitive, permit, guard, Arc::clone(&enqueued), data_len)?,
+        let prepared = prepare_native(
+            primitive,
+            permit,
+            guard,
+            Arc::clone(&enqueued),
+            data_len,
             lifecycle,
-        );
-        // End the synchronous lease scope before propagation or detached handoff.
-        let first_poll = match retirement_fence.try_send_admission() {
-            Some(admission) => send.poll_admitted(admission),
-            None => std::task::Poll::Ready(Err(Error::SendPermitRevoked)),
-        };
+        )?;
+        let admission = retirement_fence
+            .try_send_admission()
+            .ok_or(Error::SendPermitRevoked)?;
+        let (send, first_poll) = prepared.start(admission);
         // The owner moves, unchanged, from inline first poll into its bounded
         // continuation. There is no permit-owned retirement closure.
         let end_offset = match first_poll {

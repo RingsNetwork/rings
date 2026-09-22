@@ -32,7 +32,7 @@ async fn actor_success_and_failure_conform_to_reducer_traces() {
         // The actor waits until the test has inspected its intermediate Closing state.
         let release = CancellationToken::new();
         let close_release = release.clone();
-        // Count actual side effects, independently of the reducer's StartClose effect.
+        // Count actual side effects, independently of the reducer's PublishClosingAndStart effect.
         let count = Arc::new(AtomicUsize::new(0));
         let close_count = Arc::clone(&count);
         let runtime = native_send_runtime().expect("test runtime");

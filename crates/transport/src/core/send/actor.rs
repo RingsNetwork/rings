@@ -21,7 +21,11 @@ impl<P: Fn(CloseState)> Reporter<P> {
     fn apply(&mut self, event: CloseEvent) -> CloseEffect {
         let (state, effect) = close_step(self.state, event);
         self.state = state;
-        (self.publish)(state);
+        match effect {
+            CloseEffect::None => (),
+            CloseEffect::PublishClosingAndStart => (self.publish)(CloseState::Closing),
+            CloseEffect::Publish(outcome) => (self.publish)(CloseState::Finished(outcome)),
+        }
         effect
     }
 }
@@ -35,8 +39,8 @@ impl<P: Fn(CloseState)> Drop for Reporter<P> {
 /// Construct the actor before spawning, covering destruction before the first poll.
 ///
 /// Pre: inbox resolves to Fenced only after synchronous generation retirement,
-/// or ObserversGone when no request can arrive. Post: close is polled at most
-/// once per actor, only after Fenced. Scheduling and Send bounds belong to callers.
+/// or ObserversGone when no request can arrive. Post: one close operation is initiated
+/// at most once per actor, only after Fenced; its future may be polled repeatedly. Scheduling and Send bounds belong to callers.
 /// Succeeded means the close adapter fulfilled its contract, not remote acknowledgement.
 pub(crate) fn run(
     inbox: impl Future<Output = CloseEvent>,
@@ -50,7 +54,7 @@ pub(crate) fn run(
     };
     async move {
         match reporter.apply(inbox.await) {
-            CloseEffect::StartClose => {
+            CloseEffect::PublishClosingAndStart => {
                 let completion = match close.await {
                     Ok(()) => CloseEvent::CloseSucceeded,
                     Err(error) => {

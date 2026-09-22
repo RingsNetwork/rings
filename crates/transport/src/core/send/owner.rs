@@ -44,10 +44,23 @@ impl<F: Future, L: FailureObserver> OwnedSend<F, L> {
         }
     }
 
+    /// First queue poll requires an open-generation lease issued by AdmissionGate.
+    #[cfg(feature = "native-webrtc")]
+    pub(crate) fn poll_admitted<T>(
+        &mut self,
+        admission: super::gate::FirstPollLease<'_>,
+    ) -> Poll<Result<T>>
+    where
+        F: Future<Output = Result<T>>,
+    {
+        let mut context = Context::from_waker(std::task::Waker::noop());
+        self.poll_guarded(&mut context, admission)
+    }
+
     /// Common polling interpreter, retaining captures through catch and gate release.
     /// Pre: guard is the admission lease for first poll, unit for continuation polls.
     /// Post: guard is dropped before reporting any failure, preventing recursive gate lock.
-    pub(crate) fn poll_guarded<G, T>(
+    pub(super) fn poll_guarded<G, T>(
         &mut self,
         context: &mut Context<'_>,
         guard: G,

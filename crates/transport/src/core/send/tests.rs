@@ -56,6 +56,7 @@ enum Mutation {
     SkipFence,
     DuplicateClose,
     ShutdownSuccess,
+    EarlyErrorReturn,
 }
 
 /// Composition state; each field corresponds to an actual ownership boundary or observation.
@@ -81,6 +82,8 @@ struct Model {
     physical: Physical,
     /// History bit detecting a failed observer released before synchronous fencing.
     unsafe_release: bool,
+    /// An error response observed by the caller, distinct from resource destruction.
+    error_returned: bool,
 }
 
 impl Model {
@@ -97,6 +100,7 @@ impl Model {
             starts: 0,
             physical: Physical::Unstarted,
             unsafe_release: false,
+            error_returned: false,
         }
     }
 
@@ -121,7 +125,10 @@ impl Model {
             }
             CloseState::Finished(CloseOutcome::Unused) => self.starts == 0,
         };
-        !self.unsafe_release
+        let error_waited =
+            !self.error_returned || self.gate != Gate::Retired || self.actor.outcome().is_some();
+        error_waited
+            && !self.unsafe_release
             && self.starts <= 1
             && started_safely
             && command_is_fenced
@@ -137,13 +144,13 @@ impl Model {
                 CloseEffect::Publish(CloseOutcome::Succeeded),
             ),
             (Mutation::DuplicateClose, CloseEvent::Fenced, CloseState::Closing) => {
-                (CloseState::Closing, CloseEffect::StartClose)
+                (CloseState::Closing, CloseEffect::PublishClosingAndStart)
             }
             _ => close_step(self.actor, event),
         };
         Self {
             actor,
-            starts: self.starts + u8::from(effect == CloseEffect::StartClose),
+            starts: self.starts + u8::from(effect == CloseEffect::PublishClosingAndStart),
             ..self
         }
     }
@@ -352,6 +359,21 @@ fn actor_edges(s: Model, mutation: Mutation) -> Vec<(&'static str, Model)> {
     .collect()
 }
 
+/// Error return is distinct from dropping a failed observer's resources.
+fn return_edges(s: Model, mutation: Mutation) -> Vec<(&'static str, Model)> {
+    let caller_finished = s.observers[0] == Observer::Released
+        && s.admission != AdmissionPhase::Accepted
+        && !s.error_returned;
+    let cleanup_observed = s.gate != Gate::Retired || s.actor.outcome().is_some();
+    (caller_finished && (cleanup_observed || mutation == Mutation::EarlyErrorReturn))
+        .then_some(("return send error", Model {
+            error_returned: true,
+            ..s
+        }))
+        .into_iter()
+        .collect()
+}
+
 /// Reconstruct a shortest BFS counterexample rather than reporting only a failed assertion.
 fn trace(
     mut state: Model,
@@ -376,6 +398,7 @@ fn explore(mutation: Mutation) -> Result<usize, Vec<&'static str>> {
             .into_iter()
             .chain(observer_edges(state, mutation))
             .chain(actor_edges(state, mutation))
+            .chain(return_edges(state, mutation))
         {
             if !next.lawful() {
                 let mut counterexample = trace(state, &parents);
@@ -420,11 +443,12 @@ fn all_reachable_composed_ownership_states_preserve_safety() {
 
 #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_family = "wasm"), test)]
-fn mutations_expose_missing_fence_duplicate_close_and_false_shutdown_success() {
+fn mutations_expose_fence_close_shutdown_and_error_return_violations() {
     for mutation in [
         Mutation::SkipFence,
         Mutation::DuplicateClose,
         Mutation::ShutdownSuccess,
+        Mutation::EarlyErrorReturn,
     ] {
         let counterexample = explore(mutation).expect_err("mutated shell must violate a law");
         println!("{mutation:?}: {counterexample:?}");

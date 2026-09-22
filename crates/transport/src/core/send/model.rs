@@ -80,21 +80,21 @@ pub(crate) enum CloseEvent {
 pub(crate) enum CloseEffect {
     /// Duplicate or inapplicable event; preserve state and ownership.
     None,
-    /// Poll the actor-owned close future exactly once to completion or interruption.
-    StartClose,
+    /// Publish Closing, then initiate the single close operation; polling may repeat.
+    PublishClosingAndStart,
     /// Publish an explicit terminal result to watchers.
     Publish(CloseOutcome),
 }
 
 /// Pure State × Event -> State × Effect; no hidden reads or mutation.
 ///
-/// Invariant: StartClose occurs only on Idle -> Closing. Finished is absorbing.
+/// Invariant: PublishClosingAndStart occurs only on Idle -> Closing. Finished is absorbing.
 /// Preservation: duplicates stutter; only Closing can publish close success/failure.
 /// RuntimeStopped publishes Interrupted and cannot manufacture physical success.
 pub(crate) const fn close_step(state: CloseState, event: CloseEvent) -> (CloseState, CloseEffect) {
     use CloseEffect::None;
     use CloseEffect::Publish;
-    use CloseEffect::StartClose;
+    use CloseEffect::PublishClosingAndStart;
     use CloseEvent::CloseFailed;
     use CloseEvent::CloseSucceeded;
     use CloseEvent::Fenced;
@@ -108,7 +108,7 @@ pub(crate) const fn close_step(state: CloseState, event: CloseEvent) -> (CloseSt
     use CloseState::Finished;
     use CloseState::Idle;
     match (state, event) {
-        (Idle, Fenced) => (Closing, StartClose),
+        (Idle, Fenced) => (Closing, PublishClosingAndStart),
         (Idle, ObserversGone) => (Finished(Unused), Publish(Unused)),
         (Closing, CloseSucceeded) => (Finished(Succeeded), Publish(Succeeded)),
         (Closing, CloseFailed) => (Finished(Failed), Publish(Failed)),

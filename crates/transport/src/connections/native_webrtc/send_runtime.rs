@@ -7,8 +7,6 @@
 
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::MutexGuard;
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
@@ -16,11 +14,12 @@ use tokio_util::sync::CancellationToken;
 use super::send_lifecycle::OwnedSend;
 use super::send_lifecycle::SendLifecycle;
 use super::NATIVE_SEND_COMPLETION_TIMEOUT;
+use crate::core::send::gate::AdmissionGate;
+use crate::core::send::gate::FirstPollLease;
 use crate::core::transport::ConnectionStateCell;
 use crate::core::transport::SendAcceptance;
 use crate::error::Error;
 use crate::error::Result;
-use crate::sync_utils::lock_recover;
 
 /// Connection-generation gate shared by every native data channel.
 /// Cloning shares the same gate and cancellation signal; it does not create a generation.
@@ -31,7 +30,7 @@ pub(super) struct NativeRetirementFence {
     /// Wakeup signal for connection-owned work when retirement is committed.
     cancel_token: CancellationToken,
     /// Serializes the first physical poll against generation retirement.
-    retired: Arc<Mutex<bool>>,
+    gate: AdmissionGate,
     #[cfg(test)]
     /// Test witness that a competing retirement reached the admission gate.
     waiting_retirements: Arc<std::sync::atomic::AtomicUsize>,
@@ -44,12 +43,6 @@ pub(super) struct FencedCommand {
     _sealed: (),
 }
 
-/// Held only across final permit claim and the send primitive's first poll.
-pub(super) struct NativeSendAdmission<'a> {
-    /// Lease excluding retirement until the guarded first poll returns.
-    _retired: MutexGuard<'a, bool>,
-}
-
 impl NativeRetirementFence {
     /// Bind one shared gate to the generation state and its cancellation signal.
     pub(super) fn new(
@@ -59,32 +52,26 @@ impl NativeRetirementFence {
         Self {
             connection_state,
             cancel_token,
-            retired: Arc::new(Mutex::new(false)),
+            gate: AdmissionGate::new(),
             #[cfg(test)]
             waiting_retirements: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
     /// Linearize final permit admission with connection-wide retirement.
-    pub(super) fn try_send_admission(&self) -> Option<NativeSendAdmission<'_>> {
-        let retired = lock_recover(&self.retired);
-        match *retired {
-            true => None,
-            false => Some(NativeSendAdmission { _retired: retired }),
-        }
+    pub(super) fn try_send_admission(&self) -> Option<FirstPollLease<'_>> {
+        self.gate.enter()
     }
 
     /// Publish logical closure while holding exclusive generation admission.
-    fn finish_retirement(&self, retired: &mut bool) {
-        *retired = true;
+    fn finish_retirement(&self) {
         self.connection_state.close();
         self.cancel_token.cancel();
     }
 
     /// Close admission synchronously before any asynchronous physical cleanup.
     pub(super) fn request(&self) {
-        let mut retired = lock_recover(&self.retired);
-        self.finish_retirement(&mut retired);
+        self.gate.retire(|| self.finish_retirement());
     }
 
     /// Commit fencing before issuing the actor command capability.
@@ -98,10 +85,11 @@ impl NativeRetirementFence {
         self.waiting_retirements
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         before_gate();
-        let mut retired = lock_recover(&self.retired);
-        self.waiting_retirements
-            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-        self.finish_retirement(&mut retired);
+        self.gate.retire(|| {
+            self.waiting_retirements
+                .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+            self.finish_retirement();
+        });
     }
 
     #[cfg(test)]
@@ -214,11 +202,5 @@ where
         Ok(result) => result,
         Err(payload) => Err(Error::NativeSendPanic(panic_message(payload.as_ref()))),
     };
-    match result {
-        Err(error) => {
-            lifecycle.wait_for_cleanup().await;
-            Err(error)
-        }
-        Ok(value) => Ok(value),
-    }
+    lifecycle.finish(result).await
 }

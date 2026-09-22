@@ -43,7 +43,7 @@ impl QueueAdmission {
 }
 
 /// Own the serial channel lease and commit acceptance only after successful enqueue.
-pub(crate) struct QueueSend<F, L> {
+struct QueueSend<F, L> {
     /// Primitive send, independently pinned without owning the channel lease.
     primitive: Pin<Box<F>>,
     /// One linear capability state; the primitive never owns its permit/proof.
@@ -58,7 +58,7 @@ pub(crate) struct QueueSend<F, L> {
 
 impl<F: Future<Output = Result<()>>, L: Unpin> QueueSend<F, L> {
     /// Assemble an unpolled operation; the first poll must hold generation admission.
-    pub(crate) fn new(
+    fn new(
         primitive: F,
         permit: SendPermit,
         channel: L,
@@ -114,4 +114,75 @@ impl<F: Future<Output = Result<()>>, L: Unpin> Future for QueueSend<F, L> {
             }
         }
     }
+}
+
+/// Native preparation cannot be awaited: only start with a real admission lease exposes a future.
+#[cfg(feature = "native-webrtc")]
+pub(crate) struct PreparedQueue<
+    F: Future<Output = Result<()>>,
+    O: super::lifecycle::FailureObserver,
+> {
+    /// The raw queue never escapes its destruction boundary.
+    owner: super::owner::OwnedSend<QueueSend<F, tokio::sync::OwnedMutexGuard<()>>, O>,
+}
+
+/// Retain the actual native channel lease and install the owner before exposing preparation.
+#[cfg(feature = "native-webrtc")]
+pub(crate) fn prepare_native<F, O>(
+    primitive: F,
+    permit: SendPermit,
+    channel: tokio::sync::OwnedMutexGuard<()>,
+    enqueued: Arc<AtomicU64>,
+    bytes: u64,
+    observer: O,
+) -> Result<PreparedQueue<F, O>>
+where
+    F: Future<Output = Result<()>>,
+    O: super::lifecycle::FailureObserver,
+{
+    QueueSend::new(primitive, permit, channel, enqueued, bytes).map(|queue| PreparedQueue {
+        owner: super::owner::OwnedSend::new(queue, observer),
+    })
+}
+
+#[cfg(feature = "native-webrtc")]
+impl<F: Future<Output = Result<()>>, O: super::lifecycle::FailureObserver> PreparedQueue<F, O> {
+    /// Consume preparation, first-poll under the lease, then expose only the protected continuation.
+    pub(crate) fn start(
+        mut self,
+        admission: super::gate::FirstPollLease<'_>,
+    ) -> (
+        super::owner::OwnedSend<impl Future<Output = Result<u64>>, O>,
+        Poll<Result<u64>>,
+    ) {
+        let first_poll = self.owner.poll_admitted(admission);
+        (self.owner, first_poll)
+    }
+}
+
+/// Execute a non-yielding browser primitive inside the shared owner.
+/// Construction, offset snapshot and admission occur during this single poll.
+/// A caller cannot supply a Future here or retain an unpolled raw queue snapshot.
+#[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
+pub(crate) async fn send_sync<O: super::lifecycle::FailureObserver>(
+    send: impl FnOnce() -> Result<()>,
+    permit: SendPermit,
+    enqueued: Arc<AtomicU64>,
+    bytes: u64,
+    observer: O,
+) -> Result<u64> {
+    let queue = QueueSend::new(async move { send() }, permit, (), enqueued, bytes)?;
+    super::owner::OwnedSend::new(queue, observer).await
+}
+
+/// White-box regression hook for destruction-order tests, absent from production builds.
+#[cfg(test)]
+pub(crate) fn test_queue<F: Future<Output = Result<()>>, L: Unpin>(
+    primitive: F,
+    permit: SendPermit,
+    channel: L,
+    enqueued: Arc<AtomicU64>,
+    bytes: u64,
+) -> Result<impl Future<Output = Result<u64>>> {
+    QueueSend::new(primitive, permit, channel, enqueued, bytes)
 }

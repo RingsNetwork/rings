@@ -3473,6 +3473,7 @@ dependencies = [
  "dashmap 5.5.3",
  "futures",
  "futures-channel",
+ "futures-util",
  "js-sys",
  "lazy_static",
  "rand 0.8.6",

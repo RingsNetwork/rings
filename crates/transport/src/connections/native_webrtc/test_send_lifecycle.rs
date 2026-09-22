@@ -313,14 +313,9 @@ async fn queue_owner_fences_before_releasing_the_channel_lease() {
             assert!(!panic_on_poll, "injected primitive panic");
             Err(Error::NativeSendCompletionTimeout { timeout_ms: 1 })
         };
-        let queue = super::send_operation::QueueSend::new(
-            primitive,
-            permit,
-            lease,
-            Arc::clone(&counter),
-            5,
-        )
-        .expect("offset fits");
+        let queue =
+            super::send_operation::test_queue(primitive, permit, lease, Arc::clone(&counter), 5)
+                .expect("offset fits");
         let mut owner = OwnedSend::new(queue, Arc::clone(&lifecycle));
         let admission = fence.try_send_admission().expect("open fence");
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -359,20 +354,18 @@ async fn queue_acceptance_commits_bytes_once_and_retains_a_usable_generation() {
         async { Ok(()) },
     );
     let counter = Arc::new(std::sync::atomic::AtomicU64::new(10));
-    let queue = super::send_operation::QueueSend::new(
+    let prepared = super::send_operation::prepare_native(
         async { Ok(()) },
         permit,
         lease,
         Arc::clone(&counter),
         5,
+        lifecycle,
     )
     .expect("offset fits");
-    let mut owner = OwnedSend::new(queue, lifecycle);
     let admission = fence.try_send_admission().expect("open fence");
-    assert!(matches!(
-        owner.poll_admitted(admission),
-        Poll::Ready(Ok(15))
-    ));
+    let (owner, first_poll) = prepared.start(admission);
+    assert!(matches!(first_poll, Poll::Ready(Ok(15))));
     assert!(acceptance.is_accepted());
     assert_eq!(counter.load(Ordering::Acquire), 15);
     drop(owner);
@@ -388,7 +381,7 @@ async fn exhausted_byte_accounting_cannot_start_a_physical_write() {
     let acceptance = permit.acceptance();
     let attempted = Arc::new(AtomicBool::new(false));
     let writing = Arc::clone(&attempted);
-    let queue = super::send_operation::QueueSend::new(
+    let queue = super::send_operation::test_queue(
         async move {
             writing.store(true, Ordering::Release);
             Ok(())
@@ -432,7 +425,7 @@ async fn caller_and_detached_failure_share_one_close_and_preserve_handoff_owners
                     sending_release.cancelled().await;
                     Err(Error::NativeSendCompletionTimeout { timeout_ms: 3 })
                 };
-                let queue = super::send_operation::QueueSend::new(
+                let queue = super::send_operation::test_queue(
                     primitive,
                     permit,
                     sending_channel.lock_owned().await,
@@ -492,4 +485,23 @@ async fn caller_and_detached_failure_share_one_close_and_preserve_handoff_owners
     .await
     .expect("lease released and exactly one close");
     assert_eq!(closes.load(Ordering::Acquire), 1);
+}
+
+/// The production preparation type cannot be awaited before first-poll admission.
+#[test]
+fn prepared_queue_does_not_implement_future() {
+    /// Inference has a unique witness only when the candidate is not a Future.
+    trait NonFutureWitness<A> {
+        fn witness() {}
+    }
+    impl<T: ?Sized> NonFutureWitness<()> for T {}
+    /// This second witness deliberately makes inference ambiguous for a Future type.
+    struct FutureWitness;
+    impl<T: ?Sized + std::future::Future> NonFutureWitness<FutureWitness> for T {}
+    /// Use the actual public preparation type and native lifecycle address.
+    type Preparation = crate::core::send::operation::PreparedQueue<
+        std::future::Ready<Result<()>>,
+        Arc<SendLifecycle>,
+    >;
+    let _unique_witness = <Preparation as NonFutureWitness<_>>::witness;
 }

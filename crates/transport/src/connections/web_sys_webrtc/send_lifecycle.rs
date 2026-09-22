@@ -5,6 +5,9 @@ use std::future::Future;
 use std::rc::Rc;
 
 use futures_channel::oneshot;
+use futures_util::future::LocalBoxFuture;
+use futures_util::future::Shared;
+use futures_util::FutureExt;
 use wasm_bindgen_futures::spawn_local;
 use web_sys::RtcPeerConnection;
 
@@ -12,6 +15,7 @@ use crate::core::send::actor;
 use crate::core::send::lifecycle::Retirement;
 use crate::core::send::lifecycle::SendLifecycle;
 use crate::core::send::model::CloseEvent;
+use crate::core::send::model::CloseOutcome;
 use crate::core::send::model::CloseState;
 use crate::core::transport::ConnectionStateCell;
 use crate::core::transport::SendAcceptance;
@@ -37,6 +41,10 @@ pub(super) struct BrowserRetirement {
     connection_state: ConnectionStateCell,
     /// Cell moves the unique sender without borrowing across a callback or await.
     mailbox: Cell<Mailbox>,
+    /// Repeatable completion observer; cloning it never owns or cancels close IO.
+    completion: Shared<LocalBoxFuture<'static, CloseOutcome>>,
+    /// Monotone evidence that this send requested cleanup.
+    requested: Cell<bool>,
 }
 
 /// Browser specialization of the same policy used by native SendLifecycle.
@@ -44,11 +52,19 @@ pub(super) type BrowserLifecycle = SendLifecycle<BrowserRetirement>;
 
 impl Retirement for BrowserRetirement {
     type Command = FencedCommand;
+    type Completion = Shared<LocalBoxFuture<'static, CloseOutcome>>;
+    fn requested(&self) -> bool {
+        self.requested.get()
+    }
+    fn completion(&self) -> Self::Completion {
+        self.completion.clone()
+    }
     fn fence(&self) -> Self::Command {
         self.connection_state.close();
         FencedCommand { _sealed: () }
     }
     fn notify(&self, command: Self::Command) {
+        self.requested.set(true);
         match self.mailbox.replace(Mailbox::Submitted) {
             Mailbox::Open(sender) => {
                 let _delivery = sender.send(command);
@@ -81,6 +97,14 @@ impl BrowserLifecycle {
         close: impl Future<Output = Result<()>> + 'static,
     ) -> (Rc<Self>, Rc<Cell<CloseState>>) {
         let (sender, receiver) = oneshot::channel();
+        // Completion is separate from the command channel and supports multiple waiters.
+        let (completed, completion) = oneshot::channel();
+        let completion = completion
+            .map(|result| result.unwrap_or(CloseOutcome::Interrupted))
+            .boxed_local()
+            .shared();
+        // A terminal reducer effect consumes this publication capability exactly once.
+        let completed = Cell::new(Some(completed));
         let status = Rc::new(Cell::new(CloseState::Idle));
         let published = Rc::clone(&status);
         let inbox = async move {
@@ -91,12 +115,17 @@ impl BrowserLifecycle {
         spawn_local(actor::run(inbox, close, move |state| {
             published.set(state);
             if let Some(outcome) = state.outcome() {
+                if let Some(sender) = completed.take() {
+                    let _published = sender.send(outcome);
+                }
                 tracing::debug!(?outcome, "browser close actor finished");
             }
         }));
         let lifecycle = Rc::new(Self::with_adapter(acceptance, BrowserRetirement {
             connection_state,
             mailbox: Cell::new(Mailbox::Open(sender)),
+            completion,
+            requested: Cell::new(false),
         }));
         (lifecycle, status)
     }
@@ -112,7 +141,7 @@ mod tests {
 
     use super::*;
     use crate::core::send::model::CloseOutcome;
-    use crate::core::send::operation::QueueSend;
+    use crate::core::send::operation::test_queue;
     use crate::core::send::owner::OwnedSend;
     use crate::core::transport::SendPermit;
     use crate::core::transport::WebrtcConnectionState;
@@ -203,7 +232,7 @@ mod tests {
                     Err(Error::SendPermitRevoked)
                 }
             };
-            let queue = QueueSend::new(primitive, permit, (), Arc::clone(&enqueued), 3)
+            let queue = test_queue(primitive, permit, (), Arc::clone(&enqueued), 3)
                 .expect("checked offset");
             let result = OwnedSend::new(queue, lifecycle).await;
             assert_eq!(result.is_ok(), succeeds);
@@ -228,7 +257,7 @@ mod tests {
         }
         let permit = SendPermit::always();
         let acceptance = permit.acceptance();
-        let queue = QueueSend::new(
+        let queue = test_queue(
             async { Ok(()) },
             permit,
             (),
@@ -237,5 +266,77 @@ mod tests {
         );
         assert!(matches!(queue, Err(Error::SendByteCountOverflow)));
         assert!(!acceptance.is_irrevocable());
+    }
+    /// Error return waits for actor completion; cancelled and repeated waiters share its result.
+    #[wasm_bindgen_test]
+    async fn browser_error_waits_for_cleanup_without_owning_it() {
+        use std::task::Context;
+        use std::task::Waker;
+        let permit = SendPermit::always();
+        let acceptance = permit.acceptance();
+        let _proof = permit.try_mark_irrevocable().expect("claim");
+        let (release, wait) = oneshot::channel::<()>();
+        let (lifecycle, status) =
+            BrowserLifecycle::spawn(acceptance, ConnectionStateCell::new(), async move {
+                wait.await.expect("close release");
+                Ok(())
+            });
+        lifecycle.fail();
+        let mut first = Box::pin(lifecycle.finish::<()>(Err(Error::SendPermitRevoked)));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(first.as_mut().poll(&mut context).is_pending());
+        actor_turn().await;
+        assert_eq!(status.get(), CloseState::Closing);
+        assert!(first.as_mut().poll(&mut context).is_pending());
+        drop(first);
+        let mut second = Box::pin(lifecycle.finish::<()>(Err(Error::SendPermitRevoked)));
+        assert!(second.as_mut().poll(&mut context).is_pending());
+        release
+            .send(())
+            .expect("actor survived waiter cancellation");
+        assert!(matches!(second.await, Err(Error::SendPermitRevoked)));
+        assert_eq!(lifecycle.outcome().await, CloseOutcome::Succeeded);
+        assert_eq!(status.get(), CloseState::Finished(CloseOutcome::Succeeded));
+        assert!(matches!(
+            lifecycle.finish::<()>(Err(Error::SendPermitRevoked)).await,
+            Err(Error::SendPermitRevoked)
+        ));
+    }
+
+    /// Constructing two synchronous send futures does not reserve the same byte snapshot twice.
+    #[wasm_bindgen_test]
+    async fn browser_sync_entry_snapshots_offsets_only_when_executing() {
+        use crate::core::send::operation::send_sync;
+        let counter = Arc::new(AtomicU64::new(0));
+        let first_permit = SendPermit::always();
+        let second_permit = SendPermit::always();
+        let (first_owner, _) = BrowserLifecycle::spawn(
+            first_permit.acceptance(),
+            ConnectionStateCell::new(),
+            async { Ok(()) },
+        );
+        let (second_owner, _) = BrowserLifecycle::spawn(
+            second_permit.acceptance(),
+            ConnectionStateCell::new(),
+            async { Ok(()) },
+        );
+        let first = send_sync(
+            || Ok(()),
+            first_permit,
+            Arc::clone(&counter),
+            10,
+            first_owner,
+        );
+        let second = send_sync(
+            || Ok(()),
+            second_permit,
+            Arc::clone(&counter),
+            20,
+            second_owner,
+        );
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+        assert_eq!(first.await.expect("first accepted"), 10);
+        assert_eq!(second.await.expect("second accepted"), 30);
+        assert_eq!(counter.load(Ordering::SeqCst), 30);
     }
 }

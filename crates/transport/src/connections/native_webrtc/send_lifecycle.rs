@@ -1,9 +1,8 @@
 //! Native effects for the shared send lifecycle and polling owner.
 
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
-use std::task::Context;
-use std::task::Poll;
 
 use tokio::sync::mpsc;
 use tokio::sync::watch;
@@ -12,9 +11,9 @@ use tokio_util::sync::CancellationToken;
 use super::close_actor;
 use super::send_runtime::FencedCommand;
 use super::send_runtime::NativeRetirementFence;
-use super::send_runtime::NativeSendAdmission;
 use crate::core::send::lifecycle;
 use crate::core::send::lifecycle::Retirement;
+use crate::core::send::model::CloseOutcome;
 use crate::core::send::model::CloseState;
 use crate::core::send::owner;
 use crate::core::transport::SendAcceptance;
@@ -39,6 +38,13 @@ pub(super) type OwnedSend<F> = owner::OwnedSend<F, Arc<SendLifecycle>>;
 
 impl Retirement for NativeRetirement {
     type Command = FencedCommand;
+    type Completion = Pin<Box<dyn Future<Output = CloseOutcome> + Send>>;
+    fn requested(&self) -> bool {
+        self.requested.is_cancelled()
+    }
+    fn completion(&self) -> Self::Completion {
+        Box::pin(close_actor::outcome(self.status.clone()))
+    }
     fn fence(&self) -> Self::Command {
         self.fence.commit()
     }
@@ -63,32 +69,5 @@ impl SendLifecycle {
             requested: CancellationToken::new(),
             status,
         }))
-    }
-
-    /// Wait only for requested cleanup; the actor remains independent of its waiter.
-    pub(super) async fn wait_for_cleanup(&self) {
-        if self.adapter.requested.is_cancelled() {
-            let _outcome = close_actor::outcome(self.adapter.status.clone()).await;
-        }
-    }
-
-    /// Expose terminal results for conformance tests without sharing mutable actor state.
-    #[cfg(test)]
-    pub(super) async fn outcome(&self) -> crate::core::send::model::CloseOutcome {
-        close_actor::outcome(self.adapter.status.clone()).await
-    }
-}
-
-impl<F: Future> OwnedSend<F> {
-    /// Native first polling requires the actual generation lease.
-    pub(super) fn poll_admitted<T>(
-        &mut self,
-        admission: NativeSendAdmission<'_>,
-    ) -> Poll<Result<T>>
-    where
-        F: Future<Output = Result<T>>,
-    {
-        let mut context = Context::from_waker(std::task::Waker::noop());
-        self.poll_guarded(&mut context, admission)
     }
 }

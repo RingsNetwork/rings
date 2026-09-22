@@ -423,8 +423,9 @@ Finite-state exploration checks safety within a one-send/two-observer abstractio
 actor conformance and lifecycle regressions check the IO boundaries. Both backends
 use `core::send` for the lifecycle, resource owner, checked byte accounting and
 executor-neutral actor. WASM uses a one-shot mailbox and `spawn_local`; its fence
-is synchronous, while the actor invokes browser close in a later microtask. Browser
-close success means the local API returned, not remote acknowledgement. Native
+is synchronous, while the actor invokes browser close in a later microtask. Both
+backends wait for a requested cleanup's terminal result before returning a send
+error; cancelling the waiter does not cancel cleanup. Browser close success means the local API returned, not remote acknowledgement. Native
 first-poll locking and timeouts remain platform effects. Abort/trap or browser
 context destruction cannot guarantee cleanup or delivery of a terminal snapshot.
 

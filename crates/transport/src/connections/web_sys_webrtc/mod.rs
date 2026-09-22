@@ -33,8 +33,7 @@ use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
 use crate::core::pool::RoundRobin;
 use crate::core::pool::RoundRobinPool;
-use crate::core::send::operation::QueueSend;
-use crate::core::send::owner::OwnedSend;
+use crate::core::send::operation::send_sync;
 use crate::core::transport::effective_max_message_size;
 use crate::core::transport::stored_max_message_size;
 use crate::core::transport::ConnectionInterface;
@@ -104,7 +103,7 @@ fn delivery_future(
 
 impl WebSysWebrtcConnection {
     /// Use the same permit, accounting and destruction boundary as the native backend.
-    /// Browser send is synchronous: this future completes its first poll without yielding.
+    /// The send primitive is synchronous; an irrevocable error awaits actor completion.
     async fn send_after_permit(
         &self,
         permit: SendPermit,
@@ -119,8 +118,8 @@ impl WebSysWebrtcConnection {
             self.webrtc_conn.clone(),
         );
         // Unit is the browser's channel lease: no await occurs inside synchronous JS send.
-        let queue = QueueSend::new(async move { send() }, permit, (), enqueued, bytes)?;
-        OwnedSend::new(queue, lifecycle).await
+        let result = send_sync(send, permit, enqueued, bytes, Rc::clone(&lifecycle)).await;
+        lifecycle.finish(result).await
     }
 
     /// Encode and account one browser send using the shared checked queue owner.
@@ -710,7 +709,7 @@ mod tests {
 
     #[wasm_bindgen_test]
     async fn test_browser_send_failure_retires_connection_and_rejects_later_send() {
-        let (_peer_connection, connection_state, connection) = test_backend();
+        let (peer_connection, connection_state, connection) = test_backend();
         connection_state.observe_webrtc(WebrtcConnectionState::Connected);
         connection_state.observe_outbound_data_channels(true);
         let permit = SendPermit::always();
@@ -725,6 +724,11 @@ mod tests {
 
         assert!(matches!(result, Err(Error::DataChannelMessage(_))));
         assert!(!acceptance.is_accepted());
+        // The public error return must follow the actual browser close call, not just fencing.
+        assert_eq!(
+            peer_connection.connection_state(),
+            RtcPeerConnectionState::Closed
+        );
         assert_eq!(
             connection_state.snapshot().webrtc(),
             WebrtcConnectionState::Closed

@@ -101,3 +101,9 @@ and actor transitions; finite-state exploration and real actor conformance tests
 check the ownership laws. The shared lifecycle, polling owner and checked queue
 accounting live in `core::send`; platform adapters supply fencing, mailbox delivery
 and scheduling (Tokio for native, `spawn_local` for WASM).
+
+Failed sends share the same cleanup-completion boundary on both backends. The
+queue operation is private: native preparation retains a real channel lock and
+requires an admission lease before it becomes a continuation; the WASM entry
+accepts only a synchronous primitive. State publication is an explicit reducer
+effect, and terminal destruction produces no duplicate notification.
