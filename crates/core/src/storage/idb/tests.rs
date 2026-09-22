@@ -284,7 +284,7 @@ async fn reopen_existing_database_preserves_data_and_lru() {
         "same-version open retains the unused index"
     );
     let row: JsonValue =
-        crate::utils::js_value::deserialize(&store.get(&"retained".into()).await.unwrap()).unwrap();
+        crate::utils::js_value::deserialize(store.get(&"retained".into()).await.unwrap()).unwrap();
     assert!(row.get("visit_count").is_none());
     assert!(row.get("created_time").is_none());
     assert!(row["last_visit_time"].as_i64().unwrap() > 1);
