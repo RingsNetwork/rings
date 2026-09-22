@@ -57,7 +57,7 @@ metadata protection, separate from payload encryption.
 6. Between Nym clients or I2P destinations. Traffic beyond an exit/outproxy needs application encryption.
 7. Tor provides E2E for onion services; ordinary websites need HTTPS beyond the exit. A privacy layer is not an unconditional anonymity guarantee.
 
-[Primary sources](./docs/src/introduction/protocol-comparison.md#primary-sources) ·
+[Primary sources](./docs/src/README.md#primary-sources) ·
 [Rings security model](./SECURITY.md#layer-contracts)
 
 ## Reading paths
@@ -341,4 +341,4 @@ not covered by the software license.
 - [WebRTC IP address handling: RFC 8828](https://www.rfc-editor.org/rfc/rfc8828).
 - [WebRTC data channels: RFC 8831](https://www.rfc-editor.org/rfc/rfc8831).
 - [Data Channel Establishment Protocol: RFC 8832](https://www.rfc-editor.org/rfc/rfc8832).
-- [Protocol comparison sources](./docs/src/introduction/protocol-comparison.md#primary-sources).
+- [Protocol comparison primary sources](./docs/src/README.md#primary-sources).
