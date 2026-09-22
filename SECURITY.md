@@ -420,8 +420,7 @@ that send, and late acceptance cannot reopen retirement. Distinct concurrent sen
 may still close the same generation; explicit close remains generation-pinned.
 The actor publishes distinct unused, succeeded, failed and interrupted outcomes.
 Finite-state exploration checks safety within a one-send/two-observer abstraction;
-actor conformance and lifecycle regressions check the IO boundaries. The model
-and its assumptions are documented in `crates/transport/docs/native-send-ownership.md`.
+actor conformance and lifecycle regressions check the IO boundaries.
 
 `OwnedSend` retains the primitive and `QueueSend` retains its channel lease and
 acceptance proof outside the primitive's async stack. The first-poll boundary

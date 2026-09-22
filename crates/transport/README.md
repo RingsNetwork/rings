@@ -98,5 +98,4 @@ Native sends use a one-shot close actor with exclusive state and physical-close
 ownership. Caller and continuation report failures through a bounded mailbox only
 after synchronous generation fencing. Pure reducers govern failure observations
 and actor transitions; finite-state exploration and real actor conformance tests
-check the ownership laws. Architecture, verification scope and shutdown limits
-are documented in [native send ownership](docs/native-send-ownership.md).
+check the ownership laws.
