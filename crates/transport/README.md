@@ -93,5 +93,3 @@ The backend-free `--no-default-features` build has no normal Tokio dependency.
 Its notifier and the default/dummy notifier use `native_timeout_scheduler`, which
 works without an entered Tokio runtime. The native WebRTC backend still requires
 Tokio for its send, close, and timer tasks.
-
-See [the issue #787 audit](docs/issue-787.md) for the removal and retention evidence.
