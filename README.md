@@ -3,8 +3,7 @@
   <img alt="Rings Network" src="assets/logo/rings.svg" width="128" height="128">
 </picture>
 
-Rings Network
-===============
+# Rings Network
 
 [![rings-node](https://github.com/RingsNetwork/rings/actions/workflows/auto-release.yml/badge.svg)](https://github.com/RingsNetwork/rings/actions/workflows/auto-release.yml)
 [![cargo](https://img.shields.io/crates/v/rings-node.svg)](https://crates.io/crates/rings-node)
@@ -30,13 +29,48 @@ write a pure state machine, attach an interpreter shell, and run it over a decen
 overlay. Built-in protocols cover peer service relay and echo; the roadmap extends
 both the network layer and the privacy layer.
 
+## Where Rings fits
+
+Rings combines a Chord overlay, DID addressing, WebRTC transport, and a namespaced
+application runtime. The projects below solve overlapping problems at different
+layers; this is an architectural comparison, not a performance benchmark.
+
+| Project | Main abstraction and routing | Browser participation | Privacy boundary |
+|---|---|---|---|
+| **Rings** | Application overlay; Chord routes messages by DID | Browser/Wasm and native nodes join the same overlay over WebRTC | Plain routing exposes endpoint DIDs; separate onion circuits have the limits in [SECURITY.md](./SECURITY.md#layer-contracts) |
+| **[libp2p](https://libp2p.io/docs/)** | Modular networking stack; applications select transports, discovery, routing, and pubsub | Supports browser peers, including WebRTC; availability depends on implementation and transport | Secure connections do not by themselves provide anonymous routing |
+| **[aMule / eD2k / Kad](https://wiki.amule.org/wiki/FAQ_eD2k-Kademlia)** | File-sharing client; eD2k servers index sources, Kad provides DHT discovery | Native client; its web interface controls a running client | File discovery and transfer are not an anonymity layer |
+| **[Nostr](https://github.com/nostr-protocol/nips/blob/master/01.md)** | Signed events published to and queried from relays | Browser clients connect to relays over WebSocket | Event signatures authenticate authors; relays remain in the event path |
+| **[Nym mixnet](https://nym.com/nym-whitepaper.pdf)** | Privacy network; packets traverse gateways and mix nodes | Application clients access the mixnet through gateways | Sphinx packets, randomized delays, and cover traffic target traffic analysis, with latency and bandwidth costs |
+
+Rings is a fit when an application wants browser and native nodes to participate in
+one structured overlay with DID-routed messages. libp2p offers a broader choice of
+networking building blocks; aMule provides file-sharing semantics; Nostr provides
+relay-based event distribution; Nym focuses on metadata protection. These are design
+tradeoffs, not claims of protocol compatibility or stronger security.
+
+See the [detailed comparison and primary sources](./docs/src/introduction/protocol-comparison.md)
+for connectivity dependencies, identity assumptions, and selection guidance.
+
+## Reading paths
+
+- **Run a peer:** [Installation](#installation), then [node operations](./docs/src/cli.md).
+- **Build an application:** [Examples](#examples) and [Extending Rings](#extending-rings).
+- **Evaluate the design:** [Protocol comparison](#where-rings-fits), [Architecture](#architecture), and [Security model](./SECURITY.md).
+- **Read the research:** [Papers and build instructions](./papers/README.md), including DRanking and finger convergence.
+
 ## Whitepaper
 
 The canonical protocol paper is maintained in this repository:
 
 - [Rings whitepaper PDF](./papers/rings.pdf)
 - [LaTeX source](./papers/rings.tex)
-- [Paper assets and build notes](./papers/)
+- [Paper assets and build notes](./papers/README.md)
+- [DRanking paper](./papers/dranking.pdf): proposed verifiable ranking and admission;
+  the current [provisional service receipts](./docs/src/advanced-topic/dranking-service-receipts.md)
+  implement only an evidence-collection slice, not the full ranking or admission protocol.
+- [Finger-convergence specification](./papers/finger-convergence.pdf): range-proved
+  finger convergence and its assumptions.
 
 If you cite Rings in academic or technical writing, use:
 
@@ -204,9 +238,11 @@ execute, or maintain a proving backend.
 
 ## Architecture
 
-Rings is layered so that **every layer is decentralized — there is no server in the data
-path**. This is a data-path topology statement, not a permissionless Sybil-resistance
-claim; see [SECURITY.md](./SECURITY.md). Each layer maps directly to a crate/module:
+Rings separates peer connectivity, overlay routing, privacy circuits, and application
+protocols. Direct WebRTC connections can carry traffic without an application server;
+bootstrap, signaling, and ICE infrastructure still matter, and a selected TURN relay
+carries transport traffic. This does not establish permissionless Sybil resistance;
+see [SECURITY.md](./SECURITY.md). Each layer maps to a crate or module:
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -233,7 +269,8 @@ claim; see [SECURITY.md](./SECURITY.md). Each layer maps directly to a crate/mod
 ```
 
 - **Transport** establishes direct, peer-to-peer WebRTC datachannels — browser-to-browser
-  included — using STUN/ICE/SDP for NAT traversal, so traffic never transits a central server.
+  included — using STUN/ICE/SDP for NAT traversal. Direct connectivity depends on the
+  network; when a configured TURN relay is selected, that relay carries the data.
   Native nodes deployed behind cloud firewalls can bound ICE UDP gathering with
   `external_ip`, `webrtc_udp_port_min`, and `webrtc_udp_port_max`; for example,
   `49160..=49200` maps to an AWS security-group rule for `UDP 49160-49200`.
@@ -290,12 +327,10 @@ request. The Rings Network name, logo, and the hosted [rings.rs](https://rings.r
 not covered by the software license.
 
 
-## Ref:
+## Standards and references
 
-1. <https://datatracker.ietf.org/doc/html/rfc5245>
-
-2. <https://datatracker.ietf.org/doc/html/draft-ietf-rtcweb-ip-handling-01>
-
-3. <https://datatracker.ietf.org/doc/html/rfc8831>
-
-4. <https://datatracker.ietf.org/doc/html/rfc8832>
+- [ICE: RFC 8445](https://www.rfc-editor.org/rfc/rfc8445) (obsoletes RFC 5245).
+- [WebRTC IP address handling: RFC 8828](https://www.rfc-editor.org/rfc/rfc8828).
+- [WebRTC data channels: RFC 8831](https://www.rfc-editor.org/rfc/rfc8831).
+- [Data Channel Establishment Protocol: RFC 8832](https://www.rfc-editor.org/rfc/rfc8832).
+- [Protocol comparison sources](./docs/src/introduction/protocol-comparison.md#primary-sources).

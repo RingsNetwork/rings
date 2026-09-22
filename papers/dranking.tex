@@ -1,4 +1,6 @@
-\documentclass[journal]{IEEEtran}
+\documentclass[11pt,letterpaper]{article}
+% A single text column keeps formal definitions and long equations readable.
+\usepackage[margin=24mm]{geometry}
 \usepackage{color}
 \usepackage{cite}
 \usepackage{multirow}
@@ -11,12 +13,22 @@
 \usepackage{enumitem}
 \usepackage{array}
 \usepackage{booktabs}
-\usepackage[utf8]{inputenc}
+\usepackage{tabularx}
 \usepackage[english]{babel}
 \usepackage{algorithm}
 \usepackage[noend]{algpseudocode}
 \usepackage{tikz}
 \usetikzlibrary{positioning,arrows}
+\usepackage[hidelinks]{hyperref}
+\usepackage{bookmark}
+\hypersetup{
+  pdftitle={The DRanking Protocol: Verifiable Distributed Ranking and Sybil-Bounded Admission for Structured Peer-to-Peer Networks},
+  pdfauthor={Ryan J. Kung},
+  pdfsubject={Distributed ranking and admission protocol design}
+}
+% Ragged-right table cells avoid stretched spacing in technical descriptions.
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\setlength{\emergencystretch}{1em}
 
 \newtheorem{definition}{Definition}
 \newtheorem{constraint}{Constraint}
@@ -31,17 +43,15 @@
 Manuscript created February 11, 2023; rewritten August 31, 2026;
 revised September 1, 2026.
 This document supersedes the 2023 draft \emph{The Ranking Protocol}.}}
-\title{\huge The DRanking Protocol:\\
-Verifiable Distributed Ranking and Sybil-Bounded Admission\\
+\title{The DRanking Protocol:\\[0.3em]
+\large Verifiable Distributed Ranking and Sybil-Bounded Admission\\
 for Structured Peer-to-Peer Networks}
 \date{}
 
-\IEEEaftertitletext{%
-\vspace{0.5\baselineskip}%
-\noindent\hfill
-\parbox{0.90\textwidth}{%
-\centering\bfseries Abstract\\[0.5\baselineskip]%
-\normalfont
+\begin{document}
+\maketitle
+
+\begin{abstract}
 DRanking converts locally observed peer behavior in an open structured
 peer-to-peer network into a globally agreed, verifiable service weight that
 gates admission to protocol roles.  Identity creation is free, so no
@@ -58,10 +68,18 @@ objects; and a circuit-friendly epoch transition folded by Nova-family
 incrementally verifiable computation, giving constant-cost verification to
 browser nodes.  Rank is soulbound and slashable; reward is a separate
 transferable asset; the authority-to-stake transition is conditioned on a
-security-budget crossover.}}
+security-budget crossover.
+\end{abstract}
 
-\begin{document}
-\maketitle
+\noindent\textbf{Keywords:} peer-to-peer networks; service receipts; trust propagation;
+Sybil resistance; verifiable computation.
+
+\medskip
+\noindent\textbf{Implementation scope.} This paper specifies the proposed protocol.
+The Rings implementation currently collects provisional liveness-probe receipts;
+it does not implement the complete finalized ledger, trust algebra, committee
+selection, or admission policy described here. See the
+\href{https://github.com/RingsNetwork/rings/blob/master/docs/src/advanced-topic/dranking-service-receipts.md}{repository's service-receipt documentation}.
 
 \section{Introduction}
 
@@ -156,7 +174,7 @@ No bound is assumed on $|\mathsf{Adv}|$.
 \draw[->] (t) -- (sig);
 \draw[->] (sig) -- node[right,font=\scriptsize]{$\S\ref{sec:ledger}$} (qc);
 \draw[->] (qc.south) -- ++(0,-0.3) -| (b.south);
-\draw[->] (b) -- node[right,font=\scriptsize]{$\S\ref{sec:sampling}$} (sor);
+\draw[->] (b) -- node[above,font=\scriptsize]{$\S\ref{sec:sampling}$} (sor);
 \draw[->] (sor) -- (com);
 \draw[->] (com) -- (qc);
 \draw[->] (t) -- (sor);
@@ -1061,7 +1079,7 @@ synthetic load.
 \centering
 \caption{Threat matrix}\label{tab:threats}
 \renewcommand{\arraystretch}{1.25}
-\begin{tabular}{@{}p{1.9cm}p{3.3cm}p{2.4cm}@{}}
+\begin{tabularx}{\linewidth}{@{}p{0.18\linewidth}YY@{}}
 \toprule
 \textbf{Attack} & \textbf{Bound} & \textbf{Residual} \\
 \midrule
@@ -1092,7 +1110,7 @@ Rank market &
 Prop.~\ref{prop:soulbound} &
 out-of-band key sale \\
 \bottomrule
-\end{tabular}
+\end{tabularx}
 \end{table}
 
 \[
@@ -1108,7 +1126,7 @@ out-of-band key sale \\
 \centering
 \caption{Protocol parameters}\label{tab:params}
 \renewcommand{\arraystretch}{1.2}
-\begin{tabular}{@{}clp{3.6cm}@{}}
+\begin{tabularx}{\linewidth}{@{}lYY@{}}
 \toprule
 \textbf{Sym.} & \textbf{Role} & \textbf{Constraint} \\
 \midrule
@@ -1137,7 +1155,7 @@ $D$ & dilution curve &
 $\beta$ & crossover margin &
   $>1$, Obl.~\ref{obl:crossover} \\
 \bottomrule
-\end{tabular}
+\end{tabularx}
 \end{table}
 
 \section{Related Work}\label{sec:related}
@@ -1170,7 +1188,10 @@ and every mechanism above --- receipts, the trust laws, sortition, the
 ledger, folding, the two-asset economy --- is a term on the left-hand
 side.
 
+\begingroup
+\raggedright
 \bibliographystyle{IEEEtran}
 \bibliography{dranking}
+\endgroup
 
 \end{document}

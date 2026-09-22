@@ -4,8 +4,9 @@
 
 **Rings is a peer-to-peer network for the sovereign age.** Browser tabs and native daemons join
 one overlay, find each other by DID, and exchange messages over direct WebRTC datachannels
-routed by a Chord DHT. There is no server in the data path: seed nodes only help a peer find
-its first connection.
+routed by a Chord DHT. Direct connections do not need an application server in the data
+path. Bootstrap and signaling establish the first links; if ICE selects a configured TURN
+relay, that relay carries the transport traffic.
 
 The overlay is the communication layer: it routes by DID and, once two peers have completed
 the E2E handshake, encrypts to a DID. It does not hide who is talking to whom. Privacy is the
@@ -35,6 +36,8 @@ If you are new to Rings, start with a native node: it is the shortest path to a 
 and to the JSON-RPC [API](jsonrpc.md) every runtime shares.
 
 ## How it works
+
+- [Protocol comparison](introduction/protocol-comparison.md): Rings, libp2p, aMule/eD2k/Kad, Nostr, and Nym.
 
 - [Architecture](advanced-topic/architecture.md): the layers, from transport to application.
 - [How handshake works](advanced-topic/handshake.md) and [Exchange SDP](advanced-topic/exchange-sdp.md): how two peers open a datachannel.

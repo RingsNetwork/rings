@@ -2,6 +2,8 @@
 
 [Start Here](README.md)
 
+- [Protocol comparison](introduction/protocol-comparison.md)
+
 # Native Node
 
 - [Install a Native Node](install-a-native-node.md)
