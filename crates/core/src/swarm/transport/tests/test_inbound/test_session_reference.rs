@@ -136,7 +136,7 @@ async fn test_missed_session_holds_frames_until_the_peer_announces_it() -> Resul
     assert_eq!(app_callback.inbounds(), 1);
     assert!(!measure
         .snapshot_counters()?
-        .contains(&(pending.peer, MeasureCounter::FailedToReceive)));
+        .contains(&(pending.peer, MeasurementEvent::FailedToReceive)));
 
     let announcement = LinkControl::Announce(stranger.session()).to_wire()?;
     pending.receive(announcement.as_ref()).await?;
@@ -225,7 +225,7 @@ async fn test_hold_overflow_drops_the_newcomer_uncharged_and_asks_the_oldest_que
     );
     assert!(!measure
         .snapshot_counters()?
-        .contains(&(pending.peer, MeasureCounter::FailedToReceive)));
+        .contains(&(pending.peer, MeasurementEvent::FailedToReceive)));
 
     let newcomer_stranger = SessionSk::new_with_seckey(&SecretKey::random())?;
     let newcomer = stranger_payload(&pending, &transport, &newcomer_stranger, b"newcomer")?;
@@ -237,7 +237,7 @@ async fn test_hold_overflow_drops_the_newcomer_uncharged_and_asks_the_oldest_que
     );
     assert!(!measure
         .snapshot_counters()?
-        .contains(&(pending.peer, MeasureCounter::FailedToReceive)));
+        .contains(&(pending.peer, MeasurementEvent::FailedToReceive)));
     assert_eq!(
         dispatched_link_control_for_test().last(),
         Some(&(pending.peer, LinkControl::Request(oldest_digest)))
@@ -320,7 +320,7 @@ async fn test_disclaimed_session_fails_awaiting_frames_and_leaves_resolved_ones_
     ]);
     assert!(measure
         .snapshot_counters()?
-        .contains(&(pending.peer, MeasureCounter::FailedToReceive)));
+        .contains(&(pending.peer, MeasurementEvent::FailedToReceive)));
     transport.disconnect(pending.peer).await?;
     Ok(())
 }
@@ -385,7 +385,7 @@ async fn test_frames_held_past_the_timeout_are_swept_and_charged() -> Result<()>
     assert_eq!(pending.callback.session_hold_count_for_test(), 0);
     assert!(measure
         .snapshot_counters()?
-        .contains(&(peer, MeasureCounter::FailedToReceive)));
+        .contains(&(peer, MeasurementEvent::FailedToReceive)));
     assert_eq!(app_callback.inbounds(), 0);
     transport.disconnect(peer).await?;
     Ok(())
@@ -416,7 +416,7 @@ async fn test_control_frames_judged_on_a_superseded_generation_are_not_sent() ->
     assert_eq!(dispatched_link_control_for_test().len(), dispatched_before);
     assert!(!measure
         .snapshot_counters()?
-        .contains(&(first.peer, MeasureCounter::FailedToReceive)));
+        .contains(&(first.peer, MeasurementEvent::FailedToReceive)));
     assert_eq!(first.callback.pre_admission_held_count_for_test(), 0);
     assert_eq!(app_callback.inbounds(), inbounds_before);
     transport.disconnect(next.peer).await?;
@@ -692,7 +692,7 @@ async fn test_an_expired_announcement_is_refused_and_charged() -> Result<()> {
     assert_eq!(app_callback.inbounds(), 0);
     assert!(measure
         .snapshot_counters()?
-        .contains(&(pending.peer, MeasureCounter::FailedToReceive)));
+        .contains(&(pending.peer, MeasurementEvent::FailedToReceive)));
     transport.disconnect(pending.peer).await?;
     Ok(())
 }

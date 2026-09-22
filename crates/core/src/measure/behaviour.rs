@@ -23,7 +23,6 @@ use rings_measure::MeasureError;
 use rings_measure::ProvisionalEvidenceRecord;
 
 use super::Authentication;
-use super::MeasureCounter;
 use super::MeasurementBatch;
 use super::MeasurementEvent;
 use super::PeerMeasurement;
@@ -34,76 +33,41 @@ use super::PeerQuality;
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait Measure {
-    /// Increment a legacy counter whose peer attribution was already established.
-    ///
-    /// New transport code should use [`Self::record`] so the authentication
-    /// state remains explicit at the runtime boundary.
-    async fn incr(&self, did: Did, counter: MeasureCounter);
-    /// `get_count` returns the counter of the given peer.
-    async fn get_count(&self, did: Did, counter: MeasureCounter) -> u64;
-
-    /// Record one logical transport event with its explicit identity proof state.
-    ///
-    /// Implementations backed by [`rings_measure::MeasurementLedger`] should
-    /// override this method so useful-byte credits are retained. The default is
-    /// a compatibility bridge for counter-only implementations: because
-    /// they have no retained-peer set, they observe every proof-permitted local
-    /// failure, while a ledger-backed override enforces known-peer retention.
+    /// Record one logical event with explicit peer attribution and useful bytes.
+    /// Implementations must preserve the ledger's authentication and retention rules.
     async fn record(
         &self,
         did: Did,
         authentication: Authentication,
         event: MeasurementEvent,
-    ) -> Result<ApplyOutcome, MeasureError> {
-        if !authentication.permits(event) {
-            return Ok(ApplyOutcome::IgnoredUnattributable);
-        }
-        self.incr(did, MeasureCounter::from_event(event)).await;
-        Ok(ApplyOutcome::Applied)
-    }
+    ) -> Result<ApplyOutcome, MeasureError>;
 
-    /// Record a homogeneous batch as one atomic logical transition.
-    ///
-    /// The provided compatibility implementation is deliberately non-atomic and
-    /// projects only occurrence counts through [`Self::incr`]. Byte-aware or
-    /// transactional implementations must override it to preserve aggregate
-    /// useful bytes and all-or-nothing application.
+    /// Apply a homogeneous batch atomically, retaining occurrence and byte totals.
+    /// Failure must not leave a partially applied batch.
     async fn record_batch(
         &self,
         did: Did,
         authentication: Authentication,
         batch: MeasurementBatch,
-    ) -> Result<ApplyOutcome, MeasureError> {
-        if !authentication.permits(batch.event()) {
-            return Ok(ApplyOutcome::IgnoredUnattributable);
-        }
-        let counter = MeasureCounter::from_event(batch.event());
-        for _ in 0..batch.occurrences().get() {
-            self.incr(did, counter).await;
-        }
-        Ok(ApplyOutcome::Applied)
-    }
+    ) -> Result<ApplyOutcome, MeasureError>;
 
     /// Return the projected local measurement for one peer.
     ///
-    /// Counter-only compatibility implementations have no complete policy or
-    /// credit state and therefore return no projection by default.
+    /// Observation-only implementations may omit query support.
     async fn peer_measurement(&self, _did: Did) -> Result<Option<PeerMeasurement>, MeasureError> {
         Ok(None)
     }
 
     /// Return every retained local peer measurement.
     ///
-    /// Counter-only compatibility implementations cannot enumerate their key
-    /// space and therefore return an empty vector by default.
+    /// Observation-only implementations return an empty vector by default.
     async fn peer_measurements(&self) -> Result<Vec<PeerMeasurement>, MeasureError> {
         Ok(Vec::new())
     }
 
     /// Return one bounded page after an exclusive DID cursor.
     ///
-    /// Counter-only compatibility implementations cannot enumerate their key
-    /// space and therefore return an empty page by default.
+    /// Observation-only implementations return an empty page by default.
     async fn peer_measurements_page(
         &self,
         _after: Option<Did>,

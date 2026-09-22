@@ -1,3 +1,5 @@
+//! Browser witnesses for stored row shape, atomic touches, errors, and LRU eviction.
+
 use rexie::TransactionMode;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -16,7 +18,9 @@ struct TestDataStruct {
 }
 
 async fn create_db_instance(cap: u32) -> IdbStorage {
-    let instance = IdbStorage::new_with_cap(cap).await.unwrap();
+    // Every browser test owns a fresh database; never clear a user database.
+    let name = format!("rings-idb-test-{}", uuid::Uuid::new_v4());
+    let instance = IdbStorage::new_with_cap_and_name(cap, &name).await.unwrap();
     instance.clear().await.unwrap();
     let count = instance.count().await.unwrap();
     assert_eq!(count, 0, "store not empty");
@@ -54,7 +58,7 @@ async fn test_create_put_data() {
     };
     instance.put(&key, &value).await.unwrap();
 
-    let (_tx, store) = instance.get_tx_store(TransactionMode::ReadOnly).unwrap();
+    let (_tx, store) = instance.transaction(TransactionMode::ReadOnly).unwrap();
     assert!(store.count(None).await.unwrap() == 1, "indexedDB is empty");
 
     let real_value_1 = store.get(&JsValue::from(&key)).await.unwrap();
@@ -65,10 +69,9 @@ async fn test_create_put_data() {
         .as_i64()
         .unwrap();
 
-    assert!(
-        real_value_1.get("visit_count").unwrap().as_i64().unwrap() == 0,
-        "visit_count not zero"
-    );
+    assert!(real_value_1.get("visit_count").is_none());
+    assert!(real_value_1.get("created_time").is_none());
+    assert!(store.index("visit_count").is_err());
     let real_value_data_1: TestDataStruct =
         serde_json::from_value(real_value_1.get("data").unwrap().to_owned()).unwrap();
     assert!(
@@ -82,7 +85,7 @@ async fn test_create_put_data() {
     tracing::debug!("{:?}", r);
     assert_eq!(r.content, value.content);
 
-    let (_tx, store) = instance.get_tx_store(TransactionMode::ReadOnly).unwrap();
+    let (_tx, store) = instance.transaction(TransactionMode::ReadOnly).unwrap();
     assert!(store.count(None).await.unwrap() == 1, "indexedDB is empty");
     let real_value_2 = store.get(&JsValue::from(&key)).await.unwrap();
     let real_value_2: JsonValue = serde_wasm_bindgen::from_value(real_value_2).unwrap();
@@ -93,13 +96,11 @@ async fn test_create_put_data() {
         .unwrap();
 
     assert!(
-        last_visit_1 != last_visit_2,
+        last_visit_1 < last_visit_2,
         "last_visit_1 and last_visit_2 is same, {last_visit_1}"
     );
-    assert!(
-        real_value_2.get("visit_count").unwrap().as_i64().unwrap() == 1,
-        "2. visit_count not zero"
-    );
+    assert!(real_value_2.get("visit_count").is_none());
+    assert!(real_value_2.get("created_time").is_none());
     let real_value_data_2: TestDataStruct =
         serde_json::from_value(real_value_2.get("data").unwrap().to_owned()).unwrap();
     assert!(
@@ -110,7 +111,7 @@ async fn test_create_put_data() {
     );
 
     instance.clear().await.unwrap();
-    let (_tx, store) = instance.get_tx_store(TransactionMode::ReadOnly).unwrap();
+    let (_tx, store) = instance.transaction(TransactionMode::ReadOnly).unwrap();
     assert!(
         store.count(None).await.unwrap() == 0,
         "indexedDB is not empty"
@@ -182,7 +183,7 @@ async fn test_indexed_db_remove() {
 
 #[wasm_bindgen_test]
 async fn test_idb_prune() {
-    super::setup_log();
+    tracing_wasm::set_as_global_default();
     let instance = create_kv_db::<TestDataStruct>(4).await;
     let key1 = "1".to_string();
     let key2 = "2".to_string();
@@ -239,4 +240,95 @@ async fn test_idb_prune() {
     instance.clear().await.unwrap();
     let count = instance.count().await.unwrap();
     assert_eq!(count, 0, "indexedDB is not empty");
+}
+
+/// Reopening does not upgrade or erase an existing database; touches remove unused fields.
+#[wasm_bindgen_test]
+async fn reopen_existing_database_preserves_data_and_lru() {
+    // Unique scope models the previous schema without opening any application database.
+    let name = format!("rings-idb-old-schema-test-{}", uuid::Uuid::new_v4());
+    // The old schema had one unused index in addition to the eviction index.
+    let old = rexie::Rexie::builder(&name)
+        .add_object_store(
+            rexie::ObjectStore::new(&name)
+                .key_path("key")
+                .add_index(rexie::Index::new("last_visit_time", "last_visit_time"))
+                .add_index(rexie::Index::new("visit_count", "visit_count")),
+        )
+        .build()
+        .await
+        .unwrap();
+    // Seed a committed row carrying fields that the new reader does not need.
+    let transaction = old
+        .transaction(&[&name], TransactionMode::ReadWrite)
+        .unwrap();
+    let store = transaction.store(&name).unwrap();
+    let old_row = serde_json::json!({
+        "key": "retained", "data": "payload", "last_visit_time": 1,
+        "visit_count": u32::MAX, "created_time": 0
+    });
+    store
+        .put(&crate::utils::js_value::serialize(&old_row).unwrap(), None)
+        .await
+        .unwrap();
+    transaction.done().await.unwrap();
+    old.close();
+
+    // Opening at the existing version must not run a destructive upgrade.
+    let reopened = IdbStorage::new_with_cap_and_name(2, &name).await.unwrap();
+    let value: Option<String> = reopened.get("retained").await.unwrap();
+    assert_eq!(value.as_deref(), Some("payload"));
+    let (transaction, store) = reopened.transaction(TransactionMode::ReadOnly).unwrap();
+    assert!(
+        store.index("visit_count").is_ok(),
+        "same-version open retains the unused index"
+    );
+    let row: JsonValue =
+        crate::utils::js_value::deserialize(store.get(&"retained".into()).await.unwrap()).unwrap();
+    assert!(row.get("visit_count").is_none());
+    assert!(row.get("created_time").is_none());
+    assert!(row["last_visit_time"].as_i64().unwrap() > 1);
+    transaction.done().await.unwrap();
+
+    // A cold row is older than the touched row, regardless of browser clock resolution.
+    let (transaction, store) = reopened.transaction(TransactionMode::ReadWrite).unwrap();
+    let cold_row = serde_json::json!({"key": "cold", "data": "cold", "last_visit_time": 0});
+    store
+        .put(&crate::utils::js_value::serialize(&cold_row).unwrap(), None)
+        .await
+        .unwrap();
+    transaction.done().await.unwrap();
+    // Owned payload matches the adapter's DeserializeOwned contract.
+    let replacement = String::from("new");
+    reopened.put("new", &replacement).await.unwrap();
+    let entries: Vec<(String, String)> = reopened.get_all().await.unwrap();
+    assert_eq!(entries.len(), 2);
+    assert!(entries.iter().any(|(key, _)| key == "retained"));
+    assert!(!entries.iter().any(|(key, _)| key == "cold"));
+}
+
+/// Missing keys complete cleanly; a decode error does not rewrite or remove the stored payload.
+#[wasm_bindgen_test]
+async fn missing_and_invalid_reads_preserve_storage() {
+    // Isolated store exercises the public error boundary with incompatible value types.
+    let instance = create_db_instance(2).await;
+    let missing: Option<String> = instance.get("missing").await.unwrap();
+    assert!(missing.is_none());
+    instance.put("number", &42_u32).await.unwrap();
+    let invalid: crate::error::Result<Option<TestDataStruct>> = instance.get("number").await;
+    assert!(invalid.is_err());
+    let retained: Option<u32> = instance.get("number").await.unwrap();
+    assert_eq!(retained, Some(42));
+    assert_eq!(instance.count().await.unwrap(), 1);
+}
+
+/// The named constructor rejects zero capacity before opening IndexedDB.
+#[wasm_bindgen_test]
+async fn zero_capacity_is_rejected() {
+    // Rejection does not create this uniquely named database.
+    let name = format!("rings-idb-zero-test-{}", uuid::Uuid::new_v4());
+    assert!(matches!(
+        IdbStorage::new_with_cap_and_name(0, &name).await,
+        Err(crate::error::Error::InvalidCapacity)
+    ));
 }

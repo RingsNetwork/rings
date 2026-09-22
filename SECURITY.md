@@ -241,6 +241,16 @@ prove that both account roles signed one canonical claim and that their delegate
 at signing time. It cannot later prove that the receipt was observed inside the receiver's live
 epoch tolerance. Live admission checks that fact once and stores the local observation time.
 
+Local measurement writes require explicit attribution-aware events or atomic batches;
+there is no counter-only fallback that fabricates zero-byte events or hides update errors.
+Every retained peer projection carries its credit record. Reliability policy and byte credit
+remain separate, and provisional receipt admission cannot modify either one.
+
+IndexedDB reads remain atomic read-and-touch transactions: successful reads update the
+per-key monotonic LRU timestamp and await commit. Unused visit counts and creation times
+are not recorded. Existing databases can retain an unused old index because opening does
+not request a schema upgrade; the adapter does not erase user data to remove it.
+
 Provisional evidence is isolated from peer measurements, `CreditRecord`, and
 `order_peers_by_quality`; it changes neither routing nor credit. The evidence store has hard global
 and per-provider/beneficiary record and byte limits, deterministic oldest-first eviction, aggregate

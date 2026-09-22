@@ -8,25 +8,28 @@ fn did() -> Did {
 
 #[test]
 fn test_peer_quality_evidence_classifies_unknown_healthy_and_degraded() {
-    let thresholds = PeerQualityThresholds::new(3, 10, 10);
+    // Explicit policy preserves the former one-positive-observation test premise.
+    let policy =
+        rings_measure::ReliabilityPolicy::new(60, 1, PeerQualityThresholds::new(3, 10, 10))
+            .unwrap();
     assert_eq!(
-        PeerQualityEvidence::new(0, 0, 0, 0, 0, 0).classify(thresholds),
+        PeerQualityEvidence::new(0, 0, 0, 0, 0, 0).classify_with_policy(policy),
         PeerQuality::Unknown
     );
     assert_eq!(
-        PeerQualityEvidence::new(1, 0, 0, 0, 0, 0).classify(thresholds),
+        PeerQualityEvidence::new(1, 0, 0, 0, 0, 0).classify_with_policy(policy),
         PeerQuality::Healthy
     );
     assert_eq!(
-        PeerQualityEvidence::new(1, 3, 0, 0, 0, 0).classify(thresholds),
+        PeerQualityEvidence::new(1, 3, 0, 0, 0, 0).classify_with_policy(policy),
         PeerQuality::Degraded
     );
     assert_eq!(
-        PeerQualityEvidence::new(1, 0, 0, 10, 0, 0).classify(thresholds),
+        PeerQualityEvidence::new(1, 0, 0, 10, 0, 0).classify_with_policy(policy),
         PeerQuality::Degraded
     );
     assert_eq!(
-        PeerQualityEvidence::new(1, 0, 0, 0, 0, 10).classify(thresholds),
+        PeerQualityEvidence::new(1, 0, 0, 0, 0, 10).classify_with_policy(policy),
         PeerQuality::Degraded
     );
 }

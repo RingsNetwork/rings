@@ -225,14 +225,8 @@ async fn test_provider_exposes_sent_and_received_peer_measurements() {
     connect_processors(&p1, &p2, &callback1, &callback2).await;
     let sent_before = p1.peer_measurement(p2.did()).await.unwrap();
     let received_before = p2.peer_measurement(p1.did()).await.unwrap();
-    let sent_bytes_before = sent_before
-        .credit
-        .expect("periodic measurement exposes prior credit")
-        .bytes_sent_to_peer();
-    let received_bytes_before = received_before
-        .credit
-        .expect("periodic measurement exposes prior credit")
-        .bytes_received_from_peer();
+    let sent_bytes_before = sent_before.credit.bytes_sent_to_peer();
+    let received_bytes_before = received_before.credit.bytes_received_from_peer();
 
     p1.swarm
         .send_direct_message(Message::custom(b"measure-provider").unwrap(), p2.did())
@@ -246,23 +240,17 @@ async fn test_provider_exposes_sent_and_received_peer_measurements() {
     assert!(matches!(got_msg2, Message::CustomMessage(_)));
 
     let sent = wait_for_peer_measurement(&p1, p2.did(), |measurement| {
-        measurement
-            .credit
-            .is_some_and(|credit| credit.bytes_sent_to_peer() > sent_bytes_before)
+        measurement.credit.bytes_sent_to_peer() > sent_bytes_before
     })
     .await;
     let received = wait_for_peer_measurement(&p2, p1.did(), |measurement| {
-        measurement
-            .credit
-            .is_some_and(|credit| credit.bytes_received_from_peer() > received_bytes_before)
+        measurement.credit.bytes_received_from_peer() > received_bytes_before
     })
     .await;
     assert_eq!(sent.did, p2.did());
     assert_eq!(received.did, p1.did());
-    let sent_credit = sent.credit.expect("periodic measurement exposes credit");
-    let received_credit = received
-        .credit
-        .expect("periodic measurement exposes credit");
+    let sent_credit = sent.credit;
+    let received_credit = received.credit;
     let sent_delta = sent_credit.bytes_sent_to_peer() - sent_bytes_before;
     let received_delta = received_credit.bytes_received_from_peer() - received_bytes_before;
     assert!(sent_delta > b"measure-provider".len() as u64);

@@ -9,16 +9,10 @@ use crate::swarm::Swarm;
 use crate::swarm::SwarmBuilder;
 
 mod test_ice_servers;
-mod test_idb_storage;
 mod test_utils;
 mod test_wasm_transport;
 
 wasm_bindgen_test_configure!(run_in_browser);
-
-pub fn setup_log() {
-    tracing_wasm::set_as_global_default();
-    tracing::debug!("test")
-}
 
 enum TestStorageMode {
     Default,

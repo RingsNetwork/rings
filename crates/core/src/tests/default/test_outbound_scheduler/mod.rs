@@ -22,8 +22,8 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::measure::BehaviourJudgement;
 use crate::measure::Measure;
-use crate::measure::MeasureCounter;
 use crate::measure::MeasureImpl;
+use crate::measure::MeasurementEvent;
 use crate::measure::PeerQuality;
 use crate::message::test_probe_request;
 use crate::message::CustomMessage;
@@ -573,18 +573,38 @@ impl FailedSendMeasure {
 
 #[async_trait]
 impl Measure for FailedSendMeasure {
-    async fn incr(&self, _did: Did, counter: MeasureCounter) {
-        if counter == MeasureCounter::FailedToSend {
-            self.count.fetch_add(1, Ordering::AcqRel);
-        }
+    /// Delegate a singleton to the same atomic observation transition as a batch.
+    async fn record(
+        &self,
+        did: Did,
+        authentication: crate::measure::Authentication,
+        event: MeasurementEvent,
+    ) -> std::result::Result<crate::measure::ApplyOutcome, crate::measure::MeasureError> {
+        self.record_batch(
+            did,
+            authentication,
+            crate::measure::MeasurementBatch::single(event),
+        )
+        .await
     }
 
-    async fn get_count(&self, _did: Did, counter: MeasureCounter) -> u64 {
-        if counter == MeasureCounter::FailedToSend {
-            self.count() as u64
-        } else {
-            0
+    /// Publish all failure occurrences with one atomic addition for scheduler assertions.
+    async fn record_batch(
+        &self,
+        _did: Did,
+        authentication: crate::measure::Authentication,
+        batch: crate::measure::MeasurementBatch,
+    ) -> std::result::Result<crate::measure::ApplyOutcome, crate::measure::MeasureError> {
+        if !authentication.permits(batch.event()) {
+            return Ok(crate::measure::ApplyOutcome::IgnoredUnattributable);
         }
+        if batch.event() == MeasurementEvent::FailedToSend {
+            // Test workloads are bounded; reject a fixture too large for its observer.
+            let occurrences =
+                usize::try_from(batch.occurrences().get()).expect("test batch fits counter");
+            self.count.fetch_add(occurrences, Ordering::AcqRel);
+        }
+        Ok(crate::measure::ApplyOutcome::Applied)
     }
 }
 
@@ -597,13 +617,33 @@ impl BehaviourJudgement for FailedSendMeasure {
 
 #[async_trait]
 impl Measure for PendingMeasure {
-    async fn incr(&self, _did: Did, _counter: MeasureCounter) {
-        self.started.store(true, Ordering::Release);
-        pending::<()>().await;
+    /// A singleton uses the same deliberately stalled observer as a batch.
+    async fn record(
+        &self,
+        did: Did,
+        authentication: crate::measure::Authentication,
+        event: MeasurementEvent,
+    ) -> std::result::Result<crate::measure::ApplyOutcome, crate::measure::MeasureError> {
+        self.record_batch(
+            did,
+            authentication,
+            crate::measure::MeasurementBatch::single(event),
+        )
+        .await
     }
 
-    async fn get_count(&self, _did: Did, _counter: MeasureCounter) -> u64 {
-        0
+    /// Signal admission and remain pending, witnessing scheduler independence from measurement.
+    async fn record_batch(
+        &self,
+        _did: Did,
+        authentication: crate::measure::Authentication,
+        batch: crate::measure::MeasurementBatch,
+    ) -> std::result::Result<crate::measure::ApplyOutcome, crate::measure::MeasureError> {
+        if !authentication.permits(batch.event()) {
+            return Ok(crate::measure::ApplyOutcome::IgnoredUnattributable);
+        }
+        self.started.store(true, Ordering::Release);
+        pending().await
     }
 }
 

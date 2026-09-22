@@ -25,7 +25,6 @@ use crate::measure::ApplyOutcome;
 use crate::measure::Authentication;
 use crate::measure::BehaviourJudgement;
 use crate::measure::Measure;
-use crate::measure::MeasureCounter;
 use crate::measure::MeasureError;
 use crate::measure::MeasureImpl;
 use crate::measure::MeasurementBatch;
@@ -56,7 +55,7 @@ use crate::tests::multi_frame_storage_sync_entries;
 use crate::tests::outbound_capacity_released;
 
 struct CountingMeasure {
-    counters: Mutex<Vec<(crate::dht::Did, MeasureCounter)>>,
+    counters: Mutex<Vec<(crate::dht::Did, MeasurementEvent)>>,
     events: Mutex<Vec<(crate::dht::Did, MeasurementEvent)>>,
     /// Monotonic generation bumped once each recording is fully applied (its event and
     /// counters both visible). It lets a test await a specific measurement *landing*
@@ -78,7 +77,7 @@ impl Default for CountingMeasure {
 }
 
 impl CountingMeasure {
-    fn count(&self, did: crate::dht::Did, counter: MeasureCounter) -> u64 {
+    fn count(&self, did: crate::dht::Did, counter: MeasurementEvent) -> u64 {
         match self.counters.lock() {
             Ok(counters) => counters
                 .iter()
@@ -130,16 +129,6 @@ impl CountingMeasure {
 
 #[async_trait]
 impl Measure for CountingMeasure {
-    async fn incr(&self, did: crate::dht::Did, counter: MeasureCounter) {
-        if let Ok(mut counters) = self.counters.lock() {
-            counters.push((did, counter));
-        }
-    }
-
-    async fn get_count(&self, did: crate::dht::Did, counter: MeasureCounter) -> u64 {
-        self.count(did, counter)
-    }
-
     async fn record(
         &self,
         did: crate::dht::Did,
@@ -152,7 +141,7 @@ impl Measure for CountingMeasure {
         if let Ok(mut events) = self.events.lock() {
             events.push((did, event));
         }
-        self.incr(did, MeasureCounter::from_event(event)).await;
+        self.observe_event(did, event).await;
         self.recorded.send_modify(|generation| *generation += 1);
         Ok(ApplyOutcome::Applied)
     }
@@ -169,12 +158,21 @@ impl Measure for CountingMeasure {
         if let Ok(mut events) = self.events.lock() {
             events.push((did, batch.event()));
         }
-        let counter = MeasureCounter::from_event(batch.event());
-        for _ in 0..batch.occurrences().get() {
-            self.incr(did, counter).await;
+        // Publish every occurrence together; the event retains aggregate useful bytes.
+        if let Ok(mut observations) = self.counters.lock() {
+            observations
+                .extend((0..batch.occurrences().get()).map(|_occurrence| (did, batch.event())));
         }
         self.recorded.send_modify(|generation| *generation += 1);
         Ok(ApplyOutcome::Applied)
+    }
+}
+impl CountingMeasure {
+    /// Test-only event observation, independent of the runtime Measure API.
+    async fn observe_event(&self, did: crate::dht::Did, counter: MeasurementEvent) {
+        if let Ok(mut counters) = self.counters.lock() {
+            counters.push((did, counter));
+        }
     }
 }
 
@@ -321,7 +319,7 @@ async fn test_spawned_storage_sync_tail_cancelled_by_route_disappear_does_not_de
         data: large_storage_sync_entries()?,
     };
 
-    let failed_before = measure.count(node2.did(), MeasureCounter::FailedToSend);
+    let failed_before = measure.count(node2.did(), MeasurementEvent::FailedToSend);
     node1.swarm.transport.send_storage_sync(msg).await?;
     assert_eq!(
         dummy_controlled::sent_count(),
@@ -337,7 +335,7 @@ async fn test_spawned_storage_sync_tail_cancelled_by_route_disappear_does_not_de
         "route cancellation must stop the spawned task before another chunk is dispatched"
     );
     assert_eq!(
-        measure.count(node2.did(), MeasureCounter::FailedToSend),
+        measure.count(node2.did(), MeasurementEvent::FailedToSend),
         failed_before,
         "route cancellation is stale topology, not next-hop transport failure"
     );
@@ -364,7 +362,7 @@ async fn test_spawned_storage_sync_tail_cancels_when_transport_loses_readiness()
         data: large_storage_sync_entries()?,
     };
 
-    let failed_before = measure.count(node2.did(), MeasureCounter::FailedToSend);
+    let failed_before = measure.count(node2.did(), MeasurementEvent::FailedToSend);
     node1.swarm.transport.send_storage_sync(msg).await?;
     assert_eq!(
         dummy_controlled::sent_count(),
@@ -393,7 +391,7 @@ async fn test_spawned_storage_sync_tail_cancels_when_transport_loses_readiness()
     assert!(node1.swarm.transport.has_active_connection(node2.did()));
     assert!(node1.dht().successors().contains(&node2.did())?);
     assert_eq!(
-        measure.count(node2.did(), MeasureCounter::FailedToSend),
+        measure.count(node2.did(), MeasurementEvent::FailedToSend),
         failed_before,
         "transient readiness loss must not itself degrade the peer"
     );
@@ -422,7 +420,7 @@ async fn test_spawned_chunk_tail_cancels_when_same_peer_is_readmitted() -> Resul
         data: large_storage_sync_entries()?,
     };
 
-    let failed_before = measure.count(node2.did(), MeasureCounter::FailedToSend);
+    let failed_before = measure.count(node2.did(), MeasurementEvent::FailedToSend);
     node1.swarm.transport.send_storage_sync(msg).await?;
     assert_eq!(dummy_controlled::sent_count(), 1);
 
@@ -446,7 +444,7 @@ async fn test_spawned_chunk_tail_cancels_when_same_peer_is_readmitted() -> Resul
         "the replacement generation must remain admitted"
     );
     assert_eq!(
-        measure.count(node2.did(), MeasureCounter::FailedToSend),
+        measure.count(node2.did(), MeasurementEvent::FailedToSend),
         failed_before,
         "revoking an old send capability is not a failure of the replacement peer"
     );
@@ -536,7 +534,7 @@ async fn test_storage_sync_waiting_at_dispatch_defers_when_its_route_disappears(
     )
     .await;
 
-    let failed_before = measure.count(peer, MeasureCounter::FailedToSend);
+    let failed_before = measure.count(peer, MeasurementEvent::FailedToSend);
     node1.dht().remove(peer)?;
     drop(dispatch);
 
@@ -551,7 +549,7 @@ async fn test_storage_sync_waiting_at_dispatch_defers_when_its_route_disappears(
         "a revoked storage route must stop before dispatch"
     );
     assert_eq!(
-        measure.count(peer, MeasureCounter::FailedToSend),
+        measure.count(peer, MeasurementEvent::FailedToSend),
         failed_before,
         "route revocation is not evidence of peer failure"
     );
@@ -588,7 +586,7 @@ async fn test_storage_sync_waiting_at_dispatch_defers_when_transport_loses_readi
     )
     .await;
 
-    let failed_before = measure.count(peer, MeasureCounter::FailedToSend);
+    let failed_before = measure.count(peer, MeasurementEvent::FailedToSend);
     node1
         .swarm
         .transport
@@ -606,7 +604,7 @@ async fn test_storage_sync_waiting_at_dispatch_defers_when_transport_loses_readi
         "a non-ready transport must stop before dispatch"
     );
     assert_eq!(
-        measure.count(peer, MeasureCounter::FailedToSend),
+        measure.count(peer, MeasurementEvent::FailedToSend),
         failed_before,
         "transient transport readiness loss is not peer failure evidence"
     );
@@ -628,7 +626,7 @@ async fn test_detached_storage_sync_missing_routable_transport_does_not_degrade_
     wait_for_msgs([&node1, &node2]).await;
 
     let peer = node2.did();
-    let failed_before = measure.count(peer, MeasureCounter::FailedToSend);
+    let failed_before = measure.count(peer, MeasurementEvent::FailedToSend);
     node1
         .swarm
         .transport
@@ -646,7 +644,7 @@ async fn test_detached_storage_sync_missing_routable_transport_does_not_degrade_
         .await?
         .is_deferred());
     assert_eq!(
-        measure.count(peer, MeasureCounter::FailedToSend),
+        measure.count(peer, MeasurementEvent::FailedToSend),
         failed_before,
         "a missing storage data-plane route is a deferral, not peer failure evidence"
     );
@@ -956,7 +954,7 @@ async fn test_send_queue_backpressure_returns_transport_timeout() {
         .await
         .unwrap();
 
-    let failed_before = measure.count(node2.did(), MeasureCounter::FailedToSend);
+    let failed_before = measure.count(node2.did(), MeasurementEvent::FailedToSend);
     let _guard = PendingSendGuard::new();
     let err = node1
         .swarm
@@ -972,7 +970,7 @@ async fn test_send_queue_backpressure_returns_transport_timeout() {
         "expected DataChannelSendQueueTimeout, got {err:?}"
     );
     assert_eq!(
-        measure.count(node2.did(), MeasureCounter::FailedToSend),
+        measure.count(node2.did(), MeasurementEvent::FailedToSend),
         failed_before,
         "data-channel queue backpressure is local admission pressure, not peer failure"
     );

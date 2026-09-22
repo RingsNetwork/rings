@@ -258,14 +258,23 @@ fn native_construction_without_tokio_returns_typed_error() {
 }
 
 #[tokio::test]
-async fn compatibility_counters_follow_the_live_epoch() {
+async fn event_evidence_follows_the_live_epoch() {
     let clock = Arc::new(ManualMeasureClock::new(10));
     let measure = memory_measure(clock.clone()).await;
-    measure.incr(did(), MeasureCounter::Sent).await;
-    measure.incr(did(), MeasureCounter::Sent).await;
-    assert_eq!(measure.get_count(did(), MeasureCounter::Sent).await, 2);
+    // Two logical completions remain two observations until the epoch expires.
+    for _completion in 0..2 {
+        measure
+            .record(
+                did(),
+                Authentication::Authenticated,
+                MeasurementEvent::Sent { useful_bytes: 0 },
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(evidence(&measure).await.sent, 2);
     clock.advance(RELIABILITY_WINDOW.get());
-    assert_eq!(measure.get_count(did(), MeasureCounter::Sent).await, 0);
+    assert_eq!(evidence(&measure).await.sent, 0);
 }
 
 #[tokio::test]
@@ -290,12 +299,7 @@ async fn useful_bytes_produce_amule_credit_and_one_reliability_event() {
         .unwrap_or_else(|error| panic!("projection must succeed: {error}"))
         .unwrap_or_else(|| panic!("measurement must exist"));
     assert_eq!(projected.evidence.received, 1);
-    assert_eq!(
-        projected
-            .credit
-            .map(|credit| credit.bytes_received_from_peer()),
-        Some(2_000_000)
-    );
+    assert_eq!(projected.credit.bytes_received_from_peer(), 2_000_000);
     assert!(projected.credit_score.as_f64() > 1.0);
 }
 
@@ -345,10 +349,7 @@ async fn persistence_restores_complete_credit_and_epoch_state() {
         .unwrap_or_else(|error| panic!("projection must succeed: {error}"))
         .unwrap_or_else(|| panic!("restored measurement must exist"));
     assert_eq!(projected.evidence.sent, 1);
-    assert_eq!(
-        projected.credit.map(|credit| credit.bytes_sent_to_peer()),
-        Some(17)
-    );
+    assert_eq!(projected.credit.bytes_sent_to_peer(), 17);
 }
 
 #[tokio::test]
@@ -388,18 +389,12 @@ async fn startup_prunes_records_at_the_retention_boundary() {
 async fn quiet_query_paths_prune_records_at_the_retention_boundary() {
     #[derive(Clone, Copy, Debug)]
     enum QueryPath {
-        Count,
         Single,
         Bulk,
         Page,
     }
 
-    for path in [
-        QueryPath::Count,
-        QueryPath::Single,
-        QueryPath::Bulk,
-        QueryPath::Page,
-    ] {
+    for path in [QueryPath::Single, QueryPath::Bulk, QueryPath::Page] {
         let clock = Arc::new(ManualMeasureClock::new(10));
         let measure = memory_measure(clock.clone()).await;
         measure
@@ -413,9 +408,6 @@ async fn quiet_query_paths_prune_records_at_the_retention_boundary() {
         clock.set(10 + CreditPolicy::amule().retention_seconds());
 
         match path {
-            QueryPath::Count => {
-                assert_eq!(measure.get_count(did(), MeasureCounter::Connect).await, 0);
-            }
             QueryPath::Single => {
                 assert!(measure
                     .peer_measurement(did())
@@ -554,10 +546,7 @@ async fn startup_reconciles_future_snapshot_timestamps() {
         .unwrap_or_else(|error| panic!("projection must succeed: {error}"))
         .unwrap_or_else(|| panic!("reconciled record must remain visible"));
 
-    assert_eq!(
-        projected.credit.map(|credit| credit.last_seen()),
-        Some(UnixTime::from_secs(20))
-    );
+    assert_eq!(projected.credit.last_seen(), UnixTime::from_secs(20));
     assert_eq!(projected.evidence.connected, 1);
 }
 
@@ -591,10 +580,7 @@ async fn startup_migrates_obsolete_reliability_window_without_losing_credit() {
         .unwrap_or_else(|error| panic!("projection must succeed after migration: {error}"))
         .unwrap_or_else(|| panic!("migrated record must remain visible"));
 
-    assert_eq!(
-        projected.credit.map(|credit| credit.bytes_sent_to_peer()),
-        Some(41)
-    );
+    assert_eq!(projected.credit.bytes_sent_to_peer(), 41);
     assert!(projected.evidence.is_unobserved());
     assert!(lock_or_recover(&measure.state.runtime).dirty);
 }
@@ -619,10 +605,7 @@ async fn live_query_reconciles_a_wall_clock_regression() {
         .unwrap_or_else(|error| panic!("clock regression must reconcile: {error}"))
         .unwrap_or_else(|| panic!("reconciled record must remain visible"));
 
-    assert_eq!(
-        projected.credit.map(|credit| credit.last_seen()),
-        Some(UnixTime::from_secs(20))
-    );
+    assert_eq!(projected.credit.last_seen(), UnixTime::from_secs(20));
     assert_eq!(projected.evidence.received, 1);
 }
 
@@ -630,7 +613,14 @@ async fn live_query_reconciles_a_wall_clock_regression() {
 async fn bulk_query_includes_retained_peer_without_connection_enumeration() {
     let clock = Arc::new(ManualMeasureClock::new(10));
     let measure = memory_measure(clock).await;
-    measure.incr(did(), MeasureCounter::Connect).await;
+    measure
+        .record(
+            did(),
+            Authentication::Authenticated,
+            MeasurementEvent::Connected,
+        )
+        .await
+        .unwrap();
     let all = measure
         .peer_measurements()
         .await
@@ -688,10 +678,24 @@ async fn repeated_disconnections_degrade_peer_quality() {
     let clock = Arc::new(ManualMeasureClock::new(10));
     let measure = memory_measure(clock).await;
     assert_eq!(measure.quality(did()).await, PeerQuality::Unknown);
-    measure.incr(did(), MeasureCounter::Connect).await;
+    measure
+        .record(
+            did(),
+            Authentication::Authenticated,
+            MeasurementEvent::Connected,
+        )
+        .await
+        .unwrap();
     assert_eq!(measure.quality(did()).await, PeerQuality::Healthy);
     for _ in 0..crate::consts::CONNECT_FAILED_LIMIT {
-        measure.incr(did(), MeasureCounter::Disconnected).await;
+        measure
+            .record(
+                did(),
+                Authentication::Authenticated,
+                MeasurementEvent::Disconnected,
+            )
+            .await
+            .unwrap();
     }
     assert_eq!(measure.quality(did()).await, PeerQuality::Degraded);
 }
@@ -723,10 +727,7 @@ async fn storage_latency_does_not_block_memory_first_updates() {
         .await
         .unwrap_or_else(|error| panic!("projection must succeed: {error}"))
         .unwrap_or_else(|| panic!("memory-first measurement must exist"));
-    assert_eq!(
-        projected.credit.map(|credit| credit.bytes_sent_to_peer()),
-        Some(23)
-    );
+    assert_eq!(projected.credit.bytes_sent_to_peer(), 23);
     assert!(matches!(
         measure.flush_with_timeout(Duration::from_millis(10)).await,
         Err(MeasureRuntimeError::FlushTimeout)
@@ -973,10 +974,21 @@ async fn storage_failure_is_observable_without_rolling_back_memory() {
             .await,
         Ok(ApplyOutcome::Applied)
     );
-    assert_eq!(measure.get_count(did(), MeasureCounter::Received).await, 1);
+    assert_eq!(evidence(&measure).await.received, 1);
     assert!(matches!(
         measure.flush_with_timeout(Duration::from_secs(1)).await,
         Err(MeasureRuntimeError::Storage(CoreError::InvalidTransport))
     ));
-    assert_eq!(measure.get_count(did(), MeasureCounter::Received).await, 1);
+    assert_eq!(evidence(&measure).await.received, 1);
+}
+
+/// Query recent evidence through the same projection used by production consumers.
+/// An absent peer has no observations; projection failures must fail the test.
+async fn evidence(measure: &PeriodicMeasure) -> rings_core::measure::PeerQualityEvidence {
+    measure
+        .peer_measurement(did())
+        .await
+        .unwrap()
+        .map(|measurement| measurement.evidence)
+        .unwrap_or_default()
 }

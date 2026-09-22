@@ -2,15 +2,12 @@
 #![deny(missing_docs)]
 
 mod behaviour;
-mod counter;
 mod quality;
 
 pub use behaviour::BehaviourJudgement;
 pub use behaviour::Measure;
 pub use behaviour::MeasureImpl;
-pub use counter::MeasureCounter;
 pub use quality::order_peers_by_quality;
-pub use quality::peer_evidence_from_counters;
 pub use quality::PeerMeasurement;
 pub use quality::PeerMeasurementPage;
 pub use quality::PeerQuality;

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Remove the counter-only measurement bridge and threshold-only classifier. Measure
+  implementations must record attributed events and atomic batches; retained peer
+  projections always contain credit. Existing measurement RPCs and provisional
+  receipt evidence remain available.
+- Remove unused IndexedDB visit/creation metadata and its index from new databases.
+  Reads retain their atomic LRU touch. Existing databases keep their unused index
+  without a schema upgrade or data deletion; raw transaction access is now private
+  and construction requires a database name.
+
 ### Breaking changes
 
 - Subtraction round, DHT section (#787). Pre-CorrectChord defaults that #604 replaced are
