@@ -186,6 +186,9 @@ where
     runtime
         .spawn(async move {
             let mut send = Box::pin(send);
+            // Fence before dropping the pending send on timeout or unwind. The
+            // permit guard lives inside that future and can run too late for its
+            // captured resources' destruction order.
             let mut retirement = RetirementFenceGuard::new(retirement_fence);
             tokio::select! {
                 result = send.as_mut() => {
@@ -294,6 +297,9 @@ where
 {
     let mut physical_retirement =
         PhysicalRetirementGuard::new(runtime.clone(), acceptance.clone(), retirement);
+    // The permit guard may already belong to a detached continuation. Keep a
+    // caller-owned fence so cancellation closes admission immediately, before
+    // physical retirement is spawned; the continuation cannot provide this timing.
     let mut fence_retirement =
         RetirementFenceGuard::once_irrevocable(retirement_fence, acceptance.clone());
     let result = match catch_future_unwind(send).await {

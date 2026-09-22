@@ -377,6 +377,23 @@ envelope, message body decode, chunk framing, and chunk reassembly bounds;
 the JSON-RPC body decoder and authorization classification. CI generates each run's
 seed and case count, so the repository does not carry generated corpora.
 
+### Transport lifecycle boundaries
+
+Transport cleanup uses the generation-pinned `close_connection_if_current` and
+`Pool::safely_remove_if_current` boundaries. A delayed close must not resolve a CID
+again and retire its replacement. Raw inbound frames retain callback-instance
+identity; matching that private identity also proves the immutable peer attached
+to the capacity lease, including when two callbacks share a peer ID.
+
+Native sends retain distinct admission, caller-cancellation, and continuation
+retirement guards. A pending continuation can outlive its caller; retirement must
+fence new sends before physical cleanup or destruction of pending send resources.
+`NativePhysicalCloseWitness` separately records physical-close completion.
+Backend-free/default/dummy notifier timers retain the runtime-independent thread
+scheduler. These contracts are not removed by the transport API cleanup in #787.
+ICE configuration accepts password credentials; unsupported OAuth values are
+rejected rather than silently downgraded by the native backend.
+
 ### Connection Admission
 
 Each node bounds the number of peers holding any logical connection record,
@@ -468,6 +485,27 @@ generated plan assigns one RFC 6598 host address and captures no destination, so
 creates the interface without steering traffic until the operator lists a prefix. The
 capabilities a TUN device needs (`CAP_NET_ADMIN`, the Unix helper, a relaxed service sandbox)
 are never granted by the configuration and remain an operator decision.
+
+Gateway runtime construction validates configuration before allocating packet resources.
+Standalone server and TCP stack construction use the same validation boundary. Platform
+controllers still validate their own plans before host effects. Exit loss is a degraded health
+projection of the active lifecycle, not an alternate packet-admission state. The TCP endpoint
+index owns socket membership; released endpoints cannot access a recycled socket handle.
+Typed drop/rejection reasons are available at debug tracing level without packet contents or
+flow addresses.
+
+### Controlled Webview Requests
+
+The host supplies one trusted `source_target` from controlled frame state. The webview crate
+derives its origin for CORS and credentials and its site for cookie policy; page-supplied
+headers cannot supply a competing origin. The complete source URL remains available for
+existing scoped diagnostics. CORS author-header selection shares the request privacy
+allowlist and excludes gateway-generated Origin, Cookie and Accept-Encoding metadata.
+
+Response limits remain enforced immediately after each transport send, including preflight
+responses, even if a transport ignores its supplied limit. A further limit after rewriting is
+required: URL expansion and bootstrap injection can grow HTML/CSS beyond the original body
+size. None of these checks is replaced by trusting a transport or a Content-Length header.
 
 ## Required Work Before Stronger Claims
 

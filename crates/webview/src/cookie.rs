@@ -164,7 +164,7 @@ impl CookieJar {
             CookieRequestContext {
                 target: &request.target,
                 partition,
-                source: request.source_origin.as_ref(),
+                source: request.source_target.as_ref(),
                 method: request.method.as_str(),
                 top_level_navigation: request.top_level_navigation,
                 kind: request.kind,
@@ -431,7 +431,7 @@ fn cookie_partition_for_request(request: &GatewayRequest) -> Result<CookiePartit
         if request.kind == GatewayRequestKind::Navigation && request.top_level_navigation {
             &request.target
         } else {
-            request.source_origin.as_ref().unwrap_or(&request.target)
+            request.source_target.as_ref().unwrap_or(&request.target)
         };
     cookie_partition_for_url(top_level)
 }
@@ -597,9 +597,9 @@ mod tests {
         let tracker = Url::parse("https://tracker.example/pixel")?;
         let under_news =
             GatewayRequest::new(tracker.clone(), "GET", GatewayRequestKind::Subresource)
-                .with_source_origin(Url::parse("https://news.example/")?);
+                .with_source_target(Url::parse("https://news.example/")?);
         let under_shop = GatewayRequest::new(tracker, "GET", GatewayRequestKind::Subresource)
-            .with_source_origin(Url::parse("https://shop.example/")?);
+            .with_source_target(Url::parse("https://shop.example/")?);
 
         jar.store_set_cookie_for_request_at(
             &under_news,
@@ -811,7 +811,7 @@ mod tests {
         let request = crate::types::GatewayRequest::subresource(Url::parse(
             "https://auth.example.test/app/script.js",
         )?)
-        .with_source_origin(Url::parse("https://shop.example.net/page")?);
+        .with_source_target(Url::parse("https://shop.example.net/page")?);
 
         assert_eq!(jar.cookie_header_for_request(&request), None);
         Ok(())
@@ -826,7 +826,7 @@ mod tests {
         let request = crate::types::GatewayRequest::subresource(Url::parse(
             "https://auth.example.com/app/script.js",
         )?)
-        .with_source_origin(Url::parse("https://shop.example.com/page")?);
+        .with_source_target(Url::parse("https://shop.example.com/page")?);
 
         assert_eq!(
             jar.cookie_header_for_request(&request).as_deref(),
@@ -844,7 +844,7 @@ mod tests {
         let request = crate::types::GatewayRequest::subresource(Url::parse(
             "https://owner.github.io/app/script.js",
         )?)
-        .with_source_origin(Url::parse("https://attacker.github.io/page")?);
+        .with_source_target(Url::parse("https://attacker.github.io/page")?);
 
         assert_eq!(jar.cookie_header_for_request(&request), None);
         Ok(())
@@ -858,11 +858,11 @@ mod tests {
         let same_ip = crate::types::GatewayRequest::subresource(Url::parse(
             "https://127.0.0.1/app/script.js",
         )?)
-        .with_source_origin(Url::parse("https://127.0.0.1/page")?);
+        .with_source_target(Url::parse("https://127.0.0.1/page")?);
         let cross_ip = crate::types::GatewayRequest::subresource(Url::parse(
             "https://127.0.0.1/app/script.js",
         )?)
-        .with_source_origin(Url::parse("https://127.0.0.2/page")?);
+        .with_source_target(Url::parse("https://127.0.0.2/page")?);
 
         assert_eq!(
             jar.cookie_header_for_request(&same_ip).as_deref(),
@@ -901,12 +901,12 @@ mod tests {
         let safe_top_level = crate::types::GatewayRequest::navigation(Url::parse(
             "https://auth.example.test/app/page",
         )?)
-        .with_source_origin(source.clone())
+        .with_source_target(source.clone())
         .with_top_level_navigation(true);
         let unsafe_top_level = crate::types::GatewayRequest::navigation(Url::parse(
             "https://auth.example.test/app/delete",
         )?)
-        .with_source_origin(source.clone())
+        .with_source_target(source.clone())
         .with_top_level_navigation(true)
         .with_body("delete")
         .with_header(crate::types::GatewayHeader::new(
@@ -920,7 +920,7 @@ mod tests {
         let iframe_navigation = crate::types::GatewayRequest::navigation(Url::parse(
             "https://auth.example.test/app/frame",
         )?)
-        .with_source_origin(source)
+        .with_source_target(source)
         .with_top_level_navigation(false);
 
         assert_eq!(
@@ -951,7 +951,7 @@ mod tests {
         let request = crate::types::GatewayRequest::subresource(Url::parse(
             "https://auth.example.test/app/script.js",
         )?)
-        .with_source_origin(Url::parse("https://shop.example.net/page")?);
+        .with_source_target(Url::parse("https://shop.example.net/page")?);
         jar.store_set_cookie_for_request_at(
             &request,
             "sid=none; Path=/; SameSite=None; Secure",

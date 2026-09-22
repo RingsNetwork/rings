@@ -15,6 +15,11 @@
 //! applying the same public-address policy to the DNS snapshot, and connecting only to admitted
 //! addresses so DNS rebinding cannot bypass this first gate.
 //!
+//! Hosts supply a single trusted [`GatewayRequest::source_target`] from their controlled frame
+//! state. [`GatewayRequest::source_origin`] derives the CORS origin inside this crate; the full
+//! source URL is retained for scoped diagnostics. Callers migrating from `with_source_origin`
+//! must use `with_source_target` and must not accept that value from page-authored headers.
+//!
 //! ## Opaque-origin deployment boundary
 //!
 //! Production navigation responses deliberately use CSP `sandbox` without

@@ -211,9 +211,9 @@ impl InnerTransportCallback {
 
     /// Dispatch one capacity-admitted frame and transfer its permit to the callback.
     pub async fn handle_admitted_frame(&self, frame: AdmittedInboundFrame) {
-        if !Arc::ptr_eq(&self.admission_identity, &frame.owner)
-            || frame.permit.peer.as_ref() != self.cid.as_ref()
-        {
+        // Admission creates the owner identity and peer permit together from this
+        // immutable callback. Matching the owner therefore also proves the peer.
+        if !Arc::ptr_eq(&self.admission_identity, &frame.owner) {
             tracing::error!(peer = %self.cid, "rejected inbound frame admitted by another callback");
             return;
         }

@@ -73,11 +73,6 @@ impl<L> TeardownFailure<L> {
         Self { lease, error }
     }
 
-    /// Borrow the cleanup failure without consuming the retained lease.
-    pub const fn error(&self) -> &GatewayError {
-        &self.error
-    }
-
     /// Recover both the linear cleanup capability and its failure.
     pub fn into_parts(self) -> (L, GatewayError) {
         (self.lease, self.error)

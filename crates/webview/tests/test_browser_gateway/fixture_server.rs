@@ -154,9 +154,9 @@ fn gateway_request_from_http(
         GatewayRequestKind::Navigation => GatewayRequest::navigation(target),
         GatewayRequestKind::Subresource => GatewayRequest::subresource(target),
         GatewayRequestKind::Fetch => GatewayRequest::fetch(target, "GET")
-            .with_source_origin(runtime_source_from_referer(prefix, headers)?),
+            .with_source_target(runtime_source_from_referer(prefix, headers)?),
         GatewayRequestKind::Xhr => GatewayRequest::xhr(target, "GET")
-            .with_source_origin(runtime_source_from_referer(prefix, headers)?),
+            .with_source_target(runtime_source_from_referer(prefix, headers)?),
     })
 }
 

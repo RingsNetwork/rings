@@ -26,12 +26,13 @@ pub fn preflight_request(request: &GatewayRequest) -> Result<Option<GatewayReque
     if !request.is_cross_origin_runtime_request() || !requires_preflight(request) {
         return Ok(None);
     }
-    let source_origin = request
-        .source_origin
+    // Preflight preserves the same trusted page authority as the actual request.
+    let source_target = request
+        .source_target
         .clone()
         .ok_or(CorsFailure::MissingTrustedSourceOrigin)?;
     let mut preflight = GatewayRequest::new(request.target.clone(), "OPTIONS", request.kind)
-        .with_source_origin(source_origin)
+        .with_source_target(source_target)
         .with_credentials(GatewayCredentials::Omit)
         .with_header(GatewayHeader::new(
             "Access-Control-Request-Method",
@@ -136,35 +137,12 @@ fn non_safelisted_headers(request: &GatewayRequest) -> BTreeSet<String> {
     request
         .headers
         .iter()
-        .filter(|header| !is_gateway_stripped_header(header.name.as_str()))
+        // Reuse the privacy allowlist. Gateway-added Origin, Cookie and Accept-Encoding
+        // are not author request headers and must never trigger or appear in a preflight.
+        .filter(|header| crate::header::should_forward_request_header(header.name.as_str()))
         .filter(|header| !is_safelisted_header(header))
         .map(|header| header.name.to_ascii_lowercase())
         .collect()
-}
-
-fn is_gateway_stripped_header(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    lower.starts_with("sec-")
-        || matches!(
-            lower.as_str(),
-            "accept-encoding"
-                | "connection"
-                | "content-length"
-                | "cookie"
-                | "expect"
-                | "host"
-                | "keep-alive"
-                | "origin"
-                | "proxy-authenticate"
-                | "proxy-authorization"
-                | "proxy-connection"
-                | "referer"
-                | "te"
-                | "trailer"
-                | "transfer-encoding"
-                | "upgrade"
-                | "via"
-        )
 }
 
 fn is_safelisted_header(header: &GatewayHeader) -> bool {
@@ -224,9 +202,8 @@ fn is_gateway_internal_response_header(name: &str) -> bool {
 
 fn source_origin(request: &GatewayRequest) -> Result<String> {
     request
-        .source_origin
-        .as_ref()
-        .map(|source| source.origin().ascii_serialization())
+        .source_origin()
+        .map(|source| source.ascii_serialization())
         .ok_or(CorsFailure::MissingTrustedSourceOrigin.into())
 }
 
@@ -274,11 +251,11 @@ mod tests {
             "PATCH",
             GatewayRequestKind::Fetch,
         )
-        .with_source_origin(Url::parse("https://app.example.test/page")?)
+        .with_source_target(Url::parse("https://app.example.test/page")?)
         .with_credentials(credentials)
         .with_header(GatewayHeader::new("Origin", "http://127.0.0.1:8080")?)
         .with_header(GatewayHeader::new("Sec-Fetch-Mode", "cors")?)
-        .with_header(GatewayHeader::new("X-Requested-With", "Rings")?))
+        .with_header(GatewayHeader::new("Cache-Control", "no-cache")?))
     }
 
     #[test]
@@ -293,8 +270,23 @@ mod tests {
             .name_eq("access-control-request-method")
             && header.value == "PATCH"));
         assert!(preflight.headers.iter().any(|header| {
-            header.name_eq("access-control-request-headers") && header.value == "x-requested-with"
+            header.name_eq("access-control-request-headers") && header.value == "cache-control"
         }));
+        Ok(())
+    }
+
+    /// Gateway-owned metadata and discarded fingerprint headers never enter author preflight.
+    #[test]
+    fn preflight_uses_the_same_privacy_allowlist_as_forwarding() -> Result<()> {
+        // This request has no non-safelisted author headers after privacy normalization.
+        let request = GatewayRequest::fetch(Url::parse("https://api.example.test/data")?, "GET")
+            .with_source_target(Url::parse("https://app.example.test/page")?)
+            .with_header(GatewayHeader::new("Cookie", "sid=private")?)
+            .with_header(GatewayHeader::new("Origin", "https://app.example.test")?)
+            .with_header(GatewayHeader::new("Accept-Encoding", "identity")?)
+            .with_header(GatewayHeader::new("X-Fingerprint", "private")?)
+            .with_header(GatewayHeader::new("Sec-Fetch-Mode", "cors")?);
+        assert!(preflight_request(&request)?.is_none());
         Ok(())
     }
 
@@ -353,7 +345,7 @@ mod tests {
     #[test]
     fn test_cross_origin_runtime_response_headers_are_filtered_to_cors_visibility() -> Result<()> {
         let request = GatewayRequest::fetch(Url::parse("https://api.example.test/data")?, "GET")
-            .with_source_origin(Url::parse("https://app.example.test/page")?);
+            .with_source_target(Url::parse("https://app.example.test/page")?);
         let response = GatewayResponse::new(
             200,
             vec![

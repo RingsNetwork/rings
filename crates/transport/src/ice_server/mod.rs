@@ -15,11 +15,6 @@ pub enum IceCredentialType {
     /// credentials as described in <https://tools.ietf.org/html/rfc5389>.
     #[default]
     Password,
-
-    /// IceCredentialType::Oauth describes token based credential as described
-    /// in <https://tools.ietf.org/html/rfc7635>.
-    /// Not supported in WebRTC 1.0 spec
-    Oauth,
 }
 
 /// This structure is used to validate whether the parameter in String format is valid

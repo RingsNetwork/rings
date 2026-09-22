@@ -142,9 +142,6 @@ pub trait ConnectionInterface {
     /// constrained channel (which can negotiate a smaller limit) is respected.
     fn max_message_size(&self) -> usize;
 
-    /// This is a debug method to dump the stats of webrtc connection.
-    async fn get_stats(&self) -> Vec<String>;
-
     /// Create a webrtc offer to start handshake.
     async fn webrtc_create_offer(&self) -> Result<Self::Sdp, Self::Error>;
 
@@ -194,10 +191,6 @@ pub trait TransportInterface {
         callback: BoxedTransportCallback,
     ) -> Result<ConnectionRef<Self::Connection>, Self::Error>;
 
-    /// This method closes and releases the connection from transport.
-    /// All references to this cid, created by `get_connection`, will be released.
-    async fn close_connection(&self, cid: &str) -> Result<(), Self::Error>;
-
     /// Close `connection` only if it still owns its connection-id slot.
     ///
     /// This is the cleanup boundary for asynchronous work that may finish after
@@ -209,9 +202,6 @@ pub trait TransportInterface {
 
     /// Get a reference of the connection by its id.
     fn connection(&self, cid: &str) -> Result<ConnectionRef<Self::Connection>, Self::Error>;
-
-    /// Get all the connections in the transport.
-    fn connections(&self) -> Vec<(String, ConnectionRef<Self::Connection>)>;
 
     /// Get all the connection ids in the transport.
     fn connection_ids(&self) -> Vec<String>;

@@ -429,22 +429,9 @@ pub mod controlled {
         DELIVERY.with(|state| state.borrow().snapshot())
     }
 
-    /// Inspect one queued event without removing or delivering it.
-    pub fn inspect(index: usize) -> Option<QueuedDelivery> {
-        DELIVERY.with(|state| state.borrow().inspect(index))
-    }
-
     /// Inspect events with a stable sequence newer than `sequence`.
     pub fn inspect_after(sequence: Option<u64>) -> Vec<QueuedDelivery> {
         DELIVERY.with(|state| state.borrow().inspect_after(sequence))
-    }
-
-    /// Remove one queued event without invoking its callback.
-    ///
-    /// Simulation bootstrap uses this to discard topology traffic while still
-    /// delivering the explicit connection lifecycle being installed.
-    pub fn discard(index: usize) -> bool {
-        DELIVERY.with(|state| state.borrow_mut().remove(index).is_some())
     }
 
     /// Remove one queued event by stable sequence without invoking its callback.
@@ -880,10 +867,6 @@ impl ConnectionInterface for DummyConnection {
         stored_max_message_size(MAX_MESSAGE_SIZE.with(std::cell::Cell::get))
     }
 
-    async fn get_stats(&self) -> Vec<String> {
-        Vec::new()
-    }
-
     async fn webrtc_create_offer(&self) -> Result<Self::Sdp> {
         self.set_webrtc_connection_state(WebrtcConnectionState::New)
             .await;
@@ -963,10 +946,6 @@ impl TransportInterface for DummyTransport {
         Ok(connection)
     }
 
-    async fn close_connection(&self, cid: &str) -> Result<()> {
-        self.pool.safely_remove(cid).await
-    }
-
     async fn close_connection_if_current(
         &self,
         connection: &ConnectionRef<Self::Connection>,
@@ -976,10 +955,6 @@ impl TransportInterface for DummyTransport {
 
     fn connection(&self, cid: &str) -> Result<ConnectionRef<Self::Connection>> {
         self.pool.connection(cid)
-    }
-
-    fn connections(&self) -> Vec<(String, ConnectionRef<Self::Connection>)> {
-        self.pool.connections()
     }
 
     fn connection_ids(&self) -> Vec<String> {

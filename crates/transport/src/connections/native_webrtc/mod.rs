@@ -32,7 +32,6 @@ use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
 use crate::core::pool::RoundRobin;
 use crate::core::pool::RoundRobinPool;
-use crate::core::pool::StatusPool;
 use crate::core::transport::effective_max_message_size;
 use crate::core::transport::stored_max_message_size;
 use crate::core::transport::ConnectionInterface;
@@ -51,7 +50,6 @@ use crate::delivery::DeliveryFuture;
 use crate::error::Error;
 use crate::error::Result;
 use crate::ice_server::parse_ice_servers_or_warn;
-use crate::ice_server::IceCredentialType;
 use crate::ice_server::IceServer;
 use crate::notifier::wait_for_data_channel_open;
 use crate::notifier::Notifier;
@@ -297,7 +295,8 @@ impl RoundRobinPool<TrackedChannel> {
     }
 }
 
-impl StatusPool<TrackedChannel> for RoundRobinPool<TrackedChannel> {
+impl RoundRobinPool<TrackedChannel> {
+    /// Return whether every channel in this backend pool is open.
     fn all_ready(&self) -> Result<bool> {
         self.all(|tracked| tracked.channel.ready_state() == RTCDataChannelState::Open)
     }
@@ -541,16 +540,6 @@ impl ConnectionInterface for WebrtcConnection {
             ),
         )
         .await
-    }
-
-    async fn get_stats(&self) -> Vec<String> {
-        self.webrtc_conn
-            .get_stats()
-            .await
-            .reports
-            .into_iter()
-            .map(|x| serde_json::to_string(&x).unwrap_or("failed to dump stats entry".to_string()))
-            .collect()
     }
 
     fn webrtc_connection_state(&self) -> WebrtcConnectionState {
@@ -846,10 +835,6 @@ impl TransportInterface for WebrtcTransport {
         self.pool.safely_insert(cid, conn).await
     }
 
-    async fn close_connection(&self, cid: &str) -> Result<()> {
-        self.pool.safely_remove(cid).await
-    }
-
     async fn close_connection_if_current(
         &self,
         connection: &ConnectionRef<Self::Connection>,
@@ -861,10 +846,6 @@ impl TransportInterface for WebrtcTransport {
         self.pool.connection(cid)
     }
 
-    fn connections(&self) -> Vec<(String, ConnectionRef<Self::Connection>)> {
-        self.pool.connections()
-    }
-
     fn connection_ids(&self) -> Vec<String> {
         self.pool.connection_ids()
     }
@@ -872,16 +853,6 @@ impl TransportInterface for WebrtcTransport {
 
 impl From<IceServer> for RTCIceServer {
     fn from(s: IceServer) -> Self {
-        // webrtc 0.17 dropped `credential_type` from `RTCIceServer` (only long-term/password
-        // credentials remain). Password creds are carried as-is; an OAuth credential cannot be
-        // expressed, so warn rather than silently degrade an explicitly-configured one.
-        if s.credential_type == IceCredentialType::Oauth {
-            tracing::warn!(
-                "ICE server {:?} configured with OAuth credentials, which webrtc 0.17 does not \
-                 support; falling back to long-term credential fields",
-                s.urls
-            );
-        }
         Self {
             urls: s.urls,
             username: s.username,
