@@ -38,6 +38,7 @@ both the network layer and the privacy layer.
 | **aMule / eD2k / Kad** | No | Yes for Kad; no for eD2k | No anonymity layer | Protocol obfuscation only; no secure E2E guarantee |
 | **Nostr** | No (client-to-relay) | No | No built-in network anonymity layer | Yes for encrypted messages (e.g. NIP-44); not public events |
 | **Nym mixnet** | No direct P2P (browser clients use gateways) | No DHT overlay (layered mixnet) | Full mixnet path | Yes (between Nym clients) |
+| **Tor** | No | No (relay network) | Yes (onion circuits) | Yes for onion services; HTTPS needed beyond an exit |
 
 Browser P2P means the browser itself establishes a peer connection. Structured P2P
 means a DHT-organized overlay. Privacy describes network-metadata protection;
