@@ -2,7 +2,7 @@
 
 [Start Here](README.md)
 
-- [Protocol comparison](introduction/protocol-comparison.md)
+- [Protocol comparison sources](introduction/protocol-comparison.md)
 
 # Native Node
 

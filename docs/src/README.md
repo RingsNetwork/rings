@@ -37,7 +37,7 @@ and to the JSON-RPC [API](jsonrpc.md) every runtime shares.
 
 ## How it works
 
-- [Protocol comparison](introduction/protocol-comparison.md): Rings, libp2p, aMule/eD2k/Kad, Nostr, and Nym.
+- [Protocol comparison sources](introduction/protocol-comparison.md): evidence for the README capability matrix.
 
 - [Architecture](advanced-topic/architecture.md): the layers, from transport to application.
 - [How handshake works](advanced-topic/handshake.md) and [Exchange SDP](advanced-topic/exchange-sdp.md): how two peers open a datachannel.

@@ -31,22 +31,34 @@ both the network layer and the privacy layer.
 
 ## Where Rings fits
 
-| Project | Browser-to-browser P2P | Structured P2P | Privacy layer | E2E encryption |
-|---|---|---|---|---|
-| **Rings** | Yes (WebRTC) | Yes (Chord) | Separate onion-circuit layer | Yes (opt-in E2E streams) |
-| **libp2p** | Yes (WebRTC) | Optional (Kademlia DHT) | No built-in anonymity layer | Yes (peer connections, including circuit relays) |
-| **aMule / eD2k / Kad** | No | Yes for Kad; no for eD2k | No anonymity layer | Protocol obfuscation only; no secure E2E guarantee |
-| **Nostr** | No (client-to-relay) | No | No built-in network anonymity layer | Yes for encrypted messages (e.g. NIP-44); not public events |
-| **Nym mixnet** | No direct P2P (browser clients use gateways) | No DHT overlay (layered mixnet) | Full mixnet path | Yes (between Nym clients) |
-| **Tor** | No | No (relay network) | Yes (onion circuits) | Yes for onion services; HTTPS needed beyond an exit |
+✅ supported · ❌ not provided. Qualifications are listed below the table.
 
-Browser P2P means the browser itself establishes a peer connection. Structured P2P
-means a DHT-organized overlay. Privacy describes network-metadata protection;
-E2E describes payload encryption between the stated endpoints. A full mixnet path
-does not mean unconditional anonymity or protection beyond a network exit.
+| Network | Browser P2P | Structured P2P | Privacy layer | E2E encryption |
+|---|:---:|:---:|:---:|:---:|
+| **Rings** | ✅ | ✅ Chord | ✅ Separate layer | ✅¹ |
+| **libp2p** | ✅ | ✅ Kademlia² | ❌ | ✅³ |
+| **aMule / Kad** | ❌ | ✅ Kademlia | ❌ | ❌⁴ |
+| **Nostr** | ❌ | ❌ | ❌ | ✅⁵ |
+| **Nym mixnet** | ❌ | ❌ | ✅ Full mixnet path | ✅⁶ |
+| **Tor** | ❌ | ❌ Relay network | ✅ Onion circuits | ✅⁷ |
+| **I2P** | ❌ | ✅ netDb² | ✅ Tunnel network | ✅⁶ |
+| **WebTorrent (browser)** | ✅ | ❌ | ❌ | ✅³ |
 
-See [comparison sources](./docs/src/introduction/protocol-comparison.md#primary-sources)
-and the [Rings security model](./SECURITY.md#layer-contracts).
+Browser P2P means the browser itself connects as a peer; a browser UI or gateway
+client does not qualify. Structured P2P includes DHT-based discovery; it does not
+imply that application traffic is routed through the DHT. Privacy means network
+metadata protection, separate from payload encryption.
+
+1. Rings E2E streams require the E2E handshake; plain overlay messages are not E2E-encrypted.
+2. libp2p offers an optional Kademlia DHT. I2P uses a Kademlia-based netDb for discovery; messages travel through tunnels.
+3. Encrypted peer connections: libp2p includes circuit-relayed connections; browser WebTorrent uses WebRTC/DTLS. This does not make published content private or add E2E to pubsub forwarding.
+4. aMule protocol obfuscation is not a secure E2E guarantee. This row covers Kad; eD2k uses indexing servers.
+5. Nostr supports encrypted messages, such as NIP-44 payloads; public events are not encrypted.
+6. Between Nym clients or I2P destinations. Traffic beyond an exit/outproxy needs application encryption.
+7. Tor provides E2E for onion services; ordinary websites need HTTPS beyond the exit. A privacy layer is not an unconditional anonymity guarantee.
+
+[Primary sources](./docs/src/introduction/protocol-comparison.md#primary-sources) ·
+[Rings security model](./SECURITY.md#layer-contracts)
 
 ## Reading paths
 
