@@ -845,10 +845,12 @@ mod tests {
     fn test_saturated_local_queue_fails_closed_without_waiting() {
         let sessions = TransportSessions::new();
         let key = SessionKey::new(Did::from(7_u32), "tcp", SessionId(11), Initiator::Remote);
-        assert!(matches!(
-            sessions.register(key.clone(), None),
-            SlotRegistration::Registered(_)
-        ));
+        let _registration = match sessions.register(key.clone(), None) {
+            SlotRegistration::Registered(registration) => registration,
+            SlotRegistration::AlreadyPresent | SlotRegistration::Failed => {
+                panic!("first registration must occupy a vacant slot");
+            }
+        };
 
         for _ in 0..1024 {
             assert_eq!(
