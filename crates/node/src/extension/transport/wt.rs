@@ -50,6 +50,7 @@ use crate::extension::transport::Initiator;
 use crate::extension::transport::OutboundDrainState;
 use crate::extension::transport::OutboundQueueBudget;
 use crate::extension::transport::SessionKey;
+use crate::extension::transport::SlotRegistration;
 use crate::extension::transport::TransportKind;
 
 /// A peer→local op that arrived while the WebTransport was still opening (no writer yet), held
@@ -146,8 +147,10 @@ impl WtSessions {
             key.namespace.as_str(),
             "relay engine acted with a scope outside the session's namespace"
         );
-        let Some(generation) = self.open_slot(key.clone()) else {
-            return EffectEnqueue::Failed;
+        let generation = match self.open_slot(key.clone()) {
+            SlotRegistration::Registered(generation) => generation,
+            SlotRegistration::AlreadyPresent => return EffectEnqueue::AlreadyPresent,
+            SlotRegistration::Failed => return EffectEnqueue::Failed,
         };
         spawn_detached(async move {
             self.finish_connect(scope, key, url, kind, generation).await;
@@ -262,16 +265,22 @@ impl WtSessions {
 
     /// Register a fresh `Opening` slot for `key` before the handshake, returning its
     /// generation. The mirror of native's pre-dial `register`.
-    fn open_slot(&self, key: SessionKey) -> Option<u64> {
-        let generation = allocate_non_reusing(&self.generations)?;
-        if !self.insert(key, SessionHandle::Opening {
-            queue: VecDeque::new(),
-            budget: OutboundQueueBudget::default(),
-            generation,
-        }) {
-            return None;
+    fn open_slot(&self, key: SessionKey) -> SlotRegistration<u64> {
+        let Some(generation) = allocate_non_reusing(&self.generations) else {
+            return SlotRegistration::Failed;
+        };
+        let mut map = self.lock_sessions();
+        match map.entry(key) {
+            Entry::Vacant(entry) => {
+                entry.insert(SessionHandle::Opening {
+                    queue: VecDeque::new(),
+                    budget: OutboundQueueBudget::default(),
+                    generation,
+                });
+                SlotRegistration::Registered(generation)
+            }
+            Entry::Occupied(_) => SlotRegistration::AlreadyPresent,
         }
-        Some(generation)
     }
 
     /// Promote the `Opening` slot for `key` to `Ready` with the just-opened `writer`/
@@ -425,22 +434,6 @@ impl WtSessions {
         OutboundDrainStep::Operation(writer.clone(), op)
     }
 
-    /// Insert only into a vacant browser-engine slot.
-    ///
-    /// The pure relay transition is the duplicate-open authority. If an effect repeats despite
-    /// that invariant, the already committed transport remains current and the duplicate open is
-    /// refused instead of replacing and closing it.
-    fn insert(&self, key: SessionKey, handle: SessionHandle) -> bool {
-        let mut map = self.lock_sessions();
-        match map.entry(key) {
-            Entry::Vacant(entry) => {
-                entry.insert(handle);
-                true
-            }
-            Entry::Occupied(_) => false,
-        }
-    }
-
     /// Recover the single-threaded browser table after an unwinding test panic instead of
     /// translating poison into an unrelated missing-session transition.
     fn lock_sessions(&self) -> MutexGuard<'_, HashMap<SessionKey, SessionHandle>> {
@@ -561,17 +554,24 @@ mod tests {
     use crate::extension::transport::Initiator;
     use crate::extension::transport::SessionId;
     use crate::extension::transport::SessionKey;
+    use crate::extension::transport::SlotRegistration;
 
     /// A repeated browser effect leaves the existing slot and generation authoritative.
     #[test]
     fn test_duplicate_open_preserves_browser_slot_generation() {
         let sessions = WtSessions::new();
         let key = SessionKey::new(Did::from(7_u32), "tcp", SessionId(10), Initiator::Remote);
-        let original_generation = sessions
-            .open_slot(key.clone())
-            .expect("first open must occupy a vacant slot");
+        let original_generation = match sessions.open_slot(key.clone()) {
+            SlotRegistration::Registered(generation) => generation,
+            SlotRegistration::AlreadyPresent | SlotRegistration::Failed => {
+                panic!("first open must occupy a vacant slot");
+            }
+        };
 
-        assert!(sessions.open_slot(key.clone()).is_none());
+        assert!(matches!(
+            sessions.open_slot(key.clone()),
+            SlotRegistration::AlreadyPresent
+        ));
         assert_eq!(
             sessions
                 .lock_sessions()

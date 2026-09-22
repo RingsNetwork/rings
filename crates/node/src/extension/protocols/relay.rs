@@ -679,7 +679,7 @@ fn enqueue_feedback<T: Serialize>(
     admission: EffectEnqueue,
 ) -> crate::error::Result<Vec<Bytes>> {
     match admission {
-        EffectEnqueue::Enqueued => Ok(Vec::new()),
+        EffectEnqueue::Enqueued | EffectEnqueue::AlreadyPresent => Ok(Vec::new()),
         EffectEnqueue::Missing => untrack_feedback::<T>(key).map(|feedback| vec![feedback]),
         EffectEnqueue::Failed => abort_feedback::<T>(key).map(|feedback| vec![feedback]),
     }

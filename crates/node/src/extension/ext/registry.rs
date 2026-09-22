@@ -504,6 +504,7 @@ mod tests {
     use async_trait::async_trait;
     use rings_core::ecc::SecretKey;
     use rings_core::session::SessionSk;
+    use tokio::net::TcpListener;
     use tokio::sync::Notify;
 
     use super::*;
@@ -881,6 +882,96 @@ mod tests {
                 initiator: Initiator::Local,
             }) if actual_peer == peer
         ));
+        Ok(())
+    }
+
+    /// A repeated `Connect` effect is an idempotent engine observation, not a
+    /// backend failure that may roll back the reducer's committed session.
+    #[tokio::test]
+    async fn test_repeated_connect_preserves_reducer_state_without_close_feedback() -> Result<()> {
+        let extensions = extensions()?;
+        let engine = Arc::new(TransportSessions::new());
+        let interpreter = NativeRelay::new(Arc::clone(&engine));
+        let effect_scope = EffectScope::new(Scope::new(extensions.core(), TCP.to_string()));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|error| Error::ExtensionError(format!("bind test listener: {error}")))?;
+        let target = listener
+            .local_addr()
+            .map_err(|error| Error::ExtensionError(format!("read test listener: {error}")))?;
+        let relay = Relay::tcp();
+        let did = extensions.core().did();
+        let peer = Did::from(7_u32);
+        let initial = relay.init();
+        let registered = relay.step(
+            Ctx {
+                did,
+                state: &initial,
+            },
+            RelayEvent::Command(RelayCommand::RegisterService {
+                name: "web".to_string(),
+                target,
+            }),
+        );
+        let opened = relay.step(
+            Ctx {
+                did,
+                state: &registered.state,
+            },
+            RelayEvent::Frame {
+                from: peer,
+                frame: Frame::Open {
+                    session: SessionId(9),
+                    service: "web".to_string(),
+                },
+            },
+        );
+        let (connect, key) = match opened.effects.as_slice() {
+            [effect @ RelayEffect::Connect { key, .. }] => (effect.clone(), key.clone()),
+            effects => {
+                return Err(Error::ExtensionError(format!(
+                    "expected one Connect effect, got {effects:?}"
+                )));
+            }
+        };
+
+        let first_feedback = interpreter.run(&effect_scope, connect.clone()).await?;
+        assert!(first_feedback.is_empty());
+        let repeated_feedback = interpreter.run(&effect_scope, connect).await?;
+
+        let mut state = opened.state;
+        let mut feedback_effects = Vec::new();
+        for payload in repeated_feedback {
+            let event = relay
+                .decode(Wire {
+                    from: did,
+                    me: did,
+                    payload: payload.as_ref(),
+                })
+                .map_err(|Reject(why)| Error::ExtensionError(why))?;
+            let transition = relay.step(Ctx { did, state: &state }, event);
+            state = transition.state;
+            feedback_effects.extend(transition.effects);
+        }
+        assert!(
+            feedback_effects
+                .iter()
+                .all(|effect| !matches!(effect, RelayEffect::SendClose { .. })),
+            "an occupied engine slot must not reduce to a peer Close"
+        );
+
+        let duplicate_open = relay.step(Ctx { did, state: &state }, RelayEvent::Frame {
+            from: peer,
+            frame: Frame::Open {
+                session: SessionId(9),
+                service: "web".to_string(),
+            },
+        });
+        assert!(
+            duplicate_open.effects.is_empty(),
+            "the reducer must still track the original session"
+        );
+        engine.close_for_effect(&key);
         Ok(())
     }
 

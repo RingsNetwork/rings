@@ -68,6 +68,7 @@ use crate::extension::transport::EffectEnqueue;
 use crate::extension::transport::Frame;
 use crate::extension::transport::Initiator;
 use crate::extension::transport::SessionKey;
+use crate::extension::transport::SlotRegistration;
 use crate::extension::transport::TransportKind;
 
 /// Connect timeout for a local service dial.
@@ -189,8 +190,10 @@ impl TransportSessions {
             key.namespace.as_str(),
             "relay engine acted with a scope outside the session's namespace"
         );
-        let Some(task) = RelayTask::register(self.clone(), scope, key) else {
-            return EffectEnqueue::Failed;
+        let task = match RelayTask::register(self.clone(), scope, key) {
+            SlotRegistration::Registered(task) => task,
+            SlotRegistration::AlreadyPresent => return EffectEnqueue::AlreadyPresent,
+            SlotRegistration::Failed => return EffectEnqueue::Failed,
         };
         spawn_detached(async move {
             match kind {
@@ -344,9 +347,10 @@ impl TransportSessions {
         };
         match pending {
             Pending::Tcp(stream) => {
-                let Some(task) = RelayTask::register(self.clone(), scope.clone(), key.clone())
-                else {
-                    return Some(key);
+                let task = match RelayTask::register(self.clone(), scope.clone(), key.clone()) {
+                    SlotRegistration::Registered(task) => task,
+                    SlotRegistration::AlreadyPresent => return None,
+                    SlotRegistration::Failed => return Some(key),
                 };
                 spawn_detached(async move {
                     if open(&task.scope, &task.key, service.as_str())
@@ -369,10 +373,17 @@ impl TransportSessions {
                 if !self.promote_udp_flow(src, token, &key) {
                     return Some(key);
                 }
-                let Some((outbound_rx, cancel, generation)) = self.register(key.clone(), Some(src))
-                else {
-                    self.remove_udp_flow_for_key(src, &key);
-                    return Some(key);
+                let (outbound_rx, cancel, generation) = match self.register(key.clone(), Some(src))
+                {
+                    SlotRegistration::Registered(registration) => registration,
+                    SlotRegistration::AlreadyPresent => {
+                        self.remove_udp_flow_for_key(src, &key);
+                        return None;
+                    }
+                    SlotRegistration::Failed => {
+                        self.remove_udp_flow_for_key(src, &key);
+                        return Some(key);
+                    }
                 };
                 udp::spawn_udp_sendto(
                     RelayTask {
@@ -555,19 +566,27 @@ impl TransportSessions {
         &self,
         key: SessionKey,
         src: Option<SocketAddr>,
-    ) -> Option<(mpsc::Receiver<Outbound>, CancellationToken, u64)> {
+    ) -> SlotRegistration<(mpsc::Receiver<Outbound>, CancellationToken, u64)> {
         let (outbound, outbound_rx) = mpsc::channel::<Outbound>(1024);
         let cancel = CancellationToken::new();
-        let generation = allocate_non_reusing(&self.generations)?;
-        if !self.insert(key, SessionHandle {
-            outbound,
-            cancel: cancel.clone(),
-            src,
-            generation,
-        }) {
-            return None;
+        let Some(generation) = allocate_non_reusing(&self.generations) else {
+            return SlotRegistration::Failed;
+        };
+        let Ok(mut map) = self.map.lock() else {
+            return SlotRegistration::Failed;
+        };
+        match map.entry(key) {
+            Entry::Vacant(entry) => {
+                entry.insert(SessionHandle {
+                    outbound,
+                    cancel: cancel.clone(),
+                    src,
+                    generation,
+                });
+                SlotRegistration::Registered((outbound_rx, cancel, generation))
+            }
+            Entry::Occupied(_) => SlotRegistration::AlreadyPresent,
         }
-        Some((outbound_rx, cancel, generation))
     }
 
     fn sender(&self, key: &SessionKey) -> Option<(mpsc::Sender<Outbound>, u64)> {
@@ -614,24 +633,6 @@ impl TransportSessions {
             .map(|map| map.contains_key(key))
             .unwrap_or(false)
     }
-
-    /// Insert only into a vacant engine slot.
-    ///
-    /// The pure relay transition admits at most one live `Open` per [`SessionKey`]. Keeping an
-    /// occupied slot preserves that committed owner if an effect is nevertheless repeated; the
-    /// engine never replaces and cancels a live resource defensively.
-    fn insert(&self, key: SessionKey, handle: SessionHandle) -> bool {
-        let Ok(mut map) = self.map.lock() else {
-            return false;
-        };
-        match map.entry(key) {
-            Entry::Vacant(entry) => {
-                entry.insert(handle);
-                true
-            }
-            Entry::Occupied(_) => false,
-        }
-    }
 }
 
 /// Everything a per-session relay task needs: the engine handle, the session's routing
@@ -648,16 +649,25 @@ struct RelayTask {
 
 impl RelayTask {
     /// Register a fresh session channel on the engine and capture the routing identity.
-    fn register(sessions: Arc<TransportSessions>, scope: Scope, key: SessionKey) -> Option<Self> {
-        let (outbound_rx, cancel, generation) = sessions.register(key.clone(), None)?;
-        Some(Self {
-            sessions,
-            scope,
-            key,
-            outbound_rx,
-            cancel,
-            generation,
-        })
+    fn register(
+        sessions: Arc<TransportSessions>,
+        scope: Scope,
+        key: SessionKey,
+    ) -> SlotRegistration<Self> {
+        match sessions.register(key.clone(), None) {
+            SlotRegistration::Registered((outbound_rx, cancel, generation)) => {
+                SlotRegistration::Registered(Self {
+                    sessions,
+                    scope,
+                    key,
+                    outbound_rx,
+                    cancel,
+                    generation,
+                })
+            }
+            SlotRegistration::AlreadyPresent => SlotRegistration::AlreadyPresent,
+            SlotRegistration::Failed => SlotRegistration::Failed,
+        }
     }
 
     /// Connect failed: drop the pre-registered session (which `Untrack`s it) and tell the peer
@@ -713,10 +723,14 @@ fn relay_task_for_test_with_src(
         crate::extension::transport::SessionId(1),
         initiator,
     );
-    let (outbound_rx, cancel, generation) =
-        sessions.register(key.clone(), src).ok_or_else(|| {
-            Error::ExtensionError("test relay generation exhausted unexpectedly".to_string())
-        })?;
+    let (outbound_rx, cancel, generation) = match sessions.register(key.clone(), src) {
+        SlotRegistration::Registered(registration) => registration,
+        SlotRegistration::AlreadyPresent | SlotRegistration::Failed => {
+            return Err(Error::ExtensionError(
+                "test relay registration failed unexpectedly".to_string(),
+            ));
+        }
+    };
     let task = RelayTask {
         sessions: Arc::clone(&sessions),
         scope,
@@ -805,19 +819,24 @@ mod tests {
     use crate::extension::transport::Initiator;
     use crate::extension::transport::SessionId;
     use crate::extension::transport::SessionKey;
+    use crate::extension::transport::SlotRegistration;
 
     /// A repeated engine effect cannot cancel or replace the resource admitted first.
     #[test]
     fn test_duplicate_registration_preserves_live_owner() {
         let sessions = TransportSessions::new();
         let key = SessionKey::new(Did::from(7_u32), "tcp", SessionId(10), Initiator::Remote);
-        let Some((_receiver, original_cancel, original_generation)) =
-            sessions.register(key.clone(), None)
-        else {
-            panic!("first registration must occupy a vacant slot");
+        let (original_cancel, original_generation) = match sessions.register(key.clone(), None) {
+            SlotRegistration::Registered((_receiver, cancel, generation)) => (cancel, generation),
+            SlotRegistration::AlreadyPresent | SlotRegistration::Failed => {
+                panic!("first registration must occupy a vacant slot");
+            }
         };
 
-        assert!(sessions.register(key.clone(), None).is_none());
+        assert!(matches!(
+            sessions.register(key.clone(), None),
+            SlotRegistration::AlreadyPresent
+        ));
         assert!(!original_cancel.is_cancelled());
         assert_eq!(sessions.current_generation(&key), Some(original_generation));
     }
@@ -826,8 +845,10 @@ mod tests {
     fn test_saturated_local_queue_fails_closed_without_waiting() {
         let sessions = TransportSessions::new();
         let key = SessionKey::new(Did::from(7_u32), "tcp", SessionId(11), Initiator::Remote);
-        let registration = sessions.register(key.clone(), None);
-        assert!(registration.is_some());
+        assert!(matches!(
+            sessions.register(key.clone(), None),
+            SlotRegistration::Registered(_)
+        ));
 
         for _ in 0..1024 {
             assert_eq!(
@@ -909,7 +930,10 @@ mod tests {
         assert!(matches!(pending, Some(Pending::Udp { .. })));
         let key = SessionKey::new(Did::from(8_u32), "udp", SessionId(12), Initiator::Local);
         assert!(sessions.promote_udp_flow(src, token, &key));
-        assert!(sessions.register(key.clone(), Some(src)).is_some());
+        assert!(matches!(
+            sessions.register(key.clone(), Some(src)),
+            SlotRegistration::Registered(_)
+        ));
         assert_eq!(sessions.udp_flow(&src), None);
 
         assert!(sessions.activate_udp_flow(src, &key));

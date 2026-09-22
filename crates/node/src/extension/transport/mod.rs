@@ -111,10 +111,23 @@ pub enum Initiator {
 pub(crate) enum EffectEnqueue {
     /// The effect was accepted by the current backend generation.
     Enqueued,
+    /// The requested backend slot is already owned by a live generation; the
+    /// duplicate effect is a no-op and pure state must preserve the session.
+    AlreadyPresent,
     /// No backend generation exists; pure state must simply forget the key.
     Missing,
     /// The current backend generation failed or saturated; pure state must
     /// forget it and notify the peer with `Close`.
+    Failed,
+}
+
+/// Result of trying to reserve one unique backend slot.
+pub(crate) enum SlotRegistration<T> {
+    /// The vacant slot was reserved and produced its backend-specific resource.
+    Registered(T),
+    /// A live backend generation already owns the slot and remains authoritative.
+    AlreadyPresent,
+    /// The slot could not be reserved because an internal resource failed.
     Failed,
 }
 

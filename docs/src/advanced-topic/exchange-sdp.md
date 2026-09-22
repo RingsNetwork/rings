@@ -87,6 +87,7 @@ Then we ask Node2 to accept the answer:
 ```bash
 curl -X POST \
 -H "Content-Type: application/json" \
+-H "Authorization: Bearer <node2-api-token>" \
 --data '{"jsonrpc": "2.0",
         "id": 1, "method": "answerOffer",
         "params": ["<b58 encoded offer>"]}' \
