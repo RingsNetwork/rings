@@ -131,13 +131,6 @@ impl ControlledDeliveryState {
         controlled::DeliverySnapshot::new(self.queue.len(), self.generation)
     }
 
-    pub(super) fn inspect(&self, index: usize) -> Option<controlled::QueuedDelivery> {
-        self.queue
-            .values()
-            .nth(index)
-            .map(ControlledDeliveryEntry::inspect)
-    }
-
     pub(super) fn inspect_after(&self, sequence: Option<u64>) -> Vec<controlled::QueuedDelivery> {
         let lower = sequence.map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded);
         self.queue

@@ -24,7 +24,6 @@ use web_sys::RtcPeerConnectionState;
 use web_sys::RtcSdpType;
 use web_sys::RtcSessionDescription;
 use web_sys::RtcSessionDescriptionInit;
-use web_sys::RtcStatsReport;
 
 use crate::callback::admit_inbound_data_channel;
 use crate::callback::inbound_frame_exceeds_protocol_ceiling;
@@ -34,7 +33,6 @@ use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
 use crate::core::pool::RoundRobin;
 use crate::core::pool::RoundRobinPool;
-use crate::core::pool::StatusPool;
 use crate::core::transport::effective_max_message_size;
 use crate::core::transport::stored_max_message_size;
 use crate::core::transport::ConnectionInterface;
@@ -147,7 +145,8 @@ impl WebSysWebrtcConnection {
     }
 }
 
-impl StatusPool<TrackedChannel> for RoundRobinPool<TrackedChannel> {
+impl RoundRobinPool<TrackedChannel> {
+    /// Return whether every channel in this backend pool is open.
     fn all_ready(&self) -> Result<bool> {
         self.all(|(c, _)| c.ready_state() == RtcDataChannelState::Open)
     }
@@ -270,21 +269,6 @@ impl ConnectionInterface for WebSysWebrtcConnection {
 
     fn max_message_size(&self) -> usize {
         stored_max_message_size(self.remote_max_message_size.load(Ordering::SeqCst))
-    }
-
-    async fn get_stats(&self) -> Vec<String> {
-        let promise = self.webrtc_conn.get_stats();
-        let Ok(value) = wasm_bindgen_futures::JsFuture::from(promise).await else {
-            return vec![];
-        };
-
-        let stats: RtcStatsReport = value.into();
-
-        stats
-            .entries()
-            .into_iter()
-            .map(|x| dump_stats_entry(&x.ok()).unwrap_or("failed to dump stats entry".to_string()))
-            .collect::<Vec<_>>()
     }
 
     async fn webrtc_create_offer(&self) -> Result<Self::Sdp> {
@@ -576,10 +560,6 @@ impl TransportInterface for WebSysWebrtcTransport {
         self.pool.safely_insert(cid, conn).await
     }
 
-    async fn close_connection(&self, cid: &str) -> Result<()> {
-        self.pool.safely_remove(cid).await
-    }
-
     async fn close_connection_if_current(
         &self,
         connection: &ConnectionRef<Self::Connection>,
@@ -589,10 +569,6 @@ impl TransportInterface for WebSysWebrtcTransport {
 
     fn connection(&self, cid: &str) -> Result<ConnectionRef<Self::Connection>> {
         self.pool.connection(cid)
-    }
-
-    fn connections(&self) -> Vec<(String, ConnectionRef<Self::Connection>)> {
-        self.pool.connections()
     }
 
     fn connection_ids(&self) -> Vec<String> {
@@ -605,7 +581,6 @@ impl From<IceCredentialType> for RtcIceCredentialType {
     fn from(s: IceCredentialType) -> Self {
         match s {
             IceCredentialType::Password => Self::Password,
-            IceCredentialType::Oauth => Self::Token,
         }
     }
 }
@@ -652,12 +627,6 @@ impl From<RtcPeerConnectionState> for WebrtcConnectionState {
             }
         }
     }
-}
-
-fn dump_stats_entry(entry: &Option<JsValue>) -> Option<String> {
-    js_sys::JSON::stringify(entry.as_ref()?)
-        .ok()
-        .and_then(|x| x.as_string())
 }
 
 #[cfg(test)]

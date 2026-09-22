@@ -55,14 +55,6 @@ impl<C> Pool<C> {
             .ok_or(Error::ConnectionNotFound(cid.to_string()))
     }
 
-    /// Get all the connections in the pool.
-    pub fn connections(&self) -> Vec<(String, ConnectionRef<C>)> {
-        self.connections
-            .iter()
-            .map(|kv| (kv.key().clone(), ConnectionRef::new(kv.key(), kv.value())))
-            .collect()
-    }
-
     /// Get all the connection ids in the pool.
     pub fn connection_ids(&self) -> Vec<String> {
         self.connections.iter().map(|kv| kv.key().clone()).collect()
@@ -165,16 +157,6 @@ where
         }
     }
 
-    /// This method closes and releases the connection from pool.
-    /// All references to this cid, created by `get_connection`, will be released.
-    /// The [ConnectionInterface] methods of them will return [Error::ConnectionReleased].
-    pub async fn safely_remove(&self, cid: &str) -> Result<()> {
-        let Some((_, conn)) = self.connections.remove(cid) else {
-            return Err(Error::ConnectionNotFound(cid.to_string()));
-        };
-        conn.close().await
-    }
-
     /// Remove and close `expected` only while it still owns its pool slot.
     pub async fn safely_remove_if_current(&self, expected: &ConnectionRef<C>) -> Result<bool> {
         let Some(conn) = self.take_if_current(expected) else {
@@ -260,10 +242,6 @@ mod tests {
 
         fn max_message_size(&self) -> usize {
             1
-        }
-
-        async fn get_stats(&self) -> Vec<String> {
-            Vec::new()
         }
 
         async fn webrtc_create_offer(&self) -> Result<Self::Sdp> {

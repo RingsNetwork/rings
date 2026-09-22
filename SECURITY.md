@@ -377,6 +377,23 @@ envelope, message body decode, chunk framing, and chunk reassembly bounds;
 the JSON-RPC body decoder and authorization classification. CI generates each run's
 seed and case count, so the repository does not carry generated corpora.
 
+### Transport lifecycle boundaries
+
+Transport cleanup uses the generation-pinned `close_connection_if_current` and
+`Pool::safely_remove_if_current` boundaries. A delayed close must not resolve a CID
+again and retire its replacement. Raw inbound frames retain callback-instance
+identity; matching that private identity also proves the immutable peer attached
+to the capacity lease, including when two callbacks share a peer ID.
+
+Native sends retain distinct admission, caller-cancellation, and continuation
+retirement guards. A pending continuation can outlive its caller; retirement must
+fence new sends before physical cleanup or destruction of pending send resources.
+`NativePhysicalCloseWitness` separately records physical-close completion.
+Backend-free/default/dummy notifier timers retain the runtime-independent thread
+scheduler. These contracts are not removed by the transport API cleanup in #787.
+ICE configuration accepts password credentials; unsupported OAuth values are
+rejected rather than silently downgraded by the native backend.
+
 ### Connection Admission
 
 Each node bounds the number of peers holding any logical connection record,
