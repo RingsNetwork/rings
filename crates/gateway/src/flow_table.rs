@@ -49,7 +49,7 @@ impl FlowTable {
         self.states.is_empty()
     }
 
-    /// Capture one previously unseen flow.
+    /// Admit one previously unseen flow and bind its captured target immediately.
     pub fn capture(&mut self, id: FlowId) -> Result<FlowState, FlowTableError> {
         if self.states.contains_key(&id) {
             return Err(FlowTableError::Duplicate(id));
@@ -59,7 +59,8 @@ impl FlowTable {
                 limit: self.capacity,
             });
         }
-        let state = FlowState::Captured(id);
+        // FlowId already contains the immutable target; no intermediate state carries authority.
+        let state = FlowState::TargetBound(id);
         self.states.insert(id, state);
         Ok(state)
     }
@@ -146,7 +147,7 @@ mod tests {
             .transition(first, FlowEvent::Fail)
             .expect("captured flow may fail");
         assert!(table.is_empty());
-        assert_eq!(table.capture(second), Ok(FlowState::Captured(second)));
+        assert_eq!(table.capture(second), Ok(FlowState::TargetBound(second)));
     }
 
     #[test]

@@ -240,3 +240,22 @@ helper process, peer authentication, `SCM_RIGHTS` transfer, disconnected-lease r
 same-plan recovery. The ledger assertion rejects hidden IPv4 or IPv6 catch-all routes.
 
 These evidence classes are reported separately; none is described as a complete VPN.
+
+### Lifecycle and ownership boundaries
+
+`GatewayState::Active` means packet admission is enabled. Exit availability is a separate
+input to `GatewayStatus`: unknown or unavailable exits project to `GatewayHealth::Degraded`,
+and recovery projects back to active without a second lifecycle transition. Status readers
+use `GatewayStatusHandle::snapshot()`.
+
+Flow capture binds the immutable `FlowId::target` and creates `TargetBound` directly. TCP
+endpoints are the sole ownership index for smoltcp handles; insertion and removal update
+that index and the socket set together. FIN, RST and payload remain in the original packet
+processed by smoltcp, rather than being duplicated in admission metadata.
+
+Runtime construction validates configuration once and shares an immutable validation proof
+with the server and TCP stack. Their standalone public constructors obtain the same proof,
+so invalid input cannot bypass the boundary. Platform plan validation remains independent
+because a tunnel controller can be used without a runtime. Packet drops and flow rejections
+emit structured `tracing` debug events containing their typed reason, without packet contents
+or target addresses.

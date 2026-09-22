@@ -24,7 +24,6 @@ use crate::GatewayError;
 use crate::GatewayEvent;
 use crate::GatewayServer;
 use crate::GatewayState;
-use crate::GatewayStatus;
 use crate::GatewayStatusHandle;
 use crate::OnionStreamConnector;
 use crate::PacketDisposition;
@@ -183,8 +182,10 @@ impl GatewayRuntime {
         connector: Arc<dyn OnionStreamConnector>,
         random_seed: u64,
     ) -> Result<Self, GatewayError> {
-        let server = GatewayServer::new(config.clone())?;
-        let tcp = TcpStack::new(&config, random_seed)?;
+        // One immutable proof gates all component allocations in this runtime.
+        let validated = crate::config::ValidatedGatewayConfig::new(&config)?;
+        let server = GatewayServer::from_validated(&validated)?;
+        let tcp = TcpStack::from_validated(&validated, random_seed)?;
         let event_capacity = config.max_flows.saturating_mul(EVENTS_PER_FLOW).max(1);
         let (bridge_events_tx, bridge_events_rx) = mpsc::channel(event_capacity);
         let status_handle = GatewayStatusHandle::new(server.status());
@@ -220,11 +221,6 @@ impl GatewayRuntime {
     ) {
         self.server.set_exit_availability(availability, reason);
         self.publish_status();
-    }
-
-    /// Return a stable inspection snapshot.
-    pub fn status(&self) -> GatewayStatus {
-        self.server.status()
     }
 
     /// Return a cloneable inspection capability that remains valid while the runtime is running.
@@ -348,7 +344,13 @@ impl GatewayRuntime {
                     .map_err(GatewayFatal::gateway)?;
                 match self.ingest_packet(packet.to_vec(), elapsed)? {
                     PacketOutcome::Consumed(flow) => Ok(ReconcileScope::Flow(flow)),
-                    PacketOutcome::Dropped(_) | PacketOutcome::FlowRejected { .. } => {
+                    PacketOutcome::Dropped(reason) => {
+                        tracing::debug!(?reason, "gateway packet dropped");
+                        Ok(ReconcileScope::None)
+                    }
+                    PacketOutcome::FlowRejected { reason, .. } => {
+                        // Reasons carry no packet contents or destination addresses.
+                        tracing::debug!(?reason, "gateway flow rejected");
                         Ok(ReconcileScope::None)
                     }
                 }
@@ -427,9 +429,6 @@ impl GatewayRuntime {
             }
             Err(error) => return Err(GatewayFatal::gateway(error)),
         }
-        self.server
-            .transition_flow(segment.flow, FlowEvent::BindTarget)
-            .map_err(GatewayFatal::gateway)?;
         match self.tcp.admit_flow(segment, elapsed) {
             TcpFlowAdmission::Accepted => {
                 let chunk_bytes = self.chunk_bytes();
@@ -758,10 +757,7 @@ impl GatewayRuntime {
         let mut first_error = None;
         if matches!(
             self.server.state(),
-            GatewayState::Starting
-                | GatewayState::Active
-                | GatewayState::Degraded
-                | GatewayState::Failed
+            GatewayState::Starting | GatewayState::Active | GatewayState::Failed
         ) {
             record_first_error(
                 &mut first_error,

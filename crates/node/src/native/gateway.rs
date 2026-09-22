@@ -61,7 +61,6 @@ impl NativeGatewayRunner {
         config: NativeGatewayConfig,
     ) -> anyhow::Result<Self> {
         validate_status_refresh_secs(config.status_refresh_secs)?;
-        config.runtime.validate()?;
         let proxy = OnionProxyConfig::tcp_connect_service(
             config.onion_service.clone(),
             config.onion_hop_count,

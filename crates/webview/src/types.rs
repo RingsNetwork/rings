@@ -78,17 +78,11 @@ pub struct GatewayRequest {
     pub body: Vec<u8>,
     /// Browser request class.
     pub kind: GatewayRequestKind,
-    /// Trusted source origin for requests initiated by another target document.
+    /// Trusted controlled page URL that initiated this request.
     ///
-    /// This URL is normalized to the origin root (`scheme://host[:port]/`). The gateway
-    /// serializes only that origin upstream and uses it to apply virtual CORS, SameSite, and
-    /// credential rules. It must never be populated from an untrusted page header.
-    pub source_origin: Option<Url>,
-    /// Trusted page target that initiated this request.
-    ///
-    /// Unlike `source_origin`, this preserves the concrete controlled page URL for diagnostics
-    /// such as scoped WebView network and onion-route logs. It must never be populated from an
-    /// untrusted page header.
+    /// The host supplies this from frame state, never an untrusted page header. CORS and
+    /// credentials derive its origin; cookie policy derives its site. The complete URL remains
+    /// available for scoped diagnostics, so there is no independently supplied origin carrier.
     pub source_target: Option<Url>,
     /// Browser credential mode for this request.
     pub credentials: GatewayCredentials,
@@ -105,7 +99,6 @@ impl GatewayRequest {
             headers: Vec::new(),
             body: Vec::new(),
             kind,
-            source_origin: None,
             source_target: None,
             credentials: GatewayCredentials::SameOrigin,
             top_level_navigation: kind == GatewayRequestKind::Navigation,
@@ -144,18 +137,15 @@ impl GatewayRequest {
         self
     }
 
-    /// Attach the trusted virtual source origin for a browser runtime request.
-    pub fn with_source_origin(mut self, source_origin: Url) -> Self {
-        self.source_origin = Some(normalize_origin_url(source_origin));
+    /// Attach the trusted controlled page URL for browser policy and diagnostics.
+    pub fn with_source_target(mut self, source_target: Url) -> Self {
+        self.source_target = Some(source_target);
         self
     }
 
-    /// Normalize trusted source context after direct struct construction.
-    pub fn normalize_source_origin(mut self) -> Self {
-        if let Some(source_origin) = self.source_origin.take() {
-            self.source_origin = Some(normalize_origin_url(source_origin));
-        }
-        self
+    /// Derive the URL origin inside the crate without changing the diagnostic page URL.
+    pub fn source_origin(&self) -> Option<url::Origin> {
+        self.source_target.as_ref().map(Url::origin)
     }
 
     /// Set the credential mode captured from a browser runtime request.
@@ -176,7 +166,7 @@ impl GatewayRequest {
             self.kind,
             GatewayRequestKind::Fetch | GatewayRequestKind::Xhr
         ) && self
-            .source_origin
+            .source_target
             .as_ref()
             .is_some_and(|source| source.origin() != self.target.origin())
     }
@@ -186,7 +176,7 @@ impl GatewayRequest {
         matches!(
             self.kind,
             GatewayRequestKind::Fetch | GatewayRequestKind::Xhr
-        ) && self.source_origin.is_none()
+        ) && self.source_target.is_none()
     }
 
     /// Return whether the gateway may attach or store target cookies for this request.
@@ -197,7 +187,7 @@ impl GatewayRequest {
         ) {
             return true;
         }
-        match (self.source_origin.as_ref(), self.credentials) {
+        match (self.source_target.as_ref(), self.credentials) {
             (None, _) => false,
             (_, GatewayCredentials::Omit) => false,
             (Some(_), GatewayCredentials::Include) => true,
@@ -206,15 +196,6 @@ impl GatewayRequest {
             }
         }
     }
-}
-
-fn normalize_origin_url(mut url: Url) -> Url {
-    let _ = url.set_username("");
-    let _ = url.set_password(None);
-    url.set_path("/");
-    url.set_query(None);
-    url.set_fragment(None);
-    url
 }
 
 /// Normalized response returned by a gateway transport.
@@ -251,13 +232,20 @@ mod tests {
     #[test]
     fn test_source_origin_is_normalized_to_origin_root() -> Result<()> {
         let request = GatewayRequest::fetch(Url::parse("https://api.example.test/data")?, "GET")
-            .with_source_origin(Url::parse(
+            .with_source_target(Url::parse(
                 "https://user:pass@app.example.test:8443/path/page?q=1#section",
             )?);
 
         assert_eq!(
-            request.source_origin.as_ref().map(Url::as_str),
-            Some("https://app.example.test:8443/")
+            request.source_target.as_ref().map(Url::as_str),
+            Some("https://user:pass@app.example.test:8443/path/page?q=1#section")
+        );
+        assert_eq!(
+            request
+                .source_origin()
+                .map(|origin| origin.ascii_serialization())
+                .as_deref(),
+            Some("https://app.example.test:8443")
         );
         Ok(())
     }

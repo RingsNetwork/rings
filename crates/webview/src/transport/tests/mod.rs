@@ -86,7 +86,6 @@ fn test_gateway_rewrites_html_and_stores_cookies() -> Result<()> {
         headers: Vec::new(),
         body: Vec::new(),
         kind: GatewayRequestKind::Navigation,
-        source_origin: None,
         source_target: None,
         credentials: GatewayCredentials::SameOrigin,
         top_level_navigation: true,
@@ -473,7 +472,7 @@ fn test_gateway_replaces_caller_cookie_header_with_virtual_target_cookie() -> Re
     futures::executor::block_on(
         gateway.send(
             GatewayRequest::fetch(fetch_target, "GET")
-                .with_source_origin(TargetUrl::parse("https://example.com/index.html")?.into_url())
+                .with_source_target(TargetUrl::parse("https://example.com/index.html")?.into_url())
                 .with_header(GatewayHeader::new("Cookie", "caller=leak")?),
         ),
     )?;
@@ -502,10 +501,9 @@ fn test_gateway_normalizes_direct_struct_source_origin_before_transport() -> Res
         headers: Vec::new(),
         body: Vec::new(),
         kind: GatewayRequestKind::Fetch,
-        source_origin: Some(Url::parse(
+        source_target: Some(Url::parse(
             "https://user:pass@app.example.test:8443/page?q=1#section",
         )?),
-        source_target: None,
         credentials: GatewayCredentials::SameOrigin,
         top_level_navigation: false,
     };
@@ -518,8 +516,11 @@ fn test_gateway_normalizes_direct_struct_source_origin_before_transport() -> Res
         .first()
         .ok_or_else(|| WebviewError::transport("missing request".to_string()))?;
     assert_eq!(
-        first.source_origin.as_ref().map(Url::as_str),
-        Some("https://app.example.test:8443/")
+        first
+            .source_origin()
+            .map(|origin| origin.ascii_serialization())
+            .as_deref(),
+        Some("https://app.example.test:8443")
     );
     Ok(())
 }
@@ -602,7 +603,7 @@ fn test_gateway_forwards_cross_origin_runtime_requests_after_virtual_cors_prefli
     let response = futures::executor::block_on(
         gateway.send(
             GatewayRequest::fetch(target, "PATCH")
-                .with_source_origin(source)
+                .with_source_target(source)
                 .with_header(GatewayHeader::new("X-Requested-With", "Rings")?),
         ),
     )?;
@@ -677,9 +678,9 @@ fn parity_request_sequence() -> Result<Vec<GatewayRequest>> {
     Ok(vec![
         GatewayRequest::navigation(app.clone()),
         GatewayRequest::fetch(api, "PATCH")
-            .with_source_origin(app.clone())
+            .with_source_target(app.clone())
             .with_header(GatewayHeader::new("X-Requested-With", "Rings")?),
-        GatewayRequest::fetch(app, "GET").with_source_origin(
+        GatewayRequest::fetch(app, "GET").with_source_target(
             TargetUrl::parse("https://app.example.test/other-page")?.into_url(),
         ),
     ])
@@ -814,7 +815,7 @@ fn test_concurrent_gateway_cookie_commits_follow_response_order_and_source_visib
     let same_site_response = pool.run_until(
         gateway.send(
             GatewayRequest::subresource(same_site_read.clone())
-                .with_source_origin(Url::parse("https://example.test/page")?),
+                .with_source_target(Url::parse("https://example.test/page")?),
         ),
     )?;
     assert_eq!(same_site_response.body, b"/read-same-site");
@@ -837,7 +838,7 @@ fn test_concurrent_gateway_cookie_commits_follow_response_order_and_source_visib
     let cross_site_response = pool.run_until(
         gateway.send(
             GatewayRequest::subresource(cross_site_read)
-                .with_source_origin(Url::parse("https://attacker.example/page")?),
+                .with_source_target(Url::parse("https://attacker.example/page")?),
         ),
     )?;
     assert_eq!(cross_site_response.body, b"/read-cross-site");
@@ -922,7 +923,7 @@ fn test_concurrent_gateway_cookie_commits_in_mirror_response_order() -> Result<(
         .spawn_local(async move {
             let _ = slow_result_sender.send(
                 slow_gateway
-                    .send(GatewayRequest::subresource(slow_request).with_source_origin(slow_source))
+                    .send(GatewayRequest::subresource(slow_request).with_source_target(slow_source))
                     .await,
             );
         })
@@ -936,7 +937,7 @@ fn test_concurrent_gateway_cookie_commits_in_mirror_response_order() -> Result<(
     let intermediate_response = pool.run_until(
         gateway.send(
             GatewayRequest::subresource(intermediate)
-                .with_source_origin(Url::parse(same_site_source.as_str())?),
+                .with_source_target(Url::parse(same_site_source.as_str())?),
         ),
     )?;
     assert_eq!(intermediate_response.body, b"/intermediate");

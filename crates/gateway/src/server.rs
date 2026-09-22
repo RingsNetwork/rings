@@ -17,10 +17,6 @@ pub enum GatewayEvent {
     Start,
     /// All selected capture resources are installed; packet admission may begin.
     AdmitPackets,
-    /// A recoverable dependency failure reduced service.
-    Degrade,
-    /// All dependencies recovered.
-    Recover,
     /// An unrecoverable failure requires fail-closed cleanup.
     Fail,
     /// Begin draining flows and reconciling platform resources.
@@ -36,10 +32,8 @@ pub enum GatewayState {
     Stopped,
     /// Platform state is being established; packets are not admitted.
     Starting,
-    /// The gateway admits packets and has usable exit capacity.
+    /// The gateway admits packets; exit availability independently determines health.
     Active,
-    /// The gateway remains observable but cannot currently provide full service.
-    Degraded,
     /// Flow draining and platform cleanup are in progress.
     Stopping,
     /// The gateway failed closed and requires reconciliation before restart.
@@ -52,12 +46,8 @@ impl GatewayState {
         match (self, event) {
             (Self::Stopped, GatewayEvent::Start) => Ok(Self::Starting),
             (Self::Starting, GatewayEvent::AdmitPackets) => Ok(Self::Active),
-            (Self::Active, GatewayEvent::Degrade) => Ok(Self::Degraded),
-            (Self::Degraded, GatewayEvent::Recover) => Ok(Self::Active),
-            (Self::Starting | Self::Active | Self::Degraded, GatewayEvent::Fail) => {
-                Ok(Self::Failed)
-            }
-            (Self::Starting | Self::Active | Self::Degraded | Self::Failed, GatewayEvent::Stop) => {
+            (Self::Starting | Self::Active, GatewayEvent::Fail) => Ok(Self::Failed),
+            (Self::Starting | Self::Active | Self::Failed, GatewayEvent::Stop) => {
                 Ok(Self::Stopping)
             }
             (Self::Stopping, GatewayEvent::FinishStop) => Ok(Self::Stopped),
@@ -89,7 +79,17 @@ pub struct GatewayServer {
 impl GatewayServer {
     /// Construct a stopped server from validated configuration.
     pub fn new(config: GatewayConfig) -> Result<Self, GatewayError> {
-        config.validate()?;
+        // Hold the immutable validation proof throughout component construction.
+        let validated = crate::config::ValidatedGatewayConfig::new(&config)?;
+        Self::from_validated(&validated)
+    }
+
+    /// Construct from the runtime's validation proof without repeating validation.
+    pub(crate) fn from_validated(
+        validated: &crate::config::ValidatedGatewayConfig<'_>,
+    ) -> Result<Self, GatewayError> {
+        // Server status owns its configuration after the borrowed proof is released.
+        let config = validated.get().clone();
         let flows = FlowTable::new(config.max_flows)?;
         Ok(Self {
             config,
@@ -255,7 +255,7 @@ mod tests {
             .expect("admit packets");
         assert!(matches!(
             server.capture_flow(flow()),
-            Ok(FlowState::Captured(id)) if id == flow()
+            Ok(FlowState::TargetBound(id)) if id == flow()
         ));
     }
 

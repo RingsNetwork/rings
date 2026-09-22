@@ -53,12 +53,12 @@ impl HeaderPolicy {
             value: "identity".to_string(),
         });
         if request.is_cross_origin_runtime_request() {
-            let Some(source_origin) = request.source_origin.as_ref() else {
+            let Some(source_origin) = request.source_origin() else {
                 return request;
             };
             request.headers.push(GatewayHeader {
                 name: "Origin".to_string(),
-                value: source_origin.origin().ascii_serialization(),
+                value: source_origin.ascii_serialization(),
             });
         }
         request
@@ -117,7 +117,7 @@ fn classify_response_header(
 /// locale fingerprints (`Accept-Language`, `DNT`, client hints, fetch metadata, and arbitrary
 /// page headers) never reach the exit origin. `Accept` and `Accept-Encoding` are added separately
 /// with canonical values.
-fn should_forward_request_header(name: &str) -> bool {
+pub(crate) fn should_forward_request_header(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
         "access-control-request-headers"
@@ -365,7 +365,6 @@ mod tests {
             ],
             body: Vec::new(),
             kind: GatewayRequestKind::Navigation,
-            source_origin: None,
             source_target: None,
             credentials: crate::types::GatewayCredentials::SameOrigin,
             top_level_navigation: true,
@@ -402,7 +401,7 @@ mod tests {
         let target = Url::parse("https://cdn.example.test/app.js")?;
         let policy = HeaderPolicy::new(GatewayPrefix::new("/webview/")?);
         let request = GatewayRequest::subresource(target)
-            .with_source_origin(Url::parse("https://app.example.test/page")?);
+            .with_source_target(Url::parse("https://app.example.test/page")?);
 
         let normalized = policy.normalize_request(request);
 

@@ -38,10 +38,10 @@ impl GatewayTransport for FixtureTransport {
             .cloned()
             .ok_or_else(|| WebviewError::transport("missing fixture request".to_string()))?;
         let mut headers = vec![GatewayHeader::new("content-type", "text/html")?];
-        if let Some(source) = request.source_origin {
+        if let Some(source) = request.source_origin() {
             headers.push(GatewayHeader::new(
                 "access-control-allow-origin",
-                source.origin().ascii_serialization(),
+                source.ascii_serialization(),
             )?);
         }
         GatewayResponse::new(200, headers, b"<img src=\"/asset.png\">".to_vec())
@@ -304,8 +304,11 @@ fn test_host_serves_cross_target_runtime_reads_when_upstream_allows_cors() -> We
         .cloned()
         .ok_or_else(|| WebviewError::transport("missing cross-origin request".to_string()))?;
     assert_eq!(
-        request.source_origin.as_ref().map(Url::as_str),
-        Some("https://app.example.test/")
+        request
+            .source_origin()
+            .map(|origin| origin.ascii_serialization())
+            .as_deref(),
+        Some("https://app.example.test")
     );
     Ok(())
 }

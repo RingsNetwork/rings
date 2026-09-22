@@ -171,6 +171,8 @@ impl GatewayRequestSession {
         response: GatewayResponse,
     ) -> Result<GatewayResponse> {
         let response = policy.finish_response(&self.cors_request, response)?;
+        // Rewriting expands URLs and may inject a bootstrap script. The post-send limit alone
+        // cannot bound this new body; retain a separate check before delivery to the browser.
         validate_response_body_size(&response, GatewayResponseBodyLimit::DEFAULT)?;
         Ok(response)
     }
@@ -196,7 +198,6 @@ impl GatewayResponsePolicy {
         request: GatewayRequest,
         now: i64,
     ) -> Result<GatewayRequest> {
-        let request = request.normalize_source_origin();
         if request.lacks_runtime_source_origin() {
             return Err(WebviewError::MissingRuntimeSourceOrigin);
         }

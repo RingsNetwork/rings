@@ -34,12 +34,6 @@ pub struct TcpSegment {
     pub syn: bool,
     /// Whether ACK is set.
     pub ack: bool,
-    /// Whether FIN is set.
-    pub fin: bool,
-    /// Whether RST is set.
-    pub rst: bool,
-    /// TCP payload length in bytes.
-    pub payload_len: usize,
 }
 
 impl TcpSegment {
@@ -153,9 +147,6 @@ fn classify_tcp(ipv4: &Ipv4Packet<&[u8]>) -> PacketDisposition {
         },
         syn: tcp.syn(),
         ack: tcp.ack(),
-        fin: tcp.fin(),
-        rst: tcp.rst(),
-        payload_len: tcp.payload().len(),
     })
 }
 
@@ -219,13 +210,13 @@ mod tests {
         let disposition = classify_ipv4_packet(&packet);
         assert!(matches!(
             disposition,
-            PacketDisposition::Tcp(TcpSegment {
-                ack: true,
-                fin: true,
-                payload_len: 5,
-                ..
-            })
+            PacketDisposition::Tcp(TcpSegment { ack: true, .. })
         ));
+        // Admission metadata omits these fields; the original packet still carries them.
+        let ipv4 = Ipv4Packet::new_checked(packet.as_slice()).expect("valid IPv4");
+        let tcp = TcpPacket::new_checked(ipv4.payload()).expect("valid TCP");
+        assert!(tcp.fin());
+        assert_eq!(tcp.payload(), b"hello");
     }
 
     #[test]
