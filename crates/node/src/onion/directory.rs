@@ -44,17 +44,6 @@ pub(crate) trait OnionDirectoryReader {
     fn onion_entry_guards(&self) -> &OnionEntryGuards;
 }
 
-/// Build an onion route from live directory descriptors.
-pub(crate) async fn build_onion_route(
-    reader: &impl OnionDirectoryReader,
-    service: String,
-    hop_count: usize,
-    allow_short_paths: bool,
-) -> Result<OnionRoute> {
-    let request = OnionRouteRequest::new(service, hop_count, allow_short_paths)?;
-    build_filtered_onion_route(reader, request, |_| true).await
-}
-
 /// Build an onion proxy route for a concrete target.
 pub(crate) async fn build_onion_proxy_route(
     reader: &impl OnionDirectoryReader,
@@ -72,7 +61,6 @@ pub(crate) async fn build_onion_proxy_route_with_first_hop(
 ) -> Result<OnionProxyRoute> {
     let service_name = proxy.exit_service_name().clone();
     let service = service_name.as_str().to_string();
-    let transport = proxy.exit_transport();
     let exit_target = OnionExitTarget::from_proxy_target(&target);
     let now_ms = get_epoch_ms();
     let directory_exits = OnionExitDescriptor::latest_valid_by_service_did(
@@ -90,16 +78,7 @@ pub(crate) async fn build_onion_proxy_route_with_first_hop(
             service,
         }));
     }
-    let transport_exits = service_exits
-        .into_iter()
-        .filter(|exit| exit.offers_service_transport(service_name.as_str(), transport))
-        .collect::<Vec<_>>();
-    if transport_exits.is_empty() {
-        return Err(Error::OnionRouteError(
-            OnionRouteError::NoExitWithTransport { service, transport },
-        ));
-    }
-    let protocol_exits = transport_exits
+    let protocol_exits = service_exits
         .into_iter()
         .filter(|exit| proxy.accepts_exit_descriptor(exit))
         .collect::<Vec<_>>();
@@ -136,20 +115,6 @@ pub(crate) async fn build_onion_proxy_route_with_first_hop(
         target,
         route,
     })
-}
-
-async fn build_filtered_onion_route(
-    reader: &impl OnionDirectoryReader,
-    request: OnionRouteRequest,
-    exit_filter: impl Fn(&OnionExitDescriptor) -> bool,
-) -> Result<OnionRoute> {
-    let exits = reader
-        .live_onion_exits(request.service())
-        .await?
-        .into_iter()
-        .filter(exit_filter)
-        .collect::<Vec<_>>();
-    build_onion_route_from_exits(reader, request, exits, |_| true).await
 }
 
 async fn build_onion_route_from_exits(

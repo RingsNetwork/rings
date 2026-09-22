@@ -68,10 +68,32 @@ fn open(session: u64, service: &str) -> Frame {
     }
 }
 
-fn web_relay() -> Relay<SocketAddr> {
-    let mut config = HashMap::new();
-    config.insert("web".to_string(), web_addr());
-    Relay::tcp(config)
+/// Test relay whose initial state is populated through the runtime command path.
+struct WebRelay(Relay<SocketAddr>);
+
+impl std::ops::Deref for WebRelay {
+    type Target = Relay<SocketAddr>;
+
+    /// Borrow the protocol used by the transition helpers.
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl WebRelay {
+    /// Build state by replaying the same registration command used in production.
+    fn init(&self) -> RelayState<SocketAddr> {
+        step_command(&self.0, &self.0.init(), &RelayCommand::RegisterService {
+            name: "web".to_string(),
+            target: web_addr(),
+        })
+        .state
+    }
+}
+
+/// Return an unconfigured protocol paired with command-initialized test state.
+fn web_relay() -> WebRelay {
+    WebRelay(Relay::tcp())
 }
 
 /// Decode a peer frame then step.
@@ -269,7 +291,7 @@ fn test_close_removes_the_session_and_emits_close() {
 
 #[test]
 fn test_register_service_via_self_command_then_open_connects() {
-    let relay = Relay::tcp(HashMap::new());
+    let relay = Relay::tcp();
     let registered = step_command(&relay, &relay.init(), &RelayCommand::RegisterService {
         name: "web".to_string(),
         target: web_addr(),
@@ -435,10 +457,12 @@ fn test_tcp_shutdown_is_affine_and_blocks_late_peer_data_without_closing_reverse
 
 #[test]
 fn test_udp_ignores_stream_shutdown_and_keeps_accepting_datagrams() {
-    let mut config = HashMap::new();
-    config.insert("dns".to_string(), web_addr());
-    let relay = Relay::udp(config);
-    let opened = step_frame(&relay, &relay.init(), peer_a(), &open(4, "dns"));
+    let relay = Relay::udp();
+    let registered = step_command(&relay, &relay.init(), &RelayCommand::RegisterService {
+        name: "dns".to_string(),
+        target: web_addr(),
+    });
+    let opened = step_frame(&relay, &registered.state, peer_a(), &open(4, "dns"));
 
     let shutdown = step_frame(&relay, &opened.state, peer_a(), &shutdown(4));
     assert!(shutdown.effects.is_empty());

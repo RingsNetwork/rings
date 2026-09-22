@@ -29,35 +29,6 @@ pub(super) struct SwarmCallbackInstance {
     connected_notify: Notify,
 }
 
-pub(super) struct StaticRegistration {
-    publisher: crate::registration::DhtRegistrationPublisher,
-    value: Encoded,
-}
-
-impl StaticRegistration {
-    pub(super) fn new(topic: &str, value: Encoded) -> Self {
-        Self {
-            publisher: crate::registration::DhtRegistrationPublisher::new(topic),
-            value,
-        }
-    }
-}
-
-#[async_trait]
-impl RegistrationTask for StaticRegistration {
-    fn name(&self) -> &'static str {
-        "static-test"
-    }
-
-    fn interval(&self) -> Duration {
-        Duration::from_secs(60)
-    }
-
-    async fn register_once(&self, context: &RegistrationContext<'_>) -> Result<()> {
-        self.publisher.publish(context, self.value.clone()).await
-    }
-}
-
 #[async_trait]
 impl SwarmCallback for SwarmCallbackInstance {
     async fn on_inbound(
@@ -196,14 +167,13 @@ pub(super) async fn prepare_processor_with_network_and_virtual_nodes(
 ) -> Processor {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key).unwrap();
-    let serialized = ProcessorConfigSerialized::new(
+    let config = ProcessorConfig::new(
         network_id,
         "stun://stun.l.google.com:19302".to_string(),
-        session_sk.dump().unwrap(),
+        session_sk,
         3,
     )
     .dht_virtual_nodes(dht_virtual_nodes);
-    let config = ProcessorConfig::try_from(serialized).unwrap();
     let storage = Box::new(MemStorage::new());
 
     ProcessorBuilder::from_config(&config)
@@ -268,10 +238,7 @@ pub(super) fn onion_exit_descriptor_for_processor_with_policy(
 ) -> Result<OnionExitDescriptor> {
     onion_exit_descriptor_for_processor_with_service(
         processor,
-        OnionExitService::new(
-            service,
-            OnionExitService::reserved_transport(service).unwrap_or(OnionExitTransport::Tcp),
-        )?,
+        OnionServiceName::parse(service)?,
         now_ms,
         policy,
     )
@@ -279,7 +246,7 @@ pub(super) fn onion_exit_descriptor_for_processor_with_policy(
 
 pub(super) fn onion_exit_descriptor_for_processor_with_service(
     processor: &Processor,
-    service: OnionExitService,
+    service: OnionServiceName,
     now_ms: u128,
     policy: OnionExitPolicy,
 ) -> Result<OnionExitDescriptor> {
@@ -295,7 +262,7 @@ pub(super) fn onion_exit_descriptor_for_processor_with_service(
 pub(super) fn onion_exit_descriptor_for_processor_with_node_type_service(
     processor: &Processor,
     node_type: OnlineNodeType,
-    service: OnionExitService,
+    service: OnionServiceName,
     now_ms: u128,
     policy: OnionExitPolicy,
 ) -> Result<OnionExitDescriptor> {
@@ -326,8 +293,7 @@ pub(super) fn online_relay_descriptor_for_processor(
     processor: &Processor,
     now_ms: u128,
 ) -> Result<OnlineNodeDescriptor> {
-    let mut capabilities = OnlineNodeRegistration::default_capabilities();
-    capabilities.push(ONION_RELAY_CAPABILITY.to_string());
+    let capabilities = vec![ONION_RELAY_CAPABILITY.to_string()];
     OnlineNodeDescriptor::new_signed(
         OnlineNodeDescriptorBody {
             did: processor.did(),

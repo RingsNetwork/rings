@@ -84,11 +84,6 @@ impl NativeGatewayRunner {
         self.runtime.status_handle()
     }
 
-    /// Establish the packet interface and explicit routes, run, then reconcile the lease.
-    pub async fn run(self, stop: StopToken) -> anyhow::Result<()> {
-        self.run_inner(stop, None).await
-    }
-
     /// Run the gateway and publish when its explicitly selected packet ingress is active.
     pub async fn run_with_startup_barrier(
         self,

@@ -22,10 +22,8 @@ advertise_onion_exit: false
 onion_exit_heartbeat_interval_secs: 30
 onion_exit_ttl_secs: 90
 onion_exit_services:
-- name: tcp
-  transport: Tcp
-- name: https
-  transport: Tcp
+- tcp
+- https
 onion_exit_policy:
   allowed_targets: []
   denied_targets: []
@@ -100,7 +98,8 @@ where noted.
   different overlays do not verify each other's messages.
 * `session_sk`: path of the session secret key file that `rings init` writes next to the config.
   The session key is derived from your ECDSA key and signs every message on your behalf; keep the
-  file private. Passing a raw key string here instead of a path is deprecated.
+  file private. This field is path-only: a raw session dump and the removed `ecdsa_key` and
+  `session_manager` fields are rejected rather than interpreted as compatibility fallbacks.
 * `ice_servers`: STUN or TURN servers used to establish WebRTC connections, separated by `;`.
   STUN is ordinary discovery; TURN is optional and never a gateway prerequisite.
 

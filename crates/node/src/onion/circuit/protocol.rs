@@ -26,21 +26,6 @@ impl OnionCircuitCapabilities {
         Self { relay, exit_epoch }
     }
 
-    /// Build capabilities for a client-only node.
-    pub const fn client() -> Self {
-        Self::from_registration(false, None)
-    }
-
-    /// Build capabilities for a relay-only node.
-    pub const fn relay() -> Self {
-        Self::from_registration(true, None)
-    }
-
-    /// Build capabilities for an exit-only node in `process_epoch`.
-    pub const fn exit(process_epoch: crate::onion::OnionExitEpoch) -> Self {
-        Self::from_registration(false, Some(process_epoch))
-    }
-
     pub(super) const fn accepts_forward_layers(self) -> bool {
         self.relay || self.exit_epoch.is_some()
     }

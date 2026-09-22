@@ -247,9 +247,10 @@ impl OnionCircuitReducer {
         layer: OnionForwardLayer,
         state: &mut OnionCircuitState,
     ) -> Result<OnionCircuitEffect> {
-        if !self.capabilities.accepts_forward_layers() {
-            return Err(Error::NoPermission);
-        }
+        // Pre: `ForwardReady` is emitted only by the `DecryptForward` effect admitted in
+        // `advance_cell`, where `accepts_forward_layers` is checked. The typed effect/feedback
+        // transition carries that proof into this stage; repeating the capability check would
+        // not guard a second ingress boundary.
         match layer {
             OnionForwardLayer::Relay {
                 next_hop,

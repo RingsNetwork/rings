@@ -13,11 +13,8 @@ use rings_core::measure::PeerMeasurement;
 use rings_core::measure::PeerQualityEvidence;
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 use rings_core::message::MessageVerification;
-use rings_rpc::protos::rings_node::BuildOnionRouteResponse;
 use rings_rpc::protos::rings_node::OnionExitDescriptorInfo;
 use rings_rpc::protos::rings_node::OnionExitPolicyInfo;
-use rings_rpc::protos::rings_node::OnionExitServiceInfo;
-use rings_rpc::protos::rings_node::OnionExitTransportInfo;
 use rings_rpc::protos::rings_node::OnlineNodeDescriptorInfo;
 use rings_rpc::protos::rings_node::OnlineNodeTypeInfo;
 use rings_rpc::protos::rings_node::PeerCreditInfo;
@@ -33,11 +30,10 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitPolicy;
-use crate::onion::OnionExitService;
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 use crate::onion::OnionExitTarget;
-use crate::onion::OnionExitTransport;
-use crate::onion::OnionRoute;
+#[cfg(all(feature = "browser", target_family = "wasm"))]
+use crate::onion::OnionServiceName;
 use crate::online::OnlineNodeDescriptor;
 use crate::online::OnlineNodeType;
 
@@ -106,42 +102,6 @@ pub(crate) fn online_node_descriptor_infos(
         .collect()
 }
 
-fn onion_exit_transport_info(transport: OnionExitTransport) -> OnionExitTransportInfo {
-    match transport {
-        OnionExitTransport::Tcp => OnionExitTransportInfo::Tcp,
-        OnionExitTransport::Udp => OnionExitTransportInfo::Udp,
-        OnionExitTransport::WebTransport => OnionExitTransportInfo::WebTransport,
-        OnionExitTransport::RequestResponse => OnionExitTransportInfo::RequestResponse,
-        OnionExitTransport::Https => OnionExitTransportInfo::Https,
-    }
-}
-
-#[cfg(all(feature = "browser", target_family = "wasm"))]
-fn onion_exit_transport_from_info(transport: OnionExitTransportInfo) -> OnionExitTransport {
-    match transport {
-        OnionExitTransportInfo::Tcp => OnionExitTransport::Tcp,
-        OnionExitTransportInfo::Udp => OnionExitTransport::Udp,
-        OnionExitTransportInfo::WebTransport => OnionExitTransport::WebTransport,
-        OnionExitTransportInfo::RequestResponse => OnionExitTransport::RequestResponse,
-        OnionExitTransportInfo::Https => OnionExitTransport::Https,
-    }
-}
-
-fn onion_exit_service_info(service: OnionExitService) -> OnionExitServiceInfo {
-    OnionExitServiceInfo {
-        name: service.name.into(),
-        transport: onion_exit_transport_info(service.transport),
-    }
-}
-
-#[cfg(all(feature = "browser", target_family = "wasm"))]
-fn onion_exit_service_from_info(service: OnionExitServiceInfo) -> Result<OnionExitService> {
-    OnionExitService::new(
-        service.name.as_str(),
-        onion_exit_transport_from_info(service.transport),
-    )
-}
-
 fn onion_exit_policy_info(policy: OnionExitPolicy) -> OnionExitPolicyInfo {
     OnionExitPolicyInfo {
         allowed_targets: policy
@@ -189,7 +149,7 @@ pub(crate) fn onion_exit_descriptor_info(
         process_epoch: json_value(descriptor.process_epoch)?,
         node_type: online_node_type_info(descriptor.node_type),
         network_id: descriptor.network_id,
-        services: vec![onion_exit_service_info(descriptor.service)],
+        service: descriptor.service.into(),
         policy: onion_exit_policy_info(descriptor.policy),
         started_at_ms: descriptor_timestamp_ms(descriptor.started_at_ms)?,
         heartbeat_at_ms: descriptor_timestamp_ms(descriptor.heartbeat_at_ms)?,
@@ -243,9 +203,10 @@ pub(crate) fn online_node_descriptors_from_infos(
 }
 
 #[cfg(all(feature = "browser", target_family = "wasm"))]
-pub(crate) fn onion_exit_descriptors_from_info(
+/// Decode the singular service descriptor returned by a remote directory RPC.
+pub(crate) fn onion_exit_descriptor_from_info(
     descriptor: OnionExitDescriptorInfo,
-) -> Result<Vec<OnionExitDescriptor>> {
+) -> Result<OnionExitDescriptor> {
     let did = did_from_string(descriptor.did.as_str())?;
     let public_key = from_json_value::<VerificationPublicKey>(descriptor.public_key)?;
     let session_public_key = from_json_value::<PublicKey<33>>(descriptor.session_public_key)?;
@@ -253,34 +214,23 @@ pub(crate) fn onion_exit_descriptors_from_info(
     let node_type = online_node_type_from_info(descriptor.node_type);
     let policy = onion_exit_policy_from_info(descriptor.policy)?;
     let signature = from_json_value::<MessageVerification>(descriptor.signature)?;
-    let services = descriptor
-        .services
-        .into_iter()
-        .map(onion_exit_service_from_info)
-        .collect::<Result<Vec<_>>>()?;
-    if services.is_empty() {
-        return Err(Error::InvalidData);
-    }
+    let service = OnionServiceName::parse(descriptor.service)?;
 
-    Ok(services
-        .into_iter()
-        .map(|service| OnionExitDescriptor {
-            schema_version: crate::onion::ONION_EXIT_DESCRIPTOR_SCHEMA_VERSION,
-            did,
-            public_key: public_key.clone(),
-            session_public_key,
-            process_epoch,
-            node_type: node_type.clone(),
-            network_id: descriptor.network_id,
-            service,
-            policy: policy.clone(),
-            started_at_ms: u128::from(descriptor.started_at_ms),
-            heartbeat_at_ms: u128::from(descriptor.heartbeat_at_ms),
-            expires_at_ms: u128::from(descriptor.expires_at_ms),
-            version: descriptor.version.clone(),
-            signature: signature.clone(),
-        })
-        .collect())
+    Ok(OnionExitDescriptor {
+        did,
+        public_key,
+        session_public_key,
+        process_epoch,
+        node_type,
+        network_id: descriptor.network_id,
+        service,
+        policy,
+        started_at_ms: u128::from(descriptor.started_at_ms),
+        heartbeat_at_ms: u128::from(descriptor.heartbeat_at_ms),
+        expires_at_ms: u128::from(descriptor.expires_at_ms),
+        version: descriptor.version,
+        signature,
+    })
 }
 
 #[cfg(all(feature = "browser", target_family = "wasm"))]
@@ -290,18 +240,9 @@ pub(crate) fn onion_exit_descriptors_from_infos(
 ) -> Vec<OnionExitDescriptor> {
     descriptors
         .into_iter()
-        .filter_map(|descriptor| onion_exit_descriptors_from_info(descriptor).ok())
-        .flatten()
+        .filter_map(|descriptor| onion_exit_descriptor_from_info(descriptor).ok())
         .filter(|descriptor| descriptor.verify_signature(network_id))
         .collect()
-}
-
-pub(crate) fn onion_route_response(route: OnionRoute) -> Result<BuildOnionRouteResponse> {
-    Ok(BuildOnionRouteResponse {
-        hops: route.hops().iter().map(|did| did.to_string()).collect(),
-        service: route.service().to_string(),
-        exit: onion_exit_descriptor_info(route.exit().clone())?,
-    })
 }
 
 fn peer_measurement_counters_info(evidence: PeerQualityEvidence) -> PeerMeasurementCountersInfo {

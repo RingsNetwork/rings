@@ -44,8 +44,6 @@ pub enum Method {
     LookupOnlineNodes,
     /// Lookup application-layer onion exit descriptors
     LookupOnionExits,
-    /// Build an onion route from live presence and exit descriptors
-    BuildOnionRoute,
     /// Retrieve Node info
     NodeInfo,
     /// Retrieve local measurement counters for a peer
@@ -77,7 +75,6 @@ impl Method {
             Method::LookupService => "lookupService",
             Method::LookupOnlineNodes => "lookupOnlineNodes",
             Method::LookupOnionExits => "lookupOnionExits",
-            Method::BuildOnionRoute => "buildOnionRoute",
             Method::NodeInfo => "nodeInfo",
             Method::PeerMeasurement => "peerMeasurement",
             Method::ListPeerMeasurements => "listPeerMeasurements",
@@ -110,7 +107,6 @@ impl Method {
             | Method::LookupService
             | Method::LookupOnlineNodes
             | Method::LookupOnionExits
-            | Method::BuildOnionRoute
             | Method::NodeInfo
             | Method::PeerMeasurement
             | Method::ListPeerMeasurements => AuthorizationClass::Gated,
@@ -206,7 +202,6 @@ impl TryFrom<&str> for Method {
             "lookupService" => Method::LookupService,
             "lookupOnlineNodes" => Method::LookupOnlineNodes,
             "lookupOnionExits" => Method::LookupOnionExits,
-            "buildOnionRoute" => Method::BuildOnionRoute,
             "nodeInfo" => Method::NodeInfo,
             "peerMeasurement" => Method::PeerMeasurement,
             "listPeerMeasurements" => Method::ListPeerMeasurements,
@@ -249,14 +244,13 @@ mod tests {
             | Method::LookupService
             | Method::LookupOnlineNodes
             | Method::LookupOnionExits
-            | Method::BuildOnionRoute
             | Method::NodeInfo
             | Method::PeerMeasurement
             | Method::ListPeerMeasurements => AuthorizationClass::Gated,
         }
     }
 
-    const EVERY_METHOD: [Method; 22] = [
+    const EVERY_METHOD: [Method; 21] = [
         Method::ConnectPeerViaHttp,
         Method::ConnectWithDid,
         Method::ConnectWithSeed,
@@ -274,7 +268,6 @@ mod tests {
         Method::LookupService,
         Method::LookupOnlineNodes,
         Method::LookupOnionExits,
-        Method::BuildOnionRoute,
         Method::NodeInfo,
         Method::PeerMeasurement,
         Method::ListPeerMeasurements,

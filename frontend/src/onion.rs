@@ -142,7 +142,6 @@ impl From<NodeError> for OnionProxyError {
             NodeError::OnionRouteError(
                 OnionRouteError::NotEnoughRelays { .. }
                 | OnionRouteError::NoPermittedFirstHop
-                | OnionRouteError::NoExitWithTransport { .. }
                 | OnionRouteError::NoExitForProxyProtocol { .. }
                 | OnionRouteError::NoExitAllowsTarget { .. },
             ) => OnionProxyFailureKind::RouteUnavailable,

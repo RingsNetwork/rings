@@ -295,25 +295,27 @@ impl<T> RelayState<T> {
 pub struct Relay<T> {
     namespace: String,
     kind: TransportKind,
-    config: HashMap<String, T>,
+    /// Target type carried by the protocol algebra. Runtime registration is the sole source of
+    /// service mappings, so construction owns no second map.
+    marker: std::marker::PhantomData<fn() -> T>,
 }
 
 impl<T> Relay<T> {
-    /// A TCP relay with a fixed service configuration.
-    pub fn tcp(config: HashMap<String, T>) -> Self {
+    /// Build a TCP relay with an initially empty runtime service registry.
+    pub fn tcp() -> Self {
         Self {
             namespace: TCP.to_string(),
             kind: TransportKind::Tcp,
-            config,
+            marker: std::marker::PhantomData,
         }
     }
 
-    /// A UDP relay with a fixed service configuration.
-    pub fn udp(config: HashMap<String, T>) -> Self {
+    /// Build a UDP relay with an initially empty runtime service registry.
+    pub fn udp() -> Self {
         Self {
             namespace: UDP.to_string(),
             kind: TransportKind::Udp,
-            config,
+            marker: std::marker::PhantomData,
         }
     }
 }
@@ -331,7 +333,7 @@ where T: Clone + DeserializeOwned + Serialize + MaybeSend + 'static
 
     fn init(&self) -> RelayState<T> {
         RelayState {
-            services: Arc::new(self.config.clone()),
+            services: Arc::new(HashMap::new()),
             sessions: Arc::new(HashSet::new()),
             session_quota: Arc::new(PeerQuota::new(
                 MAX_RELAY_SESSIONS,
@@ -783,8 +785,8 @@ impl RelayHandle {
         let engine = Arc::new(crate::extension::transport::engine::TransportSessions::new());
         // Atomic: both namespaces register together, or neither (no half-installed relay).
         extensions.register_many(vec![
-            (Relay::tcp(HashMap::new()), NativeRelay::new(engine.clone())),
-            (Relay::udp(HashMap::new()), NativeRelay::new(engine.clone())),
+            (Relay::tcp(), NativeRelay::new(engine.clone())),
+            (Relay::udp(), NativeRelay::new(engine.clone())),
         ])?;
         let core = extensions.core();
         Ok(Self {
@@ -905,8 +907,8 @@ impl RelayHandle {
         let engine = Arc::new(crate::extension::transport::wt::WtSessions::new());
         // Atomic: both namespaces register together, or neither (no half-installed relay).
         extensions.register_many(vec![
-            (Relay::tcp(HashMap::new()), WtRelay::new(engine.clone())),
-            (Relay::udp(HashMap::new()), WtRelay::new(engine)),
+            (Relay::tcp(), WtRelay::new(engine.clone())),
+            (Relay::udp(), WtRelay::new(engine)),
         ])?;
         let core = extensions.core();
         Ok(Self {

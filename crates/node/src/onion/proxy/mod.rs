@@ -10,8 +10,6 @@ use rings_core::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
 use crate::onion::OnionExitDescriptor;
-use crate::onion::OnionExitService;
-use crate::onion::OnionExitTransport;
 pub use crate::onion::OnionProxyTarget;
 use crate::onion::OnionRoute;
 use crate::onion::OnionServiceName;
@@ -41,14 +39,6 @@ impl OnionProxyProtocol {
         match self {
             Self::TcpConnect => ONION_PROXY_TCP_SERVICE,
             Self::HttpsProxy => ONION_PROXY_HTTPS_SERVICE,
-        }
-    }
-
-    /// Return the onion-exit transport required by this proxy protocol.
-    pub const fn exit_transport(self) -> OnionExitTransport {
-        match self {
-            Self::TcpConnect => OnionExitTransport::Tcp,
-            Self::HttpsProxy => OnionExitTransport::Tcp,
         }
     }
 
@@ -144,25 +134,17 @@ impl OnionProxyConfig {
         &self.service
     }
 
-    /// Return the onion-exit transport required by this proxy.
-    pub fn exit_transport(&self) -> OnionExitTransport {
-        self.protocol.exit_transport()
-    }
-
     pub(crate) fn accepts_exit_descriptor(&self, descriptor: &OnionExitDescriptor) -> bool {
         match self.protocol {
             OnionProxyProtocol::TcpConnect => {
                 matches!(
                     descriptor.node_type,
                     OnlineNodeType::Native | OnlineNodeType::Ffi
-                ) && descriptor
-                    .service
-                    .matches(self.service.as_str(), OnionExitTransport::Tcp)
+                ) && descriptor.service.matches(self.service.as_str())
             }
             OnionProxyProtocol::HttpsProxy => {
                 self.service == OnionServiceName::https()
-                    && descriptor
-                        .offers_service_transport(self.service.as_str(), OnionExitTransport::Tcp)
+                    && descriptor.offers_service(self.service.as_str())
             }
         }
     }
@@ -174,16 +156,6 @@ fn validate_proxy_service(protocol: OnionProxyProtocol, service: &OnionServiceNa
             "onion HTTPS proxy requires service {:?}",
             OnionServiceName::https().as_str()
         )));
-    }
-    if let Some(expected) = OnionExitService::reserved_transport(service.as_str()) {
-        if expected != protocol.exit_transport() {
-            return Err(Error::InvalidConfig(format!(
-                "onion proxy service {:?} requires {:?} transport, got {:?}",
-                service.as_str(),
-                expected,
-                protocol.exit_transport()
-            )));
-        }
     }
     Ok(())
 }
@@ -209,11 +181,6 @@ impl OnionProxyRoute {
     pub fn exit_service(&self) -> &str {
         self.route.service()
     }
-
-    /// Return the exit transport used for route selection.
-    pub const fn exit_transport(&self) -> OnionExitTransport {
-        self.protocol.exit_transport()
-    }
 }
 
 #[cfg(test)]
@@ -226,14 +193,6 @@ mod tests {
     fn test_proxy_protocol_maps_to_exit_service() {
         assert_eq!(OnionProxyProtocol::TcpConnect.exit_service(), "tcp");
         assert_eq!(OnionProxyProtocol::HttpsProxy.exit_service(), "https");
-        assert_eq!(
-            OnionProxyProtocol::TcpConnect.exit_transport(),
-            OnionExitTransport::Tcp
-        );
-        assert_eq!(
-            OnionProxyProtocol::HttpsProxy.exit_transport(),
-            OnionExitTransport::Tcp
-        );
     }
 
     #[test]
@@ -241,7 +200,6 @@ mod tests {
         let proxy = OnionProxyConfig::https_proxy(3, false);
 
         assert_eq!(proxy.exit_service(), "https");
-        assert_eq!(proxy.exit_transport(), OnionExitTransport::Tcp);
         assert_eq!(proxy.hop_count, 3);
         assert!(!proxy.allow_short_paths);
     }
@@ -252,7 +210,6 @@ mod tests {
         let proxy = OnionProxyConfig::tcp_connect_service(service, 2, true)?;
 
         assert_eq!(proxy.exit_service(), "web");
-        assert_eq!(proxy.exit_transport(), OnionExitTransport::Tcp);
         assert_eq!(proxy.hop_count, 2);
         assert!(proxy.allow_short_paths);
         Ok(())
@@ -263,7 +220,6 @@ mod tests {
         let proxy = OnionProxyConfig::tcp_connect_service(OnionServiceName::https(), 1, false)?;
 
         assert_eq!(proxy.exit_service(), "https");
-        assert_eq!(proxy.exit_transport(), OnionExitTransport::Tcp);
         Ok(())
     }
 

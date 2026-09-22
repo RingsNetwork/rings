@@ -4,8 +4,8 @@
 //! remains the storage and discovery substrate, while exit policy is an
 //! application protocol decision.
 //!
-//! The current data plane selects route-aware circuits and exit policies, with layered
-//! ElGamal-AEAD frames described by [`circuit::ONION_CIRCUIT_SECURITY`].
+//! The current data plane selects route-aware circuits and exit policies over layered
+//! ElGamal-AEAD frames.
 
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
@@ -64,7 +64,6 @@ pub use failure::OnionExitFailure;
 pub use failure::OnionRouteError;
 #[cfg(rings_native)]
 pub use gateway::NativeOnionGatewayConnector;
-pub use route::select_onion_route;
 pub(crate) use route::select_onion_route_from_candidates_with_first_hop_policy;
 pub use route::OnionRoute;
 pub(crate) use route::OnionRouteCandidates;
@@ -77,8 +76,6 @@ pub use target::OnionProxyTargetError;
 
 /// DHT topic used for application-layer onion exit descriptors.
 pub const ONION_EXITS_TOPIC: &str = "onion_exits";
-
-pub(crate) const ONION_EXIT_DESCRIPTOR_SCHEMA_VERSION: u16 = 3;
 
 /// Capability label for nodes willing to relay onion cells.
 pub const ONION_RELAY_CAPABILITY: &str = "onion-relay";
@@ -126,13 +123,13 @@ pub(crate) const fn default_advertise_onion_exit() -> bool {
 
 /// Default native exit services. It is only published when onion-exit advertisement is enabled.
 /// HTTPS is advertised as a TCP-backed service because HTTPS proxying ultimately tunnels TLS bytes.
-pub fn default_onion_exit_services() -> Vec<OnionExitService> {
-    vec![OnionExitService::tcp(), OnionExitService::https()]
+pub fn default_onion_exit_services() -> Vec<OnionServiceName> {
+    vec![OnionServiceName::tcp(), OnionServiceName::https()]
 }
 
 /// Standard HTTPS-over-TCP onion-exit service set.
-pub fn https_onion_exit_services() -> Vec<OnionExitService> {
-    vec![OnionExitService::https()]
+pub fn https_onion_exit_services() -> Vec<OnionServiceName> {
+    vec![OnionServiceName::https()]
 }
 
 /// Default exit policy. It is intentionally closed until the operator configures targets.
@@ -152,33 +149,6 @@ pub(crate) fn validate_onion_exit_registration_timing(
         )));
     }
     Ok(())
-}
-
-/// Application transport exposed by an onion exit service.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum OnionExitTransport {
-    /// Native TCP service.
-    Tcp,
-    /// Native UDP service.
-    Udp,
-    /// Browser/WebTransport-backed service.
-    WebTransport,
-    /// Protocol-specific request/response service.
-    RequestResponse,
-    /// Legacy browser/application-layer HTTPS proxy marker.
-    ///
-    /// The reserved `https` service is TCP-backed; this variant remains for compatibility with
-    /// older serialized descriptors and explicit custom transports.
-    Https,
-}
-
-/// One named service offered by an onion exit.
-#[derive(Clone, Debug, Deserialize, Serialize, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct OnionExitService {
-    /// Service name advertised to route builders.
-    pub name: OnionServiceName,
-    /// Transport used by this service.
-    pub transport: OnionExitTransport,
 }
 
 /// Canonical onion-exit service name.
@@ -241,70 +211,6 @@ impl TryFrom<String> for OnionServiceName {
 impl From<OnionServiceName> for String {
     fn from(name: OnionServiceName) -> Self {
         name.0
-    }
-}
-
-impl OnionExitService {
-    /// Return a named exit service with an explicit transport.
-    pub fn new(name: impl AsRef<str>, transport: OnionExitTransport) -> Result<Self> {
-        Ok(Self::from_name(OnionServiceName::parse(name)?, transport))
-    }
-
-    /// Return a named exit service from an already validated name.
-    pub fn from_name(name: OnionServiceName, transport: OnionExitTransport) -> Self {
-        Self { name, transport }
-    }
-
-    /// Return the standard HTTPS-over-TCP exit service.
-    pub fn https() -> Self {
-        Self::from_name(OnionServiceName::https(), OnionExitTransport::Tcp)
-    }
-
-    /// Return the standard native TCP exit service.
-    pub fn tcp() -> Self {
-        Self::from_name(OnionServiceName::tcp(), OnionExitTransport::Tcp)
-    }
-
-    /// Return whether this service has the requested name.
-    pub fn has_name(&self, service: &str) -> bool {
-        self.name.matches(service)
-    }
-
-    /// Return whether this service has the requested name and transport.
-    pub fn matches(&self, service: &str, transport: OnionExitTransport) -> bool {
-        self.has_name(service) && self.transport == transport
-    }
-
-    /// Return whether this service satisfies a route request for `service`.
-    ///
-    /// Built-in service names reserve their transport class. Custom service names remain
-    /// application-defined and match by name. HTTPS is a reserved TCP-backed service, while the
-    /// legacy `https`/`Https` pair remains readable for older descriptors.
-    pub fn matches_route_service(&self, service: &str) -> bool {
-        match Self::reserved_transport(service) {
-            Some(transport) => {
-                self.matches(service, transport) || self.matches_legacy_reserved_transport(service)
-            }
-            None => self.has_name(service),
-        }
-    }
-
-    fn matches_legacy_reserved_transport(&self, service: &str) -> bool {
-        OnionServiceName::parse(service).is_ok_and(|name| {
-            name == OnionServiceName::https()
-                && self.name == name
-                && self.transport == OnionExitTransport::Https
-        })
-    }
-
-    /// Return the reserved transport for a built-in service name.
-    pub fn reserved_transport(service: &str) -> Option<OnionExitTransport> {
-        let service = OnionServiceName::parse(service).ok()?;
-        match service.as_str() {
-            "tcp" => Some(OnionExitTransport::Tcp),
-            "https" => Some(OnionExitTransport::Tcp),
-            _ => None,
-        }
     }
 }
 
@@ -456,7 +362,7 @@ pub struct OnionExitDescriptorBody {
     /// Network identifier.
     pub network_id: u32,
     /// Service this descriptor is willing to expose.
-    pub service: OnionExitService,
+    pub service: OnionServiceName,
     /// Signed exit policy.
     pub policy: OnionExitPolicy,
     /// Process start timestamp in milliseconds since Unix epoch.
@@ -472,7 +378,6 @@ pub struct OnionExitDescriptorBody {
 impl OnionExitDescriptorBody {
     fn body_ref(&self) -> OnionExitDescriptorBodyRef<'_> {
         OnionExitDescriptorBodyRef {
-            schema_version: ONION_EXIT_DESCRIPTOR_SCHEMA_VERSION,
             did: self.did,
             public_key: &self.public_key,
             session_public_key: &self.session_public_key,
@@ -516,7 +421,6 @@ impl SignedDescriptorBody for OnionExitDescriptorBody {
 
     fn into_signed_descriptor(self, signature: MessageVerification) -> Self::Descriptor {
         OnionExitDescriptor {
-            schema_version: ONION_EXIT_DESCRIPTOR_SCHEMA_VERSION,
             did: self.did,
             public_key: self.public_key,
             session_public_key: self.session_public_key,
@@ -536,14 +440,13 @@ impl SignedDescriptorBody for OnionExitDescriptorBody {
 
 #[derive(Serialize)]
 struct OnionExitDescriptorBodyRef<'a> {
-    schema_version: u16,
     did: Did,
     public_key: &'a VerificationPublicKey,
     session_public_key: &'a PublicKey<33>,
     process_epoch: OnionExitEpoch,
     node_type: &'a OnlineNodeType,
     network_id: u32,
-    service: &'a OnionExitService,
+    service: &'a OnionServiceName,
     policy: &'a OnionExitPolicy,
     started_at_ms: u128,
     heartbeat_at_ms: u128,
@@ -560,8 +463,6 @@ impl OnionExitDescriptorBodyRef<'_> {
 /// Signed descriptor published by onion exits.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct OnionExitDescriptor {
-    /// Onion-exit descriptor wire schema version covered by the descriptor signature.
-    pub schema_version: u16,
     /// DID of the exit node/account.
     pub did: Did,
     /// Account public key corresponding to `did`.
@@ -575,7 +476,7 @@ pub struct OnionExitDescriptor {
     /// Network identifier.
     pub network_id: u32,
     /// Service this descriptor is willing to expose.
-    pub service: OnionExitService,
+    pub service: OnionServiceName,
     /// Signed exit policy.
     pub policy: OnionExitPolicy,
     /// Process start timestamp in milliseconds since Unix epoch.
@@ -605,7 +506,6 @@ impl OnionExitDescriptor {
 
     fn body_ref(&self) -> OnionExitDescriptorBodyRef<'_> {
         let Self {
-            schema_version,
             did,
             public_key,
             session_public_key,
@@ -622,7 +522,6 @@ impl OnionExitDescriptor {
         } = self;
 
         OnionExitDescriptorBodyRef {
-            schema_version: *schema_version,
             did: *did,
             public_key,
             session_public_key,
@@ -642,31 +541,19 @@ impl OnionExitDescriptor {
         self.body_ref().signing_data()
     }
 
-    /// Return whether this descriptor uses the local registry wire schema.
-    pub const fn has_supported_schema(&self) -> bool {
-        self.schema_version == ONION_EXIT_DESCRIPTOR_SCHEMA_VERSION
-    }
-
     /// Return whether this descriptor advertises the requested service name.
     pub fn advertises_service_name(&self, service: &str) -> bool {
-        self.service.has_name(service)
+        self.service.matches(service)
     }
 
     /// Return whether this descriptor offers `service`.
     pub fn offers_service(&self, service: &str) -> bool {
-        self.service.matches_route_service(service)
-    }
-
-    /// Return whether this descriptor offers `service` over `transport`.
-    pub fn offers_service_transport(&self, service: &str, transport: OnionExitTransport) -> bool {
-        self.service.matches(service, transport)
-            || (transport == OnionExitTransport::Tcp
-                && self.service.matches_legacy_reserved_transport(service))
+        self.service.matches(service)
     }
 
     /// Verify the descriptor signature and DID/public-key binding.
     pub fn verify_signature(&self, network_id: u32) -> bool {
-        self.has_supported_schema() && self.descriptor_verify_signature(network_id)
+        self.descriptor_verify_signature(network_id)
     }
 
     /// Returns whether this descriptor is expired at `now_ms`.
@@ -682,15 +569,14 @@ impl OnionExitDescriptor {
     /// Select the newest valid onion-exit descriptor per `(DID, service)`.
     ///
     /// Invariant: an exit may publish independent TCP and HTTPS registrations under the same DID.
-    /// Preservation: heartbeat ordering is compared only inside each `(DID, service name,
-    /// transport)` key.
+    /// Preservation: heartbeat ordering is compared only inside each `(DID, service name)` key.
     pub fn latest_valid_by_service_did(
         descriptors: impl IntoIterator<Item = Self>,
         now_ms: u128,
         network_id: u32,
         include_expired: bool,
     ) -> Vec<Self> {
-        let mut latest = BTreeMap::<(Did, OnionExitService), Self>::new();
+        let mut latest = BTreeMap::<(Did, OnionServiceName), Self>::new();
         for descriptor in descriptors {
             if include_expired {
                 if !descriptor.verify_signature(network_id) {
@@ -755,19 +641,14 @@ impl Encoder for OnionExitDescriptor {
 
 impl Decoder for OnionExitDescriptor {
     fn from_encoded(encoded: &Encoded) -> CoreResult<Self> {
-        let descriptor: Self = decode_descriptor(encoded)?;
-        if descriptor.has_supported_schema() {
-            Ok(descriptor)
-        } else {
-            Err(CoreError::Decode)
-        }
+        decode_descriptor(encoded)
     }
 }
 
 /// Result of decoding one onion-exit registry entry.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct OnionExitDescriptorDecodeReport {
-    /// Descriptors that matched the local wire schema and decoded successfully.
+    /// Descriptors that decoded successfully under the total-cutover wire shape.
     pub descriptors: Vec<OnionExitDescriptor>,
     /// Number of registry values explicitly rejected at the decode boundary.
     pub rejected_values: usize,
@@ -788,7 +669,7 @@ pub(crate) struct OnionExitRegistration {
     node_type: OnlineNodeType,
     process_epoch: OnionExitEpoch,
     started_at_ms: u128,
-    services: Vec<OnionExitService>,
+    services: Vec<OnionServiceName>,
     policy: OnionExitPolicy,
     publisher: DhtRegistrationPublisher,
 }
@@ -798,7 +679,7 @@ impl OnionExitRegistration {
         heartbeat_interval: Duration,
         ttl: Duration,
         node_type: OnlineNodeType,
-        services: Vec<OnionExitService>,
+        services: Vec<OnionServiceName>,
         policy: OnionExitPolicy,
         process_epoch: OnionExitEpoch,
     ) -> Self {
@@ -812,17 +693,6 @@ impl OnionExitRegistration {
             policy,
             publisher: DhtRegistrationPublisher::new(ONION_EXITS_TOPIC),
         }
-    }
-
-    /// Validate this registration's periodic schedule when it is enabled.
-    pub fn validate_enabled_schedule(&self) -> Result<()> {
-        if self.heartbeat_interval >= self.ttl {
-            return Err(Error::InvalidConfig(format!(
-                "onion_exit_heartbeat_interval ({:?}) must be less than onion_exit_ttl ({:?})",
-                self.heartbeat_interval, self.ttl
-            )));
-        }
-        Ok(())
     }
 
     /// Build this node's signed onion-exit descriptors at `now_ms`.
@@ -842,7 +712,7 @@ impl OnionExitRegistration {
         &self,
         context: &RegistrationContext<'_>,
         now_ms: u128,
-        service: OnionExitService,
+        service: OnionServiceName,
     ) -> Result<OnionExitDescriptor> {
         OnionExitDescriptor::new_signed(
             OnionExitDescriptorBody {
@@ -876,7 +746,7 @@ impl OnionExitRegistration {
             .map(|descriptor| descriptor.encode().map_err(Error::CoreError))
             .collect::<Result<Vec<_>>>()?;
         self.publisher
-            .publish_many_replacing(context, encoded, |observed| {
+            .publish_replacing(context, encoded, |observed| {
                 observed
                     .decode::<OnionExitDescriptor>()
                     .is_ok_and(|descriptor| {

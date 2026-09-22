@@ -47,8 +47,6 @@ Options:
           Explicitly permit external_api_addr to bind a non-loopback address [env: ALLOW_REMOTE_EXTERNAL_API=]
       --ice-servers <ICE_SERVERS>
           ICE server list. If not provided, use ice_servers in config file or stun://stun.l.google.com:19302 [env: ICE_SERVERS=]
-  -k, --key <ECDSA_KEY>
-          Your ECDSA key. If not provided, use ECDSA_KEY in env or ecdsa_key in config file [env: ECDSA_KEY=]
       --stabilize-interval <STABILIZE_INTERVAL>
           Stabilization interval in seconds. If not provided, use stabilize_interval in config file or 15 [env: STABILIZE_INTERVAL=]
       --bootstrap-seed <BOOTSTRAP_SEED>
@@ -70,7 +68,7 @@ Options:
       --advertise-onion-exit
           Publish this node as an onion exit in the application-layer exit registry [env: ADVERTISE_ONION_EXIT=]
       --onion-exit-service <ONION_EXIT_SERVICE>
-          Exit service in name:transport form, e.g. https:tcp or web:tcp. May be repeated. [env: ONION_EXIT_SERVICE=]
+          TCP-backed exit service name, e.g. https or web. May be repeated. [env: ONION_EXIT_SERVICE=]
       --onion-exit-allow-target <ONION_EXIT_ALLOW_TARGET>
           Allow-list target for onion exit policy. May be repeated. [env: ONION_EXIT_ALLOW_TARGET=]
       --onion-exit-deny-target <ONION_EXIT_DENY_TARGET>

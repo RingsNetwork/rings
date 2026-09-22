@@ -7,56 +7,6 @@ struct StoppedRegistration;
 
 struct CountingRegistration(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 
-struct CapabilityProtocol;
-
-impl crate::extension::ext::Protocol for CapabilityProtocol {
-    type State = ();
-    type Event = ();
-    type Effect = ();
-
-    fn namespace(&self) -> &str {
-        "capability-test"
-    }
-
-    fn capabilities(&self) -> &'static [&'static str] {
-        &["capability-test"]
-    }
-
-    fn init(&self) {}
-
-    fn decode(
-        &self,
-        _wire: crate::extension::ext::Wire<'_>,
-    ) -> std::result::Result<Self::Event, crate::extension::ext::Reject> {
-        Err(crate::extension::ext::Reject(
-            "test-only protocol".to_string(),
-        ))
-    }
-
-    fn step(
-        &self,
-        _ctx: crate::extension::ext::Ctx<'_, Self::State>,
-        _event: Self::Event,
-    ) -> crate::extension::ext::Transition<Self::State, Self::Effect> {
-        crate::extension::ext::Transition::pure(())
-    }
-}
-
-struct NoopShell;
-
-#[async_trait]
-impl crate::extension::ext::Interpret for NoopShell {
-    type Effect = ();
-
-    async fn run(
-        &self,
-        _scope: &crate::extension::ext::EffectScope,
-        _effect: Self::Effect,
-    ) -> Result<Vec<bytes::Bytes>> {
-        Ok(Vec::new())
-    }
-}
-
 #[async_trait]
 impl RegistrationTask for StoppedRegistration {
     fn name(&self) -> &'static str {
@@ -86,26 +36,6 @@ impl RegistrationTask for CountingRegistration {
         self.0.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         Ok(())
     }
-}
-
-#[tokio::test]
-async fn test_extension_declared_capability_is_advertised_after_registration() -> Result<()> {
-    let processor = prepare_processor().await;
-    let descriptor = processor.online_node_descriptor_at(get_epoch_ms())?;
-    assert_eq!(
-        descriptor.capabilities,
-        OnlineNodeRegistration::default_capabilities()
-    );
-
-    let provider = Provider::from_processor(std::sync::Arc::new(processor.clone()));
-    provider.register_protocol(CapabilityProtocol, NoopShell)?;
-    let descriptor = processor.online_node_descriptor_at(get_epoch_ms())?;
-
-    assert!(descriptor
-        .capabilities
-        .iter()
-        .any(|capability| capability == "capability-test"));
-    Ok(())
 }
 
 #[tokio::test]
@@ -145,50 +75,6 @@ async fn test_registration_daemon_stops_after_sibling_maintenance_exits() {
         .await
         .expect("sibling exit should cooperatively stop registration daemon");
     assert_eq!(calls.load(std::sync::atomic::Ordering::Acquire), 1);
-}
-
-#[tokio::test]
-async fn test_custom_registration_task_publishes_through_shared_dht_sink() -> Result<()> {
-    let topic = "custom_registration_task";
-    let value = "custom-value"
-        .to_string()
-        .encode()
-        .map_err(Error::CoreError)?;
-    let key = SecretKey::random();
-    let session_sk = SessionSk::new_with_seckey(&key).unwrap();
-    let config = ProcessorConfig::try_from(
-        ProcessorConfigSerialized::new(
-            0,
-            "stun://stun.l.google.com:19302".to_string(),
-            session_sk.dump().unwrap(),
-            3,
-        )
-        .advertise_presence(false),
-    )
-    .unwrap();
-    let processor = ProcessorBuilder::from_config(&config)
-        .unwrap()
-        .storage(Box::new(MemStorage::new()))
-        .dht_finger_table_size(8)
-        .registration_task(StaticRegistration::new(topic, value.clone()))
-        .build()
-        .unwrap();
-
-    assert_eq!(processor.registration_tasks.len(), 1);
-    for task in &processor.registration_tasks {
-        task.register_once(&processor.registration_context())
-            .await?;
-    }
-
-    let entry_key = entry::Entry::gen_did(topic)?;
-    processor.storage_fetch(entry_key).await?;
-    let entry = processor
-        .storage_check_cache(entry_key)
-        .await
-        .expect("custom registration entry should be cached after publish");
-
-    assert!(entry.data.contains(&value));
-    Ok(())
 }
 
 #[tokio::test]
@@ -321,31 +207,31 @@ async fn test_onion_exit_publish_replaces_observed_self_records() -> Result<()> 
     policy.max_bytes_per_minute = 4096;
     let stale_tcp = onion_exit_descriptor_for_processor_with_service(
         &processor,
-        OnionExitService::tcp(),
+        OnionServiceName::tcp(),
         now_ms.saturating_sub(30_000),
         policy.clone(),
     )?;
     let stale_https = onion_exit_descriptor_for_processor_with_service(
         &processor,
-        OnionExitService::https(),
+        OnionServiceName::https(),
         now_ms.saturating_sub(20_000),
         policy.clone(),
     )?;
     let stale_api = onion_exit_descriptor_for_processor_with_service(
         &processor,
-        OnionExitService::new("api", OnionExitTransport::Tcp)?,
+        OnionServiceName::parse("api")?,
         now_ms.saturating_sub(10_000),
         policy.clone(),
     )?;
     let other_https = onion_exit_descriptor_for_processor_with_service(
         &other,
-        OnionExitService::https(),
+        OnionServiceName::https(),
         now_ms,
         policy.clone(),
     )?;
     let expired_other_https = onion_exit_descriptor_for_processor_with_service(
         &other,
-        OnionExitService::https(),
+        OnionServiceName::https(),
         now_ms.saturating_sub(120_000),
         policy.clone(),
     )?;
@@ -365,7 +251,7 @@ async fn test_onion_exit_publish_replaces_observed_self_records() -> Result<()> 
         Duration::from_secs(30),
         Duration::from_secs(90),
         default_online_node_type(),
-        vec![OnionExitService::https()],
+        vec![OnionServiceName::https()],
         policy,
         processor.onion_exit_epoch(),
     );
@@ -421,7 +307,7 @@ async fn test_online_node_lookup_filters_expired_descriptors_by_default() -> Res
             network_id: expired_processor.swarm.network_id(),
             storage_redundancy: expired_processor.swarm.storage_redundancy(),
             dht_virtual_nodes: expired_processor.swarm.dht_virtual_nodes(),
-            capabilities: OnlineNodeRegistration::default_capabilities(),
+            capabilities: Vec::new(),
             endpoint_hint: None,
             started_at_ms: now_ms.saturating_sub(120_000),
             heartbeat_at_ms: now_ms.saturating_sub(90_000),
@@ -515,7 +401,7 @@ async fn test_online_node_lookup_filters_other_storage_redundancy_modes() -> Res
             network_id: foreign.swarm.network_id(),
             storage_redundancy: mismatched_storage_redundancy(foreign.swarm.storage_redundancy()),
             dht_virtual_nodes: foreign.swarm.dht_virtual_nodes(),
-            capabilities: OnlineNodeRegistration::default_capabilities(),
+            capabilities: Vec::new(),
             endpoint_hint: None,
             started_at_ms: now_ms,
             heartbeat_at_ms: now_ms,

@@ -336,6 +336,22 @@ appear in several positions of one route unless the deployment adds independent
 admission or diversity controls. Reliability weighting may reorder eligible
 candidates; it never adds one.
 
+An onion-exit descriptor signs exactly one canonical service name, its policy,
+node type, network, process epoch, timestamps, and signer material. There is no
+parallel transport enum or descriptor schema number: native exits currently serve
+the advertised names through the TCP exit runtime, including the reserved `https`
+name. A new incompatible descriptor shape is therefore a network-wide release
+cutover, not a value negotiated inside the descriptor. Route construction enters
+through the policy-aware selector only: proxy protocol, target policy, entry guard,
+and direct-exit admission are explicit predicates rather than permissive wrapper
+defaults.
+
+TCP and HTTPS exit adapters share one process-local forward-nonce replay witness.
+The authenticated service name still binds the adapter action, but replaying the
+same `(peer, circuit, nonce)` through another installed service cannot authorize a
+second action. This witness is deliberately process-local; the signed random
+process epoch invalidates cells created for a previous process generation.
+
 **Entry guards.** A client pins a small local set of eligible first-hop relays per
 network and persists it outside Chord. New routes choose the relay first hop only
 from that guard set, so repeated HTTP requests, CONNECT tunnels, and TCP/UDP onion
@@ -403,6 +419,11 @@ Backend-free/default/dummy notifier timers retain the runtime-independent thread
 scheduler. These contracts are not removed by the transport API cleanup in #787.
 ICE configuration accepts password credentials; unsupported OAuth values are
 rejected rather than silently downgraded by the native backend.
+
+Relay socket and WebTransport tables treat the pure reducer as the duplicate-open
+authority. If a duplicate effect nevertheless reaches an occupied key, the engine
+refuses the new insertion and preserves the live handle and its generation; it does
+not cancel and replace the committed resource defensively.
 
 ### Connection Admission
 

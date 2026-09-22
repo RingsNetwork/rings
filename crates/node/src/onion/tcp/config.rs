@@ -7,14 +7,13 @@ use reqwest::Url;
 use crate::error::Error;
 use crate::error::Result;
 use crate::onion::OnionExitPolicy;
-use crate::onion::OnionExitService;
-use crate::onion::OnionExitTransport;
 use crate::onion::OnionServiceName;
 
 /// Native TCP exit capabilities installed into the onion circuit data plane.
 ///
-/// Invariant: `services` is non-empty and every name was derived from an advertised
-/// [`OnionExitService`] whose transport is [`OnionExitTransport::Tcp`].
+/// Invariant: `services` is non-empty. The native runtime is the sole installed exit adapter, so
+/// every advertised service uses its TCP byte-stream boundary; `https` retains HTTPS-over-TCP
+/// handling in that adapter.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NativeOnionTcpExitConfig {
     services: Vec<OnionServiceName>,
@@ -23,20 +22,14 @@ pub struct NativeOnionTcpExitConfig {
 }
 
 impl NativeOnionTcpExitConfig {
-    /// Build a native TCP exit config from advertised registry services.
+    /// Build a native TCP exit config from advertised registry service names.
     pub fn new(
-        services: impl IntoIterator<Item = OnionExitService>,
+        services: impl IntoIterator<Item = OnionServiceName>,
         policy: OnionExitPolicy,
     ) -> Result<Self> {
         let mut service_names = BTreeSet::new();
         for service in services {
-            if service.transport != OnionExitTransport::Tcp {
-                return Err(Error::InvalidConfig(format!(
-                    "native onion TCP exit cannot serve {:?} over {:?}",
-                    service.name, service.transport
-                )));
-            }
-            service_names.insert(service.name);
+            service_names.insert(service);
         }
         if service_names.is_empty() {
             return Err(Error::InvalidConfig(

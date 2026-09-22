@@ -1,6 +1,4 @@
-use rings_core::dht::entry;
 use rings_core::ecc::SecretKey;
-use rings_core::message::Encoder;
 use rings_core::message::MessageSigner;
 use rings_core::session::SessionSk;
 
@@ -12,8 +10,9 @@ const TEST_PROCESS_EPOCH: OnionExitEpoch = OnionExitEpoch::new([31; 16]);
 /// Distinct epoch used to witness that epoch substitution invalidates the descriptor signature.
 const TAMPERED_PROCESS_EPOCH: OnionExitEpoch = OnionExitEpoch::new([32; 16]);
 
-fn service(name: &str) -> OnionExitService {
-    OnionExitService::new(name, OnionExitTransport::Tcp).expect("valid test service")
+/// Parse one canonical service name for registry fixtures.
+fn service(name: &str) -> OnionServiceName {
+    OnionServiceName::parse(name).expect("valid test service")
 }
 
 fn signed_exit_at(heartbeat_at_ms: u128, expires_at_ms: u128) -> Result<OnionExitDescriptor> {
@@ -30,7 +29,7 @@ fn signed_exit_at(heartbeat_at_ms: u128, expires_at_ms: u128) -> Result<OnionExi
 
 fn signed_exit_for_session_at(
     session_sk: &SessionSk,
-    service: OnionExitService,
+    service: OnionServiceName,
     heartbeat_at_ms: u128,
     expires_at_ms: u128,
     version: &str,
@@ -68,50 +67,28 @@ fn signed_exit_for_session_at(
 #[test]
 fn test_default_exit_services_include_native_tcp_and_https() {
     assert_eq!(default_onion_exit_services(), vec![
-        OnionExitService::tcp(),
-        OnionExitService::https()
+        OnionServiceName::tcp(),
+        OnionServiceName::https()
     ]);
-    assert_eq!(https_onion_exit_services(), vec![OnionExitService::https()]);
+    assert_eq!(https_onion_exit_services(), vec![OnionServiceName::https()]);
 }
 
+/// Reserved service names match only their canonical service identity.
 #[test]
-fn test_reserved_service_name_accepts_tcp_and_legacy_https_for_routes() {
-    assert!(OnionExitService::https().matches_route_service("https"));
-    assert!(OnionExitService::new("https", OnionExitTransport::Tcp)
-        .expect("valid service")
-        .matches_route_service("https"));
-    assert!(OnionExitService::new("https", OnionExitTransport::Https)
-        .expect("valid service")
-        .matches_route_service("https"));
-    assert!(OnionExitService::new("custom", OnionExitTransport::Tcp)
-        .expect("valid service")
-        .matches_route_service("custom"));
-}
-
-#[test]
-fn test_legacy_https_descriptor_satisfies_tcp_proxy_transport_filter() -> Result<()> {
-    let session = SessionSk::new_with_seckey(&SecretKey::random()).map_err(Error::CoreError)?;
-    let descriptor = signed_exit_for_session_at(
-        &session,
-        OnionExitService::new("https", OnionExitTransport::Https)?,
-        20,
-        100,
-        "legacy",
-    )?;
-
-    assert!(descriptor.offers_service("https"));
-    assert!(descriptor.offers_service_transport("https", OnionExitTransport::Tcp));
-    Ok(())
+fn test_reserved_service_names_match_routes() {
+    assert!(OnionServiceName::https().matches("https"));
+    assert!(OnionServiceName::tcp().matches("tcp"));
+    assert!(service("custom").matches("custom"));
 }
 
 #[test]
 fn test_onion_exit_service_name_is_validated_and_canonicalized() -> Result<()> {
-    let service = OnionExitService::new("WeB-Api.1", OnionExitTransport::Tcp)?;
+    let service = OnionServiceName::parse("WeB-Api.1")?;
 
-    assert_eq!(service.name.as_str(), "web-api.1");
-    assert!(OnionExitService::new("", OnionExitTransport::Tcp).is_err());
-    assert!(OnionExitService::new(" web", OnionExitTransport::Tcp).is_err());
-    assert!(OnionExitService::new("web!", OnionExitTransport::Tcp).is_err());
+    assert_eq!(service.as_str(), "web-api.1");
+    assert!(OnionServiceName::parse("").is_err());
+    assert!(OnionServiceName::parse(" web").is_err());
+    assert!(OnionServiceName::parse("web!").is_err());
     Ok(())
 }
 
@@ -192,21 +169,6 @@ fn test_exit_descriptor_signature_covers_policy() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn test_exit_descriptor_signature_covers_schema_version() -> Result<()> {
-    let mut descriptor = signed_exit_at(20, 100)?;
-    assert_eq!(
-        descriptor.schema_version,
-        ONION_EXIT_DESCRIPTOR_SCHEMA_VERSION
-    );
-    assert!(descriptor.verify_signature(TEST_NETWORK_ID));
-
-    descriptor.schema_version = descriptor.schema_version.saturating_add(1);
-
-    assert!(!descriptor.verify_signature(TEST_NETWORK_ID));
-    Ok(())
-}
-
 /// The process epoch is signed, so a registry observer cannot substitute another
 /// replay-admission generation while preserving the descriptor signature.
 #[test]
@@ -217,28 +179,6 @@ fn test_exit_descriptor_signature_covers_process_epoch() -> Result<()> {
     descriptor.process_epoch = TAMPERED_PROCESS_EPOCH;
 
     assert!(!descriptor.verify_signature(TEST_NETWORK_ID));
-    Ok(())
-}
-
-#[test]
-fn test_exit_registry_decode_reports_rejected_schema_values() -> Result<()> {
-    let valid = signed_exit_at(20, 100)?;
-    let mut unsupported = signed_exit_at(21, 100)?;
-    unsupported.schema_version = unsupported.schema_version.saturating_add(1);
-    let data = vec![
-        valid.encode().map_err(Error::CoreError)?,
-        unsupported.encode().map_err(Error::CoreError)?,
-    ];
-    let entry = entry::Entry::new(
-        entry::Entry::gen_did(ONION_EXITS_TOPIC)?,
-        data,
-        entry::EntryKind::Data,
-    );
-
-    let report = OnionExitRegistration::decode_descriptors_from_entry(&entry);
-
-    assert_eq!(report.descriptors, vec![valid]);
-    assert_eq!(report.rejected_values, 1);
     Ok(())
 }
 
@@ -324,18 +264,13 @@ fn test_latest_valid_by_service_did_preserves_same_did_distinct_services() -> Re
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key).map_err(Error::CoreError)?;
     let old_tcp =
-        signed_exit_for_session_at(&session_sk, OnionExitService::tcp(), 10, 100, "tcp-old")?;
+        signed_exit_for_session_at(&session_sk, OnionServiceName::tcp(), 10, 100, "tcp-old")?;
     let new_tcp =
-        signed_exit_for_session_at(&session_sk, OnionExitService::tcp(), 20, 100, "tcp-new")?;
+        signed_exit_for_session_at(&session_sk, OnionServiceName::tcp(), 20, 100, "tcp-new")?;
     let https =
-        signed_exit_for_session_at(&session_sk, OnionExitService::https(), 15, 100, "https")?;
-    let custom = signed_exit_for_session_at(
-        &session_sk,
-        OnionExitService::new("api", OnionExitTransport::Tcp)?,
-        25,
-        100,
-        "api",
-    )?;
+        signed_exit_for_session_at(&session_sk, OnionServiceName::https(), 15, 100, "https")?;
+    let custom =
+        signed_exit_for_session_at(&session_sk, OnionServiceName::parse("api")?, 25, 100, "api")?;
 
     let descriptors = OnionExitDescriptor::latest_valid_by_service_did(
         vec![old_tcp, new_tcp.clone(), https.clone(), custom.clone()],

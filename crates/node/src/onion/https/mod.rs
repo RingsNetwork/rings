@@ -62,15 +62,14 @@ use crate::onion::exit_accounting::OnionExitAccounting;
 use crate::onion::exit_accounting::OnionExitLease;
 use crate::onion::proxy::OnionProxyTarget;
 use crate::onion::proxy::ONION_PROXY_HTTPS_SERVICE;
-use crate::onion::replay::OnionForwardReplayKey;
-use crate::onion::replay::OnionForwardReplayPartitions;
-use crate::onion::replay::ReplayAdmission;
+use crate::onion::replay::OnionForwardReplayWitness;
 #[cfg(any(test, rings_browser))]
 use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitFailure;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionExitTarget;
 use crate::onion::OnionRouteError;
+#[cfg(any(test, rings_browser))]
 use crate::sync_lock::lock;
 
 const DEFAULT_HTTPS_RESPONSE_BODY_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
@@ -161,7 +160,8 @@ pub(crate) struct OnionHttpsRuntime {
     #[cfg(any(test, rings_browser))]
     pending: Mutex<HashMap<OnionCircuitId, PendingRequest>>,
     exit_policy: Mutex<Option<OnionExitPolicy>>,
-    forward_replays: Mutex<OnionForwardReplayPartitions>,
+    /// Replay authority shared with the TCP adapter installed on this node.
+    pub(super) forward_replays: OnionForwardReplayWitness,
     accounting: OnionExitAccounting,
     link_sender: OnionLinkSender,
     #[cfg(rings_native)]
@@ -170,7 +170,11 @@ pub(crate) struct OnionHttpsRuntime {
 
 impl Default for OnionHttpsRuntime {
     fn default() -> Self {
-        Self::with_resources(OnionExitAccounting::default(), OnionLinkSender::default())
+        Self::with_resources(
+            OnionExitAccounting::default(),
+            OnionLinkSender::default(),
+            OnionForwardReplayWitness::default(),
+        )
     }
 }
 
@@ -193,12 +197,13 @@ impl OnionHttpsRuntime {
     pub(crate) fn with_resources(
         accounting: OnionExitAccounting,
         link_sender: OnionLinkSender,
+        forward_replays: OnionForwardReplayWitness,
     ) -> Self {
         Self {
             #[cfg(any(test, rings_browser))]
             pending: Mutex::new(HashMap::new()),
             exit_policy: Mutex::new(None),
-            forward_replays: Mutex::new(OnionForwardReplayPartitions::default()),
+            forward_replays,
             accounting,
             link_sender,
             #[cfg(rings_native)]
@@ -363,26 +368,6 @@ impl OnionHttpsRuntime {
 
     fn remaining_exit_bytes(&self, policy: &OnionExitPolicy) -> Result<Option<u64>> {
         self.accounting.remaining_bytes(policy)
-    }
-
-    fn consume_forward_nonce(
-        &self,
-        from: Did,
-        circuit_id: OnionCircuitId,
-        nonce: OnionForwardNonce,
-    ) -> Result<()> {
-        let mut replays = lock(&self.forward_replays)?;
-        match replays.consume(
-            from,
-            OnionForwardReplayKey::new(circuit_id, nonce),
-            rings_core::utils::get_epoch_ms(),
-        ) {
-            ReplayAdmission::Consumed => Ok(()),
-            ReplayAdmission::Duplicate => {
-                Err(Error::OnionRouteError(OnionRouteError::ForwardReplay))
-            }
-            ReplayAdmission::Full => Err(Error::NoPermission),
-        }
     }
 
     #[cfg(test)]
@@ -626,7 +611,9 @@ pub(crate) async fn execute_exit_fetch(
     if forward_sequence != OnionForwardSequence::FIRST {
         return Err(Error::OnionRouteError(OnionRouteError::ForwardReplay));
     }
-    runtime.consume_forward_nonce(return_peer, circuit_id, forward_nonce)?;
+    runtime
+        .forward_replays
+        .consume_forward_nonce(return_peer, circuit_id, forward_nonce)?;
     let target = OnionProxyTarget::parse_authority(&request.target)?;
     let authority = target.authority();
     let exit_target = OnionExitTarget::from_proxy_target(&target);

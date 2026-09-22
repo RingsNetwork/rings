@@ -25,7 +25,7 @@
 //!
 //! - `envelope` — the wire [`Envelope`].
 //! - `protocol` — the pure core: [`Wire`]/[`Reject`] (decode boundary), [`Ctx`],
-//!   `Inbound` (router-internal), [`Transition`], and the [`Protocol`] trait.
+//!   [`Transition`], and the [`Protocol`] trait.
 //! - `interpret` — the per-extension imperative shell ([`Interpret`]).
 //! - `registry` — the scoped capability [`Scope`] handed to shells, plus the router-internal
 //!   `Core` / `Handler` and the namespace registry ([`Extensions`]).
@@ -39,10 +39,9 @@ pub use envelope::Envelope;
 pub use interpret::Interpret;
 pub use protocol::Ctx;
 // Router internals — not part of the extension-author API (which is `Protocol` / `Interpret` /
-// `Scope` / `Transition` / …). Crate-visible only, so the old ambient `Core`/`Inbound` surface
+// `Scope` / `Transition` / …). Crate-visible only, so the old ambient `Core` surface
 // cannot be used to bypass the scoped-capability boundary. `Handler`/`DynHandler` stay private
 // to `registry` (the erased router ABI; protocol authors never name them).
-pub(crate) use protocol::Inbound;
 pub use protocol::Protocol;
 pub use protocol::Reject;
 pub use protocol::Transition;

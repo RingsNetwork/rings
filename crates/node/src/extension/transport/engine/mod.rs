@@ -42,6 +42,7 @@
 mod tcp;
 mod udp;
 
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicU64;
@@ -558,12 +559,14 @@ impl TransportSessions {
         let (outbound, outbound_rx) = mpsc::channel::<Outbound>(1024);
         let cancel = CancellationToken::new();
         let generation = allocate_non_reusing(&self.generations)?;
-        self.insert(key, SessionHandle {
+        if !self.insert(key, SessionHandle {
             outbound,
             cancel: cancel.clone(),
             src,
             generation,
-        });
+        }) {
+            return None;
+        }
         Some((outbound_rx, cancel, generation))
     }
 
@@ -612,14 +615,21 @@ impl TransportSessions {
             .unwrap_or(false)
     }
 
-    fn insert(&self, key: SessionKey, handle: SessionHandle) {
-        if let Ok(mut map) = self.map.lock() {
-            // Defensive: if a handle already exists for this key (a duplicate Open that
-            // slipped past the pure reject, or a key reuse), cancel the old relay task
-            // before replacing it, so it cannot keep running or later tear down the new one.
-            if let Some(old) = map.insert(key, handle) {
-                old.cancel.cancel();
+    /// Insert only into a vacant engine slot.
+    ///
+    /// The pure relay transition admits at most one live `Open` per [`SessionKey`]. Keeping an
+    /// occupied slot preserves that committed owner if an effect is nevertheless repeated; the
+    /// engine never replaces and cancels a live resource defensively.
+    fn insert(&self, key: SessionKey, handle: SessionHandle) -> bool {
+        let Ok(mut map) = self.map.lock() else {
+            return false;
+        };
+        match map.entry(key) {
+            Entry::Vacant(entry) => {
+                entry.insert(handle);
+                true
             }
+            Entry::Occupied(_) => false,
         }
     }
 }
@@ -795,6 +805,22 @@ mod tests {
     use crate::extension::transport::Initiator;
     use crate::extension::transport::SessionId;
     use crate::extension::transport::SessionKey;
+
+    /// A repeated engine effect cannot cancel or replace the resource admitted first.
+    #[test]
+    fn test_duplicate_registration_preserves_live_owner() {
+        let sessions = TransportSessions::new();
+        let key = SessionKey::new(Did::from(7_u32), "tcp", SessionId(10), Initiator::Remote);
+        let Some((_receiver, original_cancel, original_generation)) =
+            sessions.register(key.clone(), None)
+        else {
+            panic!("first registration must occupy a vacant slot");
+        };
+
+        assert!(sessions.register(key.clone(), None).is_none());
+        assert!(!original_cancel.is_cancelled());
+        assert_eq!(sessions.current_generation(&key), Some(original_generation));
+    }
 
     #[test]
     fn test_saturated_local_queue_fails_closed_without_waiting() {

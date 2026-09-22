@@ -17,6 +17,7 @@
 //! path is compile-checked but still needs browser integration coverage. Requires
 //! `--cfg=web_sys_unstable_apis`.
 
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::atomic::AtomicU64;
@@ -263,11 +264,13 @@ impl WtSessions {
     /// generation. The mirror of native's pre-dial `register`.
     fn open_slot(&self, key: SessionKey) -> Option<u64> {
         let generation = allocate_non_reusing(&self.generations)?;
-        self.insert(key, SessionHandle::Opening {
+        if !self.insert(key, SessionHandle::Opening {
             queue: VecDeque::new(),
             budget: OutboundQueueBudget::default(),
             generation,
-        });
+        }) {
+            return None;
+        }
         Some(generation)
     }
 
@@ -422,14 +425,19 @@ impl WtSessions {
         OutboundDrainStep::Operation(writer.clone(), op)
     }
 
-    fn insert(&self, key: SessionKey, handle: SessionHandle) {
+    /// Insert only into a vacant browser-engine slot.
+    ///
+    /// The pure relay transition is the duplicate-open authority. If an effect repeats despite
+    /// that invariant, the already committed transport remains current and the duplicate open is
+    /// refused instead of replacing and closing it.
+    fn insert(&self, key: SessionKey, handle: SessionHandle) -> bool {
         let mut map = self.lock_sessions();
-        // Defensive: if a session already exists for this key (a duplicate Open that
-        // slipped past the pure reject, or a key reuse), close the old WebTransport
-        // before replacing it, so it cannot keep running or later tear down the new one.
-        // An `Opening` slot owns no transport yet — its in-flight open will fail to promote.
-        if let Some(SessionHandle::Ready { transport, .. }) = map.insert(key, handle) {
-            transport.close();
+        match map.entry(key) {
+            Entry::Vacant(entry) => {
+                entry.insert(handle);
+                true
+            }
+            Entry::Occupied(_) => false,
         }
     }
 
@@ -542,5 +550,34 @@ async fn inject_untrack(scope: &Scope, key: &SessionKey) {
                  this (now dropped) session"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rings_core::dht::Did;
+
+    use super::WtSessions;
+    use crate::extension::transport::Initiator;
+    use crate::extension::transport::SessionId;
+    use crate::extension::transport::SessionKey;
+
+    /// A repeated browser effect leaves the existing slot and generation authoritative.
+    #[test]
+    fn test_duplicate_open_preserves_browser_slot_generation() {
+        let sessions = WtSessions::new();
+        let key = SessionKey::new(Did::from(7_u32), "tcp", SessionId(10), Initiator::Remote);
+        let original_generation = sessions
+            .open_slot(key.clone())
+            .expect("first open must occupy a vacant slot");
+
+        assert!(sessions.open_slot(key.clone()).is_none());
+        assert_eq!(
+            sessions
+                .lock_sessions()
+                .get(&key)
+                .map(super::SessionHandle::generation),
+            Some(original_generation)
+        );
     }
 }

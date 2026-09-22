@@ -19,7 +19,6 @@ use super::OnionRouteHop;
 use crate::error::Error;
 use crate::error::Result;
 
-const ENTRY_GUARD_SCHEMA_VERSION: u16 = 1;
 const ENTRY_GUARD_KEY_PREFIX: &str = "rings-node:onion-entry-guards";
 const DEFAULT_ENTRY_GUARD_COUNT: usize = 3;
 
@@ -30,7 +29,6 @@ const DEFAULT_ENTRY_GUARD_COUNT: usize = 3;
 /// should not construct or interpret guard state directly.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct OnionEntryGuardState {
-    version: u16,
     network_id: u32,
     guards: Vec<OnionEntryGuardRecord>,
 }
@@ -94,7 +92,7 @@ impl OnionEntryGuards {
             .get(&key)
             .await
             .map_err(Error::Storage)?
-            .filter(|state| state.matches_network(network_id));
+            .filter(|state| state.network_id == network_id);
         let quality_by_did = qualities.iter().copied().collect::<BTreeMap<_, _>>();
         let eligible_dids = eligible_guard_dids(relays, &quality_by_did, &first_hop_permitted);
         let next = reconcile_guard_state(
@@ -121,12 +119,6 @@ impl OnionEntryGuards {
             self.storage.put(key, state).await.map_err(Error::Storage)?;
         }
         Ok(())
-    }
-}
-
-impl OnionEntryGuardState {
-    fn matches_network(&self, network_id: u32) -> bool {
-        self.version == ENTRY_GUARD_SCHEMA_VERSION && self.network_id == network_id
     }
 }
 
@@ -178,7 +170,6 @@ fn reconcile_guard_state(
     }
 
     let state = OnionEntryGuardState {
-        version: ENTRY_GUARD_SCHEMA_VERSION,
         network_id,
         guards: retained,
     };

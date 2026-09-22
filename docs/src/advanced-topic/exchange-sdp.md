@@ -5,11 +5,11 @@ We will explain how the handshake works by establishing a connection between two
 ```yaml
 # config1.yaml
 
-bind: 127.0.0.1:50000
+internal_api_port: 50000
 endpoint_url: http://127.0.0.1:50000
-ecdsa_key: <privite key>
+session_sk: ./node1-session-sk
 ice_servers: stun://stun.l.google.com:19302
-stabilize_timeout: 3
+stabilize_interval: 3
 external_ip: null
 backend: []
 data_storage:
@@ -24,11 +24,11 @@ measure_storage:
 ```yaml
 # config2.yaml
 
-bind: 127.0.0.1:50001
+internal_api_port: 50001
 endpoint_url: http://127.0.0.1:50001
-ecdsa_key: <private key>
+session_sk: ./node2-session-sk
 ice_servers: stun://stun.l.google.com:19302
-stabilize_timeout: 3
+stabilize_interval: 3
 external_ip: null
 backend: []
 data_storage:
@@ -49,20 +49,17 @@ cargo run -- run -c config1.yaml
 cargo run -- run -c config2.yaml
 ```
 
-After that you will see your DID and signature, this signature is used for verify local RPC calling,. E.g.:
+After that each node prints its DID and JSON-RPC endpoint. The internal endpoint uses the
+Bearer token generated next to the config; the external `answerOffer` handshake method is public.
 
 ```bash
 # node1
 Did: <did1>
-Signature: <sig1>
 JSON-RPC endpoint: http://127.0.0.1:50000
-WebSocket endpoint: http://127.0.0.1:50000/ws
 
 # node1
 Did: <did2>
-Signature: <sig2>
-JSON-RPC endpoint: http://127.0.0.1:50000
-WebSocket endpoint: http://127.0.0.1:50000/ws
+JSON-RPC endpoint: http://127.0.0.1:50001
 ```
 
 ### Create Offer
@@ -72,7 +69,7 @@ Then we ask Node1 to create an offer by:
 ```bash
 curl -X POST \
 -H "Content-Type: application/json" \
--H "X-SIGNATURE: <sig1>" \
+-H "Authorization: Bearer <node1-api-token>" \
 --data '{"jsonrpc": "2.0", "id": 1, "method": "createOffer", "params": []}' \
 "http://127.0.0.1:50000"
 ```
@@ -90,7 +87,6 @@ Then we ask Node2 to accept the answer:
 ```bash
 curl -X POST \
 -H "Content-Type: application/json" \
--H "X-SIGNATURE: <sig2>" \
 --data '{"jsonrpc": "2.0",
         "id": 1, "method": "answerOffer",
         "params": ["<b58 encoded offer>"]}' \
@@ -110,7 +106,7 @@ Finally, we send the answer to Node 1 to finish handshake:
 ```bash
 curl -X POST \
 -H "Content-Type: application/json" \
--H "X-SIGNATURE: <sig1>" \
+-H "Authorization: Bearer <node1-api-token>" \
 --data '{"jsonrpc": "2.0",
          "id": 1, "method":
          "acceptAnswer",
