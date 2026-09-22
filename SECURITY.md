@@ -411,10 +411,23 @@ again and retire its replacement. Raw inbound frames retain callback-instance
 identity; matching that private identity also proves the immutable peer attached
 to the capacity lease, including when two callbacks share a peer ID.
 
-Native sends retain distinct admission, caller-cancellation, and continuation
-retirement guards. A pending continuation can outlive its caller; retirement must
-fence new sends before physical cleanup or destruction of pending send resources.
-`NativePhysicalCloseWitness` separately records physical-close completion.
+Each native send has one `SendLifecycle` retirement authority shared by its
+caller and detached continuation. The first failure observed after irrevocable
+admission fences the connection generation and consumes one physical-close
+capability. Repeated failure observations cannot spawn duplicate cleanup for that
+send; late acceptance cannot undo committed retirement. Distinct concurrent sends
+may still request close of the same generation, and explicit connection close
+remains generation-pinned.
+
+`OwnedSend` retains the primitive and `QueueSend` retains its channel lease and
+acceptance proof outside the primitive's async stack. The first-poll boundary
+releases the admission lock before reporting failure. Timeout, panic, or caller
+abandonment fences new sends before dropping the owner's captured resources.
+A pending continuation and already-started physical cleanup outlive their caller;
+revocable or accepted caller cancellation does not trigger retirement.
+`NativePhysicalCloseWitness` separately records successful physical close.
+Cleanup-task termination during executor shutdown is not evidence of physical
+close, and a stopped executor cannot guarantee completion of asynchronous cleanup.
 Backend-free/default/dummy notifier timers retain the runtime-independent thread
 scheduler. These contracts are not removed by the transport API cleanup in #787.
 ICE configuration accepts password credentials; unsupported OAuth values are

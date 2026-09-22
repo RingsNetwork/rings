@@ -93,3 +93,9 @@ The backend-free `--no-default-features` build has no normal Tokio dependency.
 Its notifier and the default/dummy notifier use `native_timeout_scheduler`, which
 works without an entered Tokio runtime. The native WebRTC backend still requires
 Tokio for its send, close, and timer tasks.
+
+Native sends share one retirement authority between the caller and its detached
+continuation. It fences the generation before releasing send-owned resources and
+consumes the physical-close capability once per send. The ownership model,
+shutdown limits, and regression witnesses are documented in
+[native send ownership](docs/native-send-ownership.md).

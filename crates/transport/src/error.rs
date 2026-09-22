@@ -61,6 +61,11 @@ pub enum Error {
     SendPermitRevoked,
 
     #[cfg(feature = "native-webrtc")]
+    /// Encoded size or cumulative channel byte offset exceeds the accounting domain.
+    #[error("Native send byte accounting exceeds u64")]
+    NativeSendByteCountOverflow,
+
+    #[cfg(feature = "native-webrtc")]
     /// No Tokio runtime is available to drive a native data-channel write.
     #[error("Native data-channel send requires an active Tokio runtime")]
     NativeSendRuntimeUnavailable,

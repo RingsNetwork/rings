@@ -44,12 +44,7 @@ pub struct IrrevocableSendPermit {
 }
 
 /// Retires a connection generation when an irrevocable send does not reach acceptance.
-#[cfg(any(
-    feature = "dummy",
-    feature = "native-webrtc",
-    feature = "web-sys-webrtc",
-    test
-))]
+#[cfg(any(feature = "dummy", feature = "web-sys-webrtc", test))]
 pub(crate) struct IrrevocableSendGuard<F: FnOnce()> {
     acceptance: SendAcceptance,
     permit: Option<IrrevocableSendPermit>,
@@ -192,12 +187,7 @@ impl IrrevocableSendPermit {
     }
 }
 
-#[cfg(any(
-    feature = "dummy",
-    feature = "native-webrtc",
-    feature = "web-sys-webrtc",
-    test
-))]
+#[cfg(any(feature = "dummy", feature = "web-sys-webrtc", test))]
 impl<F: FnOnce()> IrrevocableSendGuard<F> {
     pub(crate) fn new(acceptance: SendAcceptance, retire: F) -> Self {
         Self {
@@ -219,12 +209,7 @@ impl<F: FnOnce()> IrrevocableSendGuard<F> {
     }
 }
 
-#[cfg(any(
-    feature = "dummy",
-    feature = "native-webrtc",
-    feature = "web-sys-webrtc",
-    test
-))]
+#[cfg(any(feature = "dummy", feature = "web-sys-webrtc", test))]
 impl<F: FnOnce()> Drop for IrrevocableSendGuard<F> {
     fn drop(&mut self) {
         let must_retire = self.acceptance.failed_after_irrevocable();
