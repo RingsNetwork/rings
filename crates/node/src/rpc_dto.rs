@@ -316,7 +316,9 @@ fn peer_measurement_counters_info(evidence: PeerQualityEvidence) -> PeerMeasurem
 }
 
 pub(crate) fn peer_measurement_info(measurement: PeerMeasurement) -> Result<PeerMeasurementInfo> {
-    let credit = measurement.credit.map(|credit| PeerCreditInfo {
+    // RPC message fields retain protobuf presence; each retained peer has credit.
+    let credit = measurement.credit;
+    let credit = Some(PeerCreditInfo {
         bytes_sent_to_peer: credit.bytes_sent_to_peer(),
         bytes_received_from_peer: credit.bytes_received_from_peer(),
         last_seen_seconds: credit.last_seen().as_secs(),

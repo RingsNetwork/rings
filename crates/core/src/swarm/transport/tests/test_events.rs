@@ -257,9 +257,9 @@ async fn test_disconnected_observation_is_once_per_connection_epoch() -> Result<
     assert!(transport.peer_disconnected_since_ms(peer).is_some());
 
     assert_eq!(measure.snapshot_counters()?.as_slice(), &[
-        (peer, MeasureCounter::Disconnected),
-        (peer, MeasureCounter::Connect),
-        (peer, MeasureCounter::Disconnected),
+        (peer, MeasurementEvent::Disconnected),
+        (peer, MeasurementEvent::Connected),
+        (peer, MeasurementEvent::Disconnected),
     ]);
 
     Ok(())

@@ -32,6 +32,7 @@
 - [Transaction Replay Protection](advanced-topic/transaction-replay.md)
 - [Session References](advanced-topic/session-references.md)
 - [Provisional DRanking Service Receipts](advanced-topic/dranking-service-receipts.md)
+- [Local measurements and browser storage](advanced-topic/measurement-storage.md)
 - [config.yaml](advanced-topic/config.yaml.md)
 
 # Features

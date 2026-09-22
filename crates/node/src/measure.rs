@@ -14,7 +14,6 @@ use futures::StreamExt;
 use rings_core::dht::Did;
 use rings_core::measure;
 use rings_core::measure::Measure;
-use rings_core::measure::MeasureCounter;
 use rings_core::measure::PeerMeasurement;
 use rings_core::measure::PeerMeasurementPage;
 use rings_core::measure::PeerQuality;
@@ -437,44 +436,6 @@ impl PeriodicMeasure {
         }
     }
 
-    fn count(&self, did: Did, counter: MeasureCounter) -> u64 {
-        let (measurement, reconciled) = {
-            let (mut runtime, now) = self.state.runtime_at_now();
-            let reconciled = match maintain_runtime(&mut runtime, now) {
-                Ok(reconciled) => reconciled,
-                Err(error) => {
-                    tracing::error!(peer = %did, %error, "failed to maintain measurement state");
-                    return 0;
-                }
-            };
-            let measurement =
-                runtime
-                    .ledger
-                    .measurement(&did, now, CreditPolicy::amule(), reliability_policy());
-            (measurement, reconciled)
-        };
-        if reconciled {
-            self.wake_persistence();
-        }
-        let measurement = match measurement {
-            Ok(Some(measurement)) => measurement,
-            Ok(None) => return 0,
-            Err(error) => {
-                tracing::warn!(peer = %did, %error, "failed to project measurement counter");
-                return 0;
-            }
-        };
-        let evidence = measurement.reliability;
-        match counter {
-            MeasureCounter::Sent => evidence.sent,
-            MeasureCounter::FailedToSend => evidence.failed_to_send,
-            MeasureCounter::Received => evidence.received,
-            MeasureCounter::FailedToReceive => evidence.failed_to_receive,
-            MeasureCounter::Connect => evidence.connected,
-            MeasureCounter::Disconnected => evidence.disconnected,
-        }
-    }
-
     fn wake_persistence(&self) {
         let mut sender = self.persistence_wake.clone();
         match sender.try_send(()) {
@@ -812,19 +773,6 @@ async fn persist_pending_once(state: &MeasureState) -> Result<(), MeasureRuntime
 #[cfg_attr(feature = "node", async_trait)]
 #[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
 impl Measure for PeriodicMeasure {
-    async fn incr(&self, did: Did, counter: MeasureCounter) {
-        if let Err(error) = self
-            .record(did, Authentication::Authenticated, counter.into_event())
-            .await
-        {
-            tracing::error!(peer = %did, %error, "failed to apply compatibility measurement");
-        }
-    }
-
-    async fn get_count(&self, did: Did, counter: MeasureCounter) -> u64 {
-        self.count(did, counter)
-    }
-
     async fn record(
         &self,
         did: Did,

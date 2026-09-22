@@ -437,7 +437,7 @@ async fn test_repair_storage_backpressure_defers_without_degrading_or_removing_p
     );
     assert_eq!(
         measure
-            .get_count(node2.did(), MeasureCounter::FailedToSend)
+            .event_count(node2.did(), MeasurementEvent::FailedToSend)
             .await,
         0
     );
@@ -467,7 +467,7 @@ async fn test_repair_storage_backpressure_defers_without_degrading_or_removing_p
     assert!(node1.dht().lock_finger()?.contains(Some(node2.did())));
     assert_eq!(
         measure
-            .get_count(node2.did(), MeasureCounter::FailedToSend)
+            .event_count(node2.did(), MeasurementEvent::FailedToSend)
             .await,
         0
     );

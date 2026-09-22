@@ -26,16 +26,42 @@ impl BlockingDisconnectMeasure {
 #[cfg(feature = "dummy")]
 #[async_trait]
 impl Measure for BlockingDisconnectMeasure {
-    async fn incr(&self, did: Did, counter: MeasureCounter) {
-        if counter == MeasureCounter::Disconnected {
+    /// Apply one explicitly attributed observation in this test double.
+    async fn record(
+        &self,
+        did: crate::dht::Did,
+        authentication: crate::measure::Authentication,
+        event: MeasurementEvent,
+    ) -> std::result::Result<crate::measure::ApplyOutcome, crate::measure::MeasureError> {
+        if !authentication.permits(event) {
+            return Ok(crate::measure::ApplyOutcome::IgnoredUnattributable);
+        }
+        self.wait_for_event(event).await;
+        self.inner.record(did, authentication, event).await
+    }
+
+    /// Gate once, then delegate the complete batch without splitting its transition.
+    async fn record_batch(
+        &self,
+        did: crate::dht::Did,
+        authentication: crate::measure::Authentication,
+        batch: crate::measure::MeasurementBatch,
+    ) -> std::result::Result<crate::measure::ApplyOutcome, crate::measure::MeasureError> {
+        if !authentication.permits(batch.event()) {
+            return Ok(crate::measure::ApplyOutcome::IgnoredUnattributable);
+        }
+        self.wait_for_event(batch.event()).await;
+        self.inner.record_batch(did, authentication, batch).await
+    }
+}
+#[cfg(feature = "dummy")]
+impl BlockingDisconnectMeasure {
+    /// Pause the target lifecycle event before publishing any observation.
+    async fn wait_for_event(&self, event: MeasurementEvent) {
+        if event == MeasurementEvent::Disconnected {
             self.disconnect_started.set();
             self.release_disconnect.wait().await;
         }
-        self.inner.incr(did, counter).await;
-    }
-
-    async fn get_count(&self, did: Did, counter: MeasureCounter) -> u64 {
-        self.inner.get_count(did, counter).await
     }
 }
 

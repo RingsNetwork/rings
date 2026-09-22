@@ -1,5 +1,3 @@
-use super::Measure;
-use super::MeasureCounter;
 use crate::dht::Did;
 
 /// Local peer-quality class derived from recent reliability evidence.
@@ -21,8 +19,8 @@ pub struct PeerMeasurement {
     pub did: Did,
     /// Recent logical transport evidence.
     pub evidence: PeerQualityEvidence,
-    /// Persistent useful-byte totals when the implementation supports credits.
-    pub credit: Option<rings_measure::CreditRecord>,
+    /// Persistent useful-byte totals for this retained peer.
+    pub credit: rings_measure::CreditRecord,
     /// Local aMule-compatible resource-priority multiplier.
     pub credit_score: rings_measure::CreditScore,
     /// Advisory reliability class derived at query time.
@@ -44,30 +42,11 @@ impl PeerMeasurement {
         Self {
             did: projected.peer,
             evidence: projected.reliability,
-            credit: Some(projected.credit),
+            credit: projected.credit,
             credit_score: projected.credit_score,
             quality: projected.reliability_class,
         }
     }
-}
-
-/// Read policy-free evidence from a counter-only compatibility implementation.
-///
-/// Classification remains the caller's responsibility; this avoids encoding
-/// the absence of a policy as sentinel failure thresholds.
-pub async fn peer_evidence_from_counters<M>(measure: &M, did: Did) -> Option<PeerQualityEvidence>
-where M: Measure + ?Sized {
-    let evidence = PeerQualityEvidence {
-        connected: measure.get_count(did, MeasureCounter::Connect).await,
-        disconnected: measure.get_count(did, MeasureCounter::Disconnected).await,
-        sent: measure.get_count(did, MeasureCounter::Sent).await,
-        failed_to_send: measure.get_count(did, MeasureCounter::FailedToSend).await,
-        received: measure.get_count(did, MeasureCounter::Received).await,
-        failed_to_receive: measure
-            .get_count(did, MeasureCounter::FailedToReceive)
-            .await,
-    };
-    (!evidence.is_unobserved()).then_some(evidence)
 }
 
 /// Stably order DHT candidates by advisory reliability.

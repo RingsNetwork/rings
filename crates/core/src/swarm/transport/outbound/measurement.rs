@@ -220,7 +220,6 @@ mod tests {
     use crate::measure::ApplyOutcome;
     use crate::measure::BehaviourJudgement;
     use crate::measure::Measure;
-    use crate::measure::MeasureCounter;
     use crate::measure::MeasureError;
     use crate::measure::PeerQuality;
 
@@ -231,12 +230,6 @@ mod tests {
 
     #[async_trait]
     impl Measure for RecordingMeasure {
-        async fn incr(&self, _did: Did, _counter: MeasureCounter) {}
-
-        async fn get_count(&self, _did: Did, _counter: MeasureCounter) -> u64 {
-            0
-        }
-
         async fn record(
             &self,
             _did: Did,

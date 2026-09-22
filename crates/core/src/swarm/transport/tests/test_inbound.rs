@@ -627,7 +627,7 @@ fn failed_receive_count(measure: &RecordingMeasure, peer: Did) -> Result<usize> 
     Ok(measure
         .snapshot_counters()?
         .into_iter()
-        .filter(|(did, counter)| *did == peer && *counter == MeasureCounter::FailedToReceive)
+        .filter(|(did, counter)| *did == peer && *counter == MeasurementEvent::FailedToReceive)
         .count())
 }
 

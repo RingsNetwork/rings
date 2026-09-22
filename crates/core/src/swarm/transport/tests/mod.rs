@@ -32,7 +32,6 @@ use crate::measure::ApplyOutcome;
 use crate::measure::Authentication;
 use crate::measure::BehaviourJudgement;
 use crate::measure::Measure;
-use crate::measure::MeasureCounter;
 use crate::measure::MeasureError;
 use crate::measure::MeasurementBatch;
 use crate::measure::PeerQuality;
@@ -86,7 +85,7 @@ type TestCounter = Witness<usize>;
 
 #[derive(Default)]
 struct RecordingMeasure {
-    counters: Mutex<Vec<(Did, MeasureCounter)>>,
+    counters: Mutex<Vec<(Did, MeasurementEvent)>>,
     measurements: Mutex<Vec<(Did, MeasurementEvent)>>,
     qualities: Mutex<BTreeMap<Did, PeerQuality>>,
     /// Bumped after each counter or measurement lands, so a test awaits the
@@ -103,7 +102,7 @@ impl RecordingMeasure {
             .await;
     }
 
-    fn snapshot_counters(&self) -> std::io::Result<Vec<(Did, MeasureCounter)>> {
+    fn snapshot_counters(&self) -> std::io::Result<Vec<(Did, MeasurementEvent)>> {
         self.counters
             .lock()
             .map(|counters| counters.clone())
@@ -130,29 +129,6 @@ impl RecordingMeasure {
 
 #[async_trait]
 impl Measure for RecordingMeasure {
-    async fn incr(&self, did: Did, counter: MeasureCounter) {
-        match self.counters.lock() {
-            Ok(mut counters) => counters.push((did, counter)),
-            Err(_) => tracing::error!("RecordingMeasure counters mutex is poisoned"),
-        }
-        self.recorded.bump();
-    }
-
-    async fn get_count(&self, did: Did, counter: MeasureCounter) -> u64 {
-        match self.counters.lock() {
-            Ok(counters) => counters
-                .iter()
-                .filter(|(observed_did, observed_counter)| {
-                    *observed_did == did && *observed_counter == counter
-                })
-                .count() as u64,
-            Err(_) => {
-                tracing::error!("RecordingMeasure counters mutex is poisoned");
-                0
-            }
-        }
-    }
-
     async fn record(
         &self,
         did: Did,
@@ -166,7 +142,7 @@ impl Measure for RecordingMeasure {
             Ok(mut measurements) => measurements.push((did, event)),
             Err(_) => tracing::error!("RecordingMeasure measurements mutex is poisoned"),
         }
-        self.incr(did, MeasureCounter::from_event(event)).await;
+        self.observe_event(did, event).await;
         Ok(ApplyOutcome::Applied)
     }
 
@@ -183,11 +159,23 @@ impl Measure for RecordingMeasure {
             Ok(mut measurements) => measurements.push((did, batch.event())),
             Err(_) => tracing::error!("RecordingMeasure measurements mutex is poisoned"),
         }
-        let counter = MeasureCounter::from_event(batch.event());
-        for _ in 0..batch.occurrences().get() {
-            self.incr(did, counter).await;
+        // Publish every occurrence together; the event retains aggregate useful bytes.
+        if let Ok(mut observations) = self.counters.lock() {
+            observations
+                .extend((0..batch.occurrences().get()).map(|_occurrence| (did, batch.event())));
         }
+        self.recorded.bump();
         Ok(ApplyOutcome::Applied)
+    }
+}
+impl RecordingMeasure {
+    /// Test-only event observation, independent of the runtime Measure API.
+    async fn observe_event(&self, did: Did, counter: MeasurementEvent) {
+        match self.counters.lock() {
+            Ok(mut counters) => counters.push((did, counter)),
+            Err(_) => tracing::error!("RecordingMeasure counters mutex is poisoned"),
+        }
+        self.recorded.bump();
     }
 }
 
@@ -363,16 +351,42 @@ impl BlockingConnectMeasure {
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 #[async_trait]
 impl Measure for BlockingConnectMeasure {
-    async fn incr(&self, did: Did, counter: MeasureCounter) {
-        if counter == MeasureCounter::Connect {
+    /// Apply one explicitly attributed observation in this test double.
+    async fn record(
+        &self,
+        did: crate::dht::Did,
+        authentication: crate::measure::Authentication,
+        event: MeasurementEvent,
+    ) -> std::result::Result<crate::measure::ApplyOutcome, crate::measure::MeasureError> {
+        if !authentication.permits(event) {
+            return Ok(crate::measure::ApplyOutcome::IgnoredUnattributable);
+        }
+        self.wait_for_event(event).await;
+        self.inner.record(did, authentication, event).await
+    }
+
+    /// Gate once, then delegate the complete batch without splitting its transition.
+    async fn record_batch(
+        &self,
+        did: crate::dht::Did,
+        authentication: crate::measure::Authentication,
+        batch: crate::measure::MeasurementBatch,
+    ) -> std::result::Result<crate::measure::ApplyOutcome, crate::measure::MeasureError> {
+        if !authentication.permits(batch.event()) {
+            return Ok(crate::measure::ApplyOutcome::IgnoredUnattributable);
+        }
+        self.wait_for_event(batch.event()).await;
+        self.inner.record_batch(did, authentication, batch).await
+    }
+}
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+impl BlockingConnectMeasure {
+    /// Pause the target lifecycle event before publishing any observation.
+    async fn wait_for_event(&self, event: MeasurementEvent) {
+        if event == MeasurementEvent::Connected {
             self.connect_started.set();
             self.release_connect.wait().await;
         }
-        self.inner.incr(did, counter).await;
-    }
-
-    async fn get_count(&self, did: Did, counter: MeasureCounter) -> u64 {
-        self.inner.get_count(did, counter).await
     }
 }
 
@@ -749,8 +763,11 @@ async fn test_pending_callback_messages_are_held_until_admission() -> Result<()>
     assert_eq!(app_callback.validates(), 1);
     assert_eq!(app_callback.inbounds(), 1);
     let counters = measure.snapshot_counters()?;
-    assert!(counters.contains(&(pending.peer, MeasureCounter::Connect)));
-    assert!(counters.contains(&(pending.peer, MeasureCounter::Received)));
+    assert!(counters.contains(&(pending.peer, MeasurementEvent::Connected)));
+    assert!(counters
+        .iter()
+        .any(|(peer, event)| *peer == pending.peer
+            && matches!(event, MeasurementEvent::Received { .. })));
     assert!(transport.has_active_connection(pending.peer));
 
     let late = pending.custom_message_wire(&transport, b"message-after-admission")?;
@@ -891,7 +908,7 @@ async fn test_nested_reassembled_chunk_is_rejected_without_recursive_callback_en
             .snapshot_counters()?
             .into_iter()
             .filter(|(did, counter)| {
-                *did == peer && *counter == MeasureCounter::FailedToReceive
+                *did == peer && *counter == MeasurementEvent::FailedToReceive
             })
             .count(),
         1

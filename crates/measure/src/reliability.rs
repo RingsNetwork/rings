@@ -159,17 +159,6 @@ impl ReliabilityEvidence {
             && self.failed_to_receive == 0
     }
 
-    /// Classify evidence with the legacy one-positive-observation rule.
-    pub const fn classify(self, thresholds: ReliabilityThresholds) -> ReliabilityClass {
-        if self.reaches_failure_limit(thresholds) {
-            ReliabilityClass::Degraded
-        } else if self.positive_observations() >= 1 {
-            ReliabilityClass::Healthy
-        } else {
-            ReliabilityClass::Unknown
-        }
-    }
-
     /// Classify this evidence under a complete reliability policy.
     pub const fn classify_with_policy(self, policy: ReliabilityPolicy) -> ReliabilityClass {
         if self.reaches_failure_limit(policy.thresholds()) {

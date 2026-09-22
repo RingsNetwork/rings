@@ -30,8 +30,8 @@ use crate::measure::EvidenceDigest;
 use crate::measure::EvidenceError;
 use crate::measure::EvidencePage;
 use crate::measure::Measure;
-use crate::measure::MeasureCounter;
 use crate::measure::MeasureImpl;
+use crate::measure::MeasurementEvent;
 use crate::measure::PeerQuality;
 use crate::measure::PeerQualityThresholds;
 use crate::measure::ProvisionalEvidenceRecord;
@@ -64,7 +64,7 @@ mod test_storage_handoff;
 mod test_storage_repair;
 
 struct CountingMeasure {
-    counters: Mutex<Vec<(Did, MeasureCounter)>>,
+    counters: Mutex<Vec<(Did, MeasurementEvent)>>,
     evidence: Mutex<ProvisionalEvidenceStore<Did>>,
 }
 
@@ -79,28 +79,6 @@ impl Default for CountingMeasure {
 
 #[async_trait]
 impl Measure for CountingMeasure {
-    async fn incr(&self, did: Did, counter: MeasureCounter) {
-        match self.counters.lock() {
-            Ok(mut counters) => counters.push((did, counter)),
-            Err(_) => tracing::error!("CountingMeasure counters mutex is poisoned"),
-        }
-    }
-
-    async fn get_count(&self, did: Did, counter: MeasureCounter) -> u64 {
-        match self.counters.lock() {
-            Ok(counters) => counters
-                .iter()
-                .filter(|(observed_did, observed_counter)| {
-                    *observed_did == did && *observed_counter == counter
-                })
-                .count() as u64,
-            Err(_) => {
-                tracing::error!("CountingMeasure counters mutex is poisoned");
-                0
-            }
-        }
-    }
-
     async fn admit_provisional_evidence(
         &self,
         record: ProvisionalEvidenceRecord<Did>,
@@ -129,15 +107,85 @@ impl Measure for CountingMeasure {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .counters()
     }
+    /// Apply one explicitly attributed observation in this test double.
+    async fn record(
+        &self,
+        did: crate::dht::Did,
+        authentication: crate::measure::Authentication,
+        event: MeasurementEvent,
+    ) -> std::result::Result<crate::measure::ApplyOutcome, crate::measure::MeasureError> {
+        if !authentication.permits(event) {
+            return Ok(crate::measure::ApplyOutcome::IgnoredUnattributable);
+        }
+        self.observe_event(did, event).await;
+        Ok(crate::measure::ApplyOutcome::Applied)
+    }
+
+    /// Record all permitted occurrences together in the test event log.
+    async fn record_batch(
+        &self,
+        did: crate::dht::Did,
+        authentication: crate::measure::Authentication,
+        batch: crate::measure::MeasurementBatch,
+    ) -> std::result::Result<crate::measure::ApplyOutcome, crate::measure::MeasureError> {
+        if !authentication.permits(batch.event()) {
+            return Ok(crate::measure::ApplyOutcome::IgnoredUnattributable);
+        }
+        // A single lock publishes every occurrence in this test batch together.
+        self.counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend((0..batch.occurrences().get()).map(|_occurrence| (did, batch.event())));
+        Ok(crate::measure::ApplyOutcome::Applied)
+    }
+}
+impl CountingMeasure {
+    /// Test-only event observation, independent of the runtime Measure API.
+    async fn observe_event(&self, did: Did, counter: MeasurementEvent) {
+        match self.counters.lock() {
+            Ok(mut counters) => counters.push((did, counter)),
+            Err(_) => tracing::error!("CountingMeasure counters mutex is poisoned"),
+        }
+    }
+    /// Count event kinds without discarding useful bytes from the recorded events.
+    async fn event_count(&self, did: Did, counter: MeasurementEvent) -> u64 {
+        match self.counters.lock() {
+            Ok(counters) => counters
+                .iter()
+                .filter(|(observed_did, observed_counter)| {
+                    *observed_did == did
+                        && std::mem::discriminant(observed_counter)
+                            == std::mem::discriminant(&counter)
+                })
+                .count() as u64,
+            Err(_) => {
+                tracing::error!("CountingMeasure counters mutex is poisoned");
+                0
+            }
+        }
+    }
 }
 
 #[async_trait]
 impl BehaviourJudgement for CountingMeasure {
     async fn quality(&self, did: Did) -> PeerQuality {
-        crate::measure::peer_evidence_from_counters(self, did)
-            .await
-            .map(|evidence| evidence.classify(PeerQualityThresholds::new(3, 10, 10)))
-            .unwrap_or(PeerQuality::Unknown)
+        // This test fixture chooses a complete policy and queries its recorded events.
+        let evidence = crate::measure::PeerQualityEvidence::new(
+            self.event_count(did, MeasurementEvent::Connected).await,
+            self.event_count(did, MeasurementEvent::Disconnected).await,
+            self.event_count(did, MeasurementEvent::Sent { useful_bytes: 0 })
+                .await,
+            self.event_count(did, MeasurementEvent::FailedToSend).await,
+            self.event_count(did, MeasurementEvent::Received { useful_bytes: 0 })
+                .await,
+            self.event_count(did, MeasurementEvent::FailedToReceive)
+                .await,
+        );
+        // The explicit window is immaterial for this fixture's untimed event log.
+        let policy =
+            rings_measure::ReliabilityPolicy::new(60, 1, PeerQualityThresholds::new(3, 10, 10))
+                .unwrap();
+        evidence.classify_with_policy(policy)
     }
 }
 
@@ -367,7 +415,7 @@ async fn test_liveness_probe_backpressure_does_not_degrade_peer() -> Result<()> 
 
     assert_eq!(
         measure
-            .get_count(node2.did(), MeasureCounter::FailedToSend)
+            .event_count(node2.did(), MeasurementEvent::FailedToSend)
             .await,
         0
     );
@@ -881,7 +929,7 @@ async fn test_clean_unavailable_connections_keeps_degraded_admitted_peer() -> Re
     }
     assert_eq!(
         measure
-            .get_count(node2.did(), MeasureCounter::FailedToSend)
+            .event_count(node2.did(), MeasurementEvent::FailedToSend)
             .await,
         10
     );

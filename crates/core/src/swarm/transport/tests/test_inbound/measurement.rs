@@ -33,7 +33,7 @@ async fn test_malformed_unbound_transport_does_not_attribute_peer_failure() -> R
             .snapshot_counters()?
             .into_iter()
             .filter(|(did, counter)| {
-                *did == peer && *counter == MeasureCounter::FailedToReceive
+                *did == peer && *counter == MeasurementEvent::FailedToReceive
             })
             .count(),
         0
