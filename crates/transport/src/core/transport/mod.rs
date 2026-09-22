@@ -17,12 +17,7 @@ pub use interface::ConnectionInterface;
 pub use interface::TransportInterface;
 pub use interface::TransportMessage;
 pub use interface::MAX_DATA_CHANNEL_MESSAGE_SIZE;
-#[cfg(any(
-    feature = "dummy",
-    feature = "native-webrtc",
-    feature = "web-sys-webrtc",
-    test
-))]
+#[cfg(any(feature = "dummy", test))]
 pub(crate) use send::IrrevocableSendGuard;
 pub use send::IrrevocableSendPermit;
 pub use send::SendAcceptance;

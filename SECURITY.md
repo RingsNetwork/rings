@@ -411,10 +411,33 @@ again and retire its replacement. Raw inbound frames retain callback-instance
 identity; matching that private identity also proves the immutable peer attached
 to the capacity lease, including when two callbacks share a peer ID.
 
-Native sends retain distinct admission, caller-cancellation, and continuation
-retirement guards. A pending continuation can outlive its caller; retirement must
-fence new sends before physical cleanup or destruction of pending send resources.
-`NativePhysicalCloseWitness` separately records physical-close completion.
+Each native or WASM send has one close actor with exclusive state and physical-close
+ownership. `SendLifecycle` shares only observation rights, a bounded mailbox
+address and the synchronous generation fence. Failure observed after irrevocable
+admission fences before producing the sealed actor command. Pure reducers govern
+failure and close transitions; duplicate commands cannot initiate close twice for
+that send, and late acceptance cannot reopen retirement. Distinct concurrent sends
+may still close the same generation; explicit close remains generation-pinned.
+The actor publishes distinct unused, succeeded, failed and interrupted outcomes.
+Finite-state exploration checks safety within a one-send/two-observer abstraction;
+actor conformance and lifecycle regressions check the IO boundaries. Both backends
+use `core::send` for the lifecycle, resource owner, checked byte accounting and
+executor-neutral actor. WASM uses a one-shot mailbox and `spawn_local`; its fence
+is synchronous, while the actor invokes browser close in a later microtask. Both
+backends wait for a requested cleanup's terminal result before returning a send
+error; cancelling the waiter does not cancel cleanup. Browser close success means the local API returned, not remote acknowledgement. Native
+first-poll locking and timeouts remain platform effects. Abort/trap or browser
+context destruction cannot guarantee cleanup or delivery of a terminal snapshot.
+
+`OwnedSend` retains the primitive and `QueueSend` retains its channel lease and
+acceptance proof outside the primitive's async stack. The first-poll boundary
+releases the admission lock before reporting failure. Timeout, panic, or caller
+abandonment fences new sends before dropping the owner's captured resources.
+A pending continuation and already-started physical cleanup outlive their caller;
+revocable or accepted caller cancellation does not trigger retirement.
+`NativePhysicalCloseWitness` separately records successful physical close.
+Cleanup-task termination during executor shutdown is not evidence of physical
+close, and a stopped executor cannot guarantee completion of asynchronous cleanup.
 Backend-free/default/dummy notifier timers retain the runtime-independent thread
 scheduler. These contracts are not removed by the transport API cleanup in #787.
 ICE configuration accepts password credentials; unsupported OAuth values are

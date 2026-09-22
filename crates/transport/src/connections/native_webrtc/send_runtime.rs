@@ -7,36 +7,44 @@
 
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::MutexGuard;
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
+use super::send_lifecycle::OwnedSend;
+use super::send_lifecycle::SendLifecycle;
 use super::NATIVE_SEND_COMPLETION_TIMEOUT;
-use crate::core::drop_guard::ArmedDropGuard;
+use crate::core::send::gate::AdmissionGate;
+use crate::core::send::gate::FirstPollLease;
 use crate::core::transport::ConnectionStateCell;
 use crate::core::transport::SendAcceptance;
 use crate::error::Error;
 use crate::error::Result;
-use crate::sync_utils::lock_recover;
 
 /// Connection-generation gate shared by every native data channel.
+/// Cloning shares the same gate and cancellation signal; it does not create a generation.
 #[derive(Clone)]
 pub(super) struct NativeRetirementFence {
+    /// Public logical connection state, closed by retirement.
     connection_state: ConnectionStateCell,
+    /// Wakeup signal for connection-owned work when retirement is committed.
     cancel_token: CancellationToken,
-    retired: Arc<Mutex<bool>>,
+    /// Serializes the first physical poll against generation retirement.
+    gate: AdmissionGate,
     #[cfg(test)]
+    /// Test witness that a competing retirement reached the admission gate.
     waiting_retirements: Arc<std::sync::atomic::AtomicUsize>,
 }
 
-/// Held only across final permit claim and the send primitive's first poll.
-pub(super) struct NativeSendAdmission<'a> {
-    _retired: MutexGuard<'a, bool>,
+/// Non-forgeable evidence delivered only after the synchronous generation fence.
+/// No Clone/Copy: each delivered command is produced by an actual fence operation.
+pub(super) struct FencedCommand {
+    /// Private construction restricts issuance to NativeRetirementFence::commit.
+    _sealed: (),
 }
 
 impl NativeRetirementFence {
+    /// Bind one shared gate to the generation state and its cancellation signal.
     pub(super) fn new(
         connection_state: ConnectionStateCell,
         cancel_token: CancellationToken,
@@ -44,30 +52,32 @@ impl NativeRetirementFence {
         Self {
             connection_state,
             cancel_token,
-            retired: Arc::new(Mutex::new(false)),
+            gate: AdmissionGate::new(),
             #[cfg(test)]
             waiting_retirements: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
     /// Linearize final permit admission with connection-wide retirement.
-    pub(super) fn try_send_admission(&self) -> Option<NativeSendAdmission<'_>> {
-        let retired = lock_recover(&self.retired);
-        if *retired {
-            return None;
-        }
-        Some(NativeSendAdmission { _retired: retired })
+    pub(super) fn try_send_admission(&self) -> Option<FirstPollLease<'_>> {
+        self.gate.enter()
     }
 
-    fn finish_retirement(&self, retired: &mut bool) {
-        *retired = true;
+    /// Publish logical closure while holding exclusive generation admission.
+    fn finish_retirement(&self) {
         self.connection_state.close();
         self.cancel_token.cancel();
     }
 
+    /// Close admission synchronously before any asynchronous physical cleanup.
     pub(super) fn request(&self) {
-        let mut retired = lock_recover(&self.retired);
-        self.finish_retirement(&mut retired);
+        self.gate.retire(|| self.finish_retirement());
+    }
+
+    /// Commit fencing before issuing the actor command capability.
+    pub(super) fn commit(&self) -> FencedCommand {
+        self.request();
+        FencedCommand { _sealed: () }
     }
 
     #[cfg(test)]
@@ -75,10 +85,11 @@ impl NativeRetirementFence {
         self.waiting_retirements
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         before_gate();
-        let mut retired = lock_recover(&self.retired);
-        self.waiting_retirements
-            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-        self.finish_retirement(&mut retired);
+        self.gate.retire(|| {
+            self.waiting_retirements
+                .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+            self.finish_retirement();
+        });
     }
 
     #[cfg(test)]
@@ -88,46 +99,12 @@ impl NativeRetirementFence {
     }
 }
 
-pub(super) struct RetirementFenceGuard {
-    cleanup: ArmedDropGuard<(), Box<dyn FnOnce(()) + Send>>,
-}
-
-impl RetirementFenceGuard {
-    pub(super) fn new(fence: NativeRetirementFence) -> Self {
-        Self {
-            cleanup: ArmedDropGuard::new((), Box::new(move |()| fence.request())),
-        }
-    }
-
-    pub(super) fn once_irrevocable(
-        fence: NativeRetirementFence,
-        acceptance: SendAcceptance,
-    ) -> Self {
-        Self {
-            cleanup: ArmedDropGuard::new(
-                (),
-                Box::new(move |()| {
-                    if acceptance.failed_after_irrevocable() {
-                        fence.request();
-                    }
-                }),
-            ),
-        }
-    }
-
-    pub(super) fn retire(&mut self) {
-        self.cleanup.fire();
-    }
-
-    pub(super) fn disarm(&mut self) {
-        self.cleanup.disarm();
-    }
-}
-
+/// Require a live executor handle at the native send boundary.
 pub(super) fn native_send_runtime() -> Result<tokio::runtime::Handle> {
     tokio::runtime::Handle::try_current().map_err(|_| Error::NativeSendRuntimeUnavailable)
 }
 
+/// Detach physical close ownership from the lifetime of its join waiter.
 pub(super) async fn run_native_close_task(
     runtime: &tokio::runtime::Handle,
     close: impl Future<Output = Result<()>> + Send + 'static,
@@ -135,72 +112,39 @@ pub(super) async fn run_native_close_task(
     runtime
         .spawn(close)
         .await
-        .map_err(Error::NativeConnectionCloseTask)?
+        .map_err(Error::NativeConnectionCloseTask)
+        .and_then(std::convert::identity)
 }
 
-pub(super) fn poll_once_while_guarded<F, G>(
-    mut future: std::pin::Pin<&mut F>,
-    guard: G,
-) -> std::task::Poll<F::Output>
-where
-    F: Future + ?Sized,
-{
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let waker = std::task::Waker::noop();
-        let mut context = std::task::Context::from_waker(waker);
-        future.as_mut().poll(&mut context)
-    }));
-    drop(guard);
-    match outcome {
-        Ok(result) => result,
-        Err(payload) => std::panic::resume_unwind(payload),
-    }
-}
-
+/// Move the already-admitted resource owner into a bounded continuation.
 pub(super) async fn run_irrevocable_send<T>(
     runtime: &tokio::runtime::Handle,
-    retirement_fence: NativeRetirementFence,
-    send: impl Future<Output = Result<T>> + Send + 'static,
+    send: OwnedSend<impl Future<Output = Result<T>> + Send + 'static>,
 ) -> Result<T>
 where
     T: Send + 'static,
 {
-    run_irrevocable_send_with_timeout(
-        runtime,
-        NATIVE_SEND_COMPLETION_TIMEOUT,
-        retirement_fence,
-        send,
-    )
-    .await
+    run_irrevocable_send_with_timeout(runtime, NATIVE_SEND_COMPLETION_TIMEOUT, send).await
 }
 
+/// Execute the owned primitive with a cooperative timeout and typed join errors.
 pub(super) async fn run_irrevocable_send_with_timeout<T>(
     runtime: &tokio::runtime::Handle,
     completion_timeout: Duration,
-    retirement_fence: NativeRetirementFence,
-    send: impl Future<Output = Result<T>> + Send + 'static,
+    send: OwnedSend<impl Future<Output = Result<T>> + Send + 'static>,
 ) -> Result<T>
 where
     T: Send + 'static,
 {
     runtime
         .spawn(async move {
-            let mut send = Box::pin(send);
-            // Fence before dropping the pending send on timeout or unwind. The
-            // permit guard lives inside that future and can run too late for its
-            // captured resources' destruction order.
-            let mut retirement = RetirementFenceGuard::new(retirement_fence);
+            // The same resource owner moves into the task. On timeout, panic,
+            // or runtime cancellation its Drop fences before releasing captures.
+            let mut send = send;
             tokio::select! {
-                result = send.as_mut() => {
-                    if result.is_ok() {
-                        retirement.disarm();
-                    } else {
-                        retirement.retire();
-                    }
-                    result
-                }
+                result = &mut send => result,
                 _ = tokio::time::sleep(completion_timeout) => {
-                    retirement.retire();
+                    drop(send);
                     Err(Error::NativeSendCompletionTimeout {
                         timeout_ms: completion_timeout.as_millis(),
                     })
@@ -208,60 +152,11 @@ where
             }
         })
         .await
-        .map_err(Error::NativeSendTask)?
+        .map_err(Error::NativeSendTask)
+        .and_then(std::convert::identity)
 }
 
-struct PhysicalRetirementGuard<F>
-where F: Future<Output = Result<()>> + Send + 'static
-{
-    cleanup: ArmedDropGuard<PhysicalRetirement<F>, fn(PhysicalRetirement<F>)>,
-}
-
-struct PhysicalRetirement<F> {
-    runtime: tokio::runtime::Handle,
-    acceptance: SendAcceptance,
-    retirement: F,
-}
-
-fn retire_abandoned_send<F>(retirement: PhysicalRetirement<F>)
-where F: Future<Output = Result<()>> + Send + 'static {
-    if retirement.acceptance.failed_after_irrevocable() {
-        retirement.runtime.spawn(async move {
-            if let Err(error) = retirement.retirement.await {
-                tracing::warn!(%error, "failed to retire abandoned native send");
-            }
-        });
-    }
-}
-
-impl<F> PhysicalRetirementGuard<F>
-where F: Future<Output = Result<()>> + Send + 'static
-{
-    fn new(runtime: tokio::runtime::Handle, acceptance: SendAcceptance, retirement: F) -> Self {
-        Self {
-            cleanup: ArmedDropGuard::new(
-                PhysicalRetirement {
-                    runtime,
-                    acceptance,
-                    retirement,
-                },
-                retire_abandoned_send::<F>,
-            ),
-        }
-    }
-
-    fn disarm(&mut self) {
-        self.cleanup.disarm();
-    }
-
-    async fn retire(&mut self) -> Result<()> {
-        match self.cleanup.take() {
-            Some(retirement) => retirement.retirement.await,
-            None => Ok(()),
-        }
-    }
-}
-
+/// Preserve a human-readable panic payload without assuming its concrete type.
 fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     payload
         .downcast_ref::<&'static str>()
@@ -270,6 +165,7 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_else(|| "non-string panic payload".to_string())
 }
 
+/// Convert caller-owned polling panics without letting unwind bypass the owner.
 async fn catch_future_unwind<F>(future: F) -> std::thread::Result<F::Output>
 where F: Future {
     let mut future = Box::pin(future);
@@ -285,35 +181,26 @@ where F: Future {
     .await
 }
 
-pub(super) async fn run_send_with_retirement<T>(
+/// Install the single retirement authority and return the original send outcome.
+/// Error waiters await independently-owned cleanup; cancelling that wait cannot stop it.
+pub(super) async fn run_send_with_retirement<T, F>(
     runtime: &tokio::runtime::Handle,
     acceptance: SendAcceptance,
     retirement_fence: NativeRetirementFence,
-    send: impl Future<Output = Result<T>> + Send + 'static,
+    send: impl FnOnce(Arc<SendLifecycle>) -> F,
     retirement: impl Future<Output = Result<()>> + Send + 'static,
 ) -> Result<T>
 where
     T: Send + 'static,
+    F: Future<Output = Result<T>> + Send + 'static,
 {
-    let mut physical_retirement =
-        PhysicalRetirementGuard::new(runtime.clone(), acceptance.clone(), retirement);
-    // The permit guard may already belong to a detached continuation. Keep a
-    // caller-owned fence so cancellation closes admission immediately, before
-    // physical retirement is spawned; the continuation cannot provide this timing.
-    let mut fence_retirement =
-        RetirementFenceGuard::once_irrevocable(retirement_fence, acceptance.clone());
+    // The actor alone owns cleanup; the caller and continuation share its address.
+    // Pre: the factory only constructs the unpolled future, without performing IO.
+    let lifecycle = SendLifecycle::new(runtime.clone(), acceptance, retirement_fence, retirement);
+    let send = OwnedSend::new(send(Arc::clone(&lifecycle)), Arc::clone(&lifecycle));
     let result = match catch_future_unwind(send).await {
         Ok(result) => result,
         Err(payload) => Err(Error::NativeSendPanic(panic_message(payload.as_ref()))),
     };
-    if result.is_err() && acceptance.failed_after_irrevocable() {
-        fence_retirement.retire();
-        if let Err(error) = physical_retirement.retire().await {
-            tracing::warn!(%error, "failed to retire connection after irrevocable send error");
-        }
-    } else {
-        fence_retirement.disarm();
-        physical_retirement.disarm();
-    }
-    result
+    lifecycle.finish(result).await
 }

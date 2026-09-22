@@ -37,7 +37,6 @@ use crate::core::transport::stored_max_message_size;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::ConnectionStateCell;
 use crate::core::transport::ConnectionStateSnapshot;
-use crate::core::transport::IrrevocableSendGuard;
 use crate::core::transport::SendPermit;
 use crate::core::transport::TransportInterface;
 use crate::core::transport::TransportMessage;
@@ -56,10 +55,22 @@ use crate::notifier::Notifier;
 use crate::pool::Pool;
 use crate::webrtc_config::WebrtcUdpPortRange;
 
+mod close_actor;
+mod send_lifecycle;
+#[cfg(test)]
+use crate::core::send::model as send_model;
+use crate::core::send::operation as send_operation;
 mod send_runtime;
+#[cfg(test)]
+mod test_close_actor;
+#[cfg(test)]
+mod test_send_lifecycle;
 
+#[cfg(test)]
+use send_lifecycle::OwnedSend;
+use send_lifecycle::SendLifecycle;
+use send_operation::prepare_native;
 use send_runtime::native_send_runtime;
-use send_runtime::poll_once_while_guarded;
 use send_runtime::run_irrevocable_send;
 #[cfg(test)]
 use send_runtime::run_irrevocable_send_with_timeout;
@@ -228,11 +239,13 @@ fn delivery_future(
 }
 
 impl RoundRobinPool<TrackedChannel> {
+    /// Serialize one channel operation and hand its resource owner to the bounded executor.
     async fn send_with_retirement_fence(
         &self,
         msg: TransportMessage,
         permit: SendPermit,
         retirement_fence: NativeRetirementFence,
+        lifecycle: Arc<SendLifecycle>,
     ) -> Result<DeliveryFuture> {
         let TrackedChannel {
             channel,
@@ -249,48 +262,38 @@ impl RoundRobinPool<TrackedChannel> {
         // messages' delivery futures resolve early on phantom bytes.
         let guard = send_lock.lock_owned().await;
         let send_channel = Arc::clone(&channel);
-        let send_enqueued = Arc::clone(&enqueued);
-        let data_len = data.len();
-        let mut send = Box::pin(async move {
-            if let Err(error) = send_channel.send(&data).await {
-                tracing::error!("{:?}, Data size: {:?}", error, data.len());
-                return Err(Error::from(error));
-            }
-            Ok(())
-        });
-        let acceptance = permit.acceptance();
-        let failure_fence = retirement_fence.clone();
-        let mut permit_retirement = IrrevocableSendGuard::new(acceptance, move || {
-            failure_fence.request();
-        });
-        let Some(admission) = retirement_fence.try_send_admission() else {
-            return Err(Error::SendPermitRevoked);
+        // The encoded size shares the existing u64 accounting domain.
+        let data_len = u64::try_from(data.len()).map_err(|_| Error::SendByteCountOverflow)?;
+        // The primitive owns its bytes and channel reference. The QueueSend
+        // wrapper separately retains the serialization lease and permit proof.
+        let primitive = async move {
+            send_channel
+                .send(&data)
+                .await
+                .inspect_err(|error| tracing::error!(%error, data_len, "native send failed"))
+                .map(|_| ())
+                .map_err(Error::from)
         };
-        let Some(proof) = permit.try_mark_irrevocable() else {
-            drop(admission);
-            return Err(Error::SendPermitRevoked);
+        // Construct the complete resource owner before final admission. Its
+        // first-poll boundary releases the gate before fencing a failure.
+        let prepared = prepare_native(
+            primitive,
+            permit,
+            guard,
+            Arc::clone(&enqueued),
+            data_len,
+            lifecycle,
+        )?;
+        let admission = retirement_fence
+            .try_send_admission()
+            .ok_or(Error::SendPermitRevoked)?;
+        let (send, first_poll) = prepared.start(admission);
+        // The owner moves, unchanged, from inline first poll into its bounded
+        // continuation. There is no permit-owned retirement closure.
+        let end_offset = match first_poll {
+            std::task::Poll::Ready(result) => result?,
+            std::task::Poll::Pending => run_irrevocable_send(&runtime, send).await?,
         };
-        permit_retirement.bind(proof);
-        let first_poll = poll_once_while_guarded(send.as_mut(), admission);
-        let permit = permit_retirement;
-        let end_offset =
-            match first_poll {
-                std::task::Poll::Ready(result) => {
-                    result?;
-                    permit.mark_accepted();
-                    send_enqueued.fetch_add(data_len as u64, Ordering::SeqCst) + data_len as u64
-                }
-                std::task::Poll::Pending => {
-                    run_irrevocable_send(&runtime, retirement_fence, async move {
-                        let _guard = guard;
-                        send.await?;
-                        permit.mark_accepted();
-                        Ok(send_enqueued.fetch_add(data_len as u64, Ordering::SeqCst)
-                            + data_len as u64)
-                    })
-                    .await?
-                }
-            };
         Ok(delivery_future(channel, enqueued, end_offset))
     }
 }
@@ -529,15 +532,11 @@ impl ConnectionInterface for WebrtcConnection {
             &runtime,
             acceptance,
             retirement_fence.clone(),
-            async move {
-                pool.send_with_retirement_fence(msg, permit, retirement_fence)
+            move |lifecycle| async move {
+                pool.send_with_retirement_fence(msg, permit, retirement_fence, lifecycle)
                     .await
             },
-            retire_native_connection(
-                connection,
-                self.retirement_fence.clone(),
-                physical_close_completed,
-            ),
+            close_failed_native_send(connection, physical_close_completed),
         )
         .await
     }
@@ -647,12 +646,12 @@ async fn run_native_close_with_witness(
     .await
 }
 
-async fn retire_native_connection(
+/// Close a generation already fenced by its send lifecycle, with bounded waiting.
+/// The detached close task retains the separate physical-completion witness.
+async fn close_failed_native_send(
     connection: Arc<RTCPeerConnection>,
-    retirement_fence: NativeRetirementFence,
     physical_close_completed: Arc<AtomicBool>,
 ) -> Result<()> {
-    retirement_fence.request();
     tokio::time::timeout(
         NATIVE_CONNECTION_RETIRE_TIMEOUT,
         close_native_connection(connection, physical_close_completed),

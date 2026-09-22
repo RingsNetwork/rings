@@ -1,7 +1,37 @@
 use std::sync::atomic::AtomicBool;
 
-use super::send_runtime::RetirementFenceGuard;
 use super::*;
+
+/// Supply one no-op physical closer for gate-ordering tests.
+fn test_lifecycle(
+    acceptance: crate::core::transport::SendAcceptance,
+    fence: NativeRetirementFence,
+) -> Arc<SendLifecycle> {
+    SendLifecycle::new(
+        native_send_runtime().expect("test runtime"),
+        acceptance,
+        fence,
+        async { Ok(()) },
+    )
+}
+
+/// Model a primitive already admitted by the final gate, retaining its acceptance proof.
+fn irrevocable_owned<T: Send + 'static>(
+    send: impl std::future::Future<Output = Result<T>> + Send + 'static,
+    fence: NativeRetirementFence,
+) -> OwnedSend<impl std::future::Future<Output = Result<T>> + Send> {
+    let permit = SendPermit::always();
+    let lifecycle = test_lifecycle(permit.acceptance(), fence);
+    let proof = permit.try_mark_irrevocable().expect("live test permit");
+    OwnedSend::new(
+        async move {
+            let result = send.await?;
+            proof.mark_accepted();
+            Ok(result)
+        },
+        lifecycle,
+    )
+}
 
 async fn wait_for_flag(flag: &AtomicBool, label: &str) {
     tokio::time::timeout(Duration::from_secs(1), async {
@@ -98,22 +128,22 @@ fn test_connection_wide_fence_serializes_cross_channel_admission_with_retirement
     assert!(cancellation.is_cancelled());
 }
 
-#[test]
-fn test_cancellation_at_native_final_gate_does_not_retire_the_connection() {
+#[tokio::test]
+async fn test_cancellation_at_native_final_gate_does_not_retire_the_connection() {
     let connection_state = ConnectionStateCell::new();
     let cancellation = CancellationToken::new();
     let fence = NativeRetirementFence::new(connection_state.clone(), cancellation.clone());
     let permit = SendPermit::always();
     let acceptance = permit.acceptance();
     assert!(acceptance.try_cancel());
-    let mut retirement = RetirementFenceGuard::new(fence.clone());
+    let retirement = test_lifecycle(acceptance.clone(), fence.clone());
     let admission = fence
         .try_send_admission()
         .expect("an open connection must expose its final admission gate");
 
     assert!(permit.try_mark_irrevocable().is_none());
     drop(admission);
-    retirement.disarm();
+    retirement.fail();
     drop(retirement);
 
     assert_ne!(
@@ -123,8 +153,8 @@ fn test_cancellation_at_native_final_gate_does_not_retire_the_connection() {
     assert!(!cancellation.is_cancelled());
 }
 
-#[test]
-fn test_panic_before_native_permit_claim_does_not_retire_the_connection() {
+#[tokio::test]
+async fn test_panic_before_native_permit_claim_does_not_retire_the_connection() {
     let connection_state = ConnectionStateCell::new();
     let cancellation = CancellationToken::new();
     let fence = NativeRetirementFence::new(connection_state.clone(), cancellation.clone());
@@ -132,7 +162,7 @@ fn test_panic_before_native_permit_claim_does_not_retire_the_connection() {
         panic!("injected pre-claim panic");
     });
     let acceptance = permit.acceptance();
-    let retirement = RetirementFenceGuard::once_irrevocable(fence.clone(), acceptance.clone());
+    let retirement = test_lifecycle(acceptance.clone(), fence.clone());
     let admission = fence
         .try_send_admission()
         .expect("an open connection must expose its final admission gate");
@@ -141,6 +171,7 @@ fn test_panic_before_native_permit_claim_does_not_retire_the_connection() {
         let _proof = permit.try_mark_irrevocable();
     }));
     drop(admission);
+    retirement.fail();
     drop(retirement);
 
     assert!(outcome.is_err());
@@ -165,8 +196,8 @@ impl std::future::Future for PanicOnFirstPoll {
     }
 }
 
-#[test]
-fn test_first_poll_panic_releases_admission_before_retirement() {
+#[tokio::test]
+async fn test_first_poll_panic_releases_admission_before_retirement() {
     let connection_state = ConnectionStateCell::new();
     let cancellation = CancellationToken::new();
     let fence = NativeRetirementFence::new(connection_state.clone(), cancellation.clone());
@@ -174,20 +205,15 @@ fn test_first_poll_panic_releases_admission_before_retirement() {
     let acceptance = permit.acceptance();
 
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let failure_fence = fence.clone();
-        let mut retirement = IrrevocableSendGuard::new(acceptance.clone(), move || {
-            failure_fence.request();
-        });
+        let lifecycle = test_lifecycle(acceptance.clone(), fence.clone());
+        let mut send = OwnedSend::new(PanicOnFirstPoll, lifecycle);
         let admission = fence
             .try_send_admission()
             .expect("an open connection must expose its final admission gate");
-        retirement.bind(
-            permit
-                .try_mark_irrevocable()
-                .expect("live permit must become irrevocable"),
-        );
-        let mut send = Box::pin(PanicOnFirstPoll);
-        let _result = poll_once_while_guarded(send.as_mut(), admission);
+        let _proof = permit
+            .try_mark_irrevocable()
+            .expect("live permit must become irrevocable");
+        let _result = send.poll_admitted(admission);
     }));
 
     assert!(outcome.is_err());
@@ -250,7 +276,7 @@ async fn test_cancelled_revocable_native_send_releases_task_owned_state() {
                 &runtime,
                 acceptance,
                 test_retirement_fence(),
-                send,
+                |_| send,
                 retirement,
             )
             .await
@@ -301,10 +327,9 @@ async fn test_started_native_send_outlives_cancelled_caller() {
         }
     };
     let runtime = native_send_runtime().expect("Tokio test runtime must be available");
-    let caller =
-        tokio::spawn(
-            async move { run_irrevocable_send(&runtime, test_retirement_fence(), send).await },
-        );
+    let caller = tokio::spawn(async move {
+        run_irrevocable_send(&runtime, irrevocable_owned(send, test_retirement_fence())).await
+    });
     wait_for_flag(&started, "native send start").await;
 
     caller.abort();
@@ -377,7 +402,7 @@ async fn test_failed_irrevocable_send_retires_after_caller_is_cancelled() {
             &runtime,
             acceptance,
             test_retirement_fence(),
-            send,
+            |_| send,
             retirement,
         )
         .await
@@ -424,7 +449,7 @@ async fn test_accepted_send_is_not_retired_when_its_waiter_is_cancelled() {
             &runtime,
             acceptance,
             test_retirement_fence(),
-            send,
+            |_| send,
             retirement,
         )
         .await
@@ -470,7 +495,7 @@ async fn test_cancellation_wins_before_native_background_send_becomes_irrevocabl
         &runtime,
         acceptance.clone(),
         test_retirement_fence(),
-        send,
+        |_| send,
         retirement,
     );
     assert!(acceptance.try_cancel());
@@ -492,9 +517,15 @@ fn test_missing_runtime_returns_typed_error() {
 #[tokio::test]
 async fn test_native_send_task_preserves_join_error_source() {
     let runtime = native_send_runtime().expect("Tokio test runtime must be available");
-    let error = run_irrevocable_send::<()>(&runtime, test_retirement_fence(), async {
-        panic!("native send task panic witness");
-    })
+    let error = run_irrevocable_send::<()>(
+        &runtime,
+        irrevocable_owned(
+            async {
+                panic!("native send task panic witness");
+            },
+            test_retirement_fence(),
+        ),
+    )
     .await
     .expect_err("panicking send task must fail");
 
@@ -528,10 +559,15 @@ async fn test_panicking_irrevocable_native_send_retires_connection() {
     };
     let runtime = native_send_runtime().expect("Tokio test runtime must be available");
 
-    let error =
-        run_send_with_retirement::<()>(&runtime, acceptance, retirement_fence, send, retirement)
-            .await
-            .expect_err("panicking send task must fail");
+    let error = run_send_with_retirement::<(), _>(
+        &runtime,
+        acceptance,
+        retirement_fence,
+        |_| send,
+        retirement,
+    )
+    .await
+    .expect_err("panicking send task must fail");
 
     assert!(retired.load(Ordering::Acquire));
     assert_eq!(
@@ -567,10 +603,15 @@ async fn test_panicking_revocable_native_send_does_not_retire_connection() {
     };
     let runtime = native_send_runtime().expect("Tokio test runtime must be available");
 
-    let error =
-        run_send_with_retirement::<()>(&runtime, acceptance, retirement_fence, send, retirement)
-            .await
-            .expect_err("panicking send task must fail");
+    let error = run_send_with_retirement::<(), _>(
+        &runtime,
+        acceptance,
+        retirement_fence,
+        |_| send,
+        retirement,
+    )
+    .await
+    .expect_err("panicking send task must fail");
 
     assert!(!retired.load(Ordering::Acquire));
     assert_eq!(
@@ -596,8 +637,10 @@ async fn test_irrevocable_native_send_has_a_completion_bound() {
     let error = run_irrevocable_send_with_timeout(
         &runtime,
         NATIVE_SEND_TEST_COMPLETION_TIMEOUT,
-        NativeRetirementFence::new(ConnectionStateCell::new(), cancellation),
-        send,
+        irrevocable_owned(
+            send,
+            NativeRetirementFence::new(ConnectionStateCell::new(), cancellation),
+        ),
     )
     .await
     .expect_err("an irrevocable send must not remain pending forever");
@@ -635,7 +678,8 @@ async fn test_failed_irrevocable_send_retires_before_preserving_its_error() {
         NativeRetirementFence::new(connection_state.clone(), cancellation.clone());
 
     let result =
-        run_send_with_retirement(&runtime, acceptance, retirement_fence, send, retirement).await;
+        run_send_with_retirement(&runtime, acceptance, retirement_fence, |_| send, retirement)
+            .await;
 
     assert!(retired.load(Ordering::Acquire));
     assert_eq!(

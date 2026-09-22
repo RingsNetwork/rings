@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 /// Phase of one cancellable admission transaction.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 #[repr(u8)]
 pub enum AdmissionPhase {
     /// No irreversible work has started.
@@ -50,7 +50,7 @@ impl AdmissionPhase {
 }
 
 /// Event accepted by the admission transition model.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum AdmissionEvent {
     /// Cancel work that is still pending.
     Cancel,
