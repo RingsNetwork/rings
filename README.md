@@ -31,26 +31,21 @@ both the network layer and the privacy layer.
 
 ## Where Rings fits
 
-Rings combines a Chord overlay, DID addressing, WebRTC transport, and a namespaced
-application runtime. The projects below solve overlapping problems at different
-layers; this is an architectural comparison, not a performance benchmark.
+| Project | Browser-to-browser P2P | Structured P2P | Privacy layer | E2E encryption |
+|---|---|---|---|---|
+| **Rings** | Yes (WebRTC) | Yes (Chord) | Separate onion-circuit layer | Yes (opt-in E2E streams) |
+| **libp2p** | Yes (WebRTC) | Optional (Kademlia DHT) | No built-in anonymity layer | Yes (peer connections, including circuit relays) |
+| **aMule / eD2k / Kad** | No | Yes for Kad; no for eD2k | No anonymity layer | Protocol obfuscation only; no secure E2E guarantee |
+| **Nostr** | No (client-to-relay) | No | No built-in network anonymity layer | Yes for encrypted messages (e.g. NIP-44); not public events |
+| **Nym mixnet** | No direct P2P (browser clients use gateways) | No DHT overlay (layered mixnet) | Full mixnet path | Yes (between Nym clients) |
 
-| Project | Main abstraction and routing | Browser participation | Privacy boundary |
-|---|---|---|---|
-| **Rings** | Application overlay; Chord routes messages by DID | Browser/Wasm and native nodes join the same overlay over WebRTC | Plain routing exposes endpoint DIDs; separate onion circuits have the limits in [SECURITY.md](./SECURITY.md#layer-contracts) |
-| **[libp2p](https://libp2p.io/docs/)** | Modular networking stack; applications select transports, discovery, routing, and pubsub | Supports browser peers, including WebRTC; availability depends on implementation and transport | Secure connections do not by themselves provide anonymous routing |
-| **[aMule / eD2k / Kad](https://wiki.amule.org/wiki/FAQ_eD2k-Kademlia)** | File-sharing client; eD2k servers index sources, Kad provides DHT discovery | Native client; its web interface controls a running client | File discovery and transfer are not an anonymity layer |
-| **[Nostr](https://github.com/nostr-protocol/nips/blob/master/01.md)** | Signed events published to and queried from relays | Browser clients connect to relays over WebSocket | Event signatures authenticate authors; relays remain in the event path |
-| **[Nym mixnet](https://nym.com/nym-whitepaper.pdf)** | Privacy network; packets traverse gateways and mix nodes | Application clients access the mixnet through gateways | Sphinx packets, randomized delays, and cover traffic target traffic analysis, with latency and bandwidth costs |
+Browser P2P means the browser itself establishes a peer connection. Structured P2P
+means a DHT-organized overlay. Privacy describes network-metadata protection;
+E2E describes payload encryption between the stated endpoints. A full mixnet path
+does not mean unconditional anonymity or protection beyond a network exit.
 
-Rings is a fit when an application wants browser and native nodes to participate in
-one structured overlay with DID-routed messages. libp2p offers a broader choice of
-networking building blocks; aMule provides file-sharing semantics; Nostr provides
-relay-based event distribution; Nym focuses on metadata protection. These are design
-tradeoffs, not claims of protocol compatibility or stronger security.
-
-See the [detailed comparison and primary sources](./docs/src/introduction/protocol-comparison.md)
-for connectivity dependencies, identity assumptions, and selection guidance.
+See [comparison sources](./docs/src/introduction/protocol-comparison.md#primary-sources)
+and the [Rings security model](./SECURITY.md#layer-contracts).
 
 ## Reading paths
 
