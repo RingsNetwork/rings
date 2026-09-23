@@ -78,7 +78,7 @@ async fn test_raw_transport_lease_is_held_until_core_capacity_admission() -> Res
     ))?);
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();
-    let session = SessionSk::new_with_seckey(&peer_key)?;
+    let session = DelegateeKey::new_with_seckey(&peer_key)?;
     let payload = local_wire(
         Message::custom(b"transport-capacity-handoff")?,
         &session,

@@ -1,6 +1,6 @@
 //! Deterministic multi-node sync-storm scenarios for issue #686.
 //!
-//! Session references run in every scenario. The sender's tables are judged on the system clock
+//! Delegation references run in every scenario. The sender's tables are judged on the system clock
 //! and the receiver's on the inbound clock, both under paused tokio time here; replay identity
 //! holds because no scenario holds a frame (a handful of sessions against tables of 64 and 128,
 //! over a lossless dummy link), so no verdict depends on either clock.
@@ -15,6 +15,7 @@ use futures::FutureExt;
 use futures::StreamExt;
 use rings_transport::connections::dummy_controlled;
 
+use crate::delegation::DelegateeKey;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
@@ -30,7 +31,6 @@ use crate::message::test_probe_request;
 use crate::message::Encoder;
 use crate::message::Message;
 use crate::message::SyncEntriesWithSuccessor;
-use crate::session::SessionSk;
 use crate::simulation::model::SimAction;
 use crate::simulation::model::SimConnectionState;
 use crate::simulation::model::SimEventId;
@@ -480,7 +480,7 @@ async fn build_nodes(count: usize) -> Vec<Node> {
 fn build_repair_nodes(count: usize) -> Vec<Node> {
     (0..count)
         .map(|index| {
-            let session = SessionSk::new_with_seckey(&deterministic_key(index))
+            let session = DelegateeKey::new_with_seckey(&deterministic_key(index))
                 .expect("deterministic repair-node session must be valid");
             let swarm = SwarmBuilder::new(
                 0,
@@ -503,7 +503,7 @@ fn build_finger_nodes(key_indices: &[usize]) -> Vec<Node> {
         .iter()
         .copied()
         .map(|index| {
-            let session = SessionSk::new_with_seckey(&deterministic_key(index))
+            let session = DelegateeKey::new_with_seckey(&deterministic_key(index))
                 .expect("deterministic finger-node session must be valid");
             let swarm = SwarmBuilder::new(
                 0,
@@ -1004,7 +1004,7 @@ async fn conclude_healthy_liveness(
 fn assert_enabled_outcome(outcome: &ScenarioOutcome) {
     let diagnostic = outcome.diagnostic();
     let snapshot = outcome.state.snapshot();
-    // The storm ran over links that reached session references, so the reference protocol,
+    // The storm ran over links that reached delegation references, so the reference protocol,
     // not the all-inline encoding, is what the adversarial schedule exercised: some link
     // direction of this scenario (the set is the scenario's own, not the thread's) went by
     // reference. Which directions switch, and when, is the adversary's to delay.

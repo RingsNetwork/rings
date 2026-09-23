@@ -123,7 +123,7 @@ Now let's integrate it into the `config.yaml` file:
 
 internal_api_port: 50000
 endpoint_url: http://127.0.0.1:50000
-session_sk: ~/.rings/session_sk
+delegatee_key: ~/.rings/delegatee_key
 ice_servers: stun://stun.l.google.com:19302
 stabilize_interval: 3
 external_ip: null

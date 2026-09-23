@@ -13,9 +13,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
 use rings_core::ecc::SecretKey;
-use rings_core::session::SessionSk;
 use rings_core::storage::MemStorage;
 use rings_node::extension::protocols::relay::RelayHandle;
 use rings_node::processor::Processor;
@@ -38,11 +38,11 @@ pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 /// the relay handle (open tunnels / register services).
 pub async fn spawn_node() -> (Arc<Processor>, Arc<Provider>, RelayHandle) {
     let key = SecretKey::random();
-    let session_sk = SessionSk::new_with_seckey(&key).expect("session sk");
+    let delegatee_key = DelegateeKey::new_with_seckey(&key).expect("session sk");
     let config = ProcessorConfig::new(
         0,
         "stun://stun.l.google.com:19302".to_string(),
-        session_sk,
+        delegatee_key,
         3,
     );
     let processor = Arc::new(

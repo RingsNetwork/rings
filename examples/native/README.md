@@ -11,7 +11,7 @@ Start a seed daemon first:
 ```sh
 cargo run -p rings-node --bin rings -- init \
   --location /tmp/rings-seed/config.yaml \
-  --session-sk /tmp/rings-seed/session_sk
+  --delegatee-key /tmp/rings-seed/delegatee_key
 
 cargo run -p rings-node --bin rings -- run \
   --config /tmp/rings-seed/config.yaml \

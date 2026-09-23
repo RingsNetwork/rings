@@ -16,7 +16,7 @@ use crate::message::Message;
 use crate::message::MessageHandler;
 use crate::message::MessageKind;
 use crate::message::MessagePayload;
-use crate::swarm::session_link::ReferencedSessions;
+use crate::swarm::session_link::ReferencedDelegations;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 
@@ -278,12 +278,12 @@ pub(super) struct InboundProcessor {
     /// most one and a half of an admitted peer's frame budgets, and a quarter of the transport's
     /// per-peer frames stays free for the control frames that release either hold.
     pre_admission: Arc<Mutex<PreAdmissionHold<HeldInboundFrame>>>,
-    /// The receiving end of this connection's session references: the sessions the peer has
+    /// The receiving end of this connection's delegation references: the sessions the peer has
     /// announced on it and the frames waiting for one. It lives and dies with the connection;
     /// its hold is bounded by [`SESSION_HOLD_CAPACITY`] frames and by
     /// [`SESSION_HOLD_TIMEOUT`](crate::swarm::transport::SESSION_HOLD_TIMEOUT), swept by the
     /// inbound actor's periodic cleanup.
-    session_link: Arc<Mutex<ReferencedSessions<InboundFrameLease>>>,
+    session_link: Arc<Mutex<ReferencedDelegations<InboundFrameLease>>>,
 }
 
 /// What the transport handed over with one frame and takes back when the frame is done: the

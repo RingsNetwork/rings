@@ -1,6 +1,6 @@
 # Rings Multi-Node Cluster Image
 
-This image runs N native `rings` daemon processes in one container, generates per-node session keys from external private keys, waits for every HTTP API to become ready, then connects the nodes. It is a demo/test cluster, so onion relay and onion exit advertisement are enabled by default.
+This image runs N native `rings` daemon processes in one container, generates per-node delegatee keys from external private keys, waits for every HTTP API to become ready, then connects the nodes. It is a demo/test cluster, so onion relay and onion exit advertisement are enabled by default.
 
 The generated configuration explicitly permits the container's external listeners to bind
 `0.0.0.0`; Docker's published ports determine host access. Each node creates a separate
@@ -62,7 +62,7 @@ Private key file format:
 - 64-character hex or `0x`-prefixed hex
 - at least `RINGS_NODE_COUNT` entries when `RINGS_ALLOW_RANDOM_KEYS=false`
 
-The launcher does not print private key values or API tokens. Session key and API token files
+The launcher does not print private key values or API tokens. Delegatee key and API token files
 under `RINGS_CLUSTER_DIR/keys` are sensitive and should be stored on a protected volume if persisted.
 
 Useful environment variables:
@@ -73,7 +73,7 @@ Useful environment variables:
 - `RINGS_CONNECT_TOPOLOGY`: `ring`, `seed`, or `mesh`; default `ring`
 - `RINGS_BASE_INTERNAL_PORT`: first loopback JSON-RPC port; default `50000`
 - `RINGS_BASE_EXTERNAL_PORT`: first externally bound JSON-RPC port; default `51000`
-- `RINGS_CLUSTER_DIR`: config, logs, storage, and session key directory; default `/var/lib/rings-cluster`
+- `RINGS_CLUSTER_DIR`: config, logs, storage, and delegatee key directory; default `/var/lib/rings-cluster`
 - `RINGS_ICE_SERVERS`: ICE server list passed to every node; set it to an empty string to run without ICE servers
 - `RINGS_RUNTIME`: Tokio runtime flavor for each node process; default `current-thread`
 - `RINGS_LOG_LEVEL`: optional node log level override; when unset, the `rings` CLI default is `error`

@@ -21,8 +21,8 @@ use js_sys::Function;
 use js_sys::Object;
 use js_sys::Reflect;
 use js_sys::Uint8Array;
+use rings_node::prelude::rings_core::delegation::DelegateeKey;
 use rings_node::prelude::rings_core::ecc::SecretKey;
-use rings_node::prelude::rings_core::session::SessionSk;
 use rings_node::prelude::rings_core::storage::idb::IdbStorage;
 use rings_node::processor::ProcessorBuilder;
 use rings_node::processor::ProcessorConfig;
@@ -72,11 +72,11 @@ impl DwebNode {
 #[allow(clippy::arc_with_non_send_sync)]
 async fn build_node(storage_name: &str) -> DwebNode {
     let key = SecretKey::random();
-    let session_sk = SessionSk::new_with_seckey(&key).expect("session sk");
+    let delegatee_key = DelegateeKey::new_with_seckey(&key).expect("session sk");
     let config = ProcessorConfig::new(
         0,
         "stun://stun.l.google.com:19302".to_string(),
-        session_sk,
+        delegatee_key,
         200,
     );
     let storage = Box::new(
@@ -250,11 +250,7 @@ fn app() -> Html {
         let peer_did = peer_did.clone();
         let path = path.clone();
         Callback::from(move |_| {
-            let Some(p) = node
-                .borrow()
-                .as_ref()
-                .map(|node| node.provider.clone())
-            else {
+            let Some(p) = node.borrow().as_ref().map(|node| node.provider.clone()) else {
                 return;
             };
             let (peer, path) = ((*peer_did).trim().to_string(), (*path).clone());

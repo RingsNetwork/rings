@@ -11,9 +11,9 @@
 //!
 //! 1. Handshake
 //! - Node A create a new transport via `swarm.new_transport()` and generate the handshake SDP
-//!   with `transport.get_handshake_info(session_sk, offer)` and send it to node B.
+//!   with `transport.get_handshake_info(delegatee_key, offer)` and send it to node B.
 //! - Node B accept the offer with `transport.register_remote_info(offer)` and response with Answer via
-//!   `transport.get_handshake_info(session_sk, offer)`.
+//!   `transport.get_handshake_info(delegatee_key, offer)`.
 //! - Node A accept the answer and wait until the connection creation.
 //! 2. Join Ring
 //! - After the connection creation, node A will ask node B for a successor.
@@ -41,17 +41,11 @@
 //! last hop from the transport edge, nothing else about the route. Z responds by routing a report
 //! back to the origin over the Ring the same way.
 //!
-//! # ECDSA Session
+//! # Delegated signing
 //!
-//! To avoid too frequent signing, and keep the private key safe, we implemented a session protocol for signing/encrypting and verifying messages.
-//!
-//! ECDSA Session is based on secp256k1.
-//! - ECDSA Session is based on secp256k1.
-//!   ECDSA Session creates a temporary secret key with one-time signing auth.
-//! - To create a ECDSA Session, we should generate the unsign_info with our pubkey (Address).
-//!   `SessionSk::gen_unsign_info(addr, ..)`, it will return the msg needs for signing, and a temporary private key.
-//! - Then we can sign the auth message via some web3 provider like metamask or just with a raw private key, and create the SessionManger with
-//!   `SessionSk::new(sig, auth_info, temp_key)`.
+//! A delegator authorizes a generated delegatee key by signing a delegation proof. The delegatee
+//! key signs messages on the delegator's behalf while that proof is valid. See [`delegation`] for
+//! the `DelegationBuilder`, `Delegation`, and `DelegateeKey` APIs.
 
 //! # WASM Supported
 //! ```shell
@@ -71,13 +65,13 @@
 
 pub mod algebra;
 mod base58_check;
+pub mod delegation;
 pub mod dht;
 pub mod ecc;
 pub mod error;
 mod fair_admission;
 pub mod lifecycle;
 pub mod message;
-pub mod session;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) mod simulation;
 pub mod storage;

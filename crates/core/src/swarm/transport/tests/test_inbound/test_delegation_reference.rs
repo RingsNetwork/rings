@@ -1,37 +1,37 @@
-//! The link stage of one inbound connection: frames whose session slots are references, the
+//! The link stage of one inbound connection: frames whose delegation slots are references, the
 //! hold behind a miss, and the link-control frames that repair it. Every wait is on the
 //! application callback's delivery event.
 
 use super::*;
+use crate::delegation::DelegationDigest;
+use crate::message::DelegationRef;
 use crate::message::HopBudget;
 use crate::message::LinkControl;
 use crate::message::MessagePayload;
 use crate::message::MessageRelay;
 use crate::message::PerSlot;
-use crate::message::SessionRef;
 use crate::message::Transaction;
 use crate::message::WirePayload;
-use crate::session::SessionDigest;
 use crate::swarm::callback::SESSION_HOLD_CAPACITY;
 use crate::swarm::transport::dispatched_link_control_for_test;
 use crate::swarm::transport::LINK_CONTROL_IN_FLIGHT_CAPACITY;
 use crate::tests::default::dummy_hooks::PausedDispatchGuard;
-use crate::tests::session_sk_with_ttl;
+use crate::tests::delegatee_key_with_ttl;
 
 /// The typed refusal of a referenced frame outside a link, from the callback's boxed error.
-fn unresolved_reference(refusal: &(dyn std::error::Error + 'static)) -> Option<SessionDigest> {
+fn unresolved_reference(refusal: &(dyn std::error::Error + 'static)) -> Option<DelegationDigest> {
     match refusal.downcast_ref::<Error>() {
-        Some(Error::SessionReferenceUnresolved(digest)) => Some(*digest),
+        Some(Error::DelegationReferenceUnresolved(digest)) => Some(*digest),
         _ => None,
     }
 }
 
-/// The frame bytes of `payload` with both session slots sent by reference.
+/// The frame bytes of `payload` with both delegation slots sent by reference.
 fn referenced_wire(payload: &MessagePayload) -> Result<Vec<u8>> {
-    let sessions = payload.sessions();
+    let sessions = payload.delegations();
     let references = PerSlot {
-        origin: SessionRef::Digest(sessions.origin.digest()?),
-        hop: SessionRef::Digest(sessions.hop.digest()?),
+        origin: DelegationRef::Digest(sessions.origin.digest()?),
+        hop: DelegationRef::Digest(sessions.hop.digest()?),
     };
     WirePayload::view(payload, references)
         .to_wire()
@@ -41,10 +41,10 @@ fn referenced_wire(payload: &MessagePayload) -> Result<Vec<u8>> {
 /// The frame bytes of `payload` with the origin session inline and the hop session by
 /// reference: a slot mix only a link can carry.
 fn hop_referenced_wire(payload: &MessagePayload) -> Result<Vec<u8>> {
-    let sessions = payload.sessions();
+    let sessions = payload.delegations();
     let references = PerSlot {
-        origin: SessionRef::inline(sessions.origin),
-        hop: SessionRef::Digest(sessions.hop.digest()?),
+        origin: DelegationRef::inline(sessions.origin),
+        hop: DelegationRef::Digest(sessions.hop.digest()?),
     };
     WirePayload::view(payload, references)
         .to_wire()
@@ -56,7 +56,7 @@ fn hop_referenced_wire(payload: &MessagePayload) -> Result<Vec<u8>> {
 fn stranger_payload(
     pending: &PendingPeer,
     transport: &SwarmTransport,
-    stranger: &SessionSk,
+    stranger: &DelegateeKey,
     data: &[u8],
 ) -> Result<MessagePayload> {
     let transaction = Transaction::new(
@@ -125,7 +125,7 @@ async fn test_missed_session_holds_frames_until_the_peer_announces_it() -> Resul
     let pending = pending_peer(&transport, &app_callback).await?;
     pending.admit(&transport).await?;
 
-    let stranger = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let stranger = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let missed = stranger_payload(&pending, &transport, &stranger, b"missed")?;
     pending.receive(&referenced_wire(&missed)?).await?;
     pending
@@ -138,7 +138,7 @@ async fn test_missed_session_holds_frames_until_the_peer_announces_it() -> Resul
         .snapshot_counters()?
         .contains(&(pending.peer, MeasurementEvent::FailedToReceive)));
 
-    let announcement = LinkControl::Announce(stranger.session()).to_wire()?;
+    let announcement = LinkControl::Announce(stranger.delegation()).to_wire()?;
     pending.receive(announcement.as_ref()).await?;
     app_callback.wait_for_inbounds_at_least(2).await;
 
@@ -162,7 +162,7 @@ async fn test_missed_hop_session_is_repaired_by_announcement() -> Result<()> {
     let app_callback = Arc::new(CountingSwarmCallback::default());
     let pending = pending_peer(&transport, &app_callback).await?;
     pending.admit(&transport).await?;
-    let digest = pending.session.session().digest()?;
+    let digest = pending.session.delegation().digest()?;
     let dispatched_before = dispatched_link_control_for_test().len();
 
     let missed = custom_payload(&pending, &transport, b"hop-missed")?;
@@ -173,7 +173,7 @@ async fn test_missed_hop_session_is_repaired_by_announcement() -> Result<()> {
         vec![(pending.peer, LinkControl::Request(digest))]
     );
 
-    let announcement = LinkControl::Announce(pending.session.session()).to_wire()?;
+    let announcement = LinkControl::Announce(pending.session.delegation()).to_wire()?;
     pending.receive(announcement.as_ref()).await?;
     app_callback.wait_for_inbounds_at_least(1).await;
 
@@ -209,12 +209,12 @@ async fn test_hold_overflow_drops_the_newcomer_uncharged_and_asks_the_oldest_que
     app_callback.wait_for_inbounds_at_least(1).await;
     let dispatched_before = dispatched_link_control_for_test().len();
 
-    let oldest_stranger = SessionSk::new_with_seckey(&SecretKey::random())?;
-    let oldest_digest = oldest_stranger.session().digest()?;
+    let oldest_stranger = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let oldest_digest = oldest_stranger.delegation().digest()?;
     let oldest = stranger_payload(&pending, &transport, &oldest_stranger, b"oldest")?;
     pending.receive(&referenced_wire(&oldest)?).await?;
     for held in 1..SESSION_HOLD_CAPACITY {
-        let stranger = SessionSk::new_with_seckey(&SecretKey::random())?;
+        let stranger = DelegateeKey::new_with_seckey(&SecretKey::random())?;
         let data = format!("held-{held}");
         let missed = stranger_payload(&pending, &transport, &stranger, data.as_bytes())?;
         pending.receive(&referenced_wire(&missed)?).await?;
@@ -227,7 +227,7 @@ async fn test_hold_overflow_drops_the_newcomer_uncharged_and_asks_the_oldest_que
         .snapshot_counters()?
         .contains(&(pending.peer, MeasurementEvent::FailedToReceive)));
 
-    let newcomer_stranger = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let newcomer_stranger = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let newcomer = stranger_payload(&pending, &transport, &newcomer_stranger, b"newcomer")?;
     pending.receive(&referenced_wire(&newcomer)?).await?;
 
@@ -246,7 +246,7 @@ async fn test_hold_overflow_drops_the_newcomer_uncharged_and_asks_the_oldest_que
         .split_off(dispatched_before)
         .contains(&(
             pending.peer,
-            LinkControl::Request(newcomer_stranger.session().digest()?)
+            LinkControl::Request(newcomer_stranger.delegation().digest()?)
         )));
     assert_eq!(app_callback.inbounds(), 1);
     transport.disconnect(pending.peer).await?;
@@ -274,7 +274,7 @@ async fn test_receiver_table_does_not_outlive_the_connection_generation() -> Res
 
     let next = pending_peer_with_key(&transport, &app_callback, peer_key).await?;
     next.admit(&transport).await?;
-    let digest = next.session.session().digest()?;
+    let digest = next.session.delegation().digest()?;
     let dispatched_before = dispatched_link_control_for_test().len();
     let referenced = custom_payload(&next, &transport, b"referenced-on-the-next-generation")?;
     next.receive(&referenced_wire(&referenced)?).await?;
@@ -300,9 +300,9 @@ async fn test_disclaimed_session_fails_awaiting_frames_and_leaves_resolved_ones_
     let pending = pending_peer(&transport, &app_callback).await?;
     pending.admit(&transport).await?;
 
-    let stranger = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let stranger = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let missed = stranger_payload(&pending, &transport, &stranger, b"never-resolved")?;
-    let digest = stranger.session().digest()?;
+    let digest = stranger.delegation().digest()?;
     pending.receive(&referenced_wire(&missed)?).await?;
     pending
         .receive(&pending.custom_message_wire(&transport, b"passing")?)
@@ -336,7 +336,7 @@ async fn test_unsolicited_announcement_does_not_populate_the_link() -> Result<()
     let pending = pending_peer(&transport, &app_callback).await?;
     pending.admit(&transport).await?;
 
-    let announcement = LinkControl::Announce(pending.session.session()).to_wire()?;
+    let announcement = LinkControl::Announce(pending.session.delegation()).to_wire()?;
     pending.receive(announcement.as_ref()).await?;
     let referenced = custom_payload(&pending, &transport, b"referenced")?;
     pending.receive(&referenced_wire(&referenced)?).await?;
@@ -369,7 +369,7 @@ async fn test_frames_held_past_the_timeout_are_swept_and_charged() -> Result<()>
     pending.admit(&transport).await?;
     let peer = pending.peer;
 
-    let stranger = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let stranger = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let missed = stranger_payload(&pending, &transport, &stranger, b"never-answered")?;
     pending.receive(&referenced_wire(&missed)?).await?;
     assert_eq!(pending.callback.session_hold_count_for_test(), 1);
@@ -435,7 +435,7 @@ async fn test_control_frames_never_pace_the_read_loop() -> Result<()> {
     let app_callback = Arc::new(CountingSwarmCallback::default());
     let pending = pending_peer(&transport, &app_callback).await?;
     pending.admit(&transport).await?;
-    let digest = pending.session.session().digest()?;
+    let digest = pending.session.delegation().digest()?;
     let dispatched_before = dispatched_link_control_for_test().len();
 
     let dispatch_gate = PausedDispatchGuard::new();
@@ -465,7 +465,7 @@ async fn test_control_sends_beyond_the_in_flight_budget_are_refused() -> Result<
     let app_callback = Arc::new(CountingSwarmCallback::default());
     let pending = pending_peer(&transport, &app_callback).await?;
     pending.admit(&transport).await?;
-    let digest = pending.session.session().digest()?;
+    let digest = pending.session.delegation().digest()?;
     transport.outbound_schedulers.handle(pending.peer)?;
     let in_flight = (0..LINK_CONTROL_IN_FLIGHT_CAPACITY)
         .map(|_| {
@@ -507,12 +507,12 @@ async fn test_a_request_is_answered_from_the_announced_table() -> Result<()> {
     let app_callback = Arc::new(CountingSwarmCallback::default());
     let pending = pending_peer(&transport, &app_callback).await?;
     pending.admit(&transport).await?;
-    let own_session = transport.session_sk.session();
+    let own_session = transport.delegatee_key.delegation();
     let own_digest = own_session.digest()?;
     // This end announces its session as the worker would, by encoding one frame to the peer.
     let announced = MessagePayload::new_send(
         Message::custom(b"announces-my-session")?,
-        MessageSigner::new(&transport.session_sk, TEST_NETWORK_ID),
+        MessageSigner::new(&transport.delegatee_key, TEST_NETWORK_ID),
         transport.dht.did,
         pending.peer,
     )?;
@@ -531,8 +531,8 @@ async fn test_a_request_is_answered_from_the_announced_table() -> Result<()> {
     pending
         .receive(LinkControl::Request(own_digest).to_wire()?.as_ref())
         .await?;
-    let never_sent = SessionSk::new_with_seckey(&SecretKey::random())?
-        .session()
+    let never_sent = DelegateeKey::new_with_seckey(&SecretKey::random())?
+        .delegation()
         .digest()?;
     pending
         .receive(LinkControl::Request(never_sent).to_wire()?.as_ref())
@@ -569,7 +569,7 @@ async fn test_referenced_frame_on_an_unbound_callback_is_refused() -> Result<()>
     let refusal = refused.expect_err("a reference resolves only on a link");
     assert_eq!(
         unresolved_reference(refusal.as_ref()),
-        Some(pending.session.session().digest()?)
+        Some(pending.session.delegation().digest()?)
     );
     assert_eq!(unbound.session_hold_count_for_test(), 0);
     assert_eq!(dispatched_link_control_for_test().len(), dispatched_before);
@@ -598,7 +598,7 @@ async fn test_frames_from_a_peer_other_than_the_bound_one_are_off_the_link() -> 
     let refusal = refused.expect_err("a reference resolves only on the bound link");
     assert_eq!(
         unresolved_reference(refusal.as_ref()),
-        Some(pending.session.session().digest()?)
+        Some(pending.session.delegation().digest()?)
     );
     assert_eq!(pending.callback.session_hold_count_for_test(), 0);
 
@@ -607,7 +607,7 @@ async fn test_frames_from_a_peer_other_than_the_bound_one_are_off_the_link() -> 
     let awaited = custom_payload(&pending, &transport, b"awaiting-the-peer")?;
     pending.receive(&referenced_wire(&awaited)?).await?;
     assert_eq!(pending.callback.session_hold_count_for_test(), 1);
-    let announcement = LinkControl::Announce(pending.session.session()).to_wire()?;
+    let announcement = LinkControl::Announce(pending.session.delegation()).to_wire()?;
     pending
         .callback
         .on_admitted_message_for_test(&stranger_did.to_string(), announcement.as_ref())
@@ -663,7 +663,7 @@ async fn test_an_expired_announcement_is_refused_and_charged() -> Result<()> {
     // the inbound clock is captured, so the clock advanced past the lifetime is past the
     // delegation's end.
     const SHORT_LIFETIME_MS: u64 = 900;
-    let short_lived = session_sk_with_ttl(SHORT_LIFETIME_MS)?;
+    let short_lived = delegatee_key_with_ttl(SHORT_LIFETIME_MS)?;
     let now_ms = Arc::new(Mutex::new(crate::utils::get_epoch_ms()));
     let app_callback = Arc::new(CountingSwarmCallback::default());
     let pending = pending_peer_with(
@@ -685,7 +685,7 @@ async fn test_an_expired_announcement_is_refused_and_charged() -> Result<()> {
     assert_eq!(pending.callback.session_hold_count_for_test(), 1);
 
     *now_ms.lock().map_err(|_| Error::LockPoisoned)? += u128::from(SHORT_LIFETIME_MS) + 1;
-    let announcement = LinkControl::Announce(short_lived.session()).to_wire()?;
+    let announcement = LinkControl::Announce(short_lived.delegation()).to_wire()?;
     pending.receive(announcement.as_ref()).await?;
 
     assert_eq!(pending.callback.session_hold_count_for_test(), 0);

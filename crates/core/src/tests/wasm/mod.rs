@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use wasm_bindgen_test::wasm_bindgen_test_configure;
 
+use crate::delegation::DelegateeKey;
 use crate::ecc::SecretKey;
-use crate::session::SessionSk;
 use crate::storage::idb::IdbStorage;
 use crate::swarm::Swarm;
 use crate::swarm::SwarmBuilder;
@@ -21,14 +21,14 @@ enum TestStorageMode {
 
 async fn prepare_node_with_storage_mode(key: SecretKey, mode: TestStorageMode) -> Arc<Swarm> {
     let stun = "stun://stun.l.google.com:19302";
-    let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+    let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
     let storage = Box::new(
         IdbStorage::new_with_cap_and_name(1000, uuid::Uuid::new_v4().to_string().as_str())
             .await
             .unwrap(),
     );
 
-    let builder = SwarmBuilder::new(0, stun, storage, session_sk);
+    let builder = SwarmBuilder::new(0, stun, storage, delegatee_key);
     let builder = match mode {
         TestStorageMode::Default => builder,
         TestStorageMode::Repair => builder.dht_storage_redundancy(2).dht_virtual_nodes(0),

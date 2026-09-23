@@ -70,11 +70,11 @@ fn test_webrtc_udp_port_range_rejects_inverted_bounds() {
 #[test]
 fn test_online_node_timing_requires_heartbeat_interval_less_than_ttl_when_enabled() {
     let key = SecretKey::random();
-    let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+    let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
     let mut config = ProcessorConfig::new(
         0,
         "stun://stun.l.google.com:19302".to_string(),
-        session_sk,
+        delegatee_key,
         3,
     );
     config.online_node_heartbeat_interval = Duration::from_secs(90);
@@ -91,11 +91,11 @@ fn test_online_node_timing_requires_heartbeat_interval_less_than_ttl_when_enable
 #[test]
 fn test_presence_advertisement_can_be_disabled() {
     let key = SecretKey::random();
-    let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+    let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
     let mut config = ProcessorConfig::new(
         0,
         "stun://stun.l.google.com:19302".to_string(),
-        session_sk,
+        delegatee_key,
         3,
     );
     config.online_node_heartbeat_interval = Duration::from_secs(90);
@@ -113,11 +113,11 @@ fn test_presence_advertisement_can_be_disabled() {
 #[test]
 fn test_presence_advertisement_is_enabled_by_default() {
     let key = SecretKey::random();
-    let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+    let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
     let config = ProcessorConfig::new(
         0,
         "stun://stun.l.google.com:19302".to_string(),
-        session_sk,
+        delegatee_key,
         3,
     );
 
@@ -134,11 +134,11 @@ fn test_presence_advertisement_is_enabled_by_default() {
 #[test]
 fn test_dht_virtual_nodes_rejects_values_above_cost_bound() {
     let key = SecretKey::random();
-    let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+    let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
     let config = ProcessorConfig::new(
         0,
         "stun://stun.l.google.com:19302".to_string(),
-        session_sk,
+        delegatee_key,
         3,
     )
     .dht_virtual_nodes(MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER.saturating_add(1));
@@ -154,7 +154,7 @@ fn test_dht_virtual_nodes_rejects_values_above_cost_bound() {
 #[test]
 fn test_serialized_processor_config_defaults_dht_virtual_nodes() {
     let key = SecretKey::random();
-    let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+    let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
     let yaml = format!(
         r#"
 network_id: 0
@@ -162,14 +162,14 @@ ice_servers: stun://stun.l.google.com:19302
 external_address: null
 webrtc_udp_port_min: null
 webrtc_udp_port_max: null
-session_sk: "{}"
+delegatee_key: "{}"
 stabilize_interval: 15
 online_node_heartbeat_interval_secs: 30
 online_node_ttl_secs: 60
 online_node_type: Native
 advertise_presence: true
 "#,
-        session_sk.dump().unwrap()
+        delegatee_key.dump().unwrap()
     );
 
     let serialized = serde_yaml::from_str::<ProcessorConfigSerialized>(&yaml).unwrap();
@@ -186,13 +186,13 @@ advertise_presence: true
 #[test]
 fn test_processor_construction_preserves_explicit_origin_quota() {
     let key = SecretKey::random();
-    let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+    let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
     let lane = OriginQuotaLaneConfig::new(2, 3, 5, 7, 11).unwrap();
     let quota = OriginQuotaConfig::new(lane, lane, lane, lane);
     let config = ProcessorConfig::new(
         0,
         "stun://stun.l.google.com:19302".to_string(),
-        session_sk,
+        delegatee_key,
         3,
     )
     .origin_quota(quota);
@@ -205,11 +205,11 @@ fn test_processor_construction_preserves_explicit_origin_quota() {
 #[test]
 fn test_onion_relay_requires_presence_advertisement() {
     let key = SecretKey::random();
-    let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+    let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
     let mut config = ProcessorConfig::new(
         0,
         "stun://stun.l.google.com:19302".to_string(),
-        session_sk,
+        delegatee_key,
         3,
     )
     .advertise_onion_relay(true);
@@ -226,11 +226,11 @@ fn test_onion_relay_requires_presence_advertisement() {
 #[test]
 fn test_advertised_onion_exit_requires_open_policy() {
     let key = SecretKey::random();
-    let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+    let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
     let config = ProcessorConfig::new(
         0,
         "stun://stun.l.google.com:19302".to_string(),
-        session_sk,
+        delegatee_key,
         3,
     )
     .advertise_onion_exit(true);
@@ -244,11 +244,11 @@ fn test_advertised_onion_exit_requires_open_policy() {
 #[test]
 fn test_onion_exit_registration_task_can_run_without_presence_advertisement() -> Result<()> {
     let key = SecretKey::random();
-    let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+    let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
     let mut config = ProcessorConfig::new(
         0,
         "stun://stun.l.google.com:19302".to_string(),
-        session_sk,
+        delegatee_key,
         3,
     )
     .advertise_onion_exit(true)
@@ -268,11 +268,11 @@ fn test_onion_exit_registration_task_can_run_without_presence_advertisement() ->
 #[tokio::test]
 async fn test_onion_relay_capability_is_advertised_in_online_descriptor() {
     let key = SecretKey::random();
-    let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+    let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
     let config = ProcessorConfig::new(
         0,
         "stun://stun.l.google.com:19302".to_string(),
-        session_sk,
+        delegatee_key,
         3,
     )
     .advertise_onion_relay(true);
@@ -294,11 +294,11 @@ async fn test_onion_relay_capability_is_advertised_in_online_descriptor() {
 #[test]
 fn test_https_onion_exit_config_uses_https_only_service() {
     let key = SecretKey::random();
-    let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+    let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
     let config = ProcessorConfig::new(
         0,
         "stun://stun.l.google.com:19302".to_string(),
-        session_sk,
+        delegatee_key,
         3,
     )
     .enable_https_onion_exit();
@@ -310,11 +310,11 @@ fn test_https_onion_exit_config_uses_https_only_service() {
 #[test]
 fn test_default_onion_exit_config_uses_native_tcp_backed_services() {
     let key = SecretKey::random();
-    let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+    let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
     let config = ProcessorConfig::new(
         0,
         "stun://stun.l.google.com:19302".to_string(),
-        session_sk,
+        delegatee_key,
         3,
     )
     .enable_default_onion_exit();
@@ -331,11 +331,11 @@ fn test_default_onion_exit_config_uses_native_tcp_backed_services() {
 #[test]
 fn test_reserved_https_onion_exit_service_is_accepted() -> Result<()> {
     let key = SecretKey::random();
-    let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+    let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
     let mut config = ProcessorConfig::new(
         0,
         "stun://stun.l.google.com:19302".to_string(),
-        session_sk,
+        delegatee_key,
         3,
     )
     .advertise_onion_exit(true);
@@ -352,11 +352,11 @@ fn test_reserved_https_onion_exit_service_is_accepted() -> Result<()> {
 #[test]
 fn test_custom_onion_exit_service_is_accepted() -> Result<()> {
     let key = SecretKey::random();
-    let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+    let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
     let mut config = ProcessorConfig::new(
         0,
         "stun://stun.l.google.com:19302".to_string(),
-        session_sk,
+        delegatee_key,
         3,
     )
     .advertise_onion_exit(true);

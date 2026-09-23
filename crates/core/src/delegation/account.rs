@@ -9,7 +9,7 @@ use crate::ecc::PublicKey;
 use crate::error::Error;
 use crate::error::Result;
 
-/// An external account authorized to create a Rings session.
+/// An external account identity that can act as a delegator.
 ///
 /// Rings supports recoverable signatures identified by DID and non-recoverable signatures
 /// identified by their verification public key.

@@ -10,7 +10,7 @@ the clients call; this chapter documents the commands.
 rings <command> [options]
 
   init          Initializes a node with the given configuration.
-  new-session   Creates a new session secret key.
+  new-delegation   Creates a new delegatee signing key.
   run           Runs a foreground, composable Rings node.
   connect       Connects to a remote peer.
   peer          Manages peers on the network.
@@ -166,10 +166,10 @@ rings inspect
 Prints the swarm as the node sees it: the transport table, successors, predecessor, and finger
 table.
 
-## Sessions and keys
+## Delegations and keys
 
-`rings init` writes the configuration and a session secret key (`~/.rings/session_sk` unless
-`-s, --session-sk` says otherwise). `rings new-session` writes a fresh session key. Those two
-session-creation commands accept `-k` or `--key-file` for the account signer; `rings run` and the
-RPC client commands do not. A native node stores the resulting delegated session key in plain
+`rings init` writes the configuration and a delegatee signing key (`~/.rings/delegatee_key` unless
+`-s, --delegatee-key` says otherwise). `rings new-delegation` writes a fresh delegatee key. Those two
+delegation-creation commands accept `-k` or `--key-file` for the account signer; `rings run` and the
+RPC client commands do not. A native node stores the resulting delegatee key in plain
 text, so never derive it from a key that holds assets.

@@ -1,14 +1,14 @@
-//! Session references on one link: what each end remembers, as pure state machines.
+//! Delegation references on one link: what each end remembers, as pure state machines.
 //!
 //! A link is one admitted connection generation between two nodes. Every frame on it carries
-//! two session slots (the origin's and the current hop's, see
+//! two delegation slots (the origin's and the current hop's, see
 //! [`WirePayload`](crate::message::WirePayload)); both ends verify both proofs, so both slots
 //! matter at every hop, not only at the final destination. The few delegations behind those
 //! slots repeat for the life of the link, so each direction of a link keeps one table:
 //!
 //! ```text
-//!   sender   S : AnnouncedSessions    "sessions I sent inline, and which of them the peer confirmed"
-//!   receiver R : ReferencedSessions   "sessions this link carried inline, as I verified them"
+//!   sender   S : AnnouncedDelegations    "delegations I sent inline, and which of them the peer confirmed"
+//!   receiver R : ReferencedDelegations   "delegations this link carried inline, as I verified them"
 //! ```
 //!
 //! The link is a datagram link for all this module assumes: an accepted frame may arrive late,
@@ -16,7 +16,7 @@
 //! sooner.
 //!
 //! ```text
-//!   sender: session s in slot ─┬─ acknowledged(s) ──▶ Digest(s)
+//!   sender: delegation s in slot ─┬─ acknowledged(s) ──▶ Digest(s)
 //!                              └─ otherwise ───────▶ Inline(s)      (admit s as pending)
 //!
 //!   receiver: frame arrives ─┬─ every Digest live in R ─▶ Resolved ──verify──▶ admit inline
@@ -32,22 +32,22 @@
 //! ```
 //!
 //! Law (soundness): the sender references `d` only after the receiver confirmed `d`, and the
-//! receiver confirms only sessions of frames that verified. So on a lossless link, however
+//! receiver confirms only delegations of frames that verified. So on a lossless link, however
 //! frames are reordered, a reference never misses: the confirmation left the receiver after the
-//! session was learned, and the reference was sent after the confirmation arrived. Until the
+//! delegation was learned, and the reference was sent after the confirmation arrived. Until the
 //! confirmation arrives the sender stays inline, and the receiver confirms every inline
 //! arrival, so a lost confirmation costs inline frames, never a stall.
 //!
-//! Law (superset): `R` keeps [`REFERENCED_TABLE_CAPACITY`] sessions and `S` only
+//! Law (superset): `R` keeps [`REFERENCED_TABLE_CAPACITY`] delegations and `S` only
 //! [`ANNOUNCED_TABLE_CAPACITY`], half as many, under the same least-recently-referenced order
-//! over the frames both ends saw: `S` touches a session on every frame it encodes, `R` on every
-//! frame it resolved or verified. On a lossless link `S` therefore stops referencing a session
+//! over the frames both ends saw: `S` touches a delegation on every frame it encodes, `R` on every
+//! frame it resolved or verified. On a lossless link `S` therefore stops referencing a delegation
 //! (and sends it inline again) before `R` could have forgotten it. A frame `R` never sees
 //! resolved (lost on the link, refused at the transport, or dropped by `R` before it verified)
-//! touches `S` and not `R`, so the two orders drift and `R` may evict a session `S` still
+//! touches `S` and not `R`, so the two orders drift and `R` may evict a delegation `S` still
 //! references; that miss is answered from `S`, which still holds it, and costs one round trip
-//! and no charge. `S` cannot answer only if it evicted the session too, between the reference
-//! and the question (a full sender table of newer sessions within one round trip), or if the
+//! and no charge. `S` cannot answer only if it evicted the delegation too, between the reference
+//! and the question (a full sender table of newer delegations within one round trip), or if the
 //! two ends disagree on expiry, or the peer does not follow the protocol. The miss path is the
 //! safety net for all of these, and it is repaired on the link: the held frame asks, the sender
 //! answers from `S` or disclaims.
@@ -64,14 +64,14 @@
 //! frame per question. A frame dropped for want of room is a loss at this end's capacity, not
 //! the peer's fault, and is not charged; a held frame the peer does not back is, and only
 //! once this end has asked: a held frame whose question was never sent (the shell reports
-//! what it sent through [`ReferencedSessions::note_asked`]) is dropped uncharged by the sweep,
+//! what it sent through [`ReferencedDelegations::note_asked`]) is dropped uncharged by the sweep,
 //! since the peer never had its round trip. Law (order): a
 //! held frame never waits for a frame held before it, and never
 //! blocks a frame that resolves; among the frames resolvable at one instant, the earliest
 //! arrival leaves first. The link promises no order, so nothing downstream may rely on more
 //! than this. Law (expiry): an
-//! expired session is absent from both tables, so a reference to it is a miss and its
-//! re-announcement is judged like any other: by [`Session::verify_self_at`], which refuses it.
+//! expired delegation is absent from both tables, so a reference to it is a miss and its
+//! re-announcement is judged like any other: by [`Delegation::verify_delegator_authorization_at`], which refuses it.
 //! Expiry forces a fresh delegation and never resurrects an old one.
 //!
 //! Time is an argument of every step, never read here.
@@ -79,16 +79,16 @@
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
 
+use crate::delegation::Delegation;
+use crate::delegation::DelegationDigest;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::DelegationRef;
 use crate::message::LinkControl;
 use crate::message::MessagePayload;
 use crate::message::PerSlot;
-use crate::message::SessionRef;
 use crate::message::SlotEncoding;
 use crate::message::WirePayload;
-use crate::session::Session;
-use crate::session::SessionDigest;
 
 /// Sessions the sending end of one link remembers: its own, and the origins of the traffic it
 /// forwards, least recently referenced first out, so the working set of a busy link stays
@@ -98,33 +98,33 @@ pub(crate) const ANNOUNCED_TABLE_CAPACITY: usize = 64;
 /// See the superset law in the module documentation.
 pub(crate) const REFERENCED_TABLE_CAPACITY: usize = 2 * ANNOUNCED_TABLE_CAPACITY;
 
-/// The digests of a set of sessions: what a frame asks for, awaits, or confirms.
-pub(crate) type Digests = BTreeSet<SessionDigest>;
+/// The digests of a set of delegations: what a frame asks for, awaits, or confirms.
+pub(crate) type Digests = BTreeSet<DelegationDigest>;
 
 /// The receiver's table: what it knows carries no annotation.
-type KnownSessions = SessionTable<()>;
+type KnownDelegations = DelegationTable<()>;
 
-/// A bounded map `SessionDigest ⇀ Session × A`, ordered from least to most recently
-/// referenced, where `A` is what one end of the link annotates a session with.
+/// A bounded map `DelegationDigest ⇀ Delegation × A`, ordered from least to most recently
+/// referenced, where `A` is what one end of the link annotates a delegation with.
 ///
 /// Invariant: `entries.len() <= capacity`, digests are pairwise distinct, and every entry
-/// satisfies `entry.digest = entry.session.digest()`.
+/// satisfies `entry.digest = entry.delegation.digest()`.
 #[derive(Debug)]
-struct SessionTable<A> {
+struct DelegationTable<A> {
     entries: VecDeque<TableEntry<A>>,
     capacity: usize,
 }
 
-/// One session the table holds.
+/// One delegation the table holds.
 #[derive(Debug)]
 struct TableEntry<A> {
-    digest: SessionDigest,
-    session: Session,
+    digest: DelegationDigest,
+    delegation: Delegation,
     annotation: A,
 }
 
-impl<A> SessionTable<A> {
-    /// The empty table that keeps at most `capacity` sessions.
+impl<A> DelegationTable<A> {
+    /// The empty table that keeps at most `capacity` delegations.
     const fn new(capacity: usize) -> Self {
         Self {
             entries: VecDeque::new(),
@@ -132,18 +132,18 @@ impl<A> SessionTable<A> {
         }
     }
 
-    /// The entry addressed by `digest`, if the table holds it and its session is live at
+    /// The entry addressed by `digest`, if the table holds it and its delegation is live at
     /// `now_ms`.
-    fn live(&self, digest: SessionDigest, now_ms: u128) -> Option<&TableEntry<A>> {
+    fn live(&self, digest: DelegationDigest, now_ms: u128) -> Option<&TableEntry<A>> {
         self.entries
             .iter()
             .find(|entry| entry.digest == digest)
-            .filter(|entry| !entry.session.is_expired_at(now_ms))
+            .filter(|entry| !entry.delegation.is_expired_at(now_ms))
     }
 
     /// Record a reference to `digest`: it becomes the most recently referenced entry. Post:
     /// `true` iff the table holds `digest`.
-    fn touch(&mut self, digest: SessionDigest) -> bool {
+    fn touch(&mut self, digest: DelegationDigest) -> bool {
         let Some(position) = self.entries.iter().position(|entry| entry.digest == digest) else {
             return false;
         };
@@ -156,22 +156,27 @@ impl<A> SessionTable<A> {
     /// [`Self::live`] and [`Self::touch`] in one pass: the entry `digest` addresses, now the
     /// most recently referenced, if the table holds it live at `now_ms`; an expired entry is
     /// neither returned nor touched.
-    fn touch_live(&mut self, digest: SessionDigest, now_ms: u128) -> Option<&TableEntry<A>> {
+    fn touch_live(&mut self, digest: DelegationDigest, now_ms: u128) -> Option<&TableEntry<A>> {
         let position = self
             .entries
             .iter()
-            .position(|entry| entry.digest == digest && !entry.session.is_expired_at(now_ms))?;
+            .position(|entry| entry.digest == digest && !entry.delegation.is_expired_at(now_ms))?;
         let entry = self.entries.remove(position)?;
         self.entries.push_back(entry);
         self.entries.back()
     }
 
-    /// Hold the session `digest` addresses as the most recently referenced entry: a reference
-    /// if the table holds it, else `session()` with `annotation`, evicting the least recently
-    /// referenced entry when full. The session is materialised only on first sight.
+    /// Hold the delegation `digest` addresses as the most recently referenced entry: a reference
+    /// if the table holds it, else `delegation()` with `annotation`, evicting the least recently
+    /// referenced entry when full. The delegation is materialised only on first sight.
     ///
-    /// Pre: `digest = session().digest()`.
-    fn admit(&mut self, digest: SessionDigest, session: impl FnOnce() -> Session, annotation: A) {
+    /// Pre: `digest = delegation().digest()`.
+    fn admit(
+        &mut self,
+        digest: DelegationDigest,
+        delegation: impl FnOnce() -> Delegation,
+        annotation: A,
+    ) {
         if self.touch(digest) {
             return;
         }
@@ -180,22 +185,22 @@ impl<A> SessionTable<A> {
         }
         self.entries.push_back(TableEntry {
             digest,
-            session: session(),
+            delegation: delegation(),
             annotation,
         });
     }
 
     /// Change the annotation of `digest`, if held.
-    fn annotate(&mut self, digest: SessionDigest, annotation: A) {
+    fn annotate(&mut self, digest: DelegationDigest, annotation: A) {
         if let Some(entry) = self.entries.iter_mut().find(|entry| entry.digest == digest) {
             entry.annotation = annotation;
         }
     }
 
-    /// Forget every session expired at `now_ms`.
+    /// Forget every delegation expired at `now_ms`.
     fn evict_expired(&mut self, now_ms: u128) {
         self.entries
-            .retain(|entry| !entry.session.is_expired_at(now_ms));
+            .retain(|entry| !entry.delegation.is_expired_at(now_ms));
     }
 
     /// Forget everything.
@@ -203,14 +208,14 @@ impl<A> SessionTable<A> {
         self.entries.clear();
     }
 
-    /// The sessions currently held.
+    /// The delegations currently held.
     #[cfg(test)]
     fn len(&self) -> usize {
         self.entries.len()
     }
 }
 
-/// What the sender knows about one session it sent inline.
+/// What the sender knows about one delegation it sent inline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Acknowledgement {
     /// Sent inline; the peer has not confirmed it, so it still travels inline.
@@ -219,27 +224,27 @@ enum Acknowledgement {
     Acknowledged,
 }
 
-/// The sending end of one link: the sessions it has sent inline, and which of them the peer
+/// The sending end of one link: the delegations it has sent inline, and which of them the peer
 /// confirmed.
 ///
 /// ```text
-///   encode      : S × Generation × Payload × Time → S × PerSlot<SessionRef>
-///   acknowledge : S × Generation × SessionDigest → S
-///   answer      : S × Generation × SessionDigest × Time → LinkControl
+///   encode      : S × Generation × Payload × Time → S × PerSlot<DelegationRef>
+///   acknowledge : S × Generation × DelegationDigest → S
+///   answer      : S × Generation × DelegationDigest × Time → LinkControl
 /// ```
 #[derive(Debug)]
-pub(crate) struct AnnouncedSessions {
+pub(crate) struct AnnouncedDelegations {
     /// The connection generation the table belongs to; `None` until the first frame.
     generation: Option<u64>,
-    announced: SessionTable<Acknowledgement>,
+    announced: DelegationTable<Acknowledgement>,
 }
 
-impl AnnouncedSessions {
+impl AnnouncedDelegations {
     /// The sender state of a link that has carried nothing.
     pub(crate) const fn new() -> Self {
         Self {
             generation: None,
-            announced: SessionTable::new(ANNOUNCED_TABLE_CAPACITY),
+            announced: DelegationTable::new(ANNOUNCED_TABLE_CAPACITY),
         }
     }
 
@@ -263,57 +268,61 @@ impl AnnouncedSessions {
     /// Decide how each slot of `payload` travels on `generation` at `now_ms`, and remember
     /// what was sent inline.
     ///
-    /// A slot whose session the peer confirmed travels by digest; every other slot travels
-    /// inline, and the session enters the table as pending if it was not held.
+    /// A slot whose delegation the peer confirmed travels by digest; every other slot travels
+    /// inline, and the delegation enters the table as pending if it was not held.
     pub(crate) fn encode<'a>(
         &mut self,
         generation: u64,
         payload: &'a MessagePayload,
         now_ms: u128,
-    ) -> Result<PerSlot<SessionRef<'a>>> {
+    ) -> Result<PerSlot<DelegationRef<'a>>> {
         if !self.enter(generation) {
-            return Ok(payload.sessions().map(SessionRef::inline));
+            return Ok(payload.delegations().map(DelegationRef::inline));
         }
         self.announced.evict_expired(now_ms);
-        let sessions = payload.sessions();
+        let delegations = payload.delegations();
         Ok(PerSlot {
-            origin: self.encode_slot(sessions.origin, now_ms)?,
-            hop: self.encode_slot(sessions.hop, now_ms)?,
+            origin: self.encode_slot(delegations.origin, now_ms)?,
+            hop: self.encode_slot(delegations.hop, now_ms)?,
         })
     }
 
     /// [`Self::encode`] for one slot of the current generation.
-    fn encode_slot<'a>(&mut self, session: &'a Session, now_ms: u128) -> Result<SessionRef<'a>> {
-        let digest = session.digest()?;
+    fn encode_slot<'a>(
+        &mut self,
+        delegation: &'a Delegation,
+        now_ms: u128,
+    ) -> Result<DelegationRef<'a>> {
+        let digest = delegation.digest()?;
         match self.announced.touch_live(digest, now_ms) {
             Some(entry) if entry.annotation == Acknowledgement::Acknowledged => {
-                Ok(SessionRef::Digest(digest))
+                Ok(DelegationRef::Digest(digest))
             }
-            Some(_) => Ok(SessionRef::inline(session)),
+            Some(_) => Ok(DelegationRef::inline(delegation)),
             None => {
                 self.announced
-                    .admit(digest, || session.clone(), Acknowledgement::Pending);
-                Ok(SessionRef::inline(session))
+                    .admit(digest, || delegation.clone(), Acknowledgement::Pending);
+                Ok(DelegationRef::inline(delegation))
             }
         }
     }
 
     /// The peer confirmed `digest` on `generation`. A confirmation of a digest this end never
     /// announced, or announced on another generation, marks nothing.
-    pub(crate) fn acknowledge(&mut self, generation: u64, digest: SessionDigest) {
+    pub(crate) fn acknowledge(&mut self, generation: u64, digest: DelegationDigest) {
         if self.is_current(generation) {
             self.announced
                 .annotate(digest, Acknowledgement::Acknowledged);
         }
     }
 
-    /// Answer the peer's question about `digest` on `generation` at `now_ms`: the session if
+    /// Answer the peer's question about `digest` on `generation` at `now_ms`: the delegation if
     /// this link still holds it, else that it is unknown. Total, and one answer per question,
     /// so a peer cannot make this end send more frames than it asks.
     pub(crate) fn answer(
         &self,
         generation: u64,
-        digest: SessionDigest,
+        digest: DelegationDigest,
         now_ms: u128,
     ) -> LinkControl {
         if !self.is_current(generation) {
@@ -322,7 +331,7 @@ impl AnnouncedSessions {
         self.announced
             .live(digest, now_ms)
             .map_or(LinkControl::Unknown(digest), |entry| {
-                LinkControl::Announce(entry.session.clone())
+                LinkControl::Announce(entry.delegation.clone())
             })
     }
 }
@@ -333,7 +342,7 @@ pub(crate) struct ResolvedFrame<F> {
     pub(crate) payload: MessagePayload,
     /// What the caller attached to the frame on arrival.
     pub(crate) carrier: F,
-    /// How each slot travelled: what [`ReferencedSessions::admit_verified`] may learn.
+    /// How each slot travelled: what [`ReferencedDelegations::admit_verified`] may learn.
     pub(crate) encoding: PerSlot<SlotEncoding>,
 }
 
@@ -341,7 +350,7 @@ pub(crate) struct ResolvedFrame<F> {
 pub(crate) enum FrameArrival<F> {
     /// Every slot resolved.
     Resolved(Box<ResolvedFrame<F>>),
-    /// The frame waits for the sessions it misses, and asks for them.
+    /// The frame waits for the delegations it misses, and asks for them.
     Held {
         /// The digests to ask the peer for.
         request: Digests,
@@ -367,17 +376,17 @@ struct HeldFrame<F> {
 
 impl<F> HeldFrame<F> {
     /// The digests this frame misses in `known` at `now_ms`: its question.
-    fn missing(&self, known: &KnownSessions, now_ms: u128) -> Digests {
+    fn missing(&self, known: &KnownDelegations, now_ms: u128) -> Digests {
         missing_references(self.frame.as_ref(), known, now_ms).collect()
     }
 
-    /// Whether `digest` is one of the sessions this frame misses in `known` at `now_ms`.
-    fn awaits(&self, digest: SessionDigest, known: &KnownSessions, now_ms: u128) -> bool {
+    /// Whether `digest` is one of the delegations this frame misses in `known` at `now_ms`.
+    fn awaits(&self, digest: DelegationDigest, known: &KnownDelegations, now_ms: u128) -> bool {
         missing_references(self.frame.as_ref(), known, now_ms).any(|missing| missing == digest)
     }
 
     /// Whether every reference of this frame resolves in `known` at `now_ms`.
-    fn is_resolvable(&self, known: &KnownSessions, now_ms: u128) -> bool {
+    fn is_resolvable(&self, known: &KnownDelegations, now_ms: u128) -> bool {
         missing_references(self.frame.as_ref(), known, now_ms)
             .next()
             .is_none()
@@ -397,10 +406,10 @@ impl<F> HeldFrame<F> {
     }
 }
 
-/// The receiving end of one link: the sessions it has carried inline, as the receiver verified
+/// The receiving end of one link: the delegations it has carried inline, as the receiver verified
 /// them, and the frames waiting for one of them. See the module documentation for the laws.
-pub(crate) struct ReferencedSessions<F> {
-    known: KnownSessions,
+pub(crate) struct ReferencedDelegations<F> {
+    known: KnownDelegations,
     held: VecDeque<HeldFrame<F>>,
     hold_capacity: usize,
     /// How long a frame may wait for an answer: the answer is one round trip away, so a frame
@@ -413,7 +422,7 @@ pub(crate) struct ReferencedSessions<F> {
 
 /// The verdict on one announcement.
 pub(crate) enum Announcement<F> {
-    /// Nothing held awaits the session: ignored, nothing unsolicited is cached.
+    /// Nothing held awaits the delegation: ignored, nothing unsolicited is cached.
     Ignored,
     /// Admitted; the caller releases what resolves now.
     Admitted,
@@ -430,20 +439,20 @@ pub(crate) struct Swept<F> {
     pub(crate) unasked: Vec<F>,
 }
 
-/// The referenced sessions of `frame` that `known` does not hold live at `now_ms`, origin slot
+/// The referenced delegations of `frame` that `known` does not hold live at `now_ms`, origin slot
 /// first.
 fn missing_references<'a>(
     frame: &'a WirePayload<'_>,
-    known: &'a KnownSessions,
+    known: &'a KnownDelegations,
     now_ms: u128,
-) -> impl Iterator<Item = SessionDigest> + 'a {
+) -> impl Iterator<Item = DelegationDigest> + 'a {
     frame
-        .session_refs()
+        .delegation_refs()
         .into_array()
         .into_iter()
-        .filter_map(|session| match session {
-            SessionRef::Inline(_) => None,
-            SessionRef::Digest(digest) => Some(*digest),
+        .filter_map(|delegation| match delegation {
+            DelegationRef::Inline(_) => None,
+            DelegationRef::Digest(digest) => Some(*digest),
         })
         .filter(move |digest| known.live(*digest, now_ms).is_none())
 }
@@ -460,12 +469,12 @@ fn drop_held<F>(
     dropped.into_iter().map(|held| held.carrier).collect()
 }
 
-impl<F> ReferencedSessions<F> {
+impl<F> ReferencedDelegations<F> {
     /// The receiver state of a link that has carried nothing, holding at most `hold_capacity`
     /// unresolved frames, each for at most `hold_timeout_ms`.
     pub(crate) const fn new(hold_capacity: usize, hold_timeout_ms: u128) -> Self {
         Self {
-            known: SessionTable::new(REFERENCED_TABLE_CAPACITY),
+            known: DelegationTable::new(REFERENCED_TABLE_CAPACITY),
             held: VecDeque::new(),
             hold_capacity,
             hold_timeout_ms,
@@ -476,22 +485,22 @@ impl<F> ReferencedSessions<F> {
     /// Resolve `frame` against the table at `now_ms`, recording each reference.
     ///
     /// Pre: `missing_references(frame, known, now_ms)` is empty; otherwise the first missing digest
-    /// is reported as [`Error::SessionReferenceUnresolved`].
+    /// is reported as [`Error::DelegationReferenceUnresolved`].
     fn resolve(
         &mut self,
         frame: Box<WirePayload<'static>>,
         carrier: F,
         now_ms: u128,
     ) -> Result<Box<ResolvedFrame<F>>> {
-        let encoding = frame.session_refs().map(SessionRef::encoding);
+        let encoding = frame.delegation_refs().map(DelegationRef::encoding);
         let known = &mut self.known;
-        let payload = frame.resolve(|session| -> Result<Session> {
-            match session {
-                SessionRef::Inline(session) => Ok(session.into_owned()),
-                SessionRef::Digest(digest) => known
+        let payload = frame.resolve(|delegation| -> Result<Delegation> {
+            match delegation {
+                DelegationRef::Inline(delegation) => Ok(delegation.into_owned()),
+                DelegationRef::Digest(digest) => known
                     .touch_live(digest, now_ms)
-                    .map(|entry| entry.session.clone())
-                    .ok_or(Error::SessionReferenceUnresolved(digest)),
+                    .map(|entry| entry.delegation.clone())
+                    .ok_or(Error::DelegationReferenceUnresolved(digest)),
             }
         })?;
         Ok(Box::new(ResolvedFrame {
@@ -530,11 +539,11 @@ impl<F> ReferencedSessions<F> {
         Ok(FrameArrival::Held { request: missing })
     }
 
-    /// Learn the inline sessions of a frame that verified, and name the digests to confirm to
-    /// the peer: every inline slot's, so a sender that keeps sending a known session inline
+    /// Learn the inline delegations of a frame that verified, and name the digests to confirm to
+    /// the peer: every inline slot's, so a sender that keeps sending a known delegation inline
     /// (its confirmation lost or still in flight) is confirmed again.
     ///
-    /// Pre: `payload` verified at `now_ms`, so each of its sessions is a live, authorized
+    /// Pre: `payload` verified at `now_ms`, so each of its delegations is a live, authorized
     /// delegation; `encoding` is the [`ResolvedFrame::encoding`] it was resolved with.
     pub(crate) fn admit_verified(
         &mut self,
@@ -544,10 +553,10 @@ impl<F> ReferencedSessions<F> {
     ) -> Result<Digests> {
         self.known.evict_expired(now_ms);
         let mut confirm = Digests::new();
-        for (session, encoding) in payload.sessions().zip(encoding).into_array() {
+        for (delegation, encoding) in payload.delegations().zip(encoding).into_array() {
             if encoding == SlotEncoding::Inline {
-                let digest = session.digest()?;
-                self.known.admit(digest, || session.clone(), ());
+                let digest = delegation.digest()?;
+                self.known.admit(digest, || delegation.clone(), ());
                 self.asked.remove(&digest);
                 confirm.insert(digest);
             }
@@ -557,13 +566,13 @@ impl<F> ReferencedSessions<F> {
 
     /// Record that the peer was asked for `digests`: a held frame awaiting one of them may
     /// now be charged for waiting past the hold timeout.
-    pub(crate) fn note_asked(&mut self, digests: impl IntoIterator<Item = SessionDigest>) {
+    pub(crate) fn note_asked(&mut self, digests: impl IntoIterator<Item = DelegationDigest>) {
         self.asked.extend(digests);
     }
 
     /// Whether some held frame misses `digest` at `now_ms`: the only announcements and
     /// disclaimers this end asked for.
-    fn is_awaited(&self, digest: SessionDigest, now_ms: u128) -> bool {
+    fn is_awaited(&self, digest: DelegationDigest, now_ms: u128) -> bool {
         self.held
             .iter()
             .any(|held| held.awaits(digest, &self.known, now_ms))
@@ -577,30 +586,37 @@ impl<F> ReferencedSessions<F> {
             .any(|digest| self.is_awaited(*digest, now_ms))
     }
 
-    /// The peer announced `session` at `now_ms`.
+    /// The peer announced `delegation` at `now_ms`.
     ///
     /// ```text
     ///   not awaited ───────────────────────▶ Ignored      nothing unsolicited is cached
     ///   awaited ∧ delegation verifies ─────▶ Admitted     the caller releases
     ///   awaited ∧ delegation refused ──────▶ Refused(F*)  frames awaiting it, to be failed
     /// ```
-    pub(crate) fn announce(&mut self, session: Session, now_ms: u128) -> Result<Announcement<F>> {
-        let digest = session.digest()?;
+    pub(crate) fn announce(
+        &mut self,
+        delegation: Delegation,
+        now_ms: u128,
+    ) -> Result<Announcement<F>> {
+        let digest = delegation.digest()?;
         if !self.is_awaited(digest, now_ms) {
             return Ok(Announcement::Ignored);
         }
-        if session.verify_self_at(now_ms).is_err() {
+        if delegation
+            .verify_delegator_authorization_at(now_ms)
+            .is_err()
+        {
             return Ok(Announcement::Refused(self.unknown(digest, now_ms)));
         }
         self.known.evict_expired(now_ms);
-        self.known.admit(digest, || session, ());
+        self.known.admit(digest, || delegation, ());
         self.asked.remove(&digest);
         Ok(Announcement::Admitted)
     }
 
     /// The peer disclaimed `digest` at `now_ms`: the frames awaiting it, to be failed. A
     /// disclaimer of a digest nothing awaits drops nothing.
-    pub(crate) fn unknown(&mut self, digest: SessionDigest, now_ms: u128) -> Vec<F> {
+    pub(crate) fn unknown(&mut self, digest: DelegationDigest, now_ms: u128) -> Vec<F> {
         self.asked.remove(&digest);
         let known = &self.known;
         drop_held(&mut self.held, |held| held.awaits(digest, known, now_ms))
@@ -658,7 +674,7 @@ impl<F> ReferencedSessions<F> {
         self.held.len()
     }
 
-    /// The sessions currently known.
+    /// The delegations currently known.
     #[cfg(test)]
     pub(crate) fn known_len(&self) -> usize {
         self.known.len()

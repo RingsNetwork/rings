@@ -7,10 +7,10 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use bytes::Bytes;
+use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
 use rings_core::ecc::PublicKey;
 use rings_core::message::MessageSigner;
-use rings_core::session::SessionSk;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::net::TcpStream;
@@ -122,7 +122,7 @@ impl NativeOnionCircuitHandle {
     /// Install the route-aware onion circuit protocol.
     pub fn install(
         extensions: &Extensions,
-        session_sk: SessionSk,
+        delegatee_key: DelegateeKey,
         network_id: u32,
         allow_relay: bool,
         exit_config: Option<NativeOnionTcpExitConfig>,
@@ -130,7 +130,8 @@ impl NativeOnionCircuitHandle {
         let exit_epoch = exit_config
             .as_ref()
             .map(|_| extensions.core().onion_exit_epoch());
-        let (runtime, https) = native_onion_runtimes(session_sk.clone(), network_id, exit_config);
+        let (runtime, https) =
+            native_onion_runtimes(delegatee_key.clone(), network_id, exit_config);
         if let Some(config) = runtime.exit_config.as_ref() {
             if config.allows_service(&OnionServiceName::https()) {
                 https.set_exit_policy(Some(config.policy().clone()));
@@ -138,15 +139,15 @@ impl NativeOnionCircuitHandle {
             }
         }
         let capabilities = OnionCircuitCapabilities::from_registration(allow_relay, exit_epoch);
-        let handler_session_sk = session_sk.clone();
+        let handler_delegatee_key = delegatee_key.clone();
         extensions.register(
             OnionCircuitProtocol::new(capabilities),
             OnionCircuitShell::with_link_sender(
-                session_sk,
+                delegatee_key,
                 NativeOnionCircuitHandler {
                     runtime: runtime.clone(),
                     https,
-                    signer: MessageSigner::new(handler_session_sk, network_id),
+                    signer: MessageSigner::new(handler_delegatee_key, network_id),
                 },
                 runtime.link_sender.clone(),
             ),
@@ -182,7 +183,7 @@ impl NativeOnionCircuitHandle {
 }
 
 fn native_onion_runtimes(
-    session_sk: SessionSk,
+    delegatee_key: DelegateeKey,
     network_id: u32,
     exit_config: Option<NativeOnionTcpExitConfig>,
 ) -> (Arc<OnionTcpRuntime>, Arc<OnionHttpsRuntime>) {
@@ -190,7 +191,7 @@ fn native_onion_runtimes(
     let link_sender = OnionLinkSender::default();
     let forward_replays = OnionForwardReplayWitness::default();
     let runtime = Arc::new(OnionTcpRuntime::with_resources(
-        session_sk,
+        delegatee_key,
         network_id,
         exit_config,
         accounting.clone(),
@@ -236,7 +237,7 @@ struct NativeOnionCircuitHandler {
     runtime: Arc<OnionTcpRuntime>,
     https: Arc<OnionHttpsRuntime>,
     /// The exit's signing authority for backward payloads.
-    signer: MessageSigner<SessionSk>,
+    signer: MessageSigner<DelegateeKey>,
 }
 
 #[async_trait::async_trait]
@@ -272,8 +273,8 @@ impl OnionCircuitHandler for NativeOnionCircuitHandler {
 }
 
 struct OnionTcpRuntime {
-    /// The session key decrypts inbound cells; paired with the overlay it signs backward payloads.
-    signer: MessageSigner<SessionSk>,
+    /// The delegatee key decrypts inbound cells; paired with the overlay it signs backward payloads.
+    signer: MessageSigner<DelegateeKey>,
     client_streams: Mutex<HashMap<TcpStreamKey, ClientStream>>,
     exit_streams: Mutex<HashMap<TcpStreamKey, ExitStream>>,
     /// Replay authority shared with the HTTPS adapter installed on this node.
@@ -286,12 +287,12 @@ struct OnionTcpRuntime {
 impl OnionTcpRuntime {
     #[cfg(test)]
     fn new(
-        session_sk: SessionSk,
+        delegatee_key: DelegateeKey,
         network_id: u32,
         exit_config: Option<NativeOnionTcpExitConfig>,
     ) -> Self {
         Self::with_resources(
-            session_sk,
+            delegatee_key,
             network_id,
             exit_config,
             OnionExitAccounting::default(),
@@ -301,7 +302,7 @@ impl OnionTcpRuntime {
     }
 
     fn with_resources(
-        session_sk: SessionSk,
+        delegatee_key: DelegateeKey,
         network_id: u32,
         exit_config: Option<NativeOnionTcpExitConfig>,
         accounting: OnionExitAccounting,
@@ -309,7 +310,7 @@ impl OnionTcpRuntime {
         forward_replays: OnionForwardReplayWitness,
     ) -> Self {
         Self {
-            signer: MessageSigner::new(session_sk, network_id),
+            signer: MessageSigner::new(delegatee_key, network_id),
             client_streams: Mutex::new(HashMap::new()),
             exit_streams: Mutex::new(HashMap::new()),
             forward_replays,
@@ -320,7 +321,7 @@ impl OnionTcpRuntime {
     }
 
     /// The authority that signs this exit's backward payloads.
-    fn message_signer(&self) -> MessageSigner<&SessionSk> {
+    fn message_signer(&self) -> MessageSigner<&DelegateeKey> {
         self.signer.by_ref()
     }
 
@@ -333,7 +334,7 @@ impl OnionTcpRuntime {
         let expected_return_peer = route_first_hop(&route)?;
         let expected_exit = route.exit().clone();
         let service = route.service_name().clone();
-        let client_return = OnionClientReturn::new(self.signer.session_public_key());
+        let client_return = OnionClientReturn::new(self.signer.delegatee_public_key());
         let (tx, rx) = mpsc::channel(32);
         let (open_tx, open_rx) = oneshot::channel();
         let key = self.insert_client_stream(
@@ -431,7 +432,7 @@ impl OnionTcpRuntime {
                         key,
                         circuit_id: frame.circuit_id,
                         return_peer: frame.return_peer,
-                        return_session_public_key: frame.return_session_public_key,
+                        return_delegatee_public_key: frame.return_delegatee_public_key,
                         client: frame.client,
                         expected_forward_peer: frame.from,
                         service,
@@ -563,7 +564,7 @@ impl OnionTcpRuntime {
             key,
             circuit_id,
             return_peer,
-            return_session_public_key,
+            return_delegatee_public_key,
             client,
             service,
             ..
@@ -574,7 +575,7 @@ impl OnionTcpRuntime {
             key,
             circuit_id,
             return_peer,
-            return_session_public_key,
+            return_delegatee_public_key,
             client,
             service,
             stream,
@@ -620,7 +621,7 @@ impl OnionTcpRuntime {
             service: &request.service,
             circuit_id: request.circuit_id,
             return_peer: request.return_peer,
-            return_session_public_key: request.return_session_public_key,
+            return_delegatee_public_key: request.return_delegatee_public_key,
             client: request.client,
         }
         .send(sequence, payload)
@@ -920,7 +921,7 @@ struct TcpExitOpen {
     key: TcpStreamKey,
     circuit_id: OnionCircuitId,
     return_peer: Did,
-    return_session_public_key: PublicKey<33>,
+    return_delegatee_public_key: PublicKey<33>,
     client: OnionClientReturn,
     expected_forward_peer: Did,
     service: OnionServiceName,

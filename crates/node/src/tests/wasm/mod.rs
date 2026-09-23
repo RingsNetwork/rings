@@ -3,8 +3,8 @@ pub mod test_evidence;
 pub mod test_processor;
 use std::sync::Arc;
 
+use rings_core::delegation::DelegateeKey;
 use rings_core::ecc::SecretKey;
-use rings_core::session::SessionSk;
 use rings_core::storage::idb::IdbStorage;
 use rings_rpc::protos::rings_node::*;
 use uuid;
@@ -29,7 +29,7 @@ pub fn setup_log() {
 
 pub async fn prepare_processor() -> Processor {
     let key = SecretKey::random();
-    let sm = SessionSk::new_with_seckey(&key).unwrap();
+    let sm = DelegateeKey::new_with_seckey(&key).unwrap();
 
     let config = serde_yaml::to_string(&ProcessorConfig::new(
         0,

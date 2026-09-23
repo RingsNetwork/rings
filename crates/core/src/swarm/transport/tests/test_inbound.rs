@@ -13,9 +13,9 @@ use crate::tests::TEST_NETWORK_ID;
 
 mod test_callback_failure;
 mod test_capacity_handoff;
+mod test_delegation_reference;
 mod test_origin_quota;
 mod test_pre_admission;
-mod test_session_reference;
 mod test_storage_interleave;
 
 #[derive(Default)]
@@ -192,7 +192,7 @@ async fn test_pending_message_rechecks_admission_after_async_validation() -> Res
     ))?);
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();
-    let peer_session = SessionSk::new_with_seckey(&peer_key)?;
+    let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
     let app_callback = Arc::new(BlockingValidateSwarmCallback::default());
     let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
     let (attempt, _offer) = transport
@@ -240,7 +240,7 @@ async fn test_inbound_control_lane_progresses_while_application_validation_is_bl
     ))?);
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();
-    let peer_session = SessionSk::new_with_seckey(&peer_key)?;
+    let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
     let app_callback = Arc::new(BlockingValidateSwarmCallback::default());
     let callback = Arc::new(InnerSwarmCallback::new(
         Arc::clone(&transport),
@@ -302,7 +302,7 @@ async fn test_pre_admission_drain_does_not_block_open_and_orders_admitted_arriva
     ))?);
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();
-    let peer_session = SessionSk::new_with_seckey(&peer_key)?;
+    let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
     let app_callback = Arc::new(CountingSwarmCallback::default());
     let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
     let (attempt, _offer) = transport
@@ -385,7 +385,7 @@ async fn test_pre_admission_drain_returns_before_application_validation_complete
     ))?);
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();
-    let peer_session = SessionSk::new_with_seckey(&peer_key)?;
+    let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
     let app_callback = Arc::new(BlockingValidateSwarmCallback::default());
     let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
     let (attempt, _offer) = transport
@@ -475,7 +475,7 @@ async fn test_inbound_mailbox_reserves_control_capacity_under_application_satura
     for _ in 0..peer_count {
         let key = SecretKey::random();
         let peer: Did = key.address().into();
-        let session = SessionSk::new_with_seckey(&key)?;
+        let session = DelegateeKey::new_with_seckey(&key)?;
         let mut messages = Vec::with_capacity(inbound_peer_capacity_for_test());
         for _ in 0..inbound_peer_capacity_for_test() {
             messages.push(
@@ -492,7 +492,7 @@ async fn test_inbound_mailbox_reserves_control_capacity_under_application_satura
     }
     let control_key = SecretKey::random();
     let control_peer: Did = control_key.address().into();
-    let control_session = SessionSk::new_with_seckey(&control_key)?;
+    let control_session = DelegateeKey::new_with_seckey(&control_key)?;
     let overflow_message = MessagePayload::new_send(
         Message::custom(b"global-application-overflow")?,
         MessageSigner::new(&control_session, TEST_NETWORK_ID),
@@ -568,7 +568,7 @@ async fn test_closing_inbound_mailbox_cancels_pending_callback() -> Result<()> {
     ))?);
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();
-    let peer_session = SessionSk::new_with_seckey(&peer_key)?;
+    let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
     let app_callback = Arc::new(PendingValidateSwarmCallback::default());
     let callback = Arc::new(InnerSwarmCallback::new(
         Arc::clone(&transport),
@@ -606,7 +606,7 @@ async fn test_closing_inbound_mailbox_cancels_pending_callback() -> Result<()> {
     Ok(())
 }
 
-fn local_wire(message: Message, session: &SessionSk, local: Did) -> Result<bytes::Bytes> {
+fn local_wire(message: Message, session: &DelegateeKey, local: Did) -> Result<bytes::Bytes> {
     MessagePayload::new_send(
         message,
         MessageSigner::new(session, TEST_NETWORK_ID),
@@ -672,7 +672,7 @@ async fn test_chunk_reassembly_records_one_exact_logical_receive() -> Result<()>
     let transport = Arc::new(transport_with_measure(measure.clone())?);
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();
-    let peer_session = SessionSk::new_with_seckey(&peer_key)?;
+    let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
     let app_callback = Arc::new(CountingSwarmCallback::default());
     let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
     let (attempt, _offer) = transport
@@ -734,7 +734,7 @@ async fn test_reassembled_undecodable_message_records_one_failure_only() -> Resu
     let transport = Arc::new(transport_with_measure(measure.clone())?);
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();
-    let peer_session = SessionSk::new_with_seckey(&peer_key)?;
+    let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
     let app_callback = Arc::new(CountingSwarmCallback::default());
     let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
     let (attempt, _offer) = transport
@@ -782,7 +782,7 @@ async fn test_reassembly_handoff_preserves_data_order_without_blocking_control()
     ))?);
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();
-    let peer_session = SessionSk::new_with_seckey(&peer_key)?;
+    let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
     let app_callback = Arc::new(OrderedReassemblyCallback::default());
     let callback = Arc::new(InnerSwarmCallback::new(
         Arc::clone(&transport),
@@ -869,7 +869,7 @@ async fn test_transport_preparation_authenticates_every_reserved_lane() -> Resul
         RecordingMeasure::default(),
     ))?);
     let peer_key = SecretKey::random();
-    let peer_session = SessionSk::new_with_seckey(&peer_key)?;
+    let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
     let control = local_wire(
         noop_control_message(transport.dht.did),
         &peer_session,
@@ -966,7 +966,7 @@ async fn test_reassembled_control_shape_is_verified_before_lane_transition() -> 
 
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();
-    let session = SessionSk::new_with_seckey(&peer_key)?;
+    let session = DelegateeKey::new_with_seckey(&peer_key)?;
     let mut tampered = MessagePayload::new_send(
         noop_control_message(transport.dht.did),
         MessageSigner::new(&session, TEST_NETWORK_ID),

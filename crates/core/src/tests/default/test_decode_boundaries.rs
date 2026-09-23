@@ -10,8 +10,11 @@ use crate::chunk::ChunkMeta;
 use crate::chunk::MessageReassembler;
 use crate::chunk::ReassemblyLimits;
 use crate::consts::DEFAULT_TTL_MS;
+use crate::delegation::DelegateeKey;
+use crate::delegation::Delegation;
 use crate::dht::Did;
 use crate::ecc::SecretKey;
+use crate::message::DelegationRef;
 use crate::message::Encoded;
 use crate::message::Encoder;
 use crate::message::LinkControl;
@@ -21,12 +24,9 @@ use crate::message::MessagePayload;
 use crate::message::MessageSigner;
 use crate::message::MessageVerificationExt;
 use crate::message::PerSlot;
-use crate::message::SessionRef;
 use crate::message::WirePayload;
-use crate::session::Session;
-use crate::session::SessionSk;
 use crate::swarm::session_link::FrameArrival;
-use crate::swarm::session_link::ReferencedSessions;
+use crate::swarm::session_link::ReferencedDelegations;
 use crate::swarm::session_link::REFERENCED_TABLE_CAPACITY;
 use crate::tests::TEST_NETWORK_ID;
 use crate::utils::get_epoch_ms;
@@ -95,10 +95,10 @@ fn generated_chunk_decode_boundary_sequences_respect_bounds() {
 fn generated_link_frame_decode_boundary_inputs_keep_the_receiver_bounded() {
     let mut generator = DecodeBoundaryGenerator::named("core-link-frame");
     let cases = generated_case_count();
-    let mut receiver = ReferencedSessions::new(LINK_HOLD_CAPACITY, LINK_HOLD_TIMEOUT_MS);
+    let mut receiver = ReferencedDelegations::new(LINK_HOLD_CAPACITY, LINK_HOLD_TIMEOUT_MS);
     // Sessions earlier frames referenced: an announcement of one of them is awaited, so the
     // announce, release and sweep paths run under generated input, not only the refusals.
-    let mut referenced: Vec<Session> = Vec::new();
+    let mut referenced: Vec<Delegation> = Vec::new();
     eprintln!(
         "{SEED_ENV}={} {CASES_ENV}={cases} target=core-link-frame",
         generator.seed()
@@ -144,10 +144,10 @@ fn generated_link_frame_decode_boundary_inputs_keep_the_receiver_bounded() {
 /// announcement names a session some earlier referenced frame awaits when there is one.
 fn generated_link_frame(
     generator: &mut DecodeBoundaryGenerator,
-    referenced: &mut Vec<Session>,
+    referenced: &mut Vec<Delegation>,
 ) -> Option<Vec<u8>> {
     let payload = generated_payload(generator)?;
-    let sessions = payload.sessions();
+    let sessions = payload.delegations();
     let wire = match generator.usize(5) {
         0 => {
             let announced = match referenced.len() {
@@ -164,8 +164,8 @@ fn generated_link_frame(
         },
         _ => {
             let references = PerSlot {
-                origin: SessionRef::Digest(sessions.origin.digest().ok()?),
-                hop: SessionRef::Digest(sessions.hop.digest().ok()?),
+                origin: DelegationRef::Digest(sessions.origin.digest().ok()?),
+                hop: DelegationRef::Digest(sessions.hop.digest().ok()?),
             };
             referenced.push(sessions.origin.clone());
             if referenced.len() > LINK_HOLD_CAPACITY {
@@ -205,7 +205,7 @@ fn judge_payload(payload: &MessagePayload) {
 }
 
 fn generated_payload(generator: &mut DecodeBoundaryGenerator) -> Option<MessagePayload> {
-    let session = SessionSk::new_with_seckey(&generator.secret_key()).ok()?;
+    let session = DelegateeKey::new_with_seckey(&generator.secret_key()).ok()?;
     let peer: Did = generator.secret_key().address().into();
     MessagePayload::new_send(
         Message::custom(&generator.bytes(256)).ok()?,

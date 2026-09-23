@@ -972,11 +972,11 @@ impl Provider {
     ) -> OnionCircuitShell<BrowserOnionCircuitHandler> {
         let link_sender = runtime.link_sender();
         OnionCircuitShell::with_link_sender(
-            self.processor.session_sk().clone(),
+            self.processor.delegatee_key().clone(),
             BrowserOnionCircuitHandler::new(
                 runtime,
                 MessageSigner::new(
-                    self.processor.session_sk().clone(),
+                    self.processor.delegatee_key().clone(),
                     self.processor.swarm.network_id(),
                 ),
             ),

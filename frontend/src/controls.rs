@@ -502,9 +502,9 @@ pub(crate) fn network_stage(
                 <div class="section-heading compact">
                     <p class="eyebrow">{ "Network / inferred" }</p>
                 </div>
-                <div class="session-strip" aria-label="Session summary">
+                <div class="session-strip" aria-label="Delegation summary">
                     { local_did_metric(did_label, on_copy_did, can_copy_did) }
-                    { metric("Session", account_label.to_string()) }
+                    { metric("Delegation", account_label.to_string()) }
                     { metric("Peers", view.peers.len().to_string()) }
                 </div>
                 <div class="mobile-telemetry-strip" aria-label="Mobile topology telemetry">

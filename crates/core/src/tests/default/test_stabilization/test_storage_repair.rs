@@ -29,7 +29,7 @@ fn ensure_storage_repair_route(node: &Node, placement: Did, next_hop: Did) -> Re
 #[tokio::test]
 async fn test_stabilize_republishes_local_entries_to_missing_affine_owners() -> Result<()> {
     let key = SecretKey::random();
-    let session = SessionSk::new_with_seckey(&key)?;
+    let session = DelegateeKey::new_with_seckey(&key)?;
     let swarm = Arc::new(
         SwarmBuilder::new(
             0,

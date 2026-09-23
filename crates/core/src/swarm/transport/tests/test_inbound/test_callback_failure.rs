@@ -72,7 +72,7 @@ async fn test_validation_deadline_drops_user_future_releases_capacity_and_unbloc
     ))?);
     let key = SecretKey::random();
     let peer: Did = key.address().into();
-    let session = SessionSk::new_with_seckey(&key)?;
+    let session = DelegateeKey::new_with_seckey(&key)?;
     let app_callback = Arc::new(TimeoutOnceValidateSwarmCallback::default());
     let callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
     let cid = peer.to_string();
@@ -113,7 +113,7 @@ async fn test_inbound_callback_deadline_drops_user_future_and_releases_capacity(
     ))?);
     let key = SecretKey::random();
     let peer: Did = key.address().into();
-    let session = SessionSk::new_with_seckey(&key)?;
+    let session = DelegateeKey::new_with_seckey(&key)?;
     let app_callback = Arc::new(TimeoutOnceInboundSwarmCallback::default());
     let callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
     let cid = peer.to_string();
@@ -144,7 +144,7 @@ async fn test_actor_panic_drops_active_and_queued_capacity_and_closes_mailbox() 
     ))?);
     let key = SecretKey::random();
     let peer: Did = key.address().into();
-    let session = SessionSk::new_with_seckey(&key)?;
+    let session = DelegateeKey::new_with_seckey(&key)?;
     let app_callback = Arc::new(PanickingValidateSwarmCallback::default());
     let callback = Arc::new(InnerSwarmCallback::new(
         Arc::clone(&transport),

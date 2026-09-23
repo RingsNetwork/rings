@@ -16,9 +16,9 @@ use std::sync::Mutex;
 use bytes::Bytes;
 #[cfg(any(test, rings_browser))]
 use futures::channel::oneshot;
+use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
 use rings_core::message::MessageSigner;
-use rings_core::session::SessionSk;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -515,14 +515,14 @@ fn url_path(suffix: &str) -> String {
 pub(crate) struct BrowserOnionCircuitHandler {
     https: Arc<OnionHttpsRuntime>,
     /// The exit's signing authority for backward payloads.
-    signer: MessageSigner<SessionSk>,
+    signer: MessageSigner<DelegateeKey>,
 }
 
 #[cfg(rings_browser)]
 impl BrowserOnionCircuitHandler {
     /// Create a browser circuit handler backed by the HTTPS runtime, signing backward payloads
     /// for the overlay `network_id`.
-    pub(crate) fn new(https: Arc<OnionHttpsRuntime>, signer: MessageSigner<SessionSk>) -> Self {
+    pub(crate) fn new(https: Arc<OnionHttpsRuntime>, signer: MessageSigner<DelegateeKey>) -> Self {
         Self { https, signer }
     }
 }
@@ -551,7 +551,7 @@ impl OnionCircuitHandler for BrowserOnionCircuitHandler {
 
 pub(crate) async fn try_handle_https_exit_payload(
     runtime: &Arc<OnionHttpsRuntime>,
-    signer: MessageSigner<&SessionSk>,
+    signer: MessageSigner<&DelegateeKey>,
     scope: &Scope,
     frame: OnionCircuitExitFrame,
 ) -> Result<bool> {
@@ -590,7 +590,7 @@ pub(crate) async fn try_handle_https_exit_payload(
         OnionBackwardPath::new(
             frame.circuit_id,
             frame.return_peer,
-            frame.return_session_public_key,
+            frame.return_delegatee_public_key,
             frame.client,
         ),
         OnionBackwardSequence::FIRST,

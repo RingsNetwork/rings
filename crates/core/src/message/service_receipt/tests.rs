@@ -1,21 +1,23 @@
 use super::*;
+use crate::delegation::DelegateeKey;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::message::HopBudget;
 use crate::message::MessageRelay;
-use crate::session::SessionSk;
 
-fn signed_receipt(network_id: u32) -> Result<(ProvisionalServiceReceipt, SessionSk, SessionSk)> {
-    let provider = SessionSk::new_with_seckey(&SecretKey::random())?;
+fn signed_receipt(
+    network_id: u32,
+) -> Result<(ProvisionalServiceReceipt, DelegateeKey, DelegateeKey)> {
+    let provider = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let beneficiary_key = SecretKey::random();
-    let beneficiary = SessionSk::new_with_seckey(&beneficiary_key)?;
-    let rotated_beneficiary = SessionSk::new_with_seckey(&beneficiary_key)?;
+    let beneficiary = DelegateeKey::new_with_seckey(&beneficiary_key)?;
+    let rotated_beneficiary = DelegateeKey::new_with_seckey(&beneficiary_key)?;
     let now_seconds = u64::try_from(crate::utils::get_epoch_ms() / 1_000)
         .map_err(|_| Error::ServiceReceipt(ServiceReceiptError::ObservationTimeOverflow))?;
     let claim = ProvisionalServiceClaim::probe(
         network_id,
-        provider.account_did(),
-        beneficiary.account_did(),
+        provider.delegator_did(),
+        beneficiary.delegator_did(),
         ProvisionalEpoch::from_unix_seconds(now_seconds),
         [3; 32],
         [4; 32],
@@ -39,22 +41,22 @@ fn receipt_signed_at(
 ) -> Result<ProvisionalServiceReceipt> {
     let provider_account = SecretKey::random();
     let beneficiary_account = SecretKey::random();
-    let provider = SessionSk::from_test_keys(
+    let provider = DelegateeKey::from_test_keys(
         &provider_account,
         SecretKey::random(),
         provider_ts_ms,
-        crate::consts::DEFAULT_SESSION_TTL_MS,
+        crate::consts::DEFAULT_DELEGATION_TTL_MS,
     )?;
-    let beneficiary = SessionSk::from_test_keys(
+    let beneficiary = DelegateeKey::from_test_keys(
         &beneficiary_account,
         SecretKey::random(),
         beneficiary_ts_ms,
-        crate::consts::DEFAULT_SESSION_TTL_MS,
+        crate::consts::DEFAULT_DELEGATION_TTL_MS,
     )?;
     let claim = ProvisionalServiceClaim::probe(
         network_id,
-        provider.account_did(),
-        beneficiary.account_did(),
+        provider.delegator_did(),
+        beneficiary.delegator_did(),
         epoch,
         [13; 32],
         [14; 32],
@@ -85,7 +87,7 @@ fn session_rotation_preserves_account_roles() -> Result<()> {
 #[test]
 fn mismatched_delegated_account_and_role_swaps_fail_closed() -> Result<()> {
     let (receipt, provider, beneficiary) = signed_receipt(7)?;
-    let wrong = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let wrong = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     assert!(matches!(
         receipt
             .claim
@@ -202,13 +204,13 @@ fn live_admission_rejects_proofs_signed_before_their_sessions_expired() -> Resul
     const OBSERVED_AT_MS: u128 = SESSION_CREATED_AT_MS + 6;
     const LONG_SESSION_TTL_MS: u64 = 100;
 
-    let provider = SessionSk::from_test_keys(
+    let provider = DelegateeKey::from_test_keys(
         &SecretKey::random(),
         SecretKey::random(),
         SESSION_CREATED_AT_MS,
         SESSION_TTL_MS,
     )?;
-    let beneficiary = SessionSk::from_test_keys(
+    let beneficiary = DelegateeKey::from_test_keys(
         &SecretKey::random(),
         SecretKey::random(),
         SESSION_CREATED_AT_MS,
@@ -216,8 +218,8 @@ fn live_admission_rejects_proofs_signed_before_their_sessions_expired() -> Resul
     )?;
     let claim = ProvisionalServiceClaim::probe(
         NETWORK_ID,
-        provider.account_did(),
-        beneficiary.account_did(),
+        provider.delegator_did(),
+        beneficiary.delegator_did(),
         ProvisionalEpoch::from_unix_seconds(u64::try_from(OBSERVED_AT_MS / 1_000).unwrap_or(0)),
         [21; 32],
         [22; 32],
@@ -243,13 +245,13 @@ fn live_admission_rejects_proofs_signed_before_their_sessions_expired() -> Resul
         Err(ServiceReceiptError::ProviderAttestationNotLive)
     );
 
-    let short_beneficiary = SessionSk::from_test_keys(
+    let short_beneficiary = DelegateeKey::from_test_keys(
         &SecretKey::random(),
         SecretKey::random(),
         SESSION_CREATED_AT_MS,
         SESSION_TTL_MS,
     )?;
-    let long_provider = SessionSk::from_test_keys(
+    let long_provider = DelegateeKey::from_test_keys(
         &SecretKey::random(),
         SecretKey::random(),
         SESSION_CREATED_AT_MS,
@@ -257,8 +259,8 @@ fn live_admission_rejects_proofs_signed_before_their_sessions_expired() -> Resul
     )?;
     let claim = ProvisionalServiceClaim::probe(
         NETWORK_ID,
-        long_provider.account_did(),
-        short_beneficiary.account_did(),
+        long_provider.delegator_did(),
+        short_beneficiary.delegator_did(),
         ProvisionalEpoch::from_unix_seconds(u64::try_from(OBSERVED_AT_MS / 1_000).unwrap_or(0)),
         [24; 32],
         [25; 32],
@@ -306,28 +308,28 @@ fn canonical_receipt_golden_vector_is_stable() -> Result<()> {
     const SIGNED_AT_MS: u128 = CREATED_AT_MS + 123;
     let provider_account =
         SecretKey::try_from("0000000000000000000000000000000000000000000000000000000000000001")?;
-    let provider_session_key =
+    let provider_delegatee_key =
         SecretKey::try_from("0000000000000000000000000000000000000000000000000000000000000002")?;
     let beneficiary_account =
         SecretKey::try_from("0000000000000000000000000000000000000000000000000000000000000003")?;
-    let beneficiary_session_key =
+    let beneficiary_delegatee_key =
         SecretKey::try_from("0000000000000000000000000000000000000000000000000000000000000004")?;
-    let provider = SessionSk::from_test_keys(
+    let provider = DelegateeKey::from_test_keys(
         &provider_account,
-        provider_session_key,
+        provider_delegatee_key,
         CREATED_AT_MS,
         SESSION_TTL_MS,
     )?;
-    let beneficiary = SessionSk::from_test_keys(
+    let beneficiary = DelegateeKey::from_test_keys(
         &beneficiary_account,
-        beneficiary_session_key,
+        beneficiary_delegatee_key,
         CREATED_AT_MS,
         SESSION_TTL_MS,
     )?;
     let claim = ProvisionalServiceClaim::probe(
         7,
-        provider.account_did(),
-        beneficiary.account_did(),
+        provider.delegator_did(),
+        beneficiary.delegator_did(),
         ProvisionalEpoch { slot: 3 },
         [4; 32],
         [5; 32],
@@ -422,12 +424,12 @@ fn zero_units_and_unknown_service_kind_fail_decoding() -> Result<()> {
 #[test]
 fn probe_offer_verifies_the_exact_signed_request_and_completion() -> Result<()> {
     let network_id = 7;
-    let provider = SessionSk::new_with_seckey(&SecretKey::random())?;
-    let beneficiary = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let provider = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let beneficiary = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let provider_signer = MessageSigner::new(&provider, network_id);
     let beneficiary_signer = MessageSigner::new(&beneficiary, network_id);
-    let provider_did = provider.account_did();
-    let beneficiary_did = beneficiary.account_did();
+    let provider_did = provider.delegator_did();
+    let beneficiary_did = beneficiary.delegator_did();
     let request = ProbeRequest {
         epoch: ProvisionalEpoch::from_unix_seconds(
             u64::try_from(crate::utils::get_epoch_ms() / 1_000).unwrap_or(0),
@@ -511,18 +513,18 @@ fn probe_offer_rejects_an_attestation_from_an_expired_provider_session() -> Resu
     let observed_at_ms = crate::utils::get_epoch_ms();
     let session_created_at_ms = observed_at_ms.saturating_sub(u128::from(SESSION_TTL_MS) + 1);
     let provider_account = SecretKey::random();
-    let provider_transport = SessionSk::new_with_seckey(&provider_account)?;
-    let provider_attestation_session = SessionSk::from_test_keys(
+    let provider_transport = DelegateeKey::new_with_seckey(&provider_account)?;
+    let provider_attestation_session = DelegateeKey::from_test_keys(
         &provider_account,
         SecretKey::random(),
         session_created_at_ms,
         SESSION_TTL_MS,
     )?;
-    let beneficiary = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let beneficiary = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let provider_signer = MessageSigner::new(&provider_transport, NETWORK_ID);
     let beneficiary_signer = MessageSigner::new(&beneficiary, NETWORK_ID);
-    let provider_did = provider_transport.account_did();
-    let beneficiary_did = beneficiary.account_did();
+    let provider_did = provider_transport.delegator_did();
+    let beneficiary_did = beneficiary.delegator_did();
     let request = ProbeRequest {
         epoch: ProvisionalEpoch::from_unix_seconds(
             u64::try_from(observed_at_ms / 1_000).unwrap_or(0),
@@ -595,17 +597,17 @@ fn probe_offer_judges_embedded_transaction_sessions_at_observation_time() -> Res
     let created_at_ms = crate::utils::get_epoch_ms();
     let observed_at_ms = created_at_ms + u128::from(SESSION_TTL_MS) + 1;
     let beneficiary_account = SecretKey::random();
-    let beneficiary = SessionSk::from_test_keys(
+    let beneficiary = DelegateeKey::from_test_keys(
         &beneficiary_account,
         SecretKey::random(),
         created_at_ms,
         SESSION_TTL_MS,
     )?;
-    let provider = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let provider = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let provider_signer = MessageSigner::new(&provider, NETWORK_ID);
     let beneficiary_signer = MessageSigner::new(&beneficiary, NETWORK_ID);
-    let provider_did = provider.account_did();
-    let beneficiary_did = beneficiary.account_did();
+    let provider_did = provider.delegator_did();
+    let beneficiary_did = beneficiary.delegator_did();
     let request = ProbeRequest {
         epoch: ProvisionalEpoch::from_unix_seconds(
             u64::try_from(observed_at_ms / 1_000).unwrap_or(0),

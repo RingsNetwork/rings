@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
+use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
 use rings_core::ecc::PublicKey;
-use rings_core::session::SessionSk;
 use rings_core::utils::get_epoch_ms;
 
 use super::cell::open_cell;
@@ -33,7 +33,7 @@ use crate::extension::transport::platform::spawn_detached;
 
 /// Interpreter for route-aware circuit effects.
 pub struct OnionCircuitShell<H> {
-    session_sk: SessionSk,
+    delegatee_key: DelegateeKey,
     crypto_gate: OnionCryptoGate,
     link_sender: OnionLinkSender,
     handler: Arc<H>,
@@ -41,9 +41,9 @@ pub struct OnionCircuitShell<H> {
 
 impl<H> OnionCircuitShell<H> {
     /// Create a circuit interpreter backed by `handler`.
-    pub fn new(session_sk: SessionSk, handler: H) -> Self {
+    pub fn new(delegatee_key: DelegateeKey, handler: H) -> Self {
         Self {
-            session_sk,
+            delegatee_key,
             crypto_gate: OnionCryptoGate::default(),
             link_sender: OnionLinkSender::default(),
             handler: Arc::new(handler),
@@ -52,12 +52,12 @@ impl<H> OnionCircuitShell<H> {
 
     #[cfg(all(test, rings_native))]
     pub(super) fn new_with_send_test_hook(
-        session_sk: SessionSk,
+        delegatee_key: DelegateeKey,
         handler: H,
         test_hook: Arc<OnionSendTestHook>,
     ) -> Self {
         Self {
-            session_sk,
+            delegatee_key,
             crypto_gate: OnionCryptoGate::default(),
             link_sender: OnionLinkSender::with_test_hook(test_hook),
             handler: Arc::new(handler),
@@ -66,12 +66,12 @@ impl<H> OnionCircuitShell<H> {
 
     /// Create an interpreter sharing one node-level link sender with endpoint adapters.
     pub(crate) fn with_link_sender(
-        session_sk: SessionSk,
+        delegatee_key: DelegateeKey,
         handler: H,
         link_sender: OnionLinkSender,
     ) -> Self {
         Self {
-            session_sk,
+            delegatee_key,
             crypto_gate: OnionCryptoGate::default(),
             link_sender,
             handler: Arc::new(handler),
@@ -99,7 +99,7 @@ impl<H> OnionCircuitShell<H> {
             }
             Err(error) => return Err(error),
         }
-        let message = match open_cell(&self.session_sk, bucket, sealed) {
+        let message = match open_cell(&self.delegatee_key, bucket, sealed) {
             Ok(message) => message,
             Err(error) => {
                 drop_bad_crypto("cell decrypt", error);
@@ -131,7 +131,7 @@ impl<H> OnionCircuitShell<H> {
             }
             Err(error) => return Err(error),
         }
-        let layer = match decrypt_forward_layer(&self.session_sk, circuit_id, payload) {
+        let layer = match decrypt_forward_layer(&self.delegatee_key, circuit_id, payload) {
             Ok(layer) => layer,
             Err(error) => {
                 drop_bad_crypto("forward decrypt", error);
@@ -162,7 +162,7 @@ impl<H> OnionCircuitShell<H> {
             }
             Err(error) => return Err(error),
         }
-        match decrypt_client_payload(&self.session_sk, payload) {
+        match decrypt_client_payload(&self.delegatee_key, payload) {
             Ok(payload) => Ok(Some(payload)),
             Err(error) => {
                 drop_bad_crypto("client decrypt", error);
@@ -217,7 +217,7 @@ where H: OnionCircuitHandler + crate::extension::ext::MaybeSend + 'static
                 from,
                 circuit_id,
                 return_peer,
-                return_session_public_key,
+                return_delegatee_public_key,
                 client,
                 forward_nonce,
                 forward_sequence,
@@ -231,7 +231,7 @@ where H: OnionCircuitHandler + crate::extension::ext::MaybeSend + 'static
                             from,
                             circuit_id,
                             return_peer,
-                            return_session_public_key,
+                            return_delegatee_public_key,
                             client,
                             forward_nonce,
                             forward_sequence,
@@ -270,8 +270,8 @@ pub struct OnionCircuitExitFrame {
     pub circuit_id: OnionCircuitId,
     /// Relay peer that should receive backward frames from the exit.
     pub return_peer: Did,
-    /// Session key of the immediate return peer used to encrypt the first backward cell.
-    pub return_session_public_key: PublicKey<33>,
+    /// Delegation key of the immediate return peer used to encrypt the first backward cell.
+    pub return_delegatee_public_key: PublicKey<33>,
     /// Client return key encrypted into the exit layer.
     pub client: OnionClientReturn,
     /// One-shot replay token consumed by `Open`/HTTPS exit operations before side effects.

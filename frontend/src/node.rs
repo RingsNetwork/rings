@@ -6,7 +6,7 @@ use js_sys::Array;
 use js_sys::Object;
 use js_sys::Reflect;
 use js_sys::Uint8Array;
-use rings_node::prelude::rings_core::session::SessionSkBuilder;
+use rings_node::prelude::rings_core::delegation::DelegationBuilder;
 use rings_node::processor::ProcessorConfig;
 use rings_node::provider::browser::ProviderListener;
 use rings_node::provider::Provider;
@@ -129,7 +129,7 @@ pub enum WebviewHost {
     Extension,
 }
 
-/// Build a browser provider from a wallet-authorized session key.
+/// Build a browser provider from a wallet-authorized delegatee key.
 ///
 /// The browser provider is used only on the single-threaded wasm event loop, but
 /// the upstream `Provider` handle is exposed behind `Arc`; keep that shape at
@@ -140,17 +140,17 @@ pub async fn build_node(
     settings: NodeSettings,
     webview_host: WebviewHost,
 ) -> Result<DemoNode, String> {
-    let mut builder = SessionSkBuilder::new(wallet.account.clone(), wallet.account_type.clone());
+    let mut builder = DelegationBuilder::new(wallet.account.clone(), wallet.account_type.clone());
     let proof = builder.unsigned_proof();
     let signature = wallet.sign_session_proof(&proof).await?;
-    builder = builder.set_session_sig(signature);
-    let session_sk = builder
+    builder = builder.set_delegator_signature(signature);
+    let delegatee_key = builder
         .build()
-        .map_err(|error| format!("session key rejected: {error}"))?;
+        .map_err(|error| format!("delegatee key rejected: {error}"))?;
     let config = ProcessorConfig::new(
         settings.network_id,
         settings.ice_servers,
-        session_sk,
+        delegatee_key,
         settings.stabilize_interval,
     );
     let provider = Arc::new(
@@ -294,8 +294,8 @@ mod tests {
 
     use futures::FutureExt;
     use gloo_timers::future::sleep;
+    use rings_node::prelude::rings_core::delegation::DelegateeKey;
     use rings_node::prelude::rings_core::ecc::SecretKey;
-    use rings_node::prelude::rings_core::session::SessionSk;
     use rings_node::prelude::uuid;
     use wasm_bindgen_test::wasm_bindgen_test;
 
@@ -380,10 +380,14 @@ mod tests {
     // Mirrors the browser-only `DemoNode` ownership boundary from `build_node`.
     #[allow(clippy::arc_with_non_send_sync)]
     async fn build_test_demo_node(key: &SecretKey) -> Result<DemoNode, String> {
-        let session_sk = SessionSk::new_with_seckey(key)
-            .map_err(|error| format!("session key rejected: {error}"))?;
-        let config =
-            ProcessorConfig::new(TEST_NETWORK_ID, TEST_ICE_SERVERS.to_string(), session_sk, 0);
+        let delegatee_key = DelegateeKey::new_with_seckey(key)
+            .map_err(|error| format!("delegatee key rejected: {error}"))?;
+        let config = ProcessorConfig::new(
+            TEST_NETWORK_ID,
+            TEST_ICE_SERVERS.to_string(),
+            delegatee_key,
+            0,
+        );
         let storage_name = format!(
             "rings-frontend-listener-{}",
             uuid::Uuid::new_v4().to_simple()

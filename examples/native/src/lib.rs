@@ -1,11 +1,11 @@
 use std::fmt;
 
 use bytes::Bytes;
+use rings_core::delegation::DelegateeKey;
+use rings_core::delegation::DelegationBuilder;
 use rings_core::dht::Did;
 use rings_core::ecc::SecretKey;
 use rings_core::message::e2e;
-use rings_core::session::SessionSk;
-use rings_core::session::SessionSkBuilder;
 use rings_node::extension::ext::Ctx;
 use rings_node::extension::ext::EffectScope;
 use rings_node::extension::ext::Interpret;
@@ -137,12 +137,12 @@ where
     })
 }
 
-/// Build a session key for the randomly generated account.
-pub fn build_session_key(key: &SecretKey) -> rings_core::error::Result<SessionSk> {
+/// Build a delegatee key for the randomly generated account.
+pub fn build_delegatee_key(key: &SecretKey) -> rings_core::error::Result<DelegateeKey> {
     let did = Did::from(key.address());
-    let mut builder = SessionSkBuilder::new(did.to_string(), "secp256k1".to_string());
+    let mut builder = DelegationBuilder::new(did.to_string(), "secp256k1".to_string());
     let sig = key.sign(&builder.unsigned_proof())?;
-    builder = builder.set_session_sig(sig.to_vec());
+    builder = builder.set_delegator_signature(sig.to_vec());
     builder.build()
 }
 
@@ -275,12 +275,12 @@ mod tests {
     }
 
     #[test]
-    fn test_build_session_key_uses_the_generated_account_did() {
+    fn test_build_delegatee_key_uses_the_generated_delegator_did() {
         let key = SecretKey::random();
         let did = Did::from(key.address());
-        let session = build_session_key(&key).expect("session key");
+        let delegatee_key = build_delegatee_key(&key).expect("delegatee key");
 
-        assert_eq!(session.account_did(), did);
+        assert_eq!(delegatee_key.delegator_did(), did);
     }
 
     #[test]

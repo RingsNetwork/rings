@@ -12,19 +12,19 @@ fn did() -> Did {
     SecretKey::random().address().into()
 }
 
-fn session() -> SessionSk {
-    SessionSk::new_with_seckey(&SecretKey::random()).expect("session key")
+fn session() -> DelegateeKey {
+    DelegateeKey::new_with_seckey(&SecretKey::random()).expect("delegatee key")
 }
 
-fn exit_descriptor(session: &SessionSk) -> OnionExitDescriptor {
+fn exit_descriptor(session: &DelegateeKey) -> OnionExitDescriptor {
     OnionExitDescriptor::new_signed(
         OnionExitDescriptorBody {
-            did: session.account_did(),
+            did: session.delegator_did(),
             public_key: session
-                .session()
-                .account_verification_pubkey()
+                .delegation()
+                .delegator_verification_pubkey()
                 .expect("verification key"),
-            session_public_key: session.session_public_key(),
+            delegatee_public_key: session.delegatee_public_key(),
             process_epoch: crate::onion::OnionExitEpoch::new([19; 16]),
             node_type: OnlineNodeType::Native,
             network_id: TEST_NETWORK_ID,
@@ -81,14 +81,14 @@ fn test_exit_target_admission_returns_the_canonical_parsed_target() -> Result<()
 
 fn dummy_authenticated_payload(
     return_id: OnionReturnId,
-    session: &SessionSk,
+    session: &DelegateeKey,
 ) -> OnionAuthenticatedPayload {
     dummy_authenticated_payload_for_service(return_id, session, OnionServiceName::tcp())
 }
 
 fn dummy_authenticated_payload_for_service(
     return_id: OnionReturnId,
-    session: &SessionSk,
+    session: &DelegateeKey,
     service: OnionServiceName,
 ) -> OnionAuthenticatedPayload {
     OnionAuthenticatedPayload::new_signed(
@@ -558,19 +558,19 @@ fn test_exit_limiter_counts_distinct_circuit_ids() {
 #[tokio::test]
 async fn test_install_rejects_duplicate_namespace_instead_of_splitting_runtime() -> Result<()> {
     let processor = Arc::new(crate::tests::native::prepare_processor().await);
-    let session_sk = processor.session_sk().clone();
+    let delegatee_key = processor.delegatee_key().clone();
     let network_id = processor.swarm.network_id();
     let extensions = Extensions::new(processor);
     let _handle = NativeOnionCircuitHandle::install(
         &extensions,
-        session_sk.clone(),
+        delegatee_key.clone(),
         network_id,
         false,
         None,
     )?;
 
     assert!(matches!(
-        NativeOnionCircuitHandle::install(&extensions, session_sk, network_id, false, None),
+        NativeOnionCircuitHandle::install(&extensions, delegatee_key, network_id, false, None),
         Err(Error::ExtensionError(_))
     ));
     Ok(())

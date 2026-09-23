@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::lock::Mutex as AsyncMutex;
+use rings_core::delegation::DelegateeKey;
 use rings_core::dht::entry;
 use rings_core::dht::Did;
 use rings_core::ecc::VerificationPublicKey;
@@ -17,7 +18,6 @@ use rings_core::lifecycle::StopToken;
 use rings_core::message::Encoded;
 use rings_core::message::Encoder;
 use rings_core::message::MessageSigner;
-use rings_core::session::SessionSk;
 use rings_core::utils::get_epoch_ms;
 
 use crate::error::Error;
@@ -148,21 +148,21 @@ impl<'a> RegistrationContext<'a> {
     }
 
     /// Return the account verification public key.
-    pub(crate) fn account_verification_pubkey(&self) -> Result<VerificationPublicKey> {
+    pub(crate) fn delegator_verification_pubkey(&self) -> Result<VerificationPublicKey> {
         self.processor
             .swarm
-            .account_verification_pubkey()
+            .delegator_verification_pubkey()
             .map_err(Error::CoreError)
     }
 
     /// Return the local session signing key.
-    pub(crate) fn session_sk(&self) -> &SessionSk {
-        self.processor.session_sk()
+    pub(crate) fn delegatee_key(&self) -> &DelegateeKey {
+        self.processor.delegatee_key()
     }
 
-    /// The authority that signs this node's descriptors: its session key inside its overlay.
-    pub(crate) fn message_signer(&self) -> MessageSigner<&SessionSk> {
-        MessageSigner::new(self.session_sk(), self.network_id())
+    /// The authority that signs this node's descriptors: its delegatee key inside its overlay.
+    pub(crate) fn message_signer(&self) -> MessageSigner<&DelegateeKey> {
+        MessageSigner::new(self.delegatee_key(), self.network_id())
     }
 
     pub(crate) async fn fetch_storage_entry(&self, entry_key: Did) -> Result<Option<entry::Entry>> {
@@ -433,8 +433,8 @@ impl OnlineNodeRegistration {
         OnlineNodeDescriptor::new_signed(
             OnlineNodeDescriptorBody {
                 did: context.did(),
-                public_key: context.account_verification_pubkey()?,
-                session_public_key: context.session_sk().session_public_key(),
+                public_key: context.delegator_verification_pubkey()?,
+                delegatee_public_key: context.delegatee_key().delegatee_public_key(),
                 node_type: self.node_type.clone(),
                 network_id: context.network_id(),
                 storage_redundancy: context.storage_redundancy(),

@@ -5,10 +5,10 @@ use std::sync::atomic::Ordering;
 #[cfg(rings_native)]
 use std::time::Duration;
 
+use rings_core::delegation::DelegateeKey;
 use rings_core::ecc::SecretKey;
 #[cfg(rings_native)]
 use rings_core::message::MessageSigner;
-use rings_core::session::SessionSk;
 #[cfg(rings_native)]
 use tokio::io::AsyncReadExt;
 #[cfg(rings_native)]
@@ -26,19 +26,19 @@ fn did() -> Did {
     SecretKey::random().address().into()
 }
 
-fn session() -> SessionSk {
-    SessionSk::new_with_seckey(&SecretKey::random()).expect("session key")
+fn session() -> DelegateeKey {
+    DelegateeKey::new_with_seckey(&SecretKey::random()).expect("delegatee key")
 }
 
-fn exit_descriptor(session: &SessionSk) -> OnionExitDescriptor {
+fn exit_descriptor(session: &DelegateeKey) -> OnionExitDescriptor {
     OnionExitDescriptor::new_signed(
         OnionExitDescriptorBody {
-            did: session.account_did(),
+            did: session.delegator_did(),
             public_key: session
-                .session()
-                .account_verification_pubkey()
+                .delegation()
+                .delegator_verification_pubkey()
                 .expect("verification key"),
-            session_public_key: session.session_public_key(),
+            delegatee_public_key: session.delegatee_public_key(),
             process_epoch: crate::onion::OnionExitEpoch::new([23; 16]),
             node_type: OnlineNodeType::Browser,
             network_id: TEST_NETWORK_ID,
@@ -56,7 +56,7 @@ fn exit_descriptor(session: &SessionSk) -> OnionExitDescriptor {
 
 fn dummy_authenticated_payload(
     return_id: OnionReturnId,
-    session: &SessionSk,
+    session: &DelegateeKey,
 ) -> OnionAuthenticatedPayload {
     OnionAuthenticatedPayload::new_signed(
         return_id,

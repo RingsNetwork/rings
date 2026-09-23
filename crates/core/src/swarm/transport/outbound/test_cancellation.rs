@@ -134,7 +134,7 @@ async fn test_cancellation_after_scan_releases_successor_behind_waiting_head() {
         StopSource::new(),
         measurements,
         peer,
-        SharedAnnouncedSessions::new(),
+        SharedAnnouncedDelegations::new(),
     );
     let (head, head_completion) = scheduled_transfer(&node, peer, &capacity, &StopSource::new());
     worker.enqueue_transfer(head);

@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
 use super::*;
+use crate::delegation::DelegateeKey;
 use crate::ecc::tests::gen_ordered_keys;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::message::Message;
 use crate::message::MessageSigner;
-use crate::session::SessionSk;
 use crate::swarm::callback::SwarmCallback;
 use crate::swarm::Swarm;
 use crate::tests::default::assert_no_more_msg;
@@ -20,7 +20,7 @@ struct NoopCallback;
 impl SwarmCallback for NoopCallback {}
 
 fn notify_context(origin: &SecretKey, destination: crate::dht::Did) -> Result<MessagePayload> {
-    let session = SessionSk::new_with_seckey(origin)?;
+    let session = DelegateeKey::new_with_seckey(origin)?;
     MessagePayload::new_send(
         Message::custom(b"notify predecessor context")?,
         MessageSigner::new(&session, TEST_NETWORK_ID),

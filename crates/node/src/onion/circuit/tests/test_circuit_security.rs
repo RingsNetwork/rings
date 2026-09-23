@@ -28,11 +28,11 @@ fn test_relay_return_table_evicts_expired_entries() {
     let previous_circuit_id = OnionCircuitId::new([11; 16]);
     let first = RelayReturnKey {
         circuit_id: OnionCircuitId::new([1; 16]),
-        next_hop: next.account_did(),
+        next_hop: next.delegator_did(),
     };
     let second = RelayReturnKey {
         circuit_id: OnionCircuitId::new([2; 16]),
-        next_hop: other_next.account_did(),
+        next_hop: other_next.delegator_did(),
     };
 
     remember_return_hop(
@@ -76,7 +76,7 @@ fn test_backward_cell_after_return_expiry_is_never_forwarded() {
         return_edge(
             RelayReturnKey {
                 circuit_id: next_circuit_id,
-                next_hop: next.account_did(),
+                next_hop: next.delegator_did(),
             },
             &client,
             OnionCircuitId::new([42; 16]),
@@ -89,14 +89,14 @@ fn test_backward_cell_after_return_expiry_is_never_forwarded() {
         payload: encrypt_client_payload(
             OnionReturnId::new([43; 16]),
             test_payload("expired-return"),
-            client.session_public_key(),
+            client.delegatee_public_key(),
             MessageSigner::new(&next, TEST_NETWORK_ID),
         )
         .expect("encrypt backward fixture"),
     });
     let reducer = OnionCircuitReducer::new(OnionCircuitCapabilities::from_registration(true, None));
     let transition = reducer.apply(&state, OnionCircuitInput::CellReady {
-        from: next.account_did(),
+        from: next.delegator_did(),
         received_at_ms: 111,
         bucket: OnionCellBucket::KiB4,
         message: backward,
@@ -121,7 +121,7 @@ fn test_relay_return_table_rejects_live_edge_overwrite() {
     let previous_circuit_id = OnionCircuitId::new([6; 16]);
     let key = RelayReturnKey {
         circuit_id: OnionCircuitId::new([7; 16]),
-        next_hop: next.account_did(),
+        next_hop: next.delegator_did(),
     };
 
     remember_return_hop(
@@ -161,7 +161,7 @@ fn test_relay_return_table_preserves_capacity_for_other_authenticated_peers() {
             return_edge(
                 RelayReturnKey {
                     circuit_id: OnionCircuitId::new([circuit_byte; 16]),
-                    next_hop: next.account_did(),
+                    next_hop: next.delegator_did(),
                 },
                 &first_peer,
                 OnionCircuitId::new([circuit_byte + 10; 16]),
@@ -179,7 +179,7 @@ fn test_relay_return_table_preserves_capacity_for_other_authenticated_peers() {
             return_edge(
                 RelayReturnKey {
                     circuit_id: OnionCircuitId::new([3; 16]),
-                    next_hop: next.account_did(),
+                    next_hop: next.delegator_did(),
                 },
                 &first_peer,
                 OnionCircuitId::new([13; 16]),
@@ -197,7 +197,7 @@ fn test_relay_return_table_preserves_capacity_for_other_authenticated_peers() {
         return_edge(
             RelayReturnKey {
                 circuit_id: OnionCircuitId::new([4; 16]),
-                next_hop: next.account_did(),
+                next_hop: next.delegator_did(),
             },
             &second_peer,
             OnionCircuitId::new([14; 16]),
@@ -209,7 +209,7 @@ fn test_relay_return_table_preserves_capacity_for_other_authenticated_peers() {
 
 #[test]
 fn test_crypto_limiter_bounds_sender_window() {
-    let peer = session().account_did();
+    let peer = session().delegator_did();
     let mut limiter = OnionCryptoLimiter::with_limit(2);
 
     assert!(limiter.admit(peer, 100, 0).is_ok());
@@ -230,7 +230,7 @@ fn test_one_hop_cover_cell_has_no_state_transition_or_effect() {
     let state = OnionCircuitState::default();
 
     let transition = reducer.apply(&state, OnionCircuitInput::CellReady {
-        from: peer.account_did(),
+        from: peer.delegator_did(),
         received_at_ms: 1,
         bucket: OnionCellBucket::KiB4,
         message: OnionWireMessage::Cover,
@@ -269,7 +269,7 @@ fn test_aead_context_binds_direction_and_circuit_id() {
     let circuit_id = OnionCircuitId::new([5; 16]);
     let wrong_circuit_id = OnionCircuitId::new([6; 16]);
     let (_, forward_payload) = encode_initial_forward(
-        OnionClientReturn::new(client.session_public_key()),
+        OnionClientReturn::new(client.delegatee_public_key()),
         &route,
         circuit_id,
         test_payload("tcp-shutdown"),
@@ -288,7 +288,7 @@ fn test_aead_context_binds_direction_and_circuit_id() {
     let backward = encrypt_client_payload(
         return_id,
         test_payload("tcp-close"),
-        client.session_public_key(),
+        client.delegatee_public_key(),
         MessageSigner::new(&exit, TEST_NETWORK_ID),
     )
     .expect("encrypt backward");
@@ -313,7 +313,7 @@ fn test_backward_payload_authentication_rejects_wrong_exit_signer() {
     let sealed = encrypt_client_payload(
         return_id,
         test_payload("forged"),
-        client.session_public_key(),
+        client.delegatee_public_key(),
         MessageSigner::new(&attacker, TEST_NETWORK_ID),
     )
     .expect("encrypt forged payload");

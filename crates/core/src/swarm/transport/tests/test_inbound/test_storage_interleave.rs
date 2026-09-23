@@ -10,6 +10,7 @@ use super::local_wire;
 use super::noop_control_message;
 use super::spawn_inbound_delivery;
 use crate::chunk::ReassemblyLimits;
+use crate::delegation::DelegateeKey;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
@@ -25,7 +26,6 @@ use crate::error::Result;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::SyncEntriesWithSuccessor;
-use crate::session::SessionSk;
 use crate::storage::KvStorageInterface;
 use crate::storage::MemStorage;
 use crate::swarm::callback::DefaultCallback;
@@ -117,9 +117,9 @@ impl SwarmCallback for InterleaveCallback {
 #[tokio::test]
 async fn test_inbound_storage_batch_yields_to_control_between_persistence_steps() -> Result<()> {
     let probe = Arc::new(InterleaveProbe::default());
-    let local_session = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let local_session = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let dht = Arc::new(PeerRing::new_with_storage_and_finger_table_size(
-        local_session.account_did(),
+        local_session.delegator_did(),
         3,
         Box::new(InterleaveStorage {
             inner: MemStorage::new(),
@@ -130,7 +130,7 @@ async fn test_inbound_storage_batch_yields_to_control_between_persistence_steps(
     let transport = Arc::new(SwarmTransport::new(SwarmTransportParts {
         network_id: 0,
         webrtc: SwarmWebrtcConfig::new("".to_string(), None, None),
-        session_sk: local_session,
+        delegatee_key: local_session,
         dht,
         measure: Some(Arc::new(RecordingMeasure::default())),
         transaction_replay: Arc::new(crate::message::TransactionReplay::new(Box::new(
@@ -151,7 +151,7 @@ async fn test_inbound_storage_batch_yields_to_control_between_persistence_steps(
     ));
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();
-    let peer_session = SessionSk::new_with_seckey(&peer_key)?;
+    let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
     let cid = peer.to_string();
 
     let entries = [31_u32, 32_u32]

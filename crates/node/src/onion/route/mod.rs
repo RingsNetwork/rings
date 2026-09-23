@@ -69,15 +69,15 @@ pub struct OnionRouteHop {
     /// Hop DID.
     pub did: Did,
     /// Hop session public key used for ElGamal-AEAD layers.
-    pub session_public_key: PublicKey<33>,
+    pub delegatee_public_key: PublicKey<33>,
 }
 
 impl OnionRouteHop {
     /// Build a route hop from its DID and session public key.
-    pub const fn new(did: Did, session_public_key: PublicKey<33>) -> Self {
+    pub const fn new(did: Did, delegatee_public_key: PublicKey<33>) -> Self {
         Self {
             did,
-            session_public_key,
+            delegatee_public_key,
         }
     }
 }
@@ -299,7 +299,7 @@ pub(crate) fn select_onion_route_from_candidates_with_first_hop_policy(
     let exit = exit_candidates.remove(exit_index);
     let exit_did = exit.did;
     let mut encryption_hops = selected_relays;
-    encryption_hops.push(OnionRouteHop::new(exit_did, exit.session_public_key));
+    encryption_hops.push(OnionRouteHop::new(exit_did, exit.delegatee_public_key));
     OnionRoute::new(request.service.clone(), encryption_hops, exit)
 }
 
@@ -314,7 +314,7 @@ fn select_direct_exit_route(
         pick_weighted_exit_index_where(&exits, quality_by_did, entropy, first_hop_permitted)
             .ok_or(Error::OnionRouteError(OnionRouteError::NoPermittedFirstHop))?;
     let exit = exits.remove(exit_index);
-    let encryption_hops = vec![OnionRouteHop::new(exit.did, exit.session_public_key)];
+    let encryption_hops = vec![OnionRouteHop::new(exit.did, exit.delegatee_public_key)];
     OnionRoute::new(request.service.clone(), encryption_hops, exit)
 }
 
@@ -426,7 +426,7 @@ fn eligible_relay_dids(
         .into_iter()
         .filter(|descriptor| descriptor.matches_dht_protocol(dht_protocol))
         .filter(has_onion_relay_capability)
-        .map(|descriptor| OnionRouteHop::new(descriptor.did, descriptor.session_public_key))
+        .map(|descriptor| OnionRouteHop::new(descriptor.did, descriptor.delegatee_public_key))
         .filter(|hop| hop.did != local)
         .map(|hop| (hop.did, hop))
         .collect::<BTreeMap<_, _>>()
@@ -462,7 +462,7 @@ fn validate_route_hops(
     let Some(last) = encryption_hops.last() else {
         return Err(Error::OnionRouteError(OnionRouteError::RouteHasNoHops));
     };
-    if last.did != exit.did || last.session_public_key != exit.session_public_key {
+    if last.did != exit.did || last.delegatee_public_key != exit.delegatee_public_key {
         return Err(Error::OnionRouteError(OnionRouteError::ExitHopMismatch));
     }
     let hops = encryption_hops

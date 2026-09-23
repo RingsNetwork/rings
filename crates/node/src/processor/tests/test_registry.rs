@@ -300,9 +300,9 @@ async fn test_online_node_lookup_filters_expired_descriptors_by_default() -> Res
             did: expired_processor.did(),
             public_key: expired_processor
                 .swarm
-                .account_verification_pubkey()
+                .delegator_verification_pubkey()
                 .map_err(Error::CoreError)?,
-            session_public_key: expired_processor.session_sk.session_public_key(),
+            delegatee_public_key: expired_processor.delegatee_key.delegatee_public_key(),
             node_type: default_online_node_type(),
             network_id: expired_processor.swarm.network_id(),
             storage_redundancy: expired_processor.swarm.storage_redundancy(),
@@ -315,7 +315,7 @@ async fn test_online_node_lookup_filters_expired_descriptors_by_default() -> Res
             version: crate::util::build_version(),
         },
         MessageSigner::new(
-            &expired_processor.session_sk,
+            &expired_processor.delegatee_key,
             expired_processor.swarm.network_id(),
         ),
     )
@@ -394,9 +394,9 @@ async fn test_online_node_lookup_filters_other_storage_redundancy_modes() -> Res
             did: foreign.did(),
             public_key: foreign
                 .swarm
-                .account_verification_pubkey()
+                .delegator_verification_pubkey()
                 .map_err(Error::CoreError)?,
-            session_public_key: foreign.session_sk.session_public_key(),
+            delegatee_public_key: foreign.delegatee_key.delegatee_public_key(),
             node_type: default_online_node_type(),
             network_id: foreign.swarm.network_id(),
             storage_redundancy: mismatched_storage_redundancy(foreign.swarm.storage_redundancy()),
@@ -408,7 +408,7 @@ async fn test_online_node_lookup_filters_other_storage_redundancy_modes() -> Res
             expires_at_ms: now_ms.saturating_add(60_000),
             version: crate::util::build_version(),
         },
-        MessageSigner::new(&foreign.session_sk, foreign.swarm.network_id()),
+        MessageSigner::new(&foreign.delegatee_key, foreign.swarm.network_id()),
     )
     .map_err(Error::CoreError)?;
 

@@ -1,6 +1,6 @@
+use rings_core::delegation::DelegateeKey;
 use rings_core::ecc::SecretKey;
 use rings_core::message::MessageSigner;
-use rings_core::session::SessionSk;
 
 use super::super::*;
 use crate::tests::TEST_NETWORK_ID;
@@ -17,9 +17,9 @@ fn service(name: &str) -> OnionServiceName {
 
 fn signed_exit_at(heartbeat_at_ms: u128, expires_at_ms: u128) -> Result<OnionExitDescriptor> {
     let key = SecretKey::random();
-    let session_sk = SessionSk::new_with_seckey(&key).map_err(Error::CoreError)?;
+    let delegatee_key = DelegateeKey::new_with_seckey(&key).map_err(Error::CoreError)?;
     signed_exit_for_session_at(
-        &session_sk,
+        &delegatee_key,
         service("web"),
         heartbeat_at_ms,
         expires_at_ms,
@@ -28,21 +28,21 @@ fn signed_exit_at(heartbeat_at_ms: u128, expires_at_ms: u128) -> Result<OnionExi
 }
 
 fn signed_exit_for_session_at(
-    session_sk: &SessionSk,
+    delegatee_key: &DelegateeKey,
     service: OnionServiceName,
     heartbeat_at_ms: u128,
     expires_at_ms: u128,
     version: &str,
 ) -> Result<OnionExitDescriptor> {
-    let did = session_sk.account_did();
+    let did = delegatee_key.delegator_did();
     OnionExitDescriptor::new_signed(
         OnionExitDescriptorBody {
             did,
-            public_key: session_sk
-                .session()
-                .account_verification_pubkey()
+            public_key: delegatee_key
+                .delegation()
+                .delegator_verification_pubkey()
                 .map_err(Error::CoreError)?,
-            session_public_key: session_sk.session_public_key(),
+            delegatee_public_key: delegatee_key.delegatee_public_key(),
             process_epoch: TEST_PROCESS_EPOCH,
             node_type: OnlineNodeType::Native,
             network_id: 1,
@@ -59,7 +59,7 @@ fn signed_exit_for_session_at(
             expires_at_ms,
             version: version.to_string(),
         },
-        MessageSigner::new(session_sk, TEST_NETWORK_ID),
+        MessageSigner::new(delegatee_key, TEST_NETWORK_ID),
     )
     .map_err(Error::CoreError)
 }
@@ -185,18 +185,18 @@ fn test_exit_descriptor_signature_covers_process_epoch() -> Result<()> {
 #[test]
 fn test_latest_valid_by_service_did_filters_expired_and_keeps_newest() -> Result<()> {
     let key = SecretKey::random();
-    let session_sk = SessionSk::new_with_seckey(&key).map_err(Error::CoreError)?;
-    let did = session_sk.account_did();
-    let public_key = session_sk
-        .session()
-        .account_verification_pubkey()
+    let delegatee_key = DelegateeKey::new_with_seckey(&key).map_err(Error::CoreError)?;
+    let did = delegatee_key.delegator_did();
+    let public_key = delegatee_key
+        .delegation()
+        .delegator_verification_pubkey()
         .map_err(Error::CoreError)?;
 
     let older = OnionExitDescriptor::new_signed(
         OnionExitDescriptorBody {
             did,
             public_key: public_key.clone(),
-            session_public_key: session_sk.session_public_key(),
+            delegatee_public_key: delegatee_key.delegatee_public_key(),
             process_epoch: TEST_PROCESS_EPOCH,
             node_type: OnlineNodeType::Native,
             network_id: 1,
@@ -207,14 +207,14 @@ fn test_latest_valid_by_service_did_filters_expired_and_keeps_newest() -> Result
             expires_at_ms: 100,
             version: "old".to_string(),
         },
-        MessageSigner::new(&session_sk, TEST_NETWORK_ID),
+        MessageSigner::new(&delegatee_key, TEST_NETWORK_ID),
     )
     .map_err(Error::CoreError)?;
     let newer = OnionExitDescriptor::new_signed(
         OnionExitDescriptorBody {
             did,
             public_key,
-            session_public_key: session_sk.session_public_key(),
+            delegatee_public_key: delegatee_key.delegatee_public_key(),
             process_epoch: TEST_PROCESS_EPOCH,
             node_type: OnlineNodeType::Native,
             network_id: 1,
@@ -225,7 +225,7 @@ fn test_latest_valid_by_service_did_filters_expired_and_keeps_newest() -> Result
             expires_at_ms: 100,
             version: "new".to_string(),
         },
-        MessageSigner::new(&session_sk, TEST_NETWORK_ID),
+        MessageSigner::new(&delegatee_key, TEST_NETWORK_ID),
     )
     .map_err(Error::CoreError)?;
     let other_live = signed_exit_at(25, 100)?;
@@ -262,15 +262,20 @@ fn test_latest_valid_by_service_did_filters_expired_and_keeps_newest() -> Result
 #[test]
 fn test_latest_valid_by_service_did_preserves_same_did_distinct_services() -> Result<()> {
     let key = SecretKey::random();
-    let session_sk = SessionSk::new_with_seckey(&key).map_err(Error::CoreError)?;
+    let delegatee_key = DelegateeKey::new_with_seckey(&key).map_err(Error::CoreError)?;
     let old_tcp =
-        signed_exit_for_session_at(&session_sk, OnionServiceName::tcp(), 10, 100, "tcp-old")?;
+        signed_exit_for_session_at(&delegatee_key, OnionServiceName::tcp(), 10, 100, "tcp-old")?;
     let new_tcp =
-        signed_exit_for_session_at(&session_sk, OnionServiceName::tcp(), 20, 100, "tcp-new")?;
+        signed_exit_for_session_at(&delegatee_key, OnionServiceName::tcp(), 20, 100, "tcp-new")?;
     let https =
-        signed_exit_for_session_at(&session_sk, OnionServiceName::https(), 15, 100, "https")?;
-    let custom =
-        signed_exit_for_session_at(&session_sk, OnionServiceName::parse("api")?, 25, 100, "api")?;
+        signed_exit_for_session_at(&delegatee_key, OnionServiceName::https(), 15, 100, "https")?;
+    let custom = signed_exit_for_session_at(
+        &delegatee_key,
+        OnionServiceName::parse("api")?,
+        25,
+        100,
+        "api",
+    )?;
 
     let descriptors = OnionExitDescriptor::latest_valid_by_service_did(
         vec![old_tcp, new_tcp.clone(), https.clone(), custom.clone()],
