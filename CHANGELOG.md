@@ -17,6 +17,11 @@
 
 ### Breaking changes
 
+- Enforce IndexedDB row capacity when a database opens. Reopening an existing store with a
+  lower capacity now deletes the least recently accessed excess rows, which can remove
+  persisted data that older versions retained until later writes. This storage behavior
+  change targets 0.31.0.
+
 - Replace session-key terminology in the delegated-signing API with `Delegation`,
   `DelegateeKey`, `DelegationBuilder`, and `DelegationDigest` under
   `rings_core::delegation`. Rename the related DIDs, authorization accessors,
