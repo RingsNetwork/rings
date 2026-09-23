@@ -58,6 +58,9 @@ mod test_stabilization_failover;
 mod test_sync_storm;
 
 const TEST_DHT_FINGER_TABLE_SIZE: usize = 8;
+/// Default STUN server for real-WebRTC fixtures that exercise remote ICE
+/// gathering; host-only tests opt out when every peer runs in this process.
+const TEST_ICE_SERVERS: &str = "stun://stun.l.google.com:19302";
 const TEST_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const TEST_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(5);
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
@@ -217,6 +220,13 @@ pub async fn prepare_node(key: SecretKey) -> Node {
     prepare_node_with_optional_measure(key, None).unwrap()
 }
 
+/// Builds a test node with host ICE candidates only, avoiding external STUN
+/// gathering for local integration tests whose peers all run in this process.
+pub async fn prepare_node_without_stun(key: SecretKey) -> Node {
+    prepare_node_with_ice_servers_and_measure(key, "", None)
+        .expect("host-only loopback test node configuration is valid")
+}
+
 pub(super) fn prepare_node_with_measure(key: SecretKey, measure: MeasureImpl) -> Result<Node> {
     prepare_node_with_optional_measure(key, Some(measure))
 }
@@ -225,13 +235,28 @@ fn prepare_node_with_optional_measure(
     key: SecretKey,
     measure: Option<MeasureImpl>,
 ) -> Result<Node> {
-    let stun = "stun://stun.l.google.com:19302";
+    prepare_node_with_ice_servers_and_measure(key, TEST_ICE_SERVERS, measure)
+}
+
+/// Builds a node with explicit ICE servers and optional measurement recording.
+/// Local integration tests can omit remote STUN dependencies while the shared
+/// test fixture keeps real-WebRTC STUN gathering enabled by default.
+fn prepare_node_with_ice_servers_and_measure(
+    key: SecretKey,
+    ice_servers: &str,
+    measure: Option<MeasureImpl>,
+) -> Result<Node> {
     let storage = Box::new(MemStorage::new());
 
     let delegatee_key = DelegateeKey::new_with_seckey(&key)?;
-    let builder = SwarmBuilder::new(crate::tests::TEST_NETWORK_ID, stun, storage, delegatee_key)
-        .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
-        .dht_virtual_nodes(0);
+    let builder = SwarmBuilder::new(
+        crate::tests::TEST_NETWORK_ID,
+        ice_servers,
+        storage,
+        delegatee_key,
+    )
+    .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
+    .dht_virtual_nodes(0);
     let builder = match measure {
         Some(measure) => builder.measure(measure),
         None => builder,

@@ -274,6 +274,7 @@ pub mod tests {
     use crate::tests::default::assert_no_more_msg;
     use crate::tests::default::gen_pure_dht;
     use crate::tests::default::prepare_node;
+    use crate::tests::default::prepare_node_without_stun;
     use crate::tests::default::wait_for_connection_state;
     use crate::tests::default::wait_for_msgs;
     use crate::tests::default::wait_for_successor;
@@ -307,9 +308,9 @@ pub mod tests {
     #[tokio::test]
     async fn test_sync_successor_report_requires_token_before_connecting_successor() -> Result<()> {
         let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys::<3>();
-        let node1 = prepare_node(key1).await;
-        let node2 = prepare_node(key2).await;
-        let node3 = prepare_node(key3).await;
+        let node1 = prepare_node_without_stun(key1).await;
+        let node2 = prepare_node_without_stun(key2).await;
+        let node3 = prepare_node_without_stun(key3).await;
 
         manually_establish_connection(&node1.swarm, &node2.swarm).await;
         wait_for_msgs([&node1, &node2, &node3]).await;
