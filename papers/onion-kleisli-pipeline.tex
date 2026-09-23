@@ -19,8 +19,7 @@
 \newtheorem{assumption}{Assumption}
 \newtheorem{invariant}{Invariant}
 \newtheorem{proposition}{Proposition}
-\newtheorem{corollary}{Corollary}
-\newtheorem{obligation}{Obligation}
+\newtheorem{lemma}{Lemma}
 \newcommand{\namedhead}{}
 \newtheorem*{namedenv}{\namedhead}
 \newenvironment{defD}[2]{\renewcommand{\namedhead}{Definition #1}%
@@ -60,7 +59,6 @@
 \newcommand{\PRG}{\mathrm{PRG}}
 \newcommand{\MAC}{\mathrm{MAC}}
 \DeclareRobustCommand{\code}[1]{{\ttfamily\renewcommand{\_}{\textunderscore\allowbreak}#1}}
-\algnewcommand{\LineComment}[1]{\State \(\triangleright\) #1}
 
 \author{Ryan~J.~Kung%
 \thanks{Ryan J. Kung can be reached at ryankung@ieee.org.
@@ -88,9 +86,10 @@ signature $\Sigma$ of operation symbols: nodes are partial
 $\Sigma$-algebras that register symbols, never applications; a circuit is a
 client-sealed loop $\cl\to g\to\cdots\to g\to\cl$ that evaluates one
 application per hop and composes them in the Kleisli category of the hop
-effect monad, with $\relay$ as the identity.  Each segment holds $s=2$
+effect monad, with $\relay$ as the identity: an onion Kleisli pipeline,
+not a monad.  Each segment holds $s=2$
 relays, the guard counting in both end segments; every hop parses one
-uniform layer of a fixed-length Sphinx-style header; values travel in a fixed-width carry slot enciphered with AEZ, one
+uniform layer of a fixed-length Sphinx-style header; values travel in a carry slot of one width per loop, enciphered with AEZ, one
 length-preserving layer per relay and one authenticated layer per
 consumer; replies to world-facing sessions ride single-use reply blocks
 under credit flow control.  We state eleven laws, among them
@@ -281,7 +280,7 @@ removed, since a short path is a distinguishable segment length (D5).
 \toprule
 $n$ & $H$ & DIDs & $E$ & header $|\beta|$ \\
 \midrule
-1 & 5 & 4 & 6 & \multirow{4}{*}{$\Hm\ell=9086$\,B} \\
+1 & 5 & 4 & 6 & \multirow{4}{*}{$\Hm\ell=9310$\,B} \\
 2 & 8 & 7 & 9 & \\
 3 & 11 & 10 & 12 & \\
 4 & 14 & 13 & 15 & \\
@@ -319,14 +318,14 @@ padded to $b$, with $C_b=b-|\chi|-F$ and $F$ the cell framing.
 \end{defD}
 
 With today's encodings (239-byte ElGamal-AEAD envelope as $\alpha$, 43-byte
-DIDs, 52-byte public keys) and $48$-byte AEZ keys,
-$\ell(s,A)=393+A+48(s+2)$, so $\ell(2,64)=649$\,B and $|\beta|=9086$\,B:
+DIDs, 52-byte public keys), $48$-byte AEZ keys and a $16$-byte $\gamma$,
+$\ell(s,A)=409+A+48(s+2)$, so $\ell(2,64)=665$\,B and $|\beta|=9310$\,B:
 every loop cell uses at least the 16\,KiB bucket.
 
 \begin{definition}[Fixed-length header]\label{def:header}
 Hop $i$ derives $K_i$ from $\alpha_i$ and its secret key and expands
 $\rho_i=\PRG(K_i)\in\{0,1\}^{(\Hm+1)\ell}$; $\rho[a,b)$ is a byte range in
-units of $\ell$.  It checks $\gamma_i=\MAC_{K_i}(\beta_i)$ and peels
+units of $\ell$.  It checks the $16$-byte $\gamma_i=\MAC_{K_i}(\beta_i)$ and peels
 \[
 (\beta_i\,\|\,0^{\ell})\oplus\rho_i=\lambda_i\,\|\,\beta_{i+1}.
 \]
@@ -358,6 +357,23 @@ $\phi_i$ carries it from $i+1$ to $i$.  So the first $\Hm$ blocks of
 $(\beta_i\|0^\ell)\oplus\rho_i$ are $\lambda_i\|\beta_{i+1}[0,\Hm{-}1)$,
 and its last block $\rho_i[\Hm,\Hm{+}1)$ is the last block of $\phi_i$,
 hence of $\beta_{i+1}$.
+\end{proof}
+
+\begin{lemma}[Header view]\label{lem:header}
+For $H\le\Hm$, hop $i$'s view of $(\chi_i,\chi_{i+1})$ is, up to
+$\Hm\,\epsilon_{\PRG}+\epsilon_{\MAC}+\epsilon_{\alpha}$, a function of
+$\lambda_i$ and fresh coins alone, independent of $H$, $i$, and every
+other layer.
+\end{lemma}
+\begin{proof}
+$|\chi|$ is constant.  Hop $i$ unmasks $\lambda_i$ and $\beta_{i+1}$, and
+reads $\alpha_{i+1},\gamma_{i+1}$ from $\lambda_i$.  Every block of
+$\beta_{i+1}$ but the last is masked by some $\rho_j$, $j\ne i$: by
+$\rho_{i+1}$ when $i+1<H$, and by $\rho_H$ or an upstream term of
+$\phi_{H-1}$ when $i+1=H$.  The last block is $\rho_i[\Hm,\Hm{+}1)$,
+which $i$ computes itself.  Hybrids replacing the $\rho_j$, $j\ne i$, one
+key at a time by uniform strings make $\beta_{i+1}$ uniform apart from
+that block; $\gamma_{i+1}$ is then a $\MAC$ under an unseen key.
 \end{proof}
 
 \begin{lawL}{L3}{width}
@@ -408,6 +424,17 @@ b_k=\Dec{\tau}{k_{c_k}}(y_{k,s}).
 A value of type $()$ is encoded as $\epsilon$, so every consumer
 authenticates $\pad(\epsilon)$ and processing is uniform.
 \end{defD}
+
+\begin{lemma}[Relay carry]\label{lem:carry}
+At $i=r_{k,j}$, $y_{k,j-1}$ and $y_{k,j}$ are uniform on $\{0,1\}^C$ and
+independent of $v_k$ under Assumption~\ref{as:prim}.
+\end{lemma}
+\begin{proof}
+$y_{k,j}=\Dec{0}{k_{r_{k,j}}}(y_{k,j-1})$ is an $\Enc{}{}$ output under
+$k_{r_{k,j+1}}$ or $k_{c_k}$, a fresh key not held by $i$ and used once
+(Prop.~\ref{prop:onekey}), hence a uniform string; $y_{k,j-1}$ is its
+image under a permutation keyed by $i$'s own key.
+\end{proof}
 
 Since $s$ is constant, $|\kappa_i|$ is constant and reveals no position.
 AEZ v5 is implemented in-repo on RustCrypto \code{aes::hazmat}
@@ -476,14 +503,16 @@ fixed key: L9 is load-bearing for AEZ.
 \end{algorithmic}
 \end{algorithm}
 
-\begin{definition}[Client position]\label{def:client}
+\begin{defD}{D6$'$}{client position}
 $\cl$ is position $H+1$.  $\lambda_H$ carries, in place of
-$\alpha_{H+1}$, a fresh tag $t_\cl\in\{0,1\}^{128}$; the guard sends
-$(\chi_{H+1},y_H)$ with $\chi_{H+1}=(t_\cl,\beta_{H+1},\gamma_{H+1})$.
+$\alpha_{H+1}$, a fresh tag $t_\cl\in\{0,1\}^{128}$ padded to $|\alpha|$;
+the guard sends $(\chi_{H+1},y_H)$ with
+$\chi_{H+1}=(t_\cl,\beta_{H+1},\gamma_{H+1})$, so $|\chi_{H+1}|=|\chi|$
+and the cell is padded to $b$ like every other.
 $\cl$ keeps $T:t_\cl\mapsto(k_{c_n},\text{loop})$, removes the entry on
 first use, and drops a cell with an unknown tag.  Every SURB suffix ends
 in its own tag.
-\end{definition}
+\end{defD}
 
 $t_\cl$ is uniform and seen only by $g$ at position $H$ and by $\cl$, so it
 links nothing the guard cannot already link by timing.
@@ -510,7 +539,7 @@ header would name the reply path), and L3 fixes one $C$ for every edge of a loop
 replies.
 \end{proof}
 
-At $s=2$ that would at least double every cell ($9086$\,B of $\beta$ in
+At $s=2$ that would at least double every cell ($9310$\,B of $\beta$ in
 the carry besides the header's own), so credit arrives only as forward
 loops: one forward cell per reply cell, data optional.
 
@@ -563,16 +592,14 @@ $v_{i-1}$, may not~\cite{Goguen1982}.
 \begin{proposition}[L5 from D6, D7, L3, L4]\label{prop:ni}
 Under Assumption~\ref{as:prim}, every loop built by
 D4c--D7 satisfies L5.  Equality in distribution holds for the carry
-alone; the header makes L5 computational (Prop.~\ref{prop:pos}).
+alone; the header makes L5 computational (Lemma~\ref{lem:header}).
 \end{proposition}
 \begin{proof}
 Lengths: $|\chi_i|$ and $|y_i|=C$ are constant (D6, L3).  Times:
 $\arr_i=\sum_{j<i}(L(f_j)+\delta_j)$ by L4, a function of $\sigma,\delta$.
 Headers: $\chi_i,\chi_{i+1}$ reveal only $\lambda_i$, fixed by $\pi_i$ up
-to fresh coins (Prop.~\ref{prop:pos}).  Carry: if $i=r_{k,j}$, then
-$\Dec{0}{k_{r_{k,j}}}(y_{k,j-1})$ is an $\Enc{}{}$ output under
-$k_{r_{k,j+1}}$ or $k_{c_k}$, a fresh key not held by $i$, hence uniform on
-$\{0,1\}^C$ and independent of $v_k$.  If $i=c_k$, it learns $v_{i-1}$,
+to fresh coins (Lemma~\ref{lem:header}).  Carry: uniform at a relay
+position (Lemma~\ref{lem:carry}).  If $i=c_k$, it learns $v_{i-1}$,
 which $\pi_i$ fixes.  If $i=p_k$, its output is computed from $v_{i-1}$
 and $\bar a_i$.  No component depends on $\bar a_j,v_j$ otherwise.
 \end{proof}
@@ -602,16 +629,10 @@ $|\chi|$ and $C$ do not depend on $H$ or $i$.  $e_i$ is the hop's own,
 $x$ depends only on the build quantum (D6), and $\arr_i$ carries no
 position because the client's departure time is unobserved
 (Assumption~\ref{as:prim}).  The carry is uniform at a relay position
-(Prop.~\ref{prop:ni}) and fixed by $v_{i-1}\in\pi^{\circ}_i$ at a
-consumer.  Hop $i$
-sees $\lambda_i$, fixed by $\pi^{\circ}_i$ up to fresh coins, $\alpha_{i+1}$,
-$\gamma_{i+1}$, and $\beta_{i+1}$.  Every block of $\beta_{i+1}$ but the
-last is masked by some $\rho_j$, $j\ne i$: by $\rho_{i+1}$ when $i+1<H$,
-and by $\rho_H$ or an upstream term of $\phi_{H-1}$ when $i+1=H$.  The last
-block is $\rho_i[\Hm,\Hm{+}1)$, computed by $i$ itself in both loops.
-Hybrids replacing the $\rho_j$, $j\ne i$, one key at a time by uniform
-strings make $\beta_{i+1}$ uniform apart from that block, in $P$ and $P'$
-alike; $\gamma_{i+1}$ is then a $\MAC$ under an unseen key.
+(Lemma~\ref{lem:carry}) and fixed by $v_{i-1}\in\pi^{\circ}_i$ at a
+consumer.  The header view depends on $\lambda_i$, fixed by
+$\pi^{\circ}_i$ up to fresh coins, and on nothing else
+(Lemma~\ref{lem:header}), in $P$ and $P'$ alike.
 \end{proof}
 
 \begin{lawL}{L6}{path authority}
@@ -711,9 +732,8 @@ a $\WF$ hop knows it faces the world & no other hop learns whether symbols follo
 $g$ sees departure and return & round-trip $\sum_e d_e+\sum_i L(f_i)$: an estimate of $H$ and of $\sum_i L(f_i)$; normalising it is a separate issue \\
 latency class & L4 quantises timing; cannot remove it \\
 hosted backend & sees $\bar a$ of every application of its symbol \\
-loop class $b$ & every hop sees it; the same leakage as today's cell buckets \\
+loop class $b$ & every hop sees it, the same leakage as today's cell buckets; for a stream symbol it also reveals the throughput class the client chose \\
 session reply timing & follows the world, not $L(f)$ (L4); a session hop may hold a SURB until its $x$ \\
-stream class $b$ & chosen by the client for a stream symbol; reveals the throughput class \\
 expiry $x$ & shared by all hops of a loop and all loops sealed in one $Q=30$\,s quantum: colluders link positions only within that set \\
 $p_k$ holds $\kappa^{\mathrm{out}}_{p_k}$ & $p_k$ colluding with $r_{k,j}$ links two positions of one segment; no value leaks, and timing links them anyway \\
 client-authored semantics ($\bar a_{i+1}$ depends on meaning of $v_i$) & out of protocol scope \\
@@ -859,7 +879,7 @@ phase & content \\
 
 Table~\ref{tab:phases} orders the cutover.  Fixed: $s=2$, $n_{\max}=4$,
 $\Hm=14$, in-repo AEZ.  Open: key transport (per-layer envelope or one
-blinded element), raw DID and key encodings ($\ell(2,64)\approx531$\,B),
+blinded element), raw DID and key encodings ($\ell(2,64)\approx547$\,B),
 and the replay capacity $B$.
 Non-goals: bind, Selective branches before Phase~2b, session symbols in intermediate position, concrete symbols, and
 verification of results.

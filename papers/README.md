@@ -22,7 +22,8 @@ the paper must not be described as deployed functionality.
 Install a TeX distribution with XeLaTeX, BibTeX, and `latexmk` (for example, TeX Live
 or MacTeX). The sources use packages including IEEEtran, AMS math/theorems, TikZ,
 algorithm/algpseudocode, and booktabs. DRanking additionally uses geometry,
-tabularx, hyperref, and bookmark.
+tabularx, hyperref, and bookmark; the onion Kleisli pipeline paper uses stmaryrd
+and multirow.
 
 From the repository root:
 
