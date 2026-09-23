@@ -2,9 +2,8 @@
 //! on it: a zero-argument timeout.
 //!
 //! A browser has three global scopes that own `setTimeout`; which one is current is a
-//! property of the runtime, not of the caller, so it is detected once here and every
-//! timer-driven component (the data-channel notifier here, the sleep in `rings-core`) reuses
-//! the detection.
+//! property of the runtime, not of the caller, so it is detected here once and the timer
+//! ([`crate::sleep`]) schedules on whichever it finds — a page and a (service) worker alike.
 
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;

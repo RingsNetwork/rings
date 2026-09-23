@@ -5,6 +5,8 @@ use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
 use rings_core::ecc::PublicKey;
 use rings_core::utils::get_epoch_ms;
+use rings_runtime::MaybeSendSync;
+use rings_runtime::Spawner;
 
 use super::cell::open_cell;
 use super::cell::seal_encoded_message;
@@ -29,7 +31,6 @@ use crate::error::Result;
 use crate::extension::ext::EffectScope;
 use crate::extension::ext::Interpret;
 use crate::extension::ext::Scope;
-use crate::extension::transport::platform::spawn_detached;
 
 /// Interpreter for route-aware circuit effects.
 pub struct OnionCircuitShell<H> {
@@ -175,7 +176,7 @@ impl<H> OnionCircuitShell<H> {
 #[cfg_attr(rings_browser, async_trait::async_trait(?Send))]
 #[cfg_attr(rings_native, async_trait::async_trait)]
 impl<H> Interpret for OnionCircuitShell<H>
-where H: OnionCircuitHandler + crate::extension::ext::MaybeSend + 'static
+where H: OnionCircuitHandler + MaybeSendSync + 'static
 {
     type Effect = OnionCircuitEffect;
 
@@ -223,9 +224,10 @@ where H: OnionCircuitHandler + crate::extension::ext::MaybeSend + 'static
                 forward_sequence,
                 payload,
             } => {
+                let spawner = Spawner::current()?;
                 let lifecycle = scope.lifecycle();
                 let handler = Arc::clone(&self.handler);
-                spawn_detached(async move {
+                spawner.spawn(async move {
                     let result = handler
                         .handle_exit(&lifecycle, OnionCircuitExitFrame {
                             from,

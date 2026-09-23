@@ -41,6 +41,7 @@ wasm = [
     "uuid/v4",
     "uuid/serde",
     "rings-derive/wasm",
+    "rings-runtime/browser",
     "rings-transport/web-sys-webrtc",
 ]
 browser_chrome_test = ["wasm"]
@@ -70,7 +71,6 @@ elliptic-curve = "0.13.6"
 ethereum-types = "0.14.1"
 event-listener = "5.4.2"
 futures = "0.3.32"
-futures-timer = "3.0.2"
 hex = "0.4.3"
 hkdf = "0.12.4"
 itertools = "0.10.3"
@@ -83,6 +83,7 @@ rand_core = { version = "0.6.3", features = ["getrandom"] }
 rand_hc = "0.3.1"
 rings-codec = { workspace = true }
 rings-measure = { workspace = true }
+rings-runtime = { workspace = true }
 rings-transport = { workspace = true }
 serde = { version = "1.0.130", features = ["derive"] }
 serde_json = "1.0.70"

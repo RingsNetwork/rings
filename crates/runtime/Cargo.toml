@@ -1,0 +1,43 @@
+[package]
+name = "rings-runtime"
+description = "Shared native/browser runtime contracts (timers, task scheduling, thread-safety bounds) for Rings"
+readme = "README.md"
+keywords = ["runtime", "wasm", "async"]
+categories = ["asynchronous", "wasm"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Native (Tokio + `futures-timer`) is the default arm; `browser` selects the
+# single-threaded JavaScript event loop on a wasm target.
+default = []
+browser = ["dep:js-sys", "dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:web-sys"]
+
+[dependencies]
+futures = { version = "0.3.21", default-features = false, features = ["std"] }
+futures-timer = "3.0.2"
+thiserror = "1.0.47"
+tokio = { version = "1.32.0", features = ["rt"] }
+
+# Dependencies for the browser feature
+js-sys = { workspace = true, optional = true }
+wasm-bindgen = { workspace = true, optional = true }
+wasm-bindgen-futures = { workspace = true, optional = true }
+web-sys = { version = "0.3.64", optional = true, features = [
+    "Window",
+    "WorkerGlobalScope",
+    "ServiceWorkerGlobalScope",
+] }
+
+[dev-dependencies]
+futures = { version = "0.3.21", features = ["executor"] }
+wasm-bindgen-test = { workspace = true }
+
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+tokio = { version = "1.32.0", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }

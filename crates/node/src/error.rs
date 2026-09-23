@@ -269,9 +269,15 @@ pub enum Error {
     /// An extension runtime returned an error.
     #[error("Extension error: {0}")]
     ExtensionError(String) = 1502,
-    /// An owned extension task ended before publishing its result.
-    #[error("Detached extension task closed before publishing its result")]
-    DetachedExtensionTaskClosed = 1503,
+    /// Owned detached work produced no result: it never started or ended without publishing.
+    #[error("Detached task failed: {0}")]
+    DetachedTask(#[from] rings_runtime::DetachedError) = 1503,
+    /// Work could not be scheduled because no async runtime is current.
+    #[error(transparent)]
+    RuntimeUnavailable(#[from] rings_runtime::RuntimeUnavailable) = 1504,
+    /// The runtime could not run a timer.
+    #[error("Timer error: {0}")]
+    Timer(#[from] rings_runtime::TimerError) = 1505,
     /// Onion route construction or validation failed.
     #[error("Onion route error: {0}")]
     OnionRouteError(OnionRouteError) = 1601,

@@ -9,6 +9,7 @@
 //! effects and its own interpreter without ever touching the core.
 
 use rings_core::dht::Did;
+use rings_runtime::MaybeSendSync;
 
 /// The raw boundary input handed to [`Protocol::decode`]: an inbound message's authenticated
 /// sender, this node's own did, and the opaque payload bytes. `decode` turns this into the
@@ -88,7 +89,7 @@ pub trait Protocol {
     /// Protocol-private state, owned by the runtime and threaded through `step`.
     type State;
     /// The protocol's typed input, produced by [`decode`](Protocol::decode).
-    type Event: super::MaybeSend;
+    type Event: MaybeSendSync;
     /// The protocol's **own** effect algebra (the core defines no global effect enum).
     type Effect;
 

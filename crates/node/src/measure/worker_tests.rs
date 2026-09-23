@@ -28,7 +28,9 @@ async fn timer_failure_waits_for_a_new_wake_instead_of_hot_retrying() {
     let (mut sender, mut receiver) = mpsc::channel(1);
     let wait = wait_for_retry_or_close_with_delay(
         &mut receiver,
-        futures::future::ready(Err(MeasureRuntimeError::Timer("fixture".to_string()))),
+        futures::future::ready(Err(MeasureRuntimeError::Timer(TimerError::Rejected(
+            "fixture".to_string(),
+        )))),
     );
     tokio::pin!(wait);
     assert!(
@@ -64,7 +66,9 @@ async fn wake_observed_before_timer_failure_still_triggers_retry() {
         "the wait must consume the wake while its timer remains pending"
     );
     delay_sender
-        .send(Err(MeasureRuntimeError::Timer("fixture".to_string())))
+        .send(Err(MeasureRuntimeError::Timer(TimerError::Rejected(
+            "fixture".to_string(),
+        ))))
         .unwrap_or_else(|_| panic!("timer result receiver must remain live"));
     assert!(wait.await, "the consumed wake must authorize one retry");
 }

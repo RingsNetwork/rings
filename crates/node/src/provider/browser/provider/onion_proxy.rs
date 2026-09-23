@@ -1,6 +1,8 @@
+use std::time::Duration;
+
 use futures::future::Either;
 use futures::FutureExt;
-use rings_core::utils::js_utils;
+use rings_runtime::sleep;
 
 use super::build_browser_onion_proxy_route;
 use super::BrowserOnionProxy;
@@ -61,7 +63,7 @@ impl BrowserOnionProxy {
             .await?;
 
         let response = pending_request.fuse();
-        let timeout = js_utils::window_sleep(30_000).fuse();
+        let timeout = sleep(Duration::from_secs(30)).fuse();
         futures::pin_mut!(response, timeout);
         let response = match futures::future::select(response, timeout).await {
             Either::Left((result, _)) => match result {

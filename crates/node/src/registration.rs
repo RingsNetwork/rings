@@ -19,10 +19,10 @@ use rings_core::message::Encoded;
 use rings_core::message::Encoder;
 use rings_core::message::MessageSigner;
 use rings_core::utils::get_epoch_ms;
+use rings_runtime::MaybeSendSync;
 
 use crate::error::Error;
 use crate::error::Result;
-use crate::extension::ext::MaybeSend;
 use crate::online::OnlineNodeDescriptor;
 use crate::online::OnlineNodeDescriptorBody;
 use crate::online::OnlineNodeType;
@@ -77,23 +77,6 @@ pub(crate) fn validate_online_node_registration_timing(
             "online_node_heartbeat_interval ({heartbeat_interval:?}) must be less than online_node_ttl ({ttl:?}) when advertise_presence is enabled"
         )));
     }
-    Ok(())
-}
-
-#[cfg(not(all(feature = "browser", target_family = "wasm")))]
-pub(crate) async fn sleep_registration_interval(interval: Duration) -> Result<()> {
-    // Native timers are infallible; the Result keeps the daemon shape shared
-    // with the wasm arm, where browser timer setup can fail.
-    futures_timer::Delay::new(interval).await;
-    Ok(())
-}
-
-#[cfg(all(feature = "browser", target_family = "wasm"))]
-pub(crate) async fn sleep_registration_interval(interval: Duration) -> Result<()> {
-    let interval_ms = i32::try_from(interval.as_millis()).unwrap_or(i32::MAX);
-    rings_core::utils::js_utils::window_sleep(interval_ms)
-        .await
-        .map_err(|error| Error::JsError(format!("{error:?}")))?;
     Ok(())
 }
 
@@ -380,7 +363,7 @@ fn finish_registration_publish(
 /// Periodic node-layer registration.
 #[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
-pub(crate) trait RegistrationTask: MaybeSend {
+pub(crate) trait RegistrationTask: MaybeSendSync {
     /// Stable name used in logs.
     fn name(&self) -> &'static str;
 

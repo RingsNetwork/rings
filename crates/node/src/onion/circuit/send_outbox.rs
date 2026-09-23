@@ -27,6 +27,8 @@ use bytes::Bytes;
 use futures::channel::oneshot;
 use rings_core::dht::Did;
 use rings_core::ecc::PublicKey;
+use rings_runtime::sleep;
+use rings_runtime::Spawner;
 
 use super::cell::seal_message;
 use super::cell::sealed_cell_bucket;
@@ -37,8 +39,6 @@ use crate::error::OnionQueueAdmissionReason;
 use crate::error::OnionQueueKind;
 use crate::error::Result;
 use crate::extension::ext::Scope;
-use crate::extension::transport::platform::sleep;
-use crate::extension::transport::platform::spawn_detached;
 use crate::peer_quota::PeerQuota;
 use crate::sync_lock::lock;
 #[cfg(all(test, rings_native))]
@@ -262,6 +262,8 @@ impl OnionSendOutbox {
         payload: Bytes,
         completion: Option<oneshot::Sender<Result<()>>>,
     ) -> Result<()> {
+        // Acquired before the lane is claimed, so a missing runtime leaves no lane undrained.
+        let spawner = Spawner::current()?;
         let item_bytes = payload.len();
         let should_spawn = lock(&self.state)?
             .enqueue(
@@ -280,7 +282,7 @@ impl OnionSendOutbox {
             let pacing = Arc::clone(&self.pacing);
             #[cfg(all(test, rings_native))]
             let test_hook = self.test_hook.clone();
-            spawn_detached(async move {
+            spawner.spawn(async move {
                 drain_peer(
                     state,
                     to,

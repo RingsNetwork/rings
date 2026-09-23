@@ -56,7 +56,6 @@
 // API. Reachable in-crate by the relay extension only.
 #[cfg(rings_native)]
 pub(crate) mod engine;
-pub(crate) mod platform;
 #[cfg(rings_browser)]
 pub(crate) mod wt;
 

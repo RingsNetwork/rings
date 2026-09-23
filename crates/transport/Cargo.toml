@@ -19,7 +19,7 @@ workspace = true
 default = ["tokio/rt", "tokio/time", "tokio-util"]
 dummy = ["webrtc", "rand", "lazy_static", "tokio/rt", "tokio/sync", "tokio/time"]
 native-webrtc = ["webrtc", "tokio-util", "tokio/macros", "tokio/rt", "tokio/sync", "tokio/time"]
-web-sys-webrtc = ["dep:futures-util", "dep:futures-channel", "wasm-bindgen", "js-sys", "web-sys", "wasm-bindgen-futures"]
+web-sys-webrtc = ["dep:futures-util", "dep:futures-channel", "wasm-bindgen", "js-sys", "web-sys", "wasm-bindgen-futures", "rings-runtime/browser"]
 
 [dependencies]
 # Dependencies for native-webrtc feature
@@ -52,9 +52,6 @@ web-sys = { version = "0.3.64", optional = true, features = [
     "RtcSdpType",
     "RtcSessionDescription",
     "RtcSessionDescriptionInit",
-    "Window",
-    "WorkerGlobalScope",
-    "ServiceWorkerGlobalScope",
 ] }
 
 # Common dependencies
@@ -63,6 +60,7 @@ bytes = { version = "1.4.0", features = ["serde"] }
 chrono = { version = "0.4.30", features = ["wasmbind"] }
 dashmap = "5.5.1"
 rings-codec = { workspace = true }
+rings-runtime = { workspace = true }
 serde = "1.0.183"
 serde_json = "1.0.106"
 thiserror = "1.0.47"

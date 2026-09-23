@@ -90,27 +90,18 @@ impl Notifier {
     }
 
     /// Wake the notifier after the specified number of milliseconds.
+    ///
+    /// A timer the browser cannot run wakes the notifier at once: the waiter then re-checks
+    /// its condition instead of waiting forever.
     #[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
     pub fn set_timeout_ms(&self, millis: u64) {
-        use wasm_bindgen::JsCast;
-
-        let millis = i32::try_from(millis).unwrap_or(i32::MAX);
-
-        let timeout_notifier = self.clone();
-        let fallback_notifier = self.clone();
-        let wake = wasm_bindgen::closure::Closure::once_into_js(move || {
-            timeout_notifier.wake();
+        let this = self.clone();
+        let timeout = rings_runtime::spawn_detached(async move {
+            let _ = rings_runtime::sleep(std::time::Duration::from_millis(millis)).await;
+            this.wake();
         });
-
-        let Some(global) = crate::js_global::global() else {
-            fallback_notifier.wake();
-            return;
-        };
-
-        let callback = wake.as_ref().unchecked_ref();
-        let scheduled = global.set_timeout_0(callback, millis);
-        if scheduled.is_err() {
-            fallback_notifier.wake();
+        if timeout.is_err() {
+            self.wake();
         }
     }
 }

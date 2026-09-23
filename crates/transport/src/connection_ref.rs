@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::Weak;
 
 use async_trait::async_trait;
+use rings_runtime::MaybeSendSync;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
@@ -16,7 +17,6 @@ use crate::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 use crate::delivery::DeliveryFuture;
 use crate::error::Error;
 use crate::error::Result;
-use crate::PlatformSendSync;
 
 /// [ConnectionRef] is a weak reference to a connection and implements the `ConnectionInterface` trait.
 /// When the connection is dropped, it returns an error called [Error::ConnectionReleased].
@@ -103,7 +103,7 @@ impl ConnectionRef<crate::connections::DummyConnection> {
 )]
 impl<C, S> ConnectionInterface for ConnectionRef<C>
 where
-    C: ConnectionInterface<Error = Error, Sdp = S> + PlatformSendSync,
+    C: ConnectionInterface<Error = Error, Sdp = S> + MaybeSendSync,
     for<'async_trait> S: Serialize + DeserializeOwned + Send + Sync + 'async_trait,
 {
     type Sdp = C::Sdp;

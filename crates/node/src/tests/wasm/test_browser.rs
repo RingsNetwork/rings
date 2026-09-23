@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use rings_rpc::protos::rings_node::SendBackendMessageRequest;
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::*;
@@ -5,7 +7,6 @@ use wasm_bindgen_test::*;
 use super::create_connection;
 use super::get_peers;
 use super::new_provider;
-use crate::prelude::rings_core::utils;
 use crate::prelude::rings_core::utils::js_value;
 use crate::provider::browser;
 
@@ -20,7 +21,9 @@ async fn test_two_provider_connect_and_list() {
 
     create_connection(&provider1, &provider2).await;
     console_log!("wait for register");
-    utils::js_utils::window_sleep(1000).await.unwrap();
+    rings_runtime::sleep(Duration::from_millis(1000))
+        .await
+        .unwrap();
 
     let peers = get_peers(&provider1).await;
     assert!(peers.len() == 1, "peers len should be 1");
@@ -57,7 +60,7 @@ async fn test_provider_listener_handle_requests_stop() {
     let waiting_listener = provider.listen();
     // `started` must remain pending while `old_cleanup` owns the processor lifecycle lock.
     let started = Box::pin(JsFuture::from(waiting_listener.started()));
-    let short_delay = Box::pin(utils::js_utils::window_sleep(10));
+    let short_delay = Box::pin(rings_runtime::sleep(Duration::from_millis(10)));
     let pending_started = match futures::future::select(started, short_delay).await {
         futures::future::Either::Left(_) => {
             waiting_listener.stop();
@@ -97,7 +100,9 @@ async fn test_send_backend_message() {
 
     create_connection(&provider1, &provider2).await;
     console_log!("wait for register");
-    utils::js_utils::window_sleep(1000).await.unwrap();
+    rings_runtime::sleep(Duration::from_millis(1000))
+        .await
+        .unwrap();
 
     let req = SendBackendMessageRequest {
         destination_did: provider2.address(),
@@ -139,7 +144,9 @@ async fn test_handle_backend_message() {
     create_connection(&provider1, &provider2).await;
     console_log!("wait for register");
 
-    utils::js_utils::window_sleep(1000).await.unwrap();
+    rings_runtime::sleep(Duration::from_millis(1000))
+        .await
+        .unwrap();
 
     let peers = get_peers(&provider1).await;
     assert!(peers.len() == 1, "peers len should be 1");
@@ -150,9 +157,11 @@ async fn test_handle_backend_message() {
         .await
         .unwrap();
     console_log!("send backend hello world done");
-    utils::js_utils::window_sleep(3000).await.unwrap();
-    let global = rings_transport::js_global::global().unwrap();
-    if let rings_transport::js_global::Global::Window(window) = global {
+    rings_runtime::sleep(Duration::from_millis(3000))
+        .await
+        .unwrap();
+    let global = rings_runtime::global::global().unwrap();
+    if let rings_runtime::global::Global::Window(window) = global {
         let ret = window
             .get("recentMsg")
             .unwrap()
