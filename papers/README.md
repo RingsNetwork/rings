@@ -10,6 +10,7 @@ behavior. A design in a paper is not, by itself, a shipped feature.
 | Rings | [PDF](rings.pdf) | [LaTeX](rings.tex), [BibTeX](cites.bib) | Original protocol whitepaper; image assets are under `imgs/rings/` |
 | DRanking | [PDF](dranking.pdf) | [LaTeX](dranking.tex), [BibTeX](dranking.bib) | Proposed verifiable ranking and admission; supersedes the 2023 *Ranking Protocol* draft |
 | Finger convergence | [PDF](finger-convergence.pdf) | [LaTeX](finger-convergence.tex), [BibTeX](finger-convergence.bib) | Range-proved finger-convergence specification, written for Rings 0.26.0 |
+| Onion Kleisli pipelines | [PDF](onion-kleisli-pipeline.pdf) | [LaTeX](onion-kleisli-pipeline.tex), [BibTeX](onion-kleisli-pipeline.bib) | Proposed onion circuits as client-sealed loops of registered operation symbols ([#834](https://github.com/RingsNetwork/rings/issues/834)); specification before the Phase 2 code |
 
 DRanking's current implementation is limited to
 [provisional service receipts](../docs/src/advanced-topic/dranking-service-receipts.md).
@@ -21,7 +22,8 @@ the paper must not be described as deployed functionality.
 Install a TeX distribution with XeLaTeX, BibTeX, and `latexmk` (for example, TeX Live
 or MacTeX). The sources use packages including IEEEtran, AMS math/theorems, TikZ,
 algorithm/algpseudocode, and booktabs. DRanking additionally uses geometry,
-tabularx, hyperref, and bookmark.
+tabularx, hyperref, and bookmark; the onion Kleisli pipeline paper uses stmaryrd
+and multirow.
 
 From the repository root:
 
@@ -30,6 +32,7 @@ cd papers
 latexmk -xelatex -interaction=nonstopmode -halt-on-error rings.tex
 latexmk -xelatex -interaction=nonstopmode -halt-on-error dranking.tex
 latexmk -xelatex -interaction=nonstopmode -halt-on-error finger-convergence.tex
+latexmk -xelatex -interaction=nonstopmode -halt-on-error onion-kleisli-pipeline.tex
 ```
 
 Run only the command for the paper being edited when making a focused change.
