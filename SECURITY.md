@@ -448,6 +448,26 @@ authority. If a duplicate effect nevertheless reaches an occupied key, the engin
 refuses the new insertion and preserves the live handle and its generation; it does
 not cancel and replace the committed resource defensively.
 
+### Outbound scheduler ingestion and cancellation
+
+Native and WASM share futures channels and the existing `TransferQueues` reducer.
+Collected submissions retain their permits, bounding ingestion to 256 even with
+concurrent producers. One notification slot coalesces `CancelStopped`; each drain
+reads it once and scans at most 256 transfers. Control submitted before the FIFO
+drain is visible before selection; a submission racing the empty read may enter
+the next iteration. There is no fixed cutoff leaving earlier control behind bulk.
+The 4:1 burst and lower-lane rotation are unchanged: a continuously runnable lower
+class receives service within 15 charged admissions/failed attempts, assuming
+executor/gate service and delivery, timeout or cancellation progress.
+
+Receipt frees the notification slot before scanning; scans never read ingress.
+Shutdown releases all batch ownership before publishing its collected results.
+Common native/browser regressions cover these boundaries; native threads also
+exercise submission/close contention. The existing queue model checks 13^6 traces
+of six actions with eight slots, not arbitrary-schedule liveness. The former drain
+bounded submissions but not repeated notifications; this is not a claim of
+observed starvation or a wall-clock bound.
+
 ### Connection Admission
 
 Each node bounds the number of peers holding any logical connection record,

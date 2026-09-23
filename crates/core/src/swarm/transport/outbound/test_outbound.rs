@@ -146,7 +146,8 @@ fn admit_single_frame_transfer(
     label
 }
 
-#[test]
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), test)]
 fn test_dht_control_preempts_queued_bulk_work() {
     let mut queues = TransferQueues::default();
     push(&mut queues, TransferClass::Application, "app-1");
@@ -156,7 +157,8 @@ fn test_dht_control_preempts_queued_bulk_work() {
     assert_eq!(pop_and_finish(&mut queues), Some("dht"));
 }
 
-#[test]
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), test)]
 fn test_continuous_dht_control_yields_to_lower_classes() {
     let mut queues = TransferQueues::default();
     for item in ["dht-1", "dht-2", "dht-3", "dht-4", "dht-5"] {
@@ -206,7 +208,8 @@ fn test_completion_probes_do_not_consume_control_frame_burst() {
     ]);
 }
 
-#[test]
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), test)]
 fn test_lower_classes_progress_round_robin() {
     let mut queues = TransferQueues::default();
     push(&mut queues, TransferClass::Storage, "storage-1");
@@ -317,7 +320,8 @@ fn test_cancelled_control_attempts_consume_the_control_burst() {
     assert_eq!(next.item().1, "application");
 }
 
-#[test]
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), test)]
 fn test_waiting_lane_preserves_same_class_fifo_and_allows_control_preemption() {
     let mut queues = TransferQueues::default();
     push(&mut queues, TransferClass::Application, "app-1");
@@ -359,7 +363,8 @@ fn test_draining_a_waiting_lane_returns_its_active_and_queued_transfers() {
     assert_eq!(drained, vec!["app-1", "app-2"]);
 }
 
-#[test]
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), test)]
 fn test_removing_ready_items_preserves_waiting_heads_and_fifo_order() {
     let mut queues = TransferQueues::default();
     push(&mut queues, TransferClass::Application, "waiting");
@@ -464,7 +469,8 @@ fn test_transfer_memory_capacity_is_weighted_and_released() {
     assert_eq!(capacity.admitted_bytes(), 0);
 }
 
-#[test]
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), test)]
 fn test_shutdown_closes_channel_without_worker_owned_sender() {
     let (sender, mut receiver) = mailbox::channel();
     let stop = StopSource::new();
@@ -504,7 +510,9 @@ fn test_worker_drop_stops_generation_and_closes_ingress_without_a_normal_run_exi
     drop(worker);
 
     assert!(stop.is_stop_requested());
-    assert!(sender.send(OutboundCommand::CancelStopped).is_err());
+    assert!(sender
+        .send_coalesced(OutboundCommand::CancelStopped)
+        .is_err());
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -549,7 +557,8 @@ async fn test_worker_drop_allows_registry_to_replace_the_stopped_generation() {
     schedulers.shutdown(peer);
 }
 
-#[test]
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), test)]
 fn test_shutdown_batch_finalizes_active_ready_and_buffered_before_first_publish() {
     let admitted = Arc::new(AtomicUsize::new(3));
     let (active_sender, active_receiver) = oneshot::channel();
@@ -590,7 +599,8 @@ fn test_shutdown_batch_finalizes_active_ready_and_buffered_before_first_publish(
     assert!(completions.next().is_none());
 }
 
-#[test]
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), test)]
 fn test_active_transfer_drop_releases_capacity_before_implicit_completion() {
     let admitted = Arc::new(AtomicUsize::new(1));
     let (sender, receiver) = oneshot::channel();

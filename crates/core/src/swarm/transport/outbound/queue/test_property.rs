@@ -218,7 +218,8 @@ fn admit_single_frame(queue: &mut TransferQueues<u16>) -> (TransferClass, u16) {
     (class, id)
 }
 
-#[test]
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), test)]
 fn test_all_short_traces_preserve_fifo_cancellation_and_shutdown_invariants() {
     let trace_count = ACTION_CARDINALITY.pow(TRACE_LENGTH);
     for encoded in 0..trace_count {
@@ -234,7 +235,8 @@ fn test_all_short_traces_preserve_fifo_cancellation_and_shutdown_invariants() {
     }
 }
 
-#[test]
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), test)]
 fn test_sustained_mixed_load_bounds_control_and_rotates_lower_service() {
     let mut queue = TransferQueues::default();
     for id in 0..48 {
@@ -263,7 +265,8 @@ fn test_sustained_mixed_load_bounds_control_and_rotates_lower_service() {
     }
 }
 
-#[test]
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), test)]
 fn test_fourth_control_frame_is_followed_by_waiting_lower_work() {
     let mut queue = TransferQueues::default();
     for id in 0..5 {
@@ -284,7 +287,8 @@ fn test_fourth_control_frame_is_followed_by_waiting_lower_work() {
 }
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-#[test]
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), test)]
 fn test_bounded_control_burst_ablation_changes_the_real_queue_policy() {
     let _runtime = crate::simulation::SimulationRuntimeGuard::enter(
         41,

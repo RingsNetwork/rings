@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Bound outbound command ingestion to a permit-bounded batch and one coalesced
+  cancellation scan. Control submitted behind bulk becomes visible before frame
+  selection; shutdown releases the batch's permits before completion publication.
+
 - Remove the counter-only measurement bridge and threshold-only classifier. Measure
   implementations must record attributed events and atomic batches; retained peer
   projections always contain credit. Existing measurement RPCs and provisional

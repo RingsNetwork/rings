@@ -133,8 +133,8 @@ impl<T, P> Drop for ScheduledTransfer<T, P> {
     }
 }
 
-/// One mailbox command. The worker handles the backlog in submission order,
-/// through [`OutboundWorker::handle_command`]. Only shutdown bypasses that
+/// One mailbox command. The worker handles a batch of submissions in FIFO order,
+/// through [`OutboundWorker::handle_commands`]. Only shutdown bypasses that
 /// dispatcher, after closing ingress and cancelling all admitted transfers.
 enum OutboundCommand {
     /// A transfer admitted by the submitter; rejected on arrival if its stop
@@ -277,7 +277,10 @@ impl OutboundPeerHandle {
     }
 
     pub(super) fn cancel_stopped(&self) {
-        let _ = self.state.sender.send(OutboundCommand::CancelStopped);
+        let _ = self
+            .state
+            .sender
+            .send_coalesced(OutboundCommand::CancelStopped);
     }
 
     fn shutdown(&self) {
@@ -532,12 +535,13 @@ impl OutboundWorker {
         }
     }
 
-    /// Hand the whole command backlog to the transfer queues and observe every
-    /// completed delivery, so the next frame is chosen from the complete state.
+    /// Collect at most 256 submissions and one coalesced cancellation scan.
+    /// All control submissions in that batch are visible before selection;
+    /// submissions racing the empty read may enter the next iteration. At most four
+    /// lane heads can have completed deliveries, with no new waits added here.
     fn drain_available(&mut self) {
-        for command in self.receiver.drain_available() {
-            self.handle_command(command);
-        }
+        let commands = self.receiver.drain_available();
+        self.handle_commands(commands);
         self.input_closed = self.receiver.is_closed();
 
         while let Some(Some(event)) = self.deliveries.next().now_or_never() {
@@ -552,41 +556,34 @@ impl OutboundWorker {
         self.ready.push(class, QueuedTransfer { id, scheduled });
     }
 
-    fn handle_command(&mut self, command: OutboundCommand) {
-        match command {
-            OutboundCommand::Submit(transfer) => self.accept_submission(*transfer),
-            OutboundCommand::CancelStopped => self.cancel_stopped_admitted(),
-        }
-    }
-
-    fn accept_submission(&mut self, scheduled: ScheduledTransfer) {
-        if scheduled.transfer.is_stopped() {
-            if let Some(final_result) = Self::cancel_scheduled_transfer(scheduled) {
-                final_result.publish();
+    /// Apply a finite batch (or one idle input), releasing cancelled ownership
+    /// before publishing results. Scans never consume ingress; a stopped submit
+    /// is rejected here even when its cancellation notification arrived first.
+    fn handle_commands(&mut self, commands: impl IntoIterator<Item = OutboundCommand>) {
+        // Defer publication until every collected command relinquishes ownership.
+        let mut results = Vec::new();
+        for command in commands {
+            match command {
+                OutboundCommand::Submit(transfer) if transfer.transfer.is_stopped() => {
+                    results.extend(Self::cancel_scheduled_transfer(*transfer));
+                }
+                OutboundCommand::Submit(transfer) => self.enqueue_transfer(*transfer),
+                OutboundCommand::CancelStopped => {
+                    // Waiting heads stay owned by delivery; queued successors can stop.
+                    results.extend(
+                        self.ready
+                            .remove_ready_where(|queued| queued.scheduled.transfer.is_stopped())
+                            .into_iter()
+                            .filter_map(|queued| Self::cancel_scheduled_transfer(queued.scheduled)),
+                    );
+                }
             }
-        } else {
-            self.enqueue_transfer(scheduled);
         }
-    }
-
-    /// `CancelStopped`: release every queued transfer whose stop token is set.
-    ///
-    /// Only the queues are scanned; the mailbox is not touched here. A
-    /// stopped transfer is either still in the mailbox, where its `Submit` is
-    /// rejected by [`Self::accept_submission`] when the worker's drain reaches
-    /// it, or already queued, where this scan finds it: the stop token is set
-    /// before the command is sent, and the worker handles the backlog in
-    /// order. A transfer stopped after this scan is followed by its own
-    /// `CancelStopped`, handled by the next drain like any other command.
-    fn cancel_stopped_admitted(&mut self) {
-        let cancelled = self
-            .ready
-            .remove_ready_where(|queued| queued.scheduled.transfer.is_stopped());
-        let final_results = cancelled
-            .into_iter()
-            .filter_map(|queued| Self::cancel_scheduled_transfer(queued.scheduled))
-            .collect();
-        Self::publish_released_results(final_results);
+        if self.stop.is_stop_requested() {
+            self.shutdown_with_results(results);
+        } else {
+            Self::publish_released_results(results);
+        }
     }
 
     fn terminate_transfer(
@@ -924,7 +921,7 @@ impl OutboundWorker {
     async fn wait_for_input(&mut self) {
         if self.deliveries.is_empty() {
             match self.receiver.next().await {
-                Some(command) => self.handle_command(command),
+                Some(command) => self.handle_commands([command]),
                 None => self.input_closed = true,
             }
             return;
@@ -945,7 +942,7 @@ impl OutboundWorker {
             }
         };
         match input {
-            WorkerInput::Command(Some(command)) => self.handle_command(command),
+            WorkerInput::Command(Some(command)) => self.handle_commands([command]),
             WorkerInput::Command(None) => self.input_closed = true,
             WorkerInput::Delivery(Some(event)) => self.handle_delivery(event),
             WorkerInput::Delivery(None) => {}
@@ -962,7 +959,7 @@ impl Drop for OutboundWorker {
     }
 }
 
-#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+#[cfg(all(test, any(feature = "dummy", target_family = "wasm")))]
 mod test_cancellation;
 #[cfg(test)]
 mod test_outbound;
