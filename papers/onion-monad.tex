@@ -274,7 +274,7 @@ removed, since a short path is a distinguishable segment length (D5).
 \toprule
 $n$ & $H$ & DIDs & $E$ & header $|\beta|$ \\
 \midrule
-1 & 5 & 4 & 6 & \multirow{4}{*}{$\Hm\ell=8190$\,B} \\
+1 & 5 & 4 & 6 & \multirow{4}{*}{$\Hm\ell=9086$\,B} \\
 2 & 8 & 7 & 9 & \\
 3 & 11 & 10 & 12 & \\
 4 & 14 & 13 & 15 & \\
@@ -291,7 +291,7 @@ Every position $i$ has one layer shape
 \alpha_{i+1})
 \]
 of $\ell$ bytes, with $\bar a_i$ padded to $A$ bytes: epoch $e_i$, one
-expiry $x$ per loop, replay nonce
+expiry $x$ per loop (a multiple of $Q=30$\,s), replay nonce
 $\nu_i$, carry keys $\kappa_i=(k^{\mathrm{in}}_i;k^{\mathrm{out}}_{i,1..s+1})$,
 and the next hop's MAC $\gamma_{i+1}$ and key transport $\alpha_{i+1}$
 (Def.~\ref{def:header}).  A relay has $\bar a_i=()$ and random
@@ -303,8 +303,9 @@ $k^{\mathrm{out}}$.  The cell on every edge is
 \end{defD}
 
 With today's encodings (239-byte ElGamal-AEAD envelope as $\alpha$, 43-byte
-DIDs, 52-byte keys), $\ell(s,A)=393+A+32(s+2)$, so $\ell(2,64)=585$\,B and
-$|\beta|=8190$\,B: every loop cell uses at least the 16\,KiB bucket.
+DIDs, 52-byte public keys) and $48$-byte AEZ keys,
+$\ell(s,A)=393+A+48(s+2)$, so $\ell(2,64)=649$\,B and $|\beta|=9086$\,B:
+every loop cell uses at least the 16\,KiB bucket.
 
 \begin{definition}[Fixed-length header]\label{def:header}
 Hop $i$ derives $K_i$ from $\alpha_i$ and its secret key and expands
@@ -403,9 +404,10 @@ a chosen-ciphertext oracle under a fixed key: L9 is load-bearing for AEZ.
 \begin{algorithmic}[1]
 \State $(\lambda,\chi')\gets\peel(\mathit{sk}_i,\chi)$;\ \textbf{if}
   $\gamma$ fails \textbf{then} drop
-\If{$\arr>x\ \vee\ e\ne\mathrm{epoch}_i\ \vee\ \nu\in R_i$} \State drop
+\If{$x\notin(\arr,\arr{+}V]\vee e\ne\mathrm{epoch}_i\vee\nu\in R_i
+  \vee R_i^{\frm}\text{ full}$} \State drop
   \Comment{L9} \EndIf
-\State $R_i\gets R_i\cup\{(\nu,x)\}$
+\State $R_i\gets R_i\cup\{(\nu,\arr+V)\}$
 \If{$f=\relay$} \State $y'\gets\Dec{0}{k^{\mathrm{in}}}(y)$
 \Else
   \State $b\gets\Dec{\tau}{k^{\mathrm{in}}}(y)$;\ \textbf{if} $b=\bot$
@@ -429,19 +431,34 @@ loop suffix after $h$:
 \[
 \upsilon=(\nxt,\chi_\upsilon,k_{r_1},..,k_{r_s},k_{\cl},x_\upsilon).
 \]
-The suffix of the loop that opened or continued the session is itself a
-SURB; a forward frame may carry $\sigma$ further SURBs in its carry value.
+$h$ keeps the suffix of every forward loop that reaches it
+($\chi_{i+1}$, $\kappa^{\mathrm{out}}_i$, $x$) as one SURB; no SURB rides in
+a carry value.
 \end{defD}
 
+\begin{proposition}[No SURB in the carry]\label{prop:nosurb}
+A carried SURB forces $C>\Hm\ell$ on every edge.
+\end{proposition}
+\begin{proof}
+L5$'$ fixes $|\chi_\upsilon|=|\chi|>|\beta|=\Hm\ell$ (a shorter reply
+header would name the reply path), and L3 fixes one $C$ for all edges.
+\end{proof}
+
+At $s=2$ that would at least double every cell ($9086$\,B of $\beta$ in
+the carry besides the header's own), so credit arrives only as forward
+loops: one forward cell per reply cell, data optional.
+
 \begin{invariant}[Credit]\label{inv:credit}
-Let $Q_h$ be $h$'s unexpired SURBs, $u(t)$ the SURBs received and $r(t)$
-the replies emitted by time $t$.  Then
-\[
-r(t)\le u(t),\qquad |Q_h|=0\Rightarrow\text{\code{tcp} stops reading its
-socket.}
-\]
-Each reply consumes one $\upsilon$, produced as segment $n$ of
-D7 with $p_n=h$; replenishment resumes reading.
+Let $Q_h$ be $h$'s unexpired SURBs ($t_\upsilon$ the arrival of $\upsilon$), $u(t)$ the forward loops of the
+session received and $r(t)$ the replies emitted by time $t$.  Then
+\begin{gather*}
+r(t)\le u(t),\qquad \upsilon\in Q_h\Rightarrow t<x_\upsilon\le
+t_\upsilon+V,\\
+|Q_h|=0\Rightarrow\text{\code{tcp} stops reading its socket.}
+\end{gather*}
+Each reply consumes one $\upsilon$, produced as segment $n$ of D7 with
+$p_n=h$; an expired $\upsilon$ is discarded unused; a new forward loop
+resumes reading.  A session idle for longer than $V$ holds no credit.
 \end{invariant}
 
 \section{Security Laws}\label{sec:laws}
@@ -569,10 +586,32 @@ place; this is Sphinx's wide-block payload~\cite{Danezis2009,Anderson1996}
 with AEZ in place of LIONESS.
 
 \begin{lawL}{L9}{replay}
-Every hop admits each $\nu$ at most once within $[\,\cdot\,,x]$; $R_i$
-holds $(\nu,x)$ until $x$.  A SURB is a layer, hence single use; L9 also
-bounds each AEZ key to one carry value (Prop.~\ref{prop:onekey}).
+With $V=150$\,s (\code{ONION\_FORWARD\_MAX\_VALIDITY\_MS}) and per-sender
+capacity $B=4096$ over at most $64$ senders, hop $i$ admits a layer at
+$\arr$ iff
+\[
+\arr<x\le\arr+V\ \wedge\ \nu\notin R_i\ \wedge\ |R_i^{\frm}|<B,
+\]
+then retains $\nu$ in $R_i$ until $\arr+V$.  A full $R_i^{\frm}$ rejects;
+no tag leaves $R_i$ before its retention ends.  A SURB is a layer, hence
+single use; L9 also bounds each AEZ key to one carry value
+(Prop.~\ref{prop:onekey}).
 \end{lawL}
+
+\begin{proposition}[Replay bounds]\label{prop:replay}
+(i) No admitted layer outlives its tag: $x\le\arr+V$.  (ii) $|R_i|\le64B$.
+(iii) Hop $i$ admits at most $B$ layers per sender per $V$, i.e.\
+$B/V\approx27$ cells\,s$^{-1}$ per neighbour.  (iv) A SURB is usable
+only within $[x_\upsilon-V,x_\upsilon)$, so SURB lifetime is at most $V$.
+\end{proposition}
+\begin{proof}
+(i) is the admission window; (ii) the capacity guard; (iii) each admitted
+tag occupies a slot for $V$; (iv) every relay of the reply path applies
+(i) at the reply's arrival.
+\end{proof}
+
+(iii) bounds per-neighbour loop throughput, including SURB replies; $B$
+is a tuning constant, not a law.
 
 \begin{lawL}{L10}{wire}
 Phase~1 preserves today's bytes (golden tests); Phase~2 replaces them with
@@ -606,12 +645,13 @@ component of $\view_i$ is determined by $\pi_i$ and $\sigma$.
 \section{The Current Design}\label{sec:current}
 
 \begin{proposition}[Backward linkability]\label{prop:current}
-In \code{circuit/crypto.rs},
-\code{encrypt\_client\_payload\_at\_sequence} seals the
-exit's answer once, $c=\mathrm{AEAD}_{\mathit{pk}_\cl}(\cdot)$, and
-in \code{circuit/reducer.rs}, \code{advance\_backward} re-emits it as
-$\mathit{payload}=\mathit{frame.payload}$, rewriting only the edge
-circuit id and the outer hop seal.  Every backward relay therefore sees the
+Today the exit seals its answer once,
+$c=\mathrm{AEAD}_{\mathit{pk}_\cl}(\cdot)$
+(\code{encrypt\_client\_payload\_at\_sequence} in
+\code{circuit/crypto.rs}), and each relay re-emits it as
+$\mathit{payload}=\mathit{frame.payload}$ (\code{advance\_backward} in
+\code{circuit/reducer.rs}), rewriting only the edge circuit id and the
+outer hop seal.  Every backward relay therefore sees the
 same $c$: any two colluding relays, and the exit, link their positions by
 equality, independently of route length.
 \end{proposition}
@@ -643,7 +683,7 @@ computation & exit service only & any $f\in\Sigma_n$ (D2) \\
 return path & forward path reversed & fresh relays to $g$ (L7) \\
 relay state & \code{relay\_returns}, $\le1024$, TTL $120$\,s refreshed per cell & replay tags only (L9) \\
 return bytes & one ciphertext, identical per edge & one AEZ layer per edge (L8) \\
-replay & exits (\code{consume\_forward\_nonce}) & every hop (L9) \\
+replay & exits (\code{consume\_forward\_nonce}), $V=150$\,s, $B=4096$ & every hop, same $V$, $B$ (L9) \\
 session replies & no credit bound & one per SURB (Inv.~\ref{inv:credit}) \\
 \bottomrule
 \end{tabular}
@@ -708,8 +748,8 @@ L5 & property test on the pure builder: vary $\bar a_j,v_j$, $j\ne i$; $\view_i$
 L5$'$ & builder for $H\ne H'\le\Hm$: equal layer and cell lengths at every position; every $\gamma_i$ verifies (Prop.~\ref{prop:header}) \\
 D5, L7 & $H=(s+1)n+s$; guard at $1$ and $H$ only; $n>4$ rejected; selection fails closed below $H-1$ eligible DIDs \\
 L8 & per-hop byte inequality; one-bit flip rejects the whole value \\
-L9 & replayed layer and reused SURB rejected \\
-credit & a \code{tcp} session emits no reply without a SURB and resumes after replenishment \\
+L9 & replayed layer and reused SURB rejected; $x\notin(\arr,\arr+V]$ rejected; full $R_i^{\frm}$ rejects without evicting a live tag \\
+credit & a \code{tcp} session emits no reply without a SURB, drops expired SURBs, and resumes after a new forward loop \\
 AEZ & $2941$ vectors from the AEZ v5 reference C code (length sweep, parameter grid, CAESAR genkat), bit-flip rejection for $\tau\ge4$, native and \code{wasm32}; weak-key rejection; \code{fuzz/} target for $\Dec{}{}\circ\Enc{}{}=\mathrm{id}$ and panic freedom \\
 \bottomrule
 \end{tabular}
@@ -734,8 +774,8 @@ phase & content \\
 
 Table~\ref{tab:phases} orders the cutover.  Fixed: $s=2$, $n_{\max}=4$,
 $\Hm=14$, in-repo AEZ.  Open: key transport (per-layer envelope or one
-blinded element), raw DID and key encodings ($\ell(2,64)\approx467$\,B),
-$\sigma$, and $C\ge\sigma|\chi_\upsilon|$ when SURBs ride the carry.
+blinded element), raw DID and key encodings ($\ell(2,64)\approx531$\,B),
+and the replay capacity $B$.
 Non-goals: bind, Selective branches before Phase~2b, session symbols in intermediate position, concrete symbols, and
 verification of results.
 
