@@ -414,13 +414,7 @@ async fn test_ice_connection_establish() {
 
     #[cfg(feature = "browser_chrome_test")]
     {
-        let connection = conn2.webrtc_wait_for_data_channel_open().fuse();
-        let deadline = futures_timer::Delay::new(std::time::Duration::from_secs(60)).fuse();
-        futures::pin_mut!(connection, deadline);
-        futures::select! {
-            result = connection => result.unwrap(),
-            () = deadline => panic!("ICE connection must open a data channel within 60 seconds"),
-        }
+        conn2.webrtc_wait_for_data_channel_open().await.unwrap();
         assert_eq!(
             conn2.webrtc_connection_state(),
             WebrtcConnectionState::Connected

@@ -28,7 +28,13 @@ async fn test_notifier() {
         }));
     }
 
-    for result in futures::future::join_all(jobs).await {
+    let results = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        futures::future::join_all(jobs),
+    )
+    .await
+    .expect("all notifier waiters must finish within 500 ms");
+    for result in results {
         assert!(
             result.is_ok(),
             "notifier waiter task must complete successfully"
