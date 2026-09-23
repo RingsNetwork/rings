@@ -187,14 +187,17 @@ Violations are rejected at construction.  The bound $n_{\max}$ is
 
 \begin{defD}{D4b}{Kleisli denotation}
 For $\phi:X\to MY$, $\psi:Y\to MZ$ in $\Kl(M)$~\cite{Moggi1991},
-$\phi\then\psi=\mu_Z\circ M\psi\circ\phi$.  For hop assignment
-$h_1..h_n$ with $f_k\in\Sigma_{h_k}$,
+$\phi\then\psi=\mu_Z\circ M\psi\circ\phi$.  A placed application
+$(f,\bar a,h)$ with $f\in\Sigma_h$ is an edge of the free category
+$\Free(\Sigma\times N)$, $N$ the nodes; the unique functor
+$\sem{-}:\Free(\Sigma\times N)\to\Kl(M)$ sending it to
+$\sem{f}_h(\bar a,-)$ gives, for $P$ placed on $h_1..h_n$,
 \[
 \sem{P}(v_0)=\bigl(\sem{f_1}_{h_1}(\bar a_1,-)\then\cdots\then
 \sem{f_n}_{h_n}(\bar a_n,-)\bigr)(v_0),
 \]
-the unique functor $\Free(\Sigma)\to\Kl(M)$ extending the hop
-interpretations.  The client consumes $\sem{P}(v_0)$.
+and $\sem{P\then P'}=\sem{P}\then\sem{P'}$.  The client consumes
+$\sem{P}(v_0)$.
 \end{defD}
 
 \begin{lawL}{L1}{identity}
@@ -380,7 +383,7 @@ that block; $\gamma_{i+1}$ is then a $\MAC$ under an unseen key.
 The carry slot has width $C=C_b$ on every edge of a loop of class $b$.
 With $C_0=C-\tau$, for fixed-width symbols the client picks the least
 $b$ with $|\enc(v_0)|<C_0$ and $W(f_k)<C_0$ for all $k$; for a stream
-symbol, whose width is $C_0$ itself, $b$ is the client's choice between
+symbol, whose chunks fill $C_0-1$ bytes, $b$ is the client's choice between
 throughput and leakage (Table~\ref{tab:leak}).  $W$ factors through the output type ($W(f)=w(\Out_f)$, so the
 width a consumer unpads is fixed by its own $\In$); a $\WF$ stream symbol
 (\code{tcp}, \code{https}) has $\In=\Out=\mathrm{Bytes}_{<C_0}$, one chunk
@@ -426,13 +429,15 @@ authenticates $\pad(\epsilon)$ and processing is uniform.
 \end{defD}
 
 \begin{lemma}[Relay carry]\label{lem:carry}
-At $i=r_{k,j}$, $y_{k,j-1}$ and $y_{k,j}$ are uniform on $\{0,1\}^C$ and
-independent of $v_k$ under Assumption~\ref{as:prim}.
+Under Assumption~\ref{as:prim} and L9, at $i=r_{k,j}$ the strings
+$y_{k,j-1}$ and $y_{k,j}$ are uniform on $\{0,1\}^C$ and independent of
+$v_k$.
 \end{lemma}
 \begin{proof}
-$y_{k,j}=\Dec{0}{k_{r_{k,j}}}(y_{k,j-1})$ is an $\Enc{}{}$ output under
-$k_{r_{k,j+1}}$ or $k_{c_k}$, a fresh key not held by $i$ and used once
-(Prop.~\ref{prop:onekey}), hence a uniform string; $y_{k,j-1}$ is its
+$y_{k,j}=\Dec{0}{k_{r_{k,j}}}(y_{k,j-1})$ is $\Pi_k$ applied to one
+input, for $k=k_{r_{k,j+1}}$ ($\tau=0$) or $k=k_{c_k}$ ($\tau=16$, input
+$b_k\|0^{16}$): a fresh key not held by $i$ and used once by L9
+(Prop.~\ref{prop:onekey}), hence a uniform string.  $y_{k,j-1}$ is its
 image under a permutation keyed by $i$'s own key.
 \end{proof}
 
@@ -507,7 +512,9 @@ fixed key: L9 is load-bearing for AEZ.
 $\cl$ is position $H+1$.  $\lambda_H$ carries, in place of
 $\alpha_{H+1}$, a fresh tag $t_\cl\in\{0,1\}^{128}$ padded to $|\alpha|$;
 the guard sends $(\chi_{H+1},y_H)$ with
-$\chi_{H+1}=(t_\cl,\beta_{H+1},\gamma_{H+1})$, so $|\chi_{H+1}|=|\chi|$
+$\chi_{H+1}=(t_\cl,\beta_{H+1},\gamma_{H+1})$, so $|\chi_{H+1}|=|\chi|$.
+With blinded key transport, where $\lambda_H$ has no $\alpha_{H+1}$,
+$t_\cl$ occupies $\lambda_H$'s next-hop field instead
 and the cell is padded to $b$ like every other.
 $\cl$ keeps $T:t_\cl\mapsto(k_{c_n},\text{loop})$, removes the entry on
 first use, and drops a cell with an unknown tag.  Every SURB suffix ends
@@ -560,9 +567,10 @@ and a session idle for longer than $V$ holds no credit.
 \section{Security Laws}\label{sec:laws}
 
 \begin{assumption}[Primitives]\label{as:prim}
-Under a key it does not hold, a hop sees $\Enc{0}{k}$ as a uniformly random
-permutation of $\{0,1\}^{C}$ and $\Enc{\tau}{k}$ as robust
-AE~\cite{Hoang2015}; $\PRG$ and $\MAC$ are secure, and key transport
+AEZ is an ideal enciphering scheme~\cite{Hoang2015}: under a fresh key
+a hop does not hold, $\Enc{\tau}{k}(m)=\Pi_k(m\,\|\,0^{\tau})$ for a
+uniformly random permutation $\Pi_k$ of $\{0,1\}^{|m|+\tau}$, for
+$\tau=0$ and $\tau=16$ alike; $\PRG$ and $\MAC$ are secure, and key transport
 reveals $K_j$ to hop $j$ only.  Network delays $\delta$ are fixed per edge;
 no hop other than $g$ observes the client's departure time.
 \end{assumption}
@@ -845,11 +853,10 @@ obligation & test or property \\
 L10 & golden encodings of layers, wire messages, cells, and descriptor signing data, landed before any refactor; a new pinned set at the Phase~2 cutover \\
 L1 & carry through $\relay$ is identity; $\LoopOf(\relay\then P)\eqd\LoopOf(P)$ \\
 D4a & $\Out\ne\In$, $\WF$ before the last symbol, empty pipeline: rejected at construction \\
-L3 & fixed slot width on every edge; output $>W(f)$ dropped \\
 L4 & release at $\arr+L(f)$ and drop on overrun under an injected clock \\
 L5 & property test on the pure builder: vary $\bar a_j,v_j$, $j\ne i$; $\view_i$ bytes, lengths, and release times equal \\
 L5$'$ & builder for $H\ne H'\le\Hm$: equal layer and cell lengths at every position; every $\gamma_i$ verifies (Prop.~\ref{prop:header}) \\
-L3, D6 & one class $b$ and slot width $C_b$ on every edge of a loop, SURB replies included; stream chunks $<C_0$ \\
+L3, D6 & one class $b$ and slot width $C_b$ on every edge of a loop, SURB replies included; stream chunks of at most $C_0-1$ bytes; output $>W(f)$ dropped \\
 client & reply accepted once by tag $t_\cl$; unknown or reused tag dropped \\
 D5, L7 & $H=(s+1)n+s$; guard at $1$ and $H$ only; $n>4$ rejected; selection fails closed below $H-1$ eligible DIDs \\
 L8 & per-hop byte inequality; one-bit flip rejects the whole value \\
