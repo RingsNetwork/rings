@@ -405,8 +405,10 @@ other layer.
 \end{lemma}
 \begin{proof}
 $|\chi|$ is constant.  Hop $i$ unmasks $\lambda_i$ and $\beta_{i+1}$,
-reads $\gamma_{i+1}$ from $\lambda_i$, and blinds $\alpha_{i+1}$, which is
-uniform in the group to $i$ by the DDH assumption ($\epsilon_\alpha$).  Every block of
+reads $\gamma_{i+1}$ from $\lambda_i$, and computes $\alpha_{i+1}$ from
+$\alpha_i$ and $K_i$.  By DDH, $\alpha_i$ is a uniform group element to $i$,
+unlinkable to every other hop's $\alpha_j$ and independent of $H$ and $i$
+($\epsilon_\alpha$).  Every block of
 $\beta_{i+1}$ but the last is masked by some $\rho_j$, $j\ne i$: by
 $\rho_{i+1}$ when $i+1<H$, and by $\rho_H$ or an upstream term of
 $\phi_{H-1}$ when $i+1=H$.  The last block is $\rho_i[\Hm,\Hm{+}1)$,
@@ -563,8 +565,9 @@ $t_\cl\in\{0,1\}^{128}$ in the 16-byte tag field present in every layer
 ignored, since $k_{c_n}$ authenticates the carry.  The guard sends a
 class-$b$ cell as to any hop.
 $\cl$ keeps $T:t_\cl\mapsto(k_{c_n},\text{loop})$, removes the entry on
-first use or at $x$, and drops a cell with an unknown tag.  A SURB is the
-suffix of a forward loop and ends in that loop's tag.
+first use or at $x$, and drops a cell with an unknown tag.  Every SURB ends
+in its own tag: a forward loop's suffix in that loop's tag, a batched SURB
+(D8) in a fresh one.
 \end{defD}
 
 $t_\cl$ is uniform and seen only by $g$ at position $H$ and by $\cl$, so it
@@ -763,8 +766,10 @@ place; this is Sphinx's wide-block payload~\cite{Danezis2009,Anderson1996}
 with AEZ in place of LIONESS.
 
 \begin{lawL}{L9}{replay}
-$R_i$ is a family of Bloom filters $R_i[x]$ keyed by the quantised
-expiry; $R_i[x]$ is dropped when $x$ passes, so at most $V/Q+1=6$ are live.
+$R_i$ is a family of Bloom filters~\cite{Bloom1970} $R_i[x]$ keyed by the
+quantised expiry; $R_i[x]$ grows by blocks of $B$ tags, each at
+false-positive rate $2^{-26}$~\cite{Almeida2007}, and is dropped when $x$
+passes, so at most $V/Q+1=6$ are live.
 With $V=150$\,s (\code{ONION\_FORWARD\_MAX\_VALIDITY\_MS}), per-sender
 budget $B=16384$ over at most $64$ senders, and a global budget $64B$, all
 per $V$, hop $i$ admits a layer at $\arr$ iff
@@ -782,20 +787,26 @@ hence single use; L9 also bounds each AEZ key to one carry value
 (i) No admitted layer outlives its filter: $x\le\arr+V$ and $R_i[x]$
 lives until $x$.  (ii) A Bloom filter has no false negatives, so admission
 is at most once exactly; a false positive drops a valid cell, the safe
-direction, at rate $\le2^{-20}$, and $64B$ tags take $\approx3.8$\,MB.
+direction, at rate $\le2^{-20}$; memory grows with admitted tags and is at
+most $\approx5.4$\,MB.
 (iii) Hop $i$ admits at most $B/V\approx109$ cells\,s$^{-1}$ per
-neighbour and (iv) $64B/V\approx6990$ in total.  (v) A SURB is usable
+neighbour, shared by every loop on that link, and (iv) $64B/V\approx6990$ in total.  (v) A SURB is usable
 only within $[x_\upsilon-V,x_\upsilon)$, so SURB lifetime is at most $V$.
 \end{proposition}
 \begin{proof}
-(i) is the admission window with filters keyed by $x$; (ii) Bloom filters
-at $\approx28.9$ bits per tag for rate $2^{-20}$; (iii), (iv) are the
+(i) is the admission window with filters keyed by $x$.  (ii) $R_i[x]$
+receives tags only from arrivals in $[x-V,x)$, at most $64B$ by the global
+budget, so it has at most $64$ blocks and a false-positive rate at most
+$64\cdot2^{-26}=2^{-20}$; every live tag was admitted within the last $V$,
+so all live filters hold at most $64B$ tags in $64$ full blocks plus one
+partial block per filter, $70$ blocks of $\approx76.8$\,KB
+($\approx37.5$ bits per tag). (iii), (iv) are the
 budgets; (v) every relay of the reply path applies (i) at the reply's
 arrival.
 \end{proof}
 
 \begin{proposition}[Throughput]\label{prop:rate}
-A single client's download on a class-$b$ loop is at most
+A single client alone on its links downloads on a class-$b$ loop at most
 \[
 \min\Bigl(\frac{B}{V},\ (k+1)\,\rho_{\mathrm{f}}\Bigr)\,(C_0-2)
 \]
@@ -807,7 +818,9 @@ $b=16$\,KiB, $B/V\cdot(C_0-2)\approx109\cdot13.2\,\mathrm{KB}\approx
 Every reply cell passes $s$ relays of segment $n$, each admitting at most
 $B/V$ cells from its predecessor (iii), and consumes one SURB, of which
 each forward cell supplies $k+1$ (Prop.~\ref{prop:batch}); a reply frame
-carries at most $C_0-2$ data bytes (D2$'$).
+carries at most $C_0-2$ data bytes (D2$'$).  The forward credit cells pass
+$g$, segment~$0$ and $h$ under the same per-sender bound, at the required
+$109/(k+1)\approx22$--$27$ cells\,s$^{-1}$, far below it.
 \end{proof}
 
 Every loop of one client enters $g$ from $\cl$, so (iii) caps its forward
@@ -960,7 +973,7 @@ L8 & per-hop byte inequality; one-bit flip rejects the whole value \\
 L9 & replayed layer and reused SURB rejected; a layer for an earlier process epoch rejected after restart; $x\notin(\arr,\arr+V]$ rejected; over-budget cells rejected \\
 credit & a \code{tcp} session emits no reply without a SURB of its own $\sid$, removes each SURB before release, drops expired SURBs, and resumes after a new forward loop; two sessions at one $h$ never share a SURB; $\mathrm{fin}$ both ways drops $\sid$; a credit frame adds $k$ SURBs \\
 rate & loopback single-client \code{tcp} download $\ge1$\,MB/s at $b=16$\,KiB, upload $\approx1/(k+1)$ of download \\
-replay store & no replayed layer admitted across filter rotation; a filter dropped exactly when its $x$ passes; measured false-positive rate within $2^{-20}$ \\
+replay store & no replayed layer admitted across filter rotation; a filter grows by blocks and is dropped exactly when its $x$ passes; memory tracks admitted tags; measured false-positive rate within $2^{-20}$ \\
 seeds & derived keys match the KDF definition; a weak derived key forces a re-draw \\
 AEZ & $2941$ vectors from the AEZ v5 reference C code (length sweep, parameter grid, CAESAR genkat), bit-flip rejection for $\tau\ge4$, native and \code{wasm32}; weak-key rejection; \code{fuzz/} target for $\Dec{}{}\circ\Enc{}{}=\mathrm{id}$ and panic freedom \\
 \bottomrule
