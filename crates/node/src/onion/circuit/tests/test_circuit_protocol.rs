@@ -33,6 +33,7 @@ use crate::extension::ext::Wire;
 use crate::onion::replay::OnionForwardReplayKey;
 use crate::onion::replay::OnionForwardReplayPartitions;
 use crate::onion::replay::ReplayAdmission;
+use crate::onion::signature::ONION_SIGNATURE;
 use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitDescriptorBody;
 use crate::onion::OnionExitEpoch;
@@ -203,33 +204,30 @@ async fn peel_forward_cell(
     )
 }
 
+/// Register `interpretation` for every world-facing symbol of `Σ`.
+fn world_facing_algebra(
+    interpretation: impl OnionInterpretation + Clone + 'static,
+) -> Arc<OnionAlgebra> {
+    Arc::new(
+        ONION_SIGNATURE
+            .world_facing()
+            .fold(OnionAlgebra::default(), |algebra, symbol| {
+                algebra.register(symbol, interpretation.clone())
+            }),
+    )
+}
+
+/// Exit interpretation that consumes each forward nonce once and counts evaluations.
 #[derive(Clone, Default)]
-struct RecordingHandler {
-    clients: Arc<Mutex<Vec<(Did, OnionCircuitId, OnionAuthenticatedPayload)>>>,
+struct RecordingExit {
     exit_count: Arc<AtomicUsize>,
     exit_notify: Arc<tokio::sync::Notify>,
     forward_replays: Arc<Mutex<OnionForwardReplayPartitions>>,
 }
 
-impl RecordingHandler {
-    fn take_clients(&self) -> Vec<(Did, OnionCircuitId, OnionAuthenticatedPayload)> {
-        std::mem::take(&mut self.clients.lock().expect("recorded clients"))
-    }
-
-    fn exit_count(&self) -> usize {
-        self.exit_count.load(Ordering::SeqCst)
-    }
-
-    async fn wait_for_exit_count(&self, expected: usize) {
-        while self.exit_count() < expected {
-            self.exit_notify.notified().await;
-        }
-    }
-}
-
 #[async_trait::async_trait]
-impl OnionCircuitHandler for RecordingHandler {
-    async fn handle_exit(
+impl OnionInterpretation for RecordingExit {
+    async fn evaluate(
         &self,
         _scope: &Scope,
         frame: OnionCircuitExitFrame,
@@ -244,6 +242,47 @@ impl OnionCircuitHandler for RecordingHandler {
         self.exit_notify.notify_one();
         Ok(())
     }
+}
+
+#[derive(Clone)]
+struct RecordingHandler {
+    clients: Arc<Mutex<Vec<(Did, OnionCircuitId, OnionAuthenticatedPayload)>>>,
+    exit: RecordingExit,
+    algebra: Arc<OnionAlgebra>,
+}
+
+impl Default for RecordingHandler {
+    fn default() -> Self {
+        let exit = RecordingExit::default();
+        Self {
+            clients: Arc::default(),
+            algebra: world_facing_algebra(exit.clone()),
+            exit,
+        }
+    }
+}
+
+impl RecordingHandler {
+    fn take_clients(&self) -> Vec<(Did, OnionCircuitId, OnionAuthenticatedPayload)> {
+        std::mem::take(&mut self.clients.lock().expect("recorded clients"))
+    }
+
+    fn exit_count(&self) -> usize {
+        self.exit.exit_count.load(Ordering::SeqCst)
+    }
+
+    async fn wait_for_exit_count(&self, expected: usize) {
+        while self.exit_count() < expected {
+            self.exit.exit_notify.notified().await;
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl OnionCircuitHandler for RecordingHandler {
+    fn algebra(&self) -> &OnionAlgebra {
+        self.algebra.as_ref()
+    }
 
     async fn handle_client(
         &self,
@@ -257,28 +296,17 @@ impl OnionCircuitHandler for RecordingHandler {
     }
 }
 
+/// Exit interpretation that blocks until the test releases it.
 #[derive(Clone, Default)]
-struct BlockingExitHandler {
+struct BlockingExit {
     started: Arc<AtomicBool>,
     started_notify: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
 }
 
-impl BlockingExitHandler {
-    async fn wait_until_started(&self) {
-        while !self.started.load(Ordering::SeqCst) {
-            self.started_notify.notified().await;
-        }
-    }
-
-    fn release(&self) {
-        self.release.notify_one();
-    }
-}
-
 #[async_trait::async_trait]
-impl OnionCircuitHandler for BlockingExitHandler {
-    async fn handle_exit(
+impl OnionInterpretation for BlockingExit {
+    async fn evaluate(
         &self,
         _scope: &Scope,
         _frame: OnionCircuitExitFrame,
@@ -287,6 +315,41 @@ impl OnionCircuitHandler for BlockingExitHandler {
         self.started_notify.notify_waiters();
         self.release.notified().await;
         Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct BlockingExitHandler {
+    exit: BlockingExit,
+    algebra: Arc<OnionAlgebra>,
+}
+
+impl Default for BlockingExitHandler {
+    fn default() -> Self {
+        let exit = BlockingExit::default();
+        Self {
+            algebra: world_facing_algebra(exit.clone()),
+            exit,
+        }
+    }
+}
+
+impl BlockingExitHandler {
+    async fn wait_until_started(&self) {
+        while !self.exit.started.load(Ordering::SeqCst) {
+            self.exit.started_notify.notified().await;
+        }
+    }
+
+    fn release(&self) {
+        self.exit.release.notify_one();
+    }
+}
+
+#[async_trait::async_trait]
+impl OnionCircuitHandler for BlockingExitHandler {
+    fn algebra(&self) -> &OnionAlgebra {
+        self.algebra.as_ref()
     }
 
     async fn handle_client(
@@ -645,7 +708,7 @@ fn test_exit_effect_without_a_runtime_is_refused_before_the_adapter_starts() {
         refused,
         Err(crate::error::Error::RuntimeUnavailable(_))
     ));
-    assert!(!handler.started.load(Ordering::SeqCst));
+    assert!(!handler.exit.started.load(Ordering::SeqCst));
 }
 
 /// Law: a send refused for want of a runtime claims no peer lane, so the next send to the
@@ -1263,4 +1326,112 @@ async fn test_client_backward_payload_decryption_runs_in_shell_handler() {
             .payload,
         expected
     );
+}
+
+/// The right fold places position `i` on hop `i`: each relay layer names its successor and
+/// answers to its predecessor (the client at position zero), and the innermost layer carries the
+/// world-facing application.
+#[test]
+fn test_forward_fold_places_each_position_on_its_hop() {
+    let client = session();
+    let first = session();
+    let second = session();
+    let exit = session();
+    let route = route(&[first.clone(), second.clone()], &exit);
+    let first_circuit_id = OnionCircuitId::new([51; 16]);
+    let client_return = OnionClientReturn::new(client.delegatee_public_key());
+    let (_, payload) = encode_initial_forward(
+        client_return,
+        &route,
+        first_circuit_id,
+        test_payload("fold"),
+    )
+    .expect("encode initial route");
+    let OnionWireMessage::Forward(frame) = open_wire(&first, &payload) else {
+        panic!("expected forward frame");
+    };
+    let OnionForwardLayer::Relay {
+        next_hop: second_hop,
+        next_circuit_id: second_circuit_id,
+        next_delegatee_public_key: second_key,
+        return_delegatee_public_key: first_return,
+        inner,
+    } = decrypt_forward_layer(&first, first_circuit_id, &frame.layer).expect("first layer")
+    else {
+        panic!("expected relay layer at position zero");
+    };
+    let OnionForwardLayer::Relay {
+        next_hop: exit_hop,
+        next_circuit_id: exit_circuit_id,
+        next_delegatee_public_key: exit_key,
+        return_delegatee_public_key: second_return,
+        inner,
+    } = decrypt_forward_layer(&second, second_circuit_id, &inner).expect("second layer")
+    else {
+        panic!("expected relay layer at position one");
+    };
+    let OnionForwardLayer::Exit {
+        client: exit_client,
+        return_delegatee_public_key: exit_return,
+        payload: exit_payload,
+        ..
+    } = decrypt_forward_layer(&exit, exit_circuit_id, &inner).expect("exit layer")
+    else {
+        panic!("expected exit layer at the world-facing position");
+    };
+
+    assert_eq!(
+        (second_hop, second_key, first_return),
+        (
+            second.delegator_did(),
+            second.delegatee_public_key(),
+            client.delegatee_public_key()
+        )
+    );
+    assert_eq!(
+        (exit_hop, exit_key, second_return),
+        (
+            exit.delegator_did(),
+            exit.delegatee_public_key(),
+            first.delegatee_public_key()
+        )
+    );
+    assert_eq!(
+        (exit_client, exit_return, exit_payload),
+        (
+            client_return,
+            second.delegatee_public_key(),
+            test_payload("fold")
+        )
+    );
+}
+
+/// The algebra is one lookup on the frame's symbol: a registered symbol reaches its
+/// interpretation, and a symbol without an entry is dropped.
+#[tokio::test]
+async fn test_algebra_dispatches_on_the_frame_symbol() {
+    let client = session();
+    let exit = session();
+    let scope = test_scope(exit.clone()).lifecycle();
+    let tcp_exit = RecordingExit::default();
+    let algebra = OnionAlgebra::default().register(OnionServiceName::tcp(), tcp_exit.clone());
+    let frame = |service: &str, nonce: u8| OnionCircuitExitFrame {
+        from: client.delegator_did(),
+        circuit_id: OnionCircuitId::new([54; 16]),
+        return_peer: client.delegator_did(),
+        return_delegatee_public_key: client.delegatee_public_key(),
+        client: OnionClientReturn::new(client.delegatee_public_key()),
+        forward_nonce: OnionForwardNonce::new([nonce; 16]),
+        forward_sequence: OnionForwardSequence::FIRST,
+        payload: payload_for_service(service, "body"),
+    };
+
+    for (service, nonce) in [("tcp", 55), ("https", 56)] {
+        algebra
+            .evaluate(&scope, frame(service, nonce))
+            .await
+            .expect("evaluate exit frame");
+    }
+
+    assert_eq!(tcp_exit.exit_count.load(Ordering::SeqCst), 1);
 }

@@ -141,6 +141,10 @@ where noted.
 * `advertise_onion_relay`: advertise onion relay capability.
 * `advertise_onion_exit`, `onion_exit_heartbeat_interval_secs`, `onion_exit_ttl_secs`,
   `onion_exit_services`, `onion_exit_policy`: whether and how this node serves as an onion exit.
+  Service names form a closed set: `tcp` (byte streams) and `https` (HTTPS requests, or TLS
+  streams over the same name). Any other name, including `relay` (advertised through
+  `advertise_onion_relay` instead), is rejected, so restrict an exit's reach with the policy
+  targets rather than with a custom service name.
   An empty `allowed_targets` list is a closed policy that admits no target, so advertising an
   exit requires at least one allowed target; deny entries override allows; a `0` limit is
   unspecified.
@@ -151,7 +155,8 @@ where noted.
   through onion exits; absent means no proxy.
 * `onion_http_proxy_service`, `onion_http_proxy_hop_count`,
   `onion_http_proxy_allow_short_paths`, `onion_http_proxy_header_timeout_secs`,
-  `onion_http_proxy_max_connections`: exit service, route length, and limits of that proxy.
+  `onion_http_proxy_max_connections`: exit service (`tcp` or `https`), route length, and limits
+  of that proxy.
 
 ## Gateway
 

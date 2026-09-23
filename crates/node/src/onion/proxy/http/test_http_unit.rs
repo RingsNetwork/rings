@@ -26,13 +26,13 @@ fn test_connect_request_line_rejects_plain_http_request() {
 }
 
 #[test]
-fn test_proxy_options_build_custom_tcp_service_config() -> Result<()> {
+fn test_proxy_options_build_https_tcp_service_config() -> Result<()> {
     let mut options = options();
-    options.service = OnionServiceName::parse("web")?;
+    options.service = OnionServiceName::https();
 
     let proxy = options.proxy_config()?;
 
-    assert_eq!(proxy.exit_service(), "web");
+    assert_eq!(proxy.exit_service(), "https");
     Ok(())
 }
 

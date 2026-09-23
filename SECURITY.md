@@ -338,13 +338,22 @@ candidates; it never adds one.
 
 An onion-exit descriptor signs exactly one canonical service name, its policy,
 node type, network, process epoch, timestamps, and signer material. There is no
-parallel transport enum or descriptor schema number: native exits currently serve
-the advertised names through the TCP exit runtime, including the reserved `https`
-name. A new incompatible descriptor shape is therefore a network-wide release
-cutover, not a value negotiated inside the descriptor. Route construction enters
-through the policy-aware selector only: proxy protocol, target policy, entry guard,
-and direct-exit admission are explicit predicates rather than permissive wrapper
-defaults.
+parallel transport enum or descriptor schema number: the name denotes a
+world-facing symbol of the closed onion signature, `Σ_W = {tcp, https}`. The
+identity symbol `relay` is advertised as a relay capability and is not a service
+name, so a name outside `Σ_W`, `relay` included, is rejected wherever it enters a
+node (configuration, descriptor decode, RPC) and no route can name it. An exit
+evaluates each authenticated application through a table holding exactly the
+services it is configured to serve. `https ⊑ tcp`: native exits serve `tcp` through
+the TCP exit runtime, and `https` as the left-biased alternative of an HTTPS request
+and a TLS byte stream under the same name. The wire carries no tag between the two,
+so a tunnel chunk that also decodes as an HTTPS payload (an empty chunk, or a
+five-byte chunk `04 ‖ utf8⁴`) is taken as one and dropped; removing that overlap
+needs a wire tag and is left to the Phase 2 cutover of #834. A new incompatible descriptor
+shape is therefore a network-wide release cutover, not a value negotiated inside the
+descriptor. Route construction enters through the policy-aware selector only: proxy
+protocol, target policy, entry guard, and direct-exit admission are explicit
+predicates rather than permissive wrapper defaults.
 
 TCP and HTTPS exit adapters share one process-local forward-nonce replay witness.
 The authenticated service name still binds the adapter action, but replaying the

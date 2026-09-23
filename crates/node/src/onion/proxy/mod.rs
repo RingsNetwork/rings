@@ -18,11 +18,11 @@ use crate::online::OnlineNodeType;
 #[cfg(rings_native)]
 pub mod http;
 
-/// Exit service used by native HTTP CONNECT/SOCKS-style byte tunnels.
-pub const ONION_PROXY_TCP_SERVICE: &str = "tcp";
+/// Exit service used by native HTTP CONNECT/SOCKS-style byte tunnels: the `tcp` symbol.
+pub const ONION_PROXY_TCP_SERVICE: &str = OnionServiceName::tcp().as_str();
 
-/// Exit service used by HTTPS proxying over a TCP-backed onion exit.
-pub const ONION_PROXY_HTTPS_SERVICE: &str = "https";
+/// Exit service used by HTTPS proxying over a TCP-backed onion exit: the `https` symbol.
+pub const ONION_PROXY_HTTPS_SERVICE: &str = OnionServiceName::https().as_str();
 
 /// Proxy protocol requested by the client ingress.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -205,11 +205,10 @@ mod tests {
     }
 
     #[test]
-    fn test_tcp_proxy_config_accepts_custom_tcp_service() -> Result<()> {
-        let service = OnionServiceName::parse("web")?;
-        let proxy = OnionProxyConfig::tcp_connect_service(service, 2, true)?;
+    fn test_tcp_proxy_config_accepts_tcp_service() -> Result<()> {
+        let proxy = OnionProxyConfig::tcp_connect_service(OnionServiceName::tcp(), 2, true)?;
 
-        assert_eq!(proxy.exit_service(), "web");
+        assert_eq!(proxy.exit_service(), "tcp");
         assert_eq!(proxy.hop_count, 2);
         assert!(proxy.allow_short_paths);
         Ok(())

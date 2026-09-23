@@ -5,7 +5,10 @@
 //! application protocol decision.
 //!
 //! The current data plane selects route-aware circuits and exit policies over layered
-//! ElGamal-AEAD frames.
+//! ElGamal-AEAD frames. A circuit is a pipeline (`pipeline`) over the static signature `Σ` of
+//! operation symbols (`signature`): the pure reducer interprets the identity symbol `relay`, and
+//! each node's Σ-algebra (`circuit::OnionAlgebra`) interprets the world-facing symbols it
+//! registers.
 
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
@@ -52,9 +55,11 @@ mod gateway;
 pub mod https;
 #[cfg(rings_native)]
 pub mod native;
+pub mod pipeline;
 pub mod proxy;
 pub(crate) mod replay;
 pub mod route;
+pub mod signature;
 pub mod target;
 #[cfg(rings_native)]
 pub mod tcp;
@@ -73,6 +78,9 @@ pub use route::OnionRouteHop;
 pub use route::OnionRouteRequest;
 pub(crate) use route::SystemRouteEntropy;
 pub use route::DEFAULT_ONION_ROUTE_HOPS;
+pub use signature::OnionServiceName;
+pub use signature::OnionSymbolSpec;
+pub use signature::ONION_SIGNATURE;
 pub use target::OnionProxyTarget;
 pub use target::OnionProxyTargetError;
 
@@ -123,13 +131,13 @@ pub(crate) const fn default_advertise_onion_exit() -> bool {
     false
 }
 
-/// Default native exit services. It is only published when onion-exit advertisement is enabled.
-/// HTTPS is advertised as a TCP-backed service because HTTPS proxying ultimately tunnels TLS bytes.
+/// Default native exit services: the world-facing symbols of [`ONION_SIGNATURE`] in table order.
+/// It is only published when onion-exit advertisement is enabled.
 pub fn default_onion_exit_services() -> Vec<OnionServiceName> {
-    vec![OnionServiceName::tcp(), OnionServiceName::https()]
+    ONION_SIGNATURE.world_facing().collect()
 }
 
-/// Standard HTTPS-over-TCP onion-exit service set.
+/// Standard HTTPS onion-exit service set: the single `https` symbol of [`ONION_SIGNATURE`].
 pub fn https_onion_exit_services() -> Vec<OnionServiceName> {
     vec![OnionServiceName::https()]
 }
@@ -151,73 +159,6 @@ pub(crate) fn validate_onion_exit_registration_timing(
         )));
     }
     Ok(())
-}
-
-/// Canonical onion-exit service name.
-#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct OnionServiceName(String);
-
-impl OnionServiceName {
-    /// Parse and canonicalize a service name.
-    pub fn parse(name: impl AsRef<str>) -> Result<Self> {
-        let name = name.as_ref();
-        let trimmed = name.trim();
-        if trimmed.is_empty() || trimmed != name {
-            return Err(Error::InvalidConfig(
-                "onion exit service name must be non-empty and trimmed".to_string(),
-            ));
-        }
-        if trimmed.len() > 64 || trimmed.chars().any(|ch| !is_service_name_char(ch)) {
-            return Err(Error::InvalidConfig(format!(
-                "invalid onion exit service name {name:?}; expected [A-Za-z0-9._-] up to 64 bytes"
-            )));
-        }
-        Ok(Self(trimmed.to_ascii_lowercase()))
-    }
-
-    /// Return the standard HTTPS-over-TCP exit service name.
-    pub fn https() -> Self {
-        Self::static_name("https")
-    }
-
-    /// Return the standard native TCP exit service name.
-    pub fn tcp() -> Self {
-        Self::static_name("tcp")
-    }
-
-    /// Build a trusted static service name.
-    fn static_name(name: &'static str) -> Self {
-        Self(name.to_string())
-    }
-
-    /// Return the service name as a string slice.
-    pub fn as_str(&self) -> &str {
-        self.0.as_str()
-    }
-
-    /// Return whether this name equals `service` after service-name canonicalization.
-    pub fn matches(&self, service: &str) -> bool {
-        Self::parse(service).is_ok_and(|candidate| candidate == *self)
-    }
-}
-
-impl TryFrom<String> for OnionServiceName {
-    type Error = String;
-
-    fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
-        Self::parse(&value).map_err(|error| error.to_string())
-    }
-}
-
-impl From<OnionServiceName> for String {
-    fn from(name: OnionServiceName) -> Self {
-        name.0
-    }
-}
-
-fn is_service_name_char(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-')
 }
 
 /// Signed policy fields for an onion exit.

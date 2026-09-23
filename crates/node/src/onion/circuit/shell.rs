@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -31,6 +32,7 @@ use crate::error::Result;
 use crate::extension::ext::EffectScope;
 use crate::extension::ext::Interpret;
 use crate::extension::ext::Scope;
+use crate::onion::OnionServiceName;
 
 /// Interpreter for route-aware circuit effects.
 pub struct OnionCircuitShell<H> {
@@ -229,7 +231,8 @@ where H: OnionCircuitHandler + MaybeSendSync + 'static
                 let handler = Arc::clone(&self.handler);
                 spawner.spawn(async move {
                     let result = handler
-                        .handle_exit(&lifecycle, OnionCircuitExitFrame {
+                        .algebra()
+                        .evaluate(&lifecycle, OnionCircuitExitFrame {
                             from,
                             circuit_id,
                             return_peer,
@@ -284,12 +287,74 @@ pub struct OnionCircuitExitFrame {
     pub payload: OnionCircuitPayload,
 }
 
+/// Interpretation `⟦s⟧` of one world-facing symbol `s` at an exit.
+///
+/// `⟦s⟧(ā) : In_s → M Out_s` is a Kleisli arrow of the hop effect monad `M` (#834 D2): here `In_s`
+/// is the exit frame carrying `(s, ā)`, and the effects of `M` (sockets, fetch, backward cells) run
+/// in the shell.
+#[cfg_attr(rings_browser, async_trait::async_trait(?Send))]
+#[cfg_attr(rings_native, async_trait::async_trait)]
+pub trait OnionInterpretation: MaybeSendSync {
+    /// Evaluate the application carried by `frame`, whose symbol is `s`.
+    async fn evaluate(&self, scope: &Scope, frame: OnionCircuitExitFrame) -> Result<()>;
+}
+
+/// The partial Σ-algebra of one node: `⟦−⟧ : Σ_n ⇀ Kl(M)`, `Σ_n ⊆ Σ_W`.
+///
+/// A node registers symbols, never applications (#834 D2): each entry maps one world-facing
+/// symbol it serves to its Kleisli interpretation, so the registered keys are exactly `Σ_n`, the
+/// symbols this node interprets. `relay` is not a service name, so it cannot be registered here;
+/// the pure reducer interprets it. Evaluation is one table lookup on the frame's symbol.
+///
+/// ```text
+/// frame ──payload.service = s──▶ table(s) ──▶ Some ⟦s⟧ ──▶ ⟦s⟧(scope, frame)
+///                                        └──▶ None      ──▶ dropped (s ∉ Σ_n)
+/// ```
+///
+/// Law: registering a symbol again replaces its interpretation.
+#[derive(Default)]
+pub struct OnionAlgebra {
+    interpretations: BTreeMap<OnionServiceName, Box<dyn OnionInterpretation>>,
+}
+
+impl OnionAlgebra {
+    /// Register `interpretation` as `⟦symbol⟧`.
+    pub fn register(
+        mut self,
+        symbol: OnionServiceName,
+        interpretation: impl OnionInterpretation + 'static,
+    ) -> Self {
+        self.interpretations
+            .insert(symbol, Box::new(interpretation));
+        self
+    }
+
+    /// Return `Σ_n`, the symbols this algebra interprets, in name order.
+    pub fn symbols(&self) -> impl Iterator<Item = &OnionServiceName> {
+        self.interpretations.keys()
+    }
+
+    /// Evaluate one exit frame through the interpretation of its symbol.
+    pub async fn evaluate(&self, scope: &Scope, frame: OnionCircuitExitFrame) -> Result<()> {
+        match self.interpretations.get(frame.payload.service_name()) {
+            Some(interpretation) => interpretation.evaluate(scope, frame).await,
+            None => {
+                tracing::debug!(
+                    symbol = frame.payload.service(),
+                    "drop onion exit frame for an unregistered symbol"
+                );
+                Ok(())
+            }
+        }
+    }
+}
+
 /// Runtime-specific circuit handling.
 #[cfg_attr(rings_browser, async_trait::async_trait(?Send))]
 #[cfg_attr(rings_native, async_trait::async_trait)]
 pub trait OnionCircuitHandler {
-    /// Handle a frame that reached this node as the exit.
-    async fn handle_exit(&self, scope: &Scope, frame: OnionCircuitExitFrame) -> Result<()>;
+    /// Return the Σ-algebra evaluating frames that reached this node as the exit.
+    fn algebra(&self) -> &OnionAlgebra;
 
     /// Handle a frame that reached this node as the client.
     async fn handle_client(

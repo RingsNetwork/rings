@@ -250,7 +250,7 @@ impl OnionHttpsClient {
             encode_https_payload(OnionHttpsPayload::Request(call.addressed_to(&route.target)))?;
         let client_return = OnionClientReturn::new(self.return_key);
         let (circuit_id, response) = self.register(
-            route_first_hop(&route.route)?,
+            route_first_hop(&route.route),
             route.route.exit().clone(),
             client_return.return_id,
         )?;

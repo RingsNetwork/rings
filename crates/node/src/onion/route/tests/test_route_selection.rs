@@ -26,11 +26,6 @@ use crate::online::OnlineNodeType;
 /// Stable non-zero process epoch used only to make signed route fixtures deterministic.
 const TEST_EXIT_PROCESS_EPOCH: OnionExitEpoch = OnionExitEpoch::new([29; 16]);
 
-/// Parse one canonical service name for route-selection fixtures.
-fn service(name: &str) -> OnionServiceName {
-    OnionServiceName::parse(name).expect("valid test service")
-}
-
 fn signed_exit_at(heartbeat_at_ms: u128, expires_at_ms: u128) -> Result<OnionExitDescriptor> {
     let key = SecretKey::random();
     let delegatee_key = DelegateeKey::new_with_seckey(&key).map_err(Error::CoreError)?;
@@ -63,7 +58,7 @@ fn signed_exit_for_session_network_at(
             process_epoch: TEST_EXIT_PROCESS_EPOCH,
             node_type: OnlineNodeType::Native,
             network_id,
-            service: service("web"),
+            service: OnionServiceName::tcp(),
             policy: OnionExitPolicy {
                 allowed_targets: vec![OnionExitTarget::parse("example.com:443")?],
                 denied_targets: vec![],
@@ -208,7 +203,7 @@ fn test_route_builder_uses_presence_relays_and_exit_registry() -> Result<()> {
         online_node_at(&first_relay, 20, 100).map_err(Error::CoreError)?,
         online_node_at(&second_relay, 20, 100).map_err(Error::CoreError)?,
     ];
-    let request = route_request("web", 3, false)?;
+    let request = route_request("tcp", 3, false)?;
 
     let route =
         select_validated_route(local, 50, &request, online, vec![exit.clone()], Vec::new())?;
@@ -224,11 +219,11 @@ fn test_route_builder_uses_presence_relays_and_exit_registry() -> Result<()> {
 fn test_route_builder_canonicalizes_service_before_constructing_route() -> Result<()> {
     let local = node_key().map_err(Error::CoreError)?.delegator_did();
     let exit = signed_exit_at(20, 100)?;
-    let request = route_request("WeB", 1, false)?;
+    let request = route_request("TcP", 1, false)?;
 
     let route = select_validated_route(local, 50, &request, Vec::new(), vec![exit], Vec::new())?;
 
-    assert_eq!(route.service(), "web");
+    assert_eq!(route.service(), "tcp");
     Ok(())
 }
 
@@ -241,7 +236,7 @@ fn test_directory_candidates_reject_expired_remote_descriptors() -> Result<()> {
         local,
         test_dht_protocol(),
         50,
-        route_request("web", 1, false)?.service_name(),
+        route_request("tcp", 1, false)?.service_name(),
         vec![online_node_at(&relay, 20, 40).map_err(Error::CoreError)?],
         vec![exit],
     );
@@ -261,7 +256,7 @@ fn test_directory_candidates_reject_foreign_network_descriptors() -> Result<()> 
         local,
         test_dht_protocol(),
         50,
-        route_request("web", 1, false)?.service_name(),
+        route_request("tcp", 1, false)?.service_name(),
         vec![
             online_node_at_with_network_and_capabilities(&relay, 2, 20, 100, vec![
                 ONION_RELAY_CAPABILITY.to_string(),
@@ -281,7 +276,7 @@ fn test_route_builder_rejects_too_short_production_route() -> Result<()> {
     let local = node_key().map_err(Error::CoreError)?.delegator_did();
     let relay = node_key().map_err(Error::CoreError)?;
     let exit = signed_exit_at(20, 100)?;
-    let request = route_request("web", 3, false)?;
+    let request = route_request("tcp", 3, false)?;
 
     let result = select_validated_route(
         local,
@@ -306,7 +301,7 @@ fn test_route_builder_rejects_nodes_without_relay_capability() -> Result<()> {
     let local = node_key().map_err(Error::CoreError)?.delegator_did();
     let relay = node_key().map_err(Error::CoreError)?;
     let exit = signed_exit_at(20, 100)?;
-    let request = route_request("web", 2, false)?;
+    let request = route_request("tcp", 2, false)?;
 
     let result = select_validated_route(
         local,
@@ -328,7 +323,7 @@ fn test_route_builder_rejects_nodes_without_relay_capability() -> Result<()> {
 
 #[test]
 fn test_route_builder_reports_no_live_exit_before_first_hop_filter() -> Result<()> {
-    let request = route_request("web", 1, false)?;
+    let request = route_request("tcp", 1, false)?;
     let candidates = OnionRouteCandidates {
         relays: Vec::new(),
         exits: Vec::new(),
@@ -348,7 +343,7 @@ fn test_route_builder_reports_no_live_exit_before_first_hop_filter() -> Result<(
         result,
         Err(Error::OnionRouteError(OnionRouteError::NoLiveExit {
             service
-        })) if service == "web"
+        })) if service == "tcp"
     ));
     Ok(())
 }
@@ -359,7 +354,7 @@ fn test_route_builder_samples_relays_by_quality_weight() -> Result<()> {
     let degraded = node_key().map_err(Error::CoreError)?;
     let healthy = node_key().map_err(Error::CoreError)?;
     let exit = signed_exit_at(20, 100)?;
-    let request = route_request("web", 2, false)?;
+    let request = route_request("tcp", 2, false)?;
     let candidates = OnionRouteCandidates {
         relays: vec![
             OnionRouteHop::new(degraded.delegator_did(), degraded.delegatee_public_key()),
@@ -391,7 +386,7 @@ fn test_route_builder_entropy_can_select_second_unknown_relay() -> Result<()> {
     let first = node_key().map_err(Error::CoreError)?;
     let second = node_key().map_err(Error::CoreError)?;
     let exit = signed_exit_at(20, 100)?;
-    let request = route_request("web", 2, false)?;
+    let request = route_request("tcp", 2, false)?;
     let mut relay_hops = vec![
         OnionRouteHop::new(first.delegator_did(), first.delegatee_public_key()),
         OnionRouteHop::new(second.delegator_did(), second.delegatee_public_key()),
@@ -427,7 +422,7 @@ fn test_route_builder_first_hop_filter_preserves_remote_later_relays() -> Result
     let exit = signed_exit_at(20, 100)?;
     let direct_did = direct.delegator_did();
     let remote_did = remote.delegator_did();
-    let request = route_request("web", 3, false)?;
+    let request = route_request("tcp", 3, false)?;
     let candidates = OnionRouteCandidates {
         relays: vec![
             OnionRouteHop::new(remote_did, remote.delegatee_public_key()),
@@ -458,7 +453,7 @@ fn test_route_builder_does_not_consume_only_direct_relay_as_exit_first() -> Resu
     let direct_exit = signed_exit_for_session_at(&direct, 20, 100)?;
     let remote_exit = signed_exit_at(21, 100)?;
     let direct_did = direct.delegator_did();
-    let request = route_request("web", 2, false)?;
+    let request = route_request("tcp", 2, false)?;
     let candidates = OnionRouteCandidates {
         relays: vec![OnionRouteHop::new(
             direct_did,
@@ -486,7 +481,7 @@ fn test_route_builder_rejects_route_without_permitted_first_hop() -> Result<()> 
     let permitted = node_key().map_err(Error::CoreError)?.delegator_did();
     let remote = node_key().map_err(Error::CoreError)?;
     let exit = signed_exit_at(20, 100)?;
-    let request = route_request("web", 2, false)?;
+    let request = route_request("tcp", 2, false)?;
     let candidates = OnionRouteCandidates {
         relays: vec![OnionRouteHop::new(
             remote.delegator_did(),
@@ -517,7 +512,7 @@ fn test_route_builder_shortens_to_permitted_exit_when_no_first_relay_is_allowed(
     let remote = node_key().map_err(Error::CoreError)?;
     let exit = signed_exit_at(20, 100)?;
     let exit_did = exit.did;
-    let request = route_request("web", 3, true)?;
+    let request = route_request("tcp", 3, true)?;
     let candidates = OnionRouteCandidates {
         relays: vec![OnionRouteHop::new(
             remote.delegator_did(),
@@ -546,7 +541,7 @@ fn test_route_builder_direct_exit_filter_is_separate_from_relay_guard_filter() -
     let remote = node_key().map_err(Error::CoreError)?;
     let exit = signed_exit_at(20, 100)?;
     let exit_did = exit.did;
-    let request = route_request("web", 3, true)?;
+    let request = route_request("tcp", 3, true)?;
     let candidates = OnionRouteCandidates {
         relays: vec![OnionRouteHop::new(
             remote.delegator_did(),

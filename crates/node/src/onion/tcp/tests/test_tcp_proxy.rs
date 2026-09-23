@@ -379,7 +379,7 @@ fn test_busy_backward_stream_uses_constant_memory_sequence_window() -> Result<()
 
 #[test]
 fn test_tcp_payload_uses_selected_route_service() -> Result<()> {
-    let service = OnionServiceName::parse("web")?;
+    let service = OnionServiceName::https();
     let payload = encode_tcp_payload(&service, OnionTcpPayload::Close)?;
 
     assert!(payload.is_service(&service));
@@ -400,7 +400,7 @@ fn test_native_tcp_exit_config_rejects_empty_services() {
     )
     .is_ok());
     assert!(NativeOnionTcpExitConfig::new(
-        vec![OnionServiceName::parse("custom").expect("valid service")],
+        vec![OnionServiceName::tcp()],
         OnionExitPolicy::default()
     )
     .is_ok());
@@ -426,22 +426,21 @@ fn test_native_https_proxy_requires_explicit_valid_exit_configuration() -> Resul
     Ok(())
 }
 
+/// The TCP exit runtime decodes every frame the node's algebra routes to it (the algebra alone
+/// selects the served symbols `Σ_n`), and nothing without an exit configuration.
 #[test]
-fn test_exit_runtime_accepts_only_installed_tcp_services() -> Result<()> {
-    let service = OnionServiceName::parse("web")?;
-    let config = NativeOnionTcpExitConfig::new(
-        vec![OnionServiceName::parse("web")?],
-        OnionExitPolicy::default(),
-    )?;
-    let runtime = OnionTcpRuntime::new(session(), TEST_NETWORK_ID, Some(config));
-    let custom_payload = encode_tcp_payload(&service, OnionTcpPayload::Close)?;
-    let tcp_payload = encode_tcp_payload(&OnionServiceName::tcp(), OnionTcpPayload::Close)?;
+fn test_exit_runtime_serves_only_with_an_exit_configuration() -> Result<()> {
+    let config =
+        NativeOnionTcpExitConfig::new(vec![OnionServiceName::https()], OnionExitPolicy::default())?;
+    let configured = OnionTcpRuntime::new(session(), TEST_NETWORK_ID, Some(config));
+    let unconfigured = OnionTcpRuntime::new(session(), TEST_NETWORK_ID, None);
+    let payload = encode_tcp_payload(&OnionServiceName::https(), OnionTcpPayload::Close)?;
 
     assert!(matches!(
-        runtime.decode_exit_payload(custom_payload)?,
-        Some((accepted, OnionTcpPayload::Close, _)) if accepted == service
+        configured.decode_exit_payload(payload.clone())?,
+        Some((service, OnionTcpPayload::Close, _)) if service == OnionServiceName::https()
     ));
-    assert!(runtime.decode_exit_payload(tcp_payload)?.is_none());
+    assert!(unconfigured.decode_exit_payload(payload)?.is_none());
     Ok(())
 }
 
@@ -474,7 +473,7 @@ fn test_client_stream_rejects_backward_payload_for_wrong_service() -> Result<()>
     let (tx, _rx) = mpsc::channel(1);
     let key = insert_test_client_stream_for_service(
         &runtime,
-        OnionServiceName::parse("web")?,
+        OnionServiceName::https(),
         expected,
         exit_descriptor(&exit),
         return_id,

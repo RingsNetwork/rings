@@ -4,6 +4,12 @@
 //! public keys. Each relay decrypts exactly one ElGamal-AEAD layer and learns only the immediate
 //! next hop plus an opaque inner layer. Backward frames carry a client-encrypted AEAD payload and
 //! relays forward them with local return state.
+//!
+//! Term structure: the layers seal a closed pipeline `relay^k ⋙ (s, ā)` (see
+//! [`crate::onion::pipeline`]) over the route's hop assignment, one application per hop, built as a
+//! right fold from the world-facing application outward. A hop's layer names only its own symbol:
+//! `Relay` layers apply `relay = id` inside the pure reducer, and the `Exit` layer applies the
+//! world-facing symbol `s` through the node's [`OnionAlgebra`].
 
 mod cell;
 mod codec;
@@ -37,9 +43,11 @@ use rings_core::message::MessageVerification;
 pub(crate) use send_outbox::OnionLinkSender;
 use serde::Deserialize;
 use serde::Serialize;
+pub use shell::OnionAlgebra;
 pub use shell::OnionCircuitExitFrame;
 pub use shell::OnionCircuitHandler;
 pub use shell::OnionCircuitShell;
+pub use shell::OnionInterpretation;
 
 use super::OnionServiceName;
 use crate::error::Result;
@@ -334,6 +342,11 @@ impl OnionBackwardPath {
     }
 }
 
+/// One decrypted forward layer: the application a hop evaluates, in today's wire shape.
+///
+/// Variant order is wire data (pinned by the golden tests). The variant is the symbol the layer
+/// applies: `Relay` applies `relay = id`, and `Exit` applies the world-facing application
+/// `(payload.service, payload.body)` with `payload.service ∈ Σ_W` by type.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub(super) enum OnionForwardLayer {
     Relay {

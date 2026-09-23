@@ -148,12 +148,19 @@ pub enum OnionCircuitEffect {
 ///
 /// ```text
 /// CellObserved(encrypted)      -> [DecryptCell]
-/// CellReady(forward relay)     -> state' with return edge, [SealAndSend next]
-/// CellReady(forward exit)      -> state, [Exit]
+/// CellReady(forward)           -> state, [DecryptForward]
+/// ForwardReady(Relay)          -> state' with return edge, [SealAndSend next]
+/// ForwardReady(Exit s)         -> state, [Exit]
 /// CellReady(backward match)    -> state' with refreshed edge, [SealAndSend previous]
 /// CellReady(backward no match) -> state, [DecryptClient]
 /// CellReady(cover)             -> state, []
 /// ```
+///
+/// The layer variant is the symbol it applies: a `Relay` layer applies `relay`, evaluated here, in
+/// the pure core, as `relay = id` (peel, record the return edge, forward the inner layer
+/// unchanged); an `Exit` layer applies the world-facing symbol `s = payload.service ∈ Σ_W`, which
+/// the type of the service name guarantees, and becomes an `Exit` effect evaluated by the node's
+/// `OnionAlgebra` in the shell.
 ///
 /// Law: replaying `apply(state, input)` with the same values returns the same `(state', effects)`.
 /// Clocks, crypto, IO, and locks are represented by effects and live in the shell.

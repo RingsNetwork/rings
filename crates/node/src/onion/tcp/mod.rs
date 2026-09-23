@@ -97,9 +97,12 @@ fn decode_tcp_payload_for_service(
     if !payload.is_service(service) {
         return Ok(None);
     }
-    rings_codec::deserialize(payload.body.as_ref())
-        .map(Some)
-        .map_err(|_| Error::DecodeError)
+    decode_tcp_payload(payload.body.as_ref()).map(Some)
+}
+
+/// Decode the body of one TCP frame.
+fn decode_tcp_payload(body: &[u8]) -> Result<OnionTcpPayload> {
+    rings_codec::deserialize(body).map_err(|_| Error::DecodeError)
 }
 
 /// Client-side onion TCP stream after the exit has accepted and connected the target.
@@ -200,7 +203,7 @@ impl OnionTcpRuntime {
         route: OnionRoute,
         target: OnionProxyTarget,
     ) -> Result<NativeOnionOpenStream> {
-        let expected_return_peer = route_first_hop(&route)?;
+        let expected_return_peer = route_first_hop(&route);
         let expected_exit = route.exit().clone();
         let service = route.service_name().clone();
         let client_return = OnionClientReturn::new(self.signer.delegatee_public_key());
@@ -370,21 +373,25 @@ impl OnionTcpRuntime {
         }
     }
 
+    /// Decode one exit frame routed here by the node's Σ-algebra.
+    ///
+    /// Pre: the algebra registers this runtime only for configured services (`Σ_n`), so the
+    /// frame's service needs no second check here; a runtime without an exit configuration
+    /// serves nothing.
     fn decode_exit_payload(
         &self,
         payload: OnionCircuitPayload,
     ) -> Result<Option<(OnionServiceName, OnionTcpPayload, OnionExitPolicy)>> {
-        let service = payload.service_name().clone();
-        let Some(exit_config) = self
-            .exit_config
-            .as_ref()
-            .filter(|config| config.allows_service(&service))
-        else {
+        let Some(exit_config) = self.exit_config.as_ref() else {
             return Ok(None);
         };
-        let policy = exit_config.policy().clone();
-        decode_tcp_payload_for_service(payload, &service)
-            .map(|payload| payload.map(|payload| (service, payload, policy)))
+        decode_tcp_payload(payload.body.as_ref()).map(|decoded| {
+            Some((
+                payload.service_name().clone(),
+                decoded,
+                exit_config.policy().clone(),
+            ))
+        })
     }
 
     async fn open_exit_stream(

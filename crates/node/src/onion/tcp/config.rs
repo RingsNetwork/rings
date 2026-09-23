@@ -11,9 +11,10 @@ use crate::onion::OnionServiceName;
 
 /// Native TCP exit capabilities installed into the onion circuit data plane.
 ///
-/// Invariant: `services` is non-empty. The native runtime is the sole installed exit adapter, so
-/// every advertised service uses its TCP byte-stream boundary; `https` retains HTTPS-over-TCP
-/// handling in that adapter.
+/// Invariant: `services` is a non-empty set of world-facing symbols of the closed signature
+/// [`ONION_SIGNATURE`](crate::onion::ONION_SIGNATURE): `tcp` is interpreted by this TCP
+/// byte-stream runtime, and `https` by the left-biased alternative `⟦fetch⟧ <|> ⟦tcp⟧` of the
+/// HTTPS and TCP adapters.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NativeOnionTcpExitConfig {
     services: Vec<OnionServiceName>,
@@ -70,9 +71,9 @@ impl NativeOnionTcpExitConfig {
         Ok(self)
     }
 
-    /// Return whether this exit may execute TCP payloads for `service`.
-    pub fn allows_service(&self, service: &OnionServiceName) -> bool {
-        self.services.iter().any(|candidate| candidate == service)
+    /// Return the configured exit services `Σ_n`, in name order.
+    pub fn services(&self) -> &[OnionServiceName] {
+        self.services.as_slice()
     }
 
     /// Exit policy shared by every service this exit serves.

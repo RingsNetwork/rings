@@ -3,7 +3,8 @@
 //! This protocol is intentionally application-layer HTTPS. Clients can send an HTTPS request
 //! description over the route-aware onion circuit, the exit performs the request, and the response
 //! is sent back over the circuit return path. The client half lives in the `client` submodule, shared by
-//! native and browser callers; this module owns the wire payloads and the exit half.
+//! native and browser callers; this module owns the wire payloads and the exit half, the
+//! interpretation `⟦https⟧` registered in each exit's Σ-algebra.
 //!
 //! A browser page exit is constrained by the host browser's `fetch` capability: CORS, forbidden
 //! headers, credentials policy, and extension host permissions still apply. A full arbitrary HTTPS
@@ -44,6 +45,8 @@ use crate::error::Result;
 use crate::extension::ext::Scope;
 use crate::onion::circuit::send_backward;
 #[cfg(rings_browser)]
+use crate::onion::circuit::OnionAlgebra;
+#[cfg(rings_browser)]
 use crate::onion::circuit::OnionAuthenticatedPayload;
 use crate::onion::circuit::OnionBackwardPath;
 use crate::onion::circuit::OnionBackwardSequence;
@@ -54,6 +57,7 @@ use crate::onion::circuit::OnionCircuitId;
 use crate::onion::circuit::OnionCircuitPayload;
 use crate::onion::circuit::OnionForwardNonce;
 use crate::onion::circuit::OnionForwardSequence;
+use crate::onion::circuit::OnionInterpretation;
 use crate::onion::circuit::OnionLinkSender;
 use crate::onion::exit_accounting::OnionExitAccounting;
 use crate::onion::exit_accounting::OnionExitLease;
@@ -64,6 +68,7 @@ use crate::onion::OnionExitFailure;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionExitTarget;
 use crate::onion::OnionRouteError;
+use crate::onion::OnionServiceName;
 
 const DEFAULT_HTTPS_RESPONSE_BODY_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -102,9 +107,7 @@ enum OnionHttpsPayload {
 
 fn encode_https_payload(payload: OnionHttpsPayload) -> Result<OnionCircuitPayload> {
     rings_codec::serialize(&payload)
-        .map(|body| {
-            OnionCircuitPayload::new(crate::onion::OnionServiceName::https(), Bytes::from(body))
-        })
+        .map(|body| OnionCircuitPayload::new(OnionServiceName::https(), Bytes::from(body)))
         .map_err(|_| Error::EncodeError)
 }
 
@@ -225,12 +228,86 @@ impl OnionHttpsRuntime {
     }
 }
 
-/// Browser handler for HTTPS onion circuits.
+/// `⟦https⟧`: execute one HTTPS request at this exit and answer it along the reversed path.
+pub(crate) struct OnionHttpsInterpretation {
+    runtime: Arc<OnionHttpsRuntime>,
+    /// The exit's signing authority for backward payloads.
+    signer: MessageSigner<DelegateeKey>,
+}
+
+impl OnionHttpsInterpretation {
+    /// Interpret `https` over `runtime`, signing backward payloads with `signer`.
+    pub(crate) const fn new(
+        runtime: Arc<OnionHttpsRuntime>,
+        signer: MessageSigner<DelegateeKey>,
+    ) -> Self {
+        Self { runtime, signer }
+    }
+
+    /// Evaluate `frame` when its body is an HTTPS payload.
+    ///
+    /// Post: `Ok(false)` exactly when the body does not decode as an HTTPS payload, so the native
+    /// alternative `⟦fetch⟧ <|> ⟦tcp⟧` can hand it to the byte-stream side; a decoded request is answered along the
+    /// reversed path, and a decoded response or error, meaningless at an exit, is absorbed.
+    pub(crate) async fn apply(&self, scope: &Scope, frame: OnionCircuitExitFrame) -> Result<bool> {
+        let Some(payload) = (match decode_https_payload(frame.payload) {
+            Ok(payload) => payload,
+            Err(Error::DecodeError) => return Ok(false),
+            Err(error) => return Err(error),
+        }) else {
+            return Ok(false);
+        };
+        let response = match payload {
+            OnionHttpsPayload::Request(request) => {
+                match execute_exit_fetch(
+                    self.runtime.as_ref(),
+                    &request,
+                    frame.circuit_id,
+                    frame.return_peer,
+                    frame.forward_nonce,
+                    frame.forward_sequence,
+                )
+                .await
+                {
+                    Ok(response) => OnionHttpsPayload::Response(response),
+                    Err(error) => OnionHttpsPayload::Error(OnionExitFailure::from_error(&error)),
+                }
+            }
+            OnionHttpsPayload::Response(_) | OnionHttpsPayload::Error(_) => return Ok(true),
+        };
+        send_backward(
+            &self.runtime.link_sender,
+            scope,
+            self.signer.by_ref(),
+            OnionBackwardPath::new(
+                frame.circuit_id,
+                frame.return_peer,
+                frame.return_delegatee_public_key,
+                frame.client,
+            ),
+            OnionBackwardSequence::FIRST,
+            encode_https_payload(response)?,
+        )
+        .await?;
+        Ok(true)
+    }
+}
+
+#[cfg_attr(rings_browser, async_trait::async_trait(?Send))]
+#[cfg_attr(rings_native, async_trait::async_trait)]
+impl OnionInterpretation for OnionHttpsInterpretation {
+    async fn evaluate(&self, scope: &Scope, frame: OnionCircuitExitFrame) -> Result<()> {
+        self.apply(scope, frame).await.map(|_| ())
+    }
+}
+
+/// Browser handler for HTTPS onion circuits: its Σ-algebra registers `https` alone.
 #[cfg(rings_browser)]
 pub(crate) struct BrowserOnionCircuitHandler {
     https: Arc<OnionHttpsRuntime>,
-    /// The exit's signing authority for backward payloads.
-    signer: MessageSigner<DelegateeKey>,
+    /// Overlay network whose signing domain authenticates backward payloads.
+    network_id: u32,
+    algebra: OnionAlgebra,
 }
 
 #[cfg(rings_browser)]
@@ -238,17 +315,24 @@ impl BrowserOnionCircuitHandler {
     /// Create a browser circuit handler backed by the HTTPS runtime, signing backward payloads
     /// for the overlay `network_id`.
     pub(crate) fn new(https: Arc<OnionHttpsRuntime>, signer: MessageSigner<DelegateeKey>) -> Self {
-        Self { https, signer }
+        let network_id = signer.network_id();
+        let algebra = OnionAlgebra::default().register(
+            OnionServiceName::https(),
+            OnionHttpsInterpretation::new(Arc::clone(&https), signer),
+        );
+        Self {
+            https,
+            network_id,
+            algebra,
+        }
     }
 }
 
 #[cfg(rings_browser)]
 #[async_trait::async_trait(?Send)]
 impl OnionCircuitHandler for BrowserOnionCircuitHandler {
-    async fn handle_exit(&self, scope: &Scope, frame: OnionCircuitExitFrame) -> Result<()> {
-        let _ =
-            try_handle_https_exit_payload(&self.https, self.signer.by_ref(), scope, frame).await?;
-        Ok(())
+    fn algebra(&self) -> &OnionAlgebra {
+        &self.algebra
     }
 
     async fn handle_client(
@@ -261,62 +345,11 @@ impl OnionCircuitHandler for BrowserOnionCircuitHandler {
         // No other client adapter shares the browser circuit protocol, so an unclaimed payload is
         // a late reply to a cancelled or timed-out request, or a misrouted one.
         match self.https.client().claim(from, circuit_id)? {
-            Some(claim) => claim.resolve(payload, self.signer.network_id()),
+            Some(claim) => claim.resolve(payload, self.network_id),
             None => tracing::debug!(%from, "dropping unclaimed onion HTTPS backward payload"),
         }
         Ok(())
     }
-}
-
-pub(crate) async fn try_handle_https_exit_payload(
-    runtime: &Arc<OnionHttpsRuntime>,
-    signer: MessageSigner<&DelegateeKey>,
-    scope: &Scope,
-    frame: OnionCircuitExitFrame,
-) -> Result<bool> {
-    if !frame.payload.matches_service(ONION_PROXY_HTTPS_SERVICE) {
-        return Ok(false);
-    }
-    let Some(payload) = (match decode_https_payload(frame.payload) {
-        Ok(payload) => payload,
-        Err(Error::DecodeError) => return Ok(false),
-        Err(error) => return Err(error),
-    }) else {
-        return Ok(false);
-    };
-    let response = match payload {
-        OnionHttpsPayload::Request(request) => {
-            match execute_exit_fetch(
-                runtime,
-                &request,
-                frame.circuit_id,
-                frame.return_peer,
-                frame.forward_nonce,
-                frame.forward_sequence,
-            )
-            .await
-            {
-                Ok(response) => OnionHttpsPayload::Response(response),
-                Err(error) => OnionHttpsPayload::Error(OnionExitFailure::from_error(&error)),
-            }
-        }
-        OnionHttpsPayload::Response(_) | OnionHttpsPayload::Error(_) => return Ok(true),
-    };
-    send_backward(
-        &runtime.link_sender,
-        scope,
-        signer,
-        OnionBackwardPath::new(
-            frame.circuit_id,
-            frame.return_peer,
-            frame.return_delegatee_public_key,
-            frame.client,
-        ),
-        OnionBackwardSequence::FIRST,
-        encode_https_payload(response)?,
-    )
-    .await?;
-    Ok(true)
 }
 
 pub(crate) async fn execute_exit_fetch(
