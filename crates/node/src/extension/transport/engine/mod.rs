@@ -835,7 +835,6 @@ mod tests {
             RelaySessionId(12),
             Initiator::Remote,
         );
-
         let effect = crate::test_support::without_runtime(|| {
             Arc::clone(&sessions).connect(
                 task.scope.clone(),

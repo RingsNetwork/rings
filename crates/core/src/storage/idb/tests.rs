@@ -4,6 +4,7 @@ use rexie::TransactionMode;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
+use serde::Serializer;
 use serde_json::Value as JsonValue;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_test::wasm_bindgen_test;
@@ -15,6 +16,20 @@ use crate::storage::KvStorageInterface;
 #[derive(Serialize, Deserialize, Debug)]
 struct TestDataStruct {
     content: String,
+}
+
+/// Value used to make adapter serialization fail before any IndexedDB transaction starts.
+#[derive(Deserialize)]
+struct FailingSerialize;
+
+impl Serialize for FailingSerialize {
+    /// Return a deliberate serialization error for the write-rollback regression case.
+    fn serialize<S>(&self, _serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where S: Serializer {
+        Err(serde::ser::Error::custom(
+            "deliberate serialization failure",
+        ))
+    }
 }
 
 async fn create_db_instance(cap: u32) -> IdbStorage {
@@ -30,6 +45,11 @@ async fn create_db_instance(cap: u32) -> IdbStorage {
 async fn create_kv_db<V>(cap: u32) -> Box<dyn KvStorageInterface<V>>
 where V: DeserializeOwned + Serialize + Sized {
     Box::new(create_db_instance(cap).await)
+}
+
+/// Read a string value with the trait payload type fixed for concise browser assertions.
+async fn get_string(instance: &IdbStorage, key: &str) -> crate::error::Result<Option<String>> {
+    <IdbStorage as KvStorageInterface<String>>::get(instance, key).await
 }
 
 #[wasm_bindgen_test]
@@ -331,4 +351,119 @@ async fn zero_capacity_is_rejected() {
         IdbStorage::new_with_cap_and_name(0, &name).await,
         Err(crate::error::Error::InvalidCapacity)
     ));
+}
+
+/// Rewriting a row at capacity preserves every unrelated row and keeps the row count fixed.
+#[wasm_bindgen_test]
+async fn overwrite_at_capacity_preserves_other_rows() {
+    // The two-row store reaches its limit before the existing key is replaced.
+    let instance = create_db_instance(2).await;
+    instance.put("a", &"old-a".to_owned()).await.unwrap();
+    instance.put("b", &"old-b".to_owned()).await.unwrap();
+
+    // Replacing b must not evict a, despite the store already being full.
+    instance.put("b", &"new-b".to_owned()).await.unwrap();
+    assert_eq!(instance.count().await.unwrap(), 2);
+    let value_a = get_string(&instance, "a").await.unwrap();
+    let value_b = get_string(&instance, "b").await.unwrap();
+    assert_eq!(value_a.as_deref(), Some("old-a"));
+    assert_eq!(value_b.as_deref(), Some("new-b"));
+}
+
+/// A new key at capacity evicts the least recently accessed row in the same transaction.
+#[wasm_bindgen_test]
+async fn new_key_at_capacity_evicts_lru_row() {
+    // The explicit access below makes a newer than b before the insertion of c.
+    let instance = create_db_instance(2).await;
+    instance.put("a", &"a".to_owned()).await.unwrap();
+    instance.put("b", &"b".to_owned()).await.unwrap();
+    let recently_accessed = get_string(&instance, "a").await.unwrap();
+    assert_eq!(recently_accessed.as_deref(), Some("a"));
+
+    // Accessing a makes b the least-recently-accessed row.
+    instance.put("c", &"c".to_owned()).await.unwrap();
+    assert_eq!(instance.count().await.unwrap(), 2);
+    let value_a = get_string(&instance, "a").await.unwrap();
+    let value_b = get_string(&instance, "b").await.unwrap();
+    let value_c = get_string(&instance, "c").await.unwrap();
+    assert_eq!(value_a.as_deref(), Some("a"));
+    assert_eq!(value_b, None);
+    assert_eq!(value_c.as_deref(), Some("c"));
+}
+
+/// Reopening with a smaller row budget removes every excess row, not just one candidate.
+#[wasm_bindgen_test]
+async fn reopening_with_smaller_capacity_removes_all_excess_rows() {
+    // The first instance persists four rows with explicit ordering in a unique database.
+    let name = format!("rings-idb-lowered-cap-test-{}", uuid::Uuid::new_v4());
+    let initial = IdbStorage::new_with_cap_and_name(4, &name).await.unwrap();
+    let (transaction, store) = initial.transaction(TransactionMode::ReadWrite).unwrap();
+    for (key, timestamp) in [("a", 1_i64), ("b", 2), ("c", 3), ("d", 4)] {
+        // Distinct timestamps make survivors independent of browser clock timing.
+        let row = serde_json::json!({"key": key, "data": key, "last_visit_time": timestamp});
+        store
+            .put(&crate::utils::js_value::serialize(&row).unwrap(), None)
+            .await
+            .unwrap();
+    }
+    transaction.done().await.unwrap();
+    drop(initial);
+
+    // Reopening at capacity two must keep the two most recently written rows only.
+    let reopened = IdbStorage::new_with_cap_and_name(2, &name).await.unwrap();
+    assert_eq!(reopened.count().await.unwrap(), 2);
+    let value_a = get_string(&reopened, "a").await.unwrap();
+    let value_b = get_string(&reopened, "b").await.unwrap();
+    let value_c = get_string(&reopened, "c").await.unwrap();
+    let value_d = get_string(&reopened, "d").await.unwrap();
+    assert_eq!(value_a, None);
+    assert_eq!(value_b, None);
+    assert_eq!(value_c.as_deref(), Some("c"));
+    assert_eq!(value_d.as_deref(), Some("d"));
+}
+
+/// Concurrent puts serialize their row-budget decisions through IndexedDB transactions.
+#[wasm_bindgen_test]
+async fn concurrent_puts_never_exceed_row_capacity() {
+    // The same isolated two-row database receives simultaneous first writes.
+    let instance = create_db_instance(2).await;
+    // Keep payloads alive until join finishes polling the four borrowed put futures.
+    let [a_value, b_value, c_value, d_value] = [
+        String::from("a"),
+        String::from("b"),
+        String::from("c"),
+        String::from("d"),
+    ];
+    let (first, second, third, fourth) = futures::join!(
+        instance.put("a", &a_value),
+        instance.put("b", &b_value),
+        instance.put("c", &c_value),
+        instance.put("d", &d_value),
+    );
+    first.unwrap();
+    second.unwrap();
+    third.unwrap();
+    fourth.unwrap();
+    assert_eq!(instance.count().await.unwrap(), 2);
+    // Name the payload type explicitly because only the vector length is otherwise observed.
+    let entries: Vec<(String, String)> = instance.get_all().await.unwrap();
+    assert_eq!(entries.len(), 2);
+}
+
+/// A replacement serialization failure leaves all rows untouched, including eviction targets.
+#[wasm_bindgen_test]
+async fn failed_serialization_does_not_evict_existing_rows() {
+    // A full store provides an eviction candidate if the implementation prunes too early.
+    let instance = create_db_instance(2).await;
+    instance.put("a", &"a".to_owned()).await.unwrap();
+    instance.put("b", &"b".to_owned()).await.unwrap();
+
+    // A serialization error must occur before the write transaction can delete either row.
+    let result = instance.put("c", &FailingSerialize).await;
+    assert!(result.is_err());
+    assert_eq!(instance.count().await.unwrap(), 2);
+    let value_a = get_string(&instance, "a").await.unwrap();
+    let value_b = get_string(&instance, "b").await.unwrap();
+    assert_eq!(value_a.as_deref(), Some("a"));
+    assert_eq!(value_b.as_deref(), Some("b"));
 }

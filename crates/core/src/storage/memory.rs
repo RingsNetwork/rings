@@ -72,10 +72,10 @@ impl<V> MemStorage<V> {
         }
     }
 
-    /// Create a memory storage table holding at most `capacity` keys.
-    pub fn bounded(capacity: NonZeroU32) -> Self {
+    /// Create a memory storage table holding at most `key_capacity` keys.
+    pub fn bounded(key_capacity: NonZeroU32) -> Self {
         Self {
-            table: RwLock::new(MemTable::new(Some(capacity))),
+            table: RwLock::new(MemTable::new(Some(key_capacity))),
         }
     }
 

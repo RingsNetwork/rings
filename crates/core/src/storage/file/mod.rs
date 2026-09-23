@@ -77,17 +77,17 @@ pub struct FileStorage {
 }
 
 impl FileStorage {
-    /// Open the store rooted at `path`, creating it if absent, under a budget of `capacity`
-    /// bytes.
+    /// Open the store rooted at `path`, creating it if absent, under a budget of
+    /// `byte_capacity` serialized bytes.
     ///
     /// Post: the index mirrors the directory (stale `.tmp` files removed) and the budget law
     /// holds, so lowering the configured capacity retires the oldest files at open.
-    pub async fn new_with_cap_and_path<P>(capacity: u32, path: P) -> Result<Self>
+    pub async fn new_with_cap_and_path<P>(byte_capacity: u32, path: P) -> Result<Self>
     where P: AsRef<std::path::Path> {
         std::fs::create_dir_all(path.as_ref()).map_err(Error::ServiceIOError)?;
         let storage = Self {
             root: path.as_ref().to_path_buf(),
-            capacity: u64::from(capacity),
+            capacity: u64::from(byte_capacity),
             index: RwLock::new(FileIndex::default()),
         };
         let mut index = storage.write_index()?;

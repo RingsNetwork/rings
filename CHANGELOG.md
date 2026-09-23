@@ -21,6 +21,11 @@
 
 ### Breaking changes
 
+- Enforce IndexedDB row capacity when a database opens. Reopening an existing store with a
+  lower capacity now deletes the least recently accessed excess rows, which can remove
+  persisted data that older versions retained until later writes. This storage behavior
+  change targets 0.31.0.
+
 - Consolidate native/browser runtime adaptation into the new `rings-runtime` crate (#811):
   one fallible `sleep` (sub-millisecond durations round up, browser timers chain across the
   `setTimeout` ceiling instead of clamping, durations of `UNBOUNDED_SLEEP` or more never
