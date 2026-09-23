@@ -337,6 +337,10 @@ write_config() {
         printf 'session_sk: %s\n' "$(yaml_quote "$session_file")"
         printf 'internal_api_port: %s\n' "$internal_port"
         printf 'external_api_addr: %s\n' "$(yaml_quote "0.0.0.0:$external_port")"
+        # Container ingress deliberately binds every interface; status/control remain gated.
+        printf 'allow_remote_external_api: true\n'
+        # Each daemon creates its own owner-only token; local CLI calls load it via this config.
+        printf 'api_token_path: %s\n' "$(yaml_quote "$CLUSTER_DIR/keys/node-$node_index.api-token")"
         printf 'endpoint_url: %s\n' "$(yaml_quote "http://127.0.0.1:$internal_port")"
         printf 'ice_servers: %s\n' "$(yaml_quote "$ICE_SERVERS")"
         printf 'stabilize_interval: %s\n' "$STABILIZE_INTERVAL"
@@ -388,14 +392,29 @@ write_config() {
     chmod 0600 "$config_file"
 }
 
+# Read the public handshake DID, rejecting RPC errors and malformed responses as unready.
+# The bounded loopback request neither needs a token nor uses the daemon's remote-URL dialer.
+node_did() {
+    local external_port="$1" # Peer-facing listener of this locally managed daemon.
+    curl --noproxy '*' --max-time 5 -fsS \
+        -H 'Content-Type: application/json' \
+        --data '{"jsonrpc":"2.0","id":1,"method":"nodeDid","params":{}}' \
+        "http://127.0.0.1:$external_port" \
+        | jq -er '.result.did | select(type == "string" and test("^0x[0-9a-f]{40}$"))'
+}
+
+# Require both the public handshake and the authenticated operator API before connecting.
+# The CLI reads the generated token file itself, keeping credentials out of command arguments.
 wait_for_node() {
     local node_index="$1"
     local internal_port="$2"
     local log_file="$3"
-    local url="http://127.0.0.1:$internal_port/status"
+    local url="http://127.0.0.1:$internal_port"
 
     for _ in $(seq 1 "$READY_RETRIES"); do
-        if curl -fsS "$url" >/dev/null 2>&1; then
+        if node_did "${external_ports[$node_index]}" >/dev/null 2>&1 \
+            && "$RINGS_BIN" "${LOG_LEVEL_ARGS[@]}" --runtime current-thread inspect \
+                --config "${configs[$node_index]}" --endpoint-url "$url" >/dev/null 2>&1; then
             return 0
         fi
 
@@ -413,26 +432,39 @@ wait_for_node() {
     return 1
 }
 
+# Exchange the manual handshake through each daemon's authenticated local operator API.
+# Remote HTTP dialing intentionally rejects loopback/private destinations; the launcher owns
+# both local daemons and can pass their offer/answer directly without weakening that policy.
 connect_pair() {
     local source_index="$1"
     local target_index="$2"
     local source_endpoint="http://127.0.0.1:${internal_ports[$source_index]}"
-    local target_endpoint="http://127.0.0.1:${external_ports[$target_index]}"
+    local target_endpoint="http://127.0.0.1:${internal_ports[$target_index]}"
     local cluster_log="$CLUSTER_DIR/logs/connect.log"
     local connect_output=""
-    local status=0
+    local connect_rc=0 # Preserve the failed handshake's exit code after recording its output.
+    local target_did="" # Public identity returned by the target daemon's handshake endpoint.
+    local offer="" # Encoded offer emitted by the source and passed to the target on stdin.
+    local answer="" # Encoded answer emitted by the target and passed back on stdin.
 
     [[ "$source_index" == "$target_index" ]] && return 0
 
     log "connect node $source_index -> node $target_index"
-    if connect_output=$("$RINGS_BIN" "${LOG_LEVEL_ARGS[@]}" --runtime current-thread connect node \
-        --config "${configs[$source_index]}" \
-        --endpoint-url "$source_endpoint" \
-        "$target_endpoint" 2>&1); then
+    if connect_output=$({
+        target_did=$(node_did "${external_ports[$target_index]}") \
+            && offer=$("$RINGS_BIN" "${LOG_LEVEL_ARGS[@]}" --runtime current-thread connect offer \
+                --config "${configs[$source_index]}" --endpoint-url "$source_endpoint" "$target_did") \
+            && answer=$(printf '%s\n' "$offer" \
+                | "$RINGS_BIN" "${LOG_LEVEL_ARGS[@]}" --runtime current-thread connect answer \
+                    --config "${configs[$target_index]}" --endpoint-url "$target_endpoint" -) \
+            && printf '%s\n' "$answer" \
+                | "$RINGS_BIN" "${LOG_LEVEL_ARGS[@]}" --runtime current-thread connect accept \
+                    --config "${configs[$source_index]}" --endpoint-url "$source_endpoint" -
+    } 2>&1); then
         printf '%s\n' "$connect_output" >> "$cluster_log"
         return 0
     else
-        status=$?
+        connect_rc=$?
     fi
 
     printf '%s\n' "$connect_output" >> "$cluster_log"
@@ -443,7 +475,7 @@ connect_pair() {
 
     log "connect node $source_index -> node $target_index failed; recent connect log follows"
     tail -n 40 "$cluster_log" || true
-    return "$status"
+    return "$connect_rc"
 }
 
 log "starting $NODE_COUNT Rings node(s): topology=$TOPOLOGY, internal=$BASE_INTERNAL_PORT+, external=$BASE_EXTERNAL_PORT+, onion_relay=$ADVERTISE_ONION_RELAY, onion_exit=$ADVERTISE_ONION_EXIT"

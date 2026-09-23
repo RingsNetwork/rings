@@ -37,7 +37,7 @@ async fn test_storage_store_fetches_remote_entry_into_cache() -> Result<()> {
     assert_no_more_msg([&node1, &node2]).await;
 
     let data = "Across the Great Wall we can reach every corner in the world.".to_string();
-    let entry: Entry = data.clone().try_into()?;
+    let entry: Entry = (data.clone(), data.clone()).try_into()?;
     let entry_key = entry.did;
 
     let (node1, node2) = if key_strictly_between(entry_key, node2.did(), node1.did()) {
@@ -116,7 +116,7 @@ async fn test_storage_append_data_preserves_entry_payload_order() -> Result<()> 
     assert_no_more_msg([&node1, &node2]).await;
 
     let topic = "Across the Great Wall we can reach every corner in the world.".to_string();
-    let entry: Entry = topic.clone().try_into()?;
+    let entry: Entry = (topic.clone(), topic.clone()).try_into()?;
     let entry_key = entry.did;
 
     let (node1, node2) = if key_strictly_between(entry_key, node2.did(), node1.did()) {
@@ -184,7 +184,7 @@ async fn test_storage_append_data_moves_existing_entry_payload_to_end_once() -> 
     assert_no_more_msg([&node1, &node2]).await;
 
     let topic = "touch keeps unique entry payloads ordered by recency".to_string();
-    let entry: Entry = topic.clone().try_into()?;
+    let entry: Entry = (topic.clone(), topic.clone()).try_into()?;
     let entry_key = entry.did;
 
     let (node1, node2) = if key_strictly_between(entry_key, node2.did(), node1.did()) {
@@ -229,7 +229,7 @@ async fn test_storage_tombstone_data_removes_observed_payload() -> Result<()> {
     assert_no_more_msg([&node1, &node2]).await;
 
     let topic = "tombstone removes stale data topic payloads".to_string();
-    let entry: Entry = topic.clone().try_into()?;
+    let entry: Entry = (topic.clone(), topic.clone()).try_into()?;
     let entry_key = entry.did;
 
     let (node1, node2) = if key_strictly_between(entry_key, node2.did(), node1.did()) {
@@ -276,7 +276,7 @@ async fn test_storage_compact_data_prunes_tombstones_and_preserves_owner_values(
     assert_no_more_msg([&node1, &node2]).await;
 
     let topic = "compact data prunes tombstone metadata".to_string();
-    let entry: Entry = topic.clone().try_into()?;
+    let entry: Entry = (topic.clone(), topic.clone()).try_into()?;
     let entry_key = entry.did;
 
     let (node1, node2) = if key_strictly_between(entry_key, node2.did(), node1.did()) {

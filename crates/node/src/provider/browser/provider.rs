@@ -873,11 +873,15 @@ impl Provider {
         })
     }
 
-    /// Store an entry on DHT storage
+    /// Store data on DHT storage using the data itself as its topic.
+    ///
+    /// The explicit topic/value pair preserves the content-derived identity of
+    /// this browser API without a separate single-string entry constructor.
     pub fn storage_store(&self, data: String) -> js_sys::Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
-            let entry_info = entry::Entry::try_from(data).map_err(JsError::from)?;
+            // Preserve the public API's topic-equals-value storage convention.
+            let entry_info = entry::Entry::try_from((data.clone(), data)).map_err(JsError::from)?;
             p.storage_store(entry_info).await.map_err(JsError::from)?;
             Ok(JsValue::null())
         })

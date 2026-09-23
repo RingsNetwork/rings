@@ -3,8 +3,10 @@
 //! returns, delivered to the peer's application on stabilization, and compacted afterwards.
 //!
 //! The hand-off is the placement invariant of the owner's storage repair pass, so it holds however
-//! the owner learns of the returning peer: through its successor's notify report, or through a
+//! the owner learns of the returning peer: through its successor's topology report, or through a
 //! direct connection from the peer.
+
+mod test_rejoin;
 
 use std::time::Instant;
 
@@ -61,13 +63,12 @@ async fn next_held_message(node: &Node) -> Result<MessagePayload> {
     }
 }
 
-/// Phase 1: node1 and node3 form the ring and a message to the absent `offline` is held.
+/// Phase 1: node1 and node3 already form the ring and a message to `offline` is held.
 ///
 /// node1 routes the message to succ(offline) = node3, which is responsible for the offline
 /// position and cannot deliver, so it holds the message in the inbox carrier `offline + 1`.
 /// That key lies in node1's storage interval `(node1, node3]`, so the write lands at node1.
 async fn hold_message_for_offline_peer(node1: &Node, node3: &Node, offline: Did) -> Result<()> {
-    manually_establish_connection(&node1.swarm, &node3.swarm).await;
     wait_for_msgs([node1, node3]).await;
     wait_for_successor(node1, node3.did()).await?;
     // node3 is responsible for `offline` only once it knows node1 as its predecessor.
@@ -130,6 +131,7 @@ async fn test_message_to_offline_peer_is_held_and_delivered_on_return() -> Resul
     let node1 = prepare_node(key1).await;
     let node3 = prepare_node(key3).await;
     let offline: Did = key2.address().into();
+    manually_establish_connection(&node1.swarm, &node3.swarm).await;
     hold_message_for_offline_peer(&node1, &node3, offline).await?;
 
     // The peer returns by joining through its successor node3. node2 notifies node3, node1's
@@ -157,6 +159,7 @@ async fn test_held_message_is_delivered_when_peer_returns_through_its_predecesso
     let node1 = prepare_node(key1).await;
     let node3 = prepare_node(key3).await;
     let offline: Did = key2.address().into();
+    manually_establish_connection(&node1.swarm, &node3.swarm).await;
     hold_message_for_offline_peer(&node1, &node3, offline).await?;
 
     // The peer returns by connecting straight to node1, the inbox owner. No notify report is

@@ -242,10 +242,6 @@ impl PeerRing {
         }
     }
 
-    fn storage_fetch_fallback_successor(&self) -> Result<Option<Did>> {
-        Ok(topology::successor_head(&self.topology_state()?))
-    }
-
     async fn entry_lookup_inner(
         &self,
         entry_key: Did,
@@ -278,7 +274,9 @@ impl PeerRing {
                                 if fallback_on_local_virtual_miss
                                     && self.storage_virtual_nodes_enabled()?
                                 {
-                                    if let Some(next) = self.storage_fetch_fallback_successor()? {
+                                    if let Some(next) =
+                                        self.with_topology_state(topology::successor_head)?
+                                    {
                                         Ok(PeerRingAction::RemoteAction(
                                             next,
                                             RemoteAction::FindEntry(query),

@@ -43,22 +43,6 @@ pub(crate) enum StorageSyncOutcome {
     Deferred,
 }
 
-impl From<StorageSyncCompletion> for StorageSyncOutcome {
-    fn from(completion: StorageSyncCompletion) -> Self {
-        match completion {
-            StorageSyncCompletion::PersistedLocally => Self::PersistedLocally,
-            StorageSyncCompletion::Submitted {
-                tx_id,
-                outcome: SendCompletionOutcome::Succeeded,
-            } => Self::Sent(tx_id),
-            StorageSyncCompletion::Submitted {
-                outcome: SendCompletionOutcome::Cancelled,
-                ..
-            } => Self::Deferred,
-        }
-    }
-}
-
 impl StorageSyncOutcome {
     #[cfg(test)]
     pub(crate) const fn is_sent(self) -> bool {
@@ -68,14 +52,6 @@ impl StorageSyncOutcome {
     pub(crate) const fn is_deferred(self) -> bool {
         matches!(self, Self::Deferred)
     }
-}
-
-enum StorageSyncCompletion {
-    PersistedLocally,
-    Submitted {
-        tx_id: uuid::Uuid,
-        outcome: SendCompletionOutcome,
-    },
 }
 
 // Invariant: physical-owner sync proves the final owner identity. Placement-key
@@ -499,68 +475,69 @@ impl SwarmTransport {
         Ok(acks)
     }
 
+    /// Interpret tracked and detached sends through the same storage outcome.
+    /// Local ownership persists directly; successful remote work retains its transaction
+    /// identity. Cancellation and deferrable failures revoke any cleanup acknowledgement
+    /// capability before returning `Deferred`, so maintenance can safely recompute the route.
     async fn send_storage_sync_with_completion(
         &self,
         msg: SyncEntriesWithSuccessor,
         completion: OutboundCompletion,
-    ) -> Result<StorageSyncCompletion> {
+    ) -> Result<StorageSyncOutcome> {
         let destination = msg.destination.did();
-        let Some(next_hop) = self
+        match self
             .dht
             .next_hop_for_storage_sync(msg.destination)?
             .filter(|next_hop| *next_hop != self.dht.did)
-        else {
-            self.persist_storage_sync_entries(&msg, self.dht.did)
-                .await?;
-            return Ok(StorageSyncCompletion::PersistedLocally);
-        };
-        let payload = self
-            .signed_payload(
-                Message::SyncEntriesWithSuccessor(msg.clone()),
-                next_hop,
-                destination,
-            )
-            .await?;
-        let tx_id = payload.transaction.tx_id;
-        let records_cleanup_ack = msg.purpose.permits_source_cleanup();
-        if records_cleanup_ack {
-            self.record_pending_storage_sync_ack(
-                tx_id,
-                msg.purpose,
-                msg.destination,
-                next_hop,
-                &msg.data,
-            )?;
-        }
-        let send_outcome = match completion {
-            OutboundCompletion::Detached => self.send_payload_detached_with_outcome(payload).await,
-            OutboundCompletion::Tracked => self.send_payload_tracked(payload).await,
-        };
-        match send_outcome {
-            Ok(SendCompletionOutcome::Succeeded) => Ok(StorageSyncCompletion::Submitted {
-                tx_id,
-                outcome: SendCompletionOutcome::Succeeded,
-            }),
-            Ok(SendCompletionOutcome::Cancelled) => {
-                if records_cleanup_ack {
-                    self.remove_pending_storage_sync_ack(tx_id);
-                }
-                Ok(StorageSyncCompletion::Submitted {
-                    tx_id,
-                    outcome: SendCompletionOutcome::Cancelled,
-                })
+        {
+            None => {
+                self.persist_storage_sync_entries(&msg, self.dht.did)
+                    .await?;
+                Ok(StorageSyncOutcome::PersistedLocally)
             }
-            Err(error) => {
+            Some(next_hop) => {
+                let payload = self
+                    .signed_payload(
+                        Message::SyncEntriesWithSuccessor(msg.clone()),
+                        next_hop,
+                        destination,
+                    )
+                    .await?;
+                let tx_id = payload.transaction.tx_id;
+                let records_cleanup_ack = msg.purpose.permits_source_cleanup();
                 if records_cleanup_ack {
-                    self.remove_pending_storage_sync_ack(tx_id);
-                }
-                if error.is_deferrable_data_plane_send() {
-                    Ok(StorageSyncCompletion::Submitted {
+                    self.record_pending_storage_sync_ack(
                         tx_id,
-                        outcome: SendCompletionOutcome::Cancelled,
-                    })
-                } else {
-                    Err(error)
+                        msg.purpose,
+                        msg.destination,
+                        next_hop,
+                        &msg.data,
+                    )?;
+                }
+                let send_outcome = match completion {
+                    OutboundCompletion::Detached => {
+                        self.send_payload_detached_with_outcome(payload).await
+                    }
+                    OutboundCompletion::Tracked => self.send_payload_tracked(payload).await,
+                };
+                match send_outcome {
+                    Ok(SendCompletionOutcome::Succeeded) => Ok(StorageSyncOutcome::Sent(tx_id)),
+                    Ok(SendCompletionOutcome::Cancelled) => {
+                        if records_cleanup_ack {
+                            self.remove_pending_storage_sync_ack(tx_id);
+                        }
+                        Ok(StorageSyncOutcome::Deferred)
+                    }
+                    Err(error) => {
+                        if records_cleanup_ack {
+                            self.remove_pending_storage_sync_ack(tx_id);
+                        }
+                        if error.is_deferrable_data_plane_send() {
+                            Ok(StorageSyncOutcome::Deferred)
+                        } else {
+                            Err(error)
+                        }
+                    }
                 }
             }
         }
@@ -573,7 +550,6 @@ impl SwarmTransport {
     ) -> Result<StorageSyncOutcome> {
         self.send_storage_sync_with_completion(msg, OutboundCompletion::Detached)
             .await
-            .map(StorageSyncOutcome::from)
     }
 
     /// Send storage repair and wait until every frame has completed or cancelled.
@@ -583,7 +559,6 @@ impl SwarmTransport {
     ) -> Result<StorageSyncOutcome> {
         self.send_storage_sync_with_completion(msg, OutboundCompletion::Tracked)
             .await
-            .map(StorageSyncOutcome::from)
     }
 
     /// Send storage sync as a deferrable data-plane effect.

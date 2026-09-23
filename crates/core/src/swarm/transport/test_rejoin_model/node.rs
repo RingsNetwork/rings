@@ -526,13 +526,11 @@ impl NodeState {
     /// One maintenance period: `Stabilizer::correct_stabilize` against the
     /// head.
     ///
-    /// The periodic `notify_predecessor` broadcast (to every successor, every
-    /// period) is not modeled: toward the head it re-sends the message the
-    /// committed report already emits (`TopologyAction::Notify`), and the
-    /// model's rounds repeat; toward the tail it is omitted, which drops
-    /// protocol steps and so makes the liveness result conservative
-    /// (`rectify_predecessor` is monotone, so the extra notifications could
-    /// not unsettle a predecessor).
+    /// A committed report emits `TopologyAction::Notify` to the selected head,
+    /// matching production after #788 removed the separate periodic broadcast.
+    /// Neither the model nor production emits a notify report or notifications
+    /// to the remaining successors. The model's scope still excludes the
+    /// storage repair round and successor-list synchronization.
     pub(super) fn stabilize(mut self, request_id: uuid::Uuid, overlay: &Overlay) -> NodeStep {
         let actions = self.advance(TopologyEvent::BeginStabilize { request_id }, overlay);
         let effects = self.interpret(actions, overlay);

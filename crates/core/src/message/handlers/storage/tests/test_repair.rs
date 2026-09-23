@@ -214,7 +214,7 @@ async fn test_placed_entry_operation_rejects_non_affine_placement() -> Result<()
     let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
     let topic = "reject misplaced remote storage operation".to_string();
-    let entry: Entry = crate::tests::live(topic.try_into()?);
+    let entry: Entry = crate::tests::live((topic.clone(), topic).try_into()?);
     let invalid_placement = non_affine_placement(entry.did, 2)?;
     let msg = PlacedEntryOperation {
         placement: invalid_placement,
