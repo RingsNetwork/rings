@@ -27,12 +27,6 @@ jobs:
         uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
         with:
           fetch-depth: 0
-      - name: Get latest tag
-        id: get-latest-tag
-        run: |
-          echo "tag=`gh release list -L 1 | cut -f 1`" >> $GITHUB_OUTPUT
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Bump version
         id: generated-tag
         uses: actions/github-script@d7906e4ad0b1822421a7e6a35d5ca353c962f410 # v6

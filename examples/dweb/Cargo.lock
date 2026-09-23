@@ -625,15 +625,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "crc32fast"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
-dependencies = [
- "cfg-if",
-]
-
-[[package]]
 name = "crunchy"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -940,16 +931,6 @@ dependencies = [
  "rand",
  "rustc-hex",
  "static_assertions",
-]
-
-[[package]]
-name = "flate2"
-version = "1.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
-dependencies = [
- "crc32fast",
- "miniz_oxide",
 ]
 
 [[package]]
@@ -1966,7 +1947,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
 dependencies = [
  "adler2",
- "simd-adler32",
 ]
 
 [[package]]
@@ -2463,7 +2443,7 @@ dependencies = [
 
 [[package]]
 name = "rings-codec"
-version = "0.26.0"
+version = "0.29.0"
 dependencies = [
  "postcard",
  "serde",
@@ -2471,7 +2451,7 @@ dependencies = [
 
 [[package]]
 name = "rings-core"
-version = "0.26.0"
+version = "0.29.0"
 dependencies = [
  "ark-bls12-381",
  "ark-ec",
@@ -2494,7 +2474,6 @@ dependencies = [
  "elliptic-curve",
  "ethereum-types",
  "event-listener 5.4.2",
- "flate2",
  "futures",
  "futures-timer",
  "hex",
@@ -2522,7 +2501,6 @@ dependencies = [
  "thiserror 1.0.69",
  "tiny-keccak",
  "tracing",
- "url",
  "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -2533,7 +2511,7 @@ dependencies = [
 
 [[package]]
 name = "rings-derive"
-version = "0.26.0"
+version = "0.29.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2559,7 +2537,7 @@ dependencies = [
 
 [[package]]
 name = "rings-measure"
-version = "0.26.0"
+version = "0.29.0"
 dependencies = [
  "serde",
  "thiserror 1.0.69",
@@ -2567,7 +2545,7 @@ dependencies = [
 
 [[package]]
 name = "rings-network-policy"
-version = "0.26.0"
+version = "0.29.0"
 dependencies = [
  "thiserror 1.0.69",
  "url",
@@ -2575,7 +2553,7 @@ dependencies = [
 
 [[package]]
 name = "rings-node"
-version = "0.26.0"
+version = "0.29.0"
 dependencies = [
  "anyhow",
  "arrayref",
@@ -2588,7 +2566,6 @@ dependencies = [
  "clap",
  "dashmap",
  "dotenvy",
- "flate2",
  "futures",
  "futures-timer",
  "js-sys",
@@ -2624,28 +2601,34 @@ dependencies = [
 
 [[package]]
 name = "rings-rpc"
-version = "0.26.0"
+version = "0.29.0"
 dependencies = [
  "async-trait",
  "base64 0.13.1",
  "bytes",
- "http 0.2.12",
+ "js-sys",
  "jsonrpc-core",
  "reqwest",
  "rings-core",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+ "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]
 name = "rings-transport"
-version = "0.26.0"
+version = "0.29.0"
 dependencies = [
  "async-trait",
  "bytes",
  "chrono",
  "dashmap",
+ "futures-channel",
+ "futures-util",
  "js-sys",
  "rings-codec",
  "serde",
@@ -2880,12 +2863,6 @@ dependencies = [
  "digest",
  "rand_core",
 ]
-
-[[package]]
-name = "simd-adler32"
-version = "0.3.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "703d5c7ef118737c72f1af64ad2f6f8c5e1921f818cdcb97b8fe6fc69bf66214"
 
 [[package]]
 name = "slab"

@@ -461,55 +461,6 @@ curl -X POST \
 }
 ```
 
-### sendHttpRequestMessage
-
-Send a http request message to remote peer, the remote peer should provide the service you want to use
-
-#### REQUEST
-
-`POST http://127.0.0.1:50000`
-
-#### HEADERS
-
-`Content-Type: application/json` `X-SIGNATURE: YOUR-SIGNATURE`
-
-#### EXAMPLE
-
-```
-## Replace YOUR-SIGNATURE with your signature
-## Replace REMOTE-PEER-DID with did of remote peer
-## Replace HTTP-REQUEST-ARG with your request arguments
-curl -X POST \
--H "Content-Type: application/json" \
--H "X-SIGNATURE: YOUR-SIGNATURE" \
---data '{"jsonrpc": "2.0", "id": 1, "method": "sendSimpleTextMessage", "params": ["REMOTE-PEER-DID", {HTTP-REQUEST-ARG}]}' \
-"http://127.0.0.1:50000"
-```
-
-* HTTP-REQUEST-ARG
-  * `name` - service name
-  * `method` - http method
-  * `path` - resource path
-  * `timeout` - timeout of remote request, optional
-  * `headers` - remote request with headers, optional
-  * `body` - request body what you want to send to remote service, optional
-
-#### RESPONSE
-
-* `tx_id` - transaction id
-
-#### EXAMPLE
-
-```json
-{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "result": {
-         "tx_id": "abcd1234"
-    }
-}
-```
-
 ### sendSimpleTextMessage
 
 Send simple text message to a peer

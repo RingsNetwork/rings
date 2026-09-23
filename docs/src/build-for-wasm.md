@@ -52,3 +52,8 @@ Or build with `wasm-pack`
 ```
 wasm-pack build --scope ringsnetwork -t web --no-default-features --features browser --features console_error_panic_hook
 ```
+
+For core-only development, `cargo wasm` and `cargo test-wasm` select `rings-core`
+with its `wasm` feature and no default features. Both aliases work from the
+repository root or `crates/core`. The root `.cargo/config.toml` also supplies the
+WASM test runner, timeout, and WebTransport configuration to both locations.

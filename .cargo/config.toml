@@ -1,4 +1,7 @@
 [alias]
+# Core-only WASM shortcuts work from the root and from crates/core.
+wasm = "build -p rings-core --target=wasm32-unknown-unknown --features wasm --no-default-features"
+test-wasm = "test -p rings-core --target=wasm32-unknown-unknown --features wasm --no-default-features"
 build-node = "build --features node --no-default-features"
 build-browser = "build --lib --target=wasm32-unknown-unknown --features browser --no-default-features"
 test-browser = "test --target=wasm32-unknown-unknown --features browser --no-default-features"
