@@ -59,6 +59,13 @@ pub enum OnionRouteError {
         /// Service label selected by the route.
         route_service: String,
     },
+    /// An HTTPS request names a target other than the one its route was selected for.
+    HttpsTargetMismatch {
+        /// Target authority carried by the HTTPS request.
+        request_target: String,
+        /// Target authority the route was selected for.
+        route_target: String,
+    },
     /// A relay layer references a missing next hop.
     MissingNextHop,
     /// A constructed circuit path does not have exactly one edge id per hop.
@@ -175,6 +182,13 @@ impl fmt::Display for OnionRouteError {
             } => write!(
                 f,
                 "onion payload service {payload_service:?} does not match route service {route_service:?}"
+            ),
+            Self::HttpsTargetMismatch {
+                request_target,
+                route_target,
+            } => write!(
+                f,
+                "HTTPS request target {request_target:?} does not match route target {route_target:?}"
             ),
             Self::MissingNextHop => f.write_str("missing next onion hop"),
             Self::CircuitPathLengthMismatch {

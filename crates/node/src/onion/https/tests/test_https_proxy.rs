@@ -1,7 +1,10 @@
+use std::future::Future;
 #[cfg(rings_native)]
 use std::sync::atomic::AtomicU64;
 #[cfg(rings_native)]
 use std::sync::atomic::Ordering;
+use std::task::Context;
+use std::task::Poll;
 #[cfg(rings_native)]
 use std::time::Duration;
 
@@ -16,8 +19,17 @@ use tokio::io::AsyncWriteExt;
 #[cfg(rings_native)]
 use tokio::net::TcpListener;
 
+use super::super::client::client_request_with_default_path;
+use super::super::pending::PendingOnionHttpsRequest;
 use super::super::*;
+use crate::onion::circuit::OnionAuthenticatedPayload;
+use crate::onion::circuit::OnionReturnId;
+use crate::onion::proxy::OnionProxyProtocol;
+use crate::onion::proxy::OnionProxyRoute;
+use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitDescriptorBody;
+use crate::onion::OnionRoute;
+use crate::onion::OnionRouteHop;
 use crate::onion::OnionServiceName;
 use crate::online::OnlineNodeType;
 use crate::tests::TEST_NETWORK_ID;
@@ -52,21 +64,6 @@ fn exit_descriptor(session: &DelegateeKey) -> OnionExitDescriptor {
         MessageSigner::new(session, TEST_NETWORK_ID),
     )
     .expect("signed exit")
-}
-
-fn dummy_authenticated_payload(
-    return_id: OnionReturnId,
-    session: &DelegateeKey,
-) -> OnionAuthenticatedPayload {
-    OnionAuthenticatedPayload::new_signed(
-        return_id,
-        encode_https_payload(OnionHttpsPayload::Error(OnionExitFailure::InvalidTarget(
-            "wrong peer".to_string(),
-        )))
-        .expect("encode payload"),
-        MessageSigner::new(session, TEST_NETWORK_ID),
-    )
-    .expect("signed payload")
 }
 
 #[test]
@@ -163,104 +160,292 @@ fn test_checked_status_code_rejects_invalid_js_status_values() {
     ));
 }
 
-#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_family = "wasm"), test)]
-fn test_dropping_pending_request_future_removes_waiting_circuit() {
-    let runtime = Arc::new(OnionHttpsRuntime::new());
-    let exit = session();
-    let return_id = OnionReturnId::new([3; 16]);
-    let (_, pending_request) = runtime
-        .begin_request(did(), exit_descriptor(&exit), return_id)
-        .unwrap();
-    let mut pending_request = Box::pin(pending_request);
-    let mut context = std::task::Context::from_waker(futures::task::noop_waker_ref());
+const TEST_AUTHORITY: &str = "example.com:443";
 
-    assert_eq!(runtime.pending_len(), 1);
-    assert!(std::future::Future::poll(pending_request.as_mut(), &mut context).is_pending());
-    drop(pending_request);
-    assert_eq!(runtime.pending_len(), 0);
+fn runtime() -> OnionHttpsRuntime {
+    OnionHttpsRuntime::new(session().delegatee_public_key())
 }
 
-#[test]
-fn test_pending_request_completes_only_from_expected_return_peer() {
-    let runtime = Arc::new(OnionHttpsRuntime::new());
-    let expected = did();
-    let other = did();
-    let exit = session();
-    let return_id = OnionReturnId::new([1; 16]);
-    let (id, pending_request) = runtime
-        .begin_request(expected, exit_descriptor(&exit), return_id)
-        .unwrap();
-
-    runtime.complete_payload(
-        other,
-        id,
-        dummy_authenticated_payload(return_id, &exit),
-        TEST_NETWORK_ID,
-    );
-    assert_eq!(runtime.pending_len(), 1);
-    drop(pending_request);
+fn client() -> Arc<OnionHttpsClient> {
+    Arc::new(OnionHttpsClient::new(
+        session().delegatee_public_key(),
+        OnionLinkSender::default(),
+    ))
 }
 
-#[test]
-fn test_pending_request_rejects_payload_from_wrong_exit_session() {
-    let runtime = Arc::new(OnionHttpsRuntime::new());
-    let expected = did();
-    let selected_exit = session();
-    let wrong_exit = session();
-    let return_id = OnionReturnId::new([2; 16]);
-    let (id, mut pending_request) = runtime
-        .begin_request(expected, exit_descriptor(&selected_exit), return_id)
-        .unwrap();
-
-    runtime.complete_payload(
-        expected,
-        id,
-        dummy_authenticated_payload(return_id, &wrong_exit),
-        TEST_NETWORK_ID,
-    );
-
-    assert_eq!(runtime.pending_len(), 0);
-    assert!(matches!(pending_request.try_recv(), Ok(Some(Err(_)))));
+/// One-hop HTTPS route to [`TEST_AUTHORITY`] whose first hop, and so expected return peer, is
+/// `exit` itself.
+fn https_route(exit: &DelegateeKey) -> OnionProxyRoute {
+    let descriptor = exit_descriptor(exit);
+    let route = OnionRoute::new(
+        OnionServiceName::https(),
+        vec![OnionRouteHop::new(
+            descriptor.did,
+            descriptor.delegatee_public_key,
+        )],
+        descriptor,
+    )
+    .expect("one-hop HTTPS route");
+    OnionProxyRoute {
+        protocol: OnionProxyProtocol::HttpsProxy,
+        target: OnionProxyTarget::parse_authority(TEST_AUTHORITY).expect("test target"),
+        route,
+    }
 }
 
-#[test]
-fn test_pending_request_reports_authenticated_request_as_unexpected_backward_payload() {
-    let runtime = Arc::new(OnionHttpsRuntime::new());
-    let expected = did();
-    let exit = session();
-    let return_id = OnionReturnId::new([4; 16]);
-    let (id, mut pending_request) = runtime
-        .begin_request(expected, exit_descriptor(&exit), return_id)
-        .unwrap();
-    let request_payload = OnionHttpsPayload::Request(OnionHttpsRequest {
-        target: "example.com:443".to_string(),
+fn wire_request(target: &str) -> OnionHttpsRequest {
+    OnionHttpsRequest {
+        target: target.to_string(),
         method: "GET".to_string(),
         path: "/".to_string(),
         headers: Vec::new(),
         body: Vec::new(),
-    });
-    let payload = OnionAuthenticatedPayload::new_signed(
+    }
+}
+
+/// `payload` signed by `exit` for `return_id`.
+fn exit_payload(
+    return_id: OnionReturnId,
+    exit: &DelegateeKey,
+    payload: OnionHttpsPayload,
+) -> OnionAuthenticatedPayload {
+    OnionAuthenticatedPayload::new_signed(
         return_id,
-        encode_https_payload(request_payload).unwrap(),
-        MessageSigner::new(&exit, TEST_NETWORK_ID),
+        encode_https_payload(payload).expect("encode payload"),
+        MessageSigner::new(exit, TEST_NETWORK_ID),
     )
-    .unwrap();
+    .expect("signed payload")
+}
 
-    runtime.complete_payload(expected, id, payload, TEST_NETWORK_ID);
+fn ok_response() -> OnionHttpsResponse {
+    OnionHttpsResponse {
+        status: 200,
+        headers: vec![("content-type".to_string(), "text/plain".to_string())],
+        body: b"ok".to_vec(),
+    }
+}
 
-    assert_eq!(runtime.pending_len(), 0);
+/// Begin one request to `exit` and return its circuit, the return id the exit must sign, and the
+/// response guard.
+fn begin(
+    client: &Arc<OnionHttpsClient>,
+    exit: &DelegateeKey,
+) -> (OnionCircuitId, OnionReturnId, PendingOnionHttpsRequest) {
+    let response = client
+        .begin(&https_route(exit), wire_request(TEST_AUTHORITY))
+        .expect("begin request")
+        .into_response();
+    let id = response.circuit_id();
+    let return_id = client.pending_return_id(id).expect("circuit is pending");
+    (id, return_id, response)
+}
+
+/// Resolve `future` in one poll: every outcome under test is decided before it is polled.
+fn poll_decided<F: Future>(future: F) -> F::Output {
+    let mut future = Box::pin(future);
+    let mut context = Context::from_waker(futures::task::noop_waker_ref());
+    let Poll::Ready(output) = future.as_mut().poll(&mut context) else {
+        panic!("outcome was not decided before polling");
+    };
+    output
+}
+
+/// A deadline that never fires.
+fn no_deadline() -> impl Future<Output = Result<()>> {
+    futures::future::pending()
+}
+
+/// A deadline that has already fired.
+fn expired_deadline() -> impl Future<Output = Result<()>> {
+    futures::future::ready(Ok(()))
+}
+
+#[test]
+fn test_client_request_resolves_with_authenticated_exit_response() -> Result<()> {
+    let client = client();
+    let exit = session();
+    let (id, return_id, response) = begin(&client, &exit);
+    let reply = exit_payload(return_id, &exit, OnionHttpsPayload::Response(ok_response()));
+
+    assert!(client
+        .complete_payload(exit.delegator_did(), id, reply, TEST_NETWORK_ID)?
+        .is_none());
+    assert_eq!(client.pending_len(), 0);
+    assert_eq!(
+        poll_decided(response.within(no_deadline()))?,
+        OnionHttpsClientResponse {
+            status: 200,
+            headers: vec![("content-type".to_string(), "text/plain".to_string())],
+            body: b"ok".to_vec(),
+        }
+    );
+    Ok(())
+}
+
+#[test]
+fn test_client_request_surfaces_exit_failure() -> Result<()> {
+    let client = client();
+    let exit = session();
+    let (id, return_id, response) = begin(&client, &exit);
+    let failure = OnionExitFailure::InvalidTarget("denied".to_string());
+    let reply = exit_payload(return_id, &exit, OnionHttpsPayload::Error(failure.clone()));
+
+    client.complete_payload(exit.delegator_did(), id, reply, TEST_NETWORK_ID)?;
+
     assert!(matches!(
-        pending_request.try_recv(),
-        Ok(Some(Err(Error::OnionRouteError(
+        poll_decided(response.within(no_deadline())),
+        Err(Error::OnionRouteError(OnionRouteError::ExitFailure(reported))) if reported == failure
+    ));
+    Ok(())
+}
+
+#[test]
+fn test_client_request_ignores_payload_from_wrong_return_peer() -> Result<()> {
+    let client = client();
+    let exit = session();
+    let (id, return_id, response) = begin(&client, &exit);
+    let reply = exit_payload(return_id, &exit, OnionHttpsPayload::Response(ok_response()));
+
+    // Claimed (not handed to another adapter) but not delivered: the request stays pending.
+    assert!(client
+        .complete_payload(did(), id, reply, TEST_NETWORK_ID)?
+        .is_none());
+    assert_eq!(client.pending_len(), 1);
+    assert!(matches!(
+        poll_decided(response.within(expired_deadline())),
+        Err(Error::OnionProxyRequestTimedOut)
+    ));
+    assert_eq!(client.pending_len(), 0);
+    Ok(())
+}
+
+#[test]
+fn test_client_request_rejects_payload_signed_by_another_exit() -> Result<()> {
+    let client = client();
+    let exit = session();
+    let (id, return_id, response) = begin(&client, &exit);
+    let forged = exit_payload(
+        return_id,
+        &session(),
+        OnionHttpsPayload::Response(ok_response()),
+    );
+
+    client.complete_payload(exit.delegator_did(), id, forged, TEST_NETWORK_ID)?;
+
+    assert_eq!(client.pending_len(), 0);
+    assert!(matches!(
+        poll_decided(response.within(no_deadline())),
+        Err(Error::OnionRouteError(
+            OnionRouteError::BackwardSignerMismatch
+        ))
+    ));
+    Ok(())
+}
+
+#[test]
+fn test_client_request_rejects_payload_for_another_return_id() -> Result<()> {
+    let client = client();
+    let exit = session();
+    let (id, _, response) = begin(&client, &exit);
+    let misdirected = exit_payload(
+        OnionReturnId::new([9; 16]),
+        &exit,
+        OnionHttpsPayload::Response(ok_response()),
+    );
+
+    client.complete_payload(exit.delegator_did(), id, misdirected, TEST_NETWORK_ID)?;
+
+    assert!(matches!(
+        poll_decided(response.within(no_deadline())),
+        Err(Error::OnionRouteError(
+            OnionRouteError::BackwardReturnIdMismatch
+        ))
+    ));
+    Ok(())
+}
+
+#[test]
+fn test_client_request_reports_authenticated_request_as_unexpected_backward_payload() -> Result<()>
+{
+    let client = client();
+    let exit = session();
+    let (id, return_id, response) = begin(&client, &exit);
+    let reply = exit_payload(
+        return_id,
+        &exit,
+        OnionHttpsPayload::Request(wire_request(TEST_AUTHORITY)),
+    );
+
+    client.complete_payload(exit.delegator_did(), id, reply, TEST_NETWORK_ID)?;
+
+    assert!(matches!(
+        poll_decided(response.within(no_deadline())),
+        Err(Error::OnionRouteError(
             OnionRouteError::UnexpectedBackwardPayload
-        ))))
+        ))
+    ));
+    Ok(())
+}
+
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), test)]
+fn test_dropping_waiting_request_cancels_and_releases_its_circuit() {
+    let client = client();
+    let exit = session();
+    let (id, return_id, response) = begin(&client, &exit);
+    let mut waiting = Box::pin(response.within(no_deadline()));
+    let mut context = Context::from_waker(futures::task::noop_waker_ref());
+
+    assert!(waiting.as_mut().poll(&mut context).is_pending());
+    assert_eq!(client.pending_len(), 1);
+    drop(waiting);
+    assert_eq!(client.pending_len(), 0);
+
+    // A late reply no longer belongs to this client and is handed back to the next adapter.
+    let late = exit_payload(return_id, &exit, OnionHttpsPayload::Response(ok_response()));
+    assert!(matches!(
+        client.complete_payload(exit.delegator_did(), id, late, TEST_NETWORK_ID),
+        Ok(Some(_))
     ));
 }
 
 #[test]
+fn test_client_request_times_out_and_releases_its_circuit() {
+    let client = client();
+    let (_, _, response) = begin(&client, &session());
+
+    assert!(matches!(
+        poll_decided(response.within(expired_deadline())),
+        Err(Error::OnionProxyRequestTimedOut)
+    ));
+    assert_eq!(client.pending_len(), 0);
+}
+
+#[test]
+fn test_client_rejects_request_for_a_target_other_than_the_route_target() {
+    let client = client();
+
+    assert!(matches!(
+        client.begin(&https_route(&session()), wire_request("other.example:443")),
+        Err(Error::OnionRouteError(
+            OnionRouteError::HttpsTargetMismatch { .. }
+        ))
+    ));
+    assert_eq!(client.pending_len(), 0);
+}
+
+#[test]
+fn test_client_binds_request_target_by_canonical_authority() {
+    let client = client();
+
+    assert!(client
+        .begin(&https_route(&session()), wire_request(" Example.COM.:443 "))
+        .is_ok());
+}
+
+#[test]
 fn test_forward_nonce_is_consumed_once_for_https_exit_requests() {
-    let runtime = OnionHttpsRuntime::new();
+    let runtime = runtime();
     let peer = Did::from(99_u32);
     let circuit_id = OnionCircuitId::new([1; 16]);
     let nonce = OnionForwardNonce::new([2; 16]);
@@ -279,7 +464,7 @@ fn test_forward_nonce_is_consumed_once_for_https_exit_requests() {
 
 #[test]
 fn test_exit_limiter_rejects_bytes_over_policy_window() {
-    let runtime = OnionHttpsRuntime::new();
+    let runtime = runtime();
     let policy = OnionExitPolicy {
         max_bytes_per_minute: 8,
         ..OnionExitPolicy::default()
@@ -299,7 +484,7 @@ fn test_exit_limiter_rejects_bytes_over_policy_window() {
 
 #[test]
 fn test_exit_limiter_enforces_streams_per_circuit() {
-    let runtime = OnionHttpsRuntime::new();
+    let runtime = runtime();
     let policy = OnionExitPolicy {
         max_streams_per_circuit: 1,
         ..OnionExitPolicy::default()
@@ -322,7 +507,7 @@ fn test_exit_limiter_enforces_streams_per_circuit() {
 
 #[test]
 fn test_exit_limiter_counts_distinct_circuit_ids() {
-    let runtime = OnionHttpsRuntime::new();
+    let runtime = runtime();
     let policy = OnionExitPolicy {
         max_circuits: 1,
         ..OnionExitPolicy::default()
@@ -613,7 +798,7 @@ async fn test_native_proxy_egress_delegates_target_resolution() {
 
 #[test]
 fn test_runtime_exit_policy_starts_empty_then_sets() -> Result<()> {
-    let runtime = OnionHttpsRuntime::new();
+    let runtime = runtime();
     let policy = OnionExitPolicy::from_target_strings(vec!["example.com:443".to_string()], vec![])?;
 
     assert_eq!(runtime.exit_policy(), None);

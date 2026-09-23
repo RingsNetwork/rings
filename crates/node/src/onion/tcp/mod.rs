@@ -1,4 +1,5 @@
-//! Native TCP adapter for route-aware onion circuits.
+//! Native TCP adapter for route-aware onion circuits, and the native entry point of the shared
+//! HTTPS onion client.
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
@@ -45,7 +46,11 @@ use crate::onion::circuit::ONION_CIRCUIT_NAMESPACE;
 use crate::onion::exit_accounting::OnionExitAccounting;
 use crate::onion::exit_accounting::OnionExitLease;
 use crate::onion::https::try_handle_https_exit_payload;
+use crate::onion::https::OnionHttpsClient;
+use crate::onion::https::OnionHttpsClientResponse;
+use crate::onion::https::OnionHttpsRequest;
 use crate::onion::https::OnionHttpsRuntime;
+use crate::onion::proxy::OnionProxyRoute;
 use crate::onion::replay::OnionForwardReplayWitness;
 use crate::onion::replay::OnionSequenceWindow;
 use crate::onion::replay::SequenceAdmission;
@@ -111,10 +116,11 @@ fn decode_tcp_payload_for_service(
         .map_err(|_| Error::DecodeError)
 }
 
-/// Native handle for opening TCP streams over route-aware onion circuits.
+/// Native handle for TCP streams and HTTPS requests over route-aware onion circuits.
 #[derive(Clone)]
 pub struct NativeOnionCircuitHandle {
     runtime: Arc<OnionTcpRuntime>,
+    https: Arc<OnionHttpsClient>,
     scope: Scope,
 }
 
@@ -146,7 +152,7 @@ impl NativeOnionCircuitHandle {
                 delegatee_key,
                 NativeOnionCircuitHandler {
                     runtime: runtime.clone(),
-                    https,
+                    https: https.clone(),
                     signer: MessageSigner::new(handler_delegatee_key, network_id),
                 },
                 runtime.link_sender.clone(),
@@ -154,6 +160,7 @@ impl NativeOnionCircuitHandle {
         )?;
         Ok(Self {
             runtime,
+            https: Arc::clone(https.client()),
             scope: Scope::new(extensions.core(), ONION_CIRCUIT_NAMESPACE.to_string()),
         })
     }
@@ -180,6 +187,21 @@ impl NativeOnionCircuitHandle {
             .open_client_connection(self.scope.clone(), route, target)
             .await
     }
+
+    /// Send one HTTPS request over `route` and wait for the exit's authenticated response.
+    ///
+    /// Build `request` with [`client_request_from_url`](crate::onion::https::client_request_from_url)
+    /// and `route` for its target under
+    /// [`OnionProxyConfig::https_proxy`](crate::onion::proxy::OnionProxyConfig::https_proxy); the
+    /// request target must equal the route target. Dropping the future cancels the pending
+    /// circuit, and a silent exit yields [`Error::OnionProxyRequestTimedOut`].
+    pub async fn request_https(
+        &self,
+        route: &OnionProxyRoute,
+        request: OnionHttpsRequest,
+    ) -> Result<OnionHttpsClientResponse> {
+        self.https.request(self.scope.clone(), route, request).await
+    }
 }
 
 fn native_onion_runtimes(
@@ -190,6 +212,7 @@ fn native_onion_runtimes(
     let accounting = OnionExitAccounting::default();
     let link_sender = OnionLinkSender::default();
     let forward_replays = OnionForwardReplayWitness::default();
+    let return_key = delegatee_key.delegatee_public_key();
     let runtime = Arc::new(OnionTcpRuntime::with_resources(
         delegatee_key,
         network_id,
@@ -199,6 +222,7 @@ fn native_onion_runtimes(
         forward_replays.clone(),
     ));
     let https = Arc::new(OnionHttpsRuntime::with_resources(
+        return_key,
         accounting,
         link_sender,
         forward_replays,
@@ -266,6 +290,17 @@ impl OnionCircuitHandler for NativeOnionCircuitHandler {
         circuit_id: OnionCircuitId,
         payload: OnionAuthenticatedPayload,
     ) -> Result<()> {
+        // HTTPS and TCP clients share this circuit protocol; the HTTPS table claims its own
+        // circuits first and hands every other payload to the TCP streams.
+        let Some(payload) = self.https.client().complete_payload(
+            from,
+            circuit_id,
+            payload,
+            self.signer.network_id(),
+        )?
+        else {
+            return Ok(());
+        };
         self.runtime
             .handle_client_payload(from, circuit_id, payload)
             .await

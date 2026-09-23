@@ -44,6 +44,7 @@ use crate::onion::circuit::ONION_CIRCUIT_NAMESPACE;
 use crate::onion::directory;
 use crate::onion::directory::OnionDirectoryReader;
 use crate::onion::https::BrowserOnionCircuitHandler;
+use crate::onion::https::OnionHttpsClient;
 use crate::onion::https::OnionHttpsClientRequest;
 use crate::onion::https::OnionHttpsClientResponse;
 use crate::onion::https::OnionHttpsRuntime;
@@ -101,7 +102,7 @@ pub struct BrowserOnionProxy {
     processor: Arc<Processor>,
     scope: Scope,
     config: OnionProxyConfig,
-    runtime: Arc<OnionHttpsRuntime>,
+    client: Arc<OnionHttpsClient>,
     directory_endpoint: Option<RemoteRpcEndpoint>,
 }
 
@@ -836,7 +837,7 @@ impl Provider {
                 ONION_CIRCUIT_NAMESPACE.to_string(),
             ),
             config: OnionProxyConfig::https_proxy(hop_count, allow_short_paths),
-            runtime,
+            client: Arc::clone(runtime.client()),
             directory_endpoint: self.onion_directory_endpoint().map_err(JsError::from)?,
         })
     }
@@ -934,7 +935,9 @@ impl Provider {
             if let Some(runtime) = slot.as_ref() {
                 (runtime.clone(), true)
             } else {
-                let runtime = Arc::new(OnionHttpsRuntime::new());
+                let runtime = Arc::new(OnionHttpsRuntime::new(
+                    self.processor.delegatee_key().delegatee_public_key(),
+                ));
                 if self.extensions().contains(ONION_CIRCUIT_NAMESPACE) {
                     return Err(crate::error::Error::ExtensionError(format!(
                         "namespace {ONION_CIRCUIT_NAMESPACE:?} is already registered"

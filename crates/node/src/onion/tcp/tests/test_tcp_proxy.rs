@@ -556,6 +556,39 @@ fn test_exit_limiter_counts_distinct_circuit_ids() {
 }
 
 #[tokio::test]
+async fn test_native_client_dispatch_hands_tcp_circuits_past_the_https_client() -> Result<()> {
+    let processor = Arc::new(crate::tests::native::prepare_processor().await);
+    let scope = Scope::new(
+        Extensions::new(processor).core(),
+        ONION_CIRCUIT_NAMESPACE.to_string(),
+    );
+    let (tcp, https) = native_onion_runtimes(session(), TEST_NETWORK_ID, None);
+    let handler = NativeOnionCircuitHandler {
+        runtime: Arc::clone(&tcp),
+        https: Arc::clone(&https),
+        signer: MessageSigner::new(session(), TEST_NETWORK_ID),
+    };
+    let expected = did();
+    let exit = session();
+    let return_id = OnionReturnId::new([10; 16]);
+    let (tx, mut rx) = mpsc::channel(1);
+    let key = insert_test_client_stream(&tcp, expected, exit_descriptor(&exit), return_id, tx)?;
+
+    handler
+        .handle_client(
+            &scope,
+            expected,
+            key.circuit_id,
+            dummy_authenticated_payload(return_id, &exit),
+        )
+        .await?;
+
+    assert!(matches!(rx.try_recv(), Ok(TcpInbound::Close)));
+    assert_eq!(https.client().pending_len(), 0);
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_install_rejects_duplicate_namespace_instead_of_splitting_runtime() -> Result<()> {
     let processor = Arc::new(crate::tests::native::prepare_processor().await);
     let delegatee_key = processor.delegatee_key().clone();
