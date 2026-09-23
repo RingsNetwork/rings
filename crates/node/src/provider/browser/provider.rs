@@ -174,9 +174,9 @@ impl BrowserOnionDirectoryReader {
             .collect()
     }
 
-    fn route_first_hop_is_direct(&self, route: &OnionProxyRoute) -> NodeResult<bool> {
-        let first_hop = route_first_hop(&route.route)?;
-        Ok(first_hop != self.processor.did() && self.direct_peer_dids().contains(&first_hop))
+    fn route_first_hop_is_direct(&self, route: &OnionProxyRoute) -> bool {
+        let first_hop = route_first_hop(&route.route);
+        first_hop != self.processor.did() && self.direct_peer_dids().contains(&first_hop)
     }
 
     async fn read_online_nodes(&self) -> NodeResult<Vec<OnlineNodeDescriptor>> {
@@ -274,7 +274,7 @@ async fn build_browser_route_from_reader(
             direct_peers.contains(&did)
         })
         .await?;
-    if reader.route_first_hop_is_direct(&route)? {
+    if reader.route_first_hop_is_direct(&route) {
         return Ok(route);
     }
     Err(Error::OnionRouteError(OnionRouteError::NoPermittedFirstHop))

@@ -3,25 +3,26 @@
 //! A circuit is a term over `Σ` evaluated one symbol per hop (#834 D1). This phase fixes
 //!
 //! ```text
-//! Σ = { relay, tcp, https }
+//! Σ   = {relay} ⊎ Σ_W,    Σ_W = {tcp, https}
 //!
-//! relay : X → X   identity; W(relay) = |In|, L(relay) = 0      pos(relay) = Intermediate
-//! tcp             world-facing byte stream                        pos(tcp)   = WorldFacing
-//! https           world-facing request/response                   pos(https) = WorldFacing
+//! relay : X → X   identity; L(relay) = 0, preserves the carried width    pos = Intermediate
+//! tcp             world-facing byte stream                                pos = WorldFacing
+//! https           world-facing request/response (fetch)                  pos = WorldFacing
 //! ```
 //!
 //! Laws:
 //!
-//! - **Identity** (#834 L1). `relay = id`, so `relay ⋙ f = f = f ⋙ relay` on carried values. The
-//!   pure circuit reducer interprets `relay`; no exit adapter ever does.
-//! - **Position.** A world-facing symbol exchanges bytes with the outside world and is the last
-//!   application of a pipeline.
-//! - **Closure.** `Σ` is closed and [`OnionServiceName`] is exactly its set of names:
-//!   `OnionServiceName ≅ Σ`. Parsing is the only way in, so a name outside the table is rejected
-//!   wherever it enters the node (configuration, descriptor decode, RPC) and no route, layer or
-//!   algebra entry can name it. Resolution `spec : OnionServiceName → Σ` is therefore a total
-//!   projection, never a lookup with a fallback. The encoding is the canonical name string, so
-//!   closure changes no wire byte.
+//! - **Identity** (#834 L1). `relay = id`, so `relay ⋙ f = f` on carried values. The pure circuit
+//!   reducer interprets `relay`; no exit adapter ever does, and `relay` is registered through the
+//!   online-node relay capability, never as a service (#834 D2).
+//! - **Position.** A world-facing symbol exchanges bytes with the outside world and stands last.
+//! - **Closure.** `Σ` is closed and [`OnionServiceName`] is exactly `Σ_W`: `OnionServiceName ≅ Σ_W`.
+//!   Parsing is the only way in, so a name outside `Σ_W`, `relay` included, is rejected wherever it
+//!   enters the node (configuration, descriptor decode, RPC), and no route, exit layer or algebra
+//!   entry can name it. The encoding is the canonical name string, so closure changes no wire byte.
+//! - **Refinement.** `https ⊑ tcp`: a fetch is one request/response exchange that a byte stream can
+//!   carry, so every exit able to interpret `tcp` can interpret `https`, while a browser exit, which
+//!   has `fetch` but no sockets, interprets `https` alone.
 //!
 //! Width and latency classes `W`, `L` of the world-facing symbols are not protocol data yet: their
 //! results return along the reversed path, never through a fixed-width carry slot.
@@ -31,36 +32,16 @@ use std::fmt;
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::OnionRouteError;
 use crate::error::Error;
 use crate::error::Result;
 
-/// Semantic role of a symbol; it fixes both who interprets the symbol and where it may stand.
+/// Pipeline position `pos(f)` of a symbol (#834 D1); it also fixes who interprets the symbol.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum OnionSymbolRole {
-    /// `relay = id`: output width equals input width, latency zero, interpreted by the reducer.
-    Identity,
-    /// Exchanges bytes with the outside world and may hold a session; interpreted by an exit
-    /// adapter registered in the node's `OnionAlgebra`.
-    WorldFacing,
-}
-
-impl OnionSymbolRole {
-    /// Return the pipeline position `pos(f)` this role admits.
-    pub const fn position(self) -> OnionSymbolPosition {
-        match self {
-            Self::Identity => OnionSymbolPosition::Intermediate,
-            Self::WorldFacing => OnionSymbolPosition::WorldFacing,
-        }
-    }
-}
-
-/// Pipeline position of a symbol (#834 D1 `pos(f)`).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OnionSymbolPosition {
-    /// Followed by another application of the same pipeline.
+    /// Followed by another application: the identity `relay`, interpreted by the reducer.
     Intermediate,
-    /// The last application of a pipeline.
+    /// The last application: exchanges bytes with the outside world, interpreted by an exit
+    /// adapter registered in the node's `OnionAlgebra`.
     WorldFacing,
 }
 
@@ -68,13 +49,13 @@ pub enum OnionSymbolPosition {
 #[derive(Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct OnionSymbolSpec {
     name: &'static str,
-    role: OnionSymbolRole,
+    position: OnionSymbolPosition,
 }
 
 impl OnionSymbolSpec {
-    /// Build one table entry from its canonical name and role.
-    const fn new(name: &'static str, role: OnionSymbolRole) -> Self {
-        Self { name, role }
+    /// Build one table entry from its canonical name and position.
+    const fn new(name: &'static str, position: OnionSymbolPosition) -> Self {
+        Self { name, position }
     }
 
     /// Return the canonical symbol name.
@@ -82,14 +63,9 @@ impl OnionSymbolSpec {
         self.name
     }
 
-    /// Return the semantic role of this symbol.
-    pub const fn role(&self) -> OnionSymbolRole {
-        self.role
-    }
-
-    /// Return the name of this table entry.
-    pub fn service_name(&'static self) -> OnionServiceName {
-        OnionServiceName(self)
+    /// Return the pipeline position of this symbol.
+    pub const fn position(&self) -> OnionSymbolPosition {
+        self.position
     }
 }
 
@@ -103,9 +79,9 @@ pub struct OnionSignature {
 
 /// The onion signature of this node generation.
 pub static ONION_SIGNATURE: OnionSignature = OnionSignature {
-    relay: OnionSymbolSpec::new("relay", OnionSymbolRole::Identity),
-    tcp: OnionSymbolSpec::new("tcp", OnionSymbolRole::WorldFacing),
-    https: OnionSymbolSpec::new("https", OnionSymbolRole::WorldFacing),
+    relay: OnionSymbolSpec::new("relay", OnionSymbolPosition::Intermediate),
+    tcp: OnionSymbolSpec::new("tcp", OnionSymbolPosition::WorldFacing),
+    https: OnionSymbolSpec::new("https", OnionSymbolPosition::WorldFacing),
 };
 
 impl OnionSignature {
@@ -114,39 +90,30 @@ impl OnionSignature {
         &self.relay
     }
 
-    /// Return the world-facing byte-stream symbol `tcp`.
-    pub const fn tcp(&self) -> &OnionSymbolSpec {
-        &self.tcp
-    }
-
-    /// Return the world-facing request symbol `https`.
-    pub const fn https(&self) -> &OnionSymbolSpec {
-        &self.https
-    }
-
     /// Return `Σ` in table order.
     pub const fn symbols(&self) -> [&OnionSymbolSpec; 3] {
         [&self.relay, &self.tcp, &self.https]
     }
 
-    /// Return the world-facing symbols of `Σ` in table order.
-    pub fn world_facing(&self) -> impl Iterator<Item = &OnionSymbolSpec> {
+    /// Return `Σ_W`, the world-facing symbols of `Σ`, in table order as service names.
+    pub fn world_facing(&'static self) -> impl Iterator<Item = OnionServiceName> {
         self.symbols()
             .into_iter()
-            .filter(|spec| spec.role == OnionSymbolRole::WorldFacing)
+            .filter(|spec| spec.position == OnionSymbolPosition::WorldFacing)
+            .map(OnionServiceName)
     }
 }
 
-/// Canonical name of a symbol of `Σ`: the closed name type of onion services.
+/// Canonical name of a world-facing symbol: the closed name type `Σ_W` of onion services.
 ///
-/// Invariant: every value denotes one entry of [`ONION_SIGNATURE`] (see the closure law). It is
-/// encoded as that entry's canonical name string.
+/// Invariant: every value denotes a world-facing entry of [`ONION_SIGNATURE`] (see the closure
+/// law). It is encoded as that entry's canonical name string.
 #[derive(Clone, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct OnionServiceName(&'static OnionSymbolSpec);
 
 impl OnionServiceName {
-    /// Parse and canonicalize a service name, admitting exactly the names of `Σ`.
+    /// Parse and canonicalize a service name, admitting exactly the names of `Σ_W`.
     pub fn parse(name: impl AsRef<str>) -> Result<Self> {
         let name = name.as_ref();
         let trimmed = name.trim();
@@ -156,54 +123,38 @@ impl OnionServiceName {
             ));
         }
         ONION_SIGNATURE
-            .symbols()
-            .into_iter()
-            .find(|spec| spec.name.eq_ignore_ascii_case(trimmed))
-            .map(OnionSymbolSpec::service_name)
+            .world_facing()
+            .find(|service| service.as_str().eq_ignore_ascii_case(trimmed))
             .ok_or_else(|| {
                 Error::InvalidConfig(format!(
                     "unknown onion service {name:?}; the onion signature is closed: expected one of {}",
                     ONION_SIGNATURE
-                        .symbols()
-                        .map(OnionSymbolSpec::name)
+                        .world_facing()
+                        .map(|service| service.as_str())
+                        .collect::<Vec<_>>()
                         .join(", ")
                 ))
             })
     }
 
     /// Return the name of the world-facing `https` symbol.
-    pub fn https() -> Self {
-        ONION_SIGNATURE.https().service_name()
+    pub const fn https() -> Self {
+        Self(&ONION_SIGNATURE.https)
     }
 
     /// Return the name of the world-facing `tcp` symbol.
-    pub fn tcp() -> Self {
-        ONION_SIGNATURE.tcp().service_name()
+    pub const fn tcp() -> Self {
+        Self(&ONION_SIGNATURE.tcp)
     }
 
     /// Return the canonical name as a string slice.
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         self.0.name
     }
 
     /// Return the specification of the named symbol; total by the closure law.
-    pub fn spec(&self) -> &'static OnionSymbolSpec {
+    pub const fn spec(&self) -> &'static OnionSymbolSpec {
         self.0
-    }
-
-    /// Return the specification of a name an exit registers, which must be world-facing.
-    ///
-    /// `relay` is registered through the online-node relay capability, never as an exit service
-    /// (#834 D2), so an exit registration naming it is rejected.
-    pub fn world_facing_spec(&self) -> Result<&'static OnionSymbolSpec> {
-        match self.0.role {
-            OnionSymbolRole::WorldFacing => Ok(self.0),
-            OnionSymbolRole::Identity => Err(Error::OnionRouteError(
-                OnionRouteError::NotWorldFacingSymbol {
-                    symbol: self.0.name.to_string(),
-                },
-            )),
-        }
     }
 
     /// Return whether this name equals `service` after service-name canonicalization.
@@ -237,56 +188,53 @@ impl From<OnionServiceName> for String {
 #[cfg(test)]
 mod tests {
     use super::OnionServiceName;
-    use super::OnionSymbolRole;
+    use super::OnionSymbolPosition;
     use super::ONION_SIGNATURE;
 
-    /// Every table name parses to its own entry, case-insensitively, and nothing else parses.
+    /// Every world-facing name parses to its own entry, case-insensitively, and nothing else
+    /// parses: neither names outside `Σ` nor the identity symbol `relay`.
     #[test]
-    fn test_names_are_exactly_the_closed_signature() {
-        for spec in ONION_SIGNATURE.symbols() {
-            let name = OnionServiceName::parse(spec.name()).expect("table name");
-            assert_eq!(name.spec(), spec);
+    fn test_service_names_are_exactly_the_world_facing_signature() {
+        for service in ONION_SIGNATURE.world_facing() {
+            assert_eq!(service.spec().position(), OnionSymbolPosition::WorldFacing);
             assert_eq!(
-                OnionServiceName::parse(spec.name().to_ascii_uppercase()).ok(),
-                Some(name)
+                OnionServiceName::parse(service.as_str()).ok(),
+                Some(service.clone())
+            );
+            assert_eq!(
+                OnionServiceName::parse(service.as_str().to_ascii_uppercase()).ok(),
+                Some(service)
             );
         }
-        for outside in ["web", "api", "custom", "tcp2", "", " tcp", "tcp!"] {
+        for outside in ["relay", "web", "api", "custom", "tcp2", "", " tcp", "tcp!"] {
             assert!(OnionServiceName::parse(outside).is_err());
         }
     }
 
-    /// Decoding admits only names of `Σ`, and the encoding is the bare canonical name string.
+    /// Decoding admits only names of `Σ_W`, and the encoding is the bare canonical name string.
     #[test]
-    fn test_codec_is_the_name_string_and_rejects_names_outside_the_signature() {
+    fn test_codec_is_the_name_string_and_rejects_names_outside_the_world_facing_signature() {
         let encoded = rings_codec::serialize(&OnionServiceName::https()).expect("encode name");
-        let web = rings_codec::serialize(&"web").expect("encode string");
 
         assert_eq!(
             encoded,
             rings_codec::serialize(&"https").expect("encode string")
         );
-        assert!(rings_codec::deserialize::<OnionServiceName>(web.as_slice()).is_err());
+        for outside in ["web", "relay"] {
+            let bytes = rings_codec::serialize(&outside).expect("encode string");
+            assert!(rings_codec::deserialize::<OnionServiceName>(bytes.as_slice()).is_err());
+        }
     }
 
-    /// `relay` is the only identity symbol and is never a world-facing registration.
+    /// `relay` is the only intermediate symbol of `Σ`.
     #[test]
-    fn test_relay_is_the_only_identity_and_not_world_facing() {
-        let identities = ONION_SIGNATURE
+    fn test_relay_is_the_only_intermediate_symbol() {
+        let intermediate = ONION_SIGNATURE
             .symbols()
             .into_iter()
-            .filter(|spec| spec.role() == OnionSymbolRole::Identity)
+            .filter(|spec| spec.position() == OnionSymbolPosition::Intermediate)
             .collect::<Vec<_>>();
 
-        assert_eq!(identities, vec![ONION_SIGNATURE.relay()]);
-        assert!(ONION_SIGNATURE
-            .relay()
-            .service_name()
-            .world_facing_spec()
-            .is_err());
-        assert_eq!(
-            OnionServiceName::tcp().world_facing_spec().ok(),
-            Some(ONION_SIGNATURE.tcp())
-        );
+        assert_eq!(intermediate, vec![ONION_SIGNATURE.relay()]);
     }
 }

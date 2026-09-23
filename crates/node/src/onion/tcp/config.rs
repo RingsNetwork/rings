@@ -13,7 +13,8 @@ use crate::onion::OnionServiceName;
 ///
 /// Invariant: `services` is a non-empty set of world-facing symbols of the closed signature
 /// [`ONION_SIGNATURE`](crate::onion::ONION_SIGNATURE): `tcp` is interpreted by this TCP
-/// byte-stream runtime, and `https` by the native copairing of the HTTPS and TCP adapters.
+/// byte-stream runtime, and `https` by the left-biased alternative `⟦fetch⟧ <|> ⟦tcp⟧` of the
+/// HTTPS and TCP adapters.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NativeOnionTcpExitConfig {
     services: Vec<OnionServiceName>,
@@ -29,7 +30,6 @@ impl NativeOnionTcpExitConfig {
     ) -> Result<Self> {
         let mut service_names = BTreeSet::new();
         for service in services {
-            service.world_facing_spec()?;
             service_names.insert(service);
         }
         if service_names.is_empty() {
@@ -71,9 +71,9 @@ impl NativeOnionTcpExitConfig {
         Ok(self)
     }
 
-    /// Return whether this exit may execute TCP payloads for `service`.
-    pub fn allows_service(&self, service: &OnionServiceName) -> bool {
-        self.services.iter().any(|candidate| candidate == service)
+    /// Return the configured exit services `Σ_n`, in name order.
+    pub fn services(&self) -> &[OnionServiceName] {
+        self.services.as_slice()
     }
 
     /// Exit policy shared by every service this exit serves.

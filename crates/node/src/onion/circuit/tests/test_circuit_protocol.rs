@@ -1406,38 +1406,6 @@ fn test_forward_fold_places_each_position_on_its_hop() {
     );
 }
 
-/// An exit layer naming the identity symbol is ill-typed: `relay` is never a world-facing
-/// application, so the reducer emits no exit effect.
-#[test]
-fn test_exit_layer_naming_identity_symbol_emits_no_exit_effect() {
-    let client = session();
-    let reducer = OnionCircuitReducer::new(OnionCircuitCapabilities::from_registration(
-        false,
-        Some(TEST_PROCESS_EPOCH),
-    ));
-    let state = OnionCircuitState::default();
-    let received_at_ms = 100;
-
-    let transition = reducer.apply(&state, OnionCircuitInput::ForwardReady {
-        from: client.delegator_did(),
-        received_at_ms,
-        bucket: OnionCellBucket::KiB4,
-        circuit_id: OnionCircuitId::new([52; 16]),
-        layer: OnionForwardLayer::Exit {
-            process_epoch: TEST_PROCESS_EPOCH,
-            client: OnionClientReturn::new(client.delegatee_public_key()),
-            return_delegatee_public_key: client.delegatee_public_key(),
-            expires_at_ms: received_at_ms.saturating_add(1),
-            forward_nonce: OnionForwardNonce::new([53; 16]),
-            forward_sequence: OnionForwardSequence::FIRST,
-            payload: payload_for_service("relay", "identity"),
-        },
-    });
-
-    assert_eq!(transition.state, state);
-    assert!(transition.effects.is_empty());
-}
-
 /// The algebra is one lookup on the frame's symbol: a registered symbol reaches its
 /// interpretation, and a symbol without an entry is dropped.
 #[tokio::test]
@@ -1446,7 +1414,7 @@ async fn test_algebra_dispatches_on_the_frame_symbol() {
     let exit = session();
     let scope = test_scope(exit.clone()).lifecycle();
     let tcp_exit = RecordingExit::default();
-    let algebra = OnionAlgebra::default().register(ONION_SIGNATURE.tcp(), tcp_exit.clone());
+    let algebra = OnionAlgebra::default().register(OnionServiceName::tcp(), tcp_exit.clone());
     let frame = |service: &str, nonce: u8| OnionCircuitExitFrame {
         from: client.delegator_did(),
         circuit_id: OnionCircuitId::new([54; 16]),

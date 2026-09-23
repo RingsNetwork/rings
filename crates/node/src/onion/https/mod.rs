@@ -64,12 +64,11 @@ use crate::onion::exit_accounting::OnionExitLease;
 use crate::onion::proxy::OnionProxyTarget;
 use crate::onion::proxy::ONION_PROXY_HTTPS_SERVICE;
 use crate::onion::replay::OnionForwardReplayWitness;
-#[cfg(rings_browser)]
-use crate::onion::signature::ONION_SIGNATURE;
 use crate::onion::OnionExitFailure;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionExitTarget;
 use crate::onion::OnionRouteError;
+use crate::onion::OnionServiceName;
 
 const DEFAULT_HTTPS_RESPONSE_BODY_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -108,9 +107,7 @@ enum OnionHttpsPayload {
 
 fn encode_https_payload(payload: OnionHttpsPayload) -> Result<OnionCircuitPayload> {
     rings_codec::serialize(&payload)
-        .map(|body| {
-            OnionCircuitPayload::new(crate::onion::OnionServiceName::https(), Bytes::from(body))
-        })
+        .map(|body| OnionCircuitPayload::new(OnionServiceName::https(), Bytes::from(body)))
         .map_err(|_| Error::EncodeError)
 }
 
@@ -250,7 +247,7 @@ impl OnionHttpsInterpretation {
     /// Evaluate `frame` when its body is an HTTPS payload.
     ///
     /// Post: `Ok(false)` exactly when the body does not decode as an HTTPS payload, so the native
-    /// copairing can hand it to its byte-stream summand; a decoded request is answered along the
+    /// alternative `⟦fetch⟧ <|> ⟦tcp⟧` can hand it to the byte-stream side; a decoded request is answered along the
     /// reversed path, and a decoded response or error, meaningless at an exit, is absorbed.
     pub(crate) async fn apply(&self, scope: &Scope, frame: OnionCircuitExitFrame) -> Result<bool> {
         let Some(payload) = (match decode_https_payload(frame.payload) {
@@ -320,7 +317,7 @@ impl BrowserOnionCircuitHandler {
     pub(crate) fn new(https: Arc<OnionHttpsRuntime>, signer: MessageSigner<DelegateeKey>) -> Self {
         let network_id = signer.network_id();
         let algebra = OnionAlgebra::default().register(
-            ONION_SIGNATURE.https(),
+            OnionServiceName::https(),
             OnionHttpsInterpretation::new(Arc::clone(&https), signer),
         );
         Self {

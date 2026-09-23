@@ -1,8 +1,8 @@
 //! Onion route selection.
 //!
-//! A route request denotes the symbol sequence of a closed pipeline, `relay^{k−1} ⋙ s` for a
-//! target of `k` hops, and selection assigns one node to each position from the nodes registering
-//! that position's symbol:
+//! A route request denotes a symbol word `σ = relay^{k−1} ⋙ s` for a target of `k` hops, and
+//! selection assigns one node to each position from the nodes registering that position's symbol;
+//! the selected route is the hop assignment `h₀ … hₙ` of the word it was selected for:
 //!
 //! ```text
 //! relay position        ← OnlineNodeDescriptor with ONION_RELAY_CAPABILITY   (#834 D2)
@@ -15,16 +15,14 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
-use bytes::Bytes;
 use rings_core::dht::Did;
 use rings_core::ecc::PublicKey;
 use rings_core::measure::PeerQuality;
 use rings_core::message::DhtProtocolMode;
 
-use super::circuit::OnionCircuitPayload;
 use super::circuit::MAX_ONION_CIRCUIT_HOPS;
-use super::pipeline::OnionApplication;
 use super::pipeline::OnionPipeline;
+use super::pipeline::OnionSymbolWord;
 use super::OnionExitDescriptor;
 use super::OnionRouteError;
 use super::OnionServiceName;
@@ -38,9 +36,8 @@ pub const DEFAULT_ONION_ROUTE_HOPS: usize = 3;
 
 /// Route-building request for an onion circuit.
 ///
-/// The pair `(service, hop_count)` is the normal form of the requested symbol sequence
-/// `relay^{k−1} ⋙ service`; route selection materialises that pipeline once the hop bound admits
-/// `k`.
+/// The pair `(service, hop_count)` denotes the requested symbol word `relay^{k−1} ⋙ service`; route
+/// selection reads that word once the hop bound admits `k`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OnionRouteRequest {
     /// World-facing symbol of the last position.
@@ -82,10 +79,10 @@ impl OnionRouteRequest {
         }
     }
 
-    /// Return the requested symbol sequence `relay^{k−1} ⋙ service`, arguments left empty.
+    /// Return the requested symbol word `relay^{k−1} ⋙ service`.
     ///
-    /// Post: `1 ≤ k ≤ MAX_ONION_CIRCUIT_HOPS` and the pipeline is closed.
-    fn pipeline(&self) -> Result<OnionPipeline> {
+    /// Post: `1 ≤ k ≤ MAX_ONION_CIRCUIT_HOPS`.
+    fn word(&self) -> Result<OnionSymbolWord> {
         let target_hop_count = self.target_hop_count();
         if target_hop_count > usize::from(MAX_ONION_CIRCUIT_HOPS) {
             return Err(Error::OnionRouteError(
@@ -95,10 +92,10 @@ impl OnionRouteRequest {
                 },
             ));
         }
-        OnionPipeline::relayed(
+        Ok(OnionSymbolWord::new(
             target_hop_count.saturating_sub(1),
-            OnionApplication::new(self.service.clone(), Bytes::new())?,
-        )
+            self.service.clone(),
+        ))
     }
 }
 
@@ -128,8 +125,8 @@ pub struct OnionRoute {
     service: OnionServiceName,
     /// Ordered DIDs, ending with the exit DID.
     hops: Vec<Did>,
-    /// Ordered encrypted route hops, ending with the exit hop.
-    encryption_hops: Vec<OnionRouteHop>,
+    /// Hop assignment `h₀ … hₙ` of the route's symbol word, ending with the exit hop.
+    positions: OnionPipeline<OnionRouteHop>,
     /// Signed descriptor for the selected exit.
     exit: OnionExitDescriptor,
 }
@@ -152,10 +149,14 @@ impl OnionRoute {
             .iter()
             .map(|hop| hop.did)
             .collect::<Vec<_>>();
+        let mut relays = encryption_hops;
+        let Some(terminal) = relays.pop() else {
+            return Err(Error::OnionRouteError(OnionRouteError::RouteHasNoHops));
+        };
         Ok(Self {
             service,
             hops,
-            encryption_hops,
+            positions: OnionPipeline::new(relays, terminal),
             exit,
         })
     }
@@ -175,9 +176,14 @@ impl OnionRoute {
         self.hops.as_slice()
     }
 
-    /// Return the ordered encrypted hops, ending with the exit hop.
-    pub(crate) fn encryption_hops(&self) -> &[OnionRouteHop] {
-        self.encryption_hops.as_slice()
+    /// Return the hop assignment `h₀ … hₙ`, one encrypted hop per position of [`Self::word`].
+    pub(crate) const fn positions(&self) -> &OnionPipeline<OnionRouteHop> {
+        &self.positions
+    }
+
+    /// Return the symbol word `relay^n ⋙ service` this route was selected for.
+    pub fn word(&self) -> OnionSymbolWord {
+        OnionSymbolWord::new(self.positions.relays().len(), self.service.clone())
     }
 
     /// Return the selected exit descriptor.
@@ -188,25 +194,6 @@ impl OnionRoute {
     /// Return the selected exit DID.
     pub fn exit_did(&self) -> Did {
         self.exit.did
-    }
-
-    /// Apply `payload` at this route's world-facing position: `relay^{n−1} ⋙ (service, body)`.
-    ///
-    /// Post: the pipeline assigns one application to each encrypted hop, and its world-facing
-    /// symbol is the service that selected this route.
-    pub(crate) fn pipeline(&self, payload: OnionCircuitPayload) -> Result<OnionPipeline> {
-        if !payload.is_service(self.service_name()) {
-            return Err(Error::OnionRouteError(
-                OnionRouteError::PayloadServiceMismatch {
-                    payload_service: payload.service().to_string(),
-                    route_service: self.service().to_string(),
-                },
-            ));
-        }
-        OnionPipeline::relayed(
-            self.encryption_hops.len().saturating_sub(1),
-            OnionApplication::new(payload.service, payload.body)?,
-        )
     }
 }
 
@@ -270,9 +257,8 @@ pub(crate) fn select_onion_route_from_candidates_with_first_hop_policy(
     first_relay_hop_permitted: impl Fn(Did) -> bool,
     direct_exit_permitted: impl Fn(Did) -> bool,
 ) -> Result<OnionRoute> {
-    let pipeline = request.pipeline()?;
-    let (relay_positions, world_facing) = pipeline.closed()?;
-    let target_hop_count = pipeline.applications().len();
+    let word = request.word()?;
+    let target_hop_count = word.hop_count();
 
     let quality_by_did = qualities.into_iter().collect::<BTreeMap<_, _>>();
     let mut exit_candidates = candidates.exits;
@@ -280,12 +266,12 @@ pub(crate) fn select_onion_route_from_candidates_with_first_hop_policy(
     let direct_exit_permitted = &direct_exit_permitted;
     if exit_candidates.is_empty() {
         return Err(Error::OnionRouteError(OnionRouteError::NoLiveExit {
-            service: world_facing.symbol().as_str().to_string(),
+            service: word.terminal().as_str().to_string(),
         }));
     }
-    if relay_positions.is_empty() {
+    if word.relays() == 0 {
         return select_direct_exit_route(
-            world_facing.symbol(),
+            word.terminal(),
             exit_candidates,
             &quality_by_did,
             entropy,
@@ -294,7 +280,7 @@ pub(crate) fn select_onion_route_from_candidates_with_first_hop_policy(
     }
 
     let mut relay_candidates = candidates.relays.into_iter().collect::<Vec<_>>();
-    let relay_hops_needed = relay_positions.len();
+    let relay_hops_needed = word.relays();
     let mut selected_relays = Vec::with_capacity(relay_hops_needed);
     if relay_hops_needed > 0 {
         let has_relay_candidates = !relay_candidates.is_empty();
@@ -306,7 +292,7 @@ pub(crate) fn select_onion_route_from_candidates_with_first_hop_policy(
         else {
             if request.allow_short_paths {
                 return select_direct_exit_route(
-                    world_facing.symbol(),
+                    word.terminal(),
                     exit_candidates,
                     &quality_by_did,
                     entropy,
@@ -347,14 +333,14 @@ pub(crate) fn select_onion_route_from_candidates_with_first_hop_policy(
         })
         .ok_or_else(|| {
             Error::OnionRouteError(OnionRouteError::NoLiveExit {
-                service: world_facing.symbol().as_str().to_string(),
+                service: word.terminal().as_str().to_string(),
             })
         })?;
     let exit = exit_candidates.remove(exit_index);
     let exit_did = exit.did;
     let mut encryption_hops = selected_relays;
     encryption_hops.push(OnionRouteHop::new(exit_did, exit.delegatee_public_key));
-    OnionRoute::new(world_facing.symbol().clone(), encryption_hops, exit)
+    OnionRoute::new(word.terminal().clone(), encryption_hops, exit)
 }
 
 /// Select a one-hop route whose only position is the world-facing `service`.

@@ -32,7 +32,7 @@ use crate::error::Result;
 use crate::extension::ext::EffectScope;
 use crate::extension::ext::Interpret;
 use crate::extension::ext::Scope;
-use crate::onion::signature::OnionSymbolSpec;
+use crate::onion::OnionServiceName;
 
 /// Interpreter for route-aware circuit effects.
 pub struct OnionCircuitShell<H> {
@@ -287,38 +287,41 @@ pub struct OnionCircuitExitFrame {
     pub payload: OnionCircuitPayload,
 }
 
-/// Interpretation `⟦f⟧` of one world-facing symbol `f` at an exit.
+/// Interpretation `⟦s⟧` of one world-facing symbol `s` at an exit.
+///
+/// `⟦s⟧(ā) : In_s → M Out_s` is a Kleisli arrow of the hop effect monad `M` (#834 D2): here `In_s`
+/// is the exit frame carrying `(s, ā)`, and the effects of `M` (sockets, fetch, backward cells) run
+/// in the shell.
 #[cfg_attr(rings_browser, async_trait::async_trait(?Send))]
 #[cfg_attr(rings_native, async_trait::async_trait)]
 pub trait OnionInterpretation: MaybeSendSync {
-    /// Evaluate the application carried by `frame`, whose symbol resolves to `f`.
+    /// Evaluate the application carried by `frame`, whose symbol is `s`.
     async fn evaluate(&self, scope: &Scope, frame: OnionCircuitExitFrame) -> Result<()>;
 }
 
-/// The partial Σ-algebra of one node: `⟦−⟧ : Σ_W ⇀ End(M)` over the world-facing symbols.
+/// The partial Σ-algebra of one node: `⟦−⟧ : Σ_n ⇀ Kl(M)`, `Σ_n ⊆ Σ_W`.
 ///
-/// A node registers symbols, never applications (#834 D2): each entry maps one symbol of the
-/// closed signature [`ONION_SIGNATURE`](crate::onion::ONION_SIGNATURE) to its interpretation.
-/// The frame's service name already denotes a symbol of `Σ`, so evaluation is one table lookup.
+/// A node registers symbols, never applications (#834 D2): each entry maps one world-facing
+/// symbol it serves to its Kleisli interpretation, so the registered keys are exactly `Σ_n`, the
+/// symbols this node interprets. `relay` is not a service name, so it cannot be registered here;
+/// the pure reducer interprets it. Evaluation is one table lookup on the frame's symbol.
 ///
 /// ```text
-/// frame ──payload.service = f──▶ table(f) ──▶ Some ⟦f⟧ ──▶ ⟦f⟧(scope, frame)
-///                                        └──▶ None      ──▶ dropped (f not registered here)
+/// frame ──payload.service = s──▶ table(s) ──▶ Some ⟦s⟧ ──▶ ⟦s⟧(scope, frame)
+///                                        └──▶ None      ──▶ dropped (s ∉ Σ_n)
 /// ```
 ///
-/// Laws: `relay = id` is interpreted by the pure reducer, which never emits an exit effect for an
-/// identity symbol, so an entry for `relay` would be unreachable; registering a symbol again
-/// replaces its interpretation.
+/// Law: registering a symbol again replaces its interpretation.
 #[derive(Default)]
 pub struct OnionAlgebra {
-    interpretations: BTreeMap<&'static OnionSymbolSpec, Box<dyn OnionInterpretation>>,
+    interpretations: BTreeMap<OnionServiceName, Box<dyn OnionInterpretation>>,
 }
 
 impl OnionAlgebra {
     /// Register `interpretation` as `⟦symbol⟧`.
     pub fn register(
         mut self,
-        symbol: &'static OnionSymbolSpec,
+        symbol: OnionServiceName,
         interpretation: impl OnionInterpretation + 'static,
     ) -> Self {
         self.interpretations
@@ -326,14 +329,18 @@ impl OnionAlgebra {
         self
     }
 
+    /// Return `Σ_n`, the symbols this algebra interprets, in name order.
+    pub fn symbols(&self) -> impl Iterator<Item = &OnionServiceName> {
+        self.interpretations.keys()
+    }
+
     /// Evaluate one exit frame through the interpretation of its symbol.
     pub async fn evaluate(&self, scope: &Scope, frame: OnionCircuitExitFrame) -> Result<()> {
-        let symbol = frame.payload.service_name().spec();
-        match self.interpretations.get(symbol) {
+        match self.interpretations.get(frame.payload.service_name()) {
             Some(interpretation) => interpretation.evaluate(scope, frame).await,
             None => {
                 tracing::debug!(
-                    symbol = symbol.name(),
+                    symbol = frame.payload.service(),
                     "drop onion exit frame for an unregistered symbol"
                 );
                 Ok(())

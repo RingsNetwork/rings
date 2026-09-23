@@ -348,25 +348,16 @@ fn test_reserved_https_onion_exit_service_is_accepted() -> Result<()> {
     Ok(())
 }
 
-/// An exit registers world-facing symbols of the closed signature only: names outside `Σ` never
-/// parse, and the identity symbol `relay` is rejected at configuration.
+/// An exit registers world-facing symbols of the closed signature only: neither names outside
+/// `Σ` nor the identity symbol `relay` parse as an exit service, in code or in a config file.
 #[test]
-fn test_onion_exit_service_must_be_a_world_facing_symbol() -> Result<()> {
-    let key = SecretKey::random();
-    let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
-    let mut config = ProcessorConfig::new(
-        0,
-        "stun://stun.l.google.com:19302".to_string(),
-        delegatee_key,
-        3,
-    )
-    .advertise_onion_exit(true);
-    config.onion_exit_services = vec![OnionServiceName::parse("relay")?];
-    config.onion_exit_policy = onion_policy(&["example.com:443"], &[])?;
-
-    assert!(OnionServiceName::parse("web").is_err());
-    assert!(ProcessorBuilder::from_config(&config)
-        .and_then(ProcessorBuilder::build)
-        .is_err());
-    Ok(())
+fn test_onion_exit_service_must_be_a_world_facing_symbol() {
+    assert_eq!(
+        serde_yaml::from_str::<Vec<OnionServiceName>>("[tcp, https]").ok(),
+        Some(vec![OnionServiceName::tcp(), OnionServiceName::https()])
+    );
+    for outside in ["web", "relay"] {
+        assert!(OnionServiceName::parse(outside).is_err());
+        assert!(serde_yaml::from_str::<Vec<OnionServiceName>>(&format!("[{outside}]")).is_err());
+    }
 }

@@ -59,32 +59,6 @@ pub enum OnionRouteError {
         /// Service label selected by the route.
         route_service: String,
     },
-    /// A constructed circuit path does not have exactly one edge id per hop.
-    CircuitPathLengthMismatch {
-        /// Number of encrypted hops in the route.
-        hop_count: usize,
-        /// Number of edge ids carried by the circuit path.
-        edge_count: usize,
-    },
-    /// A pipeline does not assign exactly one application to each route hop.
-    PipelineLengthMismatch {
-        /// Number of encrypted hops in the route.
-        hop_count: usize,
-        /// Number of applications in the pipeline.
-        application_count: usize,
-    },
-    /// The identity symbol `relay` was applied to non-empty arguments.
-    ArgumentsToIdentitySymbol,
-    /// An application was composed after a world-facing symbol.
-    WorldFacingSymbolNotLast {
-        /// World-facing symbol that must stand last.
-        symbol: String,
-    },
-    /// A pipeline or exit layer ends in a symbol that is not world-facing.
-    NotWorldFacingSymbol {
-        /// Symbol found where a world-facing symbol is required.
-        symbol: String,
-    },
     /// A message cannot fit in the largest supported encrypted cell class.
     CellPayloadTooLarge,
     /// A decrypted encrypted cell has an invalid length or internal framing.
@@ -195,29 +169,6 @@ impl fmt::Display for OnionRouteError {
                 f,
                 "onion payload service {payload_service:?} does not match route service {route_service:?}"
             ),
-            Self::CircuitPathLengthMismatch {
-                hop_count,
-                edge_count,
-            } => write!(
-                f,
-                "onion circuit path has {edge_count} edge ids for {hop_count} route hops"
-            ),
-            Self::PipelineLengthMismatch {
-                hop_count,
-                application_count,
-            } => write!(
-                f,
-                "onion pipeline has {application_count} applications for {hop_count} route hops"
-            ),
-            Self::ArgumentsToIdentitySymbol => {
-                f.write_str("onion identity symbol relay takes no arguments")
-            }
-            Self::WorldFacingSymbolNotLast { symbol } => {
-                write!(f, "world-facing onion symbol {symbol:?} must be the last application")
-            }
-            Self::NotWorldFacingSymbol { symbol } => {
-                write!(f, "onion symbol {symbol:?} is not world-facing")
-            }
             Self::CellPayloadTooLarge => {
                 f.write_str("onion message exceeds the largest encrypted cell class")
             }

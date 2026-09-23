@@ -406,20 +406,6 @@ fn test_native_tcp_exit_config_rejects_empty_services() {
     .is_ok());
 }
 
-/// `relay` is the identity symbol, registered as a relay capability and never as an exit service.
-#[test]
-fn test_native_tcp_exit_config_rejects_the_identity_symbol() {
-    assert!(matches!(
-        NativeOnionTcpExitConfig::new(
-            vec![OnionServiceName::parse("relay").expect("valid service")],
-            OnionExitPolicy::default()
-        ),
-        Err(Error::OnionRouteError(
-            OnionRouteError::NotWorldFacingSymbol { .. }
-        ))
-    ));
-}
-
 #[test]
 fn test_native_https_proxy_requires_explicit_valid_exit_configuration() -> Result<()> {
     let configured =
@@ -440,20 +426,21 @@ fn test_native_https_proxy_requires_explicit_valid_exit_configuration() -> Resul
     Ok(())
 }
 
+/// The TCP exit runtime decodes every frame the node's algebra routes to it (the algebra alone
+/// selects the served symbols `Σ_n`), and nothing without an exit configuration.
 #[test]
-fn test_exit_runtime_accepts_only_installed_tcp_services() -> Result<()> {
-    let service = OnionServiceName::https();
+fn test_exit_runtime_serves_only_with_an_exit_configuration() -> Result<()> {
     let config =
         NativeOnionTcpExitConfig::new(vec![OnionServiceName::https()], OnionExitPolicy::default())?;
-    let runtime = OnionTcpRuntime::new(session(), TEST_NETWORK_ID, Some(config));
-    let installed_payload = encode_tcp_payload(&service, OnionTcpPayload::Close)?;
-    let tcp_payload = encode_tcp_payload(&OnionServiceName::tcp(), OnionTcpPayload::Close)?;
+    let configured = OnionTcpRuntime::new(session(), TEST_NETWORK_ID, Some(config));
+    let unconfigured = OnionTcpRuntime::new(session(), TEST_NETWORK_ID, None);
+    let payload = encode_tcp_payload(&OnionServiceName::https(), OnionTcpPayload::Close)?;
 
     assert!(matches!(
-        runtime.decode_exit_payload(installed_payload)?,
-        Some((accepted, OnionTcpPayload::Close, _)) if accepted == service
+        configured.decode_exit_payload(payload.clone())?,
+        Some((service, OnionTcpPayload::Close, _)) if service == OnionServiceName::https()
     ));
-    assert!(runtime.decode_exit_payload(tcp_payload)?.is_none());
+    assert!(unconfigured.decode_exit_payload(payload)?.is_none());
     Ok(())
 }
 

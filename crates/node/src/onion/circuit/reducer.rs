@@ -28,7 +28,6 @@ use super::ONION_RELAY_RETURN_TTL_MS;
 use crate::error::Error;
 use crate::error::Result;
 use crate::extension::ext::Transition;
-use crate::onion::signature::OnionSymbolRole;
 use crate::onion::OnionRouteError;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -150,18 +149,18 @@ pub enum OnionCircuitEffect {
 /// ```text
 /// CellObserved(encrypted)      -> [DecryptCell]
 /// CellReady(forward)           -> state, [DecryptForward]
-/// ForwardReady(relay)          -> state' with return edge, [SealAndSend next]
-/// ForwardReady(world-facing f) -> state, [Exit]
-/// ForwardReady(ill-typed)      -> state, []
+/// ForwardReady(Relay)          -> state' with return edge, [SealAndSend next]
+/// ForwardReady(Exit s)         -> state, [Exit]
 /// CellReady(backward match)    -> state' with refreshed edge, [SealAndSend previous]
 /// CellReady(backward no match) -> state, [DecryptClient]
 /// CellReady(cover)             -> state, []
 /// ```
 ///
-/// The reducer interprets a decrypted layer by the role of its symbol in `Σ`: the identity symbol
-/// `relay` is evaluated here, in the pure core, as `relay = id` (peel, record the return edge,
-/// forward the inner layer unchanged); a world-facing symbol becomes an `Exit` effect evaluated
-/// by the node's `OnionAlgebra` in the shell.
+/// The layer variant is the symbol it applies: a `Relay` layer applies `relay`, evaluated here, in
+/// the pure core, as `relay = id` (peel, record the return edge, forward the inner layer
+/// unchanged); an `Exit` layer applies the world-facing symbol `s = payload.service ∈ Σ_W`, which
+/// the type of the service name guarantees, and becomes an `Exit` effect evaluated by the node's
+/// `OnionAlgebra` in the shell.
 ///
 /// Law: replaying `apply(state, input)` with the same values returns the same `(state', effects)`.
 /// Clocks, crypto, IO, and locks are represented by effects and live in the shell.
@@ -259,17 +258,14 @@ impl OnionCircuitReducer {
         // `advance_cell`, where `accepts_forward_layers` is checked. The typed effect/feedback
         // transition carries that proof into this stage; repeating the capability check would
         // not guard a second ingress boundary.
-        match (layer.symbol().role(), layer) {
-            (
-                OnionSymbolRole::Identity,
-                OnionForwardLayer::Relay {
-                    next_hop,
-                    next_circuit_id,
-                    next_delegatee_public_key,
-                    return_delegatee_public_key,
-                    inner,
-                },
-            ) => {
+        match layer {
+            OnionForwardLayer::Relay {
+                next_hop,
+                next_circuit_id,
+                next_delegatee_public_key,
+                return_delegatee_public_key,
+                inner,
+            } => {
                 self.validate_relay_forward()?;
                 remember_return_hop(
                     state,
@@ -297,18 +293,15 @@ impl OnionCircuitReducer {
                     encoded_message,
                 })
             }
-            (
-                OnionSymbolRole::WorldFacing,
-                OnionForwardLayer::Exit {
-                    process_epoch,
-                    client,
-                    return_delegatee_public_key,
-                    expires_at_ms,
-                    forward_nonce,
-                    forward_sequence,
-                    payload,
-                },
-            ) => {
+            OnionForwardLayer::Exit {
+                process_epoch,
+                client,
+                return_delegatee_public_key,
+                expires_at_ms,
+                forward_nonce,
+                forward_sequence,
+                payload,
+            } => {
                 if !self.capabilities.permits_exit_epoch(process_epoch) {
                     return Err(Error::OnionRouteError(
                         OnionRouteError::ForwardEpochMismatch,
@@ -335,11 +328,6 @@ impl OnionCircuitReducer {
                     payload,
                 })
             }
-            (_, layer) => Err(Error::OnionRouteError(
-                OnionRouteError::NotWorldFacingSymbol {
-                    symbol: layer.symbol().name().to_string(),
-                },
-            )),
         }
     }
 

@@ -273,9 +273,6 @@ pub(in crate::processor) fn validate_onion_role_config(
         ));
     }
     if advertise_onion_exit {
-        for service in onion_exit_services {
-            service.world_facing_spec()?;
-        }
         onion_exit_policy.validate_targets()?;
     }
     Ok(())

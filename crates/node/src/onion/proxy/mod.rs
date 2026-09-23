@@ -13,17 +13,16 @@ use crate::onion::OnionExitDescriptor;
 pub use crate::onion::OnionProxyTarget;
 use crate::onion::OnionRoute;
 use crate::onion::OnionServiceName;
-use crate::onion::ONION_SIGNATURE;
 use crate::online::OnlineNodeType;
 
 #[cfg(rings_native)]
 pub mod http;
 
 /// Exit service used by native HTTP CONNECT/SOCKS-style byte tunnels: the `tcp` symbol.
-pub const ONION_PROXY_TCP_SERVICE: &str = ONION_SIGNATURE.tcp().name();
+pub const ONION_PROXY_TCP_SERVICE: &str = OnionServiceName::tcp().as_str();
 
 /// Exit service used by HTTPS proxying over a TCP-backed onion exit: the `https` symbol.
-pub const ONION_PROXY_HTTPS_SERVICE: &str = ONION_SIGNATURE.https().name();
+pub const ONION_PROXY_HTTPS_SERVICE: &str = OnionServiceName::https().as_str();
 
 /// Proxy protocol requested by the client ingress.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -152,7 +151,6 @@ impl OnionProxyConfig {
 }
 
 fn validate_proxy_service(protocol: OnionProxyProtocol, service: &OnionServiceName) -> Result<()> {
-    service.world_facing_spec()?;
     if protocol == OnionProxyProtocol::HttpsProxy && service != &OnionServiceName::https() {
         return Err(Error::InvalidConfig(format!(
             "onion HTTPS proxy requires service {:?}",
@@ -222,17 +220,6 @@ mod tests {
 
         assert_eq!(proxy.exit_service(), "https");
         Ok(())
-    }
-
-    /// The identity symbol `relay` is never an exit service, so no proxy may target it.
-    #[test]
-    fn test_proxy_config_rejects_the_identity_symbol() {
-        assert!(OnionProxyConfig::tcp_connect_service(
-            OnionServiceName::parse("relay").expect("relay name"),
-            1,
-            false
-        )
-        .is_err());
     }
 
     #[test]
