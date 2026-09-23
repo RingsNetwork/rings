@@ -15,7 +15,7 @@ Tung = "Tung"
 listPendings = "listPendings"
 # Rust compression crate referenced by name in the changelog.
 flate2 = "flate2"
-# Single-use reply blocks (Mixminion, Sphinx), plural as used in papers/onion-monad.tex.
+# Single-use reply blocks (Mixminion, Sphinx), plural as used in papers/onion-kleisli-pipeline.tex.
 SURBs = "SURBs"
 
 # mdBook's own variable name, which docs/theme/rings.css must spell the same way to override it.

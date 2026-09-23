@@ -68,8 +68,8 @@ Manuscript created September 24, 2026.  This document freezes the design
 of Rings issue \#834 (\texttt{rings-node}, module \texttt{onion}) before
 its Phase~2 code; it is a specification, not shipped behaviour.  The
 constants $s=2$ and $n_{\max}=4$ are those fixed in the issue discussion.}}
-\title{\huge OnionMonad:\\
-Onion Circuits as Client-Sealed Loops\\
+\title{\huge Onion Kleisli Pipelines:\\
+Circuits as Client-Sealed Loops\\
 of Registered Operation Symbols}
 \date{}
 
@@ -108,7 +108,7 @@ test obligation.\par\vspace{0.6\baselineskip}}}
 Today's circuit is the term $\relay^{k}\then(\mathit{svc},\mathit{body})$
 evaluated on the forward path and answered on its reverse
 (\S\ref{sec:current}).  This paper states the general structure of which
-it is the degenerate instance, as definitions D1--D9 and laws L1--L10 and L5$'$
+it is the degenerate instance, the onion Kleisli pipeline, as definitions D1--D9 and laws L1--L10 and L5$'$
 of issue \#834, numbered identically.  Design lineage: Sphinx headers and
 wide-block payloads~\cite{Danezis2009}, reply blocks~\cite{Chaum1981,
 Danezis2003}, loops~\cite{Piotrowska2017}, AEZ~\cite{Hoang2015}, Kleisli
@@ -637,8 +637,9 @@ is the arrows-meticulous, monads-promiscuous separation of
 \cite{Lindley2011}.
 \end{proof}
 
-``OnionMonad'' names $M$, the effect inside one hop; across hops only the
-static fragment of $\Kl(M)$ is exposed.
+Hence the name: a circuit is an onion Kleisli pipeline, a static
+composite in $\Kl(M)$.  $M$ is the effect inside one hop; across hops
+no bind is exposed, so the structure is not a monad.
 
 \begin{lawL}{L8}{unlinkability}
 On consecutive edges $\chi_i\ne\chi_{i+1}$ and $y_{i-1}\ne y_i$ (one layer
@@ -749,7 +750,7 @@ Cell buckets pad the cell before decryption, not the layer; padding the
 innermost layer to a constant total only moves the leak from $H-i$ to $i$.
 
 \begin{table}[t]
-\caption{Current circuit versus OnionMonad}
+\caption{Current circuit versus the Kleisli pipeline}
 \label{tab:delta}
 \centering\footnotesize
 \setlength{\tabcolsep}{2pt}
@@ -880,6 +881,6 @@ Arrow/Selective/Monad hierarchy~\cite{Hughes2000,Lindley2011,Mokhov2019}
 fix which compositions a client can seal in advance.
 
 \bibliographystyle{IEEEtran}
-\bibliography{onion-monad}
+\bibliography{onion-kleisli-pipeline}
 
 \end{document}
