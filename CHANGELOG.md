@@ -35,7 +35,11 @@
   #628): `storage_touch_data` is gone and callers use `storage_append_data`. The const-generic
   `ChordStorage<_, REDUNDANT>` and `ChordStorageInterface<REDUNDANT>` become the plain
   `ChordStorageInterface` over the transport's configured redundancy; the API mismatch error is
-  no longer reachable from it.
+  no longer reachable from it. Discovery of an unknown closer predecessor now waits for a
+  `TopoInfo` query/reply and connection admission instead of an immediate notify reply; the
+  removal does not preserve the old discovery latency. Replica placement uses `PlacedEntry`
+  with a separate storage key and unchanged resource identity; the obsolete `Entry::affine`,
+  `clone_with_did`, single-string conversion, and duplicate storage-head wrapper are removed.
 
 ### Fixed
 
@@ -59,9 +63,14 @@
   transiently disconnected transport, and stabilization owns its retirement (the disconnected
   grace, then the liveness probe); the send fails and is retried by its caller. The outbound
   worker's second cancellation carrier (`cancel_requested`) and its two-lane command mailbox
-  with a per-drain budget are gone: one unbounded mailbox is drained whole into the transfer
-  queues, whose control-first burst law decides the next frame. The inbound ticket chain that
-  serialised same-lane frames between core admission and the transport-lease release is gone:
+  with a per-drain budget are gone: submission permits bound each FIFO drain to 256 transfers,
+  and a separate single-slot cancellation channel coalesces repeated scan requests. The worker
+  collects that batch before releasing permits, then makes its control transfers visible before
+  selecting a frame; submissions racing the empty read enter the next iteration. With runnable
+  lower-class work, the transfer queues yield after at most four control attempts and rotate
+  lower-class service. Cancellation and shutdown release permits before publishing completion.
+  The inbound ticket chain that serialised same-lane frames between core admission and the
+  transport-lease release is gone:
   lane order is the sequence-numbered `Pending`/`Ready` protocol alone, and a lane's frames
   decode in parallel. Also removed: the duplicate data-lane check inside
   `ReassemblyHandoffBarrier::blocks` (the actor's barrier sequence carries it), the

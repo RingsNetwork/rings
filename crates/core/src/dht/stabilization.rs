@@ -314,8 +314,9 @@ impl Stabilizer {
 
     /// Execute the ordered topology sub-steps under a selected finger policy.
     ///
-    /// Cleaning and predecessor notification run before finger maintenance;
-    /// liveness probing and Chord stabilization run afterward. [`Self::run_step`]
+    /// Cleaning runs before finger maintenance; liveness probing and Chord
+    /// stabilization run afterward. The completed topology report notifies
+    /// the selected head. [`Self::run_step`]
     /// contains errors and timeouts per sub-step, so one failed effect cannot
     /// prevent the remaining topology obligations from being attempted.
     async fn stabilize_topology_with_finger_mode(

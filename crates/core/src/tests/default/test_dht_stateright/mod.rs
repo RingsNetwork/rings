@@ -129,8 +129,8 @@ impl DhtSnapshot {
 //
 // SCOPE (important): each node notifies `spec::successors(all)` — the *global*
 // successor set, i.e. as if every node already knows its final successors.
-// Production `Stabilizer::notify_predecessor` instead sends to the node's
-// current, possibly stale/incomplete local successor list. So this stage does
+// Production instead notifies only the selected head after a stabilization
+// report commits; that head can still be stale or incomplete. So this stage does
 // NOT test successor discovery or full stabilization liveness; it isolates and
 // exhausts the delivery interleavings of the predecessor-update rule once
 // successors are known. Successor discovery is stage 2.
@@ -209,8 +209,8 @@ impl Actor for ChordNode {
     }
 
     fn on_timeout(&self, id: Id, _state: &mut Cow<NodeState>, _timer: &Timer, o: &mut Out<Self>) {
-        // notify_predecessor: tell each successor "I might be your predecessor",
-        // then re-arm — i.e. periodic, per the Chord paper. The network is a
+        // Oracle subprotocol: tell each known successor "I might be your predecessor",
+        // then re-arm; this is not production's head-only scheduling. The network is a
         // duplicating *set* (`new_unordered_duplicating`), so a re-sent identical
         // notification neither grows the state nor is lost: it stays available to
         // be (re-)delivered, which is exactly the effect of periodic re-sending

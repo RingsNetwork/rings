@@ -441,13 +441,6 @@ impl TryFrom<(String, String)> for Entry {
     }
 }
 
-impl TryFrom<String> for Entry {
-    type Error = Error;
-    fn try_from(topic: String) -> Result<Self> {
-        (topic.clone(), topic).try_into()
-    }
-}
-
 impl Entry {
     fn with_element_dots(mut self, version: EntryVersion) -> Result<Self> {
         self.crdt.dots = self
@@ -715,23 +708,6 @@ impl Entry {
             self.topic_buffer()?.join(other.topic_buffer()?),
             expires_at_ms,
         ))
-    }
-
-    /// Affine Transport entry to a list of affined did
-    pub fn affine(&self, scalar: u16) -> Result<Vec<Entry>> {
-        Ok(self
-            .did
-            .rotate_affine(scalar)?
-            .into_iter()
-            .map(|did| self.clone_with_did(did))
-            .collect())
-    }
-
-    /// Clone and setup with new DID
-    pub fn clone_with_did(&self, did: Did) -> Self {
-        let mut entry = self.clone();
-        entry.did = did;
-        entry
     }
 
     fn is_data_entry(&self) -> bool {

@@ -363,7 +363,7 @@ pub(super) fn install_two_node_chord_view(first: &Node, second: &Node) -> Result
 pub(super) fn split_redundant_entry(nodes: &[&Node]) -> Result<(Entry, Did, Did, usize, usize)> {
     for attempt in 0..512 {
         let topic = format!("split remote replica placement {attempt}");
-        let entry: Entry = crate::tests::live(topic.try_into()?);
+        let entry: Entry = crate::tests::live((topic.clone(), topic).try_into()?);
         let mut placements = entry.did.rotate_affine(2)?.into_iter();
         let primary = placements
             .next()

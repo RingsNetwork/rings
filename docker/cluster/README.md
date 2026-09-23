@@ -2,6 +2,14 @@
 
 This image runs N native `rings` daemon processes in one container, generates per-node session keys from external private keys, waits for every HTTP API to become ready, then connects the nodes. It is a demo/test cluster, so onion relay and onion exit advertisement are enabled by default.
 
+The generated configuration explicitly permits the container's external listeners to bind
+`0.0.0.0`; Docker's published ports determine host access. Each node creates a separate
+owner-only API token under `RINGS_CLUSTER_DIR/keys`. Readiness checks use the public
+`nodeDid` handshake and an authenticated local `inspect` call, because `/status` requires
+a Bearer token. The launcher connects its local nodes with `connect offer`, `connect answer`,
+and `connect accept` through their authenticated internal APIs. This preserves the public
+target restriction on `connect node`, which rejects loopback and private remote URLs.
+
 This cluster is intended for controlled testing. Random or externally supplied keys
 authenticate DIDs, but they do not make the cluster Sybil-resistant; see the repository
 [threat model](../../SECURITY.md).
@@ -54,7 +62,8 @@ Private key file format:
 - 64-character hex or `0x`-prefixed hex
 - at least `RINGS_NODE_COUNT` entries when `RINGS_ALLOW_RANDOM_KEYS=false`
 
-The launcher does not print private key values. It writes only session key files under `RINGS_CLUSTER_DIR/keys`, which are still sensitive and should be stored on a protected volume if persisted.
+The launcher does not print private key values or API tokens. Session key and API token files
+under `RINGS_CLUSTER_DIR/keys` are sensitive and should be stored on a protected volume if persisted.
 
 Useful environment variables:
 

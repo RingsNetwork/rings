@@ -16,6 +16,7 @@ RUN apt-get update \
         bash \
         ca-certificates \
         curl \
+        jq \
         tini \
     && rm -rf /var/lib/apt/lists/*
 

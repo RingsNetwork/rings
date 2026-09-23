@@ -27,12 +27,12 @@
 //! Reaching that fixpoint is liveness, and the production path is more than a
 //! monotone lattice in two ways this derivation deliberately does NOT model — so
 //! a blanket Knaster–Tarski / "every fair order converges" claim is unjustified:
-//!   (1) `notify_predecessor` emits to `successors().list()`, TRUNCATED to K:
-//!       when a closer peer is learned, a farther successor can drop OUT of the
-//!       top-K, so the set of notify targets is not monotone — "more knowledge
+//!   (1) a committed stabilization report emits `Notify` to the selected HEAD:
+//!       when a closer peer is learned, the previous head stops receiving
+//!       notifications, so the set of notify targets is not monotone — "more knowledge
 //!       ⇒ more messages" is false. (`pred` still converges, because a node's
-//!       immediate predecessor always keeps it as successor #1 and so never
-//!       stops notifying it — but that is a separate argument, not monotonicity.)
+//!       immediate predecessor keeps it as successor #1 and continues notifying
+//!       it on completed rounds — a separate argument, not monotonicity.)
 //!   (2) the finger table is part of the asserted state, and range-aware
 //!       `fix_fingers` advances through correlated lookup results — sequential
 //!       state, not a single join. Production uses 160 slots; this controlled

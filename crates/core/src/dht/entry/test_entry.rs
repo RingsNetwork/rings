@@ -671,14 +671,21 @@ fn test_operation_default_entry_matches_operation_kind() -> Result<()> {
     Ok(())
 }
 
+/// Replica placement rotates the storage key while preserving the entire
+/// resource carrier, including its DID, kind, payload, and CRDT metadata.
 #[test]
-fn test_affine_preserves_payload_and_kind_while_rotating_keys() -> Result<()> {
+fn test_affine_placement_preserves_the_resource_carrier() -> Result<()> {
+    // The data carrier is shared by replicas at three distinct placement keys.
     let entry = data_entry("topic", "value")?;
-    let affined = entry.affine(3)?;
-    assert_eq!(affined.len(), 3);
-    for rotated in affined {
-        assert_eq!(rotated.data, entry.data);
-        assert_eq!(rotated.kind, entry.kind);
+    let placements = entry.did.rotate_affine(3)?;
+    assert_eq!(placements.len(), 3);
+    assert!(placements.iter().any(|key| *key != entry.did));
+    for key in placements {
+        // A replica changes its location rather than the resource identity.
+        let replica = PlacedEntry::new(key, entry.clone());
+        replica.validate_placement(3)?;
+        assert_eq!(replica.key, key);
+        assert_eq!(replica.entry, entry);
     }
     Ok(())
 }
@@ -859,13 +866,16 @@ fn test_admission_bounds_every_version_logical_time() -> Result<()> {
 /// Storage normalization and affine placement preserve the retention bound.
 #[test]
 fn test_normalization_and_affine_preserve_retention_bound() -> Result<()> {
+    // Retention belongs to the carrier and survives both normalization and placement.
     let entry = admissible_delta("topic", "value", 1)?;
     assert_eq!(
         entry.clone().try_into_storage_entry()?.expires_at_ms,
         entry.expires_at_ms
     );
-    for replica in entry.affine(3)? {
-        assert_eq!(replica.expires_at_ms, entry.expires_at_ms);
+    for key in entry.did.rotate_affine(3)? {
+        // Every physical replica retains the original carrier's expiration.
+        let replica = PlacedEntry::new(key, entry.clone());
+        assert_eq!(replica.entry.expires_at_ms, entry.expires_at_ms);
     }
     Ok(())
 }
