@@ -10,8 +10,8 @@ use super::Initiator;
 use super::Relay;
 use super::RelayCommand;
 use super::RelayEffect;
+use super::RelaySessionId;
 use super::RelayState;
-use super::SessionId;
 use super::SessionKey;
 use super::TransportKind;
 use super::MAX_RELAY_SESSIONS;
@@ -36,12 +36,12 @@ fn web_addr() -> SocketAddr {
 
 /// A server-side (peer-opened) key on the TCP relay — the common case in these tests.
 fn rkey(peer: Did, session: u64) -> SessionKey {
-    SessionKey::new(peer, super::TCP, SessionId(session), Initiator::Remote)
+    SessionKey::new(peer, super::TCP, RelaySessionId(session), Initiator::Remote)
 }
 /// Peer `Data` on a peer-opened session (`from_opener = true`).
 fn data(session: u64, bytes: &'static [u8]) -> Frame {
     Frame::Data {
-        session: SessionId(session),
+        session: RelaySessionId(session),
         from_opener: true,
         bytes: Bytes::from_static(bytes),
     }
@@ -49,21 +49,21 @@ fn data(session: u64, bytes: &'static [u8]) -> Frame {
 /// Peer `Shutdown` on a peer-opened session (`from_opener = true`).
 fn shutdown(session: u64) -> Frame {
     Frame::Shutdown {
-        session: SessionId(session),
+        session: RelaySessionId(session),
         from_opener: true,
     }
 }
 /// Peer `Close` on a peer-opened session (`from_opener = true`).
 fn close(session: u64) -> Frame {
     Frame::Close {
-        session: SessionId(session),
+        session: RelaySessionId(session),
         from_opener: true,
     }
 }
 /// Peer `Open` for `service`.
 fn open(session: u64, service: &str) -> Frame {
     Frame::Open {
-        session: SessionId(session),
+        session: RelaySessionId(session),
         service: service.to_string(),
     }
 }
@@ -183,7 +183,7 @@ fn test_open_unknown_service_emits_a_retryable_terminal_response() {
             from_opener,
         }] => {
             assert_eq!(*to, peer_a());
-            assert_eq!(*session, SessionId(7));
+            assert_eq!(*session, RelaySessionId(7));
             assert!(!from_opener, "we are not the opener of the peer's session");
         }
         other => panic!("expected one SendClose, got {other:?}"),
@@ -314,7 +314,7 @@ fn test_accepted_mints_in_the_core_then_untrack_removes() {
         peer: peer_a(),
         service: "web".to_string(),
     });
-    let key = SessionKey::new(peer_a(), super::TCP, SessionId(0), Initiator::Local);
+    let key = SessionKey::new(peer_a(), super::TCP, RelaySessionId(0), Initiator::Local);
     match accepted.effects.as_slice() {
         [RelayEffect::OpenAccepted {
             token,
@@ -331,7 +331,7 @@ fn test_accepted_mints_in_the_core_then_untrack_removes() {
 
     let untracked = step_command(&relay, &accepted.state, &RelayCommand::Untrack {
         peer: peer_a(),
-        session: SessionId(0),
+        session: RelaySessionId(0),
         initiator: Initiator::Local,
     });
     assert!(untracked.effects.is_empty());
@@ -344,7 +344,7 @@ fn test_backend_abort_removes_session_and_emits_one_peer_close() {
     let opened = step_frame(&relay, &relay.init(), peer_a(), &open(7, "web"));
     let aborted = step_command(&relay, &opened.state, &RelayCommand::Abort {
         peer: peer_a(),
-        session: SessionId(7),
+        session: RelaySessionId(7),
         initiator: Initiator::Remote,
     });
 
@@ -353,7 +353,7 @@ fn test_backend_abort_removes_session_and_emits_one_peer_close() {
         aborted.effects.as_slice(),
         [RelayEffect::SendClose {
             to,
-            session: SessionId(7),
+            session: RelaySessionId(7),
             from_opener: false,
         }] if *to == peer_a()
     ));
@@ -392,8 +392,8 @@ fn test_local_and_remote_sessions_with_the_same_id_do_not_collide() {
         peer: peer_a(),
         service: "web".to_string(),
     });
-    let remote = SessionKey::new(peer_a(), super::TCP, SessionId(0), Initiator::Remote);
-    let local = SessionKey::new(peer_a(), super::TCP, SessionId(0), Initiator::Local);
+    let remote = SessionKey::new(peer_a(), super::TCP, RelaySessionId(0), Initiator::Remote);
+    let local = SessionKey::new(peer_a(), super::TCP, RelaySessionId(0), Initiator::Local);
     assert_ne!(remote, local);
     assert!(accepted.state.sessions.contains(&remote));
     assert!(accepted.state.sessions.contains(&local));

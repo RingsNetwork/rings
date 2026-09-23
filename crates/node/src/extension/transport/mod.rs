@@ -38,9 +38,9 @@
 //! Pure/effect separation is preserved:
 //!
 //! - The **interpreter owns the live resources** (the `TcpStream` / `UdpSocket`), keyed
-//!   by [`SessionId`], in a resource table. These are non-purifiable OS handles and so
+//!   by [`RelaySessionId`], in a resource table. These are non-purifiable OS handles and so
 //!   live only in the imperative shell — never in a protocol's state.
-//! - A protocol's **pure `step`** holds only session *metadata* (which `SessionId` maps
+//! - A protocol's **pure `step`** holds only session *metadata* (which `RelaySessionId` maps
 //!   to which peer/service, framing state, counters) — never a live socket.
 //! - Generic transport **effects** (run by the interpreter): stream ops
 //!   `Connect` / `Write` / `Close`; datagram ops `Bind` / `SendTo`.
@@ -83,17 +83,18 @@ pub(crate) fn allocate_non_reusing(counter: &AtomicU64) -> Option<u64> {
         .ok()
 }
 
-/// Identifier of a relayed session/flow (a virtual circuit ↔ local socket pairing).
+/// Identifier assigned by the opener to a relayed stream or datagram flow (a virtual circuit
+/// ↔ local socket pairing). This relay identifier is distinct from delegated-signing identity.
 ///
 /// TCP uses it for a connection; UDP uses it for a *flow* (a NAT-like mapping that
 /// routes responses back to the right local client) — see [`TransportKind`].
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
-pub struct SessionId(pub u64);
+pub struct RelaySessionId(pub u64);
 
 /// Which end **opened** a relay session, from the perspective of the node holding the key.
 ///
 /// Necessary because two nodes that simultaneously open a tunnel to each other both mint
-/// `SessionId(0)`: without an initiator, "the session I opened to peer B" and "the session B
+/// `RelaySessionId(0)`: without an initiator, "the session I opened to peer B" and "the session B
 /// opened to me" would collide on `(peer=B, namespace, session=0)`, and a wire `Data(0)`
 /// would be ambiguous. The initiator splits the id space into two halves per `(peer,
 /// namespace)`.
@@ -216,8 +217,8 @@ impl OutboundQueueBudget {
 /// A relay session's full identity — the unit used to key live sessions and to address
 /// transport effects.
 ///
-/// A bare [`SessionId`] is **not** a valid address: the id on the wire is assigned by the
-/// opener, so two ends can both pick `SessionId(0)`. The key scopes a session by `(peer,
+/// A bare [`RelaySessionId`] is **not** a valid address: the id on the wire is assigned by the
+/// opener, so two ends can both pick `RelaySessionId(0)`. The key scopes a session by `(peer,
 /// namespace, session, initiator)`, where `peer` is the **authenticated** other end
 /// (`event.from`, the verified signer) and `initiator` records which end opened it. Because a
 /// peer cannot forge `event.from`, it can only ever address sessions whose `peer` is itself
@@ -230,7 +231,7 @@ pub struct SessionKey {
     /// The transport namespace the session lives under (e.g. `tcp`, `udp`).
     pub namespace: String,
     /// The opener-assigned session id, unique only within `(peer, namespace, initiator)`.
-    pub session: SessionId,
+    pub session: RelaySessionId,
     /// Which end opened the session (disambiguates colliding ids on simultaneous open).
     pub initiator: Initiator,
 }
@@ -240,7 +241,7 @@ impl SessionKey {
     pub fn new(
         peer: Did,
         namespace: impl Into<String>,
-        session: SessionId,
+        session: RelaySessionId,
         initiator: Initiator,
     ) -> Self {
         Self {
@@ -257,7 +258,7 @@ impl SessionKey {
 /// Both kinds share the same [`Frame`] vocabulary (`Open`/`Data`/`Close`); only the
 /// socket differs. UDP is *flow*-based rather than truly sessionless because a relayed
 /// datagram still needs a return path to the originating local client, so each flow
-/// carries a [`SessionId`] just like a TCP connection. `Data` preserves message
+/// carries a [`RelaySessionId`] just like a TCP connection. `Data` preserves message
 /// boundaries (one datagram per frame) for UDP.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TransportKind {
@@ -283,15 +284,15 @@ pub enum TransportKind {
 pub enum Frame {
     /// Open a session/flow to a named local service (always sent by the opener).
     Open {
-        /// Delegation identifier (assigned by the opener).
-        session: SessionId,
+        /// Relay session identifier (assigned by the opener).
+        session: RelaySessionId,
         /// Local service name to connect to.
         service: String,
     },
     /// Bytes on an open session (one datagram per frame for UDP).
     Data {
-        /// Delegation the bytes belong to.
-        session: SessionId,
+        /// Relay session the bytes belong to.
+        session: RelaySessionId,
         /// Whether the sender of this frame opened the session.
         from_opener: bool,
         /// Payload bytes.
@@ -301,15 +302,15 @@ pub enum Frame {
     /// receiver shuts down its local write side but keeps the reverse direction open.
     /// Ignored by UDP (datagram flows have no half-close).
     Shutdown {
-        /// Delegation being half-closed.
-        session: SessionId,
+        /// Relay session being half-closed.
+        session: RelaySessionId,
         /// Whether the sender of this frame opened the session.
         from_opener: bool,
     },
     /// Close a session/flow (full teardown, both directions).
     Close {
-        /// Delegation to close.
-        session: SessionId,
+        /// Relay session to close.
+        session: RelaySessionId,
         /// Whether the sender of this frame opened the session.
         from_opener: bool,
     },

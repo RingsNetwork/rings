@@ -148,7 +148,7 @@ impl UdpFlowState {
 /// holds caches that are populated by the pure relay's effects.
 ///
 /// - `map`: live sessions keyed by [`SessionKey`] (the core-minted identity). The bare
-///   opener `SessionId` is not a valid key — keying by the authenticated `peer` is what makes
+///   opener `RelaySessionId` is not a valid key — keying by the authenticated `peer` is what makes
 ///   a frame unable to address another peer's session.
 /// - `pending`: accepted-but-not-yet-bound connections/flows, keyed by engine-local token.
 /// - `udp_flows`: `src → Pending | Opening | Active` projection. It suppresses duplicate accepts
@@ -720,7 +720,7 @@ fn relay_task_for_test_with_src(
     let key = SessionKey::new(
         Did::from(99_u32),
         namespace,
-        crate::extension::transport::SessionId(1),
+        crate::extension::transport::RelaySessionId(1),
         initiator,
     );
     let (outbound_rx, cancel, generation) = match sessions.register(key.clone(), src) {
@@ -817,7 +817,7 @@ mod tests {
     use super::MAX_PENDING_ACCEPTS;
     use crate::extension::transport::EffectEnqueue;
     use crate::extension::transport::Initiator;
-    use crate::extension::transport::SessionId;
+    use crate::extension::transport::RelaySessionId;
     use crate::extension::transport::SessionKey;
     use crate::extension::transport::SlotRegistration;
 
@@ -825,7 +825,12 @@ mod tests {
     #[test]
     fn test_duplicate_registration_preserves_live_owner() {
         let sessions = TransportSessions::new();
-        let key = SessionKey::new(Did::from(7_u32), "tcp", SessionId(10), Initiator::Remote);
+        let key = SessionKey::new(
+            Did::from(7_u32),
+            "tcp",
+            RelaySessionId(10),
+            Initiator::Remote,
+        );
         let (original_cancel, original_generation) = match sessions.register(key.clone(), None) {
             SlotRegistration::Registered((_receiver, cancel, generation)) => (cancel, generation),
             SlotRegistration::AlreadyPresent | SlotRegistration::Failed => {
@@ -844,7 +849,12 @@ mod tests {
     #[test]
     fn test_saturated_local_queue_fails_closed_without_waiting() {
         let sessions = TransportSessions::new();
-        let key = SessionKey::new(Did::from(7_u32), "tcp", SessionId(11), Initiator::Remote);
+        let key = SessionKey::new(
+            Did::from(7_u32),
+            "tcp",
+            RelaySessionId(11),
+            Initiator::Remote,
+        );
         let _registration = match sessions.register(key.clone(), None) {
             SlotRegistration::Registered(registration) => registration,
             SlotRegistration::AlreadyPresent | SlotRegistration::Failed => {
@@ -930,7 +940,12 @@ mod tests {
             .expect("pending table")
             .remove(&token);
         assert!(matches!(pending, Some(Pending::Udp { .. })));
-        let key = SessionKey::new(Did::from(8_u32), "udp", SessionId(12), Initiator::Local);
+        let key = SessionKey::new(
+            Did::from(8_u32),
+            "udp",
+            RelaySessionId(12),
+            Initiator::Local,
+        );
         assert!(sessions.promote_udp_flow(src, token, &key));
         assert!(matches!(
             sessions.register(key.clone(), Some(src)),

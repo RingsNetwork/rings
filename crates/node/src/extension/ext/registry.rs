@@ -518,7 +518,7 @@ mod tests {
     use crate::extension::transport::engine::TransportSessions;
     use crate::extension::transport::Frame;
     use crate::extension::transport::Initiator;
-    use crate::extension::transport::SessionId;
+    use crate::extension::transport::RelaySessionId;
     use crate::extension::transport::SessionKey;
     use crate::processor::ProcessorBuilder;
     use crate::processor::ProcessorConfig;
@@ -582,7 +582,7 @@ mod tests {
         first_effect_started: Notify,
         release_first_effect: Notify,
         first_connect_seen: Mutex<bool>,
-        observed_connects: Mutex<Vec<SessionId>>,
+        observed_connects: Mutex<Vec<RelaySessionId>>,
     }
 
     #[async_trait]
@@ -818,7 +818,7 @@ mod tests {
             .insert(TCP.to_string(), runner);
         let from: Did = SecretKey::random().address().into();
         let open = rings_codec::serialize(&Frame::Open {
-            session: SessionId(0),
+            session: RelaySessionId(0),
             service: "web".to_string(),
         })
         .map(Bytes::from)
@@ -853,7 +853,9 @@ mod tests {
             .await
             .map_err(|_| Error::ExtensionError("second feedback turn timed out".to_string()))?
             .map_err(|error| Error::ExtensionError(error.to_string()))??;
-        assert_eq!(*lock(&interpreter.observed_connects)?, vec![SessionId(0)]);
+        assert_eq!(*lock(&interpreter.observed_connects)?, vec![
+            RelaySessionId(0)
+        ]);
         Ok(())
     }
 
@@ -863,7 +865,7 @@ mod tests {
         let effect_scope = EffectScope::new(Scope::new(extensions.core(), TCP.to_string()));
         let interpreter = NativeRelay::new(Arc::new(TransportSessions::new()));
         let peer: Did = SecretKey::random().address().into();
-        let key = SessionKey::new(peer, TCP, SessionId(9), Initiator::Local);
+        let key = SessionKey::new(peer, TCP, RelaySessionId(9), Initiator::Local);
 
         let feedback = interpreter
             .run(&effect_scope, RelayEffect::OpenAccepted {
@@ -878,7 +880,7 @@ mod tests {
             rings_codec::deserialize::<RelayCommand<SocketAddr>>(feedback[0].as_ref()),
             Ok(RelayCommand::Untrack {
                 peer: actual_peer,
-                session: SessionId(9),
+                session: RelaySessionId(9),
                 initiator: Initiator::Local,
             }) if actual_peer == peer
         ));
@@ -921,7 +923,7 @@ mod tests {
             RelayEvent::Frame {
                 from: peer,
                 frame: Frame::Open {
-                    session: SessionId(9),
+                    session: RelaySessionId(9),
                     service: "web".to_string(),
                 },
             },
@@ -963,7 +965,7 @@ mod tests {
         let duplicate_open = relay.step(Ctx { did, state: &state }, RelayEvent::Frame {
             from: peer,
             frame: Frame::Open {
-                session: SessionId(9),
+                session: RelaySessionId(9),
                 service: "web".to_string(),
             },
         });
@@ -990,7 +992,7 @@ mod tests {
             interpreter
                 .run(&effect_scope, RelayEffect::SendClose {
                     to: peer,
-                    session: SessionId(5),
+                    session: RelaySessionId(5),
                     from_opener: false,
                 })
                 .await
@@ -1031,7 +1033,7 @@ mod tests {
         interpreter
             .run(&effect_scope, RelayEffect::SendClose {
                 to: blocked_peer,
-                session: SessionId(0),
+                session: RelaySessionId(0),
                 from_opener: false,
             })
             .await?;
@@ -1046,7 +1048,7 @@ mod tests {
             let result = interpreter
                 .run(&effect_scope, RelayEffect::SendClose {
                     to: blocked_peer,
-                    session: SessionId(session),
+                    session: RelaySessionId(session),
                     from_opener: false,
                 })
                 .await;
@@ -1060,7 +1062,7 @@ mod tests {
         interpreter
             .run(&effect_scope, RelayEffect::SendClose {
                 to: independent_peer,
-                session: SessionId(9),
+                session: RelaySessionId(9),
                 from_opener: false,
             })
             .await?;
