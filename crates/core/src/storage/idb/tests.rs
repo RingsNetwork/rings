@@ -47,6 +47,11 @@ where V: DeserializeOwned + Serialize + Sized {
     Box::new(create_db_instance(cap).await)
 }
 
+/// Read a string value with the trait payload type fixed for concise browser assertions.
+async fn get_string(instance: &IdbStorage, key: &str) -> crate::error::Result<Option<String>> {
+    <IdbStorage as KvStorageInterface<String>>::get(instance, key).await
+}
+
 #[wasm_bindgen_test]
 fn test_next_visit_time_uses_wall_clock_when_it_advances() {
     assert_eq!(next_visit_time_after(10, 15), 15);
@@ -359,8 +364,10 @@ async fn overwrite_at_capacity_preserves_other_rows() {
     // Replacing b must not evict a, despite the store already being full.
     instance.put("b", &"new-b".to_owned()).await.unwrap();
     assert_eq!(instance.count().await.unwrap(), 2);
-    assert_eq!(instance.get("a").await.unwrap().as_deref(), Some("old-a"));
-    assert_eq!(instance.get("b").await.unwrap().as_deref(), Some("new-b"));
+    let value_a = get_string(&instance, "a").await.unwrap();
+    let value_b = get_string(&instance, "b").await.unwrap();
+    assert_eq!(value_a.as_deref(), Some("old-a"));
+    assert_eq!(value_b.as_deref(), Some("new-b"));
 }
 
 /// A new key at capacity evicts the least recently accessed row in the same transaction.
@@ -370,14 +377,18 @@ async fn new_key_at_capacity_evicts_lru_row() {
     let instance = create_db_instance(2).await;
     instance.put("a", &"a".to_owned()).await.unwrap();
     instance.put("b", &"b".to_owned()).await.unwrap();
-    assert_eq!(instance.get("a").await.unwrap().as_deref(), Some("a"));
+    let recently_accessed = get_string(&instance, "a").await.unwrap();
+    assert_eq!(recently_accessed.as_deref(), Some("a"));
 
     // Accessing a makes b the least-recently-accessed row.
     instance.put("c", &"c".to_owned()).await.unwrap();
     assert_eq!(instance.count().await.unwrap(), 2);
-    assert_eq!(instance.get("a").await.unwrap().as_deref(), Some("a"));
-    assert_eq!(instance.get("b").await.unwrap(), None);
-    assert_eq!(instance.get("c").await.unwrap().as_deref(), Some("c"));
+    let value_a = get_string(&instance, "a").await.unwrap();
+    let value_b = get_string(&instance, "b").await.unwrap();
+    let value_c = get_string(&instance, "c").await.unwrap();
+    assert_eq!(value_a.as_deref(), Some("a"));
+    assert_eq!(value_b, None);
+    assert_eq!(value_c.as_deref(), Some("c"));
 }
 
 /// Reopening with a smaller row budget removes every excess row, not just one candidate.
@@ -401,10 +412,14 @@ async fn reopening_with_smaller_capacity_removes_all_excess_rows() {
     // Reopening at capacity two must keep the two most recently written rows only.
     let reopened = IdbStorage::new_with_cap_and_name(2, &name).await.unwrap();
     assert_eq!(reopened.count().await.unwrap(), 2);
-    assert_eq!(reopened.get("a").await.unwrap(), None);
-    assert_eq!(reopened.get("b").await.unwrap(), None);
-    assert_eq!(reopened.get("c").await.unwrap().as_deref(), Some("c"));
-    assert_eq!(reopened.get("d").await.unwrap().as_deref(), Some("d"));
+    let value_a = get_string(&reopened, "a").await.unwrap();
+    let value_b = get_string(&reopened, "b").await.unwrap();
+    let value_c = get_string(&reopened, "c").await.unwrap();
+    let value_d = get_string(&reopened, "d").await.unwrap();
+    assert_eq!(value_a, None);
+    assert_eq!(value_b, None);
+    assert_eq!(value_c.as_deref(), Some("c"));
+    assert_eq!(value_d.as_deref(), Some("d"));
 }
 
 /// Concurrent puts serialize their row-budget decisions through IndexedDB transactions.
@@ -412,11 +427,18 @@ async fn reopening_with_smaller_capacity_removes_all_excess_rows() {
 async fn concurrent_puts_never_exceed_row_capacity() {
     // The same isolated two-row database receives simultaneous first writes.
     let instance = create_db_instance(2).await;
+    // Keep payloads alive until join finishes polling the four borrowed put futures.
+    let [a_value, b_value, c_value, d_value] = [
+        String::from("a"),
+        String::from("b"),
+        String::from("c"),
+        String::from("d"),
+    ];
     let (first, second, third, fourth) = futures::join!(
-        instance.put("a", &"a".to_owned()),
-        instance.put("b", &"b".to_owned()),
-        instance.put("c", &"c".to_owned()),
-        instance.put("d", &"d".to_owned()),
+        instance.put("a", &a_value),
+        instance.put("b", &b_value),
+        instance.put("c", &c_value),
+        instance.put("d", &d_value),
     );
     first.unwrap();
     second.unwrap();
@@ -440,6 +462,8 @@ async fn failed_serialization_does_not_evict_existing_rows() {
     let result = instance.put("c", &FailingSerialize).await;
     assert!(result.is_err());
     assert_eq!(instance.count().await.unwrap(), 2);
-    assert_eq!(instance.get("a").await.unwrap().as_deref(), Some("a"));
-    assert_eq!(instance.get("b").await.unwrap().as_deref(), Some("b"));
+    let value_a = get_string(&instance, "a").await.unwrap();
+    let value_b = get_string(&instance, "b").await.unwrap();
+    assert_eq!(value_a.as_deref(), Some("a"));
+    assert_eq!(value_b.as_deref(), Some("b"));
 }
