@@ -106,9 +106,10 @@ test obligation.\par\vspace{0.6\baselineskip}}}
 
 Today's circuit is the term $\relay^{k}\then(\mathit{svc},\mathit{body})$
 evaluated on the forward path and answered on its reverse
-(\S\ref{sec:current}).  This paper states the general structure of which
-it is the degenerate instance, the onion Kleisli pipeline, as definitions D1--D9 and laws L1--L10 and L5$'$
-of issue \#834, numbered identically.  Design lineage: Sphinx headers and
+(\S\ref{sec:current}).  This paper states the general structure, the
+onion Kleisli pipeline, of which today's circuit is the degenerate
+instance, as definitions D1--D9 and laws L1--L10 and L5$'$ of issue \#834,
+numbered identically.  Design lineage: Sphinx headers and
 wide-block payloads~\cite{Danezis2009}, reply blocks~\cite{Chaum1981,
 Danezis2003}, loops~\cite{Piotrowska2017}, AEZ~\cite{Hoang2015}, Kleisli
 semantics~\cite{Moggi1991}, generic effects~\cite{Plotkin2003,
@@ -512,10 +513,10 @@ fixed key: L9 is load-bearing for AEZ.
 $\cl$ is position $H+1$.  $\lambda_H$ carries, in place of
 $\alpha_{H+1}$, a fresh tag $t_\cl\in\{0,1\}^{128}$ padded to $|\alpha|$;
 the guard sends $(\chi_{H+1},y_H)$ with
-$\chi_{H+1}=(t_\cl,\beta_{H+1},\gamma_{H+1})$, so $|\chi_{H+1}|=|\chi|$.
-With blinded key transport, where $\lambda_H$ has no $\alpha_{H+1}$,
-$t_\cl$ occupies $\lambda_H$'s next-hop field instead
-and the cell is padded to $b$ like every other.
+$\chi_{H+1}=(t_\cl,\beta_{H+1},\gamma_{H+1})$, so $|\chi_{H+1}|=|\chi|$
+and the cell is padded to $b$ like every other.  With blinded key
+transport, where $\lambda_H$ has no $\alpha_{H+1}$, $t_\cl$ occupies
+$\lambda_H$'s next-hop field instead.
 $\cl$ keeps $T:t_\cl\mapsto(k_{c_n},\text{loop})$, removes the entry on
 first use, and drops a cell with an unknown tag.  Every SURB suffix ends
 in its own tag.
@@ -594,7 +595,10 @@ For loops $P,P'$ let
 \Rightarrow\ \view_i(P)\eqc\view_i(P') .
 \end{gather*}
 Symbols may leak; $\bar a_j,v_j$ for $j\ne i$, other than the consumed
-$v_{i-1}$, may not~\cite{Goguen1982}.
+$v_{i-1}$, may not~\cite{Goguen1982}.  On the reply path of a session
+symbol, arrival times follow the world (L4's exception) and are excluded
+from $\view_i$ there; that residual is Table~\ref{tab:leak}'s session
+reply row.
 \end{lawL}
 
 \begin{proposition}[L5 from D6, D7, L3, L4]\label{prop:ni}
@@ -604,7 +608,8 @@ alone; the header makes L5 computational (Lemma~\ref{lem:header}).
 \end{proposition}
 \begin{proof}
 Lengths: $|\chi_i|$ and $|y_i|=C$ are constant (D6, L3).  Times:
-$\arr_i=\sum_{j<i}(L(f_j)+\delta_j)$ by L4, a function of $\sigma,\delta$.
+$\arr_i=\sum_{j<i}(L(f_j)+\delta_j)$ by L4, a function of $\sigma,\delta$,
+except on a session reply path, where L5 excludes them.
 Headers: $\chi_i,\chi_{i+1}$ reveal only $\lambda_i$, fixed by $\pi_i$ up
 to fresh coins (Lemma~\ref{lem:header}).  Carry: uniform at a relay
 position (Lemma~\ref{lem:carry}).  If $i=c_k$, it learns $v_{i-1}$,
@@ -822,7 +827,7 @@ possible and out of scope.
 threat & bound \\
 \midrule
 hop learns another's $\bar a_j$, $v_j$ & L5 (Prop.~\ref{prop:ni}) \\
-position, loop length & fixed $|\beta|$, $C$, $|\kappa|$, $s$ (D5--D7, L3, L5$'$) \\
+position, loop length & fixed $|\beta|$, $C_b$, $|\kappa|$, $s$ (D5--D7, L3, L5$'$) \\
 value-dependent timing & exact release $\arr+L(f)$ (L4) \\
 colluding relays match bytes & per-edge re-encipherment (L8), up to the shared $x$ (Table~\ref{tab:leak}); cf.\ Prop.~\ref{prop:current} \\
 tagging & whole-value rejection, $2^{-8\tau}$ (L8) \\
