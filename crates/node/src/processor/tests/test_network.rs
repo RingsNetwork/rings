@@ -52,6 +52,89 @@ async fn test_provider_listen_with_started_token_returns_after_stop() {
     .expect("started provider listen token should exit after stop");
 }
 
+/// Every clone and independently constructed provider over one processor queues listener
+/// starts behind the same generation, including generations cancelled while queued.
+#[tokio::test]
+async fn test_listener_generation_is_shared_across_processor_wrappers() {
+    let processor = Arc::new(prepare_processor().await);
+    let _first_provider = Provider::from_processor(processor.clone());
+    let _second_provider = Provider::from_processor(processor.clone());
+    assert!(Arc::ptr_eq(
+        &processor.listener_gate_for_test(),
+        &processor.clone().listener_gate_for_test(),
+    ));
+
+    let first_stop = StopSource::new();
+    let (first_started_tx, first_started_rx) = tokio::sync::oneshot::channel();
+    let first_processor = processor.clone();
+    let first_token = first_stop.token();
+    let first = tokio::spawn(async move {
+        first_processor
+            .listen_with_started(first_token, move || {
+                let _sent = first_started_tx.send(());
+            })
+            .await;
+    });
+    first_started_rx
+        .await
+        .expect("the first generation should acquire processor ownership");
+
+    let queued_stop = StopSource::new();
+    let queued_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let queued_started_in_task = queued_started.clone();
+    let queued_processor = processor.clone();
+    let queued_token = queued_stop.token();
+    let queued = tokio::spawn(async move {
+        queued_processor
+            .listen_with_started(queued_token, move || {
+                queued_started_in_task.store(true, std::sync::atomic::Ordering::SeqCst);
+            })
+            .await;
+    });
+    // Cancelling before ownership does not bypass the queue or let cleanup overlap.
+    queued_stop.request_stop();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(!queued_started.load(std::sync::atomic::Ordering::SeqCst));
+
+    first_stop.request_stop();
+    tokio::time::timeout(LISTENER_STOP_TIMEOUT, first)
+        .await
+        .expect("the active generation should finish graceful cleanup")
+        .expect("the active listener task should not panic");
+    tokio::time::timeout(LISTENER_STOP_TIMEOUT, queued)
+        .await
+        .expect("the queued cancelled generation should acquire then finish")
+        .expect("the queued listener task should not panic");
+    // A pre-cancelled token still acquires ownership in queue order before returning.
+    assert!(queued_started.load(std::sync::atomic::Ordering::SeqCst));
+    let restart_stop = StopSource::new();
+    let (restart_started_tx, restart_started_rx) = tokio::sync::oneshot::channel();
+    let restart_finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let restart_finished_in_task = restart_finished.clone();
+    let restart_processor = processor.clone();
+    let restart_token = restart_stop.token();
+    let restart = tokio::spawn(async move {
+        restart_processor
+            .listen_with_started(restart_token, move || {
+                let _sent = restart_started_tx.send(());
+            })
+            .await;
+        restart_finished_in_task.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    restart_started_rx
+        .await
+        .expect("a new generation should start after cleanup");
+    first_stop.request_stop();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(!restart_finished.load(std::sync::atomic::Ordering::SeqCst));
+    restart_stop.request_stop();
+    tokio::time::timeout(LISTENER_STOP_TIMEOUT, restart)
+        .await
+        .expect("the restarted generation should clean up")
+        .expect("the restarted listener task should not panic");
+    assert!(restart_finished.load(std::sync::atomic::Ordering::SeqCst));
+}
+
 #[tokio::test]
 async fn test_online_node_registry_lists_two_publishers_over_network() -> Result<()> {
     let _network_guard = network_test_guard().await;
