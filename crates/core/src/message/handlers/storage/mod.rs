@@ -356,11 +356,27 @@ impl ChordStorageInterface for Swarm {
         let transport = self.transport.clone();
         let redundancy = transport.storage_redundancy();
         transport.start_storage_lookup(entry_key, redundancy)?;
-        let act = transport
+        let action = transport
             .dht
             .entry_lookup_for_fetch(entry_key, redundancy)
             .await?;
-        handle_storage_fetch_act(transport, entry_key, act, redundancy).await
+        let result =
+            handle_storage_fetch_act(transport.clone(), entry_key, action, redundancy).await;
+        let correlation = crate::swarm::observer::LookupCorrelation::StorageResource(entry_key);
+        if result.is_err() {
+            transport.observer().lookup_finished(
+                crate::swarm::observer::LookupKind::Storage,
+                correlation,
+                crate::swarm::observer::LookupOutcome::Failed,
+            );
+        } else if transport.dht.local_cache_get(entry_key).await?.is_some() {
+            transport.observer().lookup_finished(
+                crate::swarm::observer::LookupKind::Storage,
+                correlation,
+                crate::swarm::observer::LookupOutcome::Succeeded,
+            );
+        }
+        result
     }
 
     /// Store Entry, `TryInto<Entry>` is implemented for alot of types

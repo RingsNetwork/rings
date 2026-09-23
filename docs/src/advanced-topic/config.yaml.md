@@ -122,9 +122,11 @@ where noted.
 ## Control API
 
 * `internal_api_port`: loopback JSON-RPC listener for the `rings` CLI and local tooling; every
-  route requires the Bearer token.
+  route requires the Bearer token. The existing `/status` route also provides the compact
+  [operator observability](../operator-observability.md) projection.
 * `external_api_addr`: JSON-RPC listener peers dial for the HTTP handshake. `nodeDid` and
-  `answerOffer` are public; status and registry reads require the token.
+  `answerOffer` are public; status and registry reads, including the compact observability
+  projection, require the token.
 * `endpoint_url`: the internal endpoint the CLI connects to.
 * `api_token_path`: optional path of the Bearer token file; by default `api-token` next to the
   config file. Relative paths are resolved next to the config file.

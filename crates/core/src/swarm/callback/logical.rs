@@ -9,7 +9,14 @@ use crate::message::with_message_variants;
 use crate::message::HandleMsg;
 use crate::message::Message;
 use crate::message::MessageHandler;
+use crate::message::MessageKind;
 use crate::message::MessagePayload;
+use crate::swarm::observer::LookupCorrelation;
+use crate::swarm::observer::LookupKind;
+use crate::swarm::observer::LookupOutcome;
+use crate::swarm::observer::MessageActivity;
+use crate::swarm::observer::MessageObservation;
+use crate::swarm::observer::ObservationOutcome;
 use crate::swarm::transport::SwarmTransport;
 
 impl LocalDelivery {
@@ -48,6 +55,18 @@ impl LogicalInbound {
             Some(message) => message,
             None => payload.transaction.data()?,
         };
+        let message_kind = MessageKind::from_message(&message);
+        let lookup_completion = match &message {
+            Message::FindSuccessorReport(_) => Some((
+                LookupKind::Successor,
+                LookupCorrelation::Transaction(payload.transaction.tx_id),
+            )),
+            Message::FoundEntry(response) => Some((
+                LookupKind::Storage,
+                LookupCorrelation::StorageResource(response.resource),
+            )),
+            _ => None,
+        };
 
         macro_rules! dispatch_message_body {
             (Chunk, $msg:expr) => {{
@@ -73,6 +92,28 @@ impl LogicalInbound {
         }
 
         let result = with_message_variants!(dispatch_message);
+
+        let outcome = if result.is_ok() {
+            ObservationOutcome::Succeeded
+        } else {
+            ObservationOutcome::Failed
+        };
+        self.transport.observe_message(MessageObservation {
+            activity: MessageActivity::Received,
+            category: message_kind.class(),
+            message_class: message_kind.as_str(),
+            outcome,
+        });
+
+        if result.is_ok() && self.is_local_destination(payload) {
+            if let Some((kind, correlation)) = lookup_completion {
+                self.transport.observer().lookup_finished(
+                    kind,
+                    correlation,
+                    LookupOutcome::Succeeded,
+                );
+            }
+        }
 
         // A handler that errored must not then be reported to the application as a successful
         // inbound message: surface the error and do not run `on_inbound` for it.

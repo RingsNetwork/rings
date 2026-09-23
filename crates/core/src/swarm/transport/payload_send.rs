@@ -39,9 +39,16 @@ use crate::error::Result;
 use crate::lifecycle::StopSource;
 use crate::lifecycle::StopToken;
 use crate::message::Message;
+use crate::message::MessageCategory;
 use crate::message::MessagePayload;
 use crate::message::MessageSigner;
 use crate::message::PayloadSender;
+use crate::swarm::observer::LookupCorrelation;
+use crate::swarm::observer::LookupKind;
+use crate::swarm::observer::LookupOutcome;
+use crate::swarm::observer::MessageActivity;
+use crate::swarm::observer::MessageObservation;
+use crate::swarm::observer::ObservationOutcome;
 use crate::utils::sleep;
 
 const TRACKED_PAYLOAD_TIMEOUT: Duration = TRANSPORT_TIMEOUT_PROFILE.tracked_payload;
@@ -59,11 +66,17 @@ struct OversizedPayloadLog {
 }
 
 struct OutboundSendLog {
+    /// Account DID that originated the logical message.
+    origin: Did,
     next_hop: Did,
     destination: Did,
     relay_destination: Did,
     tx_id: uuid::Uuid,
     message_kind: &'static str,
+    /// Finite scheduling class used for bounded aggregation.
+    category: MessageCategory,
+    /// Whether this locally originated send begins a successor lookup round.
+    starts_successor_lookup: bool,
     completion: OutboundCompletion,
 }
 
@@ -73,6 +86,8 @@ struct OutboundPreparation {
     useful_bytes: u64,
     records_missing_connection_failure: bool,
     tx_id: uuid::Uuid,
+    /// Account DID that originated the logical message.
+    origin: Did,
     destination: Did,
     relay_destination: Did,
     next_hop: Did,
@@ -637,11 +652,17 @@ impl SwarmTransport {
             capacity_permit,
             receiver: framed.receiver,
             log: OutboundSendLog {
+                origin: preparation.origin,
                 next_hop: preparation.next_hop,
                 destination: preparation.destination,
                 relay_destination: preparation.relay_destination,
                 tx_id: preparation.tx_id,
                 message_kind: message_kind.as_str(),
+                category: message_kind.class(),
+                starts_successor_lookup: matches!(
+                    message_kind,
+                    OutboundMessageKind::FindSuccessorSend
+                ) && preparation.origin == self.dht.did,
                 completion,
             },
         }))
@@ -663,6 +684,7 @@ impl SwarmTransport {
             records_missing_connection_failure: completion == OutboundCompletion::Detached
                 && message_kind.records_missing_connection_failure(),
             tx_id: payload.transaction.tx_id,
+            origin: payload.transaction.origin(),
             destination: payload.transaction.destination,
             relay_destination: payload.relay.destination,
             next_hop: payload.relay.next_hop,
@@ -749,9 +771,43 @@ impl SwarmTransport {
             receiver,
             log,
         } = prepared;
-        let outcome = self
+        let successor_lookup = log
+            .starts_successor_lookup
+            .then_some(LookupCorrelation::Transaction(log.tx_id));
+        if let Some(correlation) = successor_lookup {
+            self.observer()
+                .lookup_started(LookupKind::Successor, correlation);
+        }
+        let result = self
             .submit_outbound_transfer(&admitted, handle, transfer, capacity_permit, receiver)
-            .await?;
+            .await;
+
+        let observation_outcome = match &result {
+            Ok(SendCompletionOutcome::Succeeded) => ObservationOutcome::Succeeded,
+            Ok(SendCompletionOutcome::Cancelled) | Err(_) => ObservationOutcome::Failed,
+        };
+        let activity = if log.origin == self.dht.did {
+            MessageActivity::Sent
+        } else {
+            MessageActivity::Forwarded
+        };
+        self.observe_message(MessageObservation {
+            activity,
+            category: log.category,
+            message_class: log.message_kind,
+            outcome: observation_outcome,
+        });
+        if let Some(correlation) = successor_lookup {
+            if matches!(observation_outcome, ObservationOutcome::Failed) {
+                self.observer().lookup_finished(
+                    LookupKind::Successor,
+                    correlation,
+                    LookupOutcome::Failed,
+                );
+            }
+        }
+
+        let outcome = result?;
 
         tracing::debug!(
             local = %self.dht.did,

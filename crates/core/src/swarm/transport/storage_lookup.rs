@@ -6,6 +6,8 @@ use crate::dht::entry::PlacementMiss;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
+use crate::swarm::observer::LookupCorrelation;
+use crate::swarm::observer::LookupKind;
 use crate::utils::get_epoch_ms_i64;
 
 const STORAGE_LOOKUP_OBSERVATION_TTL_MS: i64 = 30_000;
@@ -109,6 +111,10 @@ impl SwarmTransport {
             observed_at_ms: now,
             misses: BTreeSet::new(),
         });
+        self.observer().lookup_started(
+            LookupKind::Storage,
+            LookupCorrelation::StorageResource(resource),
+        );
         Ok(())
     }
 

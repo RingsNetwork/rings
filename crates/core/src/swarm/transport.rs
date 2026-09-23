@@ -57,6 +57,8 @@ use crate::message::TransactionReplay;
 use crate::swarm::callback::InnerSwarmCallback;
 use crate::swarm::callback::SwarmCallbackSlot;
 use crate::swarm::callback::SwarmEvent;
+use crate::swarm::observer::MessageObservation;
+use crate::swarm::observer::SharedSwarmObserver;
 use crate::utils::get_epoch_ms_i64;
 
 mod connection;
@@ -154,6 +156,8 @@ pub(crate) struct SwarmTransportParts {
     pub(crate) settings: SwarmTransportSettings,
     /// The application callback slot; see `SwarmTransport::callback_slot`.
     pub(crate) callback: SwarmCallbackSlot,
+    /// Bounded synchronous sink for privacy-safe operational observations.
+    pub(crate) observer: SharedSwarmObserver,
 }
 
 pub struct SwarmTransport {
@@ -181,6 +185,8 @@ pub struct SwarmTransport {
     measured_disconnects: Mutex<MeasuredDisconnectMap>,
     measure: Option<MeasureImpl>,
     transaction_replay: Arc<TransactionReplay>,
+    /// Synchronous bounded sink for semantic message and lookup activity.
+    observer: SharedSwarmObserver,
 }
 
 type MeasuredDisconnectMap = BTreeMap<Did, MeasuredDisconnect>;
@@ -276,6 +282,7 @@ impl SwarmTransport {
             transaction_replay,
             settings,
             callback,
+            observer,
         } = parts;
         let lifecycle_bounds = self::retention::lifecycle_bounds(dht.successors().capacity());
         Self {
@@ -309,7 +316,18 @@ impl SwarmTransport {
             measured_disconnects: Mutex::new(BTreeMap::new()),
             measure,
             transaction_replay,
+            observer,
         }
+    }
+
+    /// Publish one already-sanitized message observation without blocking protocol progress.
+    pub(crate) fn observe_message(&self, observation: MessageObservation) {
+        self.observer.observe_message(observation);
+    }
+
+    /// Borrow the configured operational observer for lookup lifecycle reporting.
+    pub(crate) fn observer(&self) -> &SharedSwarmObserver {
+        &self.observer
     }
 
     /// Redundancy used by storage repair and anti-entropy.

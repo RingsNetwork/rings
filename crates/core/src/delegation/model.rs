@@ -43,6 +43,21 @@ impl Delegation {
         self.delegatee_did
     }
 
+    /// Return the Unix epoch millisecond at which this delegation became valid.
+    pub const fn created_at_ms(&self) -> u128 {
+        self.ts_ms
+    }
+
+    /// Return the authorized lifetime of this delegation in milliseconds.
+    pub const fn ttl_ms(&self) -> u64 {
+        self.ttl_ms
+    }
+
+    /// Return the saturating Unix epoch millisecond at which this delegation expires.
+    pub fn expires_at_ms(&self) -> u128 {
+        self.ts_ms.saturating_add(u128::from(self.ttl_ms))
+    }
+
     /// Check whether this delegation has expired.
     pub fn is_expired(&self) -> bool {
         self.is_expired_at(utils::get_epoch_ms())

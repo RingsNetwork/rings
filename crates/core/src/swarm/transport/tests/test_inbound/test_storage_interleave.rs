@@ -32,6 +32,7 @@ use crate::swarm::callback::DefaultCallback;
 use crate::swarm::callback::InnerSwarmCallback;
 use crate::swarm::callback::SwarmCallback;
 use crate::swarm::callback::SwarmCallbackSlot;
+use crate::swarm::observer::NoopSwarmObserver;
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::transport::SwarmTransportParts;
 use crate::swarm::transport::SwarmTransportSettings;
@@ -142,6 +143,7 @@ async fn test_inbound_storage_batch_yields_to_control_between_persistence_steps(
             ReassemblyLimits::production(),
         ),
         callback: SwarmCallbackSlot::new(Arc::new(DefaultCallback)),
+        observer: Arc::new(NoopSwarmObserver),
     }));
     let callback = Arc::new(InnerSwarmCallback::new(
         Arc::clone(&transport),

@@ -20,6 +20,8 @@ pub mod measure;
 #[cfg(all(feature = "node", not(target_family = "wasm")))]
 /// Native-node configuration, CLI, and runtime adapters.
 pub mod native;
+/// Bounded, privacy-safe operator observability models and exporters.
+pub mod observability;
 pub mod onion;
 pub mod online;
 mod peer_quota;
