@@ -58,6 +58,8 @@
 \newcommand{\Hm}{\hat H}
 \newcommand{\PRG}{\mathrm{PRG}}
 \newcommand{\MAC}{\mathrm{MAC}}
+\newcommand{\KDF}{\mathrm{KDF}}
+\newcommand{\Frame}{\mathrm{Frame}}
 \newcommand{\vh}[1]{\hat v_{#1}}
 \newcommand{\sid}{\varsigma}
 \DeclareRobustCommand{\code}[1]{{\ttfamily\renewcommand{\_}{\textunderscore\allowbreak}#1}}
@@ -93,8 +95,9 @@ not a monad.  Each segment holds $s=2$
 relays, the guard counting in both end segments; every hop parses one
 uniform layer of a fixed-length Sphinx-style header; values travel in a carry slot of one width per loop, enciphered with AEZ, one
 length-preserving layer per relay and one authenticated layer per
-consumer; replies to world-facing sessions ride single-use reply blocks
-under credit flow control.  We state eleven laws, among them
+consumer; replies to world-facing sessions ride single-use reply blocks,
+batched into credit loops, reaching $\ge1$\,MB/s per client at the
+16\,KiB class.  We state eleven laws, among them
 noninterference over hop views, position hiding, client path authority
 (which admits Arrow composition and excludes monadic bind), byte
 unlinkability, and
@@ -169,11 +172,12 @@ A $\WF$ session symbol (\code{tcp}, \code{https}) is a stream symbol:
 $\Args_f\ni(\sid,\mathit{target})$ with a session id
 $\sid\in\{0,1\}^{128}$ drawn by $\cl$ per session, and
 $\In_f=\Out_f=\mathrm{Frame}$,
-\[
+\begin{gather*}
 \enc(\mathrm{data}(w))=\mathtt{00}\,\|\,w,\qquad
-\enc(\mathrm{fin})=\mathtt{01},
-\]
-with $|w|\le C_0-2$ (L3).  $h$ opens $\sid$ at its first forward loop,
+\enc(\mathrm{fin})=\mathtt{01},\\
+\enc(\mathrm{credit}(\upsilon_1..\upsilon_k))=\mathtt{02}\,\|\,\upsilon_1\|\cdots\|\upsilon_k,
+\end{gather*}
+with $|w|\le C_0-2$ (L3) and $\upsilon_j$ SURBs of $\sid$ (D8).  $h$ opens $\sid$ at its first forward loop,
 binding it to $\mathit{target}$, and rejects a later loop of $\sid$ with
 another target.  $\mathrm{data}(\epsilon)$ is a credit-only loop.
 $\mathrm{fin}$ closes one direction; $h$ drops $\sid$ once both directions
@@ -306,7 +310,7 @@ removed, since a short path is a distinguishable segment length (D5).
 \toprule
 $n$ & $H$ & DIDs & $E$ & header $|\beta|$ \\
 \midrule
-1 & 5 & 4 & 6 & \multirow{4}{*}{$\Hm\ell=9310$\,B} \\
+1 & 5 & 4 & 6 & \multirow{4}{*}{$\Hm\ell=3094$\,B} \\
 2 & 8 & 7 & 9 & \\
 3 & 11 & 10 & 12 & \\
 4 & 14 & 13 & 15 & \\
@@ -319,8 +323,7 @@ $n$ & $H$ & DIDs & $E$ & header $|\beta|$ \\
 \begin{defD}{D6}{uniform layer}
 Every position $i$ has one layer shape
 \[
-\lambda_i=(f_i,\bar a_i,\nxt_i,e_i,x,\nu_i,\kappa_i,\gamma_{i+1},
-\alpha_{i+1})
+\lambda_i=(f_i,\bar a_i,\nxt_i,e_i,x,\nu_i,\kappa_i,\gamma_{i+1},t_i)
 \]
 of $\ell$ bytes, with $\bar a_i$ padded to $A$ bytes: epoch $e_i$, one
 expiry per loop,
@@ -330,10 +333,10 @@ Q=30\,\mathrm{s},\qquad X_0=V-Q=120\,\mathrm{s},
 \end{gather*}
 a function of the build quantum only ($X_0$ is today's
 \code{ONION\_FORWARD\_PAYLOAD\_TTL\_MS}), replay nonce
-$\nu_i$, carry keys $\kappa_i=(k^{\mathrm{in}}_i;k^{\mathrm{out}}_{i,1..s+1})$,
-and the next hop's MAC $\gamma_{i+1}$ and key transport $\alpha_{i+1}$
-(Def.~\ref{def:header}).  A relay has $\bar a_i=()$ and random
-$k^{\mathrm{out}}$.  Each loop has one class $b\in\mathfrak B$, today's
+$\nu_i$, carry seeds $\kappa_i=(\sigma^{\mathrm{in}}_i,\sigma^{\mathrm{out}}_i)$
+(D7), the next hop's MAC $\gamma_{i+1}$ (Def.~\ref{def:header}), and a
+16-byte tag field $t_i$ (D6$'$).  A relay has $\bar a_i=()$ and random
+$\sigma^{\mathrm{out}}$.  Each loop has one class $b\in\mathfrak B$, today's
 cell buckets above 4\,KiB ($16$\,KiB to $12$\,MiB), chosen by $\cl$; the
 cell on every edge of the loop, SURB replies included, is
 \[
@@ -343,13 +346,24 @@ cell on every edge of the loop, SURB replies included, is
 padded to $b$, with $C_b=b-|\chi|-F$ and $F$ the cell framing.
 \end{defD}
 
-With today's encodings (239-byte ElGamal-AEAD envelope as $\alpha$, 43-byte
-DIDs, 52-byte public keys), $48$-byte AEZ keys and a $16$-byte $\gamma$,
-$\ell(s,A)=409+A+48(s+2)$, so $\ell(2,64)=665$\,B and $|\beta|=9310$\,B:
-every loop cell uses at least the 16\,KiB bucket.
+\begin{defD}{D6$''$}{header encoding}
+Key transport is Sphinx's single blinded group element $\alpha$ (33\,B);
+DIDs are raw 20\,B; carry keys travel as 32-byte seeds.  With
+$A=64$,
+\begin{gather*}
+\ell=\underbrace{1}_{f}+\underbrace{64}_{\bar a}+\underbrace{20}_{\nxt}
++\underbrace{16}_{e}+\underbrace{8}_{x}\\
++\underbrace{16}_{\nu}+\underbrace{64}_{\kappa}+\underbrace{16}_{\gamma}
++\underbrace{16}_{t}=221\,\mathrm{B},\\
+|\beta|=\Hm\ell=3094\,\mathrm{B},\\
+|\chi|=33+|\beta|+16=3143\,\mathrm{B},
+\end{gather*}
+so $C_{16\,\mathrm{KiB}}\approx13.2$\,KB, about $80\%$ of the cell.
+\end{defD}
 
 \begin{definition}[Fixed-length header]\label{def:header}
-Hop $i$ derives $K_i$ from $\alpha_i$ and its secret key and expands
+Hop $i$ derives $K_i$ from $\alpha_i$ and its secret key, blinds
+$\alpha_{i+1}=\alpha_i^{\,\mathrm{Hash}(\alpha_i,K_i)}$, and expands
 $\rho_i=\PRG(K_i)\in\{0,1\}^{(\Hm+1)\ell}$; $\rho[a,b)$ is a byte range in
 units of $\ell$.  It checks the $16$-byte $\gamma_i=\MAC_{K_i}(\beta_i)$ and peels
 \[
@@ -366,10 +380,8 @@ The client builds, for $1\le i<H$, with $R$ uniform,
 \end{gather*}
 \end{definition}
 
-This is Sphinx's header~\cite{Danezis2009}: per-hop PRG filler with MACs
-the client precomputes.  $\alpha_{i+1}$ is either a per-layer envelope
-carried in $\lambda_i$ (as above) or a blinding of $\alpha_i$ (Sphinx's
-single group element, roughly halving $\ell$); L5$'$ holds for both.
+This is Sphinx's header~\cite{Danezis2009}: one blinded group element
+per packet and per-hop PRG filler with MACs the client precomputes.
 
 \begin{proposition}[Header correctness]\label{prop:header}
 For $H\le\Hm$ and $1\le i<H$, peeling $\beta_i$ under $K_i$ yields
@@ -392,8 +404,9 @@ $\lambda_i$ and fresh coins alone, independent of $H$, $i$, and every
 other layer.
 \end{lemma}
 \begin{proof}
-$|\chi|$ is constant.  Hop $i$ unmasks $\lambda_i$ and $\beta_{i+1}$, and
-reads $\alpha_{i+1},\gamma_{i+1}$ from $\lambda_i$.  Every block of
+$|\chi|$ is constant.  Hop $i$ unmasks $\lambda_i$ and $\beta_{i+1}$,
+reads $\gamma_{i+1}$ from $\lambda_i$, and blinds $\alpha_{i+1}$, which is
+uniform in the group to $i$ by the DDH assumption ($\epsilon_\alpha$).  Every block of
 $\beta_{i+1}$ but the last is masked by some $\rho_j$, $j\ne i$: by
 $\rho_{i+1}$ when $i+1<H$, and by $\rho_H$ or an upstream term of
 $\phi_{H-1}$ when $i+1=H$.  The last block is $\rho_i[\Hm,\Hm{+}1)$,
@@ -435,13 +448,16 @@ $|\Enc{\tau}{k}(m)|=|m|+\tau$, and $\Dec{\tau}{k}$ returns $\bot$ unless
 the deciphered block ends in $\tau$ zero bytes.
 
 \begin{defD}{D7}{carry}
-For segment $k$ the client draws fresh keys
-$k_{r_{k,1}},..,k_{r_{k,s}},k_{c_k}$ and places them
-\[
-\kappa_{p_k}^{\mathrm{out}}=(k_{r_{k,1}},..,k_{r_{k,s}},k_{c_k}),\quad
-\kappa_{r_{k,j}}^{\mathrm{in}}=k_{r_{k,j}},\quad
-\kappa_{c_k}^{\mathrm{in}}=k_{c_k}.
-\]
+For segment $k$ the client draws one 32-byte segment seed $\sigma_k$ and
+derives, with HKDF-SHA256 under distinct domain tags,
+\begin{gather*}
+\sigma_{k,j}=\KDF_{32}(\sigma_k,j),\quad \sigma_{k,c}=\KDF_{32}(\sigma_k,c),\\
+k_{r_{k,j}}=\KDF_{48}(\sigma_{k,j}),\qquad k_{c_k}=\KDF_{48}(\sigma_{k,c}),
+\end{gather*}
+re-drawing $\sigma_k$ if a derived key has a zero AEZ subkey
+($\approx2^{-128}$).  It places $\sigma^{\mathrm{out}}_{p_k}=\sigma_k$,
+$\sigma^{\mathrm{in}}_{r_{k,j}}=\sigma_{k,j}$, and
+$\sigma^{\mathrm{in}}_{c_k}=\sigma_{k,c}$.
 With $b_k=\pad(\enc(v_k))$ and $\tau=16$:
 \begin{gather*}
 y_{k,0}=\Enc{0}{k_{r_{k,1}}}\circ\cdots\circ\Enc{0}{k_{r_{k,s}}}
@@ -466,11 +482,11 @@ $b_k\|0^{16}$): a fresh key not held by $i$ and used once by L9
 image under a permutation keyed by $i$'s own key.
 \end{proof}
 
-Since $s$ is constant, $|\kappa_i|$ is constant and reveals no position.
-AEZ v5 is implemented in-repo on RustCrypto \code{aes::hazmat}
-(constant-time, \code{wasm32}); keys are raw $48$-byte strings, a key with
-a zero subkey $I$, $J$ or $L$ is rejected, and $\mathrm{GF}(2^{128})$
-doubling is branch-free.  $C\ge32$ keeps every call on the AEZ-core
+Every layer carries exactly one inbound and one outbound seed, so
+$|\kappa_i|=64$\,B reveals no position.  AEZ v5 is implemented in-repo on
+RustCrypto \code{aes::hazmat} (constant-time, \code{wasm32}); its API takes
+raw $48$-byte keys only (no Extract), a key with a zero subkey $I$, $J$ or
+$L$ is rejected, and $\mathrm{GF}(2^{128})$ doubling is branch-free.  $C\ge32$ keeps every call on the AEZ-core
 path, never AEZ-tiny.
 
 \begin{proposition}[One value per key]\label{prop:onekey}
@@ -478,8 +494,9 @@ Under L9 every $k_{r_{k,j}}$ and $k_{c_k}$ is applied to exactly one
 $C$-byte value: enciphered once by $p_k$, deciphered once by its holder.
 \end{proposition}
 \begin{proof}
-Keys are fresh per layer (D7).  $p_k$ enciphers its single output once
-under each key of $\kappa^{\mathrm{out}}_{p_k}$.  The holder of $k$
+Keys derive from a fresh $\sigma_k$ per segment (D7).  $p_k$ enciphers
+its single output once under each key derived from
+$\sigma^{\mathrm{out}}_{p_k}$.  The holder of $k$
 deciphers only a cell whose layer names $k$, and L9 admits that layer
 once, across restarts by the process epoch.  Without L9 a replayed cell
 with a modified carry makes the holder a chosen-ciphertext oracle under a
@@ -492,26 +509,27 @@ fixed key: L9 is load-bearing for AEZ.
 \begin{algorithmic}[1]
 \State $(\lambda,\chi')\gets\peel(\mathit{sk}_i,\chi)$;\ \textbf{if}
   $\gamma$ fails \textbf{then} drop
-\If{$x\notin(\arr,\arr{+}V]\vee e\ne\mathrm{epoch}_i\vee\nu\in R_i
-  \vee R_i^{\frm}\text{ full}$} \State drop
+\If{$x\notin(\arr,\arr{+}V]\vee e\ne\mathrm{epoch}_i\vee\nu\in R_i[x]
+  \vee\text{over budget}$} \State drop
   \Comment{L9} \EndIf
-\State $R_i\gets R_i\cup\{(\nu,\arr+V)\}$
+\State $R_i[x]\gets R_i[x]\cup\{\nu\}$;\
+  $k^{\mathrm{in}}\gets\KDF_{48}(\sigma^{\mathrm{in}})$
 \If{$f=\relay$} \State $y'\gets\Dec{0}{k^{\mathrm{in}}}(y)$
 \Else
   \State $b\gets\Dec{\tau}{k^{\mathrm{in}}}(y)$;\ \textbf{if} $b=\bot$
     \textbf{then} drop \Comment{L8}
   \If{$f$ is a session symbol, $\bar a=(\sid,\mathit{target})$}
-    \State $Q_{h,\sid}\gets Q_{h,\sid}\cup\{(\nxt,\chi',\kappa^{\mathrm{out}},x)\}$
+    \State $Q_{h,\sid}\gets Q_{h,\sid}\cup\{(\nxt,\chi',\sigma^{\mathrm{out}},x)\}$
       \Comment{D8}
-    \State apply $\enc^{-1}\pad^{-1}(b)$ to session $\sid$ (D2$'$);\
-      \Return
+    \State apply $\enc^{-1}\pad^{-1}(b)$ to session $\sid$: data, fin, or
+      $\mathrm{credit}(\vec\upsilon)$ into $Q_{h,\sid}$ (D2$'$);\ \Return
   \EndIf
   \State $w\gets\sem{f}(\bar a,\enc^{-1}\pad^{-1}(b))$ by $\arr+L(f)$
     \Comment{L4}
   \If{late $\vee\ |\enc_f(w)|>W(f)$} \State drop \Comment{L3} \EndIf
-  \State $y'\gets\Enc{0}{k^{\mathrm{out}}_1}\circ\cdots\circ
-    \Enc{0}{k^{\mathrm{out}}_s}\circ\Enc{\tau}{k^{\mathrm{out}}_{s+1}}
-    (\pad\,\enc_f(w))$
+  \State $y'\gets\Enc{0}{k_1}\circ\cdots\circ
+    \Enc{0}{k_s}\circ\Enc{\tau}{k_{c}}(\pad\,\enc_f(w))$, keys from
+    $\sigma^{\mathrm{out}}$
 \EndIf
 \State release $(\chi',y')$ to $\nxt$ at $\arr+L(f)$
 \end{algorithmic}
@@ -527,27 +545,23 @@ session $\sid$ of $h$}
 \If{$Q_{h,\sid}=\emptyset$} \State pause reading;\ \Return
   \Comment{Inv.~\ref{inv:credit}}
 \EndIf
-\State $\upsilon=(\nxt,\chi,k_1..k_{s+1},x)\gets$ the element of least $x$
+\State $\upsilon=(\nxt,\chi,\sigma,x)\gets$ the element of least $x$
 \State $Q_{h,\sid}\gets Q_{h,\sid}\setminus\{\upsilon\}$
   \Comment{single use}
 \State $w\gets\mathrm{data}(\le C_0-2$ world bytes$)$, or $\mathrm{fin}$ at EOF
 \State $y'\gets\Enc{0}{k_1}\circ\cdots\circ\Enc{0}{k_s}\circ
-  \Enc{\tau}{k_{s+1}}(\pad\,\enc(w))$
+  \Enc{\tau}{k_c}(\pad\,\enc(w))$, keys from $\sigma$ (D7)
 \State release $(\chi,y')$ to $\nxt$
 \end{algorithmic}
 \end{algorithm}
 
 \begin{defD}{D6$'$}{client position}
-$\cl$ is position $H+1$.  $\lambda_H$ carries, in place of
-$\alpha_{H+1}$, a fresh tag $t_\cl\in\{0,1\}^{128}$ padded to $|\alpha|$;
-the guard sends $(\chi_{H+1},y_H)$ with
-$\chi_{H+1}=(t_\cl,\beta_{H+1},\gamma_{H+1})$, so $|\chi_{H+1}|=|\chi|$
-and the cell is padded to $b$ like every other.  $\nxt_H$ is the DID of
-$\cl$, whose connection $g$ already holds; $\gamma_{H+1}$ is uniform and
-ignored, since $k_{c_n}$ authenticates the carry.  With blinded key
-transport, where $\lambda_H$ has no $\alpha_{H+1}$ field, $t_\cl$ takes a
-$16$-byte tag field present in every layer (uniform elsewhere), so $\ell$
-stays uniform and $\nxt_H$ still names $\cl$.
+$\cl$ is position $H+1$ and $\nxt_H$ is the DID of $\cl$, whose
+connection $g$ already holds.  $\lambda_H$ carries a fresh
+$t_\cl\in\{0,1\}^{128}$ in the 16-byte tag field present in every layer
+(uniform elsewhere), so $\ell$ stays uniform; $\gamma_{H+1}$ is uniform and
+ignored, since $k_{c_n}$ authenticates the carry.  The guard sends a
+class-$b$ cell as to any hop.
 $\cl$ keeps $T:t_\cl\mapsto(k_{c_n},\text{loop})$, removes the entry on
 first use or at $x$, and drops a cell with an unknown tag.  A SURB is the
 suffix of a forward loop and ends in that loop's tag.
@@ -562,31 +576,34 @@ links nothing the guard cannot already link by timing.
 A single-use reply block for session $\sid$ at $h$ is the client-sealed
 loop suffix after $h$:
 \[
-\upsilon=(\nxt,\chi_\upsilon,k_{r_1},..,k_{r_s},k_{\cl},x_\upsilon).
+\upsilon=(\nxt,\chi_\upsilon,\sigma_\upsilon,x_\upsilon),\quad
+|\upsilon|=20+|\chi|+32+8=3203\,\mathrm{B}.
 \]
 $h$ keeps the suffix of every forward loop of $\sid$ that reaches it
-($\chi_{i+1}$, $\kappa^{\mathrm{out}}_i$, $x$) as one SURB in
-$Q_{h,\sid}$, and spends it only on a reply of $\sid$; no SURB rides in a
-carry value.
+($\chi_{i+1}$, $\sigma^{\mathrm{out}}_i$, $x$) as one SURB in
+$Q_{h,\sid}$, adds the $k$ SURBs of a $\mathrm{credit}$ frame, and spends
+a SURB only on a reply of $\sid$, removing it before release.
 \end{defD}
 
-\begin{proposition}[No SURB in the carry]\label{prop:nosurb}
-A carried SURB forces $C>\Hm\ell$ on every edge.
+\begin{proposition}[SURB batching]\label{prop:batch}
+A credit loop carries $k=\lfloor(C_0-2)/|\upsilon|\rfloor$ SURBs and
+yields $k+1$ credits.  At $b=16$\,KiB, $k=4$ for framing $F\le411$\,B and
+$k\ge3$ for $F\le3.6$\,KB; upload is $1/(k+1)$ of download.
 \end{proposition}
 \begin{proof}
-L5$'$ fixes $|\chi_\upsilon|=|\chi|>|\beta|=\Hm\ell$ (a shorter reply
-header would name the reply path), and L3 fixes one $C$ for every edge of a loop and its
-replies.
+L5$'$ fixes $|\chi_\upsilon|=|\chi|$, so $|\upsilon|=3203$\,B, and
+$C_0-2=16384-3143-F-18$.  The loop's own suffix is the $(k{+}1)$-th SURB.
 \end{proof}
 
-At $s=2$ that would at least double every cell ($9310$\,B of $\beta$ in
-the carry besides the header's own), so credit arrives only as forward
-loops: one forward cell per reply cell, data optional.
+With the 9.3\,KB header of the per-layer-envelope encoding a SURB did not
+fit a 16\,KiB carry, and credit was one forward cell per reply cell;
+D6$''$ removes that premise.
 
 \begin{invariant}[Credit]\label{inv:credit}
 For each session $\sid$ at $h$ let $Q_{h,\sid}$ be its unexpired SURBs
-($t_\upsilon$ the arrival of $\upsilon$), $u(t)$ its forward loops received
-and $r(t)$ its replies emitted by time $t$.  Then
+($t_\upsilon$ the arrival of $\upsilon$), $u(t)$ its SURBs received (one
+per forward loop plus $k$ per credit frame) and $r(t)$ its replies emitted
+by time $t$.  Then
 \begin{gather*}
 r(t)\le u(t),\qquad \upsilon\in Q_{h,\sid}\Rightarrow t<x_\upsilon\le
 t_\upsilon+V,\\
@@ -594,8 +611,8 @@ t_\upsilon+V,\\
 \end{gather*}
 Each reply removes one $\upsilon$ from $Q_{h,\sid}$
 (Algorithm~\ref{alg:reply}), produced as segment $n$ of D7 with
-$p_n=h$; an expired $\upsilon$ is discarded unused; a new forward loop
-resumes reading.  By the rule for $x$, a SURB lives at most $X_0+Q=V$,
+$p_n=h$; an expired $\upsilon$ is discarded unused; new credit resumes
+reading; $h$ sends $\mathrm{fin}$ at world EOF.  By the rule for $x$, a SURB lives at most $X_0+Q=V$,
 and a session idle for longer than $V$ holds no credit.
 \end{invariant}
 
@@ -605,8 +622,9 @@ and a session idle for longer than $V$ holds no credit.
 AEZ is an ideal enciphering scheme~\cite{Hoang2015}: under a fresh key
 a hop does not hold, $\Enc{\tau}{k}(m)=\Pi_k(m\,\|\,0^{\tau})$ for a
 uniformly random permutation $\Pi_k$ of $\{0,1\}^{|m|+\tau}$, for
-$\tau=0$ and $\tau=16$ alike; $\PRG$ and $\MAC$ are secure, and key transport
-reveals $K_j$ to hop $j$ only.  Network delays $\delta$ are fixed per edge.
+$\tau=0$ and $\tau=16$ alike; $\PRG$, $\MAC$ and HKDF (as a PRF) are
+secure, and DDH holds in the group of $\alpha$, so $K_j$ is known to hop
+$j$ only.  Network delays $\delta$ are fixed per edge.
 $\cl$ departs at $t_{\mathrm{build}}$, whose phase
 $t_{\mathrm{build}}\bmod Q$ is uniform and independent of the loop; no hop
 other than $g$ observes $t_{\mathrm{build}}$ beyond what $x$ reveals.
@@ -745,40 +763,57 @@ place; this is Sphinx's wide-block payload~\cite{Danezis2009,Anderson1996}
 with AEZ in place of LIONESS.
 
 \begin{lawL}{L9}{replay}
-With $V=150$\,s (\code{ONION\_FORWARD\_MAX\_VALIDITY\_MS}) and per-sender
-capacity $B=4096$ over at most $64$ senders, hop $i$ admits a layer at
-$\arr$ iff
+$R_i$ is a family of Bloom filters $R_i[x]$ keyed by the quantised
+expiry; $R_i[x]$ is dropped when $x$ passes, so at most $V/Q+1=6$ are live.
+With $V=150$\,s (\code{ONION\_FORWARD\_MAX\_VALIDITY\_MS}), per-sender
+budget $B=16384$ over at most $64$ senders, and a global budget $64B$, all
+per $V$, hop $i$ admits a layer at $\arr$ iff
 \[
-\arr<x\le\arr+V\ \wedge\ \nu\notin R_i\ \wedge\ |R_i^{\frm}|<B,
+\arr<x\le\arr+V\ \wedge\ \nu\notin R_i[x]\ \wedge\ \text{within budget},
 \]
-then retains $\nu$ in $R_i$ until $\arr+V$.  A full $R_i^{\frm}$ rejects;
-no tag leaves $R_i$ before its retention ends.  A sender beyond the 64th
-takes the quota of the least recently active partition, whose tags stay in
-$R_i$ until their retention ends; admission rejects while $|R_i|=64B$.  A SURB is a layer, hence
-single use; L9 also bounds each AEZ key to one carry value
+then inserts $\nu$ into $R_i[x]$.  A sender beyond the 64th takes the
+budget of the least recently active one.  This admission replaces the
+per-peer crypto limiter (\code{MAX\_ONION\_CRYPTO\_*}).  A SURB is a layer,
+hence single use; L9 also bounds each AEZ key to one carry value
 (Prop.~\ref{prop:onekey}).
 \end{lawL}
 
 \begin{proposition}[Replay bounds]\label{prop:replay}
-(i) No admitted layer outlives its tag: $x\le\arr+V$.  (ii) $|R_i|\le64B$.
-(iii) Hop $i$ admits at most $B$ layers per sender per $V$, i.e.\
-$B/V\approx27$ cells\,s$^{-1}$ per neighbour.  (iv) A SURB is usable
+(i) No admitted layer outlives its filter: $x\le\arr+V$ and $R_i[x]$
+lives until $x$.  (ii) A Bloom filter has no false negatives, so admission
+is at most once exactly; a false positive drops a valid cell, the safe
+direction, at rate $\le2^{-20}$, and $64B$ tags take $\approx3.8$\,MB.
+(iii) Hop $i$ admits at most $B/V\approx109$ cells\,s$^{-1}$ per
+neighbour and (iv) $64B/V\approx6990$ in total.  (v) A SURB is usable
 only within $[x_\upsilon-V,x_\upsilon)$, so SURB lifetime is at most $V$.
-(v) Hop $i$ admits at most $64B/V\approx1748$ cells\,s$^{-1}$ in total.
 \end{proposition}
 \begin{proof}
-(i) is the admission window; (ii) the capacity guard; (iii) each admitted
-tag occupies a slot for $V$; (iv) every relay of the reply path applies
-(i) at the reply's arrival; (v) follows from (ii).
+(i) is the admission window with filters keyed by $x$; (ii) Bloom filters
+at $\approx28.9$ bits per tag for rate $2^{-20}$; (iii), (iv) are the
+budgets; (v) every relay of the reply path applies (i) at the reply's
+arrival.
 \end{proof}
 
-(iii) bounds per-neighbour loop throughput, including SURB replies; $B$
-is a tuning constant, not a law.  Every loop of one client enters $g$ from
-$\cl$, so (iii) also caps a client's total forward rate at $B/V$ cells per
-second and, by Inv.~\ref{inv:credit}, its total reply rate across all its
-sessions at $B\,C_b/V$ bytes per second, about $180$\,KB\,s$^{-1}$ at
-$b=16$\,KiB.  This client-level cap, not relay-to-relay traffic, is what
-constrains $B$.
+\begin{proposition}[Throughput]\label{prop:rate}
+A single client's download on a class-$b$ loop is at most
+\[
+\min\Bigl(\frac{B}{V},\ (k+1)\,\rho_{\mathrm{f}}\Bigr)\,(C_0-2)
+\]
+bytes\,s$^{-1}$, $\rho_{\mathrm{f}}$ its forward-cell rate.  At
+$b=16$\,KiB, $B/V\cdot(C_0-2)\approx109\cdot13.2\,\mathrm{KB}\approx
+1.44$\,MB/s $\ge1$\,MB/s, reached with $\rho_{\mathrm{f}}\ge109/(k+1)$.
+\end{proposition}
+\begin{proof}
+Every reply cell passes $s$ relays of segment $n$, each admitting at most
+$B/V$ cells from its predecessor (iii), and consumes one SURB, of which
+each forward cell supplies $k+1$ (Prop.~\ref{prop:batch}); a reply frame
+carries at most $C_0-2$ data bytes (D2$'$).
+\end{proof}
+
+Every loop of one client enters $g$ from $\cl$, so (iii) caps its forward
+rate at $B/V$ cells\,s$^{-1}$; with batching that funds $(k+1)B/V$ reply
+cells, more than one relay admits, so the reply path, not the client's
+credit, binds.
 
 \begin{lawL}{L10}{wire}
 Phase~1 preserves today's bytes (golden tests); Phase~2 replaces them with
@@ -805,7 +840,7 @@ session reply timing & follows the world, not $L(f)$ (L4); a session hop may hol
 expiry $x$ & shared by all hops of a loop and all loops sealed in one $Q=30$\,s quantum: colluders link positions only within that set \\
 $x$ locates departure within $Q$ & $\arr_i$ then reveals the client-to-hop delay $D_i$ to within $Q$: position advantage $|D_i-D'_{i'}|/Q$ (L5$'$) \\
 session id $\sid$ & seen only by $h$, sealed in $\lambda_h$; links the loops of one session, which $h$ links by target anyway (D2$'$) \\
-$p_k$ holds $\kappa^{\mathrm{out}}_{p_k}$ & $p_k$ colluding with $r_{k,j}$ links two positions of one segment; no value leaks, and timing links them anyway \\
+$p_k$ holds $\sigma_k$ & $p_k$ colluding with $r_{k,j}$ links two positions of one segment; no value leaks, and timing links them anyway \\
 client-authored semantics ($\bar a_{i+1}$ depends on meaning of $v_i$) & out of protocol scope \\
 \bottomrule
 \end{tabular}
@@ -849,14 +884,14 @@ innermost layer to a constant total only moves the leak from $H-i$ to $i$.
 concern & current & here \\
 \midrule
 layers & \code{Relay}, \code{Exit} & one uniform $\lambda_i$ (D6) \\
-header & nested, $-404$\,B per hop & fixed $\Hm\ell$ (L5$'$) \\
+header & nested, $-404$\,B per hop & fixed $\Hm\ell=3094$\,B (L5$'$, D6$''$) \\
 length & $3$ by default, $\le8$, short paths allowed & $H(n,2)\le14$ (D5) \\
 computation & exit service only & any $f\in\Sigma_n$ (D2) \\
 return path & forward path reversed & fresh relays to $g$ (L7) \\
 relay state & \code{relay\_returns}, $\le1024$, TTL $120$\,s refreshed per cell & replay tags only (L9) \\
 return bytes & one ciphertext, identical per edge & one AEZ layer per edge (L8) \\
-replay & exits (\code{consume\_forward\_nonce}), $V=150$\,s, $B=4096$ & every hop, same $V$, $B$ (L9) \\
-session replies & no SURB credit & one per SURB (Inv.~\ref{inv:credit}) \\
+replay & exits (\code{consume\_forward\_nonce}), $V=150$\,s, $B=4096$, crypto limiter & every hop, $x$-keyed Bloom filters, $B=16384$ (L9) \\
+session replies & no SURB credit & one per SURB, $k$ per credit loop (D8) \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -890,9 +925,9 @@ colluding relays match bytes & per-edge re-encipherment (L8), up to the shared $
 tagging & whole-value rejection, $2^{-8\tau}$ (L8) \\
 hop-chosen routing & $\nxt_i\in\lambda_i$ (L6); bind excluded (Prop.~\ref{prop:arrow}) \\
 first/last-hop correlation & one guard closes the loop (L7) \\
-replay of layer or SURB & single admission per $\nu$ (L9) \\
+replay of layer or SURB & single admission per $\nu$; no false negatives across filter rotation (L9) \\
 replay across a restart & new process epoch rejects every older layer (D2, L9) \\
-reply amplification & $r(t)\le u(t)$ (Inv.~\ref{inv:credit}) \\
+reply amplification & $r(t)\le u(t)$ per session (Inv.~\ref{inv:credit}) \\
 symbol abuse & per-symbol $\quota(f)$ (D1) \\
 oversized result & fail closed at $W(f)$, or at $C_0$ for a frame (L3) \\
 \bottomrule
@@ -922,8 +957,11 @@ L3, D6 & one class $b$ and slot width $C_b$ on every edge of a loop, SURB replie
 client & reply accepted once by tag $t_\cl$; unknown, reused, or expired tag dropped; $T$ empty after every $x$ passes \\
 D5, L7 & $H=(s+1)n+s$; guard at $1$ and $H$ only; $n>4$ rejected; selection fails closed below $H-1$ eligible DIDs \\
 L8 & per-hop byte inequality; one-bit flip rejects the whole value \\
-L9 & replayed layer and reused SURB rejected; a layer for an earlier process epoch rejected after restart; $x\notin(\arr,\arr+V]$ rejected; full $R_i^{\frm}$ rejects without evicting a live tag \\
-credit & a \code{tcp} session emits no reply without a SURB of its own $\sid$, removes each SURB before release, drops expired SURBs, and resumes after a new forward loop; two sessions at one $h$ never share a SURB; $\mathrm{fin}$ both ways drops $\sid$ \\
+L9 & replayed layer and reused SURB rejected; a layer for an earlier process epoch rejected after restart; $x\notin(\arr,\arr+V]$ rejected; over-budget cells rejected \\
+credit & a \code{tcp} session emits no reply without a SURB of its own $\sid$, removes each SURB before release, drops expired SURBs, and resumes after a new forward loop; two sessions at one $h$ never share a SURB; $\mathrm{fin}$ both ways drops $\sid$; a credit frame adds $k$ SURBs \\
+rate & loopback single-client \code{tcp} download $\ge1$\,MB/s at $b=16$\,KiB, upload $\approx1/(k+1)$ of download \\
+replay store & no replayed layer admitted across filter rotation; a filter dropped exactly when its $x$ passes; measured false-positive rate within $2^{-20}$ \\
+seeds & derived keys match the KDF definition; a weak derived key forces a re-draw \\
 AEZ & $2941$ vectors from the AEZ v5 reference C code (length sweep, parameter grid, CAESAR genkat), bit-flip rejection for $\tau\ge4$, native and \code{wasm32}; weak-key rejection; \code{fuzz/} target for $\Dec{}{}\circ\Enc{}{}=\mathrm{id}$ and panic freedom \\
 \bottomrule
 \end{tabular}
@@ -939,17 +977,16 @@ AEZ & $2941$ vectors from the AEZ v5 reference C code (length sweep, parameter g
 \toprule
 phase & content \\
 \midrule
-1 & golden bytes; closed $\Sigma$ table (unknown names rejected, no \code{tcp} fallback; configs change, bytes do not); pipeline term; layer build as a fold over $P$; reducer and handler as $\Sigma$-algebra; route by symbol sequence.  Zero wire change, no bump \\
-2a & uniform layer, fixed-length header (L5$'$), loop with derived $\Hm$, loop classes, relay process epoch, client tag, stateless relays, AEZ carry, SURBs.  Breaking \\
+1 & golden bytes; closed $\Sigma$ table (unknown names rejected, no \code{tcp} fallback; configs change, bytes do not; \code{https} is request/response only, CONNECT tunnels use \code{tcp}); pipeline term; layer build as a fold over $P$; reducer and handler as $\Sigma$-algebra; route by symbol sequence.  Zero wire change, no bump \\
+2a & uniform layer, fixed-length header with blinded key transport and 32-byte seeds (L5$'$, D6$''$), loop with derived $\Hm$, loop classes, relay process epoch, client tag, stateless relays, AEZ carry, per-session SURBs with batching, $x$-keyed Bloom replay store with $B=16384$ replacing the crypto limiter.  Breaking \\
 2b & intermediate symbols: \code{Invoke} with release time, $\quota(f)$.  Same cutover; one version bump on its last PR \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 Table~\ref{tab:phases} orders the cutover.  Fixed: $s=2$, $n_{\max}=4$,
-$\Hm=14$, in-repo AEZ.  Open: key transport (per-layer envelope or one
-blinded element), raw DID and key encodings ($\ell(2,64)\approx547$\,B),
-and the replay capacity $B$.
+$\Hm=14$, in-repo AEZ with HKDF-derived keys, blinded key transport, raw
+20-byte DIDs, $B=16384$; no parameter remains open.
 Non-goals: bind, Selective branches before Phase~2b, session symbols in intermediate position, concrete symbols, and
 verification of results.
 
