@@ -1,20 +1,9 @@
-use std::time::Duration;
-
-use futures::future::Either;
-use futures::FutureExt;
-use rings_runtime::sleep;
-
 use super::build_browser_onion_proxy_route;
 use super::BrowserOnionProxy;
 use super::BrowserOnionProxyResponse;
-use crate::error::Error;
 use crate::error::Result as NodeResult;
-use crate::onion::circuit::encode_initial_forward_link;
-use crate::onion::circuit::route_first_hop;
-use crate::onion::circuit::OnionClientReturn;
-use crate::onion::https::encode_https_payload;
+use crate::onion::https::OnionHttpsCall;
 use crate::onion::https::OnionHttpsClientRequest;
-use crate::onion::https::OnionHttpsPayload;
 use crate::onion::proxy::OnionProxyRoute;
 use crate::onion::proxy::OnionProxyTarget;
 
@@ -44,43 +33,15 @@ impl BrowserOnionProxy {
         url: &str,
         request: OnionHttpsClientRequest,
     ) -> NodeResult<BrowserOnionProxyResponse> {
-        let (target, request) = crate::onion::https::client_request_from_url(url, request)?;
-        let proxy_route = self.build_route(target).await?;
-        let first_hop = route_first_hop(&proxy_route.route)?;
-        let client_return =
-            OnionClientReturn::new(self.processor.delegatee_key().delegatee_public_key());
-        let (id, pending_request) = self.runtime.begin_request(
-            first_hop,
-            proxy_route.route.exit().clone(),
-            client_return.return_id,
-        )?;
-        let request_payload = encode_https_payload(OnionHttpsPayload::Request(request))?;
-        let (first_link, payload) =
-            encode_initial_forward_link(client_return, &proxy_route.route, id, request_payload)?;
-        self.runtime
-            .link_sender()
-            .send_sealed(self.scope.clone(), first_link, payload)
+        let (target, call) = OnionHttpsCall::from_url(url, request)?;
+        let route = self.build_route(target).await?;
+        let response = self
+            .client
+            .request(self.scope.clone(), &route, call)
             .await?;
-
-        let response = pending_request.fuse();
-        let timeout = sleep(Duration::from_secs(30)).fuse();
-        futures::pin_mut!(response, timeout);
-        let response = match futures::future::select(response, timeout).await {
-            Either::Left((result, _)) => match result {
-                Ok(result) => result?,
-                Err(_) => {
-                    return Err(Error::HttpRequestError(
-                        "onion HTTPS proxy response channel closed".to_string(),
-                    ));
-                }
-            },
-            Either::Right((_, _)) => {
-                return Err(Error::OnionProxyRequestTimedOut);
-            }
-        };
-        Ok(BrowserOnionProxyResponse {
-            response,
-            route: proxy_route,
-        })
+        Ok(BrowserOnionProxyResponse { response, route })
     }
 }
+
+#[cfg(test)]
+mod tests;

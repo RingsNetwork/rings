@@ -28,8 +28,8 @@ use rings_gateway::GatewayStatusHandle;
 use tokio::sync::oneshot;
 
 use super::config::NativeGatewayConfig;
+use crate::onion::native::NativeOnionCircuitHandle;
 use crate::onion::proxy::OnionProxyConfig;
-use crate::onion::tcp::NativeOnionCircuitHandle;
 use crate::onion::NativeOnionGatewayConnector;
 use crate::prelude::StopSource;
 use crate::prelude::StopToken;

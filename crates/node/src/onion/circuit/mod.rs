@@ -21,7 +21,6 @@ use bytes::Bytes;
 pub use cell::OnionCellBucket;
 pub use codec::OnionCircuitEvent;
 pub use crypto::encode_initial_forward;
-#[cfg(rings_browser)]
 pub(crate) use crypto::encode_initial_forward_link;
 pub use crypto::route_first_hop;
 pub(crate) use crypto::send_backward;

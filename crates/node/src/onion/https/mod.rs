@@ -2,28 +2,29 @@
 //!
 //! This protocol is intentionally application-layer HTTPS. Clients can send an HTTPS request
 //! description over the route-aware onion circuit, the exit performs the request, and the response
-//! is sent back over the circuit return path.
+//! is sent back over the circuit return path. The client half lives in the `client` submodule, shared by
+//! native and browser callers; this module owns the wire payloads and the exit half.
 //!
 //! A browser page exit is constrained by the host browser's `fetch` capability: CORS, forbidden
 //! headers, credentials policy, and extension host permissions still apply. A full arbitrary HTTPS
 //! exit must run in a browser-extension or native context that grants those fetch permissions.
 
-#[cfg(any(test, rings_browser))]
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 
 use bytes::Bytes;
-#[cfg(any(test, rings_browser))]
-use futures::channel::oneshot;
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
+use rings_core::ecc::PublicKey;
 use rings_core::message::MessageSigner;
 use serde::Deserialize;
 use serde::Serialize;
 
 #[cfg(rings_browser)]
 use self::browser::execute_https_request;
+pub use self::client::OnionHttpsCall;
+pub(crate) use self::client::OnionHttpsClient;
+pub use self::client::OnionHttpsClientRequest;
 #[cfg(test)]
 use self::limits::checked_status_code;
 use self::limits::https_response_body_limit;
@@ -38,13 +39,11 @@ use self::native::native_fetch_with_timeout;
 use self::native::select_native_https_egress;
 #[cfg(all(test, rings_native))]
 use self::native::NativeHttpsEgress;
-#[cfg(any(test, rings_browser))]
-use self::pending::PendingOnionHttpsRequest;
 use crate::error::Error;
 use crate::error::Result;
 use crate::extension::ext::Scope;
 use crate::onion::circuit::send_backward;
-#[cfg(any(test, rings_browser))]
+#[cfg(rings_browser)]
 use crate::onion::circuit::OnionAuthenticatedPayload;
 use crate::onion::circuit::OnionBackwardPath;
 use crate::onion::circuit::OnionBackwardSequence;
@@ -56,21 +55,15 @@ use crate::onion::circuit::OnionCircuitPayload;
 use crate::onion::circuit::OnionForwardNonce;
 use crate::onion::circuit::OnionForwardSequence;
 use crate::onion::circuit::OnionLinkSender;
-#[cfg(any(test, rings_browser))]
-use crate::onion::circuit::OnionReturnId;
 use crate::onion::exit_accounting::OnionExitAccounting;
 use crate::onion::exit_accounting::OnionExitLease;
 use crate::onion::proxy::OnionProxyTarget;
 use crate::onion::proxy::ONION_PROXY_HTTPS_SERVICE;
 use crate::onion::replay::OnionForwardReplayWitness;
-#[cfg(any(test, rings_browser))]
-use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitFailure;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionExitTarget;
 use crate::onion::OnionRouteError;
-#[cfg(any(test, rings_browser))]
-use crate::sync_lock::lock;
 
 const DEFAULT_HTTPS_RESPONSE_BODY_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -101,13 +94,13 @@ pub struct OnionHttpsResponse {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) enum OnionHttpsPayload {
+enum OnionHttpsPayload {
     Request(OnionHttpsRequest),
     Response(OnionHttpsResponse),
     Error(OnionExitFailure),
 }
 
-pub(crate) fn encode_https_payload(payload: OnionHttpsPayload) -> Result<OnionCircuitPayload> {
+fn encode_https_payload(payload: OnionHttpsPayload) -> Result<OnionCircuitPayload> {
     rings_codec::serialize(&payload)
         .map(|body| {
             OnionCircuitPayload::new(crate::onion::OnionServiceName::https(), Bytes::from(body))
@@ -124,41 +117,9 @@ fn decode_https_payload(payload: OnionCircuitPayload) -> Result<Option<OnionHttp
         .map_err(|_| Error::DecodeError)
 }
 
-/// JS-facing request fields for one HTTPS proxy request.
-#[cfg(any(test, rings_browser))]
-#[cfg_attr(test, derive(Default))]
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-pub struct OnionHttpsClientRequest {
-    /// HTTP method. Defaults to `GET`.
-    #[serde(default = "default_method")]
-    pub method: String,
-    /// Optional path and query override. Defaults to the request URL path, then `/`.
-    #[serde(default)]
-    pub path: Option<String>,
-    /// Request headers.
-    #[serde(default)]
-    pub headers: Vec<(String, String)>,
-    /// Request body bytes.
-    #[serde(default)]
-    pub body: Vec<u8>,
-}
-
-/// JS-facing response fields returned from one HTTPS proxy request.
-#[cfg(any(test, rings_browser))]
-#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
-pub struct OnionHttpsClientResponse {
-    /// HTTP status code.
-    pub status: u16,
-    /// Response headers.
-    pub headers: Vec<(String, String)>,
-    /// Response body bytes.
-    pub body: Vec<u8>,
-}
-
-/// Shared runtime for the local HTTPS proxy protocol.
+/// Shared runtime for the local HTTPS proxy protocol: the exit adapter and the node's client.
 pub(crate) struct OnionHttpsRuntime {
-    #[cfg(any(test, rings_browser))]
-    pending: Mutex<HashMap<OnionCircuitId, PendingRequest>>,
+    client: Arc<OnionHttpsClient>,
     exit_policy: Mutex<Option<OnionExitPolicy>>,
     /// Replay authority shared with the TCP adapter installed on this node.
     pub(super) forward_replays: OnionForwardReplayWitness,
@@ -168,40 +129,29 @@ pub(crate) struct OnionHttpsRuntime {
     native_proxy: Mutex<Option<String>>,
 }
 
-impl Default for OnionHttpsRuntime {
-    fn default() -> Self {
+impl OnionHttpsRuntime {
+    /// Create a runtime with private accounting, link and replay resources.
+    #[cfg(any(test, rings_browser))]
+    pub(crate) fn new(return_key: PublicKey<33>) -> Self {
         Self::with_resources(
+            return_key,
             OnionExitAccounting::default(),
             OnionLinkSender::default(),
             OnionForwardReplayWitness::default(),
         )
     }
-}
-
-#[cfg(any(test, rings_browser))]
-struct PendingRequest {
-    expected_return_peer: Did,
-    expected_exit: OnionExitDescriptor,
-    return_id: OnionReturnId,
-    sender: oneshot::Sender<std::result::Result<OnionHttpsClientResponse, Error>>,
-}
-
-impl OnionHttpsRuntime {
-    /// Create an empty runtime.
-    #[cfg(any(test, rings_browser))]
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
 
     /// Create a runtime sharing node-wide accounting and link-traffic effect capabilities.
+    ///
+    /// `return_key` is the local delegatee key the client asks exits to answer to.
     pub(crate) fn with_resources(
+        return_key: PublicKey<33>,
         accounting: OnionExitAccounting,
         link_sender: OnionLinkSender,
         forward_replays: OnionForwardReplayWitness,
     ) -> Self {
         Self {
-            #[cfg(any(test, rings_browser))]
-            pending: Mutex::new(HashMap::new()),
+            client: Arc::new(OnionHttpsClient::new(return_key, link_sender.clone())),
             exit_policy: Mutex::new(None),
             forward_replays,
             accounting,
@@ -209,6 +159,11 @@ impl OnionHttpsRuntime {
             #[cfg(rings_native)]
             native_proxy: Mutex::new(None),
         }
+    }
+
+    /// The node's HTTPS onion client.
+    pub(crate) const fn client(&self) -> &Arc<OnionHttpsClient> {
+        &self.client
     }
 
     #[cfg(rings_browser)]
@@ -243,107 +198,6 @@ impl OnionHttpsRuntime {
         }
     }
 
-    /// Begin a client request expected to complete from the immediate return peer.
-    #[cfg(any(test, rings_browser))]
-    pub(crate) fn begin_request(
-        self: &Arc<Self>,
-        expected_return_peer: Did,
-        expected_exit: OnionExitDescriptor,
-        return_id: OnionReturnId,
-    ) -> Result<(OnionCircuitId, PendingOnionHttpsRequest)> {
-        let mut pending = lock(&self.pending)?;
-        for _ in 0..16 {
-            let id = OnionCircuitId::random();
-            if pending.contains_key(&id) {
-                continue;
-            }
-            let (sender, receiver) = oneshot::channel();
-            pending.insert(id, PendingRequest {
-                expected_return_peer,
-                expected_exit,
-                return_id,
-                sender,
-            });
-            return Ok((
-                id,
-                PendingOnionHttpsRequest::new(self.clone(), id, receiver),
-            ));
-        }
-        Err(Error::OnionRouteError(
-            OnionRouteError::CircuitIdAllocationFailed,
-        ))
-    }
-
-    #[cfg(any(test, rings_browser))]
-    fn cancel_request(&self, id: OnionCircuitId) {
-        if let Ok(mut pending) = self.pending.lock() {
-            pending.remove(&id);
-        }
-    }
-
-    /// Complete a pending HTTPS request with a signed response or error payload.
-    #[cfg(any(test, rings_browser))]
-    pub(crate) fn complete_payload(
-        &self,
-        from: Did,
-        id: OnionCircuitId,
-        payload: OnionAuthenticatedPayload,
-        network_id: u32,
-    ) {
-        let Some((pending, payload)) = self.take_pending_payload(from, id, payload, network_id)
-        else {
-            return;
-        };
-        match decode_https_payload(payload) {
-            Ok(Some(OnionHttpsPayload::Response(response))) => {
-                let _ = pending.sender.send(Ok(OnionHttpsClientResponse {
-                    status: response.status,
-                    headers: response.headers,
-                    body: response.body,
-                }));
-            }
-            Ok(Some(OnionHttpsPayload::Error(failure))) => {
-                let _ =
-                    pending
-                        .sender
-                        .send(Err(Error::OnionRouteError(OnionRouteError::ExitFailure(
-                            failure,
-                        ))));
-            }
-            Ok(Some(OnionHttpsPayload::Request(_)) | None) => {
-                let _ = pending.sender.send(Err(Error::OnionRouteError(
-                    OnionRouteError::UnexpectedBackwardPayload,
-                )));
-            }
-            Err(error) => {
-                let _ = pending.sender.send(Err(error));
-            }
-        }
-    }
-
-    #[cfg(any(test, rings_browser))]
-    fn take_pending_payload(
-        &self,
-        from: Did,
-        id: OnionCircuitId,
-        payload: OnionAuthenticatedPayload,
-        network_id: u32,
-    ) -> Option<(PendingRequest, OnionCircuitPayload)> {
-        let mut pending = self.pending.lock().ok()?;
-        let request = pending.remove(&id)?;
-        if request.expected_return_peer != from {
-            pending.insert(id, request);
-            return None;
-        }
-        match payload.into_verified_payload(request.return_id, &request.expected_exit, network_id) {
-            Ok(verified) => Some((request, verified.payload)),
-            Err(error) => {
-                let _ = request.sender.send(Err(error));
-                None
-            }
-        }
-    }
-
     pub(crate) fn exit_policy(&self) -> Option<OnionExitPolicy> {
         self.exit_policy
             .lock()
@@ -368,145 +222,6 @@ impl OnionHttpsRuntime {
 
     fn remaining_exit_bytes(&self, policy: &OnionExitPolicy) -> Result<Option<u64>> {
         self.accounting.remaining_bytes(policy)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn pending_len(&self) -> usize {
-        self.pending
-            .lock()
-            .map(|pending| pending.len())
-            .unwrap_or(0)
-    }
-}
-
-/// Parse a full HTTPS URL and encode one client request for its target.
-#[cfg(any(test, rings_browser))]
-pub(crate) fn client_request_from_url(
-    url: &str,
-    request: OnionHttpsClientRequest,
-) -> Result<(OnionProxyTarget, OnionHttpsRequest)> {
-    let (target, path) = parse_https_url(url)?;
-    let request = client_request_with_default_path(&target, request, path.as_str())?;
-    Ok((target, request))
-}
-
-#[cfg(any(test, rings_browser))]
-fn client_request_with_default_path(
-    target: &OnionProxyTarget,
-    request: OnionHttpsClientRequest,
-    default_path: &str,
-) -> Result<OnionHttpsRequest> {
-    let path = request.path.as_deref().unwrap_or(default_path);
-    Ok(OnionHttpsRequest {
-        target: target.authority(),
-        method: normalize_method(&request.method),
-        path: normalize_path(path)?,
-        headers: request.headers,
-        body: request.body,
-    })
-}
-
-#[cfg(any(test, rings_browser))]
-fn parse_https_url(url: &str) -> Result<(OnionProxyTarget, String)> {
-    let url = url.trim();
-    let (scheme, rest) = url.split_once("://").ok_or_else(|| {
-        Error::HttpRequestError(
-            "browser HTTPS onion proxy request URL must be absolute".to_string(),
-        )
-    })?;
-    if !scheme.eq_ignore_ascii_case("https") {
-        return Err(Error::HttpRequestError(format!(
-            "browser HTTPS onion proxy only supports https URLs, got scheme {scheme:?}"
-        )));
-    }
-    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let (authority, suffix) = rest.split_at(authority_end);
-    if authority.contains('@') {
-        return Err(Error::HttpRequestError(
-            "browser HTTPS onion proxy URLs must not contain userinfo".to_string(),
-        ));
-    }
-    let authority = https_authority_with_default_port(authority)?;
-    let target = OnionProxyTarget::parse_authority(authority.as_str())?;
-    Ok((target, url_path(suffix)))
-}
-
-#[cfg(any(test, rings_browser))]
-fn https_authority_with_default_port(authority: &str) -> Result<String> {
-    let authority = authority.trim();
-    if authority.is_empty() {
-        return Err(Error::HttpRequestError(
-            "browser HTTPS onion proxy URL host must not be empty".to_string(),
-        ));
-    }
-
-    if let Some(rest) = authority.strip_prefix('[') {
-        let Some((host, suffix)) = rest.split_once(']') else {
-            return Err(Error::HttpRequestError(format!(
-                "invalid IPv6 HTTPS onion proxy authority {authority:?}"
-            )));
-        };
-        if host.is_empty() {
-            return Err(Error::HttpRequestError(
-                "browser HTTPS onion proxy URL host must not be empty".to_string(),
-            ));
-        }
-        return if suffix.is_empty() {
-            Ok(format!("[{host}]:443"))
-        } else if let Some(port) = suffix.strip_prefix(':') {
-            if port.is_empty() {
-                Err(Error::HttpRequestError(format!(
-                    "HTTPS onion proxy authority {authority:?} has an empty port"
-                )))
-            } else {
-                Ok(authority.to_string())
-            }
-        } else {
-            Err(Error::HttpRequestError(format!(
-                "invalid IPv6 HTTPS onion proxy authority {authority:?}"
-            )))
-        };
-    }
-
-    if authority.contains('[') || authority.contains(']') {
-        return Err(Error::HttpRequestError(format!(
-            "invalid HTTPS onion proxy authority {authority:?}"
-        )));
-    }
-    let colon_count = authority.chars().filter(|ch| *ch == ':').count();
-    if colon_count > 1 {
-        return Err(Error::HttpRequestError(
-            "IPv6 HTTPS onion proxy URLs must use bracketed hosts".to_string(),
-        ));
-    }
-    if colon_count == 1 {
-        let Some((host, port)) = authority.rsplit_once(':') else {
-            return Err(Error::HttpRequestError(format!(
-                "invalid HTTPS onion proxy authority {authority:?}"
-            )));
-        };
-        if host.is_empty() || port.is_empty() {
-            return Err(Error::HttpRequestError(format!(
-                "invalid HTTPS onion proxy authority {authority:?}"
-            )));
-        }
-        Ok(authority.to_string())
-    } else {
-        Ok(format!("{authority}:443"))
-    }
-}
-
-#[cfg(any(test, rings_browser))]
-fn url_path(suffix: &str) -> String {
-    let path = suffix
-        .split_once('#')
-        .map_or(suffix, |(before_fragment, _)| before_fragment);
-    if path.is_empty() {
-        default_path()
-    } else if path.starts_with('?') {
-        format!("/{path}")
-    } else {
-        path.to_string()
     }
 }
 
@@ -543,8 +258,12 @@ impl OnionCircuitHandler for BrowserOnionCircuitHandler {
         circuit_id: OnionCircuitId,
         payload: OnionAuthenticatedPayload,
     ) -> Result<()> {
-        self.https
-            .complete_payload(from, circuit_id, payload, self.signer.network_id());
+        // No other client adapter shares the browser circuit protocol, so an unclaimed payload is
+        // a late reply to a cancelled or timed-out request, or a misrouted one.
+        match self.https.client().claim(from, circuit_id)? {
+            Some(claim) => claim.resolve(payload, self.signer.network_id()),
+            None => tracing::debug!(%from, "dropping unclaimed onion HTTPS backward payload"),
+        }
         Ok(())
     }
 }
@@ -669,7 +388,7 @@ fn normalize_path(path: &str) -> Result<String> {
         return Ok(format!("/{path}"));
     }
     Err(Error::HttpRequestError(format!(
-        "browser HTTPS onion proxy path must start with '/' or '?', got {path:?}"
+        "HTTPS onion proxy path must start with '/' or '?', got {path:?}"
     )))
 }
 
@@ -686,8 +405,8 @@ mod tests;
 
 #[cfg(rings_browser)]
 mod browser;
+mod client;
 mod limits;
 #[cfg(rings_native)]
 mod native;
-#[cfg(any(test, rings_browser))]
 mod pending;

@@ -50,6 +50,8 @@ mod failure;
 mod gateway;
 #[cfg(any(rings_native, rings_browser))]
 pub mod https;
+#[cfg(rings_native)]
+pub mod native;
 pub mod proxy;
 pub(crate) mod replay;
 pub mod route;

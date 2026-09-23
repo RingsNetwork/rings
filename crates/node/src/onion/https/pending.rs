@@ -5,53 +5,71 @@ use std::task::Context;
 use std::task::Poll;
 
 use futures::channel::oneshot;
+use futures::future::Either;
 
+use super::client::OnionHttpsClient;
+use super::client::OnionHttpsOutcome;
 use super::OnionCircuitId;
-use super::OnionHttpsClientResponse;
-use super::OnionHttpsRuntime;
 use crate::error::Error;
+use crate::error::Result;
+use crate::onion::OnionRouteError;
 
-type PendingResponse = oneshot::Receiver<std::result::Result<OnionHttpsClientResponse, Error>>;
+type PendingResponse = oneshot::Receiver<OnionHttpsOutcome>;
 
 /// Response future and ownership guard for one pending HTTPS onion request.
 ///
-/// Invariant: dropping the request future removes its circuit from the runtime,
-/// including cancellation by the browser bridge.
+/// Invariant: dropping the request future removes its circuit from the client, whether the drop is
+/// caller cancellation, a fired deadline or a failed send.
 pub(crate) struct PendingOnionHttpsRequest {
-    runtime: Arc<OnionHttpsRuntime>,
+    client: Arc<OnionHttpsClient>,
     id: OnionCircuitId,
     response: PendingResponse,
 }
 
 impl PendingOnionHttpsRequest {
     pub(super) const fn new(
-        runtime: Arc<OnionHttpsRuntime>,
+        client: Arc<OnionHttpsClient>,
         id: OnionCircuitId,
         response: PendingResponse,
     ) -> Self {
         Self {
-            runtime,
+            client,
             id,
             response,
         }
     }
 
+    /// Wait for the terminal outcome unless `deadline` resolves first.
+    ///
+    /// `deadline` is the platform timer effect: `Ok(())` means the wait expired and yields
+    /// [`Error::OnionProxyRequestTimedOut`]; a timer failure is returned unchanged. Either way
+    /// `self` is consumed, so the circuit has left the pending table when this returns.
+    pub(crate) async fn within(
+        self,
+        deadline: impl Future<Output = Result<()>>,
+    ) -> OnionHttpsOutcome {
+        futures::pin_mut!(deadline);
+        match futures::future::select(self, deadline).await {
+            Either::Left((Ok(outcome), _)) => outcome,
+            // This guard keeps the client alive, so the sender closes only when a claim is dropped
+            // unresolved; every caller resolves its claim synchronously right after taking it.
+            Either::Left((Err(oneshot::Canceled), _)) => {
+                Err(Error::OnionRouteError(OnionRouteError::HttpsResponseClosed))
+            }
+            Either::Right((Ok(()), _)) => Err(Error::OnionProxyRequestTimedOut),
+            Either::Right((Err(error), _)) => Err(error),
+        }
+    }
+
+    /// Circuit owned by this guard.
     #[cfg(test)]
-    pub(crate) fn try_recv(
-        &mut self,
-    ) -> std::result::Result<
-        Option<std::result::Result<OnionHttpsClientResponse, Error>>,
-        oneshot::Canceled,
-    > {
-        self.response.try_recv()
+    pub(crate) const fn circuit_id(&self) -> OnionCircuitId {
+        self.id
     }
 }
 
 impl Future for PendingOnionHttpsRequest {
-    type Output = std::result::Result<
-        std::result::Result<OnionHttpsClientResponse, Error>,
-        oneshot::Canceled,
-    >;
+    type Output = std::result::Result<OnionHttpsOutcome, oneshot::Canceled>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         Pin::new(&mut self.response).poll(cx)
@@ -60,6 +78,6 @@ impl Future for PendingOnionHttpsRequest {
 
 impl Drop for PendingOnionHttpsRequest {
     fn drop(&mut self) {
-        self.runtime.cancel_request(self.id);
+        self.client.cancel(self.id);
     }
 }

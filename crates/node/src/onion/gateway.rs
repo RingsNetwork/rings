@@ -7,8 +7,8 @@ use rings_gateway::FlowId;
 use rings_gateway::GatewayError;
 use rings_gateway::OnionStreamConnector;
 
+use crate::onion::native::NativeOnionCircuitHandle;
 use crate::onion::proxy::OnionProxyConfig;
-use crate::onion::tcp::NativeOnionCircuitHandle;
 use crate::onion::OnionProxyTarget;
 use crate::processor::Processor;
 
