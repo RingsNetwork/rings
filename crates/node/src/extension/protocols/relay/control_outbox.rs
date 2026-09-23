@@ -224,6 +224,31 @@ mod tests {
         assert_eq!(budget.total(), MAX_PENDING_RELAY_CONTROL_SENDS);
     }
 
+    /// Law: without a runtime the enqueue is refused before a permit is claimed.
+    #[cfg(rings_native)]
+    #[test]
+    fn test_enqueue_without_a_runtime_claims_no_permit() -> crate::error::Result<()> {
+        use rings_core::delegation::DelegateeKey;
+        use rings_core::ecc::SecretKey;
+
+        use crate::error::Error;
+        use crate::test_support::test_scope;
+        use crate::test_support::without_runtime;
+
+        let runtime = tokio::runtime::Runtime::new().expect("test runtime");
+        let delegatee_key = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+        let scope = runtime.block_on(async { test_scope(delegatee_key, "tcp") })?;
+        let outbox = ControlOutbox::default();
+        let peer = Did::from(4_u32);
+
+        let refused =
+            without_runtime(|| outbox.enqueue(scope.clone(), peer, Bytes::from_static(b"close")));
+
+        assert!(matches!(refused, Err(Error::RuntimeUnavailable(_))));
+        assert_eq!(lock(outbox.budget.as_ref())?.total(), 0);
+        Ok(())
+    }
+
     #[test]
     fn test_permit_drop_reclaims_capacity() -> crate::error::Result<()> {
         let peer = Did::from(3_u32);

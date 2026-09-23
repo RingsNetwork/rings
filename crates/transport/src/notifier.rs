@@ -1,12 +1,17 @@
 //! This module contains the [Notifier] struct.
 
+use std::future::poll_fn;
 use std::future::Future;
+use std::pin::pin;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::task::Context;
 use std::task::Poll;
+use std::time::Duration;
+
+use rings_runtime::TimerError;
 
 #[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
 use crate::core::transport::WebrtcConnectionState;
@@ -25,7 +30,7 @@ struct NotifierState {
     pub(crate) wakers: Vec<std::task::Waker>,
 }
 
-/// A notifier that can be woken by calling `wake` or `set_timeout`.
+/// A notifier that can be woken by calling `wake`, and awaited with or without a timeout.
 /// Used to notify the data channel state changing in `webrtc_wait_for_data_channel_open` of
 /// [crate::core::transport::ConnectionInterface].
 #[derive(Clone, Default)]
@@ -45,64 +50,23 @@ impl Notifier {
         }
     }
 
-    /// Wake the notifier after the specified time.
-    #[cfg(not(any(
-        all(feature = "web-sys-webrtc", target_family = "wasm"),
-        all(feature = "native-webrtc", not(target_family = "wasm"))
-    )))]
-    pub fn set_timeout(&self, seconds: u8) {
-        self.set_timeout_ms(u64::from(seconds) * 1000);
-    }
-
-    /// Wake the notifier after the specified time.
-    #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
-    pub fn set_timeout(&self, seconds: u8) {
-        let this = self.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(tokio::time::Duration::from_secs(seconds.into())).await;
-            this.wake();
-        });
-    }
-
-    /// Wake the notifier after the specified number of milliseconds.
-    #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
-    pub fn set_timeout_ms(&self, millis: u64) {
-        let this = self.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(tokio::time::Duration::from_millis(millis)).await;
-            this.wake();
-        });
-    }
-
-    /// Wake the notifier after the specified number of milliseconds.
-    #[cfg(not(any(
-        all(feature = "web-sys-webrtc", target_family = "wasm"),
-        all(feature = "native-webrtc", not(target_family = "wasm"))
-    )))]
-    pub fn set_timeout_ms(&self, millis: u64) {
-        native_timeout_scheduler::schedule_wake(self.clone(), millis);
-    }
-
-    /// Wake the notifier after the specified time.
-    #[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
-    pub fn set_timeout(&self, seconds: u8) {
-        self.set_timeout_ms(u64::from(seconds) * 1000);
-    }
-
-    /// Wake the notifier after the specified number of milliseconds.
+    /// Wait until the notifier is woken or `timeout` has elapsed, whichever comes first.
     ///
-    /// A timer the browser cannot run wakes the notifier at once: the waiter then re-checks
-    /// its condition instead of waiting forever.
-    #[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
-    pub fn set_timeout_ms(&self, millis: u64) {
-        let this = self.clone();
-        let timeout = rings_runtime::spawn_detached(async move {
-            let _ = rings_runtime::sleep(std::time::Duration::from_millis(millis)).await;
-            this.wake();
-        });
-        if timeout.is_err() {
-            self.wake();
-        }
+    /// The timeout ends only *this* wait; it never wakes the notifier, so no timer outlives
+    /// its waiter and later wakes a shared notifier. The wait is composed in place — nothing
+    /// is spawned — so it needs no runtime beyond the one polling it.
+    ///
+    /// Post: `Ok(())` once woken or elapsed, after which the caller re-checks the condition it
+    /// waits on; `Err` iff the runtime could not run the timer (browser only), which ends the
+    /// wait at once.
+    pub async fn notified_within(&self, timeout: Duration) -> std::result::Result<(), TimerError> {
+        let mut woken = pin!(self.clone());
+        let mut elapsed = pin!(rings_runtime::sleep(timeout));
+        poll_fn(|context| match woken.as_mut().poll(context) {
+            Poll::Ready(()) => Poll::Ready(Ok(())),
+            Poll::Pending => elapsed.as_mut().poll(context),
+        })
+        .await
     }
 }
 
@@ -115,7 +79,11 @@ impl Future for Notifier {
             return Poll::Ready(());
         }
 
-        state.wakers.push(cx.waker().clone());
+        // A wait that ended by timeout leaves its waker registered, so a task re-waiting on
+        // the same notifier must not add another: `wakers` stays bounded by distinct tasks.
+        if !state.wakers.iter().any(|waker| waker.will_wake(cx.waker())) {
+            state.wakers.push(cx.waker().clone());
+        }
         Poll::Pending
     }
 }
@@ -136,8 +104,9 @@ pub(crate) async fn wait_for_data_channel_open(
         return Ok(());
     }
 
-    notifier.set_timeout(timeout_seconds);
-    notifier.clone().await;
+    notifier
+        .notified_within(Duration::from_secs(timeout_seconds.into()))
+        .await?;
 
     if data_channel_is_open()? {
         Ok(())
@@ -147,12 +116,6 @@ pub(crate) async fn wait_for_data_channel_open(
         )))
     }
 }
-
-#[cfg(not(any(
-    all(feature = "web-sys-webrtc", target_family = "wasm"),
-    all(feature = "native-webrtc", not(target_family = "wasm"))
-)))]
-mod native_timeout_scheduler;
 
 #[cfg(all(test, not(target_family = "wasm")))]
 mod test_notifier;

@@ -15,7 +15,7 @@ use super::OnionProxyConfig;
 use super::OnionProxyTarget;
 use crate::error::Error;
 use crate::error::Result;
-use crate::onion::tcp::NativeOnionCircuitHandle;
+use crate::onion::native::NativeOnionCircuitHandle;
 use crate::onion::OnionServiceName;
 use crate::processor::Processor;
 

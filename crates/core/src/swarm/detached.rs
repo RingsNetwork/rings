@@ -12,13 +12,10 @@ use std::pin::Pin;
 
 use rings_runtime::Unscheduled;
 
-/// A task ready to run on its own.
-#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
-pub(crate) type DetachedTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
-
-/// A task ready to run on its own; the browser runtime is single-threaded.
-#[cfg(all(feature = "wasm", target_family = "wasm"))]
-pub(crate) type DetachedTask = Pin<Box<dyn Future<Output = ()> + 'static>>;
+/// A task ready to run on its own: `Send` for the native executor, unconstrained on the
+/// single-threaded browser event loop.
+pub(crate) type DetachedTask =
+    Pin<Box<rings_runtime::maybe_send!(dyn Future<Output = ()> + 'static)>>;
 
 /// Run `task` detached from the caller. Post: `Ok` means the runtime took it; `Err` hands
 /// the task back because no runtime is current, and the caller runs it inline or refuses.

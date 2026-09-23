@@ -293,12 +293,8 @@ impl<'de> Deserialize<'de> for ReplaySnapshot {
 }
 
 /// Storage accepted by the transaction replay runtime.
-#[cfg(all(feature = "wasm", target_family = "wasm"))]
-pub type ReplayStorage = Box<dyn KvStorageInterface<ReplaySnapshot>>;
-
-/// Storage accepted by the transaction replay runtime.
-#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
-pub type ReplayStorage = Box<dyn KvStorageInterface<ReplaySnapshot> + Send + Sync>;
+pub type ReplayStorage =
+    Box<rings_runtime::maybe_send_sync!(dyn KvStorageInterface<ReplaySnapshot>)>;
 
 /// Observable rejected-verdict and persistence-failure counters.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

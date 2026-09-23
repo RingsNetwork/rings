@@ -148,12 +148,7 @@ pub(crate) fn max_on_message_recursion_depth_for_test() -> usize {
 }
 
 /// The [InnerSwarmCallback] will accept shared [SwarmCallback] trait object.
-#[cfg(all(feature = "wasm", target_family = "wasm"))]
-pub type SharedSwarmCallback = Arc<dyn SwarmCallback>;
-
-/// The [InnerSwarmCallback] will accept shared [SwarmCallback] trait object.
-#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
-pub type SharedSwarmCallback = Arc<dyn SwarmCallback + Send + Sync>;
+pub type SharedSwarmCallback = Arc<rings_runtime::maybe_send_sync!(dyn SwarmCallback)>;
 
 /// Used to notify the application of events that occur in the swarm.
 #[derive(Clone, Debug, Eq, PartialEq)]

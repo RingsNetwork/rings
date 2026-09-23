@@ -44,6 +44,7 @@ node = [
     "dep:rings-gateway",
     "rings-rpc/std",
     "rings-derive/default",
+    "rings-runtime/tokio",
     "rings-transport/native-webrtc",
     "home",
 ]

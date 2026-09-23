@@ -3,6 +3,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -66,7 +67,7 @@ const WEBRTC_GATHER_TIMEOUT: u8 = 60; // seconds
 const DATA_CHANNEL_POOL_SIZE: u8 = 4;
 
 /// How often the delivery future re-checks whether a message has been flushed.
-const DELIVERY_POLL_INTERVAL_MS: u64 = 300;
+const DELIVERY_POLL_INTERVAL: Duration = Duration::from_millis(300);
 
 /// A data channel paired with a monotonic counter of the total bytes ever
 /// enqueued onto it. See the native backend for the rationale; the counter
@@ -94,9 +95,8 @@ fn delivery_future(
             ) {
                 return Err(closed_before_flush());
             }
-            let notifier = Notifier::default();
-            notifier.set_timeout_ms(DELIVERY_POLL_INTERVAL_MS);
-            notifier.await;
+            // A timer the browser cannot run stops the poll instead of spinning it.
+            rings_runtime::sleep(DELIVERY_POLL_INTERVAL).await?;
         }
     })
 }
@@ -206,8 +206,9 @@ impl WebSysWebrtcConnection {
             .set_onicegatheringstatechange(Some(c.as_ref().unchecked_ref()));
         c.forget();
 
-        notifier.set_timeout(WEBRTC_GATHER_TIMEOUT);
-        notifier.await;
+        notifier
+            .notified_within(Duration::from_secs(WEBRTC_GATHER_TIMEOUT.into()))
+            .await?;
         if self.webrtc_conn.ice_gathering_state() != RtcIceGatheringState::Complete {
             return Err(Error::WebrtcLocalSdpGenerationError(format!(
                 "Webrtc gathering is not completed in {WEBRTC_GATHER_TIMEOUT} seconds"

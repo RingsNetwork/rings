@@ -2,6 +2,11 @@ use rings_core::ecc::SecretKey;
 use rings_core::message::MessageSigner;
 
 use super::super::*;
+use crate::extension::ext::Extensions;
+use crate::onion::circuit::OnionCircuitHandler;
+use crate::onion::circuit::ONION_CIRCUIT_NAMESPACE;
+use crate::onion::native::native_onion_runtimes;
+use crate::onion::native::NativeOnionCircuitHandler;
 use crate::onion::OnionExitDescriptorBody;
 use crate::onion::OnionServiceName;
 use crate::online::OnlineNodeType;
@@ -556,22 +561,34 @@ fn test_exit_limiter_counts_distinct_circuit_ids() {
 }
 
 #[tokio::test]
-async fn test_install_rejects_duplicate_namespace_instead_of_splitting_runtime() -> Result<()> {
+async fn test_native_client_dispatch_hands_tcp_circuits_past_the_https_client() -> Result<()> {
     let processor = Arc::new(crate::tests::native::prepare_processor().await);
-    let delegatee_key = processor.delegatee_key().clone();
-    let network_id = processor.swarm.network_id();
-    let extensions = Extensions::new(processor);
-    let _handle = NativeOnionCircuitHandle::install(
-        &extensions,
-        delegatee_key.clone(),
-        network_id,
-        false,
-        None,
-    )?;
+    let scope = Scope::new(
+        Extensions::new(processor).core(),
+        ONION_CIRCUIT_NAMESPACE.to_string(),
+    );
+    let (tcp, https) = native_onion_runtimes(session(), TEST_NETWORK_ID, None);
+    let handler = NativeOnionCircuitHandler::new(
+        Arc::clone(&tcp),
+        Arc::clone(&https),
+        MessageSigner::new(session(), TEST_NETWORK_ID),
+    );
+    let expected = did();
+    let exit = session();
+    let return_id = OnionReturnId::new([10; 16]);
+    let (tx, mut rx) = mpsc::channel(1);
+    let key = insert_test_client_stream(&tcp, expected, exit_descriptor(&exit), return_id, tx)?;
 
-    assert!(matches!(
-        NativeOnionCircuitHandle::install(&extensions, delegatee_key, network_id, false, None),
-        Err(Error::ExtensionError(_))
-    ));
+    handler
+        .handle_client(
+            &scope,
+            expected,
+            key.circuit_id,
+            dummy_authenticated_payload(return_id, &exit),
+        )
+        .await?;
+
+    assert!(matches!(rx.try_recv(), Ok(TcpInbound::Close)));
+    assert_eq!(https.client().pending_len(), 0);
     Ok(())
 }

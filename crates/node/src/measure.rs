@@ -86,20 +86,12 @@ const fn reliability_policy() -> ReliabilityPolicy {
 }
 
 /// Storage used for one versioned complete measurement snapshot.
-#[cfg(all(feature = "browser", target_family = "wasm"))]
-pub type MeasureStorage = Box<dyn KvStorageInterface<MeasurementSnapshot<Did>>>;
-
-/// Storage used for one versioned complete measurement snapshot.
-#[cfg(not(all(feature = "browser", target_family = "wasm")))]
-pub type MeasureStorage = Box<dyn KvStorageInterface<MeasurementSnapshot<Did>> + Sync + Send>;
+pub type MeasureStorage =
+    Box<rings_runtime::maybe_send_sync!(dyn KvStorageInterface<MeasurementSnapshot<Did>>)>;
 
 /// Storage used for the separate provisional-receipt evidence snapshot.
-#[cfg(all(feature = "browser", target_family = "wasm"))]
-pub type EvidenceStorage = Box<dyn KvStorageInterface<EvidenceSnapshot<Did>>>;
-
-/// Storage used for the separate provisional-receipt evidence snapshot.
-#[cfg(not(all(feature = "browser", target_family = "wasm")))]
-pub type EvidenceStorage = Box<dyn KvStorageInterface<EvidenceSnapshot<Did>> + Sync + Send>;
+pub type EvidenceStorage =
+    Box<rings_runtime::maybe_send_sync!(dyn KvStorageInterface<EvidenceSnapshot<Did>>)>;
 
 /// Evidence backend used when a provider did not configure durable receipt storage.
 ///
@@ -164,15 +156,11 @@ impl EvidenceCollectorIdentity {
     }
 }
 
-#[cfg(all(feature = "browser", target_family = "wasm"))]
-type SharedMeasureStorage = Arc<dyn KvStorageInterface<MeasurementSnapshot<Did>>>;
-#[cfg(not(all(feature = "browser", target_family = "wasm")))]
-type SharedMeasureStorage = Arc<dyn KvStorageInterface<MeasurementSnapshot<Did>> + Sync + Send>;
+type SharedMeasureStorage =
+    Arc<rings_runtime::maybe_send_sync!(dyn KvStorageInterface<MeasurementSnapshot<Did>>)>;
 
-#[cfg(all(feature = "browser", target_family = "wasm"))]
-type SharedEvidenceStorage = Arc<dyn KvStorageInterface<EvidenceSnapshot<Did>>>;
-#[cfg(not(all(feature = "browser", target_family = "wasm")))]
-type SharedEvidenceStorage = Arc<dyn KvStorageInterface<EvidenceSnapshot<Did>> + Sync + Send>;
+type SharedEvidenceStorage =
+    Arc<rings_runtime::maybe_send_sync!(dyn KvStorageInterface<EvidenceSnapshot<Did>>)>;
 
 /// Failure while loading or explicitly flushing the runtime measurement adapter.
 #[derive(Debug, thiserror::Error)]

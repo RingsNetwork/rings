@@ -75,11 +75,13 @@ impl NativeOnionTcpExitConfig {
         self.services.iter().any(|candidate| candidate == service)
     }
 
-    pub(super) fn policy(&self) -> &OnionExitPolicy {
+    /// Exit policy shared by every service this exit serves.
+    pub(in crate::onion) fn policy(&self) -> &OnionExitPolicy {
         &self.policy
     }
 
-    pub(super) fn https_proxy(&self) -> Option<&str> {
+    /// Operator-configured upstream proxy for HTTPS egress, if any.
+    pub(in crate::onion) fn https_proxy(&self) -> Option<&str> {
         self.https_proxy.as_deref()
     }
 }
