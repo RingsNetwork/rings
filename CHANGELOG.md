@@ -23,7 +23,7 @@
   message-proof fields, WASM exports, node configuration key, and CLI command to
   `delegator`/`delegatee`/`delegation` names. There are no compatibility aliases;
   callers must update imports and persisted configuration/key data. Transport
-  `SessionId` remains the connection identifier.
+  `SessionId` remains the connection identifier. This cutover targets 0.30.0.
 
 - Subtraction round, `rings-node` section (#787), targeting protocol cutover 0.29.0. Onion-exit
   descriptors now sign one canonical service name instead of a `services` list containing a
