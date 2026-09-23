@@ -220,6 +220,9 @@ pub struct Processor {
     stabilize_interval: Duration,
     online_node_registration: OnlineNodeRegistration,
     measure: Option<Arc<PeriodicMeasure>>,
+    /// Serializes listener generations across every clone and wrapper of this processor.
+    /// Ownership includes graceful maintenance shutdown and measurement flushing.
+    listener_lifecycle_lock: Arc<futures::lock::Mutex<()>>,
     #[cfg(all(feature = "browser", target_family = "wasm"))]
     advertise_onion_relay: bool,
     registration_tasks: Vec<Arc<dyn RegistrationTask>>,
@@ -499,18 +502,39 @@ impl Processor {
 
     /// Run stabilization and node registration tasks until this future is dropped or aborted.
     ///
-    /// This is a long-running task; do not await completion as a readiness signal.
+    /// This is a long-running task; do not await completion as a readiness signal. Concurrent
+    /// calls on this processor queue, and each call retains ownership through cleanup.
     pub async fn listen(&self) {
         self.listen_with(StopToken::never()).await;
     }
 
     /// Run stabilization and node registration tasks until `stop` asks them to exit.
     ///
+    /// Concurrent calls on this processor queue, including calls through any clone or
+    /// provider wrapper. A stop requested while queued is observed after that call acquires
+    /// ownership, so its cleanup cannot overlap the current generation.
+    ///
     /// The shutdown is cooperative: it waits for the current stabilization or
     /// registration operation to finish before returning. This avoids dropping
     /// browser IndexedDB request futures while their JavaScript callbacks are
     /// still pending.
     pub async fn listen_with(&self, stop: StopToken) {
+        self.listen_with_started(stop, || {}).await;
+    }
+
+    /// Run one serialized listener generation, notifying `on_started` only after it owns
+    /// the processor lifecycle lock. Ownership remains held through cleanup and measurement
+    /// flushing. Browser promises use this signal to preserve queued-start semantics while
+    /// sharing ownership with native callers.
+    pub(crate) async fn listen_with_started<F>(&self, stop: StopToken, on_started: F)
+    where F: FnOnce() {
+        let _listener_lifecycle_guard = self.listener_lifecycle_lock.lock().await;
+        on_started();
+        self.run_listener_generation(stop).await;
+    }
+
+    /// Run maintenance and registration loops for the generation holding the lifecycle lock.
+    async fn run_listener_generation(&self, stop: StopToken) {
         let stabilizer = Arc::new(self.swarm.stabilizer());
         if self.registration_tasks.is_empty() {
             stabilizer.wait_with(self.stabilize_interval, stop).await;
@@ -533,6 +557,12 @@ impl Processor {
         if let Err(error) = self.flush_measurements().await {
             tracing::error!(%error, "failed to flush measurements during graceful shutdown");
         }
+    }
+
+    /// Return the processor's listener lifecycle lock for lifecycle tests.
+    #[cfg(test)]
+    pub(crate) fn listener_lifecycle_lock_for_test(&self) -> Arc<futures::lock::Mutex<()>> {
+        self.listener_lifecycle_lock.clone()
     }
 
     /// Flush all applied measurement updates with the graceful-shutdown deadline.

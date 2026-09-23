@@ -52,6 +52,157 @@ async fn test_provider_listen_with_started_token_returns_after_stop() {
     .expect("started provider listen token should exit after stop");
 }
 
+/// Cloned processor handles queue listener starts and preserve restart after cleanup.
+#[tokio::test]
+async fn test_listener_generation_queues_cancelled_starts_and_restarts() {
+    let processor = Arc::new(prepare_processor().await);
+    let _first_provider = Provider::from_processor(processor.clone());
+    let _second_provider = Provider::from_processor(processor.clone());
+    assert!(Arc::ptr_eq(
+        &processor.listener_lifecycle_lock_for_test(),
+        &processor.clone().listener_lifecycle_lock_for_test(),
+    ));
+
+    let first_stop = StopSource::new();
+    let (first_started_tx, first_started_rx) = tokio::sync::oneshot::channel();
+    let first_processor = processor.clone();
+    let first_token = first_stop.token();
+    let first = tokio::spawn(async move {
+        first_processor
+            .listen_with_started(first_token, move || {
+                let _sent = first_started_tx.send(());
+            })
+            .await;
+    });
+    first_started_rx
+        .await
+        .expect("the first generation should acquire processor ownership");
+
+    let queued_stop = StopSource::new();
+    let queued_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let queued_started_in_task = queued_started.clone();
+    let queued_processor = processor.clone();
+    let queued_token = queued_stop.token();
+    let queued = tokio::spawn(async move {
+        queued_processor
+            .listen_with_started(queued_token, move || {
+                queued_started_in_task.store(true, std::sync::atomic::Ordering::SeqCst);
+            })
+            .await;
+    });
+    // Cancelling before ownership does not bypass the queue or let cleanup overlap.
+    queued_stop.request_stop();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(!queued_started.load(std::sync::atomic::Ordering::SeqCst));
+
+    first_stop.request_stop();
+    tokio::time::timeout(LISTENER_STOP_TIMEOUT, first)
+        .await
+        .expect("the active generation should finish graceful cleanup")
+        .expect("the active listener task should not panic");
+    tokio::time::timeout(LISTENER_STOP_TIMEOUT, queued)
+        .await
+        .expect("the queued cancelled generation should acquire then finish")
+        .expect("the queued listener task should not panic");
+    // A pre-cancelled token still acquires ownership in queue order before returning.
+    assert!(queued_started.load(std::sync::atomic::Ordering::SeqCst));
+    let restart_stop = StopSource::new();
+    let (restart_started_tx, restart_started_rx) = tokio::sync::oneshot::channel();
+    let restart_finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let restart_finished_in_task = restart_finished.clone();
+    let restart_processor = processor.clone();
+    let restart_token = restart_stop.token();
+    let restart = tokio::spawn(async move {
+        restart_processor
+            .listen_with_started(restart_token, move || {
+                let _sent = restart_started_tx.send(());
+            })
+            .await;
+        restart_finished_in_task.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    restart_started_rx
+        .await
+        .expect("a new generation should start after cleanup");
+    first_stop.request_stop();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(!restart_finished.load(std::sync::atomic::Ordering::SeqCst));
+    restart_stop.request_stop();
+    tokio::time::timeout(LISTENER_STOP_TIMEOUT, restart)
+        .await
+        .expect("the restarted generation should clean up")
+        .expect("the restarted listener task should not panic");
+    assert!(restart_finished.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+/// Provider clones and independent wrappers over one processor queue cancelled starts.
+#[tokio::test]
+async fn test_provider_wrappers_share_listener_lifecycle_lock() {
+    let processor = Arc::new(prepare_processor().await);
+    let original_provider = Provider::from_processor(processor.clone());
+    let cloned_provider = original_provider.clone();
+    let independent_provider = Provider::from_processor(processor.clone());
+
+    let active_stop = StopSource::new();
+    let active_token = active_stop.token();
+    let active = tokio::spawn(async move {
+        original_provider.listen_with(active_token).await;
+    });
+
+    // Wait until the first provider has acquired the lifecycle lock before queuing
+    // starts through the clone and the independently constructed provider.
+    tokio::time::timeout(LISTENER_STOP_TIMEOUT, async {
+        loop {
+            if processor
+                .listener_lifecycle_lock_for_test()
+                .try_lock()
+                .is_none()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the first provider should acquire processor listener ownership");
+
+    let cloned_stop = StopSource::new();
+    cloned_stop.request_stop();
+    let cloned_token = cloned_stop.token();
+    let mut cloned = tokio::spawn(async move {
+        cloned_provider.listen_with(cloned_token).await;
+    });
+
+    let independent_stop = StopSource::new();
+    independent_stop.request_stop();
+    let independent_token = independent_stop.token();
+    let mut independent = tokio::spawn(async move {
+        independent_provider.listen_with(independent_token).await;
+    });
+
+    assert!(tokio::time::timeout(Duration::from_millis(20), &mut cloned)
+        .await
+        .is_err());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut independent)
+            .await
+            .is_err()
+    );
+
+    active_stop.request_stop();
+    tokio::time::timeout(LISTENER_STOP_TIMEOUT, active)
+        .await
+        .expect("the active provider listener should finish graceful cleanup")
+        .expect("the active provider listener should not panic");
+    tokio::time::timeout(LISTENER_STOP_TIMEOUT, cloned)
+        .await
+        .expect("the cancelled clone listener should acquire ownership then finish")
+        .expect("the cloned provider listener should not panic");
+    tokio::time::timeout(LISTENER_STOP_TIMEOUT, independent)
+        .await
+        .expect("the cancelled independent wrapper should acquire ownership then finish")
+        .expect("the independent provider listener should not panic");
+}
+
 #[tokio::test]
 async fn test_online_node_registry_lists_two_publishers_over_network() -> Result<()> {
     let _network_guard = network_test_guard().await;

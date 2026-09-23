@@ -40,28 +40,28 @@ async fn test_two_provider_connect_and_list() {
 }
 
 /// Verifies that browser listener generations serialize startup and release
-/// the provider gate after cooperative shutdown.
+/// the processor lifecycle lock after cooperative shutdown.
 ///
-/// The test first holds the gate as a synthetic old generation and proves the
-/// replacement's `started` promise stays pending. It then releases the gate,
+/// The test first holds the processor lifecycle lock as a synthetic old generation and proves the
+/// replacement's `started` promise stays pending. It then releases the lock,
 /// waits for startup, stops the listener, and repeats the full lifecycle three
-/// times to prove cleanup does not leave the gate permanently owned.
+/// times to prove cleanup does not leave the lock permanently owned.
 #[wasm_bindgen_test]
 async fn test_provider_listener_handle_requests_stop() {
     let provider = new_provider().await;
 
-    // Hold the provider-level gate to model a previous listener generation
+    // Hold the processor lifecycle lock to model a previous listener generation
     // still cleaning up after `stop`.
-    let listener_gate = provider.listener_gate_for_test();
-    let old_cleanup = listener_gate.lock().await;
+    let listener_lifecycle_lock = provider.listener_lifecycle_lock_for_test();
+    let old_cleanup = listener_lifecycle_lock.lock().await;
     let waiting_listener = provider.listen();
-    // `started` must remain pending while `old_cleanup` owns the gate.
+    // `started` must remain pending while `old_cleanup` owns the processor lifecycle lock.
     let started = Box::pin(JsFuture::from(waiting_listener.started()));
     let short_delay = Box::pin(utils::js_utils::window_sleep(10));
     let pending_started = match futures::future::select(started, short_delay).await {
         futures::future::Either::Left(_) => {
             waiting_listener.stop();
-            panic!("a new listener started while the previous generation still held the gate");
+            panic!("a new listener started while the previous generation still held the lock");
         }
         futures::future::Either::Right((delay, pending_started)) => {
             delay.unwrap();
@@ -75,7 +75,7 @@ async fn test_provider_listener_handle_requests_stop() {
     waiting_listener.stop();
     JsFuture::from(waiting_listener.task()).await.unwrap();
 
-    // Repeated start/stop cycles prove the same gate is released by each task.
+    // Repeated start/stop cycles prove the same lock is released by each task.
     for _ in 0..3 {
         let listener = provider.listen();
         JsFuture::from(listener.started()).await.unwrap();
