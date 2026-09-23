@@ -13,6 +13,7 @@ use rings_core::dht::DEFAULT_FINGER_TABLE_SIZE;
 use rings_core::ecc::PublicKey;
 use rings_core::ecc::SecretKey;
 use rings_core::error::Error as CoreError;
+use rings_core::inspect::DHTInspect;
 use rings_core::lifecycle::StopSource;
 use rings_core::lifecycle::StopToken;
 use rings_core::measure::EvidenceCounters;
@@ -1005,7 +1006,7 @@ impl Processor {
         })
     }
 
-    /// Assemble the documented v1 operator snapshot from bounded recorder and live node state.
+    /// Assemble the documented v1 operator snapshot without serializing stored entry payloads.
     pub async fn operator_snapshot(&self) -> Result<OperatorSnapshot> {
         let generated_at_ms = get_epoch_ms();
         let runtime = self.observability.runtime_snapshot(generated_at_ms);
@@ -1016,11 +1017,11 @@ impl Processor {
             .mailbox_storage_inspect()
             .await
             .map_err(Error::InternalError)?;
-        let swarm = self.swarm.inspect().await;
-        let admitted_peer_count = u64::try_from(swarm.peers.len()).unwrap_or(u64::MAX);
+        let admitted_peer_count = u64::try_from(self.swarm.peers().len()).unwrap_or(u64::MAX);
         let has_admitted_peer = admitted_peer_count > 0;
-        let has_successor = !swarm.dht.successors.is_empty();
-        let has_predecessor = swarm.dht.predecessor.is_some();
+        let dht = DHTInspect::inspect(&self.swarm.dht());
+        let has_successor = !dht.successors.is_empty();
+        let has_predecessor = dht.predecessor.is_some();
         let mut peer_ratings = self.peer_measurements().await;
         peer_ratings.sort_unstable_by_key(|measurement| measurement.did);
         peer_ratings.truncate(PEER_RATING_CAPACITY);

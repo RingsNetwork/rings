@@ -3,8 +3,9 @@
 //! [`Observability`] is the synchronous adapter installed at the core swarm boundary. It keeps
 //! process-lifetime counters, a fixed-size recent-event ring, and bounded DHT lookup correlation
 //! state. The native HTTP layer combines that state with live session, mailbox, peer-rating, and
-//! overlay snapshots before returning JSON or Prometheus text. No payload, key material, message
-//! identifier, mailbox identifier, or lookup correlation key crosses the export boundary.
+//! overlay snapshots in the authenticated `/status?view=observability` JSON response. No payload,
+//! key material, message identifier, mailbox identifier, or lookup correlation key crosses the
+//! export boundary.
 
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
@@ -21,21 +22,17 @@ use rings_core::swarm::observer::ObservationOutcome;
 use rings_core::swarm::observer::SwarmObserver;
 use serde::Serialize;
 
-/// Version of the operator JSON and Prometheus schema.
+/// Version of the observability object nested in the HTTP status response.
 pub const OPERATOR_SCHEMA_VERSION: u16 = 1;
-/// Stable versioned path of the structured operator snapshot.
-pub const OPERATOR_JSON_PATH: &str = "/operator/v1/observability";
-/// Stable versioned path of the Prometheus-compatible scrape response.
-pub const OPERATOR_METRICS_PATH: &str = "/operator/v1/metrics";
-/// Maximum number of recent message records retained in process memory.
-pub const RECENT_MESSAGE_CAPACITY: usize = 256;
+/// Maximum number of recent message records retained in process memory and one status response.
+pub const RECENT_MESSAGE_CAPACITY: usize = 32;
 /// Maximum number of peer-rating records returned by one structured snapshot.
-pub const PEER_RATING_CAPACITY: usize = 128;
+pub const PEER_RATING_CAPACITY: usize = 32;
 /// Maximum number of lookup correlations retained until completion or timeout.
 const LOOKUP_CAPACITY: usize = 1024;
 /// Lookup age at which a scrape classifies an unanswered operation as timed out.
 const LOOKUP_TIMEOUT_MS: u128 = 30_000;
-/// Finite Prometheus histogram boundaries for local DHT lookup latency.
+/// Finite cumulative histogram boundaries for local DHT lookup latency.
 const LOOKUP_LATENCY_BUCKETS_MS: [u64; 12] = [
     5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 30_000,
 ];
@@ -137,7 +134,7 @@ pub struct DhtLookupSnapshot {
     pub latency_sum_ms: u128,
     /// Number of terminal lookups in the latency distribution.
     pub latency_count: u64,
-    /// Cumulative latency buckets suitable for Prometheus export.
+    /// Cumulative latency buckets for external rate and threshold calculations.
     pub latency_buckets: Vec<LatencyBucket>,
 }
 
@@ -373,289 +370,6 @@ impl SwarmObserver for Observability {
     }
 }
 
-/// Render one complete snapshot as Prometheus text without identifier-valued labels.
-pub fn render_prometheus(snapshot: &OperatorSnapshot) -> String {
-    let mut output = String::new();
-    render_health_metrics(&mut output, &snapshot.health);
-    render_message_metrics(&mut output, &snapshot.messages);
-    render_session_metrics(&mut output, &snapshot.session_key);
-    render_mailbox_metrics(&mut output, &snapshot.mailboxes);
-    render_lookup_metrics(&mut output, &snapshot.dht_lookups);
-    render_peer_rating_metrics(&mut output, &snapshot.peer_ratings);
-    output
-}
-
-/// Append process/API and overlay health gauges.
-fn render_health_metrics(output: &mut String, health: &HealthSnapshot) {
-    metric_header(
-        output,
-        "rings_process_api_healthy",
-        "gauge",
-        "Authenticated operator API health.",
-    );
-    metric(
-        output,
-        "rings_process_api_healthy",
-        bool_value(health.process_api_healthy),
-    );
-    metric_header(
-        output,
-        "rings_overlay_ready",
-        "gauge",
-        "Conservative local overlay readiness.",
-    );
-    metric(
-        output,
-        "rings_overlay_ready",
-        bool_value(health.overlay_ready),
-    );
-    metric_header(
-        output,
-        "rings_overlay_admitted_peers",
-        "gauge",
-        "Current admitted transport peers.",
-    );
-    metric(
-        output,
-        "rings_overlay_admitted_peers",
-        health.admitted_peer_count,
-    );
-}
-
-/// Append process-lifetime message-operation counters.
-fn render_message_metrics(output: &mut String, messages: &MessageTotals) {
-    metric_header(
-        output,
-        "rings_message_operations_total",
-        "counter",
-        "Node-local process-lifetime logical message operations.",
-    );
-    labeled_metric(
-        output,
-        "rings_message_operations_total",
-        "action=\"sent\",outcome=\"succeeded\"",
-        messages.sent,
-    );
-    labeled_metric(
-        output,
-        "rings_message_operations_total",
-        "action=\"received\",outcome=\"succeeded\"",
-        messages.received,
-    );
-    labeled_metric(
-        output,
-        "rings_message_operations_total",
-        "action=\"forwarded\",outcome=\"succeeded\"",
-        messages.forwarded,
-    );
-    labeled_metric(
-        output,
-        "rings_message_operations_total",
-        "action=\"stored\",outcome=\"succeeded\"",
-        messages.stored,
-    );
-    labeled_metric(
-        output,
-        "rings_message_operations_total",
-        "action=\"all\",outcome=\"failed\"",
-        messages.failed,
-    );
-}
-
-/// Append active session-delegation lifecycle metrics.
-fn render_session_metrics(output: &mut String, session: &SessionKeySnapshot) {
-    metric_header(
-        output,
-        "rings_session_key_valid",
-        "gauge",
-        "Whether the active session delegation is valid.",
-    );
-    metric(output, "rings_session_key_valid", bool_value(session.valid));
-    metric_header(
-        output,
-        "rings_session_key_runtime_rotation_supported",
-        "gauge",
-        "Whether the running process can replace its session delegation without restart.",
-    );
-    metric(
-        output,
-        "rings_session_key_runtime_rotation_supported",
-        bool_value(session.runtime_rotation_supported),
-    );
-    metric_header(
-        output,
-        "rings_session_key_expires_at_seconds",
-        "gauge",
-        "Active session delegation expiry as Unix epoch seconds.",
-    );
-    metric(
-        output,
-        "rings_session_key_expires_at_seconds",
-        session.expires_at_ms / 1_000,
-    );
-    metric_header(
-        output,
-        "rings_session_key_seconds_remaining",
-        "gauge",
-        "Saturating seconds until active session delegation expiry.",
-    );
-    metric(
-        output,
-        "rings_session_key_seconds_remaining",
-        session.remaining_ms / 1_000,
-    );
-    metric_header(
-        output,
-        "rings_session_key_rotation_succeeded_total",
-        "counter",
-        "Successful runtime session delegation rotations.",
-    );
-    metric(
-        output,
-        "rings_session_key_rotation_succeeded_total",
-        session.rotation_succeeded_total,
-    );
-    metric_header(
-        output,
-        "rings_session_key_rotation_failed_total",
-        "counter",
-        "Failed runtime session delegation rotations.",
-    );
-    metric(
-        output,
-        "rings_session_key_rotation_failed_total",
-        session.rotation_failed_total,
-    );
-}
-
-/// Append live mailbox gauges and the process-lifetime store counter.
-fn render_mailbox_metrics(output: &mut String, mailboxes: &MailboxSnapshot) {
-    metric_header(
-        output,
-        "rings_mailboxes_registered",
-        "gauge",
-        "Live relay-inbox carriers retained by this node.",
-    );
-    metric(output, "rings_mailboxes_registered", mailboxes.registered);
-    metric_header(
-        output,
-        "rings_mailbox_held_messages",
-        "gauge",
-        "Live held messages across retained relay inboxes.",
-    );
-    metric(
-        output,
-        "rings_mailbox_held_messages",
-        mailboxes.held_messages,
-    );
-    metric_header(
-        output,
-        "rings_mailbox_stored_total",
-        "counter",
-        "Successful offline-message holds during this process lifetime.",
-    );
-    metric(output, "rings_mailbox_stored_total", mailboxes.stored_total);
-}
-
-/// Append DHT lookup counters, in-flight state, and latency histogram.
-fn render_lookup_metrics(output: &mut String, lookups: &DhtLookupSnapshot) {
-    metric_header(
-        output,
-        "rings_dht_lookups_total",
-        "counter",
-        "DHT lookups begun during this process lifetime.",
-    );
-    metric(output, "rings_dht_lookups_total", lookups.total);
-    metric_header(
-        output,
-        "rings_dht_lookup_succeeded_total",
-        "counter",
-        "DHT lookups that accepted an answer.",
-    );
-    metric(
-        output,
-        "rings_dht_lookup_succeeded_total",
-        lookups.succeeded,
-    );
-    metric_header(
-        output,
-        "rings_dht_lookup_failed_total",
-        "counter",
-        "DHT lookups that ended with an explicit failure.",
-    );
-    metric(output, "rings_dht_lookup_failed_total", lookups.failed);
-    metric_header(
-        output,
-        "rings_dht_lookup_timed_out_total",
-        "counter",
-        "DHT lookups that exceeded the bounded observation window.",
-    );
-    metric(
-        output,
-        "rings_dht_lookup_timed_out_total",
-        lookups.timed_out,
-    );
-    metric_header(
-        output,
-        "rings_dht_lookups_in_flight",
-        "gauge",
-        "DHT lookups currently awaiting an answer.",
-    );
-    metric(output, "rings_dht_lookups_in_flight", lookups.in_flight);
-    metric_header(
-        output,
-        "rings_dht_lookup_latency_milliseconds",
-        "histogram",
-        "Local DHT lookup completion latency in milliseconds.",
-    );
-    for bucket in &lookups.latency_buckets {
-        labeled_metric(
-            output,
-            "rings_dht_lookup_latency_milliseconds_bucket",
-            &format!("le=\"{}\"", bucket.le_ms),
-            bucket.count,
-        );
-    }
-    labeled_metric(
-        output,
-        "rings_dht_lookup_latency_milliseconds_bucket",
-        "le=\"+Inf\"",
-        lookups.latency_count,
-    );
-    metric(
-        output,
-        "rings_dht_lookup_latency_milliseconds_sum",
-        lookups.latency_sum_ms,
-    );
-    metric(
-        output,
-        "rings_dht_lookup_latency_milliseconds_count",
-        lookups.latency_count,
-    );
-}
-
-/// Append finite-class peer-rating counts without peer identifiers as labels.
-fn render_peer_rating_metrics(output: &mut String, peer_ratings: &[PeerRatingSnapshot]) {
-    metric_header(
-        output,
-        "rings_local_peer_ratings",
-        "gauge",
-        "Peers in each bounded local reliability class.",
-    );
-    for class in ["healthy", "unknown", "degraded"] {
-        let count = peer_ratings
-            .iter()
-            .filter(|rating| rating.reliability == class)
-            .count();
-        labeled_metric(
-            output,
-            "rings_local_peer_ratings",
-            &format!("reliability=\"{class}\""),
-            u64::try_from(count).unwrap_or(u64::MAX),
-        );
-    }
-}
-
 /// Return the current Unix epoch time in milliseconds.
 fn now_ms() -> u128 {
     rings_core::utils::get_epoch_ms()
@@ -812,47 +526,6 @@ fn lookup_snapshot(state: &RuntimeState) -> DhtLookupSnapshot {
     }
 }
 
-/// Append Prometheus help and type declarations for one metric family.
-fn metric_header(output: &mut String, name: &str, kind: &str, help: &str) {
-    output.push_str("# HELP ");
-    output.push_str(name);
-    output.push(' ');
-    output.push_str(help);
-    output.push('\n');
-    output.push_str("# TYPE ");
-    output.push_str(name);
-    output.push(' ');
-    output.push_str(kind);
-    output.push('\n');
-}
-
-/// Append one unlabeled Prometheus sample.
-fn metric(output: &mut String, name: &str, value: impl std::fmt::Display) {
-    output.push_str(name);
-    output.push(' ');
-    output.push_str(&value.to_string());
-    output.push('\n');
-}
-
-/// Append one Prometheus sample with a caller-provided finite label set.
-fn labeled_metric(output: &mut String, name: &str, labels: &str, value: impl std::fmt::Display) {
-    output.push_str(name);
-    output.push('{');
-    output.push_str(labels);
-    output.push_str("} ");
-    output.push_str(&value.to_string());
-    output.push('\n');
-}
-
-/// Encode a Boolean as Prometheus' conventional zero-or-one gauge value.
-const fn bool_value(value: bool) -> u8 {
-    if value {
-        1
-    } else {
-        0
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -899,46 +572,83 @@ mod tests {
     }
 
     #[test]
-    fn prometheus_output_declares_types_without_peer_identifiers() {
+    fn production_bounded_snapshot_fixture_stays_under_32_kib() {
+        /// Test-only wire shape matching the compact HTTP status projection.
+        #[derive(Serialize)]
+        struct CompactStatusFixture {
+            /// Conservative version string included in every compact response.
+            version: &'static str,
+            /// Maximum-width observability fixture under the production collection caps.
+            observability: OperatorSnapshot,
+        }
+
+        let message_class = "ConservativeSixtyFourCharacterProtocolMessageClassNamePlaceholderXX";
+        let peer = "did:ring:conservative-sixty-four-character-peer-identifier-placeholder";
         let snapshot = OperatorSnapshot {
             schema_version: OPERATOR_SCHEMA_VERSION,
             generated_at_ms: 2,
             process_started_at_ms: 1,
             counter_scope: "node_local_process_lifetime",
-            messages: MessageTotals::default(),
-            recent_messages: Vec::new(),
+            messages: MessageTotals {
+                sent: u64::MAX,
+                received: u64::MAX,
+                forwarded: u64::MAX,
+                stored: u64::MAX,
+                failed: u64::MAX,
+            },
+            recent_messages: (0..RECENT_MESSAGE_CAPACITY)
+                .map(|index| RecentMessageEvent {
+                    sequence: u64::try_from(index).unwrap_or(u64::MAX),
+                    observed_at_ms: u128::MAX.saturating_sub(index as u128),
+                    action: "forwarded",
+                    category: "application",
+                    message_class,
+                    outcome: "succeeded",
+                })
+                .collect(),
             session_key: SessionKeySnapshot {
                 valid: true,
-                created_at_ms: 1,
-                expires_at_ms: 10_000,
-                remaining_ms: 9_000,
-                rotation_succeeded_total: 0,
-                rotation_failed_total: 0,
+                created_at_ms: u128::MAX,
+                expires_at_ms: u128::MAX,
+                remaining_ms: u128::MAX,
+                rotation_succeeded_total: u64::MAX,
+                rotation_failed_total: u64::MAX,
                 runtime_rotation_supported: false,
             },
-            mailboxes: MailboxSnapshot::default(),
-            dht_lookups: DhtLookupSnapshot {
-                total: 0,
-                succeeded: 0,
-                failed: 0,
-                timed_out: 0,
-                in_flight: 0,
-                latency_sum_ms: 0,
-                latency_count: 0,
-                latency_buckets: Vec::new(),
+            mailboxes: MailboxSnapshot {
+                registered: u64::MAX,
+                held_messages: u64::MAX,
+                stored_total: u64::MAX,
             },
-            peer_ratings: vec![PeerRatingSnapshot {
-                peer: "did:ring:sensitive-peer".to_string(),
-                reliability: "healthy",
-                credit_score: 1.0,
-                sent: 1,
-                failed_to_send: 0,
-                received: 1,
-                failed_to_receive: 0,
-            }],
+            dht_lookups: DhtLookupSnapshot {
+                total: u64::MAX,
+                succeeded: u64::MAX,
+                failed: u64::MAX,
+                timed_out: u64::MAX,
+                in_flight: u64::MAX,
+                latency_sum_ms: u128::MAX,
+                latency_count: u64::MAX,
+                latency_buckets: (0..LOOKUP_LATENCY_BUCKETS_MS.len())
+                    .map(|_| LatencyBucket {
+                        le_ms: u64::MAX,
+                        count: u64::MAX,
+                    })
+                    .collect(),
+            },
+            peer_ratings: (0..PEER_RATING_CAPACITY)
+                .map(|_| PeerRatingSnapshot {
+                    peer: peer.to_string(),
+                    reliability: "degraded",
+                    credit_score: f64::MAX,
+                    sent: u64::MAX,
+                    failed_to_send: u64::MAX,
+                    received: u64::MAX,
+                    failed_to_receive: u64::MAX,
+                })
+                .collect(),
             health: HealthSnapshot {
                 process_api_healthy: true,
-                admitted_peer_count: 1,
+                admitted_peer_count: u64::MAX,
                 has_admitted_peer: true,
                 has_successor: true,
                 has_predecessor: false,
@@ -946,10 +656,15 @@ mod tests {
             },
         };
 
-        let output = render_prometheus(&snapshot);
-        assert!(output.contains("# TYPE rings_dht_lookup_latency_milliseconds histogram"));
-        assert!(output.contains("rings_session_key_runtime_rotation_supported 0"));
-        assert!(output.contains("rings_local_peer_ratings{reliability=\"healthy\"} 1"));
-        assert!(!output.contains("sensitive-peer"));
+        let response = CompactStatusFixture {
+            version: "0.30.0-conservative-version-placeholder",
+            observability: snapshot,
+        };
+        let encoded = serde_json::to_vec(&response).expect("serialize compact status response");
+        assert!(
+            encoded.len() < 32 * 1024,
+            "compact status response was {} bytes",
+            encoded.len()
+        );
     }
 }

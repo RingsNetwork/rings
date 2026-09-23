@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::FromRequest;
+use axum::extract::Query;
 use axum::extract::Request;
 use axum::extract::State;
 use axum::http::header::CONTENT_TYPE;
@@ -31,16 +32,14 @@ use jsonrpc_core::Version;
 use rings_gateway::GatewayStatus;
 use rings_gateway::GatewayStatusHandle;
 use rings_rpc::method::AuthorizationClass;
-use rings_rpc::protos::rings_node::NodeInfoResponse;
+use serde::Deserialize;
+use serde::Serialize;
 use tokio::net::TcpListener;
 
 use self::http_error::HttpError;
 use crate::native::api_auth::ApiListener;
 use crate::native::api_auth::ApiSecurity;
-use crate::observability::render_prometheus;
 use crate::observability::OperatorSnapshot;
-use crate::observability::OPERATOR_JSON_PATH;
-use crate::observability::OPERATOR_METRICS_PATH;
 use crate::processor::Processor;
 
 /// JSON-RPC state
@@ -56,6 +55,34 @@ where M: jsonrpc_core::Middleware<Arc<Processor>>
 #[derive(Clone)]
 pub struct StatusState {
     processor: Arc<Processor>,
+}
+
+/// Supported projections of the authenticated status route.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum StatusView {
+    /// Preserve the existing full node inspection response.
+    #[default]
+    Full,
+    /// Return bounded operator observations without storage payloads.
+    Observability,
+}
+
+/// Query parameters accepted by the authenticated status route.
+#[derive(Debug, Default, Deserialize)]
+struct StatusQuery {
+    /// Select the response projection; omission preserves the legacy full response.
+    #[serde(default)]
+    view: StatusView,
+}
+
+/// Compact status projection for routine operator polling.
+#[derive(Serialize)]
+struct ObservabilityStatusResponse {
+    /// Running Rings node version.
+    version: String,
+    /// Versioned, bounded process and overlay observations.
+    observability: OperatorSnapshot,
 }
 
 /// Gateway status endpoint state.
@@ -152,18 +179,7 @@ fn internal_router(
 
     let mut router = Router::new()
         .route("/", post(jsonrpc_io_handler).with_state(jsonrpc_state))
-        .route(
-            "/status",
-            get(status_handler).with_state(status_state.clone()),
-        )
-        .route(
-            OPERATOR_JSON_PATH,
-            get(operator_snapshot_handler).with_state(status_state.clone()),
-        )
-        .route(
-            OPERATOR_METRICS_PATH,
-            get(operator_metrics_handler).with_state(status_state),
-        );
+        .route("/status", get(status_handler).with_state(status_state));
     if let Some(status) = gateway {
         router = router.route(
             "/gateway/status",
@@ -288,60 +304,37 @@ where
 }
 
 async fn status_handler(
+    Query(query): Query<StatusQuery>,
     State(state): State<Arc<StatusState>>,
-) -> Result<axum::Json<NodeInfoResponse>, HttpError> {
-    let info = state
-        .processor
-        .get_node_info()
-        .await
-        .map_err(|_| HttpError::Internal)?;
-    Ok(axum::Json(info))
+) -> Result<Response, HttpError> {
+    match query.view {
+        StatusView::Full => {
+            let response = state
+                .processor
+                .get_node_info()
+                .await
+                .map_err(|_| HttpError::Internal)?;
+            Ok(axum::Json(response).into_response())
+        }
+        StatusView::Observability => {
+            let observability = state
+                .processor
+                .operator_snapshot()
+                .await
+                .map_err(|_| HttpError::Internal)?;
+            let response = ObservabilityStatusResponse {
+                version: crate::util::build_version(),
+                observability,
+            };
+            Ok(axum::Json(response).into_response())
+        }
+    }
 }
 
 async fn gateway_status_handler(
     State(state): State<Arc<GatewayStatusState>>,
 ) -> axum::Json<GatewayStatus> {
     axum::Json(state.status.snapshot())
-}
-
-/// Return the bounded structured v1 operator snapshot on the authenticated loopback listener.
-async fn operator_snapshot_handler(
-    State(state): State<Arc<StatusState>>,
-) -> Result<axum::Json<OperatorSnapshot>, HttpError> {
-    let snapshot = state
-        .processor
-        .operator_snapshot()
-        .await
-        .map_err(|_| HttpError::Internal)?;
-    Ok(axum::Json(snapshot))
-}
-
-/// Return the v1 Prometheus scrape representation without identifier-valued labels.
-async fn operator_metrics_handler(
-    State(state): State<Arc<StatusState>>,
-) -> Result<PrometheusResponse, HttpError> {
-    let snapshot = state
-        .processor
-        .operator_snapshot()
-        .await
-        .map_err(|_| HttpError::Internal)?;
-    Ok(PrometheusResponse(render_prometheus(&snapshot)))
-}
-
-/// Prometheus text response with the content type expected by current scrapers.
-struct PrometheusResponse(String);
-
-impl IntoResponse for PrometheusResponse {
-    fn into_response(self) -> axum::response::Response {
-        (
-            [
-                ("content-type", "text/plain; version=0.0.4; charset=utf-8"),
-                ("x-rings-observability-version", "1"),
-            ],
-            self.0,
-        )
-            .into_response()
-    }
 }
 
 /// JSON response struct
@@ -476,8 +469,6 @@ mod security_tests {
         let router = Router::new()
             .route("/", post(|| async { "accepted" }))
             .route("/status", get(|| async { "status" }))
-            .route(OPERATOR_JSON_PATH, get(|| async { "observability" }))
-            .route(OPERATOR_METRICS_PATH, get(|| async { "metrics" }))
             .route("/gateway/status", get(|| async { "gateway status" }));
         secure_router(router, security, listener)
     }
@@ -539,8 +530,6 @@ mod security_tests {
             for (method, path) in [
                 (Method::POST, "/"),
                 (Method::GET, "/status"),
-                (Method::GET, OPERATOR_JSON_PATH),
-                (Method::GET, OPERATOR_METRICS_PATH),
                 (Method::GET, "/gateway/status"),
             ] {
                 let request = Request::builder()
@@ -754,52 +743,84 @@ mod security_tests {
     }
 
     #[tokio::test]
-    async fn operator_routes_are_authenticated_and_internal_only() {
+    async fn status_preserves_full_response_and_offers_compact_observability() {
         let Some(security) = security() else {
             return;
         };
         let processor = Arc::new(prepare_processor().await);
-        for path in [OPERATOR_JSON_PATH, OPERATOR_METRICS_PATH] {
-            let unauthenticated = Request::builder()
-                .method(Method::GET)
-                .uri(path)
-                .body(Body::empty());
+        let routers = [
+            internal_router(processor.clone(), None, security.clone()),
+            external_router(processor, security),
+        ];
+        for router in &routers {
+            let response = json_reply(
+                router.clone(),
+                bearer(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri("/status")
+                        .body(Body::empty()),
+                ),
+            )
+            .await;
             assert_eq!(
-                status_of(
-                    internal_router(processor.clone(), None, security.clone()),
-                    unauthenticated,
-                )
-                .await,
-                Some(StatusCode::UNAUTHORIZED)
-            );
-
-            let authenticated = bearer(
-                Request::builder()
-                    .method(Method::GET)
-                    .uri(path)
-                    .body(Body::empty()),
-            );
-            assert_eq!(
-                status_of(
-                    internal_router(processor.clone(), None, security.clone()),
-                    authenticated,
-                )
-                .await,
+                response.as_ref().map(|(status, _)| *status),
                 Some(StatusCode::OK)
             );
+            assert!(response
+                .as_ref()
+                .and_then(|(_, body)| body.pointer("/version"))
+                .is_some());
+            assert!(response
+                .as_ref()
+                .and_then(|(_, body)| body.pointer("/swarm"))
+                .is_some());
+            assert!(response
+                .as_ref()
+                .and_then(|(_, body)| body.pointer("/observability"))
+                .is_none());
+        }
 
-            let external = bearer(
+        for router in routers {
+            let response = json_reply(
+                router,
+                bearer(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri("/status?view=observability")
+                        .body(Body::empty()),
+                ),
+            )
+            .await;
+            assert_eq!(
+                response.as_ref().map(|(status, _)| *status),
+                Some(StatusCode::OK)
+            );
+            assert!(matches!(
+                response
+                    .as_ref()
+                    .and_then(|(_, body)| body.pointer("/observability/schema_version")),
+                Some(serde_json::Value::Number(version)) if version.as_u64() == Some(1)
+            ));
+            assert!(response
+                .as_ref()
+                .and_then(|(_, body)| body.pointer("/version"))
+                .is_some());
+            assert!(response
+                .as_ref()
+                .and_then(|(_, body)| body.pointer("/swarm"))
+                .is_none());
+        }
+
+        for path in ["/operator/v1/observability", "/operator/v1/metrics"] {
+            let removed = bearer(
                 Request::builder()
                     .method(Method::GET)
                     .uri(path)
                     .body(Body::empty()),
             );
             assert_eq!(
-                status_of(
-                    external_router(processor.clone(), security.clone()),
-                    external,
-                )
-                .await,
+                status_of(stub_router(ApiListener::Internal), removed).await,
                 Some(StatusCode::NOT_FOUND)
             );
         }
