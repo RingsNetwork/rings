@@ -42,3 +42,6 @@ impl BrowserOnionProxy {
         Ok(BrowserOnionProxyResponse { response, route })
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -451,6 +451,41 @@ async fn test_native_circuit_handler_delivers_https_circuits_to_the_shared_clien
     Ok(())
 }
 
+/// The browser circuit handler routes an HTTPS circuit's backward payload to the shared client.
+#[cfg(rings_browser)]
+#[wasm_bindgen_test::wasm_bindgen_test]
+async fn test_browser_circuit_handler_delivers_https_circuits_to_the_shared_client() {
+    use crate::extension::ext::Extensions;
+    use crate::onion::circuit::OnionCircuitHandler;
+    use crate::onion::circuit::ONION_CIRCUIT_NAMESPACE;
+
+    let processor = Arc::new(crate::tests::wasm::prepare_processor().await);
+    let scope = Scope::new(
+        Extensions::new(processor).core(),
+        ONION_CIRCUIT_NAMESPACE.to_string(),
+    );
+    let local = session();
+    let runtime = Arc::new(OnionHttpsRuntime::new(local.delegatee_public_key()));
+    let handler = BrowserOnionCircuitHandler::new(
+        Arc::clone(&runtime),
+        MessageSigner::new(local, TEST_NETWORK_ID),
+    );
+    let exit = session();
+    let (id, return_id, response) = begin(runtime.client(), &exit);
+    let reply = exit_payload(return_id, &exit, OnionHttpsPayload::Response(ok_response()));
+
+    handler
+        .handle_client(&scope, exit.delegator_did(), id, reply)
+        .await
+        .expect("browser handler accepts the backward payload");
+
+    assert_eq!(runtime.client().pending_len(), 0);
+    assert_eq!(
+        poll_decided(response.within(no_deadline())).expect("exit response"),
+        ok_response()
+    );
+}
+
 #[test]
 fn test_forward_nonce_is_consumed_once_for_https_exit_requests() {
     let runtime = runtime();
