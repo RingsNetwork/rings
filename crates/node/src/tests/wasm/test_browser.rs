@@ -160,18 +160,11 @@ async fn test_handle_backend_message() {
     rings_runtime::sleep(Duration::from_millis(3000))
         .await
         .unwrap();
-    let global = rings_runtime::global::global().unwrap();
-    if let rings_runtime::global::Global::Window(window) = global {
-        let ret = window
-            .get("recentMsg")
-            .unwrap()
-            .to_string()
-            .as_string()
-            .unwrap();
-        assert_eq!(&ret, "hello world", "{ret:?}");
-    } else {
-        panic!("cannot get dom window");
-    }
+    let ret = js_sys::Reflect::get(&js_sys::global(), &"recentMsg".into())
+        .unwrap()
+        .as_string()
+        .unwrap();
+    assert_eq!(&ret, "hello world", "{ret:?}");
 }
 
 #[wasm_bindgen_test]

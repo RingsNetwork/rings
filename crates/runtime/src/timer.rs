@@ -23,7 +23,7 @@
 use std::time::Duration;
 
 /// Durations at or beyond this bound (`2³² − 1` s, about 136 years) sleep forever.
-pub const UNBOUNDED_SLEEP: Duration = Duration::from_secs(u32::MAX as u64);
+pub const UNBOUNDED_SLEEP: Duration = Duration::from_secs(4_294_967_295);
 
 /// Why the browser could not wait.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
@@ -58,11 +58,10 @@ pub async fn sleep(duration: Duration) -> Result<(), TimerError> {
     Ok(())
 }
 
-/// The largest delay `setTimeout` honours; larger values overflow and fire immediately.
-#[cfg(any(test, all(feature = "browser", target_family = "wasm")))]
-const MAX_TIMEOUT_MS: u128 = i32::MAX as u128;
-
 /// A duration decomposed into consecutive `setTimeout` delays.
+///
+/// `setTimeout` honours at most `i32::MAX` (`2³¹ − 1`) ms; a larger delay overflows and fires
+/// at once, so a longer duration is emitted as several segments instead.
 ///
 /// Laws: every segment lies in `0 ..= 2³¹ − 1`; the segments sum to `⌈d⌉` in milliseconds;
 /// a zero duration is one zero segment, so `sleep(0)` still yields to the event loop.
@@ -94,9 +93,11 @@ impl Iterator for TimeoutSegments {
             return None;
         }
         self.fresh = false;
-        let segment = self.remaining_ms.min(MAX_TIMEOUT_MS);
-        self.remaining_ms -= segment;
-        i32::try_from(segment).ok()
+        // Total: a remainder beyond the ceiling saturates to it, so no segment is ever lost.
+        let segment = i32::try_from(self.remaining_ms).unwrap_or(i32::MAX);
+        // `0 ≤ segment ≤ remaining_ms`, so the subtraction cannot underflow.
+        self.remaining_ms -= u128::from(segment.unsigned_abs());
+        Some(segment)
     }
 }
 
@@ -133,7 +134,6 @@ mod tests {
     use std::time::Duration;
 
     use super::TimeoutSegments;
-    use super::MAX_TIMEOUT_MS;
 
     fn segments(duration: Duration) -> Vec<i32> {
         TimeoutSegments::new(duration).collect()
@@ -154,7 +154,7 @@ mod tests {
     #[test]
     fn test_ceiling_is_chained_not_clamped() {
         let max = i32::MAX;
-        let at_ceiling = Duration::from_millis(u64::try_from(MAX_TIMEOUT_MS).unwrap());
+        let at_ceiling = Duration::from_millis(u64::from(max.unsigned_abs()));
 
         assert_eq!(segments(at_ceiling), vec![max]);
         assert_eq!(segments(at_ceiling + Duration::from_millis(1)), vec![

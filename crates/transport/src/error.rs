@@ -48,6 +48,10 @@ pub enum Error {
     #[error("Failed when waiting for data channel open: {0}")]
     DataChannelOpen(String),
 
+    /// The runtime could not run a timer (browser only).
+    #[error("Timer error: {0}")]
+    Timer(#[from] rings_runtime::TimerError),
+
     /// Message was not delivered: {0}
     #[error("Message was not delivered: {0}")]
     MessageNotDelivered(String),

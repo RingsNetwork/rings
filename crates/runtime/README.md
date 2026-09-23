@@ -6,7 +6,7 @@ browser's JavaScript event loop.
 | Contract | Native | Browser (`browser` feature on a wasm target) |
 | --- | --- | --- |
 | [`sleep`] | `futures-timer`; never fails | chained `setTimeout` on the window, worker or service-worker scope; fails with [`TimerError`] |
-| [`Spawner`] / [`spawn_detached`] | current Tokio runtime; [`RuntimeUnavailable`] outside one | `spawn_local`; always available |
+| [`Spawner`] / [`spawn_detached`] | current Tokio runtime (`tokio` feature); [`RuntimeUnavailable`] outside one | `spawn_local`; always available |
 | [`run_detached`] | awaited work owned by the runtime | same |
 | [`MaybeSend`] / [`MaybeSendSync`] | `Send` / `Send + Sync` | no bound |
 

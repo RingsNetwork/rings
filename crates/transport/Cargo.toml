@@ -16,9 +16,9 @@ workspace = true
 [features]
 # Include nothing by default
 # The crate root rejects native+wasm backend combinations.
-default = ["tokio/rt", "tokio/time", "tokio-util"]
-dummy = ["webrtc", "rand", "lazy_static", "tokio/rt", "tokio/sync", "tokio/time"]
-native-webrtc = ["webrtc", "tokio-util", "tokio/macros", "tokio/rt", "tokio/sync", "tokio/time"]
+default = ["tokio/rt", "tokio/time", "tokio-util", "rings-runtime/tokio"]
+dummy = ["webrtc", "rand", "lazy_static", "tokio/rt", "tokio/sync", "tokio/time", "rings-runtime/tokio"]
+native-webrtc = ["webrtc", "tokio-util", "tokio/macros", "tokio/rt", "tokio/sync", "tokio/time", "rings-runtime/tokio"]
 web-sys-webrtc = ["dep:futures-util", "dep:futures-channel", "wasm-bindgen", "js-sys", "web-sys", "wasm-bindgen-futures", "rings-runtime/browser"]
 
 [dependencies]

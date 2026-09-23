@@ -263,12 +263,7 @@ pub(crate) trait InboxDelivery {
 }
 
 /// A shared interpreter of the inbox-delivery intent.
-#[cfg(all(feature = "wasm", target_family = "wasm"))]
-pub(crate) type SharedInboxDelivery = Arc<dyn InboxDelivery>;
-
-/// A shared interpreter of the inbox-delivery intent.
-#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
-pub(crate) type SharedInboxDelivery = Arc<dyn InboxDelivery + Send + Sync>;
+pub(crate) type SharedInboxDelivery = Arc<rings_runtime::maybe_send_sync!(dyn InboxDelivery)>;
 
 impl Stabilizer {
     /// Create a new stabilization runner whose inbox-delivery intent `inbox` interprets.

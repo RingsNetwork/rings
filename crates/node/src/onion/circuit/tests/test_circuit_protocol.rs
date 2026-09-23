@@ -26,7 +26,6 @@ use super::super::send_outbox::OnionSendTestHook;
 use super::super::*;
 use crate::extension::ext::Ctx;
 use crate::extension::ext::EffectScope;
-use crate::extension::ext::Extensions;
 use crate::extension::ext::Interpret;
 use crate::extension::ext::Protocol;
 use crate::extension::ext::Scope;
@@ -41,8 +40,6 @@ use crate::onion::OnionRoute;
 use crate::onion::OnionRouteHop;
 use crate::onion::OnionServiceName;
 use crate::online::OnlineNodeType;
-use crate::processor::ProcessorBuilder;
-use crate::processor::ProcessorConfig;
 use crate::sync_lock::lock;
 use crate::tests::TEST_NETWORK_ID;
 
@@ -151,17 +148,10 @@ fn decode_event(
 }
 
 fn test_scope(delegatee_key: DelegateeKey) -> EffectScope {
-    let config = ProcessorConfig::new(1, String::new(), delegatee_key, 1);
-    let processor = ProcessorBuilder::from_config(&config)
-        .expect("processor builder")
-        .advertise_presence(false)
-        .build()
-        .expect("processor");
-    let extensions = Extensions::new(Arc::new(processor));
-    EffectScope::new(Scope::new(
-        extensions.core(),
-        ONION_CIRCUIT_NAMESPACE.to_string(),
-    ))
+    EffectScope::new(
+        crate::test_support::test_scope(delegatee_key, ONION_CIRCUIT_NAMESPACE)
+            .expect("onion circuit test scope"),
+    )
 }
 
 async fn peel_forward_cell(
@@ -625,6 +615,100 @@ async fn test_exit_effect_releases_transition_turn_before_adapter_io_completes()
     .expect("spawn exit adapter");
     handler.wait_until_started().await;
     handler.release();
+}
+
+/// Law: without a runtime the exit effect is refused and its adapter never starts.
+#[test]
+fn test_exit_effect_without_a_runtime_is_refused_before_the_adapter_starts() {
+    let runtime = tokio::runtime::Runtime::new().expect("test runtime");
+    let client = session();
+    let exit = session();
+    let handler = BlockingExitHandler::default();
+    let shell = OnionCircuitShell::new(exit.clone(), handler.clone());
+    let scope = runtime.block_on(async { test_scope(exit.clone()) });
+    let effect = OnionCircuitEffect::Exit {
+        from: client.delegator_did(),
+        circuit_id: OnionCircuitId::new([29; 16]),
+        return_peer: client.delegator_did(),
+        return_delegatee_public_key: client.delegatee_public_key(),
+        client: OnionClientReturn::new(client.delegatee_public_key()),
+        forward_nonce: OnionForwardNonce::new([30; 16]),
+        forward_sequence: OnionForwardSequence::FIRST,
+        payload: test_payload("exit-without-runtime"),
+    };
+
+    let refused = crate::test_support::without_runtime(|| {
+        futures::executor::block_on(shell.run(&scope, effect))
+    });
+
+    assert!(matches!(
+        refused,
+        Err(crate::error::Error::RuntimeUnavailable(_))
+    ));
+    assert!(!handler.started.load(Ordering::SeqCst));
+}
+
+/// Law: a send refused for want of a runtime claims no peer lane, so the next send to the
+/// same peer still starts its own drain.
+#[test]
+fn test_send_effect_without_a_runtime_leaves_the_peer_lane_unclaimed() {
+    let runtime = tokio::runtime::Runtime::new().expect("test runtime");
+    let local = session();
+    let peer = session();
+    let hook = Arc::new(OnionSendTestHook::default());
+    let shell = OnionCircuitShell::new_with_send_test_hook(
+        local.clone(),
+        RecordingHandler::default(),
+        Arc::clone(&hook),
+    );
+    let scope = runtime.block_on(async { test_scope(local.clone()) });
+    let send = |tag: u8| {
+        let message = OnionWireMessage::Backward(OnionBackwardFrame {
+            circuit_id: OnionCircuitId::new([tag; 16]),
+            payload: encrypt_client_payload(
+                OnionReturnId::new([tag; 16]),
+                test_payload("lane"),
+                local.delegatee_public_key(),
+                MessageSigner::new(&local, TEST_NETWORK_ID),
+            )
+            .expect("encrypt lane fixture"),
+        });
+        let effect = OnionCircuitEffect::SealAndSend {
+            to: peer.delegator_did(),
+            recipient: peer.delegatee_public_key(),
+            bucket: OnionCellBucket::KiB4,
+            encoded_message: encode_message(&message).expect("encode lane fixture"),
+        };
+        (message, effect)
+    };
+
+    let (_, refused_effect) = send(31);
+    let refused = crate::test_support::without_runtime(|| {
+        futures::executor::block_on(shell.run(&scope, refused_effect))
+    });
+    assert!(matches!(
+        refused,
+        Err(crate::error::Error::RuntimeUnavailable(_))
+    ));
+
+    let (message, effect) = send(32);
+    runtime.block_on(async {
+        shell
+            .run(&scope, effect)
+            .await
+            .expect("enqueue after refusal");
+        hook.release();
+        let observed =
+            tokio::time::timeout(std::time::Duration::from_secs(1), hook.wait_for_observed(1))
+                .await
+                .expect("the lane drains the send that follows a refusal")
+                .expect("observed sends");
+        let observed = observed
+            .iter()
+            .map(|payload| open_wire(&peer, payload))
+            .collect::<Vec<_>>();
+        assert_eq!(observed, [message]);
+    });
 }
 
 #[tokio::test]
