@@ -423,7 +423,7 @@ async fn test_ice_connection_establish() {
 }
 
 #[wasm_bindgen_test]
-async fn test_message_handler() {
+async fn test_message_handler_manual_handshake_only() {
     get_fake_permission().await;
 
     let key1 = SecretKey::random();

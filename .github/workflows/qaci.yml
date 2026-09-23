@@ -297,7 +297,7 @@ jobs:
       - name: Run core browser tests
         uses: coactions/setup-xvfb@b6b4fcfb9f5a895edadc3bc76318fae0ac17c8b3 # v1
         with:
-          run: cargo test -p rings-core --release --target=wasm32-unknown-unknown --features wasm --no-default-features
+          run: cargo test -p rings-core --release --target=wasm32-unknown-unknown --features browser_chrome_test --no-default-features
           working-directory: ./
 
       - name: Run transport browser tests
@@ -544,6 +544,9 @@ jobs:
 
       - name: Check shared data plane and Wintun binding
         run: cargo check -p rings-gateway --all-targets
+
+      - name: Run Windows gateway library tests
+        run: cargo test -p rings-gateway --lib
 
       - name: Check native node gateway integration
         run: cargo check -p rings-node --no-default-features --features node

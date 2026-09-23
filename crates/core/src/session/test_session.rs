@@ -102,6 +102,23 @@ pub fn test_session_verify_bls12381_account_key() {
 }
 
 #[test]
+pub fn test_session_rejects_altered_bls12381_account_signature() {
+    let signing_key = SigningSecretKey::random_bls12381().unwrap();
+    let account_key = signing_key.public_key().unwrap();
+    let VerificationPublicKey::Bls12381(raw_account_key) = account_key else {
+        unreachable!("random_bls12381 returns a BLS verification key");
+    };
+    let account_entity = base58_monero::encode_check(&raw_account_key.0).unwrap();
+    let mut builder = SessionSkBuilder::new(account_entity, "bls12-381".to_string());
+    let proof = builder.unsigned_proof();
+    let unrelated_signer = SigningSecretKey::random_bls12381().unwrap();
+    let signature = unrelated_signer.sign_raw(proof.as_bytes()).unwrap();
+    builder = builder.set_session_sig(signature);
+
+    assert!(builder.build().is_err());
+}
+
+#[test]
 pub fn test_session_verify_ed25519_account_key() {
     let signing_key = SigningSecretKey::random_ed25519();
     let account_key = signing_key.public_key().unwrap();
