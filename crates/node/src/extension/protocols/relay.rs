@@ -39,6 +39,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use rings_core::dht::Did;
+use rings_runtime::MaybeSendSync;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
@@ -48,7 +49,6 @@ use crate::extension::ext::Ctx;
 use crate::extension::ext::EffectScope;
 #[cfg(any(rings_native, rings_browser))]
 use crate::extension::ext::Interpret;
-use crate::extension::ext::MaybeSend;
 use crate::extension::ext::Protocol;
 use crate::extension::ext::Reject;
 use crate::extension::ext::Scope;
@@ -321,7 +321,7 @@ impl<T> Relay<T> {
 }
 
 impl<T> Protocol for Relay<T>
-where T: Clone + DeserializeOwned + Serialize + MaybeSend + 'static
+where T: Clone + DeserializeOwned + Serialize + MaybeSendSync + 'static
 {
     type State = RelayState<T>;
     type Event = RelayEvent<T>;

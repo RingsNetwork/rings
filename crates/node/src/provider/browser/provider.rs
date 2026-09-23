@@ -6,6 +6,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use js_sys;
 use js_sys::Uint8Array;
@@ -19,11 +20,11 @@ use rings_core::message::DhtProtocolMode;
 use rings_core::message::MessageSigner;
 use rings_core::message::ReplayStorage;
 use rings_core::storage::idb::IdbStorage;
-use rings_core::utils::js_utils;
 use rings_core::utils::js_value;
 use rings_derive::wasm_export;
 use rings_rpc::jsonrpc::Client as RpcClient;
 use rings_rpc::protos::rings_node::*;
+use rings_runtime::sleep;
 use wasm_bindgen;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures;
@@ -898,7 +899,9 @@ impl Provider {
             tracing::debug!("browser lookup_service storage_fetch: {}", entry_key);
             p.storage_fetch(entry_key).await.map_err(JsError::from)?;
             tracing::debug!("browser lookup_service finish storage_fetch: {}", entry_key);
-            js_utils::window_sleep(500).await?;
+            sleep(Duration::from_millis(500))
+                .await
+                .map_err(JsError::from)?;
             let result = p.storage_check_cache(entry_key).await;
 
             if let Some(entry) = result {

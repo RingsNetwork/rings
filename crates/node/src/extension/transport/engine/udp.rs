@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use rings_core::dht::Did;
+use rings_runtime::Spawner;
 use tokio::net::UdpSocket;
 
 use super::inject_accepted;
@@ -15,7 +16,6 @@ use super::RelayTask;
 use super::TransportSessions;
 use super::UDP_BUF;
 use crate::extension::ext::Scope;
-use crate::extension::transport::platform::spawn_detached;
 use crate::extension::transport::Frame;
 use crate::extension::transport::RELAY_IDLE_TIMEOUT;
 
@@ -33,6 +33,10 @@ impl TransportSessions {
         peer: Did,
         service: String,
     ) {
+        let Ok(spawner) = Spawner::current() else {
+            tracing::error!("transport udp listen on {local_addr} requires a runtime");
+            return;
+        };
         let socket = match UdpSocket::bind(local_addr).await {
             Ok(socket) => Arc::new(socket),
             Err(e) => {
@@ -40,7 +44,7 @@ impl TransportSessions {
                 return;
             }
         };
-        spawn_detached(async move {
+        spawner.spawn(async move {
             let mut buf = vec![0u8; UDP_BUF];
             loop {
                 match socket.recv_from(buf.as_mut_slice()).await {
@@ -150,8 +154,13 @@ async fn relay_udp_connected_with_idle(
 }
 
 /// Client-side UDP flow: route peer bytes back to the originating local client `dest`.
-pub(super) fn spawn_udp_sendto(task: RelayTask, socket: Arc<UdpSocket>, dest: SocketAddr) {
-    spawn_detached(relay_udp_sendto(task, socket, dest, RELAY_IDLE_TIMEOUT));
+pub(super) fn spawn_udp_sendto(
+    task: RelayTask,
+    socket: Arc<UdpSocket>,
+    dest: SocketAddr,
+    spawner: &Spawner,
+) {
+    spawner.spawn(relay_udp_sendto(task, socket, dest, RELAY_IDLE_TIMEOUT));
 }
 
 async fn relay_udp_sendto(

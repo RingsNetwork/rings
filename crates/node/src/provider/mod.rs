@@ -119,11 +119,11 @@ impl Provider {
     /// Errors if the namespace is already taken.
     pub fn register_protocol<P, I>(&self, protocol: P, interpret: I) -> Result<()>
     where
-        P: crate::extension::ext::Protocol + crate::extension::ext::MaybeSend + 'static,
-        P::State: crate::extension::ext::MaybeSend + 'static,
-        P::Effect: crate::extension::ext::MaybeSend,
+        P: crate::extension::ext::Protocol + rings_runtime::MaybeSendSync + 'static,
+        P::State: rings_runtime::MaybeSendSync + 'static,
+        P::Effect: rings_runtime::MaybeSendSync,
         I: crate::extension::ext::Interpret<Effect = P::Effect>
-            + crate::extension::ext::MaybeSend
+            + rings_runtime::MaybeSendSync
             + 'static,
     {
         self.extensions.register(protocol, interpret)

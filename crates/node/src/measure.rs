@@ -39,6 +39,11 @@ use rings_measure::ProvisionalEvidenceRecord;
 use rings_measure::ProvisionalEvidenceStore;
 use rings_measure::ReliabilityPolicy;
 use rings_measure::UnixTime;
+use rings_runtime::sleep;
+use rings_runtime::Abandoned;
+use rings_runtime::RuntimeUnavailable;
+use rings_runtime::Spawner;
+use rings_runtime::TimerError;
 
 // Legacy `PeriodicMeasure/counters/...` values intentionally remain unread:
 // a bare count proves neither byte-credit direction nor a live epoch timestamp.
@@ -189,11 +194,10 @@ pub enum MeasureRuntimeError {
     FlushTaskStopped,
     /// The browser could not schedule a measurement timer.
     #[error("measurement timer failed: {0}")]
-    Timer(String),
+    Timer(#[from] TimerError),
     /// Native construction was attempted without a live Tokio runtime.
-    #[cfg(not(all(feature = "browser", target_family = "wasm")))]
-    #[error("measurement persistence requires a live Tokio runtime: {0}")]
-    RuntimeUnavailable(String),
+    #[error("measurement persistence requires a live runtime: {0}")]
+    RuntimeUnavailable(#[from] RuntimeUnavailable),
 }
 
 /// Pure-ledger runtime adapter with durable evidence admission and coalesced measurement snapshots.
@@ -213,8 +217,8 @@ struct MeasureState {
     runtime: Mutex<RuntimeLedger>,
     persistence_lock: AsyncMutex<()>,
     clock: Arc<dyn MeasureClock>,
-    #[cfg(not(all(feature = "browser", target_family = "wasm")))]
-    runtime_handle: tokio::runtime::Handle,
+    /// The executor captured at construction, which owns persistence and flush work.
+    spawner: Spawner,
 }
 
 impl MeasureState {
@@ -319,9 +323,7 @@ impl PeriodicMeasure {
         collector: Option<EvidenceCollectorIdentity>,
         clock: Arc<dyn MeasureClock>,
     ) -> Result<Self, MeasureRuntimeError> {
-        #[cfg(not(all(feature = "browser", target_family = "wasm")))]
-        let runtime_handle = tokio::runtime::Handle::try_current()
-            .map_err(|error| MeasureRuntimeError::RuntimeUnavailable(error.to_string()))?;
+        let spawner = Spawner::current()?;
         let storage = SharedMeasureStorage::from(storage);
         let evidence_storage = SharedEvidenceStorage::from(evidence_storage);
         let mut ledger = match storage.get(SNAPSHOT_KEY).await? {
@@ -387,11 +389,12 @@ impl PeriodicMeasure {
             }),
             persistence_lock: AsyncMutex::new(()),
             clock,
-            #[cfg(not(all(feature = "browser", target_family = "wasm")))]
-            runtime_handle,
+            spawner,
         });
         let (mut persistence_wake, receiver) = mpsc::channel(PERSISTENCE_WAKE_CAPACITY);
-        spawn_persistence_worker(state.clone(), receiver);
+        state
+            .spawner
+            .spawn(run_persistence_worker(state.clone(), receiver));
         if dirty {
             let _ = persistence_wake.try_send(());
         }
@@ -406,12 +409,7 @@ impl PeriodicMeasure {
     /// On native targets, the Tokio runtime captured by [`Self::new`] must
     /// remain alive until the returned future completes.
     pub async fn flush(&self) -> Result<(), MeasureRuntimeError> {
-        let (sender, flush) = futures::channel::oneshot::channel();
-        spawn_bounded_flush(self.state.clone(), sender);
-        match flush.await {
-            Ok(result) => result,
-            Err(_) => Err(MeasureRuntimeError::FlushTaskStopped),
-        }
+        self.start_flush().await
     }
 
     /// Persist all applied updates unless the supplied deadline expires first.
@@ -419,20 +417,31 @@ impl PeriodicMeasure {
     /// On native targets, the Tokio runtime captured by [`Self::new`] must
     /// remain alive until the returned future completes or reaches `timeout`.
     pub async fn flush_with_timeout(&self, timeout: Duration) -> Result<(), MeasureRuntimeError> {
-        let (sender, flush) = futures::channel::oneshot::channel();
-        spawn_bounded_flush(self.state.clone(), sender);
-        let flush = flush.fuse();
+        let flush = self.start_flush().fuse();
         let deadline = measurement_delay(timeout).fuse();
         futures::pin_mut!(flush, deadline);
         futures::select! {
-            result = flush => match result {
-                Ok(result) => result,
-                Err(_) => Err(MeasureRuntimeError::FlushTaskStopped),
-            },
+            result = flush => result,
             deadline = deadline => match deadline {
                 Ok(()) => Err(MeasureRuntimeError::FlushTimeout),
                 Err(error) => Err(error),
             },
+        }
+    }
+
+    /// Start a flush on the captured executor now; the flush outlives a caller that stops
+    /// waiting for it (a timed-out [`Self::flush_with_timeout`]).
+    fn start_flush(&self) -> impl std::future::Future<Output = Result<(), MeasureRuntimeError>> {
+        let state = Arc::clone(&self.state);
+        let flush = self
+            .state
+            .spawner
+            .run_detached(async move { flush_state(&state).await });
+        async move {
+            match flush.await {
+                Ok(result) => result,
+                Err(Abandoned) => Err(MeasureRuntimeError::FlushTaskStopped),
+            }
         }
     }
 
@@ -465,36 +474,9 @@ async fn flush_state(state: &MeasureState) -> Result<(), MeasureRuntimeError> {
     result.map_err(MeasureRuntimeError::from)
 }
 
-type FlushSender = futures::channel::oneshot::Sender<Result<(), MeasureRuntimeError>>;
-
-#[cfg(not(all(feature = "browser", target_family = "wasm")))]
-fn spawn_bounded_flush(state: Arc<MeasureState>, sender: FlushSender) {
-    let runtime_handle = state.runtime_handle.clone();
-    runtime_handle.spawn(async move {
-        let _ = sender.send(flush_state(&state).await);
-    });
-}
-
-#[cfg(not(all(feature = "browser", target_family = "wasm")))]
+/// Wait on the shared runtime timer, reporting failure as a measurement runtime error.
 async fn measurement_delay(duration: Duration) -> Result<(), MeasureRuntimeError> {
-    futures_timer::Delay::new(duration).await;
-    Ok(())
-}
-
-#[cfg(all(feature = "browser", target_family = "wasm"))]
-async fn measurement_delay(duration: Duration) -> Result<(), MeasureRuntimeError> {
-    let millis = i32::try_from(duration.as_millis()).unwrap_or(i32::MAX);
-    rings_core::utils::js_utils::window_sleep(millis)
-        .await
-        .map_err(|error| MeasureRuntimeError::Timer(format!("{error:?}")))?;
-    Ok(())
-}
-
-#[cfg(all(feature = "browser", target_family = "wasm"))]
-fn spawn_bounded_flush(state: Arc<MeasureState>, sender: FlushSender) {
-    wasm_bindgen_futures::spawn_local(async move {
-        let _ = sender.send(flush_state(&state).await);
-    });
+    Ok(sleep(duration).await?)
 }
 
 fn next_prune_time(ledger: &MeasurementLedger<Did>, now: UnixTime) -> UnixTime {
@@ -621,17 +603,6 @@ fn lock_or_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-#[cfg(not(all(feature = "browser", target_family = "wasm")))]
-fn spawn_persistence_worker(state: Arc<MeasureState>, receiver: mpsc::Receiver<()>) {
-    let runtime_handle = state.runtime_handle.clone();
-    runtime_handle.spawn(run_persistence_worker(state, receiver));
-}
-
-#[cfg(all(feature = "browser", target_family = "wasm"))]
-fn spawn_persistence_worker(state: Arc<MeasureState>, receiver: mpsc::Receiver<()>) {
-    wasm_bindgen_futures::spawn_local(run_persistence_worker(state, receiver));
 }
 
 async fn run_persistence_worker(state: Arc<MeasureState>, mut receiver: mpsc::Receiver<()>) {

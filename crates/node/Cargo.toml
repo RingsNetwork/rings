@@ -58,6 +58,7 @@ browser = [
     "rings-core/wasm",
     "rings-rpc/wasm",
     "rings-derive/wasm",
+    "rings-runtime/browser",
     "rings-transport/web-sys-webrtc",
     "serde-wasm-bindgen",
     "lazy_static",
@@ -79,7 +80,6 @@ chrono = "0.4.23"
 dashmap = "5"
 dotenvy = "0.15.7"
 futures = { version = "0.3.21", features = ["alloc"] }
-futures-timer = "3.0.2"
 jsonrpc-core = { workspace = true }
 log = { version = "0.4", features = ["std"] }
 rand = { version = "0.8.5", features = ["getrandom"] }
@@ -89,6 +89,7 @@ rings-derive = { workspace = true, optional = true }
 rings-measure = { workspace = true }
 rings-network-policy = { workspace = true }
 rings-rpc = { workspace = true, optional = true }
+rings-runtime = { workspace = true }
 rings-transport = { workspace = true }
 serde = { version = "1.0.136", features = ["derive"] }
 serde_json = "1.0.70"

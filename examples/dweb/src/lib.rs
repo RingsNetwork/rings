@@ -452,7 +452,9 @@ mod tests {
     /// Two nodes: B hosts `/`, A connects and fetches it over rings, expecting B's page.
     #[wasm_bindgen_test]
     async fn test_two_nodes_fetch_a_hosted_page() {
-        use rings_node::prelude::rings_core::utils::js_utils::window_sleep;
+        use std::time::Duration;
+
+        use rings_node::prelude::rings_runtime::sleep;
 
         // B hosts a page.
         let b = build_node("rings-dweb-test-b").await;
@@ -479,7 +481,7 @@ mod tests {
         let b_did = b.provider.address();
         for _ in 0..60 {
             let _ = fetch_path(a.provider.clone(), b_did.clone(), "/".to_string()).await;
-            window_sleep(500).await.ok();
+            sleep(Duration::from_millis(500)).await.ok();
             if got.borrow().is_some() {
                 break;
             }

@@ -12,12 +12,6 @@ use crate::message::reset_browser_task_yield_guard_counts_for_test;
 use crate::message::yield_browser_task;
 use crate::message::yield_core_actor_step;
 use crate::message::CORE_ACTOR_BROWSER_YIELD_INTERVAL;
-use crate::utils::js_utils;
-
-#[wasm_bindgen_test]
-async fn test_window_sleep_not_panic() {
-    js_utils::window_sleep(200).await.unwrap();
-}
 
 #[wasm_bindgen_test]
 async fn test_core_actor_steps_yield_to_a_queued_browser_task() {

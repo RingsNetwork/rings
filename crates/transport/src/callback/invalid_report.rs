@@ -183,26 +183,28 @@ impl InnerTransportCallback {
         if !self.queue_invalid_inbound_frame() {
             return;
         }
-        let callback = Arc::clone(self);
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            callback
-                .invalid_frame_report_state
-                .swap(0, Ordering::AcqRel);
-            tracing::error!(peer = %callback.cid, "invalid-frame reporter requires a Tokio runtime");
+        let Ok(spawner) = rings_runtime::Spawner::current() else {
+            self.invalid_frame_report_state.swap(0, Ordering::AcqRel);
+            tracing::error!(peer = %self.cid, "invalid-frame reporter requires a Tokio runtime");
             return;
         };
-        runtime.spawn(async move { callback.drain_invalid_inbound_frames().await });
+        let callback = Arc::clone(self);
+        spawner.spawn(async move { callback.drain_invalid_inbound_frames().await });
     }
 
     #[cfg(all(target_family = "wasm", feature = "web-sys-webrtc"))]
     /// Report one malformed or oversized frame without blocking adapter ingress.
     pub fn report_invalid_inbound_frame(self: &Rc<Self>) {
-        if self.queue_invalid_inbound_frame() {
-            let callback = Rc::clone(self);
-            wasm_bindgen_futures::spawn_local(async move {
-                callback.drain_invalid_inbound_frames().await;
-            });
+        if !self.queue_invalid_inbound_frame() {
+            return;
         }
+        // The browser event loop is always current, so this spawner cannot be refused.
+        let Ok(spawner) = rings_runtime::Spawner::current() else {
+            self.invalid_frame_report_state.swap(0, Ordering::AcqRel);
+            return;
+        };
+        let callback = Rc::clone(self);
+        spawner.spawn(async move { callback.drain_invalid_inbound_frames().await });
     }
 
     #[cfg(all(test, not(target_family = "wasm")))]

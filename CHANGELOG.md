@@ -17,6 +17,18 @@
 
 ### Breaking changes
 
+- Consolidate native/browser runtime adaptation into the new `rings-runtime` crate (#811):
+  one fallible `sleep` (sub-millisecond durations round up, browser timers chain across the
+  `setTimeout` ceiling instead of clamping, durations of `UNBOUNDED_SLEEP` or more never
+  resolve), a `Spawner` whose absence is reported before any work starts, detached
+  `spawn_detached`/`run_detached` contracts, and the `MaybeSend`/`MaybeSendSync` bounds.
+  Removed without aliases: `rings_core::utils::js_utils` (use `rings_runtime::sleep`),
+  `rings_transport::js_global` (now `rings_runtime::global`), `rings_transport::PlatformSendSync`
+  and `rings_node::extension::ext::MaybeSend` (both `rings_runtime::MaybeSendSync`). Node error
+  code 1503 is now `DetachedTask`, with new codes 1504 `RuntimeUnavailable` and 1505 `Timer`;
+  relay, onion and measurement work refuses with these errors instead of panicking when no
+  Tokio runtime is current. `rings_node::prelude` re-exports `rings_runtime`.
+
 - Replace session-key terminology in the delegated-signing API with `Delegation`,
   `DelegateeKey`, `DelegationBuilder`, and `DelegationDigest` under
   `rings_core::delegation`. Rename the related DIDs, authorization accessors,

@@ -20,11 +20,11 @@ use std::sync::RwLock;
 use bytes::Bytes;
 use futures::lock::Mutex as AsyncMutex;
 use rings_core::dht::Did;
+use rings_runtime::MaybeSendSync;
 
 use super::Ctx;
 use super::Envelope;
 use super::Interpret;
-use super::MaybeSend;
 use super::Protocol;
 use super::Reject;
 use super::Transition;
@@ -242,10 +242,10 @@ struct Runner<P: Protocol, I> {
 #[cfg_attr(rings_native, async_trait::async_trait)]
 impl<P, I> Handler for Runner<P, I>
 where
-    P: Protocol + MaybeSend + 'static,
-    P::State: MaybeSend + 'static,
-    P::Effect: MaybeSend,
-    I: Interpret<Effect = P::Effect> + MaybeSend + 'static,
+    P: Protocol + MaybeSendSync + 'static,
+    P::State: MaybeSendSync + 'static,
+    P::Effect: MaybeSendSync,
+    I: Interpret<Effect = P::Effect> + MaybeSendSync + 'static,
 {
     async fn handle(&self, core: &Core, from: Did, payload: Bytes) -> Result<()> {
         // Boundary: decode raw bytes to a typed event. An undecodable/foreign message is an
@@ -371,10 +371,10 @@ impl Extensions {
     /// intentional replacement (no more silent overwrite).
     pub fn register<P, I>(&self, protocol: P, interpret: I) -> Result<()>
     where
-        P: Protocol + MaybeSend + 'static,
-        P::State: MaybeSend + 'static,
-        P::Effect: MaybeSend,
-        I: Interpret<Effect = P::Effect> + MaybeSend + 'static,
+        P: Protocol + MaybeSendSync + 'static,
+        P::State: MaybeSendSync + 'static,
+        P::Effect: MaybeSendSync,
+        I: Interpret<Effect = P::Effect> + MaybeSendSync + 'static,
     {
         self.insert(protocol, interpret, false)
     }
@@ -383,10 +383,10 @@ impl Extensions {
     /// namespace instead of erroring. For deliberate hot-swaps.
     pub fn replace<P, I>(&self, protocol: P, interpret: I) -> Result<()>
     where
-        P: Protocol + MaybeSend + 'static,
-        P::State: MaybeSend + 'static,
-        P::Effect: MaybeSend,
-        I: Interpret<Effect = P::Effect> + MaybeSend + 'static,
+        P: Protocol + MaybeSendSync + 'static,
+        P::State: MaybeSendSync + 'static,
+        P::Effect: MaybeSendSync,
+        I: Interpret<Effect = P::Effect> + MaybeSendSync + 'static,
     {
         self.insert(protocol, interpret, true)
     }
@@ -398,10 +398,10 @@ impl Extensions {
     /// partial install can never leave one namespace claimed while the caller gets no handle.
     pub fn register_many<P, I>(&self, items: Vec<(P, I)>) -> Result<()>
     where
-        P: Protocol + MaybeSend + 'static,
-        P::State: MaybeSend + 'static,
-        P::Effect: MaybeSend,
-        I: Interpret<Effect = P::Effect> + MaybeSend + 'static,
+        P: Protocol + MaybeSendSync + 'static,
+        P::State: MaybeSendSync + 'static,
+        P::Effect: MaybeSendSync,
+        I: Interpret<Effect = P::Effect> + MaybeSendSync + 'static,
     {
         // Build (namespace, runner) outside the lock.
         let prepared: Vec<(String, Arc<DynHandler>)> = items
@@ -447,10 +447,10 @@ impl Extensions {
 
     fn insert<P, I>(&self, protocol: P, interpret: I, replace: bool) -> Result<()>
     where
-        P: Protocol + MaybeSend + 'static,
-        P::State: MaybeSend + 'static,
-        P::Effect: MaybeSend,
-        I: Interpret<Effect = P::Effect> + MaybeSend + 'static,
+        P: Protocol + MaybeSendSync + 'static,
+        P::State: MaybeSendSync + 'static,
+        P::Effect: MaybeSendSync,
+        I: Interpret<Effect = P::Effect> + MaybeSendSync + 'static,
     {
         let namespace = protocol.namespace().to_string();
         let state = Mutex::new(protocol.init());

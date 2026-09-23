@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use rings_core::dht::Did;
+use rings_runtime::Spawner;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
@@ -19,7 +20,6 @@ use super::RelayTask;
 use super::TransportSessions;
 use super::TCP_BUF;
 use crate::extension::ext::Scope;
-use crate::extension::transport::platform::spawn_detached;
 use crate::extension::transport::Frame;
 use crate::extension::transport::RELAY_IDLE_TIMEOUT;
 
@@ -35,6 +35,10 @@ impl TransportSessions {
         peer: Did,
         service: String,
     ) {
+        let Ok(spawner) = Spawner::current() else {
+            tracing::error!("transport listen on {local_addr} requires a runtime");
+            return;
+        };
         let listener = match TcpListener::bind(local_addr).await {
             Ok(listener) => listener,
             Err(e) => {
@@ -42,7 +46,7 @@ impl TransportSessions {
                 return;
             }
         };
-        spawn_detached(async move {
+        spawner.spawn(async move {
             loop {
                 match listener.accept().await {
                     Ok((stream, _)) => {

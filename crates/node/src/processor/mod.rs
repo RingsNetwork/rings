@@ -43,6 +43,7 @@ use rings_core::swarm::Swarm;
 use rings_core::swarm::SwarmBuilder;
 use rings_core::utils::get_epoch_ms;
 use rings_rpc::protos::rings_node::*;
+use rings_runtime::sleep;
 use rings_transport::webrtc_config::WebrtcUdpPortRange;
 use serde::Deserialize;
 use serde::Serialize;
@@ -87,7 +88,6 @@ use crate::registration::default_advertise_presence;
 use crate::registration::default_online_node_heartbeat_interval_secs;
 use crate::registration::default_online_node_ttl_secs;
 use crate::registration::default_online_node_type;
-use crate::registration::sleep_registration_interval;
 use crate::registration::validate_online_node_registration_timing;
 use crate::registration::OnlineNodeRegistration;
 use crate::registration::RegistrationContext;
@@ -109,21 +109,6 @@ pub use config::ProcessorConfigSerialized;
 const DHT_LOOKUP_CACHE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DHT_LOOKUP_CACHE_POLL_ATTEMPTS: usize = 40;
 
-#[cfg(not(all(feature = "browser", target_family = "wasm")))]
-async fn sleep_dht_lookup_poll_interval(interval: Duration) -> Result<()> {
-    futures_timer::Delay::new(interval).await;
-    Ok(())
-}
-
-#[cfg(all(feature = "browser", target_family = "wasm"))]
-async fn sleep_dht_lookup_poll_interval(interval: Duration) -> Result<()> {
-    let interval_ms = i32::try_from(interval.as_millis()).unwrap_or(i32::MAX);
-    rings_core::utils::js_utils::window_sleep(interval_ms)
-        .await
-        .map_err(|error| Error::JsError(format!("{error:?}")))?;
-    Ok(())
-}
-
 async fn sleep_registration_interval_with_stop(
     interval: Duration,
     stop: &StopToken,
@@ -138,7 +123,7 @@ async fn sleep_registration_interval_with_stop(
         pin_mut!(own_stop, maintenance_stop);
         let _ = select(own_stop, maintenance_stop).await;
     };
-    let interval_elapsed = sleep_registration_interval(interval);
+    let interval_elapsed = sleep(interval);
     pin_mut!(stopped, interval_elapsed);
     match select(interval_elapsed, stopped).await {
         futures::future::Either::Left((result, _)) => {
@@ -386,7 +371,7 @@ impl Processor {
             if attempt + 1 == DHT_LOOKUP_CACHE_POLL_ATTEMPTS {
                 break;
             }
-            sleep_dht_lookup_poll_interval(DHT_LOOKUP_CACHE_POLL_INTERVAL).await?;
+            sleep(DHT_LOOKUP_CACHE_POLL_INTERVAL).await?;
         }
         Ok(None)
     }
@@ -426,7 +411,7 @@ impl Processor {
     ) -> Result<Option<entry::Entry>> {
         self.storage_fetch(entry_key).await?;
         for _ in 0..DHT_LOOKUP_CACHE_POLL_ATTEMPTS {
-            sleep_dht_lookup_poll_interval(DHT_LOOKUP_CACHE_POLL_INTERVAL).await?;
+            sleep(DHT_LOOKUP_CACHE_POLL_INTERVAL).await?;
             let Some(entry) = self.storage_check_cache(entry_key).await else {
                 continue;
             };

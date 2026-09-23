@@ -19,7 +19,7 @@
 //! `step` is pure (no IO, clocks, globals) and total over well-typed events; the decode
 //! boundary makes "undecodable/foreign input" an explicit [`Reject`] instead of a silent
 //! no-op. The abstraction is identical on both targets; the sole divergence is the `Send` /
-//! `?Send` bound, isolated in [`MaybeSend`].
+//! `?Send` bound, isolated in [`rings_runtime::MaybeSendSync`].
 //!
 //! ## Module layout
 //!
@@ -50,17 +50,3 @@ pub(crate) use registry::Core;
 pub use registry::EffectScope;
 pub use registry::Extensions;
 pub use registry::Scope;
-
-/// Auto-trait bound that is `Send + Sync` on native and empty on browser.
-///
-/// Lets the pure-core types be written once; the `Send`-ness divergence (browser futures
-/// are not `Send`) is confined here. `∀ T` on browser; `Send + Sync` elsewhere.
-#[cfg(rings_native)]
-pub trait MaybeSend: Send + Sync {}
-#[cfg(rings_native)]
-impl<T: Send + Sync> MaybeSend for T {}
-/// Auto-trait bound that is `Send + Sync` on native and empty on browser.
-#[cfg(rings_browser)]
-pub trait MaybeSend {}
-#[cfg(rings_browser)]
-impl<T> MaybeSend for T {}
