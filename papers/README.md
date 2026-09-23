@@ -10,6 +10,7 @@ behavior. A design in a paper is not, by itself, a shipped feature.
 | Rings | [PDF](rings.pdf) | [LaTeX](rings.tex), [BibTeX](cites.bib) | Original protocol whitepaper; image assets are under `imgs/rings/` |
 | DRanking | [PDF](dranking.pdf) | [LaTeX](dranking.tex), [BibTeX](dranking.bib) | Proposed verifiable ranking and admission; supersedes the 2023 *Ranking Protocol* draft |
 | Finger convergence | [PDF](finger-convergence.pdf) | [LaTeX](finger-convergence.tex), [BibTeX](finger-convergence.bib) | Range-proved finger-convergence specification, written for Rings 0.26.0 |
+| OnionMonad | [PDF](onion-monad.pdf) | [LaTeX](onion-monad.tex), [BibTeX](onion-monad.bib) | Proposed onion circuits as client-sealed loops of registered operation symbols ([#834](https://github.com/RingsNetwork/rings/issues/834)); specification before the Phase 2 code |
 
 DRanking's current implementation is limited to
 [provisional service receipts](../docs/src/advanced-topic/dranking-service-receipts.md).
@@ -30,6 +31,7 @@ cd papers
 latexmk -xelatex -interaction=nonstopmode -halt-on-error rings.tex
 latexmk -xelatex -interaction=nonstopmode -halt-on-error dranking.tex
 latexmk -xelatex -interaction=nonstopmode -halt-on-error finger-convergence.tex
+latexmk -xelatex -interaction=nonstopmode -halt-on-error onion-monad.tex
 ```
 
 Run only the command for the paper being edited when making a focused change.
