@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Rename the relay transport identifier from `SessionId` to `RelaySessionId` to distinguish
+  relayed TCP connections and UDP flows from delegated-signing identities. The wire value and
+  frame encoding are unchanged.
+
 - Bound outbound command ingestion to a permit-bounded batch and one coalesced
   cancellation scan. Control submitted behind bulk becomes visible before frame
   selection; shutdown releases the batch's permits before completion publication.

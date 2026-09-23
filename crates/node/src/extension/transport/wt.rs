@@ -552,7 +552,7 @@ mod tests {
 
     use super::WtSessions;
     use crate::extension::transport::Initiator;
-    use crate::extension::transport::SessionId;
+    use crate::extension::transport::RelaySessionId;
     use crate::extension::transport::SessionKey;
     use crate::extension::transport::SlotRegistration;
 
@@ -560,7 +560,12 @@ mod tests {
     #[test]
     fn test_duplicate_open_preserves_browser_slot_generation() {
         let sessions = WtSessions::new();
-        let key = SessionKey::new(Did::from(7_u32), "tcp", SessionId(10), Initiator::Remote);
+        let key = SessionKey::new(
+            Did::from(7_u32),
+            "tcp",
+            RelaySessionId(10),
+            Initiator::Remote,
+        );
         let original_generation = match sessions.open_slot(key.clone()) {
             SlotRegistration::Registered(generation) => generation,
             SlotRegistration::AlreadyPresent | SlotRegistration::Failed => {
