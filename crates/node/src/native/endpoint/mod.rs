@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::FromRequest;
+use axum::extract::Query;
 use axum::extract::Request;
 use axum::extract::State;
 use axum::http::header::CONTENT_TYPE;
@@ -31,12 +32,14 @@ use jsonrpc_core::Version;
 use rings_gateway::GatewayStatus;
 use rings_gateway::GatewayStatusHandle;
 use rings_rpc::method::AuthorizationClass;
-use rings_rpc::protos::rings_node::NodeInfoResponse;
+use serde::Deserialize;
+use serde::Serialize;
 use tokio::net::TcpListener;
 
 use self::http_error::HttpError;
 use crate::native::api_auth::ApiListener;
 use crate::native::api_auth::ApiSecurity;
+use crate::observability::OperatorSnapshot;
 use crate::processor::Processor;
 
 /// JSON-RPC state
@@ -52,6 +55,34 @@ where M: jsonrpc_core::Middleware<Arc<Processor>>
 #[derive(Clone)]
 pub struct StatusState {
     processor: Arc<Processor>,
+}
+
+/// Supported projections of the authenticated status route.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum StatusView {
+    /// Preserve the existing full node inspection response.
+    #[default]
+    Full,
+    /// Return bounded operator observations without storage payloads.
+    Observability,
+}
+
+/// Query parameters accepted by the authenticated status route.
+#[derive(Debug, Default, Deserialize)]
+struct StatusQuery {
+    /// Select the response projection; omission preserves the legacy full response.
+    #[serde(default)]
+    view: StatusView,
+}
+
+/// Compact status projection for routine operator polling.
+#[derive(Serialize)]
+struct ObservabilityStatusResponse {
+    /// Running Rings node version.
+    version: String,
+    /// Versioned, bounded process and overlay observations.
+    observability: OperatorSnapshot,
 }
 
 /// Gateway status endpoint state.
@@ -273,14 +304,31 @@ where
 }
 
 async fn status_handler(
+    Query(query): Query<StatusQuery>,
     State(state): State<Arc<StatusState>>,
-) -> Result<axum::Json<NodeInfoResponse>, HttpError> {
-    let info = state
-        .processor
-        .get_node_info()
-        .await
-        .map_err(|_| HttpError::Internal)?;
-    Ok(axum::Json(info))
+) -> Result<Response, HttpError> {
+    match query.view {
+        StatusView::Full => {
+            let response = state
+                .processor
+                .get_node_info()
+                .await
+                .map_err(|_| HttpError::Internal)?;
+            Ok(axum::Json(response).into_response())
+        }
+        StatusView::Observability => {
+            let observability = state
+                .processor
+                .operator_snapshot()
+                .await
+                .map_err(|_| HttpError::Internal)?;
+            let response = ObservabilityStatusResponse {
+                version: crate::util::build_version(),
+                observability,
+            };
+            Ok(axum::Json(response).into_response())
+        }
+    }
 }
 
 async fn gateway_status_handler(
@@ -692,5 +740,89 @@ mod security_tests {
                 .map(|(status, reply)| (*status, reply.pointer("/error/code"))),
             Some((StatusCode::OK, Some(&serde_json::Value::from(-32700))))
         );
+    }
+
+    #[tokio::test]
+    async fn status_preserves_full_response_and_offers_compact_observability() {
+        let Some(security) = security() else {
+            return;
+        };
+        let processor = Arc::new(prepare_processor().await);
+        let routers = [
+            internal_router(processor.clone(), None, security.clone()),
+            external_router(processor, security),
+        ];
+        for router in &routers {
+            let response = json_reply(
+                router.clone(),
+                bearer(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri("/status")
+                        .body(Body::empty()),
+                ),
+            )
+            .await;
+            assert_eq!(
+                response.as_ref().map(|(status, _)| *status),
+                Some(StatusCode::OK)
+            );
+            assert!(response
+                .as_ref()
+                .and_then(|(_, body)| body.pointer("/version"))
+                .is_some());
+            assert!(response
+                .as_ref()
+                .and_then(|(_, body)| body.pointer("/swarm"))
+                .is_some());
+            assert!(response
+                .as_ref()
+                .and_then(|(_, body)| body.pointer("/observability"))
+                .is_none());
+        }
+
+        for router in routers {
+            let response = json_reply(
+                router,
+                bearer(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri("/status?view=observability")
+                        .body(Body::empty()),
+                ),
+            )
+            .await;
+            assert_eq!(
+                response.as_ref().map(|(status, _)| *status),
+                Some(StatusCode::OK)
+            );
+            assert!(matches!(
+                response
+                    .as_ref()
+                    .and_then(|(_, body)| body.pointer("/observability/schema_version")),
+                Some(serde_json::Value::Number(version)) if version.as_u64() == Some(1)
+            ));
+            assert!(response
+                .as_ref()
+                .and_then(|(_, body)| body.pointer("/version"))
+                .is_some());
+            assert!(response
+                .as_ref()
+                .and_then(|(_, body)| body.pointer("/swarm"))
+                .is_none());
+        }
+
+        for path in ["/operator/v1/observability", "/operator/v1/metrics"] {
+            let removed = bearer(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(path)
+                    .body(Body::empty()),
+            );
+            assert_eq!(
+                status_of(stub_router(ApiListener::Internal), removed).await,
+                Some(StatusCode::NOT_FOUND)
+            );
+        }
     }
 }

@@ -31,6 +31,7 @@ use js_sys::Uint8Array;
 use rings_core::dht::Did;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
+use wasm_bindgen_futures::spawn_local;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::ReadableStream;
 use web_sys::ReadableStreamDefaultReader;
@@ -43,7 +44,6 @@ use crate::error::Result;
 use crate::extension::ext::Scope;
 use crate::extension::protocols::relay::RelayCommand;
 use crate::extension::transport::allocate_non_reusing;
-use crate::extension::transport::platform::spawn_detached;
 use crate::extension::transport::EffectEnqueue;
 use crate::extension::transport::Frame;
 use crate::extension::transport::Initiator;
@@ -152,7 +152,7 @@ impl WtSessions {
             SlotRegistration::AlreadyPresent => return EffectEnqueue::AlreadyPresent,
             SlotRegistration::Failed => return EffectEnqueue::Failed,
         };
-        spawn_detached(async move {
+        spawn_local(async move {
             self.finish_connect(scope, key, url, kind, generation).await;
         });
         EffectEnqueue::Enqueued
@@ -375,7 +375,7 @@ impl WtSessions {
     /// blocking an extension transition or being misclassified as a permanent failure.
     fn spawn_writer_loop(self: &Arc<Self>, scope: Scope, key: SessionKey, generation: u64) {
         let sessions = self.clone();
-        spawn_detached(async move {
+        spawn_local(async move {
             loop {
                 let (writer, op) = match sessions.take_ready_outbound(&key, generation) {
                     OutboundDrainStep::Operation(writer, op) => (writer, op),
@@ -452,7 +452,7 @@ impl WtSessions {
         generation: u64,
     ) {
         let sessions = self.clone();
-        spawn_detached(async move {
+        spawn_local(async move {
             let peer = key.peer;
             let session = key.session;
             let from_opener = matches!(key.initiator, Initiator::Local);
@@ -552,7 +552,7 @@ mod tests {
 
     use super::WtSessions;
     use crate::extension::transport::Initiator;
-    use crate::extension::transport::SessionId;
+    use crate::extension::transport::RelaySessionId;
     use crate::extension::transport::SessionKey;
     use crate::extension::transport::SlotRegistration;
 
@@ -560,7 +560,12 @@ mod tests {
     #[test]
     fn test_duplicate_open_preserves_browser_slot_generation() {
         let sessions = WtSessions::new();
-        let key = SessionKey::new(Did::from(7_u32), "tcp", SessionId(10), Initiator::Remote);
+        let key = SessionKey::new(
+            Did::from(7_u32),
+            "tcp",
+            RelaySessionId(10),
+            Initiator::Remote,
+        );
         let original_generation = match sessions.open_slot(key.clone()) {
             SlotRegistration::Registered(generation) => generation,
             SlotRegistration::AlreadyPresent | SlotRegistration::Failed => {

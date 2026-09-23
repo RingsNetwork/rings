@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::Duration;
 
 use futures::future::Either;
 use futures::FutureExt;
@@ -8,7 +9,7 @@ use js_sys::Object;
 use js_sys::Promise;
 use js_sys::Reflect;
 use js_sys::Uint8Array;
-use rings_core::utils::js_utils;
+use rings_runtime::sleep;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
@@ -28,7 +29,7 @@ use crate::onion::proxy::OnionProxyTarget;
 use crate::onion::target::validate_public_ip_literal;
 use crate::onion::OnionExitPolicy;
 
-const HTTPS_EXIT_REQUEST_TIMEOUT_MS: i32 = 30_000;
+const HTTPS_EXIT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(super) async fn execute_https_request(
     url: &str,
@@ -74,7 +75,7 @@ pub(super) async fn execute_https_request(
             body,
         })
     };
-    let timeout = js_utils::window_sleep(HTTPS_EXIT_REQUEST_TIMEOUT_MS).fuse();
+    let timeout = sleep(HTTPS_EXIT_REQUEST_TIMEOUT).fuse();
     futures::pin_mut!(fetch_task, timeout);
     match futures::future::select(fetch_task, timeout).await {
         Either::Left((result, _)) => result,

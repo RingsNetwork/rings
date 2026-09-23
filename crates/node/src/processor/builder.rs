@@ -193,6 +193,8 @@ impl ProcessorBuilder {
             registration_tasks.push(Arc::new(onion_exit_registration));
         }
 
+        // One recorder is shared between core protocol hooks and node-level snapshot assembly.
+        let observability = Arc::new(crate::observability::Observability::new());
         let mut swarm_builder = SwarmBuilder::new(
             self.network_id,
             &self.ice_servers,
@@ -205,6 +207,7 @@ impl ProcessorBuilder {
         swarm_builder = swarm_builder.reassembly_limits(self.reassembly_limits);
         swarm_builder = swarm_builder.replay_storage(replay_storage);
         swarm_builder = swarm_builder.origin_quota(self.origin_quota);
+        swarm_builder = swarm_builder.observer(observability.clone());
 
         if let Some(external_address) = self.external_address {
             swarm_builder = swarm_builder.external_address(external_address);
@@ -232,6 +235,7 @@ impl ProcessorBuilder {
             #[cfg(all(feature = "browser", target_family = "wasm"))]
             advertise_onion_relay: self.advertise_onion_relay,
             registration_tasks,
+            observability,
         })
     }
 

@@ -22,7 +22,6 @@ use futures::pin_mut;
 use futures::select;
 use futures::FutureExt;
 use futures::Stream;
-use futures_timer::Delay;
 use rings_rpc::jsonrpc::Client as RpcClient;
 use rings_rpc::protos::rings_node::*;
 
@@ -266,7 +265,7 @@ impl Client {
 
         stream! {
             loop {
-                let timeout = Delay::new(Duration::from_secs(5)).fuse();
+                let timeout = rings_runtime::sleep(Duration::from_secs(5)).fuse();
                 pin_mut!(timeout);
 
                 select! {

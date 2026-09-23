@@ -15,10 +15,10 @@ use rings_core::message::MessageVerificationExt;
 use rings_core::swarm::callback::PeerTransition;
 use rings_core::swarm::callback::SwarmCallback;
 use rings_core::swarm::callback::SwarmEvent;
+use rings_runtime::run_detached;
 
 use crate::extension::ext::Envelope;
 use crate::extension::ext::Extensions;
-use crate::extension::transport::platform::run_detached;
 use crate::provider::Provider;
 
 /// Observer of swarm facts the [`Backend`] decodes or receives but does not act on itself.

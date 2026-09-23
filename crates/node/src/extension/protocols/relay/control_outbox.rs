@@ -7,12 +7,12 @@ use std::sync::Mutex;
 
 use bytes::Bytes;
 use rings_core::dht::Did;
+use rings_runtime::Spawner;
 
 #[cfg(test)]
 use crate::error::OnionQueueAdmissionReason;
 use crate::error::OnionQueueKind;
 use crate::extension::ext::Scope;
-use crate::extension::transport::platform::spawn_detached;
 use crate::peer_quota::PeerQuota;
 use crate::sync_lock::lock;
 #[cfg(all(test, rings_native))]
@@ -158,6 +158,7 @@ impl ControlOutbox {
         to: Did,
         payload: Bytes,
     ) -> crate::error::Result<()> {
+        let spawner = Spawner::current()?;
         let permit = ControlPermit::acquire(Arc::clone(&self.budget), to)?;
         let send = ControlSend {
             scope,
@@ -166,7 +167,7 @@ impl ControlOutbox {
             #[cfg(all(test, rings_native))]
             test_hook: self.test_hook.clone(),
         };
-        spawn_detached(async move {
+        spawner.spawn(async move {
             let _permit = permit;
             apply_control_send(send).await;
         });

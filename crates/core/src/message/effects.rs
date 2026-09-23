@@ -36,6 +36,9 @@ use crate::message::PayloadSender;
 use crate::message::QueryForTopoInfoSend;
 use crate::swarm::callback::InnerSwarmCallback;
 use crate::swarm::callback::SharedSwarmCallback;
+use crate::swarm::observer::MessageActivity;
+use crate::swarm::observer::MessageObservation;
+use crate::swarm::observer::ObservationOutcome;
 use crate::swarm::transport::SwarmTransport;
 
 /// Yield one executor poll without depending on a particular async runtime.
@@ -424,7 +427,20 @@ impl<'handler> CoreEffectInterpreter<'handler> {
                 self.transport.reset_destination(payload, next_hop).await
             }
             CoreEffect::HoldForOfflineDestination { payload } => {
-                hold_for_offline_destination(self.transport.clone(), payload).await
+                let message_kind =
+                    crate::message::MessageKind::from_wire(&payload.transaction.data)?;
+                let result = hold_for_offline_destination(self.transport.clone(), payload).await;
+                self.transport.observe_message(MessageObservation {
+                    activity: MessageActivity::Stored,
+                    category: message_kind.class(),
+                    message_class: message_kind.as_str(),
+                    outcome: if result.is_ok() {
+                        ObservationOutcome::Succeeded
+                    } else {
+                        ObservationOutcome::Failed
+                    },
+                });
+                result
             }
             CoreEffect::RequestStorageRepair => {
                 self.transport.request_storage_repair();

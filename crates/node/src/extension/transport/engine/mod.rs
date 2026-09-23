@@ -52,6 +52,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use rings_core::dht::Did;
+use rings_runtime::Spawner;
 use tokio::net::TcpStream;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
@@ -63,7 +64,6 @@ use crate::error::Result;
 use crate::extension::ext::Scope;
 use crate::extension::protocols::relay::RelayCommand;
 use crate::extension::transport::allocate_non_reusing;
-use crate::extension::transport::platform::spawn_detached;
 use crate::extension::transport::EffectEnqueue;
 use crate::extension::transport::Frame;
 use crate::extension::transport::Initiator;
@@ -148,7 +148,7 @@ impl UdpFlowState {
 /// holds caches that are populated by the pure relay's effects.
 ///
 /// - `map`: live sessions keyed by [`SessionKey`] (the core-minted identity). The bare
-///   opener `SessionId` is not a valid key — keying by the authenticated `peer` is what makes
+///   opener `RelaySessionId` is not a valid key — keying by the authenticated `peer` is what makes
 ///   a frame unable to address another peer's session.
 /// - `pending`: accepted-but-not-yet-bound connections/flows, keyed by engine-local token.
 /// - `udp_flows`: `src → Pending | Opening | Active` projection. It suppresses duplicate accepts
@@ -190,12 +190,16 @@ impl TransportSessions {
             key.namespace.as_str(),
             "relay engine acted with a scope outside the session's namespace"
         );
+        // Acquired before the slot is claimed, so a missing runtime claims nothing.
+        let Ok(spawner) = Spawner::current() else {
+            return EffectEnqueue::Failed;
+        };
         let task = match RelayTask::register(self.clone(), scope, key) {
             SlotRegistration::Registered(task) => task,
             SlotRegistration::AlreadyPresent => return EffectEnqueue::AlreadyPresent,
             SlotRegistration::Failed => return EffectEnqueue::Failed,
         };
-        spawn_detached(async move {
+        spawner.spawn(async move {
             match kind {
                 TransportKind::Tcp => {
                     match timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await {
@@ -345,6 +349,11 @@ impl TransportSessions {
             // The reducer already recorded `key`; synchronously return its cleanup obligation.
             return Some(key);
         };
+        // Acquired before any slot or flow is claimed; without a runtime the pending
+        // connection is dropped and the reducer untracks `key`.
+        let Ok(spawner) = Spawner::current() else {
+            return Some(key);
+        };
         match pending {
             Pending::Tcp(stream) => {
                 let task = match RelayTask::register(self.clone(), scope.clone(), key.clone()) {
@@ -352,7 +361,7 @@ impl TransportSessions {
                     SlotRegistration::AlreadyPresent => return None,
                     SlotRegistration::Failed => return Some(key),
                 };
-                spawn_detached(async move {
+                spawner.spawn(async move {
                     if open(&task.scope, &task.key, service.as_str())
                         .await
                         .is_err()
@@ -396,8 +405,9 @@ impl TransportSessions {
                     },
                     socket,
                     src,
+                    &spawner,
                 );
-                spawn_detached(async move {
+                spawner.spawn(async move {
                     if open(&scope, &key, service.as_str()).await.is_err() {
                         if self.close_if_current(&scope, &key, generation).await {
                             let _ = send_frame(&scope, key.peer, Frame::Close {
@@ -720,7 +730,7 @@ fn relay_task_for_test_with_src(
     let key = SessionKey::new(
         Did::from(99_u32),
         namespace,
-        crate::extension::transport::SessionId(1),
+        crate::extension::transport::RelaySessionId(1),
         initiator,
     );
     let (outbound_rx, cancel, generation) = match sessions.register(key.clone(), src) {
@@ -817,15 +827,48 @@ mod tests {
     use super::MAX_PENDING_ACCEPTS;
     use crate::extension::transport::EffectEnqueue;
     use crate::extension::transport::Initiator;
-    use crate::extension::transport::SessionId;
+    use crate::extension::transport::RelaySessionId;
     use crate::extension::transport::SessionKey;
     use crate::extension::transport::SlotRegistration;
+    use crate::extension::transport::TransportKind;
+
+    /// Without a current runtime the connect effect is refused before its slot is claimed, so
+    /// no session stays registered for relay work that never starts.
+    #[test]
+    fn test_connect_without_a_runtime_claims_no_slot() -> crate::error::Result<()> {
+        let runtime = tokio::runtime::Runtime::new().expect("test runtime");
+        let (task, sessions, _) = runtime.block_on(async { super::relay_task_for_test("tcp") })?;
+        let key = SessionKey::new(Did::from(8_u32), "tcp", SessionId(12), Initiator::Remote);
+        let scope = task.scope.clone();
+        let connecting = Arc::clone(&sessions);
+        let connect_key = key.clone();
+
+        let effect = std::thread::spawn(move || {
+            connecting.connect(
+                scope,
+                connect_key,
+                SocketAddr::from(([127, 0, 0, 1], 9)),
+                TransportKind::Tcp,
+            )
+        })
+        .join()
+        .expect("runtime-less connect thread");
+
+        assert_eq!(effect, EffectEnqueue::Failed);
+        assert_eq!(sessions.current_generation(&key), None);
+        Ok(())
+    }
 
     /// A repeated engine effect cannot cancel or replace the resource admitted first.
     #[test]
     fn test_duplicate_registration_preserves_live_owner() {
         let sessions = TransportSessions::new();
-        let key = SessionKey::new(Did::from(7_u32), "tcp", SessionId(10), Initiator::Remote);
+        let key = SessionKey::new(
+            Did::from(7_u32),
+            "tcp",
+            RelaySessionId(10),
+            Initiator::Remote,
+        );
         let (original_cancel, original_generation) = match sessions.register(key.clone(), None) {
             SlotRegistration::Registered((_receiver, cancel, generation)) => (cancel, generation),
             SlotRegistration::AlreadyPresent | SlotRegistration::Failed => {
@@ -844,7 +887,12 @@ mod tests {
     #[test]
     fn test_saturated_local_queue_fails_closed_without_waiting() {
         let sessions = TransportSessions::new();
-        let key = SessionKey::new(Did::from(7_u32), "tcp", SessionId(11), Initiator::Remote);
+        let key = SessionKey::new(
+            Did::from(7_u32),
+            "tcp",
+            RelaySessionId(11),
+            Initiator::Remote,
+        );
         let _registration = match sessions.register(key.clone(), None) {
             SlotRegistration::Registered(registration) => registration,
             SlotRegistration::AlreadyPresent | SlotRegistration::Failed => {
@@ -930,7 +978,12 @@ mod tests {
             .expect("pending table")
             .remove(&token);
         assert!(matches!(pending, Some(Pending::Udp { .. })));
-        let key = SessionKey::new(Did::from(8_u32), "udp", SessionId(12), Initiator::Local);
+        let key = SessionKey::new(
+            Did::from(8_u32),
+            "udp",
+            RelaySessionId(12),
+            Initiator::Local,
+        );
         assert!(sessions.promote_udp_flow(src, token, &key));
         assert!(matches!(
             sessions.register(key.clone(), Some(src)),

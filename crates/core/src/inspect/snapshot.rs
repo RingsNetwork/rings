@@ -50,6 +50,34 @@ pub struct StorageInspect {
     pub items: Vec<(String, Entry)>,
 }
 
+/// Aggregate live relay-inbox storage state without mailbox identifiers or payloads.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MailboxStorageInspect {
+    /// Number of live relay-inbox carriers retained by this node.
+    pub registered: u64,
+    /// Number of live held messages across the retained carriers.
+    pub held_messages: u64,
+}
+
+impl MailboxStorageInspect {
+    /// Build privacy-safe aggregate mailbox state from the ring's live storage view.
+    pub async fn inspect(dht: &PeerRing) -> crate::error::Result<Self> {
+        let mut snapshot = Self::default();
+        for (_, entry) in dht
+            .live_storage_entries(crate::utils::get_epoch_ms())
+            .await?
+        {
+            if entry.kind == crate::dht::entry::EntryKind::RelayMessage {
+                snapshot.registered = snapshot.registered.saturating_add(1);
+                snapshot.held_messages = snapshot
+                    .held_messages
+                    .saturating_add(u64::try_from(entry.data.len()).unwrap_or(u64::MAX));
+            }
+        }
+        Ok(snapshot)
+    }
+}
+
 impl SwarmInspect {
     /// Build a full inspection snapshot from `swarm`.
     pub async fn inspect(swarm: &Swarm) -> Self {

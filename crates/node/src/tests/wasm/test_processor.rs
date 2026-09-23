@@ -1,11 +1,11 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::lock::Mutex;
 use rings_core::dht::Did;
 use rings_core::inspect::SwarmInspect;
 use rings_core::swarm::callback::SwarmCallback;
-use rings_core::utils;
 use wasm_bindgen_futures::spawn_local;
 use wasm_bindgen_test::*;
 
@@ -56,7 +56,9 @@ async fn wait_for_swarm_state(
             return;
         }
         last_inspect = Some(inspect);
-        utils::js_utils::window_sleep(200).await.unwrap();
+        rings_runtime::sleep(Duration::from_millis(200))
+            .await
+            .unwrap();
     }
     panic!(
         "timeout waiting for {label}; peers={:?}, dht={:?}",
@@ -156,7 +158,9 @@ async fn test_processor_handshake_and_msg() {
     console_log!("processor_hs_connect_1_2");
     create_connection(&p1, &p2).await;
 
-    utils::js_utils::window_sleep(2000).await.unwrap();
+    rings_runtime::sleep(Duration::from_millis(2000))
+        .await
+        .unwrap();
 
     console_log!("processor_send_test_text_messages");
     p1.send_message(p2_did, test_text1.as_bytes())
@@ -184,7 +188,9 @@ async fn test_processor_handshake_and_msg() {
         .unwrap();
     console_log!("send test_text5 done");
 
-    utils::js_utils::window_sleep(4000).await.unwrap();
+    rings_runtime::sleep(Duration::from_millis(4000))
+        .await
+        .unwrap();
 
     console_log!("check received");
 

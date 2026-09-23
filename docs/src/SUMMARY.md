@@ -7,6 +7,7 @@
 - [Install a Native Node](install-a-native-node.md)
 - [Host a Native Node](host-a-native-node.md)
 - [Operate a Node from the CLI](cli.md)
+- [Operator Observability](operator-observability.md)
 - [Native Gateway](native-gateway.md)
 
 # Wasm Node (WebAssembly for Browsers)

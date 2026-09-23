@@ -104,7 +104,7 @@ async fn test_online_node_descriptor_publishes_and_lists_signed_self() -> Result
 async fn test_online_node_descriptor_refresh_replaces_previous_self_record() -> Result<()> {
     let processor = prepare_processor().await;
     let first = processor.publish_online_node_descriptor().await?;
-    futures_timer::Delay::new(std::time::Duration::from_millis(1)).await;
+    rings_runtime::sleep(std::time::Duration::from_millis(1)).await?;
     let second = processor.publish_online_node_descriptor().await?;
     let entry_key = entry::Entry::gen_did(ONLINE_NODES_TOPIC)?;
     processor.storage_fetch(entry_key).await?;

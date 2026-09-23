@@ -4,6 +4,7 @@ pub use base58;
 /// Use this when you want to quickly bootstrap a new project.
 pub use rings_core;
 pub use rings_derive::wasm_export;
+pub use rings_runtime;
 pub use uuid;
 
 pub use self::rings_core::chunk;

@@ -3247,7 +3247,6 @@ dependencies = [
  "ethereum-types",
  "event-listener 5.4.2",
  "futures",
- "futures-timer",
  "hex",
  "hkdf",
  "itertools 0.10.5",
@@ -3265,6 +3264,7 @@ dependencies = [
  "rings-codec",
  "rings-derive",
  "rings-measure",
+ "rings-runtime",
  "rings-transport",
  "serde",
  "serde-wasm-bindgen",
@@ -3376,7 +3376,6 @@ dependencies = [
  "dotenvy",
  "form_urlencoded",
  "futures",
- "futures-timer",
  "home",
  "js-sys",
  "jsonrpc-core",
@@ -3393,6 +3392,7 @@ dependencies = [
  "rings-measure",
  "rings-network-policy",
  "rings-rpc",
+ "rings-runtime",
  "rings-transport",
  "serde",
  "serde-wasm-bindgen",
@@ -3452,6 +3452,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rings-runtime"
+version = "0.31.0"
+dependencies = [
+ "futures",
+ "futures-timer",
+ "js-sys",
+ "thiserror 1.0.69",
+ "tokio",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-test",
+ "web-sys",
+]
+
+[[package]]
 name = "rings-transport"
 version = "0.31.0"
 dependencies = [
@@ -3466,6 +3481,7 @@ dependencies = [
  "lazy_static",
  "rand 0.8.6",
  "rings-codec",
+ "rings-runtime",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

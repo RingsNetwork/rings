@@ -10,7 +10,7 @@ Rings separates the identity authorizing a signing key from the key that signs i
 
 The delegator signs the delegation proof. The delegatee key then signs messages while that delegation is valid. The delegator's private key is not given to the Rings node.
 
-A delegation is not a network connection identifier. In particular, the transport `SessionId` names a connection scoped to a peer, namespace, and initiator; it does not identify the delegator or delegatee.
+A delegation is not a network identifier. The relay transport's `RelaySessionId` identifies a TCP connection or UDP flow scoped to a peer, namespace, and initiator; it does not identify the delegator or delegatee.
 
 ## External delegators
 

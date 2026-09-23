@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
+use rings_runtime::MaybeSendSync;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
@@ -15,7 +16,6 @@ use crate::core::transport::ConnectionStateSnapshot;
 use crate::core::transport::WebrtcConnectionState;
 use crate::error::Error;
 use crate::error::Result;
-use crate::PlatformSendSync;
 
 /// [Pool] manages all the connections for each peer.
 pub struct Pool<C> {
@@ -98,7 +98,7 @@ impl<C> Pool<C> {
 
 impl<C, S> Pool<C>
 where
-    C: ConnectionInterface<Error = Error, Sdp = S> + PlatformSendSync,
+    C: ConnectionInterface<Error = Error, Sdp = S> + MaybeSendSync,
     S: Serialize + DeserializeOwned + Send + Sync + 'static,
 {
     /// Reject an early connection setup while the peer already occupies its slot.

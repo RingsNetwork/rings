@@ -5,9 +5,6 @@ pub(crate) use tokio::time::Instant;
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
 pub(crate) use web_time::Instant;
 
-#[cfg(all(feature = "wasm", target_family = "wasm"))]
-use super::js_utils;
-
 /// Get local utc timestamp (millisecond)
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 pub fn get_epoch_ms() -> u128 {
@@ -33,49 +30,28 @@ pub(crate) fn get_epoch_ms_i64() -> i64 {
     i64::try_from(get_epoch_ms()).unwrap_or(i64::MAX)
 }
 
-/// Sleep for `duration` without imposing an executor on production callers.
+/// Sleep for `duration`; a timer the runtime cannot run ends the wait early.
 ///
-/// Deterministic dummy simulations use Tokio's paused clock; every other native
-/// caller retains the executor-neutral timer contract of this shared boundary.
-#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+/// One-shot timeout users fail closed on an early end. Repeating loops must call
+/// [`try_sleep`] and stop explicitly, so a rejected timer cannot become a hot retry loop.
 pub(crate) async fn sleep(duration: std::time::Duration) {
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    if crate::simulation::epoch_ms_override().is_some() {
-        tokio::time::sleep(duration).await;
-        return;
-    }
-    futures_timer::Delay::new(duration).await;
+    let _ = try_sleep(duration).await;
 }
 
-/// Wait for `duration`, reporting whether the native timer completed.
-#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+/// Wait for `duration`. Post: `false` iff the runtime could not run the timer.
+///
+/// Deterministic dummy simulations follow Tokio's paused clock; every other caller waits on
+/// the shared [`rings_runtime::sleep`] contract.
 pub(crate) async fn try_sleep(duration: std::time::Duration) -> bool {
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     if crate::simulation::epoch_ms_override().is_some() {
         tokio::time::sleep(duration).await;
         return true;
     }
-    futures_timer::Delay::new(duration).await;
-    true
-}
-
-/// Sleep for `duration` on the JavaScript event loop.
-#[cfg(all(feature = "wasm", target_family = "wasm"))]
-pub(crate) async fn sleep(duration: std::time::Duration) {
-    // One-shot timeout users fail closed when the JavaScript timer is
-    // unavailable. Repeating loops must call `try_sleep` and stop explicitly
-    // so a rejected timer cannot become a hot retry loop.
-    let _ = try_sleep(duration).await;
-}
-
-/// Wait for `duration`, reporting a rejected JavaScript timer.
-#[cfg(all(feature = "wasm", target_family = "wasm"))]
-pub(crate) async fn try_sleep(duration: std::time::Duration) -> bool {
-    let millis = i32::try_from(duration.as_millis()).unwrap_or(i32::MAX);
-    match js_utils::window_sleep(millis).await {
-        Ok(_) => true,
+    match rings_runtime::sleep(duration).await {
+        Ok(()) => true,
         Err(error) => {
-            tracing::error!("failed to wait for timeout: {:?}", error);
+            tracing::error!("failed to wait for timeout: {error}");
             false
         }
     }

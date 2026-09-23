@@ -13,6 +13,7 @@ use rings_core::dht::DEFAULT_FINGER_TABLE_SIZE;
 use rings_core::ecc::PublicKey;
 use rings_core::ecc::SecretKey;
 use rings_core::error::Error as CoreError;
+use rings_core::inspect::DHTInspect;
 use rings_core::lifecycle::StopSource;
 use rings_core::lifecycle::StopToken;
 use rings_core::measure::EvidenceCounters;
@@ -43,6 +44,7 @@ use rings_core::swarm::Swarm;
 use rings_core::swarm::SwarmBuilder;
 use rings_core::utils::get_epoch_ms;
 use rings_rpc::protos::rings_node::*;
+use rings_runtime::sleep;
 use rings_transport::webrtc_config::WebrtcUdpPortRange;
 use serde::Deserialize;
 use serde::Serialize;
@@ -51,6 +53,14 @@ use uuid;
 use crate::error::Error;
 use crate::error::Result;
 use crate::measure::PeriodicMeasure;
+use crate::observability::HealthSnapshot;
+use crate::observability::MailboxSnapshot;
+use crate::observability::Observability;
+use crate::observability::OperatorSnapshot;
+use crate::observability::PeerRatingSnapshot;
+use crate::observability::SessionKeySnapshot;
+use crate::observability::OPERATOR_SCHEMA_VERSION;
+use crate::observability::PEER_RATING_CAPACITY;
 use crate::onion::default_advertise_onion_exit;
 use crate::onion::default_advertise_onion_relay;
 use crate::onion::default_onion_exit_heartbeat_interval_secs;
@@ -87,7 +97,6 @@ use crate::registration::default_advertise_presence;
 use crate::registration::default_online_node_heartbeat_interval_secs;
 use crate::registration::default_online_node_ttl_secs;
 use crate::registration::default_online_node_type;
-use crate::registration::sleep_registration_interval;
 use crate::registration::validate_online_node_registration_timing;
 use crate::registration::OnlineNodeRegistration;
 use crate::registration::RegistrationContext;
@@ -109,21 +118,6 @@ pub use config::ProcessorConfigSerialized;
 const DHT_LOOKUP_CACHE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DHT_LOOKUP_CACHE_POLL_ATTEMPTS: usize = 40;
 
-#[cfg(not(all(feature = "browser", target_family = "wasm")))]
-async fn sleep_dht_lookup_poll_interval(interval: Duration) -> Result<()> {
-    futures_timer::Delay::new(interval).await;
-    Ok(())
-}
-
-#[cfg(all(feature = "browser", target_family = "wasm"))]
-async fn sleep_dht_lookup_poll_interval(interval: Duration) -> Result<()> {
-    let interval_ms = i32::try_from(interval.as_millis()).unwrap_or(i32::MAX);
-    rings_core::utils::js_utils::window_sleep(interval_ms)
-        .await
-        .map_err(|error| Error::JsError(format!("{error:?}")))?;
-    Ok(())
-}
-
 async fn sleep_registration_interval_with_stop(
     interval: Duration,
     stop: &StopToken,
@@ -138,7 +132,7 @@ async fn sleep_registration_interval_with_stop(
         pin_mut!(own_stop, maintenance_stop);
         let _ = select(own_stop, maintenance_stop).await;
     };
-    let interval_elapsed = sleep_registration_interval(interval);
+    let interval_elapsed = sleep(interval);
     pin_mut!(stopped, interval_elapsed);
     match select(interval_elapsed, stopped).await {
         futures::future::Either::Left((result, _)) => {
@@ -226,6 +220,8 @@ pub struct Processor {
     #[cfg(all(feature = "browser", target_family = "wasm"))]
     advertise_onion_relay: bool,
     registration_tasks: Vec<Arc<dyn RegistrationTask>>,
+    /// Process-local bounded recorder backing the authenticated operator surface.
+    observability: Arc<Observability>,
 }
 
 impl Processor {
@@ -386,7 +382,7 @@ impl Processor {
             if attempt + 1 == DHT_LOOKUP_CACHE_POLL_ATTEMPTS {
                 break;
             }
-            sleep_dht_lookup_poll_interval(DHT_LOOKUP_CACHE_POLL_INTERVAL).await?;
+            sleep(DHT_LOOKUP_CACHE_POLL_INTERVAL).await?;
         }
         Ok(None)
     }
@@ -426,7 +422,7 @@ impl Processor {
     ) -> Result<Option<entry::Entry>> {
         self.storage_fetch(entry_key).await?;
         for _ in 0..DHT_LOOKUP_CACHE_POLL_ATTEMPTS {
-            sleep_dht_lookup_poll_interval(DHT_LOOKUP_CACHE_POLL_INTERVAL).await?;
+            sleep(DHT_LOOKUP_CACHE_POLL_INTERVAL).await?;
             let Some(entry) = self.storage_check_cache(entry_key).await else {
                 continue;
             };
@@ -993,6 +989,81 @@ impl Processor {
             version: crate::util::build_version(),
             swarm: Some(self.swarm.inspect().await.into()),
         })
+    }
+
+    /// Assemble the documented v1 operator snapshot without serializing stored entry payloads.
+    pub async fn operator_snapshot(&self) -> Result<OperatorSnapshot> {
+        let generated_at_ms = get_epoch_ms();
+        let runtime = self.observability.runtime_snapshot(generated_at_ms);
+        let delegation = self.delegatee_key.delegation();
+        let expires_at_ms = delegation.expires_at_ms();
+        let mailbox = self
+            .swarm
+            .mailbox_storage_inspect()
+            .await
+            .map_err(Error::InternalError)?;
+        let admitted_peer_count = u64::try_from(self.swarm.peers().len()).unwrap_or(u64::MAX);
+        let has_admitted_peer = admitted_peer_count > 0;
+        let dht = DHTInspect::inspect(&self.swarm.dht());
+        let has_successor = !dht.successors.is_empty();
+        let has_predecessor = dht.predecessor.is_some();
+        let mut peer_ratings = self.peer_measurements().await;
+        peer_ratings.sort_unstable_by_key(|measurement| measurement.did);
+        peer_ratings.truncate(PEER_RATING_CAPACITY);
+        let peer_ratings = peer_ratings
+            .into_iter()
+            .map(|measurement| PeerRatingSnapshot {
+                peer: measurement.did.to_string(),
+                reliability: peer_quality_name(measurement.quality),
+                credit_score: measurement.credit_score.as_f64(),
+                sent: measurement.evidence.sent,
+                failed_to_send: measurement.evidence.failed_to_send,
+                received: measurement.evidence.received,
+                failed_to_receive: measurement.evidence.failed_to_receive,
+            })
+            .collect();
+
+        Ok(OperatorSnapshot {
+            schema_version: OPERATOR_SCHEMA_VERSION,
+            generated_at_ms,
+            process_started_at_ms: self.observability.process_started_at_ms(),
+            counter_scope: "node_local_process_lifetime",
+            messages: runtime.messages,
+            recent_messages: runtime.recent_messages,
+            session_key: SessionKeySnapshot {
+                valid: !delegation.is_expired_at(generated_at_ms),
+                created_at_ms: delegation.created_at_ms(),
+                expires_at_ms,
+                remaining_ms: expires_at_ms.saturating_sub(generated_at_ms),
+                rotation_succeeded_total: 0,
+                rotation_failed_total: 0,
+                runtime_rotation_supported: false,
+            },
+            mailboxes: MailboxSnapshot {
+                registered: mailbox.registered,
+                held_messages: mailbox.held_messages,
+                stored_total: runtime.messages.stored,
+            },
+            dht_lookups: runtime.dht_lookups,
+            peer_ratings,
+            health: HealthSnapshot {
+                process_api_healthy: true,
+                admitted_peer_count,
+                has_admitted_peer,
+                has_successor,
+                has_predecessor,
+                overlay_ready: has_admitted_peer && has_successor,
+            },
+        })
+    }
+}
+
+/// Stable text form of one advisory local peer-quality class.
+const fn peer_quality_name(quality: PeerQuality) -> &'static str {
+    match quality {
+        PeerQuality::Healthy => "healthy",
+        PeerQuality::Unknown => "unknown",
+        PeerQuality::Degraded => "degraded",
     }
 }
 

@@ -1,4 +1,5 @@
 use std::rc::Rc;
+use std::time::Duration;
 
 use js_sys::Object;
 use js_sys::Reflect;
@@ -6,7 +7,8 @@ use rings_node::onion::OnionExitPolicy;
 use rings_node::prelude::rings_core::delegation::DelegateeKey;
 use rings_node::prelude::rings_core::ecc::SecretKey;
 use rings_node::prelude::rings_core::storage::idb::IdbStorage;
-use rings_node::prelude::rings_core::utils::js_utils::window_sleep;
+use rings_node::prelude::rings_runtime::sleep;
+use rings_node::prelude::rings_runtime::TimerError;
 use rings_node::prelude::uuid;
 use rings_node::processor::Processor;
 use rings_node::processor::ProcessorBuilder;
@@ -84,7 +86,7 @@ async fn run_browser_onion_webview_flow() -> WebviewResult<()> {
     let _client_listener = client.listen();
     let _exit_listener = exit.listen();
     connect_browser_providers(&client, &exit).await?;
-    window_sleep(1_000).await.map_err(js_webview_error)?;
+    sleep(Duration::from_secs(1)).await.map_err(timer_webview_error)?;
 
     let node = WebviewNode::new(
         client,
@@ -279,7 +281,7 @@ async fn retry_gateway_navigation(
             Ok(response) => return Ok(response),
             Err(error) => {
                 last_error = Some(error.to_string());
-                window_sleep(250).await.map_err(js_webview_error)?;
+                sleep(Duration::from_millis(250)).await.map_err(timer_webview_error)?;
             }
         }
     }
@@ -522,4 +524,8 @@ fn restore_mock_exit_fetch() -> WebviewResult<()> {
 
 fn js_webview_error(error: JsValue) -> WebviewError {
     WebviewError::Browser(format!("{error:?}"))
+}
+
+fn timer_webview_error(error: TimerError) -> WebviewError {
+    WebviewError::Browser(error.to_string())
 }
