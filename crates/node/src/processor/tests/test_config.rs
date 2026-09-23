@@ -233,6 +233,7 @@ fn test_advertised_onion_exit_requires_open_policy() {
         delegatee_key,
         3,
     )
+    .advertise_onion_relay(true)
     .advertise_onion_exit(true);
 
     assert!(matches!(
@@ -241,11 +242,13 @@ fn test_advertised_onion_exit_requires_open_policy() {
     ));
 }
 
+/// Registering any symbol registers `relay` (#834 D2): an exit without the relay capability is
+/// rejected at configuration, and so, through `relay ⇒ presence`, is an exit without presence.
 #[test]
-fn test_onion_exit_registration_task_can_run_without_presence_advertisement() -> Result<()> {
+fn test_onion_exit_registration_requires_relay_registration() -> Result<()> {
     let key = SecretKey::random();
     let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
-    let mut config = ProcessorConfig::new(
+    let exit_only = ProcessorConfig::new(
         0,
         "stun://stun.l.google.com:19302".to_string(),
         delegatee_key,
@@ -253,20 +256,26 @@ fn test_onion_exit_registration_task_can_run_without_presence_advertisement() ->
     )
     .advertise_onion_exit(true)
     .onion_exit_policy(onion_policy(&["example.com:443"], &[])?);
-    config.advertise_presence = false;
-    let processor = ProcessorBuilder::from_config(&config)
-        .unwrap()
-        .storage(Box::new(MemStorage::new()))
-        .dht_finger_table_size(8)
-        .build()
-        .unwrap();
+    let mut without_presence = exit_only.clone().advertise_onion_relay(true);
+    without_presence.advertise_presence = false;
 
-    assert_eq!(processor.registration_tasks.len(), 1);
+    assert!(matches!(
+        ProcessorBuilder::from_config(&exit_only).and_then(ProcessorBuilder::build),
+        Err(Error::InvalidConfig(message))
+            if message.contains("advertise_onion_exit")
+                && message.contains("advertise_onion_relay")
+    ));
+    assert!(matches!(
+        ProcessorBuilder::from_config(&without_presence).and_then(ProcessorBuilder::build),
+        Err(Error::InvalidConfig(message)) if message.contains("advertise_presence")
+    ));
     Ok(())
 }
 
+/// The relay capability carries the process epoch `e_n`, and every build (process start) draws a
+/// fresh one (#834 D2).
 #[tokio::test]
-async fn test_onion_relay_capability_is_advertised_in_online_descriptor() {
+async fn test_onion_relay_capability_carries_a_fresh_process_epoch() {
     let key = SecretKey::random();
     let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
     let config = ProcessorConfig::new(
@@ -276,19 +285,26 @@ async fn test_onion_relay_capability_is_advertised_in_online_descriptor() {
         3,
     )
     .advertise_onion_relay(true);
-
-    let processor = ProcessorBuilder::from_config(&config)
-        .unwrap()
-        .storage(Box::new(MemStorage::new()))
-        .dht_finger_table_size(8)
-        .build()
-        .unwrap();
+    let start = || {
+        ProcessorBuilder::from_config(&config)
+            .unwrap()
+            .storage(Box::new(MemStorage::new()))
+            .dht_finger_table_size(8)
+            .build()
+            .unwrap()
+    };
+    let processor = start();
+    let restarted = start();
     let descriptor = processor.online_node_descriptor_at(get_epoch_ms()).unwrap();
 
-    assert!(descriptor
-        .capabilities
-        .iter()
-        .any(|capability| capability == ONION_RELAY_CAPABILITY));
+    assert_eq!(
+        descriptor.capabilities,
+        OnlineNodeCapabilities::onion_relay(processor.onion_process_epoch())
+    );
+    assert_ne!(
+        processor.onion_process_epoch(),
+        restarted.onion_process_epoch()
+    );
 }
 
 #[test]
@@ -303,6 +319,7 @@ fn test_https_onion_exit_config_uses_https_only_service() {
     )
     .enable_https_onion_exit();
 
+    assert!(config.advertise_onion_relay);
     assert!(config.advertise_onion_exit);
     assert_eq!(config.onion_exit_services, https_onion_exit_services());
 }
@@ -319,6 +336,7 @@ fn test_default_onion_exit_config_uses_native_tcp_backed_services() {
     )
     .enable_default_onion_exit();
 
+    assert!(config.advertise_onion_relay);
     assert!(config.advertise_onion_exit);
     assert_eq!(config.onion_exit_services, default_onion_exit_services());
     assert_eq!(config.onion_exit_services, vec![
@@ -338,6 +356,7 @@ fn test_reserved_https_onion_exit_service_is_accepted() -> Result<()> {
         delegatee_key,
         3,
     )
+    .advertise_onion_relay(true)
     .advertise_onion_exit(true);
     config.onion_exit_services = vec![OnionServiceName::https()];
     config.onion_exit_policy = onion_policy(&["example.com:443"], &[])?;

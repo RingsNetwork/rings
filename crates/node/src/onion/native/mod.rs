@@ -84,7 +84,7 @@ impl NativeOnionCircuitHandle {
     ) -> Result<Self> {
         let exit_epoch = exit_config
             .as_ref()
-            .map(|_| extensions.core().onion_exit_epoch());
+            .map(|_| extensions.core().onion_process_epoch());
         let (tcp, https) = native_onion_runtimes(delegatee_key.clone(), network_id, exit_config);
         if let Some(config) = tcp.exit_config() {
             if config.services().contains(&OnionServiceName::https()) {

@@ -79,12 +79,12 @@ use crate::onion::validate_onion_exit_registration_timing;
 use crate::onion::OnionEntryGuardStorage;
 use crate::onion::OnionEntryGuards;
 use crate::onion::OnionExitDescriptor;
-use crate::onion::OnionExitEpoch;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionExitRegistration;
+use crate::onion::OnionProcessEpoch;
 use crate::onion::OnionServiceName;
 use crate::onion::ONION_EXITS_TOPIC;
-use crate::onion::ONION_RELAY_CAPABILITY;
+use crate::online::OnlineNodeCapabilities;
 use crate::online::OnlineNodeDescriptor;
 use crate::online::OnlineNodeType;
 use crate::online::ONLINE_NODES_TOPIC;
@@ -208,8 +208,8 @@ pub struct Processor {
     pub swarm: Arc<Swarm>,
     /// Same delegatee key held by the swarm transport; kept here for node-layer descriptor signing.
     delegatee_key: DelegateeKey,
-    /// Fresh process epoch shared by exit advertisement and exit-layer admission.
-    onion_exit_epoch: OnionExitEpoch,
+    /// Fresh process epoch `e_n` carried by every onion symbol this process registers (#834 D2).
+    onion_process_epoch: OnionProcessEpoch,
     onion_entry_guards: Arc<OnionEntryGuards>,
     stabilize_interval: Duration,
     online_node_registration: OnlineNodeRegistration,
@@ -234,8 +234,8 @@ impl Processor {
         &self.delegatee_key
     }
 
-    pub(crate) const fn onion_exit_epoch(&self) -> OnionExitEpoch {
-        self.onion_exit_epoch
+    pub(crate) const fn onion_process_epoch(&self) -> OnionProcessEpoch {
+        self.onion_process_epoch
     }
 
     #[cfg(all(feature = "browser", target_family = "wasm"))]

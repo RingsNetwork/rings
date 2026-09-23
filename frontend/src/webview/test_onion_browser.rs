@@ -31,7 +31,6 @@ use super::web_shell_bootstrap;
 use super::WebviewHostOutcome;
 use super::WebviewHostRequest;
 use super::WebviewNode;
-use super::WebviewOnionSettings;
 use super::GATEWAY_PREFIX;
 
 const TEST_DHT_FINGER_TABLE_SIZE: usize = 8;
@@ -43,6 +42,20 @@ const TEST_STABILIZE_INTERVAL_SECS: u64 = 15;
 // this fixture address from reaching the network while preserving the production admission model.
 const FIXTURE_HOST: &str = "1.1.1.1";
 const FIXTURE_ORIGIN_GLOBAL: &str = "__ringsWebviewOnionFixtureOrigin";
+/// Relays that are neither the client's guard nor the exit: the two candidates for the forward
+/// relay `r₀,₂` and the return relay `r₁,₁` of the loop `g, r₀,₂, exit, r₁,₁, g` (#834 D5).
+const FIXTURE_MIDDLE_RELAYS: usize = 2;
+
+/// Onion registration of one fixture node.
+#[derive(Clone, Copy)]
+enum FixtureRole<'a> {
+    /// Registers no symbol; builds routes.
+    Client,
+    /// Registers `relay`.
+    Relay,
+    /// Registers `https` for the target authority and, with it, `relay`.
+    Exit(&'a str),
+}
 
 #[derive(Debug, Deserialize)]
 struct FetchCall {
@@ -75,25 +88,46 @@ async fn run_browser_onion_webview_flow() -> WebviewResult<()> {
     let fixture_submit = fixture_url("/forms/submit");
     let client = browser_provider(
         &format!("rings-webview-onion-client-{storage_suffix}"),
-        None,
+        FixtureRole::Client,
     )
     .await?;
+    let guard = browser_provider(
+        &format!("rings-webview-onion-guard-{storage_suffix}"),
+        FixtureRole::Relay,
+    )
+    .await?;
+    let mut middle = Vec::with_capacity(FIXTURE_MIDDLE_RELAYS);
+    for index in 0..FIXTURE_MIDDLE_RELAYS {
+        middle.push(
+            browser_provider(
+                &format!("rings-webview-onion-relay-{index}-{storage_suffix}"),
+                FixtureRole::Relay,
+            )
+            .await?,
+        );
+    }
     let exit = browser_provider(
         &format!("rings-webview-onion-exit-{storage_suffix}"),
-        Some(fixture_authority.as_str()),
+        FixtureRole::Exit(fixture_authority.as_str()),
     )
     .await?;
-    let _client_listener = client.listen();
-    let _exit_listener = exit.listen();
-    connect_browser_providers(&client, &exit).await?;
-    sleep(Duration::from_secs(1)).await.map_err(timer_webview_error)?;
+    let _listeners = [&client, &guard, &exit]
+        .into_iter()
+        .chain(middle.iter())
+        .map(|provider| provider.listen())
+        .collect::<Vec<_>>();
+    // The client's only direct peer is `guard`, so the browser guard policy draws it; either
+    // middle relay can take the forward relay position, so each links the guard to the exit.
+    connect_browser_providers(&client, &guard).await?;
+    for relay in middle.iter() {
+        connect_browser_providers(&guard, relay).await?;
+        connect_browser_providers(relay, &exit).await?;
+    }
+    sleep(Duration::from_secs(1))
+        .await
+        .map_err(timer_webview_error)?;
 
-    let node = WebviewNode::new(
-        client,
-        controlled_origin()?,
-        WebviewOnionSettings::new(true),
-        web_shell_bootstrap,
-    )?;
+    let node = WebviewNode::new(client, controlled_origin()?, web_shell_bootstrap)?;
     let index_target = TargetUrl::parse(fixture_index.as_str())?;
     let index = retry_gateway_navigation(&node, &index_target).await?;
     expect_status(&index, "index navigation", 200)?;
@@ -174,7 +208,7 @@ fn fixture_url(path: &str) -> String {
 
 async fn browser_provider(
     storage_name: &str,
-    exit_target: Option<&str>,
+    role: FixtureRole<'_>,
 ) -> WebviewResult<Rc<Provider>> {
     let delegatee_key = DelegateeKey::new_with_seckey(&SecretKey::random()).map_err(|error| {
         WebviewError::transport(format!("build browser delegatee key: {error:?}"))
@@ -185,10 +219,16 @@ async fn browser_provider(
         delegatee_key,
         TEST_STABILIZE_INTERVAL_SECS,
     );
-    if let Some(target) = exit_target {
-        let policy = OnionExitPolicy::from_target_strings(vec![target.to_string()], Vec::new())
-            .map_err(|error| WebviewError::transport(format!("build exit policy: {error:?}")))?;
-        config = config.enable_https_onion_exit().onion_exit_policy(policy);
+    match role {
+        FixtureRole::Client => {}
+        FixtureRole::Relay => config = config.advertise_onion_relay(true),
+        FixtureRole::Exit(target) => {
+            let policy = OnionExitPolicy::from_target_strings(vec![target.to_string()], Vec::new())
+                .map_err(|error| {
+                    WebviewError::transport(format!("build exit policy: {error:?}"))
+                })?;
+            config = config.enable_https_onion_exit().onion_exit_policy(policy);
+        }
     }
     let storage = Box::new(
         IdbStorage::new_with_cap_and_name(50_000, storage_name)
@@ -205,12 +245,21 @@ async fn browser_provider(
     provider
         .set_backend()
         .map_err(|error| WebviewError::transport(format!("install backend: {error:?}")))?;
-    if let Some(target) = exit_target {
-        provider
-            .install_onion_https_exit(vec![target.to_string()], Vec::new())
-            .map_err(|error| {
-                WebviewError::transport(format!("install onion HTTPS exit: {error:?}"))
+    match role {
+        FixtureRole::Client => {}
+        // A browser installs its onion runtime, relay capability included, with its first proxy.
+        FixtureRole::Relay => {
+            provider.onion_https_proxy().map_err(|error| {
+                WebviewError::transport(format!("install onion relay: {:?}", JsValue::from(error)))
             })?;
+        }
+        FixtureRole::Exit(target) => {
+            provider
+                .install_onion_https_exit(vec![target.to_string()], Vec::new())
+                .map_err(|error| {
+                    WebviewError::transport(format!("install onion HTTPS exit: {error:?}"))
+                })?;
+        }
     }
     Ok(provider)
 }
@@ -223,22 +272,27 @@ fn provider_from_processor(processor: Processor) -> Provider {
     Provider::from_processor(std::sync::Arc::new(processor))
 }
 
-async fn connect_browser_providers(client: &Provider, exit: &Provider) -> WebviewResult<()> {
+async fn connect_browser_providers(offerer: &Provider, answerer: &Provider) -> WebviewResult<()> {
     let offer = string_field(
         &rpc(
-            client,
+            offerer,
             "createOffer",
-            object(&[("did", exit.address().as_str())]),
+            object(&[("did", answerer.address().as_str())]),
         )
         .await?,
         "offer",
     )?;
     let answer = string_field(
-        &rpc(exit, "answerOffer", object(&[("offer", offer.as_str())])).await?,
+        &rpc(
+            answerer,
+            "answerOffer",
+            object(&[("offer", offer.as_str())]),
+        )
+        .await?,
         "answer",
     )?;
     let _accepted = rpc(
-        client,
+        offerer,
         "acceptAnswer",
         object(&[("answer", answer.as_str())]),
     )
@@ -281,7 +335,9 @@ async fn retry_gateway_navigation(
             Ok(response) => return Ok(response),
             Err(error) => {
                 last_error = Some(error.to_string());
-                sleep(Duration::from_millis(250)).await.map_err(timer_webview_error)?;
+                sleep(Duration::from_millis(250))
+                    .await
+                    .map_err(timer_webview_error)?;
             }
         }
     }

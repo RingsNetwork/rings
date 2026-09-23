@@ -12,11 +12,11 @@ use crate::tests::wasm::new_provider;
 async fn test_browser_proxies_send_through_the_installed_runtime_client() {
     let provider = new_provider().await;
     let first = provider
-        .onion_https_proxy(3, false)
+        .onion_https_proxy()
         .map_err(JsValue::from)
         .expect("first proxy installs the onion runtime");
     let second = provider
-        .onion_https_proxy(2, true)
+        .onion_https_proxy()
         .map_err(JsValue::from)
         .expect("second proxy reuses the onion runtime");
     let runtime = provider

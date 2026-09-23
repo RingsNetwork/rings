@@ -97,15 +97,19 @@ impl ProcessorConfig {
         self.network_id
     }
 
-    /// Enables only the standard HTTPS-over-TCP onion exit service.
+    /// Enables only the standard HTTPS-over-TCP onion exit service, with the `relay` registration
+    /// every symbol registration implies (#834 D2).
     pub fn enable_https_onion_exit(mut self) -> Self {
+        self.advertise_onion_relay = true;
         self.advertise_onion_exit = true;
         self.onion_exit_services = https_onion_exit_services();
         self
     }
 
-    /// Enables default native onion exit advertisement.
+    /// Enables default native onion exit advertisement, with the `relay` registration every
+    /// symbol registration implies (#834 D2).
     pub fn enable_default_onion_exit(mut self) -> Self {
+        self.advertise_onion_relay = true;
         self.advertise_onion_exit = true;
         self.onion_exit_services = default_onion_exit_services();
         self
@@ -254,6 +258,16 @@ pub(in crate::processor) fn validate_dht_virtual_nodes(positions_per_peer: u16) 
     )))
 }
 
+/// Validate the onion registration roles of one node process.
+///
+/// The roles form a chain of implications, each rejected at configuration when violated:
+///
+/// ```text
+/// advertise_onion_exit ⇒ advertise_onion_relay ⇒ advertise_presence
+/// ```
+///
+/// The first is `Σ_n ≠ ∅ ⇒ relay ∈ Σ_n` (#834 D2); the second holds because `relay` is published
+/// in the online-node descriptor. An advertised exit also needs a service and an open policy.
 pub(in crate::processor) fn validate_onion_role_config(
     advertise_presence: bool,
     advertise_onion_relay: bool,
@@ -264,6 +278,12 @@ pub(in crate::processor) fn validate_onion_role_config(
     if advertise_onion_relay && !advertise_presence {
         return Err(Error::InvalidConfig(
             "advertise_onion_relay requires advertise_presence because relay capability is published in online-node descriptors"
+                .to_string(),
+        ));
+    }
+    if advertise_onion_exit && !advertise_onion_relay {
+        return Err(Error::InvalidConfig(
+            "advertise_onion_exit requires advertise_onion_relay because registering any onion symbol registers relay (#834 D2)"
                 .to_string(),
         ));
     }

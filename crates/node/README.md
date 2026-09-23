@@ -130,8 +130,6 @@ gateway:
   wintun_dll_path: null
   status_refresh_secs: 2
   onion_service: tcp
-  onion_hop_count: 0
-  onion_allow_short_paths: false
 ```
 
 `rings run --gateway` enables the section for that run without editing the file. On a config

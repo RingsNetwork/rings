@@ -30,7 +30,7 @@ fn exit_descriptor(session: &DelegateeKey) -> OnionExitDescriptor {
                 .delegator_verification_pubkey()
                 .expect("verification key"),
             delegatee_public_key: session.delegatee_public_key(),
-            process_epoch: crate::onion::OnionExitEpoch::new([19; 16]),
+            process_epoch: crate::onion::OnionProcessEpoch::new([19; 16]),
             node_type: OnlineNodeType::Native,
             network_id: TEST_NETWORK_ID,
             service: OnionServiceName::tcp(),

@@ -23,6 +23,7 @@ use crate::descriptor::latest_valid_by_did;
 use crate::descriptor::sign_descriptor_body;
 use crate::descriptor::SignedDescriptor;
 use crate::descriptor::SignedDescriptorBody;
+use crate::onion::OnionProcessEpoch;
 
 /// DHT topic used for online-node registry descriptors.
 pub const ONLINE_NODES_TOPIC: &str = "online_nodes";
@@ -39,6 +40,26 @@ pub enum OnlineNodeType {
     Native,
     /// FFI runtime.
     Ffi,
+}
+
+/// Typed capabilities of one node process, published in its online-node descriptor.
+///
+/// `onion_relay = Some(e_n)` registers the identity symbol `relay` of the onion signature at the
+/// process epoch `e_n` (#834 D2). The epoch is part of the capability, so a relay registration
+/// without an epoch is unrepresentable.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
+pub struct OnlineNodeCapabilities {
+    /// Process epoch at which this node registers the onion `relay` symbol, if it does.
+    pub onion_relay: Option<OnionProcessEpoch>,
+}
+
+impl OnlineNodeCapabilities {
+    /// Register the onion `relay` symbol at process epoch `epoch`.
+    pub const fn onion_relay(epoch: OnionProcessEpoch) -> Self {
+        Self {
+            onion_relay: Some(epoch),
+        }
+    }
 }
 
 /// Descriptor fields covered by the online-node signature.
@@ -58,8 +79,8 @@ pub struct OnlineNodeDescriptorBody {
     pub storage_redundancy: u16,
     /// Storage virtual-node positions required by this DHT protocol mode.
     pub dht_virtual_nodes: u16,
-    /// Optional capability labels.
-    pub capabilities: Vec<String>,
+    /// Typed capabilities of this node process.
+    pub capabilities: OnlineNodeCapabilities,
     /// Optional endpoint hint, controlled by node policy/configuration.
     pub endpoint_hint: Option<String>,
     /// Process start timestamp in milliseconds since Unix epoch.
@@ -82,7 +103,7 @@ impl OnlineNodeDescriptorBody {
             network_id: self.network_id,
             storage_redundancy: self.storage_redundancy,
             dht_virtual_nodes: self.dht_virtual_nodes,
-            capabilities: &self.capabilities,
+            capabilities: self.capabilities,
             endpoint_hint: &self.endpoint_hint,
             started_at_ms: self.started_at_ms,
             heartbeat_at_ms: self.heartbeat_at_ms,
@@ -146,7 +167,7 @@ struct OnlineNodeDescriptorBodyRef<'a> {
     network_id: u32,
     storage_redundancy: u16,
     dht_virtual_nodes: u16,
-    capabilities: &'a [String],
+    capabilities: OnlineNodeCapabilities,
     endpoint_hint: &'a Option<String>,
     started_at_ms: u128,
     heartbeat_at_ms: u128,
@@ -177,8 +198,8 @@ pub struct OnlineNodeDescriptor {
     pub storage_redundancy: u16,
     /// Storage virtual-node positions required by this DHT protocol mode.
     pub dht_virtual_nodes: u16,
-    /// Optional capability labels.
-    pub capabilities: Vec<String>,
+    /// Typed capabilities of this node process.
+    pub capabilities: OnlineNodeCapabilities,
     /// Optional endpoint hint, controlled by node policy/configuration.
     pub endpoint_hint: Option<String>,
     /// Process start timestamp in milliseconds since Unix epoch.
@@ -232,7 +253,7 @@ impl OnlineNodeDescriptor {
             network_id: *network_id,
             storage_redundancy: *storage_redundancy,
             dht_virtual_nodes: *dht_virtual_nodes,
-            capabilities,
+            capabilities: *capabilities,
             endpoint_hint,
             started_at_ms: *started_at_ms,
             heartbeat_at_ms: *heartbeat_at_ms,
@@ -357,7 +378,7 @@ mod tests {
                 network_id: 1,
                 storage_redundancy: 6,
                 dht_virtual_nodes: 0,
-                capabilities: Vec::new(),
+                capabilities: OnlineNodeCapabilities::default(),
                 endpoint_hint: None,
                 started_at_ms: 10,
                 heartbeat_at_ms,
@@ -408,7 +429,7 @@ mod tests {
                 network_id: 1,
                 storage_redundancy: 6,
                 dht_virtual_nodes: 0,
-                capabilities: vec![],
+                capabilities: OnlineNodeCapabilities::default(),
                 endpoint_hint: None,
                 started_at_ms: 1,
                 heartbeat_at_ms: 10,
@@ -426,7 +447,7 @@ mod tests {
                 network_id: 1,
                 storage_redundancy: 6,
                 dht_virtual_nodes: 0,
-                capabilities: vec![],
+                capabilities: OnlineNodeCapabilities::default(),
                 endpoint_hint: None,
                 started_at_ms: 1,
                 heartbeat_at_ms: 20,

@@ -1,8 +1,9 @@
+use std::collections::BTreeSet;
 use std::collections::VecDeque;
 
 use rings_core::delegation::DelegateeKey;
+use rings_core::dht::Did;
 use rings_core::ecc::SecretKey;
-use rings_core::error::Result as CoreResult;
 use rings_core::measure::PeerQuality;
 use rings_core::message::DhtProtocolMode;
 use rings_core::message::MessageSigner;
@@ -13,49 +14,61 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitDescriptorBody;
-use crate::onion::OnionExitEpoch;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionExitTarget;
+use crate::onion::OnionProcessEpoch;
 use crate::onion::OnionRouteError;
 use crate::onion::OnionServiceName;
-use crate::onion::ONION_RELAY_CAPABILITY;
+use crate::onion::MAX_ONION_LOOP_SYMBOLS;
+use crate::online::OnlineNodeCapabilities;
 use crate::online::OnlineNodeDescriptor;
 use crate::online::OnlineNodeDescriptorBody;
 use crate::online::OnlineNodeType;
 
-/// Stable non-zero process epoch used only to make signed route fixtures deterministic.
-const TEST_EXIT_PROCESS_EPOCH: OnionExitEpoch = OnionExitEpoch::new([29; 16]);
+/// Network of every fixture unless a test names another.
+const TEST_NETWORK_ID: u32 = 1;
+/// Current process epoch of every fixture node.
+const TEST_PROCESS_EPOCH: OnionProcessEpoch = OnionProcessEpoch::new([29; 16]);
+/// Process epoch of an earlier process of a fixture node.
+const STALE_PROCESS_EPOCH: OnionProcessEpoch = OnionProcessEpoch::new([31; 16]);
+/// Clock reading at which fixtures are live.
+const NOW_MS: u128 = 50;
+/// Heartbeat of every live fixture descriptor.
+const HEARTBEAT_MS: u128 = 20;
+/// Expiry of every live fixture descriptor.
+const EXPIRES_MS: u128 = 100;
 
-fn signed_exit_at(heartbeat_at_ms: u128, expires_at_ms: u128) -> Result<OnionExitDescriptor> {
-    let key = SecretKey::random();
-    let delegatee_key = DelegateeKey::new_with_seckey(&key).map_err(Error::CoreError)?;
-    signed_exit_for_session_at(&delegatee_key, heartbeat_at_ms, expires_at_ms)
+/// Draw a fresh node session.
+fn node_key() -> Result<DelegateeKey> {
+    DelegateeKey::new_with_seckey(&SecretKey::random()).map_err(Error::CoreError)
 }
 
-fn signed_exit_for_session_at(
-    delegatee_key: &DelegateeKey,
-    heartbeat_at_ms: u128,
-    expires_at_ms: u128,
-) -> Result<OnionExitDescriptor> {
-    signed_exit_for_session_network_at(delegatee_key, 1, heartbeat_at_ms, expires_at_ms)
+/// Draw `count` fresh node sessions.
+fn node_keys(count: usize) -> Result<Vec<DelegateeKey>> {
+    (0..count).map(|_| node_key()).collect()
 }
 
-fn signed_exit_for_session_network_at(
-    delegatee_key: &DelegateeKey,
+/// The relay hop of `key` at `epoch`.
+fn hop(key: &DelegateeKey, epoch: OnionProcessEpoch) -> OnionRouteHop {
+    OnionRouteHop::new(key.delegator_did(), key.delegatee_public_key(), epoch)
+}
+
+/// A signed `tcp` registration of `key` at `epoch` on `network_id`, live until `expires_at_ms`.
+fn exit_descriptor(
+    key: &DelegateeKey,
+    epoch: OnionProcessEpoch,
     network_id: u32,
-    heartbeat_at_ms: u128,
     expires_at_ms: u128,
 ) -> Result<OnionExitDescriptor> {
-    let did = delegatee_key.delegator_did();
     OnionExitDescriptor::new_signed(
         OnionExitDescriptorBody {
-            did,
-            public_key: delegatee_key
+            did: key.delegator_did(),
+            public_key: key
                 .delegation()
                 .delegator_verification_pubkey()
                 .map_err(Error::CoreError)?,
-            delegatee_public_key: delegatee_key.delegatee_public_key(),
-            process_epoch: TEST_EXIT_PROCESS_EPOCH,
+            delegatee_public_key: key.delegatee_public_key(),
+            process_epoch: epoch,
             node_type: OnlineNodeType::Native,
             network_id,
             service: OnionServiceName::tcp(),
@@ -67,52 +80,35 @@ fn signed_exit_for_session_network_at(
                 max_bytes_per_minute: 1024,
             },
             started_at_ms: 1,
-            heartbeat_at_ms,
+            heartbeat_at_ms: HEARTBEAT_MS,
             expires_at_ms,
             version: "test".to_string(),
         },
-        MessageSigner::new(delegatee_key, network_id),
+        MessageSigner::new(key, network_id),
     )
     .map_err(Error::CoreError)
 }
 
-fn online_node_at(
-    delegatee_key: &DelegateeKey,
-    heartbeat_at_ms: u128,
-    expires_at_ms: u128,
-) -> CoreResult<OnlineNodeDescriptor> {
-    online_node_at_with_capabilities(delegatee_key, heartbeat_at_ms, expires_at_ms, vec![
-        ONION_RELAY_CAPABILITY.to_string(),
-    ])
+/// A live `tcp` registration of `key` at the current epoch.
+fn live_exit(key: &DelegateeKey) -> Result<OnionExitDescriptor> {
+    exit_descriptor(key, TEST_PROCESS_EPOCH, TEST_NETWORK_ID, EXPIRES_MS)
 }
 
-fn online_node_at_with_capabilities(
-    delegatee_key: &DelegateeKey,
-    heartbeat_at_ms: u128,
-    expires_at_ms: u128,
-    capabilities: Vec<String>,
-) -> CoreResult<OnlineNodeDescriptor> {
-    online_node_at_with_network_and_capabilities(
-        delegatee_key,
-        1,
-        heartbeat_at_ms,
-        expires_at_ms,
-        capabilities,
-    )
-}
-
-fn online_node_at_with_network_and_capabilities(
-    delegatee_key: &DelegateeKey,
+/// A signed online-node descriptor of `key` with `capabilities`, live until `expires_at_ms`.
+fn online_descriptor(
+    key: &DelegateeKey,
+    capabilities: OnlineNodeCapabilities,
     network_id: u32,
-    heartbeat_at_ms: u128,
     expires_at_ms: u128,
-    capabilities: Vec<String>,
-) -> CoreResult<OnlineNodeDescriptor> {
+) -> Result<OnlineNodeDescriptor> {
     OnlineNodeDescriptor::new_signed(
         OnlineNodeDescriptorBody {
-            did: delegatee_key.delegator_did(),
-            public_key: delegatee_key.delegation().delegator_verification_pubkey()?,
-            delegatee_public_key: delegatee_key.delegatee_public_key(),
+            did: key.delegator_did(),
+            public_key: key
+                .delegation()
+                .delegator_verification_pubkey()
+                .map_err(Error::CoreError)?,
+            delegatee_public_key: key.delegatee_public_key(),
             node_type: OnlineNodeType::Native,
             network_id,
             storage_redundancy: DATA_REDUNDANT,
@@ -120,66 +116,59 @@ fn online_node_at_with_network_and_capabilities(
             capabilities,
             endpoint_hint: None,
             started_at_ms: 1,
-            heartbeat_at_ms,
+            heartbeat_at_ms: HEARTBEAT_MS,
             expires_at_ms,
             version: "test".to_string(),
         },
-        MessageSigner::new(delegatee_key, network_id),
+        MessageSigner::new(key, network_id),
+    )
+    .map_err(Error::CoreError)
+}
+
+/// A live online-node descriptor of `key` registering `relay` at the current epoch.
+fn live_relay(key: &DelegateeKey) -> Result<OnlineNodeDescriptor> {
+    online_descriptor(
+        key,
+        OnlineNodeCapabilities::onion_relay(TEST_PROCESS_EPOCH),
+        TEST_NETWORK_ID,
+        EXPIRES_MS,
     )
 }
 
-fn node_key() -> CoreResult<DelegateeKey> {
-    DelegateeKey::new_with_seckey(&SecretKey::random())
+/// The request for a loop over the `tcp` symbol.
+fn tcp_request() -> OnionRouteRequest {
+    OnionRouteRequest::from_service_name(OnionServiceName::tcp())
 }
 
-fn route_request(
-    service: &str,
-    hop_count: usize,
-    allow_short_paths: bool,
-) -> Result<OnionRouteRequest> {
-    Ok(OnionRouteRequest::from_service_name(
-        OnionServiceName::parse(service)?,
-        hop_count,
-        allow_short_paths,
-    ))
-}
-
+/// The local DHT protocol mode of every fixture.
 fn test_dht_protocol() -> DhtProtocolMode {
-    DhtProtocolMode::new(1, DATA_REDUNDANT, 0)
+    DhtProtocolMode::new(TEST_NETWORK_ID, DATA_REDUNDANT, 0)
 }
 
-/// Select a test route after applying the directory's descriptor-admission boundary.
-fn select_validated_route(
-    local: rings_core::dht::Did,
-    now_ms: u128,
-    request: &OnionRouteRequest,
+/// Admit `online_nodes` and `exits` through the directory boundary for the `tcp` symbol.
+fn tcp_candidates(
+    local: Did,
     online_nodes: impl IntoIterator<Item = OnlineNodeDescriptor>,
     exits: impl IntoIterator<Item = OnionExitDescriptor>,
-    qualities: impl IntoIterator<Item = (rings_core::dht::Did, PeerQuality)>,
-) -> Result<OnionRoute> {
-    let candidates = OnionRouteCandidates::from_validated_descriptors(
+) -> OnionRouteCandidates {
+    OnionRouteCandidates::from_validated_descriptors(
         local,
         test_dht_protocol(),
-        now_ms,
-        request.service_name(),
+        NOW_MS,
+        &OnionServiceName::tcp(),
         online_nodes,
         exits,
-    );
-    select_onion_route_from_candidates_with_first_hop_policy(
-        request,
-        candidates,
-        qualities,
-        &mut SystemRouteEntropy::new(),
-        |_| true,
-        |_| true,
     )
 }
 
+/// Replay a fixed draw sequence, then `0`: every draw past the sequence takes the first
+/// candidate by DID order.
 struct FixedEntropy {
     values: VecDeque<u64>,
 }
 
 impl FixedEntropy {
+    /// Replay `values` in order.
     fn new(values: impl IntoIterator<Item = u64>) -> Self {
         Self {
             values: values.into_iter().collect(),
@@ -193,52 +182,200 @@ impl RouteEntropy for FixedEntropy {
     }
 }
 
-#[test]
-fn test_route_builder_uses_presence_relays_and_exit_registry() -> Result<()> {
-    let local = node_key().map_err(Error::CoreError)?.delegator_did();
-    let first_relay = node_key().map_err(Error::CoreError)?;
-    let second_relay = node_key().map_err(Error::CoreError)?;
-    let exit = signed_exit_at(20, 100)?;
-    let online = vec![
-        online_node_at(&first_relay, 20, 100).map_err(Error::CoreError)?,
-        online_node_at(&second_relay, 20, 100).map_err(Error::CoreError)?,
-    ];
-    let request = route_request("tcp", 3, false)?;
+/// Assert the loop laws of a selected route: `H = 5` positions, the guard at `1` and `H` only,
+/// the exit at the symbol position, `H − 1` distinct hops, and the Phase 1 view `g, r₀,₂, h₁`.
+fn assert_session_loop(route: &OnionRoute) {
+    let hops = route.hops();
+    let dids = hops.positions().map(|hop| hop.did).collect::<Vec<_>>();
+    let guard = hops.guard().did;
 
-    let route =
-        select_validated_route(local, 50, &request, online, vec![exit.clone()], Vec::new())?;
-
-    assert_eq!(route.hops().len(), 3);
-    assert_eq!(route.exit_did(), exit.did);
-    assert_eq!(route.hops().last().copied(), Some(exit.did));
-    assert_ne!(route.hops().first().copied(), Some(exit.did));
-    Ok(())
+    assert_eq!(dids.len(), 5);
+    assert_eq!(dids.first(), Some(&guard));
+    assert_eq!(dids.last(), Some(&guard));
+    assert_eq!(dids.iter().filter(|did| **did == guard).count(), 2);
+    assert_eq!(dids.get(2), Some(&route.exit_did()));
+    assert_eq!(
+        hops.open_path()
+            .map(|hop| hop.did)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        4
+    );
+    let prefix = route.positions();
+    assert_eq!(
+        prefix
+            .relays()
+            .iter()
+            .map(|hop| hop.did)
+            .collect::<Vec<_>>(),
+        dids.get(..2).map(<[Did]>::to_vec).unwrap_or_default()
+    );
+    assert_eq!(prefix.terminal().did, route.exit_did());
 }
 
+/// Selection places the `tcp` registrant at the symbol position and relay registrants
+/// everywhere else, closing the loop through one guard (D4c, D5, L7).
 #[test]
-fn test_route_builder_canonicalizes_service_before_constructing_route() -> Result<()> {
-    let local = node_key().map_err(Error::CoreError)?.delegator_did();
-    let exit = signed_exit_at(20, 100)?;
-    let request = route_request("TcP", 1, false)?;
+fn test_route_is_a_guard_closed_loop_of_registrants() -> Result<()> {
+    let local = node_key()?.delegator_did();
+    let relays = node_keys(3)?;
+    let exit = node_key()?;
+    let online = relays
+        .iter()
+        .chain([&exit])
+        .map(live_relay)
+        .collect::<Result<Vec<_>>>()?;
+    let registrants = relays
+        .iter()
+        .chain([&exit])
+        .map(|key| key.delegator_did())
+        .collect::<BTreeSet<_>>();
 
-    let route = select_validated_route(local, 50, &request, Vec::new(), vec![exit], Vec::new())?;
+    let route = select_onion_route_from_candidates(
+        &tcp_request(),
+        tcp_candidates(local, online, [live_exit(&exit)?]),
+        Vec::new(),
+        &mut FixedEntropy::new([]),
+        |_| true,
+    )?;
 
+    assert_session_loop(&route);
+    assert_eq!(route.exit_did(), exit.delegator_did());
     assert_eq!(route.service(), "tcp");
+    assert!(route
+        .hops()
+        .positions()
+        .all(|hop| registrants.contains(&hop.did) && hop.process_epoch == TEST_PROCESS_EPOCH));
+    assert!(route.hops().positions().all(|hop| hop.did != local));
     Ok(())
 }
 
+/// Fail closed (D5): below `H − 1 = 4` distinct relay registrants selection fails and never
+/// shortens the loop; a node without the relay capability is not counted.
+#[test]
+fn test_selection_fails_closed_below_distinct_hop_bound() -> Result<()> {
+    let local = node_key()?.delegator_did();
+    let relays = node_keys(2)?;
+    let bystander = node_key()?;
+    let exit = node_key()?;
+    let mut online = relays
+        .iter()
+        .chain([&exit])
+        .map(live_relay)
+        .collect::<Result<Vec<_>>>()?;
+    online.push(online_descriptor(
+        &bystander,
+        OnlineNodeCapabilities::default(),
+        TEST_NETWORK_ID,
+        EXPIRES_MS,
+    )?);
+
+    let result = select_onion_route_from_candidates(
+        &tcp_request(),
+        tcp_candidates(local, online, [live_exit(&exit)?]),
+        Vec::new(),
+        &mut FixedEntropy::new([]),
+        |_| true,
+    );
+
+    assert!(matches!(
+        result,
+        Err(Error::OnionRouteError(OnionRouteError::NotEnoughLoopHops {
+            required: 4,
+            eligible: 3,
+        }))
+    ));
+    Ok(())
+}
+
+/// Registration (D2): a symbol descriptor is eligible only while the same process registers
+/// `relay`. A descriptor whose node registers no relay epoch (missing) or another relay epoch
+/// (stale) is rejected; a matching one is kept.
+#[test]
+fn test_symbol_registrant_requires_its_current_relay_epoch() -> Result<()> {
+    let local = node_key()?.delegator_did();
+    let current = node_key()?;
+    let restarted = node_key()?;
+    let relay_less = node_key()?;
+    let unregistered = node_key()?;
+    let online = vec![
+        live_relay(&current)?,
+        live_relay(&restarted)?,
+        online_descriptor(
+            &relay_less,
+            OnlineNodeCapabilities::default(),
+            TEST_NETWORK_ID,
+            EXPIRES_MS,
+        )?,
+    ];
+    let exits = vec![
+        live_exit(&current)?,
+        exit_descriptor(&restarted, STALE_PROCESS_EPOCH, TEST_NETWORK_ID, EXPIRES_MS)?,
+        live_exit(&relay_less)?,
+        live_exit(&unregistered)?,
+    ];
+
+    let candidates = tcp_candidates(local, online, exits);
+
+    assert_eq!(
+        candidates
+            .exits
+            .iter()
+            .map(|descriptor| descriptor.did)
+            .collect::<Vec<_>>(),
+        vec![current.delegator_did()]
+    );
+    assert_eq!(
+        candidates
+            .relays
+            .iter()
+            .map(|relay| relay.did)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([current.delegator_did(), restarted.delegator_did()])
+    );
+    Ok(())
+}
+
+/// A route cannot be built over a symbol hop whose epoch differs from its descriptor's.
+#[test]
+fn test_route_rejects_symbol_hop_with_stale_epoch() -> Result<()> {
+    let keys = node_keys(4)?;
+    let exit = keys.get(2).ok_or(Error::InvalidData)?;
+    let mut next = keys.iter();
+    let stale = OnionLoopShape::SESSION.try_label(|_| {
+        next.next()
+            .map(|key| hop(key, STALE_PROCESS_EPOCH))
+            .ok_or(Error::InvalidData)
+    });
+
+    assert!(matches!(
+        stale.and_then(|hops| OnionRoute::new(OnionServiceName::tcp(), hops, live_exit(exit)?)),
+        Err(Error::OnionRouteError(OnionRouteError::ExitHopMismatch))
+    ));
+    Ok(())
+}
+
+/// Descriptors past their expiry are not candidates.
 #[test]
 fn test_directory_candidates_reject_expired_remote_descriptors() -> Result<()> {
-    let local = node_key().map_err(Error::CoreError)?.delegator_did();
-    let relay = node_key().map_err(Error::CoreError)?;
-    let exit = signed_exit_at(20, 40)?;
-    let candidates = OnionRouteCandidates::from_validated_descriptors(
+    let local = node_key()?.delegator_did();
+    let relay = node_key()?;
+    let expired_at = 40;
+
+    let candidates = tcp_candidates(
         local,
-        test_dht_protocol(),
-        50,
-        route_request("tcp", 1, false)?.service_name(),
-        vec![online_node_at(&relay, 20, 40).map_err(Error::CoreError)?],
-        vec![exit],
+        [online_descriptor(
+            &relay,
+            OnlineNodeCapabilities::onion_relay(TEST_PROCESS_EPOCH),
+            TEST_NETWORK_ID,
+            expired_at,
+        )?],
+        [exit_descriptor(
+            &relay,
+            TEST_PROCESS_EPOCH,
+            TEST_NETWORK_ID,
+            expired_at,
+        )?],
     );
 
     assert!(candidates.relays.is_empty());
@@ -246,24 +383,27 @@ fn test_directory_candidates_reject_expired_remote_descriptors() -> Result<()> {
     Ok(())
 }
 
+/// Descriptors signed for another network are not candidates.
 #[test]
 fn test_directory_candidates_reject_foreign_network_descriptors() -> Result<()> {
-    let local = node_key().map_err(Error::CoreError)?.delegator_did();
-    let relay = node_key().map_err(Error::CoreError)?;
-    let exit_key = node_key().map_err(Error::CoreError)?;
-    let exit = signed_exit_for_session_network_at(&exit_key, 2, 20, 100)?;
-    let candidates = OnionRouteCandidates::from_validated_descriptors(
+    let local = node_key()?.delegator_did();
+    let relay = node_key()?;
+    let foreign_network = 2;
+
+    let candidates = tcp_candidates(
         local,
-        test_dht_protocol(),
-        50,
-        route_request("tcp", 1, false)?.service_name(),
-        vec![
-            online_node_at_with_network_and_capabilities(&relay, 2, 20, 100, vec![
-                ONION_RELAY_CAPABILITY.to_string(),
-            ])
-            .map_err(Error::CoreError)?,
-        ],
-        vec![exit],
+        [online_descriptor(
+            &relay,
+            OnlineNodeCapabilities::onion_relay(TEST_PROCESS_EPOCH),
+            foreign_network,
+            EXPIRES_MS,
+        )?],
+        [exit_descriptor(
+            &relay,
+            TEST_PROCESS_EPOCH,
+            foreign_network,
+            EXPIRES_MS,
+        )?],
     );
 
     assert!(candidates.relays.is_empty());
@@ -271,71 +411,19 @@ fn test_directory_candidates_reject_foreign_network_descriptors() -> Result<()> 
     Ok(())
 }
 
+/// Without a symbol registrant the route reports the service before any guard policy runs.
 #[test]
-fn test_route_builder_rejects_too_short_production_route() -> Result<()> {
-    let local = node_key().map_err(Error::CoreError)?.delegator_did();
-    let relay = node_key().map_err(Error::CoreError)?;
-    let exit = signed_exit_at(20, 100)?;
-    let request = route_request("tcp", 3, false)?;
-
-    let result = select_validated_route(
-        local,
-        50,
-        &request,
-        vec![online_node_at(&relay, 20, 100).map_err(Error::CoreError)?],
-        vec![exit],
-        Vec::new(),
-    );
-
-    assert!(matches!(
-        result,
-        Err(Error::OnionRouteError(OnionRouteError::NotEnoughRelays {
-            hop_count: 3
-        }))
-    ));
-    Ok(())
-}
-
-#[test]
-fn test_route_builder_rejects_nodes_without_relay_capability() -> Result<()> {
-    let local = node_key().map_err(Error::CoreError)?.delegator_did();
-    let relay = node_key().map_err(Error::CoreError)?;
-    let exit = signed_exit_at(20, 100)?;
-    let request = route_request("tcp", 2, false)?;
-
-    let result = select_validated_route(
-        local,
-        50,
-        &request,
-        vec![online_node_at_with_capabilities(&relay, 20, 100, vec![]).map_err(Error::CoreError)?],
-        vec![exit],
-        Vec::new(),
-    );
-
-    assert!(matches!(
-        result,
-        Err(Error::OnionRouteError(OnionRouteError::NotEnoughRelays {
-            hop_count: 2
-        }))
-    ));
-    Ok(())
-}
-
-#[test]
-fn test_route_builder_reports_no_live_exit_before_first_hop_filter() -> Result<()> {
-    let request = route_request("tcp", 1, false)?;
+fn test_route_builder_reports_no_live_exit_before_guard_filter() {
     let candidates = OnionRouteCandidates {
         relays: Vec::new(),
         exits: Vec::new(),
     };
-    let mut entropy = FixedEntropy::new([0]);
 
-    let result = select_onion_route_from_candidates_with_first_hop_policy(
-        &request,
+    let result = select_onion_route_from_candidates(
+        &tcp_request(),
         candidates,
         Vec::new(),
-        &mut entropy,
-        |_| false,
+        &mut FixedEntropy::new([]),
         |_| false,
     );
 
@@ -345,222 +433,294 @@ fn test_route_builder_reports_no_live_exit_before_first_hop_filter() -> Result<(
             service
         })) if service == "tcp"
     ));
-    Ok(())
 }
 
-#[test]
-fn test_route_builder_samples_relays_by_quality_weight() -> Result<()> {
-    let local = node_key().map_err(Error::CoreError)?.delegator_did();
-    let degraded = node_key().map_err(Error::CoreError)?;
-    let healthy = node_key().map_err(Error::CoreError)?;
-    let exit = signed_exit_at(20, 100)?;
-    let request = route_request("tcp", 2, false)?;
-    let candidates = OnionRouteCandidates {
-        relays: vec![
-            OnionRouteHop::new(degraded.delegator_did(), degraded.delegatee_public_key()),
-            OnionRouteHop::new(healthy.delegator_did(), healthy.delegatee_public_key()),
-        ],
-        exits: vec![exit],
-    };
-    let mut entropy = FixedEntropy::new([1, 0]);
+/// The candidates of `relays` plus the registrant `exit`, both at the current epoch.
+fn candidates_with_exit(
+    relays: &[DelegateeKey],
+    exit: &DelegateeKey,
+) -> Result<OnionRouteCandidates> {
+    Ok(OnionRouteCandidates {
+        relays: relays
+            .iter()
+            .chain([exit])
+            .map(|key| hop(key, TEST_PROCESS_EPOCH))
+            .collect(),
+        exits: vec![live_exit(exit)?],
+    })
+}
 
-    let route = select_onion_route_from_candidates_with_first_hop_policy(
-        &request,
-        candidates,
+/// The guard is drawn by quality weight: a healthy guard (weight 8) wins a draw of `1` against
+/// a degraded one (weight 1) listed first.
+#[test]
+fn test_guard_is_drawn_by_quality_weight() -> Result<()> {
+    let relays = node_keys(3)?;
+    let exit = node_key()?;
+    let mut by_did = relays.iter().collect::<Vec<_>>();
+    by_did.sort_by_key(|key| key.delegator_did());
+    let (degraded, healthy) = match by_did.as_slice() {
+        [first, second, ..] => (first.delegator_did(), second.delegator_did()),
+        _ => return Err(Error::InvalidData),
+    };
+
+    let route = select_onion_route_from_candidates(
+        &tcp_request(),
+        candidates_with_exit(relays.as_slice(), &exit)?,
         vec![
-            (degraded.delegator_did(), PeerQuality::Degraded),
-            (healthy.delegator_did(), PeerQuality::Healthy),
+            (degraded, PeerQuality::Degraded),
+            (healthy, PeerQuality::Healthy),
         ],
-        &mut entropy,
-        |_| true,
-        |_| true,
+        &mut FixedEntropy::new([1]),
+        |did| did == degraded || did == healthy,
     )?;
 
-    assert_eq!(route.hops().first().copied(), Some(healthy.delegator_did()));
-    assert_ne!(route.hops().first().copied(), Some(local));
+    assert_session_loop(&route);
+    assert_eq!(route.hops().guard().did, healthy);
     Ok(())
 }
 
+/// The guard is drawn from the permitted first hops only; later relays need no permission.
 #[test]
-fn test_route_builder_entropy_can_select_second_unknown_relay() -> Result<()> {
-    let first = node_key().map_err(Error::CoreError)?;
-    let second = node_key().map_err(Error::CoreError)?;
-    let exit = signed_exit_at(20, 100)?;
-    let request = route_request("tcp", 2, false)?;
-    let mut relay_hops = vec![
-        OnionRouteHop::new(first.delegator_did(), first.delegatee_public_key()),
-        OnionRouteHop::new(second.delegator_did(), second.delegatee_public_key()),
-    ];
-    relay_hops.sort_by_key(|hop| hop.did);
-    let second_sorted = relay_hops
-        .get(1)
-        .map(|hop| hop.did)
-        .ok_or(Error::OnionRouteError(OnionRouteError::MissingTestRelay))?;
-    let candidates = OnionRouteCandidates {
-        relays: relay_hops,
-        exits: vec![exit],
-    };
-    let mut entropy = FixedEntropy::new([4, 0]);
+fn test_guard_policy_constrains_the_guard_only() -> Result<()> {
+    let relays = node_keys(3)?;
+    let exit = node_key()?;
+    let direct = relays
+        .last()
+        .map(DelegateeKey::delegator_did)
+        .ok_or(Error::InvalidData)?;
 
-    let route = select_onion_route_from_candidates_with_first_hop_policy(
-        &request,
-        candidates,
+    let route = select_onion_route_from_candidates(
+        &tcp_request(),
+        candidates_with_exit(relays.as_slice(), &exit)?,
         Vec::new(),
-        &mut entropy,
-        |_| true,
-        |_| true,
+        &mut FixedEntropy::new([]),
+        |did| did == direct,
     )?;
 
-    assert_eq!(route.hops().first().copied(), Some(second_sorted));
+    assert_session_loop(&route);
+    assert_eq!(route.hops().guard().did, direct);
     Ok(())
 }
 
+/// A permitted guard that is also the only other registrant of the symbol is still drawn as
+/// guard when another registrant can take the symbol position.
 #[test]
-fn test_route_builder_first_hop_filter_preserves_remote_later_relays() -> Result<()> {
-    let direct = node_key().map_err(Error::CoreError)?;
-    let remote = node_key().map_err(Error::CoreError)?;
-    let exit = signed_exit_at(20, 100)?;
+fn test_guard_never_strands_the_symbol_position() -> Result<()> {
+    let relays = node_keys(2)?;
+    let direct = node_key()?;
+    let remote = node_key()?;
     let direct_did = direct.delegator_did();
-    let remote_did = remote.delegator_did();
-    let request = route_request("tcp", 3, false)?;
     let candidates = OnionRouteCandidates {
-        relays: vec![
-            OnionRouteHop::new(remote_did, remote.delegatee_public_key()),
-            OnionRouteHop::new(direct_did, direct.delegatee_public_key()),
-        ],
-        exits: vec![exit],
+        relays: relays
+            .iter()
+            .chain([&direct, &remote])
+            .map(|key| hop(key, TEST_PROCESS_EPOCH))
+            .collect(),
+        exits: vec![live_exit(&direct)?, live_exit(&remote)?],
     };
-    let mut entropy = FixedEntropy::new([0, 0, 0]);
 
-    let route = select_onion_route_from_candidates_with_first_hop_policy(
-        &request,
+    let route = select_onion_route_from_candidates(
+        &tcp_request(),
         candidates,
         Vec::new(),
-        &mut entropy,
-        |did| did == direct_did,
+        &mut FixedEntropy::new([]),
         |did| did == direct_did,
     )?;
 
-    assert_eq!(route.hops().len(), 3);
-    assert_eq!(route.hops().first().copied(), Some(direct_did));
-    assert!(route.hops().contains(&remote_did));
+    assert_session_loop(&route);
+    assert_eq!(route.hops().guard().did, direct_did);
+    assert_eq!(route.exit_did(), remote.delegator_did());
     Ok(())
 }
 
+/// The only permitted guard cannot be the only symbol registrant: no loop exists.
 #[test]
-fn test_route_builder_does_not_consume_only_direct_relay_as_exit_first() -> Result<()> {
-    let direct = node_key().map_err(Error::CoreError)?;
-    let direct_exit = signed_exit_for_session_at(&direct, 20, 100)?;
-    let remote_exit = signed_exit_at(21, 100)?;
-    let direct_did = direct.delegator_did();
-    let request = route_request("tcp", 2, false)?;
-    let candidates = OnionRouteCandidates {
-        relays: vec![OnionRouteHop::new(
-            direct_did,
-            direct.delegatee_public_key(),
-        )],
-        exits: vec![direct_exit, remote_exit.clone()],
-    };
-    let mut entropy = FixedEntropy::new([0, 0]);
+fn test_route_rejects_loop_without_permitted_guard() -> Result<()> {
+    let relays = node_keys(3)?;
+    let exit = node_key()?;
+    let exit_did = exit.delegator_did();
+    let outsider = node_key()?.delegator_did();
 
-    let route = select_onion_route_from_candidates_with_first_hop_policy(
-        &request,
-        candidates,
-        Vec::new(),
-        &mut entropy,
-        |did| did == direct_did,
-        |did| did == direct_did,
-    )?;
+    for permitted in [exit_did, outsider] {
+        let result = select_onion_route_from_candidates(
+            &tcp_request(),
+            candidates_with_exit(relays.as_slice(), &exit)?,
+            Vec::new(),
+            &mut FixedEntropy::new([]),
+            |did| did == permitted,
+        );
 
-    assert_eq!(route.hops(), &[direct_did, remote_exit.did]);
+        assert!(matches!(
+            result,
+            Err(Error::OnionRouteError(OnionRouteError::NoPermittedFirstHop))
+        ));
+    }
     Ok(())
 }
 
+/// Loop shape over `n` symbols: `H = 3n + 2`, the guard at `1` and `H` only, the `k`-th symbol
+/// hop at `3k` drawn from the registrants of symbol `k`, every other position a relay registrant,
+/// and `H − 1` distinct hops.
 #[test]
-fn test_route_builder_rejects_route_without_permitted_first_hop() -> Result<()> {
-    let permitted = node_key().map_err(Error::CoreError)?.delegator_did();
-    let remote = node_key().map_err(Error::CoreError)?;
-    let exit = signed_exit_at(20, 100)?;
-    let request = route_request("tcp", 2, false)?;
-    let candidates = OnionRouteCandidates {
-        relays: vec![OnionRouteHop::new(
-            remote.delegator_did(),
-            remote.delegatee_public_key(),
-        )],
-        exits: vec![exit],
-    };
-    let mut entropy = FixedEntropy::new([0, 0]);
+fn test_select_loop_places_each_symbol_on_its_registrants() -> Result<()> {
+    for symbols in 1..=MAX_ONION_LOOP_SYMBOLS {
+        let shape = OnionLoopShape::new(symbols)?;
+        let keys = node_keys(shape.distinct_hops())?;
+        let relays = keys
+            .iter()
+            .map(|key| hop(key, TEST_PROCESS_EPOCH))
+            .collect::<Vec<_>>();
+        let registrants = keys
+            .chunks(2)
+            .take(symbols)
+            .map(|pair| pair.iter().map(DelegateeKey::delegator_did).collect())
+            .collect::<Vec<BTreeSet<_>>>();
 
-    let result = select_onion_route_from_candidates_with_first_hop_policy(
-        &request,
-        candidates,
-        Vec::new(),
-        &mut entropy,
-        |did| did == permitted,
-        |did| did == permitted,
-    );
+        let hops = select_loop(
+            registrants.as_slice(),
+            relays.as_slice(),
+            &BTreeMap::new(),
+            &mut FixedEntropy::new([]),
+            |_| true,
+        )?;
+        let dids = hops.positions().map(|hop| hop.did).collect::<Vec<_>>();
+
+        assert_eq!(dids.len(), 3 * symbols + 2);
+        assert_eq!(dids.first(), dids.last());
+        assert!(!has_duplicate_dids(&hops));
+        for (k, registrant) in registrants.iter().enumerate() {
+            let symbol_hop = hops.symbol(k + 1).map(|hop| hop.did);
+            assert!(symbol_hop.is_some_and(|did| registrant.contains(&did)));
+            assert_eq!(symbol_hop.as_ref(), dids.get(3 * (k + 1) - 1));
+        }
+    }
+    Ok(())
+}
+
+/// `n > n_max` is rejected before any draw.
+#[test]
+fn test_select_loop_rejects_more_than_max_symbols() -> Result<()> {
+    let keys = node_keys(16)?;
+    let relays = keys
+        .iter()
+        .map(|key| hop(key, TEST_PROCESS_EPOCH))
+        .collect::<Vec<_>>();
+    let registrants =
+        vec![relays.iter().map(|hop| hop.did).collect::<BTreeSet<_>>(); MAX_ONION_LOOP_SYMBOLS + 1];
 
     assert!(matches!(
-        result,
-        Err(Error::OnionRouteError(OnionRouteError::NoPermittedFirstHop))
+        select_loop(
+            registrants.as_slice(),
+            relays.as_slice(),
+            &BTreeMap::new(),
+            &mut FixedEntropy::new([]),
+            |_| true,
+        ),
+        Err(Error::OnionRouteError(
+            OnionRouteError::LoopSymbolsOutOfBounds {
+                symbols: 5,
+                max_symbols: 4,
+            }
+        ))
     ));
     Ok(())
 }
 
+/// Hall's condition steers the symbol draws: with `S₁ = {a}` and `S₂ = {a, b}` every loop puts
+/// `a` at `h₁` and `b` at `h₂`, and with `S₁ = S₂ = {a}` no loop exists.
 #[test]
-fn test_route_builder_shortens_to_permitted_exit_when_no_first_relay_is_allowed() -> Result<()> {
-    let remote = node_key().map_err(Error::CoreError)?;
-    let exit = signed_exit_at(20, 100)?;
-    let exit_did = exit.did;
-    let request = route_request("tcp", 3, true)?;
-    let candidates = OnionRouteCandidates {
-        relays: vec![OnionRouteHop::new(
-            remote.delegator_did(),
-            remote.delegatee_public_key(),
-        )],
-        exits: vec![exit],
+fn test_select_loop_assigns_distinct_symbol_hops_when_possible() -> Result<()> {
+    let keys = node_keys(7)?;
+    let relays = keys
+        .iter()
+        .map(|key| hop(key, TEST_PROCESS_EPOCH))
+        .collect::<Vec<_>>();
+    let (a, b) = match relays.as_slice() {
+        [first, second, ..] => (first.did, second.did),
+        _ => return Err(Error::InvalidData),
     };
-    let mut entropy = FixedEntropy::new([0, 0]);
 
-    let route = select_onion_route_from_candidates_with_first_hop_policy(
-        &request,
-        candidates,
-        Vec::new(),
-        &mut entropy,
-        |did| did == exit_did,
-        |did| did == exit_did,
-    )?;
+    for draw in [0, 1, u64::MAX] {
+        let hops = select_loop(
+            &[BTreeSet::from([a]), BTreeSet::from([a, b])],
+            relays.as_slice(),
+            &BTreeMap::new(),
+            &mut FixedEntropy::new([draw; 8]),
+            |_| true,
+        )?;
 
-    assert_eq!(route.hops().len(), 1);
-    assert_eq!(route.hops().first().copied(), Some(exit_did));
+        assert_eq!(hops.symbol(1).map(|hop| hop.did), Some(a));
+        assert_eq!(hops.symbol(2).map(|hop| hop.did), Some(b));
+        assert!(!has_duplicate_dids(&hops));
+    }
+    assert!(matches!(
+        select_loop(
+            &[BTreeSet::from([a]), BTreeSet::from([a])],
+            relays.as_slice(),
+            &BTreeMap::new(),
+            &mut FixedEntropy::new([]),
+            |_| true,
+        ),
+        Err(Error::OnionRouteError(
+            OnionRouteError::NoDistinctSymbolHops
+        ))
+    ));
     Ok(())
 }
 
+/// Guard closure (L7): `has_duplicate_dids` admits the guard exactly twice, at `1` and `H`, and
+/// rejects any other repetition, of the guard or of another hop.
 #[test]
-fn test_route_builder_direct_exit_filter_is_separate_from_relay_guard_filter() -> Result<()> {
-    let remote = node_key().map_err(Error::CoreError)?;
-    let exit = signed_exit_at(20, 100)?;
-    let exit_did = exit.did;
-    let request = route_request("tcp", 3, true)?;
-    let candidates = OnionRouteCandidates {
-        relays: vec![OnionRouteHop::new(
-            remote.delegator_did(),
-            remote.delegatee_public_key(),
-        )],
-        exits: vec![exit],
+fn test_has_duplicate_dids_admits_exactly_the_guard_twice() -> Result<()> {
+    let keys = node_keys(4)?;
+    let labelled = |interior: [usize; 3]| {
+        let mut next = interior.into_iter();
+        OnionLoopShape::SESSION.try_label(|role| {
+            let index = match role {
+                OnionLoopRole::Guard => Some(0),
+                OnionLoopRole::Relay | OnionLoopRole::Symbol(_) => next.next(),
+            };
+            index
+                .and_then(|index| keys.get(index))
+                .map(|key| hop(key, TEST_PROCESS_EPOCH))
+                .ok_or(Error::InvalidData)
+        })
     };
-    let mut entropy = FixedEntropy::new([0]);
 
-    let route = select_onion_route_from_candidates_with_first_hop_policy(
-        &request,
-        candidates,
-        Vec::new(),
-        &mut entropy,
-        |_| false,
-        |did| did == exit_did,
-    )?;
+    let distinct = labelled([1, 2, 3])?;
+    assert!(!has_duplicate_dids(&distinct));
+    assert_eq!(
+        distinct
+            .positions()
+            .filter(|hop| hop.did == distinct.guard().did)
+            .count(),
+        2
+    );
+    assert!(has_duplicate_dids(&labelled([0, 2, 3])?));
+    assert!(has_duplicate_dids(&labelled([1, 2, 0])?));
+    assert!(has_duplicate_dids(&labelled([1, 2, 1])?));
+    Ok(())
+}
 
-    assert_eq!(route.hops().len(), 1);
-    assert_eq!(route.hops().first().copied(), Some(exit_did));
+/// A route admits only the loop of its one-symbol pipeline.
+#[test]
+fn test_route_rejects_loop_of_another_pipeline_shape() -> Result<()> {
+    let shape = OnionLoopShape::new(2)?;
+    let keys = node_keys(shape.distinct_hops())?;
+    let exit = keys.get(2).ok_or(Error::InvalidData)?;
+    let mut next = keys.iter();
+    let hops = shape.try_label(|_| {
+        next.next()
+            .map(|key| hop(key, TEST_PROCESS_EPOCH))
+            .ok_or(Error::InvalidData)
+    })?;
+
+    assert!(matches!(
+        OnionRoute::new(OnionServiceName::tcp(), hops, live_exit(exit)?),
+        Err(Error::OnionRouteError(OnionRouteError::LoopShapeMismatch {
+            expected: 1,
+            actual: 2,
+        }))
+    ));
     Ok(())
 }

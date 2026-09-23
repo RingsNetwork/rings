@@ -43,12 +43,13 @@ use crate::error::Result;
 use crate::extension::ext::Scope;
 use crate::onion::pipeline::OnionPipeline;
 use crate::onion::OnionExitDescriptor;
-use crate::onion::OnionExitEpoch;
+use crate::onion::OnionProcessEpoch;
 use crate::onion::OnionRoute;
 use crate::onion::OnionRouteError;
 use crate::onion::OnionRouteHop;
 #[cfg(rings_native)]
 use crate::onion::OnionServiceName;
+use crate::onion::MAX_ONION_LOOP_HOPS;
 
 /// Message family of the exit's backward-payload signature.
 const ONION_BACKWARD_PAYLOAD_DOMAIN_TAG: DomainTag =
@@ -149,7 +150,7 @@ pub fn route_first_hop(route: &OnionRoute) -> Did {
 /// Seal one forward frame for `positions` and address it to position zero.
 fn seal_forward(
     client: OnionClientReturn,
-    process_epoch: OnionExitEpoch,
+    process_epoch: OnionProcessEpoch,
     sequence: OnionForwardSequence,
     positions: &OnionPipeline<OnionForwardPosition>,
     application: OnionCircuitPayload,
@@ -214,7 +215,7 @@ fn assign_edges(
 ) -> Result<OnionPipeline<OnionForwardPosition>> {
     let mut circuit_ids =
         edge_circuit_ids(route.positions().hop_count(), first_circuit_id)?.into_iter();
-    route.positions().clone().try_map(|hop| {
+    route.positions().try_map(|hop| {
         circuit_ids
             .next()
             .map(|circuit_id| OnionForwardPosition { hop, circuit_id })
@@ -242,7 +243,7 @@ fn assign_edges(
 /// layer plaintext is one pinned `OnionForwardLayer` shape.
 fn build_forward_layers(
     client: OnionClientReturn,
-    process_epoch: OnionExitEpoch,
+    process_epoch: OnionProcessEpoch,
     sequence: OnionForwardSequence,
     positions: &OnionPipeline<OnionForwardPosition>,
     application: OnionCircuitPayload,
@@ -320,11 +321,11 @@ pub(super) fn edge_circuit_ids_with(
     mut next_id: impl FnMut() -> OnionCircuitId,
 ) -> Result<Vec<OnionCircuitId>> {
     const MAX_ALLOCATION_ATTEMPTS_PER_EDGE: usize = 16;
-    if hop_count == 0 || hop_count > usize::from(super::MAX_ONION_CIRCUIT_HOPS) {
+    if hop_count == 0 || hop_count > MAX_ONION_LOOP_HOPS {
         return Err(Error::OnionRouteError(
             OnionRouteError::HopCountOutOfBounds {
                 hop_count,
-                max_hops: super::MAX_ONION_CIRCUIT_HOPS,
+                max_hops: MAX_ONION_LOOP_HOPS,
             },
         ));
     }

@@ -52,7 +52,6 @@ struct SettingsSnapshot {
     ice_servers: String,
     stabilize_interval: String,
     storage_name: String,
-    webview_allow_short_paths: bool,
     seed_url: String,
     http_endpoint: String,
 }
@@ -78,8 +77,6 @@ struct NodeState {
     ice_servers: UseStateHandle<String>,
     stabilize_interval: UseStateHandle<String>,
     storage_name: UseStateHandle<String>,
-    webview_allow_short_paths: UseStateHandle<bool>,
-    webview_onion_settings: webview::WebviewOnionSettings,
     peers: UseStateHandle<Vec<PeerView>>,
     seed_url: UseStateHandle<String>,
     webview_ready: UseStateHandle<bool>,
@@ -108,8 +105,6 @@ struct CustomState {
 struct OnionState {
     url: UseStateHandle<String>,
     method: UseStateHandle<String>,
-    hop_count: UseStateHandle<String>,
-    allow_short_paths: UseStateHandle<bool>,
     headers: UseStateHandle<String>,
     body: UseStateHandle<String>,
     route_result: UseStateHandle<String>,
@@ -149,18 +144,6 @@ fn use_shell_state() -> ShellState {
 fn use_node_state() -> NodeState {
     let generation_ref = use_mut_ref(GenerationClock::default);
     let generation = generation_ref.borrow().clone();
-    let initial_webview_allow_short_paths =
-        load_bool_setting_or_default(extension::SETTING_WEBVIEW_ALLOW_SHORT_PATHS, false);
-    let webview_allow_short_paths = use_state(move || initial_webview_allow_short_paths);
-    let webview_onion_settings =
-        use_state(move || webview::WebviewOnionSettings::new(initial_webview_allow_short_paths));
-    {
-        let webview_onion_settings = (*webview_onion_settings).clone();
-        use_effect_with(*webview_allow_short_paths, move |allow_short_paths| {
-            webview_onion_settings.set_allow_short_paths(*allow_short_paths);
-            || {}
-        });
-    }
     NodeState {
         wallet_kind: use_state(initial_wallet_kind),
         wallet_account: use_state(|| None::<WalletAccount>),
@@ -192,8 +175,6 @@ fn use_node_state() -> NodeState {
                 "rings-frontend",
             )
         }),
-        webview_allow_short_paths,
-        webview_onion_settings: (*webview_onion_settings).clone(),
         peers: use_state(Vec::<PeerView>::new),
         seed_url: use_state(|| {
             load_setting_or_default(
@@ -248,8 +229,6 @@ fn use_onion_state() -> OnionState {
     OnionState {
         url: use_state(|| "https://example.com/".to_string()),
         method: use_state(|| "GET".to_string()),
-        hop_count: use_state(|| "3".to_string()),
-        allow_short_paths: use_state(|| false),
         headers: use_state(String::new),
         body: use_state(String::new),
         route_result: use_state(String::new),
@@ -270,12 +249,6 @@ fn initial_wallet_kind() -> WalletKind {
 
 fn load_setting_or_default(key: &str, legacy_key: &str, default: &'static str) -> String {
     extension::load_setting_with_legacy(key, legacy_key).unwrap_or_else(|| default.to_string())
-}
-
-fn load_bool_setting_or_default(key: &str, default: bool) -> bool {
-    extension::load_setting(key)
-        .map(|value| value == "true")
-        .unwrap_or(default)
 }
 
 fn load_stabilize_interval_setting_or_default() -> String {
@@ -340,7 +313,6 @@ fn use_settings_persistence(node: &NodeState, link: &LinkState) {
         ice_servers: (*node.ice_servers).clone(),
         stabilize_interval: (*node.stabilize_interval).clone(),
         storage_name: (*node.storage_name).clone(),
-        webview_allow_short_paths: *node.webview_allow_short_paths,
         seed_url: (*node.seed_url).clone(),
         http_endpoint: (*link.http_endpoint).clone(),
     };
@@ -353,14 +325,6 @@ fn use_settings_persistence(node: &NodeState, link: &LinkState) {
             &settings.stabilize_interval,
         );
         extension::save_setting(extension::SETTING_STORAGE_NAME, &settings.storage_name);
-        extension::save_setting(
-            extension::SETTING_WEBVIEW_ALLOW_SHORT_PATHS,
-            if settings.webview_allow_short_paths {
-                "true"
-            } else {
-                "false"
-            },
-        );
         extension::save_setting(extension::SETTING_SEED_URL, &settings.seed_url);
         extension::save_setting(extension::SETTING_HTTP_ENDPOINT, &settings.http_endpoint);
     });
@@ -712,7 +676,6 @@ fn control_view(node: &NodeState) -> ControlView<'_> {
         ice_servers: &node.ice_servers,
         stabilize_interval: &node.stabilize_interval,
         storage_name: &node.storage_name,
-        webview_allow_short_paths: &node.webview_allow_short_paths,
         seed_url: &node.seed_url,
     }
 }
@@ -762,8 +725,6 @@ fn render_onion_panel(node: &NodeState, onion: &OnionState) -> Html {
         workbench::OnionProxyState {
             url: &onion.url,
             method: &onion.method,
-            hop_count: &onion.hop_count,
-            allow_short_paths: &onion.allow_short_paths,
             headers: &onion.headers,
             body: &onion.body,
             route_result: &onion.route_result,

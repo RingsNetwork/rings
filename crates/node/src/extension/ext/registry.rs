@@ -68,8 +68,8 @@ impl Core {
     }
 
     #[cfg(rings_native)]
-    pub(crate) fn onion_exit_epoch(&self) -> crate::onion::OnionExitEpoch {
-        self.processor.onion_exit_epoch()
+    pub(crate) fn onion_process_epoch(&self) -> crate::onion::OnionProcessEpoch {
+        self.processor.onion_process_epoch()
     }
 
     /// Put a message on the overlay to `to` under `namespace`.

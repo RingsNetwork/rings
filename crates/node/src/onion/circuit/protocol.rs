@@ -14,14 +14,14 @@ use crate::extension::ext::Wire;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OnionCircuitCapabilities {
     relay: bool,
-    exit_epoch: Option<crate::onion::OnionExitEpoch>,
+    exit_epoch: Option<crate::onion::OnionProcessEpoch>,
 }
 
 impl OnionCircuitCapabilities {
     /// Build capabilities from the node's advertised relay flag and installed exit epoch.
     pub const fn from_registration(
         relay: bool,
-        exit_epoch: Option<crate::onion::OnionExitEpoch>,
+        exit_epoch: Option<crate::onion::OnionProcessEpoch>,
     ) -> Self {
         Self { relay, exit_epoch }
     }
@@ -34,7 +34,7 @@ impl OnionCircuitCapabilities {
         self.relay
     }
 
-    pub(super) fn permits_exit_epoch(self, process_epoch: crate::onion::OnionExitEpoch) -> bool {
+    pub(super) fn permits_exit_epoch(self, process_epoch: crate::onion::OnionProcessEpoch) -> bool {
         matches!(self.exit_epoch, Some(local_epoch) if local_epoch == process_epoch)
     }
 }

@@ -23,6 +23,7 @@ use rings_runtime::MaybeSendSync;
 
 use crate::error::Error;
 use crate::error::Result;
+use crate::online::OnlineNodeCapabilities;
 use crate::online::OnlineNodeDescriptor;
 use crate::online::OnlineNodeDescriptorBody;
 use crate::online::OnlineNodeType;
@@ -382,8 +383,8 @@ pub struct OnlineNodeRegistration {
     node_type: OnlineNodeType,
     started_at_ms: u128,
     endpoint_hint: Option<String>,
-    /// Immutable labels selected while the processor is built.
-    capabilities: Vec<String>,
+    /// Immutable capabilities selected while the processor is built.
+    capabilities: OnlineNodeCapabilities,
     publisher: DhtRegistrationPublisher,
 }
 
@@ -394,7 +395,7 @@ impl OnlineNodeRegistration {
         ttl: Duration,
         node_type: OnlineNodeType,
         endpoint_hint: Option<String>,
-        capabilities: Vec<String>,
+        capabilities: OnlineNodeCapabilities,
     ) -> Self {
         Self {
             heartbeat_interval,
@@ -422,7 +423,7 @@ impl OnlineNodeRegistration {
                 network_id: context.network_id(),
                 storage_redundancy: context.storage_redundancy(),
                 dht_virtual_nodes: context.dht_virtual_nodes(),
-                capabilities: self.capabilities.clone(),
+                capabilities: self.capabilities,
                 endpoint_hint: self.endpoint_hint.clone(),
                 started_at_ms: self.started_at_ms,
                 heartbeat_at_ms: now_ms,

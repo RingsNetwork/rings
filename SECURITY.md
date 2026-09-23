@@ -37,10 +37,10 @@ placement, and can attempt eclipse behavior.
 ## Fault Model
 
 The implementation is intended to handle ordinary churn and fail-stop behavior:
-peers can disconnect, crash, restart, or miss heartbeats. Onion exits generate a
-fresh process epoch at each start and bind it into signed descriptors and encrypted
-forward layers, so reusing a persisted delegated delegatee key does not keep
-pre-restart exit cells valid. TTLs, stabilization, storage repair, and descriptor
+peers can disconnect, crash, restart, or miss heartbeats. Every onion node generates a
+fresh process epoch at each start and publishes it with its relay capability and in
+every signed exit descriptor; exits bind it into encrypted forward layers, so reusing
+a persisted delegated delegatee key does not keep pre-restart exit cells valid. TTLs, stabilization, storage repair, and descriptor
 refreshes are designed for that environment.
 
 The current overlay does not provide Byzantine membership safety. A malicious peer
@@ -298,8 +298,17 @@ layer and never appears as an edge header. The final layer also authenticates th
 selected descriptor's random process epoch, and the exit checks that epoch before
 emitting any adapter effect. A relay therefore knows its predecessor and its
 successor on the circuit and nothing else about the route; only the exit sees the
-application payload, and only the client knows the whole route. A route is at most
-eight hops and defaults to three, counting the exit.
+application payload, and only the client knows the whole route.
+
+**Route shape.** A route is a loop `g → r → exit → r' → g` that leaves and returns
+through the client's entry guard `g`, with exactly two relays, the guard counted,
+on each side of the exit. Its length follows from the pipeline, not from
+configuration: `H = 3n + 2` positions for `n` symbol hops (`n ≤ 4`, so `H ≤ 14`),
+and every position except the guard's return is a distinct node. Selection fails
+closed when fewer than `H − 1` distinct eligible relays are live; it never
+shortens a route, because a short path is a distinguishable segment length. The
+current data plane still seals the forward prefix `g → r → exit` and answers
+along its reverse; the return segment is selected but not yet used.
 
 **Cover and pacing contract** (`circuit/send_outbox.rs`). Let `B = 4` be the link
 batch size. A non-empty batch toward one next hop carries `r` real cells,
@@ -340,8 +349,8 @@ An onion-exit descriptor signs exactly one canonical service name, its policy,
 node type, network, process epoch, timestamps, and signer material. There is no
 parallel transport enum or descriptor schema number: the name denotes a
 world-facing symbol of the closed onion signature, `Σ_W = {tcp, https}`. The
-identity symbol `relay` is advertised as a relay capability and is not a service
-name, so a name outside `Σ_W`, `relay` included, is rejected wherever it enters a
+identity symbol `relay` is advertised as a relay capability, which carries the
+node's process epoch, and is not a service name, so a name outside `Σ_W`, `relay` included, is rejected wherever it enters a
 node (configuration, descriptor decode, RPC) and no route can name it. An exit
 evaluates each authenticated application through a table holding exactly the
 services it is configured to serve. `https ⊑ tcp`: native exits serve `tcp` through
@@ -351,9 +360,12 @@ so a tunnel chunk that also decodes as an HTTPS payload (an empty chunk, or a
 five-byte chunk `04 ‖ utf8⁴`) is taken as one and dropped; removing that overlap
 needs a wire tag and is left to the Phase 2 cutover of #834. A new incompatible descriptor
 shape is therefore a network-wide release cutover, not a value negotiated inside the
-descriptor. Route construction enters through the policy-aware selector only: proxy
-protocol, target policy, entry guard, and direct-exit admission are explicit
-predicates rather than permissive wrapper defaults.
+descriptor. Every exit is also a relay: a node that advertises an exit must advertise
+the relay capability, and route selection admits an exit descriptor only while its
+DID, session key, and process epoch equal the node's current relay capability, so a
+stale descriptor from an earlier process is never selected. Route construction
+enters through the policy-aware selector only: proxy protocol, target policy, and
+entry guard are explicit predicates rather than permissive wrapper defaults.
 
 TCP and HTTPS exit adapters share one process-local forward-nonce replay witness.
 The authenticated service name still binds the adapter action, but replaying the

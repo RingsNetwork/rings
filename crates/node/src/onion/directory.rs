@@ -5,7 +5,7 @@ use rings_core::measure::PeerQuality;
 use rings_core::message::DhtProtocolMode;
 use rings_core::utils::get_epoch_ms;
 
-use super::select_onion_route_from_candidates_with_first_hop_policy;
+use super::select_onion_route_from_candidates;
 use super::OnionEntryGuards;
 use super::OnionExitDescriptor;
 use super::OnionExitTarget;
@@ -102,11 +102,7 @@ pub(crate) async fn build_onion_proxy_route_with_first_hop(
             },
         ));
     }
-    let request = OnionRouteRequest::from_service_name(
-        service_name,
-        proxy.hop_count,
-        proxy.allow_short_paths,
-    );
+    let request = OnionRouteRequest::from_service_name(service_name);
     let route =
         build_onion_route_from_exits(reader, request, policy_exits, first_hop_permitted).await?;
 
@@ -146,12 +142,7 @@ async fn build_onion_route_from_exits(
             first_hop_permitted,
         )
         .await?;
-    select_onion_route_from_candidates_with_first_hop_policy(
-        &request,
-        candidates,
-        qualities,
-        &mut entropy,
-        |did| guard_set.contains(did) && first_hop_permitted(did),
-        first_hop_permitted,
-    )
+    select_onion_route_from_candidates(&request, candidates, qualities, &mut entropy, |did| {
+        guard_set.contains(did) && first_hop_permitted(did)
+    })
 }

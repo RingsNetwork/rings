@@ -297,8 +297,8 @@ pub struct OnlineNodeDescriptorInfo {
     pub storage_redundancy: u16,
     /// Number of virtual DHT nodes advertised by the node.
     pub dht_virtual_nodes: u16,
-    /// Capability names advertised by the node.
-    pub capabilities: Vec<String>,
+    /// Typed node capabilities encoded with the node serde shape.
+    pub capabilities: Value,
     /// Optional endpoint hint clients may use for direct connection.
     pub endpoint_hint: Option<String>,
     /// Descriptor creation timestamp in Unix milliseconds.

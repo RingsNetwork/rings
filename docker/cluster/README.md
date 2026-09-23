@@ -81,12 +81,12 @@ Useful environment variables:
 - `RINGS_EXTERNAL_IP_APPEND_CONTAINER_IP`: when `RINGS_EXTERNAL_IP` is set, also advertise the container IP so nodes inside the same container can still connect to each other; default `true`
 - `RINGS_WEBRTC_UDP_PORT_MIN` and `RINGS_WEBRTC_UDP_PORT_MAX`: optional fixed native WebRTC UDP port range; publish the same range with `/udp` when browser peers must establish data channels to non-ingress nodes
 - `RINGS_ADVERTISE_ONION_RELAY`: publish relay capability from every node; default `true`
-- `RINGS_ADVERTISE_ONION_EXIT`: publish exit descriptors from every node; default `true`
+- `RINGS_ADVERTISE_ONION_EXIT`: publish exit descriptors from every node; requires `RINGS_ADVERTISE_ONION_RELAY`; default `true`
 - `RINGS_ONION_EXIT_SERVICES`: comma-separated service names; default `tcp,https`
 - `RINGS_ONION_EXIT_ALLOW_TARGETS`: comma-separated exit target allow-list; use `*:*` for all targets; default `*:*`
 - `RINGS_ONION_EXIT_DENY_TARGETS`: comma-separated exit target deny-list; default empty
 
-The reserved `https` onion service is handled by the native TCP exit runtime. Native nodes advertising the default services publish both `tcp` and `https`, which lets WorkBench build HTTPS onion proxy routes against the Docker cluster.
+The reserved `https` onion service is handled by the native TCP exit runtime. Native nodes advertising the default services publish both `tcp` and `https`, which lets WorkBench build HTTPS onion proxy routes against the Docker cluster. Every route is a loop through four distinct relays besides the client (guard, relay, exit, relay, back to the guard), so it needs `RINGS_NODE_COUNT` of at least `4`.
 
 Topology modes:
 

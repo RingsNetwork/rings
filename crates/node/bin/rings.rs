@@ -350,7 +350,7 @@ struct RunCommand {
     #[arg(
         long,
         action = ArgAction::SetTrue,
-        help = "Publish this node as an onion exit in the application-layer exit registry",
+        help = "Publish this node as an onion exit in the application-layer exit registry; requires --advertise-onion-relay",
         env
     )]
     pub advertise_onion_exit: bool,
@@ -410,21 +410,6 @@ struct RunCommand {
         env
     )]
     pub onion_http_proxy_service: Option<OnionServiceName>,
-
-    #[arg(
-        long,
-        help = "Desired hop count for the local onion HTTP proxy. 0 uses node default.",
-        env
-    )]
-    pub onion_http_proxy_hop_count: Option<usize>,
-
-    #[arg(
-        long,
-        action = ArgAction::SetTrue,
-        help = "Allow the local onion HTTP proxy to use shorter routes when too few relays are live",
-        env
-    )]
-    pub onion_http_proxy_allow_short_paths: bool,
 
     #[arg(
         long,
@@ -789,12 +774,6 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
     if let Some(service) = args.onion_http_proxy_service {
         c.onion_http_proxy_service = service;
     }
-    if let Some(hop_count) = args.onion_http_proxy_hop_count {
-        c.onion_http_proxy_hop_count = hop_count;
-    }
-    if args.onion_http_proxy_allow_short_paths {
-        c.onion_http_proxy_allow_short_paths = true;
-    }
     if let Some(timeout_secs) = args.onion_http_proxy_header_timeout_secs {
         c.onion_http_proxy_header_timeout_secs = timeout_secs;
     }
@@ -827,8 +806,6 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
     let onion_exit_policy = c.onion_exit_policy.clone();
     let onion_http_proxy_addr = c.onion_http_proxy_addr.clone();
     let onion_http_proxy_service = c.onion_http_proxy_service.clone();
-    let onion_http_proxy_hop_count = c.onion_http_proxy_hop_count;
-    let onion_http_proxy_allow_short_paths = c.onion_http_proxy_allow_short_paths;
     let onion_http_proxy_header_timeout_secs = c.onion_http_proxy_header_timeout_secs;
     let onion_http_proxy_max_connections = c.onion_http_proxy_max_connections;
     let gateway_config = c.enabled_gateway().cloned();
@@ -990,8 +967,6 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
         let proxy_options = OnionHttpProxyOptions {
             listen_addr: onion_http_proxy_addr,
             service: onion_http_proxy_service,
-            hop_count: onion_http_proxy_hop_count,
-            allow_short_paths: onion_http_proxy_allow_short_paths,
             max_connections: onion_http_proxy_max_connections,
             header_timeout: Duration::from_secs(onion_http_proxy_header_timeout_secs),
         };

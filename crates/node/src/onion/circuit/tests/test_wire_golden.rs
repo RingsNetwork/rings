@@ -36,12 +36,11 @@ use super::test_circuit_protocol::session;
 use crate::descriptor::SignedDescriptor;
 use crate::descriptor::SignedDescriptorBody;
 use crate::onion::OnionExitDescriptorBody;
-use crate::onion::OnionExitEpoch;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionExitTarget;
+use crate::onion::OnionProcessEpoch;
 use crate::onion::OnionServiceName;
 use crate::onion::ONION_EXITS_TOPIC;
-use crate::onion::ONION_RELAY_CAPABILITY;
 use crate::online::OnlineNodeType;
 use crate::tests::TEST_NETWORK_ID;
 
@@ -117,7 +116,7 @@ fn relay_layer() -> OnionForwardLayer {
 /// Exit layer whose every field is a distinct constant.
 fn exit_layer() -> OnionForwardLayer {
     OnionForwardLayer::Exit {
-        process_epoch: OnionExitEpoch::new([0x21; 16]),
+        process_epoch: OnionProcessEpoch::new([0x21; 16]),
         client: OnionClientReturn {
             delegatee_public_key: point(0x04),
             return_id: OnionReturnId::new([0x22; 16]),
@@ -136,7 +135,7 @@ fn exit_descriptor_body() -> OnionExitDescriptorBody {
         did: Did::from(0x0a0b_0c0d_u32),
         public_key: VerificationPublicKey::Secp256k1(point(0x06)),
         delegatee_public_key: point(0x07),
-        process_epoch: OnionExitEpoch::new([0x31; 16]),
+        process_epoch: OnionProcessEpoch::new([0x31; 16]),
         node_type: OnlineNodeType::Native,
         network_id: TEST_NETWORK_ID,
         service: OnionServiceName::https(),
@@ -281,5 +280,4 @@ fn test_frozen_onion_labels() {
         EXIT_DESCRIPTOR_DOMAIN_TAG
     );
     assert_eq!(ONION_EXITS_TOPIC, "onion_exits");
-    assert_eq!(ONION_RELAY_CAPABILITY, "onion-relay");
 }

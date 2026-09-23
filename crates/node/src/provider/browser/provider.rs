@@ -121,7 +121,7 @@ pub struct BrowserOnionProxyResponse {
 /// render and audit the result.
 #[derive(serde::Serialize)]
 struct BrowserOnionRouteInfo {
-    /// Ordered DID hops ending with the exit.
+    /// DIDs of the loop's positions `1 … H`, the guard first and last.
     hops: Vec<String>,
     /// Canonical service selected by the route.
     service: String,
@@ -132,7 +132,11 @@ struct BrowserOnionRouteInfo {
 /// Project a selected route into the browser API without recreating the removed RPC method.
 fn browser_onion_route_info(route: &crate::onion::OnionRoute) -> NodeResult<BrowserOnionRouteInfo> {
     Ok(BrowserOnionRouteInfo {
-        hops: route.hops().iter().map(ToString::to_string).collect(),
+        hops: route
+            .hops()
+            .positions()
+            .map(|hop| hop.did.to_string())
+            .collect(),
         service: route.service().to_string(),
         exit: crate::rpc_dto::onion_exit_descriptor_info(route.exit().clone())?,
     })
@@ -309,16 +313,6 @@ impl BrowserOnionProxy {
     /// Return the exit service class this proxy selects.
     pub fn exit_service(&self) -> String {
         self.config.exit_service().to_string()
-    }
-
-    /// Return the desired hop count, including the exit. `0` means the node default.
-    pub fn hop_count(&self) -> usize {
-        self.config.hop_count
-    }
-
-    /// Return whether this proxy may use fewer hops when too few relays are live.
-    pub fn allow_short_paths(&self) -> bool {
-        self.config.allow_short_paths
     }
 
     /// Build an HTTPS-over-TCP onion proxy route for `target_authority` (`host:port`).
@@ -822,11 +816,7 @@ impl Provider {
     ///
     /// The returned proxy is not bound to a URL; call [`BrowserOnionProxy::request`] with a full
     /// `https://` URL to send through the selected exit.
-    pub fn onion_https_proxy(
-        &self,
-        hop_count: usize,
-        allow_short_paths: bool,
-    ) -> Result<BrowserOnionProxy, JsError> {
+    pub fn onion_https_proxy(&self) -> Result<BrowserOnionProxy, JsError> {
         let runtime = self
             .install_onion_https_protocol(None)
             .map_err(JsError::from)?;
@@ -836,7 +826,7 @@ impl Provider {
                 self.extensions().core(),
                 ONION_CIRCUIT_NAMESPACE.to_string(),
             ),
-            config: OnionProxyConfig::https_proxy(hop_count, allow_short_paths),
+            config: OnionProxyConfig::https_proxy(),
             client: Arc::clone(runtime.client()),
             directory_endpoint: self.onion_directory_endpoint().map_err(JsError::from)?,
         })
@@ -945,7 +935,7 @@ impl Provider {
                 }
                 let capabilities = OnionCircuitCapabilities::from_registration(
                     self.processor.advertise_onion_relay(),
-                    allow_exit.then(|| self.processor.onion_exit_epoch()),
+                    allow_exit.then(|| self.processor.onion_process_epoch()),
                 );
                 self.register_protocol(
                     OnionCircuitProtocol::new(capabilities),
@@ -961,7 +951,7 @@ impl Provider {
             if registered {
                 let capabilities = OnionCircuitCapabilities::from_registration(
                     self.processor.advertise_onion_relay(),
-                    Some(self.processor.onion_exit_epoch()),
+                    Some(self.processor.onion_process_epoch()),
                 );
                 self.extensions().replace(
                     OnionCircuitProtocol::new(capabilities),

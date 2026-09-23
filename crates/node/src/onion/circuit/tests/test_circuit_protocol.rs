@@ -30,14 +30,18 @@ use crate::extension::ext::Interpret;
 use crate::extension::ext::Protocol;
 use crate::extension::ext::Scope;
 use crate::extension::ext::Wire;
+use crate::onion::loop_shape::OnionLoopRole;
 use crate::onion::replay::OnionForwardReplayKey;
 use crate::onion::replay::OnionForwardReplayPartitions;
 use crate::onion::replay::ReplayAdmission;
 use crate::onion::signature::ONION_SIGNATURE;
 use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitDescriptorBody;
-use crate::onion::OnionExitEpoch;
+use crate::onion::OnionLoop;
+use crate::onion::OnionLoopShape;
+use crate::onion::OnionProcessEpoch;
 use crate::onion::OnionRoute;
+use crate::onion::OnionRouteError;
 use crate::onion::OnionRouteHop;
 use crate::onion::OnionServiceName;
 use crate::online::OnlineNodeType;
@@ -45,9 +49,9 @@ use crate::sync_lock::lock;
 use crate::tests::TEST_NETWORK_ID;
 
 /// Stable non-zero epoch used by ordinary circuit fixtures; only determinism matters here.
-const TEST_PROCESS_EPOCH: OnionExitEpoch = OnionExitEpoch::new([17; 16]);
+const TEST_PROCESS_EPOCH: OnionProcessEpoch = OnionProcessEpoch::new([17; 16]);
 /// A distinct epoch models a restarted process that reuses the same delegated delegatee key.
-const RESTARTED_PROCESS_EPOCH: OnionExitEpoch = OnionExitEpoch::new([42; 16]);
+const RESTARTED_PROCESS_EPOCH: OnionProcessEpoch = OnionProcessEpoch::new([42; 16]);
 /// Dedicated circuit id keeps the restart replay witness separate from neighboring fixtures.
 const RESTART_REPLAY_CIRCUIT_ID: OnionCircuitId = OnionCircuitId::new([41; 16]);
 
@@ -85,31 +89,58 @@ fn payload_for_service(service: &str, label: &str) -> OnionCircuitPayload {
         .expect("valid payload service")
 }
 
-pub(super) fn route(relays: &[DelegateeKey], exit_session: &DelegateeKey) -> OnionRoute {
-    route_for_service("https", relays, exit_session)
+/// Hop of `session` at the fixture process epoch.
+fn route_hop(session: &DelegateeKey) -> OnionRouteHop {
+    OnionRouteHop::new(
+        session.delegator_did(),
+        session.delegatee_public_key(),
+        TEST_PROCESS_EPOCH,
+    )
 }
 
-fn route_for_service(
-    service: &str,
-    relays: &[DelegateeKey],
+/// The loop `guard, relay, symbol, back, guard` of a one-symbol pipeline.
+pub(super) fn session_loop(
+    guard: &DelegateeKey,
+    relay: &DelegateeKey,
+    symbol: &DelegateeKey,
+    back: &DelegateeKey,
+) -> OnionLoop<OnionRouteHop> {
+    let mut interior = [relay, symbol, back].into_iter();
+    OnionLoopShape::SESSION
+        .try_label(|role| match role {
+            OnionLoopRole::Guard => Ok(route_hop(guard)),
+            OnionLoopRole::Relay | OnionLoopRole::Symbol(_) => interior
+                .next()
+                .map(route_hop)
+                .ok_or(crate::error::Error::InvalidData),
+        })
+        .expect("session loop")
+}
+
+/// An `https` route whose Phase 1 view is `guard → relay → exit`; the loop returns through a
+/// fresh relay.
+pub(super) fn route(
+    guard: &DelegateeKey,
+    relay: &DelegateeKey,
     exit_session: &DelegateeKey,
 ) -> OnionRoute {
-    let exit = exit_session.delegator_did();
+    route_for_service("https", guard, relay, exit_session)
+}
+
+/// A `service` route whose Phase 1 view is `guard → relay → exit`.
+fn route_for_service(
+    service: &str,
+    guard: &DelegateeKey,
+    relay: &DelegateeKey,
+    exit_session: &DelegateeKey,
+) -> OnionRoute {
     let public_key = exit_session
         .delegation()
         .delegator_verification_pubkey()
         .expect("verification key");
-    let mut encryption_hops = relays
-        .iter()
-        .map(|relay| OnionRouteHop::new(relay.delegator_did(), relay.delegatee_public_key()))
-        .collect::<Vec<_>>();
-    encryption_hops.push(OnionRouteHop::new(
-        exit,
-        exit_session.delegatee_public_key(),
-    ));
     let exit = OnionExitDescriptor::new_signed(
         OnionExitDescriptorBody {
-            did: exit,
+            did: exit_session.delegator_did(),
             public_key,
             delegatee_public_key: exit_session.delegatee_public_key(),
             process_epoch: TEST_PROCESS_EPOCH,
@@ -127,10 +158,42 @@ fn route_for_service(
     .expect("signed exit");
     OnionRoute::new(
         OnionServiceName::parse(service).expect("valid route service"),
-        encryption_hops,
+        session_loop(guard, relay, exit_session, &session()),
         exit,
     )
     .expect("valid route")
+}
+
+/// Carry a forward cell through the relays of a route's Phase 1 view, as each relay would: open
+/// the cell, peel its relay layer and seal the inner layer to the next hop in the same class.
+/// Returns the cell the terminal receives.
+pub(super) fn relay_to_terminal(relays: &[&DelegateeKey], payload: &Bytes) -> Bytes {
+    relays.iter().fold(payload.clone(), |payload, relay| {
+        let cell =
+            rings_codec::deserialize::<OnionWireCell>(&payload).expect("decode encrypted cell");
+        let OnionWireMessage::Forward(frame) = open_wire(relay, &payload) else {
+            panic!("expected forward frame");
+        };
+        let OnionForwardLayer::Relay {
+            next_circuit_id,
+            next_delegatee_public_key,
+            inner,
+            ..
+        } = decrypt_forward_layer(relay, frame.circuit_id, &frame.layer)
+            .expect("decrypt relay layer")
+        else {
+            panic!("expected relay layer");
+        };
+        seal_message(
+            &OnionWireMessage::Forward(OnionForwardFrame {
+                circuit_id: next_circuit_id,
+                layer: inner,
+            }),
+            next_delegatee_public_key,
+            Some(cell.bucket),
+        )
+        .expect("seal next-hop cell")
+    })
 }
 
 fn decode_event(
@@ -369,7 +432,7 @@ fn test_initial_forward_targets_first_hop_and_hides_payload() {
     let first = session();
     let second = session();
     let exit = session();
-    let route = route(&[first.clone(), second], &exit);
+    let route = route(&first, &second, &exit);
     let circuit_id = OnionCircuitId::new([9; 16]);
 
     let (to, payload) = encode_initial_forward(
@@ -395,7 +458,7 @@ fn test_relay_layer_uses_distinct_next_edge_circuit_id() {
     let client = session();
     let first = session();
     let exit = session();
-    let route = route(std::slice::from_ref(&first), &exit);
+    let route = route(&first, &session(), &exit);
     let first_circuit_id = OnionCircuitId::new([9; 16]);
     let (_, payload) = encode_initial_forward(
         OnionClientReturn::new(client.delegatee_public_key()),
@@ -422,7 +485,7 @@ fn test_circuit_path_reuses_edge_ids_for_stream_payloads() {
     let client = session();
     let first = session();
     let exit = session();
-    let route = route(std::slice::from_ref(&first), &exit);
+    let route = route(&first, &session(), &exit);
     let first_circuit_id = OnionCircuitId::new([9; 16]);
     let client_return = OnionClientReturn::new(client.delegatee_public_key());
     let path = OnionCircuitPath::new(route, first_circuit_id).expect("stable circuit path");
@@ -462,19 +525,17 @@ fn relay_next_circuit_id(
 fn test_route_constructor_rejects_mismatched_exit_hop() {
     let first = session();
     let exit = session();
-    let route = route(&[], &exit);
-    let encryption_hops = vec![OnionRouteHop::new(
-        first.delegator_did(),
-        first.delegatee_public_key(),
-    )];
+    let route = route(&session(), &session(), &exit);
 
     assert!(matches!(
         OnionRoute::new(
             route.service_name().clone(),
-            encryption_hops,
+            session_loop(&session(), &session(), &first, &session()),
             route.exit().clone(),
         ),
-        Err(crate::error::Error::OnionRouteError(_))
+        Err(crate::error::Error::OnionRouteError(
+            OnionRouteError::ExitHopMismatch
+        ))
     ));
 }
 
@@ -482,7 +543,7 @@ fn test_route_constructor_rejects_mismatched_exit_hop() {
 fn test_initial_forward_requires_route_payload_service_match() {
     let client = session();
     let exit = session();
-    let route = route(&[], &exit);
+    let route = route(&session(), &session(), &exit);
     let circuit_id = OnionCircuitId::new([9; 16]);
 
     assert!(matches!(
@@ -500,7 +561,7 @@ fn test_initial_forward_requires_route_payload_service_match() {
 fn test_initial_forward_accepts_canonical_payload_for_mixed_case_route_service() {
     let client = session();
     let exit = session();
-    let route = route_for_service("HTTPS", &[], &exit);
+    let route = route_for_service("HTTPS", &session(), &session(), &exit);
     let circuit_id = OnionCircuitId::new([10; 16]);
 
     let result = encode_initial_forward(
@@ -518,7 +579,7 @@ fn test_hidden_cell_direction_defers_relay_capability_check_until_after_cell_dec
     let client = session();
     let relay = session();
     let exit = session();
-    let route = route(std::slice::from_ref(&relay), &exit);
+    let route = route(&relay, &session(), &exit);
     let circuit_id = OnionCircuitId::new([1; 16]);
     let (_, payload) = encode_initial_forward(
         OnionClientReturn::new(client.delegatee_public_key()),
@@ -571,8 +632,10 @@ fn test_hidden_cell_direction_defers_relay_capability_check_until_after_cell_dec
 #[tokio::test]
 async fn test_relay_capability_does_not_execute_exit_layer() {
     let client = session();
+    let guard = session();
+    let previous = session();
     let relay = session();
-    let route = route(&[], &relay);
+    let route = route(&guard, &previous, &relay);
     let circuit_id = OnionCircuitId::new([4; 16]);
     let (_, payload) = encode_initial_forward(
         OnionClientReturn::new(client.delegatee_public_key()),
@@ -581,6 +644,7 @@ async fn test_relay_capability_does_not_execute_exit_layer() {
         test_payload("tcp-shutdown"),
     )
     .expect("encode exit layer");
+    let payload = relay_to_terminal(&[&guard, &previous], &payload);
     let protocol =
         OnionCircuitProtocol::new(OnionCircuitCapabilities::from_registration(true, None));
     let shell = OnionCircuitShell::new(relay.clone(), RecordingHandler::default());
@@ -588,7 +652,7 @@ async fn test_relay_capability_does_not_execute_exit_layer() {
     let state = protocol.init();
     let event = decode_event(
         &protocol,
-        client.delegator_did(),
+        previous.delegator_did(),
         relay.delegator_did(),
         &payload,
     );
@@ -966,9 +1030,10 @@ fn test_overlong_exit_layer_emits_no_exit_effect() {
 #[tokio::test]
 async fn test_relay_decrypts_one_layer_and_remembers_return_hop() {
     let client = session();
+    let guard = session();
     let relay = session();
     let exit = session();
-    let route = route(std::slice::from_ref(&relay), &exit);
+    let route = route(&guard, &relay, &exit);
     let circuit_id = OnionCircuitId::new([2; 16]);
     let (_, payload) = encode_initial_forward(
         OnionClientReturn::new(client.delegatee_public_key()),
@@ -977,13 +1042,14 @@ async fn test_relay_decrypts_one_layer_and_remembers_return_hop() {
         test_payload("tcp-shutdown"),
     )
     .expect("encode forward");
+    let payload = relay_to_terminal(&[&guard], &payload);
     let protocol =
         OnionCircuitProtocol::new(OnionCircuitCapabilities::from_registration(true, None));
     let shell = OnionCircuitShell::new(relay.clone(), RecordingHandler::default());
     let scope = test_scope(relay.clone());
     let event = decode_event(
         &protocol,
-        client.delegator_did(),
+        guard.delegator_did(),
         relay.delegator_did(),
         &payload,
     );
@@ -1057,7 +1123,7 @@ async fn test_two_relays_peel_fixed_size_cells_through_the_exit_reducer_and_shel
     let first = session();
     let second = session();
     let exit = session();
-    let route = route(&[first.clone(), second.clone()], &exit);
+    let route = route(&first, &second, &exit);
     let expected = test_payload("multi-hop-fixed-cell");
     let first_edge_id = OnionCircuitId::new([31; 16]);
     let (first_peer, first_payload) = encode_initial_forward(
@@ -1172,8 +1238,10 @@ async fn test_two_relays_peel_fixed_size_cells_through_the_exit_reducer_and_shel
 #[tokio::test]
 async fn test_restarted_exit_rejects_old_epoch_before_replay_state_or_side_effect() {
     let client = session();
+    let guard = session();
+    let relay = session();
     let exit = session();
-    let route = route(&[], &exit);
+    let route = route(&guard, &relay, &exit);
     let original_epoch = route.exit().process_epoch;
     let circuit_id = RESTART_REPLAY_CIRCUIT_ID;
     let (_, payload) = encode_initial_forward(
@@ -1183,6 +1251,7 @@ async fn test_restarted_exit_rejects_old_epoch_before_replay_state_or_side_effec
         test_payload("one-shot"),
     )
     .expect("encode original process cell");
+    let payload = relay_to_terminal(&[&guard, &relay], &payload);
 
     let original_protocol = OnionCircuitProtocol::new(OnionCircuitCapabilities::from_registration(
         false,
@@ -1196,7 +1265,7 @@ async fn test_restarted_exit_rejects_old_epoch_before_replay_state_or_side_effec
         &original_shell,
         &original_scope,
         &original_protocol.init(),
-        client.delegator_did(),
+        relay.delegator_did(),
         exit.delegator_did(),
         &payload,
     )
@@ -1226,7 +1295,7 @@ async fn test_restarted_exit_rejects_old_epoch_before_replay_state_or_side_effec
         &restarted_shell,
         &restarted_scope,
         &restarted_protocol.init(),
-        client.delegator_did(),
+        relay.delegator_did(),
         exit.delegator_did(),
         &payload,
     )
@@ -1248,7 +1317,7 @@ async fn test_client_backward_payload_decryption_runs_in_shell_handler() {
     let state = protocol.init();
     let circuit_id = OnionCircuitId::new([3; 16]);
     let return_id = OnionReturnId::new([13; 16]);
-    let expected_exit = route(&[], &exit).exit().clone();
+    let expected_exit = route(&session(), &session(), &exit).exit().clone();
     let expected = test_payload("closed");
     let frame = OnionBackwardFrame {
         circuit_id,
@@ -1337,7 +1406,7 @@ fn test_forward_fold_places_each_position_on_its_hop() {
     let first = session();
     let second = session();
     let exit = session();
-    let route = route(&[first.clone(), second.clone()], &exit);
+    let route = route(&first, &second, &exit);
     let first_circuit_id = OnionCircuitId::new([51; 16]);
     let client_return = OnionClientReturn::new(client.delegatee_public_key());
     let (_, payload) = encode_initial_forward(

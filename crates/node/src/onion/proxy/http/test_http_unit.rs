@@ -4,8 +4,6 @@ fn options() -> OnionHttpProxyOptions {
     OnionHttpProxyOptions::new(
         SocketAddr::from(([127, 0, 0, 1], 0)),
         OnionServiceName::tcp(),
-        0,
-        false,
     )
 }
 

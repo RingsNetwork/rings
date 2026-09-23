@@ -34,6 +34,8 @@ use crate::onion::OnionExitPolicy;
 use crate::onion::OnionExitTarget;
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 use crate::onion::OnionServiceName;
+#[cfg(all(feature = "browser", target_family = "wasm"))]
+use crate::online::OnlineNodeCapabilities;
 use crate::online::OnlineNodeDescriptor;
 use crate::online::OnlineNodeType;
 
@@ -83,7 +85,7 @@ pub(crate) fn online_node_descriptor_info(
         network_id: descriptor.network_id,
         storage_redundancy: descriptor.storage_redundancy,
         dht_virtual_nodes: descriptor.dht_virtual_nodes,
-        capabilities: descriptor.capabilities,
+        capabilities: json_value(descriptor.capabilities)?,
         endpoint_hint: descriptor.endpoint_hint,
         started_at_ms: descriptor_timestamp_ms(descriptor.started_at_ms)?,
         heartbeat_at_ms: descriptor_timestamp_ms(descriptor.heartbeat_at_ms)?,
@@ -180,7 +182,7 @@ pub(crate) fn online_node_descriptor_from_info(
         network_id: descriptor.network_id,
         storage_redundancy: descriptor.storage_redundancy,
         dht_virtual_nodes: descriptor.dht_virtual_nodes,
-        capabilities: descriptor.capabilities,
+        capabilities: from_json_value::<OnlineNodeCapabilities>(descriptor.capabilities)?,
         endpoint_hint: descriptor.endpoint_hint,
         started_at_ms: u128::from(descriptor.started_at_ms),
         heartbeat_at_ms: u128::from(descriptor.heartbeat_at_ms),
@@ -210,7 +212,8 @@ pub(crate) fn onion_exit_descriptor_from_info(
     let did = did_from_string(descriptor.did.as_str())?;
     let public_key = from_json_value::<VerificationPublicKey>(descriptor.public_key)?;
     let delegatee_public_key = from_json_value::<PublicKey<33>>(descriptor.delegatee_public_key)?;
-    let process_epoch = from_json_value::<crate::onion::OnionExitEpoch>(descriptor.process_epoch)?;
+    let process_epoch =
+        from_json_value::<crate::onion::OnionProcessEpoch>(descriptor.process_epoch)?;
     let node_type = online_node_type_from_info(descriptor.node_type);
     let policy = onion_exit_policy_from_info(descriptor.policy)?;
     let signature = from_json_value::<MessageVerification>(descriptor.signature)?;

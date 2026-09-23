@@ -18,12 +18,31 @@ pub enum OnionRouteError {
         /// Requested or constructed hop count.
         hop_count: usize,
         /// Maximum hop count accepted by this circuit implementation.
-        max_hops: u8,
+        max_hops: usize,
     },
-    /// Route construction could not select enough relay hops.
-    NotEnoughRelays {
-        /// Requested hop count including the exit.
-        hop_count: usize,
+    /// A pipeline has no symbol application or more than the loop admits (#834 D4a).
+    LoopSymbolsOutOfBounds {
+        /// Number of symbol applications of the pipeline.
+        symbols: usize,
+        /// Largest number of symbol applications of one loop.
+        max_symbols: usize,
+    },
+    /// Fewer distinct eligible hops exist than the loop's `H − 1` positions require (#834 D5).
+    NotEnoughLoopHops {
+        /// Distinct hops the loop requires.
+        required: usize,
+        /// Distinct eligible hops found.
+        eligible: usize,
+    },
+    /// The symbol registrants admit no assignment of pairwise distinct hops to the symbol
+    /// positions of a loop.
+    NoDistinctSymbolHops,
+    /// A route's loop does not have the shape of the route's pipeline.
+    LoopShapeMismatch {
+        /// Symbol applications of the route's pipeline.
+        expected: usize,
+        /// Symbol hops of the loop.
+        actual: usize,
     },
     /// Route construction could not select a first hop accepted by the caller.
     NoPermittedFirstHop,
@@ -138,9 +157,24 @@ impl fmt::Display for OnionRouteError {
                 hop_count,
                 max_hops,
             } => write!(f, "onion route hop count {hop_count} exceeds limit {max_hops}"),
-            Self::NotEnoughRelays { hop_count } => {
-                write!(f, "not enough relay candidates for {hop_count}-hop onion route")
+            Self::LoopSymbolsOutOfBounds {
+                symbols,
+                max_symbols,
+            } => write!(
+                f,
+                "onion pipeline has {symbols} symbol applications; a loop admits 1 to {max_symbols}"
+            ),
+            Self::NotEnoughLoopHops { required, eligible } => write!(
+                f,
+                "onion loop requires {required} distinct hops but only {eligible} are eligible"
+            ),
+            Self::NoDistinctSymbolHops => {
+                f.write_str("onion symbol registrants admit no distinct hop per symbol position")
             }
+            Self::LoopShapeMismatch { expected, actual } => write!(
+                f,
+                "onion loop has {actual} symbol hops but its pipeline has {expected}"
+            ),
             Self::NoPermittedFirstHop => {
                 f.write_str("no onion route has a permitted first hop")
             }

@@ -23,10 +23,12 @@ use super::super::pending::PendingOnionHttpsRequest;
 use super::super::*;
 use crate::onion::circuit::OnionAuthenticatedPayload;
 use crate::onion::circuit::OnionReturnId;
+use crate::onion::loop_shape::OnionLoopRole;
 use crate::onion::proxy::OnionProxyProtocol;
 use crate::onion::proxy::OnionProxyRoute;
 use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitDescriptorBody;
+use crate::onion::OnionLoopShape;
 use crate::onion::OnionRoute;
 use crate::onion::OnionRouteHop;
 use crate::onion::OnionServiceName;
@@ -50,7 +52,7 @@ fn exit_descriptor(session: &DelegateeKey) -> OnionExitDescriptor {
                 .delegator_verification_pubkey()
                 .expect("verification key"),
             delegatee_public_key: session.delegatee_public_key(),
-            process_epoch: crate::onion::OnionExitEpoch::new([23; 16]),
+            process_epoch: crate::onion::OnionProcessEpoch::new([23; 16]),
             node_type: OnlineNodeType::Browser,
             network_id: TEST_NETWORK_ID,
             service: OnionServiceName::https(),
@@ -176,19 +178,28 @@ fn client() -> Arc<OnionHttpsClient> {
     ))
 }
 
-/// One-hop HTTPS route to [`TEST_AUTHORITY`] whose first hop, and so expected return peer, is
-/// `exit` itself.
-fn https_route(exit: &DelegateeKey) -> OnionProxyRoute {
+/// HTTPS route to [`TEST_AUTHORITY`] over the loop `guard, relay, exit, back, guard`; its first
+/// hop, and so expected return peer, is `guard`.
+fn https_route(exit: &DelegateeKey, guard: &DelegateeKey) -> OnionProxyRoute {
     let descriptor = exit_descriptor(exit);
-    let route = OnionRoute::new(
-        OnionServiceName::https(),
-        vec![OnionRouteHop::new(
-            descriptor.did,
-            descriptor.delegatee_public_key,
-        )],
-        descriptor,
-    )
-    .expect("one-hop HTTPS route");
+    let symbol = OnionRouteHop::of_symbol(&descriptor);
+    let hop = |session: &DelegateeKey| {
+        OnionRouteHop::new(
+            session.delegator_did(),
+            session.delegatee_public_key(),
+            symbol.process_epoch,
+        )
+    };
+    let mut interior = [hop(&session()), symbol, hop(&session())].into_iter();
+    let hops = OnionLoopShape::SESSION
+        .try_label(|role| match role {
+            OnionLoopRole::Guard => Ok(hop(guard)),
+            OnionLoopRole::Relay | OnionLoopRole::Symbol(_) => {
+                interior.next().ok_or(Error::InvalidData)
+            }
+        })
+        .expect("HTTPS loop");
+    let route = OnionRoute::new(OnionServiceName::https(), hops, descriptor).expect("HTTPS route");
     OnionProxyRoute {
         protocol: OnionProxyProtocol::HttpsProxy,
         target: OnionProxyTarget::parse_authority(TEST_AUTHORITY).expect("test target"),
@@ -223,14 +234,15 @@ fn ok_response() -> OnionHttpsResponse {
     }
 }
 
-/// Begin one request to `exit` and return its circuit, the return id the exit must sign, and the
-/// response guard.
+/// Begin one request to `exit` through `guard` and return its circuit, the return id the exit must
+/// sign, and the pending response.
 fn begin(
     client: &Arc<OnionHttpsClient>,
     exit: &DelegateeKey,
+    guard: &DelegateeKey,
 ) -> (OnionCircuitId, OnionReturnId, PendingOnionHttpsRequest) {
     let response = client
-        .begin(&https_route(exit), get_root())
+        .begin(&https_route(exit, guard), get_root())
         .expect("begin request")
         .into_response();
     let id = response.circuit_id();
@@ -276,10 +288,11 @@ fn expired_deadline() -> impl Future<Output = Result<()>> {
 fn test_client_request_resolves_with_authenticated_exit_response() -> Result<()> {
     let client = client();
     let exit = session();
-    let (id, return_id, response) = begin(&client, &exit);
+    let guard = session();
+    let (id, return_id, response) = begin(&client, &exit, &guard);
     let reply = exit_payload(return_id, &exit, OnionHttpsPayload::Response(ok_response()));
 
-    resolve_from(&client, exit.delegator_did(), id, reply)?;
+    resolve_from(&client, guard.delegator_did(), id, reply)?;
     assert_eq!(client.pending_len(), 0);
     assert_eq!(poll_decided(response.within(no_deadline()))?, ok_response());
     Ok(())
@@ -289,11 +302,12 @@ fn test_client_request_resolves_with_authenticated_exit_response() -> Result<()>
 fn test_client_request_surfaces_exit_failure() -> Result<()> {
     let client = client();
     let exit = session();
-    let (id, return_id, response) = begin(&client, &exit);
+    let guard = session();
+    let (id, return_id, response) = begin(&client, &exit, &guard);
     let failure = OnionExitFailure::InvalidTarget("denied".to_string());
     let reply = exit_payload(return_id, &exit, OnionHttpsPayload::Error(failure.clone()));
 
-    resolve_from(&client, exit.delegator_did(), id, reply)?;
+    resolve_from(&client, guard.delegator_did(), id, reply)?;
 
     assert!(matches!(
         poll_decided(response.within(no_deadline())),
@@ -305,9 +319,9 @@ fn test_client_request_surfaces_exit_failure() -> Result<()> {
 #[test]
 fn test_client_request_ignores_payload_from_wrong_return_peer() -> Result<()> {
     let client = client();
-    let (id, _, response) = begin(&client, &session());
+    let (id, _, response) = begin(&client, &session(), &session());
 
-    // The request owns (id, exit), not (id, other): no claim is taken and the request waits.
+    // The request owns (id, guard), not (id, other): no claim is taken and the request waits.
     assert!(client.claim(did(), id)?.is_none());
     assert_eq!(client.pending_len(), 1);
     assert!(matches!(
@@ -322,14 +336,15 @@ fn test_client_request_ignores_payload_from_wrong_return_peer() -> Result<()> {
 fn test_client_request_rejects_payload_signed_by_another_exit() -> Result<()> {
     let client = client();
     let exit = session();
-    let (id, return_id, response) = begin(&client, &exit);
+    let guard = session();
+    let (id, return_id, response) = begin(&client, &exit, &guard);
     let forged = exit_payload(
         return_id,
         &session(),
         OnionHttpsPayload::Response(ok_response()),
     );
 
-    resolve_from(&client, exit.delegator_did(), id, forged)?;
+    resolve_from(&client, guard.delegator_did(), id, forged)?;
 
     assert_eq!(client.pending_len(), 0);
     assert!(matches!(
@@ -345,14 +360,15 @@ fn test_client_request_rejects_payload_signed_by_another_exit() -> Result<()> {
 fn test_client_request_rejects_payload_for_another_return_id() -> Result<()> {
     let client = client();
     let exit = session();
-    let (id, _, response) = begin(&client, &exit);
+    let guard = session();
+    let (id, _, response) = begin(&client, &exit, &guard);
     let misdirected = exit_payload(
         OnionReturnId::new([9; 16]),
         &exit,
         OnionHttpsPayload::Response(ok_response()),
     );
 
-    resolve_from(&client, exit.delegator_did(), id, misdirected)?;
+    resolve_from(&client, guard.delegator_did(), id, misdirected)?;
 
     assert!(matches!(
         poll_decided(response.within(no_deadline())),
@@ -368,14 +384,15 @@ fn test_client_request_reports_authenticated_request_as_unexpected_backward_payl
 {
     let client = client();
     let exit = session();
-    let (id, return_id, response) = begin(&client, &exit);
+    let guard = session();
+    let (id, return_id, response) = begin(&client, &exit, &guard);
     let reply = exit_payload(
         return_id,
         &exit,
-        OnionHttpsPayload::Request(get_root().addressed_to(&https_route(&exit).target)),
+        OnionHttpsPayload::Request(get_root().addressed_to(&https_route(&exit, &guard).target)),
     );
 
-    resolve_from(&client, exit.delegator_did(), id, reply)?;
+    resolve_from(&client, guard.delegator_did(), id, reply)?;
 
     assert!(matches!(
         poll_decided(response.within(no_deadline())),
@@ -391,7 +408,8 @@ fn test_client_request_reports_authenticated_request_as_unexpected_backward_payl
 fn test_dropping_waiting_request_cancels_and_releases_its_circuit() {
     let client = client();
     let exit = session();
-    let (id, _, response) = begin(&client, &exit);
+    let guard = session();
+    let (id, _, response) = begin(&client, &exit, &guard);
     let mut waiting = Box::pin(response.within(no_deadline()));
     let mut context = Context::from_waker(futures::task::noop_waker_ref());
 
@@ -401,13 +419,13 @@ fn test_dropping_waiting_request_cancels_and_releases_its_circuit() {
     assert_eq!(client.pending_len(), 0);
 
     // A late reply finds no claim, so it falls through to the next adapter.
-    assert!(matches!(client.claim(exit.delegator_did(), id), Ok(None)));
+    assert!(matches!(client.claim(guard.delegator_did(), id), Ok(None)));
 }
 
 #[test]
 fn test_client_request_times_out_and_releases_its_circuit() {
     let client = client();
-    let (_, _, response) = begin(&client, &session());
+    let (_, _, response) = begin(&client, &session(), &session());
 
     assert!(matches!(
         poll_decided(response.within(expired_deadline())),
@@ -439,11 +457,12 @@ async fn test_native_circuit_handler_delivers_https_circuits_to_the_shared_clien
         MessageSigner::new(local, TEST_NETWORK_ID),
     );
     let exit = session();
-    let (id, return_id, response) = begin(https.client(), &exit);
+    let guard = session();
+    let (id, return_id, response) = begin(https.client(), &exit, &guard);
     let reply = exit_payload(return_id, &exit, OnionHttpsPayload::Response(ok_response()));
 
     handler
-        .handle_client(&scope, exit.delegator_did(), id, reply)
+        .handle_client(&scope, guard.delegator_did(), id, reply)
         .await?;
 
     assert_eq!(https.client().pending_len(), 0);
@@ -471,11 +490,12 @@ async fn test_browser_circuit_handler_delivers_https_circuits_to_the_shared_clie
         MessageSigner::new(local, TEST_NETWORK_ID),
     );
     let exit = session();
-    let (id, return_id, response) = begin(runtime.client(), &exit);
+    let guard = session();
+    let (id, return_id, response) = begin(runtime.client(), &exit, &guard);
     let reply = exit_payload(return_id, &exit, OnionHttpsPayload::Response(ok_response()));
 
     handler
-        .handle_client(&scope, exit.delegator_did(), id, reply)
+        .handle_client(&scope, guard.delegator_did(), id, reply)
         .await
         .expect("browser handler accepts the backward payload");
 

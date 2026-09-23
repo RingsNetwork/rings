@@ -68,10 +68,6 @@ impl OnionLink {
 /// Namespace used by route-aware onion circuit messages.
 pub const ONION_CIRCUIT_NAMESPACE: &str = "onion-circuit";
 
-/// Maximum route length encoded by local clients and maximum relay hop-budget value accepted per
-/// decrypted layer.
-pub const MAX_ONION_CIRCUIT_HOPS: u8 = 8;
-
 pub(super) const MAX_ONION_RELAY_CIRCUITS: usize = 1024;
 pub(super) const ONION_RELAY_RETURN_TTL_MS: u128 = 120_000;
 pub(super) const ONION_FORWARD_PAYLOAD_TTL_MS: u128 = 120_000;
@@ -357,7 +353,7 @@ pub(super) enum OnionForwardLayer {
         inner: AeadCiphertext,
     },
     Exit {
-        process_epoch: super::OnionExitEpoch,
+        process_epoch: super::OnionProcessEpoch,
         client: OnionClientReturn,
         return_delegatee_public_key: PublicKey<33>,
         expires_at_ms: u128,

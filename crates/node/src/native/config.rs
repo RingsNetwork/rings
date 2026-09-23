@@ -93,12 +93,6 @@ pub struct NativeGatewayConfig {
     /// Onion TCP exit service selected for captured flows.
     #[serde(default = "OnionServiceName::tcp")]
     pub onion_service: OnionServiceName,
-    /// Requested onion route hop count; zero selects the node default.
-    #[serde(default)]
-    pub onion_hop_count: usize,
-    /// Permit shorter onion paths when the requested hop count is unavailable.
-    #[serde(default)]
-    pub onion_allow_short_paths: bool,
 }
 
 impl NativeGatewayConfig {
@@ -115,8 +109,6 @@ impl NativeGatewayConfig {
             wintun_dll_path: None,
             status_refresh_secs: default_gateway_status_refresh_secs(),
             onion_service: OnionServiceName::tcp(),
-            onion_hop_count: 0,
-            onion_allow_short_paths: false,
         }
     }
 
@@ -228,12 +220,6 @@ pub struct Config {
     /// Onion service name used by the HTTP CONNECT proxy.
     #[serde(default = "OnionServiceName::tcp")]
     pub onion_http_proxy_service: OnionServiceName,
-    /// Requested hop count for HTTP CONNECT proxy routes.
-    #[serde(default)]
-    pub onion_http_proxy_hop_count: usize,
-    /// Whether the HTTP CONNECT proxy may use shorter routes when needed.
-    #[serde(default)]
-    pub onion_http_proxy_allow_short_paths: bool,
     /// Timeout for reading HTTP CONNECT headers in seconds.
     #[serde(default = "crate::onion::proxy::http::default_connect_header_timeout_secs")]
     pub onion_http_proxy_header_timeout_secs: u64,
@@ -343,8 +329,6 @@ impl Config {
             onion_exit_policy: crate::onion::default_onion_exit_policy(),
             onion_http_proxy_addr: None,
             onion_http_proxy_service: OnionServiceName::tcp(),
-            onion_http_proxy_hop_count: 0,
-            onion_http_proxy_allow_short_paths: false,
             onion_http_proxy_header_timeout_secs:
                 crate::onion::proxy::http::default_connect_header_timeout_secs(),
             onion_http_proxy_max_connections:
@@ -468,8 +452,6 @@ measure_storage:
         assert!(!cfg.advertise_onion_exit);
         assert_eq!(cfg.onion_http_proxy_addr, None);
         assert_eq!(cfg.onion_http_proxy_service, OnionServiceName::tcp());
-        assert_eq!(cfg.onion_http_proxy_hop_count, 0);
-        assert!(!cfg.onion_http_proxy_allow_short_paths);
         assert_eq!(
             cfg.onion_http_proxy_header_timeout_secs,
             crate::onion::proxy::http::default_connect_header_timeout_secs()
@@ -651,8 +633,6 @@ gateway:
                 "wintun_dll_path",
                 "status_refresh_secs",
                 "onion_service",
-                "onion_hop_count",
-                "onion_allow_short_paths",
             ])
         );
     }

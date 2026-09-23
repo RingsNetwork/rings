@@ -10,7 +10,7 @@ pub struct ProcessorBuilder {
     pub(in crate::processor) external_address: Option<String>,
     pub(in crate::processor) webrtc_udp_port_range: Option<WebrtcUdpPortRange>,
     pub(in crate::processor) delegatee_key: DelegateeKey,
-    pub(in crate::processor) onion_exit_epoch: OnionExitEpoch,
+    pub(in crate::processor) onion_process_epoch: OnionProcessEpoch,
     pub(in crate::processor) storage: Option<EntryStorage>,
     pub(in crate::processor) replay_storage: Option<ReplayStorage>,
     pub(in crate::processor) origin_quota: OriginQuotaConfig,
@@ -48,7 +48,7 @@ impl ProcessorBuilder {
             external_address: config.external_address.clone(),
             webrtc_udp_port_range: config.webrtc_udp_port_range()?,
             delegatee_key: config.delegatee_key.clone(),
-            onion_exit_epoch: OnionExitEpoch::random(),
+            onion_process_epoch: OnionProcessEpoch::random(),
             storage: None,
             replay_storage: None,
             origin_quota: config.origin_quota,
@@ -165,10 +165,11 @@ impl ProcessorBuilder {
             .onion_entry_guard_storage
             .unwrap_or_else(|| Box::new(MemStorage::new()));
         let endpoint_hint = self.external_address.clone();
-        let mut online_node_capabilities = Vec::new();
-        if self.advertise_onion_relay {
-            online_node_capabilities.push(ONION_RELAY_CAPABILITY.to_string());
-        }
+        let online_node_capabilities = OnlineNodeCapabilities {
+            onion_relay: self
+                .advertise_onion_relay
+                .then_some(self.onion_process_epoch),
+        };
         let delegatee_key = self.delegatee_key.clone();
         let online_node_registration = OnlineNodeRegistration::new(
             self.online_node_heartbeat_interval,
@@ -188,7 +189,7 @@ impl ProcessorBuilder {
                 self.online_node_type,
                 self.onion_exit_services,
                 self.onion_exit_policy,
-                self.onion_exit_epoch,
+                self.onion_process_epoch,
             );
             registration_tasks.push(Arc::new(onion_exit_registration));
         }
@@ -226,7 +227,7 @@ impl ProcessorBuilder {
         Ok(Processor {
             swarm,
             delegatee_key,
-            onion_exit_epoch: self.onion_exit_epoch,
+            onion_process_epoch: self.onion_process_epoch,
             onion_entry_guards: Arc::new(OnionEntryGuards::new(onion_entry_guard_storage)),
             stabilize_interval: self.stabilize_interval,
             online_node_registration,
