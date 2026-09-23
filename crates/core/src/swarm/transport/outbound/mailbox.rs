@@ -1,142 +1,122 @@
-//! Executor-neutral snapshot mailbox for the outbound actor.
+//! Outbound command ingress using futures channels for ownership and wakeups.
 //!
-//! The sender gate linearizes validation, insertion, snapshots and close. A
-//! snapshot moves the entire FIFO into worker ownership at one gate boundary; new
-//! producers cannot extend it. Transfer permits bound that FIFO to 256 entries.
-//! The sole idempotent notification, `CancelStopped`, occupies one separate
-//! slot. It is moved with the snapshot and dispatched after its submissions.
-//! This is coalescing of one scan command, not a second cancellation flag.
+//! Submissions retain their permits while collected, so the FIFO drain is bounded
+//! by the peer's 256 permits even with concurrent producers. Cancellation has one
+//! channel slot and is read once per drain, preventing repeated scan notifications
+//! from extending that batch. Control transfers stay in the complete FIFO batch;
+//! the transfer queues alone decide frame priority.
 
-use std::collections::VecDeque;
-use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::MutexGuard;
-use std::task::Poll;
 
-use futures::future::poll_fn;
-use futures::task::AtomicWaker;
+use futures::channel::mpsc;
+use futures::future::FutureExt;
+use futures::stream::select;
+use futures::stream::Select;
+use futures::stream::StreamExt;
 
-mod state;
-use state::MailboxState;
-
-/// Shared effect boundary: serialization and executor wakeup only.
-struct Shared<T> {
-    /// Pure ingress state; no callbacks or IO occur in its transitions.
-    state: Mutex<MailboxState<T>>,
-    /// The single actor waiting for a command or closure.
-    wake: AtomicWaker,
-}
-
-impl<T> Shared<T> {
-    /// Recover ownership even after a panicking validation callback.
-    fn lock(&self) -> MutexGuard<'_, MailboxState<T>> {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    /// Close under the same gate as submission, then notify outside the lock.
-    fn close(&self) {
-        self.lock().close();
-        self.wake.wake();
-    }
-}
-
-/// Sole producer handle, shared by reference or Arc by its actor clients.
+/// Producer endpoints share the existing validation/close gate.
 pub(super) struct MailboxSender<T> {
-    /// Shared ownership keeps ingress alive until both endpoints disappear.
-    shared: Arc<Shared<T>>,
+    /// Submission FIFO and sole notification sender. Never clone the bounded
+    /// sender: `channel(0)` has one reserved slot per sender, hence one slot here.
+    sender: Mutex<(mpsc::UnboundedSender<T>, mpsc::Sender<T>)>,
 }
 
-/// Single consumer; batches belong exclusively to this actor after extraction.
+/// Both input sources use the library's stream selection and wakeup machinery.
 pub(super) struct MailboxReceiver<T> {
-    /// The same gate used by submission validation and close.
-    shared: Arc<Shared<T>>,
+    /// Idle selection is fair; active drains collect submissions then one scan.
+    receiver: Select<mpsc::UnboundedReceiver<T>, mpsc::Receiver<T>>,
+    /// A drained submission channel seals ingress; shutdown cancels all owners.
+    closed: bool,
 }
 
-/// Construct the platform-independent command ingress and its single consumer.
+/// Connect the transfer FIFO and a single pending idempotent scan notification.
 pub(super) fn channel<T>() -> (MailboxSender<T>, MailboxReceiver<T>) {
-    let shared = Arc::new(Shared {
-        state: Mutex::new(MailboxState::default()),
-        wake: AtomicWaker::new(),
-    });
+    let (sender, receiver) = mpsc::unbounded();
+    let (notification, notifications) = mpsc::channel(0);
     (
         MailboxSender {
-            shared: Arc::clone(&shared),
+            sender: Mutex::new((sender, notification)),
         },
-        MailboxReceiver { shared },
+        MailboxReceiver {
+            receiver: select(receiver, notifications),
+            closed: false,
+        },
     )
 }
 
 impl<T> MailboxSender<T> {
-    /// Schedule one idempotent scan. Callers must use this only for equivalent
-    /// notifications whose predicate is stored outside the command (stop tokens).
-    /// A scan requested after snapshot extraction occupies the next batch.
+    /// A full slot already promises a scan. Callers set their stop token before
+    /// sending; after receipt frees the slot, a later stop queues a fresh scan.
     pub(super) fn send_coalesced(&self, item: T) -> Result<(), ()> {
-        let result = self.shared.lock().notify(item);
-        self.shared.wake.wake();
-        result.map_err(|_| ())
+        let mut sender = self.sender.lock().map_err(|_| ())?;
+        match sender.1.try_send(item) {
+            Ok(()) => Ok(()),
+            Err(error) if error.is_full() && !sender.1.is_closed() => Ok(()),
+            Err(_) => Err(()),
+        }
     }
 
-    /// Validate and insert under the close gate, returning refused ownership.
+    /// Validate and insert under the original sender gate, returning refused ownership.
     pub(super) fn send_if(&self, item: T, predicate: impl FnOnce(&T) -> bool) -> Result<(), T> {
-        let result = {
-            let mut state = self.shared.lock();
-            if predicate(&item) {
-                state.submit(item)
-            } else {
-                Err(item)
-            }
-        };
-        self.shared.wake.wake();
-        result
+        match self.sender.lock() {
+            Ok(sender) if predicate(&item) => sender
+                .0
+                .unbounded_send(item)
+                .map_err(|error| error.into_inner()),
+            _ => Err(item),
+        }
     }
 
-    /// Prevent new submissions without discarding previously accepted ownership.
+    /// Seal both channels under the submission gate; retain accepted commands.
     pub(super) fn close(&self) {
-        self.shared.close();
-    }
-}
-
-impl<T> Drop for MailboxSender<T> {
-    fn drop(&mut self) {
-        self.close();
+        let mut sender = self
+            .sender
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        sender.0.close_channel();
+        sender.1.close_channel();
     }
 }
 
 impl<T> MailboxReceiver<T> {
-    /// Atomically detach the finite batch, including its pending scan command.
-    /// Production bound: 256 permit-bearing submissions plus one notification.
-    pub(super) fn drain_available(&mut self) -> VecDeque<T> {
-        self.shared.lock().snapshot()
+    /// Collect the permit-bounded FIFO before handling any command. No permit is
+    /// released in this loop, so producers cannot recycle capacity to prolong it.
+    /// Read only one notification even if producers refill its slot immediately.
+    pub(super) fn drain_available(&mut self) -> Vec<T> {
+        let mut drained = Vec::new();
+        let (submissions, notifications) = self.receiver.get_mut();
+        while !self.closed {
+            match submissions.next().now_or_never() {
+                Some(Some(item)) => drained.push(item),
+                Some(None) => self.closed = true,
+                None => break,
+            }
+        }
+        if let Some(Some(notification)) = notifications.next().now_or_never() {
+            drained.push(notification);
+        }
+        drained
     }
 
-    /// Close the same gate used by producers before shutdown drains ownership.
+    /// Reject new ingress before the worker collects its shutdown batch.
     pub(super) fn close(&mut self) {
-        self.shared.close();
+        let (submissions, notifications) = self.receiver.get_mut();
+        submissions.close();
+        notifications.close();
     }
 
-    /// Closure is terminal only after all accepted commands have been extracted.
+    /// Report drained submission closure to the worker's shutdown path.
     pub(super) fn is_closed(&self) -> bool {
-        self.shared.lock().is_terminated()
+        self.closed
     }
 
-    /// Register before inspecting state, preventing a send/close between the
-    /// empty check and registration from losing the actor's wakeup.
+    /// Await either input using the existing futures stream wakeup contract.
     pub(super) async fn next(&mut self) -> Option<T> {
-        poll_fn(|context| {
-            self.shared.wake.register(context.waker());
-            self.shared.lock().poll_next()
-        })
-        .await
-    }
-}
-
-impl<T> Drop for MailboxReceiver<T> {
-    fn drop(&mut self) {
-        self.close();
-        // Release payloads outside the gate: their Drop may wake producers.
-        drop(self.drain_available());
+        let item = self.receiver.next().await;
+        if item.is_none() {
+            self.closed = true;
+        }
+        item
     }
 }
 
@@ -152,7 +132,7 @@ mod tests {
         assert_eq!(sender.send_if(2, |_| false), Err(2));
         sender.send_if(3, |_| true).expect("mailbox open");
 
-        assert_eq!(receiver.drain_available(), VecDeque::from([1, 3]));
+        assert_eq!(receiver.drain_available(), vec![1, 3]);
         assert!(receiver.drain_available().is_empty());
     }
 
@@ -164,7 +144,7 @@ mod tests {
             sender.send_if(index, |_| true).expect("mailbox open");
         }
 
-        assert_eq!(receiver.drain_available(), (0..64).collect::<VecDeque<_>>());
+        assert_eq!(receiver.drain_available(), (0..64).collect::<Vec<_>>());
         assert!(!receiver.is_closed());
         sender.close();
         assert!(receiver.drain_available().is_empty());
@@ -221,7 +201,7 @@ mod tests {
         submitting.join().expect("submission thread must not panic");
         closing.join().expect("close thread must not panic");
 
-        assert_eq!(receiver.drain_available(), VecDeque::from([1]));
+        assert_eq!(receiver.drain_available(), vec![1]);
         assert_eq!(sender.send_if(2, |_| true), Err(2));
     }
 }

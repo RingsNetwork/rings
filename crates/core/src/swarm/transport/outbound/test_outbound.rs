@@ -103,8 +103,7 @@ fn assert_wire_classification(
     assert_eq!(decoded.class(), typed.class());
 }
 
-#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_family = "wasm"), test)]
+#[test]
 fn test_detached_first_frame_success_and_cancellation_are_mutually_exclusive() {
     let cancelled = DetachedAdmission::new();
     let cancelled_stop = cancelled.stop_token();
@@ -172,8 +171,7 @@ fn test_continuous_dht_control_yields_to_lower_classes() {
     ]);
 }
 
-#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_family = "wasm"), test)]
+#[test]
 fn test_completion_probes_do_not_consume_control_frame_burst() {
     let mut queues = TransferQueues::default();
     for item in ["dht-1", "dht-2", "dht-3", "dht-4", "dht-5"] {
@@ -227,8 +225,7 @@ fn test_lower_classes_progress_round_robin() {
     ]);
 }
 
-#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_family = "wasm"), test)]
+#[test]
 fn test_every_transfer_class_uses_its_own_lane() {
     let classes = [
         TransferClass::DhtControl,
@@ -248,8 +245,7 @@ fn test_every_transfer_class_uses_its_own_lane() {
     }
 }
 
-#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_family = "wasm"), test)]
+#[test]
 fn test_lower_cursor_wraps_and_skips_idle_lanes() {
     for (previous, expected) in [
         (TransferClass::Application, TransferClass::Storage),
@@ -280,8 +276,7 @@ fn test_lower_cursor_wraps_and_skips_idle_lanes() {
     );
 }
 
-#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_family = "wasm"), test)]
+#[test]
 fn test_terminal_attempt_advances_the_lower_class_cursor() {
     let mut queues = TransferQueues::default();
     push(&mut queues, TransferClass::Storage, "stale-storage");
@@ -301,8 +296,7 @@ fn test_terminal_attempt_advances_the_lower_class_cursor() {
     assert_eq!(next.item().1, "e2e");
 }
 
-#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_family = "wasm"), test)]
+#[test]
 fn test_cancelled_control_attempts_consume_the_control_burst() {
     let mut queues = TransferQueues::default();
     push(&mut queues, TransferClass::Application, "application");
@@ -348,8 +342,7 @@ fn test_waiting_lane_preserves_same_class_fifo_and_allows_control_preemption() {
     assert_eq!(pop_and_finish(&mut queues), Some("app-2"));
 }
 
-#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_family = "wasm"), test)]
+#[test]
 fn test_draining_a_waiting_lane_returns_its_active_and_queued_transfers() {
     let mut queues = TransferQueues::default();
     push(&mut queues, TransferClass::Application, "app-1");
@@ -398,8 +391,7 @@ fn test_removing_ready_items_preserves_waiting_heads_and_fifo_order() {
     assert_eq!(pop_and_finish(&mut queues), Some("keep"));
 }
 
-#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_family = "wasm"), test)]
+#[test]
 fn test_transfer_capacity_is_strict_across_permit_lifetimes() {
     let global = Arc::new(GlobalTransferCapacity::new());
     let capacity = Arc::new(TransferCapacity::new(global));
@@ -454,8 +446,7 @@ fn test_transfer_capacity_is_strict_across_permit_lifetimes() {
     assert!(capacity.try_acquire(peer, TransferClass::E2e, 1).is_ok());
 }
 
-#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_family = "wasm"), test)]
+#[test]
 fn test_transfer_memory_capacity_is_weighted_and_released() {
     let global = Arc::new(GlobalTransferCapacity::new());
     let capacity = Arc::new(TransferCapacity::new(global));
@@ -502,8 +493,7 @@ fn test_shutdown_closes_channel_without_worker_owned_sender() {
     assert!(matches!(receiver.next().now_or_never(), Some(None)));
 }
 
-#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_family = "wasm"), test)]
+#[test]
 fn test_worker_drop_stops_generation_and_closes_ingress_without_a_normal_run_exit() {
     let peer = Did::from(43_u32);
     let (sender, receiver) = mailbox::channel();
@@ -628,8 +618,7 @@ fn test_active_transfer_drop_releases_capacity_before_implicit_completion() {
     assert_eq!(admitted.load(Ordering::Acquire), 0);
 }
 
-#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_family = "wasm"), test)]
+#[test]
 fn test_final_handle_drop_requests_stop_before_channel_close() {
     let (sender, mut receiver) = mailbox::channel();
     let stop = StopSource::new();
@@ -652,8 +641,7 @@ fn test_final_handle_drop_requests_stop_before_channel_close() {
     assert!(matches!(receiver.next().now_or_never(), Some(None)));
 }
 
-#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_family = "wasm"), test)]
+#[test]
 fn test_message_classification_is_local_and_control_first() {
     let dht = Message::ProbeRequest(crate::message::test_probe_request(1));
     let storage = Message::SyncEntriesWithSuccessor(crate::message::SyncEntriesWithSuccessor {

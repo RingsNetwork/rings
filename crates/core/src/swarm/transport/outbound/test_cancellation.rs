@@ -205,11 +205,11 @@ impl ArcWake for ReleasedBeforeWake {
 }
 
 /// The real submission predicate handles cancel-before-submit on both targets;
-/// shutdown drains a waiting head, queued work, and a detached ingress snapshot
+/// shutdown drains a waiting head, queued work, and a collected ingress batch
 /// before publishing even the first cancelled submission's completion.
 #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_family = "wasm"), tokio::test)]
-async fn stopped_snapshot_releases_all_owners_before_completion() {
+async fn stopped_batch_releases_all_owners_before_completion() {
     let (node, remote) = connected_swarms().await;
     let peer = remote.did();
     let capacity = Arc::new(TransferCapacity::new(Arc::new(

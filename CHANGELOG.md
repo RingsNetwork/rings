@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Bound outbound command ingestion to a permit-bounded snapshot and one coalesced
+- Bound outbound command ingestion to a permit-bounded batch and one coalesced
   cancellation scan. Control submitted behind bulk becomes visible before frame
   selection; shutdown releases the batch's permits before completion publication.
 

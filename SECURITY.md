@@ -450,52 +450,30 @@ not cancel and replace the committed resource defensively.
 
 ### Outbound scheduler ingestion and cancellation
 
-The native and browser outbound actors share `mailbox::state::MailboxState` and
-`TransferQueues`. Each ingress snapshot atomically detaches all submissions plus
-at most one coalesced `CancelStopped` command. Every submission owns a per-peer
-transfer permit across ingress, queued work, and delivery waits: the snapshot
-therefore processes at most 256 submissions and one cancellation scan, including
-concurrent producers. A scan visits at most 256 admitted transfers. Delivery
-observation visits at most four waiting lane heads per iteration. This is a work
-bound, not a wall-clock or mutex-acquisition latency guarantee.
+Native and WASM share the existing futures-channel mailbox and `TransferQueues`.
+A drain retains every collected transfer's permit, so even concurrent producers
+can supply at most 256 submissions before processing starts. A separate one-slot
+futures channel coalesces `CancelStopped`; the worker reads it once per drain.
+The bound is therefore 256 submissions plus one scan of at most 256 admitted
+transfers. The former channel already bounded submissions but not repeated scan
+commands; removing that missing bound does not imply observed starvation.
 
-The previous drain-until-empty channel already bounded permit-bearing submissions
-by 256 while collecting its batch; it did not bound repeated cancellation commands.
-Continuous producers could keep that command drain busy. This was a missing bound,
-not evidence of observed starvation. The snapshot now prevents producers from
-extending a batch, and repeated pending scan requests occupy one command slot.
+Control submitted before the FIFO drain is visible before frame selection; a
+submission racing the final empty read may enter the next iteration. There is no
+fixed cutoff leaving earlier control behind bulk. The existing 4:1 policy and
+lower-lane rotation give each continuously runnable lower class service within
+15 charged admissions/failed attempts. This assumes executor/gate service and
+send/delivery completion, cancellation or timeout; it is not a wall-clock bound.
+FIFO successors still depend on their head, while stopped queued work can be
+cancelled independently of a waiting head.
 
-All control submissions linearized before the snapshot are scheduler-visible before
-the next frame selection, even behind a bulk backlog. Later submissions become
-visible at the next iteration; there is no arbitrary 32-command cutoff. The 4:1
-control burst arbitrates only runnable lane heads after ingestion. Under sustained
-mixed runnable load, every fifth admitted frame (or failed attempt charged by the
-same fairness rule) serves a lower class, rotating storage, E2E, and application.
-Thus each continuously runnable lower class receives service within 15 such steps.
-FIFO successors still depend on their lane head's completion; a waiting head is not
-runnable. Progress requires executor and gate service, finite command work, and
-send/delivery completion or the existing cancellation/timeout boundaries.
-
-Stop tokens are set before requesting the coalesced scan. A scan detached by the
-worker cannot absorb a subsequent notification: that notification belongs to the
-next batch and wakes idle input. The scan never reads or discards mailbox commands.
-Submissions recheck stop state when ingested, covering cancel-before-submit; queued
-successors are cancellable while their lane head waits for delivery. Validation,
-submission, snapshot and close share one gate. Close rejects future ingress and
-retains accepted ownership for shutdown. Shutdown releases active, ready, buffered,
-and delivery-wait owners before publishing its collected completion results.
-
-Common native/browser tests execute the production ingress reducer over all 6^6
-six-action traces with three submission slots, and the production transfer queues
-over 13^6 six-action traces with eight transfer slots. These finite safety checks
-do not prove arbitrary schedules or transport liveness. Common behavior tests
-cover control behind bulk, coalescing across snapshots, all idle wakeup sources,
-4:1 service, cancellation after a scan behind a waiting head, cancel-before-submit,
-and release-before-publication with real transfer permits. Native thread contention
-additionally tests validation versus close; this thread scenario does not apply to
-the browser's single-thread executor. Controlled dummy transport regressions cover
-paused send/delivery paths; browser fixtures use real RTC only for admission and
-then drive the same worker transitions without relying on network timing.
+Stop tokens precede notifications. Receiving a scan frees its slot before the
+scan runs, so a later stop queues another command. Scans never drain ingress.
+Shutdown releases its active, queued, buffered and delivery-wait owners before
+publishing collected completions. Common native/browser regression tests cover
+these boundaries; native-only thread tests cover submission/close contention.
+The existing production queue model explores 13^6 six-action traces with eight
+transfer slots, establishing safety only within that finite scope.
 
 ### Connection Admission
 

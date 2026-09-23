@@ -133,7 +133,7 @@ impl<T, P> Drop for ScheduledTransfer<T, P> {
     }
 }
 
-/// One mailbox command. The worker handles a snapshot of submissions in FIFO order,
+/// One mailbox command. The worker handles a batch of submissions in FIFO order,
 /// through [`OutboundWorker::handle_command`]. Only shutdown bypasses that
 /// dispatcher, after closing ingress and cancelling all admitted transfers.
 enum OutboundCommand {
@@ -535,12 +535,12 @@ impl OutboundWorker {
         }
     }
 
-    /// Detach at most 256 submissions and one coalesced cancellation scan.
-    /// All control submissions in that snapshot are visible before selection;
-    /// concurrent later submissions belong to the next iteration. At most four
+    /// Collect at most 256 submissions and one coalesced cancellation scan.
+    /// All control submissions in that batch are visible before selection;
+    /// submissions racing the empty read may enter the next iteration. At most four
     /// lane heads can have completed deliveries, with no new waits added here.
     fn drain_available(&mut self) {
-        // Hold completion publication until the detached batch has relinquished
+        // Hold completion publication until the collected batch has relinquished
         // every command. Shutdown must also release the active and queued owners.
         let mut final_results = Vec::new();
         for command in self.receiver.drain_available() {
@@ -603,7 +603,7 @@ impl OutboundWorker {
     /// rejected by [`Self::accept_submission`] when the worker's drain reaches
     /// it, or already queued, where this scan finds it: the stop token is set
     /// before the command is sent, and the worker handles the backlog in
-    /// FIFO order before the coalesced scan. A stop after snapshot extraction
+    /// FIFO order before the coalesced scan. A stop after notification receipt
     /// leaves a new `CancelStopped` in ingress, even while this scan runs.
     /// No scan consumes mailbox commands; none can discard a later wakeup.
     fn cancel_stopped_admitted(&mut self) -> Vec<FinalTransferResult> {
