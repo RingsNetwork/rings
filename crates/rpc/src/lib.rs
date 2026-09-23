@@ -11,5 +11,3 @@ pub mod method;
 pub mod prelude;
 /// JSON-RPC request and response DTOs.
 pub mod protos;
-/// Shared RPC transport settings.
-pub mod types;

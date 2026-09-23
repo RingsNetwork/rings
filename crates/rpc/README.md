@@ -10,6 +10,11 @@ Rings RPC
 [![rings-node](https://github.com/RingsNetwork/rings/actions/workflows/auto-release.yml/badge.svg)](https://github.com/RingsNetwork/rings/actions/workflows/auto-release.yml)
 
 
+The former HTTP service-backend DTOs (`rings_rpc::types::{HttpRequest, Timeout}`)
+are removed. The extension registry and relay protocol replaced that backend in
+#596; these DTOs are not used by the JSON-RPC client or current request types in
+`protos`. This is a Rust API removal, not a change to the current JSON-RPC wire format.
+
 ## Authenticated Rust clients
 
 `jsonrpc::Client::new` and `with_bearer_token` return `Result`. Bearer credentials
@@ -521,57 +526,6 @@ curl -X POST \
     "jsonrpc": "2.0",
     "id": 1,
     "result": {}
-}
-```
-
-
-### sendHttpRequestMessage
-
-Send a http request message to remote peer, the remote peer should provide the service you want to use
-
-#### REQUEST
-
-`POST http://127.0.0.1:50000`
-
-#### HEADERS
-
-`Content-Type: application/json`
-`X-SIGNATURE: YOUR-SIGNATURE`
-
-#### EXAMPLE
-
-```
-## Replace YOUR-SIGNATURE with your signature
-## Replace REMOTE-PEER-DID with did of remote peer
-## Replace HTTP-REQUEST-ARG with your request arguments
-curl -X POST \
--H "Content-Type: application/json" \
--H "X-SIGNATURE: YOUR-SIGNATURE" \
---data '{"jsonrpc": "2.0", "id": 1, "method": "sendSimpleTextMessage", "params": ["REMOTE-PEER-DID", {HTTP-REQUEST-ARG}]}' \
-"http://127.0.0.1:50000"
-```
-
-* HTTP-REQUEST-ARG
-  - `name` - service name
-  - `method` - http method
-  - `path` - resource path
-  - `timeout` - timeout of remote request, optional
-  - `headers` - remote request with headers, optional
-  - `body` - request body what you want to send to remote service, optional
-
-#### RESPONSE
-
-* `tx_id` - transaction id
-
-#### EXAMPLE
-
-```json
-{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "result": {
-         "tx_id": "abcd1234"
-    }
 }
 ```
 
