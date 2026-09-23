@@ -338,13 +338,17 @@ candidates; it never adds one.
 
 An onion-exit descriptor signs exactly one canonical service name, its policy,
 node type, network, process epoch, timestamps, and signer material. There is no
-parallel transport enum or descriptor schema number: native exits currently serve
-the advertised names through the TCP exit runtime, including the reserved `https`
-name. A new incompatible descriptor shape is therefore a network-wide release
-cutover, not a value negotiated inside the descriptor. Route construction enters
-through the policy-aware selector only: proxy protocol, target policy, entry guard,
-and direct-exit admission are explicit predicates rather than permissive wrapper
-defaults.
+parallel transport enum or descriptor schema number: the name denotes a symbol of
+the static onion signature `Σ = {relay, tcp, https}`, every name outside `Σ`
+resolves to the byte-stream symbol `tcp`, and an exit registration naming the
+identity symbol `relay` is rejected. An exit evaluates each authenticated
+application through a table indexed by its symbol, so native exits serve every
+advertised name through the TCP exit runtime, and the reserved `https` name first
+as an HTTPS request, otherwise as a TLS byte stream. A new incompatible descriptor
+shape is therefore a network-wide release cutover, not a value negotiated inside the
+descriptor. Route construction enters through the policy-aware selector only: proxy
+protocol, target policy, entry guard, and direct-exit admission are explicit
+predicates rather than permissive wrapper defaults.
 
 TCP and HTTPS exit adapters share one process-local forward-nonce replay witness.
 The authenticated service name still binds the adapter action, but replaying the

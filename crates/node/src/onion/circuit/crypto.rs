@@ -1,3 +1,4 @@
+use std::iter;
 #[cfg(rings_native)]
 use std::sync::atomic::AtomicU64;
 #[cfg(rings_native)]
@@ -40,6 +41,8 @@ use super::ONION_FORWARD_PAYLOAD_TTL_MS;
 use crate::error::Error;
 use crate::error::Result;
 use crate::extension::ext::Scope;
+use crate::onion::pipeline::OnionPipeline;
+use crate::onion::signature::OnionSymbolRole;
 use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitEpoch;
 use crate::onion::OnionRoute;
@@ -74,15 +77,15 @@ pub(crate) fn encode_initial_forward_link(
     circuit_id: OnionCircuitId,
     payload: OnionCircuitPayload,
 ) -> Result<(OnionLink, Bytes)> {
-    validate_route_payload_service(route, &payload)?;
+    let pipeline = route.pipeline(payload)?;
     let first = route_first_link(route)?;
     let layer = build_forward_layers(
         client,
+        &pipeline,
         route.encryption_hops(),
         route.exit().process_epoch,
         circuit_id,
         OnionForwardSequence::FIRST,
-        payload,
     )?;
     let frame = OnionForwardFrame { circuit_id, layer };
     seal_message(&OnionWireMessage::Forward(frame), first.recipient, None)
@@ -122,7 +125,7 @@ impl OnionCircuitPath {
         client: OnionClientReturn,
         payload: OnionCircuitPayload,
     ) -> Result<(OnionLink, Bytes)> {
-        validate_route_payload_service(&self.route, &payload)?;
+        let pipeline = self.route.pipeline(payload)?;
         let sequence = self
             .next_forward_sequence
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
@@ -133,11 +136,11 @@ impl OnionCircuitPath {
         let first = route_first_link(&self.route)?;
         let layer = build_forward_layers_with_ids(
             client,
+            &pipeline,
             self.route.encryption_hops(),
             self.route.exit().process_epoch,
             self.edge_circuit_ids.as_slice(),
             sequence,
-            payload,
         )?;
         let frame = OnionForwardFrame {
             circuit_id: self.first_circuit_id,
@@ -203,36 +206,61 @@ pub async fn send_backward(
         .await
 }
 
+/// Seal `pipeline` over freshly allocated edge ids starting at `first_circuit_id`.
 fn build_forward_layers(
     client: OnionClientReturn,
+    pipeline: &OnionPipeline,
     hops: &[OnionRouteHop],
     process_epoch: OnionExitEpoch,
     first_circuit_id: OnionCircuitId,
     sequence: OnionForwardSequence,
-    payload: OnionCircuitPayload,
 ) -> Result<AeadCiphertext> {
     let circuit_ids = edge_circuit_ids(hops.len(), first_circuit_id)?;
     build_forward_layers_with_ids(
         client,
+        pipeline,
         hops,
         process_epoch,
         circuit_ids.as_slice(),
         sequence,
-        payload,
     )
 }
 
+/// One pipeline position bound to its hop: the node, its inbound edge id, and the key it answers
+/// backward to.
+#[derive(Clone, Copy)]
+struct OnionForwardPosition {
+    /// Node evaluating this position.
+    hop: OnionRouteHop,
+    /// Edge-local circuit id of the edge into `hop`.
+    circuit_id: OnionCircuitId,
+    /// Delegatee key of the previous hop, or of the client at position zero.
+    return_delegatee_public_key: PublicKey<33>,
+}
+
+/// Seal `pipeline` over `hops` as nested forward layers, one layer per position.
+///
+/// A right fold over the positions `pᵢ = (hopᵢ, idᵢ, backᵢ)` zipped with the applications
+/// `(fᵢ, āᵢ)` of `pipeline`, where `back₀` is the client key and `backᵢ = hopᵢ₋₁.key`:
+///
+/// ```text
+/// layer = foldr step base (zip [p₀ … pₙ₋₂] [(f₀, ā₀) … (fₙ₋₂, āₙ₋₂)])
+///
+///   base                       = seal(hopₙ₋₁, idₙ₋₁, Exit { backₙ₋₁, (fₙ₋₁, āₙ₋₁), … })
+///   step (pᵢ, relay) (inner, q) = (seal(hopᵢ, idᵢ, Relay { q.hop, q.id, backᵢ, inner }), pᵢ)
+///   step (pᵢ, f)     _          = ⊥   f world-facing but not last
+/// ```
+///
+/// The world-facing layer is sealed first and each relay wraps its successor's layer, so the
+/// result is addressed to `hop₀`. Each layer plaintext is one pinned `OnionForwardLayer` shape.
 fn build_forward_layers_with_ids(
     client: OnionClientReturn,
+    pipeline: &OnionPipeline,
     hops: &[OnionRouteHop],
     process_epoch: OnionExitEpoch,
     circuit_ids: &[OnionCircuitId],
     sequence: OnionForwardSequence,
-    payload: OnionCircuitPayload,
 ) -> Result<AeadCiphertext> {
-    let Some(exit) = hops.last().copied() else {
-        return Err(Error::OnionRouteError(OnionRouteError::RouteHasNoHops));
-    };
     if hops.len() != circuit_ids.len() {
         return Err(Error::OnionRouteError(
             OnionRouteError::CircuitPathLengthMismatch {
@@ -241,62 +269,76 @@ fn build_forward_layers_with_ids(
             },
         ));
     }
-    let expires_at_ms = quantized_forward_expiry(get_epoch_ms());
-    let exit_circuit_id = *circuit_ids
-        .last()
-        .ok_or_else(|| Error::OnionRouteError(OnionRouteError::RouteHasNoHops))?;
-    let exit_return_delegatee_public_key = hops
+    if pipeline.applications().len() != hops.len() {
+        return Err(Error::OnionRouteError(
+            OnionRouteError::PipelineLengthMismatch {
+                hop_count: hops.len(),
+                application_count: pipeline.applications().len(),
+            },
+        ));
+    }
+    let (relay_applications, world_facing) = pipeline.closed()?;
+    let return_keys = iter::once(client.delegatee_public_key)
+        .chain(hops.iter().map(|hop| hop.delegatee_public_key));
+    let positions = hops
         .iter()
-        .rev()
-        .nth(1)
-        .map_or(client.delegatee_public_key, |hop| hop.delegatee_public_key);
-    let mut layer = encrypt_forward_layer(
-        exit_circuit_id,
+        .copied()
+        .zip(circuit_ids.iter().copied())
+        .zip(return_keys)
+        .map(
+            |((hop, circuit_id), return_delegatee_public_key)| OnionForwardPosition {
+                hop,
+                circuit_id,
+                return_delegatee_public_key,
+            },
+        )
+        .collect::<Vec<_>>();
+    let Some((exit, relays)) = positions.split_last() else {
+        return Err(Error::OnionRouteError(OnionRouteError::RouteHasNoHops));
+    };
+    let base = encrypt_forward_layer(
+        exit.circuit_id,
         OnionForwardLayer::Exit {
             process_epoch,
             client,
-            return_delegatee_public_key: exit_return_delegatee_public_key,
-            expires_at_ms,
+            return_delegatee_public_key: exit.return_delegatee_public_key,
+            expires_at_ms: quantized_forward_expiry(get_epoch_ms()),
             forward_nonce: OnionForwardNonce::random(),
             forward_sequence: sequence,
-            payload,
+            payload: OnionCircuitPayload::new(
+                world_facing.symbol().clone(),
+                world_facing.args().clone(),
+            ),
         },
-        exit.delegatee_public_key,
+        exit.hop.delegatee_public_key,
     )?;
-
-    for (index, hop) in hops.iter().copied().enumerate().rev().skip(1) {
-        let next_index = index.saturating_add(1);
-        let next_hop = hops
-            .get(next_index)
-            .copied()
-            .ok_or_else(|| Error::OnionRouteError(OnionRouteError::MissingNextHop))?;
-        let current_circuit_id = circuit_ids
-            .get(index)
-            .copied()
-            .ok_or_else(|| Error::OnionRouteError(OnionRouteError::MissingNextHop))?;
-        let next_circuit_id = circuit_ids
-            .get(next_index)
-            .copied()
-            .ok_or_else(|| Error::OnionRouteError(OnionRouteError::MissingNextHop))?;
-        layer = encrypt_forward_layer(
-            current_circuit_id,
-            OnionForwardLayer::Relay {
-                next_hop: next_hop.did,
-                next_circuit_id,
-                next_delegatee_public_key: next_hop.delegatee_public_key,
-                return_delegatee_public_key: if index == 0 {
-                    client.delegatee_public_key
-                } else {
-                    hops.get(index.saturating_sub(1))
-                        .map(|previous| previous.delegatee_public_key)
-                        .ok_or_else(|| Error::OnionRouteError(OnionRouteError::MissingNextHop))?
-                },
-                inner: layer,
+    relays
+        .iter()
+        .zip(relay_applications)
+        .rev()
+        .try_fold(
+            (base, exit),
+            |(inner, next), (position, application)| match application.spec().role() {
+                OnionSymbolRole::Identity => encrypt_forward_layer(
+                    position.circuit_id,
+                    OnionForwardLayer::Relay {
+                        next_hop: next.hop.did,
+                        next_circuit_id: next.circuit_id,
+                        next_delegatee_public_key: next.hop.delegatee_public_key,
+                        return_delegatee_public_key: position.return_delegatee_public_key,
+                        inner,
+                    },
+                    position.hop.delegatee_public_key,
+                )
+                .map(|layer| (layer, position)),
+                OnionSymbolRole::WorldFacing => Err(Error::OnionRouteError(
+                    OnionRouteError::WorldFacingSymbolNotLast {
+                        symbol: application.symbol().as_str().to_string(),
+                    },
+                )),
             },
-            hop.delegatee_public_key,
-        )?;
-    }
-    Ok(layer)
+        )
+        .map(|(layer, _)| layer)
 }
 
 /// Quantize authenticated expiry to a coarse wall-clock boundary.
@@ -580,16 +622,4 @@ fn backward_payload_authentication_data(
 struct OnionAeadDirectionContext {
     namespace: &'static str,
     direction: OnionAeadDirection,
-}
-
-fn validate_route_payload_service(route: &OnionRoute, payload: &OnionCircuitPayload) -> Result<()> {
-    if !payload.is_service(route.service_name()) {
-        return Err(Error::OnionRouteError(
-            OnionRouteError::PayloadServiceMismatch {
-                payload_service: payload.service().to_string(),
-                route_service: route.service().to_string(),
-            },
-        ));
-    }
-    Ok(())
 }

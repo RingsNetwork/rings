@@ -4,6 +4,12 @@
 //! public keys. Each relay decrypts exactly one ElGamal-AEAD layer and learns only the immediate
 //! next hop plus an opaque inner layer. Backward frames carry a client-encrypted AEAD payload and
 //! relays forward them with local return state.
+//!
+//! Term structure: the layers seal a closed pipeline `relay^k ⋙ (s, ā)` (see
+//! [`crate::onion::pipeline`]), one application per hop, built as a right fold from the
+//! world-facing application outward. A hop's layer names only its own symbol: `Relay` layers apply
+//! `relay = id` inside the pure reducer, and the `Exit` layer applies the world-facing symbol `s`
+//! through the node's [`OnionAlgebra`].
 
 mod cell;
 mod codec;
@@ -37,10 +43,14 @@ use rings_core::message::MessageVerification;
 pub(crate) use send_outbox::OnionLinkSender;
 use serde::Deserialize;
 use serde::Serialize;
+pub use shell::OnionAlgebra;
 pub use shell::OnionCircuitExitFrame;
 pub use shell::OnionCircuitHandler;
 pub use shell::OnionCircuitShell;
+pub use shell::OnionInterpretation;
 
+use super::signature::OnionSymbolSpec;
+use super::signature::ONION_SIGNATURE;
 use super::OnionServiceName;
 use crate::error::Result;
 
@@ -334,6 +344,10 @@ impl OnionBackwardPath {
     }
 }
 
+/// One decrypted forward layer: the application a hop evaluates, in today's wire shape.
+///
+/// Variant order is wire data (pinned by the golden tests): `Relay` carries `relay = id` and
+/// `Exit` carries one world-facing application `(payload.service, payload.body)`.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub(super) enum OnionForwardLayer {
     Relay {
@@ -352,4 +366,17 @@ pub(super) enum OnionForwardLayer {
         forward_sequence: OnionForwardSequence,
         payload: OnionCircuitPayload,
     },
+}
+
+impl OnionForwardLayer {
+    /// Return the symbol of `Σ` this layer applies at its hop.
+    ///
+    /// `Relay ↦ relay` and `Exit ↦ spec(payload.service)`; an exit layer naming the identity symbol
+    /// is ill-typed and is rejected by the reducer.
+    pub(super) fn symbol(&self) -> &'static OnionSymbolSpec {
+        match self {
+            Self::Relay { .. } => ONION_SIGNATURE.relay(),
+            Self::Exit { payload, .. } => ONION_SIGNATURE.spec(payload.service_name()),
+        }
+    }
 }

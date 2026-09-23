@@ -13,16 +13,17 @@ use crate::onion::OnionExitDescriptor;
 pub use crate::onion::OnionProxyTarget;
 use crate::onion::OnionRoute;
 use crate::onion::OnionServiceName;
+use crate::onion::ONION_SIGNATURE;
 use crate::online::OnlineNodeType;
 
 #[cfg(rings_native)]
 pub mod http;
 
-/// Exit service used by native HTTP CONNECT/SOCKS-style byte tunnels.
-pub const ONION_PROXY_TCP_SERVICE: &str = "tcp";
+/// Exit service used by native HTTP CONNECT/SOCKS-style byte tunnels: the `tcp` symbol.
+pub const ONION_PROXY_TCP_SERVICE: &str = ONION_SIGNATURE.tcp().name();
 
-/// Exit service used by HTTPS proxying over a TCP-backed onion exit.
-pub const ONION_PROXY_HTTPS_SERVICE: &str = "https";
+/// Exit service used by HTTPS proxying over a TCP-backed onion exit: the `https` symbol.
+pub const ONION_PROXY_HTTPS_SERVICE: &str = ONION_SIGNATURE.https().name();
 
 /// Proxy protocol requested by the client ingress.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -406,6 +406,20 @@ fn test_native_tcp_exit_config_rejects_empty_services() {
     .is_ok());
 }
 
+/// `relay` is the identity symbol, registered as a relay capability and never as an exit service.
+#[test]
+fn test_native_tcp_exit_config_rejects_the_identity_symbol() {
+    assert!(matches!(
+        NativeOnionTcpExitConfig::new(
+            vec![OnionServiceName::parse("relay").expect("valid service")],
+            OnionExitPolicy::default()
+        ),
+        Err(Error::OnionRouteError(
+            OnionRouteError::NotWorldFacingSymbol { .. }
+        ))
+    ));
+}
+
 #[test]
 fn test_native_https_proxy_requires_explicit_valid_exit_configuration() -> Result<()> {
     let configured =

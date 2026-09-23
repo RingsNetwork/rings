@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -31,6 +32,8 @@ use crate::error::Result;
 use crate::extension::ext::EffectScope;
 use crate::extension::ext::Interpret;
 use crate::extension::ext::Scope;
+use crate::onion::signature::OnionSymbolSpec;
+use crate::onion::signature::ONION_SIGNATURE;
 
 /// Interpreter for route-aware circuit effects.
 pub struct OnionCircuitShell<H> {
@@ -229,7 +232,8 @@ where H: OnionCircuitHandler + MaybeSendSync + 'static
                 let handler = Arc::clone(&self.handler);
                 spawner.spawn(async move {
                     let result = handler
-                        .handle_exit(&lifecycle, OnionCircuitExitFrame {
+                        .algebra()
+                        .evaluate(&lifecycle, OnionCircuitExitFrame {
                             from,
                             circuit_id,
                             return_peer,
@@ -284,12 +288,67 @@ pub struct OnionCircuitExitFrame {
     pub payload: OnionCircuitPayload,
 }
 
+/// Interpretation `⟦f⟧` of one world-facing symbol `f` at an exit.
+#[cfg_attr(rings_browser, async_trait::async_trait(?Send))]
+#[cfg_attr(rings_native, async_trait::async_trait)]
+pub trait OnionInterpretation: MaybeSendSync {
+    /// Evaluate the application carried by `frame`, whose symbol resolves to `f`.
+    async fn evaluate(&self, scope: &Scope, frame: OnionCircuitExitFrame) -> Result<()>;
+}
+
+/// The partial Σ-algebra of one node: `⟦−⟧ : Σ_W ⇀ End(M)` over the world-facing symbols.
+///
+/// A node registers symbols, never applications (#834 D2): each entry maps one symbol of
+/// [`ONION_SIGNATURE`] to its interpretation, and evaluation resolves the frame's symbol with
+/// the total `spec` of the signature before one table lookup.
+///
+/// ```text
+/// frame ──spec(payload.service)──▶ f ──table(f)──▶ Some ⟦f⟧ ──▶ ⟦f⟧(scope, frame)
+///                                            └──▶ None      ──▶ dropped (f not registered here)
+/// ```
+///
+/// Laws: `relay = id` is interpreted by the pure reducer, which never emits an exit effect for an
+/// identity symbol, so an entry for `relay` would be unreachable; registering a symbol again
+/// replaces its interpretation.
+#[derive(Default)]
+pub struct OnionAlgebra {
+    interpretations: BTreeMap<&'static str, Box<dyn OnionInterpretation>>,
+}
+
+impl OnionAlgebra {
+    /// Register `interpretation` as `⟦symbol⟧`.
+    pub fn register(
+        mut self,
+        symbol: &'static OnionSymbolSpec,
+        interpretation: impl OnionInterpretation + 'static,
+    ) -> Self {
+        self.interpretations
+            .insert(symbol.name(), Box::new(interpretation));
+        self
+    }
+
+    /// Evaluate one exit frame through the interpretation of its symbol.
+    pub async fn evaluate(&self, scope: &Scope, frame: OnionCircuitExitFrame) -> Result<()> {
+        let symbol = ONION_SIGNATURE.spec(frame.payload.service_name());
+        match self.interpretations.get(symbol.name()) {
+            Some(interpretation) => interpretation.evaluate(scope, frame).await,
+            None => {
+                tracing::debug!(
+                    symbol = symbol.name(),
+                    "drop onion exit frame for an unregistered symbol"
+                );
+                Ok(())
+            }
+        }
+    }
+}
+
 /// Runtime-specific circuit handling.
 #[cfg_attr(rings_browser, async_trait::async_trait(?Send))]
 #[cfg_attr(rings_native, async_trait::async_trait)]
 pub trait OnionCircuitHandler {
-    /// Handle a frame that reached this node as the exit.
-    async fn handle_exit(&self, scope: &Scope, frame: OnionCircuitExitFrame) -> Result<()>;
+    /// Return the Σ-algebra evaluating frames that reached this node as the exit.
+    fn algebra(&self) -> &OnionAlgebra;
 
     /// Handle a frame that reached this node as the client.
     async fn handle_client(
