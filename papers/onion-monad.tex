@@ -131,8 +131,9 @@ the exact output width in bytes, $L(f)$ the exact latency class,
 $\pos(f)\subseteq\{\Int,\WF\}$, and $\quota(f)$ the admission budget.
 $W,L$ are protocol data.  The identity symbol is
 \[
-\relay:X\to X,\qquad W(\relay)=|X|,\qquad L(\relay)=0 .
+\relay:X\to X,\qquad L(\relay)=0 ;
 \]
+$\relay$ has no $W$: it preserves the slot width $C$ (L3).
 \end{defD}
 
 \begin{defD}{D2}{registration}
@@ -142,9 +143,11 @@ for each $f\in\Sigma_n$, a generic effect~\cite{Plotkin2003}
 \sem{f}_n:\Args_f\times\In_f\to M\,\Out_f ,
 \]
 $M$ the hop effect monad (failure, delay, world I/O).  $n$ publishes
-$f\in\Sigma_n$, never an application.  $\relay$ is published in
-\code{OnlineNodeDescriptor::capabilities}; every other $f$ in one signed
-descriptor per symbol carrying $n$'s invocation epoch and $\quota(f)$.
+$f\in\Sigma_n$, never an application.  Every published symbol,
+$\relay$ included, carries $n$'s process epoch $e_n$, drawn afresh at each
+process start: $\relay$ in \code{OnlineNodeDescriptor::capabilities}
+extended with $e_n$, every other $f$ in one signed descriptor per symbol
+with $e_n$ and $\quota(f)$.
 Registration is upward closed: $\Sigma_n\ne\emptyset\Rightarrow\relay\in
 \Sigma_n$, so a neighbour's registry entry does not reveal whether a relay
 is adjacent to a symbol hop.
@@ -295,11 +298,14 @@ expiry $x$ per loop (a multiple of $Q=30$\,s), replay nonce
 $\nu_i$, carry keys $\kappa_i=(k^{\mathrm{in}}_i;k^{\mathrm{out}}_{i,1..s+1})$,
 and the next hop's MAC $\gamma_{i+1}$ and key transport $\alpha_{i+1}$
 (Def.~\ref{def:header}).  A relay has $\bar a_i=()$ and random
-$k^{\mathrm{out}}$.  The cell on every edge is
+$k^{\mathrm{out}}$.  Each loop has one class $b\in\mathfrak B$, today's
+cell buckets above 4\,KiB ($16$\,KiB to $12$\,MiB), chosen by $\cl$; the
+cell on every edge of the loop, SURB replies included, is
 \[
-(\chi_{i+1},y_i),\qquad \chi=(\alpha,\beta,\gamma),\qquad
-|\beta|=\Hm\ell,\qquad |y_i|=C .
+(\chi_{i+1},y_i),\quad \chi=(\alpha,\beta,\gamma),\quad
+|\beta|=\Hm\ell,\quad |y_i|=C_b ,
 \]
+padded to $b$, with $C_b=b-|\chi|-F$.
 \end{defD}
 
 With today's encodings (239-byte ElGamal-AEAD envelope as $\alpha$, 43-byte
@@ -332,7 +338,8 @@ single group element, roughly halving $\ell$); L5$'$ holds for both.
 
 \begin{proposition}[Header correctness]\label{prop:header}
 For $H\le\Hm$ and $1\le i<H$, peeling $\beta_i$ under $K_i$ yields
-$(\lambda_i,\beta_{i+1})$, and every $\gamma_i$ verifies.
+$(\lambda_i,\beta_{i+1})$, peeling $\beta_H$ yields $\lambda_H$, and every
+$\gamma_i$ verifies.
 \end{proposition}
 \begin{proof}
 By induction down from $H$, the last $i-1$ blocks of $\beta_i$ are
@@ -344,10 +351,12 @@ hence of $\beta_{i+1}$.
 \end{proof}
 
 \begin{lawL}{L3}{width}
-The carry slot has width $C$ on every edge.  With plaintext width
-$C_0=C-\tau$, $W(f)<C_0$ for all $f\in\Sigma$, $W$ factors through the
-output type ($W(f)=w(\Out_f)$, so the width a consumer unpads is fixed by
-its own $\In$), and
+The carry slot has width $C=C_b$ on every edge of a loop of class $b$.
+With $C_0=C-\tau$, the client picks the least $b$ with $W(f_k)<C_0$ for
+all $k$.  $W$ factors through the output type ($W(f)=w(\Out_f)$, so the
+width a consumer unpads is fixed by its own $\In$); a $\WF$ stream symbol
+(\code{tcp}, \code{https}) has $\In=\Out=\mathrm{Bytes}_{<C_0}$, one chunk
+per loop or reply, and larger bodies span several loops.  Further,
 \[
 \pad(b)=b\,\|\,\mathtt{80}\,\|\,\mathtt{00}^{C_0-|b|-1},\qquad
 |\enc_f(w)|=W(f);
@@ -382,7 +391,8 @@ y_{k,0}=\Enc{0}{k_{r_{k,1}}}\circ\cdots\circ\Enc{0}{k_{r_{k,s}}}
 y_{k,j}=\Dec{0}{k_{r_{k,j}}}(y_{k,j-1}),\qquad
 b_k=\Dec{\tau}{k_{c_k}}(y_{k,s}).
 \end{gather*}
-A consumer with $\In_f=()$ ignores the slot.
+A value of type $()$ is encoded as $\epsilon$, so every consumer
+authenticates $\pad(\epsilon)$ and processing is uniform.
 \end{defD}
 
 Since $s$ is constant, $|\kappa_i|$ is constant and reveals no position.
@@ -393,10 +403,17 @@ doubling is branch-free.  $C\ge32$ keeps every call on the AEZ-core
 path, never AEZ-tiny.
 
 \begin{proposition}[One value per key]\label{prop:onekey}
-Under L9 every $k_{r_{k,j}}$ and $k_{c_k}$ enciphers exactly one $C$-byte
-value.  Without L9 a relay replaying one cell with modified carry becomes
-a chosen-ciphertext oracle under a fixed key: L9 is load-bearing for AEZ.
+Under L9 every $k_{r_{k,j}}$ and $k_{c_k}$ is applied to exactly one
+$C$-byte value: enciphered once by $p_k$, deciphered once by its holder.
 \end{proposition}
+\begin{proof}
+Keys are fresh per layer (D7).  $p_k$ enciphers its single output once
+under each key of $\kappa^{\mathrm{out}}_{p_k}$.  The holder of $k$
+deciphers only a cell whose layer names $k$, and L9 admits that layer
+once, across restarts by the process epoch.  Without L9 a replayed cell
+with a modified carry makes the holder a chosen-ciphertext oracle under a
+fixed key: L9 is load-bearing for AEZ.
+\end{proof}
 
 \begin{algorithm}[t]
 \caption{$\mathrm{Hop}_i(\frm,\chi,y,\arr)$: one position, all symbols}
@@ -412,6 +429,11 @@ a chosen-ciphertext oracle under a fixed key: L9 is load-bearing for AEZ.
 \Else
   \State $b\gets\Dec{\tau}{k^{\mathrm{in}}}(y)$;\ \textbf{if} $b=\bot$
     \textbf{then} drop \Comment{L8}
+  \If{$f$ is a $\WF$ session symbol}
+    \State $Q_h\gets Q_h\cup\{(\nxt,\chi',\kappa^{\mathrm{out}},x)\}$
+      \Comment{D8}
+    \State write $\pad^{-1}(b)$ to the world;\ \Return
+  \EndIf
   \State $w\gets\sem{f}(\bar a,\enc^{-1}\pad^{-1}(b))$ by $\arr+L(f)$
     \Comment{L4}
   \If{late $\vee\ |\enc_f(w)|>W(f)$} \State drop \Comment{L3} \EndIf
@@ -422,6 +444,35 @@ a chosen-ciphertext oracle under a fixed key: L9 is load-bearing for AEZ.
 \State release $(\chi',y')$ to $\nxt$ at $\arr+L(f)$
 \end{algorithmic}
 \end{algorithm}
+
+\begin{algorithm}[t]
+\caption{$\mathrm{Reply}_h(t)$: world bytes ready at session hop $h$}
+\label{alg:reply}
+\begin{algorithmic}[1]
+\State $Q_h\gets\{\upsilon\in Q_h: t<x_\upsilon\}$ \Comment{expired SURBs
+  discarded}
+\If{$Q_h=\emptyset$} \State pause reading;\ \Return
+  \Comment{Inv.~\ref{inv:credit}}
+\EndIf
+\State take $\upsilon=(\nxt,\chi,k_1..k_{s+1},x)\in Q_h$ of least $x$
+\State $w\gets$ at most $C_0-1$ world bytes
+\State $y'\gets\Enc{0}{k_1}\circ\cdots\circ\Enc{0}{k_s}\circ
+  \Enc{\tau}{k_{s+1}}(\pad(w))$
+\State release $(\chi,y')$ to $\nxt$
+\end{algorithmic}
+\end{algorithm}
+
+\begin{definition}[Client position]\label{def:client}
+$\cl$ is position $H+1$.  $\lambda_H$ carries, in place of
+$\alpha_{H+1}$, a fresh tag $t_\cl\in\{0,1\}^{128}$; the guard sends
+$(\chi_{H+1},y_H)$ with $\chi_{H+1}=(t_\cl,\beta_{H+1},\gamma_{H+1})$.
+$\cl$ keeps $T:t_\cl\mapsto(k_{c_n},\text{loop})$, removes the entry on
+first use, and drops a cell with an unknown tag.  Every SURB suffix ends
+in its own tag.
+\end{definition}
+
+$t_\cl$ is uniform and seen only by $g$ at position $H$ and by $\cl$, so it
+links nothing the guard cannot already link by timing.
 
 \section{Reply Blocks}\label{sec:surb}
 
@@ -441,7 +492,8 @@ A carried SURB forces $C>\Hm\ell$ on every edge.
 \end{proposition}
 \begin{proof}
 L5$'$ fixes $|\chi_\upsilon|=|\chi|>|\beta|=\Hm\ell$ (a shorter reply
-header would name the reply path), and L3 fixes one $C$ for all edges.
+header would name the reply path), and L3 fixes one $C$ for every edge of a loop and its
+replies.
 \end{proof}
 
 At $s=2$ that would at least double every cell ($9086$\,B of $\beta$ in
@@ -475,7 +527,7 @@ no hop other than $g$ observes the client's departure time.
 Over client coins $\rho$ (keys, nonces, header randomness) and delays
 $\delta$,
 \begin{multline*}
-\view_i=(f_i,\bar a_i,v_{i-1},\frm_i,\nxt_i,e_i,x_i,\\
+\view_i=(f_i,\bar a_i,v_{i-1},\frm_i,\nxt_i,e_i,x,b,\\
 \mathit{bucket},\arr_i,\dep_i,\chi_i,y_{i-1},\chi_{i+1},y_i),
 \end{multline*}
 with $v_{i-1}=\bot$ when $f_i=\relay$ (a relay consumes no value).
@@ -484,7 +536,7 @@ with $v_{i-1}=\bot$ when $f_i=\relay$ (a relay consumes no value).
 \begin{lawL}{L5}{noninterference}
 For loops $P,P'$ let
 \begin{gather*}
-\pi_i(P)=(f_i,\bar a_i,v_{i-1},\frm_i,\nxt_i,e_i,x),\\
+\pi_i(P)=(f_i,\bar a_i,v_{i-1},\frm_i,\nxt_i,e_i,x,b),\\
 \sigma(P)=f_1\cdots f_H,\\
 \pi_i(P)=\pi_i(P')\ \wedge\ \sigma(P)=\sigma(P')\\
 \Rightarrow\ \view_i(P)\eqd\view_i(P') .
@@ -516,11 +568,13 @@ about length or position; L5$'$ does.
 For loops $P,P'$ with $H(P),H(P')\le\Hm$ and positions $i$ of $P$, $i'$
 of $P'$,
 \begin{gather*}
-\pi^{\circ}_i(P)=(f_i,\bar a_i,v_{i-1},\frm_i,\nxt_i),\\
+\pi^{\circ}_i(P)=(f_i,\bar a_i,v_{i-1},\frm_i,\nxt_i,b),\\
 \pi^{\circ}_i(P)=\pi^{\circ}_{i'}(P')\ \Rightarrow\
 \view_i(P)\eqc\view_{i'}(P') .
 \end{gather*}
-No hop learns its position, $H$, or the symbols elsewhere in the loop.
+No hop learns its position, $H$, or the symbols elsewhere in the loop,
+except the guard: $\frm=\cl$ or $\nxt=\cl$ names position $1$ or $H$, and
+$\pi^{\circ}$ records it.
 \end{lawL}
 
 \begin{proposition}[L5$'$ from Def.~\ref{def:header}]\label{prop:pos}
@@ -633,6 +687,8 @@ a $\WF$ hop knows it faces the world & no other hop learns whether symbols follo
 $g$ sees departure and return & round-trip $\sum_e d_e+\sum_i L(f_i)$: an estimate of $H$ and of $\sum_i L(f_i)$; normalising it is a separate issue \\
 latency class & L4 quantises timing; cannot remove it \\
 hosted backend & sees $\bar a$ of every application of its symbol \\
+loop class $b$ & every hop sees it; the same leakage as today's cell buckets \\
+expiry $x$ & shared by all hops of a loop and all loops sealed in one $Q=30$\,s quantum: colluders link positions only within that set \\
 $p_k$ holds $\kappa^{\mathrm{out}}_{p_k}$ & $p_k$ colluding with $r_{k,j}$ links two positions of one segment; no value leaks, and timing links them anyway \\
 client-authored semantics ($\bar a_{i+1}$ depends on meaning of $v_i$) & out of protocol scope \\
 \bottomrule
@@ -714,11 +770,12 @@ threat & bound \\
 hop learns another's $\bar a_j$, $v_j$ & L5 (Prop.~\ref{prop:ni}) \\
 position, loop length & fixed $|\beta|$, $C$, $|\kappa|$, $s$ (D5--D7, L3, L5$'$) \\
 value-dependent timing & exact release $\arr+L(f)$ (L4) \\
-colluding relays match bytes & per-edge re-encipherment (L8); cf.\ Prop.~\ref{prop:current} \\
+colluding relays match bytes & per-edge re-encipherment (L8), up to the shared $x$ (Table~\ref{tab:leak}); cf.\ Prop.~\ref{prop:current} \\
 tagging & whole-value rejection, $2^{-8\tau}$ (L8) \\
 hop-chosen routing & $\nxt_i\in\lambda_i$ (L6); bind excluded (Prop.~\ref{prop:arrow}) \\
 first/last-hop correlation & one guard closes the loop (L7) \\
 replay of layer or SURB & single admission per $\nu$ (L9) \\
+replay across a restart & new process epoch rejects every older layer (D2, L9) \\
 reply amplification & $r(t)\le u(t)$ (Inv.~\ref{inv:credit}) \\
 symbol abuse & per-symbol $\quota(f)$ (D1) \\
 oversized result & fail closed at $W(f)$ (L3) \\
@@ -746,9 +803,11 @@ L3 & fixed slot width on every edge; output $>W(f)$ dropped \\
 L4 & release at $\arr+L(f)$ and drop on overrun under an injected clock \\
 L5 & property test on the pure builder: vary $\bar a_j,v_j$, $j\ne i$; $\view_i$ bytes, lengths, and release times equal \\
 L5$'$ & builder for $H\ne H'\le\Hm$: equal layer and cell lengths at every position; every $\gamma_i$ verifies (Prop.~\ref{prop:header}) \\
+L3, D6 & one class $b$ and slot width $C_b$ on every edge of a loop, SURB replies included; stream chunks $<C_0$ \\
+client & reply accepted once by tag $t_\cl$; unknown or reused tag dropped \\
 D5, L7 & $H=(s+1)n+s$; guard at $1$ and $H$ only; $n>4$ rejected; selection fails closed below $H-1$ eligible DIDs \\
 L8 & per-hop byte inequality; one-bit flip rejects the whole value \\
-L9 & replayed layer and reused SURB rejected; $x\notin(\arr,\arr+V]$ rejected; full $R_i^{\frm}$ rejects without evicting a live tag \\
+L9 & replayed layer and reused SURB rejected; a layer for an earlier process epoch rejected after restart; $x\notin(\arr,\arr+V]$ rejected; full $R_i^{\frm}$ rejects without evicting a live tag \\
 credit & a \code{tcp} session emits no reply without a SURB, drops expired SURBs, and resumes after a new forward loop \\
 AEZ & $2941$ vectors from the AEZ v5 reference C code (length sweep, parameter grid, CAESAR genkat), bit-flip rejection for $\tau\ge4$, native and \code{wasm32}; weak-key rejection; \code{fuzz/} target for $\Dec{}{}\circ\Enc{}{}=\mathrm{id}$ and panic freedom \\
 \bottomrule
@@ -766,7 +825,7 @@ AEZ & $2941$ vectors from the AEZ v5 reference C code (length sweep, parameter g
 phase & content \\
 \midrule
 1 & golden bytes; $\Sigma$ table; pipeline term; layer build as a fold over $P$; reducer and handler as $\Sigma$-algebra; route by symbol sequence.  Zero wire change, no bump \\
-2a & uniform layer, fixed-length header (L5$'$), loop with derived $\Hm$, stateless relays, AEZ carry, SURBs.  Breaking \\
+2a & uniform layer, fixed-length header (L5$'$), loop with derived $\Hm$, loop classes, relay process epoch, client tag, stateless relays, AEZ carry, SURBs.  Breaking \\
 2b & intermediate symbols: \code{Invoke} with release time, $\quota(f)$.  Same cutover; one version bump on its last PR \\
 \bottomrule
 \end{tabular}
