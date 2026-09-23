@@ -648,8 +648,9 @@ fn entry_owned_by(owner: &Node, label: &str) -> PlacedEntry {
     panic!("failed to derive an entry owned by {}", owner.did());
 }
 
-async fn submit_workload(nodes: &[Node], kind: ScenarioTopology) {
+async fn submit_workload(nodes: &[Node], kind: ScenarioTopology) -> Vec<BTreeMap<String, Entry>> {
     let edges = workload_edges(nodes, kind);
+    let mut expected_by_node = vec![BTreeMap::new(); nodes.len()];
     for (job, &(sender, receiver)) in edges.iter().enumerate() {
         let receiver_did = nodes[receiver].did();
         let entry = entry_owned_by(&nodes[receiver], &job.to_string());
@@ -661,6 +662,7 @@ async fn submit_workload(nodes: &[Node], kind: ScenarioTopology) {
             matches!(owner_action, PeerRingAction::Some(_)),
             "receiver does not own generated placement: {owner_action:?}"
         );
+        expected_by_node[receiver].insert(entry.key.to_string(), entry.entry.clone());
         let msg = SyncEntriesWithSuccessor {
             purpose: StorageSyncPurpose::AdditiveRepair,
             destination: StorageSyncDestination::PhysicalOwner(receiver_did),
@@ -682,6 +684,7 @@ async fn submit_workload(nodes: &[Node], kind: ScenarioTopology) {
             .await
             .expect("control probe must enter the real outbound scheduler");
     }
+    expected_by_node
 }
 
 fn network_busy(nodes: &[Node]) -> bool {
@@ -858,6 +861,47 @@ async fn count_persisted(nodes: &[Node]) -> Vec<usize> {
         counts.push(usize::try_from(node_count).expect("memory storage count must fit usize"));
     }
     counts
+}
+
+async fn assert_persisted_matches_workload(nodes: &[Node], expected: &[BTreeMap<String, Entry>]) {
+    assert_eq!(
+        nodes.len(),
+        expected.len(),
+        "every node must have an expected placement map"
+    );
+    for (index, node) in nodes.iter().enumerate() {
+        let actual = node
+            .dht()
+            .storage
+            .get_all()
+            .await
+            .expect("memory storage contents must be readable")
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            actual.keys().collect::<Vec<_>>(),
+            expected[index].keys().collect::<Vec<_>>(),
+            "persisted keys or placement differ at node {}",
+            node.did()
+        );
+        for (key, expected_entry) in &expected[index] {
+            let actual_entry = actual
+                .get(key)
+                .expect("matching storage key must have a value");
+            assert_eq!(
+                actual_entry.did, expected_entry.did,
+                "entry identity differs for {key}"
+            );
+            assert_eq!(
+                actual_entry.data, expected_entry.data,
+                "entry contents differ for {key}"
+            );
+            assert_eq!(
+                actual_entry.kind, expected_entry.kind,
+                "entry kind differs for {key}"
+            );
+        }
+    }
 }
 
 async fn run_empty_repair_maintenance(nodes: &[Node], driver: &mut TraceDriver) {

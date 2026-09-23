@@ -397,17 +397,26 @@ pub(crate) mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_to_string_with_sha10x00() {
+    fn test_sha1_hashstr_matches_known_hex_input_vector() {
         let s = "65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0";
         let t: HashStr = s.into();
-        assert_eq!(t.0.len(), 40);
+        assert_eq!(t.0, "3e32a6d219dc2370ae3f35142eb9a411200aef0b");
     }
 
     #[test]
-    fn test_parse_to_string_with_sha10x01() {
-        let s = "hello";
-        let t: HashStr = s.into();
-        assert_eq!(t.0.len(), 40);
+    fn test_sha1_hashstr_matches_empty_ascii_and_binary_vectors() {
+        assert_eq!(
+            HashStr::from_bytes(b"").0,
+            "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+        );
+        assert_eq!(
+            HashStr::from_bytes("hello".as_bytes()).0,
+            "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"
+        );
+        assert_eq!(
+            HashStr::from_bytes(&[0, 0xff, 0x80]).0,
+            "e4bc8a01806054986edd720593bc12f760eca5b9"
+        );
     }
 
     #[test]

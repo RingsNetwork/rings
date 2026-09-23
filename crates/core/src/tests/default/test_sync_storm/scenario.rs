@@ -50,7 +50,24 @@ async fn run_storm_and_recovery(
         .await
         .expect("liveness idle interval must advance deterministically");
     driver.advance_virtual(idle_ms);
-    submit_workload(nodes, kind).await;
+    let mut expected_persistence = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        let entries = node
+            .dht()
+            .storage
+            .get_all()
+            .await
+            .expect("pre-storm storage contents must be readable")
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        expected_persistence.push(entries);
+    }
+    for (expected, workload) in expected_persistence
+        .iter_mut()
+        .zip(submit_workload(nodes, kind).await)
+    {
+        expected.extend(workload);
+    }
     let storm_backlog = runtime
         .new_pending_deliveries()
         .expect("storm backlog must remain observable before maintenance");
@@ -80,6 +97,7 @@ async fn run_storm_and_recovery(
         .expect("recovery start must remain observable");
     drain_traced(runtime, nodes, strategy, driver).await;
     conclude_healthy_liveness(nodes, expected_endpoints, &probes, driver).await;
+    assert_persisted_matches_workload(nodes, &expected_persistence).await;
     driver.stop_storm();
     runtime
         .elapsed_ms()

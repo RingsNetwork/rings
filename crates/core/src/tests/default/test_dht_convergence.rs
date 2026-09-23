@@ -205,6 +205,45 @@ pub(super) mod spec {
     }
 }
 
+/// Fixed small-ring outputs independent of the production topology oracle.
+#[test]
+fn test_small_ring_successor_and_predecessor_outputs_are_fixed() {
+    let nodes = [
+        Did::from(2_u32),
+        Did::from(9_u32),
+        Did::from(20_u32),
+        Did::from(40_u32),
+    ];
+    let local = Did::from(9_u32);
+
+    assert_eq!(crate::dht::topology::successors(&nodes, local, 3), vec![
+        Did::from(20_u32),
+        Did::from(40_u32),
+        Did::from(2_u32)
+    ]);
+    assert_eq!(
+        crate::dht::topology::predecessor(&nodes, local),
+        Some(Did::from(2_u32))
+    );
+}
+
+#[test]
+fn test_stabilization_retains_the_three_nearest_fixed_ring_candidates() {
+    let actual = crate::dht::topology::stabilize_successors(
+        Did::from(0_u32),
+        &[Did::from(8_u32)],
+        &[Did::from(2_u32), Did::from(4_u32), Did::from(6_u32)],
+        Some(Did::from(1_u32)),
+        3,
+    );
+
+    assert_eq!(actual, vec![
+        Did::from(1_u32),
+        Did::from(2_u32),
+        Did::from(4_u32)
+    ]);
+}
+
 /// The ring order, `2^160`.
 fn ring() -> BigUint {
     BigUint::from(1u8) << BITS

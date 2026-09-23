@@ -136,6 +136,9 @@ pub fn sign(sk: &SecretKey, msg: &[u8]) -> Result<Signature> {
 /// Verifies that the signature is the actual aggregated signature of hashes - pubkeys. Calculated by
 /// e(g1, signature) == \prod_{i = 0}^n e(pk_i, hash_i).
 pub fn verify_hash(hashes: &[[u8; 96]], sig: &Signature, pks: &[PublicKey<48>]) -> Result<bool> {
+    if hashes.is_empty() || hashes.len() != pks.len() {
+        return Err(Error::BlsInputLengthMismatch);
+    }
     let sig: G2Projective = sig.clone().try_into()?;
     let g1 = G1Projective::generator();
     let e1 = Bls12_381::pairing(g1, sig);
@@ -161,6 +164,9 @@ pub fn verify_hash(hashes: &[[u8; 96]], sig: &Signature, pks: &[PublicKey<48>]) 
 /// Verifies that the signature is the actual aggregated signature of messages - pubkeys. Calculated by
 /// e(g1, signature) == \prod_{i = 0}^n e(pk_i, hash_to_curve(message_i)).
 pub fn verify(msgs: &[&[u8]], sig: &Signature, pks: &[PublicKey<48>]) -> Result<bool> {
+    if msgs.is_empty() || msgs.len() != pks.len() {
+        return Err(Error::BlsInputLengthMismatch);
+    }
     let hashes: Vec<[u8; 96]> = msgs
         .iter()
         .map(|msg| hash_to_curve(msg))

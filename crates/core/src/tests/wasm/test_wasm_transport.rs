@@ -414,7 +414,13 @@ async fn test_ice_connection_establish() {
 
     #[cfg(feature = "browser_chrome_test")]
     {
-        conn2.webrtc_wait_for_data_channel_open().await.unwrap();
+        let connection = conn2.webrtc_wait_for_data_channel_open().fuse();
+        let deadline = futures_timer::Delay::new(std::time::Duration::from_secs(60)).fuse();
+        futures::pin_mut!(connection, deadline);
+        futures::select! {
+            result = connection => result.unwrap(),
+            () = deadline => panic!("ICE connection must open a data channel within 60 seconds"),
+        }
         assert_eq!(
             conn2.webrtc_connection_state(),
             WebrtcConnectionState::Connected
@@ -423,7 +429,7 @@ async fn test_ice_connection_establish() {
 }
 
 #[wasm_bindgen_test]
-async fn test_message_handler() {
+async fn test_message_handler_manual_handshake_only() {
     get_fake_permission().await;
 
     let key1 = SecretKey::random();

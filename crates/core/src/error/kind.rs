@@ -4,6 +4,9 @@ use super::CallbackError;
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
+    /// The BLS aggregate verifier received different numbers of hashes and public keys.
+    #[error("BLS hash and public key counts differ")]
+    BlsInputLengthMismatch,
     /// Serialize affine failed
     #[error("Serialize affine failed")]
     EccSerializeFailed,
