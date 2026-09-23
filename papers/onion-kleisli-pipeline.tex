@@ -524,7 +524,8 @@ fixed key: L9 is load-bearing for AEZ.
     \State $Q_{h,\sid}\gets Q_{h,\sid}\cup\{(\nxt,\chi',\sigma^{\mathrm{out}},x)\}$
       \Comment{D8}
     \State apply $\enc^{-1}\pad^{-1}(b)$ to session $\sid$: data, fin, or
-      $\mathrm{credit}(\vec\upsilon)$ into $Q_{h,\sid}$ (D2$'$);\ \Return
+      $\mathrm{credit}(\vec\upsilon)$ into $Q_{h,\sid}$ up to $Q_{\max}$
+      (D2$'$, D8);\ \Return
   \EndIf
   \State $w\gets\sem{f}(\bar a,\enc^{-1}\pad^{-1}(b))$ by $\arr+L(f)$
     \Comment{L4}
@@ -585,7 +586,9 @@ loop suffix after $h$:
 $h$ keeps the suffix of every forward loop of $\sid$ that reaches it
 ($\chi_{i+1}$, $\sigma^{\mathrm{out}}_i$, $x$) as one SURB in
 $Q_{h,\sid}$, adds the $k$ SURBs of a $\mathrm{credit}$ frame, and spends
-a SURB only on a reply of $\sid$, removing it before release.
+a SURB only on a reply of $\sid$, removing it before release.  A pool holds
+at most $Q_{\max}=256$ SURBs ($\approx820$\,KB); credit beyond it is dropped,
+and the pools of all sessions at $h$ count against $\quota(f)$.
 \end{defD}
 
 \begin{proposition}[SURB batching]\label{prop:batch}
@@ -608,8 +611,8 @@ For each session $\sid$ at $h$ let $Q_{h,\sid}$ be its unexpired SURBs
 per forward loop plus $k$ per credit frame) and $r(t)$ its replies emitted
 by time $t$.  Then
 \begin{gather*}
-r(t)\le u(t),\qquad \upsilon\in Q_{h,\sid}\Rightarrow t<x_\upsilon\le
-t_\upsilon+V,\\
+r(t)\le u(t),\qquad |Q_{h,\sid}|\le Q_{\max},\\
+\upsilon\in Q_{h,\sid}\Rightarrow t<x_\upsilon\le t_\upsilon+V,\\
 |Q_{h,\sid}|=0\Rightarrow\text{\code{tcp} stops reading its socket.}
 \end{gather*}
 Each reply removes one $\upsilon$ from $Q_{h,\sid}$
@@ -770,9 +773,11 @@ $R_i$ is a family of Bloom filters~\cite{Bloom1970} $R_i[x]$ keyed by the
 quantised expiry; $R_i[x]$ grows by blocks of $B$ tags, each at
 false-positive rate $2^{-26}$~\cite{Almeida2007}, and is dropped when $x$
 passes, so at most $V/Q+1=6$ are live.
-With $V=150$\,s (\code{ONION\_FORWARD\_MAX\_VALIDITY\_MS}), per-sender
-budget $B=16384$ over at most $64$ senders, and a global budget $64B$, all
-per $V$, hop $i$ admits a layer at $\arr$ iff
+Budgets count units of 16\,KiB: a class-$b$ cell costs $b/16\,\mathrm{KiB}$
+units, as today's cell buckets charge the full visible size.  With
+$V=150$\,s (\code{ONION\_FORWARD\_MAX\_VALIDITY\_MS}), per-sender budget
+$B=16384$ units over at most $64$ senders, and a global budget $64B$
+units, all per $V$, hop $i$ admits a layer at $\arr$ iff
 \[
 \arr<x\le\arr+V\ \wedge\ \nu\notin R_i[x]\ \wedge\ \text{within budget},
 \]
@@ -789,8 +794,10 @@ lives until $x$.  (ii) A Bloom filter has no false negatives, so admission
 is at most once exactly; a false positive drops a valid cell, the safe
 direction, at rate $\le2^{-20}$; memory grows with admitted tags and is at
 most $\approx5.4$\,MB.
-(iii) Hop $i$ admits at most $B/V\approx109$ cells\,s$^{-1}$ per
-neighbour, shared by every loop on that link, and (iv) $64B/V\approx6990$ in total.  (v) A SURB is usable
+(iii) Hop $i$ admits at most $B/V\approx109$ units\,s$^{-1}$
+($\approx1.79$\,MB/s of cells) per neighbour, shared by every loop on that
+link, and (iv) $64B/V\approx6990$ units\,s$^{-1}$ ($\approx115$\,MB/s) in
+total; a 16\,KiB cell is one unit.  (v) A SURB is usable
 only within $[x_\upsilon-V,x_\upsilon)$, so SURB lifetime is at most $V$.
 \end{proposition}
 \begin{proof}
@@ -812,7 +819,10 @@ A single client alone on its links downloads on a class-$b$ loop at most
 \]
 bytes\,s$^{-1}$, $\rho_{\mathrm{f}}$ its forward-cell rate.  At
 $b=16$\,KiB, $B/V\cdot(C_0-2)\approx109\cdot13.2\,\mathrm{KB}\approx
-1.44$\,MB/s $\ge1$\,MB/s, reached with $\rho_{\mathrm{f}}\ge109/(k+1)$.
+1.44$\,MB/s $\ge1$\,MB/s, reached with $\rho_{\mathrm{f}}\ge109/(k+1)$; a
+larger class $b$ admits $16\,\mathrm{KiB}/b$ as many cells, and the bound
+rises towards $B\cdot16\,\mathrm{KiB}/V\approx1.79$\,MB/s as the header's
+share falls.
 \end{proposition}
 \begin{proof}
 Every reply cell passes $s$ relays of segment $n$, each admitting at most
@@ -820,7 +830,8 @@ $B/V$ cells from its predecessor (iii), and consumes one SURB, of which
 each forward cell supplies $k+1$ (Prop.~\ref{prop:batch}); a reply frame
 carries at most $C_0-2$ data bytes (D2$'$).  The forward credit cells pass
 $g$, segment~$0$ and $h$ under the same per-sender bound, at the required
-$109/(k+1)\approx22$--$27$ cells\,s$^{-1}$, far below it.
+$109/(k+1)\approx22$--$27$ cells\,s$^{-1}$, far below it.  $Q_{\max}$
+does not bind while the loop's round trip is below $Q_{\max}V/B\approx2.3$\,s.
 \end{proof}
 
 Every loop of one client enters $g$ from $\cl$, so (iii) caps its forward
@@ -903,7 +914,7 @@ computation & exit service only & any $f\in\Sigma_n$ (D2) \\
 return path & forward path reversed & fresh relays to $g$ (L7) \\
 relay state & \code{relay\_returns}, $\le1024$, TTL $120$\,s refreshed per cell & replay tags only (L9) \\
 return bytes & one ciphertext, identical per edge & one AEZ layer per edge (L8) \\
-replay & exits (\code{consume\_forward\_nonce}), $V=150$\,s, $B=4096$, crypto limiter & every hop, $x$-keyed Bloom filters, $B=16384$ (L9) \\
+replay & exits (\code{consume\_forward\_nonce}), $V=150$\,s, $B=4096$, crypto limiter & every hop, $x$-keyed Bloom filters, $B=16384$ units of 16\,KiB (L9) \\
 session replies & no SURB credit & one per SURB, $k$ per credit loop (D8) \\
 \bottomrule
 \end{tabular}
@@ -941,6 +952,8 @@ first/last-hop correlation & one guard closes the loop (L7) \\
 replay of layer or SURB & single admission per $\nu$; no false negatives across filter rotation (L9) \\
 replay across a restart & new process epoch rejects every older layer (D2, L9) \\
 reply amplification & $r(t)\le u(t)$ per session (Inv.~\ref{inv:credit}) \\
+large-class cell flood & budgets in 16\,KiB units: $\le1.79$\,MB/s of cells per neighbour (L9) \\
+SURB-pool exhaustion & $|Q_{h,\sid}|\le Q_{\max}$, all pools under $\quota(f)$ (D8) \\
 symbol abuse & per-symbol $\quota(f)$ (D1) \\
 oversized result & fail closed at $W(f)$, or at $C_0$ for a frame (L3) \\
 \bottomrule
@@ -970,8 +983,8 @@ L3, D6 & one class $b$ and slot width $C_b$ on every edge of a loop, SURB replie
 client & reply accepted once by tag $t_\cl$; unknown, reused, or expired tag dropped; $T$ empty after every $x$ passes \\
 D5, L7 & $H=(s+1)n+s$; guard at $1$ and $H$ only; $n>4$ rejected; selection fails closed below $H-1$ eligible DIDs \\
 L8 & per-hop byte inequality; one-bit flip rejects the whole value \\
-L9 & replayed layer and reused SURB rejected; a layer for an earlier process epoch rejected after restart; $x\notin(\arr,\arr+V]$ rejected; over-budget cells rejected \\
-credit & a \code{tcp} session emits no reply without a SURB of its own $\sid$, removes each SURB before release, drops expired SURBs, and resumes after a new forward loop; two sessions at one $h$ never share a SURB; $\mathrm{fin}$ both ways drops $\sid$; a credit frame adds $k$ SURBs \\
+L9 & replayed layer and reused SURB rejected; a layer for an earlier process epoch rejected after restart; $x\notin(\arr,\arr+V]$ rejected; a class-$b$ cell charged $b/16$\,KiB units; over-budget cells rejected \\
+credit & a \code{tcp} session emits no reply without a SURB of its own $\sid$, removes each SURB before release, drops expired SURBs, and resumes after new credit; two sessions at one $h$ never share a SURB; $\mathrm{fin}$ both ways drops $\sid$; a credit frame adds $k$ SURBs; credit beyond $Q_{\max}$ is dropped \\
 rate & loopback single-client \code{tcp} download $\ge1$\,MB/s at $b=16$\,KiB, upload $\approx1/(k+1)$ of download \\
 replay store & no replayed layer admitted across filter rotation; a filter grows by blocks and is dropped exactly when its $x$ passes; memory tracks admitted tags; measured false-positive rate within $2^{-20}$ \\
 seeds & derived keys match the KDF definition; a weak derived key forces a re-draw \\
