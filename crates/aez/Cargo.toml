@@ -1,0 +1,23 @@
+[package]
+name = "rings-aez"
+description = "AEZ v5 wide-block cipher and robust authenticated encryption for Rings"
+readme = "README.md"
+keywords = ["aez", "cipher", "aead", "wasm"]
+categories = ["cryptography", "wasm"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+aes = { version = "0.8.4", features = ["hazmat"] }
+subtle = "2.4.1"
+thiserror = "1"
+zeroize = { version = "1.8.1", features = ["zeroize_derive"] }
+
+[dev-dependencies]
+wasm-bindgen-test = { workspace = true }

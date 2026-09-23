@@ -3212,6 +3212,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rings-aez"
+version = "0.31.0"
+dependencies = [
+ "aes",
+ "subtle",
+ "thiserror 1.0.69",
+ "wasm-bindgen-test",
+ "zeroize",
+]
+
+[[package]]
 name = "rings-codec"
 version = "0.31.0"
 dependencies = [
