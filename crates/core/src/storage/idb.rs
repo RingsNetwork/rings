@@ -1,11 +1,12 @@
 #![deny(missing_docs)]
 
-//! IndexedDB adapter with atomic read-and-touch LRU updates.
+//! IndexedDB adapter with atomic updates and row-budget LRU eviction.
 //!
-//! Row metadata has one purpose: ordering eviction by `last_visit_time`.
-//! Opening an existing database neither upgrades its schema nor clears data.
-use std::ops::Add;
-use std::ops::Sub;
+//! The configured capacity counts rows. When a new key would exceed it, the least recently
+//! accessed rows are retired first; rewriting an existing key does not change row count or
+//! retire another key. Opening an existing database with a smaller capacity retires every
+//! excess row in the same transaction. Row metadata orders eviction by `last_visit_time`.
+//! Opening an existing database neither upgrades its schema nor clears data within capacity.
 
 use async_trait::async_trait;
 use rexie::Index;
@@ -69,16 +70,17 @@ pub struct IdbStorage {
 }
 
 impl IdbStorage {
-    /// Open a named database with a nonzero row capacity.
+    /// Open a named database with a nonzero maximum number of rows.
     ///
+    /// `row_capacity` counts rows, and opening an existing store restores that row bound.
     /// Only a newly created database runs Rexie's schema callback. Reopening an
     /// existing database does not remove old indexes; they are unused. We neither
     /// bump a schema version nor delete caller data to remove that residue.
-    pub async fn new_with_cap_and_name(cap: u32, name: &str) -> Result<Self> {
-        if cap == 0 {
+    pub async fn new_with_cap_and_name(row_capacity: u32, name: &str) -> Result<Self> {
+        if row_capacity == 0 {
             return Err(Error::InvalidCapacity);
         }
-        Ok(Self {
+        let storage = Self {
             db: Rexie::builder(name)
                 .add_object_store(
                     ObjectStore::new(name)
@@ -89,9 +91,12 @@ impl IdbStorage {
                 .build()
                 .await
                 .map_err(Error::IDBError)?,
-            cap,
+            cap: row_capacity,
             storage_name: name.to_owned(),
-        })
+        };
+        // Opening under a smaller row budget immediately restores the configured bound.
+        storage.prune().await?;
+        Ok(storage)
     }
 
     /// Open the store together with its transaction completion witness.
@@ -109,16 +114,18 @@ impl IdbStorage {
         Ok((transaction, store))
     }
 
+    /// Restore the configured row budget by retiring every least-recently-accessed excess row.
+    ///
+    /// All count, selection, and deletion requests share one read-write transaction. The
+    /// transaction is committed only after each candidate can be decoded and deleted.
     async fn prune(&self) -> Result<()> {
         let (tx, store) = self.transaction(TransactionMode::ReadWrite)?;
         let count = store.count(None).await.map_err(Error::IDBError)?;
-        if count < self.cap {
+        if count <= self.cap {
+            tx.done().await.map_err(Error::IDBError)?;
             return Ok(());
         }
-        let delete_count = count.sub(self.cap).add(1);
-        if delete_count == 0 {
-            return Ok(());
-        }
+        let delete_count = count.saturating_sub(self.cap);
 
         let item_index = store.index("last_visit_time").map_err(Error::IDBError)?;
         let entries = item_index
@@ -127,10 +134,18 @@ impl IdbStorage {
             .map_err(Error::IDBError)?;
         tracing::debug!("entries: {:?}", entries);
 
-        if let Some((_k, value)) = entries.first() {
-            let data_entry: DataStruct<serde_json::Value> = js_value::deserialize(value)?;
+        // Validate every candidate before scheduling any deletion, so a decode error leaves
+        // the transaction with no destructive requests queued.
+        let keys = entries
+            .into_iter()
+            .map(|(_key, value)| {
+                let data_entry: DataStruct<serde_json::Value> = js_value::deserialize(value)?;
+                Ok(data_entry.key)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        for key in keys {
             store
-                .delete(&JsValue::from(&data_entry.key))
+                .delete(&JsValue::from(&key))
                 .await
                 .map_err(Error::IDBError)?;
         }
@@ -181,10 +196,46 @@ where V: DeserializeOwned + Serialize + Sized
     }
 
     async fn put(&self, key: &str, value: &V) -> Result<()> {
-        self.prune().await?;
+        // Serialize before opening a destructive transaction so serialization failure cannot
+        // evict any previously stored row.
+        let replacement = js_value::serialize(&DataStruct::new(key, value))?;
         let (tx, store) = self.transaction(TransactionMode::ReadWrite)?;
+        // Check existence under the same transaction that will evict and store the row.
+        let existing = store
+            .get(&JsValue::from(key))
+            .await
+            .map_err(Error::IDBError)?;
+        if existing.is_undefined() || existing.is_null() {
+            // Count includes every row visible to this transaction; only a new key needs room.
+            let count = store.count(None).await.map_err(Error::IDBError)?;
+            if count >= self.cap {
+                // Remove every row needed to make room, rather than only the first candidate.
+                let delete_count = count.saturating_sub(self.cap).saturating_add(1);
+                let item_index = store.index("last_visit_time").map_err(Error::IDBError)?;
+                let entries = item_index
+                    .get_all(None, Some(delete_count), None, None)
+                    .await
+                    .map_err(Error::IDBError)?;
+                // Decode every candidate before queuing deletions, avoiding partial work if a
+                // malformed record prevents the operation from proceeding.
+                let keys = entries
+                    .into_iter()
+                    .map(|(_entry_key, entry_value)| {
+                        let data_entry: DataStruct<serde_json::Value> =
+                            js_value::deserialize(entry_value)?;
+                        Ok(data_entry.key)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                for entry_key in keys {
+                    store
+                        .delete(&JsValue::from(&entry_key))
+                        .await
+                        .map_err(Error::IDBError)?;
+                }
+            }
+        }
         store
-            .put(&js_value::serialize(&DataStruct::new(key, value))?, None)
+            .put(&replacement, None)
             .await
             .map_err(Error::IDBError)?;
         tx.done().await.map_err(Error::IDBError)?;
