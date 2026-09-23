@@ -6,6 +6,7 @@ mod snapshot;
 pub use compress::compress_iter;
 pub use snapshot::ConnectionInspect;
 pub use snapshot::DHTInspect;
+pub use snapshot::MailboxStorageInspect;
 pub use snapshot::StorageInspect;
 pub use snapshot::SwarmInspect;
 

@@ -7,6 +7,8 @@ mod builder;
 pub mod callback;
 mod detached;
 mod inbox;
+/// Non-blocking observation hooks for operator telemetry.
+pub mod observer;
 pub(crate) mod session_link;
 pub(crate) mod transport;
 
@@ -26,6 +28,7 @@ use crate::ecc::VerificationPublicKey;
 use crate::error::Error;
 use crate::error::Result;
 use crate::inspect::ConnectionInspect;
+use crate::inspect::MailboxStorageInspect;
 use crate::inspect::SwarmInspect;
 use crate::measure::PeerMeasurement;
 use crate::measure::PeerMeasurementPage;
@@ -42,6 +45,9 @@ use crate::message::PayloadSender;
 use crate::message::ReplayCounters;
 use crate::swarm::callback::SharedSwarmCallback;
 use crate::swarm::inbox::SwarmInboxDelivery;
+use crate::swarm::observer::LookupCorrelation;
+use crate::swarm::observer::LookupKind;
+use crate::swarm::observer::LookupOutcome;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 
@@ -234,7 +240,18 @@ impl Swarm {
     /// The step and the hop come from one topology snapshot.
     pub async fn lookup_successor(&self, key: Did) -> Result<SuccessorLookup> {
         match self.dht.find_successor(key)? {
-            PeerRingAction::Some(successor) => Ok(SuccessorLookup::Local(successor)),
+            PeerRingAction::Some(successor) => {
+                let correlation = LookupCorrelation::StorageResource(key);
+                self.transport
+                    .observer()
+                    .lookup_started(LookupKind::Successor, correlation);
+                self.transport.observer().lookup_finished(
+                    LookupKind::Successor,
+                    correlation,
+                    LookupOutcome::Succeeded,
+                );
+                Ok(SuccessorLookup::Local(successor))
+            }
             PeerRingAction::RemoteAction(next, _) => {
                 let request = Message::FindSuccessorSend(FindSuccessorSend {
                     did: key,
@@ -272,6 +289,11 @@ impl Swarm {
     /// Check the status of swarm
     pub async fn inspect(&self) -> SwarmInspect {
         SwarmInspect::inspect(self).await
+    }
+
+    /// Return aggregate live relay-inbox state without identifiers or payloads.
+    pub async fn mailbox_storage_inspect(&self) -> Result<MailboxStorageInspect> {
+        MailboxStorageInspect::inspect(&self.dht).await
     }
 
     /// Return destination-scoped transaction replay counters.

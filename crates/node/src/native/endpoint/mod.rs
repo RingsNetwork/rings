@@ -37,6 +37,10 @@ use tokio::net::TcpListener;
 use self::http_error::HttpError;
 use crate::native::api_auth::ApiListener;
 use crate::native::api_auth::ApiSecurity;
+use crate::observability::render_prometheus;
+use crate::observability::OperatorSnapshot;
+use crate::observability::OPERATOR_JSON_PATH;
+use crate::observability::OPERATOR_METRICS_PATH;
 use crate::processor::Processor;
 
 /// JSON-RPC state
@@ -148,7 +152,18 @@ fn internal_router(
 
     let mut router = Router::new()
         .route("/", post(jsonrpc_io_handler).with_state(jsonrpc_state))
-        .route("/status", get(status_handler).with_state(status_state));
+        .route(
+            "/status",
+            get(status_handler).with_state(status_state.clone()),
+        )
+        .route(
+            OPERATOR_JSON_PATH,
+            get(operator_snapshot_handler).with_state(status_state.clone()),
+        )
+        .route(
+            OPERATOR_METRICS_PATH,
+            get(operator_metrics_handler).with_state(status_state),
+        );
     if let Some(status) = gateway {
         router = router.route(
             "/gateway/status",
@@ -289,6 +304,46 @@ async fn gateway_status_handler(
     axum::Json(state.status.snapshot())
 }
 
+/// Return the bounded structured v1 operator snapshot on the authenticated loopback listener.
+async fn operator_snapshot_handler(
+    State(state): State<Arc<StatusState>>,
+) -> Result<axum::Json<OperatorSnapshot>, HttpError> {
+    let snapshot = state
+        .processor
+        .operator_snapshot()
+        .await
+        .map_err(|_| HttpError::Internal)?;
+    Ok(axum::Json(snapshot))
+}
+
+/// Return the v1 Prometheus scrape representation without identifier-valued labels.
+async fn operator_metrics_handler(
+    State(state): State<Arc<StatusState>>,
+) -> Result<PrometheusResponse, HttpError> {
+    let snapshot = state
+        .processor
+        .operator_snapshot()
+        .await
+        .map_err(|_| HttpError::Internal)?;
+    Ok(PrometheusResponse(render_prometheus(&snapshot)))
+}
+
+/// Prometheus text response with the content type expected by current scrapers.
+struct PrometheusResponse(String);
+
+impl IntoResponse for PrometheusResponse {
+    fn into_response(self) -> axum::response::Response {
+        (
+            [
+                ("content-type", "text/plain; version=0.0.4; charset=utf-8"),
+                ("x-rings-observability-version", "1"),
+            ],
+            self.0,
+        )
+            .into_response()
+    }
+}
+
 /// JSON response struct
 #[derive(Debug, Clone)]
 pub struct JsonResponse(String);
@@ -421,6 +476,8 @@ mod security_tests {
         let router = Router::new()
             .route("/", post(|| async { "accepted" }))
             .route("/status", get(|| async { "status" }))
+            .route(OPERATOR_JSON_PATH, get(|| async { "observability" }))
+            .route(OPERATOR_METRICS_PATH, get(|| async { "metrics" }))
             .route("/gateway/status", get(|| async { "gateway status" }));
         secure_router(router, security, listener)
     }
@@ -482,6 +539,8 @@ mod security_tests {
             for (method, path) in [
                 (Method::POST, "/"),
                 (Method::GET, "/status"),
+                (Method::GET, OPERATOR_JSON_PATH),
+                (Method::GET, OPERATOR_METRICS_PATH),
                 (Method::GET, "/gateway/status"),
             ] {
                 let request = Request::builder()
@@ -692,5 +751,57 @@ mod security_tests {
                 .map(|(status, reply)| (*status, reply.pointer("/error/code"))),
             Some((StatusCode::OK, Some(&serde_json::Value::from(-32700))))
         );
+    }
+
+    #[tokio::test]
+    async fn operator_routes_are_authenticated_and_internal_only() {
+        let Some(security) = security() else {
+            return;
+        };
+        let processor = Arc::new(prepare_processor().await);
+        for path in [OPERATOR_JSON_PATH, OPERATOR_METRICS_PATH] {
+            let unauthenticated = Request::builder()
+                .method(Method::GET)
+                .uri(path)
+                .body(Body::empty());
+            assert_eq!(
+                status_of(
+                    internal_router(processor.clone(), None, security.clone()),
+                    unauthenticated,
+                )
+                .await,
+                Some(StatusCode::UNAUTHORIZED)
+            );
+
+            let authenticated = bearer(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(path)
+                    .body(Body::empty()),
+            );
+            assert_eq!(
+                status_of(
+                    internal_router(processor.clone(), None, security.clone()),
+                    authenticated,
+                )
+                .await,
+                Some(StatusCode::OK)
+            );
+
+            let external = bearer(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(path)
+                    .body(Body::empty()),
+            );
+            assert_eq!(
+                status_of(
+                    external_router(processor.clone(), security.clone()),
+                    external,
+                )
+                .await,
+                Some(StatusCode::NOT_FOUND)
+            );
+        }
     }
 }

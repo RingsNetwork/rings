@@ -21,6 +21,8 @@ use crate::message::TransactionReplay;
 use crate::swarm::callback::DefaultCallback;
 use crate::swarm::callback::SharedSwarmCallback;
 use crate::swarm::callback::SwarmCallbackSlot;
+use crate::swarm::observer::NoopSwarmObserver;
+use crate::swarm::observer::SharedSwarmObserver;
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::transport::SwarmTransportParts;
 use crate::swarm::transport::SwarmTransportSettings;
@@ -45,6 +47,8 @@ pub struct SwarmBuilder {
     session_ttl: Option<usize>,
     measure: Option<MeasureImpl>,
     callback: Option<SharedSwarmCallback>,
+    /// Optional bounded sink for privacy-safe operational observations.
+    observer: Option<SharedSwarmObserver>,
 }
 
 impl SwarmBuilder {
@@ -72,6 +76,7 @@ impl SwarmBuilder {
             session_ttl: None,
             measure: None,
             callback: None,
+            observer: None,
         }
     }
 
@@ -149,6 +154,12 @@ impl SwarmBuilder {
         self
     }
 
+    /// Bind a synchronous, non-blocking observer for operational telemetry.
+    pub fn observer(mut self, observer: SharedSwarmObserver) -> Self {
+        self.observer = Some(observer);
+        self
+    }
+
     /// Set the durable sender-sequence and receiver replay-window storage.
     pub fn replay_storage(mut self, storage: ReplayStorage) -> Self {
         self.replay_storage = storage;
@@ -179,6 +190,7 @@ impl SwarmBuilder {
 
         let callback =
             SwarmCallbackSlot::new(self.callback.unwrap_or_else(|| Arc::new(DefaultCallback)));
+        let observer = self.observer.unwrap_or_else(|| Arc::new(NoopSwarmObserver));
         let transport = Arc::new(SwarmTransport::new(SwarmTransportParts {
             network_id: self.network_id,
             webrtc: SwarmWebrtcConfig::new(
@@ -199,6 +211,7 @@ impl SwarmBuilder {
                 self.reassembly_limits,
             ),
             callback,
+            observer,
         }));
 
         Swarm { dht, transport }

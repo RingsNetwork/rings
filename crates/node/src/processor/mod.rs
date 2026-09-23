@@ -51,6 +51,14 @@ use uuid;
 use crate::error::Error;
 use crate::error::Result;
 use crate::measure::PeriodicMeasure;
+use crate::observability::HealthSnapshot;
+use crate::observability::MailboxSnapshot;
+use crate::observability::Observability;
+use crate::observability::OperatorSnapshot;
+use crate::observability::PeerRatingSnapshot;
+use crate::observability::SessionKeySnapshot;
+use crate::observability::OPERATOR_SCHEMA_VERSION;
+use crate::observability::PEER_RATING_CAPACITY;
 use crate::onion::default_advertise_onion_exit;
 use crate::onion::default_advertise_onion_relay;
 use crate::onion::default_onion_exit_heartbeat_interval_secs;
@@ -226,6 +234,8 @@ pub struct Processor {
     #[cfg(all(feature = "browser", target_family = "wasm"))]
     advertise_onion_relay: bool,
     registration_tasks: Vec<Arc<dyn RegistrationTask>>,
+    /// Process-local bounded recorder backing the authenticated operator surface.
+    observability: Arc<Observability>,
 }
 
 impl Processor {
@@ -993,6 +1003,81 @@ impl Processor {
             version: crate::util::build_version(),
             swarm: Some(self.swarm.inspect().await.into()),
         })
+    }
+
+    /// Assemble the documented v1 operator snapshot from bounded recorder and live node state.
+    pub async fn operator_snapshot(&self) -> Result<OperatorSnapshot> {
+        let generated_at_ms = get_epoch_ms();
+        let runtime = self.observability.runtime_snapshot(generated_at_ms);
+        let delegation = self.delegatee_key.delegation();
+        let expires_at_ms = delegation.expires_at_ms();
+        let mailbox = self
+            .swarm
+            .mailbox_storage_inspect()
+            .await
+            .map_err(Error::InternalError)?;
+        let swarm = self.swarm.inspect().await;
+        let admitted_peer_count = u64::try_from(swarm.peers.len()).unwrap_or(u64::MAX);
+        let has_admitted_peer = admitted_peer_count > 0;
+        let has_successor = !swarm.dht.successors.is_empty();
+        let has_predecessor = swarm.dht.predecessor.is_some();
+        let mut peer_ratings = self.peer_measurements().await;
+        peer_ratings.sort_unstable_by_key(|measurement| measurement.did);
+        peer_ratings.truncate(PEER_RATING_CAPACITY);
+        let peer_ratings = peer_ratings
+            .into_iter()
+            .map(|measurement| PeerRatingSnapshot {
+                peer: measurement.did.to_string(),
+                reliability: peer_quality_name(measurement.quality),
+                credit_score: measurement.credit_score.as_f64(),
+                sent: measurement.evidence.sent,
+                failed_to_send: measurement.evidence.failed_to_send,
+                received: measurement.evidence.received,
+                failed_to_receive: measurement.evidence.failed_to_receive,
+            })
+            .collect();
+
+        Ok(OperatorSnapshot {
+            schema_version: OPERATOR_SCHEMA_VERSION,
+            generated_at_ms,
+            process_started_at_ms: self.observability.process_started_at_ms(),
+            counter_scope: "node_local_process_lifetime",
+            messages: runtime.messages,
+            recent_messages: runtime.recent_messages,
+            session_key: SessionKeySnapshot {
+                valid: !delegation.is_expired_at(generated_at_ms),
+                created_at_ms: delegation.created_at_ms(),
+                expires_at_ms,
+                remaining_ms: expires_at_ms.saturating_sub(generated_at_ms),
+                rotation_succeeded_total: 0,
+                rotation_failed_total: 0,
+                runtime_rotation_supported: false,
+            },
+            mailboxes: MailboxSnapshot {
+                registered: mailbox.registered,
+                held_messages: mailbox.held_messages,
+                stored_total: runtime.messages.stored,
+            },
+            dht_lookups: runtime.dht_lookups,
+            peer_ratings,
+            health: HealthSnapshot {
+                process_api_healthy: true,
+                admitted_peer_count,
+                has_admitted_peer,
+                has_successor,
+                has_predecessor,
+                overlay_ready: has_admitted_peer && has_successor,
+            },
+        })
+    }
+}
+
+/// Stable text form of one advisory local peer-quality class.
+const fn peer_quality_name(quality: PeerQuality) -> &'static str {
+    match quality {
+        PeerQuality::Healthy => "healthy",
+        PeerQuality::Unknown => "unknown",
+        PeerQuality::Degraded => "degraded",
     }
 }
 

@@ -498,6 +498,7 @@ fn transport_with_key_measure_and_reassembly_limits(
         ))),
         settings: SwarmTransportSettings::new(1, VirtualNodeConfig::disabled(), reassembly_limits),
         callback: SwarmCallbackSlot::new(Arc::new(DefaultCallback)),
+        observer: Arc::new(crate::swarm::observer::NoopSwarmObserver),
     }))
 }
 
