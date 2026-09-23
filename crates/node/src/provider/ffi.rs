@@ -470,11 +470,11 @@ mod tests {
     use std::ffi::CStr;
     use std::ffi::CString;
 
+    use rings_core::delegation::DelegateeKey;
     use rings_core::dht::Did;
     use rings_core::ecc::signers::eip191;
     use rings_core::ecc::SecretKey;
     use rings_core::measure::MeasureError;
-    use rings_core::session::SessionSk;
     use rings_core::storage::KvStorageInterface;
     use rings_measure::MeasurementSnapshot;
 
@@ -645,11 +645,11 @@ mod tests {
         let storage = ObservedMeasureStorage::default();
         let provider = runtime
             .block_on(async {
-                let session_sk = SessionSk::new_with_seckey(&SecretKey::random())?;
+                let delegatee_key = DelegateeKey::new_with_seckey(&SecretKey::random())?;
                 let config = ProcessorConfig::new(
                     0,
                     "stun://stun.l.google.com:19302".to_owned(),
-                    session_sk,
+                    delegatee_key,
                     1,
                 );
                 Provider::new_provider_with_storage_internal(

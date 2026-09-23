@@ -95,11 +95,11 @@ pub(super) async fn prepare_processor_with_identity_key_network_and_virtual_node
     network_id: u32,
     dht_virtual_nodes: u16,
 ) -> Processor {
-    let session_sk = SessionSk::new_with_seckey(&identity_key).unwrap();
+    let delegatee_key = DelegateeKey::new_with_seckey(&identity_key).unwrap();
     let config = ProcessorConfig::new(
         network_id,
         "stun://stun.l.google.com:19302".to_string(),
-        session_sk,
+        delegatee_key,
         3,
     )
     .dht_virtual_nodes(dht_virtual_nodes);
@@ -166,11 +166,11 @@ pub(super) async fn prepare_processor_with_network_and_virtual_nodes(
     dht_virtual_nodes: u16,
 ) -> Processor {
     let key = SecretKey::random();
-    let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+    let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
     let config = ProcessorConfig::new(
         network_id,
         "stun://stun.l.google.com:19302".to_string(),
-        session_sk,
+        delegatee_key,
         3,
     )
     .dht_virtual_nodes(dht_virtual_nodes);
@@ -198,11 +198,11 @@ pub(super) async fn prepare_processor_with_online_node_type(
     node_type: OnlineNodeType,
 ) -> Processor {
     let key = SecretKey::random();
-    let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+    let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
     let config = ProcessorConfig::new(
         0,
         "stun://stun.l.google.com:19302".to_string(),
-        session_sk,
+        delegatee_key,
         3,
     );
     let storage = Box::new(MemStorage::new());
@@ -271,9 +271,9 @@ pub(super) fn onion_exit_descriptor_for_processor_with_node_type_service(
             did: processor.did(),
             public_key: processor
                 .swarm
-                .account_verification_pubkey()
+                .delegator_verification_pubkey()
                 .map_err(Error::CoreError)?,
-            session_public_key: processor.session_sk.session_public_key(),
+            delegatee_public_key: processor.delegatee_key.delegatee_public_key(),
             process_epoch: processor.onion_exit_epoch,
             node_type,
             network_id: processor.swarm.network_id(),
@@ -284,7 +284,7 @@ pub(super) fn onion_exit_descriptor_for_processor_with_node_type_service(
             expires_at_ms: now_ms + 90_000,
             version: crate::util::build_version(),
         },
-        MessageSigner::new(&processor.session_sk, processor.swarm.network_id()),
+        MessageSigner::new(&processor.delegatee_key, processor.swarm.network_id()),
     )
     .map_err(Error::CoreError)
 }
@@ -299,9 +299,9 @@ pub(super) fn online_relay_descriptor_for_processor(
             did: processor.did(),
             public_key: processor
                 .swarm
-                .account_verification_pubkey()
+                .delegator_verification_pubkey()
                 .map_err(Error::CoreError)?,
-            session_public_key: processor.session_sk.session_public_key(),
+            delegatee_public_key: processor.delegatee_key.delegatee_public_key(),
             node_type: default_online_node_type(),
             network_id: processor.swarm.network_id(),
             storage_redundancy: processor.swarm.storage_redundancy(),
@@ -313,7 +313,7 @@ pub(super) fn online_relay_descriptor_for_processor(
             expires_at_ms: now_ms + 90_000,
             version: crate::util::build_version(),
         },
-        MessageSigner::new(&processor.session_sk, processor.swarm.network_id()),
+        MessageSigner::new(&processor.delegatee_key, processor.swarm.network_id()),
     )
     .map_err(Error::CoreError)
 }
@@ -328,11 +328,11 @@ pub(super) fn mismatched_storage_redundancy(value: u16) -> u16 {
 
 pub(super) async fn prepare_measured_processor() -> Processor {
     let key = SecretKey::random();
-    let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+    let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
     let config = ProcessorConfig::new(
         0,
         "stun://stun.l.google.com:19302".to_string(),
-        session_sk,
+        delegatee_key,
         3,
     );
     let storage = Box::new(MemStorage::new());

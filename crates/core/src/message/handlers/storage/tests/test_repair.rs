@@ -10,6 +10,7 @@ use super::test_support::non_affine_placement;
 use super::test_support::prepare_node_with_storage_redundancy;
 use super::test_support::split_redundant_entry;
 use super::test_support::NoopCallback;
+use crate::delegation::DelegateeKey;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::EntryOperation;
@@ -28,7 +29,6 @@ use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::MessageSigner;
 use crate::message::MessageVerificationExt;
-use crate::session::SessionSk;
 use crate::storage::MemStorage;
 use crate::swarm::transport::STORAGE_LOOKUP_OBSERVATION_CAPACITY;
 use crate::swarm::SwarmBuilder;
@@ -59,7 +59,7 @@ async fn test_storage_repair_request_after_claim_remains_pending() -> Result<()>
 #[tokio::test]
 async fn test_leave_dht_defers_repair_until_maintenance_runs() -> Result<()> {
     let key = SecretKey::random();
-    let session = SessionSk::new_with_seckey(&key)?;
+    let session = DelegateeKey::new_with_seckey(&key)?;
     let swarm = Arc::new(
         SwarmBuilder::new(
             0,
@@ -220,7 +220,7 @@ async fn test_placed_entry_operation_rejects_non_affine_placement() -> Result<()
         placement: invalid_placement,
         op: EntryOperation::Overwrite(entry.clone()),
     };
-    let sender_session = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let sender_session = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let context = MessagePayload::new_send(
         Message::OperateEntry(msg.clone()),
         MessageSigner::new(&sender_session, TEST_NETWORK_ID),
@@ -314,7 +314,7 @@ async fn test_remote_redundant_store_writes_split_replica_at_affine_placement() 
 #[tokio::test]
 async fn test_local_hit_read_repair_sends_no_search_for_unknown_replicas() -> Result<()> {
     let key = SecretKey::random();
-    let session = SessionSk::new_with_seckey(&key)?;
+    let session = DelegateeKey::new_with_seckey(&key)?;
     let swarm = Arc::new(
         SwarmBuilder::new(
             0,
@@ -368,7 +368,7 @@ async fn test_found_entry_repairs_buffered_misses_only() -> Result<()> {
         .ok_or_else(|| Error::InvalidMessage("expected repair placement".to_string()))?;
     let unknown_key = Did::from(120u32);
     let context_key = SecretKey::random();
-    let context_session = SessionSk::new_with_seckey(&context_key)?;
+    let context_session = DelegateeKey::new_with_seckey(&context_key)?;
     let context = MessagePayload::new_send(
         Message::FoundEntry(FoundEntry {
             data: vec![],
@@ -426,7 +426,7 @@ async fn test_found_entry_rejects_multiple_entries() -> Result<()> {
         EntryKind::Data,
     );
     let context_key = SecretKey::random();
-    let context_session = SessionSk::new_with_seckey(&context_key)?;
+    let context_session = DelegateeKey::new_with_seckey(&context_key)?;
     let context = MessagePayload::new_send(
         Message::FoundEntry(FoundEntry {
             data: vec![first.clone(), second.clone()],
@@ -467,7 +467,7 @@ async fn test_found_entry_rejects_redundancy_outside_local_protocol_mode() -> Re
         EntryKind::Data,
     );
     let context_key = SecretKey::random();
-    let context_session = SessionSk::new_with_seckey(&context_key)?;
+    let context_session = DelegateeKey::new_with_seckey(&context_key)?;
     let context = MessagePayload::new_send(
         Message::FoundEntry(FoundEntry {
             data: vec![entry.clone()],
@@ -512,7 +512,7 @@ async fn test_found_entry_rejects_response_without_active_lookup() -> Result<()>
         EntryKind::Data,
     );
     let context_key = SecretKey::random();
-    let context_session = SessionSk::new_with_seckey(&context_key)?;
+    let context_session = DelegateeKey::new_with_seckey(&context_key)?;
     let context = MessagePayload::new_send(
         Message::FoundEntry(FoundEntry {
             data: vec![entry.clone()],
@@ -553,7 +553,7 @@ async fn test_found_entry_rejects_resource_mismatch_without_cache_write() -> Res
         EntryKind::Data,
     );
     let context_key = SecretKey::random();
-    let context_session = SessionSk::new_with_seckey(&context_key)?;
+    let context_session = DelegateeKey::new_with_seckey(&context_key)?;
     let context = MessagePayload::new_send(
         Message::FoundEntry(FoundEntry {
             data: vec![entry.clone()],
@@ -638,7 +638,7 @@ async fn test_expired_storage_response_does_not_update_cache_or_repair() -> Resu
         .nth(1)
         .ok_or_else(|| Error::InvalidMessage("expected repair placement".to_string()))?;
     let context_key = SecretKey::random();
-    let context_session = SessionSk::new_with_seckey(&context_key)?;
+    let context_session = DelegateeKey::new_with_seckey(&context_key)?;
     let context = MessagePayload::new_send(
         Message::FoundEntry(FoundEntry {
             data: vec![],

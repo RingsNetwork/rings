@@ -41,14 +41,14 @@ pub(super) struct RelayReturnEdge {
     pub(super) key: RelayReturnKey,
     pub(super) previous_hop: Did,
     pub(super) previous_circuit_id: OnionCircuitId,
-    pub(super) previous_session_public_key: PublicKey<33>,
+    pub(super) previous_delegatee_public_key: PublicKey<33>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RelayReturnEntry {
     previous_hop: Did,
     previous_circuit_id: OnionCircuitId,
-    previous_session_public_key: PublicKey<33>,
+    previous_delegatee_public_key: PublicKey<33>,
     expires_at_ms: u128,
 }
 
@@ -107,7 +107,7 @@ pub enum OnionCircuitEffect {
     SealAndSend {
         /// Next hop.
         to: Did,
-        /// Next hop session key authenticated inside the current layer.
+        /// Next hop delegatee key authenticated inside the current layer.
         recipient: PublicKey<33>,
         /// Padding class preserved across relay edges.
         bucket: OnionCellBucket,
@@ -122,8 +122,8 @@ pub enum OnionCircuitEffect {
         circuit_id: OnionCircuitId,
         /// Immediate return peer.
         return_peer: Did,
-        /// Immediate return peer session key for the first backward cell.
-        return_session_public_key: PublicKey<33>,
+        /// Immediate return peer delegatee key for the first backward cell.
+        return_delegatee_public_key: PublicKey<33>,
         /// Client return key.
         client: OnionClientReturn,
         /// Replay token consumed by one-shot exit operations; stream frames use `forward_sequence`.
@@ -255,8 +255,8 @@ impl OnionCircuitReducer {
             OnionForwardLayer::Relay {
                 next_hop,
                 next_circuit_id,
-                next_session_public_key,
-                return_session_public_key,
+                next_delegatee_public_key,
+                return_delegatee_public_key,
                 inner,
             } => {
                 self.validate_relay_forward()?;
@@ -271,7 +271,7 @@ impl OnionCircuitReducer {
                         },
                         previous_hop: from,
                         previous_circuit_id: circuit_id,
-                        previous_session_public_key: return_session_public_key,
+                        previous_delegatee_public_key: return_delegatee_public_key,
                     },
                     received_at_ms,
                 )?;
@@ -281,7 +281,7 @@ impl OnionCircuitReducer {
                 }))
                 .map(|encoded_message| OnionCircuitEffect::SealAndSend {
                     to: next_hop,
-                    recipient: next_session_public_key,
+                    recipient: next_delegatee_public_key,
                     bucket,
                     encoded_message,
                 })
@@ -289,7 +289,7 @@ impl OnionCircuitReducer {
             OnionForwardLayer::Exit {
                 process_epoch,
                 client,
-                return_session_public_key,
+                return_delegatee_public_key,
                 expires_at_ms,
                 forward_nonce,
                 forward_sequence,
@@ -314,7 +314,7 @@ impl OnionCircuitReducer {
                     from,
                     circuit_id,
                     return_peer: from,
-                    return_session_public_key,
+                    return_delegatee_public_key,
                     client,
                     forward_nonce,
                     forward_sequence,
@@ -340,7 +340,7 @@ impl OnionCircuitReducer {
         if let Some(entry) = state.relay_returns.get(&key).copied() {
             let previous_hop = entry.previous_hop;
             let previous_circuit_id = entry.previous_circuit_id;
-            let previous_session_public_key = entry.previous_session_public_key;
+            let previous_delegatee_public_key = entry.previous_delegatee_public_key;
             if let Some(entry) = Arc::make_mut(&mut state.relay_returns).get_mut(&key) {
                 entry.expires_at_ms = received_at_ms.saturating_add(ONION_RELAY_RETURN_TTL_MS);
             }
@@ -351,7 +351,7 @@ impl OnionCircuitReducer {
                 }))?;
             return Ok(OnionCircuitEffect::SealAndSend {
                 to: previous_hop,
-                recipient: previous_session_public_key,
+                recipient: previous_delegatee_public_key,
                 bucket,
                 encoded_message,
             });
@@ -386,7 +386,7 @@ pub(super) fn remember_return_hop(
         key,
         previous_hop,
         previous_circuit_id,
-        previous_session_public_key,
+        previous_delegatee_public_key,
     } = edge;
     purge_expired_return_hops(state, now_ms);
     let table = Arc::make_mut(&mut state.relay_returns);
@@ -400,7 +400,7 @@ pub(super) fn remember_return_hop(
         Entry::Occupied(mut entry) => {
             if entry.get().previous_hop != previous_hop
                 || entry.get().previous_circuit_id != previous_circuit_id
-                || entry.get().previous_session_public_key != previous_session_public_key
+                || entry.get().previous_delegatee_public_key != previous_delegatee_public_key
             {
                 return Err(Error::OnionRouteError(OnionRouteError::ReturnEdgeConflict));
             }
@@ -416,7 +416,7 @@ pub(super) fn remember_return_hop(
             entry.insert(RelayReturnEntry {
                 previous_hop,
                 previous_circuit_id,
-                previous_session_public_key,
+                previous_delegatee_public_key,
                 expires_at_ms: now_ms.saturating_add(ttl_ms),
             });
         }

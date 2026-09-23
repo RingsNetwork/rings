@@ -85,7 +85,7 @@ pub(super) struct ExitStreamTask {
     pub(super) key: TcpStreamKey,
     pub(super) circuit_id: OnionCircuitId,
     pub(super) return_peer: Did,
-    pub(super) return_session_public_key: PublicKey<33>,
+    pub(super) return_delegatee_public_key: PublicKey<33>,
     pub(super) client: OnionClientReturn,
     pub(super) service: OnionServiceName,
     pub(super) stream: TcpStream,
@@ -98,7 +98,7 @@ struct ExitReturnPath {
     scope: Scope,
     circuit_id: OnionCircuitId,
     return_peer: Did,
-    return_session_public_key: PublicKey<33>,
+    return_delegatee_public_key: PublicKey<33>,
     client: OnionClientReturn,
     service: OnionServiceName,
 }
@@ -115,7 +115,7 @@ impl ExitReturnPath {
             service: &self.service,
             circuit_id: self.circuit_id,
             return_peer: self.return_peer,
-            return_session_public_key: self.return_session_public_key,
+            return_delegatee_public_key: self.return_delegatee_public_key,
             client: self.client,
         }
         .send(sequence, payload)
@@ -176,7 +176,7 @@ async fn run_exit_stream(task: ExitStreamTask) {
         key,
         circuit_id,
         return_peer,
-        return_session_public_key,
+        return_delegatee_public_key,
         client,
         service,
         stream,
@@ -188,7 +188,7 @@ async fn run_exit_stream(task: ExitStreamTask) {
         scope,
         circuit_id,
         return_peer,
-        return_session_public_key,
+        return_delegatee_public_key,
         client,
         service,
     };

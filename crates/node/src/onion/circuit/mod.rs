@@ -130,7 +130,7 @@ impl OnionCircuitPayload {
     }
 }
 
-/// Client-decrypted backward payload plus the exit session proof that authenticated it.
+/// Client-decrypted backward payload plus the exit delegation proof that authenticated it.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct OnionAuthenticatedPayload {
     /// Client/exit-only return id encrypted in the exit layer.
@@ -252,16 +252,16 @@ pub struct OnionVerifiedPayload {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct OnionClientReturn {
     /// Client session public key used for backward AEAD payloads.
-    pub session_public_key: PublicKey<33>,
+    pub delegatee_public_key: PublicKey<33>,
     /// Client/exit-only id used to authenticate backward payloads.
     pub return_id: OnionReturnId,
 }
 
 impl OnionClientReturn {
     /// Build a client return descriptor with a fresh return id.
-    pub fn new(session_public_key: PublicKey<33>) -> Self {
+    pub fn new(delegatee_public_key: PublicKey<33>) -> Self {
         Self {
-            session_public_key,
+            delegatee_public_key,
             return_id: OnionReturnId::random(),
         }
     }
@@ -312,8 +312,8 @@ pub struct OnionBackwardPath {
     pub circuit_id: OnionCircuitId,
     /// Immediate overlay return peer.
     pub return_peer: Did,
-    /// Session key that encrypts the hop-to-hop return cell.
-    pub return_session_public_key: PublicKey<33>,
+    /// Delegation key that encrypts the hop-to-hop return cell.
+    pub return_delegatee_public_key: PublicKey<33>,
     /// Client-only key and return id for the inner signed payload.
     pub client: OnionClientReturn,
 }
@@ -323,13 +323,13 @@ impl OnionBackwardPath {
     pub const fn new(
         circuit_id: OnionCircuitId,
         return_peer: Did,
-        return_session_public_key: PublicKey<33>,
+        return_delegatee_public_key: PublicKey<33>,
         client: OnionClientReturn,
     ) -> Self {
         Self {
             circuit_id,
             return_peer,
-            return_session_public_key,
+            return_delegatee_public_key,
             client,
         }
     }
@@ -340,14 +340,14 @@ pub(super) enum OnionForwardLayer {
     Relay {
         next_hop: Did,
         next_circuit_id: OnionCircuitId,
-        next_session_public_key: PublicKey<33>,
-        return_session_public_key: PublicKey<33>,
+        next_delegatee_public_key: PublicKey<33>,
+        return_delegatee_public_key: PublicKey<33>,
         inner: AeadCiphertext,
     },
     Exit {
         process_epoch: super::OnionExitEpoch,
         client: OnionClientReturn,
-        return_session_public_key: PublicKey<33>,
+        return_delegatee_public_key: PublicKey<33>,
         expires_at_ms: u128,
         forward_nonce: OnionForwardNonce,
         forward_sequence: OnionForwardSequence,

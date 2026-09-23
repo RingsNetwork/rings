@@ -101,7 +101,7 @@ struct SessionHandle {
 }
 
 /// A locally-accepted connection/flow that has been reported to the pure relay (`Accepted`)
-/// and is waiting for the core to mint its session key (`OpenAccepted` → `bind_accepted`).
+/// and is waiting for the core to mint its delegatee key (`OpenAccepted` → `bind_accepted`).
 enum Pending {
     /// An accepted TCP connection.
     Tcp(TcpStream),
@@ -697,15 +697,15 @@ fn relay_task_for_test_with_src(
     namespace: &str,
     src: Option<SocketAddr>,
 ) -> Result<(RelayTask, Arc<TransportSessions>, SessionKey)> {
+    use rings_core::delegation::DelegateeKey;
     use rings_core::ecc::SecretKey;
-    use rings_core::session::SessionSk;
 
     use crate::extension::ext::Extensions;
     use crate::processor::ProcessorBuilder;
     use crate::processor::ProcessorConfig;
 
-    let session_sk = SessionSk::new_with_seckey(&SecretKey::random())?;
-    let config = ProcessorConfig::new(1, String::new(), session_sk, 1);
+    let delegatee_key = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let config = ProcessorConfig::new(1, String::new(), delegatee_key, 1);
     let processor = ProcessorBuilder::from_config(&config)?
         .advertise_presence(false)
         .build()?;

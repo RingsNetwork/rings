@@ -17,6 +17,14 @@
 
 ### Breaking changes
 
+- Replace session-key terminology in the delegated-signing API with `Delegation`,
+  `DelegateeKey`, `DelegationBuilder`, and `DelegationDigest` under
+  `rings_core::delegation`. Rename the related DIDs, authorization accessors,
+  message-proof fields, WASM exports, node configuration key, and CLI command to
+  `delegator`/`delegatee`/`delegation` names. There are no compatibility aliases;
+  callers must update imports and persisted configuration/key data. Transport
+  `SessionId` remains the connection identifier.
+
 - Subtraction round, `rings-node` section (#787), targeting protocol cutover 0.29.0. Onion-exit
   descriptors now sign one canonical service name instead of a `services` list containing a
   second transport axis; the unused transport enum, descriptor and entry-guard schema numbers,

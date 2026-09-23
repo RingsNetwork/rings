@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
 use rings_core::domain_tag;
 use rings_core::ecc::PublicKey;
@@ -24,7 +25,6 @@ use rings_core::message::Encoded;
 use rings_core::message::Encoder;
 use rings_core::message::MessageSigner;
 use rings_core::message::MessageVerification;
-use rings_core::session::SessionSk;
 use rings_core::utils::get_epoch_ms;
 use serde::Deserialize;
 use serde::Serialize;
@@ -353,8 +353,8 @@ pub struct OnionExitDescriptorBody {
     pub did: Did,
     /// Account public key corresponding to `did`.
     pub public_key: VerificationPublicKey,
-    /// Session public key used for encrypted onion exit frames.
-    pub session_public_key: PublicKey<33>,
+    /// Delegation public key used for encrypted onion exit frames.
+    pub delegatee_public_key: PublicKey<33>,
     /// Random process epoch bound into every encrypted exit layer.
     pub process_epoch: OnionExitEpoch,
     /// Runtime family of this exit node.
@@ -380,7 +380,7 @@ impl OnionExitDescriptorBody {
         OnionExitDescriptorBodyRef {
             did: self.did,
             public_key: &self.public_key,
-            session_public_key: &self.session_public_key,
+            delegatee_public_key: &self.delegatee_public_key,
             process_epoch: self.process_epoch,
             node_type: &self.node_type,
             network_id: self.network_id,
@@ -423,7 +423,7 @@ impl SignedDescriptorBody for OnionExitDescriptorBody {
         OnionExitDescriptor {
             did: self.did,
             public_key: self.public_key,
-            session_public_key: self.session_public_key,
+            delegatee_public_key: self.delegatee_public_key,
             process_epoch: self.process_epoch,
             node_type: self.node_type,
             network_id: self.network_id,
@@ -442,7 +442,7 @@ impl SignedDescriptorBody for OnionExitDescriptorBody {
 struct OnionExitDescriptorBodyRef<'a> {
     did: Did,
     public_key: &'a VerificationPublicKey,
-    session_public_key: &'a PublicKey<33>,
+    delegatee_public_key: &'a PublicKey<33>,
     process_epoch: OnionExitEpoch,
     node_type: &'a OnlineNodeType,
     network_id: u32,
@@ -467,8 +467,8 @@ pub struct OnionExitDescriptor {
     pub did: Did,
     /// Account public key corresponding to `did`.
     pub public_key: VerificationPublicKey,
-    /// Session public key used for encrypted onion exit frames.
-    pub session_public_key: PublicKey<33>,
+    /// Delegation public key used for encrypted onion exit frames.
+    pub delegatee_public_key: PublicKey<33>,
     /// Random process epoch bound into every encrypted exit layer.
     pub process_epoch: OnionExitEpoch,
     /// Runtime family of this exit node.
@@ -495,7 +495,7 @@ impl OnionExitDescriptor {
     /// Create and sign an onion-exit descriptor.
     pub fn new_signed(
         body: OnionExitDescriptorBody,
-        signer: MessageSigner<&SessionSk>,
+        signer: MessageSigner<&DelegateeKey>,
     ) -> CoreResult<Self> {
         sign_descriptor_body(
             body,
@@ -508,7 +508,7 @@ impl OnionExitDescriptor {
         let Self {
             did,
             public_key,
-            session_public_key,
+            delegatee_public_key,
             process_epoch,
             node_type,
             network_id,
@@ -524,7 +524,7 @@ impl OnionExitDescriptor {
         OnionExitDescriptorBodyRef {
             did: *did,
             public_key,
-            session_public_key,
+            delegatee_public_key,
             process_epoch: *process_epoch,
             node_type,
             network_id: *network_id,
@@ -717,8 +717,8 @@ impl OnionExitRegistration {
         OnionExitDescriptor::new_signed(
             OnionExitDescriptorBody {
                 did: context.did(),
-                public_key: context.account_verification_pubkey()?,
-                session_public_key: context.session_sk().session_public_key(),
+                public_key: context.delegator_verification_pubkey()?,
+                delegatee_public_key: context.delegatee_key().delegatee_public_key(),
                 process_epoch: self.process_epoch,
                 node_type: self.node_type.clone(),
                 network_id: context.network_id(),

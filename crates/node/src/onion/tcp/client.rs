@@ -1,6 +1,6 @@
+use rings_core::delegation::DelegateeKey;
 use rings_core::ecc::PublicKey;
 use rings_core::message::MessageSigner;
-use rings_core::session::SessionSk;
 
 use super::*;
 use crate::onion::circuit::OnionBackwardPath;
@@ -70,11 +70,11 @@ async fn send_client_payload(
 pub(super) struct TcpBackwardRoute<'route> {
     pub(super) link_sender: &'route OnionLinkSender,
     pub(super) scope: &'route Scope,
-    pub(super) signer: MessageSigner<&'route SessionSk>,
+    pub(super) signer: MessageSigner<&'route DelegateeKey>,
     pub(super) service: &'route OnionServiceName,
     pub(super) circuit_id: OnionCircuitId,
     pub(super) return_peer: Did,
-    pub(super) return_session_public_key: PublicKey<33>,
+    pub(super) return_delegatee_public_key: PublicKey<33>,
     pub(super) client: OnionClientReturn,
 }
 
@@ -91,7 +91,7 @@ impl TcpBackwardRoute<'_> {
             OnionBackwardPath::new(
                 self.circuit_id,
                 self.return_peer,
-                self.return_session_public_key,
+                self.return_delegatee_public_key,
                 self.client,
             ),
             sequence,

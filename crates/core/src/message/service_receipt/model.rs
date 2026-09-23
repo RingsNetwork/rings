@@ -36,8 +36,8 @@ use stateright::Model;
 use stateright::Property;
 
 use super::*;
+use crate::delegation::DelegateeKey;
 use crate::ecc::SecretKey;
-use crate::session::SessionSk;
 
 const MAX_TIME: u8 = 4;
 const MODEL_PROOF_TTL: u8 = 2;
@@ -434,13 +434,13 @@ fn signed_receipt_with_session_ends(
 ) -> crate::error::Result<ProvisionalServiceReceipt> {
     const CREATED_AT_MS: u128 = 1_700_000_000_000;
     const NETWORK_ID: u32 = 7;
-    let provider = SessionSk::from_test_keys(
+    let provider = DelegateeKey::from_test_keys(
         &SecretKey::random(),
         SecretKey::random(),
         CREATED_AT_MS,
         provider_ttl_ms,
     )?;
-    let beneficiary = SessionSk::from_test_keys(
+    let beneficiary = DelegateeKey::from_test_keys(
         &SecretKey::random(),
         SecretKey::random(),
         CREATED_AT_MS,
@@ -448,8 +448,8 @@ fn signed_receipt_with_session_ends(
     )?;
     let claim = ProvisionalServiceClaim::probe(
         NETWORK_ID,
-        provider.account_did(),
-        beneficiary.account_did(),
+        provider.delegator_did(),
+        beneficiary.delegator_did(),
         ProvisionalEpoch::from_unix_seconds(u64::try_from(CREATED_AT_MS / 1_000).unwrap_or(0)),
         [1; 32],
         [2; 32],

@@ -9,6 +9,7 @@
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 
+use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
 use rings_core::ecc::VerificationPublicKey;
 use rings_core::error::Error;
@@ -19,7 +20,6 @@ use rings_core::message::Encoder;
 use rings_core::message::MessageSigner;
 use rings_core::message::MessageVerification;
 use rings_core::message::SigningDomain;
-use rings_core::session::SessionSk;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
@@ -42,14 +42,14 @@ pub(crate) trait SignedDescriptorBody: Sized {
 /// Pre: the body names the signer's account and public key, and states the signer's overlay.
 pub(crate) fn sign_descriptor_body<B>(
     body: B,
-    signer: MessageSigner<&SessionSk>,
+    signer: MessageSigner<&DelegateeKey>,
     mismatch_message: &'static str,
 ) -> Result<B::Descriptor>
 where
     B: SignedDescriptorBody,
 {
     let did = body.body_did();
-    if body.body_public_key().did() != did || signer.account_did() != did {
+    if body.body_public_key().did() != did || signer.delegator_did() != did {
         return Err(Error::InvalidMessage(mismatch_message.to_string()));
     }
     if body.body_network_id() != signer.network_id() {
@@ -86,14 +86,14 @@ pub(crate) trait SignedDescriptor: Sized {
         let did = self.descriptor_did();
         let public_key = self.descriptor_public_key();
         let signature = self.descriptor_signature();
-        if public_key.did() != did || signature.session.account_did() != did {
+        if public_key.did() != did || signature.delegation.delegator_did() != did {
             return false;
         }
 
-        let Ok(session_public_key) = signature.session.account_verification_pubkey() else {
+        let Ok(delegatee_public_key) = signature.delegation.delegator_verification_pubkey() else {
             return false;
         };
-        if &session_public_key != public_key {
+        if &delegatee_public_key != public_key {
             return false;
         }
 

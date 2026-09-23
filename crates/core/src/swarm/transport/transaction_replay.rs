@@ -38,7 +38,7 @@ impl SwarmTransport {
     ) -> Result<RangeInclusive<u64>> {
         let key = StreamKey::new(
             self.network_id,
-            self.message_signer().account_did(),
+            self.message_signer().delegator_did(),
             destination,
         );
         self.transaction_replay.reserve(key, count).await
@@ -100,14 +100,14 @@ fn logical_message_byte_cost(transaction: &Transaction) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::delegation::DelegateeKey;
     use crate::ecc::SecretKey;
     use crate::message::Message;
     use crate::message::MessageSigner;
-    use crate::session::SessionSk;
 
     #[test]
     fn logical_byte_cost_is_the_signed_message_data_length() -> Result<()> {
-        let session = SessionSk::new_with_seckey(&SecretKey::random())?;
+        let session = DelegateeKey::new_with_seckey(&SecretKey::random())?;
         let transaction = Transaction::new(
             SecretKey::random().address().into(),
             uuid::Uuid::new_v4(),

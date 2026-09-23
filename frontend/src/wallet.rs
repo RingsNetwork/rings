@@ -1,4 +1,4 @@
-//! Browser account standards used to authorize a Rings session key.
+//! Browser account standards used to authorize a Rings delegatee key.
 
 use base58::FromBase58;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -43,7 +43,7 @@ pub enum WalletKind {
 pub struct WalletAccount {
     /// Account standard that created this account.
     pub kind: WalletKind,
-    /// Account entity passed to `SessionSkBuilder`.
+    /// Account entity passed to `DelegationBuilder`.
     pub account: String,
     /// Lower-case Rings account type.
     pub account_type: String,
@@ -95,7 +95,7 @@ impl WalletAccount {
         }
     }
 
-    /// Sign the session proof expected by `SessionSkBuilder`.
+    /// Sign the delegation proof expected by `DelegationBuilder`.
     pub async fn sign_session_proof(&self, proof: &str) -> Result<Vec<u8>, String> {
         match self.kind {
             WalletKind::WebCrypto => sign_webcrypto(&self.handle, proof).await,
@@ -454,7 +454,7 @@ mod tests {
 
 #[cfg(all(test, target_arch = "wasm32"))]
 mod wasm_tests {
-    use rings_node::prelude::rings_core::session::SessionSkBuilder;
+    use rings_node::prelude::rings_core::delegation::DelegationBuilder;
     use wasm_bindgen_test::wasm_bindgen_test;
     use wasm_bindgen_test::wasm_bindgen_test_configure;
 
@@ -463,7 +463,7 @@ mod wasm_tests {
     wasm_bindgen_test_configure!(run_in_browser);
 
     #[wasm_bindgen_test(async)]
-    async fn test_webcrypto_account_authorizes_session_key() {
+    async fn test_webcrypto_account_authorizes_delegatee_key() {
         let account = connect_webcrypto().await;
         assert!(account.is_ok());
         let Ok(account) = account else {
@@ -472,7 +472,7 @@ mod wasm_tests {
         assert_eq!(account.account_type.as_str(), "secp256r1");
 
         let mut builder =
-            SessionSkBuilder::new(account.account.clone(), account.account_type.clone());
+            DelegationBuilder::new(account.account.clone(), account.account_type.clone());
         let proof = builder.unsigned_proof();
         let signature = account.sign_session_proof(&proof).await;
         assert!(signature.is_ok());
@@ -481,12 +481,15 @@ mod wasm_tests {
         };
         assert_eq!(signature.len(), 64);
 
-        builder = builder.set_session_sig(signature);
-        let session_key = builder.build();
-        assert!(session_key.is_ok());
-        let Ok(session_key) = session_key else {
+        builder = builder.set_delegator_signature(signature);
+        let delegatee_key = builder.build();
+        assert!(delegatee_key.is_ok());
+        let Ok(delegatee_key) = delegatee_key else {
             return;
         };
-        assert!(session_key.session().verify_self().is_ok());
+        assert!(delegatee_key
+            .delegation()
+            .verify_delegator_authorization()
+            .is_ok());
     }
 }

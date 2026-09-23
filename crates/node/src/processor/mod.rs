@@ -82,7 +82,7 @@ use crate::prelude::entry;
 use crate::prelude::wasm_export;
 use crate::prelude::ChordStorageInterface;
 use crate::prelude::ChordStorageInterfaceCacheChecker;
-use crate::prelude::SessionSk;
+use crate::prelude::DelegateeKey;
 use crate::registration::default_advertise_presence;
 use crate::registration::default_online_node_heartbeat_interval_secs;
 use crate::registration::default_online_node_ttl_secs;
@@ -212,8 +212,8 @@ impl From<HandshakeFailure> for Error {
 pub struct Processor {
     /// a swarm instance
     pub swarm: Arc<Swarm>,
-    /// Same session key held by the swarm transport; kept here for node-layer descriptor signing.
-    session_sk: SessionSk,
+    /// Same delegatee key held by the swarm transport; kept here for node-layer descriptor signing.
+    delegatee_key: DelegateeKey,
     /// Fresh process epoch shared by exit advertisement and exit-layer admission.
     onion_exit_epoch: OnionExitEpoch,
     onion_entry_guards: Arc<OnionEntryGuards>,
@@ -231,8 +231,8 @@ impl Processor {
         self.swarm.did()
     }
 
-    pub(crate) fn session_sk(&self) -> &SessionSk {
-        &self.session_sk
+    pub(crate) fn delegatee_key(&self) -> &DelegateeKey {
+        &self.delegatee_key
     }
 
     pub(crate) const fn onion_exit_epoch(&self) -> OnionExitEpoch {
@@ -705,9 +705,9 @@ impl Processor {
     /// Send an E2E handshake request to a DID.
     ///
     /// The negotiated key is the peer's account/identity secp256k1 key, not
-    /// the ephemeral session key.
+    /// the ephemeral delegatee key.
     pub async fn send_e2e_handshake(&self, destination: Did) -> Result<uuid::Uuid> {
-        let public_key = self.swarm.account_pubkey().map_err(Error::SendMessage)?;
+        let public_key = self.swarm.delegator_pubkey().map_err(Error::SendMessage)?;
         self.swarm
             .send_message(
                 Message::E2eHandshakeRequest(E2eHandshakeRequest::new(public_key)),
@@ -747,7 +747,7 @@ impl Processor {
     ) -> Result<uuid::Uuid> {
         e2e::ensure_public_key_matches_did(recipient_public_key, destination)
             .map_err(Error::SendMessage)?;
-        let sender_public_key = self.swarm.account_pubkey().map_err(Error::SendMessage)?;
+        let sender_public_key = self.swarm.delegator_pubkey().map_err(Error::SendMessage)?;
         let stream_id = uuid::Uuid::new_v4();
         let frames = e2e::encrypt_stream_frames(
             msg,
@@ -797,7 +797,7 @@ impl Processor {
     /// Create an E2E stream decryptor with this node's identity/signing secret key.
     ///
     /// The ciphertext is encrypted to the DID/account key negotiated by the
-    /// handshake. A session private key cannot decrypt it unless the session key
+    /// handshake. A session private key cannot decrypt it unless the delegatee key
     /// is also the account key, so callers must supply the local identity key
     /// explicitly.
     pub fn e2e_stream_decryptor(

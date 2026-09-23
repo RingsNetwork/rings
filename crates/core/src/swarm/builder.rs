@@ -7,6 +7,7 @@ use std::sync::Arc;
 use rings_transport::webrtc_config::WebrtcUdpPortRange;
 
 use crate::chunk::ReassemblyLimits;
+use crate::delegation::DelegateeKey;
 use crate::dht::EntryStorage;
 use crate::dht::PeerRing;
 use crate::dht::VirtualNodeConfig;
@@ -17,7 +18,6 @@ use crate::message::OriginQuotaConfig;
 use crate::message::ReplaySnapshot;
 use crate::message::ReplayStorage;
 use crate::message::TransactionReplay;
-use crate::session::SessionSk;
 use crate::swarm::callback::DefaultCallback;
 use crate::swarm::callback::SharedSwarmCallback;
 use crate::swarm::callback::SwarmCallbackSlot;
@@ -41,7 +41,7 @@ pub struct SwarmBuilder {
     dht_storage: EntryStorage,
     replay_storage: ReplayStorage,
     origin_quota: OriginQuotaConfig,
-    session_sk: SessionSk,
+    delegatee_key: DelegateeKey,
     session_ttl: Option<usize>,
     measure: Option<MeasureImpl>,
     callback: Option<SharedSwarmCallback>,
@@ -53,7 +53,7 @@ impl SwarmBuilder {
         network_id: u32,
         ice_servers: &str,
         dht_storage: EntryStorage,
-        session_sk: SessionSk,
+        delegatee_key: DelegateeKey,
     ) -> Self {
         SwarmBuilder {
             network_id,
@@ -68,7 +68,7 @@ impl SwarmBuilder {
             dht_storage,
             replay_storage: Box::new(crate::storage::MemStorage::<ReplaySnapshot>::new()),
             origin_quota: OriginQuotaConfig::default(),
-            session_sk,
+            delegatee_key,
             session_ttl: None,
             measure: None,
             callback: None,
@@ -163,7 +163,7 @@ impl SwarmBuilder {
 
     /// Try build for `Swarm`.
     pub fn build(self) -> Swarm {
-        let dht_did = self.session_sk.account_did();
+        let dht_did = self.delegatee_key.delegator_did();
         let storage_virtual_node_config =
             VirtualNodeConfig::new(self.network_id, self.dht_virtual_nodes);
 
@@ -186,7 +186,7 @@ impl SwarmBuilder {
                 self.external_address,
                 self.webrtc_udp_port_range,
             ),
-            session_sk: self.session_sk,
+            delegatee_key: self.delegatee_key,
             dht: dht.clone(),
             measure: self.measure,
             transaction_replay: Arc::new(TransactionReplay::new_with_quota(

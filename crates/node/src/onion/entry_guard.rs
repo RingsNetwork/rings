@@ -218,7 +218,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::prelude::SessionSk;
+    use crate::prelude::DelegateeKey;
 
     struct FixedEntropy {
         values: VecDeque<u64>,
@@ -239,10 +239,10 @@ mod tests {
     }
 
     fn relay() -> Result<OnionRouteHop> {
-        let session_sk = SessionSk::new_with_seckey(&SecretKey::random())?;
+        let delegatee_key = DelegateeKey::new_with_seckey(&SecretKey::random())?;
         Ok(OnionRouteHop::new(
-            session_sk.account_did(),
-            session_sk.session_public_key(),
+            delegatee_key.delegator_did(),
+            delegatee_key.delegatee_public_key(),
         ))
     }
 

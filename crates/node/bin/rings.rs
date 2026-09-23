@@ -41,7 +41,7 @@ use rings_node::prelude::rings_core::chunk::ReassemblyLimits;
 use rings_node::prelude::rings_core::dht::Did;
 use rings_node::prelude::rings_core::ecc::SecretKey;
 use rings_node::prelude::rings_core::storage::file::FileStorage;
-use rings_node::prelude::SessionSkBuilder;
+use rings_node::prelude::DelegationBuilder;
 use rings_node::prelude::StopSource;
 use rings_node::processor::ProcessorBuilder;
 use rings_node::processor::ProcessorConfig;
@@ -179,8 +179,8 @@ fn payload_arg_or_stdin(value: &str) -> anyhow::Result<String> {
 enum Command {
     #[command(about = "Initializes a node with the given configuration.")]
     Init(InitCommand),
-    #[command(about = "Creates a new session secret key.")]
-    NewSession(NewSessionCommand),
+    #[command(about = "Creates a new delegatee signing key.")]
+    NewDelegation(NewDelegationCommand),
     #[command(about = "Runs a foreground, composable Rings node.")]
     Run(Box<RunCommand>),
     #[command(about = "Provides chat room-like functionality on the Rings Network.")]
@@ -214,7 +214,7 @@ struct ConfigArgs {
 #[derive(Args, Debug)]
 struct InitCommand {
     #[command(flatten)]
-    session_args: SessionArgs,
+    delegation_args: DelegationArgs,
 
     #[arg(
         long,
@@ -225,9 +225,9 @@ struct InitCommand {
 }
 
 #[derive(Args, Debug)]
-struct NewSessionCommand {
+struct NewDelegationCommand {
     #[command(flatten)]
-    session_args: SessionArgs,
+    delegation_args: DelegationArgs,
 }
 
 #[derive(Args, Debug)]
@@ -479,14 +479,14 @@ impl ClientArgs {
 }
 
 #[derive(Args, Debug)]
-struct SessionArgs {
+struct DelegationArgs {
     #[arg(
         long,
         short = 's',
-        default_value = "~/.rings/session_sk",
-        help = "The location of session_sk file"
+        default_value = "~/.rings/delegatee_key",
+        help = "The location of delegatee_key file"
     )]
-    pub session_sk: String,
+    pub delegatee_key: String,
 
     #[arg(
         long,
@@ -506,30 +506,33 @@ struct SessionArgs {
     #[arg(
         long,
         default_value = "2592000",
-        help = "The ttl of session file in seconds"
+        help = "The ttl of delegation file in seconds"
     )]
     pub ttl: u64,
 }
 
-impl SessionArgs {
-    fn new_session_then_write_to_fs(&self) -> anyhow::Result<&std::path::Path> {
+impl DelegationArgs {
+    fn new_delegation_then_write_to_fs(&self) -> anyhow::Result<&std::path::Path> {
         let key = self.load_or_create_key()?;
         let key_did: Did = key.address().into();
 
-        let ssk_builder = SessionSkBuilder::new(key_did.to_string(), "secp256k1".to_string())
+        let ssk_builder = DelegationBuilder::new(key_did.to_string(), "secp256k1".to_string())
             .set_ttl(self.ttl * 1000);
         let unsigned_proof = ssk_builder.unsigned_proof();
 
         let sig = key.sign(&unsigned_proof)?.to_vec();
-        let ssk_builder = ssk_builder.set_session_sig(sig);
+        let ssk_builder = ssk_builder.set_delegator_signature(sig);
 
         let ssk = ssk_builder.build()?;
         let ssk_dump = ssk.dump()?;
 
-        let ssk_path = std::path::Path::new(&self.session_sk);
+        let ssk_path = std::path::Path::new(&self.delegatee_key);
         ensure_parent_dir(ssk_path)?;
         std::fs::write(expand_home(ssk_path)?, ssk_dump)?;
-        println!("Your session_sk file has saved to: {}", ssk_path.display());
+        println!(
+            "Your delegatee_key file has saved to: {}",
+            ssk_path.display()
+        );
 
         Ok(ssk_path)
     }
@@ -817,7 +820,7 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
         args.allow_remote_external_api,
     )?;
 
-    let onion_session_sk = pc.session_sk();
+    let onion_delegatee_key = pc.delegatee_key();
     let advertise_onion_relay = c.advertise_onion_relay;
     let advertise_onion_exit = c.advertise_onion_exit;
     let onion_exit_services = c.onion_exit_services.clone();
@@ -874,7 +877,8 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
         .await?,
     );
 
-    let collector = EvidenceCollectorIdentity::new(pc.network_id(), pc.session_sk().account_did());
+    let collector =
+        EvidenceCollectorIdentity::new(pc.network_id(), pc.delegatee_key().delegator_did());
     let measure = PeriodicMeasure::new_with_evidence_storage(
         per_measure_storage,
         per_evidence_storage,
@@ -903,7 +907,7 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
         .transpose()?;
     let onion = NativeOnionCircuitHandle::install(
         &provider.extensions(),
-        onion_session_sk,
+        onion_delegatee_key,
         pc.network_id(),
         advertise_onion_relay,
         onion_exit_config,
@@ -1314,8 +1318,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             Ok(())
         }
         Command::Init(args) => {
-            let session_sk_path = args.session_args.new_session_then_write_to_fs()?;
-            let config = config::Config::new(session_sk_path);
+            let delegatee_key_path = args.delegation_args.new_delegation_then_write_to_fs()?;
+            let config = config::Config::new(delegatee_key_path);
             let p = config.write_fs(&args.location)?;
             let api_token = load_or_create_api_token(&p, config.api_token_path.as_deref())?;
             println!("Your config file has saved to: {p}");
@@ -1325,8 +1329,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             );
             Ok(())
         }
-        Command::NewSession(args) => {
-            args.session_args.new_session_then_write_to_fs()?;
+        Command::NewDelegation(args) => {
+            args.delegation_args.new_delegation_then_write_to_fs()?;
             Ok(())
         }
         Command::Inspect(args) => {
@@ -1368,7 +1372,7 @@ mod tests {
     #[test]
     fn test_cli_default_log_level_is_error() {
         let parsed =
-            parse_without_log_level_env(["rings", "--runtime", "current-thread", "new-session"]);
+            parse_without_log_level_env(["rings", "--runtime", "current-thread", "new-delegation"]);
 
         assert!(matches!(
             parsed,
@@ -1387,7 +1391,7 @@ mod tests {
             "debug",
             "--runtime",
             "current-thread",
-            "new-session",
+            "new-delegation",
         ]);
 
         assert!(matches!(

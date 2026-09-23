@@ -64,7 +64,7 @@ impl Client {
     ///
     /// This function allows two peers to establish a WebRTC connection using HTTP,
     /// which can be useful in scenarios where a direct peer-to-peer connection is not possible due to firewall restrictions or other network issues.
-    /// The function sends ICE candidates and Session Description Protocol (SDP) messages over HTTP as a form of signaling to establish the connection.
+    /// The function sends ICE candidates and Delegation Description Protocol (SDP) messages over HTTP as a form of signaling to establish the connection.
     ///
     /// Takes a URL for an HTTP server that will be used as the signaling channel to exchange ICE candidates and SDP with the remote peer.
     /// Returns a Did that can be used to refer to this connection in subsequent WebRTC operations.

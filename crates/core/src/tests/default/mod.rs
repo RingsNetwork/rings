@@ -10,6 +10,7 @@ use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tokio::time::Duration;
 
+use crate::delegation::DelegateeKey;
 use crate::dht::entry::Entry;
 use crate::dht::Did;
 use crate::dht::PeerRing;
@@ -20,7 +21,6 @@ use crate::measure::MeasureImpl;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
-use crate::session::SessionSk;
 use crate::storage::MemStorage;
 use crate::swarm::callback::SwarmCallback;
 use crate::swarm::Swarm;
@@ -228,8 +228,8 @@ fn prepare_node_with_optional_measure(
     let stun = "stun://stun.l.google.com:19302";
     let storage = Box::new(MemStorage::new());
 
-    let session_sk = SessionSk::new_with_seckey(&key)?;
-    let builder = SwarmBuilder::new(crate::tests::TEST_NETWORK_ID, stun, storage, session_sk)
+    let delegatee_key = DelegateeKey::new_with_seckey(&key)?;
+    let builder = SwarmBuilder::new(crate::tests::TEST_NETWORK_ID, stun, storage, delegatee_key)
         .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
         .dht_virtual_nodes(0);
     let builder = match measure {

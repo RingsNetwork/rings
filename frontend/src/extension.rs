@@ -343,7 +343,7 @@ async fn start_headless_node_inner(
     set_headless_starting_for_generation(
         &state,
         &generation,
-        "authorizing session key".to_string(),
+        "authorizing delegatee key".to_string(),
         None,
         true,
     );

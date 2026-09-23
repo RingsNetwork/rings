@@ -1,18 +1,22 @@
 //! Laws of the two link tables, checked over explicit instants: every step takes the instant it
 //! is judged at, and no test waits.
 
-use super::AnnouncedSessions;
+use super::AnnouncedDelegations;
 use super::Announcement;
 use super::Digests;
 use super::FrameArrival;
-use super::ReferencedSessions;
+use super::ReferencedDelegations;
 use super::ResolvedFrame;
 use super::Swept;
 use super::ANNOUNCED_TABLE_CAPACITY;
 use super::REFERENCED_TABLE_CAPACITY;
+use crate::delegation::DelegateeKey;
+use crate::delegation::Delegation;
+use crate::delegation::DelegationDigest;
 use crate::dht::Did;
 use crate::ecc::SecretKey;
 use crate::error::Result;
+use crate::message::DelegationRef;
 use crate::message::HopBudget;
 use crate::message::LinkControl;
 use crate::message::LinkFrame;
@@ -21,14 +25,10 @@ use crate::message::MessagePayload;
 use crate::message::MessageRelay;
 use crate::message::MessageSigner;
 use crate::message::PerSlot;
-use crate::message::SessionRef;
 use crate::message::SlotEncoding;
 use crate::message::Transaction;
 use crate::message::WirePayload;
-use crate::session::Session;
-use crate::session::SessionDigest;
-use crate::session::SessionSk;
-use crate::tests::session_sk_with_ttl;
+use crate::tests::delegatee_key_with_ttl;
 use crate::tests::TEST_NETWORK_ID;
 use crate::utils::get_epoch_ms;
 
@@ -43,7 +43,11 @@ const SHORT_SESSION_TTL_MS: u64 = 60_000;
 const GENERATION: u64 = 3;
 
 /// A payload whose transaction is signed by `origin` and whose carrier is signed by `hop`.
-fn relayed_payload(origin: &SessionSk, hop: &SessionSk, sequence: u64) -> Result<MessagePayload> {
+fn relayed_payload(
+    origin: &DelegateeKey,
+    hop: &DelegateeKey,
+    sequence: u64,
+) -> Result<MessagePayload> {
     let destination: Did = SecretKey::random().address().into();
     let transaction = Transaction::new(
         destination,
@@ -59,7 +63,7 @@ fn relayed_payload(origin: &SessionSk, hop: &SessionSk, sequence: u64) -> Result
 /// The frame a receiver decodes when `payload` is sent with `sessions` in its slots.
 fn received<'a>(
     payload: &'a MessagePayload,
-    sessions: PerSlot<SessionRef<'a>>,
+    sessions: PerSlot<DelegationRef<'a>>,
 ) -> Result<Box<WirePayload<'static>>> {
     let bytes = WirePayload::view(payload, sessions).to_wire()?;
     match LinkFrame::from_wire(bytes.as_ref())? {
@@ -69,22 +73,22 @@ fn received<'a>(
 }
 
 /// `session` by reference.
-fn by_digest(session: &Session) -> Result<SessionRef<'static>> {
-    session.digest().map(SessionRef::Digest)
+fn by_digest(session: &Delegation) -> Result<DelegationRef<'static>> {
+    session.digest().map(DelegationRef::Digest)
 }
 
 /// A frame of `payload` whose origin slot is by reference and whose hop slot is inline.
 fn origin_referenced(payload: &MessagePayload) -> Result<Box<WirePayload<'static>>> {
-    let sessions = payload.sessions();
+    let sessions = payload.delegations();
     received(payload, PerSlot {
         origin: by_digest(sessions.origin)?,
-        hop: SessionRef::inline(sessions.hop),
+        hop: DelegationRef::inline(sessions.hop),
     })
 }
 
 /// The frame a sender in state `sender` puts on the wire for `payload`.
 fn sent(
-    sender: &mut AnnouncedSessions,
+    sender: &mut AnnouncedDelegations,
     payload: &MessagePayload,
     now_ms: u128,
 ) -> Result<Box<WirePayload<'static>>> {
@@ -94,7 +98,7 @@ fn sent(
 
 /// How each slot of `frame` travelled.
 fn encoding(frame: &WirePayload<'_>) -> PerSlot<SlotEncoding> {
-    frame.session_refs().map(SessionRef::encoding)
+    frame.delegation_refs().map(DelegationRef::encoding)
 }
 
 /// Both slots inline.
@@ -110,12 +114,12 @@ const BOTH_REFERENCED: PerSlot<SlotEncoding> = PerSlot {
 };
 
 /// A receiver with the test hold bounds.
-fn receiver<F>() -> ReferencedSessions<F> {
-    ReferencedSessions::new(HOLD_CAPACITY, HOLD_TIMEOUT_MS)
+fn receiver<F>() -> ReferencedDelegations<F> {
+    ReferencedDelegations::new(HOLD_CAPACITY, HOLD_TIMEOUT_MS)
 }
 
 /// The digest set `{digests}`.
-fn digests<const N: usize>(digests: [SessionDigest; N]) -> Digests {
+fn digests<const N: usize>(digests: [DelegationDigest; N]) -> Digests {
     Digests::from(digests)
 }
 
@@ -144,7 +148,7 @@ fn expect_held<F>(arrival: FrameArrival<F>) -> Digests {
 /// Deliver a frame the receiver resolved: verify it and let the link learn from it, as the
 /// shell does; the digests to confirm to the peer.
 fn deliver(
-    receiver: &mut ReferencedSessions<u8>,
+    receiver: &mut ReferencedDelegations<u8>,
     resolved: Box<ResolvedFrame<u8>>,
     now_ms: u128,
 ) -> Result<Digests> {
@@ -156,7 +160,7 @@ fn deliver(
 
 /// Arrive and deliver a frame that must resolve; the digests to confirm.
 fn arrive_and_deliver(
-    receiver: &mut ReferencedSessions<u8>,
+    receiver: &mut ReferencedDelegations<u8>,
     frame: Box<WirePayload<'static>>,
     carrier: u8,
     now_ms: u128,
@@ -167,7 +171,7 @@ fn arrive_and_deliver(
 
 /// The carriers and payloads of every held frame that resolves now, in release order.
 fn released(
-    receiver: &mut ReferencedSessions<u8>,
+    receiver: &mut ReferencedDelegations<u8>,
     now_ms: u128,
 ) -> Result<Vec<(u8, MessagePayload)>> {
     let mut out = Vec::new();
@@ -185,10 +189,10 @@ fn released(
 #[test]
 fn test_sender_references_only_confirmed_sessions() -> Result<()> {
     let now_ms = get_epoch_ms();
-    let origin = SessionSk::new_with_seckey(&SecretKey::random())?;
-    let hop = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let origin = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let hop = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let payload = relayed_payload(&origin, &hop, 0)?;
-    let mut sender = AnnouncedSessions::new();
+    let mut sender = AnnouncedDelegations::new();
 
     for _ in 0..3 {
         assert_eq!(
@@ -196,7 +200,7 @@ fn test_sender_references_only_confirmed_sessions() -> Result<()> {
             BOTH_INLINE
         );
     }
-    sender.acknowledge(GENERATION, origin.session().digest()?);
+    sender.acknowledge(GENERATION, origin.delegation().digest()?);
     assert_eq!(
         encoding(sent(&mut sender, &payload, now_ms)?.as_ref()),
         PerSlot {
@@ -204,10 +208,10 @@ fn test_sender_references_only_confirmed_sessions() -> Result<()> {
             hop: SlotEncoding::Inline,
         }
     );
-    sender.acknowledge(GENERATION, hop.session().digest()?);
+    sender.acknowledge(GENERATION, hop.delegation().digest()?);
     assert_eq!(sender.encode(GENERATION, &payload, now_ms)?, PerSlot {
-        origin: by_digest(&origin.session())?,
-        hop: by_digest(&hop.session())?,
+        origin: by_digest(&origin.delegation())?,
+        hop: by_digest(&hop.delegation())?,
     });
     Ok(())
 }
@@ -216,20 +220,20 @@ fn test_sender_references_only_confirmed_sessions() -> Result<()> {
 #[test]
 fn test_unannounced_confirmation_marks_nothing() -> Result<()> {
     let now_ms = get_epoch_ms();
-    let node = SessionSk::new_with_seckey(&SecretKey::random())?;
-    let stranger = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let node = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let stranger = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let payload = relayed_payload(&node, &node, 0)?;
-    let mut sender = AnnouncedSessions::new();
+    let mut sender = AnnouncedDelegations::new();
 
-    sender.acknowledge(GENERATION, stranger.session().digest()?);
-    sender.acknowledge(GENERATION, node.session().digest()?);
+    sender.acknowledge(GENERATION, stranger.delegation().digest()?);
+    sender.acknowledge(GENERATION, node.delegation().digest()?);
     assert_eq!(
         encoding(sent(&mut sender, &payload, now_ms)?.as_ref()),
         BOTH_INLINE
     );
     assert_eq!(
-        sender.answer(GENERATION, stranger.session().digest()?, now_ms),
-        LinkControl::Unknown(stranger.session().digest()?)
+        sender.answer(GENERATION, stranger.delegation().digest()?, now_ms),
+        LinkControl::Unknown(stranger.delegation().digest()?)
     );
     Ok(())
 }
@@ -239,26 +243,26 @@ fn test_unannounced_confirmation_marks_nothing() -> Result<()> {
 #[test]
 fn test_steady_state_frame_carries_digests_instead_of_sessions() -> Result<()> {
     let now_ms = get_epoch_ms();
-    let origin = SessionSk::new_with_seckey(&SecretKey::random())?;
-    let hop = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let origin = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let hop = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let payload = relayed_payload(&origin, &hop, 0)?;
-    let mut sender = AnnouncedSessions::new();
+    let mut sender = AnnouncedDelegations::new();
 
     let first = sender.encode(GENERATION, &payload, now_ms)?;
     let first_size = WirePayload::view(&payload, first).wire_size()?;
-    sender.acknowledge(GENERATION, origin.session().digest()?);
-    sender.acknowledge(GENERATION, hop.session().digest()?);
+    sender.acknowledge(GENERATION, origin.delegation().digest()?);
+    sender.acknowledge(GENERATION, hop.delegation().digest()?);
     let steady = sender.encode(GENERATION, &payload, now_ms)?;
     let steady_size = WirePayload::view(&payload, steady).wire_size()?;
 
-    let session_bytes = |session: &Session| -> Result<usize> {
+    let session_bytes = |session: &Delegation| -> Result<usize> {
         Ok(rings_codec::serialize(session)
             .map_err(crate::error::Error::CodecSerialize)?
             .len())
     };
-    let digest_bytes = origin.session().digest()?.into_bytes().len();
+    let digest_bytes = origin.delegation().digest()?.into_bytes().len();
     assert_eq!(digest_bytes, 20);
-    let saved = session_bytes(&origin.session())? + session_bytes(&hop.session())?;
+    let saved = session_bytes(&origin.delegation())? + session_bytes(&hop.delegation())?;
     assert_eq!(first_size, payload.wire_size()?);
     assert_eq!(first_size - steady_size, saved - 2 * digest_bytes);
     Ok(())
@@ -269,10 +273,10 @@ fn test_steady_state_frame_carries_digests_instead_of_sessions() -> Result<()> {
 #[test]
 fn test_sender_table_is_scoped_to_its_generation() -> Result<()> {
     let now_ms = get_epoch_ms();
-    let node = SessionSk::new_with_seckey(&SecretKey::random())?;
-    let digest = node.session().digest()?;
+    let node = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let digest = node.delegation().digest()?;
     let payload = relayed_payload(&node, &node, 0)?;
-    let mut sender = AnnouncedSessions::new();
+    let mut sender = AnnouncedDelegations::new();
     sent(&mut sender, &payload, now_ms)?;
     sender.acknowledge(GENERATION, digest);
     assert_eq!(
@@ -281,14 +285,14 @@ fn test_sender_table_is_scoped_to_its_generation() -> Result<()> {
     );
 
     let next = sender.encode(GENERATION + 1, &payload, now_ms)?;
-    assert_eq!(next, payload.sessions().map(SessionRef::inline));
+    assert_eq!(next, payload.delegations().map(DelegationRef::inline));
     assert_eq!(
         sender.answer(GENERATION, digest, now_ms),
         LinkControl::Unknown(digest)
     );
     sender.acknowledge(GENERATION, digest);
     let stale = sender.encode(GENERATION, &payload, now_ms)?;
-    assert_eq!(stale, payload.sessions().map(SessionRef::inline));
+    assert_eq!(stale, payload.delegations().map(DelegationRef::inline));
     assert_eq!(
         encoding(sent(&mut sender, &payload, now_ms)?.as_ref()),
         BOTH_INLINE
@@ -301,11 +305,11 @@ fn test_sender_table_is_scoped_to_its_generation() -> Result<()> {
 #[test]
 fn test_sender_expiry_forces_reannouncement() -> Result<()> {
     // The session is stamped before `now_ms`, so `now_ms + ttl + 1` is past its expiry.
-    let node = session_sk_with_ttl(SHORT_SESSION_TTL_MS)?;
+    let node = delegatee_key_with_ttl(SHORT_SESSION_TTL_MS)?;
     let now_ms = get_epoch_ms();
-    let digest = node.session().digest()?;
+    let digest = node.delegation().digest()?;
     let payload = relayed_payload(&node, &node, 0)?;
-    let mut sender = AnnouncedSessions::new();
+    let mut sender = AnnouncedDelegations::new();
     sent(&mut sender, &payload, now_ms)?;
     sender.acknowledge(GENERATION, digest);
     assert_eq!(
@@ -314,7 +318,7 @@ fn test_sender_expiry_forces_reannouncement() -> Result<()> {
     );
     assert_eq!(
         sender.answer(GENERATION, digest, now_ms),
-        LinkControl::Announce(node.session())
+        LinkControl::Announce(node.delegation())
     );
 
     let expired_ms = now_ms + u128::from(SHORT_SESSION_TTL_MS) + 1;
@@ -334,9 +338,9 @@ fn test_sender_expiry_forces_reannouncement() -> Result<()> {
 #[test]
 fn test_sender_table_is_bounded_and_forgets_least_recently_referenced() -> Result<()> {
     let now_ms = get_epoch_ms();
-    let hop = SessionSk::new_with_seckey(&SecretKey::random())?;
-    let first_origin = SessionSk::new_with_seckey(&SecretKey::random())?;
-    let mut sender = AnnouncedSessions::new();
+    let hop = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let first_origin = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let mut sender = AnnouncedDelegations::new();
     sent(
         &mut sender,
         &relayed_payload(&first_origin, &hop, 0)?,
@@ -345,17 +349,17 @@ fn test_sender_table_is_bounded_and_forgets_least_recently_referenced() -> Resul
 
     // `hop` is referenced by every frame, so it stays; `first_origin` is never referenced again.
     for _ in 0..ANNOUNCED_TABLE_CAPACITY {
-        let origin = SessionSk::new_with_seckey(&SecretKey::random())?;
+        let origin = DelegateeKey::new_with_seckey(&SecretKey::random())?;
         sent(&mut sender, &relayed_payload(&origin, &hop, 0)?, now_ms)?;
     }
 
     assert_eq!(
-        sender.answer(GENERATION, first_origin.session().digest()?, now_ms),
-        LinkControl::Unknown(first_origin.session().digest()?)
+        sender.answer(GENERATION, first_origin.delegation().digest()?, now_ms),
+        LinkControl::Unknown(first_origin.delegation().digest()?)
     );
     assert_eq!(
-        sender.answer(GENERATION, hop.session().digest()?, now_ms),
-        LinkControl::Announce(hop.session())
+        sender.answer(GENERATION, hop.delegation().digest()?, now_ms),
+        LinkControl::Announce(hop.delegation())
     );
     Ok(())
 }
@@ -366,10 +370,10 @@ fn test_sender_table_is_bounded_and_forgets_least_recently_referenced() -> Resul
 #[test]
 fn test_loss_drifts_the_orders_and_the_sender_still_answers_the_miss() -> Result<()> {
     let now_ms = get_epoch_ms();
-    let hop = SessionSk::new_with_seckey(&SecretKey::random())?;
-    let origin = SessionSk::new_with_seckey(&SecretKey::random())?;
-    let origin_digest = origin.session().digest()?;
-    let mut sender = AnnouncedSessions::new();
+    let hop = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let origin = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let origin_digest = origin.delegation().digest()?;
+    let mut sender = AnnouncedDelegations::new();
     let mut receiver = receiver();
     let first = sent(&mut sender, &relayed_payload(&origin, &hop, 0)?, now_ms)?;
     for digest in arrive_and_deliver(&mut receiver, first, 0, now_ms)? {
@@ -379,7 +383,7 @@ fn test_loss_drifts_the_orders_and_the_sender_still_answers_the_miss() -> Result
     // Each round delivers one other origin to both ends, then loses a frame that references
     // `origin`: the sender keeps `origin` most recent, the receiver never sees it touched.
     for _ in 0..REFERENCED_TABLE_CAPACITY {
-        let other = SessionSk::new_with_seckey(&SecretKey::random())?;
+        let other = DelegateeKey::new_with_seckey(&SecretKey::random())?;
         let delivered = sent(&mut sender, &relayed_payload(&other, &hop, 0)?, now_ms)?;
         for digest in arrive_and_deliver(&mut receiver, delivered, 1, now_ms)? {
             sender.acknowledge(GENERATION, digest);
@@ -397,7 +401,7 @@ fn test_loss_drifts_the_orders_and_the_sender_still_answers_the_miss() -> Result
     );
     assert_eq!(
         sender.answer(GENERATION, origin_digest, now_ms),
-        LinkControl::Announce(origin.session())
+        LinkControl::Announce(origin.delegation())
     );
     Ok(())
 }
@@ -409,10 +413,10 @@ fn test_loss_drifts_the_orders_and_the_sender_still_answers_the_miss() -> Result
 #[test]
 fn test_receiver_table_is_bounded_and_outlasts_the_sender_table() -> Result<()> {
     let now_ms = get_epoch_ms();
-    let hop = SessionSk::new_with_seckey(&SecretKey::random())?;
-    let first_origin = SessionSk::new_with_seckey(&SecretKey::random())?;
-    let first_digest = first_origin.session().digest()?;
-    let mut sender = AnnouncedSessions::new();
+    let hop = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let first_origin = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let first_digest = first_origin.delegation().digest()?;
+    let mut sender = AnnouncedDelegations::new();
     let mut receiver = receiver();
     let first = sent(
         &mut sender,
@@ -424,12 +428,12 @@ fn test_receiver_table_is_bounded_and_outlasts_the_sender_table() -> Result<()> 
     }
 
     // `hop` is referenced by every frame, so both tables keep it; each origin is seen once.
-    let relay_others = |sender: &mut AnnouncedSessions,
-                        receiver: &mut ReferencedSessions<u8>,
+    let relay_others = |sender: &mut AnnouncedDelegations,
+                        receiver: &mut ReferencedDelegations<u8>,
                         count: usize|
      -> Result<()> {
         for _ in 0..count {
-            let origin = SessionSk::new_with_seckey(&SecretKey::random())?;
+            let origin = DelegateeKey::new_with_seckey(&SecretKey::random())?;
             let frame = sent(sender, &relayed_payload(&origin, &hop, 0)?, now_ms)?;
             assert_eq!(encoding(frame.as_ref()).hop, SlotEncoding::Referenced);
             for digest in arrive_and_deliver(receiver, frame, 1, now_ms)? {
@@ -472,9 +476,9 @@ fn test_receiver_table_is_bounded_and_outlasts_the_sender_table() -> Result<()> 
 #[test]
 fn test_confirmation_exchange_reaches_references_and_resolves() -> Result<()> {
     let now_ms = get_epoch_ms();
-    let origin = SessionSk::new_with_seckey(&SecretKey::random())?;
-    let hop = SessionSk::new_with_seckey(&SecretKey::random())?;
-    let mut sender = AnnouncedSessions::new();
+    let origin = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let hop = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let mut sender = AnnouncedDelegations::new();
     let mut receiver = receiver();
 
     let payload = relayed_payload(&origin, &hop, 0)?;
@@ -485,7 +489,7 @@ fn test_confirmation_exchange_reaches_references_and_resolves() -> Result<()> {
     let confirm = deliver(&mut receiver, resolved, now_ms)?;
     assert_eq!(
         confirm,
-        digests([origin.session().digest()?, hop.session().digest()?])
+        digests([origin.delegation().digest()?, hop.delegation().digest()?])
     );
     for digest in confirm {
         sender.acknowledge(GENERATION, digest);
@@ -512,9 +516,9 @@ fn test_confirmation_exchange_reaches_references_and_resolves() -> Result<()> {
 #[test]
 fn test_loss_and_reordering_before_confirmation_never_miss() -> Result<()> {
     let now_ms = get_epoch_ms();
-    let node = SessionSk::new_with_seckey(&SecretKey::random())?;
-    let digest = node.session().digest()?;
-    let mut sender = AnnouncedSessions::new();
+    let node = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let digest = node.delegation().digest()?;
+    let mut sender = AnnouncedDelegations::new();
     let mut receiver = receiver();
 
     let lost = sent(&mut sender, &relayed_payload(&node, &node, 0)?, now_ms)?;
@@ -545,19 +549,19 @@ fn test_loss_and_reordering_before_confirmation_never_miss() -> Result<()> {
 #[test]
 fn test_origin_session_miss_is_repaired_by_announcement() -> Result<()> {
     let now_ms = get_epoch_ms();
-    let origin = SessionSk::new_with_seckey(&SecretKey::random())?;
-    let hop = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let origin = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let hop = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let payload = relayed_payload(&origin, &hop, 0)?;
     let mut receiver = receiver();
 
     assert_eq!(
         expect_held(receiver.arrive(origin_referenced(&payload)?, 7u8, now_ms)?),
-        digests([origin.session().digest()?])
+        digests([origin.delegation().digest()?])
     );
     assert!(receiver.release_next(now_ms)?.is_none());
 
     assert!(matches!(
-        receiver.announce(origin.session(), now_ms)?,
+        receiver.announce(origin.delegation(), now_ms)?,
         Announcement::Admitted
     ));
     assert_eq!(released(&mut receiver, now_ms)?, vec![(7, payload)]);
@@ -569,21 +573,21 @@ fn test_origin_session_miss_is_repaired_by_announcement() -> Result<()> {
 #[test]
 fn test_hop_session_miss_is_repaired_by_announcement() -> Result<()> {
     let now_ms = get_epoch_ms();
-    let origin = SessionSk::new_with_seckey(&SecretKey::random())?;
-    let hop = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let origin = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let hop = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let payload = relayed_payload(&origin, &hop, 0)?;
     let frame = received(&payload, PerSlot {
-        origin: SessionRef::inline(&origin.session()),
-        hop: by_digest(&hop.session())?,
+        origin: DelegationRef::inline(&origin.delegation()),
+        hop: by_digest(&hop.delegation())?,
     })?;
     let mut receiver = receiver();
 
     assert_eq!(
         expect_held(receiver.arrive(frame, 7u8, now_ms)?),
-        digests([hop.session().digest()?])
+        digests([hop.delegation().digest()?])
     );
     assert!(matches!(
-        receiver.announce(hop.session(), now_ms)?,
+        receiver.announce(hop.delegation(), now_ms)?,
         Announcement::Admitted
     ));
     assert_eq!(released(&mut receiver, now_ms)?, vec![(7, payload)]);
@@ -596,9 +600,9 @@ fn test_hop_session_miss_is_repaired_by_announcement() -> Result<()> {
 #[test]
 fn test_miss_is_answered_from_the_sender_table() -> Result<()> {
     let now_ms = get_epoch_ms();
-    let node = SessionSk::new_with_seckey(&SecretKey::random())?;
-    let digest = node.session().digest()?;
-    let mut sender = AnnouncedSessions::new();
+    let node = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let digest = node.delegation().digest()?;
+    let mut sender = AnnouncedDelegations::new();
     sent(&mut sender, &relayed_payload(&node, &node, 0)?, now_ms)?;
     sender.acknowledge(GENERATION, digest);
 
@@ -631,9 +635,9 @@ fn test_miss_is_answered_from_the_sender_table() -> Result<()> {
 fn test_held_frames_never_wait_for_each_other_and_resolvable_ones_leave_earliest_first(
 ) -> Result<()> {
     let now_ms = get_epoch_ms();
-    let first_stranger = SessionSk::new_with_seckey(&SecretKey::random())?;
-    let second_stranger = SessionSk::new_with_seckey(&SecretKey::random())?;
-    let hop = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let first_stranger = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let second_stranger = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let hop = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let mut receiver = receiver();
 
     let first = relayed_payload(&first_stranger, &hop, 0)?;
@@ -642,23 +646,23 @@ fn test_held_frames_never_wait_for_each_other_and_resolvable_ones_leave_earliest
     let ready = relayed_payload(&hop, &hop, 0)?;
     assert_eq!(
         expect_held(receiver.arrive(origin_referenced(&first)?, 1u8, now_ms)?),
-        digests([first_stranger.session().digest()?])
+        digests([first_stranger.delegation().digest()?])
     );
     assert_eq!(
         expect_held(receiver.arrive(origin_referenced(&second)?, 2u8, now_ms)?),
-        digests([second_stranger.session().digest()?])
+        digests([second_stranger.delegation().digest()?])
     );
     // The third misses what the first already awaits, and asks again all the same.
     assert_eq!(
         expect_held(receiver.arrive(origin_referenced(&third)?, 3u8, now_ms)?),
-        digests([first_stranger.session().digest()?])
+        digests([first_stranger.delegation().digest()?])
     );
-    let ready_frame = received(&ready, ready.sessions().map(SessionRef::inline))?;
+    let ready_frame = received(&ready, ready.delegations().map(DelegationRef::inline))?;
     expect_resolved(receiver.arrive(ready_frame, 4u8, now_ms)?);
     assert_eq!(receiver.held_len(), 3);
 
     assert!(matches!(
-        receiver.announce(first_stranger.session(), now_ms)?,
+        receiver.announce(first_stranger.delegation(), now_ms)?,
         Announcement::Admitted
     ));
     assert_eq!(released(&mut receiver, now_ms)?, vec![
@@ -667,7 +671,7 @@ fn test_held_frames_never_wait_for_each_other_and_resolvable_ones_leave_earliest
     ]);
     assert_eq!(receiver.held_len(), 1);
     assert!(matches!(
-        receiver.announce(second_stranger.session(), now_ms)?,
+        receiver.announce(second_stranger.delegation(), now_ms)?,
         Announcement::Admitted
     ));
     assert_eq!(released(&mut receiver, now_ms)?, vec![(2, second)]);
@@ -679,11 +683,11 @@ fn test_held_frames_never_wait_for_each_other_and_resolvable_ones_leave_earliest
 #[test]
 fn test_overflow_drops_the_newcomer_and_asks_the_oldest_question_again() -> Result<()> {
     let now_ms = get_epoch_ms();
-    let stranger = SessionSk::new_with_seckey(&SecretKey::random())?;
-    let newcomer_stranger = SessionSk::new_with_seckey(&SecretKey::random())?;
-    let hop = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let stranger = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let newcomer_stranger = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let hop = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let mut receiver = receiver();
-    let digest = stranger.session().digest()?;
+    let digest = stranger.delegation().digest()?;
 
     for carrier in 0..HOLD_CAPACITY {
         let payload = relayed_payload(&stranger, &hop, 0)?;
@@ -707,13 +711,13 @@ fn test_overflow_drops_the_newcomer_and_asks_the_oldest_question_again() -> Resu
 #[test]
 fn test_unsolicited_announcement_is_ignored_and_disclaimer_fails_awaiting_frames() -> Result<()> {
     let now_ms = get_epoch_ms();
-    let stranger = SessionSk::new_with_seckey(&SecretKey::random())?;
-    let other = SessionSk::new_with_seckey(&SecretKey::random())?;
-    let hop = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let stranger = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let other = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let hop = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let mut receiver = receiver();
 
     assert!(matches!(
-        receiver.announce(stranger.session(), now_ms)?,
+        receiver.announce(stranger.delegation(), now_ms)?,
         Announcement::Ignored
     ));
     assert_eq!(receiver.known_len(), 0);
@@ -722,11 +726,11 @@ fn test_unsolicited_announcement_is_ignored_and_disclaimer_fails_awaiting_frames
     expect_held(receiver.arrive(origin_referenced(&payload)?, 1u8, now_ms)?);
 
     assert!(receiver
-        .unknown(other.session().digest()?, now_ms)
+        .unknown(other.delegation().digest()?, now_ms)
         .is_empty());
     assert_eq!(receiver.held_len(), 1);
     assert_eq!(
-        receiver.unknown(stranger.session().digest()?, now_ms),
+        receiver.unknown(stranger.delegation().digest()?, now_ms),
         vec![1]
     );
     assert_eq!(receiver.held_len(), 0);
@@ -740,10 +744,10 @@ fn test_unsolicited_announcement_is_ignored_and_disclaimer_fails_awaiting_frames
 #[test]
 fn test_receiver_expiry_evicts_and_refuses_the_expired_delegation() -> Result<()> {
     // The session is stamped before `now_ms`, so `now_ms + ttl + 1` is past its expiry.
-    let node = session_sk_with_ttl(SHORT_SESSION_TTL_MS)?;
+    let node = delegatee_key_with_ttl(SHORT_SESSION_TTL_MS)?;
     let now_ms = get_epoch_ms();
-    let digest = node.session().digest()?;
-    let mut sender = AnnouncedSessions::new();
+    let digest = node.delegation().digest()?;
+    let mut sender = AnnouncedDelegations::new();
     let mut receiver = receiver();
 
     let first = sent(&mut sender, &relayed_payload(&node, &node, 0)?, now_ms)?;
@@ -758,21 +762,21 @@ fn test_receiver_expiry_evicts_and_refuses_the_expired_delegation() -> Result<()
     let payload = relayed_payload(&node, &node, 2)?;
     assert!(payload.verification.is_live_at(expired_ms));
     let stale = received(&payload, PerSlot {
-        origin: SessionRef::Digest(digest),
-        hop: SessionRef::Digest(digest),
+        origin: DelegationRef::Digest(digest),
+        hop: DelegationRef::Digest(digest),
     })?;
     assert_eq!(
         expect_held(receiver.arrive(stale, 2u8, expired_ms)?),
         digests([digest])
     );
     assert!(matches!(
-        receiver.announce(node.session(), expired_ms)?,
+        receiver.announce(node.delegation(), expired_ms)?,
         Announcement::Refused(ref refused) if refused == &vec![2]
     ));
     assert_eq!(receiver.held_len(), 0);
 
     // A fresh delegation is a different value, hence a different digest: it travels inline.
-    let renewed = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let renewed = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let renewed_payload = relayed_payload(&renewed, &renewed, 0)?;
     let frame = sent(&mut sender, &renewed_payload, expired_ms)?;
     assert_eq!(encoding(frame.as_ref()), BOTH_INLINE);
@@ -787,18 +791,18 @@ fn test_receiver_expiry_evicts_and_refuses_the_expired_delegation() -> Result<()
 #[test]
 fn test_reannouncing_a_known_session_is_idempotent() -> Result<()> {
     let now_ms = get_epoch_ms();
-    let node = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let node = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let mut receiver = receiver();
 
     for sequence in 0..2 {
         let payload = relayed_payload(&node, &node, sequence)?;
-        let frame = sent(&mut AnnouncedSessions::new(), &payload, now_ms)?;
+        let frame = sent(&mut AnnouncedDelegations::new(), &payload, now_ms)?;
         assert_eq!(encoding(frame.as_ref()), BOTH_INLINE);
         let resolved = expect_resolved(receiver.arrive(frame, 0u8, now_ms)?);
         assert_eq!(resolved.payload, payload);
         assert_eq!(
             deliver(&mut receiver, resolved, now_ms)?,
-            digests([node.session().digest()?])
+            digests([node.delegation().digest()?])
         );
         assert_eq!(receiver.known_len(), 1);
     }
@@ -816,8 +820,8 @@ fn swept(swept: Swept<u8>) -> (Vec<u8>, Vec<u8>) {
 #[test]
 fn test_sweep_drops_frames_past_the_hold_timeout_or_their_proof() -> Result<()> {
     let now_ms = get_epoch_ms();
-    let stranger = SessionSk::new_with_seckey(&SecretKey::random())?;
-    let hop = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let stranger = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let hop = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let mut receiver = receiver();
 
     let early = relayed_payload(&stranger, &hop, 0)?;
@@ -834,8 +838,8 @@ fn test_sweep_drops_frames_past_the_hold_timeout_or_their_proof() -> Result<()> 
     // A hold timeout longer than the proof's lifetime: the proof lapses first.
     let lapsed_ms = late.verification.ts_ms + u128::from(late.verification.ttl_ms) + 1;
     let hold_outlasting_the_proof_ms = u128::from(late.verification.ttl_ms).saturating_mul(2);
-    let mut lapsed_receiver: ReferencedSessions<u8> =
-        ReferencedSessions::new(HOLD_CAPACITY, hold_outlasting_the_proof_ms);
+    let mut lapsed_receiver: ReferencedDelegations<u8> =
+        ReferencedDelegations::new(HOLD_CAPACITY, hold_outlasting_the_proof_ms);
     let question = expect_held(lapsed_receiver.arrive(origin_referenced(&late)?, 2u8, now_ms)?);
     lapsed_receiver.note_asked(question);
     assert_eq!(
@@ -852,8 +856,8 @@ fn test_sweep_drops_frames_past_the_hold_timeout_or_their_proof() -> Result<()> 
 #[test]
 fn test_sweep_tells_unasked_frames_from_unanswered_ones() -> Result<()> {
     let now_ms = get_epoch_ms();
-    let stranger = SessionSk::new_with_seckey(&SecretKey::random())?;
-    let hop = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let stranger = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let hop = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let mut receiver = receiver();
     let stale_ms = now_ms + HOLD_TIMEOUT_MS + 1;
 
@@ -871,7 +875,7 @@ fn test_sweep_tells_unasked_frames_from_unanswered_ones() -> Result<()> {
     let question = expect_held(receiver.arrive(origin_referenced(&again)?, 2u8, now_ms)?);
     receiver.note_asked(question);
     assert!(matches!(
-        receiver.announce(stranger.session(), now_ms)?,
+        receiver.announce(stranger.delegation(), now_ms)?,
         Announcement::Admitted
     ));
     assert_eq!(released(&mut receiver, now_ms)?.len(), 1);

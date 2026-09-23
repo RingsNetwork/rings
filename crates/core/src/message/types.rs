@@ -557,6 +557,7 @@ mod tests {
 
     use super::*;
     use crate::chunk::ChunkMeta;
+    use crate::delegation::DelegateeKey;
     use crate::dht::entry::EntryKind;
     use crate::dht::entry::EntryOperation;
     use crate::ecc::SecretKey;
@@ -566,24 +567,23 @@ mod tests {
     use crate::message::ProvisionalServiceClaim;
     use crate::message::ProvisionalServiceReceipt;
     use crate::message::Transaction;
-    use crate::session::SessionSk;
 
     pub(super) struct MessageFixture {
         did: Did,
         public_key: crate::ecc::PublicKey<33>,
         entry: Entry,
-        provider: SessionSk,
-        beneficiary: SessionSk,
+        provider: DelegateeKey,
+        beneficiary: DelegateeKey,
     }
 
     impl MessageFixture {
         pub(super) fn new() -> Result<Self> {
-            let provider = SessionSk::new_with_seckey(&SecretKey::random())?;
-            let beneficiary = SessionSk::new_with_seckey(&SecretKey::random())?;
-            let did = provider.account_did();
+            let provider = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+            let beneficiary = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+            let did = provider.delegator_did();
             Ok(Self {
                 did,
-                public_key: provider.session_public_key(),
+                public_key: provider.delegatee_public_key(),
                 entry: Entry::new(did, Vec::new(), EntryKind::Data),
                 provider,
                 beneficiary,
@@ -726,7 +726,7 @@ mod tests {
             nonce: [7; 32],
         };
         let request = Transaction::new(
-            fixture.provider.account_did(),
+            fixture.provider.delegator_did(),
             tx_id,
             0,
             Message::ProbeRequest(request_body),
@@ -734,7 +734,7 @@ mod tests {
         )?;
         let request_digest = request.digest()?.into_bytes();
         let completion = Transaction::new(
-            fixture.beneficiary.account_did(),
+            fixture.beneficiary.delegator_did(),
             tx_id,
             0,
             ProbeCompletion {
@@ -745,8 +745,8 @@ mod tests {
         )?;
         let claim = ProvisionalServiceClaim::probe(
             network_id,
-            fixture.provider.account_did(),
-            fixture.beneficiary.account_did(),
+            fixture.provider.delegator_did(),
+            fixture.beneficiary.delegator_did(),
             request_body.epoch,
             request_body.nonce,
             request_digest,

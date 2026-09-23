@@ -268,7 +268,7 @@ impl StartAction {
         settings: node::NodeSettings,
         token: &GenerationToken,
     ) -> Option<DemoNode> {
-        self.status.set("authorizing session key".to_string());
+        self.status.set("authorizing delegatee key".to_string());
         match extension::operation_timeout(
             "session authorization",
             extension::SESSION_AUTH_TIMEOUT,

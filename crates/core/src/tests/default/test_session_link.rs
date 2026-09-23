@@ -1,6 +1,7 @@
-//! Session references between real swarms over the dummy transport's immediate delivery.
+//! Delegation references between real swarms over the dummy transport's immediate delivery.
 //! Every wait is the arrival of a message at a node's callback.
 
+use crate::delegation::DelegationDigest;
 use crate::dht::Did;
 use crate::ecc::SecretKey;
 use crate::error::Error;
@@ -12,7 +13,6 @@ use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
 use crate::message::PayloadSender;
 use crate::message::PerSlot;
-use crate::session::SessionDigest;
 use crate::swarm::transport::dispatched_link_control_for_test;
 use crate::swarm::transport::referenced_slots_for_test;
 use crate::swarm::transport::LinkDirection;
@@ -32,7 +32,7 @@ use crate::tests::TEST_NETWORK_ID;
 const SWITCH_WITHIN_MESSAGES: usize = 8;
 
 /// The digests that went by reference on `link` so far, per slot.
-fn referenced_on(link: LinkDirection) -> PerSlot<Vec<SessionDigest>> {
+fn referenced_on(link: LinkDirection) -> PerSlot<Vec<DelegationDigest>> {
     referenced_slots_for_test()
         .remove(&link)
         .unwrap_or(PerSlot {
@@ -142,7 +142,7 @@ async fn test_relayed_origin_session_needs_no_question() -> Result<()> {
     let dispatched_before = dispatched_link_control_for_test().len();
     let last_hop = (relay.did(), destination.did());
     let first = relay_custom(&origin, &relay, &destination, b"relayed").await?;
-    let origin_digest = first.transaction.verification.session.digest()?;
+    let origin_digest = first.transaction.verification.delegation.digest()?;
 
     // The relay forwards the origin's session inline until the destination confirms it, then
     // by reference: within a few messages a frame on the last hop carries the origin's own

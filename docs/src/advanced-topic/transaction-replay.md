@@ -10,12 +10,12 @@ been deleted.
 Replay state is keyed by:
 
 ```text
-StreamKey = (network_id, origin_account_did, destination_did)
+StreamKey = (network_id, origin_delegator_did, destination_did)
 ```
 
-The origin is recovered from `Transaction.verification.session.account_did()`. It is not the
-delegated session DID and not an intermediate relay. Rotating a session key therefore preserves
-the same account-to-destination stream, while two destinations advance independently.
+The origin is recovered from `Transaction.verification.delegation.delegator_did()`. It is not the
+delegatee DID and not an intermediate relay. Rotating a delegatee key therefore preserves
+the same delegator-to-destination stream, while two destinations advance independently.
 
 Every transaction carries a mandatory `u64` sequence. The transaction signature transcript
 binds the receiver-selected `network_id` through the signing domain and binds `destination`,
@@ -94,7 +94,7 @@ closed on storage errors. Counters expose `Replay`, `Fork`, `Stale`, and persist
 transaction signing domain and payload marker changed with it. 0.28.0 is the next one: the
 signing domain is `rings-core:message-verification:transaction`, the payload wire encoding
 begins with the `RINGS-PAYLOAD` marker, and the replay store key is
-`rings-core:transaction-replay` (see [Session References](session-references.md)). Payloads
+`rings-core:transaction-replay` (see [Delegation References](delegation-references.md)). Payloads
 without the current marker are rejected before deserialization. There is no dual decoder,
 negotiation, feature flag, downgrade path, or legacy fallback, and no version behind any of these
 names: the protocol is not versioned before 1.0. Mixed-version overlays are unsupported.
@@ -104,7 +104,7 @@ names: the protocol is not versioned before 1.0. Mixed-version overlays are unsu
 - No cross-account or global order.
 - No claim that a sequence gap identifies loss or a dishonest relay.
 - No retransmission, acknowledgement, or head-of-line blocking protocol for transactions (the
-  link's session confirmations and repairs are about session references, not about
+  link's session confirmations and repairs are about delegation references, not about
   transactions).
 - No exactly-once application side effects.
 - No recognition of messages older than a deliberately deleted replay store.

@@ -14,6 +14,7 @@ use crate::consts::MAX_RELAY_INBOX_TTL_MS;
 use crate::consts::MAX_TTL_MS;
 use crate::consts::RELAY_INBOX_MAX_LEN;
 use crate::consts::TS_OFFSET_TOLERANCE_MS;
+use crate::delegation::DelegateeKey;
 use crate::dht::Did;
 use crate::ecc::SecretKey;
 use crate::error::Error;
@@ -23,13 +24,12 @@ use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::MessageSigner;
 use crate::message::NotifyPredecessorSend;
-use crate::session::SessionSk;
 use crate::tests::with_retention;
 use crate::tests::TEST_NETWORK_ID;
 use crate::utils::get_epoch_ms;
 
-fn session() -> Result<SessionSk> {
-    SessionSk::new_with_seckey(&SecretKey::random())
+fn session() -> Result<DelegateeKey> {
+    DelegateeKey::new_with_seckey(&SecretKey::random())
 }
 
 fn payload_to(message: Message, destination: Did, network_id: u32) -> Result<MessagePayload> {
@@ -48,7 +48,7 @@ fn custom_to(destination: Did, network_id: u32) -> Result<MessagePayload> {
 
 /// A hold by `holder` of `payload` inside `network_id` at `held_at_ms`.
 fn hold_at(
-    holder: &SessionSk,
+    holder: &DelegateeKey,
     payload: MessagePayload,
     network_id: u32,
     held_at_ms: u128,
@@ -57,7 +57,7 @@ fn hold_at(
 }
 
 /// A hold by `holder` of a fresh custom message to `destination`, inside `network_id`, now.
-fn held_by(holder: &SessionSk, destination: Did, network_id: u32) -> Result<HeldMessage> {
+fn held_by(holder: &DelegateeKey, destination: Did, network_id: u32) -> Result<HeldMessage> {
     hold_at(
         holder,
         custom_to(destination, network_id)?,
@@ -126,7 +126,7 @@ fn test_witness_admits_a_held_custom_message_addressed_to_the_recipient() -> Res
 
     assert_eq!(delta.did, inbox_key(destination));
     delta.validate_admissible_at(now_ms, TEST_NETWORK_ID)?;
-    assert_eq!(held.holder(), holder.account_did());
+    assert_eq!(held.holder(), holder.delegator_did());
     Ok(())
 }
 
@@ -264,7 +264,7 @@ fn test_witness_rejects_a_tampered_payload_and_a_reset_floor() -> Result<()> {
     let mut with_floor = live_delta(&held, now_ms)?;
     with_floor.crdt.register = Some(EntryVersion::new(
         now_ms,
-        holder.account_did(),
+        holder.delegator_did(),
         Did::from(0u32),
     ));
     assert!(matches!(
@@ -326,7 +326,7 @@ fn test_hold_law_admits_only_the_responsible_holder_of_a_live_message() -> Resul
     let holder = session()?;
     let other = session()?;
     let destination: Did = SecretKey::random().address().into();
-    let responsible = holder.account_did();
+    let responsible = holder.delegator_did();
     let stranger: Did = SecretKey::random().address().into();
     let hold = EntryOperation::Extend(live_delta(
         &held_by(&holder, destination, TEST_NETWORK_ID)?,
@@ -426,7 +426,7 @@ fn test_partition_pairs_each_witnessed_element_with_its_dot_and_retires_the_rest
     let now_ms = get_epoch_ms();
     let holder = session()?;
     let destination: Did = SecretKey::random().address().into();
-    let actor = holder.account_did();
+    let actor = holder.delegator_did();
     let first = held_by(&holder, destination, TEST_NETWORK_ID)?;
     let second = held_by(&holder, destination, TEST_NETWORK_ID)?;
     let junk = held_by(&holder, destination, TEST_NETWORK_ID + 1)?;
@@ -477,7 +477,7 @@ fn test_partition_pairs_each_witnessed_element_with_its_dot_and_retires_the_rest
 fn test_inbox_keeps_the_newest_elements_and_bounds_its_tombstones() -> Result<()> {
     let holder = session()?;
     let destination: Did = SecretKey::random().address().into();
-    let actor = holder.account_did();
+    let actor = holder.delegator_did();
 
     // Two full inboxes, drained in turn: the second drain leaves twice the cap of removals to
     // choose from, and the carrier keeps the newest cap of them. Every instant is read from the

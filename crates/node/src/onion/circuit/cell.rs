@@ -12,10 +12,10 @@
 use bytes::Bytes;
 use rand::CryptoRng;
 use rand::RngCore;
+use rings_core::delegation::DelegateeKey;
 use rings_core::ecc::elgamal::impls::secp256k1::encrypt_aead_with_rng;
 use rings_core::ecc::elgamal::impls::secp256k1::AeadCiphertext;
 use rings_core::ecc::PublicKey;
-use rings_core::session::SessionSk;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -172,12 +172,12 @@ fn seal_encoded_message_with_rng<R: CryptoRng + RngCore>(
 }
 
 pub(super) fn open_cell(
-    session_sk: &SessionSk,
+    delegatee_key: &DelegateeKey,
     bucket: OnionCellBucket,
     sealed: &AeadCiphertext,
 ) -> Result<OnionWireMessage> {
     let aad = cell_aad(bucket)?;
-    let plaintext = session_sk
+    let plaintext = delegatee_key
         .decrypt_elgamal_aead(sealed, &aad)
         .map_err(Error::CoreError)?;
     if plaintext.len() != bucket.plaintext_len() {
@@ -208,15 +208,15 @@ fn cell_aad(bucket: OnionCellBucket) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    use rings_core::delegation::DelegateeKey;
     use rings_core::ecc::SecretKey;
-    use rings_core::session::SessionSk;
 
     use super::*;
     use crate::onion::circuit::OnionBackwardFrame;
     use crate::onion::circuit::OnionCircuitId;
 
-    fn session() -> SessionSk {
-        SessionSk::new_with_seckey(&SecretKey::random()).expect("session key")
+    fn session() -> DelegateeKey {
+        DelegateeKey::new_with_seckey(&SecretKey::random()).expect("delegatee key")
     }
 
     fn backward_message(payload_len: usize) -> OnionWireMessage {
@@ -224,7 +224,7 @@ mod tests {
         let sealed = encrypt_aead_with_rng(
             &vec![7_u8; payload_len],
             b"cell-test",
-            recipient.session_public_key(),
+            recipient.delegatee_public_key(),
             &mut rand::thread_rng(),
         )
         .expect("encrypt fixture");
@@ -237,11 +237,11 @@ mod tests {
     #[test]
     fn test_small_messages_share_one_observable_cell_size() {
         let recipient = session();
-        let short = seal_message(&backward_message(1), recipient.session_public_key(), None)
+        let short = seal_message(&backward_message(1), recipient.delegatee_public_key(), None)
             .expect("seal short");
         let longer = seal_message(
             &backward_message(1_000),
-            recipient.session_public_key(),
+            recipient.delegatee_public_key(),
             None,
         )
         .expect("seal longer");
@@ -254,7 +254,7 @@ mod tests {
         let wrong = session();
         let message = backward_message(1);
         let encoded =
-            seal_message(&message, recipient.session_public_key(), None).expect("seal message");
+            seal_message(&message, recipient.delegatee_public_key(), None).expect("seal message");
         let cell: OnionWireCell = rings_codec::deserialize(&encoded).expect("decode cell");
         assert_eq!(
             open_cell(&recipient, cell.bucket, &cell.sealed).expect("open cell"),
@@ -268,7 +268,7 @@ mod tests {
         let recipient = session();
         let encoded = seal_message(
             &OnionWireMessage::Cover,
-            recipient.session_public_key(),
+            recipient.delegatee_public_key(),
             Some(OnionCellBucket::KiB4),
         )
         .expect("seal cover");

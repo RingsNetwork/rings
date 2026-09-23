@@ -294,7 +294,7 @@ create_session_file() {
     local node_index="$1"
     local session_file="$2"
     local key_file="$CLUSTER_DIR/tmp/node-${node_index}.key"
-    local command_log="$CLUSTER_DIR/tmp/new-session-${node_index}.log"
+    local command_log="$CLUSTER_DIR/tmp/new-delegation-${node_index}.log"
     local generated_random=false
 
     if (( node_index >= ${#supplied_keys[@]} )); then
@@ -303,8 +303,8 @@ create_session_file() {
 
     for _ in $(seq 1 16); do
         write_key_file "$node_index" "$key_file"
-        if "$RINGS_BIN" "${LOG_LEVEL_ARGS[@]}" --runtime current-thread new-session \
-            --session-sk "$session_file" \
+        if "$RINGS_BIN" "${LOG_LEVEL_ARGS[@]}" --runtime current-thread new-delegation \
+            --delegatee-key "$session_file" \
             --key-file "$key_file" \
             --ttl "$SESSION_TTL_SECONDS" >"$command_log" 2>&1; then
             rm -f "$key_file" "$command_log"
@@ -314,7 +314,7 @@ create_session_file() {
 
         rm -f "$key_file" "$command_log"
         if [[ "$generated_random" != "true" ]]; then
-            die "failed to create session key for node $node_index from external private key (value redacted)"
+            die "failed to create delegatee key for node $node_index from external private key (value redacted)"
         fi
     done
 
@@ -334,7 +334,7 @@ write_config() {
 
     {
         printf 'network_id: %s\n' "$NETWORK_ID"
-        printf 'session_sk: %s\n' "$(yaml_quote "$session_file")"
+        printf 'delegatee_key: %s\n' "$(yaml_quote "$session_file")"
         printf 'internal_api_port: %s\n' "$internal_port"
         printf 'external_api_addr: %s\n' "$(yaml_quote "0.0.0.0:$external_port")"
         # Container ingress deliberately binds every interface; status/control remain gated.
@@ -483,7 +483,7 @@ log "starting $NODE_COUNT Rings node(s): topology=$TOPOLOGY, internal=$BASE_INTE
 for i in $(seq 0 $((NODE_COUNT - 1))); do
     internal_port=$((BASE_INTERNAL_PORT + i))
     external_port=$((BASE_EXTERNAL_PORT + i))
-    session_file="$CLUSTER_DIR/keys/node-$i.session_sk"
+    session_file="$CLUSTER_DIR/keys/node-$i.delegatee_key"
     config_file="$CLUSTER_DIR/config/node-$i.yaml"
     storage_path="$CLUSTER_DIR/storage/node-$i"
     log_file="$CLUSTER_DIR/logs/node-$i.log"
@@ -536,7 +536,7 @@ case "$TOPOLOGY" in
         ;;
 esac
 
-log "cluster ready; private key values were not printed. session keys are stored under $CLUSTER_DIR/keys"
+log "cluster ready; private key values were not printed. delegatee keys are stored under $CLUSTER_DIR/keys"
 log "node logs are under $CLUSTER_DIR/logs"
 
 while true; do

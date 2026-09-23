@@ -8,7 +8,7 @@ the communication layer minimizes leakage; the privacy layer provides privacy.
 ## Summary
 
 Rings authenticates peer identities and protocol messages with DIDs and delegated
-session keys. That proves control of a key. It does not make identities scarce,
+delegatee keys. That proves control of a key. It does not make identities scarce,
 expensive, or globally reputation-bearing. Peer measurements remain local advisory
 state and are not portable trust claims.
 
@@ -21,7 +21,7 @@ placement, and can attempt eclipse behavior.
 
 - A DID identifies a cryptographic account key, and signature checks authenticate
   control of that key.
-- Delegated session keys are accepted only according to the protocol checks in the
+- Delegated delegatee keys are accepted only according to the protocol checks in the
   core and node layers.
 - WebRTC transport establishment and data channels provide the expected channel
   security for a successfully established peer connection.
@@ -39,7 +39,7 @@ placement, and can attempt eclipse behavior.
 The implementation is intended to handle ordinary churn and fail-stop behavior:
 peers can disconnect, crash, restart, or miss heartbeats. Onion exits generate a
 fresh process epoch at each start and bind it into signed descriptors and encrypted
-forward layers, so reusing a persisted delegated session key does not keep
+forward layers, so reusing a persisted delegated delegatee key does not keep
 pre-restart exit cells valid. TTLs, stabilization, storage repair, and descriptor
 refreshes are designed for that environment.
 
@@ -86,7 +86,7 @@ as privacy-layer bugs that cover traffic is expected to absorb.
 ### Communication layer
 
 The communication layer is `crates/core`: Chord routing, `MessageRelay`,
-`MessagePayload`, session-key signatures, and the E2E ElGamal stream family. Its
+`MessagePayload`, delegatee-key signatures, and the E2E ElGamal stream family. Its
 contract is payload authenticity for every message and payload confidentiality for
 peers that have completed the E2E handshake. It has no unlinkability contract and
 cannot acquire one by changing the relay: Chord routes by the destination DID, so
@@ -129,17 +129,17 @@ The obligations of this layer are leak-minimization obligations:
 - every signature bound to `network_id` and to a per-message-family domain tag, so
   an observation in one overlay is not a credential in another.
 
-Session references do not change what a hop learns. A link sends each session
-delegation inline until the receiver confirms it, and its 20-byte content address
-(the trailing bytes of `keccak256` over the encoded `Session`) afterwards; the
+Delegation references do not change what a hop learns. A link sends each delegation
+inline until the receiver confirms it, and its 20-byte content address
+(the trailing bytes of `keccak256` over the encoded `Delegation`) afterwards; the
 receiver resolves the address to the exact delegation that would have travelled
 inline, then verifies both proofs as before. The address names the whole
-delegation, not the session key, because a session key can carry several
-delegations and any account can sign one for a key it does not hold. The cache
+delegation, not the delegatee key, because a delegatee key can carry several
+delegations and any delegator can sign one for a key it does not hold. The cache
 behind the references is scoped to one direction of one admitted connection
 generation and obeys these rules:
 
-- it is populated only by the peer at the other end, with sessions of frames that
+- it is populated only by the peer at the other end, with delegations of frames that
   verified on the link (a frame from any other peer, or on a callback bound to no
   handshake, is judged self-contained and a reference in it refused) or with an
   announcement this end asked for and whose delegation verified; an unsolicited
@@ -149,14 +149,14 @@ generation and obeys these rules:
 - the sender references only what the receiver confirmed, so loss or reordering on
   the link costs inline frames and never a stall; the link is treated as a datagram
   link throughout;
-- the sender remembers at most 64 sessions and the receiver 128, under one
+- the sender remembers at most 64 delegations and the receiver 128, under one
   least-recently-referenced order over the frames both ends saw, so on a lossless
   link the sender goes back to inline before the receiver could have forgotten;
   both tables are scoped to the connection generation;
 - a miss (a frame lost between the two orders, the two ends disagreeing on expiry,
   or a misbehaving peer) holds that frame alone, at most 16 per connection and for
   at most twice the delivery timeout plus one period of the inbound actor's sweep,
-  and is repaired on the link by one unsigned request per missing session of a held
+  and is repaired on the link by one unsigned request per missing delegation of a held
   frame (or of the oldest held frame, when a frame finds the hold full) and exactly
   one unsigned answer per question; each control frame is emitted on the connection
   generation it was judged on, in a task of its own rather than from the transport's
@@ -168,16 +168,16 @@ generation and obeys these rules:
   or whose question this end never managed to send, is dropped uncharged, as one the
   pre-admission hold cannot take is; a frame released after its connection generation
   was superseded is dropped, never delivered; no hop asks the origin for anything;
-- an expired session is evicted, a reference to it is a miss, and re-announcing the
+- an expired delegation is evicted, a reference to it is a miss, and re-announcing the
   expired delegation is refused exactly as it is inline.
 
 ### Transaction replay boundary
 
 Signed transactions use a destination-scoped sequence stream keyed by `network_id`, the origin
-account DID recovered from the delegated session, and the final destination DID. The final
+account DID recovered from the delegated delegation, and the final destination DID. The final
 destination persists a fixed 32-sequence acceptance window before application validation and
 handler dispatch. Exact duplicates, conflicting transactions at one sequence, and sequences
-below the retained window are rejected as separate typed verdicts. Session-key rotation does not
+below the retained window are rejected as separate typed verdicts. Delegation-key rotation does not
 reset the account stream, sender timestamps do not order it, and intermediate Chord relays keep no
 origin replay state.
 
@@ -199,7 +199,7 @@ bounds. Those bounds limit queued memory; they are not rate limits and do not id
 origin. After both payload signatures verify, a final destination additionally applies two
 runtime-local token buckets keyed by `(network_id, origin account DID, destination DID, logical
 inbound lane)`: one for messages and one for verified logical-message bytes. The account DID comes
-from the inner transaction signature, so changing a delegated session or last-hop relay does not
+from the inner transaction signature, so changing a delegated delegation or last-hop relay does not
 reset an active allowance, while unrelated origins carried by one relay remain independent.
 
 The destination serializes replay classification and quota admission as one commit boundary. A
@@ -228,7 +228,7 @@ and a current or adjacent five-minute epoch. The provider returns an offer that 
 signed request transaction and an exact provider-signed completion transaction. The provider and
 beneficiary then sign the same canonical claim under different role domains, and the beneficiary
 returns the complete receipt in an acknowledgement. Account DIDs define the roles; delegated
-session rotation neither changes a role nor creates a distinct receipt identity.
+delegation rotation neither changes a role nor creates a distinct receipt identity.
 
 The wire markers and signing domains are protocol-domain separators, not compatibility
 fallbacks, and carry no version: the protocol is not versioned before 1.0. Only `Probe` is
@@ -289,7 +289,7 @@ registries. It sits in `rings-node` deliberately: Chord remains the storage and
 discovery substrate, and exit policy is an application decision.
 
 **Per-hop knowledge bound.** Forward layers are wrapped from exit to entry with the
-selected hops' session public keys. Each relay decrypts exactly one ElGamal-AEAD
+selected hops' delegation public keys. Each relay decrypts exactly one ElGamal-AEAD
 layer and learns only the immediate next hop plus an opaque inner layer; backward
 frames carry a client-encrypted AEAD payload that relays forward with local return
 state. A circuit id identifies exactly one directed edge of one route and is
@@ -365,7 +365,7 @@ from whichever guard is selected for a given circuit.
 
 ### DID Identity
 
-DID signatures authenticate the key behind a message, descriptor, or session
+DID signatures authenticate the key behind a message, descriptor, or delegation
 delegation. They do not prove that two DIDs are controlled by different operators,
 and they do not prevent an operator from generating many DIDs.
 

@@ -504,7 +504,7 @@ fn test_worker_drop_stops_generation_and_closes_ingress_without_a_normal_run_exi
         stop.clone(),
         measurements,
         peer,
-        SharedAnnouncedSessions::new(),
+        SharedAnnouncedDelegations::new(),
     );
 
     drop(worker);
@@ -542,7 +542,7 @@ async fn test_worker_drop_allows_registry_to_replace_the_stopped_generation() {
         stop,
         measurements,
         peer,
-        SharedAnnouncedSessions::new(),
+        SharedAnnouncedDelegations::new(),
     );
 
     drop(worker);

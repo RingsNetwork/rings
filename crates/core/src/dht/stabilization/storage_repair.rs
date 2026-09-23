@@ -309,11 +309,11 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::delegation::DelegateeKey;
     use crate::dht::entry::EntryKind;
     use crate::dht::entry::PlacedEntry;
     use crate::dht::StorageSyncDestination;
     use crate::ecc::SecretKey;
-    use crate::session::SessionSk;
     use crate::storage::MemStorage;
     use crate::swarm::SwarmBuilder;
     use crate::tests::live_entry;
@@ -347,7 +347,7 @@ mod tests {
 
     #[test]
     fn test_changing_delivery_sets_preserve_repair_progress_across_stabilizers() -> Result<()> {
-        let session = SessionSk::new_with_seckey(&SecretKey::random())?;
+        let session = DelegateeKey::new_with_seckey(&SecretKey::random())?;
         let swarm = Arc::new(
             SwarmBuilder::new(
                 0,
@@ -376,7 +376,7 @@ mod tests {
 
     #[test]
     fn test_deferred_delivery_rotates_without_losing_its_retry() -> Result<()> {
-        let session = SessionSk::new_with_seckey(&SecretKey::random())?;
+        let session = DelegateeKey::new_with_seckey(&SecretKey::random())?;
         let swarm = Arc::new(
             SwarmBuilder::new(
                 0,

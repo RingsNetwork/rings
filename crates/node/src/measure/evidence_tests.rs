@@ -77,19 +77,21 @@ impl MeasureClock for ManualMeasureClock {
 fn provisional_evidence_fixture(
     nonce: u8,
 ) -> (ProvisionalEvidenceRecord<Did>, EvidenceCollectorIdentity) {
-    let provider =
-        rings_core::session::SessionSk::new_with_seckey(&rings_core::ecc::SecretKey::random())
-            .unwrap_or_else(|error| panic!("provider session must build: {error}"));
-    let beneficiary =
-        rings_core::session::SessionSk::new_with_seckey(&rings_core::ecc::SecretKey::random())
-            .unwrap_or_else(|error| panic!("beneficiary session must build: {error}"));
+    let provider = rings_core::delegation::DelegateeKey::new_with_seckey(
+        &rings_core::ecc::SecretKey::random(),
+    )
+    .unwrap_or_else(|error| panic!("provider delegation must build: {error}"));
+    let beneficiary = rings_core::delegation::DelegateeKey::new_with_seckey(
+        &rings_core::ecc::SecretKey::random(),
+    )
+    .unwrap_or_else(|error| panic!("beneficiary delegation must build: {error}"));
     let observed_at_ms = rings_core::utils::get_epoch_ms();
     let observed_at_seconds = u64::try_from(observed_at_ms / 1_000)
         .unwrap_or_else(|_| panic!("current observation time must fit whole seconds"));
     let claim = ProvisionalServiceClaim::probe(
         7,
-        provider.account_did(),
-        beneficiary.account_did(),
+        provider.delegator_did(),
+        beneficiary.delegator_did(),
         ProvisionalEpoch::from_unix_seconds(observed_at_seconds),
         [nonce; 32],
         [nonce.wrapping_add(1); 32],

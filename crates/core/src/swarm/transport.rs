@@ -37,6 +37,8 @@ use rings_transport::webrtc_config::WebrtcUdpPortRange;
 use self::storage_sync::StorageSyncAckMap;
 use crate::chunk::ReassemblyBudget;
 use crate::chunk::ReassemblyLimits;
+use crate::delegation::DelegateeKey;
+use crate::delegation::Delegation;
 use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::dht::StorageSyncDeliveryCursor;
@@ -52,8 +54,6 @@ use crate::message::DhtProtocolMode;
 use crate::message::Message;
 use crate::message::PayloadSender;
 use crate::message::TransactionReplay;
-use crate::session::Session;
-use crate::session::SessionSk;
 use crate::swarm::callback::InnerSwarmCallback;
 use crate::swarm::callback::SwarmCallbackSlot;
 use crate::swarm::callback::SwarmEvent;
@@ -142,8 +142,8 @@ pub(crate) struct SwarmTransportParts {
     pub(crate) network_id: u32,
     /// WebRTC ICE and address configuration.
     pub(crate) webrtc: SwarmWebrtcConfig,
-    /// Session key that signs every payload.
-    pub(crate) session_sk: SessionSk,
+    /// Delegation key that signs every payload.
+    pub(crate) delegatee_key: DelegateeKey,
     /// Local DHT the transport keeps in step with its admitted peers.
     pub(crate) dht: Arc<PeerRing>,
     /// Optional measurement sink.
@@ -159,7 +159,7 @@ pub(crate) struct SwarmTransportParts {
 pub struct SwarmTransport {
     pub(crate) network_id: u32,
     transport: Transport,
-    session_sk: SessionSk,
+    delegatee_key: DelegateeKey,
     pub(crate) dht: Arc<PeerRing>,
     storage_redundancy: u16,
     dht_virtual_nodes: u16,
@@ -270,7 +270,7 @@ impl SwarmTransport {
         let SwarmTransportParts {
             network_id,
             webrtc,
-            session_sk,
+            delegatee_key,
             dht,
             measure,
             transaction_replay,
@@ -285,7 +285,7 @@ impl SwarmTransport {
                 webrtc.external_address,
                 webrtc.udp_port_range,
             ),
-            session_sk,
+            delegatee_key,
             dht,
             storage_redundancy: settings.storage_redundancy,
             dht_virtual_nodes: settings.dht_virtual_nodes,
@@ -408,8 +408,8 @@ impl SwarmTransport {
     }
 
     /// The session this node authenticates with: its public half and account authorization.
-    pub(crate) fn session(&self) -> Session {
-        self.session_sk.session()
+    pub(crate) fn delegation(&self) -> Delegation {
+        self.delegatee_key.delegation()
     }
 
     /// Storage virtual-node positions required by this DHT protocol mode.

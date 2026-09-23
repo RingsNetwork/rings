@@ -7,6 +7,7 @@ use std::num::NonZeroU64;
 
 use async_trait::async_trait;
 
+use crate::delegation::DelegateeKey;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
@@ -26,7 +27,6 @@ use crate::message::ProvisionalServiceClaim;
 use crate::message::ProvisionalServiceReceipt;
 use crate::message::ServiceReceiptError;
 use crate::message::Transaction;
-use crate::session::SessionSk;
 use crate::utils::get_epoch_ms;
 
 enum ProbeEffect<'payload> {
@@ -89,7 +89,7 @@ impl ProbeOfferPlan {
     fn build(
         self,
         completion_sequence: u64,
-        signer: MessageSigner<&SessionSk>,
+        signer: MessageSigner<&DelegateeKey>,
     ) -> Result<ProbeOffer> {
         let completion = Transaction::new(
             self.beneficiary,
@@ -150,7 +150,7 @@ fn plan_probe_offer(
 
 fn build_probe_acknowledgement(
     offer: &ProbeOffer,
-    signer: MessageSigner<&SessionSk>,
+    signer: MessageSigner<&DelegateeKey>,
 ) -> Result<ProbeAcknowledgement> {
     let beneficiary_attestation = offer.claim.sign_beneficiary(signer)?;
     let receipt = ProvisionalServiceReceipt::new(

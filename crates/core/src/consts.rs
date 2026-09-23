@@ -35,7 +35,7 @@ pub const LOCAL_CACHE_CAPACITY: NonZeroU32 = match NonZeroU32::new(1024) {
     None => unreachable!(),
 };
 /// Default session time-to-live in milliseconds.
-pub const DEFAULT_SESSION_TTL_MS: u64 = 30 * 24 * 3600 * 1000;
+pub const DEFAULT_DELEGATION_TTL_MS: u64 = 30 * 24 * 3600 * 1000;
 /// Ceiling on one logical message, 60 MB. The data-channel frame size is not
 /// derived from it: the transport negotiates `max_message_size` per connection
 /// and the chunk layer sizes frames to that.

@@ -483,7 +483,7 @@ mod tests {
             algorithm: SignatureAlgorithm::Secp256k1,
             did,
         };
-        let msg = b"session proof";
+        let msg = b"delegation proof";
         let sig = secret.sign_raw(msg).unwrap();
 
         assert_eq!(reference.did(), did);
@@ -505,7 +505,7 @@ mod tests {
             algorithm: SignatureAlgorithm::Bip137,
             did,
         };
-        let msg = b"bitcoin session proof";
+        let msg = b"bitcoin delegation proof";
         let sig = secret.sign_raw(msg).unwrap();
 
         assert_eq!(secret.algorithm(), "bip137");
@@ -524,7 +524,7 @@ mod tests {
         let public_key = secret.public_key().unwrap();
         let did = public_key.did();
         let reference = AccountVerifier::PublicKey(public_key.clone());
-        let msg = b"bls session proof";
+        let msg = b"bls delegation proof";
         let sig = secret.sign_raw(msg).unwrap();
 
         assert_eq!(secret.algorithm(), "bls12-381");
@@ -553,7 +553,7 @@ mod tests {
         let public_key = secret.public_key().unwrap();
         let did = public_key.did();
         let reference = AccountVerifier::PublicKey(public_key.clone());
-        let msg = b"ed25519 session proof";
+        let msg = b"ed25519 delegation proof";
         let sig = secret.sign_raw(msg).unwrap();
 
         assert_eq!(secret.algorithm(), "ed25519");

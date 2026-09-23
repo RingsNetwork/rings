@@ -523,10 +523,10 @@ mod tests {
     use std::task::Waker;
 
     use super::*;
+    use crate::delegation::DelegateeKey;
     use crate::ecc::SecretKey;
     use crate::message::types::QueryFor;
     use crate::message::MessageSigner;
-    use crate::session::SessionSk;
     #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
     use crate::swarm::callback::SwarmCallback;
     #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
@@ -554,10 +554,10 @@ mod tests {
 
     fn payload(destination: Did) -> Result<MessagePayload> {
         let key = SecretKey::random();
-        let session_sk = SessionSk::new_with_seckey(&key)?;
+        let delegatee_key = DelegateeKey::new_with_seckey(&key)?;
         MessagePayload::new_send(
             Message::custom(b"hello")?,
-            MessageSigner::new(&session_sk, TEST_NETWORK_ID),
+            MessageSigner::new(&delegatee_key, TEST_NETWORK_ID),
             destination,
             destination,
         )
