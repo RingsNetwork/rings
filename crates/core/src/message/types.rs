@@ -723,7 +723,7 @@ mod tests {
         let tx_id = uuid::Uuid::nil();
         let request_body = ProbeRequest {
             epoch: ProvisionalEpoch { slot: 1 },
-            nonce: [7; 32],
+            nonce: rand::random::<[u8; 32]>(),
         };
         let request = Transaction::new(
             fixture.provider.delegator_did(),

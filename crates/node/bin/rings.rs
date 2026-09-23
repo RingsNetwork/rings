@@ -1321,11 +1321,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             let delegatee_key_path = args.delegation_args.new_delegation_then_write_to_fs()?;
             let config = config::Config::new(delegatee_key_path);
             let p = config.write_fs(&args.location)?;
-            let api_token = load_or_create_api_token(&p, config.api_token_path.as_deref())?;
+            let credential_file = load_or_create_api_token(&p, config.api_token_path.as_deref())?;
             println!("Your config file has saved to: {p}");
             println!(
                 "API authentication token file: {}",
-                api_token.path().display()
+                credential_file.path().display()
             );
             Ok(())
         }
