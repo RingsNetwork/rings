@@ -133,7 +133,11 @@ $W,L$ are protocol data.  The identity symbol is
 \[
 \relay:X\to X,\qquad L(\relay)=0 ;
 \]
-$\relay$ has no $W$: it preserves the slot width $C$ (L3).
+$\relay$ has no $W$: it preserves the slot width $C$ (L3).  $\Sigma$ is
+closed: a name outside $\Sigma$ is rejected at configuration, at
+descriptor decode, and at route construction; nothing falls back to
+\code{tcp}, and operator-named services are not accepted.  An operator
+exposing TCP targets registers \code{tcp} and restricts targets by policy.
 \end{defD}
 
 \begin{defD}{D2}{registration}
@@ -824,7 +828,7 @@ AEZ & $2941$ vectors from the AEZ v5 reference C code (length sweep, parameter g
 \toprule
 phase & content \\
 \midrule
-1 & golden bytes; $\Sigma$ table; pipeline term; layer build as a fold over $P$; reducer and handler as $\Sigma$-algebra; route by symbol sequence.  Zero wire change, no bump \\
+1 & golden bytes; closed $\Sigma$ table (unknown names rejected, no \code{tcp} fallback; configs change, bytes do not); pipeline term; layer build as a fold over $P$; reducer and handler as $\Sigma$-algebra; route by symbol sequence.  Zero wire change, no bump \\
 2a & uniform layer, fixed-length header (L5$'$), loop with derived $\Hm$, loop classes, relay process epoch, client tag, stateless relays, AEZ carry, SURBs.  Breaking \\
 2b & intermediate symbols: \code{Invoke} with release time, $\quota(f)$.  Same cutover; one version bump on its last PR \\
 \bottomrule
