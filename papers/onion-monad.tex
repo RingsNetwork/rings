@@ -152,7 +152,7 @@ $\relay$ included, carries $n$'s process epoch $e_n$, drawn afresh at each
 process start: $\relay$ in \code{OnlineNodeDescriptor::capabilities}
 extended with $e_n$, every other $f$ in one signed descriptor per symbol
 with $e_n$ and $\quota(f)$.
-Registration is upward closed: $\Sigma_n\ne\emptyset\Rightarrow\relay\in
+Registration includes $\relay$: $\Sigma_n\ne\emptyset\Rightarrow\relay\in
 \Sigma_n$, so a neighbour's registry entry does not reveal whether a relay
 is adjacent to a symbol hop.
 \end{defD}
@@ -298,7 +298,13 @@ Every position $i$ has one layer shape
 \alpha_{i+1})
 \]
 of $\ell$ bytes, with $\bar a_i$ padded to $A$ bytes: epoch $e_i$, one
-expiry $x$ per loop (a multiple of $Q=30$\,s), replay nonce
+expiry per loop,
+\begin{gather*}
+x=\lceil t_{\mathrm{build}}/Q\rceil\,Q+X_0,\\
+Q=30\,\mathrm{s},\qquad X_0=V-Q=120\,\mathrm{s},
+\end{gather*}
+a function of the build quantum only ($X_0$ is today's
+\code{ONION\_FORWARD\_PAYLOAD\_TTL\_MS}), replay nonce
 $\nu_i$, carry keys $\kappa_i=(k^{\mathrm{in}}_i;k^{\mathrm{out}}_{i,1..s+1})$,
 and the next hop's MAC $\gamma_{i+1}$ and key transport $\alpha_{i+1}$
 (Def.~\ref{def:header}).  A relay has $\bar a_i=()$ and random
@@ -309,7 +315,7 @@ cell on every edge of the loop, SURB replies included, is
 (\chi_{i+1},y_i),\quad \chi=(\alpha,\beta,\gamma),\quad
 |\beta|=\Hm\ell,\quad |y_i|=C_b ,
 \]
-padded to $b$, with $C_b=b-|\chi|-F$.
+padded to $b$, with $C_b=b-|\chi|-F$ and $F$ the cell framing.
 \end{defD}
 
 With today's encodings (239-byte ElGamal-AEAD envelope as $\alpha$, 43-byte
@@ -356,8 +362,10 @@ hence of $\beta_{i+1}$.
 
 \begin{lawL}{L3}{width}
 The carry slot has width $C=C_b$ on every edge of a loop of class $b$.
-With $C_0=C-\tau$, the client picks the least $b$ with $W(f_k)<C_0$ for
-all $k$.  $W$ factors through the output type ($W(f)=w(\Out_f)$, so the
+With $C_0=C-\tau$, for fixed-width symbols the client picks the least
+$b$ with $|\enc(v_0)|<C_0$ and $W(f_k)<C_0$ for all $k$; for a stream
+symbol, whose width is $C_0$ itself, $b$ is the client's choice between
+throughput and leakage (Table~\ref{tab:leak}).  $W$ factors through the output type ($W(f)=w(\Out_f)$, so the
 width a consumer unpads is fixed by its own $\In$); a $\WF$ stream symbol
 (\code{tcp}, \code{https}) has $\In=\Out=\mathrm{Bytes}_{<C_0}$, one chunk
 per loop or reply, and larger bodies span several loops.  Further,
@@ -370,7 +378,9 @@ an output with $|\enc_f(w)|>W(f)$ fails closed, never truncated.
 
 \begin{lawL}{L4}{timing}
 $\dep_i=\arr_i+L(f_i)$ exactly.  An evaluation unfinished at $\dep_i$ is
-dropped, never released late.
+dropped, never released late.  The one exception is a reply of a $\WF$
+session symbol (Algorithm~\ref{alg:reply}): it leaves when world bytes are
+ready, at any time before the SURB's $x$.
 \end{lawL}
 
 \section{Carry}\label{sec:carry}
@@ -436,7 +446,7 @@ fixed key: L9 is load-bearing for AEZ.
   \If{$f$ is a $\WF$ session symbol}
     \State $Q_h\gets Q_h\cup\{(\nxt,\chi',\kappa^{\mathrm{out}},x)\}$
       \Comment{D8}
-    \State write $\pad^{-1}(b)$ to the world;\ \Return
+    \State write $\enc^{-1}\pad^{-1}(b)$ to $\bar a$'s target;\ \Return
   \EndIf
   \State $w\gets\sem{f}(\bar a,\enc^{-1}\pad^{-1}(b))$ by $\arr+L(f)$
     \Comment{L4}
@@ -450,10 +460,10 @@ fixed key: L9 is load-bearing for AEZ.
 \end{algorithm}
 
 \begin{algorithm}[t]
-\caption{$\mathrm{Reply}_h(t)$: world bytes ready at session hop $h$}
+\caption{$\mathrm{Reply}_h(t_0)$: world bytes ready at session hop $h$}
 \label{alg:reply}
 \begin{algorithmic}[1]
-\State $Q_h\gets\{\upsilon\in Q_h: t<x_\upsilon\}$ \Comment{expired SURBs
+\State $Q_h\gets\{\upsilon\in Q_h: t_0<x_\upsilon\}$ \Comment{expired SURBs
   discarded}
 \If{$Q_h=\emptyset$} \State pause reading;\ \Return
   \Comment{Inv.~\ref{inv:credit}}
@@ -514,7 +524,8 @@ t_\upsilon+V,\\
 \end{gather*}
 Each reply consumes one $\upsilon$, produced as segment $n$ of D7 with
 $p_n=h$; an expired $\upsilon$ is discarded unused; a new forward loop
-resumes reading.  A session idle for longer than $V$ holds no credit.
+resumes reading.  By the rule for $x$, a SURB lives at most $X_0+Q=V$,
+and a session idle for longer than $V$ holds no credit.
 \end{invariant}
 
 \section{Security Laws}\label{sec:laws}
@@ -532,7 +543,7 @@ Over client coins $\rho$ (keys, nonces, header randomness) and delays
 $\delta$,
 \begin{multline*}
 \view_i=(f_i,\bar a_i,v_{i-1},\frm_i,\nxt_i,e_i,x,b,\\
-\mathit{bucket},\arr_i,\dep_i,\chi_i,y_{i-1},\chi_{i+1},y_i),
+\arr_i,\dep_i,\chi_i,y_{i-1},\chi_{i+1},y_i),
 \end{multline*}
 with $v_{i-1}=\bot$ when $f_i=\relay$ (a relay consumes no value).
 \end{defD}
@@ -543,7 +554,7 @@ For loops $P,P'$ let
 \pi_i(P)=(f_i,\bar a_i,v_{i-1},\frm_i,\nxt_i,e_i,x,b),\\
 \sigma(P)=f_1\cdots f_H,\\
 \pi_i(P)=\pi_i(P')\ \wedge\ \sigma(P)=\sigma(P')\\
-\Rightarrow\ \view_i(P)\eqd\view_i(P') .
+\Rightarrow\ \view_i(P)\eqc\view_i(P') .
 \end{gather*}
 Symbols may leak; $\bar a_j,v_j$ for $j\ne i$, other than the consumed
 $v_{i-1}$, may not~\cite{Goguen1982}.
@@ -551,7 +562,8 @@ $v_{i-1}$, may not~\cite{Goguen1982}.
 
 \begin{proposition}[L5 from D6, D7, L3, L4]\label{prop:ni}
 Under Assumption~\ref{as:prim}, every loop built by
-D4c--D7 satisfies L5.
+D4c--D7 satisfies L5.  Equality in distribution holds for the carry
+alone; the header makes L5 computational (Prop.~\ref{prop:pos}).
 \end{proposition}
 \begin{proof}
 Lengths: $|\chi_i|$ and $|y_i|=C$ are constant (D6, L3).  Times:
@@ -586,8 +598,12 @@ Under Assumption~\ref{as:prim}, the distinguishing advantage is at most
 $\Hm\,\epsilon_{\PRG}+\epsilon_{\MAC}+\epsilon_{\alpha}$.
 \end{proposition}
 \begin{proof}
-$|\chi|$ and $C$ do not depend on $H$ or $i$; $e_i$, $x$ and $\arr_i$ carry
-no position (one expiry per loop; departure time unobserved).  Hop $i$
+$|\chi|$ and $C$ do not depend on $H$ or $i$.  $e_i$ is the hop's own,
+$x$ depends only on the build quantum (D6), and $\arr_i$ carries no
+position because the client's departure time is unobserved
+(Assumption~\ref{as:prim}).  The carry is uniform at a relay position
+(Prop.~\ref{prop:ni}) and fixed by $v_{i-1}\in\pi^{\circ}_i$ at a
+consumer.  Hop $i$
 sees $\lambda_i$, fixed by $\pi^{\circ}_i$ up to fresh coins, $\alpha_{i+1}$,
 $\gamma_{i+1}$, and $\beta_{i+1}$.  Every block of $\beta_{i+1}$ but the
 last is masked by some $\rho_j$, $j\ne i$: by $\rho_{i+1}$ when $i+1<H$,
@@ -651,7 +667,9 @@ $\arr$ iff
 \arr<x\le\arr+V\ \wedge\ \nu\notin R_i\ \wedge\ |R_i^{\frm}|<B,
 \]
 then retains $\nu$ in $R_i$ until $\arr+V$.  A full $R_i^{\frm}$ rejects;
-no tag leaves $R_i$ before its retention ends.  A SURB is a layer, hence
+no tag leaves $R_i$ before its retention ends.  A sender beyond the 64th
+takes the quota of the least recently active partition, whose tags stay in
+$R_i$ until their retention ends; admission rejects while $|R_i|=64B$.  A SURB is a layer, hence
 single use; L9 also bounds each AEZ key to one carry value
 (Prop.~\ref{prop:onekey}).
 \end{lawL}
@@ -661,11 +679,12 @@ single use; L9 also bounds each AEZ key to one carry value
 (iii) Hop $i$ admits at most $B$ layers per sender per $V$, i.e.\
 $B/V\approx27$ cells\,s$^{-1}$ per neighbour.  (iv) A SURB is usable
 only within $[x_\upsilon-V,x_\upsilon)$, so SURB lifetime is at most $V$.
+(v) Hop $i$ admits at most $64B/V\approx1748$ cells\,s$^{-1}$ in total.
 \end{proposition}
 \begin{proof}
 (i) is the admission window; (ii) the capacity guard; (iii) each admitted
 tag occupies a slot for $V$; (iv) every relay of the reply path applies
-(i) at the reply's arrival.
+(i) at the reply's arrival; (v) follows from (ii).
 \end{proof}
 
 (iii) bounds per-neighbour loop throughput, including SURB replies; $B$
@@ -692,6 +711,8 @@ $g$ sees departure and return & round-trip $\sum_e d_e+\sum_i L(f_i)$: an estima
 latency class & L4 quantises timing; cannot remove it \\
 hosted backend & sees $\bar a$ of every application of its symbol \\
 loop class $b$ & every hop sees it; the same leakage as today's cell buckets \\
+session reply timing & follows the world, not $L(f)$ (L4); a session hop may hold a SURB until its $x$ \\
+stream class $b$ & chosen by the client for a stream symbol; reveals the throughput class \\
 expiry $x$ & shared by all hops of a loop and all loops sealed in one $Q=30$\,s quantum: colluders link positions only within that set \\
 $p_k$ holds $\kappa^{\mathrm{out}}_{p_k}$ & $p_k$ colluding with $r_{k,j}$ links two positions of one segment; no value leaks, and timing links them anyway \\
 client-authored semantics ($\bar a_{i+1}$ depends on meaning of $v_i$) & out of protocol scope \\
@@ -744,7 +765,7 @@ return path & forward path reversed & fresh relays to $g$ (L7) \\
 relay state & \code{relay\_returns}, $\le1024$, TTL $120$\,s refreshed per cell & replay tags only (L9) \\
 return bytes & one ciphertext, identical per edge & one AEZ layer per edge (L8) \\
 replay & exits (\code{consume\_forward\_nonce}), $V=150$\,s, $B=4096$ & every hop, same $V$, $B$ (L9) \\
-session replies & no credit bound & one per SURB (Inv.~\ref{inv:credit}) \\
+session replies & no SURB credit & one per SURB (Inv.~\ref{inv:credit}) \\
 \bottomrule
 \end{tabular}
 \end{table}

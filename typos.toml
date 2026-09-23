@@ -8,13 +8,20 @@ extend-ignore-re = ["[wW]s", "WS"]
 [default.extend-words]
 Brin = "Brin"
 Pease = "Pease"
+Tung = "Tung"
 
 # JSON-RPC method name as documented in docs/src/jsonrpc.md.
 [default.extend-identifiers]
 listPendings = "listPendings"
 # Rust compression crate referenced by name in the changelog.
 flate2 = "flate2"
+# Single-use reply blocks (Mixminion, Sphinx), plural as used in papers/onion-monad.tex.
+SURBs = "SURBs"
 
 # mdBook's own variable name, which docs/theme/rings.css must spell the same way to override it.
 [type.css]
 extend-ignore-re = ["--sidebar-non-existant"]
+
+# amsmath's display environment name in papers/*.tex.
+[type.tex]
+extend-ignore-re = ["\\\\(begin|end)\\{multline\\*?\\}"]
