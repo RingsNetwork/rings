@@ -838,7 +838,12 @@ mod tests {
     fn test_connect_without_a_runtime_claims_no_slot() -> crate::error::Result<()> {
         let runtime = tokio::runtime::Runtime::new().expect("test runtime");
         let (task, sessions, _) = runtime.block_on(async { super::relay_task_for_test("tcp") })?;
-        let key = SessionKey::new(Did::from(8_u32), "tcp", SessionId(12), Initiator::Remote);
+        let key = SessionKey::new(
+            Did::from(8_u32),
+            "tcp",
+            RelaySessionId(12),
+            Initiator::Remote,
+        );
         let scope = task.scope.clone();
         let connecting = Arc::clone(&sessions);
         let connect_key = key.clone();
