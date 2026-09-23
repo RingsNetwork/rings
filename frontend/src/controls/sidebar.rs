@@ -285,7 +285,7 @@ fn node_rail_card(derived: &ControlSidebarDerived) -> Html {
                 <strong class={derived.node_state_class}>{ derived.node_state }</strong>
             </div>
             { rail_row("Standard", derived.account_standard.clone()) }
-            { rail_row("Delegation", derived.session_label.clone()) }
+            { rail_row("Session", derived.session_label.clone()) }
         </section>
     }
 }

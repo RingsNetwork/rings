@@ -287,8 +287,8 @@ pub struct OnlineNodeDescriptorInfo {
     pub did: String,
     /// Verification public key encoded with the core serde shape.
     pub public_key: Value,
-    /// Delegation encryption public key encoded with the core serde shape.
-    pub delegatee_public_key: Value,
+    /// Session encryption public key encoded with the core serde shape.
+    pub session_public_key: Value,
     /// Runtime class of the advertised node.
     pub node_type: OnlineNodeTypeInfo,
     /// Overlay network identifier the descriptor belongs to.
@@ -342,8 +342,8 @@ pub struct OnionExitDescriptorInfo {
     pub did: String,
     /// Verification public key encoded with the core serde shape.
     pub public_key: Value,
-    /// Delegation encryption public key encoded with the core serde shape.
-    pub delegatee_public_key: Value,
+    /// Session encryption public key encoded with the core serde shape.
+    pub session_public_key: Value,
     /// Random process epoch encoded with the node serde shape.
     pub process_epoch: Value,
     /// Runtime class of the exit node.

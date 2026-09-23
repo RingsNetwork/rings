@@ -102,7 +102,7 @@ use queue::RunnableTransfer;
 use queue::TransferQueues;
 #[cfg(test)]
 pub(crate) use queue::OUTBOUND_CONTROL_BURST;
-use session_encoding::SharedAnnouncedDelegations;
+use session_encoding::SharedAnnouncedSessions;
 use spawn::spawn_worker;
 pub(super) use transfer::ChunkFrames;
 pub(super) use transfer::ChunkedFrameSource;
@@ -464,7 +464,7 @@ struct OutboundWorker {
     receiver: MailboxReceiver<OutboundCommand>,
     ready: TransferQueues<QueuedTransfer>,
     active: Option<RunnableTransfer<QueuedTransfer>>,
-    announced: SharedAnnouncedDelegations,
+    announced: SharedAnnouncedSessions,
     deliveries: FuturesUnordered<DeliveryWaitFuture>,
     measurements: MeasurementRecorder,
     stop: StopSource,
@@ -479,7 +479,7 @@ impl OutboundWorker {
         stop: StopSource,
         measurements: MeasurementRecorder,
         peer: Did,
-        announced: SharedAnnouncedDelegations,
+        announced: SharedAnnouncedSessions,
     ) -> Self {
         #[cfg(not(test))]
         let _ = peer;

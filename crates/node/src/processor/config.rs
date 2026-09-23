@@ -21,8 +21,8 @@ pub struct ProcessorConfig {
     pub(in crate::processor) webrtc_udp_port_min: Option<u16>,
     /// Inclusive upper native WebRTC UDP port bound.
     pub(in crate::processor) webrtc_udp_port_max: Option<u16>,
-    /// [DelegateeKey].
-    pub(in crate::processor) delegatee_key: DelegateeKey,
+    /// [SessionSk].
+    pub(in crate::processor) session_sk: SessionSk,
     /// Stabilization interval.
     pub(in crate::processor) stabilize_interval: Duration,
     /// Online-node registry heartbeat interval.
@@ -57,7 +57,7 @@ impl ProcessorConfig {
     pub fn new(
         network_id: u32,
         ice_servers: String,
-        delegatee_key: DelegateeKey,
+        session_sk: SessionSk,
         stabilize_interval: u64,
     ) -> Self {
         Self {
@@ -66,7 +66,7 @@ impl ProcessorConfig {
             external_address: None,
             webrtc_udp_port_min: None,
             webrtc_udp_port_max: None,
-            delegatee_key,
+            session_sk,
             stabilize_interval: Duration::from_secs(stabilize_interval),
             online_node_heartbeat_interval: Duration::from_secs(
                 default_online_node_heartbeat_interval_secs(),
@@ -87,9 +87,9 @@ impl ProcessorConfig {
         }
     }
 
-    /// Return associated [DelegateeKey].
-    pub fn delegatee_key(&self) -> DelegateeKey {
-        self.delegatee_key.clone()
+    /// Return associated [SessionSk].
+    pub fn session_sk(&self) -> SessionSk {
+        self.session_sk.clone()
     }
 
     /// Return the overlay this node joins.
@@ -174,7 +174,7 @@ impl FromStr for ProcessorConfig {
 }
 
 /// `ProcessorConfigSerialized` is a serialized version of `ProcessorConfig`.
-/// Instead of storing the `DelegateeKey` instance, it stores the dumped string representation of the session secret key.
+/// Instead of storing the `SessionSk` instance, it stores the dumped string representation of the session secret key.
 #[derive(Serialize, Deserialize, Clone)]
 #[wasm_export]
 pub struct ProcessorConfigSerialized {
@@ -189,8 +189,8 @@ pub struct ProcessorConfigSerialized {
     pub(crate) webrtc_udp_port_min: Option<u16>,
     /// Inclusive upper native WebRTC UDP port bound.
     pub(crate) webrtc_udp_port_max: Option<u16>,
-    /// A string representing the dumped `DelegateeKey`.
-    pub(crate) delegatee_key: String,
+    /// A string representing the dumped `SessionSk`.
+    pub(crate) session_sk: String,
     /// An unsigned integer representing the stabilization interval in seconds.
     pub(crate) stabilize_interval: u64,
     /// Online-node registry heartbeat interval in seconds.
@@ -287,7 +287,7 @@ impl TryFrom<ProcessorConfig> for ProcessorConfigSerialized {
             external_address: ins.external_address.clone(),
             webrtc_udp_port_min: ins.webrtc_udp_port_min,
             webrtc_udp_port_max: ins.webrtc_udp_port_max,
-            delegatee_key: ins.delegatee_key.dump()?,
+            session_sk: ins.session_sk.dump()?,
             stabilize_interval: ins.stabilize_interval.as_secs(),
             online_node_heartbeat_interval_secs: ins.online_node_heartbeat_interval.as_secs(),
             online_node_ttl_secs: ins.online_node_ttl.as_secs(),
@@ -322,7 +322,7 @@ impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
             external_address: ins.external_address.clone(),
             webrtc_udp_port_min: webrtc_udp_port_range.map(WebrtcUdpPortRange::min),
             webrtc_udp_port_max: webrtc_udp_port_range.map(WebrtcUdpPortRange::max),
-            delegatee_key: DelegateeKey::from_str(&ins.delegatee_key)?,
+            session_sk: SessionSk::from_str(&ins.session_sk)?,
             stabilize_interval: Duration::from_secs(ins.stabilize_interval),
             online_node_heartbeat_interval,
             online_node_ttl,

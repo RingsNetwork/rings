@@ -4,7 +4,7 @@ use std::time::Duration;
 use rings_core::dht::Did;
 use rings_core::ecc::SecretKey;
 use rings_core::storage::MemStorage;
-use rings_native_example::build_delegatee_key;
+use rings_native_example::build_session_key;
 use rings_native_example::example_message_request;
 use rings_native_example::parse_cli_args;
 use rings_native_example::peer_is_connected;
@@ -32,9 +32,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("===> Current key: {key_str}"); // It's useful when you want to reproduce the same did.
     println!("===> Current did: {did}");
 
-    // Build the node.s delegatee key through the external delegation flow.
-    // The helper keeps the delegator secret key out of the processor API.
-    let sk = build_delegatee_key(&key)?;
+    // Build SessionSk of node in a safely way.
+    // You can also use `SessionSk::new_with_key(&key)` directly.
+    let sk = build_session_key(&key)?;
 
     // Build processor
     let config = ProcessorConfig::new(

@@ -21,7 +21,7 @@ use crate::message::Message;
 use crate::message::MessageKind;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
-use crate::swarm::session_link::ReferencedDelegations;
+use crate::swarm::session_link::ReferencedSessions;
 use crate::swarm::session_link::Swept;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
@@ -85,7 +85,7 @@ impl InboundProcessor {
             reassembly_clock,
             pending_attempt: Arc::new(Mutex::new(None)),
             pre_admission: Arc::new(Mutex::new(PreAdmissionHold::new(inbound::peer_capacity()))),
-            session_link: Arc::new(Mutex::new(ReferencedDelegations::new(
+            session_link: Arc::new(Mutex::new(ReferencedSessions::new(
                 super::SESSION_HOLD_CAPACITY,
                 SESSION_HOLD_TIMEOUT.as_millis(),
             ))),
@@ -161,13 +161,13 @@ impl InboundProcessor {
         }
     }
 
-    /// The receiving end of this connection's delegation references.
+    /// The receiving end of this connection's session references.
     ///
     /// Lock law: held for one pure step and never across a suspension point; a poisoned lock
     /// still guards a well-formed state, since no step panics between two writes.
     pub(super) fn session_link(
         &self,
-    ) -> std::sync::MutexGuard<'_, ReferencedDelegations<InboundFrameLease>> {
+    ) -> std::sync::MutexGuard<'_, ReferencedSessions<InboundFrameLease>> {
         self.session_link
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -335,7 +335,7 @@ impl InboundProcessor {
 
 /// Verify one resolved frame of `wire_bytes` bytes and decode the message it carries.
 ///
-/// The payload is self-contained by now: whether a delegation slot travelled inline or by
+/// The payload is self-contained by now: whether a session slot travelled inline or by
 /// reference, this is the verification it always was.
 pub(super) fn prepare_resolved_frame(
     network_id: u32,

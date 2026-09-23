@@ -236,7 +236,7 @@ pub struct SessionKey {
 }
 
 impl SessionKey {
-    /// Build a delegatee key from its parts.
+    /// Build a session key from its parts.
     pub fn new(
         peer: Did,
         namespace: impl Into<String>,
@@ -283,14 +283,14 @@ pub enum TransportKind {
 pub enum Frame {
     /// Open a session/flow to a named local service (always sent by the opener).
     Open {
-        /// Delegation identifier (assigned by the opener).
+        /// Session identifier (assigned by the opener).
         session: SessionId,
         /// Local service name to connect to.
         service: String,
     },
     /// Bytes on an open session (one datagram per frame for UDP).
     Data {
-        /// Delegation the bytes belong to.
+        /// Session the bytes belong to.
         session: SessionId,
         /// Whether the sender of this frame opened the session.
         from_opener: bool,
@@ -301,14 +301,14 @@ pub enum Frame {
     /// receiver shuts down its local write side but keeps the reverse direction open.
     /// Ignored by UDP (datagram flows have no half-close).
     Shutdown {
-        /// Delegation being half-closed.
+        /// Session being half-closed.
         session: SessionId,
         /// Whether the sender of this frame opened the session.
         from_opener: bool,
     },
     /// Close a session/flow (full teardown, both directions).
     Close {
-        /// Delegation to close.
+        /// Session to close.
         session: SessionId,
         /// Whether the sender of this frame opened the session.
         from_opener: bool,

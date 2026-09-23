@@ -62,11 +62,11 @@ mod tests {
 
     use rings_transport::connections::dummy_controlled;
 
-    use crate::delegation::DelegateeKey;
     use crate::dht::Chord;
     use crate::dht::PeerRing;
     use crate::ecc::SecretKey;
     use crate::inspect::DHTInspect;
+    use crate::session::SessionSk;
     use crate::storage::MemStorage;
     use crate::swarm::Swarm;
     use crate::swarm::SwarmBuilder;
@@ -290,9 +290,9 @@ mod tests {
     async fn prepare_schedule_node(key: SecretKey) -> Node {
         let stun = "stun://stun.l.google.com:19302";
         let storage = Box::new(MemStorage::new());
-        let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
+        let session_sk = SessionSk::new_with_seckey(&key).unwrap();
         let swarm = Arc::new(
-            SwarmBuilder::new(0, stun, storage, delegatee_key)
+            SwarmBuilder::new(0, stun, storage, session_sk)
                 .dht_finger_table_size(SCHEDULE_FINGER_TABLE_SIZE)
                 .dht_virtual_nodes(0)
                 .build(),

@@ -502,8 +502,8 @@ mod tests {
     use std::sync::Mutex;
 
     use async_trait::async_trait;
-    use rings_core::delegation::DelegateeKey;
     use rings_core::ecc::SecretKey;
+    use rings_core::session::SessionSk;
     use tokio::net::TcpListener;
     use tokio::sync::Notify;
 
@@ -640,7 +640,7 @@ mod tests {
     }
 
     fn extensions() -> Result<Extensions> {
-        let session = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+        let session = SessionSk::new_with_seckey(&SecretKey::random())?;
         let config = ProcessorConfig::new(1, String::new(), session, 1);
         let processor = ProcessorBuilder::from_config(&config)?
             .advertise_presence(false)

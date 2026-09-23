@@ -20,7 +20,7 @@ pub(crate) enum ScheduledDeliveryClass {
     Lifecycle,
     /// Chord or liveness control payload.
     Control,
-    /// A link-control frame of the delegation references (a confirmation, question or answer):
+    /// A link-control frame of the session references (a confirmation, question or answer):
     /// a frame of the link itself, belonging to no transaction and to no transfer lane. A
     /// delayed confirmation costs inline frames and a delayed answer costs the held frame,
     /// never a stall of anything that resolves, so it carries no deadline.
@@ -146,7 +146,7 @@ fn inspect_delivery(
     })
 }
 
-/// Classify one queued frame as the production link would, without resolving its delegation slots:
+/// Classify one queued frame as the production link would, without resolving its session slots:
 /// the class and transaction id of a payload are readable whatever its slots hold, and a
 /// link-control frame is the link's own, belonging to no transaction.
 pub(super) fn inspect_message(

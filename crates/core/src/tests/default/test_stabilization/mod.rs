@@ -14,7 +14,6 @@ use tokio::time::timeout;
 #[cfg(not(target_family = "wasm"))]
 use tokio::time::Duration;
 
-use crate::delegation::DelegateeKey;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::Did;
@@ -38,6 +37,7 @@ use crate::measure::PeerQualityThresholds;
 use crate::measure::ProvisionalEvidenceRecord;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::message::ProvisionalServiceReceipt;
+use crate::session::SessionSk;
 use crate::storage::MemStorage;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::swarm::transport::PEER_LIVENESS_IDLE_MS;
@@ -238,7 +238,7 @@ fn prepare_repair_node_with_optional_measure(
     key: SecretKey,
     measure: Option<MeasureImpl>,
 ) -> Result<Node> {
-    let session = DelegateeKey::new_with_seckey(&key)?;
+    let session = SessionSk::new_with_seckey(&key)?;
     let mut builder = SwarmBuilder::new(
         0,
         "stun://stun.l.google.com:19302",

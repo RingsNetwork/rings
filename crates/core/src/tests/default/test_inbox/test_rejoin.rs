@@ -7,8 +7,8 @@ use std::sync::Arc;
 use rings_transport::core::transport::WebrtcConnectionState;
 
 use super::*;
-use crate::delegation::DelegateeKey;
 use crate::ecc::SecretKey;
+use crate::session::SessionSk;
 use crate::storage::MemStorage;
 use crate::swarm::SwarmBuilder;
 
@@ -16,7 +16,7 @@ use crate::swarm::SwarmBuilder;
 /// from successor-list discovery. Storage and message handling remain unchanged.
 fn head_only_node(key: SecretKey) -> Result<Node> {
     // The session authenticates this node's real connection and topology messages.
-    let session = DelegateeKey::new_with_seckey(&key)?;
+    let session = SessionSk::new_with_seckey(&key)?;
     // Only topology breadth is reduced; the production transport and storage remain enabled.
     let swarm = SwarmBuilder::new(
         crate::tests::TEST_NETWORK_ID,

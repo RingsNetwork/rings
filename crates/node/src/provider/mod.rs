@@ -6,7 +6,6 @@ use std::sync::Arc;
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 use std::sync::Mutex;
 
-use rings_core::delegation::DelegationBuilder;
 use rings_core::dht::Did;
 use rings_core::dht::EntryStorage;
 #[cfg(feature = "node")]
@@ -17,6 +16,7 @@ use rings_core::measure::EvidenceError;
 use rings_core::measure::EvidencePage;
 use rings_core::measure::PeerMeasurement;
 use rings_core::message::ReplayStorage;
+use rings_core::session::SessionSkBuilder;
 use rings_core::storage::MemStorage;
 use rings_core::swarm::callback::SharedSwarmCallback;
 use rings_core::swarm::callback::SwarmCallback;
@@ -190,10 +190,8 @@ impl Provider {
             onion_entry_guard_storage.unwrap_or_else(|| Box::new(MemStorage::new()));
         let replay_storage = replay_storage.unwrap_or_else(|| Box::new(MemStorage::new()));
 
-        let collector = EvidenceCollectorIdentity::new(
-            config.network_id(),
-            config.delegatee_key().delegator_did(),
-        );
+        let collector =
+            EvidenceCollectorIdentity::new(config.network_id(), config.session_sk().account_did());
         let measure = PeriodicMeasure::new_with_evidence_storage(
             measure_storage,
             evidence_storage,
@@ -276,16 +274,15 @@ impl Provider {
         replay_storage: Option<ReplayStorage>,
         configure: impl FnOnce(ProcessorConfig) -> ProcessorConfig,
     ) -> Result<Provider> {
-        let mut sk_builder = DelegationBuilder::new(account, account_type);
+        let mut sk_builder = SessionSkBuilder::new(account, account_type);
         let proof = sk_builder.unsigned_proof();
         let sig = match signer {
             Signer::Sync(s) => s(proof),
             Signer::Async(s) => s(proof).await,
         };
-        sk_builder = sk_builder.set_delegator_signature(sig.to_vec());
-        let delegatee_key = sk_builder.build().map_err(Error::InternalError)?;
-        let config =
-            ProcessorConfig::new(network_id, ice_servers, delegatee_key, stabilize_interval);
+        sk_builder = sk_builder.set_session_sig(sig.to_vec());
+        let session_sk = sk_builder.build().map_err(Error::InternalError)?;
+        let config = ProcessorConfig::new(network_id, ice_servers, session_sk, stabilize_interval);
         let config = configure(config);
         Self::new_provider_with_storage_internal(
             config,

@@ -50,7 +50,7 @@ const TRANSACTION_REPLAY_SNAPSHOT_KEY: &str = "rings-core:transaction-replay";
 pub struct StreamKey {
     /// Overlay in which the transaction signature is valid.
     pub network_id: u32,
-    /// Account DID recovered from the transaction's delegation.
+    /// Account DID recovered from the transaction's delegated session.
     pub origin_account: Did,
     /// Final logical destination of the transaction.
     pub destination: Did,
@@ -694,8 +694,8 @@ mod tests {
     #[test]
     fn session_rotation_preserves_the_account_destination_stream_key() -> Result<()> {
         let account = SecretKey::random();
-        let first_session = crate::delegation::DelegateeKey::new_with_seckey(&account)?;
-        let rotated_session = crate::delegation::DelegateeKey::new_with_seckey(&account)?;
+        let first_session = crate::session::SessionSk::new_with_seckey(&account)?;
+        let rotated_session = crate::session::SessionSk::new_with_seckey(&account)?;
         let destination: Did = SecretKey::random().address().into();
         let first = crate::message::Transaction::new(
             destination,
@@ -713,8 +713,8 @@ mod tests {
         )?;
 
         assert_ne!(
-            first_session.delegation().delegatee_did(),
-            rotated_session.delegation().delegatee_did()
+            first_session.session().session_did(),
+            rotated_session.session().session_did()
         );
         assert_eq!(first.stream_key(7), rotated.stream_key(7));
         Ok(())

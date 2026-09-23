@@ -47,7 +47,7 @@ async fn test_invalid_chunk_shape_records_peer_receive_failure() -> Result<()> {
     let transport = Arc::new(transport_with_measure(measure.clone())?);
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();
-    let session = DelegateeKey::new_with_seckey(&peer_key)?;
+    let session = SessionSk::new_with_seckey(&peer_key)?;
     let callback = admitted_callback(Arc::clone(&transport), peer).await?;
     let frame = local_wire(
         Message::Chunk(Chunk {
@@ -91,7 +91,7 @@ async fn test_reassembly_rejections_score_only_invalid_input_and_release_resourc
     let budget = transport.reassembly_budget();
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();
-    let session = DelegateeKey::new_with_seckey(&peer_key)?;
+    let session = SessionSk::new_with_seckey(&peer_key)?;
     let callback = admitted_callback(Arc::clone(&transport), peer).await?;
     let first = Chunk {
         chunk: [0, 2],
@@ -176,7 +176,7 @@ async fn test_expired_partial_reassembly_releases_shared_budget_without_more_pee
     let budget = transport.reassembly_budget();
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();
-    let session = DelegateeKey::new_with_seckey(&peer_key)?;
+    let session = SessionSk::new_with_seckey(&peer_key)?;
     let meta = crate::chunk::ChunkMeta {
         ttl_ms: 100,
         ..Default::default()
@@ -301,7 +301,7 @@ async fn test_authenticated_partial_expiry_remains_attributable_after_disconnect
     let budget = transport.reassembly_budget();
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();
-    let session = DelegateeKey::new_with_seckey(&peer_key)?;
+    let session = SessionSk::new_with_seckey(&peer_key)?;
     let meta = crate::chunk::ChunkMeta {
         ttl_ms: 100,
         ..Default::default()
@@ -369,7 +369,7 @@ fn test_inbound_mailbox_without_runtime_returns_typed_error() -> Result<()> {
         RecordingMeasure::default(),
     ))?);
     let peer_key = SecretKey::random();
-    let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
+    let peer_session = SessionSk::new_with_seckey(&peer_key)?;
     let wire = local_wire(
         Message::custom(b"valid-message")?,
         &peer_session,

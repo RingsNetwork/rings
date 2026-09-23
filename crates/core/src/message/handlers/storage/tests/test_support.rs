@@ -7,7 +7,6 @@ use tokio::time::Duration;
 use tokio::time::Instant;
 
 use super::super::ChordStorageInterfaceCacheChecker;
-use crate::delegation::DelegateeKey;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::Chord;
@@ -27,6 +26,7 @@ use crate::message::MessageRelay;
 use crate::message::MessageSigner;
 use crate::message::PayloadSender;
 use crate::message::Transaction;
+use crate::session::SessionSk;
 use crate::storage::MemStorage;
 use crate::swarm::callback::SwarmCallback;
 use crate::swarm::SwarmBuilder;
@@ -234,7 +234,7 @@ pub(super) fn next_generated_key(keys: &mut impl Iterator<Item = SecretKey>) -> 
 pub(super) fn storage_sync_report_payload(
     request: &MessagePayload,
     report: SyncEntriesWithSuccessorReport,
-    signer: MessageSigner<&DelegateeKey>,
+    signer: MessageSigner<&SessionSk>,
     next_hop: Did,
     destination: Did,
 ) -> Result<MessagePayload> {
@@ -253,13 +253,13 @@ pub(super) fn prepare_node_with_storage_redundancy(
     key: SecretKey,
     redundancy: u16,
 ) -> Result<Node> {
-    let delegatee_key = DelegateeKey::new_with_seckey(&key)?;
+    let session_sk = SessionSk::new_with_seckey(&key)?;
     let swarm = Arc::new(
         SwarmBuilder::new(
             0,
             "stun://stun.l.google.com:19302",
             Box::new(MemStorage::new()),
-            delegatee_key,
+            session_sk,
         )
         .dht_storage_redundancy(redundancy)
         .dht_virtual_nodes(0)
@@ -273,13 +273,13 @@ pub(super) fn prepare_node_with_virtual_nodes(
     key: SecretKey,
     positions_per_peer: u16,
 ) -> Result<Node> {
-    let delegatee_key = DelegateeKey::new_with_seckey(&key)?;
+    let session_sk = SessionSk::new_with_seckey(&key)?;
     let swarm = Arc::new(
         SwarmBuilder::new(
             0,
             "stun://stun.l.google.com:19302",
             Box::new(MemStorage::new()),
-            delegatee_key,
+            session_sk,
         )
         .dht_virtual_nodes(positions_per_peer)
         .dht_finger_table_size(8)

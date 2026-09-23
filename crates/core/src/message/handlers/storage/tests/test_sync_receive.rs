@@ -9,7 +9,6 @@ use super::test_support::prepare_node_with_storage_redundancy;
 use super::test_support::remote_storage_placement_after;
 use super::test_support::NoopCallback;
 use crate::consts::ENTRY_DATA_MAX_LEN;
-use crate::delegation::DelegateeKey;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
@@ -30,6 +29,7 @@ use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::MessageSigner;
 use crate::message::PayloadSender;
+use crate::session::SessionSk;
 use crate::swarm::transport::StorageSyncBatch;
 use crate::swarm::transport::StorageSyncBatchStep;
 use crate::tests::default::assert_no_more_msg;
@@ -78,7 +78,7 @@ async fn test_sync_entries_handler_stores_entry_at_placement_key() -> Result<()>
         .ok_or_else(|| Error::InvalidMessage("expected redundant placement".to_string()))?;
     let stored_entry = entry.clone().try_into_storage_entry()?;
     let context_key = SecretKey::random();
-    let context_session = DelegateeKey::new_with_seckey(&context_key)?;
+    let context_session = SessionSk::new_with_seckey(&context_key)?;
     let context = MessagePayload::new_send(
         Message::custom(b"sync context")?,
         MessageSigner::new(&context_session, TEST_NETWORK_ID),
@@ -118,7 +118,7 @@ async fn test_sync_entries_handler_caps_inbound_entry_payloads() -> Result<()> {
     );
     let placement_key = entry.did;
     let context_key = SecretKey::random();
-    let context_session = DelegateeKey::new_with_seckey(&context_key)?;
+    let context_session = SessionSk::new_with_seckey(&context_key)?;
     let context = MessagePayload::new_send(
         Message::custom(b"sync context")?,
         MessageSigner::new(&context_session, TEST_NETWORK_ID),
@@ -168,7 +168,7 @@ async fn test_sync_entries_handler_rejects_non_affine_placement_before_writing()
     let valid_placement = valid_entry.did;
     let invalid_placement = non_affine_placement(invalid_entry.did, 2)?;
     let context_key = SecretKey::random();
-    let context_session = DelegateeKey::new_with_seckey(&context_key)?;
+    let context_session = SessionSk::new_with_seckey(&context_key)?;
     let context = MessagePayload::new_send(
         Message::custom(b"sync context")?,
         MessageSigner::new(&context_session, TEST_NETWORK_ID),

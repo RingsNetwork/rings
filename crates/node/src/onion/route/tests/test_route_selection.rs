@@ -1,11 +1,11 @@
 use std::collections::VecDeque;
 
-use rings_core::delegation::DelegateeKey;
 use rings_core::ecc::SecretKey;
 use rings_core::error::Result as CoreResult;
 use rings_core::measure::PeerQuality;
 use rings_core::message::DhtProtocolMode;
 use rings_core::message::MessageSigner;
+use rings_core::session::SessionSk;
 
 use super::super::*;
 use crate::consts::DATA_REDUNDANT;
@@ -33,33 +33,33 @@ fn service(name: &str) -> OnionServiceName {
 
 fn signed_exit_at(heartbeat_at_ms: u128, expires_at_ms: u128) -> Result<OnionExitDescriptor> {
     let key = SecretKey::random();
-    let delegatee_key = DelegateeKey::new_with_seckey(&key).map_err(Error::CoreError)?;
-    signed_exit_for_session_at(&delegatee_key, heartbeat_at_ms, expires_at_ms)
+    let session_sk = SessionSk::new_with_seckey(&key).map_err(Error::CoreError)?;
+    signed_exit_for_session_at(&session_sk, heartbeat_at_ms, expires_at_ms)
 }
 
 fn signed_exit_for_session_at(
-    delegatee_key: &DelegateeKey,
+    session_sk: &SessionSk,
     heartbeat_at_ms: u128,
     expires_at_ms: u128,
 ) -> Result<OnionExitDescriptor> {
-    signed_exit_for_session_network_at(delegatee_key, 1, heartbeat_at_ms, expires_at_ms)
+    signed_exit_for_session_network_at(session_sk, 1, heartbeat_at_ms, expires_at_ms)
 }
 
 fn signed_exit_for_session_network_at(
-    delegatee_key: &DelegateeKey,
+    session_sk: &SessionSk,
     network_id: u32,
     heartbeat_at_ms: u128,
     expires_at_ms: u128,
 ) -> Result<OnionExitDescriptor> {
-    let did = delegatee_key.delegator_did();
+    let did = session_sk.account_did();
     OnionExitDescriptor::new_signed(
         OnionExitDescriptorBody {
             did,
-            public_key: delegatee_key
-                .delegation()
-                .delegator_verification_pubkey()
+            public_key: session_sk
+                .session()
+                .account_verification_pubkey()
                 .map_err(Error::CoreError)?,
-            delegatee_public_key: delegatee_key.delegatee_public_key(),
+            session_public_key: session_sk.session_public_key(),
             process_epoch: TEST_EXIT_PROCESS_EPOCH,
             node_type: OnlineNodeType::Native,
             network_id,
@@ -76,29 +76,29 @@ fn signed_exit_for_session_network_at(
             expires_at_ms,
             version: "test".to_string(),
         },
-        MessageSigner::new(delegatee_key, network_id),
+        MessageSigner::new(session_sk, network_id),
     )
     .map_err(Error::CoreError)
 }
 
 fn online_node_at(
-    delegatee_key: &DelegateeKey,
+    session_sk: &SessionSk,
     heartbeat_at_ms: u128,
     expires_at_ms: u128,
 ) -> CoreResult<OnlineNodeDescriptor> {
-    online_node_at_with_capabilities(delegatee_key, heartbeat_at_ms, expires_at_ms, vec![
+    online_node_at_with_capabilities(session_sk, heartbeat_at_ms, expires_at_ms, vec![
         ONION_RELAY_CAPABILITY.to_string(),
     ])
 }
 
 fn online_node_at_with_capabilities(
-    delegatee_key: &DelegateeKey,
+    session_sk: &SessionSk,
     heartbeat_at_ms: u128,
     expires_at_ms: u128,
     capabilities: Vec<String>,
 ) -> CoreResult<OnlineNodeDescriptor> {
     online_node_at_with_network_and_capabilities(
-        delegatee_key,
+        session_sk,
         1,
         heartbeat_at_ms,
         expires_at_ms,
@@ -107,7 +107,7 @@ fn online_node_at_with_capabilities(
 }
 
 fn online_node_at_with_network_and_capabilities(
-    delegatee_key: &DelegateeKey,
+    session_sk: &SessionSk,
     network_id: u32,
     heartbeat_at_ms: u128,
     expires_at_ms: u128,
@@ -115,9 +115,9 @@ fn online_node_at_with_network_and_capabilities(
 ) -> CoreResult<OnlineNodeDescriptor> {
     OnlineNodeDescriptor::new_signed(
         OnlineNodeDescriptorBody {
-            did: delegatee_key.delegator_did(),
-            public_key: delegatee_key.delegation().delegator_verification_pubkey()?,
-            delegatee_public_key: delegatee_key.delegatee_public_key(),
+            did: session_sk.account_did(),
+            public_key: session_sk.session().account_verification_pubkey()?,
+            session_public_key: session_sk.session_public_key(),
             node_type: OnlineNodeType::Native,
             network_id,
             storage_redundancy: DATA_REDUNDANT,
@@ -129,12 +129,12 @@ fn online_node_at_with_network_and_capabilities(
             expires_at_ms,
             version: "test".to_string(),
         },
-        MessageSigner::new(delegatee_key, network_id),
+        MessageSigner::new(session_sk, network_id),
     )
 }
 
-fn node_key() -> CoreResult<DelegateeKey> {
-    DelegateeKey::new_with_seckey(&SecretKey::random())
+fn node_key() -> CoreResult<SessionSk> {
+    SessionSk::new_with_seckey(&SecretKey::random())
 }
 
 fn route_request(
@@ -200,7 +200,7 @@ impl RouteEntropy for FixedEntropy {
 
 #[test]
 fn test_route_builder_uses_presence_relays_and_exit_registry() -> Result<()> {
-    let local = node_key().map_err(Error::CoreError)?.delegator_did();
+    let local = node_key().map_err(Error::CoreError)?.account_did();
     let first_relay = node_key().map_err(Error::CoreError)?;
     let second_relay = node_key().map_err(Error::CoreError)?;
     let exit = signed_exit_at(20, 100)?;
@@ -222,7 +222,7 @@ fn test_route_builder_uses_presence_relays_and_exit_registry() -> Result<()> {
 
 #[test]
 fn test_route_builder_canonicalizes_service_before_constructing_route() -> Result<()> {
-    let local = node_key().map_err(Error::CoreError)?.delegator_did();
+    let local = node_key().map_err(Error::CoreError)?.account_did();
     let exit = signed_exit_at(20, 100)?;
     let request = route_request("WeB", 1, false)?;
 
@@ -234,7 +234,7 @@ fn test_route_builder_canonicalizes_service_before_constructing_route() -> Resul
 
 #[test]
 fn test_directory_candidates_reject_expired_remote_descriptors() -> Result<()> {
-    let local = node_key().map_err(Error::CoreError)?.delegator_did();
+    let local = node_key().map_err(Error::CoreError)?.account_did();
     let relay = node_key().map_err(Error::CoreError)?;
     let exit = signed_exit_at(20, 40)?;
     let candidates = OnionRouteCandidates::from_validated_descriptors(
@@ -253,7 +253,7 @@ fn test_directory_candidates_reject_expired_remote_descriptors() -> Result<()> {
 
 #[test]
 fn test_directory_candidates_reject_foreign_network_descriptors() -> Result<()> {
-    let local = node_key().map_err(Error::CoreError)?.delegator_did();
+    let local = node_key().map_err(Error::CoreError)?.account_did();
     let relay = node_key().map_err(Error::CoreError)?;
     let exit_key = node_key().map_err(Error::CoreError)?;
     let exit = signed_exit_for_session_network_at(&exit_key, 2, 20, 100)?;
@@ -278,7 +278,7 @@ fn test_directory_candidates_reject_foreign_network_descriptors() -> Result<()> 
 
 #[test]
 fn test_route_builder_rejects_too_short_production_route() -> Result<()> {
-    let local = node_key().map_err(Error::CoreError)?.delegator_did();
+    let local = node_key().map_err(Error::CoreError)?.account_did();
     let relay = node_key().map_err(Error::CoreError)?;
     let exit = signed_exit_at(20, 100)?;
     let request = route_request("web", 3, false)?;
@@ -303,7 +303,7 @@ fn test_route_builder_rejects_too_short_production_route() -> Result<()> {
 
 #[test]
 fn test_route_builder_rejects_nodes_without_relay_capability() -> Result<()> {
-    let local = node_key().map_err(Error::CoreError)?.delegator_did();
+    let local = node_key().map_err(Error::CoreError)?.account_did();
     let relay = node_key().map_err(Error::CoreError)?;
     let exit = signed_exit_at(20, 100)?;
     let request = route_request("web", 2, false)?;
@@ -355,15 +355,15 @@ fn test_route_builder_reports_no_live_exit_before_first_hop_filter() -> Result<(
 
 #[test]
 fn test_route_builder_samples_relays_by_quality_weight() -> Result<()> {
-    let local = node_key().map_err(Error::CoreError)?.delegator_did();
+    let local = node_key().map_err(Error::CoreError)?.account_did();
     let degraded = node_key().map_err(Error::CoreError)?;
     let healthy = node_key().map_err(Error::CoreError)?;
     let exit = signed_exit_at(20, 100)?;
     let request = route_request("web", 2, false)?;
     let candidates = OnionRouteCandidates {
         relays: vec![
-            OnionRouteHop::new(degraded.delegator_did(), degraded.delegatee_public_key()),
-            OnionRouteHop::new(healthy.delegator_did(), healthy.delegatee_public_key()),
+            OnionRouteHop::new(degraded.account_did(), degraded.session_public_key()),
+            OnionRouteHop::new(healthy.account_did(), healthy.session_public_key()),
         ],
         exits: vec![exit],
     };
@@ -373,15 +373,15 @@ fn test_route_builder_samples_relays_by_quality_weight() -> Result<()> {
         &request,
         candidates,
         vec![
-            (degraded.delegator_did(), PeerQuality::Degraded),
-            (healthy.delegator_did(), PeerQuality::Healthy),
+            (degraded.account_did(), PeerQuality::Degraded),
+            (healthy.account_did(), PeerQuality::Healthy),
         ],
         &mut entropy,
         |_| true,
         |_| true,
     )?;
 
-    assert_eq!(route.hops().first().copied(), Some(healthy.delegator_did()));
+    assert_eq!(route.hops().first().copied(), Some(healthy.account_did()));
     assert_ne!(route.hops().first().copied(), Some(local));
     Ok(())
 }
@@ -393,8 +393,8 @@ fn test_route_builder_entropy_can_select_second_unknown_relay() -> Result<()> {
     let exit = signed_exit_at(20, 100)?;
     let request = route_request("web", 2, false)?;
     let mut relay_hops = vec![
-        OnionRouteHop::new(first.delegator_did(), first.delegatee_public_key()),
-        OnionRouteHop::new(second.delegator_did(), second.delegatee_public_key()),
+        OnionRouteHop::new(first.account_did(), first.session_public_key()),
+        OnionRouteHop::new(second.account_did(), second.session_public_key()),
     ];
     relay_hops.sort_by_key(|hop| hop.did);
     let second_sorted = relay_hops
@@ -425,13 +425,13 @@ fn test_route_builder_first_hop_filter_preserves_remote_later_relays() -> Result
     let direct = node_key().map_err(Error::CoreError)?;
     let remote = node_key().map_err(Error::CoreError)?;
     let exit = signed_exit_at(20, 100)?;
-    let direct_did = direct.delegator_did();
-    let remote_did = remote.delegator_did();
+    let direct_did = direct.account_did();
+    let remote_did = remote.account_did();
     let request = route_request("web", 3, false)?;
     let candidates = OnionRouteCandidates {
         relays: vec![
-            OnionRouteHop::new(remote_did, remote.delegatee_public_key()),
-            OnionRouteHop::new(direct_did, direct.delegatee_public_key()),
+            OnionRouteHop::new(remote_did, remote.session_public_key()),
+            OnionRouteHop::new(direct_did, direct.session_public_key()),
         ],
         exits: vec![exit],
     };
@@ -457,13 +457,10 @@ fn test_route_builder_does_not_consume_only_direct_relay_as_exit_first() -> Resu
     let direct = node_key().map_err(Error::CoreError)?;
     let direct_exit = signed_exit_for_session_at(&direct, 20, 100)?;
     let remote_exit = signed_exit_at(21, 100)?;
-    let direct_did = direct.delegator_did();
+    let direct_did = direct.account_did();
     let request = route_request("web", 2, false)?;
     let candidates = OnionRouteCandidates {
-        relays: vec![OnionRouteHop::new(
-            direct_did,
-            direct.delegatee_public_key(),
-        )],
+        relays: vec![OnionRouteHop::new(direct_did, direct.session_public_key())],
         exits: vec![direct_exit, remote_exit.clone()],
     };
     let mut entropy = FixedEntropy::new([0, 0]);
@@ -483,14 +480,14 @@ fn test_route_builder_does_not_consume_only_direct_relay_as_exit_first() -> Resu
 
 #[test]
 fn test_route_builder_rejects_route_without_permitted_first_hop() -> Result<()> {
-    let permitted = node_key().map_err(Error::CoreError)?.delegator_did();
+    let permitted = node_key().map_err(Error::CoreError)?.account_did();
     let remote = node_key().map_err(Error::CoreError)?;
     let exit = signed_exit_at(20, 100)?;
     let request = route_request("web", 2, false)?;
     let candidates = OnionRouteCandidates {
         relays: vec![OnionRouteHop::new(
-            remote.delegator_did(),
-            remote.delegatee_public_key(),
+            remote.account_did(),
+            remote.session_public_key(),
         )],
         exits: vec![exit],
     };
@@ -520,8 +517,8 @@ fn test_route_builder_shortens_to_permitted_exit_when_no_first_relay_is_allowed(
     let request = route_request("web", 3, true)?;
     let candidates = OnionRouteCandidates {
         relays: vec![OnionRouteHop::new(
-            remote.delegator_did(),
-            remote.delegatee_public_key(),
+            remote.account_did(),
+            remote.session_public_key(),
         )],
         exits: vec![exit],
     };
@@ -549,8 +546,8 @@ fn test_route_builder_direct_exit_filter_is_separate_from_relay_guard_filter() -
     let request = route_request("web", 3, true)?;
     let candidates = OnionRouteCandidates {
         relays: vec![OnionRouteHop::new(
-            remote.delegator_did(),
-            remote.delegatee_public_key(),
+            remote.account_did(),
+            remote.session_public_key(),
         )],
         exits: vec![exit],
     };

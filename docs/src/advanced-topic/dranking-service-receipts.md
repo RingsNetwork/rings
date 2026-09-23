@@ -18,8 +18,8 @@ DRanking design.
 
 The canonical claim binds `network_id`, service kind, provider account, beneficiary account,
 epoch, nonce, units, request digest, and completion digest. Provider and beneficiary signatures
-use different domains. Roles are account DIDs recovered from delegation proofs, so a
-delegatee-key rotation does not change the account role.
+use different domains. Roles are account DIDs recovered from delegated session proofs, so a
+session-key rotation does not change the account role.
 
 The canonical marker and the signing domains name this field layout, so a signature over it
 cannot be interpreted as another receipt protocol; they carry no version, since the protocol is

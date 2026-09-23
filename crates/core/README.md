@@ -24,7 +24,7 @@ The design goal of Rings Network is to enable nodes to run in any environment, i
 
 The transport layer of Rings Network is based on WebRTC protocol, which provides browsers and mobile apps with real-time communication capabilities through simple interface.
 
-The WebRTC protocol obtains the optimal connection path between nodes by exchanging SDP (Delegation Description Protocol), which can be either TCP or UDP. In the Rings Network, we use WebRTC's data channel to implement data communication. For a typical ICE (Interactive Connectivity Establishment) process, it can be described as follows:
+The WebRTC protocol obtains the optimal connection path between nodes by exchanging SDP (Session Description Protocol), which can be either TCP or UDP. In the Rings Network, we use WebRTC's data channel to implement data communication. For a typical ICE (Interactive Connectivity Establishment) process, it can be described as follows:
 
 Assuming Node A and Node B want to create a WebRTC connection, they would need to exchange a minimum of three messages with each other:
 
@@ -54,7 +54,7 @@ In the protocol layer, the central design concept revolves around the utilizatio
 
 It is comprised of a set of elements with two binary operations, addition and multiplication, which satisfy a set of axioms such as associativity, commutativity, and distributivity. The ring is deemed finite due to its having a finite number of elements. Finite rings are widely employed in various domains of mathematics and computer science, including cryptography and coding theory.
 
-At the protocol layer, we have implemented the concept of a Delegated Delegation Key, which is used to support various cryptographic verification methods associated with DID (Decentralized Identifier). Currently, the supported signature algorithms include ECDSA-secp256k1, ECDSA-secp256r1, and EdDSA-ed25519.
+At the protocol layer, we have implemented the concept of a Delegated Session Key, which is used to support various cryptographic verification methods associated with DID (Decentralized Identifier). Currently, the supported signature algorithms include ECDSA-secp256k1, ECDSA-secp256r1, and EdDSA-ed25519.
 
 DID signatures authenticate key control, not identity scarcity. Operators should use
 the deployment model in the [threat model](../../SECURITY.md#deployment-models) before
@@ -66,7 +66,7 @@ The nucleus of Rings Network is similar to the Actor Model, and it requires that
 
 # Migration Notes
 
-- `Delegation::delegator_pubkey()` now only returns legacy secp256k1-compatible account public keys. For secp256r1, Ed25519, and BLS12-381 accounts, use `Delegation::delegator_verification_pubkey()` or `Delegation::delegator_verifier()`.
+- `Session::account_pubkey()` now only returns legacy secp256k1-compatible account public keys. For secp256r1, Ed25519, and BLS12-381 accounts, use `Session::account_verification_pubkey()` or `Session::account_verifier()`.
 
 # Build
 

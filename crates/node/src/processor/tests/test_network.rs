@@ -472,8 +472,8 @@ async fn test_processor_e2e_handshake_exchanges_verified_public_keys() {
 
     let did1 = p1.did();
     let did2 = p2.did();
-    let requester_public_key = p1.swarm.delegator_pubkey().unwrap();
-    let responder_public_key = p2.swarm.delegator_pubkey().unwrap();
+    let requester_public_key = p1.swarm.account_pubkey().unwrap();
+    let responder_public_key = p2.swarm.account_pubkey().unwrap();
 
     p1.send_e2e_handshake(did2).await.unwrap();
 
@@ -526,7 +526,7 @@ async fn test_processor_e2e_message_streams_and_decrypts_with_receiver_identity_
 
     let did1 = p1.did();
     let did2 = p2.did();
-    let responder_public_key = p2.swarm.delegator_pubkey().unwrap();
+    let responder_public_key = p2.swarm.account_pubkey().unwrap();
     let stream_id = p1
         .send_e2e_message_with_frame_len(
             did2,

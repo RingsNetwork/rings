@@ -2,7 +2,7 @@
 
 //! Implementation of Message Verification.
 //!
-//! A [`MessageVerification`] is a delegatee signature over a *domain-separated* transcript:
+//! A [`MessageVerification`] is a session signature over a *domain-separated* transcript:
 //!
 //! ```text
 //! transcript(d, ts, ttl, m) = len(tag(d)) || tag(d) || network_id(d) || ts || ttl || m
@@ -11,10 +11,10 @@
 //! where `d : SigningDomain = (tag, network_id)` names the message family and the overlay, all
 //! integers are big-endian, and `len(tag)` is one byte. The length prefix makes the tag component
 //! prefix-free, so transcripts of distinct domains never collide for any `m`. Binding `network_id`
-//! makes a signature non-portable across overlays that share a delegatee key; binding the tag makes
+//! makes a signature non-portable across overlays that share a session key; binding the tag makes
 //! it non-portable across message families that share a signing surface.
 //!
-//! Authority: every signature is issued by a [`MessageSigner`], a delegatee key paired with the
+//! Authority: every signature is issued by a [`MessageSigner`], a session key paired with the
 //! overlay it acts in, and every verification is performed against the *receiver's* domain, never
 //! against a value carried in the message. A type that embeds a verification implements
 //! [`MessageVerificationExt`] with its own [`DomainTag`] and verifies under the receiver's
@@ -28,11 +28,11 @@ use serde::Serialize;
 use crate::consts::DEFAULT_TTL_MS;
 use crate::consts::MAX_TTL_MS;
 use crate::consts::TS_OFFSET_TOLERANCE_MS;
-use crate::delegation::DelegateeKey;
-use crate::delegation::Delegation;
 use crate::dht::Did;
 use crate::ecc::PublicKey;
 use crate::error::Result;
+use crate::session::Session;
+use crate::session::SessionSk;
 use crate::utils::get_epoch_ms;
 
 /// Name of one signed message family; the first component of a [`SigningDomain`].
@@ -120,42 +120,42 @@ impl SigningDomain {
     }
 }
 
-/// A delegatee key acting inside one overlay: the authority that issues every
+/// A session key acting inside one overlay: the authority that issues every
 /// [`MessageVerification`] a node signs.
 ///
-/// Signing is the map `(delegatee_key, network_id) × (tag, data) → MessageVerification`. This
+/// Signing is the map `(session_sk, network_id) × (tag, data) → MessageVerification`. This
 /// type fixes the first component, so message constructors take one authority instead of a key
 /// and an overlay that could be paired inconsistently. `S` is how the key is held: a borrowed
-/// authority `MessageSigner<&DelegateeKey>` is `Copy` and is what signing functions take; an owned
-/// authority `MessageSigner<DelegateeKey>` is what long-lived runtimes store, so the pairing is
+/// authority `MessageSigner<&SessionSk>` is `Copy` and is what signing functions take; an owned
+/// authority `MessageSigner<SessionSk>` is what long-lived runtimes store, so the pairing is
 /// never split across two fields.
 ///
 /// Law: copying or cloning an authority is semantically invisible, since it names the same key
 /// and the same overlay.
 #[derive(Clone, Copy, Debug)]
 pub struct MessageSigner<S> {
-    delegatee_key: S,
+    session_sk: S,
     network_id: u32,
 }
 
 impl<S> MessageSigner<S>
-where S: Borrow<DelegateeKey>
+where S: Borrow<SessionSk>
 {
-    /// Let `delegatee_key` sign on behalf of the overlay `network_id`.
-    pub const fn new(delegatee_key: S, network_id: u32) -> Self {
+    /// Let `session_sk` sign on behalf of the overlay `network_id`.
+    pub const fn new(session_sk: S, network_id: u32) -> Self {
         Self {
-            delegatee_key,
+            session_sk,
             network_id,
         }
     }
 
-    fn delegatee_key(&self) -> &DelegateeKey {
-        self.delegatee_key.borrow()
+    fn session_sk(&self) -> &SessionSk {
+        self.session_sk.borrow()
     }
 
     /// The public key of the session this authority signs with.
-    pub fn delegatee_public_key(&self) -> PublicKey<33> {
-        self.delegatee_key().delegatee_public_key()
+    pub fn session_public_key(&self) -> PublicKey<33> {
+        self.session_sk().session_public_key()
     }
 
     /// The overlay this authority signs for.
@@ -163,19 +163,19 @@ where S: Borrow<DelegateeKey>
         self.network_id
     }
 
-    /// The account DID that authorized the delegatee key.
-    pub fn delegator_did(&self) -> Did {
-        self.delegatee_key().delegator_did()
+    /// The account DID that authorized the session key.
+    pub fn account_did(&self) -> Did {
+        self.session_sk().account_did()
     }
 
     /// This authority borrowing its key: the form signing functions take.
-    pub fn by_ref(&self) -> MessageSigner<&DelegateeKey> {
-        MessageSigner::new(self.delegatee_key(), self.network_id)
+    pub fn by_ref(&self) -> MessageSigner<&SessionSk> {
+        MessageSigner::new(self.session_sk(), self.network_id)
     }
 
     /// This authority owning a copy of its key: the form long-lived runtimes store.
-    pub fn owned(&self) -> MessageSigner<DelegateeKey> {
-        MessageSigner::new(self.delegatee_key().clone(), self.network_id)
+    pub fn owned(&self) -> MessageSigner<SessionSk> {
+        MessageSigner::new(self.session_sk().clone(), self.network_id)
     }
 
     /// Sign `data` as a member of the message family `tag` inside this overlay, stamped with
@@ -191,8 +191,8 @@ where S: Borrow<DelegateeKey>
         let ttl_ms = DEFAULT_TTL_MS;
         let msg = domain.transcript(data, ts_ms, ttl_ms);
         Ok(MessageVerification {
-            delegation: self.delegatee_key().delegation(),
-            sig: self.delegatee_key().sign(&msg)?,
+            session: self.session_sk().session(),
+            sig: self.session_sk().sign(&msg)?,
             ttl_ms,
             ts_ms,
         })
@@ -229,13 +229,13 @@ impl ProofLifetime {
 /// it also included ttl time and created ts.
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct MessageVerification {
-    /// The [Delegation] of the [DelegateeKey]. Used to identify a sender and verify the signature.
-    pub delegation: Delegation,
+    /// The [Session] of the [SessionSk]. Used to identify a sender and verify the signature.
+    pub session: Session,
     /// The time to live of the message in milliseconds.
     pub ttl_ms: u64,
     /// The timestamp of the message in milliseconds.
     pub ts_ms: u128,
-    /// The signature of the message. Signed by [DelegateeKey]. Can be verified by [Delegation].
+    /// The signature of the message. Signed by [SessionSk]. Can be verified by [Session].
     pub sig: Vec<u8>,
 }
 
@@ -255,7 +255,7 @@ impl MessageVerification {
     pub fn verify_at(&self, domain: SigningDomain, data: &[u8], at_ms: u128) -> bool {
         let msg = domain.transcript(data, self.ts_ms, self.ttl_ms);
 
-        self.delegation
+        self.session
             .verify_at(&msg, &self.sig, at_ms)
             .map_err(|e| {
                 tracing::warn!("MessageVerification verify failed: {:?}", e);
@@ -344,7 +344,7 @@ pub trait MessageVerificationExt {
 
     /// Get signer did from verification.
     fn signer(&self) -> Did {
-        self.verification().delegation.delegator_did()
+        self.verification().session.account_did()
     }
 }
 
@@ -377,15 +377,15 @@ mod tests {
         SigningDomain::new(FIXTURE_TAG, NETWORK_ID)
     }
 
-    fn fixture_signer(delegatee_key: &DelegateeKey) -> MessageSigner<&DelegateeKey> {
-        MessageSigner::new(delegatee_key, NETWORK_ID)
+    fn fixture_signer(session_sk: &SessionSk) -> MessageSigner<&SessionSk> {
+        MessageSigner::new(session_sk, NETWORK_ID)
     }
 
     #[test]
     fn test_expiration_handles_timestamp_below_tolerance_without_underflow() -> Result<()> {
         let key = SecretKey::random();
-        let delegatee_key = DelegateeKey::new_with_seckey(&key)?;
-        let mut verification = fixture_signer(&delegatee_key).sign(FIXTURE_TAG, &[])?;
+        let session_sk = SessionSk::new_with_seckey(&key)?;
+        let mut verification = fixture_signer(&session_sk).sign(FIXTURE_TAG, &[])?;
         verification.ts_ms = 0;
         let fixture = VerifiedFixture { verification };
 
@@ -395,24 +395,24 @@ mod tests {
 
     fn signed_verification(
         data: &[u8],
-        delegatee_key: &DelegateeKey,
+        session_sk: &SessionSk,
         ts_ms: u128,
         ttl_ms: u64,
     ) -> Result<MessageVerification> {
         let msg = fixture_domain().transcript(data, ts_ms, ttl_ms);
         Ok(MessageVerification {
-            delegation: delegatee_key.delegation(),
+            session: session_sk.session(),
             ttl_ms,
             ts_ms,
-            sig: delegatee_key.sign(&msg)?,
+            sig: session_sk.sign(&msg)?,
         })
     }
 
     #[test]
     fn test_verify_live_rejects_ttl_above_max() -> Result<()> {
         let key = SecretKey::random();
-        let delegatee_key = DelegateeKey::new_with_seckey(&key)?;
-        let proof = signed_verification(&[], &delegatee_key, get_epoch_ms(), MAX_TTL_MS + 1)?;
+        let session_sk = SessionSk::new_with_seckey(&key)?;
+        let proof = signed_verification(&[], &session_sk, get_epoch_ms(), MAX_TTL_MS + 1)?;
 
         assert!(proof.is_expired());
         assert!(!proof.verify_live(fixture_domain(), &[]));
@@ -422,10 +422,10 @@ mod tests {
     #[test]
     fn test_verify_live_rejects_timestamp_beyond_future_tolerance() -> Result<()> {
         let key = SecretKey::random();
-        let delegatee_key = DelegateeKey::new_with_seckey(&key)?;
+        let session_sk = SessionSk::new_with_seckey(&key)?;
         let proof = signed_verification(
             &[],
-            &delegatee_key,
+            &session_sk,
             get_epoch_ms() + TS_OFFSET_TOLERANCE_MS + 60_000,
             1_000,
         )?;
@@ -463,8 +463,8 @@ mod tests {
     #[test]
     fn test_signature_is_bound_to_the_overlay() -> Result<()> {
         let key = SecretKey::random();
-        let delegatee_key = DelegateeKey::new_with_seckey(&key)?;
-        let verification = fixture_signer(&delegatee_key).sign(FIXTURE_TAG, b"data")?;
+        let session_sk = SessionSk::new_with_seckey(&key)?;
+        let verification = fixture_signer(&session_sk).sign(FIXTURE_TAG, b"data")?;
 
         assert!(verification.verify(fixture_domain(), b"data"));
         assert!(!verification.verify(SigningDomain::new(FIXTURE_TAG, NETWORK_ID + 1), b"data"));
@@ -475,8 +475,8 @@ mod tests {
     #[test]
     fn test_signature_is_bound_to_the_message_family() -> Result<()> {
         let key = SecretKey::random();
-        let delegatee_key = DelegateeKey::new_with_seckey(&key)?;
-        let verification = fixture_signer(&delegatee_key).sign(FIXTURE_TAG, b"data")?;
+        let session_sk = SessionSk::new_with_seckey(&key)?;
+        let verification = fixture_signer(&session_sk).sign(FIXTURE_TAG, b"data")?;
 
         assert!(!verification.verify(SigningDomain::new(OTHER_TAG, NETWORK_ID), b"data"));
         Ok(())
@@ -487,8 +487,8 @@ mod tests {
     #[test]
     fn test_ext_verify_uses_type_tag_and_receiver_overlay() -> Result<()> {
         let key = SecretKey::random();
-        let delegatee_key = DelegateeKey::new_with_seckey(&key)?;
-        let signer = fixture_signer(&delegatee_key);
+        let session_sk = SessionSk::new_with_seckey(&key)?;
+        let signer = fixture_signer(&session_sk);
         let fixture = VerifiedFixture {
             verification: signer.sign(FIXTURE_TAG, &[])?,
         };
@@ -507,12 +507,12 @@ mod tests {
     #[test]
     fn test_owned_and_borrowed_authorities_are_the_same_signer() -> Result<()> {
         let key = SecretKey::random();
-        let delegatee_key = DelegateeKey::new_with_seckey(&key)?;
-        let owned = fixture_signer(&delegatee_key).owned();
+        let session_sk = SessionSk::new_with_seckey(&key)?;
+        let owned = fixture_signer(&session_sk).owned();
         let proof = owned.by_ref().sign(FIXTURE_TAG, b"data")?;
 
         assert_eq!(owned.network_id(), NETWORK_ID);
-        assert_eq!(owned.delegator_did(), delegatee_key.delegator_did());
+        assert_eq!(owned.account_did(), session_sk.account_did());
         assert!(proof.verify(fixture_domain(), b"data"));
         Ok(())
     }

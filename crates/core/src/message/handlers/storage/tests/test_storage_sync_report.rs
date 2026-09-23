@@ -7,7 +7,6 @@ use super::test_support::physical_sync_route_next_hop;
 use super::test_support::prepare_node_with_virtual_nodes;
 use super::test_support::storage_sync_route_next_hop;
 use super::test_support::NoopCallback;
-use crate::delegation::DelegateeKey;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
@@ -29,6 +28,7 @@ use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
+use crate::session::SessionSk;
 use crate::tests::default::assert_no_more_msg;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;
@@ -104,7 +104,7 @@ async fn test_sync_entries_handler_reports_persisted_entries() -> Result<()> {
 fn inbox_held_by_a_stranger(destination: Did) -> Result<Entry> {
     held_inbox_for(
         destination,
-        &DelegateeKey::new_with_seckey(&SecretKey::random())?,
+        &SessionSk::new_with_seckey(&SecretKey::random())?,
     )
 }
 

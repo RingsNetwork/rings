@@ -9,7 +9,7 @@ pub struct ProcessorBuilder {
     pub(in crate::processor) ice_servers: String,
     pub(in crate::processor) external_address: Option<String>,
     pub(in crate::processor) webrtc_udp_port_range: Option<WebrtcUdpPortRange>,
-    pub(in crate::processor) delegatee_key: DelegateeKey,
+    pub(in crate::processor) session_sk: SessionSk,
     pub(in crate::processor) onion_exit_epoch: OnionExitEpoch,
     pub(in crate::processor) storage: Option<EntryStorage>,
     pub(in crate::processor) replay_storage: Option<ReplayStorage>,
@@ -47,7 +47,7 @@ impl ProcessorBuilder {
             ice_servers: config.ice_servers.clone(),
             external_address: config.external_address.clone(),
             webrtc_udp_port_range: config.webrtc_udp_port_range()?,
-            delegatee_key: config.delegatee_key.clone(),
+            session_sk: config.session_sk.clone(),
             onion_exit_epoch: OnionExitEpoch::random(),
             storage: None,
             replay_storage: None,
@@ -152,9 +152,9 @@ impl ProcessorBuilder {
     /// Build the [Processor].
     pub fn build(self) -> Result<Processor> {
         self.validate()?;
-        self.delegatee_key
-            .delegation()
-            .verify_delegator_authorization()
+        self.session_sk
+            .session()
+            .verify_self()
             .map_err(|e| Error::VerifyError(e.to_string()))?;
 
         let storage = self.storage.unwrap_or_else(|| Box::new(MemStorage::new()));
@@ -169,7 +169,7 @@ impl ProcessorBuilder {
         if self.advertise_onion_relay {
             online_node_capabilities.push(ONION_RELAY_CAPABILITY.to_string());
         }
-        let delegatee_key = self.delegatee_key.clone();
+        let session_sk = self.session_sk.clone();
         let online_node_registration = OnlineNodeRegistration::new(
             self.online_node_heartbeat_interval,
             self.online_node_ttl,
@@ -193,12 +193,8 @@ impl ProcessorBuilder {
             registration_tasks.push(Arc::new(onion_exit_registration));
         }
 
-        let mut swarm_builder = SwarmBuilder::new(
-            self.network_id,
-            &self.ice_servers,
-            storage,
-            self.delegatee_key,
-        );
+        let mut swarm_builder =
+            SwarmBuilder::new(self.network_id, &self.ice_servers, storage, self.session_sk);
         swarm_builder = swarm_builder.dht_storage_redundancy(DATA_REDUNDANT);
         swarm_builder = swarm_builder.dht_finger_table_size(self.dht_finger_table_size);
         swarm_builder = swarm_builder.dht_virtual_nodes(self.dht_virtual_nodes);
@@ -222,7 +218,7 @@ impl ProcessorBuilder {
 
         Ok(Processor {
             swarm,
-            delegatee_key,
+            session_sk,
             onion_exit_epoch: self.onion_exit_epoch,
             onion_entry_guards: Arc::new(OnionEntryGuards::new(onion_entry_guard_storage)),
             stabilize_interval: self.stabilize_interval,

@@ -83,13 +83,13 @@ impl Swarm {
     }
 
     /// Get the local account public key used for E2E public-key negotiation.
-    pub fn delegator_pubkey(&self) -> Result<PublicKey<33>> {
-        self.transport.delegation().delegator_pubkey()
+    pub fn account_pubkey(&self) -> Result<PublicKey<33>> {
+        self.transport.session().account_pubkey()
     }
 
     /// Get the typed account verification public key.
-    pub fn delegator_verification_pubkey(&self) -> Result<VerificationPublicKey> {
-        self.transport.delegation().delegator_verification_pubkey()
+    pub fn account_verification_pubkey(&self) -> Result<VerificationPublicKey> {
+        self.transport.session().account_verification_pubkey()
     }
 
     /// Get this swarm's network id.

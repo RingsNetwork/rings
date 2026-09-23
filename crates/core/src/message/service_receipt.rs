@@ -142,7 +142,7 @@ impl ProvisionalServiceClaim {
     /// Sign the provider role domain with the delegated provider session.
     pub fn sign_provider(
         &self,
-        signer: MessageSigner<&crate::delegation::DelegateeKey>,
+        signer: MessageSigner<&crate::session::SessionSk>,
     ) -> Result<MessageVerification> {
         self.require_signer(signer, self.provider_account)?;
         signer.sign(PROVIDER_DOMAIN, &self.canonical_bytes()?)
@@ -151,7 +151,7 @@ impl ProvisionalServiceClaim {
     /// Sign the beneficiary role domain with the delegated beneficiary session.
     pub fn sign_beneficiary(
         &self,
-        signer: MessageSigner<&crate::delegation::DelegateeKey>,
+        signer: MessageSigner<&crate::session::SessionSk>,
     ) -> Result<MessageVerification> {
         self.require_signer(signer, self.beneficiary_account)?;
         signer.sign(BENEFICIARY_DOMAIN, &self.canonical_bytes()?)
@@ -159,7 +159,7 @@ impl ProvisionalServiceClaim {
 
     fn require_signer(
         &self,
-        signer: MessageSigner<&crate::delegation::DelegateeKey>,
+        signer: MessageSigner<&crate::session::SessionSk>,
         expected: Did,
     ) -> std::result::Result<(), ServiceReceiptError> {
         if signer.network_id() != self.network_id {
@@ -168,7 +168,7 @@ impl ProvisionalServiceClaim {
                 actual: signer.network_id(),
             });
         }
-        let actual = signer.delegator_did();
+        let actual = signer.account_did();
         if actual != expected {
             return Err(ServiceReceiptError::SignerRoleMismatch { expected, actual });
         }
@@ -182,10 +182,10 @@ impl ProvisionalServiceClaim {
         domain: super::DomainTag,
         invalid: ServiceReceiptError,
     ) -> std::result::Result<(), ServiceReceiptError> {
-        if attestation.delegation.delegator_did() != expected_account {
+        if attestation.session.account_did() != expected_account {
             return Err(ServiceReceiptError::SignerRoleMismatch {
                 expected: expected_account,
-                actual: attestation.delegation.delegator_did(),
+                actual: attestation.session.account_did(),
             });
         }
         let claim = self.canonical_bytes()?;
@@ -207,10 +207,10 @@ impl ProvisionalServiceClaim {
         observed_at_ms: u128,
         not_live: ServiceReceiptError,
     ) -> std::result::Result<(), ServiceReceiptError> {
-        if attestation.delegation.delegator_did() != expected_account {
+        if attestation.session.account_did() != expected_account {
             return Err(ServiceReceiptError::SignerRoleMismatch {
                 expected: expected_account,
-                actual: attestation.delegation.delegator_did(),
+                actual: attestation.session.account_did(),
             });
         }
         let claim = self.canonical_bytes()?;
@@ -241,9 +241,9 @@ impl ServiceReceiptDigest {
 pub struct ProvisionalServiceReceipt {
     /// Canonical service claim.
     pub claim: ProvisionalServiceClaim,
-    /// Provider-delegatee signature under the provider role domain.
+    /// Provider-session signature under the provider role domain.
     pub provider_attestation: MessageVerification,
-    /// Beneficiary-delegatee signature under the beneficiary role domain.
+    /// Beneficiary-session signature under the beneficiary role domain.
     pub beneficiary_attestation: MessageVerification,
 }
 
@@ -548,12 +548,12 @@ pub enum ServiceReceiptError {
         /// Rejected non-zero unit count.
         units: u64,
     },
-    /// A delegation belongs to a different delegator role.
+    /// A delegated session belongs to a different account role.
     #[error("receipt signer account {actual} does not match role account {expected}")]
     SignerRoleMismatch {
         /// Account fixed by the claim role.
         expected: Did,
-        /// Account recovered from the delegated delegation proof.
+        /// Account recovered from the delegated session proof.
         actual: Did,
     },
     /// Provider signature failed under the provider domain.

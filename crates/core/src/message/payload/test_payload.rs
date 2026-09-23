@@ -1,9 +1,9 @@
 use rand::Rng;
 
 use super::*;
-use crate::delegation::DelegateeKey;
 use crate::ecc::SecretKey;
 use crate::message::Message;
+use crate::session::SessionSk;
 use crate::tests::TEST_NETWORK_ID;
 
 #[derive(Deserialize, Serialize, PartialEq, Debug, Clone)]
@@ -28,10 +28,10 @@ pub fn new_payload<T>(data: T, next_hop: Did) -> MessagePayload
 where T: Serialize + DeserializeOwned {
     let key = SecretKey::random();
     let destination = SecretKey::random().address().into();
-    let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
+    let session_sk = SessionSk::new_with_seckey(&key).unwrap();
     MessagePayload::new_send(
         data,
-        MessageSigner::new(&delegatee_key, TEST_NETWORK_ID),
+        MessageSigner::new(&session_sk, TEST_NETWORK_ID),
         next_hop,
         destination,
     )
@@ -61,13 +61,13 @@ fn test_transaction_debug_reports_size_without_data_bytes() -> Result<()> {
 #[test]
 fn test_relay_destination_predicates_name_forwarding_state() -> Result<()> {
     let local_key = SecretKey::random();
-    let delegatee_key = DelegateeKey::new_with_seckey(&local_key)?;
+    let session_sk = SessionSk::new_with_seckey(&local_key)?;
     let local: Did = local_key.address().into();
     let remote: Did = SecretKey::random().address().into();
 
     let local_payload = MessagePayload::new_send(
         Message::custom(b"local")?,
-        MessageSigner::new(&delegatee_key, TEST_NETWORK_ID),
+        MessageSigner::new(&session_sk, TEST_NETWORK_ID),
         local,
         local,
     )?;
@@ -76,7 +76,7 @@ fn test_relay_destination_predicates_name_forwarding_state() -> Result<()> {
 
     let remote_payload = MessagePayload::new_send(
         Message::custom(b"remote")?,
-        MessageSigner::new(&delegatee_key, TEST_NETWORK_ID),
+        MessageSigner::new(&session_sk, TEST_NETWORK_ID),
         remote,
         remote,
     )?;
@@ -90,7 +90,7 @@ fn test_relay_destination_predicates_name_forwarding_state() -> Result<()> {
 #[test]
 fn test_origin_is_the_account_behind_the_signing_session() -> Result<()> {
     let account_key = SecretKey::random();
-    let delegatee_key = DelegateeKey::new_with_seckey(&account_key)?;
+    let session_sk = SessionSk::new_with_seckey(&account_key)?;
     let account: Did = account_key.address().into();
     let destination: Did = SecretKey::random().address().into();
 
@@ -99,14 +99,11 @@ fn test_origin_is_the_account_behind_the_signing_session() -> Result<()> {
         uuid::Uuid::new_v4(),
         0,
         Message::custom(b"origin")?,
-        MessageSigner::new(&delegatee_key, TEST_NETWORK_ID),
+        MessageSigner::new(&session_sk, TEST_NETWORK_ID),
     )?;
 
     assert_eq!(transaction.origin(), account);
-    assert_ne!(
-        transaction.origin(),
-        delegatee_key.delegation().delegatee_did()
-    );
+    assert_ne!(transaction.origin(), session_sk.session().session_did());
     Ok(())
 }
 
@@ -295,15 +292,15 @@ fn test_transaction_sequence_is_inside_both_signature_transcripts() {
 fn test_self_contained_decoding_refuses_link_only_frames() -> Result<()> {
     let next_hop = SecretKey::random().address().into();
     let payload = new_test_payload(next_hop);
-    let sessions = payload.delegations();
+    let sessions = payload.sessions();
     let referenced = super::WirePayload::view(&payload, super::PerSlot {
-        origin: super::DelegationRef::Digest(sessions.origin.digest()?),
-        hop: super::DelegationRef::Inline(std::borrow::Cow::Borrowed(sessions.hop)),
+        origin: super::SessionRef::Digest(sessions.origin.digest()?),
+        hop: super::SessionRef::Inline(std::borrow::Cow::Borrowed(sessions.hop)),
     })
     .to_wire()?;
     assert!(matches!(
         MessagePayload::from_wire(&referenced),
-        Err(Error::DelegationReferenceUnresolved(digest)) if digest == sessions.origin.digest()?
+        Err(Error::SessionReferenceUnresolved(digest)) if digest == sessions.origin.digest()?
     ));
 
     let control = super::LinkControl::Known(sessions.hop.digest()?).to_wire()?;

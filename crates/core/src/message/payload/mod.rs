@@ -25,8 +25,6 @@ use super::protocols::MessageVerification;
 use super::protocols::MessageVerificationExt;
 use super::replay::StreamKey;
 use super::replay::TransactionDigest;
-use crate::delegation::DelegateeKey;
-use crate::delegation::Delegation;
 use crate::dht::Chord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
@@ -35,13 +33,15 @@ use crate::domain_tag;
 use crate::ecc::keccak256;
 use crate::error::Error;
 use crate::error::Result;
+use crate::session::Session;
+use crate::session::SessionSk;
 
 mod wire;
 
-pub(crate) use self::wire::DelegationRef;
 pub(crate) use self::wire::LinkControl;
 pub(crate) use self::wire::LinkFrame;
 pub(crate) use self::wire::PerSlot;
+pub(crate) use self::wire::SessionRef;
 pub(crate) use self::wire::SlotEncoding;
 pub(crate) use self::wire::WirePayload;
 
@@ -148,7 +148,7 @@ impl Transaction {
         tx_id: uuid::Uuid,
         sequence: u64,
         data: T,
-        signer: MessageSigner<&DelegateeKey>,
+        signer: MessageSigner<&SessionSk>,
     ) -> Result<Self>
     where
         T: Serialize,
@@ -178,7 +178,7 @@ impl Transaction {
         StreamKey::new(network_id, self.origin(), self.destination)
     }
 
-    /// Digest of this exact signed transaction, including its delegation and signature.
+    /// Digest of this exact signed transaction, including its delegated session and signature.
     pub fn digest(&self) -> Result<TransactionDigest> {
         let wire = rings_codec::serialize(self).map_err(Error::CodecSerialize)?;
         Ok(TransactionDigest::new(keccak256(&wire)))
@@ -196,7 +196,7 @@ impl MessagePayload {
     /// Need [Transaction], [MessageSigner] and [MessageRelay].
     pub fn new(
         transaction: Transaction,
-        signer: MessageSigner<&DelegateeKey>,
+        signer: MessageSigner<&SessionSk>,
         relay: MessageRelay,
     ) -> Result<Self> {
         let msg_hash = hash_transaction(
@@ -216,7 +216,7 @@ impl MessagePayload {
     /// Helps to create sending message from data: a fresh carrier with the full hop budget.
     pub fn new_send_with_sequence<T>(
         data: T,
-        signer: MessageSigner<&DelegateeKey>,
+        signer: MessageSigner<&SessionSk>,
         next_hop: Did,
         destination: Did,
         sequence: u64,
@@ -233,7 +233,7 @@ impl MessagePayload {
     #[cfg(test)]
     pub(crate) fn new_send<T>(
         data: T,
-        signer: MessageSigner<&DelegateeKey>,
+        signer: MessageSigner<&SessionSk>,
         next_hop: Did,
         destination: Did,
     ) -> Result<Self>
@@ -242,17 +242,17 @@ impl MessagePayload {
     {
         let sequence = next_test_transaction_sequence(StreamKey::new(
             signer.network_id(),
-            signer.delegator_did(),
+            signer.account_did(),
             destination,
         ))?;
         Self::new_send_with_sequence(data, signer, next_hop, destination, sequence)
     }
 
     /// The sessions in the two slots of this payload: the origin's and the current hop's.
-    pub(crate) const fn delegations(&self) -> PerSlot<&Delegation> {
+    pub(crate) const fn sessions(&self) -> PerSlot<&Session> {
         PerSlot {
-            origin: &self.transaction.verification.delegation,
-            hop: &self.verification.delegation,
+            origin: &self.transaction.verification.session,
+            hop: &self.verification.session,
         }
     }
 
@@ -260,7 +260,7 @@ impl MessagePayload {
     /// frame with both sessions inline.
     ///
     /// A frame that references a session is meaningful only on the link that announced it, and
-    /// is refused here with [`Error::DelegationReferenceUnresolved`]; a link resolves such frames
+    /// is refused here with [`Error::SessionReferenceUnresolved`]; a link resolves such frames
     /// before they reach a `MessagePayload`.
     pub fn from_wire(data: &[u8]) -> Result<Self> {
         match LinkFrame::from_wire(data)? {
@@ -339,7 +339,7 @@ impl Decoder for MessagePayload {
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait PayloadSender {
     /// The authority that signs every payload this sender emits.
-    fn message_signer(&self) -> MessageSigner<&DelegateeKey>;
+    fn message_signer(&self) -> MessageSigner<&SessionSk>;
 
     /// Get access to DHT.
     fn dht(&self) -> Arc<PeerRing>;

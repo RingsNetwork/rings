@@ -1,0 +1,126 @@
+use serde::Deserialize;
+use serde::Serialize;
+
+use super::Account;
+use crate::dht::Did;
+use crate::ecc::keys::AccountVerifier;
+use crate::ecc::keys::VerificationPublicKey;
+use crate::ecc::signers;
+use crate::ecc::PublicKey;
+use crate::error::Error;
+use crate::error::Result;
+use crate::utils;
+
+pub(super) fn pack_session(session_id: Did, ts_ms: u128, ttl_ms: u64) -> String {
+    format!("{session_id}\n{ts_ms}\n{ttl_ms}")
+}
+
+/// A serializable session proof used to verify messages signed by a delegated session key.
+#[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
+pub struct Session {
+    /// DID of the session public key.
+    pub(super) session_id: Did,
+    /// Account that authorized the session.
+    pub(super) account: Account,
+    /// Session lifetime.
+    pub(super) ttl_ms: u64,
+    /// Timestamp when the session was created.
+    pub(super) ts_ms: u128,
+    /// Account signature authorizing the session.
+    pub(super) sig: Vec<u8>,
+}
+
+impl Session {
+    /// Pack the session into a string for verification or public key recovery.
+    pub fn pack(&self) -> Vec<u8> {
+        pack_session(self.session_id, self.ts_ms, self.ttl_ms)
+            .as_bytes()
+            .to_vec()
+    }
+
+    /// Return the DID of the session public key.
+    pub fn session_did(&self) -> Did {
+        self.session_id
+    }
+
+    /// Check whether the session has expired.
+    pub fn is_expired(&self) -> bool {
+        self.is_expired_at(utils::get_epoch_ms())
+    }
+
+    /// Check whether the session had expired at the instant `at_ms`.
+    ///
+    /// Total over every stamp: a lifetime that overflows the clock saturates, so a delegation
+    /// that arrives unsigned on a link (an announcement) cannot make this end panic.
+    pub fn is_expired_at(&self, at_ms: u128) -> bool {
+        at_ms > self.ts_ms.saturating_add(u128::from(self.ttl_ms))
+    }
+
+    /// Verify that the account authorized this unexpired session.
+    pub fn verify_self(&self) -> Result<()> {
+        self.verify_self_at(utils::get_epoch_ms())
+    }
+
+    /// Verify that the account authorized this session and that it was live at `at_ms`.
+    pub fn verify_self_at(&self, at_ms: u128) -> Result<()> {
+        if self.is_expired_at(at_ms) {
+            return Err(Error::SessionExpired);
+        }
+
+        let auth_bytes = self.pack();
+        if !self
+            .account
+            .account_verifier()
+            .verify(&auth_bytes, &self.sig)
+        {
+            return Err(Error::VerifySignatureFailed);
+        }
+        Ok(())
+    }
+
+    /// Verify a message signed by this session key.
+    pub fn verify(&self, msg: &[u8], sig: impl AsRef<[u8]>) -> Result<()> {
+        self.verify_at(msg, sig, utils::get_epoch_ms())
+    }
+
+    /// Verify a message signed by this session key as of the instant `at_ms`: the session must
+    /// have been live then, whatever it is now.
+    pub fn verify_at(&self, msg: &[u8], sig: impl AsRef<[u8]>, at_ms: u128) -> Result<()> {
+        self.verify_self_at(at_ms)?;
+        if !signers::secp256k1::verify(msg, &self.session_id, sig) {
+            return Err(Error::VerifySignatureFailed);
+        }
+        Ok(())
+    }
+
+    /// Get the legacy secp256k1-compatible account public key.
+    ///
+    /// Use [`Session::account_verification_pubkey`] for typed account verification keys.
+    pub fn account_pubkey(&self) -> Result<PublicKey<33>> {
+        match self.account_verification_pubkey()? {
+            VerificationPublicKey::Secp256k1(pk)
+            | VerificationPublicKey::Eip191(pk)
+            | VerificationPublicKey::Bip137(pk) => Ok(pk),
+            VerificationPublicKey::Secp256r1(_)
+            | VerificationPublicKey::Ed25519(_)
+            | VerificationPublicKey::Bls12381(_) => Err(Error::UnknownAccount),
+        }
+    }
+
+    /// Get the typed account verification public key from the session proof.
+    pub fn account_verification_pubkey(&self) -> Result<VerificationPublicKey> {
+        self.account
+            .account_verifier()
+            .verification_key_from_signature(&self.pack(), &self.sig)
+    }
+
+    /// Get the typed account verifier.
+    pub fn account_verifier(&self) -> AccountVerifier {
+        self.account.account_verifier()
+    }
+
+    /// Get the authorizing account DID.
+    pub fn account_did(&self) -> Did {
+        self.account.account_verifier().did()
+    }
+}

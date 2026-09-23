@@ -1,6 +1,5 @@
 use std::num::NonZeroUsize;
 
-use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
 use rings_core::ecc::SecretKey;
 use rings_core::measure::Measure;
@@ -8,6 +7,7 @@ use rings_core::message::MessageSigner;
 use rings_core::message::ProvisionalEpoch;
 use rings_core::message::ProvisionalServiceClaim;
 use rings_core::message::ProvisionalServiceReceipt;
+use rings_core::session::SessionSk;
 use rings_core::storage::idb::IdbStorage;
 use rings_measure::EvidenceAccountPair;
 use rings_measure::EvidenceDigest;
@@ -22,13 +22,13 @@ use crate::measure::MeasureStorage;
 use crate::measure::PeriodicMeasure;
 
 fn evidence_fixture() -> (ProvisionalEvidenceRecord<Did>, EvidenceCollectorIdentity) {
-    let provider = DelegateeKey::new_with_seckey(&SecretKey::random()).unwrap();
-    let beneficiary = DelegateeKey::new_with_seckey(&SecretKey::random()).unwrap();
+    let provider = SessionSk::new_with_seckey(&SecretKey::random()).unwrap();
+    let beneficiary = SessionSk::new_with_seckey(&SecretKey::random()).unwrap();
     let observed_at_seconds = u64::try_from(rings_core::utils::get_epoch_ms() / 1_000).unwrap();
     let claim = ProvisionalServiceClaim::probe(
         9,
-        provider.delegator_did(),
-        beneficiary.delegator_did(),
+        provider.account_did(),
+        beneficiary.account_did(),
         ProvisionalEpoch::from_unix_seconds(observed_at_seconds),
         [5; 32],
         [6; 32],

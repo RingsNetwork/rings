@@ -1,22 +1,22 @@
-//! The frames one link carries, and the delegation references inside them.
+//! The frames one link carries, and the session references inside them.
 //!
-//! A [`MessagePayload`] is self-contained: each of its two proofs embeds the full [`Delegation`]
+//! A [`MessagePayload`] is self-contained: each of its two proofs embeds the full [`Session`]
 //! that signed it. On a link that is redundant, because the same few delegations sign every
 //! frame for the lifetime of the connection. The wire form therefore carries, in each session
-//! slot, a [`DelegationRef`]:
+//! slot, a [`SessionRef`]:
 //!
 //! ```text
-//!   DelegationRef = Inline(Delegation) + Digest(DelegationDigest)
+//!   SessionRef = Inline(Session) + Digest(SessionDigest)
 //!
-//!   view    : MessagePayload × PerSlot<DelegationRef> → WirePayload      (borrowing, no copy)
-//!   resolve : WirePayload × (DelegationRef → E + Delegation) → E + MessagePayload   (by move)
+//!   view    : MessagePayload × PerSlot<SessionRef> → WirePayload      (borrowing, no copy)
+//!   resolve : WirePayload × (SessionRef → E + Session) → E + MessagePayload   (by move)
 //! ```
 //!
 //! Law (round trip): for every `p` and every choice of references `r` with
 //! `ρ(r_slot) = p.session(slot)`, `resolve(decode(encode(view(p, r))), ρ) = p`. A digest is the
 //! content address of the session it replaces, so the resolved payload is the value that would
 //! have travelled inline: what is verified, attributed, and digested does not depend on how a
-//! slot was encoded. Neither signature covers the delegation slot (both sign the transaction
+//! slot was encoded. Neither signature covers the session slot (both sign the transaction
 //! hash), so re-encoding a slot per link leaves the origin's signature intact.
 //!
 //! A frame is either a payload or a [`LinkControl`]; the two are told apart by a marker before
@@ -34,14 +34,14 @@ use serde::Serialize;
 
 use super::MessagePayload;
 use super::Transaction;
-use crate::delegation::Delegation;
-use crate::delegation::DelegationDigest;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::protocols::MessageRelay;
 use crate::message::protocols::MessageVerification;
 use crate::message::protocols::ProofLifetime;
+use crate::session::Session;
+use crate::session::SessionDigest;
 
 /// Marker of a payload frame. A frame without it is refused before any decoding; there is no
 /// version behind the marker, because the protocol is not versioned before 1.0: every wire
@@ -52,7 +52,7 @@ const PAYLOAD_FRAME_MARKER: &[u8] = b"RINGS-PAYLOAD\0";
 /// differing byte, so neither marker is a prefix of the other.
 const LINK_CONTROL_FRAME_MARKER: &[u8] = b"RINGS-LINK\0";
 
-/// The two delegation slots of a payload, as a product: `PerSlot<T> ≅ T × T`.
+/// The two session slots of a payload, as a product: `PerSlot<T> ≅ T × T`.
 ///
 /// Every per-slot quantity (a reference, a lookup, a staged announcement) is carried in this
 /// one shape, so the slots are always handled together and in the same order.
@@ -86,23 +86,23 @@ impl<T> PerSlot<T> {
     }
 }
 
-/// What a delegation slot holds on the wire.
+/// What a session slot holds on the wire.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-pub(crate) enum DelegationRef<'a> {
-    /// The delegation itself: the receiver learns it from this frame.
-    Inline(Cow<'a, Delegation>),
+pub(crate) enum SessionRef<'a> {
+    /// The session itself: the receiver learns it from this frame.
+    Inline(Cow<'a, Session>),
     /// The content address of a session this link already carried inline.
-    Digest(DelegationDigest),
+    Digest(SessionDigest),
 }
 
-impl DelegationRef<'_> {
+impl SessionRef<'_> {
     /// `session` inline, borrowed for the frame being built.
-    pub(crate) const fn inline(session: &Delegation) -> DelegationRef<'_> {
-        DelegationRef::Inline(Cow::Borrowed(session))
+    pub(crate) const fn inline(session: &Session) -> SessionRef<'_> {
+        SessionRef::Inline(Cow::Borrowed(session))
     }
 }
 
-/// How a slot travelled: the shape of a [`DelegationRef`] without its content.
+/// How a slot travelled: the shape of a [`SessionRef`] without its content.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SlotEncoding {
     /// The session was carried inline.
@@ -111,7 +111,7 @@ pub(crate) enum SlotEncoding {
     Referenced,
 }
 
-impl DelegationRef<'_> {
+impl SessionRef<'_> {
     /// How this slot travelled.
     pub(crate) const fn encoding(&self) -> SlotEncoding {
         match self {
@@ -121,16 +121,16 @@ impl DelegationRef<'_> {
     }
 }
 
-/// The wire form of a [`MessageVerification`]: the proof with its delegation slot as a reference.
+/// The wire form of a [`MessageVerification`]: the proof with its session slot as a reference.
 #[derive(Deserialize, Serialize)]
 struct WireVerification<'a> {
-    /// The delegation slot.
-    delegation: DelegationRef<'a>,
+    /// The session slot.
+    session: SessionRef<'a>,
     /// The proof's lifetime stamp, in the clear whether or not the slot is resolved.
     ttl_ms: u64,
     /// The proof's creation stamp.
     ts_ms: u128,
-    /// The delegatee signature.
+    /// The session signature.
     sig: Cow<'a, [u8]>,
 }
 
@@ -149,7 +149,7 @@ struct WireTransaction<'a> {
     verification: WireVerification<'a>,
 }
 
-/// The wire form of a [`MessagePayload`]: each delegation slot a [`DelegationRef`]. Borrowed when
+/// The wire form of a [`MessagePayload`]: each session slot a [`SessionRef`]. Borrowed when
 /// built by [`Self::view`], owned when decoded.
 #[derive(Deserialize, Serialize)]
 pub(crate) struct WirePayload<'a> {
@@ -163,9 +163,9 @@ pub(crate) struct WirePayload<'a> {
 
 impl<'a> WireVerification<'a> {
     /// View `verification` with `session` in its slot.
-    fn view(verification: &'a MessageVerification, delegation: DelegationRef<'a>) -> Self {
+    fn view(verification: &'a MessageVerification, session: SessionRef<'a>) -> Self {
         Self {
-            delegation,
+            session,
             ttl_ms: verification.ttl_ms,
             ts_ms: verification.ts_ms,
             sig: Cow::Borrowed(verification.sig.as_slice()),
@@ -175,16 +175,16 @@ impl<'a> WireVerification<'a> {
     /// The self-contained proof, with its slot resolved by `resolve`.
     fn resolve<E>(
         self,
-        resolve: &mut impl FnMut(DelegationRef<'a>) -> std::result::Result<Delegation, E>,
+        resolve: &mut impl FnMut(SessionRef<'a>) -> std::result::Result<Session, E>,
     ) -> std::result::Result<MessageVerification, E> {
         let Self {
-            delegation,
+            session,
             ttl_ms,
             ts_ms,
             sig,
         } = self;
         Ok(MessageVerification {
-            delegation: resolve(delegation)?,
+            session: resolve(session)?,
             ttl_ms,
             ts_ms,
             sig: sig.into_owned(),
@@ -197,7 +197,7 @@ impl<'a> WirePayload<'a> {
     ///
     /// Pre: each reference stands for the session in its slot (it is that session inline, or
     /// its digest); the round-trip law holds only then.
-    pub(crate) fn view(payload: &'a MessagePayload, sessions: PerSlot<DelegationRef<'a>>) -> Self {
+    pub(crate) fn view(payload: &'a MessagePayload, sessions: PerSlot<SessionRef<'a>>) -> Self {
         let transaction = &payload.transaction;
         Self {
             transaction: WireTransaction {
@@ -215,12 +215,12 @@ impl<'a> WirePayload<'a> {
     /// View `payload` with both sessions inline: the self-contained frame, valid on any link and
     /// in any context that has no link at all.
     pub(crate) fn inline(payload: &'a MessagePayload) -> Self {
-        Self::view(payload, payload.delegations().map(DelegationRef::inline))
+        Self::view(payload, payload.sessions().map(SessionRef::inline))
     }
 
     /// The payload, with every slot required inline: the self-contained reading, valid outside
     /// any link. A slot sent by reference is refused as
-    /// [`Error::DelegationReferenceUnresolved`].
+    /// [`Error::SessionReferenceUnresolved`].
     pub(crate) fn into_self_contained(self) -> Result<MessagePayload> {
         self.resolve(resolve_inline)
     }
@@ -242,10 +242,10 @@ impl<'a> WirePayload<'a> {
     }
 
     /// What each slot holds.
-    pub(crate) const fn delegation_refs(&self) -> PerSlot<&DelegationRef<'a>> {
+    pub(crate) const fn session_refs(&self) -> PerSlot<&SessionRef<'a>> {
         PerSlot {
-            origin: &self.transaction.verification.delegation,
-            hop: &self.verification.delegation,
+            origin: &self.transaction.verification.session,
+            hop: &self.verification.session,
         }
     }
 
@@ -272,7 +272,7 @@ impl<'a> WirePayload<'a> {
     /// Owned fields move; nothing is copied for a decoded frame.
     pub(crate) fn resolve<E>(
         self,
-        mut resolve: impl FnMut(DelegationRef<'a>) -> std::result::Result<Delegation, E>,
+        mut resolve: impl FnMut(SessionRef<'a>) -> std::result::Result<Session, E>,
     ) -> std::result::Result<MessagePayload, E> {
         let Self {
             transaction,
@@ -295,19 +295,19 @@ impl<'a> WirePayload<'a> {
     }
 }
 
-/// What the two ends of one link tell each other about delegation references. See the module
+/// What the two ends of one link tell each other about session references. See the module
 /// documentation for why these are unsigned.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub(crate) enum LinkControl {
     /// "A frame of yours carried this session inline and it verified: you may reference it."
-    Known(DelegationDigest),
+    Known(SessionDigest),
     /// "A frame of yours references this digest and I cannot resolve it."
-    Request(DelegationDigest),
+    Request(SessionDigest),
     /// "This is a session you asked for." The receiver recomputes the digest; it is never
     /// taken from the sender.
-    Announce(Delegation),
+    Announce(Session),
     /// "I no longer hold the session you asked for": frames waiting on it cannot be resolved.
-    Unknown(DelegationDigest),
+    Unknown(SessionDigest),
 }
 
 impl LinkControl {
@@ -320,7 +320,7 @@ impl LinkControl {
 
 /// One decoded frame.
 pub(crate) enum LinkFrame {
-    /// A payload whose delegation slots may still be references.
+    /// A payload whose session slots may still be references.
     Payload(Box<WirePayload<'static>>),
     /// A link-control frame.
     Control(LinkControl),
@@ -363,9 +363,9 @@ fn frame_bytes(marker: &[u8], body: &[u8]) -> Result<Bytes> {
 }
 
 /// Resolve a slot of a frame that travels outside any link: only an inline session resolves.
-fn resolve_inline(delegation: DelegationRef<'_>) -> Result<Delegation> {
-    match delegation {
-        DelegationRef::Inline(session) => Ok(session.into_owned()),
-        DelegationRef::Digest(digest) => Err(Error::DelegationReferenceUnresolved(digest)),
+fn resolve_inline(session: SessionRef<'_>) -> Result<Session> {
+    match session {
+        SessionRef::Inline(session) => Ok(session.into_owned()),
+        SessionRef::Digest(digest) => Err(Error::SessionReferenceUnresolved(digest)),
     }
 }

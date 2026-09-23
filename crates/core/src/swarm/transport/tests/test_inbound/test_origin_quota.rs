@@ -9,8 +9,8 @@ use crate::message::Transaction;
 
 fn relayed_wire(
     message: Message,
-    origin: &DelegateeKey,
-    carrier: &DelegateeKey,
+    origin: &SessionSk,
+    carrier: &SessionSk,
     local: Did,
     sequence: u64,
 ) -> Result<bytes::Bytes> {
@@ -34,7 +34,7 @@ async fn quota_is_shared_across_relays_but_isolated_between_origins() -> Result<
     let lane = OriginQuotaLaneConfig::new(1, 1, 1024, 1024, 8)
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
     let quota = OriginQuotaConfig::new(lane, lane, lane, lane);
-    let local = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let local = SessionSk::new_with_seckey(&SecretKey::random())?;
     let app_callback = Arc::new(CountingSwarmCallback::default());
     let swarm = SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local)
         .origin_quota(quota)
@@ -44,10 +44,10 @@ async fn quota_is_shared_across_relays_but_isolated_between_origins() -> Result<
 
     let relay_a_key = SecretKey::random();
     let relay_a: Did = relay_a_key.address().into();
-    let relay_a_session = DelegateeKey::new_with_seckey(&relay_a_key)?;
+    let relay_a_session = SessionSk::new_with_seckey(&relay_a_key)?;
     let relay_b_key = SecretKey::random();
     let relay_b: Did = relay_b_key.address().into();
-    let relay_b_session = DelegateeKey::new_with_seckey(&relay_b_key)?;
+    let relay_b_session = SessionSk::new_with_seckey(&relay_b_key)?;
     let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
     let (attempt_a, _offer) = transport
         .prepare_connection_offer_with_attempt(relay_a, offer_callback)
@@ -63,7 +63,7 @@ async fn quota_is_shared_across_relays_but_isolated_between_origins() -> Result<
     let callback_b = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone())
         .with_pending_connection_attempt(attempt_b);
 
-    let origin_a = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let origin_a = SessionSk::new_with_seckey(&SecretKey::random())?;
     let first = relayed_wire(
         Message::custom(b"origin-a-relay-a")?,
         &origin_a,
@@ -93,7 +93,7 @@ async fn quota_is_shared_across_relays_but_isolated_between_origins() -> Result<
         ))
     ));
 
-    let origin_b = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let origin_b = SessionSk::new_with_seckey(&SecretKey::random())?;
     let independent = relayed_wire(
         Message::custom(b"origin-b-relay-a")?,
         &origin_b,
@@ -122,9 +122,9 @@ async fn quota_is_shared_across_relays_but_isolated_between_origins() -> Result<
 
 #[tokio::test]
 async fn normal_and_reassembled_messages_each_consume_one_logical_byte_cost() -> Result<()> {
-    let local = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let local_did = local.delegator_did();
-    let origin = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let local = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let local_did = local.account_did();
+    let origin = SessionSk::new_with_seckey(&SecretKey::random())?;
     let message = Message::custom(&vec![41; 512])?;
     let reassembled = MessagePayload::new_send(
         message.clone(),
@@ -164,7 +164,7 @@ async fn normal_and_reassembled_messages_each_consume_one_logical_byte_cost() ->
     let transport = Arc::clone(&swarm.transport);
     let relay_key = SecretKey::random();
     let relay: Did = relay_key.address().into();
-    let relay_session = DelegateeKey::new_with_seckey(&relay_key)?;
+    let relay_session = SessionSk::new_with_seckey(&relay_key)?;
     let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(relay, offer_callback)

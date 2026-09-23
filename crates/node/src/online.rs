@@ -1,6 +1,5 @@
 //! Signed online-node descriptors stored in the DHT.
 
-use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
 use rings_core::domain_tag;
 use rings_core::ecc::PublicKey;
@@ -14,6 +13,7 @@ use rings_core::message::Encoded;
 use rings_core::message::Encoder;
 use rings_core::message::MessageSigner;
 use rings_core::message::MessageVerification;
+use rings_core::session::SessionSk;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -48,8 +48,8 @@ pub struct OnlineNodeDescriptorBody {
     pub did: Did,
     /// Account public key corresponding to `did`.
     pub public_key: VerificationPublicKey,
-    /// Delegation public key used for encrypted onion relay frames.
-    pub delegatee_public_key: PublicKey<33>,
+    /// Session public key used for encrypted onion relay frames.
+    pub session_public_key: PublicKey<33>,
     /// Runtime family of this node.
     pub node_type: OnlineNodeType,
     /// Network identifier.
@@ -77,7 +77,7 @@ impl OnlineNodeDescriptorBody {
         OnlineNodeDescriptorBodyRef {
             did: self.did,
             public_key: &self.public_key,
-            delegatee_public_key: &self.delegatee_public_key,
+            session_public_key: &self.session_public_key,
             node_type: &self.node_type,
             network_id: self.network_id,
             storage_redundancy: self.storage_redundancy,
@@ -121,7 +121,7 @@ impl SignedDescriptorBody for OnlineNodeDescriptorBody {
         OnlineNodeDescriptor {
             did: self.did,
             public_key: self.public_key,
-            delegatee_public_key: self.delegatee_public_key,
+            session_public_key: self.session_public_key,
             node_type: self.node_type,
             network_id: self.network_id,
             storage_redundancy: self.storage_redundancy,
@@ -141,7 +141,7 @@ impl SignedDescriptorBody for OnlineNodeDescriptorBody {
 struct OnlineNodeDescriptorBodyRef<'a> {
     did: Did,
     public_key: &'a VerificationPublicKey,
-    delegatee_public_key: &'a PublicKey<33>,
+    session_public_key: &'a PublicKey<33>,
     node_type: &'a OnlineNodeType,
     network_id: u32,
     storage_redundancy: u16,
@@ -167,8 +167,8 @@ pub struct OnlineNodeDescriptor {
     pub did: Did,
     /// Account public key corresponding to `did`.
     pub public_key: VerificationPublicKey,
-    /// Delegation public key used for encrypted onion relay frames.
-    pub delegatee_public_key: PublicKey<33>,
+    /// Session public key used for encrypted onion relay frames.
+    pub session_public_key: PublicKey<33>,
     /// Runtime family of this node.
     pub node_type: OnlineNodeType,
     /// Network identifier.
@@ -197,7 +197,7 @@ impl OnlineNodeDescriptor {
     /// Create and sign a descriptor.
     pub fn new_signed(
         body: OnlineNodeDescriptorBody,
-        signer: MessageSigner<&DelegateeKey>,
+        signer: MessageSigner<&SessionSk>,
     ) -> Result<Self> {
         sign_descriptor_body(
             body,
@@ -210,7 +210,7 @@ impl OnlineNodeDescriptor {
         let Self {
             did,
             public_key,
-            delegatee_public_key,
+            session_public_key,
             node_type,
             network_id,
             storage_redundancy,
@@ -227,7 +227,7 @@ impl OnlineNodeDescriptor {
         OnlineNodeDescriptorBodyRef {
             did: *did,
             public_key,
-            delegatee_public_key,
+            session_public_key,
             node_type,
             network_id: *network_id,
             storage_redundancy: *storage_redundancy,
@@ -338,21 +338,21 @@ impl Decoder for OnlineNodeDescriptor {
 
 #[cfg(test)]
 mod tests {
-    use rings_core::delegation::DelegateeKey;
     use rings_core::ecc::SecretKey;
+    use rings_core::session::SessionSk;
 
     use super::*;
     use crate::tests::TEST_NETWORK_ID;
 
     fn descriptor_at(heartbeat_at_ms: u128, expires_at_ms: u128) -> Result<OnlineNodeDescriptor> {
         let key = SecretKey::random();
-        let delegatee_key = DelegateeKey::new_with_seckey(&key)?;
-        let did = delegatee_key.delegator_did();
+        let session_sk = SessionSk::new_with_seckey(&key)?;
+        let did = session_sk.account_did();
         OnlineNodeDescriptor::new_signed(
             OnlineNodeDescriptorBody {
                 did,
-                public_key: delegatee_key.delegation().delegator_verification_pubkey()?,
-                delegatee_public_key: delegatee_key.delegatee_public_key(),
+                public_key: session_sk.session().account_verification_pubkey()?,
+                session_public_key: session_sk.session_public_key(),
                 node_type: OnlineNodeType::Native,
                 network_id: 1,
                 storage_redundancy: 6,
@@ -364,7 +364,7 @@ mod tests {
                 expires_at_ms,
                 version: "test".to_string(),
             },
-            MessageSigner::new(&delegatee_key, TEST_NETWORK_ID),
+            MessageSigner::new(&session_sk, TEST_NETWORK_ID),
         )
     }
 
@@ -395,15 +395,15 @@ mod tests {
     #[test]
     fn test_latest_valid_by_did_filters_expired_and_keeps_newest() -> Result<()> {
         let key = SecretKey::random();
-        let delegatee_key = DelegateeKey::new_with_seckey(&key)?;
-        let did = delegatee_key.delegator_did();
-        let public_key = delegatee_key.delegation().delegator_verification_pubkey()?;
+        let session_sk = SessionSk::new_with_seckey(&key)?;
+        let did = session_sk.account_did();
+        let public_key = session_sk.session().account_verification_pubkey()?;
 
         let older = OnlineNodeDescriptor::new_signed(
             OnlineNodeDescriptorBody {
                 did,
                 public_key: public_key.clone(),
-                delegatee_public_key: delegatee_key.delegatee_public_key(),
+                session_public_key: session_sk.session_public_key(),
                 node_type: OnlineNodeType::Native,
                 network_id: 1,
                 storage_redundancy: 6,
@@ -415,13 +415,13 @@ mod tests {
                 expires_at_ms: 100,
                 version: "old".to_string(),
             },
-            MessageSigner::new(&delegatee_key, TEST_NETWORK_ID),
+            MessageSigner::new(&session_sk, TEST_NETWORK_ID),
         )?;
         let newer = OnlineNodeDescriptor::new_signed(
             OnlineNodeDescriptorBody {
                 did,
                 public_key,
-                delegatee_public_key: delegatee_key.delegatee_public_key(),
+                session_public_key: session_sk.session_public_key(),
                 node_type: OnlineNodeType::Native,
                 network_id: 1,
                 storage_redundancy: 6,
@@ -433,7 +433,7 @@ mod tests {
                 expires_at_ms: 100,
                 version: "new".to_string(),
             },
-            MessageSigner::new(&delegatee_key, TEST_NETWORK_ID),
+            MessageSigner::new(&session_sk, TEST_NETWORK_ID),
         )?;
         let other_live = descriptor_at(25, 100)?;
         let expired = descriptor_at(30, 40)?;

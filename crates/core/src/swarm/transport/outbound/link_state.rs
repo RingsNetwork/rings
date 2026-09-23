@@ -1,5 +1,5 @@
 //! The state of one peer's link that the sending end keeps across its outbound workers: the
-//! announced-delegation table and the budget of link-control sends in flight. A worker is
+//! announced-session table and the budget of link-control sends in flight. A worker is
 //! replaced under an unchanged connection generation without losing either; a newer
 //! generation empties the table by itself on its first frame.
 
@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use rings_transport::callback::INBOUND_PEER_FRAME_CAPACITY;
 
-use super::session_encoding::SharedAnnouncedDelegations;
+use super::session_encoding::SharedAnnouncedSessions;
 use super::OutboundSchedulers;
 use crate::dht::Did;
 
@@ -23,7 +23,7 @@ pub(crate) const LINK_CONTROL_IN_FLIGHT_CAPACITY: usize = 2 * INBOUND_PEER_FRAME
 #[derive(Clone)]
 pub(super) struct PeerLinkState {
     /// The sessions sent inline and which of them the peer confirmed.
-    pub(super) announced: SharedAnnouncedDelegations,
+    pub(super) announced: SharedAnnouncedSessions,
     /// The link-control sends in flight to the peer.
     pub(super) control_budget: LinkControlBudget,
 }
@@ -32,7 +32,7 @@ impl PeerLinkState {
     /// The link state of a peer nothing has been sent to.
     pub(super) fn new() -> Self {
         Self {
-            announced: SharedAnnouncedDelegations::new(),
+            announced: SharedAnnouncedSessions::new(),
             control_budget: LinkControlBudget::new(),
         }
     }

@@ -11,7 +11,6 @@ use super::sync::sync_entries_batches;
 use super::sync::SYNC_BATCH_MAX_BYTES;
 use crate::consts::MAX_CHUNK_ENVELOPE_OVERHEAD;
 use crate::consts::TRANSPORT_CUSTOM_OVERHEAD;
-use crate::delegation::DelegateeKey;
 use crate::dht::entry::inbox::inbox_key;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
@@ -37,6 +36,7 @@ use crate::error::Result;
 use crate::message::types::Message;
 use crate::message::types::SyncEntriesWithSuccessor;
 use crate::message::Encoded;
+use crate::session::SessionSk;
 use crate::storage::KvStorageInterface;
 use crate::storage::MemStorage;
 use crate::tests::expired;
@@ -947,9 +947,9 @@ fn test_storage_key_partitions_kinds_and_keeps_the_data_rendering() -> Result<()
 /// distinct carriers, so the topic cannot block the hold and the hold cannot touch the topic.
 #[tokio::test]
 async fn test_data_topic_at_the_inbox_position_does_not_block_the_hold() -> Result<()> {
-    let holder = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let holder = SessionSk::new_with_seckey(&SecretKey::random())?;
     // Standing alone, the node routes every position to itself and is the hold authority.
-    let node = PeerRing::new_with_storage(holder.delegator_did(), 3, Box::new(MemStorage::new()));
+    let node = PeerRing::new_with_storage(holder.account_did(), 3, Box::new(MemStorage::new()));
     let destination = Did::from(50u32);
     let position = inbox_key(destination);
     let now_ms = get_epoch_ms();
@@ -1021,9 +1021,9 @@ impl KvStorageInterface<Entry> for YieldingStorage {
 /// holds survive either way.
 #[tokio::test]
 async fn test_interleaved_operations_on_one_slot_do_not_lose_a_write() -> Result<()> {
-    let holder = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let holder = SessionSk::new_with_seckey(&SecretKey::random())?;
     let node = PeerRing::new_with_storage(
-        holder.delegator_did(),
+        holder.account_did(),
         3,
         Box::new(YieldingStorage(MemStorage::new())),
     );
@@ -1078,8 +1078,8 @@ async fn test_interleaved_operations_on_one_slot_do_not_lose_a_write() -> Result
 /// would retire; for a data topic by value, for a relay inbox by a dot the recipient once saw.
 #[tokio::test]
 async fn test_removal_against_nothing_held_stores_nothing() -> Result<()> {
-    let holder = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let node = PeerRing::new_with_storage(holder.delegator_did(), 3, Box::new(MemStorage::new()));
+    let holder = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let node = PeerRing::new_with_storage(holder.account_did(), 3, Box::new(MemStorage::new()));
     let now_ms = get_epoch_ms();
 
     let topic = Did::from(100u32);

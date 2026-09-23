@@ -3,11 +3,11 @@ use std::rc::Rc;
 use js_sys::Object;
 use js_sys::Reflect;
 use rings_node::onion::OnionExitPolicy;
-use rings_node::prelude::rings_core::delegation::DelegateeKey;
 use rings_node::prelude::rings_core::ecc::SecretKey;
+use rings_node::prelude::uuid;
+use rings_node::prelude::rings_core::session::SessionSk;
 use rings_node::prelude::rings_core::storage::idb::IdbStorage;
 use rings_node::prelude::rings_core::utils::js_utils::window_sleep;
-use rings_node::prelude::uuid;
 use rings_node::processor::Processor;
 use rings_node::processor::ProcessorBuilder;
 use rings_node::processor::ProcessorConfig;
@@ -174,13 +174,13 @@ async fn browser_provider(
     storage_name: &str,
     exit_target: Option<&str>,
 ) -> WebviewResult<Rc<Provider>> {
-    let delegatee_key = DelegateeKey::new_with_seckey(&SecretKey::random()).map_err(|error| {
-        WebviewError::transport(format!("build browser delegatee key: {error:?}"))
+    let session_sk = SessionSk::new_with_seckey(&SecretKey::random()).map_err(|error| {
+        WebviewError::transport(format!("build browser session key: {error:?}"))
     })?;
     let mut config = ProcessorConfig::new(
         TEST_NETWORK_ID,
         TEST_ICE_SERVERS.to_string(),
-        delegatee_key,
+        session_sk,
         TEST_STABILIZE_INTERVAL_SECS,
     );
     if let Some(target) = exit_target {

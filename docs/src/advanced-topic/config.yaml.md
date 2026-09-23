@@ -6,7 +6,7 @@ operator edits. This is the file it writes, with `$HOME` expanded to `/home/oper
 
 ```yaml
 network_id: 1
-delegatee_key: /home/operator/.rings/delegatee_key
+session_sk: /home/operator/.rings/session_sk
 internal_api_port: 50000
 external_api_addr: 127.0.0.1:50001
 endpoint_url: http://127.0.0.1:50000
@@ -96,8 +96,8 @@ where noted.
 
 * `network_id`: the Rings overlay this node joins. Signatures are bound to it, so nodes on
   different overlays do not verify each other's messages.
-* `delegatee_key`: path of the delegatee signing key file that `rings init` writes next to the config.
-  The delegatee key is derived from your ECDSA key and signs every message on your behalf; keep the
+* `session_sk`: path of the session secret key file that `rings init` writes next to the config.
+  The session key is derived from your ECDSA key and signs every message on your behalf; keep the
   file private. This field is path-only: a raw session dump and the removed `ecdsa_key` and
   `session_manager` fields are rejected rather than interpreted as compatibility fallbacks.
 * `ice_servers`: STUN or TURN servers used to establish WebRTC connections, separated by `;`.
@@ -113,7 +113,7 @@ where noted.
 * `origin_quota`: runtime-local final-destination rate limits. Each of `dht_control`, `storage`,
   `e2e`, and `application` sets message rate/burst, byte rate/burst, and the maximum retained
   origin records for that lane. Every value must be non-zero. The key uses the verified origin
-  account and final destination, not the delegation or immediate relay. Token balances are
+  account and final destination, not the delegated session or immediate relay. Token balances are
   deliberately reset on restart; durable replay state is separate.
 * `external_ip`, `webrtc_udp_port_min`, `webrtc_udp_port_max`: optional reachability hints, an
   externally visible address and a UDP port range for ICE. The two port bounds must be given

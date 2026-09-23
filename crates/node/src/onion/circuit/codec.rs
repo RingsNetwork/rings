@@ -150,20 +150,20 @@ pub(super) fn encode_local_message(message: OnionLocalMessage) -> Result<Bytes> 
 
 #[cfg(test)]
 mod tests {
-    use rings_core::delegation::DelegateeKey;
     use rings_core::ecc::SecretKey;
+    use rings_core::session::SessionSk;
 
     use super::*;
     use crate::onion::circuit::cell::seal_message;
 
     #[test]
     fn test_decode_rejects_oversized_wrapped_key_before_crypto_admission() {
-        let sender = DelegateeKey::new_with_seckey(&SecretKey::random()).expect("sender session");
+        let sender = SessionSk::new_with_seckey(&SecretKey::random()).expect("sender session");
         let recipient =
-            DelegateeKey::new_with_seckey(&SecretKey::random()).expect("recipient session");
+            SessionSk::new_with_seckey(&SecretKey::random()).expect("recipient session");
         let payload = seal_message(
             &OnionWireMessage::Cover,
-            recipient.delegatee_public_key(),
+            recipient.session_public_key(),
             Some(OnionCellBucket::KiB4),
         )
         .expect("seal cell");
@@ -177,6 +177,6 @@ mod tests {
         cell.sealed.encrypted_key.push(extra_block);
         let oversized = rings_codec::serialize(&cell).expect("encode oversized cell");
 
-        assert!(decode_wire_message(sender.delegator_did(), &oversized).is_err());
+        assert!(decode_wire_message(sender.account_did(), &oversized).is_err());
     }
 }

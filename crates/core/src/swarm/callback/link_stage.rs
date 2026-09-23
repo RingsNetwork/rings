@@ -1,7 +1,7 @@
 //! The link stage of one inbound connection: the first thing a frame from the transport meets.
 //!
-//! A frame is a payload, whose delegation slots may be references that this connection's
-//! [`ReferencedDelegations`](crate::swarm::session_link::ReferencedDelegations) resolves, or a
+//! A frame is a payload, whose session slots may be references that this connection's
+//! [`ReferencedSessions`](crate::swarm::session_link::ReferencedSessions) resolves, or a
 //! link-control frame, which asks about, confirms or answers such a reference. This module is
 //! the imperative shell around that pure state: it reads the inbound clock, interprets the
 //! effects the steps return (deliver, drop, ask, confirm), and hands every resolved frame to
@@ -16,7 +16,7 @@
 //! under the link's peer, so every drop charges one identity. A frame from any other peer, or
 //! on a callback bound to no handshake, has no link: it is judged self-contained, as it would
 //! be outside any connection, a reference in it is refused as
-//! [`Error::DelegationReferenceUnresolved`](crate::error::Error::DelegationReferenceUnresolved), and
+//! [`Error::SessionReferenceUnresolved`](crate::error::Error::SessionReferenceUnresolved), and
 //! nothing it carries reaches the table.
 //!
 //! Learning law: what a verified frame teaches the link is confirmed to the peer, and the held
@@ -47,11 +47,11 @@ use super::InnerSwarmCallback;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 use super::OnMessageRecursionDepthGuard;
 use super::TransportCallbackError;
-use crate::delegation::DelegationDigest;
 use crate::dht::Did;
 use crate::message::LinkControl;
 use crate::message::LinkFrame;
 use crate::message::WirePayload;
+use crate::session::SessionDigest;
 use crate::swarm::detached::run_detached_or_inline;
 use crate::swarm::detached::DetachedTask;
 use crate::swarm::session_link::Announcement;
@@ -113,18 +113,18 @@ impl InnerSwarmCallback {
                     .await
             }
             Ok(FrameArrival::Held { request }) => {
-                let asked = self.request_delegations(link, request).await;
+                let asked = self.request_sessions(link, request).await;
                 self.processor.session_link().note_asked(asked);
                 Ok(())
             }
             Ok(FrameArrival::Overflow { carrier, request }) => {
                 tracing::debug!(
                     peer = %link.peer(),
-                    "dropping message; the hold for unresolved delegation references is full"
+                    "dropping message; the hold for unresolved session references is full"
                 );
                 // Dropping the carrier is the effect: it releases the frame's transport lease.
                 drop(carrier);
-                let asked = self.request_delegations(link, request).await;
+                let asked = self.request_sessions(link, request).await;
                 self.processor.session_link().note_asked(asked);
                 Ok(())
             }
@@ -159,7 +159,7 @@ impl InnerSwarmCallback {
                 provenance.releases_what_it_teaches() && session_link.awaits_any(&learned, now_ms);
             (learned, releases)
         };
-        self.confirm_delegations(link, learned).await;
+        self.confirm_sessions(link, learned).await;
         if releases {
             self.start_release(link).await;
         }
@@ -238,14 +238,14 @@ impl InnerSwarmCallback {
                 tracing::warn!(
                     peer = %link.peer(),
                     error = ?error,
-                    "failed to deliver a message held for a delegation reference"
+                    "failed to deliver a message held for a session reference"
                 );
             }
         }
     }
 
     /// Tell the peer that the sessions behind `confirm` verified here, so it may reference them.
-    async fn confirm_delegations(&self, link: PendingConnectionAttempt, confirm: Digests) {
+    async fn confirm_sessions(&self, link: PendingConnectionAttempt, confirm: Digests) {
         for digest in confirm {
             let _dispatched = self
                 .emit_link_control(link, LinkControl::Known(digest))
@@ -255,11 +255,7 @@ impl InnerSwarmCallback {
 
     /// Ask the peer for the sessions behind `request`. Post: the digests actually asked about,
     /// for the hold to know which frames the peer may be charged for.
-    async fn request_delegations(
-        &self,
-        link: PendingConnectionAttempt,
-        request: Digests,
-    ) -> Digests {
+    async fn request_sessions(&self, link: PendingConnectionAttempt, request: Digests) -> Digests {
         let mut asked = Digests::new();
         for digest in request {
             if self
@@ -367,11 +363,7 @@ impl InnerSwarmCallback {
     }
 
     /// Answer the peer's question about `digest` from what `link`'s generation announced.
-    async fn answer_session_request(
-        &self,
-        link: PendingConnectionAttempt,
-        digest: DelegationDigest,
-    ) {
+    async fn answer_session_request(&self, link: PendingConnectionAttempt, digest: SessionDigest) {
         if let Err(error) = self
             .processor
             .logical

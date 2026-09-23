@@ -53,13 +53,13 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::delegation::DelegateeKey;
     use crate::ecc::SecretKey;
     use crate::error::Error;
     use crate::message::HopBudget;
     use crate::message::Message;
     use crate::message::MessagePayload;
     use crate::message::MessageSigner;
+    use crate::session::SessionSk;
     use crate::swarm::callback::SwarmCallback;
     use crate::tests::default::assert_no_more_msg;
     use crate::tests::default::prepare_node;
@@ -78,7 +78,7 @@ mod tests {
         destination: &Node,
         hop_budget: HopBudget,
     ) -> Result<(MessagePayload, CustomMessage)> {
-        let origin = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+        let origin = SessionSk::new_with_seckey(&SecretKey::random())?;
         let message = CustomMessage(b"through".to_vec());
         let mut payload = MessagePayload::new_send(
             Message::CustomMessage(message.clone()),

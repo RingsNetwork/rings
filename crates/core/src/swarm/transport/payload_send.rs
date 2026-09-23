@@ -31,7 +31,6 @@ use crate::chunk::Chunk;
 use crate::chunk::Framing;
 use crate::chunk::WireReserves;
 use crate::consts::TRANSPORT_MAX_SIZE;
-use crate::delegation::DelegateeKey;
 use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::error::Error;
@@ -42,6 +41,7 @@ use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::MessageSigner;
 use crate::message::PayloadSender;
+use crate::session::SessionSk;
 use crate::utils::sleep;
 
 const TRACKED_PAYLOAD_TIMEOUT: Duration = TRANSPORT_TIMEOUT_PROFILE.tracked_payload;
@@ -695,7 +695,7 @@ impl SwarmTransport {
 
     /// Build the transfer that carries `payload` under `framing`.
     ///
-    /// A whole payload travels as one link frame, its delegation slots encoded by the worker. A
+    /// A whole payload travels as one link frame, its session slots encoded by the worker. A
     /// chunked payload is cut from its self-contained encoding, because the receiver decodes it
     /// after reassembly, outside the order of the link; the chunk frames that carry it are link
     /// frames like any other.
@@ -842,8 +842,8 @@ impl SwarmTransport {
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl PayloadSender for SwarmTransport {
-    fn message_signer(&self) -> MessageSigner<&DelegateeKey> {
-        MessageSigner::new(&self.delegatee_key, self.network_id)
+    fn message_signer(&self) -> MessageSigner<&SessionSk> {
+        MessageSigner::new(&self.session_sk, self.network_id)
     }
 
     fn dht(&self) -> Arc<PeerRing> {

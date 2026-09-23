@@ -145,8 +145,8 @@ pub enum Error {
     UnmarkedFrame,
 
     /// A payload that travels outside any link referenced a session instead of carrying it.
-    #[error("Delegation reference {0:?} cannot be resolved outside the link that announced it")]
-    DelegationReferenceUnresolved(crate::delegation::DelegationDigest),
+    #[error("Session reference {0:?} cannot be resolved outside the link that announced it")]
+    SessionReferenceUnresolved(crate::session::SessionDigest),
 
     /// A link-control frame was decoded where a payload was expected: outside any link.
     #[error("Link-control frame is meaningful only on the connection it arrived on")]
@@ -767,9 +767,9 @@ pub enum Error {
     #[error("Error on ser/der JsValue")]
     SerdeWasmBindgenError(#[from] serde_wasm_bindgen::Error),
 
-    /// Delegation is expired
-    #[error("Delegation is expired")]
-    DelegationExpired,
+    /// Session is expired
+    #[error("Session is expired")]
+    SessionExpired,
 
     /// Transport error: {0}
     #[error("Transport error: {0}")]

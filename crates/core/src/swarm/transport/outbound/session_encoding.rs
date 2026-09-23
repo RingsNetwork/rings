@@ -9,27 +9,27 @@ use std::sync::MutexGuard;
 use bytes::Bytes;
 
 use super::OutboundSchedulers;
-use crate::delegation::DelegationDigest;
 use crate::dht::Did;
 use crate::error::Result;
 use crate::message::LinkControl;
 use crate::message::MessagePayload;
 use crate::message::WirePayload;
-use crate::swarm::session_link::AnnouncedDelegations;
+use crate::session::SessionDigest;
+use crate::swarm::session_link::AnnouncedSessions;
 
-/// The one handle on a peer's [`AnnouncedDelegations`]: every access is one pure step under the
+/// The one handle on a peer's [`AnnouncedSessions`]: every access is one pure step under the
 /// lock.
 ///
 /// Lock law: the lock is never held across a suspension point, and a poisoned lock still guards
 /// a well-formed table, since no step panics between two writes. Clone law: clones name the
 /// same table.
 #[derive(Clone)]
-pub(super) struct SharedAnnouncedDelegations(Arc<Mutex<AnnouncedDelegations>>);
+pub(super) struct SharedAnnouncedSessions(Arc<Mutex<AnnouncedSessions>>);
 
-impl SharedAnnouncedDelegations {
+impl SharedAnnouncedSessions {
     /// The table of a peer nothing has been sent to.
     pub(super) fn new() -> Self {
-        Self(Arc::new(Mutex::new(AnnouncedDelegations::new())))
+        Self(Arc::new(Mutex::new(AnnouncedSessions::new())))
     }
 
     /// Whether `other` names this very table.
@@ -39,13 +39,13 @@ impl SharedAnnouncedDelegations {
     }
 
     /// The table, for one step.
-    fn lock(&self) -> MutexGuard<'_, AnnouncedDelegations> {
+    fn lock(&self) -> MutexGuard<'_, AnnouncedSessions> {
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// The bytes of `payload` on the link of `generation` at `now_ms`: its delegation slots are
+    /// The bytes of `payload` on the link of `generation` at `now_ms`: its session slots are
     /// decided by the table, confirmed sessions by digest and every other session inline.
     pub(super) fn encode(
         &self,
@@ -90,7 +90,7 @@ impl OutboundSchedulers {
         &self,
         peer: Did,
         generation: u64,
-        digest: DelegationDigest,
+        digest: SessionDigest,
     ) {
         if let Some(link) = self.link_of(peer) {
             link.announced.lock().acknowledge(generation, digest);
@@ -103,7 +103,7 @@ impl OutboundSchedulers {
         &self,
         peer: Did,
         generation: u64,
-        digest: DelegationDigest,
+        digest: SessionDigest,
         now_ms: u128,
     ) -> LinkControl {
         self.link_of(peer)

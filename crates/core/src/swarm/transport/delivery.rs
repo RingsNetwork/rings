@@ -18,7 +18,6 @@ use super::PendingConnectionAttempt;
 use super::TransportReadiness;
 use super::TRANSPORT_TIMEOUT_PROFILE;
 use crate::chunk::Chunk;
-use crate::delegation::DelegateeKey;
 use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::dht::StorageSyncDestination;
@@ -34,6 +33,7 @@ use crate::message::MessagePayload;
 use crate::message::MessageRelay;
 use crate::message::MessageSigner;
 use crate::message::Transaction;
+use crate::session::SessionSk;
 use crate::utils::sleep;
 
 pub(super) const DATA_CHANNEL_SEND_ACCEPT_TIMEOUT: Duration = TRANSPORT_TIMEOUT_PROFILE.send_accept;
@@ -400,7 +400,7 @@ pub(super) async fn record_measurement(
 /// A chunk crosses exactly the edge it is sent on and is reassembled by `did`, so its carrier
 /// holds no forwards.
 pub(super) fn frame_chunk(
-    signer: MessageSigner<&DelegateeKey>,
+    signer: MessageSigner<&SessionSk>,
     did: Did,
     chunk: Chunk,
     sequence: u64,

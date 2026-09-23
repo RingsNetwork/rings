@@ -5,8 +5,6 @@
 use num_bigint::BigUint;
 
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
-use crate::delegation::DelegateeKey;
-#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 use crate::dht::entry::inbox::HeldMessage;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
@@ -33,6 +31,8 @@ use crate::message::MessageCategory;
 use crate::message::MessagePayload;
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 use crate::message::MessageSigner;
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+use crate::session::SessionSk;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::Swarm;
@@ -41,18 +41,16 @@ use crate::utils::get_epoch_ms;
 /// Overlay every test fixture signs for and verifies against.
 pub(crate) const TEST_NETWORK_ID: u32 = 0;
 
-/// A delegatee key delegated for `ttl_ms` by a fresh account: with a small `ttl_ms`, a delegation
+/// A session key delegated for `ttl_ms` by a fresh account: with a small `ttl_ms`, a delegation
 /// that expires under a clock advanced past it.
-pub(crate) fn delegatee_key_with_ttl(ttl_ms: u64) -> Result<crate::delegation::DelegateeKey> {
+pub(crate) fn session_sk_with_ttl(ttl_ms: u64) -> Result<crate::session::SessionSk> {
     let account = crate::ecc::SecretKey::random();
-    let delegator_did: Did = account.address().into();
-    let builder = crate::delegation::DelegationBuilder::new(
-        delegator_did.to_string(),
-        "secp256k1".to_string(),
-    )
-    .set_ttl(ttl_ms);
+    let account_did: Did = account.address().into();
+    let builder =
+        crate::session::SessionSkBuilder::new(account_did.to_string(), "secp256k1".to_string())
+            .set_ttl(ttl_ms);
     let sig = account.sign(&builder.unsigned_proof())?.to_vec();
-    builder.set_delegator_signature(sig).build()
+    builder.set_session_sig(sig).build()
 }
 
 /// Retention bound far enough ahead that a fixture stays live for a whole test.
@@ -84,8 +82,8 @@ pub(crate) fn expired(entry: Entry) -> Entry {
 /// A live inbox delta for `destination`: one custom message from a fresh sender, held now by
 /// `holder` inside [`TEST_NETWORK_ID`].
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
-pub(crate) fn held_inbox_for(destination: Did, holder: &DelegateeKey) -> Result<Entry> {
-    let sender = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+pub(crate) fn held_inbox_for(destination: Did, holder: &SessionSk) -> Result<Entry> {
+    let sender = SessionSk::new_with_seckey(&SecretKey::random())?;
     let payload = MessagePayload::new_send(
         Message::custom(b"held")?,
         MessageSigner::new(&sender, TEST_NETWORK_ID),

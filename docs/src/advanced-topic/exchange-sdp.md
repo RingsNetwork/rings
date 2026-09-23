@@ -7,7 +7,7 @@ We will explain how the handshake works by establishing a connection between two
 
 internal_api_port: 50000
 endpoint_url: http://127.0.0.1:50000
-delegatee_key: ./node1-delegatee-key
+session_sk: ./node1-session-sk
 ice_servers: stun://stun.l.google.com:19302
 stabilize_interval: 3
 external_ip: null
@@ -26,7 +26,7 @@ measure_storage:
 
 internal_api_port: 50001
 endpoint_url: http://127.0.0.1:50001
-delegatee_key: ./node2-delegatee-key
+session_sk: ./node2-session-sk
 ice_servers: stun://stun.l.google.com:19302
 stabilize_interval: 3
 external_ip: null

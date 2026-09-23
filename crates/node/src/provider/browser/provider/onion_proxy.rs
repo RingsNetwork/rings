@@ -46,7 +46,7 @@ impl BrowserOnionProxy {
         let proxy_route = self.build_route(target).await?;
         let first_hop = route_first_hop(&proxy_route.route)?;
         let client_return =
-            OnionClientReturn::new(self.processor.delegatee_key().delegatee_public_key());
+            OnionClientReturn::new(self.processor.session_sk().session_public_key());
         let (id, pending_request) = self.runtime.begin_request(
             first_hop,
             proxy_route.route.exit().clone(),

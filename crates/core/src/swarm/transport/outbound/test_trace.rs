@@ -12,13 +12,13 @@ use std::sync::Mutex;
 use super::Did;
 use super::TransferClass;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-use crate::delegation::DelegationDigest;
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-use crate::message::DelegationRef;
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::message::LinkControl;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::message::PerSlot;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+use crate::message::SessionRef;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+use crate::session::SessionDigest;
 
 /// One direction of one link, as the sending end names it: `(this node, next hop)`.
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
@@ -29,7 +29,7 @@ thread_local! {
     static OUTBOUND_SUBMIT_COUNT: Cell<usize> = const { Cell::new(0) };
     /// Per link direction, the digests this thread's nodes put in each slot of a payload frame,
     /// one entry per frame whose slot went by reference.
-    static REFERENCED_SLOTS: RefCell<BTreeMap<LinkDirection, PerSlot<Vec<DelegationDigest>>>> =
+    static REFERENCED_SLOTS: RefCell<BTreeMap<LinkDirection, PerSlot<Vec<SessionDigest>>>> =
         const { RefCell::new(BTreeMap::new()) };
     /// Every link-control frame this thread's nodes dispatched, with the peer it went to.
     static DISPATCHED_LINK_CONTROL: RefCell<Vec<(Did, LinkControl)>> =
@@ -57,8 +57,7 @@ pub(super) fn record_outbound_submit() {
 /// reads them before and after itself learns what happened during it, whatever earlier
 /// scenarios on the same thread, with the same deterministic node keys, did.
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-pub(crate) fn referenced_slots_for_test() -> BTreeMap<LinkDirection, PerSlot<Vec<DelegationDigest>>>
-{
+pub(crate) fn referenced_slots_for_test() -> BTreeMap<LinkDirection, PerSlot<Vec<SessionDigest>>> {
     REFERENCED_SLOTS.with(|slots| slots.borrow().clone())
 }
 
@@ -72,16 +71,16 @@ pub(crate) fn dispatched_link_control_for_test() -> Vec<(Did, LinkControl)> {
 
 /// The digest a slot was sent as, if it went by reference.
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-fn referenced_digest(slot: &DelegationRef<'_>) -> Option<DelegationDigest> {
+fn referenced_digest(slot: &SessionRef<'_>) -> Option<SessionDigest> {
     match slot {
-        DelegationRef::Digest(digest) => Some(*digest),
-        DelegationRef::Inline(_) => None,
+        SessionRef::Digest(digest) => Some(*digest),
+        SessionRef::Inline(_) => None,
     }
 }
 
 /// Count the referenced slots of a frame encoded as `sessions` on `link`.
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-pub(super) fn record_encoded_frame(link: LinkDirection, sessions: &PerSlot<DelegationRef<'_>>) {
+pub(super) fn record_encoded_frame(link: LinkDirection, sessions: &PerSlot<SessionRef<'_>>) {
     let referenced = PerSlot {
         origin: referenced_digest(&sessions.origin),
         hop: referenced_digest(&sessions.hop),

@@ -19,7 +19,7 @@ use crate::prelude::rings_core::dht::DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER
 use crate::prelude::rings_core::ecc::SecretKey;
 use crate::prelude::rings_core::message::OriginQuotaConfig;
 #[cfg(test)]
-use crate::prelude::DelegateeKey;
+use crate::prelude::SessionSk;
 use crate::processor::ProcessorConfig;
 use crate::processor::ProcessorConfigSerialized;
 use crate::seed::SeedPeer;
@@ -171,8 +171,8 @@ pub struct BootstrapConfig {
 pub struct Config {
     /// Rings network identifier this node joins.
     pub network_id: u32,
-    /// Delegation secret key file path.
-    pub delegatee_key: String,
+    /// Session secret key file path.
+    pub session_sk: String,
     /// Internal JSON-RPC API port.
     pub internal_api_port: u16,
     /// External JSON-RPC listener address.
@@ -272,8 +272,8 @@ pub struct Config {
 impl TryFrom<Config> for ProcessorConfigSerialized {
     type Error = Error;
     fn try_from(config: Config) -> Result<Self> {
-        let session_path = expand_home(&config.delegatee_key)?;
-        let delegatee_key = fs::read_to_string(&session_path).map_err(|error| {
+        let session_path = expand_home(&config.session_sk)?;
+        let session_sk = fs::read_to_string(&session_path).map_err(|error| {
             Error::OpenFileError(format!("{}: {error}", session_path.display()))
         })?;
 
@@ -288,7 +288,7 @@ impl TryFrom<Config> for ProcessorConfigSerialized {
             external_address: config.external_ip,
             webrtc_udp_port_min: udp_range.map(|range| range.min()),
             webrtc_udp_port_max: udp_range.map(|range| range.max()),
-            delegatee_key,
+            session_sk,
             stabilize_interval: config.stabilize_interval,
             online_node_heartbeat_interval_secs: config.online_node_heartbeat_interval_secs,
             online_node_ttl_secs: config.online_node_ttl_secs,
@@ -314,13 +314,13 @@ impl TryFrom<Config> for ProcessorConfig {
 }
 
 impl Config {
-    /// Creates a default native-node configuration using the supplied delegatee key path.
-    pub fn new<P>(delegatee_key: P) -> Self
+    /// Creates a default native-node configuration using the supplied session key path.
+    pub fn new<P>(session_sk: P) -> Self
     where P: AsRef<std::path::Path> {
-        let delegatee_key = delegatee_key.as_ref().to_string_lossy().to_string();
+        let session_sk = session_sk.as_ref().to_string_lossy().to_string();
         Self {
             network_id: DEFAULT_NETWORK_ID,
-            delegatee_key,
+            session_sk,
             internal_api_port: DEFAULT_INTERNAL_API_PORT,
             external_api_addr: DEFAULT_EXTERNAL_API_ADDR.to_string(),
             endpoint_url: DEFAULT_ENDPOINT_URL.to_string(),
@@ -417,23 +417,23 @@ impl StorageConfig {
 mod tests {
     use super::*;
 
-    fn dumped_delegatee_key() -> String {
+    fn dumped_session_sk() -> String {
         let key = SecretKey::random();
-        let session = match DelegateeKey::new_with_seckey(&key) {
+        let session = match SessionSk::new_with_seckey(&key) {
             Ok(session) => session,
-            Err(error) => panic!("delegatee key construction failed: {error}"),
+            Err(error) => panic!("session key construction failed: {error}"),
         };
         match session.dump() {
             Ok(dump) => dump,
-            Err(error) => panic!("delegatee key dump failed: {error}"),
+            Err(error) => panic!("session key dump failed: {error}"),
         }
     }
 
-    /// Write a valid delegatee key to an isolated file and return its config plus cleanup path.
+    /// Write a valid session key to an isolated file and return its config plus cleanup path.
     fn config_with_session_file() -> (Config, PathBuf) {
         let path =
             std::env::temp_dir().join(format!("rings-session-{}.yaml", uuid::Uuid::new_v4()));
-        fs::write(&path, dumped_delegatee_key()).expect("write test delegatee key");
+        fs::write(&path, dumped_session_sk()).expect("write test session key");
         (Config::new(&path), path)
     }
 
@@ -441,7 +441,7 @@ mod tests {
     fn test_deserialization_defaults_online_registration_fields() {
         let yaml = r#"
 network_id: 1
-delegatee_key: delegatee_key
+session_sk: session_sk
 internal_api_port: 50000
 external_api_addr: 127.0.0.1:50001
 endpoint_url: http://127.0.0.1:50000
@@ -492,7 +492,7 @@ measure_storage:
     fn test_deserialization_preserves_explicit_disabled_dht_virtual_nodes() {
         let yaml = r#"
 network_id: 1
-delegatee_key: delegatee_key
+session_sk: session_sk
 internal_api_port: 50000
 external_api_addr: 127.0.0.1:50001
 endpoint_url: http://127.0.0.1:50000
@@ -517,7 +517,7 @@ measure_storage:
 
     const CONFIG_WITHOUT_GATEWAY_SECTION: &str = r#"
 network_id: 1
-delegatee_key: delegatee_key
+session_sk: session_sk
 internal_api_port: 50000
 external_api_addr: 127.0.0.1:50001
 endpoint_url: http://127.0.0.1:50000
@@ -565,7 +565,7 @@ gateway:
     fn generated_config_round_trips_with_the_gateway_disabled() {
         let root = std::env::temp_dir().join(format!("rings-config-{}", uuid::Uuid::new_v4()));
         let path = root.join("config.yaml");
-        let written = Config::new("delegatee_key").write_fs(&path);
+        let written = Config::new("session_sk").write_fs(&path);
         let restored = written.and_then(Config::read_fs);
         let _ = fs::remove_file(&path);
         let _ = fs::remove_dir(root);
@@ -583,9 +583,9 @@ gateway:
         assert_eq!(restored.origin_quota, OriginQuotaConfig::default());
     }
 
-    /// The document `rings init` writes for a fresh delegatee key.
+    /// The document `rings init` writes for a fresh session key.
     fn generated_document() -> String {
-        serde_yaml::to_string(&Config::new("delegatee_key")).expect("generated config serializes")
+        serde_yaml::to_string(&Config::new("session_sk")).expect("generated config serializes")
     }
 
     /// `rings init` states the bootstrap section explicitly, with no managed targets.
@@ -594,7 +594,7 @@ gateway:
         let document = generated_document();
         assert!(document.contains("bootstrap:\n  peers: []\n"));
         assert_eq!(
-            Config::new("delegatee_key").bootstrap,
+            Config::new("session_sk").bootstrap,
             BootstrapConfig::default()
         );
     }
@@ -623,7 +623,7 @@ gateway:
 
     #[test]
     fn generated_gateway_section_states_every_field() {
-        let document = match serde_yaml::to_value(Config::new("delegatee_key")) {
+        let document = match serde_yaml::to_value(Config::new("session_sk")) {
             Ok(document) => document,
             Err(error) => panic!("generated config must serialize: {error}"),
         };
@@ -676,7 +676,7 @@ gateway:
 
     #[test]
     fn enabling_the_generated_section_selects_a_runner() {
-        let mut config = Config::new("delegatee_key");
+        let mut config = Config::new("session_sk");
         assert!(config.enabled_gateway().is_none());
 
         if let Some(gateway) = config.gateway.as_mut() {
@@ -734,7 +734,7 @@ gateway:
     /// Raw session dumps are not reinterpreted after file lookup fails.
     #[test]
     fn test_raw_session_dump_is_not_treated_as_a_path_fallback() {
-        let result = ProcessorConfig::try_from(Config::new(dumped_delegatee_key()));
+        let result = ProcessorConfig::try_from(Config::new(dumped_session_sk()));
 
         assert!(matches!(result, Err(Error::OpenFileError(_))));
     }

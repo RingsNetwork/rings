@@ -753,7 +753,6 @@ mod tests {
     use super::SimulationRuntimeGuard;
     use crate::chunk::Chunk;
     use crate::chunk::ChunkMeta;
-    use crate::delegation::DelegateeKey;
     use crate::dht::StorageSyncDestination;
     use crate::dht::StorageSyncPurpose;
     use crate::ecc::SecretKey;
@@ -762,6 +761,7 @@ mod tests {
     use crate::message::MessagePayload;
     use crate::message::MessageSigner;
     use crate::message::SyncEntriesWithSuccessor;
+    use crate::session::SessionSk;
 
     #[tokio::test(start_paused = true)]
     async fn same_seed_replays_clock_uuid_and_delivery_choices() {
@@ -774,9 +774,9 @@ mod tests {
     fn production_wire_classification_distinguishes_control_storage_and_chunks() {
         let guard = SimulationRuntimeGuard::enter(3, 100, ProtectionProfile::ALL_ENABLED)
             .expect("runtime must install");
-        let session = DelegateeKey::new_with_seckey(&SecretKey::random())
-            .expect("test session must be valid");
-        let did = session.delegator_did();
+        let session =
+            SessionSk::new_with_seckey(&SecretKey::random()).expect("test session must be valid");
+        let did = session.account_did();
         let fixtures = [
             (
                 Message::ProbeRequest(test_probe_request(1)),
@@ -822,7 +822,7 @@ mod tests {
         }
         // A link-control frame is the link's own: its class carries no deadline and it names no
         // transaction.
-        let digest = session.delegation().digest().expect("session must digest");
+        let digest = session.session().digest().expect("session must digest");
         let control = crate::message::LinkControl::Request(digest)
             .to_wire()
             .expect("control frame must encode");

@@ -1,7 +1,7 @@
 use rings_core::ecc::SecretKey;
 use rings_core::storage::MemStorage;
 
-use crate::prelude::DelegateeKey;
+use crate::prelude::SessionSk;
 use crate::processor::Processor;
 use crate::processor::ProcessorBuilder;
 use crate::processor::ProcessorConfig;
@@ -12,7 +12,7 @@ const TEST_DHT_FINGER_TABLE_SIZE: usize = 8;
 
 pub async fn prepare_processor() -> Processor {
     let key = SecretKey::random();
-    let sm = DelegateeKey::new_with_seckey(&key).unwrap();
+    let sm = SessionSk::new_with_seckey(&key).unwrap();
 
     let config = serde_yaml::to_string(&ProcessorConfig::new(
         0,

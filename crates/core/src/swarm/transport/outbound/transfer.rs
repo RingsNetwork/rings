@@ -17,12 +17,12 @@ use super::SendCompletionOutcome;
 use super::TransferClass;
 use super::TransferStop;
 use crate::chunk::Chunk;
-use crate::delegation::DelegateeKey;
 use crate::dht::Did;
 use crate::error::Result;
 use crate::lifecycle::StopToken;
 use crate::message::MessagePayload;
 use crate::message::MessageSigner;
+use crate::session::SessionSk;
 
 type TransferResultSender = oneshot::Sender<Result<SendCompletionOutcome>>;
 
@@ -37,14 +37,14 @@ enum FrameSource {
 }
 
 pub(in crate::swarm::transport) struct ChunkedFrameSource {
-    signer: MessageSigner<DelegateeKey>,
+    signer: MessageSigner<SessionSk>,
     chunks: ChunkFrames,
     logical_sequence: u64,
 }
 
 impl ChunkedFrameSource {
     pub(in crate::swarm::transport) fn new(
-        signer: MessageSigner<&DelegateeKey>,
+        signer: MessageSigner<&SessionSk>,
         chunks: ChunkFrames,
         logical_sequence: u64,
     ) -> Self {
@@ -58,7 +58,7 @@ impl ChunkedFrameSource {
 
 impl FrameSource {
     /// The next payload of this source; the worker encodes it for the link just before sending,
-    /// so its delegation slots follow the order frames are accepted in.
+    /// so its session slots follow the order frames are accepted in.
     fn next_frame(&mut self, did: Did) -> Result<Option<(Box<MessagePayload>, &'static str)>> {
         match self {
             Self::Whole(frame) => Ok(frame.take().map(|payload| (payload, "whole_message"))),

@@ -4,7 +4,6 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
 use bytes::Bytes;
-use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
 use rings_core::domain_tag;
 use rings_core::ecc::elgamal::impls::secp256k1::encrypt_aead_with_rng;
@@ -13,6 +12,7 @@ use rings_core::ecc::PublicKey;
 use rings_core::message::DomainTag;
 use rings_core::message::MessageSigner;
 use rings_core::message::SigningDomain;
+use rings_core::session::SessionSk;
 use rings_core::utils::get_epoch_ms;
 use serde::Serialize;
 
@@ -166,7 +166,7 @@ pub(crate) fn route_first_link(route: &OnionRoute) -> Result<OnionLink> {
     route
         .encryption_hops()
         .first()
-        .map(|hop| OnionLink::new(hop.did, hop.delegatee_public_key))
+        .map(|hop| OnionLink::new(hop.did, hop.session_public_key))
         .ok_or_else(|| Error::OnionRouteError(OnionRouteError::RouteHasNoHops))
 }
 
@@ -174,7 +174,7 @@ pub(crate) fn route_first_link(route: &OnionRoute) -> Result<OnionLink> {
 pub async fn send_backward(
     link_sender: &OnionLinkSender,
     scope: &Scope,
-    signer: MessageSigner<&DelegateeKey>,
+    signer: MessageSigner<&SessionSk>,
     path: OnionBackwardPath,
     sequence: OnionBackwardSequence,
     payload: OnionCircuitPayload,
@@ -185,19 +185,19 @@ pub async fn send_backward(
             path.client.return_id,
             sequence,
             payload,
-            path.client.delegatee_public_key,
+            path.client.session_public_key,
             signer,
         )?,
     };
     let payload = seal_message(
         &OnionWireMessage::Backward(frame),
-        path.return_delegatee_public_key,
+        path.return_session_public_key,
         None,
     )?;
     link_sender
         .send_sealed(
             scope.clone(),
-            OnionLink::new(path.return_peer, path.return_delegatee_public_key),
+            OnionLink::new(path.return_peer, path.return_session_public_key),
             payload,
         )
         .await
@@ -245,23 +245,23 @@ fn build_forward_layers_with_ids(
     let exit_circuit_id = *circuit_ids
         .last()
         .ok_or_else(|| Error::OnionRouteError(OnionRouteError::RouteHasNoHops))?;
-    let exit_return_delegatee_public_key = hops
+    let exit_return_session_public_key = hops
         .iter()
         .rev()
         .nth(1)
-        .map_or(client.delegatee_public_key, |hop| hop.delegatee_public_key);
+        .map_or(client.session_public_key, |hop| hop.session_public_key);
     let mut layer = encrypt_forward_layer(
         exit_circuit_id,
         OnionForwardLayer::Exit {
             process_epoch,
             client,
-            return_delegatee_public_key: exit_return_delegatee_public_key,
+            return_session_public_key: exit_return_session_public_key,
             expires_at_ms,
             forward_nonce: OnionForwardNonce::random(),
             forward_sequence: sequence,
             payload,
         },
-        exit.delegatee_public_key,
+        exit.session_public_key,
     )?;
 
     for (index, hop) in hops.iter().copied().enumerate().rev().skip(1) {
@@ -283,17 +283,17 @@ fn build_forward_layers_with_ids(
             OnionForwardLayer::Relay {
                 next_hop: next_hop.did,
                 next_circuit_id,
-                next_delegatee_public_key: next_hop.delegatee_public_key,
-                return_delegatee_public_key: if index == 0 {
-                    client.delegatee_public_key
+                next_session_public_key: next_hop.session_public_key,
+                return_session_public_key: if index == 0 {
+                    client.session_public_key
                 } else {
                     hops.get(index.saturating_sub(1))
-                        .map(|previous| previous.delegatee_public_key)
+                        .map(|previous| previous.session_public_key)
                         .ok_or_else(|| Error::OnionRouteError(OnionRouteError::MissingNextHop))?
                 },
                 inner: layer,
             },
-            hop.delegatee_public_key,
+            hop.session_public_key,
         )?;
     }
     Ok(layer)
@@ -358,12 +358,12 @@ fn encrypt_forward_layer(
 }
 
 pub(super) fn decrypt_forward_layer(
-    delegatee_key: &DelegateeKey,
+    session_sk: &SessionSk,
     circuit_id: OnionCircuitId,
     sealed: &AeadCiphertext,
 ) -> Result<OnionForwardLayer> {
     let aad = onion_aead_context(OnionAeadDirection::Forward, circuit_id)?;
-    let plaintext = delegatee_key
+    let plaintext = session_sk
         .decrypt_elgamal_aead(sealed, &aad)
         .map_err(Error::CoreError)?;
     rings_codec::deserialize(&plaintext).map_err(|_| Error::DecodeError)
@@ -374,7 +374,7 @@ pub(super) fn encrypt_client_payload(
     return_id: OnionReturnId,
     payload: OnionCircuitPayload,
     recipient: PublicKey<33>,
-    signer: MessageSigner<&DelegateeKey>,
+    signer: MessageSigner<&SessionSk>,
 ) -> Result<AeadCiphertext> {
     encrypt_client_payload_at_sequence(
         return_id,
@@ -390,25 +390,25 @@ pub(super) fn encrypt_client_payload_at_sequence(
     sequence: OnionBackwardSequence,
     payload: OnionCircuitPayload,
     recipient: PublicKey<33>,
-    signer: MessageSigner<&DelegateeKey>,
+    signer: MessageSigner<&SessionSk>,
 ) -> Result<AeadCiphertext> {
     let authenticated =
         OnionAuthenticatedPayload::new_signed_at_sequence(return_id, sequence, payload, signer)?;
     let plaintext = rings_codec::serialize(&authenticated).map_err(|_| Error::EncodeError)?;
     // The outer hop cell authenticates the edge-local circuit and direction. This inner payload
     // deliberately remains stable while relays rewrite edge ids; its signed transcript binds the
-    // client-only return id, nonce, monotonic sequence, exit delegatee key, and payload bytes.
+    // client-only return id, nonce, monotonic sequence, exit session key, and payload bytes.
     let aad = backward_aead_context()?;
     let mut rng = rand::thread_rng();
     encrypt_aead_with_rng(&plaintext, &aad, recipient, &mut rng).map_err(Error::CoreError)
 }
 
 pub(super) fn decrypt_client_payload(
-    delegatee_key: &DelegateeKey,
+    session_sk: &SessionSk,
     sealed: &AeadCiphertext,
 ) -> Result<OnionAuthenticatedPayload> {
     let aad = backward_aead_context()?;
-    let plaintext = delegatee_key
+    let plaintext = session_sk
         .decrypt_elgamal_aead(sealed, &aad)
         .map_err(Error::CoreError)?;
     rings_codec::deserialize(&plaintext).map_err(|_| Error::DecodeError)
@@ -419,7 +419,7 @@ impl OnionAuthenticatedPayload {
     pub fn new_signed(
         return_id: OnionReturnId,
         payload: OnionCircuitPayload,
-        signer: MessageSigner<&DelegateeKey>,
+        signer: MessageSigner<&SessionSk>,
     ) -> Result<Self> {
         Self::new_signed_at_sequence(return_id, OnionBackwardSequence::FIRST, payload, signer)
     }
@@ -429,7 +429,7 @@ impl OnionAuthenticatedPayload {
         return_id: OnionReturnId,
         sequence: OnionBackwardSequence,
         payload: OnionCircuitPayload,
-        signer: MessageSigner<&DelegateeKey>,
+        signer: MessageSigner<&SessionSk>,
     ) -> Result<Self> {
         let nonce = OnionBackwardNonce::random();
         let authentication = signer
@@ -439,7 +439,7 @@ impl OnionAuthenticatedPayload {
                     return_id,
                     nonce,
                     sequence,
-                    signer.delegatee_public_key(),
+                    signer.session_public_key(),
                     &payload,
                 )?,
             )
@@ -472,21 +472,21 @@ impl OnionAuthenticatedPayload {
                 OnionRouteError::BackwardReturnIdMismatch,
             ));
         }
-        let signer = &self.authentication.delegation;
-        if signer.delegator_did() != expected_exit.did {
+        let signer = &self.authentication.session;
+        if signer.account_did() != expected_exit.did {
             return Err(Error::OnionRouteError(
                 OnionRouteError::BackwardSignerMismatch,
             ));
         }
         let public_key = signer
-            .delegator_verification_pubkey()
+            .account_verification_pubkey()
             .map_err(Error::CoreError)?;
         if public_key != expected_exit.public_key {
             return Err(Error::OnionRouteError(
                 OnionRouteError::BackwardAccountKeyMismatch,
             ));
         }
-        if signer.delegatee_did() != Did::from(expected_exit.delegatee_public_key.address()) {
+        if signer.session_did() != Did::from(expected_exit.session_public_key.address()) {
             return Err(Error::OnionRouteError(
                 OnionRouteError::BackwardSessionKeyMismatch,
             ));
@@ -495,7 +495,7 @@ impl OnionAuthenticatedPayload {
             return_id,
             self.nonce,
             self.sequence,
-            expected_exit.delegatee_public_key,
+            expected_exit.session_public_key,
             &self.payload,
         )?;
         let domain = SigningDomain::new(ONION_BACKWARD_PAYLOAD_DOMAIN_TAG, network_id);
@@ -527,7 +527,7 @@ struct OnionBackwardAuthenticationData<'a> {
     return_id: OnionReturnId,
     nonce: OnionBackwardNonce,
     sequence: OnionBackwardSequence,
-    exit_delegatee_public_key: PublicKey<33>,
+    exit_session_public_key: PublicKey<33>,
     payload: &'a OnionCircuitPayload,
 }
 
@@ -561,7 +561,7 @@ fn backward_payload_authentication_data(
     return_id: OnionReturnId,
     nonce: OnionBackwardNonce,
     sequence: OnionBackwardSequence,
-    exit_delegatee_public_key: PublicKey<33>,
+    exit_session_public_key: PublicKey<33>,
     payload: &OnionCircuitPayload,
 ) -> Result<Vec<u8>> {
     rings_codec::serialize(&OnionBackwardAuthenticationData {
@@ -570,7 +570,7 @@ fn backward_payload_authentication_data(
         return_id,
         nonce,
         sequence,
-        exit_delegatee_public_key,
+        exit_session_public_key,
         payload,
     })
     .map_err(|_| Error::EncodeError)

@@ -18,7 +18,7 @@
 //!   every frame is: a send that became irrevocable and timed out retires the connection
 //!   through the transport's termination path, never by dropping the send.
 //! - Bound law: nothing here reserves lane or memory capacity. Each inbound frame causes at
-//!   most two of these frames (a confirmation or question per delegation slot of a frame this
+//!   most two of these frames (a confirmation or question per session slot of a frame this
 //!   end verified, held, or dropped for want of room, or one answer per question), and at
 //!   most `LINK_CONTROL_IN_FLIGHT_CAPACITY` of them, twice the raw frames the peer may have in
 //!   flight at this end's transport
@@ -41,11 +41,11 @@ use super::outbound::LinkControlPermit;
 use super::AdmittedConnection;
 use super::PendingConnectionAttempt;
 use super::SwarmTransport;
-use crate::delegation::DelegationDigest;
 use crate::error::Error;
 use crate::error::Result;
 use crate::lifecycle::StopToken;
 use crate::message::LinkControl;
+use crate::session::SessionDigest;
 use crate::swarm::detached::spawn_detached;
 use crate::utils::get_epoch_ms;
 
@@ -138,7 +138,7 @@ impl SwarmTransport {
     pub(crate) fn acknowledge_session(
         &self,
         attempt: PendingConnectionAttempt,
-        digest: DelegationDigest,
+        digest: SessionDigest,
     ) {
         self.outbound_schedulers
             .acknowledge_session(attempt.peer(), attempt.generation(), digest);
@@ -149,7 +149,7 @@ impl SwarmTransport {
     pub(crate) async fn answer_session_request(
         &self,
         attempt: PendingConnectionAttempt,
-        digest: DelegationDigest,
+        digest: SessionDigest,
     ) -> Result<()> {
         let answer = self.outbound_schedulers.answer_session_request(
             attempt.peer(),

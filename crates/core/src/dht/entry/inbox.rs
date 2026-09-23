@@ -49,7 +49,6 @@ use super::EntryDot;
 use super::EntryKind;
 use super::EntryOperation;
 use crate::consts::TS_OFFSET_TOLERANCE_MS;
-use crate::delegation::DelegateeKey;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
@@ -62,6 +61,7 @@ use crate::message::MessagePayload;
 use crate::message::MessageSigner;
 use crate::message::MessageVerification;
 use crate::message::MessageVerificationExt;
+use crate::session::SessionSk;
 
 /// The message family of a holder's signature over a held payload.
 pub(crate) const HELD_MESSAGE_DOMAIN_TAG: DomainTag =
@@ -121,7 +121,7 @@ impl HeldMessage {
     /// Hold `payload` under `holder`'s authority at the instant `held_at_ms`.
     pub(crate) fn hold(
         payload: MessagePayload,
-        holder: MessageSigner<&DelegateeKey>,
+        holder: MessageSigner<&SessionSk>,
         held_at_ms: u128,
     ) -> Result<Self> {
         let data = rings_codec::serialize(&payload).map_err(Error::CodecSerialize)?;

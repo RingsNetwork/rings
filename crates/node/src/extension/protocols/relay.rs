@@ -144,7 +144,7 @@ pub enum RelayEvent<T> {
 pub enum RelayEffect<T> {
     /// Open a local backend session to `target` and relay it (peer opened a session).
     Connect {
-        /// Owner-scoped delegatee key.
+        /// Owner-scoped session key.
         key: SessionKey,
         /// Local target to dial.
         target: T,
@@ -174,7 +174,7 @@ pub enum RelayEffect<T> {
     SendClose {
         /// Peer to reply to.
         to: Did,
-        /// Delegation id to close.
+        /// Session id to close.
         session: SessionId,
         /// Whether *we* opened the session (false: the peer did).
         from_opener: bool,
@@ -185,7 +185,7 @@ pub enum RelayEffect<T> {
     OpenAccepted {
         /// Engine-local handle for the pending connection/flow.
         token: u64,
-        /// The delegatee key minted by the pure step.
+        /// The session key minted by the pure step.
         key: SessionKey,
         /// The remote service to open.
         service: String,

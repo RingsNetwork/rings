@@ -119,7 +119,6 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::delegation::DelegateeKey;
     use crate::ecc::SecretKey;
     use crate::error::Error;
     use crate::message::Message;
@@ -127,6 +126,7 @@ mod tests {
     use crate::message::OriginQuotaConfig;
     use crate::message::OriginQuotaError;
     use crate::message::OriginQuotaLaneConfig;
+    use crate::session::SessionSk;
     use crate::storage::MemStorage;
     use crate::swarm::SwarmBuilder;
     use crate::tests::TEST_NETWORK_ID;
@@ -176,7 +176,7 @@ mod tests {
         destination: crate::dht::Did,
         sequence: u64,
     ) -> crate::error::Result<MessagePayload> {
-        let sender = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+        let sender = SessionSk::new_with_seckey(&SecretKey::random())?;
         MessagePayload::new_send_with_sequence(
             Message::custom(b"replay boundary")?,
             MessageSigner::new(&sender, TEST_NETWORK_ID),
@@ -187,7 +187,7 @@ mod tests {
     }
 
     fn payload_from(
-        sender: &DelegateeKey,
+        sender: &SessionSk,
         destination: crate::dht::Did,
         sequence: u64,
     ) -> crate::error::Result<MessagePayload> {
@@ -202,7 +202,7 @@ mod tests {
 
     #[tokio::test]
     async fn final_destination_persists_before_validation_and_rejects_duplicate_dispatch() {
-        let local = DelegateeKey::new_with_seckey(&SecretKey::random()).expect("local session");
+        let local = SessionSk::new_with_seckey(&SecretKey::random()).expect("local session");
         let callback = Arc::new(ObservedCallback::default());
         let swarm = SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local)
             .callback(callback.clone())
@@ -221,8 +221,8 @@ mod tests {
 
     #[tokio::test]
     async fn application_validation_failure_still_consumes_committed_quota() {
-        let local = DelegateeKey::new_with_seckey(&SecretKey::random()).expect("local session");
-        let sender = DelegateeKey::new_with_seckey(&SecretKey::random()).expect("sender session");
+        let local = SessionSk::new_with_seckey(&SecretKey::random()).expect("local session");
+        let sender = SessionSk::new_with_seckey(&SecretKey::random()).expect("sender session");
         let callback = Arc::new(RejectingValidationCallback::default());
         let lane =
             OriginQuotaLaneConfig::new(1, 1, 1024, 1024, 8).expect("test quota configuration");
@@ -247,7 +247,7 @@ mod tests {
 
     #[tokio::test]
     async fn intermediate_relay_does_not_create_origin_replay_state() {
-        let local = DelegateeKey::new_with_seckey(&SecretKey::random()).expect("local session");
+        let local = SessionSk::new_with_seckey(&SecretKey::random()).expect("local session");
         let callback = Arc::new(ObservedCallback::default());
         let swarm = SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local)
             .callback(callback.clone())

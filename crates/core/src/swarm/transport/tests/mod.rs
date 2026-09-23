@@ -480,9 +480,9 @@ fn transport_with_key_measure_and_reassembly_limits(
     measure: MeasureImpl,
     reassembly_limits: ReassemblyLimits,
 ) -> Result<SwarmTransport> {
-    let delegatee_key = DelegateeKey::new_with_seckey(key)?;
+    let session_sk = SessionSk::new_with_seckey(key)?;
     let dht = Arc::new(PeerRing::new_with_storage_and_finger_table_size(
-        delegatee_key.delegator_did(),
+        session_sk.account_did(),
         3,
         Box::new(MemStorage::new()),
         DEFAULT_FINGER_TABLE_SIZE,
@@ -490,7 +490,7 @@ fn transport_with_key_measure_and_reassembly_limits(
     Ok(SwarmTransport::new(SwarmTransportParts {
         network_id: 0,
         webrtc: SwarmWebrtcConfig::new("".to_string(), None, None),
-        delegatee_key,
+        session_sk,
         dht,
         measure: Some(measure),
         transaction_replay: Arc::new(crate::message::TransactionReplay::new(Box::new(
@@ -551,8 +551,8 @@ pub(super) async fn open_dummy_data_channel_before_ice_connected(
 #[test]
 fn test_swarm_builder_uses_chord_virtual_node_default() -> Result<()> {
     let key = SecretKey::random();
-    let delegatee_key = DelegateeKey::new_with_seckey(&key)?;
-    let swarm = SwarmBuilder::new(7, "", Box::new(MemStorage::new()), delegatee_key).build();
+    let session_sk = SessionSk::new_with_seckey(&key)?;
+    let swarm = SwarmBuilder::new(7, "", Box::new(MemStorage::new()), session_sk).build();
 
     assert_eq!(
         swarm.dht_virtual_nodes(),
@@ -569,9 +569,9 @@ fn test_swarm_builder_uses_chord_virtual_node_default() -> Result<()> {
 #[test]
 fn test_swarm_builder_normalizes_virtual_nodes_before_protocol_advertisement() -> Result<()> {
     let key = SecretKey::random();
-    let delegatee_key = DelegateeKey::new_with_seckey(&key)?;
+    let session_sk = SessionSk::new_with_seckey(&key)?;
     let requested = MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER.saturating_add(1);
-    let swarm = SwarmBuilder::new(7, "", Box::new(MemStorage::new()), delegatee_key)
+    let swarm = SwarmBuilder::new(7, "", Box::new(MemStorage::new()), session_sk)
         .dht_virtual_nodes(requested)
         .build();
 
@@ -653,7 +653,7 @@ async fn test_data_channel_open_admits_successor_before_ice_connected() -> Resul
 #[cfg(feature = "dummy")]
 struct PendingPeer {
     peer: Did,
-    session: DelegateeKey,
+    session: SessionSk,
     callback: InnerSwarmCallback,
 }
 
@@ -687,7 +687,7 @@ async fn pending_peer_with(
     clock: Option<Arc<Mutex<u128>>>,
 ) -> Result<PendingPeer> {
     let peer: Did = peer_key.address().into();
-    let session = DelegateeKey::new_with_seckey(&peer_key)?;
+    let session = SessionSk::new_with_seckey(&peer_key)?;
     let offer_callback = InnerSwarmCallback::new(Arc::clone(transport), app_callback.clone());
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, offer_callback)
@@ -834,7 +834,7 @@ async fn test_held_messages_are_discarded_when_the_pending_connection_is_cancell
 
     let stranger_key = SecretKey::random();
     let stranger: Did = stranger_key.address().into();
-    let stranger_session = DelegateeKey::new_with_seckey(&stranger_key)?;
+    let stranger_session = SessionSk::new_with_seckey(&stranger_key)?;
     let intrusion = MessagePayload::new_send(
         Message::custom(b"stranger")?,
         MessageSigner::new(&stranger_session, TEST_NETWORK_ID),
@@ -862,7 +862,7 @@ async fn test_nested_reassembled_chunk_is_rejected_without_recursive_callback_en
     let transport = Arc::new(transport_with_measure(measure.clone())?);
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();
-    let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
+    let peer_session = SessionSk::new_with_seckey(&peer_key)?;
     let app_callback = Arc::new(CountingSwarmCallback::default());
     let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
     let (attempt, _offer) = transport
@@ -965,7 +965,7 @@ async fn test_invalid_inbound_log_omits_transaction_data() -> Result<()> {
     ))?);
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();
-    let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
+    let peer_session = SessionSk::new_with_seckey(&peer_key)?;
     let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback));
     let mut payload = MessagePayload::new_send(
         Message::custom(PRIVATE_MARKER.as_bytes())?,

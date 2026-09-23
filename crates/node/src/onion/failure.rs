@@ -82,7 +82,7 @@ pub enum OnionRouteError {
     BackwardSignerMismatch,
     /// A backward payload signer account key is not the selected exit key.
     BackwardAccountKeyMismatch,
-    /// A backward payload delegatee key is not the selected exit delegatee key.
+    /// A backward payload session key is not the selected exit session key.
     BackwardSessionKeyMismatch,
     /// A backward payload signature or freshness proof is invalid.
     InvalidBackwardSignature,
@@ -202,7 +202,7 @@ impl fmt::Display for OnionRouteError {
                 f.write_str("onion backward payload account key is not the selected exit")
             }
             Self::BackwardSessionKeyMismatch => {
-                f.write_str("onion backward payload delegatee key is not the selected exit")
+                f.write_str("onion backward payload session key is not the selected exit")
             }
             Self::InvalidBackwardSignature => {
                 f.write_str("invalid onion backward payload signature")

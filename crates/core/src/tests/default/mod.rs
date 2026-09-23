@@ -10,7 +10,6 @@ use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tokio::time::Duration;
 
-use crate::delegation::DelegateeKey;
 use crate::dht::entry::Entry;
 use crate::dht::Did;
 use crate::dht::PeerRing;
@@ -21,6 +20,7 @@ use crate::measure::MeasureImpl;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
+use crate::session::SessionSk;
 use crate::storage::MemStorage;
 use crate::swarm::callback::SwarmCallback;
 use crate::swarm::Swarm;

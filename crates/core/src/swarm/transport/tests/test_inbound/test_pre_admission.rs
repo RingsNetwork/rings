@@ -48,7 +48,7 @@ async fn test_pre_admission_drain_runs_after_connected_event_error() -> Result<(
     ))?);
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();
-    let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
+    let peer_session = SessionSk::new_with_seckey(&peer_key)?;
     let app_callback = Arc::new(FailingConnectedSwarmCallback::default());
     let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
     let (attempt, _offer) = transport
@@ -100,7 +100,7 @@ async fn test_retired_frame_queued_on_lane_is_not_delivered() -> Result<()> {
     let transport = Arc::new(transport_with_measure(measure.clone())?);
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();
-    let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
+    let peer_session = SessionSk::new_with_seckey(&peer_key)?;
     let app_callback = Arc::new(CountingSwarmCallback::default());
     let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
     let (attempt, _offer) = transport
