@@ -10,7 +10,10 @@ use crate::dht::Did;
 use crate::ecc::keccak256;
 use crate::ecc::keys::AccountVerifier;
 use crate::ecc::signers;
+use crate::ecc::Point;
 use crate::ecc::PublicKey;
+use crate::ecc::Scalar;
+use crate::ecc::Secp256k1;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
@@ -96,6 +99,17 @@ impl DelegateeKey {
         aad: &[u8],
     ) -> Result<Vec<u8>> {
         crate::ecc::elgamal::impls::secp256k1::decrypt_aead(sealed, aad, &self.delegatee_secret_key)
+    }
+
+    /// The Diffie–Hellman action of the delegatee secret `d` on a group element: `P ↦ d·P`.
+    ///
+    /// Law: for every scalar `x`, `diffie_hellman(x·G) = x·(d·G) = x·pk`, so a sender holding
+    /// `x` and [`Self::delegatee_public_key`] derives the same element; this is the key
+    /// transport of a Sphinx header (#834 D6″). The action is k256's constant-time scalar
+    /// multiplication; validating `P` (on the curve, not the identity) is the caller's
+    /// contract, since the action is total on the group.
+    pub fn diffie_hellman(&self, point: Point<Secp256k1>) -> Point<Secp256k1> {
+        point * Scalar::new(self.delegatee_secret_key.secp256k1_scalar())
     }
 
     /// Sign a message with this delegatee key.

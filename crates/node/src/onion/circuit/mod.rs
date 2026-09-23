@@ -217,6 +217,11 @@ impl OnionForwardNonce {
         Self(bytes)
     }
 
+    /// Return the nonce bytes, the replay nonce `ν` of the uniform layer (#834 D6″).
+    pub const fn to_bytes(self) -> [u8; 16] {
+        self.0
+    }
+
     /// Generate a random forward-payload nonce.
     pub fn random() -> Self {
         Self(rand::random())

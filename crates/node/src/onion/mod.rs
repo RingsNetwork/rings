@@ -60,6 +60,7 @@ pub mod proxy;
 pub(crate) mod replay;
 pub mod route;
 pub mod signature;
+pub mod sphinx;
 pub mod target;
 #[cfg(rings_native)]
 pub mod tcp;
@@ -98,6 +99,11 @@ impl OnionExitEpoch {
     /// Build an exit epoch from explicit bytes.
     pub const fn new(bytes: [u8; 16]) -> Self {
         Self(bytes)
+    }
+
+    /// Return the epoch bytes, the `e` field of the uniform layer (#834 D6″).
+    pub const fn to_bytes(self) -> [u8; 16] {
+        self.0
     }
 
     /// Generate a fresh exit epoch for one process lifetime.

@@ -24,6 +24,9 @@
 //!   carry, so every exit able to interpret `tcp` can interpret `https`, while a browser exit, which
 //!   has `fetch` but no sockets, interprets `https` alone.
 //!
+//! - **Code.** Each symbol has a one-byte code, the `f` field of the uniform layer (#834 D6″). The
+//!   code map `Σ ↪ u8` is injective, so the layer's `f` byte names exactly one symbol.
+//!
 //! Width and latency classes `W`, `L` of the world-facing symbols are not protocol data yet: their
 //! results return along the reversed path, never through a fixed-width carry slot.
 
@@ -49,18 +52,28 @@ pub enum OnionSymbolPosition {
 #[derive(Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct OnionSymbolSpec {
     name: &'static str,
+    code: u8,
     position: OnionSymbolPosition,
 }
 
 impl OnionSymbolSpec {
-    /// Build one table entry from its canonical name and position.
-    const fn new(name: &'static str, position: OnionSymbolPosition) -> Self {
-        Self { name, position }
+    /// Build one table entry from its canonical name, layer code and position.
+    const fn new(name: &'static str, code: u8, position: OnionSymbolPosition) -> Self {
+        Self {
+            name,
+            code,
+            position,
+        }
     }
 
     /// Return the canonical symbol name.
     pub const fn name(&self) -> &'static str {
         self.name
+    }
+
+    /// Return the one-byte code of this symbol in the uniform layer's `f` field (#834 D6″).
+    pub const fn code(&self) -> u8 {
+        self.code
     }
 
     /// Return the pipeline position of this symbol.
@@ -79,9 +92,9 @@ pub struct OnionSignature {
 
 /// The onion signature of this node generation.
 pub static ONION_SIGNATURE: OnionSignature = OnionSignature {
-    relay: OnionSymbolSpec::new("relay", OnionSymbolPosition::Intermediate),
-    tcp: OnionSymbolSpec::new("tcp", OnionSymbolPosition::WorldFacing),
-    https: OnionSymbolSpec::new("https", OnionSymbolPosition::WorldFacing),
+    relay: OnionSymbolSpec::new("relay", 0, OnionSymbolPosition::Intermediate),
+    tcp: OnionSymbolSpec::new("tcp", 1, OnionSymbolPosition::WorldFacing),
+    https: OnionSymbolSpec::new("https", 2, OnionSymbolPosition::WorldFacing),
 };
 
 impl OnionSignature {
@@ -187,6 +200,8 @@ impl From<OnionServiceName> for String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::OnionServiceName;
     use super::OnionSymbolPosition;
     use super::ONION_SIGNATURE;
@@ -236,5 +251,17 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(intermediate, vec![ONION_SIGNATURE.relay()]);
+    }
+
+    /// The code map `Σ ↪ u8` is injective: no two symbols share a layer code.
+    #[test]
+    fn test_symbol_codes_are_injective() {
+        let codes = ONION_SIGNATURE
+            .symbols()
+            .into_iter()
+            .map(|spec| spec.code())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(codes.len(), ONION_SIGNATURE.symbols().len());
     }
 }
