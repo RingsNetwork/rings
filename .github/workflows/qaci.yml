@@ -216,6 +216,9 @@ jobs:
       - name: Run clippy for runtime wasm
         run: cargo clippy -p rings-runtime --no-default-features --features browser --no-deps --target=wasm32-unknown-unknown --tests -- -D warnings
 
+      - name: Run clippy for aez wasm
+        run: cargo clippy -p rings-aez --no-deps --target=wasm32-unknown-unknown --tests -- -D warnings
+
       - name: Run clippy for transport wasm
         run: cargo clippy -p rings-transport --features web-sys-webrtc --no-deps --no-default-features --target=wasm32-unknown-unknown --tests -- -D warnings
 
@@ -307,6 +310,12 @@ jobs:
         uses: coactions/setup-xvfb@b6b4fcfb9f5a895edadc3bc76318fae0ac17c8b3 # v1
         with:
           run: cargo test -p rings-runtime --release --target=wasm32-unknown-unknown --no-default-features --features browser
+          working-directory: ./
+
+      - name: Run aez browser tests
+        uses: coactions/setup-xvfb@b6b4fcfb9f5a895edadc3bc76318fae0ac17c8b3 # v1
+        with:
+          run: cargo test -p rings-aez --release --target=wasm32-unknown-unknown
           working-directory: ./
 
       - name: Run transport browser tests

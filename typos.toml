@@ -1,5 +1,10 @@
 [files]
-extend-exclude = ["crates/gateway/vendor/netlink-packet-core/**"]
+extend-exclude = [
+    "crates/gateway/vendor/netlink-packet-core/**",
+    # Hex known-answer vectors and the CAESAR `crypto_aead` prototypes they are generated through.
+    "crates/aez/vectors/reference.txt",
+    "crates/aez/vectors/crypto_aead.h",
+]
 
 [type.rust]
 extend-ignore-re = ["[wW]s", "WS"]
