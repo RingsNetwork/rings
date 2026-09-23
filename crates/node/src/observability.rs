@@ -1,6 +1,7 @@
 //! Versioned, bounded operator observability for a running node.
 //!
-//! [`Observability`] is the synchronous adapter installed at the core swarm boundary. It keeps
+//! [`Observability`](crate::observability::Observability) is the synchronous adapter installed at
+//! the core swarm boundary. It keeps
 //! process-lifetime counters, a fixed-size recent-event ring, and bounded DHT lookup correlation
 //! state. The native HTTP layer combines that state with live session, mailbox, peer-rating, and
 //! overlay snapshots in the authenticated `/status?view=observability` JSON response. No payload,

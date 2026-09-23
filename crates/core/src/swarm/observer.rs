@@ -1,9 +1,10 @@
 //! Bounded-observability boundary for swarm activity.
 //!
-//! The core reports semantic events through [`SwarmObserver`] without choosing a storage,
-//! retention, or export format. Implementations must keep callbacks synchronous and bounded:
-//! transport delivery and inbound dispatch invoke them on protocol paths that must not wait for
-//! operator telemetry.
+//! The core reports semantic events through
+//! [`SwarmObserver`](crate::swarm::observer::SwarmObserver) without choosing a storage, retention,
+//! or export format. Implementations must keep callbacks synchronous and bounded: transport
+//! delivery and inbound dispatch invoke them on protocol paths that must not wait for operator
+//! telemetry.
 
 use std::sync::Arc;
 
