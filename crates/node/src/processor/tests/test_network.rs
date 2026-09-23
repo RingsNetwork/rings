@@ -168,14 +168,14 @@ async fn test_provider_wrappers_share_listener_lifecycle_lock() {
     let cloned_stop = StopSource::new();
     cloned_stop.request_stop();
     let cloned_token = cloned_stop.token();
-    let cloned = tokio::spawn(async move {
+    let mut cloned = tokio::spawn(async move {
         cloned_provider.listen_with(cloned_token).await;
     });
 
     let independent_stop = StopSource::new();
     independent_stop.request_stop();
     let independent_token = independent_stop.token();
-    let independent = tokio::spawn(async move {
+    let mut independent = tokio::spawn(async move {
         independent_provider.listen_with(independent_token).await;
     });
 
