@@ -12,6 +12,7 @@ use super::client::OnionHttpsOutcome;
 use super::OnionCircuitId;
 use crate::error::Error;
 use crate::error::Result;
+use crate::onion::OnionRouteError;
 
 type PendingResponse = oneshot::Receiver<OnionHttpsOutcome>;
 
@@ -50,9 +51,11 @@ impl PendingOnionHttpsRequest {
         futures::pin_mut!(deadline);
         match futures::future::select(self, deadline).await {
             Either::Left((Ok(outcome), _)) => outcome,
-            Either::Left((Err(oneshot::Canceled), _)) => Err(Error::HttpRequestError(
-                "onion HTTPS proxy response channel closed".to_string(),
-            )),
+            // This guard keeps the client alive, so the sender closes only when a claim is dropped
+            // unresolved; every caller resolves its claim synchronously right after taking it.
+            Either::Left((Err(oneshot::Canceled), _)) => {
+                Err(Error::OnionRouteError(OnionRouteError::HttpsResponseClosed))
+            }
             Either::Right((Ok(()), _)) => Err(Error::OnionProxyRequestTimedOut),
             Either::Right((Err(error), _)) => Err(error),
         }

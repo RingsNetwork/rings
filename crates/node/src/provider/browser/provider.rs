@@ -46,7 +46,7 @@ use crate::onion::directory::OnionDirectoryReader;
 use crate::onion::https::BrowserOnionCircuitHandler;
 use crate::onion::https::OnionHttpsClient;
 use crate::onion::https::OnionHttpsClientRequest;
-use crate::onion::https::OnionHttpsClientResponse;
+use crate::onion::https::OnionHttpsResponse;
 use crate::onion::https::OnionHttpsRuntime;
 use crate::onion::proxy::OnionProxyConfig;
 use crate::onion::proxy::OnionProxyRoute;
@@ -109,7 +109,7 @@ pub struct BrowserOnionProxy {
 /// Typed response from a cancellable browser onion HTTPS request.
 pub struct BrowserOnionProxyResponse {
     /// HTTP response returned by the selected onion exit.
-    pub response: OnionHttpsClientResponse,
+    pub response: OnionHttpsResponse,
     /// Onion route used for the request.
     pub route: OnionProxyRoute,
 }

@@ -2,7 +2,7 @@ use super::build_browser_onion_proxy_route;
 use super::BrowserOnionProxy;
 use super::BrowserOnionProxyResponse;
 use crate::error::Result as NodeResult;
-use crate::onion::https::client_request_from_url;
+use crate::onion::https::OnionHttpsCall;
 use crate::onion::https::OnionHttpsClientRequest;
 use crate::onion::proxy::OnionProxyRoute;
 use crate::onion::proxy::OnionProxyTarget;
@@ -33,11 +33,11 @@ impl BrowserOnionProxy {
         url: &str,
         request: OnionHttpsClientRequest,
     ) -> NodeResult<BrowserOnionProxyResponse> {
-        let (target, request) = client_request_from_url(url, request)?;
+        let (target, call) = OnionHttpsCall::from_url(url, request)?;
         let route = self.build_route(target).await?;
         let response = self
             .client
-            .request(self.scope.clone(), &route, request)
+            .request(self.scope.clone(), &route, call)
             .await?;
         Ok(BrowserOnionProxyResponse { response, route })
     }

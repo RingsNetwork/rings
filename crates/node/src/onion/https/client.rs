@@ -5,21 +5,24 @@
 //! independent:
 //!
 //! ```text
-//! url ──client_request_from_url──▶ (target, request)
-//!     ──route(target)──────────▶ OnionProxyRoute                      [caller]
-//!     ──begin──────────────────▶ OnionHttpsFlight {link, cell, guard} [pending table]
-//!     ──send_sealed────────────▶ first hop                            [link effect]
-//!     ──within(deadline)───────▶ response | exit failure | timeout    [timer effect]
+//! url ──OnionHttpsCall::from_url──▶ (target, call)
+//!     ──route(target)───────────▶ OnionProxyRoute                      [caller]
+//!     ──begin(route, call)──────▶ OnionHttpsFlight {link, cell, guard} [pending table]
+//!     ──send_sealed─────────────▶ first hop                            [link effect]
+//!     ──within(deadline)────────▶ response | exit failure | timeout    [timer effect]
 //! ```
 //!
 //! Laws:
-//! - Target binding: `begin` admits a request only when `parse(request.target) = route.target`.
+//! - Target binding: an [`OnionHttpsCall`] names no target; `begin` addresses it to
+//!   `route.target`, so the request target equals the route target by construction.
 //! - Ownership: a circuit id is pending iff its [`PendingOnionHttpsRequest`] guard is alive and no
 //!   terminal outcome has been delivered. Dropping the guard (caller cancellation, timeout, send
 //!   failure) removes the entry, so the table never outlives its waiters.
-//! - Authentication: a pending request resolves only from its expected return peer, and only with a
-//!   payload verified under its return id, selected exit and overlay network. A payload from any
-//!   other peer leaves the entry pending, so a misrouted frame cannot cancel the request.
+//! - Authentication: a pending request owns the pair `(circuit id, expected return peer)`.
+//!   [`OnionHttpsClient::claim`] yields it only for that pair, and [`OnionHttpsClaim::resolve`]
+//!   delivers a payload only after verifying it under the request's return id, selected exit and
+//!   overlay network. Any other pair leaves the table unchanged, so a misrouted frame can neither
+//!   resolve nor cancel a request.
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
@@ -34,7 +37,6 @@ use rings_core::dht::Did;
 use rings_core::ecc::PublicKey;
 use rings_runtime::sleep;
 use serde::Deserialize;
-use serde::Serialize;
 
 use super::decode_https_payload;
 use super::default_method;
@@ -45,6 +47,7 @@ use super::normalize_path;
 use super::pending::PendingOnionHttpsRequest;
 use super::OnionHttpsPayload;
 use super::OnionHttpsRequest;
+use super::OnionHttpsResponse;
 use crate::error::Error;
 use crate::error::Result;
 use crate::extension::ext::Scope;
@@ -63,7 +66,7 @@ use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionRouteError;
 use crate::sync_lock::lock;
 
-/// Longest wait for the exit's response once the forward cell has reached the first hop.
+/// Longest wait for the exit's response once the first hop has accepted the forward cell.
 const ONION_HTTPS_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Caller-facing request fields for one HTTPS proxy request.
@@ -84,19 +87,58 @@ pub struct OnionHttpsClientRequest {
     pub body: Vec<u8>,
 }
 
-/// Caller-facing response fields returned from one HTTPS proxy request.
-#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
-pub struct OnionHttpsClientResponse {
-    /// HTTP status code.
-    pub status: u16,
-    /// Response headers.
-    pub headers: Vec<(String, String)>,
-    /// Response body bytes.
-    pub body: Vec<u8>,
+/// Normalized HTTPS request that names no target.
+///
+/// Constructing a call is the proof that its method and path are normalized. A call is addressed
+/// only when it is sent, to the target of the route it is sent over, so a request cannot disagree
+/// with its route.
+#[derive(Debug)]
+pub struct OnionHttpsCall {
+    method: String,
+    path: String,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+impl OnionHttpsCall {
+    /// Split an absolute `https://` URL into the target to route to and the normalized call.
+    ///
+    /// The URL path is the default; `request.path` overrides it.
+    pub fn from_url(
+        url: &str,
+        request: OnionHttpsClientRequest,
+    ) -> Result<(OnionProxyTarget, Self)> {
+        let (target, path) = parse_https_url(url)?;
+        Ok((target, Self::with_default_path(request, path.as_str())?))
+    }
+
+    /// Normalize `request`, using `default_path` when it carries no path override.
+    pub(super) fn with_default_path(
+        request: OnionHttpsClientRequest,
+        default_path: &str,
+    ) -> Result<Self> {
+        Ok(Self {
+            method: normalize_method(&request.method),
+            path: normalize_path(request.path.as_deref().unwrap_or(default_path))?,
+            headers: request.headers,
+            body: request.body,
+        })
+    }
+
+    /// The wire request this call becomes when sent to `target`.
+    pub(super) fn addressed_to(self, target: &OnionProxyTarget) -> OnionHttpsRequest {
+        OnionHttpsRequest {
+            target: target.authority(),
+            method: self.method,
+            path: self.path,
+            headers: self.headers,
+            body: self.body,
+        }
+    }
 }
 
 /// Terminal outcome delivered to the waiter of one pending circuit.
-pub(super) type OnionHttpsOutcome = Result<OnionHttpsClientResponse>;
+pub(super) type OnionHttpsOutcome = Result<OnionHttpsResponse>;
 
 /// Verification context and waiter of one pending circuit.
 struct PendingRequest {
@@ -104,6 +146,34 @@ struct PendingRequest {
     expected_exit: OnionExitDescriptor,
     return_id: OnionReturnId,
     sender: oneshot::Sender<OnionHttpsOutcome>,
+}
+
+impl PendingRequest {
+    /// Whether `peer` is the immediate return peer this request's route ends its backward path at.
+    fn answers_through(&self, peer: Did) -> bool {
+        self.expected_return_peer == peer
+    }
+}
+
+/// Exclusive right to resolve one pending request, taken out of the table by
+/// [`OnionHttpsClient::claim`].
+///
+/// Linear by intent: [`resolve`](Self::resolve) consumes it; dropping it unresolved closes the
+/// waiter with [`OnionRouteError::HttpsResponseClosed`].
+pub(crate) struct OnionHttpsClaim(PendingRequest);
+
+impl OnionHttpsClaim {
+    /// Verify `payload` for the claimed request and hand its terminal outcome to the waiter.
+    ///
+    /// A verification or decoding failure is itself the outcome; nothing is returned to the caller.
+    pub(crate) fn resolve(self, payload: OnionAuthenticatedPayload, network_id: u32) {
+        let Self(request) = self;
+        let outcome = payload
+            .into_verified_payload(request.return_id, &request.expected_exit, network_id)
+            .and_then(|verified| client_outcome(verified.payload));
+        // A closed receiver means the waiter was dropped after the claim; nobody observes it.
+        let _ = request.sender.send(outcome);
+    }
 }
 
 /// Pending-request table and forward-link capability of one node's HTTPS onion client.
@@ -142,21 +212,23 @@ impl OnionHttpsClient {
         }
     }
 
-    /// Send one request over `route` and wait for its authenticated response.
+    /// Send `call` over `route` and wait for its authenticated response.
     ///
-    /// Dropping the returned future cancels the pending circuit; an exit that stays silent for
-    /// [`ONION_HTTPS_RESPONSE_TIMEOUT`] yields [`Error::OnionProxyRequestTimedOut`].
+    /// The deadline, [`ONION_HTTPS_RESPONSE_TIMEOUT`], starts once the first hop has accepted the
+    /// forward cell; the send itself is bounded by the link outbox, not by this deadline. Dropping
+    /// the returned future cancels the pending circuit; a silent exit yields
+    /// [`Error::OnionProxyRequestTimedOut`].
     pub(crate) async fn request(
         self: &Arc<Self>,
         scope: Scope,
         route: &OnionProxyRoute,
-        request: OnionHttpsRequest,
+        call: OnionHttpsCall,
     ) -> OnionHttpsOutcome {
         let OnionHttpsFlight {
             first_link,
             cell,
             response,
-        } = self.begin(route, request)?;
+        } = self.begin(route, call)?;
         self.link_sender
             .send_sealed(scope, first_link, cell)
             .await?;
@@ -165,24 +237,17 @@ impl OnionHttpsClient {
             .await
     }
 
-    /// Bind `request` to `route`, register its circuit and seal the first forward cell.
+    /// Address `call` to `route.target`, register its circuit and seal the first forward cell.
     ///
     /// Post: on `Ok`, exactly one new circuit is pending and owned by the returned flight; on
     /// `Err`, the pending table is unchanged.
     pub(crate) fn begin(
         self: &Arc<Self>,
         route: &OnionProxyRoute,
-        request: OnionHttpsRequest,
+        call: OnionHttpsCall,
     ) -> Result<OnionHttpsFlight> {
-        if OnionProxyTarget::parse_authority(request.target.as_str())? != route.target {
-            return Err(Error::OnionRouteError(
-                OnionRouteError::HttpsTargetMismatch {
-                    request_target: request.target,
-                    route_target: route.target.authority(),
-                },
-            ));
-        }
-        let payload = encode_https_payload(OnionHttpsPayload::Request(request))?;
+        let payload =
+            encode_https_payload(OnionHttpsPayload::Request(call.addressed_to(&route.target)))?;
         let client_return = OnionClientReturn::new(self.return_key);
         let (circuit_id, response) = self.register(
             route_first_hop(&route.route)?,
@@ -235,34 +300,22 @@ impl OnionHttpsClient {
         }
     }
 
-    /// Deliver one authenticated backward payload to the pending request owning `circuit_id`.
+    /// Take the pending request owning `(circuit_id, from)` out of the table.
     ///
-    /// Returns the payload unchanged when no pending HTTPS request owns the circuit, so another
-    /// client adapter installed on the same circuit protocol may claim it. A payload from a peer
-    /// other than the expected return peer is claimed and discarded with the entry left pending.
-    pub(crate) fn complete_payload(
+    /// Post: `Some` iff such a request existed, and it is no longer pending; `None` leaves the table
+    /// unchanged, so the backward payload belongs to another adapter or to nobody.
+    pub(crate) fn claim(
         &self,
         from: Did,
         circuit_id: OnionCircuitId,
-        payload: OnionAuthenticatedPayload,
-        network_id: u32,
-    ) -> Result<Option<OnionAuthenticatedPayload>> {
-        let request = {
-            let mut pending = lock(&self.pending)?;
-            let Entry::Occupied(entry) = pending.entry(circuit_id) else {
-                return Ok(Some(payload));
-            };
-            if entry.get().expected_return_peer != from {
-                return Ok(None);
+    ) -> Result<Option<OnionHttpsClaim>> {
+        let mut pending = lock(&self.pending)?;
+        Ok(match pending.entry(circuit_id) {
+            Entry::Occupied(entry) if entry.get().answers_through(from) => {
+                Some(OnionHttpsClaim(entry.remove()))
             }
-            entry.remove()
-        };
-        let outcome = payload
-            .into_verified_payload(request.return_id, &request.expected_exit, network_id)
-            .and_then(|verified| client_outcome(verified.payload));
-        // A closed receiver means the waiter was dropped after removal; nobody observes the outcome.
-        let _ = request.sender.send(outcome);
-        Ok(None)
+            Entry::Occupied(_) | Entry::Vacant(_) => None,
+        })
     }
 
     /// Number of circuits awaiting a terminal outcome.
@@ -287,11 +340,7 @@ impl OnionHttpsClient {
 /// Interpret one verified backward payload as the client's terminal outcome.
 fn client_outcome(payload: OnionCircuitPayload) -> OnionHttpsOutcome {
     match decode_https_payload(payload)? {
-        Some(OnionHttpsPayload::Response(response)) => Ok(OnionHttpsClientResponse {
-            status: response.status,
-            headers: response.headers,
-            body: response.body,
-        }),
+        Some(OnionHttpsPayload::Response(response)) => Ok(response),
         Some(OnionHttpsPayload::Error(failure)) => Err(Error::OnionRouteError(
             OnionRouteError::ExitFailure(failure),
         )),
@@ -299,32 +348,6 @@ fn client_outcome(payload: OnionCircuitPayload) -> OnionHttpsOutcome {
             OnionRouteError::UnexpectedBackwardPayload,
         )),
     }
-}
-
-/// Parse a full HTTPS URL and encode one client request for its target.
-pub fn client_request_from_url(
-    url: &str,
-    request: OnionHttpsClientRequest,
-) -> Result<(OnionProxyTarget, OnionHttpsRequest)> {
-    let (target, path) = parse_https_url(url)?;
-    let request = client_request_with_default_path(&target, request, path.as_str())?;
-    Ok((target, request))
-}
-
-/// Encode `request` for `target`, using `default_path` when the caller gave no path override.
-pub(super) fn client_request_with_default_path(
-    target: &OnionProxyTarget,
-    request: OnionHttpsClientRequest,
-    default_path: &str,
-) -> Result<OnionHttpsRequest> {
-    let path = request.path.as_deref().unwrap_or(default_path);
-    Ok(OnionHttpsRequest {
-        target: target.authority(),
-        method: normalize_method(&request.method),
-        path: normalize_path(path)?,
-        headers: request.headers,
-        body: request.body,
-    })
 }
 
 /// Split an absolute `https://` URL into its canonical target and its path-and-query.

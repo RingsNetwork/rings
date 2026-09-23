@@ -48,8 +48,8 @@ use tokio::sync::oneshot;
 
 use super::common::*;
 use super::*;
+use crate::onion::native::NativeOnionCircuitHandle;
 use crate::onion::proxy::OnionProxyConfig;
-use crate::onion::tcp::NativeOnionCircuitHandle;
 use crate::onion::tcp::NativeOnionTcpExitConfig;
 use crate::onion::NativeOnionGatewayConnector;
 

@@ -59,13 +59,6 @@ pub enum OnionRouteError {
         /// Service label selected by the route.
         route_service: String,
     },
-    /// An HTTPS request names a target other than the one its route was selected for.
-    HttpsTargetMismatch {
-        /// Target authority carried by the HTTPS request.
-        request_target: String,
-        /// Target authority the route was selected for.
-        route_target: String,
-    },
     /// A relay layer references a missing next hop.
     MissingNextHop,
     /// A constructed circuit path does not have exactly one edge id per hop.
@@ -111,6 +104,8 @@ pub enum OnionRouteError {
     CircuitIdAllocationFailed,
     /// A queued endpoint cell lost its drain task before the overlay reported a result.
     LinkSendCancelled,
+    /// An HTTPS response channel closed before the exit's outcome was delivered.
+    HttpsResponseClosed,
     /// A TCP open response channel closed before an answer.
     TcpOpenResponseClosed,
     /// A TCP open request timed out before the exit answered.
@@ -183,13 +178,6 @@ impl fmt::Display for OnionRouteError {
                 f,
                 "onion payload service {payload_service:?} does not match route service {route_service:?}"
             ),
-            Self::HttpsTargetMismatch {
-                request_target,
-                route_target,
-            } => write!(
-                f,
-                "HTTPS request target {request_target:?} does not match route target {route_target:?}"
-            ),
             Self::MissingNextHop => f.write_str("missing next onion hop"),
             Self::CircuitPathLengthMismatch {
                 hop_count,
@@ -239,6 +227,9 @@ impl fmt::Display for OnionRouteError {
             }
             Self::LinkSendCancelled => {
                 f.write_str("onion link send was cancelled before overlay completion")
+            }
+            Self::HttpsResponseClosed => {
+                f.write_str("onion HTTPS response channel closed")
             }
             Self::TcpOpenResponseClosed => {
                 f.write_str("onion TCP open response channel closed")

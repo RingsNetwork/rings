@@ -22,10 +22,9 @@ use serde::Serialize;
 
 #[cfg(rings_browser)]
 use self::browser::execute_https_request;
-pub use self::client::client_request_from_url;
+pub use self::client::OnionHttpsCall;
 pub(crate) use self::client::OnionHttpsClient;
 pub use self::client::OnionHttpsClientRequest;
-pub use self::client::OnionHttpsClientResponse;
 #[cfg(test)]
 use self::limits::checked_status_code;
 use self::limits::https_response_body_limit;
@@ -260,13 +259,11 @@ impl OnionCircuitHandler for BrowserOnionCircuitHandler {
         payload: OnionAuthenticatedPayload,
     ) -> Result<()> {
         // No other client adapter shares the browser circuit protocol, so an unclaimed payload is
-        // a late response to a request that was already cancelled or timed out.
-        let _unclaimed = self.https.client().complete_payload(
-            from,
-            circuit_id,
-            payload,
-            self.signer.network_id(),
-        )?;
+        // a late reply to a cancelled or timed-out request, or a misrouted one.
+        match self.https.client().claim(from, circuit_id)? {
+            Some(claim) => claim.resolve(payload, self.signer.network_id()),
+            None => tracing::debug!(%from, "dropping unclaimed onion HTTPS backward payload"),
+        }
         Ok(())
     }
 }
