@@ -60,8 +60,8 @@ async fn test_listener_generation_is_shared_across_processor_wrappers() {
     let _first_provider = Provider::from_processor(processor.clone());
     let _second_provider = Provider::from_processor(processor.clone());
     assert!(Arc::ptr_eq(
-        &processor.listener_gate_for_test(),
-        &processor.clone().listener_gate_for_test(),
+        &processor.listener_lifecycle_lock_for_test(),
+        &processor.clone().listener_lifecycle_lock_for_test(),
     ));
 
     let first_stop = StopSource::new();

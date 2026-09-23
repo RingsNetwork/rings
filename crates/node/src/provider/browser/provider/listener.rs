@@ -1,7 +1,7 @@
 //! Serialized browser listener lifecycle.
 //!
-//! The shared [`Processor`] owns the asynchronous listener gate. A browser
-//! generation does not announce that it has started until it owns that gate,
+//! The shared [`Processor`] owns the asynchronous listener lifecycle lock. A
+//! browser generation does not announce that it has started until it owns the lock,
 //! and it retains ownership through cooperative shutdown and measurement flush.
 //!
 //! # Algorithm flow
@@ -14,7 +14,7 @@
 //!       +--> return ProviderListener with two JavaScript promises
 //!                    |
 //!                    v
-//!            task waits for processor gate
+//!            task waits for processor lifecycle lock
 //!                    |
 //!                    v
 //!            Processor::listen_with_started acquires ownership
@@ -30,7 +30,7 @@
 //!            listener cleanup completes
 //!                    |
 //!                    v
-//!            release processor gate and resolve task promise
+//!            release processor lifecycle lock and resolve task promise
 //! ```
 
 use futures::channel::oneshot;
@@ -51,14 +51,14 @@ pub struct ProviderListener {
     /// `Processor::listen_with`; dropping this source alone does not report a
     /// successful listener shutdown to JavaScript.
     stop: StopSource,
-    /// Promise resolved after this generation acquires the provider gate.
+    /// Promise resolved after this generation acquires the processor lifecycle lock.
     ///
     /// It deliberately remains pending while an earlier generation is still
     /// cleaning up, so callers never confuse task creation with active service.
     started: js_sys::Promise,
     /// Promise representing the complete long-running listener generation.
     ///
-    /// Resolution means `listen_with` returned and released the provider gate;
+    /// Resolution means `listen_with` returned and released the lifecycle lock;
     /// callers may then start another generation without overlap.
     task: js_sys::Promise,
 }
@@ -78,7 +78,7 @@ impl ProviderListener {
     /// Return a promise that resolves once the listener task enters its run loop.
     ///
     /// A queued listener does not resolve this promise until the previous
-    /// generation has finished cleanup and released the provider gate.
+    /// generation has finished cleanup and released the processor lifecycle lock.
     pub fn started(&self) -> js_sys::Promise {
         self.started.clone()
     }
@@ -135,8 +135,10 @@ impl Provider {
     }
 
     #[cfg(test)]
-    /// Return the processor-owned listener gate for lifecycle tests.
-    pub(crate) fn listener_gate_for_test(&self) -> std::sync::Arc<futures::lock::Mutex<()>> {
-        self.processor.listener_gate_for_test()
+    /// Return the processor-owned listener lifecycle lock for lifecycle tests.
+    pub(crate) fn listener_lifecycle_lock_for_test(
+        &self,
+    ) -> std::sync::Arc<futures::lock::Mutex<()>> {
+        self.processor.listener_lifecycle_lock_for_test()
     }
 }

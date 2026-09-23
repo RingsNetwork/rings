@@ -222,7 +222,7 @@ pub struct Processor {
     measure: Option<Arc<PeriodicMeasure>>,
     /// Serializes listener generations across every clone and wrapper of this processor.
     /// Ownership includes graceful maintenance shutdown and measurement flushing.
-    listener_gate: Arc<futures::lock::Mutex<()>>,
+    listener_lifecycle_lock: Arc<futures::lock::Mutex<()>>,
     #[cfg(all(feature = "browser", target_family = "wasm"))]
     advertise_onion_relay: bool,
     registration_tasks: Vec<Arc<dyn RegistrationTask>>,
@@ -523,17 +523,17 @@ impl Processor {
     }
 
     /// Run one serialized listener generation, notifying `on_started` only after it owns
-    /// the processor lifecycle gate. Ownership remains held through cleanup and measurement
+    /// the processor lifecycle lock. Ownership remains held through cleanup and measurement
     /// flushing. Browser promises use this signal to preserve queued-start semantics while
     /// sharing ownership with native callers.
     pub(crate) async fn listen_with_started<F>(&self, stop: StopToken, on_started: F)
     where F: FnOnce() {
-        let _listener_guard = self.listener_gate.lock().await;
+        let _listener_lifecycle_guard = self.listener_lifecycle_lock.lock().await;
         on_started();
         self.run_listener_generation(stop).await;
     }
 
-    /// Run maintenance and registration loops for the generation holding `listener_gate`.
+    /// Run maintenance and registration loops for the generation holding the lifecycle lock.
     async fn run_listener_generation(&self, stop: StopToken) {
         let stabilizer = Arc::new(self.swarm.stabilizer());
         if self.registration_tasks.is_empty() {
@@ -559,10 +559,10 @@ impl Processor {
         }
     }
 
-    /// Return the shared listener gate for lifecycle tests.
+    /// Return the processor's listener lifecycle lock for lifecycle tests.
     #[cfg(test)]
-    pub(crate) fn listener_gate_for_test(&self) -> Arc<futures::lock::Mutex<()>> {
-        self.listener_gate.clone()
+    pub(crate) fn listener_lifecycle_lock_for_test(&self) -> Arc<futures::lock::Mutex<()>> {
+        self.listener_lifecycle_lock.clone()
     }
 
     /// Flush all applied measurement updates with the graceful-shutdown deadline.

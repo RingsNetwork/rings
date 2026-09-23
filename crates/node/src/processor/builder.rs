@@ -228,7 +228,7 @@ impl ProcessorBuilder {
             stabilize_interval: self.stabilize_interval,
             online_node_registration,
             measure,
-            listener_gate: Arc::new(futures::lock::Mutex::new(())),
+            listener_lifecycle_lock: Arc::new(futures::lock::Mutex::new(())),
             #[cfg(all(feature = "browser", target_family = "wasm"))]
             advertise_onion_relay: self.advertise_onion_relay,
             registration_tasks,
