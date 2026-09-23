@@ -134,7 +134,7 @@ impl<T, P> Drop for ScheduledTransfer<T, P> {
 }
 
 /// One mailbox command. The worker handles a batch of submissions in FIFO order,
-/// through [`OutboundWorker::handle_command`]. Only shutdown bypasses that
+/// through [`OutboundWorker::handle_commands`]. Only shutdown bypasses that
 /// dispatcher, after closing ingress and cancelling all admitted transfers.
 enum OutboundCommand {
     /// A transfer admitted by the submitter; rejected on arrival if its stop
@@ -540,13 +540,8 @@ impl OutboundWorker {
     /// submissions racing the empty read may enter the next iteration. At most four
     /// lane heads can have completed deliveries, with no new waits added here.
     fn drain_available(&mut self) {
-        // Hold completion publication until the collected batch has relinquished
-        // every command. Shutdown must also release the active and queued owners.
-        let mut final_results = Vec::new();
-        for command in self.receiver.drain_available() {
-            final_results.extend(self.apply_command(command));
-        }
-        self.publish_command_results(final_results);
+        let commands = self.receiver.drain_available();
+        self.handle_commands(commands);
         self.input_closed = self.receiver.is_closed();
 
         while let Some(Some(event)) = self.deliveries.next().now_or_never() {
@@ -561,59 +556,34 @@ impl OutboundWorker {
         self.ready.push(class, QueuedTransfer { id, scheduled });
     }
 
-    /// Dispatch one idle-input command through the same reducer as a batch.
-    fn handle_command(&mut self, command: OutboundCommand) {
-        let final_results = self.apply_command(command);
-        self.publish_command_results(final_results);
-    }
-
-    /// Move command ownership into queues or deferred completion records.
-    fn apply_command(&mut self, command: OutboundCommand) -> Vec<FinalTransferResult> {
-        match command {
-            OutboundCommand::Submit(transfer) => {
-                self.accept_submission(*transfer).into_iter().collect()
+    /// Apply a finite batch (or one idle input), releasing cancelled ownership
+    /// before publishing results. Scans never consume ingress; a stopped submit
+    /// is rejected here even when its cancellation notification arrived first.
+    fn handle_commands(&mut self, commands: impl IntoIterator<Item = OutboundCommand>) {
+        // Defer publication until every collected command relinquishes ownership.
+        let mut results = Vec::new();
+        for command in commands {
+            match command {
+                OutboundCommand::Submit(transfer) if transfer.transfer.is_stopped() => {
+                    results.extend(Self::cancel_scheduled_transfer(*transfer));
+                }
+                OutboundCommand::Submit(transfer) => self.enqueue_transfer(*transfer),
+                OutboundCommand::CancelStopped => {
+                    // Waiting heads stay owned by delivery; queued successors can stop.
+                    results.extend(
+                        self.ready
+                            .remove_ready_where(|queued| queued.scheduled.transfer.is_stopped())
+                            .into_iter()
+                            .filter_map(|queued| Self::cancel_scheduled_transfer(queued.scheduled)),
+                    );
+                }
             }
-            OutboundCommand::CancelStopped => self.cancel_stopped_admitted(),
         }
-    }
-
-    /// Complete a stopped batch only after shutdown has released all other owners.
-    fn publish_command_results(&mut self, final_results: Vec<FinalTransferResult>) {
         if self.stop.is_stop_requested() {
-            self.shutdown_with_results(final_results);
+            self.shutdown_with_results(results);
         } else {
-            Self::publish_released_results(final_results);
+            Self::publish_released_results(results);
         }
-    }
-
-    /// Recheck cancellation at actor visibility, including cancel-before-submit.
-    fn accept_submission(&mut self, scheduled: ScheduledTransfer) -> Option<FinalTransferResult> {
-        if scheduled.transfer.is_stopped() {
-            Self::cancel_scheduled_transfer(scheduled)
-        } else {
-            self.enqueue_transfer(scheduled);
-            None
-        }
-    }
-
-    /// `CancelStopped`: release every queued transfer whose stop token is set.
-    ///
-    /// Only the queues are scanned; the mailbox is not touched here. A
-    /// stopped transfer is either still in the mailbox, where its `Submit` is
-    /// rejected by [`Self::accept_submission`] when the worker's drain reaches
-    /// it, or already queued, where this scan finds it: the stop token is set
-    /// before the command is sent, and the worker handles the backlog in
-    /// FIFO order before the coalesced scan. A stop after notification receipt
-    /// leaves a new `CancelStopped` in ingress, even while this scan runs.
-    /// No scan consumes mailbox commands; none can discard a later wakeup.
-    fn cancel_stopped_admitted(&mut self) -> Vec<FinalTransferResult> {
-        let cancelled = self
-            .ready
-            .remove_ready_where(|queued| queued.scheduled.transfer.is_stopped());
-        cancelled
-            .into_iter()
-            .filter_map(|queued| Self::cancel_scheduled_transfer(queued.scheduled))
-            .collect()
     }
 
     fn terminate_transfer(
@@ -951,7 +921,7 @@ impl OutboundWorker {
     async fn wait_for_input(&mut self) {
         if self.deliveries.is_empty() {
             match self.receiver.next().await {
-                Some(command) => self.handle_command(command),
+                Some(command) => self.handle_commands([command]),
                 None => self.input_closed = true,
             }
             return;
@@ -972,7 +942,7 @@ impl OutboundWorker {
             }
         };
         match input {
-            WorkerInput::Command(Some(command)) => self.handle_command(command),
+            WorkerInput::Command(Some(command)) => self.handle_commands([command]),
             WorkerInput::Command(None) => self.input_closed = true,
             WorkerInput::Delivery(Some(event)) => self.handle_delivery(event),
             WorkerInput::Delivery(None) => {}

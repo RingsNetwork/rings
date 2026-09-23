@@ -450,30 +450,23 @@ not cancel and replace the committed resource defensively.
 
 ### Outbound scheduler ingestion and cancellation
 
-Native and WASM share the existing futures-channel mailbox and `TransferQueues`.
-A drain retains every collected transfer's permit, so even concurrent producers
-can supply at most 256 submissions before processing starts. A separate one-slot
-futures channel coalesces `CancelStopped`; the worker reads it once per drain.
-The bound is therefore 256 submissions plus one scan of at most 256 admitted
-transfers. The former channel already bounded submissions but not repeated scan
-commands; removing that missing bound does not imply observed starvation.
+Native and WASM share futures channels and the existing `TransferQueues` reducer.
+Collected submissions retain their permits, bounding ingestion to 256 even with
+concurrent producers. One notification slot coalesces `CancelStopped`; each drain
+reads it once and scans at most 256 transfers. Control submitted before the FIFO
+drain is visible before selection; a submission racing the empty read may enter
+the next iteration. There is no fixed cutoff leaving earlier control behind bulk.
+The 4:1 burst and lower-lane rotation are unchanged: a continuously runnable lower
+class receives service within 15 charged admissions/failed attempts, assuming
+executor/gate service and delivery, timeout or cancellation progress.
 
-Control submitted before the FIFO drain is visible before frame selection; a
-submission racing the final empty read may enter the next iteration. There is no
-fixed cutoff leaving earlier control behind bulk. The existing 4:1 policy and
-lower-lane rotation give each continuously runnable lower class service within
-15 charged admissions/failed attempts. This assumes executor/gate service and
-send/delivery completion, cancellation or timeout; it is not a wall-clock bound.
-FIFO successors still depend on their head, while stopped queued work can be
-cancelled independently of a waiting head.
-
-Stop tokens precede notifications. Receiving a scan frees its slot before the
-scan runs, so a later stop queues another command. Scans never drain ingress.
-Shutdown releases its active, queued, buffered and delivery-wait owners before
-publishing collected completions. Common native/browser regression tests cover
-these boundaries; native-only thread tests cover submission/close contention.
-The existing production queue model explores 13^6 six-action traces with eight
-transfer slots, establishing safety only within that finite scope.
+Receipt frees the notification slot before scanning; scans never read ingress.
+Shutdown releases all batch ownership before publishing its collected results.
+Common native/browser regressions cover these boundaries; native threads also
+exercise submission/close contention. The existing queue model checks 13^6 traces
+of six actions with eight slots, not arbitrary-schedule liveness. The former drain
+bounded submissions but not repeated notifications; this is not a claim of
+observed starvation or a wall-clock bound.
 
 ### Connection Admission
 

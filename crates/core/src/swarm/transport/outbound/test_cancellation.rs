@@ -61,7 +61,7 @@ async fn connected_swarms() -> (Arc<Swarm>, Arc<Swarm>) {
     (node, remote)
 }
 
-/// Attach the real admission permit to a tracked transfer fixture.
+/// Build a tracked transfer with its real capacity permit for the shared contracts.
 fn scheduled_transfer(
     node: &Swarm,
     peer: Did,
@@ -69,22 +69,6 @@ fn scheduled_transfer(
     stop: &StopSource,
 ) -> (
     ScheduledTransfer,
-    oneshot::Receiver<Result<SendCompletionOutcome>>,
-) {
-    let (transfer, completion) = tracked_transfer(node, peer, stop);
-    let permit = capacity
-        .try_acquire(peer, TransferClass::Application, 1)
-        .expect("fixture fits capacity");
-    (ScheduledTransfer::new(transfer, permit), completion)
-}
-
-/// Construct a signed, admitted transfer shared by native and browser tests.
-fn tracked_transfer(
-    node: &Swarm,
-    peer: Did,
-    stop: &StopSource,
-) -> (
-    OutboundTransfer,
     oneshot::Receiver<Result<SendCompletionOutcome>>,
 ) {
     // The admitted connection is shared by all three transfers in this lane.
@@ -115,22 +99,35 @@ fn tracked_transfer(
         stop.token(),
         None,
     );
-    (transfer, completion)
+    let permit = capacity
+        .try_acquire(peer, TransferClass::Application, 1)
+        .expect("fixture fits capacity");
+    (ScheduledTransfer::new(transfer, permit), completion)
 }
 
-/// A stop published after the scan reclaims its successor before head delivery.
+/// Assert release-before-publication at the actual completion wake boundary.
+struct ReleasedBeforeWake(Arc<TransferCapacity>);
+impl ArcWake for ReleasedBeforeWake {
+    fn wake_by_ref(this: &Arc<Self>) {
+        assert_eq!(
+            this.0.admitted(),
+            0,
+            "shutdown must release all permits first"
+        );
+    }
+}
+
+/// Reuse one admitted pair and worker for cancellation-before-submit, successive
+/// scans behind a waiting head, and shutdown across queued/buffered ownership.
 #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_family = "wasm"), tokio::test)]
 async fn test_cancellation_after_scan_releases_successor_behind_waiting_head() {
-    // Only connection setup uses the runtime; the worker interleaving is synchronous.
     let (node, remote) = connected_swarms().await;
     let peer = remote.did();
-    // This private capacity accountant excludes connection-setup traffic.
     let capacity = Arc::new(TransferCapacity::new(Arc::new(
         GlobalTransferCapacity::new(),
     )));
     let (sender, receiver) = mailbox::channel();
-    let sender = Arc::new(sender);
     let (measurements, _measurement_receiver) = MeasurementRecorder::channel(None, peer);
     let mut worker = OutboundWorker::new(
         receiver,
@@ -139,143 +136,68 @@ async fn test_cancellation_after_scan_releases_successor_behind_waiting_head() {
         peer,
         SharedAnnouncedSessions::new(),
     );
-    // Hold the lane head in the delivery state throughout both cancellation scans.
-    let (head, _head_completion) = scheduled_transfer(&node, peer, &capacity, &StopSource::new());
+    let (head, head_completion) = scheduled_transfer(&node, peer, &capacity, &StopSource::new());
     worker.enqueue_transfer(head);
-    let waiting = worker.ready.pop().expect("head is initially runnable");
+    let waiting = worker.ready.pop().expect("head runnable");
     worker.ready.wait_for_delivery(1, waiting);
-    // The first cancellation publishes completion after remove_ready_where finishes.
-    let first_stop = StopSource::new();
-    let (first, first_completion) = scheduled_transfer(&node, peer, &capacity, &first_stop);
-    worker.enqueue_transfer(first);
-    let successor_stop = StopSource::new();
-    let (successor, successor_completion) =
-        scheduled_transfer(&node, peer, &capacity, &successor_stop);
-    worker.enqueue_transfer(successor);
-    assert_eq!(capacity.admitted(), 3);
-    // Stop after the production scan but before its completion effects. This
-    // explicit reducer/effect boundary is executable on both platforms without
-    // requiring browser connection handles to implement Send for an ArcWake.
-    first_stop.request_stop();
-    let results = worker.apply_command(OutboundCommand::CancelStopped);
-    assert_eq!(capacity.admitted(), 2);
-    successor_stop.request_stop();
-    assert!(sender
-        .send_coalesced(OutboundCommand::CancelStopped)
-        .is_ok());
-    worker.publish_command_results(results);
-    assert!(matches!(
-        first_completion.now_or_never(),
-        Some(Ok(Ok(SendCompletionOutcome::Cancelled)))
-    ));
-    // The next normal drain must consume the later command and reclaim its permit.
-    worker.drain_available();
-    assert_eq!(
-        capacity.admitted(),
-        1,
-        "only the blocked head retains capacity"
-    );
-    assert!(matches!(
-        successor_completion.now_or_never(),
-        Some(Ok(Ok(SendCompletionOutcome::Cancelled)))
-    ));
-    assert!(
-        worker
-            .ready
-            .take_waiting(TransferClass::Application, 1)
-            .is_some(),
-        "head delivery is still pending"
-    );
-}
-
-/// Observe real admission permits at the instant a tracked result is published.
-struct ReleasedBeforeWake {
-    /// Independent accountant shared by every transfer in this fixture.
-    capacity: Arc<TransferCapacity>,
-}
-
-impl ArcWake for ReleasedBeforeWake {
-    fn wake_by_ref(arc_self: &Arc<Self>) {
+    // Each later cancellation must reclaim its successor without completing the head.
+    for _ in 0..2 {
+        let stop = StopSource::new();
+        let (transfer, completion) = scheduled_transfer(&node, peer, &capacity, &stop);
+        worker.enqueue_transfer(transfer);
+        worker.handle_commands([OutboundCommand::CancelStopped]);
         assert_eq!(
-            arc_self.capacity.admitted(),
-            0,
-            "shutdown publishes after all permits release"
+            capacity.admitted(),
+            2,
+            "live successor survives the first scan"
         );
+        stop.request_stop();
+        sender
+            .send_coalesced(OutboundCommand::CancelStopped)
+            .expect("ingress open");
+        worker.drain_available();
+        assert_eq!(capacity.admitted(), 1, "only waiting head retains capacity");
+        assert!(matches!(
+            completion.now_or_never(),
+            Some(Ok(Ok(SendCompletionOutcome::Cancelled)))
+        ));
     }
-}
-
-/// The real submission predicate handles cancel-before-submit on both targets;
-/// shutdown drains a waiting head, queued work, and a collected ingress batch
-/// before publishing even the first cancelled submission's completion.
-#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_family = "wasm"), tokio::test)]
-async fn stopped_batch_releases_all_owners_before_completion() {
-    let (node, remote) = connected_swarms().await;
-    let peer = remote.did();
-    let capacity = Arc::new(TransferCapacity::new(Arc::new(
-        GlobalTransferCapacity::new(),
-    )));
-    let (sender, receiver) = mailbox::channel();
+    // The actor rechecks stop even when the scan preceded its Submit command.
     let stop = StopSource::new();
-    let handle = OutboundPeerHandle {
-        state: Arc::new(OutboundPeerState {
-            #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-            peer,
-            sender,
-            link: PeerLinkState::new(),
-            _capacity_anchor: TransferCapacityAnchor::new(Arc::clone(&capacity)),
-            stop: stop.clone(),
-        }),
-    };
-    let (measurements, _receiver) = MeasurementRecorder::channel(None, peer);
-    let mut worker = OutboundWorker::new(
-        receiver,
-        stop,
-        measurements,
-        peer,
-        SharedAnnouncedSessions::new(),
-    );
-    let cancelled = StopSource::new();
-    let (transfer, completion) = tracked_transfer(&node, peer, &cancelled);
-    let permit = capacity
-        .try_acquire(peer, TransferClass::Application, 1)
-        .expect("fixture fits capacity");
-    cancelled.request_stop();
-    handle.cancel_stopped();
-    assert!(handle.submit(transfer, permit).is_ok());
-    assert_eq!(capacity.admitted(), 0);
+    let (transfer, completion) = scheduled_transfer(&node, peer, &capacity, &stop);
+    stop.request_stop();
+    worker.handle_commands([
+        OutboundCommand::CancelStopped,
+        OutboundCommand::Submit(Box::new(transfer)),
+    ]);
+    assert_eq!(capacity.admitted(), 1);
     assert!(matches!(
         completion.now_or_never(),
         Some(Ok(Ok(SendCompletionOutcome::Cancelled)))
     ));
-    let mut completions = Vec::new();
-    for index in 0..4 {
-        let (mut scheduled, completion) =
+    // Reuse the same blocked head with a queued successor and two buffered submits.
+    let mut completions = vec![head_completion];
+    for index in 0..3 {
+        let (mut transfer, completion) =
             scheduled_transfer(&node, peer, &capacity, &StopSource::new());
-        scheduled.transfer.bind_scheduler_stop(worker.stop.token());
-        if index < 2 {
-            worker.enqueue_transfer(scheduled);
+        transfer.transfer.bind_scheduler_stop(worker.stop.token());
+        if index == 0 {
+            worker.enqueue_transfer(transfer);
         } else {
-            assert!(handle
-                .state
-                .sender
-                .send_if(OutboundCommand::Submit(Box::new(scheduled)), |_| true)
+            assert!(sender
+                .send_if(OutboundCommand::Submit(Box::new(transfer)), |_| true)
                 .is_ok());
         }
         completions.push(completion);
     }
-    let waiting = worker.ready.pop().expect("head runnable");
-    worker.ready.wait_for_delivery(1, waiting);
-    let wake = futures::task::waker(Arc::new(ReleasedBeforeWake {
-        capacity: Arc::clone(&capacity),
-    }));
+    let wake = futures::task::waker(Arc::new(ReleasedBeforeWake(Arc::clone(&capacity))));
     let mut context = Context::from_waker(&wake);
     for completion in &mut completions {
         assert!(Pin::new(completion).poll(&mut context).is_pending());
     }
-    handle.shutdown();
+    worker.stop.request_stop();
+    sender.close();
     worker.drain_available();
-    assert_eq!(capacity.admitted(), 0);
     for completion in completions {
         assert!(matches!(
             completion.now_or_never(),

@@ -122,7 +122,17 @@ impl<T> MailboxReceiver<T> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+    use std::task::Context;
+    use std::task::Poll;
+
+    use futures::task::ArcWake;
+
     use super::*;
+    use crate::swarm::transport::outbound::TransferClass;
+    use crate::swarm::transport::outbound::TransferQueues;
 
     #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_family = "wasm"), test)]
@@ -134,18 +144,58 @@ mod tests {
 
         assert_eq!(receiver.drain_available(), vec![1, 3]);
         assert!(receiver.drain_available().is_empty());
+        // Receipt must reopen the notification slot before the worker scans.
+        for _ in 0..1024 {
+            assert!(sender.send_coalesced(7).is_ok());
+        }
+        assert_eq!(receiver.next().now_or_never(), Some(Some(7)));
+        assert!(sender.send_coalesced(8).is_ok());
+        sender.close();
+        assert!(sender.send_coalesced(9).is_err());
+        assert_eq!(receiver.drain_available(), vec![8]);
+        assert_eq!(receiver.next().now_or_never(), Some(None));
     }
 
     #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_family = "wasm"), test)]
     fn test_drain_hands_over_the_whole_backlog_in_submission_order() {
         let (sender, mut receiver) = channel();
-        for index in 0..64 {
-            sender.send_if(index, |_| true).expect("mailbox open");
+        let sender = Arc::new(sender);
+        for _ in 0..64 {
+            sender
+                .send_if(Some(TransferClass::Application), |_| true)
+                .expect("mailbox open");
         }
-
-        assert_eq!(receiver.drain_available(), (0..64).collect::<Vec<_>>());
-        assert!(!receiver.is_closed());
+        sender
+            .send_if(Some(TransferClass::DhtControl), |_| true)
+            .expect("mailbox open");
+        assert!(sender.send_coalesced(None).is_ok());
+        // Native producers can refill the slot during collection; the batch still
+        // contains one scan. Browser tasks use the same bound without OS threads.
+        #[cfg(not(target_family = "wasm"))]
+        let producer = {
+            let sender = Arc::clone(&sender);
+            std::thread::spawn(move || {
+                for _ in 0..10_000 {
+                    assert!(sender.send_coalesced(None).is_ok());
+                }
+            })
+        };
+        let batch = receiver.drain_available();
+        assert_eq!(batch.len(), 66);
+        assert_eq!(batch.last(), Some(&None));
+        let mut queues = TransferQueues::default();
+        for class in batch.into_iter().flatten() {
+            queues.push(class, ());
+        }
+        assert_eq!(
+            queues.pop().expect("runnable control").class(),
+            TransferClass::DhtControl
+        );
+        #[cfg(not(target_family = "wasm"))]
+        producer.join().expect("producer finishes");
+        assert!(sender.send_coalesced(None).is_ok());
+        assert_eq!(receiver.drain_available(), vec![None]);
         sender.close();
         assert!(receiver.drain_available().is_empty());
         assert!(receiver.is_closed());
@@ -204,7 +254,38 @@ mod tests {
         assert_eq!(receiver.drain_available(), vec![1]);
         assert_eq!(sender.send_if(2, |_| true), Err(2));
     }
-}
 
-#[cfg(test)]
-mod test_contract;
+    /// Counts executor notifications without running a platform-specific executor.
+    struct WakeCount(AtomicUsize);
+    impl ArcWake for WakeCount {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            arc_self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Idle receive is woken by submission, cancellation, and closure. The same
+    /// futures channel selection runs in native executors and browser tasks.
+    #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_family = "wasm"), test)]
+    fn idle_actor_observes_each_wakeup_source() {
+        for action in 0..3 {
+            let (sender, mut receiver) = channel();
+            let counter = Arc::new(WakeCount(AtomicUsize::new(0)));
+            let wake = futures::task::waker(Arc::clone(&counter));
+            let mut context = Context::from_waker(&wake);
+            let waiting = receiver.next();
+            futures::pin_mut!(waiting);
+            assert!(waiting.as_mut().poll_unpin(&mut context).is_pending());
+            match action {
+                0 => assert!(sender.send_if(7, |_| true).is_ok()),
+                1 => assert!(sender.send_coalesced(7).is_ok()),
+                _ => sender.close(),
+            }
+            assert!(counter.0.load(Ordering::SeqCst) > 0);
+            assert_eq!(
+                waiting.as_mut().poll_unpin(&mut context),
+                Poll::Ready((action != 2).then_some(7))
+            );
+        }
+    }
+}
