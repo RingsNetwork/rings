@@ -67,12 +67,7 @@ use crate::utils::new_uuid;
 use crate::utils::Instant;
 
 /// Storage accepted by [`PeerRing::new_with_storage`].
-#[cfg(all(feature = "wasm", target_family = "wasm"))]
-pub type EntryStorage = Box<dyn KvStorageInterface<Entry>>;
-
-/// Storage accepted by [`PeerRing::new_with_storage`].
-#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
-pub type EntryStorage = Box<dyn KvStorageInterface<Entry> + Send + Sync>;
+pub type EntryStorage = Box<rings_runtime::maybe_send_sync!(dyn KvStorageInterface<Entry>)>;
 
 /// Chord routing and replicated-storage state for one network peer.
 pub struct PeerRing {

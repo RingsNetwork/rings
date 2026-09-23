@@ -1,9 +1,44 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::sync::Mutex;
 
+use rings_core::delegation::DelegateeKey;
+
 use crate::error::Result;
+use crate::extension::ext::Extensions;
+use crate::extension::ext::Scope;
+use crate::processor::ProcessorBuilder;
+use crate::processor::ProcessorConfig;
 use crate::sync_lock::lock;
+
+/// A `namespace` scope over a fresh processor keyed by `delegatee_key`.
+///
+/// Pre: called inside a Tokio runtime, which the processor's swarm workers start on.
+pub(crate) fn test_scope(delegatee_key: DelegateeKey, namespace: &str) -> Result<Scope> {
+    let config = ProcessorConfig::new(1, String::new(), delegatee_key, 1);
+    let processor = ProcessorBuilder::from_config(&config)?
+        .advertise_presence(false)
+        .build()?;
+    let extensions = Extensions::new(Arc::new(processor));
+    Ok(Scope::new(extensions.core(), namespace.to_string()))
+}
+
+/// Run `work` on a thread with no entered runtime and return its result.
+///
+/// Witnesses the "no runtime" branch of a boundary that acquires a `Spawner` before it claims
+/// a resource; borrowed fixtures stay usable because the thread is scoped.
+pub(crate) fn without_runtime<T: Send>(work: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                assert!(rings_runtime::Spawner::current().is_err());
+                work()
+            })
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })
+}
 
 /// Awaitable witness that blocks effects for the first observed key until explicitly released.
 pub(crate) struct BlockingSendProbe<K> {

@@ -710,17 +710,8 @@ fn relay_task_for_test_with_src(
     use rings_core::delegation::DelegateeKey;
     use rings_core::ecc::SecretKey;
 
-    use crate::extension::ext::Extensions;
-    use crate::processor::ProcessorBuilder;
-    use crate::processor::ProcessorConfig;
-
     let delegatee_key = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let config = ProcessorConfig::new(1, String::new(), delegatee_key, 1);
-    let processor = ProcessorBuilder::from_config(&config)?
-        .advertise_presence(false)
-        .build()?;
-    let extensions = Extensions::new(Arc::new(processor));
-    let scope = Scope::new(extensions.core(), namespace.to_string());
+    let scope = crate::test_support::test_scope(delegatee_key, namespace)?;
     let sessions = Arc::new(TransportSessions::new());
     let initiator = if src.is_some() {
         Initiator::Local
@@ -844,20 +835,15 @@ mod tests {
             RelaySessionId(12),
             Initiator::Remote,
         );
-        let scope = task.scope.clone();
-        let connecting = Arc::clone(&sessions);
-        let connect_key = key.clone();
 
-        let effect = std::thread::spawn(move || {
-            connecting.connect(
-                scope,
-                connect_key,
+        let effect = crate::test_support::without_runtime(|| {
+            Arc::clone(&sessions).connect(
+                task.scope.clone(),
+                key.clone(),
                 SocketAddr::from(([127, 0, 0, 1], 9)),
                 TransportKind::Tcp,
             )
-        })
-        .join()
-        .expect("runtime-less connect thread");
+        });
 
         assert_eq!(effect, EffectEnqueue::Failed);
         assert_eq!(sessions.current_generation(&key), None);

@@ -116,11 +116,4 @@ pub trait TransportCallback {
 /// The `new_connection` method of
 /// [TransportInterface](super::transport::TransportInterface) trait will
 /// accept boxed [TransportCallback] trait object.
-#[cfg(not(all(feature = "web-sys-webrtc", target_family = "wasm")))]
-pub type BoxedTransportCallback = Box<dyn TransportCallback + Send + Sync>;
-
-/// The `new_connection` method of
-/// [TransportInterface](super::transport::TransportInterface) trait will
-/// accept boxed [TransportCallback] trait object.
-#[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
-pub type BoxedTransportCallback = Box<dyn TransportCallback>;
+pub type BoxedTransportCallback = Box<rings_runtime::maybe_send_sync!(dyn TransportCallback)>;

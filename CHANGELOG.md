@@ -30,8 +30,20 @@
   `rings_transport::js_global` (now `rings_runtime::global`), `rings_transport::PlatformSendSync`
   and `rings_node::extension::ext::MaybeSend` (both `rings_runtime::MaybeSendSync`). Node error
   code 1503 is now `DetachedTask`, with new codes 1504 `RuntimeUnavailable` and 1505 `Timer`;
-  relay, onion and measurement work refuses with these errors instead of panicking when no
-  Tokio runtime is current. `rings_node::prelude` re-exports `rings_runtime`.
+  relay and onion work refuses with these errors instead of panicking when no Tokio runtime is
+  current (measurement construction already refused with a typed error).
+  `rings_node::prelude` re-exports `rings_runtime`.
+
+- Finish the runtime consolidation (#829). `Notifier::set_timeout`/`set_timeout_ms` are
+  removed; `Notifier::notified_within(timeout)` races the notifier against
+  `rings_runtime::sleep` in place, so no timer task is spawned, no native path panics without
+  a runtime, and a timeout no longer wakes a shared notifier. The dedicated notifier timer
+  thread is gone. Trait-object aliases that were split per target (`SharedSwarmCallback`,
+  `EntryStorage`, `ReplayStorage`, `CallbackError`, `MeasureImpl`, `MeasureStorage`,
+  `EvidenceStorage`, `OnionEntryGuardStorage`, `BoxedTransportCallback`, …) are now written
+  once through `rings_runtime::maybe_send_sync!`/`maybe_send!`; their types are unchanged.
+  `rings_runtime::global` is private, the browser delivery poll stops on a timer failure
+  instead of spinning, and `rings_transport::Error` gains `Timer`.
 
 - Replace session-key terminology in the delegated-signing API with `Delegation`,
   `DelegateeKey`, `DelegationBuilder`, and `DelegationDigest` under

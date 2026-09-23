@@ -38,11 +38,7 @@ use crate::sync_lock::lock;
 const MAX_FIXPOINT_STEPS: u32 = 1024;
 
 /// Type-erased handler stored in the registry: native is `Send + Sync`, browser not.
-#[cfg(rings_native)]
-pub(crate) type DynHandler = dyn Handler + Send + Sync;
-/// Type-erased handler stored in the registry.
-#[cfg(rings_browser)]
-pub(crate) type DynHandler = dyn Handler;
+pub(crate) type DynHandler = rings_runtime::maybe_send_sync!(dyn Handler);
 
 type HandlerMap = RwLock<HashMap<String, Arc<DynHandler>>>;
 

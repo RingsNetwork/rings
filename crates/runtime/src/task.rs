@@ -70,9 +70,11 @@ pub enum DetachedError {
 
 /// The capability to schedule detached work on one executor.
 ///
-/// Acquired once with [`Spawner::current`]; afterwards [`Spawner::spawn`] cannot fail, even
-/// from a thread that has no runtime of its own (the native spawner pins the executor it
-/// was acquired on).
+/// Acquired once with [`Spawner::current`]; afterwards [`Spawner::spawn`] needs no runtime
+/// on the calling thread (the native spawner pins the executor it was acquired on).
+///
+/// Invariant: a spawner does not keep its executor alive. Once a native runtime has shut
+/// down, work handed to its spawner is dropped unpolled — see [`Spawner::spawn`].
 #[derive(Clone, Debug)]
 pub struct Spawner {
     #[cfg(not(all(feature = "browser", target_family = "wasm")))]
@@ -97,6 +99,11 @@ impl Spawner {
     }
 
     /// Run `future` detached on this spawner's executor.
+    ///
+    /// Post: the executor owns `future` and runs it to completion while it is alive. If the
+    /// executor has shut down, `future` is dropped unpolled and `spawn` cannot report it;
+    /// work whose loss must be observed goes through [`Spawner::run_detached`], which reports
+    /// it as [`Abandoned`].
     #[cfg(not(all(feature = "browser", target_family = "wasm")))]
     pub fn spawn<F>(&self, future: F)
     where F: Future<Output = ()> + MaybeSend + 'static {
@@ -254,6 +261,25 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), completed.notified())
             .await
             .expect("work handed to the executor must run although its waiter was never polled");
+    }
+
+    /// Law: a spawner outliving its runtime drops work unpolled, and `run_detached` reports
+    /// the loss as `Abandoned` instead of hanging.
+    #[test]
+    fn test_spawner_after_runtime_shutdown_drops_work_and_reports_abandoned() {
+        let runtime = tokio::runtime::Runtime::new().expect("test runtime");
+        let spawner = runtime
+            .block_on(async { Spawner::current() })
+            .expect("current");
+        drop(runtime);
+        let polled = Arc::new(AtomicBool::new(false));
+        let witness = Arc::clone(&polled);
+
+        spawner.spawn(async move { witness.store(true, Ordering::SeqCst) });
+        let result = futures::executor::block_on(spawner.run_detached(async {}));
+
+        assert!(!polled.load(Ordering::SeqCst));
+        assert_eq!(result, Err(Abandoned));
     }
 
     #[tokio::test]

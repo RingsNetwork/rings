@@ -34,12 +34,8 @@ pub struct OnionEntryGuardState {
 }
 
 /// Local key-value storage for persisted onion entry guards.
-#[cfg(all(feature = "browser", target_family = "wasm"))]
-pub type OnionEntryGuardStorage = Box<dyn KvStorageInterface<OnionEntryGuardState>>;
-
-/// Local key-value storage for persisted onion entry guards.
-#[cfg(not(all(feature = "browser", target_family = "wasm")))]
-pub type OnionEntryGuardStorage = Box<dyn KvStorageInterface<OnionEntryGuardState> + Send + Sync>;
+pub type OnionEntryGuardStorage =
+    Box<rings_runtime::maybe_send_sync!(dyn KvStorageInterface<OnionEntryGuardState>)>;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct OnionEntryGuardRecord {

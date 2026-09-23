@@ -5,13 +5,8 @@ use async_trait::async_trait;
 
 use crate::dht::Did;
 
-/// Type of Measure, see [Measure].
-#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
-pub type MeasureImpl = Arc<dyn BehaviourJudgement + Send + Sync>;
-
 /// Type of Measure, see [crate::measure::Measure].
-#[cfg(all(feature = "wasm", target_family = "wasm"))]
-pub type MeasureImpl = Arc<dyn BehaviourJudgement>;
+pub type MeasureImpl = Arc<rings_runtime::maybe_send_sync!(dyn BehaviourJudgement)>;
 
 use rings_measure::ApplyOutcome;
 use rings_measure::EvidenceAdmissionReport;
