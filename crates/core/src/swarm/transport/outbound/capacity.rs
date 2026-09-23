@@ -367,7 +367,8 @@ impl TransferCapacity {
         })
     }
 
-    #[cfg(all(test, not(target_family = "wasm")))]
+    /// Observe live permit ownership for the common native/browser contract tests.
+    #[cfg(test)]
     pub(super) fn admitted(&self) -> usize {
         self.state
             .lock()

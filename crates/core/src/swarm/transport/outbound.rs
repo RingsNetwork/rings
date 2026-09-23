@@ -133,7 +133,7 @@ impl<T, P> Drop for ScheduledTransfer<T, P> {
     }
 }
 
-/// One mailbox command. The worker handles the backlog in submission order,
+/// One mailbox command. The worker handles a snapshot of submissions in FIFO order,
 /// through [`OutboundWorker::handle_command`]. Only shutdown bypasses that
 /// dispatcher, after closing ingress and cancelling all admitted transfers.
 enum OutboundCommand {
@@ -277,7 +277,10 @@ impl OutboundPeerHandle {
     }
 
     pub(super) fn cancel_stopped(&self) {
-        let _ = self.state.sender.send(OutboundCommand::CancelStopped);
+        let _ = self
+            .state
+            .sender
+            .send_coalesced(OutboundCommand::CancelStopped);
     }
 
     fn shutdown(&self) {
@@ -532,12 +535,18 @@ impl OutboundWorker {
         }
     }
 
-    /// Hand the whole command backlog to the transfer queues and observe every
-    /// completed delivery, so the next frame is chosen from the complete state.
+    /// Detach at most 256 submissions and one coalesced cancellation scan.
+    /// All control submissions in that snapshot are visible before selection;
+    /// concurrent later submissions belong to the next iteration. At most four
+    /// lane heads can have completed deliveries, with no new waits added here.
     fn drain_available(&mut self) {
+        // Hold completion publication until the detached batch has relinquished
+        // every command. Shutdown must also release the active and queued owners.
+        let mut final_results = Vec::new();
         for command in self.receiver.drain_available() {
-            self.handle_command(command);
+            final_results.extend(self.apply_command(command));
         }
+        self.publish_command_results(final_results);
         self.input_closed = self.receiver.is_closed();
 
         while let Some(Some(event)) = self.deliveries.next().now_or_never() {
@@ -552,20 +561,38 @@ impl OutboundWorker {
         self.ready.push(class, QueuedTransfer { id, scheduled });
     }
 
+    /// Dispatch one idle-input command through the same reducer as a batch.
     fn handle_command(&mut self, command: OutboundCommand) {
+        let final_results = self.apply_command(command);
+        self.publish_command_results(final_results);
+    }
+
+    /// Move command ownership into queues or deferred completion records.
+    fn apply_command(&mut self, command: OutboundCommand) -> Vec<FinalTransferResult> {
         match command {
-            OutboundCommand::Submit(transfer) => self.accept_submission(*transfer),
+            OutboundCommand::Submit(transfer) => {
+                self.accept_submission(*transfer).into_iter().collect()
+            }
             OutboundCommand::CancelStopped => self.cancel_stopped_admitted(),
         }
     }
 
-    fn accept_submission(&mut self, scheduled: ScheduledTransfer) {
+    /// Complete a stopped batch only after shutdown has released all other owners.
+    fn publish_command_results(&mut self, final_results: Vec<FinalTransferResult>) {
+        if self.stop.is_stop_requested() {
+            self.shutdown_with_results(final_results);
+        } else {
+            Self::publish_released_results(final_results);
+        }
+    }
+
+    /// Recheck cancellation at actor visibility, including cancel-before-submit.
+    fn accept_submission(&mut self, scheduled: ScheduledTransfer) -> Option<FinalTransferResult> {
         if scheduled.transfer.is_stopped() {
-            if let Some(final_result) = Self::cancel_scheduled_transfer(scheduled) {
-                final_result.publish();
-            }
+            Self::cancel_scheduled_transfer(scheduled)
         } else {
             self.enqueue_transfer(scheduled);
+            None
         }
     }
 
@@ -576,17 +603,17 @@ impl OutboundWorker {
     /// rejected by [`Self::accept_submission`] when the worker's drain reaches
     /// it, or already queued, where this scan finds it: the stop token is set
     /// before the command is sent, and the worker handles the backlog in
-    /// order. A transfer stopped after this scan is followed by its own
-    /// `CancelStopped`, handled by the next drain like any other command.
-    fn cancel_stopped_admitted(&mut self) {
+    /// FIFO order before the coalesced scan. A stop after snapshot extraction
+    /// leaves a new `CancelStopped` in ingress, even while this scan runs.
+    /// No scan consumes mailbox commands; none can discard a later wakeup.
+    fn cancel_stopped_admitted(&mut self) -> Vec<FinalTransferResult> {
         let cancelled = self
             .ready
             .remove_ready_where(|queued| queued.scheduled.transfer.is_stopped());
-        let final_results = cancelled
+        cancelled
             .into_iter()
             .filter_map(|queued| Self::cancel_scheduled_transfer(queued.scheduled))
-            .collect();
-        Self::publish_released_results(final_results);
+            .collect()
     }
 
     fn terminate_transfer(
@@ -962,7 +989,7 @@ impl Drop for OutboundWorker {
     }
 }
 
-#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+#[cfg(all(test, any(feature = "dummy", target_family = "wasm")))]
 mod test_cancellation;
 #[cfg(test)]
 mod test_outbound;
