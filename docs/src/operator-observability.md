@@ -24,7 +24,26 @@ a lightweight health check.
 version plus a bounded `observability` object. The largest collections are capped at 32 recent
 message records and 32 peer-rating records. A conservative maximum-width production fixture is
 about 18 KiB and is kept below 32 KiB by a regression test. This makes the projection suitable
-for routine polling without adding the storage payload or performing the full status scan.
+for periodic polling without adding the storage payload or performing the legacy full status
+serialization.
+
+## Polling interval and request cost
+
+Poll `GET /status?view=observability` at most once every 60 seconds per node. Do not use it for
+high-frequency polling, do not start a new request while the previous request is still running,
+and avoid having multiple independent collectors poll the same node. Configure a client timeout so
+a slow request cannot accumulate overlapping work.
+
+The response size is bounded, but the work needed to assemble a current snapshot is not constant.
+Each request walks the live persistent DHT storage view to count mailbox carriers and held messages;
+the walk reads and decodes stored entries and retires expired entries. Snapshot assembly also
+projects the current retained peer measurements. Its CPU, storage I/O, allocation, and lock-hold
+costs therefore grow with the node's stored data and retained peer state. The 60-second interval is
+an operational recommendation intended to limit this work; it is not a claim that the endpoint has
+constant-time cost.
+
+Do not periodically poll the default `GET /status` response. It additionally serializes every
+persistent and cache storage value and is intended for explicit inspection rather than monitoring.
 
 The JSON object's `schema_version` is the compatibility boundary. Fields may be added within the
 current version; incompatible meaning or removal requires a schema-version increment.
