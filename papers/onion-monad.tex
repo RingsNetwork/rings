@@ -1,0 +1,761 @@
+\documentclass[journal]{IEEEtran}
+\usepackage{color}
+\usepackage{cite}
+\usepackage{amsfonts}
+\usepackage{amssymb}
+\usepackage{amsmath}
+\usepackage{amsthm}
+\usepackage{stmaryrd}
+\usepackage{url}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+\usepackage{algorithm}
+\usepackage[noend]{algpseudocode}
+
+\newtheorem{definition}{Definition}
+\newtheorem{assumption}{Assumption}
+\newtheorem{invariant}{Invariant}
+\newtheorem{proposition}{Proposition}
+\newtheorem{corollary}{Corollary}
+\newtheorem{obligation}{Obligation}
+\newcommand{\namedhead}{}
+\newtheorem*{namedenv}{\namedhead}
+\newenvironment{defD}[2]{\renewcommand{\namedhead}{Definition #1}%
+  \begin{namedenv}[#2]}{\end{namedenv}}
+\newenvironment{lawL}[2]{\renewcommand{\namedhead}{Law #1}%
+  \begin{namedenv}[#2]}{\end{namedenv}}
+
+\newcommand{\sem}[1]{\llbracket #1\rrbracket}
+\newcommand{\then}{\mathbin{\ggg}}
+\newcommand{\relay}{\mathsf{relay}}
+\newcommand{\Int}{\mathsf{Intermediate}}
+\newcommand{\WF}{\mathsf{WorldFacing}}
+\newcommand{\Kl}{\mathbf{Kl}}
+\newcommand{\Free}{\mathcal{F}}
+\newcommand{\cl}{\diamond}
+\newcommand{\Enc}[2]{\mathrm{E}^{#1}_{#2}}
+\newcommand{\Dec}[2]{\mathrm{D}^{#1}_{#2}}
+\newcommand{\view}{\mathrm{view}}
+\newcommand{\nxt}{\mathrm{next}}
+\newcommand{\frm}{\mathrm{from}}
+\newcommand{\pad}{\mathrm{pad}}
+\newcommand{\enc}{\mathrm{enc}}
+\newcommand{\peel}{\mathrm{peel}}
+\newcommand{\nf}{\mathrm{nf}}
+\newcommand{\LoopOf}{\mathrm{Loop}}
+\newcommand{\spec}{\mathrm{spec}}
+\newcommand{\quota}{\mathrm{quota}}
+\newcommand{\pos}{\mathrm{pos}}
+\newcommand{\Args}{\mathrm{Args}}
+\newcommand{\In}{\mathrm{In}}
+\newcommand{\Out}{\mathrm{Out}}
+\newcommand{\arr}{t^{\mathrm{arr}}}
+\newcommand{\dep}{t^{\mathrm{dep}}}
+\newcommand{\eqd}{\overset{d}{=}}
+\newcommand{\eqc}{\approx_{c}}
+\newcommand{\Hm}{\hat H}
+\newcommand{\PRG}{\mathrm{PRG}}
+\newcommand{\MAC}{\mathrm{MAC}}
+\DeclareRobustCommand{\code}[1]{{\ttfamily\renewcommand{\_}{\textunderscore\allowbreak}#1}}
+\algnewcommand{\LineComment}[1]{\State \(\triangleright\) #1}
+
+\author{Ryan~J.~Kung%
+\thanks{Ryan J. Kung can be reached at ryankung@ieee.org.
+Manuscript created September 24, 2026.  This document freezes the design
+of Rings issue \#834 (\texttt{rings-node}, module \texttt{onion}) before
+its Phase~2 code; it is a specification, not shipped behaviour.  The
+constants $s=2$ and $n_{\max}=4$ are those fixed in the issue discussion.}}
+\title{\huge OnionMonad:\\
+Onion Circuits as Client-Sealed Loops\\
+of Registered Operation Symbols}
+\date{}
+
+\IEEEaftertitletext{%
+\vspace{0.5\baselineskip}%
+\noindent\hfill
+\parbox{0.90\textwidth}{%
+{\centering\bfseries Abstract\par}%
+\vspace{0.4\baselineskip}%
+\noindent
+The Rings onion data plane interprets two layers, \emph{relay} and
+\emph{exit}, and answers along the reversed path through relays that keep
+per-circuit return state and forward one client-bound ciphertext
+byte-identical.  We generalise the circuit to a term over a static
+signature $\Sigma$ of operation symbols: nodes are partial
+$\Sigma$-algebras that register symbols, never applications; a circuit is a
+client-sealed loop $\cl\to g\to\cdots\to g\to\cl$ that evaluates one
+application per hop and composes them in the Kleisli category of the hop
+effect monad, with $\relay$ as the identity.  Each segment holds $s=2$
+relays, the guard counting in both end segments; every hop parses one
+uniform layer of a fixed-length Sphinx-style header; values travel in a fixed-width carry slot enciphered with AEZ, one
+length-preserving layer per relay and one authenticated layer per
+consumer; replies to world-facing sessions ride single-use reply blocks
+under credit flow control.  We state eleven laws, among them
+noninterference over hop views, position hiding, client path authority
+(which admits Arrow composition and excludes monadic bind), byte
+unlinkability, and
+single-use admission, list the residual leakage, and map each law to a
+test obligation.\par\vspace{0.6\baselineskip}}}
+
+\begin{document}
+\maketitle
+
+\section{Introduction}
+
+Today's circuit is the term $\relay^{k}\then(\mathit{svc},\mathit{body})$
+evaluated on the forward path and answered on its reverse
+(\S\ref{sec:current}).  This paper states the general structure of which
+it is the degenerate instance, as definitions D1--D9 and laws L1--L10 and L5$'$
+of issue \#834, numbered identically.  Design lineage: Sphinx headers and
+wide-block payloads~\cite{Danezis2009}, reply blocks~\cite{Chaum1981,
+Danezis2003}, loops~\cite{Piotrowska2017}, AEZ~\cite{Hoang2015}, Kleisli
+semantics~\cite{Moggi1991}, generic effects~\cite{Plotkin2003,
+Plotkin2009}, and the Arrow/Selective hierarchy~\cite{Hughes2000,
+Lindley2011,Mokhov2019}.
+
+\section{Signature and Algebras}\label{sec:sig}
+
+\begin{defD}{D1}{signature}
+$\Sigma$ is a finite, statically defined table of symbols; each $f\in\Sigma$
+has
+\begin{multline*}
+\spec(f)=(\mathit{name},\Args_f,\In_f,\Out_f,\\
+W(f),L(f),\pos(f),\quota(f))
+\end{multline*}
+with $\mathit{name}$ identifying the backend (e.g.\ \code{jev.typesafe}),
+$\Args_f$ client constants, $\In_f,\Out_f$ carried types, $W(f)\in\mathbb{N}$
+the exact output width in bytes, $L(f)$ the exact latency class,
+$\pos(f)\subseteq\{\Int,\WF\}$, and $\quota(f)$ the admission budget.
+$W,L$ are protocol data.  The identity symbol is
+\[
+\relay:X\to X,\qquad W(\relay)=|X|,\qquad L(\relay)=0 .
+\]
+\end{defD}
+
+\begin{defD}{D2}{registration}
+Node $n$ is a partial $\Sigma$-algebra: a set $\Sigma_n\subseteq\Sigma$ and,
+for each $f\in\Sigma_n$, a generic effect~\cite{Plotkin2003}
+\[
+\sem{f}_n:\Args_f\times\In_f\to M\,\Out_f ,
+\]
+$M$ the hop effect monad (failure, delay, world I/O).  $n$ publishes
+$f\in\Sigma_n$, never an application.  $\relay$ is published in
+\code{OnlineNodeDescriptor::capabilities}; every other $f$ in one signed
+descriptor per symbol carrying $n$'s invocation epoch and $\quota(f)$.
+Registration is upward closed: $\Sigma_n\ne\emptyset\Rightarrow\relay\in
+\Sigma_n$, so a neighbour's registry entry does not reveal whether a relay
+is adjacent to a symbol hop.
+\end{defD}
+
+A node is a handler~\cite{Plotkin2009} for the operations it registers;
+$\WF$ symbols (\code{tcp}, \code{https}) may hold a session, $\Int$ symbols
+are one-shot.
+
+\begin{defD}{D3}{application}
+An application is $(f,\bar a)$, $\bar a\in\Args_f$, typed
+$(f,\bar a):\In_f\rightsquigarrow\Out_f$; it is sealed in the layer of the
+hop that evaluates it and visible to no other hop.
+\end{defD}
+
+\section{Pipelines}\label{sec:pipeline}
+
+\begin{defD}{D4a}{pipeline}
+Pipelines are the morphisms of the free category $\Free(\Sigma)$ on the
+graph with types as vertices and applications as edges; composition is
+\[
+\frac{\theta:X\rightsquigarrow Y\qquad \vartheta:Y\rightsquigarrow Z}
+     {\theta\then\vartheta:X\rightsquigarrow Z}.
+\]
+$P=(f_1,\bar a_1)\then\cdots\then(f_n,\bar a_n)$ is well formed iff
+\begin{gather*}
+1\le n\le n_{\max}=4,\qquad\forall k<n:\ \Out_{f_k}=\In_{f_{k+1}},\\
+\forall k<n:\ \Int\in\pos(f_k),\\
+f_n\text{ is a }\WF\text{ session symbol}\ \Rightarrow\ n=1 .
+\end{gather*}
+Violations are rejected at construction.  The bound $n_{\max}$ is
+\code{MAX\_ONION\_LOOP\_SYMBOLS}.
+\end{defD}
+
+\begin{defD}{D4b}{Kleisli denotation}
+For $\phi:X\to MY$, $\psi:Y\to MZ$ in $\Kl(M)$~\cite{Moggi1991},
+$\phi\then\psi=\mu_Z\circ M\psi\circ\phi$.  For hop assignment
+$h_1..h_n$ with $f_k\in\Sigma_{h_k}$,
+\[
+\sem{P}(v_0)=\bigl(\sem{f_1}_{h_1}(\bar a_1,-)\then\cdots\then
+\sem{f_n}_{h_n}(\bar a_n,-)\bigr)(v_0),
+\]
+the unique functor $\Free(\Sigma)\to\Kl(M)$ extending the hop
+interpretations.  The client consumes $\sem{P}(v_0)$.
+\end{defD}
+
+\begin{lawL}{L1}{identity}
+$\sem{\relay}=\eta$, hence $\relay\then f=f=f\then\relay$ on values.  The
+loop builder factors through $\nf$, which deletes $\relay$ applications:
+$\LoopOf(P)=\LoopOf(\nf P)$, so $\LoopOf(\relay\then P)\eqd\LoopOf(P)$ and every
+hop's view is unchanged.
+\end{lawL}
+
+\begin{lawL}{L2}{associativity}
+$(f\then g)\then h=f\then(g\then h)$ on values; immediate from the monad
+laws, and $\Free(\Sigma)$ has no bracketing.
+\end{lawL}
+
+$\nf$ and L1 on views apply from Phase~2a.  Phase~1 admits only
+$\relay^{k}\then(f,\bar a)$ with $\WF\in\pos(f)$, which
+is today's circuit (\S\ref{sec:current}).
+
+\section{The Loop}\label{sec:loop}
+
+\begin{defD}{D4c, D5}{loop, segment}
+Let $\cl$ be the client and $g$ its entry guard.  Segment $k\in[0,n]$
+is $s=2$ relays $r_{k,1}..r_{k,s}$ (\code{ONION\_SEGMENT\_RELAYS}) from producer $p_k$ to consumer $c_k$,
+\begin{gather*}
+p_0=\cl,\quad p_k=h_k,\quad c_k=h_{k+1},\quad c_n=\cl,\\
+\LoopOf(P):\ \cl\to r_{0,1..s}\to h_1\to r_{1,1..s}\to\cdots\\
+\to h_n\to r_{n,1..s}\to\cl .
+\end{gather*}
+Positions are $i\in[1,H]$; position $i$ evaluates $f_i$,
+which is $\relay$ on every $r_{k,j}$.  $\LoopOf(\nf P)$ is the symbol word
+$\relay^{s}f_1\relay^{s}\cdots f_n\relay^{s}$.
+\end{defD}
+
+\begin{lawL}{L7}{guard closure}
+$r_{0,1}=r_{n,s}=g$: the guard is relay $1$ of segment $0$ and relay $s$
+of segment $n$.  The other $H-2$ positions carry pairwise distinct DIDs,
+distinct from $g$.  $g$ is the only hop adjacent to $\cl$.
+\end{lawL}
+
+\begin{proposition}[Loop size]\label{prop:size}
+With $n$ symbol hops and $n+1$ segments of $s$ relays,
+\begin{gather*}
+H(n,s)=n+(n+1)s=(s+1)n+s,\\
+\#\mathrm{DID}=H-1,\qquad E=H+1\ \text{cells},\\
+\Hm=H(n_{\max},s)=(s+1)\cdot4+s=14 .
+\end{gather*}
+\end{proposition}
+\begin{proof}
+Segments contribute $(n+1)s$ positions; L7 repeats exactly one DID; the
+$H$ positions lie on a path from $\cl$ to $\cl$ of $H+1$ edges.
+\end{proof}
+
+\begin{proposition}[Segment length]\label{prop:s}
+$s=2$ is the least $s$ at which no single node is adjacent to both $\cl$
+and a symbol hop.
+\end{proposition}
+\begin{proof}
+$s=0$ violates L7.  At $s=1$, $r_{0,1}=r_{0,s}=r_{n,1}=r_{n,s}=g$, so $g$
+alone is adjacent to $\cl$, $h_1$ and $h_n$, and for $n=1$ links $\cl$ to
+its world-facing $h_1$.  At $s=2$, $g$ neighbours only $\cl$, $r_{0,2}$,
+$r_{n,1}$.
+\end{proof}
+
+Relays do not mix ($L(\relay)=0$), so a timing-correlating coalition skips
+middle relays: $s\ge3$ adds $n+1$ edges of latency per relay and no
+anonymity.  At $(s,n)=(2,1)$, $E=6$ and the forward prefix
+$g,r_{0,2},h_1$ is Tor's three-hop circuit~\cite{Dingledine2004}.
+
+Route validation checks $H=(s+1)n+s$ with exactly $s$ relays between
+consecutive symbol hops, and admits $g$ exactly twice, at positions $1$
+and $H$ (\code{has\_duplicate\_dids}); selection fails closed when fewer
+than $H-1$ distinct eligible DIDs exist.  \code{MAX\_ONION\_LOOP\_HOPS}
+$=\Hm$ is derived from $s$ and $n_{\max}$ and replaces
+\code{MAX\_ONION\_CIRCUIT\_HOPS}~$=8$; \code{DEFAULT\_ONION\_ROUTE\_HOPS}
+and \code{OnionRouteRequest::\{hop\_count, allow\_short\_paths\}} are
+removed, since a short path is a distinguishable segment length (D5).
+
+\begin{table}[t]
+\caption{Loop shape at $s=2$ (Prop.~\ref{prop:size})}
+\label{tab:size}
+\centering\small
+\begin{tabular}{@{}ccccc@{}}
+\toprule
+$n$ & $H$ & DIDs & $E$ & header $|\beta|$ \\
+\midrule
+1 & 5 & 4 & 6 & \multirow{4}{*}{$\Hm\ell=8190$\,B} \\
+2 & 8 & 7 & 9 & \\
+3 & 11 & 10 & 12 & \\
+4 & 14 & 13 & 15 & \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Uniform Layer and Timing}\label{sec:layer}
+
+\begin{defD}{D6}{uniform layer}
+Every position $i$ has one layer shape
+\[
+\lambda_i=(f_i,\bar a_i,\nxt_i,e_i,x,\nu_i,\kappa_i,\gamma_{i+1},
+\alpha_{i+1})
+\]
+of $\ell$ bytes, with $\bar a_i$ padded to $A$ bytes: epoch $e_i$, one
+expiry $x$ per loop, replay nonce
+$\nu_i$, carry keys $\kappa_i=(k^{\mathrm{in}}_i;k^{\mathrm{out}}_{i,1..s+1})$,
+and the next hop's MAC $\gamma_{i+1}$ and key transport $\alpha_{i+1}$
+(Def.~\ref{def:header}).  A relay has $\bar a_i=()$ and random
+$k^{\mathrm{out}}$.  The cell on every edge is
+\[
+(\chi_{i+1},y_i),\qquad \chi=(\alpha,\beta,\gamma),\qquad
+|\beta|=\Hm\ell,\qquad |y_i|=C .
+\]
+\end{defD}
+
+With today's encodings (239-byte ElGamal-AEAD envelope as $\alpha$, 43-byte
+DIDs, 52-byte keys), $\ell(s,A)=393+A+32(s+2)$, so $\ell(2,64)=585$\,B and
+$|\beta|=8190$\,B: every loop cell uses at least the 16\,KiB bucket.
+
+\begin{definition}[Fixed-length header]\label{def:header}
+Hop $i$ derives $K_i$ from $\alpha_i$ and its secret key and expands
+$\rho_i=\PRG(K_i)\in\{0,1\}^{(\Hm+1)\ell}$; $\rho[a,b)$ is a byte range in
+units of $\ell$.  It checks $\gamma_i=\MAC_{K_i}(\beta_i)$ and peels
+\[
+(\beta_i\,\|\,0^{\ell})\oplus\rho_i=\lambda_i\,\|\,\beta_{i+1}.
+\]
+The client builds, for $1\le i<H$, with $R$ uniform,
+\begin{gather*}
+\phi_0=\epsilon,\quad
+\phi_i=(\phi_{i-1}\|0^{\ell})\oplus\rho_i[\Hm{-}i{+}1,\Hm{+}1),\\
+\beta_H=\bigl((\lambda_H\|R)\oplus\rho_H[0,\Hm{-}H{+}1)\bigr)\,\|\,
+\phi_{H-1},\\
+\beta_i=\bigl(\lambda_i\,\|\,\beta_{i+1}[0,\Hm{-}1)\bigr)\oplus
+\rho_i[0,\Hm),\quad \gamma_i=\MAC_{K_i}(\beta_i).
+\end{gather*}
+\end{definition}
+
+This is Sphinx's header~\cite{Danezis2009}: per-hop PRG filler with MACs
+the client precomputes.  $\alpha_{i+1}$ is either a per-layer envelope
+carried in $\lambda_i$ (as above) or a blinding of $\alpha_i$ (Sphinx's
+single group element, roughly halving $\ell$); L5$'$ holds for both.
+
+\begin{proposition}[Header correctness]\label{prop:header}
+For $H\le\Hm$ and $1\le i<H$, peeling $\beta_i$ under $K_i$ yields
+$(\lambda_i,\beta_{i+1})$, and every $\gamma_i$ verifies.
+\end{proposition}
+\begin{proof}
+By induction down from $H$, the last $i-1$ blocks of $\beta_i$ are
+$\phi_{i-1}$: true at $H$ by construction, and expanding $\beta_i$ and
+$\phi_i$ carries it from $i+1$ to $i$.  So the first $\Hm$ blocks of
+$(\beta_i\|0^\ell)\oplus\rho_i$ are $\lambda_i\|\beta_{i+1}[0,\Hm{-}1)$,
+and its last block $\rho_i[\Hm,\Hm{+}1)$ is the last block of $\phi_i$,
+hence of $\beta_{i+1}$.
+\end{proof}
+
+\begin{lawL}{L3}{width}
+The carry slot has width $C$ on every edge.  With plaintext width
+$C_0=C-\tau$, $W(f)<C_0$ for all $f\in\Sigma$, $W$ factors through the
+output type ($W(f)=w(\Out_f)$, so the width a consumer unpads is fixed by
+its own $\In$), and
+\[
+\pad(b)=b\,\|\,\mathtt{80}\,\|\,\mathtt{00}^{C_0-|b|-1},\qquad
+|\enc_f(w)|=W(f);
+\]
+an output with $|\enc_f(w)|>W(f)$ fails closed, never truncated.
+\end{lawL}
+
+\begin{lawL}{L4}{timing}
+$\dep_i=\arr_i+L(f_i)$ exactly.  An evaluation unfinished at $\dep_i$ is
+dropped, never released late.
+\end{lawL}
+
+\section{Carry}\label{sec:carry}
+
+Write $\Enc{\tau}{k},\Dec{\tau}{k}$ for AEZ v5~\cite{AEZv5,Hoang2015}
+encryption and decryption with empty nonce and associated data;
+$|\Enc{\tau}{k}(m)|=|m|+\tau$, and $\Dec{\tau}{k}$ returns $\bot$ unless
+the deciphered block ends in $\tau$ zero bytes.
+
+\begin{defD}{D7}{carry}
+For segment $k$ the client draws fresh keys
+$k_{r_{k,1}},..,k_{r_{k,s}},k_{c_k}$ and places them
+\[
+\kappa_{p_k}^{\mathrm{out}}=(k_{r_{k,1}},..,k_{r_{k,s}},k_{c_k}),\quad
+\kappa_{r_{k,j}}^{\mathrm{in}}=k_{r_{k,j}},\quad
+\kappa_{c_k}^{\mathrm{in}}=k_{c_k}.
+\]
+With $b_k=\pad(\enc(v_k))$ and $\tau=16$:
+\begin{gather*}
+y_{k,0}=\Enc{0}{k_{r_{k,1}}}\circ\cdots\circ\Enc{0}{k_{r_{k,s}}}
+\circ\Enc{\tau}{k_{c_k}}(b_k),\\
+y_{k,j}=\Dec{0}{k_{r_{k,j}}}(y_{k,j-1}),\qquad
+b_k=\Dec{\tau}{k_{c_k}}(y_{k,s}).
+\end{gather*}
+A consumer with $\In_f=()$ ignores the slot.
+\end{defD}
+
+Since $s$ is constant, $|\kappa_i|$ is constant and reveals no position.
+AEZ v5 is implemented in-repo on RustCrypto \code{aes::hazmat}
+(constant-time, \code{wasm32}); keys are raw $48$-byte strings, a key with
+a zero subkey $I$, $J$ or $L$ is rejected, and $\mathrm{GF}(2^{128})$
+doubling is branch-free.  $C\ge32$ keeps every call on the AEZ-core
+path, never AEZ-tiny.
+
+\begin{proposition}[One value per key]\label{prop:onekey}
+Under L9 every $k_{r_{k,j}}$ and $k_{c_k}$ enciphers exactly one $C$-byte
+value.  Without L9 a relay replaying one cell with modified carry becomes
+a chosen-ciphertext oracle under a fixed key: L9 is load-bearing for AEZ.
+\end{proposition}
+
+\begin{algorithm}[t]
+\caption{$\mathrm{Hop}_i(\frm,\chi,y,\arr)$: one position, all symbols}
+\label{alg:hop}
+\begin{algorithmic}[1]
+\State $(\lambda,\chi')\gets\peel(\mathit{sk}_i,\chi)$;\ \textbf{if}
+  $\gamma$ fails \textbf{then} drop
+\If{$\arr>x\ \vee\ e\ne\mathrm{epoch}_i\ \vee\ \nu\in R_i$} \State drop
+  \Comment{L9} \EndIf
+\State $R_i\gets R_i\cup\{(\nu,x)\}$
+\If{$f=\relay$} \State $y'\gets\Dec{0}{k^{\mathrm{in}}}(y)$
+\Else
+  \State $b\gets\Dec{\tau}{k^{\mathrm{in}}}(y)$;\ \textbf{if} $b=\bot$
+    \textbf{then} drop \Comment{L8}
+  \State $w\gets\sem{f}(\bar a,\enc^{-1}\pad^{-1}(b))$ by $\arr+L(f)$
+    \Comment{L4}
+  \If{late $\vee\ |\enc_f(w)|>W(f)$} \State drop \Comment{L3} \EndIf
+  \State $y'\gets\Enc{0}{k^{\mathrm{out}}_1}\circ\cdots\circ
+    \Enc{0}{k^{\mathrm{out}}_s}\circ\Enc{\tau}{k^{\mathrm{out}}_{s+1}}
+    (\pad\,\enc_f(w))$
+\EndIf
+\State release $(\chi',y')$ to $\nxt$ at $\arr+L(f)$
+\end{algorithmic}
+\end{algorithm}
+
+\section{Reply Blocks}\label{sec:surb}
+
+\begin{defD}{D8}{SURB}
+A single-use reply block for a session symbol at $h$ is the client-sealed
+loop suffix after $h$:
+\[
+\upsilon=(\nxt,\chi_\upsilon,k_{r_1},..,k_{r_s},k_{\cl},x_\upsilon).
+\]
+The suffix of the loop that opened or continued the session is itself a
+SURB; a forward frame may carry $\sigma$ further SURBs in its carry value.
+\end{defD}
+
+\begin{invariant}[Credit]\label{inv:credit}
+Let $Q_h$ be $h$'s unexpired SURBs, $u(t)$ the SURBs received and $r(t)$
+the replies emitted by time $t$.  Then
+\[
+r(t)\le u(t),\qquad |Q_h|=0\Rightarrow\text{\code{tcp} stops reading its
+socket.}
+\]
+Each reply consumes one $\upsilon$, produced as segment $n$ of
+D7 with $p_n=h$; replenishment resumes reading.
+\end{invariant}
+
+\section{Security Laws}\label{sec:laws}
+
+\begin{assumption}[Primitives]\label{as:prim}
+Under a key it does not hold, a hop sees $\Enc{0}{k}$ as a uniformly random
+permutation of $\{0,1\}^{C}$ and $\Enc{\tau}{k}$ as robust
+AE~\cite{Hoang2015}; $\PRG$ and $\MAC$ are secure, and key transport
+reveals $K_j$ to hop $j$ only.  Network delays $\delta$ are fixed per edge;
+no hop other than $g$ observes the client's departure time.
+\end{assumption}
+
+\begin{defD}{D9}{view}
+Over client coins $\rho$ (keys, nonces, header randomness) and delays
+$\delta$,
+\begin{multline*}
+\view_i=(f_i,\bar a_i,v_{i-1},\frm_i,\nxt_i,e_i,x_i,\\
+\mathit{bucket},\arr_i,\dep_i,\chi_i,y_{i-1},\chi_{i+1},y_i),
+\end{multline*}
+with $v_{i-1}=\bot$ when $f_i=\relay$ (a relay consumes no value).
+\end{defD}
+
+\begin{lawL}{L5}{noninterference}
+For loops $P,P'$ let
+\begin{gather*}
+\pi_i(P)=(f_i,\bar a_i,v_{i-1},\frm_i,\nxt_i,e_i,x),\\
+\sigma(P)=f_1\cdots f_H,\\
+\pi_i(P)=\pi_i(P')\ \wedge\ \sigma(P)=\sigma(P')\\
+\Rightarrow\ \view_i(P)\eqd\view_i(P') .
+\end{gather*}
+Symbols may leak; $\bar a_j,v_j$ for $j\ne i$, other than the consumed
+$v_{i-1}$, may not~\cite{Goguen1982}.
+\end{lawL}
+
+\begin{proposition}[L5 from D6, D7, L3, L4]\label{prop:ni}
+Under Assumption~\ref{as:prim}, every loop built by
+D4c--D7 satisfies L5.
+\end{proposition}
+\begin{proof}
+Lengths: $|\chi_i|$ and $|y_i|=C$ are constant (D6, L3).  Times:
+$\arr_i=\sum_{j<i}(L(f_j)+\delta_j)$ by L4, a function of $\sigma,\delta$.
+Headers: $\chi_i,\chi_{i+1}$ reveal only $\lambda_i$, fixed by $\pi_i$ up
+to fresh coins (Prop.~\ref{prop:pos}).  Carry: if $i=r_{k,j}$, then
+$\Dec{0}{k_{r_{k,j}}}(y_{k,j-1})$ is an $\Enc{}{}$ output under
+$k_{r_{k,j+1}}$ or $k_{c_k}$, a fresh key not held by $i$, hence uniform on
+$\{0,1\}^C$ and independent of $v_k$.  If $i=c_k$, it learns $v_{i-1}$,
+which $\pi_i$ fixes.  If $i=p_k$, its output is computed from $v_{i-1}$
+and $\bar a_i$.  No component depends on $\bar a_j,v_j$ otherwise.
+\end{proof}
+
+L5's premise fixes $\sigma$, hence $H$ and every index, so it says nothing
+about length or position; L5$'$ does.
+
+\begin{lawL}{L5$'$}{position hiding}
+For loops $P,P'$ with $H(P),H(P')\le\Hm$ and positions $i$ of $P$, $i'$
+of $P'$,
+\begin{gather*}
+\pi^{\circ}_i(P)=(f_i,\bar a_i,v_{i-1},\frm_i,\nxt_i),\\
+\pi^{\circ}_i(P)=\pi^{\circ}_{i'}(P')\ \Rightarrow\
+\view_i(P)\eqc\view_{i'}(P') .
+\end{gather*}
+No hop learns its position, $H$, or the symbols elsewhere in the loop.
+\end{lawL}
+
+\begin{proposition}[L5$'$ from Def.~\ref{def:header}]\label{prop:pos}
+Under Assumption~\ref{as:prim}, the distinguishing advantage is at most
+$\Hm\,\epsilon_{\PRG}+\epsilon_{\MAC}+\epsilon_{\alpha}$.
+\end{proposition}
+\begin{proof}
+$|\chi|$ and $C$ do not depend on $H$ or $i$; $e_i$, $x$ and $\arr_i$ carry
+no position (one expiry per loop; departure time unobserved).  Hop $i$
+sees $\lambda_i$, fixed by $\pi^{\circ}_i$ up to fresh coins, $\alpha_{i+1}$,
+$\gamma_{i+1}$, and $\beta_{i+1}$.  Every block of $\beta_{i+1}$ but the
+last is masked by some $\rho_j$, $j\ne i$: by $\rho_{i+1}$ when $i+1<H$,
+and by $\rho_H$ or an upstream term of $\phi_{H-1}$ when $i+1=H$.  The last
+block is $\rho_i[\Hm,\Hm{+}1)$, computed by $i$ itself in both loops.
+Hybrids replacing the $\rho_j$, $j\ne i$, one key at a time by uniform
+strings make $\beta_{i+1}$ uniform apart from that block, in $P$ and $P'$
+alike; $\gamma_{i+1}$ is then a $\MAC$ under an unseen key.
+\end{proof}
+
+\begin{lawL}{L6}{path authority}
+$\nxt_i$ is a field of $\lambda_i$, fixed by $\cl$ at construction:
+$\nxt_i$ is independent of every $v_j$.  No symbol chooses a hop.
+\end{lawL}
+
+\begin{proposition}[Admissible combinators]\label{prop:arrow}
+L6 admits the composition fragment ($\then$, without $\mathit{arr}$ or
+$\mathit{first}$) of Arrows~\cite{Hughes2000} and excludes monadic bind.
+Selective branching~\cite{Mokhov2019} over client-sealed branches needs
+L6 weakened to $\nxt_i\in N_i$, a finite set sealed by $\cl$.
+\end{proposition}
+\begin{proof}
+$\then$ fixes every hop before any value exists.
+$\mathit{select}:F(A+B)\to F(A\to B)\to F\,B$ fixes the possible effects,
+so $\cl$ can seal both branches, but the selecting hop picks $\nxt_i$ by
+$v_i$ and learns the branch taken; its law is deferred with Selective
+itself.  Bind $m\gg\!\!=k$, $k:A\to M\,B$, chooses the
+continuation, and so its hops, from a run-time value: either a hop
+constructs $\nxt$ (violating L6) or $\cl$ seals $|A|$ continuations.  This
+is the arrows-meticulous, monads-promiscuous separation of
+\cite{Lindley2011}.
+\end{proof}
+
+``OnionMonad'' names $M$, the effect inside one hop; across hops only the
+static fragment of $\Kl(M)$ is exposed.
+
+\begin{lawL}{L8}{unlinkability}
+On consecutive edges $\chi_i\ne\chi_{i+1}$ and $y_{i-1}\ne y_i$ (one layer
+peeled, one AEZ layer removed per hop).  If any $y_{k,j}$ is modified to
+$\tilde y\ne y_{k,j}$,
+\[
+\Pr\bigl[\Dec{\tau}{k_{c_k}}(\tilde y_{k,s})\ne\bot\bigr]\le2^{-8\tau}
++\epsilon_{\mathrm{AEZ}},
+\]
+and a rejected value yields nothing; no bit of a tag survives.  L8 is a
+byte-level law; colluders still link by timing (Table~\ref{tab:leak}).
+\end{lawL}
+
+Under Assumption~\ref{as:prim} consecutive $y$ are independent uniform
+strings to any hop lacking both keys.  A modification propagates through
+every later wide-block decipherment, so, unlike counter-mode relay
+cryptography~\cite{Degabriele2018}, a flipped bit is never observed in
+place; this is Sphinx's wide-block payload~\cite{Danezis2009,Anderson1996}
+with AEZ in place of LIONESS.
+
+\begin{lawL}{L9}{replay}
+Every hop admits each $\nu$ at most once within $[\,\cdot\,,x]$; $R_i$
+holds $(\nu,x)$ until $x$.  A SURB is a layer, hence single use; L9 also
+bounds each AEZ key to one carry value (Prop.~\ref{prop:onekey}).
+\end{lawL}
+
+\begin{lawL}{L10}{wire}
+Phase~1 preserves today's bytes (golden tests); Phase~2 replaces them with
+a new pinned golden set in one cutover, without versioning.
+\end{lawL}
+
+\section{Accepted Leakage}\label{sec:leak}
+
+\begin{table}[t]
+\caption{Residual leakage, stated and accepted}
+\label{tab:leak}
+\centering\small
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.38\columnwidth}>{\raggedright\arraybackslash}p{0.55\columnwidth}@{}}
+\toprule
+leakage & bound \\
+\midrule
+symbols $\sigma$ are public; $\lambda_i$ names $f_i$ & L5 hypothesis \\
+a $\WF$ hop knows it faces the world & no other hop learns whether symbols follow (L3, D6, L5$'$) \\
+$g$ sees departure and return & round-trip $\sum_e d_e+\sum_i L(f_i)$: an estimate of $H$ and of $\sum_i L(f_i)$; normalising it is a separate issue \\
+latency class & L4 quantises timing; cannot remove it \\
+hosted backend & sees $\bar a$ of every application of its symbol \\
+$p_k$ holds $\kappa^{\mathrm{out}}_{p_k}$ & $p_k$ colluding with $r_{k,j}$ links two positions of one segment; no value leaks, and timing links them anyway \\
+client-authored semantics ($\bar a_{i+1}$ depends on meaning of $v_i$) & out of protocol scope \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:leak} is exhaustive with respect to L5: every other
+component of $\view_i$ is determined by $\pi_i$ and $\sigma$.
+
+\section{The Current Design}\label{sec:current}
+
+\begin{proposition}[Backward linkability]\label{prop:current}
+In \code{circuit/crypto.rs},
+\code{encrypt\_client\_payload\_at\_sequence} seals the
+exit's answer once, $c=\mathrm{AEAD}_{\mathit{pk}_\cl}(\cdot)$, and
+in \code{circuit/reducer.rs}, \code{advance\_backward} re-emits it as
+$\mathit{payload}=\mathit{frame.payload}$, rewriting only the edge
+circuit id and the outer hop seal.  Every backward relay therefore sees the
+same $c$: any two colluding relays, and the exit, link their positions by
+equality, independently of route length.
+\end{proposition}
+
+\begin{proposition}[Nested layers leak position]\label{prop:nested}
+\code{build\_forward\_layers\_with\_ids} nests one envelope per hop, so
+hop $i$ decrypts $\mathit{inner}_i$ with
+$|\mathit{inner}_i|=\sum_{j>i}\ell_j+|\lambda_H|$, measured at $404$\,B per
+downstream hop.  A loop extended after $i$ changes $|\mathit{inner}_i|$,
+so $\view_i$ distinguishes it with probability $1$: L5$'$ fails.
+\end{proposition}
+
+Cell buckets pad the cell before decryption, not the layer; padding the
+innermost layer to a constant total only moves the leak from $H-i$ to $i$.
+
+\begin{table}[t]
+\caption{Current circuit versus OnionMonad}
+\label{tab:delta}
+\centering\footnotesize
+\setlength{\tabcolsep}{2pt}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.19\columnwidth}>{\raggedright\arraybackslash}p{0.39\columnwidth}>{\raggedright\arraybackslash}p{0.38\columnwidth}@{}}
+\toprule
+concern & current & here \\
+\midrule
+layers & \code{Relay}, \code{Exit} & one uniform $\lambda_i$ (D6) \\
+header & nested, $-404$\,B per hop & fixed $\Hm\ell$ (L5$'$) \\
+length & $3$ by default, $\le8$, short paths allowed & $H(n,2)\le14$ (D5) \\
+computation & exit service only & any $f\in\Sigma_n$ (D2) \\
+return path & forward path reversed & fresh relays to $g$ (L7) \\
+relay state & \code{relay\_returns}, $\le1024$, TTL $120$\,s refreshed per cell & replay tags only (L9) \\
+return bytes & one ciphertext, identical per edge & one AEZ layer per edge (L8) \\
+replay & exits (\code{consume\_forward\_nonce}) & every hop (L9) \\
+session replies & no credit bound & one per SURB (Inv.~\ref{inv:credit}) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The stored return edge $(\mathit{id}',\nxt)\mapsto(\frm,\mathit{id},
+\mathit{pk})$ is the only reason relays hold circuit state; the loop
+removes it with \code{Backward}, \code{OnionBackwardFrame},
+\code{MAX\_ONION\_RELAY\_CIRCUITS}, and \code{ONION\_RELAY\_RETURN\_TTL\_MS}.
+
+\section{Security}\label{sec:security}
+
+Table~\ref{tab:threats} maps each threat to the law that bounds it.
+
+The adversary controls any set of nodes other than $\cl$, and delivery
+order; it cannot break Assumption~\ref{as:prim}.  Relays do not mix, so
+this is Tor's threat model: a global passive observer is out of scope.  Dropping is always
+possible and out of scope.
+
+\begin{table}[t]
+\caption{Threats and the law that bounds each}
+\label{tab:threats}
+\centering\small
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.3\columnwidth}>{\raggedright\arraybackslash}p{0.63\columnwidth}@{}}
+\toprule
+threat & bound \\
+\midrule
+hop learns another's $\bar a_j$, $v_j$ & L5 (Prop.~\ref{prop:ni}) \\
+position, loop length & fixed $|\beta|$, $C$, $|\kappa|$, $s$ (D5--D7, L3, L5$'$) \\
+value-dependent timing & exact release $\arr+L(f)$ (L4) \\
+colluding relays match bytes & per-edge re-encipherment (L8); cf.\ Prop.~\ref{prop:current} \\
+tagging & whole-value rejection, $2^{-8\tau}$ (L8) \\
+hop-chosen routing & $\nxt_i\in\lambda_i$ (L6); bind excluded (Prop.~\ref{prop:arrow}) \\
+first/last-hop correlation & one guard closes the loop (L7) \\
+replay of layer or SURB & single admission per $\nu$ (L9) \\
+reply amplification & $r(t)\le u(t)$ (Inv.~\ref{inv:credit}) \\
+symbol abuse & per-symbol $\quota(f)$ (D1) \\
+oversized result & fail closed at $W(f)$ (L3) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Verification}\label{sec:verification}
+
+Every law is discharged against the pure builder and reducer, not a shadow
+model (Table~\ref{tab:obligations}).
+
+\begin{table}[t]
+\caption{Obligations and the test that discharges each}
+\label{tab:obligations}
+\centering\small
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.2\columnwidth}>{\raggedright\arraybackslash}p{0.73\columnwidth}@{}}
+\toprule
+obligation & test or property \\
+\midrule
+L10 & golden encodings of layers, wire messages, cells, and descriptor signing data, landed before any refactor; a new pinned set at the Phase~2 cutover \\
+L1 & carry through $\relay$ is identity; $\LoopOf(\relay\then P)\eqd\LoopOf(P)$ \\
+D4a & $\Out\ne\In$, $\WF$ before the last symbol, empty pipeline: rejected at construction \\
+L3 & fixed slot width on every edge; output $>W(f)$ dropped \\
+L4 & release at $\arr+L(f)$ and drop on overrun under an injected clock \\
+L5 & property test on the pure builder: vary $\bar a_j,v_j$, $j\ne i$; $\view_i$ bytes, lengths, and release times equal \\
+L5$'$ & builder for $H\ne H'\le\Hm$: equal layer and cell lengths at every position; every $\gamma_i$ verifies (Prop.~\ref{prop:header}) \\
+D5, L7 & $H=(s+1)n+s$; guard at $1$ and $H$ only; $n>4$ rejected; selection fails closed below $H-1$ eligible DIDs \\
+L8 & per-hop byte inequality; one-bit flip rejects the whole value \\
+L9 & replayed layer and reused SURB rejected \\
+credit & a \code{tcp} session emits no reply without a SURB and resumes after replenishment \\
+AEZ & $2941$ vectors from the AEZ v5 reference C code (length sweep, parameter grid, CAESAR genkat), bit-flip rejection for $\tau\ge4$, native and \code{wasm32}; weak-key rejection; \code{fuzz/} target for $\Dec{}{}\circ\Enc{}{}=\mathrm{id}$ and panic freedom \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Phases}\label{sec:phases}
+
+\begin{table}[t]
+\caption{Cutover plan}
+\label{tab:phases}
+\centering\small
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.14\columnwidth}>{\raggedright\arraybackslash}p{0.79\columnwidth}@{}}
+\toprule
+phase & content \\
+\midrule
+1 & golden bytes; $\Sigma$ table; pipeline term; layer build as a fold over $P$; reducer and handler as $\Sigma$-algebra; route by symbol sequence.  Zero wire change, no bump \\
+2a & uniform layer, fixed-length header (L5$'$), loop with derived $\Hm$, stateless relays, AEZ carry, SURBs.  Breaking \\
+2b & intermediate symbols: \code{Invoke} with release time, $\quota(f)$.  Same cutover; one version bump on its last PR \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:phases} orders the cutover.  Fixed: $s=2$, $n_{\max}=4$,
+$\Hm=14$, in-repo AEZ.  Open: key transport (per-layer envelope or one
+blinded element), raw DID and key encodings ($\ell(2,64)\approx467$\,B),
+$\sigma$, and $C\ge\sigma|\chi_\upsilon|$ when SURBs ride the carry.
+Non-goals: bind, Selective branches before Phase~2b, session symbols in intermediate position, concrete symbols, and
+verification of results.
+
+\section{Related Work}\label{sec:related}
+
+Tor~\cite{Dingledine2004} answers along the circuit it built, as Rings does
+today; Degabriele and Stam~\cite{Degabriele2018} formalise the tagging that
+its counter-mode relay cryptography admits.  Chaum's untraceable return
+addresses~\cite{Chaum1981} and Mixminion's SURBs~\cite{Danezis2003} are the
+source of D8; Sphinx~\cite{Danezis2009} gives the fixed-length header and a
+LIONESS~\cite{Anderson1996} payload whose zero-block check L8 inherits.
+Loopix~\cite{Piotrowska2017} routes traffic as loops for cover; here the
+loop is the circuit.  AEZ~\cite{Hoang2015,AEZv5} supplies both the
+length-preserving relay layer and robust AE in one primitive.  On the
+semantic side, Moggi's Kleisli semantics~\cite{Moggi1991}, generic effects
+and handlers~\cite{Plotkin2003,Plotkin2009}, and the
+Arrow/Selective/Monad hierarchy~\cite{Hughes2000,Lindley2011,Mokhov2019}
+fix which compositions a client can seal in advance.
+
+\bibliographystyle{IEEEtran}
+\bibliography{onion-monad}
+
+\end{document}
