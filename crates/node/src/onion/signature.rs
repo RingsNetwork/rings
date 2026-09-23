@@ -16,22 +16,27 @@
 //!   pure circuit reducer interprets `relay`; no exit adapter ever does.
 //! - **Position.** A world-facing symbol exchanges bytes with the outside world and is the last
 //!   application of a pipeline.
-//! - **Resolution.** `spec : OnionServiceName → Σ` is total. A table name resolves to its own
-//!   entry; every other canonical name is an operator-named backend of the byte-stream operation
-//!   and resolves to `tcp`, because a name identifies the backend, not only the operation
-//!   (#834 D1). This is the contract native exits already keep: every configured service is
-//!   served at the TCP boundary.
+//! - **Closure.** `Σ` is closed and [`OnionServiceName`] is exactly its set of names:
+//!   `OnionServiceName ≅ Σ`. Parsing is the only way in, so a name outside the table is rejected
+//!   wherever it enters the node (configuration, descriptor decode, RPC) and no route, layer or
+//!   algebra entry can name it. Resolution `spec : OnionServiceName → Σ` is therefore a total
+//!   projection, never a lookup with a fallback. The encoding is the canonical name string, so
+//!   closure changes no wire byte.
 //!
 //! Width and latency classes `W`, `L` of the world-facing symbols are not protocol data yet: their
 //! results return along the reversed path, never through a fixed-width carry slot.
 
+use std::fmt;
+
+use serde::Deserialize;
+use serde::Serialize;
+
 use super::OnionRouteError;
-use super::OnionServiceName;
 use crate::error::Error;
 use crate::error::Result;
 
 /// Semantic role of a symbol; it fixes both who interprets the symbol and where it may stand.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum OnionSymbolRole {
     /// `relay = id`: output width equals input width, latency zero, interpreted by the reducer.
     Identity,
@@ -59,8 +64,8 @@ pub enum OnionSymbolPosition {
     WorldFacing,
 }
 
-/// Specification `spec(f)` of one symbol of `Σ` (#834 D1).
-#[derive(Debug, Eq, PartialEq)]
+/// Specification `spec(f)` of one symbol of `Σ` (#834 D1), ordered by name first.
+#[derive(Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct OnionSymbolSpec {
     name: &'static str,
     role: OnionSymbolRole,
@@ -82,9 +87,9 @@ impl OnionSymbolSpec {
         self.role
     }
 
-    /// Return the canonical name as the symbol-name type.
-    pub fn service_name(&self) -> OnionServiceName {
-        OnionServiceName::static_name(self.name)
+    /// Return the name of this table entry.
+    pub fn service_name(&'static self) -> OnionServiceName {
+        OnionServiceName(self)
     }
 }
 
@@ -130,66 +135,158 @@ impl OnionSignature {
             .into_iter()
             .filter(|spec| spec.role == OnionSymbolRole::WorldFacing)
     }
+}
 
-    /// Resolve a canonical name to its specification; total by the resolution law above.
-    pub fn spec(&self, name: &OnionServiceName) -> &OnionSymbolSpec {
-        self.symbols()
+/// Canonical name of a symbol of `Σ`: the closed name type of onion services.
+///
+/// Invariant: every value denotes one entry of [`ONION_SIGNATURE`] (see the closure law). It is
+/// encoded as that entry's canonical name string.
+#[derive(Clone, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct OnionServiceName(&'static OnionSymbolSpec);
+
+impl OnionServiceName {
+    /// Parse and canonicalize a service name, admitting exactly the names of `Σ`.
+    pub fn parse(name: impl AsRef<str>) -> Result<Self> {
+        let name = name.as_ref();
+        let trimmed = name.trim();
+        if trimmed.is_empty() || trimmed != name {
+            return Err(Error::InvalidConfig(
+                "onion exit service name must be non-empty and trimmed".to_string(),
+            ));
+        }
+        ONION_SIGNATURE
+            .symbols()
             .into_iter()
-            .find(|spec| spec.name == name.as_str())
-            .unwrap_or(self.tcp())
+            .find(|spec| spec.name.eq_ignore_ascii_case(trimmed))
+            .map(OnionSymbolSpec::service_name)
+            .ok_or_else(|| {
+                Error::InvalidConfig(format!(
+                    "unknown onion service {name:?}; the onion signature is closed: expected one of {}",
+                    ONION_SIGNATURE
+                        .symbols()
+                        .map(OnionSymbolSpec::name)
+                        .join(", ")
+                ))
+            })
     }
 
-    /// Resolve a name an exit registers, which must denote a world-facing symbol.
+    /// Return the name of the world-facing `https` symbol.
+    pub fn https() -> Self {
+        ONION_SIGNATURE.https().service_name()
+    }
+
+    /// Return the name of the world-facing `tcp` symbol.
+    pub fn tcp() -> Self {
+        ONION_SIGNATURE.tcp().service_name()
+    }
+
+    /// Return the canonical name as a string slice.
+    pub fn as_str(&self) -> &'static str {
+        self.0.name
+    }
+
+    /// Return the specification of the named symbol; total by the closure law.
+    pub fn spec(&self) -> &'static OnionSymbolSpec {
+        self.0
+    }
+
+    /// Return the specification of a name an exit registers, which must be world-facing.
     ///
     /// `relay` is registered through the online-node relay capability, never as an exit service
     /// (#834 D2), so an exit registration naming it is rejected.
-    pub fn world_facing_spec(&self, name: &OnionServiceName) -> Result<&OnionSymbolSpec> {
-        let spec = self.spec(name);
-        match spec.role {
-            OnionSymbolRole::WorldFacing => Ok(spec),
+    pub fn world_facing_spec(&self) -> Result<&'static OnionSymbolSpec> {
+        match self.0.role {
+            OnionSymbolRole::WorldFacing => Ok(self.0),
             OnionSymbolRole::Identity => Err(Error::OnionRouteError(
                 OnionRouteError::NotWorldFacingSymbol {
-                    symbol: spec.name.to_string(),
+                    symbol: self.0.name.to_string(),
                 },
             )),
         }
+    }
+
+    /// Return whether this name equals `service` after service-name canonicalization.
+    pub fn matches(&self, service: &str) -> bool {
+        Self::parse(service).is_ok_and(|candidate| candidate == *self)
+    }
+}
+
+impl fmt::Debug for OnionServiceName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("OnionServiceName")
+            .field(&self.0.name)
+            .finish()
+    }
+}
+
+impl TryFrom<String> for OnionServiceName {
+    type Error = String;
+
+    fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
+        Self::parse(&value).map_err(|error| error.to_string())
+    }
+}
+
+impl From<OnionServiceName> for String {
+    fn from(name: OnionServiceName) -> Self {
+        name.as_str().to_string()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::OnionServiceName;
     use super::OnionSymbolRole;
     use super::ONION_SIGNATURE;
-    use crate::onion::OnionServiceName;
 
-    /// Every table name is canonical, and resolution of a table name returns its own entry.
+    /// Every table name parses to its own entry, case-insensitively, and nothing else parses.
     #[test]
-    fn test_table_names_are_canonical_fixed_points_of_resolution() {
+    fn test_names_are_exactly_the_closed_signature() {
         for spec in ONION_SIGNATURE.symbols() {
-            let name = OnionServiceName::parse(spec.name()).expect("canonical table name");
-            assert_eq!(name, spec.service_name());
-            assert_eq!(ONION_SIGNATURE.spec(&name), spec);
+            let name = OnionServiceName::parse(spec.name()).expect("table name");
+            assert_eq!(name.spec(), spec);
+            assert_eq!(
+                OnionServiceName::parse(spec.name().to_ascii_uppercase()).ok(),
+                Some(name)
+            );
+        }
+        for outside in ["web", "api", "custom", "tcp2", "", " tcp", "tcp!"] {
+            assert!(OnionServiceName::parse(outside).is_err());
         }
     }
 
-    /// `relay` is the only identity symbol; operator names resolve to the byte-stream symbol.
+    /// Decoding admits only names of `Σ`, and the encoding is the bare canonical name string.
     #[test]
-    fn test_resolution_is_total_and_routes_operator_names_to_tcp() {
+    fn test_codec_is_the_name_string_and_rejects_names_outside_the_signature() {
+        let encoded = rings_codec::serialize(&OnionServiceName::https()).expect("encode name");
+        let web = rings_codec::serialize(&"web").expect("encode string");
+
+        assert_eq!(
+            encoded,
+            rings_codec::serialize(&"https").expect("encode string")
+        );
+        assert!(rings_codec::deserialize::<OnionServiceName>(web.as_slice()).is_err());
+    }
+
+    /// `relay` is the only identity symbol and is never a world-facing registration.
+    #[test]
+    fn test_relay_is_the_only_identity_and_not_world_facing() {
         let identities = ONION_SIGNATURE
             .symbols()
             .into_iter()
             .filter(|spec| spec.role() == OnionSymbolRole::Identity)
             .collect::<Vec<_>>();
-        let operator_name = OnionServiceName::parse("web").expect("operator name");
 
         assert_eq!(identities, vec![ONION_SIGNATURE.relay()]);
-        assert_eq!(ONION_SIGNATURE.spec(&operator_name), ONION_SIGNATURE.tcp());
+        assert!(ONION_SIGNATURE
+            .relay()
+            .service_name()
+            .world_facing_spec()
+            .is_err());
         assert_eq!(
-            ONION_SIGNATURE.world_facing_spec(&operator_name).ok(),
+            OnionServiceName::tcp().world_facing_spec().ok(),
             Some(ONION_SIGNATURE.tcp())
         );
-        assert!(ONION_SIGNATURE
-            .world_facing_spec(&ONION_SIGNATURE.relay().service_name())
-            .is_err());
     }
 }

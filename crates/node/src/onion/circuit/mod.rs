@@ -376,7 +376,7 @@ impl OnionForwardLayer {
     pub(super) fn symbol(&self) -> &'static OnionSymbolSpec {
         match self {
             Self::Relay { .. } => ONION_SIGNATURE.relay(),
-            Self::Exit { payload, .. } => ONION_SIGNATURE.spec(payload.service_name()),
+            Self::Exit { payload, .. } => payload.service_name().spec(),
         }
     }
 }

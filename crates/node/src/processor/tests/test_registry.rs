@@ -217,12 +217,6 @@ async fn test_onion_exit_publish_replaces_observed_self_records() -> Result<()> 
         now_ms.saturating_sub(20_000),
         policy.clone(),
     )?;
-    let stale_api = onion_exit_descriptor_for_processor_with_service(
-        &processor,
-        OnionServiceName::parse("api")?,
-        now_ms.saturating_sub(10_000),
-        policy.clone(),
-    )?;
     let other_https = onion_exit_descriptor_for_processor_with_service(
         &other,
         OnionServiceName::https(),
@@ -241,7 +235,6 @@ async fn test_onion_exit_publish_replaces_observed_self_records() -> Result<()> 
         .storage_store(Processor::onion_exit_registry_entry(vec![
             stale_tcp,
             stale_https,
-            stale_api,
             other_https.clone(),
             expired_other_https,
         ])?)

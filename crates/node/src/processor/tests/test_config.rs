@@ -348,9 +348,10 @@ fn test_reserved_https_onion_exit_service_is_accepted() -> Result<()> {
     Ok(())
 }
 
-/// Custom canonical service names remain valid on the singular native exit surface.
+/// An exit registers world-facing symbols of the closed signature only: names outside `Σ` never
+/// parse, and the identity symbol `relay` is rejected at configuration.
 #[test]
-fn test_custom_onion_exit_service_is_accepted() -> Result<()> {
+fn test_onion_exit_service_must_be_a_world_facing_symbol() -> Result<()> {
     let key = SecretKey::random();
     let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
     let mut config = ProcessorConfig::new(
@@ -360,11 +361,12 @@ fn test_custom_onion_exit_service_is_accepted() -> Result<()> {
         3,
     )
     .advertise_onion_exit(true);
-    config.onion_exit_services = vec![OnionServiceName::parse("web")?];
+    config.onion_exit_services = vec![OnionServiceName::parse("relay")?];
     config.onion_exit_policy = onion_policy(&["example.com:443"], &[])?;
 
+    assert!(OnionServiceName::parse("web").is_err());
     assert!(ProcessorBuilder::from_config(&config)
         .and_then(ProcessorBuilder::build)
-        .is_ok());
+        .is_err());
     Ok(())
 }

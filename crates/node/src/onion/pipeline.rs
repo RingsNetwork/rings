@@ -78,7 +78,7 @@ impl OnionApplication {
 
     /// Return the specification of the applied symbol.
     pub fn spec(&self) -> &'static OnionSymbolSpec {
-        ONION_SIGNATURE.spec(self.symbol())
+        self.symbol.spec()
     }
 
     /// Return whether this application may only stand last.

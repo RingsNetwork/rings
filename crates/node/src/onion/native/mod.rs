@@ -5,8 +5,8 @@
 //! evaluated by the node's Σ-algebra, one registration per world-facing symbol:
 //!
 //! ```text
-//! exit frame ──spec(service)──▶ tcp   ↦ ⟦tcp⟧ = TCP exit          (operator names resolve to tcp)
-//!                          └──▶ https ↦ [⟦https⟧, ⟦tcp⟧]          (copairing, see below)
+//! exit frame ──service──▶ tcp   ↦ ⟦tcp⟧ = TCP exit
+//!                   └──▶ https ↦ [⟦https⟧, ⟦tcp⟧]          (copairing, see below)
 //!
 //! backward frame ──claim(peer, id)──▶ HTTPS client ──Some(claim)──▶ claim.resolve(payload)
 //!                                        │ None

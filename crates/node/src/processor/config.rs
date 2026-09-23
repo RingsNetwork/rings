@@ -4,7 +4,6 @@ use rings_core::dht::DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use rings_core::dht::MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 
 use super::*;
-use crate::onion::ONION_SIGNATURE;
 
 /// ProcessorConfig is usually serialized as json or yaml.
 /// There is a `from_config` method in [ProcessorBuilder] used to initialize the Builder with a serialized ProcessorConfig.
@@ -275,7 +274,7 @@ pub(in crate::processor) fn validate_onion_role_config(
     }
     if advertise_onion_exit {
         for service in onion_exit_services {
-            ONION_SIGNATURE.world_facing_spec(service)?;
+            service.world_facing_spec()?;
         }
         onion_exit_policy.validate_targets()?;
     }

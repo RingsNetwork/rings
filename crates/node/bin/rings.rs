@@ -358,7 +358,7 @@ struct RunCommand {
     #[arg(
         long,
         value_parser = parse_onion_exit_service,
-        help = "TCP-backed exit service name, e.g. https or web. May be repeated.",
+        help = "Onion exit service to serve: tcp or https. May be repeated.",
         env
     )]
     pub onion_exit_service: Vec<OnionServiceName>,
@@ -406,7 +406,7 @@ struct RunCommand {
     #[arg(
         long,
         value_parser = parse_onion_service_name,
-        help = "TCP onion-exit service used by the local HTTP CONNECT proxy, e.g. tcp or web",
+        help = "Onion exit service used by the local HTTP CONNECT proxy: tcp or https",
         env
     )]
     pub onion_http_proxy_service: Option<OnionServiceName>,

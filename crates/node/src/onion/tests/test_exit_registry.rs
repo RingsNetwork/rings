@@ -10,17 +10,12 @@ const TEST_PROCESS_EPOCH: OnionExitEpoch = OnionExitEpoch::new([31; 16]);
 /// Distinct epoch used to witness that epoch substitution invalidates the descriptor signature.
 const TAMPERED_PROCESS_EPOCH: OnionExitEpoch = OnionExitEpoch::new([32; 16]);
 
-/// Parse one canonical service name for registry fixtures.
-fn service(name: &str) -> OnionServiceName {
-    OnionServiceName::parse(name).expect("valid test service")
-}
-
 fn signed_exit_at(heartbeat_at_ms: u128, expires_at_ms: u128) -> Result<OnionExitDescriptor> {
     let key = SecretKey::random();
     let delegatee_key = DelegateeKey::new_with_seckey(&key).map_err(Error::CoreError)?;
     signed_exit_for_session_at(
         &delegatee_key,
-        service("web"),
+        OnionServiceName::tcp(),
         heartbeat_at_ms,
         expires_at_ms,
         "test",
@@ -78,17 +73,17 @@ fn test_default_exit_services_include_native_tcp_and_https() {
 fn test_reserved_service_names_match_routes() {
     assert!(OnionServiceName::https().matches("https"));
     assert!(OnionServiceName::tcp().matches("tcp"));
-    assert!(service("custom").matches("custom"));
+    assert!(OnionServiceName::https().matches("HTTPS"));
 }
 
 #[test]
 fn test_onion_exit_service_name_is_validated_and_canonicalized() -> Result<()> {
-    let service = OnionServiceName::parse("WeB-Api.1")?;
+    let service = OnionServiceName::parse("TcP")?;
 
-    assert_eq!(service.as_str(), "web-api.1");
+    assert_eq!(service.as_str(), "tcp");
     assert!(OnionServiceName::parse("").is_err());
-    assert!(OnionServiceName::parse(" web").is_err());
-    assert!(OnionServiceName::parse("web!").is_err());
+    assert!(OnionServiceName::parse(" tcp").is_err());
+    assert!(OnionServiceName::parse("web").is_err());
     Ok(())
 }
 
@@ -200,7 +195,7 @@ fn test_latest_valid_by_service_did_filters_expired_and_keeps_newest() -> Result
             process_epoch: TEST_PROCESS_EPOCH,
             node_type: OnlineNodeType::Native,
             network_id: 1,
-            service: service("web"),
+            service: OnionServiceName::tcp(),
             policy: OnionExitPolicy::default(),
             started_at_ms: 1,
             heartbeat_at_ms: 10,
@@ -218,7 +213,7 @@ fn test_latest_valid_by_service_did_filters_expired_and_keeps_newest() -> Result
             process_epoch: TEST_PROCESS_EPOCH,
             node_type: OnlineNodeType::Native,
             network_id: 1,
-            service: service("web"),
+            service: OnionServiceName::tcp(),
             policy: OnionExitPolicy::default(),
             started_at_ms: 1,
             heartbeat_at_ms: 20,
@@ -269,24 +264,40 @@ fn test_latest_valid_by_service_did_preserves_same_did_distinct_services() -> Re
         signed_exit_for_session_at(&delegatee_key, OnionServiceName::tcp(), 20, 100, "tcp-new")?;
     let https =
         signed_exit_for_session_at(&delegatee_key, OnionServiceName::https(), 15, 100, "https")?;
-    let custom = signed_exit_for_session_at(
-        &delegatee_key,
-        OnionServiceName::parse("api")?,
-        25,
-        100,
-        "api",
-    )?;
 
     let descriptors = OnionExitDescriptor::latest_valid_by_service_did(
-        vec![old_tcp, new_tcp.clone(), https.clone(), custom.clone()],
+        vec![old_tcp, new_tcp.clone(), https.clone()],
         50,
         TEST_NETWORK_ID,
         false,
     );
 
-    assert_eq!(descriptors.len(), 3);
+    assert_eq!(descriptors.len(), 2);
     assert!(descriptors.iter().any(|descriptor| descriptor == &new_tcp));
     assert!(descriptors.iter().any(|descriptor| descriptor == &https));
-    assert!(descriptors.iter().any(|descriptor| descriptor == &custom));
+    Ok(())
+}
+
+/// The signature is closed at decode: a descriptor naming a service outside `Σ` never decodes,
+/// whatever its signature, while its well-formed original round-trips.
+#[test]
+fn test_descriptor_naming_a_service_outside_the_signature_is_rejected_at_decode() -> Result<()> {
+    let descriptor = signed_exit_at(10, 100)?;
+    let encoded = rings_codec::serialize(&descriptor).map_err(|_| Error::EncodeError)?;
+    let service_offset = encoded
+        .windows(4)
+        .position(|window| window == b"\x03tcp")
+        .expect("encoded tcp service name");
+    let mut outside = encoded.clone();
+    outside
+        .get_mut(service_offset..service_offset + 4)
+        .expect("service name bytes")
+        .copy_from_slice(b"\x03web");
+
+    assert_eq!(
+        rings_codec::deserialize::<OnionExitDescriptor>(encoded.as_slice()).ok(),
+        Some(descriptor)
+    );
+    assert!(rings_codec::deserialize::<OnionExitDescriptor>(outside.as_slice()).is_err());
     Ok(())
 }

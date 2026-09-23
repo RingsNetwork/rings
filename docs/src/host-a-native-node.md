@@ -68,7 +68,7 @@ Options:
       --advertise-onion-exit
           Publish this node as an onion exit in the application-layer exit registry [env: ADVERTISE_ONION_EXIT=]
       --onion-exit-service <ONION_EXIT_SERVICE>
-          TCP-backed exit service name, e.g. https or web. May be repeated. [env: ONION_EXIT_SERVICE=]
+          Onion exit service to serve: tcp or https. May be repeated. [env: ONION_EXIT_SERVICE=]
       --onion-exit-allow-target <ONION_EXIT_ALLOW_TARGET>
           Allow-list target for onion exit policy. May be repeated. [env: ONION_EXIT_ALLOW_TARGET=]
       --onion-exit-deny-target <ONION_EXIT_DENY_TARGET>
@@ -86,7 +86,7 @@ Options:
       --onion-http-proxy-addr <ONION_HTTP_PROXY_ADDR>
           Bind a local HTTP CONNECT proxy that routes client TCP streams through onion exits, e.g. 127.0.0.1:18080 [env: ONION_HTTP_PROXY_ADDR=]
       --onion-http-proxy-service <ONION_HTTP_PROXY_SERVICE>
-          TCP onion-exit service used by the local HTTP CONNECT proxy, e.g. tcp or web [env: ONION_HTTP_PROXY_SERVICE=]
+          Onion exit service used by the local HTTP CONNECT proxy: tcp or https [env: ONION_HTTP_PROXY_SERVICE=]
       --onion-http-proxy-hop-count <ONION_HTTP_PROXY_HOP_COUNT>
           Desired hop count for the local onion HTTP proxy. 0 uses node default. [env: ONION_HTTP_PROXY_HOP_COUNT=]
       --onion-http-proxy-allow-short-paths

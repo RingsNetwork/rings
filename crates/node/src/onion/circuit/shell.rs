@@ -33,7 +33,6 @@ use crate::extension::ext::EffectScope;
 use crate::extension::ext::Interpret;
 use crate::extension::ext::Scope;
 use crate::onion::signature::OnionSymbolSpec;
-use crate::onion::signature::ONION_SIGNATURE;
 
 /// Interpreter for route-aware circuit effects.
 pub struct OnionCircuitShell<H> {
@@ -298,13 +297,13 @@ pub trait OnionInterpretation: MaybeSendSync {
 
 /// The partial Σ-algebra of one node: `⟦−⟧ : Σ_W ⇀ End(M)` over the world-facing symbols.
 ///
-/// A node registers symbols, never applications (#834 D2): each entry maps one symbol of
-/// [`ONION_SIGNATURE`] to its interpretation, and evaluation resolves the frame's symbol with
-/// the total `spec` of the signature before one table lookup.
+/// A node registers symbols, never applications (#834 D2): each entry maps one symbol of the
+/// closed signature [`ONION_SIGNATURE`](crate::onion::ONION_SIGNATURE) to its interpretation.
+/// The frame's service name already denotes a symbol of `Σ`, so evaluation is one table lookup.
 ///
 /// ```text
-/// frame ──spec(payload.service)──▶ f ──table(f)──▶ Some ⟦f⟧ ──▶ ⟦f⟧(scope, frame)
-///                                            └──▶ None      ──▶ dropped (f not registered here)
+/// frame ──payload.service = f──▶ table(f) ──▶ Some ⟦f⟧ ──▶ ⟦f⟧(scope, frame)
+///                                        └──▶ None      ──▶ dropped (f not registered here)
 /// ```
 ///
 /// Laws: `relay = id` is interpreted by the pure reducer, which never emits an exit effect for an
@@ -312,7 +311,7 @@ pub trait OnionInterpretation: MaybeSendSync {
 /// replaces its interpretation.
 #[derive(Default)]
 pub struct OnionAlgebra {
-    interpretations: BTreeMap<&'static str, Box<dyn OnionInterpretation>>,
+    interpretations: BTreeMap<&'static OnionSymbolSpec, Box<dyn OnionInterpretation>>,
 }
 
 impl OnionAlgebra {
@@ -323,14 +322,14 @@ impl OnionAlgebra {
         interpretation: impl OnionInterpretation + 'static,
     ) -> Self {
         self.interpretations
-            .insert(symbol.name(), Box::new(interpretation));
+            .insert(symbol, Box::new(interpretation));
         self
     }
 
     /// Evaluate one exit frame through the interpretation of its symbol.
     pub async fn evaluate(&self, scope: &Scope, frame: OnionCircuitExitFrame) -> Result<()> {
-        let symbol = ONION_SIGNATURE.spec(frame.payload.service_name());
-        match self.interpretations.get(symbol.name()) {
+        let symbol = frame.payload.service_name().spec();
+        match self.interpretations.get(symbol) {
             Some(interpretation) => interpretation.evaluate(scope, frame).await,
             None => {
                 tracing::debug!(

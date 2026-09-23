@@ -1438,10 +1438,10 @@ fn test_exit_layer_naming_identity_symbol_emits_no_exit_effect() {
     assert!(transition.effects.is_empty());
 }
 
-/// The algebra resolves the frame's symbol before its one lookup: an operator name reaches the
-/// `tcp` entry, and a symbol without an entry is dropped.
+/// The algebra is one lookup on the frame's symbol: a registered symbol reaches its
+/// interpretation, and a symbol without an entry is dropped.
 #[tokio::test]
-async fn test_algebra_dispatches_on_the_resolved_symbol() {
+async fn test_algebra_dispatches_on_the_frame_symbol() {
     let client = session();
     let exit = session();
     let scope = test_scope(exit.clone()).lifecycle();
@@ -1458,12 +1458,12 @@ async fn test_algebra_dispatches_on_the_resolved_symbol() {
         payload: payload_for_service(service, "body"),
     };
 
-    for (service, nonce) in [("tcp", 55), ("web", 56), ("https", 57)] {
+    for (service, nonce) in [("tcp", 55), ("https", 56)] {
         algebra
             .evaluate(&scope, frame(service, nonce))
             .await
             .expect("evaluate exit frame");
     }
 
-    assert_eq!(tcp_exit.exit_count.load(Ordering::SeqCst), 2);
+    assert_eq!(tcp_exit.exit_count.load(Ordering::SeqCst), 1);
 }

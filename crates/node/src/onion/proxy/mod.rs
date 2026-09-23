@@ -152,6 +152,7 @@ impl OnionProxyConfig {
 }
 
 fn validate_proxy_service(protocol: OnionProxyProtocol, service: &OnionServiceName) -> Result<()> {
+    service.world_facing_spec()?;
     if protocol == OnionProxyProtocol::HttpsProxy && service != &OnionServiceName::https() {
         return Err(Error::InvalidConfig(format!(
             "onion HTTPS proxy requires service {:?}",
@@ -206,11 +207,10 @@ mod tests {
     }
 
     #[test]
-    fn test_tcp_proxy_config_accepts_custom_tcp_service() -> Result<()> {
-        let service = OnionServiceName::parse("web")?;
-        let proxy = OnionProxyConfig::tcp_connect_service(service, 2, true)?;
+    fn test_tcp_proxy_config_accepts_tcp_service() -> Result<()> {
+        let proxy = OnionProxyConfig::tcp_connect_service(OnionServiceName::tcp(), 2, true)?;
 
-        assert_eq!(proxy.exit_service(), "web");
+        assert_eq!(proxy.exit_service(), "tcp");
         assert_eq!(proxy.hop_count, 2);
         assert!(proxy.allow_short_paths);
         Ok(())
@@ -222,6 +222,17 @@ mod tests {
 
         assert_eq!(proxy.exit_service(), "https");
         Ok(())
+    }
+
+    /// The identity symbol `relay` is never an exit service, so no proxy may target it.
+    #[test]
+    fn test_proxy_config_rejects_the_identity_symbol() {
+        assert!(OnionProxyConfig::tcp_connect_service(
+            OnionServiceName::parse("relay").expect("relay name"),
+            1,
+            false
+        )
+        .is_err());
     }
 
     #[test]

@@ -8,7 +8,7 @@ async fn test_onion_exit_lookup_uses_dedicated_exit_registry() -> Result<()> {
     let relay_only = prepare_processor().await;
     let exit = prepare_processor().await;
     let relay_descriptor = relay_only.online_node_descriptor_at(get_epoch_ms())?;
-    let exit_descriptor = onion_exit_descriptor_for_processor(&exit, "web", get_epoch_ms())?;
+    let exit_descriptor = onion_exit_descriptor_for_processor(&exit, "tcp", get_epoch_ms())?;
 
     processor
         .storage_store(Processor::online_node_registry_entry(vec![
@@ -21,7 +21,7 @@ async fn test_onion_exit_lookup_uses_dedicated_exit_registry() -> Result<()> {
         ])?)
         .await?;
 
-    let exits = processor.lookup_onion_exits("web", false).await?;
+    let exits = processor.lookup_onion_exits("tcp", false).await?;
 
     assert_eq!(exits, vec![exit_descriptor]);
     assert!(exits
@@ -38,17 +38,18 @@ async fn test_onion_exit_lookup_preserves_distinct_services_for_same_did() -> Re
     let processor = prepare_processor().await;
     let exit = prepare_processor().await;
     let now_ms = get_epoch_ms();
-    let older_web = onion_exit_descriptor_for_processor(&exit, "web", now_ms)?;
-    let newer_ssh = onion_exit_descriptor_for_processor(&exit, "ssh", now_ms + 1)?;
+    let older_tcp = onion_exit_descriptor_for_processor(&exit, "tcp", now_ms)?;
+    let newer_https = onion_exit_descriptor_for_processor(&exit, "https", now_ms + 1)?;
 
     processor
         .storage_store(Processor::onion_exit_registry_entry(vec![
-            older_web, newer_ssh,
+            older_tcp,
+            newer_https,
         ])?)
         .await?;
 
-    assert_eq!(processor.lookup_onion_exits("web", false).await?.len(), 1);
-    assert_eq!(processor.lookup_onion_exits("ssh", false).await?.len(), 1);
+    assert_eq!(processor.lookup_onion_exits("tcp", false).await?.len(), 1);
+    assert_eq!(processor.lookup_onion_exits("https", false).await?.len(), 1);
     assert_eq!(processor.lookup_onion_exits("", false).await?.len(), 2);
     Ok(())
 }
@@ -61,7 +62,7 @@ async fn test_onion_proxy_route_uses_presence_relays_without_exit_descriptor() -
     let second_relay = prepare_processor().await;
     let exit = prepare_processor().await;
     let now_ms = get_epoch_ms();
-    let exit_descriptor = onion_exit_descriptor_for_processor(&exit, "web", now_ms)?;
+    let exit_descriptor = onion_exit_descriptor_for_processor(&exit, "tcp", now_ms)?;
 
     processor
         .storage_store(Processor::online_node_registry_entry(vec![
@@ -78,7 +79,7 @@ async fn test_onion_proxy_route_uses_presence_relays_without_exit_descriptor() -
 
     let route = processor
         .build_onion_proxy_route(
-            OnionProxyConfig::tcp_connect_service(OnionServiceName::parse("web")?, 3, false)?,
+            OnionProxyConfig::tcp_connect_service(OnionServiceName::tcp(), 3, false)?,
             OnionProxyTarget::parse_authority("example.com:443")?,
         )
         .await?
