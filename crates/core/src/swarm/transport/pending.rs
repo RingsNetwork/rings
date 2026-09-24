@@ -31,6 +31,7 @@ use crate::dht::FingerFixRequest;
 use crate::dht::PeerRingAction;
 use crate::error::Error;
 use crate::error::Result;
+use crate::lifecycle::epoch::Epoch;
 use crate::swarm::callback::InnerSwarmCallback;
 use crate::utils::get_epoch_ms_i64;
 
@@ -61,12 +62,15 @@ type PendingFingerUpdatesGuard<'transport> =
 
 /// Shared serialization boundary for logical connection ownership.
 ///
-/// Clone law: every clone refers to the same mutex. Holding the boundary
+/// Clone law: every clone refers to the same mutex and the same epoch. Holding the boundary
 /// prevents admission, retirement, and final send admission from crossing.
 #[derive(Clone)]
 pub(super) struct ConnectionLifecycleBoundary {
     /// Mutex that serializes admission, retirement, and final send checks.
     inner: Arc<Mutex<()>>,
+    /// Advanced by every admission, retirement, and readiness callback: the event a rerouted
+    /// send waits on for its hop to become usable (see `rerouting`).
+    link_transitions: Arc<Epoch>,
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     /// Test-only count of threads waiting to acquire the lifecycle gate.
     waiting: Arc<std::sync::atomic::AtomicUsize>,
@@ -76,9 +80,15 @@ impl ConnectionLifecycleBoundary {
     pub(super) fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(())),
+            link_transitions: Arc::new(Epoch::default()),
             #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
             waiting: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
+    }
+
+    /// The epoch of link transitions shared by every clone of this boundary.
+    pub(super) fn link_transitions(&self) -> &Epoch {
+        &self.link_transitions
     }
 
     pub(super) fn lock(&self) -> Result<std::sync::MutexGuard<'_, ()>> {
@@ -649,6 +659,7 @@ impl SwarmTransport {
 
         admitting.activate();
         pending_finger_updates.remove(&attempt);
+        self.connection_lifecycle.link_transitions().advance();
         tracing::info!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
@@ -715,6 +726,7 @@ impl SwarmTransport {
             peer_liveness.remove(attempt.peer);
             measured_disconnects.remove(&attempt.peer);
             self.outbound_schedulers.shutdown(attempt.peer);
+            self.connection_lifecycle.link_transitions().advance();
         }
         Ok(outcome)
     }

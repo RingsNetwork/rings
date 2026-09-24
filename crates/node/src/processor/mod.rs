@@ -306,6 +306,13 @@ impl Processor {
     }
 
     /// List signed online-node descriptors from the registry.
+    ///
+    /// Inherits the rerouting of core's DHT operations (#859): a send refused before the backend
+    /// accepted it (a connection generation replaced by glare or rejoin, a hop not yet ready,
+    /// exhausted local capacity) is retried from fresh topology once a topology, link or
+    /// capacity event makes the retry fresh, never after a duration and at most
+    /// `REROUTING_BUDGET` times; exhaustion returns `ReroutingExhausted` with the last cause.
+    /// No placement is applied twice.
     pub async fn lookup_online_nodes(
         &self,
         include_expired: bool,
@@ -329,6 +336,13 @@ impl Processor {
     }
 
     /// List signed onion-exit descriptors from the application-layer exit registry.
+    ///
+    /// Inherits the rerouting of core's DHT operations (#859): a send refused before the backend
+    /// accepted it (a connection generation replaced by glare or rejoin, a hop not yet ready,
+    /// exhausted local capacity) is retried from fresh topology once a topology, link or
+    /// capacity event makes the retry fresh, never after a duration and at most
+    /// `REROUTING_BUDGET` times; exhaustion returns `ReroutingExhausted` with the last cause.
+    /// No placement is applied twice.
     pub async fn lookup_onion_exits(
         &self,
         service: &str,
@@ -880,6 +894,13 @@ impl Processor {
     }
 
     /// Fetch an entry from DHT storage
+    ///
+    /// Inherits the rerouting of core's DHT operations (#859): a send refused before the backend
+    /// accepted it (a connection generation replaced by glare or rejoin, a hop not yet ready,
+    /// exhausted local capacity) is retried from fresh topology once a topology, link or
+    /// capacity event makes the retry fresh, never after a duration and at most
+    /// `REROUTING_BUDGET` times; exhaustion returns `ReroutingExhausted` with the last cause.
+    /// No placement is applied twice.
     pub async fn storage_fetch(&self, entry_key: Did) -> Result<()> {
         self.swarm
             .storage_fetch(entry_key)
@@ -888,6 +909,13 @@ impl Processor {
     }
 
     /// Store an entry on DHT storage
+    ///
+    /// Inherits the rerouting of core's DHT operations (#859): a send refused before the backend
+    /// accepted it (a connection generation replaced by glare or rejoin, a hop not yet ready,
+    /// exhausted local capacity) is retried from fresh topology once a topology, link or
+    /// capacity event makes the retry fresh, never after a duration and at most
+    /// `REROUTING_BUDGET` times; exhaustion returns `ReroutingExhausted` with the last cause.
+    /// No placement is applied twice.
     pub async fn storage_store(&self, entry: entry::Entry) -> Result<()> {
         self.swarm
             .storage_store(entry)
@@ -896,6 +924,13 @@ impl Processor {
     }
 
     /// Append data to an entry on DHT storage
+    ///
+    /// Inherits the rerouting of core's DHT operations (#859): a send refused before the backend
+    /// accepted it (a connection generation replaced by glare or rejoin, a hop not yet ready,
+    /// exhausted local capacity) is retried from fresh topology once a topology, link or
+    /// capacity event makes the retry fresh, never after a duration and at most
+    /// `REROUTING_BUDGET` times; exhaustion returns `ReroutingExhausted` with the last cause.
+    /// No placement is applied twice.
     pub async fn storage_append_data(&self, topic: &str, data: Encoded) -> Result<()> {
         self.swarm
             .storage_append_data(topic, data)
@@ -904,6 +939,13 @@ impl Processor {
     }
 
     /// Tombstone observed data in an entry on DHT storage.
+    ///
+    /// Inherits the rerouting of core's DHT operations (#859): a send refused before the backend
+    /// accepted it (a connection generation replaced by glare or rejoin, a hop not yet ready,
+    /// exhausted local capacity) is retried from fresh topology once a topology, link or
+    /// capacity event makes the retry fresh, never after a duration and at most
+    /// `REROUTING_BUDGET` times; exhaustion returns `ReroutingExhausted` with the last cause.
+    /// No placement is applied twice.
     pub async fn storage_tombstone_data(&self, topic: &str, data: Encoded) -> Result<()> {
         self.swarm
             .storage_tombstone_data(topic, data)
@@ -912,6 +954,13 @@ impl Processor {
     }
 
     /// Compact observed data in an entry on DHT storage.
+    ///
+    /// Inherits the rerouting of core's DHT operations (#859): a send refused before the backend
+    /// accepted it (a connection generation replaced by glare or rejoin, a hop not yet ready,
+    /// exhausted local capacity) is retried from fresh topology once a topology, link or
+    /// capacity event makes the retry fresh, never after a duration and at most
+    /// `REROUTING_BUDGET` times; exhaustion returns `ReroutingExhausted` with the last cause.
+    /// No placement is applied twice.
     pub async fn storage_compact_data(&self, topic: &str, removals: Vec<Encoded>) -> Result<()> {
         self.swarm
             .storage_compact_data(topic, removals)

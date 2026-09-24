@@ -184,3 +184,19 @@ fn test_unavailable_successor_promotes_verified_fallback_in_interpreted_state() 
     ]);
     Ok(())
 }
+
+/// Law (Epoch): a commit advances the topology epoch iff it changes the routes.
+#[test]
+fn test_topology_epoch_advances_exactly_on_route_changes() -> Result<()> {
+    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
+    let peer = Did::from(10u32);
+    let initial = node.topology_epoch().current();
+
+    node.admit_connected(peer, None)?;
+    let admitted = node.topology_epoch().current();
+    assert_eq!(admitted, initial + 1);
+
+    node.admit_connected(peer, None)?;
+    assert_eq!(node.topology_epoch().current(), admitted);
+    Ok(())
+}

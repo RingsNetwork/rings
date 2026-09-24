@@ -304,6 +304,17 @@ impl InnerSwarmCallback {
                 .is_active_connection_attempt(attempt)
     }
 
+    /// Record the link transition a readiness callback reports, and parse its peer.
+    ///
+    /// The signal precedes the parse: a waiting rerouted send re-reads its route and the hop's
+    /// readiness, so a spurious signal costs one predicate evaluation and never a retry.
+    fn link_transition_peer(&self, cid: &str, callback: &str) -> Option<Did> {
+        self.processor.logical.transport.signal_link_transition();
+        Did::from_str(cid)
+            .inspect_err(|_| tracing::warn!("{callback} parse did failed: {cid}"))
+            .ok()
+    }
+
     fn is_local_did_event(&self, did: Did, operation: &str) -> bool {
         if did != self.processor.logical.transport.dht.did {
             return false;
@@ -570,8 +581,7 @@ impl TransportCallback for InnerSwarmCallback {
         cid: &str,
         s: WebrtcConnectionState,
     ) -> Result<(), TransportCallbackError> {
-        let Ok(did) = Did::from_str(cid) else {
-            tracing::warn!("on_peer_connection_state_change parse did failed: {}", cid);
+        let Some(did) = self.link_transition_peer(cid, "on_peer_connection_state_change") else {
             return Ok(());
         };
         if self
@@ -668,8 +678,7 @@ impl TransportCallback for InnerSwarmCallback {
     }
 
     async fn on_data_channel_open(&self, cid: &str) -> Result<(), TransportCallbackError> {
-        let Ok(did) = Did::from_str(cid) else {
-            tracing::warn!("on_data_channel_open parse did failed: {}", cid);
+        let Some(did) = self.link_transition_peer(cid, "on_data_channel_open") else {
             return Ok(());
         };
         if self

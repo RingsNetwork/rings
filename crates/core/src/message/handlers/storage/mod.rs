@@ -4,6 +4,10 @@ use std::sync::Arc;
 
 use async_recursion::async_recursion;
 use async_trait::async_trait;
+use rerouted::reroute;
+use rerouted::LookupPlacement;
+use rerouted::OperatePlacement;
+use rerouted::Route;
 
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
@@ -33,12 +37,17 @@ use crate::message::Encoded;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
-use crate::message::PayloadSender;
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::Swarm;
 use crate::utils::get_epoch_ms;
 
 /// ChordStorageInterface should imply necessary method for DHT storage
+///
+/// Every remote placement of these operations is rerouted (`rerouted`, #859): a send refused
+/// before backend acceptance is retried from topology recomputed after a topology, link or
+/// capacity event, never after a duration, within `REROUTING_BUDGET` deferrals; exhaustion
+/// returns `Error::ReroutingExhausted` with the last cause. A placement is applied at most
+/// once, so append, tombstone and compact keep their non-idempotent semantics.
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait ChordStorageInterface {
@@ -116,24 +125,11 @@ async fn handle_storage_fetch_act(
                 .await?;
             run_storage_repair_transport_effects(transport.clone(), repair).await?;
         }
-        PeerRingAction::RemoteAction(next, dht_act) => {
-            if let PeerRingRemoteAction::FindEntry(query) = dht_act {
-                tracing::debug!(
-                    "storage_fetch send_message: SearchEntry({:?}) to {:?}",
-                    query,
-                    next
-                );
-                transport
-                    .send_message(
-                        Message::SearchEntry(SearchEntry {
-                            resource: query.resource,
-                            placement: query.placement,
-                            redundancy,
-                        }),
-                        next,
-                    )
-                    .await?;
-            }
+        PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindEntry(query)) => {
+            tracing::debug!("storage_fetch SearchEntry({query:?}) to {next:?}");
+            let placement = LookupPlacement { query, redundancy };
+            let message = placement.message(query);
+            reroute(&transport, &placement, Route::Remote { next, message }).await?;
         }
         PeerRingAction::MultiActions(acts) => {
             for (act, has_next) in core_actor_steps(acts) {
@@ -159,10 +155,10 @@ pub(super) async fn handle_storage_store_act(
     act: PeerRingAction,
 ) -> Result<()> {
     match act {
-        PeerRingAction::RemoteAction(target, PeerRingRemoteAction::FindEntryForOperate(op)) => {
-            transport
-                .send_message(Message::OperateEntry(*op), target)
-                .await?;
+        PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindEntryForOperate(op)) => {
+            let placement = OperatePlacement(*op);
+            let message = placement.message();
+            reroute(&transport, &placement, Route::Remote { next, message }).await?;
         }
         PeerRingAction::MultiActions(acts) => {
             for (act, has_next) in core_actor_steps(acts) {
@@ -513,6 +509,7 @@ impl HandleMsg<SyncEntriesWithSuccessorReport> for MessageHandler {
     }
 }
 
+mod rerouted;
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 #[cfg(test)]
 mod tests;

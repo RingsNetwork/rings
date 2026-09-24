@@ -767,6 +767,15 @@ pub enum Error {
     #[error("Error on ser/der JsValue")]
     SerdeWasmBindgenError(#[from] serde_wasm_bindgen::Error),
 
+    /// A data-plane rerouting spent its budget: every attempt was refused before acceptance.
+    #[error("Rerouting exhausted after {deferrals} deferred sends; last cause: {last}")]
+    ReroutingExhausted {
+        /// Deferred sends, each refused before backend acceptance, so none had an effect.
+        deferrals: u8,
+        /// The cause of the last deferral.
+        last: super::SendDeferral,
+    },
+
     /// Delegation is expired
     #[error("Delegation is expired")]
     DelegationExpired,

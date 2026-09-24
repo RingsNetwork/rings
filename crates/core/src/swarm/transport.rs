@@ -71,6 +71,7 @@ mod outbound;
 mod payload_send;
 mod pending;
 mod readiness;
+mod rerouting;
 mod retention;
 mod storage_lookup;
 mod storage_sync;
@@ -126,6 +127,10 @@ use self::pending::SharedConnectionLifecycles;
 #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
 use self::pending::PENDING_CONNECTION_TIMEOUT_MS;
 pub(crate) use self::readiness::TransportReadiness;
+pub(crate) use self::rerouting::LinkRoute;
+pub(crate) use self::rerouting::Rerouting;
+pub(crate) use self::rerouting::Step;
+pub(crate) use self::rerouting::Verdict;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::retention::UNREFERENCED_CONNECTION_GRACE_MS;
 use self::storage_lookup::StorageLookupObservationMap;
@@ -1062,6 +1067,8 @@ impl From<SwarmConnection> for Did {
 
 /// Stage 6 model check (#772): rejoin races across connection generations.
 /// Built for every test target, so the browser build checks the same model.
+#[cfg(test)]
+mod test_model_check;
 #[cfg(test)]
 mod test_rejoin_model;
 #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]

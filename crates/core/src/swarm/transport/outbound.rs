@@ -41,6 +41,7 @@ use super::AdmittedConnection;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
+use crate::lifecycle::epoch::Epoch;
 use crate::lifecycle::StopSource;
 use crate::measure::MeasureImpl;
 use crate::utils::get_epoch_ms;
@@ -383,6 +384,11 @@ impl OutboundSchedulers {
         )?;
         registry.peers.insert(peer, handle.clone());
         Ok(handle)
+    }
+
+    /// The epoch of outbound capacity releases, shared by every peer's transfers.
+    pub(super) fn capacity_releases(&self) -> &Epoch {
+        self.global_capacity.releases()
     }
 
     pub(super) async fn reserve(

@@ -48,8 +48,10 @@ pub mod types;
 pub mod virtual_node;
 
 pub use chord::EntryStorage;
+pub(crate) use chord::OperateRoute;
 pub use chord::PeerRing;
 pub use chord::PeerRingAction;
+pub(crate) use chord::PlacementLookup;
 pub use chord::RemoteAction as PeerRingRemoteAction;
 pub(crate) use chord::StorageKey;
 pub use chord::TopoInfo;

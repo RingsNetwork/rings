@@ -15,6 +15,7 @@ use crate::fair_admission::CountedReservedCapacity;
 use crate::fair_admission::FairWaitBudget;
 use crate::fair_admission::FairWaitQueue;
 use crate::fair_admission::ReservedCapacity;
+use crate::lifecycle::epoch::Epoch;
 
 /// Hard per-peer transfer bound, including queued and delivery-waiting heads.
 pub(crate) const OUTBOUND_TRANSFER_QUEUE_CAPACITY: usize = 256;
@@ -144,6 +145,9 @@ pub(super) struct GlobalTransferCapacity {
     state: Mutex<ReservedCapacity<{ TransferClass::COUNT }>>,
     waiters: Arc<FairWaitQueue>,
     wait_budget: Arc<FairWaitBudget>,
+    /// Advanced after every release of a global permit, which every transfer holds, so it
+    /// counts every transfer's release of its peer and global capacity.
+    releases: Epoch,
 }
 
 impl GlobalTransferCapacity {
@@ -156,7 +160,13 @@ impl GlobalTransferCapacity {
             state: Mutex::new(ReservedCapacity::new()),
             waiters: Arc::new(FairWaitQueue::with_budget(wait_budget.clone())),
             wait_budget,
+            releases: Epoch::default(),
         }
+    }
+
+    /// The epoch of capacity releases (see `rerouting`).
+    pub(super) const fn releases(&self) -> &Epoch {
+        &self.releases
     }
 
     fn try_acquire_inner(
@@ -387,6 +397,10 @@ impl TransferCapacity {
     }
 }
 
+/// The peer and global capacity one transfer holds until it ends.
+///
+/// Fields drop in declaration order, so the global release, which advances
+/// `GlobalTransferCapacity::releases`, follows the peer release.
 pub(in crate::swarm::transport) struct TransferCapacityPermit {
     _peer: PeerCapacityPermit,
     _global: GlobalCapacityPermit,
@@ -423,6 +437,7 @@ impl Drop for GlobalCapacityPermit {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .release(self.class.index(), self.bytes);
         self.capacity.waiters.wake_front();
+        self.capacity.releases.advance();
     }
 }
 
