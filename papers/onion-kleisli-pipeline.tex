@@ -929,6 +929,13 @@ closed ledger drains; that is a liveness assumption, not a fairness
 guarantee.  \code{link\_closed}$(\xi)$ removes $\xi$ from $\mathcal L_i$
 and is idempotent: a no-op on an unknown or refused $\xi$.
 
+\emph{Clock.}  Every step at $\mathit{now}$, $\mathrm{reconcile}_i$
+included, first joins the clock and drops expired filters:
+\begin{gather*}
+\mathit{clock}\gets\max(\mathit{clock},\mathit{now}),\qquad
+R_i[x]\gets\varnothing\ \text{for}\ x\le\mathit{clock}.
+\end{gather*}
+
 \emph{Reconciliation.}  Core's registry snapshot
 $L\subseteq\mathrm{DID}\times\mathbb N$ is authoritative.  The pure
 \begin{gather*}
@@ -938,21 +945,41 @@ $L\subseteq\mathrm{DID}\times\mathbb N$ is authoritative.  The pure
 \end{gather*}
 closes every generation absent from $L$ (\code{link\_closed}) and opens
 every missing one (\code{link\_opened}, with the same full-table
-refusal), so $\mathcal L_i\subseteq L$ afterwards and a lost
-\code{Retired} cannot pin a slot.  The shell calls it on callback
+refusal), so afterwards $\mathcal L_i=L\setminus\mathrm{refused}$, and a
+lost \code{Retired} cannot pin a slot.  The shell calls it on callback
 replacement and on a tick of period $\le V$.
 
-\emph{Epoch reset.}  $\mathrm{reset}_i(e',L)$ requires $e'\ne\mathrm{epoch}_i$,
-sets $\mathcal L_i\gets L$ from the same snapshot, and clears ledgers,
-loads, $\mathit{clock}$ and $R_i$; each live DID's ledger restarts at
-load $0$.  Its trigger is the pure predicate of the state
+\emph{Linearisation} (obligation on the shell).  $L$ must be
+linearised with the \code{Admitted}/\code{Retired} stream: delivered
+through the same ordered channel, or read and applied atomically at the
+shell's queue-drain point.  Then
+$\mathcal L_i=\mathrm{registry}\setminus\mathrm{refused}$ after
+$\mathrm{reconcile}_i$ or $\mathrm{reset}_i$.  Otherwise a stale $L$
+fails both ways until the next tick: read before an
+\code{Admitted}$(\xi)$ applied first, it closes the live $\xi$; read
+before a \code{Retired}$(\xi)$ applied first, it reopens the retired
+$\xi$.
+
+\emph{Epoch reset.}  With $\mathrm{clear}_i(e')$ setting
+$\mathrm{epoch}_i\gets e'$ and emptying $\mathcal L_i$, ledgers, loads,
+$\mathit{clock}$ and $R_i$,
+\begin{gather*}
+\mathrm{reset}_i(e',L)=\mathrm{reconcile}_i(L)\circ\mathrm{clear}_i(e'),
+\end{gather*}
+so $\mathcal L_i=L\setminus\mathrm{refused}$ afterwards
+($\mathrm{refused}=\varnothing$ while $|L|\le2\mathcal R$), each with a
+load-$0$ ledger.  $e'$ is drawn independently and uniformly from
+$\{0,1\}^{128}$; the state refuses $e'=\mathrm{epoch}_i$ and the shell
+redraws, so $e'$ is uniform on $\{0,1\}^{128}\setminus\{\mathrm{epoch}_i\}$.
+The trigger is the pure predicate of the state
 \begin{gather*}
 \mathrm{is\_rolled\_back\_at}_i(\mathit{now})\iff
 \mathit{now}<\mathit{clock}-X_0,
 \end{gather*}
-or a process restart; no peer can cause either.  A fresh epoch is
-necessary: with $e'=e$ the cleared $R_i$ would re-admit a layer admitted
-before the reset, violating at-most-once and with it
+or a process restart; no peer can cause either.  Freshness is
+necessary: with $e'$ equal to the current or any earlier epoch of $i$
+($A\to B\to A$), the cleared $R_i$ would re-admit a layer admitted under
+the first $A$, violating at-most-once and with it
 Prop.~\ref{prop:onekey}.
 
 \emph{Charge on receipt.}  Every received cell on $\xi=(d,g)$ is charged $u(b)$ to
@@ -1004,9 +1031,10 @@ identity rotation.
 $\mathcal L_i$, never served; its \code{link\_closed} is a no-op, and a
 redial (a new generation) succeeds once a closed ledger drains (liveness
 assumption, not fairness).
-(vi) With lost \code{Retired} events, a generation absent from core's
-registry leaves $\mathcal L_i$ within one tick ($\le V$), and its ledger
-is released within $V$ after that.
+(vi) Under the linearisation obligation, with lost \code{Retired}
+events, a generation absent from core's registry leaves $\mathcal L_i$
+within one tick ($\le V$), and its ledger is released within $V$ after
+that.
 \end{proposition}
 \begin{proof}
 (i) Live links are at most $\mathcal R$ (registry).  A closed link's load
@@ -1019,7 +1047,9 @@ a new generation of $d$ finds it; a new DID needs a real authenticated
 connection, which the registry bounds, and obtains its own $B$ only.
 (v) is the refusal rule, idempotent close, and (i): a closed ledger
 drains within $V$.  (vi) $\mathrm{reconcile}_i$ yields
-$\mathcal L_i\subseteq L$ at every tick; then (i).
+$\mathcal L_i=L\setminus\mathrm{refused}$ at every tick, and by the
+obligation $L$ is the registry at that point of the stream, so a
+generation absent from the registry is not in $\mathcal L_i$; then (i).
 \end{proof}
 
 \begin{proposition}[Replay bounds]\label{prop:replay}
@@ -1045,7 +1075,13 @@ $\min(d,2\mathcal R)\,B$ (Prop.~\ref{prop:ledger}).
 (iv) The same holds for $G$, $G/V\approx6990$ units\,s$^{-1}$
 ($\approx115$\,MB/s), in total; a 16\,KiB cell is one unit.  (v) A SURB is usable
 only within $[x_\upsilon-V,x_\upsilon)$, so SURB lifetime is at most $V$.
-(vi) Admission stays at most once across an epoch reset.
+(vi) Across $k$ resets of one process with epochs $e_0,\dots,e_k$,
+\begin{gather*}
+\Pr[\exists\,m<j.\ e_j=e_m]\le k^2\,2^{-129},\\
+\Pr[\exists\,j>m.\ e_j=e_m]\le k\,2^{-128}
+\end{gather*}
+for any fixed $m$; outside the first event admission stays at most once
+across every reset.
 \end{proposition}
 \begin{proof}
 (i) is the admission window with filters keyed by $x$ and the liveness
@@ -1064,10 +1100,13 @@ quanta, covered by $\lceil(\lceil T/Q\rceil+1)/5\rceil$ runs of $5$
 consecutive quanta, each charged at most $B$; within an epoch the ledger
 is never reset while loaded (Prop.~\ref{prop:ledger}).  (iv) is the global
 ledger, argued alike.  (v) every relay of the reply path applies (i) at the reply's
-arrival.  (vi) $R_i$ is cleared, but $\mathrm{admit}_i$ requires
-$e=\mathrm{epoch}_i=e'$, and every layer admitted before the reset names
-the old epoch $e\ne e'$; with $e'=e$ its replay would take a fresh token
-of epoch $e$ and pass $\nu\notin R_i[x]$.
+arrival.  (vi) $e_j$ is uniform on $2^{128}-1$ values excluding
+$e_{j-1}$, so $\Pr[e_j=e_m]\le(2^{128}-1)^{-1}$ for $m<j-1$ and $0$ for
+$m=j-1$; the union bound over $\binom k2$ pairs, resp.\ $\le k-1$ values
+of $j$, gives the bounds for $k\le2^{128}$.  $R_i$ is cleared, but
+$\mathrm{admit}_i$ requires $e=\mathrm{epoch}_i=e_j$, and every layer
+admitted before names some $e_m\ne e_j$; with $e_j=e_m$ its replay would
+take a fresh token of epoch $e_m$ and pass $\nu\notin R_i[x]$.
 \end{proof}
 
 \begin{proposition}[Throughput]\label{prop:rate}
@@ -1224,7 +1263,8 @@ ledger-table exhaustion & \code{link\_opened} refuses the link; redial is a live
 cell on a link not yet live or closed & $\mathrm{charge}_i$ requires $\xi\in\mathcal L_i$: never charged or peeled (L9, Prop.~\ref{prop:ledger}) \\
 cross-epoch link close & \code{link\_closed} idempotent: no-op on an unknown or refused $\xi$; a reset takes core's snapshot and rejects older tokens (L9) \\
 lost \code{Retired} event pins slots & $\mathrm{reconcile}_i$ on callback replacement and every tick $\le V$ (L9, Prop.~\ref{prop:ledger}) \\
-same-epoch renewal & a reset requires a fresh $e'\ne e$ (L9, Prop.~\ref{prop:replay}) \\
+epoch reuse ($A\to B\to A$) & $e'$ uniform on $\{0,1\}^{128}$ (L9, Prop.~\ref{prop:replay}) \\
+stale snapshot & linearised with the events (L9) \\
 reply amplification & $r(t)\le u(t)$ per session (Inv.~\ref{inv:credit}) \\
 large-class cell flood & budgets in 16\,KiB units: $\le1.79$\,MB/s of cells per neighbour (L9) \\
 SURB-pool exhaustion & $|Q_{h,\sid}|\le Q_{\max}$, all pools under $\quota(h,f,\epsilon)$ (D8) \\
@@ -1259,8 +1299,8 @@ client & reply accepted once by tag $t_\cl$; unknown, reused, or expired tag dro
 D5, L7 & $H=(s+1)n+s$; guard at $1$ and $H$ only; $n>4$ rejected; selection fails closed below $H-1$ eligible DIDs \\
 draw order & exact-enumeration test pins exit and guard marginals (Prop.~\ref{prop:draw}); no draw fails after the first succeeds \\
 L8 & per-hop byte inequality; one-bit flip rejects the whole value; a cell re-padded to another class fails $\gamma$ at the next hop \\
-L9 & replayed layer and reused SURB rejected; an earlier process epoch rejected after restart; $x\notin(\arr,\arr+V]$ at the token's $\arr$ rejected, and $x\le\mathit{clock}$ rejected at admission; every received cell charged $u(b)$ exactly once before $\alpha$ decoding, whatever its outcome; over-budget cells dropped unprocessed; one ledger per live sender DID, shared by its generations, released once closed at load $0$, found again by a new generation; a full $2\mathcal R$ table refuses the link; a cell on $\xi\notin\mathcal L_i$ (not yet live, refused, closed) never charged; \code{link\_closed} idempotent on unknown or refused $\xi$; an epoch reset with $e'=e$ refused; a reset sets $\mathcal L_i$ from the snapshot, clears ledgers, loads, $\mathit{clock}$, $R_i$, and rejects every older token; a layer admitted before a reset is rejected after it; \code{is\_rolled\_back\_at} exactly when $\mathit{now}<\mathit{clock}-X_0$ \\
-reconcile & $\mathrm{reconcile}_i(L)$ closes $\mathcal L_i\setminus L$, opens $L\setminus\mathcal L_i$ with the full-table refusal; after a dropped \code{Retired}, the slot is released; the shell calls it on callback replacement and on a tick $\le V$ \\
+L9 & replayed layer and reused SURB rejected; an earlier process epoch rejected after restart; $x\notin(\arr,\arr+V]$ at the token's $\arr$ rejected, and $x\le\mathit{clock}$ rejected at admission; every received cell charged $u(b)$ exactly once before $\alpha$ decoding, whatever its outcome; over-budget cells dropped unprocessed; one ledger per live sender DID, shared by its generations, released once closed at load $0$, found again by a new generation; a full $2\mathcal R$ table refuses the link; a cell on $\xi\notin\mathcal L_i$ (not yet live, refused, closed) never charged; \code{link\_closed} idempotent on unknown or refused $\xi$; an epoch reset with $e'=e$ refused; a reset clears, then reconciles ($\mathcal L_i=L\setminus\mathrm{refused}$), and rejects every older token; every step, $\mathrm{reconcile}_i$ included, joins $\mathit{now}$ into $\mathit{clock}$; a layer admitted before a reset is rejected after it; \code{is\_rolled\_back\_at} exactly when $\mathit{now}<\mathit{clock}-X_0$ \\
+reconcile & $\mathrm{reconcile}_i(L)$ closes $\mathcal L_i\setminus L$, opens $L\setminus\mathcal L_i$ with the full-table refusal; $\mathcal L_i=L\setminus\mathrm{refused}$; a dropped \code{Retired} releases the slot; called on callback replacement and each tick $\le V$; $L$ linearised with the event stream: no live link closed, no retired one reopened \\
 D6 & a uniform (cover) cell is rejected at $\alpha$ decoding or at $\gamma$, is charged $u(b)$ once, never reaches $R_i$ \\
 D1$'$, D2 & unknown shape rejected at configuration, descriptor decode, route construction; a backend name only under $\mathsf{invoke}$, canonical, $\le32$ bytes over $[\mathtt{a\text{-}z0\text{-}9.\_\text{-}}]$, validated against signed descriptors; $\sigma$ carries no $\omega$ \\
 credit & a \code{tcp} session emits no reply without a SURB of its own $\sid$, removes each SURB before release, drops expired SURBs, and resumes after new credit; two sessions at one $h$ never share a SURB; $\mathrm{fin}$ both ways drops $\sid$; a credit frame adds $k$ SURBs; credit beyond $Q_{\max}$ is dropped \\
