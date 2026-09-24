@@ -308,11 +308,6 @@ impl SecretKey {
         *self.0.to_nonzero_scalar()
     }
 
-    /// The secret scalar as an element of `Z_n^*`, non-zero by the key's invariant.
-    pub(crate) fn secp256k1_nonzero_scalar(&self) -> k256::NonZeroScalar {
-        self.0.to_nonzero_scalar()
-    }
-
     /// Generate a random secp256k1 secret key.
     pub fn random() -> Self {
         let mut rng = Hc128Rng::from_entropy();

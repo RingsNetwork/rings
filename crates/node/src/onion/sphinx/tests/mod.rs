@@ -4,6 +4,7 @@
 //! scalars, so a failure reproduces bit for bit.
 
 mod test_carry;
+mod test_cell;
 mod test_header;
 mod test_layer;
 mod test_peel_cost;

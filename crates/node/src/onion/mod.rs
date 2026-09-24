@@ -109,7 +109,14 @@ impl OnionExitEpoch {
     }
 
     /// Return the epoch bytes, the `e` field of the uniform layer (#834 D6″).
-    pub const fn to_bytes(self) -> [u8; 16] {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the layer encoding of the Sphinx primitives; #834 Phase 2a-4 (#843) uses it"
+        )
+    )]
+    pub(crate) const fn to_bytes(self) -> [u8; 16] {
         self.0
     }
 

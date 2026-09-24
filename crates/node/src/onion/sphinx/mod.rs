@@ -8,10 +8,12 @@
 //! ```
 //!
 //! where the header `χ = (α, β, γ)` routes the cell (Sphinx, [`header`]) and the carry slot `y`
-//! transports one segment value under nested AEZ layers ([`carry`]). A hop maps its cell by
+//! transports one segment value under nested AEZ layers ([`carry`]); [`cell`] parses a received
+//! string into `(b, χ, y)` with `b` its observed length, the only source of `b`. A hop maps its
+//! cell by
 //!
 //! ```text
-//! peel_i : χ_i ↦ (λ_i, χ_{i+1})                  one header layer        (Def. fixed-length header)
+//! peel_i : χ_i ↦ (λ_i, χ_{i+1})                  one header layer         (Def. header)
 //! y_{k,j} = Dec⁰_{k_{r_{k,j}}}(y_{k,j−1})         one AEZ layer at a relay (D7)
 //! b_k     = Dec^τ_{k_{c_k}}(y_{k,s})              authenticated at the consumer
 //! ```
@@ -35,11 +37,11 @@
 //!
 //! Assumptions this module relies on, stated for the data-plane integration (#834 Phase 2a-4):
 //!
-//! 1. **No discriminant** (`F = 0`). A cell is exactly `b` bytes and its class is its length, so
-//!    link cover traffic is a uniformly random `b`-byte cell, which fails the `γ` check at the
-//!    receiving hop, and the length is bound by `γ = MAC(b ‖ β)`. The `γ` check therefore precedes any replay-store insertion or admission
-//!    charge (L9 counts admitted layers only); the ECDH of a cell that fails `γ` is charged to the
-//!    sender's crypto budget.
+//! 1. **No discriminant** (`F = 0`). A cell is exactly `b` bytes and its class is its length,
+//!    bound by `γ = MAC(b ‖ β)`. Link cover traffic is a uniformly random `b`-byte cell, which the
+//!    receiving hop rejects at `α` decoding (`≈ 99.6 %`, before any ECDH) or at `γ`; both are one
+//!    outcome, [`header::OnionHeaderError::Invalid`], charged `u(b)` by admission (#834) and
+//!    checked before any replay-store insertion (L9 counts admitted layers only).
 //! 2. **Integrity and neighbour.** No per-edge cell AEAD remains: header integrity is `γ`, carry
 //!    integrity is the consumer's AEZ authenticator, and the neighbour `from` is the authenticated
 //!    transport link.
@@ -52,6 +54,7 @@ use sha2::Sha256;
 use zeroize::Zeroizing;
 
 pub(crate) mod carry;
+pub(crate) mod cell;
 pub(crate) mod class;
 pub(crate) mod header;
 pub(crate) mod layer;

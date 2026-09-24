@@ -10,6 +10,7 @@ use rings_aez::KEY_BYTES;
 use sha2::Sha256;
 
 use super::fixture_rng;
+use crate::onion::sphinx::seed::first_strong;
 use crate::onion::sphinx::seed::OnionCarrySeed;
 use crate::onion::sphinx::seed::OnionSegmentSeed;
 
@@ -70,19 +71,33 @@ fn test_segment_seeds_are_pairwise_distinct() {
     }
 }
 
-/// A derived key with a zero subkey `I`, `J` or `L` is rejected by `Aez::new`, the constructor
-/// [`OnionCarrySeed::key`] passes every `KDF₄₈` output through, so the holder drops the cell and
-/// the client re-draws `σ`. A weak HKDF output itself occurs with probability `≈ 2^−128` and
-/// cannot be exhibited.
+/// `first_strong` returns the first candidate whose derivation succeeds, re-drawing after each
+/// weak one, and fails closed with the last error after `SEGMENT_SEED_DRAWS = 4` weak draws. The
+/// derivation is injected, since a weak HKDF output (probability `≈ 2^−125`) cannot be exhibited.
 #[test]
-fn test_weak_key_is_detected() {
-    for (subkey, name) in [(0, Subkey::I), (1, Subkey::J), (2, Subkey::L)] {
-        let mut key = [0x5a; KEY_BYTES];
-        key[16 * subkey..16 * (subkey + 1)].fill(0);
+fn test_first_strong_redraws_and_fails_closed() {
+    let weak = KeyError::ZeroSubkey(Subkey::J);
+    for strong_from in 0..6_u8 {
+        let mut next = 0_u8;
+        let drawn = first_strong(
+            || {
+                next += 1;
+                next - 1
+            },
+            |candidate| {
+                (*candidate >= strong_from)
+                    .then_some(*candidate)
+                    .ok_or(weak)
+            },
+        );
 
-        assert_eq!(Aez::new(&key).err(), Some(KeyError::ZeroSubkey(name)));
+        if strong_from < 4 {
+            assert_eq!(drawn, Ok((strong_from, strong_from)));
+        } else {
+            assert_eq!(drawn, Err(weak));
+        }
+        assert_eq!(next, strong_from.saturating_add(1).min(4));
     }
-    assert!(Aez::new(&[0x5a; KEY_BYTES]).is_ok());
 }
 
 /// `draw` returns a segment seed all of whose keys are strong, and its keys equal the keys the

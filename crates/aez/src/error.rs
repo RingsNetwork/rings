@@ -50,3 +50,8 @@ pub enum DecryptError {
     #[error("AEZ authenticator mismatch")]
     Inauthentic,
 }
+
+/// The deciphered authenticator is not `0^τ`; the buffer has been zeroized.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("AEZ authenticator mismatch")]
+pub struct Inauthentic;

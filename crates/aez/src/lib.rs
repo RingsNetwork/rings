@@ -14,6 +14,7 @@ mod aez_tiny;
 mod block;
 mod cipher;
 mod error;
+mod expanded;
 mod hash;
 mod tbc;
 #[cfg(test)]
@@ -25,8 +26,10 @@ use crate::block::Block;
 use crate::cipher::Direction;
 pub use crate::error::DecryptError;
 pub use crate::error::ExpansionExceedsBuffer;
+pub use crate::error::Inauthentic;
 pub use crate::error::KeyError;
 pub use crate::error::Subkey;
+pub use crate::expanded::Expanded;
 use crate::tbc::Subkeys;
 pub use crate::tbc::KEY_BYTES;
 
@@ -124,6 +127,34 @@ impl Aez {
             plaintext.zeroize();
             authenticator.zeroize();
             Err(DecryptError::Inauthentic)
+        }
+    }
+
+    /// `Encrypt_K(T, τ, M)` in place on a buffer whose width `|M| + τ ≥ τ` is already a type:
+    /// [`Self::encrypt`] without its only failure.
+    pub fn encrypt_expanded<const TAU: usize>(&self, tweak: Tweak<'_>, buffer: &mut Expanded<TAU>) {
+        buffer.authenticator_mut().zeroize();
+        self.transform(tweak, TAU, Direction::Encipher, buffer.as_mut_slice());
+    }
+
+    /// `Decrypt_K(T, τ, C)` in place on a buffer of width at least `τ`: [`Self::decrypt`] without
+    /// its truncation failure. On success the message is [`Expanded::into_message`].
+    ///
+    /// # Errors
+    ///
+    /// [`Inauthentic`] if the deciphered authenticator is not `0^τ`; the whole buffer has then
+    /// been zeroized.
+    pub fn decrypt_expanded<const TAU: usize>(
+        &self,
+        tweak: Tweak<'_>,
+        buffer: &mut Expanded<TAU>,
+    ) -> Result<(), Inauthentic> {
+        self.transform(tweak, TAU, Direction::Decipher, buffer.as_mut_slice());
+        if is_zero(buffer.authenticator_mut()) {
+            Ok(())
+        } else {
+            buffer.as_mut_slice().zeroize();
+            Err(Inauthentic)
         }
     }
 

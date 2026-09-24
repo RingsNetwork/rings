@@ -41,8 +41,9 @@ use super::ONION_SEGMENT_RELAYS;
 /// Width of every carry seed, `|σ| = 32`.
 pub(crate) const ONION_CARRY_SEED_BYTES: usize = 32;
 
-/// Draws of `σ_k` before [`OnionSegmentSeed::draw`] fails closed: four consecutive weak segments
-/// occur with probability `< 2^−500` unless the RNG is broken.
+/// Draws of `σ_k` before [`OnionSegmentSeed::draw`] fails closed: a draw is weak with probability
+/// `≈ 9·2^−128 ≈ 2^−124.8`, so four consecutive weak draws occur with probability `≈ 2^−499`
+/// unless the RNG is broken.
 const SEGMENT_SEED_DRAWS: usize = 4;
 
 /// The relay indices `j = 1 … s`; the array length is checked against `s` at compile time.
@@ -136,12 +137,8 @@ impl OnionSegmentSeed {
         seed
     }
 
-    /// Draw `σ_k` for a new segment, re-drawing while a derived key is weak.
-    ///
-    /// ```text
-    /// up to SEGMENT_SEED_DRAWS times:  σ ← U({0,1}^256);  keys(σ) = Ok(K) ⇒ return (σ, K)
-    /// otherwise fail with the last KeyError               (only a broken RNG gets here)
-    /// ```
+    /// Draw `σ_k` for a new segment, re-drawing while a derived key is weak: [`first_strong`]
+    /// over uniform seeds and [`Self::keys`].
     ///
     /// # Errors
     ///
@@ -149,17 +146,7 @@ impl OnionSegmentSeed {
     pub(crate) fn draw(
         rng: &mut (impl CryptoRng + RngCore),
     ) -> Result<(Self, OnionSegmentKeys), KeyError> {
-        (1..SEGMENT_SEED_DRAWS).fold(Self::draw_once(rng), |drawn, _| {
-            drawn.or_else(|_| Self::draw_once(rng))
-        })
-    }
-
-    /// One draw of `σ_k` with its keys.
-    fn draw_once(
-        rng: &mut (impl CryptoRng + RngCore),
-    ) -> Result<(Self, OnionSegmentKeys), KeyError> {
-        let seed = Self::random(rng);
-        seed.keys().map(|keys| (seed, keys))
+        first_strong(|| Self::random(rng), Self::keys)
     }
 
     /// `(KDF₃₂(σ_k, relay j))_{j=1…s}` and `KDF₃₂(σ_k, consumer)`.
@@ -193,6 +180,26 @@ impl OnionSegmentSeed {
             consumer: seeds.consumer.key()?,
         })
     }
+}
+
+/// The first of at most `SEGMENT_SEED_DRAWS` drawn candidates whose derivation succeeds, with
+/// its derivation; otherwise the last failure.
+///
+/// ```text
+/// attempt = draw ≫= λc. (c, derive c)
+/// first_strong = attempt <|> attempt <|> …   (SEGMENT_SEED_DRAWS times; <|> keeps the first Ok)
+/// ```
+///
+/// Pure in its two arguments, so the fail-closed path is testable with an injected `derive`.
+pub(super) fn first_strong<C, K>(
+    mut draw: impl FnMut() -> C,
+    derive: impl Fn(&C) -> Result<K, KeyError>,
+) -> Result<(C, K), KeyError> {
+    let mut attempt = || {
+        let candidate = draw();
+        derive(&candidate).map(|derived| (candidate, derived))
+    };
+    (1..SEGMENT_SEED_DRAWS).fold(attempt(), |drawn, _| drawn.or_else(|_| attempt()))
 }
 
 impl OnionCarryKey {

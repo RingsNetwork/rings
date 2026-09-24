@@ -77,7 +77,7 @@ async-trait = { workspace = true }
 base58 = "0.2"
 base64 = { version = "0.13.0" }
 bytes = { version = "1.2.1", features = ["serde"] }
-chacha20 = "0.9.1"
+chacha20 = { version = "0.9.1", features = ["zeroize"] }
 chrono = "0.4.23"
 dashmap = "5"
 dotenvy = "0.15.7"

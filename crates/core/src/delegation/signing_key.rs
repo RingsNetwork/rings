@@ -107,9 +107,8 @@ impl DelegateeKey {
     /// `d`, zeroized on drop.
     ///
     /// Law: for every `x ∈ Z_n^*`, `diffie_hellman(x·G) = (d·G)·x` in its x-coordinate, so a
-    /// sender holding `x` and [`Self::delegatee_public_key`] derives the same secret; this is the
-    /// key transport of a Sphinx header (#834 D6″). `P ≠ O` by its type, and the secret scalar is
-    /// only ever held in a zeroizing `Z_n^*` value.
+    /// sender holding `x` and [`Self::delegatee_public_key`] derives the same secret. `P ≠ O` by
+    /// its type, and the secret scalar is only ever held in a zeroizing `Z_n^*` value.
     pub fn diffie_hellman(
         &self,
         peer: &NonIdentityPoint<Secp256k1>,

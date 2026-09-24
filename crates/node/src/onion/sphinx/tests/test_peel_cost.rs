@@ -1,15 +1,17 @@
 //! The benchmark gate of #840: the cost of peeling one cell at a relay, natively and on `wasm32`.
 //!
-//! One cell is everything a relay computes before it forwards:
+//! One cell is everything a relay computes from the received bytes to the bytes it forwards:
 //!
 //! ```text
+//! parse   |w| ↦ (b, χ, y)
 //! header  α check, ECDH d·α, HKDF key schedule (blinding b by wide reduction), ChaCha20 ρ over
-//!         (Ĥ+1)ℓ, HMAC γ over β, layer decode, α′ = b·α
-//! carry   KDF₄₈(σ_in), AEZ key setup, one AEZ decipherment of C_16KiB = 13241 bytes
+//!         (Ĥ+1)ℓ, HMAC γ over b ‖ β, layer decode, α′ = b·α
+//! carry   KDF₄₈(σ_in), AEZ key setup, one AEZ decipherment of C_16KiB = 13465 bytes
+//! encode  χ′ ‖ y′
 //! ```
 //!
-//! Beside the three measurements of the real code paths (header peel, carry step, whole cell), the
-//! same primitives are timed alone with the operands of one cell, so that the cost splits into
+//! Beside the two measurements of the real code paths (header peel, whole cell), the same
+//! primitives are timed alone with the operands of one cell, so that the cost splits into
 //! ECDH, blinding, key schedule, PRG, MAC and AEZ. Every row runs `WARM_UP` untimed passes and
 //! then `RUNS` timed passes over state built outside the timed region, on both targets alike, by
 //! the monotonic clock of `web_time::Instant` (`std::time::Instant` natively, `performance.now()`
@@ -22,8 +24,9 @@
 //! ```text
 //! native:  cargo test --release -p rings-node --lib sphinx::tests::test_peel_cost -- --ignored \
 //!            --nocapture --test-threads=1
-//! wasm32:  CHROMEDRIVER=… cargo test --release -p rings-node --lib --target wasm32-unknown-unknown \
-//!            --features browser_default --no-default-features -- --include-ignored --nocapture bench_peel_cost
+//! wasm32:  CHROMEDRIVER=… cargo test --release -p rings-node --lib \
+//!            --target wasm32-unknown-unknown --features browser_default --no-default-features \
+//!            -- --include-ignored --nocapture bench_peel_cost
 //! ```
 
 use core::hint::black_box;
@@ -45,12 +48,12 @@ use web_time::Instant;
 use super::fixture_keys;
 use super::fixture_rng;
 use super::fixture_route;
-use crate::onion::sphinx::carry::OnionCarry;
+use crate::onion::sphinx::cell::OnionCell;
 use crate::onion::sphinx::class::OnionLoopClass;
 use crate::onion::sphinx::header::OnionHeader;
-use crate::onion::sphinx::header::OnionLoopTag;
 use crate::onion::sphinx::header::ONION_HEADER_ROUTING_BYTES;
 use crate::onion::sphinx::layer::ONION_LAYER_BYTES;
+use crate::onion::sphinx::seed::OnionSegmentSeed;
 use crate::onion::sphinx::MAX_ONION_LOOP_HOPS;
 
 /// Untimed passes per row before measuring.
@@ -72,20 +75,18 @@ fn measure() -> Vec<(&'static str, f64)> {
     let mut rng = fixture_rng(40);
     let class = OnionLoopClass::DEFAULT;
     let keys = fixture_keys(MAX_ONION_LOOP_HOPS);
-    let header = OnionHeader::build(
-        &fixture_route(40, &keys),
-        class,
-        OnionLoopTag::new([0; 16]),
-        &mut rng,
-    )
-    .expect("build the header");
+    let (header, _) =
+        OnionHeader::build(&fixture_route(40, &keys), class, &mut rng).expect("build the header");
     let key = &keys[0];
     let peeled = header.peel(class, key).expect("peel");
     let inbound = &peeled.layer.inbound;
     let carry_key = inbound.key().expect("strong key");
+    let (_, segment) = OnionSegmentSeed::draw(&mut rng).expect("strong segment");
+    let cell = OnionCell::seal(class, header.clone(), &segment, b"value")
+        .expect("seal")
+        .to_bytes();
     let mut slot = vec![0; class.carry_bytes()];
     rng.fill_bytes(&mut slot);
-    let mut carry = OnionCarry::from_bytes(class, slot.clone()).expect("carry width");
     let alpha =
         NonIdentityPoint::generator_mul(&NonZeroScalar::<Secp256k1>::random_with_rng(&mut rng));
     let blinding = NonZeroScalar::<Secp256k1>::random_with_rng(&mut rng);
@@ -123,7 +124,7 @@ fn measure() -> Vec<(&'static str, f64)> {
             "PRG ChaCha20 (Ĥ+1)ℓ",
             microseconds_per_run(|| {
                 ChaCha20::new(&[7_u8; 32].into(), &[0_u8; 12].into())
-                    .apply_keystream(stream.as_mut_slice());
+                    .apply_keystream(black_box(stream.as_mut_slice()));
                 black_box(&stream);
             }),
         ),
@@ -139,7 +140,7 @@ fn measure() -> Vec<(&'static str, f64)> {
         (
             "carry key KDF₄₈ + AEZ setup",
             microseconds_per_run(|| {
-                black_box(inbound.key().expect("strong key"));
+                black_box(black_box(inbound).key().expect("strong key"));
             }),
         ),
         (
@@ -153,35 +154,31 @@ fn measure() -> Vec<(&'static str, f64)> {
         (
             "header peel (real path)",
             microseconds_per_run(|| {
-                black_box(header.peel(class, key).expect("peel"));
+                black_box(black_box(&header).peel(class, key).expect("peel"));
             }),
         ),
         (
-            "carry step (real path)",
+            "whole cell: parse, peel, relay, encode",
             microseconds_per_run(|| {
-                carry = black_box(carry.clone().peel(&inbound.key().expect("strong key")));
-            }),
-        ),
-        (
-            "whole cell (real path)",
-            microseconds_per_run(|| {
-                let peeled = header.peel(class, key).expect("peel");
-                carry = black_box(
-                    carry
-                        .clone()
-                        .peel(&peeled.layer.inbound.key().expect("strong key")),
-                );
+                let (layer, forwarded) = OnionCell::parse(black_box(cell.as_slice()))
+                    .expect("cell")
+                    .peel(key)
+                    .expect("peel")
+                    .relay()
+                    .expect("strong key");
+                black_box((layer, forwarded.to_bytes()));
             }),
         ),
     ]
 }
+
 /// Renders a measurement as a table, one row per operation, in µs and passes per second.
 fn report(target: &str, rows: &[(&'static str, f64)]) -> String {
     rows.iter().fold(
         format!("peel cost ({target}, {RUNS} runs per row after {WARM_UP} warm-up runs)"),
         |table, (operation, micros)| {
             format!(
-                "{table}\n  {operation:<30} {micros:>9.1} µs  {:>9.0} /s",
+                "{table}\n  {operation:<40} {micros:>9.1} µs  {:>9.0} /s",
                 1_000_000.0 / micros
             )
         },
