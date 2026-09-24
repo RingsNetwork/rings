@@ -938,31 +938,40 @@ async fn test_endpoint_send_awaits_the_same_paced_link_lane_and_emits_cover() {
     assert_eq!(hook.cover_count(), 3);
 }
 
-#[test]
-fn test_expired_exit_layer_emits_no_exit_effect() {
+/// Whether the reducer emits an exit effect for an exit layer expiring at `expires_at_ms` and
+/// received at `received_at_ms`, all other fields fixed. A pair of calls that differ only in the
+/// expiry pins the window as the reason for a rejection.
+fn exit_layer_is_admitted(received_at_ms: u128, expires_at_ms: u128) -> bool {
     let client = session();
     let reducer = OnionCircuitReducer::new(OnionCircuitCapabilities::Exit(TEST_PROCESS_EPOCH));
     let state = OnionCircuitState::default();
-    let circuit_id = OnionCircuitId::new([8; 16]);
-
     let transition = reducer.apply(&state, OnionCircuitInput::ForwardReady {
         from: client.delegator_did(),
-        received_at_ms: 100,
+        received_at_ms,
         bucket: OnionCellBucket::KiB4,
-        circuit_id,
+        circuit_id: OnionCircuitId::new([8; 16]),
         layer: OnionForwardLayer::Exit {
             process_epoch: TEST_PROCESS_EPOCH,
             client: OnionClientReturn::new(client.delegatee_public_key()),
             return_delegatee_public_key: client.delegatee_public_key(),
-            expires_at_ms: 100,
+            expires_at_ms,
             forward_nonce: OnionForwardNonce::new([9; 16]),
             forward_sequence: OnionForwardSequence::FIRST,
-            payload: test_payload("expired"),
+            payload: test_payload("window"),
         },
     });
+    matches!(transition.effects.as_slice(), [
+        OnionCircuitEffect::Exit { .. }
+    ])
+}
 
-    assert_eq!(transition.state, state);
-    assert!(transition.effects.is_empty());
+/// Law: at the window's lower boundary, an on-grid layer that expires exactly at its arrival
+/// (`x = arr = Q`) is rejected, while the next grid point `x = 2Q` is admitted.
+#[test]
+fn test_expired_exit_layer_emits_no_exit_effect() {
+    let quantum = super::super::ONION_FORWARD_EXPIRY_QUANTUM_MS;
+    assert!(!exit_layer_is_admitted(quantum, quantum));
+    assert!(exit_layer_is_admitted(quantum, 2 * quantum));
 }
 
 #[test]
@@ -982,34 +991,17 @@ fn test_read_only_reducer_arm_structurally_shares_return_state() {
     assert!(transition.effects.is_empty());
 }
 
+/// Law: at the window's upper boundary, with `arr = Q − 1`, the on-grid layer
+/// `x = 6Q = arr + V + 1` is rejected, while the grid point just inside, `x = 5Q ≤ arr + V`, is
+/// admitted.
 #[test]
 fn test_overlong_exit_layer_emits_no_exit_effect() {
-    let client = session();
-    let reducer = OnionCircuitReducer::new(OnionCircuitCapabilities::Exit(TEST_PROCESS_EPOCH));
-    let state = OnionCircuitState::default();
-    let received_at_ms = 100;
-    let circuit_id = OnionCircuitId::new([38; 16]);
-
-    let transition = reducer.apply(&state, OnionCircuitInput::ForwardReady {
-        from: client.delegator_did(),
-        received_at_ms,
-        bucket: OnionCellBucket::KiB4,
-        circuit_id,
-        layer: OnionForwardLayer::Exit {
-            process_epoch: TEST_PROCESS_EPOCH,
-            client: OnionClientReturn::new(client.delegatee_public_key()),
-            return_delegatee_public_key: client.delegatee_public_key(),
-            expires_at_ms: received_at_ms
-                .saturating_add(super::super::ONION_FORWARD_MAX_VALIDITY_MS)
-                .saturating_add(1),
-            forward_nonce: OnionForwardNonce::new([39; 16]),
-            forward_sequence: OnionForwardSequence::FIRST,
-            payload: test_payload("overlong"),
-        },
-    });
-
-    assert_eq!(transition.state, state);
-    assert!(transition.effects.is_empty());
+    let quantum = super::super::ONION_FORWARD_EXPIRY_QUANTUM_MS;
+    let received_at_ms = quantum - 1;
+    let overlong = received_at_ms + super::super::ONION_FORWARD_MAX_VALIDITY_MS + 1;
+    assert_eq!(overlong, 6 * quantum);
+    assert!(!exit_layer_is_admitted(received_at_ms, overlong));
+    assert!(exit_layer_is_admitted(received_at_ms, overlong - quantum));
 }
 
 #[tokio::test]
