@@ -663,6 +663,18 @@ pub enum Error {
     #[error("IndexedDB error, {0}")]
     IDBError(rexie::Error),
 
+    #[cfg(all(feature = "wasm", target_family = "wasm"))]
+    /// IndexedDB access clock record is missing from an opened store
+    #[error("IndexedDB access clock record is missing from an opened store")]
+    IdbAccessClockMissing,
+
+    #[cfg(all(feature = "wasm", target_family = "wasm"))]
+    /// IndexedDB access clock at {0} cannot advance without leaving the exact integer range
+    #[error(
+        "IndexedDB access clock at {0} cannot advance without leaving the exact integer range"
+    )]
+    IdbAccessClockExhausted(u64),
+
     /// Invalid capacity value
     #[error("Invalid capacity value")]
     InvalidCapacity,
