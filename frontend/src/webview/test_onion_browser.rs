@@ -20,6 +20,7 @@ use rings_node::prelude::uuid;
 use rings_node::processor::Processor;
 use rings_node::processor::ProcessorBuilder;
 use rings_node::processor::ProcessorConfig;
+use rings_node::provider::browser::ProviderListener;
 use rings_node::provider::Provider;
 use rings_webview::browser::BOOTSTRAP_MARKER;
 use rings_webview::GatewayHeader;
@@ -81,66 +82,11 @@ async fn test_webview_node_fetches_page_resources_through_browser_onion_exit() {
 }
 
 async fn run_browser_onion_webview_flow() -> WebviewResult<()> {
-    let storage_suffix = uuid::Uuid::new_v4().to_simple().to_string();
-    let fixture_authority = fixture_authority();
     let fixture_index = fixture_url("/index.html");
     let fixture_css = fixture_url("/site.css");
     let fixture_api = fixture_url("/api/data");
     let fixture_submit = fixture_url("/forms/submit");
-    let client = browser_provider(
-        &format!("rings-webview-onion-client-{storage_suffix}"),
-        OnionRole::Client,
-    )
-    .await?;
-    let guard = browser_provider(
-        &format!("rings-webview-onion-guard-{storage_suffix}"),
-        OnionRole::Relay,
-    )
-    .await?;
-    let mut middle = Vec::with_capacity(FIXTURE_MIDDLE_RELAYS);
-    for index in 0..FIXTURE_MIDDLE_RELAYS {
-        middle.push(
-            browser_provider(
-                &format!("rings-webview-onion-relay-{index}-{storage_suffix}"),
-                OnionRole::Relay,
-            )
-            .await?,
-        );
-    }
-    let exit = browser_provider(
-        &format!("rings-webview-onion-exit-{storage_suffix}"),
-        OnionRole::Exit(fixture_authority.as_str()),
-    )
-    .await?;
-    // The client's only direct peer is `guard`, so the browser guard policy draws it; either
-    // middle relay can take the forward relay position, so each links the guard to the exit.
-    let edges = iter::once((&client, &guard))
-        .chain(middle.iter().map(|relay| (&guard, relay)))
-        .chain(middle.iter().map(|relay| (relay, &exit)))
-        .collect::<Vec<_>>();
-    try_join_all(
-        edges
-            .iter()
-            .map(|(offerer, answerer)| connect_browser_providers(offerer, answerer)),
-    )
-    .await?;
-    for (offerer, answerer) in edges.iter() {
-        poll_until("the fixture edge to connect on both sides", || {
-            edge_connected(offerer, answerer)
-        })
-        .await?;
-    }
-    // Listening starts each node's registrations, and the first one publishes at once: started
-    // after the edges, every registration reaches the overlay on its first attempt.
-    let _listeners = [&client, &guard, &exit]
-        .into_iter()
-        .chain(middle.iter())
-        .map(|provider| provider.listen())
-        .collect::<Vec<_>>();
-    poll_until("the client directory to register the loop", || {
-        loop_directory_ready(&client, FIXTURE_MIDDLE_RELAYS + 2)
-    })
-    .await?;
+    let (client, _listeners) = browser_onion_loop().await?;
     let node = WebviewNode::new(client, controlled_origin()?, web_shell_bootstrap)?;
     let index_target = TargetUrl::parse(fixture_index.as_str())?;
     let index = gateway_navigation(&node, &index_target).await?;
@@ -206,6 +152,75 @@ async fn run_browser_onion_webview_flow() -> WebviewResult<()> {
     assert_fetch_call(&calls, fixture_api.as_str(), "GET", None)?;
     assert_fetch_call(&calls, fixture_submit.as_str(), "POST", Some("name=value"))?;
     Ok(())
+}
+
+/// Build the browser onion loop fixture and wait until the client's directory registers it.
+///
+/// ```text
+/// client ── guard ─┬─ relay₀ ─┬─ exit
+///                  └─ relay₁ ─┘
+/// ```
+///
+/// The listeners are returned with the client, and the caller holds them for as long as it
+/// routes through the loop.
+async fn browser_onion_loop() -> WebviewResult<(Rc<Provider>, Vec<ProviderListener>)> {
+    let storage_suffix = uuid::Uuid::new_v4().to_simple().to_string();
+    let fixture_authority = fixture_authority();
+    let client = browser_provider(
+        &format!("rings-webview-onion-client-{storage_suffix}"),
+        OnionRole::Client,
+    )
+    .await?;
+    let guard = browser_provider(
+        &format!("rings-webview-onion-guard-{storage_suffix}"),
+        OnionRole::Relay,
+    )
+    .await?;
+    let mut middle = Vec::with_capacity(FIXTURE_MIDDLE_RELAYS);
+    for index in 0..FIXTURE_MIDDLE_RELAYS {
+        middle.push(
+            browser_provider(
+                &format!("rings-webview-onion-relay-{index}-{storage_suffix}"),
+                OnionRole::Relay,
+            )
+            .await?,
+        );
+    }
+    let exit = browser_provider(
+        &format!("rings-webview-onion-exit-{storage_suffix}"),
+        OnionRole::Exit(fixture_authority.as_str()),
+    )
+    .await?;
+    // The client's only direct peer is `guard`, so the browser guard policy draws it; either
+    // middle relay can take the forward relay position, so each links the guard to the exit.
+    let edges = iter::once((&client, &guard))
+        .chain(middle.iter().map(|relay| (&guard, relay)))
+        .chain(middle.iter().map(|relay| (relay, &exit)))
+        .collect::<Vec<_>>();
+    try_join_all(
+        edges
+            .iter()
+            .map(|(offerer, answerer)| connect_browser_providers(offerer, answerer)),
+    )
+    .await?;
+    for (offerer, answerer) in edges.iter() {
+        poll_until("the fixture edge to connect on both sides", || {
+            edge_connected(offerer, answerer)
+        })
+        .await?;
+    }
+    // Listening starts each node's registrations, and the first one publishes at once: started
+    // after the edges, every registration reaches the overlay on its first attempt.
+    let listeners = [&client, &guard, &exit]
+        .into_iter()
+        .chain(middle.iter())
+        .map(|provider| provider.listen())
+        .collect::<Vec<_>>();
+    poll_until("the client directory to register the loop", || {
+        loop_directory_ready(&client, FIXTURE_MIDDLE_RELAYS + 2)
+    })
+    .await?;
+    Ok((client, listeners))
 }
 
 fn fixture_origin() -> String {

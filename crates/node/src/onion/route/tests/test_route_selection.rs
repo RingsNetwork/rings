@@ -898,3 +898,29 @@ fn test_fail_closed_is_checked_before_the_guard_policy() -> Result<()> {
     ));
     Ok(())
 }
+
+/// One registration per DID: the relay registrants and the admitted symbol registrants keep the
+/// first registration of each DID, and a symbol hop that is not the DID's relay registration is
+/// not admitted (D2).
+#[test]
+fn test_registrants_keep_one_registration_per_did() -> Result<()> {
+    let keys = node_keys(1..=2)?;
+    let [first, second] = keys.as_slice() else {
+        return Err(Error::InvalidData);
+    };
+    let relay = hop(first, TEST_PROCESS_EPOCH);
+    let other = hop(second, TEST_PROCESS_EPOCH);
+    let relays = RelayRegistrants::new(vec![relay, other, relay]);
+    assert_eq!(relays.0.len(), 2);
+
+    let stale = hop(second, STALE_PROCESS_EPOCH);
+    let admitted = relays.admit([(relay, 'a'), (relay, 'b'), (stale, 'c')], |(hop, _)| *hop);
+
+    assert_eq!(admitted.dids(), [relay.did].as_slice());
+    assert_eq!(
+        admitted.registrations,
+        vec![(relay, (relay, 'a'))],
+        "the first registration of a DID is kept, a stale hop is not admitted"
+    );
+    Ok(())
+}

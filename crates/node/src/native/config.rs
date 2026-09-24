@@ -164,7 +164,8 @@ where D: serde::Deserializer<'de> {
         return Err(serde::de::Error::custom(
             if REMOVED_GATEWAY_KEYS.contains(&key) {
                 format!(
-                    "gateway.{key} was removed: the onion route length is fixed by the loop shape (#834 D5)"
+                    "gateway.{key} was removed: the onion route length is fixed by the loop shape \
+                     (#834 D5)"
                 )
             } else {
                 format!(
@@ -685,7 +686,8 @@ gateway:
     #[test]
     fn gateway_section_rejects_unknown_keys() {
         let document = format!(
-            "{CONFIG_WITHOUT_GATEWAY_SECTION}{GATEWAY_SECTION_WITHOUT_ENABLED}  onion_services: https\n"
+            "{CONFIG_WITHOUT_GATEWAY_SECTION}{GATEWAY_SECTION_WITHOUT_ENABLED}  \
+             onion_services: https\n"
         );
 
         let error = match serde_yaml::from_str::<Config>(&document) {
@@ -705,7 +707,8 @@ gateway:
             ("onion_allow_short_paths", "true"),
         ] {
             let document = format!(
-                "{CONFIG_WITHOUT_GATEWAY_SECTION}{GATEWAY_SECTION_WITHOUT_ENABLED}  {key}: {value}\n"
+                "{CONFIG_WITHOUT_GATEWAY_SECTION}{GATEWAY_SECTION_WITHOUT_ENABLED}  \
+                 {key}: {value}\n"
             );
 
             let error = match serde_yaml::from_str::<Config>(&document) {

@@ -21,8 +21,8 @@
 //!   the loop at position `H`; the other `H − 2` hops are pairwise distinct and distinct from `g`
 //!   (`has_duplicate_dids`).
 //! - **Draw order** (L7). The symbol positions are drawn first, then the guard, then the relays,
-//!   so when every exit extends to a loop, an exit's marginal is its quality share among the
-//!   exits.
+//!   so when every registrant of the first symbol `h₁` extends to a loop, its marginal is its
+//!   quality share among them; for a one-symbol pipeline `h₁` is the exit.
 //!
 //! Until #834 Phase 2a-4 the data plane consumes only the loop's forward prefix
 //! [`OnionRoute::circuit_hops`], `g, r₀,₂, h₁ = relay^s ⋙ (s, ā)`, and answers along its reverse.
@@ -255,9 +255,9 @@ impl OnionRouteCandidates {
 /// Select a route for `request` from live candidates and an explicit guard policy.
 ///
 /// ```text
-/// E  = exits of the service                        E = ∅                     → NoLiveExit
-/// E′ = { e ∈ E | hop(e) ∈ R }   (D2)               E′ = ∅, some DID(e) ∈ R   → ExitRelayRegistrationMismatch
-///                                                  E′ = ∅ otherwise           → ExitWithoutRelayRegistration
+/// E  = exits of the service              E = ∅                    → NoLiveExit
+/// E′ = { e ∈ E | hop(e) ∈ R }   (D2)     E′ = ∅, some DID(e) ∈ R  → ExitRelayRegistrationMismatch
+///                                        E′ = ∅ otherwise         → ExitWithoutRelayRegistration
 /// loop ← select_loop(ε ⋙ E′, R)
 /// ```
 ///
@@ -330,24 +330,35 @@ impl RelayRegistrants {
             .collect::<Vec<_>>();
         admitted.sort_by_key(|(hop, _)| hop.did);
         admitted.dedup_by_key(|(hop, _)| hop.did);
-        SymbolRegistrants(admitted)
+        SymbolRegistrants {
+            dids: admitted.iter().map(|(hop, _)| hop.did).collect(),
+            registrations: admitted,
+        }
     }
 }
 
 /// The registrations of one symbol whose hops are relay registrations of the draw (D2), in DID
 /// order and one per DID. Every hop Hall's condition counts is therefore drawable (#846 N1), and
 /// each registrant's draw weight is its quality weight once.
-struct SymbolRegistrants<X>(Vec<(OnionRouteHop, X)>);
+///
+/// Invariant: `dids = map (did ∘ fst) registrations`, projected once by [`RelayRegistrants::admit`]
+/// so every matching borrows it.
+struct SymbolRegistrants<X> {
+    /// The admitted registrations with their hops, in DID order.
+    registrations: Vec<(OnionRouteHop, X)>,
+    /// The DIDs of `registrations`, in the same order.
+    dids: Vec<Did>,
+}
 
 impl<X> SymbolRegistrants<X> {
     /// Return whether no registration was admitted.
     fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.registrations.is_empty()
     }
 
     /// Return the DIDs of the admitted registrations, in DID order.
-    fn dids(&self) -> Vec<Did> {
-        self.0.iter().map(|(hop, _)| hop.did).collect()
+    fn dids(&self) -> &[Did] {
+        self.dids.as_slice()
     }
 }
 
@@ -367,13 +378,28 @@ impl<X> SymbolRegistrants<X> {
 /// the H − 2 − n relays ← draws from R ∖ T, placed by OnionLoop::try_unfold
 /// ```
 ///
-/// When every registrant of a symbol extends to a loop (the matching admits it), drawing the
-/// symbols first makes each registrant's marginal its quality share among them, so a scarce
-/// high-quality exit is not consumed as the guard or a relay first. A registrant the matching
-/// excludes, e.g. the only permitted guard, is never drawn for the symbol. Once the checks above
-/// pass, the matching keeps every later draw non-empty and `|R| ≥ H − 1` leaves the relays their
-/// `H − 2 − n` distinct hops; an empty draw is therefore reported as `LoopDrawInvariant`, a
-/// violated invariant, never as a property of the network.
+/// When every registrant of the first symbol extends to a loop (the matching admits it), drawing
+/// the symbols first makes each registrant's marginal for `h₁` its quality share among them, so a
+/// scarce high-quality exit of a one-symbol pipeline is not consumed as the guard or a relay
+/// first. The later symbols are drawn conditionally on `T`, so their marginals are not claimed. A
+/// registrant the matching excludes, e.g. the only permitted guard, is never drawn for the symbol.
+///
+/// No draw is empty once the checks above pass. With `T` the DIDs taken so far:
+///
+/// ```text
+/// P1  Sₖ ⊆ R and G ⊆ R, one hop per DID          (RelayRegistrants::admit, D2)
+/// P2  matching(S₁ … Sₙ, G; ∅)                     (the NoPermittedFirstHop check)
+/// P3  |R| ≥ H − 1                                  (the NotEnoughLoopHops check, D5)
+///
+/// I   matching(Sₖ … Sₙ, G; T) before draw k       (k = 1 by P2)
+///     ⇒ its Sₖ-element c ∉ T witnesses matching(Sₖ₊₁ … Sₙ, G; T ∪ {c}),
+///       so the filtered draw of hₖ is non-empty and I holds for k + 1
+/// g   I at k = n + 1 is matching(G; T) ⇒ G ∖ T ≠ ∅
+/// r   |T| = n + 1 and T ⊆ R (P1) ⇒ |R ∖ T| ≥ H − 2 − n (P3): every relay draw is non-empty
+/// ```
+///
+/// An empty draw is therefore reported as `LoopDrawInvariant`, a violated invariant, never as a
+/// property of the network.
 fn select_loop<'x, X>(
     symbols: OnionPipelineSymbols<'_, SymbolRegistrants<&'x X>>,
     relays: &RelayRegistrants,
@@ -394,29 +420,24 @@ fn select_loop<'x, X>(
         .filter(|hop| guard_permitted(hop.did))
         .collect::<Vec<_>>();
     let guard_dids = guards.iter().map(|hop| hop.did).collect::<Vec<_>>();
-    let symbol_dids = symbols
-        .iter()
-        .map(SymbolRegistrants::dids)
-        .collect::<Vec<_>>();
-    if !admits_distinct_hops(PendingPositions::symbols(&symbol_dids), |_| false) {
+    if !admits_distinct_hops(PendingPositions::symbols(symbols.as_slice()), |_| false) {
         return Err(Error::OnionRouteError(
             OnionRouteError::NoDistinctSymbolHops,
         ));
     }
-    if !admits_distinct_hops(PendingPositions::new(&symbol_dids, &guard_dids), |_| false) {
+    if !admits_distinct_hops(
+        PendingPositions::new(symbols.as_slice(), &guard_dids),
+        |_| false,
+    ) {
         return Err(Error::OnionRouteError(OnionRouteError::NoPermittedFirstHop));
     }
 
     let invariant = || Error::OnionRouteError(OnionRouteError::LoopDrawInvariant);
     let mut taken = BTreeSet::new();
     let (intermediate, terminal) = symbols.try_map_with_later(|registrants, later| {
-        let later_dids = later
-            .iter()
-            .map(SymbolRegistrants::dids)
-            .collect::<Vec<_>>();
-        let pending = PendingPositions::new(&later_dids, &guard_dids);
+        let pending = PendingPositions::new(later, &guard_dids);
         let drawn = *draw_weighted(
-            registrants.0.iter().filter(|(hop, _)| {
+            registrants.registrations.iter().filter(|(hop, _)| {
                 !taken.contains(&hop.did)
                     && admits_distinct_hops(pending, |did| *did == hop.did || taken.contains(did))
             }),
@@ -454,17 +475,25 @@ fn select_loop<'x, X>(
 }
 
 /// The positions still to be matched: the pending symbols, then the guard until it is drawn.
-#[derive(Clone, Copy)]
-struct PendingPositions<'p> {
-    /// Candidate DIDs of each pending symbol, in pipeline order.
-    symbols: &'p [Vec<Did>],
+struct PendingPositions<'p, X> {
+    /// The registrants of each pending symbol, in pipeline order.
+    symbols: &'p [SymbolRegistrants<X>],
     /// Candidate DIDs of the guard, while the guard is pending.
     guard: Option<&'p [Did]>,
 }
 
-impl<'p> PendingPositions<'p> {
+/// A view of borrowed slices: copyable for every `X`, which `#[derive(Copy)]` would bound.
+impl<X> Clone for PendingPositions<'_, X> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<X> Copy for PendingPositions<'_, X> {}
+
+impl<'p, X> PendingPositions<'p, X> {
     /// The pending `symbols` followed by the guard's candidates `guard`.
-    const fn new(symbols: &'p [Vec<Did>], guard: &'p [Did]) -> Self {
+    const fn new(symbols: &'p [SymbolRegistrants<X>], guard: &'p [Did]) -> Self {
         Self {
             symbols,
             guard: Some(guard),
@@ -472,7 +501,7 @@ impl<'p> PendingPositions<'p> {
     }
 
     /// The pending `symbols` alone.
-    const fn symbols(symbols: &'p [Vec<Did>]) -> Self {
+    const fn symbols(symbols: &'p [SymbolRegistrants<X>]) -> Self {
         Self {
             symbols,
             guard: None,
@@ -487,7 +516,7 @@ impl<'p> PendingPositions<'p> {
     /// Return the candidates of position `index`: a symbol, or the guard after the symbols.
     fn get(self, index: usize) -> Option<&'p [Did]> {
         match self.symbols.get(index) {
-            Some(candidates) => Some(candidates.as_slice()),
+            Some(registrants) => Some(registrants.dids()),
             None => self.guard.filter(|_| index == self.symbols.len()),
         }
     }
@@ -502,7 +531,10 @@ impl<'p> PendingPositions<'p> {
 ///
 /// decided by its equivalent: a matching that gives every position its own DID. Each position
 /// is matched in turn along an augmenting path (Kuhn), in `O(|P| · Σ|Pᵢ|)` steps.
-fn admits_distinct_hops(pending: PendingPositions<'_>, excluded: impl Fn(&Did) -> bool) -> bool {
+fn admits_distinct_hops<X>(
+    pending: PendingPositions<'_, X>,
+    excluded: impl Fn(&Did) -> bool,
+) -> bool {
     let mut owner = BTreeMap::new();
     (0..pending.len()).all(|position| {
         augment_matching(
@@ -517,8 +549,8 @@ fn admits_distinct_hops(pending: PendingPositions<'_>, excluded: impl Fn(&Did) -
 
 /// Extend the matching `owner` (DID ↦ position index) to cover `position`, re-matching positions
 /// along an augmenting path; `visited` holds the DIDs this search has tried.
-fn augment_matching(
-    pending: PendingPositions<'_>,
+fn augment_matching<X>(
+    pending: PendingPositions<'_, X>,
     position: usize,
     excluded: &impl Fn(&Did) -> bool,
     owner: &mut BTreeMap<Did, usize>,

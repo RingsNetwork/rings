@@ -140,8 +140,8 @@ impl<'s, S> OnionPipelineSymbols<'s, S> {
     }
 
     /// Return the symbols in pipeline order.
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &'s S> {
-        self.all.iter()
+    pub(crate) const fn as_slice(&self) -> &'s [S] {
+        self.all
     }
 
     /// Label every symbol in pipeline order, handing each the symbols after it, and stop at the
@@ -470,7 +470,8 @@ mod tests {
         assert_eq!(asked, ONION_SEGMENT_RELAYS + 1);
     }
 
-    /// Each symbol is labelled with the symbols after it, in pipeline order, the terminal with none.
+    /// Each symbol is labelled with the symbols after it, in pipeline order, the terminal with
+    /// none.
     #[test]
     fn test_symbols_are_labelled_with_the_symbols_after_them() -> Result<()> {
         let pipeline = [1, 2, 3];

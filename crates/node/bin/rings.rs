@@ -350,7 +350,10 @@ struct RunCommand {
     #[arg(
         long,
         action = ArgAction::SetTrue,
-        help = "Publish this node as an onion exit in the application-layer exit registry; requires --advertise-onion-relay",
+        help = concat!(
+            "Publish this node as an onion exit in the application-layer exit registry; ",
+            "requires --advertise-onion-relay",
+        ),
         env
     )]
     pub advertise_onion_exit: bool,
@@ -714,9 +717,13 @@ const REMOVED_ONION_ROUTE_ENV: [&str; 2] = [
 
 /// Reject every variable of [`REMOVED_ONION_ROUTE_ENV`] that `is_set` reports as set.
 fn reject_removed_onion_route_env(is_set: impl Fn(&str) -> bool) -> anyhow::Result<()> {
-    match REMOVED_ONION_ROUTE_ENV.into_iter().find(|name| is_set(name)) {
+    match REMOVED_ONION_ROUTE_ENV
+        .into_iter()
+        .find(|name| is_set(name))
+    {
         Some(name) => Err(anyhow::anyhow!(
-            "{name} was removed: the onion route length is fixed by the loop shape (#834 D5); unset it"
+            "{name} was removed: the onion route length is fixed by the loop shape (#834 D5); \
+             unset it"
         )),
         None => Ok(()),
     }

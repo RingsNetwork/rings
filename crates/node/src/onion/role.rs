@@ -162,8 +162,11 @@ impl OnionRole<OnionExitOffer> {
             (true, false) => Ok(Self::Relay),
             (true, true) => OnionExitOffer::new(services, policy).map(Self::Exit),
             (false, true) => Err(Error::InvalidConfig(
-                "advertise_onion_exit requires advertise_onion_relay because registering any onion symbol registers relay (#834 D2)"
-                    .to_string(),
+                concat!(
+                    "advertise_onion_exit requires advertise_onion_relay because registering any ",
+                    "onion symbol registers relay (#834 D2)",
+                )
+                .to_string(),
             )),
         }
     }

@@ -9,9 +9,15 @@
 //! ```text
 //! Provider::listen
 //!       |
+//!       +--> role registers relay? --yes--> install the onion runtime now
+//!       |                                   (the task holds only its Result)
+//!       |
 //!       +--> create stop source and one-shot start signal
 //!       |
 //!       +--> return ProviderListener with two JavaScript promises
+//!                    |
+//!                    v
+//!            installation failed? --yes--> reject task promise
 //!                    |
 //!                    v
 //!            task waits for processor lifecycle lock
