@@ -33,7 +33,6 @@ use crate::extension::ext::Wire;
 use crate::onion::replay::OnionForwardReplayKey;
 use crate::onion::replay::OnionForwardReplayPartitions;
 use crate::onion::replay::ReplayAdmission;
-use crate::onion::signature::ONION_SIGNATURE;
 use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitDescriptorBody;
 use crate::onion::OnionExitEpoch;
@@ -209,11 +208,9 @@ fn world_facing_algebra(
     interpretation: impl OnionInterpretation + Clone + 'static,
 ) -> Arc<OnionAlgebra> {
     Arc::new(
-        ONION_SIGNATURE
-            .world_facing()
-            .fold(OnionAlgebra::default(), |algebra, symbol| {
-                algebra.register(symbol, interpretation.clone())
-            }),
+        OnionServiceName::world_facing().fold(OnionAlgebra::default(), |algebra, symbol| {
+            algebra.register(symbol, interpretation.clone())
+        }),
     )
 }
 

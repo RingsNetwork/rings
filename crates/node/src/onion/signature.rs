@@ -124,10 +124,6 @@ macro_rules! onion_signature {
                 [&self.relay, $(&self.$field,)+]
             }
 
-            /// Return `Σ_W`, the world-facing symbols of `Σ`, in table order as service names.
-            pub fn world_facing(&'static self) -> impl Iterator<Item = OnionServiceName> {
-                OnionWorldSymbol::ALL.into_iter().map(OnionServiceName)
-            }
         }
 
         /// `Σ_W` as a type: one constructor per world-facing row, in table order; the
@@ -151,6 +147,11 @@ macro_rules! onion_signature {
         }
 
         impl OnionServiceName {
+            /// Return `Σ_W`, the world-facing symbols of `Σ`, in table order.
+            pub fn world_facing() -> impl Iterator<Item = Self> {
+                OnionWorldSymbol::ALL.into_iter().map(Self)
+            }
+
             $(
                 #[doc = concat!("Return the name of the world-facing `", $name, "` symbol.")]
                 pub const fn $field() -> Self {
@@ -237,14 +238,12 @@ impl OnionServiceName {
                 "onion exit service name must be non-empty and trimmed".to_string(),
             ));
         }
-        ONION_SIGNATURE
-            .world_facing()
+        OnionServiceName::world_facing()
             .find(|service| service.as_str().eq_ignore_ascii_case(trimmed))
             .ok_or_else(|| {
                 Error::InvalidConfig(format!(
                     "unknown onion service {name:?}; the onion signature is closed: expected one of {}",
-                    ONION_SIGNATURE
-                        .world_facing()
+                    OnionServiceName::world_facing()
                         .map(|service| service.as_str())
                         .collect::<Vec<_>>()
                         .join(", ")
@@ -315,7 +314,7 @@ mod tests {
     /// parses: neither names outside `Σ` nor the identity symbol `relay`.
     #[test]
     fn test_service_names_are_exactly_the_world_facing_signature() {
-        for service in ONION_SIGNATURE.world_facing() {
+        for service in OnionServiceName::world_facing() {
             assert_eq!(service.spec().position(), OnionSymbolPosition::WorldFacing);
             assert_eq!(
                 OnionServiceName::parse(service.as_str()).ok(),
@@ -382,7 +381,7 @@ mod tests {
             assert_eq!(spec_of_symbol, spec);
         }
         assert_eq!(
-            ONION_SIGNATURE.world_facing().count() + 1,
+            OnionServiceName::world_facing().count() + 1,
             ONION_SIGNATURE.symbols().len()
         );
     }

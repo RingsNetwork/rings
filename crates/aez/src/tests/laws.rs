@@ -223,4 +223,18 @@ witness! {
         );
         assert!(Ciphertext::<16>::new(vec![0; 16]).is_ok());
     }
+
+    /// Law: a message whose buffer already has room for the slot is sealed in place, so
+    /// `seal` neither copies nor reallocates it.
+    fn plaintext_keeps_a_buffer_with_room_for_the_slot() {
+        let mut message = Vec::with_capacity(48 + 16);
+        message.extend_from_slice(&[7; 48]);
+        let address = message.as_ptr();
+        let cipher = keyed(&mut Stream::new(0x5eed_000a));
+
+        let sealed = cipher.seal(Tweak::EMPTY, Plaintext::<16>::new(message));
+
+        assert_eq!(sealed.as_slice().as_ptr(), address);
+        assert_eq!(sealed.as_slice().len(), 48 + 16);
+    }
 }

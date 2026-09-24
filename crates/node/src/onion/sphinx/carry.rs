@@ -84,15 +84,17 @@ pub(super) fn seal(
             capacity,
         });
     }
-    let message = Plaintext::new(
+    // `pad(v)` in a buffer with room for the slot, which `Plaintext::new` then keeps as it is.
+    let mut padded = Vec::with_capacity(class.carry_bytes());
+    padded.extend(
         value
             .iter()
             .copied()
             .chain(core::iter::once(PADDING_MARKER))
             .chain(core::iter::repeat(0))
-            .take(class.carry_value_bytes())
-            .collect(),
+            .take(class.carry_value_bytes()),
     );
+    let message = Plaintext::new(padded);
     let mut carry = keys.consumer().aez().seal(Tweak::EMPTY, message);
     keys.relays()
         .iter()

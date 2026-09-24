@@ -15,7 +15,7 @@
 //! ```text
 //! peel_i : χ_i ↦ (λ_i, χ_{i+1})                  one header layer         (Def. header)
 //! y_{k,j} = Dec⁰_{k_{r_{k,j}}}(y_{k,j−1})         one AEZ layer at a relay (D7)
-//! b_k     = Dec^τ_{k_{c_k}}(y_{k,s})              authenticated at the consumer
+//! m_k     = Dec^τ_{k_{c_k}}(y_{k,s})              authenticated at the consumer
 //! ```
 //!
 //! with every key derived from a 32-byte seed in the hop's own layer `λ_i` ([`seed`]); `λ_i`
@@ -102,7 +102,7 @@ fn hkdf_expand<const N: usize>(kdf: &Hkdf<Sha256>, info: &[&[u8]]) -> Zeroizing<
 /// wiped at once.
 ///
 /// The PRK is also held inside the returned `Hkdf`'s HMAC state, which hkdf 0.12 and hmac 0.12
-/// cannot wipe; that residue is tracked in its own issue.
+/// cannot wipe; that residue is #852.
 fn hkdf_extract(salt: &[u8], ikm: &[&[u8]]) -> Hkdf<Sha256> {
     let mut extract = HkdfExtract::<Sha256>::new(Some(salt));
     ikm.iter().for_each(|part| extract.input_ikm(part));

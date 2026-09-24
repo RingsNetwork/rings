@@ -4,8 +4,8 @@
 //!
 //! ```text
 //! parse   |w| ↦ (b, χ, y)
-//! header  α check, ECDH d·α, HKDF key schedule (blinding b by wide reduction), ChaCha20 ρ over
-//!         (Ĥ+1)ℓ, HMAC γ over b ‖ β, layer decode, α′ = b·α
+//! header  α check, ECDH d·α, HKDF key schedule (blinding factor z by wide reduction), ChaCha20
+//!         ρ over (Ĥ+1)ℓ, HMAC γ over b ‖ β (b the class), layer decode, α′ = z·α
 //! carry   KDF₄₈(σ_in), AEZ key setup, one AEZ decipherment of C_16KiB = 13465 bytes
 //! encode  χ′ ‖ y′
 //! ```
@@ -113,7 +113,7 @@ fn measure() -> Vec<(&'static str, f64)> {
             }),
         ),
         (
-            "blind b·α",
+            "blind z·α",
             microseconds_per_run(|| {
                 black_box(black_box(&alpha) * black_box(&blinding));
             }),

@@ -14,9 +14,9 @@
 //! is unrepresentable rather than checked. [`PrimeOrder`] is sealed, since its law is a proof
 //! obligation no downstream implementation can be held to.
 //!
-//! This module is the one SEC1 compressed encoder of secp256k1: every conversion of a point,
-//! public key or verifying key into `PublicKey<33>` factors through
-//! `NonIdentityPoint<Secp256k1> → PublicKey<33>`, which is total, and the SEC1 decoder produces
+//! This module holds the one SEC1 compressed encoder of secp256k1, on the affine carrier: every
+//! conversion of a point, public key or verifying key into `PublicKey<33>` factors through it,
+//! already-affine keys without a field inversion, and the SEC1 decoder produces
 //! `G ∖ {O}` directly from `k256::PublicKey`, which already excludes `O`. Sampling is the
 //! carrier's non-zero sampler.
 
@@ -200,17 +200,25 @@ impl From<K256PublicKey> for NonIdentityPoint<Secp256k1> {
 }
 
 impl From<&NonIdentityPoint<Secp256k1>> for PublicKey<SEC1_COMPRESSED_BYTES> {
-    /// The SEC1 compressed encoding: total on `G ∖ {O}`, where it is exactly 33 bytes; the one
-    /// encoder every other secp256k1 conversion into `PublicKey<33>` factors through.
+    /// The SEC1 compressed encoding of a projective point: one normalisation, then the encoder.
     fn from(point: &NonIdentityPoint<Secp256k1>) -> Self {
-        let encoded = point.0.as_inner().to_affine().to_bytes();
-        let mut bytes = [0_u8; SEC1_COMPRESSED_BYTES];
-        bytes
-            .iter_mut()
-            .zip(encoded.iter())
-            .for_each(|(slot, byte)| *slot = *byte);
-        Self(bytes)
+        encode_sec1(&point.0.as_inner().to_affine())
     }
+}
+
+/// The one SEC1 compressed encoder of secp256k1, on the affine carrier, so an input that is
+/// already affine (a `k256` public or verifying key) costs no field inversion.
+///
+/// Pre: `point ≠ O`: every caller holds an element of `G ∖ {O}` (a [`NonIdentityPoint`] or a
+/// `k256::PublicKey`), on which the encoding is total and exactly 33 bytes.
+fn encode_sec1(point: &K256AffinePoint) -> PublicKey<SEC1_COMPRESSED_BYTES> {
+    let encoded = point.to_bytes();
+    let mut bytes = [0_u8; SEC1_COMPRESSED_BYTES];
+    bytes
+        .iter_mut()
+        .zip(encoded.iter())
+        .for_each(|(slot, byte)| *slot = *byte);
+    PublicKey(bytes)
 }
 
 impl TryFrom<PublicKey<SEC1_COMPRESSED_BYTES>> for NonIdentityPoint<Secp256k1> {
@@ -241,16 +249,16 @@ impl TryFrom<K256AffinePoint> for PublicKey<SEC1_COMPRESSED_BYTES> {
 }
 
 impl From<K256PublicKey> for PublicKey<SEC1_COMPRESSED_BYTES> {
-    /// SEC1 compressed encoding of a `k256` public key.
+    /// SEC1 compressed encoding of a `k256` public key, already affine and `≠ O`.
     fn from(key: K256PublicKey) -> Self {
-        Self::from(&NonIdentityPoint::from(key))
+        encode_sec1(key.as_affine())
     }
 }
 
 impl From<k256::ecdsa::VerifyingKey> for PublicKey<SEC1_COMPRESSED_BYTES> {
-    /// SEC1 compressed encoding of an ECDSA verifying key.
+    /// SEC1 compressed encoding of an ECDSA verifying key, already affine and `≠ O`.
     fn from(key: k256::ecdsa::VerifyingKey) -> Self {
-        Self::from(K256PublicKey::from(key))
+        encode_sec1(key.as_affine())
     }
 }
 
@@ -330,6 +338,10 @@ mod tests {
         let decoded = NonIdentityPoint::<Secp256k1>::try_from(encoded).expect("valid point");
 
         assert_eq!(PublicKey::from(&decoded), encoded);
+        assert_eq!(
+            PublicKey::from(k256::PublicKey::try_from(encoded).expect("valid key")),
+            encoded
+        );
         assert_eq!(PublicKey::try_from(Point::from(point)).ok(), Some(encoded));
         assert!(NonIdentityPoint::<Secp256k1>::try_from(PublicKey([0; 33])).is_err());
         assert!(PublicKey::<33>::try_from(Point::<Secp256k1>::zero()).is_err());

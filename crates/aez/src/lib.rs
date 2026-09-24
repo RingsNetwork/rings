@@ -98,7 +98,7 @@ impl Aez {
         expansion: usize,
         buffer: &mut [u8],
     ) -> Result<(), ExpansionExceedsBuffer> {
-        message_width(buffer, expansion)?;
+        split_authenticator(buffer, expansion)?;
         self.encrypt_in_place(tweak, expansion, buffer);
         Ok(())
     }
@@ -118,9 +118,9 @@ impl Aez {
         expansion: usize,
         buffer: &'b mut [u8],
     ) -> Result<&'b mut [u8], DecryptError> {
-        let message = message_width(buffer, expansion)?;
+        split_authenticator(buffer, expansion)?;
         self.decrypt_in_place(tweak, expansion, buffer)?;
-        Ok(buffer.split_at_mut(message).0)
+        Ok(split_authenticator(buffer, expansion)?.0)
     }
 
     /// `Encrypt_K(T, τ, M)` on an owned plaintext, whose type already reserves the `τ`-byte
@@ -131,9 +131,9 @@ impl Aez {
         tweak: Tweak<'_>,
         plaintext: Plaintext<TAU>,
     ) -> Ciphertext<TAU> {
-        let mut bytes = plaintext.into_slotted();
+        let (mut bytes, message) = plaintext.into_slotted();
         self.encrypt_in_place(tweak, TAU, bytes.as_mut_slice());
-        Ciphertext::from_sealed(bytes)
+        Ciphertext::from_sealed(bytes, message)
     }
 
     /// `Decrypt_K(T, τ, C)` on an owned ciphertext, whose type already guarantees `|C| ≥ τ`:
@@ -148,9 +148,9 @@ impl Aez {
         tweak: Tweak<'_>,
         ciphertext: Ciphertext<TAU>,
     ) -> Result<Plaintext<TAU>, Inauthentic> {
-        let mut bytes = ciphertext.into_zeroizing();
+        let (mut bytes, message) = ciphertext.into_parts();
         self.decrypt_in_place(tweak, TAU, bytes.as_mut_slice())?;
-        Ok(Plaintext::from_opened(bytes))
+        Ok(Plaintext::from_opened(bytes, message))
     }
 
     /// The one encryption core: `buffer ← Encipher(M ‖ 0^τ)` for `buffer = M ‖ slot`.
@@ -218,19 +218,20 @@ impl Aez {
     }
 }
 
-/// `|M| = |buffer| − τ`, the message width of `buffer = M ‖ A`.
+/// Splits `buffer = M ‖ A` with `|A| = τ`, by a checked subtraction and a checked split.
 ///
 /// # Errors
 ///
 /// [`ExpansionExceedsBuffer`] if the buffer is shorter than `τ`.
-fn message_width(buffer: &[u8], expansion: usize) -> Result<usize, ExpansionExceedsBuffer> {
-    buffer
-        .len()
+fn split_authenticator(
+    buffer: &mut [u8],
+    expansion: usize,
+) -> Result<(&mut [u8], &mut [u8]), ExpansionExceedsBuffer> {
+    let length = buffer.len();
+    length
         .checked_sub(expansion)
-        .ok_or(ExpansionExceedsBuffer {
-            length: buffer.len(),
-            expansion,
-        })
+        .and_then(|message| buffer.split_at_mut_checked(message))
+        .ok_or(ExpansionExceedsBuffer { length, expansion })
 }
 
 /// Whether every byte is zero, in time independent of the bytes' values.

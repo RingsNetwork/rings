@@ -154,7 +154,7 @@ pub(crate) const fn default_advertise_onion_exit() -> bool {
 /// Default native exit services: the world-facing symbols of [`ONION_SIGNATURE`] in table order.
 /// It is only published when onion-exit advertisement is enabled.
 pub fn default_onion_exit_services() -> Vec<OnionServiceName> {
-    ONION_SIGNATURE.world_facing().collect()
+    OnionServiceName::world_facing().collect()
 }
 
 /// Standard HTTPS onion-exit service set: the single `https` symbol of [`ONION_SIGNATURE`].

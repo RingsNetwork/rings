@@ -122,12 +122,7 @@ fn test_loop_carries_each_segment_value_to_its_consumer() {
     };
 
     let cell = relay(relay(cell.into_bytes(), &keys[0]), &keys[1]);
-    let OnionStep::Consumed {
-        layer,
-        value,
-        producer,
-    } = peel(cell, &keys[2])
-    else {
+    let OnionStep::Consumed { layer, value, surb } = peel(cell, &keys[2]) else {
         panic!("the symbol position");
     };
     assert!(matches!(
@@ -135,7 +130,7 @@ fn test_loop_carries_each_segment_value_to_its_consumer() {
         OnionLayerApplication::Apply { .. }
     ));
     assert_eq!(*value, input);
-    let cell = producer.produce(&output).expect("produce").into_bytes();
+    let cell = surb.produce(&output).expect("produce").into_bytes();
     let cell = relay(relay(cell, &keys[3]), &keys[4]);
     let returned = OnionCell::parse(cell).expect("cell");
 
