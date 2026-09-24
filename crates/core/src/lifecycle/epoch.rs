@@ -34,14 +34,10 @@ pub(crate) struct Epoch {
 impl Epoch {
     /// Record one event: increment the count, then wake every listener.
     ///
-    /// Post: `current()` observed after this call exceeds every reading taken before it.
-    /// The count saturates at `u64::MAX`, which one process cannot reach by increments.
+    /// Post: `current()` observed after this call exceeds every reading taken before it (one
+    /// process cannot perform the `2^64` increments that would wrap the count).
     pub(crate) fn advance(&self) {
-        let _ = self
-            .value
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
-                Some(value.saturating_add(1))
-            });
+        self.value.fetch_add(1, Ordering::AcqRel);
         self.changed.notify(usize::MAX);
     }
 
@@ -56,6 +52,12 @@ impl Epoch {
     /// when the predicate is false; `Law (Wake)` then rules out a lost notification.
     pub(crate) fn listen(&self) -> EventListener {
         self.changed.listen()
+    }
+
+    /// Test hook: the listeners registered and not yet notified or dropped.
+    #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
+    pub(crate) fn listeners(&self) -> usize {
+        self.changed.total_listeners()
     }
 }
 

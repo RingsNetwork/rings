@@ -751,6 +751,14 @@ pub enum Error {
         context: &'static str,
     },
 
+    /// A detached transfer ended cancelled after its first frame was claimed by the backend
+    /// (the worker stopped mid-send), so the frame may have been delivered.
+    #[error("Detached send to {peer} was abandoned after the backend claimed its first frame")]
+    DetachedSendAbandonedAfterClaim {
+        /// Peer whose backend claimed the frame.
+        peer: crate::dht::Did,
+    },
+
     /// A tracked transfer did not stop within its post-deadline cleanup grace.
     #[error(
         "Tracked payload cleanup for {peer} exceeded its {timeout_ms}ms grace after the send deadline"
@@ -768,10 +776,8 @@ pub enum Error {
     SerdeWasmBindgenError(#[from] serde_wasm_bindgen::Error),
 
     /// A data-plane rerouting spent its budget: every attempt was refused before acceptance.
-    #[error("Rerouting exhausted after {deferrals} deferred sends; last cause: {last}")]
+    #[error("Rerouting exhausted its budget of deferred sends; last cause: {last}")]
     ReroutingExhausted {
-        /// Deferred sends, each refused before backend acceptance, so none had an effect.
-        deferrals: u8,
         /// The cause of the last deferral.
         last: super::SendDeferral,
     },

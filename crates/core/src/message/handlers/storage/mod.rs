@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use async_recursion::async_recursion;
 use async_trait::async_trait;
+use futures::future::join_all;
 use rerouted::reroute;
 use rerouted::LookupPlacement;
 use rerouted::OperatePlacement;
@@ -132,12 +133,15 @@ async fn handle_storage_fetch_act(
             reroute(&transport, &placement, Route::Remote { next, message }).await?;
         }
         PeerRingAction::MultiActions(acts) => {
-            for (act, has_next) in core_actor_steps(acts) {
-                handle_storage_fetch_act(transport.clone(), resource, act, redundancy).await?;
-                if has_next {
-                    yield_core_actor_step().await;
-                }
-            }
+            // Placements are independent: one waiting for its trigger must not hold the others.
+            join_all(
+                acts.into_iter().map(|act| {
+                    handle_storage_fetch_act(transport.clone(), resource, act, redundancy)
+                }),
+            )
+            .await
+            .into_iter()
+            .collect::<Result<()>>()?;
         }
         PeerRingAction::EntryMisses(misses) => {
             transport.observe_storage_misses(resource, redundancy, misses)?;
@@ -161,12 +165,14 @@ pub(super) async fn handle_storage_store_act(
             reroute(&transport, &placement, Route::Remote { next, message }).await?;
         }
         PeerRingAction::MultiActions(acts) => {
-            for (act, has_next) in core_actor_steps(acts) {
-                handle_storage_store_act(transport.clone(), act).await?;
-                if has_next {
-                    yield_core_actor_step().await;
-                }
-            }
+            // Placements are independent: one waiting for its trigger must not hold the others.
+            join_all(
+                acts.into_iter()
+                    .map(|act| handle_storage_store_act(transport.clone(), act)),
+            )
+            .await
+            .into_iter()
+            .collect::<Result<()>>()?;
         }
         act => finish_storage_action(act)?,
     }

@@ -377,8 +377,7 @@ impl TransferCapacity {
         })
     }
 
-    /// Observe live permit ownership for the common native/browser contract tests.
-    #[cfg(test)]
+    /// Live permits of this peer: `0` iff no transfer of the peer holds frames in flight.
     pub(super) fn admitted(&self) -> usize {
         self.state
             .lock()

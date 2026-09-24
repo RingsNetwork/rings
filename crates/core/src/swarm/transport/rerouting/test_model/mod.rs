@@ -11,6 +11,7 @@
 //!            ready      : BOOLEAN                \* the admitted generation can make progress
 //!            preference : {Target, Alternate, Local}
 //!            congested  : BOOLEAN ; capacity : ℕ  \* local capacity and its release epoch
+//!            jam        : Hop → ℕ                \* other transfers holding each channel
 //!            phase      : Compute(d) | InFlight(d, hop, g, stamp)
 //!                       | Waiting(d, hop, stamp, cause) | Done(outcome)
 //!            effects, sends, last_refusal, stale_retry : history variables
@@ -25,10 +26,11 @@
 //!              effects = [phase ∈ Done(Accepted | Ambiguous)]      (S1)
 //!              ¬stale_retry                                        (S2)
 //!              sends ≤ B + 1 ∧ Exhausted ⇒ deferrals = B + 1 ∧ last cause   (S3)
-//! Liveness:    Fairness ≜ WF(Admit) ∧ WF(Recover) ∧ WF(Close) ∧ WF(Release)
+//! Liveness:    Fairness ≜ WF(Admit) ∧ WF(Recover) ∧ WF(Close) ∧ WF(Release) ∧ WF(Drain(h))
 //!                         ∧ WF(Send) ∧ WF(Accept) ∧ WF(Refuse(r)) ∧ WF(Wake)
 //!              ∀r. Premise(r) ⇒ (□[Protocol] ∧ Fairness ⇒ ◇ Done(Accepted))      (L1)
 //!              Premise(r) ≜ phase ∉ Done ∧ deferrals ≤ B − QUIESCENT_DEFERRALS
+//!                           ∧ TopologyReferencesOnlyAdmitted   \* built into Route below
 //! ```
 //!
 //! `WF(Admit)` is the weak fairness of readiness: a registered generation of the target
@@ -46,6 +48,9 @@
 //! - What the model owns is the environment and the resolution relation of the send path
 //!   (`next::resolutions`), which states the send-path lemmas of `error::send_class`: refusals
 //!   occur only before acceptance, and ambiguities only after it.
+//! - The refused transfer's own capacity release is not an event of the model, as in
+//!   production no trigger reads it: a capacity refusal held no permit, and `Idle(hop)` counts
+//!   only transfers still in flight (`jam`).
 //!
 //! # Scope limits
 //!
@@ -62,15 +67,17 @@
 //! the first). Each test asserts its exact state count, depth and premise counts.
 //!
 //! Churn columns: reservations `r`, glare `g`, withdrawals `w`, deaths `d`, disconnects `x`,
-//! reroutes `t`, congestions `c`, ambiguities `a`.
+//! reroutes `t`, congestions `c`, jams `j`, ambiguities `a`.
 //!
-//! | configuration       | r g w d x t c a | states | depth | premise (unsettled) |
-//! |---------------------|-----------------|--------|-------|---------------------|
-//! | replacement         | 2 0 0 2 1 0 0 1 | 1642   | 21    | 1048 (1048)         |
-//! | glare               | 2 1 0 1 0 0 1 0 | 957    | 18    | 765 (765)           |
-//! | retire before ready | 2 0 1 2 0 0 0 0 | 604    | 16    | 479 (479)           |
-//! | topology mid-wait   | 1 0 0 1 1 2 1 0 | 21417  | 27    | 13977 (13977)       |
-//! | exhaustion          | 2 0 0 2 2 0 2 0 | 49702  | 33    | 26675 (26675)       |
+//! | configuration       | r g w d x t c j a | states | depth | premise (unsettled) |
+//! |---------------------|-------------------|--------|-------|---------------------|
+//! | replacement         | 2 0 0 2 1 0 0 0 1 | 1731   | 21    | 1133 (1133)         |
+//! | glare               | 2 1 0 1 0 0 1 0 0 | 799    | 18    | 643 (643)           |
+//! | retire before ready | 2 0 1 2 0 0 0 0 0 | 631    | 16    | 506 (506)           |
+//! | topology mid-wait   | 1 0 0 1 1 2 1 1 0 | 107179 | 32    | 64361 (64361)       |
+//! | exhaustion          | 2 0 0 2 2 0 2 1 0 | 257075 | 38    | 122947 (122947)     |
+//! | channel drain       | 1 0 0 1 0 0 0 2 0 | 1689   | 19    | 1195 (1195)         |
+//! | one replacement     | 1 0 0 1 0 0 0 0 0 | never exhausts (`REPLACEMENT_DEFERRALS`)  |
 
 mod carrier;
 mod laws;
@@ -110,6 +117,7 @@ const QUIET: Churn = Churn {
     disconnects: 0,
     reroutes: 0,
     congestions: 0,
+    jams: 0,
     ambiguities: 0,
 };
 
@@ -119,6 +127,7 @@ const TOPOLOGY_MID_WAIT: Churn = Churn {
     deaths: 1,
     reroutes: 2,
     congestions: 1,
+    jams: 1,
     disconnects: 1,
     ..QUIET
 };
@@ -191,10 +200,10 @@ fn test_rerouting_laws_hold_across_generation_replacement() {
             ..QUIET
         },
         Bounds {
-            states: 1642,
+            states: 1731,
             depth: 21,
-            premise_states: 1048,
-            unstable_premise_states: 1048,
+            premise_states: 1133,
+            unstable_premise_states: 1133,
         },
         &[
             LawName::RetryReachesReplacement,
@@ -218,10 +227,10 @@ fn test_rerouting_laws_hold_under_glare() {
             ..QUIET
         },
         Bounds {
-            states: 957,
+            states: 799,
             depth: 18,
-            premise_states: 765,
-            unstable_premise_states: 765,
+            premise_states: 643,
+            unstable_premise_states: 643,
         },
         &[
             LawName::RetryReachesReplacement,
@@ -243,10 +252,10 @@ fn test_rerouting_laws_hold_when_retired_before_ready() {
             ..QUIET
         },
         Bounds {
-            states: 604,
+            states: 631,
             depth: 16,
-            premise_states: 479,
-            unstable_premise_states: 479,
+            premise_states: 506,
+            unstable_premise_states: 506,
         },
         &[
             LawName::RetryReachesReplacement,
@@ -263,16 +272,70 @@ fn test_rerouting_laws_hold_when_topology_changes_mid_wait() {
         "topology mid-wait",
         TOPOLOGY_MID_WAIT,
         Bounds {
-            states: 21417,
-            depth: 27,
-            premise_states: 13977,
-            unstable_premise_states: 13977,
+            states: 107179,
+            depth: 32,
+            premise_states: 64361,
+            unstable_premise_states: 64361,
         },
         &[
             LawName::WaitEndsByRouteChange,
             LawName::WaitEndsByCapacityRelease,
         ],
     );
+}
+
+/// Channel drain: other transfers jam the hops' channels; a queue timeout waits for their
+/// drain (never for its own release) or a generation change.
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), test)]
+fn test_rerouting_laws_hold_when_channels_drain() {
+    assert_laws_hold_exhaustively(
+        "channel drain",
+        Churn {
+            reservations: 1,
+            deaths: 1,
+            jams: 2,
+            ..QUIET
+        },
+        Bounds {
+            states: 1689,
+            depth: 19,
+            premise_states: 1195,
+            unstable_premise_states: 1195,
+        },
+        &[
+            LawName::WaitEndsByChannelDrain,
+            LawName::RetryReachesReplacement,
+        ],
+    );
+}
+
+/// `REPLACEMENT_DEFERRALS`: one generation replacement racing the placement (death, then
+/// re-admission) never exhausts the budget.
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), test)]
+fn test_one_replacement_never_exhausts_the_budget() {
+    let model = Model {
+        churn: Churn {
+            reservations: 1,
+            deaths: 1,
+            ..QUIET
+        },
+        mutation: Mutation::Faithful,
+    };
+    let SearchReport::Safe {
+        uncovered,
+        liveness,
+        ..
+    } = check(&model, has_liveness_budget)
+    else {
+        panic!("the faithful automaton is safe");
+    };
+    assert!(
+        uncovered.contains(&LawName::BudgetExhausts),
+        "a replacement exhausted"
+    );
+    assert!(liveness.violation.is_none(), "{liveness:#?}");
 }
 
 /// Exhaustion: churn enough to spend the budget, which ends typed with the last cause.
@@ -286,13 +349,14 @@ fn test_rerouting_budget_exhausts_with_the_last_cause() {
             deaths: 2,
             disconnects: 2,
             congestions: 2,
+            jams: 1,
             ..QUIET
         },
         Bounds {
-            states: 49702,
-            depth: 33,
-            premise_states: 26675,
-            unstable_premise_states: 26675,
+            states: 257075,
+            depth: 38,
+            premise_states: 122947,
+            unstable_premise_states: 122947,
         },
         &[LawName::BudgetExhausts],
     );
@@ -324,8 +388,8 @@ fn test_liveness_needs_the_quiescent_deferrals() {
     assert!(liveness.violation.is_some(), "{liveness:#?}");
 }
 
-/// S1 is not vacuous: deferring an ambiguous failure leaves an effect behind a pending retry
-/// (`EffectsFollowOutcome`, the earliest witness) that a second acceptance then duplicates.
+/// S1 is not vacuous: deferring an ambiguous failure leaves the placement waiting although
+/// its effect may already have happened, which `EffectsFollowOutcome` rejects at once.
 #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_family = "wasm"), test)]
 fn test_retrying_an_ambiguous_failure_duplicates_the_effect() {

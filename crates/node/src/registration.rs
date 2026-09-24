@@ -230,9 +230,8 @@ impl DhtRegistrationPublisher {
     /// storage owner computes the final live set from its current local entry and
     /// preserves concurrent live writes.
     ///
-    /// Each append, tombstone and compaction inherits core's rerouting (#859): a write refused
-    /// before acceptance is retried from fresh topology after a topology, link or capacity
-    /// event, within `REROUTING_BUDGET`, and is never applied twice at a placement.
+    /// Each append, tombstone and compaction is rerouted as `Processor::storage_fetch`
+    /// documents.
     pub(crate) async fn publish_many_replacing_and_compacting(
         &self,
         context: &RegistrationContext<'_>,

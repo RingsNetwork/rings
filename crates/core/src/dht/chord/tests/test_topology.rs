@@ -196,7 +196,11 @@ fn test_topology_epoch_advances_exactly_on_route_changes() -> Result<()> {
     let admitted = node.topology_epoch().current();
     assert_eq!(admitted, initial + 1);
 
-    node.admit_connected(peer, None)?;
+    let before = node.topology_state()?;
+    node.begin_stabilization(crate::utils::new_uuid())?;
+    let after = node.topology_state()?;
+    assert_ne!(before, after, "the stabilization token changed the state");
+    assert!(before.routes_equal(&after));
     assert_eq!(node.topology_epoch().current(), admitted);
     Ok(())
 }

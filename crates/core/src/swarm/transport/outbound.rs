@@ -386,6 +386,17 @@ impl OutboundSchedulers {
         Ok(handle)
     }
 
+    /// `Idle(peer)`: no transfer of `peer` holds capacity, so none has frames in its channel.
+    ///
+    /// Every release makes progress toward it and is notified by `capacity_releases`.
+    pub(super) fn is_idle(&self, peer: Did) -> bool {
+        self.lock_registry()
+            .capacities
+            .get(&peer)
+            .and_then(Weak::upgrade)
+            .is_none_or(|capacity| capacity.admitted() == 0)
+    }
+
     /// The epoch of outbound capacity releases, shared by every peer's transfers.
     pub(super) fn capacity_releases(&self) -> &Epoch {
         self.global_capacity.releases()

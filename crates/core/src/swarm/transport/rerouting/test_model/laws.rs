@@ -1,11 +1,11 @@
 //! The propositions checked over the rerouting carrier, and the carrier as an instance of the
 //! shared search.
 //!
-//! Safety (`□`): `NoDuplicateEffect` (S1), `EffectsFollowOutcome` (S1), `FreshHop` (S2),
+//! Safety (`□`): `EffectsFollowOutcome` (S1: it implies `effects ≤ 1`), `FreshHop` (S2),
 //! `SendsBounded` (S3), `ExhaustionCarriesLastCause` (S3), `VerdictsClassified`. Coverage
 //! (`◇`), so the safety laws are not vacuous: `RetryReachesReplacement`,
-//! `WaitEndsByRouteChange`, `WaitEndsByCapacityRelease`, `AmbiguityEndsUnretried`,
-//! `BudgetExhausts`.
+//! `WaitEndsByRouteChange`, `WaitEndsByCapacityRelease`, `WaitEndsByChannelDrain`,
+//! `AmbiguityEndsUnretried`, `BudgetExhausts`.
 //!
 //! Liveness (L1) is decided by the search over [`is_accepted`] under [`has_liveness_budget`].
 
@@ -25,10 +25,8 @@ use crate::swarm::transport::test_model_check::Law;
 /// The identity of a law, as verdicts and mutation tests refer to it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum LawName {
-    /// `□ effects ≤ 1` (S1): no placement is applied twice.
-    NoDuplicateEffect,
     /// `□` (S1): `effects = 1` exactly when the placement ended accepted or ambiguous, and
-    /// `effects = 0` while it is in progress or after exhaustion.
+    /// `effects = 0` while it is in progress or after exhaustion; so `effects ≤ 1`.
     EffectsFollowOutcome,
     /// `□ ¬stale_retry` (S2): every wake satisfies the model's own freshness condition.
     FreshHop,
@@ -44,6 +42,8 @@ pub(super) enum LawName {
     WaitEndsByRouteChange,
     /// `◇`: a wait ends because capacity was released.
     WaitEndsByCapacityRelease,
+    /// `◇`: a wait ends because the hop's channel drained or its generation changed.
+    WaitEndsByChannelDrain,
     /// `◇`: an ambiguous failure ends the placement.
     AmbiguityEndsUnretried,
     /// `◇`: the budget is exhausted.
@@ -54,11 +54,6 @@ impl fmt::Display for LawName {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(self, formatter)
     }
-}
-
-/// S1: at most one effect.
-fn no_duplicate_effect(_: &Model, state: &State) -> bool {
-    state.effects <= 1
 }
 
 /// S1: the effect count is the one the phase implies.
@@ -113,6 +108,11 @@ fn wait_ends_by_capacity_release(_: &Model, state: &State) -> bool {
     state.woke_on_capacity
 }
 
+/// Coverage: a wait ended by a channel drain or a generation change.
+fn wait_ends_by_channel_drain(_: &Model, state: &State) -> bool {
+    state.woke_on_drain
+}
+
 /// Coverage: an ambiguous failure ended the placement.
 fn ambiguity_ends_unretried(_: &Model, state: &State) -> bool {
     state.phase == Phase::Done(Outcome::Ambiguous)
@@ -142,11 +142,6 @@ pub(super) fn has_liveness_budget(state: &State) -> bool {
 
 /// Every checked proposition, in report order.
 pub(super) const LAWS: [Law<Model>; 11] = [
-    Law {
-        name: LawName::NoDuplicateEffect,
-        expectation: Expectation::Always,
-        holds: no_duplicate_effect,
-    },
     Law {
         name: LawName::EffectsFollowOutcome,
         expectation: Expectation::Always,
@@ -186,6 +181,11 @@ pub(super) const LAWS: [Law<Model>; 11] = [
         name: LawName::WaitEndsByCapacityRelease,
         expectation: Expectation::Sometimes,
         holds: wait_ends_by_capacity_release,
+    },
+    Law {
+        name: LawName::WaitEndsByChannelDrain,
+        expectation: Expectation::Sometimes,
+        holds: wait_ends_by_channel_drain,
     },
     Law {
         name: LawName::AmbiguityEndsUnretried,

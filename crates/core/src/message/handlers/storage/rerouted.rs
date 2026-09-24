@@ -4,7 +4,8 @@
 //! compact, relay-inbox writes) one `OperateEntry` per remote placement. Each of those sends is
 //! a [`Placement`]: an instance supplies the per-placement `Compute` (the same DHT function the
 //! whole operation used to plan it) and the local settlement a recomputed route may reach, and
-//! [`reroute`] composes them with `swarm::transport::rerouting`:
+//! [`reroute`] composes them with `swarm::transport::rerouting`. An operation drives its
+//! placements concurrently, so one waiting for its trigger holds no other:
 //!
 //! ```text
 //! reroute(P, first):
@@ -16,7 +17,8 @@
 //!     case δ(R, stamp, verdict) of
 //!       Complete  ⇒ return Ok
 //!       Fail(e)   ⇒ return Err(e)                \* fatal, ambiguous, or exhausted
-//!       Await(A)  ⇒ route ← first route r computed after listening with A.is_triggered(r)
+//!       Await(A)  ⇒ route ← first route r computed after listening with
+//!                           A.is_triggered(r, observation(A))
 //!                   R ← A.resume
 //! ```
 //!
@@ -189,13 +191,13 @@ pub(super) async fn reroute<P: Placement>(
             Step::Await(awaiting) => awaiting,
         };
         route = loop {
-            let listeners = transport.rerouting_listeners();
+            let listeners = transport.rerouting_listeners(&awaiting);
             let fresh = placement.route(&transport.dht).await?;
             let link = match &fresh {
                 Route::Local(_) => LinkRoute::Local,
-                Route::Remote { next, .. } => transport.link_route(*next)?,
+                Route::Remote { next, .. } => LinkRoute::Remote(transport.link_hop(*next)?),
             };
-            if awaiting.is_triggered(link, transport.capacity_stamp()) {
+            if awaiting.is_triggered(link, transport.observation(&awaiting)) {
                 break fresh;
             }
             listeners.notified().await;

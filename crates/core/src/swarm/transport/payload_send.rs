@@ -527,7 +527,7 @@ impl SwarmTransport {
             }
         };
         let Some(prepared) = prepared else {
-            return Ok(SendCompletionOutcome::Cancelled);
+            return admission.cancelled_outcome(did);
         };
         let mut cancel_on_drop =
             DetachedAdmissionOnDrop::new(admission.clone(), prepared.handle.clone());
@@ -564,7 +564,13 @@ impl SwarmTransport {
             },
         };
         cancel_on_drop.disarm();
-        result
+        // Every detached result reaches the caller here: a `Cancelled` from any path (worker
+        // drop or panic, scheduler loss, a stopped submit) stands only while the admission can
+        // still be cancelled, never after a claim won.
+        match result {
+            Ok(SendCompletionOutcome::Cancelled) => admission.cancelled_outcome(did),
+            result => result,
+        }
     }
 
     async fn prepare_outbound_transfer(

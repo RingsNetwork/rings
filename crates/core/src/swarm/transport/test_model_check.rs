@@ -5,7 +5,7 @@
 //! actions and the next-state relation, its laws, its convergence predicate,
 //! and which actions are environmental (excluded once churn stops) or
 //! periodic (strongly fair). The Chord rejoin model (`test_rejoin_model`,
-//! #772) and the rerouting model (`test_rerouting_model`, #859) are its
+//! #772) and the rerouting model (`rerouting::test_model`, #859) are its
 //! instances; the search, the fairness analysis, and the trace replay are one
 //! implementation.
 //!

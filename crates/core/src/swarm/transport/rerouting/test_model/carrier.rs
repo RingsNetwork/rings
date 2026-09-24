@@ -9,6 +9,7 @@
 
 use super::super::Awaiting;
 use super::super::CapacityStamp;
+use super::super::LinkHop;
 use super::super::LinkRoute;
 use super::super::Rerouting;
 use super::super::Step;
@@ -34,6 +35,14 @@ pub(super) enum Hop {
 }
 
 impl Hop {
+    /// The hop's slot in per-hop arrays.
+    pub(super) const fn index(self) -> usize {
+        match self {
+            Self::Target => 0,
+            Self::Alternate => 1,
+        }
+    }
+
     /// The hop's identity: the target is `1`, the alternate `2`.
     pub(super) fn did(self) -> Did {
         match self {
@@ -68,10 +77,37 @@ pub(super) enum Refusal {
     Cancelled,
     /// The bound generation cannot make progress: `TransportNotReady`.
     NotReady,
-    /// Capacity admission timed out: `OutboundTransferAdmissionTimeout`.
+    /// Capacity admission timed out: `OutboundTransferAdmissionTimeout` (`CapacityRelease`).
     AdmissionTimeout,
-    /// The backend queue did not accept in time: `DataChannelSendQueueTimeout`.
+    /// The backend queue did not accept in time: `DataChannelSendQueueTimeout`
+    /// (`ChannelDrain`).
     QueueTimeout,
+}
+
+impl Refusal {
+    /// The model's own reading of the trigger, independent of `send_class`.
+    pub(super) const fn trigger(self) -> Trigger {
+        match self {
+            Self::AdmissionTimeout => Trigger::Capacity,
+            Self::QueueTimeout => Trigger::Drain,
+            Self::Missing
+            | Self::Superseded
+            | Self::PermitRevoked
+            | Self::Cancelled
+            | Self::NotReady => Trigger::Link,
+        }
+    }
+}
+
+/// The event class a refusal waits for, as the model defines it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) enum Trigger {
+    /// A usable hop, or a route move.
+    Link,
+    /// A capacity release by another transfer, or a route move.
+    Capacity,
+    /// The hop's channel drained or its generation changed, or a route move.
+    Drain,
 }
 
 /// A post-acceptance failure the send path produces: every `Ambiguous` error a detached
@@ -88,15 +124,18 @@ pub(super) enum Ambiguity {
     PublishedAfterCancel,
     /// `Transport(MessageNotDelivered)`.
     NotDelivered,
+    /// `DetachedSendAbandonedAfterClaim`: the worker stopped after the claim.
+    AbandonedAfterClaim,
 }
 
 /// Every ambiguity, in action order.
-pub(super) const AMBIGUITIES: [Ambiguity; 5] = [
+pub(super) const AMBIGUITIES: [Ambiguity; 6] = [
     Ambiguity::CompletionTimeout,
     Ambiguity::DeliveryTimeout,
     Ambiguity::CleanupTimeout,
     Ambiguity::PublishedAfterCancel,
     Ambiguity::NotDelivered,
+    Ambiguity::AbandonedAfterClaim,
 ];
 
 impl Refusal {
@@ -153,6 +192,7 @@ impl Ambiguity {
             Self::NotDelivered => Error::Transport(
                 rings_transport::error::Error::MessageNotDelivered("model".to_string()),
             ),
+            Self::AbandonedAfterClaim => Error::DetachedSendAbandonedAfterClaim { peer: hop },
         }
     }
 }
@@ -166,7 +206,7 @@ pub(super) enum Outcome {
     Ambiguous,
     /// `ReroutingExhausted` with the cause of its last deferral.
     Exhausted {
-        /// The deferrals the error reports.
+        /// The deferrals spent, the exhausting one included.
         deferrals: u8,
         /// Whether its cause is the carrier's last recorded refusal.
         last_matches: bool,
@@ -189,8 +229,7 @@ pub(super) enum Phase {
         deferrals: u8,
         /// The bound hop.
         hop: Hop,
-        /// The target's sendable generation at binding; `None` for the alternate or when
-        /// the target had none.
+        /// The hop's sendable generation at binding (`LinkHop::generation`).
         generation: Option<u64>,
         /// Capacity epoch read before the send.
         stamp: u64,
@@ -201,6 +240,8 @@ pub(super) enum Phase {
         deferrals: u8,
         /// `Awaiting::hop`.
         hop: Hop,
+        /// `Awaiting::generation`.
+        generation: Option<u64>,
         /// `Awaiting::stamp`.
         stamp: u64,
         /// The refusal its cause was built from.
@@ -227,6 +268,8 @@ pub(super) struct Churn {
     pub(super) reroutes: u8,
     /// Capacity exhaustions.
     pub(super) congestions: u8,
+    /// Other transfers entering a hop's channel.
+    pub(super) jams: u8,
     /// Sends accepted and then failed ambiguously.
     pub(super) ambiguities: u8,
 }
@@ -244,6 +287,8 @@ pub(super) struct State {
     pub(super) congested: bool,
     /// The capacity-release epoch.
     pub(super) capacity: u64,
+    /// Other transfers holding each hop's channel (by `Hop::index`).
+    pub(super) jam: [u8; 2],
     /// The automaton.
     pub(super) phase: Phase,
     /// Remaining environment budget.
@@ -262,6 +307,8 @@ pub(super) struct State {
     pub(super) woke_on_capacity: bool,
     /// History: a wait ended by a route change.
     pub(super) woke_on_route: bool,
+    /// History: a wait ended by a channel drain or a generation change.
+    pub(super) woke_on_drain: bool,
 }
 
 /// One step of the carrier.
@@ -281,6 +328,8 @@ pub(super) enum Action {
     Reroute(Preference),
     /// Env: local capacity is exhausted for the next resolution.
     Congest,
+    /// Env: another transfer enters the hop's channel buffer.
+    Jam(Hop),
     /// Env: the in-flight send is accepted, then fails ambiguously.
     AcceptThenFail(Ambiguity),
     /// Protocol (weakly fair): the pending generation becomes ready and is admitted.
@@ -291,6 +340,9 @@ pub(super) enum Action {
     Close,
     /// Protocol (weakly fair): an admitted transfer releases capacity.
     Release,
+    /// Protocol (weakly fair): another transfer's frames leave the hop's channel, releasing
+    /// its capacity.
+    Drain(Hop),
     /// Protocol: compute the route and bind a send, or settle locally.
     Send,
     /// Protocol: the in-flight send resolves with the backend's acceptance.
@@ -313,6 +365,7 @@ impl Action {
                 | Self::Disconnect
                 | Self::Reroute(_)
                 | Self::Congest
+                | Self::Jam(_)
                 | Self::AcceptThenFail(_)
         )
     }
@@ -356,6 +409,7 @@ impl Model {
             preference: Preference::Target,
             congested: false,
             capacity: 0,
+            jam: [0; 2],
             phase: Phase::Compute { deferrals: 0 },
             churn: self.churn,
             effects: 0,
@@ -365,6 +419,7 @@ impl Model {
             reached_replacement: false,
             woke_on_capacity: false,
             woke_on_route: false,
+            woke_on_drain: false,
         }
     }
 }
@@ -406,15 +461,34 @@ impl State {
         }
     }
 
+    /// The sendable generation of `hop`: the target's registry generation, `0` for the
+    /// stable alternate.
+    pub(super) fn generation(&self, hop: Hop) -> Option<u64> {
+        match hop {
+            Hop::Target => self
+                .registry
+                .sendable_attempt(Hop::Target.did())
+                .map(|attempt| attempt.generation()),
+            Hop::Alternate => Some(0),
+        }
+    }
+
     /// The production `LinkRoute` of the current route.
     pub(super) fn link_route(&self) -> LinkRoute {
         match self.route() {
             None => LinkRoute::Local,
-            Some(hop) => LinkRoute::Remote {
+            Some(hop) => LinkRoute::Remote(LinkHop {
                 hop: hop.did(),
+                generation: self.generation(hop),
                 usable: self.usable(hop),
-            },
+            }),
         }
+    }
+
+    /// `Idle(hop)`: no other transfer holds the hop's channel (`OutboundSchedulers::is_idle`;
+    /// the refused transfer's own release is not a transfer in flight).
+    pub(super) fn is_idle(&self, hop: Hop) -> bool {
+        self.jam[hop.index()] == 0
     }
 }
 
@@ -423,29 +497,43 @@ impl State {
 /// Panics when the classification no longer defers it: the model's refusals are the
 /// pre-acceptance outcomes `send_class` proves deferrable.
 pub(super) fn deferral(hop: Hop, refusal: Refusal) -> SendDeferral {
-    match Verdict::remote(hop.did(), refusal.outcome(hop.did(), 0)) {
+    match Verdict::remote(hop.did(), None, refusal.outcome(hop.did(), 0)) {
         Verdict::Deferred { cause, .. } => cause,
         verdict => panic!("{refusal:?} must defer, classified {verdict:?}"),
     }
 }
 
 /// Rebuild the production `Awaiting` of a waiting phase.
-pub(super) fn awaiting(deferrals: u8, hop: Hop, stamp: u64, cause: Refusal) -> Awaiting {
+pub(super) fn awaiting(
+    deferrals: u8,
+    hop: Hop,
+    generation: Option<u64>,
+    stamp: u64,
+    cause: Refusal,
+) -> Awaiting {
     Awaiting {
         deferrals,
         hop: hop.did(),
+        generation,
         stamp: CapacityStamp(stamp),
         cause: deferral(hop, cause),
     }
 }
 
-/// Run the production `δ` from `deferrals` spent on a send to `hop` stamped `stamp`, and
-/// project the step back into the carrier; `refusal` is the refusal the verdict was built
-/// from, if any.
+/// Where a resolved send stood: its hop and the capacity stamp read before it.
+#[derive(Clone, Copy)]
+pub(super) struct Resolved {
+    /// The bound hop.
+    pub(super) hop: Hop,
+    /// Capacity epoch read before the send.
+    pub(super) stamp: u64,
+}
+
+/// Run the production `δ` from `deferrals` spent on the resolved send, and project the step
+/// back into the carrier; `refusal` is the refusal the verdict was built from, if any.
 pub(super) fn transition(
     deferrals: u8,
-    hop: Hop,
-    stamp: u64,
+    resolved: Resolved,
     verdict: Verdict,
     refusal: Option<Refusal>,
 ) -> Phase {
@@ -453,25 +541,27 @@ pub(super) fn transition(
         Verdict::Deferred { cause, .. } => Some(cause.to_string()),
         Verdict::Accepted | Verdict::Failed(_) => None,
     };
-    match (Rerouting { deferrals }).after(CapacityStamp(stamp), verdict) {
+    match (Rerouting { deferrals }).after(CapacityStamp(resolved.stamp), verdict) {
         Step::Complete => Phase::Done(Outcome::Accepted),
         Step::Await(Awaiting {
-            deferrals, stamp, ..
+            deferrals,
+            generation,
+            stamp,
+            ..
         }) => match refusal {
             Some(cause) => Phase::Waiting {
                 deferrals,
-                hop,
+                hop: resolved.hop,
+                generation,
                 stamp: stamp.0,
                 cause,
             },
             None => Phase::Done(Outcome::Unexpected),
         },
-        Step::Fail(Error::ReroutingExhausted { deferrals, last }) => {
-            Phase::Done(Outcome::Exhausted {
-                deferrals,
-                last_matches: deferred == Some(last.to_string()),
-            })
-        }
+        Step::Fail(Error::ReroutingExhausted { last }) => Phase::Done(Outcome::Exhausted {
+            deferrals: deferrals.saturating_add(1),
+            last_matches: deferred == Some(last.to_string()),
+        }),
         Step::Fail(error) => Phase::Done(match error.send_class() {
             SendClass::Ambiguous => Outcome::Ambiguous,
             SendClass::Deferrable(_) | SendClass::Fatal => Outcome::Unexpected,

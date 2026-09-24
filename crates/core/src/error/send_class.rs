@@ -8,7 +8,7 @@
 //! SendClass ≜ Deferrable(DeferralTrigger)   \* proved refused before backend acceptance
 //!           | Ambiguous                     \* the backend may have accepted
 //!           | Fatal                         \* not retried; no acceptance claim is made
-//! DeferralTrigger ≜ LinkChange | CapacityRelease
+//! DeferralTrigger ≜ LinkChange | CapacityRelease | ChannelDrain
 //! ```
 //!
 //! # Acceptance
@@ -25,15 +25,19 @@
 //!
 //! # Lemmas of the send path (`swarm::transport`)
 //!
-//! - **(P) Single publication.** A transfer publishes its result through one `oneshot` taken
-//!   from an `Option` (`TransferCompletion::take_final`), so at most once. A detached transfer
-//!   publishes `Ok(Succeeded)` when its first frame is admitted
-//!   (`OutboundTransfer::take_frame_admission_result`), and that publication cannot fail after a
-//!   successful claim: the detached admission moves `Pending → Irrevocable → Accepted`, and
-//!   `Irrevocable → Cancelled` is a rollback taken only when the claim failed
-//!   (`build_transport_send_permit`). So every `Err(e)` or `Ok(Cancelled)` a detached caller
-//!   receives from the scheduler was published before its first frame was claimed; what a
-//!   later frame does is never observed by that caller.
+//! - **(P) Single publication and the cancellation gate.** A transfer publishes its result
+//!   through one `oneshot` taken from an `Option` (`TransferCompletion::take_final`), so at most
+//!   once; a detached transfer publishes `Ok(Succeeded)` when its first frame is admitted
+//!   (`OutboundTransfer::take_frame_admission_result`). An *error* the scheduler publishes for
+//!   a claimed frame comes from (C) and is never deferrable. A `Cancelled` proves nothing by
+//!   itself: a worker that stops abnormally (dropped on panic or runtime cancellation,
+//!   `shutdown_with_results`) or is lost (`resolve_scheduler_loss`) publishes it whatever the
+//!   admission phase. So the caller boundary `do_send_payload_detached_until` passes every
+//!   `Ok(Cancelled)` through `DetachedAdmission::cancelled_outcome`: it stands iff the admission
+//!   is, or is now moved to, `Cancelled`, from which no claim can succeed (a claim needs
+//!   `try_mark_irrevocable` from `Pending`); after a claim won, the caller receives the
+//!   ambiguous `DetachedSendAbandonedAfterClaim`. Hence a detached `Cancelled` observed by a
+//!   caller ⇒ no frame of the transfer was ever claimed.
 //! - **(C) Cancellable boundary.** `send_data_with_timeout` returns a pre-claim outcome
 //!   (`ChunkSendProgress::Cancelled`, or `Ready(Err)` from the timeout arm) only after
 //!   `SendAcceptance::try_cancel` succeeded or while `!is_irrevocable()`; once the claim
@@ -102,8 +106,12 @@ pub(crate) enum SendClass {
 pub(crate) enum DeferralTrigger {
     /// The hop's connection generation, its readiness, or the route changed.
     LinkChange,
-    /// Local outbound capacity was released (or the link or route changed).
+    /// Capacity admission refused the send before it held a permit; another transfer's release
+    /// (or a route change) can admit it.
     CapacityRelease,
+    /// The hop's data channel did not accept the frame in time: the peer must go idle (no
+    /// transfer of it in flight), or the generation or route change.
+    ChannelDrain,
 }
 
 /// The cause of one deferral: a send refused before backend acceptance.
@@ -179,16 +187,19 @@ impl Error {
         match self {
             Self::ConnectionAttemptSuperseded { .. } | Self::TransportNotReady { .. }
             | Self::SwarmMissDidInTable(_) => SendClass::Deferrable(DeferralTrigger::LinkChange),
-            Self::DataChannelSendQueueTimeout { .. }
-            | Self::OutboundTransferCapacityExceeded { .. }
+            Self::OutboundTransferCapacityExceeded { .. }
             | Self::OutboundTransferMemoryCapacityExceeded { .. }
-            | Self::OutboundTransferAdmissionTimeout { .. }
-            | Self::OutboundFirstFrameAdmissionTimeout { .. } => {
+            | Self::OutboundTransferAdmissionTimeout { .. } => {
                 SendClass::Deferrable(DeferralTrigger::CapacityRelease)
+            }
+            Self::DataChannelSendQueueTimeout { .. }
+            | Self::OutboundFirstFrameAdmissionTimeout { .. } => {
+                SendClass::Deferrable(DeferralTrigger::ChannelDrain)
             }
             Self::DataChannelSendCompletionTimeout { .. } | Self::DataChannelDeliveryTimeout { .. }
             | Self::DetachedPayloadCleanupTimeout { .. } | Self::TrackedPayloadCleanupTimeout { .. }
-            | Self::CancelledDetachedAdmissionPublishedSuccess => SendClass::Ambiguous,
+            | Self::CancelledDetachedAdmissionPublishedSuccess
+            | Self::DetachedSendAbandonedAfterClaim { .. } => SendClass::Ambiguous,
             Self::Transport(error) => transport_send_class(error),
             #[cfg(all(feature = "wasm", target_family = "wasm"))]
             Self::IDBError(_) | Self::SerdeWasmBindgenError(_) => SendClass::Fatal,
@@ -343,6 +354,15 @@ mod tests {
                 Error::OutboundTransferCapacityExceeded { peer, capacity: 1 },
                 DeferralTrigger::CapacityRelease,
             ),
+            (
+                Error::DataChannelSendQueueTimeout {
+                    peer,
+                    timeout_ms: 1,
+                    bytes: 1,
+                    context: "test",
+                },
+                DeferralTrigger::ChannelDrain,
+            ),
         ];
         for (error, trigger) in deferrable {
             let described = error.to_string();
@@ -378,7 +398,6 @@ mod tests {
     fn test_rerouting_exhaustion_is_fatal() {
         let peer = Did::from(7_u32);
         let exhausted = Error::ReroutingExhausted {
-            deferrals: 1,
             last: SendDeferral::cancelled(peer),
         };
         assert_eq!(exhausted.send_class(), SendClass::Fatal);

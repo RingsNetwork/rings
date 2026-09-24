@@ -16,7 +16,7 @@ impl Error {
     pub(crate) const fn is_local_send_backpressure(&self) -> bool {
         matches!(
             self.send_class(),
-            SendClass::Deferrable(DeferralTrigger::CapacityRelease)
+            SendClass::Deferrable(DeferralTrigger::CapacityRelease | DeferralTrigger::ChannelDrain)
         )
     }
 
@@ -38,6 +38,7 @@ impl Error {
             Self::ConnectionAttemptSuperseded { .. }
             | Self::OutboundSchedulerRuntimeUnavailable
             | Self::CancelledDetachedAdmissionPublishedSuccess
+            | Self::DetachedSendAbandonedAfterClaim { .. }
             | Self::DetachedPayloadCleanupTimeout { .. }
             | Self::DataChannelSendCompletionTimeout { .. }
             | Self::DataChannelDeliveryTimeout { .. }

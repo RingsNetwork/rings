@@ -1,19 +1,21 @@
 //! `Next` of the rerouting model: which actions are enabled, and what each does.
 //!
 //! ```text
-//! Env      ≜ Dial ∨ Glare ∨ Withdraw ∨ Die ∨ Disconnect ∨ Reroute(p) ∨ Congest
-//!          ∨ AcceptThenFail(a)                                  \* each spends Churn
-//! Protocol ≜ Admit ∨ Recover ∨ Close ∨ Release                   \* WF: readiness, close, release
-//!          ∨ Send ∨ Accept ∨ Refuse(r) ∨ Wake                    \* the automaton
+//! Env      ≜ Dial ∨ Glare ∨ Withdraw ∨ Die ∨ Disconnect ∨ Reroute(p) ∨ Congest ∨ Jam(h)
+//!          ∨ AcceptThenFail(a)                                      \* each spends Churn
+//! Protocol ≜ Admit ∨ Recover ∨ Close ∨ Release ∨ Drain(h)            \* WF
+//!          ∨ Send ∨ Accept ∨ Refuse(r) ∨ Wake                        \* the automaton
 //! ```
 //!
 //! The send path's lemmas fix which resolutions an in-flight send has (`resolutions`): a send
 //! bound to a generation that lost its slot, or that cannot make progress, is refused before
-//! acceptance; a send to a usable hop meets exhausted capacity or is accepted, and only an
-//! accepted send can fail ambiguously. Every resolution is a production value classified by
-//! production code.
+//! acceptance; a send to a usable hop is refused by exhausted capacity, may time out in a
+//! jammed channel, or is accepted; only an accepted send can fail ambiguously. Every
+//! resolution is a production value classified by production code. The refused transfer's own
+//! capacity release is not an event here: production excludes it from both stamps.
 
 use super::super::CapacityStamp;
+use super::super::Observation;
 use super::super::Verdict;
 use super::carrier::admit;
 use super::carrier::awaiting;
@@ -26,18 +28,17 @@ use super::carrier::Mutation;
 use super::carrier::Phase;
 use super::carrier::Preference;
 use super::carrier::Refusal;
+use super::carrier::Resolved;
 use super::carrier::State;
+use super::carrier::Trigger;
 use super::carrier::AMBIGUITIES;
 use crate::error::SendDeferral;
 
 /// Every route preference, in action order.
 const PREFERENCES: [Preference; 3] = [Preference::Target, Preference::Alternate, Preference::Local];
 
-/// Whether `refusal` waits for released capacity rather than a link change: the model's own
-/// reading of the trigger, independent of `send_class`.
-const fn waits_for_capacity(refusal: Refusal) -> bool {
-    matches!(refusal, Refusal::AdmissionTimeout | Refusal::QueueTimeout)
-}
+/// Both hops, in action order.
+const HOPS: [Hop; 2] = [Hop::Target, Hop::Alternate];
 
 /// The resolutions of a send to `hop` bound to `generation` in `state`: refusals, and
 /// whether acceptance is possible.
@@ -46,32 +47,33 @@ const fn waits_for_capacity(refusal: Refusal) -> bool {
 /// Target, no generation bound         ─▶ { Missing }
 /// Target, generation lost its slot    ─▶ { Superseded, PermitRevoked, Cancelled }
 /// Target, generation not ready        ─▶ { NotReady, PermitRevoked, Missing }
-/// usable, capacity exhausted          ─▶ { AdmissionTimeout, QueueTimeout }
+/// usable, capacity exhausted          ─▶ { AdmissionTimeout }
+/// usable, channel jammed              ─▶ { QueueTimeout } and accept
 /// usable                              ─▶ accept
 /// ```
 fn resolutions(state: &State, hop: Hop, generation: Option<u64>) -> (Vec<Refusal>, bool) {
-    let sendable = state
-        .registry
-        .sendable_attempt(Hop::Target.did())
-        .map(|attempt| attempt.generation());
-    let refusals = match (hop, generation) {
-        (Hop::Target, None) => vec![Refusal::Missing],
-        (Hop::Target, Some(bound)) if sendable != Some(bound) => {
+    match (hop, generation) {
+        (Hop::Target, None) => (vec![Refusal::Missing], false),
+        (Hop::Target, Some(_)) if state.generation(Hop::Target) != generation => (
             vec![
                 Refusal::Superseded,
                 Refusal::PermitRevoked,
                 Refusal::Cancelled,
-            ]
-        }
-        (Hop::Target, Some(_)) if !state.ready => {
-            vec![Refusal::NotReady, Refusal::PermitRevoked, Refusal::Missing]
-        }
+            ],
+            false,
+        ),
+        (Hop::Target, Some(_)) if !state.ready => (
+            vec![Refusal::NotReady, Refusal::PermitRevoked, Refusal::Missing],
+            false,
+        ),
         (Hop::Target | Hop::Alternate, _) if state.congested => {
-            vec![Refusal::AdmissionTimeout, Refusal::QueueTimeout]
+            (vec![Refusal::AdmissionTimeout], false)
         }
-        (Hop::Target | Hop::Alternate, _) => return (Vec::new(), true),
-    };
-    (refusals, false)
+        (Hop::Target | Hop::Alternate, _) if state.jam[hop.index()] > 0 => {
+            (vec![Refusal::QueueTimeout], true)
+        }
+        (Hop::Target | Hop::Alternate, _) => (Vec::new(), true),
+    }
 }
 
 impl Model {
@@ -93,6 +95,11 @@ impl Model {
                 .map(|_| Action::Close),
         );
         actions.extend(state.congested.then_some(Action::Release));
+        actions.extend(
+            HOPS.into_iter()
+                .filter(|hop| state.jam[hop.index()] > 0)
+                .map(Action::Drain),
+        );
         match state.phase {
             Phase::Compute { .. } => actions.push(Action::Send),
             Phase::InFlight {
@@ -105,11 +112,16 @@ impl Model {
             Phase::Waiting {
                 deferrals,
                 hop,
+                generation,
                 stamp,
                 cause,
             } => {
-                let triggered = awaiting(deferrals, hop, stamp, cause)
-                    .is_triggered(state.link_route(), CapacityStamp(state.capacity));
+                let observation = Observation {
+                    capacity: CapacityStamp(state.capacity),
+                    idle: state.is_idle(hop),
+                };
+                let triggered = awaiting(deferrals, hop, generation, stamp, cause)
+                    .is_triggered(state.link_route(), observation);
                 if triggered || self.mutation == Mutation::WakeUntriggered {
                     actions.push(Action::Wake);
                 }
@@ -145,6 +157,9 @@ impl Model {
             );
         }
         actions.extend((!state.congested && churn.congestions > 0).then_some(Action::Congest));
+        if churn.jams > 0 {
+            actions.extend(HOPS.into_iter().map(Action::Jam));
+        }
         if let Phase::InFlight {
             hop, generation, ..
         } = state.phase
@@ -197,25 +212,23 @@ impl Model {
                 next.churn.congestions -= 1;
                 next.congested = true;
             }
+            Action::Jam(hop) => {
+                next.churn.jams -= 1;
+                next.jam[hop.index()] += 1;
+            }
             Action::Admit => {
                 let pending = next.registry.pending_attempt(target)?;
                 admit(&mut next.registry, pending);
                 next.ready = true;
             }
             Action::Recover => next.ready = true,
-            Action::Close => {
-                let admitted = next.registry.active_attempt(target)?;
-                let retired = next
-                    .registry
-                    .retire_active_if(admitted, |_| Ok(Some(())))
-                    .ok()?;
-                assert!(retired.is_retired(), "a dead generation retires");
-            }
+            Action::Close => close(&mut next),
             Action::Release => {
                 next.congested = false;
                 next.capacity += 1;
             }
-            Action::Send => self.send(&mut next),
+            Action::Drain(hop) => next.jam[hop.index()] -= 1,
+            Action::Send => send(&mut next),
             Action::Accept => self.resolve(&mut next, Resolution::Accept),
             Action::Refuse(refusal) => self.resolve(&mut next, Resolution::Refuse(*refusal)),
             Action::AcceptThenFail(ambiguity) => {
@@ -225,35 +238,6 @@ impl Model {
             Action::Wake => wake(&mut next),
         }
         Some(next)
-    }
-
-    /// `Compute`: settle locally, or bind a send to the routed hop.
-    fn send(&self, state: &mut State) {
-        let Phase::Compute { deferrals } = state.phase else {
-            return;
-        };
-        let Some(hop) = state.route() else {
-            // A local settlement is the placement's effect; `δ` ignores the hop of a local
-            // verdict, so any hop stands in for it.
-            state.effects += 1;
-            let verdict = Verdict::local(Ok(()));
-            state.phase = transition(deferrals, Hop::Alternate, state.capacity, verdict, None);
-            return;
-        };
-        let generation = match hop {
-            Hop::Target => state
-                .registry
-                .sendable_attempt(Hop::Target.did())
-                .map(|attempt| attempt.generation()),
-            Hop::Alternate => None,
-        };
-        state.sends += 1;
-        state.phase = Phase::InFlight {
-            deferrals,
-            hop,
-            generation,
-            stamp: state.capacity,
-        };
     }
 
     /// Resolve the in-flight send and run the production `δ` on its verdict.
@@ -280,12 +264,13 @@ impl Model {
                     Mutation::RetryAmbiguous => (
                         Verdict::Deferred {
                             hop: hop.did(),
+                            generation,
                             cause: SendDeferral::cancelled(hop.did()),
                         },
                         Some(Refusal::Cancelled),
                     ),
                     Mutation::Faithful | Mutation::WakeUntriggered => (
-                        Verdict::remote(hop.did(), Err(ambiguity.error(hop.did()))),
+                        Verdict::remote(hop.did(), generation, Err(ambiguity.error(hop.did()))),
                         None,
                     ),
                 }
@@ -293,11 +278,55 @@ impl Model {
             Resolution::Refuse(refusal) => {
                 state.last_refusal = Some(refusal);
                 let outcome = refusal.outcome(hop.did(), generation.unwrap_or_default());
-                (Verdict::remote(hop.did(), outcome), Some(refusal))
+                (
+                    Verdict::remote(hop.did(), generation, outcome),
+                    Some(refusal),
+                )
             }
         };
-        state.phase = transition(deferrals, hop, stamp, verdict, refusal);
+        let resolved = Resolved { hop, stamp };
+        state.phase = transition(deferrals, resolved, verdict, refusal);
     }
+}
+
+/// `Close`: the dead generation retires; its channel's other transfers are cancelled and
+/// release their capacity, and the channel is gone.
+fn close(state: &mut State) {
+    let target = Hop::Target.did();
+    let Some(admitted) = state.registry.active_attempt(target) else {
+        return;
+    };
+    let retired = state.registry.retire_active_if(admitted, |_| Ok(Some(())));
+    assert!(
+        retired.is_ok_and(|outcome| outcome.is_retired()),
+        "a dead generation retires"
+    );
+    state.jam[Hop::Target.index()] = 0;
+}
+
+/// `Compute`: settle locally, or bind a send to the routed hop.
+fn send(state: &mut State) {
+    let Phase::Compute { deferrals } = state.phase else {
+        return;
+    };
+    let Some(hop) = state.route() else {
+        // A local settlement is the placement's effect; `δ` ignores where a local verdict
+        // stood, so any hop stands in for it.
+        state.effects += 1;
+        let resolved = Resolved {
+            hop: Hop::Alternate,
+            stamp: state.capacity,
+        };
+        state.phase = transition(deferrals, resolved, Verdict::local(Ok(())), None);
+        return;
+    };
+    state.sends += 1;
+    state.phase = Phase::InFlight {
+        deferrals,
+        hop,
+        generation: state.generation(hop),
+        stamp: state.capacity,
+    };
 }
 
 /// How an in-flight send resolves.
@@ -314,12 +343,16 @@ enum Resolution {
 /// `Waiting → Compute`, recording whether the model's own freshness condition held.
 ///
 /// ```text
-/// Fresh ≜ route ≠ hop ∨ (capacity trigger ∧ capacity > stamp) ∨ (link trigger ∧ usable(hop))
+/// Fresh ≜ route ≠ hop
+///       ∨ (Link     ∧ usable(hop))
+///       ∨ (Capacity ∧ capacity > stamp)
+///       ∨ (Drain    ∧ (generation(hop) ≠ bound ∨ idle(hop)))
 /// ```
 fn wake(state: &mut State) {
     let Phase::Waiting {
         deferrals,
         hop,
+        generation,
         stamp,
         cause,
     } = state.phase
@@ -329,15 +362,18 @@ fn wake(state: &mut State) {
     let moved = state.route() != Some(hop);
     let released = state.capacity > stamp;
     let fresh = moved
-        || if waits_for_capacity(cause) {
-            released
-        } else {
-            state.usable(hop)
+        || match cause.trigger() {
+            Trigger::Link => state.usable(hop),
+            Trigger::Capacity => released,
+            Trigger::Drain => state.generation(hop) != generation || state.is_idle(hop),
         };
     state.stale_retry |= !fresh;
     state.woke_on_route |= moved;
-    state.woke_on_capacity |= !moved && released && waits_for_capacity(cause);
+    state.woke_on_capacity |= !moved && released && cause.trigger() == Trigger::Capacity;
+    state.woke_on_drain |= !moved && cause.trigger() == Trigger::Drain;
     state.phase = Phase::Compute {
-        deferrals: awaiting(deferrals, hop, stamp, cause).resume().deferrals,
+        deferrals: awaiting(deferrals, hop, generation, stamp, cause)
+            .resume()
+            .deferrals,
     };
 }
