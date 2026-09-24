@@ -8,14 +8,15 @@
 //! ```text
 //! δ : S × Time × I → S × (Out + Rejection)
 //! I = Charge(Link × Units) + Admit(Charge × Epoch × Expiry × Tag)
-//!   + LinkOpened(Link) + LinkClosed(Link) + Reconcile(𝒫 Link) + Renew(Epoch × Key × 𝒫 Link)
+//!   + LinkOpened(Link) + LinkClosed(Link) + Reconcile(𝒫 Link)
+//! ρ : S × Epoch × Key × 𝒫 Link → S × (Refused + NotFresh)      (the reset; it takes no time)
 //! Link = Did × Generation
 //! ```
 //!
 //! [`OnionAdmissionState::charge`], [`OnionAdmissionState::admit`],
 //! [`OnionAdmissionState::link_opened`], [`OnionAdmissionState::link_closed`],
-//! [`OnionAdmissionState::reconcile`] and [`OnionAdmissionState::renew`] realise `δ` on the six
-//! summands in place. [`OnionAdmissionState::is_rolled_back_at`] is the pure query that tells the
+//! and [`OnionAdmissionState::reconcile`] realise `δ` on the five summands in place, and
+//! [`OnionAdmissionState::renew`] realises the reset `ρ`, which restarts the clock. [`OnionAdmissionState::is_rolled_back_at`] is the pure query that tells the
 //! shell when to renew. Time is an argument, and the only randomness is the probe key given at
 //! construction, so a trace of inputs determines the trace of verdicts. The order is the paper's
 //! hop algorithm, with the charge taken on receipt (#834 L9):
@@ -59,8 +60,8 @@
 //!   inside one epoch: recovering early would mean forgetting filters that may still be live. So
 //!   the effectful shell (#834 2a-4), when [`OnionAdmissionState::is_rolled_back_at`] holds
 //!   (`now < clock − X₀`), must move to a fresh process epoch with
-//!   [`OnionAdmissionState::renew`]. That keeps the live links and clears the
-//!   ledgers, the clock and the replay store. It is safe by the epoch law, but it invalidates
+//!   [`OnionAdmissionState::renew`]. That rebuilds the live links from core's snapshot and clears
+//!   the ledgers, the clock and the replay store. It is safe by the epoch law, but it invalidates
 //!   every loop in flight through this hop.
 //! * **Skew (for 2a-4).** The window has no skew tolerance. A hop whose clock runs `δ < Q` behind
 //!   or ahead of the builder's rejects about `δ / Q` of loops at the window's edges.
@@ -96,15 +97,22 @@
 //!   [`OnionAdmissionLink`] `= (did, generation)`: plain data, fed by the 2a-4 shell from core's
 //!   `Admitted`/`Retired` events. The state keeps the set of live links, and one budget ledger per
 //!   DID with at least one live link or some load.
-//!   * **Event-pairing obligation (2a-4).** The live set shrinks only on `link_closed`. A lost
-//!     `Retired` therefore pins a live link, and a ledger slot, until something repairs it.
-//!     Core itself splits an `Admitted`/`Retired` pair when the callback is replaced, and a
-//!     bounded shell queue may drop events. The shell must call
-//!     [`OnionAdmissionState::reconcile`] with core's registry snapshot of live links whenever
+//!   * **Event-pairing obligation (2a-4).** Between resets the live set shrinks only through
+//!     `link_closed` and `reconcile`. A lost `Retired` therefore pins a live link, and a ledger
+//!     slot, until a reconciliation repairs it. Core itself splits an `Admitted`/`Retired` pair
+//!     when the callback is replaced, and a bounded shell queue may drop events. The shell must
+//!     call [`OnionAdmissionState::reconcile`] with core's registry snapshot of live links whenever
 //!     the callback is replaced, and on a periodic tick no longer than `V`. `reconcile` closes
 //!     every live link absent from the snapshot and opens every snapshot link that is not live,
-//!     so the live set agrees with core after each reconciliation. The leak lasts at most one
+//!     so afterwards the live set is `L \ refused` for the snapshot `L`. The leak lasts at most one
 //!     tick.
+//!   * **Linearisation obligation (2a-4).** `reconcile` treats its snapshot as authoritative, so
+//!     the snapshot must be linearised with the event stream it repairs. It must be delivered
+//!     through the same ordered channel as `Admitted`/`Retired`, or read and applied atomically at
+//!     the shell's queue-drain point. Otherwise a snapshot read before an `Admitted(g)` that is
+//!     processed first would close the live `g` (its cells would be `LinkNotLive` for up to one
+//!     tick), and the converse would reopen a retired `g`. "Agrees with core" holds only under
+//!     this obligation.
 //!   * [`OnionAdmissionState::link_opened`] makes a link live, creating its DID's ledger, and is
 //!     idempotent on a live link. [`OnionAdmissionState::link_closed`] makes it not live, and is
 //!     idempotent too: closing an unknown, refused or closed link changes nothing. A close
@@ -128,11 +136,16 @@
 //!     fills only under connection churn beyond `R` within `V`. `link_opened` then refuses the
 //!     *link*: the shell must close it (fail closed). A refused peer may redial later as a new
 //!     generation. There is no fairness here: a churner that opens cheap DIDs at rate `R / V` can
-//!     win every freed slot. Eventual admission of an honest redial is a liveness *assumption* on
-//!     churn, as #834 states, not a guarantee.
+//!     win every freed slot. The event path serves links first come, first served. `reconcile`
+//!     opens a snapshot's links in DID order, so when the table is full, small DIDs win, and DID
+//!     prefixes can be ground cheaply. Eventual admission of an honest redial is a liveness
+//!     *assumption* on churn, as #834 states, not a guarantee.
 //!   * [`OnionAdmissionState::renew`] (the epoch reset) requires a *fresh* epoch. Renewing into the
 //!     current epoch would clear the replay store while keeping `epoch_i`, so a replay of an
-//!     admitted `(x, ν)` could be admitted again. The reset rebuilds the live set from core's
+//!     admitted `(x, ν)` could be admitted again. The state checks only `e′ ≠ epoch_i`. The shell
+//!     owes the rest: `e′` is drawn independently and uniformly from `2¹²⁸`, so that an
+//!     `A → B → A` sequence, which would revive `A`'s layers, has probability `≤ k·2⁻¹²⁸` over `k`
+//!     resets. The reset rebuilds the live set from core's
 //!     snapshot, and every DID with a live link starts with a zero-load ledger, so every live
 //!     link still has a ledger. The per-DID bound `B` therefore holds within one epoch. A token
 //!     charged before the reset is never admitted after it, because its epoch differs.
@@ -264,6 +277,19 @@ pub(super) enum OnionAdmissionRejection {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct OnionLinkTableFull;
 
+/// The links a table refused, which the shell must close. Returned by
+/// [`OnionAdmissionState::reconcile`] and [`OnionAdmissionState::renew`].
+#[must_use = "refused links must be closed by the shell"]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct OnionRefusedLinks(Vec<OnionAdmissionLink>);
+
+impl OnionRefusedLinks {
+    /// The refused links, in DID order.
+    pub(super) fn links(&self) -> &[OnionAdmissionLink] {
+        self.0.as_slice()
+    }
+}
+
 /// A renewal refused because the requested epoch is the current one. Renewing into the current
 /// epoch would clear the replay store while keeping `epoch_i`, and so re-admit replays.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -338,7 +364,7 @@ impl OnionAdmissionState {
         epoch: OnionExitEpoch,
         filter_key: OnionReplayFilterKey,
         live: impl IntoIterator<Item = OnionAdmissionLink>,
-    ) -> Result<Vec<OnionAdmissionLink>, OnionEpochNotFresh> {
+    ) -> Result<OnionRefusedLinks, OnionEpochNotFresh> {
         if epoch == self.epoch {
             return Err(OnionEpochNotFresh);
         }
@@ -355,16 +381,17 @@ impl OnionAdmissionState {
     }
 
     /// The step `δ` on `Reconcile(live)`: make the live-link set equal core's registry snapshot
-    /// `live`. Every live link absent from the snapshot is closed first, which frees its slot, and
-    /// then every snapshot link that is not live is opened, with the table's usual refusal. It
-    /// returns the refused snapshot links, which the shell must close. This repairs a lost `Retired`
-    /// or `Admitted` event.
-    #[must_use = "refused links must be closed by the shell"]
+    /// `live`, up to refusals. Every live link absent from the snapshot is closed first, which
+    /// frees its slot. Then every snapshot link that is not live is opened in DID order, with the
+    /// table's usual refusal. Afterwards the live set is `live \ refused`, no link that was already
+    /// live and is in the snapshot is refused, and a second reconciliation with the same snapshot,
+    /// in any order, changes nothing. This repairs lost `Retired` and `Admitted` events. The snapshot
+    /// must be linearised with the event stream (see the module laws).
     pub(super) fn reconcile(
         &mut self,
         now_ms: u128,
         live: impl IntoIterator<Item = OnionAdmissionLink>,
-    ) -> Vec<OnionAdmissionLink> {
+    ) -> OnionRefusedLinks {
         let mut snapshot = BTreeMap::<Did, BTreeSet<u64>>::new();
         for link in live {
             snapshot
@@ -375,33 +402,31 @@ impl OnionAdmissionState {
         let absent = self
             .senders
             .iter()
-            .flat_map(|(did, sender)| {
+            .flat_map(|(&did, sender)| {
+                let kept = snapshot.get(&did);
                 sender
                     .live
                     .iter()
-                    .filter(|generation| {
-                        !snapshot
-                            .get(did)
-                            .is_some_and(|generations| generations.contains(generation))
+                    .copied()
+                    .filter(move |generation| {
+                        !kept.is_some_and(|generations| generations.contains(generation))
                     })
-                    .map(|generation| OnionAdmissionLink {
-                        did: did.to_owned(),
-                        generation: generation.to_owned(),
-                    })
+                    .map(move |generation| OnionAdmissionLink { did, generation })
             })
             .collect::<Vec<_>>();
         for link in absent {
             self.link_closed(now_ms, link);
         }
-        snapshot
-            .into_iter()
-            .flat_map(|(did, generations)| {
-                generations
-                    .into_iter()
-                    .map(move |generation| OnionAdmissionLink { did, generation })
-            })
-            .filter(|link| self.link_opened(now_ms, link.to_owned()).is_err())
-            .collect()
+        let mut refused = Vec::new();
+        for (did, generations) in snapshot {
+            for generation in generations {
+                let link = OnionAdmissionLink { did, generation };
+                if self.link_opened(now_ms, link).is_err() {
+                    refused.push(link);
+                }
+            }
+        }
+        OnionRefusedLinks(refused)
     }
 
     /// The step `δ` on `LinkOpened(link)`: make `link` live, creating its DID's ledger if it has
