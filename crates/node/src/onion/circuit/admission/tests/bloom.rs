@@ -44,10 +44,10 @@ fn test_block_geometry_meets_the_block_rate() {
 
 /// Property, seeded: a filter saturated through admission by `64` senders × `B` one-unit cells has
 /// exactly `64` blocks. A false positive on a fresh tag is a drop, the safe direction, and it is
-/// charged like every other cell. The exact measured rates (the product of slice fills) stay
-/// within target: at most `1.25 · 2⁻²⁶` per block and `≤ 2⁻²⁰` for the filter. The global budget
-/// then stops the filter from growing. A smoke check with `2¹⁶` fresh probes (`2⁻⁴` hits expected at
-/// the target rate) guards the query path. The sample is far too small to estimate the rate itself.
+/// charged like every other cell. The exact measured rates (the product of slice fills) stay within
+/// target: at most `1.25 · 2⁻²⁶` per block and `≤ 2⁻²⁰` for the filter. The global budget then
+/// stops the filter from growing. A smoke check with `2¹⁶` fresh probes (`2⁻⁴` hits expected at the
+/// target rate) guards the query path. The sample is far too small to estimate the rate itself.
 #[test]
 fn test_saturated_filter_meets_the_false_positive_target() {
     let mut rng = StdRng::seed_from_u64(0x0841_0008);

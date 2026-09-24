@@ -159,6 +159,6 @@ pub(super) fn sender_load(admission: &OnionAdmissionState, from: u32, now_ms: u1
 }
 
 /// The live filter keys in expiry order.
-pub(super) fn live(admission: &OnionAdmissionState) -> Vec<OnionExpiry> {
+pub(super) fn live_filters(admission: &OnionAdmissionState) -> Vec<OnionExpiry> {
     admission.replay.filters().keys().copied().collect()
 }

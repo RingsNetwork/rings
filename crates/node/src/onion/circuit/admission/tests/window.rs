@@ -10,7 +10,7 @@ use super::expiry;
 use super::latest_expiry;
 use super::layer;
 use super::link;
-use super::live;
+use super::live_filters;
 use super::send;
 use super::sender_load;
 use super::state;
@@ -40,8 +40,9 @@ fn test_expiry_is_constructible_only_on_the_quantum_grid() {
     assert_eq!(OnionExpiry::from_ms(ORIGIN_MS + Q - 1), None);
 }
 
-/// Law: the build quantiser is `x = ⌈t / Q⌉·Q + X₀`. It is constant on each quantum `((k − 1)Q, kQ]`,
-/// and its expiry is admissible at the build instant itself, which a freshly built loop needs.
+/// Law: the build quantiser is `x = ⌈t / Q⌉·Q + X₀`. It is constant on each quantum `((k − 1)Q,
+/// kQ]`, and its expiry is admissible at the build instant itself, which a freshly built loop
+/// needs.
 #[test]
 fn test_build_quantiser_maps_each_quantum_to_one_admissible_expiry() {
     let quantum = ORIGIN_MS / Q;
@@ -99,8 +100,10 @@ fn test_no_replay_is_admitted_across_rotation_and_boundaries() {
         if verdict == Verdict::Admitted {
             admitted.insert((x, tag));
         }
-        assert!(live(&admission).len() <= ADMISSION_WINDOW_QUANTA);
-        assert!(live(&admission).iter().all(|live| live.as_ms() > clock_ms));
+        assert!(live_filters(&admission).len() <= ADMISSION_WINDOW_QUANTA);
+        assert!(live_filters(&admission)
+            .iter()
+            .all(|live| live.as_ms() > clock_ms));
     }
     assert!(clock_ms >= ORIGIN_MS + 100 * ONION_ADMISSION_WINDOW_MS);
 }
@@ -132,9 +135,9 @@ fn test_filter_is_dropped_exactly_at_its_expiry() {
         send(&mut admission, x.as_ms() - 1, 3, 1, layer(x, 1)),
         replayed
     );
-    assert_eq!(live(&admission), vec![x]);
+    assert_eq!(live_filters(&admission), vec![x]);
     assert_eq!(send(&mut admission, x.as_ms(), 1, 1, layer(x, 1)), outside);
-    assert_eq!(live(&admission), Vec::new());
+    assert_eq!(live_filters(&admission), Vec::new());
 }
 
 /// Law: a forward clock jump drops filters, and a later rollback cannot revive their pairs. The
@@ -159,7 +162,7 @@ fn test_clock_rollback_after_a_jump_never_admits_a_replay() {
         ),
         Verdict::Admitted
     );
-    assert!(!live(&admission).contains(&x));
+    assert!(!live_filters(&admission).contains(&x));
     assert_eq!(
         send(&mut admission, ORIGIN_MS, 1, 1, layer(x, 9)),
         Verdict::Rejected(OnionAdmissionRejection::OutsideWindow)
@@ -187,7 +190,7 @@ fn test_new_epoch_rejects_every_layer_of_the_old_one() {
         );
     }
     assert_eq!(restarted.global.load(ORIGIN_MS / Q), 64);
-    assert_eq!(live(&restarted), Vec::new());
+    assert_eq!(live_filters(&restarted), Vec::new());
     assert_eq!(
         send(&mut restarted, ORIGIN_MS, 1, 1, OnionAdmissionLayer {
             epoch: restarted_epoch,
@@ -218,14 +221,14 @@ fn test_the_window_is_judged_at_the_charge_instant() {
         admission.admit(ORIGIN_MS + Q, early, layer(too_far, 1)),
         outside
     );
-    assert!(live(&admission).is_empty());
+    assert!(live_filters(&admission).is_empty());
 
     let x = latest_expiry(ORIGIN_MS);
     let in_time = admission
         .charge(ORIGIN_MS, sender, units(1))
         .expect("the sender has headroom");
     assert_eq!(admission.admit(x.as_ms(), in_time, layer(x, 2)), outside);
-    assert!(live(&admission).is_empty());
+    assert!(live_filters(&admission).is_empty());
     assert_eq!(sender_load(&admission, 1, ORIGIN_MS), Some(2));
 }
 
@@ -244,7 +247,7 @@ fn test_a_token_from_another_epoch_admits_nothing() {
         here.admit(ORIGIN_MS, foreign, layer(x, 1)),
         Err(OnionAdmissionRejection::StaleEpoch)
     );
-    assert!(live(&here).is_empty());
+    assert!(live_filters(&here).is_empty());
 }
 
 /// Property, seeded (H1 of the round-3 review): with tokens held across quanta and admitted late,

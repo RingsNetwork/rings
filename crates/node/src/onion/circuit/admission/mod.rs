@@ -14,12 +14,13 @@
 //! ```
 //!
 //! [`OnionAdmissionState::charge`], [`OnionAdmissionState::admit`],
-//! [`OnionAdmissionState::link_opened`], [`OnionAdmissionState::link_closed`],
-//! and [`OnionAdmissionState::reconcile`] realise `δ` on the five summands in place, and
-//! [`OnionAdmissionState::renew`] realises the reset `ρ`, which restarts the clock. [`OnionAdmissionState::is_rolled_back_at`] is the pure query that tells the
-//! shell when to renew. Time is an argument, and the only randomness is the probe key given at
-//! construction, so a trace of inputs determines the trace of verdicts. The order is the paper's
-//! hop algorithm, with the charge taken on receipt (#834 L9):
+//! [`OnionAdmissionState::link_opened`], [`OnionAdmissionState::link_closed`], and
+//! [`OnionAdmissionState::reconcile`] realise `δ` on the five summands in place, and
+//! [`OnionAdmissionState::renew`] realises the reset `ρ`, which restarts the clock.
+//! [`OnionAdmissionState::is_rolled_back_at`] is the pure query that tells the shell when to renew.
+//! Time is an argument, and the only randomness is the probe key given at construction, so a trace
+//! of inputs determines the trace of verdicts. The order is the paper's hop algorithm, with the
+//! charge taken on receipt (#834 L9):
 //!
 //! ```text
 //! charge(link, u) at arr ──Err──→ drop   (nothing charged, no ECDH)
@@ -75,12 +76,12 @@
 //!   pair `(x, ν)` is admitted at most once. At most `V / Q = 5` filters are live, namely the grid
 //!   points of `(clock, clock + V]`. An idle hop keeps its filters until its next step. They stay
 //!   within the memory bound below, and the 2a-4 shell decides whether to drive a step on a timer.
-//! * **Five quanta per filter.** `arr < x ≤ arr + V` gives `arr ∈ [x − V, x)`. With `x = kQ` and
-//!   `V = 5Q`, the arrival quanta are exactly `{k − 5, …, k − 1}`, five consecutive aligned quanta.
+//! * **Five quanta per filter.** `arr < x ≤ arr + V` gives `arr ∈ [x − V, x)`. With `x = kQ` and `V
+//!   = 5Q`, the arrival quanta are exactly `{k − 5, …, k − 1}`, five consecutive aligned quanta.
 //!   The window is judged at `token.arr`, the instant of the charge, so these are also the charging
 //!   quanta, however late the admission completes. They all lie in the ledger window `(s − 5, s]`
-//!   of the last charge admitted into `R_i[x]` (at quantum `s ≤ k − 1`), and that charge bounded the
-//!   whole set by the global cap.
+//!   of the last charge admitted into `R_i[x]` (at quantum `s ≤ k − 1`), and that charge bounded
+//!   the whole set by the global cap.
 //! * **Tags ≤ units.** Tags are counted per cell and budgets per unit, and every admitted cell was
 //!   charged at least one unit. So `|R_i[x]| ≤ G = 64·B`, `R_i[x]` has at most `64` blocks, and
 //!   its false-positive rate is `≤ 64·2⁻²⁶ = 2⁻²⁰`. A tag is live only if it was admitted in the
@@ -106,13 +107,14 @@
 //!     every live link absent from the snapshot and opens every snapshot link that is not live,
 //!     so afterwards the live set is `L \ refused` for the snapshot `L`. The leak lasts at most one
 //!     tick.
-//!   * **Linearisation obligation (2a-4).** `reconcile` treats its snapshot as authoritative, so
-//!     the snapshot must be linearised with the event stream it repairs. It must be delivered
-//!     through the same ordered channel as `Admitted`/`Retired`, or read and applied atomically at
-//!     the shell's queue-drain point. Otherwise a snapshot read before an `Admitted(g)` that is
-//!     processed first would close the live `g` (its cells would be `LinkNotLive` for up to one
-//!     tick), and the converse would reopen a retired `g`. "Agrees with core" holds only under
-//!     this obligation.
+//!   * **Linearisation obligation (2a-4).** `reconcile` and `renew` both treat their snapshot as
+//!     authoritative, so each snapshot must be linearised with the event stream it repairs. It must
+//!     be delivered through the same ordered channel as `Admitted`/`Retired`, or read and applied
+//!     atomically at the shell's queue-drain point. Under this obligation, after `reconcile` or
+//!     `renew` the live set is exactly core's registry minus the refused links. Without it, a
+//!     snapshot read before an `Admitted(g)` that is processed first would close the live `g` (its
+//!     cells would be `LinkNotLive` for up to one tick), and the converse would reopen a retired
+//!     `g`.
 //!   * [`OnionAdmissionState::link_opened`] makes a link live, creating its DID's ledger, and is
 //!     idempotent on a live link. [`OnionAdmissionState::link_closed`] makes it not live, and is
 //!     idempotent too: closing an unknown, refused or closed link changes nothing. A close
@@ -128,9 +130,9 @@
 //!     capacity (#723). There is no recycling. Within one epoch, a ledger is never reset while it
 //!     carries load, so no DID regains budget by closing and reopening links: a reconnecting DID
 //!     finds its old ledger. `(iii)` of the paper's replay bounds therefore holds per DID within an
-//!     epoch, however many other DIDs churn. The live-link set is also capped at `2·R`. This is only
-//!     a memory bound: under core's laws, which allow at most one live generation per DID and at
-//!     most `R` DIDs, the cap is unreachable, and it only matters if the event obligation above
+//!     epoch, however many other DIDs churn. The live-link set is also capped at `2·R`. This is
+//!     only a memory bound: under core's laws, which allow at most one live generation per DID and
+//!     at most `R` DIDs, the cap is unreachable, and it only matters if the event obligation above
 //!     is broken.
 //!   * At most `R` links are live, and a closed ledger drains within one window. So the table
 //!     fills only under connection churn beyond `R` within `V`. `link_opened` then refuses the
@@ -142,12 +144,13 @@
 //!     *assumption* on churn, as #834 states, not a guarantee.
 //!   * [`OnionAdmissionState::renew`] (the epoch reset) requires a *fresh* epoch. Renewing into the
 //!     current epoch would clear the replay store while keeping `epoch_i`, so a replay of an
-//!     admitted `(x, ν)` could be admitted again. The state checks only `e′ ≠ epoch_i`. The shell
-//!     owes the rest: `e′` is drawn independently and uniformly from `2¹²⁸`, so that an
-//!     `A → B → A` sequence, which would revive `A`'s layers, has probability `≤ k·2⁻¹²⁸` over `k`
-//!     resets. The reset rebuilds the live set from core's
-//!     snapshot, and every DID with a live link starts with a zero-load ledger, so every live
-//!     link still has a ledger. The per-DID bound `B` therefore holds within one epoch. A token
+//!     admitted `(x, ν)` could be admitted again. The state rejects only `e′ = epoch_i`. The shell
+//!     owes the rest: it draws `e′` independently and uniformly from `2¹²⁸`, and redraws on that
+//!     rejection. Over `k` resets, the chance of reusing one *fixed* earlier epoch is
+//!     `≤ k·2⁻¹²⁸`. The chance that some reset reuses *any* earlier epoch, the `A → B → A`
+//!     sequence that would revive `A`'s layers, is at most the birthday bound `k²·2⁻¹²⁹`. The reset
+//!     rebuilds the live set from core's snapshot, and every DID with a live link starts with a
+//!     zero-load ledger, so every live link still has a ledger. The per-DID bound `B` therefore holds within one epoch. A token
 //!     charged before the reset is never admitted after it, because its epoch differs.
 //!   * `G` is independent of the table size and bounds what all DIDs admit together, and hence the
 //!     replay store.
@@ -215,8 +218,8 @@ impl OnionAdmissionUnits {
 }
 
 /// Evidence of one charge, taken at `arrival_ms` by a state of this epoch; it is not bound to a
-/// particular cell or to its units (the shell's obligation, see the Charging law). It is affine: it is
-/// neither `Clone` nor `Copy`, only [`OnionAdmissionState::charge`] can build it, and
+/// particular cell or to its units (the shell's obligation, see the Charging law). It is affine: it
+/// is neither `Clone` nor `Copy`, only [`OnionAdmissionState::charge`] can build it, and
 /// [`OnionAdmissionState::admit`] consumes it. Dropping it settles an invalid `α` or a failed `γ`,
 /// which are already paid for.
 #[must_use = "a charged cell is admitted with its token, or dropped after an invalid α or γ"]
@@ -355,7 +358,7 @@ impl OnionAdmissionState {
         now_ms.saturating_add(ONION_EXPIRY_OFFSET_MS) < self.clock_ms
     }
 
-    /// The step `δ` on `Renew(epoch, key, live)`: the epoch reset. It requires a fresh `epoch` and
+    /// The reset `ρ(epoch, key, live)`: the epoch reset. It requires a fresh `epoch` and
     /// otherwise changes nothing. On success the state is the initial state of `epoch` with probe
     /// key `filter_key`, over the live links of core's snapshot `live`, each DID with a zero-load
     /// ledger. It returns the snapshot links the table refuses, which the shell must close.
@@ -385,13 +388,14 @@ impl OnionAdmissionState {
     /// frees its slot. Then every snapshot link that is not live is opened in DID order, with the
     /// table's usual refusal. Afterwards the live set is `live \ refused`, no link that was already
     /// live and is in the snapshot is refused, and a second reconciliation with the same snapshot,
-    /// in any order, changes nothing. This repairs lost `Retired` and `Admitted` events. The snapshot
-    /// must be linearised with the event stream (see the module laws).
+    /// in any order, changes nothing. This repairs lost `Retired` and `Admitted` events. The
+    /// snapshot must be linearised with the event stream (see the module laws).
     pub(super) fn reconcile(
         &mut self,
         now_ms: u128,
         live: impl IntoIterator<Item = OnionAdmissionLink>,
     ) -> OnionRefusedLinks {
+        self.advance(now_ms);
         let mut snapshot = BTreeMap::<Did, BTreeSet<u64>>::new();
         for link in live {
             snapshot
@@ -472,8 +476,9 @@ impl OnionAdmissionState {
         }
     }
 
-    /// The step `δ` on `Charge(link, u)`: charge a cell received on `link` to its DID's ledger and to
-    /// the global ledger, both or neither, before its key is computed. Only a live link is charged.
+    /// The step `δ` on `Charge(link, u)`: charge a cell received on `link` to its DID's ledger and
+    /// to the global ledger, both or neither, before its key is computed. Only a live link is
+    /// charged.
     ///
     /// ```text
     ///  now := max(now, clock);  drop R[x] for x ≤ now;  s = ⌊now / Q⌋;  sweep if s is new

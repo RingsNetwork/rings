@@ -13,7 +13,7 @@ use super::generation;
 use super::latest_expiry;
 use super::layer;
 use super::link;
-use super::live;
+use super::live_filters;
 use super::open;
 use super::registry;
 use super::send;
@@ -65,7 +65,8 @@ fn test_more_than_64_live_links_are_all_admitted() {
 /// Law: closing a link does not reset its ledger while it carries load, even under table pressure.
 /// A DID spends `B` and closes its link. 38 churning DIDs then open, send and close, filling the
 /// table: a refused churner never becomes live. When the DID reconnects within the window, as a new
-/// generation, it finds its old ledger and is still over budget. Once the window passes, the sweep releases every drained churner.
+/// generation, it finds its old ledger and is still over budget. Once the window passes, the sweep
+/// releases every drained churner.
 #[test]
 fn test_closed_link_keeps_its_ledger_until_it_drains() {
     const R: usize = 8;
@@ -132,8 +133,8 @@ fn test_closed_link_keeps_its_ledger_until_it_drains() {
 }
 
 /// Law: a full table refuses the link, and the link's cells are never charged or decrypted. The
-/// shell's close of that refused link is a no-op. The peer's redial, a new generation, succeeds once
-/// a closed ledger has drained and been swept.
+/// shell's close of that refused link is a no-op. The peer's redial, a new generation, succeeds
+/// once a closed ledger has drained and been swept.
 #[test]
 fn test_full_table_refuses_the_link_and_the_peer_redials() {
     let mut rng = StdRng::seed_from_u64(0x0841_000c);
@@ -250,13 +251,13 @@ fn test_a_refused_generation_cannot_close_a_live_one() {
 }
 
 /// Law: the epoch reset rebuilds the live set from core's snapshot `L`, not from the old live set.
-/// The snapshot here differs from the live set: it drops the live DID 2 and adds the non-live DID 3.
-/// Every link of `L` starts with a zero ledger, so every live link still has a ledger. The reset
+/// The snapshot here differs from the live set: it drops the live DID 2 and adds the non-live DID
+/// 3. Every link of `L` starts with a zero ledger, so every live link still has a ledger. The reset
 /// clears the loads, the clock and the replay store, and drops every other ledger. Every layer of
 /// the old epoch is then rejected, and so is every token charged before the reset, because its
 /// epoch differs.
 #[test]
-fn test_renewal_keeps_live_links_and_clears_the_rest() {
+fn test_renewal_rebuilds_live_links_from_the_snapshot() {
     let mut rng = StdRng::seed_from_u64(0x0841_0015);
     let mut admission = state_with(&mut rng, EPOCH, 4, 1..3);
     let x = latest_expiry(ORIGIN_MS);
@@ -286,7 +287,7 @@ fn test_renewal_keeps_live_links_and_clears_the_rest() {
         Ok(OnionRefusedLinks::default())
     );
     assert_eq!(admission.clock_ms, 0);
-    assert_eq!(live(&admission), Vec::new());
+    assert_eq!(live_filters(&admission), Vec::new());
     assert_eq!(admission.senders.keys().collect::<Vec<_>>(), vec![
         &Did::from(1_u32),
         &Did::from(3_u32)
@@ -340,7 +341,7 @@ fn test_a_same_epoch_renewal_is_refused_and_cannot_readmit_a_replay() {
         Err(OnionEpochNotFresh)
     );
     assert_eq!(admission.clock_ms, ORIGIN_MS);
-    assert_eq!(live(&admission), vec![x]);
+    assert_eq!(live_filters(&admission), vec![x]);
     assert_eq!(
         send(&mut admission, ORIGIN_MS, 1, 1, layer(x, 1)),
         Verdict::Rejected(OnionAdmissionRejection::Replayed)
@@ -559,6 +560,14 @@ fn test_rotation_through_many_dids_never_exceeds_the_sender_budget() {
     }
 }
 
+/// Whether the table has no room for `link`: the live-link set is full, or `link`'s DID has no
+/// ledger and the ledger table is full. This is the only justification for a refusal.
+fn is_full_for(admission: &OnionAdmissionState, link: &OnionAdmissionLink) -> bool {
+    admission.live_link_count() >= admission.capacity
+        || (!admission.senders.contains_key(&link.did)
+            && admission.senders.len() >= admission.capacity)
+}
+
 /// The live links of `admission`, as `(did, generation)` pairs.
 fn live_links(admission: &OnionAdmissionState) -> BTreeSet<(Did, u64)> {
     admission
@@ -577,9 +586,12 @@ fn live_links(admission: &OnionAdmissionState) -> BTreeSet<(Did, u64)> {
 /// * a second reconciliation with the same snapshot changes nothing and refuses the same links;
 /// * the shuffled snapshot yields the same state as the sorted one.
 ///
-/// Throughout, a charge is `LinkNotLive` exactly when the modelled live set lacks the link, and
-/// the state's live set equals the model's after every step. The shell closes every refused link
-/// in core, so the model removes it from `L`.
+/// Every refusal is justified: after a refused `link_opened`, or after a reconciliation that
+/// refuses a link, the table has no room for that link. Throughout, a charge is `LinkNotLive`
+/// exactly when the modelled live set lacks the link, and the state's live set equals the model's
+/// after every step. The shell closes every refused link in core, so the model removes it from
+/// `L`. The run asserts that delivered opens, delivered closes, event refusals and reconcile
+/// refusals all occur.
 #[test]
 fn test_reconcile_restores_core_truth_under_lost_events() {
     const R: usize = 8;
@@ -592,6 +604,7 @@ fn test_reconcile_restores_core_truth_under_lost_events() {
     let mut next_generation = 0_u64;
     let mut reconciliations = 0_u32;
     let mut lost = 0_u32;
+    let mut occurred = [0_u32; 4];
     let mut now_ms = ORIGIN_MS;
     for tag in 0..6_000_u128 {
         now_ms += rng.gen_range(0..=Q / 16);
@@ -611,9 +624,12 @@ fn test_reconcile_restores_core_truth_under_lost_events() {
                     assert_eq!(shuffled.link_opened(now_ms, opened), verdict);
                     match verdict {
                         Ok(()) => {
+                            occurred[0] += 1;
                             modelled.insert((did, next_generation));
                         }
                         Err(OnionLinkTableFull) => {
+                            occurred[2] += 1;
+                            assert!(is_full_for(&sorted, &opened));
                             truth.remove(&(did, next_generation));
                         }
                     }
@@ -632,6 +648,7 @@ fn test_reconcile_restores_core_truth_under_lost_events() {
                         let closed = OnionAdmissionLink { did, generation };
                         sorted.link_closed(now_ms, closed);
                         shuffled.link_closed(now_ms, closed);
+                        occurred[1] += 1;
                         modelled.remove(&(did, generation));
                     }
                 }
@@ -662,6 +679,11 @@ fn test_reconcile_restores_core_truth_under_lost_events() {
                 assert!(before
                     .intersection(&truth)
                     .all(|link| !refused_set.contains(link)));
+                assert!(refused
+                    .links()
+                    .iter()
+                    .all(|link| is_full_for(&sorted, link)));
+                occurred[3] += u32::from(!refused.links().is_empty());
                 let ledgers = sorted.senders.clone();
                 assert_eq!(sorted.reconcile(now_ms, snapshot.iter().copied()), refused);
                 assert_eq!(
@@ -699,4 +721,5 @@ fn test_reconcile_restores_core_truth_under_lost_events() {
         reconciliations > 100 && lost > 50,
         "{reconciliations} {lost}"
     );
+    assert!(occurred.iter().all(|count| *count > 0), "{occurred:?}");
 }
