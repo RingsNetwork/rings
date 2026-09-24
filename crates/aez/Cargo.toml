@@ -17,7 +17,7 @@ workspace = true
 aes = { version = "0.8.4", features = ["hazmat"] }
 subtle = "2.4.1"
 thiserror = "1"
-zeroize = { version = "1.8.1", features = ["zeroize_derive"] }
+zeroize = { workspace = true, features = ["zeroize_derive"] }
 
 [dev-dependencies]
 wasm-bindgen-test = { workspace = true }

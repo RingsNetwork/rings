@@ -9,7 +9,6 @@ use rings_core::ecc::PublicKey;
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::admission::OnionExpiry;
 use super::cell::encode_message;
 use super::cell::OnionCellBucket;
 use super::codec::OnionCircuitInput;
@@ -24,6 +23,7 @@ use super::OnionForwardLayer;
 use super::OnionForwardNonce;
 use super::OnionForwardSequence;
 use super::MAX_ONION_RELAY_CIRCUITS;
+use super::ONION_FORWARD_MAX_VALIDITY_MS;
 use super::ONION_RELAY_RETURN_TTL_MS;
 use crate::error::Error;
 use crate::error::Result;
@@ -308,11 +308,10 @@ impl OnionCircuitReducer {
                     ));
                 }
                 // Invariant: every accepted layer expires while its replay witness is still live.
-                // The window's upper bound also prevents a malicious client from extending
-                // authenticated validity beyond the finite replay-cache retention contract, and an
-                // off-grid expiry is never built by `OnionExpiry::of_build`.
-                if !OnionExpiry::from_ms(expires_at_ms)
-                    .is_some_and(|expiry| expiry.admissible_at(received_at_ms))
+                // The upper bound also prevents a malicious client from extending authenticated
+                // validity beyond the finite replay-cache retention contract.
+                if expires_at_ms <= received_at_ms
+                    || expires_at_ms > received_at_ms.saturating_add(ONION_FORWARD_MAX_VALIDITY_MS)
                 {
                     return Err(Error::OnionRouteError(
                         OnionRouteError::ForwardPayloadExpired,

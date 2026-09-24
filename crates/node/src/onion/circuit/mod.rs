@@ -90,6 +90,41 @@ pub(super) const ONION_FORWARD_EXPIRY_QUANTUM_MS: u128 = 30_000;
 /// the nonce that proves its one-shot exit effect was already consumed.
 pub(super) const ONION_FORWARD_MAX_VALIDITY_MS: u128 =
     ONION_FORWARD_PAYLOAD_TTL_MS + ONION_FORWARD_EXPIRY_QUANTUM_MS;
+
+/// A layer's quantised expiry `x ∈ Q·ℕ`, held as its quantum index `x / Q`, so an off-grid
+/// instant is unrepresentable.
+///
+/// [`Self::of_build`] is the only source of the grid. The admission algebra over expiries
+/// (parsing, the window, passing) lives with the L9 admission step.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct OnionExpiry(u128);
+
+impl OnionExpiry {
+    /// The expiry of a loop built at `built_at_ms`: `x = ⌈t_build / Q⌉·Q + X₀`, with
+    /// `X₀ = ONION_FORWARD_PAYLOAD_TTL_MS` a whole number of quanta. Every build instant in one
+    /// quantum maps to the same `x`, so a layer does not reveal the client's clock at a finer
+    /// resolution than `Q`.
+    fn of_build(built_at_ms: u128) -> Self {
+        Self(
+            built_at_ms
+                .div_ceil(ONION_FORWARD_EXPIRY_QUANTUM_MS)
+                .saturating_add(ONION_FORWARD_PAYLOAD_TTL_MS / ONION_FORWARD_EXPIRY_QUANTUM_MS),
+        )
+    }
+
+    /// The expiry instant in milliseconds, saturating at the largest representable instant,
+    /// which no window admits.
+    const fn as_ms(self) -> u128 {
+        self.0.saturating_mul(ONION_FORWARD_EXPIRY_QUANTUM_MS)
+    }
+}
+
+/// Compile-time law: `X₀` and `V` are whole numbers of quanta, so [`OnionExpiry::of_build`]
+/// stays on the grid.
+const _: () = assert!(
+    ONION_FORWARD_PAYLOAD_TTL_MS.is_multiple_of(ONION_FORWARD_EXPIRY_QUANTUM_MS)
+        && ONION_FORWARD_MAX_VALIDITY_MS.is_multiple_of(ONION_FORWARD_EXPIRY_QUANTUM_MS)
+);
 pub(super) const ONION_CRYPTO_LIMIT_WINDOW_MS: u128 = 60_000;
 pub(super) const MAX_ONION_CRYPTO_OPS_PER_WINDOW: u32 = 4096;
 pub(super) const MAX_ONION_CRYPTO_OPS_GLOBAL_PER_WINDOW: u32 = 8192;

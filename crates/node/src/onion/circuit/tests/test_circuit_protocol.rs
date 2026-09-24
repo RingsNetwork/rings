@@ -893,16 +893,18 @@ fn test_expired_exit_layer_emits_no_exit_effect() {
     let state = OnionCircuitState::default();
     let circuit_id = OnionCircuitId::new([8; 16]);
 
+    // On the expiry grid: the layer expires exactly at its arrival, the window's lower boundary.
+    let received_at_ms = super::super::ONION_FORWARD_EXPIRY_QUANTUM_MS;
     let transition = reducer.apply(&state, OnionCircuitInput::ForwardReady {
         from: client.delegator_did(),
-        received_at_ms: 100,
+        received_at_ms,
         bucket: OnionCellBucket::KiB4,
         circuit_id,
         layer: OnionForwardLayer::Exit {
             process_epoch: TEST_PROCESS_EPOCH,
             client: OnionClientReturn::new(client.delegatee_public_key()),
             return_delegatee_public_key: client.delegatee_public_key(),
-            expires_at_ms: 100,
+            expires_at_ms: received_at_ms,
             forward_nonce: OnionForwardNonce::new([9; 16]),
             forward_sequence: OnionForwardSequence::FIRST,
             payload: test_payload("expired"),
@@ -938,7 +940,8 @@ fn test_overlong_exit_layer_emits_no_exit_effect() {
         Some(TEST_PROCESS_EPOCH),
     ));
     let state = OnionCircuitState::default();
-    let received_at_ms = 100;
+    // On the expiry grid: the first grid point after the window's upper boundary `arr + V`.
+    let received_at_ms = super::super::ONION_FORWARD_EXPIRY_QUANTUM_MS;
     let circuit_id = OnionCircuitId::new([38; 16]);
 
     let transition = reducer.apply(&state, OnionCircuitInput::ForwardReady {
@@ -952,7 +955,7 @@ fn test_overlong_exit_layer_emits_no_exit_effect() {
             return_delegatee_public_key: client.delegatee_public_key(),
             expires_at_ms: received_at_ms
                 .saturating_add(super::super::ONION_FORWARD_MAX_VALIDITY_MS)
-                .saturating_add(1),
+                .saturating_add(super::super::ONION_FORWARD_EXPIRY_QUANTUM_MS),
             forward_nonce: OnionForwardNonce::new([39; 16]),
             forward_sequence: OnionForwardSequence::FIRST,
             payload: test_payload("overlong"),

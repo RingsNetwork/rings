@@ -17,7 +17,6 @@ use rings_core::message::SigningDomain;
 use rings_core::utils::get_epoch_ms;
 use serde::Serialize;
 
-use super::admission::OnionExpiry;
 use super::cell::seal_message;
 use super::codec::OnionWireMessage;
 use super::OnionAuthenticatedPayload;
@@ -28,6 +27,7 @@ use super::OnionBackwardSequence;
 use super::OnionCircuitId;
 use super::OnionCircuitPayload;
 use super::OnionClientReturn;
+use super::OnionExpiry;
 use super::OnionForwardFrame;
 use super::OnionForwardLayer;
 use super::OnionForwardNonce;

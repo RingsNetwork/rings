@@ -5,9 +5,9 @@
 //! A *block* is a sliced Bloom filter (Almeida et al., 2007): `K` slices of `M` bits each, and
 //! the address `g_j` hits slice `j` only. The addresses are independent and uniform, so after `n`
 //! insertions each slice has expected fill `p_n = 1 − (1 − 1/M)ⁿ`. Slices are independent, so a
-//! fresh tag is a false positive with probability exactly `p_nᴷ`. (`p_n ≥ 1 − e^{−n/M}` is the
-//! familiar approximation, from below, and it is not a bound.) With `n = B = 16 384`, `K = 26` and
-//! `M = 23 680`:
+//! fresh tag is a false positive with probability exactly `p_nᴷ`. (The familiar approximation
+//! `1 − e^{−n/M}` is a *lower* bound on `p_n`, so it cannot certify an upper bound on the rate.)
+//! With `n = B = 16 384`, `K = 26` and `M = 23 680`:
 //!
 //! ```text
 //! (1 − (1 − 1/M)^B)^K ≤ 2⁻²⁶   ⇔   M ≥ 23 637.8
@@ -96,7 +96,9 @@ impl Drop for OnionReplayFilterKey {
 /// two tags with the same pattern collide in every block, which puts a false-positive floor of
 /// `n / M² ≈ 2⁻⁹` at `n = 64·B` tags. The reduction bias of `w_j mod M` is below `M / 2³² < 2⁻¹⁷`
 /// relative per address.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+///
+/// The addresses are secret-keyed PRF output, so the probe is neither `Debug` nor `Copy`: it lives
+/// for one step, by reference.
 pub(super) struct ReplayProbe {
     /// `g_0(ν), …, g_{K−1}(ν)`, each in `[0, M)`.
     addresses: [u16; REPLAY_BLOCK_HASHES],
