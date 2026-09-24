@@ -1,38 +1,44 @@
 //! The fixed-length Sphinx header `χ = (α, β, γ)` (#834 L5′, D6″; paper Def. fixed-length header).
 //!
 //! Key transport is one blinded secp256k1 element per cell. Hop `i` holds the delegatee key
-//! `d_i` with `pk_i = d_i·G`; the client draws `x ← Z_n^*` and
+//! `d_i` with `pk_i = d_i·G`; the client draws `x ∈ Z_n^*` and, over `G ∖ {O}` and `Z_n^*` (so no
+//! step can meet `O`, see `rings_core::ecc::prime_order`),
 //!
 //! ```text
-//! x_1 = x,  α_i = x_i·G,  K_i = x_i·pk_i = d_i·α_i          (ECDH; the hop computes d_i·α_i)
-//! (ρ-key, μ-key, blind) = HKDF-SHA256(salt = D, ikm = SEC1(α_i) ‖ x(K_i); "prg", "mac", "blind")
-//! b_i = (blind mod n) ∈ Z_n^*    (64-byte wide reduction, zero rejected)
+//! x_1 = x,  α_i = x_i·G,  K_i = x(x_i·pk_i) = x(d_i·α_i)            (ECDH; the hop computes d_i·α_i)
+//! (ρ-key, μ-key, blind) = HKDF-SHA256(salt = D, ikm = SEC1(α_i) ‖ K_i; "prg", "mac", "blind")
+//! b_i = blind mod n ∈ Z_n^*     (64-byte wide reduction; 0 rejected)
 //! x_{i+1} = x_i·b_i,  α_{i+1} = b_i·α_i
-//! ρ_i = ChaCha20_{ρ-key}(0^{(Ĥ+1)ℓ}),   MAC_{K_i} = HMAC-SHA256_{μ-key} truncated to 16 bytes
+//! ρ_i = ChaCha20_{ρ-key}(0^{(Ĥ+1)ℓ}),   γ_i = HMAC-SHA256_{μ-key}(b ‖ β_i)[0, 16)
 //! ```
 //!
-//! With `ρ[a, b)` the byte range `[aℓ, bℓ)`, the routing information `β` of `Ĥ·ℓ` bytes is
+//! where `b` is the loop class as its cell length (#834 H1: a cell relabelled to another class
+//! fails `γ` at the next honest hop). `SEC1(α_i)` in the key schedule binds the sign of `α_i`:
+//! `−α_i` has the same `K_i` but other keys. With `β` as `Ĥ` blocks of `ℓ` bytes and `ρ[a, b)` the
+//! blocks `a … b − 1`, the routing information is
 //!
 //! ```text
 //! φ_0 = ε,   φ_i = (φ_{i−1} ‖ 0^ℓ) ⊕ ρ_i[Ĥ−i+1, Ĥ+1)                               1 ≤ i < H
 //! β_H = ((λ_H ‖ R) ⊕ ρ_H[0, Ĥ−H+1)) ‖ φ_{H−1}                                     R uniform
-//! β_i = (λ_i ‖ β_{i+1}[0, Ĥ−1)) ⊕ ρ_i[0, Ĥ),   γ_i = MAC_{K_i}(β_i)               1 ≤ i ≤ H
+//! β_i = (λ_i ‖ β_{i+1}[0, Ĥ−1)) ⊕ ρ_i[0, Ĥ)                                       1 ≤ i < H
 //! ```
 //!
-//! and hop `i` peels `(β_i ‖ 0^ℓ) ⊕ ρ_i = λ_i ‖ β_{i+1}`, where `λ_i` carries `γ_{i+1}` (at `i = H`,
-//! the client position `H + 1` of D6′, `γ_{H+1}` is uniform and ignored).
+//! and hop `i` peels `(β_i ‖ 0^ℓ) ⊕ ρ_i = λ_i ‖ β_{i+1}`, where `λ_i` carries `γ_{i+1}`. At
+//! `i = H` the next header goes to the client, position `H + 1` (D6′): `γ_{H+1} = t_⋄` is the
+//! client's loop tag, drawn by the client and forwarded by the guard ([`OnionHeader::loop_tag`]).
 //!
 //! Laws:
 //!
-//! - **Correctness** (Prop. header correctness). For `H ≤ Ĥ` and `1 ≤ i ≤ H`, [`OnionHeader::peel`]
-//!   of `χ_i` under `d_i` yields `λ_i` and `χ_{i+1}`, and every `γ_i` verifies. By induction down
-//!   from `H`, the last `i − 1` blocks of `β_i` are `φ_{i−1}`, so the block that peeling appends,
-//!   `ρ_i[Ĥ, Ĥ+1)`, is the last block of `φ_i`, hence of `β_{i+1}`.
-//! - **Length** (L5′). `|χ| = 33 + Ĥℓ + 16` for every `H` and `i`; a header type of fixed width
-//!   makes this hold by construction.
-//! - **Rejection order.** `peel` rejects an `α` that is not a curve point or is the identity before
-//!   any ECDH, and verifies `γ` before any layer is decoded, so a random cell (link cover, F = 0)
-//!   costs one ECDH and is dropped before admission.
+//! - **Correctness** (Prop. header correctness). For `H ≤ Ĥ` and `1 ≤ i ≤ H`,
+//!   [`OnionHeader::peel`] of `χ_i` under `d_i` yields `λ_i` and `χ_{i+1}`, every `γ_i` verifies,
+//!   and `χ_{H+1}` carries `t_⋄`. By induction down from `H`, the last `i − 1` blocks of `β_i` are
+//!   `φ_{i−1}`, so the block that peeling appends, `ρ_i[Ĥ, Ĥ+1)`, is the last block of `φ_i`,
+//!   hence of `β_{i+1}`.
+//! - **Length** (L5′). `|χ| = 33 + Ĥℓ + 16` for every `H` and `i`: the header type has fixed
+//!   width.
+//! - **Rejection order.** `peel` rejects an `α` that is not a curve point before any ECDH, and
+//!   verifies `γ` before any layer is decoded, so a random cell (link cover, F = 0) costs one
+//!   ECDH and is dropped before admission.
 
 use chacha20::cipher::KeyIvInit;
 use chacha20::cipher::StreamCipher;
@@ -41,51 +47,40 @@ use hkdf::HkdfExtract;
 use hmac::digest::Key;
 use hmac::Hmac;
 use hmac::Mac;
-use k256::elliptic_curve::bigint::Encoding;
-use k256::elliptic_curve::bigint::U512;
-use k256::elliptic_curve::group::Group;
-use k256::elliptic_curve::ops::MulByGenerator;
-use k256::elliptic_curve::ops::Reduce;
-use k256::elliptic_curve::point::AffineCoordinates;
-use k256::elliptic_curve::sec1::FromEncodedPoint;
-use k256::elliptic_curve::sec1::ToEncodedPoint;
-use k256::AffinePoint;
-use k256::EncodedPoint;
-use k256::NonZeroScalar;
-use k256::ProjectivePoint;
-use k256::Scalar;
 use rand::CryptoRng;
 use rand::RngCore;
 use rings_core::delegation::DelegateeKey;
-use rings_core::ecc::Point;
+use rings_core::ecc::prime_order::NonIdentityPoint;
+use rings_core::ecc::prime_order::NonZeroScalar;
+use rings_core::ecc::prime_order::SHARED_SECRET_BYTES;
+use rings_core::ecc::prime_order::WIDE_SCALAR_BYTES;
 use rings_core::ecc::PublicKey;
+use rings_core::ecc::Secp256k1;
 use sha2::Sha256;
+use subtle::Choice;
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
+use super::class::OnionLoopClass;
 use super::hkdf_expand;
 use super::layer::OnionLayer;
 use super::layer::OnionLayerError;
 use super::layer::ONION_LAYER_BYTES;
-use super::take_array;
 use super::xor_in_place;
 use super::MAX_ONION_LOOP_HOPS;
 
 /// `|α|`, a compressed SEC1 secp256k1 point.
-pub const ONION_GROUP_ELEMENT_BYTES: usize = 33;
+const ONION_GROUP_ELEMENT_BYTES: usize = 33;
 
 /// `|γ|`, the truncated header MAC.
-pub const ONION_HEADER_MAC_BYTES: usize = 16;
+pub(crate) const ONION_HEADER_MAC_BYTES: usize = 16;
 
 /// `|β| = Ĥ·ℓ`, the routing information.
-pub const ONION_HEADER_ROUTING_BYTES: usize = MAX_ONION_LOOP_HOPS * ONION_LAYER_BYTES;
+pub(crate) const ONION_HEADER_ROUTING_BYTES: usize = MAX_ONION_LOOP_HOPS * ONION_LAYER_BYTES;
 
 /// `|χ| = |α| + |β| + |γ|`.
-pub const ONION_HEADER_BYTES: usize =
+pub(crate) const ONION_HEADER_BYTES: usize =
     ONION_GROUP_ELEMENT_BYTES + ONION_HEADER_ROUTING_BYTES + ONION_HEADER_MAC_BYTES;
-
-/// `|ρ| = (Ĥ + 1)·ℓ`: the pad for `β ‖ 0^ℓ`.
-const ONION_HEADER_STREAM_BYTES: usize = ONION_HEADER_ROUTING_BYTES + ONION_LAYER_BYTES;
 
 /// HKDF salt `D` of the per-hop key schedule.
 const HEADER_KDF_SALT: &[u8] = b"rings-node:onion-sphinx-header";
@@ -105,53 +100,74 @@ const STREAM_KEY_BYTES: usize = 32;
 /// Width of the MAC key: one SHA-256 block, so HMAC uses it without hashing.
 const MAC_KEY_BYTES: usize = 64;
 
-/// Width of the blinding material, reduced modulo `n` without bias.
-const BLIND_BYTES: usize = 64;
+/// One `ℓ`-byte block of `β` or `ρ`: one layer slot.
+type Block = [u8; ONION_LAYER_BYTES];
 
-/// `γ`, a truncated HMAC-SHA256 over `β`.
+/// `β`, `Ĥ` layer slots.
+type Routing = [Block; MAX_ONION_LOOP_HOPS];
+
+/// `ρ`, the pad of `β ‖ 0^ℓ`: `Ĥ + 1` blocks.
+type Stream = [Block; MAX_ONION_LOOP_HOPS + 1];
+
+/// `γ`, a truncated HMAC-SHA256; compared only in constant time.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct OnionHeaderMac([u8; ONION_HEADER_MAC_BYTES]);
+
+/// The client's loop tag `t_⋄ = γ_{H+1}` (#834 D6′, H2).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct OnionHeaderMac([u8; ONION_HEADER_MAC_BYTES]);
+pub(crate) struct OnionLoopTag([u8; ONION_HEADER_MAC_BYTES]);
 
 /// The Sphinx header `χ = (α, β, γ)`, exactly `|χ|` bytes whatever the loop length.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct OnionHeader {
-    /// `α`, compressed SEC1; validated when peeled.
-    alpha: [u8; ONION_GROUP_ELEMENT_BYTES],
+#[derive(Clone, Debug)]
+pub(crate) struct OnionHeader {
+    /// `α`, SEC1 compressed; decoded when peeled.
+    alpha: PublicKey<ONION_GROUP_ELEMENT_BYTES>,
     /// `β`.
-    routing: [u8; ONION_HEADER_ROUTING_BYTES],
-    /// `γ = MAC(β)`.
+    routing: Routing,
+    /// `γ = MAC(b ‖ β)`.
     mac: OnionHeaderMac,
 }
 
 /// One position of a loop as the client builds it: the hop's key and its layer.
-pub struct OnionHeaderHop {
+pub(crate) struct OnionHeaderHop {
     /// `pk_i`, the delegatee key of the hop at this position.
-    pub public_key: PublicKey<33>,
+    pub(crate) public_key: PublicKey<33>,
     /// `λ_i` without `γ_{i+1}`, which the builder computes.
-    pub layer: OnionLayer,
+    pub(crate) layer: OnionLayer,
+}
+
+/// The positions `1 … H` of a loop, `1 ≤ H ≤ Ĥ`: the outer positions and the last one.
+pub(crate) struct OnionHeaderRoute {
+    /// Positions `1 … H − 1`, in visiting order.
+    outer: Vec<OnionHeaderHop>,
+    /// Position `H`, the guard facing the client.
+    last: OnionHeaderHop,
 }
 
 /// The result of peeling one header: this hop's layer and the header it forwards.
-pub struct OnionPeeledHeader {
+pub(crate) struct OnionPeeledHeader {
     /// `λ_i`.
-    pub layer: OnionLayer,
+    pub(crate) layer: OnionLayer,
     /// `χ_{i+1}`.
-    pub next: OnionHeader,
+    pub(crate) next: OnionHeader,
 }
 
-/// Why a header was not built or not peeled.
+/// Why a header was not built, decoded or peeled.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-pub enum OnionHeaderError {
+pub(crate) enum OnionHeaderError {
     /// The loop has no position or more than `Ĥ`.
     #[error("loop of {0} positions is outside 1..={MAX_ONION_LOOP_HOPS}")]
     HopCount(usize),
+    /// A header string is not `|χ|` bytes long.
+    #[error("header of {0} bytes is not {ONION_HEADER_BYTES} bytes long")]
+    Width(usize),
     /// A hop's public key is not a secp256k1 point.
     #[error("onion hop public key is not a secp256k1 point")]
     PublicKey,
-    /// `α` is not a curve point, or is the identity.
-    #[error("onion header group element is not a non-identity secp256k1 point")]
+    /// `α` is not a secp256k1 point.
+    #[error("onion header group element is not a secp256k1 point")]
     GroupElement,
-    /// The derived blinding factor is `0 mod n`.
+    /// The derived blinding factor is `0 mod n` (probability `2^−256`).
     #[error("onion header blinding factor is zero")]
     Blinding,
     /// `γ` does not verify.
@@ -162,25 +178,54 @@ pub enum OnionHeaderError {
     Layer(#[from] OnionLayerError),
 }
 
-/// The per-hop secrets derived from `(α_i, K_i)`.
+/// The per-hop secrets derived from `(α_i, K_i)`, zeroized on drop.
 struct OnionHopSecrets {
-    /// The ChaCha20 key of `ρ_i`.
-    stream_key: Zeroizing<[u8; STREAM_KEY_BYTES]>,
+    /// `ρ_i`.
+    stream: Zeroizing<Stream>,
     /// The HMAC key of `γ_i`.
     mac_key: Zeroizing<[u8; MAC_KEY_BYTES]>,
     /// `b_i`.
-    blinding: NonZeroScalar,
+    blinding: NonZeroScalar<Secp256k1>,
 }
 
 impl OnionHeaderMac {
     /// Wrap MAC bytes.
-    pub const fn new(bytes: [u8; ONION_HEADER_MAC_BYTES]) -> Self {
+    pub(crate) const fn new(bytes: [u8; ONION_HEADER_MAC_BYTES]) -> Self {
         Self(bytes)
     }
 
     /// Return the MAC bytes.
-    pub const fn to_bytes(self) -> [u8; ONION_HEADER_MAC_BYTES] {
+    pub(crate) const fn to_bytes(self) -> [u8; ONION_HEADER_MAC_BYTES] {
         self.0
+    }
+}
+
+impl ConstantTimeEq for OnionHeaderMac {
+    /// Equality in time independent of the MAC bytes.
+    fn ct_eq(&self, other: &Self) -> Choice {
+        self.0.ct_eq(&other.0)
+    }
+}
+
+impl OnionLoopTag {
+    /// Wrap tag bytes.
+    pub(crate) const fn new(bytes: [u8; ONION_HEADER_MAC_BYTES]) -> Self {
+        Self(bytes)
+    }
+}
+
+impl OnionHeaderRoute {
+    /// Accept the positions `hops = (pk_i, λ_i)_{i=1…H}` of a loop.
+    ///
+    /// # Errors
+    ///
+    /// [`OnionHeaderError::HopCount`] unless `1 ≤ H ≤ Ĥ`.
+    pub(crate) fn new(mut hops: Vec<OnionHeaderHop>) -> Result<Self, OnionHeaderError> {
+        let count = hops.len();
+        hops.pop()
+            .filter(|_| count <= MAX_ONION_LOOP_HOPS)
+            .map(|last| Self { outer: hops, last })
+            .ok_or(OnionHeaderError::HopCount(count))
     }
 }
 
@@ -189,224 +234,225 @@ impl OnionHopSecrets {
     ///
     /// # Errors
     ///
-    /// [`OnionHeaderError::Blinding`] if the blinding material reduces to `0 mod n`
-    /// (probability `2^−256`); the client then re-draws `x`, a hop drops the cell.
+    /// [`OnionHeaderError::Blinding`] if the blinding material reduces to `0 mod n`; the client
+    /// then builds again with fresh randomness, a hop drops the cell.
     fn derive(
-        alpha: &[u8; ONION_GROUP_ELEMENT_BYTES],
-        shared: &AffinePoint,
+        alpha: &PublicKey<ONION_GROUP_ELEMENT_BYTES>,
+        shared: &[u8; SHARED_SECRET_BYTES],
     ) -> Result<Self, OnionHeaderError> {
         let mut extract = HkdfExtract::<Sha256>::new(Some(HEADER_KDF_SALT));
-        extract.input_ikm(alpha.as_slice());
-        extract.input_ikm(shared.x().as_slice());
+        extract.input_ikm(alpha.0.as_slice());
+        extract.input_ikm(shared.as_slice());
         let (_, kdf) = extract.finalize();
-        let blind = hkdf_expand::<BLIND_BYTES>(&kdf, &[BLIND_INFO]);
-        let blinding = NonZeroScalar::new(<Scalar as Reduce<U512>>::reduce(U512::from_be_bytes(
-            *blind,
-        )))
-        .into_option()
-        .ok_or(OnionHeaderError::Blinding)?;
+        let blinding =
+            NonZeroScalar::from_wide_bytes(&hkdf_expand::<WIDE_SCALAR_BYTES>(&kdf, &[BLIND_INFO]))
+                .ok_or(OnionHeaderError::Blinding)?;
+        let mut stream = Zeroizing::new([[0; ONION_LAYER_BYTES]; MAX_ONION_LOOP_HOPS + 1]);
+        ChaCha20::new(
+            &(*hkdf_expand::<STREAM_KEY_BYTES>(&kdf, &[STREAM_INFO])).into(),
+            &[0; 12].into(),
+        )
+        .apply_keystream(stream.as_flattened_mut());
         Ok(Self {
-            stream_key: hkdf_expand(&kdf, &[STREAM_INFO]),
+            stream,
             mac_key: hkdf_expand(&kdf, &[MAC_INFO]),
             blinding,
         })
     }
 
-    /// `ρ_i`, the ChaCha20 keystream of `(Ĥ + 1)·ℓ` bytes under the zero nonce (one key, one
-    /// stream).
-    fn stream(&self) -> Zeroizing<[u8; ONION_HEADER_STREAM_BYTES]> {
-        let mut stream = Zeroizing::new([0_u8; ONION_HEADER_STREAM_BYTES]);
-        ChaCha20::new(&(*self.stream_key).into(), &[0_u8; 12].into())
-            .apply_keystream(stream.as_mut_slice());
-        stream
-    }
-
-    /// `MAC_{K_i}(β)`.
-    fn mac(&self, routing: &[u8; ONION_HEADER_ROUTING_BYTES]) -> OnionHeaderMac {
-        let mut key = Key::<Hmac<Sha256>>::default();
+    /// `γ = HMAC-SHA256_μ(b ‖ β)[0, 16)`: truncation keeps the leftmost 16 of the 32 bytes.
+    fn mac(&self, class: OnionLoopClass, routing: &Routing) -> OnionHeaderMac {
+        let mut key = Zeroizing::new(Key::<Hmac<Sha256>>::default());
         key.iter_mut()
             .zip(self.mac_key.iter())
             .for_each(|(slot, byte)| *slot = *byte);
         let mut mac = <Hmac<Sha256> as Mac>::new(&key);
-        mac.update(routing.as_slice());
-        OnionHeaderMac(take_array(&mut mac.finalize().into_bytes().into_iter()))
+        mac.update(&class.mac_label());
+        mac.update(routing.as_flattened());
+        let mut truncated = [0; ONION_HEADER_MAC_BYTES];
+        truncated
+            .iter_mut()
+            .zip(mac.finalize().into_bytes())
+            .for_each(|(slot, byte)| *slot = byte);
+        OnionHeaderMac(truncated)
     }
-}
 
-/// `SEC1(P)`, compressed; `None` for the identity, which has no 33-byte encoding.
-fn encode_element(point: &AffinePoint) -> Option<[u8; ONION_GROUP_ELEMENT_BYTES]> {
-    let encoded = point.to_encoded_point(true);
-    (encoded.len() == ONION_GROUP_ELEMENT_BYTES)
-        .then(|| take_array(&mut encoded.as_bytes().iter().copied()))
+    /// `(β ‖ 0^ℓ) ⊕ ρ` for the hop, or `(λ ‖ β′) ⊕ ρ[0, Ĥ)` for the client: `blocks ⊕ ρ` over
+    /// the common prefix.
+    fn mask(&self, blocks: &mut [Block]) {
+        blocks
+            .iter_mut()
+            .zip(self.stream.iter())
+            .for_each(|(block, mask)| xor_in_place(block.iter_mut(), mask.iter()));
+    }
 }
 
 impl OnionHeader {
-    /// Decode a header from its `|χ|` bytes; `α` is validated when the header is peeled.
-    pub fn from_bytes(bytes: &[u8; ONION_HEADER_BYTES]) -> Self {
-        let mut fields = bytes.iter().copied();
-        Self {
-            alpha: take_array(&mut fields),
-            routing: take_array(&mut fields),
-            mac: OnionHeaderMac(take_array(&mut fields)),
-        }
+    /// Decode a header from its `|χ|` bytes; `α` is decoded when the header is peeled.
+    ///
+    /// # Errors
+    ///
+    /// [`OnionHeaderError::Width`] unless `|bytes| = |χ|`.
+    pub(crate) fn from_bytes(bytes: &[u8]) -> Result<Self, OnionHeaderError> {
+        let width = OnionHeaderError::Width(bytes.len());
+        let (alpha, rest) = bytes.split_first_chunk().ok_or(width)?;
+        let (routing, mac) = rest.split_last_chunk().ok_or(width)?;
+        let (blocks, []) = routing.as_chunks() else {
+            return Err(width);
+        };
+        Ok(Self {
+            alpha: PublicKey(*alpha),
+            routing: Routing::try_from(blocks).map_err(|_| width)?,
+            mac: OnionHeaderMac(*mac),
+        })
     }
 
-    /// Encode the header as `α ‖ β ‖ γ`.
-    pub fn to_bytes(&self) -> [u8; ONION_HEADER_BYTES] {
-        take_array(
-            &mut self
-                .alpha
-                .iter()
-                .chain(self.routing.iter())
-                .chain(self.mac.0.iter())
-                .copied(),
-        )
+    /// Encode the header as `α ‖ β ‖ γ`, exactly `|χ|` bytes.
+    pub(crate) fn to_bytes(&self) -> Vec<u8> {
+        [
+            self.alpha.0.as_slice(),
+            self.routing.as_flattened(),
+            self.mac.0.as_slice(),
+        ]
+        .concat()
     }
 
-    /// Build `χ_1` for the loop `hops = (pk_i, λ_i)_{i=1…H}`, drawing `x`, `R` and `γ_{H+1}`
-    /// from `rng`.
+    /// `t_⋄ = γ_{H+1}`: the loop tag, read by the client from the header the guard forwards.
+    pub(crate) const fn loop_tag(&self) -> OnionLoopTag {
+        OnionLoopTag(self.mac.0)
+    }
+
+    /// Build `χ_1` for a loop of class `b` with client tag `t_⋄`, drawing `x` and `R` from `rng`.
     ///
     /// ```text
-    /// H ≤ Ĥ ?                                       else HopCount   (H = 0: no innermost layer)
     /// x ← Z_n^*
-    /// for i = 1 … H:     α_i = x_i·G,  K_i = x_i·pk_i,  secrets_i,  x_{i+1} = x_i·b_i
-    /// for i = 1 … H−1:   φ_i = (φ_{i−1} ‖ 0^ℓ) ⊕ ρ_i[Ĥ−i+1, Ĥ+1)
-    /// β_H = ((λ_H(γ_{H+1} uniform) ‖ R) ⊕ ρ_H[0, Ĥ−H+1)) ‖ φ_{H−1},   γ_H = MAC_H(β_H)
-    /// for i = H−1 … 1:   β_i = (λ_i(γ_{i+1}) ‖ β_{i+1}[0, Ĥ−1)) ⊕ ρ_i[0, Ĥ),  γ_i = MAC_i(β_i)
+    /// for i = 1 … H:     α_i = x_i·G,  K_i = x(x_i·pk_i),  secrets_i,  x_{i+1} = x_i·b_i
+    /// for i = 1 … H−1:   φ_i = (φ_{i−1} ‖ 0^ℓ) ⊕ ρ_i[Ĥ−i+1, Ĥ+1)      (tail-aligned blocks)
+    /// β_H = ((λ_H(γ_{H+1} = t_⋄) ‖ R) ⊕ ρ_H[0, Ĥ)), then its last H−1 blocks := φ_{H−1}
+    /// γ_H = MAC_H(b ‖ β_H)
+    /// for i = H−1 … 1:   β_i = (λ_i(γ_{i+1}) ‖ β_{i+1}[0, Ĥ−1)) ⊕ ρ_i[0, Ĥ),  γ_i = MAC_i(b ‖ β_i)
     /// return (α_1, β_1, γ_1)
     /// ```
     ///
     /// # Errors
     ///
-    /// [`OnionHeaderError::HopCount`] outside `1 ≤ H ≤ Ĥ` (`H = 0` leaves no innermost layer), [`OnionHeaderError::PublicKey`] for a
-    /// key that is not a curve point, and [`OnionHeaderError::Blinding`] for a zero blinding
-    /// factor, after which the client builds again with fresh randomness.
-    pub fn build(
-        hops: &[OnionHeaderHop],
+    /// [`OnionHeaderError::PublicKey`] for a key that is not a curve point, and
+    /// [`OnionHeaderError::Blinding`] for a zero blinding factor, after which the client builds
+    /// again with fresh randomness.
+    pub(crate) fn build(
+        route: &OnionHeaderRoute,
+        class: OnionLoopClass,
+        tag: OnionLoopTag,
         rng: &mut (impl CryptoRng + RngCore),
     ) -> Result<Self, OnionHeaderError> {
-        if hops.len() > MAX_ONION_LOOP_HOPS {
-            return Err(OnionHeaderError::HopCount(hops.len()));
-        }
-        let (_, schedule) = hops.iter().try_fold(
+        let (exponent, outer) = route.outer.iter().try_fold(
             (
-                NonZeroScalar::random(&mut *rng),
-                Vec::with_capacity(hops.len()),
+                NonZeroScalar::random_with_rng(&mut *rng),
+                Vec::with_capacity(route.outer.len()),
             ),
             |(exponent, mut schedule), hop| {
-                let recipient = AffinePoint::try_from(hop.public_key)
-                    .map_err(|_| OnionHeaderError::PublicKey)?;
-                let alpha = encode_element(
-                    &ProjectivePoint::mul_by_generator(exponent.as_ref()).to_affine(),
-                )
-                .ok_or(OnionHeaderError::GroupElement)?;
-                let shared = (ProjectivePoint::from(recipient) * exponent.as_ref()).to_affine();
-                let secrets = OnionHopSecrets::derive(&alpha, &shared)?;
-                let next_exponent = exponent * secrets.blinding;
+                let (alpha, secrets) = Self::position(hop, &exponent)?;
+                let next = &exponent * &secrets.blinding;
                 schedule.push((alpha, secrets));
-                Ok::<_, OnionHeaderError>((next_exponent, schedule))
+                Ok::<_, OnionHeaderError>((next, schedule))
             },
         )?;
-        let filler = schedule.iter().take(hops.len().saturating_sub(1)).fold(
-            Vec::new(),
-            |mut filler, (_, secrets)| {
-                filler.extend([0_u8; ONION_LAYER_BYTES]);
-                let offset = ONION_HEADER_STREAM_BYTES.saturating_sub(filler.len());
-                xor_in_place(filler.iter_mut(), secrets.stream().iter().skip(offset));
+        let (alpha, secrets) = Self::position(&route.last, &exponent)?;
+        let filler = outer
+            .iter()
+            .fold(Vec::<Block>::new(), |mut filler, (_, secrets)| {
+                filler.push([0; ONION_LAYER_BYTES]);
                 filler
-            },
-        );
-        let mut positions = hops.iter().zip(schedule.iter()).rev();
-        let innermost = positions.next().map(|(hop, (alpha, secrets))| {
-            let mut last_mac = [0_u8; ONION_HEADER_MAC_BYTES];
-            rng.fill_bytes(&mut last_mac);
-            let mut routing = [0_u8; ONION_HEADER_ROUTING_BYTES];
-            rng.fill_bytes(&mut routing);
-            let masked = ONION_HEADER_ROUTING_BYTES.saturating_sub(filler.len());
-            routing
-                .iter_mut()
-                .zip(hop.layer.encode(OnionHeaderMac(last_mac)).iter())
-                .for_each(|(slot, byte)| *slot = *byte);
-            xor_in_place(routing.iter_mut().take(masked), secrets.stream().iter());
-            routing
-                .iter_mut()
-                .skip(masked)
-                .zip(filler.iter())
-                .for_each(|(slot, byte)| *slot = *byte);
-            let mac = secrets.mac(&routing);
-            Self {
-                alpha: *alpha,
-                routing,
-                mac,
-            }
-        });
-        let outermost = positions.fold(innermost, |next, (hop, (alpha, secrets))| {
-            next.map(|next| {
-                let layer = hop.layer.encode(next.mac);
-                let mut routing = take_array::<ONION_HEADER_ROUTING_BYTES>(
-                    &mut layer.iter().chain(next.routing.iter()).copied(),
-                );
-                xor_in_place(routing.iter_mut(), secrets.stream().iter());
-                let mac = secrets.mac(&routing);
+                    .iter_mut()
+                    .rev()
+                    .zip(secrets.stream.iter().rev())
+                    .for_each(|(block, mask)| xor_in_place(block.iter_mut(), mask.iter()));
+                filler
+            });
+        let mut routing: Routing = [[0; ONION_LAYER_BYTES]; MAX_ONION_LOOP_HOPS];
+        rng.fill_bytes(routing.as_flattened_mut());
+        let [first, ..] = &mut routing;
+        *first = *route.last.layer.encode(&OnionHeaderMac(tag.0));
+        secrets.mask(&mut routing);
+        routing
+            .iter_mut()
+            .rev()
+            .zip(filler.iter().rev())
+            .for_each(|(block, filler)| *block = *filler);
+        let innermost = Self {
+            alpha,
+            mac: secrets.mac(class, &routing),
+            routing,
+        };
+        Ok(route.outer.iter().zip(outer.iter()).rev().fold(
+            innermost,
+            |next, (hop, (alpha, secrets))| {
+                let mut routing = next.routing;
+                routing.rotate_right(1);
+                let [first, ..] = &mut routing;
+                *first = *hop.layer.encode(&next.mac);
+                secrets.mask(&mut routing);
                 Self {
                     alpha: *alpha,
+                    mac: secrets.mac(class, &routing),
                     routing,
-                    mac,
                 }
-            })
-        });
-        outermost.ok_or(OnionHeaderError::HopCount(hops.len()))
+            },
+        ))
     }
 
-    /// Peel `χ_i` under the hop's delegatee key: `(λ_i, χ_{i+1})`.
+    /// The client's view of one position under exponent `x_i`: `α_i` and the secrets of
+    /// `K_i = x(x_i·pk_i)`.
+    fn position(
+        hop: &OnionHeaderHop,
+        exponent: &NonZeroScalar<Secp256k1>,
+    ) -> Result<(PublicKey<ONION_GROUP_ELEMENT_BYTES>, OnionHopSecrets), OnionHeaderError> {
+        let recipient = NonIdentityPoint::<Secp256k1>::try_from(hop.public_key)
+            .map_err(|_| OnionHeaderError::PublicKey)?;
+        let alpha = NonIdentityPoint::generator_mul(exponent).to_sec1();
+        let secrets = OnionHopSecrets::derive(&alpha, &recipient.shared_secret(exponent))?;
+        Ok((alpha, secrets))
+    }
+
+    /// Peel `χ_i` of a class-`b` cell under the hop's delegatee key: `(λ_i, χ_{i+1})`.
     ///
     /// ```text
-    /// α_i ∈ E(F_p) \ {O} ?                   else GroupElement      (before any ECDH)
-    /// K_i = d_i·α_i;  secrets_i
-    /// γ_i = MAC_i(β_i) ?                     else Mac               (before any decoding)
-    /// λ_i ‖ β_{i+1} = (β_i ‖ 0^ℓ) ⊕ ρ_i;  decode λ_i = (layer, γ_{i+1})
-    /// α_{i+1} = b_i·α_i ≠ O ?                else GroupElement
-    /// return (layer, (α_{i+1}, β_{i+1}, γ_{i+1}))
+    /// α_i ∈ G ∖ {O} ?                        else GroupElement      (decoded before any ECDH)
+    /// K_i = x(d_i·α_i);  secrets_i            else Blinding          (b_i ≡ 0, probability 2^−256)
+    /// γ_i = MAC_i(b ‖ β_i) ?                 else Mac               (constant time, before decoding)
+    /// λ_i ‖ β_{i+1} = (β_i ‖ 0^ℓ) ⊕ ρ_i;  decode λ_i = (layer, γ_{i+1})   else Layer
+    /// α_{i+1} = b_i·α_i                      (∈ G ∖ {O} by type)
     /// ```
     ///
     /// # Errors
     ///
     /// [`OnionHeaderError::GroupElement`], [`OnionHeaderError::Blinding`],
     /// [`OnionHeaderError::Mac`] and [`OnionHeaderError::Layer`], in that order of checking.
-    pub fn peel(&self, key: &DelegateeKey) -> Result<OnionPeeledHeader, OnionHeaderError> {
-        let alpha = EncodedPoint::from_bytes(self.alpha)
-            .ok()
-            .and_then(|encoded| AffinePoint::from_encoded_point(&encoded).into_option())
-            .map(ProjectivePoint::from)
-            .filter(|point| !bool::from(point.is_identity()))
-            .ok_or(OnionHeaderError::GroupElement)?;
-        let shared = key
-            .diffie_hellman(Point::new(alpha))
-            .into_inner()
-            .to_affine();
-        let secrets = OnionHopSecrets::derive(&self.alpha, &shared)?;
-        if !bool::from(secrets.mac(&self.routing).0.ct_eq(self.mac.0.as_slice())) {
+    pub(crate) fn peel(
+        &self,
+        class: OnionLoopClass,
+        key: &DelegateeKey,
+    ) -> Result<OnionPeeledHeader, OnionHeaderError> {
+        let alpha = NonIdentityPoint::<Secp256k1>::try_from(self.alpha)
+            .map_err(|_| OnionHeaderError::GroupElement)?;
+        let secrets = OnionHopSecrets::derive(&self.alpha, &key.diffie_hellman(&alpha))?;
+        if !bool::from(secrets.mac(class, &self.routing).ct_eq(&self.mac)) {
             return Err(OnionHeaderError::Mac);
         }
-        let stream = secrets.stream();
-        let mut plaintext = self
-            .routing
-            .iter()
-            .copied()
-            .chain(core::iter::repeat_n(0, ONION_LAYER_BYTES))
-            .zip(stream.iter())
-            .map(|(byte, mask)| byte ^ mask);
-        let layer = Zeroizing::new(take_array::<ONION_LAYER_BYTES>(&mut plaintext));
-        let routing = take_array::<ONION_HEADER_ROUTING_BYTES>(&mut plaintext);
-        let (layer, next_mac) = OnionLayer::decode(&layer)?;
-        let next_alpha = encode_element(&(alpha * secrets.blinding.as_ref()).to_affine())
-            .ok_or(OnionHeaderError::GroupElement)?;
+        let mut blocks = Zeroizing::new([[0; ONION_LAYER_BYTES]; MAX_ONION_LOOP_HOPS + 1]);
+        blocks
+            .iter_mut()
+            .zip(self.routing.iter())
+            .for_each(|(block, routing)| *block = *routing);
+        secrets.mask(blocks.as_mut_slice());
+        let [layer, routing @ ..] = *blocks;
+        let (layer, mac) = OnionLayer::decode(Zeroizing::new(layer).as_slice())?;
         Ok(OnionPeeledHeader {
             layer,
             next: Self {
-                alpha: next_alpha,
+                alpha: (&alpha * &secrets.blinding).to_sec1(),
                 routing,
-                mac: next_mac,
+                mac,
             },
         })
     }

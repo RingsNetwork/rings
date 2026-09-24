@@ -20,8 +20,6 @@
 //!   whole value (AEZ is a strong PRP: the change spreads over the whole block of every later
 //!   decipherment), except with probability `2^−8τ + ε_AEZ`; a rejected value yields nothing.
 
-use rings_aez::DecryptError;
-use rings_aez::ExpansionExceedsBuffer;
 use rings_aez::Tweak;
 
 use super::class::OnionLoopClass;
@@ -29,29 +27,28 @@ use super::seed::OnionCarryKey;
 use super::seed::OnionSegmentKeys;
 
 /// `τ`, the consumer's authenticator width in bytes.
-pub const ONION_CARRY_AUTHENTICATOR_BYTES: usize = 16;
+pub(crate) const ONION_CARRY_AUTHENTICATOR_BYTES: usize = 16;
 
 /// The byte that ends a value inside its padding, `pad(v) = v ‖ 0x80 ‖ 0*`.
 const PADDING_MARKER: u8 = 0x80;
 
 /// The carry slot `y` of one cell of a class-`b` loop.
 ///
-/// Invariant: `bytes.len() = C_b` for `class`, established by every constructor.
+/// Invariant: `|bytes| = C_b` for the loop's class, established by every constructor; the class
+/// is the slot length, so it is not stored beside it.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct OnionCarry {
-    /// The loop class `b`.
-    class: OnionLoopClass,
+pub(crate) struct OnionCarry {
     /// The slot, exactly `C_b` bytes.
     bytes: Vec<u8>,
 }
 
 /// Why a carry was not produced or not accepted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-pub enum OnionCarryError {
+pub(crate) enum OnionCarryError {
     /// The slot is not `C_b` bytes long.
     #[error("carry of {length} bytes is not the {expected}-byte slot of its class")]
     Width {
-        /// The slot length received.
+        /// The slot length.
         length: usize,
         /// `C_b`.
         expected: usize,
@@ -64,12 +61,9 @@ pub enum OnionCarryError {
         /// `C₀ − 1`, the widest value `pad` admits.
         capacity: usize,
     },
-    /// The slot cannot hold the authenticator.
-    #[error(transparent)]
-    Expansion(#[from] ExpansionExceedsBuffer),
-    /// The consumer's authenticator check failed, or the slot was truncated.
-    #[error(transparent)]
-    Decrypt(#[from] DecryptError),
+    /// The consumer's AEZ decryption rejected the slot; nothing of it is released (L8).
+    #[error("carry authenticator does not verify")]
+    Inauthentic,
     /// The authenticated plaintext is not in the image of `pad`.
     #[error("carry value has no padding marker")]
     Padding,
@@ -81,9 +75,12 @@ impl OnionCarry {
     /// # Errors
     ///
     /// [`OnionCarryError::Width`] unless `|bytes| = C_b`.
-    pub fn from_bytes(class: OnionLoopClass, bytes: Vec<u8>) -> Result<Self, OnionCarryError> {
+    pub(crate) fn from_bytes(
+        class: OnionLoopClass,
+        bytes: Vec<u8>,
+    ) -> Result<Self, OnionCarryError> {
         if bytes.len() == class.carry_bytes() {
-            Ok(Self { class, bytes })
+            Ok(Self { bytes })
         } else {
             Err(OnionCarryError::Width {
                 length: bytes.len(),
@@ -92,13 +89,8 @@ impl OnionCarry {
         }
     }
 
-    /// Return the loop class.
-    pub const fn class(&self) -> OnionLoopClass {
-        self.class
-    }
-
     /// Return the slot bytes, `C_b` of them.
-    pub fn as_bytes(&self) -> &[u8] {
+    pub(crate) fn as_bytes(&self) -> &[u8] {
         self.bytes.as_slice()
     }
 
@@ -112,8 +104,10 @@ impl OnionCarry {
     ///
     /// # Errors
     ///
-    /// [`OnionCarryError::ValueTooWide`] if `|v| ≥ C₀`.
-    pub fn seal(
+    /// [`OnionCarryError::ValueTooWide`] if `|v| ≥ C₀`. The slot is built with width
+    /// `C_b ≥ 32 > τ`, so AEZ's only encryption error, a slot shorter than `τ`, is reported as the
+    /// [`OnionCarryError::Width`] it would be.
+    pub(crate) fn seal(
         class: OnionLoopClass,
         keys: &OnionSegmentKeys,
         value: &[u8],
@@ -132,20 +126,26 @@ impl OnionCarry {
             .chain(core::iter::repeat(0))
             .take(class.carry_bytes())
             .collect::<Vec<_>>();
-        keys.consumer().aez().encrypt(
-            Tweak::EMPTY,
-            ONION_CARRY_AUTHENTICATOR_BYTES,
-            bytes.as_mut_slice(),
-        )?;
+        keys.consumer()
+            .aez()
+            .encrypt(
+                Tweak::EMPTY,
+                ONION_CARRY_AUTHENTICATOR_BYTES,
+                bytes.as_mut_slice(),
+            )
+            .map_err(|short| OnionCarryError::Width {
+                length: short.length,
+                expected: class.carry_bytes(),
+            })?;
         keys.relays()
             .iter()
             .rev()
             .for_each(|relay| relay.aez().encipher(Tweak::EMPTY, bytes.as_mut_slice()));
-        Ok(Self { class, bytes })
+        Ok(Self { bytes })
     }
 
     /// `peel_k(y) = Dec⁰_k(y)`, at a relay: one length-preserving layer off, never failing.
-    pub fn peel(mut self, key: &OnionCarryKey) -> Self {
+    pub(crate) fn peel(mut self, key: &OnionCarryKey) -> Self {
         key.aez().decipher(Tweak::EMPTY, self.bytes.as_mut_slice());
         self
     }
@@ -154,14 +154,17 @@ impl OnionCarry {
     ///
     /// # Errors
     ///
-    /// [`OnionCarryError::Decrypt`] if the authenticator fails, rejecting the whole value, and
+    /// [`OnionCarryError::Inauthentic`] if AEZ rejects the slot, rejecting the whole value, and
     /// [`OnionCarryError::Padding`] if the plaintext has no padding marker.
-    pub fn open(mut self, key: &OnionCarryKey) -> Result<Vec<u8>, OnionCarryError> {
-        let padded = key.aez().decrypt(
-            Tweak::EMPTY,
-            ONION_CARRY_AUTHENTICATOR_BYTES,
-            self.bytes.as_mut_slice(),
-        )?;
+    pub(crate) fn open(mut self, key: &OnionCarryKey) -> Result<Vec<u8>, OnionCarryError> {
+        let padded = key
+            .aez()
+            .decrypt(
+                Tweak::EMPTY,
+                ONION_CARRY_AUTHENTICATOR_BYTES,
+                self.bytes.as_mut_slice(),
+            )
+            .map_err(|_| OnionCarryError::Inauthentic)?;
         let marker = padded
             .iter()
             .copied()

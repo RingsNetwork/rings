@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! cell = α ‖ β ‖ γ ‖ y       |α| = 33, |β| = Ĥ·ℓ, |γ| = 16, |y| = C_b = b − |χ| − F
-//!        └── χ ──┘            Ĥ = MAX_ONION_LOOP_HOPS = 14, ℓ = 221, |χ| = 3143, F = 0
+//!        └── χ ──┘            Ĥ = MAX_ONION_LOOP_HOPS = 14, ℓ = 205, |χ| = 2919, F = 0
 //! ```
 //!
 //! where the header `χ = (α, β, γ)` routes the cell (Sphinx, [`header`]) and the carry slot `y`
@@ -23,7 +23,9 @@
 //!
 //! - **Header correctness** (Prop. header correctness). For `1 ≤ H ≤ Ĥ` and every position
 //!   `1 ≤ i ≤ H`, `i = H` (the guard facing the client, D6′) included, `peel_i` under hop `i`'s key
-//!   yields `λ_i`, and every `γ_i` verifies.
+//!   yields `λ_i`, every `γ_i` verifies, and the client receives its tag `t_⋄ = γ_{H+1}`.
+//! - **Class binding** (#834 H1). `γ_i` covers the class `b`, so a cell relabelled to another
+//!   class fails `γ` at the next honest hop.
 //! - **L5′ lengths.** `|χ_i| = |χ|` and `|y_i| = C_b` at every position and for every `H`: the
 //!   lengths are functions of the class `b` alone, never of `H` or `i`.
 //! - **L8 unlinkability.** `χ_i ≠ χ_{i+1}` and `y_{i−1} ≠ y_i` on every edge, and a one-bit change
@@ -35,67 +37,39 @@
 //!
 //! 1. **No discriminant** (`F = 0`). A cell is exactly `b` bytes and its class is its length, so
 //!    link cover traffic is a uniformly random `b`-byte cell, which fails the `γ` check at the
-//!    receiving hop. The `γ` check therefore precedes any replay-store insertion or admission
+//!    receiving hop, and the length is bound by `γ = MAC(b ‖ β)`. The `γ` check therefore precedes any replay-store insertion or admission
 //!    charge (L9 counts admitted layers only); the ECDH of a cell that fails `γ` is charged to the
 //!    sender's crypto budget.
 //! 2. **Integrity and neighbour.** No per-edge cell AEAD remains: header integrity is `γ`, carry
 //!    integrity is the consumer's AEZ authenticator, and the neighbour `from` is the authenticated
 //!    transport link.
 //!
-//! Nothing here is wired to the data plane: no live wire message changes.
+//! Nothing here is wired to the data plane, and no live wire message changes: the module is
+//! crate-private until #834 Phase 2a-4 (#843) uses it.
 
 use hkdf::Hkdf;
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
-pub mod carry;
-pub mod class;
-pub mod header;
-pub mod layer;
-pub mod seed;
+pub(crate) mod carry;
+pub(crate) mod class;
+pub(crate) mod header;
+pub(crate) mod layer;
+pub(crate) mod seed;
 #[cfg(test)]
 mod tests;
 
-pub use carry::OnionCarry;
-pub use carry::OnionCarryError;
-pub use class::OnionLoopClass;
-pub use header::OnionHeader;
-pub use header::OnionHeaderError;
-pub use header::OnionHeaderHop;
-pub use header::OnionPeeledHeader;
-pub use layer::OnionLayer;
-pub use layer::OnionLayerApplication;
-pub use layer::OnionLayerError;
-pub use seed::OnionCarryKey;
-pub use seed::OnionCarrySeed;
-pub use seed::OnionSegmentKeys;
-pub use seed::OnionSegmentSeed;
-
 /// Relays per segment, `s` (#834 D5): the guard counts as a relay of both end segments.
-pub const ONION_SEGMENT_RELAYS: usize = 2;
+pub(crate) const ONION_SEGMENT_RELAYS: usize = 2;
 
 /// Upper bound `n_max` on the symbol hops of one loop (#834 D5).
-pub const MAX_ONION_LOOP_SYMBOLS: usize = 4;
+pub(crate) const MAX_ONION_LOOP_SYMBOLS: usize = 4;
 
 /// `Ĥ = H(n_max, s) = (s + 1)·n_max + s = 14`, the hop visits of the longest loop (#834 D5).
 ///
 /// The fixed-length header has exactly `Ĥ` layer slots, whatever the loop's own `H` (L5′).
-pub const MAX_ONION_LOOP_HOPS: usize =
+pub(crate) const MAX_ONION_LOOP_HOPS: usize =
     (ONION_SEGMENT_RELAYS + 1) * MAX_ONION_LOOP_SYMBOLS + ONION_SEGMENT_RELAYS;
-
-/// Copies the next `N` bytes of `source` into a fresh array.
-///
-/// Total by construction: callers split a fixed-width string into fields whose widths sum to the
-/// string's width by definition (`ℓ` in [`layer`], `|χ|` and `|β| + ℓ` in [`header`]), so the
-/// stream never runs short; a shorter stream would leave the tail zero rather than panic.
-fn take_array<const N: usize>(source: &mut impl Iterator<Item = u8>) -> [u8; N] {
-    let mut array = [0_u8; N];
-    array
-        .iter_mut()
-        .zip(source)
-        .for_each(|(slot, byte)| *slot = byte);
-    array
-}
 
 /// `target ← target ⊕ mask`, bytewise over the common prefix of the two streams.
 fn xor_in_place<'a, 'b>(

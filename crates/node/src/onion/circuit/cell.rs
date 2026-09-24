@@ -53,7 +53,8 @@ pub enum OnionCellBucket {
 }
 
 impl OnionCellBucket {
-    const ALL: [Self; 7] = [
+    /// Every bucket, in increasing size.
+    pub(crate) const ALL: [Self; 7] = [
         Self::KiB4,
         Self::KiB16,
         Self::KiB64,

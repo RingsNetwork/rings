@@ -10,7 +10,6 @@ use rings_aez::KEY_BYTES;
 use sha2::Sha256;
 
 use super::fixture_rng;
-use crate::onion::sphinx::seed::OnionCarryKey;
 use crate::onion::sphinx::seed::OnionCarrySeed;
 use crate::onion::sphinx::seed::OnionSegmentSeed;
 
@@ -30,17 +29,17 @@ fn fingerprint(cipher: &Aez) -> Vec<u8> {
     block
 }
 
-/// `σ_{k,j} = KDF₃₂(σ_k, relay j)`, `σ_{k,c} = KDF₃₂(σ_k, consumer)` and
+/// `σ_{k,j} = KDF₃₂(σ_k, relay ‖ j)`, `σ_{k,c} = KDF₃₂(σ_k, consumer)` and
 /// `k = KDF₄₈(σ_in)` exactly as D7 defines them.
 #[test]
 fn test_derivation_matches_its_definition() {
     let segment = OnionSegmentSeed::new([7; 32]);
     let seeds = segment.seeds();
 
-    for (index, relay) in seeds.relays.iter().enumerate() {
-        let info = [b"relay".as_slice(), &(index as u64 + 1).to_be_bytes()].concat();
+    for (relay, seed) in (1_u8..).zip(seeds.relays.iter()) {
+        let info = [b"relay".as_slice(), &[relay]].concat();
         let expected = hkdf::<32>(b"rings-node:onion-carry-seed", &[7; 32], &info);
-        assert_eq!(relay.as_bytes(), &expected);
+        assert_eq!(seed.as_bytes(), &expected);
     }
     let consumer = hkdf::<32>(b"rings-node:onion-carry-seed", &[7; 32], b"consumer");
     assert_eq!(seeds.consumer.as_bytes(), &consumer);
@@ -56,7 +55,7 @@ fn test_derivation_matches_its_definition() {
 /// distinct, so no two hops of a segment hold the same key.
 #[test]
 fn test_segment_seeds_are_pairwise_distinct() {
-    let (segment, _) = OnionSegmentSeed::draw(&mut fixture_rng(30));
+    let (segment, _) = OnionSegmentSeed::draw(&mut fixture_rng(30)).expect("strong segment");
     let seeds = segment.seeds();
     let all = seeds
         .relays
@@ -71,35 +70,32 @@ fn test_segment_seeds_are_pairwise_distinct() {
     }
 }
 
-/// A derived key with a zero subkey `I`, `J` or `L` is rejected by the key constructor that
-/// every derivation passes through, so the client re-draws `σ` (a weak HKDF output itself occurs
-/// with probability `≈ 2^−128` and cannot be exhibited).
+/// A derived key with a zero subkey `I`, `J` or `L` is rejected by `Aez::new`, the constructor
+/// [`OnionCarrySeed::key`] passes every `KDF₄₈` output through, so the holder drops the cell and
+/// the client re-draws `σ`. A weak HKDF output itself occurs with probability `≈ 2^−128` and
+/// cannot be exhibited.
 #[test]
 fn test_weak_key_is_detected() {
     for (subkey, name) in [(0, Subkey::I), (1, Subkey::J), (2, Subkey::L)] {
         let mut key = [0x5a; KEY_BYTES];
         key[16 * subkey..16 * (subkey + 1)].fill(0);
 
-        assert_eq!(
-            OnionCarryKey::new(&key).err(),
-            Some(KeyError::ZeroSubkey(name))
-        );
+        assert_eq!(Aez::new(&key).err(), Some(KeyError::ZeroSubkey(name)));
     }
-    assert!(OnionCarryKey::new(&[0x5a; KEY_BYTES]).is_ok());
+    assert!(Aez::new(&[0x5a; KEY_BYTES]).is_ok());
 }
 
 /// `draw` returns a segment seed all of whose keys are strong, and its keys equal the keys the
 /// seed derives afterwards.
 #[test]
 fn test_draw_returns_a_strong_segment() {
-    let (segment, keys) = OnionSegmentSeed::draw(&mut fixture_rng(31));
+    let (segment, keys) = OnionSegmentSeed::draw(&mut fixture_rng(31)).expect("strong segment");
     let derived = segment.keys().expect("strong segment");
 
     assert_eq!(
         fingerprint(keys.consumer().aez()),
         fingerprint(derived.consumer().aez())
     );
-    assert_eq!(keys.relays().len(), derived.relays().len());
     for (drawn, derived) in keys.relays().iter().zip(derived.relays()) {
         assert_eq!(fingerprint(drawn.aez()), fingerprint(derived.aez()));
     }

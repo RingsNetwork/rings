@@ -3393,7 +3393,6 @@ dependencies = [
  "home",
  "js-sys",
  "jsonrpc-core",
- "k256",
  "lazy_static",
  "libc",
  "log",
@@ -3433,6 +3432,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
  "web-sys",
+ "web-time",
  "zeroize",
 ]
 

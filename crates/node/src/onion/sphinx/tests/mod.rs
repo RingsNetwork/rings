@@ -1,6 +1,6 @@
 //! Law tests of the Sphinx primitives (#840), one module per law of the parent documentation.
 //!
-//! Every test is deterministic: randomness comes from a seeded [`StdRng`] and hop keys from fixed
+//! Every test is deterministic: randomness comes from seeded [`StdRng`]s and hop keys from fixed
 //! scalars, so a failure reproduces bit for bit.
 
 mod test_carry;
@@ -18,10 +18,10 @@ use rings_core::dht::Did;
 use rings_core::ecc::SecretKey;
 
 use super::header::OnionHeaderHop;
+use super::header::OnionHeaderRoute;
 use super::layer::OnionArguments;
 use super::layer::OnionLayer;
 use super::layer::OnionLayerApplication;
-use super::layer::OnionLoopTag;
 use super::layer::ONION_ARGUMENT_BYTES;
 use super::seed::OnionCarrySeed;
 use super::seed::OnionSegmentSeed;
@@ -34,18 +34,21 @@ fn fixture_rng(seed: u64) -> StdRng {
     StdRng::seed_from_u64(seed)
 }
 
-/// The delegatee key of the hop at `position`: the fixed scalar `(position + 1)·0x0101…01`.
-fn hop_key(position: usize) -> DelegateeKey {
-    let byte = u8::try_from(position).expect("fixture position fits a byte") + 1;
+/// The delegatee key of hop `index`: the fixed scalar `(index + 1)·0x0101…01`.
+fn hop_key(index: usize) -> DelegateeKey {
+    let byte = u8::try_from(index).expect("fixture index fits a byte") + 1;
     let secret =
         SecretKey::try_from(format!("{byte:02x}").repeat(32).as_str()).expect("fixture scalar");
     DelegateeKey::new_with_seckey(&secret).expect("fixture delegation")
 }
 
-/// A layer for `position` of a loop of `hops` positions: `relay` everywhere but the last
-/// position, which applies `tcp`; every other field uniform.
-fn fixture_layer(rng: &mut StdRng, position: usize, hops: usize) -> OnionLayer {
-    let application = if position.saturating_add(1) == hops {
+/// The layer of `position` in a loop of `hops` positions under fixture `seed`: `relay` everywhere
+/// but the last position, which applies `tcp`; every other field uniform. A function of its
+/// arguments, so a test rebuilds the expected layer instead of cloning key material.
+fn fixture_layer(seed: u64, position: usize, hops: usize) -> OnionLayer {
+    let offset = u64::try_from(position).expect("fixture position fits u64");
+    let mut rng = fixture_rng(seed.wrapping_mul(1 << 16).wrapping_add(offset));
+    let application = if position + 1 == hops {
         let mut arguments = [0; ONION_ARGUMENT_BYTES];
         rng.fill_bytes(&mut arguments);
         OnionLayerApplication::Apply {
@@ -62,27 +65,25 @@ fn fixture_layer(rng: &mut StdRng, position: usize, hops: usize) -> OnionLayer {
         expires_at_ms: rng.gen(),
         nonce: OnionForwardNonce::new(rng.gen()),
         inbound: OnionCarrySeed::new(rng.gen()),
-        outbound: OnionSegmentSeed::random(rng),
-        tag: OnionLoopTag::new(rng.gen()),
+        outbound: OnionSegmentSeed::random(&mut rng),
     }
 }
 
-/// The keys and layers of a loop of `hops` positions, and the hops the client builds from.
-fn fixture_loop(
-    rng: &mut StdRng,
-    hops: usize,
-) -> (Vec<DelegateeKey>, Vec<OnionLayer>, Vec<OnionHeaderHop>) {
-    let keys = (0..hops).map(hop_key).collect::<Vec<_>>();
-    let layers = (0..hops)
-        .map(|position| fixture_layer(rng, position, hops))
-        .collect::<Vec<_>>();
-    let route = keys
-        .iter()
-        .zip(layers.iter())
-        .map(|(key, layer)| OnionHeaderHop {
-            public_key: key.delegatee_public_key(),
-            layer: layer.clone(),
-        })
-        .collect();
-    (keys, layers, route)
+/// The route of a loop of `hops` positions whose hop at each position holds `keys[position]`.
+fn fixture_route(seed: u64, keys: &[DelegateeKey]) -> OnionHeaderRoute {
+    OnionHeaderRoute::new(
+        keys.iter()
+            .enumerate()
+            .map(|(position, key)| OnionHeaderHop {
+                public_key: key.delegatee_public_key(),
+                layer: fixture_layer(seed, position, keys.len()),
+            })
+            .collect(),
+    )
+    .expect("fixture loop length")
+}
+
+/// The keys of a loop of `hops` distinct hops.
+fn fixture_keys(hops: usize) -> Vec<DelegateeKey> {
+    (0..hops).map(hop_key).collect()
 }

@@ -26,6 +26,7 @@ use crate::error::Result;
 pub mod elgamal;
 pub mod group;
 pub mod keys;
+pub mod prime_order;
 /// Signature schemes used by DID identity and provider login.
 pub mod signers;
 mod types;
@@ -305,6 +306,11 @@ impl SecretKey {
 
     pub(crate) fn secp256k1_scalar(&self) -> K256Scalar {
         *self.0.to_nonzero_scalar()
+    }
+
+    /// The secret scalar as an element of `Z_n^*`, non-zero by the key's invariant.
+    pub(crate) fn secp256k1_nonzero_scalar(&self) -> k256::NonZeroScalar {
+        self.0.to_nonzero_scalar()
     }
 
     /// Generate a random secp256k1 secret key.

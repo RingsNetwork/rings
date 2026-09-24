@@ -60,7 +60,14 @@ pub mod proxy;
 pub(crate) mod replay;
 pub mod route;
 pub mod signature;
-pub mod sphinx;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "pure Sphinx primitives; #834 Phase 2a-4 (#843) wires them into the data plane and removes this"
+    )
+)]
+pub(crate) mod sphinx;
 pub mod target;
 #[cfg(rings_native)]
 pub mod tcp;

@@ -24,8 +24,8 @@
 //!   carry, so every exit able to interpret `tcp` can interpret `https`, while a browser exit, which
 //!   has `fetch` but no sockets, interprets `https` alone.
 //!
-//! - **Code.** Each symbol has a one-byte code, the `f` field of the uniform layer (#834 D6″). The
-//!   code map `Σ ↪ u8` is injective, so the layer's `f` byte names exactly one symbol.
+//! - **Code.** The `f` byte of the uniform layer (#834 D6″) is a symbol's position in table order,
+//!   `code : Σ ↪ u8`, and `by_code` is its left inverse: `by_code ∘ code = Some`.
 //!
 //! Width and latency classes `W`, `L` of the world-facing symbols are not protocol data yet: their
 //! results return along the reversed path, never through a fixed-width carry slot.
@@ -52,28 +52,18 @@ pub enum OnionSymbolPosition {
 #[derive(Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct OnionSymbolSpec {
     name: &'static str,
-    code: u8,
     position: OnionSymbolPosition,
 }
 
 impl OnionSymbolSpec {
-    /// Build one table entry from its canonical name, layer code and position.
-    const fn new(name: &'static str, code: u8, position: OnionSymbolPosition) -> Self {
-        Self {
-            name,
-            code,
-            position,
-        }
+    /// Build one table entry from its canonical name and position.
+    const fn new(name: &'static str, position: OnionSymbolPosition) -> Self {
+        Self { name, position }
     }
 
     /// Return the canonical symbol name.
     pub const fn name(&self) -> &'static str {
         self.name
-    }
-
-    /// Return the one-byte code of this symbol in the uniform layer's `f` field (#834 D6″).
-    pub const fn code(&self) -> u8 {
-        self.code
     }
 
     /// Return the pipeline position of this symbol.
@@ -92,9 +82,9 @@ pub struct OnionSignature {
 
 /// The onion signature of this node generation.
 pub static ONION_SIGNATURE: OnionSignature = OnionSignature {
-    relay: OnionSymbolSpec::new("relay", 0, OnionSymbolPosition::Intermediate),
-    tcp: OnionSymbolSpec::new("tcp", 1, OnionSymbolPosition::WorldFacing),
-    https: OnionSymbolSpec::new("https", 2, OnionSymbolPosition::WorldFacing),
+    relay: OnionSymbolSpec::new("relay", OnionSymbolPosition::Intermediate),
+    tcp: OnionSymbolSpec::new("tcp", OnionSymbolPosition::WorldFacing),
+    https: OnionSymbolSpec::new("https", OnionSymbolPosition::WorldFacing),
 };
 
 impl OnionSignature {
@@ -108,6 +98,30 @@ impl OnionSignature {
         [&self.relay, &self.tcp, &self.https]
     }
 
+    /// Return the layer code of `spec`: the number of symbols before it in table order.
+    pub fn code(&self, spec: &OnionSymbolSpec) -> u8 {
+        self.symbols()
+            .into_iter()
+            .take_while(|symbol| *symbol != spec)
+            .fold(0, |code, _| code.saturating_add(1))
+    }
+
+    /// Return the symbol whose layer code is `code`, if any, as the coproduct
+    /// `Σ = {relay} ⊎ Σ_W`: the left inverse of [`Self::code`].
+    ///
+    /// `relay` is the only intermediate symbol, so every other entry of `Σ` names `Σ_W`.
+    pub fn by_code(&'static self, code: u8) -> Option<OnionSymbol> {
+        self.symbols()
+            .into_iter()
+            .nth(usize::from(code))
+            .map(|spec| match spec.position {
+                OnionSymbolPosition::Intermediate => OnionSymbol::Relay,
+                OnionSymbolPosition::WorldFacing => {
+                    OnionSymbol::WorldFacing(OnionServiceName(spec))
+                }
+            })
+    }
+
     /// Return `Σ_W`, the world-facing symbols of `Σ`, in table order as service names.
     pub fn world_facing(&'static self) -> impl Iterator<Item = OnionServiceName> {
         self.symbols()
@@ -115,6 +129,15 @@ impl OnionSignature {
             .filter(|spec| spec.position == OnionSymbolPosition::WorldFacing)
             .map(OnionServiceName)
     }
+}
+
+/// A symbol of `Σ = {relay} ⊎ Σ_W`, as that coproduct.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OnionSymbol {
+    /// The identity symbol `relay`, the only intermediate symbol.
+    Relay,
+    /// A world-facing symbol.
+    WorldFacing(OnionServiceName),
 }
 
 /// Canonical name of a world-facing symbol: the closed name type `Σ_W` of onion services.
@@ -200,9 +223,8 @@ impl From<OnionServiceName> for String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
-
     use super::OnionServiceName;
+    use super::OnionSymbol;
     use super::OnionSymbolPosition;
     use super::ONION_SIGNATURE;
 
@@ -253,15 +275,23 @@ mod tests {
         assert_eq!(intermediate, vec![ONION_SIGNATURE.relay()]);
     }
 
-    /// The code map `Σ ↪ u8` is injective: no two symbols share a layer code.
+    /// `by_code ∘ code = Some` on `Σ`, codes are the table positions, and no code past the table
+    /// names a symbol.
     #[test]
-    fn test_symbol_codes_are_injective() {
-        let codes = ONION_SIGNATURE
-            .symbols()
-            .into_iter()
-            .map(|spec| spec.code())
-            .collect::<BTreeSet<_>>();
+    fn test_by_code_inverts_code() {
+        let symbols = ONION_SIGNATURE.symbols();
+        for (position, spec) in symbols.into_iter().enumerate() {
+            let code = ONION_SIGNATURE.code(spec);
+            let expected = if spec == ONION_SIGNATURE.relay() {
+                OnionSymbol::Relay
+            } else {
+                OnionSymbol::WorldFacing(OnionServiceName::parse(spec.name()).expect("Σ_W"))
+            };
 
-        assert_eq!(codes.len(), ONION_SIGNATURE.symbols().len());
+            assert_eq!(usize::from(code), position);
+            assert_eq!(ONION_SIGNATURE.by_code(code), Some(expected));
+        }
+        let past = u8::try_from(symbols.len()).expect("Σ fits a byte");
+        assert_eq!(ONION_SIGNATURE.by_code(past), None);
     }
 }

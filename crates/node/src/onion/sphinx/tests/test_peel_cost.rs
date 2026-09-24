@@ -10,8 +10,10 @@
 //!
 //! Beside the three measurements of the real code paths (header peel, carry step, whole cell), the
 //! same primitives are timed alone with the operands of one cell, so that the cost splits into
-//! ECDH, blinding, key schedule, PRG, MAC and AEZ. Every row runs one untimed warm-up pass and
-//! then `RUNS` timed passes over state built outside the timed region, on both targets alike.
+//! ECDH, blinding, key schedule, PRG, MAC and AEZ. Every row runs `WARM_UP` untimed passes and
+//! then `RUNS` timed passes over state built outside the timed region, on both targets alike, by
+//! the monotonic clock of `web_time::Instant` (`std::time::Instant` natively, `performance.now()`
+//! in the browser); every result passes through `black_box`.
 //!
 //! The target is ≥ 109 cells/s per neighbour on `wasm32` (#834 L9). The numbers are reported,
 //! never asserted: a duration is a measurement, not a law, so the benchmarks are ignored by
@@ -32,49 +34,61 @@ use chacha20::ChaCha20;
 use hkdf::HkdfExtract;
 use hmac::Hmac;
 use hmac::Mac;
-use k256::ProjectivePoint;
-use k256::Scalar;
 use rand::RngCore;
 use rings_aez::Tweak;
-use rings_core::ecc::Point;
-use rings_core::utils::get_epoch_ms;
+use rings_core::ecc::prime_order::NonIdentityPoint;
+use rings_core::ecc::prime_order::NonZeroScalar;
+use rings_core::ecc::Secp256k1;
 use sha2::Sha256;
+use web_time::Instant;
 
-use super::fixture_loop;
+use super::fixture_keys;
 use super::fixture_rng;
+use super::fixture_route;
 use crate::onion::sphinx::carry::OnionCarry;
 use crate::onion::sphinx::class::OnionLoopClass;
 use crate::onion::sphinx::header::OnionHeader;
+use crate::onion::sphinx::header::OnionLoopTag;
 use crate::onion::sphinx::header::ONION_HEADER_ROUTING_BYTES;
 use crate::onion::sphinx::layer::ONION_LAYER_BYTES;
 use crate::onion::sphinx::MAX_ONION_LOOP_HOPS;
 
-/// Timed passes per row: enough that every row spans well over the millisecond wall clock.
+/// Untimed passes per row before measuring.
+const WARM_UP: u32 = 200;
+
+/// Timed passes per row.
 const RUNS: u32 = 2000;
 
-/// Mean microseconds per pass of `run`, after one untimed warm-up pass, by the wall clock.
+/// Mean microseconds per pass of `run`, after `WARM_UP` untimed passes.
 fn microseconds_per_run(mut run: impl FnMut()) -> f64 {
-    run();
-    let start = get_epoch_ms();
+    (0..WARM_UP).for_each(|_| run());
+    let start = Instant::now();
     (0..RUNS).for_each(|_| run());
-    let elapsed_ms = get_epoch_ms().saturating_sub(start).max(1);
-    elapsed_ms as f64 * 1000.0 / f64::from(RUNS)
+    start.elapsed().as_secs_f64() * 1_000_000.0 / f64::from(RUNS)
 }
 
 /// Every row of the report: `(operation, µs per pass)`, components first, then the real paths.
 fn measure() -> Vec<(&'static str, f64)> {
     let mut rng = fixture_rng(40);
-    let (keys, _, route) = fixture_loop(&mut rng, MAX_ONION_LOOP_HOPS);
-    let header = OnionHeader::build(&route, &mut rng).expect("build the header");
+    let class = OnionLoopClass::DEFAULT;
+    let keys = fixture_keys(MAX_ONION_LOOP_HOPS);
+    let header = OnionHeader::build(
+        &fixture_route(40, &keys),
+        class,
+        OnionLoopTag::new([0; 16]),
+        &mut rng,
+    )
+    .expect("build the header");
     let key = &keys[0];
-    let inbound = header.peel(key).expect("peel").layer.inbound.clone();
+    let peeled = header.peel(class, key).expect("peel");
+    let inbound = &peeled.layer.inbound;
     let carry_key = inbound.key().expect("strong key");
-    let class = OnionLoopClass::KiB16;
     let mut slot = vec![0; class.carry_bytes()];
     rng.fill_bytes(&mut slot);
     let mut carry = OnionCarry::from_bytes(class, slot.clone()).expect("carry width");
-    let alpha = ProjectivePoint::GENERATOR * Scalar::from(u64::from(rng.next_u32()) + 1);
-    let blinding = Scalar::from(u64::from(rng.next_u32()) + 1);
+    let alpha =
+        NonIdentityPoint::generator_mul(&NonZeroScalar::<Secp256k1>::random_with_rng(&mut rng));
+    let blinding = NonZeroScalar::<Secp256k1>::random_with_rng(&mut rng);
     let mut stream = vec![0_u8; ONION_HEADER_ROUTING_BYTES + ONION_LAYER_BYTES];
     let mut routing = vec![0_u8; ONION_HEADER_ROUTING_BYTES];
     rng.fill_bytes(&mut routing);
@@ -84,13 +98,13 @@ fn measure() -> Vec<(&'static str, f64)> {
         (
             "ECDH d·α",
             microseconds_per_run(|| {
-                black_box(key.diffie_hellman(Point::new(black_box(alpha))));
+                black_box(key.diffie_hellman(black_box(&alpha)));
             }),
         ),
         (
             "blind b·α",
             microseconds_per_run(|| {
-                black_box(black_box(alpha) * black_box(blinding));
+                black_box(black_box(&alpha) * black_box(&blinding));
             }),
         ),
         (
@@ -114,9 +128,10 @@ fn measure() -> Vec<(&'static str, f64)> {
             }),
         ),
         (
-            "MAC HMAC-SHA256 β",
+            "MAC HMAC-SHA256 b ‖ β",
             microseconds_per_run(|| {
                 let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&[7_u8; 64]).expect("HMAC key");
+                mac.update(&class.mac_label());
                 mac.update(black_box(routing.as_slice()));
                 black_box(mac.finalize());
             }),
@@ -138,31 +153,32 @@ fn measure() -> Vec<(&'static str, f64)> {
         (
             "header peel (real path)",
             microseconds_per_run(|| {
-                black_box(header.peel(key).expect("peel"));
+                black_box(header.peel(class, key).expect("peel"));
             }),
         ),
         (
             "carry step (real path)",
             microseconds_per_run(|| {
-                carry = carry.clone().peel(&inbound.key().expect("strong key"));
+                carry = black_box(carry.clone().peel(&inbound.key().expect("strong key")));
             }),
         ),
         (
             "whole cell (real path)",
             microseconds_per_run(|| {
-                let peeled = header.peel(key).expect("peel");
-                carry = carry
-                    .clone()
-                    .peel(&peeled.layer.inbound.key().expect("strong key"));
+                let peeled = header.peel(class, key).expect("peel");
+                carry = black_box(
+                    carry
+                        .clone()
+                        .peel(&peeled.layer.inbound.key().expect("strong key")),
+                );
             }),
         ),
     ]
 }
-
 /// Renders a measurement as a table, one row per operation, in µs and passes per second.
 fn report(target: &str, rows: &[(&'static str, f64)]) -> String {
     rows.iter().fold(
-        format!("peel cost ({target}, {RUNS} runs per row, after one warm-up)"),
+        format!("peel cost ({target}, {RUNS} runs per row after {WARM_UP} warm-up runs)"),
         |table, (operation, micros)| {
             format!(
                 "{table}\n  {operation:<30} {micros:>9.1} µs  {:>9.0} /s",

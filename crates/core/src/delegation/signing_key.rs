@@ -3,16 +3,18 @@ use std::str::FromStr;
 use rings_derive::wasm_export;
 use serde::Deserialize;
 use serde::Serialize;
+use zeroize::Zeroizing;
 
 use super::Delegation;
 use super::DelegationBuilder;
 use crate::dht::Did;
 use crate::ecc::keccak256;
 use crate::ecc::keys::AccountVerifier;
+use crate::ecc::prime_order::NonIdentityPoint;
+use crate::ecc::prime_order::NonZeroScalar;
+use crate::ecc::prime_order::SHARED_SECRET_BYTES;
 use crate::ecc::signers;
-use crate::ecc::Point;
 use crate::ecc::PublicKey;
-use crate::ecc::Scalar;
 use crate::ecc::Secp256k1;
 use crate::ecc::SecretKey;
 use crate::error::Error;
@@ -101,15 +103,18 @@ impl DelegateeKey {
         crate::ecc::elgamal::impls::secp256k1::decrypt_aead(sealed, aad, &self.delegatee_secret_key)
     }
 
-    /// The Diffie–Hellman action of the delegatee secret `d` on a group element: `P ↦ d·P`.
+    /// The Diffie–Hellman shared secret `x(P·d)` of a peer element `P` and the delegatee secret
+    /// `d`, zeroized on drop.
     ///
-    /// Law: for every scalar `x`, `diffie_hellman(x·G) = x·(d·G) = x·pk`, so a sender holding
-    /// `x` and [`Self::delegatee_public_key`] derives the same element; this is the key
-    /// transport of a Sphinx header (#834 D6″). The action is k256's constant-time scalar
-    /// multiplication; validating `P` (on the curve, not the identity) is the caller's
-    /// contract, since the action is total on the group.
-    pub fn diffie_hellman(&self, point: Point<Secp256k1>) -> Point<Secp256k1> {
-        point * Scalar::new(self.delegatee_secret_key.secp256k1_scalar())
+    /// Law: for every `x ∈ Z_n^*`, `diffie_hellman(x·G) = (d·G)·x` in its x-coordinate, so a
+    /// sender holding `x` and [`Self::delegatee_public_key`] derives the same secret; this is the
+    /// key transport of a Sphinx header (#834 D6″). `P ≠ O` by its type, and the secret scalar is
+    /// only ever held in a zeroizing `Z_n^*` value.
+    pub fn diffie_hellman(
+        &self,
+        peer: &NonIdentityPoint<Secp256k1>,
+    ) -> Zeroizing<[u8; SHARED_SECRET_BYTES]> {
+        peer.shared_secret(&NonZeroScalar::from_secret_key(&self.delegatee_secret_key))
     }
 
     /// Sign a message with this delegatee key.

@@ -1,8 +1,6 @@
 //! Carry segments (D7): round trip through the keys each hop derives from its own seed, the
 //! width law (L3, L5′), and L8 on the carry.
 
-use rings_aez::DecryptError;
-
 use super::fixture_rng;
 use crate::onion::sphinx::carry::OnionCarry;
 use crate::onion::sphinx::carry::OnionCarryError;
@@ -38,8 +36,8 @@ fn edges(carry: OnionCarry, relays: &[OnionCarryKey]) -> Vec<OnionCarry> {
 #[test]
 fn test_segment_round_trip_at_every_width() {
     let mut rng = fixture_rng(20);
-    let class = OnionLoopClass::KiB16;
-    let (segment, keys) = OnionSegmentSeed::draw(&mut rng);
+    let class = OnionLoopClass::DEFAULT;
+    let (segment, keys) = OnionSegmentSeed::draw(&mut rng).expect("strong segment");
     let (relays, consumer) = holder_keys(&segment);
     let widest = vec![0xa5; class.carry_value_bytes() - 1];
 
@@ -68,7 +66,7 @@ fn test_segment_round_trip_at_every_width() {
 /// A received slot is accepted exactly at width `C_b`.
 #[test]
 fn test_received_slot_width_is_exactly_the_class_width() {
-    let class = OnionLoopClass::KiB16;
+    let class = OnionLoopClass::DEFAULT;
     for length in [0, class.carry_bytes() - 1, class.carry_bytes() + 1] {
         assert_eq!(
             OnionCarry::from_bytes(class, vec![0; length]).err(),
@@ -86,8 +84,8 @@ fn test_received_slot_width_is_exactly_the_class_width() {
 #[test]
 fn test_one_bit_flip_on_any_edge_rejects_the_whole_value() {
     let mut rng = fixture_rng(21);
-    let class = OnionLoopClass::KiB16;
-    let (segment, keys) = OnionSegmentSeed::draw(&mut rng);
+    let class = OnionLoopClass::DEFAULT;
+    let (segment, keys) = OnionSegmentSeed::draw(&mut rng).expect("strong segment");
     let (relays, consumer) = holder_keys(&segment);
     let carry = OnionCarry::seal(class, &keys, b"one value, one key").expect("seal");
     let slots = edges(carry, relays.as_slice());
@@ -120,7 +118,7 @@ fn test_one_bit_flip_on_any_edge_rejects_the_whole_value() {
 
             assert_eq!(
                 rejection,
-                Some(OnionCarryError::Decrypt(DecryptError::Inauthentic)),
+                Some(OnionCarryError::Inauthentic),
                 "edge {edge}, byte {offset}"
             );
         }

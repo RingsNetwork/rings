@@ -85,7 +85,6 @@ futures = { version = "0.3.21", features = ["alloc"] }
 hkdf = "0.12.4"
 hmac = "0.12.1"
 jsonrpc-core = { workspace = true }
-k256 = "0.13.4"
 log = { version = "0.4", features = ["std"] }
 rand = { version = "0.8.5", features = ["getrandom"] }
 rings-aez = { workspace = true }
@@ -160,6 +159,7 @@ smoltcp = { version = "0.14.0", default-features = false, features = [
 ] }
 tower = "0.5"
 wasm-bindgen-test = { workspace = true }
+web-time = "1.1.0"
 
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 tokio = { version = "1.13.0", features = ["test-util"] }
