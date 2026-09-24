@@ -8,94 +8,174 @@
 //! carry   KDF₄₈(σ_in), AEZ key setup, one AEZ decipherment of C_16KiB = 13241 bytes
 //! ```
 //!
+//! Beside the three measurements of the real code paths (header peel, carry step, whole cell), the
+//! same primitives are timed alone with the operands of one cell, so that the cost splits into
+//! ECDH, blinding, key schedule, PRG, MAC and AEZ. Every row runs one untimed warm-up pass and
+//! then `RUNS` timed passes over state built outside the timed region, on both targets alike.
+//!
 //! The target is ≥ 109 cells/s per neighbour on `wasm32` (#834 L9). The numbers are reported,
 //! never asserted: a duration is a measurement, not a law, so the benchmarks are ignored by
 //! default and run on request.
 //!
 //! ```text
-//! native:  cargo test --release -p rings-node --lib sphinx::tests::test_peel_cost -- --ignored --nocapture
+//! native:  cargo test --release -p rings-node --lib sphinx::tests::test_peel_cost -- --ignored \
+//!            --nocapture --test-threads=1
 //! wasm32:  CHROMEDRIVER=… cargo test --release -p rings-node --lib --target wasm32-unknown-unknown \
-//!            --features browser_chrome_test --no-default-features -- --include-ignored bench_peel_cost
+//!            --features browser_default --no-default-features -- --include-ignored --nocapture bench_peel_cost
 //! ```
 
+use core::hint::black_box;
+
+use chacha20::cipher::KeyIvInit;
+use chacha20::cipher::StreamCipher;
+use chacha20::ChaCha20;
+use hkdf::HkdfExtract;
+use hmac::Hmac;
+use hmac::Mac;
+use k256::ProjectivePoint;
+use k256::Scalar;
 use rand::RngCore;
+use rings_aez::Tweak;
+use rings_core::ecc::Point;
 use rings_core::utils::get_epoch_ms;
+use sha2::Sha256;
 
 use super::fixture_loop;
 use super::fixture_rng;
 use crate::onion::sphinx::carry::OnionCarry;
 use crate::onion::sphinx::class::OnionLoopClass;
 use crate::onion::sphinx::header::OnionHeader;
+use crate::onion::sphinx::header::ONION_HEADER_ROUTING_BYTES;
+use crate::onion::sphinx::layer::ONION_LAYER_BYTES;
 use crate::onion::sphinx::MAX_ONION_LOOP_HOPS;
 
-/// Cells peeled per measurement.
-const CELLS: u32 = 1000;
+/// Timed passes per row: enough that every row spans well over the millisecond wall clock.
+const RUNS: u32 = 2000;
 
-/// The measured throughputs, in cells per second.
-struct PeelCost {
-    /// Header peel alone.
-    header: f64,
-    /// Carry step alone.
-    carry: f64,
-    /// One whole cell: header peel, then the carry step under the peeled layer's seed.
-    cell: f64,
-}
-
-/// `CELLS / elapsed` for `CELLS` runs of `step`, by the wall clock.
-fn cells_per_second(mut step: impl FnMut()) -> f64 {
+/// Mean microseconds per pass of `run`, after one untimed warm-up pass, by the wall clock.
+fn microseconds_per_run(mut run: impl FnMut()) -> f64 {
+    run();
     let start = get_epoch_ms();
-    (0..CELLS).for_each(|_| step());
+    (0..RUNS).for_each(|_| run());
     let elapsed_ms = get_epoch_ms().saturating_sub(start).max(1);
-    f64::from(CELLS) * 1000.0 / elapsed_ms as f64
+    elapsed_ms as f64 * 1000.0 / f64::from(RUNS)
 }
 
-/// Peel the first header of a longest loop, and a class-16KiB carry, `CELLS` times each.
-fn measure() -> PeelCost {
+/// Every row of the report: `(operation, µs per pass)`, components first, then the real paths.
+fn measure() -> Vec<(&'static str, f64)> {
     let mut rng = fixture_rng(40);
     let (keys, _, route) = fixture_loop(&mut rng, MAX_ONION_LOOP_HOPS);
     let header = OnionHeader::build(&route, &mut rng).expect("build the header");
     let key = &keys[0];
     let inbound = header.peel(key).expect("peel").layer.inbound.clone();
+    let carry_key = inbound.key().expect("strong key");
     let class = OnionLoopClass::KiB16;
     let mut slot = vec![0; class.carry_bytes()];
     rng.fill_bytes(&mut slot);
-    let mut carry = OnionCarry::from_bytes(class, slot).expect("carry width");
+    let mut carry = OnionCarry::from_bytes(class, slot.clone()).expect("carry width");
+    let alpha = ProjectivePoint::GENERATOR * Scalar::from(u64::from(rng.next_u32()) + 1);
+    let blinding = Scalar::from(u64::from(rng.next_u32()) + 1);
+    let mut stream = vec![0_u8; ONION_HEADER_ROUTING_BYTES + ONION_LAYER_BYTES];
+    let mut routing = vec![0_u8; ONION_HEADER_ROUTING_BYTES];
+    rng.fill_bytes(&mut routing);
+    let mut okm = [0_u8; 64];
 
-    let header_rate = cells_per_second(|| {
-        header.peel(key).expect("peel");
-    });
-    let carry_rate = cells_per_second(|| {
-        carry = carry.clone().peel(&inbound.key().expect("strong key"));
-    });
-    let cell_rate = cells_per_second(|| {
-        let peeled = header.peel(key).expect("peel");
-        carry = carry
-            .clone()
-            .peel(&peeled.layer.inbound.key().expect("strong key"));
-    });
-    PeelCost {
-        header: header_rate,
-        carry: carry_rate,
-        cell: cell_rate,
-    }
+    vec![
+        (
+            "ECDH d·α",
+            microseconds_per_run(|| {
+                black_box(key.diffie_hellman(Point::new(black_box(alpha))));
+            }),
+        ),
+        (
+            "blind b·α",
+            microseconds_per_run(|| {
+                black_box(black_box(alpha) * black_box(blinding));
+            }),
+        ),
+        (
+            "HKDF schedule",
+            microseconds_per_run(|| {
+                let mut extract = HkdfExtract::<Sha256>::new(Some(b"salt".as_slice()));
+                extract.input_ikm(black_box([7_u8; 65].as_slice()));
+                let (_, kdf) = extract.finalize();
+                for info in [b"prg".as_slice(), b"mac", b"blind"] {
+                    kdf.expand(info, &mut okm).expect("HKDF length");
+                }
+                black_box(&okm);
+            }),
+        ),
+        (
+            "PRG ChaCha20 (Ĥ+1)ℓ",
+            microseconds_per_run(|| {
+                ChaCha20::new(&[7_u8; 32].into(), &[0_u8; 12].into())
+                    .apply_keystream(stream.as_mut_slice());
+                black_box(&stream);
+            }),
+        ),
+        (
+            "MAC HMAC-SHA256 β",
+            microseconds_per_run(|| {
+                let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&[7_u8; 64]).expect("HMAC key");
+                mac.update(black_box(routing.as_slice()));
+                black_box(mac.finalize());
+            }),
+        ),
+        (
+            "carry key KDF₄₈ + AEZ setup",
+            microseconds_per_run(|| {
+                black_box(inbound.key().expect("strong key"));
+            }),
+        ),
+        (
+            "AEZ decipher C_16KiB",
+            microseconds_per_run(|| {
+                carry_key
+                    .aez()
+                    .decipher(Tweak::EMPTY, black_box(slot.as_mut_slice()));
+            }),
+        ),
+        (
+            "header peel (real path)",
+            microseconds_per_run(|| {
+                black_box(header.peel(key).expect("peel"));
+            }),
+        ),
+        (
+            "carry step (real path)",
+            microseconds_per_run(|| {
+                carry = carry.clone().peel(&inbound.key().expect("strong key"));
+            }),
+        ),
+        (
+            "whole cell (real path)",
+            microseconds_per_run(|| {
+                let peeled = header.peel(key).expect("peel");
+                carry = carry
+                    .clone()
+                    .peel(&peeled.layer.inbound.key().expect("strong key"));
+            }),
+        ),
+    ]
 }
 
-/// Renders a measurement as one report line.
-fn report(target: &str, cost: &PeelCost) -> String {
-    format!(
-        "peel cost ({target}, {CELLS} cells): header {:.0} cells/s, carry {:.0} cells/s, \
-         cell {:.0} cells/s ({:.2} ms/cell)",
-        cost.header,
-        cost.carry,
-        cost.cell,
-        1000.0 / cost.cell
+/// Renders a measurement as a table, one row per operation, in µs and passes per second.
+fn report(target: &str, rows: &[(&'static str, f64)]) -> String {
+    rows.iter().fold(
+        format!("peel cost ({target}, {RUNS} runs per row, after one warm-up)"),
+        |table, (operation, micros)| {
+            format!(
+                "{table}\n  {operation:<30} {micros:>9.1} µs  {:>9.0} /s",
+                1_000_000.0 / micros
+            )
+        },
     )
 }
 
 /// Native per-cell peel cost.
 #[cfg(not(target_family = "wasm"))]
 #[test]
-#[ignore = "benchmark: run with --release -- --ignored --nocapture"]
+#[ignore = "benchmark: run with --release -- --ignored --nocapture --test-threads=1"]
 fn bench_peel_cost_native() {
     println!("{}", report("native", &measure()));
 }
@@ -103,7 +183,7 @@ fn bench_peel_cost_native() {
 /// `wasm32` per-cell peel cost in the browser.
 #[cfg(rings_browser)]
 #[wasm_bindgen_test::wasm_bindgen_test]
-#[ignore = "benchmark: run with --release -- --include-ignored"]
+#[ignore = "benchmark: run with --release -- --include-ignored --nocapture"]
 fn bench_peel_cost_wasm() {
     wasm_bindgen_test::console_log!("{}", report("wasm32", &measure()));
 }
