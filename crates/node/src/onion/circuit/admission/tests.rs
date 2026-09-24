@@ -16,7 +16,6 @@ use super::bloom::REPLAY_BLOCK_HASHES;
 use super::bloom::REPLAY_BLOCK_TAGS;
 use super::bloom::REPLAY_SLICE_BITS;
 use super::bloom::REPLAY_SLICE_WORDS;
-use super::OnionAdmissionCharge;
 use super::OnionAdmissionLayer;
 use super::OnionAdmissionLink;
 use super::OnionAdmissionRejection;
@@ -1054,49 +1053,67 @@ fn test_a_token_from_another_epoch_admits_nothing() {
 }
 
 /// Property, seeded (H1 of the round-3 review): with tokens held across quanta and admitted late,
-/// no filter ever holds more tags than the units charged in its five arrival quanta, and so never
-/// more than `G / u` tags of `u`-unit cells. 64 DIDs send 768-unit cells as fast as their budgets
-/// allow, for twenty quanta. Each cell names a random expiry around its arrival window, some just
-/// outside it, and its admission completes after a random delay of up to `V`. The run checks that
-/// filters come within a factor of two of the bound, so the bound is not vacuous.
+/// no filter ever holds more than `G / u` tags of `u`-unit cells, and the bound is tight.
+///
+/// Each of four rounds targets one expiry `x = kQ` with 64 DIDs and `u = 1024`, so that
+/// `64·B / u = G / u` cells saturate a window:
+/// * Phase A: in quantum `k − 6`, every DID spends its whole budget on cells that name `x`. At that
+///   arrival `x` lies outside the window. The tokens are held and admitted at random instants in
+///   `[(k − 5)Q, kQ)`, when `x ≤ clock + V`.
+/// * Phase B: in quantum `k − 1`, after phase A has left the ledger window, every DID spends its
+///   budget again on cells that name `x`, and they are admitted at once.
+///
+/// Judging the window at the charge instant rejects all of phase A and admits all of phase B, so
+/// `R_i[x]` holds exactly `G / u` tags. Judging it at the admission instant would admit both
+/// phases, `2·G / u` tags.
 #[test]
 fn test_late_admissions_never_exceed_the_global_bound_per_filter() {
-    const UNITS: u32 = 768;
+    const UNITS: u32 = 1024;
+    let per_sender = ONION_ADMISSION_SENDER_UNITS / UNITS;
+    let bound = ONION_ADMISSION_GLOBAL_UNITS / UNITS;
     let mut rng = StdRng::seed_from_u64(0x0841_0016);
     let mut admission = state(&mut rng);
-    let mut pending = Vec::new();
-    let mut tags = BTreeMap::<OnionExpiry, u32>::new();
-    let mut settle = |admission: &mut OnionAdmissionState,
-                      pending: &mut Vec<(u128, OnionAdmissionCharge, OnionAdmissionLayer)>,
-                      now_ms: u128| {
-        let (due, waiting): (Vec<_>, Vec<_>) = std::mem::take(pending)
-            .into_iter()
-            .partition(|(release_ms, _, _)| *release_ms <= now_ms);
-        *pending = waiting;
-        for (_, token, layer) in due {
-            if admission.admit(now_ms, token, layer).is_ok() {
-                *tags.entry(layer.expiry).or_default() += 1;
-            }
-        }
-    };
     let mut tag = 0_u128;
-    for step in 0..(20 * 32_u128) {
-        let now_ms = ORIGIN_MS + step * (Q / 32);
-        for _ in 0..16 {
-            let sender = rng.gen_range(0..64_u32);
-            if let Ok(token) = admission.charge(now_ms, &link(sender), units(UNITS)) {
-                tag += 1;
-                let x = expiry(now_ms / Q + rng.gen_range(1..=ADMISSION_WINDOW_QUANTA_WIDE + 1));
-                let release_ms = now_ms + rng.gen_range(0..=ONION_ADMISSION_WINDOW_MS);
-                pending.push((release_ms, token, layer(x, tag)));
+    for round in 0..4_u128 {
+        let k = ORIGIN_MS / Q + 20 + 10 * round;
+        let x = expiry(k);
+        let mut events = Vec::new();
+        let cells = (0..64_u32).flat_map(|sender| (0..per_sender).map(move |_| sender));
+        for (sender, offset) in cells.clone().zip(0_u128..) {
+            let arrival_ms = (k - 6) * Q + offset;
+            let token = admission
+                .charge(arrival_ms, &link(sender), units(UNITS))
+                .expect("phase A fits every budget");
+            tag += 1;
+            let release_ms = (k - 5) * Q + rng.gen_range(0..5 * Q);
+            events.push((release_ms, token, layer(x, tag)));
+        }
+        events.sort_by_key(|(release_ms, _, _)| *release_ms);
+        let mut admitted = 0_u32;
+        let mut late = events.into_iter().peekable();
+        for (sender, offset) in cells.zip(0_u128..) {
+            let arrival_ms = (k - 1) * Q + offset;
+            while let Some((_, token, layer)) =
+                late.next_if(|(release_ms, _, _)| *release_ms <= arrival_ms)
+            {
+                assert_eq!(
+                    admission.admit(arrival_ms, token, layer),
+                    Err(OnionAdmissionRejection::OutsideWindow)
+                );
+            }
+            tag += 1;
+            if send(&mut admission, arrival_ms, sender, UNITS, layer(x, tag)) == Verdict::Admitted {
+                admitted += 1;
             }
         }
-        settle(&mut admission, &mut pending, now_ms);
+        for (release_ms, token, layer) in late {
+            assert_eq!(
+                admission.admit(release_ms, token, layer),
+                Err(OnionAdmissionRejection::OutsideWindow)
+            );
+        }
+        assert_eq!(admitted, bound);
     }
-    settle(&mut admission, &mut pending, u128::MAX);
-    let fullest = tags.values().copied().max().unwrap_or(0);
-    assert!(fullest * UNITS <= ONION_ADMISSION_GLOBAL_UNITS);
-    assert!(2 * fullest * UNITS >= ONION_ADMISSION_GLOBAL_UNITS / 5);
 }
 
 /// Law: a filter grows by whole blocks, one per `B` tags, and no inserted tag is ever missed.
