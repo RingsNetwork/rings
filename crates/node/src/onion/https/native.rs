@@ -1,4 +1,3 @@
-use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -42,32 +41,24 @@ pub(super) fn is_native_transport_managed_header(name: &str) -> bool {
     .any(|managed| name.eq_ignore_ascii_case(managed))
 }
 
-/// Mutually exclusive native HTTPS egress strategies.
+/// Native HTTPS egress: the target host pinned to its resolved public addresses.
 ///
-/// A direct request is allowed only after resolving and pinning public addresses. A proxied
-/// request deliberately delegates name resolution to an operator-configured upstream proxy; the
-/// explicit proxy object prevents reqwest from silently applying `NO_PROXY` and bypassing that
-/// trust boundary.
+/// A request leaves only after resolution selected public addresses; pinning them, with every
+/// ambient proxy disabled, keeps reqwest from re-resolving the host or routing around the check.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) enum NativeHttpsEgress {
-    Direct {
-        host: String,
-        addresses: Vec<SocketAddr>,
-    },
-    Proxy(String),
+pub(super) struct NativeHttpsEgress {
+    /// The host name the request is addressed to.
+    pub(super) host: String,
+    /// The public addresses `host` is pinned to.
+    pub(super) addresses: Vec<SocketAddr>,
 }
 
 impl NativeHttpsEgress {
-    fn configure(
-        &self,
-        builder: reqwest::ClientBuilder,
-    ) -> std::result::Result<reqwest::ClientBuilder, reqwest::Error> {
-        match self {
-            Self::Direct { host, addresses } => {
-                Ok(builder.no_proxy().resolve_to_addrs(host, addresses))
-            }
-            Self::Proxy(proxy) => reqwest::Proxy::all(proxy).map(|proxy| builder.proxy(proxy)),
-        }
+    /// Pin `host` to `addresses` on `builder`, disabling every ambient proxy.
+    fn configure(&self, builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+        builder
+            .no_proxy()
+            .resolve_to_addrs(&self.host, self.addresses.as_slice())
     }
 }
 
@@ -80,7 +71,7 @@ pub(super) async fn execute_https_request(
     policy: &OnionExitPolicy,
 ) -> Result<FetchResponse> {
     let addresses = resolve_target_addresses(target).await?;
-    let egress = select_native_https_egress(target, addresses, runtime.native_proxy())?;
+    let egress = select_native_https_egress(target, addresses)?;
     native_fetch_with_timeout(
         url,
         request,
@@ -92,40 +83,23 @@ pub(super) async fn execute_https_request(
     .await
 }
 
-/// Select native HTTPS egress from an immutable resolution result and proxy configuration.
+/// Select native HTTPS egress from an immutable resolution result.
 ///
-/// Post: public resolution always selects a pinned direct path; only a hostname whose complete DNS
-/// snapshot is in the proxy fake-IP range may delegate resolution to an operator-configured proxy;
-/// every other non-public result remains denied.
+/// Post: public resolution selects the pinned path; every non-public result is denied.
 pub(super) fn select_native_https_egress(
     target: &OnionProxyTarget,
     addresses: Vec<SocketAddr>,
-    configured_proxy: Option<String>,
 ) -> Result<NativeHttpsEgress> {
-    let proxy_synthetic_resolution = target.host().parse::<IpAddr>().is_err()
-        && !addresses.is_empty()
-        && addresses
-            .iter()
-            .all(|address| is_native_proxy_synthetic_ip(address.ip()));
     match select_public_exit_addresses(addresses) {
-        PublicAddressSelection::Public(addresses) => Ok(NativeHttpsEgress::Direct {
+        PublicAddressSelection::Public(addresses) => Ok(NativeHttpsEgress {
             host: target.host().to_string(),
             addresses,
         }),
-        PublicAddressSelection::Denied if proxy_synthetic_resolution => configured_proxy
-            .map(NativeHttpsEgress::Proxy)
-            .ok_or(Error::NoPermission),
         PublicAddressSelection::Denied => Err(Error::NoPermission),
         PublicAddressSelection::Empty => Err(Error::OnionTargetResolvedEmpty {
             authority: target.authority(),
         }),
     }
-}
-
-/// Return whether local DNS produced the narrow IPv4 range commonly reserved for proxy fake-IP
-/// synthesis. No other non-public address is eligible for proxy-side resolution.
-const fn is_native_proxy_synthetic_ip(address: IpAddr) -> bool {
-    matches!(address, IpAddr::V4(address) if matches!(address.octets(), [198, 18..=19, _, _]))
 }
 
 fn native_http_error(context: &str, error: reqwest::Error) -> Error {
@@ -151,7 +125,6 @@ pub(super) async fn native_fetch_with_timeout(
         .timeout(timeout);
     let client = egress
         .configure(client)
-        .map_err(|error| native_http_error("configure HTTPS proxy", error))?
         .build()
         .map_err(|error| Error::HttpRequestError(format!("build HTTPS proxy client: {error}")))?;
     let mut builder = client.request(method, url);

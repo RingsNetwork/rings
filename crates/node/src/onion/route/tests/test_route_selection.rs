@@ -352,13 +352,12 @@ fn test_exit_requires_its_current_relay_registration() -> Result<()> {
 fn test_route_rejects_symbol_hop_with_stale_epoch() -> Result<()> {
     let keys = node_keys(1..=4)?;
     let exit = keys.get(2).ok_or(Error::InvalidData)?;
-    let mut next = keys.iter().map(|key| hop(key, STALE_PROCESS_EPOCH));
-    let stale = OnionLoop::try_unfold(
-        OnionPipelineSymbols::new(&[], &()),
-        &mut next,
-        |next, _| next.next().ok_or(Error::InvalidData),
-        |next, _| next.next().ok_or(Error::InvalidData),
-    )?;
+    let stale = |index: usize| {
+        keys.get(index)
+            .map(|key| hop(key, STALE_PROCESS_EPOCH))
+            .ok_or(Error::InvalidData)
+    };
+    let stale = one_symbol_loop([stale(0)?, stale(1)?, stale(3)?], stale(2)?)?;
 
     assert!(matches!(
         OnionRoute::new(OnionServiceName::tcp(), stale, live_exit(exit)?),
@@ -462,6 +461,17 @@ fn candidates_with_exit(
     })
 }
 
+/// The loop `g, r, symbol, r′, g` of a one-symbol pipeline, with `relays = [g, r, r′]`.
+fn one_symbol_loop(
+    relays: [OnionRouteHop; 3],
+    symbol: OnionRouteHop,
+) -> Result<OnionLoop<OnionRouteHop>> {
+    let mut relays = relays.into_iter();
+    OnionLoop::try_unfold(Vec::new(), symbol, |_| {
+        relays.next().ok_or(Error::InvalidData)
+    })
+}
+
 /// Draw a loop for the pipeline whose symbols are registered by the hops of `symbols`, and
 /// relabel its symbol positions by those hops.
 fn draw_loop(
@@ -472,11 +482,10 @@ fn draw_loop(
     let relays = RelayRegistrants::new(relays.to_vec());
     let admitted = symbols
         .iter()
-        .map(|registrants| relays.admit(registrants.iter().copied(), |hop| *hop))
+        .map(|registrants| relays.admit(registrants.iter(), |hop| **hop))
         .collect::<Vec<_>>();
-    let (terminal, intermediate) = admitted.split_last().ok_or(Error::InvalidData)?;
     select_loop(
-        OnionPipelineSymbols::new(intermediate, terminal),
+        OnionPipelineSymbols::new(&admitted).ok_or(Error::InvalidData)?,
         &relays,
         &BTreeMap::new(),
         entropy,
@@ -763,17 +772,13 @@ fn test_hall_filter_ignores_registrants_outside_the_relays() -> Result<()> {
 #[test]
 fn test_has_duplicate_dids_admits_exactly_the_guard_twice() -> Result<()> {
     let keys = node_keys(1..=4)?;
-    let labelled = |order: [usize; 4]| {
-        let mut next = order
-            .into_iter()
-            .filter_map(|index| keys.get(index))
-            .map(|key| hop(key, TEST_PROCESS_EPOCH));
-        OnionLoop::try_unfold(
-            OnionPipelineSymbols::new(&[], &()),
-            &mut next,
-            |next, _| next.next().ok_or(Error::InvalidData),
-            |next, _| next.next().ok_or(Error::InvalidData),
-        )
+    let at = |index: usize| {
+        keys.get(index)
+            .map(|key| hop(key, TEST_PROCESS_EPOCH))
+            .ok_or(Error::InvalidData)
+    };
+    let labelled = |[guard, relay, symbol, back]: [usize; 4]| {
+        one_symbol_loop([at(guard)?, at(relay)?, at(back)?], at(symbol)?)
     };
 
     let distinct = labelled([0, 1, 2, 3])?;
@@ -796,13 +801,15 @@ fn test_has_duplicate_dids_admits_exactly_the_guard_twice() -> Result<()> {
 fn test_route_rejects_loop_of_another_pipeline_shape() -> Result<()> {
     let keys = node_keys(1..=7)?;
     let exit = keys.get(2).ok_or(Error::InvalidData)?;
-    let mut next = keys.iter().map(|key| hop(key, TEST_PROCESS_EPOCH));
-    let hops = OnionLoop::try_unfold(
-        OnionPipelineSymbols::new(&[()], &()),
-        &mut next,
-        |next, _| next.next().ok_or(Error::InvalidData),
-        |next, _| next.next().ok_or(Error::InvalidData),
-    )?;
+    let at = |index: usize| {
+        keys.get(index)
+            .map(|key| hop(key, TEST_PROCESS_EPOCH))
+            .ok_or(Error::InvalidData)
+    };
+    let mut relays = [at(0)?, at(1)?, at(3)?, at(4)?, at(6)?].into_iter();
+    let hops = OnionLoop::try_unfold(vec![at(2)?], at(5)?, |_| {
+        relays.next().ok_or(Error::InvalidData)
+    })?;
 
     assert!(matches!(
         OnionRoute::new(OnionServiceName::tcp(), hops, live_exit(exit)?),

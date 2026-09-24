@@ -28,6 +28,9 @@ pub enum OnionRouteError {
     /// The symbol registrants admit no assignment of pairwise distinct hops to the symbol
     /// positions of a loop.
     NoDistinctSymbolHops,
+    /// A loop draw found no candidate although its matching guaranteed one: a violated invariant
+    /// of loop selection, never a property of the network.
+    LoopDrawInvariant,
     /// A route's loop does not have the shape of the route's pipeline.
     LoopShapeMismatch {
         /// Symbol applications of the route's pipeline.
@@ -169,6 +172,9 @@ impl fmt::Display for OnionRouteError {
             Self::NoDistinctSymbolHops => {
                 f.write_str("onion symbol registrants admit no distinct hop per symbol position")
             }
+            Self::LoopDrawInvariant => f.write_str(
+                "onion loop selection violated its invariant: a guaranteed draw had no candidate",
+            ),
             Self::LoopShapeMismatch { expected, actual } => write!(
                 f,
                 "onion loop has {actual} symbol hops but its pipeline has {expected}"

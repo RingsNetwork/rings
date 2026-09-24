@@ -308,7 +308,10 @@ and every position except the guard's return is a distinct node. Selection fails
 closed when fewer than `H − 1` distinct eligible relays are live; it never
 shortens a route, because a short path is a distinguishable segment length. The
 exit is drawn first, by quality among the exits, then the guard, then the
-relays, so a scarce high-quality exit is not consumed as a guard or relay. The
+relays, so a scarce high-quality exit is not consumed as a guard or relay: when
+every registered exit extends to a loop, the exit's marginal is its quality share
+among the exits. A draw that would leave a later position unfillable is excluded
+up front, which conditions that marginal otherwise. The
 current data plane still seals the forward prefix `g → r → exit` and answers
 along its reverse; the return segment is selected but not yet used.
 

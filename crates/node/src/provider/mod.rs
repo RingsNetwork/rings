@@ -30,6 +30,10 @@ use crate::measure::EvidenceStorage;
 use crate::measure::MeasureStorage;
 use crate::measure::PeriodicMeasure;
 use crate::measure::UnavailableEvidenceStorage;
+#[cfg(feature = "node")]
+use crate::onion::circuit::ONION_CIRCUIT_NAMESPACE;
+#[cfg(feature = "node")]
+use crate::onion::native::NativeOnionCircuitHandle;
 use crate::onion::OnionEntryGuardStorage;
 use crate::prelude::wasm_export;
 use crate::processor::Processor;
@@ -363,16 +367,38 @@ impl Provider {
 
     /// Listen for messages until this future is dropped or aborted.
     ///
-    /// This is a long-running task; do not await completion as a readiness signal.
-    pub async fn listen(&self) {
+    /// This is a long-running task; do not await completion as a readiness signal. Listening
+    /// publishes the processor's registrations, so a role that registers `relay` first installs
+    /// its onion runtime (`install_onion_runtime`).
+    pub async fn listen(&self) -> Result<()> {
+        self.install_onion_runtime()?;
         self.processor.listen().await;
+        Ok(())
     }
 
     /// Listen for messages until `stop` requests cooperative shutdown.
     ///
-    /// This is a long-running task; do not await completion as a readiness signal.
-    pub async fn listen_with(&self, stop: StopToken) {
+    /// This is a long-running task; do not await completion as a readiness signal. Like
+    /// [`Self::listen`], it first installs the onion runtime of a role that registers `relay`.
+    pub async fn listen_with(&self, stop: StopToken) -> Result<()> {
+        self.install_onion_runtime()?;
         self.processor.listen_with(stop).await;
+        Ok(())
+    }
+
+    /// Install the onion circuit runtime when the processor's role registers `relay` and no
+    /// runtime is installed yet, so a native node never advertises a relay it does not run.
+    ///
+    /// A caller that needs the circuit handle installs it first
+    /// ([`NativeOnionCircuitHandle::install`]); listening then keeps that installation.
+    fn install_onion_runtime(&self) -> Result<()> {
+        let extensions = self.extensions();
+        if self.processor.onion_role().registers_relay()
+            && !extensions.contains(ONION_CIRCUIT_NAMESPACE)
+        {
+            NativeOnionCircuitHandle::install(&extensions)?;
+        }
+        Ok(())
     }
 }
 

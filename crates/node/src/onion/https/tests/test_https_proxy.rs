@@ -28,7 +28,6 @@ use crate::onion::proxy::OnionProxyRoute;
 use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitDescriptorBody;
 use crate::onion::OnionLoop;
-use crate::onion::OnionPipelineSymbols;
 use crate::onion::OnionRoute;
 use crate::onion::OnionRouteHop;
 use crate::onion::OnionServiceName;
@@ -190,13 +189,10 @@ fn https_route(exit: &DelegateeKey, guard: &DelegateeKey) -> OnionProxyRoute {
             symbol.process_epoch,
         )
     };
-    let mut next = [hop(guard), hop(&session()), symbol, hop(&session())].into_iter();
-    let hops = OnionLoop::try_unfold(
-        OnionPipelineSymbols::new(&[], &()),
-        &mut next,
-        |next, _| next.next().ok_or(Error::InvalidData),
-        |next, _| next.next().ok_or(Error::InvalidData),
-    )
+    let mut relays = [hop(guard), hop(&session()), hop(&session())].into_iter();
+    let hops = OnionLoop::try_unfold(Vec::new(), symbol, |_| {
+        relays.next().ok_or(Error::InvalidData)
+    })
     .expect("HTTPS loop");
     let route = OnionRoute::new(OnionServiceName::https(), hops, descriptor).expect("HTTPS route");
     OnionProxyRoute {
@@ -607,7 +603,7 @@ async fn test_native_fetch_times_out_stalled_response() {
         headers: Vec::new(),
         body: Vec::new(),
     };
-    let egress = NativeHttpsEgress::Direct {
+    let egress = NativeHttpsEgress {
         host: address.ip().to_string(),
         addresses: vec![address],
     };
@@ -653,7 +649,7 @@ async fn test_native_fetch_records_response_bytes_as_chunks_arrive() {
     };
     let recorded = std::sync::Arc::new(AtomicU64::new(0));
     let recorded_for_fetch = recorded.clone();
-    let egress = NativeHttpsEgress::Direct {
+    let egress = NativeHttpsEgress {
         host: address.ip().to_string(),
         addresses: vec![address],
     };
@@ -744,7 +740,7 @@ async fn test_native_fetch_uses_validated_url_authority_instead_of_caller_host()
         ],
         body: b"ok".to_vec(),
     };
-    let egress = NativeHttpsEgress::Direct {
+    let egress = NativeHttpsEgress {
         host: "allowed.example".to_string(),
         addresses: vec![address],
     };
@@ -767,95 +763,29 @@ async fn test_native_fetch_uses_validated_url_authority_instead_of_caller_host()
 
 #[cfg(rings_native)]
 #[test]
-fn test_native_egress_selection_pins_public_addresses_and_proxies_only_synthetic_dns() {
+fn test_native_egress_selection_pins_public_addresses_and_denies_the_rest() {
     let target = OnionProxyTarget::parse_authority("example.com:443").unwrap();
     let public = "8.8.8.8:443".parse().unwrap();
-    let synthetic = "198.18.1.113:443".parse().unwrap();
 
     assert_eq!(
-        select_native_https_egress(
-            &target,
-            vec![public],
-            Some("http://127.0.0.1:6152".to_string()),
-        )
-        .unwrap(),
-        NativeHttpsEgress::Direct {
+        select_native_https_egress(&target, vec![public]).unwrap(),
+        NativeHttpsEgress {
             host: "example.com".to_string(),
             addresses: vec![public],
         },
     );
-    assert_eq!(
-        select_native_https_egress(
-            &target,
-            vec![synthetic],
-            Some("http://127.0.0.1:6152".to_string()),
-        )
-        .unwrap(),
-        NativeHttpsEgress::Proxy("http://127.0.0.1:6152".to_string()),
-    );
-    assert!(matches!(
-        select_native_https_egress(&target, vec![synthetic], None),
-        Err(Error::NoPermission),
-    ));
-}
-
-#[cfg(rings_native)]
-#[test]
-fn test_native_proxy_fallback_rejects_private_loopback_and_literal_synthetic_targets() {
-    let proxy = Some("http://127.0.0.1:6152".to_string());
     for (authority, address) in [
         ("localhost:443", "127.0.0.1:443"),
         ("internal.example:443", "10.0.0.1:443"),
+        ("example.com:443", "198.18.1.113:443"),
         ("198.18.1.113:443", "198.18.1.113:443"),
     ] {
         let target = OnionProxyTarget::parse_authority(authority).unwrap();
         assert!(matches!(
-            select_native_https_egress(&target, vec![address.parse().unwrap()], proxy.clone()),
+            select_native_https_egress(&target, vec![address.parse().unwrap()]),
             Err(Error::NoPermission),
         ));
     }
-}
-
-#[cfg(rings_native)]
-#[cfg(rings_native)]
-#[tokio::test]
-async fn test_native_proxy_egress_delegates_target_resolution() {
-    let proxy = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-    let proxy_address = proxy.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        let (mut stream, _) = proxy.accept().await.unwrap();
-        let mut request = [0_u8; 2048];
-        let request_len = stream.read(&mut request).await.unwrap();
-        let request = String::from_utf8_lossy(&request[..request_len]);
-        assert!(request.starts_with("GET http://unresolvable.invalid/probe HTTP/1.1"));
-        stream
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
-            .await
-            .unwrap();
-    });
-    let request = OnionHttpsRequest {
-        target: "unresolvable.invalid:80".to_string(),
-        method: "GET".to_string(),
-        path: "/probe".to_string(),
-        headers: Vec::new(),
-        body: Vec::new(),
-    };
-    let egress = NativeHttpsEgress::Proxy(format!("http://{proxy_address}"));
-
-    let response = native_fetch_with_timeout(
-        "http://unresolvable.invalid/probe",
-        &request,
-        DEFAULT_HTTPS_RESPONSE_BODY_LIMIT_BYTES,
-        Duration::from_secs(1),
-        &egress,
-        |_| Ok(()),
-    )
-    .await
-    .unwrap();
-
-    server.await.unwrap();
-    assert_eq!(response.status, 200);
-    assert_eq!(response.body, b"ok");
 }
 
 #[test]

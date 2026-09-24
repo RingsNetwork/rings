@@ -141,7 +141,7 @@ impl OnionExitOffer {
 
 /// Return whether this node's runtime interprets the world-facing `service`: a native runtime
 /// interprets every one, a browser runtime, which has `fetch` but no sockets, only `https`.
-pub fn runtime_interprets(service: &OnionServiceName) -> bool {
+pub(crate) fn runtime_interprets(service: &OnionServiceName) -> bool {
     cfg!(not(rings_browser)) || *service == OnionServiceName::https()
 }
 

@@ -125,8 +125,8 @@ async fn run_browser_onion_webview_flow() -> WebviewResult<()> {
     )
     .await?;
     for (offerer, answerer) in edges.iter() {
-        poll_until("the fixture edge to connect", || {
-            peer_connected(offerer, answerer)
+        poll_until("the fixture edge to connect on both sides", || {
+            edge_connected(offerer, answerer)
         })
         .await?;
     }
@@ -344,12 +344,18 @@ where
     )))
 }
 
-/// Return whether `offerer` lists `answerer` as a connected peer.
-async fn peer_connected(offerer: &Provider, answerer: &Provider) -> WebviewResult<bool> {
-    let peers = rpc(offerer, "listPeers", Object::new().into()).await?;
-    let answerer = answerer.address();
+/// Return whether the edge `offerer — answerer` is connected on both sides: each end lists the
+/// other as a connected peer, so either one can relay over it.
+async fn edge_connected(offerer: &Provider, answerer: &Provider) -> WebviewResult<bool> {
+    Ok(peer_connected(offerer, answerer).await? && peer_connected(answerer, offerer).await?)
+}
+
+/// Return whether `local` lists `remote` as a connected peer.
+async fn peer_connected(local: &Provider, remote: &Provider) -> WebviewResult<bool> {
+    let peers = rpc(local, "listPeers", Object::new().into()).await?;
+    let remote = remote.address();
     Ok(array_field(&peers, "peers")?.iter().any(|peer| {
-        string_field(&peer, "did").is_ok_and(|did| did == answerer)
+        string_field(&peer, "did").is_ok_and(|did| did == remote)
             && string_field(&peer, "state").is_ok_and(|state| state == "Connected")
     }))
 }

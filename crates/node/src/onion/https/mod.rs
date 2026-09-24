@@ -128,8 +128,6 @@ pub(crate) struct OnionHttpsRuntime {
     pub(super) forward_replays: OnionForwardReplayWitness,
     accounting: OnionExitAccounting,
     link_sender: OnionLinkSender,
-    #[cfg(rings_native)]
-    native_proxy: Mutex<Option<String>>,
 }
 
 impl OnionHttpsRuntime {
@@ -159,8 +157,6 @@ impl OnionHttpsRuntime {
             forward_replays,
             accounting,
             link_sender,
-            #[cfg(rings_native)]
-            native_proxy: Mutex::new(None),
         }
     }
 
@@ -172,14 +168,6 @@ impl OnionHttpsRuntime {
     #[cfg(rings_browser)]
     pub(crate) fn link_sender(&self) -> OnionLinkSender {
         self.link_sender.clone()
-    }
-
-    #[cfg(rings_native)]
-    pub(crate) fn native_proxy(&self) -> Option<String> {
-        self.native_proxy
-            .lock()
-            .ok()
-            .and_then(|proxy| proxy.clone())
     }
 
     #[cfg(all(test, rings_native))]
