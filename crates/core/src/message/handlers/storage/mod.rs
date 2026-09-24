@@ -26,6 +26,7 @@ use crate::dht::StorageSyncDestination;
 use crate::dht::StorageSyncPurpose;
 use crate::error::Error;
 use crate::error::Result;
+use crate::error::SendClass;
 use crate::message::effects::core_actor_steps;
 use crate::message::effects::yield_core_actor_step;
 use crate::message::effects::CoreEffect;
@@ -49,6 +50,10 @@ use crate::utils::get_epoch_ms;
 /// capacity event, never after a duration, within `REROUTING_BUDGET` deferrals; exhaustion
 /// returns `Error::ReroutingExhausted` with the last cause. A placement is applied at most
 /// once, so append, tombstone and compact keep their non-idempotent semantics.
+///
+/// The placements of one operation run concurrently and all run to completion: an `Err`
+/// means that at least one placement failed while others may have been applied, and it is an
+/// ambiguous error whenever any placement's outcome is unknown.
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait ChordStorageInterface {
@@ -72,6 +77,31 @@ pub trait ChordStorageInterfaceCacheChecker {
     ///
     /// Returns an optional `Entry` representing the cached data, or `None` if it is not found.
     async fn storage_check_cache(&self, entry_key: Did) -> Option<Entry>;
+}
+
+/// Join the results of an operation's placements, which all ran to completion.
+///
+/// `Ok` iff every placement succeeded. Otherwise the error reported is the join of the
+/// placements' acceptance classes: an `Ambiguous` error when any placement's effect is unknown
+/// (so a caller never mistakes a possibly-applied operation for an unapplied one), else the
+/// first error; every other error is logged, not dropped.
+fn join_placements(results: Vec<Result<()>>) -> Result<()> {
+    let mut errors = results
+        .into_iter()
+        .filter_map(Result::err)
+        .collect::<Vec<_>>();
+    if errors.is_empty() {
+        return Ok(());
+    }
+    let reported = errors
+        .iter()
+        .position(|error| error.send_class() == SendClass::Ambiguous)
+        .unwrap_or(0);
+    let error = errors.swap_remove(reported);
+    for other in errors {
+        tracing::warn!(%other, "another placement of the storage operation failed");
+    }
+    Err(error)
 }
 
 fn finish_storage_action(act: PeerRingAction) -> Result<()> {
@@ -134,14 +164,12 @@ async fn handle_storage_fetch_act(
         }
         PeerRingAction::MultiActions(acts) => {
             // Placements are independent: one waiting for its trigger must not hold the others.
-            join_all(
-                acts.into_iter().map(|act| {
+            join_placements(
+                join_all(acts.into_iter().map(|act| {
                     handle_storage_fetch_act(transport.clone(), resource, act, redundancy)
-                }),
-            )
-            .await
-            .into_iter()
-            .collect::<Result<()>>()?;
+                }))
+                .await,
+            )?;
         }
         PeerRingAction::EntryMisses(misses) => {
             transport.observe_storage_misses(resource, redundancy, misses)?;
@@ -166,13 +194,13 @@ pub(super) async fn handle_storage_store_act(
         }
         PeerRingAction::MultiActions(acts) => {
             // Placements are independent: one waiting for its trigger must not hold the others.
-            join_all(
-                acts.into_iter()
-                    .map(|act| handle_storage_store_act(transport.clone(), act)),
-            )
-            .await
-            .into_iter()
-            .collect::<Result<()>>()?;
+            join_placements(
+                join_all(
+                    acts.into_iter()
+                        .map(|act| handle_storage_store_act(transport.clone(), act)),
+                )
+                .await,
+            )?;
         }
         act => finish_storage_action(act)?,
     }

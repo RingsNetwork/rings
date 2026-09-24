@@ -8,7 +8,6 @@
 //! production values at every step, so each step runs production code on production values.
 
 use super::super::Awaiting;
-use super::super::CapacityStamp;
 use super::super::LinkHop;
 use super::super::LinkRoute;
 use super::super::Rerouting;
@@ -20,6 +19,8 @@ use crate::error::Result;
 use crate::error::SendClass;
 use crate::error::SendDeferral;
 use crate::swarm::transport::delivery::SendCompletionOutcome;
+use crate::swarm::transport::outbound::PeerProgress;
+use crate::swarm::transport::outbound::TransferDemand;
 use crate::swarm::transport::pending::ConnectionLifecycleRegistry;
 use crate::swarm::transport::pending::LifecycleBounds;
 use crate::swarm::transport::pending::PendingConnectionAttempt;
@@ -77,7 +78,11 @@ pub(super) enum Refusal {
     Cancelled,
     /// The bound generation cannot make progress: `TransportNotReady`.
     NotReady,
-    /// Capacity admission timed out: `OutboundTransferAdmissionTimeout` (`CapacityRelease`).
+    /// The hop's own capacity is full: `OutboundTransferCapacityExceeded` (`CapacityRelease`,
+    /// peer scope).
+    PeerFull,
+    /// Shared capacity admission timed out: `OutboundTransferAdmissionTimeout`
+    /// (`CapacityRelease`, global scope).
     AdmissionTimeout,
     /// The backend queue did not accept in time: `DataChannelSendQueueTimeout`
     /// (`ChannelDrain`).
@@ -88,7 +93,8 @@ impl Refusal {
     /// The model's own reading of the trigger, independent of `send_class`.
     pub(super) const fn trigger(self) -> Trigger {
         match self {
-            Self::AdmissionTimeout => Trigger::Capacity,
+            Self::PeerFull => Trigger::PeerCapacity,
+            Self::AdmissionTimeout => Trigger::GlobalCapacity,
             Self::QueueTimeout => Trigger::Drain,
             Self::Missing
             | Self::Superseded
@@ -104,8 +110,10 @@ impl Refusal {
 pub(super) enum Trigger {
     /// A usable hop, or a route move.
     Link,
-    /// A capacity release by another transfer, or a route move.
-    Capacity,
+    /// A release by another transfer of the hop, or a route move.
+    PeerCapacity,
+    /// A release by any other transfer, or a route move.
+    GlobalCapacity,
     /// The hop's channel drained or its generation changed, or a route move.
     Drain,
 }
@@ -154,6 +162,10 @@ impl Refusal {
             Self::NotReady => Error::TransportNotReady {
                 state: rings_transport::core::transport::WebrtcConnectionState::Disconnected,
                 data_channel_open: true,
+            },
+            Self::PeerFull => Error::OutboundTransferCapacityExceeded {
+                peer: hop,
+                capacity: 1,
             },
             Self::AdmissionTimeout => Error::OutboundTransferAdmissionTimeout {
                 peer: hop,
@@ -231,8 +243,6 @@ pub(super) enum Phase {
         hop: Hop,
         /// The hop's sendable generation at binding (`LinkHop::generation`).
         generation: Option<u64>,
-        /// Capacity epoch read before the send.
-        stamp: u64,
     },
     /// `Waiting`: the fields of the production `Awaiting`.
     Waiting {
@@ -242,8 +252,8 @@ pub(super) enum Phase {
         hop: Hop,
         /// `Awaiting::generation`.
         generation: Option<u64>,
-        /// `Awaiting::stamp`.
-        stamp: u64,
+        /// The hop's peer release epoch read after the refusal (`PeerStamp`).
+        peer: u64,
         /// The refusal its cause was built from.
         cause: Refusal,
     },
@@ -270,6 +280,8 @@ pub(super) struct Churn {
     pub(super) congestions: u8,
     /// Other transfers entering a hop's channel.
     pub(super) jams: u8,
+    /// A hop's own capacity filling up (its in-flight transfers hold every slot).
+    pub(super) fills: u8,
     /// Sends accepted and then failed ambiguously.
     pub(super) ambiguities: u8,
 }
@@ -283,12 +295,14 @@ pub(super) struct State {
     pub(super) ready: bool,
     /// The route preference.
     pub(super) preference: Preference,
-    /// Whether the next resolution meets exhausted capacity.
+    /// Whether shared (global) capacity is exhausted.
     pub(super) congested: bool,
-    /// The capacity-release epoch.
-    pub(super) capacity: u64,
-    /// Other transfers holding each hop's channel (by `Hop::index`).
+    /// Other transfers holding each hop's channel and capacity (by `Hop::index`).
     pub(super) jam: [u8; 2],
+    /// Whether each hop's own capacity is full. Inv: `full[h] ⇒ jam[h] > 0`.
+    pub(super) full: [bool; 2],
+    /// Each hop's peer release epoch.
+    pub(super) released: [u64; 2],
     /// The automaton.
     pub(super) phase: Phase,
     /// Remaining environment budget.
@@ -328,8 +342,10 @@ pub(super) enum Action {
     Reroute(Preference),
     /// Env: local capacity is exhausted for the next resolution.
     Congest,
-    /// Env: another transfer enters the hop's channel buffer.
+    /// Env: another transfer enters the hop's channel.
     Jam(Hop),
+    /// Env: the hop's own capacity fills up.
+    FillPeer(Hop),
     /// Env: the in-flight send is accepted, then fails ambiguously.
     AcceptThenFail(Ambiguity),
     /// Protocol (weakly fair): the pending generation becomes ready and is admitted.
@@ -338,10 +354,11 @@ pub(super) enum Action {
     Recover,
     /// Protocol (weakly fair): the dead generation's close retires it.
     Close,
-    /// Protocol (weakly fair): an admitted transfer releases capacity.
+    /// Protocol (weakly fair): another peer's transfer releases enough to clear shared
+    /// congestion.
     Release,
-    /// Protocol (weakly fair): another transfer's frames leave the hop's channel, releasing
-    /// its capacity.
+    /// Protocol (weakly fair): another transfer of the hop completes, releasing its peer and
+    /// global capacity (it clears the hop's full capacity, not shared congestion).
     Drain(Hop),
     /// Protocol: compute the route and bind a send, or settle locally.
     Send,
@@ -366,6 +383,7 @@ impl Action {
                 | Self::Reroute(_)
                 | Self::Congest
                 | Self::Jam(_)
+                | Self::FillPeer(_)
                 | Self::AcceptThenFail(_)
         )
     }
@@ -408,8 +426,9 @@ impl Model {
             ready: true,
             preference: Preference::Target,
             congested: false,
-            capacity: 0,
             jam: [0; 2],
+            full: [false; 2],
+            released: [0; 2],
             phase: Phase::Compute { deferrals: 0 },
             churn: self.churn,
             effects: 0,
@@ -485,10 +504,17 @@ impl State {
         }
     }
 
-    /// `Idle(hop)`: no other transfer holds the hop's channel (`OutboundSchedulers::is_idle`;
-    /// the refused transfer's own release is not a transfer in flight).
-    pub(super) fn is_idle(&self, hop: Hop) -> bool {
-        self.jam[hop.index()] == 0
+    /// `Room(hop, demand)`: neither the hop's own capacity nor the shared one is exhausted.
+    pub(super) fn has_room(&self, hop: Hop) -> bool {
+        !self.full[hop.index()] && !self.congested
+    }
+
+    /// The production `PeerProgress` of `hop` against a peer stamp `peer`.
+    pub(super) fn progress(&self, hop: Hop, peer: u64) -> PeerProgress {
+        PeerProgress {
+            released: self.released[hop.index()] > peer,
+            idle: self.jam[hop.index()] == 0,
+        }
     }
 }
 
@@ -497,7 +523,12 @@ impl State {
 /// Panics when the classification no longer defers it: the model's refusals are the
 /// pre-acceptance outcomes `send_class` proves deferrable.
 pub(super) fn deferral(hop: Hop, refusal: Refusal) -> SendDeferral {
-    match Verdict::remote(hop.did(), None, refusal.outcome(hop.did(), 0)) {
+    match Verdict::remote(
+        hop.did(),
+        None,
+        TransferDemand::for_test(),
+        refusal.outcome(hop.did(), 0),
+    ) {
         Verdict::Deferred { cause, .. } => cause,
         verdict => panic!("{refusal:?} must defer, classified {verdict:?}"),
     }
@@ -508,25 +539,25 @@ pub(super) fn awaiting(
     deferrals: u8,
     hop: Hop,
     generation: Option<u64>,
-    stamp: u64,
     cause: Refusal,
 ) -> Awaiting {
     Awaiting {
         deferrals,
         hop: hop.did(),
         generation,
-        stamp: CapacityStamp(stamp),
+        demand: TransferDemand::for_test(),
         cause: deferral(hop, cause),
     }
 }
 
-/// Where a resolved send stood: its hop and the capacity stamp read before it.
+/// Where a resolved send stood: its hop, and the hop's peer release epoch read after its
+/// resolution.
 #[derive(Clone, Copy)]
 pub(super) struct Resolved {
     /// The bound hop.
     pub(super) hop: Hop,
-    /// Capacity epoch read before the send.
-    pub(super) stamp: u64,
+    /// The hop's peer release epoch read after the resolution.
+    pub(super) peer: u64,
 }
 
 /// Run the production `δ` from `deferrals` spent on the resolved send, and project the step
@@ -541,19 +572,18 @@ pub(super) fn transition(
         Verdict::Deferred { cause, .. } => Some(cause.to_string()),
         Verdict::Accepted | Verdict::Failed(_) => None,
     };
-    match (Rerouting { deferrals }).after(CapacityStamp(resolved.stamp), verdict) {
+    match (Rerouting { deferrals }).after(verdict) {
         Step::Complete => Phase::Done(Outcome::Accepted),
         Step::Await(Awaiting {
             deferrals,
             generation,
-            stamp,
             ..
         }) => match refusal {
             Some(cause) => Phase::Waiting {
                 deferrals,
                 hop: resolved.hop,
                 generation,
-                stamp: stamp.0,
+                peer: resolved.peer,
                 cause,
             },
             None => Phase::Done(Outcome::Unexpected),

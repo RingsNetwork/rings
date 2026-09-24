@@ -15,6 +15,7 @@ use futures::poll;
 use super::super::ChordStorageInterface;
 use super::test_support::assert_cached_data_values;
 use super::test_support::next_generated_key;
+use super::test_support::next_payload_matching;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::Did;
@@ -22,6 +23,7 @@ use crate::dht::OperateRoute;
 use crate::ecc::tests::gen_ordered_keys;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::types::Message;
 use crate::message::Encoder;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;
@@ -65,6 +67,32 @@ fn kill_generation(writer: &Node, owner: &Node) -> Result<()> {
     Ok(())
 }
 
+/// Drain `node`'s inbox and count the `OperateEntry` payloads it received.
+async fn operate_entries_received(node: &Node) -> Result<usize> {
+    let mut count = 0;
+    while let Some(payload) = node.try_listen_once().await {
+        count += usize::from(matches!(
+            payload.transaction.data()?,
+            Message::OperateEntry(_)
+        ));
+    }
+    Ok(count)
+}
+
+/// Count the further `OperateEntry` payloads `owner` receives until `writer` has no transfer
+/// in flight and `owner` no inbound message left.
+async fn operate_entries_delivered(writer: &Node, owner: &Node) -> Result<usize> {
+    let mut count = 0;
+    loop {
+        let settled = !writer.has_outbound_transfer() && !owner.has_inbound_message();
+        count += operate_entries_received(owner).await?;
+        if settled {
+            return Ok(count);
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
 /// `Close`, `Dial`, `Admit`: retire the dead generation and admit a replacement.
 async fn replace_generation(writer: &Node, owner: &Node) -> Result<()> {
     writer.swarm.disconnect(owner.did()).await?;
@@ -75,13 +103,15 @@ async fn replace_generation(writer: &Node, owner: &Node) -> Result<()> {
 }
 
 /// Law (S1, L1 on the shell): an append refused by a dead generation waits for the
-/// replacement's admission, then is applied at the owner exactly once.
+/// replacement's admission, then reaches the owner exactly once (one `OperateEntry` received)
+/// and is applied.
 #[tokio::test]
 async fn test_append_refused_by_a_dead_generation_waits_and_applies_once() -> Result<()> {
     let topic = "rerouted append waits for the replacement generation";
     let (writer, owner) = linked_route(topic).await?;
     let placement = Entry::gen_did(topic)?;
     kill_generation(&writer, &owner)?;
+    operate_entries_received(&owner).await?;
 
     let append = writer
         .swarm
@@ -98,6 +128,18 @@ async fn test_append_refused_by_a_dead_generation_waits_and_applies_once() -> Re
     replace_generation(&writer, &owner).await?;
     append.await?;
     assert_eq!(writer.swarm.transport.link_waiters_for_test(), 0);
+    next_payload_matching(&owner, "the append's delivery", |payload| {
+        Ok(matches!(
+            payload.transaction.data()?,
+            Message::OperateEntry(_)
+        ))
+    })
+    .await?;
+    assert_eq!(
+        operate_entries_delivered(&writer, &owner).await?,
+        0,
+        "no second delivery of the append"
+    );
     wait_for_msgs([&writer, &owner]).await;
 
     writer.swarm.storage_fetch(placement).await?;
@@ -132,4 +174,24 @@ async fn test_fetch_refused_by_a_dead_generation_waits_for_the_replacement() -> 
     fetch.await?;
     wait_for_msgs([&reader, &owner]).await;
     assert_cached_data_values(&reader, placement, &["111"]).await
+}
+
+/// Law (join of placements): an operation whose placements failed reports an ambiguous error
+/// whenever any placement's effect is unknown, else its first error; all succeeded ⇒ `Ok`.
+#[test]
+fn test_placement_errors_join_to_the_ambiguous_class() {
+    let peer = Did::from(7_u32);
+    let exhausted = || Error::ReroutingExhausted {
+        last: crate::error::SendDeferral::cancelled(peer),
+    };
+    let ambiguous = || Error::DetachedSendAbandonedAfterClaim { peer };
+    assert!(super::super::join_placements(vec![Ok(()), Ok(())]).is_ok());
+    assert!(matches!(
+        super::super::join_placements(vec![Ok(()), Err(exhausted()), Err(ambiguous())]),
+        Err(Error::DetachedSendAbandonedAfterClaim { .. })
+    ));
+    assert!(matches!(
+        super::super::join_placements(vec![Err(exhausted()), Err(Error::NoNextHop)]),
+        Err(Error::ReroutingExhausted { .. })
+    ));
 }

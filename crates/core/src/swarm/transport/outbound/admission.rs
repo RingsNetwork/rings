@@ -6,7 +6,7 @@
 //! admission did not succeed. The shared transport state model defines these
 //! edges; this wrapper adds the stop signal required by detached payload work.
 //!
-//! A detached caller observes `Cancelled` only through `cancelled_outcome`, so
+//! A detached caller observes `Cancelled` only through `settle_cancelled`, so
 //! `Cancelled` observed ⇒ no claim ever succeeded (lemma (P) of `error::send_class`).
 
 use rings_transport::core::admission::AdmissionEvent;
@@ -78,13 +78,13 @@ impl DetachedAdmission {
         }
     }
 
-    /// The outcome a detached caller may observe for a transfer to `peer` that ended
-    /// `Cancelled`.
+    /// Settle a detached transfer to `peer` that ended `Cancelled`: cancel the admission (a
+    /// compare-and-swap that also requests stop) and return what the caller may observe.
     ///
     /// Post: `Ok(Cancelled)` iff the admission is (or has now been moved to) `Cancelled`, so no
     /// claim can ever succeed; once a claim won (`Irrevocable` or `Accepted`), the backend may
     /// hold the frame, and the outcome is the ambiguous `DetachedSendAbandonedAfterClaim`.
-    pub(in crate::swarm::transport) fn cancelled_outcome(
+    pub(in crate::swarm::transport) fn settle_cancelled(
         &self,
         peer: Did,
     ) -> Result<SendCompletionOutcome> {

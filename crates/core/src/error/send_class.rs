@@ -33,7 +33,7 @@
 //!   itself: a worker that stops abnormally (dropped on panic or runtime cancellation,
 //!   `shutdown_with_results`) or is lost (`resolve_scheduler_loss`) publishes it whatever the
 //!   admission phase. So the caller boundary `do_send_payload_detached_until` passes every
-//!   `Ok(Cancelled)` through `DetachedAdmission::cancelled_outcome`: it stands iff the admission
+//!   `Ok(Cancelled)` through `DetachedAdmission::settle_cancelled`: it stands iff the admission
 //!   is, or is now moved to, `Cancelled`, from which no claim can succeed (a claim needs
 //!   `try_mark_irrevocable` from `Pending`); after a claim won, the caller receives the
 //!   ambiguous `DetachedSendAbandonedAfterClaim`. Hence a detached `Cancelled` observed by a
@@ -106,11 +106,13 @@ pub(crate) enum SendClass {
 pub(crate) enum DeferralTrigger {
     /// The hop's connection generation, its readiness, or the route changed.
     LinkChange,
-    /// Capacity admission refused the send before it held a permit; another transfer's release
-    /// (or a route change) can admit it.
+    /// Capacity admission refused the send before it held a permit: a release in the refused
+    /// scope (the peer's, or the global one while the peer is idle), or a route change, can
+    /// admit it.
     CapacityRelease,
-    /// The hop's data channel did not accept the frame in time: the peer must go idle (no
-    /// transfer of it in flight), or the generation or route change.
+    /// The hop's data channel did not accept the frame in time: the peer's link must make
+    /// progress (another transfer of it releases, or it goes idle), or the generation or route
+    /// change.
     ChannelDrain,
 }
 

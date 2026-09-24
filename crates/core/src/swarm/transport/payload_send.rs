@@ -21,6 +21,7 @@ use super::outbound::OutboundPeerHandle;
 use super::outbound::OutboundTransfer;
 use super::outbound::OutboundTransferRoute;
 use super::outbound::TransferCapacityPermit;
+use super::outbound::TransferDemand;
 use super::timeouts::OUTBOUND_PAYLOAD_CLEANUP_GRACE;
 use super::timeouts::TRACKED_PAYLOAD_COMPLETION_BOUND;
 use super::AdmittedConnection;
@@ -249,6 +250,11 @@ fn outbound_memory_reservation(wire_bytes: usize) -> usize {
     crate::fair_admission::retained_wire_bytes(wire_bytes).max(1)
 }
 
+/// The capacity demand of a transfer of `kind` whose wire form is `wire_bytes` long.
+fn transfer_demand(kind: OutboundMessageKind, wire_bytes: usize) -> TransferDemand {
+    TransferDemand::new(kind.class(), outbound_memory_reservation(wire_bytes))
+}
+
 fn resolve_scheduler_loss(
     admitted: &AdmittedConnection,
     local_error: Error,
@@ -261,17 +267,21 @@ fn resolve_scheduler_loss(
 }
 
 impl SwarmTransport {
+    /// The capacity demand of `payload`, as `prepare_outbound_transfer` reserves it.
+    pub(super) fn payload_demand(payload: &MessagePayload) -> Result<TransferDemand> {
+        Ok(transfer_demand(
+            OutboundMessageKind::from_wire(&payload.transaction.data)?,
+            payload.wire_size()?,
+        ))
+    }
+
     async fn reserve_outbound_capacity(
         &self,
         peer: Did,
-        kind: OutboundMessageKind,
-        bytes: usize,
+        demand: TransferDemand,
         completion: OutboundCompletion,
     ) -> Result<TransferCapacityPermit> {
-        let reserve = self
-            .outbound_schedulers
-            .reserve(peer, kind.class(), bytes)
-            .fuse();
+        let reserve = self.outbound_schedulers.reserve(peer, demand).fuse();
         if completion == OutboundCompletion::Tracked {
             return reserve.await;
         }
@@ -527,7 +537,7 @@ impl SwarmTransport {
             }
         };
         let Some(prepared) = prepared else {
-            return admission.cancelled_outcome(did);
+            return admission.settle_cancelled(did);
         };
         let mut cancel_on_drop =
             DetachedAdmissionOnDrop::new(admission.clone(), prepared.handle.clone());
@@ -568,7 +578,7 @@ impl SwarmTransport {
         // drop or panic, scheduler loss, a stopped submit) stands only while the admission can
         // still be cancelled, never after a claim won.
         match result {
-            Ok(SendCompletionOutcome::Cancelled) => admission.cancelled_outcome(did),
+            Ok(SendCompletionOutcome::Cancelled) => admission.settle_cancelled(did),
             result => result,
         }
     }
@@ -590,12 +600,7 @@ impl SwarmTransport {
         #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
         crate::simulation::record_outbound_submission(preparation.tx_id);
         let capacity_permit = self
-            .reserve_outbound_capacity(
-                did,
-                message_kind,
-                outbound_memory_reservation(wire_bytes),
-                completion,
-            )
+            .reserve_outbound_capacity(did, transfer_demand(message_kind, wire_bytes), completion)
             .await?;
         let permit = if message_kind.requires_storage_route() {
             let message = payload.transaction.data::<Message>()?;

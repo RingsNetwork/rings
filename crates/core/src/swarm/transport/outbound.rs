@@ -79,8 +79,11 @@ pub(super) use admission::DetachedAdmission;
 pub(super) use admission::DetachedAdmissionCancel;
 pub(super) use admission::DetachedAdmissionClaim;
 use capacity::GlobalTransferCapacity;
+pub(crate) use capacity::PeerProgress;
+pub(crate) use capacity::PeerStamp;
 use capacity::TransferCapacity;
 pub(super) use capacity::TransferCapacityPermit;
+pub(crate) use capacity::TransferDemand;
 #[cfg(test)]
 pub(crate) use capacity::OUTBOUND_CONTROL_RESERVED_TRANSFERS;
 #[cfg(test)]
@@ -386,15 +389,27 @@ impl OutboundSchedulers {
         Ok(handle)
     }
 
-    /// `Idle(peer)`: no transfer of `peer` holds capacity, so none has frames in its channel.
-    ///
-    /// Every release makes progress toward it and is notified by `capacity_releases`.
-    pub(super) fn is_idle(&self, peer: Did) -> bool {
-        self.lock_registry()
+    /// `Room(peer, demand)` now (see `TransferCapacity::has_room`), registering nothing.
+    pub(super) fn has_room(&self, peer: Did, demand: TransferDemand) -> bool {
+        let capacity = self
+            .lock_registry()
             .capacities
             .get(&peer)
-            .and_then(Weak::upgrade)
-            .is_none_or(|capacity| capacity.admitted() == 0)
+            .and_then(Weak::upgrade);
+        capacity.map_or_else(
+            || TransferCapacity::has_room_unheld(&self.global_capacity, peer, demand),
+            |capacity| capacity.has_room(peer, demand),
+        )
+    }
+
+    /// Stamp `peer`'s release epoch now (see `PeerStamp`).
+    pub(super) fn peer_stamp(&self, peer: Did) -> PeerStamp {
+        let capacity = self
+            .lock_registry()
+            .capacities
+            .get(&peer)
+            .and_then(Weak::upgrade);
+        PeerStamp::of(capacity.as_ref())
     }
 
     /// The epoch of outbound capacity releases, shared by every peer's transfers.
@@ -405,11 +420,10 @@ impl OutboundSchedulers {
     pub(super) async fn reserve(
         &self,
         peer: Did,
-        class: TransferClass,
-        bytes: usize,
+        demand: TransferDemand,
     ) -> Result<TransferCapacityPermit> {
         let capacity = self.lock_registry().capacity(peer, &self.global_capacity);
-        capacity.acquire(peer, class, bytes).await
+        capacity.acquire(peer, demand.class(), demand.bytes()).await
     }
 
     pub(super) fn shutdown(&self, peer: Did) {

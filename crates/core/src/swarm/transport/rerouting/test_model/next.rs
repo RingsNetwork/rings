@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! Env      ≜ Dial ∨ Glare ∨ Withdraw ∨ Die ∨ Disconnect ∨ Reroute(p) ∨ Congest ∨ Jam(h)
-//!          ∨ AcceptThenFail(a)                                      \* each spends Churn
+//!          ∨ FillPeer(h) ∨ AcceptThenFail(a)                        \* each spends Churn
 //! Protocol ≜ Admit ∨ Recover ∨ Close ∨ Release ∨ Drain(h)            \* WF
 //!          ∨ Send ∨ Accept ∨ Refuse(r) ∨ Wake                        \* the automaton
 //! ```
@@ -11,10 +11,12 @@
 //! bound to a generation that lost its slot, or that cannot make progress, is refused before
 //! acceptance; a send to a usable hop is refused by exhausted capacity, may time out in a
 //! jammed channel, or is accepted; only an accepted send can fail ambiguously. Every
-//! resolution is a production value classified by production code. The refused transfer's own
-//! capacity release is not an event here: production excludes it from both stamps.
+//! resolution is a production value classified by production code. Releases are scoped as in
+//! production: a hop's `Drain` (and a `Close`) frees the hop's own capacity and advances its
+//! peer epoch without clearing shared congestion; only `Release` clears shared congestion.
+//! Capacity waits read `Room` (`State::has_room`), channel waits the peer's progress against
+//! the stamp read after the refusal, so the refused send's own release is not an event.
 
-use super::super::CapacityStamp;
 use super::super::Observation;
 use super::super::Verdict;
 use super::carrier::admit;
@@ -33,6 +35,7 @@ use super::carrier::State;
 use super::carrier::Trigger;
 use super::carrier::AMBIGUITIES;
 use crate::error::SendDeferral;
+use crate::swarm::transport::outbound::TransferDemand;
 
 /// Every route preference, in action order.
 const PREFERENCES: [Preference; 3] = [Preference::Target, Preference::Alternate, Preference::Local];
@@ -47,7 +50,8 @@ const HOPS: [Hop; 2] = [Hop::Target, Hop::Alternate];
 /// Target, no generation bound         ─▶ { Missing }
 /// Target, generation lost its slot    ─▶ { Superseded, PermitRevoked, Cancelled }
 /// Target, generation not ready        ─▶ { NotReady, PermitRevoked, Missing }
-/// usable, capacity exhausted          ─▶ { AdmissionTimeout }
+/// usable, the hop's capacity full     ─▶ { PeerFull }
+/// usable, shared capacity exhausted   ─▶ { AdmissionTimeout }
 /// usable, channel jammed              ─▶ { QueueTimeout } and accept
 /// usable                              ─▶ accept
 /// ```
@@ -66,6 +70,9 @@ fn resolutions(state: &State, hop: Hop, generation: Option<u64>) -> (Vec<Refusal
             vec![Refusal::NotReady, Refusal::PermitRevoked, Refusal::Missing],
             false,
         ),
+        (Hop::Target | Hop::Alternate, _) if state.full[hop.index()] => {
+            (vec![Refusal::PeerFull], false)
+        }
         (Hop::Target | Hop::Alternate, _) if state.congested => {
             (vec![Refusal::AdmissionTimeout], false)
         }
@@ -113,14 +120,14 @@ impl Model {
                 deferrals,
                 hop,
                 generation,
-                stamp,
+                peer,
                 cause,
             } => {
                 let observation = Observation {
-                    capacity: CapacityStamp(state.capacity),
-                    idle: state.is_idle(hop),
+                    room: state.has_room(hop),
+                    peer: state.progress(hop, peer),
                 };
-                let triggered = awaiting(deferrals, hop, generation, stamp, cause)
+                let triggered = awaiting(deferrals, hop, generation, cause)
                     .is_triggered(state.link_route(), observation);
                 if triggered || self.mutation == Mutation::WakeUntriggered {
                     actions.push(Action::Wake);
@@ -159,6 +166,13 @@ impl Model {
         actions.extend((!state.congested && churn.congestions > 0).then_some(Action::Congest));
         if churn.jams > 0 {
             actions.extend(HOPS.into_iter().map(Action::Jam));
+        }
+        if churn.fills > 0 {
+            actions.extend(
+                HOPS.into_iter()
+                    .filter(|hop| state.jam[hop.index()] > 0 && !state.full[hop.index()])
+                    .map(Action::FillPeer),
+            );
         }
         if let Phase::InFlight {
             hop, generation, ..
@@ -216,6 +230,10 @@ impl Model {
                 next.churn.jams -= 1;
                 next.jam[hop.index()] += 1;
             }
+            Action::FillPeer(hop) => {
+                next.churn.fills -= 1;
+                next.full[hop.index()] = true;
+            }
             Action::Admit => {
                 let pending = next.registry.pending_attempt(target)?;
                 admit(&mut next.registry, pending);
@@ -223,11 +241,8 @@ impl Model {
             }
             Action::Recover => next.ready = true,
             Action::Close => close(&mut next),
-            Action::Release => {
-                next.congested = false;
-                next.capacity += 1;
-            }
-            Action::Drain(hop) => next.jam[hop.index()] -= 1,
+            Action::Release => next.congested = false,
+            Action::Drain(hop) => release_hop(&mut next, *hop, 1),
             Action::Send => send(&mut next),
             Action::Accept => self.resolve(&mut next, Resolution::Accept),
             Action::Refuse(refusal) => self.resolve(&mut next, Resolution::Refuse(*refusal)),
@@ -246,7 +261,6 @@ impl Model {
             deferrals,
             hop,
             generation,
-            stamp,
         } = state.phase
         else {
             return;
@@ -265,12 +279,18 @@ impl Model {
                         Verdict::Deferred {
                             hop: hop.did(),
                             generation,
+                            demand: TransferDemand::for_test(),
                             cause: SendDeferral::cancelled(hop.did()),
                         },
                         Some(Refusal::Cancelled),
                     ),
                     Mutation::Faithful | Mutation::WakeUntriggered => (
-                        Verdict::remote(hop.did(), generation, Err(ambiguity.error(hop.did()))),
+                        Verdict::remote(
+                            hop.did(),
+                            generation,
+                            TransferDemand::for_test(),
+                            Err(ambiguity.error(hop.did())),
+                        ),
                         None,
                     ),
                 }
@@ -279,14 +299,28 @@ impl Model {
                 state.last_refusal = Some(refusal);
                 let outcome = refusal.outcome(hop.did(), generation.unwrap_or_default());
                 (
-                    Verdict::remote(hop.did(), generation, outcome),
+                    Verdict::remote(hop.did(), generation, TransferDemand::for_test(), outcome),
                     Some(refusal),
                 )
             }
         };
-        let resolved = Resolved { hop, stamp };
+        let resolved = Resolved {
+            hop,
+            peer: state.released[hop.index()],
+        };
         state.phase = transition(deferrals, resolved, verdict, refusal);
     }
+}
+
+/// `count` other transfers of `hop` end: each releases its peer and global capacity, which
+/// frees the hop's own capacity but not shared congestion.
+fn release_hop(state: &mut State, hop: Hop, count: u8) {
+    if count == 0 {
+        return;
+    }
+    state.jam[hop.index()] -= count;
+    state.full[hop.index()] = false;
+    state.released[hop.index()] += u64::from(count);
 }
 
 /// `Close`: the dead generation retires; its channel's other transfers are cancelled and
@@ -301,7 +335,7 @@ fn close(state: &mut State) {
         retired.is_ok_and(|outcome| outcome.is_retired()),
         "a dead generation retires"
     );
-    state.jam[Hop::Target.index()] = 0;
+    release_hop(state, Hop::Target, state.jam[Hop::Target.index()]);
 }
 
 /// `Compute`: settle locally, or bind a send to the routed hop.
@@ -315,7 +349,7 @@ fn send(state: &mut State) {
         state.effects += 1;
         let resolved = Resolved {
             hop: Hop::Alternate,
-            stamp: state.capacity,
+            peer: 0,
         };
         state.phase = transition(deferrals, resolved, Verdict::local(Ok(())), None);
         return;
@@ -325,7 +359,6 @@ fn send(state: &mut State) {
         deferrals,
         hop,
         generation: state.generation(hop),
-        stamp: state.capacity,
     };
 }
 
@@ -344,35 +377,46 @@ enum Resolution {
 ///
 /// ```text
 /// Fresh ≜ route ≠ hop
-///       ∨ (Link     ∧ usable(hop))
-///       ∨ (Capacity ∧ capacity > stamp)
-///       ∨ (Drain    ∧ (generation(hop) ≠ bound ∨ idle(hop)))
+///       ∨ (Link           ∧ usable(hop))
+///       ∨ (PeerCapacity   ∧ the hop's own capacity has room)
+///       ∨ (GlobalCapacity ∧ the shared capacity has room)
+///       ∨ (Drain          ∧ (generation(hop) ≠ bound ∨ the hop released ∨ idle(hop)))
 /// ```
+///
+/// The capacity disjuncts are scoped by the refusal the model knows; `FreshHop` checks that
+/// production's `Room` never wakes a capacity refusal whose own scope is still exhausted.
 fn wake(state: &mut State) {
     let Phase::Waiting {
         deferrals,
         hop,
         generation,
-        stamp,
+        peer,
         cause,
     } = state.phase
     else {
         return;
     };
     let moved = state.route() != Some(hop);
-    let released = state.capacity > stamp;
+    let progress = state.progress(hop, peer);
     let fresh = moved
         || match cause.trigger() {
             Trigger::Link => state.usable(hop),
-            Trigger::Capacity => released,
-            Trigger::Drain => state.generation(hop) != generation || state.is_idle(hop),
+            Trigger::PeerCapacity => !state.full[hop.index()],
+            Trigger::GlobalCapacity => !state.congested,
+            Trigger::Drain => {
+                state.generation(hop) != generation || progress.released || progress.idle
+            }
         };
+    let capacity = matches!(
+        cause.trigger(),
+        Trigger::PeerCapacity | Trigger::GlobalCapacity
+    );
     state.stale_retry |= !fresh;
     state.woke_on_route |= moved;
-    state.woke_on_capacity |= !moved && released && cause.trigger() == Trigger::Capacity;
+    state.woke_on_capacity |= !moved && capacity;
     state.woke_on_drain |= !moved && cause.trigger() == Trigger::Drain;
     state.phase = Phase::Compute {
-        deferrals: awaiting(deferrals, hop, generation, stamp, cause)
+        deferrals: awaiting(deferrals, hop, generation, cause)
             .resume()
             .deferrals,
     };

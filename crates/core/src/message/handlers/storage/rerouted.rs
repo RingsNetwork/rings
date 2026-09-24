@@ -11,14 +11,14 @@
 //! reroute(P, first):
 //!   R ← start ; route ← first
 //!   loop
-//!     stamp ← capacity epoch
 //!     verdict ← route = Local(l)        ⇒ Verdict::local(P.settle(l))
 //!               route = Remote(next, m) ⇒ attempt_remote(m, next)
-//!     case δ(R, stamp, verdict) of
+//!     case δ(R, verdict) of
 //!       Complete  ⇒ return Ok
 //!       Fail(e)   ⇒ return Err(e)                \* fatal, ambiguous, or exhausted
-//!       Await(A)  ⇒ route ← first route r computed after listening with
-//!                           A.is_triggered(r, observation(A))
+//!       Await(A)  ⇒ peer  ← A's hop release stamp            \* after the refusal published
+//!                   route ← first route r computed after listening with
+//!                           A.is_triggered(r, observation(A, peer))
 //!                   R ← A.resume
 //! ```
 //!
@@ -180,24 +180,24 @@ pub(super) async fn reroute<P: Placement>(
     let mut rerouting = Rerouting::start();
     let mut route = first;
     loop {
-        let stamp = transport.capacity_stamp();
         let verdict = match route {
             Route::Local(local) => Verdict::local(placement.settle(transport, local).await),
             Route::Remote { next, message } => transport.attempt_remote(message, next).await,
         };
-        let awaiting = match rerouting.after(stamp, verdict) {
+        let awaiting = match rerouting.after(verdict) {
             Step::Complete => return Ok(()),
             Step::Fail(error) => return Err(error),
             Step::Await(awaiting) => awaiting,
         };
+        let peer = transport.peer_stamp(&awaiting);
         route = loop {
-            let listeners = transport.rerouting_listeners(&awaiting);
+            let listeners = transport.rerouting_listeners(&awaiting, &peer);
             let fresh = placement.route(&transport.dht).await?;
             let link = match &fresh {
                 Route::Local(_) => LinkRoute::Local,
                 Route::Remote { next, .. } => LinkRoute::Remote(transport.link_hop(*next)?),
             };
-            if awaiting.is_triggered(link, transport.observation(&awaiting)) {
+            if awaiting.is_triggered(link, transport.observation(&awaiting, &peer)) {
                 break fresh;
             }
             listeners.notified().await;

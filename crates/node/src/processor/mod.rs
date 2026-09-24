@@ -6,6 +6,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future::join_all;
+use futures::pin_mut;
+use futures::select;
+use futures::FutureExt;
 use rings_core::chunk::ReassemblyLimits;
 use rings_core::dht::Did;
 use rings_core::dht::EntryStorage;
@@ -446,13 +449,24 @@ impl Processor {
         directory::build_onion_proxy_route(self, proxy, target).await
     }
 
+    /// One registration pass, cancelled by `stop`.
+    ///
+    /// A pass waits on DHT writes that reroute on events, not durations (see
+    /// [`Self::storage_fetch`]), so `stop` must end the pass itself: the pass is dropped, which
+    /// is safe at every rerouting wait (no send is then in flight).
     async fn run_registration_once(
         &self,
         task: &dyn RegistrationTask,
         stop: StopToken,
     ) -> Result<()> {
-        let context = self.registration_context_with_stop(stop);
-        task.register_once(&context).await
+        let context = self.registration_context_with_stop(stop.clone());
+        let pass = task.register_once(&context).fuse();
+        let stopped = stop.stopped().fuse();
+        pin_mut!(pass, stopped);
+        select! {
+            result = pass => result,
+            () = stopped => Err(Error::RegistrationStopped),
+        }
     }
 
     async fn registration_task_daemon_with(
@@ -888,12 +902,9 @@ impl Processor {
     /// # Rerouting
     ///
     /// Every DHT operation of this processor (fetch, store, append, tombstone, compact, and the
-    /// registry lookups and writes built on them) inherits core's rerouting (#859): a send
-    /// refused before the backend accepted it (a connection generation replaced by glare or
-    /// rejoin, a hop not yet ready, exhausted local capacity, a busy channel) is retried from
-    /// fresh topology once a topology, link or capacity event makes the retry fresh, never after
-    /// a duration and within `REROUTING_BUDGET` deferrals; exhaustion returns
-    /// `ReroutingExhausted` with the last cause. No placement is applied twice.
+    /// registry lookups and writes built on them) is rerouted as core's [`ChordStorageInterface`]
+    /// documents (#859): refusals before acceptance are retried on events within a budget, and
+    /// no placement is applied twice. A caller that must bound the wait drops the operation.
     pub async fn storage_fetch(&self, entry_key: Did) -> Result<()> {
         self.swarm
             .storage_fetch(entry_key)

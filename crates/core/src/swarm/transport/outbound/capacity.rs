@@ -1,7 +1,10 @@
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::Weak;
 #[cfg(test)]
 use std::task::Poll;
+
+use event_listener::EventListener;
 
 use super::model::TransferClass;
 use crate::dht::Did;
@@ -169,6 +172,45 @@ impl GlobalTransferCapacity {
         &self.releases
     }
 
+    /// The pure reservation step: `state` after admitting `bytes` of `class` in `scope`, or
+    /// the refusal. Shared by `try_acquire_inner` (which commits it) and `has_room` (which does
+    /// not), so the room predicate is the admission rule itself.
+    fn reserved(
+        mut state: ReservedCapacity<{ TransferClass::COUNT }>,
+        peer: Did,
+        class: TransferClass,
+        bytes: usize,
+        scope: CapacityScope,
+    ) -> Result<ReservedCapacity<{ TransferClass::COUNT }>> {
+        let reservations = global_byte_reservations();
+        let refused = || memory_capacity_error(peer, bytes, global_byte_limit(class));
+        if scope == CapacityScope::FixedReservation
+            && !state.reservation_covers(class.index(), bytes, reservations)
+        {
+            return Err(refused());
+        }
+        if !state.try_reserve(
+            class.index(),
+            bytes,
+            OUTBOUND_GLOBAL_BYTE_CAPACITY,
+            reservations,
+        ) {
+            return Err(refused());
+        }
+        Ok(state)
+    }
+
+    /// Whether `demand` could be admitted now, in either scope, without admitting it.
+    fn has_room(&self, peer: Did, demand: TransferDemand) -> bool {
+        let state = *self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        [CapacityScope::FixedReservation, CapacityScope::Shared]
+            .into_iter()
+            .any(|scope| Self::reserved(state, peer, demand.class, demand.bytes, scope).is_ok())
+    }
+
     fn try_acquire_inner(
         self: &Arc<Self>,
         peer: Did,
@@ -180,21 +222,7 @@ impl GlobalTransferCapacity {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut next = *state;
-        let reservations = global_byte_reservations();
-        if scope == CapacityScope::FixedReservation
-            && !next.reservation_covers(class.index(), bytes, reservations)
-        {
-            return Err(memory_capacity_error(peer, bytes, global_byte_limit(class)));
-        }
-        if !next.try_reserve(
-            class.index(),
-            bytes,
-            OUTBOUND_GLOBAL_BYTE_CAPACITY,
-            reservations,
-        ) {
-            return Err(memory_capacity_error(peer, bytes, global_byte_limit(class)));
-        }
+        let next = Self::reserved(*state, peer, class, bytes, scope)?;
         #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
         crate::simulation::observe_outbound_global_capacity(
             next.admitted(),
@@ -271,6 +299,9 @@ pub(super) struct TransferCapacity {
     state: Mutex<PeerCapacityState>,
     global: Arc<GlobalTransferCapacity>,
     waiters: Arc<FairWaitQueue>,
+    /// Advanced after every release of this peer's capacity, a half reservation included:
+    /// the progress of the peer's link.
+    releases: Epoch,
 }
 
 impl TransferCapacity {
@@ -280,7 +311,60 @@ impl TransferCapacity {
             state: Mutex::new(PeerCapacityState::new()),
             global,
             waiters: Arc::new(FairWaitQueue::with_budget(wait_budget)),
+            releases: Epoch::default(),
         }
+    }
+
+    /// The pure reservation step of this peer (see `GlobalTransferCapacity::reserved`).
+    fn reserved(
+        mut state: PeerCapacityState,
+        peer: Did,
+        class: TransferClass,
+        bytes: usize,
+        scope: CapacityScope,
+    ) -> Result<PeerCapacityState> {
+        if scope == CapacityScope::FixedReservation && !state.reservation_covers(class, bytes) {
+            return Err(memory_capacity_error(peer, bytes, peer_byte_limit(class)));
+        }
+        match state.try_reserve(class, bytes) {
+            Ok(()) => Ok(state),
+            Err(CountedReservationRejection::Count) => {
+                Err(Error::OutboundTransferCapacityExceeded {
+                    peer,
+                    capacity: transfer_limit(class),
+                })
+            }
+            Err(CountedReservationRejection::Bytes) => {
+                Err(memory_capacity_error(peer, bytes, peer_byte_limit(class)))
+            }
+        }
+    }
+
+    /// Whether a peer in `state` admits `demand` in either scope (the admission rule itself,
+    /// on a copy of the state).
+    fn admits(state: PeerCapacityState, peer: Did, demand: TransferDemand) -> bool {
+        [CapacityScope::FixedReservation, CapacityScope::Shared]
+            .into_iter()
+            .any(|scope| Self::reserved(state, peer, demand.class, demand.bytes, scope).is_ok())
+    }
+
+    /// `Room(peer, demand)`: `demand` could be admitted now by this peer and the global
+    /// capacity, without admitting it.
+    pub(super) fn has_room(&self, peer: Did, demand: TransferDemand) -> bool {
+        let state = *self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self::admits(state, peer, demand) && self.global.has_room(peer, demand)
+    }
+
+    /// `Room(peer, demand)` for a peer that holds no capacity: its own state is fresh.
+    pub(super) fn has_room_unheld(
+        global: &GlobalTransferCapacity,
+        peer: Did,
+        demand: TransferDemand,
+    ) -> bool {
+        Self::admits(PeerCapacityState::new(), peer, demand) && global.has_room(peer, demand)
     }
 
     fn try_acquire_peer_inner(
@@ -294,22 +378,7 @@ impl TransferCapacity {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut next = *state;
-        if scope == CapacityScope::FixedReservation && !next.reservation_covers(class, bytes) {
-            return Err(memory_capacity_error(peer, bytes, peer_byte_limit(class)));
-        }
-        match next.try_reserve(class, bytes) {
-            Ok(()) => {}
-            Err(CountedReservationRejection::Count) => {
-                return Err(Error::OutboundTransferCapacityExceeded {
-                    peer,
-                    capacity: transfer_limit(class),
-                });
-            }
-            Err(CountedReservationRejection::Bytes) => {
-                return Err(memory_capacity_error(peer, bytes, peer_byte_limit(class)));
-            }
-        }
+        let next = Self::reserved(*state, peer, class, bytes, scope)?;
         #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
         crate::simulation::observe_outbound_peer_capacity(
             next.capacity.admitted_count(),
@@ -396,6 +465,94 @@ impl TransferCapacity {
     }
 }
 
+/// What one transfer asks of outbound capacity: its class and its reservation in bytes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct TransferDemand {
+    /// The scheduling class the transfer is admitted under.
+    class: TransferClass,
+    /// The reservation in bytes (at least one).
+    bytes: usize,
+}
+
+impl TransferDemand {
+    /// The demand of a transfer of `class` reserving `bytes`, as `acquire` charges it.
+    pub(in crate::swarm::transport) fn new(class: TransferClass, bytes: usize) -> Self {
+        Self {
+            class,
+            bytes: bytes.max(1),
+        }
+    }
+
+    /// A demand for tests that only carry one through the automaton.
+    #[cfg(test)]
+    pub(in crate::swarm::transport) fn for_test() -> Self {
+        Self::new(TransferClass::Application, 1)
+    }
+
+    /// The class the demand is admitted under.
+    pub(super) const fn class(self) -> TransferClass {
+        self.class
+    }
+
+    /// The bytes the demand reserves.
+    pub(super) const fn bytes(self) -> usize {
+        self.bytes
+    }
+}
+
+/// A reading of one peer's release epoch, taken after a refused send published its refusal,
+/// so after the refused send released whatever it held.
+///
+/// The capacity is held weakly: a dead capacity means every permit of the peer was released,
+/// and a live `Weak` pins the allocation, so a recreated capacity is never mistaken for the
+/// stamped one.
+pub(crate) struct PeerStamp {
+    /// The peer's capacity when stamped, if one existed.
+    capacity: Weak<TransferCapacity>,
+    /// Its release count when stamped.
+    released: u64,
+}
+
+/// What the peer's capacity shows against a [`PeerStamp`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub(crate) struct PeerProgress {
+    /// Another transfer of the peer released capacity since the stamp.
+    pub(crate) released: bool,
+    /// `Idle(peer)`: no transfer of the peer holds capacity.
+    pub(crate) idle: bool,
+}
+
+impl PeerStamp {
+    /// Stamp `capacity`, the peer's current capacity if any.
+    pub(super) fn of(capacity: Option<&Arc<TransferCapacity>>) -> Self {
+        Self {
+            capacity: capacity.map_or_else(Weak::new, Arc::downgrade),
+            released: capacity.map_or(0, |capacity| capacity.releases.current()),
+        }
+    }
+
+    /// The peer's progress now against this stamp; a released capacity is idle.
+    pub(crate) fn progress(&self) -> PeerProgress {
+        self.capacity.upgrade().map_or(
+            PeerProgress {
+                released: true,
+                idle: true,
+            },
+            |capacity| PeerProgress {
+                released: capacity.releases.current() > self.released,
+                idle: capacity.admitted() == 0,
+            },
+        )
+    }
+
+    /// Register for the peer's next release, while its capacity lives.
+    pub(crate) fn listen(&self) -> Option<EventListener> {
+        self.capacity
+            .upgrade()
+            .map(|capacity| capacity.releases.listen())
+    }
+}
+
 /// The peer and global capacity one transfer holds until it ends.
 ///
 /// Fields drop in declaration order, so the global release, which advances
@@ -419,6 +576,7 @@ impl Drop for PeerCapacityPermit {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .release(self.class, self.bytes);
         self.capacity.waiters.wake_front();
+        self.capacity.releases.advance();
     }
 }
 

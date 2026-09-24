@@ -5,15 +5,17 @@
 //!
 //! ```text
 //! CONSTANTS  B = REROUTING_BUDGET, Churn (reservations, glare, withdrawals, deaths,
-//!            disconnects, reroutes, congestions, ambiguities)
+//!            disconnects, reroutes, congestions, jams, fills, ambiguities)
 //!
 //! VARIABLES  registry   : ConnectionLifecycleRegistry of the target hop   (production)
 //!            ready      : BOOLEAN                \* the admitted generation can make progress
 //!            preference : {Target, Alternate, Local}
-//!            congested  : BOOLEAN ; capacity : ℕ  \* local capacity and its release epoch
+//!            congested  : BOOLEAN                \* shared (global) capacity exhausted
 //!            jam        : Hop → ℕ                \* other transfers holding each channel
-//!            phase      : Compute(d) | InFlight(d, hop, g, stamp)
-//!                       | Waiting(d, hop, stamp, cause) | Done(outcome)
+//!            full       : Hop → BOOLEAN          \* a hop's own capacity exhausted
+//!            released   : Hop → ℕ                \* each hop's peer release epoch
+//!            phase      : Compute(d) | InFlight(d, hop, g)
+//!                       | Waiting(d, hop, g, peer stamp, cause) | Done(outcome)
 //!            effects, sends, last_refusal, stale_retry : history variables
 //!
 //! Init ≜ registry = {Target ↦ Active(g₁)} ∧ ready ∧ preference = Target ∧ phase = Compute(0)
@@ -49,8 +51,10 @@
 //!   (`next::resolutions`), which states the send-path lemmas of `error::send_class`: refusals
 //!   occur only before acceptance, and ambiguities only after it.
 //! - The refused transfer's own capacity release is not an event of the model, as in
-//!   production no trigger reads it: a capacity refusal held no permit, and `Idle(hop)` counts
-//!   only transfers still in flight (`jam`).
+//!   production no trigger reads it: `Room` is a state (`State::has_room`, the production
+//!   dry-run admission), and the peer release stamp is read after the refusal.
+//! - Releases are scoped as in production: a hop's `Drain` and `Close` free its own capacity
+//!   and advance its peer epoch without clearing shared congestion; only `Release` does.
 //!
 //! # Scope limits
 //!
@@ -67,21 +71,24 @@
 //! the first). Each test asserts its exact state count, depth and premise counts.
 //!
 //! Churn columns: reservations `r`, glare `g`, withdrawals `w`, deaths `d`, disconnects `x`,
-//! reroutes `t`, congestions `c`, jams `j`, ambiguities `a`.
+//! reroutes `t`, congestions `c`, jams `j`, fills `f`, ambiguities `a`.
 //!
-//! | configuration       | r g w d x t c j a | states | depth | premise (unsettled) |
-//! |---------------------|-------------------|--------|-------|---------------------|
-//! | replacement         | 2 0 0 2 1 0 0 0 1 | 1731   | 21    | 1133 (1133)         |
-//! | glare               | 2 1 0 1 0 0 1 0 0 | 799    | 18    | 643 (643)           |
-//! | retire before ready | 2 0 1 2 0 0 0 0 0 | 631    | 16    | 506 (506)           |
-//! | topology mid-wait   | 1 0 0 1 1 2 1 1 0 | 107179 | 32    | 64361 (64361)       |
-//! | exhaustion          | 2 0 0 2 2 0 2 1 0 | 257075 | 38    | 122947 (122947)     |
-//! | channel drain       | 1 0 0 1 0 0 0 2 0 | 1689   | 19    | 1195 (1195)         |
-//! | one replacement     | 1 0 0 1 0 0 0 0 0 | never exhausts (`REPLACEMENT_DEFERRALS`)  |
+//! | configuration       | r g w d x t c j f a | states | depth | premise (unsettled) |
+//! |---------------------|---------------------|--------|-------|---------------------|
+//! | replacement         | 2 0 0 2 1 0 0 0 0 1 | 1731   | 21    | 733 (733)           |
+//! | glare               | 2 1 0 1 0 0 1 0 0 0 | 710    | 18    | 424 (424)           |
+//! | retire before ready | 2 0 1 2 0 0 0 0 0 0 | 631    | 16    | 408 (408)           |
+//! | topology mid-wait   | 1 0 0 1 1 2 1 1 0 0 | 124222 | 29    | 36100 (36100)       |
+//! | exhaustion          | 2 0 0 2 2 0 2 1 0 0 | 242013 | 35    | 41418 (41418)       |
+//! | channel drain       | 1 0 0 1 0 0 0 2 0 0 | 2602   | 19    | 1405 (1405)         |
+//! | scoped capacity     | 1 0 0 1 0 0 1 2 2 0 | 43548  | 29    | 15987 (15987)       |
+//! | one replacement     | 1 0 0 1 0 0 0 0 0 0 | max deferrals = `REPLACEMENT_DEFERRALS`     |
 
 mod carrier;
 mod laws;
 mod next;
+
+use std::collections::HashSet;
 
 use carrier::Churn;
 use carrier::Model;
@@ -90,6 +97,7 @@ use laws::has_liveness_budget;
 use laws::LawName;
 
 use super::QUIESCENT_DEFERRALS;
+use super::REPLACEMENT_DEFERRALS;
 use super::REROUTING_BUDGET;
 use crate::swarm::transport::test_model_check::check;
 use crate::swarm::transport::test_model_check::LivenessAnalysis;
@@ -118,6 +126,7 @@ const QUIET: Churn = Churn {
     reroutes: 0,
     congestions: 0,
     jams: 0,
+    fills: 0,
     ambiguities: 0,
 };
 
@@ -129,6 +138,16 @@ const TOPOLOGY_MID_WAIT: Churn = Churn {
     congestions: 1,
     jams: 1,
     disconnects: 1,
+    ..QUIET
+};
+
+/// The scoped-capacity churn: per-peer fills beside shared congestion.
+const SCOPED_CAPACITY: Churn = Churn {
+    reservations: 1,
+    deaths: 1,
+    congestions: 1,
+    jams: 2,
+    fills: 2,
     ..QUIET
 };
 
@@ -202,8 +221,8 @@ fn test_rerouting_laws_hold_across_generation_replacement() {
         Bounds {
             states: 1731,
             depth: 21,
-            premise_states: 1133,
-            unstable_premise_states: 1133,
+            premise_states: 733,
+            unstable_premise_states: 733,
         },
         &[
             LawName::RetryReachesReplacement,
@@ -227,10 +246,10 @@ fn test_rerouting_laws_hold_under_glare() {
             ..QUIET
         },
         Bounds {
-            states: 799,
+            states: 710,
             depth: 18,
-            premise_states: 643,
-            unstable_premise_states: 643,
+            premise_states: 424,
+            unstable_premise_states: 424,
         },
         &[
             LawName::RetryReachesReplacement,
@@ -254,8 +273,8 @@ fn test_rerouting_laws_hold_when_retired_before_ready() {
         Bounds {
             states: 631,
             depth: 16,
-            premise_states: 506,
-            unstable_premise_states: 506,
+            premise_states: 408,
+            unstable_premise_states: 408,
         },
         &[
             LawName::RetryReachesReplacement,
@@ -272,10 +291,10 @@ fn test_rerouting_laws_hold_when_topology_changes_mid_wait() {
         "topology mid-wait",
         TOPOLOGY_MID_WAIT,
         Bounds {
-            states: 107179,
-            depth: 32,
-            premise_states: 64361,
-            unstable_premise_states: 64361,
+            states: 124222,
+            depth: 29,
+            premise_states: 36100,
+            unstable_premise_states: 36100,
         },
         &[
             LawName::WaitEndsByRouteChange,
@@ -298,10 +317,10 @@ fn test_rerouting_laws_hold_when_channels_drain() {
             ..QUIET
         },
         Bounds {
-            states: 1689,
+            states: 2602,
             depth: 19,
-            premise_states: 1195,
-            unstable_premise_states: 1195,
+            premise_states: 1405,
+            unstable_premise_states: 1405,
         },
         &[
             LawName::WaitEndsByChannelDrain,
@@ -310,11 +329,33 @@ fn test_rerouting_laws_hold_when_channels_drain() {
     );
 }
 
-/// `REPLACEMENT_DEFERRALS`: one generation replacement racing the placement (death, then
-/// re-admission) never exhausts the budget.
+/// Scoped capacity: a hop's own capacity fills beside shared congestion; the hop's releases
+/// free its own scope but not the shared one, and a capacity wait ends only on `Room`.
 #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_family = "wasm"), test)]
-fn test_one_replacement_never_exhausts_the_budget() {
+fn test_rerouting_laws_hold_under_scoped_capacity() {
+    assert_laws_hold_exhaustively(
+        "scoped capacity",
+        SCOPED_CAPACITY,
+        Bounds {
+            states: 43548,
+            depth: 29,
+            premise_states: 15987,
+            unstable_premise_states: 15987,
+        },
+        &[
+            LawName::WaitEndsByCapacityRelease,
+            LawName::WaitEndsByChannelDrain,
+        ],
+    );
+}
+
+/// `REPLACEMENT_DEFERRALS` is tight: under one generation replacement racing the placement
+/// (a death, then a re-admission) and nothing else, every reachable state has spent at most
+/// `REPLACEMENT_DEFERRALS` deferrals, and some state has spent exactly that many.
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), test)]
+fn test_one_replacement_spends_exactly_the_replacement_deferrals() {
     let model = Model {
         churn: Churn {
             reservations: 1,
@@ -323,19 +364,33 @@ fn test_one_replacement_never_exhausts_the_budget() {
         },
         mutation: Mutation::Faithful,
     };
-    let SearchReport::Safe {
-        uncovered,
-        liveness,
-        ..
-    } = check(&model, has_liveness_budget)
-    else {
-        panic!("the faithful automaton is safe");
-    };
-    assert!(
-        uncovered.contains(&LawName::BudgetExhausts),
-        "a replacement exhausted"
-    );
-    assert!(liveness.violation.is_none(), "{liveness:#?}");
+    let mut seen = HashSet::new();
+    let mut frontier = vec![model.init()];
+    let mut most = 0;
+    while let Some(state) = frontier.pop() {
+        most = most.max(spent(&state.phase));
+        for action in model.actions(&state) {
+            if let Some(next) = model.next_state(&state, &action) {
+                if seen.insert(next.clone()) {
+                    frontier.push(next);
+                }
+            }
+        }
+    }
+    assert_eq!(most, REPLACEMENT_DEFERRALS);
+}
+
+/// The deferrals a phase has spent, the exhausting one included.
+fn spent(phase: &carrier::Phase) -> u8 {
+    match *phase {
+        carrier::Phase::Compute { deferrals }
+        | carrier::Phase::InFlight { deferrals, .. }
+        | carrier::Phase::Waiting { deferrals, .. }
+        | carrier::Phase::Done(carrier::Outcome::Exhausted { deferrals, .. }) => deferrals,
+        carrier::Phase::Done(
+            carrier::Outcome::Accepted | carrier::Outcome::Ambiguous | carrier::Outcome::Unexpected,
+        ) => 0,
+    }
 }
 
 /// Exhaustion: churn enough to spend the budget, which ends typed with the last cause.
@@ -353,10 +408,10 @@ fn test_rerouting_budget_exhausts_with_the_last_cause() {
             ..QUIET
         },
         Bounds {
-            states: 257075,
-            depth: 38,
-            premise_states: 122947,
-            unstable_premise_states: 122947,
+            states: 242013,
+            depth: 35,
+            premise_states: 41418,
+            unstable_premise_states: 41418,
         },
         &[LawName::BudgetExhausts],
     );
