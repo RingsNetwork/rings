@@ -47,6 +47,34 @@ impl OnionExpiry {
             .then_some(Self(ms / ONION_FORWARD_EXPIRY_QUANTUM_MS))
     }
 
+    /// The admission window (#834 L9): `arr < x ≤ arr + V`, the only instants at which a layer
+    /// expiring at `x` may be admitted by any hop.
+    #[cfg_attr(
+        not(all(test, rings_native)),
+        expect(
+            dead_code,
+            reason = "every hop judges its window with it in #834 Phase 2a-4 (#843)"
+        )
+    )]
+    pub(super) const fn admissible_at(self, arrival_ms: u128) -> bool {
+        let expiry_ms = self.as_ms();
+        arrival_ms < expiry_ms
+            && expiry_ms <= arrival_ms.saturating_add(ONION_FORWARD_MAX_VALIDITY_MS)
+    }
+
+    /// Whether `x` has passed at `now`, i.e. `x ≤ now`: the replay filter of `x` is gone, and no
+    /// layer expiring at `x` may be admitted any more.
+    #[cfg_attr(
+        not(all(test, rings_native)),
+        expect(
+            dead_code,
+            reason = "the replay store drops filters with it once #834 Phase 2a-4 wires admission (#843)"
+        )
+    )]
+    pub(super) const fn has_passed_at(self, now_ms: u128) -> bool {
+        self.as_ms() <= now_ms
+    }
+
     /// The expiry instant in milliseconds, `x = k·Q`.
     ///
     /// It saturates at `u128::MAX` only for a quantum index beyond `u128::MAX / Q`, which no clock
