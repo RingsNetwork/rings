@@ -23,6 +23,7 @@ use crate::dht::OperateRoute;
 use crate::ecc::tests::gen_ordered_keys;
 use crate::error::Error;
 use crate::error::Result;
+use crate::lifecycle::StopSource;
 use crate::message::types::Message;
 use crate::message::Encoder;
 use crate::tests::default::prepare_node;
@@ -174,6 +175,29 @@ async fn test_fetch_refused_by_a_dead_generation_waits_for_the_replacement() -> 
     fetch.await?;
     wait_for_msgs([&reader, &owner]).await;
     assert_cached_data_values(&reader, placement, &["111"]).await
+}
+
+/// Law (cooperative stop): a placement waiting to be rerouted under `scoped_storage` ends with
+/// `ReroutingStopped` once its stop is requested, and its refused attempt had no effect.
+#[tokio::test]
+async fn test_stop_ends_a_waiting_placement_without_effect() -> Result<()> {
+    let topic = "rerouted append stops while waiting";
+    let (writer, owner) = linked_route(topic).await?;
+    kill_generation(&writer, &owner)?;
+    operate_entries_received(&owner).await?;
+    let stop = StopSource::new();
+
+    let storage = writer.swarm.scoped_storage(stop.token());
+    let append = storage.storage_append_data(topic, "111".to_string().encode()?);
+    pin_mut!(append);
+    assert!(poll!(append.as_mut()).is_pending());
+    assert_eq!(writer.swarm.transport.link_waiters_for_test(), 1);
+
+    stop.request_stop();
+    assert!(matches!(append.await, Err(Error::ReroutingStopped)));
+    assert_eq!(writer.swarm.transport.link_waiters_for_test(), 0);
+    assert_eq!(operate_entries_received(&owner).await?, 0);
+    Ok(())
 }
 
 /// Law (join of placements): an operation whose placements failed reports an ambiguous error

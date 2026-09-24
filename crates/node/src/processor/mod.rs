@@ -6,9 +6,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future::join_all;
-use futures::pin_mut;
-use futures::select;
-use futures::FutureExt;
 use rings_core::chunk::ReassemblyLimits;
 use rings_core::dht::Did;
 use rings_core::dht::EntryStorage;
@@ -227,6 +224,15 @@ pub struct Processor {
     observability: Arc<Observability>,
 }
 
+/// The node error of a DHT operation run under a registration stop: a rerouting wait ended by
+/// the stop is the registration's cooperative stop, anything else an entry error.
+pub(crate) fn stoppable_storage_error(error: rings_core::error::Error) -> Error {
+    match error {
+        rings_core::error::Error::ReroutingStopped => Error::RegistrationStopped,
+        error => Error::EntryError(error),
+    }
+}
+
 impl Processor {
     /// Get current did
     pub fn did(&self) -> Did {
@@ -378,7 +384,11 @@ impl Processor {
         if stop.should_stop() {
             return Err(Error::RegistrationStopped);
         }
-        self.storage_fetch(entry_key).await?;
+        self.swarm
+            .scoped_storage(stop.clone())
+            .storage_fetch(entry_key)
+            .await
+            .map_err(stoppable_storage_error)?;
         for attempt in 0..DHT_LOOKUP_CACHE_POLL_ATTEMPTS {
             if stop.should_stop() {
                 return Err(Error::RegistrationStopped);
@@ -449,24 +459,13 @@ impl Processor {
         directory::build_onion_proxy_route(self, proxy, target).await
     }
 
-    /// One registration pass, cancelled by `stop`.
-    ///
-    /// A pass waits on DHT writes that reroute on events, not durations (see
-    /// [`Self::storage_fetch`]), so `stop` must end the pass itself: the pass is dropped, which
-    /// is safe at every rerouting wait (no send is then in flight).
     async fn run_registration_once(
         &self,
         task: &dyn RegistrationTask,
         stop: StopToken,
     ) -> Result<()> {
-        let context = self.registration_context_with_stop(stop.clone());
-        let pass = task.register_once(&context).fuse();
-        let stopped = stop.stopped().fuse();
-        pin_mut!(pass, stopped);
-        select! {
-            result = pass => result,
-            () = stopped => Err(Error::RegistrationStopped),
-        }
+        let context = self.registration_context_with_stop(stop);
+        task.register_once(&context).await
     }
 
     async fn registration_task_daemon_with(

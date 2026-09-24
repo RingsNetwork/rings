@@ -782,6 +782,11 @@ pub enum Error {
         last: super::SendDeferral,
     },
 
+    /// A rerouted DHT placement was stopped while waiting to be retried; its refused attempt
+    /// had no effect.
+    #[error("Rerouting stopped while waiting to retry a placement")]
+    ReroutingStopped,
+
     /// Delegation is expired
     #[error("Delegation is expired")]
     DelegationExpired,

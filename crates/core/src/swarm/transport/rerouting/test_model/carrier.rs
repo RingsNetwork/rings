@@ -19,6 +19,8 @@ use crate::error::Result;
 use crate::error::SendClass;
 use crate::error::SendDeferral;
 use crate::swarm::transport::delivery::SendCompletionOutcome;
+use crate::swarm::transport::outbound::admits_now;
+use crate::swarm::transport::outbound::CapacityScope;
 use crate::swarm::transport::outbound::PeerProgress;
 use crate::swarm::transport::outbound::TransferDemand;
 use crate::swarm::transport::pending::ConnectionLifecycleRegistry;
@@ -282,6 +284,8 @@ pub(super) struct Churn {
     pub(super) jams: u8,
     /// A hop's own capacity filling up (its in-flight transfers hold every slot).
     pub(super) fills: u8,
+    /// A large transfer queuing on the shared capacity.
+    pub(super) queues: u8,
     /// Sends accepted and then failed ambiguously.
     pub(super) ambiguities: u8,
 }
@@ -297,6 +301,8 @@ pub(super) struct State {
     pub(super) preference: Preference,
     /// Whether shared (global) capacity is exhausted.
     pub(super) congested: bool,
+    /// Whether a waiter is queued on the shared capacity, so unqueued admission is refused.
+    pub(super) queued: bool,
     /// Other transfers holding each hop's channel and capacity (by `Hop::index`).
     pub(super) jam: [u8; 2],
     /// Whether each hop's own capacity is full. Inv: `full[h] ⇒ jam[h] > 0`.
@@ -346,6 +352,8 @@ pub(super) enum Action {
     Jam(Hop),
     /// Env: the hop's own capacity fills up.
     FillPeer(Hop),
+    /// Env: a large transfer queues on the shared capacity.
+    Enqueue,
     /// Env: the in-flight send is accepted, then fails ambiguously.
     AcceptThenFail(Ambiguity),
     /// Protocol (weakly fair): the pending generation becomes ready and is admitted.
@@ -360,6 +368,8 @@ pub(super) enum Action {
     /// Protocol (weakly fair): another transfer of the hop completes, releasing its peer and
     /// global capacity (it clears the hop's full capacity, not shared congestion).
     Drain(Hop),
+    /// Protocol (weakly fair): the queued waiter is admitted or cancelled (a departure).
+    Dequeue,
     /// Protocol: compute the route and bind a send, or settle locally.
     Send,
     /// Protocol: the in-flight send resolves with the backend's acceptance.
@@ -384,6 +394,7 @@ impl Action {
                 | Self::Congest
                 | Self::Jam(_)
                 | Self::FillPeer(_)
+                | Self::Enqueue
                 | Self::AcceptThenFail(_)
         )
     }
@@ -426,6 +437,7 @@ impl Model {
             ready: true,
             preference: Preference::Target,
             congested: false,
+            queued: false,
             jam: [0; 2],
             full: [false; 2],
             released: [0; 2],
@@ -504,9 +516,14 @@ impl State {
         }
     }
 
-    /// `Room(hop, demand)`: neither the hop's own capacity nor the shared one is exhausted.
+    /// `Room(hop, demand)`: the production combinator `admits_now` over the model's scopes.
+    /// Model demands exceed every fixed reservation, so only the shared step, through an empty
+    /// queue, admits them.
     pub(super) fn has_room(&self, hop: Hop) -> bool {
-        !self.full[hop.index()] && !self.congested
+        admits_now(!self.queued, |scope| match scope {
+            CapacityScope::FixedReservation => false,
+            CapacityScope::Shared => !self.full[hop.index()] && !self.congested,
+        })
     }
 
     /// The production `PeerProgress` of `hop` against a peer stamp `peer`.

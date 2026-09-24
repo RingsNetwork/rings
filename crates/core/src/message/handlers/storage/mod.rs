@@ -5,10 +5,8 @@ use std::sync::Arc;
 use async_recursion::async_recursion;
 use async_trait::async_trait;
 use futures::future::join_all;
-use rerouted::reroute;
 use rerouted::LookupPlacement;
 use rerouted::OperatePlacement;
-use rerouted::Route;
 
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
@@ -27,6 +25,7 @@ use crate::dht::StorageSyncPurpose;
 use crate::error::Error;
 use crate::error::Result;
 use crate::error::SendClass;
+use crate::lifecycle::StopToken;
 use crate::message::effects::core_actor_steps;
 use crate::message::effects::yield_core_actor_step;
 use crate::message::effects::CoreEffect;
@@ -39,6 +38,8 @@ use crate::message::Encoded;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
+use crate::swarm::transport::reroute;
+use crate::swarm::transport::Route;
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::Swarm;
 use crate::utils::get_epoch_ms;
@@ -142,6 +143,7 @@ async fn handle_storage_fetch_act(
     resource: Did,
     act: PeerRingAction,
     redundancy: u16,
+    stop: &StopToken,
 ) -> Result<()> {
     match act {
         PeerRingAction::SomeEntry(evidence) => {
@@ -160,13 +162,19 @@ async fn handle_storage_fetch_act(
             tracing::debug!("storage_fetch SearchEntry({query:?}) to {next:?}");
             let placement = LookupPlacement { query, redundancy };
             let message = placement.message(query);
-            reroute(&transport, &placement, Route::Remote { next, message }).await?;
+            reroute(
+                &transport,
+                &placement,
+                Route::Remote { next, message },
+                stop,
+            )
+            .await?;
         }
         PeerRingAction::MultiActions(acts) => {
             // Placements are independent: one waiting for its trigger must not hold the others.
             join_placements(
                 join_all(acts.into_iter().map(|act| {
-                    handle_storage_fetch_act(transport.clone(), resource, act, redundancy)
+                    handle_storage_fetch_act(transport.clone(), resource, act, redundancy, stop)
                 }))
                 .await,
             )?;
@@ -185,19 +193,26 @@ async fn handle_storage_fetch_act(
 pub(super) async fn handle_storage_store_act(
     transport: Arc<SwarmTransport>,
     act: PeerRingAction,
+    stop: &StopToken,
 ) -> Result<()> {
     match act {
         PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindEntryForOperate(op)) => {
             let placement = OperatePlacement(*op);
             let message = placement.message();
-            reroute(&transport, &placement, Route::Remote { next, message }).await?;
+            reroute(
+                &transport,
+                &placement,
+                Route::Remote { next, message },
+                stop,
+            )
+            .await?;
         }
         PeerRingAction::MultiActions(acts) => {
             // Placements are independent: one waiting for its trigger must not hold the others.
             join_placements(
                 join_all(
                     acts.into_iter()
-                        .map(|act| handle_storage_store_act(transport.clone(), act)),
+                        .map(|act| handle_storage_store_act(transport.clone(), act, stop)),
                 )
                 .await,
             )?;
@@ -317,16 +332,18 @@ async fn handle_storage_search_act(
 }
 
 /// Apply `operation` under the transport's configured redundancy: locally where this node is
-/// an accepted placement and by `OperateEntry` toward every remote one.
+/// an accepted placement and by `OperateEntry` toward every remote one. A rerouting wait ends
+/// once `stop` is requested (see [`ScopedStorage`]).
 pub(crate) async fn operate_entry(
     transport: Arc<SwarmTransport>,
     operation: EntryOperation,
+    stop: &StopToken,
 ) -> Result<()> {
     let action = transport
         .dht
         .entry_operate(operation, transport.storage_redundancy())
         .await?;
-    handle_storage_store_act(transport, action).await
+    handle_storage_store_act(transport, action, stop).await
 }
 
 fn next_hop_for_sync_entries(
@@ -377,9 +394,32 @@ impl ChordStorageInterfaceCacheChecker for Swarm {
     }
 }
 
+/// The DHT operations of a swarm, scoped by a stop token.
+///
+/// A placement waiting to be rerouted (#859) ends with `Error::ReroutingStopped` once `stop` is
+/// requested. Nothing else is interrupted: storage reads and writes, locks, and sends run to
+/// completion, so a caller that owns IndexedDB futures stops cooperatively. `Swarm`'s own
+/// [`ChordStorageInterface`] is this view under a stop that never fires.
+pub struct ScopedStorage<'a> {
+    /// The transport the operations run on.
+    transport: &'a Arc<SwarmTransport>,
+    /// Ends every rerouting wait of these operations once requested.
+    stop: StopToken,
+}
+
+impl Swarm {
+    /// The DHT operations of this swarm, whose rerouting waits end once `stop` is requested.
+    pub fn scoped_storage(&self, stop: StopToken) -> ScopedStorage<'_> {
+        ScopedStorage {
+            transport: &self.transport,
+            stop,
+        }
+    }
+}
+
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
-impl ChordStorageInterface for Swarm {
+impl ChordStorageInterface for ScopedStorage<'_> {
     /// Fetch an entry. If it exists in local storage, copy it to the cache;
     /// otherwise query the responsible remote node.
     async fn storage_fetch(&self, entry_key: Did) -> Result<()> {
@@ -391,7 +431,8 @@ impl ChordStorageInterface for Swarm {
             .entry_lookup_for_fetch(entry_key, redundancy)
             .await?;
         let result =
-            handle_storage_fetch_act(transport.clone(), entry_key, action, redundancy).await;
+            handle_storage_fetch_act(transport.clone(), entry_key, action, redundancy, &self.stop)
+                .await;
         let correlation = crate::swarm::observer::LookupCorrelation::StorageResource(entry_key);
         if result.is_err() {
             transport.observer().lookup_finished(
@@ -411,22 +452,66 @@ impl ChordStorageInterface for Swarm {
 
     /// Store Entry, `TryInto<Entry>` is implemented for alot of types
     async fn storage_store(&self, entry: Entry) -> Result<()> {
-        operate_entry(self.transport.clone(), EntryOperation::Overwrite(entry)).await
+        let operation = EntryOperation::Overwrite(entry);
+        operate_entry(self.transport.clone(), operation, &self.stop).await
     }
 
     async fn storage_append_data(&self, topic: &str, data: Encoded) -> Result<()> {
         let entry: Entry = (topic.to_string(), data).try_into()?;
-        operate_entry(self.transport.clone(), EntryOperation::Extend(entry)).await
+        operate_entry(
+            self.transport.clone(),
+            EntryOperation::Extend(entry),
+            &self.stop,
+        )
+        .await
     }
 
     async fn storage_tombstone_data(&self, topic: &str, data: Encoded) -> Result<()> {
         let entry: Entry = (topic.to_string(), data).try_into()?;
-        operate_entry(self.transport.clone(), EntryOperation::Tombstone(entry)).await
+        let operation = EntryOperation::Tombstone(entry);
+        operate_entry(self.transport.clone(), operation, &self.stop).await
     }
 
     async fn storage_compact_data(&self, topic: &str, removals: Vec<Encoded>) -> Result<()> {
         let entry = Entry::new(Entry::gen_did(topic)?, removals, EntryKind::Data);
-        operate_entry(self.transport.clone(), EntryOperation::CompactData(entry)).await
+        let operation = EntryOperation::CompactData(entry);
+        operate_entry(self.transport.clone(), operation, &self.stop).await
+    }
+}
+
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
+impl ChordStorageInterface for Swarm {
+    /// The fetch of `scoped_storage` under a stop that never fires.
+    async fn storage_fetch(&self, entry_key: Did) -> Result<()> {
+        self.scoped_storage(StopToken::never())
+            .storage_fetch(entry_key)
+            .await
+    }
+
+    /// The store of `scoped_storage` under a stop that never fires.
+    async fn storage_store(&self, entry: Entry) -> Result<()> {
+        self.scoped_storage(StopToken::never())
+            .storage_store(entry)
+            .await
+    }
+
+    async fn storage_append_data(&self, topic: &str, data: Encoded) -> Result<()> {
+        self.scoped_storage(StopToken::never())
+            .storage_append_data(topic, data)
+            .await
+    }
+
+    async fn storage_tombstone_data(&self, topic: &str, data: Encoded) -> Result<()> {
+        self.scoped_storage(StopToken::never())
+            .storage_tombstone_data(topic, data)
+            .await
+    }
+
+    async fn storage_compact_data(&self, topic: &str, removals: Vec<Encoded>) -> Result<()> {
+        self.scoped_storage(StopToken::never())
+            .storage_compact_data(topic, removals)
+            .await
     }
 }
 

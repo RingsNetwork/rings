@@ -2,8 +2,8 @@
 //!
 //! ```text
 //! Env      ≜ Dial ∨ Glare ∨ Withdraw ∨ Die ∨ Disconnect ∨ Reroute(p) ∨ Congest ∨ Jam(h)
-//!          ∨ FillPeer(h) ∨ AcceptThenFail(a)                        \* each spends Churn
-//! Protocol ≜ Admit ∨ Recover ∨ Close ∨ Release ∨ Drain(h)            \* WF
+//!          ∨ FillPeer(h) ∨ Enqueue ∨ AcceptThenFail(a)              \* each spends Churn
+//! Protocol ≜ Admit ∨ Recover ∨ Close ∨ Release ∨ Drain(h) ∨ Dequeue  \* WF
 //!          ∨ Send ∨ Accept ∨ Refuse(r) ∨ Wake                        \* the automaton
 //! ```
 //!
@@ -51,7 +51,8 @@ const HOPS: [Hop; 2] = [Hop::Target, Hop::Alternate];
 /// Target, generation lost its slot    ─▶ { Superseded, PermitRevoked, Cancelled }
 /// Target, generation not ready        ─▶ { NotReady, PermitRevoked, Missing }
 /// usable, the hop's capacity full     ─▶ { PeerFull }
-/// usable, shared capacity exhausted   ─▶ { AdmissionTimeout }
+/// usable, shared capacity exhausted
+///   or a waiter queued on it          ─▶ { AdmissionTimeout }
 /// usable, channel jammed              ─▶ { QueueTimeout } and accept
 /// usable                              ─▶ accept
 /// ```
@@ -73,7 +74,7 @@ fn resolutions(state: &State, hop: Hop, generation: Option<u64>) -> (Vec<Refusal
         (Hop::Target | Hop::Alternate, _) if state.full[hop.index()] => {
             (vec![Refusal::PeerFull], false)
         }
-        (Hop::Target | Hop::Alternate, _) if state.congested => {
+        (Hop::Target | Hop::Alternate, _) if state.congested || state.queued => {
             (vec![Refusal::AdmissionTimeout], false)
         }
         (Hop::Target | Hop::Alternate, _) if state.jam[hop.index()] > 0 => {
@@ -102,6 +103,7 @@ impl Model {
                 .map(|_| Action::Close),
         );
         actions.extend(state.congested.then_some(Action::Release));
+        actions.extend(state.queued.then_some(Action::Dequeue));
         actions.extend(
             HOPS.into_iter()
                 .filter(|hop| state.jam[hop.index()] > 0)
@@ -164,6 +166,7 @@ impl Model {
             );
         }
         actions.extend((!state.congested && churn.congestions > 0).then_some(Action::Congest));
+        actions.extend((!state.queued && churn.queues > 0).then_some(Action::Enqueue));
         if churn.jams > 0 {
             actions.extend(HOPS.into_iter().map(Action::Jam));
         }
@@ -242,6 +245,11 @@ impl Model {
             Action::Recover => next.ready = true,
             Action::Close => close(&mut next),
             Action::Release => next.congested = false,
+            Action::Enqueue => {
+                next.churn.queues -= 1;
+                next.queued = true;
+            }
+            Action::Dequeue => next.queued = false,
             Action::Drain(hop) => release_hop(&mut next, *hop, 1),
             Action::Send => send(&mut next),
             Action::Accept => self.resolve(&mut next, Resolution::Accept),
@@ -379,7 +387,7 @@ enum Resolution {
 /// Fresh ≜ route ≠ hop
 ///       ∨ (Link           ∧ usable(hop))
 ///       ∨ (PeerCapacity   ∧ the hop's own capacity has room)
-///       ∨ (GlobalCapacity ∧ the shared capacity has room)
+///       ∨ (GlobalCapacity ∧ the shared capacity has room and no waiter is queued on it)
 ///       ∨ (Drain          ∧ (generation(hop) ≠ bound ∨ the hop released ∨ idle(hop)))
 /// ```
 ///
@@ -402,7 +410,7 @@ fn wake(state: &mut State) {
         || match cause.trigger() {
             Trigger::Link => state.usable(hop),
             Trigger::PeerCapacity => !state.full[hop.index()],
-            Trigger::GlobalCapacity => !state.congested,
+            Trigger::GlobalCapacity => !state.congested && !state.queued,
             Trigger::Drain => {
                 state.generation(hop) != generation || progress.released || progress.idle
             }

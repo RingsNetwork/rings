@@ -22,6 +22,7 @@ use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::Weak;
 
+use event_listener::EventListener;
 use futures::future::FutureExt;
 use futures::pin_mut;
 use futures::select;
@@ -41,7 +42,6 @@ use super::AdmittedConnection;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
-use crate::lifecycle::epoch::Epoch;
 use crate::lifecycle::StopSource;
 use crate::measure::MeasureImpl;
 use crate::utils::get_epoch_ms;
@@ -78,12 +78,16 @@ mod transfer;
 pub(super) use admission::DetachedAdmission;
 pub(super) use admission::DetachedAdmissionCancel;
 pub(super) use admission::DetachedAdmissionClaim;
+#[cfg(test)]
+pub(super) use capacity::admits_now;
+#[cfg(test)]
+pub(super) use capacity::CapacityScope;
 use capacity::GlobalTransferCapacity;
-pub(crate) use capacity::PeerProgress;
-pub(crate) use capacity::PeerStamp;
+pub(super) use capacity::PeerProgress;
+pub(super) use capacity::PeerStamp;
 use capacity::TransferCapacity;
 pub(super) use capacity::TransferCapacityPermit;
-pub(crate) use capacity::TransferDemand;
+pub(super) use capacity::TransferDemand;
 #[cfg(test)]
 pub(crate) use capacity::OUTBOUND_CONTROL_RESERVED_TRANSFERS;
 #[cfg(test)]
@@ -402,7 +406,26 @@ impl OutboundSchedulers {
         )
     }
 
-    /// Stamp `peer`'s release epoch now (see `PeerStamp`).
+    /// Register for every event after which `Room(peer, _)` may change: global and peer
+    /// releases, and departures from both queues.
+    pub(super) fn room_listeners(&self, peer: Did) -> Vec<EventListener> {
+        let capacity = self
+            .lock_registry()
+            .capacities
+            .get(&peer)
+            .and_then(Weak::upgrade);
+        self.global_capacity
+            .room_listeners()
+            .into_iter()
+            .chain(
+                capacity
+                    .into_iter()
+                    .flat_map(|capacity| capacity.room_listeners()),
+            )
+            .collect()
+    }
+
+    /// Stamp `peer`'s progress epoch now (see `PeerStamp`).
     pub(super) fn peer_stamp(&self, peer: Did) -> PeerStamp {
         let capacity = self
             .lock_registry()
@@ -410,11 +433,6 @@ impl OutboundSchedulers {
             .get(&peer)
             .and_then(Weak::upgrade);
         PeerStamp::of(capacity.as_ref())
-    }
-
-    /// The epoch of outbound capacity releases, shared by every peer's transfers.
-    pub(super) fn capacity_releases(&self) -> &Epoch {
-        self.global_capacity.releases()
     }
 
     pub(super) async fn reserve(

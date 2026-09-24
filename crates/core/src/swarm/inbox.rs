@@ -22,6 +22,7 @@ use crate::dht::entry::EntryOperation;
 use crate::dht::InboxDelivery;
 use crate::dht::StorageKey;
 use crate::error::Result;
+use crate::lifecycle::StopToken;
 use crate::message::handlers::storage::operate_entry;
 use crate::swarm::callback::LocalDelivery;
 use crate::swarm::transport::SwarmTransport;
@@ -40,7 +41,8 @@ impl SwarmInboxDelivery {
 
     /// Tombstone `removal` at the carrier's owner.
     async fn retire(&self, removal: Entry) -> Result<()> {
-        operate_entry(self.transport.clone(), EntryOperation::Tombstone(removal)).await
+        let removal = EntryOperation::Tombstone(removal);
+        operate_entry(self.transport.clone(), removal, &StopToken::never()).await
     }
 }
 

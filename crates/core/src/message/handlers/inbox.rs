@@ -16,6 +16,7 @@ use crate::dht::entry::Entry;
 use crate::dht::entry::EntryOperation;
 use crate::dht::Did;
 use crate::error::Result;
+use crate::lifecycle::StopToken;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
@@ -34,6 +35,7 @@ pub(crate) async fn hold_for_offline_destination(
     operate_entry(
         transport,
         EntryOperation::Extend(Entry::inbox_delta(&held)?),
+        &StopToken::never(),
     )
     .await
 }

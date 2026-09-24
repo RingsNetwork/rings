@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! CONSTANTS  B = REROUTING_BUDGET, Churn (reservations, glare, withdrawals, deaths,
-//!            disconnects, reroutes, congestions, jams, fills, ambiguities)
+//!            disconnects, reroutes, congestions, jams, fills, queues, ambiguities)
 //!
 //! VARIABLES  registry   : ConnectionLifecycleRegistry of the target hop   (production)
 //!            ready      : BOOLEAN                \* the admitted generation can make progress
@@ -13,6 +13,7 @@
 //!            congested  : BOOLEAN                \* shared (global) capacity exhausted
 //!            jam        : Hop → ℕ                \* other transfers holding each channel
 //!            full       : Hop → BOOLEAN          \* a hop's own capacity exhausted
+//!            queued     : BOOLEAN                \* a waiter queued on the shared capacity
 //!            released   : Hop → ℕ                \* each hop's peer release epoch
 //!            phase      : Compute(d) | InFlight(d, hop, g)
 //!                       | Waiting(d, hop, g, peer stamp, cause) | Done(outcome)
@@ -29,9 +30,11 @@
 //!              ¬stale_retry                                        (S2)
 //!              sends ≤ B + 1 ∧ Exhausted ⇒ deferrals = B + 1 ∧ last cause   (S3)
 //! Liveness:    Fairness ≜ WF(Admit) ∧ WF(Recover) ∧ WF(Close) ∧ WF(Release) ∧ WF(Drain(h))
+//!                         ∧ WF(Dequeue)
 //!                         ∧ WF(Send) ∧ WF(Accept) ∧ WF(Refuse(r)) ∧ WF(Wake)
 //!              ∀r. Premise(r) ⇒ (□[Protocol] ∧ Fairness ⇒ ◇ Done(Accepted))      (L1)
 //!              Premise(r) ≜ phase ∉ Done ∧ deferrals ≤ B − QUIESCENT_DEFERRALS
+//!                           ∧ ∀h. jam[h] ≤ 1        \* one foreign transfer per channel
 //!                           ∧ TopologyReferencesOnlyAdmitted   \* built into Route below
 //! ```
 //!
@@ -51,8 +54,10 @@
 //!   (`next::resolutions`), which states the send-path lemmas of `error::send_class`: refusals
 //!   occur only before acceptance, and ambiguities only after it.
 //! - The refused transfer's own capacity release is not an event of the model, as in
-//!   production no trigger reads it: `Room` is a state (`State::has_room`, the production
-//!   dry-run admission), and the peer release stamp is read after the refusal.
+//!   production no trigger reads it: `Room` is a state, decided by the production combinator
+//!   `admits_now` over the model's scopes (`State::has_room`: the hop's own capacity, the
+//!   shared capacity, and whether a waiter is queued on it), and the peer progress stamp is
+//!   read after the refusal.
 //! - Releases are scoped as in production: a hop's `Drain` and `Close` free its own capacity
 //!   and advance its peer epoch without clearing shared congestion; only `Release` does.
 //!
@@ -71,18 +76,18 @@
 //! the first). Each test asserts its exact state count, depth and premise counts.
 //!
 //! Churn columns: reservations `r`, glare `g`, withdrawals `w`, deaths `d`, disconnects `x`,
-//! reroutes `t`, congestions `c`, jams `j`, fills `f`, ambiguities `a`.
+//! reroutes `t`, congestions `c`, jams `j`, fills `f`, queues `q`, ambiguities `a`.
 //!
-//! | configuration       | r g w d x t c j f a | states | depth | premise (unsettled) |
-//! |---------------------|---------------------|--------|-------|---------------------|
-//! | replacement         | 2 0 0 2 1 0 0 0 0 1 | 1731   | 21    | 733 (733)           |
-//! | glare               | 2 1 0 1 0 0 1 0 0 0 | 710    | 18    | 424 (424)           |
-//! | retire before ready | 2 0 1 2 0 0 0 0 0 0 | 631    | 16    | 408 (408)           |
-//! | topology mid-wait   | 1 0 0 1 1 2 1 1 0 0 | 124222 | 29    | 36100 (36100)       |
-//! | exhaustion          | 2 0 0 2 2 0 2 1 0 0 | 242013 | 35    | 41418 (41418)       |
-//! | channel drain       | 1 0 0 1 0 0 0 2 0 0 | 2602   | 19    | 1405 (1405)         |
-//! | scoped capacity     | 1 0 0 1 0 0 1 2 2 0 | 43548  | 29    | 15987 (15987)       |
-//! | one replacement     | 1 0 0 1 0 0 0 0 0 0 | max deferrals = `REPLACEMENT_DEFERRALS`     |
+//! | configuration       | r g w d x t c j f q a | states | depth | premise (unsettled) |
+//! |---------------------|-----------------------|--------|-------|---------------------|
+//! | replacement         | 2 0 0 2 1 0 0 0 0 0 1 | 1731   | 21    | 733 (733)           |
+//! | glare               | 2 1 0 1 0 0 1 0 0 0 0 | 710    | 18    | 424 (424)           |
+//! | retire before ready | 2 0 1 2 0 0 0 0 0 0 0 | 631    | 16    | 408 (408)           |
+//! | topology mid-wait   | 1 0 0 1 1 2 1 1 0 0 0 | 124222 | 29    | 36100 (36100)       |
+//! | exhaustion          | 2 0 0 2 2 0 2 1 0 0 0 | 242013 | 35    | 41418 (41418)       |
+//! | channel drain       | 1 0 0 1 0 0 0 2 0 0 0 | 2602   | 19    | 1255 (1255)         |
+//! | scoped capacity     | 1 0 0 1 0 0 1 2 2 1 0 | 160688 | 31    | 47515 (47515)       |
+//! | one replacement     | 1 0 0 1 0 0 0 0 0 0 0 | max deferrals = `REPLACEMENT_DEFERRALS`       |
 
 mod carrier;
 mod laws;
@@ -127,6 +132,7 @@ const QUIET: Churn = Churn {
     congestions: 0,
     jams: 0,
     fills: 0,
+    queues: 0,
     ambiguities: 0,
 };
 
@@ -148,6 +154,7 @@ const SCOPED_CAPACITY: Churn = Churn {
     congestions: 1,
     jams: 2,
     fills: 2,
+    queues: 1,
     ..QUIET
 };
 
@@ -319,8 +326,8 @@ fn test_rerouting_laws_hold_when_channels_drain() {
         Bounds {
             states: 2602,
             depth: 19,
-            premise_states: 1405,
-            unstable_premise_states: 1405,
+            premise_states: 1255,
+            unstable_premise_states: 1255,
         },
         &[
             LawName::WaitEndsByChannelDrain,
@@ -338,10 +345,10 @@ fn test_rerouting_laws_hold_under_scoped_capacity() {
         "scoped capacity",
         SCOPED_CAPACITY,
         Bounds {
-            states: 43548,
-            depth: 29,
-            premise_states: 15987,
-            unstable_premise_states: 15987,
+            states: 160688,
+            depth: 31,
+            premise_states: 47515,
+            unstable_premise_states: 47515,
         },
         &[
             LawName::WaitEndsByCapacityRelease,

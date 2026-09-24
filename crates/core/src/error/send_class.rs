@@ -106,9 +106,9 @@ pub(crate) enum SendClass {
 pub(crate) enum DeferralTrigger {
     /// The hop's connection generation, its readiness, or the route changed.
     LinkChange,
-    /// Capacity admission refused the send before it held a permit: a release in the refused
-    /// scope (the peer's, or the global one while the peer is idle), or a route change, can
-    /// admit it.
+    /// Capacity admission refused the send before it held a permit: it may pass once the
+    /// admission path has room for it again (`Room`: the fixed reservation, or the shared
+    /// capacity through an empty fair-wait queue), or after a route change.
     CapacityRelease,
     /// The hop's data channel did not accept the frame in time: the peer's link must make
     /// progress (another transfer of it releases, or it goes idle), or the generation or route
@@ -275,7 +275,7 @@ impl Error {
             | Self::SuccessorIndexOutOfBounds { .. } | Self::FailedToWriteSuccessors
             | Self::PeerRingUnexpectedAction(_) | Self::InvalidNextHop
             | Self::RelayHopBudgetExhausted | Self::RelayHopBudgetAboveMax(_) | Self::NoNextHop
-            | Self::ReroutingExhausted { .. }
+            | Self::ReroutingExhausted { .. } | Self::ReroutingStopped
             // host
             | Self::ServiceIOError(_) | Self::JsError(_) => SendClass::Fatal,
         }

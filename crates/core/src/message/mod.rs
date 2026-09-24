@@ -82,6 +82,7 @@ pub use types::*;
 pub mod handlers;
 pub use handlers::storage::ChordStorageInterface;
 pub use handlers::storage::ChordStorageInterfaceCacheChecker;
+pub use handlers::storage::ScopedStorage;
 pub use handlers::HandleMsg;
 pub use handlers::MessageHandler;
 

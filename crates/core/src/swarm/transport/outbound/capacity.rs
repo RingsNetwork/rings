@@ -114,9 +114,12 @@ fn global_byte_reservations() -> &'static [usize; TransferClass::COUNT] {
     active_reservations(&OUTBOUND_GLOBAL_BYTE_RESERVATIONS)
 }
 
+/// The two ways `acquire_with_fixed_reservation` can admit a demand.
 #[derive(Clone, Copy, Eq, PartialEq)]
-enum CapacityScope {
+pub(in crate::swarm::transport) enum CapacityScope {
+    /// The class's fixed reservation, open whatever is queued.
     FixedReservation,
+    /// The shared capacity, reached only through the fair-wait queue.
     Shared,
 }
 
@@ -144,6 +147,17 @@ async fn acquire_with_fixed_reservation<T>(
     .await
 }
 
+/// `Admits ≜ reserved(Fixed) ∨ (queue empty ∧ reserved(Shared))`: the admission path of
+/// `acquire_with_fixed_reservation` decided without admitting, for a demand of any size. A
+/// demand the fixed reservation does not cover is refused by `try_admit_unqueued`, or queued by
+/// `acquire_fair`, whenever a waiter is queued, so shared room alone does not admit it.
+pub(in crate::swarm::transport) fn admits_now(
+    queue_empty: bool,
+    reserved: impl Fn(CapacityScope) -> bool,
+) -> bool {
+    reserved(CapacityScope::FixedReservation) || (queue_empty && reserved(CapacityScope::Shared))
+}
+
 pub(super) struct GlobalTransferCapacity {
     state: Mutex<ReservedCapacity<{ TransferClass::COUNT }>>,
     waiters: Arc<FairWaitQueue>,
@@ -167,9 +181,10 @@ impl GlobalTransferCapacity {
         }
     }
 
-    /// The epoch of capacity releases (see `rerouting`).
-    pub(super) const fn releases(&self) -> &Epoch {
-        &self.releases
+    /// Register for every event after which the global part of `Room` may change: its
+    /// releases and its queue's departures.
+    pub(super) fn room_listeners(&self) -> [EventListener; 2] {
+        [self.releases.listen(), self.waiters.departures().listen()]
     }
 
     /// The pure reservation step: `state` after admitting `bytes` of `class` in `scope`, or
@@ -200,15 +215,15 @@ impl GlobalTransferCapacity {
         Ok(state)
     }
 
-    /// Whether `demand` could be admitted now, in either scope, without admitting it.
+    /// Whether `demand` could be admitted now by the global capacity (see `admits_now`).
     fn has_room(&self, peer: Did, demand: TransferDemand) -> bool {
         let state = *self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        [CapacityScope::FixedReservation, CapacityScope::Shared]
-            .into_iter()
-            .any(|scope| Self::reserved(state, peer, demand.class, demand.bytes, scope).is_ok())
+        admits_now(self.waiters.is_empty(), |scope| {
+            Self::reserved(state, peer, demand.class, demand.bytes, scope).is_ok()
+        })
     }
 
     fn try_acquire_inner(
@@ -300,8 +315,11 @@ pub(super) struct TransferCapacity {
     global: Arc<GlobalTransferCapacity>,
     waiters: Arc<FairWaitQueue>,
     /// Advanced after every release of this peer's capacity, a half reservation included:
-    /// the progress of the peer's link.
+    /// the events after which `Room` may change.
     releases: Epoch,
+    /// Advanced when a whole transfer of this peer ends (`TransferCapacityPermit` dropped):
+    /// the progress of the peer's link. A half reservation held no frames and is not counted.
+    progress: Epoch,
 }
 
 impl TransferCapacity {
@@ -312,6 +330,7 @@ impl TransferCapacity {
             global,
             waiters: Arc::new(FairWaitQueue::with_budget(wait_budget)),
             releases: Epoch::default(),
+            progress: Epoch::default(),
         }
     }
 
@@ -340,31 +359,29 @@ impl TransferCapacity {
         }
     }
 
-    /// Whether a peer in `state` admits `demand` in either scope (the admission rule itself,
-    /// on a copy of the state).
-    fn admits(state: PeerCapacityState, peer: Did, demand: TransferDemand) -> bool {
-        [CapacityScope::FixedReservation, CapacityScope::Shared]
-            .into_iter()
-            .any(|scope| Self::reserved(state, peer, demand.class, demand.bytes, scope).is_ok())
-    }
-
     /// `Room(peer, demand)`: `demand` could be admitted now by this peer and the global
-    /// capacity, without admitting it.
+    /// capacity (see `admits_now`), without admitting it.
     pub(super) fn has_room(&self, peer: Did, demand: TransferDemand) -> bool {
         let state = *self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Self::admits(state, peer, demand) && self.global.has_room(peer, demand)
+        admits_now(self.waiters.is_empty(), |scope| {
+            Self::reserved(state, peer, demand.class, demand.bytes, scope).is_ok()
+        }) && self.global.has_room(peer, demand)
     }
 
-    /// `Room(peer, demand)` for a peer that holds no capacity: its own state is fresh.
+    /// `Room(peer, demand)` for a peer that holds no capacity: its own state is fresh and its
+    /// queue empty, so only the fixed or shared step decides.
     pub(super) fn has_room_unheld(
         global: &GlobalTransferCapacity,
         peer: Did,
         demand: TransferDemand,
     ) -> bool {
-        Self::admits(PeerCapacityState::new(), peer, demand) && global.has_room(peer, demand)
+        let fresh = PeerCapacityState::new();
+        admits_now(true, |scope| {
+            Self::reserved(fresh, peer, demand.class, demand.bytes, scope).is_ok()
+        }) && global.has_room(peer, demand)
     }
 
     fn try_acquire_peer_inner(
@@ -446,6 +463,12 @@ impl TransferCapacity {
         })
     }
 
+    /// Register for every event after which `Room` of this peer may change: its releases and
+    /// its queue's departures.
+    pub(super) fn room_listeners(&self) -> [EventListener; 2] {
+        [self.releases.listen(), self.waiters.departures().listen()]
+    }
+
     /// Live permits of this peer: `0` iff no transfer of the peer holds frames in flight.
     pub(super) fn admitted(&self) -> usize {
         self.state
@@ -467,7 +490,7 @@ impl TransferCapacity {
 
 /// What one transfer asks of outbound capacity: its class and its reservation in bytes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct TransferDemand {
+pub(in crate::swarm::transport) struct TransferDemand {
     /// The scheduling class the transfer is admitted under.
     class: TransferClass,
     /// The reservation in bytes (at least one).
@@ -500,26 +523,26 @@ impl TransferDemand {
     }
 }
 
-/// A reading of one peer's release epoch, taken after a refused send published its refusal,
+/// A reading of one peer's progress epoch, taken after a refused send published its refusal,
 /// so after the refused send released whatever it held.
 ///
 /// The capacity is held weakly: a dead capacity means every permit of the peer was released,
 /// and a live `Weak` pins the allocation, so a recreated capacity is never mistaken for the
 /// stamped one.
-pub(crate) struct PeerStamp {
+pub(in crate::swarm::transport) struct PeerStamp {
     /// The peer's capacity when stamped, if one existed.
     capacity: Weak<TransferCapacity>,
-    /// Its release count when stamped.
+    /// Its progress count when stamped.
     released: u64,
 }
 
 /// What the peer's capacity shows against a [`PeerStamp`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub(crate) struct PeerProgress {
-    /// Another transfer of the peer released capacity since the stamp.
-    pub(crate) released: bool,
+pub(in crate::swarm::transport) struct PeerProgress {
+    /// Another transfer of the peer ended since the stamp.
+    pub(in crate::swarm::transport) released: bool,
     /// `Idle(peer)`: no transfer of the peer holds capacity.
-    pub(crate) idle: bool,
+    pub(in crate::swarm::transport) idle: bool,
 }
 
 impl PeerStamp {
@@ -527,29 +550,29 @@ impl PeerStamp {
     pub(super) fn of(capacity: Option<&Arc<TransferCapacity>>) -> Self {
         Self {
             capacity: capacity.map_or_else(Weak::new, Arc::downgrade),
-            released: capacity.map_or(0, |capacity| capacity.releases.current()),
+            released: capacity.map_or(0, |capacity| capacity.progress.current()),
         }
     }
 
     /// The peer's progress now against this stamp; a released capacity is idle.
-    pub(crate) fn progress(&self) -> PeerProgress {
+    pub(in crate::swarm::transport) fn progress(&self) -> PeerProgress {
         self.capacity.upgrade().map_or(
             PeerProgress {
                 released: true,
                 idle: true,
             },
             |capacity| PeerProgress {
-                released: capacity.releases.current() > self.released,
+                released: capacity.progress.current() > self.released,
                 idle: capacity.admitted() == 0,
             },
         )
     }
 
-    /// Register for the peer's next release, while its capacity lives.
-    pub(crate) fn listen(&self) -> Option<EventListener> {
+    /// Register for the peer's next progress, while its capacity lives.
+    pub(in crate::swarm::transport) fn listen(&self) -> Option<EventListener> {
         self.capacity
             .upgrade()
-            .map(|capacity| capacity.releases.listen())
+            .map(|capacity| capacity.progress.listen())
     }
 }
 
@@ -560,6 +583,14 @@ impl PeerStamp {
 pub(in crate::swarm::transport) struct TransferCapacityPermit {
     _peer: PeerCapacityPermit,
     _global: GlobalCapacityPermit,
+}
+
+impl Drop for TransferCapacityPermit {
+    /// A whole transfer of the peer ended: its frames have left the link, which is progress.
+    /// The fields release the peer and global capacity right after.
+    fn drop(&mut self) {
+        self._peer.capacity.progress.advance();
+    }
 }
 
 struct PeerCapacityPermit {

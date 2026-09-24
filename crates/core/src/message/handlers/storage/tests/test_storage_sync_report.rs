@@ -32,6 +32,7 @@ use crate::message::PayloadSender;
 use crate::tests::default::assert_no_more_msg;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;
+use crate::tests::default::Node;
 use crate::tests::held_inbox_for;
 use crate::tests::live_entry;
 use crate::tests::manually_establish_connection;
@@ -291,35 +292,26 @@ async fn test_sync_entries_handler_skips_entries_owned_by_another_virtual_owner(
     Ok(())
 }
 
-#[tokio::test]
-async fn test_sync_entries_physical_destination_routes_by_physical_did_not_storage_owner(
-) -> Result<()> {
-    let mut keys = gen_ordered_keys::<6>().into_iter();
-    let node = prepare_node_with_virtual_nodes(next_generated_key(&mut keys)?, 4)?;
-    let mut peers = Vec::new();
-    for _ in 0..5 {
-        peers.push(next_generated_key(&mut keys)?.address().into());
-    }
-    for peer in peers.iter().copied() {
-        let _ = node.dht().admit_connected(peer, None)?;
-    }
+/// A fixture key: the secret scalar `scalar`, so its address, and hence its ring position and
+/// virtual positions, are fixed.
+fn fixture_key(scalar: u8) -> Result<SecretKey> {
+    SecretKey::try_from(format!("{scalar:064x}").as_str())
+}
 
-    let dht = node.dht();
-    let mut witness = None;
-    for destination in peers {
-        let physical_next = physical_sync_route_next_hop(&dht, destination)?;
-        let storage_next = storage_sync_route_next_hop(&dht, destination)?;
-        if physical_next != storage_next {
-            witness = Some((destination, physical_next, storage_next));
-            break;
-        }
+/// The ring of the physical-destination fixture: the local node (scalar `0x10`, 4 virtual
+/// positions per owner, finger table size 8) with the peers of scalars `0x11..=0x15` admitted.
+fn physical_destination_fixture() -> Result<(Node, [Did; 5])> {
+    let node = prepare_node_with_virtual_nodes(fixture_key(0x10)?, 4)?;
+    let mut peers = [Did::default(); 5];
+    for (peer, scalar) in peers.iter_mut().zip(0x11..=0x15) {
+        *peer = fixture_key(scalar)?.address().into();
+        let _ = node.dht().admit_connected(*peer, None)?;
     }
-    let Some((destination, physical_next, storage_next)) = witness else {
-        return Err(Error::InvalidMessage(
-            "expected physical and storage routes to diverge".to_string(),
-        ));
-    };
+    Ok((node, peers))
+}
 
+/// Route `destination` as `PhysicalOwner` through `node`'s sync handler.
+fn physical_owner_next_hop(node: &Node, destination: Did) -> Result<Option<Did>> {
     let msg = SyncEntriesWithSuccessor {
         purpose: StorageSyncPurpose::OwnershipHandoff,
         destination: StorageSyncDestination::PhysicalOwner(destination),
@@ -332,10 +324,45 @@ async fn test_sync_entries_physical_destination_routes_by_physical_did_not_stora
         destination,
     )?;
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+    next_hop_for_sync_entries(&handler, &context, &msg)
+}
 
-    let next = next_hop_for_sync_entries(&handler, &context, &msg)?;
+/// Law: a `PhysicalOwner` sync routes by the physical DID, never by the storage owner of its
+/// position (#862: deterministic fixture instead of a random draw).
+///
+/// Fixture (`physical_destination_fixture`), addresses abbreviated to their first 16 bits:
+///
+/// ```text
+/// local 0x10 → fae3 ; peers 0x11 → 252d, 0x12 → 7919, 0x13 → 4bd1, 0x14 → 811d, 0x15 → 157b
+/// successors(local) = [157b, 252d, 4bd1]            \* clockwise from fae3, capacity 3
+/// virtual positions around the diverging key:  … 4428 (252d), 457d (local), 568e (4bd1) …
+/// virtual positions around the coinciding key: … 568e (4bd1), a888 (157b) …
+///
+/// destination 4bd1 (0x13): physical = find_successor(4bd1) from fae3 lies past the head
+///                          157b, so the next hop is 157b;
+///                          storage  = owner of the first position ≥ 4bd1, 568e, is 4bd1.
+///                          physical ≠ storage: the diverging witness.
+/// destination 7919 (0x12): physical = 157b; storage = owner of a888, 157b: they coincide.
+/// ```
+///
+/// Both premises are asserted, so a change to key derivation or virtual placement fails here
+/// deterministically instead of making the witness disappear at random.
+#[tokio::test]
+async fn test_sync_entries_physical_destination_routes_by_physical_did_not_storage_owner(
+) -> Result<()> {
+    let (node, peers) = physical_destination_fixture()?;
+    let dht = node.dht();
+    let [_, coinciding, diverging, _, head] = peers;
 
-    assert_eq!(next, physical_next);
-    assert_ne!(next, storage_next);
+    assert_eq!(physical_sync_route_next_hop(&dht, diverging)?, Some(head));
+    assert_eq!(
+        storage_sync_route_next_hop(&dht, diverging)?,
+        Some(diverging)
+    );
+    assert_eq!(physical_owner_next_hop(&node, diverging)?, Some(head));
+
+    assert_eq!(physical_sync_route_next_hop(&dht, coinciding)?, Some(head));
+    assert_eq!(storage_sync_route_next_hop(&dht, coinciding)?, Some(head));
+    assert_eq!(physical_owner_next_hop(&node, coinciding)?, Some(head));
     Ok(())
 }
