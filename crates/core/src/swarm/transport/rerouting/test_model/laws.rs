@@ -129,7 +129,9 @@ pub(super) fn is_accepted(state: &State) -> bool {
 }
 
 /// L1's premise at the state where churn stops: the placement is in progress with at least
-/// `QUIESCENT_DEFERRALS` deferrals of budget left, whatever the channels' occupancy.
+/// `QUIESCENT_DEFERRALS` deferrals of budget left, whatever the channels' occupancy (checked up
+/// to three foreign transfers on one channel; the general claim is the occupancy argument of
+/// `rerouting`'s L1).
 pub(super) fn has_liveness_budget(state: &State) -> bool {
     let deferrals = match state.phase {
         Phase::Compute { deferrals }

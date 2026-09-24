@@ -208,7 +208,7 @@ async fn test_stop_ends_a_waiting_placement() -> Result<()> {
 
 /// Law (inbound writes never wait, #860 review M1): a write under `Attempts::Single`, as the
 /// inbound path issues it (relay hold, inbox retirement), ends at its first refusal with
-/// `ReroutingExhausted` carrying it, and never registers a rerouting wait.
+/// `SingleAttemptRefused` carrying it, and never registers a rerouting wait.
 ///
 /// As in the stop test, the path to the first refusal completes within one poll on the dummy
 /// transport; a wait would leave the future pending with a link waiter.
@@ -229,7 +229,7 @@ async fn test_single_attempt_write_ends_at_its_first_refusal() -> Result<()> {
         panic!("a single attempt must not wait");
     };
     assert!(
-        matches!(&result, Err(Error::ReroutingExhausted { last }) if last.to_string()
+        matches!(&result, Err(Error::SingleAttemptRefused { refusal }) if refusal.to_string()
             == Error::SwarmMissDidInTable(owner.did()).to_string()),
         "{result:?}"
     );

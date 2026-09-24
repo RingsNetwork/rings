@@ -80,9 +80,15 @@
 //!            once every transfer ahead of it is gone).
 //!      Proof: after Env stops, at most QUIESCENT_DEFERRALS refusals remain (its derivation);
 //!            each is followed by an event its trigger names, which satisfies is_triggered,
-//!            and a send to a usable hop with capacity and a drained channel is accepted. The
-//!            model check decides this on every fair trace and finds a counterexample with one
-//!            deferral less of budget.
+//!            and a send to a usable hop with capacity and a drained channel is accepted.
+//!            Occupancy: a channel refusal stamped after Env stops has ahead = n, the transfers
+//!            holding the peer then, and no transfer is admitted afterwards; so Drained ∨ Idle
+//!            holds only once all n are gone, the channel holds none of them, and the retry is
+//!            not refused by the channel. A wait stamped before Env stops wakes at most once
+//!            onto residual occupancy, and its next refusal is stamped after. Neither step
+//!            depends on n, so the bound holds for every occupancy. The model check decides L1
+//!            on every fair trace up to three foreign transfers on one channel (the argument's
+//!            witness past n = 2) and finds a counterexample with one deferral less of budget.
 //! ```
 //!
 //! The model check `test_model` enumerates every bounded trace of this automaton composed
@@ -184,6 +190,18 @@ pub(super) enum Verdict {
 }
 
 impl Verdict {
+    /// The outcome of a placement that makes this one attempt (`Attempts::Single`).
+    ///
+    /// Post: `Ok` iff `Accepted`; a deferral is `SingleAttemptRefused` carrying it (no
+    /// effect, S1); any other failure is returned as is.
+    pub(super) fn single(self) -> Result<()> {
+        match self {
+            Self::Accepted => Ok(()),
+            Self::Deferred { cause, .. } => Err(Error::SingleAttemptRefused { refusal: cause }),
+            Self::Failed(error) => Err(error),
+        }
+    }
+
     /// Classify a local attempt: whatever happened locally is final.
     pub(super) fn local(result: Result<()>) -> Self {
         match result {
@@ -260,14 +278,6 @@ impl Rerouting {
     /// The initial state: no deferral spent.
     pub(super) const fn start() -> Self {
         Self { deferrals: 0 }
-    }
-
-    /// A rerouting with its whole budget spent: its first deferral exhausts, so it makes one
-    /// attempt and never waits.
-    pub(super) const fn spent() -> Self {
-        Self {
-            deferrals: REROUTING_BUDGET,
-        }
     }
 
     /// `δ(R, verdict)`.

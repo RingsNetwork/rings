@@ -39,7 +39,8 @@ impl SwarmInboxDelivery {
         Self { transport }
     }
 
-    /// Tombstone `removal` at the carrier's owner.
+    /// Tombstone `removal` at the carrier's owner, in one attempt (`Attempts::Single`): a
+    /// refusal before acceptance is `SingleAttemptRefused`, and the removal had no effect.
     async fn retire(&self, removal: Entry) -> Result<()> {
         let removal = EntryOperation::Tombstone(removal);
         operate_entry(self.transport.clone(), removal, Attempts::Single).await
@@ -52,6 +53,11 @@ impl InboxDelivery for SwarmInboxDelivery {
     /// Post: every element of the locally stored inbox that passes the witness was offered to
     /// the application and then tombstoned at its owner; every element that fails the witness
     /// was tombstoned unread.
+    ///
+    /// A retirement refused before acceptance (`SingleAttemptRefused`, including a detached
+    /// `Cancelled`, which was `Ok` before #859) ends the drain with that error: the element
+    /// stays at its owner and is offered again on the next drain, as it was after a silent
+    /// cancellation, so no element is lost or retired twice.
     async fn deliver_inbox(&self) -> Result<()> {
         let now_ms = get_epoch_ms();
         let key = StorageKey::inbox_of(self.transport.dht.did);

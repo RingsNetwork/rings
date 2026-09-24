@@ -27,6 +27,10 @@ use crate::utils::get_epoch_ms;
 ///
 /// Pre: this node is responsible for the destination's ring position and the destination has
 /// no connection; `payload` was verified live on arrival.
+///
+/// One attempt (`Attempts::Single`): this runs on the inbound lane, which a rerouting wait must
+/// never hold. A refusal before acceptance is `SingleAttemptRefused` (the hold had no effect);
+/// before #859 the same refusal was the send's raw error, and a detached `Cancelled` was `Ok`.
 pub(crate) async fn hold_for_offline_destination(
     transport: Arc<SwarmTransport>,
     payload: &MessagePayload,

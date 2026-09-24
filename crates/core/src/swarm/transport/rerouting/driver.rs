@@ -54,8 +54,8 @@ pub(crate) trait Placement {
 pub(crate) enum Attempts {
     /// Reroute within `REROUTING_BUDGET`; a wait ends once the stop is requested.
     Rerouted(StopToken),
-    /// One attempt, as before #859: a refusal ends the placement with `ReroutingExhausted`
-    /// carrying it, and nothing waits. For writes originated on the inbound path (relay holds,
+    /// One attempt, as before #859: a pre-acceptance refusal ends the placement with
+    /// `SingleAttemptRefused` carrying it, and nothing waits. For writes originated on the inbound path (relay holds,
     /// inbox retirement), which must never hold an inbound lane on a rerouting wait.
     Single,
 }
@@ -64,10 +64,10 @@ pub(crate) enum Attempts {
 ///
 /// ```text
 /// reroute(P, first, attempts):
-///   R ← start (Rerouted) | spent (Single) ; route ← first
+///   attempts = Single ⇒ return (attempt first).single     \* one attempt, no automaton
+///   R ← start ; route ← first
 ///   loop
-///     verdict ← route = Local(l)        ⇒ Verdict::local(P.settle(l))
-///               route = Remote(next, m) ⇒ attempt_remote(m, next)
+///     verdict ← attempt route
 ///     case δ(R, verdict) of
 ///       Complete  ⇒ return Ok
 ///       Fail(e)   ⇒ return Err(e)                \* fatal, ambiguous, or exhausted
@@ -77,24 +77,22 @@ pub(crate) enum Attempts {
 ///
 /// Post: `Ok(())` iff one attempt was accepted or settled locally; every earlier attempt was
 /// refused before acceptance (S1). `Err(ReroutingExhausted { .. })` after
-/// `REROUTING_BUDGET + 1` refused sends (S3), or after the one refused send of
-/// `Attempts::Single`; `Err(ReroutingStopped)` as [`await_trigger`] states.
+/// `REROUTING_BUDGET + 1` refused sends (S3); `Err(SingleAttemptRefused { .. })` after the one
+/// refused send of `Attempts::Single`; `Err(ReroutingStopped)` as [`await_trigger`] states.
 pub(crate) async fn reroute<P: Placement>(
     transport: &Arc<SwarmTransport>,
     placement: &P,
     first: Route<P::Local>,
     attempts: Attempts,
 ) -> Result<()> {
-    let (mut rerouting, stop) = match attempts {
-        Attempts::Rerouted(stop) => (Rerouting::start(), stop),
-        Attempts::Single => (Rerouting::spent(), StopToken::never()),
+    let stop = match attempts {
+        Attempts::Rerouted(stop) => stop,
+        Attempts::Single => return attempt(transport, placement, first).await.single(),
     };
+    let mut rerouting = Rerouting::start();
     let mut route = first;
     loop {
-        let verdict = match route {
-            Route::Local(local) => Verdict::local(placement.settle(transport, local).await),
-            Route::Remote { next, message } => transport.attempt_remote(message, next).await,
-        };
+        let verdict = attempt(transport, placement, route).await;
         let awaiting = match rerouting.after(verdict) {
             Step::Complete => return Ok(()),
             Step::Fail(error) => return Err(error),
@@ -102,6 +100,18 @@ pub(crate) async fn reroute<P: Placement>(
         };
         route = await_trigger(transport, placement, &awaiting, &stop).await?;
         rerouting = awaiting.resume();
+    }
+}
+
+/// One attempt of `placement` along `route`: settle it here, or send it toward `next`.
+async fn attempt<P: Placement>(
+    transport: &Arc<SwarmTransport>,
+    placement: &P,
+    route: Route<P::Local>,
+) -> Verdict {
+    match route {
+        Route::Local(local) => Verdict::local(placement.settle(transport, local).await),
+        Route::Remote { next, message } => transport.attempt_remote(message, next).await,
     }
 }
 

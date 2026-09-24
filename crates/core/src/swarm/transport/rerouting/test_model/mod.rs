@@ -89,6 +89,7 @@
 //! | topology mid-wait   | 1 0 0 1 1 2 1 1 0 0 0 | 130776 | 29    | 38532 (38532)       |
 //! | exhaustion          | 2 0 0 2 2 0 2 1 0 0 0 | 257719 | 35    | 44140 (44140)       |
 //! | channel drain       | 1 0 0 1 0 0 0 2 0 0 0 | 2900   | 19    | 1650 (1650)         |
+//! | deep channel drain  | 1 0 0 1 0 0 0 3 0 0 0 | 9067   | 24    | 4599 (4599)         |
 //! | scoped capacity     | 1 0 0 1 0 0 1 2 2 1 0 | 185372 | 31    | 61026 (61026)       |
 //! | one replacement     | 1 0 0 1 0 0 0 0 0 0 0 | max deferrals = `REPLACEMENT_DEFERRALS`       |
 
@@ -331,6 +332,34 @@ fn test_rerouting_laws_hold_when_channels_drain() {
             depth: 19,
             premise_states: 1650,
             unstable_premise_states: 1650,
+        },
+        &[
+            LawName::WaitEndsByChannelDrain,
+            LawName::RetryReachesReplacement,
+        ],
+    );
+}
+
+/// Deep channel drain: up to three foreign transfers occupy one channel when the environment
+/// stops. L1 holds with the same `QUIESCENT_DEFERRALS`, so the bound does not grow with the
+/// residual occupancy (the drained-ahead stamp; the general claim is its argument in
+/// `rerouting`'s L1, of which this configuration is the check one step past `jams = 2`).
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), test)]
+fn test_rerouting_laws_hold_when_a_channel_is_deeply_occupied() {
+    assert_laws_hold_exhaustively(
+        "deep channel drain",
+        Churn {
+            reservations: 1,
+            deaths: 1,
+            jams: 3,
+            ..QUIET
+        },
+        Bounds {
+            states: 9067,
+            depth: 24,
+            premise_states: 4599,
+            unstable_premise_states: 4599,
         },
         &[
             LawName::WaitEndsByChannelDrain,

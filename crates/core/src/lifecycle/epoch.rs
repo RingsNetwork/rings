@@ -3,8 +3,9 @@
 //! An [`Epoch`] counts the occurrences of one class of event (a topology commit, a link
 //! transition, a capacity release) and notifies each. Production waiters never read the count:
 //! each guards on a state predicate, registered before the check, so `Law (Wake)` alone rules
-//! out a lost event. The count is the specification's observable (`Law (Mono)`, and the laws
-//! stated in counts such as `PeerRing`'s `Law (Epoch)`), kept in test builds, where it is read.
+//! out a lost event. The count is kept in every build, so the type is the counter its laws
+//! describe (`Law (Mono)`, and laws stated in counts such as `PeerRing`'s `Law (Epoch)`); only
+//! its reader, `current`, is a test hook.
 //!
 //! ```text
 //! Epoch      ≜ (value : ℕ, changed : Event)
@@ -14,9 +15,7 @@
 //!              so  listen ; check(predicate) ; await   misses no advance.
 //! ```
 
-#[cfg(test)]
 use std::sync::atomic::AtomicU64;
-#[cfg(test)]
 use std::sync::atomic::Ordering;
 
 use event_listener::Event;
@@ -28,8 +27,7 @@ use event_listener::EventListener;
 /// before it.
 #[derive(Debug, Default)]
 pub(crate) struct Epoch {
-    /// Number of events of this class so far (test builds: the observable of the laws).
-    #[cfg(test)]
+    /// Number of events of this class so far.
     value: AtomicU64,
     /// Notified after every increment of `value`.
     changed: Event,
@@ -41,7 +39,6 @@ impl Epoch {
     /// Post: `current()` observed after this call exceeds every reading taken before it (one
     /// process cannot perform the `2^64` increments that would wrap the count).
     pub(crate) fn advance(&self) {
-        #[cfg(test)]
         self.value.fetch_add(1, Ordering::AcqRel);
         self.changed.notify(usize::MAX);
     }

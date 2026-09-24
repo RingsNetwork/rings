@@ -74,6 +74,14 @@ impl CapacityView<'_> {
 /// `drained` and `ahead` come from one locked reading of the peer state, so no transfer is
 /// both ahead and already drained (Inv of `PeerCapacityState::drained`).
 ///
+/// `Drained` counts ends, not identities: under load, transfers admitted after the stamp may
+/// end before those ahead and satisfy it early, and the retry may then be refused again. That
+/// costs one deferral within the budget and never L1, since nothing is admitted once the
+/// environment stops. The exact predicate, "no transfer admitted at the stamp still holds
+/// capacity", needs the peer's set of admitted sequence numbers in the reservation state,
+/// which is `Copy` and copied by every admission check (`reserved`); an ordered set there
+/// would put a set update on every admission and release to remove a budget-bounded cost.
+///
 /// The capacity is held weakly: a dead capacity means every permit of the peer was released,
 /// and a live `Weak` pins the allocation, so a recreated capacity is never mistaken for the
 /// stamped one.

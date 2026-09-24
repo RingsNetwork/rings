@@ -802,6 +802,14 @@ pub enum Error {
         last: super::SendDeferral,
     },
 
+    /// A single-attempt DHT placement (a write the inbound path originates) was refused before
+    /// acceptance; it had no effect and is not retried.
+    #[error("Single-attempt send refused before acceptance: {refusal}")]
+    SingleAttemptRefused {
+        /// The refusal.
+        refusal: super::SendDeferral,
+    },
+
     /// A rerouted DHT placement was stopped while waiting to be retried; its refused attempt
     /// had no effect.
     #[error("Rerouting stopped while waiting to retry a placement")]

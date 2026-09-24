@@ -277,7 +277,8 @@ impl Error {
             | Self::SuccessorIndexOutOfBounds { .. } | Self::FailedToWriteSuccessors
             | Self::PeerRingUnexpectedAction(_) | Self::InvalidNextHop
             | Self::RelayHopBudgetExhausted | Self::RelayHopBudgetAboveMax(_) | Self::NoNextHop
-            | Self::ReroutingExhausted { .. } | Self::ReroutingStopped
+            | Self::ReroutingExhausted { .. } | Self::SingleAttemptRefused { .. }
+            | Self::ReroutingStopped
             // host
             | Self::ServiceIOError(_) | Self::JsError(_) => SendClass::Fatal,
         }
@@ -396,7 +397,7 @@ mod tests {
         );
     }
 
-    /// The exhaustion error is never itself retried.
+    /// The exhaustion and single-attempt refusals are never themselves retried.
     #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_family = "wasm"), test)]
     fn test_rerouting_exhaustion_is_fatal() {
@@ -405,5 +406,9 @@ mod tests {
             last: SendDeferral::cancelled(peer),
         };
         assert_eq!(exhausted.send_class(), SendClass::Fatal);
+        let refused = Error::SingleAttemptRefused {
+            refusal: SendDeferral::cancelled(peer),
+        };
+        assert_eq!(refused.send_class(), SendClass::Fatal);
     }
 }
