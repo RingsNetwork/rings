@@ -204,14 +204,16 @@ impl Error {
             | Self::DetachedSendAbandonedAfterClaim { .. } => SendClass::Ambiguous,
             Self::Transport(error) => transport_send_class(error),
             #[cfg(all(feature = "wasm", target_family = "wasm"))]
-            Self::IDBError(_) | Self::SerdeWasmBindgenError(_) => SendClass::Fatal,
+            Self::IDBError(_) | Self::SerdeWasmBindgenError(_) | Self::IdbAccessClockMissing
+            | Self::IdbAccessClockExhausted(_) => SendClass::Fatal,
             // cryptography
             Self::BlsInputLengthMismatch | Self::EccSerializeFailed | Self::EccDeserializeFailed
             | Self::CurveHasherInitFailed | Self::CurveHasherFailed | Self::EdDSAPublicKeyBadFormat
             | Self::ECDSAPublicKeyBadFormat | Self::Secp256k1PointLiftFailed | Self::ECDSAError(_)
             | Self::PublicKeyBadFormat | Self::PrivateKeyBadFormat | Self::InvalidPublicKey
             | Self::InvalidRecoverId(_) | Self::NonCanonicalSignature | Self::VerifySignatureFailed
-            | Self::UnknownAccount | Self::InvalidAffineScalar
+            | Self::UnknownAccount | Self::InvalidAffineScalar | Self::IdentityElement
+            | Self::ZeroScalar
             // end-to-end frames
             | Self::E2eStreamIdMismatch { .. } | Self::E2eFrameSequenceMismatch { .. }
             | Self::E2eFrameReorderWindowExceeded { .. } | Self::E2eFrameSequenceOverflow
