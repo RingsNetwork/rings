@@ -19,14 +19,15 @@
 //! OnionPeeledCell ─┬─ relay:  Dec⁰ under KDF₄₈(σ_in)  ──▶ Relayed(OnionCell)
 //!                  └─ symbol: Dec^τ under KDF₄₈(σ_in) ──▶ Consumed(v, OnionSurb)
 //!
-//! OnionSurb = (b, χ_{i+1}, σ_out) ── produce(v′), sealed under the keys of σ_out ──▶ OnionCell
+//! OnionSurb υ = (next, χ_{i+1}, σ_out, x) ── produce(v′), keys of σ_out ──▶ (next, OnionCell)
 //! ```
 //!
 //! The class flows along every arrow unchanged, the role is the layer's application, and the
 //! output's keys come from `σ_out` in the hop's own layer: a hop supplies none of the three.
-//! [`OnionSurb`] is the compact reply block of D8, `|b| + |χ| + |σ| ≈ 2.95 KB` (2979 B with the
-//! next DID and `x` that the pool keeps beside it), so a SURB pool costs that per entry whatever
-//! the class; its keys are derived when it is spent. The client has one
+//! [`OnionSurb`] is D8's reply block `υ` with the class of its cell: 2980 B (a class byte, `χ`,
+//! `σ`, the next DID and `x`), so a SURB pool costs that per entry whatever the class; its keys
+//! are derived when it is spent. The batched-credit codec of `υ` (D8) lands in 2a-4 and decodes
+//! into this type. The client has one
 //! constructor, [`OnionCell::client`], which builds the header and seals the first segment in the
 //! class it chooses, and reads a returning cell through [`OnionCell::loop_tag`] and
 //! [`OnionCell::open`].
@@ -43,6 +44,7 @@ use rand::CryptoRng;
 use rand::RngCore;
 use rings_aez::KeyError;
 use rings_core::delegation::DelegateeKey;
+use rings_core::dht::Did;
 use zeroize::Zeroizing;
 
 use super::carry;
@@ -58,6 +60,7 @@ use super::header::OnionPeelError;
 use super::header::ONION_HEADER_BYTES;
 use super::layer::OnionLayer;
 use super::layer::OnionLayerApplication;
+use super::layer::OnionLayerHead;
 use super::seed::OnionCarryKey;
 use super::seed::OnionSegmentKeys;
 use super::seed::OnionSegmentSeed;
@@ -91,36 +94,48 @@ pub(crate) struct OnionPeeledCell {
     buffer: Vec<u8>,
 }
 
-/// The outcome of a hop's carry step, chosen by its layer's application.
+/// The outcome of a hop's carry step, chosen by its layer's application. The step consumes both
+/// seeds of `λ_i`, so only its key-free head comes out.
 pub(crate) enum OnionStep {
     /// A relay removed one AEZ layer: the cell it forwards.
     Relayed {
-        /// `λ_i`.
-        layer: OnionLayer,
+        /// The head of `λ_i`.
+        head: OnionLayerHead,
         /// The forwarded cell, of the received class.
         cell: OnionCell,
     },
     /// A symbol hop received its input: the value and the reply block of its output.
     Consumed {
-        /// `λ_i`.
-        layer: OnionLayer,
+        /// The head of `λ_i`.
+        head: OnionLayerHead,
         /// `v`, zeroized on drop.
         value: Zeroizing<Vec<u8>>,
-        /// The reply block `(b, χ_{i+1}, σ_out)` that produces the forwarded cell.
+        /// The reply block `υ = (next, χ_{i+1}, σ_out, x)` that produces the forwarded cell.
         surb: OnionSurb,
     },
 }
 
-/// A single-use reply block (#834 D8): the class, the next header and the segment seed `σ_out`
-/// of a symbol hop's output. It holds neither the received cell nor derived keys.
+/// A single-use reply block `υ = (next, χ_υ, σ_υ, x_υ)` (#834 D8), with the class of its cell:
+/// where the output goes, its header, the segment seed of its carry, and its expiry.
+///
+/// It holds neither a cell buffer nor derived keys, so its size is independent of the class:
+/// one class byte, `|χ| = 2919`, `|σ| = 32`, a 20-byte DID and an 8-byte `x`, the 2980 B of D8.
+/// Affine: no `Clone`, so a reply block is spent at most once.
 pub(crate) struct OnionSurb {
-    /// `b`, the class of the received cell.
+    /// `b`, the class of the cell it produces.
     class: OnionLoopClass,
-    /// `χ_{i+1}`.
-    next: OnionHeader,
-    /// `σ_out` of `λ_i`.
+    /// `next`, the DID the produced cell goes to.
+    next: Did,
+    /// `χ_υ`.
+    header: OnionHeader,
+    /// `σ_υ`, zeroized on drop.
     outbound: OnionSegmentSeed,
+    /// `x_υ`, in milliseconds.
+    expires_at_ms: u64,
 }
+
+// The reply block is sized by the header, not by the class of its cell (D8).
+const _: () = assert!(size_of::<OnionSurb>() <= 3 * 1024);
 
 /// A byte string whose length is no loop class: no cell.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -261,68 +276,80 @@ impl OnionCell {
 }
 
 impl OnionPeeledCell {
-    /// Return `λ_i`, for the admission and routing decisions made before the carry step.
-    pub(crate) const fn layer(&self) -> &OnionLayer {
-        &self.layer
+    /// Return the head of `λ_i`, for the admission and routing decisions made before the carry
+    /// step.
+    pub(crate) const fn head(&self) -> &OnionLayerHead {
+        &self.layer.head
     }
 
-    /// The carry step of this position, by `λ_i`'s application:
+    /// The carry step of this position, by `λ_i`'s application; it consumes both seeds:
     ///
     /// ```text
-    /// relay     y_i = Dec⁰_{KDF₄₈(σ_in)}(y_{i−1})                   ⇒ Relayed, same class
-    /// f ∈ Σ_W   v = pad⁻¹ Dec^τ_{KDF₄₈(σ_in)}(y_{i−1})         ⇒ Consumed(v, (b, χ_{i+1}, σ_out))
+    /// relay     y_i = Dec⁰_{KDF₄₈(σ_in)}(y_{i−1})                 ⇒ Relayed(head, cell)
+    /// f ∈ Σ_W   v = pad⁻¹ Dec^τ_{KDF₄₈(σ_in)}(y_{i−1})            ⇒ Consumed(head, v, υ)
+    ///           υ = (next, χ_{i+1}, σ_out, x)
     /// ```
     ///
     /// # Errors
     ///
     /// [`OnionStepError::Key`] for a weak key, and [`OnionStepError::Open`] if a symbol hop
     /// rejects its input.
-    pub(crate) fn step(mut self) -> Result<OnionStep, OnionStepError> {
-        match self.layer.application {
+    pub(crate) fn step(self) -> Result<OnionStep, OnionStepError> {
+        let OnionLayer {
+            head,
+            inbound,
+            outbound,
+        } = self.layer;
+        let key = inbound.key()?;
+        match head.application {
             OnionLayerApplication::Relay => {
-                carry::peel(&self.layer.inbound.key()?, &mut self.carry);
+                let mut carry = self.carry;
+                carry::peel(&key, &mut carry);
                 Ok(OnionStep::Relayed {
-                    layer: self.layer,
+                    head,
                     cell: OnionCell {
                         class: self.class,
                         header: self.next,
-                        carry: self.carry,
+                        carry,
                         buffer: self.buffer,
                     },
                 })
             }
             OnionLayerApplication::Apply { .. } => {
-                let value = carry::open(&self.layer.inbound.key()?, self.carry)?;
+                let value = carry::open(&key, self.carry)?;
                 let surb = OnionSurb {
                     class: self.class,
-                    next: self.next,
-                    outbound: OnionSegmentSeed::new(*self.layer.outbound.as_bytes()),
+                    next: head.next,
+                    header: self.next,
+                    outbound,
+                    expires_at_ms: head.expires_at_ms,
                 };
-                Ok(OnionStep::Consumed {
-                    layer: self.layer,
-                    value,
-                    surb,
-                })
+                Ok(OnionStep::Consumed { head, value, surb })
             }
         }
     }
 }
 
 impl OnionSurb {
-    /// Spend the reply block: `v′` sealed under the segment keys of `σ_out`, as a cell of the
-    /// received class in a fresh buffer.
+    /// `x_υ`: the pool drops the block at `x_υ` and spends the least `x` first (D8).
+    pub(crate) const fn expires_at_ms(&self) -> u64 {
+        self.expires_at_ms
+    }
+
+    /// Spend the reply block: `v′` sealed under the segment keys of `σ_υ`, as a cell of its class
+    /// in a fresh buffer, with the DID it goes to.
     ///
     /// # Errors
     ///
-    /// [`OnionProduceError::Key`] for a weak key of `σ_out`, and
+    /// [`OnionProduceError::Key`] for a weak key of `σ_υ`, and
     /// [`OnionProduceError::ValueTooWide`] if `|v′| ≥ C₀`.
-    pub(crate) fn produce(self, value: &[u8]) -> Result<OnionCell, OnionProduceError> {
+    pub(crate) fn produce(self, value: &[u8]) -> Result<(Did, OnionCell), OnionProduceError> {
         let keys = self.outbound.keys()?;
-        Ok(OnionCell {
+        Ok((self.next, OnionCell {
             class: self.class,
             carry: carry::seal(self.class, &keys, value)?,
-            header: self.next,
+            header: self.header,
             buffer: Vec::with_capacity(self.class.cell_bytes()),
-        })
+        }))
     }
 }

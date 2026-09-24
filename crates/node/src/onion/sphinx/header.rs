@@ -14,8 +14,8 @@
 //!
 //! where `b` is the loop class, bound as its one-byte label (#834 H1: a cell relabelled to another
 //! class fails `γ` at the next honest hop); `b` denotes the class only. `SEC1(α_i)` in the key
-//! schedule binds the sign of `α_i`: `−α_i` has the same `K_i` but other keys. With `β` as `Ĥ` blocks of `ℓ` bytes and `ρ[a, b)` the
-//! blocks `a … b − 1`, the routing information is
+//! schedule binds the sign of `α_i`: `−α_i` has the same `K_i` but other keys. With `β` as `Ĥ`
+//! blocks of `ℓ` bytes and `ρ[a, b)` the blocks `a … b − 1`, the routing information is
 //!
 //! ```text
 //! φ_0 = ε,   φ_i = (φ_{i−1} ‖ 0^ℓ) ⊕ ρ_i[Ĥ−i+1, Ĥ+1)                               1 ≤ i < H

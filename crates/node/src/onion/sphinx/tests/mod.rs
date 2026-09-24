@@ -23,6 +23,7 @@ use super::header::OnionHeaderRoute;
 use super::layer::OnionArguments;
 use super::layer::OnionLayer;
 use super::layer::OnionLayerApplication;
+use super::layer::OnionLayerHead;
 use super::layer::ONION_ARGUMENT_BYTES;
 use super::seed::OnionCarrySeed;
 use super::seed::OnionSegmentSeed;
@@ -60,11 +61,13 @@ fn fixture_layer(seed: u64, position: usize, hops: usize) -> OnionLayer {
         OnionLayerApplication::Relay
     };
     OnionLayer {
-        application,
-        next: Did::from(u32::try_from(position).expect("fixture position fits u32")),
-        epoch: OnionExitEpoch::new(rng.gen()),
-        expires_at_ms: rng.gen(),
-        nonce: OnionForwardNonce::new(rng.gen()),
+        head: OnionLayerHead {
+            application,
+            next: Did::from(u32::try_from(position).expect("fixture position fits u32")),
+            epoch: OnionExitEpoch::new(rng.gen()),
+            expires_at_ms: rng.gen(),
+            nonce: OnionForwardNonce::new(rng.gen()),
+        },
         inbound: OnionCarrySeed::new(rng.gen()),
         outbound: OnionSegmentSeed::random(&mut rng),
     }

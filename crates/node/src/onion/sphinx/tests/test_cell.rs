@@ -25,6 +25,7 @@ use crate::onion::sphinx::header::OnionHeaderRoute;
 use crate::onion::sphinx::layer::OnionArguments;
 use crate::onion::sphinx::layer::OnionLayer;
 use crate::onion::sphinx::layer::OnionLayerApplication;
+use crate::onion::sphinx::layer::OnionLayerHead;
 use crate::onion::sphinx::seed::OnionCarrySeed;
 use crate::onion::sphinx::seed::OnionSegmentSeed;
 use crate::onion::OnionExitEpoch;
@@ -37,11 +38,13 @@ fn layer(
     outbound: OnionSegmentSeed,
 ) -> OnionLayer {
     OnionLayer {
-        application,
-        next: Did::from(7_u32),
-        epoch: OnionExitEpoch::new([1; 16]),
-        expires_at_ms: 1,
-        nonce: OnionForwardNonce::new([2; 16]),
+        head: OnionLayerHead {
+            application,
+            next: Did::from(7_u32),
+            epoch: OnionExitEpoch::new([1; 16]),
+            expires_at_ms: 1,
+            nonce: OnionForwardNonce::new([2; 16]),
+        },
         inbound,
         outbound,
     }
@@ -109,28 +112,32 @@ fn test_loop_carries_each_segment_value_to_its_consumer() {
             .peel(key)
             .expect("peel");
         // Admission reads the layer before any carry work.
-        assert_eq!(peeled.layer().expires_at_ms, 1);
+        assert_eq!(peeled.head().expires_at_ms, 1);
         peeled.step().expect("carry step")
     };
     let relay = |cell: Vec<u8>, key| {
-        let OnionStep::Relayed { layer, cell } = peel(cell, key) else {
+        let OnionStep::Relayed { head, cell } = peel(cell, key) else {
             panic!("a relay position");
         };
-        assert_eq!(layer.application, OnionLayerApplication::Relay);
+        assert_eq!(head.application, OnionLayerApplication::Relay);
         assert_eq!(cell.class(), class);
         cell.into_bytes()
     };
 
     let cell = relay(relay(cell.into_bytes(), &keys[0]), &keys[1]);
-    let OnionStep::Consumed { layer, value, surb } = peel(cell, &keys[2]) else {
+    let OnionStep::Consumed { head, value, surb } = peel(cell, &keys[2]) else {
         panic!("the symbol position");
     };
     assert!(matches!(
-        layer.application,
+        head.application,
         OnionLayerApplication::Apply { .. }
     ));
     assert_eq!(*value, input);
-    let cell = surb.produce(&output).expect("produce").into_bytes();
+    // υ carries the symbol layer's `next` and `x`, so a pool needs nothing beside it.
+    assert_eq!(surb.expires_at_ms(), head.expires_at_ms);
+    let (next, cell) = surb.produce(&output).expect("produce");
+    assert_eq!(next, head.next);
+    let cell = cell.into_bytes();
     let cell = relay(relay(cell, &keys[3]), &keys[4]);
     let returned = OnionCell::parse(cell).expect("cell");
 

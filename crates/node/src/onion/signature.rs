@@ -93,7 +93,9 @@ impl OnionSymbolSpec {
 macro_rules! onion_signature {
     (
         relay: $relay:literal,
-        world_facing: [$($(#[doc = $doc:literal])* $variant:ident $field:ident $name:literal,)+] $(,)?
+        world_facing: [
+            $($(#[doc = $doc:literal])* $variant:ident $field:ident $name:literal,)+
+        ] $(,)?
     ) => {
         /// The finite signature `Σ`, one named field per symbol so that every table access is
         /// total.

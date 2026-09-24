@@ -242,9 +242,14 @@ impl TryFrom<Point<Secp256k1>> for PublicKey<SEC1_COMPRESSED_BYTES> {
 impl TryFrom<K256AffinePoint> for PublicKey<SEC1_COMPRESSED_BYTES> {
     type Error = Error;
 
-    /// SEC1 compressed encoding of an affine point: defined exactly on `G ∖ {O}`.
+    /// SEC1 compressed encoding of an affine point: defined exactly on `G ∖ {O}`, checked on the
+    /// affine point itself, so no field inversion is spent.
     fn try_from(point: K256AffinePoint) -> Result<Self> {
-        Self::try_from(Point::<Secp256k1>::from(point))
+        if point == K256AffinePoint::IDENTITY {
+            Err(Error::IdentityElement)
+        } else {
+            Ok(encode_sec1(&point))
+        }
     }
 }
 
@@ -345,6 +350,11 @@ mod tests {
         assert_eq!(PublicKey::try_from(Point::from(point)).ok(), Some(encoded));
         assert!(NonIdentityPoint::<Secp256k1>::try_from(PublicKey([0; 33])).is_err());
         assert!(PublicKey::<33>::try_from(Point::<Secp256k1>::zero()).is_err());
+        assert!(PublicKey::<33>::try_from(k256::AffinePoint::IDENTITY).is_err());
+        assert_eq!(
+            PublicKey::try_from(Point::from(decoded.clone()).as_inner().to_affine()).ok(),
+            Some(encoded)
+        );
     }
 
     /// Wide reduction maps `0` and `n` to `0`, which is rejected, and `n + 1` to `1`.

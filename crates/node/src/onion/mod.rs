@@ -64,7 +64,7 @@ pub mod signature;
     not(test),
     expect(
         dead_code,
-        reason = "pure Sphinx primitives; #834 Phase 2a-4 (#843) wires them into the data plane and removes this"
+        reason = "pure Sphinx primitives; #834 Phase 2a-4 (#843) wires them in and removes this"
     )
 )]
 pub(crate) mod sphinx;

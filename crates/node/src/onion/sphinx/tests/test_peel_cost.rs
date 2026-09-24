@@ -37,8 +37,10 @@ use chacha20::ChaCha20;
 use hkdf::HkdfExtract;
 use hmac::Hmac;
 use hmac::Mac;
+use rand::rngs::StdRng;
 use rand::RngCore;
 use rings_aez::Tweak;
+use rings_core::delegation::DelegateeKey;
 use rings_core::ecc::prime_order::NonIdentityPoint;
 use rings_core::ecc::prime_order::NonZeroScalar;
 use rings_core::ecc::Secp256k1;
@@ -54,6 +56,7 @@ use crate::onion::sphinx::class::OnionLoopClass;
 use crate::onion::sphinx::header::OnionHeader;
 use crate::onion::sphinx::header::ONION_HEADER_ROUTING_BYTES;
 use crate::onion::sphinx::layer::ONION_LAYER_BYTES;
+use crate::onion::sphinx::seed::OnionCarrySeed;
 use crate::onion::sphinx::seed::OnionSegmentSeed;
 use crate::onion::sphinx::MAX_ONION_LOOP_HOPS;
 
@@ -80,8 +83,6 @@ fn measure() -> Vec<(&'static str, f64)> {
         OnionHeader::build(&fixture_route(40, &keys), class, &mut rng).expect("build the header");
     let key = &keys[0];
     let peeled = header.peel(class, key).expect("peel");
-    let inbound = &peeled.layer.inbound;
-    let carry_key = inbound.key().expect("strong key");
     let (_, segment) = OnionSegmentSeed::draw(&mut rng).expect("strong segment");
     let (cell, _) = OnionCell::client(
         &fixture_route(40, &keys),
@@ -91,15 +92,27 @@ fn measure() -> Vec<(&'static str, f64)> {
         &mut rng,
     )
     .expect("client cell");
-    let cell = cell.into_bytes();
     // `parse` consumes its buffer, so every pass gets its own copy, made before timing starts.
     let passes = usize::try_from(WARM_UP + RUNS).expect("pass count fits usize");
-    let mut cells = vec![cell; passes].into_iter();
+    let cells = vec![cell.into_bytes(); passes];
+
+    let mut rows = component_rows(key, &peeled.layer.inbound, &mut rng);
+    rows.extend(real_path_rows(key, &header, cells));
+    rows
+}
+
+/// The rows that time each primitive of one cell alone, with that cell's operands.
+fn component_rows(
+    key: &DelegateeKey,
+    inbound: &OnionCarrySeed,
+    rng: &mut StdRng,
+) -> Vec<(&'static str, f64)> {
+    let class = OnionLoopClass::DEFAULT;
+    let carry_key = inbound.key().expect("strong key");
     let mut slot = vec![0; class.carry_bytes()];
     rng.fill_bytes(&mut slot);
-    let alpha =
-        NonIdentityPoint::generator_mul(&NonZeroScalar::<Secp256k1>::random_with_rng(&mut rng));
-    let blinding = NonZeroScalar::<Secp256k1>::random_with_rng(&mut rng);
+    let alpha = NonIdentityPoint::generator_mul(&NonZeroScalar::<Secp256k1>::random_with_rng(rng));
+    let blinding = NonZeroScalar::<Secp256k1>::random_with_rng(rng);
     let mut stream = vec![0_u8; ONION_HEADER_ROUTING_BYTES + ONION_LAYER_BYTES];
     let mut routing = vec![0_u8; ONION_HEADER_ROUTING_BYTES];
     rng.fill_bytes(&mut routing);
@@ -161,10 +174,23 @@ fn measure() -> Vec<(&'static str, f64)> {
                     .decipher(Tweak::EMPTY, black_box(slot.as_mut_slice()));
             }),
         ),
+    ]
+}
+
+/// The rows that time the real code paths: the header peel alone, and a whole relayed cell from
+/// the received bytes to the forwarded bytes, one prepared cell per pass.
+fn real_path_rows(
+    key: &DelegateeKey,
+    header: &OnionHeader,
+    cells: Vec<Vec<u8>>,
+) -> Vec<(&'static str, f64)> {
+    let class = OnionLoopClass::DEFAULT;
+    let mut cells = cells.into_iter();
+    vec![
         (
             "header peel (real path)",
             microseconds_per_run(|| {
-                black_box(black_box(&header).peel(class, key).expect("peel"));
+                black_box(black_box(header).peel(class, key).expect("peel"));
             }),
         ),
         (

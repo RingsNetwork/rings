@@ -141,29 +141,35 @@ pub(crate) enum OnionLayerApplication {
     },
 }
 
-/// The uniform layer `λ_i` without its header MAC `γ_{i+1}` (see the module documentation).
+/// The uniform layer `λ_i` without its header MAC `γ_{i+1}` (see the module documentation): the
+/// key-free head and the two carry seeds `κ = (σ_in, σ_out)`.
 ///
-/// Zeroized on drop, since the carry seeds are key material; the seeds compare in constant time.
-#[derive(Debug, Eq, PartialEq, Zeroize, ZeroizeOnDrop)]
+/// The seeds are the key material; each zeroizes itself on drop and compares in constant time.
+/// A hop's carry step moves them out (`σ_in` into its key, `σ_out` into its reply block), so
+/// only the head outlives the step and each seed lives in exactly one place.
+#[derive(Debug, Eq, PartialEq)]
 pub(crate) struct OnionLayer {
-    /// The application `(f_i, ā_i)` this position evaluates.
-    #[zeroize(skip)]
-    pub(crate) application: OnionLayerApplication,
-    /// `next_i`, the DID the hop hands its cell to (L6: fixed by the client).
-    #[zeroize(skip)]
-    pub(crate) next: Did,
-    /// `e_i`, the process epoch of the hop this layer is sealed for (#834 D2, L9).
-    #[zeroize(skip)]
-    pub(crate) epoch: OnionExitEpoch,
-    /// `x`, the loop expiry in milliseconds, one per loop (#834 D6).
-    pub(crate) expires_at_ms: u64,
-    /// `ν_i`, the replay nonce the hop admits at most once (L9).
-    #[zeroize(skip)]
-    pub(crate) nonce: OnionForwardNonce,
+    /// The key-free fields `(f, ā, next, e, x, ν)`.
+    pub(crate) head: OnionLayerHead,
     /// `σ_in`, the seed of the key that removes this hop's inbound carry layer (D7).
     pub(crate) inbound: OnionCarrySeed,
     /// `σ_out`, the segment seed of the carry this hop produces; uniform at a relay (D7).
     pub(crate) outbound: OnionSegmentSeed,
+}
+
+/// The key-free fields of `λ_i`: everything admission and routing read.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct OnionLayerHead {
+    /// The application `(f_i, ā_i)` this position evaluates.
+    pub(crate) application: OnionLayerApplication,
+    /// `next_i`, the DID the hop hands its cell to (L6: fixed by the client).
+    pub(crate) next: Did,
+    /// `e_i`, the process epoch of the hop this layer is sealed for (#834 D2, L9).
+    pub(crate) epoch: OnionExitEpoch,
+    /// `x`, the loop expiry in milliseconds, one per loop (#834 D6).
+    pub(crate) expires_at_ms: u64,
+    /// `ν_i`, the replay nonce the hop admits at most once (L9).
+    pub(crate) nonce: OnionForwardNonce,
 }
 
 /// A byte string outside the image of [`OnionLayer::encode`].
@@ -183,7 +189,7 @@ pub(crate) enum OnionLayerError {
 impl OnionLayer {
     /// `encode(λ, γ_{i+1})`: the fields of [`LayerRecord`] in wire order, integers big-endian.
     pub(crate) fn encode(&self, next_mac: &OnionHeaderMac) -> Zeroizing<[u8; ONION_LAYER_BYTES]> {
-        let (symbol, arguments) = match &self.application {
+        let (symbol, arguments) = match &self.head.application {
             OnionLayerApplication::Relay => (OnionSymbol::Relay, [0; ONION_ARGUMENT_BYTES]),
             OnionLayerApplication::Apply { symbol, arguments } => {
                 (OnionSymbol::WorldFacing(symbol.clone()), arguments.0)
@@ -192,10 +198,10 @@ impl OnionLayer {
         LayerRecord {
             code: [symbol.code()],
             arguments,
-            next: PublicKeyAddress::from(self.next).to_fixed_bytes(),
-            epoch: self.epoch.to_bytes(),
-            expiry: self.expires_at_ms.to_be_bytes(),
-            nonce: self.nonce.to_bytes(),
+            next: PublicKeyAddress::from(self.head.next).to_fixed_bytes(),
+            epoch: self.head.epoch.to_bytes(),
+            expiry: self.head.expires_at_ms.to_be_bytes(),
+            nonce: self.head.nonce.to_bytes(),
             inbound: *self.inbound.as_bytes(),
             outbound: *self.outbound.as_bytes(),
             next_mac: next_mac.to_bytes(),
@@ -224,11 +230,13 @@ impl OnionLayer {
             };
         Ok((
             Self {
-                application,
-                next: Did::from(PublicKeyAddress::from(record.next)),
-                epoch: OnionExitEpoch::new(record.epoch),
-                expires_at_ms: u64::from_be_bytes(record.expiry),
-                nonce: OnionForwardNonce::new(record.nonce),
+                head: OnionLayerHead {
+                    application,
+                    next: Did::from(PublicKeyAddress::from(record.next)),
+                    epoch: OnionExitEpoch::new(record.epoch),
+                    expires_at_ms: u64::from_be_bytes(record.expiry),
+                    nonce: OnionForwardNonce::new(record.nonce),
+                },
                 inbound: OnionCarrySeed::new(record.inbound),
                 outbound: OnionSegmentSeed::new(record.outbound),
             },
