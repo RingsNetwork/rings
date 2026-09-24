@@ -307,6 +307,8 @@ configuration: `H = 3n + 2` positions for `n` symbol hops (`n ≤ 4`, so `H ≤ 
 and every position except the guard's return is a distinct node. Selection fails
 closed when fewer than `H − 1` distinct eligible relays are live; it never
 shortens a route, because a short path is a distinguishable segment length. The
+exit is drawn first, by quality among the exits, then the guard, then the
+relays, so a scarce high-quality exit is not consumed as a guard or relay. The
 current data plane still seals the forward prefix `g → r → exit` and answers
 along its reverse; the return segment is selected but not yet used.
 

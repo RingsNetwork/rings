@@ -67,6 +67,18 @@ impl Core {
         self.processor.did()
     }
 
+    /// This node's session key.
+    #[cfg(rings_native)]
+    pub(crate) fn delegatee_key(&self) -> &rings_core::delegation::DelegateeKey {
+        self.processor.delegatee_key()
+    }
+
+    /// The overlay network this node joins.
+    #[cfg(rings_native)]
+    pub(crate) fn network_id(&self) -> u32 {
+        self.processor.swarm.network_id()
+    }
+
     /// This process's onion role (#834 D2).
     #[cfg(rings_native)]
     pub(crate) fn onion_role(&self) -> &crate::onion::OnionRole<crate::onion::OnionExitOffer> {

@@ -1,6 +1,9 @@
+use std::future::Future;
+use std::iter;
 use std::rc::Rc;
 use std::time::Duration;
 
+use futures::future::try_join_all;
 use js_sys::Array;
 use js_sys::Object;
 use js_sys::Reflect;
@@ -50,10 +53,10 @@ const FIXTURE_ORIGIN_GLOBAL: &str = "__ringsWebviewOnionFixtureOrigin";
 /// Relays that are neither the client's guard nor the exit: the two candidates for the forward
 /// relay `r₀,₂` and the return relay `r₁,₁` of the loop `g, r₀,₂, exit, r₁,₁, g` (#834 D5).
 const FIXTURE_MIDDLE_RELAYS: usize = 2;
-/// Interval between two reads of the client's directory while it converges.
-const DIRECTORY_POLL_MS: u64 = 250;
-/// Reads of the client's directory before the fixture gives up: two stabilisation intervals.
-const DIRECTORY_POLLS: usize = 120;
+/// Interval between two reads of a fixture precondition while it converges.
+const CONDITION_POLL_MS: u64 = 100;
+/// Reads of a fixture precondition before the fixture fails: an upper bound of 20 s.
+const CONDITION_POLLS: usize = 200;
 
 #[derive(Debug, Deserialize)]
 struct FetchCall {
@@ -109,19 +112,35 @@ async fn run_browser_onion_webview_flow() -> WebviewResult<()> {
         OnionRole::Exit(fixture_authority.as_str()),
     )
     .await?;
+    // The client's only direct peer is `guard`, so the browser guard policy draws it; either
+    // middle relay can take the forward relay position, so each links the guard to the exit.
+    let edges = iter::once((&client, &guard))
+        .chain(middle.iter().map(|relay| (&guard, relay)))
+        .chain(middle.iter().map(|relay| (relay, &exit)))
+        .collect::<Vec<_>>();
+    try_join_all(
+        edges
+            .iter()
+            .map(|(offerer, answerer)| connect_browser_providers(offerer, answerer)),
+    )
+    .await?;
+    for (offerer, answerer) in edges.iter() {
+        poll_until("the fixture edge to connect", || {
+            peer_connected(offerer, answerer)
+        })
+        .await?;
+    }
+    // Listening starts each node's registrations, and the first one publishes at once: started
+    // after the edges, every registration reaches the overlay on its first attempt.
     let _listeners = [&client, &guard, &exit]
         .into_iter()
         .chain(middle.iter())
         .map(|provider| provider.listen())
         .collect::<Vec<_>>();
-    // The client's only direct peer is `guard`, so the browser guard policy draws it; either
-    // middle relay can take the forward relay position, so each links the guard to the exit.
-    connect_browser_providers(&client, &guard).await?;
-    for relay in middle.iter() {
-        connect_browser_providers(&guard, relay).await?;
-        connect_browser_providers(relay, &exit).await?;
-    }
-    await_loop_directory(&client, FIXTURE_MIDDLE_RELAYS + 2).await?;
+    poll_until("the client directory to register the loop", || {
+        loop_directory_ready(&client, FIXTURE_MIDDLE_RELAYS + 2)
+    })
+    .await?;
     let node = WebviewNode::new(client, controlled_origin()?, web_shell_bootstrap)?;
     let index_target = TargetUrl::parse(fixture_index.as_str())?;
     let index = gateway_navigation(&node, &index_target).await?;
@@ -236,9 +255,6 @@ async fn browser_provider(
     provider
         .set_backend()
         .map_err(|error| WebviewError::transport(format!("install backend: {error:?}")))?;
-    provider
-        .install_onion_runtime()
-        .map_err(|error| WebviewError::transport(format!("install onion runtime: {error:?}")))?;
     Ok(provider)
 }
 
@@ -303,41 +319,62 @@ fn string_field(value: &JsValue, field: &str) -> WebviewResult<String> {
         .ok_or_else(|| WebviewError::Browser(format!("missing string field {field:?}")))
 }
 
-/// Wait until the client's directory holds the precondition of a loop route: the relay
-/// registrations of `relays` fixture nodes, the exit included, and the exit's `https` offer.
+/// Wait until `ready` holds, re-checking every `CONDITION_POLL_MS`, at most `CONDITION_POLLS`
+/// times.
 ///
-/// The DHT gives a browser no change notification, so the directory is re-read once per
-/// `DIRECTORY_POLL_MS`, at most `DIRECTORY_POLLS` times. Only the precondition is awaited: the
-/// navigation that follows runs once, and any route error fails the test.
-async fn await_loop_directory(client: &Provider, relays: usize) -> WebviewResult<()> {
-    for _ in 0..DIRECTORY_POLLS {
-        let nodes = rpc(client, "lookupOnlineNodes", Object::new().into()).await?;
-        let exits = rpc(
-            client,
-            "lookupOnionExits",
-            object(&[("service", OnionServiceName::https().as_str())]),
-        )
-        .await?;
-        let registered = array_field(&nodes, "nodes")?
-            .iter()
-            .filter(|node| {
-                Reflect::get(node, &JsValue::from_str("capabilities"))
-                    .and_then(|capabilities| {
-                        Reflect::get(&capabilities, &JsValue::from_str("onion_relay"))
-                    })
-                    .is_ok_and(|epoch| !epoch.is_null() && !epoch.is_undefined())
-            })
-            .count();
-        if registered >= relays && array_field(&exits, "exits")?.length() > 0 {
+/// The browser offers no notification for a WebRTC edge opening or for a DHT entry converging,
+/// so both fixture preconditions are read back. The bound is an upper bound on that convergence,
+/// not a delay: every wait returns on the first read that holds, and the navigation that follows
+/// runs once, failing on any route error.
+async fn poll_until<Ready, Check>(what: &str, mut ready: Check) -> WebviewResult<()>
+where
+    Check: FnMut() -> Ready,
+    Ready: Future<Output = WebviewResult<bool>>,
+{
+    for _ in 0..CONDITION_POLLS {
+        if ready().await? {
             return Ok(());
         }
-        sleep(Duration::from_millis(DIRECTORY_POLL_MS))
+        sleep(Duration::from_millis(CONDITION_POLL_MS))
             .await
             .map_err(timer_webview_error)?;
     }
     Err(WebviewError::transport(format!(
-        "the client directory did not register {relays} relays and an https exit"
+        "timed out waiting for {what}"
     )))
+}
+
+/// Return whether `offerer` lists `answerer` as a connected peer.
+async fn peer_connected(offerer: &Provider, answerer: &Provider) -> WebviewResult<bool> {
+    let peers = rpc(offerer, "listPeers", Object::new().into()).await?;
+    let answerer = answerer.address();
+    Ok(array_field(&peers, "peers")?.iter().any(|peer| {
+        string_field(&peer, "did").is_ok_and(|did| did == answerer)
+            && string_field(&peer, "state").is_ok_and(|state| state == "Connected")
+    }))
+}
+
+/// Return whether the client's directory holds the precondition of a loop route: the relay
+/// registrations of `relays` fixture nodes, the exit included, and the exit's `https` offer.
+async fn loop_directory_ready(client: &Provider, relays: usize) -> WebviewResult<bool> {
+    let nodes = rpc(client, "lookupOnlineNodes", Object::new().into()).await?;
+    let exits = rpc(
+        client,
+        "lookupOnionExits",
+        object(&[("service", OnionServiceName::https().as_str())]),
+    )
+    .await?;
+    let registered = array_field(&nodes, "nodes")?
+        .iter()
+        .filter(|node| {
+            Reflect::get(node, &JsValue::from_str("capabilities"))
+                .and_then(|capabilities| {
+                    Reflect::get(&capabilities, &JsValue::from_str("onion_relay"))
+                })
+                .is_ok_and(|epoch| !epoch.is_null() && !epoch.is_undefined())
+        })
+        .count();
+    Ok(registered >= relays && array_field(&exits, "exits")?.length() > 0)
 }
 
 /// Read the array field `field` of a JSON-RPC response.

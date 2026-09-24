@@ -194,8 +194,8 @@ fn https_route(exit: &DelegateeKey, guard: &DelegateeKey) -> OnionProxyRoute {
     let hops = OnionLoop::try_unfold(
         OnionPipelineSymbols::new(&[], &()),
         &mut next,
-        |next, _, _| next.next().ok_or(Error::InvalidData),
-        |next, _, _| next.next().ok_or(Error::InvalidData),
+        |next, _| next.next().ok_or(Error::InvalidData),
+        |next, _| next.next().ok_or(Error::InvalidData),
     )
     .expect("HTTPS loop");
     let route = OnionRoute::new(OnionServiceName::https(), hops, descriptor).expect("HTTPS route");

@@ -178,6 +178,13 @@ pub enum Error {
     /// The node configuration is structurally invalid.
     #[error("Invalid configuration: {0}")]
     InvalidConfig(String) = 812,
+    /// An onion exit offers a service this node's runtime cannot interpret: a browser runtime
+    /// has `fetch` but no sockets, so it interprets `https` only.
+    #[error("this node's onion runtime cannot interpret the offered exit service {service:?}")]
+    UninterpretableOnionService {
+        /// The first offered service the runtime cannot interpret.
+        service: crate::onion::OnionServiceName,
+    } = 813,
     /// Opening browser IndexedDB-backed provider storage failed.
     #[error("Open browser storage \"{name}\" failed: {source}")]
     BrowserStorageOpen {

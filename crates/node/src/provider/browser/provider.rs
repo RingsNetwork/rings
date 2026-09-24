@@ -57,7 +57,6 @@ use crate::onion::OnionExitOffer;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionRole;
 use crate::onion::OnionRouteError;
-use crate::onion::OnionServiceName;
 use crate::online::OnlineNodeDescriptor;
 use crate::processor::Processor;
 use crate::processor::ProcessorConfig;
@@ -473,6 +472,7 @@ impl Provider {
         config: ProcessorConfig,
         storage_name: String,
     ) -> NodeResult<Self> {
+        config.validate_onion_role()?;
         let entry_storage = open_browser_entry_storage_or_memory(&storage_name).await;
         let measure_storage =
             open_browser_measure_storage(&format!("{storage_name}/measure")).await;
@@ -614,17 +614,6 @@ impl Provider {
 
             Ok(JsValue::from(provider))
         })
-    }
-
-    /// Install this provider's onion runtime for its processor's [`OnionRole`] now.
-    ///
-    /// The browser constructors do this for every role that registers `relay`, so a browser never
-    /// advertises a relay or exit it does not run; a provider built around an existing processor
-    /// calls it once after `set_backend`.
-    pub fn install_onion_runtime(&self) -> Result<(), JsError> {
-        self.install_onion_https_protocol()
-            .map(|_| ())
-            .map_err(JsError::from)
     }
 
     /// Create new provider instance with serialized config (yaml/json)
@@ -904,9 +893,11 @@ impl Provider {
     /// Install this provider's onion runtime once, with the circuit capabilities of the
     /// processor's role at its process epoch and, for an exit, the policy of its offer.
     ///
-    /// A browser's Σ-algebra interprets `https` only, so an exit offering any other service is
-    /// rejected: it would publish descriptors whose loops die at this node.
-    fn install_onion_https_protocol(&self) -> crate::error::Result<Arc<OnionHttpsRuntime>> {
+    /// The role holds only services this runtime interprets (`https`): the processor builder
+    /// rejects any other offer (`Error::UninterpretableOnionService`).
+    pub(crate) fn install_onion_https_protocol(
+        &self,
+    ) -> crate::error::Result<Arc<OnionHttpsRuntime>> {
         let mut slot = self
             .onion_https_runtime
             .lock()
@@ -920,18 +911,6 @@ impl Provider {
             )));
         }
         let offer = self.processor.onion_role().exit();
-        if let Some(service) = offer.and_then(|offer| {
-            offer
-                .services()
-                .iter()
-                .find(|service| **service != OnionServiceName::https())
-        }) {
-            return Err(crate::error::Error::InvalidConfig(format!(
-                "a browser onion exit offers only {:?}; it cannot serve {:?}",
-                OnionServiceName::https().as_str(),
-                service.as_str()
-            )));
-        }
         let runtime = Arc::new(OnionHttpsRuntime::new(
             self.processor.delegatee_key().delegatee_public_key(),
         ));

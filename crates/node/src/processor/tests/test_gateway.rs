@@ -192,22 +192,24 @@ async fn receive_tcp(
     .expect("gateway TCP response deadline")
 }
 
+/// Connect `first` to `second` and wait until both admit the edge.
+///
+/// Stabilization connects overlay neighbours by itself once some edges exist, so an edge the
+/// overlay already opened (`AlreadyConnected` at either handshake step) satisfies the request.
 async fn connect_gateway_edge(first: &Processor, second: &Processor, label: &str) {
-    let offer = first
-        .swarm
-        .create_offer(second.did())
-        .await
-        .expect("create gateway edge offer");
-    let answer = second
-        .swarm
-        .answer_offer(offer)
-        .await
-        .expect("answer gateway edge offer");
-    first
-        .swarm
-        .accept_answer(answer)
-        .await
-        .expect("accept gateway edge answer");
+    match first.swarm.create_offer(second.did()).await {
+        Ok(offer) => match second.swarm.answer_offer(offer).await {
+            Ok(answer) => first
+                .swarm
+                .accept_answer(answer)
+                .await
+                .expect("accept gateway edge answer"),
+            Err(rings_core::error::Error::AlreadyConnected) => {}
+            Err(error) => panic!("answer gateway edge offer: {error:?}"),
+        },
+        Err(rings_core::error::Error::AlreadyConnected) => {}
+        Err(error) => panic!("create gateway edge offer: {error:?}"),
+    }
     tokio::time::timeout(Duration::from_secs(20), async {
         while !processor_has_admitted_peer(first, second.did())
             || !processor_has_admitted_peer(second, first.did())
@@ -227,18 +229,6 @@ struct OnionLoopGatewayFixture {
     runtime: GatewayRuntime,
     _processors: Vec<Arc<Processor>>,
     _providers: Vec<Provider>,
-}
-
-/// Install the onion runtime of `processor`'s role.
-fn install_gateway_onion(
-    provider: &Provider,
-    processor: &Processor,
-) -> Result<NativeOnionCircuitHandle> {
-    NativeOnionCircuitHandle::install(
-        &provider.extensions(),
-        processor.delegatee_key().clone(),
-        processor.swarm.network_id(),
-    )
 }
 
 /// A client, three relays and a public TCP exit over real WebRTC edges.
@@ -277,11 +267,11 @@ async fn prepare_onion_loop_public_gateway(
         .iter()
         .map(|relay| Provider::from_processor(Arc::clone(relay)))
         .collect::<Vec<_>>();
-    let client_onion = install_gateway_onion(&client_provider, &client)?;
-    for (provider, relay) in relay_providers.iter().zip(relays.iter()) {
-        install_gateway_onion(provider, relay)?;
+    let client_onion = NativeOnionCircuitHandle::install(&client_provider.extensions())?;
+    for provider in relay_providers.iter() {
+        NativeOnionCircuitHandle::install(&provider.extensions())?;
     }
-    install_gateway_onion(&exit_provider, &exit)?;
+    NativeOnionCircuitHandle::install(&exit_provider.extensions())?;
     client_provider.set_backend()?;
     exit_provider.set_backend()?;
     for provider in relay_providers.iter() {

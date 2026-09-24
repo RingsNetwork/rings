@@ -175,13 +175,6 @@ impl OnionHttpsRuntime {
     }
 
     #[cfg(rings_native)]
-    pub(crate) fn set_native_proxy(&self, proxy: Option<String>) {
-        if let Ok(mut current) = self.native_proxy.lock() {
-            *current = proxy;
-        }
-    }
-
-    #[cfg(rings_native)]
     pub(crate) fn native_proxy(&self) -> Option<String> {
         self.native_proxy
             .lock()

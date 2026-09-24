@@ -75,11 +75,9 @@ pub use failure::OnionRouteError;
 #[cfg(rings_native)]
 pub use gateway::NativeOnionGatewayConnector;
 pub use loop_shape::OnionLoop;
-pub use loop_shape::OnionLoopCursor;
-pub use loop_shape::OnionLoopRelay;
+pub(crate) use loop_shape::OnionLoopRelay;
 pub use loop_shape::OnionLoopShape;
-pub use loop_shape::OnionPending;
-pub use loop_shape::OnionPipelineSymbols;
+pub(crate) use loop_shape::OnionPipelineSymbols;
 pub use loop_shape::MAX_ONION_LOOP_HOPS;
 pub use loop_shape::MAX_ONION_LOOP_SYMBOLS;
 pub use loop_shape::ONION_SEGMENT_RELAYS;

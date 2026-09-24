@@ -8,21 +8,21 @@
 //! ```
 //!
 //! [`OnionRole<X>`] is that ladder with the exit's data `X` in the last rung, so "exit without
-//! relay" has no inhabitant. `OnionRole` is a functor in `X` ([`OnionRole::map`]); each layer of the
-//! node reads the same role at the payload it needs:
+//! relay" has no inhabitant. `OnionRole` is a functor in `X` ([`OnionRole::map`]). The processor
+//! holds one `OnionRole<OnionExitOffer>`, and every layer of the node reads that value:
 //!
 //! ```text
-//! OnionRole<OnionExitOffer>             configuration: services and policy the exit offers
-//!   ↦ OnionRole<NativeOnionTcpExitConfig>  native data plane: the installed exit runtime
+//! OnionRole<OnionExitOffer>                registration, and the native and browser exit runtimes
 //!   ↦ OnionRole<OnionProcessEpoch>         circuit reducer: the epoch exit layers must name
 //! ```
 //!
-//! Every `map` preserves the rung, so the relay capability published in the online-node
-//! descriptor, the exit descriptors, and the reducer's admission all agree by construction.
+//! `map` preserves the rung, so the relay capability published in the online-node descriptor,
+//! the exit descriptors, and the reducer's admission all agree by construction.
 //!
-//! The ladder assumes every non-`relay` symbol of `Σ` is world-facing, which holds for this
-//! signature. Phase 2b adds intermediate symbols (`Int ∈ pos(f)`, #834 D1); a node registering
-//! only such invoke-only symbols has no rung here, because [`OnionExitOffer`] requires a
+//! The ladder assumes every non-`relay` shape of `Σ` is world-facing (`tcp`, `https`), which
+//! holds until Phase 2b. Under #834 D1′, Phase 2b registers intermediate one-shot computations
+//! as `invoke⟨In, Out, W, L⟩` shapes paired with an open backend name; a node registering only
+//! such (shape, backend) pairs has no rung here, because [`OnionExitOffer`] requires a
 //! world-facing service, and the ladder then gains a rung for it.
 
 use std::collections::BTreeSet;
@@ -129,6 +129,20 @@ impl OnionExitOffer {
     pub fn offers(&self, service: &OnionServiceName) -> bool {
         self.services.contains(service)
     }
+
+    /// Return the first offered service this node's runtime cannot interpret, if any
+    /// (`runtime_interprets`).
+    pub fn uninterpretable_service(&self) -> Option<&OnionServiceName> {
+        self.services
+            .iter()
+            .find(|service| !runtime_interprets(service))
+    }
+}
+
+/// Return whether this node's runtime interprets the world-facing `service`: a native runtime
+/// interprets every one, a browser runtime, which has `fetch` but no sockets, only `https`.
+pub fn runtime_interprets(service: &OnionServiceName) -> bool {
+    cfg!(not(rings_browser)) || *service == OnionServiceName::https()
 }
 
 impl OnionRole<OnionExitOffer> {

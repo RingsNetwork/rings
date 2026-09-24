@@ -108,8 +108,8 @@ pub(super) fn session_loop(
     OnionLoop::try_unfold(
         OnionPipelineSymbols::new(&[], &()),
         &mut next,
-        |next, _, _| next.next().ok_or(crate::error::Error::InvalidData),
-        |next, _, _| next.next().ok_or(crate::error::Error::InvalidData),
+        |next, _| next.next().ok_or(crate::error::Error::InvalidData),
+        |next, _| next.next().ok_or(crate::error::Error::InvalidData),
     )
     .expect("session loop")
 }

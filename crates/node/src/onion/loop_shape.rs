@@ -15,7 +15,7 @@
 //! - **Size.** `H(n, s) = (s + 1)·n + s` positions and `H − 1` distinct hops, bounded by
 //!   `MAX_ONION_LOOP_HOPS = H(n_max, s) = 14` with `n_max = MAX_ONION_LOOP_SYMBOLS = 4`.
 //! - **Segment** (D5). Exactly `s` relay positions, the guard counted, precede `h₁`, separate
-//!   `hₖ` from `hₖ₊₁` and follow `hₙ`: a short segment is unrepresentable.
+//!   `hₖ` from `hₖ₊₁` and follow `hₙ`; the only constructor emits no other segment length.
 //! - **Guard closure** (L7). An [`OnionLoop`] stores the guard once and places it at positions `1`
 //!   and `H` and nowhere else, so the guard is the only hop adjacent to the client. The remaining
 //!   `H − 2` positions are pairwise distinct and distinct from `g` for every loop a route admits
@@ -29,9 +29,11 @@
 //! unfold [f₁ … fₙ] = Guard · Relay^{s−1} · Π_{k=1..n} (Symbol fₖ · Relay^{s − [k = n]})
 //! ```
 //!
-//! and closes the loop with the guard's label, so the laws above hold by construction. Relay
-//! positions are labelled `P` and symbol positions `T`; the terminal `hₙ` is a field, not an
-//! index, so a caller labelling it with the drawn registrant reads it back totally.
+//! and closes the loop with the guard's label. Relay positions are labelled `P` and symbol
+//! positions `T`; the terminal `hₙ` is a field, not an index, so a caller labelling it with the
+//! drawn registrant reads it back totally. The unfold fixes the position order only: a caller
+//! may draw its labels in another order first and hand them to the unfold (route selection draws
+//! symbols, then the guard, then the relays, #834 L7).
 
 use std::iter;
 
@@ -106,14 +108,14 @@ impl OnionLoopShape {
 /// A non-empty pipeline of symbols: the intermediate symbols `f₁ … fₙ₋₁`, then the terminal
 /// symbol `fₙ` (#834 D4a), so `n ≥ 1` holds by construction.
 #[derive(Debug)]
-pub struct OnionPipelineSymbols<'s, S> {
+pub(crate) struct OnionPipelineSymbols<'s, S> {
     intermediate: &'s [S],
     terminal: &'s S,
 }
 
 impl<'s, S> OnionPipelineSymbols<'s, S> {
     /// Build the pipeline `intermediate ⋙ terminal`.
-    pub const fn new(intermediate: &'s [S], terminal: &'s S) -> Self {
+    pub(crate) const fn new(intermediate: &'s [S], terminal: &'s S) -> Self {
         Self {
             intermediate,
             terminal,
@@ -121,66 +123,49 @@ impl<'s, S> OnionPipelineSymbols<'s, S> {
     }
 
     /// Return the number `n ≥ 1` of symbols.
-    pub const fn symbol_count(&self) -> usize {
+    pub(crate) const fn symbol_count(&self) -> usize {
         self.intermediate.len() + 1
     }
 
-    /// Return the intermediate symbols `f₁ … fₙ₋₁`.
-    pub const fn intermediate(&self) -> &'s [S] {
-        self.intermediate
+    /// Return the symbols in pipeline order.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &'s S> {
+        self.intermediate.iter().chain(iter::once(self.terminal))
     }
 
-    /// Return the terminal symbol `fₙ`.
-    pub const fn terminal(&self) -> &'s S {
-        self.terminal
-    }
-}
-
-/// The symbols of a pipeline still to be placed after one position: a suffix of the
-/// intermediate symbols, then the terminal symbol unless it is already placed.
-#[derive(Debug)]
-pub struct OnionPending<'s, S> {
-    intermediate: &'s [S],
-    terminal: Option<&'s S>,
-}
-
-impl<'s, S> OnionPending<'s, S> {
-    /// Return the pending symbols in pipeline order.
-    pub fn iter(&self) -> impl Iterator<Item = &'s S> {
-        self.intermediate.iter().chain(self.terminal)
+    /// Relabel every symbol, preserving the pipeline's order and shape.
+    pub(crate) fn try_map<T>(
+        &self,
+        mut label: impl FnMut(&'s S) -> Result<T>,
+    ) -> Result<(Vec<T>, T)> {
+        let intermediate = self
+            .intermediate
+            .iter()
+            .map(&mut label)
+            .collect::<Result<Vec<_>>>()?;
+        Ok((intermediate, label(self.terminal)?))
     }
 }
 
 /// The kind of a relay position of the open path: the entry guard at position `1`, or another
 /// relay. Both evaluate `relay`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum OnionLoopRelay {
+pub(crate) enum OnionLoopRelay {
     /// Position `1`, the entry guard `g`.
     Guard,
     /// A relay position other than the guard.
     Relay,
 }
 
-/// What [`OnionLoop::try_unfold`] tells a label function about one position: the loop's shape and
-/// the symbols pending after the position.
-#[derive(Debug)]
-pub struct OnionLoopCursor<'s, S> {
-    /// Shape of the loop being unfolded.
-    pub shape: OnionLoopShape,
-    /// Symbols still to be placed after this position.
-    pub pending: OnionPending<'s, S>,
-}
-
 /// A loop whose relay positions carry a label `P` and whose symbol positions carry a label `T`,
 /// the guard's label stored once.
 ///
-/// The fields follow the unfold grammar of the module documentation: `lead` holds the `s − 1`
-/// relays after the guard, `stages` each intermediate symbol with the `s` relays after it,
-/// `terminal` the last symbol `hₙ`, and `tail` the `s − 1` relays before the closing guard. The
-/// guard and the terminal are therefore total, and a short segment is unrepresentable.
+/// The fields follow the unfold grammar of the module documentation: `lead` holds the relays
+/// after the guard, `stages` each intermediate symbol with the relays after it, `terminal` the
+/// last symbol `hₙ`, and `tail` the relays before the closing guard. The guard and the terminal
+/// are total, and the shape is derived from `stages`. The segment lengths `s − 1`, `s`, `s − 1`
+/// are established by `OnionLoop::try_unfold`, the only constructor.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OnionLoop<P, T = P> {
-    shape: OnionLoopShape,
     guard: P,
     lead: Vec<P>,
     stages: Vec<(T, Vec<P>)>,
@@ -196,42 +181,33 @@ impl<P, T> OnionLoop<P, T> {
     /// receive `state`, threaded through the unfold in position order. The guard is labelled
     /// exactly once, and position `H` repeats its label (L7). A pipeline of more than `n_max`
     /// symbols is rejected before any label is asked.
-    pub fn try_unfold<S, St>(
+    pub(crate) fn try_unfold<S, St>(
         symbols: OnionPipelineSymbols<'_, S>,
         state: &mut St,
-        mut label_relay: impl FnMut(&mut St, OnionLoopRelay, OnionLoopCursor<'_, S>) -> Result<P>,
-        mut label_symbol: impl FnMut(&mut St, &S, OnionLoopCursor<'_, S>) -> Result<T>,
+        mut label_relay: impl FnMut(&mut St, OnionLoopRelay) -> Result<P>,
+        mut label_symbol: impl FnMut(&mut St, &S) -> Result<T>,
     ) -> Result<Self> {
-        let shape = OnionLoopShape::new(symbols.symbol_count())?;
-        let cursor = |intermediate, terminal| OnionLoopCursor {
-            shape,
-            pending: OnionPending {
-                intermediate,
-                terminal,
-            },
-        };
-        let all = || cursor(symbols.intermediate, Some(symbols.terminal));
-        let guard = label_relay(state, OnionLoopRelay::Guard, all())?;
+        OnionLoopShape::new(symbols.symbol_count())?;
+        let guard = label_relay(state, OnionLoopRelay::Guard)?;
         let lead = (1..ONION_SEGMENT_RELAYS)
-            .map(|_| label_relay(state, OnionLoopRelay::Relay, all()))
+            .map(|_| label_relay(state, OnionLoopRelay::Relay))
             .collect::<Result<Vec<_>>>()?;
-        let mut stages = Vec::with_capacity(symbols.intermediate.len());
-        let mut rest = symbols.intermediate;
-        while let Some((symbol, later)) = rest.split_first() {
-            let pending = || cursor(later, Some(symbols.terminal));
-            let hop = label_symbol(state, symbol, pending())?;
-            let relays = (0..ONION_SEGMENT_RELAYS)
-                .map(|_| label_relay(state, OnionLoopRelay::Relay, pending()))
-                .collect::<Result<Vec<_>>>()?;
-            stages.push((hop, relays));
-            rest = later;
-        }
-        let terminal = label_symbol(state, symbols.terminal, cursor(&[], None))?;
+        let stages = symbols
+            .intermediate
+            .iter()
+            .map(|symbol| {
+                let hop = label_symbol(state, symbol)?;
+                let relays = (0..ONION_SEGMENT_RELAYS)
+                    .map(|_| label_relay(state, OnionLoopRelay::Relay))
+                    .collect::<Result<Vec<_>>>()?;
+                Ok((hop, relays))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let terminal = label_symbol(state, symbols.terminal)?;
         let tail = (1..ONION_SEGMENT_RELAYS)
-            .map(|_| label_relay(state, OnionLoopRelay::Relay, cursor(&[], None)))
+            .map(|_| label_relay(state, OnionLoopRelay::Relay))
             .collect::<Result<Vec<_>>>()?;
         Ok(Self {
-            shape,
             guard,
             lead,
             stages,
@@ -240,9 +216,11 @@ impl<P, T> OnionLoop<P, T> {
         })
     }
 
-    /// Return the shape of this loop.
-    pub const fn shape(&self) -> OnionLoopShape {
-        self.shape
+    /// Return the shape of this loop: `n = |stages| + 1` symbols, bounded by construction.
+    pub fn shape(&self) -> OnionLoopShape {
+        OnionLoopShape {
+            symbols: self.stages.len() + 1,
+        }
     }
 
     /// Return the guard's label, the label of positions `1` and `H`.
@@ -262,7 +240,7 @@ impl<P, T> OnionLoop<P, T> {
 
     /// Relabel every symbol position by `project` and return the terminal's label beside the
     /// relabelled loop: `OnionLoop<P, T> → OnionLoop<P> × T`.
-    pub fn project_symbols(self, project: impl Fn(&T) -> P) -> (OnionLoop<P>, T) {
+    pub(crate) fn project_symbols(self, project: impl Fn(&T) -> P) -> (OnionLoop<P>, T) {
         let stages = self
             .stages
             .into_iter()
@@ -270,7 +248,6 @@ impl<P, T> OnionLoop<P, T> {
             .collect();
         (
             OnionLoop {
-                shape: self.shape,
                 guard: self.guard,
                 lead: self.lead,
                 stages,
@@ -303,7 +280,7 @@ impl<P> OnionLoop<P> {
 
     /// Return the label of the symbol hop `hₖ`, `1 ≤ k ≤ n`, or `None` for any other `k`.
     pub fn symbol(&self, k: usize) -> Option<&P> {
-        if k == self.shape.symbols() {
+        if k == self.shape().symbols() {
             return Some(&self.terminal);
         }
         self.stages.get(k.checked_sub(1)?).map(|(symbol, _)| symbol)
@@ -324,12 +301,12 @@ mod tests {
     use crate::onion::OnionRouteError;
 
     /// The kind of one position, read off the unfolded loop: the guard, a relay, or the symbol
-    /// `k` of the pipeline `[1 … n]`, each with the number of symbols pending after it.
+    /// `k` of the pipeline `[1 … n]`.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum Kind {
-        Guard(usize),
-        Relay(usize),
-        Symbol(usize, usize),
+        Guard,
+        Relay,
+        Symbol(usize),
     }
 
     /// Unfold the pipeline `[1 … n]`, labelling each position with its kind, and count the labels
@@ -341,17 +318,16 @@ mod tests {
         let unfolded = OnionLoop::try_unfold(
             OnionPipelineSymbols::new(intermediate, terminal),
             &mut asked,
-            |asked, relay, cursor| {
+            |asked, relay| {
                 *asked += 1;
-                let pending = cursor.pending.iter().count();
                 Ok(match relay {
-                    OnionLoopRelay::Guard => Kind::Guard(pending),
-                    OnionLoopRelay::Relay => Kind::Relay(pending),
+                    OnionLoopRelay::Guard => Kind::Guard,
+                    OnionLoopRelay::Relay => Kind::Relay,
                 })
             },
-            |asked, symbol, cursor| {
+            |asked, symbol| {
                 *asked += 1;
-                Ok(Kind::Symbol(*symbol, cursor.pending.iter().count()))
+                Ok(Kind::Symbol(*symbol))
             },
         )?;
         Ok((unfolded, asked))
@@ -391,11 +367,11 @@ mod tests {
         let unfolded = OnionLoop::<(), ()>::try_unfold(
             OnionPipelineSymbols::new(&pipeline[1..], &()),
             &mut asked,
-            |asked, _, _| {
+            |asked, _| {
                 *asked += 1;
                 Ok(())
             },
-            |asked, _, _| {
+            |asked, _| {
                 *asked += 1;
                 Ok(())
             },
@@ -418,17 +394,17 @@ mod tests {
 
     /// Segment (D5) and guard closure (L7): the guard is at `1` and `H` only, the `k`-th symbol at
     /// `(s + 1)·k`, exactly `s` relay positions, the guard counted, lie before `h₁`, between
-    /// consecutive symbols and after `hₙ`, and each position sees exactly the symbols after it.
+    /// consecutive symbols and after `hₙ`.
     #[test]
     fn test_unfold_interleaves_segments_of_s_relays() -> Result<()> {
         for symbols in 1..=MAX_ONION_LOOP_SYMBOLS {
             let (unfolded, _) = unfold_kinds(symbols)?;
             let kinds = unfolded.positions().copied().collect::<Vec<_>>();
             let guards = (1..=kinds.len())
-                .filter(|position| matches!(kinds.get(position - 1), Some(Kind::Guard(_))))
+                .filter(|position| kinds.get(position - 1) == Some(&Kind::Guard))
                 .collect::<Vec<_>>();
             let segments = kinds
-                .split(|kind| matches!(kind, Kind::Symbol(..)))
+                .split(|kind| matches!(kind, Kind::Symbol(_)))
                 .map(<[Kind]>::len)
                 .collect::<Vec<_>>();
 
@@ -436,7 +412,7 @@ mod tests {
             for k in 1..=symbols {
                 assert_eq!(
                     kinds.get((ONION_SEGMENT_RELAYS + 1) * k - 1),
-                    Some(&Kind::Symbol(k, symbols - k))
+                    Some(&Kind::Symbol(k))
                 );
                 assert_eq!(
                     unfolded.symbol(k),
@@ -444,8 +420,8 @@ mod tests {
                 );
             }
             assert_eq!(segments, vec![ONION_SEGMENT_RELAYS; symbols + 1]);
-            assert_eq!(unfolded.guard(), &Kind::Guard(symbols));
-            assert_eq!(unfolded.terminal(), &Kind::Symbol(symbols, 0));
+            assert_eq!(unfolded.guard(), &Kind::Guard);
+            assert_eq!(unfolded.terminal(), &Kind::Symbol(symbols));
             assert_eq!(unfolded.symbol(0), None);
             assert_eq!(unfolded.symbol(symbols + 1), None);
             assert_eq!(
@@ -466,13 +442,13 @@ mod tests {
         let unfolded = OnionLoop::<u64, u64>::try_unfold(
             OnionPipelineSymbols::new(&intermediate, &20_u32),
             &mut (),
-            |(), relay, _| {
+            |(), relay| {
                 Ok(match relay {
                     OnionLoopRelay::Guard => 1,
                     OnionLoopRelay::Relay => 2,
                 })
             },
-            |(), symbol, _| Ok(u64::from(*symbol) * 100),
+            |(), symbol| Ok(u64::from(*symbol) * 100),
         )?;
 
         let (projected, terminal) = unfolded.project_symbols(|label| label / 100 + 5);
@@ -491,11 +467,11 @@ mod tests {
         let unfolded = OnionLoop::<(), ()>::try_unfold(
             OnionPipelineSymbols::new(&[], &()),
             &mut asked,
-            |asked, _, _| {
+            |asked, _| {
                 *asked += 1;
                 Ok(())
             },
-            |_, _, _| Err(Error::InvalidData),
+            |_, _| Err(Error::InvalidData),
         );
 
         assert!(matches!(unfolded, Err(Error::InvalidData)));

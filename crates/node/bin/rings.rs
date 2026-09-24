@@ -817,7 +817,6 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
         args.allow_remote_external_api,
     )?;
 
-    let onion_delegatee_key = pc.delegatee_key();
     let onion_http_proxy_addr = c.onion_http_proxy_addr.clone();
     let onion_http_proxy_service = c.onion_http_proxy_service.clone();
     let onion_http_proxy_header_timeout_secs = c.onion_http_proxy_header_timeout_secs;
@@ -893,11 +892,7 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
     // registered interpreters.
     let _relay =
         rings_node::extension::protocols::relay::RelayHandle::install(&provider.extensions())?;
-    let onion = NativeOnionCircuitHandle::install(
-        &provider.extensions(),
-        onion_delegatee_key,
-        pc.network_id(),
-    )?;
+    let onion = NativeOnionCircuitHandle::install(&provider.extensions())?;
     let gateway_runner = gateway_config
         .map(|config| NativeGatewayRunner::new(processor.clone(), onion.clone(), config))
         .transpose()?;

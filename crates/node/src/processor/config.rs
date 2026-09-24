@@ -112,6 +112,13 @@ impl ProcessorConfig {
         self
     }
 
+    /// Validate this config's onion role ([`validate_onion_role_config`]) before any runtime
+    /// effect, as the builder does at build time.
+    #[cfg(all(feature = "browser", target_family = "wasm"))]
+    pub(crate) fn validate_onion_role(&self) -> Result<()> {
+        validate_onion_role_config(self.advertise_presence, &self.onion_role)
+    }
+
     /// Sets runtime-local final-destination quotas keyed by verified origin and logical lane.
     pub fn origin_quota(mut self, config: OriginQuotaConfig) -> Self {
         self.origin_quota = config;
@@ -208,13 +215,28 @@ pub(in crate::processor) fn validate_dht_virtual_nodes(positions_per_peer: u16) 
     )))
 }
 
-/// Validate that the onion role can be published: `relay ∈ Σ_n ⇒ advertise_presence`, because the
-/// relay registration lives in the online-node descriptor. `Σ_n ≠ ∅ ⇒ relay ∈ Σ_n` needs no check:
-/// [`OnionRole`] has no rung that registers a symbol without `relay`.
+/// Validate that the onion role can be published and served.
+///
+/// - `relay ∈ Σ_n ⇒ advertise_presence`, because the relay registration lives in the online-node
+///   descriptor.
+/// - Every offered exit service is one this node's runtime interprets
+///   ([`OnionExitOffer::uninterpretable_service`]), so no descriptor names a service the node
+///   cannot evaluate.
+///
+/// `Σ_n ≠ ∅ ⇒ relay ∈ Σ_n` needs no check: [`OnionRole`] has no rung that registers a symbol
+/// without `relay`.
 pub(in crate::processor) fn validate_onion_role_config(
     advertise_presence: bool,
     onion_role: &OnionRole<OnionExitOffer>,
 ) -> Result<()> {
+    if let Some(service) = onion_role
+        .exit()
+        .and_then(OnionExitOffer::uninterpretable_service)
+    {
+        return Err(Error::UninterpretableOnionService {
+            service: service.clone(),
+        });
+    }
     if onion_role.registers_relay() && !advertise_presence {
         return Err(Error::InvalidConfig(
             "advertise_onion_relay requires advertise_presence because relay capability is published in online-node descriptors"

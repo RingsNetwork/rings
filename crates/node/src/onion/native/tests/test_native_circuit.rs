@@ -11,7 +11,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::extension::ext::Extensions;
 use crate::onion::circuit::OnionCircuitHandler;
-use crate::onion::tcp::NativeOnionTcpExitConfig;
+use crate::onion::OnionExitOffer;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionServiceName;
 use crate::tests::TEST_NETWORK_ID;
@@ -20,14 +20,11 @@ use crate::tests::TEST_NETWORK_ID;
 #[tokio::test]
 async fn test_install_rejects_duplicate_namespace_instead_of_splitting_runtime() -> Result<()> {
     let processor = Arc::new(crate::tests::native::prepare_processor().await);
-    let delegatee_key = processor.delegatee_key().clone();
-    let network_id = processor.swarm.network_id();
     let extensions = Extensions::new(processor);
-    let _handle =
-        NativeOnionCircuitHandle::install(&extensions, delegatee_key.clone(), network_id)?;
+    let _handle = NativeOnionCircuitHandle::install(&extensions)?;
 
     assert!(matches!(
-        NativeOnionCircuitHandle::install(&extensions, delegatee_key, network_id),
+        NativeOnionCircuitHandle::install(&extensions),
         Err(Error::ExtensionError(_))
     ));
     Ok(())
@@ -38,7 +35,9 @@ async fn test_install_rejects_duplicate_namespace_instead_of_splitting_runtime()
 #[test]
 fn test_native_algebra_registers_exactly_the_configured_services() -> Result<()> {
     let session = DelegateeKey::new_with_seckey(&SecretKey::random()).map_err(Error::CoreError)?;
-    let registered = |exit_config: Option<NativeOnionTcpExitConfig>| {
+    let policy =
+        OnionExitPolicy::from_target_strings(vec!["example.com:443".to_string()], Vec::new())?;
+    let registered = |exit_config: Option<OnionExitOffer>| {
         let (tcp, https) = native_onion_runtimes(session.clone(), TEST_NETWORK_ID, exit_config);
         let handler = NativeOnionCircuitHandler::new(
             tcp,
@@ -49,16 +48,17 @@ fn test_native_algebra_registers_exactly_the_configured_services() -> Result<()>
     };
 
     assert_eq!(
-        registered(Some(NativeOnionTcpExitConfig::new(
-            vec![OnionServiceName::https()],
-            OnionExitPolicy::default()
+        registered(Some(OnionExitOffer::new(
+            [OnionServiceName::https()],
+            policy.clone()
         )?)),
         vec![OnionServiceName::https()]
     );
     assert_eq!(
-        registered(Some(NativeOnionTcpExitConfig::tcp(
-            OnionExitPolicy::default()
-        ))),
+        registered(Some(OnionExitOffer::new(
+            [OnionServiceName::tcp()],
+            policy
+        )?)),
         vec![OnionServiceName::tcp()]
     );
     assert!(registered(None).is_empty());

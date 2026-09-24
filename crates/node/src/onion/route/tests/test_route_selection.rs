@@ -356,8 +356,8 @@ fn test_route_rejects_symbol_hop_with_stale_epoch() -> Result<()> {
     let stale = OnionLoop::try_unfold(
         OnionPipelineSymbols::new(&[], &()),
         &mut next,
-        |next, _, _| next.next().ok_or(Error::InvalidData),
-        |next, _, _| next.next().ok_or(Error::InvalidData),
+        |next, _| next.next().ok_or(Error::InvalidData),
+        |next, _| next.next().ok_or(Error::InvalidData),
     )?;
 
     assert!(matches!(
@@ -469,11 +469,15 @@ fn draw_loop(
     relays: &[OnionRouteHop],
     entropy: &mut FixedEntropy,
 ) -> Result<OnionLoop<OnionRouteHop>> {
-    let (terminal, intermediate) = symbols.split_last().ok_or(Error::InvalidData)?;
+    let relays = RelayRegistrants::new(relays.to_vec());
+    let admitted = symbols
+        .iter()
+        .map(|registrants| relays.admit(registrants.iter().copied(), |hop| *hop))
+        .collect::<Vec<_>>();
+    let (terminal, intermediate) = admitted.split_last().ok_or(Error::InvalidData)?;
     select_loop(
         OnionPipelineSymbols::new(intermediate, terminal),
-        |hop| *hop,
-        relays,
+        &relays,
         &BTreeMap::new(),
         entropy,
         |_| true,
@@ -481,8 +485,8 @@ fn draw_loop(
     .map(|drawn| drawn.project_symbols(|(hop, _)| *hop).0)
 }
 
-/// The guard is drawn by quality weight, over the relays in DID order: a healthy guard
-/// (weight 8) wins a draw of `1` against a degraded one (weight 1) before it.
+/// The guard is drawn by quality weight, over the relays in DID order: after the exit's draw, a
+/// healthy guard (weight 8) wins a draw of `1` against a degraded one (weight 1) before it.
 #[test]
 fn test_guard_is_drawn_by_quality_weight() -> Result<()> {
     let relays = node_keys(1..=3)?;
@@ -499,7 +503,7 @@ fn test_guard_is_drawn_by_quality_weight() -> Result<()> {
             (degraded, PeerQuality::Degraded),
             (healthy, PeerQuality::Healthy),
         ],
-        &mut FixedEntropy::new([1]),
+        &mut FixedEntropy::new([0, 1]),
         |did| did == degraded || did == healthy,
     )?;
 
@@ -767,8 +771,8 @@ fn test_has_duplicate_dids_admits_exactly_the_guard_twice() -> Result<()> {
         OnionLoop::try_unfold(
             OnionPipelineSymbols::new(&[], &()),
             &mut next,
-            |next, _, _| next.next().ok_or(Error::InvalidData),
-            |next, _, _| next.next().ok_or(Error::InvalidData),
+            |next, _| next.next().ok_or(Error::InvalidData),
+            |next, _| next.next().ok_or(Error::InvalidData),
         )
     };
 
@@ -796,8 +800,8 @@ fn test_route_rejects_loop_of_another_pipeline_shape() -> Result<()> {
     let hops = OnionLoop::try_unfold(
         OnionPipelineSymbols::new(&[()], &()),
         &mut next,
-        |next, _, _| next.next().ok_or(Error::InvalidData),
-        |next, _, _| next.next().ok_or(Error::InvalidData),
+        |next, _| next.next().ok_or(Error::InvalidData),
+        |next, _| next.next().ok_or(Error::InvalidData),
     )?;
 
     assert!(matches!(
@@ -805,6 +809,84 @@ fn test_route_rejects_loop_of_another_pipeline_shape() -> Result<()> {
         Err(Error::OnionRouteError(OnionRouteError::LoopShapeMismatch {
             expected: 1,
             actual: 2,
+        }))
+    ));
+    Ok(())
+}
+
+/// Draw order (L7): the exit is drawn before the guard and the relays, so its marginal is its
+/// quality share among the exits, and a high-quality exit is not consumed as the guard first.
+///
+/// With `R = {x, a, b, c}`, exits `{x (Healthy, 8), a (Unknown, 4)}` and every relay a permitted
+/// guard, the exit roll is taken modulo `12` and the guard roll modulo `12` or `16`, so every
+/// pair of rolls in `[0, 48)²` enumerates the two draws exactly:
+///
+/// ```text
+/// P(exit = x)  = 8/12            = 2/3     1536 of 2304
+/// P(guard = x) = P(exit = a)·8/16 = 1/6     384 of 2304
+/// ```
+#[test]
+fn test_exit_and_guard_marginals_follow_the_draw_order() -> Result<()> {
+    let keys = node_keys(1..=4)?;
+    let (x, a) = match keys.as_slice() {
+        [x, a, ..] => (x.delegator_did(), a.delegator_did()),
+        _ => return Err(Error::InvalidData),
+    };
+    let candidates = OnionRouteCandidates {
+        relays: keys
+            .iter()
+            .map(|key| hop(key, TEST_PROCESS_EPOCH))
+            .collect(),
+        exits: keys
+            .get(..2)
+            .unwrap_or_default()
+            .iter()
+            .map(live_exit)
+            .collect::<Result<Vec<_>>>()?,
+    };
+    let mut exits_at_x = 0;
+    let mut guards_at_x = 0;
+
+    for exit_roll in 0..48 {
+        for guard_roll in 0..48 {
+            let route = select_onion_route_from_candidates(
+                &tcp_request(),
+                candidates.clone(),
+                vec![(x, PeerQuality::Healthy)],
+                &mut FixedEntropy::new([exit_roll, guard_roll]),
+                |_| true,
+            )?;
+            exits_at_x += usize::from(route.exit_did() == x);
+            guards_at_x += usize::from(route.hops().guard().did == x);
+            assert!([x, a].contains(&route.exit_did()));
+        }
+    }
+
+    assert_eq!(exits_at_x, 1536);
+    assert_eq!(guards_at_x, 384);
+    Ok(())
+}
+
+/// Fail closed first (D5): below `H − 1` relays the error is `NotEnoughLoopHops`, whatever the
+/// guard policy admits.
+#[test]
+fn test_fail_closed_is_checked_before_the_guard_policy() -> Result<()> {
+    let relays = node_keys(1..=2)?;
+    let exit = node_key(3)?;
+
+    let result = select_onion_route_from_candidates(
+        &tcp_request(),
+        candidates_with_exit(relays.as_slice(), &exit)?,
+        Vec::new(),
+        &mut FixedEntropy::new([]),
+        |_| false,
+    );
+
+    assert!(matches!(
+        result,
+        Err(Error::OnionRouteError(OnionRouteError::NotEnoughLoopHops {
+            required: 4,
+            eligible: 3,
         }))
     ));
     Ok(())
