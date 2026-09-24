@@ -389,10 +389,14 @@ fn test_reconcile_recovers_lost_link_events() {
     );
 
     // DIDs 1 and 5 are absent and unloaded, so they are released. DID 6 is absent but still
-    // loaded, so its closed ledger keeps a slot until it drains. Three of the ten new links fit.
+    // loaded, so its closed ledger keeps a slot until it drains. Three of the ten new links fit,
+    // and reconcile opens in DID order, so DIDs 10 to 12 win and 13 to 19 are refused.
     let crowded = (10..20).map(link).collect::<Vec<_>>();
     let refused = admission.reconcile(ORIGIN_MS, crowded);
-    assert_eq!(refused.links().len(), 7);
+    assert_eq!(
+        refused.links(),
+        (13..20).map(link).collect::<Vec<_>>().as_slice()
+    );
     assert_eq!(admission.senders.len(), 4);
     assert!(admission.senders.contains_key(&Did::from(6_u32)));
 }
@@ -560,10 +564,15 @@ fn test_rotation_through_many_dids_never_exceeds_the_sender_budget() {
     }
 }
 
-/// Whether the table has no room for `link`: the live-link set is full, or `link`'s DID has no
-/// ledger and the ledger table is full. This is the only justification for a refusal.
-fn is_full_for(admission: &OnionAdmissionState, link: &OnionAdmissionLink) -> bool {
-    admission.live_link_count() >= admission.capacity
+/// Whether the table has no room for `link`, given the modelled number of live links: the live-link
+/// set is full, or `link`'s DID has no ledger and the ledger table is full. This is the only
+/// justification for a refusal.
+fn is_full_for(
+    admission: &OnionAdmissionState,
+    live_links: usize,
+    link: &OnionAdmissionLink,
+) -> bool {
+    live_links >= admission.capacity
         || (!admission.senders.contains_key(&link.did)
             && admission.senders.len() >= admission.capacity)
 }
@@ -577,6 +586,172 @@ fn live_links(admission: &OnionAdmissionState) -> BTreeSet<(Did, u64)> {
         .collect()
 }
 
+/// The model of the lost-events property: core's truth `L`, the live set admission should hold,
+/// and two states driven in lockstep, one reconciled with sorted snapshots and one with shuffled
+/// snapshots.
+struct Lockstep {
+    /// The seeded source of every choice.
+    rng: StdRng,
+    /// The state reconciled with sorted snapshots.
+    sorted: OnionAdmissionState,
+    /// The state reconciled with shuffled snapshots.
+    shuffled: OnionAdmissionState,
+    /// Core's registry of live links, `L`.
+    truth: BTreeSet<(Did, u64)>,
+    /// The live set admission should hold, given the events it received.
+    modelled: BTreeSet<(Did, u64)>,
+    /// The last generation core issued.
+    next_generation: u64,
+    /// Reconciliations run.
+    reconciliations: u32,
+    /// Events lost before reaching admission.
+    lost: u32,
+    /// Delivered opens, delivered closes, event refusals, and reconciliations with a refusal.
+    occurred: [u32; 4],
+}
+
+impl Lockstep {
+    /// Two fresh states with `R = 8` under one probe key, and empty truth.
+    fn new(seed: u64) -> Self {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let key: [u8; 32] = rng.gen();
+        let fresh = || OnionAdmissionState::new(EPOCH, OnionReplayFilterKey::new(key), registry(8));
+        Self {
+            rng,
+            sorted: fresh(),
+            shuffled: fresh(),
+            truth: BTreeSet::new(),
+            modelled: BTreeSet::new(),
+            next_generation: 0,
+            reconciliations: 0,
+            lost: 0,
+            occurred: [0; 4],
+        }
+    }
+
+    /// Core admits a new generation of `did`. The event is lost with probability ⅙. Otherwise both
+    /// states open it; a refusal must be justified, and the shell then closes the link in core.
+    fn open(&mut self, now_ms: u128, did: Did) {
+        self.next_generation += 1;
+        let opened = OnionAdmissionLink {
+            did,
+            generation: self.next_generation,
+        };
+        self.truth.insert((did, opened.generation));
+        if self.rng.gen_ratio(1, 6) {
+            self.lost += 1;
+            return;
+        }
+        let verdict = self.sorted.link_opened(now_ms, opened);
+        assert_eq!(self.shuffled.link_opened(now_ms, opened), verdict);
+        match verdict {
+            Ok(()) => {
+                self.occurred[0] += 1;
+                self.modelled.insert((did, opened.generation));
+            }
+            Err(OnionLinkTableFull) => {
+                self.occurred[2] += 1;
+                assert!(is_full_for(&self.sorted, self.modelled.len(), &opened));
+                self.truth.remove(&(did, opened.generation));
+            }
+        }
+    }
+
+    /// Core retires a random live generation. The event is lost with probability ⅙; otherwise both
+    /// states close it.
+    fn retire(&mut self, now_ms: u128) {
+        let index = self.rng.gen_range(0..self.truth.len().max(1));
+        let Some((did, generation)) = self.truth.iter().nth(index).copied() else {
+            return;
+        };
+        self.truth.remove(&(did, generation));
+        if self.rng.gen_ratio(1, 6) {
+            self.lost += 1;
+            return;
+        }
+        let closed = OnionAdmissionLink { did, generation };
+        self.sorted.link_closed(now_ms, closed);
+        self.shuffled.link_closed(now_ms, closed);
+        self.occurred[1] += 1;
+        self.modelled.remove(&(did, generation));
+    }
+
+    /// Reconcile both states against `L`, sorted and shuffled, and check the four reconciliation
+    /// laws and the justification of every refusal. The shell then closes the refused links in
+    /// core.
+    fn reconcile(&mut self, now_ms: u128) {
+        self.reconciliations += 1;
+        let snapshot = self
+            .truth
+            .iter()
+            .map(|&(did, generation)| OnionAdmissionLink { did, generation })
+            .collect::<Vec<_>>();
+        let mut permuted = snapshot.clone();
+        permuted.shuffle(&mut self.rng);
+        let before = live_links(&self.sorted);
+        let refused = self.sorted.reconcile(now_ms, snapshot.iter().copied());
+        assert_eq!(
+            self.shuffled.reconcile(now_ms, permuted.iter().copied()),
+            refused
+        );
+        let refused_set = refused
+            .links()
+            .iter()
+            .map(|link| (link.did, link.generation))
+            .collect::<BTreeSet<_>>();
+        let expected = self
+            .truth
+            .difference(&refused_set)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(live_links(&self.sorted), expected);
+        assert!(before
+            .intersection(&self.truth)
+            .all(|link| !refused_set.contains(link)));
+        assert!(refused
+            .links()
+            .iter()
+            .all(|link| is_full_for(&self.sorted, expected.len(), link)));
+        self.occurred[3] += u32::from(!refused.links().is_empty());
+        let ledgers = self.sorted.senders.clone();
+        assert_eq!(
+            self.sorted.reconcile(now_ms, snapshot.iter().copied()),
+            refused
+        );
+        assert_eq!(
+            self.shuffled.reconcile(now_ms, permuted.iter().copied()),
+            refused
+        );
+        assert_eq!(self.sorted.senders, ledgers);
+        self.truth = expected;
+        self.modelled = self.truth.clone();
+    }
+
+    /// Charge a cell on a random modelled link, or with probability ¼ on a possibly stale
+    /// generation of `did`. Both states agree, and `LinkNotLive` holds exactly when the model lacks
+    /// the link.
+    fn charge(&mut self, now_ms: u128, did: Did, tag: u128) {
+        let index = self.rng.gen_range(0..self.modelled.len().max(1));
+        let on = match self.modelled.iter().nth(index) {
+            Some(&(did, generation)) if !self.rng.gen_ratio(1, 4) => {
+                OnionAdmissionLink { did, generation }
+            }
+            _ => OnionAdmissionLink {
+                did,
+                generation: self.rng.gen_range(0..=self.next_generation),
+            },
+        };
+        let cost = self.rng.gen_range(1..=64_u32);
+        let x = layer(latest_expiry(now_ms), tag);
+        let verdict = send_on(&mut self.sorted, now_ms, on, cost, x);
+        assert_eq!(send_on(&mut self.shuffled, now_ms, on, cost, x), verdict);
+        assert_eq!(
+            verdict == Verdict::Unpaid(OnionChargeRejection::LinkNotLive),
+            !self.modelled.contains(&(on.did, on.generation))
+        );
+    }
+}
+
 /// Property, seeded (M2 of the round-6 review): with lost `Admitted`/`Retired` events, periodic
 /// reconciliation against core's truth `L` restores the laws. Two states are driven in lockstep
 /// with the same inputs; one receives every snapshot sorted and the other shuffled. After every
@@ -587,139 +762,36 @@ fn live_links(admission: &OnionAdmissionState) -> BTreeSet<(Did, u64)> {
 /// * the shuffled snapshot yields the same state as the sorted one.
 ///
 /// Every refusal is justified: after a refused `link_opened`, or after a reconciliation that
-/// refuses a link, the table has no room for that link. Throughout, a charge is `LinkNotLive`
-/// exactly when the modelled live set lacks the link, and the state's live set equals the model's
-/// after every step. The shell closes every refused link in core, so the model removes it from
-/// `L`. The run asserts that delivered opens, delivered closes, event refusals and reconcile
-/// refusals all occur.
+/// refuses a link, the table has no room for that link, counting live links from the model.
+/// Throughout, a charge is `LinkNotLive` exactly when the modelled live set lacks the link, and
+/// the state's live set equals the model's after every step. The shell closes every refused link
+/// in core, so the model removes it from `L`. The run asserts that delivered opens, delivered
+/// closes, event refusals and reconcile refusals all occur.
 #[test]
 fn test_reconcile_restores_core_truth_under_lost_events() {
-    const R: usize = 8;
-    let mut rng = StdRng::seed_from_u64(0x0841_001b);
-    let key: [u8; 32] = rng.gen();
-    let mut sorted = OnionAdmissionState::new(EPOCH, OnionReplayFilterKey::new(key), registry(R));
-    let mut shuffled = OnionAdmissionState::new(EPOCH, OnionReplayFilterKey::new(key), registry(R));
-    let mut truth = BTreeSet::<(Did, u64)>::new();
-    let mut modelled = BTreeSet::<(Did, u64)>::new();
-    let mut next_generation = 0_u64;
-    let mut reconciliations = 0_u32;
-    let mut lost = 0_u32;
-    let mut occurred = [0_u32; 4];
+    let mut model = Lockstep::new(0x0841_001b);
     let mut now_ms = ORIGIN_MS;
     for tag in 0..6_000_u128 {
-        now_ms += rng.gen_range(0..=Q / 16);
-        let did = Did::from(rng.gen_range(0..24_u32));
-        match rng.gen_range(0..16) {
-            0 | 1 => {
-                next_generation += 1;
-                let opened = OnionAdmissionLink {
-                    did,
-                    generation: next_generation,
-                };
-                truth.insert((did, next_generation));
-                if rng.gen_ratio(1, 6) {
-                    lost += 1;
-                } else {
-                    let verdict = sorted.link_opened(now_ms, opened);
-                    assert_eq!(shuffled.link_opened(now_ms, opened), verdict);
-                    match verdict {
-                        Ok(()) => {
-                            occurred[0] += 1;
-                            modelled.insert((did, next_generation));
-                        }
-                        Err(OnionLinkTableFull) => {
-                            occurred[2] += 1;
-                            assert!(is_full_for(&sorted, &opened));
-                            truth.remove(&(did, next_generation));
-                        }
-                    }
-                }
-            }
-            2 => {
-                let retired = truth
-                    .iter()
-                    .nth(rng.gen_range(0..truth.len().max(1)))
-                    .copied();
-                if let Some((did, generation)) = retired {
-                    truth.remove(&(did, generation));
-                    if rng.gen_ratio(1, 6) {
-                        lost += 1;
-                    } else {
-                        let closed = OnionAdmissionLink { did, generation };
-                        sorted.link_closed(now_ms, closed);
-                        shuffled.link_closed(now_ms, closed);
-                        occurred[1] += 1;
-                        modelled.remove(&(did, generation));
-                    }
-                }
-            }
-            3 => {
-                reconciliations += 1;
-                let snapshot = truth
-                    .iter()
-                    .map(|&(did, generation)| OnionAdmissionLink { did, generation })
-                    .collect::<Vec<_>>();
-                let mut permuted = snapshot.clone();
-                permuted.shuffle(&mut rng);
-                let before = live_links(&sorted);
-                let refused = sorted.reconcile(now_ms, snapshot.iter().copied());
-                assert_eq!(
-                    shuffled.reconcile(now_ms, permuted.iter().copied()),
-                    refused
-                );
-                let refused_set = refused
-                    .links()
-                    .iter()
-                    .map(|link| (link.did, link.generation))
-                    .collect::<BTreeSet<_>>();
-                assert_eq!(
-                    live_links(&sorted),
-                    truth.difference(&refused_set).copied().collect()
-                );
-                assert!(before
-                    .intersection(&truth)
-                    .all(|link| !refused_set.contains(link)));
-                assert!(refused
-                    .links()
-                    .iter()
-                    .all(|link| is_full_for(&sorted, link)));
-                occurred[3] += u32::from(!refused.links().is_empty());
-                let ledgers = sorted.senders.clone();
-                assert_eq!(sorted.reconcile(now_ms, snapshot.iter().copied()), refused);
-                assert_eq!(
-                    shuffled.reconcile(now_ms, permuted.iter().copied()),
-                    refused
-                );
-                assert_eq!(sorted.senders, ledgers);
-                truth = truth.difference(&refused_set).copied().collect();
-                modelled = truth.clone();
-            }
-            _ => {
-                let on = match modelled.iter().nth(rng.gen_range(0..modelled.len().max(1))) {
-                    Some(&(did, generation)) if !rng.gen_ratio(1, 4) => {
-                        OnionAdmissionLink { did, generation }
-                    }
-                    _ => OnionAdmissionLink {
-                        did,
-                        generation: rng.gen_range(0..=next_generation),
-                    },
-                };
-                let cost = rng.gen_range(1..=64_u32);
-                let x = layer(latest_expiry(now_ms), tag);
-                let verdict = send_on(&mut sorted, now_ms, on, cost, x);
-                assert_eq!(send_on(&mut shuffled, now_ms, on, cost, x), verdict);
-                assert_eq!(
-                    verdict == Verdict::Unpaid(OnionChargeRejection::LinkNotLive),
-                    !modelled.contains(&(on.did, on.generation))
-                );
-            }
+        now_ms += model.rng.gen_range(0..=Q / 16);
+        let did = Did::from(model.rng.gen_range(0..24_u32));
+        match model.rng.gen_range(0..16) {
+            0 | 1 => model.open(now_ms, did),
+            2 => model.retire(now_ms),
+            3 => model.reconcile(now_ms),
+            _ => model.charge(now_ms, did, tag),
         }
-        assert_eq!(live_links(&sorted), modelled);
-        assert_eq!(sorted.senders, shuffled.senders);
+        assert_eq!(live_links(&model.sorted), model.modelled);
+        assert_eq!(model.sorted.senders, model.shuffled.senders);
     }
     assert!(
-        reconciliations > 100 && lost > 50,
-        "{reconciliations} {lost}"
+        model.reconciliations > 100 && model.lost > 50,
+        "{} {}",
+        model.reconciliations,
+        model.lost
     );
-    assert!(occurred.iter().all(|count| *count > 0), "{occurred:?}");
+    assert!(
+        model.occurred.iter().all(|count| *count > 0),
+        "{:?}",
+        model.occurred
+    );
 }

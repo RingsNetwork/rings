@@ -939,8 +939,9 @@ fn test_read_only_reducer_arm_structurally_shares_return_state() {
     assert!(transition.effects.is_empty());
 }
 
-/// Law: at the window's upper boundary, with `arr = Q − 1`, the on-grid layer `x = 6Q = arr + V + 1`
-/// is rejected, while the grid point just inside, `x = 5Q ≤ arr + V`, is admitted.
+/// Law: at the window's upper boundary, with `arr = Q − 1`, the on-grid layer
+/// `x = 6Q = arr + V + 1` is rejected, while the grid point just inside, `x = 5Q ≤ arr + V`, is
+/// admitted.
 #[test]
 fn test_overlong_exit_layer_emits_no_exit_effect() {
     let quantum = super::super::ONION_FORWARD_EXPIRY_QUANTUM_MS;

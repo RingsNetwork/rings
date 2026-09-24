@@ -61,8 +61,9 @@
 //!   inside one epoch: recovering early would mean forgetting filters that may still be live. So
 //!   the effectful shell (#834 2a-4), when [`OnionAdmissionState::is_rolled_back_at`] holds
 //!   (`now < clock − X₀`), must move to a fresh process epoch with
-//!   [`OnionAdmissionState::renew`]. That rebuilds the live links from core's snapshot and clears
-//!   the ledgers, the clock and the replay store. It is safe by the epoch law, but it invalidates
+//!   [`OnionAdmissionState::renew`]. That clears the ledgers, the clock and the replay store, and
+//!   then reconciles the cleared state with core's snapshot, `ρ = reconcile ∘ clear`, so the live
+//!   links are the snapshot up to refusals. It is safe by the epoch law, but it invalidates
 //!   every loop in flight through this hop.
 //! * **Skew (for 2a-4).** The window has no skew tolerance. A hop whose clock runs `δ < Q` behind
 //!   or ahead of the builder's rejects about `δ / Q` of loops at the window's edges.
@@ -146,12 +147,12 @@
 //!     current epoch would clear the replay store while keeping `epoch_i`, so a replay of an
 //!     admitted `(x, ν)` could be admitted again. The state rejects only `e′ = epoch_i`. The shell
 //!     owes the rest: it draws `e′` independently and uniformly from `2¹²⁸`, and redraws on that
-//!     rejection. Over `k` resets, the chance of reusing one *fixed* earlier epoch is
-//!     `≤ k·2⁻¹²⁸`. The chance that some reset reuses *any* earlier epoch, the `A → B → A`
-//!     sequence that would revive `A`'s layers, is at most the birthday bound `k²·2⁻¹²⁹`. The reset
-//!     rebuilds the live set from core's snapshot, and every DID with a live link starts with a
-//!     zero-load ledger, so every live link still has a ledger. The per-DID bound `B` therefore holds within one epoch. A token
-//!     charged before the reset is never admitted after it, because its epoch differs.
+//!     rejection. Over `k` resets, the chance of reusing one *fixed* earlier epoch is `≤ k·2⁻¹²⁸`.
+//!     The chance that some reset reuses *any* earlier epoch, the `A → B → A` sequence that would
+//!     revive `A`'s layers, is at most the birthday bound `k²·2⁻¹²⁹`. The reset rebuilds the live
+//!     set from core's snapshot, and every DID with a live link starts with a zero-load ledger, so
+//!     every live link still has a ledger. The per-DID bound `B` therefore holds within one epoch.
+//!     A token charged before the reset is never admitted after it, because its epoch differs.
 //!   * `G` is independent of the table size and bounds what all DIDs admit together, and hence the
 //!     replay store.
 
@@ -358,10 +359,12 @@ impl OnionAdmissionState {
         now_ms.saturating_add(ONION_EXPIRY_OFFSET_MS) < self.clock_ms
     }
 
-    /// The reset `ρ(epoch, key, live)`: the epoch reset. It requires a fresh `epoch` and
-    /// otherwise changes nothing. On success the state is the initial state of `epoch` with probe
-    /// key `filter_key`, over the live links of core's snapshot `live`, each DID with a zero-load
-    /// ledger. It returns the snapshot links the table refuses, which the shell must close.
+    /// The reset `ρ(epoch, key, live)`: the epoch reset. It requires a fresh `epoch` and otherwise
+    /// changes nothing. On success, `ρ = reconcile ∘ clear`: the state is the initial state of
+    /// `epoch` with probe key `filter_key`, reconciled with core's snapshot `live`, each DID with a
+    /// zero-load ledger. It returns the snapshot links the table refuses, which the shell must
+    /// close. The cleared table is empty and a snapshot has no more DIDs than links, so nothing is
+    /// refused when `|live| ≤ 2·R`.
     pub(super) fn renew(
         &mut self,
         epoch: OnionExitEpoch,
