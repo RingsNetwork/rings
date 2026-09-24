@@ -18,6 +18,7 @@ use super::fixture_rng;
 use super::hop_key;
 use crate::onion::circuit::OnionForwardNonce;
 use crate::onion::sphinx::cell::OnionCell;
+use crate::onion::sphinx::cell::OnionProduceError;
 use crate::onion::sphinx::cell::OnionStep;
 use crate::onion::sphinx::class::OnionLoopClass;
 use crate::onion::sphinx::header::OnionHeaderHop;
@@ -31,8 +32,11 @@ use crate::onion::sphinx::seed::OnionSegmentSeed;
 use crate::onion::OnionExitEpoch;
 use crate::onion::OnionServiceName;
 
-/// A layer with the given application and carry seeds; its other fields are fixed.
+/// The layer of `position` with the given application and carry seeds; its `next` and `x` are
+/// distinct per position (`100 + position`, `1000 + position`), so the tests can tell which layer
+/// a value came from.
 fn layer(
+    position: u32,
     application: OnionLayerApplication,
     inbound: OnionCarrySeed,
     outbound: OnionSegmentSeed,
@@ -40,9 +44,9 @@ fn layer(
     OnionLayer {
         head: OnionLayerHead {
             application,
-            next: Did::from(7_u32),
+            next: Did::from(100 + position),
             epoch: OnionExitEpoch::new([1; 16]),
-            expires_at_ms: 1,
+            expires_at_ms: 1000 + u64::from(position),
             nonce: OnionForwardNonce::new([2; 16]),
         },
         inbound,
@@ -64,16 +68,19 @@ fn test_loop_carries_each_segment_value_to_its_consumer() {
     let [inbound_4, inbound_5] = second.seeds().relays;
     let layers = [
         layer(
+            0,
             OnionLayerApplication::Relay,
             inbound_1,
             OnionSegmentSeed::random(&mut rng),
         ),
         layer(
+            1,
             OnionLayerApplication::Relay,
             inbound_2,
             OnionSegmentSeed::random(&mut rng),
         ),
         layer(
+            2,
             OnionLayerApplication::Apply {
                 symbol: OnionServiceName::tcp(),
                 arguments: OnionArguments::new([3; 64]),
@@ -82,11 +89,13 @@ fn test_loop_carries_each_segment_value_to_its_consumer() {
             OnionSegmentSeed::new(*second.as_bytes()),
         ),
         layer(
+            3,
             OnionLayerApplication::Relay,
             inbound_4,
             OnionSegmentSeed::random(&mut rng),
         ),
         layer(
+            4,
             OnionLayerApplication::Relay,
             inbound_5,
             OnionSegmentSeed::random(&mut rng),
@@ -106,17 +115,18 @@ fn test_loop_carries_each_segment_value_to_its_consumer() {
     let output = rng.gen::<[u8; 24]>();
     let (cell, tag) = OnionCell::client(&route, class, &first_keys, &input, &mut rng)
         .expect("the client's first cell");
-    let peel = |cell: Vec<u8>, key| {
+    let peel = |cell: Vec<u8>, position: usize| {
         let peeled = OnionCell::parse(cell)
             .expect("cell")
-            .peel(key)
+            .peel(&keys[position])
             .expect("peel");
-        // Admission reads the layer before any carry work.
-        assert_eq!(peeled.head().expires_at_ms, 1);
+        // Admission reads this position's own layer before any carry work.
+        let index = u64::try_from(position).expect("small");
+        assert_eq!(peeled.head().expires_at_ms, 1000 + index);
         peeled.step().expect("carry step")
     };
-    let relay = |cell: Vec<u8>, key| {
-        let OnionStep::Relayed { head, cell } = peel(cell, key) else {
+    let relay = |cell: Vec<u8>, position| {
+        let OnionStep::Relayed { head, cell } = peel(cell, position) else {
             panic!("a relay position");
         };
         assert_eq!(head.application, OnionLayerApplication::Relay);
@@ -124,8 +134,8 @@ fn test_loop_carries_each_segment_value_to_its_consumer() {
         cell.into_bytes()
     };
 
-    let cell = relay(relay(cell.into_bytes(), &keys[0]), &keys[1]);
-    let OnionStep::Consumed { head, value, surb } = peel(cell, &keys[2]) else {
+    let cell = relay(relay(cell.into_bytes(), 0), 1);
+    let OnionStep::Consumed { head, value, surb } = peel(cell, 2) else {
         panic!("the symbol position");
     };
     assert!(matches!(
@@ -133,12 +143,16 @@ fn test_loop_carries_each_segment_value_to_its_consumer() {
         OnionLayerApplication::Apply { .. }
     ));
     assert_eq!(*value, input);
-    // υ carries the symbol layer's `next` and `x`, so a pool needs nothing beside it.
-    assert_eq!(surb.expires_at_ms(), head.expires_at_ms);
+    // υ carries the symbol layer's own `next` and `x` (position 2), so a pool needs nothing
+    // beside it; a value too wide for the class hands the block back unspent.
+    assert_eq!(surb.expires_at_ms(), 1002);
+    let overwide = vec![0; surb.capacity() + 1];
+    let Err(OnionProduceError::ValueTooWide { surb, .. }) = surb.produce(&overwide) else {
+        panic!("a value one byte over capacity");
+    };
     let (next, cell) = surb.produce(&output).expect("produce");
-    assert_eq!(next, head.next);
-    let cell = cell.into_bytes();
-    let cell = relay(relay(cell, &keys[3]), &keys[4]);
+    assert_eq!(next, Did::from(102_u32));
+    let cell = relay(relay(cell.into_bytes(), 3), 4);
     let returned = OnionCell::parse(cell).expect("cell");
 
     assert_eq!(returned.loop_tag(), tag);

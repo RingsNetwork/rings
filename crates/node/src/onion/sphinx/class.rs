@@ -47,6 +47,11 @@ impl OnionLoopClass {
         self.carry_bytes() - ONION_CARRY_AUTHENTICATOR_BYTES
     }
 
+    /// `C₀ − 1`, the widest value `pad` admits: `|v| < C₀` (L3).
+    pub(crate) const fn value_capacity(self) -> usize {
+        self.carry_value_bytes() - 1
+    }
+
     /// `b` as the one-byte string the header MAC binds (#834 H1: `γ = MAC(b ‖ β)`): the
     /// bucket's `repr(u8)` discriminant, injective on classes.
     pub(crate) const fn mac_label(self) -> [u8; 1] {

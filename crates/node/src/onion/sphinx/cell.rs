@@ -16,18 +16,18 @@
 //! OnionCell ──────────────────────▶ OnionPeeledCell
 //!
 //!                  step, by λ_i's application
-//! OnionPeeledCell ─┬─ relay:  Dec⁰ under KDF₄₈(σ_in)  ──▶ Relayed(OnionCell)
-//!                  └─ symbol: Dec^τ under KDF₄₈(σ_in) ──▶ Consumed(v, OnionSurb)
+//! OnionPeeledCell ─┬─ relay:  Dec⁰ under KDF₄₈(σ_in)  ──▶ Relayed(head, OnionCell)
+//!                  └─ symbol: Dec^τ under KDF₄₈(σ_in) ──▶ Consumed(head, v, OnionSurb)
 //!
 //! OnionSurb υ = (next, χ_{i+1}, σ_out, x) ── produce(v′), keys of σ_out ──▶ (next, OnionCell)
 //! ```
 //!
 //! The class flows along every arrow unchanged, the role is the layer's application, and the
 //! output's keys come from `σ_out` in the hop's own layer: a hop supplies none of the three.
-//! [`OnionSurb`] is D8's reply block `υ` with the class of its cell: 2980 B (a class byte, `χ`,
-//! `σ`, the next DID and `x`), so a SURB pool costs that per entry whatever the class; its keys
-//! are derived when it is spent. The batched-credit codec of `υ` (D8) lands in 2a-4 and decodes
-//! into this type. The client has one
+//! The step consumes both seeds of `λ_i` and yields its key-free head. [`OnionSurb`] is D8's reply
+//! block `υ` (2979 B: `next`, `χ`, `σ`, `x`) plus the class byte of its cell, 2980 B, so a SURB
+//! pool costs that per entry whatever the class; its keys are derived when it is spent. The
+//! batched-credit codec of `υ` (D8) lands in 2a-4 and decodes into this type. The client has one
 //! constructor, [`OnionCell::client`], which builds the header and seals the first segment in the
 //! class it chooses, and reads a returning cell through [`OnionCell::loop_tag`] and
 //! [`OnionCell::open`].
@@ -118,9 +118,11 @@ pub(crate) enum OnionStep {
 /// A single-use reply block `υ = (next, χ_υ, σ_υ, x_υ)` (#834 D8), with the class of its cell:
 /// where the output goes, its header, the segment seed of its carry, and its expiry.
 ///
-/// It holds neither a cell buffer nor derived keys, so its size is independent of the class:
-/// one class byte, `|χ| = 2919`, `|σ| = 32`, a 20-byte DID and an 8-byte `x`, the 2980 B of D8.
-/// Affine: no `Clone`, so a reply block is spent at most once.
+/// It holds neither a cell buffer nor derived keys, so its size is independent of the class: D8's
+/// 2979 B (`|next| = 20`, `|χ| = 2919`, `|σ| = 32`, `|x| = 8`) plus the class byte, 2980 B.
+/// Affine: no `Clone`, so a reply block is spent at most once; a value too wide for its class
+/// hands it back unspent.
+#[derive(Debug)]
 pub(crate) struct OnionSurb {
     /// `b`, the class of the cell it produces.
     class: OnionLoopClass,
@@ -143,14 +145,19 @@ const _: () = assert!(size_of::<OnionSurb>() <= 3 * 1024);
 pub(crate) struct OnionCellWidth(pub(crate) usize);
 
 /// Why a reply block did not produce its cell.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum OnionProduceError {
-    /// A key of `σ_out`'s segment is weak.
+    /// A key of `σ_out`'s segment is weak: the reply block is unusable and is dropped.
     #[error(transparent)]
     Key(#[from] KeyError),
-    /// The value does not fit the class.
-    #[error(transparent)]
-    ValueTooWide(#[from] OnionValueTooWide),
+    /// The value does not fit the class; the reply block comes back unspent.
+    #[error("{width}")]
+    ValueTooWide {
+        /// The unspent reply block.
+        surb: Box<OnionSurb>,
+        /// `|v′|` against the class capacity.
+        width: OnionValueTooWide,
+    },
 }
 
 /// Why a hop's carry step failed.
@@ -336,20 +343,31 @@ impl OnionSurb {
         self.expires_at_ms
     }
 
+    /// The widest value this reply block can carry, `C₀ − 1` of its class.
+    pub(crate) const fn capacity(&self) -> usize {
+        self.class.value_capacity()
+    }
+
     /// Spend the reply block: `v′` sealed under the segment keys of `σ_υ`, as a cell of its class
     /// in a fresh buffer, with the DID it goes to.
     ///
     /// # Errors
     ///
     /// [`OnionProduceError::Key`] for a weak key of `σ_υ`, and
-    /// [`OnionProduceError::ValueTooWide`] if `|v′| ≥ C₀`.
+    /// [`OnionProduceError::ValueTooWide`] if `|v′| > capacity()`, which returns the block.
     pub(crate) fn produce(self, value: &[u8]) -> Result<(Did, OnionCell), OnionProduceError> {
         let keys = self.outbound.keys()?;
-        Ok((self.next, OnionCell {
-            class: self.class,
-            carry: carry::seal(self.class, &keys, value)?,
-            header: self.header,
-            buffer: Vec::with_capacity(self.class.cell_bytes()),
-        }))
+        match carry::seal(self.class, &keys, value) {
+            Ok(carry) => Ok((self.next, OnionCell {
+                class: self.class,
+                carry,
+                header: self.header,
+                buffer: Vec::with_capacity(self.class.cell_bytes()),
+            })),
+            Err(width) => Err(OnionProduceError::ValueTooWide {
+                surb: Box::new(self),
+                width,
+            }),
+        }
     }
 }

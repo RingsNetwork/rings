@@ -209,8 +209,10 @@ impl From<&NonIdentityPoint<Secp256k1>> for PublicKey<SEC1_COMPRESSED_BYTES> {
 /// The one SEC1 compressed encoder of secp256k1, on the affine carrier, so an input that is
 /// already affine (a `k256` public or verifying key) costs no field inversion.
 ///
-/// Pre: `point ≠ O`: every caller holds an element of `G ∖ {O}` (a [`NonIdentityPoint`] or a
-/// `k256::PublicKey`), on which the encoding is total and exactly 33 bytes.
+/// Pre: `point ≠ O`. Every caller holds an element of `G ∖ {O}`: the normalised point of a
+/// [`NonIdentityPoint`], the affine point of a `k256` public or verifying key, or an affine point
+/// just checked against `O`. On `G ∖ {O}` the encoding is total and exactly 33 bytes; on `O` it
+/// would be 33 zero bytes, which no caller can pass.
 fn encode_sec1(point: &K256AffinePoint) -> PublicKey<SEC1_COMPRESSED_BYTES> {
     let encoded = point.to_bytes();
     let mut bytes = [0_u8; SEC1_COMPRESSED_BYTES];

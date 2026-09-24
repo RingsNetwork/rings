@@ -77,7 +77,7 @@ pub(super) fn seal(
     keys: &OnionSegmentKeys,
     value: &[u8],
 ) -> Result<OnionCarry, OnionValueTooWide> {
-    let capacity = class.carry_value_bytes() - 1;
+    let capacity = class.value_capacity();
     if value.len() > capacity {
         return Err(OnionValueTooWide {
             length: value.len(),
