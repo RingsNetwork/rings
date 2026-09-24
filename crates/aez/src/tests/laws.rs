@@ -5,9 +5,12 @@ use super::Stream;
 use crate::block::Block;
 use crate::tbc::Subkeys;
 use crate::Aez;
+use crate::Ciphertext;
 use crate::DecryptError;
 use crate::ExpansionExceedsBuffer;
+use crate::Inauthentic;
 use crate::KeyError;
+use crate::Plaintext;
 use crate::Subkey;
 use crate::Tweak;
 use crate::KEY_BYTES;
@@ -183,7 +186,55 @@ witness! {
         relay.decipher(Tweak::EMPTY, &mut slot);
         assert_eq!(
             consumer.decrypt(Tweak::EMPTY, 16, &mut slot).map(|_| ()),
-            Err(DecryptError::Inauthentic)
+            Err(DecryptError::Inauthentic(Inauthentic))
         );
+    }
+
+    /// Law: the typed path agrees with the checked one. `seal(M)` equals `encrypt(M ‖ 0^τ)`,
+    /// `open ∘ seal` recovers `M`, and a flipped bit is `Inauthentic`.
+    fn typed_seal_and_open_agree_with_encrypt_and_decrypt() {
+        let mut stream = Stream::new(0x5eed_0009);
+        let cipher = keyed(&mut stream);
+        for width in [0, 1, 31, 32, 100] {
+            let message = stream.bytes(width);
+            let mut checked = [message.as_slice(), &[0; 16]].concat();
+            cipher.encrypt(Tweak::EMPTY, 16, &mut checked).unwrap();
+
+            let sealed = cipher.seal(Tweak::EMPTY, Plaintext::<16>::new(message.clone()));
+            assert_eq!(sealed.as_slice(), checked.as_slice(), "width {width}");
+            let mut tampered = sealed.clone();
+            let opened = cipher.open(Tweak::EMPTY, sealed).unwrap();
+            assert_eq!(opened.as_slice(), message.as_slice(), "width {width}");
+
+            let first = tampered.as_mut_slice().first_mut().unwrap();
+            *first ^= 1;
+            assert!(matches!(cipher.open(Tweak::EMPTY, tampered), Err(Inauthentic)));
+        }
+    }
+
+    /// Law: a buffer shorter than `τ` is not a `Ciphertext<τ>`.
+    fn ciphertext_rejects_a_buffer_shorter_than_tau() {
+        assert_eq!(
+            Ciphertext::<16>::new(vec![0; 15]),
+            Err(ExpansionExceedsBuffer {
+                length: 15,
+                expansion: 16,
+            })
+        );
+        assert!(Ciphertext::<16>::new(vec![0; 16]).is_ok());
+    }
+
+    /// Law: a message whose buffer already has room for the slot is sealed in place, so
+    /// `seal` neither copies nor reallocates it.
+    fn plaintext_keeps_a_buffer_with_room_for_the_slot() {
+        let mut message = Vec::with_capacity(48 + 16);
+        message.extend_from_slice(&[7; 48]);
+        let address = message.as_ptr();
+        let cipher = keyed(&mut Stream::new(0x5eed_000a));
+
+        let sealed = cipher.seal(Tweak::EMPTY, Plaintext::<16>::new(message));
+
+        assert_eq!(sealed.as_slice().as_ptr(), address);
+        assert_eq!(sealed.as_slice().len(), 48 + 16);
     }
 }

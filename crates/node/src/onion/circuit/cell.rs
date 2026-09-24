@@ -33,6 +33,7 @@ const ONION_CELL_AEAD_NAMESPACE: &[u8] = b"rings-node:onion-cell";
 /// application length are encrypted. A small class set bounds padding overhead without exposing
 /// a byte-accurate traffic fingerprint.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[repr(u8)]
 pub enum OnionCellBucket {
     /// Up to four KiB of encrypted cell plaintext.
     KiB4,
@@ -53,7 +54,8 @@ pub enum OnionCellBucket {
 }
 
 impl OnionCellBucket {
-    const ALL: [Self; 7] = [
+    /// Every bucket, in increasing size.
+    pub(crate) const ALL: [Self; 7] = [
         Self::KiB4,
         Self::KiB16,
         Self::KiB64,

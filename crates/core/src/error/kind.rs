@@ -288,6 +288,14 @@ pub enum Error {
     #[error("A lock was poisoned by a panicking holder")]
     LockPoisoned,
 
+    /// A group element is the identity where `G ∖ {O}` is required
+    #[error("group element is the identity")]
+    IdentityElement,
+
+    /// A scalar is zero where `Z_n^*` is required
+    #[error("scalar is zero")]
+    ZeroScalar,
+
     /// Affine rotation scalar must be greater than zero
     #[error("Affine rotation scalar must be greater than zero")]
     InvalidAffineScalar,

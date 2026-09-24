@@ -20,6 +20,7 @@ repository = "https://github.com/RingsNetwork/rings"
 async-trait = "0.1.77"
 js-sys = "0.3.98"
 jsonrpc-core = "18.0.0"
+rings-aez = { path = "crates/aez", version = "0.31.0" }
 rings-codec = { path = "crates/codec", version = "0.31.0" }
 rings-core = { path = "crates/core", version = "0.31.0", default-features = false }
 rings-derive = { path = "crates/derive", version = "0.31.0", default-features = false }

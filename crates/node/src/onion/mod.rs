@@ -63,6 +63,14 @@ pub(crate) mod replay;
 mod role;
 pub mod route;
 pub mod signature;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "pure Sphinx primitives; #834 Phase 2a-4 (#843) wires them in and removes this"
+    )
+)]
+pub(crate) mod sphinx;
 pub mod target;
 #[cfg(rings_native)]
 pub mod tcp;
@@ -118,6 +126,18 @@ impl OnionProcessEpoch {
         Self(bytes)
     }
 
+    /// Return the epoch bytes, the `e` field of the uniform layer (#834 D6″).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the layer encoding of the Sphinx primitives; #834 Phase 2a-4 (#843) uses it"
+        )
+    )]
+    pub(crate) const fn to_bytes(self) -> [u8; 16] {
+        self.0
+    }
+
     /// Draw a fresh process epoch for one process lifetime.
     pub fn random() -> Self {
         Self(rand::random())
@@ -152,7 +172,7 @@ pub(crate) const fn default_advertise_onion_exit() -> bool {
 /// Default native exit services: the world-facing symbols of [`ONION_SIGNATURE`] in table order.
 /// It is only published when onion-exit advertisement is enabled.
 pub fn default_onion_exit_services() -> Vec<OnionServiceName> {
-    ONION_SIGNATURE.world_facing().collect()
+    OnionServiceName::world_facing().collect()
 }
 
 /// Standard HTTPS onion-exit service set: the single `https` symbol of [`ONION_SIGNATURE`].
