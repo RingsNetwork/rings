@@ -295,7 +295,9 @@ $\relay^{s}f_1\relay^{s}\cdots f_n\relay^{s}$.
 \begin{lawL}{L7}{guard closure}
 $r_{0,1}=r_{n,s}=g$: the guard is relay $1$ of segment $0$ and relay $s$
 of segment $n$.  The other $H-2$ positions carry pairwise distinct DIDs,
-distinct from $g$.  $g$ is the only hop adjacent to $\cl$.
+distinct from $g$.  $g$ is the only hop adjacent to $\cl$.  Selection
+draws the symbol positions first, then $g$, then the relays
+(Prop.~\ref{prop:draw}).
 \end{lawL}
 
 \begin{proposition}[Loop size]\label{prop:size}
@@ -335,6 +337,42 @@ $=\Hm$ is derived from $s$ and $n_{\max}$ and replaces
 \code{MAX\_ONION\_CIRCUIT\_HOPS}~$=8$; \code{DEFAULT\_ONION\_ROUTE\_HOPS}
 and \code{OnionRouteRequest::\{hop\_count, allow\_short\_paths\}} are
 removed, since a short path is a distinguishable segment length (D5).
+
+\emph{Draw order.}  Let $q:\mathrm{DID}\to\mathbb R_{>0}$ be the quality
+weight and $N_p$ the candidates of position $p$: the registrants of
+$(f_k,\omega_k)$ at $h_k$, the permitted guards at $g$, the relay
+registrants at $r_{k,j}\ne g$.  A partial assignment $\pi$ is an
+injective map from filled positions to DIDs, $\pi(p)\in N_p$.  The
+\emph{Hall filter}
+\begin{gather*}
+F(\pi,p)=\{d\in N_p\setminus\mathrm{im}\,\pi:\ \pi\cup\{p\mapsto d\}
+\text{ extends}\\
+\text{to an injective total assignment}\}
+\end{gather*}
+is decided by one bipartite matching of the pending positions, $g$
+included, against unused DIDs (Hall's theorem).  Selection fills
+$h_1..h_n$, then $g$, then the relays, each by one draw
+$\Pr[\pi(p)=d]=q(d)/q(F(\pi,p))$, and fails closed if $F=\emptyset$.
+
+\begin{proposition}[Draw order]\label{prop:draw}
+(i) $F(\pi,p)$ depends on the set $\pi$ only, not on the order in which
+it was filled.  (ii) If the first draw succeeds, no later draw fails.
+(iii) $\Pr[h_1=d]=q(d)/q(F(\emptyset,h_1))$, which is $q(d)/q(N_{h_1})$
+when every registrant of $h_1$ extends; a session loop has $n=1$, so its
+exit's marginal is proportional to its weight among the exits.  Each
+$h_k$ is drawn among $F$ given $h_{<k}$ before $g$ and the relays, so no
+exit is consumed as a guard or relay before it is offered.
+\end{proposition}
+\begin{proof}
+(i) Extendability is a predicate of the partial map.  (ii) Induction: a
+drawn $d\in F(\pi,p)$ makes $\pi'=\pi\cup\{p\mapsto d\}$ extendable, and
+any extension of $\pi'$ puts a member of $F(\pi',p')$ at the next
+position $p'$.  (iii) The first draw is a single weighted draw from
+$F(\emptyset,h_1)$; $g$ and relays are drawn later, from $N\setminus
+\mathrm{im}\,\pi$.  The guard marginal is
+$\mathbb E_{h}\bigl[q(d)\,[d\in F]/q(F)\bigr]$ with $F=F(h_{1..n},g)$,
+which the exact-enumeration test pins.
+\end{proof}
 
 \begin{table}[t]
 \caption{Loop shape at $s=2$ (Prop.~\ref{prop:size})}
@@ -570,7 +608,7 @@ fixed key: L9 is load-bearing for AEZ.
 \If{$\gamma\ne\MAC_{K_i}(b\,\|\,\beta)$}\label{alg:hop:gamma}
   \State settle $\mathsf{tk}$;\ drop \Comment{D6, L8}
 \EndIf
-\If{$\neg\,\mathrm{admit}_i(\mathsf{tk},x,e,\nu)$}
+\If{$\neg\,\mathrm{admit}_i(\mathsf{tk},e,x,\nu)$}
   \State drop \Comment{consumes $\mathsf{tk}$; L9}
 \EndIf
 \State $R_i[x]\gets R_i[x]\cup\{\nu\}$;\
@@ -871,7 +909,8 @@ Hop $i$ keeps the live set $\mathcal L_i$, fed from core's
 \begin{gather*}
 \mathrm{live}_i(d)\iff\exists g.\ (d,g)\in\mathcal L_i.
 \end{gather*}
-\emph{Ledgers} are keyed by the sender DID $d$ of a live link.  With $\mathcal R=2(\text{finger slots}+\text{successors}+1)$ the
+\emph{Ledgers} are keyed by the sender DID $d$ of a live link: a DID with
+several live generations has one ledger.  With $\mathcal R=2(\text{finger slots}+\text{successors}+1)$ the
 transport connection-registry capacity (\#723), hop $i$ keeps a partial
 map $\Lambda_i:\mathrm{DID}\rightharpoonup\mathbb N$ of loads, and
 $\Lambda_i^{\Sigma}$ the global load:
@@ -880,17 +919,41 @@ $\Lambda_i^{\Sigma}$ the global load:
 d\in\mathrm{dom}\,\Lambda_i\ \text{released}\iff
 \neg\mathrm{live}_i(d)\wedge\Lambda_i(d)=0,
 \end{gather*}
-$\mathcal R$ ledgers for live links and $\mathcal R$ for links closed with
-load in the window.  \code{link\_opened}$(\xi)$ adds $\xi$ to
+$\mathcal R$ ledgers for live DIDs and $\mathcal R$ for DIDs whose links
+closed with load in the window.  \code{link\_opened}$(\xi)$ adds $\xi$ to
 $\mathcal L_i$ and opens $\Lambda_i(d)$, or finds it if $d$ reconnects; no
 ledger is recycled or evicted (no LRU).  If the table is full,
 \code{link\_opened} refuses $\xi$, fail closed: $\xi\notin\mathcal L_i$,
 the shell closes it and the peer redials.  A redial obtains a slot once a
 closed ledger drains; that is a liveness assumption, not a fairness
 guarantee.  \code{link\_closed}$(\xi)$ removes $\xi$ from $\mathcal L_i$
-and is idempotent: a no-op on an unknown or refused $\xi$.  An epoch
-reset keeps $\mathcal L_i$ and clears ledgers, loads, $\mathit{clock}$ and
-$R_i$; each live DID's ledger restarts at load $0$.
+and is idempotent: a no-op on an unknown or refused $\xi$.
+
+\emph{Reconciliation.}  Core's registry snapshot
+$L\subseteq\mathrm{DID}\times\mathbb N$ is authoritative.  The pure
+\begin{gather*}
+\mathrm{reconcile}_i(L)=
+\mathrm{open}_i(L\setminus\mathcal L_i)\circ
+\mathrm{close}_i(\mathcal L_i\setminus L)
+\end{gather*}
+closes every generation absent from $L$ (\code{link\_closed}) and opens
+every missing one (\code{link\_opened}, with the same full-table
+refusal), so $\mathcal L_i\subseteq L$ afterwards and a lost
+\code{Retired} cannot pin a slot.  The shell calls it on callback
+replacement and on a tick of period $\le V$.
+
+\emph{Epoch reset.}  $\mathrm{reset}_i(e',L)$ requires $e'\ne\mathrm{epoch}_i$,
+sets $\mathcal L_i\gets L$ from the same snapshot, and clears ledgers,
+loads, $\mathit{clock}$ and $R_i$; each live DID's ledger restarts at
+load $0$.  Its trigger is the pure predicate of the state
+\begin{gather*}
+\mathrm{is\_rolled\_back\_at}_i(\mathit{now})\iff
+\mathit{now}<\mathit{clock}-X_0,
+\end{gather*}
+or a process restart; no peer can cause either.  A fresh epoch is
+necessary: with $e'=e$ the cleared $R_i$ would re-admit a layer admitted
+before the reset, violating at-most-once and with it
+Prop.~\ref{prop:onekey}.
 
 \emph{Charge on receipt.}  Every received cell on $\xi=(d,g)$ is charged $u(b)$ to
 $\Lambda_i(d)$ exactly once, whatever its outcome (invalid $\alpha$,
@@ -910,7 +973,7 @@ or failed $\gamma$); the charge stands either way, so no cell is peeled
 for free.  Admission judges the window at the token's
 $\arr$, not at the clock, and requires the filter to be live:
 \begin{multline*}
-\mathrm{admit}_i((\arr,e^{\mathsf{tk}}),x,e,\nu)\iff{}\\
+\mathrm{admit}_i((\arr,e^{\mathsf{tk}}),e,x,\nu)\iff{}\\
 \arr<x\le\arr+V\ \wedge\ x>\mathit{clock}\\
 \wedge\ e^{\mathsf{tk}}=e=\mathrm{epoch}_i\ \wedge\
 \nu\notin R_i[x],
@@ -941,6 +1004,9 @@ identity rotation.
 $\mathcal L_i$, never served; its \code{link\_closed} is a no-op, and a
 redial (a new generation) succeeds once a closed ledger drains (liveness
 assumption, not fairness).
+(vi) With lost \code{Retired} events, a generation absent from core's
+registry leaves $\mathcal L_i$ within one tick ($\le V$), and its ledger
+is released within $V$ after that.
 \end{proposition}
 \begin{proof}
 (i) Live links are at most $\mathcal R$ (registry).  A closed link's load
@@ -952,7 +1018,8 @@ keyed by $d$, not $g$, and is never reset while loaded within an epoch;
 a new generation of $d$ finds it; a new DID needs a real authenticated
 connection, which the registry bounds, and obtains its own $B$ only.
 (v) is the refusal rule, idempotent close, and (i): a closed ledger
-drains within $V$.
+drains within $V$.  (vi) $\mathrm{reconcile}_i$ yields
+$\mathcal L_i\subseteq L$ at every tick; then (i).
 \end{proof}
 
 \begin{proposition}[Replay bounds]\label{prop:replay}
@@ -978,6 +1045,7 @@ $\min(d,2\mathcal R)\,B$ (Prop.~\ref{prop:ledger}).
 (iv) The same holds for $G$, $G/V\approx6990$ units\,s$^{-1}$
 ($\approx115$\,MB/s), in total; a 16\,KiB cell is one unit.  (v) A SURB is usable
 only within $[x_\upsilon-V,x_\upsilon)$, so SURB lifetime is at most $V$.
+(vi) Admission stays at most once across an epoch reset.
 \end{proposition}
 \begin{proof}
 (i) is the admission window with filters keyed by $x$ and the liveness
@@ -996,7 +1064,10 @@ quanta, covered by $\lceil(\lceil T/Q\rceil+1)/5\rceil$ runs of $5$
 consecutive quanta, each charged at most $B$; within an epoch the ledger
 is never reset while loaded (Prop.~\ref{prop:ledger}).  (iv) is the global
 ledger, argued alike.  (v) every relay of the reply path applies (i) at the reply's
-arrival.
+arrival.  (vi) $R_i$ is cleared, but $\mathrm{admit}_i$ requires
+$e=\mathrm{epoch}_i=e'$, and every layer admitted before the reset names
+the old epoch $e\ne e'$; with $e'=e$ its replay would take a fresh token
+of epoch $e$ and pass $\nu\notin R_i[x]$.
 \end{proof}
 
 \begin{proposition}[Throughput]\label{prop:rate}
@@ -1106,7 +1177,7 @@ computation & exit service only & any registered shape; under $\mathsf{invoke}$,
 return path & forward path reversed & fresh relays to $g$ (L7) \\
 relay state & \code{relay\_returns}, $\le1024$, TTL $120$\,s refreshed per cell & replay tags only (L9) \\
 return bytes & one ciphertext, identical per edge & one AEZ layer per edge (L8) \\
-replay & exits (\code{consume\_forward\_nonce}), $V=150$\,s, $B=4096$, crypto limiter & every hop, $x$-keyed Bloom filters, $B=16384$ units of 16\,KiB per link-keyed ledger, $2\mathcal R$ ledgers, $G=64B$ (L9) \\
+replay & exits (\code{consume\_forward\_nonce}), $V=150$\,s, $B=4096$, crypto limiter & every hop, $x$-keyed Bloom filters, $B=16384$ units of 16\,KiB per sender-DID ledger, $2\mathcal R$ ledgers, $G=64B$ (L9) \\
 session replies & no SURB credit & one per SURB, $k$ per credit loop (D8) \\
 \bottomrule
 \end{tabular}
@@ -1142,15 +1213,18 @@ tagging & whole-value rejection, $2^{-8\tau}$ (L8) \\
 class relabelling (length tag) & $b$ bound in $\gamma_i$; next honest hop drops (L8) \\
 hop-chosen routing & $\nxt_i\in\lambda_i$ (L6); bind excluded (Prop.~\ref{prop:arrow}) \\
 first/last-hop correlation & one guard closes the loop (L7) \\
+high-quality exits consumed as guard or relay & symbol positions drawn first (L7, Prop.~\ref{prop:draw}) \\
 replay of layer or SURB & single admission per $\nu$; no false negatives across filter rotation (L9) \\
 replay across a restart & new process epoch rejects every older layer (D2, L9) \\
 identity rotation to reset a budget & $\le B$ per DID per window; a new DID needs a live link, bounded by $\mathcal R$ (L9, Prop.~\ref{prop:ledger}) \\
-sender-slot lockout & a ledger per live link; no slots beyond live links and links closed with load within $V$ (L9, Prop.~\ref{prop:ledger}) \\
+sender-slot lockout & one ledger per live sender DID, shared by its generations; no slots beyond live DIDs and DIDs whose links closed with load within $V$ (L9, Prop.~\ref{prop:ledger}) \\
 invalid-$\alpha$/$\gamma$, replay and expired floods (cover, garbage) & charged $u(b)$ on receipt, before $\alpha$ decoding and the ECDH; $\gamma$ before $R_i$ and admission (D6, L9) \\
 ECDH latency (window drift, filter overfill) & token carries $\arr$; window judged at $\arr$, filter live ($x>\mathit{clock}$); $\le G$ tags per $R_i[x]$ (L9, Prop.~\ref{prop:replay}) \\
 ledger-table exhaustion & \code{link\_opened} refuses the link; redial is a liveness assumption, not fairness (Prop.~\ref{prop:ledger}) \\
 cell on a link not yet live or closed & $\mathrm{charge}_i$ requires $\xi\in\mathcal L_i$: never charged or peeled (L9, Prop.~\ref{prop:ledger}) \\
-cross-epoch link close & \code{link\_closed} idempotent: no-op on an unknown or refused $\xi$; a reset keeps $\mathcal L_i$ and rejects older tokens (L9) \\
+cross-epoch link close & \code{link\_closed} idempotent: no-op on an unknown or refused $\xi$; a reset takes core's snapshot and rejects older tokens (L9) \\
+lost \code{Retired} event pins slots & $\mathrm{reconcile}_i$ on callback replacement and every tick $\le V$ (L9, Prop.~\ref{prop:ledger}) \\
+same-epoch renewal & a reset requires a fresh $e'\ne e$ (L9, Prop.~\ref{prop:replay}) \\
 reply amplification & $r(t)\le u(t)$ per session (Inv.~\ref{inv:credit}) \\
 large-class cell flood & budgets in 16\,KiB units: $\le1.79$\,MB/s of cells per neighbour (L9) \\
 SURB-pool exhaustion & $|Q_{h,\sid}|\le Q_{\max}$, all pools under $\quota(h,f,\epsilon)$ (D8) \\
@@ -1166,11 +1240,11 @@ oversized result & fail closed at $W(f)$, or at $C_0$ for a frame (L3) \\
 Every law is discharged against the pure builder and reducer, not a shadow
 model (Table~\ref{tab:obligations}).
 
-\begin{table}[t]
+\begin{table*}[t]
 \caption{Obligations and the test that discharges each}
 \label{tab:obligations}
 \centering\small
-\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.2\columnwidth}>{\raggedright\arraybackslash}p{0.73\columnwidth}@{}}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.1\textwidth}>{\raggedright\arraybackslash}p{0.86\textwidth}@{}}
 \toprule
 obligation & test or property \\
 \midrule
@@ -1183,8 +1257,10 @@ L5$'$ & builder for $H\ne H'\le\Hm$: equal layer and cell lengths at every posit
 L3, D6 & one class $b$ and slot width $C_b$ on every edge of a loop, SURB replies included; stream frames of at most $C_0-2$ data bytes; output $>W(f)$ dropped \\
 client & reply accepted once by tag $t_\cl$; unknown, reused, or expired tag dropped; $T$ empty after every $x$ passes \\
 D5, L7 & $H=(s+1)n+s$; guard at $1$ and $H$ only; $n>4$ rejected; selection fails closed below $H-1$ eligible DIDs \\
+draw order & exact-enumeration test pins exit and guard marginals (Prop.~\ref{prop:draw}); no draw fails after the first succeeds \\
 L8 & per-hop byte inequality; one-bit flip rejects the whole value; a cell re-padded to another class fails $\gamma$ at the next hop \\
-L9 & replayed layer and reused SURB rejected; an earlier process epoch rejected after restart; $x\notin(\arr,\arr+V]$ at the token's $\arr$ rejected, and $x\le\mathit{clock}$ rejected at admission; every received cell charged $u(b)$ exactly once before $\alpha$ decoding, whatever its outcome; over-budget cells dropped unprocessed; a ledger per live link, released once closed at load $0$, found again by a new generation; a full $2\mathcal R$ table refuses the link; a cell on $\xi\notin\mathcal L_i$ (not yet live, refused, closed) never charged; \code{link\_closed} idempotent on unknown or refused $\xi$; an epoch reset keeps $\mathcal L_i$, clears ledgers, loads, $\mathit{clock}$, $R_i$, and rejects every older token \\
+L9 & replayed layer and reused SURB rejected; an earlier process epoch rejected after restart; $x\notin(\arr,\arr+V]$ at the token's $\arr$ rejected, and $x\le\mathit{clock}$ rejected at admission; every received cell charged $u(b)$ exactly once before $\alpha$ decoding, whatever its outcome; over-budget cells dropped unprocessed; one ledger per live sender DID, shared by its generations, released once closed at load $0$, found again by a new generation; a full $2\mathcal R$ table refuses the link; a cell on $\xi\notin\mathcal L_i$ (not yet live, refused, closed) never charged; \code{link\_closed} idempotent on unknown or refused $\xi$; an epoch reset with $e'=e$ refused; a reset sets $\mathcal L_i$ from the snapshot, clears ledgers, loads, $\mathit{clock}$, $R_i$, and rejects every older token; a layer admitted before a reset is rejected after it; \code{is\_rolled\_back\_at} exactly when $\mathit{now}<\mathit{clock}-X_0$ \\
+reconcile & $\mathrm{reconcile}_i(L)$ closes $\mathcal L_i\setminus L$, opens $L\setminus\mathcal L_i$ with the full-table refusal; after a dropped \code{Retired}, the slot is released; the shell calls it on callback replacement and on a tick $\le V$ \\
 D6 & a uniform (cover) cell is rejected at $\alpha$ decoding or at $\gamma$, is charged $u(b)$ once, never reaches $R_i$ \\
 D1$'$, D2 & unknown shape rejected at configuration, descriptor decode, route construction; a backend name only under $\mathsf{invoke}$, canonical, $\le32$ bytes over $[\mathtt{a\text{-}z0\text{-}9.\_\text{-}}]$, validated against signed descriptors; $\sigma$ carries no $\omega$ \\
 credit & a \code{tcp} session emits no reply without a SURB of its own $\sid$, removes each SURB before release, drops expired SURBs, and resumes after new credit; two sessions at one $h$ never share a SURB; $\mathrm{fin}$ both ways drops $\sid$; a credit frame adds $k$ SURBs; credit beyond $Q_{\max}$ is dropped \\
@@ -1194,7 +1270,7 @@ seeds & derived keys match the KDF definition; a weak derived key forces a re-dr
 AEZ & $2941$ vectors from the AEZ v5 reference C code (length sweep, parameter grid, CAESAR genkat), bit-flip rejection for $\tau\ge4$, native and \code{wasm32}; weak-key rejection; \code{fuzz/} target for $\Dec{}{}\circ\Enc{}{}=\mathrm{id}$ and panic freedom \\
 \bottomrule
 \end{tabular}
-\end{table}
+\end{table*}
 
 \section{Phases}\label{sec:phases}
 
@@ -1207,7 +1283,7 @@ AEZ & $2941$ vectors from the AEZ v5 reference C code (length sweep, parameter g
 phase & content \\
 \midrule
 1 & golden bytes; closed shape table, world-facing shapes only (unknown names rejected, no \code{tcp} fallback; configs change, bytes do not; \code{https} is request/response only, CONNECT tunnels use \code{tcp}); pipeline term; layer build as a fold over $P$; reducer and handler as $\Sigma$-algebra; route by symbol sequence.  Zero wire change, no bump \\
-2a & uniform layer, fixed-length header with blinded key transport and 32-byte seeds (L5$'$, D6$''$), loop with derived $\Hm$, loop classes, relay process epoch, client tag, stateless relays, AEZ carry, per-session SURBs with batching, $x$-keyed Bloom replay store; admission with $B=16384$ per link-keyed ledger ($2\mathcal R$ ledgers) and global $G$, replacing the crypto limiter.  Breaking \\
+2a & uniform layer, fixed-length header with blinded key transport and 32-byte seeds (L5$'$, D6$''$), loop with derived $\Hm$, loop classes, relay process epoch, client tag, stateless relays, AEZ carry, per-session SURBs with batching, $x$-keyed Bloom replay store; admission with $B=16384$ per sender-DID ledger ($2\mathcal R$ ledgers) and global $G$, with reconciliation and fresh-epoch reset, replacing the crypto limiter.  Breaking \\
 2b & intermediate shapes $\mathsf{invoke}\langle\In,\Out,W,L\rangle$ with discrete $W,L$ classes; descriptors per (shape, backend); selection of an $\mathsf{invoke}$ hop among nodes registering the pair; $\omega$ sealed as the first component of $\bar a$; \code{Invoke} with release time; $\quota(n,f,\omega)$.  Same cutover; one version bump on its last PR \\
 \bottomrule
 \end{tabular}
