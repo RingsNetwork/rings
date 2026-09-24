@@ -17,6 +17,7 @@ use rings_core::message::SigningDomain;
 use rings_core::utils::get_epoch_ms;
 use serde::Serialize;
 
+use super::admission::OnionExpiry;
 use super::cell::seal_message;
 use super::codec::OnionWireMessage;
 use super::OnionAuthenticatedPayload;
@@ -36,8 +37,6 @@ use super::OnionLinkSender;
 use super::OnionReturnId;
 use super::OnionVerifiedPayload;
 use super::ONION_AEAD_NAMESPACE;
-use super::ONION_FORWARD_EXPIRY_QUANTUM_MS;
-use super::ONION_FORWARD_PAYLOAD_TTL_MS;
 use crate::error::Error;
 use crate::error::Result;
 use crate::extension::ext::Scope;
@@ -266,7 +265,7 @@ fn build_forward_layers(
                 .map_or(client.delegatee_public_key, |position| {
                     position.hop.delegatee_public_key
                 }),
-            expires_at_ms: quantized_forward_expiry(get_epoch_ms()),
+            expires_at_ms: OnionExpiry::of_build(get_epoch_ms()).as_ms(),
             forward_nonce: OnionForwardNonce::random(),
             forward_sequence: sequence,
             payload: application,
@@ -291,20 +290,6 @@ fn build_forward_layers(
             .map(|layer| (layer, position))
         })
         .map(|(layer, _)| layer)
-}
-
-/// Quantize authenticated expiry to a coarse wall-clock boundary.
-///
-/// Law: every timestamp in one quantum maps to the same advertised boundary, so exit validation
-/// retains a finite TTL while the encrypted layer does not preserve byte-accurate client clock
-/// skew. Saturation remains fail-closed at the maximum representable instant.
-fn quantized_forward_expiry(now_ms: u128) -> u128 {
-    let deadline = now_ms.saturating_add(ONION_FORWARD_PAYLOAD_TTL_MS);
-    deadline
-        .saturating_add(ONION_FORWARD_EXPIRY_QUANTUM_MS - 1)
-        .checked_div(ONION_FORWARD_EXPIRY_QUANTUM_MS)
-        .and_then(|bucket| bucket.checked_mul(ONION_FORWARD_EXPIRY_QUANTUM_MS))
-        .unwrap_or(u128::MAX)
 }
 
 fn edge_circuit_ids(

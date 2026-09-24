@@ -59,18 +59,27 @@ impl QuantumLedger {
         let mut next = self;
         // The cell of `s` if it exists, else the cell with the least quantum. The window
         // (s − N, s] holds at most N distinct quanta, so when `s` has no cell at most N − 1
-        // cells lie in the window and the least one lies outside it.
-        let cell = next
-            .charges
-            .iter_mut()
-            .min_by_key(|charge| (charge.quantum != quantum, charge.quantum))?;
+        // cells lie in the window and the least one lies outside it. The array is non-empty, so
+        // the fold from its head is total.
+        let [head, tail @ ..] = &mut next.charges;
+        let cell = tail.iter_mut().fold(head, |best, charge| {
+            if (charge.quantum != quantum, charge.quantum) < (best.quantum != quantum, best.quantum)
+            {
+                charge
+            } else {
+                best
+            }
+        });
+        // When `cell.quantum = s`, `cell.units + units ≤ load_s + units ≤ cap`, so saturation
+        // never engages: the sum is exact.
+        let charged = if cell.quantum == quantum {
+            cell.units.saturating_add(units)
+        } else {
+            units
+        };
         *cell = QuantumCharge {
             quantum,
-            units: if cell.quantum == quantum {
-                cell.units.checked_add(units)?
-            } else {
-                units
-            },
+            units: charged,
         };
         Some(next)
     }
