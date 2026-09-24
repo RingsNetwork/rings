@@ -21,6 +21,12 @@
 
 ### Breaking changes
 
+- Order IndexedDB LRU eviction by a store-wide logical access clock instead of wall-clock
+  milliseconds (#853). Rows touched within one timer tick could tie and evict a recently
+  read row. Rows now store `access_stamp`; the database schema moves to version 2 and a
+  version-1 database is migrated in place on first open, keeping every row and its former
+  eviction order. Older builds cannot evict from a migrated database.
+
 - Enforce IndexedDB row capacity when a database opens. Reopening an existing store with a
   lower capacity now deletes the least recently accessed excess rows, which can remove
   persisted data that older versions retained until later writes. This storage behavior
