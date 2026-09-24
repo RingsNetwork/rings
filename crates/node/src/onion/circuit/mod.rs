@@ -11,9 +11,18 @@
 //! `Relay` layers apply `relay = id` inside the pure reducer, and the `Exit` layer applies the
 //! world-facing symbol `s` through the node's [`OnionAlgebra`].
 
+#[cfg_attr(
+    not(all(test, rings_native)),
+    expect(
+        dead_code,
+        reason = "pure L9 admission; #834 Phase 2a-4 wires it into the data plane and removes this"
+    )
+)]
+mod admission;
 mod cell;
 mod codec;
 mod crypto;
+mod expiry;
 mod limiter;
 mod protocol;
 mod reducer;
@@ -49,6 +58,7 @@ pub use shell::OnionCircuitHandler;
 pub use shell::OnionCircuitShell;
 pub use shell::OnionInterpretation;
 
+use self::expiry::OnionExpiry;
 use super::OnionServiceName;
 use crate::error::Result;
 

@@ -94,7 +94,7 @@ subtle = "2.4.1"
 thiserror = "1"
 tracing = "0.1.37"
 web-time = "1.1.0"
-zeroize = "1.8.1"
+zeroize = { workspace = true }
 
 rings-derive = { workspace = true, optional = true }
 tiny-keccak = { version = "2.0.1", features = ["keccak"] }

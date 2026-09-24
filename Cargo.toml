@@ -37,6 +37,7 @@ wasm-bindgen-futures = "0.4.71"
 wasm-bindgen-macro-support = "0.2.121"
 wasm-bindgen-test = "0.3.71"
 webrtc = { version = "0.17.1" }
+zeroize = "1.8.1"
 
 [workspace.lints.rust]
 missing_docs = "deny"
