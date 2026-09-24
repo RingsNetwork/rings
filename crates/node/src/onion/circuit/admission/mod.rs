@@ -8,12 +8,15 @@
 //! ```text
 //! δ : S × Time × I → S × (Out + Rejection)
 //! I = Charge(Link × Units) + Admit(Charge × Epoch × Expiry × Tag)
-//!   + LinkOpened(Link) + LinkClosed(Link)          Link = Did × Generation
+//!   + LinkOpened(Link) + LinkClosed(Link) + Reconcile(𝒫 Link) + Renew(Epoch × Key × 𝒫 Link)
+//! Link = Did × Generation
 //! ```
 //!
 //! [`OnionAdmissionState::charge`], [`OnionAdmissionState::admit`],
-//! [`OnionAdmissionState::link_opened`] and [`OnionAdmissionState::link_closed`] realise `δ` on the
-//! four summands in place. Time is an argument, and the only randomness is the probe key given at
+//! [`OnionAdmissionState::link_opened`], [`OnionAdmissionState::link_closed`],
+//! [`OnionAdmissionState::reconcile`] and [`OnionAdmissionState::renew`] realise `δ` on the six
+//! summands in place. [`OnionAdmissionState::is_rolled_back_at`] is the pure query that tells the
+//! shell when to renew. Time is an argument, and the only randomness is the probe key given at
 //! construction, so a trace of inputs determines the trace of verdicts. The order is the paper's
 //! hop algorithm, with the charge taken on receipt (#834 L9):
 //!
@@ -24,7 +27,7 @@
 //! α valid, ECDH, peel, γ ──fails──→ drop the token  (charged once, no admission)
 //!   │ holds
 //!   ▼
-//! admit(token, e, x, ν) = e = epoch_i ; token.arr < x ≤ token.arr + V ; clock < x ;
+//! admit(token, e, x, ν) = token.epoch = e = epoch_i ; token.arr < x ≤ token.arr + V ; clock < x ;
 //!                         ν ∉ R_i[x] ; R_i[x] ← R_i[x] ∪ {ν}
 //! ```
 //!
@@ -54,8 +57,9 @@
 //!   future instant. Honest layers start failing the window once `Δ ≥ X₀ = 4Q`, and all of them
 //!   fail once `Δ ≥ V`, until the wall clock catches up. Safety and liveness cannot both be kept
 //!   inside one epoch: recovering early would mean forgetting filters that may still be live. So
-//!   the effectful shell (#834 2a-4), when it sees `now < clock − X₀`, must move to a fresh process
-//!   epoch with [`OnionAdmissionState::renewed`]. That keeps the live links and clears the
+//!   the effectful shell (#834 2a-4), when [`OnionAdmissionState::is_rolled_back_at`] holds
+//!   (`now < clock − X₀`), must move to a fresh process epoch with
+//!   [`OnionAdmissionState::renew`]. That keeps the live links and clears the
 //!   ledgers, the clock and the replay store. It is safe by the epoch law, but it invalidates
 //!   every loop in flight through this hop.
 //! * **Skew (for 2a-4).** The window has no skew tolerance. A hop whose clock runs `δ < Q` behind
@@ -92,33 +96,46 @@
 //!   [`OnionAdmissionLink`] `= (did, generation)`: plain data, fed by the 2a-4 shell from core's
 //!   `Admitted`/`Retired` events. The state keeps the set of live links, and one budget ledger per
 //!   DID with at least one live link or some load.
+//!   * **Event-pairing obligation (2a-4).** The live set shrinks only on `link_closed`. A lost
+//!     `Retired` therefore pins a live link, and a ledger slot, until something repairs it.
+//!     Core itself splits an `Admitted`/`Retired` pair when the callback is replaced, and a
+//!     bounded shell queue may drop events. The shell must call
+//!     [`OnionAdmissionState::reconcile`] with core's registry snapshot of live links whenever
+//!     the callback is replaced, and on a periodic tick no longer than `V`. `reconcile` closes
+//!     every live link absent from the snapshot and opens every snapshot link that is not live,
+//!     so the live set agrees with core after each reconciliation. The leak lasts at most one
+//!     tick.
 //!   * [`OnionAdmissionState::link_opened`] makes a link live, creating its DID's ledger, and is
 //!     idempotent on a live link. [`OnionAdmissionState::link_closed`] makes it not live, and is
 //!     idempotent too: closing an unknown, refused or closed link changes nothing. A close
 //!     therefore affects only its own generation, under any interleaving (`open(g₁) open(g₂)
-//!     close(g₁)` leaves `g₂` live, and a late close of a refused `g₁` is a no-op). Nothing is held
-//!     by the shell that could leak when dropped.
+//!     close(g₁)` leaves `g₂` live, and a late close of a refused `g₁` is a no-op).
 //!   * A cell is charged only against a live link, so a cell that arrives before its link is
 //!     opened, after it is closed, or on a refused link is never charged and never decrypted.
 //!   * A ledger is *releasable* when its DID has no live link and zero window load. Invariant:
 //!     after every step no ledger is releasable, because `link_closed` releases a drained ledger
 //!     at once and every step that enters a new quantum sweeps the ledgers that have drained.
 //!     A load can reach zero only when the quantum advances, since charges only add to it.
-//!   * The table holds at most `2·R` ledgers and `2·R` live links, where `R` is the transport
-//!     connection-registry capacity (#723). There is no recycling. A ledger is never reset while it
+//!   * The table holds at most `2·R` ledgers, where `R` is the transport connection-registry
+//!     capacity (#723). There is no recycling. Within one epoch, a ledger is never reset while it
 //!     carries load, so no DID regains budget by closing and reopening links: a reconnecting DID
-//!     finds its old ledger. `(iii)` of the paper's replay bounds therefore holds per DID, however
-//!     many other DIDs churn.
+//!     finds its old ledger. `(iii)` of the paper's replay bounds therefore holds per DID within an
+//!     epoch, however many other DIDs churn. The live-link set is also capped at `2·R`. This is only
+//!     a memory bound: under core's laws, which allow at most one live generation per DID and at
+//!     most `R` DIDs, the cap is unreachable, and it only matters if the event obligation above
+//!     is broken.
 //!   * At most `R` links are live, and a closed ledger drains within one window. So the table
 //!     fills only under connection churn beyond `R` within `V`. `link_opened` then refuses the
 //!     *link*: the shell must close it (fail closed). A refused peer may redial later as a new
 //!     generation. There is no fairness here: a churner that opens cheap DIDs at rate `R / V` can
 //!     win every freed slot. Eventual admission of an honest redial is a liveness *assumption* on
 //!     churn, as #834 states, not a guarantee.
-//!   * [`OnionAdmissionState::renewed`] (the epoch reset) keeps the live links, and every DID with
-//!     a live link restarts with a zero-load ledger, so every live link still has a ledger. The
-//!     per-DID bound `B` therefore holds within one epoch. A token charged before the reset is never
-//!     admitted after it, because its epoch differs.
+//!   * [`OnionAdmissionState::renew`] (the epoch reset) requires a *fresh* epoch. Renewing into the
+//!     current epoch would clear the replay store while keeping `epoch_i`, so a replay of an
+//!     admitted `(x, ν)` could be admitted again. The reset rebuilds the live set from core's
+//!     snapshot, and every DID with a live link starts with a zero-load ledger, so every live
+//!     link still has a ledger. The per-DID bound `B` therefore holds within one epoch. A token
+//!     charged before the reset is never admitted after it, because its epoch differs.
 //!   * `G` is independent of the table size and bounds what all DIDs admit together, and hence the
 //!     replay store.
 
@@ -127,6 +144,7 @@ mod ledger;
 #[cfg(all(test, rings_native))]
 mod tests;
 
+use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::num::NonZeroU32;
@@ -141,6 +159,7 @@ use super::OnionExpiry;
 use super::OnionForwardNonce;
 use super::ONION_FORWARD_EXPIRY_QUANTUM_MS;
 use super::ONION_FORWARD_MAX_VALIDITY_MS;
+use super::ONION_FORWARD_PAYLOAD_TTL_MS;
 use crate::onion::OnionExitEpoch;
 
 /// Admission window `V = 150 s`: a layer is admissible at `arr` iff `arr < x ≤ arr + V`.
@@ -148,6 +167,9 @@ const ONION_ADMISSION_WINDOW_MS: u128 = ONION_FORWARD_MAX_VALIDITY_MS;
 
 /// Arrival quanta per window, `N = V / Q = 5`, as the ledger's array length.
 const ADMISSION_WINDOW_QUANTA: usize = 5;
+
+/// Build-to-expiry offset `X₀ = V − Q`, the rollback threshold of the monotone clock.
+const ONION_EXPIRY_OFFSET_MS: u128 = ONION_FORWARD_PAYLOAD_TTL_MS;
 
 /// `N = V / Q` in the quantum domain.
 const ADMISSION_WINDOW_QUANTA_WIDE: u128 =
@@ -196,7 +218,7 @@ pub(super) struct OnionAdmissionCharge {
 /// One generation of an authenticated link from a sender DID, as core admits and retires it. It
 /// is plain data, not a capability: the state keeps the set of live links, and the 2a-4 shell
 /// feeds it from core's `Admitted`/`Retired` events.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct OnionAdmissionLink {
     /// The link's sender DID, which owns the budget ledger.
     pub(super) did: Did,
@@ -217,7 +239,7 @@ pub(super) struct OnionAdmissionLayer {
 
 /// Why a cell could not be charged. Nothing was charged, and the cell must not be decrypted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum OnionBudgetRejection {
+pub(super) enum OnionChargeRejection {
     /// The cell's link is not live: not yet opened, closed, or refused.
     LinkNotLive,
     /// The sender's ledger lacks headroom for the cell's units.
@@ -241,6 +263,11 @@ pub(super) enum OnionAdmissionRejection {
 /// must close the link, and the peer may redial later.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct OnionLinkTableFull;
+
+/// A renewal refused because the requested epoch is the current one. Renewing into the current
+/// epoch would clear the replay store while keeping `epoch_i`, and so re-admit replays.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct OnionEpochNotFresh;
 
 /// One sender DID's unit ledger and its live link generations.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -272,8 +299,6 @@ pub(super) struct OnionAdmissionState {
     global: QuantumLedger,
     /// Capacity `2·R`, both of the ledger table and of the live-link set.
     capacity: usize,
-    /// Number of live links, the sum of every ledger's `live` set, at most `capacity`.
-    live_links: usize,
     /// At most `capacity` sender ledgers, none of them releasable between steps.
     senders: BTreeMap<Did, SenderLedger>,
 }
@@ -294,37 +319,89 @@ impl OnionAdmissionState {
             replay: ReplayStore::new(filter_key),
             global: QuantumLedger::default(),
             capacity: link_registry_capacity.get().saturating_mul(2),
-            live_links: 0,
             senders: BTreeMap::new(),
         }
     }
 
-    /// The epoch reset: the state of a fresh epoch `epoch` with probe key `filter_key` over the same
-    /// live links. Links belong to the transport, not to the epoch, so every live link stays live
-    /// with a zero ledger. The clock, the loads, the replay store and the ledgers of closed links
-    /// are cleared. It is safe by the epoch law, since every layer of the old epoch is rejected.
-    pub(super) fn renewed(self, epoch: OnionExitEpoch, filter_key: OnionReplayFilterKey) -> Self {
-        let senders = self
-            .senders
-            .into_iter()
-            .filter(|(_, sender)| !sender.live.is_empty())
-            .map(|(did, sender)| {
-                (did, SenderLedger {
-                    ledger: QuantumLedger::default(),
-                    live: sender.live,
-                })
-            })
-            .collect();
-        Self {
+    /// Whether the wall clock has rolled back far enough behind the monotone clock that honest
+    /// layers fail the window: `now < clock − X₀`. The shell then renews into a fresh epoch.
+    pub(super) const fn is_rolled_back_at(&self, now_ms: u128) -> bool {
+        now_ms.saturating_add(ONION_EXPIRY_OFFSET_MS) < self.clock_ms
+    }
+
+    /// The step `δ` on `Renew(epoch, key, live)`: the epoch reset. It requires a fresh `epoch` and
+    /// otherwise changes nothing. On success the state is the initial state of `epoch` with probe
+    /// key `filter_key`, over the live links of core's snapshot `live`, each DID with a zero-load
+    /// ledger. It returns the snapshot links the table refuses, which the shell must close.
+    pub(super) fn renew(
+        &mut self,
+        epoch: OnionExitEpoch,
+        filter_key: OnionReplayFilterKey,
+        live: impl IntoIterator<Item = OnionAdmissionLink>,
+    ) -> Result<Vec<OnionAdmissionLink>, OnionEpochNotFresh> {
+        if epoch == self.epoch {
+            return Err(OnionEpochNotFresh);
+        }
+        *self = Self {
             epoch,
             clock_ms: 0,
             swept_quantum: 0,
             replay: ReplayStore::new(filter_key),
             global: QuantumLedger::default(),
             capacity: self.capacity,
-            live_links: self.live_links,
-            senders,
+            senders: BTreeMap::new(),
+        };
+        Ok(self.reconcile(0, live))
+    }
+
+    /// The step `δ` on `Reconcile(live)`: make the live-link set equal core's registry snapshot
+    /// `live`. Every live link absent from the snapshot is closed first, which frees its slot, and
+    /// then every snapshot link that is not live is opened, with the table's usual refusal. It
+    /// returns the refused snapshot links, which the shell must close. This repairs a lost `Retired`
+    /// or `Admitted` event.
+    #[must_use = "refused links must be closed by the shell"]
+    pub(super) fn reconcile(
+        &mut self,
+        now_ms: u128,
+        live: impl IntoIterator<Item = OnionAdmissionLink>,
+    ) -> Vec<OnionAdmissionLink> {
+        let mut snapshot = BTreeMap::<Did, BTreeSet<u64>>::new();
+        for link in live {
+            snapshot
+                .entry(link.did)
+                .or_default()
+                .insert(link.generation);
         }
+        let absent = self
+            .senders
+            .iter()
+            .flat_map(|(did, sender)| {
+                sender
+                    .live
+                    .iter()
+                    .filter(|generation| {
+                        !snapshot
+                            .get(did)
+                            .is_some_and(|generations| generations.contains(generation))
+                    })
+                    .map(|generation| OnionAdmissionLink {
+                        did: did.to_owned(),
+                        generation: generation.to_owned(),
+                    })
+            })
+            .collect::<Vec<_>>();
+        for link in absent {
+            self.link_closed(now_ms, link);
+        }
+        snapshot
+            .into_iter()
+            .flat_map(|(did, generations)| {
+                generations
+                    .into_iter()
+                    .map(move |generation| OnionAdmissionLink { did, generation })
+            })
+            .filter(|link| self.link_opened(now_ms, link.to_owned()).is_err())
+            .collect()
     }
 
     /// The step `δ` on `LinkOpened(link)`: make `link` live, creating its DID's ledger if it has
@@ -336,27 +413,23 @@ impl OnionAdmissionState {
         link: OnionAdmissionLink,
     ) -> Result<(), OnionLinkTableFull> {
         self.advance(now_ms);
-        let has_ledger = self.senders.contains_key(&link.did);
-        if self
-            .senders
-            .get(&link.did)
-            .is_some_and(|sender| sender.live.contains(&link.generation))
-        {
-            return Ok(());
-        }
-        if self.live_links >= self.capacity || (!has_ledger && self.senders.len() >= self.capacity)
-        {
-            return Err(OnionLinkTableFull);
-        }
-        self.senders
-            .entry(link.did)
-            .or_insert_with(|| SenderLedger {
-                ledger: QuantumLedger::default(),
-                live: BTreeSet::new(),
-            })
-            .live
-            .insert(link.generation);
-        self.live_links = self.live_links.saturating_add(1);
+        let live_links = self.live_link_count();
+        let ledgers = self.senders.len();
+        let capacity = self.capacity;
+        let sender = match self.senders.entry(link.did) {
+            Entry::Occupied(occupied) if occupied.get().live.contains(&link.generation) => {
+                return Ok(());
+            }
+            Entry::Occupied(occupied) if live_links < capacity => occupied.into_mut(),
+            Entry::Vacant(vacant) if live_links < capacity && ledgers < capacity => {
+                vacant.insert(SenderLedger {
+                    ledger: QuantumLedger::default(),
+                    live: BTreeSet::new(),
+                })
+            }
+            Entry::Occupied(_) | Entry::Vacant(_) => return Err(OnionLinkTableFull),
+        };
+        sender.live.insert(link.generation);
         Ok(())
     }
 
@@ -366,12 +439,10 @@ impl OnionAdmissionState {
     /// generation's liveness away.
     pub(super) fn link_closed(&mut self, now_ms: u128, link: OnionAdmissionLink) {
         let quantum = self.advance(now_ms);
-        if let Some(sender) = self.senders.get_mut(&link.did) {
-            if sender.live.remove(&link.generation) {
-                self.live_links = self.live_links.saturating_sub(1);
-            }
-            if sender.is_releasable_at(quantum) {
-                self.senders.remove(&link.did);
+        if let Entry::Occupied(mut occupied) = self.senders.entry(link.did) {
+            occupied.get_mut().live.remove(&link.generation);
+            if occupied.get().is_releasable_at(quantum) {
+                occupied.remove();
             }
         }
     }
@@ -389,29 +460,34 @@ impl OnionAdmissionState {
     pub(super) fn charge(
         &mut self,
         now_ms: u128,
-        link: &OnionAdmissionLink,
+        link: OnionAdmissionLink,
         units: OnionAdmissionUnits,
-    ) -> Result<OnionAdmissionCharge, OnionBudgetRejection> {
+    ) -> Result<OnionAdmissionCharge, OnionChargeRejection> {
         let quantum = self.advance(now_ms);
         let sender = self
             .senders
             .get_mut(&link.did)
             .filter(|sender| sender.live.contains(&link.generation))
-            .ok_or(OnionBudgetRejection::LinkNotLive)?;
+            .ok_or(OnionChargeRejection::LinkNotLive)?;
         let charged_sender = sender
             .ledger
             .charged(quantum, units.get(), ONION_ADMISSION_SENDER_UNITS)
-            .ok_or(OnionBudgetRejection::SenderBudget)?;
+            .ok_or(OnionChargeRejection::SenderBudget)?;
         let charged_global = self
             .global
             .charged(quantum, units.get(), ONION_ADMISSION_GLOBAL_UNITS)
-            .ok_or(OnionBudgetRejection::GlobalBudget)?;
+            .ok_or(OnionChargeRejection::GlobalBudget)?;
         sender.ledger = charged_sender;
         self.global = charged_global;
         Ok(OnionAdmissionCharge {
             arrival_ms: self.clock_ms,
             epoch: self.epoch,
         })
+    }
+
+    /// The number of live links, `Σ_d |live(d)|`, derived rather than stored.
+    fn live_link_count(&self) -> usize {
+        self.senders.values().map(|sender| sender.live.len()).sum()
     }
 
     /// The step `δ` on `Admit(token, e, x, ν)`: admit a charged, `γ`-verified layer, or reject it.

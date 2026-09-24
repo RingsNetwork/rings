@@ -21,7 +21,8 @@ use super::OnionAdmissionLink;
 use super::OnionAdmissionRejection;
 use super::OnionAdmissionState;
 use super::OnionAdmissionUnits;
-use super::OnionBudgetRejection;
+use super::OnionChargeRejection;
+use super::OnionEpochNotFresh;
 use super::OnionExpiry;
 use super::OnionLinkTableFull;
 use super::OnionReplayFilterKey;
@@ -49,7 +50,7 @@ enum Verdict {
     /// The cell was admitted.
     Admitted,
     /// The charge was refused. Nothing was charged and the cell was not decrypted.
-    Unpaid(OnionBudgetRejection),
+    Unpaid(OnionChargeRejection),
     /// The cell was charged and then rejected.
     Rejected(OnionAdmissionRejection),
 }
@@ -133,7 +134,7 @@ fn send_on(
     n: u32,
     layer: OnionAdmissionLayer,
 ) -> Verdict {
-    match admission.charge(now_ms, &link, units(n)) {
+    match admission.charge(now_ms, link, units(n)) {
         Err(rejection) => Verdict::Unpaid(rejection),
         Ok(token) => match admission.admit(now_ms, token, layer) {
             Ok(()) => Verdict::Admitted,
@@ -358,7 +359,7 @@ fn test_every_computed_cell_is_charged_exactly_once() {
         send(&mut admission, ORIGIN_MS, 1, 5, layer(expiry(quantum), 2)),
         Verdict::Rejected(OnionAdmissionRejection::OutsideWindow)
     );
-    let invalid = admission.charge(ORIGIN_MS, &sender, units(7));
+    let invalid = admission.charge(ORIGIN_MS, sender, units(7));
     assert!(invalid.is_ok());
     drop(invalid);
     assert_eq!(sender_load(&admission, 1, ORIGIN_MS), Some(2 + 3 + 5 + 7));
@@ -373,22 +374,22 @@ fn test_every_computed_cell_is_charged_exactly_once() {
     );
 
     let spent = ONION_ADMISSION_SENDER_UNITS - 17 - 1;
-    assert!(admission.charge(ORIGIN_MS, &sender, units(spent)).is_ok());
+    assert!(admission.charge(ORIGIN_MS, sender, units(spent)).is_ok());
     let pipelined = (0..8)
-        .map(|_| admission.charge(ORIGIN_MS, &sender, units(1)))
+        .map(|_| admission.charge(ORIGIN_MS, sender, units(1)))
         .collect::<Vec<_>>();
     assert!(pipelined.first().is_some_and(Result::is_ok));
     assert!(pipelined
         .iter()
         .skip(1)
-        .all(|charge| matches!(charge, Err(OnionBudgetRejection::SenderBudget))));
+        .all(|charge| matches!(charge, Err(OnionChargeRejection::SenderBudget))));
     assert_eq!(
         sender_load(&admission, 1, ORIGIN_MS),
         Some(ONION_ADMISSION_SENDER_UNITS)
     );
     assert_eq!(
         send(&mut admission, ORIGIN_MS, 1_000, 1, layer(x, 4)),
-        Verdict::Unpaid(OnionBudgetRejection::LinkNotLive)
+        Verdict::Unpaid(OnionChargeRejection::LinkNotLive)
     );
     assert_eq!(admission.global.load(quantum), ONION_ADMISSION_SENDER_UNITS);
 }
@@ -400,7 +401,7 @@ fn test_sender_budget_is_bounded_over_the_sliding_window() {
     let mut rng = StdRng::seed_from_u64(0x0841_0005);
     let mut admission = state(&mut rng);
     let x = latest_expiry(ORIGIN_MS);
-    let over = Verdict::Unpaid(OnionBudgetRejection::SenderBudget);
+    let over = Verdict::Unpaid(OnionChargeRejection::SenderBudget);
     for tag in 0..u128::from(ONION_ADMISSION_SENDER_UNITS / 768) {
         assert_eq!(
             send(&mut admission, ORIGIN_MS, 1, 768, layer(x, tag)),
@@ -474,7 +475,7 @@ fn test_global_budget_bounds_every_sender_together() {
     let before = admission.senders.clone();
     assert_eq!(
         send(&mut admission, ORIGIN_MS, 64, 1, layer(x, 64)),
-        Verdict::Unpaid(OnionBudgetRejection::GlobalBudget)
+        Verdict::Unpaid(OnionChargeRejection::GlobalBudget)
     );
     assert_eq!(admission.senders, before);
     let next_window = ORIGIN_MS + ONION_ADMISSION_WINDOW_MS;
@@ -565,7 +566,7 @@ fn test_closed_link_keeps_its_ledger_until_it_drains() {
             1,
             layer(x, 100)
         ),
-        Verdict::Unpaid(OnionBudgetRejection::SenderBudget)
+        Verdict::Unpaid(OnionChargeRejection::SenderBudget)
     );
     let drained = ORIGIN_MS + ONION_ADMISSION_WINDOW_MS;
     assert_eq!(
@@ -602,7 +603,7 @@ fn test_full_table_refuses_the_link_and_the_peer_redials() {
     assert_eq!(admission.senders, before);
     assert_eq!(
         send(&mut admission, ORIGIN_MS, 3, 1, layer(x, 3)),
-        Verdict::Unpaid(OnionBudgetRejection::LinkNotLive)
+        Verdict::Unpaid(OnionChargeRejection::LinkNotLive)
     );
 
     admission.link_closed(ORIGIN_MS, link(1));
@@ -640,7 +641,7 @@ fn test_ledger_counts_interleaved_link_generations() {
     let x = latest_expiry(ORIGIN_MS);
     assert_eq!(
         send_on(&mut admission, ORIGIN_MS, generation(1, 0), 1, layer(x, 1)),
-        Verdict::Unpaid(OnionBudgetRejection::LinkNotLive)
+        Verdict::Unpaid(OnionChargeRejection::LinkNotLive)
     );
     assert_eq!(
         send_on(&mut admission, ORIGIN_MS, generation(1, 1), 1, layer(x, 1)),
@@ -657,7 +658,7 @@ fn test_ledger_counts_interleaved_link_generations() {
             1,
             layer(latest_expiry(drained), 2)
         ),
-        Verdict::Unpaid(OnionBudgetRejection::LinkNotLive)
+        Verdict::Unpaid(OnionChargeRejection::LinkNotLive)
     );
     assert!(admission.senders.is_empty());
 }
@@ -699,10 +700,10 @@ fn test_a_refused_generation_cannot_close_a_live_one() {
     }
 }
 
-/// Law: the epoch reset keeps every live link live with a zero ledger, so every live link still has
-/// a ledger. It clears the loads, the clock and the replay store, and drops the ledgers of closed
-/// links. Every layer of the old epoch is then rejected, and so is every token charged before the
-/// reset, because its epoch differs.
+/// Law: the epoch reset rebuilds the live set from core's snapshot, and every live link starts
+/// with a zero ledger, so every live link still has a ledger. The reset clears the loads, the
+/// clock and the replay store, and drops the ledgers of closed links. Every layer of the old epoch
+/// is then rejected, and so is every token charged before the reset, because its epoch differs.
 #[test]
 fn test_renewal_keeps_live_links_and_clears_the_rest() {
     let mut rng = StdRng::seed_from_u64(0x0841_0015);
@@ -723,39 +724,153 @@ fn test_renewal_keeps_live_links_and_clears_the_rest() {
         Verdict::Admitted
     );
     let held = admission
-        .charge(ORIGIN_MS, &link(2), units(1))
+        .charge(ORIGIN_MS, link(2), units(1))
         .expect("DID 2 has headroom");
     admission.link_closed(ORIGIN_MS, link(2));
     let renewed_epoch = OnionExitEpoch::new([8; 16]);
-    let mut renewed = admission.renewed(renewed_epoch, OnionReplayFilterKey::new(rng.gen()));
-    assert_eq!(renewed.clock_ms, 0);
-    assert_eq!(live(&renewed), Vec::new());
-    assert_eq!(renewed.senders.keys().collect::<Vec<_>>(), vec![
+    assert_eq!(
+        admission.renew(renewed_epoch, OnionReplayFilterKey::new(rng.gen()), [link(
+            1
+        )]),
+        Ok(Vec::new())
+    );
+    assert_eq!(admission.clock_ms, 0);
+    assert_eq!(live(&admission), Vec::new());
+    assert_eq!(admission.senders.keys().collect::<Vec<_>>(), vec![
         &Did::from(1_u32)
     ]);
-    assert_eq!(sender_load(&renewed, 1, ORIGIN_MS), Some(0));
+    assert_eq!(sender_load(&admission, 1, ORIGIN_MS), Some(0));
     assert_eq!(
-        renewed.admit(ORIGIN_MS, held, OnionAdmissionLayer {
+        admission.admit(ORIGIN_MS, held, OnionAdmissionLayer {
             epoch: renewed_epoch,
             ..layer(x, 4)
         }),
         Err(OnionAdmissionRejection::StaleEpoch)
     );
     assert_eq!(
-        send(&mut renewed, ORIGIN_MS, 1, 1, layer(x, 1)),
+        send(&mut admission, ORIGIN_MS, 1, 1, layer(x, 1)),
         Verdict::Rejected(OnionAdmissionRejection::StaleEpoch)
     );
     assert_eq!(
-        send(&mut renewed, ORIGIN_MS, 1, 1, OnionAdmissionLayer {
+        send(&mut admission, ORIGIN_MS, 1, 1, OnionAdmissionLayer {
             epoch: renewed_epoch,
             ..layer(x, 1)
         }),
         Verdict::Admitted
     );
     assert_eq!(
-        send(&mut renewed, ORIGIN_MS, 2, 1, layer(x, 3)),
-        Verdict::Unpaid(OnionBudgetRejection::LinkNotLive)
+        send(&mut admission, ORIGIN_MS, 2, 1, layer(x, 3)),
+        Verdict::Unpaid(OnionChargeRejection::LinkNotLive)
     );
+}
+
+/// Law (M1 of the round-5 review): renewing into the current epoch is refused and changes nothing,
+/// so the replay store survives and an admitted `(x, ν)` cannot be admitted again.
+#[test]
+fn test_a_same_epoch_renewal_is_refused_and_cannot_readmit_a_replay() {
+    let mut rng = StdRng::seed_from_u64(0x0841_0017);
+    let mut admission = state(&mut rng);
+    let x = latest_expiry(ORIGIN_MS);
+    assert_eq!(
+        send(&mut admission, ORIGIN_MS, 1, 1, layer(x, 1)),
+        Verdict::Admitted
+    );
+    assert_eq!(
+        admission.renew(EPOCH, OnionReplayFilterKey::new(rng.gen()), [link(1)]),
+        Err(OnionEpochNotFresh)
+    );
+    assert_eq!(admission.clock_ms, ORIGIN_MS);
+    assert_eq!(live(&admission), vec![x]);
+    assert_eq!(
+        send(&mut admission, ORIGIN_MS, 1, 1, layer(x, 1)),
+        Verdict::Rejected(OnionAdmissionRejection::Replayed)
+    );
+}
+
+/// Law (M2 of the round-5 review): lost `Retired` events pin live links until the shell
+/// reconciles with core's snapshot. Here every `Retired` is lost, so the table fills and refuses a
+/// newcomer. `reconcile` then closes every generation absent from the snapshot, opens the snapshot
+/// generation that was never reported (a lost `Admitted`), and returns the links it refuses.
+#[test]
+fn test_reconcile_recovers_lost_link_events() {
+    let mut rng = StdRng::seed_from_u64(0x0841_0018);
+    let mut admission = state_with(&mut rng, EPOCH, 2, 1..5);
+    assert_eq!(
+        admission.link_opened(ORIGIN_MS, link(5)),
+        Err(OnionLinkTableFull)
+    );
+    let refused = admission.reconcile(ORIGIN_MS, [link(1), generation(6, 3)]);
+    assert!(refused.is_empty());
+    assert_eq!(admission.senders.keys().collect::<Vec<_>>(), vec![
+        &Did::from(1_u32),
+        &Did::from(6_u32)
+    ]);
+    open(&mut admission, ORIGIN_MS, link(5));
+    assert_eq!(
+        send_on(
+            &mut admission,
+            ORIGIN_MS,
+            generation(6, 3),
+            1,
+            layer(latest_expiry(ORIGIN_MS), 1)
+        ),
+        Verdict::Admitted
+    );
+    assert_eq!(
+        send(
+            &mut admission,
+            ORIGIN_MS,
+            2,
+            1,
+            layer(latest_expiry(ORIGIN_MS), 2)
+        ),
+        Verdict::Unpaid(OnionChargeRejection::LinkNotLive)
+    );
+
+    // DIDs 1 and 5 are absent and unloaded, so they are released. DID 6 is absent but still
+    // loaded, so its closed ledger keeps a slot until it drains. Three of the ten new links fit.
+    let crowded = (10..20).map(link).collect::<Vec<_>>();
+    let refused = admission.reconcile(ORIGIN_MS, crowded);
+    assert_eq!(refused.len(), 7);
+    assert_eq!(admission.senders.len(), 4);
+    assert!(admission.senders.contains_key(&Did::from(6_u32)));
+}
+
+/// Law (memory bound): the live-link set is capped at `2·R` even for one DID. That can only be
+/// reached if the event obligation is broken, so that many generations of one DID stay live.
+#[test]
+fn test_live_links_are_capped_as_a_memory_bound() {
+    let mut rng = StdRng::seed_from_u64(0x0841_0019);
+    let mut admission = state_with(&mut rng, EPOCH, 2, 0..0);
+    for generation_index in 0..4 {
+        open(&mut admission, ORIGIN_MS, generation(1, generation_index));
+    }
+    assert_eq!(
+        admission.link_opened(ORIGIN_MS, generation(1, 4)),
+        Err(OnionLinkTableFull)
+    );
+    assert_eq!(admission.live_link_count(), 4);
+}
+
+/// Law: the shell's renewal trigger is exactly `now < clock − X₀`.
+#[test]
+fn test_rollback_is_detected_beyond_the_build_offset() {
+    let mut rng = StdRng::seed_from_u64(0x0841_001a);
+    let mut admission = state(&mut rng);
+    assert_eq!(
+        send(
+            &mut admission,
+            ORIGIN_MS,
+            1,
+            1,
+            layer(latest_expiry(ORIGIN_MS), 1)
+        ),
+        Verdict::Admitted
+    );
+    let offset = (ADMISSION_WINDOW_QUANTA_WIDE - 1) * Q;
+    assert!(!admission.is_rolled_back_at(ORIGIN_MS));
+    assert!(!admission.is_rolled_back_at(ORIGIN_MS - offset));
+    assert!(admission.is_rolled_back_at(ORIGIN_MS - offset - 1));
 }
 
 /// Law (invariant): no ledger is releasable after any step. A closed ledger with load is released
@@ -803,8 +918,10 @@ fn test_drained_closed_ledgers_are_swept_on_the_next_quantum() {
 
 /// Property, seeded: under random link churn (48 DIDs, `R = 16`, two of them heavy), no DID is
 /// ever charged more than `B` units in any window of five consecutive quanta, the table never
-/// exceeds `2·R`, and no ledger is ever releasable between steps. The run hits the sender budget,
-/// unlinked senders and the full table, so none of the bounds holds vacuously.
+/// exceeds `2·R`, the live-link count equals the model's, and no ledger is ever releasable between
+/// steps. Closes and charges pick a random live generation, or with probability ¼ a random
+/// generation that may be stale, refused or unknown. The run hits the sender budget, links that
+/// are not live, and the full table, so none of the bounds holds vacuously.
 #[test]
 fn test_rotation_through_many_dids_never_exceeds_the_sender_budget() {
     const R: usize = 16;
@@ -824,10 +941,13 @@ fn test_rotation_through_many_dids_never_exceeds_the_sender_budget() {
         };
         match rng.gen_range(0..16) {
             0 => {
-                let closed = live_generations
-                    .get_mut(&sender)
-                    .and_then(Vec::pop)
-                    .unwrap_or(u64::MAX);
+                let generations = live_generations.entry(sender).or_default();
+                let closed = if generations.is_empty() || rng.gen_ratio(1, 4) {
+                    rng.gen_range(0..=next_generation)
+                } else {
+                    generations.swap_remove(rng.gen_range(0..generations.len()))
+                };
+                generations.retain(|live| *live != closed);
                 admission.link_closed(now_ms, generation(sender, closed));
             }
             1 | 2 => {
@@ -842,10 +962,15 @@ fn test_rotation_through_many_dids_never_exceeds_the_sender_budget() {
             }
             _ => {
                 let cost = rng.gen_range(1..=768_u32);
-                let on = live_generations
-                    .get(&sender)
-                    .and_then(|generations| generations.last().copied())
-                    .unwrap_or(0);
+                let on = match live_generations.get(&sender) {
+                    Some(generations) if !generations.is_empty() && !rng.gen_ratio(1, 4) => {
+                        generations
+                            .get(rng.gen_range(0..generations.len()))
+                            .copied()
+                            .unwrap_or(0)
+                    }
+                    _ => rng.gen_range(0..=next_generation),
+                };
                 match send_on(
                     &mut admission,
                     now_ms,
@@ -856,13 +981,17 @@ fn test_rotation_through_many_dids_never_exceeds_the_sender_budget() {
                     Verdict::Admitted => {
                         *charged.entry((sender, now_ms / Q)).or_default() += cost;
                     }
-                    Verdict::Unpaid(OnionBudgetRejection::SenderBudget) => outcomes[0] += 1,
-                    Verdict::Unpaid(OnionBudgetRejection::LinkNotLive) => outcomes[1] += 1,
+                    Verdict::Unpaid(OnionChargeRejection::SenderBudget) => outcomes[0] += 1,
+                    Verdict::Unpaid(OnionChargeRejection::LinkNotLive) => outcomes[1] += 1,
                     unexpected => assert_eq!(unexpected, Verdict::Admitted),
                 }
             }
         }
         assert!(admission.senders.len() <= 2 * R);
+        assert_eq!(
+            admission.live_link_count(),
+            live_generations.values().map(Vec::len).sum::<usize>()
+        );
         assert!(admission
             .senders
             .values()
@@ -920,7 +1049,7 @@ fn test_saturated_filter_meets_the_false_positive_target() {
                     insertion_false_positives += 1;
                 }
                 verdict => {
-                    assert_eq!(verdict, Verdict::Unpaid(OnionBudgetRejection::SenderBudget));
+                    assert_eq!(verdict, Verdict::Unpaid(OnionChargeRejection::SenderBudget));
                     break;
                 }
             }
@@ -931,7 +1060,7 @@ fn test_saturated_filter_meets_the_false_positive_target() {
     assert!(insertion_false_positives <= 4);
     assert_eq!(
         send(&mut admission, ORIGIN_MS, 64, 1, layer(x, rng.gen())),
-        Verdict::Unpaid(OnionBudgetRejection::GlobalBudget)
+        Verdict::Unpaid(OnionChargeRejection::GlobalBudget)
     );
 
     let rates = admission
@@ -1015,7 +1144,7 @@ fn test_the_window_is_judged_at_the_charge_instant() {
     let outside = Err(OnionAdmissionRejection::OutsideWindow);
 
     let early = admission
-        .charge(ORIGIN_MS, &sender, units(1))
+        .charge(ORIGIN_MS, sender, units(1))
         .expect("the sender has headroom");
     let too_far = expiry(ORIGIN_MS / Q + ADMISSION_WINDOW_QUANTA_WIDE + 1);
     assert!(too_far.admissible_at(ORIGIN_MS + Q));
@@ -1027,7 +1156,7 @@ fn test_the_window_is_judged_at_the_charge_instant() {
 
     let x = latest_expiry(ORIGIN_MS);
     let in_time = admission
-        .charge(ORIGIN_MS, &sender, units(1))
+        .charge(ORIGIN_MS, sender, units(1))
         .expect("the sender has headroom");
     assert_eq!(admission.admit(x.as_ms(), in_time, layer(x, 2)), outside);
     assert!(live(&admission).is_empty());
@@ -1043,7 +1172,7 @@ fn test_a_token_from_another_epoch_admits_nothing() {
     let mut elsewhere = state_with(&mut rng, OnionExitEpoch::new([9; 16]), 4, 1..2);
     let x = latest_expiry(ORIGIN_MS);
     let foreign = elsewhere
-        .charge(ORIGIN_MS, &link(1), units(1))
+        .charge(ORIGIN_MS, link(1), units(1))
         .expect("the other state has headroom");
     assert_eq!(
         here.admit(ORIGIN_MS, foreign, layer(x, 1)),
@@ -1082,7 +1211,7 @@ fn test_late_admissions_never_exceed_the_global_bound_per_filter() {
         for (sender, offset) in cells.clone().zip(0_u128..) {
             let arrival_ms = (k - 6) * Q + offset;
             let token = admission
-                .charge(arrival_ms, &link(sender), units(UNITS))
+                .charge(arrival_ms, link(sender), units(UNITS))
                 .expect("phase A fits every budget");
             tag += 1;
             let release_ms = (k - 5) * Q + rng.gen_range(0..5 * Q);
@@ -1091,13 +1220,21 @@ fn test_late_admissions_never_exceed_the_global_bound_per_filter() {
         events.sort_by_key(|(release_ms, _, _)| *release_ms);
         let mut admitted = 0_u32;
         let mut late = events.into_iter().peekable();
+        while let Some((release_ms, token, layer)) =
+            late.next_if(|(release_ms, _, _)| *release_ms < (k - 1) * Q)
+        {
+            assert_eq!(
+                admission.admit(release_ms, token, layer),
+                Err(OnionAdmissionRejection::OutsideWindow)
+            );
+        }
         for (sender, offset) in cells.zip(0_u128..) {
             let arrival_ms = (k - 1) * Q + offset;
-            while let Some((_, token, layer)) =
+            while let Some((release_ms, token, layer)) =
                 late.next_if(|(release_ms, _, _)| *release_ms <= arrival_ms)
             {
                 assert_eq!(
-                    admission.admit(arrival_ms, token, layer),
+                    admission.admit(release_ms, token, layer),
                     Err(OnionAdmissionRejection::OutsideWindow)
                 );
             }
