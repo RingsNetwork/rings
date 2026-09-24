@@ -116,7 +116,8 @@ pub(super) enum Trigger {
     PeerCapacity,
     /// A release by any other transfer, or a route move.
     GlobalCapacity,
-    /// The hop's channel drained or its generation changed, or a route move.
+    /// The transfers ahead on the hop's channel drained, the hop went idle or its generation
+    /// changed, or a route move.
     Drain,
 }
 
@@ -254,8 +255,8 @@ pub(super) enum Phase {
         hop: Hop,
         /// `Awaiting::generation`.
         generation: Option<u64>,
-        /// The hop's peer release epoch read after the refusal (`PeerStamp`).
-        peer: u64,
+        /// The hop's channel mark read after the refusal (`PeerStamp`).
+        peer: ChannelMark,
         /// The refusal its cause was built from.
         cause: Refusal,
     },
@@ -307,8 +308,9 @@ pub(super) struct State {
     pub(super) jam: [u8; 2],
     /// Whether each hop's own capacity is full. Inv: `full[h] ⇒ jam[h] > 0`.
     pub(super) full: [bool; 2],
-    /// Each hop's peer release epoch.
-    pub(super) released: [u64; 2],
+    /// Each hop's count of other transfers that reached its link and ended
+    /// (`PeerCapacityState::drained`).
+    pub(super) drained: [u64; 2],
     /// The automaton.
     pub(super) phase: Phase,
     /// Remaining environment budget.
@@ -440,7 +442,7 @@ impl Model {
             queued: false,
             jam: [0; 2],
             full: [false; 2],
-            released: [0; 2],
+            drained: [0; 2],
             phase: Phase::Compute { deferrals: 0 },
             churn: self.churn,
             effects: 0,
@@ -526,10 +528,18 @@ impl State {
         })
     }
 
-    /// The production `PeerProgress` of `hop` against a peer stamp `peer`.
-    pub(super) fn progress(&self, hop: Hop, peer: u64) -> PeerProgress {
+    /// The production `PeerStamp` of `hop` now: its drained count and the transfers ahead.
+    pub(super) fn mark(&self, hop: Hop) -> ChannelMark {
+        ChannelMark {
+            drained: self.drained[hop.index()],
+            ahead: self.jam[hop.index()],
+        }
+    }
+
+    /// The production `PeerProgress` of `hop` against a mark `peer`.
+    pub(super) fn progress(&self, hop: Hop, peer: ChannelMark) -> PeerProgress {
         PeerProgress {
-            released: self.released[hop.index()] > peer,
+            drained: self.drained[hop.index()] - peer.drained >= u64::from(peer.ahead),
             idle: self.jam[hop.index()] == 0,
         }
     }
@@ -567,14 +577,24 @@ pub(super) fn awaiting(
     }
 }
 
-/// Where a resolved send stood: its hop, and the hop's peer release epoch read after its
+/// The model of a production `PeerStamp`: a hop's drained count and the transfers ahead of a
+/// retry, read together after a refusal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub(super) struct ChannelMark {
+    /// `PeerStamp::drained`.
+    pub(super) drained: u64,
+    /// `PeerStamp::ahead`.
+    pub(super) ahead: u8,
+}
+
+/// Where a resolved send stood: its hop, and the hop's channel mark read after its
 /// resolution.
 #[derive(Clone, Copy)]
 pub(super) struct Resolved {
     /// The bound hop.
     pub(super) hop: Hop,
-    /// The hop's peer release epoch read after the resolution.
-    pub(super) peer: u64,
+    /// The hop's channel mark read after the resolution.
+    pub(super) peer: ChannelMark,
 }
 
 /// Run the production `δ` from `deferrals` spent on the resolved send, and project the step

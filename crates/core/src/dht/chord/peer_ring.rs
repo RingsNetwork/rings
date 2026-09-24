@@ -204,10 +204,8 @@ impl PeerRing {
         self.storage_virtual_node_config
     }
 
-    /// The count of committed route changes (`Law (Epoch)` in the module documentation).
-    ///
-    /// A stamp `e₀ = topology_epoch().current()` read before a routing decision is stale iff
-    /// the epoch has since advanced.
+    /// The epoch of committed route changes (`Law (Epoch)` in the module documentation): a
+    /// waiter that listens before routing is notified by every later route change.
     pub(crate) const fn topology_epoch(&self) -> &Epoch {
         &self.topology_epoch
     }

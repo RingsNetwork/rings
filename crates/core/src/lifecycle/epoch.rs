@@ -1,9 +1,10 @@
 //! A monotone event counter that waiters can await without a duration.
 //!
 //! An [`Epoch`] counts the occurrences of one class of event (a topology commit, a link
-//! transition, a capacity release). Its value only grows, so a reading `e₀` taken before a
-//! computation is a *stamp*: `current() > e₀` holds iff an event of the class happened after the
-//! stamp, and no event can be lost between the stamp and a later wait.
+//! transition, a capacity release) and notifies each. Production waiters never read the count:
+//! each guards on a state predicate, registered before the check, so `Law (Wake)` alone rules
+//! out a lost event. The count is the specification's observable (`Law (Mono)`, and the laws
+//! stated in counts such as `PeerRing`'s `Law (Epoch)`), kept in test builds, where it is read.
 //!
 //! ```text
 //! Epoch      ≜ (value : ℕ, changed : Event)
@@ -13,7 +14,9 @@
 //!              so  listen ; check(predicate) ; await   misses no advance.
 //! ```
 
+#[cfg(test)]
 use std::sync::atomic::AtomicU64;
+#[cfg(test)]
 use std::sync::atomic::Ordering;
 
 use event_listener::Event;
@@ -25,7 +28,8 @@ use event_listener::EventListener;
 /// before it.
 #[derive(Debug, Default)]
 pub(crate) struct Epoch {
-    /// Number of events of this class so far.
+    /// Number of events of this class so far (test builds: the observable of the laws).
+    #[cfg(test)]
     value: AtomicU64,
     /// Notified after every increment of `value`.
     changed: Event,
@@ -37,11 +41,13 @@ impl Epoch {
     /// Post: `current()` observed after this call exceeds every reading taken before it (one
     /// process cannot perform the `2^64` increments that would wrap the count).
     pub(crate) fn advance(&self) {
+        #[cfg(test)]
         self.value.fetch_add(1, Ordering::AcqRel);
         self.changed.notify(usize::MAX);
     }
 
-    /// The number of events recorded so far: a stamp for [`Self::listen`] predicates.
+    /// Test hook: the number of events recorded so far.
+    #[cfg(test)]
     pub(crate) fn current(&self) -> u64 {
         self.value.load(Ordering::Acquire)
     }

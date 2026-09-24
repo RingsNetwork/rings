@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use super::super::next_hop_for_sync_entries;
+use super::test_support::fixture_key;
 use super::test_support::next_generated_key;
 use super::test_support::next_payload_for_tx;
 use super::test_support::physical_sync_route_next_hop;
@@ -292,12 +293,6 @@ async fn test_sync_entries_handler_skips_entries_owned_by_another_virtual_owner(
     Ok(())
 }
 
-/// A fixture key: the secret scalar `scalar`, so its address, and hence its ring position and
-/// virtual positions, are fixed.
-fn fixture_key(scalar: u8) -> Result<SecretKey> {
-    SecretKey::try_from(format!("{scalar:064x}").as_str())
-}
-
 /// The ring of the physical-destination fixture: the local node (scalar `0x10`, 4 virtual
 /// positions per owner, finger table size 8) with the peers of scalars `0x11..=0x15` admitted.
 fn physical_destination_fixture() -> Result<(Node, [Did; 5])> {
@@ -335,6 +330,9 @@ fn physical_owner_next_hop(node: &Node, destination: Did) -> Result<Option<Did>>
 /// ```text
 /// local 0x10 → fae3 ; peers 0x11 → 252d, 0x12 → 7919, 0x13 → 4bd1, 0x14 → 811d, 0x15 → 157b
 /// successors(local) = [157b, 252d, 4bd1]            \* clockwise from fae3, capacity 3
+/// virtual registry    = positions of local and successors(local) only
+///                       \* 7919 and 811d are not successors, so their positions
+///                       \* (3d3f, 3fd8, 58fe; 5899, 8cac) are absent
 /// virtual positions around the diverging key:  … 4428 (252d), 457d (local), 568e (4bd1) …
 /// virtual positions around the coinciding key: … 568e (4bd1), a888 (157b) …
 ///

@@ -4,8 +4,9 @@
 //! A user operation (`storage_fetch`, `operate_entry`) sends one message per remote placement.
 //! A send can race a connection-generation replacement (glare, rejoin, stabilization
 //! auto-connect) and be refused before the backend accepted it. This module is the pure
-//! automaton that decides what happens next, and the transport shell that performs its two
-//! effects: one send, and one wait.
+//! automaton that decides what happens next; `shell` performs its two effects (one send, and
+//! the registrations of one wait) and reads what its guard evaluates, and `driver` composes
+//! them into [`reroute`].
 //!
 //! # State model
 //!
@@ -32,9 +33,13 @@
 //! on their states without admitting. It holds when that path would admit the refused request
 //! now, whichever scope refused it; a retry it wakes can still be refused if another sender
 //! takes the room first, which is a race, not a wake-up without cause. A channel refusal waits
-//! for its peer's progress, counted against the peer progress epoch read *after* the refusal
-//! was published: the refused send's own transfer ended before its refusal was published, so
-//! every progress counted is another transfer's.
+//! until its peer's link has drained the transfers ahead of it: the peer's transfers holding
+//! capacity when the refusal was published (`k`), against the count of the peer's transfers
+//! that reached the link and ended, both read in one critical section *after* the refusal was
+//! published. The refused send released its own capacity before publishing, so it is neither
+//! ahead nor counted. Arrivals after the stamp do not raise `k`, so a flowing link wakes the
+//! placement after finitely many ends; once nothing arrives, the wake finds every transfer
+//! that was ahead gone.
 //!
 //! # Laws
 //!
@@ -69,11 +74,10 @@
 //!            or a channel; every such step advances an epoch the shell listens to. A channel
 //!            that holds none of this node's frames and still refuses them is broken; the
 //!            liveness layer retires it (a link change), outside this law's environment.
-//!      Law : if Env stops while deferrals ≤ REROUTING_BUDGET − QUIESCENT_DEFERRALS and at
-//!            most one foreign transfer holds each hop's channel, then ◇ Done(Ok): a ready
-//!            responsible hop is reached within the budget. Deeper occupancy costs one
-//!            deferral per partial drain (the channel trigger wakes on progress, so a busy but
-//!            flowing link never starves the placement); the budget bounds it, L1 does not.
+//!      Law : if Env stops while deferrals ≤ REROUTING_BUDGET − QUIESCENT_DEFERRALS, then
+//!            ◇ Done(Ok): a ready responsible hop is reached within the budget, whatever the
+//!            channels' residual occupancy (a channel wait stamped after Env stops wakes only
+//!            once every transfer ahead of it is gone).
 //!      Proof: after Env stops, at most QUIESCENT_DEFERRALS refusals remain (its derivation);
 //!            each is followed by an event its trigger names, which satisfies is_triggered,
 //!            and a send to a usable hop with capacity and a drained channel is accepted. The
@@ -85,28 +89,22 @@
 //! with the production lifecycle registry and asserts S1–S3 on all of them and L1 on the fair
 //! ones.
 
-use std::pin::pin;
-use std::sync::Arc;
-
-use event_listener::EventListener;
-use futures::future::select;
-use futures::future::select_all;
-use serde::Serialize;
-
 use super::delivery::SendCompletionOutcome;
 use super::outbound::PeerProgress;
-use super::outbound::PeerStamp;
 use super::outbound::TransferDemand;
-use super::SwarmTransport;
 use crate::dht::Did;
-use crate::dht::PeerRing;
 use crate::error::DeferralTrigger;
 use crate::error::Error;
 use crate::error::Result;
 use crate::error::SendDeferral;
-use crate::lifecycle::StopToken;
-use crate::message::types::Message;
-use crate::message::PayloadSender;
+
+mod driver;
+mod shell;
+
+pub(crate) use driver::reroute;
+pub(crate) use driver::Attempts;
+pub(crate) use driver::Placement;
+pub(crate) use driver::Route;
 
 /// Deferrals a placement can still meet after the environment stops (tight: the model check
 /// finds a fair exhausting trace with one deferral less of budget).
@@ -119,11 +117,11 @@ use crate::message::PayloadSender;
 ///    route moves to it, and its channel is busy as well            (QueueTimeout)
 /// ```
 ///
-/// A capacity refusal wakes only once its request has `Room`, and a channel refusal on its
-/// channel's progress; once the environment stops, neither condition is re-established, so
-/// each costs at most one deferral per route. While the environment keeps filling a channel,
-/// a channel refusal may cost one deferral per partial drain: the budget bounds that case,
-/// and the caller may drop the operation at any wait.
+/// A capacity refusal wakes only once its request has `Room`, and a channel refusal once the
+/// transfers ahead of it drained; once the environment stops, neither condition is
+/// re-established, so each costs at most one deferral per route. While the environment keeps
+/// filling a channel, arrivals may overtake a woken retry: the budget bounds that case, and
+/// the caller may stop the operation at any wait.
 pub(super) const QUIESCENT_DEFERRALS: u8 = 4;
 
 /// Deferrals one generation replacement racing the operation causes: the death of the bound
@@ -264,6 +262,14 @@ impl Rerouting {
         Self { deferrals: 0 }
     }
 
+    /// A rerouting with its whole budget spent: its first deferral exhausts, so it makes one
+    /// attempt and never waits.
+    pub(super) const fn spent() -> Self {
+        Self {
+            deferrals: REROUTING_BUDGET,
+        }
+    }
+
     /// `δ(R, verdict)`.
     ///
     /// Post: `Complete` iff `Accepted`; `Fail(e)` for `Failed(e)`; a deferral within budget
@@ -300,17 +306,18 @@ impl Awaiting {
     /// ```text
     /// Moved     ≜ route ≠ Remote(hop, _, _)
     /// Replaced  ≜ route = Remote(hop, g', _) ∧ g' ≠ generation
-    /// Progress  ≜ another transfer of hop's peer released since the refusal
+    /// Drained   ≜ k transfers of hop's peer that reached its link ended since the refusal,
+    ///             k = the peer's transfers holding capacity at the refusal
     /// Triggered ≜ Moved ∨ (trigger = LinkChange      ∧ route = Remote(hop, _, usable))
     ///                   ∨ (trigger = CapacityRelease ∧ Room(hop, demand))
-    ///                   ∨ (trigger = ChannelDrain    ∧ (Replaced ∨ Progress ∨ Idle(hop)))
+    ///                   ∨ (trigger = ChannelDrain    ∧ (Replaced ∨ Drained ∨ Idle(hop)))
     /// ```
     ///
     /// `Room` decides the admission path of the scope that refused (the peer's slots or bytes,
     /// or the global bytes, each behind its fair-wait queue): a release in another scope, one
     /// too small, or one a queued waiter takes does not satisfy it. A channel
-    /// refusal resolves as the channel makes progress, not only when it empties, so a busy but
-    /// flowing channel wakes the placement. Every disjunct is a predicate over readings taken
+    /// refusal resolves once the transfers ahead of it drained, not only when the channel
+    /// empties, so a busy but flowing channel wakes the placement. Every disjunct is a predicate over readings taken
     /// after the listeners were registered, so no wake-up is lost, and none is satisfied by the
     /// refused send's own release (module documentation).
     pub(super) fn is_triggered(&self, route: LinkRoute, observation: Observation) -> bool {
@@ -328,7 +335,7 @@ impl Awaiting {
                 DeferralTrigger::CapacityRelease => observation.room,
                 DeferralTrigger::ChannelDrain => {
                     generation != self.generation
-                        || observation.peer.released
+                        || observation.peer.drained
                         || observation.peer.idle
                 }
             }
@@ -339,212 +346,6 @@ impl Awaiting {
         Rerouting {
             deferrals: self.deferrals,
         }
-    }
-}
-
-impl SwarmTransport {
-    /// Record that a transport callback observed a connection or data-channel state change.
-    ///
-    /// An active generation recovering from `Disconnected` has no lifecycle transition, so its
-    /// callback is the only event that can make a waiting hop usable again.
-    pub(crate) fn signal_link_transition(&self) {
-        self.connection_lifecycle.link_transitions().advance();
-    }
-
-    /// The link hop toward `next` now: the peer `infer_next_hop` binds, its sendable
-    /// generation, and whether that generation can make progress.
-    pub(super) fn link_hop(&self, next: Did) -> Result<LinkHop> {
-        let hop = self.infer_next_hop(next, None)?;
-        let admitted = self.admitted_send_connection(hop)?;
-        Ok(LinkHop {
-            hop,
-            generation: admitted
-                .as_ref()
-                .map(|admitted| admitted.attempt().generation()),
-            usable: admitted
-                .is_some_and(|admitted| admitted.connection().readiness().can_make_progress()),
-        })
-    }
-
-    /// Send `message` to `destination` through the hop `infer_next_hop` binds, detached, and
-    /// classify the outcome.
-    ///
-    /// Unlike `PayloadSender::send_message`, a `Cancelled` completion is not reported as a
-    /// success: it is the pre-acceptance deferral the cancellation gate proves it to be.
-    pub(super) async fn attempt_remote<T>(&self, message: T, destination: Did) -> Verdict
-    where T: Serialize + Send {
-        let LinkHop {
-            hop, generation, ..
-        } = match self.link_hop(destination) {
-            Ok(link) => link,
-            Err(error) => return Verdict::Failed(error),
-        };
-        let payload = match self.signed_payload(message, hop, destination).await {
-            Ok(payload) => payload,
-            Err(error) => return Verdict::Failed(error),
-        };
-        let demand = match Self::payload_demand(&payload) {
-            Ok(demand) => demand,
-            Err(error) => return Verdict::Failed(error),
-        };
-        let result = self.send_payload_detached_with_outcome(payload).await;
-        Verdict::remote(hop, generation, demand, result)
-    }
-
-    /// Stamp the release epoch of `awaiting`'s hop, after its refusal was published.
-    pub(super) fn peer_stamp(&self, awaiting: &Awaiting) -> PeerStamp {
-        self.outbound_schedulers.peer_stamp(awaiting.hop)
-    }
-
-    /// The observation the wake guard of `awaiting` reads now, against the hop's `peer`
-    /// stamp.
-    pub(super) fn observation(&self, awaiting: &Awaiting, peer: &PeerStamp) -> Observation {
-        Observation {
-            room: self
-                .outbound_schedulers
-                .has_room(awaiting.hop, awaiting.demand),
-            peer: peer.progress(),
-        }
-    }
-
-    /// Test hook: the rerouted placements waiting for a link event (`LinkChange` or
-    /// `ChannelDrain`): only a waiting placement listens on the link epoch.
-    #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
-    pub(crate) fn link_waiters_for_test(&self) -> usize {
-        self.connection_lifecycle.link_transitions().listeners()
-    }
-
-    /// Register for the next event of every class that can trigger `awaiting`.
-    ///
-    /// ```text
-    /// LinkChange      ─▶ topology, link
-    /// CapacityRelease ─▶ topology, peer and global releases, peer and global queue departures
-    /// ChannelDrain    ─▶ topology, link, peer progress
-    /// ```
-    ///
-    /// A peer whose capacity is gone has no listener: its progress already reads idle.
-    ///
-    /// Pre: the caller evaluates [`Awaiting::is_triggered`] *after* this call and awaits
-    /// [`ReroutingListeners::notified`] only when it is false, so no event is lost (`Law (Wake)`
-    /// of `Epoch`).
-    pub(super) fn rerouting_listeners(
-        &self,
-        awaiting: &Awaiting,
-        peer: &PeerStamp,
-    ) -> ReroutingListeners {
-        let mut listeners = vec![self.dht.topology_epoch().listen()];
-        let link = || self.connection_lifecycle.link_transitions().listen();
-        match awaiting.cause.trigger() {
-            DeferralTrigger::LinkChange => listeners.push(link()),
-            DeferralTrigger::CapacityRelease => {
-                listeners.extend(self.outbound_schedulers.room_listeners(awaiting.hop));
-            }
-            DeferralTrigger::ChannelDrain => {
-                listeners.push(link());
-                listeners.extend(peer.listen());
-            }
-        }
-        ReroutingListeners(listeners)
-    }
-}
-
-/// One registration on the epochs a waiting placement's trigger reads.
-pub(super) struct ReroutingListeners(Vec<EventListener>);
-
-impl ReroutingListeners {
-    /// Resolve at the first event of any listened class. No duration bounds this wait: it ends
-    /// by an event (L1's fairness), or when the caller drops the operation.
-    pub(super) async fn notified(self) {
-        select_all(self.0).await;
-    }
-}
-
-/// Where one placement goes under the topology now.
-pub(crate) enum Route<Local> {
-    /// This node settles the placement with `Local`.
-    Local(Local),
-    /// Send `message` toward `next`.
-    Remote {
-        /// The node the message is addressed to.
-        next: Did,
-        /// The placement's message under this route, boxed so a route is small beside a local
-        /// settlement (serialization is transparent through the box).
-        message: Box<Message>,
-    },
-}
-
-/// One remote placement of a user DHT operation: the unit that reroutes.
-pub(crate) trait Placement {
-    /// What a placement settled here carries.
-    type Local;
-
-    /// `Compute`: route this placement under the topology (and local storage) now.
-    async fn route(&self, dht: &PeerRing) -> Result<Route<Self::Local>>;
-
-    /// Settle a placement whose route is local.
-    async fn settle(&self, transport: &Arc<SwarmTransport>, local: Self::Local) -> Result<()>;
-}
-
-/// Drive `placement` from its planned `first` route to completion.
-///
-/// ```text
-/// reroute(P, first, stop):
-///   R ← start ; route ← first
-///   loop
-///     verdict ← route = Local(l)        ⇒ Verdict::local(P.settle(l))
-///               route = Remote(next, m) ⇒ attempt_remote(m, next)
-///     case δ(R, verdict) of
-///       Complete  ⇒ return Ok
-///       Fail(e)   ⇒ return Err(e)                \* fatal, ambiguous, or exhausted
-///       Await(A)  ⇒ peer  ← A's hop progress stamp           \* after the refusal published
-///                   route ← first route r computed after listening with
-///                           A.is_triggered(r, observation(A, peer)),
-///                           or return Err(ReroutingStopped) once `stop` is requested
-///                   R ← A.resume
-/// ```
-///
-/// `stop` is observed only while waiting, where no send is in flight and no other await is
-/// pending, so stopping is cooperative: nothing but the wait is interrupted.
-///
-/// Post: `Ok(())` iff one attempt was accepted or settled locally; every earlier attempt was
-/// refused before acceptance (S1). `Err(ReroutingExhausted { .. })` after
-/// `REROUTING_BUDGET + 1` refused sends (S3); `Err(ReroutingStopped)` iff `stop` was
-/// requested while waiting.
-pub(crate) async fn reroute<P: Placement>(
-    transport: &Arc<SwarmTransport>,
-    placement: &P,
-    first: Route<P::Local>,
-    stop: &StopToken,
-) -> Result<()> {
-    let mut rerouting = Rerouting::start();
-    let mut route = first;
-    loop {
-        let verdict = match route {
-            Route::Local(local) => Verdict::local(placement.settle(transport, local).await),
-            Route::Remote { next, message } => transport.attempt_remote(message, next).await,
-        };
-        let awaiting = match rerouting.after(verdict) {
-            Step::Complete => return Ok(()),
-            Step::Fail(error) => return Err(error),
-            Step::Await(awaiting) => awaiting,
-        };
-        let peer = transport.peer_stamp(&awaiting);
-        route = loop {
-            let listeners = transport.rerouting_listeners(&awaiting, &peer);
-            let fresh = placement.route(&transport.dht).await?;
-            let link = match &fresh {
-                Route::Local(_) => LinkRoute::Local,
-                Route::Remote { next, .. } => LinkRoute::Remote(transport.link_hop(*next)?),
-            };
-            if awaiting.is_triggered(link, transport.observation(&awaiting, &peer)) {
-                break fresh;
-            }
-            if stop.should_stop() {
-                return Err(Error::ReroutingStopped);
-            }
-            select(pin!(listeners.notified()), pin!(stop.stopped())).await;
-        };
-        rerouting = awaiting.resume();
     }
 }
 
@@ -609,10 +410,10 @@ mod tests {
     }
 
     /// An observation of `room` and the hop's peer progress.
-    const fn observed(room: bool, released: bool, idle: bool) -> Observation {
+    const fn observed(room: bool, drained: bool, idle: bool) -> Observation {
         Observation {
             room,
-            peer: PeerProgress { released, idle },
+            peer: PeerProgress { drained, idle },
         }
     }
 

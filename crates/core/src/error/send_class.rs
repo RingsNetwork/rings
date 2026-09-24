@@ -110,8 +110,8 @@ pub(crate) enum DeferralTrigger {
     /// admission path has room for it again (`Room`: the fixed reservation, or the shared
     /// capacity through an empty fair-wait queue), or after a route change.
     CapacityRelease,
-    /// The hop's data channel did not accept the frame in time: the peer's link must make
-    /// progress (another transfer of it releases, or it goes idle), or the generation or route
+    /// The hop's data channel did not accept the frame in time: the peer's link must drain
+    /// the transfers ahead of the refused one (or go idle), or the generation or route
     /// change.
     ChannelDrain,
 }

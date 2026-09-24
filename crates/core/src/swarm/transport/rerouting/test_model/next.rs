@@ -314,7 +314,7 @@ impl Model {
         };
         let resolved = Resolved {
             hop,
-            peer: state.released[hop.index()],
+            peer: state.mark(hop),
         };
         state.phase = transition(deferrals, resolved, verdict, refusal);
     }
@@ -328,7 +328,7 @@ fn release_hop(state: &mut State, hop: Hop, count: u8) {
     }
     state.jam[hop.index()] -= count;
     state.full[hop.index()] = false;
-    state.released[hop.index()] += u64::from(count);
+    state.drained[hop.index()] += u64::from(count);
 }
 
 /// `Close`: the dead generation retires; its channel's other transfers are cancelled and
@@ -357,7 +357,7 @@ fn send(state: &mut State) {
         state.effects += 1;
         let resolved = Resolved {
             hop: Hop::Alternate,
-            peer: 0,
+            peer: state.mark(Hop::Alternate),
         };
         state.phase = transition(deferrals, resolved, Verdict::local(Ok(())), None);
         return;
@@ -388,7 +388,8 @@ enum Resolution {
 ///       ∨ (Link           ∧ usable(hop))
 ///       ∨ (PeerCapacity   ∧ the hop's own capacity has room)
 ///       ∨ (GlobalCapacity ∧ the shared capacity has room and no waiter is queued on it)
-///       ∨ (Drain          ∧ (generation(hop) ≠ bound ∨ the hop released ∨ idle(hop)))
+///       ∨ (Drain          ∧ (generation(hop) ≠ bound ∨ the transfers ahead drained
+///                            ∨ idle(hop)))
 /// ```
 ///
 /// The capacity disjuncts are scoped by the refusal the model knows; `FreshHop` checks that
@@ -412,7 +413,7 @@ fn wake(state: &mut State) {
             Trigger::PeerCapacity => !state.full[hop.index()],
             Trigger::GlobalCapacity => !state.congested && !state.queued,
             Trigger::Drain => {
-                state.generation(hop) != generation || progress.released || progress.idle
+                state.generation(hop) != generation || progress.drained || progress.idle
             }
         };
     let capacity = matches!(

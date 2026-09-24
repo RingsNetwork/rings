@@ -1,9 +1,9 @@
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::Weak;
 #[cfg(test)]
 use std::task::Poll;
 
+use event_listener::Event;
 use event_listener::EventListener;
 
 use super::model::TransferClass;
@@ -19,6 +19,12 @@ use crate::fair_admission::FairWaitBudget;
 use crate::fair_admission::FairWaitQueue;
 use crate::fair_admission::ReservedCapacity;
 use crate::lifecycle::epoch::Epoch;
+
+mod view;
+
+pub(in crate::swarm::transport) use view::CapacityView;
+pub(in crate::swarm::transport) use view::PeerProgress;
+pub(in crate::swarm::transport) use view::PeerStamp;
 
 /// Hard per-peer transfer bound, including queued and delivery-waiting heads.
 pub(crate) const OUTBOUND_TRANSFER_QUEUE_CAPACITY: usize = 256;
@@ -183,7 +189,7 @@ impl GlobalTransferCapacity {
 
     /// Register for every event after which the global part of `Room` may change: its
     /// releases and its queue's departures.
-    pub(super) fn room_listeners(&self) -> [EventListener; 2] {
+    fn room_listeners(&self) -> [EventListener; 2] {
         [self.releases.listen(), self.waiters.departures().listen()]
     }
 
@@ -272,12 +278,19 @@ impl GlobalTransferCapacity {
 #[derive(Clone, Copy)]
 struct PeerCapacityState {
     capacity: CountedReservedCapacity<{ TransferClass::COUNT }>,
+    /// Transfers of the peer that reached its link and ended: the progress of the link.
+    ///
+    /// Inv: incremented in the critical section that releases the transfer's peer capacity,
+    /// so one reading of the state sees a transfer either admitted or counted here, never
+    /// both and never neither.
+    drained: u64,
 }
 
 impl PeerCapacityState {
     const fn new() -> Self {
         Self {
             capacity: CountedReservedCapacity::new(),
+            drained: 0,
         }
     }
 
@@ -317,9 +330,10 @@ pub(super) struct TransferCapacity {
     /// Advanced after every release of this peer's capacity, a half reservation included:
     /// the events after which `Room` may change.
     releases: Epoch,
-    /// Advanced when a whole transfer of this peer ends (`TransferCapacityPermit` dropped):
-    /// the progress of the peer's link. A half reservation held no frames and is not counted.
-    progress: Epoch,
+    /// Notified after `PeerCapacityState::drained` grows
+    /// ([`TransferCapacityPermit::release_after_progress`]). A transfer that never admitted a
+    /// frame to the link, and a half reservation, do not notify it.
+    progressed: Event,
 }
 
 impl TransferCapacity {
@@ -330,7 +344,7 @@ impl TransferCapacity {
             global,
             waiters: Arc::new(FairWaitQueue::with_budget(wait_budget)),
             releases: Epoch::default(),
-            progress: Epoch::default(),
+            progressed: Event::new(),
         }
     }
 
@@ -361,7 +375,7 @@ impl TransferCapacity {
 
     /// `Room(peer, demand)`: `demand` could be admitted now by this peer and the global
     /// capacity (see `admits_now`), without admitting it.
-    pub(super) fn has_room(&self, peer: Did, demand: TransferDemand) -> bool {
+    fn has_room(&self, peer: Did, demand: TransferDemand) -> bool {
         let state = *self
             .state
             .lock()
@@ -373,11 +387,7 @@ impl TransferCapacity {
 
     /// `Room(peer, demand)` for a peer that holds no capacity: its own state is fresh and its
     /// queue empty, so only the fixed or shared step decides.
-    pub(super) fn has_room_unheld(
-        global: &GlobalTransferCapacity,
-        peer: Did,
-        demand: TransferDemand,
-    ) -> bool {
+    fn has_room_unheld(global: &GlobalTransferCapacity, peer: Did, demand: TransferDemand) -> bool {
         let fresh = PeerCapacityState::new();
         admits_now(true, |scope| {
             Self::reserved(fresh, peer, demand.class, demand.bytes, scope).is_ok()
@@ -408,6 +418,7 @@ impl TransferCapacity {
             capacity: self.clone(),
             class,
             bytes,
+            reach: LinkReach::Unreached,
         })
     }
 
@@ -465,11 +476,12 @@ impl TransferCapacity {
 
     /// Register for every event after which `Room` of this peer may change: its releases and
     /// its queue's departures.
-    pub(super) fn room_listeners(&self) -> [EventListener; 2] {
+    fn room_listeners(&self) -> [EventListener; 2] {
         [self.releases.listen(), self.waiters.departures().listen()]
     }
 
     /// Live permits of this peer: `0` iff no transfer of the peer holds frames in flight.
+    #[cfg(test)]
     pub(super) fn admitted(&self) -> usize {
         self.state
             .lock()
@@ -523,59 +535,6 @@ impl TransferDemand {
     }
 }
 
-/// A reading of one peer's progress epoch, taken after a refused send published its refusal,
-/// so after the refused send released whatever it held.
-///
-/// The capacity is held weakly: a dead capacity means every permit of the peer was released,
-/// and a live `Weak` pins the allocation, so a recreated capacity is never mistaken for the
-/// stamped one.
-pub(in crate::swarm::transport) struct PeerStamp {
-    /// The peer's capacity when stamped, if one existed.
-    capacity: Weak<TransferCapacity>,
-    /// Its progress count when stamped.
-    released: u64,
-}
-
-/// What the peer's capacity shows against a [`PeerStamp`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub(in crate::swarm::transport) struct PeerProgress {
-    /// Another transfer of the peer ended since the stamp.
-    pub(in crate::swarm::transport) released: bool,
-    /// `Idle(peer)`: no transfer of the peer holds capacity.
-    pub(in crate::swarm::transport) idle: bool,
-}
-
-impl PeerStamp {
-    /// Stamp `capacity`, the peer's current capacity if any.
-    pub(super) fn of(capacity: Option<&Arc<TransferCapacity>>) -> Self {
-        Self {
-            capacity: capacity.map_or_else(Weak::new, Arc::downgrade),
-            released: capacity.map_or(0, |capacity| capacity.progress.current()),
-        }
-    }
-
-    /// The peer's progress now against this stamp; a released capacity is idle.
-    pub(in crate::swarm::transport) fn progress(&self) -> PeerProgress {
-        self.capacity.upgrade().map_or(
-            PeerProgress {
-                released: true,
-                idle: true,
-            },
-            |capacity| PeerProgress {
-                released: capacity.progress.current() > self.released,
-                idle: capacity.admitted() == 0,
-            },
-        )
-    }
-
-    /// Register for the peer's next progress, while its capacity lives.
-    pub(in crate::swarm::transport) fn listen(&self) -> Option<EventListener> {
-        self.capacity
-            .upgrade()
-            .map(|capacity| capacity.progress.listen())
-    }
-}
-
 /// The peer and global capacity one transfer holds until it ends.
 ///
 /// Fields drop in declaration order, so the global release, which advances
@@ -585,27 +544,54 @@ pub(in crate::swarm::transport) struct TransferCapacityPermit {
     _global: GlobalCapacityPermit,
 }
 
-impl Drop for TransferCapacityPermit {
-    /// A whole transfer of the peer ended: its frames have left the link, which is progress.
-    /// The fields release the peer and global capacity right after.
-    fn drop(&mut self) {
-        self._peer.capacity.progress.advance();
+impl TransferCapacityPermit {
+    /// Release the permit of a transfer that admitted a frame to the peer's link and has
+    /// ended, counting it in `PeerCapacityState::drained`, then notify the peer's progress.
+    ///
+    /// Post: a waiter woken by this progress reads the peer and global capacity already
+    /// released, so its retry is not refused by the transfer that woke it. Dropping a permit
+    /// releases it without progress: nothing it reserved reached the link.
+    pub(in crate::swarm::transport) fn release_after_progress(mut self) {
+        self._peer.reach = LinkReach::Reached;
+        let capacity = Arc::clone(&self._peer.capacity);
+        drop(self);
+        capacity.progressed.notify(usize::MAX);
     }
+}
+
+/// Whether a transfer holding a peer permit admitted a frame to the peer's link.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LinkReach {
+    /// No frame of the transfer reached the link (a half reservation, or a transfer that
+    /// ended before its first frame).
+    Unreached,
+    /// The transfer admitted a frame to the link and has ended.
+    Reached,
 }
 
 struct PeerCapacityPermit {
     capacity: Arc<TransferCapacity>,
     class: TransferClass,
     bytes: usize,
+    /// Whether the release counts as the link's progress.
+    reach: LinkReach,
 }
 
 impl Drop for PeerCapacityPermit {
+    /// Release the peer capacity and, for a transfer that reached the link, count it drained
+    /// in the same critical section (Inv of `PeerCapacityState::drained`).
     fn drop(&mut self) {
-        self.capacity
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .release(self.class, self.bytes);
+        {
+            let mut state = self
+                .capacity
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.release(self.class, self.bytes);
+            if self.reach == LinkReach::Reached {
+                state.drained = state.drained.saturating_add(1);
+            }
+        }
         self.capacity.waiters.wake_front();
         self.capacity.releases.advance();
     }

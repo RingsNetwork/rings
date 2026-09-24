@@ -22,7 +22,6 @@ use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::Weak;
 
-use event_listener::EventListener;
 use futures::future::FutureExt;
 use futures::pin_mut;
 use futures::select;
@@ -82,6 +81,7 @@ pub(super) use admission::DetachedAdmissionClaim;
 pub(super) use capacity::admits_now;
 #[cfg(test)]
 pub(super) use capacity::CapacityScope;
+pub(super) use capacity::CapacityView;
 use capacity::GlobalTransferCapacity;
 pub(super) use capacity::PeerProgress;
 pub(super) use capacity::PeerStamp;
@@ -393,48 +393,6 @@ impl OutboundSchedulers {
         Ok(handle)
     }
 
-    /// `Room(peer, demand)` now (see `TransferCapacity::has_room`), registering nothing.
-    pub(super) fn has_room(&self, peer: Did, demand: TransferDemand) -> bool {
-        let capacity = self
-            .lock_registry()
-            .capacities
-            .get(&peer)
-            .and_then(Weak::upgrade);
-        capacity.map_or_else(
-            || TransferCapacity::has_room_unheld(&self.global_capacity, peer, demand),
-            |capacity| capacity.has_room(peer, demand),
-        )
-    }
-
-    /// Register for every event after which `Room(peer, _)` may change: global and peer
-    /// releases, and departures from both queues.
-    pub(super) fn room_listeners(&self, peer: Did) -> Vec<EventListener> {
-        let capacity = self
-            .lock_registry()
-            .capacities
-            .get(&peer)
-            .and_then(Weak::upgrade);
-        self.global_capacity
-            .room_listeners()
-            .into_iter()
-            .chain(
-                capacity
-                    .into_iter()
-                    .flat_map(|capacity| capacity.room_listeners()),
-            )
-            .collect()
-    }
-
-    /// Stamp `peer`'s progress epoch now (see `PeerStamp`).
-    pub(super) fn peer_stamp(&self, peer: Did) -> PeerStamp {
-        let capacity = self
-            .lock_registry()
-            .capacities
-            .get(&peer)
-            .and_then(Weak::upgrade);
-        PeerStamp::of(capacity.as_ref())
-    }
-
     pub(super) async fn reserve(
         &self,
         peer: Did,
@@ -651,11 +609,18 @@ impl OutboundWorker {
         }
     }
 
+    /// The terminal transition of a scheduled transfer: take its final result, then release
+    /// its capacity before the result is published. A transfer that admitted a frame to the
+    /// link releases as progress of the peer's link (`release_after_progress`).
     fn finalize_scheduled_transfer(
         mut scheduled: ScheduledTransfer,
         result: Result<SendCompletionOutcome>,
     ) -> Option<FinalTransferResult> {
+        let reached_link = !scheduled.transfer.is_before_first_frame();
         let final_result = scheduled.transfer.take_final(result);
+        if let (Some(permit), true) = (scheduled.capacity_permit.take(), reached_link) {
+            permit.release_after_progress();
+        }
         drop(scheduled);
         final_result
     }

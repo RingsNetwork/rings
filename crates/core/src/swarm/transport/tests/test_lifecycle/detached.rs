@@ -49,6 +49,13 @@ impl Gate {
 ///
 /// The send races the gate's entry notification, so a send that never parks fails the test
 /// by completing instead of spinning.
+///
+/// `send_gate_entered` is thread-wide: it does not name the send that parked, and a background
+/// send of this runtime could raise it first. That cannot make a row pass falsely. The worker
+/// is lost wherever this send then stands: a send lost short of the irrevocable gate is
+/// unclaimed, so the `Irrevocable` row fails. A send lost short of the post-permit gate is
+/// unclaimed as well, so the `PostPermit` row still witnesses its proposition (lost before the
+/// claim ⇒ `Cancelled`).
 fn send_losing_the_worker_at(gate: Gate) -> Result<Result<SendCompletionOutcome>> {
     let worker_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

@@ -9,6 +9,13 @@
 //! where a fresh operation would, and the local settlement a recomputed route may reach. A
 //! settlement reached after a deferral is the placement's single effect: the deferred send had
 //! none.
+//!
+//! How many attempts a placement makes is its caller's [`Attempts`]: a user operation reroutes
+//! (`Attempts::Rerouted`, through `Swarm::scoped_storage`), while writes originated on the
+//! inbound path (a relay hold for an offline destination, inbox retirement) make one attempt
+//! (`Attempts::Single`), as before #859, so no inbound lane is ever held by a rerouting wait.
+//!
+//! [`Attempts`]: crate::swarm::transport::Attempts
 
 use std::sync::Arc;
 

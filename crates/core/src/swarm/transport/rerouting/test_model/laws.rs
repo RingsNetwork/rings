@@ -129,9 +129,7 @@ pub(super) fn is_accepted(state: &State) -> bool {
 }
 
 /// L1's premise at the state where churn stops: the placement is in progress with at least
-/// `QUIESCENT_DEFERRALS` deferrals of budget left, and at most one foreign transfer holds each
-/// hop's channel (deeper occupancy costs a deferral per partial drain, which the budget bounds
-/// but L1 does not cover).
+/// `QUIESCENT_DEFERRALS` deferrals of budget left, whatever the channels' occupancy.
 pub(super) fn has_liveness_budget(state: &State) -> bool {
     let deferrals = match state.phase {
         Phase::Compute { deferrals }
@@ -139,7 +137,7 @@ pub(super) fn has_liveness_budget(state: &State) -> bool {
         | Phase::Waiting { deferrals, .. } => deferrals,
         Phase::Done(_) => return false,
     };
-    deferrals <= REROUTING_BUDGET - QUIESCENT_DEFERRALS && state.jam.iter().all(|jam| *jam <= 1)
+    deferrals <= REROUTING_BUDGET - QUIESCENT_DEFERRALS
 }
 
 /// Every checked proposition, in report order.

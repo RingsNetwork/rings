@@ -128,6 +128,7 @@ use self::pending::SharedConnectionLifecycles;
 use self::pending::PENDING_CONNECTION_TIMEOUT_MS;
 pub(crate) use self::readiness::TransportReadiness;
 pub(crate) use self::rerouting::reroute;
+pub(crate) use self::rerouting::Attempts;
 pub(crate) use self::rerouting::Placement;
 pub(crate) use self::rerouting::Route;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]

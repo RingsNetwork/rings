@@ -8,16 +8,19 @@
 //! is involved: the test drives the events and awaits the operation's own completion.
 
 use std::cmp::Ordering;
+use std::task::Poll;
 
 use futures::pin_mut;
 use futures::poll;
 
+use super::super::operate_entry;
 use super::super::ChordStorageInterface;
 use super::test_support::assert_cached_data_values;
 use super::test_support::next_generated_key;
 use super::test_support::next_payload_matching;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
+use crate::dht::entry::EntryOperation;
 use crate::dht::Did;
 use crate::dht::OperateRoute;
 use crate::ecc::tests::gen_ordered_keys;
@@ -26,6 +29,7 @@ use crate::error::Result;
 use crate::lifecycle::StopSource;
 use crate::message::types::Message;
 use crate::message::Encoder;
+use crate::swarm::transport::Attempts;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;
 use crate::tests::default::Node;
@@ -178,13 +182,16 @@ async fn test_fetch_refused_by_a_dead_generation_waits_for_the_replacement() -> 
 }
 
 /// Law (cooperative stop): a placement waiting to be rerouted under `scoped_storage` ends with
-/// `ReroutingStopped` once its stop is requested, and its refused attempt had no effect.
+/// `ReroutingStopped` once its stop is requested, and leaves no waiter behind.
+///
+/// The refused attempt's lack of effect is S1's, witnessed by the append conformance test: the
+/// refusal here (`SwarmMissDidInTable`) precedes submission, so no payload could reach the
+/// owner either way.
 #[tokio::test]
-async fn test_stop_ends_a_waiting_placement_without_effect() -> Result<()> {
+async fn test_stop_ends_a_waiting_placement() -> Result<()> {
     let topic = "rerouted append stops while waiting";
     let (writer, owner) = linked_route(topic).await?;
     kill_generation(&writer, &owner)?;
-    operate_entries_received(&owner).await?;
     let stop = StopSource::new();
 
     let storage = writer.swarm.scoped_storage(stop.token());
@@ -196,7 +203,37 @@ async fn test_stop_ends_a_waiting_placement_without_effect() -> Result<()> {
     stop.request_stop();
     assert!(matches!(append.await, Err(Error::ReroutingStopped)));
     assert_eq!(writer.swarm.transport.link_waiters_for_test(), 0);
-    assert_eq!(operate_entries_received(&owner).await?, 0);
+    Ok(())
+}
+
+/// Law (inbound writes never wait, #860 review M1): a write under `Attempts::Single`, as the
+/// inbound path issues it (relay hold, inbox retirement), ends at its first refusal with
+/// `ReroutingExhausted` carrying it, and never registers a rerouting wait.
+///
+/// As in the stop test, the path to the first refusal completes within one poll on the dummy
+/// transport; a wait would leave the future pending with a link waiter.
+#[tokio::test]
+async fn test_single_attempt_write_ends_at_its_first_refusal() -> Result<()> {
+    let topic = "inbound-path append makes one attempt";
+    let (writer, owner) = linked_route(topic).await?;
+    kill_generation(&writer, &owner)?;
+
+    let entry: Entry = (topic.to_string(), "111".to_string().encode()?).try_into()?;
+    let append = operate_entry(
+        writer.swarm.transport.clone(),
+        EntryOperation::Extend(entry),
+        Attempts::Single,
+    );
+    pin_mut!(append);
+    let Poll::Ready(result) = poll!(append.as_mut()) else {
+        panic!("a single attempt must not wait");
+    };
+    assert!(
+        matches!(&result, Err(Error::ReroutingExhausted { last }) if last.to_string()
+            == Error::SwarmMissDidInTable(owner.did()).to_string()),
+        "{result:?}"
+    );
+    assert_eq!(writer.swarm.transport.link_waiters_for_test(), 0);
     Ok(())
 }
 

@@ -14,9 +14,9 @@
 //!            jam        : Hop → ℕ                \* other transfers holding each channel
 //!            full       : Hop → BOOLEAN          \* a hop's own capacity exhausted
 //!            queued     : BOOLEAN                \* a waiter queued on the shared capacity
-//!            released   : Hop → ℕ                \* each hop's peer release epoch
+//!            drained    : Hop → ℕ                \* each hop's transfers ended on its link
 //!            phase      : Compute(d) | InFlight(d, hop, g)
-//!                       | Waiting(d, hop, g, peer stamp, cause) | Done(outcome)
+//!                       | Waiting(d, hop, g, (drained₀, ahead), cause) | Done(outcome)
 //!            effects, sends, last_refusal, stale_retry : history variables
 //!
 //! Init ≜ registry = {Target ↦ Active(g₁)} ∧ ready ∧ preference = Target ∧ phase = Compute(0)
@@ -34,7 +34,6 @@
 //!                         ∧ WF(Send) ∧ WF(Accept) ∧ WF(Refuse(r)) ∧ WF(Wake)
 //!              ∀r. Premise(r) ⇒ (□[Protocol] ∧ Fairness ⇒ ◇ Done(Accepted))      (L1)
 //!              Premise(r) ≜ phase ∉ Done ∧ deferrals ≤ B − QUIESCENT_DEFERRALS
-//!                           ∧ ∀h. jam[h] ≤ 1        \* one foreign transfer per channel
 //!                           ∧ TopologyReferencesOnlyAdmitted   \* built into Route below
 //! ```
 //!
@@ -56,10 +55,14 @@
 //! - The refused transfer's own capacity release is not an event of the model, as in
 //!   production no trigger reads it: `Room` is a state, decided by the production combinator
 //!   `admits_now` over the model's scopes (`State::has_room`: the hop's own capacity, the
-//!   shared capacity, and whether a waiter is queued on it), and the peer progress stamp is
-//!   read after the refusal.
+//!   shared capacity, and whether a waiter is queued on it), and the channel mark
+//!   `(drained₀, ahead)` is read after the refusal, as `PeerStamp` is.
+//! - The combinator is shared, but its scopes are abstract booleans: the fixed reservation is
+//!   pinned to `false` (every modeled demand exceeds it) and no waiter queues on a hop's own
+//!   capacity. So the branch where a small demand bypasses a non-empty queue through its fixed
+//!   reservation is not explored; it only admits sooner than the modeled shared branch.
 //! - Releases are scoped as in production: a hop's `Drain` and `Close` free its own capacity
-//!   and advance its peer epoch without clearing shared congestion; only `Release` does.
+//!   and count its ended transfers without clearing shared congestion; only `Release` does.
 //!
 //! # Scope limits
 //!
@@ -83,10 +86,10 @@
 //! | replacement         | 2 0 0 2 1 0 0 0 0 0 1 | 1731   | 21    | 733 (733)           |
 //! | glare               | 2 1 0 1 0 0 1 0 0 0 0 | 710    | 18    | 424 (424)           |
 //! | retire before ready | 2 0 1 2 0 0 0 0 0 0 0 | 631    | 16    | 408 (408)           |
-//! | topology mid-wait   | 1 0 0 1 1 2 1 1 0 0 0 | 124222 | 29    | 36100 (36100)       |
-//! | exhaustion          | 2 0 0 2 2 0 2 1 0 0 0 | 242013 | 35    | 41418 (41418)       |
-//! | channel drain       | 1 0 0 1 0 0 0 2 0 0 0 | 2602   | 19    | 1255 (1255)         |
-//! | scoped capacity     | 1 0 0 1 0 0 1 2 2 1 0 | 160688 | 31    | 47515 (47515)       |
+//! | topology mid-wait   | 1 0 0 1 1 2 1 1 0 0 0 | 130776 | 29    | 38532 (38532)       |
+//! | exhaustion          | 2 0 0 2 2 0 2 1 0 0 0 | 257719 | 35    | 44140 (44140)       |
+//! | channel drain       | 1 0 0 1 0 0 0 2 0 0 0 | 2900   | 19    | 1650 (1650)         |
+//! | scoped capacity     | 1 0 0 1 0 0 1 2 2 1 0 | 185372 | 31    | 61026 (61026)       |
 //! | one replacement     | 1 0 0 1 0 0 0 0 0 0 0 | max deferrals = `REPLACEMENT_DEFERRALS`       |
 
 mod carrier;
@@ -298,10 +301,10 @@ fn test_rerouting_laws_hold_when_topology_changes_mid_wait() {
         "topology mid-wait",
         TOPOLOGY_MID_WAIT,
         Bounds {
-            states: 124222,
+            states: 130776,
             depth: 29,
-            premise_states: 36100,
-            unstable_premise_states: 36100,
+            premise_states: 38532,
+            unstable_premise_states: 38532,
         },
         &[
             LawName::WaitEndsByRouteChange,
@@ -324,10 +327,10 @@ fn test_rerouting_laws_hold_when_channels_drain() {
             ..QUIET
         },
         Bounds {
-            states: 2602,
+            states: 2900,
             depth: 19,
-            premise_states: 1255,
-            unstable_premise_states: 1255,
+            premise_states: 1650,
+            unstable_premise_states: 1650,
         },
         &[
             LawName::WaitEndsByChannelDrain,
@@ -345,10 +348,10 @@ fn test_rerouting_laws_hold_under_scoped_capacity() {
         "scoped capacity",
         SCOPED_CAPACITY,
         Bounds {
-            states: 160688,
+            states: 185372,
             depth: 31,
-            premise_states: 47515,
-            unstable_premise_states: 47515,
+            premise_states: 61026,
+            unstable_premise_states: 61026,
         },
         &[
             LawName::WaitEndsByCapacityRelease,
@@ -415,10 +418,10 @@ fn test_rerouting_budget_exhausts_with_the_last_cause() {
             ..QUIET
         },
         Bounds {
-            states: 242013,
+            states: 257719,
             depth: 35,
-            premise_states: 41418,
-            unstable_premise_states: 41418,
+            premise_states: 44140,
+            unstable_premise_states: 44140,
         },
         &[LawName::BudgetExhausts],
     );
