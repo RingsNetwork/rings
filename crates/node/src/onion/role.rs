@@ -19,6 +19,13 @@
 //!
 //! Every `map` preserves the rung, so the relay capability published in the online-node
 //! descriptor, the exit descriptors, and the reducer's admission all agree by construction.
+//!
+//! The ladder assumes every non-`relay` symbol of `Σ` is world-facing, which holds for this
+//! signature. Phase 2b adds intermediate symbols (`Int ∈ pos(f)`, #834 D1); a node registering
+//! only such invoke-only symbols has no rung here, because [`OnionExitOffer`] requires a
+//! world-facing service, and the ladder then gains a rung for it.
+
+use std::collections::BTreeSet;
 
 use super::OnionExitPolicy;
 use super::OnionServiceName;
@@ -67,21 +74,38 @@ impl<X> OnionRole<X> {
             Self::Exit(data) => OnionRole::Exit(exit(data)),
         }
     }
+
+    /// Relabel the exit's data by a fallible function, preserving the rung: the traversal of
+    /// `OnionRole` in `Result E`, so `try_map(Ok ∘ f) = Ok ∘ map(f)`.
+    pub fn try_map<Y, E>(
+        self,
+        exit: impl FnOnce(X) -> std::result::Result<Y, E>,
+    ) -> std::result::Result<OnionRole<Y>, E> {
+        match self {
+            Self::Client => Ok(OnionRole::Client),
+            Self::Relay => Ok(OnionRole::Relay),
+            Self::Exit(data) => exit(data).map(OnionRole::Exit),
+        }
+    }
 }
 
 /// What an exit offers: a non-empty set of world-facing services under an open policy.
 ///
 /// Invariant: `services` is non-empty and `policy` admits at least one target, so every value
-/// is an exit a client can route to.
+/// is an exit a client can route to. The services are a set, so each is registered once.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OnionExitOffer {
-    services: Vec<OnionServiceName>,
+    services: BTreeSet<OnionServiceName>,
     policy: OnionExitPolicy,
 }
 
 impl OnionExitOffer {
     /// Build an offer, rejecting an empty service set and a closed policy.
-    pub fn new(services: Vec<OnionServiceName>, policy: OnionExitPolicy) -> Result<Self> {
+    pub fn new(
+        services: impl IntoIterator<Item = OnionServiceName>,
+        policy: OnionExitPolicy,
+    ) -> Result<Self> {
+        let services = services.into_iter().collect::<BTreeSet<_>>();
         if services.is_empty() {
             return Err(Error::InvalidConfig(
                 "an onion exit requires at least one onion_exit_services entry".to_string(),
@@ -91,9 +115,9 @@ impl OnionExitOffer {
         Ok(Self { services, policy })
     }
 
-    /// Return the offered services.
-    pub fn services(&self) -> &[OnionServiceName] {
-        self.services.as_slice()
+    /// Return the offered services, in name order.
+    pub const fn services(&self) -> &BTreeSet<OnionServiceName> {
+        &self.services
     }
 
     /// Return the policy shared by every offered service.
@@ -180,6 +204,17 @@ mod tests {
             Err(Error::InvalidConfig(message)) if message.contains("allowed target")
         ));
         Ok(())
+    }
+
+    /// `try_map` is the traversal of `map`: it preserves the rung and fails only on the exit.
+    #[test]
+    fn test_try_map_traverses_the_exit_rung() {
+        let halve = |value: u8| value.is_multiple_of(2).then_some(value / 2).ok_or(value);
+
+        assert_eq!(OnionRole::Exit(8_u8).try_map(halve), Ok(OnionRole::Exit(4)));
+        assert_eq!(OnionRole::Exit(7_u8).try_map(halve), Err(7));
+        assert_eq!(OnionRole::Relay.try_map(halve), Ok(OnionRole::Relay));
+        assert_eq!(OnionRole::Client.try_map(halve), Ok(OnionRole::Client));
     }
 
     /// `map` preserves the rung, and every rung above `Client` registers `relay`.

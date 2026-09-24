@@ -1,6 +1,7 @@
 use std::rc::Rc;
 use std::time::Duration;
 
+use js_sys::Array;
 use js_sys::Object;
 use js_sys::Reflect;
 use rings_node::onion::OnionExitOffer;
@@ -26,6 +27,7 @@ use rings_webview::TargetUrl;
 use rings_webview::WebviewError;
 use serde::Deserialize;
 use url::Url;
+use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::wasm_bindgen_test;
@@ -48,6 +50,10 @@ const FIXTURE_ORIGIN_GLOBAL: &str = "__ringsWebviewOnionFixtureOrigin";
 /// Relays that are neither the client's guard nor the exit: the two candidates for the forward
 /// relay `r₀,₂` and the return relay `r₁,₁` of the loop `g, r₀,₂, exit, r₁,₁, g` (#834 D5).
 const FIXTURE_MIDDLE_RELAYS: usize = 2;
+/// Interval between two reads of the client's directory while it converges.
+const DIRECTORY_POLL_MS: u64 = 250;
+/// Reads of the client's directory before the fixture gives up: two stabilisation intervals.
+const DIRECTORY_POLLS: usize = 120;
 
 #[derive(Debug, Deserialize)]
 struct FetchCall {
@@ -115,9 +121,10 @@ async fn run_browser_onion_webview_flow() -> WebviewResult<()> {
         connect_browser_providers(&guard, relay).await?;
         connect_browser_providers(relay, &exit).await?;
     }
+    await_loop_directory(&client, FIXTURE_MIDDLE_RELAYS + 2).await?;
     let node = WebviewNode::new(client, controlled_origin()?, web_shell_bootstrap)?;
     let index_target = TargetUrl::parse(fixture_index.as_str())?;
-    let index = retry_gateway_navigation(&node, &index_target).await?;
+    let index = gateway_navigation(&node, &index_target).await?;
     expect_status(&index, "index navigation", 200)?;
     let index_body = utf8_body(index)?;
     assert_contains(&index_body, "Rings Onion Fixture")?;
@@ -207,15 +214,13 @@ async fn browser_provider(
         delegatee_key,
         TEST_STABILIZE_INTERVAL_SECS,
     );
-    config = config.onion_role(match role {
-        OnionRole::Client => OnionRole::Client,
-        OnionRole::Relay => OnionRole::Relay,
-        OnionRole::Exit(target) => OnionRole::Exit(
+    config = config.onion_role(
+        role.try_map(|target| {
             OnionExitPolicy::from_target_strings(vec![target.to_string()], Vec::new())
-                .and_then(|policy| OnionExitOffer::new(vec![OnionServiceName::https()], policy))
-                .map_err(|error| WebviewError::transport(format!("build exit offer: {error:?}")))?,
-        ),
-    });
+                .and_then(|policy| OnionExitOffer::new([OnionServiceName::https()], policy))
+        })
+        .map_err(|error| WebviewError::transport(format!("build exit offer: {error:?}")))?,
+    );
     let storage = Box::new(
         IdbStorage::new_with_cap_and_name(50_000, storage_name)
             .await
@@ -231,20 +236,9 @@ async fn browser_provider(
     provider
         .set_backend()
         .map_err(|error| WebviewError::transport(format!("install backend: {error:?}")))?;
-    match role {
-        OnionRole::Client => {}
-        // A browser installs its onion runtime, relay capability included, with its first proxy.
-        OnionRole::Relay => {
-            provider.onion_https_proxy().map_err(|error| {
-                WebviewError::transport(format!("install onion relay: {:?}", JsValue::from(error)))
-            })?;
-        }
-        OnionRole::Exit(_) => {
-            provider.install_onion_https_exit().map_err(|error| {
-                WebviewError::transport(format!("install onion HTTPS exit: {error:?}"))
-            })?;
-        }
-    }
+    provider
+        .install_onion_runtime()
+        .map_err(|error| WebviewError::transport(format!("install onion runtime: {error:?}")))?;
     Ok(provider)
 }
 
@@ -309,26 +303,49 @@ fn string_field(value: &JsValue, field: &str) -> WebviewResult<String> {
         .ok_or_else(|| WebviewError::Browser(format!("missing string field {field:?}")))
 }
 
-async fn retry_gateway_navigation(
-    node: &WebviewNode,
-    target: &TargetUrl,
-) -> WebviewResult<GatewayResponse> {
-    let mut last_error = None;
-    for _ in 0..60 {
-        match gateway_navigation(node, target).await {
-            Ok(response) => return Ok(response),
-            Err(error) => {
-                last_error = Some(error.to_string());
-                sleep(Duration::from_millis(250))
-                    .await
-                    .map_err(timer_webview_error)?;
-            }
+/// Wait until the client's directory holds the precondition of a loop route: the relay
+/// registrations of `relays` fixture nodes, the exit included, and the exit's `https` offer.
+///
+/// The DHT gives a browser no change notification, so the directory is re-read once per
+/// `DIRECTORY_POLL_MS`, at most `DIRECTORY_POLLS` times. Only the precondition is awaited: the
+/// navigation that follows runs once, and any route error fails the test.
+async fn await_loop_directory(client: &Provider, relays: usize) -> WebviewResult<()> {
+    for _ in 0..DIRECTORY_POLLS {
+        let nodes = rpc(client, "lookupOnlineNodes", Object::new().into()).await?;
+        let exits = rpc(
+            client,
+            "lookupOnionExits",
+            object(&[("service", OnionServiceName::https().as_str())]),
+        )
+        .await?;
+        let registered = array_field(&nodes, "nodes")?
+            .iter()
+            .filter(|node| {
+                Reflect::get(node, &JsValue::from_str("capabilities"))
+                    .and_then(|capabilities| {
+                        Reflect::get(&capabilities, &JsValue::from_str("onion_relay"))
+                    })
+                    .is_ok_and(|epoch| !epoch.is_null() && !epoch.is_undefined())
+            })
+            .count();
+        if registered >= relays && array_field(&exits, "exits")?.length() > 0 {
+            return Ok(());
         }
+        sleep(Duration::from_millis(DIRECTORY_POLL_MS))
+            .await
+            .map_err(timer_webview_error)?;
     }
     Err(WebviewError::transport(format!(
-        "gateway navigation did not find a browser onion exit: {}",
-        last_error.unwrap_or_else(|| "no attempt was made".to_string())
+        "the client directory did not register {relays} relays and an https exit"
     )))
+}
+
+/// Read the array field `field` of a JSON-RPC response.
+fn array_field(value: &JsValue, field: &str) -> WebviewResult<Array> {
+    Reflect::get(value, &JsValue::from_str(field))
+        .map_err(js_webview_error)?
+        .dyn_into::<Array>()
+        .map_err(js_webview_error)
 }
 
 async fn gateway_navigation(

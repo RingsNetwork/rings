@@ -28,7 +28,7 @@ use crate::onion::proxy::OnionProxyRoute;
 use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitDescriptorBody;
 use crate::onion::OnionLoop;
-use crate::onion::OnionLoopStep;
+use crate::onion::OnionPipelineSymbols;
 use crate::onion::OnionRoute;
 use crate::onion::OnionRouteHop;
 use crate::onion::OnionServiceName;
@@ -190,13 +190,13 @@ fn https_route(exit: &DelegateeKey, guard: &DelegateeKey) -> OnionProxyRoute {
             symbol.process_epoch,
         )
     };
-    let mut interior = [hop(&session()), symbol, hop(&session())].into_iter();
-    let hops = OnionLoop::try_unfold(&[()], |step| match step {
-        OnionLoopStep::Guard { .. } => Ok(hop(guard)),
-        OnionLoopStep::Relay { .. } | OnionLoopStep::Symbol { .. } => {
-            interior.next().ok_or(Error::InvalidData)
-        }
-    })
+    let mut next = [hop(guard), hop(&session()), symbol, hop(&session())].into_iter();
+    let hops = OnionLoop::try_unfold(
+        OnionPipelineSymbols::new(&[], &()),
+        &mut next,
+        |next, _, _| next.next().ok_or(Error::InvalidData),
+        |next, _, _| next.next().ok_or(Error::InvalidData),
+    )
     .expect("HTTPS loop");
     let route = OnionRoute::new(OnionServiceName::https(), hops, descriptor).expect("HTTPS route");
     OnionProxyRoute {

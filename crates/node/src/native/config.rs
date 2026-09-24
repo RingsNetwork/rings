@@ -125,13 +125,30 @@ struct GatewaySection<'a> {
     gateway: &'a NativeGatewayConfig,
 }
 
-/// Keys of the `gateway:` section removed by the onion loop cutover (#834 D5).
-///
-/// The section flattens [`GatewayConfig`], so serde cannot deny its unknown keys; these are
-/// rejected by name instead of being silently ignored.
+/// Keys of the `gateway:` section: those of [`NativeGatewayConfig`] and of the flattened
+/// [`GatewayConfig`], in the order `rings init` writes them.
+const GATEWAY_KEYS: [&str; 11] = [
+    "enabled",
+    "plan",
+    "max_flows",
+    "flow_idle_timeout",
+    "tcp_buffer_bytes",
+    "interface_name",
+    "route_ledger_path",
+    "unix_helper_socket",
+    "wintun_dll_path",
+    "status_refresh_secs",
+    "onion_service",
+];
+
+/// Keys of the `gateway:` section removed by the onion loop cutover (#834 D5), rejected with a
+/// pointer to the loop shape.
 const REMOVED_GATEWAY_KEYS: [&str; 2] = ["onion_hop_count", "onion_allow_short_paths"];
 
-/// Deserialize the `gateway:` section, rejecting every key of [`REMOVED_GATEWAY_KEYS`].
+/// Deserialize the `gateway:` section, rejecting every key outside [`GATEWAY_KEYS`].
+///
+/// The section flattens [`GatewayConfig`], so serde cannot deny unknown keys there; without this
+/// a misspelt key (say `onion_services`) would silently fall back to its default.
 fn deserialize_gateway_section<'de, D>(
     deserializer: D,
 ) -> std::result::Result<Option<NativeGatewayConfig>, D::Error>
@@ -139,13 +156,23 @@ where D: serde::Deserializer<'de> {
     let Some(section) = Option::<serde_yaml::Mapping>::deserialize(deserializer)? else {
         return Ok(None);
     };
-    if let Some(key) = REMOVED_GATEWAY_KEYS
-        .into_iter()
-        .find(|key| section.contains_key(*key))
+    if let Some(key) = section
+        .keys()
+        .map(|key| key.as_str().unwrap_or_default())
+        .find(|key| !GATEWAY_KEYS.contains(key))
     {
-        return Err(serde::de::Error::custom(format!(
-            "gateway.{key} was removed: the onion route length is fixed by the loop shape (#834 D5)"
-        )));
+        return Err(serde::de::Error::custom(
+            if REMOVED_GATEWAY_KEYS.contains(&key) {
+                format!(
+                    "gateway.{key} was removed: the onion route length is fixed by the loop shape (#834 D5)"
+                )
+            } else {
+                format!(
+                    "unknown gateway key {key:?}; expected one of {}",
+                    GATEWAY_KEYS.join(", ")
+                )
+            },
+        ));
     }
     serde_yaml::from_value(serde_yaml::Value::Mapping(section))
         .map(Some)
@@ -650,22 +677,23 @@ gateway:
                     .collect::<Vec<_>>()
             });
 
-        assert_eq!(
-            keys,
-            Some(vec![
-                "enabled",
-                "plan",
-                "max_flows",
-                "flow_idle_timeout",
-                "tcp_buffer_bytes",
-                "interface_name",
-                "route_ledger_path",
-                "unix_helper_socket",
-                "wintun_dll_path",
-                "status_refresh_secs",
-                "onion_service",
-            ])
+        assert_eq!(keys, Some(GATEWAY_KEYS.to_vec()));
+    }
+
+    /// Any key outside the gateway section's own is rejected, not ignored by the flattened
+    /// section, so a misspelt key cannot silently fall back to its default.
+    #[test]
+    fn gateway_section_rejects_unknown_keys() {
+        let document = format!(
+            "{CONFIG_WITHOUT_GATEWAY_SECTION}{GATEWAY_SECTION_WITHOUT_ENABLED}  onion_services: https\n"
         );
+
+        let error = match serde_yaml::from_str::<Config>(&document) {
+            Ok(_) => panic!("a misspelt gateway key must be rejected"),
+            Err(error) => error.to_string(),
+        };
+
+        assert!(error.contains("unknown gateway key \"onion_services\""));
     }
 
     /// The route-length keys removed by the onion loop cutover are rejected by name, not ignored

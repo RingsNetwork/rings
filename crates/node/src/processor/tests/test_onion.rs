@@ -122,7 +122,7 @@ async fn test_onion_proxy_route_rejects_exit_with_stale_process_epoch() -> Resul
 
     assert!(matches!(
         error,
-        Error::OnionRouteError(OnionRouteError::StaleExitRegistration { service })
+        Error::OnionRouteError(OnionRouteError::ExitRelayRegistrationMismatch { service })
             if service == "tcp"
     ));
     Ok(())

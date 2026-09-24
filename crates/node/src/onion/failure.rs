@@ -42,9 +42,10 @@ pub enum OnionRouteError {
         /// Requested service name.
         service: String,
     },
-    /// Every live exit of the service names a process other than its node's current relay
-    /// registration: an exit restarted and its descriptors have not converged (#834 D2).
-    StaleExitRegistration {
+    /// Every live exit of the service differs from its node's current relay registration in
+    /// session key or process epoch: the exit registered from another process, typically before
+    /// a restart, and its descriptors have not converged (#834 D2).
+    ExitRelayRegistrationMismatch {
         /// Requested service name.
         service: String,
     },
@@ -178,9 +179,9 @@ impl fmt::Display for OnionRouteError {
             Self::NoLiveExit { service } => {
                 write!(f, "no live onion exit offers service {service:?}")
             }
-            Self::StaleExitRegistration { service } => write!(
+            Self::ExitRelayRegistrationMismatch { service } => write!(
                 f,
-                "every onion exit offering service {service:?} names a process epoch other than its current relay registration"
+                "every onion exit offering service {service:?} differs from its node's current relay registration in session key or process epoch"
             ),
             Self::ExitWithoutRelayRegistration { service } => write!(
                 f,

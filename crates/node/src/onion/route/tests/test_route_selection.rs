@@ -212,7 +212,7 @@ fn assert_session_loop(route: &OnionRoute) {
             .len(),
         4
     );
-    let prefix = route.positions();
+    let prefix = route.forward_path();
     assert_eq!(
         prefix
             .relays()
@@ -332,7 +332,7 @@ fn test_exit_requires_its_current_relay_registration() -> Result<()> {
 
     assert!(matches!(
         select(vec![stale]),
-        Err(Error::OnionRouteError(OnionRouteError::StaleExitRegistration { service }))
+        Err(Error::OnionRouteError(OnionRouteError::ExitRelayRegistrationMismatch { service }))
             if service == "tcp"
     ));
     assert!(matches!(
@@ -352,12 +352,13 @@ fn test_exit_requires_its_current_relay_registration() -> Result<()> {
 fn test_route_rejects_symbol_hop_with_stale_epoch() -> Result<()> {
     let keys = node_keys(1..=4)?;
     let exit = keys.get(2).ok_or(Error::InvalidData)?;
-    let mut next = keys.iter();
-    let stale = OnionLoop::try_unfold(&[()], |_| {
-        next.next()
-            .map(|key| hop(key, STALE_PROCESS_EPOCH))
-            .ok_or(Error::InvalidData)
-    })?;
+    let mut next = keys.iter().map(|key| hop(key, STALE_PROCESS_EPOCH));
+    let stale = OnionLoop::try_unfold(
+        OnionPipelineSymbols::new(&[], &()),
+        &mut next,
+        |next, _, _| next.next().ok_or(Error::InvalidData),
+        |next, _, _| next.next().ok_or(Error::InvalidData),
+    )?;
 
     assert!(matches!(
         OnionRoute::new(OnionServiceName::tcp(), stale, live_exit(exit)?),
@@ -461,8 +462,27 @@ fn candidates_with_exit(
     })
 }
 
-/// The guard is drawn by quality weight: a healthy guard (weight 8) wins a draw of `1` against
-/// a degraded one (weight 1) first in DID order.
+/// Draw a loop for the pipeline whose symbols are registered by the hops of `symbols`, and
+/// relabel its symbol positions by those hops.
+fn draw_loop(
+    symbols: &[Vec<OnionRouteHop>],
+    relays: &[OnionRouteHop],
+    entropy: &mut FixedEntropy,
+) -> Result<OnionLoop<OnionRouteHop>> {
+    let (terminal, intermediate) = symbols.split_last().ok_or(Error::InvalidData)?;
+    select_loop(
+        OnionPipelineSymbols::new(intermediate, terminal),
+        |hop| *hop,
+        relays,
+        &BTreeMap::new(),
+        entropy,
+        |_| true,
+    )
+    .map(|drawn| drawn.project_symbols(|(hop, _)| *hop).0)
+}
+
+/// The guard is drawn by quality weight, over the relays in DID order: a healthy guard
+/// (weight 8) wins a draw of `1` against a degraded one (weight 1) before it.
 #[test]
 fn test_guard_is_drawn_by_quality_weight() -> Result<()> {
     let relays = node_keys(1..=3)?;
@@ -479,7 +499,7 @@ fn test_guard_is_drawn_by_quality_weight() -> Result<()> {
             (degraded, PeerQuality::Degraded),
             (healthy, PeerQuality::Healthy),
         ],
-        &mut FixedEntropy::new([0, 1]),
+        &mut FixedEntropy::new([1]),
         |did| did == degraded || did == healthy,
     )?;
 
@@ -527,12 +547,15 @@ fn test_hall_filter_keeps_the_sole_registrant_out_of_the_guard() -> Result<()> {
         .map(|key| hop(key, TEST_PROCESS_EPOCH))
         .collect::<Vec<_>>();
 
-    let hops = select_loop(
-        &[BTreeSet::from([registrant])],
+    let registrant_hop = relays
+        .iter()
+        .copied()
+        .find(|hop| hop.did == registrant)
+        .ok_or(Error::InvalidData)?;
+    let hops = draw_loop(
+        &[vec![registrant_hop]],
         relays.as_slice(),
-        &BTreeMap::new(),
         &mut FixedEntropy::new([]),
-        |_| true,
     )?;
 
     assert_ne!(hops.guard().did, registrant);
@@ -609,18 +632,16 @@ fn test_select_loop_places_each_symbol_on_its_registrants() -> Result<()> {
             .iter()
             .map(|key| hop(key, TEST_PROCESS_EPOCH))
             .collect::<Vec<_>>();
-        let registrants = keys
+        let registrants = relays
             .chunks(2)
             .take(symbols)
-            .map(|pair| pair.iter().map(DelegateeKey::delegator_did).collect())
-            .collect::<Vec<BTreeSet<_>>>();
+            .map(<[OnionRouteHop]>::to_vec)
+            .collect::<Vec<_>>();
 
-        let hops = select_loop(
+        let hops = draw_loop(
             registrants.as_slice(),
             relays.as_slice(),
-            &BTreeMap::new(),
             &mut FixedEntropy::new([]),
-            |_| true,
         )?;
         let dids = hops.positions().map(|hop| hop.did).collect::<Vec<_>>();
 
@@ -628,9 +649,12 @@ fn test_select_loop_places_each_symbol_on_its_registrants() -> Result<()> {
         assert_eq!(dids.first(), dids.last());
         assert!(!has_duplicate_dids(&hops));
         for (k, registrant) in registrants.iter().enumerate() {
-            let symbol_hop = hops.symbol(k + 1).map(|hop| hop.did);
-            assert!(symbol_hop.is_some_and(|did| registrant.contains(&did)));
-            assert_eq!(symbol_hop.as_ref(), dids.get(3 * (k + 1) - 1));
+            let symbol_hop = hops.symbol(k + 1);
+            assert!(symbol_hop.is_some_and(|hop| registrant.contains(hop)));
+            assert_eq!(
+                symbol_hop.map(|hop| hop.did).as_ref(),
+                dids.get(3 * (k + 1) - 1)
+            );
         }
     }
     Ok(())
@@ -644,16 +668,12 @@ fn test_select_loop_rejects_more_than_max_symbols() -> Result<()> {
         .iter()
         .map(|key| hop(key, TEST_PROCESS_EPOCH))
         .collect::<Vec<_>>();
-    let registrants =
-        vec![relays.iter().map(|hop| hop.did).collect::<BTreeSet<_>>(); MAX_ONION_LOOP_SYMBOLS + 1];
 
     assert!(matches!(
-        select_loop(
-            registrants.as_slice(),
+        draw_loop(
+            &vec![relays.clone(); MAX_ONION_LOOP_SYMBOLS + 1],
             relays.as_slice(),
-            &BTreeMap::new(),
             &mut FixedEntropy::new([]),
-            |_| true,
         ),
         Err(Error::OnionRouteError(
             OnionRouteError::LoopSymbolsOutOfBounds {
@@ -675,30 +695,26 @@ fn test_select_loop_assigns_distinct_symbol_hops_when_possible() -> Result<()> {
         .map(|key| hop(key, TEST_PROCESS_EPOCH))
         .collect::<Vec<_>>();
     let (a, b) = match relays.as_slice() {
-        [first, second, ..] => (first.did, second.did),
+        [first, second, ..] => (*first, *second),
         _ => return Err(Error::InvalidData),
     };
 
     for draw in [0, 1, u64::MAX] {
-        let hops = select_loop(
-            &[BTreeSet::from([a]), BTreeSet::from([a, b])],
+        let hops = draw_loop(
+            &[vec![a], vec![a, b]],
             relays.as_slice(),
-            &BTreeMap::new(),
             &mut FixedEntropy::new([draw; 8]),
-            |_| true,
         )?;
 
-        assert_eq!(hops.symbol(1).map(|hop| hop.did), Some(a));
-        assert_eq!(hops.symbol(2).map(|hop| hop.did), Some(b));
+        assert_eq!(hops.symbol(1), Some(&a));
+        assert_eq!(hops.symbol(2), Some(&b));
         assert!(!has_duplicate_dids(&hops));
     }
     assert!(matches!(
-        select_loop(
-            &[BTreeSet::from([a]), BTreeSet::from([a])],
+        draw_loop(
+            &[vec![a], vec![a]],
             relays.as_slice(),
-            &BTreeMap::new(),
             &mut FixedEntropy::new([]),
-            |_| true,
         ),
         Err(Error::OnionRouteError(
             OnionRouteError::NoDistinctSymbolHops
@@ -707,26 +723,56 @@ fn test_select_loop_assigns_distinct_symbol_hops_when_possible() -> Result<()> {
     Ok(())
 }
 
+/// Hall's condition counts only drawable candidates: a registrant outside the relays cannot
+/// vouch for the symbol position. With `S = {x, a}`, `x` registering no relay, the guard draw
+/// must leave `a` to the symbol although `a` is first in DID order and a permitted guard.
+#[test]
+fn test_hall_filter_ignores_registrants_outside_the_relays() -> Result<()> {
+    let keys = node_keys(1..=5)?;
+    let ordered = in_did_order(keys.as_slice());
+    let (phantom, relays) = match ordered.split_last() {
+        Some((phantom, relays)) => (
+            hop(phantom, TEST_PROCESS_EPOCH),
+            relays
+                .iter()
+                .map(|key| hop(key, TEST_PROCESS_EPOCH))
+                .collect::<Vec<_>>(),
+        ),
+        None => return Err(Error::InvalidData),
+    };
+    let first = *relays.first().ok_or(Error::InvalidData)?;
+
+    let hops = draw_loop(
+        &[vec![phantom, first]],
+        relays.as_slice(),
+        &mut FixedEntropy::new([]),
+    )?;
+
+    assert_ne!(hops.guard().did, first.did);
+    assert_eq!(hops.symbol(1), Some(&first));
+    assert!(hops.positions().all(|hop| hop.did != phantom.did));
+    Ok(())
+}
+
 /// Guard closure (L7): `has_duplicate_dids` admits the guard exactly twice, at `1` and `H`, and
 /// rejects any other repetition, of the guard or of another hop.
 #[test]
 fn test_has_duplicate_dids_admits_exactly_the_guard_twice() -> Result<()> {
     let keys = node_keys(1..=4)?;
-    let labelled = |interior: [usize; 3]| {
-        let mut next = interior.into_iter();
-        OnionLoop::try_unfold(&[()], |step| {
-            let index = match step {
-                OnionLoopStep::Guard { .. } => Some(0),
-                OnionLoopStep::Relay { .. } | OnionLoopStep::Symbol { .. } => next.next(),
-            };
-            index
-                .and_then(|index| keys.get(index))
-                .map(|key| hop(key, TEST_PROCESS_EPOCH))
-                .ok_or(Error::InvalidData)
-        })
+    let labelled = |order: [usize; 4]| {
+        let mut next = order
+            .into_iter()
+            .filter_map(|index| keys.get(index))
+            .map(|key| hop(key, TEST_PROCESS_EPOCH));
+        OnionLoop::try_unfold(
+            OnionPipelineSymbols::new(&[], &()),
+            &mut next,
+            |next, _, _| next.next().ok_or(Error::InvalidData),
+            |next, _, _| next.next().ok_or(Error::InvalidData),
+        )
     };
 
-    let distinct = labelled([1, 2, 3])?;
+    let distinct = labelled([0, 1, 2, 3])?;
     assert!(!has_duplicate_dids(&distinct));
     assert_eq!(
         distinct
@@ -735,9 +781,9 @@ fn test_has_duplicate_dids_admits_exactly_the_guard_twice() -> Result<()> {
             .count(),
         2
     );
-    assert!(has_duplicate_dids(&labelled([0, 2, 3])?));
-    assert!(has_duplicate_dids(&labelled([1, 2, 0])?));
-    assert!(has_duplicate_dids(&labelled([1, 2, 1])?));
+    assert!(has_duplicate_dids(&labelled([0, 0, 2, 3])?));
+    assert!(has_duplicate_dids(&labelled([0, 1, 2, 0])?));
+    assert!(has_duplicate_dids(&labelled([0, 1, 2, 1])?));
     Ok(())
 }
 
@@ -746,12 +792,13 @@ fn test_has_duplicate_dids_admits_exactly_the_guard_twice() -> Result<()> {
 fn test_route_rejects_loop_of_another_pipeline_shape() -> Result<()> {
     let keys = node_keys(1..=7)?;
     let exit = keys.get(2).ok_or(Error::InvalidData)?;
-    let mut next = keys.iter();
-    let hops = OnionLoop::try_unfold(&[(), ()], |_| {
-        next.next()
-            .map(|key| hop(key, TEST_PROCESS_EPOCH))
-            .ok_or(Error::InvalidData)
-    })?;
+    let mut next = keys.iter().map(|key| hop(key, TEST_PROCESS_EPOCH));
+    let hops = OnionLoop::try_unfold(
+        OnionPipelineSymbols::new(&[()], &()),
+        &mut next,
+        |next, _, _| next.next().ok_or(Error::InvalidData),
+        |next, _, _| next.next().ok_or(Error::InvalidData),
+    )?;
 
     assert!(matches!(
         OnionRoute::new(OnionServiceName::tcp(), hops, live_exit(exit)?),

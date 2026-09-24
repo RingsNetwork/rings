@@ -26,6 +26,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::iter;
 
 use rings_core::dht::Did;
 use rings_core::ecc::PublicKey;
@@ -36,8 +37,10 @@ use super::pipeline::OnionPipeline;
 use super::pipeline::OnionSymbolWord;
 use super::OnionExitDescriptor;
 use super::OnionLoop;
+use super::OnionLoopRelay;
 use super::OnionLoopShape;
-use super::OnionLoopStep;
+use super::OnionPending;
+use super::OnionPipelineSymbols;
 use super::OnionProcessEpoch;
 use super::OnionRouteError;
 use super::OnionServiceName;
@@ -162,26 +165,22 @@ impl OnionRoute {
     /// the return segment of [`Self::hops`] is selected but unused.
     pub fn circuit_hops(&self) -> impl Iterator<Item = &OnionRouteHop> {
         self.hops
-            .prefix_to_symbol(OnionLoopShape::SESSION.symbols())
+            .forward_prefix()
+            .chain(iter::once(self.hops.terminal()))
     }
 
-    /// Return the Phase 1 view of [`Self::circuit_hops`]: the relays before `h₁`, then the exit.
-    pub(crate) fn positions(&self) -> OnionPipeline<OnionRouteHop> {
+    /// Return [`Self::circuit_hops`] as the Phase 1 pipeline the data plane seals: the relay
+    /// positions before `h₁`, then the terminal `h₁ = hₙ` (the loop has `n = 1`).
+    pub(crate) fn forward_path(&self) -> OnionPipeline<OnionRouteHop> {
         OnionPipeline::new(
-            self.circuit_hops()
-                .take_while(|hop| hop.did != self.exit.did)
-                .copied()
-                .collect(),
-            OnionRouteHop::of_symbol(&self.exit),
+            self.hops.forward_prefix().copied().collect(),
+            *self.hops.terminal(),
         )
     }
 
-    /// Return the symbol word `relay^k ⋙ service` of [`Self::circuit_hops`].
+    /// Return the symbol word `relay^s ⋙ service` of [`Self::circuit_hops`].
     pub fn word(&self) -> OnionSymbolWord {
-        OnionSymbolWord::new(
-            self.circuit_hops().count().saturating_sub(1),
-            self.service.clone(),
-        )
+        OnionSymbolWord::new(self.hops.forward_prefix().count(), self.service.clone())
     }
 
     /// Return the selected exit descriptor.
@@ -254,16 +253,14 @@ impl OnionRouteCandidates {
 /// Select a route for `request` from live candidates and an explicit guard policy.
 ///
 /// ```text
-/// E  = exits of the service                       E = ∅                      → NoLiveExit
-/// E′ = { e ∈ E | hop(e) ∈ R }   (D2)              E′ = ∅, some DID(e) ∈ R    → StaleExitRegistration
-///                                                 E′ = ∅ otherwise            → ExitWithoutRelayRegistration
-/// e  ← draw { e ∈ E′ | ∃ r ∈ R. r ≠ e ∧ guard_permitted(r) }         none → NoPermittedFirstHop
-/// loop ← select_loop([{e}], R)
+/// E  = exits of the service                        E = ∅                     → NoLiveExit
+/// E′ = { e ∈ E | hop(e) ∈ R }   (D2)               E′ = ∅, some DID(e) ∈ R   → ExitRelayRegistrationMismatch
+///                                                  E′ = ∅ otherwise           → ExitWithoutRelayRegistration
+/// loop ← select_loop(ε ⋙ E, R)                     its symbol position drawn from E′
 /// ```
 ///
-/// The exit is drawn first, among the exits some permitted guard can precede, so the loop drawn
-/// around it never lacks a guard. Callers must state the guard policy explicitly, so a permissive
-/// default cannot bypass entry-guard policy.
+/// Callers must state the guard policy explicitly, so a permissive default cannot bypass
+/// entry-guard policy.
 pub(crate) fn select_onion_route_from_candidates(
     request: &OnionRouteRequest,
     candidates: OnionRouteCandidates,
@@ -273,139 +270,202 @@ pub(crate) fn select_onion_route_from_candidates(
 ) -> Result<OnionRoute> {
     let service = request.service_name();
     let OnionRouteCandidates { relays, exits } = candidates;
-    let (registered, unregistered) = exits
-        .into_iter()
-        .partition::<Vec<_>, _>(|exit| relays.contains(&OnionRouteHop::of_symbol(exit)));
-    if registered.is_empty() {
+    if !exits
+        .iter()
+        .any(|exit| relays.contains(&OnionRouteHop::of_symbol(exit)))
+    {
         let service = service.as_str().to_string();
-        let error = if unregistered.is_empty() {
+        let error = if exits.is_empty() {
             OnionRouteError::NoLiveExit { service }
-        } else if unregistered
+        } else if exits
             .iter()
             .any(|exit| relays.iter().any(|relay| relay.did == exit.did))
         {
-            OnionRouteError::StaleExitRegistration { service }
+            OnionRouteError::ExitRelayRegistrationMismatch { service }
         } else {
             OnionRouteError::ExitWithoutRelayRegistration { service }
         };
         return Err(Error::OnionRouteError(error));
     }
-    let quality_by_did = qualities.into_iter().collect::<BTreeMap<_, _>>();
-    let exit = draw_weighted(
-        registered.into_iter().filter(|exit| {
-            relays
-                .iter()
-                .any(|relay| relay.did != exit.did && guard_permitted(relay.did))
-        }),
-        |exit| exit.did,
-        &quality_by_did,
-        entropy,
-    )
-    .ok_or(Error::OnionRouteError(OnionRouteError::NoPermittedFirstHop))?;
-    let hops = select_loop(
-        &[BTreeSet::from([exit.did])],
+    let drawn = select_loop(
+        OnionPipelineSymbols::new(&[], &exits),
+        OnionRouteHop::of_symbol,
         relays.as_slice(),
-        &quality_by_did,
+        &qualities.into_iter().collect(),
         entropy,
         guard_permitted,
     )?;
+    let (hops, (_, exit)) = drawn.project_symbols(|(hop, _)| *hop);
     OnionRoute::new(service.clone(), hops, exit)
 }
 
-/// Draw a loop for the pipeline whose `k`-th symbol is registered by `symbols[k − 1]`.
+/// A symbol registrant drawable at a symbol position: its relay hop, and the registration `X`.
+type SymbolCandidate<X> = (OnionRouteHop, X);
+
+/// State threaded through one loop draw: the hops already taken and the entropy source.
+struct LoopDraw<'e, E> {
+    /// DIDs of the positions drawn so far.
+    taken: BTreeSet<Did>,
+    /// Source of the weighted draws.
+    entropy: &'e mut E,
+}
+
+/// Draw a loop for the pipeline `symbols`, each symbol given by the registrations `X` of its
+/// registrants, projected to their hops by `project`.
 ///
-/// Every hop comes from `relays`, the relay registrants, so a symbol registrant outside `relays`
-/// registers no `relay` and is never drawn (D2). The loop is unfolded position by position
+/// Every hop comes from `relays`, the relay registrants: a registration whose hop is not in
+/// `relays` registers no `relay` at its epoch and is dropped at entry (D2), so every candidate
+/// Hall's condition counts is drawable. The loop is unfolded position by position
 /// ([`OnionLoop::try_unfold`]); at each position, with `T` the hops already taken and `Sₚ` the
-/// symbols still pending after it, one hop is drawn by quality weight from
+/// candidates of the symbols still pending after it, one hop is drawn by quality weight, in DID
+/// order, from
 ///
 /// ```text
 /// Guard       { r ∈ R ∖ T | guard_permitted(r) ∧ SDR(Sₚ, T ∪ {r}) }   none → NoPermittedFirstHop
 ///                                                                          or NoDistinctSymbolHops
 /// Relay       { r ∈ R ∖ T | SDR(Sₚ, T ∪ {r}) }                        none → NotEnoughLoopHops
-/// Symbol f    { r ∈ R ∖ T | r ∈ f ∧ SDR(Sₚ, T ∪ {r}) }               none → NoDistinctSymbolHops
+/// Symbol f    { c ∈ f ∖ T | SDR(Sₚ, T ∪ {c}) }                        none → NoDistinctSymbolHops
 /// ```
 ///
 /// where `SDR(S, T)` is Hall's condition that the pending symbols can still take pairwise
 /// distinct hops outside `T`. Every draw keeps `SDR(pending, T)`, so a draw never strands a later
 /// symbol: a relay draw fails exactly when fewer than `H − 1` distinct relays exist (fail closed,
 /// D5), and a symbol draw cannot fail once the guard is drawn.
-fn select_loop(
-    symbols: &[BTreeSet<Did>],
+fn select_loop<X: Clone>(
+    symbols: OnionPipelineSymbols<'_, Vec<X>>,
+    project: impl Fn(&X) -> OnionRouteHop,
     relays: &[OnionRouteHop],
     quality_by_did: &BTreeMap<Did, PeerQuality>,
     entropy: &mut impl RouteEntropy,
     guard_permitted: impl Fn(Did) -> bool,
-) -> Result<OnionLoop<OnionRouteHop>> {
-    let required = OnionLoopShape::new(symbols.len())?.distinct_hops();
-    let mut taken = BTreeSet::new();
-    OnionLoop::try_unfold(symbols, |step| {
-        let pending = step.pending();
-        let hop = draw_weighted(
-            relays.iter().copied().filter(|hop| {
-                let eligible = match &step {
-                    OnionLoopStep::Guard { .. } => guard_permitted(hop.did),
-                    OnionLoopStep::Relay { .. } => true,
-                    OnionLoopStep::Symbol { symbol, .. } => symbol.contains(&hop.did),
-                };
-                eligible
-                    && !taken.contains(&hop.did)
-                    && admits_distinct_symbol_hops(pending, |did| {
-                        *did == hop.did || taken.contains(did)
-                    })
-            }),
-            |hop| hop.did,
-            quality_by_did,
+) -> Result<OnionLoop<OnionRouteHop, SymbolCandidate<X>>> {
+    let mut relays = relays.to_vec();
+    relays.sort_by_key(|hop| hop.did);
+    let candidates = |registrations: &Vec<X>| {
+        let mut candidates = registrations
+            .iter()
+            .map(|registration| (project(registration), registration.clone()))
+            .filter(|(hop, _)| relays.contains(hop))
+            .collect::<Vec<_>>();
+        candidates.sort_by_key(|(hop, _)| hop.did);
+        candidates
+    };
+    let intermediate = symbols
+        .intermediate()
+        .iter()
+        .map(candidates)
+        .collect::<Vec<_>>();
+    let terminal = candidates(symbols.terminal());
+    OnionLoop::try_unfold(
+        OnionPipelineSymbols::new(intermediate.as_slice(), &terminal),
+        &mut LoopDraw {
+            taken: BTreeSet::new(),
             entropy,
-        )
-        .ok_or_else(|| {
-            Error::OnionRouteError(match step {
-                OnionLoopStep::Guard { .. } if admits_distinct_symbol_hops(symbols, |_| false) => {
-                    OnionRouteError::NoPermittedFirstHop
-                }
-                OnionLoopStep::Relay { .. } => OnionRouteError::NotEnoughLoopHops {
-                    required,
-                    eligible: relays.len(),
-                },
-                OnionLoopStep::Guard { .. } | OnionLoopStep::Symbol { .. } => {
-                    OnionRouteError::NoDistinctSymbolHops
-                }
-            })
-        })?;
-        taken.insert(hop.did);
-        Ok(hop)
-    })
+        },
+        |draw, relay, cursor| {
+            let pending = pending_dids(&cursor.pending);
+            let hop = draw_weighted(
+                relays.iter().copied().filter(|hop| {
+                    (relay == OnionLoopRelay::Relay || guard_permitted(hop.did))
+                        && !draw.taken.contains(&hop.did)
+                        && admits_distinct_symbol_hops(pending.as_slice(), |did| {
+                            *did == hop.did || draw.taken.contains(did)
+                        })
+                }),
+                |hop| hop.did,
+                quality_by_did,
+                draw.entropy,
+            )
+            .ok_or_else(|| {
+                Error::OnionRouteError(match relay {
+                    OnionLoopRelay::Relay => OnionRouteError::NotEnoughLoopHops {
+                        required: cursor.shape.distinct_hops(),
+                        eligible: relays.len(),
+                    },
+                    OnionLoopRelay::Guard
+                        if admits_distinct_symbol_hops(pending.as_slice(), |_| false) =>
+                    {
+                        OnionRouteError::NoPermittedFirstHop
+                    }
+                    OnionLoopRelay::Guard => OnionRouteError::NoDistinctSymbolHops,
+                })
+            })?;
+            draw.taken.insert(hop.did);
+            Ok(hop)
+        },
+        |draw, symbol, cursor| {
+            let pending = pending_dids(&cursor.pending);
+            let candidate = draw_weighted(
+                symbol
+                    .iter()
+                    .filter(|(hop, _)| {
+                        !draw.taken.contains(&hop.did)
+                            && admits_distinct_symbol_hops(pending.as_slice(), |did| {
+                                *did == hop.did || draw.taken.contains(did)
+                            })
+                    })
+                    .cloned(),
+                |(hop, _)| hop.did,
+                quality_by_did,
+                draw.entropy,
+            )
+            .ok_or(Error::OnionRouteError(
+                OnionRouteError::NoDistinctSymbolHops,
+            ))?;
+            draw.taken.insert(candidate.0.did);
+            Ok(candidate)
+        },
+    )
 }
 
-/// Hall's condition for the pending symbol positions: every subfamily `J` of `symbols`, less the
-/// `excluded` hops, covers at least `|J|` hops,
+/// Return the candidate DIDs of each pending symbol, in pipeline order.
+fn pending_dids<X>(pending: &OnionPending<'_, Vec<SymbolCandidate<X>>>) -> Vec<Vec<Did>> {
+    pending
+        .iter()
+        .map(|candidates| candidates.iter().map(|(hop, _)| hop.did).collect())
+        .collect()
+}
+
+/// Hall's condition for the pending symbol positions,
 ///
 /// ```text
 /// SDR(S, T)  ⇔  ∀ J ⊆ S.  |⋃J ∖ T| ≥ |J|,
 /// ```
 ///
-/// which holds exactly when the positions can still take pairwise distinct hops outside `T`. The
-/// subfamilies are folded one symbol at a time, each paired with its size and union, so the
-/// check needs no index arithmetic; a loop has at most `2^n_max = 16` of them.
-fn admits_distinct_symbol_hops(symbols: &[BTreeSet<Did>], excluded: impl Fn(&Did) -> bool) -> bool {
-    symbols
-        .iter()
-        .fold(
-            vec![(0_usize, BTreeSet::<&Did>::new())],
-            |families, registrant| {
-                let extended = families
-                    .iter()
-                    .map(|(size, union)| {
-                        let mut union = union.clone();
-                        union.extend(registrant.iter().filter(|did| !excluded(did)));
-                        (size + 1, union)
-                    })
-                    .collect::<Vec<_>>();
-                families.into_iter().chain(extended).collect()
-            },
-        )
-        .iter()
-        .all(|(size, union)| union.len() >= *size)
+/// decided by its equivalent: a matching that gives every symbol of `symbols` its own DID outside
+/// the `excluded` set exists. Each symbol is matched in turn along an augmenting path (Kuhn), so
+/// the check takes `O(n · Σ|Sᵢ|)` steps and builds no subfamily.
+fn admits_distinct_symbol_hops(symbols: &[Vec<Did>], excluded: impl Fn(&Did) -> bool) -> bool {
+    let mut owner = BTreeMap::new();
+    (0..symbols.len()).all(|symbol| {
+        augment_symbol_matching(symbols, symbol, &excluded, &mut owner, &mut BTreeSet::new())
+    })
+}
+
+/// Extend the matching `owner` (DID ↦ symbol index) to cover `symbol`, re-matching symbols along
+/// an augmenting path; `visited` holds the DIDs this search has tried.
+fn augment_symbol_matching(
+    symbols: &[Vec<Did>],
+    symbol: usize,
+    excluded: &impl Fn(&Did) -> bool,
+    owner: &mut BTreeMap<Did, usize>,
+    visited: &mut BTreeSet<Did>,
+) -> bool {
+    symbols.get(symbol).is_some_and(|dids| {
+        dids.iter().any(|did| {
+            if excluded(did) || !visited.insert(*did) {
+                return false;
+            }
+            let free = match owner.get(did).copied() {
+                None => true,
+                Some(other) => augment_symbol_matching(symbols, other, excluded, owner, visited),
+            };
+            if free {
+                owner.insert(*did, symbol);
+            }
+            free
+        })
+    })
 }
 
 /// Draw one candidate with probability proportional to the quality weight of its DID, or `None`

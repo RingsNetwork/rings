@@ -212,7 +212,7 @@ fn assign_edges(
     route: &OnionRoute,
     first_circuit_id: OnionCircuitId,
 ) -> Result<OnionPipeline<OnionForwardPosition>> {
-    let positions = route.positions();
+    let positions = route.forward_path();
     let mut circuit_ids = edge_circuit_ids(positions.hop_count(), first_circuit_id)?.into_iter();
     positions.try_map(|hop| {
         circuit_ids

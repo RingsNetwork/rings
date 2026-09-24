@@ -67,9 +67,18 @@ impl Core {
         self.processor.did()
     }
 
+    /// This process's onion role (#834 D2).
     #[cfg(rings_native)]
-    pub(crate) fn onion_process_epoch(&self) -> crate::onion::OnionProcessEpoch {
-        self.processor.onion_process_epoch()
+    pub(crate) fn onion_role(&self) -> &crate::onion::OnionRole<crate::onion::OnionExitOffer> {
+        self.processor.onion_role()
+    }
+
+    /// This process's circuit capabilities: its onion role at its process epoch.
+    #[cfg(rings_native)]
+    pub(crate) fn onion_circuit_capabilities(
+        &self,
+    ) -> crate::onion::circuit::OnionCircuitCapabilities {
+        self.processor.onion_circuit_capabilities()
     }
 
     /// Put a message on the overlay to `to` under `namespace`.

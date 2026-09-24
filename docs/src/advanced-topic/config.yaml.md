@@ -141,7 +141,8 @@ where noted.
   `onion_exit_services`, `onion_exit_policy`: whether and how this node serves as an onion exit.
   Every exit is also a relay: `advertise_onion_exit` requires `advertise_onion_relay`, and each
   exit descriptor carries the same process epoch as the relay capability. Clients select an exit
-  only while both agree.
+  only while both agree. A browser node interprets `https` only, so a browser exit offering `tcp`
+  is rejected when it starts.
   Service names form a closed set: `tcp` (byte streams) and `https` (HTTPS requests, or TLS
   streams over the same name). Any other name, including `relay` (advertised through
   `advertise_onion_relay` instead), is rejected, so restrict an exit's reach with the policy
@@ -192,6 +193,9 @@ gateway starts ⟺ section present ∧ (enabled = true ∨ rings run --gateway)
 * `status_refresh_secs`: refresh interval of onion-exit availability in `/gateway/status`.
 * `onion_service`: exit service used for captured flows. Route length follows the onion loop
   shape (see [HTTP CONNECT proxy](#http-connect-proxy)).
+
+Any other key in the section is rejected rather than ignored, so a misspelt key cannot fall back
+to its default.
 
 ## Bootstrap
 

@@ -122,7 +122,7 @@ impl From<NodeError> for OnionProxyError {
         let kind = match &error {
             NodeError::OnionRouteError(
                 OnionRouteError::NoLiveExit { .. }
-                | OnionRouteError::StaleExitRegistration { .. }
+                | OnionRouteError::ExitRelayRegistrationMismatch { .. }
                 | OnionRouteError::ExitWithoutRelayRegistration { .. },
             ) => OnionProxyFailureKind::ExitUnavailable,
             NodeError::OnionRouteError(

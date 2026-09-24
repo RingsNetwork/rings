@@ -494,7 +494,7 @@ impl Provider {
         )
         .await?;
         provider.set_backend()?;
-        if provider.offers_https_exit() {
+        if provider.processor.onion_role().registers_relay() {
             provider.install_onion_https_protocol()?;
         }
         Ok(provider)
@@ -616,17 +616,12 @@ impl Provider {
         })
     }
 
-    /// Install the browser HTTPS onion-exit handler of this provider's configured exit.
+    /// Install this provider's onion runtime for its processor's [`OnionRole`] now.
     ///
-    /// The exit's services and policy come from the processor's [`OnionRole`], the same value
-    /// its registrations publish, so a provider not configured as an HTTPS exit is rejected
-    /// rather than evaluating exit layers it never advertised.
-    pub fn install_onion_https_exit(&self) -> Result<(), JsError> {
-        if !self.offers_https_exit() {
-            return Err(JsError::from(crate::error::Error::InvalidConfig(
-                "provider is not configured as an HTTPS onion exit".to_string(),
-            )));
-        }
+    /// The browser constructors do this for every role that registers `relay`, so a browser never
+    /// advertises a relay or exit it does not run; a provider built around an existing processor
+    /// calls it once after `set_backend`.
+    pub fn install_onion_runtime(&self) -> Result<(), JsError> {
         self.install_onion_https_protocol()
             .map(|_| ())
             .map_err(JsError::from)
@@ -906,16 +901,11 @@ impl Provider {
 }
 
 impl Provider {
-    /// Return whether the processor's role offers the `https` symbol.
-    fn offers_https_exit(&self) -> bool {
-        self.processor
-            .onion_role()
-            .exit()
-            .is_some_and(|offer| offer.offers(&OnionServiceName::https()))
-    }
-
     /// Install this provider's onion runtime once, with the circuit capabilities of the
-    /// processor's role at its process epoch, and the exit policy of its `https` offer, if any.
+    /// processor's role at its process epoch and, for an exit, the policy of its offer.
+    ///
+    /// A browser's Σ-algebra interprets `https` only, so an exit offering any other service is
+    /// rejected: it would publish descriptors whose loops die at this node.
     fn install_onion_https_protocol(&self) -> crate::error::Result<Arc<OnionHttpsRuntime>> {
         let mut slot = self
             .onion_https_runtime
@@ -929,19 +919,27 @@ impl Provider {
                 "namespace {ONION_CIRCUIT_NAMESPACE:?} is already registered"
             )));
         }
-        let role = self.processor.onion_role();
+        let offer = self.processor.onion_role().exit();
+        if let Some(service) = offer.and_then(|offer| {
+            offer
+                .services()
+                .iter()
+                .find(|service| **service != OnionServiceName::https())
+        }) {
+            return Err(crate::error::Error::InvalidConfig(format!(
+                "a browser onion exit offers only {:?}; it cannot serve {:?}",
+                OnionServiceName::https().as_str(),
+                service.as_str()
+            )));
+        }
         let runtime = Arc::new(OnionHttpsRuntime::new(
             self.processor.delegatee_key().delegatee_public_key(),
         ));
-        if let Some(offer) = role
-            .exit()
-            .filter(|offer| offer.offers(&OnionServiceName::https()))
-        {
+        if let Some(offer) = offer {
             runtime.set_exit_policy(Some(offer.policy().clone()));
         }
-        let epoch = self.processor.onion_process_epoch();
         self.register_protocol(
-            OnionCircuitProtocol::new(role.as_ref().map(|_| epoch)),
+            OnionCircuitProtocol::new(self.processor.onion_circuit_capabilities()),
             self.onion_https_shell(runtime.clone()),
         )?;
         *slot = Some(runtime.clone());

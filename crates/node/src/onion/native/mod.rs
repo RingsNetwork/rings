@@ -61,7 +61,6 @@ use crate::onion::tcp::NativeOnionOpenStream;
 use crate::onion::tcp::NativeOnionTcpExitConfig;
 use crate::onion::tcp::OnionTcpRuntime;
 use crate::onion::OnionProxyTarget;
-use crate::onion::OnionRole;
 use crate::onion::OnionRoute;
 use crate::onion::OnionServiceName;
 
@@ -74,18 +73,22 @@ pub struct NativeOnionCircuitHandle {
 }
 
 impl NativeOnionCircuitHandle {
-    /// Install the route-aware onion circuit protocol for `role`, whose exit rung carries the
-    /// installed TCP exit runtime.
+    /// Install the route-aware onion circuit protocol for the processor's onion role: its
+    /// circuit capabilities and, on the exit rung, the TCP exit runtime of its offer. Both are
+    /// read from the role the processor registers, so what the node publishes and what it
+    /// evaluates agree by construction.
     pub fn install(
         extensions: &Extensions,
         delegatee_key: DelegateeKey,
         network_id: u32,
-        role: OnionRole<NativeOnionTcpExitConfig>,
     ) -> Result<Self> {
-        let epoch = extensions.core().onion_process_epoch();
-        let capabilities = role.as_ref().map(|_| epoch);
-        let (tcp, https) =
-            native_onion_runtimes(delegatee_key.clone(), network_id, role.exit().cloned());
+        let core = extensions.core();
+        let capabilities = core.onion_circuit_capabilities();
+        let exit_config = core
+            .onion_role()
+            .exit()
+            .map(NativeOnionTcpExitConfig::from_offer);
+        let (tcp, https) = native_onion_runtimes(delegatee_key.clone(), network_id, exit_config);
         if let Some(config) = tcp.exit_config() {
             if config.services().contains(&OnionServiceName::https()) {
                 https.set_exit_policy(Some(config.policy().clone()));

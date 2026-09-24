@@ -50,8 +50,8 @@ use super::common::*;
 use super::*;
 use crate::onion::native::NativeOnionCircuitHandle;
 use crate::onion::proxy::OnionProxyConfig;
-use crate::onion::tcp::NativeOnionTcpExitConfig;
 use crate::onion::NativeOnionGatewayConnector;
+use crate::tests::native::prepare_processor_with_onion_role;
 
 const PUBLIC_HTTP_PORT: u16 = 80;
 const PUBLIC_HTTP_IPV4: Ipv4Addr = Ipv4Addr::new(1, 1, 1, 1);
@@ -229,17 +229,15 @@ struct OnionLoopGatewayFixture {
     _providers: Vec<Provider>,
 }
 
-/// Install the onion runtime of `role` on `processor`.
+/// Install the onion runtime of `processor`'s role.
 fn install_gateway_onion(
     provider: &Provider,
     processor: &Processor,
-    role: OnionRole<NativeOnionTcpExitConfig>,
 ) -> Result<NativeOnionCircuitHandle> {
     NativeOnionCircuitHandle::install(
         &provider.extensions(),
         processor.delegatee_key().clone(),
         processor.swarm.network_id(),
-        role,
     )
 }
 
@@ -260,10 +258,18 @@ async fn prepare_onion_loop_public_gateway(
     exit_policy.max_bytes_per_minute = 1_048_576;
 
     let client = Arc::new(prepare_processor().await);
-    let exit = Arc::new(prepare_processor().await);
+    let exit = Arc::new(
+        prepare_processor_with_onion_role(OnionRole::Exit(OnionExitOffer::new(
+            [OnionServiceName::tcp()],
+            exit_policy.clone(),
+        )?))
+        .await,
+    );
     let mut relays = Vec::with_capacity(GATEWAY_FIXTURE_RELAYS);
     for _ in 0..GATEWAY_FIXTURE_RELAYS {
-        relays.push(Arc::new(prepare_processor().await));
+        relays.push(Arc::new(
+            prepare_processor_with_onion_role(OnionRole::Relay).await,
+        ));
     }
     let client_provider = Provider::from_processor(Arc::clone(&client));
     let exit_provider = Provider::from_processor(Arc::clone(&exit));
@@ -271,15 +277,11 @@ async fn prepare_onion_loop_public_gateway(
         .iter()
         .map(|relay| Provider::from_processor(Arc::clone(relay)))
         .collect::<Vec<_>>();
-    let client_onion = install_gateway_onion(&client_provider, &client, OnionRole::Client)?;
+    let client_onion = install_gateway_onion(&client_provider, &client)?;
     for (provider, relay) in relay_providers.iter().zip(relays.iter()) {
-        install_gateway_onion(provider, relay, OnionRole::Relay)?;
+        install_gateway_onion(provider, relay)?;
     }
-    install_gateway_onion(
-        &exit_provider,
-        &exit,
-        OnionRole::Exit(NativeOnionTcpExitConfig::tcp(exit_policy.clone())),
-    )?;
+    install_gateway_onion(&exit_provider, &exit)?;
     client_provider.set_backend()?;
     exit_provider.set_backend()?;
     for provider in relay_providers.iter() {

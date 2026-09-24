@@ -249,7 +249,7 @@ impl TryFrom<ProcessorConfig> for ProcessorConfigSerialized {
                 .onion_role
                 .exit()
                 .map_or_else(default_onion_exit_services, |offer| {
-                    offer.services().to_vec()
+                    offer.services().iter().cloned().collect()
                 }),
             onion_exit_policy: ins
                 .onion_role

@@ -37,7 +37,7 @@ use crate::onion::signature::ONION_SIGNATURE;
 use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitDescriptorBody;
 use crate::onion::OnionLoop;
-use crate::onion::OnionLoopStep;
+use crate::onion::OnionPipelineSymbols;
 use crate::onion::OnionProcessEpoch;
 use crate::onion::OnionRoute;
 use crate::onion::OnionRouteError;
@@ -104,14 +104,13 @@ pub(super) fn session_loop(
     symbol: &DelegateeKey,
     back: &DelegateeKey,
 ) -> OnionLoop<OnionRouteHop> {
-    let mut interior = [relay, symbol, back].into_iter();
-    OnionLoop::try_unfold(&[()], |step| match step {
-        OnionLoopStep::Guard { .. } => Ok(route_hop(guard)),
-        OnionLoopStep::Relay { .. } | OnionLoopStep::Symbol { .. } => interior
-            .next()
-            .map(route_hop)
-            .ok_or(crate::error::Error::InvalidData),
-    })
+    let mut next = [guard, relay, symbol, back].into_iter().map(route_hop);
+    OnionLoop::try_unfold(
+        OnionPipelineSymbols::new(&[], &()),
+        &mut next,
+        |next, _, _| next.next().ok_or(crate::error::Error::InvalidData),
+        |next, _, _| next.next().ok_or(crate::error::Error::InvalidData),
+    )
     .expect("session loop")
 }
 

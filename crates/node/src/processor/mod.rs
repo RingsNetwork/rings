@@ -61,6 +61,7 @@ use crate::observability::PeerRatingSnapshot;
 use crate::observability::SessionKeySnapshot;
 use crate::observability::OPERATOR_SCHEMA_VERSION;
 use crate::observability::PEER_RATING_CAPACITY;
+use crate::onion::circuit::OnionCircuitCapabilities;
 use crate::onion::default_advertise_onion_exit;
 use crate::onion::default_advertise_onion_relay;
 use crate::onion::default_onion_exit_heartbeat_interval_secs;
@@ -233,10 +234,6 @@ impl Processor {
         &self.delegatee_key
     }
 
-    pub(crate) const fn onion_process_epoch(&self) -> OnionProcessEpoch {
-        self.onion_process_epoch
-    }
-
     #[cfg(all(feature = "browser", target_family = "wasm"))]
     pub(crate) fn onion_entry_guards(&self) -> &OnionEntryGuards {
         self.onion_entry_guards.as_ref()
@@ -245,6 +242,12 @@ impl Processor {
     /// Return the onion symbols this process registers (#834 D2).
     pub const fn onion_role(&self) -> &OnionRole<OnionExitOffer> {
         &self.onion_role
+    }
+
+    /// Return this process's circuit capabilities: its onion role at its process epoch, the image
+    /// of [`Self::onion_role`] under `OnionRole::map(|_| e_n)`.
+    pub(crate) fn onion_circuit_capabilities(&self) -> OnionCircuitCapabilities {
+        self.onion_role.as_ref().map(|_| self.onion_process_epoch)
     }
 
     fn registration_context(&self) -> RegistrationContext<'_> {

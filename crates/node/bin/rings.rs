@@ -34,7 +34,6 @@ use rings_node::native::gateway::NativeGatewayRunner;
 use rings_node::onion::native::NativeOnionCircuitHandle;
 use rings_node::onion::proxy::http::run_onion_http_proxy;
 use rings_node::onion::proxy::http::OnionHttpProxyOptions;
-use rings_node::onion::tcp::NativeOnionTcpExitConfig;
 use rings_node::onion::OnionEntryGuardStorage;
 use rings_node::onion::OnionExitTarget;
 use rings_node::onion::OnionServiceName;
@@ -898,10 +897,6 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
         &provider.extensions(),
         onion_delegatee_key,
         pc.network_id(),
-        processor
-            .onion_role()
-            .as_ref()
-            .map(NativeOnionTcpExitConfig::from_offer),
     )?;
     let gateway_runner = gateway_config
         .map(|config| NativeGatewayRunner::new(processor.clone(), onion.clone(), config))

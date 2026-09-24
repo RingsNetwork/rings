@@ -48,13 +48,7 @@ impl NativeOnionTcpExitConfig {
     /// Build the native TCP exit runtime config serving everything `offer` offers.
     pub fn from_offer(offer: &OnionExitOffer) -> Self {
         Self {
-            services: offer
-                .services()
-                .iter()
-                .cloned()
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect(),
+            services: offer.services().iter().cloned().collect(),
             policy: offer.policy().clone(),
             https_proxy: None,
         }
