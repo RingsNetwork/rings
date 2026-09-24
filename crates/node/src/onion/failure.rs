@@ -11,15 +11,6 @@ use crate::error::Error;
 /// Local route/circuit failure before any user-facing rendering.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OnionRouteError {
-    /// A route or circuit was unexpectedly empty.
-    RouteHasNoHops,
-    /// The requested or constructed hop count is outside the circuit bound.
-    HopCountOutOfBounds {
-        /// Requested or constructed hop count.
-        hop_count: usize,
-        /// Maximum hop count accepted by this circuit implementation.
-        max_hops: usize,
-    },
     /// A pipeline has no symbol application or more than the loop admits (#834 D4a).
     LoopSymbolsOutOfBounds {
         /// Number of symbol applications of the pipeline.
@@ -48,6 +39,17 @@ pub enum OnionRouteError {
     NoPermittedFirstHop,
     /// No live exit descriptor offers the requested service.
     NoLiveExit {
+        /// Requested service name.
+        service: String,
+    },
+    /// Every live exit of the service names a process other than its node's current relay
+    /// registration: an exit restarted and its descriptors have not converged (#834 D2).
+    StaleExitRegistration {
+        /// Requested service name.
+        service: String,
+    },
+    /// Every live exit of the service belongs to a node that registers no `relay` (#834 D2).
+    ExitWithoutRelayRegistration {
         /// Requested service name.
         service: String,
     },
@@ -152,11 +154,6 @@ pub enum OnionRouteError {
 impl fmt::Display for OnionRouteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::RouteHasNoHops => f.write_str("onion route has no hops"),
-            Self::HopCountOutOfBounds {
-                hop_count,
-                max_hops,
-            } => write!(f, "onion route hop count {hop_count} exceeds limit {max_hops}"),
             Self::LoopSymbolsOutOfBounds {
                 symbols,
                 max_symbols,
@@ -181,6 +178,14 @@ impl fmt::Display for OnionRouteError {
             Self::NoLiveExit { service } => {
                 write!(f, "no live onion exit offers service {service:?}")
             }
+            Self::StaleExitRegistration { service } => write!(
+                f,
+                "every onion exit offering service {service:?} names a process epoch other than its current relay registration"
+            ),
+            Self::ExitWithoutRelayRegistration { service } => write!(
+                f,
+                "every onion exit offering service {service:?} lacks a relay registration"
+            ),
             Self::NoExitForProxyProtocol { service, protocol } => write!(
                 f,
                 "no live onion exit offers service {service:?} for proxy protocol {protocol:?}"

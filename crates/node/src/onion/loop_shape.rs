@@ -7,14 +7,8 @@
 //! ```
 //!
 //! of `n + 1` segments of `s = ONION_SEGMENT_RELAYS` relays, closed by the client's entry guard
-//! `g = r₀,₁ = rₙ,ₛ`: the guard is relay `1` of the first segment and relay `s` of the last. The
-//! positions are `i ∈ [1, H]`, and the role of each is a function of `i` alone:
-//!
-//! ```text
-//! role(i) = Guard       i = 1 ∨ i = H
-//!         = Symbol(k)   i = (s + 1)·k,  1 ≤ k ≤ n
-//!         = Relay       otherwise
-//! ```
+//! `g = r₀,₁ = rₙ,ₛ`: the guard is relay `1` of the first segment and relay `s` of the last, and
+//! the symbol hop `hₖ` stands at position `(s + 1)·k` of `[1, H]`.
 //!
 //! Laws, for every shape `n ∈ [1, n_max]`:
 //!
@@ -27,9 +21,15 @@
 //!   `H − 2` positions are pairwise distinct and distinct from `g` for every loop a route admits
 //!   (`has_duplicate_dids` in the route module).
 //!
-//! Categorically, [`OnionLoopShape::try_label`] is the traversal of the shape's positions in the
-//! failure monad: it labels the `H − 1` positions of the open path `1 … H − 1` in order and closes
-//! the loop with the guard's label, so `try_label` never labels the guard twice.
+//! The only constructor is [`OnionLoop::try_unfold`], an unfold of the pipeline in the failure
+//! monad along its list zipper: it walks the symbols once, emitting each segment and symbol step
+//! with the symbols still pending after it,
+//!
+//! ```text
+//! unfold [f₁ … fₙ] = Guard · Relay^{s−1} · Π_{k=1..n} (Symbol fₖ · Relay^{s − [k = n]})
+//! ```
+//!
+//! and closes the loop with the guard's label, so the laws above hold by construction.
 
 use std::iter;
 
@@ -57,17 +57,6 @@ const SYMBOL_PERIOD: usize = ONION_SEGMENT_RELAYS + 1;
 /// Number of positions `H(n, s) = n + (n + 1)·s = (s + 1)·n + s` of a loop over `n` symbols.
 const fn loop_hops(symbols: usize) -> usize {
     SYMBOL_PERIOD * symbols + ONION_SEGMENT_RELAYS
-}
-
-/// Role of one loop position (#834 D4c, L7).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum OnionLoopRole {
-    /// The entry guard `g`, at positions `1` and `H` only; it evaluates `relay`.
-    Guard,
-    /// A relay other than the guard; it evaluates `relay`.
-    Relay,
-    /// The symbol hop `hₖ`, evaluating the `k`-th application of the pipeline (`1 ≤ k ≤ n`).
-    Symbol(usize),
 }
 
 /// The shape of a loop over `n ∈ [1, n_max]` symbol applications.
@@ -110,38 +99,39 @@ impl OnionLoopShape {
     pub const fn distinct_hops(self) -> usize {
         self.hop_count() - 1
     }
+}
 
-    /// Return the role of position `i ∈ [1, H]`, or `None` outside the loop.
-    pub const fn role(self, position: usize) -> Option<OnionLoopRole> {
-        if position == 0 || position > self.hop_count() {
-            None
-        } else if position == 1 || position == self.hop_count() {
-            Some(OnionLoopRole::Guard)
-        } else if position.is_multiple_of(SYMBOL_PERIOD) {
-            Some(OnionLoopRole::Symbol(position / SYMBOL_PERIOD))
-        } else {
-            Some(OnionLoopRole::Relay)
+/// One position of the open path `1 … H − 1`, as [`OnionLoop::try_unfold`] asks for its label:
+/// its kind, and the symbols of the pipeline still to be placed after it.
+#[derive(Debug, Eq, PartialEq)]
+pub enum OnionLoopStep<'s, S> {
+    /// Position `1`, the entry guard; it evaluates `relay`.
+    Guard {
+        /// Every symbol of the pipeline.
+        pending: &'s [S],
+    },
+    /// A relay position other than the guard; it evaluates `relay`.
+    Relay {
+        /// The symbols after this position.
+        pending: &'s [S],
+    },
+    /// The symbol hop of `symbol`.
+    Symbol {
+        /// The symbol evaluated here.
+        symbol: &'s S,
+        /// The symbols after this position.
+        pending: &'s [S],
+    },
+}
+
+impl<'s, S> OnionLoopStep<'s, S> {
+    /// Return the symbols still to be placed after this position.
+    pub const fn pending(&self) -> &'s [S] {
+        match self {
+            Self::Guard { pending } | Self::Relay { pending } | Self::Symbol { pending, .. } => {
+                pending
+            }
         }
-    }
-
-    /// Label every position by its role, stopping at the first failure.
-    ///
-    /// `label` is applied to the roles of the open path `1 … H − 1` in position order, so it
-    /// is asked for the guard exactly once; position `H` repeats the guard's label (L7).
-    pub fn try_label<P>(
-        self,
-        mut label: impl FnMut(OnionLoopRole) -> Result<P>,
-    ) -> Result<OnionLoop<P>> {
-        let guard = label(OnionLoopRole::Guard)?;
-        let interior = (2..self.hop_count())
-            .filter_map(|position| self.role(position))
-            .map(&mut label)
-            .collect::<Result<Vec<_>>>()?;
-        Ok(OnionLoop {
-            shape: self,
-            guard,
-            interior,
-        })
     }
 }
 
@@ -156,6 +146,41 @@ pub struct OnionLoop<P> {
 }
 
 impl<P> OnionLoop<P> {
+    /// Unfold the loop of the pipeline `symbols`, labelling each position of the open path
+    /// `1 … H − 1` in order and stopping at the first failure.
+    ///
+    /// `label` is asked for the guard exactly once; position `H` repeats the guard's label (L7).
+    /// A pipeline of `0` or more than `n_max` symbols is rejected before any label is asked.
+    pub fn try_unfold<S>(
+        symbols: &[S],
+        mut label: impl FnMut(OnionLoopStep<'_, S>) -> Result<P>,
+    ) -> Result<Self> {
+        let shape = OnionLoopShape::new(symbols.len())?;
+        let guard = label(OnionLoopStep::Guard { pending: symbols })?;
+        let mut interior = Vec::with_capacity(shape.hop_count() - 2);
+        for _ in 1..ONION_SEGMENT_RELAYS {
+            interior.push(label(OnionLoopStep::Relay { pending: symbols })?);
+        }
+        let mut rest = symbols;
+        while let Some((symbol, pending)) = rest.split_first() {
+            interior.push(label(OnionLoopStep::Symbol { symbol, pending })?);
+            let relays = if pending.is_empty() {
+                ONION_SEGMENT_RELAYS - 1
+            } else {
+                ONION_SEGMENT_RELAYS
+            };
+            for _ in 0..relays {
+                interior.push(label(OnionLoopStep::Relay { pending })?);
+            }
+            rest = pending;
+        }
+        Ok(Self {
+            shape,
+            guard,
+            interior,
+        })
+    }
+
     /// Return the shape of this loop.
     pub const fn shape(&self) -> OnionLoopShape {
         self.shape
@@ -177,9 +202,11 @@ impl<P> OnionLoop<P> {
         self.open_path().chain(iter::once(&self.guard))
     }
 
-    /// Return the label of position `i ∈ [1, H]`, or `None` outside the loop.
-    pub fn position(&self, position: usize) -> Option<&P> {
-        self.positions().nth(position.checked_sub(1)?)
+    /// Return the labels of positions `1 … (s + 1)·k`: the loop from the guard to the symbol
+    /// hop `hₖ`, empty for `k = 0`.
+    pub fn prefix_to_symbol(&self, k: usize) -> impl Iterator<Item = &P> {
+        self.positions()
+            .take(SYMBOL_PERIOD * k.min(self.shape.symbols()))
     }
 
     /// Return the label of the symbol hop `hₖ`, `1 ≤ k ≤ n`, or `None` for any other `k`.
@@ -187,20 +214,44 @@ impl<P> OnionLoop<P> {
         if k == 0 || k > self.shape.symbols() {
             return None;
         }
-        self.position(SYMBOL_PERIOD * k)
+        self.positions().nth(SYMBOL_PERIOD * k - 1)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::OnionLoopRole;
+    use super::OnionLoop;
     use super::OnionLoopShape;
+    use super::OnionLoopStep;
     use super::MAX_ONION_LOOP_HOPS;
     use super::MAX_ONION_LOOP_SYMBOLS;
     use super::ONION_SEGMENT_RELAYS;
     use crate::error::Error;
     use crate::error::Result;
     use crate::onion::OnionRouteError;
+
+    /// The kind of one position, read off the unfolded loop: the guard, a relay, or the symbol
+    /// with index `k` of the pipeline `[1 … n]`.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Kind {
+        Guard,
+        Relay,
+        Symbol(usize),
+    }
+
+    /// Unfold the pipeline `[1 … n]`, labelling each position with its kind and with the number
+    /// of symbols pending after it.
+    fn unfold_kinds(symbols: usize) -> Result<OnionLoop<(Kind, usize)>> {
+        let pipeline = (1..=symbols).collect::<Vec<_>>();
+        OnionLoop::try_unfold(pipeline.as_slice(), |step| {
+            let kind = match step {
+                OnionLoopStep::Guard { .. } => Kind::Guard,
+                OnionLoopStep::Relay { .. } => Kind::Relay,
+                OnionLoopStep::Symbol { symbol, .. } => Kind::Symbol(*symbol),
+            };
+            Ok((kind, step.pending().len()))
+        })
+    }
 
     /// Size (D5): `H = (s + 1)·n + s` for every admitted `n`, `H − 1` distinct hops, and the
     /// derived bound `MAX_ONION_LOOP_HOPS = 14`.
@@ -211,6 +262,7 @@ mod tests {
         assert_eq!(MAX_ONION_LOOP_HOPS, 14);
         for (symbols, hops) in [(1, 5), (2, 8), (3, 11), (4, 14)] {
             let shape = OnionLoopShape::new(symbols)?;
+            let unfolded = unfold_kinds(symbols)?;
             assert_eq!(shape.hop_count(), hops);
             assert_eq!(
                 shape.hop_count(),
@@ -218,125 +270,116 @@ mod tests {
             );
             assert_eq!(shape.distinct_hops(), hops - 1);
             assert!(shape.hop_count() <= MAX_ONION_LOOP_HOPS);
-            assert_eq!(shape.try_label(|_| Ok(()))?.positions().count(), hops);
+            assert_eq!(unfolded.shape(), shape);
+            assert_eq!(unfolded.positions().count(), hops);
+            assert_eq!(unfolded.open_path().count(), hops - 1);
         }
         assert_eq!(OnionLoopShape::SESSION, OnionLoopShape::new(1)?);
         Ok(())
     }
 
-    /// `n = 0` and `n > n_max` are rejected at construction.
+    /// `n = 0` and `n > n_max` are rejected, before any label is asked.
     #[test]
-    fn test_loop_symbols_are_bounded() {
-        for symbols in [0, MAX_ONION_LOOP_SYMBOLS + 1, usize::MAX] {
+    fn test_loop_symbols_are_bounded() -> Result<()> {
+        for symbols in [0, MAX_ONION_LOOP_SYMBOLS + 1] {
+            let pipeline = vec![(); symbols];
+            let mut asked = 0;
             assert!(matches!(
-                OnionLoopShape::new(symbols),
+                OnionLoop::try_unfold(pipeline.as_slice(), |_| {
+                    asked += 1;
+                    Ok(())
+                }),
                 Err(Error::OnionRouteError(OnionRouteError::LoopSymbolsOutOfBounds {
                     symbols: rejected,
                     max_symbols: MAX_ONION_LOOP_SYMBOLS,
                 })) if rejected == symbols
             ));
+            assert_eq!(asked, 0);
         }
-    }
-
-    /// Segment (D5) and guard closure (L7): the guard is at `1` and `H` only, the `k`-th symbol hop
-    /// at `(s + 1)·k`, and exactly `s` relay positions, the guard counted, lie before `h₁`,
-    /// between consecutive symbol hops and after `hₙ`.
-    #[test]
-    fn test_loop_roles_interleave_segments_of_s_relays() -> Result<()> {
-        for symbols in 1..=MAX_ONION_LOOP_SYMBOLS {
-            let shape = OnionLoopShape::new(symbols)?;
-            let roles = (1..=shape.hop_count())
-                .map(|position| shape.role(position))
-                .collect::<Option<Vec<_>>>()
-                .ok_or(Error::InvalidData)?;
-            let guards = roles
-                .iter()
-                .enumerate()
-                .filter(|(_, role)| **role == OnionLoopRole::Guard)
-                .map(|(index, _)| index + 1)
-                .collect::<Vec<_>>();
-            let symbol_positions = roles
-                .iter()
-                .enumerate()
-                .filter_map(|(index, role)| match role {
-                    OnionLoopRole::Symbol(k) => Some((*k, index + 1)),
-                    OnionLoopRole::Guard | OnionLoopRole::Relay => None,
-                })
-                .collect::<Vec<_>>();
-            let segments = roles
-                .split(|role| matches!(role, OnionLoopRole::Symbol(_)))
-                .map(<[OnionLoopRole]>::len)
-                .collect::<Vec<_>>();
-
-            assert_eq!(guards, vec![1, shape.hop_count()]);
-            assert_eq!(
-                symbol_positions,
-                (1..=symbols)
-                    .map(|k| (k, (ONION_SEGMENT_RELAYS + 1) * k))
-                    .collect::<Vec<_>>()
-            );
-            assert_eq!(segments, vec![ONION_SEGMENT_RELAYS; symbols + 1]);
-            assert_eq!(shape.role(0), None);
-            assert_eq!(shape.role(shape.hop_count() + 1), None);
-        }
+        assert!(OnionLoopShape::new(usize::MAX).is_err());
         Ok(())
     }
 
-    /// Labelling asks for the guard once and closes the loop with it; the open path holds the
-    /// `H − 1` distinct labels and every symbol hop sits at its role's position.
+    /// Segment (D5) and guard closure (L7): the guard is at `1` and `H` only, the `k`-th symbol at
+    /// `(s + 1)·k`, exactly `s` relay positions, the guard counted, lie before `h₁`, between
+    /// consecutive symbols and after `hₙ`, and every position sees the symbols after it.
     #[test]
-    fn test_try_label_closes_the_loop_with_one_guard_label() -> Result<()> {
+    fn test_unfold_interleaves_segments_of_s_relays() -> Result<()> {
         for symbols in 1..=MAX_ONION_LOOP_SYMBOLS {
-            let shape = OnionLoopShape::new(symbols)?;
-            let mut asked = Vec::new();
-            let labelled = shape.try_label(|role| {
-                asked.push(role);
-                Ok(asked.len())
-            })?;
-            let positions = labelled.positions().copied().collect::<Vec<_>>();
+            let unfolded = unfold_kinds(symbols)?;
+            let positions = unfolded.positions().copied().collect::<Vec<_>>();
+            let kinds = positions.iter().map(|(kind, _)| *kind).collect::<Vec<_>>();
+            let guards = (1..=positions.len())
+                .filter(|position| kinds.get(position - 1) == Some(&Kind::Guard))
+                .collect::<Vec<_>>();
+            let segments = kinds
+                .split(|kind| matches!(kind, Kind::Symbol(_)))
+                .map(<[Kind]>::len)
+                .collect::<Vec<_>>();
 
-            assert_eq!(
-                asked
-                    .iter()
-                    .filter(|role| **role == OnionLoopRole::Guard)
-                    .count(),
-                1
-            );
-            assert_eq!(positions.first(), positions.last());
-            assert_eq!(
-                labelled.open_path().copied().collect::<Vec<_>>(),
-                (1..shape.hop_count()).collect::<Vec<_>>()
-            );
+            assert_eq!(guards, vec![1, positions.len()]);
             for k in 1..=symbols {
                 assert_eq!(
-                    labelled.symbol(k),
-                    labelled.position((ONION_SEGMENT_RELAYS + 1) * k)
+                    kinds.get((ONION_SEGMENT_RELAYS + 1) * k - 1),
+                    Some(&Kind::Symbol(k))
                 );
                 assert_eq!(
-                    asked.get((ONION_SEGMENT_RELAYS + 1) * k - 1),
-                    Some(&OnionLoopRole::Symbol(k))
+                    unfolded.symbol(k),
+                    positions.get((ONION_SEGMENT_RELAYS + 1) * k - 1)
                 );
             }
-            assert_eq!(labelled.symbol(0), None);
-            assert_eq!(labelled.symbol(symbols + 1), None);
-            assert_eq!(labelled.guard(), &1);
+            assert_eq!(segments, vec![ONION_SEGMENT_RELAYS; symbols + 1]);
+            assert!(positions.iter().all(|(kind, pending)| match kind {
+                Kind::Guard => *pending == symbols,
+                Kind::Symbol(k) => *pending == symbols - k,
+                Kind::Relay => true,
+            }));
+            assert_eq!(unfolded.symbol(0), None);
+            assert_eq!(unfolded.symbol(symbols + 1), None);
+            assert_eq!(
+                unfolded.prefix_to_symbol(1).count(),
+                ONION_SEGMENT_RELAYS + 1
+            );
         }
         Ok(())
     }
 
-    /// Labelling stops at the first failure.
+    /// Unfolding asks for the guard once and closes the loop with it.
     #[test]
-    fn test_try_label_propagates_the_first_failure() {
-        let mut calls = 0;
-        let labelled = OnionLoopShape::SESSION.try_label(|role| {
-            calls += 1;
-            match role {
-                OnionLoopRole::Symbol(_) => Err(Error::InvalidData),
-                OnionLoopRole::Guard | OnionLoopRole::Relay => Ok(()),
+    fn test_unfold_closes_the_loop_with_one_guard_label() -> Result<()> {
+        for symbols in 1..=MAX_ONION_LOOP_SYMBOLS {
+            let pipeline = vec![(); symbols];
+            let mut asked = 0;
+            let unfolded = OnionLoop::try_unfold(pipeline.as_slice(), |_| {
+                asked += 1;
+                Ok(asked)
+            })?;
+            let positions = unfolded.positions().copied().collect::<Vec<_>>();
+
+            assert_eq!(asked, unfolded.shape().distinct_hops());
+            assert_eq!(positions.first(), positions.last());
+            assert_eq!(unfolded.guard(), &1);
+            assert_eq!(
+                unfolded.open_path().copied().collect::<Vec<_>>(),
+                (1..=unfolded.shape().distinct_hops()).collect::<Vec<_>>()
+            );
+        }
+        Ok(())
+    }
+
+    /// Unfolding stops at the first failure.
+    #[test]
+    fn test_unfold_propagates_the_first_failure() {
+        let mut asked = 0;
+        let unfolded = OnionLoop::<()>::try_unfold(&[()], |step| {
+            asked += 1;
+            match step {
+                OnionLoopStep::Symbol { .. } => Err(Error::InvalidData),
+                OnionLoopStep::Guard { .. } | OnionLoopStep::Relay { .. } => Ok(()),
             }
         });
 
-        assert!(matches!(labelled, Err(Error::InvalidData)));
-        assert_eq!(calls, 3);
+        assert!(matches!(unfolded, Err(Error::InvalidData)));
+        assert_eq!(asked, 3);
     }
 }

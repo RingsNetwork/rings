@@ -22,12 +22,9 @@ pub struct ProcessorBuilder {
     pub(in crate::processor) online_node_type: OnlineNodeType,
     pub(in crate::processor) advertise_presence: bool,
     pub(in crate::processor) dht_virtual_nodes: u16,
-    pub(in crate::processor) advertise_onion_relay: bool,
-    pub(in crate::processor) advertise_onion_exit: bool,
+    pub(in crate::processor) onion_role: OnionRole<OnionExitOffer>,
     pub(in crate::processor) onion_exit_heartbeat_interval: Duration,
     pub(in crate::processor) onion_exit_ttl: Duration,
-    pub(in crate::processor) onion_exit_services: Vec<OnionServiceName>,
-    pub(in crate::processor) onion_exit_policy: OnionExitPolicy,
     pub(in crate::processor) dht_finger_table_size: usize,
     pub(in crate::processor) reassembly_limits: ReassemblyLimits,
 }
@@ -60,12 +57,9 @@ impl ProcessorBuilder {
             online_node_type: config.online_node_type.clone(),
             advertise_presence: config.advertise_presence,
             dht_virtual_nodes: config.dht_virtual_nodes,
-            advertise_onion_relay: config.advertise_onion_relay,
-            advertise_onion_exit: config.advertise_onion_exit,
+            onion_role: config.onion_role.clone(),
             onion_exit_heartbeat_interval: config.onion_exit_heartbeat_interval,
             onion_exit_ttl: config.onion_exit_ttl,
-            onion_exit_services: config.onion_exit_services.clone(),
-            onion_exit_policy: config.onion_exit_policy.clone(),
             dht_finger_table_size: DEFAULT_FINGER_TABLE_SIZE,
             reassembly_limits: ReassemblyLimits::production(),
         })
@@ -137,15 +131,9 @@ impl ProcessorBuilder {
         self
     }
 
-    /// Set whether listen() advertises this node as an onion relay.
-    pub fn advertise_onion_relay(mut self, advertise: bool) -> Self {
-        self.advertise_onion_relay = advertise;
-        self
-    }
-
-    /// Set whether listen() publishes this node as an onion exit.
-    pub fn advertise_onion_exit(mut self, advertise: bool) -> Self {
-        self.advertise_onion_exit = advertise;
+    /// Set the onion symbols this process registers (#834 D2).
+    pub fn onion_role(mut self, role: OnionRole<OnionExitOffer>) -> Self {
+        self.onion_role = role;
         self
     }
 
@@ -167,7 +155,8 @@ impl ProcessorBuilder {
         let endpoint_hint = self.external_address.clone();
         let online_node_capabilities = OnlineNodeCapabilities {
             onion_relay: self
-                .advertise_onion_relay
+                .onion_role
+                .registers_relay()
                 .then_some(self.onion_process_epoch),
         };
         let delegatee_key = self.delegatee_key.clone();
@@ -182,13 +171,12 @@ impl ProcessorBuilder {
         if self.advertise_presence {
             registration_tasks.push(Arc::new(online_node_registration.clone()));
         }
-        if self.advertise_onion_exit {
+        if let Some(offer) = self.onion_role.exit() {
             let onion_exit_registration = OnionExitRegistration::new(
                 self.onion_exit_heartbeat_interval,
                 self.onion_exit_ttl,
                 self.online_node_type,
-                self.onion_exit_services,
-                self.onion_exit_policy,
+                offer.clone(),
                 self.onion_process_epoch,
             );
             registration_tasks.push(Arc::new(onion_exit_registration));
@@ -233,8 +221,7 @@ impl ProcessorBuilder {
             online_node_registration,
             measure,
             listener_lifecycle_lock: Arc::new(futures::lock::Mutex::new(())),
-            #[cfg(all(feature = "browser", target_family = "wasm"))]
-            advertise_onion_relay: self.advertise_onion_relay,
+            onion_role: self.onion_role,
             registration_tasks,
             observability,
         })
@@ -253,16 +240,10 @@ impl ProcessorBuilder {
             self.online_node_ttl,
         )?;
         validate_onion_exit_registration_timing(
-            self.advertise_onion_exit,
+            self.onion_role.exit().is_some(),
             self.onion_exit_heartbeat_interval,
             self.onion_exit_ttl,
         )?;
-        validate_onion_role_config(
-            self.advertise_presence,
-            self.advertise_onion_relay,
-            self.advertise_onion_exit,
-            &self.onion_exit_services,
-            &self.onion_exit_policy,
-        )
+        validate_onion_role_config(self.advertise_presence, &self.onion_role)
     }
 }

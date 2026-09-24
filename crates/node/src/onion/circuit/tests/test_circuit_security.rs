@@ -94,7 +94,7 @@ fn test_backward_cell_after_return_expiry_is_never_forwarded() {
         )
         .expect("encrypt backward fixture"),
     });
-    let reducer = OnionCircuitReducer::new(OnionCircuitCapabilities::from_registration(true, None));
+    let reducer = OnionCircuitReducer::new(OnionCircuitCapabilities::Relay);
     let transition = reducer.apply(&state, OnionCircuitInput::CellReady {
         from: next.delegator_did(),
         received_at_ms: 111,
@@ -226,7 +226,7 @@ fn test_crypto_limiter_bounds_sender_window() {
 #[test]
 fn test_one_hop_cover_cell_has_no_state_transition_or_effect() {
     let peer = session();
-    let reducer = OnionCircuitReducer::new(OnionCircuitCapabilities::from_registration(true, None));
+    let reducer = OnionCircuitReducer::new(OnionCircuitCapabilities::Relay);
     let state = OnionCircuitState::default();
 
     let transition = reducer.apply(&state, OnionCircuitInput::CellReady {

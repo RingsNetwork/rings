@@ -23,12 +23,12 @@ use super::super::pending::PendingOnionHttpsRequest;
 use super::super::*;
 use crate::onion::circuit::OnionAuthenticatedPayload;
 use crate::onion::circuit::OnionReturnId;
-use crate::onion::loop_shape::OnionLoopRole;
 use crate::onion::proxy::OnionProxyProtocol;
 use crate::onion::proxy::OnionProxyRoute;
 use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitDescriptorBody;
-use crate::onion::OnionLoopShape;
+use crate::onion::OnionLoop;
+use crate::onion::OnionLoopStep;
 use crate::onion::OnionRoute;
 use crate::onion::OnionRouteHop;
 use crate::onion::OnionServiceName;
@@ -191,14 +191,13 @@ fn https_route(exit: &DelegateeKey, guard: &DelegateeKey) -> OnionProxyRoute {
         )
     };
     let mut interior = [hop(&session()), symbol, hop(&session())].into_iter();
-    let hops = OnionLoopShape::SESSION
-        .try_label(|role| match role {
-            OnionLoopRole::Guard => Ok(hop(guard)),
-            OnionLoopRole::Relay | OnionLoopRole::Symbol(_) => {
-                interior.next().ok_or(Error::InvalidData)
-            }
-        })
-        .expect("HTTPS loop");
+    let hops = OnionLoop::try_unfold(&[()], |step| match step {
+        OnionLoopStep::Guard { .. } => Ok(hop(guard)),
+        OnionLoopStep::Relay { .. } | OnionLoopStep::Symbol { .. } => {
+            interior.next().ok_or(Error::InvalidData)
+        }
+    })
+    .expect("HTTPS loop");
     let route = OnionRoute::new(OnionServiceName::https(), hops, descriptor).expect("HTTPS route");
     OnionProxyRoute {
         protocol: OnionProxyProtocol::HttpsProxy,

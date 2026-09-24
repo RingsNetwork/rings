@@ -44,7 +44,7 @@ pub(crate) struct OnionProxyHttpRequest {
 pub(crate) struct OnionProxyRoute {
     /// Onion service name selected by the core route builder.
     pub(crate) service: String,
-    /// DIDs of the onion loop's positions, the entry guard first and last.
+    /// DIDs of the hops the circuit uses, entry guard first and exit last.
     pub(crate) hops: Vec<String>,
     /// Exit DID.
     pub(crate) exit: String,
@@ -120,11 +120,14 @@ impl From<String> for OnionProxyError {
 impl From<NodeError> for OnionProxyError {
     fn from(error: NodeError) -> Self {
         let kind = match &error {
-            NodeError::OnionRouteError(OnionRouteError::NoLiveExit { .. }) => {
-                OnionProxyFailureKind::ExitUnavailable
-            }
+            NodeError::OnionRouteError(
+                OnionRouteError::NoLiveExit { .. }
+                | OnionRouteError::StaleExitRegistration { .. }
+                | OnionRouteError::ExitWithoutRelayRegistration { .. },
+            ) => OnionProxyFailureKind::ExitUnavailable,
             NodeError::OnionRouteError(
                 OnionRouteError::NotEnoughLoopHops { .. }
+                | OnionRouteError::NoDistinctSymbolHops
                 | OnionRouteError::NoPermittedFirstHop
                 | OnionRouteError::NoExitForProxyProtocol { .. }
                 | OnionRouteError::NoExitAllowsTarget { .. },
@@ -339,8 +342,7 @@ fn display_route(route: &NodeOnionProxyRoute) -> OnionProxyRoute {
         service: route.exit_service().to_string(),
         hops: route
             .route
-            .hops()
-            .positions()
+            .circuit_hops()
             .map(|hop| hop.did.to_string())
             .collect(),
         exit: route.exit_did().to_string(),

@@ -69,19 +69,18 @@ use crate::onion::default_onion_exit_services;
 use crate::onion::default_onion_exit_ttl_secs;
 use crate::onion::directory;
 use crate::onion::directory::OnionDirectoryReader;
-use crate::onion::https_onion_exit_services;
 use crate::onion::proxy::OnionProxyConfig;
 use crate::onion::proxy::OnionProxyRoute;
 use crate::onion::proxy::OnionProxyTarget;
-#[cfg(all(feature = "browser", target_family = "wasm"))]
-use crate::onion::proxy::ONION_PROXY_HTTPS_SERVICE;
 use crate::onion::validate_onion_exit_registration_timing;
 use crate::onion::OnionEntryGuardStorage;
 use crate::onion::OnionEntryGuards;
 use crate::onion::OnionExitDescriptor;
+use crate::onion::OnionExitOffer;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionExitRegistration;
 use crate::onion::OnionProcessEpoch;
+use crate::onion::OnionRole;
 use crate::onion::OnionServiceName;
 use crate::onion::ONION_EXITS_TOPIC;
 use crate::online::OnlineNodeCapabilities;
@@ -217,8 +216,8 @@ pub struct Processor {
     /// Serializes listener generations across every clone and wrapper of this processor.
     /// Ownership includes graceful maintenance shutdown and measurement flushing.
     listener_lifecycle_lock: Arc<futures::lock::Mutex<()>>,
-    #[cfg(all(feature = "browser", target_family = "wasm"))]
-    advertise_onion_relay: bool,
+    /// Onion symbols this process registers (#834 D2).
+    onion_role: OnionRole<OnionExitOffer>,
     registration_tasks: Vec<Arc<dyn RegistrationTask>>,
     /// Process-local bounded recorder backing the authenticated operator surface.
     observability: Arc<Observability>,
@@ -243,9 +242,9 @@ impl Processor {
         self.onion_entry_guards.as_ref()
     }
 
-    #[cfg(all(feature = "browser", target_family = "wasm"))]
-    pub(crate) fn advertise_onion_relay(&self) -> bool {
-        self.advertise_onion_relay
+    /// Return the onion symbols this process registers (#834 D2).
+    pub const fn onion_role(&self) -> &OnionRole<OnionExitOffer> {
+        &self.onion_role
     }
 
     fn registration_context(&self) -> RegistrationContext<'_> {

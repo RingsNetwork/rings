@@ -13,6 +13,7 @@ use crate::extension::ext::Extensions;
 use crate::onion::circuit::OnionCircuitHandler;
 use crate::onion::tcp::NativeOnionTcpExitConfig;
 use crate::onion::OnionExitPolicy;
+use crate::onion::OnionRole;
 use crate::onion::OnionServiceName;
 use crate::tests::TEST_NETWORK_ID;
 
@@ -27,12 +28,16 @@ async fn test_install_rejects_duplicate_namespace_instead_of_splitting_runtime()
         &extensions,
         delegatee_key.clone(),
         network_id,
-        false,
-        None,
+        OnionRole::Client,
     )?;
 
     assert!(matches!(
-        NativeOnionCircuitHandle::install(&extensions, delegatee_key, network_id, false, None),
+        NativeOnionCircuitHandle::install(
+            &extensions,
+            delegatee_key,
+            network_id,
+            OnionRole::Client
+        ),
         Err(Error::ExtensionError(_))
     ));
     Ok(())

@@ -125,6 +125,33 @@ struct GatewaySection<'a> {
     gateway: &'a NativeGatewayConfig,
 }
 
+/// Keys of the `gateway:` section removed by the onion loop cutover (#834 D5).
+///
+/// The section flattens [`GatewayConfig`], so serde cannot deny its unknown keys; these are
+/// rejected by name instead of being silently ignored.
+const REMOVED_GATEWAY_KEYS: [&str; 2] = ["onion_hop_count", "onion_allow_short_paths"];
+
+/// Deserialize the `gateway:` section, rejecting every key of [`REMOVED_GATEWAY_KEYS`].
+fn deserialize_gateway_section<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<NativeGatewayConfig>, D::Error>
+where D: serde::Deserializer<'de> {
+    let Some(section) = Option::<serde_yaml::Mapping>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    if let Some(key) = REMOVED_GATEWAY_KEYS
+        .into_iter()
+        .find(|key| section.contains_key(*key))
+    {
+        return Err(serde::de::Error::custom(format!(
+            "gateway.{key} was removed: the onion route length is fixed by the loop shape (#834 D5)"
+        )));
+    }
+    serde_yaml::from_value(serde_yaml::Value::Mapping(section))
+        .map(Some)
+        .map_err(serde::de::Error::custom)
+}
+
 const fn default_gateway_status_refresh_secs() -> u64 {
     DEFAULT_GATEWAY_STATUS_REFRESH_SECS
 }
@@ -229,7 +256,11 @@ pub struct Config {
     /// Native TUN gateway section; `rings init` writes it disabled, and it starts a gateway in
     /// the same foreground lifecycle only under `enabled: true` or `--gateway`. Older configs
     /// without the section load as `None`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_gateway_section",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub gateway: Option<NativeGatewayConfig>,
     /// Managed bootstrap targets `rings run` keeps reachable for the life of the process.
     #[serde(default)]
@@ -635,6 +666,28 @@ gateway:
                 "onion_service",
             ])
         );
+    }
+
+    /// The route-length keys removed by the onion loop cutover are rejected by name, not ignored
+    /// by the flattened gateway section.
+    #[test]
+    fn gateway_section_rejects_removed_route_length_keys() {
+        for (key, value) in [
+            ("onion_hop_count", "3"),
+            ("onion_allow_short_paths", "true"),
+        ] {
+            let document = format!(
+                "{CONFIG_WITHOUT_GATEWAY_SECTION}{GATEWAY_SECTION_WITHOUT_ENABLED}  {key}: {value}\n"
+            );
+
+            let error = match serde_yaml::from_str::<Config>(&document) {
+                Ok(_) => panic!("gateway.{key} must be rejected"),
+                Err(error) => error.to_string(),
+            };
+
+            assert!(error.contains(&format!("gateway.{key} was removed")));
+            assert!(error.contains("loop shape"));
+        }
     }
 
     #[test]

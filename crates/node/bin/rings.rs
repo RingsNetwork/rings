@@ -1,5 +1,6 @@
 //! Rings native node command-line entrypoint.
 
+use std::env;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::str::FromStr;
@@ -705,8 +706,26 @@ struct InspectCommand {
     client_args: ClientArgs,
 }
 
+/// Environment variables of the run options removed by the onion loop cutover (#834 D5). Clap
+/// ignores an environment variable no argument reads, so a set one is rejected here instead.
+const REMOVED_ONION_ROUTE_ENV: [&str; 2] = [
+    "ONION_HTTP_PROXY_HOP_COUNT",
+    "ONION_HTTP_PROXY_ALLOW_SHORT_PATHS",
+];
+
+/// Reject every variable of [`REMOVED_ONION_ROUTE_ENV`] that `is_set` reports as set.
+fn reject_removed_onion_route_env(is_set: impl Fn(&str) -> bool) -> anyhow::Result<()> {
+    match REMOVED_ONION_ROUTE_ENV.into_iter().find(|name| is_set(name)) {
+        Some(name) => Err(anyhow::anyhow!(
+            "{name} was removed: the onion route length is fixed by the loop shape (#834 D5); unset it"
+        )),
+        None => Ok(()),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
+    reject_removed_onion_route_env(|name| env::var_os(name).is_some())?;
     let config_path = args.config_args.config.clone();
     let mut c = config::Config::read_fs(&config_path)?;
 
@@ -800,10 +819,6 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
     )?;
 
     let onion_delegatee_key = pc.delegatee_key();
-    let advertise_onion_relay = c.advertise_onion_relay;
-    let advertise_onion_exit = c.advertise_onion_exit;
-    let onion_exit_services = c.onion_exit_services.clone();
-    let onion_exit_policy = c.onion_exit_policy.clone();
     let onion_http_proxy_addr = c.onion_http_proxy_addr.clone();
     let onion_http_proxy_service = c.onion_http_proxy_service.clone();
     let onion_http_proxy_header_timeout_secs = c.onion_http_proxy_header_timeout_secs;
@@ -879,15 +894,14 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
     // registered interpreters.
     let _relay =
         rings_node::extension::protocols::relay::RelayHandle::install(&provider.extensions())?;
-    let onion_exit_config = advertise_onion_exit
-        .then(|| NativeOnionTcpExitConfig::new(onion_exit_services, onion_exit_policy.clone()))
-        .transpose()?;
     let onion = NativeOnionCircuitHandle::install(
         &provider.extensions(),
         onion_delegatee_key,
         pc.network_id(),
-        advertise_onion_relay,
-        onion_exit_config,
+        processor
+            .onion_role()
+            .as_ref()
+            .map(NativeOnionTcpExitConfig::from_offer),
     )?;
     let gateway_runner = gateway_config
         .map(|config| NativeGatewayRunner::new(processor.clone(), onion.clone(), config))
@@ -1331,8 +1345,26 @@ mod tests {
     use super::await_task_cleanup;
     use super::onion_entry_guard_storage_path;
     use super::provisional_evidence_storage_path;
+    use super::reject_removed_onion_route_env;
     use super::transaction_replay_storage_path;
     use super::Cli;
+    use super::REMOVED_ONION_ROUTE_ENV;
+
+    /// A set environment variable of a removed route-length option is rejected by name; an
+    /// environment without one passes.
+    #[test]
+    fn test_removed_onion_route_env_is_rejected() {
+        assert!(reject_removed_onion_route_env(|_| false).is_ok());
+        for removed in REMOVED_ONION_ROUTE_ENV {
+            let error = reject_removed_onion_route_env(|name| name == removed)
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_default();
+
+            assert!(error.starts_with(removed));
+            assert!(error.contains("loop shape"));
+        }
+    }
 
     fn parse_without_log_level_env<const N: usize>(args: [&str; N]) -> Result<Cli, clap::Error> {
         let matches = Cli::command()

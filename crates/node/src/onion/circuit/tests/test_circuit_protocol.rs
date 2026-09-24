@@ -30,7 +30,6 @@ use crate::extension::ext::Interpret;
 use crate::extension::ext::Protocol;
 use crate::extension::ext::Scope;
 use crate::extension::ext::Wire;
-use crate::onion::loop_shape::OnionLoopRole;
 use crate::onion::replay::OnionForwardReplayKey;
 use crate::onion::replay::OnionForwardReplayPartitions;
 use crate::onion::replay::ReplayAdmission;
@@ -38,7 +37,7 @@ use crate::onion::signature::ONION_SIGNATURE;
 use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitDescriptorBody;
 use crate::onion::OnionLoop;
-use crate::onion::OnionLoopShape;
+use crate::onion::OnionLoopStep;
 use crate::onion::OnionProcessEpoch;
 use crate::onion::OnionRoute;
 use crate::onion::OnionRouteError;
@@ -106,15 +105,14 @@ pub(super) fn session_loop(
     back: &DelegateeKey,
 ) -> OnionLoop<OnionRouteHop> {
     let mut interior = [relay, symbol, back].into_iter();
-    OnionLoopShape::SESSION
-        .try_label(|role| match role {
-            OnionLoopRole::Guard => Ok(route_hop(guard)),
-            OnionLoopRole::Relay | OnionLoopRole::Symbol(_) => interior
-                .next()
-                .map(route_hop)
-                .ok_or(crate::error::Error::InvalidData),
-        })
-        .expect("session loop")
+    OnionLoop::try_unfold(&[()], |step| match step {
+        OnionLoopStep::Guard { .. } => Ok(route_hop(guard)),
+        OnionLoopStep::Relay { .. } | OnionLoopStep::Symbol { .. } => interior
+            .next()
+            .map(route_hop)
+            .ok_or(crate::error::Error::InvalidData),
+    })
+    .expect("session loop")
 }
 
 /// An `https` route whose Phase 1 view is `guard → relay → exit`; the loop returns through a
@@ -588,8 +586,7 @@ fn test_hidden_cell_direction_defers_relay_capability_check_until_after_cell_dec
         test_payload("tcp-shutdown"),
     )
     .expect("encode forward");
-    let protocol =
-        OnionCircuitProtocol::new(OnionCircuitCapabilities::from_registration(false, None));
+    let protocol = OnionCircuitProtocol::new(OnionCircuitCapabilities::Client);
     let event = decode_event(
         &protocol,
         client.delegator_did(),
@@ -645,8 +642,7 @@ async fn test_relay_capability_does_not_execute_exit_layer() {
     )
     .expect("encode exit layer");
     let payload = relay_to_terminal(&[&guard, &previous], &payload);
-    let protocol =
-        OnionCircuitProtocol::new(OnionCircuitCapabilities::from_registration(true, None));
+    let protocol = OnionCircuitProtocol::new(OnionCircuitCapabilities::Relay);
     let shell = OnionCircuitShell::new(relay.clone(), RecordingHandler::default());
     let scope = test_scope(relay.clone());
     let state = protocol.init();
@@ -950,10 +946,7 @@ async fn test_endpoint_send_awaits_the_same_paced_link_lane_and_emits_cover() {
 #[test]
 fn test_expired_exit_layer_emits_no_exit_effect() {
     let client = session();
-    let reducer = OnionCircuitReducer::new(OnionCircuitCapabilities::from_registration(
-        false,
-        Some(TEST_PROCESS_EPOCH),
-    ));
+    let reducer = OnionCircuitReducer::new(OnionCircuitCapabilities::Exit(TEST_PROCESS_EPOCH));
     let state = OnionCircuitState::default();
     let circuit_id = OnionCircuitId::new([8; 16]);
 
@@ -980,7 +973,7 @@ fn test_expired_exit_layer_emits_no_exit_effect() {
 #[test]
 fn test_read_only_reducer_arm_structurally_shares_return_state() {
     let peer = session();
-    let reducer = OnionCircuitReducer::new(OnionCircuitCapabilities::from_registration(true, None));
+    let reducer = OnionCircuitReducer::new(OnionCircuitCapabilities::Relay);
     let state = OnionCircuitState::default();
 
     let transition = reducer.apply(&state, OnionCircuitInput::CellReady {
@@ -997,10 +990,7 @@ fn test_read_only_reducer_arm_structurally_shares_return_state() {
 #[test]
 fn test_overlong_exit_layer_emits_no_exit_effect() {
     let client = session();
-    let reducer = OnionCircuitReducer::new(OnionCircuitCapabilities::from_registration(
-        false,
-        Some(TEST_PROCESS_EPOCH),
-    ));
+    let reducer = OnionCircuitReducer::new(OnionCircuitCapabilities::Exit(TEST_PROCESS_EPOCH));
     let state = OnionCircuitState::default();
     let received_at_ms = 100;
     let circuit_id = OnionCircuitId::new([38; 16]);
@@ -1043,8 +1033,7 @@ async fn test_relay_decrypts_one_layer_and_remembers_return_hop() {
     )
     .expect("encode forward");
     let payload = relay_to_terminal(&[&guard], &payload);
-    let protocol =
-        OnionCircuitProtocol::new(OnionCircuitCapabilities::from_registration(true, None));
+    let protocol = OnionCircuitProtocol::new(OnionCircuitCapabilities::Relay);
     let shell = OnionCircuitShell::new(relay.clone(), RecordingHandler::default());
     let scope = test_scope(relay.clone());
     let event = decode_event(
@@ -1135,8 +1124,7 @@ async fn test_two_relays_peel_fixed_size_cells_through_the_exit_reducer_and_shel
     .expect("encode multi-hop route");
     assert_eq!(first_peer, first.delegator_did());
 
-    let first_protocol =
-        OnionCircuitProtocol::new(OnionCircuitCapabilities::from_registration(true, None));
+    let first_protocol = OnionCircuitProtocol::new(OnionCircuitCapabilities::Relay);
     let first_shell = OnionCircuitShell::new(first.clone(), RecordingHandler::default());
     let first_scope = test_scope(first.clone());
     let first_transition = peel_forward_cell(
@@ -1171,8 +1159,7 @@ async fn test_two_relays_peel_fixed_size_cells_through_the_exit_reducer_and_shel
         .expect("seal second-hop cell");
     assert_eq!(first_payload.len(), second_payload.len());
 
-    let second_protocol =
-        OnionCircuitProtocol::new(OnionCircuitCapabilities::from_registration(true, None));
+    let second_protocol = OnionCircuitProtocol::new(OnionCircuitCapabilities::Relay);
     let second_shell = OnionCircuitShell::new(second.clone(), RecordingHandler::default());
     let second_scope = test_scope(second.clone());
     let second_transition = peel_forward_cell(
@@ -1208,10 +1195,8 @@ async fn test_two_relays_peel_fixed_size_cells_through_the_exit_reducer_and_shel
         seal_encoded_message(encoded_message, *recipient, Some(*bucket)).expect("seal exit cell");
     assert_eq!(first_payload.len(), exit_payload.len());
 
-    let exit_protocol = OnionCircuitProtocol::new(OnionCircuitCapabilities::from_registration(
-        false,
-        Some(TEST_PROCESS_EPOCH),
-    ));
+    let exit_protocol =
+        OnionCircuitProtocol::new(OnionCircuitCapabilities::Exit(TEST_PROCESS_EPOCH));
     let exit_shell = OnionCircuitShell::new(exit.clone(), RecordingHandler::default());
     let exit_scope = test_scope(exit.clone());
     let exit_transition = peel_forward_cell(
@@ -1253,10 +1238,8 @@ async fn test_restarted_exit_rejects_old_epoch_before_replay_state_or_side_effec
     .expect("encode original process cell");
     let payload = relay_to_terminal(&[&guard, &relay], &payload);
 
-    let original_protocol = OnionCircuitProtocol::new(OnionCircuitCapabilities::from_registration(
-        false,
-        Some(original_epoch),
-    ));
+    let original_protocol =
+        OnionCircuitProtocol::new(OnionCircuitCapabilities::Exit(original_epoch));
     let original_handler = RecordingHandler::default();
     let original_shell = OnionCircuitShell::new(exit.clone(), original_handler.clone());
     let original_scope = test_scope(exit.clone());
@@ -1285,9 +1268,8 @@ async fn test_restarted_exit_rejects_old_epoch_before_replay_state_or_side_effec
     .expect("original exit effect completed");
 
     let restarted_handler = RecordingHandler::default();
-    let restarted_protocol = OnionCircuitProtocol::new(
-        OnionCircuitCapabilities::from_registration(false, Some(RESTARTED_PROCESS_EPOCH)),
-    );
+    let restarted_protocol =
+        OnionCircuitProtocol::new(OnionCircuitCapabilities::Exit(RESTARTED_PROCESS_EPOCH));
     let restarted_shell = OnionCircuitShell::new(exit.clone(), restarted_handler.clone());
     let restarted_scope = test_scope(exit.clone());
     let restarted_transition = peel_forward_cell(
@@ -1309,8 +1291,7 @@ async fn test_restarted_exit_rejects_old_epoch_before_replay_state_or_side_effec
 async fn test_client_backward_payload_decryption_runs_in_shell_handler() {
     let client = session();
     let exit = session();
-    let protocol =
-        OnionCircuitProtocol::new(OnionCircuitCapabilities::from_registration(false, None));
+    let protocol = OnionCircuitProtocol::new(OnionCircuitCapabilities::Client);
     let handler = RecordingHandler::default();
     let shell = OnionCircuitShell::new(client.clone(), handler.clone());
     let scope = test_scope(client.clone());

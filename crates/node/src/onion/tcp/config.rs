@@ -6,6 +6,7 @@ use reqwest::Url;
 
 use crate::error::Error;
 use crate::error::Result;
+use crate::onion::OnionExitOffer;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionServiceName;
 
@@ -42,6 +43,21 @@ impl NativeOnionTcpExitConfig {
             policy,
             https_proxy: None,
         })
+    }
+
+    /// Build the native TCP exit runtime config serving everything `offer` offers.
+    pub fn from_offer(offer: &OnionExitOffer) -> Self {
+        Self {
+            services: offer
+                .services()
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+            policy: offer.policy().clone(),
+            https_proxy: None,
+        }
     }
 
     /// Build a native TCP exit config for the reserved `tcp` service.

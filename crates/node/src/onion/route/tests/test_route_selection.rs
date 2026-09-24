@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
+use std::ops::RangeInclusive;
 
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
@@ -38,14 +39,24 @@ const HEARTBEAT_MS: u128 = 20;
 /// Expiry of every live fixture descriptor.
 const EXPIRES_MS: u128 = 100;
 
-/// Draw a fresh node session.
-fn node_key() -> Result<DelegateeKey> {
-    DelegateeKey::new_with_seckey(&SecretKey::random()).map_err(Error::CoreError)
+/// The node whose account secret key is `[seed; 32]`: fixed DIDs make every DID-ordered draw
+/// reproducible. `seed` is non-zero.
+fn node_key(seed: u8) -> Result<DelegateeKey> {
+    let secret =
+        SecretKey::try_from(format!("{seed:02x}").repeat(32).as_str()).map_err(Error::CoreError)?;
+    DelegateeKey::new_with_seckey(&secret).map_err(Error::CoreError)
 }
 
-/// Draw `count` fresh node sessions.
-fn node_keys(count: usize) -> Result<Vec<DelegateeKey>> {
-    (0..count).map(|_| node_key()).collect()
+/// The nodes of `seeds`.
+fn node_keys(seeds: RangeInclusive<u8>) -> Result<Vec<DelegateeKey>> {
+    seeds.map(node_key).collect()
+}
+
+/// `keys` in DID order, the order of every weighted draw.
+fn in_did_order(keys: &[DelegateeKey]) -> Vec<&DelegateeKey> {
+    let mut ordered = keys.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|key| key.delegator_did());
+    ordered
 }
 
 /// The relay hop of `key` at `epoch`.
@@ -217,9 +228,9 @@ fn assert_session_loop(route: &OnionRoute) {
 /// everywhere else, closing the loop through one guard (D4c, D5, L7).
 #[test]
 fn test_route_is_a_guard_closed_loop_of_registrants() -> Result<()> {
-    let local = node_key()?.delegator_did();
-    let relays = node_keys(3)?;
-    let exit = node_key()?;
+    let local = node_key(1)?.delegator_did();
+    let relays = node_keys(2..=4)?;
+    let exit = node_key(5)?;
     let online = relays
         .iter()
         .chain([&exit])
@@ -254,10 +265,10 @@ fn test_route_is_a_guard_closed_loop_of_registrants() -> Result<()> {
 /// shortens the loop; a node without the relay capability is not counted.
 #[test]
 fn test_selection_fails_closed_below_distinct_hop_bound() -> Result<()> {
-    let local = node_key()?.delegator_did();
-    let relays = node_keys(2)?;
-    let bystander = node_key()?;
-    let exit = node_key()?;
+    let local = node_key(1)?.delegator_did();
+    let relays = node_keys(2..=3)?;
+    let bystander = node_key(4)?;
+    let exit = node_key(5)?;
     let mut online = relays
         .iter()
         .chain([&exit])
@@ -288,50 +299,50 @@ fn test_selection_fails_closed_below_distinct_hop_bound() -> Result<()> {
     Ok(())
 }
 
-/// Registration (D2): a symbol descriptor is eligible only while the same process registers
-/// `relay`. A descriptor whose node registers no relay epoch (missing) or another relay epoch
-/// (stale) is rejected; a matching one is kept.
+/// Registration (D2): an exit is selected only while its process registers `relay` at the same
+/// epoch. Each rejection names its cause: no relay registration at all, or a relay registration
+/// of another process (stale).
 #[test]
-fn test_symbol_registrant_requires_its_current_relay_epoch() -> Result<()> {
-    let local = node_key()?.delegator_did();
-    let current = node_key()?;
-    let restarted = node_key()?;
-    let relay_less = node_key()?;
-    let unregistered = node_key()?;
-    let online = vec![
-        live_relay(&current)?,
-        live_relay(&restarted)?,
-        online_descriptor(
+fn test_exit_requires_its_current_relay_registration() -> Result<()> {
+    let local = node_key(1)?.delegator_did();
+    let relays = node_keys(2..=4)?;
+    let exit = node_key(5)?;
+    let relay_less = node_key(6)?;
+    let online = relays
+        .iter()
+        .chain([&exit])
+        .map(live_relay)
+        .chain([online_descriptor(
             &relay_less,
             OnlineNodeCapabilities::default(),
             TEST_NETWORK_ID,
             EXPIRES_MS,
-        )?,
-    ];
-    let exits = vec![
-        live_exit(&current)?,
-        exit_descriptor(&restarted, STALE_PROCESS_EPOCH, TEST_NETWORK_ID, EXPIRES_MS)?,
-        live_exit(&relay_less)?,
-        live_exit(&unregistered)?,
-    ];
+        )])
+        .collect::<Result<Vec<_>>>()?;
+    let stale = exit_descriptor(&exit, STALE_PROCESS_EPOCH, TEST_NETWORK_ID, EXPIRES_MS)?;
+    let select = |exits: Vec<OnionExitDescriptor>| {
+        select_onion_route_from_candidates(
+            &tcp_request(),
+            tcp_candidates(local, online.clone(), exits),
+            Vec::new(),
+            &mut FixedEntropy::new([]),
+            |_| true,
+        )
+    };
 
-    let candidates = tcp_candidates(local, online, exits);
-
+    assert!(matches!(
+        select(vec![stale]),
+        Err(Error::OnionRouteError(OnionRouteError::StaleExitRegistration { service }))
+            if service == "tcp"
+    ));
+    assert!(matches!(
+        select(vec![live_exit(&relay_less)?, live_exit(&node_key(7)?)?]),
+        Err(Error::OnionRouteError(OnionRouteError::ExitWithoutRelayRegistration { service }))
+            if service == "tcp"
+    ));
     assert_eq!(
-        candidates
-            .exits
-            .iter()
-            .map(|descriptor| descriptor.did)
-            .collect::<Vec<_>>(),
-        vec![current.delegator_did()]
-    );
-    assert_eq!(
-        candidates
-            .relays
-            .iter()
-            .map(|relay| relay.did)
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([current.delegator_did(), restarted.delegator_did()])
+        select(vec![live_exit(&relay_less)?, live_exit(&exit)?])?.exit_did(),
+        exit.delegator_did()
     );
     Ok(())
 }
@@ -339,17 +350,17 @@ fn test_symbol_registrant_requires_its_current_relay_epoch() -> Result<()> {
 /// A route cannot be built over a symbol hop whose epoch differs from its descriptor's.
 #[test]
 fn test_route_rejects_symbol_hop_with_stale_epoch() -> Result<()> {
-    let keys = node_keys(4)?;
+    let keys = node_keys(1..=4)?;
     let exit = keys.get(2).ok_or(Error::InvalidData)?;
     let mut next = keys.iter();
-    let stale = OnionLoopShape::SESSION.try_label(|_| {
+    let stale = OnionLoop::try_unfold(&[()], |_| {
         next.next()
             .map(|key| hop(key, STALE_PROCESS_EPOCH))
             .ok_or(Error::InvalidData)
-    });
+    })?;
 
     assert!(matches!(
-        stale.and_then(|hops| OnionRoute::new(OnionServiceName::tcp(), hops, live_exit(exit)?)),
+        OnionRoute::new(OnionServiceName::tcp(), stale, live_exit(exit)?),
         Err(Error::OnionRouteError(OnionRouteError::ExitHopMismatch))
     ));
     Ok(())
@@ -358,8 +369,8 @@ fn test_route_rejects_symbol_hop_with_stale_epoch() -> Result<()> {
 /// Descriptors past their expiry are not candidates.
 #[test]
 fn test_directory_candidates_reject_expired_remote_descriptors() -> Result<()> {
-    let local = node_key()?.delegator_did();
-    let relay = node_key()?;
+    let local = node_key(1)?.delegator_did();
+    let relay = node_key(2)?;
     let expired_at = 40;
 
     let candidates = tcp_candidates(
@@ -386,8 +397,8 @@ fn test_directory_candidates_reject_expired_remote_descriptors() -> Result<()> {
 /// Descriptors signed for another network are not candidates.
 #[test]
 fn test_directory_candidates_reject_foreign_network_descriptors() -> Result<()> {
-    let local = node_key()?.delegator_did();
-    let relay = node_key()?;
+    let local = node_key(1)?.delegator_did();
+    let relay = node_key(2)?;
     let foreign_network = 2;
 
     let candidates = tcp_candidates(
@@ -451,14 +462,12 @@ fn candidates_with_exit(
 }
 
 /// The guard is drawn by quality weight: a healthy guard (weight 8) wins a draw of `1` against
-/// a degraded one (weight 1) listed first.
+/// a degraded one (weight 1) first in DID order.
 #[test]
 fn test_guard_is_drawn_by_quality_weight() -> Result<()> {
-    let relays = node_keys(3)?;
-    let exit = node_key()?;
-    let mut by_did = relays.iter().collect::<Vec<_>>();
-    by_did.sort_by_key(|key| key.delegator_did());
-    let (degraded, healthy) = match by_did.as_slice() {
+    let relays = node_keys(1..=3)?;
+    let exit = node_key(4)?;
+    let (degraded, healthy) = match in_did_order(relays.as_slice()).as_slice() {
         [first, second, ..] => (first.delegator_did(), second.delegator_did()),
         _ => return Err(Error::InvalidData),
     };
@@ -470,7 +479,7 @@ fn test_guard_is_drawn_by_quality_weight() -> Result<()> {
             (degraded, PeerQuality::Degraded),
             (healthy, PeerQuality::Healthy),
         ],
-        &mut FixedEntropy::new([1]),
+        &mut FixedEntropy::new([0, 1]),
         |did| did == degraded || did == healthy,
     )?;
 
@@ -482,8 +491,8 @@ fn test_guard_is_drawn_by_quality_weight() -> Result<()> {
 /// The guard is drawn from the permitted first hops only; later relays need no permission.
 #[test]
 fn test_guard_policy_constrains_the_guard_only() -> Result<()> {
-    let relays = node_keys(3)?;
-    let exit = node_key()?;
+    let relays = node_keys(1..=3)?;
+    let exit = node_key(4)?;
     let direct = relays
         .last()
         .map(DelegateeKey::delegator_did)
@@ -502,13 +511,42 @@ fn test_guard_policy_constrains_the_guard_only() -> Result<()> {
     Ok(())
 }
 
-/// A permitted guard that is also the only other registrant of the symbol is still drawn as
-/// guard when another registrant can take the symbol position.
+/// Hall's filter keeps the sole symbol registrant out of the guard: it is first in DID order and
+/// a permitted guard, so an unfiltered draw of `0` would take it, and the symbol position would
+/// be stranded.
+#[test]
+fn test_hall_filter_keeps_the_sole_registrant_out_of_the_guard() -> Result<()> {
+    let keys = node_keys(1..=4)?;
+    let ordered = in_did_order(keys.as_slice());
+    let registrant = ordered
+        .first()
+        .map(|key| key.delegator_did())
+        .ok_or(Error::InvalidData)?;
+    let relays = ordered
+        .iter()
+        .map(|key| hop(key, TEST_PROCESS_EPOCH))
+        .collect::<Vec<_>>();
+
+    let hops = select_loop(
+        &[BTreeSet::from([registrant])],
+        relays.as_slice(),
+        &BTreeMap::new(),
+        &mut FixedEntropy::new([]),
+        |_| true,
+    )?;
+
+    assert_ne!(hops.guard().did, registrant);
+    assert_eq!(hops.symbol(1).map(|hop| hop.did), Some(registrant));
+    Ok(())
+}
+
+/// A permitted guard that is also a registrant of the symbol is still drawn as guard when
+/// another registrant can take the symbol position.
 #[test]
 fn test_guard_never_strands_the_symbol_position() -> Result<()> {
-    let relays = node_keys(2)?;
-    let direct = node_key()?;
-    let remote = node_key()?;
+    let relays = node_keys(1..=2)?;
+    let direct = node_key(3)?;
+    let remote = node_key(4)?;
     let direct_did = direct.delegator_did();
     let candidates = OnionRouteCandidates {
         relays: relays
@@ -536,10 +574,10 @@ fn test_guard_never_strands_the_symbol_position() -> Result<()> {
 /// The only permitted guard cannot be the only symbol registrant: no loop exists.
 #[test]
 fn test_route_rejects_loop_without_permitted_guard() -> Result<()> {
-    let relays = node_keys(3)?;
-    let exit = node_key()?;
+    let relays = node_keys(1..=3)?;
+    let exit = node_key(4)?;
     let exit_did = exit.delegator_did();
-    let outsider = node_key()?.delegator_did();
+    let outsider = node_key(5)?.delegator_did();
 
     for permitted in [exit_did, outsider] {
         let result = select_onion_route_from_candidates(
@@ -565,7 +603,8 @@ fn test_route_rejects_loop_without_permitted_guard() -> Result<()> {
 fn test_select_loop_places_each_symbol_on_its_registrants() -> Result<()> {
     for symbols in 1..=MAX_ONION_LOOP_SYMBOLS {
         let shape = OnionLoopShape::new(symbols)?;
-        let keys = node_keys(shape.distinct_hops())?;
+        let count = u8::try_from(shape.distinct_hops()).map_err(|_| Error::InvalidData)?;
+        let keys = node_keys(1..=count)?;
         let relays = keys
             .iter()
             .map(|key| hop(key, TEST_PROCESS_EPOCH))
@@ -600,7 +639,7 @@ fn test_select_loop_places_each_symbol_on_its_registrants() -> Result<()> {
 /// `n > n_max` is rejected before any draw.
 #[test]
 fn test_select_loop_rejects_more_than_max_symbols() -> Result<()> {
-    let keys = node_keys(16)?;
+    let keys = node_keys(1..=16)?;
     let relays = keys
         .iter()
         .map(|key| hop(key, TEST_PROCESS_EPOCH))
@@ -630,7 +669,7 @@ fn test_select_loop_rejects_more_than_max_symbols() -> Result<()> {
 /// `a` at `h₁` and `b` at `h₂`, and with `S₁ = S₂ = {a}` no loop exists.
 #[test]
 fn test_select_loop_assigns_distinct_symbol_hops_when_possible() -> Result<()> {
-    let keys = node_keys(7)?;
+    let keys = node_keys(1..=7)?;
     let relays = keys
         .iter()
         .map(|key| hop(key, TEST_PROCESS_EPOCH))
@@ -672,13 +711,13 @@ fn test_select_loop_assigns_distinct_symbol_hops_when_possible() -> Result<()> {
 /// rejects any other repetition, of the guard or of another hop.
 #[test]
 fn test_has_duplicate_dids_admits_exactly_the_guard_twice() -> Result<()> {
-    let keys = node_keys(4)?;
+    let keys = node_keys(1..=4)?;
     let labelled = |interior: [usize; 3]| {
         let mut next = interior.into_iter();
-        OnionLoopShape::SESSION.try_label(|role| {
-            let index = match role {
-                OnionLoopRole::Guard => Some(0),
-                OnionLoopRole::Relay | OnionLoopRole::Symbol(_) => next.next(),
+        OnionLoop::try_unfold(&[()], |step| {
+            let index = match step {
+                OnionLoopStep::Guard { .. } => Some(0),
+                OnionLoopStep::Relay { .. } | OnionLoopStep::Symbol { .. } => next.next(),
             };
             index
                 .and_then(|index| keys.get(index))
@@ -705,11 +744,10 @@ fn test_has_duplicate_dids_admits_exactly_the_guard_twice() -> Result<()> {
 /// A route admits only the loop of its one-symbol pipeline.
 #[test]
 fn test_route_rejects_loop_of_another_pipeline_shape() -> Result<()> {
-    let shape = OnionLoopShape::new(2)?;
-    let keys = node_keys(shape.distinct_hops())?;
+    let keys = node_keys(1..=7)?;
     let exit = keys.get(2).ok_or(Error::InvalidData)?;
     let mut next = keys.iter();
-    let hops = shape.try_label(|_| {
+    let hops = OnionLoop::try_unfold(&[(), ()], |_| {
         next.next()
             .map(|key| hop(key, TEST_PROCESS_EPOCH))
             .ok_or(Error::InvalidData)

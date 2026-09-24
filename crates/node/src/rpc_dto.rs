@@ -15,6 +15,7 @@ use rings_core::measure::PeerQualityEvidence;
 use rings_core::message::MessageVerification;
 use rings_rpc::protos::rings_node::OnionExitDescriptorInfo;
 use rings_rpc::protos::rings_node::OnionExitPolicyInfo;
+use rings_rpc::protos::rings_node::OnlineNodeCapabilitiesInfo;
 use rings_rpc::protos::rings_node::OnlineNodeDescriptorInfo;
 use rings_rpc::protos::rings_node::OnlineNodeTypeInfo;
 use rings_rpc::protos::rings_node::PeerCreditInfo;
@@ -85,7 +86,13 @@ pub(crate) fn online_node_descriptor_info(
         network_id: descriptor.network_id,
         storage_redundancy: descriptor.storage_redundancy,
         dht_virtual_nodes: descriptor.dht_virtual_nodes,
-        capabilities: json_value(descriptor.capabilities)?,
+        capabilities: OnlineNodeCapabilitiesInfo {
+            onion_relay: descriptor
+                .capabilities
+                .onion_relay
+                .map(json_value)
+                .transpose()?,
+        },
         endpoint_hint: descriptor.endpoint_hint,
         started_at_ms: descriptor_timestamp_ms(descriptor.started_at_ms)?,
         heartbeat_at_ms: descriptor_timestamp_ms(descriptor.heartbeat_at_ms)?,
@@ -182,7 +189,13 @@ pub(crate) fn online_node_descriptor_from_info(
         network_id: descriptor.network_id,
         storage_redundancy: descriptor.storage_redundancy,
         dht_virtual_nodes: descriptor.dht_virtual_nodes,
-        capabilities: from_json_value::<OnlineNodeCapabilities>(descriptor.capabilities)?,
+        capabilities: OnlineNodeCapabilities {
+            onion_relay: descriptor
+                .capabilities
+                .onion_relay
+                .map(from_json_value::<crate::onion::OnionProcessEpoch>)
+                .transpose()?,
+        },
         endpoint_hint: descriptor.endpoint_hint,
         started_at_ms: u128::from(descriptor.started_at_ms),
         heartbeat_at_ms: u128::from(descriptor.heartbeat_at_ms),

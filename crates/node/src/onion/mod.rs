@@ -54,12 +54,13 @@ mod failure;
 mod gateway;
 #[cfg(any(rings_native, rings_browser))]
 pub mod https;
-pub mod loop_shape;
+mod loop_shape;
 #[cfg(rings_native)]
 pub mod native;
 pub mod pipeline;
 pub mod proxy;
 pub(crate) mod replay;
+mod role;
 pub mod route;
 pub mod signature;
 pub mod target;
@@ -75,9 +76,12 @@ pub use failure::OnionRouteError;
 pub use gateway::NativeOnionGatewayConnector;
 pub use loop_shape::OnionLoop;
 pub use loop_shape::OnionLoopShape;
+pub use loop_shape::OnionLoopStep;
 pub use loop_shape::MAX_ONION_LOOP_HOPS;
 pub use loop_shape::MAX_ONION_LOOP_SYMBOLS;
 pub use loop_shape::ONION_SEGMENT_RELAYS;
+pub use role::OnionExitOffer;
+pub use role::OnionRole;
 pub(crate) use route::select_onion_route_from_candidates;
 pub use route::OnionRoute;
 pub(crate) use route::OnionRouteCandidates;
@@ -625,8 +629,7 @@ pub(crate) struct OnionExitRegistration {
     node_type: OnlineNodeType,
     process_epoch: OnionProcessEpoch,
     started_at_ms: u128,
-    services: Vec<OnionServiceName>,
-    policy: OnionExitPolicy,
+    offer: OnionExitOffer,
     publisher: DhtRegistrationPublisher,
 }
 
@@ -635,8 +638,7 @@ impl OnionExitRegistration {
         heartbeat_interval: Duration,
         ttl: Duration,
         node_type: OnlineNodeType,
-        services: Vec<OnionServiceName>,
-        policy: OnionExitPolicy,
+        offer: OnionExitOffer,
         process_epoch: OnionProcessEpoch,
     ) -> Self {
         Self {
@@ -645,8 +647,7 @@ impl OnionExitRegistration {
             node_type,
             process_epoch,
             started_at_ms: get_epoch_ms(),
-            services,
-            policy,
+            offer,
             publisher: DhtRegistrationPublisher::new(ONION_EXITS_TOPIC),
         }
     }
@@ -657,7 +658,8 @@ impl OnionExitRegistration {
         context: &RegistrationContext<'_>,
         now_ms: u128,
     ) -> Result<Vec<OnionExitDescriptor>> {
-        self.services
+        self.offer
+            .services()
             .iter()
             .cloned()
             .map(|service| self.descriptor_for_service(context, now_ms, service))
@@ -679,7 +681,7 @@ impl OnionExitRegistration {
                 node_type: self.node_type.clone(),
                 network_id: context.network_id(),
                 service,
-                policy: self.policy.clone(),
+                policy: self.offer.policy().clone(),
                 started_at_ms: self.started_at_ms,
                 heartbeat_at_ms: now_ms,
                 expires_at_ms: now_ms + self.ttl.as_millis(),

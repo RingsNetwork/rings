@@ -49,7 +49,6 @@ use crate::onion::OnionRouteError;
 use crate::onion::OnionRouteHop;
 #[cfg(rings_native)]
 use crate::onion::OnionServiceName;
-use crate::onion::MAX_ONION_LOOP_HOPS;
 
 /// Message family of the exit's backward-payload signature.
 const ONION_BACKWARD_PAYLOAD_DOMAIN_TAG: DomainTag =
@@ -142,9 +141,9 @@ impl OnionCircuitPath {
     }
 }
 
-/// Return the first overlay hop of a route.
+/// Return the first overlay hop of a route: its entry guard.
 pub fn route_first_hop(route: &OnionRoute) -> Did {
-    route.positions().first().did
+    route.hops().guard().did
 }
 
 /// Seal one forward frame for `positions` and address it to position zero.
@@ -213,9 +212,9 @@ fn assign_edges(
     route: &OnionRoute,
     first_circuit_id: OnionCircuitId,
 ) -> Result<OnionPipeline<OnionForwardPosition>> {
-    let mut circuit_ids =
-        edge_circuit_ids(route.positions().hop_count(), first_circuit_id)?.into_iter();
-    route.positions().try_map(|hop| {
+    let positions = route.positions();
+    let mut circuit_ids = edge_circuit_ids(positions.hop_count(), first_circuit_id)?.into_iter();
+    positions.try_map(|hop| {
         circuit_ids
             .next()
             .map(|circuit_id| OnionForwardPosition { hop, circuit_id })
@@ -321,14 +320,6 @@ pub(super) fn edge_circuit_ids_with(
     mut next_id: impl FnMut() -> OnionCircuitId,
 ) -> Result<Vec<OnionCircuitId>> {
     const MAX_ALLOCATION_ATTEMPTS_PER_EDGE: usize = 16;
-    if hop_count == 0 || hop_count > MAX_ONION_LOOP_HOPS {
-        return Err(Error::OnionRouteError(
-            OnionRouteError::HopCountOutOfBounds {
-                hop_count,
-                max_hops: MAX_ONION_LOOP_HOPS,
-            },
-        ));
-    }
     let mut ids = Vec::with_capacity(hop_count);
     ids.push(first_circuit_id);
     while ids.len() < hop_count {

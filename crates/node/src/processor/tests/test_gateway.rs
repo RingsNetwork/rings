@@ -229,18 +229,17 @@ struct OnionLoopGatewayFixture {
     _providers: Vec<Provider>,
 }
 
-/// Install a relaying onion runtime on `processor`, with `exit` as its exit configuration.
+/// Install the onion runtime of `role` on `processor`.
 fn install_gateway_onion(
     provider: &Provider,
     processor: &Processor,
-    exit: Option<NativeOnionTcpExitConfig>,
+    role: OnionRole<NativeOnionTcpExitConfig>,
 ) -> Result<NativeOnionCircuitHandle> {
     NativeOnionCircuitHandle::install(
         &provider.extensions(),
         processor.delegatee_key().clone(),
         processor.swarm.network_id(),
-        true,
-        exit,
+        role,
     )
 }
 
@@ -272,20 +271,14 @@ async fn prepare_onion_loop_public_gateway(
         .iter()
         .map(|relay| Provider::from_processor(Arc::clone(relay)))
         .collect::<Vec<_>>();
-    let client_onion = NativeOnionCircuitHandle::install(
-        &client_provider.extensions(),
-        client.delegatee_key().clone(),
-        client.swarm.network_id(),
-        false,
-        None,
-    )?;
+    let client_onion = install_gateway_onion(&client_provider, &client, OnionRole::Client)?;
     for (provider, relay) in relay_providers.iter().zip(relays.iter()) {
-        install_gateway_onion(provider, relay, None)?;
+        install_gateway_onion(provider, relay, OnionRole::Relay)?;
     }
     install_gateway_onion(
         &exit_provider,
         &exit,
-        Some(NativeOnionTcpExitConfig::tcp(exit_policy.clone())),
+        OnionRole::Exit(NativeOnionTcpExitConfig::tcp(exit_policy.clone())),
     )?;
     client_provider.set_backend()?;
     exit_provider.set_backend()?;

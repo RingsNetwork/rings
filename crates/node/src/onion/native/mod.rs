@@ -41,7 +41,6 @@ use crate::extension::ext::Extensions;
 use crate::extension::ext::Scope;
 use crate::onion::circuit::OnionAlgebra;
 use crate::onion::circuit::OnionAuthenticatedPayload;
-use crate::onion::circuit::OnionCircuitCapabilities;
 use crate::onion::circuit::OnionCircuitExitFrame;
 use crate::onion::circuit::OnionCircuitHandler;
 use crate::onion::circuit::OnionCircuitId;
@@ -62,6 +61,7 @@ use crate::onion::tcp::NativeOnionOpenStream;
 use crate::onion::tcp::NativeOnionTcpExitConfig;
 use crate::onion::tcp::OnionTcpRuntime;
 use crate::onion::OnionProxyTarget;
+use crate::onion::OnionRole;
 use crate::onion::OnionRoute;
 use crate::onion::OnionServiceName;
 
@@ -74,25 +74,24 @@ pub struct NativeOnionCircuitHandle {
 }
 
 impl NativeOnionCircuitHandle {
-    /// Install the route-aware onion circuit protocol.
+    /// Install the route-aware onion circuit protocol for `role`, whose exit rung carries the
+    /// installed TCP exit runtime.
     pub fn install(
         extensions: &Extensions,
         delegatee_key: DelegateeKey,
         network_id: u32,
-        allow_relay: bool,
-        exit_config: Option<NativeOnionTcpExitConfig>,
+        role: OnionRole<NativeOnionTcpExitConfig>,
     ) -> Result<Self> {
-        let exit_epoch = exit_config
-            .as_ref()
-            .map(|_| extensions.core().onion_process_epoch());
-        let (tcp, https) = native_onion_runtimes(delegatee_key.clone(), network_id, exit_config);
+        let epoch = extensions.core().onion_process_epoch();
+        let capabilities = role.as_ref().map(|_| epoch);
+        let (tcp, https) =
+            native_onion_runtimes(delegatee_key.clone(), network_id, role.exit().cloned());
         if let Some(config) = tcp.exit_config() {
             if config.services().contains(&OnionServiceName::https()) {
                 https.set_exit_policy(Some(config.policy().clone()));
                 https.set_native_proxy(config.https_proxy().map(ToString::to_string));
             }
         }
-        let capabilities = OnionCircuitCapabilities::from_registration(allow_relay, exit_epoch);
         let signer = MessageSigner::new(delegatee_key.clone(), network_id);
         extensions.register(
             OnionCircuitProtocol::new(capabilities),

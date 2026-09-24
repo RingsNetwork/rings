@@ -244,8 +244,7 @@ async fn test_onion_exit_publish_replaces_observed_self_records() -> Result<()> 
         Duration::from_secs(30),
         Duration::from_secs(90),
         default_online_node_type(),
-        vec![OnionServiceName::https()],
-        policy,
+        OnionExitOffer::new(vec![OnionServiceName::https()], policy)?,
         processor.onion_process_epoch(),
     );
     let published = registration

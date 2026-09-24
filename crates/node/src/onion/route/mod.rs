@@ -21,8 +21,8 @@
 //!   the loop at position `H`; the other `H − 2` hops are pairwise distinct and distinct from `g`
 //!   (`has_duplicate_dids`).
 //!
-//! Until #834 Phase 2a-4 the data plane consumes a route through the Phase 1 view
-//! `OnionRoute::positions`: the loop's forward prefix `g, r₀,₂, h₁ = relay^s ⋙ (s, ā)`.
+//! Until #834 Phase 2a-4 the data plane consumes only the loop's forward prefix
+//! [`OnionRoute::circuit_hops`], `g, r₀,₂, h₁ = relay^s ⋙ (s, ā)`, and answers along its reverse.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -32,13 +32,12 @@ use rings_core::ecc::PublicKey;
 use rings_core::measure::PeerQuality;
 use rings_core::message::DhtProtocolMode;
 
-use super::loop_shape::OnionLoop;
-use super::loop_shape::OnionLoopRole;
-use super::loop_shape::OnionLoopShape;
-use super::loop_shape::ONION_SEGMENT_RELAYS;
 use super::pipeline::OnionPipeline;
 use super::pipeline::OnionSymbolWord;
 use super::OnionExitDescriptor;
+use super::OnionLoop;
+use super::OnionLoopShape;
+use super::OnionLoopStep;
 use super::OnionProcessEpoch;
 use super::OnionRouteError;
 use super::OnionServiceName;
@@ -129,7 +128,7 @@ impl OnionRoute {
     ///
     /// Invariant: `service` is canonical, so route/payload service equality is ordinary value
     /// equality over [`OnionServiceName`], not caller-dependent string normalization.
-    pub fn new(
+    pub(crate) fn new(
         service: OnionServiceName,
         hops: OnionLoop<OnionRouteHop>,
         exit: OnionExitDescriptor,
@@ -157,23 +156,32 @@ impl OnionRoute {
         &self.hops
     }
 
-    /// Return the Phase 1 view of the loop: its forward prefix `g, r₀,₂ … r₀,ₛ, h₁`, one encrypted
-    /// hop per position of [`Self::word`]. The data plane seals this path until #834 Phase 2a-4
-    /// consumes the whole loop.
+    /// Return the hops the circuit uses: the loop's forward prefix `g, r₀,₂ … r₀,ₛ, h₁`.
+    ///
+    /// Until #834 Phase 2a-4 the data plane seals only this prefix and answers along its reverse;
+    /// the return segment of [`Self::hops`] is selected but unused.
+    pub fn circuit_hops(&self) -> impl Iterator<Item = &OnionRouteHop> {
+        self.hops
+            .prefix_to_symbol(OnionLoopShape::SESSION.symbols())
+    }
+
+    /// Return the Phase 1 view of [`Self::circuit_hops`]: the relays before `h₁`, then the exit.
     pub(crate) fn positions(&self) -> OnionPipeline<OnionRouteHop> {
         OnionPipeline::new(
-            self.hops
-                .positions()
-                .take(ONION_SEGMENT_RELAYS)
+            self.circuit_hops()
+                .take_while(|hop| hop.did != self.exit.did)
                 .copied()
                 .collect(),
             OnionRouteHop::of_symbol(&self.exit),
         )
     }
 
-    /// Return the symbol word `relay^s ⋙ service` of the Phase 1 view.
+    /// Return the symbol word `relay^k ⋙ service` of [`Self::circuit_hops`].
     pub fn word(&self) -> OnionSymbolWord {
-        OnionSymbolWord::new(ONION_SEGMENT_RELAYS, self.service.clone())
+        OnionSymbolWord::new(
+            self.circuit_hops().count().saturating_sub(1),
+            self.service.clone(),
+        )
     }
 
     /// Return the selected exit descriptor.
@@ -209,10 +217,11 @@ impl RouteEntropy for SystemRouteEntropy {
     }
 }
 
-/// Registrants eligible for one route: relay registrants and the registrants of its symbol.
+/// Live registrants for one route: relay registrants and the registrants of its symbol.
 ///
-/// Invariant: every exit's hop ([`OnionRouteHop::of_symbol`]) is an element of `relays`, and no
-/// DID in either is the local node.
+/// Invariant: `relays` holds one hop per DID, and no DID in either field is the local node.
+/// `exits` are not yet matched against `relays`: that is D2's admission, made by selection so
+/// that each rejection is reported with its cause.
 #[derive(Clone, Debug)]
 pub(crate) struct OnionRouteCandidates {
     pub(in crate::onion) relays: Vec<OnionRouteHop>,
@@ -222,9 +231,8 @@ pub(crate) struct OnionRouteCandidates {
 impl OnionRouteCandidates {
     /// Collect the live registrants of `relay` and of `service` in the local DHT protocol mode.
     ///
-    /// A `service` registrant is kept only if the same process registers `relay` (D2): its hop
-    /// `(did, session key, e_n)` must be one of the relay hops, which rejects a symbol descriptor
-    /// without a relay epoch and one whose epoch is stale.
+    /// The directory may be a remote node, so its descriptors are re-validated here: signature,
+    /// liveness, the local DHT protocol mode, and the newest descriptor per DID.
     pub(crate) fn from_validated_descriptors(
         local: Did,
         dht_protocol: DhtProtocolMode,
@@ -233,22 +241,29 @@ impl OnionRouteCandidates {
         online_nodes: impl IntoIterator<Item = OnlineNodeDescriptor>,
         exits: impl IntoIterator<Item = OnionExitDescriptor>,
     ) -> Self {
-        let relays = eligible_relays(dht_protocol, now_ms, local, online_nodes);
-        let exits = eligible_exits(dht_protocol.network_id, now_ms, service, exits)
-            .into_iter()
-            .filter(|descriptor| relays.contains(&OnionRouteHop::of_symbol(descriptor)))
-            .collect();
-
-        Self { relays, exits }
+        Self {
+            relays: eligible_relays(dht_protocol, now_ms, local, online_nodes),
+            exits: eligible_exits(dht_protocol.network_id, now_ms, service, exits)
+                .into_iter()
+                .filter(|descriptor| descriptor.did != local)
+                .collect(),
+        }
     }
 }
 
-/// Select a route for `request` from prevalidated candidates and an explicit guard policy.
+/// Select a route for `request` from live candidates and an explicit guard policy.
 ///
-/// The request's pipeline is its one world-facing symbol, registered by `candidates.exits`; the
-/// loop is drawn by [`select_loop`] and its symbol hop resolved back to the registering
-/// descriptor. Callers must state the guard policy explicitly, so a permissive default cannot
-/// bypass entry-guard policy.
+/// ```text
+/// E  = exits of the service                       E = ∅                      → NoLiveExit
+/// E′ = { e ∈ E | hop(e) ∈ R }   (D2)              E′ = ∅, some DID(e) ∈ R    → StaleExitRegistration
+///                                                 E′ = ∅ otherwise            → ExitWithoutRelayRegistration
+/// e  ← draw { e ∈ E′ | ∃ r ∈ R. r ≠ e ∧ guard_permitted(r) }         none → NoPermittedFirstHop
+/// loop ← select_loop([{e}], R)
+/// ```
+///
+/// The exit is drawn first, among the exits some permitted guard can precede, so the loop drawn
+/// around it never lacks a guard. Callers must state the guard policy explicitly, so a permissive
+/// default cannot bypass entry-guard policy.
 pub(crate) fn select_onion_route_from_candidates(
     request: &OnionRouteRequest,
     candidates: OnionRouteCandidates,
@@ -257,181 +272,154 @@ pub(crate) fn select_onion_route_from_candidates(
     guard_permitted: impl Fn(Did) -> bool,
 ) -> Result<OnionRoute> {
     let service = request.service_name();
-    let no_live_exit = || {
-        Error::OnionRouteError(OnionRouteError::NoLiveExit {
-            service: service.as_str().to_string(),
-        })
-    };
-    if candidates.exits.is_empty() {
-        return Err(no_live_exit());
+    let OnionRouteCandidates { relays, exits } = candidates;
+    let (registered, unregistered) = exits
+        .into_iter()
+        .partition::<Vec<_>, _>(|exit| relays.contains(&OnionRouteHop::of_symbol(exit)));
+    if registered.is_empty() {
+        let service = service.as_str().to_string();
+        let error = if unregistered.is_empty() {
+            OnionRouteError::NoLiveExit { service }
+        } else if unregistered
+            .iter()
+            .any(|exit| relays.iter().any(|relay| relay.did == exit.did))
+        {
+            OnionRouteError::StaleExitRegistration { service }
+        } else {
+            OnionRouteError::ExitWithoutRelayRegistration { service }
+        };
+        return Err(Error::OnionRouteError(error));
     }
-    let registrants = [candidates
-        .exits
-        .iter()
-        .map(|descriptor| descriptor.did)
-        .collect::<BTreeSet<_>>()];
     let quality_by_did = qualities.into_iter().collect::<BTreeMap<_, _>>();
+    let exit = draw_weighted(
+        registered.into_iter().filter(|exit| {
+            relays
+                .iter()
+                .any(|relay| relay.did != exit.did && guard_permitted(relay.did))
+        }),
+        |exit| exit.did,
+        &quality_by_did,
+        entropy,
+    )
+    .ok_or(Error::OnionRouteError(OnionRouteError::NoPermittedFirstHop))?;
     let hops = select_loop(
-        &registrants,
-        &candidates.relays,
+        &[BTreeSet::from([exit.did])],
+        relays.as_slice(),
         &quality_by_did,
         entropy,
         guard_permitted,
     )?;
-    let symbol_hop = hops
-        .symbol(OnionLoopShape::SESSION.symbols())
-        .map(|hop| hop.did)
-        .ok_or_else(no_live_exit)?;
-    let exit = candidates
-        .exits
-        .into_iter()
-        .find(|descriptor| descriptor.did == symbol_hop)
-        .ok_or_else(no_live_exit)?;
     OnionRoute::new(service.clone(), hops, exit)
 }
 
-/// Draw a loop for the pipeline whose `k`-th symbol is registered by `registrants[k − 1]`.
+/// Draw a loop for the pipeline whose `k`-th symbol is registered by `symbols[k − 1]`.
 ///
-/// Every hop comes from `relays`, the relay registrants; a symbol registrant outside `relays`
-/// registers no `relay` and is not eligible (D2). With `Sₖ` the eligible registrants of symbol
-/// `k` and `SDR(F, T)` Hall's condition that the family `F`, less the taken hops `T`, still has
-/// distinct representatives:
+/// Every hop comes from `relays`, the relay registrants, so a symbol registrant outside `relays`
+/// registers no `relay` and is never drawn (D2). The loop is unfolded position by position
+/// ([`OnionLoop::try_unfold`]); at each position, with `T` the hops already taken and `Sₚ` the
+/// symbols still pending after it, one hop is drawn by quality weight from
 ///
 /// ```text
-/// shape  ← OnionLoopShape::new(n)                          n ∉ [1, 4]      → LoopSymbolsOutOfBounds
-/// |R| < H − 1                                                               → NotEnoughLoopHops
-/// ¬SDR(S₁ … Sₙ, ∅)                                                          → NoDistinctSymbolHops
-/// g      ← draw { r ∈ R | guard_permitted(r) ∧ SDR(S₁ … Sₙ, {r}) }      none → NoPermittedFirstHop
-/// for k = 1 … n:
-///   hₖ   ← draw { d ∈ Sₖ ∖ T | SDR(Sₖ₊₁ … Sₙ, T ∪ {d}) },  T ← T ∪ {hₖ}
-/// rest   ← H − 2 − n draws without replacement from R ∖ T
-/// loop   = shape.try_label(Guard ↦ g, Symbol(k) ↦ hₖ, Relay ↦ next of rest)
+/// Guard       { r ∈ R ∖ T | guard_permitted(r) ∧ SDR(Sₚ, T ∪ {r}) }   none → NoPermittedFirstHop
+///                                                                          or NoDistinctSymbolHops
+/// Relay       { r ∈ R ∖ T | SDR(Sₚ, T ∪ {r}) }                        none → NotEnoughLoopHops
+/// Symbol f    { r ∈ R ∖ T | r ∈ f ∧ SDR(Sₚ, T ∪ {r}) }               none → NoDistinctSymbolHops
 /// ```
 ///
-/// Every draw is weighted by peer quality. The SDR guard on each draw makes the greedy order
-/// complete: a draw never strands a later symbol position, so selection fails only when no loop
-/// exists, and `|R| ≥ H − 1` leaves at least `H − 2 − n` relays once `g` and the `hₖ` are taken.
+/// where `SDR(S, T)` is Hall's condition that the pending symbols can still take pairwise
+/// distinct hops outside `T`. Every draw keeps `SDR(pending, T)`, so a draw never strands a later
+/// symbol: a relay draw fails exactly when fewer than `H − 1` distinct relays exist (fail closed,
+/// D5), and a symbol draw cannot fail once the guard is drawn.
 fn select_loop(
-    registrants: &[BTreeSet<Did>],
+    symbols: &[BTreeSet<Did>],
     relays: &[OnionRouteHop],
     quality_by_did: &BTreeMap<Did, PeerQuality>,
     entropy: &mut impl RouteEntropy,
     guard_permitted: impl Fn(Did) -> bool,
 ) -> Result<OnionLoop<OnionRouteHop>> {
-    let shape = OnionLoopShape::new(registrants.len())?;
-    let hop_by_did = relays
-        .iter()
-        .map(|hop| (hop.did, *hop))
-        .collect::<BTreeMap<_, _>>();
-    if hop_by_did.len() < shape.distinct_hops() {
-        return Err(Error::OnionRouteError(OnionRouteError::NotEnoughLoopHops {
-            required: shape.distinct_hops(),
-            eligible: hop_by_did.len(),
-        }));
-    }
-    let symbols = registrants
-        .iter()
-        .map(|registrant| {
-            registrant
-                .iter()
-                .copied()
-                .filter(|did| hop_by_did.contains_key(did))
-                .collect::<BTreeSet<_>>()
-        })
-        .collect::<Vec<_>>();
-    let no_symbol_hops = || Error::OnionRouteError(OnionRouteError::NoDistinctSymbolHops);
-    if !admits_distinct_symbol_hops(symbols.as_slice(), &BTreeSet::new()) {
-        return Err(no_symbol_hops());
-    }
-
-    let guard = draw_weighted(
-        hop_by_did.keys().copied().filter(|did| {
-            guard_permitted(*did)
-                && admits_distinct_symbol_hops(symbols.as_slice(), &BTreeSet::from([*did]))
-        }),
-        quality_by_did,
-        entropy,
-    )
-    .ok_or(Error::OnionRouteError(OnionRouteError::NoPermittedFirstHop))?;
-    let mut taken = BTreeSet::from([guard]);
-    let mut symbol_hops = Vec::with_capacity(symbols.len());
-    for (k, registrant) in symbols.iter().enumerate() {
-        let later = symbols.get(k + 1..).unwrap_or_default();
+    let required = OnionLoopShape::new(symbols.len())?.distinct_hops();
+    let mut taken = BTreeSet::new();
+    OnionLoop::try_unfold(symbols, |step| {
+        let pending = step.pending();
         let hop = draw_weighted(
-            registrant.difference(&taken).copied().filter(|did| {
-                let mut after = taken.clone();
-                after.insert(*did);
-                admits_distinct_symbol_hops(later, &after)
+            relays.iter().copied().filter(|hop| {
+                let eligible = match &step {
+                    OnionLoopStep::Guard { .. } => guard_permitted(hop.did),
+                    OnionLoopStep::Relay { .. } => true,
+                    OnionLoopStep::Symbol { symbol, .. } => symbol.contains(&hop.did),
+                };
+                eligible
+                    && !taken.contains(&hop.did)
+                    && admits_distinct_symbol_hops(pending, |did| {
+                        *did == hop.did || taken.contains(did)
+                    })
             }),
+            |hop| hop.did,
             quality_by_did,
             entropy,
         )
-        .ok_or_else(no_symbol_hops)?;
-        taken.insert(hop);
-        symbol_hops.push(hop);
-    }
-    let not_enough_hops = || {
-        Error::OnionRouteError(OnionRouteError::NotEnoughLoopHops {
-            required: shape.distinct_hops(),
-            eligible: hop_by_did.len(),
-        })
-    };
-    let hop_of = |did: Did| hop_by_did.get(&did).copied().ok_or_else(not_enough_hops);
-    shape.try_label(|role| match role {
-        OnionLoopRole::Guard => hop_of(guard),
-        OnionLoopRole::Symbol(k) => k
-            .checked_sub(1)
-            .and_then(|index| symbol_hops.get(index))
-            .copied()
-            .ok_or_else(no_symbol_hops)
-            .and_then(hop_of),
-        OnionLoopRole::Relay => {
-            let relay = draw_weighted(
-                hop_by_did
-                    .keys()
-                    .copied()
-                    .filter(|did| !taken.contains(did)),
-                quality_by_did,
-                entropy,
-            )
-            .ok_or_else(not_enough_hops)?;
-            taken.insert(relay);
-            hop_of(relay)
-        }
+        .ok_or_else(|| {
+            Error::OnionRouteError(match step {
+                OnionLoopStep::Guard { .. } if admits_distinct_symbol_hops(symbols, |_| false) => {
+                    OnionRouteError::NoPermittedFirstHop
+                }
+                OnionLoopStep::Relay { .. } => OnionRouteError::NotEnoughLoopHops {
+                    required,
+                    eligible: relays.len(),
+                },
+                OnionLoopStep::Guard { .. } | OnionLoopStep::Symbol { .. } => {
+                    OnionRouteError::NoDistinctSymbolHops
+                }
+            })
+        })?;
+        taken.insert(hop.did);
+        Ok(hop)
     })
 }
 
-/// Hall's condition for the open symbol positions: every nonempty subfamily `J` of `symbols`,
-/// less the `taken` hops, covers at least `|J|` hops,
+/// Hall's condition for the pending symbol positions: every subfamily `J` of `symbols`, less the
+/// `excluded` hops, covers at least `|J|` hops,
 ///
 /// ```text
-/// SDR(S, T)  ⇔  ∀ J ⊆ S, J ≠ ∅.  |⋃J ∖ T| ≥ |J|,
+/// SDR(S, T)  ⇔  ∀ J ⊆ S.  |⋃J ∖ T| ≥ |J|,
 /// ```
 ///
-/// which holds exactly when the positions can still take pairwise distinct untaken hops. The
-/// family has at most `MAX_ONION_LOOP_SYMBOLS` members, so at most 15 subfamilies are checked.
-fn admits_distinct_symbol_hops(symbols: &[BTreeSet<Did>], taken: &BTreeSet<Did>) -> bool {
-    (1..1_usize << symbols.len()).all(|family| {
-        let covered = symbols
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| (family >> index) & 1 == 1)
-            .flat_map(|(_, registrant)| registrant.difference(taken))
-            .collect::<BTreeSet<_>>();
-        covered.len() >= family.count_ones() as usize
-    })
+/// which holds exactly when the positions can still take pairwise distinct hops outside `T`. The
+/// subfamilies are folded one symbol at a time, each paired with its size and union, so the
+/// check needs no index arithmetic; a loop has at most `2^n_max = 16` of them.
+fn admits_distinct_symbol_hops(symbols: &[BTreeSet<Did>], excluded: impl Fn(&Did) -> bool) -> bool {
+    symbols
+        .iter()
+        .fold(
+            vec![(0_usize, BTreeSet::<&Did>::new())],
+            |families, registrant| {
+                let extended = families
+                    .iter()
+                    .map(|(size, union)| {
+                        let mut union = union.clone();
+                        union.extend(registrant.iter().filter(|did| !excluded(did)));
+                        (size + 1, union)
+                    })
+                    .collect::<Vec<_>>();
+                families.into_iter().chain(extended).collect()
+            },
+        )
+        .iter()
+        .all(|(size, union)| union.len() >= *size)
 }
 
-/// Draw one DID from `candidates` with probability proportional to its quality weight, or `None`
+/// Draw one candidate with probability proportional to the quality weight of its DID, or `None`
 /// when there is no candidate.
-fn draw_weighted(
-    candidates: impl Iterator<Item = Did>,
+fn draw_weighted<T>(
+    candidates: impl Iterator<Item = T>,
+    did_of: impl Fn(&T) -> Did,
     quality_by_did: &BTreeMap<Did, PeerQuality>,
     entropy: &mut impl RouteEntropy,
-) -> Option<Did> {
+) -> Option<T> {
     let candidates = candidates.collect::<Vec<_>>();
-    pick_weighted_index(candidates.as_slice(), quality_by_did, entropy)
-        .and_then(|index| candidates.get(index).copied())
+    let dids = candidates.iter().map(&did_of).collect::<Vec<_>>();
+    let index = pick_weighted_index(dids.as_slice(), quality_by_did, entropy)?;
+    candidates.into_iter().nth(index)
 }
 
 /// Pick an index of `dids` with probability proportional to its quality weight, or `None` when
@@ -483,7 +471,7 @@ fn eligible_exits(
 }
 
 /// Return the relay hop of every remote node whose newest live descriptor in the local DHT
-/// protocol mode registers `relay`, ordered by DID, at the epoch it registers it with.
+/// protocol mode registers `relay`, one per DID, at the epoch it registers it with.
 fn eligible_relays(
     dht_protocol: DhtProtocolMode,
     now_ms: u128,
@@ -499,9 +487,6 @@ fn eligible_relays(
                 OnionRouteHop::new(descriptor.did, descriptor.delegatee_public_key, epoch)
             })
         })
-        .map(|hop| (hop.did, hop))
-        .collect::<BTreeMap<_, _>>()
-        .into_values()
         .collect()
 }
 
