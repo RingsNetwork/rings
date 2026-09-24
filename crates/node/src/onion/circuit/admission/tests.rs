@@ -1,7 +1,7 @@
 //! Laws of the L9 admission step, checked against injected time and a seeded RNG.
 
 use std::collections::BTreeMap;
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 use std::num::NonZeroUsize;
 use std::ops::Range;
@@ -17,6 +17,7 @@ use super::bloom::REPLAY_BLOCK_TAGS;
 use super::bloom::REPLAY_SLICE_BITS;
 use super::bloom::REPLAY_SLICE_WORDS;
 use super::OnionAdmissionLayer;
+use super::OnionAdmissionLink;
 use super::OnionAdmissionRejection;
 use super::OnionAdmissionState;
 use super::OnionAdmissionUnits;
@@ -58,30 +59,38 @@ fn registry(r: usize) -> NonZeroUsize {
     NonZeroUsize::MIN.saturating_add(r.saturating_sub(1))
 }
 
-/// A fresh state for `epoch` with registry capacity `R`, a probe key drawn from `rng`, and links
-/// opened at time zero from the DIDs in `linked`.
+/// A fresh state for `epoch` with registry capacity `R`, a probe key drawn from `rng`, and one link
+/// opened at time zero from each DID in `linked`, whose handles are returned by DID.
 fn state_with(
     rng: &mut StdRng,
     epoch: OnionExitEpoch,
     r: usize,
     linked: Range<u32>,
-) -> OnionAdmissionState {
+) -> (OnionAdmissionState, BTreeMap<u32, OnionAdmissionLink>) {
     let mut admission =
         OnionAdmissionState::new(epoch, OnionReplayFilterKey::new(rng.gen()), registry(r));
-    for sender in linked {
-        assert_eq!(admission.link_opened(0, Did::from(sender)), Ok(()));
-    }
-    admission
+    let links = linked
+        .map(|sender| (sender, open(&mut admission, 0, sender)))
+        .collect();
+    (admission, links)
 }
 
-/// A fresh state for [`EPOCH`] with `R = 64` and links from DIDs `0..=64`.
+/// A fresh state for [`EPOCH`] with `R = 64` and links from DIDs `0..=64` that stay open for the
+/// whole test (their handles are dropped, which leaves the links counted as open).
 fn state(rng: &mut StdRng) -> OnionAdmissionState {
-    state_with(rng, EPOCH, 64, 0..65)
+    state_with(rng, EPOCH, 64, 0..65).0
 }
 
-/// The on-grid expiry `k · Q`.
+/// Open a link from `sender` at `now_ms`, which the test expects the table to accept.
+fn open(admission: &mut OnionAdmissionState, now_ms: u128, sender: u32) -> OnionAdmissionLink {
+    admission
+        .link_opened(now_ms, Did::from(sender))
+        .expect("the table has room for this link")
+}
+
+/// The on-grid expiry `k · Q`, through the parser, the only way from a wire instant to an expiry.
 fn expiry(quantum: u128) -> OnionExpiry {
-    OnionExpiry(quantum)
+    OnionExpiry::from_ms(quantum * Q).expect("a multiple of Q lies on the grid")
 }
 
 /// The latest admissible expiry at `now_ms`: the greatest grid point in `(now, now + V]`.
@@ -170,8 +179,8 @@ fn test_build_quantiser_maps_each_quantum_to_one_admissible_expiry() {
 #[test]
 fn test_no_replay_is_admitted_across_rotation_and_boundaries() {
     let mut rng = StdRng::seed_from_u64(0x0841_0001);
-    let mut admission = state_with(&mut rng, EPOCH, 4, 0..4);
-    let mut admitted = HashSet::new();
+    let (mut admission, _links) = state_with(&mut rng, EPOCH, 4, 0..4);
+    let mut admitted = BTreeSet::new();
     let mut clock_ms = 0;
     let mut now_ms = ORIGIN_MS;
     for _ in 0..20_000 {
@@ -284,7 +293,7 @@ fn test_new_epoch_rejects_every_layer_of_the_old_one() {
     );
 
     let restarted_epoch = OnionExitEpoch::new([8; 16]);
-    let mut restarted = state_with(&mut rng, restarted_epoch, 64, 1..2);
+    let (mut restarted, _links) = state_with(&mut rng, restarted_epoch, 64, 1..2);
     for tag in 0..64 {
         assert_eq!(
             send(&mut restarted, ORIGIN_MS, 1, 1, layer(x, tag)),
@@ -463,7 +472,7 @@ fn test_global_budget_bounds_every_sender_together() {
 #[test]
 fn test_more_than_64_live_links_are_all_admitted() {
     let mut rng = StdRng::seed_from_u64(0x0841_000a);
-    let mut admission = state_with(&mut rng, EPOCH, 100, 0..150);
+    let (mut admission, _links) = state_with(&mut rng, EPOCH, 100, 0..150);
     let x = latest_expiry(ORIGIN_MS);
     for sender in 0..150_u32 {
         assert_eq!(
@@ -482,14 +491,14 @@ fn test_more_than_64_live_links_are_all_admitted() {
 
 /// Law: closing a link does not reset its ledger while it carries load, even under table pressure.
 /// A DID spends `B` and closes its link. 38 churning DIDs then open, send and close, filling the
-/// table: every refused churner is closed by the shell, which is a no-op for admission. When the
-/// DID reconnects within the window it finds its old ledger and is still over budget. Once the
-/// window passes, the sweep releases every drained churner.
+/// table: a refused churner gets no handle, and the shell closes the transport link without
+/// touching admission. When the DID reconnects within the window it finds its old ledger and is
+/// still over budget. Once the window passes, the sweep releases every drained churner.
 #[test]
 fn test_closed_link_keeps_its_ledger_until_it_drains() {
     const R: usize = 8;
     let mut rng = StdRng::seed_from_u64(0x0841_000b);
-    let mut admission = state_with(&mut rng, EPOCH, R, 1..2);
+    let (mut admission, mut links) = state_with(&mut rng, EPOCH, R, 1..2);
     let x = latest_expiry(ORIGIN_MS);
     let spender = Did::from(1_u32);
     assert_eq!(
@@ -502,29 +511,32 @@ fn test_closed_link_keeps_its_ledger_until_it_drains() {
         ),
         Verdict::Admitted
     );
-    admission.link_closed(ORIGIN_MS, &spender);
+    if let Some(link) = links.remove(&1) {
+        admission.link_closed(ORIGIN_MS, link);
+    }
     let mut refused = 0;
     for churner in 2..40_u32 {
-        let did = Did::from(churner);
-        match admission.link_opened(ORIGIN_MS + 1, did) {
-            Ok(()) => assert_eq!(
-                send(
-                    &mut admission,
-                    ORIGIN_MS + 1,
-                    churner,
-                    1,
-                    layer(x, u128::from(churner))
-                ),
-                Verdict::Admitted
-            ),
+        match admission.link_opened(ORIGIN_MS + 1, Did::from(churner)) {
+            Ok(link) => {
+                assert_eq!(
+                    send(
+                        &mut admission,
+                        ORIGIN_MS + 1,
+                        churner,
+                        1,
+                        layer(x, u128::from(churner))
+                    ),
+                    Verdict::Admitted
+                );
+                admission.link_closed(ORIGIN_MS + 1, link);
+            }
             Err(OnionLinkTableFull) => refused += 1,
         }
-        admission.link_closed(ORIGIN_MS + 1, &did);
         assert!(admission.senders.len() <= 2 * R);
     }
     assert!(refused > 0);
     assert!(admission.senders.contains_key(&spender));
-    assert_eq!(admission.link_opened(ORIGIN_MS + 2, spender), Ok(()));
+    let _reconnected = open(&mut admission, ORIGIN_MS + 2, 1);
     assert_eq!(
         send(&mut admission, ORIGIN_MS + 2, 1, 1, layer(x, 100)),
         Verdict::Unpaid(OnionBudgetRejection::SenderBudget)
@@ -543,39 +555,37 @@ fn test_closed_link_keeps_its_ledger_until_it_drains() {
     assert_eq!(admission.senders.keys().collect::<Vec<_>>(), vec![&spender]);
 }
 
-/// Law: a full table refuses the link. The shell closes it (a no-op for admission), the link's
-/// cells are unlinked and never decrypted, and the peer's redial, a new link event, succeeds once
-/// a closed ledger has drained and been swept.
+/// Law: a full table refuses the link and hands out no handle, so the shell's close of that
+/// transport link cannot reach admission. The link's cells are unlinked and never decrypted. The
+/// peer's redial, a new link event, succeeds once a closed ledger has drained and been swept.
 #[test]
 fn test_full_table_refuses_the_link_and_the_peer_redials() {
     let mut rng = StdRng::seed_from_u64(0x0841_000c);
-    let mut admission = state_with(&mut rng, EPOCH, 1, 1..3);
+    let (mut admission, mut links) = state_with(&mut rng, EPOCH, 1, 1..3);
     let x = latest_expiry(ORIGIN_MS);
     let newcomer = Did::from(3_u32);
     assert_eq!(
         send(&mut admission, ORIGIN_MS, 1, 1, layer(x, 1)),
         Verdict::Admitted
     );
-    assert_eq!(
+    assert!(matches!(
         admission.link_opened(ORIGIN_MS, newcomer),
         Err(OnionLinkTableFull)
-    );
-    let before = admission.senders.clone();
-    admission.link_closed(ORIGIN_MS, &newcomer);
-    assert_eq!(admission.senders, before);
+    ));
     assert_eq!(
         send(&mut admission, ORIGIN_MS, 3, 1, layer(x, 3)),
         Verdict::Unpaid(OnionBudgetRejection::UnlinkedSender)
     );
 
-    admission.link_closed(ORIGIN_MS, &Did::from(1_u32));
-    assert_eq!(
+    if let Some(link) = links.remove(&1) {
+        admission.link_closed(ORIGIN_MS, link);
+    }
+    assert!(matches!(
         admission.link_opened(ORIGIN_MS + 1, newcomer),
         Err(OnionLinkTableFull)
-    );
-    admission.link_closed(ORIGIN_MS + 1, &newcomer);
+    ));
     let drained = ORIGIN_MS + ONION_ADMISSION_WINDOW_MS;
-    assert_eq!(admission.link_opened(drained, newcomer), Ok(()));
+    let _redial = open(&mut admission, drained, 3);
     assert!(!admission.senders.contains_key(&Did::from(1_u32)));
     assert!(admission.senders.contains_key(&Did::from(2_u32)));
     assert_eq!(
@@ -590,16 +600,16 @@ fn test_full_table_refuses_the_link_and_the_peer_redials() {
     );
 }
 
-/// Law: the ledger counts open links, so interleaved link generations of one DID
+/// Law: the ledger counts accepted link handles, so interleaved link generations of one DID
 /// (`open(g₁) open(g₂) close(g₁)`) leave it open, and only the last close releases it.
 #[test]
 fn test_ledger_counts_interleaved_link_generations() {
     let mut rng = StdRng::seed_from_u64(0x0841_0010);
-    let mut admission = state_with(&mut rng, EPOCH, 4, 0..0);
+    let (mut admission, _links) = state_with(&mut rng, EPOCH, 4, 0..0);
     let peer = Did::from(1_u32);
-    assert_eq!(admission.link_opened(ORIGIN_MS, peer), Ok(()));
-    assert_eq!(admission.link_opened(ORIGIN_MS, peer), Ok(()));
-    admission.link_closed(ORIGIN_MS, &peer);
+    let first = open(&mut admission, ORIGIN_MS, 1);
+    let second = open(&mut admission, ORIGIN_MS, 1);
+    admission.link_closed(ORIGIN_MS, first);
     assert_eq!(
         send(
             &mut admission,
@@ -610,11 +620,57 @@ fn test_ledger_counts_interleaved_link_generations() {
         ),
         Verdict::Admitted
     );
-    admission.link_closed(ORIGIN_MS, &peer);
+    admission.link_closed(ORIGIN_MS, second);
     assert!(admission.senders.contains_key(&peer));
     let drained = ORIGIN_MS + ONION_ADMISSION_WINDOW_MS;
-    admission.link_closed(drained, &peer);
+    assert_eq!(
+        send(
+            &mut admission,
+            drained,
+            1,
+            1,
+            layer(latest_expiry(drained), 2)
+        ),
+        Verdict::Unpaid(OnionBudgetRejection::UnlinkedSender)
+    );
     assert!(admission.senders.is_empty());
+}
+
+/// Law (M2 of the round-2 review): a refused generation cannot decrement a live one. `open(g₁)` is
+/// refused and yields no handle. After the table drains, `open(g₂)` succeeds. Nothing the shell
+/// holds for `g₁` can reach `link_closed`, so `g₂` keeps its ledger across later windows and is
+/// never locked out.
+#[test]
+fn test_a_refused_generation_cannot_close_a_live_one() {
+    let mut rng = StdRng::seed_from_u64(0x0841_0012);
+    let (mut admission, mut links) = state_with(&mut rng, EPOCH, 1, 1..3);
+    let x = latest_expiry(ORIGIN_MS);
+    assert_eq!(
+        send(&mut admission, ORIGIN_MS, 1, 1, layer(x, 1)),
+        Verdict::Admitted
+    );
+    assert!(matches!(
+        admission.link_opened(ORIGIN_MS, Did::from(3_u32)),
+        Err(OnionLinkTableFull)
+    ));
+    if let Some(link) = links.remove(&1) {
+        admission.link_closed(ORIGIN_MS, link);
+    }
+    let drained = ORIGIN_MS + ONION_ADMISSION_WINDOW_MS;
+    let _live = open(&mut admission, drained, 3);
+    for window in 1..4_u128 {
+        let now_ms = drained + window * ONION_ADMISSION_WINDOW_MS;
+        assert_eq!(
+            send(
+                &mut admission,
+                now_ms,
+                3,
+                1,
+                layer(latest_expiry(now_ms), window)
+            ),
+            Verdict::Admitted
+        );
+    }
 }
 
 /// Law (invariant): no ledger is releasable after any step. A closed ledger with load is released
@@ -623,13 +679,15 @@ fn test_ledger_counts_interleaved_link_generations() {
 #[test]
 fn test_drained_closed_ledgers_are_swept_on_the_next_quantum() {
     let mut rng = StdRng::seed_from_u64(0x0841_0011);
-    let mut admission = state_with(&mut rng, EPOCH, 64, 1..3);
+    let (mut admission, mut links) = state_with(&mut rng, EPOCH, 64, 1..3);
     let x = latest_expiry(ORIGIN_MS);
     assert_eq!(
         send(&mut admission, ORIGIN_MS, 1, 1, layer(x, 1)),
         Verdict::Admitted
     );
-    admission.link_closed(ORIGIN_MS, &Did::from(1_u32));
+    if let Some(link) = links.remove(&1) {
+        admission.link_closed(ORIGIN_MS, link);
+    }
     let still_loaded = ORIGIN_MS + ONION_ADMISSION_WINDOW_MS - 1;
     assert_eq!(
         send(
@@ -668,7 +726,8 @@ fn test_drained_closed_ledgers_are_swept_on_the_next_quantum() {
 fn test_rotation_through_many_dids_never_exceeds_the_sender_budget() {
     const R: usize = 16;
     let mut rng = StdRng::seed_from_u64(0x0841_000d);
-    let mut admission = state_with(&mut rng, EPOCH, R, 0..0);
+    let (mut admission, _none) = state_with(&mut rng, EPOCH, R, 0..0);
+    let mut links = BTreeMap::<u32, Vec<OnionAdmissionLink>>::new();
     let mut charged = BTreeMap::<(u32, u128), u32>::new();
     let mut outcomes = [0_u32; 3];
     let mut now_ms = ORIGIN_MS;
@@ -680,9 +739,13 @@ fn test_rotation_through_many_dids_never_exceeds_the_sender_budget() {
             rng.gen_range(2..48_u32)
         };
         match rng.gen_range(0..16) {
-            0 => admission.link_closed(now_ms, &Did::from(sender)),
+            0 => {
+                if let Some(link) = links.get_mut(&sender).and_then(Vec::pop) {
+                    admission.link_closed(now_ms, link);
+                }
+            }
             1 | 2 => match admission.link_opened(now_ms, Did::from(sender)) {
-                Ok(()) => {}
+                Ok(link) => links.entry(sender).or_default().push(link),
                 Err(OnionLinkTableFull) => outcomes[2] += 1,
             },
             _ => {
@@ -800,24 +863,22 @@ fn test_saturated_filter_meets_the_false_positive_target() {
 }
 
 /// Law (memory), seeded: under sustained saturation over ten quanta, the live filters together
-/// never hold more than `64 + 5` blocks. Each quantum, every one of 64 DIDs sends a fifth of its
-/// budget spread over the five admissible expiries, so charges roll through the window, and old
-/// filters expire while new ones fill.
+/// never hold more than `64 + 5` blocks. Each quantum, every one of 64 DIDs sends one-unit cells
+/// spread over the five admissible expiries until a charge is refused, so the global ledger is
+/// saturated at every quantum: `G` whenever the window has room and nothing more when it is full.
+/// Old filters expire while new ones fill.
 #[test]
 fn test_all_live_filters_stay_within_the_memory_bound() {
     let mut rng = StdRng::seed_from_u64(0x0841_000e);
     let mut admission = state(&mut rng);
+    let mut refusals = 0_u32;
     for step in 0..10_u128 {
         let now_ms = ORIGIN_MS + step * Q;
         let expiries = (1..=ADMISSION_WINDOW_QUANTA_WIDE)
             .map(|offset| expiry(now_ms / Q + offset))
             .collect::<Vec<_>>();
         for sender in 0..64_u32 {
-            for x in expiries
-                .iter()
-                .cycle()
-                .take(usize::try_from(ONION_ADMISSION_SENDER_UNITS / 5).unwrap_or(0))
-            {
+            for x in expiries.iter().cycle() {
                 if let Verdict::Unpaid(_) = send(
                     &mut admission,
                     now_ms,
@@ -825,10 +886,15 @@ fn test_all_live_filters_stay_within_the_memory_bound() {
                     1,
                     layer(x.to_owned(), rng.gen()),
                 ) {
+                    refusals += 1;
                     break;
                 }
             }
         }
+        assert_eq!(
+            admission.global.load(now_ms / Q),
+            ONION_ADMISSION_GLOBAL_UNITS
+        );
         let filters = admission.replay.filters();
         let blocks = filters
             .values()
@@ -837,6 +903,56 @@ fn test_all_live_filters_stay_within_the_memory_bound() {
         assert!(filters.len() <= ADMISSION_WINDOW_QUANTA);
         assert!(blocks <= 64 + filters.len());
     }
+    assert_eq!(refusals, 10 * 64);
+}
+
+/// Law (H1 of the round-3 review): the window is judged at the charge's arrival, not at the
+/// admission's instant. A cell charged at `arr` with `x = arr + V + Q` (outside the window) is
+/// still outside when its admission completes later, once `x ≤ clock + V`. A cell charged inside
+/// the window whose admission completes after `x` has passed is rejected too, because its filter
+/// is gone. So a late admission neither widens the window nor writes a dropped filter.
+#[test]
+fn test_the_window_is_judged_at_the_charge_instant() {
+    let mut rng = StdRng::seed_from_u64(0x0841_0013);
+    let mut admission = state(&mut rng);
+    let sender = Did::from(1_u32);
+    let outside = Err(OnionAdmissionRejection::OutsideWindow);
+
+    let early = admission.charge(ORIGIN_MS, &sender, units(1));
+    let too_far = expiry(ORIGIN_MS / Q + ADMISSION_WINDOW_QUANTA_WIDE + 1);
+    assert!(too_far.admissible_at(ORIGIN_MS + Q));
+    if let Ok(token) = early {
+        assert_eq!(
+            admission.admit(ORIGIN_MS + Q, token, layer(too_far, 1)),
+            outside
+        );
+    }
+    assert!(live(&admission).is_empty());
+
+    let x = latest_expiry(ORIGIN_MS);
+    let in_time = admission.charge(ORIGIN_MS, &sender, units(1));
+    if let Ok(token) = in_time {
+        assert_eq!(admission.admit(x.as_ms(), token, layer(x, 2)), outside);
+    }
+    assert!(live(&admission).is_empty());
+    assert_eq!(sender_load(&admission, 1, ORIGIN_MS), Some(2));
+}
+
+/// Law: a token binds the epoch of the state that charged it, so a token from another process
+/// (another epoch) admits nothing here, even for a layer sealed for this epoch.
+#[test]
+fn test_a_token_from_another_epoch_admits_nothing() {
+    let mut rng = StdRng::seed_from_u64(0x0841_0014);
+    let mut here = state(&mut rng);
+    let (mut elsewhere, _links) = state_with(&mut rng, OnionExitEpoch::new([9; 16]), 4, 1..2);
+    let x = latest_expiry(ORIGIN_MS);
+    if let Ok(token) = elsewhere.charge(ORIGIN_MS, &Did::from(1_u32), units(1)) {
+        assert_eq!(
+            here.admit(ORIGIN_MS, token, layer(x, 1)),
+            Err(OnionAdmissionRejection::StaleEpoch)
+        );
+    }
+    assert!(live(&here).is_empty());
 }
 
 /// Law: a filter grows by whole blocks, one per `B` tags, and no inserted tag is ever missed.

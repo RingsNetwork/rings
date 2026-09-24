@@ -8,40 +8,46 @@
 //! ```text
 //! δ : S × Time × I → S × (Out + Rejection)
 //! I = Charge(Did × Units) + Admit(Charge × Epoch × Expiry × Tag)
-//!   + LinkOpened(Did) + LinkClosed(Did)
+//!   + LinkOpened(Did) + LinkClosed(Link)
 //! ```
 //!
 //! [`OnionAdmissionState::charge`], [`OnionAdmissionState::admit`],
 //! [`OnionAdmissionState::link_opened`] and [`OnionAdmissionState::link_closed`] realise `δ` on the
 //! four summands in place. Time is an argument, and the only randomness is the probe key given at
 //! construction, so a trace of inputs determines the trace of verdicts. The order is the paper's
-//! hop algorithm:
+//! hop algorithm, with the charge taken on receipt (#834 L9):
 //!
 //! ```text
-//! charge(from, u) ──Err──→ drop            (nothing charged, no ECDH)
-//!   │ Ok(token)
+//! charge(from, u) at arr ──Err──→ drop   (nothing charged, no ECDH)
+//!   │ Ok(token = (arr, epoch_i))
 //!   ▼
 //! α valid, ECDH, peel, γ ──fails──→ drop the token  (charged once, no admission)
 //!   │ holds
 //!   ▼
-//! admit(token, e, x, ν) = e = epoch_i ; arr < x ≤ arr + V ; ν ∉ R_i[x] ; R_i[x] ← R_i[x] ∪ {ν}
+//! admit(token, e, x, ν) = e = epoch_i ; token.arr < x ≤ token.arr + V ; clock < x ;
+//!                         ν ∉ R_i[x] ; R_i[x] ← R_i[x] ∪ {ν}
 //! ```
 //!
 //! # Laws
 //!
-//! * **Charging.** Every received cell is charged `u(b) = b / 16 KiB` exactly once, whatever its
-//!   outcome, by [`OnionAdmissionState::charge`], *before* its group element `α` is checked and
-//!   its key computed. The charge returns an [`OnionAdmissionCharge`]: a linear token that is
-//!   neither `Clone` nor `Copy` and can be built only by `charge`. It settles the cell in one of
-//!   two ways. [`OnionAdmissionState::admit`] consumes it for a `γ`-verified layer, and every other
-//!   outcome (an invalid `α`, a failed `γ`) drops it, so no separate "invalid" path exists. Hence
-//!   every ECDH is paid for, and no cell is admitted uncharged or charged twice, by construction
-//!   rather than by convention in the shell. Replayed, expired and stale-epoch cells pay too. A
-//!   charge without headroom is refused and charges nothing; the cell is dropped undecrypted.
+//! * **Charging.** A cell is charged `u(b) = b / 16 KiB` once by [`OnionAdmissionState::charge`],
+//!   on receipt and before its group element `α` is checked or its key computed. The charge returns
+//!   an [`OnionAdmissionCharge`]: an *affine* token that is neither `Clone` nor `Copy`, that only
+//!   `charge` can build, and that records the arrival `arr` and the process epoch.
+//!   [`OnionAdmissionState::admit`] consumes the token. Dropping it (for an invalid `α` or a
+//!   failed `γ`) is a valid settlement: those cells are already paid for. Replayed, expired and
+//!   stale-epoch cells pay too. A charge without headroom is refused, charges nothing, and the
+//!   cell is dropped undecrypted.
+//!
+//!   The types guarantee that *admission requires a paid token* and that one token admits at most
+//!   once. They do not bind a token to its cell or its units, and they do not make peeling require
+//!   a token. The 2a-4 shell owes these: charge every received cell once, with the units of its
+//!   class, before it peels.
 //! * **Clock: safety.** The state's clock is the join of every `now` it has seen,
 //!   `now := max(now, clock)`. A wall-clock rollback therefore cannot refund budget or revive a
-//!   dropped filter. A layer that a dropped filter would have caught has `x ≤ clock`, so the window
-//!   rejects it.
+//!   dropped filter. The window is judged at the cell's arrival `token.arr`, which is the clock at
+//!   its charge, not at its admission. Admission also requires `clock < x`, so a filter the clock
+//!   has dropped is never written again, and at-most-once holds when an admission completes late.
 //! * **Clock: liveness cost.** An honest layer built at `t` has `x ∈ [t + X₀, t + V)` with
 //!   `X₀ = V − Q`. If the wall clock jumps forward by `Δ` and back, `clock` stays pinned at the
 //!   future instant. Honest layers start failing the window once `Δ ≥ X₀ = 4Q`, and all of them
@@ -64,8 +70,10 @@
 //!   within the memory bound below, and the 2a-4 shell decides whether to drive a step on a timer.
 //! * **Five quanta per filter.** `arr < x ≤ arr + V` gives `arr ∈ [x − V, x)`. With `x = kQ` and
 //!   `V = 5Q`, the arrival quanta are exactly `{k − 5, …, k − 1}`, five consecutive aligned quanta.
-//!   They all lie in the ledger window `(s − 5, s]` of the last admission into `R_i[x]` (at quantum
-//!   `s ≤ k − 1`), and that charge bounded the whole set by the global cap.
+//!   The window is judged at `token.arr`, the instant of the charge, so these are also the charging
+//!   quanta, however late the admission completes. They all lie in the ledger window `(s − 5, s]`
+//!   of the last charge admitted into `R_i[x]` (at quantum `s ≤ k − 1`), and that charge bounded the
+//!   whole set by the global cap.
 //! * **Tags ≤ units.** Tags are counted per cell and budgets per unit, and every admitted cell was
 //!   charged at least one unit. So `|R_i[x]| ≤ G = 64·B`, `R_i[x]` has at most `64` blocks, and
 //!   its false-positive rate is `≤ 64·2⁻²⁶ = 2⁻²⁰`. A tag is live only if it was admitted in the
@@ -79,10 +87,12 @@
 //!   sender and `≈ 6990` units/s in total. `G` is one pool shared by all links, which `γ`-failing
 //!   cover cells also consume (for 2a-4).
 //! * **Sender ledgers.** A ledger is keyed by a sender DID and counts that DID's open links.
-//!   * [`OnionAdmissionState::link_opened`] creates the ledger or increments its count.
-//!     [`OnionAdmissionState::link_closed`] decrements it. A count, not a flag, keeps the ledger
-//!     right under any interleaving of link generations (`open(g₁) open(g₂) close(g₁)` leaves one
-//!     link open), whether or not core delivers `Admitted`/`Retired` paired per generation.
+//!   * [`OnionAdmissionState::link_opened`] creates the ledger or increments its count, and returns
+//!     an affine [`OnionAdmissionLink`] handle. [`OnionAdmissionState::link_closed`] consumes the
+//!     handle and decrements the count. A close therefore always matches an accepted open: a
+//!     refused link has no handle and cannot decrement. So the count equals the number of live
+//!     handles under any interleaving of link generations (`open(g₁) open(g₂) close(g₁)` leaves one
+//!     link open).
 //!   * A ledger is *releasable* when its count is zero and its window load is zero. Invariant:
 //!     after every step no ledger is releasable, because `link_closed` releases a drained ledger
 //!     at once and every step that enters a new quantum sweeps the ledgers that have drained.
@@ -94,11 +104,13 @@
 //!     DIDs churn.
 //!   * At most `R` links are live, and a closed ledger drains within one window. So the table
 //!     fills only under connection churn beyond `R` within `V`. `link_opened` then refuses the
-//!     *link*: the shell must close it (fail closed), and the peer redials later, as a new link
-//!     event. A link is never left open without a ledger.
+//!     *link*: the shell must close it (fail closed). A link is never left open without a ledger.
+//!     A refused peer may redial later as a new link event. There is no fairness here: a churner
+//!     that opens cheap DIDs at rate `R / V` can win every freed slot. Eventual admission of an
+//!     honest redial is a liveness *assumption* on churn, as #834 states, not a guarantee.
 //!   * Precondition for the shell (2a-4): `link_opened` is applied when core reports a peer
-//!     `Connected`, before any of its cells. A cell from a DID without a ledger is refused as
-//!     [`OnionBudgetRejection::UnlinkedSender`], so it is never decrypted.
+//!     `Connected`, before any of its cells, and the shell keeps the handle per link generation.
+//!     A cell arriving on a link without a handle has no ledger to charge and is never decrypted.
 //!   * `G` is independent of the table size and bounds what all DIDs admit together, and hence the
 //!     replay store.
 
@@ -143,12 +155,6 @@ const ONION_ADMISSION_GLOBAL_UNITS: u32 = 64 * ONION_ADMISSION_SENDER_UNITS;
 const _: () = assert!(ADMISSION_WINDOW_QUANTA_WIDE == ADMISSION_WINDOW_QUANTA as u128);
 
 impl OnionExpiry {
-    /// Parse a wire expiry: `Some` iff `ms` lies on the grid `Q·ℕ`.
-    fn from_ms(ms: u128) -> Option<Self> {
-        ms.is_multiple_of(ONION_FORWARD_EXPIRY_QUANTUM_MS)
-            .then_some(Self(ms / ONION_FORWARD_EXPIRY_QUANTUM_MS))
-    }
-
     /// The admission window: `arr < x ≤ arr + V`.
     const fn admissible_at(self, arrival_ms: u128) -> bool {
         let expiry_ms = self.as_ms();
@@ -177,12 +183,28 @@ impl OnionAdmissionUnits {
     }
 }
 
-/// Proof that one cell was charged. It is linear: it is neither `Clone` nor `Copy`, it can be built
-/// only by [`OnionAdmissionState::charge`], and [`OnionAdmissionState::admit`] consumes it.
-/// Dropping it settles an invalid `α` or a failed `γ`, which are already paid for.
+/// Proof that one cell was charged at `arrival_ms` in this process's epoch. It is affine: it is
+/// neither `Clone` nor `Copy`, only [`OnionAdmissionState::charge`] can build it, and
+/// [`OnionAdmissionState::admit`] consumes it. Dropping it settles an invalid `α` or a failed `γ`,
+/// which are already paid for.
 #[must_use = "a charged cell is admitted with its token, or dropped after an invalid α or γ"]
 #[derive(Debug)]
-pub(super) struct OnionAdmissionCharge(());
+pub(super) struct OnionAdmissionCharge {
+    /// The cell's arrival: the monotone clock at its charge. The window is judged here.
+    arrival_ms: u128,
+    /// The epoch of the state that charged the cell.
+    epoch: OnionExitEpoch,
+}
+
+/// An accepted link from one sender DID. It is affine: it is neither `Clone` nor `Copy`, only
+/// [`OnionAdmissionState::link_opened`] can build it, and [`OnionAdmissionState::link_closed`]
+/// consumes it. So every close matches an accepted open.
+#[must_use = "a link handle is kept for the link's lifetime and consumed by link_closed"]
+#[derive(Debug)]
+pub(super) struct OnionAdmissionLink {
+    /// The link's sender DID.
+    from: Did,
+}
 
 /// The authenticated fields of a peeled layer that admission decides on.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -209,9 +231,9 @@ pub(super) enum OnionBudgetRejection {
 /// Why a charged layer was not admitted. The cell was charged and is dropped.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum OnionAdmissionRejection {
-    /// The layer was sealed for another process epoch (D2).
+    /// The layer, or its charge, belongs to another process epoch (D2).
     StaleEpoch,
-    /// `x ∉ (arr, arr + V]`.
+    /// `x ∉ (token.arr, token.arr + V]`, or `x` has passed on the monotone clock.
     OutsideWindow,
     /// `ν ∈ R_i[x]`: a replay, or a false positive at rate `≤ 2⁻²⁰`.
     Replayed,
@@ -277,16 +299,17 @@ impl OnionAdmissionState {
     }
 
     /// The step `δ` on `LinkOpened(from)`: count one more open link for `from`, creating its
-    /// ledger if it has none. A full table refuses the link; the shell must then close it.
+    /// ledger if it has none, and return the link's handle. A full table refuses the link; the
+    /// shell must then close it.
     pub(super) fn link_opened(
         &mut self,
         now_ms: u128,
         from: Did,
-    ) -> Result<(), OnionLinkTableFull> {
+    ) -> Result<OnionAdmissionLink, OnionLinkTableFull> {
         self.advance(now_ms);
         if let Some(sender) = self.senders.get_mut(&from) {
             sender.open_links = sender.open_links.saturating_add(1);
-            return Ok(());
+            return Ok(OnionAdmissionLink { from });
         }
         if self.senders.len() >= self.sender_capacity {
             return Err(OnionLinkTableFull);
@@ -295,18 +318,18 @@ impl OnionAdmissionState {
             ledger: QuantumLedger::default(),
             open_links: 1,
         });
-        Ok(())
+        Ok(OnionAdmissionLink { from })
     }
 
-    /// The step `δ` on `LinkClosed(from)`: count one fewer open link for `from`, releasing its
-    /// ledger at once if that leaves it releasable. A close with no matching open changes
-    /// nothing.
-    pub(super) fn link_closed(&mut self, now_ms: u128, from: &Did) {
+    /// The step `δ` on `LinkClosed(link)`: consume the link's handle, count one fewer open link for
+    /// its DID, and release the ledger at once if that leaves it releasable.
+    pub(super) fn link_closed(&mut self, now_ms: u128, link: OnionAdmissionLink) {
         let quantum = self.advance(now_ms);
-        if let Some(sender) = self.senders.get_mut(from) {
+        let OnionAdmissionLink { from } = link;
+        if let Some(sender) = self.senders.get_mut(&from) {
             sender.open_links = sender.open_links.saturating_sub(1);
             if sender.is_releasable_at(quantum) {
-                self.senders.remove(from);
+                self.senders.remove(&from);
             }
         }
     }
@@ -319,7 +342,7 @@ impl OnionAdmissionState {
     ///   ├─ from has no ledger ────────────→ UnlinkedSender
     ///   ├─ load_from(s) + u > B ──────────→ SenderBudget
     ///   ├─ load_global(s) + u > G ────────→ GlobalBudget
-    ///   └─ charge both ledgers ───────────→ Ok(token)
+    ///   └─ charge both ledgers ───────────→ Ok(token = (clock, epoch_i))
     /// ```
     pub(super) fn charge(
         &mut self,
@@ -342,31 +365,37 @@ impl OnionAdmissionState {
             .ok_or(OnionBudgetRejection::GlobalBudget)?;
         sender.ledger = charged_sender;
         self.global = charged_global;
-        Ok(OnionAdmissionCharge(()))
+        Ok(OnionAdmissionCharge {
+            arrival_ms: self.clock_ms,
+            epoch: self.epoch,
+        })
     }
 
     /// The step `δ` on `Admit(token, e, x, ν)`: admit a charged, `γ`-verified layer, or reject it.
-    /// The charge stands either way.
+    /// The charge stands either way. The window is judged at the token's arrival, not at `now`.
     ///
     /// ```text
     ///  now := max(now, clock);  drop R[x] for x ≤ now
-    ///   ├─ e ≠ epoch ─────────────────────→ StaleEpoch
-    ///   ├─ ¬ x.admissible_at(now) ────────→ OutsideWindow
-    ///   ├─ ν ∈ R[x] ──────────────────────→ Replayed
-    ///   └─ R[x] ← R[x] ∪ {ν} ─────────────→ Ok
+    ///   ├─ e ≠ epoch_i ∨ token.epoch ≠ epoch_i ──────→ StaleEpoch
+    ///   ├─ ¬ x.admissible_at(token.arr) ∨ x ≤ clock ─→ OutsideWindow
+    ///   ├─ ν ∈ R[x] ─────────────────────────────────→ Replayed
+    ///   └─ R[x] ← R[x] ∪ {ν} ────────────────────────→ Ok
     /// ```
+    ///
+    /// A wire expiry off the grid never reaches this step: the shell parses it with
+    /// `OnionExpiry::from_ms`, and `None` drops the cell, which is already charged.
     pub(super) fn admit(
         &mut self,
         now_ms: u128,
         charge: OnionAdmissionCharge,
         layer: OnionAdmissionLayer,
     ) -> Result<(), OnionAdmissionRejection> {
-        let OnionAdmissionCharge(()) = charge;
+        let OnionAdmissionCharge { arrival_ms, epoch } = charge;
         self.advance(now_ms);
-        if layer.epoch != self.epoch {
+        if layer.epoch != self.epoch || epoch != self.epoch {
             return Err(OnionAdmissionRejection::StaleEpoch);
         }
-        if !layer.expiry.admissible_at(self.clock_ms) {
+        if !layer.expiry.admissible_at(arrival_ms) || layer.expiry.has_passed_at(self.clock_ms) {
             return Err(OnionAdmissionRejection::OutsideWindow);
         }
         let probe = self.replay.probe(layer.tag);
