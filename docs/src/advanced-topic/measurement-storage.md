@@ -24,24 +24,34 @@ reliability.
 
 ## IndexedDB access and eviction
 
-An IndexedDB row stores `key`, `data`, and `last_visit_time`. A successful `get`
-updates the timestamp in the **same read-write transaction** as its lookup and
-awaits commit before returning. Splitting the touch from the read could overwrite
-a concurrent value; removing the touch would change least-recently-used eviction.
-A missing-key read also waits for transaction completion. Access timestamps remain
-monotonic per key when the clock stalls or moves backward, saturating at `i64::MAX`.
-This is the existing per-key ordering guarantee, not a global logical clock.
+An IndexedDB row stores `key`, `data`, and `access_stamp`. Recency is a
+store-wide **logical clock**, not wall-clock time: each database keeps one access
+counter in a companion object store, and every `put` and every successful `get`
+takes the next counter value as the row's stamp and advances the counter in the
+**same read-write transaction** as the row write, awaiting commit before
+returning. Splitting the touch from the read could overwrite a concurrent value;
+removing the touch would change least-recently-used eviction. A missing-key read
+is not an access and also waits for transaction completion.
 
-`visit_count` and `created_time` are no longer serialized, and newly created
-stores have only the `last_visit_time` index. Database opening supplies no version:
-Rexie runs schema creation only for a new database. An existing database therefore
-retains its unused `visit_count` index. Normal deserialization ignores surplus row
-fields and the next successful touch rewrites the current row shape; no migration
-branch or version family is introduced. Removing an existing index would require
-an IndexedDB schema upgrade, so this cleanup does not promise physical removal of
-that old index and never deletes a user's database.
+The law: k accesses receive k distinct, strictly increasing stamps, whatever the
+browser's timer resolution; no timer is read. Eviction removes the rows with the
+smallest stamps through the `access_stamp` index, so two rows never tie. `clear`
+keeps the counter, so a stamp is never reused within one database. The counter
+stops with an error at `Number.MAX_SAFE_INTEGER` rather than repeat a stamp.
+
+Schema version 2 introduced the counter. A version-1 database, whose rows carry
+wall-clock `last_visit_time`, is migrated in place and never cleared: the upgrade
+adds the counter store and the `access_stamp` index and drops the old
+`last_visit_time` and `visit_count` indexes; the first open then restamps every
+row `0..n` in its former eviction order (`last_visit_time`, then key) and sets the
+counter to `n` in one transaction, dropping the unused `visit_count` and
+`created_time` fields. The counter record marks a completed migration; an
+interrupted one reruns from the untouched rows on the next open. The upgrade
+waits until every connection still open at version 1, such as another tab
+running an older build, has closed.
 
 The constructor requires an explicit database name and nonzero capacity. Raw
 transactions are private to the adapter. Browser tests use unique database names,
 including an isolated previous-schema fixture, and exercise actual IndexedDB reads,
-writes, errors, timestamp touches, capacity eviction, and reopening.
+writes, errors, access-clock touches, capacity eviction, migration, and
+reopening. No browser test reads or waits on wall-clock time.
