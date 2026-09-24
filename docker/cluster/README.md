@@ -86,7 +86,7 @@ Useful environment variables:
 - `RINGS_ONION_EXIT_ALLOW_TARGETS`: comma-separated exit target allow-list; use `*:*` for all targets; default `*:*`
 - `RINGS_ONION_EXIT_DENY_TARGETS`: comma-separated exit target deny-list; default empty
 
-The reserved `https` onion service is handled by the native TCP exit runtime. Native nodes advertising the default services publish both `tcp` and `https`, which lets WorkBench build HTTPS onion proxy routes against the Docker cluster. Every route is a loop through four distinct relays besides the client (guard, relay, exit, relay, back to the guard), so it needs `RINGS_NODE_COUNT` of at least `4`.
+The reserved `https` onion service is handled by the native TCP exit runtime. Native nodes advertising the default services publish both `tcp` and `https`, which lets WorkBench build HTTPS onion proxy routes against the Docker cluster. Every route is a loop through four distinct relays besides the client (guard, relay, exit, relay, back to the guard). A client outside the cluster, such as WorkBench, therefore needs `RINGS_NODE_COUNT` of at least `4`; a cluster node acting as the client never selects itself, so it needs at least `5`.
 
 Topology modes:
 

@@ -107,9 +107,29 @@ async fn retire_unless_live(
     Ok(None)
 }
 
+/// Join `incoming` into the live value stored at `key`, and store the join.
+///
+/// Pre: the caller holds the ring's storage transition, and `incoming` was admitted.
+/// Post: the stored value is `live ⊔ incoming` when a live value exists, otherwise `incoming`,
+/// normalized for storage either way; it is returned.
+async fn join_live_entry(
+    store: &EntryStorage,
+    key: &str,
+    incoming: Entry,
+    now_ms: u128,
+) -> Result<Entry> {
+    let joined = match live_entry(store, key, now_ms).await? {
+        Some(live) => live.join(incoming)?,
+        None => incoming,
+    }
+    .try_into_storage_entry()?;
+    store.put(key, &joined).await?;
+    Ok(joined)
+}
+
 /// Storage transition law: every read-modify-write of a slot (an operation, a join, an
-/// acknowledged removal, and the retirement a read performs) runs under the ring's storage
-/// transition, one at a time. The inbound actor and the stabilizer write the same slots
+/// acknowledged removal, and the retirement a read performs), in replicated storage and in the
+/// fetch cache alike, runs under the ring's storage transition, one at a time. The inbound actor and the stabilizer write the same slots
 /// concurrently (a hold arriving while the recipient drains its inbox, a hand-off joining while
 /// a repair pass reads), and the store itself only orders single puts, so without this
 /// serialization one of two interleaved read-modify-writes would overwrite the other and a held
@@ -183,14 +203,7 @@ impl PeerRing {
         let key = StorageKey::new(incoming.kind, key).to_string();
         let incoming = incoming.try_into_storage_entry()?;
         let _transition = self.storage_transition.lock().await;
-        let stored = if let Some(local) = live_entry(&self.storage, &key, now_ms).await? {
-            local.join(incoming)?
-        } else {
-            incoming
-        }
-        .try_into_storage_entry()?;
-        self.storage.put(&key, &stored).await?;
-        Ok(stored)
+        join_live_entry(&self.storage, &key, incoming, now_ms).await
     }
 
     /// Apply a stamped operation issued by `writer` to the value stored at `placement` at time
@@ -394,19 +407,29 @@ impl PeerRing {
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl ChordStorageCache<PeerRingAction> for PeerRing {
-    /// Cache a fetched entry.
+    /// Join a fetched entry into the cache: `cache[k] ← cache[k] ⊔ entry` (#864).
     ///
     /// Pre: `entry` satisfies the same admission law as a replicated write, so a peer cannot
     /// pin a fetched value in the cache past the retention bound it could obtain in storage.
+    /// Post: the cached carrier is the join of every live reply observed for its key, so it does
+    /// not depend on the order in which replicas answer. The read-join-write is one storage
+    /// transition, so two concurrent replies cannot lose one side.
     async fn local_cache_put(&self, entry: Entry) -> Result<()> {
         if entry.kind.is_relay_inbox() {
             return Err(Error::RelayInboxOperationNotAllowed);
         }
-        entry.validate_admissible_at(get_epoch_ms(), self.network_id())?;
-        self.cache.put(&entry.did.to_string(), &entry).await
+        let now_ms = get_epoch_ms();
+        entry.validate_admissible_at(now_ms, self.network_id())?;
+        let key = entry.did.to_string();
+        let incoming = entry.try_into_storage_entry()?;
+        let _transition = self.storage_transition.lock().await;
+        join_live_entry(&self.cache, &key, incoming, now_ms)
+            .await
+            .map(drop)
     }
 
     async fn local_cache_get(&self, entry_key: Did) -> Result<Option<Entry>> {
+        let _transition = self.storage_transition.lock().await;
         live_entry(&self.cache, &entry_key.to_string(), get_epoch_ms()).await
     }
 }

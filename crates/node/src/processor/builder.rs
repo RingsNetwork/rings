@@ -2,7 +2,6 @@ use super::config::validate_dht_virtual_nodes;
 use super::config::validate_onion_role_config;
 use super::*;
 use crate::consts::DATA_REDUNDANT;
-use crate::descriptor::DescriptorView;
 
 /// ProcessorBuilder is used to initialize a [Processor] instance.
 pub struct ProcessorBuilder {
@@ -225,8 +224,6 @@ impl ProcessorBuilder {
             onion_role: self.onion_role,
             registration_tasks,
             observability,
-            online_nodes: DescriptorView::default(),
-            onion_exits: DescriptorView::default(),
         })
     }
 

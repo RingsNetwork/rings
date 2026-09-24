@@ -363,7 +363,6 @@ mod tests {
     use rings_core::ecc::SecretKey;
 
     use super::*;
-    use crate::descriptor::DescriptorView;
     use crate::tests::TEST_NETWORK_ID;
 
     fn descriptor_at(heartbeat_at_ms: u128, expires_at_ms: u128) -> Result<OnlineNodeDescriptor> {
@@ -399,80 +398,37 @@ mod tests {
         )
     }
 
-    /// Join `read` into `view` at `now_ms` and return the DIDs of the live answer.
-    fn join_dids(
-        view: &DescriptorView<Did, OnlineNodeDescriptor>,
-        read: &[&OnlineNodeDescriptor],
-        now_ms: u128,
-    ) -> Result<Vec<Did>> {
-        Ok(view
-            .join(
-                read.iter().copied().cloned(),
-                |descriptor| descriptor.did,
-                now_ms,
+    /// Totality (#864): of two distinct descriptors of one DID at an equal heartbeat, the same
+    /// one is selected whatever order they are read in: at a different expiry, and at an equal
+    /// expiry from two session keys of one account (two processes publishing in the same
+    /// millisecond).
+    #[test]
+    fn test_latest_valid_by_did_breaks_an_equal_heartbeat_by_content() -> Result<()> {
+        let account = SecretKey::random();
+        let session = DelegateeKey::new_with_seckey(&account)?;
+        let other_session = DelegateeKey::new_with_seckey(&account)?;
+        let shorter = descriptor_of(&session, 20, 100)?;
+        let longer = descriptor_of(&session, 20, 200)?;
+        let other_process = descriptor_of(&other_session, 20, 100)?;
+        assert_eq!(other_process.did, shorter.did);
+        assert_ne!(other_process, shorter);
+
+        for (first, second) in [(&shorter, &longer), (&shorter, &other_process)] {
+            let forward = OnlineNodeDescriptor::latest_valid_by_did(
+                [first.clone(), second.clone()],
+                50,
                 TEST_NETWORK_ID,
                 false,
-            )?
-            .into_iter()
-            .map(|descriptor| descriptor.did)
-            .collect())
-    }
-
-    /// Monotonicity (#864): a descriptor observed once stays in every later answer, even when a
-    /// later read comes from a replica that lacks it.
-    #[test]
-    fn test_view_keeps_a_descriptor_a_later_read_lacks() -> Result<()> {
-        let view = DescriptorView::default();
-        let first = descriptor_at(10, 100)?;
-        let second = descriptor_at(10, 100)?;
-        let mut both = vec![first.did, second.did];
-        both.sort();
-
-        assert_eq!(join_dids(&view, &[&first, &second], 20)?, both);
-        assert_eq!(join_dids(&view, &[&first], 30)?, both);
-        assert_eq!(join_dids(&view, &[], 40)?, both);
-        Ok(())
-    }
-
-    /// Commutativity (#864): the newest heartbeat of a DID wins whichever replica answers last.
-    #[test]
-    fn test_view_keeps_the_newest_heartbeat_in_any_read_order() -> Result<()> {
-        let delegatee_key = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-        let older = descriptor_of(&delegatee_key, 10, 100)?;
-        let newer = descriptor_of(&delegatee_key, 20, 100)?;
-
-        for reads in [[&older, &newer], [&newer, &older]] {
-            let view = DescriptorView::default();
-            let answers = reads
-                .iter()
-                .map(|read| {
-                    view.join(
-                        [(*read).clone()],
-                        |descriptor| descriptor.did,
-                        30,
-                        TEST_NETWORK_ID,
-                        false,
-                    )
-                })
-                .collect::<Result<Vec<_>>>()?;
-            assert_eq!(answers.last(), Some(&vec![newer.clone()]));
+            );
+            let reverse = OnlineNodeDescriptor::latest_valid_by_did(
+                [second.clone(), first.clone()],
+                50,
+                TEST_NETWORK_ID,
+                false,
+            );
+            assert_eq!(forward, reverse);
+            assert_eq!(forward.len(), 1);
         }
-        Ok(())
-    }
-
-    /// Expiry bounds the view (#864): an expired descriptor leaves the view and every later
-    /// answer.
-    #[test]
-    fn test_view_drops_expired_descriptors() -> Result<()> {
-        let view = DescriptorView::default();
-        let short = descriptor_at(10, 50)?;
-        let long = descriptor_at(10, 100)?;
-
-        let mut both = vec![short.did, long.did];
-        both.sort();
-        assert_eq!(join_dids(&view, &[&short, &long], 20)?, both);
-        assert_eq!(join_dids(&view, &[], 60)?, vec![long.did]);
-        assert_eq!(join_dids(&view, &[], 110)?, Vec::<Did>::new());
         Ok(())
     }
 

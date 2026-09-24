@@ -1,4 +1,5 @@
 use std::iter;
+use std::num::NonZeroUsize;
 #[cfg(rings_native)]
 use std::sync::atomic::AtomicU64;
 #[cfg(rings_native)]
@@ -293,21 +294,21 @@ fn build_forward_layers(
 }
 
 fn edge_circuit_ids(
-    hop_count: usize,
+    hop_count: NonZeroUsize,
     first_circuit_id: OnionCircuitId,
 ) -> Result<Vec<OnionCircuitId>> {
     edge_circuit_ids_with(hop_count, first_circuit_id, OnionCircuitId::random)
 }
 
 pub(super) fn edge_circuit_ids_with(
-    hop_count: usize,
+    hop_count: NonZeroUsize,
     first_circuit_id: OnionCircuitId,
     mut next_id: impl FnMut() -> OnionCircuitId,
 ) -> Result<Vec<OnionCircuitId>> {
     const MAX_ALLOCATION_ATTEMPTS_PER_EDGE: usize = 16;
-    let mut ids = Vec::with_capacity(hop_count);
+    let mut ids = Vec::with_capacity(hop_count.get());
     ids.push(first_circuit_id);
-    while ids.len() < hop_count {
+    while ids.len() < hop_count.get() {
         let next = (0..MAX_ALLOCATION_ATTEMPTS_PER_EDGE)
             .map(|_| next_id())
             .find(|candidate| !ids.contains(candidate))

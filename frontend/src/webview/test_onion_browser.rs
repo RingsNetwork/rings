@@ -1,17 +1,26 @@
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::iter;
 use std::rc::Rc;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
+use futures::channel::oneshot;
+use futures::future::try_join;
 use futures::future::try_join_all;
 use js_sys::Array;
 use js_sys::Object;
 use js_sys::Reflect;
+use rings_node::extension::Backend;
+use rings_node::extension::BackendObserver;
 use rings_node::onion::OnionExitOffer;
 use rings_node::onion::OnionExitPolicy;
 use rings_node::onion::OnionRole;
 use rings_node::onion::OnionServiceName;
 use rings_node::prelude::rings_core::delegation::DelegateeKey;
+use rings_node::prelude::rings_core::dht::Did;
 use rings_node::prelude::rings_core::ecc::SecretKey;
 use rings_node::prelude::rings_core::storage::idb::IdbStorage;
 use rings_node::prelude::rings_runtime::sleep;
@@ -197,30 +206,103 @@ async fn browser_onion_loop() -> WebviewResult<(Rc<Provider>, Vec<ProviderListen
         .chain(middle.iter().map(|relay| (&guard, relay)))
         .chain(middle.iter().map(|relay| (relay, &exit)))
         .collect::<Vec<_>>();
-    try_join_all(
-        edges
-            .iter()
-            .map(|(offerer, answerer)| connect_browser_providers(offerer, answerer)),
-    )
+    // Each edge is connected when both ends have admitted each other: awaited on the
+    // admission events of their backends, not polled.
+    try_join_all(edges.iter().map(|(offerer, answerer)| async move {
+        connect_browser_providers(&offerer.provider, &answerer.provider).await?;
+        try_join(offerer.admits(answerer), answerer.admits(offerer)).await
+    }))
     .await?;
-    for (offerer, answerer) in edges.iter() {
-        poll_until("the fixture edge to connect on both sides", || {
-            edge_connected(offerer, answerer)
-        })
-        .await?;
-    }
     // Listening starts each node's registrations, and the first one publishes at once: started
-    // after the edges, every registration reaches the overlay on its first attempt.
+    // after the edges, every registration reaches the overlay on its first attempt. A
+    // registration publish has no completion signal (#866), so the client's directory is polled.
     let listeners = [&client, &guard, &exit]
         .into_iter()
         .chain(middle.iter())
-        .map(|provider| provider.listen())
+        .map(|node| node.provider.listen())
         .collect::<Vec<_>>();
     poll_until("the client directory to register the loop", || {
-        loop_directory_ready(&client, FIXTURE_MIDDLE_RELAYS + 2)
+        loop_directory_ready(&client.provider, FIXTURE_MIDDLE_RELAYS + 2)
     })
     .await?;
-    Ok((client, listeners))
+    Ok((client.provider, listeners))
+}
+
+/// One fixture node: its provider and the peers its backend has admitted.
+struct FixtureNode {
+    /// The node's provider.
+    provider: Rc<Provider>,
+    /// Admission events of the node's backend.
+    admitted: Arc<AdmittedPeers>,
+}
+
+impl FixtureNode {
+    /// Resolve once this node has admitted `peer`.
+    async fn admits(&self, peer: &Self) -> WebviewResult<()> {
+        let did = Did::from_str(peer.provider.address().as_str())
+            .map_err(|error| WebviewError::transport(format!("fixture peer did: {error:?}")))?;
+        self.admitted.admission(did).await
+    }
+}
+
+/// The peers one fixture node has admitted, from its backend's admission events.
+#[derive(Default)]
+struct AdmittedPeers {
+    /// Admitted peers, and the admissions still awaited.
+    state: Mutex<AdmissionState>,
+}
+
+/// State of [`AdmittedPeers`].
+#[derive(Default)]
+struct AdmissionState {
+    /// Peers currently admitted.
+    admitted: BTreeSet<Did>,
+    /// Awaited admissions, each resolved when its peer is admitted.
+    awaited: Vec<(Did, oneshot::Sender<()>)>,
+}
+
+impl AdmittedPeers {
+    /// Resolve once `peer` is admitted: at once when it already is.
+    async fn admission(&self, peer: Did) -> WebviewResult<()> {
+        let admitted = {
+            let mut state = self.state.lock().map_err(|_| {
+                WebviewError::transport("fixture admission state poisoned".to_string())
+            })?;
+            if state.admitted.contains(&peer) {
+                return Ok(());
+            }
+            let (sender, receiver) = oneshot::channel();
+            state.awaited.push((peer, sender));
+            receiver
+        };
+        admitted
+            .await
+            .map_err(|_| WebviewError::transport("fixture admission observer dropped".to_string()))
+    }
+}
+
+impl BackendObserver for AdmittedPeers {
+    fn lookup_report(&self, _tx_id: uuid::Uuid, _successor: Did) {}
+
+    fn peer_admitted(&self, peer: Did) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        state.admitted.insert(peer);
+        let (resolved, awaited) = std::mem::take(&mut state.awaited)
+            .into_iter()
+            .partition::<Vec<_>, _>(|(awaited, _)| *awaited == peer);
+        state.awaited = awaited;
+        for (_, sender) in resolved {
+            let _resolved = sender.send(());
+        }
+    }
+
+    fn peer_retired(&self, peer: Did) {
+        if let Ok(mut state) = self.state.lock() {
+            state.admitted.remove(&peer);
+        }
+    }
 }
 
 fn fixture_origin() -> String {
@@ -235,10 +317,7 @@ fn fixture_url(path: &str) -> String {
     format!("{}{path}", fixture_origin())
 }
 
-async fn browser_provider(
-    storage_name: &str,
-    role: OnionRole<&str>,
-) -> WebviewResult<Rc<Provider>> {
+async fn browser_provider(storage_name: &str, role: OnionRole<&str>) -> WebviewResult<FixtureNode> {
     let delegatee_key = DelegateeKey::new_with_seckey(&SecretKey::random()).map_err(|error| {
         WebviewError::transport(format!("build browser delegatee key: {error:?}"))
     })?;
@@ -266,19 +345,31 @@ async fn browser_provider(
         .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
         .build()
         .map_err(|error| WebviewError::transport(format!("build processor: {error:?}")))?;
-    let provider = Rc::new(provider_from_processor(processor));
-    provider
-        .set_backend()
-        .map_err(|error| WebviewError::transport(format!("install backend: {error:?}")))?;
-    Ok(provider)
+    let admitted = Arc::new(AdmittedPeers::default());
+    let provider = observed_provider(processor, Arc::clone(&admitted))?;
+    Ok(FixtureNode {
+        provider: Rc::new(provider),
+        admitted,
+    })
 }
 
+/// Wrap `processor` in a provider whose backend reports admissions to `admitted`.
 #[expect(
     clippy::arc_with_non_send_sync,
-    reason = "Provider::from_processor requires Arc<Processor>; this browser-only test stores Provider in Rc after the API boundary"
+    reason = "Provider::from_processor, Backend::new and Swarm::set_callback require Arc; this browser-only test stores Provider in Rc after the API boundary"
 )]
-fn provider_from_processor(processor: Processor) -> Provider {
-    Provider::from_processor(std::sync::Arc::new(processor))
+fn observed_provider(
+    processor: Processor,
+    admitted: Arc<AdmittedPeers>,
+) -> WebviewResult<Provider> {
+    let swarm = Arc::clone(&processor.swarm);
+    let provider = Provider::from_processor(Arc::new(processor));
+    swarm
+        .set_callback(Arc::new(
+            Backend::new(Arc::new(provider.clone())).observed_by(admitted),
+        ))
+        .map_err(|error| WebviewError::transport(format!("install backend: {error:?}")))?;
+    Ok(provider)
 }
 
 async fn connect_browser_providers(offerer: &Provider, answerer: &Provider) -> WebviewResult<()> {
@@ -357,22 +448,6 @@ where
     Err(WebviewError::transport(format!(
         "timed out waiting for {what}"
     )))
-}
-
-/// Return whether the edge `offerer — answerer` is connected on both sides: each end lists the
-/// other as a connected peer, so either one can relay over it.
-async fn edge_connected(offerer: &Provider, answerer: &Provider) -> WebviewResult<bool> {
-    Ok(peer_connected(offerer, answerer).await? && peer_connected(answerer, offerer).await?)
-}
-
-/// Return whether `local` lists `remote` as a connected peer.
-async fn peer_connected(local: &Provider, remote: &Provider) -> WebviewResult<bool> {
-    let peers = rpc(local, "listPeers", Object::new().into()).await?;
-    let remote = remote.address();
-    Ok(array_field(&peers, "peers")?.iter().any(|peer| {
-        string_field(&peer, "did").is_ok_and(|did| did == remote)
-            && string_field(&peer, "state").is_ok_and(|state| state == "Connected")
-    }))
 }
 
 /// Return whether the client's directory holds the precondition of a loop route: the relay

@@ -81,7 +81,8 @@ pub struct PeerRing {
     predecessor: Arc<Mutex<Option<Did>>>,
     /// Persistent replicated-entry storage.
     pub storage: EntryStorage,
-    /// Local fetched-entry cache, bounded at [`LOCAL_CACHE_CAPACITY`] entries.
+    /// Local fetched-entry cache, bounded at [`LOCAL_CACHE_CAPACITY`] entries: each carrier is
+    /// the join of the replies observed for its key (#864).
     pub cache: EntryStorage,
     /// Virtual ownership layout used by storage placement.
     storage_virtual_node_config: VirtualNodeConfig,

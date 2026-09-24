@@ -8,8 +8,6 @@
 
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::sync::Mutex;
 
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
@@ -114,6 +112,29 @@ pub(crate) trait SignedDescriptor: Sized {
     fn descriptor_is_live_at(&self, now_ms: u128, network_id: u32) -> bool {
         self.descriptor_verify_signature(network_id) && !self.descriptor_is_expired_at(now_ms)
     }
+
+    /// Return whether this descriptor supersedes `other` of the same key: the later heartbeat
+    /// wins, and an equal heartbeat is decided by `(expiry, signed body, signature)`, so the
+    /// order is total on distinct descriptors. A descriptor whose content fails to encode never
+    /// supersedes, and is superseded by one that encodes.
+    fn supersedes(&self, other: &Self) -> bool {
+        let rank = |descriptor: &Self| {
+            (
+                descriptor.descriptor_heartbeat_at_ms(),
+                descriptor.descriptor_expires_at_ms(),
+            )
+        };
+        let content = |descriptor: &Self| {
+            Some((
+                descriptor.descriptor_signing_data().ok()?,
+                rings_codec::serialize(descriptor.descriptor_signature()).ok()?,
+            ))
+        };
+        rank(self)
+            .cmp(&rank(other))
+            .then_with(|| content(self).cmp(&content(other)))
+            == std::cmp::Ordering::Greater
+    }
 }
 
 /// Select the newest descriptor per DID that verifies under the receiver's overlay.
@@ -138,8 +159,9 @@ where
 }
 
 /// Select the newest descriptor per `key` that verifies under the receiver's overlay, and live at
-/// `now_ms` unless `include_expired`: the join `⊔` of the descriptors under the heartbeat order
-/// within each key.
+/// `now_ms` unless `include_expired`: the join `⊔` of the descriptors under
+/// [`SignedDescriptor::supersedes`] within each key, a total order, so the selection does not
+/// depend on the input order.
 pub(crate) fn latest_valid_by_key<K, D>(
     descriptors: impl IntoIterator<Item = D>,
     key: impl Fn(&D) -> K,
@@ -162,9 +184,7 @@ where
         }
         match latest.entry(key(&descriptor)) {
             Entry::Occupied(mut entry) => {
-                if descriptor.descriptor_heartbeat_at_ms()
-                    > entry.get().descriptor_heartbeat_at_ms()
-                {
+                if descriptor.supersedes(entry.get()) {
                     entry.insert(descriptor);
                 }
             }
@@ -174,74 +194,6 @@ where
         }
     }
     latest
-}
-
-/// The descriptors this process has observed in one registry, joined across directory reads
-/// (#864).
-///
-/// A directory read returns whichever replica answered last, so two reads of one registry need
-/// not agree while ownership moves. The view makes reads monotone: each read is joined into it,
-///
-/// ```text
-/// R  = read ⊎ V                      the read, with the view
-/// V′ = latest(R, live at now)        newest live descriptor per key
-/// ```
-///
-/// and answered from `R`. `⊔ = latest` is commutative, associative and idempotent, so the
-/// order in which replicas answer does not matter, and a descriptor once observed stays in every
-/// later answer until a newer heartbeat of its key replaces it or it expires:
-///
-/// ```text
-/// t ≤ t′  ⇒  keys(V_t ∖ expired(t′)) ⊆ keys(V_t′).
-/// ```
-///
-/// A precondition observed on one read therefore holds on every later read, until expiry.
-/// Clones share one view.
-pub(crate) struct DescriptorView<K, D> {
-    /// Newest live descriptor per key observed so far.
-    latest: Arc<Mutex<BTreeMap<K, D>>>,
-}
-
-impl<K, D> Clone for DescriptorView<K, D> {
-    fn clone(&self) -> Self {
-        Self {
-            latest: Arc::clone(&self.latest),
-        }
-    }
-}
-
-impl<K, D> Default for DescriptorView<K, D> {
-    fn default() -> Self {
-        Self {
-            latest: Arc::new(Mutex::new(BTreeMap::new())),
-        }
-    }
-}
-
-impl<K, D> DescriptorView<K, D>
-where
-    K: Ord,
-    D: SignedDescriptor + Clone,
-{
-    /// Join `read` into the view and answer the read from the joined descriptors: the newest per
-    /// key, live at `now_ms` unless `include_expired`.
-    pub(crate) fn join(
-        &self,
-        read: impl IntoIterator<Item = D>,
-        key: impl Fn(&D) -> K,
-        now_ms: u128,
-        network_id: u32,
-        include_expired: bool,
-    ) -> Result<Vec<D>> {
-        let mut latest = self.latest.lock().map_err(|_| Error::LockPoisoned)?;
-        let joined = read
-            .into_iter()
-            .chain(latest.values().cloned())
-            .collect::<Vec<_>>();
-        let answer = latest_valid_by_key(joined.clone(), &key, now_ms, network_id, include_expired);
-        *latest = latest_valid_by_key(joined, &key, now_ms, network_id, false);
-        Ok(answer.into_values().collect())
-    }
 }
 
 pub(crate) fn encode_descriptor<T: Serialize>(descriptor: &T) -> Result<Encoded> {

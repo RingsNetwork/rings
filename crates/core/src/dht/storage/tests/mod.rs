@@ -1218,3 +1218,58 @@ async fn test_local_cache_shares_admission_and_retention() -> Result<()> {
     assert_eq!(node.cache.count().await?, 0);
     Ok(())
 }
+
+/// A stamped `Extend` delta that adds `value` to the carrier `did`, written by `writer` at
+/// `now_ms`: the shape a replica holds after that write.
+fn extend_delta(did: Did, value: &str, now_ms: u128, writer: Did) -> Result<Entry> {
+    Ok(
+        EntryOperation::Extend(live_entry(did, vec![value.into()], EntryKind::Data))
+            .stamped(now_ms, writer)?
+            .entry()
+            .clone(),
+    )
+}
+
+/// Read-join (#864): the cache holds the join of the replies, whatever order they arrive in,
+/// including two replies stamped at the same instant by different writers; a repeated reply
+/// changes nothing.
+#[tokio::test]
+async fn test_local_cache_joins_replies_in_any_order() -> Result<()> {
+    let resource = Did::from(10u32);
+    let now_ms = get_epoch_ms();
+    let first = extend_delta(resource, "a", now_ms, Did::from(1u32))?;
+    let tied = extend_delta(resource, "b", now_ms, Did::from(2u32))?;
+
+    let mut cached = Vec::new();
+    for replies in [[&first, &tied, &first], [&tied, &first, &tied]] {
+        let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
+        for reply in replies {
+            node.local_cache_put(reply.clone()).await?;
+        }
+        cached.push(node.local_cache_get(resource).await?);
+    }
+
+    let [forward, reverse] = cached.as_slice() else {
+        return Err(Error::InvalidMessage("two read orders".to_string()));
+    };
+    assert_eq!(forward, reverse);
+    assert_eq!(forward.as_ref().map(|entry| entry.data.len()), Some(2));
+    Ok(())
+}
+
+/// Tombstones propagate through the cache: a stale replica that still holds a removed element
+/// does not resurrect it when it answers after the replica that observed the removal.
+#[tokio::test]
+async fn test_local_cache_keeps_a_tombstone_against_a_stale_reply() -> Result<()> {
+    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
+    let resource = Did::from(10u32);
+    let added = extend_delta(resource, "a", get_epoch_ms(), Did::from(1u32))?;
+    let removed = added.tombstone(added.clone())?;
+
+    node.local_cache_put(removed).await?;
+    node.local_cache_put(added).await?;
+
+    let cached = node.local_cache_get(resource).await?;
+    assert_eq!(cached.map(|entry| entry.data), Some(Vec::new()));
+    Ok(())
+}

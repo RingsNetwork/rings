@@ -1,3 +1,5 @@
+use std::num::NonZeroUsize;
+
 use rings_core::message::MessageSigner;
 
 use super::super::codec::OnionCircuitInput;
@@ -247,14 +249,14 @@ fn test_edge_circuit_id_allocation_retries_collisions_and_fails_boundedly() {
     let third = OnionCircuitId::new([3; 16]);
     let mut candidates = [first, second, second, third].into_iter();
 
-    let ids = edge_circuit_ids_with(3, first, || {
+    let ids = edge_circuit_ids_with(NonZeroUsize::MIN.saturating_add(2), first, || {
         candidates.next().expect("bounded collision fixture")
     })
     .expect("unique candidates eventually succeed");
     assert_eq!(ids, vec![first, second, third]);
 
     assert!(matches!(
-        edge_circuit_ids_with(2, first, || first),
+        edge_circuit_ids_with(NonZeroUsize::MIN.saturating_add(1), first, || first),
         Err(crate::error::Error::OnionRouteError(
             crate::onion::OnionRouteError::CircuitIdAllocationFailed
         ))

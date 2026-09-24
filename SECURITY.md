@@ -40,8 +40,9 @@ The implementation is intended to handle ordinary churn and fail-stop behavior:
 peers can disconnect, crash, restart, or miss heartbeats. Every onion node generates a
 fresh process epoch at each start and publishes it with its relay capability and in
 every signed exit descriptor; exits bind it into encrypted forward layers, so reusing
-a persisted delegated delegatee key does not keep pre-restart exit cells valid. TTLs, stabilization, storage repair, and descriptor
-refreshes are designed for that environment.
+a persisted delegated delegatee key does not keep pre-restart exit cells valid. TTLs,
+stabilization, storage repair, and descriptor refreshes are designed for that
+environment.
 
 The current overlay does not provide Byzantine membership safety. A malicious peer
 can drop, delay, or refuse messages; advertise service policy it later ignores;
@@ -309,11 +310,14 @@ configuration: `H = 3n + 2` positions for `n` symbol hops (`n ≤ 4`, so `H ≤ 
 and every position except the guard's return is a distinct node. Selection fails
 closed when fewer than `H − 1` distinct eligible relays are live; it never
 shortens a route, because a short path is a distinguishable segment length. The
-candidates come from a per-process view of the registries: every directory read is
-joined into it, newest heartbeat per key, and a descriptor leaves it only at expiry.
-Reads are therefore monotone, whichever replica answers, and a withdrawn
-registration stays a candidate until its TTL, as it would in a stale replica. The
-exit is drawn first, by quality among the exits, then the guard, then the
+candidates come from the node's fetched-entry cache, which holds the CRDT join of
+every reply observed for a registry rather than the last one, so reads do not depend
+on which replica answers and a removal observed once is not undone by a stale
+replica. A read is monotone only while its carrier stays cached and live: capacity
+eviction, the carrier's retention bound (admitted at most the maximum TTL), and a
+process restart each start it again from the replies it gets, and a failed fetch
+answers from the cache. A client reading through a remote directory node sees that
+node's cache instead. The exit is drawn first, by quality among the exits, then the guard, then the
 relays, so a scarce high-quality exit is not consumed as a guard or relay: when
 every registered exit extends to a loop, the exit's marginal is its quality share
 among the exits. A draw that would leave a later position unfillable is excluded
@@ -361,8 +365,9 @@ node type, network, process epoch, timestamps, and signer material. There is no
 parallel transport enum or descriptor schema number: the name denotes a
 world-facing symbol of the closed onion signature, `Σ_W = {tcp, https}`. The
 identity symbol `relay` is advertised as a relay capability, which carries the
-node's process epoch, and is not a service name, so a name outside `Σ_W`, `relay` included, is rejected wherever it enters a
-node (configuration, descriptor decode, RPC) and no route can name it. An exit
+node's process epoch, and is not a service name, so a name outside `Σ_W`, `relay`
+included, is rejected wherever it enters a node (configuration, descriptor decode,
+RPC) and no route can name it. An exit
 evaluates each authenticated application through a table holding exactly the
 services it is configured to serve. `https ⊑ tcp`: native exits serve `tcp` through
 the TCP exit runtime, and `https` as the left-biased alternative of an HTTPS request
@@ -567,7 +572,8 @@ or redeliver a message inside the sender's own proof lifetime, and every element
 it by signature. Held messages are stored and relocated in the clear between owners, as
 every DHT value is; confidentiality is the application's E2E layer's.
 Native storage enforces its configured byte budget by retiring the least recently
-written values, and the fetched-entry cache is bounded by entry count. These bounds
+written values, and the fetched-entry cache is bounded by entry count; each cached
+carrier is the join of the replies observed for it, capped like a stored carrier. These bounds
 limit resource use by any single writer; they are not a Sybil defence, and an
 adversary with many identities can still fill a budget with values that expire only
 at the maximum time-to-live.

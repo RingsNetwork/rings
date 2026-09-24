@@ -25,6 +25,8 @@
 //! Substitution `σ[ā]` replaces the terminal symbol `s` by the application `(s, ā)`; relay positions
 //! take `ε` and are left untouched, so the substitution happens once, at the terminal.
 
+use std::num::NonZeroUsize;
+
 use super::circuit::OnionCircuitPayload;
 use super::OnionRouteError;
 use super::OnionServiceName;
@@ -104,9 +106,9 @@ impl<P> OnionPipeline<P> {
         self.relays.first().unwrap_or(&self.terminal)
     }
 
-    /// Return the number of positions, one hop each.
-    pub fn hop_count(&self) -> usize {
-        self.relays.len().saturating_add(1)
+    /// Return the number of positions, one hop each: at least one, the terminal's.
+    pub fn hop_count(&self) -> NonZeroUsize {
+        NonZeroUsize::MIN.saturating_add(self.relays.len())
     }
 
     /// Relabel every position in evaluation order, stopping at the first failure.

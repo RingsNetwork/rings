@@ -345,7 +345,11 @@ async fn test_local_hit_read_repair_sends_no_search_for_unknown_replicas() -> Re
 
     node.swarm.storage_fetch(entry.did).await?;
 
-    assert_eq!(node.swarm.storage_check_cache(entry.did).await, Some(entry));
+    // The cache holds the join of the replies, normalized for storage like every carrier.
+    assert_eq!(
+        node.swarm.storage_check_cache(entry.did).await,
+        Some(entry.try_into_storage_entry()?)
+    );
     assert_no_more_msg([&node]).await;
     Ok(())
 }

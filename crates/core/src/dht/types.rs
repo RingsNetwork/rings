@@ -100,10 +100,21 @@ pub trait ChordStorageRepair<Action>: Chord<Action> {
 /// The cache is bounded and shares the storage admission law: a fetched entry
 /// is cached only if it could have been accepted into storage, and it is
 /// retired once its retention bound elapses.
+///
+/// Laws (#864):
+/// - Read-join: a put joins the reply into the cached carrier, `cache[k] ← cache[k] ⊔ reply`
+///   ([`Entry::join`]). `⊔` is commutative, associative and idempotent, so the cached value
+///   does not depend on the order in which replicas answer, and a tombstone observed in any
+///   reply is kept, so a removed element does not resurface from a stale replica.
+/// - Bounds: every reply is admitted like a replicated write, every carrier is capped at its
+///   kind's `max_data_len` (oldest dropped), and the cache holds at most
+///   [`LOCAL_CACHE_CAPACITY`](crate::consts::LOCAL_CACHE_CAPACITY) carriers.
+/// - Monotonicity is per resident key: evicting a key at capacity, or retiring it at its
+///   retention bound, un-observes it, and its next read starts again from the replies it gets.
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait ChordStorageCache<Action>: Chord<Action> {
-    /// Cache fetched resource locally.
+    /// Join a fetched resource into the local cache.
     async fn local_cache_put(&self, entry: Entry) -> Result<()>;
     /// Get a live cached entry.
     async fn local_cache_get(&self, entry_key: Did) -> Result<Option<Entry>>;

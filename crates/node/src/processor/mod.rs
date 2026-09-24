@@ -50,7 +50,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use uuid;
 
-use crate::descriptor::DescriptorView;
 use crate::error::Error;
 use crate::error::Result;
 use crate::measure::PeriodicMeasure;
@@ -223,10 +222,6 @@ pub struct Processor {
     registration_tasks: Vec<Arc<dyn RegistrationTask>>,
     /// Process-local bounded recorder backing the authenticated operator surface.
     observability: Arc<Observability>,
-    /// Online-node descriptors observed across directory reads, keyed by DID (#864).
-    online_nodes: DescriptorView<Did, OnlineNodeDescriptor>,
-    /// Onion-exit descriptors observed across directory reads, keyed by `(DID, service)` (#864).
-    onion_exits: DescriptorView<(Did, OnionServiceName), OnionExitDescriptor>,
 }
 
 impl Processor {
@@ -314,34 +309,34 @@ impl Processor {
 
     /// List signed online-node descriptors from the registry.
     ///
-    /// The read is joined into this process's view of the registry, so a descriptor observed once
-    /// is listed until a newer heartbeat of its DID replaces it or it expires (#864).
+    /// The registry carrier is the join of every reply this node has observed (#864), so a
+    /// descriptor observed once stays listed while its carrier is cached and live.
     pub async fn lookup_online_nodes(
         &self,
         include_expired: bool,
     ) -> Result<Vec<OnlineNodeDescriptor>> {
         let entry_key = entry::Entry::gen_did(ONLINE_NODES_TOPIC)?;
-        let read = self
-            .fetch_storage_entry(entry_key)
-            .await?
-            .map(|entry| Self::online_node_descriptors_from_entry(&entry))
-            .unwrap_or_default()
+
+        let Some(entry) = self.fetch_storage_entry(entry_key).await? else {
+            return Ok(vec![]);
+        };
+
+        let descriptors = Self::online_node_descriptors_from_entry(&entry)
             .into_iter()
             .filter(|descriptor| descriptor.matches_dht_protocol(self.swarm.dht_protocol_mode()));
 
-        Ok(self.online_nodes.join(
-            read,
-            |descriptor| descriptor.did,
+        Ok(OnlineNodeDescriptor::latest_valid_by_did(
+            descriptors,
             get_epoch_ms(),
             self.swarm.network_id(),
             include_expired,
-        )?)
+        ))
     }
 
     /// List signed onion-exit descriptors from the application-layer exit registry.
     ///
-    /// Like [`Self::lookup_online_nodes`], every read is joined into this process's view of the
-    /// registry (#864).
+    /// Like [`Self::lookup_online_nodes`], the carrier read is the join of the observed replies
+    /// (#864).
     pub async fn lookup_onion_exits(
         &self,
         service: &str,
@@ -350,45 +345,43 @@ impl Processor {
         let entry_key = entry::Entry::gen_did(ONION_EXITS_TOPIC)?;
         let service = service.trim();
 
-        let entry = self.fetch_storage_entry(entry_key).await?;
-        let exits = self.join_onion_exits(entry.as_ref(), service, include_expired)?;
-        let Some(entry) = entry.filter(|entry| {
-            !include_expired
-                && exits.is_empty()
-                && self.entry_has_expired_onion_exit_service(entry, service)
-        }) else {
+        let Some(entry) = self.fetch_storage_entry(entry_key).await? else {
+            return Ok(vec![]);
+        };
+        let exits = self.select_onion_exits_from_entry(&entry, service, include_expired);
+        if include_expired
+            || !exits.is_empty()
+            || !self.entry_has_expired_onion_exit_service(&entry, service)
+        {
+            return Ok(exits);
+        }
+
+        let Some(refreshed_entry) = self
+            .fetch_storage_entry_after_cache_refresh(entry_key, &entry)
+            .await?
+        else {
             return Ok(exits);
         };
-
-        let refreshed_entry = self
-            .fetch_storage_entry_after_cache_refresh(entry_key, &entry)
-            .await?;
-        self.join_onion_exits(refreshed_entry.as_ref(), service, include_expired)
+        Ok(self.select_onion_exits_from_entry(&refreshed_entry, service, include_expired))
     }
 
-    /// Join the exit descriptors of `entry` into this process's exit view and answer the lookup
-    /// of `service` (every service when empty) from it.
-    fn join_onion_exits(
+    /// Select the newest live exit registration per `(DID, service)` of `entry` offering
+    /// `service` (every service when empty).
+    fn select_onion_exits_from_entry(
         &self,
-        entry: Option<&entry::Entry>,
+        entry: &entry::Entry,
         service: &str,
         include_expired: bool,
-    ) -> Result<Vec<OnionExitDescriptor>> {
-        let read = entry
-            .map(Self::onion_exit_descriptors_from_entry)
-            .unwrap_or_default();
-        Ok(self
-            .onion_exits
-            .join(
-                read,
-                OnionExitDescriptor::registration_key,
-                get_epoch_ms(),
-                self.swarm.network_id(),
-                include_expired,
-            )?
-            .into_iter()
-            .filter(|descriptor| service.is_empty() || descriptor.offers_service(service))
-            .collect())
+    ) -> Vec<OnionExitDescriptor> {
+        OnionExitDescriptor::latest_valid_by_service_did(
+            Self::onion_exit_descriptors_from_entry(entry),
+            get_epoch_ms(),
+            self.swarm.network_id(),
+            include_expired,
+        )
+        .into_iter()
+        .filter(|descriptor| service.is_empty() || descriptor.offers_service(service))
+        .collect()
     }
 
     pub(crate) async fn fetch_storage_entry(&self, entry_key: Did) -> Result<Option<entry::Entry>> {
@@ -396,6 +389,10 @@ impl Processor {
         self.fetch_storage_entry_with_stop(entry_key, &stop).await
     }
 
+    /// Fetch `entry_key` and answer from the cache, the join of every reply observed (#864).
+    ///
+    /// A failed fetch is the empty read, `cache ⊔ ∅ = cache`: it answers from the live cache and
+    /// returns the fetch error only when the cache holds no live carrier for the key.
     pub(crate) async fn fetch_storage_entry_with_stop(
         &self,
         entry_key: Did,
@@ -404,7 +401,13 @@ impl Processor {
         if stop.should_stop() {
             return Err(Error::RegistrationStopped);
         }
-        self.storage_fetch(entry_key).await?;
+        if let Err(error) = self.storage_fetch(entry_key).await {
+            return self
+                .storage_check_cache(entry_key)
+                .await
+                .map(Some)
+                .ok_or(error);
+        }
         for attempt in 0..DHT_LOOKUP_CACHE_POLL_ATTEMPTS {
             if stop.should_stop() {
                 return Err(Error::RegistrationStopped);
