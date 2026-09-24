@@ -39,6 +39,10 @@ impl Error {
             | Self::OutboundSchedulerRuntimeUnavailable
             | Self::CancelledDetachedAdmissionPublishedSuccess
             | Self::DetachedSendAbandonedAfterClaim { .. }
+            // rerouting outcomes: a placement's verdict, never a peer's send failure
+            | Self::ReroutingExhausted { .. }
+            | Self::SingleAttemptRefused { .. }
+            | Self::ReroutingStopped
             | Self::DetachedPayloadCleanupTimeout { .. }
             | Self::DataChannelSendCompletionTimeout { .. }
             | Self::DataChannelDeliveryTimeout { .. }

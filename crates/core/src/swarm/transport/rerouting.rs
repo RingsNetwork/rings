@@ -325,9 +325,9 @@ impl Awaiting {
     ///
     /// `Room` decides the admission path of the scope that refused (the peer's slots or bytes,
     /// or the global bytes, each behind its fair-wait queue): a release in another scope, one
-    /// too small, or one a queued waiter takes does not satisfy it. A channel
-    /// refusal resolves once the transfers ahead of it drained, not only when the channel
-    /// empties, so a busy but flowing channel wakes the placement. Every disjunct is a predicate over readings taken
+    /// too small, or one a queued waiter takes does not satisfy it. A channel refusal resolves
+    /// once the transfers ahead of it drained, not only when the channel empties, so a busy but
+    /// flowing channel wakes the placement. Every disjunct is a predicate over readings taken
     /// after the listeners were registered, so no wake-up is lost, and none is satisfied by the
     /// refused send's own release (module documentation).
     pub(super) fn is_triggered(&self, route: LinkRoute, observation: Observation) -> bool {

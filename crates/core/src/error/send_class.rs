@@ -397,18 +397,24 @@ mod tests {
         );
     }
 
-    /// The exhaustion and single-attempt refusals are never themselves retried.
+    /// The rerouting outcomes are never themselves retried, and never degrade a peer's quality:
+    /// each is a placement's verdict, not a send failure of the peer.
     #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_family = "wasm"), test)]
-    fn test_rerouting_exhaustion_is_fatal() {
+    fn test_rerouting_outcomes_are_fatal_and_not_peer_failures() {
         let peer = Did::from(7_u32);
-        let exhausted = Error::ReroutingExhausted {
-            last: SendDeferral::cancelled(peer),
-        };
-        assert_eq!(exhausted.send_class(), SendClass::Fatal);
-        let refused = Error::SingleAttemptRefused {
-            refusal: SendDeferral::cancelled(peer),
-        };
-        assert_eq!(refused.send_class(), SendClass::Fatal);
+        let outcomes = [
+            Error::ReroutingExhausted {
+                last: SendDeferral::cancelled(peer),
+            },
+            Error::SingleAttemptRefused {
+                refusal: SendDeferral::cancelled(peer),
+            },
+            Error::ReroutingStopped,
+        ];
+        for outcome in outcomes {
+            assert_eq!(outcome.send_class(), SendClass::Fatal, "{outcome}");
+            assert!(!outcome.records_peer_send_failure(), "{outcome}");
+        }
     }
 }

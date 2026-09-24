@@ -55,8 +55,9 @@ pub(crate) enum Attempts {
     /// Reroute within `REROUTING_BUDGET`; a wait ends once the stop is requested.
     Rerouted(StopToken),
     /// One attempt, as before #859: a pre-acceptance refusal ends the placement with
-    /// `SingleAttemptRefused` carrying it, and nothing waits. For writes originated on the inbound path (relay holds,
-    /// inbox retirement), which must never hold an inbound lane on a rerouting wait.
+    /// `SingleAttemptRefused` carrying it, and nothing waits. For writes originated on the
+    /// inbound path (relay holds, inbox retirement), which must never hold an inbound lane on a
+    /// rerouting wait.
     Single,
 }
 
