@@ -345,7 +345,17 @@ cell on every edge of the loop, SURB replies included, is
 |y_i|=C_b=b-|\chi|,\qquad |\mathrm{cell}|=b ,
 \end{gather*}
 with framing $F=0$: $b$ is decoded from the cell length, and no class byte
-exists that could disagree with it.
+exists that could disagree with it.  Consequences of $F=0$:
+\begin{itemize}
+\item no per-edge cell AEAD: integrity is $\gamma$, and the previous hop
+  is the authenticated transport link $\frm$;
+\item link padding (cover) is a uniform class-$b$ cell; it fails $\gamma$
+  at the receiving hop, except with probability $2^{-128}$;
+\item $\gamma$ is checked before any insertion into $R_i$ and before the
+  admission charge (Algorithm~\ref{alg:hop});
+\item the ECDH cost of a cell that fails $\gamma$ is charged to the
+  ledger of $\frm$ (L9).
+\end{itemize}
 \end{defD}
 
 \begin{defD}{D6$''$}{header encoding}
@@ -513,12 +523,19 @@ fixed key: L9 is load-bearing for AEZ.
 \caption{$\mathrm{Hop}_i(\frm,\chi,y,\arr)$: one position, all symbols}
 \label{alg:hop}
 \begin{algorithmic}[1]
-\State $b\gets|\chi|+|y|$;\ $(\lambda,\chi')\gets\peel(\mathit{sk}_i,\chi)$
-\State \textbf{if} $\gamma\ne\MAC_{K_i}(b\,\|\,\beta)$ \textbf{then} drop
-  \Comment{L8}
-\If{$x\notin(\arr,\arr{+}V]\vee e\ne\mathrm{epoch}_i\vee\nu\in R_i[x]
-  \vee\text{over budget}$} \State drop
-  \Comment{L9} \EndIf
+\State $b\gets|\chi|+|y|$;\ $u\gets b/16\,\mathrm{KiB}$;\
+  $\Lambda\gets\Lambda_i(\frm)$
+\If{$\Lambda=\bot\vee\Lambda{+}u>B\vee\Lambda_i^{\Sigma}{+}u>G$}
+  \State drop \Comment{L9, before ECDH}
+\EndIf
+\State $(\lambda,\chi')\gets\peel(\mathit{sk}_i,\chi)$ \Comment{ECDH, $K_i$}
+\If{$\gamma\ne\MAC_{K_i}(b\,\|\,\beta)$}\label{alg:hop:gamma}
+  \State $\Lambda\gets\Lambda{+}u$;\ drop \Comment{D6, L8}
+\EndIf
+\State $\Lambda\gets\Lambda{+}u$ \Comment{admission charge, L9}
+\If{$x\notin(\arr,\arr{+}V]\vee e\ne\mathrm{epoch}_i\vee\nu\in R_i[x]$}
+  \State drop \Comment{L9}
+\EndIf
 \State $R_i[x]\gets R_i[x]\cup\{\nu\}$;\
   $k^{\mathrm{in}}\gets\KDF_{48}(\sigma^{\mathrm{in}})$
 \If{$f=\relay$} \State $y'\gets\Dec{0}{k^{\mathrm{in}}}(y)$
@@ -776,7 +793,7 @@ is bound: $\gamma_i=\MAC_{K_i}(b\|\beta_i)$.  Under $F=0$, $b$ is only the
 cell length, which $\tau=0$ relays preserve, so a hop re-padding a cell to
 $b'\ne b$ would plant a length tag; the next honest hop computes
 $\MAC_{K}(b'\|\beta)\ne\gamma$ and drops it
-(Algorithm~\ref{alg:hop}, line~2).  L8 is a
+(Algorithm~\ref{alg:hop}, line~\ref{alg:hop:gamma}).  L8 is a
 byte-level law; colluders still link by timing (Table~\ref{tab:leak}).
 \end{lawL}
 
@@ -799,24 +816,67 @@ p_{\mathrm{blk}}=\bigl(1-(1-1/M)^{B}\bigr)^{K}\le2^{-26}\\
 \end{gather*}
 met by $M=370\cdot64=23680$.  (The estimate $e^{-B/M}$ undercounts:
 $(1-1/M)^B<e^{-B/M}$.)
-Budgets count units of 16\,KiB: a class-$b$ cell costs $b/16\,\mathrm{KiB}$
-units, as today's cell buckets charge the full visible size.  With
-$V=150$\,s (\code{ONION\_FORWARD\_MAX\_VALIDITY\_MS}), per-sender budget
-$B=16384$ units over at most $64$ sender partitions, and a global budget
-$64B$ units, a load being the charge over the $V/Q=5$ aligned quanta
-$\lfloor\arr/Q\rfloor-4..\lfloor\arr/Q\rfloor$, hop $i$ admits a layer at
-$\arr$ iff
-\[
-\arr<x\le\arr+V\ \wedge\ \nu\notin R_i[x]\ \wedge\ \text{within budget},
-\]
-then inserts $\nu$ into $R_i[x]$.  \emph{Partition recycling:} a 65th
-sender takes a partition only if that partition's window load is $0$; if
-none is idle, the newcomer is rejected until one is.  A ledger is thus
-never reset while loaded.  This admission replaces the
-per-peer crypto limiter (\code{MAX\_ONION\_CRYPTO\_*}).  A SURB is a layer,
-hence single use; L9 also bounds each AEZ key to one carry value
+Budgets count units of 16\,KiB: a class-$b$ cell costs $u(b)=b/16\,\mathrm{KiB}$
+units, as today's cell buckets charge the full visible size.  A load is
+the charge over the $V/Q=5$ aligned quanta
+$\lfloor\arr/Q\rfloor-4..\lfloor\arr/Q\rfloor$, with
+\begin{gather*}
+V=150\,\mathrm{s},\qquad B=16384,\qquad G=64B\ \text{units},
+\end{gather*}
+$V$ being \code{ONION\_FORWARD\_MAX\_VALIDITY\_MS}, $B$ the per-sender
+budget, and $G$ the global budget, a constant of its own that bounds
+$R_i$ (Prop.~\ref{prop:replay}), not a sender count.
+\emph{Ledgers} are keyed by the sender DID of a live authenticated direct
+link.  With $\mathcal R=2(\text{finger slots}+\text{successors}+1)$ the
+transport connection-registry capacity (\#723), hop $i$ keeps a partial
+map $\Lambda_i:\mathrm{DID}\rightharpoonup\mathbb N$ of loads, and
+$\Lambda_i^{\Sigma}$ the global load:
+\begin{gather*}
+|\mathrm{dom}\,\Lambda_i|\le2\mathcal R,\\
+d\in\mathrm{dom}\,\Lambda_i\ \text{released}\iff
+\mathrm{closed}(d)\wedge\Lambda_i(d)=0,
+\end{gather*}
+$\mathcal R$ ledgers for live links and $\mathcal R$ for links closed with
+load in the window.  A link to $d$ opens $\Lambda_i(d)$, or finds it if
+$d$ reconnects; no ledger is recycled or evicted (no LRU), and a cell
+with $\Lambda_i(\frm)=\bot$ (full table) is rejected, fail closed.  Each
+cell on which $i$ computes $K_i$ is charged $u(b)$ to $\Lambda_i(\frm)$
+exactly once: on a $\gamma$ failure (D6), else at admission, after
+$\gamma$ (Algorithm~\ref{alg:hop}).  Hop $i$ admits a layer at $\arr$ iff
+\begin{multline*}
+\Lambda_i(\frm)+u\le B\ \wedge\ \Lambda_i^{\Sigma}+u\le G\ \wedge\
+\gamma\ \text{holds}\\
+\wedge\ \arr<x\le\arr+V\ \wedge\ e=\mathrm{epoch}_i\ \wedge\
+\nu\notin R_i[x],
+\end{multline*}
+then inserts $\nu$ into $R_i[x]$.  This admission replaces the per-peer
+crypto limiter (\code{MAX\_ONION\_CRYPTO\_*}).  A SURB is a layer, hence
+single use; L9 also bounds each AEZ key to one carry value
 (Prop.~\ref{prop:onekey}).
 \end{lawL}
+
+\begin{proposition}[Ledger table]\label{prop:ledger}
+Let $c(t)$ be the number of links closed in $(t-V,t]$.
+(i) $\mathrm{dom}\,\Lambda_i\subseteq\{\text{live links}\}\cup
+\{\text{links closed in }(t-V,t]\}$, so
+$|\mathrm{dom}\,\Lambda_i|\le\mathcal R+c(t)$.
+(ii) If $c(t)\le\mathcal R$, every live link has a ledger: no honest
+neighbour is locked out, and a full table requires churn beyond
+$\mathcal R$ within $V$.
+(iii) No sender holds a ledger without a live link or one closed within
+$V$, so no slot exists beyond them.
+(iv) Per DID, $\le B$ units per window under reconnection and identity
+rotation.
+\end{proposition}
+\begin{proof}
+(i) Live links are at most $\mathcal R$ (registry).  A closed link's load
+is charged before its close and so vanishes within the $5$ aligned
+quanta, at most $V$, after it; the ledger is then released.  (ii) follows
+from (i) and $2\mathcal R$ slots; (iii) is the release rule.  (iv) A
+ledger is never reset while loaded, and a reconnecting DID finds it; a new
+DID needs a real authenticated connection, which the registry bounds, and
+obtains its own $B$ only.
+\end{proof}
 
 \begin{proposition}[Replay bounds]\label{prop:replay}
 (i) No admitted layer outlives its filter: $x\le\arr+V$ and $R_i[x]$
@@ -832,24 +892,24 @@ B\,\bigl\lceil(\lceil T/Q\rceil+1)/5\bigr\rceil\ \text{units}:
 $B$ within $4Q$, a burst of $2B$ within $4Q+\epsilon$ ($B$ at the end of
 quantum $q$, $B$ at the start of $q+5$), and $B/V\approx109$
 units\,s$^{-1}$ ($\approx1.79$\,MB/s of cells) in the long run, shared by
-every loop on that link; $d$ DIDs obtain at most $\min(d,64)\,B$.
-(iv) The same holds for $64B$, $64B/V\approx6990$ units\,s$^{-1}$
+every loop on that link; $d$ DIDs need $d$ links and obtain at most
+$\min(d,2\mathcal R)\,B$ (Prop.~\ref{prop:ledger}).
+(iv) The same holds for $G$, $G/V\approx6990$ units\,s$^{-1}$
 ($\approx115$\,MB/s), in total; a 16\,KiB cell is one unit.  (v) A SURB is usable
 only within $[x_\upsilon-V,x_\upsilon)$, so SURB lifetime is at most $V$.
 \end{proposition}
 \begin{proof}
 (i) is the admission window with filters keyed by $x$.  (ii) $R_i[x]$
 receives tags only from arrivals in $[x-V,x)$, which are $5$ aligned
-quanta, at most $64B$ by the global budget, so it has at most $64$ blocks
+quanta, at most $G=64B$ by the global budget, so it has at most $64$ blocks
 and a false-positive rate at most $64\cdot2^{-26}=2^{-20}$ (union bound);
 every live tag was admitted within the last $5$ quanta, so the $\le5$
-live filters hold at most $64B$ tags in $64$ full blocks plus one partial
+live filters hold at most $G$ tags in $64$ full blocks plus one partial
 block per filter: $69$ blocks of $KM/8=76960$\,B ($37.6$ bits per tag).
 (iii) An interval of length $T$ meets at most $\lceil T/Q\rceil+1$
 quanta, covered by $\lceil(\lceil T/Q\rceil+1)/5\rceil$ runs of $5$
-consecutive quanta, each charged at most $B$.  A ledger is reset only by
-recycling, only at load $0$, so a rotated DID never re-opens a loaded
-budget, and a new DID needs an idle partition.  (iv) is the global
+consecutive quanta, each charged at most $B$; the ledger is never reset
+while loaded (Prop.~\ref{prop:ledger}).  (iv) is the global
 ledger, argued alike.  (v) every relay of the reply path applies (i) at the reply's
 arrival.
 \end{proof}
@@ -959,7 +1019,7 @@ computation & exit service only & any $f\in\Sigma_n$ (D2) \\
 return path & forward path reversed & fresh relays to $g$ (L7) \\
 relay state & \code{relay\_returns}, $\le1024$, TTL $120$\,s refreshed per cell & replay tags only (L9) \\
 return bytes & one ciphertext, identical per edge & one AEZ layer per edge (L8) \\
-replay & exits (\code{consume\_forward\_nonce}), $V=150$\,s, $B=4096$, crypto limiter & every hop, $x$-keyed Bloom filters, $B=16384$ units of 16\,KiB (L9) \\
+replay & exits (\code{consume\_forward\_nonce}), $V=150$\,s, $B=4096$, crypto limiter & every hop, $x$-keyed Bloom filters, $B=16384$ units of 16\,KiB per link-keyed ledger, $2\mathcal R$ ledgers, $G=64B$ (L9) \\
 session replies & no SURB credit & one per SURB, $k$ per credit loop (D8) \\
 \bottomrule
 \end{tabular}
@@ -997,7 +1057,9 @@ hop-chosen routing & $\nxt_i\in\lambda_i$ (L6); bind excluded (Prop.~\ref{prop:a
 first/last-hop correlation & one guard closes the loop (L7) \\
 replay of layer or SURB & single admission per $\nu$; no false negatives across filter rotation (L9) \\
 replay across a restart & new process epoch rejects every older layer (D2, L9) \\
-identity rotation to reset a budget & only idle partitions recycled; $\le B$ per DID per window (L9) \\
+identity rotation to reset a budget & $\le B$ per DID per window; a new DID needs a live link, bounded by $\mathcal R$ (L9, Prop.~\ref{prop:ledger}) \\
+sender-slot lockout & a ledger per live link; no slots beyond live links and links closed with load within $V$ (L9, Prop.~\ref{prop:ledger}) \\
+invalid-$\gamma$ flood (cover, garbage) & $\gamma$ before $R_i$ and admission; ECDH cost charged $u(b)$ to $\frm$ (D6, L9) \\
 reply amplification & $r(t)\le u(t)$ per session (Inv.~\ref{inv:credit}) \\
 large-class cell flood & budgets in 16\,KiB units: $\le1.79$\,MB/s of cells per neighbour (L9) \\
 SURB-pool exhaustion & $|Q_{h,\sid}|\le Q_{\max}$, all pools under $\quota(f)$ (D8) \\
@@ -1030,7 +1092,8 @@ L3, D6 & one class $b$ and slot width $C_b$ on every edge of a loop, SURB replie
 client & reply accepted once by tag $t_\cl$; unknown, reused, or expired tag dropped; $T$ empty after every $x$ passes \\
 D5, L7 & $H=(s+1)n+s$; guard at $1$ and $H$ only; $n>4$ rejected; selection fails closed below $H-1$ eligible DIDs \\
 L8 & per-hop byte inequality; one-bit flip rejects the whole value; a cell re-padded to another class fails $\gamma$ at the next hop \\
-L9 & replayed layer and reused SURB rejected; a layer for an earlier process epoch rejected after restart; $x\notin(\arr,\arr+V]$ rejected; a class-$b$ cell charged $b/16$\,KiB units; over-budget cells rejected; a 65th sender rejected while all 64 partitions are loaded, admitted once one is idle \\
+L9 & replayed layer and reused SURB rejected; an earlier process epoch rejected after restart; $x\notin(\arr,\arr+V]$ rejected; charge $u(b)$; over-budget cells rejected; a ledger per live link, released once closed at load $0$, found again on reconnect; a full $2\mathcal R$ table rejects \\
+D6 & a uniform (cover) cell fails $\gamma$, is charged $u(b)$, never reaches $R_i$ \\
 credit & a \code{tcp} session emits no reply without a SURB of its own $\sid$, removes each SURB before release, drops expired SURBs, and resumes after new credit; two sessions at one $h$ never share a SURB; $\mathrm{fin}$ both ways drops $\sid$; a credit frame adds $k$ SURBs; credit beyond $Q_{\max}$ is dropped \\
 rate & loopback single-client \code{tcp} download $\ge1$\,MB/s at $b=16$\,KiB, upload $\approx1/(k+1)$ of download \\
 replay store & no replayed layer admitted across filter rotation; a filter grows by blocks and is dropped exactly when its $x$ passes; memory tracks admitted tags; measured false-positive rate within $2^{-20}$ \\
@@ -1051,7 +1114,7 @@ AEZ & $2941$ vectors from the AEZ v5 reference C code (length sweep, parameter g
 phase & content \\
 \midrule
 1 & golden bytes; closed $\Sigma$ table (unknown names rejected, no \code{tcp} fallback; configs change, bytes do not; \code{https} is request/response only, CONNECT tunnels use \code{tcp}); pipeline term; layer build as a fold over $P$; reducer and handler as $\Sigma$-algebra; route by symbol sequence.  Zero wire change, no bump \\
-2a & uniform layer, fixed-length header with blinded key transport and 32-byte seeds (L5$'$, D6$''$), loop with derived $\Hm$, loop classes, relay process epoch, client tag, stateless relays, AEZ carry, per-session SURBs with batching, $x$-keyed Bloom replay store with $B=16384$ replacing the crypto limiter.  Breaking \\
+2a & uniform layer, fixed-length header with blinded key transport and 32-byte seeds (L5$'$, D6$''$), loop with derived $\Hm$, loop classes, relay process epoch, client tag, stateless relays, AEZ carry, per-session SURBs with batching, $x$-keyed Bloom replay store; admission with $B=16384$ per link-keyed ledger ($2\mathcal R$ ledgers) and global $G$, replacing the crypto limiter.  Breaking \\
 2b & intermediate symbols: \code{Invoke} with release time, $\quota(f)$.  Same cutover; one version bump on its last PR \\
 \bottomrule
 \end{tabular}
