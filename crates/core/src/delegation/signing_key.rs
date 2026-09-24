@@ -3,14 +3,19 @@ use std::str::FromStr;
 use rings_derive::wasm_export;
 use serde::Deserialize;
 use serde::Serialize;
+use zeroize::Zeroizing;
 
 use super::Delegation;
 use super::DelegationBuilder;
 use crate::dht::Did;
 use crate::ecc::keccak256;
 use crate::ecc::keys::AccountVerifier;
+use crate::ecc::prime_order::NonIdentityPoint;
+use crate::ecc::prime_order::NonZeroScalar;
+use crate::ecc::prime_order::SHARED_SECRET_BYTES;
 use crate::ecc::signers;
 use crate::ecc::PublicKey;
+use crate::ecc::Secp256k1;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
@@ -96,6 +101,19 @@ impl DelegateeKey {
         aad: &[u8],
     ) -> Result<Vec<u8>> {
         crate::ecc::elgamal::impls::secp256k1::decrypt_aead(sealed, aad, &self.delegatee_secret_key)
+    }
+
+    /// The Diffie–Hellman shared secret `x(P·d)` of a peer element `P` and the delegatee secret
+    /// `d`, zeroized on drop.
+    ///
+    /// Law: for every `x ∈ Z_n^*`, `diffie_hellman(x·G) = (d·G)·x` in its x-coordinate, so a
+    /// sender holding `x` and [`Self::delegatee_public_key`] derives the same secret. `P ≠ O` by
+    /// its type, and the secret scalar is only ever held in a zeroizing `Z_n^*` value.
+    pub fn diffie_hellman(
+        &self,
+        peer: &NonIdentityPoint<Secp256k1>,
+    ) -> Zeroizing<[u8; SHARED_SECRET_BYTES]> {
+        peer.shared_secret(&NonZeroScalar::from_secret_key(&self.delegatee_secret_key))
     }
 
     /// Sign a message with this delegatee key.

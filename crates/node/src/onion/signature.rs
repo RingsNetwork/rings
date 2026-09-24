@@ -24,6 +24,16 @@
 //!   carry, so every exit able to interpret `tcp` can interpret `https`, while a browser exit, which
 //!   has `fetch` but no sockets, interprets `https` alone.
 //!
+//! - **Code.** `Σ = {relay} ⊎ Σ_W` is the coproduct `OnionSymbol = 1 + Σ_W`, and the `f` byte
+//!   of the uniform layer (#834 D6″) is its position in table order: `code(inl) = 0`,
+//!   `code(inr w) = 1 + w`, with `from_code ∘ code = Some` and `from_code` undefined past `Σ`.
+//!   All of it is derived from one table (`onion_signature!`).
+//!
+//! Phase 2b note: the `invoke` shapes of #834 D1′ are intermediate but not `relay`, so there the
+//! coproduct becomes `1 + Σ_I + Σ_W` and the code orders `relay`, then `Σ_I`, then `Σ_W`. That is
+//! a change to this table and its codec at the cutover, not to their consumers; the statements
+//! "`Σ = {relay} ⊎ Σ_W`" and "`relay` is the only intermediate symbol" hold for Phases 1 and 2a.
+//!
 //! Width and latency classes `W`, `L` of the world-facing symbols are not protocol data yet: their
 //! results return along the reversed path, never through a fixed-width carry slot.
 
@@ -69,38 +79,146 @@ impl OnionSymbolSpec {
     }
 }
 
-/// The finite signature `Σ`, one named field per symbol so that every table access is total.
-#[derive(Debug)]
-pub struct OnionSignature {
-    relay: OnionSymbolSpec,
-    tcp: OnionSymbolSpec,
-    https: OnionSymbolSpec,
+/// Declares `Σ` once, in table order: the identity symbol, then one row per world-facing symbol.
+/// Every representation of `Σ_W` is derived from the rows, so adding a symbol is one row and no
+/// other place can fall out of step:
+///
+/// ```text
+/// row  Variant field "name"  ↦  OnionSignature.field and its entry in ONION_SIGNATURE,
+///                                its place in symbols() (table order = layer code),
+///                                OnionWorldSymbol::Variant, its place in OnionWorldSymbol::ALL,
+///                                spec(Variant) = &ONION_SIGNATURE.field,
+///                                OnionServiceName::field()
+/// ```
+macro_rules! onion_signature {
+    (
+        relay: $relay:literal,
+        world_facing: [
+            $($(#[doc = $doc:literal])* $variant:ident $field:ident $name:literal,)+
+        ] $(,)?
+    ) => {
+        /// The finite signature `Σ`, one named field per symbol so that every table access is
+        /// total.
+        #[derive(Debug)]
+        pub struct OnionSignature {
+            /// `relay`.
+            relay: OnionSymbolSpec,
+            $($(#[doc = $doc])* $field: OnionSymbolSpec,)+
+        }
+
+        /// The onion signature of this node generation.
+        pub static ONION_SIGNATURE: OnionSignature = OnionSignature {
+            relay: OnionSymbolSpec::new($relay, OnionSymbolPosition::Intermediate),
+            $($field: OnionSymbolSpec::new($name, OnionSymbolPosition::WorldFacing),)+
+        };
+
+        /// `|Σ_W|`, the number of world-facing rows.
+        const WORLD_FACING_SYMBOLS: usize = [$(onion_signature!(@unit $variant),)+].len();
+
+        impl OnionSignature {
+            /// Return the identity symbol `relay`.
+            pub const fn relay(&self) -> &OnionSymbolSpec {
+                &self.relay
+            }
+
+            /// Return `Σ` in table order, which is the order of the layer codes.
+            pub const fn symbols(&self) -> [&OnionSymbolSpec; 1 + WORLD_FACING_SYMBOLS] {
+                [&self.relay, $(&self.$field,)+]
+            }
+
+        }
+
+        /// `Σ_W` as a type: one constructor per world-facing row, in table order; the
+        /// discriminant is the position within `Σ_W`.
+        #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+        #[repr(u8)]
+        enum OnionWorldSymbol {
+            $($(#[doc = $doc])* $variant,)+
+        }
+
+        impl OnionWorldSymbol {
+            /// `Σ_W` in table order.
+            const ALL: [Self; WORLD_FACING_SYMBOLS] = [$(Self::$variant,)+];
+
+            /// The table entry of this symbol.
+            const fn spec(self) -> &'static OnionSymbolSpec {
+                match self {
+                    $(Self::$variant => &ONION_SIGNATURE.$field,)+
+                }
+            }
+        }
+
+        impl OnionServiceName {
+            /// Return `Σ_W`, the world-facing symbols of `Σ`, in table order.
+            pub fn world_facing() -> impl Iterator<Item = Self> {
+                OnionWorldSymbol::ALL.into_iter().map(Self)
+            }
+
+            $(
+                #[doc = concat!("Return the name of the world-facing `", $name, "` symbol.")]
+                pub const fn $field() -> Self {
+                    Self(OnionWorldSymbol::$variant)
+                }
+            )+
+        }
+    };
+    (@unit $variant:ident) => {
+        ()
+    };
 }
 
-/// The onion signature of this node generation.
-pub static ONION_SIGNATURE: OnionSignature = OnionSignature {
-    relay: OnionSymbolSpec::new("relay", OnionSymbolPosition::Intermediate),
-    tcp: OnionSymbolSpec::new("tcp", OnionSymbolPosition::WorldFacing),
-    https: OnionSymbolSpec::new("https", OnionSymbolPosition::WorldFacing),
-};
+onion_signature! {
+    relay: "relay",
+    world_facing: [
+        /// `tcp`, a world-facing byte stream.
+        Tcp tcp "tcp",
+        /// `https`, a world-facing request/response (fetch).
+        Https https "https",
+    ],
+}
 
-impl OnionSignature {
-    /// Return the identity symbol `relay`.
-    pub const fn relay(&self) -> &OnionSymbolSpec {
-        &self.relay
+/// A symbol of `Σ = {relay} ⊎ Σ_W`, as the coproduct `1 + Σ_W`.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the layer code of the Sphinx primitives; #834 Phase 2a-4 (#843) uses it"
+    )
+)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum OnionSymbol {
+    /// The identity symbol `relay`, the only intermediate symbol.
+    Relay,
+    /// A world-facing symbol.
+    WorldFacing(OnionServiceName),
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the layer code of the Sphinx primitives; #834 Phase 2a-4 (#843) uses it"
+    )
+)]
+impl OnionSymbol {
+    /// `code : 1 + Σ_W → u8`, `inl ↦ 0`, `inr w ↦ 1 + w`: the position in table order.
+    pub(crate) const fn code(&self) -> u8 {
+        match self {
+            Self::Relay => 0,
+            // A fieldless `repr(u8)` discriminant: its position within `Σ_W`.
+            Self::WorldFacing(OnionServiceName(symbol)) => 1 + *symbol as u8,
+        }
     }
 
-    /// Return `Σ` in table order.
-    pub const fn symbols(&self) -> [&OnionSymbolSpec; 3] {
-        [&self.relay, &self.tcp, &self.https]
-    }
-
-    /// Return `Σ_W`, the world-facing symbols of `Σ`, in table order as service names.
-    pub fn world_facing(&'static self) -> impl Iterator<Item = OnionServiceName> {
-        self.symbols()
-            .into_iter()
-            .filter(|spec| spec.position == OnionSymbolPosition::WorldFacing)
-            .map(OnionServiceName)
+    /// The left inverse of [`Self::code`]; `None` past the end of `Σ`.
+    pub(crate) fn from_code(code: u8) -> Option<Self> {
+        match code.checked_sub(1) {
+            None => Some(Self::Relay),
+            Some(world) => OnionWorldSymbol::ALL
+                .into_iter()
+                .nth(usize::from(world))
+                .map(|symbol| Self::WorldFacing(OnionServiceName(symbol))),
+        }
     }
 }
 
@@ -108,9 +226,9 @@ impl OnionSignature {
 ///
 /// Invariant: every value denotes a world-facing entry of [`ONION_SIGNATURE`] (see the closure
 /// law). It is encoded as that entry's canonical name string.
-#[derive(Clone, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct OnionServiceName(&'static OnionSymbolSpec);
+pub struct OnionServiceName(OnionWorldSymbol);
 
 impl OnionServiceName {
     /// Parse and canonicalize a service name, admitting exactly the names of `Σ_W`.
@@ -122,14 +240,12 @@ impl OnionServiceName {
                 "onion exit service name must be non-empty and trimmed".to_string(),
             ));
         }
-        ONION_SIGNATURE
-            .world_facing()
+        OnionServiceName::world_facing()
             .find(|service| service.as_str().eq_ignore_ascii_case(trimmed))
             .ok_or_else(|| {
                 Error::InvalidConfig(format!(
                     "unknown onion service {name:?}; the onion signature is closed: expected one of {}",
-                    ONION_SIGNATURE
-                        .world_facing()
+                    OnionServiceName::world_facing()
                         .map(|service| service.as_str())
                         .collect::<Vec<_>>()
                         .join(", ")
@@ -137,24 +253,14 @@ impl OnionServiceName {
             })
     }
 
-    /// Return the name of the world-facing `https` symbol.
-    pub const fn https() -> Self {
-        Self(&ONION_SIGNATURE.https)
-    }
-
-    /// Return the name of the world-facing `tcp` symbol.
-    pub const fn tcp() -> Self {
-        Self(&ONION_SIGNATURE.tcp)
-    }
-
     /// Return the canonical name as a string slice.
     pub const fn as_str(&self) -> &'static str {
-        self.0.name
+        self.0.spec().name
     }
 
     /// Return the specification of the named symbol; total by the closure law.
     pub const fn spec(&self) -> &'static OnionSymbolSpec {
-        self.0
+        self.0.spec()
     }
 
     /// Return whether this name equals `service` after service-name canonicalization.
@@ -166,8 +272,22 @@ impl OnionServiceName {
 impl fmt::Debug for OnionServiceName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("OnionServiceName")
-            .field(&self.0.name)
+            .field(&self.as_str())
             .finish()
+    }
+}
+
+impl PartialOrd for OnionServiceName {
+    /// Names order by their canonical string, so `Σ_W` sorts the same wherever it is keyed.
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for OnionServiceName {
+    /// Names order by their canonical string.
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.as_str().cmp(other.as_str())
     }
 }
 
@@ -188,6 +308,7 @@ impl From<OnionServiceName> for String {
 #[cfg(test)]
 mod tests {
     use super::OnionServiceName;
+    use super::OnionSymbol;
     use super::OnionSymbolPosition;
     use super::ONION_SIGNATURE;
 
@@ -195,7 +316,7 @@ mod tests {
     /// parses: neither names outside `Σ` nor the identity symbol `relay`.
     #[test]
     fn test_service_names_are_exactly_the_world_facing_signature() {
-        for service in ONION_SIGNATURE.world_facing() {
+        for service in OnionServiceName::world_facing() {
             assert_eq!(service.spec().position(), OnionSymbolPosition::WorldFacing);
             assert_eq!(
                 OnionServiceName::parse(service.as_str()).ok(),
@@ -236,5 +357,40 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(intermediate, vec![ONION_SIGNATURE.relay()]);
+    }
+
+    /// `from_code ∘ code = Some` on `Σ`, every code is its symbol's position in `symbols()`, every
+    /// symbol has a code, and no code past the table names a symbol. Enumerated over all of
+    /// `u8`, so no hand-written list can hide a missing row.
+    #[test]
+    fn test_from_code_inverts_code() {
+        let decoded = (0..=u8::MAX)
+            .filter_map(|code| OnionSymbol::from_code(code).map(|symbol| (code, symbol)))
+            .collect::<Vec<_>>();
+
+        assert_eq!(decoded.len(), ONION_SIGNATURE.symbols().len());
+        for ((code, symbol), (position, spec)) in decoded
+            .iter()
+            .zip(ONION_SIGNATURE.symbols().into_iter().enumerate())
+        {
+            let spec_of_symbol = match symbol {
+                OnionSymbol::Relay => ONION_SIGNATURE.relay(),
+                OnionSymbol::WorldFacing(name) => name.spec(),
+            };
+
+            assert_eq!(usize::from(*code), position);
+            assert_eq!(symbol.code(), *code);
+            assert_eq!(spec_of_symbol, spec);
+        }
+        assert_eq!(
+            OnionServiceName::world_facing().count() + 1,
+            ONION_SIGNATURE.symbols().len()
+        );
+    }
+
+    /// Service names order by their canonical string.
+    #[test]
+    fn test_service_names_order_by_name() {
+        assert!(OnionServiceName::https() < OnionServiceName::tcp());
     }
 }
