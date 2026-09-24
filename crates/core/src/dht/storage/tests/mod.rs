@@ -1219,41 +1219,121 @@ async fn test_local_cache_shares_admission_and_retention() -> Result<()> {
     Ok(())
 }
 
-/// A stamped `Extend` delta that adds `value` to the carrier `did`, written by `writer` at
-/// `now_ms`: the shape a replica holds after that write.
-fn extend_delta(did: Did, value: &str, now_ms: u128, writer: Did) -> Result<Entry> {
+/// The replica shape of `operation` on `value` for the carrier `did`, stamped by `writer` at
+/// `now_ms`.
+fn stamped_delta(
+    operation: fn(Entry) -> EntryOperation,
+    did: Did,
+    value: &str,
+    now_ms: u128,
+    writer: Did,
+) -> Result<Entry> {
     Ok(
-        EntryOperation::Extend(live_entry(did, vec![value.into()], EntryKind::Data))
+        operation(live_entry(did, vec![value.into()], EntryKind::Data))
             .stamped(now_ms, writer)?
             .entry()
             .clone(),
     )
 }
 
-/// Read-join (#864): the cache holds the join of the replies, whatever order they arrive in,
-/// including two replies stamped at the same instant by different writers; a repeated reply
-/// changes nothing.
+/// A stamped `Extend` delta that adds `value` to the carrier `did`, written by `writer` at
+/// `now_ms`: the shape a replica holds after that write.
+fn extend_delta(did: Did, value: &str, now_ms: u128, writer: Did) -> Result<Entry> {
+    stamped_delta(EntryOperation::Extend, did, value, now_ms, writer)
+}
+
+/// The carrier cached for `resource` after `replies` are put in order into a fresh cache.
+async fn cached_after(resource: Did, replies: &[&Entry]) -> Result<Option<Entry>> {
+    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
+    for reply in replies {
+        node.local_cache_put((*reply).clone()).await?;
+    }
+    node.local_cache_get(resource).await
+}
+
+/// Assert that `first` and `second` cache to the same carrier in both reply orders, repeats
+/// included, and return it.
+async fn assert_cached_in_any_order(
+    resource: Did,
+    first: &Entry,
+    second: &Entry,
+) -> Result<Option<Entry>> {
+    let forward = cached_after(resource, &[first, second, first]).await?;
+    let reverse = cached_after(resource, &[second, first, second]).await?;
+    assert_eq!(forward, reverse);
+    Ok(forward)
+}
+
+/// Read-join (#864): replies adding distinct payloads cache to their union in either order.
 #[tokio::test]
 async fn test_local_cache_joins_replies_in_any_order() -> Result<()> {
     let resource = Did::from(10u32);
     let now_ms = get_epoch_ms();
     let first = extend_delta(resource, "a", now_ms, Did::from(1u32))?;
-    let tied = extend_delta(resource, "b", now_ms, Did::from(2u32))?;
+    let second = extend_delta(resource, "b", now_ms, Did::from(2u32))?;
 
-    let mut cached = Vec::new();
-    for replies in [[&first, &tied, &first], [&tied, &first, &tied]] {
-        let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
-        for reply in replies {
-            node.local_cache_put(reply.clone()).await?;
-        }
-        cached.push(node.local_cache_get(resource).await?);
-    }
+    let cached = assert_cached_in_any_order(resource, &first, &second).await?;
+    assert_eq!(cached.map(|entry| entry.data.len()), Some(2));
+    Ok(())
+}
 
-    let [forward, reverse] = cached.as_slice() else {
-        return Err(Error::InvalidMessage("two read orders".to_string()));
+/// Tie (#864): one payload added by two writers at the same instant competes on its dot, and
+/// the cache keeps the greater dot whichever reply arrives last.
+#[tokio::test]
+async fn test_local_cache_breaks_a_same_instant_add_tie_by_dot() -> Result<()> {
+    let resource = Did::from(10u32);
+    let now_ms = get_epoch_ms();
+    let first = extend_delta(resource, "a", now_ms, Did::from(1u32))?;
+    let second = extend_delta(resource, "a", now_ms, Did::from(2u32))?;
+    assert_ne!(first.crdt.dots, second.crdt.dots);
+
+    let cached = assert_cached_in_any_order(resource, &first, &second).await?;
+    let greater = first
+        .crdt
+        .dots
+        .iter()
+        .chain(&second.crdt.dots)
+        .max()
+        .copied();
+    assert_eq!(
+        cached.map(|entry| entry.crdt.dots.last().copied()),
+        Some(greater)
+    );
+    Ok(())
+}
+
+/// Tie (#864): two overwrites by different writers at the same instant compete on the
+/// register, and the cache keeps the greater register's value whichever arrives last.
+#[tokio::test]
+async fn test_local_cache_breaks_a_same_instant_overwrite_tie_by_register() -> Result<()> {
+    let resource = Did::from(10u32);
+    let now_ms = get_epoch_ms();
+    let first = stamped_delta(
+        EntryOperation::Overwrite,
+        resource,
+        "a",
+        now_ms,
+        Did::from(1u32),
+    )?;
+    let second = stamped_delta(
+        EntryOperation::Overwrite,
+        resource,
+        "b",
+        now_ms,
+        Did::from(2u32),
+    )?;
+    assert_ne!(first.crdt.register, second.crdt.register);
+
+    let cached = assert_cached_in_any_order(resource, &first, &second).await?;
+    let winner = if first.crdt.register > second.crdt.register {
+        &first
+    } else {
+        &second
     };
-    assert_eq!(forward, reverse);
-    assert_eq!(forward.as_ref().map(|entry| entry.data.len()), Some(2));
+    assert_eq!(
+        cached.map(|entry| (entry.crdt.register, entry.data)),
+        Some((winner.crdt.register, winner.data.clone()))
+    );
     Ok(())
 }
 

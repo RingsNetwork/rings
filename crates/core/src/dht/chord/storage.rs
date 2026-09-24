@@ -82,7 +82,7 @@ impl FromStr for StorageKey {
 
 /// Read `key` from `store`, retiring a value that is no longer live.
 ///
-/// Pre: the caller holds the ring's storage transition, since a retirement is a write.
+/// Pre: the caller holds the transition of `store`, since a retirement is a write.
 /// Post: `Ok(Some(entry))` implies `entry.is_live_at(now_ms)`. A stored value whose
 /// retention bound has elapsed (or that predates retention bounds) is removed and reported
 /// absent, so expiry is enforced lazily on every read path instead of by a sweeper.
@@ -109,7 +109,7 @@ async fn retire_unless_live(
 
 /// Join `incoming` into the live value stored at `key`, and store the join.
 ///
-/// Pre: the caller holds the ring's storage transition, and `incoming` was admitted.
+/// Pre: the caller holds the transition of `store`, and `incoming` was admitted.
 /// Post: the stored value is `live ⊔ incoming` when a live value exists, otherwise `incoming`,
 /// normalized for storage either way; it is returned.
 async fn join_live_entry(
@@ -127,14 +127,16 @@ async fn join_live_entry(
     Ok(joined)
 }
 
-/// Storage transition law: every read-modify-write of a slot (an operation, a join, an
-/// acknowledged removal, and the retirement a read performs), in replicated storage and in the
-/// fetch cache alike, runs under the ring's storage transition, one at a time. The inbound actor and the stabilizer write the same slots
-/// concurrently (a hold arriving while the recipient drains its inbox, a hand-off joining while
-/// a repair pass reads), and the store itself only orders single puts, so without this
-/// serialization one of two interleaved read-modify-writes would overwrite the other and a held
-/// message could be lost. The transition is held across the store's own awaits and nothing
-/// else, so it never nests and never waits on the network.
+/// Transition law: every read-modify-write of a slot (an operation, a join, an acknowledged
+/// removal, and the retirement a read performs) runs under its store's transition, one at a
+/// time: the storage transition for replicated storage, the cache transition for the fetch
+/// cache. The two stores share no slot and no invariant, so each has its own lock, and no path
+/// holds both. The inbound actor and the stabilizer write the same slots concurrently (a hold
+/// arriving while the recipient drains its inbox, a hand-off joining while a repair pass reads,
+/// two fetch replies joining one cache slot), and a store itself only orders single puts, so
+/// without this serialization one of two interleaved read-modify-writes would overwrite the
+/// other and a held message or an observed reply could be lost. The transition is held across
+/// the store's own awaits and nothing else, so it never nests and never waits on the network.
 impl PeerRing {
     /// Read the live replicated entry stored at `key`.
     pub(crate) async fn live_storage_entry(
@@ -412,7 +414,7 @@ impl ChordStorageCache<PeerRingAction> for PeerRing {
     /// Pre: `entry` satisfies the same admission law as a replicated write, so a peer cannot
     /// pin a fetched value in the cache past the retention bound it could obtain in storage.
     /// Post: the cached carrier is the join of every live reply observed for its key, so it does
-    /// not depend on the order in which replicas answer. The read-join-write is one storage
+    /// not depend on the order in which replicas answer. The read-join-write is one cache
     /// transition, so two concurrent replies cannot lose one side.
     async fn local_cache_put(&self, entry: Entry) -> Result<()> {
         if entry.kind.is_relay_inbox() {
@@ -422,14 +424,14 @@ impl ChordStorageCache<PeerRingAction> for PeerRing {
         entry.validate_admissible_at(now_ms, self.network_id())?;
         let key = entry.did.to_string();
         let incoming = entry.try_into_storage_entry()?;
-        let _transition = self.storage_transition.lock().await;
+        let _transition = self.cache_transition.lock().await;
         join_live_entry(&self.cache, &key, incoming, now_ms)
             .await
             .map(drop)
     }
 
     async fn local_cache_get(&self, entry_key: Did) -> Result<Option<Entry>> {
-        let _transition = self.storage_transition.lock().await;
+        let _transition = self.cache_transition.lock().await;
         live_entry(&self.cache, &entry_key.to_string(), get_epoch_ms()).await
     }
 }

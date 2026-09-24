@@ -311,18 +311,22 @@ and every position except the guard's return is a distinct node. Selection fails
 closed when fewer than `H − 1` distinct eligible relays are live; it never
 shortens a route, because a short path is a distinguishable segment length. The
 candidates come from the node's fetched-entry cache, which holds the CRDT join of
-every reply observed for a registry rather than the last one, so reads do not depend
-on which replica answers and a removal observed once is not undone by a stale
-replica. A read is monotone only while its carrier stays cached and live: capacity
-eviction, the carrier's retention bound (admitted at most the maximum TTL), and a
-process restart each start it again from the replies it gets, and a failed fetch
+every reply observed for a registry rather than the last one, so the cached carrier
+does not depend on which replica answers and a removal observed once is not undone
+by a stale replica. The carrier only ascends in the lattice order while it stays
+cached and live, but its visible elements do not: a tombstone, an overwrite or
+compaction floor, or the element cap removes elements, and the registry publisher
+compacts on every heartbeat, so a floor from an owner that never held a descriptor
+erases it from the join until that node heartbeats again (#867). Capacity eviction,
+the carrier's retention bound (admitted at most the maximum TTL), and a process
+restart each start a carrier again from the replies it gets, and a failed fetch
 answers from the cache. A client reading through a remote directory node sees that
-node's cache instead. The exit is drawn first, by quality among the exits, then the guard, then the
-relays, so a scarce high-quality exit is not consumed as a guard or relay: when
-every registered exit extends to a loop, the exit's marginal is its quality share
-among the exits. A draw that would leave a later position unfillable is excluded
-up front, which conditions that marginal otherwise. The
-current data plane still seals the forward prefix `g → r → exit` and answers
+node's cache instead. The exit is drawn first, by quality among the exits, then the
+guard, then the relays, so a scarce high-quality exit is not consumed as a guard or
+relay: when every registered exit extends to a loop, the exit's marginal is its
+quality share among the exits. A draw that would leave a later position unfillable
+is excluded up front, which conditions that marginal otherwise. The current data
+plane still seals the forward prefix `g → r → exit` and answers
 along its reverse; the return segment is selected but not yet used.
 
 **Cover and pacing contract** (`circuit/send_outbox.rs`). Let `B = 4` be the link
@@ -573,10 +577,10 @@ it by signature. Held messages are stored and relocated in the clear between own
 every DHT value is; confidentiality is the application's E2E layer's.
 Native storage enforces its configured byte budget by retiring the least recently
 written values, and the fetched-entry cache is bounded by entry count; each cached
-carrier is the join of the replies observed for it, capped like a stored carrier. These bounds
-limit resource use by any single writer; they are not a Sybil defence, and an
-adversary with many identities can still fill a budget with values that expire only
-at the maximum time-to-live.
+carrier is the join of the replies observed for it, capped like a stored carrier.
+These bounds limit resource use by any single writer; they are not a Sybil defence,
+and an adversary with many identities can still fill a budget with values that
+expire only at the maximum time-to-live.
 
 ### Online And Onion Registries
 

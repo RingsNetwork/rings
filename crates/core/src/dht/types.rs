@@ -106,11 +106,16 @@ pub trait ChordStorageRepair<Action>: Chord<Action> {
 ///   ([`Entry::join`]). `⊔` is commutative, associative and idempotent, so the cached value
 ///   does not depend on the order in which replicas answer, and a tombstone observed in any
 ///   reply is kept, so a removed element does not resurface from a stale replica.
+/// - Monotone in the lattice order: while a key stays resident, successive cached carriers
+///   ascend in `⊑`. The *visible element set* is monotone only between reset floors and
+///   tombstones: an element leaves it when a tombstone for its dot arrives, when an overwrite
+///   or compaction floor above its dot arrives, or when the `max_data_len` cap drops it. A
+///   floor from an owner that never held an element erases that element from the join (#867).
 /// - Bounds: every reply is admitted like a replicated write, every carrier is capped at its
 ///   kind's `max_data_len` (oldest dropped), and the cache holds at most
 ///   [`LOCAL_CACHE_CAPACITY`](crate::consts::LOCAL_CACHE_CAPACITY) carriers.
-/// - Monotonicity is per resident key: evicting a key at capacity, or retiring it at its
-///   retention bound, un-observes it, and its next read starts again from the replies it gets.
+/// - Residency: evicting a key at capacity, or retiring it at its retention bound, un-observes
+///   it, and its next read starts again from the replies it gets.
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait ChordStorageCache<Action>: Chord<Action> {

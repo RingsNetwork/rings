@@ -29,6 +29,7 @@ use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::MessageSigner;
 use crate::message::MessageVerificationExt;
+use crate::message::PayloadSender;
 use crate::storage::MemStorage;
 use crate::swarm::transport::STORAGE_LOOKUP_OBSERVATION_CAPACITY;
 use crate::swarm::SwarmBuilder;
@@ -191,9 +192,10 @@ async fn test_found_entry_read_repair_backpressure_is_deferred() -> Result<()> {
         })
         .await?;
 
+    // The cache holds the join of the replies, normalized for storage like every carrier.
     assert_eq!(
         node1.swarm.storage_check_cache(entry.did).await,
-        Some(entry)
+        Some(entry.try_into_storage_entry()?)
     );
     assert_eq!(
         node2
@@ -687,5 +689,52 @@ async fn test_expired_storage_response_does_not_update_cache_or_repair() -> Resu
     );
     Ok(())
 }
-#[cfg(feature = "dummy")]
-use crate::message::PayloadSender;
+
+/// Read-join through the handler path (#864): two `FoundEntry` replies from replicas holding
+/// disjoint adds of one carrier leave their join in the cache, whichever answers last.
+#[tokio::test]
+async fn test_found_entry_replies_join_in_the_cache() -> Result<()> {
+    let resource = Did::from(10u32);
+    let now_ms = crate::utils::get_epoch_ms();
+    let replica = |value: &str, writer: u32| -> Result<Entry> {
+        Ok(EntryOperation::Extend(crate::tests::live_entry(
+            resource,
+            vec![value.to_string().encode()?],
+            EntryKind::Data,
+        ))
+        .stamped(now_ms, Did::from(writer))?
+        .entry()
+        .clone())
+    };
+    let (holds_a, holds_b) = (replica("a", 1)?, replica("b", 2)?);
+
+    let mut cached = Vec::new();
+    for replies in [[&holds_a, &holds_b], [&holds_b, &holds_a]] {
+        let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
+        let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+        node.swarm.transport.start_storage_lookup(resource, 2)?;
+        for reply in replies {
+            let found = FoundEntry {
+                data: vec![reply.clone()],
+                misses: vec![],
+                resource,
+                redundancy: 2,
+            };
+            let context = MessagePayload::new_send(
+                Message::FoundEntry(found.clone()),
+                node.swarm.transport.message_signer(),
+                node.did(),
+                node.did(),
+            )?;
+            handler.handle(&context, &found).await?;
+        }
+        cached.push(node.swarm.storage_check_cache(resource).await);
+    }
+
+    let [forward, reverse] = cached.as_slice() else {
+        return Err(Error::InvalidMessage("two reply orders".to_string()));
+    };
+    assert_eq!(forward, reverse);
+    assert_eq!(forward.as_ref().map(|entry| entry.data.len()), Some(2));
+    Ok(())
+}

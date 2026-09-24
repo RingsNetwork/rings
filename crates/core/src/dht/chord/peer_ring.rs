@@ -115,6 +115,8 @@ pub struct PeerRing {
     finger_jitter_entropy: OnceLock<uuid::Uuid>,
     /// Serializes every read-modify-write of a storage slot (see `chord::storage`).
     pub(super) storage_transition: FuturesMutex<()>,
+    /// Serializes every read-modify-write of a fetch-cache slot (see `chord::storage`).
+    pub(super) cache_transition: FuturesMutex<()>,
 }
 
 /// Construction.
@@ -169,6 +171,7 @@ impl PeerRing {
             clock_origin: Instant::now(),
             finger_jitter_entropy: OnceLock::new(),
             storage_transition: FuturesMutex::new(()),
+            cache_transition: FuturesMutex::new(()),
             did,
         }
     }

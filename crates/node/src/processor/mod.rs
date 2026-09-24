@@ -391,8 +391,10 @@ impl Processor {
 
     /// Fetch `entry_key` and answer from the cache, the join of every reply observed (#864).
     ///
-    /// A failed fetch is the empty read, `cache ⊔ ∅ = cache`: it answers from the live cache and
-    /// returns the fetch error only when the cache holds no live carrier for the key.
+    /// A failed fetch is the empty read ([`Self::answer_failed_fetch`]). This serves the
+    /// directory lookups and the registration publisher alike: a publisher whose fetch fails
+    /// chooses what to tombstone from its cached observation instead of abandoning the attempt,
+    /// and its own replaced values are still caught by its record of what it published.
     pub(crate) async fn fetch_storage_entry_with_stop(
         &self,
         entry_key: Did,
@@ -402,11 +404,7 @@ impl Processor {
             return Err(Error::RegistrationStopped);
         }
         if let Err(error) = self.storage_fetch(entry_key).await {
-            return self
-                .storage_check_cache(entry_key)
-                .await
-                .map(Some)
-                .ok_or(error);
+            return self.answer_failed_fetch(entry_key, error).await;
         }
         for attempt in 0..DHT_LOOKUP_CACHE_POLL_ATTEMPTS {
             if stop.should_stop() {
@@ -434,12 +432,31 @@ impl Processor {
             })
     }
 
+    /// Answer a fetch of `entry_key` that failed with `error` as the empty read,
+    /// `cache ⊔ ∅ = cache`: from the live cached carrier, and with `error` only when there is none.
+    async fn answer_failed_fetch(
+        &self,
+        entry_key: Did,
+        error: Error,
+    ) -> Result<Option<entry::Entry>> {
+        self.storage_check_cache(entry_key)
+            .await
+            .map(Some)
+            .ok_or(error)
+    }
+
+    /// Fetch `entry_key` again and wait for the cached carrier to move past `previous_entry`.
+    ///
+    /// A failed fetch is the empty read ([`Self::answer_failed_fetch`]): nothing new arrived, so
+    /// the cached carrier is the answer.
     async fn fetch_storage_entry_after_cache_refresh(
         &self,
         entry_key: Did,
         previous_entry: &entry::Entry,
     ) -> Result<Option<entry::Entry>> {
-        self.storage_fetch(entry_key).await?;
+        if let Err(error) = self.storage_fetch(entry_key).await {
+            return self.answer_failed_fetch(entry_key, error).await;
+        }
         for _ in 0..DHT_LOOKUP_CACHE_POLL_ATTEMPTS {
             sleep(DHT_LOOKUP_CACHE_POLL_INTERVAL).await?;
             let Some(entry) = self.storage_check_cache(entry_key).await else {
