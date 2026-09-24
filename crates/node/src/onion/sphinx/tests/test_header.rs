@@ -5,7 +5,6 @@
 use rand::RngCore;
 use rings_core::delegation::DelegateeKey;
 use rings_core::ecc::PublicKey;
-use subtle::ConstantTimeEq;
 
 use super::fixture_keys;
 use super::fixture_layer;
@@ -14,13 +13,15 @@ use super::fixture_route;
 use super::hop_key;
 use crate::onion::circuit::OnionCellBucket;
 use crate::onion::sphinx::cell::OnionCell;
-use crate::onion::sphinx::cell::OnionCellError;
+use crate::onion::sphinx::cell::OnionCellWidth;
+use crate::onion::sphinx::cell::OnionStep;
 use crate::onion::sphinx::class::OnionLoopClass;
 use crate::onion::sphinx::header::OnionHeader;
-use crate::onion::sphinx::header::OnionHeaderError;
 use crate::onion::sphinx::header::OnionHeaderHop;
 use crate::onion::sphinx::header::OnionHeaderRoute;
+use crate::onion::sphinx::header::OnionHeaderRouteError;
 use crate::onion::sphinx::header::OnionLoopTag;
+use crate::onion::sphinx::header::OnionPeelError;
 use crate::onion::sphinx::header::ONION_HEADER_BYTES;
 use crate::onion::sphinx::layer::ONION_LAYER_BYTES;
 use crate::onion::sphinx::seed::OnionSegmentSeed;
@@ -73,7 +74,7 @@ fn test_every_position_of_every_loop_length_peels_its_own_layer() {
             });
 
         assert_eq!(client.to_bytes().len(), ONION_HEADER_BYTES);
-        assert!(bool::from(client.loop_tag().ct_eq(&tag)), "H = {hops}");
+        assert_eq!(client.loop_tag(), tag, "H = {hops}");
     }
 }
 
@@ -83,34 +84,45 @@ fn test_every_position_of_every_loop_length_peels_its_own_layer() {
 #[test]
 fn test_relabelled_cell_dies_at_the_next_honest_hop() {
     let keys = fixture_keys(5);
-    let (header, _) = fixture_header(20, &keys);
-    let (_, segment_keys) = OnionSegmentSeed::draw(&mut fixture_rng(20)).expect("strong segment");
-    let cell =
-        OnionCell::seal(OnionLoopClass::DEFAULT, header, &segment_keys, b"value").expect("seal");
-    let (_, forwarded) = OnionCell::parse(&cell.to_bytes())
+    let mut rng = fixture_rng(20);
+    let (_, segment_keys) = OnionSegmentSeed::draw(&mut rng).expect("strong segment");
+    let (cell, _) = OnionCell::client(
+        &fixture_route(20, &keys),
+        OnionLoopClass::DEFAULT,
+        &segment_keys,
+        b"value",
+        &mut rng,
+    )
+    .expect("client cell");
+    let OnionStep::Relayed {
+        cell: forwarded, ..
+    } = OnionCell::parse(cell.into_bytes())
         .expect("a 16 KiB cell")
         .peel(&keys[0])
         .expect("the colluder peels honestly")
-        .relay()
-        .expect("strong key");
-    let honest = forwarded.to_bytes();
+        .step()
+        .expect("strong key")
+    else {
+        panic!("position 1 is a relay");
+    };
+    let honest = forwarded.into_bytes();
     let large = OnionLoopClass::try_from(OnionCellBucket::MiB12).expect("a loop class");
     let mut relabelled = honest.clone();
     relabelled.resize(large.cell_bytes(), 0);
 
-    let relabelled = OnionCell::parse(&relabelled).expect("a 12 MiB cell");
+    let relabelled = OnionCell::parse(relabelled).expect("a 12 MiB cell");
     assert_eq!(relabelled.class(), large);
     assert_eq!(
         relabelled.peel(&keys[1]).err(),
-        Some(OnionHeaderError::Invalid)
+        Some(OnionPeelError::Invalid)
     );
-    assert!(OnionCell::parse(&honest)
+    assert!(OnionCell::parse(honest)
         .expect("a 16 KiB cell")
         .peel(&keys[1])
         .is_ok());
 }
 
-/// A string whose length is no class is no cell.
+/// A string whose length is no class is no cell, and `into_bytes ∘ parse = id` on cells.
 #[test]
 fn test_cell_parser_admits_exactly_the_class_lengths() {
     for width in [
@@ -121,13 +133,15 @@ fn test_cell_parser_admits_exactly_the_class_lengths() {
         16 * 1024 + 1,
     ] {
         assert_eq!(
-            OnionCell::parse(&vec![0; width]).err(),
-            Some(OnionCellError::Width(width))
+            OnionCell::parse(vec![0; width]).err(),
+            Some(OnionCellWidth(width))
         );
     }
-    let cell = OnionCell::parse(&vec![0; 16 * 1024]).expect("a 16 KiB cell");
+    let mut bytes = vec![0; 16 * 1024];
+    fixture_rng(26).fill_bytes(&mut bytes);
+    let cell = OnionCell::parse(bytes.clone()).expect("a 16 KiB cell");
     assert_eq!(cell.class(), OnionLoopClass::DEFAULT);
-    assert_eq!(cell.to_bytes(), vec![0; 16 * 1024]);
+    assert_eq!(cell.into_bytes(), bytes);
 }
 
 /// L7 guard closure: one guard key at positions `1` and `H` peels both of its layers, and the
@@ -148,7 +162,7 @@ fn test_guard_key_at_first_and_last_position() {
             peeled.next
         });
 
-    assert!(bool::from(client.loop_tag().ct_eq(&tag)));
+    assert_eq!(client.loop_tag(), tag);
 }
 
 /// L8 on the header: `χ_i ≠ χ_{i+1}` on every edge, in `α` and in `β`, and no forwarded header
@@ -184,13 +198,13 @@ fn test_wrong_key_negated_alpha_or_flipped_bit_is_invalid() {
 
     assert_eq!(
         header.peel(class, &hop_key(9)).err(),
-        Some(OnionHeaderError::Invalid)
+        Some(OnionPeelError::Invalid)
     );
     let mut negated = header.to_bytes();
     negated[0] ^= 0x02 ^ 0x03;
     assert_eq!(
         decode(&negated).peel(class, &keys[0]).err(),
-        Some(OnionHeaderError::Invalid)
+        Some(OnionPeelError::Invalid)
     );
     for bit in [
         8 * ALPHA_BYTES,
@@ -203,7 +217,7 @@ fn test_wrong_key_negated_alpha_or_flipped_bit_is_invalid() {
 
         assert_eq!(
             decode(&bytes).peel(class, &keys[0]).err(),
-            Some(OnionHeaderError::Invalid),
+            Some(OnionPeelError::Invalid),
             "bit {bit}"
         );
     }
@@ -222,7 +236,7 @@ fn test_invalid_group_element_and_random_headers_are_invalid() {
         bytes[..ALPHA_BYTES].copy_from_slice(&alpha);
         assert_eq!(
             decode(&bytes).peel(class, &keys[0]).err(),
-            Some(OnionHeaderError::Invalid)
+            Some(OnionPeelError::Invalid)
         );
     }
     let mut rng = fixture_rng(24);
@@ -231,7 +245,7 @@ fn test_invalid_group_element_and_random_headers_are_invalid() {
         rng.fill_bytes(&mut bytes);
         assert_eq!(
             decode(&bytes).peel(class, &keys[0]).err(),
-            Some(OnionHeaderError::Invalid)
+            Some(OnionPeelError::Invalid)
         );
     }
 }
@@ -250,14 +264,14 @@ fn test_route_rejects_bad_lengths_and_keys() {
 
     assert_eq!(
         OnionHeaderRoute::new(Vec::new()).err(),
-        Some(OnionHeaderError::HopCount(0))
+        Some(OnionHeaderRouteError::HopCount(0))
     );
     assert_eq!(
         OnionHeaderRoute::new(overlong).err(),
-        Some(OnionHeaderError::HopCount(MAX_ONION_LOOP_HOPS + 1))
+        Some(OnionHeaderRouteError::HopCount(MAX_ONION_LOOP_HOPS + 1))
     );
     assert_eq!(
         OnionHeaderRoute::new(vec![hop(PublicKey([0; 33]))]).err(),
-        Some(OnionHeaderError::PublicKey)
+        Some(OnionHeaderRouteError::PublicKey)
     );
 }

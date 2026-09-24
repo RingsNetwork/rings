@@ -2,23 +2,24 @@
 //! `s = 2` relays with the guard last, and the client again, every cell parsed from its bytes.
 //!
 //! ```text
-//! client ─seal σ₀─▶ r₀₁ ─▶ r₀₂ ─▶ h₁ (consume v₀, produce v₁ under σ₁) ─▶ r₁₁ ─▶ r₁₂ = g ─▶ client
+//! client ─σ₀─▶ g = r₀₁ ─▶ r₀₂ ─▶ h₁ (consume v₀, produce v₁ under σ₁) ─▶ r₁₁ ─▶ r₁₂ = g ─▶ client
 //! ```
 //!
 //! Laws: every relay is the identity on the carried value (L1), the consumer of each segment
 //! receives exactly its producer's value (D7), the class is the one the client chose on every
-//! edge, and the client receives its tag `t_⋄` (D6′).
+//! edge, the guard peels both of its positions with one key (L7), and the client receives its tag
+//! `t_⋄` (D6′).
 
 use rand::Rng;
 use rings_core::dht::Did;
-use subtle::ConstantTimeEq;
 
 use super::fixture_keys;
 use super::fixture_rng;
+use super::hop_key;
 use crate::onion::circuit::OnionForwardNonce;
 use crate::onion::sphinx::cell::OnionCell;
+use crate::onion::sphinx::cell::OnionStep;
 use crate::onion::sphinx::class::OnionLoopClass;
-use crate::onion::sphinx::header::OnionHeader;
 use crate::onion::sphinx::header::OnionHeaderHop;
 use crate::onion::sphinx::header::OnionHeaderRoute;
 use crate::onion::sphinx::layer::OnionArguments;
@@ -52,7 +53,8 @@ fn layer(
 fn test_loop_carries_each_segment_value_to_its_consumer() {
     let mut rng = fixture_rng(50);
     let class = OnionLoopClass::DEFAULT;
-    let keys = fixture_keys(5);
+    let mut keys = fixture_keys(4);
+    keys.push(hop_key(0));
     let (first, first_keys) = OnionSegmentSeed::draw(&mut rng).expect("strong segment");
     let (second, _) = OnionSegmentSeed::draw(&mut rng).expect("strong segment");
     let [inbound_1, inbound_2] = first.seeds().relays;
@@ -97,41 +99,49 @@ fn test_loop_carries_each_segment_value_to_its_consumer() {
             .collect(),
     )
     .expect("loop length");
-    let (header, tag) = OnionHeader::build(&route, class, &mut rng).expect("build the header");
     let input = rng.gen::<[u8; 32]>();
     let output = rng.gen::<[u8; 24]>();
-    let relay = |cell: Vec<u8>, key| {
-        let peeled = OnionCell::parse(&cell)
+    let (cell, tag) = OnionCell::client(&route, class, &first_keys, &input, &mut rng)
+        .expect("the client's first cell");
+    let peel = |cell: Vec<u8>, key| {
+        let peeled = OnionCell::parse(cell)
             .expect("cell")
             .peel(key)
             .expect("peel");
-        assert_eq!(peeled.layer().application, OnionLayerApplication::Relay);
-        let (_, forwarded) = peeled.relay().expect("strong key");
-        assert_eq!(forwarded.class(), class);
-        forwarded.to_bytes()
+        // Admission reads the layer before any carry work.
+        assert_eq!(peeled.layer().expires_at_ms, 1);
+        peeled.step().expect("carry step")
+    };
+    let relay = |cell: Vec<u8>, key| {
+        let OnionStep::Relayed { layer, cell } = peel(cell, key) else {
+            panic!("a relay position");
+        };
+        assert_eq!(layer.application, OnionLayerApplication::Relay);
+        assert_eq!(cell.class(), class);
+        cell.into_bytes()
     };
 
-    let cell = OnionCell::seal(class, header, &first_keys, &input)
-        .expect("seal")
-        .to_bytes();
-    let cell = relay(relay(cell, &keys[0]), &keys[1]);
-    let (layer, value, producer) = OnionCell::parse(&cell)
-        .expect("cell")
-        .peel(&keys[2])
-        .expect("peel")
-        .consume()
-        .expect("h₁ receives v₀");
-    assert_eq!(value, input);
-    let cell = producer
-        .produce(&layer.outbound.keys().expect("strong segment"), &output)
-        .expect("produce")
-        .to_bytes();
+    let cell = relay(relay(cell.into_bytes(), &keys[0]), &keys[1]);
+    let OnionStep::Consumed {
+        layer,
+        value,
+        producer,
+    } = peel(cell, &keys[2])
+    else {
+        panic!("the symbol position");
+    };
+    assert!(matches!(
+        layer.application,
+        OnionLayerApplication::Apply { .. }
+    ));
+    assert_eq!(*value, input);
+    let cell = producer.produce(&output).expect("produce").into_bytes();
     let cell = relay(relay(cell, &keys[3]), &keys[4]);
-    let returned = OnionCell::parse(&cell).expect("cell");
+    let returned = OnionCell::parse(cell).expect("cell");
 
-    assert!(bool::from(returned.loop_tag().ct_eq(&tag)));
+    assert_eq!(returned.loop_tag(), tag);
     assert_eq!(
-        returned
+        *returned
             .open(&second.seeds().consumer.key().expect("strong key"))
             .expect("the client receives v₁"),
         output

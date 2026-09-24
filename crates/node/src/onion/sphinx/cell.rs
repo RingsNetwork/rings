@@ -12,43 +12,63 @@
 //! cell of the other length, whose `γ` fails at the next honest hop. A hop's step is
 //!
 //! ```text
-//!             peel (χ under d_i)                   relay (Dec⁰ under KDF₄₈(σ_in))
-//! OnionCell ─────────────────────▶ OnionPeeledCell ──────────────────────────────▶ OnionCell
-//!                                        │ consume (Dec^τ under KDF₄₈(σ_in))
-//!                                        ▼
-//!                                 (v, OnionProducer) ── produce (seal, σ_out) ──▶ OnionCell
+//!             peel (χ under d_i)
+//! OnionCell ──────────────────────▶ OnionPeeledCell
+//!
+//!                  step, by λ_i's application
+//! OnionPeeledCell ─┬─ relay:  Dec⁰ under KDF₄₈(σ_in)  ──▶ Relayed(OnionCell)
+//!                  └─ symbol: Dec^τ under KDF₄₈(σ_in) ──▶ Consumed(v, OnionProducer)
+//!
+//! OnionProducer ── produce(v′), sealed under the keys of σ_out in λ_i ──▶ OnionCell
 //! ```
 //!
-//! and the class flows along every arrow unchanged: a hop cannot change it.
+//! The class flows along every arrow unchanged, the role is the layer's application, and the
+//! producer's keys come from its own layer: a hop supplies none of the three. The client has one
+//! constructor, [`OnionCell::client`], which builds the header and seals the first segment in the
+//! class it chooses, and reads a returning cell through [`OnionCell::loop_tag`] and
+//! [`OnionCell::open`].
+//!
+//! Buffers: [`OnionCell::parse`] takes the received `Vec` and splits the slot off it, and
+//! [`OnionCell::into_bytes`] re-encodes the forwarded header into the same allocation and appends
+//! the slot, so a relay allocates once per cell.
 //!
 //! [`parse`]: OnionCell::parse
 
-use rings_aez::Expanded;
+use rand::CryptoRng;
+use rand::RngCore;
 use rings_aez::KeyError;
 use rings_core::delegation::DelegateeKey;
+use zeroize::Zeroizing;
 
+use super::carry;
 use super::carry::OnionCarry;
-use super::carry::OnionCarryError;
+use super::carry::OnionOpenError;
+use super::carry::OnionValueTooWide;
 use super::class::OnionLoopClass;
+use super::header::OnionBlindingError;
 use super::header::OnionHeader;
-use super::header::OnionHeaderError;
+use super::header::OnionHeaderRoute;
 use super::header::OnionLoopTag;
+use super::header::OnionPeelError;
 use super::header::ONION_HEADER_BYTES;
 use super::layer::OnionLayer;
+use super::layer::OnionLayerApplication;
 use super::seed::OnionCarryKey;
 use super::seed::OnionSegmentKeys;
 
 /// One cell `(b, χ, y)` of a loop edge.
 ///
-/// Invariant: `|χ ‖ y| = b`, established by [`OnionCell::parse`] and by every constructor that
-/// takes the class of an earlier cell or of the client's choice.
+/// Invariant: `|χ| + |y| = b`, established by [`OnionCell::parse`] and by every constructor,
+/// which takes the class of the cell it continues or of the client's choice.
 pub(crate) struct OnionCell {
-    /// `b`, the observed cell length.
+    /// `b`, the observed or chosen cell length.
     class: OnionLoopClass,
     /// `χ`.
     header: OnionHeader,
     /// `y`, `C_b` bytes.
     carry: OnionCarry,
+    /// The allocation the cell is re-encoded into, with capacity for `b` bytes.
+    buffer: Vec<u8>,
 }
 
 /// A cell whose header this hop has peeled: `λ_i`, `χ_{i+1}` and the inbound slot `y_{i−1}`.
@@ -61,57 +81,98 @@ pub(crate) struct OnionPeeledCell {
     next: OnionHeader,
     /// `y_{i−1}`.
     carry: OnionCarry,
+    /// The received cell's allocation.
+    buffer: Vec<u8>,
 }
 
-/// A symbol hop between consuming its input and producing its output: the class and header of
-/// the cell it forwards.
+/// The outcome of a hop's carry step, chosen by its layer's application.
+pub(crate) enum OnionStep {
+    /// A relay removed one AEZ layer: the cell it forwards.
+    Relayed {
+        /// `λ_i`.
+        layer: OnionLayer,
+        /// The forwarded cell, of the received class.
+        cell: OnionCell,
+    },
+    /// A symbol hop received its input: the value and the producer of its output.
+    Consumed {
+        /// `λ_i`.
+        layer: OnionLayer,
+        /// `v`, zeroized on drop.
+        value: Zeroizing<Vec<u8>>,
+        /// The producer of the forwarded cell.
+        producer: OnionProducer,
+    },
+}
+
+/// A symbol hop between consuming its input and producing its output.
 pub(crate) struct OnionProducer {
-    /// `b`.
+    /// `b`, the class of the received cell.
     class: OnionLoopClass,
     /// `χ_{i+1}`.
     next: OnionHeader,
+    /// The segment keys of `σ_out` in `λ_i`.
+    keys: OnionSegmentKeys,
+    /// The received cell's allocation.
+    buffer: Vec<u8>,
 }
 
-/// Why a cell was not accepted or not processed.
+/// A byte string whose length is no loop class: no cell.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-pub(crate) enum OnionCellError {
-    /// The string's length is no loop class, so it is no cell.
-    #[error("{0} bytes is not the length of any onion loop class")]
-    Width(usize),
-    /// The header was not peeled.
-    #[error(transparent)]
-    Header(#[from] OnionHeaderError),
-    /// The key named by the layer's seed is weak.
+#[error("{0} bytes is not the length of any onion loop class")]
+pub(crate) struct OnionCellWidth(pub(crate) usize);
+
+/// Why a hop's carry step failed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub(crate) enum OnionStepError {
+    /// A key named by the layer's seeds is weak.
     #[error(transparent)]
     Key(#[from] KeyError),
-    /// The carry was not opened or not produced.
+    /// A symbol hop rejected its input slot.
     #[error(transparent)]
-    Carry(#[from] OnionCarryError),
+    Open(#[from] OnionOpenError),
+}
+
+/// Why the client did not build a loop's first cell.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub(crate) enum OnionClientError {
+    /// A blinding factor was zero; build again with fresh randomness.
+    #[error(transparent)]
+    Blinding(#[from] OnionBlindingError),
+    /// The value does not fit the class.
+    #[error(transparent)]
+    ValueTooWide(#[from] OnionValueTooWide),
 }
 
 impl OnionCell {
-    /// `w ↦ (b, χ, y)` with `b = |w|`: the one parser of a received cell.
+    /// `w ↦ (b, χ, y)` with `b = |w|`: the one parser of a received cell. The slot is split off
+    /// the received buffer, which is kept for re-encoding.
     ///
     /// # Errors
     ///
-    /// [`OnionCellError::Width`] unless `|w|` is the length of a loop class.
-    pub(crate) fn parse(bytes: &[u8]) -> Result<Self, OnionCellError> {
-        OnionLoopClass::from_cell_bytes(bytes.len())
-            .zip(bytes.split_first_chunk::<ONION_HEADER_BYTES>())
-            .and_then(|(class, (header, carry))| {
+    /// [`OnionCellWidth`] unless `|w|` is the length of a loop class.
+    pub(crate) fn parse(mut bytes: Vec<u8>) -> Result<Self, OnionCellWidth> {
+        let width = bytes.len();
+        OnionLoopClass::from_cell_bytes(width)
+            .and_then(|class| {
+                let header = OnionHeader::decode(bytes.get(..ONION_HEADER_BYTES)?)?;
+                let carry = OnionCarry::new(bytes.split_off(ONION_HEADER_BYTES)).ok()?;
                 Some(Self {
                     class,
-                    header: OnionHeader::decode(header)?,
-                    carry: OnionCarry::from_slot(Expanded::new(carry.to_vec()).ok()?),
+                    header,
+                    carry,
+                    buffer: bytes,
                 })
             })
-            .ok_or(OnionCellError::Width(bytes.len()))
+            .ok_or(OnionCellWidth(width))
     }
 
-    /// `χ ‖ y`, exactly `b` bytes.
-    pub(crate) fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = self.header.to_bytes();
-        bytes.extend_from_slice(self.carry.as_bytes());
+    /// `χ ‖ y`, exactly `b` bytes, in the cell's allocation.
+    pub(crate) fn into_bytes(self) -> Vec<u8> {
+        let mut bytes = self.buffer;
+        bytes.clear();
+        self.header.encode_into(&mut bytes);
+        bytes.extend_from_slice(self.carry.as_slice());
         bytes
     }
 
@@ -120,23 +181,32 @@ impl OnionCell {
         self.class
     }
 
-    /// The client's first cell of a loop of its chosen class: `χ_1` and the value sealed for
-    /// segment 0.
+    /// The client's first cell of a loop: the header over `route` and `v` sealed for segment 0
+    /// under `keys`, in the class the client chooses; returns the cell and the tag `t_⋄` the loop
+    /// will return with.
     ///
     /// # Errors
     ///
-    /// [`OnionCarryError::ValueTooWide`] if `|v| ≥ C₀`.
-    pub(crate) fn seal(
+    /// [`OnionClientError::ValueTooWide`] if `|v| ≥ C₀`, and [`OnionClientError::Blinding`] for a
+    /// zero blinding factor (build again).
+    pub(crate) fn client(
+        route: &OnionHeaderRoute,
         class: OnionLoopClass,
-        header: OnionHeader,
         keys: &OnionSegmentKeys,
         value: &[u8],
-    ) -> Result<Self, OnionCarryError> {
-        OnionCarry::seal(class, keys, value).map(|carry| Self {
-            class,
-            header,
-            carry,
-        })
+        rng: &mut (impl CryptoRng + RngCore),
+    ) -> Result<(Self, OnionLoopTag), OnionClientError> {
+        let carry = carry::seal(class, keys, value)?;
+        let (header, tag) = OnionHeader::build(route, class, rng)?;
+        Ok((
+            Self {
+                class,
+                header,
+                carry,
+                buffer: Vec::with_capacity(class.cell_bytes()),
+            },
+            tag,
+        ))
     }
 
     /// The client tag `t_⋄` of a cell arriving at the client, position `H + 1`.
@@ -148,23 +218,24 @@ impl OnionCell {
     ///
     /// # Errors
     ///
-    /// [`OnionCarryError::Inauthentic`] or [`OnionCarryError::Padding`].
-    pub(crate) fn open(self, key: &OnionCarryKey) -> Result<Vec<u8>, OnionCarryError> {
-        self.carry.open(key)
+    /// The [`OnionOpenError`] of the consumer's check.
+    pub(crate) fn open(self, key: &OnionCarryKey) -> Result<Zeroizing<Vec<u8>>, OnionOpenError> {
+        carry::open(key, self.carry)
     }
 
     /// Peel `χ_i` under the hop's key, with the class the cell arrived in.
     ///
     /// # Errors
     ///
-    /// The [`OnionHeaderError`] of [`OnionHeader::peel`].
-    pub(crate) fn peel(self, key: &DelegateeKey) -> Result<OnionPeeledCell, OnionHeaderError> {
+    /// The [`OnionPeelError`] of the header.
+    pub(crate) fn peel(self, key: &DelegateeKey) -> Result<OnionPeeledCell, OnionPeelError> {
         let peeled = self.header.peel(self.class, key)?;
         Ok(OnionPeeledCell {
             class: self.class,
             layer: peeled.layer,
             next: peeled.next,
             carry: self.carry,
+            buffer: self.buffer,
         })
     }
 }
@@ -175,47 +246,62 @@ impl OnionPeeledCell {
         &self.layer
     }
 
-    /// A relay's step: `y_i = Dec⁰_{KDF₄₈(σ_in)}(y_{i−1})`, forwarded as a cell of the same class.
+    /// The carry step of this position, by `λ_i`'s application:
+    ///
+    /// ```text
+    /// relay     y_i = Dec⁰_{KDF₄₈(σ_in)}(y_{i−1})                   ⇒ Relayed, same class
+    /// f ∈ Σ_W   v = pad⁻¹ Dec^τ_{KDF₄₈(σ_in)}(y_{i−1}),  keys(σ_out) ⇒ Consumed
+    /// ```
     ///
     /// # Errors
     ///
-    /// [`KeyError`] if the key named by `σ_in` is weak.
-    pub(crate) fn relay(self) -> Result<(OnionLayer, OnionCell), KeyError> {
-        let key = self.layer.inbound.key()?;
-        Ok((self.layer, OnionCell {
-            class: self.class,
-            header: self.next,
-            carry: self.carry.peel(&key),
-        }))
-    }
-
-    /// A symbol hop's input: `v = pad⁻¹ Dec^τ_{KDF₄₈(σ_in)}(y_{i−1})`.
-    ///
-    /// # Errors
-    ///
-    /// [`OnionCellError::Key`] for a weak key and [`OnionCellError::Carry`] if the value is
-    /// rejected.
-    pub(crate) fn consume(self) -> Result<(OnionLayer, Vec<u8>, OnionProducer), OnionCellError> {
-        let value = self.carry.open(&self.layer.inbound.key()?)?;
-        Ok((self.layer, value, OnionProducer {
-            class: self.class,
-            next: self.next,
-        }))
+    /// [`OnionStepError::Key`] for a weak key, and [`OnionStepError::Open`] if a symbol hop
+    /// rejects its input.
+    pub(crate) fn step(mut self) -> Result<OnionStep, OnionStepError> {
+        match self.layer.application {
+            OnionLayerApplication::Relay => {
+                carry::peel(&self.layer.inbound.key()?, &mut self.carry);
+                Ok(OnionStep::Relayed {
+                    layer: self.layer,
+                    cell: OnionCell {
+                        class: self.class,
+                        header: self.next,
+                        carry: self.carry,
+                        buffer: self.buffer,
+                    },
+                })
+            }
+            OnionLayerApplication::Apply { .. } => {
+                let value = carry::open(&self.layer.inbound.key()?, self.carry)?;
+                let keys = self.layer.outbound.keys()?;
+                Ok(OnionStep::Consumed {
+                    layer: self.layer,
+                    value,
+                    producer: OnionProducer {
+                        class: self.class,
+                        next: self.next,
+                        keys,
+                        buffer: self.buffer,
+                    },
+                })
+            }
+        }
     }
 }
 
 impl OnionProducer {
-    /// A symbol hop's output: `v′` sealed under the segment keys of `σ_out`, forwarded as a cell
-    /// of the received class.
+    /// A symbol hop's output: `v′` sealed under the keys of `σ_out`, forwarded as a cell of the
+    /// received class.
     ///
     /// # Errors
     ///
-    /// [`OnionCarryError::ValueTooWide`] if `|v′| ≥ C₀`.
-    pub(crate) fn produce(
-        self,
-        keys: &OnionSegmentKeys,
-        value: &[u8],
-    ) -> Result<OnionCell, OnionCarryError> {
-        OnionCell::seal(self.class, self.next, keys, value)
+    /// [`OnionValueTooWide`] if `|v′| ≥ C₀`.
+    pub(crate) fn produce(self, value: &[u8]) -> Result<OnionCell, OnionValueTooWide> {
+        Ok(OnionCell {
+            class: self.class,
+            carry: carry::seal(self.class, &self.keys, value)?,
+            header: self.next,
+            buffer: self.buffer,
+        })
     }
 }

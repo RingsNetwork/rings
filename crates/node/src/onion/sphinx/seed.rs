@@ -24,18 +24,17 @@
 
 use core::fmt;
 
-use hkdf::Hkdf;
 use rand::CryptoRng;
 use rand::RngCore;
 use rings_aez::Aez;
 use rings_aez::KeyError;
 use rings_aez::KEY_BYTES;
-use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use zeroize::Zeroize;
 use zeroize::ZeroizeOnDrop;
 
 use super::hkdf_expand;
+use super::hkdf_extract;
 use super::ONION_SEGMENT_RELAYS;
 
 /// Width of every carry seed, `|σ| = 32`.
@@ -44,7 +43,7 @@ pub(crate) const ONION_CARRY_SEED_BYTES: usize = 32;
 /// Draws of `σ_k` before [`OnionSegmentSeed::draw`] fails closed: a draw is weak with probability
 /// `≈ 9·2^−128 ≈ 2^−124.8`, so four consecutive weak draws occur with probability `≈ 2^−499`
 /// unless the RNG is broken.
-const SEGMENT_SEED_DRAWS: usize = 4;
+pub(super) const SEGMENT_SEED_DRAWS: usize = 4;
 
 /// The relay indices `j = 1 … s`; the array length is checked against `s` at compile time.
 const RELAY_INDICES: [u8; ONION_SEGMENT_RELAYS] = [1, 2];
@@ -113,8 +112,7 @@ impl OnionCarrySeed {
     ///
     /// [`KeyError::ZeroSubkey`] for a weak key; the holder drops the cell.
     pub(crate) fn key(&self) -> Result<OnionCarryKey, KeyError> {
-        let key =
-            hkdf_expand::<KEY_BYTES>(&Hkdf::<Sha256>::new(Some(KEY_SALT), &self.0), &[KEY_INFO]);
+        let key = hkdf_expand::<KEY_BYTES>(&hkdf_extract(KEY_SALT, &[&self.0]), &[KEY_INFO]);
         Aez::new(&key).map(OnionCarryKey)
     }
 }
@@ -151,7 +149,7 @@ impl OnionSegmentSeed {
 
     /// `(KDF₃₂(σ_k, relay j))_{j=1…s}` and `KDF₃₂(σ_k, consumer)`.
     pub(crate) fn seeds(&self) -> OnionSegmentSeeds {
-        let kdf = Hkdf::<Sha256>::new(Some(SEED_SALT), &self.0);
+        let kdf = hkdf_extract(SEED_SALT, &[&self.0]);
         OnionSegmentSeeds {
             relays: RELAY_INDICES.map(|relay| {
                 OnionCarrySeed(*hkdf_expand::<ONION_CARRY_SEED_BYTES>(&kdf, &[

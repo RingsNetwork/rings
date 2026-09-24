@@ -49,6 +49,7 @@ use super::fixture_keys;
 use super::fixture_rng;
 use super::fixture_route;
 use crate::onion::sphinx::cell::OnionCell;
+use crate::onion::sphinx::cell::OnionStep;
 use crate::onion::sphinx::class::OnionLoopClass;
 use crate::onion::sphinx::header::OnionHeader;
 use crate::onion::sphinx::header::ONION_HEADER_ROUTING_BYTES;
@@ -82,9 +83,18 @@ fn measure() -> Vec<(&'static str, f64)> {
     let inbound = &peeled.layer.inbound;
     let carry_key = inbound.key().expect("strong key");
     let (_, segment) = OnionSegmentSeed::draw(&mut rng).expect("strong segment");
-    let cell = OnionCell::seal(class, header.clone(), &segment, b"value")
-        .expect("seal")
-        .to_bytes();
+    let (cell, _) = OnionCell::client(
+        &fixture_route(40, &keys),
+        class,
+        &segment,
+        b"value",
+        &mut rng,
+    )
+    .expect("client cell");
+    let cell = cell.into_bytes();
+    // `parse` consumes its buffer, so every pass gets its own copy, made before timing starts.
+    let passes = usize::try_from(WARM_UP + RUNS).expect("pass count fits usize");
+    let mut cells = vec![cell; passes].into_iter();
     let mut slot = vec![0; class.carry_bytes()];
     rng.fill_bytes(&mut slot);
     let alpha =
@@ -160,13 +170,15 @@ fn measure() -> Vec<(&'static str, f64)> {
         (
             "whole cell: parse, peel, relay, encode",
             microseconds_per_run(|| {
-                let (layer, forwarded) = OnionCell::parse(black_box(cell.as_slice()))
+                let bytes = cells.next().expect("one prepared cell per pass");
+                let peeled = OnionCell::parse(black_box(bytes))
                     .expect("cell")
                     .peel(key)
-                    .expect("peel")
-                    .relay()
-                    .expect("strong key");
-                black_box((layer, forwarded.to_bytes()));
+                    .expect("peel");
+                black_box(match peeled.step().expect("relay step") {
+                    OnionStep::Relayed { cell, .. } => cell.into_bytes(),
+                    OnionStep::Consumed { .. } => Vec::new(),
+                });
             }),
         ),
     ]

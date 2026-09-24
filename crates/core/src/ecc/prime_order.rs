@@ -4,26 +4,33 @@
 //!
 //! ```text
 //! ι : NonIdentityPoint<C> ↪ Point<C>          (From; the partial inverse is TryFrom, rejecting O)
-//! ι : NonZeroScalar<C>    ↪ Scalar<C>         (From; the partial inverse is TryFrom, rejecting 0)
+//! ι : NonZeroScalar<C>    ↪ Scalar<C>         (TryFrom from the carrier, rejecting 0)
 //! · : (G ∖ {O}) × Z_n^* → G ∖ {O}             P·k = O ⇔ P = O ∨ k ≡ 0 (mod n)
 //! · : Z_n^* × Z_n^* → Z_n^*                   Z_n^* is the multiplicative group of the field
 //! ```
 //!
-//! and `ι` commutes with the action: `ι(P·k) = ι(P)·ι(k)`. A protocol that only multiplies
-//! non-identity points by non-zero scalars (Diffie–Hellman, Sphinx-style blinding) therefore
-//! never meets `O`: the degenerate case is unrepresentable rather than checked. Sampling and the
-//! SEC1 codec are those of the carriers, restricted: [`NonZeroScalar::random_with_rng`] is
-//! [`CurveScalarField::random_scalar_with_rng`], and the secp256k1 SEC1 encoding of
-//! `Point<Secp256k1>` factors through `NonIdentityPoint<Secp256k1>`, where it is total.
+//! and `ι` commutes with the action. A protocol that only multiplies non-identity points by
+//! non-zero scalars (Diffie–Hellman, Sphinx-style blinding) never meets `O`: the degenerate case
+//! is unrepresentable rather than checked. [`PrimeOrder`] is sealed, since its law is a proof
+//! obligation no downstream implementation can be held to.
+//!
+//! This module is the one SEC1 compressed encoder of secp256k1: every conversion of a point,
+//! public key or verifying key into `PublicKey<33>` factors through
+//! `NonIdentityPoint<Secp256k1> → PublicKey<33>`, which is total, and the SEC1 decoder produces
+//! `G ∖ {O}` directly from `k256::PublicKey`, which already excludes `O`. Sampling is the
+//! carrier's non-zero sampler.
 
 use std::ops::Mul;
 
 use elliptic_curve::bigint::U512;
+use elliptic_curve::group::GroupEncoding;
 use elliptic_curve::ops::Reduce;
 use elliptic_curve::point::AffineCoordinates;
-use elliptic_curve::sec1::ToEncodedPoint;
+use k256::AffinePoint as K256AffinePoint;
+use k256::PublicKey as K256PublicKey;
 use k256::Scalar as K256Scalar;
 use k256::WideBytes;
+use rand::CryptoRng;
 use rand::RngCore;
 use zeroize::Zeroize;
 use zeroize::Zeroizing;
@@ -33,7 +40,6 @@ use crate::ecc::group::CurveScalarField;
 use crate::ecc::group::Point;
 use crate::ecc::group::Scalar;
 use crate::ecc::group::Secp256k1;
-use crate::ecc::group::Secp256r1;
 use crate::ecc::PublicKey;
 use crate::ecc::SecretKey;
 use crate::error::Error;
@@ -48,17 +54,22 @@ pub const SHARED_SECRET_BYTES: usize = 32;
 /// Width of the input of [`NonZeroScalar::from_wide_bytes`].
 pub const WIDE_SCALAR_BYTES: usize = 64;
 
+/// The seal of [`PrimeOrder`]: only this crate names a curve prime-order.
+mod sealed {
+    /// Implemented exactly for the curves this crate has proved prime-order.
+    pub trait Sealed {}
+}
+
 /// A curve whose point carrier represents a group of prime order `n`, with zeroizable scalars.
 ///
 /// Law: the order of the group of `Point<C>` is prime, so the restrictions of the module
-/// documentation are closed. This is a proof obligation of the implementor, as for [`Eq`].
-pub trait PrimeOrder: CurveScalarField<Scalar: Zeroize> {}
+/// documentation are closed. Sealed: implemented only here, for curves of cofactor 1.
+pub trait PrimeOrder: CurveScalarField<Scalar: Zeroize> + sealed::Sealed {}
+
+impl sealed::Sealed for Secp256k1 {}
 
 /// secp256k1 has cofactor 1.
 impl PrimeOrder for Secp256k1 {}
-
-/// secp256r1 has cofactor 1.
-impl PrimeOrder for Secp256r1 {}
 
 /// An element of `G ∖ {O}`: a [`Point`] other than the identity.
 pub struct NonIdentityPoint<C: PrimeOrder>(Point<C>);
@@ -86,27 +97,20 @@ impl<C: PrimeOrder> TryFrom<Point<C>> for NonIdentityPoint<C> {
     /// The partial inverse of `ι`, rejecting `O`.
     fn try_from(point: Point<C>) -> Result<Self> {
         if point == Point::zero() {
-            Err(Error::InvalidPublicKey)
+            Err(Error::IdentityElement)
         } else {
             Ok(Self(point))
         }
     }
 }
 
-impl<C: PrimeOrder> From<&NonZeroScalar<C>> for Scalar<C> {
-    /// The inclusion `ι : Z_n^* ↪ Z_n`.
-    fn from(scalar: &NonZeroScalar<C>) -> Self {
-        scalar.0.clone()
-    }
-}
-
 impl<C: PrimeOrder> TryFrom<Scalar<C>> for NonZeroScalar<C> {
     type Error = Error;
 
-    /// The partial inverse of `ι`, rejecting `0`.
+    /// The restriction of the carrier to `Z_n^*`, rejecting `0`.
     fn try_from(scalar: Scalar<C>) -> Result<Self> {
         if C::scalar_is_zero(scalar.as_inner()) {
-            Err(Error::InvalidPublicKey)
+            Err(Error::ZeroScalar)
         } else {
             Ok(Self(scalar))
         }
@@ -114,8 +118,8 @@ impl<C: PrimeOrder> TryFrom<Scalar<C>> for NonZeroScalar<C> {
 }
 
 impl<C: PrimeOrder> NonZeroScalar<C> {
-    /// A uniform element of `Z_n^*`: the carrier's non-zero sampler.
-    pub fn random_with_rng(rng: &mut impl RngCore) -> Self {
+    /// A uniform element of `Z_n^*` from a cryptographic RNG: the carrier's non-zero sampler.
+    pub fn random_with_rng(rng: &mut (impl CryptoRng + RngCore)) -> Self {
         Self(Scalar::new(C::random_scalar_with_rng(rng)))
     }
 }
@@ -132,7 +136,10 @@ impl<C: PrimeOrder> Mul<&NonZeroScalar<C>> for &NonZeroScalar<C> {
 
     /// The product in `Z_n^*`.
     fn mul(self, rhs: &NonZeroScalar<C>) -> Self::Output {
-        NonZeroScalar(self.0.clone() * rhs.0.clone())
+        NonZeroScalar(Scalar::new(C::scalar_mul(
+            self.0.as_inner(),
+            rhs.0.as_inner(),
+        )))
     }
 }
 
@@ -141,7 +148,7 @@ impl<C: PrimeOrder> Mul<&NonZeroScalar<C>> for &NonIdentityPoint<C> {
 
     /// The module action `P·k`, closed on `G ∖ {O}` by primality.
     fn mul(self, rhs: &NonZeroScalar<C>) -> Self::Output {
-        NonIdentityPoint(self.0.clone() * rhs.0.clone())
+        NonIdentityPoint(Point::new(C::mul(self.0.as_inner(), rhs.0.as_inner())))
     }
 }
 
@@ -166,7 +173,8 @@ impl NonZeroScalar<Secp256k1> {
         .ok()
     }
 
-    /// The secret scalar of a secp256k1 key, non-zero by the key's invariant.
+    /// The secret scalar of a secp256k1 key, non-zero by the key's invariant. The key's accessor
+    /// returns a copy; this value, not that transient, is the one zeroized on drop.
     pub(crate) fn from_secret_key(key: &SecretKey) -> Self {
         Self(Scalar::new(key.secp256k1_scalar()))
     }
@@ -184,15 +192,22 @@ impl NonIdentityPoint<Secp256k1> {
     }
 }
 
+impl From<K256PublicKey> for NonIdentityPoint<Secp256k1> {
+    /// A `k256` public key is a point `≠ O` by its own invariant.
+    fn from(key: K256PublicKey) -> Self {
+        Self(Point::new(key.to_projective()))
+    }
+}
+
 impl From<&NonIdentityPoint<Secp256k1>> for PublicKey<SEC1_COMPRESSED_BYTES> {
-    /// The SEC1 compressed encoding, total on `G ∖ {O}`: every non-identity point has a
-    /// 33-byte encoding.
+    /// The SEC1 compressed encoding: total on `G ∖ {O}`, where it is exactly 33 bytes; the one
+    /// encoder every other secp256k1 conversion into `PublicKey<33>` factors through.
     fn from(point: &NonIdentityPoint<Secp256k1>) -> Self {
-        let encoded = point.0.as_inner().to_affine().to_encoded_point(true);
+        let encoded = point.0.as_inner().to_affine().to_bytes();
         let mut bytes = [0_u8; SEC1_COMPRESSED_BYTES];
         bytes
             .iter_mut()
-            .zip(encoded.as_bytes())
+            .zip(encoded.iter())
             .for_each(|(slot, byte)| *slot = *byte);
         Self(bytes)
     }
@@ -201,9 +216,41 @@ impl From<&NonIdentityPoint<Secp256k1>> for PublicKey<SEC1_COMPRESSED_BYTES> {
 impl TryFrom<PublicKey<SEC1_COMPRESSED_BYTES>> for NonIdentityPoint<Secp256k1> {
     type Error = Error;
 
-    /// SEC1 decoding of the carrier, then the subtype check.
+    /// SEC1 decoding, straight into `G ∖ {O}`: every valid encoding denotes a point `≠ O`.
     fn try_from(encoded: PublicKey<SEC1_COMPRESSED_BYTES>) -> Result<Self> {
-        Point::<Secp256k1>::try_from(encoded).and_then(Self::try_from)
+        K256PublicKey::try_from(encoded).map(Self::from)
+    }
+}
+
+impl TryFrom<Point<Secp256k1>> for PublicKey<SEC1_COMPRESSED_BYTES> {
+    type Error = Error;
+
+    /// SEC1 compressed encoding of the carrier: defined exactly on `G ∖ {O}`.
+    fn try_from(point: Point<Secp256k1>) -> Result<Self> {
+        NonIdentityPoint::try_from(point).map(|point| Self::from(&point))
+    }
+}
+
+impl TryFrom<K256AffinePoint> for PublicKey<SEC1_COMPRESSED_BYTES> {
+    type Error = Error;
+
+    /// SEC1 compressed encoding of an affine point: defined exactly on `G ∖ {O}`.
+    fn try_from(point: K256AffinePoint) -> Result<Self> {
+        Self::try_from(Point::<Secp256k1>::from(point))
+    }
+}
+
+impl From<K256PublicKey> for PublicKey<SEC1_COMPRESSED_BYTES> {
+    /// SEC1 compressed encoding of a `k256` public key.
+    fn from(key: K256PublicKey) -> Self {
+        Self::from(&NonIdentityPoint::from(key))
+    }
+}
+
+impl From<k256::ecdsa::VerifyingKey> for PublicKey<SEC1_COMPRESSED_BYTES> {
+    /// SEC1 compressed encoding of an ECDSA verifying key.
+    fn from(key: k256::ecdsa::VerifyingKey) -> Self {
+        Self::from(K256PublicKey::from(key))
     }
 }
 
@@ -235,6 +282,11 @@ mod tests {
         DelegateeKey::new_with_seckey(&secret).expect("fixture delegation")
     }
 
+    /// The point `k·G` for the wide encoding of `k`, compared by its SEC1 encoding.
+    fn sec1_of(scalar: &NonZeroScalar<Secp256k1>) -> PublicKey<33> {
+        PublicKey::from(&NonIdentityPoint::generator_mul(scalar))
+    }
+
     /// `x(d·(x·G)) = x(x·(d·G))`: the delegatee and the sender derive one secret.
     #[test]
     fn test_diffie_hellman_commutes() {
@@ -249,22 +301,25 @@ mod tests {
         );
     }
 
-    /// The inclusions reject exactly the degenerate elements, and `ι` commutes with the action.
+    /// The inclusions reject exactly the degenerate elements, and `ι` commutes with the action:
+    /// `ι(P·k) = ι(P)·k` in the carrier.
     #[test]
     fn test_inclusions_and_action() {
         let mut rng = StdRng::seed_from_u64(2);
-        let point =
-            NonIdentityPoint::generator_mul(&NonZeroScalar::<Secp256k1>::random_with_rng(&mut rng));
+        let base = NonZeroScalar::<Secp256k1>::random_with_rng(&mut rng);
+        let point = NonIdentityPoint::generator_mul(&base);
         let scalar = NonZeroScalar::<Secp256k1>::random_with_rng(&mut rng);
 
         assert!(NonIdentityPoint::<Secp256k1>::try_from(Point::zero()).is_err());
         assert!(NonZeroScalar::<Secp256k1>::try_from(Scalar::zero()).is_err());
         assert!(
-            Point::from(&point * &scalar) == Point::from(point.clone()) * Scalar::from(&scalar)
+            Point::from(&point * &scalar)
+                == Point::from(NonIdentityPoint::generator_mul(&(&base * &scalar)))
         );
     }
 
-    /// SEC1 decoding inverts the total encoding, and the all-zero string (no point) is rejected.
+    /// SEC1 decoding inverts the one encoder, the carrier encodings agree with it, and the
+    /// all-zero string (no point) is rejected.
     #[test]
     fn test_sec1_round_trip() {
         let point = NonIdentityPoint::generator_mul(&NonZeroScalar::<Secp256k1>::random_with_rng(
@@ -275,7 +330,9 @@ mod tests {
         let decoded = NonIdentityPoint::<Secp256k1>::try_from(encoded).expect("valid point");
 
         assert_eq!(PublicKey::from(&decoded), encoded);
+        assert_eq!(PublicKey::try_from(Point::from(point)).ok(), Some(encoded));
         assert!(NonIdentityPoint::<Secp256k1>::try_from(PublicKey([0; 33])).is_err());
+        assert!(PublicKey::<33>::try_from(Point::<Secp256k1>::zero()).is_err());
     }
 
     /// Wide reduction maps `0` and `n` to `0`, which is rejected, and `n + 1` to `1`.
@@ -292,6 +349,6 @@ mod tests {
         assert!(NonZeroScalar::<Secp256k1>::from_wide_bytes(&order).is_none());
         let one = NonZeroScalar::<Secp256k1>::from_wide_bytes(&successor).expect("n + 1 ≡ 1");
         let expected = NonZeroScalar::<Secp256k1>::from_wide_bytes(&unit).expect("1");
-        assert!(Scalar::from(&one) == Scalar::from(&expected));
+        assert_eq!(sec1_of(&one), sec1_of(&expected));
     }
 }

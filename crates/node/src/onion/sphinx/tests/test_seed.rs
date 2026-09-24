@@ -13,6 +13,7 @@ use super::fixture_rng;
 use crate::onion::sphinx::seed::first_strong;
 use crate::onion::sphinx::seed::OnionCarrySeed;
 use crate::onion::sphinx::seed::OnionSegmentSeed;
+use crate::onion::sphinx::seed::SEGMENT_SEED_DRAWS;
 
 /// `HKDF-SHA256(salt, ikm, info)[0, N)`, written out independently of the module under test.
 fn hkdf<const N: usize>(salt: &[u8], ikm: &[u8], info: &[u8]) -> [u8; N] {
@@ -72,12 +73,13 @@ fn test_segment_seeds_are_pairwise_distinct() {
 }
 
 /// `first_strong` returns the first candidate whose derivation succeeds, re-drawing after each
-/// weak one, and fails closed with the last error after `SEGMENT_SEED_DRAWS = 4` weak draws. The
+/// weak one, and fails closed with the last error after `SEGMENT_SEED_DRAWS` weak draws. The
 /// derivation is injected, since a weak HKDF output (probability `≈ 2^−125`) cannot be exhibited.
 #[test]
 fn test_first_strong_redraws_and_fails_closed() {
     let weak = KeyError::ZeroSubkey(Subkey::J);
-    for strong_from in 0..6_u8 {
+    let draws = u8::try_from(SEGMENT_SEED_DRAWS).expect("a small bound");
+    for strong_from in 0..=draws.saturating_add(1) {
         let mut next = 0_u8;
         let drawn = first_strong(
             || {
@@ -91,12 +93,12 @@ fn test_first_strong_redraws_and_fails_closed() {
             },
         );
 
-        if strong_from < 4 {
+        if strong_from < draws {
             assert_eq!(drawn, Ok((strong_from, strong_from)));
         } else {
             assert_eq!(drawn, Err(weak));
         }
-        assert_eq!(next, strong_from.saturating_add(1).min(4));
+        assert_eq!(next, strong_from.saturating_add(1).min(draws));
     }
 }
 

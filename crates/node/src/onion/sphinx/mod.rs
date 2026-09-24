@@ -50,7 +50,9 @@
 //! crate-private until #834 Phase 2a-4 (#843) uses it.
 
 use hkdf::Hkdf;
+use hkdf::HkdfExtract;
 use sha2::Sha256;
+use zeroize::Zeroize;
 use zeroize::Zeroizing;
 
 pub(crate) mod carry;
@@ -94,4 +96,17 @@ fn hkdf_expand<const N: usize>(kdf: &Hkdf<Sha256>, info: &[&[u8]]) -> Zeroizing<
     let mut okm = Zeroizing::new([0_u8; N]);
     let _ = kdf.expand_multi_info(info, okm.as_mut_slice());
     okm
+}
+
+/// `HKDF-Extract(salt, ikm₁ ‖ … ‖ ikmₙ)`, with the pseudorandom key the extract step returns
+/// wiped at once.
+///
+/// The PRK is also held inside the returned `Hkdf`'s HMAC state, which hkdf 0.12 and hmac 0.12
+/// cannot wipe; that residue is tracked in its own issue.
+fn hkdf_extract(salt: &[u8], ikm: &[&[u8]]) -> Hkdf<Sha256> {
+    let mut extract = HkdfExtract::<Sha256>::new(Some(salt));
+    ikm.iter().for_each(|part| extract.input_ikm(part));
+    let (mut prk, kdf) = extract.finalize();
+    prk.zeroize();
+    kdf
 }

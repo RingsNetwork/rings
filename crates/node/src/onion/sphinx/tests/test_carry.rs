@@ -1,11 +1,11 @@
 //! Carry segments (D7): round trip through the keys each hop derives from its own seed, the
 //! width law (L3, L5′), and L8 on the carry.
 
-use rings_aez::Expanded;
-
 use super::fixture_rng;
+use crate::onion::sphinx::carry;
 use crate::onion::sphinx::carry::OnionCarry;
-use crate::onion::sphinx::carry::OnionCarryError;
+use crate::onion::sphinx::carry::OnionOpenError;
+use crate::onion::sphinx::carry::OnionValueTooWide;
 use crate::onion::sphinx::class::OnionLoopClass;
 use crate::onion::sphinx::seed::OnionCarryKey;
 use crate::onion::sphinx::seed::OnionSegmentSeed;
@@ -26,7 +26,7 @@ fn holder_keys(segment: &OnionSegmentSeed) -> (Vec<OnionCarryKey>, OnionCarryKey
 fn edges(carry: OnionCarry, relays: &[OnionCarryKey]) -> Vec<OnionCarry> {
     core::iter::once(carry.clone())
         .chain(relays.iter().scan(carry, |carry, key| {
-            *carry = carry.clone().peel(key);
+            carry::peel(key, carry);
             Some(carry.clone())
         }))
         .collect()
@@ -44,21 +44,21 @@ fn test_segment_round_trip_at_every_width() {
     let widest = vec![0xa5; class.carry_value_bytes() - 1];
 
     for value in [Vec::new(), b"kleisli".to_vec(), widest.clone()] {
-        let carry = OnionCarry::seal(class, &keys, value.as_slice()).expect("seal");
+        let carry = carry::seal(class, &keys, value.as_slice()).expect("seal");
         let slots = edges(carry, relays.as_slice());
 
         assert_eq!(slots.len(), ONION_SEGMENT_RELAYS + 1);
         assert!(slots
             .iter()
-            .all(|edge| edge.as_bytes().len() == class.carry_bytes()));
+            .all(|edge| edge.as_slice().len() == class.carry_bytes()));
         let last = slots.last().expect("the consumer's edge").clone();
-        assert_eq!(last.open(&consumer).expect("open"), value);
+        assert_eq!(*carry::open(&consumer, last).expect("open"), value);
     }
 
     let overwide = [widest.as_slice(), &[0]].concat();
     assert_eq!(
-        OnionCarry::seal(class, &keys, overwide.as_slice()).err(),
-        Some(OnionCarryError::ValueTooWide {
+        carry::seal(class, &keys, overwide.as_slice()).err(),
+        Some(OnionValueTooWide {
             length: class.carry_value_bytes(),
             capacity: class.carry_value_bytes() - 1,
         })
@@ -73,12 +73,12 @@ fn test_one_bit_flip_on_any_edge_rejects_the_whole_value() {
     let class = OnionLoopClass::DEFAULT;
     let (segment, keys) = OnionSegmentSeed::draw(&mut rng).expect("strong segment");
     let (relays, consumer) = holder_keys(&segment);
-    let carry = OnionCarry::seal(class, &keys, b"one value, one key").expect("seal");
+    let carry = carry::seal(class, &keys, b"one value, one key").expect("seal");
     let slots = edges(carry, relays.as_slice());
 
     assert!(slots
         .windows(2)
-        .all(|pair| pair[0].as_bytes() != pair[1].as_bytes()));
+        .all(|pair| pair[0].as_slice() != pair[1].as_slice()));
     let width = class.carry_bytes();
     let offsets = (0..width).step_by(width / 61).chain([
         1,
@@ -92,19 +92,18 @@ fn test_one_bit_flip_on_any_edge_rejects_the_whole_value() {
     ]);
     for (edge, slot) in slots.iter().enumerate() {
         for offset in offsets.clone() {
-            let mut bytes = slot.as_bytes().to_vec();
+            let mut bytes = slot.as_slice().to_vec();
             bytes[offset] ^= 1 << (offset % 8);
-            let tampered = OnionCarry::from_slot(Expanded::new(bytes).expect("same width"));
+            let tampered = OnionCarry::new(bytes).expect("same width");
 
             let rejection = edges(tampered, &relays[edge..])
                 .pop()
-                .expect("the consumer's edge")
-                .open(&consumer)
-                .err();
+                .map(|slot| carry::open(&consumer, slot).err())
+                .expect("the consumer's edge");
 
             assert_eq!(
                 rejection,
-                Some(OnionCarryError::Inauthentic),
+                Some(OnionOpenError::Inauthentic),
                 "edge {edge}, byte {offset}"
             );
         }

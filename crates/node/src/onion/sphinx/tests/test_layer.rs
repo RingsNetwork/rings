@@ -6,6 +6,7 @@ use subtle::ConstantTimeEq;
 use super::fixture_layer;
 use super::fixture_rng;
 use crate::onion::circuit::OnionCellBucket;
+use crate::onion::signature::ONION_SIGNATURE;
 use crate::onion::sphinx::class::OnionLoopClass;
 use crate::onion::sphinx::class::ONION_CELL_FRAMING_BYTES;
 use crate::onion::sphinx::header::OnionHeaderMac;
@@ -50,8 +51,8 @@ fn test_accepted_strings_are_canonical() {
     for _ in 0..512 {
         let mut bytes = [0_u8; ONION_LAYER_BYTES];
         rng.fill_bytes(&mut bytes);
-        // Codes `0..4` cover `relay`, both world-facing symbols, and one code outside `Σ`.
-        bytes[0] %= 4;
+        // Codes `0..=|Σ|` cover every symbol and the first code outside `Σ`.
+        bytes[0] %= u8::try_from(ONION_SIGNATURE.symbols().len() + 1).expect("Σ fits a byte");
         if bytes[0] == 0 {
             bytes[1..=ONION_ARGUMENT_BYTES].fill(0);
         }
@@ -114,7 +115,9 @@ fn test_carry_width_per_class() {
         );
     }
     assert_eq!(OnionLoopClass::from_cell_bytes(4 * 1024), None);
-    assert!(classes
-        .windows(2)
-        .all(|pair| pair[0].mac_label() != pair[1].mac_label()));
+    for (index, class) in classes.iter().enumerate() {
+        assert!(classes[index + 1..]
+            .iter()
+            .all(|other| other.mac_label() != class.mac_label()));
+    }
 }

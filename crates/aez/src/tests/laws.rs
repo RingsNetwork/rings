@@ -5,11 +5,12 @@ use super::Stream;
 use crate::block::Block;
 use crate::tbc::Subkeys;
 use crate::Aez;
+use crate::Ciphertext;
 use crate::DecryptError;
-use crate::Expanded;
 use crate::ExpansionExceedsBuffer;
 use crate::Inauthentic;
 use crate::KeyError;
+use crate::Plaintext;
 use crate::Subkey;
 use crate::Tweak;
 use crate::KEY_BYTES;
@@ -185,47 +186,41 @@ witness! {
         relay.decipher(Tweak::EMPTY, &mut slot);
         assert_eq!(
             consumer.decrypt(Tweak::EMPTY, 16, &mut slot).map(|_| ()),
-            Err(DecryptError::Inauthentic)
+            Err(DecryptError::Inauthentic(Inauthentic))
         );
     }
 
-    /// Law: the typed path agrees with the checked one. `encrypt_expanded(M ‖ 0^τ)` equals
-    /// `encrypt` on the same buffer, `decrypt_expanded ∘ encrypt_expanded` recovers `M`, and a
-    /// flipped bit is `Inauthentic` with the buffer zeroized.
-    fn expanded_agrees_with_encrypt_and_decrypt() {
+    /// Law: the typed path agrees with the checked one. `seal(M)` equals `encrypt(M ‖ 0^τ)`,
+    /// `open ∘ seal` recovers `M`, and a flipped bit is `Inauthentic`.
+    fn typed_seal_and_open_agree_with_encrypt_and_decrypt() {
         let mut stream = Stream::new(0x5eed_0009);
         let cipher = keyed(&mut stream);
         for width in [0, 1, 31, 32, 100] {
             let message = stream.bytes(width);
             let mut checked = [message.as_slice(), &[0; 16]].concat();
             cipher.encrypt(Tweak::EMPTY, 16, &mut checked).unwrap();
-            let mut typed = Expanded::<16>::with_authenticator_slot(message.clone());
 
-            cipher.encrypt_expanded(Tweak::EMPTY, &mut typed);
-            assert_eq!(typed.as_slice(), checked.as_slice(), "width {width}");
-            let mut tampered = Expanded::<16>::new(typed.as_slice().to_vec()).unwrap();
-            cipher.decrypt_expanded(Tweak::EMPTY, &mut typed).unwrap();
-            assert_eq!(typed.into_message(), message, "width {width}");
+            let sealed = cipher.seal(Tweak::EMPTY, Plaintext::<16>::new(message.clone()));
+            assert_eq!(sealed.as_slice(), checked.as_slice(), "width {width}");
+            let mut tampered = sealed.clone();
+            let opened = cipher.open(Tweak::EMPTY, sealed).unwrap();
+            assert_eq!(opened.as_slice(), message.as_slice(), "width {width}");
 
             let first = tampered.as_mut_slice().first_mut().unwrap();
             *first ^= 1;
-            assert_eq!(
-                cipher.decrypt_expanded(Tweak::EMPTY, &mut tampered),
-                Err(Inauthentic)
-            );
-            assert!(tampered.as_slice().iter().all(|byte| *byte == 0));
+            assert!(matches!(cipher.open(Tweak::EMPTY, tampered), Err(Inauthentic)));
         }
     }
 
-    /// Law: a buffer shorter than `τ` is not an `Expanded<τ>`.
-    fn expanded_rejects_a_buffer_shorter_than_tau() {
+    /// Law: a buffer shorter than `τ` is not a `Ciphertext<τ>`.
+    fn ciphertext_rejects_a_buffer_shorter_than_tau() {
         assert_eq!(
-            Expanded::<16>::new(vec![0; 15]),
+            Ciphertext::<16>::new(vec![0; 15]),
             Err(ExpansionExceedsBuffer {
                 length: 15,
                 expansion: 16,
             })
         );
-        assert!(Expanded::<16>::new(vec![0; 16]).is_ok());
+        assert!(Ciphertext::<16>::new(vec![0; 16]).is_ok());
     }
 }

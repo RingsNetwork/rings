@@ -63,7 +63,6 @@ use crate::algebra::Field as AlgebraField;
 use crate::algebra::Module;
 use crate::algebra::One as AlgebraOne;
 use crate::algebra::Zero as AlgebraZero;
-use crate::ecc::prime_order::NonIdentityPoint;
 use crate::ecc::PublicKey;
 use crate::ecc::SecretKey;
 use crate::error::Error;
@@ -752,15 +751,6 @@ impl TryFrom<PublicKey<33>> for Point<Secp256k1> {
     fn try_from(public_key: PublicKey<33>) -> Result<Self> {
         let point: K256AffinePoint = public_key.try_into()?;
         Ok(point.into())
-    }
-}
-
-impl TryFrom<Point<Secp256k1>> for PublicKey<33> {
-    type Error = Error;
-
-    /// SEC1 compressed encoding: defined exactly on `G ∖ {O}`, where it is total.
-    fn try_from(point: Point<Secp256k1>) -> Result<Self> {
-        NonIdentityPoint::try_from(point).map(|point| Self::from(&point))
     }
 }
 

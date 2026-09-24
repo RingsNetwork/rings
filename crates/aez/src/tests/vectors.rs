@@ -4,6 +4,7 @@
 use super::witness;
 use crate::Aez;
 use crate::DecryptError;
+use crate::Inauthentic;
 use crate::Tweak;
 use crate::KEY_BYTES;
 
@@ -97,7 +98,7 @@ witness! {
                     let mut buffer = vector.ciphertext.clone();
                     buffer[position] ^= 1 << (position % 8);
                     let result = aez.decrypt(tweak, vector.expansion, &mut buffer).map(|_| ());
-                    assert_eq!(result, Err(DecryptError::Inauthentic), "vector {index} at {position}");
+                    assert_eq!(result, Err(DecryptError::Inauthentic(Inauthentic)), "vector {index} at {position}");
                     assert!(buffer.iter().all(|byte| *byte == 0), "vector {index} not zeroized");
                 });
             }

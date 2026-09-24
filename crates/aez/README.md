@@ -11,9 +11,10 @@ therefore serves two roles, which the Rings onion carry (#834) uses one per hop:
 | relay | [`Aez::encipher`] / [`Aez::decipher`] (`τ = 0`) | length-preserving tweakable strong PRP on every length |
 | consumer | [`Aez::encrypt`] / [`Aez::decrypt`] (`τ = 16`) | robust AE: any change to any ciphertext bit fails authentication |
 
-A buffer that already carries its `τ`-byte authenticator slot is an [`Expanded<τ>`](Expanded):
-[`Aez::encrypt_expanded`] and [`Aez::decrypt_expanded`] take it, so the `|buffer| ≥ τ`
-precondition is checked once, where the buffer is built, and not at every call.
+Owned buffers carry the length precondition and the plaintext/ciphertext distinction as types:
+[`Aez::seal`] maps a [`Plaintext<τ>`](Plaintext) (wiped on drop, opaque) to a
+[`Ciphertext<τ>`](Ciphertext) (`|C| ≥ τ`) without failure, and [`Aez::open`] maps it back or
+rejects it. Both paths share one private encryption and one decryption core with the slice API.
 
 ## Model
 
