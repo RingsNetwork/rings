@@ -18,6 +18,7 @@ mod hash;
 mod tbc;
 #[cfg(test)]
 mod tests;
+mod typed;
 
 use zeroize::Zeroize;
 
@@ -25,10 +26,13 @@ use crate::block::Block;
 use crate::cipher::Direction;
 pub use crate::error::DecryptError;
 pub use crate::error::ExpansionExceedsBuffer;
+pub use crate::error::Inauthentic;
 pub use crate::error::KeyError;
 pub use crate::error::Subkey;
 use crate::tbc::Subkeys;
 pub use crate::tbc::KEY_BYTES;
+pub use crate::typed::Ciphertext;
+pub use crate::typed::Plaintext;
 
 /// The tweak `T = (N, A_1, …, A_t)`: a nonce followed by associated-data strings.
 ///
@@ -94,9 +98,8 @@ impl Aez {
         expansion: usize,
         buffer: &mut [u8],
     ) -> Result<(), ExpansionExceedsBuffer> {
-        let (_, slot) = split_authenticator(buffer, expansion)?;
-        slot.zeroize();
-        self.transform(tweak, expansion, Direction::Encipher, buffer);
+        split_authenticator(buffer, expansion)?;
+        self.encrypt_in_place(tweak, expansion, buffer);
         Ok(())
     }
 
@@ -116,14 +119,68 @@ impl Aez {
         buffer: &'b mut [u8],
     ) -> Result<&'b mut [u8], DecryptError> {
         split_authenticator(buffer, expansion)?;
+        self.decrypt_in_place(tweak, expansion, buffer)?;
+        Ok(split_authenticator(buffer, expansion)?.0)
+    }
+
+    /// `Encrypt_K(T, τ, M)` on an owned plaintext, whose type already reserves the `τ`-byte
+    /// slot: [`Self::encrypt`] without its failure. The plaintext's buffer becomes the
+    /// ciphertext's, so no copy of `M` outlives the call.
+    pub fn seal<const TAU: usize>(
+        &self,
+        tweak: Tweak<'_>,
+        plaintext: Plaintext<TAU>,
+    ) -> Ciphertext<TAU> {
+        let (mut bytes, message) = plaintext.into_slotted();
+        self.encrypt_in_place(tweak, TAU, bytes.as_mut_slice());
+        Ciphertext::from_sealed(bytes, message)
+    }
+
+    /// `Decrypt_K(T, τ, C)` on an owned ciphertext, whose type already guarantees `|C| ≥ τ`:
+    /// [`Self::decrypt`] without its truncation failure.
+    ///
+    /// # Errors
+    ///
+    /// [`Inauthentic`] if the deciphered authenticator is not `0^τ`; the buffer is then zeroized
+    /// and dropped.
+    pub fn open<const TAU: usize>(
+        &self,
+        tweak: Tweak<'_>,
+        ciphertext: Ciphertext<TAU>,
+    ) -> Result<Plaintext<TAU>, Inauthentic> {
+        let (mut bytes, message) = ciphertext.into_parts();
+        self.decrypt_in_place(tweak, TAU, bytes.as_mut_slice())?;
+        Ok(Plaintext::from_opened(bytes, message))
+    }
+
+    /// The one encryption core: `buffer ← Encipher(M ‖ 0^τ)` for `buffer = M ‖ slot`.
+    ///
+    /// Pre: `|buffer| ≥ τ`, established by each caller (checked, or by type).
+    fn encrypt_in_place(&self, tweak: Tweak<'_>, expansion: usize, buffer: &mut [u8]) {
+        buffer
+            .iter_mut()
+            .rev()
+            .take(expansion)
+            .for_each(|byte| *byte = 0);
+        self.transform(tweak, expansion, Direction::Encipher, buffer);
+    }
+
+    /// The one decryption core: `buffer ← Decipher(C)`, accepted iff its last `τ` bytes are
+    /// `0^τ`; on rejection the whole buffer is zeroized.
+    ///
+    /// Pre: `|buffer| ≥ τ`, established by each caller (checked, or by type).
+    fn decrypt_in_place(
+        &self,
+        tweak: Tweak<'_>,
+        expansion: usize,
+        buffer: &mut [u8],
+    ) -> Result<(), Inauthentic> {
         self.transform(tweak, expansion, Direction::Decipher, buffer);
-        let (plaintext, authenticator) = split_authenticator(buffer, expansion)?;
-        if is_zero(authenticator) {
-            Ok(plaintext)
+        if is_zero(buffer.iter().rev().take(expansion)) {
+            Ok(())
         } else {
-            plaintext.zeroize();
-            authenticator.zeroize();
-            Err(DecryptError::Inauthentic)
+            buffer.zeroize();
+            Err(Inauthentic)
         }
     }
 
@@ -161,7 +218,11 @@ impl Aez {
     }
 }
 
-/// Splits `buffer = M ‖ A` with `|A| = τ`.
+/// Splits `buffer = M ‖ A` with `|A| = τ`, by a checked subtraction and a checked split.
+///
+/// # Errors
+///
+/// [`ExpansionExceedsBuffer`] if the buffer is shorter than `τ`.
 fn split_authenticator(
     buffer: &mut [u8],
     expansion: usize,
@@ -174,7 +235,7 @@ fn split_authenticator(
 }
 
 /// Whether every byte is zero, in time independent of the bytes' values.
-fn is_zero(bytes: &[u8]) -> bool {
-    let union = bytes.iter().fold(0u8, |union, byte| union | byte);
+fn is_zero<'a>(bytes: impl Iterator<Item = &'a u8>) -> bool {
+    let union = bytes.fold(0u8, |union, byte| union | byte);
     subtle::ConstantTimeEq::ct_eq(&union, &0).into()
 }

@@ -47,6 +47,11 @@ pub enum DecryptError {
     #[error(transparent)]
     Truncated(#[from] ExpansionExceedsBuffer),
     /// The deciphered authenticator is not `0^τ`; the buffer has been zeroized.
-    #[error("AEZ authenticator mismatch")]
-    Inauthentic,
+    #[error(transparent)]
+    Inauthentic(#[from] Inauthentic),
 }
+
+/// The deciphered authenticator is not `0^τ`; the buffer has been zeroized.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("AEZ authenticator mismatch")]
+pub struct Inauthentic;

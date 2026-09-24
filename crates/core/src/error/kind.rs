@@ -288,6 +288,14 @@ pub enum Error {
     #[error("A lock was poisoned by a panicking holder")]
     LockPoisoned,
 
+    /// A group element is the identity where `G ∖ {O}` is required
+    #[error("group element is the identity")]
+    IdentityElement,
+
+    /// A scalar is zero where `Z_n^*` is required
+    #[error("scalar is zero")]
+    ZeroScalar,
+
     /// Affine rotation scalar must be greater than zero
     #[error("Affine rotation scalar must be greater than zero")]
     InvalidAffineScalar,
@@ -662,6 +670,18 @@ pub enum Error {
     /// IndexedDB error, {0}
     #[error("IndexedDB error, {0}")]
     IDBError(rexie::Error),
+
+    #[cfg(all(feature = "wasm", target_family = "wasm"))]
+    /// IndexedDB access clock record is missing from an opened store
+    #[error("IndexedDB access clock record is missing from an opened store")]
+    IdbAccessClockMissing,
+
+    #[cfg(all(feature = "wasm", target_family = "wasm"))]
+    /// IndexedDB access clock at {0} cannot advance without leaving the exact integer range
+    #[error(
+        "IndexedDB access clock at {0} cannot advance without leaving the exact integer range"
+    )]
+    IdbAccessClockExhausted(u64),
 
     /// Invalid capacity value
     #[error("Invalid capacity value")]
