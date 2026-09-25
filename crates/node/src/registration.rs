@@ -13,6 +13,7 @@ use futures::lock::Mutex as AsyncMutex;
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::entry;
 use rings_core::dht::Did;
+use rings_core::ecc::HashStr;
 use rings_core::ecc::VerificationPublicKey;
 use rings_core::lifecycle::StopToken;
 use rings_core::message::Encoded;
@@ -161,6 +162,8 @@ pub(crate) struct DhtRegistrationPublisher {
     topic: String,
     publish_gate: Arc<AsyncMutex<()>>,
     published_values: Arc<Mutex<BTreeSet<Encoded>>>,
+    /// The mark of the last compaction this publisher issued successfully.
+    last_compaction: Arc<Mutex<Option<CompactionMark>>>,
 }
 
 impl DhtRegistrationPublisher {
@@ -170,6 +173,7 @@ impl DhtRegistrationPublisher {
             topic: topic.into(),
             publish_gate: Arc::new(AsyncMutex::new(())),
             published_values: Arc::new(Mutex::new(BTreeSet::new())),
+            last_compaction: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -178,6 +182,7 @@ impl DhtRegistrationPublisher {
     /// Invariant: registry topics are keyed presence sets, not append-only heartbeat logs.
     /// Preservation: every observed value replaced by the current publish is tombstoned after the
     /// replacement value has been touched, while unrelated publisher keys stay joinable.
+    /// This publisher never compacts, so its tombstones are not bounded (#871).
     pub(crate) async fn publish_replacing(
         &self,
         context: &RegistrationContext<'_>,
@@ -223,8 +228,8 @@ impl DhtRegistrationPublisher {
         Ok(())
     }
 
-    /// Publish values, tombstone stale observed registry values, and compact at the owner once
-    /// the observed tombstone metadata crosses [`REGISTRY_COMPACTION_TOMBSTONE_THRESHOLD`].
+    /// Publish values, tombstone stale observed registry values, and compact at the owner when
+    /// this node is the compactor [`plan_compacting_registration_publish`] designates.
     ///
     /// This never sends a replacement value set computed from an observed client
     /// snapshot. Compaction is requested with only the removable payloads, so the
@@ -234,32 +239,41 @@ impl DhtRegistrationPublisher {
     /// A replaced descriptor is already removed by its per-dot tombstone, so a heartbeat does
     /// not compact merely because it replaced one: a compaction stamps a reset floor that also
     /// erases every concurrent add the owner has not received (#867), so it is issued only to
-    /// bound tombstone metadata. The plan is [`plan_compacting_registration_publish`].
+    /// bound tombstone metadata, by one designated registrant per crossing.
+    ///
+    /// `live_registrant` maps an observed value to the DID of its registrant iff the value is a
+    /// live descriptor; every other value not in `values` is tombstoned.
     pub(crate) async fn publish_many_replacing_and_compacting(
         &self,
         context: &RegistrationContext<'_>,
         values: impl IntoIterator<Item = Encoded>,
         replaces_observed_value: impl Fn(&Encoded) -> bool,
-        preserves_observed_value: impl Fn(&Encoded) -> bool,
+        live_registrant: impl Fn(&Encoded) -> Option<Did>,
     ) -> Result<()> {
         let current_values = values.into_iter().collect::<BTreeSet<_>>();
         let _publish_turn = self.publish_gate.lock().await;
         context.ensure_running()?;
         let observed_entry = self.observed_registry_entry(context).await?;
+        let last_compaction = *self.last_compaction.lock().map_err(|_| Error::Lock)?;
         let plan = {
             let mut published_values = self.published_values.lock().map_err(|_| Error::Lock)?;
             plan_compacting_registration_publish(
                 &mut published_values,
                 &current_values,
-                observed_entry.as_ref(),
+                RegistryObservation {
+                    entry: observed_entry,
+                    local: context.did(),
+                    last_compaction,
+                },
                 |observed| {
                     should_prune_observed_registry_value(
                         observed,
                         &replaces_observed_value,
-                        &preserves_observed_value,
+                        &|value| live_registrant(value).is_some(),
                     )
                 },
-            )
+                &live_registrant,
+            )?
         };
 
         for value in &current_values {
@@ -269,7 +283,7 @@ impl DhtRegistrationPublisher {
                 .storage_append_data(&self.topic, value.clone())
                 .await?;
         }
-        for stale_value in plan.tombstones.iter() {
+        for stale_value in plan.removals.iter() {
             context.ensure_running()?;
             context
                 .processor
@@ -280,12 +294,15 @@ impl DhtRegistrationPublisher {
                 .map_err(|_| Error::Lock)?
                 .remove(stale_value);
         }
-        if plan.compacts {
+        if let Some(mark) = plan.compaction {
             context.ensure_running()?;
             context
                 .processor
-                .storage_compact_data(&self.topic, plan.tombstones)
+                .storage_compact_data(&self.topic, plan.removals)
                 .await?;
+            // Committed only after the effect: a failed compaction is retried on the next
+            // heartbeat that still observes the same register.
+            *self.last_compaction.lock().map_err(|_| Error::Lock)? = Some(mark);
         }
         {
             let mut published_values = self.published_values.lock().map_err(|_| Error::Lock)?;
@@ -314,78 +331,160 @@ impl DhtRegistrationPublisher {
     }
 }
 
-/// The observed tombstone count at which a registry publisher compacts its topic.
+/// The tombstone step `T` of the online-node registry's compaction ladder.
 ///
 /// Derivation: a data carrier keeps at most `L = EntryKind::Data.max_data_len()` visible
 /// elements, one add dot each, and the carrier law in `rings_core::consts` sizes a full
 /// carrier for those `L` elements plus their dot metadata. Tombstones are the only part of a
 /// data carrier with no cap of their own (`EntryKind::Data.max_tombstones()` is `None`); a
-/// reset floor is what prunes them. Setting the threshold to `L` keeps the remove side of a
-/// registry carrier at the scale of its add side:
-///
-/// ```text
-///   |tombstones(owner)|  <  T + Δ         T = L,  Δ = tombstones issued in one heartbeat interval
-///   |dots(owner)|        ≤  L             (materialization cap)
-/// ```
-///
-/// because every live registrant observes the carrier once per heartbeat, so a crossing of `T`
-/// is seen, and compacted, within one interval of it. A heartbeat below the threshold stamps
-/// no floor, which is the point: a floor is the one operation that can erase a concurrent add
-/// the owner has not received (#867).
-pub(crate) const REGISTRY_COMPACTION_TOMBSTONE_THRESHOLD: usize =
-    entry::EntryKind::Data.max_data_len();
+/// reset floor is what prunes them. `T = L` keeps the remove side of the registry carrier at
+/// the scale of its add side. The resulting bound is stated on
+/// [`plan_compacting_registration_publish`].
+const REGISTRY_COMPACTION_TOMBSTONE_STEP: usize = entry::EntryKind::Data.max_data_len();
 
-/// Whether an observed registry carrier holds enough tombstone metadata to be compacted.
+/// The observed register a compaction was planned under.
 ///
-/// Predicate: `|tombstones(entry)| ≥ REGISTRY_COMPACTION_TOMBSTONE_THRESHOLD`. It is false for
-/// an absent carrier and for every carrier below the threshold, whether or not the heartbeat
-/// replaces a value.
-fn registry_compaction_due(entry: &entry::Entry) -> bool {
-    entry.crdt.tombstones.len() >= REGISTRY_COMPACTION_TOMBSTONE_THRESHOLD
+/// Every observation between two reset floors carries the same register, so a mark names
+/// one threshold crossing as its observers see it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CompactionMark {
+    /// The observed carrier's reset floor, `None` for a carrier never floored.
+    register: Option<entry::EntryVersion>,
 }
 
-/// The effects of one compacting registry heartbeat, computed purely from the publisher's
-/// memory and one observation of the carrier.
+impl CompactionMark {
+    /// The mark of an observed carrier.
+    fn of(entry: &entry::Entry) -> Self {
+        Self {
+            register: entry.crdt.register,
+        }
+    }
+
+    /// The ring point that orders the compactors of this crossing:
+    /// `anchor = H(topic_did ‖ register)`.
+    ///
+    /// Every observer of one crossing derives the same anchor, while successive crossings
+    /// (separated by a floor, hence by a register) rotate the designation around the ring.
+    fn anchor(self, topic_did: Did) -> Result<Did> {
+        let bytes = rings_codec::serialize(&(topic_did, self.register))
+            .map_err(|error| Error::CoreError(rings_core::error::Error::CodecSerialize(error)))?;
+        Did::try_from(HashStr::from_bytes(&bytes)).map_err(Error::CoreError)
+    }
+}
+
+/// A registry publisher's view of one heartbeat: the observed carrier, its own DID, and the
+/// mark of its last successful compaction.
+struct RegistryObservation {
+    /// The carrier as this heartbeat's read returned it; possibly a previous round's reply.
+    entry: Option<entry::Entry>,
+    /// This registrant's DID.
+    local: Did,
+    /// The mark of this publisher's last successful compaction.
+    last_compaction: Option<CompactionMark>,
+}
+
+/// The rank of `local` among the observed live registrants, ordered by clockwise ring
+/// distance from `anchor`; `None` when `local` holds no live descriptor in the observation.
+///
+/// Rank `k` means exactly `k` distinct live registrants are closer to the anchor.
+fn compactor_rank(
+    anchor: Did,
+    local: Did,
+    live_registrants: impl IntoIterator<Item = Did>,
+) -> Option<usize> {
+    let registrants = live_registrants.into_iter().collect::<BTreeSet<_>>();
+    registrants.contains(&local).then(|| {
+        registrants
+            .iter()
+            .filter(|registrant| Did::cmp_from_observer(anchor, **registrant, local).is_lt())
+            .count()
+    })
+}
+
+/// The tombstone count at which the compactor of rank `rank` compacts: `T · (rank + 1)`.
+fn compaction_threshold(rank: usize) -> usize {
+    REGISTRY_COMPACTION_TOMBSTONE_STEP.saturating_mul(rank.saturating_add(1))
+}
+
+/// The effects of one compacting registry heartbeat.
 ///
 /// The shell ([`DhtRegistrationPublisher::publish_many_replacing_and_compacting`]) executes it
-/// in order: append the current values, tombstone [`Self::tombstones`], then compact with
-/// [`Self::tombstones`] as the removals iff [`Self::compacts`].
+/// in order: append the current values, tombstone [`Self::removals`], then, iff
+/// [`Self::compaction`] is present, compact with [`Self::removals`] and record the mark.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RegistrationPublishPlan {
-    /// Previously published or observed values this heartbeat removes by per-dot tombstone.
-    tombstones: Vec<Encoded>,
-    /// Whether this heartbeat ends in a compaction: exactly `registry_compaction_due(observed)`.
-    compacts: bool,
+    /// Previously published or observed payloads this heartbeat removes by per-dot tombstone.
+    removals: Vec<Encoded>,
+    /// The mark to record once the compaction this heartbeat issues has succeeded.
+    compaction: Option<CompactionMark>,
 }
 
-/// Plan one compacting registry heartbeat.
+/// Plan one compacting registry heartbeat: the state transition
+/// `(published, observation) ↦ (published′, plan)`.
 ///
 /// ```text
-///   observed ──► begin_registration_publish ──► tombstones   (per-dot removals, no floor)
-///      │
-///      └──────► registry_compaction_due ─────► compacts      (floor only past the threshold)
+///   observation.entry ─┬─► begin_registration_publish ─► removals   (per-dot, no floor)
+///                      │
+///                      └─► mark = register ─► anchor = H(topic ‖ register)
+///                               │                  │
+///                               │      rank = |{live r : r closer to anchor than local}|
+///                               ▼                  ▼
+///        mark ≠ last_compaction  ∧  |tombstones| ≥ T·(rank + 1)  ─►  compaction = Some(mark)
 /// ```
 ///
-/// Law (no heartbeat floor): `compacts ⇔ registry_compaction_due(observed)`; in particular a
-/// non-empty `tombstones` never implies a compaction on its own.
-/// Effect on `published_values`: as [`begin_registration_publish`], every current value is
+/// Laws:
+/// - No heartbeat floor: a non-empty `removals` never implies a compaction on its own.
+/// - Single writer per crossing: every observer of one crossing sees one register, hence one
+///   anchor and one ranking; below `2T` only rank 0 compacts, and the recorded mark stops it
+///   from compacting again on a stale reply that still carries the pre-floor register.
+/// - Ladder: a designated compactor that is dead leaves the ranking when its descriptor
+///   expires, and one that stays live but never compacts is overtaken by rank `k` at `T·(k+1)`.
+///
+/// Bound: with `f` live registrants that never compact, reads that lag the owner by at most
+/// `λ` heartbeat intervals, and `Δ` tombstones per interval from every writer (data admission
+/// has no writer authority, so `Δ` includes any peer's add-then-remove writes),
+/// `|tombstones(owner)| < T·(f + 1) + λ·Δ`. A crossing, and therefore a floor that can erase
+/// an add the owner has not received, can be forced by any writer until #867's causally
+/// stable compaction lands.
+///
+/// Effect on `published`: as [`begin_registration_publish`], every current value is
 /// remembered before the first await.
 fn plan_compacting_registration_publish(
     published_values: &mut BTreeSet<Encoded>,
     current_values: &BTreeSet<Encoded>,
-    observed: Option<&entry::Entry>,
+    observation: RegistryObservation,
     prunes_observed_value: impl Fn(&Encoded) -> bool,
-) -> RegistrationPublishPlan {
-    let observed_values = observed.map_or_else(Vec::new, |entry| entry.data.clone());
-    RegistrationPublishPlan {
-        tombstones: begin_registration_publish(
+    live_registrant: impl Fn(&Encoded) -> Option<Did>,
+) -> Result<RegistrationPublishPlan> {
+    let Some(entry) = observation.entry else {
+        return Ok(RegistrationPublishPlan {
+            removals: begin_registration_publish(
+                published_values,
+                current_values,
+                vec![],
+                prunes_observed_value,
+            ),
+            compaction: None,
+        });
+    };
+    let mark = CompactionMark::of(&entry);
+    let rank = compactor_rank(
+        mark.anchor(entry.did)?,
+        observation.local,
+        entry.data.iter().filter_map(&live_registrant),
+    );
+    let compaction = (observation.last_compaction != Some(mark)
+        && rank.is_some_and(|rank| entry.crdt.tombstones.len() >= compaction_threshold(rank)))
+    .then_some(mark);
+    Ok(RegistrationPublishPlan {
+        removals: begin_registration_publish(
             published_values,
             current_values,
-            observed_values,
+            entry.data,
             prunes_observed_value,
         ),
-        compacts: observed.is_some_and(registry_compaction_due),
-    }
+        compaction,
+    })
 }
 
 fn should_prune_observed_registry_value(
@@ -525,10 +624,12 @@ impl OnlineNodeRegistration {
                 |observed| {
                     observed
                         .decode::<OnlineNodeDescriptor>()
-                        .is_ok_and(|descriptor| {
+                        .ok()
+                        .filter(|descriptor| {
                             descriptor.verify_signature(context.network_id())
                                 && !descriptor.is_expired_at(now_ms)
                         })
+                        .map(|descriptor| descriptor.did)
                 },
             )
             .await?;
@@ -582,54 +683,73 @@ mod tests {
     /// The model's first operation instant; each operation advances it by one millisecond.
     const MODEL_EPOCH_MS: u128 = 1_700_000_000_000;
 
+    /// Heartbeat intervals by which a registrant's plan can lag the owner: its read returns
+    /// the previous round's reply, and the crossing may land just after its turn.
+    const MODEL_READ_LAG_INTERVALS: usize = 2;
+
     /// Registrant `registrant`'s descriptor stand-in at heartbeat `heartbeat`.
     fn model_descriptor(registrant: u32, heartbeat: usize) -> Encoded {
         encoded(&format!("{registrant}:{heartbeat}"))
     }
 
-    /// Whether `value` is a descriptor stand-in of `registrant`: the model's
-    /// `replaces_observed_value`, which prunes only the registrant's own older descriptors.
-    fn model_is_descriptor_of(registrant: u32, value: &Encoded) -> bool {
+    /// The registrant of a descriptor stand-in: the model's `live_registrant`, under which
+    /// every descriptor is live.
+    fn model_live_registrant(value: &Encoded) -> Option<Did> {
         value
             .value()
             .split_once(':')
-            .is_some_and(|(prefix, _heartbeat)| prefix == registrant.to_string())
+            .and_then(|(prefix, _heartbeat)| prefix.parse::<u32>().ok())
+            .map(Did::from)
     }
 
-    /// A registry carrier under compacting heartbeats, executed against a single owner.
+    /// A registry carrier under compacting heartbeats with lagged reads, executed against a
+    /// single owner.
     ///
-    /// Each heartbeat observes the owner (a fresh read), plans with the production
-    /// [`plan_compacting_registration_publish`], and applies the plan's effects in the order of
+    /// A heartbeat plans on the snapshot its previous heartbeat read (the production read
+    /// answers from the reply cached by the previous round), stores the current owner snapshot
+    /// for its next heartbeat, and applies the plan's effects in the order of
     /// [`DhtRegistrationPublisher::publish_many_replacing_and_compacting`]:
     ///
     /// ```text
-    ///   observe owner ─► plan ─► Extend(current) ─► Tombstone(stale)* ─► CompactData? ─► finish
+    ///   plan(previous snapshot) ─► snapshot ─► Extend ─► Tombstone* ─► CompactData? ─► finish
     /// ```
+    ///
+    /// A stalled registrant plans like every other one but never issues its compaction.
     struct HeartbeatModel {
         /// The owner's carrier.
         owner: entry::Entry,
         /// Each registrant's publisher memory.
         published: BTreeMap<u32, BTreeSet<Encoded>>,
+        /// Each registrant's snapshot from its previous heartbeat.
+        snapshots: BTreeMap<u32, entry::Entry>,
+        /// Each registrant's last successful compaction.
+        last_compactions: BTreeMap<u32, CompactionMark>,
+        /// Registrants that never issue a compaction.
+        stalled: BTreeSet<u32>,
         /// The next operation instant.
         now_ms: u128,
         /// Tombstone operations issued so far.
         tombstones_issued: usize,
-        /// Compactions issued so far.
-        compactions: usize,
+        /// The registrants of the compactions issued so far, in order.
+        compactors: Vec<u32>,
     }
 
     impl HeartbeatModel {
-        /// An empty registry carrier with `registrants` publishers.
-        fn new(registrants: u32) -> Result<Self> {
+        /// An empty registry carrier with `registrants` publishers, of which `stalled` never
+        /// compact.
+        fn new(registrants: u32, stalled: BTreeSet<u32>) -> Result<Self> {
             let did = entry::Entry::gen_did(MODEL_TOPIC).map_err(Error::CoreError)?;
             Ok(Self {
                 owner: entry::Entry::new(did, vec![], entry::EntryKind::Data),
                 published: (0..registrants)
                     .map(|registrant| (registrant, BTreeSet::new()))
                     .collect(),
+                snapshots: BTreeMap::new(),
+                last_compactions: BTreeMap::new(),
+                stalled,
                 now_ms: MODEL_EPOCH_MS,
                 tombstones_issued: 0,
-                compactions: 0,
+                compactors: vec![],
             })
         }
 
@@ -648,39 +768,57 @@ mod tests {
             Ok(())
         }
 
-        /// Heartbeat `heartbeat` of `registrant`, returning whether it compacted.
-        fn heartbeat(&mut self, registrant: u32, heartbeat: usize) -> Result<bool> {
+        /// Heartbeat `heartbeat` of `registrant`.
+        fn heartbeat(&mut self, registrant: u32, heartbeat: usize) -> Result<()> {
             let current = BTreeSet::from([model_descriptor(registrant, heartbeat)]);
-            let observed = Some(self.owner.clone());
+            let observation = RegistryObservation {
+                entry: self.snapshots.insert(registrant, self.owner.clone()),
+                local: Did::from(registrant),
+                last_compaction: self.last_compactions.get(&registrant).copied(),
+            };
             let plan = plan_compacting_registration_publish(
                 self.published.entry(registrant).or_default(),
                 &current,
-                observed.as_ref(),
-                |value| model_is_descriptor_of(registrant, value),
-            );
+                observation,
+                |value| model_live_registrant(value) == Some(Did::from(registrant)),
+                model_live_registrant,
+            )?;
             for value in current.iter() {
                 let op = entry::EntryOperation::Extend(self.operand(vec![value.clone()]));
                 self.apply(registrant, op)?;
             }
-            for stale in plan.tombstones.iter() {
+            for stale in plan.removals.iter() {
                 let op = entry::EntryOperation::Tombstone(self.operand(vec![stale.clone()]));
                 self.apply(registrant, op)?;
                 self.tombstones_issued = self.tombstones_issued.saturating_add(1);
             }
-            if plan.compacts {
-                let op = entry::EntryOperation::CompactData(self.operand(plan.tombstones));
+            if let Some(mark) = plan
+                .compaction
+                .filter(|_| !self.stalled.contains(&registrant))
+            {
+                let op = entry::EntryOperation::CompactData(self.operand(plan.removals));
                 self.apply(registrant, op)?;
-                self.compactions = self.compactions.saturating_add(1);
+                self.last_compactions.insert(registrant, mark);
+                self.compactors.push(registrant);
             }
             finish_registration_publish(self.published.entry(registrant).or_default(), current);
-            Ok(plan.compacts)
+            Ok(())
         }
 
         /// One heartbeat of every registrant, in registrant order.
         fn round(&mut self, heartbeat: usize) -> Result<()> {
             let registrants = self.published.keys().copied().collect::<Vec<_>>();
-            registrants.into_iter().try_for_each(|registrant| {
-                self.heartbeat(registrant, heartbeat).map(|_compacted| ())
+            registrants
+                .into_iter()
+                .try_for_each(|registrant| self.heartbeat(registrant, heartbeat))
+        }
+
+        /// Run rounds `rounds`, checking `invariant` after each.
+        fn run(&mut self, rounds: std::ops::Range<usize>, invariant: impl Fn(&Self)) -> Result<()> {
+            rounds.into_iter().try_for_each(|heartbeat| {
+                self.round(heartbeat)?;
+                invariant(self);
+                Ok(())
             })
         }
 
@@ -693,62 +831,96 @@ mod tests {
         fn tombstones(&self) -> usize {
             self.owner.crdt.tombstones.len()
         }
+
+        /// The model's tombstone bound `T·(f + 1) + λ·Δ`, with `Δ` one tombstone per registrant
+        /// per interval and `f` the stalled registrants.
+        fn tombstone_bound(&self) -> usize {
+            compaction_threshold(self.stalled.len()) + MODEL_READ_LAG_INTERVALS * self.registrants()
+        }
+
+        /// The registrant of rank 0 for a carrier with `register`, among `registrants`.
+        fn designated(&self, register: Option<entry::EntryVersion>) -> Result<Option<u32>> {
+            let anchor = CompactionMark { register }.anchor(self.owner.did)?;
+            let registrants = self.published.keys().copied().collect::<Vec<_>>();
+            Ok(registrants.iter().copied().find(|registrant| {
+                compactor_rank(
+                    anchor,
+                    Did::from(*registrant),
+                    registrants.iter().copied().map(Did::from),
+                ) == Some(0)
+            }))
+        }
     }
 
     #[test]
-    fn test_registration_heartbeats_compact_only_on_a_threshold_crossing() -> Result<()> {
-        let registrants = 4_u32;
-        let mut model = HeartbeatModel::new(registrants)?;
-        let rounds = REGISTRY_COMPACTION_TOMBSTONE_THRESHOLD / model.registrants() + 3;
-        for heartbeat in 0..rounds {
-            for registrant in 0..registrants {
-                let due = model.tombstones() >= REGISTRY_COMPACTION_TOMBSTONE_THRESHOLD;
-                let compacted = model.heartbeat(registrant, heartbeat)?;
-                // Law: a heartbeat compacts iff its observation crossed the threshold; a
-                // replaced descriptor alone never compacts.
-                assert_eq!(compacted, due, "heartbeat {heartbeat} of {registrant}");
-                if compacted {
-                    // A compaction prunes every tombstone below its floor, so the next
-                    // compaction needs a fresh crossing.
-                    assert!(model.tombstones() < REGISTRY_COMPACTION_TOMBSTONE_THRESHOLD);
-                }
-            }
-        }
-        assert_eq!(model.compactions, 1);
-        assert!(model.tombstones_issued >= REGISTRY_COMPACTION_TOMBSTONE_THRESHOLD);
+    fn test_registration_heartbeats_compact_once_per_crossing_under_lagged_reads() -> Result<()> {
+        let mut model = HeartbeatModel::new(8, BTreeSet::new())?;
+        let rounds = REGISTRY_COMPACTION_TOMBSTONE_STEP / model.registrants();
+        // Below the crossing: every heartbeat replaces a descriptor, none compacts.
+        model.run(0..rounds, |model| {
+            assert!(model.tombstones() < REGISTRY_COMPACTION_TOMBSTONE_STEP);
+            assert!(model.compactors.is_empty());
+        })?;
+        // Across it: exactly the designated registrant compacts, once, although every
+        // registrant's lagged read shows the crossing and the compactor's own next read still
+        // carries the pre-floor register.
+        let designated = model.designated(None)?;
+        model.run(
+            rounds..rounds + 2 * MODEL_READ_LAG_INTERVALS + 2,
+            |_model| (),
+        )?;
+        assert_eq!(model.compactors, designated.into_iter().collect::<Vec<_>>());
+        assert!(model.tombstones() < REGISTRY_COMPACTION_TOMBSTONE_STEP);
         Ok(())
     }
 
     #[test]
     fn test_registration_heartbeats_keep_the_registry_carrier_bounded() -> Result<()> {
-        let mut model = HeartbeatModel::new(5)?;
+        let mut model = HeartbeatModel::new(5, BTreeSet::new())?;
         let registrants = model.registrants();
-        for heartbeat in 0..3 * REGISTRY_COMPACTION_TOMBSTONE_THRESHOLD / registrants {
-            model.round(heartbeat)?;
-            // Bound: at most one heartbeat interval (Δ = one tombstone per registrant) past T.
-            assert!(model.tombstones() < REGISTRY_COMPACTION_TOMBSTONE_THRESHOLD + registrants);
+        let rounds = 3 * REGISTRY_COMPACTION_TOMBSTONE_STEP / registrants;
+        model.run(0..rounds, |model| {
+            assert!(model.tombstones() < model.tombstone_bound());
             assert_eq!(model.owner.data.len(), registrants);
             assert_eq!(model.owner.crdt.dots.len(), registrants);
-        }
-        // At most one compaction per threshold's worth of tombstones, and the bound above was
-        // reached by compacting, not by a lucky horizon.
-        assert!(
-            model.compactions * REGISTRY_COMPACTION_TOMBSTONE_THRESHOLD <= model.tombstones_issued
-        );
-        assert!(model.compactions >= 2);
+        })?;
+        // One compaction per step of tombstones, and the bound was kept by compacting.
+        let compactions = model.compactors.len();
+        assert!(compactions * REGISTRY_COMPACTION_TOMBSTONE_STEP <= model.tombstones_issued);
+        assert!(compactions >= 2);
         Ok(())
     }
 
     #[test]
-    fn test_registration_heartbeats_preserve_a_concurrent_replica_only_add() -> Result<()> {
-        let registrants = 3_u32;
-        let late_registrant = registrants;
-        let mut model = HeartbeatModel::new(registrants)?;
-        (0..4).try_for_each(|heartbeat| model.round(heartbeat))?;
-        // A replica holds an add the owner never receives.
+    fn test_registration_compaction_ladder_overtakes_a_stalled_designee() -> Result<()> {
+        let probe = HeartbeatModel::new(4, BTreeSet::new())?;
+        let stalled = probe.designated(None)?.into_iter().collect::<BTreeSet<_>>();
+        assert_eq!(stalled.len(), 1);
+        let mut model = HeartbeatModel::new(4, stalled.clone())?;
+        let rounds = compaction_threshold(1) / model.registrants() + 2 * MODEL_READ_LAG_INTERVALS;
+        model.run(0..rounds, |model| {
+            assert!(model.tombstones() < model.tombstone_bound());
+        })?;
+        // Rank 1 took over at 2T; the stalled designee never compacted.
+        assert_eq!(model.compactors.len(), 1);
+        assert!(model
+            .compactors
+            .iter()
+            .all(|compactor| !stalled.contains(compactor)));
+        Ok(())
+    }
+
+    /// A model warmed up for `warmup` rounds, and a replica of its owner holding one add the
+    /// owner never receives.
+    fn model_with_replica_only_add(
+        warmup: usize,
+    ) -> Result<(HeartbeatModel, entry::Entry, Encoded)> {
+        let mut model = HeartbeatModel::new(3, BTreeSet::new())?;
+        model.run(0..warmup, |_model| ())?;
+        let late_registrant = 99;
         let late = model_descriptor(late_registrant, 0);
-        let mut replica = model.owner.clone();
-        replica = replica
+        let replica = model
+            .owner
             .operate(
                 model.now_ms,
                 entry::EntryOperation::Extend(model.operand(vec![late.clone()])),
@@ -756,12 +928,15 @@ mod tests {
             )
             .map_err(Error::CoreError)?;
         assert!(!model.owner.data.contains(&late));
+        Ok((model, replica, late))
+    }
 
+    #[test]
+    fn test_registration_heartbeats_below_the_threshold_preserve_a_replica_only_add() -> Result<()>
+    {
+        let (mut model, replica, late) = model_with_replica_only_add(4)?;
         // Every heartbeat below replaces a descriptor, which used to stamp a reset floor.
-        (4..16).try_for_each(|heartbeat| model.round(heartbeat))?;
-        assert_eq!(model.compactions, 0);
-
-        // No floor was stamped, so the add survives sync in both directions.
+        model.run(4..16, |_model| ())?;
         let synced_at_owner = model
             .owner
             .join(replica.clone())
@@ -771,6 +946,23 @@ mod tests {
             .map_err(Error::CoreError)?;
         assert!(synced_at_owner.data.contains(&late));
         assert_eq!(synced_at_owner, synced_at_replica);
+        assert!(model.compactors.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_registration_compaction_past_the_threshold_still_erases_a_replica_only_add(
+    ) -> Result<()> {
+        // The residual #867 hazard this publisher narrows but cannot remove: the floor of a
+        // crossing erases an add the owner never received, from every carrier that joins it.
+        let (mut model, replica, late) = model_with_replica_only_add(4)?;
+        let rounds = REGISTRY_COMPACTION_TOMBSTONE_STEP / model.registrants();
+        model.run(4..rounds + 2 * MODEL_READ_LAG_INTERVALS, |_model| ())?;
+        assert_eq!(model.compactors.len(), 1);
+        let synced_at_replica = replica
+            .join(model.owner.clone())
+            .map_err(Error::CoreError)?;
+        assert!(!synced_at_replica.data.contains(&late));
         Ok(())
     }
 

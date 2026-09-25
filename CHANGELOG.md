@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Stop compacting the online-node registry on every heartbeat (#867, part B). A heartbeat's
+  replaced descriptor is already removed by its tombstone; a compaction, whose reset floor can
+  erase a concurrent registration the storage owner has not received, is now issued only when
+  the observed tombstones reach `T = ENTRY_DATA_MAX_LEN`, by one registrant designated per
+  crossing (escalating to the next one at every further `T` if it does not compact).
+
 - Rename the relay transport identifier from `SessionId` to `RelaySessionId` to distinguish
   relayed TCP connections and UDP flows from delegated-signing identities. The wire value and
   frame encoding are unchanged.
