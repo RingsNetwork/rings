@@ -262,10 +262,18 @@ async fn await_stored_entry(
 /// (3)  Stored ; disconnect(node2)                ⊢ ◇Closed      close witness
 /// ```
 ///
-/// All three predicates are stable. Nothing removes the placement. Deallocation is terminal,
-/// so a reservation after `disconnect` (an inbound-driven send that reserves before it finds no
-/// connection) can create a new capacity but cannot revive `K₀`. A close that succeeded stays
-/// successful.
+/// All three predicates are stable. Nothing removes the placement. A close that succeeded
+/// stays successful. Deallocation is terminal: once `K₀` is gone, a later reservation toward
+/// node2 creates a new capacity and cannot revive `K₀`.
+///
+/// Liveness of (2) needs one instant with no permit of `K₀` held. A reservation that starts
+/// while `K₀` is live joins it (`OutboundRegistry::capacity` upgrades the live `Weak`), so
+/// continuously overlapping reservations would keep `K₀` alive. After `disconnect`, node2 is
+/// in none of node1's successors, predecessor or fingers, so maintenance and repair choose no
+/// next hop toward it. node2 runs no maintenance of its own, and its retired connection
+/// admits no further inbound work, so nothing on node1 reserves toward it. A regression that
+/// breaks either premise and keeps reserving toward the retired peer is exactly what the hang
+/// guard reports.
 ///
 /// No wake-up can be lost: each wait registers its listener before it reads the state. The
 /// write generation is marked before the store is read, the retirement watch is subscribed
@@ -273,8 +281,7 @@ async fn await_stored_entry(
 /// state, not a pulse.
 ///
 /// The producers keep running through (2), so the test covers retirement racing live
-/// maintenance. A regression that keeps re-admitting transfers toward the retired peer keeps
-/// `K₀` alive and fails the hang guard.
+/// maintenance.
 ///
 /// No observation waits for a duration. The producers under test are timer-paced by design
 /// (`wait_with(500 ms)`, a 25 ms pressure loop), and the timeouts only guard against a hang.
