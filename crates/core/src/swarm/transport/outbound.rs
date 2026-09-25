@@ -77,9 +77,17 @@ mod transfer;
 pub(super) use admission::DetachedAdmission;
 pub(super) use admission::DetachedAdmissionCancel;
 pub(super) use admission::DetachedAdmissionClaim;
+#[cfg(test)]
+pub(super) use capacity::admits_now;
+#[cfg(test)]
+pub(super) use capacity::CapacityScope;
+pub(super) use capacity::CapacityView;
 use capacity::GlobalTransferCapacity;
+pub(super) use capacity::PeerProgress;
+pub(super) use capacity::PeerStamp;
 use capacity::TransferCapacity;
 pub(super) use capacity::TransferCapacityPermit;
+pub(super) use capacity::TransferDemand;
 #[cfg(test)]
 pub(crate) use capacity::OUTBOUND_CONTROL_RESERVED_TRANSFERS;
 #[cfg(test)]
@@ -388,11 +396,10 @@ impl OutboundSchedulers {
     pub(super) async fn reserve(
         &self,
         peer: Did,
-        class: TransferClass,
-        bytes: usize,
+        demand: TransferDemand,
     ) -> Result<TransferCapacityPermit> {
         let capacity = self.lock_registry().capacity(peer, &self.global_capacity);
-        capacity.acquire(peer, class, bytes).await
+        capacity.acquire(peer, demand.class(), demand.bytes()).await
     }
 
     pub(super) fn shutdown(&self, peer: Did) {
@@ -602,11 +609,18 @@ impl OutboundWorker {
         }
     }
 
+    /// The terminal transition of a scheduled transfer: take its final result, then release
+    /// its capacity before the result is published. A transfer that admitted a frame to the
+    /// link releases as progress of the peer's link (`release_after_progress`).
     fn finalize_scheduled_transfer(
         mut scheduled: ScheduledTransfer,
         result: Result<SendCompletionOutcome>,
     ) -> Option<FinalTransferResult> {
+        let reached_link = !scheduled.transfer.is_before_first_frame();
         let final_result = scheduled.transfer.take_final(result);
+        if let (Some(permit), true) = (scheduled.capacity_permit.take(), reached_link) {
+            permit.release_after_progress();
+        }
         drop(scheduled);
         final_result
     }

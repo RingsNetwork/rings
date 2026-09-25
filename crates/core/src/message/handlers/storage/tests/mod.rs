@@ -1,5 +1,6 @@
 mod test_api;
 mod test_repair;
+mod test_rerouting;
 mod test_storage_sync_report;
 mod test_support;
 mod test_sync_ack;

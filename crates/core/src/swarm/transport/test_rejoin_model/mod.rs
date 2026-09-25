@@ -65,7 +65,7 @@
 //! because the search allows one round in flight overlay-wide: the
 //! production timer is continuously enabled, and weak fairness of a
 //! continuously enabled action is strong fairness of the same action under
-//! a bound that sometimes disables it (`search`).
+//! a bound that sometimes disables it (`test_model_check`).
 //!
 //! # Fidelity
 //!
@@ -76,8 +76,9 @@
 //!   `DhtPeerRemoval`. The carrier stores those production values, so there
 //!   is no snapshot or shadow state machine to keep equal to them.
 //! - What the model owns is the composition `SwarmTransport` performs under
-//!   its lifecycle boundary (`node`), the physical world (`overlay`), and the
-//!   search (`search`). Each composed step names the production path it
+//!   its lifecycle boundary (`node`) and the physical world (`overlay`); the
+//!   search is the shared `test_model_check`, of which `Overlay` is an
+//!   instance (`laws`). Each composed step names the production path it
 //!   interprets. The one place it hands `step` a differently shaped argument
 //!   than production does (replacement candidates) is proved observationally
 //!   equal below, and the acceptance trace is replayed against a real
@@ -173,7 +174,6 @@ mod conformance;
 mod laws;
 mod node;
 mod overlay;
-mod search;
 
 use std::num::NonZeroU32;
 
@@ -187,9 +187,6 @@ use overlay::Overlay;
 use overlay::OverlayAction;
 use overlay::OverlayState;
 use overlay::ShellMutation;
-use search::check;
-use search::LivenessAnalysis;
-use search::SearchReport;
 
 use crate::dht::topology::step;
 use crate::dht::topology::successors;
@@ -198,6 +195,9 @@ use crate::dht::topology::TopologyEvent;
 use crate::dht::topology::TopologyState;
 use crate::dht::Did;
 use crate::swarm::transport::pending::PendingConnectionAttempt;
+use crate::swarm::transport::test_model_check::check;
+use crate::swarm::transport::test_model_check::LivenessAnalysis;
+use crate::swarm::transport::test_model_check::SearchReport;
 
 /// The documented size of one configuration's reachable graph, asserted
 /// exactly so the bounds table cannot drift.

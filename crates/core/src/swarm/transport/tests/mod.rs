@@ -13,6 +13,8 @@ use rings_transport::core::callback::TransportCallback;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use tracing_test::traced_test;
 
+#[cfg(feature = "dummy")]
+use super::outbound::TransferDemand;
 use super::pending::ConnectionLifecycleRegistry;
 #[cfg(feature = "dummy")]
 use super::pending::FingerUpdateDisposition;
@@ -930,7 +932,7 @@ async fn test_missing_peer_error_precedes_outbound_capacity_admission() -> Resul
         permits.push(
             transport
                 .outbound_schedulers
-                .reserve(peer, MessageCategory::Application, 1)
+                .reserve(peer, TransferDemand::new(MessageCategory::Application, 1))
                 .await?,
         );
     }

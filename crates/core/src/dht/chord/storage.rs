@@ -24,6 +24,31 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::utils::get_epoch_ms;
 
+/// The step one placement of a lookup takes (see [`PeerRing::lookup_placement`]).
+#[derive(Debug)]
+pub(crate) enum PlacementLookup {
+    /// A live value is stored here.
+    Found(Entry),
+    /// This node owns the placement and stores nothing for it.
+    Missed(PlacementMiss),
+    /// Ask `next` for `query`.
+    Remote {
+        /// The node the query goes to.
+        next: Did,
+        /// The placement the query interrogates.
+        query: EntryLookupKey,
+    },
+}
+
+/// Where one placement of an operation is applied (see [`PeerRing::operate_route`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OperateRoute {
+    /// This node accepts the placement.
+    Owned,
+    /// The operation is routed through `next`.
+    Remote(Did),
+}
+
 /// The identity of a stored carrier: its kind and its placement.
 ///
 /// Storage is partitioned by kind, so the two carriers one position can name (a data topic,
@@ -242,6 +267,62 @@ impl PeerRing {
         }
     }
 
+    /// The step one placement of a lookup takes under the topology and local storage at
+    /// `now_ms`: the per-placement `Compute` shared by a whole lookup and by the rerouting of one
+    /// placement.
+    ///
+    /// ```text
+    /// find_storage_owner(placement)
+    ///   ├─ Some(owner) ─▶ [live value stored here?] ── yes ─▶ Found(value)
+    ///   │                        │ no
+    ///   │                        ├─ owner ≠ self ─────────────────────▶ Remote(owner)
+    ///   │                        └─ owner = self ─▶ [fallback ∧ virtual nodes ∧ ∃ head]
+    ///   │                                              ├─ yes ─▶ Remote(head)
+    ///   │                                              └─ no  ─▶ Missed(placement, self)
+    ///   └─ RemoteAction(next, FindSuccessor(id)) ──────────────────▶ Remote(next) for id
+    /// ```
+    pub(crate) async fn lookup_placement(
+        &self,
+        query: EntryLookupKey,
+        fallback_on_local_virtual_miss: bool,
+        now_ms: u128,
+    ) -> Result<PlacementLookup> {
+        match self.find_storage_owner(query.placement)? {
+            PeerRingAction::Some(owner) => {
+                // A lookup reads the data namespace: a relay inbox is never fetched, its
+                // recipient drains it from local storage, so a lookup at its position sees it as
+                // absent.
+                let key = StorageKey::new(EntryKind::Data, query.placement);
+                if let Some(value) = self.live_storage_entry(key, now_ms).await? {
+                    return Ok(PlacementLookup::Found(value));
+                }
+                tracing::debug!("Cannot find entry in local storage, try to query from successor");
+                if owner != self.did {
+                    return Ok(PlacementLookup::Remote { next: owner, query });
+                }
+                let head =
+                    if fallback_on_local_virtual_miss && self.storage_virtual_nodes_enabled()? {
+                        self.with_topology_state(topology::successor_head)?
+                    } else {
+                        None
+                    };
+                Ok(match head {
+                    Some(next) => PlacementLookup::Remote { next, query },
+                    None => PlacementLookup::Missed(PlacementMiss::new(query.placement, owner)),
+                })
+            }
+            PeerRingAction::RemoteAction(next, RemoteAction::FindSuccessor(id)) => {
+                Ok(PlacementLookup::Remote {
+                    next,
+                    query: EntryLookupKey::new(query.resource, id),
+                })
+            }
+            action => Err(Error::unexpected_peer_ring_action(action)),
+        }
+    }
+
+    /// Look up every placement of `entry_key`: the first stored value ends the lookup with the
+    /// misses observed before it; otherwise every remote placement becomes a `FindEntry`.
     async fn entry_lookup_inner(
         &self,
         entry_key: Did,
@@ -253,65 +334,22 @@ impl PeerRing {
         let mut misses = vec![];
         for placement_key in entry_key.rotate_affine(redundancy)? {
             let query = EntryLookupKey::new(entry_key, placement_key);
-            // A lookup reads the data namespace: a relay inbox is never fetched, its recipient
-            // drains it from local storage, so a lookup at its position sees it as absent.
-            let key = StorageKey::new(EntryKind::Data, placement_key);
-            let act = match self.find_storage_owner(placement_key) {
-                Ok(PeerRingAction::Some(succ)) => {
-                    match self.live_storage_entry(key, now_ms).await {
-                        Ok(Some(value)) => {
-                            let observed_misses = std::mem::take(&mut misses);
-                            Ok(PeerRingAction::SomeEntry(EntryLookupEvidence::new(
-                                value,
-                                observed_misses,
-                            )))
-                        }
-                        Ok(None) => {
-                            tracing::debug!(
-                                "Cannot find entry in local storage, try to query from successor"
-                            );
-                            if succ == self.did {
-                                if fallback_on_local_virtual_miss
-                                    && self.storage_virtual_nodes_enabled()?
-                                {
-                                    if let Some(next) =
-                                        self.with_topology_state(topology::successor_head)?
-                                    {
-                                        Ok(PeerRingAction::RemoteAction(
-                                            next,
-                                            RemoteAction::FindEntry(query),
-                                        ))
-                                    } else {
-                                        misses.push(PlacementMiss::new(placement_key, succ));
-                                        Ok(PeerRingAction::None)
-                                    }
-                                } else {
-                                    misses.push(PlacementMiss::new(placement_key, succ));
-                                    Ok(PeerRingAction::None)
-                                }
-                            } else {
-                                Ok(PeerRingAction::RemoteAction(
-                                    succ,
-                                    RemoteAction::FindEntry(query),
-                                ))
-                            }
-                        }
-                        Err(error) => Err(error),
-                    }
+            match self
+                .lookup_placement(query, fallback_on_local_virtual_miss, now_ms)
+                .await?
+            {
+                PlacementLookup::Found(value) => {
+                    return Ok(PeerRingAction::SomeEntry(EntryLookupEvidence::new(
+                        value, misses,
+                    )));
                 }
-                Ok(PeerRingAction::RemoteAction(next, RemoteAction::FindSuccessor(id))) => {
-                    Ok(PeerRingAction::RemoteAction(
+                PlacementLookup::Missed(miss) => misses.push(miss),
+                PlacementLookup::Remote { next, query } => {
+                    ret.push(PeerRingAction::RemoteAction(
                         next,
-                        RemoteAction::FindEntry(EntryLookupKey::new(entry_key, id)),
-                    ))
+                        RemoteAction::FindEntry(query),
+                    ));
                 }
-                Ok(action) => Err(Error::unexpected_peer_ring_action(action)),
-                Err(error) => Err(error),
-            }?;
-            if act.is_remote() {
-                ret.push(act);
-            } else if act.is_some_entry() {
-                return Ok(act);
             }
         }
         if !misses.is_empty() {
@@ -351,6 +389,19 @@ impl PeerRing {
         self.entry_lookup_inner(entry_key, false, redundancy).await
     }
 
+    /// Where an operation of `kind` at `placement` is applied under the topology now: the
+    /// per-placement `Compute` shared by [`Self::entry_operate`] and the rerouting of one
+    /// placement.
+    pub(crate) fn operate_route(&self, placement: Did, kind: EntryKind) -> Result<OperateRoute> {
+        match self.find_storage_owner_for(placement, kind)? {
+            PeerRingAction::Some(_) => Ok(OperateRoute::Owned),
+            PeerRingAction::RemoteAction(next, RemoteAction::FindSuccessor(_)) => {
+                Ok(OperateRoute::Remote(next))
+            }
+            action => Err(Error::unexpected_peer_ring_action(action)),
+        }
+    }
+
     /// Apply `op` under a runtime `redundancy`: locally at every accepted placement, and as a
     /// [`RemoteAction::FindEntryForOperate`] toward every remote one.
     pub(crate) async fn entry_operate(
@@ -364,27 +415,19 @@ impl PeerRing {
         let kind = op.entry().kind;
         let redundancy = kind.replication(redundancy);
         let mut ret = vec![];
-        for entry_key in entry_key.rotate_affine(redundancy)? {
-            let act = match self.find_storage_owner_for(entry_key, kind) {
-                Ok(PeerRingAction::Some(_)) => {
-                    self.operate_storage_entry(now_ms, entry_key, op.clone(), self.did)
+        for placement in entry_key.rotate_affine(redundancy)? {
+            match self.operate_route(placement, kind)? {
+                OperateRoute::Owned => {
+                    self.operate_storage_entry(now_ms, placement, op.clone(), self.did)
                         .await?;
-                    Ok(PeerRingAction::None)
                 }
-                Ok(PeerRingAction::RemoteAction(next, RemoteAction::FindSuccessor(_))) => {
-                    Ok(PeerRingAction::RemoteAction(
-                        next,
-                        RemoteAction::FindEntryForOperate(Box::new(PlacedEntryOperation {
-                            placement: entry_key,
-                            op: op.clone(),
-                        })),
-                    ))
-                }
-                Ok(action) => Err(Error::unexpected_peer_ring_action(action)),
-                Err(error) => Err(error),
-            }?;
-            if act.is_remote() {
-                ret.push(act);
+                OperateRoute::Remote(next) => ret.push(PeerRingAction::RemoteAction(
+                    next,
+                    RemoteAction::FindEntryForOperate(Box::new(PlacedEntryOperation {
+                        placement,
+                        op: op.clone(),
+                    })),
+                )),
             }
         }
         Ok(ret.into())

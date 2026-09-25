@@ -224,6 +224,15 @@ pub struct Processor {
     observability: Arc<Observability>,
 }
 
+/// The node error of a DHT operation run under a registration stop: a rerouting wait ended by
+/// the stop is the registration's cooperative stop, anything else an entry error.
+pub(crate) fn stoppable_storage_error(error: rings_core::error::Error) -> Error {
+    match error {
+        rings_core::error::Error::ReroutingStopped => Error::RegistrationStopped,
+        error => Error::EntryError(error),
+    }
+}
+
 impl Processor {
     /// Get current did
     pub fn did(&self) -> Did {
@@ -306,6 +315,8 @@ impl Processor {
     }
 
     /// List signed online-node descriptors from the registry.
+    ///
+    /// Rerouted as [`Self::storage_fetch`] documents.
     pub async fn lookup_online_nodes(
         &self,
         include_expired: bool,
@@ -329,6 +340,8 @@ impl Processor {
     }
 
     /// List signed onion-exit descriptors from the application-layer exit registry.
+    ///
+    /// Rerouted as [`Self::storage_fetch`] documents.
     pub async fn lookup_onion_exits(
         &self,
         service: &str,
@@ -371,7 +384,11 @@ impl Processor {
         if stop.should_stop() {
             return Err(Error::RegistrationStopped);
         }
-        self.storage_fetch(entry_key).await?;
+        self.swarm
+            .scoped_storage(stop.clone())
+            .storage_fetch(entry_key)
+            .await
+            .map_err(stoppable_storage_error)?;
         for attempt in 0..DHT_LOOKUP_CACHE_POLL_ATTEMPTS {
             if stop.should_stop() {
                 return Err(Error::RegistrationStopped);
@@ -880,6 +897,13 @@ impl Processor {
     }
 
     /// Fetch an entry from DHT storage
+    ///
+    /// # Rerouting
+    ///
+    /// Every DHT operation of this processor (fetch, store, append, tombstone, compact, and the
+    /// registry lookups and writes built on them) is rerouted as core's [`ChordStorageInterface`]
+    /// documents (#859): refusals before acceptance are retried on events within a budget, and
+    /// no placement is applied twice. A caller that must bound the wait drops the operation.
     pub async fn storage_fetch(&self, entry_key: Did) -> Result<()> {
         self.swarm
             .storage_fetch(entry_key)
@@ -888,6 +912,8 @@ impl Processor {
     }
 
     /// Store an entry on DHT storage
+    ///
+    /// Rerouted as [`Self::storage_fetch`] documents.
     pub async fn storage_store(&self, entry: entry::Entry) -> Result<()> {
         self.swarm
             .storage_store(entry)
@@ -896,6 +922,8 @@ impl Processor {
     }
 
     /// Append data to an entry on DHT storage
+    ///
+    /// Rerouted as [`Self::storage_fetch`] documents.
     pub async fn storage_append_data(&self, topic: &str, data: Encoded) -> Result<()> {
         self.swarm
             .storage_append_data(topic, data)
@@ -904,6 +932,8 @@ impl Processor {
     }
 
     /// Tombstone observed data in an entry on DHT storage.
+    ///
+    /// Rerouted as [`Self::storage_fetch`] documents.
     pub async fn storage_tombstone_data(&self, topic: &str, data: Encoded) -> Result<()> {
         self.swarm
             .storage_tombstone_data(topic, data)
@@ -912,6 +942,8 @@ impl Processor {
     }
 
     /// Compact observed data in an entry on DHT storage.
+    ///
+    /// Rerouted as [`Self::storage_fetch`] documents.
     pub async fn storage_compact_data(&self, topic: &str, removals: Vec<Encoded>) -> Result<()> {
         self.swarm
             .storage_compact_data(topic, removals)

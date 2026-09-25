@@ -2,6 +2,7 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
 use futures::FutureExt;
+use num_bigint::BigUint;
 use tokio::time::timeout;
 use tokio::time::Duration;
 use tokio::time::Instant;
@@ -10,6 +11,8 @@ use super::super::ChordStorageInterfaceCacheChecker;
 use crate::delegation::DelegateeKey;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
+use crate::dht::topology::dist;
+use crate::dht::topology::RING_BITS;
 use crate::dht::Chord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
@@ -358,6 +361,33 @@ pub(super) fn install_two_node_chord_view(first: &Node, second: &Node) -> Result
     *first.dht().lock_predecessor()? = Some(second.did());
     *second.dht().lock_predecessor()? = Some(first.did());
     Ok(())
+}
+
+/// A fixture key: the secret scalar `scalar`, so its address, and hence its ring position and
+/// virtual positions, are fixed.
+pub(super) fn fixture_key(scalar: u8) -> Result<SecretKey> {
+    SecretKey::try_from(format!("{scalar:064x}").as_str())
+}
+
+/// The split-owner fixture: the keys of scalars `0x20` and `0x26`, at `32e7…` and `b56e…`.
+///
+/// With two plain-Chord nodes, a placement `x` and its antipode `x + ½` (`rotate_affine(2)`)
+/// share an owner iff both fall in the longer arc, with probability `2L − 1` for a longer arc
+/// of fraction `L`. A random pair makes that probability uniform on `[0, 1]`, so a fixed
+/// sample of topics fails with probability `1/513` (#862 class). Here the arc from the first
+/// node to the second is `0x8287…`, about 0.51 of the ring, so each topic splits with
+/// probability about 0.98, and `split_redundant_entry`'s fixed topics find a witness on every
+/// run. The premise `¼ ≤ arc ≤ ¾` is asserted.
+pub(super) fn split_owner_keys() -> Result<[SecretKey; 2]> {
+    let keys = [fixture_key(0x20)?, fixture_key(0x26)?];
+    let [first, second]: [Did; 2] = [keys[0].address().into(), keys[1].address().into()];
+    let quarter = BigUint::from(1_u8) << (RING_BITS - 2);
+    let arc = dist(first, second);
+    assert!(
+        arc >= quarter && arc <= &quarter * 3_u8,
+        "the fixture's arcs are balanced"
+    );
+    Ok(keys)
 }
 
 pub(super) fn split_redundant_entry(nodes: &[&Node]) -> Result<(Entry, Did, Did, usize, usize)> {
