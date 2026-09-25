@@ -48,6 +48,7 @@ use crate::swarm::SwarmBuilder;
 use crate::tests::default::assert_no_more_msg;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::tests::default::dummy_hooks::PendingSendGuard;
+use crate::tests::default::fixed_secret_keys;
 use crate::tests::default::prepare_node;
 use crate::tests::default::prepare_node_with_measure;
 use crate::tests::default::wait_for_msgs;
@@ -256,14 +257,9 @@ fn prepare_repair_node_with_optional_measure(
 }
 
 fn repair_test_keys() -> Result<(SecretKey, SecretKey)> {
-    let mut first =
-        SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0")?;
-    let mut second =
-        SecretKey::try_from("1f9275dbafdfba81942eb3330b07f38cbee4ebb86bdc2174af9648d5f5509a54")?;
-    if first.address() < second.address() {
-        (first, second) = (second, first);
-    }
-    Ok((first, second))
+    // Descending address order: the first identity is the higher one.
+    let [lower, higher] = fixed_secret_keys::<2>()?;
+    Ok((higher, lower))
 }
 
 fn entry_for_remote_repair_placement(node: &Node, successor: Did) -> Result<(Entry, Did)> {

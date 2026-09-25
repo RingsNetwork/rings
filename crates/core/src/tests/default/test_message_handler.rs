@@ -39,6 +39,8 @@ use crate::swarm::callback::SwarmCallback;
 #[cfg(feature = "dummy")]
 use crate::tests::default::dummy_hooks::ControlledDeliveryGuard;
 #[cfg(feature = "dummy")]
+use crate::tests::default::fixed_secret_keys;
+#[cfg(feature = "dummy")]
 use crate::tests::default::has_connection_in_state;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_connection_state;
@@ -57,10 +59,10 @@ struct NoopCallback;
 #[cfg(feature = "dummy")]
 impl SwarmCallback for NoopCallback {}
 
-/// Deliver every queued controlled event; see [`deliver_until`].
+/// Deliver every queued controlled event, each to a live connection; see [`deliver_until`].
 #[cfg(feature = "dummy")]
 async fn drain_controlled_dummy_events() {
-    deliver_until("controlled queue drained", || {
+    deliver_until("controlled queue drained", RetiredTarget::Forbidden, || {
         Ok(dummy_controlled::pending() == 0)
     })
     .await
@@ -187,9 +189,8 @@ async fn test_handle_dht_notify_remote_action_sends_predecessor_to_target() -> R
 #[cfg(feature = "dummy")]
 const CONTROLLED_STEP_BOUND: usize = 4_096;
 
-/// Cooperative yields with an empty controlled queue after which [`deliver_to_quiescence`]
-/// treats the run as quiescent: every task spawned by a delivered handler has had that many
-/// turns of the current-thread scheduler to enqueue a follow-up event, and none did.
+/// Cooperative yields [`deliver_to_quiescence`] grants runnable tasks before it re-checks the
+/// quiescence predicates; the predicates, not this count, decide quiescence.
 #[cfg(feature = "dummy")]
 const QUIESCENCE_YIELDS: usize = 64;
 
@@ -197,64 +198,85 @@ const QUIESCENCE_YIELDS: usize = 64;
 #[cfg(feature = "dummy")]
 const CONNECT_NODE_DUMMY_SEED: u64 = 850;
 
-/// Three fixed identities ordered by address, so the ring gaps, and with them every finger
-/// lookup the joins emit, are the same on every run.
+/// What [`deliver_until`] concludes from a delivery whose target connection is gone.
 #[cfg(feature = "dummy")]
-fn connect_node_test_keys() -> Result<[SecretKey; 3]> {
-    let mut keys = [
-        SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0")?,
-        SecretKey::try_from("1f9275dbafdfba81942eb3330b07f38cbee4ebb86bdc2174af9648d5f5509a54")?,
-        SecretKey::try_from("27b2fe8ceaf3a6a720f12658301351960b128672e9da4d6f4dead366af3fd834")?,
-    ];
-    keys.sort_by_key(|key| key.address());
-    Ok(keys)
+#[derive(Clone, Copy)]
+enum RetiredTarget {
+    /// The schedule under test never retires a target: such a delivery is a failure.
+    Forbidden,
+    /// A retired target is a legal protocol outcome (e.g. a glare close); the event is consumed.
+    Consumed,
 }
 
 /// Drive the controlled dummy queue in FIFO order until `reached` holds.
 ///
 /// Each step first observes `reached`, then delivers the oldest queued event (if
 /// any) and yields once so that tasks spawned by the delivered handler run. A
-/// delivery whose target connection was already retired returns `false`; that is
-/// a legal protocol outcome, and the event is consumed all the same.
+/// delivery whose target connection was already retired is judged by `retired`.
 ///
 /// Pre: controlled delivery is enabled on this thread.
 /// Post: returns only after `reached` was observed true. Failing to reach it
 /// within [`CONTROLLED_STEP_BOUND`] steps panics with `label`. The schedule is a
 /// function of the queue alone; no step reads a clock.
 #[cfg(feature = "dummy")]
-async fn deliver_until(label: &str, mut reached: impl FnMut() -> Result<bool>) -> Result<()> {
+async fn deliver_until(
+    label: &str,
+    retired: RetiredTarget,
+    mut reached: impl FnMut() -> Result<bool>,
+) -> Result<()> {
     for _ in 0..CONTROLLED_STEP_BOUND {
         if reached()? {
             return Ok(());
         }
         if dummy_controlled::pending() > 0 {
-            dummy_controlled::deliver(0).await;
+            let delivered = dummy_controlled::deliver(0).await;
+            if let RetiredTarget::Forbidden = retired {
+                assert!(
+                    delivered,
+                    "{label}: controlled event targets a live connection"
+                );
+            }
         }
         tokio::task::yield_now().await;
     }
     panic!("{label} not reached within {CONTROLLED_STEP_BOUND} controlled steps");
 }
 
-/// Deliver until the controlled run is quiescent.
+/// Whether no node has work in flight that could emit a controlled event.
+///
+/// A task parked on a timer is not woken by yields, but every such task in this flow holds
+/// observable state while it waits: a send waiting for readiness holds an admitted transfer,
+/// and a handshake holds a pending connection. So these predicates, not a count of scheduler
+/// turns, decide quiescence.
+#[cfg(feature = "dummy")]
+fn controlled_run_quiescent(nodes: &[&Node]) -> bool {
+    dummy_controlled::pending() == 0
+        && nodes.iter().all(|node| {
+            !node.has_handshaking_connection()
+                && !node.has_inbound_message()
+                && !node.has_outbound_transfer()
+        })
+}
+
+/// Deliver until the controlled run is quiescent over `nodes`.
 ///
 /// ```text
-/// quiescent ≡ pending() = 0 after QUIESCENCE_YIELDS yields that follow an empty queue
+/// quiescent ≡ pending() = 0 ∧ ∀ n. ¬handshaking(n) ∧ ¬inbound(n) ∧ ¬outbound(n)
 /// ```
 ///
-/// On the current-thread runtime, a task spawned by a delivered handler runs only when the
-/// test yields. An empty queue that stays empty across the yields therefore means that no
-/// delivered handler left work that emits another event.
+/// The state is re-checked after [`QUIESCENCE_YIELDS`] cooperative yields, so a runnable task
+/// that was about to start new work has had its turn to make it observable first.
 #[cfg(feature = "dummy")]
-async fn deliver_to_quiescence() -> Result<()> {
+async fn deliver_to_quiescence(nodes: &[&Node]) -> Result<()> {
     for _ in 0..CONTROLLED_STEP_BOUND {
-        deliver_until("controlled queue drained", || {
-            Ok(dummy_controlled::pending() == 0)
+        deliver_until("controlled run quiescent", RetiredTarget::Consumed, || {
+            Ok(controlled_run_quiescent(nodes))
         })
         .await?;
         for _ in 0..QUIESCENCE_YIELDS {
             tokio::task::yield_now().await;
         }
-        if dummy_controlled::pending() == 0 {
+        if controlled_run_quiescent(nodes) {
             return Ok(());
         }
     }
@@ -282,9 +304,10 @@ async fn received_hops(node: &Node, origin: Did, matches: fn(&Message) -> bool) 
 ///
 /// Let `d(n1) < d(n2) < d(n3)`, `C(a, b)` mean that `a` holds a `Connected`
 /// connection to `b`, and `S(a)` be the successor list of `a`. Let `σ` be the
-/// FIFO schedule of the controlled dummy queue. The identities are fixed and the
-/// dummy identifiers are seeded, so `σ` is the same on every run: the run does
-/// not depend on wall-clock time or on suite load, and a failure replays.
+/// FIFO schedule of the controlled dummy queue. `σ` depends on no clock, so the
+/// run does not depend on wall-clock time or on suite load. The identities and
+/// the dummy identifiers are fixed; other randomness (transaction ids, nonces)
+/// has not been audited for an effect on queue order.
 ///
 /// ```text
 /// E₀ = { n3–n2, n1–n2 }                              (out-of-band bootstrap)
@@ -294,9 +317,11 @@ async fn received_hops(node: &Node, origin: Did, matches: fn(&Message) -> bool) 
 /// W  ≡ n3 received ConnectNodeSend from n1 via n2
 ///      ∧ n1 received ConnectNodeReport from n3 via n2
 ///
-/// (1)  E₀ ⊢_σ ◇P₀,  and in the first state with P₀, n1 has no link to n3
+/// (1)  E₀ ⊢_σ ◇P₀,  and in the first state with P₀, n1 has no link to n3,
+///      neither admitted nor pending
 /// (2)  P₀ ; connect(n1, n3) ⊢_σ ◇P₁
-/// (3)  P₁ ∧ quiescent ⟹ □P₁      (no event is queued and no task is left to queue one)
+/// (3)  P₁ ∧ quiescent ⟹ □P₁      (see deliver_to_quiescence: no event queued, and no
+///                                   handshake, inbound message or outbound transfer in flight)
 /// (4)  W                           (the link in P₁ came from n1's relayed connect)
 /// ```
 ///
@@ -314,7 +339,7 @@ async fn received_hops(node: &Node, origin: Did, matches: fn(&Message) -> bool) 
 #[cfg(feature = "dummy")]
 #[tokio::test]
 async fn test_handle_connect_node() -> Result<()> {
-    let [key1, key2, key3] = connect_node_test_keys()?;
+    let [key1, key2, key3] = fixed_secret_keys::<3>()?;
     let node1 = prepare_node(key1).await;
     let node2 = prepare_node(key2).await;
     let node3 = prepare_node(key3).await;
@@ -325,7 +350,7 @@ async fn test_handle_connect_node() -> Result<()> {
     manually_establish_connection(&node3.swarm, &node2.swarm).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
 
-    deliver_until("P0: n1-n2-n3 path joined", || {
+    deliver_until("P0: n1-n2-n3 path joined", RetiredTarget::Forbidden, || {
         Ok(has_connection_in_state(&node1, node2.did(), connected)
             && has_connection_in_state(&node2, node3.did(), connected)
             && node1.dht().successors().contains(&node2.did())?
@@ -334,8 +359,9 @@ async fn test_handle_connect_node() -> Result<()> {
     })
     .await?;
     assert!(
-        node1.swarm.transport.get_connection(node3.did()).is_none(),
-        "n1 must not reach n3 before the DHT-signalled connect"
+        node1.swarm.transport.get_connection(node3.did()).is_none()
+            && !node1.swarm.has_unadmitted_connection(node3.did())?,
+        "n1 has neither an admitted nor a pending link to n3 before the DHT-signalled connect"
     );
 
     node1.swarm.connect(node3.did()).await?;
@@ -347,8 +373,13 @@ async fn test_handle_connect_node() -> Result<()> {
             && node2.dht().successors().list()? == vec![node3.did(), node1.did()]
             && node3.dht().successors().list()? == vec![node1.did(), node2.did()])
     };
-    deliver_until("P1: n1-n3 connected via n2, successors converged", p1).await?;
-    deliver_to_quiescence().await?;
+    deliver_until(
+        "P1: n1-n3 connected via n2, successors converged",
+        RetiredTarget::Consumed,
+        p1,
+    )
+    .await?;
+    deliver_to_quiescence(&[&node1, &node2, &node3]).await?;
     assert!(p1()?, "P1 is stable once the controlled run is quiescent");
 
     let is_send = |message: &Message| matches!(message, Message::ConnectNodeSend(_));
