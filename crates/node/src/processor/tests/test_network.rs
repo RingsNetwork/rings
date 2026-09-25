@@ -508,16 +508,17 @@ async fn test_processor_e2e_handshake_exchanges_verified_public_keys() {
     }
 }
 
+/// Secret of the sender key on [`e2e_test_frame`]; any fixed key serves, since only sequence
+/// and finality matter to the predicate under test.
+const E2E_TEST_FRAME_SECRET: &str =
+    "0101010101010101010101010101010101010101010101010101010101010101";
+
 /// A stream frame at `sequence` with no payload; only sequence and finality matter here, so the
 /// stream id and sender key are fixed.
 fn e2e_test_frame(sequence: u64, is_final: bool) -> E2eStreamFrame {
     E2eStreamFrame {
         stream_id: uuid::Uuid::nil(),
-        sender_public_key: SecretKey::try_from(
-            "65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0",
-        )
-        .unwrap()
-        .pubkey(),
+        sender_public_key: SecretKey::try_from(E2E_TEST_FRAME_SECRET).unwrap().pubkey(),
         sequence,
         is_final,
         ciphertext: Vec::new(),
@@ -586,7 +587,7 @@ fn test_e2e_stream_complete_is_order_insensitive_and_monotone() {
 ///
 /// ```text
 /// Admitted ≡ p1 ∈ peers(p2) ∧ p2 ∈ peers(p1)
-/// Complete ≡ complete_e2e_stream(inbound(p2, stream))
+/// Complete ≡ e2e_stream_complete(inbound(p2, stream))
 ///
 /// connect(p1, p2)       ⊢ ◇Admitted     awaited on `connected_notify`
 /// Admitted ; send(p1)   ⊢ ◇Complete     awaited on `inbound_notify`
@@ -598,9 +599,11 @@ fn test_e2e_stream_complete_is_order_insensitive_and_monotone() {
 /// does not guarantee order.
 ///
 /// The helper returns the raw frames in arrival order, so the shape assertions below are
-/// about what the sender emitted: exactly one final frame, and the sorted sequences are exactly
-/// `0..n`, which rules out gaps, duplicates and frames after the final one. The frames are then
-/// decrypted in reverse arrival order.
+/// about what the sender emitted, among the frames that arrived by completion: exactly one
+/// final frame, and the sorted sequences are exactly `0..n`, which rules out gaps, and any
+/// duplicate or post-final frame that arrived before completion. A stray frame that arrives
+/// after completion is not observed; the processor has no end-of-stream signal to await for
+/// it. The frames are then decrypted in reverse arrival order.
 ///
 /// The fixtures use host-only ICE, so the handshake depends on no external server. The link is
 /// still real WebRTC under the helpers' 5 s deadline; moving this protocol test onto a
