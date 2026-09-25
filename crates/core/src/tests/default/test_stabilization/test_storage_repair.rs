@@ -366,7 +366,11 @@ async fn test_native_wait_with_repairs_storage_before_connection_retirement() ->
         node1.swarm.disconnect(node2.did()).await?;
         assert!(node1.swarm.transport.get_connection(node2.did()).is_none());
         assert!(!node1.swarm.transport.has_active_connection(node2.did()));
+        // The liveness premise of (2): node2 is in none of node1's topology slots, so no
+        // maintenance or repair step picks it as a next hop.
         assert!(!node1.dht().successors().contains(&node2.did())?);
+        assert_ne!(*node1.dht().lock_predecessor()?, Some(node2.did()));
+        assert!(!node1.dht().lock_finger()?.contains(Some(node2.did())));
         timeout(
             Duration::from_secs(3),
             node1

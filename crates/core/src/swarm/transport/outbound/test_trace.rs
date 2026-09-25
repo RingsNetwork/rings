@@ -289,10 +289,13 @@ impl crate::swarm::transport::SwarmTransport {
     /// transient reservation can falsify and a watch can coalesce away, it cannot be observed
     /// and then lost.
     ///
+    /// The receiver is subscribed while `K₀` is pinned, and a closed watch stays closed, so a
+    /// deallocation that precedes the wait is still observed.
+    ///
     /// Liveness premise: some instant holds no permit of `K₀`. A reservation for `peer` that
-    /// starts while `K₀` is live joins `K₀` (the registry upgrades its `Weak`), so a caller must
-    /// ensure that reservations toward `peer` stop overlapping, e.g. because `peer` was retired. The receiver is subscribed while `K₀` is pinned, and a closed watch stays
-    /// closed, so a deallocation that precedes the wait is still observed.
+    /// starts while `K₀` is live joins `K₀` (the registry upgrades its `Weak`), so a caller
+    /// must ensure that reservations toward `peer` stop overlapping, e.g. because `peer` was
+    /// retired.
     #[cfg(all(test, not(feature = "dummy"), not(target_family = "wasm")))]
     pub(crate) async fn outbound_capacity_retired_for_test(&self, peer: Did) {
         let Some(mut retirement) = self
