@@ -10,7 +10,7 @@ use crate::tests::wasm::new_provider;
 /// and one pending table.
 #[wasm_bindgen_test]
 async fn test_browser_proxies_send_through_the_installed_runtime_client() {
-    let provider = new_provider().await;
+    let provider = new_provider().await.provider;
     let first = provider
         .onion_https_proxy(3, false)
         .map_err(JsValue::from)
