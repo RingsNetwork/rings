@@ -15,13 +15,15 @@ use crate::dht::entry::EntryKind;
 use crate::dht::entry::EntryOperation;
 use crate::dht::entry::PlacedEntryOperation;
 #[cfg(feature = "dummy")]
+use crate::dht::Did;
+#[cfg(feature = "dummy")]
 use crate::dht::PeerRingAction;
 #[cfg(feature = "dummy")]
 use crate::dht::PeerRingRemoteAction;
 use crate::dht::StorageKey;
+#[cfg(feature = "dummy")]
 use crate::ecc::tests::gen_ordered_keys;
 use crate::ecc::SecretKey;
-use crate::error::Error;
 use crate::error::Result;
 use crate::message;
 use crate::message::Encoder;
@@ -35,7 +37,6 @@ use crate::swarm::callback::SwarmCallback;
 #[cfg(feature = "dummy")]
 use crate::tests::default::dummy_hooks::ControlledDeliveryGuard;
 use crate::tests::default::prepare_node;
-use crate::tests::default::prepare_node_without_stun;
 use crate::tests::default::wait_for_connection_state;
 use crate::tests::default::wait_for_finger;
 use crate::tests::default::wait_for_msgs;
@@ -174,67 +175,109 @@ async fn test_handle_dht_notify_remote_action_sends_predecessor_to_target() -> R
     Ok(())
 }
 
+/// Upper bound on scheduler steps [`deliver_until`] takes before it declares the
+/// awaited state unreachable. A step is one FIFO delivery or one cooperative
+/// yield, so the bound counts events, never wall-clock time.
+#[cfg(feature = "dummy")]
+const CONTROLLED_STEP_BOUND: usize = 4_096;
+
+/// Whether `node` holds a `Connected` transport connection to `peer`.
+#[cfg(feature = "dummy")]
+fn is_connected(node: &Node, peer: Did) -> bool {
+    node.swarm
+        .transport
+        .get_connection(peer)
+        .is_some_and(|conn| conn.webrtc_connection_state() == WebrtcConnectionState::Connected)
+}
+
+/// Drive the controlled dummy queue in FIFO order until `reached` holds.
+///
+/// Each step first observes `reached`, then delivers the oldest queued event (if
+/// any) and yields once so that tasks spawned by the delivered handler run.
+///
+/// Pre: controlled delivery is enabled on this thread.
+/// Post: returns only after `reached` was observed true. Failing to reach it
+/// within [`CONTROLLED_STEP_BOUND`] steps panics with `label`. The schedule is a
+/// function of the queue alone; no step reads a clock.
+#[cfg(feature = "dummy")]
+async fn deliver_until(label: &str, mut reached: impl FnMut() -> Result<bool>) -> Result<()> {
+    for _ in 0..CONTROLLED_STEP_BOUND {
+        if reached()? {
+            return Ok(());
+        }
+        if dummy_controlled::pending() > 0 {
+            assert!(
+                dummy_controlled::deliver(0).await,
+                "controlled event targets a live connection"
+            );
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("{label} not reached within {CONTROLLED_STEP_BOUND} controlled steps");
+}
+
+/// Reachability of a connection signalled through the DHT.
+///
+/// Let `d(n1) < d(n2) < d(n3)`, `C(a, b)` mean that `a` holds a `Connected`
+/// connection to `b`, and `S(a)` be the successor list of `a`. Let `σ` be the
+/// FIFO schedule of the controlled dummy queue. `σ` is deterministic, so the run
+/// does not depend on wall-clock time or on suite load.
+///
+/// ```text
+/// E₀ = { n3–n2, n1–n2 }                              (out-of-band bootstrap)
+/// P₀ ≡ C(n1,n2) ∧ C(n2,n3) ∧ n2 ∈ S(n1) ∧ n3 ∈ S(n2) ∧ n2 ∈ S(n3)
+/// P₁ ≡ C(n1,n3) ∧ C(n3,n1)
+///      ∧ S(n1) = [n2, n3] ∧ S(n2) = [n3, n1] ∧ S(n3) = [n1, n2]
+///
+/// (1)  E₀ ⊢_σ ◇P₀,  and in the first state with P₀, n1 has no link to n3
+/// (2)  P₀ ; connect(n1, n3) ⊢_σ ◇P₁
+/// ```
+///
+/// In (2), n2 is n1's only neighbour when `connect` runs. So `ConnectNodeSend`
+/// must travel `n1 → n2 → n3` and `ConnectNodeReport` must travel
+/// `n3 → n2 → n1`: `C(n1, n3)` can only come from n2's signalling. The claim is
+/// liveness along one fair schedule, not along every interleaving. The
+/// all-orders question belongs to `test_dht_schedule` and the Stateright model.
+///
+/// The real-WebRTC form of this flow (ICE, DTLS and SCTP over the relayed SDP)
+/// is covered by `message::handlers::connection::tests::test_triple_nodes_*`.
+/// Those tests run in the default build and wait on quiescence, not on a
+/// deadline.
+#[cfg(feature = "dummy")]
 #[tokio::test]
 async fn test_handle_connect_node() -> Result<()> {
     let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys::<3>();
+    let node1 = prepare_node(key1).await;
+    let node2 = prepare_node(key2).await;
+    let node3 = prepare_node(key3).await;
+    let _controlled = ControlledDeliveryGuard::new();
 
-    let node1 = prepare_node_without_stun(key1).await;
-    let node2 = prepare_node_without_stun(key2).await;
-    let node3 = prepare_node_without_stun(key3).await;
-
-    // 2 to 3
     manually_establish_connection(&node3.swarm, &node2.swarm).await;
-
-    // 1 to 2
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
 
-    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
-    wait_for_connection_state(&node2, node3.did(), WebrtcConnectionState::Connected).await?;
-    wait_for_successor(&node1, node2.did()).await?;
-    wait_for_successor(&node2, node3.did()).await?;
-    wait_for_successor(&node3, node2.did()).await?;
+    deliver_until("P0: n1-n2-n3 path joined", || {
+        Ok(is_connected(&node1, node2.did())
+            && is_connected(&node2, node3.did())
+            && node1.dht().successors().contains(&node2.did())?
+            && node2.dht().successors().contains(&node3.did())?
+            && node3.dht().successors().contains(&node2.did())?)
+    })
+    .await?;
+    assert!(
+        node1.swarm.transport.get_connection(node3.did()).is_none(),
+        "n1 must not reach n3 before the DHT-signalled connect"
+    );
 
-    println!("node1 key address: {:?}", node1.did());
-    println!("node2 key address: {:?}", node2.did());
-    println!("node3 key address: {:?}", node3.did());
-    let dht1 = node1.dht();
-    let dht2 = node2.dht();
-    let dht3 = node3.dht();
-    {
-        let dht1_successor = dht1.successors();
-        let dht2_successor = dht2.successors();
-        let dht3_successor = dht3.successors();
-        println!("node1.dht() successor: {dht1_successor:?}");
-        println!("node2.dht() successor: {dht2_successor:?}");
-        println!("node3.dht() successor: {dht3_successor:?}");
+    node1.swarm.connect(node3.did()).await?;
 
-        assert!(
-            dht1_successor.list()?.contains(&node2.did()),
-            "Expect node1.dht() successor is key2, Found: {:?}",
-            dht1_successor.list()?
-        );
-        assert!(
-            dht2_successor.list()?.contains(&node3.did()),
-            "{:?}",
-            dht2_successor.list()
-        );
-        assert!(
-            dht3_successor.list()?.contains(&node2.did()),
-            "node3.dht() successor is key2"
-        );
-    }
-
-    // node1 may already have connected node3 while syncing successor-list
-    // candidates. If not, ask DHT to connect it through node2.
-    if node1.swarm.transport.get_connection(node3.did()).is_none() {
-        match node1.swarm.connect(node3.did()).await {
-            Ok(()) | Err(Error::AlreadyConnected) => {}
-            Err(error) => return Err(error),
-        }
-    }
-    wait_for_connection_state(&node1, node3.did(), WebrtcConnectionState::Connected).await?;
-
-    Ok(())
+    deliver_until("P1: n1-n3 connected via n2, successors converged", || {
+        Ok(is_connected(&node1, node3.did())
+            && is_connected(&node3, node1.did())
+            && node1.dht().successors().list()? == vec![node2.did(), node3.did()]
+            && node2.dht().successors().list()? == vec![node3.did(), node1.did()]
+            && node3.dht().successors().list()? == vec![node1.did(), node2.did()])
+    })
+    .await
 }
 
 #[tokio::test]
