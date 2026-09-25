@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::FutureExt;
 use rings_transport::core::callback::TransportCallback;
 use rings_transport::core::transport::ConnectionInterface;
 use rings_transport::core::transport::TransportInterface;
@@ -12,6 +11,7 @@ use wasm_bindgen_test::*;
 
 use super::prepare_node;
 use super::prepare_repair_node;
+use super::with_hang_guard;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::maintenance_phase_trace_for_test;
@@ -47,6 +47,8 @@ const REPAIR_POLL_ATTEMPTS: usize = 1_200;
 const BROWSER_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(500);
 const BROWSER_REPAIR_SCENARIO_TIMEOUT: Duration = Duration::from_secs(60);
 const BROWSER_PHASE_TRACE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Hang guard of one real browser handshake; a loopback handshake completes far below it.
+const BROWSER_HANDSHAKE_HANG_GUARD: Duration = Duration::from_secs(30);
 
 async fn wait_for_full_mesh(nodes: &[&crate::swarm::Swarm]) {
     for _ in 0..SOAK_POLL_ATTEMPTS {
@@ -397,66 +399,84 @@ async fn prepare_transport() -> Transport {
     trans
 }
 
+/// Real browser ICE between two raw transports.
+///
+/// This test exercises the real transport by design, so it runs under a per-test hang guard:
+/// a stalled handshake fails here by name instead of timing out the whole binary.
 #[wasm_bindgen_test]
 async fn test_ice_connection_establish() {
-    get_fake_permission().await;
-    let trans1 = prepare_transport().await;
-    let conn1 = trans1.connection("test").unwrap();
-    let trans2 = prepare_transport().await;
-    let conn2 = trans2.connection("test").unwrap();
+    with_hang_guard(
+        "test_ice_connection_establish",
+        BROWSER_HANDSHAKE_HANG_GUARD,
+        async {
+            get_fake_permission().await;
+            let trans1 = prepare_transport().await;
+            let conn1 = trans1.connection("test").unwrap();
+            let trans2 = prepare_transport().await;
+            let conn2 = trans2.connection("test").unwrap();
 
-    assert_eq!(conn1.webrtc_connection_state(), WebrtcConnectionState::New);
-    assert_eq!(conn2.webrtc_connection_state(), WebrtcConnectionState::New);
+            assert_eq!(conn1.webrtc_connection_state(), WebrtcConnectionState::New);
+            assert_eq!(conn2.webrtc_connection_state(), WebrtcConnectionState::New);
 
-    let offer = conn1.webrtc_create_offer().await.unwrap();
-    let answer = conn2.webrtc_answer_offer(offer).await.unwrap();
-    conn1.webrtc_accept_answer(answer).await.unwrap();
+            let offer = conn1.webrtc_create_offer().await.unwrap();
+            let answer = conn2.webrtc_answer_offer(offer).await.unwrap();
+            conn1.webrtc_accept_answer(answer).await.unwrap();
 
-    #[cfg(feature = "browser_chrome_test")]
-    {
-        conn2.webrtc_wait_for_data_channel_open().await.unwrap();
-        assert_eq!(
-            conn2.webrtc_connection_state(),
-            WebrtcConnectionState::Connected
-        );
-    }
+            #[cfg(feature = "browser_chrome_test")]
+            {
+                conn2.webrtc_wait_for_data_channel_open().await.unwrap();
+                assert_eq!(
+                    conn2.webrtc_connection_state(),
+                    WebrtcConnectionState::Connected
+                );
+            }
+        },
+    )
+    .await
 }
 
+/// Real browser handshake between two swarms, under a per-test hang guard (see
+/// [`test_ice_connection_establish`]).
 #[wasm_bindgen_test]
 async fn test_message_handler_manual_handshake_only() {
-    get_fake_permission().await;
+    with_hang_guard(
+        "test_message_handler_manual_handshake_only",
+        BROWSER_HANDSHAKE_HANG_GUARD,
+        async {
+            get_fake_permission().await;
 
-    let key1 = SecretKey::random();
-    let key2 = SecretKey::random();
+            let key1 = SecretKey::random();
+            let key2 = SecretKey::random();
 
-    let node1 = prepare_node(key1).await;
-    let node2 = prepare_node(key2).await;
+            let node1 = prepare_node(key1).await;
+            let node2 = prepare_node(key2).await;
 
-    manually_establish_connection(&node1, &node2).await;
+            manually_establish_connection(&node1, &node2).await;
+        },
+    )
+    .await
 }
 
 #[wasm_bindgen_test]
 async fn test_storage_repair_load_does_not_starve_three_node_stabilization() {
-    let scenario = async {
-        get_fake_permission().await;
-        let nodes = prepare_repair_mesh().await;
-        let [node1, node2, node3] = &nodes;
-        let fixture = seed_remote_repair_entries(node1, node2, node3).await;
-        let swarms = [node1.as_ref(), node2.as_ref(), node3.as_ref()];
-        perturb_ring_predecessors(&swarms);
-        reset_maintenance_phase_trace_for_test();
-        let stop = StopSource::new();
-        let completions = start_browser_maintenance(&nodes, &stop);
-        exercise_contended_browser_storage(node1, node2).await;
-        wait_for_repair_and_convergence(&swarms, &fixture).await;
-        wait_for_browser_maintenance_cadence(node1.did()).await;
-        stop_browser_maintenance(stop, completions).await;
-    }
-    .fuse();
-    let deadline = sleep(BROWSER_REPAIR_SCENARIO_TIMEOUT).fuse();
-    futures::pin_mut!(scenario, deadline);
-    futures::select! {
-        () = scenario => {}
-        () = deadline => panic!("browser repair scenario exceeded its 60-second budget"),
-    }
+    with_hang_guard(
+        "browser repair scenario",
+        BROWSER_REPAIR_SCENARIO_TIMEOUT,
+        async {
+            get_fake_permission().await;
+            let nodes = prepare_repair_mesh().await;
+            let [node1, node2, node3] = &nodes;
+            let fixture = seed_remote_repair_entries(node1, node2, node3).await;
+            let swarms = [node1.as_ref(), node2.as_ref(), node3.as_ref()];
+            perturb_ring_predecessors(&swarms);
+            reset_maintenance_phase_trace_for_test();
+            let stop = StopSource::new();
+            let completions = start_browser_maintenance(&nodes, &stop);
+            exercise_contended_browser_storage(node1, node2).await;
+            wait_for_repair_and_convergence(&swarms, &fixture).await;
+            wait_for_browser_maintenance_cadence(node1.did()).await;
+            stop_browser_maintenance(stop, completions).await;
+        },
+    )
+    .await
 }

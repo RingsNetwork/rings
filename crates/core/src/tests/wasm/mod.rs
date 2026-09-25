@@ -1,5 +1,8 @@
+use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
+use futures::FutureExt;
 use wasm_bindgen_test::wasm_bindgen_test_configure;
 
 use crate::delegation::DelegateeKey;
@@ -7,6 +10,7 @@ use crate::ecc::SecretKey;
 use crate::storage::idb::IdbStorage;
 use crate::swarm::Swarm;
 use crate::swarm::SwarmBuilder;
+use crate::utils::sleep;
 
 mod test_ice_servers;
 mod test_utils;
@@ -47,4 +51,19 @@ pub async fn prepare_node(key: SecretKey) -> Arc<Swarm> {
 
 pub async fn prepare_repair_node(key: SecretKey) -> Arc<Swarm> {
     prepare_node_with_storage_mode(key, TestStorageMode::Repair).await
+}
+
+/// Run `test` under a per-test hang guard.
+///
+/// A browser test binary shares one wasm-bindgen-test budget, so a hung test would otherwise
+/// time out the whole binary and starve every test after it. The guard fails with `name` after
+/// `budget` instead. It is a failure bound only: a passing run proceeds on `test` alone.
+pub async fn with_hang_guard<T>(name: &str, budget: Duration, test: impl Future<Output = T>) -> T {
+    let test = test.fuse();
+    let deadline = sleep(budget).fuse();
+    futures::pin_mut!(test, deadline);
+    futures::select! {
+        value = test => value,
+        () = deadline => panic!("{name} exceeded its {budget:?} hang guard"),
+    }
 }

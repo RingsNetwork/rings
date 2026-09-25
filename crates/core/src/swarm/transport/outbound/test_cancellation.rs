@@ -11,54 +11,53 @@ use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
 use crate::swarm::Swarm;
-use crate::tests::manually_establish_connection;
 
-/// Native setup adapter: retain the established dummy fixture's admission gates.
+/// Native setup adapter: a dummy-transport test swarm; no connection is established.
 #[cfg(not(target_family = "wasm"))]
-async fn connected_swarms() -> (Arc<Swarm>, Arc<Swarm>) {
-    use rings_transport::core::transport::WebrtcConnectionState;
-
-    use crate::tests::default::prepare_node;
-    use crate::tests::default::wait_for_connection_state;
-    use crate::tests::default::wait_for_msgs;
-    use crate::tests::default::wait_for_successor;
-    let node = prepare_node(SecretKey::random()).await;
-    let remote = prepare_node(SecretKey::random()).await;
-    manually_establish_connection(&node.swarm, &remote.swarm).await;
-    wait_for_connection_state(&node, remote.did(), WebrtcConnectionState::Connected)
+async fn test_swarm() -> Arc<Swarm> {
+    crate::tests::default::prepare_node(SecretKey::random())
         .await
-        .expect("fixture connects");
-    wait_for_successor(&node, remote.did())
-        .await
-        .expect("fixture admits peer");
-    wait_for_msgs([&node, &remote]).await;
-    (node.swarm, remote.swarm)
+        .swarm
 }
 
-/// Browser setup adapter: real RTC establishment, then bounded admission polling.
-/// The subsequent worker state and assertions are identical on both platforms.
+/// Browser setup adapter: a browser test swarm; no connection is established.
 #[cfg(target_family = "wasm")]
-async fn connected_swarms() -> (Arc<Swarm>, Arc<Swarm>) {
-    let node = crate::tests::wasm::prepare_node(SecretKey::random()).await;
-    let remote = crate::tests::wasm::prepare_node(SecretKey::random()).await;
-    manually_establish_connection(&node, &remote).await;
-    for _ in 0..400 {
-        if node
-            .transport
-            .admitted_send_connection(remote.did())
-            .expect("registry readable")
-            .is_some()
-        {
-            break;
-        }
-        crate::utils::sleep(std::time::Duration::from_millis(25)).await;
-    }
-    assert!(node
+async fn test_swarm() -> Arc<Swarm> {
+    crate::tests::wasm::prepare_node(SecretKey::random()).await
+}
+
+/// Admit `peer` on `node` without a link, so the worker has an admitted generation to route to.
+///
+/// ```text
+/// reserve(peer)            ⊢ Pending(a)
+/// new_pending_connection   ⊢ raw(peer) exists              (local object; no offer, no ICE)
+/// activate_for_test(a)     ⊢ Pending(a) → Admitting(a) → Active(a)
+/// ⟹ admitted_send_connection(peer) = Some(token(a))
+/// ```
+///
+/// Every transfer in this test is cancelled before any frame is sent, so the token is never
+/// used for I/O and no network is needed on either platform. Each step completes before the
+/// next begins, so nothing is awaited on a transport and there is no admission to poll for.
+async fn admit_detached_peer(node: &Swarm, peer: Did) {
+    let attempt = node
         .transport
-        .admitted_send_connection(remote.did())
-        .expect("registry readable")
-        .is_some());
-    (node, remote)
+        .reserve_pending_connection(peer)
+        .await
+        .expect("fixture reserves a pending generation");
+    let callback = node
+        .inner_callback()
+        .expect("fixture callback is installed")
+        .with_pending_connection_attempt(attempt);
+    node.transport
+        .new_pending_connection(attempt, callback)
+        .await
+        .expect("fixture creates the local transport object");
+    assert!(
+        node.transport
+            .activate_connection_for_test(attempt)
+            .expect("lifecycle registry is writable"),
+        "the reserved generation becomes active"
+    );
 }
 
 /// Build a tracked transfer with its real capacity permit for the shared contracts.
@@ -117,13 +116,20 @@ impl ArcWake for ReleasedBeforeWake {
     }
 }
 
-/// Reuse one admitted pair and worker for cancellation-before-submit, successive
+/// Reuse one admitted generation and worker for cancellation-before-submit, successive
 /// scans behind a waiting head, and shutdown across queued/buffered ownership.
+///
+/// The generation is minted by [`admit_detached_peer`] without a link, so the test awaits
+/// nothing on a transport on either platform: every assertion follows a synchronous worker
+/// step (`handle_commands`, `drain_available`) or an immediate `now_or_never` poll. The run is
+/// a function of the command sequence alone, with no clock and no network, and it cannot hang
+/// on a handshake.
 #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_family = "wasm"), tokio::test)]
 async fn test_cancellation_after_scan_releases_successor_behind_waiting_head() {
-    let (node, remote) = connected_swarms().await;
-    let peer = remote.did();
+    let node = test_swarm().await;
+    let peer: Did = SecretKey::random().address().into();
+    admit_detached_peer(&node, peer).await;
     let capacity = Arc::new(TransferCapacity::new(Arc::new(
         GlobalTransferCapacity::new(),
     )));
