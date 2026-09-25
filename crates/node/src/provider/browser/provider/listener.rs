@@ -9,9 +9,15 @@
 //! ```text
 //! Provider::listen
 //!       |
+//!       +--> role registers relay? --yes--> install the onion runtime now
+//!       |                                   (the task holds only its Result)
+//!       |
 //!       +--> create stop source and one-shot start signal
 //!       |
 //!       +--> return ProviderListener with two JavaScript promises
+//!                    |
+//!                    v
+//!            installation failed? --yes--> reject task promise
 //!                    |
 //!                    v
 //!            task waits for processor lifecycle lock
@@ -98,7 +104,17 @@ impl Provider {
     /// Calls queue on the shared processor, including starts through provider
     /// clones or other wrappers. A new browser listener publishes `started` only
     /// after the previous generation finishes cooperative shutdown and flushing.
+    ///
+    /// Listening publishes the processor's registrations, so a role that registers `relay` first
+    /// installs its onion runtime: a browser never advertises a relay it does not run, however
+    /// the provider was built.
     pub fn listen(&self) -> ProviderListener {
+        // Install before spawning, so the task holds only the installation's outcome.
+        let installed = if self.processor.onion_role().registers_relay() {
+            self.install_onion_https_protocol().map(drop)
+        } else {
+            Ok(())
+        };
         // Clone the processor before spawning the JS promise so the exported
         // Provider value can be dropped independently of the listener task.
         let processor = self.processor.clone();
@@ -117,6 +133,7 @@ impl Provider {
         });
 
         let task = future_to_promise(async move {
+            installed.map_err(JsError::from)?;
             processor
                 .listen_with_started(token, || {
                     // Ignore receiver loss: dropping `started()` must not cancel

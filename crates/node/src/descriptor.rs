@@ -112,6 +112,29 @@ pub(crate) trait SignedDescriptor: Sized {
     fn descriptor_is_live_at(&self, now_ms: u128, network_id: u32) -> bool {
         self.descriptor_verify_signature(network_id) && !self.descriptor_is_expired_at(now_ms)
     }
+
+    /// Return whether this descriptor supersedes `other` of the same key: the later heartbeat
+    /// wins, and an equal heartbeat is decided by `(expiry, signed body, signature)`, so the
+    /// order is total on distinct descriptors. A descriptor whose content fails to encode never
+    /// supersedes, and is superseded by one that encodes.
+    fn supersedes(&self, other: &Self) -> bool {
+        let rank = |descriptor: &Self| {
+            (
+                descriptor.descriptor_heartbeat_at_ms(),
+                descriptor.descriptor_expires_at_ms(),
+            )
+        };
+        let content = |descriptor: &Self| {
+            Some((
+                descriptor.descriptor_signing_data().ok()?,
+                rings_codec::serialize(descriptor.descriptor_signature()).ok()?,
+            ))
+        };
+        rank(self)
+            .cmp(&rank(other))
+            .then_with(|| content(self).cmp(&content(other)))
+            == std::cmp::Ordering::Greater
+    }
 }
 
 /// Select the newest descriptor per DID that verifies under the receiver's overlay.
@@ -124,7 +147,33 @@ pub(crate) fn latest_valid_by_did<D>(
 where
     D: SignedDescriptor,
 {
-    let mut latest = BTreeMap::<Did, D>::new();
+    latest_valid_by_key(
+        descriptors,
+        SignedDescriptor::descriptor_did,
+        now_ms,
+        network_id,
+        include_expired,
+    )
+    .into_values()
+    .collect()
+}
+
+/// Select the newest descriptor per `key` that verifies under the receiver's overlay, and live at
+/// `now_ms` unless `include_expired`: the join `⊔` of the descriptors under
+/// [`SignedDescriptor::supersedes`] within each key, a total order, so the selection does not
+/// depend on the input order.
+pub(crate) fn latest_valid_by_key<K, D>(
+    descriptors: impl IntoIterator<Item = D>,
+    key: impl Fn(&D) -> K,
+    now_ms: u128,
+    network_id: u32,
+    include_expired: bool,
+) -> BTreeMap<K, D>
+where
+    K: Ord,
+    D: SignedDescriptor,
+{
+    let mut latest = BTreeMap::<K, D>::new();
     for descriptor in descriptors {
         if include_expired {
             if !descriptor.descriptor_verify_signature(network_id) {
@@ -133,11 +182,9 @@ where
         } else if !descriptor.descriptor_is_live_at(now_ms, network_id) {
             continue;
         }
-        match latest.entry(descriptor.descriptor_did()) {
+        match latest.entry(key(&descriptor)) {
             Entry::Occupied(mut entry) => {
-                if descriptor.descriptor_heartbeat_at_ms()
-                    > entry.get().descriptor_heartbeat_at_ms()
-                {
+                if descriptor.supersedes(entry.get()) {
                     entry.insert(descriptor);
                 }
             }
@@ -146,7 +193,7 @@ where
             }
         }
     }
-    latest.into_values().collect()
+    latest
 }
 
 pub(crate) fn encode_descriptor<T: Serialize>(descriptor: &T) -> Result<Encoded> {

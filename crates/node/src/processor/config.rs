@@ -37,18 +37,12 @@ pub struct ProcessorConfig {
     pub(in crate::processor) dht_virtual_nodes: u16,
     /// Runtime-local final-destination quotas keyed by verified origin and logical lane.
     pub(in crate::processor) origin_quota: OriginQuotaConfig,
-    /// Whether this node advertises onion relay capability in the online-node registry.
-    pub(in crate::processor) advertise_onion_relay: bool,
-    /// Whether this node publishes an onion-exit descriptor.
-    pub(in crate::processor) advertise_onion_exit: bool,
+    /// Onion symbols this process registers (#834 D2).
+    pub(in crate::processor) onion_role: OnionRole<OnionExitOffer>,
     /// Onion-exit registry heartbeat interval.
     pub(in crate::processor) onion_exit_heartbeat_interval: Duration,
     /// Onion-exit registry descriptor TTL.
     pub(in crate::processor) onion_exit_ttl: Duration,
-    /// Services this node publishes when onion exit advertisement is enabled.
-    pub(in crate::processor) onion_exit_services: Vec<OnionServiceName>,
-    /// Exit policy this node publishes when onion exit advertisement is enabled.
-    pub(in crate::processor) onion_exit_policy: OnionExitPolicy,
 }
 
 #[wasm_export]
@@ -76,14 +70,11 @@ impl ProcessorConfig {
             advertise_presence: default_advertise_presence(),
             dht_virtual_nodes: DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER,
             origin_quota: OriginQuotaConfig::default(),
-            advertise_onion_relay: default_advertise_onion_relay(),
-            advertise_onion_exit: default_advertise_onion_exit(),
+            onion_role: OnionRole::Client,
             onion_exit_heartbeat_interval: Duration::from_secs(
                 default_onion_exit_heartbeat_interval_secs(),
             ),
             onion_exit_ttl: Duration::from_secs(default_onion_exit_ttl_secs()),
-            onion_exit_services: default_onion_exit_services(),
-            onion_exit_policy: default_onion_exit_policy(),
         }
     }
 
@@ -97,26 +88,6 @@ impl ProcessorConfig {
         self.network_id
     }
 
-    /// Enables only the standard HTTPS-over-TCP onion exit service.
-    pub fn enable_https_onion_exit(mut self) -> Self {
-        self.advertise_onion_exit = true;
-        self.onion_exit_services = https_onion_exit_services();
-        self
-    }
-
-    /// Enables default native onion exit advertisement.
-    pub fn enable_default_onion_exit(mut self) -> Self {
-        self.advertise_onion_exit = true;
-        self.onion_exit_services = default_onion_exit_services();
-        self
-    }
-
-    /// Sets whether listen() advertises this node as an onion relay.
-    pub fn advertise_onion_relay(mut self, advertise: bool) -> Self {
-        self.advertise_onion_relay = advertise;
-        self
-    }
-
     /// Sets storage-only virtual positions derived per physical peer.
     ///
     /// Serialized configs reject values above
@@ -127,12 +98,6 @@ impl ProcessorConfig {
         self.dht_virtual_nodes = positions_per_peer;
         self
     }
-
-    /// Sets whether listen() publishes this node as an onion exit.
-    pub fn advertise_onion_exit(mut self, advertise: bool) -> Self {
-        self.advertise_onion_exit = advertise;
-        self
-    }
 }
 
 impl ProcessorConfig {
@@ -141,27 +106,23 @@ impl ProcessorConfig {
         parse_webrtc_udp_port_range(self.webrtc_udp_port_min, self.webrtc_udp_port_max)
     }
 
-    /// Sets the onion-exit policy.
-    pub fn onion_exit_policy(mut self, policy: OnionExitPolicy) -> Self {
-        self.onion_exit_policy = policy;
+    /// Sets the onion symbols this process registers (#834 D2).
+    pub fn onion_role(mut self, role: OnionRole<OnionExitOffer>) -> Self {
+        self.onion_role = role;
         self
+    }
+
+    /// Validate this config's onion role ([`validate_onion_role_config`]) before any runtime
+    /// effect, as the builder does at build time.
+    #[cfg(all(feature = "browser", target_family = "wasm"))]
+    pub(crate) fn validate_onion_role(&self) -> Result<()> {
+        validate_onion_role_config(self.advertise_presence, &self.onion_role)
     }
 
     /// Sets runtime-local final-destination quotas keyed by verified origin and logical lane.
     pub fn origin_quota(mut self, config: OriginQuotaConfig) -> Self {
         self.origin_quota = config;
         self
-    }
-
-    /// Return the HTTPS onion-exit policy when this config advertises that service.
-    #[cfg(all(feature = "browser", target_family = "wasm"))]
-    pub fn onion_https_exit_policy(&self) -> Option<OnionExitPolicy> {
-        (self.advertise_onion_exit
-            && self
-                .onion_exit_services
-                .iter()
-                .any(|service| service.matches(ONION_PROXY_HTTPS_SERVICE)))
-        .then(|| self.onion_exit_policy.clone())
     }
 }
 
@@ -254,26 +215,33 @@ pub(in crate::processor) fn validate_dht_virtual_nodes(positions_per_peer: u16) 
     )))
 }
 
+/// Validate that the onion role can be published and served.
+///
+/// - `relay ∈ Σ_n ⇒ advertise_presence`, because the relay registration lives in the online-node
+///   descriptor.
+/// - Every offered exit service is one this node's runtime interprets
+///   ([`OnionExitOffer::uninterpretable_service`]), so no descriptor names a service the node
+///   cannot evaluate.
+///
+/// `Σ_n ≠ ∅ ⇒ relay ∈ Σ_n` needs no check: [`OnionRole`] has no rung that registers a symbol
+/// without `relay`.
 pub(in crate::processor) fn validate_onion_role_config(
     advertise_presence: bool,
-    advertise_onion_relay: bool,
-    advertise_onion_exit: bool,
-    onion_exit_services: &[OnionServiceName],
-    onion_exit_policy: &OnionExitPolicy,
+    onion_role: &OnionRole<OnionExitOffer>,
 ) -> Result<()> {
-    if advertise_onion_relay && !advertise_presence {
+    if let Some(service) = onion_role
+        .exit()
+        .and_then(OnionExitOffer::uninterpretable_service)
+    {
+        return Err(Error::UninterpretableOnionService {
+            service: service.clone(),
+        });
+    }
+    if onion_role.registers_relay() && !advertise_presence {
         return Err(Error::InvalidConfig(
             "advertise_onion_relay requires advertise_presence because relay capability is published in online-node descriptors"
                 .to_string(),
         ));
-    }
-    if advertise_onion_exit && onion_exit_services.is_empty() {
-        return Err(Error::InvalidConfig(
-            "advertise_onion_exit requires at least one onion_exit_services entry".to_string(),
-        ));
-    }
-    if advertise_onion_exit {
-        onion_exit_policy.validate_targets()?;
     }
     Ok(())
 }
@@ -295,12 +263,20 @@ impl TryFrom<ProcessorConfig> for ProcessorConfigSerialized {
             advertise_presence: ins.advertise_presence,
             dht_virtual_nodes: ins.dht_virtual_nodes,
             origin_quota: ins.origin_quota,
-            advertise_onion_relay: ins.advertise_onion_relay,
-            advertise_onion_exit: ins.advertise_onion_exit,
+            advertise_onion_relay: ins.onion_role.registers_relay(),
+            advertise_onion_exit: ins.onion_role.exit().is_some(),
             onion_exit_heartbeat_interval_secs: ins.onion_exit_heartbeat_interval.as_secs(),
             onion_exit_ttl_secs: ins.onion_exit_ttl.as_secs(),
-            onion_exit_services: ins.onion_exit_services,
-            onion_exit_policy: ins.onion_exit_policy,
+            onion_exit_services: ins
+                .onion_role
+                .exit()
+                .map_or_else(default_onion_exit_services, |offer| {
+                    offer.services().iter().cloned().collect()
+                }),
+            onion_exit_policy: ins
+                .onion_role
+                .exit()
+                .map_or_else(default_onion_exit_policy, |offer| offer.policy().clone()),
         })
     }
 }
@@ -330,12 +306,14 @@ impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
             advertise_presence: ins.advertise_presence,
             dht_virtual_nodes: ins.dht_virtual_nodes,
             origin_quota: ins.origin_quota,
-            advertise_onion_relay: ins.advertise_onion_relay,
-            advertise_onion_exit: ins.advertise_onion_exit,
+            onion_role: OnionRole::from_flags(
+                ins.advertise_onion_relay,
+                ins.advertise_onion_exit,
+                ins.onion_exit_services,
+                ins.onion_exit_policy,
+            )?,
             onion_exit_heartbeat_interval,
             onion_exit_ttl,
-            onion_exit_services: ins.onion_exit_services,
-            onion_exit_policy: ins.onion_exit_policy,
         })
     }
 }

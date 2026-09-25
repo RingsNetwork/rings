@@ -1,4 +1,5 @@
 use std::iter;
+use std::num::NonZeroUsize;
 #[cfg(rings_native)]
 use std::sync::atomic::AtomicU64;
 #[cfg(rings_native)]
@@ -42,7 +43,7 @@ use crate::error::Result;
 use crate::extension::ext::Scope;
 use crate::onion::pipeline::OnionPipeline;
 use crate::onion::OnionExitDescriptor;
-use crate::onion::OnionExitEpoch;
+use crate::onion::OnionProcessEpoch;
 use crate::onion::OnionRoute;
 use crate::onion::OnionRouteError;
 use crate::onion::OnionRouteHop;
@@ -140,15 +141,15 @@ impl OnionCircuitPath {
     }
 }
 
-/// Return the first overlay hop of a route.
+/// Return the first overlay hop of a route: its entry guard.
 pub fn route_first_hop(route: &OnionRoute) -> Did {
-    route.positions().first().did
+    route.hops().guard().did
 }
 
 /// Seal one forward frame for `positions` and address it to position zero.
 fn seal_forward(
     client: OnionClientReturn,
-    process_epoch: OnionExitEpoch,
+    process_epoch: OnionProcessEpoch,
     sequence: OnionForwardSequence,
     positions: &OnionPipeline<OnionForwardPosition>,
     application: OnionCircuitPayload,
@@ -211,9 +212,9 @@ fn assign_edges(
     route: &OnionRoute,
     first_circuit_id: OnionCircuitId,
 ) -> Result<OnionPipeline<OnionForwardPosition>> {
-    let mut circuit_ids =
-        edge_circuit_ids(route.positions().hop_count(), first_circuit_id)?.into_iter();
-    route.positions().clone().try_map(|hop| {
+    let positions = route.forward_path();
+    let mut circuit_ids = edge_circuit_ids(positions.hop_count(), first_circuit_id)?.into_iter();
+    positions.try_map(|hop| {
         circuit_ids
             .next()
             .map(|circuit_id| OnionForwardPosition { hop, circuit_id })
@@ -241,7 +242,7 @@ fn assign_edges(
 /// layer plaintext is one pinned `OnionForwardLayer` shape.
 fn build_forward_layers(
     client: OnionClientReturn,
-    process_epoch: OnionExitEpoch,
+    process_epoch: OnionProcessEpoch,
     sequence: OnionForwardSequence,
     positions: &OnionPipeline<OnionForwardPosition>,
     application: OnionCircuitPayload,
@@ -293,29 +294,21 @@ fn build_forward_layers(
 }
 
 fn edge_circuit_ids(
-    hop_count: usize,
+    hop_count: NonZeroUsize,
     first_circuit_id: OnionCircuitId,
 ) -> Result<Vec<OnionCircuitId>> {
     edge_circuit_ids_with(hop_count, first_circuit_id, OnionCircuitId::random)
 }
 
 pub(super) fn edge_circuit_ids_with(
-    hop_count: usize,
+    hop_count: NonZeroUsize,
     first_circuit_id: OnionCircuitId,
     mut next_id: impl FnMut() -> OnionCircuitId,
 ) -> Result<Vec<OnionCircuitId>> {
     const MAX_ALLOCATION_ATTEMPTS_PER_EDGE: usize = 16;
-    if hop_count == 0 || hop_count > usize::from(super::MAX_ONION_CIRCUIT_HOPS) {
-        return Err(Error::OnionRouteError(
-            OnionRouteError::HopCountOutOfBounds {
-                hop_count,
-                max_hops: super::MAX_ONION_CIRCUIT_HOPS,
-            },
-        ));
-    }
-    let mut ids = Vec::with_capacity(hop_count);
+    let mut ids = Vec::with_capacity(hop_count.get());
     ids.push(first_circuit_id);
-    while ids.len() < hop_count {
+    while ids.len() < hop_count.get() {
         let next = (0..MAX_ALLOCATION_ATTEMPTS_PER_EDGE)
             .map(|_| next_id())
             .find(|candidate| !ids.contains(candidate))

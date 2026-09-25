@@ -31,8 +31,6 @@ onion_exit_policy:
   max_streams_per_circuit: 0
   max_bytes_per_minute: 0
 onion_http_proxy_service: tcp
-onion_http_proxy_hop_count: 0
-onion_http_proxy_allow_short_paths: false
 onion_http_proxy_header_timeout_secs: 10
 onion_http_proxy_max_connections: 1024
 gateway:
@@ -51,8 +49,6 @@ gateway:
   wintun_dll_path: null
   status_refresh_secs: 2
   onion_service: tcp
-  onion_hop_count: 0
-  onion_allow_short_paths: false
 bootstrap:
   peers: []
 dht_virtual_nodes: 160
@@ -138,9 +134,15 @@ where noted.
 
 * `online_node_heartbeat_interval_secs`, `online_node_ttl_secs`, `online_node_type`,
   `advertise_presence`: how this node publishes its online-node descriptor.
-* `advertise_onion_relay`: advertise onion relay capability.
+* `advertise_onion_relay`: advertise onion relay capability. The capability carries the node's
+  process epoch, drawn afresh at every start, so layers sealed for an earlier process are
+  rejected after a restart. It requires `advertise_presence`.
 * `advertise_onion_exit`, `onion_exit_heartbeat_interval_secs`, `onion_exit_ttl_secs`,
   `onion_exit_services`, `onion_exit_policy`: whether and how this node serves as an onion exit.
+  Every exit is also a relay: `advertise_onion_exit` requires `advertise_onion_relay`, and each
+  exit descriptor carries the same process epoch as the relay capability. Clients select an exit
+  only while both agree. A browser node interprets `https` only, so a browser exit offering `tcp`
+  is rejected when it starts.
   Service names form a closed set: `tcp` (byte streams) and `https` (HTTPS requests, or TLS
   streams over the same name). Any other name, including `relay` (advertised through
   `advertise_onion_relay` instead), is rejected, so restrict an exit's reach with the policy
@@ -153,10 +155,14 @@ where noted.
 
 * `onion_http_proxy_addr`: optional local HTTP CONNECT listener that routes client TCP streams
   through onion exits; absent means no proxy.
-* `onion_http_proxy_service`, `onion_http_proxy_hop_count`,
-  `onion_http_proxy_allow_short_paths`, `onion_http_proxy_header_timeout_secs`,
-  `onion_http_proxy_max_connections`: exit service (`tcp` or `https`), route length, and limits
-  of that proxy.
+* `onion_http_proxy_service`, `onion_http_proxy_header_timeout_secs`,
+  `onion_http_proxy_max_connections`: exit service (`tcp` or `https`) and limits of that proxy.
+
+The route length is not configurable. Every onion route is a loop that leaves and returns through
+the client's entry guard, with two relays around the exit on each side:
+`guard → relay → exit → relay → guard`. It needs four distinct live relays besides the client, one
+of which registers the exit service; with fewer, route selection fails instead of shortening the
+path.
 
 ## Gateway
 
@@ -185,8 +191,11 @@ gateway starts ⟺ section present ∧ (enabled = true ∨ rings run --gateway)
 * `unix_helper_socket`: control socket of the `gateway-config-unix` foreground helper on Linux
   and macOS; must match the helper's `--socket`.
 * `status_refresh_secs`: refresh interval of onion-exit availability in `/gateway/status`.
-* `onion_service`, `onion_hop_count`, `onion_allow_short_paths`: exit service and route length
-  used for captured flows.
+* `onion_service`: exit service used for captured flows. Route length follows the onion loop
+  shape (see [HTTP CONNECT proxy](#http-connect-proxy)).
+
+Any other key in the section is rejected rather than ignored, so a misspelt key cannot fall back
+to its default.
 
 ## Bootstrap
 

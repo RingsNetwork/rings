@@ -6,6 +6,7 @@ use subtle::ConstantTimeEq;
 use super::fixture_layer;
 use super::fixture_rng;
 use crate::onion::circuit::OnionCellBucket;
+use crate::onion::loop_shape::MAX_ONION_LOOP_HOPS;
 use crate::onion::signature::ONION_SIGNATURE;
 use crate::onion::sphinx::class::OnionLoopClass;
 use crate::onion::sphinx::class::ONION_CELL_FRAMING_BYTES;
@@ -16,7 +17,6 @@ use crate::onion::sphinx::layer::OnionLayer;
 use crate::onion::sphinx::layer::OnionLayerError;
 use crate::onion::sphinx::layer::ONION_ARGUMENT_BYTES;
 use crate::onion::sphinx::layer::ONION_LAYER_BYTES;
-use crate::onion::sphinx::MAX_ONION_LOOP_HOPS;
 
 /// The widths are the specified ones (D5, D6″ with #834 H2): `Ĥ = 14`, `ℓ = 205`, `|β| = 2870`,
 /// `|χ| = 2919`.

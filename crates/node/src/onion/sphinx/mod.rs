@@ -64,18 +64,6 @@ pub(crate) mod seed;
 #[cfg(test)]
 mod tests;
 
-/// Relays per segment, `s` (#834 D5): the guard counts as a relay of both end segments.
-pub(crate) const ONION_SEGMENT_RELAYS: usize = 2;
-
-/// Upper bound `n_max` on the symbol hops of one loop (#834 D5).
-pub(crate) const MAX_ONION_LOOP_SYMBOLS: usize = 4;
-
-/// `Ĥ = H(n_max, s) = (s + 1)·n_max + s = 14`, the hop visits of the longest loop (#834 D5).
-///
-/// The fixed-length header has exactly `Ĥ` layer slots, whatever the loop's own `H` (L5′).
-pub(crate) const MAX_ONION_LOOP_HOPS: usize =
-    (ONION_SEGMENT_RELAYS + 1) * MAX_ONION_LOOP_SYMBOLS + ONION_SEGMENT_RELAYS;
-
 /// `target ← target ⊕ mask`, bytewise over the common prefix of the two streams.
 fn xor_in_place<'a, 'b>(
     target: impl IntoIterator<Item = &'a mut u8>,

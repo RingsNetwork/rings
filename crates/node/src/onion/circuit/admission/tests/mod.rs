@@ -28,7 +28,7 @@ use super::OnionReplayFilterKey;
 use super::ADMISSION_WINDOW_QUANTA_WIDE;
 use crate::onion::circuit::OnionForwardNonce;
 use crate::onion::circuit::ONION_FORWARD_EXPIRY_QUANTUM_MS;
-use crate::onion::OnionExitEpoch;
+use crate::onion::OnionProcessEpoch;
 
 /// `Q` in milliseconds.
 pub(super) const Q: u128 = ONION_FORWARD_EXPIRY_QUANTUM_MS;
@@ -37,7 +37,7 @@ pub(super) const Q: u128 = ONION_FORWARD_EXPIRY_QUANTUM_MS;
 pub(super) const ORIGIN_MS: u128 = 1_000 * Q;
 
 /// The epoch of the process under test.
-pub(super) const EPOCH: OnionExitEpoch = OnionExitEpoch::new([7; 16]);
+pub(super) const EPOCH: OnionProcessEpoch = OnionProcessEpoch::new([7; 16]);
 
 /// The verdict of one cell through the shell's pipeline: the charge, then the admission.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -72,7 +72,7 @@ pub(super) fn link(did: u32) -> OnionAdmissionLink {
 /// first link generation of each DID in `linked` opened at time zero.
 pub(super) fn state_with(
     rng: &mut StdRng,
-    epoch: OnionExitEpoch,
+    epoch: OnionProcessEpoch,
     r: usize,
     linked: Range<u32>,
 ) -> OnionAdmissionState {

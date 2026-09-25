@@ -8,10 +8,9 @@
 //! ElGamal-AEAD frames. A circuit is a pipeline (`pipeline`) over the static signature `Σ` of
 //! operation symbols (`signature`): the pure reducer interprets the identity symbol `relay`, and
 //! each node's Σ-algebra (`circuit::OnionAlgebra`) interprets the world-facing symbols it
-//! registers.
+//! registers. Route selection places a pipeline on a guard-closed loop (`loop_shape`) whose every
+//! position is a node registering that position's symbol at its current process epoch.
 
-use std::collections::btree_map::Entry;
-use std::collections::BTreeMap;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -34,6 +33,7 @@ use serde::Serialize;
 
 use crate::descriptor::decode_descriptor;
 use crate::descriptor::encode_descriptor;
+use crate::descriptor::latest_valid_by_key;
 use crate::descriptor::sign_descriptor_body;
 use crate::descriptor::SignedDescriptor;
 use crate::descriptor::SignedDescriptorBody;
@@ -53,11 +53,13 @@ mod failure;
 mod gateway;
 #[cfg(any(rings_native, rings_browser))]
 pub mod https;
+mod loop_shape;
 #[cfg(rings_native)]
 pub mod native;
 pub mod pipeline;
 pub mod proxy;
 pub(crate) mod replay;
+mod role;
 pub mod route;
 pub mod signature;
 #[cfg_attr(
@@ -79,13 +81,21 @@ pub use failure::OnionExitFailure;
 pub use failure::OnionRouteError;
 #[cfg(rings_native)]
 pub use gateway::NativeOnionGatewayConnector;
-pub(crate) use route::select_onion_route_from_candidates_with_first_hop_policy;
+pub use loop_shape::OnionLoop;
+pub(crate) use loop_shape::OnionLoopRelay;
+pub use loop_shape::OnionLoopShape;
+pub(crate) use loop_shape::OnionPipelineSymbols;
+pub use loop_shape::MAX_ONION_LOOP_HOPS;
+pub use loop_shape::MAX_ONION_LOOP_SYMBOLS;
+pub use loop_shape::ONION_SEGMENT_RELAYS;
+pub use role::OnionExitOffer;
+pub use role::OnionRole;
+pub(crate) use route::select_onion_route_from_candidates;
 pub use route::OnionRoute;
 pub(crate) use route::OnionRouteCandidates;
 pub use route::OnionRouteHop;
 pub use route::OnionRouteRequest;
 pub(crate) use route::SystemRouteEntropy;
-pub use route::DEFAULT_ONION_ROUTE_HOPS;
 pub use signature::OnionServiceName;
 pub use signature::OnionSymbolSpec;
 pub use signature::ONION_SIGNATURE;
@@ -95,15 +105,22 @@ pub use target::OnionProxyTargetError;
 /// DHT topic used for application-layer onion exit descriptors.
 pub const ONION_EXITS_TOPIC: &str = "onion_exits";
 
-/// Capability label for nodes willing to relay onion cells.
-pub const ONION_RELAY_CAPABILITY: &str = "onion-relay";
-
-/// Random process epoch that invalidates encrypted exit layers after an exit restarts.
+/// Process epoch `e_n` of one node process (#834 D2), drawn afresh at every process start.
+///
+/// Every symbol a process registers carries its `e_n`: `relay` in the online-node capabilities and
+/// every other symbol in its signed descriptor, so a process registers exactly one epoch,
+///
+/// ```text
+/// ∀ f ∈ Σ_n.  epoch(f) = e_n,
+/// ```
+///
+/// and a layer sealed for an earlier process of the same node names an epoch no current
+/// registration carries.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-pub struct OnionExitEpoch([u8; 16]);
+pub struct OnionProcessEpoch([u8; 16]);
 
-impl OnionExitEpoch {
-    /// Build an exit epoch from explicit bytes.
+impl OnionProcessEpoch {
+    /// Build a process epoch from explicit bytes.
     pub const fn new(bytes: [u8; 16]) -> Self {
         Self(bytes)
     }
@@ -120,7 +137,7 @@ impl OnionExitEpoch {
         self.0
     }
 
-    /// Generate a fresh exit epoch for one process lifetime.
+    /// Draw a fresh process epoch for one process lifetime.
     pub fn random() -> Self {
         Self(rand::random())
     }
@@ -318,8 +335,8 @@ pub struct OnionExitDescriptorBody {
     pub public_key: VerificationPublicKey,
     /// Delegation public key used for encrypted onion exit frames.
     pub delegatee_public_key: PublicKey<33>,
-    /// Random process epoch bound into every encrypted exit layer.
-    pub process_epoch: OnionExitEpoch,
+    /// Process epoch `e_n` of the registering process, equal to its `relay` registration's.
+    pub process_epoch: OnionProcessEpoch,
     /// Runtime family of this exit node.
     pub node_type: OnlineNodeType,
     /// Network identifier.
@@ -406,7 +423,7 @@ struct OnionExitDescriptorBodyRef<'a> {
     did: Did,
     public_key: &'a VerificationPublicKey,
     delegatee_public_key: &'a PublicKey<33>,
-    process_epoch: OnionExitEpoch,
+    process_epoch: OnionProcessEpoch,
     node_type: &'a OnlineNodeType,
     network_id: u32,
     service: &'a OnionServiceName,
@@ -432,8 +449,8 @@ pub struct OnionExitDescriptor {
     pub public_key: VerificationPublicKey,
     /// Delegation public key used for encrypted onion exit frames.
     pub delegatee_public_key: PublicKey<33>,
-    /// Random process epoch bound into every encrypted exit layer.
-    pub process_epoch: OnionExitEpoch,
+    /// Process epoch `e_n` of the registering process, equal to its `relay` registration's.
+    pub process_epoch: OnionProcessEpoch,
     /// Runtime family of this exit node.
     pub node_type: OnlineNodeType,
     /// Network identifier.
@@ -539,28 +556,21 @@ impl OnionExitDescriptor {
         network_id: u32,
         include_expired: bool,
     ) -> Vec<Self> {
-        let mut latest = BTreeMap::<(Did, OnionServiceName), Self>::new();
-        for descriptor in descriptors {
-            if include_expired {
-                if !descriptor.verify_signature(network_id) {
-                    continue;
-                }
-            } else if !descriptor.is_live_at(now_ms, network_id) {
-                continue;
-            }
-            let key = (descriptor.did, descriptor.service.clone());
-            match latest.entry(key) {
-                Entry::Occupied(mut entry) => {
-                    if descriptor.heartbeat_at_ms > entry.get().heartbeat_at_ms {
-                        entry.insert(descriptor);
-                    }
-                }
-                Entry::Vacant(entry) => {
-                    entry.insert(descriptor);
-                }
-            }
-        }
-        latest.into_values().collect()
+        latest_valid_by_key(
+            descriptors,
+            Self::registration_key,
+            now_ms,
+            network_id,
+            include_expired,
+        )
+        .into_values()
+        .collect()
+    }
+
+    /// Return the key `(DID, service)` of this registration: an exit registers each service it
+    /// offers independently.
+    pub(crate) fn registration_key(&self) -> (Did, OnionServiceName) {
+        (self.did, self.service.clone())
     }
 }
 
@@ -630,10 +640,9 @@ pub(crate) struct OnionExitRegistration {
     heartbeat_interval: Duration,
     ttl: Duration,
     node_type: OnlineNodeType,
-    process_epoch: OnionExitEpoch,
+    process_epoch: OnionProcessEpoch,
     started_at_ms: u128,
-    services: Vec<OnionServiceName>,
-    policy: OnionExitPolicy,
+    offer: OnionExitOffer,
     publisher: DhtRegistrationPublisher,
 }
 
@@ -642,9 +651,8 @@ impl OnionExitRegistration {
         heartbeat_interval: Duration,
         ttl: Duration,
         node_type: OnlineNodeType,
-        services: Vec<OnionServiceName>,
-        policy: OnionExitPolicy,
-        process_epoch: OnionExitEpoch,
+        offer: OnionExitOffer,
+        process_epoch: OnionProcessEpoch,
     ) -> Self {
         Self {
             heartbeat_interval,
@@ -652,8 +660,7 @@ impl OnionExitRegistration {
             node_type,
             process_epoch,
             started_at_ms: get_epoch_ms(),
-            services,
-            policy,
+            offer,
             publisher: DhtRegistrationPublisher::new(ONION_EXITS_TOPIC),
         }
     }
@@ -664,7 +671,8 @@ impl OnionExitRegistration {
         context: &RegistrationContext<'_>,
         now_ms: u128,
     ) -> Result<Vec<OnionExitDescriptor>> {
-        self.services
+        self.offer
+            .services()
             .iter()
             .cloned()
             .map(|service| self.descriptor_for_service(context, now_ms, service))
@@ -686,7 +694,7 @@ impl OnionExitRegistration {
                 node_type: self.node_type.clone(),
                 network_id: context.network_id(),
                 service,
-                policy: self.policy.clone(),
+                policy: self.offer.policy().clone(),
                 started_at_ms: self.started_at_ms,
                 heartbeat_at_ms: now_ms,
                 expires_at_ms: now_ms + self.ttl.as_millis(),

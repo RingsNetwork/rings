@@ -185,7 +185,9 @@ impl ProviderHandle {
         let mut listener_threads = self.listener_threads.lock().map_err(|_| Error::Lock)?;
         listener_threads.push(std::thread::spawn(move || {
             runtime.block_on(async {
-                provider.listen_with(stop).await;
+                if let Err(error) = provider.listen_with(stop).await {
+                    tracing::error!("FFI listen failed: {error}");
+                }
             })
         }));
         Ok(())

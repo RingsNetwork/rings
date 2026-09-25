@@ -28,7 +28,7 @@ use crate::onion::circuit::admission::ADMISSION_WINDOW_QUANTA_WIDE;
 use crate::onion::circuit::admission::ONION_ADMISSION_GLOBAL_UNITS;
 use crate::onion::circuit::admission::ONION_ADMISSION_SENDER_UNITS;
 use crate::onion::circuit::admission::ONION_ADMISSION_WINDOW_MS;
-use crate::onion::OnionExitEpoch;
+use crate::onion::OnionProcessEpoch;
 
 /// Law: an expiry exists only on the grid `Q·ℕ`, and `from_ms ∘ as_ms = Some`.
 #[test]
@@ -181,7 +181,7 @@ fn test_new_epoch_rejects_every_layer_of_the_old_one() {
         Verdict::Admitted
     );
 
-    let restarted_epoch = OnionExitEpoch::new([8; 16]);
+    let restarted_epoch = OnionProcessEpoch::new([8; 16]);
     let mut restarted = state_with(&mut rng, restarted_epoch, 64, 1..2);
     for tag in 0..64 {
         assert_eq!(
@@ -238,7 +238,7 @@ fn test_the_window_is_judged_at_the_charge_instant() {
 fn test_a_token_from_another_epoch_admits_nothing() {
     let mut rng = StdRng::seed_from_u64(0x0841_0014);
     let mut here = state(&mut rng);
-    let mut elsewhere = state_with(&mut rng, OnionExitEpoch::new([9; 16]), 4, 1..2);
+    let mut elsewhere = state_with(&mut rng, OnionProcessEpoch::new([9; 16]), 4, 1..2);
     let x = latest_expiry(ORIGIN_MS);
     let foreign = elsewhere
         .charge(ORIGIN_MS, link(1), units(1))

@@ -141,8 +141,6 @@ gateway:
   route_ledger_path: "~/.rings/gateway-routes.json"
   status_refresh_secs: 2
   onion_service: tcp
-  onion_hop_count: 0
-  onion_allow_short_paths: false
 ```
 
 For externally steered packet operation, `included_routes` may be empty. The packet interface
@@ -224,12 +222,12 @@ RINGS_GATEWAY_BENCH_BYTES_PER_FLOW=1024 \
 cargo run --release -p rings-gateway --example gateway-bench
 ```
 
-The native node integration test uses real WebRTC processors, a two-hop Onion route, and a public
-TCP exit with in-memory packet injection:
+The native node integration test uses real WebRTC processors, a guard-closed Onion loop over three
+relays, and a public TCP exit with in-memory packet injection:
 
 ```bash
 cargo test -p rings-node \
-  captured_tcp_reaches_public_http_only_through_two_hop_onion_route \
+  captured_tcp_reaches_public_http_only_through_onion_loop \
   -- --ignored --nocapture
 ```
 

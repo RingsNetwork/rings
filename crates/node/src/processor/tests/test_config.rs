@@ -202,149 +202,113 @@ fn test_processor_construction_preserves_explicit_origin_quota() {
     assert_eq!(builder.origin_quota, quota);
 }
 
-#[test]
-fn test_onion_relay_requires_presence_advertisement() {
+/// A config for network `0` with a fresh key.
+fn onion_test_config() -> ProcessorConfig {
     let key = SecretKey::random();
     let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
-    let mut config = ProcessorConfig::new(
+    ProcessorConfig::new(
         0,
         "stun://stun.l.google.com:19302".to_string(),
         delegatee_key,
         3,
     )
-    .advertise_onion_relay(true);
-    config.advertise_presence = false;
-
-    assert!(matches!(
-        ProcessorBuilder::from_config(&config).and_then(ProcessorBuilder::build),
-        Err(Error::InvalidConfig(message))
-            if message.contains("advertise_onion_relay")
-                && message.contains("advertise_presence")
-    ));
 }
 
-#[test]
-fn test_advertised_onion_exit_requires_open_policy() {
-    let key = SecretKey::random();
-    let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
-    let config = ProcessorConfig::new(
-        0,
-        "stun://stun.l.google.com:19302".to_string(),
-        delegatee_key,
-        3,
-    )
-    .advertise_onion_exit(true);
-
-    assert!(matches!(
-        ProcessorBuilder::from_config(&config).and_then(ProcessorBuilder::build),
-        Err(Error::InvalidConfig(message)) if message.contains("allowed target")
-    ));
+/// An exit offering `https` to `example.com:443`.
+fn https_exit_role() -> Result<OnionRole<OnionExitOffer>> {
+    Ok(OnionRole::Exit(OnionExitOffer::new(
+        vec![OnionServiceName::https()],
+        onion_policy(&["example.com:443"], &[])?,
+    )?))
 }
 
+/// `relay ∈ Σ_n ⇒ advertise_presence`: the relay registration lives in the online-node
+/// descriptor, for a relay and for an exit alike.
 #[test]
-fn test_onion_exit_registration_task_can_run_without_presence_advertisement() -> Result<()> {
-    let key = SecretKey::random();
-    let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
-    let mut config = ProcessorConfig::new(
-        0,
-        "stun://stun.l.google.com:19302".to_string(),
-        delegatee_key,
-        3,
-    )
-    .advertise_onion_exit(true)
-    .onion_exit_policy(onion_policy(&["example.com:443"], &[])?);
-    config.advertise_presence = false;
-    let processor = ProcessorBuilder::from_config(&config)
-        .unwrap()
-        .storage(Box::new(MemStorage::new()))
-        .dht_finger_table_size(8)
-        .build()
-        .unwrap();
+fn test_onion_relay_requires_presence_advertisement() -> Result<()> {
+    for role in [OnionRole::Relay, https_exit_role()?] {
+        let mut config = onion_test_config().onion_role(role);
+        config.advertise_presence = false;
 
-    assert_eq!(processor.registration_tasks.len(), 1);
+        assert!(matches!(
+            ProcessorBuilder::from_config(&config).and_then(ProcessorBuilder::build),
+            Err(Error::InvalidConfig(message))
+                if message.contains("advertise_onion_relay")
+                    && message.contains("advertise_presence")
+        ));
+    }
     Ok(())
 }
 
-#[tokio::test]
-async fn test_onion_relay_capability_is_advertised_in_online_descriptor() {
-    let key = SecretKey::random();
-    let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
-    let config = ProcessorConfig::new(
-        0,
-        "stun://stun.l.google.com:19302".to_string(),
-        delegatee_key,
-        3,
-    )
-    .advertise_onion_relay(true);
+/// The serialized flags are parsed onto the role once: "exit without relay" and an exit with a
+/// closed policy are rejected there, and a typed role survives the round trip.
+#[test]
+fn test_serialized_onion_flags_parse_onto_the_role() -> Result<()> {
+    let config = onion_test_config().onion_role(https_exit_role()?);
+    let serialized = ProcessorConfigSerialized::try_from(config.clone())?;
+    let mut exit_only = serialized.clone();
+    exit_only.advertise_onion_relay = false;
+    let mut closed = serialized.clone();
+    closed.onion_exit_policy = OnionExitPolicy::default();
 
-    let processor = ProcessorBuilder::from_config(&config)
-        .unwrap()
-        .storage(Box::new(MemStorage::new()))
-        .dht_finger_table_size(8)
-        .build()
-        .unwrap();
+    assert!(serialized.advertise_onion_relay && serialized.advertise_onion_exit);
+    assert_eq!(
+        ProcessorConfig::try_from(serialized)?.onion_role,
+        config.onion_role
+    );
+    assert!(matches!(
+        ProcessorConfig::try_from(exit_only),
+        Err(Error::InvalidConfig(message))
+            if message.contains("advertise_onion_exit")
+                && message.contains("advertise_onion_relay")
+    ));
+    assert!(matches!(
+        ProcessorConfig::try_from(closed),
+        Err(Error::InvalidConfig(message)) if message.contains("allowed target")
+    ));
+    Ok(())
+}
+
+/// The relay capability carries the process epoch `e_n`, and every build (process start) draws a
+/// fresh one (#834 D2).
+#[tokio::test]
+async fn test_onion_relay_capability_carries_a_fresh_process_epoch() {
+    let config = onion_test_config().onion_role(OnionRole::Relay);
+    let start = || {
+        ProcessorBuilder::from_config(&config)
+            .unwrap()
+            .storage(Box::new(MemStorage::new()))
+            .dht_finger_table_size(8)
+            .build()
+            .unwrap()
+    };
+    let processor = start();
+    let restarted = start();
     let descriptor = processor.online_node_descriptor_at(get_epoch_ms()).unwrap();
 
-    assert!(descriptor
-        .capabilities
-        .iter()
-        .any(|capability| capability == ONION_RELAY_CAPABILITY));
+    assert_eq!(
+        descriptor.capabilities,
+        OnlineNodeCapabilities::onion_relay(processor.onion_process_epoch)
+    );
+    assert_ne!(processor.onion_process_epoch, restarted.onion_process_epoch);
 }
 
-#[test]
-fn test_https_onion_exit_config_uses_https_only_service() {
-    let key = SecretKey::random();
-    let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
-    let config = ProcessorConfig::new(
-        0,
-        "stun://stun.l.google.com:19302".to_string(),
-        delegatee_key,
-        3,
-    )
-    .enable_https_onion_exit();
+/// The reserved HTTPS name is valid without a parallel transport discriminator, and an exit
+/// registers `relay` with it.
+#[tokio::test]
+async fn test_reserved_https_onion_exit_service_is_accepted() -> Result<()> {
+    let processor =
+        ProcessorBuilder::from_config(&onion_test_config().onion_role(https_exit_role()?))?
+            .storage(Box::new(MemStorage::new()))
+            .dht_finger_table_size(8)
+            .build()?;
+    let descriptor = processor.online_node_descriptor_at(get_epoch_ms())?;
 
-    assert!(config.advertise_onion_exit);
-    assert_eq!(config.onion_exit_services, https_onion_exit_services());
-}
-
-#[test]
-fn test_default_onion_exit_config_uses_native_tcp_backed_services() {
-    let key = SecretKey::random();
-    let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
-    let config = ProcessorConfig::new(
-        0,
-        "stun://stun.l.google.com:19302".to_string(),
-        delegatee_key,
-        3,
-    )
-    .enable_default_onion_exit();
-
-    assert!(config.advertise_onion_exit);
-    assert_eq!(config.onion_exit_services, default_onion_exit_services());
-    assert_eq!(config.onion_exit_services, vec![
-        OnionServiceName::tcp(),
-        OnionServiceName::https()
-    ]);
-}
-
-/// The reserved HTTPS name is valid without a parallel transport discriminator.
-#[test]
-fn test_reserved_https_onion_exit_service_is_accepted() -> Result<()> {
-    let key = SecretKey::random();
-    let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
-    let mut config = ProcessorConfig::new(
-        0,
-        "stun://stun.l.google.com:19302".to_string(),
-        delegatee_key,
-        3,
-    )
-    .advertise_onion_exit(true);
-    config.onion_exit_services = vec![OnionServiceName::https()];
-    config.onion_exit_policy = onion_policy(&["example.com:443"], &[])?;
-
-    assert!(ProcessorBuilder::from_config(&config)
-        .and_then(ProcessorBuilder::build)
-        .is_ok());
+    assert_eq!(processor.onion_role(), &https_exit_role()?);
+    assert_eq!(
+        descriptor.capabilities,
+        OnlineNodeCapabilities::onion_relay(processor.onion_process_epoch)
+    );
     Ok(())
 }
 

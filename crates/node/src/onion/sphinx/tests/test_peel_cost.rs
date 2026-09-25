@@ -50,6 +50,7 @@ use web_time::Instant;
 use super::fixture_keys;
 use super::fixture_rng;
 use super::fixture_route;
+use crate::onion::loop_shape::MAX_ONION_LOOP_HOPS;
 use crate::onion::sphinx::cell::OnionCell;
 use crate::onion::sphinx::cell::OnionStep;
 use crate::onion::sphinx::class::OnionLoopClass;
@@ -58,7 +59,6 @@ use crate::onion::sphinx::header::ONION_HEADER_ROUTING_BYTES;
 use crate::onion::sphinx::layer::ONION_LAYER_BYTES;
 use crate::onion::sphinx::seed::OnionCarrySeed;
 use crate::onion::sphinx::seed::OnionSegmentSeed;
-use crate::onion::sphinx::MAX_ONION_LOOP_HOPS;
 
 /// Untimed passes per row before measuring.
 const WARM_UP: u32 = 200;

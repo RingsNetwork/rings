@@ -67,39 +67,6 @@ const WEBVIEW_OVERLAY_LOADER: &str = r#"
 })();
 "#;
 
-/// Runtime onion routing settings shared by the local node and WebView gateway.
-#[derive(Clone)]
-pub struct WebviewOnionSettings {
-    allow_short_paths: Rc<Cell<bool>>,
-}
-
-impl WebviewOnionSettings {
-    /// Build settings with the current short-path opt-in state.
-    pub fn new(allow_short_paths: bool) -> Self {
-        Self {
-            allow_short_paths: Rc::new(Cell::new(allow_short_paths)),
-        }
-    }
-
-    /// Update whether the WebView may use fewer onion hops than requested.
-    pub(crate) fn set_allow_short_paths(&self, allow_short_paths: bool) {
-        self.allow_short_paths.set(allow_short_paths);
-    }
-
-    fn options(&self) -> onion::OnionProxyOptions {
-        onion::OnionProxyOptions {
-            allow_short_paths: self.allow_short_paths.get(),
-            ..onion::OnionProxyOptions::default()
-        }
-    }
-}
-
-impl Default for WebviewOnionSettings {
-    fn default() -> Self {
-        Self::new(false)
-    }
-}
-
 pub(crate) async fn dispatch_browser_request(gateway: WebviewNode, request: JsValue) -> JsValue {
     let request = match browser_host_request(&request) {
         Ok(request) => request,
@@ -516,10 +483,7 @@ pub struct WebviewNode {
 
 impl WebviewNode {
     /// Attach a WebView gateway when the current page has an HTTP(S) controlled origin.
-    pub(crate) fn for_current_window(
-        provider: Arc<Provider>,
-        onion_settings: WebviewOnionSettings,
-    ) -> WebviewResult<Option<Self>> {
+    pub(crate) fn for_current_window(provider: Arc<Provider>) -> WebviewResult<Option<Self>> {
         let origin = web_sys::window()
             .ok_or_else(|| WebviewError::Browser("browser window is unavailable".to_string()))?
             .location()
@@ -533,7 +497,6 @@ impl WebviewNode {
         Self::new(
             Rc::new((*provider).clone()),
             controlled_origin,
-            onion_settings,
             web_shell_bootstrap,
         )
         .map(Some)
@@ -544,15 +507,11 @@ impl WebviewNode {
     /// The origin is a routing witness only. Extension documents never navigate to it: the
     /// trusted extension window sends typed requests to the offscreen node, while an opaque
     /// sandbox renders the returned bytes.
-    pub(crate) fn for_extension(
-        provider: Arc<Provider>,
-        onion_settings: WebviewOnionSettings,
-    ) -> WebviewResult<Self> {
+    pub(crate) fn for_extension(provider: Arc<Provider>) -> WebviewResult<Self> {
         let controlled_origin = Url::parse("https://rings-webview.invalid/")?;
         Self::new(
             Rc::new((*provider).clone()),
             controlled_origin,
-            onion_settings,
             extension_webview_bootstrap,
         )
     }
@@ -565,16 +524,12 @@ impl WebviewNode {
     fn new(
         provider: Rc<Provider>,
         controlled_origin: Url,
-        onion_settings: WebviewOnionSettings,
         request_bootstrap: fn(&GatewayRequest) -> String,
     ) -> WebviewResult<Self> {
         let prefix = GatewayPrefix::new(GATEWAY_PREFIX)?;
         let policy = GatewayRoutePolicy::new(controlled_origin, prefix.clone())?;
-        let gateway = ConcurrentWebviewGateway::new(prefix, OnionGatewayTransport {
-            provider,
-            onion_settings,
-        })
-        .with_request_bootstrap(request_bootstrap);
+        let gateway = ConcurrentWebviewGateway::new(prefix, OnionGatewayTransport { provider })
+            .with_request_bootstrap(request_bootstrap);
         Ok(Self {
             host: Rc::new(WebviewGatewayHost {
                 policy,
@@ -761,7 +716,6 @@ impl Drop for GatewayRequestPermit {
 
 struct OnionGatewayTransport {
     provider: Rc<Provider>,
-    onion_settings: WebviewOnionSettings,
 }
 
 #[async_trait(?Send)]
@@ -771,7 +725,6 @@ impl GatewayTransport for OnionGatewayTransport {
         request: GatewayRequest,
         body_limit: rings_webview::GatewayResponseBodyLimit,
     ) -> WebviewResult<GatewayResponse> {
-        let options = self.onion_settings.options();
         let should_trace = should_trace_onion_route(request.kind);
         let debug_target = request.target.to_string();
         let debug_source_target = request.source_target.as_ref().map(Url::to_string);
@@ -791,7 +744,6 @@ impl GatewayTransport for OnionGatewayTransport {
                 .map(|header| (header.name, header.value))
                 .collect(),
             body: request.body,
-            options,
         })
         .await;
         let duration_ms = (js_sys::Date::now() - started).max(0.0).round();

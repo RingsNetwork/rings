@@ -14,30 +14,16 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use web_sys::Url;
 
-use crate::browser_api::js_bool_field;
 use crate::browser_api::js_error_label;
 use crate::browser_api::js_prop;
 use crate::browser_api::js_set;
 use crate::browser_api::js_string_field;
-
-const DEFAULT_HOP_COUNT: usize = 3;
-
-/// Onion HTTPS proxy route-selection options.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct OnionProxyOptions {
-    /// Desired hop count including the exit. `0` delegates to node defaults.
-    pub(crate) hop_count: usize,
-    /// Allow fewer hops when the live network cannot satisfy the requested count.
-    pub(crate) allow_short_paths: bool,
-}
 
 /// One route probe request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct OnionProxyRouteRequest {
     /// Absolute HTTPS URL used to derive the target authority.
     pub(crate) url: String,
-    /// Route-selection options.
-    pub(crate) options: OnionProxyOptions,
 }
 
 /// One proxied HTTPS request.
@@ -51,8 +37,6 @@ pub(crate) struct OnionProxyHttpRequest {
     pub(crate) headers: Vec<(String, String)>,
     /// UTF-8 request body bytes.
     pub(crate) body: Vec<u8>,
-    /// Route-selection options.
-    pub(crate) options: OnionProxyOptions,
 }
 
 /// Browser-displayable route result.
@@ -60,7 +44,7 @@ pub(crate) struct OnionProxyHttpRequest {
 pub(crate) struct OnionProxyRoute {
     /// Onion service name selected by the core route builder.
     pub(crate) service: String,
-    /// Ordered DID hops ending with the exit.
+    /// DIDs of the hops the circuit uses, entry guard first and exit last.
     pub(crate) hops: Vec<String>,
     /// Exit DID.
     pub(crate) exit: String,
@@ -136,11 +120,14 @@ impl From<String> for OnionProxyError {
 impl From<NodeError> for OnionProxyError {
     fn from(error: NodeError) -> Self {
         let kind = match &error {
-            NodeError::OnionRouteError(OnionRouteError::NoLiveExit { .. }) => {
-                OnionProxyFailureKind::ExitUnavailable
-            }
             NodeError::OnionRouteError(
-                OnionRouteError::NotEnoughRelays { .. }
+                OnionRouteError::NoLiveExit { .. }
+                | OnionRouteError::ExitRelayRegistrationMismatch { .. }
+                | OnionRouteError::ExitWithoutRelayRegistration { .. },
+            ) => OnionProxyFailureKind::ExitUnavailable,
+            NodeError::OnionRouteError(
+                OnionRouteError::NotEnoughLoopHops { .. }
+                | OnionRouteError::NoDistinctSymbolHops
                 | OnionRouteError::NoPermittedFirstHop
                 | OnionRouteError::NoExitForProxyProtocol { .. }
                 | OnionRouteError::NoExitAllowsTarget { .. },
@@ -155,57 +142,11 @@ impl From<NodeError> for OnionProxyError {
     }
 }
 
-impl Default for OnionProxyOptions {
-    fn default() -> Self {
-        Self {
-            hop_count: DEFAULT_HOP_COUNT,
-            allow_short_paths: false,
-        }
-    }
-}
-
-impl OnionProxyOptions {
-    /// Parse route options from UI state.
-    pub(crate) fn from_input(hop_count: &str, allow_short_paths: bool) -> Result<Self, String> {
-        let hop_count = match hop_count.trim() {
-            "" => DEFAULT_HOP_COUNT,
-            value => value
-                .parse::<usize>()
-                .map_err(|error| format!("invalid hop count: {error}"))?,
-        };
-        Ok(Self {
-            hop_count,
-            allow_short_paths,
-        })
-    }
-
-    fn from_js(message: &JsValue) -> Result<Self, String> {
-        Ok(Self {
-            hop_count: optional_usize_field(message, "hopCount", DEFAULT_HOP_COUNT)?,
-            allow_short_paths: js_bool_field(message, "allowShortPaths").unwrap_or(false),
-        })
-    }
-
-    fn write_js(&self, object: &Object) -> Result<(), String> {
-        js_set(
-            object,
-            "hopCount",
-            &JsValue::from_f64(self.hop_count as f64),
-        )?;
-        js_set(
-            object,
-            "allowShortPaths",
-            &JsValue::from_bool(self.allow_short_paths),
-        )
-    }
-}
-
 impl OnionProxyRouteRequest {
     /// Parse one route request from an extension runtime message.
     pub(crate) fn from_js(message: &JsValue) -> Result<Self, String> {
         Ok(Self {
             url: required_string_field(message, "url", "enter an HTTPS URL")?,
-            options: OnionProxyOptions::from_js(message)?,
         })
     }
 
@@ -213,7 +154,6 @@ impl OnionProxyRouteRequest {
     pub(crate) fn to_js(&self) -> Result<JsValue, String> {
         let object = Object::new();
         js_set(&object, "url", &JsValue::from_str(&self.url))?;
-        self.options.write_js(&object)?;
         Ok(object.into())
     }
 }
@@ -228,7 +168,6 @@ impl OnionProxyHttpRequest {
             body: js_string_field(message, "body")
                 .unwrap_or_default()
                 .into_bytes(),
-            options: OnionProxyOptions::from_js(message)?,
         })
     }
 
@@ -243,7 +182,6 @@ impl OnionProxyHttpRequest {
             "body",
             &JsValue::from_str(&String::from_utf8_lossy(&self.body)),
         )?;
-        self.options.write_js(&object)?;
         Ok(object.into())
     }
 
@@ -362,14 +300,12 @@ pub(crate) async fn route(
     request: OnionProxyRouteRequest,
 ) -> Result<OnionProxyRoute, OnionProxyError> {
     let target_authority = target_authority(&request.url)?;
-    let proxy = provider
-        .onion_https_proxy(request.options.hop_count, request.options.allow_short_paths)
-        .map_err(|error| {
-            OnionProxyError::generic(format!(
-                "create onion proxy failed: {}",
-                js_error_label(error.into())
-            ))
-        })?;
+    let proxy = provider.onion_https_proxy().map_err(|error| {
+        OnionProxyError::generic(format!(
+            "create onion proxy failed: {}",
+            js_error_label(error.into())
+        ))
+    })?;
     let route = proxy
         .route_http(&target_authority)
         .await
@@ -383,14 +319,12 @@ pub(crate) async fn request(
     request: OnionProxyHttpRequest,
 ) -> Result<OnionProxyResponse, OnionProxyError> {
     target_authority(&request.url)?;
-    let proxy = provider
-        .onion_https_proxy(request.options.hop_count, request.options.allow_short_paths)
-        .map_err(|error| {
-            OnionProxyError::generic(format!(
-                "create onion proxy failed: {}",
-                js_error_label(error.into())
-            ))
-        })?;
+    let proxy = provider.onion_https_proxy().map_err(|error| {
+        OnionProxyError::generic(format!(
+            "create onion proxy failed: {}",
+            js_error_label(error.into())
+        ))
+    })?;
     let response = proxy
         .request_http(request.url.as_str(), request.client_request())
         .await
@@ -406,7 +340,11 @@ pub(crate) async fn request(
 fn display_route(route: &NodeOnionProxyRoute) -> OnionProxyRoute {
     OnionProxyRoute {
         service: route.exit_service().to_string(),
-        hops: route.route.hops().iter().map(ToString::to_string).collect(),
+        hops: route
+            .route
+            .circuit_hops()
+            .map(|hop| hop.did.to_string())
+            .collect(),
         exit: route.exit_did().to_string(),
     }
 }
@@ -427,27 +365,6 @@ fn target_authority(url: &str) -> Result<String, String> {
     } else {
         Ok(authority)
     }
-}
-
-fn optional_usize_field(
-    object: &JsValue,
-    field: &'static str,
-    default: usize,
-) -> Result<usize, String> {
-    let value = js_prop(object, field)?;
-    if value.is_null() || value.is_undefined() {
-        return Ok(default);
-    }
-    let Some(number) = value.as_f64() else {
-        return Err(format!("{field} must be a number"));
-    };
-    if !number.is_finite() || number < 0.0 || number.fract() != 0.0 {
-        return Err(format!("{field} must be a non-negative integer"));
-    }
-    if number > u32::MAX as f64 {
-        return Err(format!("{field} is too large"));
-    }
-    Ok(number as usize)
 }
 
 fn optional_route_js(value: JsValue) -> Result<Option<OnionProxyRoute>, String> {
@@ -587,59 +504,6 @@ mod tests {
     use super::target_authority;
     use super::OnionProxyError;
     use super::OnionProxyFailureKind;
-    use super::OnionProxyHttpRequest;
-    use super::OnionProxyOptions;
-    use super::OnionProxyRouteRequest;
-
-    #[wasm_bindgen_test]
-    fn test_onion_proxy_options_default_requires_full_paths() {
-        assert_eq!(OnionProxyOptions::default(), OnionProxyOptions {
-            hop_count: super::DEFAULT_HOP_COUNT,
-            allow_short_paths: false,
-        });
-    }
-
-    #[wasm_bindgen_test]
-    fn test_route_request_from_js_requires_explicit_short_path_opt_in() {
-        let message = Object::new();
-        assert_eq!(
-            super::js_set(&message, "url", &JsValue::from_str("https://example.com/")),
-            Ok(())
-        );
-
-        let parsed =
-            OnionProxyRouteRequest::from_js(&message.into()).map(|request| request.options);
-
-        assert_eq!(
-            parsed,
-            Ok(OnionProxyOptions {
-                hop_count: super::DEFAULT_HOP_COUNT,
-                allow_short_paths: false,
-            })
-        );
-    }
-
-    #[wasm_bindgen_test]
-    fn test_http_request_from_js_allows_explicit_short_path_opt_in() {
-        let message = Object::new();
-        let set_message =
-            super::js_set(&message, "url", &JsValue::from_str("https://example.com/"))
-                .and_then(|()| super::js_set(&message, "method", &JsValue::from_str("GET")))
-                .and_then(|()| super::js_set(&message, "headers", &Array::new().into()))
-                .and_then(|()| super::js_set(&message, "body", &JsValue::from_str("")))
-                .and_then(|()| super::js_set(&message, "allowShortPaths", &JsValue::TRUE));
-        assert_eq!(set_message, Ok(()));
-
-        let parsed = OnionProxyHttpRequest::from_js(&message.into()).map(|request| request.options);
-
-        assert_eq!(
-            parsed,
-            Ok(OnionProxyOptions {
-                hop_count: super::DEFAULT_HOP_COUNT,
-                allow_short_paths: true,
-            })
-        );
-    }
 
     #[wasm_bindgen_test]
     fn test_target_authority_adds_default_https_port() {
@@ -665,7 +529,10 @@ mod tests {
             },
         ));
         let route = OnionProxyError::from(super::NodeError::OnionRouteError(
-            super::OnionRouteError::NotEnoughRelays { hop_count: 3 },
+            super::OnionRouteError::NotEnoughLoopHops {
+                required: 4,
+                eligible: 3,
+            },
         ));
         let timeout = OnionProxyError::from(super::NodeError::OnionProxyRequestTimedOut);
 

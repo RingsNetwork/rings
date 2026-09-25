@@ -41,7 +41,6 @@ use crate::extension::ext::Extensions;
 use crate::extension::ext::Scope;
 use crate::onion::circuit::OnionAlgebra;
 use crate::onion::circuit::OnionAuthenticatedPayload;
-use crate::onion::circuit::OnionCircuitCapabilities;
 use crate::onion::circuit::OnionCircuitExitFrame;
 use crate::onion::circuit::OnionCircuitHandler;
 use crate::onion::circuit::OnionCircuitId;
@@ -59,8 +58,8 @@ use crate::onion::https::OnionHttpsRuntime;
 use crate::onion::proxy::OnionProxyRoute;
 use crate::onion::replay::OnionForwardReplayWitness;
 use crate::onion::tcp::NativeOnionOpenStream;
-use crate::onion::tcp::NativeOnionTcpExitConfig;
 use crate::onion::tcp::OnionTcpRuntime;
+use crate::onion::OnionExitOffer;
 use crate::onion::OnionProxyTarget;
 use crate::onion::OnionRoute;
 use crate::onion::OnionServiceName;
@@ -74,25 +73,26 @@ pub struct NativeOnionCircuitHandle {
 }
 
 impl NativeOnionCircuitHandle {
-    /// Install the route-aware onion circuit protocol.
-    pub fn install(
-        extensions: &Extensions,
-        delegatee_key: DelegateeKey,
-        network_id: u32,
-        allow_relay: bool,
-        exit_config: Option<NativeOnionTcpExitConfig>,
-    ) -> Result<Self> {
-        let exit_epoch = exit_config
-            .as_ref()
-            .map(|_| extensions.core().onion_exit_epoch());
-        let (tcp, https) = native_onion_runtimes(delegatee_key.clone(), network_id, exit_config);
-        if let Some(config) = tcp.exit_config() {
-            if config.services().contains(&OnionServiceName::https()) {
-                https.set_exit_policy(Some(config.policy().clone()));
-                https.set_native_proxy(config.https_proxy().map(ToString::to_string));
+    /// Install the route-aware onion circuit protocol of the processor behind `extensions`.
+    ///
+    /// Everything is read from that processor: its session key and network, its circuit
+    /// capabilities and, on the exit rung, its exit offer. What the node publishes and what it
+    /// evaluates therefore agree by construction.
+    pub fn install(extensions: &Extensions) -> Result<Self> {
+        let core = extensions.core();
+        let delegatee_key = core.delegatee_key().clone();
+        let network_id = core.network_id();
+        let capabilities = core.onion_circuit_capabilities();
+        let (tcp, https) = native_onion_runtimes(
+            delegatee_key.clone(),
+            network_id,
+            core.onion_role().exit().cloned(),
+        );
+        if let Some(offer) = tcp.exit_config() {
+            if offer.offers(&OnionServiceName::https()) {
+                https.set_exit_policy(Some(offer.policy().clone()));
             }
         }
-        let capabilities = OnionCircuitCapabilities::from_registration(allow_relay, exit_epoch);
         let signer = MessageSigner::new(delegatee_key.clone(), network_id);
         extensions.register(
             OnionCircuitProtocol::new(capabilities),
@@ -152,7 +152,7 @@ impl NativeOnionCircuitHandle {
 pub(super) fn native_onion_runtimes(
     delegatee_key: DelegateeKey,
     network_id: u32,
-    exit_config: Option<NativeOnionTcpExitConfig>,
+    exit_config: Option<OnionExitOffer>,
 ) -> (Arc<OnionTcpRuntime>, Arc<OnionHttpsRuntime>) {
     let accounting = OnionExitAccounting::default();
     let link_sender = OnionLinkSender::default();
@@ -226,7 +226,7 @@ impl NativeOnionCircuitHandler {
         let network_id = signer.network_id();
         let services = tcp
             .exit_config()
-            .map(|config| config.services().to_vec())
+            .map(|config| config.services().iter().cloned().collect::<Vec<_>>())
             .unwrap_or_default();
         let algebra = services
             .into_iter()

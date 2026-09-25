@@ -244,9 +244,8 @@ async fn test_onion_exit_publish_replaces_observed_self_records() -> Result<()> 
         Duration::from_secs(30),
         Duration::from_secs(90),
         default_online_node_type(),
-        vec![OnionServiceName::https()],
-        policy,
-        processor.onion_exit_epoch(),
+        OnionExitOffer::new(vec![OnionServiceName::https()], policy)?,
+        processor.onion_process_epoch,
     );
     let published = registration
         .publish_descriptors(&processor.registration_context())
@@ -257,7 +256,7 @@ async fn test_onion_exit_publish_replaces_observed_self_records() -> Result<()> 
         .ok_or_else(|| Error::InvalidConfig("expected one onion-exit descriptor".to_string()))?;
     assert_eq!(
         published_descriptor.process_epoch,
-        processor.onion_exit_epoch()
+        processor.onion_process_epoch
     );
     let entry_key = entry::Entry::gen_did(ONION_EXITS_TOPIC)?;
     processor.storage_fetch(entry_key).await?;
@@ -300,7 +299,7 @@ async fn test_online_node_lookup_filters_expired_descriptors_by_default() -> Res
             network_id: expired_processor.swarm.network_id(),
             storage_redundancy: expired_processor.swarm.storage_redundancy(),
             dht_virtual_nodes: expired_processor.swarm.dht_virtual_nodes(),
-            capabilities: Vec::new(),
+            capabilities: OnlineNodeCapabilities::default(),
             endpoint_hint: None,
             started_at_ms: now_ms.saturating_sub(120_000),
             heartbeat_at_ms: now_ms.saturating_sub(90_000),
@@ -394,7 +393,7 @@ async fn test_online_node_lookup_filters_other_storage_redundancy_modes() -> Res
             network_id: foreign.swarm.network_id(),
             storage_redundancy: mismatched_storage_redundancy(foreign.swarm.storage_redundancy()),
             dht_virtual_nodes: foreign.swarm.dht_virtual_nodes(),
-            capabilities: Vec::new(),
+            capabilities: OnlineNodeCapabilities::default(),
             endpoint_hint: None,
             started_at_ms: now_ms,
             heartbeat_at_ms: now_ms,

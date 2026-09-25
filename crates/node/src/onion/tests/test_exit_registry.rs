@@ -6,9 +6,9 @@ use super::super::*;
 use crate::tests::TEST_NETWORK_ID;
 
 /// Stable epoch used by signed descriptor fixtures; its concrete byte value is not semantic.
-const TEST_PROCESS_EPOCH: OnionExitEpoch = OnionExitEpoch::new([31; 16]);
+const TEST_PROCESS_EPOCH: OnionProcessEpoch = OnionProcessEpoch::new([31; 16]);
 /// Distinct epoch used to witness that epoch substitution invalidates the descriptor signature.
-const TAMPERED_PROCESS_EPOCH: OnionExitEpoch = OnionExitEpoch::new([32; 16]);
+const TAMPERED_PROCESS_EPOCH: OnionProcessEpoch = OnionProcessEpoch::new([32; 16]);
 
 fn signed_exit_at(heartbeat_at_ms: u128, expires_at_ms: u128) -> Result<OnionExitDescriptor> {
     let key = SecretKey::random();

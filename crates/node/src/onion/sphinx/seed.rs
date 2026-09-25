@@ -35,7 +35,7 @@ use zeroize::ZeroizeOnDrop;
 
 use super::hkdf_expand;
 use super::hkdf_extract;
-use super::ONION_SEGMENT_RELAYS;
+use crate::onion::loop_shape::ONION_SEGMENT_RELAYS;
 
 /// Width of every carry seed, `|σ| = 32`.
 pub(crate) const ONION_CARRY_SEED_BYTES: usize = 32;

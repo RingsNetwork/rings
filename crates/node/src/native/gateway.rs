@@ -61,11 +61,7 @@ impl NativeGatewayRunner {
         config: NativeGatewayConfig,
     ) -> anyhow::Result<Self> {
         validate_status_refresh_secs(config.status_refresh_secs)?;
-        let proxy = OnionProxyConfig::tcp_connect_service(
-            config.onion_service.clone(),
-            config.onion_hop_count,
-            config.onion_allow_short_paths,
-        )?;
+        let proxy = OnionProxyConfig::tcp_connect_service(config.onion_service.clone())?;
         let connector = Arc::new(NativeOnionGatewayConnector::new(
             processor.clone(),
             onion,

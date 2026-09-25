@@ -42,10 +42,6 @@ pub struct OnionHttpProxyOptions {
     pub listen_addr: SocketAddr,
     /// TCP onion-exit service used for local CONNECT requests.
     pub service: OnionServiceName,
-    /// Desired hop count including the exit. `0` uses node default.
-    pub hop_count: usize,
-    /// Whether route selection may use fewer hops when too few relays are live.
-    pub allow_short_paths: bool,
     /// Maximum concurrent local CONNECT requests accepted by this ingress.
     pub max_connections: usize,
     /// Deadline for receiving a complete CONNECT header.
@@ -54,17 +50,10 @@ pub struct OnionHttpProxyOptions {
 
 impl OnionHttpProxyOptions {
     /// Build options with production defaults for resource bounds.
-    pub fn new(
-        listen_addr: SocketAddr,
-        service: OnionServiceName,
-        hop_count: usize,
-        allow_short_paths: bool,
-    ) -> Self {
+    pub fn new(listen_addr: SocketAddr, service: OnionServiceName) -> Self {
         Self {
             listen_addr,
             service,
-            hop_count,
-            allow_short_paths,
             max_connections: DEFAULT_MAX_CONNECT_CONNECTIONS,
             header_timeout: Duration::from_secs(DEFAULT_CONNECT_HEADER_TIMEOUT_SECS),
         }
@@ -85,11 +74,7 @@ impl OnionHttpProxyOptions {
     }
 
     fn proxy_config(&self) -> Result<OnionProxyConfig> {
-        OnionProxyConfig::tcp_connect_service(
-            self.service.clone(),
-            self.hop_count,
-            self.allow_short_paths,
-        )
+        OnionProxyConfig::tcp_connect_service(self.service.clone())
     }
 }
 

@@ -2,6 +2,7 @@
 //! width law (L3, L5′), and L8 on the carry.
 
 use super::fixture_rng;
+use crate::onion::loop_shape::ONION_SEGMENT_RELAYS;
 use crate::onion::sphinx::carry;
 use crate::onion::sphinx::carry::OnionCarry;
 use crate::onion::sphinx::carry::OnionOpenError;
@@ -9,7 +10,6 @@ use crate::onion::sphinx::carry::OnionValueTooWide;
 use crate::onion::sphinx::class::OnionLoopClass;
 use crate::onion::sphinx::seed::OnionCarryKey;
 use crate::onion::sphinx::seed::OnionSegmentSeed;
-use crate::onion::sphinx::ONION_SEGMENT_RELAYS;
 
 /// The keys a segment's relays and consumer derive from the seeds in their own layers.
 fn holder_keys(segment: &OnionSegmentSeed) -> (Vec<OnionCarryKey>, OnionCarryKey) {

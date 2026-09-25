@@ -274,7 +274,7 @@ pub(super) fn onion_exit_descriptor_for_processor_with_node_type_service(
                 .delegator_verification_pubkey()
                 .map_err(Error::CoreError)?,
             delegatee_public_key: processor.delegatee_key.delegatee_public_key(),
-            process_epoch: processor.onion_exit_epoch,
+            process_epoch: processor.onion_process_epoch,
             node_type,
             network_id: processor.swarm.network_id(),
             service,
@@ -293,7 +293,7 @@ pub(super) fn online_relay_descriptor_for_processor(
     processor: &Processor,
     now_ms: u128,
 ) -> Result<OnlineNodeDescriptor> {
-    let capabilities = vec![ONION_RELAY_CAPABILITY.to_string()];
+    let capabilities = OnlineNodeCapabilities::onion_relay(processor.onion_process_epoch);
     OnlineNodeDescriptor::new_signed(
         OnlineNodeDescriptorBody {
             did: processor.did(),
@@ -316,6 +316,31 @@ pub(super) fn online_relay_descriptor_for_processor(
         MessageSigner::new(&processor.delegatee_key, processor.swarm.network_id()),
     )
     .map_err(Error::CoreError)
+}
+
+/// Store in `processor`'s online-node registry the relay registrations of `exits` and of
+/// `relays` fresh relay processors, which are returned. An onion loop over one symbol needs
+/// `H − 1 = 4` distinct relay registrants, the exit included (#834 D5).
+pub(super) async fn store_onion_relays(
+    processor: &Processor,
+    exits: &[&Processor],
+    relays: usize,
+) -> Result<Vec<Processor>> {
+    let mut relay_processors = Vec::with_capacity(relays);
+    for _ in 0..relays {
+        relay_processors.push(prepare_processor().await);
+    }
+    let now_ms = get_epoch_ms();
+    let descriptors = exits
+        .iter()
+        .copied()
+        .chain(relay_processors.iter())
+        .map(|relay| online_relay_descriptor_for_processor(relay, now_ms))
+        .collect::<Result<Vec<_>>>()?;
+    processor
+        .storage_store(Processor::online_node_registry_entry(descriptors)?)
+        .await?;
+    Ok(relay_processors)
 }
 
 pub(super) fn mismatched_storage_redundancy(value: u16) -> u16 {

@@ -25,6 +25,8 @@
 //! Substitution `σ[ā]` replaces the terminal symbol `s` by the application `(s, ā)`; relay positions
 //! take `ε` and are left untouched, so the substitution happens once, at the terminal.
 
+use std::num::NonZeroUsize;
+
 use super::circuit::OnionCircuitPayload;
 use super::OnionRouteError;
 use super::OnionServiceName;
@@ -54,9 +56,9 @@ impl OnionSymbolWord {
         &self.terminal
     }
 
-    /// Return the number of positions, one hop each: `k + 1`.
-    pub const fn hop_count(&self) -> usize {
-        self.relays.saturating_add(1)
+    /// Return the number of positions, one hop each: `k + 1`, at least the terminal's.
+    pub const fn hop_count(&self) -> NonZeroUsize {
+        NonZeroUsize::MIN.saturating_add(self.relays)
     }
 
     /// Substitute a client payload into this word: `σ[ā]`.
@@ -104,9 +106,9 @@ impl<P> OnionPipeline<P> {
         self.relays.first().unwrap_or(&self.terminal)
     }
 
-    /// Return the number of positions, one hop each.
-    pub fn hop_count(&self) -> usize {
-        self.relays.len().saturating_add(1)
+    /// Return the number of positions, one hop each: at least one, the terminal's.
+    pub fn hop_count(&self) -> NonZeroUsize {
+        NonZeroUsize::MIN.saturating_add(self.relays.len())
     }
 
     /// Relabel every position in evaluation order, stopping at the first failure.
@@ -143,7 +145,7 @@ mod tests {
         let word = OnionSymbolWord::new(2, OnionServiceName::https());
         let payload = OnionCircuitPayload::new(OnionServiceName::https(), Bytes::from_static(b"a"));
 
-        assert_eq!(word.hop_count(), 3);
+        assert_eq!(word.hop_count().get(), 3);
         assert_eq!(word.apply(payload.clone())?, payload);
         assert!(matches!(
             word.apply(OnionCircuitPayload::new(

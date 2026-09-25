@@ -12,6 +12,7 @@ use super::fixture_rng;
 use super::fixture_route;
 use super::hop_key;
 use crate::onion::circuit::OnionCellBucket;
+use crate::onion::loop_shape::MAX_ONION_LOOP_HOPS;
 use crate::onion::sphinx::cell::OnionCell;
 use crate::onion::sphinx::cell::OnionCellWidth;
 use crate::onion::sphinx::cell::OnionStep;
@@ -25,7 +26,6 @@ use crate::onion::sphinx::header::OnionPeelError;
 use crate::onion::sphinx::header::ONION_HEADER_BYTES;
 use crate::onion::sphinx::layer::ONION_LAYER_BYTES;
 use crate::onion::sphinx::seed::OnionSegmentSeed;
-use crate::onion::sphinx::MAX_ONION_LOOP_HOPS;
 
 /// Width of `α` in the header encoding.
 const ALPHA_BYTES: usize = 33;

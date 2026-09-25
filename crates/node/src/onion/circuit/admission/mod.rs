@@ -177,7 +177,7 @@ use super::OnionForwardNonce;
 use super::ONION_FORWARD_EXPIRY_QUANTUM_MS;
 use super::ONION_FORWARD_MAX_VALIDITY_MS;
 use super::ONION_FORWARD_PAYLOAD_TTL_MS;
-use crate::onion::OnionExitEpoch;
+use crate::onion::OnionProcessEpoch;
 
 /// Admission window `V = 150 s`: a layer is admissible at `arr` iff `arr < x ≤ arr + V`.
 const ONION_ADMISSION_WINDOW_MS: u128 = ONION_FORWARD_MAX_VALIDITY_MS;
@@ -229,7 +229,7 @@ pub(super) struct OnionAdmissionCharge {
     /// The cell's arrival: the monotone clock at its charge. The window is judged here.
     arrival_ms: u128,
     /// The epoch of the state that charged the cell.
-    epoch: OnionExitEpoch,
+    epoch: OnionProcessEpoch,
 }
 
 /// One generation of an authenticated link from a sender DID, as core admits and retires it. It
@@ -247,7 +247,7 @@ pub(super) struct OnionAdmissionLink {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct OnionAdmissionLayer {
     /// Process epoch the layer was sealed for.
-    pub(super) epoch: OnionExitEpoch,
+    pub(super) epoch: OnionProcessEpoch,
     /// Quantised expiry `x` of the layer's loop.
     pub(super) expiry: OnionExpiry,
     /// Replay tag `ν` of the layer.
@@ -318,7 +318,7 @@ impl SenderLedger {
 /// The admission state `S` of one hop for one process lifetime.
 pub(super) struct OnionAdmissionState {
     /// This process's epoch `epoch_i`.
-    epoch: OnionExitEpoch,
+    epoch: OnionProcessEpoch,
     /// Monotone clock: the greatest `now` seen so far.
     clock_ms: u128,
     /// The quantum at which drained ledgers were last swept.
@@ -338,7 +338,7 @@ impl OnionAdmissionState {
     /// once at process start by the caller. The table holds `2·R` ledgers and live links, where `R`
     /// is the transport connection-registry capacity.
     pub(super) fn new(
-        epoch: OnionExitEpoch,
+        epoch: OnionProcessEpoch,
         filter_key: OnionReplayFilterKey,
         link_registry_capacity: NonZeroUsize,
     ) -> Self {
@@ -367,7 +367,7 @@ impl OnionAdmissionState {
     /// refused when `|live| ≤ 2·R`.
     pub(super) fn renew(
         &mut self,
-        epoch: OnionExitEpoch,
+        epoch: OnionProcessEpoch,
         filter_key: OnionReplayFilterKey,
         live: impl IntoIterator<Item = OnionAdmissionLink>,
     ) -> Result<OnionRefusedLinks, OnionEpochNotFresh> {

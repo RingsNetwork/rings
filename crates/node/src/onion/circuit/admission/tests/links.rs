@@ -38,7 +38,7 @@ use crate::onion::circuit::admission::OnionReplayFilterKey;
 use crate::onion::circuit::admission::ADMISSION_WINDOW_QUANTA_WIDE;
 use crate::onion::circuit::admission::ONION_ADMISSION_SENDER_UNITS;
 use crate::onion::circuit::admission::ONION_ADMISSION_WINDOW_MS;
-use crate::onion::OnionExitEpoch;
+use crate::onion::OnionProcessEpoch;
 
 /// Law: there is no fixed sender limit and no lockout. With `R = 100`, 150 live links, more than
 /// the old 64 partitions, are all admitted.
@@ -278,7 +278,7 @@ fn test_renewal_rebuilds_live_links_from_the_snapshot() {
     let held = admission
         .charge(ORIGIN_MS, link(2), units(1))
         .expect("DID 2 has headroom");
-    let renewed_epoch = OnionExitEpoch::new([8; 16]);
+    let renewed_epoch = OnionProcessEpoch::new([8; 16]);
     assert_eq!(
         admission.renew(renewed_epoch, OnionReplayFilterKey::new(rng.gen()), [
             link(1),

@@ -61,67 +61,43 @@ impl OnionProxyProtocol {
 /// Target-agnostic onion proxy configuration.
 ///
 /// A client owns one proxy configuration per ingress style, then resolves one route per target
-/// authority. This keeps browser proxy APIs from becoming one-off URL fetch wrappers.
+/// authority. This keeps browser proxy APIs from becoming one-off URL fetch wrappers. The route
+/// length is not configurable: it is fixed by the pipeline's loop shape (#834 D5).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OnionProxyConfig {
     /// Requested ingress protocol.
     pub protocol: OnionProxyProtocol,
     service: OnionServiceName,
-    /// Desired hop count including the exit. `0` uses [`crate::onion::DEFAULT_ONION_ROUTE_HOPS`].
-    pub hop_count: usize,
-    /// Whether route selection may use fewer hops when too few relays are live.
-    pub allow_short_paths: bool,
 }
 
 impl OnionProxyConfig {
     /// Create a proxy configuration for `protocol`.
-    pub fn new(protocol: OnionProxyProtocol, hop_count: usize, allow_short_paths: bool) -> Self {
+    pub fn new(protocol: OnionProxyProtocol) -> Self {
         Self {
             protocol,
             service: protocol.default_exit_service_name(),
-            hop_count,
-            allow_short_paths,
         }
     }
 
     /// Create a proxy configuration with an explicit exit service.
-    pub fn with_service(
-        protocol: OnionProxyProtocol,
-        service: OnionServiceName,
-        hop_count: usize,
-        allow_short_paths: bool,
-    ) -> Result<Self> {
+    pub fn with_service(protocol: OnionProxyProtocol, service: OnionServiceName) -> Result<Self> {
         validate_proxy_service(protocol, &service)?;
-        Ok(Self {
-            protocol,
-            service,
-            hop_count,
-            allow_short_paths,
-        })
+        Ok(Self { protocol, service })
     }
 
     /// Create a native TCP CONNECT proxy configuration.
-    pub fn tcp_connect(hop_count: usize, allow_short_paths: bool) -> Self {
-        Self::new(OnionProxyProtocol::TcpConnect, hop_count, allow_short_paths)
+    pub fn tcp_connect() -> Self {
+        Self::new(OnionProxyProtocol::TcpConnect)
     }
 
     /// Create a native TCP CONNECT proxy configuration for a specific TCP exit service.
-    pub fn tcp_connect_service(
-        service: OnionServiceName,
-        hop_count: usize,
-        allow_short_paths: bool,
-    ) -> Result<Self> {
-        Self::with_service(
-            OnionProxyProtocol::TcpConnect,
-            service,
-            hop_count,
-            allow_short_paths,
-        )
+    pub fn tcp_connect_service(service: OnionServiceName) -> Result<Self> {
+        Self::with_service(OnionProxyProtocol::TcpConnect, service)
     }
 
     /// Create an HTTPS proxy configuration.
-    pub fn https_proxy(hop_count: usize, allow_short_paths: bool) -> Self {
-        Self::new(OnionProxyProtocol::HttpsProxy, hop_count, allow_short_paths)
+    pub fn https_proxy() -> Self {
+        Self::new(OnionProxyProtocol::HttpsProxy)
     }
 
     /// Return the onion-exit service name required by this proxy.
@@ -197,26 +173,22 @@ mod tests {
 
     #[test]
     fn test_proxy_config_is_target_agnostic() {
-        let proxy = OnionProxyConfig::https_proxy(3, false);
+        let proxy = OnionProxyConfig::https_proxy();
 
         assert_eq!(proxy.exit_service(), "https");
-        assert_eq!(proxy.hop_count, 3);
-        assert!(!proxy.allow_short_paths);
     }
 
     #[test]
     fn test_tcp_proxy_config_accepts_tcp_service() -> Result<()> {
-        let proxy = OnionProxyConfig::tcp_connect_service(OnionServiceName::tcp(), 2, true)?;
+        let proxy = OnionProxyConfig::tcp_connect_service(OnionServiceName::tcp())?;
 
         assert_eq!(proxy.exit_service(), "tcp");
-        assert_eq!(proxy.hop_count, 2);
-        assert!(proxy.allow_short_paths);
         Ok(())
     }
 
     #[test]
     fn test_tcp_proxy_config_accepts_https_tcp_service() -> Result<()> {
-        let proxy = OnionProxyConfig::tcp_connect_service(OnionServiceName::https(), 1, false)?;
+        let proxy = OnionProxyConfig::tcp_connect_service(OnionServiceName::https())?;
 
         assert_eq!(proxy.exit_service(), "https");
         Ok(())

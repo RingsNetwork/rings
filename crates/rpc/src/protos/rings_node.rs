@@ -280,6 +280,14 @@ pub enum OnlineNodeTypeInfo {
     Ffi,
 }
 
+/// Capabilities of one node process, mirroring the node's `OnlineNodeCapabilities`.
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct OnlineNodeCapabilitiesInfo {
+    /// Process epoch at which the node registers the onion `relay` symbol, encoded with the node
+    /// serde shape; absent when it registers no `relay`.
+    pub onion_relay: Option<Value>,
+}
+
 /// Public descriptor for a node currently known by the online-node directory.
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct OnlineNodeDescriptorInfo {
@@ -297,8 +305,8 @@ pub struct OnlineNodeDescriptorInfo {
     pub storage_redundancy: u16,
     /// Number of virtual DHT nodes advertised by the node.
     pub dht_virtual_nodes: u16,
-    /// Capability names advertised by the node.
-    pub capabilities: Vec<String>,
+    /// Typed capabilities of the advertised node process.
+    pub capabilities: OnlineNodeCapabilitiesInfo,
     /// Optional endpoint hint clients may use for direct connection.
     pub endpoint_hint: Option<String>,
     /// Descriptor creation timestamp in Unix milliseconds.

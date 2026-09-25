@@ -93,12 +93,6 @@ pub struct NativeGatewayConfig {
     /// Onion TCP exit service selected for captured flows.
     #[serde(default = "OnionServiceName::tcp")]
     pub onion_service: OnionServiceName,
-    /// Requested onion route hop count; zero selects the node default.
-    #[serde(default)]
-    pub onion_hop_count: usize,
-    /// Permit shorter onion paths when the requested hop count is unavailable.
-    #[serde(default)]
-    pub onion_allow_short_paths: bool,
 }
 
 impl NativeGatewayConfig {
@@ -115,8 +109,6 @@ impl NativeGatewayConfig {
             wintun_dll_path: None,
             status_refresh_secs: default_gateway_status_refresh_secs(),
             onion_service: OnionServiceName::tcp(),
-            onion_hop_count: 0,
-            onion_allow_short_paths: false,
         }
     }
 
@@ -131,6 +123,61 @@ impl NativeGatewayConfig {
 #[derive(Serialize)]
 struct GatewaySection<'a> {
     gateway: &'a NativeGatewayConfig,
+}
+
+/// Keys of the `gateway:` section: those of [`NativeGatewayConfig`] and of the flattened
+/// [`GatewayConfig`], in the order `rings init` writes them.
+const GATEWAY_KEYS: [&str; 11] = [
+    "enabled",
+    "plan",
+    "max_flows",
+    "flow_idle_timeout",
+    "tcp_buffer_bytes",
+    "interface_name",
+    "route_ledger_path",
+    "unix_helper_socket",
+    "wintun_dll_path",
+    "status_refresh_secs",
+    "onion_service",
+];
+
+/// Keys of the `gateway:` section removed by the onion loop cutover (#834 D5), rejected with a
+/// pointer to the loop shape.
+const REMOVED_GATEWAY_KEYS: [&str; 2] = ["onion_hop_count", "onion_allow_short_paths"];
+
+/// Deserialize the `gateway:` section, rejecting every key outside [`GATEWAY_KEYS`].
+///
+/// The section flattens [`GatewayConfig`], so serde cannot deny unknown keys there; without this
+/// a misspelt key (say `onion_services`) would silently fall back to its default.
+fn deserialize_gateway_section<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<NativeGatewayConfig>, D::Error>
+where D: serde::Deserializer<'de> {
+    let Some(section) = Option::<serde_yaml::Mapping>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    if let Some(key) = section
+        .keys()
+        .map(|key| key.as_str().unwrap_or_default())
+        .find(|key| !GATEWAY_KEYS.contains(key))
+    {
+        return Err(serde::de::Error::custom(
+            if REMOVED_GATEWAY_KEYS.contains(&key) {
+                format!(
+                    "gateway.{key} was removed: the onion route length is fixed by the loop shape \
+                     (#834 D5)"
+                )
+            } else {
+                format!(
+                    "unknown gateway key {key:?}; expected one of {}",
+                    GATEWAY_KEYS.join(", ")
+                )
+            },
+        ));
+    }
+    serde_yaml::from_value(serde_yaml::Value::Mapping(section))
+        .map(Some)
+        .map_err(serde::de::Error::custom)
 }
 
 const fn default_gateway_status_refresh_secs() -> u64 {
@@ -228,12 +275,6 @@ pub struct Config {
     /// Onion service name used by the HTTP CONNECT proxy.
     #[serde(default = "OnionServiceName::tcp")]
     pub onion_http_proxy_service: OnionServiceName,
-    /// Requested hop count for HTTP CONNECT proxy routes.
-    #[serde(default)]
-    pub onion_http_proxy_hop_count: usize,
-    /// Whether the HTTP CONNECT proxy may use shorter routes when needed.
-    #[serde(default)]
-    pub onion_http_proxy_allow_short_paths: bool,
     /// Timeout for reading HTTP CONNECT headers in seconds.
     #[serde(default = "crate::onion::proxy::http::default_connect_header_timeout_secs")]
     pub onion_http_proxy_header_timeout_secs: u64,
@@ -243,7 +284,11 @@ pub struct Config {
     /// Native TUN gateway section; `rings init` writes it disabled, and it starts a gateway in
     /// the same foreground lifecycle only under `enabled: true` or `--gateway`. Older configs
     /// without the section load as `None`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_gateway_section",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub gateway: Option<NativeGatewayConfig>,
     /// Managed bootstrap targets `rings run` keeps reachable for the life of the process.
     #[serde(default)]
@@ -343,8 +388,6 @@ impl Config {
             onion_exit_policy: crate::onion::default_onion_exit_policy(),
             onion_http_proxy_addr: None,
             onion_http_proxy_service: OnionServiceName::tcp(),
-            onion_http_proxy_hop_count: 0,
-            onion_http_proxy_allow_short_paths: false,
             onion_http_proxy_header_timeout_secs:
                 crate::onion::proxy::http::default_connect_header_timeout_secs(),
             onion_http_proxy_max_connections:
@@ -468,8 +511,6 @@ measure_storage:
         assert!(!cfg.advertise_onion_exit);
         assert_eq!(cfg.onion_http_proxy_addr, None);
         assert_eq!(cfg.onion_http_proxy_service, OnionServiceName::tcp());
-        assert_eq!(cfg.onion_http_proxy_hop_count, 0);
-        assert!(!cfg.onion_http_proxy_allow_short_paths);
         assert_eq!(
             cfg.onion_http_proxy_header_timeout_secs,
             crate::onion::proxy::http::default_connect_header_timeout_secs()
@@ -637,24 +678,47 @@ gateway:
                     .collect::<Vec<_>>()
             });
 
-        assert_eq!(
-            keys,
-            Some(vec![
-                "enabled",
-                "plan",
-                "max_flows",
-                "flow_idle_timeout",
-                "tcp_buffer_bytes",
-                "interface_name",
-                "route_ledger_path",
-                "unix_helper_socket",
-                "wintun_dll_path",
-                "status_refresh_secs",
-                "onion_service",
-                "onion_hop_count",
-                "onion_allow_short_paths",
-            ])
+        assert_eq!(keys, Some(GATEWAY_KEYS.to_vec()));
+    }
+
+    /// Any key outside the gateway section's own is rejected, not ignored by the flattened
+    /// section, so a misspelt key cannot silently fall back to its default.
+    #[test]
+    fn gateway_section_rejects_unknown_keys() {
+        let document = format!(
+            "{CONFIG_WITHOUT_GATEWAY_SECTION}{GATEWAY_SECTION_WITHOUT_ENABLED}  \
+             onion_services: https\n"
         );
+
+        let error = match serde_yaml::from_str::<Config>(&document) {
+            Ok(_) => panic!("a misspelt gateway key must be rejected"),
+            Err(error) => error.to_string(),
+        };
+
+        assert!(error.contains("unknown gateway key \"onion_services\""));
+    }
+
+    /// The route-length keys removed by the onion loop cutover are rejected by name, not ignored
+    /// by the flattened gateway section.
+    #[test]
+    fn gateway_section_rejects_removed_route_length_keys() {
+        for (key, value) in [
+            ("onion_hop_count", "3"),
+            ("onion_allow_short_paths", "true"),
+        ] {
+            let document = format!(
+                "{CONFIG_WITHOUT_GATEWAY_SECTION}{GATEWAY_SECTION_WITHOUT_ENABLED}  \
+                 {key}: {value}\n"
+            );
+
+            let error = match serde_yaml::from_str::<Config>(&document) {
+                Ok(_) => panic!("gateway.{key} must be rejected"),
+                Err(error) => error.to_string(),
+            };
+
+            assert!(error.contains(&format!("gateway.{key} was removed")));
+            assert!(error.contains("loop shape"));
+        }
     }
 
     #[test]

@@ -9,33 +9,21 @@ use crate::extension::ext::Protocol;
 use crate::extension::ext::Reject;
 use crate::extension::ext::Transition;
 use crate::extension::ext::Wire;
+use crate::onion::OnionProcessEpoch;
+use crate::onion::OnionRole;
 
-/// Capabilities this node enables for the onion circuit data plane.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct OnionCircuitCapabilities {
-    relay: bool,
-    exit_epoch: Option<crate::onion::OnionExitEpoch>,
-}
+/// Capabilities this node enables for the onion circuit data plane: its [`OnionRole`] at the
+/// process epoch `e_n` exit layers must name, the image of the configured role under
+/// `OnionRole::map(|_| e_n)` (#834 D2).
+///
+/// A [`OnionRole::Client`] accepts no forward layer; every other rung relays; only
+/// [`OnionRole::Exit`] evaluates an exit layer, and only one sealed for its own process.
+pub type OnionCircuitCapabilities = OnionRole<OnionProcessEpoch>;
 
 impl OnionCircuitCapabilities {
-    /// Build capabilities from the node's advertised relay flag and installed exit epoch.
-    pub const fn from_registration(
-        relay: bool,
-        exit_epoch: Option<crate::onion::OnionExitEpoch>,
-    ) -> Self {
-        Self { relay, exit_epoch }
-    }
-
-    pub(super) const fn accepts_forward_layers(self) -> bool {
-        self.relay || self.exit_epoch.is_some()
-    }
-
-    pub(super) const fn permits_relay_layer(self) -> bool {
-        self.relay
-    }
-
-    pub(super) fn permits_exit_epoch(self, process_epoch: crate::onion::OnionExitEpoch) -> bool {
-        matches!(self.exit_epoch, Some(local_epoch) if local_epoch == process_epoch)
+    /// Return whether an exit layer sealed for `process_epoch` may be evaluated here.
+    pub(super) fn permits_exit_layer(self, process_epoch: OnionProcessEpoch) -> bool {
+        matches!(self, Self::Exit(local) if local == process_epoch)
     }
 }
 

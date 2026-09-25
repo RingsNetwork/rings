@@ -31,7 +31,40 @@ async fn test_provider_listen_with_pre_stopped_token_returns_before_first_tick()
         provider.listen_with(stop.token()),
     )
     .await
-    .expect("pre-stopped provider listen token should exit before the first stabilization tick");
+    .expect("pre-stopped provider listen token should exit before the first stabilization tick")
+    .expect("provider listen");
+}
+
+/// Listening installs the onion circuit runtime exactly for the roles that register `relay`, and
+/// keeps a runtime installed before it.
+#[tokio::test]
+async fn test_provider_listen_installs_the_onion_runtime_of_relay_roles() {
+    use crate::onion::circuit::ONION_CIRCUIT_NAMESPACE;
+    use crate::onion::native::NativeOnionCircuitHandle;
+    use crate::onion::OnionRole;
+    use crate::tests::native::prepare_processor_with_onion_role;
+
+    let stopped = StopSource::new();
+    stopped.request_stop();
+    let client = Provider::from_processor(Arc::new(prepare_processor().await));
+    let relay = Provider::from_processor(Arc::new(
+        prepare_processor_with_onion_role(OnionRole::Relay).await,
+    ));
+    let installed = Provider::from_processor(Arc::new(
+        prepare_processor_with_onion_role(OnionRole::Relay).await,
+    ));
+    let _handle = NativeOnionCircuitHandle::install(&installed.extensions()).expect("install");
+
+    for provider in [&client, &relay, &installed] {
+        provider
+            .listen_with(stopped.token())
+            .await
+            .expect("provider listen");
+    }
+
+    assert!(!client.extensions().contains(ONION_CIRCUIT_NAMESPACE));
+    assert!(relay.extensions().contains(ONION_CIRCUIT_NAMESPACE));
+    assert!(installed.extensions().contains(ONION_CIRCUIT_NAMESPACE));
 }
 
 #[tokio::test]
@@ -46,10 +79,12 @@ async fn test_provider_listen_with_started_token_returns_after_stop() {
     };
 
     tokio::time::timeout(LISTENER_STOP_TIMEOUT, async {
-        futures::join!(listen, stopper);
+        let (listened, ()) = futures::join!(listen, stopper);
+        listened
     })
     .await
-    .expect("started provider listen token should exit after stop");
+    .expect("started provider listen token should exit after stop")
+    .expect("provider listen");
 }
 
 /// Cloned processor handles queue listener starts and preserve restart after cleanup.
@@ -145,7 +180,10 @@ async fn test_provider_wrappers_share_listener_lifecycle_lock() {
     let active_stop = StopSource::new();
     let active_token = active_stop.token();
     let active = tokio::spawn(async move {
-        original_provider.listen_with(active_token).await;
+        original_provider
+            .listen_with(active_token)
+            .await
+            .expect("provider listen");
     });
 
     // Wait until the first provider has acquired the lifecycle lock before queuing
@@ -169,14 +207,20 @@ async fn test_provider_wrappers_share_listener_lifecycle_lock() {
     cloned_stop.request_stop();
     let cloned_token = cloned_stop.token();
     let mut cloned = tokio::spawn(async move {
-        cloned_provider.listen_with(cloned_token).await;
+        cloned_provider
+            .listen_with(cloned_token)
+            .await
+            .expect("provider listen");
     });
 
     let independent_stop = StopSource::new();
     independent_stop.request_stop();
     let independent_token = independent_stop.token();
     let mut independent = tokio::spawn(async move {
-        independent_provider.listen_with(independent_token).await;
+        independent_provider
+            .listen_with(independent_token)
+            .await
+            .expect("provider listen");
     });
 
     assert!(tokio::time::timeout(Duration::from_millis(20), &mut cloned)

@@ -9,30 +9,68 @@ use serde::Serialize;
 use crate::error::Error;
 
 /// Local route/circuit failure before any user-facing rendering.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum OnionRouteError {
-    /// A route or circuit was unexpectedly empty.
-    RouteHasNoHops,
-    /// The requested or constructed hop count is outside the circuit bound.
-    HopCountOutOfBounds {
-        /// Requested or constructed hop count.
-        hop_count: usize,
-        /// Maximum hop count accepted by this circuit implementation.
-        max_hops: u8,
+    /// A pipeline has no symbol application or more than the loop admits (#834 D4a).
+    #[error("onion pipeline has {symbols} symbol applications; a loop admits 1 to {max_symbols}")]
+    LoopSymbolsOutOfBounds {
+        /// Number of symbol applications of the pipeline.
+        symbols: usize,
+        /// Largest number of symbol applications of one loop.
+        max_symbols: usize,
     },
-    /// Route construction could not select enough relay hops.
-    NotEnoughRelays {
-        /// Requested hop count including the exit.
-        hop_count: usize,
+    /// Fewer distinct eligible hops exist than the loop's `H − 1` positions require (#834 D5).
+    #[error("onion loop requires {required} distinct hops but only {eligible} are eligible")]
+    NotEnoughLoopHops {
+        /// Distinct hops the loop requires.
+        required: usize,
+        /// Distinct eligible hops found.
+        eligible: usize,
+    },
+    /// The symbol registrants admit no assignment of pairwise distinct hops to the symbol
+    /// positions of a loop.
+    #[error("onion symbol registrants admit no distinct hop per symbol position")]
+    NoDistinctSymbolHops,
+    /// A loop draw found no candidate although its matching guaranteed one: a violated invariant
+    /// of loop selection, never a property of the network.
+    #[error("onion loop selection violated its invariant: a guaranteed draw had no candidate")]
+    LoopDrawInvariant,
+    /// A route's loop does not have the shape of the route's pipeline.
+    #[error("onion loop has {actual} symbol hops but its pipeline has {expected}")]
+    LoopShapeMismatch {
+        /// Symbol applications of the route's pipeline.
+        expected: usize,
+        /// Symbol hops of the loop.
+        actual: usize,
     },
     /// Route construction could not select a first hop accepted by the caller.
+    #[error("no onion route has a permitted first hop")]
     NoPermittedFirstHop,
     /// No live exit descriptor offers the requested service.
+    #[error("no live onion exit offers service {service:?}")]
     NoLiveExit {
         /// Requested service name.
         service: String,
     },
+    /// Every live exit of the service differs from its node's current relay registration in
+    /// session key or process epoch: the exit registered from another process, typically before
+    /// a restart, and its descriptors have not converged (#834 D2).
+    #[error(
+        "every onion exit offering service {service:?} differs from its node's current relay \
+         registration in session key or process epoch"
+    )]
+    ExitRelayRegistrationMismatch {
+        /// Requested service name.
+        service: String,
+    },
+    /// Every live exit of the service belongs to a node that registers no `relay` (#834 D2).
+    #[error("every onion exit offering service {service:?} lacks a relay registration")]
+    ExitWithoutRelayRegistration {
+        /// Requested service name.
+        service: String,
+    },
     /// Live exits advertise the service, but none can serve the requested proxy protocol.
+    #[error("no live onion exit offers service {service:?} for proxy protocol {protocol:?}")]
     NoExitForProxyProtocol {
         /// Requested service name.
         service: String,
@@ -40,6 +78,7 @@ pub enum OnionRouteError {
         protocol: String,
     },
     /// Live exits advertise the service, but no policy allows the target.
+    #[error("no live onion exit for service {service:?} allows target {target:?}")]
     NoExitAllowsTarget {
         /// Requested service name.
         service: String,
@@ -47,12 +86,19 @@ pub enum OnionRouteError {
         target: String,
     },
     /// Route construction found duplicate DIDs.
+    #[error("onion route contains duplicate hops")]
     DuplicateRouteHops,
     /// The selected exit descriptor does not match the final encrypted hop.
+    #[error("onion route exit hop does not match exit descriptor")]
     ExitHopMismatch,
     /// The selected exit does not offer the route service.
+    #[error("onion route exit does not offer selected service")]
     ExitServiceMismatch,
     /// A payload service does not match its route service.
+    #[error(
+        "onion payload service {payload_service:?} does not match route service \
+         {route_service:?}"
+    )]
     PayloadServiceMismatch {
         /// Service label authenticated in the payload.
         payload_service: String,
@@ -60,56 +106,82 @@ pub enum OnionRouteError {
         route_service: String,
     },
     /// A message cannot fit in the largest supported encrypted cell class.
+    #[error("onion message exceeds the largest encrypted cell class")]
     CellPayloadTooLarge,
     /// A decrypted encrypted cell has an invalid length or internal framing.
+    #[error("invalid encrypted onion cell")]
     InvalidCell,
     /// A live relay return edge already belongs to another previous hop.
+    #[error("onion relay return edge already belongs to another previous hop")]
     ReturnEdgeConflict,
     /// The relay return table is full.
+    #[error("onion relay circuit table is full")]
     RelayTableFull,
     /// One authenticated previous hop exhausted its share of the relay return table.
+    #[error("onion relay circuit table quota for previous hop is full")]
     RelayPeerTableFull,
     /// A backward payload signer is not the selected exit DID.
+    #[error("onion backward payload signer is not the selected exit")]
     BackwardSignerMismatch,
     /// A backward payload signer account key is not the selected exit key.
+    #[error("onion backward payload account key is not the selected exit")]
     BackwardAccountKeyMismatch,
     /// A backward payload delegatee key is not the selected exit delegatee key.
+    #[error("onion backward payload delegatee key is not the selected exit")]
     BackwardSessionKeyMismatch,
     /// A backward payload signature or freshness proof is invalid.
+    #[error("invalid onion backward payload signature")]
     InvalidBackwardSignature,
     /// A forward nonce has already authorized an exit-side action.
+    #[error("replayed onion forward payload")]
     ForwardReplay,
     /// A forward payload reached the exit after its authenticated expiry.
+    #[error("expired onion forward payload")]
     ForwardPayloadExpired,
     /// A forward payload names an exit process epoch that is no longer active.
+    #[error("onion forward payload belongs to another exit process epoch")]
     ForwardEpochMismatch,
     /// A backward sequence number has already delivered a client-side action.
+    #[error("replayed onion TCP backward payload")]
     BackwardReplay,
     /// A circuit direction exhausted its monotonic sequence space.
+    #[error("onion circuit sequence exhausted")]
     SequenceExhausted,
     /// A backward payload carries a return id that does not belong to the local client state.
+    #[error("onion backward payload return id mismatch")]
     BackwardReturnIdMismatch,
     /// A backward payload decoded to a shape that no client adapter may accept.
+    #[error("unexpected onion backward payload for client adapter")]
     UnexpectedBackwardPayload,
     /// The runtime could not allocate a unique circuit id.
+    #[error("failed to allocate unique onion circuit id")]
     CircuitIdAllocationFailed,
     /// A queued endpoint cell lost its drain task before the overlay reported a result.
+    #[error("onion link send was cancelled before overlay completion")]
     LinkSendCancelled,
     /// An HTTPS response channel closed before the exit's outcome was delivered.
+    #[error("onion HTTPS response channel closed")]
     HttpsResponseClosed,
     /// A TCP open response channel closed before an answer.
+    #[error("onion TCP open response channel closed")]
     TcpOpenResponseClosed,
     /// A TCP open request timed out before the exit answered.
+    #[error("onion TCP open timed out")]
     TcpOpenTimedOut,
     /// A TCP stream key is unknown to this runtime.
+    #[error("unknown onion TCP stream")]
     UnknownTcpStream,
     /// A TCP stream channel has already closed.
+    #[error("onion TCP stream is closed")]
     TcpStreamClosed,
     /// A TCP stream's bounded inbound queue cannot accept another frame.
+    #[error("onion TCP stream inbound queue is saturated")]
     TcpStreamBackpressure,
     /// A duplicate TCP open targeted a live circuit.
+    #[error("duplicate onion TCP open for live circuit")]
     DuplicateTcpOpen,
     /// A received TCP return peer differs from the selected route peer.
+    #[error("unexpected onion TCP return peer: expected {expected:?}, got {actual:?}")]
     UnexpectedTcpReturnPeer {
         /// Return peer selected by the client route.
         expected: Did,
@@ -117,6 +189,7 @@ pub enum OnionRouteError {
         actual: Did,
     },
     /// A received TCP forward peer differs from the selected route peer.
+    #[error("unexpected onion TCP forward peer: expected {expected:?}, got {actual:?}")]
     UnexpectedTcpForwardPeer {
         /// Forward peer recorded when the exit accepted the circuit.
         expected: Did,
@@ -124,119 +197,12 @@ pub enum OnionRouteError {
         actual: Did,
     },
     /// An exit-reported failure reached the local route client.
+    #[error("{0}")]
     ExitFailure(OnionExitFailure),
     /// A test-only route fixture was missing an expected relay.
     #[cfg(test)]
+    #[error("missing test relay")]
     MissingTestRelay,
-}
-
-impl fmt::Display for OnionRouteError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::RouteHasNoHops => f.write_str("onion route has no hops"),
-            Self::HopCountOutOfBounds {
-                hop_count,
-                max_hops,
-            } => write!(f, "onion route hop count {hop_count} exceeds limit {max_hops}"),
-            Self::NotEnoughRelays { hop_count } => {
-                write!(f, "not enough relay candidates for {hop_count}-hop onion route")
-            }
-            Self::NoPermittedFirstHop => {
-                f.write_str("no onion route has a permitted first hop")
-            }
-            Self::NoLiveExit { service } => {
-                write!(f, "no live onion exit offers service {service:?}")
-            }
-            Self::NoExitForProxyProtocol { service, protocol } => write!(
-                f,
-                "no live onion exit offers service {service:?} for proxy protocol {protocol:?}"
-            ),
-            Self::NoExitAllowsTarget { service, target } => write!(
-                f,
-                "no live onion exit for service {service:?} allows target {target:?}"
-            ),
-            Self::DuplicateRouteHops => f.write_str("onion route contains duplicate hops"),
-            Self::ExitHopMismatch => {
-                f.write_str("onion route exit hop does not match exit descriptor")
-            }
-            Self::ExitServiceMismatch => {
-                f.write_str("onion route exit does not offer selected service")
-            }
-            Self::PayloadServiceMismatch {
-                payload_service,
-                route_service,
-            } => write!(
-                f,
-                "onion payload service {payload_service:?} does not match route service {route_service:?}"
-            ),
-            Self::CellPayloadTooLarge => {
-                f.write_str("onion message exceeds the largest encrypted cell class")
-            }
-            Self::InvalidCell => f.write_str("invalid encrypted onion cell"),
-            Self::ReturnEdgeConflict => {
-                f.write_str("onion relay return edge already belongs to another previous hop")
-            }
-            Self::RelayTableFull => f.write_str("onion relay circuit table is full"),
-            Self::RelayPeerTableFull => {
-                f.write_str("onion relay circuit table quota for previous hop is full")
-            }
-            Self::BackwardSignerMismatch => {
-                f.write_str("onion backward payload signer is not the selected exit")
-            }
-            Self::BackwardAccountKeyMismatch => {
-                f.write_str("onion backward payload account key is not the selected exit")
-            }
-            Self::BackwardSessionKeyMismatch => {
-                f.write_str("onion backward payload delegatee key is not the selected exit")
-            }
-            Self::InvalidBackwardSignature => {
-                f.write_str("invalid onion backward payload signature")
-            }
-            Self::ForwardReplay => f.write_str("replayed onion forward payload"),
-            Self::ForwardPayloadExpired => f.write_str("expired onion forward payload"),
-            Self::ForwardEpochMismatch => {
-                f.write_str("onion forward payload belongs to another exit process epoch")
-            }
-            Self::BackwardReplay => f.write_str("replayed onion TCP backward payload"),
-            Self::SequenceExhausted => f.write_str("onion circuit sequence exhausted"),
-            Self::BackwardReturnIdMismatch => {
-                f.write_str("onion backward payload return id mismatch")
-            }
-            Self::UnexpectedBackwardPayload => {
-                f.write_str("unexpected onion backward payload for client adapter")
-            }
-            Self::CircuitIdAllocationFailed => {
-                f.write_str("failed to allocate unique onion circuit id")
-            }
-            Self::LinkSendCancelled => {
-                f.write_str("onion link send was cancelled before overlay completion")
-            }
-            Self::HttpsResponseClosed => {
-                f.write_str("onion HTTPS response channel closed")
-            }
-            Self::TcpOpenResponseClosed => {
-                f.write_str("onion TCP open response channel closed")
-            }
-            Self::TcpOpenTimedOut => f.write_str("onion TCP open timed out"),
-            Self::UnknownTcpStream => f.write_str("unknown onion TCP stream"),
-            Self::TcpStreamClosed => f.write_str("onion TCP stream is closed"),
-            Self::TcpStreamBackpressure => {
-                f.write_str("onion TCP stream inbound queue is saturated")
-            }
-            Self::DuplicateTcpOpen => f.write_str("duplicate onion TCP open for live circuit"),
-            Self::UnexpectedTcpReturnPeer { expected, actual } => write!(
-                f,
-                "unexpected onion TCP return peer: expected {expected:?}, got {actual:?}"
-            ),
-            Self::UnexpectedTcpForwardPeer { expected, actual } => write!(
-                f,
-                "unexpected onion TCP forward peer: expected {expected:?}, got {actual:?}"
-            ),
-            Self::ExitFailure(failure) => failure.fmt(f),
-            #[cfg(test)]
-            Self::MissingTestRelay => f.write_str("missing test relay"),
-        }
-    }
 }
 
 /// Recoverable failure reported by an onion exit to its client.

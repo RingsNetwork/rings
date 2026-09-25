@@ -64,7 +64,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Listen messages from peers.
     let listening_provider = provider.clone();
-    tokio::spawn(async move { listening_provider.listen().await });
+    tokio::spawn(async move {
+        if let Err(error) = listening_provider.listen().await {
+            eprintln!("listener failed to start: {error}");
+        }
+    });
 
     // Join remote network via url then send message to the did.
     let args = parse_cli_args(std::env::args())?;

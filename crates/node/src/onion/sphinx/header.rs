@@ -69,7 +69,7 @@ use super::layer::OnionLayer;
 use super::layer::OnionLayerError;
 use super::layer::ONION_LAYER_BYTES;
 use super::xor_in_place;
-use super::MAX_ONION_LOOP_HOPS;
+use crate::onion::loop_shape::MAX_ONION_LOOP_HOPS;
 
 /// `|α|`, a compressed SEC1 secp256k1 point.
 const ONION_GROUP_ELEMENT_BYTES: usize = 33;
@@ -77,7 +77,8 @@ const ONION_GROUP_ELEMENT_BYTES: usize = 33;
 /// `|γ|`, the truncated header MAC.
 pub(crate) const ONION_HEADER_MAC_BYTES: usize = 16;
 
-/// `|β| = Ĥ·ℓ`, the routing information.
+/// `|β| = Ĥ·ℓ`, the routing information: exactly `Ĥ` layer slots whatever the loop's own `H`
+/// (L5′).
 pub(crate) const ONION_HEADER_ROUTING_BYTES: usize = MAX_ONION_LOOP_HOPS * ONION_LAYER_BYTES;
 
 /// `|χ| = |α| + |β| + |γ|`.

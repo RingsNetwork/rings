@@ -90,7 +90,8 @@ pub struct PeerRing {
     predecessor: Arc<Mutex<Option<Did>>>,
     /// Persistent replicated-entry storage.
     pub storage: EntryStorage,
-    /// Local fetched-entry cache, bounded at [`LOCAL_CACHE_CAPACITY`] entries.
+    /// Local fetched-entry cache, bounded at [`LOCAL_CACHE_CAPACITY`] entries: each carrier is
+    /// the join of the replies observed for its key (#864).
     pub cache: EntryStorage,
     /// Virtual ownership layout used by storage placement.
     storage_virtual_node_config: VirtualNodeConfig,
@@ -123,6 +124,8 @@ pub struct PeerRing {
     finger_jitter_entropy: OnceLock<uuid::Uuid>,
     /// Serializes every read-modify-write of a storage slot (see `chord::storage`).
     pub(super) storage_transition: FuturesMutex<()>,
+    /// Serializes every read-modify-write of a fetch-cache slot (see `chord::storage`).
+    pub(super) cache_transition: FuturesMutex<()>,
     /// Count of committed transitions that changed the routes (`Law (Epoch)`).
     topology_epoch: Epoch,
 }
@@ -179,6 +182,7 @@ impl PeerRing {
             clock_origin: Instant::now(),
             finger_jitter_entropy: OnceLock::new(),
             storage_transition: FuturesMutex::new(()),
+            cache_transition: FuturesMutex::new(()),
             topology_epoch: Epoch::default(),
             did,
         }

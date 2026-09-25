@@ -61,6 +61,7 @@ use crate::observability::PeerRatingSnapshot;
 use crate::observability::SessionKeySnapshot;
 use crate::observability::OPERATOR_SCHEMA_VERSION;
 use crate::observability::PEER_RATING_CAPACITY;
+use crate::onion::circuit::OnionCircuitCapabilities;
 use crate::onion::default_advertise_onion_exit;
 use crate::onion::default_advertise_onion_relay;
 use crate::onion::default_onion_exit_heartbeat_interval_secs;
@@ -69,22 +70,21 @@ use crate::onion::default_onion_exit_services;
 use crate::onion::default_onion_exit_ttl_secs;
 use crate::onion::directory;
 use crate::onion::directory::OnionDirectoryReader;
-use crate::onion::https_onion_exit_services;
 use crate::onion::proxy::OnionProxyConfig;
 use crate::onion::proxy::OnionProxyRoute;
 use crate::onion::proxy::OnionProxyTarget;
-#[cfg(all(feature = "browser", target_family = "wasm"))]
-use crate::onion::proxy::ONION_PROXY_HTTPS_SERVICE;
 use crate::onion::validate_onion_exit_registration_timing;
 use crate::onion::OnionEntryGuardStorage;
 use crate::onion::OnionEntryGuards;
 use crate::onion::OnionExitDescriptor;
-use crate::onion::OnionExitEpoch;
+use crate::onion::OnionExitOffer;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionExitRegistration;
+use crate::onion::OnionProcessEpoch;
+use crate::onion::OnionRole;
 use crate::onion::OnionServiceName;
 use crate::onion::ONION_EXITS_TOPIC;
-use crate::onion::ONION_RELAY_CAPABILITY;
+use crate::online::OnlineNodeCapabilities;
 use crate::online::OnlineNodeDescriptor;
 use crate::online::OnlineNodeType;
 use crate::online::ONLINE_NODES_TOPIC;
@@ -208,8 +208,8 @@ pub struct Processor {
     pub swarm: Arc<Swarm>,
     /// Same delegatee key held by the swarm transport; kept here for node-layer descriptor signing.
     delegatee_key: DelegateeKey,
-    /// Fresh process epoch shared by exit advertisement and exit-layer admission.
-    onion_exit_epoch: OnionExitEpoch,
+    /// Fresh process epoch `e_n` carried by every onion symbol this process registers (#834 D2).
+    onion_process_epoch: OnionProcessEpoch,
     onion_entry_guards: Arc<OnionEntryGuards>,
     stabilize_interval: Duration,
     online_node_registration: OnlineNodeRegistration,
@@ -217,8 +217,8 @@ pub struct Processor {
     /// Serializes listener generations across every clone and wrapper of this processor.
     /// Ownership includes graceful maintenance shutdown and measurement flushing.
     listener_lifecycle_lock: Arc<futures::lock::Mutex<()>>,
-    #[cfg(all(feature = "browser", target_family = "wasm"))]
-    advertise_onion_relay: bool,
+    /// Onion symbols this process registers (#834 D2).
+    onion_role: OnionRole<OnionExitOffer>,
     registration_tasks: Vec<Arc<dyn RegistrationTask>>,
     /// Process-local bounded recorder backing the authenticated operator surface.
     observability: Arc<Observability>,
@@ -243,18 +243,20 @@ impl Processor {
         &self.delegatee_key
     }
 
-    pub(crate) const fn onion_exit_epoch(&self) -> OnionExitEpoch {
-        self.onion_exit_epoch
-    }
-
     #[cfg(all(feature = "browser", target_family = "wasm"))]
     pub(crate) fn onion_entry_guards(&self) -> &OnionEntryGuards {
         self.onion_entry_guards.as_ref()
     }
 
-    #[cfg(all(feature = "browser", target_family = "wasm"))]
-    pub(crate) fn advertise_onion_relay(&self) -> bool {
-        self.advertise_onion_relay
+    /// Return the onion symbols this process registers (#834 D2).
+    pub const fn onion_role(&self) -> &OnionRole<OnionExitOffer> {
+        &self.onion_role
+    }
+
+    /// Return this process's circuit capabilities: its onion role at its process epoch, the image
+    /// of [`Self::onion_role`] under `OnionRole::map(|_| e_n)`.
+    pub(crate) fn onion_circuit_capabilities(&self) -> OnionCircuitCapabilities {
+        self.onion_role.as_ref().map(|_| self.onion_process_epoch)
     }
 
     fn registration_context(&self) -> RegistrationContext<'_> {
@@ -316,7 +318,10 @@ impl Processor {
 
     /// List signed online-node descriptors from the registry.
     ///
-    /// Rerouted as [`Self::storage_fetch`] documents.
+    /// The registry carrier is the join of every reply this node has observed (#864): it ascends
+    /// in the lattice order while cached and live, but a descriptor still leaves it on a
+    /// tombstone, on an overwrite or compaction floor (#867), or at the element cap. Rerouted as
+    /// [`Self::storage_fetch`] documents.
     pub async fn lookup_online_nodes(
         &self,
         include_expired: bool,
@@ -341,19 +346,19 @@ impl Processor {
 
     /// List signed onion-exit descriptors from the application-layer exit registry.
     ///
-    /// Rerouted as [`Self::storage_fetch`] documents.
+    /// Like [`Self::lookup_online_nodes`], the carrier read is the join of the observed replies
+    /// (#864). Rerouted as [`Self::storage_fetch`] documents.
     pub async fn lookup_onion_exits(
         &self,
         service: &str,
         include_expired: bool,
     ) -> Result<Vec<OnionExitDescriptor>> {
         let entry_key = entry::Entry::gen_did(ONION_EXITS_TOPIC)?;
+        let service = service.trim();
 
         let Some(entry) = self.fetch_storage_entry(entry_key).await? else {
             return Ok(vec![]);
         };
-
-        let service = service.trim();
         let exits = self.select_onion_exits_from_entry(&entry, service, include_expired);
         if include_expired
             || !exits.is_empty()
@@ -371,39 +376,8 @@ impl Processor {
         Ok(self.select_onion_exits_from_entry(&refreshed_entry, service, include_expired))
     }
 
-    pub(crate) async fn fetch_storage_entry(&self, entry_key: Did) -> Result<Option<entry::Entry>> {
-        let stop = StopToken::never();
-        self.fetch_storage_entry_with_stop(entry_key, &stop).await
-    }
-
-    pub(crate) async fn fetch_storage_entry_with_stop(
-        &self,
-        entry_key: Did,
-        stop: &StopToken,
-    ) -> Result<Option<entry::Entry>> {
-        if stop.should_stop() {
-            return Err(Error::RegistrationStopped);
-        }
-        self.swarm
-            .scoped_storage(stop.clone())
-            .storage_fetch(entry_key)
-            .await
-            .map_err(stoppable_storage_error)?;
-        for attempt in 0..DHT_LOOKUP_CACHE_POLL_ATTEMPTS {
-            if stop.should_stop() {
-                return Err(Error::RegistrationStopped);
-            }
-            if let Some(entry) = self.storage_check_cache(entry_key).await {
-                return Ok(Some(entry));
-            }
-            if attempt + 1 == DHT_LOOKUP_CACHE_POLL_ATTEMPTS {
-                break;
-            }
-            sleep(DHT_LOOKUP_CACHE_POLL_INTERVAL).await?;
-        }
-        Ok(None)
-    }
-
+    /// Select the newest live exit registration per `(DID, service)` of `entry` offering
+    /// `service` (every service when empty).
     fn select_onion_exits_from_entry(
         &self,
         entry: &entry::Entry,
@@ -421,6 +395,52 @@ impl Processor {
         .collect()
     }
 
+    pub(crate) async fn fetch_storage_entry(&self, entry_key: Did) -> Result<Option<entry::Entry>> {
+        let stop = StopToken::never();
+        self.fetch_storage_entry_with_stop(entry_key, &stop).await
+    }
+
+    /// Fetch `entry_key` and answer from the cache, the join of every reply observed (#864).
+    ///
+    /// A failed fetch is the empty read ([`Self::answer_failed_fetch`]). This serves the
+    /// directory lookups and the registration publisher alike: a publisher whose fetch fails
+    /// chooses what to tombstone from its cached observation instead of abandoning the attempt,
+    /// and its own replaced values are still caught by its record of what it published.
+    pub(crate) async fn fetch_storage_entry_with_stop(
+        &self,
+        entry_key: Did,
+        stop: &StopToken,
+    ) -> Result<Option<entry::Entry>> {
+        if stop.should_stop() {
+            return Err(Error::RegistrationStopped);
+        }
+        match self
+            .swarm
+            .scoped_storage(stop.clone())
+            .storage_fetch(entry_key)
+            .await
+            .map_err(stoppable_storage_error)
+        {
+            Ok(()) => {}
+            // A stop is the caller's cooperative stop, not a failed read.
+            Err(Error::RegistrationStopped) => return Err(Error::RegistrationStopped),
+            Err(error) => return self.answer_failed_fetch(entry_key, error).await,
+        }
+        for attempt in 0..DHT_LOOKUP_CACHE_POLL_ATTEMPTS {
+            if stop.should_stop() {
+                return Err(Error::RegistrationStopped);
+            }
+            if let Some(entry) = self.storage_check_cache(entry_key).await {
+                return Ok(Some(entry));
+            }
+            if attempt + 1 == DHT_LOOKUP_CACHE_POLL_ATTEMPTS {
+                break;
+            }
+            sleep(DHT_LOOKUP_CACHE_POLL_INTERVAL).await?;
+        }
+        Ok(None)
+    }
+
     fn entry_has_expired_onion_exit_service(&self, entry: &entry::Entry, service: &str) -> bool {
         let now_ms = get_epoch_ms();
         Self::onion_exit_descriptors_from_entry(entry)
@@ -432,12 +452,32 @@ impl Processor {
             })
     }
 
+    /// Answer a fetch of `entry_key` that failed with `error` as the empty read,
+    /// `cache ⊔ ∅ = cache`: from the live cached carrier, and with `error` only when there is none.
+    async fn answer_failed_fetch(
+        &self,
+        entry_key: Did,
+        error: Error,
+    ) -> Result<Option<entry::Entry>> {
+        let cached = self.storage_check_cache(entry_key).await;
+        if cached.is_some() {
+            tracing::debug!(%entry_key, %error, "storage fetch failed; answering from the cache");
+        }
+        cached.map(Some).ok_or(error)
+    }
+
+    /// Fetch `entry_key` again and wait for the cached carrier to move past `previous_entry`.
+    ///
+    /// A failed fetch is the empty read ([`Self::answer_failed_fetch`]): nothing new arrived, so
+    /// the cached carrier is the answer.
     async fn fetch_storage_entry_after_cache_refresh(
         &self,
         entry_key: Did,
         previous_entry: &entry::Entry,
     ) -> Result<Option<entry::Entry>> {
-        self.storage_fetch(entry_key).await?;
+        if let Err(error) = self.storage_fetch(entry_key).await {
+            return self.answer_failed_fetch(entry_key, error).await;
+        }
         for _ in 0..DHT_LOOKUP_CACHE_POLL_ATTEMPTS {
             sleep(DHT_LOOKUP_CACHE_POLL_INTERVAL).await?;
             let Some(entry) = self.storage_check_cache(entry_key).await else {

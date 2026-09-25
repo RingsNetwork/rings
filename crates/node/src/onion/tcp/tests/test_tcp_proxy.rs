@@ -30,7 +30,7 @@ fn exit_descriptor(session: &DelegateeKey) -> OnionExitDescriptor {
                 .delegator_verification_pubkey()
                 .expect("verification key"),
             delegatee_public_key: session.delegatee_public_key(),
-            process_epoch: crate::onion::OnionExitEpoch::new([19; 16]),
+            process_epoch: crate::onion::OnionProcessEpoch::new([19; 16]),
             node_type: OnlineNodeType::Native,
             network_id: TEST_NETWORK_ID,
             service: OnionServiceName::tcp(),
@@ -387,51 +387,14 @@ fn test_tcp_payload_uses_selected_route_service() -> Result<()> {
     Ok(())
 }
 
-/// Native exit configuration rejects an empty service set and accepts canonical names.
-#[test]
-fn test_native_tcp_exit_config_rejects_empty_services() {
-    assert!(matches!(
-        NativeOnionTcpExitConfig::new(Vec::new(), OnionExitPolicy::default()),
-        Err(Error::InvalidConfig(_))
-    ));
-    assert!(NativeOnionTcpExitConfig::new(
-        vec![OnionServiceName::https()],
-        OnionExitPolicy::default()
-    )
-    .is_ok());
-    assert!(NativeOnionTcpExitConfig::new(
-        vec![OnionServiceName::tcp()],
-        OnionExitPolicy::default()
-    )
-    .is_ok());
-}
-
-#[test]
-fn test_native_https_proxy_requires_explicit_valid_exit_configuration() -> Result<()> {
-    let configured =
-        NativeOnionTcpExitConfig::new(vec![OnionServiceName::https()], OnionExitPolicy::default())?
-            .with_https_proxy("http://127.0.0.1:6152")?;
-    assert_eq!(configured.https_proxy(), Some("http://127.0.0.1:6152"));
-
-    for invalid in ["", "relative-proxy", "socks5://127.0.0.1:6152"] {
-        assert!(matches!(
-            NativeOnionTcpExitConfig::new(
-                vec![OnionServiceName::https()],
-                OnionExitPolicy::default(),
-            )?
-            .with_https_proxy(invalid),
-            Err(Error::InvalidConfig(_))
-        ));
-    }
-    Ok(())
-}
-
 /// The TCP exit runtime decodes every frame the node's algebra routes to it (the algebra alone
 /// selects the served symbols `Σ_n`), and nothing without an exit configuration.
 #[test]
 fn test_exit_runtime_serves_only_with_an_exit_configuration() -> Result<()> {
-    let config =
-        NativeOnionTcpExitConfig::new(vec![OnionServiceName::https()], OnionExitPolicy::default())?;
+    let config = OnionExitOffer::new(
+        [OnionServiceName::https()],
+        OnionExitPolicy::from_target_strings(vec!["example.com:443".to_string()], Vec::new())?,
+    )?;
     let configured = OnionTcpRuntime::new(session(), TEST_NETWORK_ID, Some(config));
     let unconfigured = OnionTcpRuntime::new(session(), TEST_NETWORK_ID, None);
     let payload = encode_tcp_payload(&OnionServiceName::https(), OnionTcpPayload::Close)?;

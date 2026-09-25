@@ -227,7 +227,7 @@ impl OnionCircuitReducer {
     ) -> Result<Option<OnionCircuitEffect>> {
         match message {
             OnionWireMessage::Forward(frame) => {
-                if !self.capabilities.accepts_forward_layers() {
+                if !self.capabilities.registers_relay() {
                     return Err(Error::NoPermission);
                 }
                 Ok(Some(OnionCircuitEffect::DecryptForward {
@@ -302,7 +302,7 @@ impl OnionCircuitReducer {
                 forward_sequence,
                 payload,
             } => {
-                if !self.capabilities.permits_exit_epoch(process_epoch) {
+                if !self.capabilities.permits_exit_layer(process_epoch) {
                     return Err(Error::OnionRouteError(
                         OnionRouteError::ForwardEpochMismatch,
                     ));
@@ -372,7 +372,7 @@ impl OnionCircuitReducer {
     }
 
     fn validate_relay_forward(&self) -> Result<()> {
-        if !self.capabilities.permits_relay_layer() {
+        if !self.capabilities.registers_relay() {
             return Err(Error::NoPermission);
         }
         // The route constructor bounds honest routes. Untrusted recursive layers are bounded by

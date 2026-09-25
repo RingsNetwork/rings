@@ -42,6 +42,7 @@ use crate::onion::replay::OnionSequenceWindow;
 use crate::onion::replay::SequenceAdmission;
 use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitFailure;
+use crate::onion::OnionExitOffer;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionProxyTarget;
 use crate::onion::OnionRoute;
@@ -50,7 +51,6 @@ use crate::onion::OnionServiceName;
 use crate::sync_lock::lock;
 
 mod client;
-mod config;
 mod duplex;
 mod exit;
 mod inbound;
@@ -58,7 +58,6 @@ mod pump;
 
 use client::spawn_client_stream;
 use client::TcpBackwardRoute;
-pub use config::NativeOnionTcpExitConfig;
 #[cfg(test)]
 use duplex::TcpDuplexState;
 use exit::admit_exit_target;
@@ -139,7 +138,7 @@ pub(in crate::onion) struct OnionTcpRuntime {
     exit_streams: Mutex<HashMap<TcpStreamKey, ExitStream>>,
     /// Replay authority shared with the HTTPS adapter installed on this node.
     forward_replays: OnionForwardReplayWitness,
-    exit_config: Option<NativeOnionTcpExitConfig>,
+    exit_config: Option<OnionExitOffer>,
     accounting: OnionExitAccounting,
     link_sender: OnionLinkSender,
 }
@@ -149,7 +148,7 @@ impl OnionTcpRuntime {
     fn new(
         delegatee_key: DelegateeKey,
         network_id: u32,
-        exit_config: Option<NativeOnionTcpExitConfig>,
+        exit_config: Option<OnionExitOffer>,
     ) -> Self {
         Self::with_resources(
             delegatee_key,
@@ -165,7 +164,7 @@ impl OnionTcpRuntime {
     pub(in crate::onion) fn with_resources(
         delegatee_key: DelegateeKey,
         network_id: u32,
-        exit_config: Option<NativeOnionTcpExitConfig>,
+        exit_config: Option<OnionExitOffer>,
         accounting: OnionExitAccounting,
         link_sender: OnionLinkSender,
         forward_replays: OnionForwardReplayWitness,
@@ -181,8 +180,8 @@ impl OnionTcpRuntime {
         }
     }
 
-    /// Installed exit configuration; `None` means client-only mode.
-    pub(in crate::onion) fn exit_config(&self) -> Option<&NativeOnionTcpExitConfig> {
+    /// Installed exit offer; `None` means client-only mode.
+    pub(in crate::onion) fn exit_config(&self) -> Option<&OnionExitOffer> {
         self.exit_config.as_ref()
     }
 

@@ -12,6 +12,8 @@ use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::wasm_bindgen_test_configure;
 
 use crate::logging::browser::init_logging;
+use crate::onion::OnionExitOffer;
+use crate::onion::OnionRole;
 use crate::prelude::rings_core::utils::js_value;
 use crate::processor::Processor;
 use crate::processor::ProcessorBuilder;
@@ -28,6 +30,11 @@ pub fn setup_log() {
 }
 
 pub async fn prepare_processor() -> Processor {
+    prepare_processor_with_onion_role(OnionRole::Client).await
+}
+
+/// Prepare a browser test processor registering the onion symbols of `role`.
+pub async fn prepare_processor_with_onion_role(role: OnionRole<OnionExitOffer>) -> Processor {
     let key = SecretKey::random();
     let sm = DelegateeKey::new_with_seckey(&key).unwrap();
 
@@ -50,6 +57,7 @@ pub async fn prepare_processor() -> Processor {
         .unwrap()
         .storage(storage)
         .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
+        .onion_role(role)
         .build()
         .unwrap()
 }

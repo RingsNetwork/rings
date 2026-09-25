@@ -364,12 +364,12 @@ jobs:
           --inventory target/ci-evidence/native-inventory.json
           --require-file scripts/ci-native-model-tests.txt
 
-      - name: Exercise captured TCP through a two-hop Onion public exit
+      - name: Exercise captured TCP through an Onion loop to a public exit
         run: >-
           python3 scripts/run-ci-tests.py target/ci-evidence/native.jsonl
           --inventory target/ci-evidence/captured-tcp-inventory.json
           --target rings_node --ignored --exact --nocapture
-          --filter processor::tests::test_gateway::captured_tcp_reaches_public_http_only_through_two_hop_onion_route
+          --filter processor::tests::test_gateway::captured_tcp_reaches_public_http_only_through_onion_loop
 
       - name: Exercise privileged Linux TUN and route cleanup
         run: >-
@@ -385,12 +385,12 @@ jobs:
           --target unix_helper --ignored --exact --nocapture --sudo
           --filter privileged_helper_retains_and_recovers_a_disconnected_lease
 
-      - name: Exercise kernel TCP through Linux TUN and two-hop Onion exit
+      - name: Exercise kernel TCP through Linux TUN and an Onion loop exit
         run: >-
           python3 scripts/run-ci-tests.py target/ci-evidence/native.jsonl
           --inventory target/ci-evidence/kernel-tcp-inventory.json
           --target rings_node --ignored --exact --nocapture --sudo
-          --filter processor::tests::test_gateway::real_linux_tun_tcp_reaches_public_http_through_two_hop_onion_route
+          --filter processor::tests::test_gateway::real_linux_tun_tcp_reaches_public_http_through_onion_loop
 
       - name: Upload native timings and test inventory
         if: always()

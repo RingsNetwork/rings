@@ -67,9 +67,30 @@ impl Core {
         self.processor.did()
     }
 
+    /// This node's session key.
     #[cfg(rings_native)]
-    pub(crate) fn onion_exit_epoch(&self) -> crate::onion::OnionExitEpoch {
-        self.processor.onion_exit_epoch()
+    pub(crate) fn delegatee_key(&self) -> &rings_core::delegation::DelegateeKey {
+        self.processor.delegatee_key()
+    }
+
+    /// The overlay network this node joins.
+    #[cfg(rings_native)]
+    pub(crate) fn network_id(&self) -> u32 {
+        self.processor.swarm.network_id()
+    }
+
+    /// This process's onion role (#834 D2).
+    #[cfg(rings_native)]
+    pub(crate) fn onion_role(&self) -> &crate::onion::OnionRole<crate::onion::OnionExitOffer> {
+        self.processor.onion_role()
+    }
+
+    /// This process's circuit capabilities: its onion role at its process epoch.
+    #[cfg(rings_native)]
+    pub(crate) fn onion_circuit_capabilities(
+        &self,
+    ) -> crate::onion::circuit::OnionCircuitCapabilities {
+        self.processor.onion_circuit_capabilities()
     }
 
     /// Put a message on the overlay to `to` under `namespace`.

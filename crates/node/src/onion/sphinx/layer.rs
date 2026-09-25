@@ -40,7 +40,7 @@ use super::seed::OnionSegmentSeed;
 use super::seed::ONION_CARRY_SEED_BYTES;
 use crate::onion::circuit::OnionForwardNonce;
 use crate::onion::signature::OnionSymbol;
-use crate::onion::OnionExitEpoch;
+use crate::onion::OnionProcessEpoch;
 use crate::onion::OnionServiceName;
 
 /// Width `A` of the argument field `ā`: every application's arguments are encoded into exactly
@@ -165,7 +165,7 @@ pub(crate) struct OnionLayerHead {
     /// `next_i`, the DID the hop hands its cell to (L6: fixed by the client).
     pub(crate) next: Did,
     /// `e_i`, the process epoch of the hop this layer is sealed for (#834 D2, L9).
-    pub(crate) epoch: OnionExitEpoch,
+    pub(crate) epoch: OnionProcessEpoch,
     /// `x`, the loop expiry in milliseconds, one per loop (#834 D6).
     pub(crate) expires_at_ms: u64,
     /// `ν_i`, the replay nonce the hop admits at most once (L9).
@@ -233,7 +233,7 @@ impl OnionLayer {
                 head: OnionLayerHead {
                     application,
                     next: Did::from(PublicKeyAddress::from(record.next)),
-                    epoch: OnionExitEpoch::new(record.epoch),
+                    epoch: OnionProcessEpoch::new(record.epoch),
                     expires_at_ms: u64::from_be_bytes(record.expiry),
                     nonce: OnionForwardNonce::new(record.nonce),
                 },

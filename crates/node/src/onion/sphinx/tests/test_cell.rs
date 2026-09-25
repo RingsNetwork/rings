@@ -29,7 +29,7 @@ use crate::onion::sphinx::layer::OnionLayerApplication;
 use crate::onion::sphinx::layer::OnionLayerHead;
 use crate::onion::sphinx::seed::OnionCarrySeed;
 use crate::onion::sphinx::seed::OnionSegmentSeed;
-use crate::onion::OnionExitEpoch;
+use crate::onion::OnionProcessEpoch;
 use crate::onion::OnionServiceName;
 
 /// The layer of `position` with the given application and carry seeds; its `next` and `x` are
@@ -45,7 +45,7 @@ fn layer(
         head: OnionLayerHead {
             application,
             next: Did::from(100 + position),
-            epoch: OnionExitEpoch::new([1; 16]),
+            epoch: OnionProcessEpoch::new([1; 16]),
             expires_at_ms: 1000 + u64::from(position),
             nonce: OnionForwardNonce::new([2; 16]),
         },

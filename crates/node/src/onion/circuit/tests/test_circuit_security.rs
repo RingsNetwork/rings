@@ -1,3 +1,5 @@
+use std::num::NonZeroUsize;
+
 use rings_core::message::MessageSigner;
 
 use super::super::codec::OnionCircuitInput;
@@ -94,7 +96,7 @@ fn test_backward_cell_after_return_expiry_is_never_forwarded() {
         )
         .expect("encrypt backward fixture"),
     });
-    let reducer = OnionCircuitReducer::new(OnionCircuitCapabilities::from_registration(true, None));
+    let reducer = OnionCircuitReducer::new(OnionCircuitCapabilities::Relay);
     let transition = reducer.apply(&state, OnionCircuitInput::CellReady {
         from: next.delegator_did(),
         received_at_ms: 111,
@@ -226,7 +228,7 @@ fn test_crypto_limiter_bounds_sender_window() {
 #[test]
 fn test_one_hop_cover_cell_has_no_state_transition_or_effect() {
     let peer = session();
-    let reducer = OnionCircuitReducer::new(OnionCircuitCapabilities::from_registration(true, None));
+    let reducer = OnionCircuitReducer::new(OnionCircuitCapabilities::Relay);
     let state = OnionCircuitState::default();
 
     let transition = reducer.apply(&state, OnionCircuitInput::CellReady {
@@ -247,14 +249,14 @@ fn test_edge_circuit_id_allocation_retries_collisions_and_fails_boundedly() {
     let third = OnionCircuitId::new([3; 16]);
     let mut candidates = [first, second, second, third].into_iter();
 
-    let ids = edge_circuit_ids_with(3, first, || {
+    let ids = edge_circuit_ids_with(NonZeroUsize::MIN.saturating_add(2), first, || {
         candidates.next().expect("bounded collision fixture")
     })
     .expect("unique candidates eventually succeed");
     assert_eq!(ids, vec![first, second, third]);
 
     assert!(matches!(
-        edge_circuit_ids_with(2, first, || first),
+        edge_circuit_ids_with(NonZeroUsize::MIN.saturating_add(1), first, || first),
         Err(crate::error::Error::OnionRouteError(
             crate::onion::OnionRouteError::CircuitIdAllocationFailed
         ))
@@ -264,8 +266,9 @@ fn test_edge_circuit_id_allocation_retries_collisions_and_fails_boundedly() {
 #[test]
 fn test_aead_context_binds_direction_and_circuit_id() {
     let client = session();
+    let guard = session();
     let exit = session();
-    let route = route(&[], &exit);
+    let route = route(&guard, &session(), &exit);
     let circuit_id = OnionCircuitId::new([5; 16]);
     let wrong_circuit_id = OnionCircuitId::new([6; 16]);
     let (_, forward_payload) = encode_initial_forward(
@@ -275,13 +278,13 @@ fn test_aead_context_binds_direction_and_circuit_id() {
         test_payload("tcp-shutdown"),
     )
     .expect("encode forward");
-    let OnionWireMessage::Forward(frame) = open_wire(&exit, &forward_payload) else {
+    let OnionWireMessage::Forward(frame) = open_wire(&guard, &forward_payload) else {
         panic!("expected forward frame");
     };
 
-    assert!(decrypt_forward_layer(&exit, circuit_id, &frame.layer).is_ok());
-    assert!(decrypt_forward_layer(&exit, wrong_circuit_id, &frame.layer).is_err());
-    assert!(decrypt_client_payload(&exit, &frame.layer).is_err());
+    assert!(decrypt_forward_layer(&guard, circuit_id, &frame.layer).is_ok());
+    assert!(decrypt_forward_layer(&guard, wrong_circuit_id, &frame.layer).is_err());
+    assert!(decrypt_client_payload(&guard, &frame.layer).is_err());
 
     let return_id = OnionReturnId::new([15; 16]);
     let wrong_return_id = OnionReturnId::new([16; 16]);
@@ -308,7 +311,7 @@ fn test_backward_payload_authentication_rejects_wrong_exit_signer() {
     let client = session();
     let exit = session();
     let attacker = session();
-    let route = route(&[], &exit);
+    let route = route(&session(), &session(), &exit);
     let return_id = OnionReturnId::new([8; 16]);
     let sealed = encrypt_client_payload(
         return_id,
