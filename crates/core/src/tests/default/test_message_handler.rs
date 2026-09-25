@@ -248,6 +248,10 @@ async fn deliver_until(
 /// observable state while it waits: a send waiting for readiness holds an admitted transfer,
 /// and a handshake holds a pending connection. So these predicates, not a count of scheduler
 /// turns, decide quiescence.
+///
+/// Exception: a link-control send runs as a detached task holding a `LinkControlPermit`, which
+/// none of these predicates count. It is assumed immediate here, because the dummy `send`
+/// resolves on its first poll unless a test gate is set, and this test sets none.
 #[cfg(feature = "dummy")]
 fn controlled_run_quiescent(nodes: &[&Node]) -> bool {
     dummy_controlled::pending() == 0
