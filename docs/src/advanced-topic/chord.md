@@ -46,12 +46,17 @@ Delivery (`dht::delivery`) works as follows:
    destination; otherwise it ends the route with a typed error (`RelayDestinationUnreachable`).
    It never routes greedily again.
 
-A message for a node that no view knows yet therefore fails fast, within a bounded number of hops,
+A message for a node that no view knows yet therefore fails fast, within at most `|V| + 2` hops,
 instead of circling the ring until its hop budget runs out; it is delivered once the ring has
-converged. A joining node is the one case that cannot wait for convergence, because convergence
-needs the replies to its own join requests. While a node has no predecessor, its requests carry a
-signed `reply_via` naming its successor head, which is its bootstrap during a join. Reports then
-travel to that peer, which hands them over its direct link.
+converged. Greedy hops choose only peers this node is linked to, because the successor list may
+name peers a stabilization report introduced before any connection to them exists.
+
+A node without a predecessor is the one case that cannot wait for convergence: a joiner needs the
+answers to its own join lookup and connection offer to converge at all. Whenever a node has no
+predecessor, its requests carry a signed `reply_via` naming its successor head, which is its
+bootstrap during a join. Successor and connection answers (`FindSuccessorReport`,
+`ConnectNodeReport`) then travel to that peer, which hands them over its direct link. Every other
+report goes straight to the origin, so `reply_via` reflects at most one bounded answer per request.
 
 ## Finger-table convergence
 

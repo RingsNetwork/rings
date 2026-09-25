@@ -13,6 +13,7 @@ use super::REFERENCED_TABLE_CAPACITY;
 use crate::delegation::DelegateeKey;
 use crate::delegation::Delegation;
 use crate::delegation::DelegationDigest;
+use crate::dht::delivery::NextHop;
 use crate::dht::Did;
 use crate::ecc::SecretKey;
 use crate::error::Result;
@@ -56,7 +57,7 @@ fn relayed_payload(
         Message::custom(b"session link")?,
         MessageSigner::new(origin, TEST_NETWORK_ID),
     )?;
-    let relay = MessageRelay::new(destination, destination, HopBudget::MAX);
+    let relay = MessageRelay::new(NextHop::toward(destination), destination, HopBudget::MAX);
     MessagePayload::new(transaction, MessageSigner::new(hop, TEST_NETWORK_ID), relay)
 }
 

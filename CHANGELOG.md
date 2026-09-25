@@ -22,15 +22,17 @@
 ### Breaking changes
 
 - Deliver messages toward a node DID by a dedicated rule instead of the owner lookup (#865, #873).
-  Greedy hops forward to the known peer, successors included, nearest the destination, and never
-  pass it. A hop that knows no such peer hands the message once to its successor head, which
-  delivers over a direct link or ends the route with `RelayDestinationUnreachable`. This ends
-  the cycles that dropped replies with `RelayHopBudgetExhausted` on unconverged rings, and it
-  removes the relay as an amplifier. While a node has no predecessor, its requests carry a
-  signed `Transaction::reply_via` naming its successor head, so reports to a joiner return
-  through its bootstrap. The owner lookup `find_successor` now scans successors as well as
-  fingers. The relay carrier gains a `stage` field and the transaction hash covers `reply_via`,
-  so the wire format is incompatible with 0.31.x; this targets 0.32.0.
+  Greedy hops forward to the linked known peer, successors included, that lies nearest the
+  destination, and never pass it. A hop that knows no such peer hands the message once to the
+  first linked node after it, which delivers over a direct link or ends the route with
+  `RelayDestinationUnreachable`. This ends the cycles that dropped replies with
+  `RelayHopBudgetExhausted` on unconverged rings: a route takes at most `|V| + 2` hops. Whenever
+  a node has no predecessor, its requests carry a signed `Transaction::reply_via` naming its
+  successor head, and successor and connection answers to it return through that peer, so joins
+  work under fail-fast. Every locally originated request is built by
+  `PayloadSender::originate`. The owner lookup `find_successor` is unchanged. The relay carrier
+  gains a `stage` field and the transaction hash covers `reply_via`, so the wire format is
+  incompatible with 0.31.x; this targets 0.32.0.
 
 - Order IndexedDB LRU eviction by a store-wide logical access clock instead of wall-clock
   milliseconds (#853). Rows touched within one timer tick could tie and evict a recently

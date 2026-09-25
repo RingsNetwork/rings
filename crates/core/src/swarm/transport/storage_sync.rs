@@ -16,6 +16,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::message::yield_core_actor_step;
 use crate::message::Message;
+use crate::message::PayloadSender;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::message::SyncEntriesWithSuccessorReport;
 use crate::utils::get_epoch_ms;
@@ -497,10 +498,10 @@ impl SwarmTransport {
             }
             Some(next_hop) => {
                 let payload = self
-                    .signed_payload(
+                    .originate(
                         Message::SyncEntriesWithSuccessor(msg.clone()),
-                        next_hop,
                         destination,
+                        Some(next_hop),
                     )
                     .await?;
                 let tx_id = payload.transaction.tx_id;

@@ -1,9 +1,10 @@
 //! Checked model of delivery toward a node DID (#873).
 //!
 //! State: an overlay `O = (V, L)` of per-node views `V : Did → TopologyState` and a symmetric
-//! link relation `L ⊇ Known`, with links outside every view allowed (a joiner's bootstrap, a
-//! leaf's guard). A payload for `T` at `n` in stage `σ` takes the production step
-//! [`delivery_step`] with `linked = L(n)`.
+//! link relation `L`. Views may name peers they have no link to (a successor a stabilization
+//! report introduced before its connection exists), and links may exist outside every view (a
+//! joiner's bootstrap, a leaf's guard). A payload for `T` at `n` in stage `σ` takes the
+//! production step [`delivery_step`] with `linked = L(n)`.
 //!
 //! [`delivery_step`] depends on `(n, σ)` only, so a route is the orbit of a deterministic map on
 //! the finite set `V × RouteStage`; a repeated state would be a cycle that only the hop budget
@@ -13,11 +14,11 @@
 //! Laws checked on every route `n₀ → n₁ → …`:
 //!
 //! - `Linked`: every hop follows a link;
-//! - `NeverOvershoots`: every hop that leaves the stage's handoff flag unset satisfies
-//!   `next ∈ (n, aim]`;
-//! - `SingleCrossing`: each aim is crossed at most once, by the hop that sets the flag;
+//! - `NeverOvershoots`: every hop that does not set the stage's handoff flag satisfies
+//!   `next ∈ (n, aim]` (crossing the aim only by that one flagged hop is then a property of the
+//!   type: nothing clears the flag);
 //! - `Acyclic`: no `(node, stage)` repeats, so the hop budget never ends a route;
-//! - `Bounded`: at most `2(|V| + 1) + 1` hops;
+//! - `Bounded`: at most `|V| + 2` hops (one greedy run, one handoff, two terminal deliveries);
 //! - `Exact`: an undelivered route toward `T` visited no node linked to `T`;
 //! - `Converged ⇒ Delivered`, and the join-window law: on a converged ring without `J`, with
 //!   `J` linked only to a bootstrap `B`, every member's report naming `reply_via = B` arrives.
@@ -99,6 +100,19 @@ impl Overlay {
         Self { views, links }
     }
 
+    /// The overlay with exactly the links `links`, whatever the views name.
+    fn with_links(
+        views: BTreeMap<Did, TopologyState>,
+        links: impl IntoIterator<Item = (Did, Did)>,
+    ) -> Self {
+        let links = links
+            .into_iter()
+            .filter(|(a, b)| a != b)
+            .map(|(a, b)| (a.min(b), a.max(b)))
+            .collect();
+        Self { views, links }
+    }
+
     /// `(a, b) ∈ L`.
     fn linked(&self, a: Did, b: Did) -> bool {
         self.links.contains(&(a.min(b), a.max(b)))
@@ -143,7 +157,7 @@ impl Overlay {
         let route = self.route(origin, destination, stage);
         assert_ne!(route.outcome, Outcome::Cycle, "cycle: {route:?}");
         assert!(
-            route.states.len() <= 2 * (self.views.len() + 1) + 2,
+            route.states.len() <= self.views.len() + 3,
             "unbounded: {route:?}"
         );
         let hops = route
@@ -152,26 +166,17 @@ impl Overlay {
             .copied()
             .zip(route.states.iter().copied().skip(1))
             .collect::<Vec<_>>();
-        let mut crossings = BTreeMap::<Did, usize>::new();
         for ((from, before), (to, after)) in hops.iter().copied() {
             assert!(self.linked(from, to), "unlinked hop: {route:?}");
-            if to == destination || to == after.aim(destination) {
-                continue;
-            }
             let aim = after.aim(destination);
-            if after.handed_off && !before.handed_off {
-                *crossings.entry(aim).or_default() += 1;
-            } else {
+            let crossing = after.handed_off && !before.handed_off;
+            if to != destination && to != aim && !crossing {
                 assert!(
                     dist(from, to) < dist(from, aim),
                     "overshoot toward {aim}: {route:?}"
                 );
             }
         }
-        assert!(
-            crossings.values().all(|count| *count <= 1),
-            "aim crossed twice: {route:?}"
-        );
         if route.outcome != Outcome::Delivered && stage.via.is_none() {
             assert!(
                 route
@@ -250,9 +255,10 @@ fn random_members(rng: &mut Hc128Rng, count: usize) -> Vec<Did> {
 }
 
 /// Delivery step unit laws: a linked destination is delivered to in any stage; the greedy step
-/// forwards to the peer on `(n, aim]` nearest the aim over successors ∪ fingers and hands off
-/// once to the head when none exists; a handoff receiver delivers over a link or ends the
-/// route; a via peer hands over to the destination or ends the route.
+/// forwards to the linked known peer on `(n, aim]` nearest the aim over successors ∪ fingers,
+/// skipping known peers without a link, and hands off once to the first linked known node when
+/// none exists; a handoff receiver delivers over a link or ends the route; a via peer hands
+/// over to the destination or ends the route.
 #[test]
 fn test_delivery_step_stages() {
     let local = Did::from(0u32);
@@ -266,6 +272,7 @@ fn test_delivery_step_stages() {
         })
         .map(|hop| (hop.peer, hop.stage))
     };
+    let view = [8, 16, 40];
     let toward = RouteStage::TOWARD;
     let handed = toward.handed_off();
     let via_local = RouteStage::replying_via(Some(local));
@@ -273,24 +280,18 @@ fn test_delivery_step_stages() {
 
     assert_eq!(step(30, toward, &[30]), Some((Did::from(30u32), toward)));
     assert_eq!(step(30, handed, &[30]), Some((Did::from(30u32), handed)));
-    assert_eq!(step(30, toward, &[]), Some((Did::from(16u32), toward)));
-    assert_eq!(step(50, toward, &[]), Some((Did::from(40u32), toward)));
-    assert_eq!(step(4, toward, &[]), Some((Did::from(8u32), handed)));
-    assert_eq!(step(4, handed, &[]), None);
+    assert_eq!(step(30, toward, &view), Some((Did::from(16u32), toward)));
+    assert_eq!(step(30, toward, &[8, 40]), Some((Did::from(8u32), toward)));
+    assert_eq!(step(50, toward, &view), Some((Did::from(40u32), toward)));
+    assert_eq!(step(4, toward, &view), Some((Did::from(8u32), handed)));
+    assert_eq!(step(4, toward, &[16, 40]), Some((Did::from(16u32), handed)));
+    assert_eq!(step(4, toward, &[]), None);
+    assert_eq!(step(4, handed, &view), None);
     assert_eq!(step(4, via_local, &[4]), Some((Did::from(4u32), via_local)));
-    assert_eq!(step(4, via_local, &[]), None);
-    assert_eq!(step(4, via_far, &[]), Some((Did::from(40u32), via_far)));
+    assert_eq!(step(4, via_local, &view), None);
+    assert_eq!(step(4, via_far, &view), Some((Did::from(40u32), via_far)));
     assert_eq!(step(4, via_far, &[50]), Some((Did::from(50u32), via_far)));
-    assert_eq!(step(4, via_far.handed_off(), &[]), None);
-    assert_eq!(
-        delivery_step(
-            &TopologyState::new(local, vec![], None, vec![]),
-            Did::from(4u32),
-            toward,
-            |_| false,
-        ),
-        None
-    );
+    assert_eq!(step(4, via_far.handed_off(), &view), None);
 }
 
 /// #865 regression: the ring `A < B < T < C < D` with the successor lists of the trace. The
@@ -333,7 +334,7 @@ fn test_issue_865_topology_delivers_reply_and_fails_fast() {
 
 /// The join topologies of #873 §1.2: a report to a joiner linked only to its bootstrap arrives
 /// when the request named `reply_via = bootstrap`, from every member; without the hint the
-/// route ends with the typed error, never by the budget.
+/// route still satisfies the route law (it ends, typically with the typed error).
 #[test]
 fn test_join_window_report_arrives_through_reply_via() {
     for (members, bootstrap, joiner) in [
@@ -347,8 +348,7 @@ fn test_join_window_report_arrives_through_reply_via() {
             let replied =
                 overlay.check_route_law(origin, joiner, RouteStage::replying_via(Some(bootstrap)));
             assert_eq!(replied.outcome, Outcome::Delivered, "{replied:?}");
-            let unhinted = overlay.check_route_law(origin, joiner, RouteStage::TOWARD);
-            assert_ne!(unhinted.outcome, Outcome::Cycle, "{unhinted:?}");
+            overlay.check_route_law(origin, joiner, RouteStage::TOWARD);
         }
     }
 }
@@ -447,8 +447,9 @@ fn test_route_law_holds_on_every_four_node_view() {
 }
 
 /// Randomized model with a fixed seed: rings of 10 random DIDs with random successor
-/// knowledge, finger hints and links outside every view satisfy the route law; the converged
-/// overlay of the same members delivers every route.
+/// knowledge and finger hints, and links drawn independently of the views (so views name
+/// unlinked peers and links exist outside views), satisfy the route law; the converged overlay
+/// of the same members delivers every route.
 #[test]
 fn test_route_law_holds_on_random_unconverged_views() {
     let mut rng = Hc128Rng::seed_from_u64(865);
@@ -474,12 +475,12 @@ fn test_route_law_holds_on_random_unconverged_views() {
                 (*local, view(*local, &known, fingers))
             })
             .collect();
-        let extra = members
+        let links = members
             .iter()
             .flat_map(|a| members.iter().map(move |b| (*a, *b)))
-            .filter(|_| rng.gen_bool(0.1))
+            .filter(|_| rng.gen_bool(0.3))
             .collect::<Vec<_>>();
-        Overlay::new(views, extra).check_all_routes();
+        Overlay::with_links(views, links).check_all_routes();
 
         let routes = converged(&members).check_all_routes();
         assert!(routes

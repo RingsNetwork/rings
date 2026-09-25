@@ -447,12 +447,12 @@ pub enum FindSuccessorStep {
 /// Pure result of one delivery step toward a node (see [`route_toward`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RouteStep {
-    /// Send to this known peer on `(n, d]`; the peer is `d` itself when known.
+    /// Send to this linked known peer on `(n, d]`; the peer is `d` itself when known.
     Forward(Did),
-    /// No known peer lies on `(n, d]`: hand the payload to the successor head,
-    /// the owner of `d⁺` in this view.
+    /// No linked known peer lies on `(n, d]`: hand the payload once to the first
+    /// linked known node after `n`, which lies past `d`.
     Handoff(Did),
-    /// The node has no successor to route through.
+    /// The node has no linked known peer to route through.
     Isolated,
 }
 
@@ -793,6 +793,23 @@ fn precedes(local: Did, peer: Did, target: &BigUint) -> bool {
     peer != local && dist(local, peer) < *target
 }
 
+/// `ClosestPrecedingFinger(n, id)`: the highest finger slot on the open arc
+/// `(n, id)`, or `None` when the sparse table holds no such hint.
+///
+/// The owner lookup scans fingers only: fingers are set on admission, whereas
+/// the successor list also holds candidates a stabilization report named before
+/// any link to them exists, and the lookup has no link predicate to tell them
+/// apart. Delivery, which has one, scans both (see [`route_toward`]).
+fn closest_preceding_finger(state: &TopologyState, target: &BigUint) -> Option<Did> {
+    state
+        .fingers
+        .iter()
+        .rev()
+        .flatten()
+        .copied()
+        .find(|peer| precedes(state.local, *peer, target))
+}
+
 /// `Reaches(n, p, id)`: `p` lies on the half-open arc `(n, id]`, so forwarding
 /// to `p` either delivers to `id` (`p = id`) or makes strict clockwise progress
 /// toward it.
@@ -800,50 +817,35 @@ fn reaches(local: Did, peer: Did, target: &BigUint) -> bool {
     peer != local && dist(local, peer) <= *target
 }
 
-/// `Known(n) = succ[n] ∪ {finger[n][i]}`: every peer the local view can hand a
-/// message to, self entries included (callers' arc predicates exclude them).
-fn known_peers(state: &TopologyState) -> impl Iterator<Item = Did> + '_ {
+/// `Known(n) ∩ Linked(n)`, where `Known(n) = succ[n] ∪ {finger[n][i]}` minus
+/// `n` itself: the peers of the view this node can hand a message to now.
+fn linked_known_peers<'state>(
+    state: &'state TopologyState,
+    linked: &'state impl Fn(Did) -> bool,
+) -> impl Iterator<Item = Did> + 'state {
     state
         .successors
         .iter()
         .copied()
         .chain(state.fingers.iter().flatten().copied())
+        .filter(move |peer| *peer != state.local && linked(*peer))
 }
 
-/// `argmax_{p ∈ Known(n), on_arc(p)} dist(n, p)`: the known peer farthest along
-/// the clockwise arc selected by `on_arc`, or `None` when no known peer lies on
-/// it.
+/// `ReplyVia(n)`: the peer `n` names for its reports while no node is known to
+/// route to it, i.e. while it has no predecessor; `None` once a predecessor has
+/// notified it.
 ///
-/// Scanning the union, rather than the finger table alone, is what lets a node
-/// directly connected to the destination's predecessor through its successor
-/// list use that edge (#865); the answer does not depend on the order or
-/// monotonicity of either list.
-fn closest_known_on(state: &TopologyState, on_arc: impl Fn(Did) -> bool) -> Option<Did> {
-    known_peers(state)
-        .filter(|peer| on_arc(*peer))
-        .max_by_key(|peer| dist(state.local, *peer))
-}
-
-/// `ReplyVia(n)`: the peer `n` names for its reports while no node is known to route to
-/// it, i.e. while it has no predecessor; `None` once a predecessor has notified it.
-///
-/// A predecessor `p` notifies `n` iff `p`'s successor is `n`, i.e. iff `p` knows `n`; from
-/// then on greedy delivery reaches `n` through `p`. Before that, only `n`'s own links know
-/// it, so its reports must return through one of them: its successor head, which for a
-/// joiner is its bootstrap.
+/// A predecessor `p` notifies `n` iff `p`'s successor is `n`, i.e. iff `p` knows
+/// `n`; from then on greedy delivery reaches `n` through `p`. Before that (while
+/// joining, and again after the predecessor departs until a new one notifies),
+/// only `n`'s own links know it, so its reports must return through one of them:
+/// its successor head, which for a joiner is its bootstrap.
 pub fn reply_via(state: &TopologyState) -> Option<Did> {
     state
         .predecessor
         .is_none()
         .then(|| successor_head(state))
         .flatten()
-}
-
-/// `ClosestPrecedingNode(n, id)`: the known peer on the open arc `(n, id)`
-/// nearest to `id`, over successors and fingers as in Chord's
-/// `closest_preceding_node`.
-fn closest_preceding_node(state: &TopologyState, target: &BigUint) -> Option<Did> {
-    closest_known_on(state, |peer| precedes(state.local, peer, target))
 }
 
 /// `Responsible(n, id)`: `id ∈ (pred(n), n]`, so `n` is the Chord successor of the position
@@ -864,17 +866,17 @@ pub fn is_responsible_for(state: &TopologyState, id: Did) -> bool {
 ///
 /// `Local(head)` answers when `did` lies in the local successor interval
 /// `(n, head]`; a node without successors answers with itself. Otherwise the
-/// query is forwarded to the closest preceding node over successors ∪ fingers.
-/// `head` is itself a successor on `(n, did)` in that branch, so the scan
-/// always finds a hop, even when the sparse/no-wrap finger table holds none
-/// right after a join or after a run was cleared.
+/// query is forwarded to the closest preceding finger, falling back to the
+/// successor head. The Chord paper needs no such fallback because its
+/// `finger[1]` is the successor, so `closest_preceding_node` always finds a
+/// hop; the sparse/no-wrap finger table may hold no finger right after a join
+/// or after a run was cleared, and the head fallback restores that invariant.
 ///
-/// This is the owner-lookup question (storage placement, finger fixing,
-/// successor lookups, inbox hold authority): `Local(head)` names a position's
-/// owner, which may lie past `did`. Delivering a payload to the node `did` is a
-/// different question, answered by [`delivery`](crate::dht::delivery), whose
-/// greedy step ([`route_toward`]) passes `did` only by one explicit, terminal
-/// handoff.
+/// This answers the owner-lookup question (storage placement, finger fixing,
+/// successor lookups, inbox hold authority), where `Local(head)` with `head`
+/// past `did` is the intended answer. Delivering a payload to the node `did`
+/// is a different question, answered by [`delivery`](crate::dht::delivery),
+/// which never passes its aim except by one explicit, terminal handoff.
 ///
 /// `TopologyState` has public fields, so a successor or finger entry equal to
 /// `local` is representable; such entries are skipped rather than trusted.
@@ -888,43 +890,51 @@ pub fn find_successor(state: &TopologyState, did: Did) -> FindSuccessorStep {
         return FindSuccessorStep::Local(state.local);
     };
     let target = dist(state.local, did);
-    match closest_preceding_node(state, &target) {
-        Some(next) if target > dist(state.local, head) => FindSuccessorStep::Remote { next, did },
-        _ => FindSuccessorStep::Local(head),
+    if target <= dist(state.local, head) {
+        return FindSuccessorStep::Local(head);
     }
+    let next = closest_preceding_finger(state, &target).unwrap_or(head);
+    FindSuccessorStep::Remote { next, did }
 }
 
-/// Pure greedy step of delivery toward the node `destination` over one view.
+/// Pure greedy step of delivery toward the node `aim` over one view and this
+/// node's link predicate `linked`.
 ///
-/// This is the greedy step of delivery over the view alone; the carrier stage
-/// that marks a handoff as terminal lives in
-/// [`delivery`](crate::dht::delivery), which consults this step.
+/// This is the greedy step of delivery; the carrier stage that marks a handoff
+/// as terminal lives in [`delivery`](crate::dht::delivery), which consults it.
+/// Candidates are `Known(n) ∩ Linked(n)`: the successor list may name peers a
+/// stabilization report introduced before any link to them exists.
 ///
 /// ```text
-/// ∃ p ∈ Known(n). p ∈ (n, d] ──▶ Forward(argmax dist(n, p))   (p = d delivers)
+/// ∃ p ∈ Known ∩ Linked. p ∈ (n, a] ──▶ Forward(argmax dist(n, p))    (p = a delivers)
 ///            │ no
 ///            ▼
-/// head(n) = Some(h) ──▶ Handoff(h)   (d ∈ (n, h): h owns d⁺ in this view)
-///            │ no
+/// ∃ p ∈ Known ∩ Linked            ──▶ Handoff(argmin dist(n, p))    (past a: the first
+///            │ no                                                    linked node after it)
 ///            ▼
 ///         Isolated
 /// ```
 ///
-/// Law (progress). `Forward(p)` satisfies `dist(p, d) < dist(n, d)`, so a
-/// chain of forwards strictly decreases a measure in `ℕ` and visits each node
-/// at most once. `Handoff(h)` is the only step that passes `d`; it hands the
-/// payload to the owner of `d⁺ = d + 1` in this view, and the carrier marks it
-/// so that no later hop takes another greedy step toward `d`.
+/// Law (progress). `Forward(p)` satisfies `dist(p, a) < dist(n, a)`, so a chain
+/// of forwards strictly decreases a measure in `ℕ` and visits each node at most
+/// once. `Handoff(h)` is the only step that passes `a`; since no linked known
+/// peer lies on `(n, a]`, `h` is the first linked known node after `a`.
 ///
-/// Unlike [`find_successor`], which answers `Local(head)` for `d ∈ (n, head]`
-/// and so lets a hop that does not know `d` pass it and then route greedily
-/// again from the far side, circling among the nodes whose views skip `d`
+/// Unlike [`find_successor`], which answers `Local(head)` for `a ∈ (n, head]`
+/// and so lets a hop that does not know `a` pass it and then route greedily
+/// again from the far side, circling among the nodes whose views skip `a`
 /// (#873), the pass here is explicit and terminal.
-pub fn route_toward(state: &TopologyState, destination: Did) -> RouteStep {
-    let target = dist(state.local, destination);
-    match closest_known_on(state, |peer| reaches(state.local, peer, &target)) {
+pub fn route_toward(state: &TopologyState, aim: Did, linked: impl Fn(Did) -> bool) -> RouteStep {
+    let target = dist(state.local, aim);
+    let peers = || linked_known_peers(state, &linked);
+    match peers()
+        .filter(|peer| reaches(state.local, *peer, &target))
+        .max_by_key(|peer| dist(state.local, *peer))
+    {
         Some(next) => RouteStep::Forward(next),
-        None => successor_head(state).map_or(RouteStep::Isolated, RouteStep::Handoff),
+        None => peers()
+            .min_by_key(|peer| dist(state.local, *peer))
+            .map_or(RouteStep::Isolated, RouteStep::Handoff),
     }
 }
 

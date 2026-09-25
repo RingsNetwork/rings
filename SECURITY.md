@@ -96,10 +96,11 @@ signature, so every hop can attribute it.
 Every hop, and the destination, learns from a relayed message:
 
 - the origin DID, named by the transaction signature, which is also where every report
-  for the message is routed back to, through the `reply_via` peer the origin signed when
-  it names one: a node sets it, to its successor head, only while no predecessor has
-  notified it, i.e. during its join window, so for that window every hop of a request
-  and of its report learns one of the origin's links;
+  for the message is routed back to. A node whose requests carry a signed `reply_via`
+  names its successor head there whenever it has no predecessor: while it joins, and
+  again after its predecessor departs until a new one notifies it. For that time every
+  hop of such a request, and of its successor or connection answer, learns one of the
+  origin's links;
 - the destination DID, carried by the transaction and by the relay header, because
   the next hop is chosen from it;
 - its own predecessor, the authenticated transport edge the message arrived on, and
@@ -123,13 +124,23 @@ rather than key digests, which is a different identifier design, not a relay cha
 
 The obligations of this layer are leak-minimization obligations:
 
-- no hop history on the wire, and no amplification. Every greedy hop moves strictly
-  closer to its aim without passing it, and a route crosses its aim at most once, by a
-  marked handoff whose receiver delivers over a direct link or ends the route with a
-  typed error (`dht::delivery`). A message for a node no view yet knows therefore ends
-  within `2(|V| + 1) + 1` hops, never by circling the ring; exhausting the hop budget
-  witnesses a fault. The carrier is outside every signature, so the budget bounds the
-  work honest hops do for one message and is not a promise a dishonest hop keeps;
+- no hop history on the wire, and no cycles. Every greedy hop moves strictly closer
+  to its aim without passing it, and a route crosses its aim at most once, by a marked
+  handoff whose receiver delivers over a direct link or ends the route with a typed
+  error (`dht::delivery`). A route therefore takes at most `|V| + 2` hops (one greedy
+  run, one handoff, two terminal deliveries), and a message for a node no view yet
+  knows fails fast instead of circling the ring. With a finger table that spans the
+  identifier space a greedy run takes `O(log |V|)` hops; with a sparse one it
+  degenerates to a successor walk, so exhausting the hop budget on the delivery path
+  means a correct route longer than the budget (`|V| + 2 > MAX_RELAY_HOPS`), not a
+  loop. The carrier is outside every signature, so the budget bounds the work honest
+  hops do for one message and is not a promise a dishonest hop keeps;
+- a bounded reflection through `reply_via`: a request names one peer, and a responder
+  routes at most one successor or connection answer (`FindSuccessorReport`,
+  `ConnectNodeReport`) toward it; that peer receives the answer whole and hands it on
+  only over a direct link to the origin. Every other report, such as `FoundEntry`
+  with its entry data, is routed straight to the origin, so a small request cannot be
+  turned into a large report aimed at a third party;
 - no telemetry in the envelope beyond what routing needs: the next hop, the
   destination, the hop budget, and the delivery stage;
 - payload bytes encrypted to the destination's account key once the E2E handshake

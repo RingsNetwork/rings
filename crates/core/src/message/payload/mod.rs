@@ -35,6 +35,7 @@ use crate::domain_tag;
 use crate::ecc::keccak256;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::Message;
 
 mod wire;
 
@@ -103,11 +104,13 @@ fn hash_transaction(
 /// All messages transmitted in RingsNetwork should be wrapped by `Transaction`.
 /// It additionally offer destination, tx_id and verification.
 ///
-/// A report for a transaction is routed to the transaction's [origin](Self::origin), through
-/// [`reply_via`](Self::reply_via) when the origin signed one; no other return address exists,
-/// so a request can direct its report at no third party except one peer the origin itself
-/// named, and that peer hands the report on only over a direct link to the origin (see
-/// [`crate::dht::delivery`]).
+/// A report for a transaction is routed to the transaction's [origin](Self::origin). Only the
+/// successor and connection answers a node needs while it has no predecessor
+/// (`FindSuccessorReport`, `ConnectNodeReport`) first go through
+/// [`reply_via`](Self::reply_via) when the origin signed one. No other return address exists,
+/// so a request can direct no report at a third party except one of these bounded answers at
+/// the one peer the origin itself named, which receives it whole and hands it on only over a
+/// direct link to the origin (see [`crate::dht::delivery`]).
 ///
 /// To transmit `Transaction` in RingsNetwork, user should build
 /// [MessagePayload] and use [PayloadSender] to send.
@@ -120,9 +123,10 @@ pub struct Transaction {
     pub tx_id: uuid::Uuid,
     /// Monotonic sequence inside the origin account's destination-scoped stream.
     pub sequence: u64,
-    /// The peer the origin's reports return through while no node is known to route to the
-    /// origin (it has no predecessor yet, e.g. a joiner behind its bootstrap); `None` otherwise.
-    /// Signed with the rest of the transaction, so only the origin chooses it.
+    /// The peer the origin's successor and connection answers return through while no node is
+    /// known to route to the origin: whenever it has no predecessor, i.e. while it joins and
+    /// again after its predecessor departs until a new one notifies it; `None` otherwise. Signed
+    /// with the rest of the transaction, so only the origin chooses it.
     pub reply_via: Option<Did>,
     /// data
     pub data: Vec<u8>,
@@ -259,30 +263,9 @@ impl MessagePayload {
         })
     }
 
-    /// Helps to create sending message from data: a fresh carrier with the full hop budget.
+    /// A locally originated payload: a fresh carrier with the full hop budget leaving along
+    /// the delivery decision `hop`, over a transaction that names `reply_via`.
     pub fn new_send_with_sequence<T>(
-        data: T,
-        signer: MessageSigner<&DelegateeKey>,
-        next_hop: Did,
-        destination: Did,
-        sequence: u64,
-    ) -> Result<Self>
-    where
-        T: Serialize,
-    {
-        Self::new_send_along(
-            data,
-            signer,
-            NextHop::new(next_hop, RouteStage::TOWARD),
-            destination,
-            sequence,
-            None,
-        )
-    }
-
-    /// [`Self::new_send_with_sequence`] whose fresh carrier leaves along the delivery decision
-    /// `hop`, stage included, and whose transaction names `reply_via`.
-    pub fn new_send_along<T>(
         data: T,
         signer: MessageSigner<&DelegateeKey>,
         hop: NextHop,
@@ -296,7 +279,7 @@ impl MessagePayload {
         let tx_id = crate::utils::new_uuid();
         let transaction =
             Transaction::replying_via(destination, tx_id, sequence, reply_via, data, signer)?;
-        let relay = MessageRelay::along(hop, transaction.destination, HopBudget::MAX);
+        let relay = MessageRelay::new(hop, transaction.destination, HopBudget::MAX);
         Self::new(transaction, signer, relay)
     }
 
@@ -315,7 +298,14 @@ impl MessagePayload {
             signer.delegator_did(),
             destination,
         ))?;
-        Self::new_send_with_sequence(data, signer, next_hop, destination, sequence)
+        Self::new_send_with_sequence(
+            data,
+            signer,
+            NextHop::toward(next_hop),
+            destination,
+            sequence,
+            None,
+        )
     }
 
     /// The sessions in the two slots of this payload: the origin's and the current hop's.
@@ -438,6 +428,50 @@ pub trait PayloadSender {
             .ok_or(Error::RelayDestinationUnreachable { destination })
     }
 
+    /// Build a locally originated payload for `destination`: the only constructor of a
+    /// transaction this node authors as a request.
+    ///
+    /// The first hop is `next_hop` when the caller fixed it, otherwise the delivery decision;
+    /// the transaction names this node's [`reply_via`](crate::dht::topology::reply_via). When
+    /// the hop is decided here, both come from one topology snapshot
+    /// ([`origination`](crate::dht::delivery::origination)). Every locally originated request
+    /// passes through here, so the law "a node without a predecessor names its successor head"
+    /// holds for all of them.
+    async fn originate<T>(
+        &self,
+        msg: T,
+        destination: Did,
+        next_hop: Option<Did>,
+    ) -> Result<MessagePayload>
+    where
+        T: Serialize + Send,
+    {
+        let (hop, reply_via) = match next_hop {
+            Some(peer) => (NextHop::toward(peer), self.dht().reply_via()?),
+            None => {
+                let origination = self
+                    .dht()
+                    .origination(destination, |peer| self.is_connected(peer))?;
+                let hop = origination
+                    .hop
+                    .ok_or(Error::RelayDestinationUnreachable { destination })?;
+                (hop, origination.reply_via)
+            }
+        };
+        let sequence = *self
+            .reserve_transaction_sequences(destination, NonZeroU64::MIN)
+            .await?
+            .start();
+        MessagePayload::new_send_with_sequence(
+            msg,
+            self.message_signer(),
+            hop,
+            destination,
+            sequence,
+            reply_via,
+        )
+    }
+
     /// Alias for `do_send_payload` that sets the next hop to `payload.relay.next_hop`.
     async fn send_payload(&self, payload: MessagePayload) -> Result<()> {
         self.do_send_payload(payload.relay.next_hop, payload).await
@@ -453,35 +487,7 @@ pub trait PayloadSender {
     where
         T: Serialize + Send,
     {
-        self.send_message_along(msg, destination, NextHop::new(next_hop, RouteStage::TOWARD))
-            .await
-    }
-
-    /// Send a message to a specified destination along the delivery decision `hop`.
-    ///
-    /// The transaction names [`PeerRing::reply_via`] as the return path of its reports: this
-    /// node's successor head while no node is known to route to it, and nothing otherwise.
-    async fn send_message_along<T>(
-        &self,
-        msg: T,
-        destination: Did,
-        hop: NextHop,
-    ) -> Result<uuid::Uuid>
-    where
-        T: Serialize + Send,
-    {
-        let sequence = *self
-            .reserve_transaction_sequences(destination, NonZeroU64::MIN)
-            .await?
-            .start();
-        let payload = MessagePayload::new_send_along(
-            msg,
-            self.message_signer(),
-            hop,
-            destination,
-            sequence,
-            self.dht().reply_via()?,
-        )?;
+        let payload = self.originate(msg, destination, Some(next_hop)).await?;
         let tx_id = payload.transaction.tx_id;
         self.send_payload(payload).await?;
         Ok(tx_id)
@@ -490,8 +496,10 @@ pub trait PayloadSender {
     /// Send a message to a specified destination.
     async fn send_message<T>(&self, msg: T, destination: Did) -> Result<uuid::Uuid>
     where T: Serialize + Send {
-        let hop = self.next_hop_toward(destination, RouteStage::TOWARD)?;
-        self.send_message_along(msg, destination, hop).await
+        let payload = self.originate(msg, destination, None).await?;
+        let tx_id = payload.transaction.tx_id;
+        self.send_payload(payload).await?;
+        Ok(tx_id)
     }
 
     /// Send a direct message to a specified destination.
@@ -501,17 +509,21 @@ pub trait PayloadSender {
             .await
     }
 
-    /// Send a report for the request carried by `payload`: a fresh payload routed to the
-    /// request's origin under the same transaction id, through the request's signed `reply_via`
-    /// when it names one. The report's first stage depends on the signed request alone, never on
-    /// the request's carrier.
-    async fn send_report_message<T>(&self, payload: &MessagePayload, msg: T) -> Result<()>
-    where T: Serialize + Send {
+    /// Send the report `msg` for the request carried by `payload`: a fresh payload routed to
+    /// the request's origin under the same transaction id.
+    ///
+    /// A successor or connection answer (`FindSuccessorReport`, `ConnectNodeReport`) starts in
+    /// stage `(via reply_via, ⊥)` when the signed request names one; every other report routes
+    /// straight toward the origin, so a request can reflect at most one bounded report toward
+    /// the peer it names. The first stage depends on the signed request alone, never on the
+    /// request's carrier.
+    async fn send_report_message(&self, payload: &MessagePayload, msg: Message) -> Result<()> {
         let origin = payload.transaction.origin();
-        let hop = self.next_hop_toward(
-            origin,
-            RouteStage::replying_via(payload.transaction.reply_via),
-        )?;
+        let reply_via = payload
+            .transaction
+            .reply_via
+            .filter(|_| msg.returns_through_reply_via());
+        let hop = self.next_hop_toward(origin, RouteStage::replying_via(reply_via))?;
         let relay = payload.relay.report(self.dht().did, origin, hop)?;
 
         let signer = self.message_signer();
@@ -542,16 +554,14 @@ pub trait PayloadSender {
     /// the stage is then carried unchanged.
     async fn forward_payload(&self, payload: &MessagePayload, next_hop: Option<Did>) -> Result<()> {
         let (local, destination) = (self.dht().did, payload.relay.destination);
-        let relay = match next_hop {
-            None => payload.relay.advance(
-                local,
-                self.next_hop_toward(destination, payload.relay.stage)?,
-            )?,
+        let hop = match next_hop {
+            None => self.next_hop_toward(destination, payload.relay.stage)?,
             Some(_) if self.is_connected(destination) => {
-                payload.relay.forward(local, destination)?
+                NextHop::new(destination, payload.relay.stage)
             }
-            Some(next_hop) => payload.relay.forward(local, next_hop)?,
+            Some(next_hop) => NextHop::new(next_hop, payload.relay.stage),
         };
+        let relay = payload.relay.forward(local, hop)?;
         self.forward_by_relay(payload, relay).await
     }
 
@@ -560,7 +570,7 @@ pub trait PayloadSender {
         let relay = payload
             .relay
             .reset_destination(next_hop)
-            .forward(self.dht().did, next_hop)?;
+            .forward(self.dht().did, NextHop::toward(next_hop))?;
         self.forward_by_relay(payload, relay).await
     }
 }

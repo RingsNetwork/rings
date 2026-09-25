@@ -7,7 +7,7 @@
 //! partial map
 //!
 //! ```text
-//! advance(current, (next', σ')) : (current, d, n, σ) ↦ (next', d, n − 1, σ')    defined iff n > 0
+//! forward(current, (next', σ')) : (current, d, n, σ) ↦ (next', d, n − 1, σ')    defined iff n > 0
 //! ```
 //!
 //! so the budget component walks the finite chain `MAX > … > 1 > 0` and never climbs it; a report
@@ -17,8 +17,10 @@
 //! carrier records nothing about the hops already taken: each hop learns its predecessor from the
 //! transport edge it received on and its successor from `next_hop`, and the destination learns
 //! only the last hop. Delivery is bounded by its own progress law
-//! ([`delivery`](crate::dht::delivery)), so a route that outruns its budget is a fault, and budget
-//! exhaustion is the witness that replaces any history-based loop detection.
+//! ([`delivery`](crate::dht::delivery)): no route cycles, so a route outruns its budget only when
+//! a correct route is longer than the budget (a ring larger than it whose finger table does not
+//! span the identifier space), and budget exhaustion is the witness that replaces any
+//! history-based loop detection.
 //!
 //! The carrier is outside every signature: it is rewritten by each hop under that hop's own
 //! transport edge. A budget therefore bounds the work honest hops do for one payload; it is not a
@@ -103,17 +105,8 @@ pub struct MessageRelay {
 }
 
 impl MessageRelay {
-    /// A fresh carrier, in the initial stage [`RouteStage::TOWARD`].
-    pub fn new(next_hop: Did, destination: Did, hop_budget: HopBudget) -> Self {
-        Self::along(
-            NextHop::new(next_hop, RouteStage::TOWARD),
-            destination,
-            hop_budget,
-        )
-    }
-
-    /// A fresh carrier whose first hop is the delivery decision `hop`.
-    pub fn along(hop: NextHop, destination: Did, hop_budget: HopBudget) -> Self {
+    /// A fresh carrier whose first hop is the delivery decision `hop`, stage included.
+    pub fn new(hop: NextHop, destination: Did, hop_budget: HopBudget) -> Self {
         Self {
             next_hop: hop.peer,
             destination,
@@ -122,21 +115,14 @@ impl MessageRelay {
         }
     }
 
-    /// The carrier `current` sends on toward `self.destination` through `next_hop`.
+    /// The carrier `current` sends on toward `self.destination` after the delivery decision
+    /// `hop`.
     ///
     /// Pre: `self` was addressed to `current`.
-    /// Post: `Ok` spends exactly one forward; `Err(RelayHopBudgetExhausted)` is the drop of a
-    /// payload that has taken every forward it was given.
-    pub fn forward(&self, current: Did, next_hop: Did) -> Result<Self> {
-        self.advance(current, NextHop::new(next_hop, self.stage))
-    }
-
-    /// The carrier `current` sends on after the delivery decision `hop`: [`Self::forward`] that
-    /// also moves the stage.
-    ///
-    /// Pre: `self` was addressed to `current`.
-    /// Post: as [`Self::forward`], with `stage = hop.stage`.
-    pub fn advance(&self, current: Did, hop: NextHop) -> Result<Self> {
+    /// Post: `Ok` spends exactly one forward and sets `stage = hop.stage`;
+    /// `Err(RelayHopBudgetExhausted)` is the drop of a payload that has taken every forward it
+    /// was given.
+    pub fn forward(&self, current: Did, hop: NextHop) -> Result<Self> {
         self.validate(current)?;
         let hop_budget = self
             .hop_budget
@@ -159,7 +145,7 @@ impl MessageRelay {
     pub fn report(&self, current: Did, destination: Did, hop: NextHop) -> Result<Self> {
         self.validate(current)?;
 
-        Ok(Self::along(hop, destination, HopBudget::MAX))
+        Ok(Self::new(hop, destination, HopBudget::MAX))
     }
 
     /// The same carrier aimed at `destination`.

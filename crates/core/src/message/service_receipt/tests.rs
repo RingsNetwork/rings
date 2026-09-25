@@ -1,5 +1,6 @@
 use super::*;
 use crate::delegation::DelegateeKey;
+use crate::dht::delivery::NextHop;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::message::HopBudget;
@@ -480,7 +481,11 @@ fn probe_offer_verifies_the_exact_signed_request_and_completion() -> Result<()> 
     let outer = MessagePayload::new(
         outer_transaction,
         provider_signer,
-        MessageRelay::new(beneficiary_did, beneficiary_did, HopBudget::MAX),
+        MessageRelay::new(
+            NextHop::toward(beneficiary_did),
+            beneficiary_did,
+            HopBudget::MAX,
+        ),
     )?;
 
     assert_eq!(
@@ -580,7 +585,11 @@ fn probe_offer_rejects_an_attestation_from_an_expired_provider_session() -> Resu
     let outer = MessagePayload::new(
         outer_transaction,
         provider_signer,
-        MessageRelay::new(beneficiary_did, beneficiary_did, HopBudget::MAX),
+        MessageRelay::new(
+            NextHop::toward(beneficiary_did),
+            beneficiary_did,
+            HopBudget::MAX,
+        ),
     )?;
 
     assert_eq!(
@@ -658,7 +667,11 @@ fn probe_offer_judges_embedded_transaction_sessions_at_observation_time() -> Res
     let outer = MessagePayload::new(
         outer_transaction,
         provider_signer,
-        MessageRelay::new(beneficiary_did, beneficiary_did, HopBudget::MAX),
+        MessageRelay::new(
+            NextHop::toward(beneficiary_did),
+            beneficiary_did,
+            HopBudget::MAX,
+        ),
     )?;
 
     offer.verify_transcript(&outer, NETWORK_ID, beneficiary_did)?;

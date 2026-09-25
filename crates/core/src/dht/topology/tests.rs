@@ -563,18 +563,17 @@ fn test_apply_finger_step_rejects_stale_and_invalid_results() {
     assert_eq!(ignored.state, current);
 }
 
-/// A sparse finger table with no hint preceding the target forwards through
-/// the successor list, to its entry closest to the target, never to the local
-/// node (#865: Chord's `closest_preceding_node` ranges over successors too).
+/// A sparse finger table with no hint preceding the target forwards to the
+/// successor head, never to the local node.
 #[test]
-fn test_find_successor_routes_through_successor_list_when_no_finger_precedes_target() {
+fn test_find_successor_falls_back_to_successor_head_when_no_finger_precedes_target() {
     let local = did(0);
     let head = did(8);
     let far = did(64);
     let current = state(local, vec![head, did(16)], None, vec![None; 8], 0);
 
     assert_eq!(find_successor(&current, far), FindSuccessorStep::Remote {
-        next: did(16),
+        next: head,
         did: far
     });
 }
@@ -990,14 +989,6 @@ fn test_rectify_never_adopts_the_local_node_as_predecessor() {
     assert!(is_responsible_for(&notified_by_itself.state, did(7)));
 }
 
-/// Admission-focused regression tests for deferred finger proofs.
-///
-/// The submodule keeps timeout, duplicate, and supersession cases close to the
-/// topology reducer while separating them from the broader ring-shape tests in
-/// this file.
-mod admission_tests;
-mod stabilization_tests;
-
 /// `ReplyVia(n)` names the successor head exactly while no predecessor has notified `n`, and
 /// nothing for a node without successors.
 #[test]
@@ -1012,3 +1003,11 @@ fn test_reply_via_names_the_head_only_without_a_predecessor() {
     assert_eq!(reply_via(&notified), None);
     assert_eq!(reply_via(&alone), None);
 }
+
+/// Admission-focused regression tests for deferred finger proofs.
+///
+/// The submodule keeps timeout, duplicate, and supersession cases close to the
+/// topology reducer while separating them from the broader ring-shape tests in
+/// this file.
+mod admission_tests;
+mod stabilization_tests;

@@ -329,7 +329,7 @@ impl Swarm {
         // The invoker should fix it before sending.
         let payload = self
             .transport
-            .signed_payload(Message::ConnectNodeSend(offer_msg), self.did(), peer)
+            .originate(Message::ConnectNodeSend(offer_msg), peer, Some(self.did()))
             .await?;
 
         Ok((ConnectionAttempt(attempt), payload))
@@ -366,7 +366,11 @@ impl Swarm {
         // The invoker should fix it before sending.
         let answer_payload = self
             .transport
-            .signed_payload(Message::ConnectNodeReport(answer_msg), self.did(), peer)
+            .originate(
+                Message::ConnectNodeReport(answer_msg),
+                peer,
+                Some(self.did()),
+            )
             .await?;
 
         Ok(answer_payload)

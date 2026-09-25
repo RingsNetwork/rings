@@ -41,6 +41,7 @@ use super::TopoInfo;
 use crate::consts::LOCAL_CACHE_CAPACITY;
 use crate::dht::delivery;
 use crate::dht::delivery::NextHop;
+use crate::dht::delivery::Origination;
 use crate::dht::delivery::RouteStage;
 use crate::dht::entry::Entry;
 use crate::dht::finger::FingerApplyOutcome;
@@ -264,6 +265,20 @@ impl PeerRing {
     /// Returns an error when a backing lock is poisoned.
     pub(crate) fn reply_via(&self) -> Result<Option<Did>> {
         self.with_topology_state(topology::reply_via)
+    }
+
+    /// The first hop and the `reply_via` of a request this node originates toward
+    /// `destination`, from one coherent snapshot; see [`delivery::origination`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a backing lock is poisoned.
+    pub(crate) fn origination(
+        &self,
+        destination: Did,
+        linked: impl Fn(Did) -> bool,
+    ) -> Result<Origination> {
+        self.with_topology_state(|view| delivery::origination(view, destination, linked))
     }
 }
 

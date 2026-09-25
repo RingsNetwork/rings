@@ -297,7 +297,7 @@ fn test_reply_via_is_inside_both_signature_transcripts() -> Result<()> {
     let signer = MessageSigner::new(&key, TEST_NETWORK_ID);
     let bootstrap: Did = SecretKey::random().address().into();
     let next_hop: Did = SecretKey::random().address().into();
-    let mut payload = MessagePayload::new_send_along(
+    let mut payload = MessagePayload::new_send_with_sequence(
         Message::custom(b"join")?,
         signer,
         NextHop::new(next_hop, RouteStage::TOWARD),
@@ -323,7 +323,7 @@ fn test_wire_round_trip_keeps_reply_via_and_stage() -> Result<()> {
     let key = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let bootstrap: Did = SecretKey::random().address().into();
     let stage = RouteStage::replying_via(Some(bootstrap)).handed_off();
-    let payload = MessagePayload::new_send_along(
+    let payload = MessagePayload::new_send_with_sequence(
         Message::custom(b"round trip")?,
         MessageSigner::new(&key, TEST_NETWORK_ID),
         NextHop::new(SecretKey::random().address().into(), stage),
