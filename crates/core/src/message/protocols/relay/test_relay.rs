@@ -83,21 +83,38 @@ fn test_reset_destination_keeps_the_budget() -> Result<()> {
     Ok(())
 }
 
+/// Stage law: `forward` carries the stage, `advance` sets it, and re-aiming starts a new route
+/// in [`RouteStage::TOWARD`].
+#[test]
+fn test_stage_is_carried_set_and_reset() -> Result<()> {
+    let relay = MessageRelay::new(did(1), did(9), FIXTURE_BUDGET);
+    assert_eq!(relay.stage, RouteStage::TOWARD);
+
+    let handed = RouteStage::TOWARD.handed_off();
+    let advanced = relay.advance(did(1), NextHop::new(did(2), handed))?;
+    assert_eq!(advanced.stage, handed);
+    assert_eq!(advanced.forward(did(2), did(3))?.stage, handed);
+    assert_eq!(advanced.reset_destination(did(7)).stage, RouteStage::TOWARD);
+    Ok(())
+}
+
 /// A report is a fresh carrier: it holds the full budget, not what the request has left.
 #[test]
 fn test_report_is_a_fresh_carrier() -> Result<()> {
     let current = did(2);
     let origin = did(1);
     let next_hop = did(4);
+    let hop = NextHop::new(next_hop, RouteStage::replying_via(Some(did(5))));
     let request = MessageRelay::new(current, current, HopBudget::EXHAUSTED);
 
-    let report = request.report(current, origin, next_hop)?;
+    let report = request.report(current, origin, hop)?;
 
     assert_eq!(report.next_hop, next_hop);
     assert_eq!(report.destination, origin);
     assert_eq!(report.hop_budget, HopBudget::MAX);
+    assert_eq!(report.stage, hop.stage);
     assert!(matches!(
-        request.report(did(3), origin, next_hop),
+        request.report(did(3), origin, hop),
         Err(Error::InvalidNextHop)
     ));
     Ok(())

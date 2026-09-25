@@ -563,17 +563,18 @@ fn test_apply_finger_step_rejects_stale_and_invalid_results() {
     assert_eq!(ignored.state, current);
 }
 
-/// A sparse finger table with no hint preceding the target forwards to the
-/// successor head, never to the local node.
+/// A sparse finger table with no hint preceding the target forwards through
+/// the successor list, to its entry closest to the target, never to the local
+/// node (#865: Chord's `closest_preceding_node` ranges over successors too).
 #[test]
-fn test_find_successor_falls_back_to_successor_head_when_no_finger_precedes_target() {
+fn test_find_successor_routes_through_successor_list_when_no_finger_precedes_target() {
     let local = did(0);
     let head = did(8);
     let far = did(64);
     let current = state(local, vec![head, did(16)], None, vec![None; 8], 0);
 
     assert_eq!(find_successor(&current, far), FindSuccessorStep::Remote {
-        next: head,
+        next: did(16),
         did: far
     });
 }
@@ -996,3 +997,18 @@ fn test_rectify_never_adopts_the_local_node_as_predecessor() {
 /// this file.
 mod admission_tests;
 mod stabilization_tests;
+
+/// `ReplyVia(n)` names the successor head exactly while no predecessor has notified `n`, and
+/// nothing for a node without successors.
+#[test]
+fn test_reply_via_names_the_head_only_without_a_predecessor() {
+    let local = did(0);
+    let head = did(8);
+    let joining = state(local, vec![head, did(16)], None, vec![None; 4], 0);
+    let notified = state(local, vec![head, did(16)], Some(did(40)), vec![None; 4], 0);
+    let alone = state(local, vec![], None, vec![None; 4], 0);
+
+    assert_eq!(reply_via(&joining), Some(head));
+    assert_eq!(reply_via(&notified), None);
+    assert_eq!(reply_via(&alone), None);
+}

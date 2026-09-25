@@ -26,7 +26,9 @@ pub const TS_OFFSET_TOLERANCE_MS: u128 = 3000;
 /// A ring whose finger table does not span the space (the small tables of simulated networks)
 /// routes by successor walk instead, whose length is the ring size and is known to no node, so
 /// the budget is a network constant rather than a per-ring derivation; it covers such rings up
-/// to 65 nodes.
+/// to 65 nodes. Delivery toward a node never relies on it to end a route (see `dht::delivery`):
+/// a route crosses its aim at most once and then delivers or fails fast, so the budget is only a
+/// fault witness there.
 pub const MAX_RELAY_HOPS: u8 = 64;
 /// Maximum number of fetched entries the local DHT cache retains before evicting the
 /// least recently written one.

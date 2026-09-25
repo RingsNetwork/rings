@@ -658,6 +658,15 @@ pub enum Error {
     #[error("Cannot get next hop when sending message")]
     NoNextHop,
 
+    /// Delivery toward a node cannot continue from this hop: no known peer makes progress
+    /// toward its aim, or the route was already handed past it and no direct link leads on
+    /// (see `dht::delivery`). The route ends here instead of spending its hop budget.
+    #[error("Relay destination {destination} is not reachable from this hop")]
+    RelayDestinationUnreachable {
+        /// The node the payload was routed toward.
+        destination: crate::dht::Did,
+    },
+
     #[cfg(all(feature = "wasm", target_family = "wasm"))]
     /// IndexedDB error, {0}
     #[error("IndexedDB error, {0}")]

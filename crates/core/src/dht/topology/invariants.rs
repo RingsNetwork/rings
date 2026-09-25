@@ -77,8 +77,8 @@ impl TopologyState {
     ///
     /// The first clause is the sparse/no-wrap law (it also excludes `n`, at
     /// distance `0 < 2^i`); the second says a higher slot never points nearer
-    /// than a lower one, which is what lets `closest_preceding_finger` scan
-    /// from the top.
+    /// than a lower one, so the finger table read from the top is ordered by
+    /// clockwise distance.
     pub(crate) fn fingers_are_well_formed(&self) -> bool {
         let occupied = self
             .fingers

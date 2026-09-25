@@ -29,6 +29,30 @@ Correct Chord is derived from Pamela Zave's work on Chord, and it encompasses tw
 
 Rings Network builds upon Correct Chord and incorporates several modifications, including support for multiple successors and improved stabilization algorithms, among other enhancements.
 
+## Delivery toward a node
+
+Finding the owner of a key and delivering a message to a node are different questions, and Rings
+answers them with different rules. The owner lookup (`find_successor`) answers `head` when the key
+lies between a node and its successor head, and crossing the key is correct there: the owner is the
+first node at or after it. A node is not a position, so a message for a node must never pass it.
+
+Delivery (`dht::delivery`) works as follows:
+
+1. **Greedy.** Each hop forwards to the known peer (successor or finger) that lies between itself
+   and the destination and is nearest the destination. The clockwise distance strictly
+   decreases, so no route can cycle. A hop linked to the destination delivers directly.
+2. **One handoff.** When no known peer lies on that arc, the hop hands the message once to its
+   successor head and marks the carrier. The receiver delivers if it is linked to the
+   destination; otherwise it ends the route with a typed error (`RelayDestinationUnreachable`).
+   It never routes greedily again.
+
+A message for a node that no view knows yet therefore fails fast, within a bounded number of hops,
+instead of circling the ring until its hop budget runs out; it is delivered once the ring has
+converged. A joining node is the one case that cannot wait for convergence, because convergence
+needs the replies to its own join requests. While a node has no predecessor, its requests carry a
+signed `reply_via` naming its successor head, which is its bootstrap during a join. Reports then
+travel to that peer, which hands them over its direct link.
+
 ## Finger-table convergence
 
 ### Algorithmic basis and Rings policy

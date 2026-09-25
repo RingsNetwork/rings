@@ -3,17 +3,21 @@
 //! The relay carrier of a payload: where it goes next, where it ends, and how many forwards it
 //! has left.
 //!
-//! A carrier is the triple `(next_hop, destination, hop_budget)`. Forwarding is the partial map
+//! A carrier is the quadruple `(next_hop, destination, hop_budget, stage)`. Forwarding is the
+//! partial map
 //!
 //! ```text
-//! forward(current, next') : (current, d, n) ↦ (next', d, n − 1)    defined iff n > 0
+//! advance(current, (next', σ')) : (current, d, n, σ) ↦ (next', d, n − 1, σ')    defined iff n > 0
 //! ```
 //!
 //! so the budget component walks the finite chain `MAX > … > 1 > 0` and never climbs it; a report
-//! is a fresh carrier, not a continuation. The carrier records nothing about the hops already
-//! taken: each hop learns its predecessor from the transport edge it received on and its
-//! successor from `next_hop`, and the destination learns only the last hop. Chord greedy routing
-//! is monotone toward the destination, so a route that outruns its budget is a fault, and budget
+//! is a fresh carrier, not a continuation: its stage is derived from the signed request alone
+//! (its `reply_via`), never from the request's carrier. The stage `σ` is the delivery automaton's
+//! state (see [`RouteStage`]): the route's aim and whether it was handed past that aim. The
+//! carrier records nothing about the hops already taken: each hop learns its predecessor from the
+//! transport edge it received on and its successor from `next_hop`, and the destination learns
+//! only the last hop. Delivery is bounded by its own progress law
+//! ([`delivery`](crate::dht::delivery)), so a route that outruns its budget is a fault, and budget
 //! exhaustion is the witness that replaces any history-based loop detection.
 //!
 //! The carrier is outside every signature: it is rewritten by each hop under that hop's own
@@ -24,6 +28,8 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::consts::MAX_RELAY_HOPS;
+use crate::dht::delivery::NextHop;
+use crate::dht::delivery::RouteStage;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
@@ -91,15 +97,28 @@ pub struct MessageRelay {
 
     /// The forwards the payload may still take.
     pub hop_budget: HopBudget,
+
+    /// The delivery stage: the route's aim, and whether it was handed past that aim.
+    pub stage: RouteStage,
 }
 
 impl MessageRelay {
-    /// A fresh carrier.
+    /// A fresh carrier, in the initial stage [`RouteStage::TOWARD`].
     pub fn new(next_hop: Did, destination: Did, hop_budget: HopBudget) -> Self {
-        Self {
-            next_hop,
+        Self::along(
+            NextHop::new(next_hop, RouteStage::TOWARD),
             destination,
             hop_budget,
+        )
+    }
+
+    /// A fresh carrier whose first hop is the delivery decision `hop`.
+    pub fn along(hop: NextHop, destination: Did, hop_budget: HopBudget) -> Self {
+        Self {
+            next_hop: hop.peer,
+            destination,
+            hop_budget,
+            stage: hop.stage,
         }
     }
 
@@ -109,6 +128,15 @@ impl MessageRelay {
     /// Post: `Ok` spends exactly one forward; `Err(RelayHopBudgetExhausted)` is the drop of a
     /// payload that has taken every forward it was given.
     pub fn forward(&self, current: Did, next_hop: Did) -> Result<Self> {
+        self.advance(current, NextHop::new(next_hop, self.stage))
+    }
+
+    /// The carrier `current` sends on after the delivery decision `hop`: [`Self::forward`] that
+    /// also moves the stage.
+    ///
+    /// Pre: `self` was addressed to `current`.
+    /// Post: as [`Self::forward`], with `stage = hop.stage`.
+    pub fn advance(&self, current: Did, hop: NextHop) -> Result<Self> {
         self.validate(current)?;
         let hop_budget = self
             .hop_budget
@@ -116,31 +144,35 @@ impl MessageRelay {
             .ok_or(Error::RelayHopBudgetExhausted)?;
 
         Ok(Self {
-            next_hop,
+            next_hop: hop.peer,
             destination: self.destination,
             hop_budget,
+            stage: hop.stage,
         })
     }
 
     /// The fresh carrier of a report `current` sends for the request carried by `self`: it
     /// holds [`HopBudget::MAX`], as every fresh carrier does, whatever `self` has left.
     ///
-    /// Pre: `self` was addressed to `current`; `next_hop` was inferred by the caller from
+    /// Pre: `self` was addressed to `current`; `hop` was decided by the caller toward
     /// `destination`.
-    pub fn report(&self, current: Did, destination: Did, next_hop: Did) -> Result<Self> {
+    pub fn report(&self, current: Did, destination: Did, hop: NextHop) -> Result<Self> {
         self.validate(current)?;
 
-        Ok(Self::new(next_hop, destination, HopBudget::MAX))
+        Ok(Self::along(hop, destination, HopBudget::MAX))
     }
 
     /// The same carrier aimed at `destination`.
     ///
     /// A sender that does not know the final destination names its next hop as the destination;
-    /// a hop that resolves a farther node re-aims the carrier here before forwarding it.
+    /// a hop that resolves a farther node re-aims the carrier here before forwarding it. A new
+    /// destination starts a new route, so the stage returns to [`RouteStage::TOWARD`].
     pub fn reset_destination(&self, destination: Did) -> Self {
-        let mut relay = self.clone();
-        relay.destination = destination;
-        relay
+        Self {
+            destination,
+            stage: RouteStage::TOWARD,
+            ..self.clone()
+        }
     }
 
     /// Check that this carrier was addressed to `current`.

@@ -39,6 +39,9 @@ use super::PeerRingAction;
 use super::RemoteAction;
 use super::TopoInfo;
 use crate::consts::LOCAL_CACHE_CAPACITY;
+use crate::dht::delivery;
+use crate::dht::delivery::NextHop;
+use crate::dht::delivery::RouteStage;
 use crate::dht::entry::Entry;
 use crate::dht::finger::FingerApplyOutcome;
 use crate::dht::finger::FingerConvergenceStatus;
@@ -235,6 +238,32 @@ impl PeerRing {
             FindSuccessorStep::Local(responsible) => Some(responsible),
             FindSuccessorStep::Remote { .. } => None,
         })
+    }
+
+    /// The delivery decision for a payload addressed to the node `destination` whose carrier
+    /// is in `stage`, against one coherent snapshot; see [`delivery::delivery_step`] for the
+    /// step and its laws. `linked` is the transport's direct-link predicate.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a backing lock is poisoned.
+    pub(crate) fn delivery_step(
+        &self,
+        destination: Did,
+        stage: RouteStage,
+        linked: impl Fn(Did) -> bool,
+    ) -> Result<Option<NextHop>> {
+        self.with_topology_state(|view| delivery::delivery_step(view, destination, stage, linked))
+    }
+
+    /// The peer this node names for its reports while no node is known to route to it; see
+    /// [`topology::reply_via`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a backing lock is poisoned.
+    pub(crate) fn reply_via(&self) -> Result<Option<Did>> {
+        self.with_topology_state(topology::reply_via)
     }
 }
 

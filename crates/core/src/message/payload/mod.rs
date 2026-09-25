@@ -27,10 +27,10 @@ use super::replay::StreamKey;
 use super::replay::TransactionDigest;
 use crate::delegation::DelegateeKey;
 use crate::delegation::Delegation;
-use crate::dht::Chord;
+use crate::dht::delivery::NextHop;
+use crate::dht::delivery::RouteStage;
 use crate::dht::Did;
 use crate::dht::PeerRing;
-use crate::dht::PeerRingAction;
 use crate::domain_tag;
 use crate::ecc::keccak256;
 use crate::error::Error;
@@ -72,12 +72,29 @@ fn next_test_transaction_sequence(key: StreamKey) -> Result<u64> {
     Ok(next)
 }
 
-fn hash_transaction(destination: Did, tx_id: uuid::Uuid, sequence: u64, data: &[u8]) -> [u8; 32] {
+/// The digest both signatures of a payload cover: every signed field of the transaction.
+///
+/// `reply_via` is encoded as a presence byte followed by the DID when present, before the
+/// variable-length `data`, so the encoding stays injective.
+fn hash_transaction(
+    destination: Did,
+    tx_id: uuid::Uuid,
+    sequence: u64,
+    reply_via: Option<Did>,
+    data: &[u8],
+) -> [u8; 32] {
     let mut msg = vec![];
 
     msg.extend_from_slice(destination.as_bytes());
     msg.extend_from_slice(tx_id.as_bytes());
     msg.extend_from_slice(&sequence.to_be_bytes());
+    match reply_via {
+        Some(peer) => {
+            msg.push(1);
+            msg.extend_from_slice(peer.as_bytes());
+        }
+        None => msg.push(0),
+    }
     msg.extend_from_slice(data);
 
     keccak256(&msg)
@@ -86,8 +103,11 @@ fn hash_transaction(destination: Did, tx_id: uuid::Uuid, sequence: u64, data: &[
 /// All messages transmitted in RingsNetwork should be wrapped by `Transaction`.
 /// It additionally offer destination, tx_id and verification.
 ///
-/// A report for a transaction is routed to the transaction's [origin](Self::origin); no other
-/// return address exists, so a request can never direct a report at a third party.
+/// A report for a transaction is routed to the transaction's [origin](Self::origin), through
+/// [`reply_via`](Self::reply_via) when the origin signed one; no other return address exists,
+/// so a request can direct its report at no third party except one peer the origin itself
+/// named, and that peer hands the report on only over a direct link to the origin (see
+/// [`crate::dht::delivery`]).
 ///
 /// To transmit `Transaction` in RingsNetwork, user should build
 /// [MessagePayload] and use [PayloadSender] to send.
@@ -100,6 +120,10 @@ pub struct Transaction {
     pub tx_id: uuid::Uuid,
     /// Monotonic sequence inside the origin account's destination-scoped stream.
     pub sequence: u64,
+    /// The peer the origin's reports return through while no node is known to route to the
+    /// origin (it has no predecessor yet, e.g. a joiner behind its bootstrap); `None` otherwise.
+    /// Signed with the rest of the transaction, so only the origin chooses it.
+    pub reply_via: Option<Did>,
     /// data
     pub data: Vec<u8>,
     /// This field holds a signature from a node,
@@ -113,6 +137,7 @@ impl fmt::Debug for Transaction {
             .field("destination", &self.destination)
             .field("tx_id", &self.tx_id)
             .field("sequence", &self.sequence)
+            .field("reply_via", &self.reply_via)
             .field("data_bytes", &self.data.len())
             .finish()
     }
@@ -142,7 +167,7 @@ impl fmt::Debug for MessagePayload {
 
 impl Transaction {
     /// Wrap data. Will serialize by [rings_codec::serialize]
-    /// then sign [MessageVerification] by `signer`.
+    /// then sign [MessageVerification] by `signer`. The transaction names no `reply_via`.
     pub fn new<T>(
         destination: Did,
         tx_id: uuid::Uuid,
@@ -153,16 +178,43 @@ impl Transaction {
     where
         T: Serialize,
     {
+        Self::replying_via(destination, tx_id, sequence, None, data, signer)
+    }
+
+    /// [`Self::new`] naming `reply_via` as the peer its reports return through.
+    pub fn replying_via<T>(
+        destination: Did,
+        tx_id: uuid::Uuid,
+        sequence: u64,
+        reply_via: Option<Did>,
+        data: T,
+        signer: MessageSigner<&DelegateeKey>,
+    ) -> Result<Self>
+    where
+        T: Serialize,
+    {
         let data = rings_codec::serialize(&data).map_err(Error::CodecSerialize)?;
-        let msg_hash = hash_transaction(destination, tx_id, sequence, &data);
+        let msg_hash = hash_transaction(destination, tx_id, sequence, reply_via, &data);
         let verification = signer.sign(TRANSACTION_DOMAIN_TAG, &msg_hash)?;
         Ok(Self {
             destination,
             tx_id,
             sequence,
+            reply_via,
             data,
             verification,
         })
+    }
+
+    /// The digest both the origin's and each hop's signature cover.
+    fn signed_hash(&self) -> [u8; 32] {
+        hash_transaction(
+            self.destination,
+            self.tx_id,
+            self.sequence,
+            self.reply_via,
+            &self.data,
+        )
     }
 
     /// The origin of this transaction: the account that authorized the session it is signed
@@ -199,13 +251,7 @@ impl MessagePayload {
         signer: MessageSigner<&DelegateeKey>,
         relay: MessageRelay,
     ) -> Result<Self> {
-        let msg_hash = hash_transaction(
-            transaction.destination,
-            transaction.tx_id,
-            transaction.sequence,
-            &transaction.data,
-        );
-        let verification = signer.sign(PAYLOAD_DOMAIN_TAG, &msg_hash)?;
+        let verification = signer.sign(PAYLOAD_DOMAIN_TAG, &transaction.signed_hash())?;
         Ok(Self {
             transaction,
             relay,
@@ -224,9 +270,33 @@ impl MessagePayload {
     where
         T: Serialize,
     {
+        Self::new_send_along(
+            data,
+            signer,
+            NextHop::new(next_hop, RouteStage::TOWARD),
+            destination,
+            sequence,
+            None,
+        )
+    }
+
+    /// [`Self::new_send_with_sequence`] whose fresh carrier leaves along the delivery decision
+    /// `hop`, stage included, and whose transaction names `reply_via`.
+    pub fn new_send_along<T>(
+        data: T,
+        signer: MessageSigner<&DelegateeKey>,
+        hop: NextHop,
+        destination: Did,
+        sequence: u64,
+        reply_via: Option<Did>,
+    ) -> Result<Self>
+    where
+        T: Serialize,
+    {
         let tx_id = crate::utils::new_uuid();
-        let transaction = Transaction::new(destination, tx_id, sequence, data, signer)?;
-        let relay = MessageRelay::new(next_hop, transaction.destination, HopBudget::MAX);
+        let transaction =
+            Transaction::replying_via(destination, tx_id, sequence, reply_via, data, signer)?;
+        let relay = MessageRelay::along(hop, transaction.destination, HopBudget::MAX);
         Self::new(transaction, signer, relay)
     }
 
@@ -301,7 +371,7 @@ impl MessageVerificationExt for Transaction {
     const DOMAIN_TAG: DomainTag = TRANSACTION_DOMAIN_TAG;
 
     fn verification_data(&self) -> Result<Vec<u8>> {
-        Ok(hash_transaction(self.destination, self.tx_id, self.sequence, &self.data).to_vec())
+        Ok(self.signed_hash().to_vec())
     }
 
     fn verification(&self) -> &MessageVerification {
@@ -344,7 +414,7 @@ pub trait PayloadSender {
     /// Get access to DHT.
     fn dht(&self) -> Arc<PeerRing>;
 
-    /// Used to check if destination is already connected when `infer_next_hop`
+    /// Whether `did` is a directly linked peer.
     fn is_connected(&self, did: Did) -> bool;
 
     /// Persistently reserve sender sequences for one final destination before signing.
@@ -357,21 +427,15 @@ pub trait PayloadSender {
     /// Send a message payload to a specified DID.
     async fn do_send_payload(&self, did: Did, payload: MessagePayload) -> Result<()>;
 
-    /// Infer the next hop for a message by calling `dht.find_successor()`.
-    fn infer_next_hop(&self, destination: Did, next_hop: Option<Did>) -> Result<Did> {
-        if self.is_connected(destination) {
-            return Ok(destination);
-        }
-
-        if let Some(next_hop) = next_hop {
-            return Ok(next_hop);
-        }
-
-        match self.dht().find_successor(destination)? {
-            PeerRingAction::Some(did) => Ok(did),
-            PeerRingAction::RemoteAction(did, _) => Ok(did),
-            _ => Err(Error::NoNextHop),
-        }
+    /// The delivery decision at this node for a payload addressed to the node `destination`
+    /// whose carrier is in `stage`: [`delivery_step`](crate::dht::delivery::delivery_step) over
+    /// this node's view and direct links. No hop passes its aim except by one terminal handoff,
+    /// and a route that cannot continue ends here with
+    /// [`Error::RelayDestinationUnreachable`] instead of spending its hop budget.
+    fn next_hop_toward(&self, destination: Did, stage: RouteStage) -> Result<NextHop> {
+        self.dht()
+            .delivery_step(destination, stage, |peer| self.is_connected(peer))?
+            .ok_or(Error::RelayDestinationUnreachable { destination })
     }
 
     /// Alias for `do_send_payload` that sets the next hop to `payload.relay.next_hop`.
@@ -389,16 +453,34 @@ pub trait PayloadSender {
     where
         T: Serialize + Send,
     {
+        self.send_message_along(msg, destination, NextHop::new(next_hop, RouteStage::TOWARD))
+            .await
+    }
+
+    /// Send a message to a specified destination along the delivery decision `hop`.
+    ///
+    /// The transaction names [`PeerRing::reply_via`] as the return path of its reports: this
+    /// node's successor head while no node is known to route to it, and nothing otherwise.
+    async fn send_message_along<T>(
+        &self,
+        msg: T,
+        destination: Did,
+        hop: NextHop,
+    ) -> Result<uuid::Uuid>
+    where
+        T: Serialize + Send,
+    {
         let sequence = *self
             .reserve_transaction_sequences(destination, NonZeroU64::MIN)
             .await?
             .start();
-        let payload = MessagePayload::new_send_with_sequence(
+        let payload = MessagePayload::new_send_along(
             msg,
             self.message_signer(),
-            next_hop,
+            hop,
             destination,
             sequence,
+            self.dht().reply_via()?,
         )?;
         let tx_id = payload.transaction.tx_id;
         self.send_payload(payload).await?;
@@ -408,8 +490,8 @@ pub trait PayloadSender {
     /// Send a message to a specified destination.
     async fn send_message<T>(&self, msg: T, destination: Did) -> Result<uuid::Uuid>
     where T: Serialize + Send {
-        let next_hop = self.infer_next_hop(destination, None)?;
-        self.send_message_by_hop(msg, destination, next_hop).await
+        let hop = self.next_hop_toward(destination, RouteStage::TOWARD)?;
+        self.send_message_along(msg, destination, hop).await
     }
 
     /// Send a direct message to a specified destination.
@@ -419,13 +501,18 @@ pub trait PayloadSender {
             .await
     }
 
-    /// Send a report for the request carried by `payload`: a fresh payload Chord-routed to the
-    /// request's origin under the same transaction id.
+    /// Send a report for the request carried by `payload`: a fresh payload routed to the
+    /// request's origin under the same transaction id, through the request's signed `reply_via`
+    /// when it names one. The report's first stage depends on the signed request alone, never on
+    /// the request's carrier.
     async fn send_report_message<T>(&self, payload: &MessagePayload, msg: T) -> Result<()>
     where T: Serialize + Send {
         let origin = payload.transaction.origin();
-        let next_hop = self.infer_next_hop(origin, None)?;
-        let relay = payload.relay.report(self.dht().did, origin, next_hop)?;
+        let hop = self.next_hop_toward(
+            origin,
+            RouteStage::replying_via(payload.transaction.reply_via),
+        )?;
+        let relay = payload.relay.report(self.dht().did, origin, hop)?;
 
         let signer = self.message_signer();
         let sequence = *self
@@ -447,10 +534,24 @@ pub trait PayloadSender {
         self.send_payload(new_pl).await
     }
 
-    /// Forward a payload message, with the next hop inferred by the DHT.
+    /// Forward a payload one hop on toward its relay destination.
+    ///
+    /// With `next_hop = None` the hop is the delivery decision for the carrier's stage (see
+    /// [`Self::next_hop_toward`]). A fixed `next_hop` is taken as given, as the owner-lookup
+    /// protocols choose it from `find_successor`, unless the destination is directly linked;
+    /// the stage is then carried unchanged.
     async fn forward_payload(&self, payload: &MessagePayload, next_hop: Option<Did>) -> Result<()> {
-        let next_hop = self.infer_next_hop(payload.relay.destination, next_hop)?;
-        let relay = payload.relay.forward(self.dht().did, next_hop)?;
+        let (local, destination) = (self.dht().did, payload.relay.destination);
+        let relay = match next_hop {
+            None => payload.relay.advance(
+                local,
+                self.next_hop_toward(destination, payload.relay.stage)?,
+            )?,
+            Some(_) if self.is_connected(destination) => {
+                payload.relay.forward(local, destination)?
+            }
+            Some(next_hop) => payload.relay.forward(local, next_hop)?,
+        };
         self.forward_by_relay(payload, relay).await
     }
 
