@@ -29,8 +29,20 @@ use crate::processor::ProcessorConfig;
 use crate::provider::Provider;
 
 const TEST_DHT_FINGER_TABLE_SIZE: usize = 8;
-/// Failure bound of one awaited event in these tests; see [`within_hang_guard`].
-const HANG_GUARD: Duration = Duration::from_secs(60);
+
+/// ICE servers of every browser fixture: none, so peers gather host candidates only.
+///
+/// Every peer of these tests lives in the same page. An external STUN server would put its
+/// latency inside `createOffer`/`answerOffer`, which wait for ICE gathering to complete, and
+/// so ahead of every awaited event.
+const TEST_ICE_SERVERS: &str = "";
+
+/// Per-test hang guard of the connection tests; see [`with_hang_guard`].
+///
+/// Budget arithmetic: wasm-bindgen-test gives the whole binary 120 s. The suite passes in
+/// about 9 s, so one test that hangs to this guard still leaves the rest of the binary its
+/// normal runtime within the budget, and the named guard fires before the runner's.
+pub const TEST_HANG_GUARD: Duration = Duration::from_secs(30);
 
 /// A logical peer transition, as [`SwarmEvent::peer_transition`] reads it off the event stream.
 type Transition = (Did, PeerTransition);
@@ -126,24 +138,34 @@ impl PeerTransitions {
             }
             false
         };
-        if !within_hang_guard(format_args!("{wanted:?}"), arrival).await {
+        if !arrival.await {
             panic!("transition recorder dropped before {wanted:?}");
         }
     }
 }
 
-/// Await `event`, failing with `label` if it has not resolved within [`HANG_GUARD`].
+/// Await `a`'s admission of `b` and `b`'s admission of `a`.
+pub async fn await_mutual_admission(
+    (a, a_transitions): (Did, &PeerTransitions),
+    (b, b_transitions): (Did, &PeerTransitions),
+) {
+    futures::join!(a_transitions.admitted(b), b_transitions.admitted(a));
+}
+
+/// Run the test `name` under a per-test hang guard of `budget`.
 ///
-/// The guard is a failure bound that names the missing event; the passing path proceeds on
-/// `event` alone.
-pub async fn within_hang_guard<T>(
-    label: impl std::fmt::Display,
-    event: impl std::future::Future<Output = T>,
+/// The binary's tests share one runner budget, so a hung test would otherwise time out the
+/// whole binary and starve every test after it. The guard fails with `name` instead. It is a
+/// failure bound only: a passing run proceeds on `test` alone, since every wait inside is on
+/// an event.
+pub async fn with_hang_guard<T>(
+    name: &str,
+    budget: Duration,
+    test: impl std::future::Future<Output = T>,
 ) -> T {
-    match futures::future::select(Box::pin(event), Box::pin(rings_runtime::sleep(HANG_GUARD))).await
-    {
+    match futures::future::select(Box::pin(test), Box::pin(rings_runtime::sleep(budget))).await {
         Either::Left((value, _)) => value,
-        Either::Right(_) => panic!("{label} not observed within {HANG_GUARD:?}"),
+        Either::Right(_) => panic!("{name} exceeded its {budget:?} hang guard"),
     }
 }
 
@@ -160,7 +182,7 @@ pub async fn prepare_processor() -> Processor {
 
     let config = serde_yaml::to_string(&ProcessorConfig::new(
         0,
-        "stun://stun.l.google.com:19302".to_string(),
+        TEST_ICE_SERVERS.to_string(),
         sm,
         200,
     ))
@@ -261,8 +283,9 @@ pub async fn create_connection(node1: &ObservedProvider, node2: &ObservedProvide
     .await
     .unwrap();
 
-    futures::join!(
-        node1.transitions.admitted(provider_did(&node2.provider)),
-        node2.transitions.admitted(provider_did(&node1.provider)),
-    );
+    await_mutual_admission(
+        (provider_did(&node1.provider), &node1.transitions),
+        (provider_did(&node2.provider), &node2.transitions),
+    )
+    .await;
 }
