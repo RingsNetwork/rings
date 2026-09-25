@@ -309,8 +309,9 @@ impl Processor {
 
     /// List signed online-node descriptors from the registry.
     ///
-    /// The registry carrier is the join of every reply this node has observed (#864), so a
-    /// descriptor observed once stays listed while its carrier is cached and live.
+    /// The registry carrier is the join of every reply this node has observed (#864): it ascends
+    /// in the lattice order while cached and live, but a descriptor still leaves it on a
+    /// tombstone, on an overwrite or compaction floor (#867), or at the element cap.
     pub async fn lookup_online_nodes(
         &self,
         include_expired: bool,
@@ -439,10 +440,11 @@ impl Processor {
         entry_key: Did,
         error: Error,
     ) -> Result<Option<entry::Entry>> {
-        self.storage_check_cache(entry_key)
-            .await
-            .map(Some)
-            .ok_or(error)
+        let cached = self.storage_check_cache(entry_key).await;
+        if cached.is_some() {
+            tracing::debug!(%entry_key, %error, "storage fetch failed; answering from the cache");
+        }
+        cached.map(Some).ok_or(error)
     }
 
     /// Fetch `entry_key` again and wait for the cached carrier to move past `previous_entry`.

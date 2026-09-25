@@ -356,7 +356,7 @@ async fn browser_provider(storage_name: &str, role: OnionRole<&str>) -> WebviewR
 /// Wrap `processor` in a provider whose backend reports admissions to `admitted`.
 #[expect(
     clippy::arc_with_non_send_sync,
-    reason = "Provider::from_processor, Backend::new and Swarm::set_callback require Arc; this browser-only test stores Provider in Rc after the API boundary"
+    reason = "Provider, Backend and Swarm::set_callback take Arc; this browser test keeps Rc"
 )]
 fn observed_provider(
     processor: Processor,

@@ -413,8 +413,9 @@ impl ChordStorageCache<PeerRingAction> for PeerRing {
     ///
     /// Pre: `entry` satisfies the same admission law as a replicated write, so a peer cannot
     /// pin a fetched value in the cache past the retention bound it could obtain in storage.
-    /// Post: the cached carrier is the join of every live reply observed for its key, so it does
-    /// not depend on the order in which replicas answer. The read-join-write is one cache
+    /// Post: the cached carrier is the join of every live reply observed for its key since the
+    /// key last became resident, so, within one residency, it does not depend on the order in
+    /// which replicas answer. The read-join-write is one cache
     /// transition, so two concurrent replies cannot lose one side.
     async fn local_cache_put(&self, entry: Entry) -> Result<()> {
         if entry.kind.is_relay_inbox() {
