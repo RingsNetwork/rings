@@ -508,51 +508,78 @@ async fn test_processor_e2e_handshake_exchanges_verified_public_keys() {
     }
 }
 
-/// A stream frame at `sequence` with no payload; only sequence and finality matter here.
-fn e2e_test_frame(stream_id: e2e::E2eStreamId, sequence: u64, is_final: bool) -> E2eStreamFrame {
+/// A stream frame at `sequence` with no payload; only sequence and finality matter here, so the
+/// stream id and sender key are fixed.
+fn e2e_test_frame(sequence: u64, is_final: bool) -> E2eStreamFrame {
     E2eStreamFrame {
-        stream_id,
-        sender_public_key: SecretKey::random().pubkey(),
+        stream_id: uuid::Uuid::nil(),
+        sender_public_key: SecretKey::try_from(
+            "65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0",
+        )
+        .unwrap()
+        .pubkey(),
         sequence,
         is_final,
         ciphertext: Vec::new(),
     }
 }
 
-/// `complete_e2e_stream` under an unordered, duplicating link.
+/// Every ordering of `items`.
+fn permutations<T: Clone>(items: &[T]) -> Vec<Vec<T>> {
+    if items.is_empty() {
+        return vec![Vec::new()];
+    }
+    (0..items.len())
+        .flat_map(|chosen| {
+            let mut rest = items.to_vec();
+            let head = rest.remove(chosen);
+            permutations(rest.as_slice())
+                .into_iter()
+                .map(move |mut tail| {
+                    tail.insert(0, head.clone());
+                    tail
+                })
+        })
+        .collect()
+}
+
+/// `e2e_stream_complete` is insensitive to arrival order, and monotone.
 ///
 /// ```text
-/// arrivals: 3ᶠ, 0, 2, 0, 1
-/// complete after each prefix: ⊥, ⊥, ⊥, ⊥, [0, 1, 2, 3ᶠ]
+/// ∀ π ∈ Perm({0, 1, 2, 3ᶠ}).
+///   ∀ k < 4. ¬complete(π[..k])                     (some sequence ≤ 3 is missing)
+///   complete(π)
+///   complete(π ++ [π₀, 4])                          (a duplicate and a stray frame)
 /// ```
 ///
-/// The final frame overtakes the stream, the gap at sequence 1 keeps the stream incomplete,
-/// and the duplicate of sequence 0 is collapsed.
+/// All 24 arrival orders are checked. Every proper prefix of a permutation of four distinct
+/// sequences lacks one of them, so it is incomplete whether or not it holds the final frame.
 #[test]
-fn test_complete_e2e_stream_waits_for_every_sequence_below_final() {
-    let stream_id = uuid::Uuid::new_v4();
-    let arrivals = [
-        e2e_test_frame(stream_id, 3, true),
-        e2e_test_frame(stream_id, 0, false),
-        e2e_test_frame(stream_id, 2, false),
-        e2e_test_frame(stream_id, 0, false),
-        e2e_test_frame(stream_id, 1, false),
+fn test_e2e_stream_complete_is_order_insensitive_and_monotone() {
+    let stream = [
+        e2e_test_frame(0, false),
+        e2e_test_frame(1, false),
+        e2e_test_frame(2, false),
+        e2e_test_frame(3, true),
     ];
-    for delivered in 1..arrivals.len() {
-        assert_eq!(
-            complete_e2e_stream(arrivals.iter().take(delivered)),
-            None,
-            "{delivered} arrivals leave a gap below the final frame"
+    let orders = permutations(stream.as_slice());
+    assert_eq!(orders.len(), 24);
+    for order in orders {
+        for delivered in 0..order.len() {
+            assert!(
+                !e2e_stream_complete(order.iter().take(delivered)),
+                "{delivered} arrivals leave a sequence below the final frame missing"
+            );
+        }
+        assert!(e2e_stream_complete(order.iter()));
+        let mut extended = order.clone();
+        extended.push(order[0].clone());
+        extended.push(e2e_test_frame(4, false));
+        assert!(
+            e2e_stream_complete(extended.iter()),
+            "later duplicates and stray frames keep a complete stream complete"
         );
     }
-    let complete = complete_e2e_stream(arrivals.iter()).expect("every sequence has arrived");
-    assert_eq!(
-        complete
-            .iter()
-            .map(|frame| (frame.sequence, frame.is_final))
-            .collect::<Vec<_>>(),
-        vec![(0, false), (1, false), (2, false), (3, true)]
-    );
 }
 
 /// E2E streaming over a real link, decrypted with the receiver's identity key.
@@ -567,10 +594,17 @@ fn test_complete_e2e_stream_waits_for_every_sequence_below_final() {
 ///
 /// Both notifies are `notify_one`, which stores a permit when no task waits, so a wake-up
 /// between a scan and the next wait is not lost. `Complete` is stable: frames are only
-/// appended, and the predicate is monotone. Arrival order is irrelevant to it, since the
-/// link does not guarantee order, and decryption is exercised in reverse order below. The
-/// fixtures use host-only ICE, so the handshake depends on no external server; the deadlines
-/// in the helpers only guard against a hang.
+/// appended, and the predicate is monotone. Arrival order is irrelevant to it, since the link
+/// does not guarantee order.
+///
+/// The helper returns the raw frames in arrival order, so the shape assertions below are
+/// about what the sender emitted: exactly one final frame, and the sorted sequences are exactly
+/// `0..n`, which rules out gaps, duplicates and frames after the final one. The frames are then
+/// decrypted in reverse arrival order.
+///
+/// The fixtures use host-only ICE, so the handshake depends on no external server. The link is
+/// still real WebRTC under the helpers' 5 s deadline; moving this protocol test onto a
+/// controlled transport is tracked in #883.
 #[tokio::test]
 async fn test_processor_e2e_message_streams_and_decrypts_with_receiver_identity_key() {
     let _network_guard = network_test_guard().await;
@@ -621,9 +655,7 @@ async fn test_processor_e2e_message_streams_and_decrypts_with_receiver_identity_
 
     let mut decryptor = p2.e2e_stream_decryptor(did1, stream_id, identity2).unwrap();
     let mut plaintext = Vec::new();
-    let mut delivered_frames = frames.clone();
-    delivered_frames.reverse();
-    for frame in &delivered_frames {
+    for frame in frames.iter().rev() {
         plaintext.extend_from_slice(&p2.decrypt_e2e_stream_frame(&mut decryptor, frame).unwrap());
     }
     decryptor.finish().unwrap();

@@ -2,17 +2,12 @@ use rings_core::message::MessageSigner;
 
 use super::*;
 use crate::consts::DATA_REDUNDANT;
+use crate::tests::native::TEST_ICE_SERVERS;
 
 // Native WebRTC tests share process-global ICE/UDP resources and timing-sensitive
 // connection callbacks; run them serially so one test's candidates or callbacks
 // cannot add pressure to another test's handshake.
 static NETWORK_TEST_LOCK: OnceLock<AsyncTestMutex<()>> = OnceLock::new();
-
-/// ICE servers of every processor fixture: none, so peers gather host candidates only.
-///
-/// All peers of these tests run in this process, so loopback host candidates connect them; an
-/// external STUN server would only add a network dependency whose latency no test controls.
-const TEST_ICE_SERVERS: &str = "";
 
 pub(super) fn onion_policy(
     allowed_targets: &[&str],
@@ -560,43 +555,50 @@ pub(super) async fn wait_for_inbound_message(
     }
 }
 
-/// The complete stream carried by `frames`, ordered by sequence, or `None` while incomplete.
+/// Whether `frames` carry a complete stream: some final frame arrived, and so did every
+/// sequence up to it.
 ///
 /// The overlay link makes no ordering guarantee, so arrival order is irrelevant. With
-/// `S = { f.sequence | f ∈ frames }` and a final frame at sequence `n`:
+/// `S = { f.sequence | f ∈ frames }`:
 ///
 /// ```text
-/// complete(frames) ≡ ∃ f ∈ frames. f.is_final ∧ S ⊇ {0, …, f.sequence}
+/// complete(frames) ≡ ∃ f ∈ frames. f.is_final ∧ {0, …, f.sequence} ⊆ S
 /// ```
 ///
-/// Frames are deduplicated by sequence, so the result holds exactly `n + 1` frames. The
-/// predicate is monotone in `frames`: once complete, more arrivals keep it complete.
-pub(super) fn complete_e2e_stream<'a>(
+/// The predicate is monotone: `S` and the set of final frames only grow as frames arrive, so
+/// once complete, further arrivals (duplicates or stray frames included) keep it complete.
+pub(super) fn e2e_stream_complete<'a>(
     frames: impl IntoIterator<Item = &'a E2eStreamFrame>,
-) -> Option<Vec<E2eStreamFrame>> {
-    let by_sequence = frames
+) -> bool {
+    let (sequences, finals): (BTreeSet<u64>, Vec<u64>) = frames.into_iter().fold(
+        (BTreeSet::new(), Vec::new()),
+        |(mut sequences, mut finals), frame| {
+            sequences.insert(frame.sequence);
+            if frame.is_final {
+                finals.push(frame.sequence);
+            }
+            (sequences, finals)
+        },
+    );
+    finals
         .into_iter()
-        .map(|frame| (frame.sequence, frame))
-        .collect::<BTreeMap<_, _>>();
-    let last = by_sequence.values().find(|frame| frame.is_final)?.sequence;
-    let expected = usize::try_from(last).ok()?.checked_add(1)?;
-    let prefix = by_sequence
-        .range(..=last)
-        .map(|(_, frame)| E2eStreamFrame::clone(frame))
-        .collect::<Vec<_>>();
-    (prefix.len() == expected).then_some(prefix)
+        .any(|last| (0..=last).all(|sequence| sequences.contains(&sequence)))
 }
 
-/// Await the complete E2E stream `stream_id` on `callback`, in sequence order.
+/// Await a complete E2E stream `stream_id` on `callback`, and return every frame of it that
+/// arrived, raw and in arrival order.
 ///
 /// ```text
-/// loop:  frames := inbound(stream_id) ;  complete(frames) ? return : await inbound_notify
+/// loop:  frames := inbound(stream_id) ;  complete(frames) ? return frames : await inbound_notify
 /// ```
+///
+/// Completeness decides only *when* to stop; the frames are returned unfiltered, so the caller
+/// still sees duplicates, stray frames and the actual arrival order.
 ///
 /// Law (no lost wake-up): `on_inbound` appends under the lock and then calls `notify_one`,
 /// which stores a permit when no task waits. A frame that arrives between the scan and the
 /// wait therefore leaves a permit that wakes the next wait. The deadline guards only against a
-/// hang; completion is the event.
+/// hang; completion is the event. The link is still real WebRTC (#883).
 pub(super) async fn wait_for_e2e_stream_frames(
     callback: &SwarmCallbackInstance,
     stream_id: e2e::E2eStreamId,
@@ -605,11 +607,16 @@ pub(super) async fn wait_for_e2e_stream_frames(
     loop {
         {
             let inbound = callback.inbound.lock().unwrap();
-            let frames = inbound.iter().filter_map(|msg| match msg {
-                Message::E2eStreamFrame(frame) if frame.stream_id == stream_id => Some(frame),
-                _ => None,
-            });
-            if let Some(frames) = complete_e2e_stream(frames) {
+            let frames = inbound
+                .iter()
+                .filter_map(|msg| match msg {
+                    Message::E2eStreamFrame(frame) if frame.stream_id == stream_id => {
+                        Some(frame.clone())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if e2e_stream_complete(frames.iter()) {
                 return frames;
             }
         }
