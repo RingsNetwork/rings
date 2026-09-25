@@ -8,6 +8,8 @@
 
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
@@ -124,7 +126,32 @@ pub(crate) fn latest_valid_by_did<D>(
 where
     D: SignedDescriptor,
 {
-    let mut latest = BTreeMap::<Did, D>::new();
+    latest_valid_by_key(
+        descriptors,
+        SignedDescriptor::descriptor_did,
+        now_ms,
+        network_id,
+        include_expired,
+    )
+    .into_values()
+    .collect()
+}
+
+/// Select the newest descriptor per `key` that verifies under the receiver's overlay, and live at
+/// `now_ms` unless `include_expired`: the join `⊔` of the descriptors under the heartbeat order
+/// within each key.
+pub(crate) fn latest_valid_by_key<K, D>(
+    descriptors: impl IntoIterator<Item = D>,
+    key: impl Fn(&D) -> K,
+    now_ms: u128,
+    network_id: u32,
+    include_expired: bool,
+) -> BTreeMap<K, D>
+where
+    K: Ord,
+    D: SignedDescriptor,
+{
+    let mut latest = BTreeMap::<K, D>::new();
     for descriptor in descriptors {
         if include_expired {
             if !descriptor.descriptor_verify_signature(network_id) {
@@ -133,7 +160,7 @@ where
         } else if !descriptor.descriptor_is_live_at(now_ms, network_id) {
             continue;
         }
-        match latest.entry(descriptor.descriptor_did()) {
+        match latest.entry(key(&descriptor)) {
             Entry::Occupied(mut entry) => {
                 if descriptor.descriptor_heartbeat_at_ms()
                     > entry.get().descriptor_heartbeat_at_ms()
@@ -146,7 +173,75 @@ where
             }
         }
     }
-    latest.into_values().collect()
+    latest
+}
+
+/// The descriptors this process has observed in one registry, joined across directory reads
+/// (#864).
+///
+/// A directory read returns whichever replica answered last, so two reads of one registry need
+/// not agree while ownership moves. The view makes reads monotone: each read is joined into it,
+///
+/// ```text
+/// R  = read ⊎ V                      the read, with the view
+/// V′ = latest(R, live at now)        newest live descriptor per key
+/// ```
+///
+/// and answered from `R`. `⊔ = latest` is commutative, associative and idempotent, so the
+/// order in which replicas answer does not matter, and a descriptor once observed stays in every
+/// later answer until a newer heartbeat of its key replaces it or it expires:
+///
+/// ```text
+/// t ≤ t′  ⇒  keys(V_t ∖ expired(t′)) ⊆ keys(V_t′).
+/// ```
+///
+/// A precondition observed on one read therefore holds on every later read, until expiry.
+/// Clones share one view.
+pub(crate) struct DescriptorView<K, D> {
+    /// Newest live descriptor per key observed so far.
+    latest: Arc<Mutex<BTreeMap<K, D>>>,
+}
+
+impl<K, D> Clone for DescriptorView<K, D> {
+    fn clone(&self) -> Self {
+        Self {
+            latest: Arc::clone(&self.latest),
+        }
+    }
+}
+
+impl<K, D> Default for DescriptorView<K, D> {
+    fn default() -> Self {
+        Self {
+            latest: Arc::new(Mutex::new(BTreeMap::new())),
+        }
+    }
+}
+
+impl<K, D> DescriptorView<K, D>
+where
+    K: Ord,
+    D: SignedDescriptor + Clone,
+{
+    /// Join `read` into the view and answer the read from the joined descriptors: the newest per
+    /// key, live at `now_ms` unless `include_expired`.
+    pub(crate) fn join(
+        &self,
+        read: impl IntoIterator<Item = D>,
+        key: impl Fn(&D) -> K,
+        now_ms: u128,
+        network_id: u32,
+        include_expired: bool,
+    ) -> Result<Vec<D>> {
+        let mut latest = self.latest.lock().map_err(|_| Error::LockPoisoned)?;
+        let joined = read
+            .into_iter()
+            .chain(latest.values().cloned())
+            .collect::<Vec<_>>();
+        let answer = latest_valid_by_key(joined.clone(), &key, now_ms, network_id, include_expired);
+        *latest = latest_valid_by_key(joined, &key, now_ms, network_id, false);
+        Ok(answer.into_values().collect())
+    }
 }
 
 pub(crate) fn encode_descriptor<T: Serialize>(descriptor: &T) -> Result<Encoded> {

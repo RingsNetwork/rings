@@ -50,6 +50,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use uuid;
 
+use crate::descriptor::DescriptorView;
 use crate::error::Error;
 use crate::error::Result;
 use crate::measure::PeriodicMeasure;
@@ -222,6 +223,10 @@ pub struct Processor {
     registration_tasks: Vec<Arc<dyn RegistrationTask>>,
     /// Process-local bounded recorder backing the authenticated operator surface.
     observability: Arc<Observability>,
+    /// Online-node descriptors observed across directory reads, keyed by DID (#864).
+    online_nodes: DescriptorView<Did, OnlineNodeDescriptor>,
+    /// Onion-exit descriptors observed across directory reads, keyed by `(DID, service)` (#864).
+    onion_exits: DescriptorView<(Did, OnionServiceName), OnionExitDescriptor>,
 }
 
 impl Processor {
@@ -308,56 +313,82 @@ impl Processor {
     }
 
     /// List signed online-node descriptors from the registry.
+    ///
+    /// The read is joined into this process's view of the registry, so a descriptor observed once
+    /// is listed until a newer heartbeat of its DID replaces it or it expires (#864).
     pub async fn lookup_online_nodes(
         &self,
         include_expired: bool,
     ) -> Result<Vec<OnlineNodeDescriptor>> {
         let entry_key = entry::Entry::gen_did(ONLINE_NODES_TOPIC)?;
-
-        let Some(entry) = self.fetch_storage_entry(entry_key).await? else {
-            return Ok(vec![]);
-        };
-
-        let descriptors = Self::online_node_descriptors_from_entry(&entry)
+        let read = self
+            .fetch_storage_entry(entry_key)
+            .await?
+            .map(|entry| Self::online_node_descriptors_from_entry(&entry))
+            .unwrap_or_default()
             .into_iter()
             .filter(|descriptor| descriptor.matches_dht_protocol(self.swarm.dht_protocol_mode()));
 
-        Ok(OnlineNodeDescriptor::latest_valid_by_did(
-            descriptors,
+        Ok(self.online_nodes.join(
+            read,
+            |descriptor| descriptor.did,
             get_epoch_ms(),
             self.swarm.network_id(),
             include_expired,
-        ))
+        )?)
     }
 
     /// List signed onion-exit descriptors from the application-layer exit registry.
+    ///
+    /// Like [`Self::lookup_online_nodes`], every read is joined into this process's view of the
+    /// registry (#864).
     pub async fn lookup_onion_exits(
         &self,
         service: &str,
         include_expired: bool,
     ) -> Result<Vec<OnionExitDescriptor>> {
         let entry_key = entry::Entry::gen_did(ONION_EXITS_TOPIC)?;
-
-        let Some(entry) = self.fetch_storage_entry(entry_key).await? else {
-            return Ok(vec![]);
-        };
-
         let service = service.trim();
-        let exits = self.select_onion_exits_from_entry(&entry, service, include_expired);
-        if include_expired
-            || !exits.is_empty()
-            || !self.entry_has_expired_onion_exit_service(&entry, service)
-        {
-            return Ok(exits);
-        }
 
-        let Some(refreshed_entry) = self
-            .fetch_storage_entry_after_cache_refresh(entry_key, &entry)
-            .await?
-        else {
+        let entry = self.fetch_storage_entry(entry_key).await?;
+        let exits = self.join_onion_exits(entry.as_ref(), service, include_expired)?;
+        let Some(entry) = entry.filter(|entry| {
+            !include_expired
+                && exits.is_empty()
+                && self.entry_has_expired_onion_exit_service(entry, service)
+        }) else {
             return Ok(exits);
         };
-        Ok(self.select_onion_exits_from_entry(&refreshed_entry, service, include_expired))
+
+        let refreshed_entry = self
+            .fetch_storage_entry_after_cache_refresh(entry_key, &entry)
+            .await?;
+        self.join_onion_exits(refreshed_entry.as_ref(), service, include_expired)
+    }
+
+    /// Join the exit descriptors of `entry` into this process's exit view and answer the lookup
+    /// of `service` (every service when empty) from it.
+    fn join_onion_exits(
+        &self,
+        entry: Option<&entry::Entry>,
+        service: &str,
+        include_expired: bool,
+    ) -> Result<Vec<OnionExitDescriptor>> {
+        let read = entry
+            .map(Self::onion_exit_descriptors_from_entry)
+            .unwrap_or_default();
+        Ok(self
+            .onion_exits
+            .join(
+                read,
+                OnionExitDescriptor::registration_key,
+                get_epoch_ms(),
+                self.swarm.network_id(),
+                include_expired,
+            )?
+            .into_iter()
+            .filter(|descriptor| service.is_empty() || descriptor.offers_service(service))
+            .collect())
     }
 
     pub(crate) async fn fetch_storage_entry(&self, entry_key: Did) -> Result<Option<entry::Entry>> {
@@ -387,23 +418,6 @@ impl Processor {
             sleep(DHT_LOOKUP_CACHE_POLL_INTERVAL).await?;
         }
         Ok(None)
-    }
-
-    fn select_onion_exits_from_entry(
-        &self,
-        entry: &entry::Entry,
-        service: &str,
-        include_expired: bool,
-    ) -> Vec<OnionExitDescriptor> {
-        OnionExitDescriptor::latest_valid_by_service_did(
-            Self::onion_exit_descriptors_from_entry(entry),
-            get_epoch_ms(),
-            self.swarm.network_id(),
-            include_expired,
-        )
-        .into_iter()
-        .filter(|descriptor| service.is_empty() || descriptor.offers_service(service))
-        .collect()
     }
 
     fn entry_has_expired_onion_exit_service(&self, entry: &entry::Entry, service: &str) -> bool {

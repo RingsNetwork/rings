@@ -363,11 +363,21 @@ mod tests {
     use rings_core::ecc::SecretKey;
 
     use super::*;
+    use crate::descriptor::DescriptorView;
     use crate::tests::TEST_NETWORK_ID;
 
     fn descriptor_at(heartbeat_at_ms: u128, expires_at_ms: u128) -> Result<OnlineNodeDescriptor> {
         let key = SecretKey::random();
         let delegatee_key = DelegateeKey::new_with_seckey(&key)?;
+        descriptor_of(&delegatee_key, heartbeat_at_ms, expires_at_ms)
+    }
+
+    /// A descriptor of `delegatee_key`'s node with the given heartbeat and expiry.
+    fn descriptor_of(
+        delegatee_key: &DelegateeKey,
+        heartbeat_at_ms: u128,
+        expires_at_ms: u128,
+    ) -> Result<OnlineNodeDescriptor> {
         let did = delegatee_key.delegator_did();
         OnlineNodeDescriptor::new_signed(
             OnlineNodeDescriptorBody {
@@ -385,8 +395,85 @@ mod tests {
                 expires_at_ms,
                 version: "test".to_string(),
             },
-            MessageSigner::new(&delegatee_key, TEST_NETWORK_ID),
+            MessageSigner::new(delegatee_key, TEST_NETWORK_ID),
         )
+    }
+
+    /// Join `read` into `view` at `now_ms` and return the DIDs of the live answer.
+    fn join_dids(
+        view: &DescriptorView<Did, OnlineNodeDescriptor>,
+        read: &[&OnlineNodeDescriptor],
+        now_ms: u128,
+    ) -> Result<Vec<Did>> {
+        Ok(view
+            .join(
+                read.iter().copied().cloned(),
+                |descriptor| descriptor.did,
+                now_ms,
+                TEST_NETWORK_ID,
+                false,
+            )?
+            .into_iter()
+            .map(|descriptor| descriptor.did)
+            .collect())
+    }
+
+    /// Monotonicity (#864): a descriptor observed once stays in every later answer, even when a
+    /// later read comes from a replica that lacks it.
+    #[test]
+    fn test_view_keeps_a_descriptor_a_later_read_lacks() -> Result<()> {
+        let view = DescriptorView::default();
+        let first = descriptor_at(10, 100)?;
+        let second = descriptor_at(10, 100)?;
+        let mut both = vec![first.did, second.did];
+        both.sort();
+
+        assert_eq!(join_dids(&view, &[&first, &second], 20)?, both);
+        assert_eq!(join_dids(&view, &[&first], 30)?, both);
+        assert_eq!(join_dids(&view, &[], 40)?, both);
+        Ok(())
+    }
+
+    /// Commutativity (#864): the newest heartbeat of a DID wins whichever replica answers last.
+    #[test]
+    fn test_view_keeps_the_newest_heartbeat_in_any_read_order() -> Result<()> {
+        let delegatee_key = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+        let older = descriptor_of(&delegatee_key, 10, 100)?;
+        let newer = descriptor_of(&delegatee_key, 20, 100)?;
+
+        for reads in [[&older, &newer], [&newer, &older]] {
+            let view = DescriptorView::default();
+            let answers = reads
+                .iter()
+                .map(|read| {
+                    view.join(
+                        [(*read).clone()],
+                        |descriptor| descriptor.did,
+                        30,
+                        TEST_NETWORK_ID,
+                        false,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?;
+            assert_eq!(answers.last(), Some(&vec![newer.clone()]));
+        }
+        Ok(())
+    }
+
+    /// Expiry bounds the view (#864): an expired descriptor leaves the view and every later
+    /// answer.
+    #[test]
+    fn test_view_drops_expired_descriptors() -> Result<()> {
+        let view = DescriptorView::default();
+        let short = descriptor_at(10, 50)?;
+        let long = descriptor_at(10, 100)?;
+
+        let mut both = vec![short.did, long.did];
+        both.sort();
+        assert_eq!(join_dids(&view, &[&short, &long], 20)?, both);
+        assert_eq!(join_dids(&view, &[], 60)?, vec![long.did]);
+        assert_eq!(join_dids(&view, &[], 110)?, Vec::<Did>::new());
+        Ok(())
     }
 
     #[test]

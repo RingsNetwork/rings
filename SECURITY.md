@@ -307,6 +307,10 @@ configuration: `H = 3n + 2` positions for `n` symbol hops (`n ≤ 4`, so `H ≤ 
 and every position except the guard's return is a distinct node. Selection fails
 closed when fewer than `H − 1` distinct eligible relays are live; it never
 shortens a route, because a short path is a distinguishable segment length. The
+candidates come from a per-process view of the registries: every directory read is
+joined into it, newest heartbeat per key, and a descriptor leaves it only at expiry.
+Reads are therefore monotone, whichever replica answers, and a withdrawn
+registration stays a candidate until its TTL, as it would in a stale replica. The
 exit is drawn first, by quality among the exits, then the guard, then the
 relays, so a scarce high-quality exit is not consumed as a guard or relay: when
 every registered exit extends to a loop, the exit's marginal is its quality share

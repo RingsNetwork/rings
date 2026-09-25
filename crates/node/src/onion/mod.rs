@@ -11,8 +11,6 @@
 //! registers. Route selection places a pipeline on a guard-closed loop (`loop_shape`) whose every
 //! position is a node registering that position's symbol at its current process epoch.
 
-use std::collections::btree_map::Entry;
-use std::collections::BTreeMap;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -35,6 +33,7 @@ use serde::Serialize;
 
 use crate::descriptor::decode_descriptor;
 use crate::descriptor::encode_descriptor;
+use crate::descriptor::latest_valid_by_key;
 use crate::descriptor::sign_descriptor_body;
 use crate::descriptor::SignedDescriptor;
 use crate::descriptor::SignedDescriptorBody;
@@ -557,28 +556,21 @@ impl OnionExitDescriptor {
         network_id: u32,
         include_expired: bool,
     ) -> Vec<Self> {
-        let mut latest = BTreeMap::<(Did, OnionServiceName), Self>::new();
-        for descriptor in descriptors {
-            if include_expired {
-                if !descriptor.verify_signature(network_id) {
-                    continue;
-                }
-            } else if !descriptor.is_live_at(now_ms, network_id) {
-                continue;
-            }
-            let key = (descriptor.did, descriptor.service.clone());
-            match latest.entry(key) {
-                Entry::Occupied(mut entry) => {
-                    if descriptor.heartbeat_at_ms > entry.get().heartbeat_at_ms {
-                        entry.insert(descriptor);
-                    }
-                }
-                Entry::Vacant(entry) => {
-                    entry.insert(descriptor);
-                }
-            }
-        }
-        latest.into_values().collect()
+        latest_valid_by_key(
+            descriptors,
+            Self::registration_key,
+            now_ms,
+            network_id,
+            include_expired,
+        )
+        .into_values()
+        .collect()
+    }
+
+    /// Return the key `(DID, service)` of this registration: an exit registers each service it
+    /// offers independently.
+    pub(crate) fn registration_key(&self) -> (Did, OnionServiceName) {
+        (self.did, self.service.clone())
     }
 }
 
