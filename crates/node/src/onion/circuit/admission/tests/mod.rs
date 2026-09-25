@@ -129,7 +129,7 @@ pub(super) fn send_on(
     n: u32,
     layer: OnionAdmissionLayer,
 ) -> Verdict {
-    match admission.charge(now_ms, link, units(n)) {
+    match admission.charge_units(now_ms, link, units(n)) {
         Err(rejection) => Verdict::Unpaid(rejection),
         Ok(token) => match admission.admit(now_ms, token, layer) {
             Ok(()) => Verdict::Admitted,

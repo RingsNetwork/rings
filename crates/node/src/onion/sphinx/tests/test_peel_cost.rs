@@ -47,6 +47,7 @@ use rings_core::ecc::Secp256k1;
 use sha2::Sha256;
 use web_time::Instant;
 
+use super::admitted;
 use super::fixture_keys;
 use super::fixture_rng;
 use super::fixture_route;
@@ -197,11 +198,8 @@ fn real_path_rows(
             "whole cell: parse, peel, relay, encode",
             microseconds_per_run(|| {
                 let bytes = cells.next().expect("one prepared cell per pass");
-                let peeled = OnionCell::parse(black_box(bytes))
-                    .expect("cell")
-                    .peel(key)
-                    .expect("peel");
-                black_box(match peeled.step().expect("relay step") {
+                let admitted = admitted(black_box(bytes), key);
+                black_box(match admitted.step().expect("relay step") {
                     OnionStep::Relayed { cell, .. } => cell.into_bytes(),
                     OnionStep::Consumed { .. } => Vec::new(),
                 });

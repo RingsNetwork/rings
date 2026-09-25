@@ -32,6 +32,14 @@ mod shell;
 #[cfg(all(test, rings_native))]
 mod tests;
 
+pub(crate) use admission::OnionAdmissionCharge;
+pub(crate) use admission::OnionAdmissionLayer;
+#[cfg(test)]
+pub(crate) use admission::OnionAdmissionLink;
+pub(crate) use admission::OnionAdmissionRejection;
+pub(crate) use admission::OnionAdmissionState;
+#[cfg(test)]
+pub(crate) use admission::OnionReplayFilterKey;
 use bytes::Bytes;
 pub use cell::OnionCellBucket;
 pub use codec::OnionCircuitEvent;
@@ -41,6 +49,7 @@ pub use crypto::route_first_hop;
 pub(crate) use crypto::send_backward;
 #[cfg(rings_native)]
 pub(crate) use crypto::OnionCircuitPath;
+pub(crate) use expiry::OnionExpiry;
 pub use protocol::OnionCircuitCapabilities;
 pub use protocol::OnionCircuitProtocol;
 pub use reducer::OnionCircuitEffect;
@@ -58,7 +67,6 @@ pub use shell::OnionCircuitHandler;
 pub use shell::OnionCircuitShell;
 pub use shell::OnionInterpretation;
 
-use self::expiry::OnionExpiry;
 use super::OnionServiceName;
 use crate::error::Result;
 
@@ -86,7 +94,7 @@ pub(super) const ONION_FORWARD_EXPIRY_QUANTUM_MS: u128 = 30_000;
 ///
 /// Law: replay witnesses live for this same interval, so no still-valid forward layer can outlive
 /// the nonce that proves its one-shot exit effect was already consumed.
-pub(super) const ONION_FORWARD_MAX_VALIDITY_MS: u128 =
+pub(crate) const ONION_FORWARD_MAX_VALIDITY_MS: u128 =
     ONION_FORWARD_PAYLOAD_TTL_MS + ONION_FORWARD_EXPIRY_QUANTUM_MS;
 pub(super) const ONION_CRYPTO_LIMIT_WINDOW_MS: u128 = 60_000;
 pub(super) const MAX_ONION_CRYPTO_OPS_PER_WINDOW: u32 = 4096;

@@ -125,6 +125,13 @@ pub(crate) struct OnionHeaderMac([u8; ONION_HEADER_MAC_BYTES]);
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct OnionLoopTag([u8; ONION_HEADER_MAC_BYTES]);
 
+impl OnionLoopTag {
+    /// Wrap the `γ` bytes of a cell arriving at the client.
+    pub(crate) const fn new(bytes: [u8; ONION_HEADER_MAC_BYTES]) -> Self {
+        Self(bytes)
+    }
+}
+
 /// The Sphinx header `χ = (α, β, γ)`, exactly `|χ|` bytes whatever the loop length.
 #[derive(Clone, Debug)]
 pub(crate) struct OnionHeader {
@@ -288,7 +295,7 @@ impl OnionHopSecrets {
     }
 
     /// `γ = HMAC-SHA256_μ(b ‖ β)[0, 16)`: truncation keeps the leftmost 16 of the 32 bytes.
-    fn mac(&self, class: OnionLoopClass, routing: &Routing) -> OnionHeaderMac {
+    fn mac(&self, class: OnionLoopClass, routing: &[Block]) -> OnionHeaderMac {
         let mut key = Zeroizing::new(Key::<Hmac<Sha256>>::default());
         key.iter_mut()
             .zip(self.mac_key.iter())
@@ -441,47 +448,82 @@ impl OnionHeader {
         Ok((alpha, secrets))
     }
 
-    /// Peel `χ_i` of a class-`b` cell under the hop's delegatee key: `(λ_i, χ_{i+1})`. The class
-    /// is the observed cell length, supplied by the cell parser alone.
-    ///
-    /// ```text
-    /// α_i ∈ G ∖ {O} ?                        else Invalid   (decoded before any ECDH)
-    /// K_i = x(d_i·α_i);  secrets_i            else Blinding  (z_i ≡ 0, probability 2^−256)
-    /// γ_i = MAC_i(b ‖ β_i) ?                 else Invalid   (constant time, before decoding)
-    /// λ_i ‖ β_{i+1} = (β_i ‖ 0^ℓ) ⊕ ρ_i;  decode λ_i = (layer, γ_{i+1})   else Layer
-    /// α_{i+1} = z_i·α_i                      (∈ G ∖ {O} by type)
-    /// ```
+    /// Peel `χ_i` of a class-`b` cell under the hop's delegatee key: `(λ_i, χ_{i+1})`, on an
+    /// owned copy. A cell peels its header in place with [`peel_in_place`]; this is the same
+    /// transition on the header value.
     ///
     /// # Errors
     ///
-    /// [`OnionPeelError::Invalid`], [`OnionPeelError::Blinding`] and [`OnionPeelError::Layer`],
-    /// in that order of checking.
+    /// The [`OnionPeelError`] of [`peel_in_place`].
     pub(super) fn peel(
         &self,
         class: OnionLoopClass,
         key: &DelegateeKey,
     ) -> Result<OnionPeeledHeader, OnionPeelError> {
-        let alpha = NonIdentityPoint::<Secp256k1>::try_from(self.alpha)
-            .map_err(|_| OnionPeelError::Invalid)?;
-        let secrets = OnionHopSecrets::derive(&self.alpha, &key.diffie_hellman(&alpha))?;
-        if !bool::from(secrets.mac(class, &self.routing).ct_eq(&self.mac)) {
-            return Err(OnionPeelError::Invalid);
-        }
-        let mut blocks = Zeroizing::new([[0; ONION_LAYER_BYTES]; MAX_ONION_LOOP_HOPS + 1]);
-        blocks
+        let mut bytes = [0; ONION_HEADER_BYTES];
+        bytes
             .iter_mut()
-            .zip(self.routing.iter())
-            .for_each(|(block, routing)| *block = *routing);
-        secrets.mask(blocks.as_mut_slice());
-        let [layer, routing @ ..] = *blocks;
-        let (layer, mac) = OnionLayer::decode(Zeroizing::new(layer).as_slice())?;
-        Ok(OnionPeeledHeader {
-            layer,
-            next: Self {
-                alpha: PublicKey::from(&(&alpha * &secrets.blinding)),
-                routing,
-                mac,
-            },
-        })
+            .zip(self.to_bytes())
+            .for_each(|(slot, byte)| *slot = byte);
+        let layer = peel_in_place(&mut bytes, class, key)?;
+        let next = Self::decode(&bytes).ok_or(OnionPeelError::Invalid)?;
+        Ok(OnionPeeledHeader { layer, next })
     }
+}
+
+/// Peel the header `χ_i` held in `bytes`, replacing it by `χ_{i+1}` in the same bytes, and
+/// return `λ_i`. The class is the observed cell length, supplied by the cell parser alone.
+///
+/// ```text
+/// bytes = α_i ‖ β_i ‖ γ_i
+/// α_i ∈ G ∖ {O} ?                        else Invalid   (decoded before any ECDH)
+/// K_i = x(d_i·α_i);  secrets_i            else Blinding  (z_i ≡ 0, probability 2^−256)
+/// γ_i = MAC_i(b ‖ β_i) ?                 else Invalid   (constant time, before decoding)
+/// λ_i ‖ β_{i+1} = (β_i ‖ 0^ℓ) ⊕ ρ_i;  decode λ_i = (layer, γ_{i+1})   else Layer
+/// bytes ← z_i·α_i ‖ β_{i+1} ‖ γ_{i+1}      (α_{i+1} ∈ G ∖ {O} by type)
+/// ```
+///
+/// The bytes are rewritten only once every check has passed, so a rejected header leaves them
+/// as they arrived. `λ_i` and the pad `ρ_i` live in zeroizing buffers only.
+///
+/// # Errors
+///
+/// [`OnionPeelError::Invalid`], [`OnionPeelError::Blinding`] and [`OnionPeelError::Layer`], in
+/// that order of checking.
+pub(super) fn peel_in_place(
+    bytes: &mut [u8; ONION_HEADER_BYTES],
+    class: OnionLoopClass,
+    key: &DelegateeKey,
+) -> Result<OnionLayer, OnionPeelError> {
+    let (alpha_bytes, rest) = bytes
+        .split_first_chunk_mut::<ONION_GROUP_ELEMENT_BYTES>()
+        .ok_or(OnionPeelError::Invalid)?;
+    let (routing, mac) = rest
+        .split_last_chunk_mut::<ONION_HEADER_MAC_BYTES>()
+        .ok_or(OnionPeelError::Invalid)?;
+    let encoded_alpha = PublicKey(*alpha_bytes);
+    let alpha = NonIdentityPoint::<Secp256k1>::try_from(encoded_alpha)
+        .map_err(|_| OnionPeelError::Invalid)?;
+    let secrets = OnionHopSecrets::derive(&encoded_alpha, &key.diffie_hellman(&alpha))?;
+    let (blocks, []) = routing.as_chunks_mut::<ONION_LAYER_BYTES>() else {
+        return Err(OnionPeelError::Invalid);
+    };
+    if !bool::from(secrets.mac(class, blocks).ct_eq(&OnionHeaderMac(*mac))) {
+        return Err(OnionPeelError::Invalid);
+    }
+    let mut padded = Zeroizing::new([[0; ONION_LAYER_BYTES]; MAX_ONION_LOOP_HOPS + 1]);
+    padded
+        .iter_mut()
+        .zip(blocks.iter())
+        .for_each(|(block, routing)| *block = *routing);
+    secrets.mask(padded.as_mut_slice());
+    let [layer, next_routing @ ..] = &*padded;
+    let (layer, next_mac) = OnionLayer::decode(layer.as_slice())?;
+    *alpha_bytes = PublicKey::<ONION_GROUP_ELEMENT_BYTES>::from(&(&alpha * &secrets.blinding)).0;
+    blocks
+        .iter_mut()
+        .zip(next_routing.iter())
+        .for_each(|(block, next)| *block = *next);
+    *mac = next_mac.to_bytes();
+    Ok(layer)
 }

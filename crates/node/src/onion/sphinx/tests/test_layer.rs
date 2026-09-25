@@ -43,6 +43,9 @@ fn test_decode_inverts_encode() {
     }
 }
 
+/// The offset of `x` in a layer: `f`, `ā`, `next` and `e` precede it.
+const LAYER_EXPIRY_OFFSET: usize = 1 + ONION_ARGUMENT_BYTES + 20 + 16;
+
 /// `decode(w) = Right(λ, γ) ⇒ encode(λ, γ) = w`: every accepted string is canonical.
 #[test]
 fn test_accepted_strings_are_canonical() {
@@ -56,6 +59,8 @@ fn test_accepted_strings_are_canonical() {
         if bytes[0] == 0 {
             bytes[1..=ONION_ARGUMENT_BYTES].fill(0);
         }
+        // `x` must lie on the grid `Q·ℕ`; zero does, and every other field stays random.
+        bytes[LAYER_EXPIRY_OFFSET..LAYER_EXPIRY_OFFSET + 8].fill(0);
 
         if let Ok((layer, mac)) = OnionLayer::decode(&bytes) {
             accepted += 1;
@@ -65,8 +70,9 @@ fn test_accepted_strings_are_canonical() {
     assert!(accepted > 0);
 }
 
-/// A code outside `Σ`, a `relay` layer with arguments, and a string of another width are
-/// outside the image of `encode`.
+/// A code outside `Σ`, a `relay` layer with arguments, an expiry off the grid `Q·ℕ`, and a
+/// string of another width are outside the image of `encode`: `x` is parsed once, here, so no hop
+/// ever judges an off-grid expiry.
 #[test]
 fn test_decode_rejects_non_canonical_strings() {
     let relay = *fixture_layer(3, 0, 2).encode(&OnionHeaderMac::new([0; 16]));
@@ -83,6 +89,19 @@ fn test_decode_rejects_non_canonical_strings() {
     assert_eq!(
         OnionLayer::decode(&with_arguments).err(),
         Some(OnionLayerError::RelayArguments)
+    );
+
+    let mut off_grid = relay;
+    let expiry = LAYER_EXPIRY_OFFSET..LAYER_EXPIRY_OFFSET + 8;
+    off_grid[expiry.clone()].copy_from_slice(&30_001_u64.to_be_bytes());
+    assert_eq!(
+        OnionLayer::decode(&off_grid).err(),
+        Some(OnionLayerError::OffGridExpiry(30_001))
+    );
+    off_grid[expiry].copy_from_slice(&u64::MAX.to_be_bytes());
+    assert_eq!(
+        OnionLayer::decode(&off_grid).err(),
+        Some(OnionLayerError::OffGridExpiry(u64::MAX))
     );
 
     for width in [ONION_LAYER_BYTES - 1, ONION_LAYER_BYTES + 1] {

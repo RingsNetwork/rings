@@ -55,6 +55,7 @@ use sha2::Sha256;
 use zeroize::Zeroize;
 use zeroize::Zeroizing;
 
+pub(crate) mod builder;
 pub(crate) mod carry;
 pub(crate) mod cell;
 pub(crate) mod class;

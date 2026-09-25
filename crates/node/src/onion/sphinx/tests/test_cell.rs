@@ -13,9 +13,12 @@
 use rand::Rng;
 use rings_core::dht::Did;
 
+use super::admitted;
+use super::fixture_expiry;
 use super::fixture_keys;
 use super::fixture_rng;
 use super::hop_key;
+use super::FIXTURE_EPOCH;
 use crate::onion::circuit::OnionForwardNonce;
 use crate::onion::sphinx::cell::OnionCell;
 use crate::onion::sphinx::cell::OnionProduceError;
@@ -29,7 +32,6 @@ use crate::onion::sphinx::layer::OnionLayerApplication;
 use crate::onion::sphinx::layer::OnionLayerHead;
 use crate::onion::sphinx::seed::OnionCarrySeed;
 use crate::onion::sphinx::seed::OnionSegmentSeed;
-use crate::onion::OnionProcessEpoch;
 use crate::onion::OnionServiceName;
 
 /// The layer of `position` with the given application and carry seeds; its `next` and `x` are
@@ -45,8 +47,8 @@ fn layer(
         head: OnionLayerHead {
             application,
             next: Did::from(100 + position),
-            epoch: OnionProcessEpoch::new([1; 16]),
-            expires_at_ms: 1000 + u64::from(position),
+            epoch: FIXTURE_EPOCH,
+            expiry: fixture_expiry(position),
             nonce: OnionForwardNonce::new([2; 16]),
         },
         inbound,
@@ -116,14 +118,11 @@ fn test_loop_carries_each_segment_value_to_its_consumer() {
     let (cell, tag) = OnionCell::client(&route, class, &first_keys, &input, &mut rng)
         .expect("the client's first cell");
     let peel = |cell: Vec<u8>, position: usize| {
-        let peeled = OnionCell::parse(cell)
-            .expect("cell")
-            .peel(&keys[position])
-            .expect("peel");
-        // Admission reads this position's own layer before any carry work.
-        let index = u64::try_from(position).expect("small");
-        assert_eq!(peeled.head().expires_at_ms, 1000 + index);
-        peeled.step().expect("carry step")
+        let admitted = admitted(cell, &keys[position]);
+        // Admission read this position's own layer before any carry work.
+        let index = u32::try_from(position).expect("small");
+        assert_eq!(admitted.head().expiry, fixture_expiry(index));
+        admitted.step().expect("carry step")
     };
     let relay = |cell: Vec<u8>, position| {
         let OnionStep::Relayed { head, cell } = peel(cell, position) else {
@@ -142,10 +141,10 @@ fn test_loop_carries_each_segment_value_to_its_consumer() {
         head.application,
         OnionLayerApplication::Apply { .. }
     ));
-    assert_eq!(*value, input);
+    assert_eq!(value.as_slice(), input);
     // υ carries the symbol layer's own `next` and `x` (position 2), so a pool needs nothing
     // beside it; a value too wide for the class hands the block back unspent.
-    assert_eq!(surb.expires_at_ms(), 1002);
+    assert_eq!(surb.expiry(), fixture_expiry(2));
     let overwide = vec![0; surb.capacity() + 1];
     let Err(OnionProduceError::ValueTooWide { surb, .. }) = surb.produce(&overwide) else {
         panic!("a value one byte over capacity");
@@ -157,9 +156,10 @@ fn test_loop_carries_each_segment_value_to_its_consumer() {
 
     assert_eq!(returned.loop_tag(), tag);
     assert_eq!(
-        *returned
+        returned
             .open(&second.seeds().consumer.key().expect("strong key"))
-            .expect("the client receives v₁"),
+            .expect("the client receives v₁")
+            .as_slice(),
         output
     );
 }

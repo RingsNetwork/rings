@@ -72,11 +72,11 @@ const _: () = assert!(
 ///
 /// Drawn once per process, like the process epoch. It is neither cloned nor serialised, and it is
 /// zeroised on drop.
-pub(in crate::onion::circuit) struct OnionReplayFilterKey([u8; 32]);
+pub(crate) struct OnionReplayFilterKey([u8; 32]);
 
 impl OnionReplayFilterKey {
     /// Wrap 32 secret bytes supplied by the caller's RNG, which keeps randomness injected.
-    pub(in crate::onion::circuit) const fn new(bytes: [u8; 32]) -> Self {
+    pub(crate) const fn new(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
 }

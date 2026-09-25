@@ -276,7 +276,7 @@ fn test_renewal_rebuilds_live_links_from_the_snapshot() {
         Verdict::Admitted
     );
     let held = admission
-        .charge(ORIGIN_MS, link(2), units(1))
+        .charge_units(ORIGIN_MS, link(2), units(1))
         .expect("DID 2 has headroom");
     let renewed_epoch = OnionProcessEpoch::new([8; 16]);
     assert_eq!(

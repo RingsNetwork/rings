@@ -61,6 +61,11 @@ pub mod proxy;
 pub(crate) mod replay;
 mod role;
 pub mod route;
+#[expect(
+    dead_code,
+    reason = "pure session algebra; the #843 wire cutover wires it in and removes this"
+)]
+pub(crate) mod session;
 pub mod signature;
 #[cfg_attr(
     not(test),
@@ -83,6 +88,7 @@ pub use failure::OnionRouteError;
 pub use gateway::NativeOnionGatewayConnector;
 pub use loop_shape::OnionLoop;
 pub(crate) use loop_shape::OnionLoopRelay;
+pub use loop_shape::OnionLoopRole;
 pub use loop_shape::OnionLoopShape;
 pub(crate) use loop_shape::OnionPipelineSymbols;
 pub use loop_shape::MAX_ONION_LOOP_HOPS;

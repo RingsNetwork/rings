@@ -169,7 +169,7 @@ use std::num::NonZeroUsize;
 
 use rings_core::dht::Did;
 
-pub(super) use self::bloom::OnionReplayFilterKey;
+pub(crate) use self::bloom::OnionReplayFilterKey;
 use self::bloom::ReplayStore;
 use self::ledger::QuantumLedger;
 use super::OnionExpiry;
@@ -177,6 +177,10 @@ use super::OnionForwardNonce;
 use super::ONION_FORWARD_EXPIRY_QUANTUM_MS;
 use super::ONION_FORWARD_MAX_VALIDITY_MS;
 use super::ONION_FORWARD_PAYLOAD_TTL_MS;
+use crate::onion::circuit::OnionCellBucket;
+use crate::onion::sphinx::cell::Charged;
+use crate::onion::sphinx::cell::OnionCell;
+use crate::onion::sphinx::class::OnionLoopClass;
 use crate::onion::OnionProcessEpoch;
 
 /// Admission window `V = 150 s`: a layer is admissible at `arr` iff `arr < x ≤ arr + V`.
@@ -202,14 +206,40 @@ const ONION_ADMISSION_GLOBAL_UNITS: u32 = 64 * ONION_ADMISSION_SENDER_UNITS;
 /// Compile-time law: the ledger's array length is `N = V / Q`.
 const _: () = assert!(ADMISSION_WINDOW_QUANTA_WIDE == ADMISSION_WINDOW_QUANTA as u128);
 
+/// Bytes of one admission unit, 16 KiB: the least loop class.
+const ONION_ADMISSION_UNIT_BYTES: usize = 16 * 1024;
+
+// Every class is a whole number of units, at least one, and the largest (12 MiB = 768 units)
+// fits the ledgers' `u32`.
+const _: () = assert!(
+    OnionLoopClass::DEFAULT.cell_bytes() == ONION_ADMISSION_UNIT_BYTES
+        && OnionCellBucket::MiB12
+            .plaintext_len()
+            .is_multiple_of(ONION_ADMISSION_UNIT_BYTES)
+        && OnionCellBucket::MiB12.plaintext_len() / ONION_ADMISSION_UNIT_BYTES <= u32::MAX as usize
+);
+
 /// Units of 16 KiB charged for one cell. A class-`b` cell costs `b / 16 KiB ≥ 1` units.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct OnionAdmissionUnits(NonZeroU32);
 
 impl OnionAdmissionUnits {
     /// Wrap a positive unit count.
+    #[cfg(all(test, rings_native))]
     pub(super) const fn new(units: NonZeroU32) -> Self {
         Self(units)
+    }
+
+    /// `u(b) = b / 16 KiB`, the units of one class-`b` cell: at least one, since the least class
+    /// is 16 KiB (#834 L9).
+    fn of_class(class: OnionLoopClass) -> Self {
+        let units = class.cell_bytes() / ONION_ADMISSION_UNIT_BYTES;
+        Self(
+            u32::try_from(units)
+                .ok()
+                .and_then(NonZeroU32::new)
+                .unwrap_or(NonZeroU32::MIN),
+        )
     }
 
     /// The unit count.
@@ -225,7 +255,7 @@ impl OnionAdmissionUnits {
 /// which are already paid for.
 #[must_use = "a charged cell is admitted with its token, or dropped after an invalid α or γ"]
 #[derive(Debug)]
-pub(super) struct OnionAdmissionCharge {
+pub(crate) struct OnionAdmissionCharge {
     /// The cell's arrival: the monotone clock at its charge. The window is judged here.
     arrival_ms: u128,
     /// The epoch of the state that charged the cell.
@@ -236,27 +266,27 @@ pub(super) struct OnionAdmissionCharge {
 /// is plain data, not a capability: the state keeps the set of live links, and the 2a-4 shell
 /// feeds it from core's `Admitted`/`Retired` events.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct OnionAdmissionLink {
+pub(crate) struct OnionAdmissionLink {
     /// The link's sender DID, which owns the budget ledger.
-    pub(super) did: Did,
+    pub(crate) did: Did,
     /// Core's generation of the link to `did`.
-    pub(super) generation: u64,
+    pub(crate) generation: u64,
 }
 
 /// The authenticated fields of a peeled layer that admission decides on.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct OnionAdmissionLayer {
+pub(crate) struct OnionAdmissionLayer {
     /// Process epoch the layer was sealed for.
-    pub(super) epoch: OnionProcessEpoch,
+    pub(crate) epoch: OnionProcessEpoch,
     /// Quantised expiry `x` of the layer's loop.
-    pub(super) expiry: OnionExpiry,
+    pub(crate) expiry: OnionExpiry,
     /// Replay tag `ν` of the layer.
-    pub(super) tag: OnionForwardNonce,
+    pub(crate) tag: OnionForwardNonce,
 }
 
 /// Why a cell could not be charged. Nothing was charged, and the cell must not be decrypted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum OnionChargeRejection {
+pub(crate) enum OnionChargeRejection {
     /// The cell's link is not live: not yet opened, closed, or refused.
     LinkNotLive,
     /// The sender's ledger lacks headroom for the cell's units.
@@ -267,7 +297,7 @@ pub(super) enum OnionChargeRejection {
 
 /// Why a charged layer was not admitted. The cell was charged and is dropped.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum OnionAdmissionRejection {
+pub(crate) enum OnionAdmissionRejection {
     /// The layer, or its charge, belongs to another process epoch (D2).
     StaleEpoch,
     /// `x ∉ (token.arr, token.arr + V]`, or `x` has passed on the monotone clock.
@@ -279,17 +309,17 @@ pub(super) enum OnionAdmissionRejection {
 /// A link refused because the table is full (connection churn beyond `R` within `V`). The shell
 /// must close the link, and the peer may redial later.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct OnionLinkTableFull;
+pub(crate) struct OnionLinkTableFull;
 
 /// The links a table refused, which the shell must close. Returned by
 /// [`OnionAdmissionState::reconcile`] and [`OnionAdmissionState::renew`].
 #[must_use = "refused links must be closed by the shell"]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(super) struct OnionRefusedLinks(Vec<OnionAdmissionLink>);
+pub(crate) struct OnionRefusedLinks(Vec<OnionAdmissionLink>);
 
 impl OnionRefusedLinks {
     /// The refused links, in DID order.
-    pub(super) fn links(&self) -> &[OnionAdmissionLink] {
+    pub(crate) fn links(&self) -> &[OnionAdmissionLink] {
         self.0.as_slice()
     }
 }
@@ -297,7 +327,7 @@ impl OnionRefusedLinks {
 /// A renewal refused because the requested epoch is the current one. Renewing into the current
 /// epoch would clear the replay store while keeping `epoch_i`, and so re-admit replays.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct OnionEpochNotFresh;
+pub(crate) struct OnionEpochNotFresh;
 
 /// One sender DID's unit ledger and its live link generations.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -316,7 +346,7 @@ impl SenderLedger {
 }
 
 /// The admission state `S` of one hop for one process lifetime.
-pub(super) struct OnionAdmissionState {
+pub(crate) struct OnionAdmissionState {
     /// This process's epoch `epoch_i`.
     epoch: OnionProcessEpoch,
     /// Monotone clock: the greatest `now` seen so far.
@@ -337,7 +367,7 @@ impl OnionAdmissionState {
     /// The initial state of a process with epoch `epoch` and probe key `filter_key`, both drawn
     /// once at process start by the caller. The table holds `2·R` ledgers and live links, where `R`
     /// is the transport connection-registry capacity.
-    pub(super) fn new(
+    pub(crate) fn new(
         epoch: OnionProcessEpoch,
         filter_key: OnionReplayFilterKey,
         link_registry_capacity: NonZeroUsize,
@@ -355,7 +385,7 @@ impl OnionAdmissionState {
 
     /// Whether the wall clock has rolled back far enough behind the monotone clock that honest
     /// layers fail the window: `now < clock − X₀`. The shell then renews into a fresh epoch.
-    pub(super) const fn is_rolled_back_at(&self, now_ms: u128) -> bool {
+    pub(crate) const fn is_rolled_back_at(&self, now_ms: u128) -> bool {
         now_ms.saturating_add(ONION_EXPIRY_OFFSET_MS) < self.clock_ms
     }
 
@@ -365,7 +395,7 @@ impl OnionAdmissionState {
     /// zero-load ledger. It returns the snapshot links the table refuses, which the shell must
     /// close. The cleared table is empty and a snapshot has no more DIDs than links, so nothing is
     /// refused when `|live| ≤ 2·R`.
-    pub(super) fn renew(
+    pub(crate) fn renew(
         &mut self,
         epoch: OnionProcessEpoch,
         filter_key: OnionReplayFilterKey,
@@ -393,7 +423,7 @@ impl OnionAdmissionState {
     /// live and is in the snapshot is refused, and a second reconciliation with the same snapshot,
     /// in any order, changes nothing. This repairs lost `Retired` and `Admitted` events. The
     /// snapshot must be linearised with the event stream (see the module laws).
-    pub(super) fn reconcile(
+    pub(crate) fn reconcile(
         &mut self,
         now_ms: u128,
         live: impl IntoIterator<Item = OnionAdmissionLink>,
@@ -439,7 +469,7 @@ impl OnionAdmissionState {
     /// The step `δ` on `LinkOpened(link)`: make `link` live, creating its DID's ledger if it has
     /// none. Opening a live link again changes nothing. A full table refuses the link; the shell
     /// must then close it.
-    pub(super) fn link_opened(
+    pub(crate) fn link_opened(
         &mut self,
         now_ms: u128,
         link: OnionAdmissionLink,
@@ -469,7 +499,7 @@ impl OnionAdmissionState {
     /// at once if that leaves it releasable. It is idempotent: closing a link that is not live
     /// (unknown, refused, or already closed) changes nothing, so a close can never take another
     /// generation's liveness away.
-    pub(super) fn link_closed(&mut self, now_ms: u128, link: OnionAdmissionLink) {
+    pub(crate) fn link_closed(&mut self, now_ms: u128, link: OnionAdmissionLink) {
         let quantum = self.advance(now_ms);
         if let Entry::Occupied(mut occupied) = self.senders.entry(link.did) {
             occupied.get_mut().live.remove(&link.generation);
@@ -479,9 +509,29 @@ impl OnionAdmissionState {
         }
     }
 
+    /// The step `δ` on `Charge(link, u(b))` for a received cell: charge it `u(b) = b / 16 KiB`
+    /// units, the units of its own class, and pair it with the token (#843). This is the only
+    /// source of tokens outside this module, so a peel is always paid for, with its cell's units
+    /// (see `sphinx::cell`).
+    ///
+    /// # Errors
+    ///
+    /// The [`OnionChargeRejection`] of the unit step; nothing is charged, and the cell must be
+    /// dropped undecrypted.
+    pub(crate) fn charge(
+        &mut self,
+        now_ms: u128,
+        link: OnionAdmissionLink,
+        cell: OnionCell,
+    ) -> Result<Charged<OnionCell>, OnionChargeRejection> {
+        let units = OnionAdmissionUnits::of_class(cell.class());
+        self.charge_units(now_ms, link, units)
+            .map(|charge| Charged::new(cell, charge))
+    }
+
     /// The step `δ` on `Charge(link, u)`: charge a cell received on `link` to its DID's ledger and
     /// to the global ledger, both or neither, before its key is computed. Only a live link is
-    /// charged.
+    /// charged. Private: the crate charges cells through [`Self::charge`].
     ///
     /// ```text
     ///  now := max(now, clock);  drop R[x] for x ≤ now;  s = ⌊now / Q⌋;  sweep if s is new
@@ -490,7 +540,7 @@ impl OnionAdmissionState {
     ///   ├─ load_global(s) + u > G ────────→ GlobalBudget
     ///   └─ charge both ledgers ───────────→ Ok(token = (clock, epoch_i))
     /// ```
-    pub(super) fn charge(
+    fn charge_units(
         &mut self,
         now_ms: u128,
         link: OnionAdmissionLink,
@@ -536,7 +586,7 @@ impl OnionAdmissionState {
     ///
     /// A wire expiry off the grid never reaches this step: the shell parses it with
     /// `OnionExpiry::from_ms`, and `None` drops the cell, which is already charged.
-    pub(super) fn admit(
+    pub(crate) fn admit(
         &mut self,
         now_ms: u128,
         charge: OnionAdmissionCharge,

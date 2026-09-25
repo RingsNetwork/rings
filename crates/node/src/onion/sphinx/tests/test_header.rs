@@ -6,6 +6,8 @@ use rand::RngCore;
 use rings_core::delegation::DelegateeKey;
 use rings_core::ecc::PublicKey;
 
+use super::admitted;
+use super::charged;
 use super::fixture_keys;
 use super::fixture_layer;
 use super::fixture_rng;
@@ -96,10 +98,7 @@ fn test_relabelled_cell_dies_at_the_next_honest_hop() {
     .expect("client cell");
     let OnionStep::Relayed {
         cell: forwarded, ..
-    } = OnionCell::parse(cell.into_bytes())
-        .expect("a 16 KiB cell")
-        .peel(&keys[0])
-        .expect("the colluder peels honestly")
+    } = admitted(cell.into_bytes(), &keys[0])
         .step()
         .expect("strong key")
     else {
@@ -110,16 +109,16 @@ fn test_relabelled_cell_dies_at_the_next_honest_hop() {
     let mut relabelled = honest.clone();
     relabelled.resize(large.cell_bytes(), 0);
 
-    let relabelled = OnionCell::parse(relabelled).expect("a 12 MiB cell");
-    assert_eq!(relabelled.class(), large);
+    let relabelled = charged(relabelled);
+    assert_eq!(relabelled.value().class(), large);
     assert_eq!(
-        relabelled.peel(&keys[1]).err(),
-        Some(OnionPeelError::Invalid)
+        relabelled
+            .peel(&keys[1])
+            .err()
+            .map(|error| error.to_string()),
+        Some(OnionPeelError::Invalid.to_string())
     );
-    assert!(OnionCell::parse(honest)
-        .expect("a 16 KiB cell")
-        .peel(&keys[1])
-        .is_ok());
+    assert!(charged(honest).peel(&keys[1]).is_ok());
 }
 
 /// A string whose length is no class is no cell, and `into_bytes ∘ parse = id` on cells.
