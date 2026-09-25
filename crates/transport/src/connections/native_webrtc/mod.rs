@@ -367,6 +367,9 @@ impl NativePhysicalCloseWitness {
     /// Await the close outcome: `true` once `RTCPeerConnection::close()` has succeeded, `false`
     /// once every holder of the connection released it without a successful close.
     ///
+    /// This is supported API: the awaitable form of [`Self::is_complete`] for any caller that
+    /// must act after the physical close, rather than polling for it.
+    ///
     /// Law (no lost wake-up): `wait_for` tests the stored value before it suspends, and the
     /// value is monotone (`false → true` only), so a publication that precedes this call is
     /// observed as readily as one that follows it.

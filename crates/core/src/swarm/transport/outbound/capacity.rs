@@ -264,12 +264,11 @@ pub(super) struct TransferCapacity {
     state: Mutex<PeerCapacityState>,
     global: Arc<GlobalTransferCapacity>,
     waiters: Arc<FairWaitQueue>,
-    /// Test observation of the admitted transfer count.
-    ///
-    /// Invariant: written under `state`'s lock at every admission and release, so the watched
-    /// value is the admitted count of the last committed transition, never a stale read.
+    /// Test witness of this capacity's deallocation. Nothing is ever sent on it, so its
+    /// subscribers observe exactly one event, the channel closing when the capacity is
+    /// dropped, and that event is terminal.
     #[cfg(all(test, not(feature = "dummy"), not(target_family = "wasm")))]
-    admitted_watch: watch::Sender<usize>,
+    retirement: watch::Sender<()>,
 }
 
 impl TransferCapacity {
@@ -280,7 +279,7 @@ impl TransferCapacity {
             global,
             waiters: Arc::new(FairWaitQueue::with_budget(wait_budget)),
             #[cfg(all(test, not(feature = "dummy"), not(target_family = "wasm")))]
-            admitted_watch: watch::channel(0).0,
+            retirement: watch::channel(()).0,
         }
     }
 
@@ -319,9 +318,6 @@ impl TransferCapacity {
             OUTBOUND_PEER_BYTE_CAPACITY,
         );
         *state = next;
-        #[cfg(all(test, not(feature = "dummy"), not(target_family = "wasm")))]
-        self.admitted_watch
-            .send_replace(state.capacity.admitted_count());
         Ok(PeerCapacityPermit {
             capacity: self.clone(),
             class,
@@ -391,10 +387,10 @@ impl TransferCapacity {
             .admitted_count()
     }
 
-    /// Subscribe to the admitted transfer count; see `admitted_watch` for its invariant.
+    /// Subscribe to this capacity's deallocation; see `retirement`.
     #[cfg(all(test, not(feature = "dummy"), not(target_family = "wasm")))]
-    pub(super) fn subscribe_admitted(&self) -> watch::Receiver<usize> {
-        self.admitted_watch.subscribe()
+    pub(super) fn subscribe_retirement(&self) -> watch::Receiver<()> {
+        self.retirement.subscribe()
     }
 
     #[cfg(test)]
@@ -420,17 +416,11 @@ struct PeerCapacityPermit {
 
 impl Drop for PeerCapacityPermit {
     fn drop(&mut self) {
-        let mut state = self
-            .capacity
+        self.capacity
             .state
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.release(self.class, self.bytes);
-        #[cfg(all(test, not(feature = "dummy"), not(target_family = "wasm")))]
-        self.capacity
-            .admitted_watch
-            .send_replace(state.capacity.admitted_count());
-        drop(state);
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .release(self.class, self.bytes);
         self.capacity.waiters.wake_front();
     }
 }

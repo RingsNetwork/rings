@@ -275,26 +275,29 @@ impl crate::swarm::transport::SwarmTransport {
         self.outbound_schedulers.admitted_transfer_total_for_test()
     }
 
-    /// Await the event "every transfer admitted to `peer` when the wait began has released
-    /// its capacity".
+    /// Await the event "the capacity `peer` held at the call has been deallocated".
     ///
     /// ```text
-    /// A₀     = permits of peer held at subscription
-    /// R(peer) ≡ admitted(peer) = 0  ∨  capacity(peer) deallocated
-    /// R(peer) observed  ⟹  ∀ p ∈ A₀. released(p)
+    /// K₀         = capacity(peer) live at subscription     (None ⟹ nothing to await)
+    /// Retired(K₀) ≡ K₀ deallocated
+    /// Retired(K₀) ⟹ ∀ permit p of K₀. released(p)
     /// ```
     ///
-    /// The count is a sum over live permits, so it reaches zero only after every permit in `A₀`
-    /// has been dropped, whatever transient reservations come and go meanwhile. The watch is
-    /// subscribed while the capacity is pinned, and `wait_for` tests the stored count before it
-    /// suspends, so a release that precedes the wait is not lost. A closed watch means the
-    /// capacity was deallocated, which happens only after every permit (each holds the
-    /// capacity) was dropped.
+    /// Every permit holds its capacity (`Arc`), and the registry holds only a `Weak`, so the
+    /// capacity is deallocated only after every permit admitted to it has been dropped.
+    /// Deallocation is terminal, so `Retired` is stable: unlike `admitted = 0`, which a later
+    /// transient reservation can falsify and a watch can coalesce away, it cannot be observed
+    /// and then lost. The receiver is subscribed while `K₀` is pinned, and a closed watch stays
+    /// closed, so a deallocation that precedes the wait is still observed.
     #[cfg(all(test, not(feature = "dummy"), not(target_family = "wasm")))]
-    pub(crate) async fn outbound_transfers_released_for_test(&self, peer: Did) {
-        let Some(mut admitted) = self.outbound_schedulers.subscribe_admitted_for_test(peer) else {
+    pub(crate) async fn outbound_capacity_retired_for_test(&self, peer: Did) {
+        let Some(mut retirement) = self
+            .outbound_schedulers
+            .subscribe_capacity_retirement_for_test(peer)
+        else {
             return;
         };
-        drop(admitted.wait_for(|admitted| *admitted == 0).await);
+        // Nothing is ever sent, so `changed` resolves only with the closing error.
+        while retirement.changed().await.is_ok() {}
     }
 }
