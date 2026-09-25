@@ -90,7 +90,7 @@ fn test_onion_exit_service_name_is_validated_and_canonicalized() -> Result<()> {
 #[test]
 fn test_default_exit_policy_is_closed() -> Result<()> {
     let policy = OnionExitPolicy::default();
-    let target = OnionExitTarget::parse("example.com:443")?;
+    let target = OnionProxyTarget::parse_authority("example.com:443")?;
 
     assert!(policy.is_closed());
     assert!(!policy.allows_target(&target));
@@ -110,9 +110,9 @@ fn test_exit_policy_allow_list_controls_targets() -> Result<()> {
         ],
         vec!["api.example.com:443".to_string()],
     )?;
-    let example = OnionExitTarget::parse("example.com:443")?;
-    let api = OnionExitTarget::parse("api.example.com:443")?;
-    let other = OnionExitTarget::parse("other.example.com:443")?;
+    let example = OnionProxyTarget::parse_authority("example.com:443")?;
+    let api = OnionProxyTarget::parse_authority("api.example.com:443")?;
+    let other = OnionProxyTarget::parse_authority("other.example.com:443")?;
 
     assert!(!policy.is_closed());
     assert!(policy.allows_target(&example));
@@ -121,14 +121,60 @@ fn test_exit_policy_allow_list_controls_targets() -> Result<()> {
     Ok(())
 }
 
+/// `*:port` admits every host on that port and nothing else, so HTTPS-only egress is `tcp` under
+/// `*:443` (#834 D1′); a specific deny still overrides it.
+#[test]
+fn test_exit_policy_port_wildcard_admits_one_port_on_every_host() -> Result<()> {
+    let policy = OnionExitPolicy::from_target_strings(vec!["*:443".to_string()], vec![
+        "blocked.example.com:443".to_string(),
+    ])?;
+
+    for (authority, admitted) in [
+        ("example.com:443", true),
+        ("[2001:db8::1]:443", true),
+        ("10.0.0.1:443", true),
+        ("example.com:80", false),
+        ("example.com:8443", false),
+        ("blocked.example.com:443", false),
+    ] {
+        let target = OnionProxyTarget::parse_authority(authority)?;
+        assert_eq!(policy.allows_target(&target), admitted, "{authority}");
+    }
+    Ok(())
+}
+
+/// Every pattern round-trips through its canonical encoding: `parse ∘ encode = id`, and
+/// `encode ∘ parse` canonicalises (`*` to `*:*`, host case and trailing dot away). A zero or
+/// malformed wildcard port is rejected.
+#[test]
+fn test_exit_target_patterns_round_trip_canonically() -> Result<()> {
+    for (raw, canonical) in [
+        ("*", "*:*"),
+        ("*:*", "*:*"),
+        ("*:443", "*:443"),
+        ("Example.COM.:443", "example.com:443"),
+        ("[2001:DB8::1]:8443", "[2001:db8::1]:8443"),
+    ] {
+        let target = OnionExitTarget::parse(raw)?;
+        assert_eq!(target.to_string(), canonical);
+        assert_eq!(OnionExitTarget::parse(target.to_string())?, target);
+        let encoded = serde_json::to_string(&target).map_err(|_| Error::EncodeError)?;
+        assert_eq!(encoded, format!("{canonical:?}"));
+    }
+    for invalid in ["*:0", "*:https", "*:", "*:65536"] {
+        assert!(OnionExitTarget::parse(invalid).is_err(), "{invalid}");
+    }
+    Ok(())
+}
+
 #[test]
 fn test_exit_policy_wildcard_allows_all_targets_with_specific_denies() -> Result<()> {
     let policy = OnionExitPolicy::from_target_strings(vec!["*:*".to_string()], vec![
         "api.example.com:443".to_string(),
     ])?;
-    let google = OnionExitTarget::parse("google.com:443")?;
-    let example = OnionExitTarget::parse("example.com:8443")?;
-    let api = OnionExitTarget::parse("api.example.com:443")?;
+    let google = OnionProxyTarget::parse_authority("google.com:443")?;
+    let example = OnionProxyTarget::parse_authority("example.com:8443")?;
+    let api = OnionProxyTarget::parse_authority("api.example.com:443")?;
 
     assert!(!policy.is_closed());
     assert!(policy.allows_target(&google));

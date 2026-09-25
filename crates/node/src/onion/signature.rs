@@ -20,9 +20,10 @@
 //!   Parsing is the only way in, so a name outside `Σ_W`, `relay` included, is rejected wherever it
 //!   enters the node (configuration, descriptor decode, RPC), and no route, exit layer or algebra
 //!   entry can name it. The encoding is the canonical name string, so closure changes no wire byte.
-//! - **Refinement.** `https ⊑ tcp`: a fetch is one request/response exchange that a byte stream can
-//!   carry, so every exit able to interpret `tcp` can interpret `https`, while a browser exit, which
-//!   has `fetch` but no sockets, interprets `https` alone.
+//! - **One interpretation per symbol** (#834 D1′). `https` is a request/response fetch only, and
+//!   every byte tunnel, TLS included, is `tcp`. No interpretation falls back to another symbol, so
+//!   a browser exit, which has `fetch` but no sockets, interprets `https` alone, and HTTPS-only
+//!   egress is `tcp` under a `*:443` policy.
 //!
 //! - **Code.** `Σ = {relay} ⊎ Σ_W` is the coproduct `OnionSymbol = 1 + Σ_W`, and the `f` byte
 //!   of the uniform layer (#834 D6″) is its position in table order: `code(inl) = 0`,

@@ -116,12 +116,12 @@ fn onion_exit_policy_info(policy: OnionExitPolicy) -> OnionExitPolicyInfo {
         allowed_targets: policy
             .allowed_targets
             .into_iter()
-            .map(|target| target.authority().to_string())
+            .map(|target| target.to_string())
             .collect(),
         denied_targets: policy
             .denied_targets
             .into_iter()
-            .map(|target| target.authority().to_string())
+            .map(|target| target.to_string())
             .collect(),
         max_circuits: policy.max_circuits,
         max_streams_per_circuit: policy.max_streams_per_circuit,

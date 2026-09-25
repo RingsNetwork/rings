@@ -373,12 +373,12 @@ node's process epoch, and is not a service name, so a name outside `Σ_W`, `rela
 included, is rejected wherever it enters a node (configuration, descriptor decode,
 RPC) and no route can name it. An exit
 evaluates each authenticated application through a table holding exactly the
-services it is configured to serve. `https ⊑ tcp`: native exits serve `tcp` through
-the TCP exit runtime, and `https` as the left-biased alternative of an HTTPS request
-and a TLS byte stream under the same name. The wire carries no tag between the two,
-so a tunnel chunk that also decodes as an HTTPS payload (an empty chunk, or a
-five-byte chunk `04 ‖ utf8⁴`) is taken as one and dropped; removing that overlap
-needs a wire tag and is left to the Phase 2 cutover of #834. A new incompatible descriptor
+services it is configured to serve, one interpretation per symbol: `https` is a
+request/response fetch only, and every byte tunnel (HTTP CONNECT, SOCKS, the gateway's
+captured flows, TLS included) is `tcp`. No interpretation falls back to another
+symbol, so a body that is not a well-formed payload of its symbol is dropped, and an
+operator who wants HTTPS-only egress registers `tcp` under a port-restricted policy
+such as `*:443`. A new incompatible descriptor
 shape is therefore a network-wide release cutover, not a value negotiated inside the
 descriptor. Every exit is also a relay: a node that advertises an exit must advertise
 the relay capability, and route selection admits an exit descriptor only while its

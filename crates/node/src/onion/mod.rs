@@ -213,42 +213,81 @@ pub struct OnionExitPolicy {
     pub max_bytes_per_minute: u64,
 }
 
-/// Canonical target authority admitted by an onion exit policy.
-#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+/// One entry of an onion exit policy: a pattern over target authorities.
+///
+/// ```text
+/// OnionExitTarget = Any | AnyHost(port) | Authority(host, port)
+/// encode:  *:*      *:port          host:port | [ipv6]:port        (canonical, lowercase)
+/// matches(Any, t) = ⊤    matches(AnyHost(p), t) = (port(t) = p)    matches(Authority(a), t) = (a = t)
+/// ```
+///
+/// Laws: `parse ∘ encode = Ok` on every pattern, `encode ∘ parse` is canonicalisation, and
+/// `matches` is monotone in the pattern order `Authority(h, p) ≤ AnyHost(p) ≤ Any`. The port
+/// wildcard is how an operator expresses HTTPS-only egress: `https` is a fetch only, so a TLS
+/// tunnel is `tcp` restricted to `*:443` (#834 D1′).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct OnionExitTarget(String);
+pub struct OnionExitTarget(OnionExitTargetPattern);
+
+/// The pattern of an [`OnionExitTarget`]; see its encoding table.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum OnionExitTargetPattern {
+    /// `*:*`: every target.
+    Any,
+    /// `*:port`: every host on one port.
+    AnyHost(u16),
+    /// `host:port`: exactly one canonical authority.
+    Authority(OnionProxyTarget),
+}
 
 impl OnionExitTarget {
-    const WILDCARD_AUTHORITY: &'static str = "*:*";
+    /// The wildcard host `*` of a pattern.
+    const WILDCARD: &'static str = "*";
 
-    /// Parse and canonicalize an exit target authority.
+    /// Parse and canonicalize an exit target pattern: `*`, `*:*`, `*:port` or `host:port`.
     pub fn parse(target: impl AsRef<str>) -> Result<Self> {
         let raw = target.as_ref().trim();
-        if raw == "*" || raw == Self::WILDCARD_AUTHORITY {
-            return Ok(Self(Self::WILDCARD_AUTHORITY.to_string()));
+        let invalid = |error: &dyn std::fmt::Display| {
+            Error::InvalidConfig(format!(
+                "invalid onion exit target {:?}; expected host:port, *:port or *:*: {error}",
+                target.as_ref()
+            ))
+        };
+        let pattern = match raw.split_once(':') {
+            _ if raw == Self::WILDCARD => OnionExitTargetPattern::Any,
+            Some((Self::WILDCARD, Self::WILDCARD)) => OnionExitTargetPattern::Any,
+            Some((Self::WILDCARD, port)) => match port.parse::<u16>() {
+                Ok(0) => return Err(invalid(&OnionProxyTargetError::ZeroPort)),
+                Ok(port) => OnionExitTargetPattern::AnyHost(port),
+                Err(_) => return Err(invalid(&OnionProxyTargetError::InvalidPort)),
+            },
+            _ => OnionExitTargetPattern::Authority(
+                OnionProxyTarget::parse_authority(raw).map_err(|error| invalid(&error))?,
+            ),
+        };
+        Ok(Self(pattern))
+    }
+
+    /// Return whether `target` falls under this pattern.
+    pub fn matches(&self, target: &OnionProxyTarget) -> bool {
+        match &self.0 {
+            OnionExitTargetPattern::Any => true,
+            OnionExitTargetPattern::AnyHost(port) => target.port() == *port,
+            OnionExitTargetPattern::Authority(authority) => authority == target,
         }
-        OnionProxyTarget::parse_authority(raw)
-            .map(|target| Self(target.authority()))
-            .map_err(|error| {
-                Error::InvalidConfig(format!(
-                    "invalid onion exit target {:?}; expected host:port or *:*: {error}",
-                    target.as_ref()
-                ))
-            })
     }
+}
 
-    /// Return the canonical host:port authority.
-    pub fn authority(&self) -> &str {
-        self.0.as_str()
-    }
-
-    /// Build a policy target from an already-validated proxy target.
-    pub fn from_proxy_target(target: &OnionProxyTarget) -> Self {
-        Self(target.authority())
-    }
-
-    fn matches_target(&self, target: &Self) -> bool {
-        self.0 == Self::WILDCARD_AUTHORITY || self == target
+impl std::fmt::Display for OnionExitTarget {
+    /// The canonical encoding of the pattern.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            OnionExitTargetPattern::Any => write!(formatter, "*:*"),
+            OnionExitTargetPattern::AnyHost(port) => write!(formatter, "*:{port}"),
+            OnionExitTargetPattern::Authority(authority) => {
+                formatter.write_str(authority.authority().as_str())
+            }
+        }
     }
 }
 
@@ -262,7 +301,7 @@ impl TryFrom<String> for OnionExitTarget {
 
 impl From<OnionExitTarget> for String {
     fn from(target: OnionExitTarget) -> Self {
-        target.0
+        target.to_string()
     }
 }
 
@@ -295,27 +334,24 @@ impl OnionExitPolicy {
         Ok(())
     }
 
-    /// Return whether `target` is admitted by this policy's allow-list.
-    pub fn allows_target(&self, target: &OnionExitTarget) -> bool {
-        if self.is_closed() {
-            return false;
-        }
-        if self.denies(target) {
-            return false;
-        }
-        self.allows(target)
+    /// Return whether `target` is admitted by this policy: some allow entry matches it and no
+    /// deny entry does.
+    pub fn allows_target(&self, target: &OnionProxyTarget) -> bool {
+        !self.is_closed() && !self.denies(target) && self.allows(target)
     }
 
-    fn allows(&self, target: &OnionExitTarget) -> bool {
+    /// Whether an allow entry matches `target`.
+    fn allows(&self, target: &OnionProxyTarget) -> bool {
         self.allowed_targets
             .iter()
-            .any(|allowed| allowed.matches_target(target))
+            .any(|allowed| allowed.matches(target))
     }
 
-    fn denies(&self, target: &OnionExitTarget) -> bool {
+    /// Whether a deny entry matches `target`.
+    fn denies(&self, target: &OnionProxyTarget) -> bool {
         self.denied_targets
             .iter()
-            .any(|denied| denied.matches_target(target))
+            .any(|denied| denied.matches(target))
     }
 }
 

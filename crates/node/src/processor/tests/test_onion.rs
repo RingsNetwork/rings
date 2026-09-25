@@ -73,7 +73,7 @@ async fn test_onion_proxy_route_uses_presence_relays_without_exit_descriptor() -
 
     let route = processor
         .build_onion_proxy_route(
-            OnionProxyConfig::tcp_connect_service(OnionServiceName::tcp())?,
+            OnionProxyConfig::tcp_connect(),
             OnionProxyTarget::parse_authority("example.com:443")?,
         )
         .await?
@@ -230,13 +230,14 @@ async fn test_onion_proxy_route_accepts_https_service() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_tcp_connect_route_rejects_browser_https_exit_descriptor() -> Result<()> {
+async fn test_tcp_connect_route_rejects_browser_tcp_exit_descriptor() -> Result<()> {
     let processor = prepare_processor().await;
     let browser_exit = prepare_processor().await;
+    // A browser has no sockets, so a `tcp` registration from one cannot carry a tunnel.
     let descriptor = onion_exit_descriptor_for_processor_with_node_type_service(
         &browser_exit,
         OnlineNodeType::Browser,
-        OnionServiceName::https(),
+        OnionServiceName::tcp(),
         get_epoch_ms(),
         {
             let mut policy = onion_policy(&["example.com:443"], &[])?;
@@ -253,10 +254,7 @@ async fn test_tcp_connect_route_rejects_browser_https_exit_descriptor() -> Resul
 
     let target = OnionProxyTarget::parse_authority("example.com:443")?;
     let error = processor
-        .build_onion_proxy_route(
-            OnionProxyConfig::tcp_connect_service(OnionServiceName::https())?,
-            target,
-        )
+        .build_onion_proxy_route(OnionProxyConfig::tcp_connect(), target)
         .await
         .err()
         .ok_or_else(|| Error::InvalidConfig("expected route failure".to_string()))?;
@@ -264,7 +262,7 @@ async fn test_tcp_connect_route_rejects_browser_https_exit_descriptor() -> Resul
     assert!(matches!(
         error,
         Error::OnionRouteError(OnionRouteError::NoExitForProxyProtocol { service, protocol })
-            if service == "https" && protocol == "tcp-connect"
+            if service == "tcp" && protocol == "tcp-connect"
     ));
     Ok(())
 }

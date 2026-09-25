@@ -1,10 +1,7 @@
 use super::*;
 
 fn options() -> OnionHttpProxyOptions {
-    OnionHttpProxyOptions::new(
-        SocketAddr::from(([127, 0, 0, 1], 0)),
-        OnionServiceName::tcp(),
-    )
+    OnionHttpProxyOptions::new(SocketAddr::from(([127, 0, 0, 1], 0)))
 }
 
 #[test]
@@ -21,17 +18,6 @@ fn test_connect_request_line_rejects_plain_http_request() {
         parse_connect_request_line("GET http://example.com/ HTTP/1.1"),
         Err(Error::HttpRequestError(_))
     ));
-}
-
-#[test]
-fn test_proxy_options_build_https_tcp_service_config() -> Result<()> {
-    let mut options = options();
-    options.service = OnionServiceName::https();
-
-    let proxy = options.proxy_config()?;
-
-    assert_eq!(proxy.exit_service(), "https");
-    Ok(())
 }
 
 #[test]

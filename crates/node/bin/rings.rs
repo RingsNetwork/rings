@@ -154,11 +154,6 @@ fn parse_onion_exit_service(raw: &str) -> Result<OnionServiceName, String> {
     OnionServiceName::parse(raw).map_err(|error| error.to_string())
 }
 
-/// Parse a canonical service name for client-side onion proxy options.
-fn parse_onion_service_name(raw: &str) -> Result<OnionServiceName, String> {
-    OnionServiceName::parse(raw).map_err(|error| error.to_string())
-}
-
 /// Resolves a handshake payload argument that may be `-`, meaning "read it from stdin".
 ///
 /// The base58-check offer/answer strings are long and awkward to pass inline, so the
@@ -405,14 +400,6 @@ struct RunCommand {
         env
     )]
     pub onion_http_proxy_addr: Option<String>,
-
-    #[arg(
-        long,
-        value_parser = parse_onion_service_name,
-        help = "Onion exit service used by the local HTTP CONNECT proxy: tcp or https",
-        env
-    )]
-    pub onion_http_proxy_service: Option<OnionServiceName>,
 
     #[arg(
         long,
@@ -796,9 +783,6 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
     if let Some(addr) = args.onion_http_proxy_addr {
         c.onion_http_proxy_addr = Some(addr);
     }
-    if let Some(service) = args.onion_http_proxy_service {
-        c.onion_http_proxy_service = service;
-    }
     if let Some(timeout_secs) = args.onion_http_proxy_header_timeout_secs {
         c.onion_http_proxy_header_timeout_secs = timeout_secs;
     }
@@ -825,7 +809,6 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
     )?;
 
     let onion_http_proxy_addr = c.onion_http_proxy_addr.clone();
-    let onion_http_proxy_service = c.onion_http_proxy_service.clone();
     let onion_http_proxy_header_timeout_secs = c.onion_http_proxy_header_timeout_secs;
     let onion_http_proxy_max_connections = c.onion_http_proxy_max_connections;
     let gateway_config = c.enabled_gateway().cloned();
@@ -977,7 +960,6 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
         let onion_http_proxy_addr = onion_http_proxy_addr.parse::<SocketAddr>()?;
         let proxy_options = OnionHttpProxyOptions {
             listen_addr: onion_http_proxy_addr,
-            service: onion_http_proxy_service,
             max_connections: onion_http_proxy_max_connections,
             header_timeout: Duration::from_secs(onion_http_proxy_header_timeout_secs),
         };

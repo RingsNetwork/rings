@@ -5,23 +5,19 @@
 //! evaluated by the node's Σ-algebra, which registers exactly the configured exit services `Σ_n`:
 //!
 //! ```text
-//! exit frame ──service──▶ tcp   ↦ ⟦tcp⟧ = TCP exit                  if tcp ∈ Σ_n
-//!                   └──▶ https ↦ ⟦fetch⟧ <|> ⟦tcp⟧                   if https ∈ Σ_n
+//! exit frame ──service──▶ tcp   ↦ ⟦tcp⟧   = TCP exit                if tcp ∈ Σ_n
+//!                   └──▶ https ↦ ⟦https⟧ = HTTPS fetch             if https ∈ Σ_n
 //!
 //! backward frame ──claim(peer, id)──▶ HTTPS client ──Some(claim)──▶ claim.resolve(payload)
 //!                                        │ None
 //!                                        └──────────────────────▶ TCP client streams
 //! ```
 //!
-//! `https ⊑ tcp` (see `onion::signature`): a native exit serving `https` answers fetches and also
-//! carries TLS tunnels opened under the same name by HTTPS CONNECT clients. The wire carries no
-//! tag between the two, so the interpretation is the left-biased alternative `⟦fetch⟧ <|> ⟦tcp⟧`:
-//! a body that decodes as an HTTPS payload is a fetch, and every other body is a tunnel frame.
-//! This is not a coproduct, because the two encodings overlap. A tunnel `Data` chunk whose bytes
-//! also decode as an HTTPS payload is taken by the fetch side, which absorbs it: the empty chunk
-//! (`02 00` = `Error(PermissionDenied)`) and a five-byte chunk `04 ‖ utf8⁴`
-//! (`Error(InvalidTarget(_))`). Removing the overlap needs a tag on the wire, which is a Phase 2
-//! cutover.
+//! Each symbol has exactly one interpretation (#834 D1′): `https` is a request/response fetch
+//! only, and every byte tunnel, TLS included, is `tcp`. No interpretation dispatches on a decode
+//! failure, so a body that is not a well-formed payload of its symbol is dropped, never handed
+//! to another symbol. An operator who wants HTTPS-only egress registers `tcp` restricted to
+//! `*:443`.
 //!
 //! Law (client disjointness): the HTTPS client and the TCP streams draw circuit ids independently
 //! and uniformly from 128 bits, and the HTTPS client claims only the pair `(circuit id, expected
@@ -187,23 +183,6 @@ impl OnionInterpretation for OnionTcpInterpretation {
     }
 }
 
-/// `⟦https⟧` on a native exit: the left-biased alternative `⟦fetch⟧ <|> ⟦tcp⟧` (see the module
-/// docs).
-struct NativeHttpsInterpretation {
-    fetch: OnionHttpsInterpretation,
-    stream: OnionTcpInterpretation,
-}
-
-#[async_trait::async_trait]
-impl OnionInterpretation for NativeHttpsInterpretation {
-    async fn evaluate(&self, scope: &Scope, frame: OnionCircuitExitFrame) -> Result<()> {
-        if self.fetch.apply(scope, frame.clone()).await? {
-            return Ok(());
-        }
-        self.stream.evaluate(scope, frame).await
-    }
-}
-
 /// Circuit handler of a native node: its Σ-algebra and client continuations (see the module
 /// diagram).
 pub(super) struct NativeOnionCircuitHandler {
@@ -231,17 +210,16 @@ impl NativeOnionCircuitHandler {
         let algebra = services
             .into_iter()
             .fold(OnionAlgebra::default(), |algebra, service| {
-                let stream = OnionTcpInterpretation {
-                    runtime: Arc::clone(&tcp),
-                };
                 // Σ_W = {tcp, https} is closed, so a service other than `https` is `tcp`.
                 if service == OnionServiceName::https() {
-                    algebra.register(service, NativeHttpsInterpretation {
-                        fetch: OnionHttpsInterpretation::new(Arc::clone(&https), signer.clone()),
-                        stream,
-                    })
+                    algebra.register(
+                        service,
+                        OnionHttpsInterpretation::new(Arc::clone(&https), signer.clone()),
+                    )
                 } else {
-                    algebra.register(service, stream)
+                    algebra.register(service, OnionTcpInterpretation {
+                        runtime: Arc::clone(&tcp),
+                    })
                 }
             });
         Self {

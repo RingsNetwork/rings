@@ -8,7 +8,6 @@ use rings_core::utils::get_epoch_ms;
 use super::select_onion_route_from_candidates;
 use super::OnionEntryGuards;
 use super::OnionExitDescriptor;
-use super::OnionExitTarget;
 use super::OnionRoute;
 use super::OnionRouteCandidates;
 use super::OnionRouteError;
@@ -59,9 +58,8 @@ pub(crate) async fn build_onion_proxy_route_with_first_hop(
     target: OnionProxyTarget,
     first_hop_permitted: impl Fn(Did) -> bool,
 ) -> Result<OnionProxyRoute> {
-    let service_name = proxy.exit_service_name().clone();
+    let service_name = proxy.exit_service_name();
     let service = service_name.as_str().to_string();
-    let exit_target = OnionExitTarget::from_proxy_target(&target);
     let now_ms = get_epoch_ms();
     let directory_exits = OnionExitDescriptor::latest_valid_by_service_did(
         reader.live_onion_exits("").await?,
@@ -92,13 +90,13 @@ pub(crate) async fn build_onion_proxy_route_with_first_hop(
     }
     let policy_exits = protocol_exits
         .into_iter()
-        .filter(|exit| exit.policy.allows_target(&exit_target))
+        .filter(|exit| exit.policy.allows_target(&target))
         .collect::<Vec<_>>();
     if policy_exits.is_empty() {
         return Err(Error::OnionRouteError(
             OnionRouteError::NoExitAllowsTarget {
                 service,
-                target: exit_target.authority().to_string(),
+                target: target.authority(),
             },
         ));
     }

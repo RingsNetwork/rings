@@ -21,7 +21,6 @@ use crate::onion::exit_accounting::OnionExitLease;
 use crate::onion::target::resolve_public_target;
 use crate::onion::OnionExitFailure;
 use crate::onion::OnionExitPolicy;
-use crate::onion::OnionExitTarget;
 use crate::onion::OnionProxyTarget;
 use crate::onion::OnionServiceName;
 
@@ -47,8 +46,7 @@ pub(super) fn admit_exit_target(
 ) -> std::result::Result<OnionProxyTarget, OnionExitFailure> {
     let target = OnionProxyTarget::parse_authority(target)
         .map_err(|error| OnionExitFailure::InvalidTarget(error.to_string()))?;
-    let exit_target = OnionExitTarget::from_proxy_target(&target);
-    if !policy.allows_target(&exit_target) {
+    if !policy.allows_target(&target) {
         return Err(OnionExitFailure::PermissionDenied);
     }
     Ok(target)

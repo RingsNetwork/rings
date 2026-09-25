@@ -66,7 +66,6 @@ use crate::onion::proxy::ONION_PROXY_HTTPS_SERVICE;
 use crate::onion::replay::OnionForwardReplayWitness;
 use crate::onion::OnionExitFailure;
 use crate::onion::OnionExitPolicy;
-use crate::onion::OnionExitTarget;
 use crate::onion::OnionRouteError;
 use crate::onion::OnionServiceName;
 
@@ -225,18 +224,13 @@ impl OnionHttpsInterpretation {
         Self { runtime, signer }
     }
 
-    /// Evaluate `frame` when its body is an HTTPS payload.
-    ///
-    /// Post: `Ok(false)` exactly when the body does not decode as an HTTPS payload, so the native
-    /// alternative `⟦fetch⟧ <|> ⟦tcp⟧` can hand it to the byte-stream side; a decoded request is answered along the
-    /// reversed path, and a decoded response or error, meaningless at an exit, is absorbed.
-    pub(crate) async fn apply(&self, scope: &Scope, frame: OnionCircuitExitFrame) -> Result<bool> {
-        let Some(payload) = (match decode_https_payload(frame.payload) {
-            Ok(payload) => payload,
-            Err(Error::DecodeError) => return Ok(false),
-            Err(error) => return Err(error),
-        }) else {
-            return Ok(false);
+    /// Evaluate `frame`, whose symbol is `https`: a request is fetched and answered along the
+    /// reversed path. A body that is not an HTTPS payload fails with `DecodeError` and is dropped,
+    /// never reinterpreted (#834 D1′), and a response or error, meaningless at an exit, is
+    /// absorbed.
+    async fn apply(&self, scope: &Scope, frame: OnionCircuitExitFrame) -> Result<()> {
+        let Some(payload) = decode_https_payload(frame.payload)? else {
+            return Ok(());
         };
         let response = match payload {
             OnionHttpsPayload::Request(request) => {
@@ -254,7 +248,7 @@ impl OnionHttpsInterpretation {
                     Err(error) => OnionHttpsPayload::Error(OnionExitFailure::from_error(&error)),
                 }
             }
-            OnionHttpsPayload::Response(_) | OnionHttpsPayload::Error(_) => return Ok(true),
+            OnionHttpsPayload::Response(_) | OnionHttpsPayload::Error(_) => return Ok(()),
         };
         send_backward(
             &self.runtime.link_sender,
@@ -269,8 +263,7 @@ impl OnionHttpsInterpretation {
             OnionBackwardSequence::FIRST,
             encode_https_payload(response)?,
         )
-        .await?;
-        Ok(true)
+        .await
     }
 }
 
@@ -278,7 +271,7 @@ impl OnionHttpsInterpretation {
 #[cfg_attr(rings_native, async_trait::async_trait)]
 impl OnionInterpretation for OnionHttpsInterpretation {
     async fn evaluate(&self, scope: &Scope, frame: OnionCircuitExitFrame) -> Result<()> {
-        self.apply(scope, frame).await.map(|_| ())
+        self.apply(scope, frame).await
     }
 }
 
@@ -349,13 +342,12 @@ pub(crate) async fn execute_exit_fetch(
         .consume_forward_nonce(return_peer, circuit_id, forward_nonce)?;
     let target = OnionProxyTarget::parse_authority(&request.target)?;
     let authority = target.authority();
-    let exit_target = OnionExitTarget::from_proxy_target(&target);
     let Some(policy) = runtime.exit_policy() else {
         return Err(Error::InvalidConfig(
             "browser HTTPS onion exit is not enabled locally".to_string(),
         ));
     };
-    if !policy.allows_target(&exit_target) {
+    if !policy.allows_target(&target) {
         return Err(Error::NoPermission);
     }
     let request_body_bytes = usize_to_u64(request.body.len())?;
