@@ -291,18 +291,21 @@ pub async fn wait_until_result(
     }
 }
 
+/// Whether `node` holds an active, routable connection to `peer` in `state`.
+pub fn has_connection_in_state(node: &Node, peer: Did, state: WebrtcConnectionState) -> bool {
+    node.swarm
+        .transport
+        .get_connection(peer)
+        .is_some_and(|conn| conn.webrtc_connection_state() == state)
+}
+
 pub async fn wait_for_connection_state(
     node: &Node,
     peer: Did,
     state: WebrtcConnectionState,
 ) -> crate::error::Result<()> {
     wait_until_result("connection reaches expected state", || {
-        Ok(node
-            .swarm
-            .transport
-            .get_connection(peer)
-            .map(|conn| conn.webrtc_connection_state() == state)
-            .unwrap_or(false))
+        Ok(has_connection_in_state(node, peer, state))
     })
     .await
 }

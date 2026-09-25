@@ -33,9 +33,13 @@ use crate::message::Message;
 #[cfg(feature = "dummy")]
 use crate::message::MessageHandler;
 #[cfg(feature = "dummy")]
+use crate::message::MessageVerificationExt;
+#[cfg(feature = "dummy")]
 use crate::swarm::callback::SwarmCallback;
 #[cfg(feature = "dummy")]
 use crate::tests::default::dummy_hooks::ControlledDeliveryGuard;
+#[cfg(feature = "dummy")]
+use crate::tests::default::has_connection_in_state;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_connection_state;
 use crate::tests::default::wait_for_finger;
@@ -53,12 +57,14 @@ struct NoopCallback;
 #[cfg(feature = "dummy")]
 impl SwarmCallback for NoopCallback {}
 
+/// Deliver every queued controlled event; see [`deliver_until`].
 #[cfg(feature = "dummy")]
 async fn drain_controlled_dummy_events() {
-    while dummy_controlled::pending() > 0 {
-        assert!(dummy_controlled::deliver(0).await);
-        tokio::task::yield_now().await;
-    }
+    deliver_until("controlled queue drained", || {
+        Ok(dummy_controlled::pending() == 0)
+    })
+    .await
+    .expect("the controlled queue drains within the step bound");
 }
 
 #[cfg(feature = "dummy")]
@@ -176,24 +182,40 @@ async fn test_handle_dht_notify_remote_action_sends_predecessor_to_target() -> R
 }
 
 /// Upper bound on scheduler steps [`deliver_until`] takes before it declares the
-/// awaited state unreachable. A step is one FIFO delivery or one cooperative
-/// yield, so the bound counts events, never wall-clock time.
+/// awaited state unreachable. A step is one observation, at most one FIFO delivery,
+/// and one cooperative yield, so the bound counts events, never wall-clock time.
 #[cfg(feature = "dummy")]
 const CONTROLLED_STEP_BOUND: usize = 4_096;
 
-/// Whether `node` holds a `Connected` transport connection to `peer`.
+/// Cooperative yields with an empty controlled queue after which [`deliver_to_quiescence`]
+/// treats the run as quiescent: every task spawned by a delivered handler has had that many
+/// turns of the current-thread scheduler to enqueue a follow-up event, and none did.
 #[cfg(feature = "dummy")]
-fn is_connected(node: &Node, peer: Did) -> bool {
-    node.swarm
-        .transport
-        .get_connection(peer)
-        .is_some_and(|conn| conn.webrtc_connection_state() == WebrtcConnectionState::Connected)
+const QUIESCENCE_YIELDS: usize = 64;
+
+/// Seed of the dummy connection identifiers in [`test_handle_connect_node`].
+#[cfg(feature = "dummy")]
+const CONNECT_NODE_DUMMY_SEED: u64 = 850;
+
+/// Three fixed identities ordered by address, so the ring gaps, and with them every finger
+/// lookup the joins emit, are the same on every run.
+#[cfg(feature = "dummy")]
+fn connect_node_test_keys() -> Result<[SecretKey; 3]> {
+    let mut keys = [
+        SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0")?,
+        SecretKey::try_from("1f9275dbafdfba81942eb3330b07f38cbee4ebb86bdc2174af9648d5f5509a54")?,
+        SecretKey::try_from("27b2fe8ceaf3a6a720f12658301351960b128672e9da4d6f4dead366af3fd834")?,
+    ];
+    keys.sort_by_key(|key| key.address());
+    Ok(keys)
 }
 
 /// Drive the controlled dummy queue in FIFO order until `reached` holds.
 ///
 /// Each step first observes `reached`, then delivers the oldest queued event (if
-/// any) and yields once so that tasks spawned by the delivered handler run.
+/// any) and yields once so that tasks spawned by the delivered handler run. A
+/// delivery whose target connection was already retired returns `false`; that is
+/// a legal protocol outcome, and the event is consumed all the same.
 ///
 /// Pre: controlled delivery is enabled on this thread.
 /// Post: returns only after `reached` was observed true. Failing to reach it
@@ -206,58 +228,106 @@ async fn deliver_until(label: &str, mut reached: impl FnMut() -> Result<bool>) -
             return Ok(());
         }
         if dummy_controlled::pending() > 0 {
-            assert!(
-                dummy_controlled::deliver(0).await,
-                "controlled event targets a live connection"
-            );
+            dummy_controlled::deliver(0).await;
         }
         tokio::task::yield_now().await;
     }
     panic!("{label} not reached within {CONTROLLED_STEP_BOUND} controlled steps");
 }
 
+/// Deliver until the controlled run is quiescent.
+///
+/// ```text
+/// quiescent ≡ pending() = 0 after QUIESCENCE_YIELDS yields that follow an empty queue
+/// ```
+///
+/// On the current-thread runtime, a task spawned by a delivered handler runs only when the
+/// test yields. An empty queue that stays empty across the yields therefore means that no
+/// delivered handler left work that emits another event.
+#[cfg(feature = "dummy")]
+async fn deliver_to_quiescence() -> Result<()> {
+    for _ in 0..CONTROLLED_STEP_BOUND {
+        deliver_until("controlled queue drained", || {
+            Ok(dummy_controlled::pending() == 0)
+        })
+        .await?;
+        for _ in 0..QUIESCENCE_YIELDS {
+            tokio::task::yield_now().await;
+        }
+        if dummy_controlled::pending() == 0 {
+            return Ok(());
+        }
+    }
+    panic!("controlled run not quiescent within {CONTROLLED_STEP_BOUND} drains");
+}
+
+/// Hop signers of the messages `node` received from `origin` that satisfy `matches`: for each
+/// such message, the signer of the hop that delivered it.
+#[cfg(feature = "dummy")]
+async fn received_hops(node: &Node, origin: Did, matches: fn(&Message) -> bool) -> Vec<Did> {
+    let mut hops = Vec::new();
+    while let Some(payload) = node.try_listen_once().await {
+        let is_match = payload
+            .transaction
+            .data::<Message>()
+            .is_ok_and(|message| matches(&message));
+        if is_match && payload.transaction.signer() == origin {
+            hops.push(payload.signer());
+        }
+    }
+    hops
+}
+
 /// Reachability of a connection signalled through the DHT.
 ///
 /// Let `d(n1) < d(n2) < d(n3)`, `C(a, b)` mean that `a` holds a `Connected`
 /// connection to `b`, and `S(a)` be the successor list of `a`. Let `σ` be the
-/// FIFO schedule of the controlled dummy queue. `σ` is deterministic, so the run
-/// does not depend on wall-clock time or on suite load.
+/// FIFO schedule of the controlled dummy queue. The identities are fixed and the
+/// dummy identifiers are seeded, so `σ` is the same on every run: the run does
+/// not depend on wall-clock time or on suite load, and a failure replays.
 ///
 /// ```text
 /// E₀ = { n3–n2, n1–n2 }                              (out-of-band bootstrap)
 /// P₀ ≡ C(n1,n2) ∧ C(n2,n3) ∧ n2 ∈ S(n1) ∧ n3 ∈ S(n2) ∧ n2 ∈ S(n3)
 /// P₁ ≡ C(n1,n3) ∧ C(n3,n1)
 ///      ∧ S(n1) = [n2, n3] ∧ S(n2) = [n3, n1] ∧ S(n3) = [n1, n2]
+/// W  ≡ n3 received ConnectNodeSend from n1 via n2
+///      ∧ n1 received ConnectNodeReport from n3 via n2
 ///
 /// (1)  E₀ ⊢_σ ◇P₀,  and in the first state with P₀, n1 has no link to n3
 /// (2)  P₀ ; connect(n1, n3) ⊢_σ ◇P₁
+/// (3)  P₁ ∧ quiescent ⟹ □P₁      (no event is queued and no task is left to queue one)
+/// (4)  W                           (the link in P₁ came from n1's relayed connect)
 /// ```
 ///
-/// In (2), n2 is n1's only neighbour when `connect` runs. So `ConnectNodeSend`
-/// must travel `n1 → n2 → n3` and `ConnectNodeReport` must travel
-/// `n3 → n2 → n1`: `C(n1, n3)` can only come from n2's signalling. The claim is
-/// liveness along one fair schedule, not along every interleaving. The
-/// all-orders question belongs to `test_dht_schedule` and the Stateright model.
+/// In (2), n2 is n1's only neighbour when `connect` runs, so its `ConnectNodeSend`
+/// can reach n3 only through n2. (4) makes that observable instead of inferring it
+/// from `C(n1, n3)`, which a connect started by n3 could also produce. (3) is
+/// checked by driving to quiescence and re-asserting `P₁`. The claim is liveness
+/// along one fair schedule, not along every interleaving; the all-orders question
+/// belongs to `test_dht_schedule` and the Stateright model.
 ///
-/// The real-WebRTC form of this flow (ICE, DTLS and SCTP over the relayed SDP)
-/// is covered by `message::handlers::connection::tests::test_triple_nodes_*`.
-/// Those tests run in the default build and wait on quiescence, not on a
-/// deadline.
+/// No real-WebRTC form of this relayed connect is kept here:
+/// `message::handlers::connection::tests::test_triple_nodes_*` issue the relayed
+/// `connect` only when the join has not already linked n1 and n3, and they wait on
+/// wall-clock helpers. A dedicated real-transport smoke test is tracked in #882.
 #[cfg(feature = "dummy")]
 #[tokio::test]
 async fn test_handle_connect_node() -> Result<()> {
-    let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys::<3>();
+    let [key1, key2, key3] = connect_node_test_keys()?;
     let node1 = prepare_node(key1).await;
     let node2 = prepare_node(key2).await;
     let node3 = prepare_node(key3).await;
     let _controlled = ControlledDeliveryGuard::new();
+    dummy_controlled::set_seed(CONNECT_NODE_DUMMY_SEED);
+    let connected = WebrtcConnectionState::Connected;
 
     manually_establish_connection(&node3.swarm, &node2.swarm).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
 
     deliver_until("P0: n1-n2-n3 path joined", || {
-        Ok(is_connected(&node1, node2.did())
-            && is_connected(&node2, node3.did())
+        Ok(has_connection_in_state(&node1, node2.did(), connected)
+            && has_connection_in_state(&node2, node3.did(), connected)
             && node1.dht().successors().contains(&node2.did())?
             && node2.dht().successors().contains(&node3.did())?
             && node3.dht().successors().contains(&node2.did())?)
@@ -270,14 +340,32 @@ async fn test_handle_connect_node() -> Result<()> {
 
     node1.swarm.connect(node3.did()).await?;
 
-    deliver_until("P1: n1-n3 connected via n2, successors converged", || {
-        Ok(is_connected(&node1, node3.did())
-            && is_connected(&node3, node1.did())
+    let p1 = || {
+        Ok(has_connection_in_state(&node1, node3.did(), connected)
+            && has_connection_in_state(&node3, node1.did(), connected)
             && node1.dht().successors().list()? == vec![node2.did(), node3.did()]
             && node2.dht().successors().list()? == vec![node3.did(), node1.did()]
             && node3.dht().successors().list()? == vec![node1.did(), node2.did()])
-    })
-    .await
+    };
+    deliver_until("P1: n1-n3 connected via n2, successors converged", p1).await?;
+    deliver_to_quiescence().await?;
+    assert!(p1()?, "P1 is stable once the controlled run is quiescent");
+
+    let is_send = |message: &Message| matches!(message, Message::ConnectNodeSend(_));
+    let is_report = |message: &Message| matches!(message, Message::ConnectNodeReport(_));
+    assert!(
+        received_hops(&node3, node1.did(), is_send)
+            .await
+            .contains(&node2.did()),
+        "n3 received n1's ConnectNodeSend relayed by n2"
+    );
+    assert!(
+        received_hops(&node1, node3.did(), is_report)
+            .await
+            .contains(&node2.did()),
+        "n1 received n3's ConnectNodeReport relayed by n2"
+    );
+    Ok(())
 }
 
 #[tokio::test]
