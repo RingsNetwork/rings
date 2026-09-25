@@ -199,21 +199,41 @@ $\Int$ symbols are one-shot.
 
 \begin{defD}{D2$'$}{session symbol}
 A $\WF$ session symbol (\code{tcp}, \code{https}) is a stream symbol:
-$\Args_f\ni(\sid,\mathit{target})$ with a session id
-$\sid\in\{0,1\}^{128}$ drawn by $\cl$ per session, and
-$\In_f=\Out_f=\mathrm{Frame}$,
+$\Args_f\ni(\sid,d)$ with a session id
+$\sid\in\{0,1\}^{128}$ drawn by $\cl$ per session and the target digest
+$d=\mathrm{SHA\text{-}256}(t)$, so $\bar a=\sid\|d$ fills $48$ of the
+$A=64$ bytes whatever $|t|$; and $\In_f=\Out_f=\mathrm{Frame}$,
 \begin{gather*}
-\enc(\mathrm{data}(w))=\mathtt{00}\,\|\,w,\qquad
-\enc(\mathrm{fin})=\mathtt{01},\\
+\enc(\mathrm{data}(n,\phi,w))=\mathtt{00}\,\|\,n\,\|\,\phi\,\|\,w,\\
+\enc(\mathrm{fin}(n))=\mathtt{01}\,\|\,n,\\
 \enc(\mathrm{credit}(\upsilon_1..\upsilon_k))=\mathtt{02}\,\|\,\upsilon_1\|\cdots\|\upsilon_k,
 \end{gather*}
-with $|w|\le C_0-2$ (L3) and $\upsilon_j$ SURBs of $\sid$ (D8).  $h$ opens $\sid$ at its first forward loop,
-binding it to $\mathit{target}$, and rejects a later loop of $\sid$ with
-another target.  $\mathrm{data}(\epsilon)$ is a credit-only loop.
+with $n$ a $32$-bit per-direction sequence, $\phi$ a flags byte,
+$|w|\le C_0-6$ (L3), and $\upsilon_j$ SURBs of $\sid$ (D8).
+\begin{itemize}
+\item \emph{Opening.}  Flag $T$ (bit~$0$ of $\phi$) marks
+  $w=|t|\,\|\,t\,\|\,w'$ with $|t|$ a $16$-bit length; the other bits are
+  reserved for message-oriented symbols and are $0$ (fail closed).  $\cl$
+  sets $T$ on every forward $\mathrm{data}$ loop of $\sid$ until the first
+  reply of $\sid$; $h$ opens $\sid$ at the first $T$-loop with
+  $\mathrm{SHA\text{-}256}(t)=d$ and rejects a mismatch, or a later loop of
+  $\sid$ with another $d$.  No frame is dedicated to opening, so the loss
+  or reordering of any single loop does not prevent it.
+\item \emph{Open result.}  For \code{tcp}, $h$'s first reply after a
+  successful connect is $\mathrm{data}(0,0,\epsilon)$; a $\mathrm{fin}$
+  before any $\mathrm{data}$ means failure.  Reasons never leave $h$.
+\item \emph{Order.}  $n$ starts at $0$ per direction and grows by one per
+  $\mathrm{data}$ or $\mathrm{fin}$; $\mathrm{credit}$ is unsequenced.  It
+  lies inside the carry, so no relay sees it.  A receiver reorders within
+  $Q_{\max}$ frames; a gap persisting past that window, or for $V$ after a
+  later frame, fails $\sid$ closed.  There is no retransmission, so a lost
+  loop never removes stream bytes silently.
+\end{itemize}
+$\mathrm{data}(n,0,\epsilon)$ is a credit-only loop.
 $\mathrm{fin}$ closes one direction; $h$ drops $\sid$ once both directions
 are closed, or once no forward loop of $\sid$ has arrived for $V$.
-For \code{https} the frames carry the HTTPS request/response encoding;
-TLS tunnels use \code{tcp}.
+For \code{https} the frames carry the HTTPS request/response encoding
+(fetch only); every TLS tunnel uses \code{tcp}.
 \end{defD}
 
 \begin{defD}{D3}{application}
@@ -428,6 +448,11 @@ exists that could disagree with it.  Consequences of $F=0$:
   $2^{-128}$;
 \item every received cell is charged $u(b)$ on receipt, before $\alpha$
   decoding and the ECDH (L9);
+\item cover therefore spends the receiver's budget, so a sender emits on
+  each active link at the constant rate $r=\rho B/V$ units\,s$^{-1}$,
+  $\rho<1$, sending a queued real cell in each slot if one exists and a
+  cover cell otherwise: no $V$-window carries more than $\rho B<B$ units,
+  and an honest sender is never refused;
 \item $\gamma$ is checked before any insertion into $R_i$ and before
   admission (Algorithm~\ref{alg:hop}).
 \end{itemize}
@@ -510,7 +535,7 @@ that block; $\gamma_{i+1}$ is then a $\MAC$ under an unseen key.
 The carry slot has width $C=C_b$ on every edge of a loop of class $b$.
 With $C_0=C-\tau$, for fixed-width symbols the client picks the least
 $b$ with $|\enc(v_0)|<C_0$ and $W(f_k)<C_0$ for all $k$; for a stream
-symbol, whose frames carry up to $C_0-2$ bytes, $b$ is the client's choice
+symbol, whose frames carry up to $C_0-6$ bytes, $b$ is the client's choice
 between throughput and leakage (Table~\ref{tab:leak}).  For a fixed-width
 symbol $W$ factors through the output type ($W(f)=w(\Out_f)$, so the
 width a consumer unpads is fixed by its own $\In$); a stream symbol
@@ -617,7 +642,7 @@ fixed key: L9 is load-bearing for AEZ.
 \Else
   \State $m\gets\Dec{\tau}{k^{\mathrm{in}}}(y)$;\ \textbf{if} $m=\bot$
     \textbf{then} drop \Comment{L8}
-  \If{$f$ is a session symbol, $\bar a=(\sid,\mathit{target})$}
+  \If{$f$ is a session symbol, $\bar a=(\sid,d)$}
     \State $Q_{h,\sid}\gets Q_{h,\sid}\cup\{(\nxt,\chi',\sigma^{\mathrm{out}},x)\}$
       \Comment{D8}
     \State apply $\enc^{-1}\pad^{-1}(m)$ to session $\sid$: data, fin, or
@@ -648,7 +673,7 @@ session $\sid$ of $h$}
 \State $\upsilon=(\nxt,\chi,\sigma,x)\gets$ the element of least $x$
 \State $Q_{h,\sid}\gets Q_{h,\sid}\setminus\{\upsilon\}$
   \Comment{single use}
-\State $w\gets\mathrm{data}(\le C_0-2$ world bytes$)$, or $\mathrm{fin}$ at EOF
+\State $w\gets\mathrm{data}(n,0,\le C_0-6$ world bytes$)$, or $\mathrm{fin}(n)$ at EOF
 \State $y'\gets\Enc{0}{k_1}\circ\cdots\circ\Enc{0}{k_s}\circ
   \Enc{\tau}{k_c}(\pad\,\enc(w))$, keys from $\sigma$ (D7)
 \State release $(\chi,y')$ to $\nxt$
@@ -675,6 +700,25 @@ in its own tag: a forward loop's suffix in that loop's tag, a batched SURB
 $t_\cl$ is uniform and seen only by $g$ (in $\lambda_H$, then on the edge
 $g\to\cl$) and by $\cl$, so it links nothing the guard cannot already link
 by timing.
+
+\begin{proposition}[Reply authentication]\label{prop:replyauth}
+A reply carries no signature of $h$.  A reply accepted by $\cl$ under
+$k_{c_n}=\KDF_{48}(\KDF_{32}(\sigma_n,c))$ was produced by $\cl$ or by the
+process that peeled $\lambda_h$, except with the forgery probability of
+$\Enc{\tau}{}$; and no third party can verify it.
+\end{proposition}
+\begin{proof}
+$\sigma_n$ is drawn by $\cl$ and placed only as $\sigma^{\mathrm{out}}_{p_n}$
+in $\lambda_h$, which only $h$'s session key opens (D6, D7); a relay
+$r_{n,j}$ holds $\sigma_{n,j}=\KDF_{32}(\sigma_n,j)$, from which
+$\sigma_{n,c}$ is not computable, so it cannot derive $k_{c_n}$.  The
+authenticator is symmetric, so $\cl$ can compute any accepted reply
+itself.
+\end{proof}
+
+Replies are thus deniable by design: $\cl$ learns that $h$ answered but
+holds no transferable proof of what $h$ returned, which protects exit
+operators; exit accountability for returned content is out of scope.
 
 \section{Reply Blocks}\label{sec:surb}
 
@@ -1112,14 +1156,14 @@ take a fresh token of epoch $e_m$ and pass $\nu\notin R_i[x]$.
 \begin{proposition}[Throughput]\label{prop:rate}
 A single client alone on its links downloads on a class-$b$ loop at most
 \[
-\min\Bigl(\frac{B}{V},\ (k+1)\,\rho_{\mathrm{f}}\Bigr)\,(C_0-2)
+\min\Bigl(\frac{\rho B}{V},\ (k+1)\,\rho_{\mathrm{f}}\Bigr)\,(C_0-6)
 \]
-bytes\,s$^{-1}$, $\rho_{\mathrm{f}}$ its forward-cell rate.  At
-$b=16$\,KiB,
+bytes\,s$^{-1}$, $\rho_{\mathrm{f}}$ its forward-cell rate and $\rho B/V$
+the constant emission rate of a link (D6).  At $b=16$\,KiB and $\rho=0.9$,
 \[
-\tfrac{B}{V}(C_0-2)=\tfrac{16384\cdot13447}{150}\approx1.47\,\mathrm{MB/s},
+\tfrac{\rho B}{V}(C_0-6)=\tfrac{0.9\cdot16384\cdot13443}{150}\approx1.32\,\mathrm{MB/s},
 \]
-$\ge1$\,MB/s with $\approx47\%$ headroom, reached with $\rho_{\mathrm{f}}\ge109/(k+1)$; a
+$\ge1$\,MB/s with $\approx32\%$ headroom, reached with $\rho_{\mathrm{f}}\ge98/(k+1)$; a
 larger class $b$ admits $16\,\mathrm{KiB}/b$ as many cells, and the bound
 rises towards $B\cdot16\,\mathrm{KiB}/V\approx1.79$\,MB/s as the header's
 share falls.
@@ -1128,9 +1172,10 @@ share falls.
 Every reply cell passes $s$ relays of segment $n$, each admitting at most
 $B/V$ cells from its predecessor (iii), and consumes one SURB, of which
 each forward cell supplies $k+1$ (Prop.~\ref{prop:batch}); a reply frame
-carries at most $C_0-2$ data bytes (D2$'$).  The forward credit cells pass
-$g$, segment~$0$ and $h$ under the same per-sender bound, at the required
-$109/(k+1)\approx22$ cells\,s$^{-1}$, far below it.  $Q_{\max}$
+carries at most $C_0-6$ data bytes (D2$'$), and each link emits at most
+$\rho B/V$ units\,s$^{-1}$, real cells substituting for cover (D6).  The
+forward credit cells pass $g$, segment~$0$ and $h$ under the same bound, at
+the required $98/(k+1)\approx20$ cells\,s$^{-1}$, far below it.  $Q_{\max}$
 does not bind while the loop's round trip is below $Q_{\max}V/B\approx2.3$\,s.
 \end{proof}
 
@@ -1166,6 +1211,8 @@ session reply timing & follows the world, not $L(f)$ (L4); a session hop may hol
 expiry $x$ & shared by all hops of a loop and all loops sealed in one $Q=30$\,s quantum: colluders link positions only within that set \\
 $x$ locates departure within $Q$ & $\arr_i$ then reveals the client-to-hop delay $D_i$ to within $Q$: position advantage $|D_i-D'_{i'}|/Q$ (L5$'$) \\
 session id $\sid$ & seen only by $h$, sealed in $\lambda_h$; links the loops of one session, which $h$ links by target anyway (D2$'$) \\
+deniable replies & no signature of $h$; $\cl$ holds no transferable proof of what $h$ returned; exit accountability out of scope (Prop.~\ref{prop:replyauth}) \\
+link activity & constant rate $\rho B/V$ while a link is active hides volume, not on/off activity; an idle cover floor is open \\
 $p_k$ holds $\sigma_k$ & $p_k$ colluding with $r_{k,j}$ links two positions of one segment; no value leaks, and timing links them anyway \\
 client-authored semantics ($\bar a_{i+1}$ depends on meaning of $v_i$) & out of protocol scope \\
 \bottomrule
@@ -1266,6 +1313,8 @@ lost \code{Retired} event pins slots & $\mathrm{reconcile}_i$ on callback replac
 epoch reuse ($A\to B\to A$) & $e'$ uniform on $\{0,1\}^{128}$ (L9, Prop.~\ref{prop:replay}) \\
 stale snapshot & linearised with the events (L9) \\
 reply amplification & $r(t)\le u(t)$ per session (Inv.~\ref{inv:credit}) \\
+cover overspending the budget & constant emission $\rho B/V<B/V$ per link, real cells substituting for cover (D6) \\
+silent stream loss & per-direction sequence; a gap fails the session closed (D2$'$) \\
 large-class cell flood & budgets in 16\,KiB units: $\le1.79$\,MB/s of cells per neighbour (L9) \\
 SURB-pool exhaustion & $|Q_{h,\sid}|\le Q_{\max}$, all pools under $\quota(h,f,\epsilon)$ (D8) \\
 symbol abuse & $\quota(n,f,\omega)$ per (node, shape, backend) (D2) \\
@@ -1294,7 +1343,7 @@ D4a & $\Out\ne\In$, $\WF$ before the last symbol, empty pipeline: rejected at co
 L4 & release at $\arr+L(f)$ and drop on overrun under an injected clock \\
 L5 & property test on the pure builder: vary $\bar a_j$, $j\ne i$, and $v_k\ne\vh i$; $\view_i$ bytes, lengths, and release times equal \\
 L5$'$ & builder for $H\ne H'\le\Hm$: equal layer and cell lengths at every position; every $\gamma_i$ verifies (Prop.~\ref{prop:header}); $x$ is a function of the build quantum only \\
-L3, D6 & one class $b$ and slot width $C_b$ on every edge of a loop, SURB replies included; stream frames of at most $C_0-2$ data bytes; output $>W(f)$ dropped \\
+L3, D6 & one class $b$ and slot width $C_b$ on every edge of a loop, SURB replies included; stream frames of at most $C_0-6$ data bytes; output $>W(f)$ dropped \\
 client & reply accepted once by tag $t_\cl$; unknown, reused, or expired tag dropped; $T$ empty after every $x$ passes \\
 D5, L7 & $H=(s+1)n+s$; guard at $1$ and $H$ only; $n>4$ rejected; selection fails closed below $H-1$ eligible DIDs \\
 draw order & exact-enumeration test pins exit and guard marginals (Prop.~\ref{prop:draw}); no draw fails after the first succeeds \\
@@ -1305,6 +1354,9 @@ D6 & a uniform (cover) cell is rejected at $\alpha$ decoding or at $\gamma$, is 
 D1$'$, D2 & unknown shape rejected at configuration, descriptor decode, route construction; a backend name only under $\mathsf{invoke}$, canonical, $\le32$ bytes over $[\mathtt{a\text{-}z0\text{-}9.\_\text{-}}]$, validated against signed descriptors; $\sigma$ carries no $\omega$ \\
 credit & a \code{tcp} session emits no reply without a SURB of its own $\sid$, removes each SURB before release, drops expired SURBs, and resumes after new credit; two sessions at one $h$ never share a SURB; $\mathrm{fin}$ both ways drops $\sid$; a credit frame adds $k$ SURBs; credit beyond $Q_{\max}$ is dropped \\
 rate & loopback single-client \code{tcp} download $\ge1$\,MB/s at $b=16$\,KiB, upload $\approx1/(k+1)$ of download \\
+emission & no $V$-window of a link exceeds $\rho B$ units; constant rate while active, real cells FIFO; an honest sender at full load is never refused \\
+frames & $T$ set until the first reply; open only on a matching digest; open ack $\mathrm{data}(0,0,\epsilon)$, $\mathrm{fin}$ first means failure; reorder within $Q_{\max}$; a persisting gap fails closed; reserved $\phi$ bits rejected \\
+reply auth & no exit signature on the wire; a one-bit flip of a reply fails $\Enc{\tau}{k_{c_n}}$ \\
 replay store & no replayed layer admitted across filter rotation; a filter grows by blocks and is dropped exactly when its $x$ passes; memory tracks admitted tags; measured false-positive rate within $2^{-20}$ \\
 seeds & derived keys match the KDF definition; a weak derived key forces a re-draw \\
 AEZ & $2941$ vectors from the AEZ v5 reference C code (length sweep, parameter grid, CAESAR genkat), bit-flip rejection for $\tau\ge4$, native and \code{wasm32}; weak-key rejection; \code{fuzz/} target for $\Dec{}{}\circ\Enc{}{}=\mathrm{id}$ and panic freedom \\
