@@ -19,6 +19,14 @@
 //! commit is visible to the next snapshot. Read-only views take the same lock
 //! for the same reason.
 //!
+//! A commit that changes the routes (`TopologyState::routes_equal` is false) advances the
+//! topology epoch, the event a data-plane operation deferred on a stale hop waits for:
+//!
+//! ```text
+//! Law (Epoch) : commit(s, s') ∧ ¬RoutesEqual(s, s') ⇒ epoch' = epoch + 1
+//!               commit(s, s') ∧  RoutesEqual(s, s') ⇒ epoch' = epoch
+//! ```
+//!
 //! Successor-list synchronization tokens are the one piece of state kept
 //! beside the model rather than inside it. A token is valid only while its
 //! reporter is a successor, so the transition core prunes the tokens of
@@ -61,6 +69,7 @@ use crate::dht::FingerFixRequest;
 use crate::dht::FingerTable;
 use crate::error::Error;
 use crate::error::Result;
+use crate::lifecycle::epoch::Epoch;
 use crate::storage::KvStorageInterface;
 use crate::storage::MemStorage;
 use crate::utils::new_uuid;
@@ -117,6 +126,8 @@ pub struct PeerRing {
     pub(super) storage_transition: FuturesMutex<()>,
     /// Serializes every read-modify-write of a fetch-cache slot (see `chord::storage`).
     pub(super) cache_transition: FuturesMutex<()>,
+    /// Count of committed transitions that changed the routes (`Law (Epoch)`).
+    topology_epoch: Epoch,
 }
 
 /// Construction.
@@ -172,6 +183,7 @@ impl PeerRing {
             finger_jitter_entropy: OnceLock::new(),
             storage_transition: FuturesMutex::new(()),
             cache_transition: FuturesMutex::new(()),
+            topology_epoch: Epoch::default(),
             did,
         }
     }
@@ -194,6 +206,12 @@ impl PeerRing {
     /// Storage virtual-node configuration used by the DHT storage layer.
     pub(in crate::dht) const fn storage_virtual_node_config(&self) -> VirtualNodeConfig {
         self.storage_virtual_node_config
+    }
+
+    /// The epoch of committed route changes (`Law (Epoch)` in the module documentation): a
+    /// waiter that listens before routing is notified by every later route change.
+    pub(crate) const fn topology_epoch(&self) -> &Epoch {
+        &self.topology_epoch
     }
 
     /// An owned copy of the current topology state.
@@ -342,6 +360,9 @@ impl PeerRing {
         if next.state.successors != current.successors {
             self.lock_pending_successor_sync()?
                 .retain_current(&next.state.successors);
+        }
+        if !next.state.routes_equal(&current) {
+            self.topology_epoch.advance();
         }
         Ok((next, outcome))
     }

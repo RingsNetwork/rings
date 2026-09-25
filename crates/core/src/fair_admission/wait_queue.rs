@@ -6,6 +6,8 @@ use std::task::Context;
 use std::task::Poll;
 use std::task::Waker;
 
+use crate::lifecycle::epoch::Epoch;
+
 #[derive(Default)]
 struct FairWaitBudgetState {
     waiters: usize,
@@ -90,6 +92,9 @@ impl FairWaitQueueState {
 pub(crate) struct FairWaitQueue {
     state: Mutex<FairWaitQueueState>,
     budget: Arc<FairWaitBudget>,
+    /// Advanced whenever a waiter leaves the queue, admitted or cancelled: the event after
+    /// which an unqueued admission may pass again.
+    departures: Epoch,
 }
 
 pub(super) enum FairAdmission<T> {
@@ -102,7 +107,22 @@ impl FairWaitQueue {
         Self {
             state: Mutex::new(FairWaitQueueState::default()),
             budget,
+            departures: Epoch::default(),
         }
+    }
+
+    /// Whether no waiter is queued, so an unqueued admission would be attempted.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .queue
+            .is_empty()
+    }
+
+    /// The epoch of departures from the queue.
+    pub(crate) const fn departures(&self) -> &Epoch {
+        &self.departures
     }
 
     pub(crate) fn wake_front(&self) {
@@ -222,6 +242,7 @@ impl FairWaiter {
         let next = state.arm_front();
         self.active = false;
         drop(state);
+        self.queue.departures.advance();
         if let Some(waker) = next {
             waker.wake();
         }
@@ -246,6 +267,7 @@ impl FairWaiter {
         self.active = false;
         let next = was_front.then(|| state.arm_front()).flatten();
         drop(state);
+        self.queue.departures.advance();
         if let Some(waker) = next {
             waker.wake();
         }

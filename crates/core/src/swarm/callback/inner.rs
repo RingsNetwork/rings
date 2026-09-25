@@ -547,6 +547,14 @@ impl InnerSwarmCallback {
     }
 }
 
+/// The peer a transport callback names by its connection id, or `None` (with a warning naming
+/// `callback`) when the id is not a DID.
+fn callback_peer(cid: &str, callback: &str) -> Option<Did> {
+    Did::from_str(cid)
+        .inspect_err(|_| tracing::warn!("{callback} parse did failed: {cid}"))
+        .ok()
+}
+
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl TransportCallback for InnerSwarmCallback {
@@ -570,8 +578,8 @@ impl TransportCallback for InnerSwarmCallback {
         cid: &str,
         s: WebrtcConnectionState,
     ) -> Result<(), TransportCallbackError> {
-        let Ok(did) = Did::from_str(cid) else {
-            tracing::warn!("on_peer_connection_state_change parse did failed: {}", cid);
+        self.processor.logical.transport.signal_link_transition();
+        let Some(did) = callback_peer(cid, "on_peer_connection_state_change") else {
             return Ok(());
         };
         if self
@@ -668,8 +676,8 @@ impl TransportCallback for InnerSwarmCallback {
     }
 
     async fn on_data_channel_open(&self, cid: &str) -> Result<(), TransportCallbackError> {
-        let Ok(did) = Did::from_str(cid) else {
-            tracing::warn!("on_data_channel_open parse did failed: {}", cid);
+        self.processor.logical.transport.signal_link_transition();
+        let Some(did) = callback_peer(cid, "on_data_channel_open") else {
             return Ok(());
         };
         if self

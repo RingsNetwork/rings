@@ -45,6 +45,9 @@ thread_local! {
     pub(super) static IRREVOCABLE_SEND_GATE: RefCell<Option<Arc<Notify>>> = const { RefCell::new(None) };
     /// Whether a send is parked at the irrevocable publication boundary.
     pub(super) static IRREVOCABLE_SEND_GATE_WAITING: Cell<bool> = const { Cell::new(false) };
+    /// Notified (one stored permit) whenever a send parks at the post-permit or irrevocable
+    /// gate, so a test awaits the event instead of polling the waiting flags.
+    pub(super) static SEND_GATE_ENTERED: Arc<Notify> = Arc::new(Notify::new());
     /// Park sends after this thread has published the configured message count.
     pub(super) static SEND_MESSAGE_PENDING_AFTER_SENT_COUNT: Cell<Option<usize>> = const { Cell::new(None) };
     /// Force the receiver-facing delivery completion future to stay pending.

@@ -59,6 +59,7 @@ use self::state::NEXT_CALLBACK_CID;
 use self::state::NEXT_DELIVERY_GATE;
 use self::state::POST_PERMIT_SEND_GATE;
 use self::state::POST_PERMIT_SEND_GATE_WAITING;
+use self::state::SEND_GATE_ENTERED;
 use self::state::SEND_MESSAGE_GATE;
 use self::state::SEND_MESSAGE_GATE_WAITING;
 use self::state::SEND_MESSAGE_PENDING;
@@ -121,6 +122,7 @@ pub mod controlled {
     use super::NEXT_DELIVERY_GATE;
     use super::POST_PERMIT_SEND_GATE;
     use super::POST_PERMIT_SEND_GATE_WAITING;
+    use super::SEND_GATE_ENTERED;
     use super::SEND_MESSAGE_GATE;
     use super::SEND_MESSAGE_GATE_WAITING;
     use super::SEND_MESSAGE_PENDING;
@@ -357,6 +359,12 @@ pub mod controlled {
     /// Return whether a background dummy send is waiting past its irrevocable boundary.
     pub fn irrevocable_send_gate_waiting() -> bool {
         IRREVOCABLE_SEND_GATE_WAITING.with(|waiting| waiting.get())
+    }
+
+    /// The notification this thread's sends raise when they park at the post-permit or the
+    /// irrevocable gate; `notified()` resolves once per parked send, even if it parked first.
+    pub fn send_gate_entered() -> Arc<tokio::sync::Notify> {
+        SEND_GATE_ENTERED.with(Arc::clone)
     }
 
     /// Test hook: force `send_message` to stay pending once this thread has already dispatched
@@ -811,6 +819,7 @@ impl ConnectionInterface for DummyConnection {
         let post_permit_gate = POST_PERMIT_SEND_GATE.with(|gate| gate.borrow().clone());
         if let Some(post_permit_gate) = post_permit_gate {
             POST_PERMIT_SEND_GATE_WAITING.with(|waiting| waiting.set(true));
+            SEND_GATE_ENTERED.with(|entered| entered.notify_one());
             post_permit_gate.notified().await;
             POST_PERMIT_SEND_GATE_WAITING.with(|waiting| waiting.set(false));
         }
@@ -838,6 +847,7 @@ impl ConnectionInterface for DummyConnection {
             let (result_sender, result_receiver) = oneshot::channel();
             tokio::spawn(async move {
                 IRREVOCABLE_SEND_GATE_WAITING.with(|waiting| waiting.set(true));
+                SEND_GATE_ENTERED.with(|entered| entered.notify_one());
                 irrevocable_gate.notified().await;
                 IRREVOCABLE_SEND_GATE_WAITING.with(|waiting| waiting.set(false));
                 let result =

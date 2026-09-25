@@ -24,6 +24,7 @@ use crate::dht::StorageKey;
 use crate::error::Result;
 use crate::message::handlers::storage::operate_entry;
 use crate::swarm::callback::LocalDelivery;
+use crate::swarm::transport::Attempts;
 use crate::swarm::transport::SwarmTransport;
 use crate::utils::get_epoch_ms;
 
@@ -38,9 +39,11 @@ impl SwarmInboxDelivery {
         Self { transport }
     }
 
-    /// Tombstone `removal` at the carrier's owner.
+    /// Tombstone `removal` at the carrier's owner, in one attempt (`Attempts::Single`): a
+    /// refusal before acceptance is `SingleAttemptRefused`, and the removal had no effect.
     async fn retire(&self, removal: Entry) -> Result<()> {
-        operate_entry(self.transport.clone(), EntryOperation::Tombstone(removal)).await
+        let removal = EntryOperation::Tombstone(removal);
+        operate_entry(self.transport.clone(), removal, Attempts::Single).await
     }
 }
 
@@ -50,6 +53,12 @@ impl InboxDelivery for SwarmInboxDelivery {
     /// Post: every element of the locally stored inbox that passes the witness was offered to
     /// the application and then tombstoned at its owner; every element that fails the witness
     /// was tombstoned unread.
+    ///
+    /// Delivery to the application is at least once. A retirement refused before acceptance
+    /// (`SingleAttemptRefused`, including a detached `Cancelled`, which was `Ok` before #859)
+    /// ends the drain with that error: the element stays at its owner and is offered to the
+    /// application again on the next drain, as after a silent cancellation on develop. No
+    /// element is lost, and none is tombstoned twice.
     async fn deliver_inbox(&self) -> Result<()> {
         let now_ms = get_epoch_ms();
         let key = StorageKey::inbox_of(self.transport.dht.did);

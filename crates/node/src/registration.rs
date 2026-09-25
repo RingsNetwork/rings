@@ -15,9 +15,11 @@ use rings_core::dht::entry;
 use rings_core::dht::Did;
 use rings_core::ecc::VerificationPublicKey;
 use rings_core::lifecycle::StopToken;
+use rings_core::message::ChordStorageInterface;
 use rings_core::message::Encoded;
 use rings_core::message::Encoder;
 use rings_core::message::MessageSigner;
+use rings_core::message::ScopedStorage;
 use rings_core::utils::get_epoch_ms;
 use rings_runtime::MaybeSendSync;
 
@@ -28,6 +30,7 @@ use crate::online::OnlineNodeDescriptor;
 use crate::online::OnlineNodeDescriptorBody;
 use crate::online::OnlineNodeType;
 use crate::online::ONLINE_NODES_TOPIC;
+use crate::processor::stoppable_storage_error;
 use crate::processor::Processor;
 
 const DEFAULT_ONLINE_NODE_HEARTBEAT_INTERVAL_SECS: u64 = 30;
@@ -149,6 +152,35 @@ impl<'a> RegistrationContext<'a> {
         MessageSigner::new(self.delegatee_key(), self.network_id())
     }
 
+    /// The DHT operations of this registration: their rerouting waits end at its stop.
+    fn storage(&self) -> ScopedStorage<'_> {
+        self.processor.swarm.scoped_storage(self.stop.clone())
+    }
+
+    /// Append `data` to `topic`, stopping cooperatively with the registration.
+    pub(crate) async fn append_data(&self, topic: &str, data: Encoded) -> Result<()> {
+        self.storage()
+            .storage_append_data(topic, data)
+            .await
+            .map_err(stoppable_storage_error)
+    }
+
+    /// Tombstone `data` in `topic`, stopping cooperatively with the registration.
+    pub(crate) async fn tombstone_data(&self, topic: &str, data: Encoded) -> Result<()> {
+        self.storage()
+            .storage_tombstone_data(topic, data)
+            .await
+            .map_err(stoppable_storage_error)
+    }
+
+    /// Compact `removals` out of `topic`, stopping cooperatively with the registration.
+    pub(crate) async fn compact_data(&self, topic: &str, removals: Vec<Encoded>) -> Result<()> {
+        self.storage()
+            .storage_compact_data(topic, removals)
+            .await
+            .map_err(stoppable_storage_error)
+    }
+
     pub(crate) async fn fetch_storage_entry(&self, entry_key: Did) -> Result<Option<entry::Entry>> {
         self.processor
             .fetch_storage_entry_with_stop(entry_key, &self.stop)
@@ -201,16 +233,12 @@ impl DhtRegistrationPublisher {
 
         for value in &current_values {
             context.ensure_running()?;
-            context
-                .processor
-                .storage_append_data(&self.topic, value.clone())
-                .await?;
+            context.append_data(&self.topic, value.clone()).await?;
         }
         for stale_value in stale_values {
             context.ensure_running()?;
             context
-                .processor
-                .storage_tombstone_data(&self.topic, stale_value.clone())
+                .tombstone_data(&self.topic, stale_value.clone())
                 .await?;
             self.published_values
                 .lock()
@@ -230,6 +258,9 @@ impl DhtRegistrationPublisher {
     /// snapshot. Compaction is requested with only the removable payloads, so the
     /// storage owner computes the final live set from its current local entry and
     /// preserves concurrent live writes.
+    ///
+    /// Each append, tombstone and compaction is rerouted as `Processor::storage_fetch`
+    /// documents, and its rerouting wait ends at the registration's stop.
     pub(crate) async fn publish_many_replacing_and_compacting(
         &self,
         context: &RegistrationContext<'_>,
@@ -268,16 +299,12 @@ impl DhtRegistrationPublisher {
 
         for value in &current_values {
             context.ensure_running()?;
-            context
-                .processor
-                .storage_append_data(&self.topic, value.clone())
-                .await?;
+            context.append_data(&self.topic, value.clone()).await?;
         }
         for stale_value in stale_values {
             context.ensure_running()?;
             context
-                .processor
-                .storage_tombstone_data(&self.topic, stale_value.clone())
+                .tombstone_data(&self.topic, stale_value.clone())
                 .await?;
             self.published_values
                 .lock()
@@ -286,10 +313,7 @@ impl DhtRegistrationPublisher {
         }
         if should_compact {
             context.ensure_running()?;
-            context
-                .processor
-                .storage_compact_data(&self.topic, removals)
-                .await?;
+            context.compact_data(&self.topic, removals).await?;
         }
         {
             let mut published_values = self.published_values.lock().map_err(|_| Error::Lock)?;

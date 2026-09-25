@@ -4,10 +4,10 @@ use super::super::ChordStorageInterface;
 use super::super::ChordStorageInterfaceCacheChecker;
 #[cfg(feature = "dummy")]
 use super::test_support::install_two_node_chord_view;
-use super::test_support::next_generated_key;
 use super::test_support::next_payload_matching;
 use super::test_support::non_affine_placement;
 use super::test_support::prepare_node_with_storage_redundancy;
+use super::test_support::split_owner_keys;
 use super::test_support::split_redundant_entry;
 use super::test_support::NoopCallback;
 use crate::delegation::DelegateeKey;
@@ -17,7 +17,6 @@ use crate::dht::entry::EntryOperation;
 use crate::dht::entry::PlacedEntryOperation;
 use crate::dht::entry::PlacementMiss;
 use crate::dht::Did;
-use crate::ecc::tests::gen_ordered_keys;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
@@ -142,8 +141,9 @@ async fn test_leave_dht_attempt_requests_repair_only_for_a_referenced_peer() -> 
 #[cfg(feature = "dummy")]
 #[tokio::test]
 async fn test_found_entry_read_repair_backpressure_is_deferred() -> Result<()> {
-    let node1 = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
-    let node2 = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
+    let [key1, key2] = split_owner_keys()?;
+    let node1 = prepare_node_with_storage_redundancy(key1, 2)?;
+    let node2 = prepare_node_with_storage_redundancy(key2, 2)?;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
     install_two_node_chord_view(&node1, &node2)?;
     wait_for_msgs([&node1, &node2]).await;
@@ -250,9 +250,9 @@ async fn test_placed_entry_operation_rejects_non_affine_placement() -> Result<()
 
 #[tokio::test]
 async fn test_remote_redundant_store_writes_split_replica_at_affine_placement() -> Result<()> {
-    let mut keys = gen_ordered_keys::<2>().into_iter();
-    let node1 = prepare_node_with_storage_redundancy(next_generated_key(&mut keys)?, 2)?;
-    let node2 = prepare_node_with_storage_redundancy(next_generated_key(&mut keys)?, 2)?;
+    let [key1, key2] = split_owner_keys()?;
+    let node1 = prepare_node_with_storage_redundancy(key1, 2)?;
+    let node2 = prepare_node_with_storage_redundancy(key2, 2)?;
 
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
     wait_for_msgs([&node1, &node2]).await;

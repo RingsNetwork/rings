@@ -709,14 +709,20 @@ async fn test_peer_capacity_survives_scheduler_generation_replacement() {
 async fn test_dead_peer_capacity_keys_are_pruned() {
     let schedulers = OutboundSchedulers::new(None);
     let first = schedulers
-        .reserve(Did::from(41_u32), TransferClass::Application, 1)
+        .reserve(
+            Did::from(41_u32),
+            TransferDemand::new(TransferClass::Application, 1),
+        )
         .await
         .expect("first peer must reserve capacity");
     assert_eq!(schedulers.capacity_key_count_for_test(), 1);
     drop(first);
 
     let second = schedulers
-        .reserve(Did::from(42_u32), TransferClass::Application, 1)
+        .reserve(
+            Did::from(42_u32),
+            TransferDemand::new(TransferClass::Application, 1),
+        )
         .await
         .expect("second peer must reserve capacity");
     assert_eq!(schedulers.capacity_key_count_for_test(), 1);
@@ -733,7 +739,7 @@ async fn test_peer_state_keeps_idle_capacity_accountant_alive() {
     let peer = Did::from(43_u32);
     let handle = schedulers.handle(peer).expect("peer worker must start");
     let permit = schedulers
-        .reserve(peer, TransferClass::Application, 1)
+        .reserve(peer, TransferDemand::new(TransferClass::Application, 1))
         .await
         .expect("peer must reserve capacity");
 
