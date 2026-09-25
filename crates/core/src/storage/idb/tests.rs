@@ -1,4 +1,5 @@
-//! Browser witnesses for stored row shape, atomic touches, errors, and LRU eviction.
+//! Browser witnesses for the access-clock law, stored row shape, atomic touches, errors,
+//! schema migration, and LRU eviction. No test waits on or reads wall-clock time.
 
 use rexie::TransactionMode;
 use serde::de::DeserializeOwned;
@@ -9,8 +10,15 @@ use serde_json::Value as JsonValue;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_test::wasm_bindgen_test;
 
-use crate::storage::idb::next_visit_time_after;
+use crate::storage::idb::clock_store_name;
+use crate::storage::idb::restamp;
+use crate::storage::idb::AccessClock;
+use crate::storage::idb::AccessStamp;
 use crate::storage::idb::IdbStorage;
+use crate::storage::idb::LegacyRow;
+use crate::storage::idb::ACCESS_STAMP_INDEX;
+use crate::storage::idb::CLOCK_LIMIT;
+use crate::storage::idb::SCHEMA_VERSION;
 use crate::storage::KvStorageInterface;
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -52,22 +60,87 @@ async fn get_string(instance: &IdbStorage, key: &str) -> crate::error::Result<Op
     <IdbStorage as KvStorageInterface<String>>::get(instance, key).await
 }
 
-#[wasm_bindgen_test]
-fn test_next_visit_time_uses_wall_clock_when_it_advances() {
-    assert_eq!(next_visit_time_after(10, 15), 15);
+/// Raw stored row `key` as JSON, read outside the adapter's decoding.
+async fn raw_row(instance: &IdbStorage, key: &str) -> JsonValue {
+    let scope = instance.scope(TransactionMode::ReadOnly).unwrap();
+    let row = scope.rows.get(&JsValue::from(key)).await.unwrap();
+    serde_wasm_bindgen::from_value(row).unwrap()
 }
 
-#[wasm_bindgen_test]
-fn test_next_visit_time_advances_when_wall_clock_stalls_or_rewinds() {
-    assert_eq!(next_visit_time_after(10, 10), 11);
-    assert_eq!(next_visit_time_after(10, 5), 11);
+/// Access stamp currently stored on row `key`.
+async fn stamp_of(instance: &IdbStorage, key: &str) -> u64 {
+    raw_row(instance, key).await["access_stamp"]
+        .as_u64()
+        .unwrap()
 }
 
-#[wasm_bindgen_test]
-fn test_next_visit_time_saturates_at_i64_max() {
-    assert_eq!(next_visit_time_after(i64::MAX, i64::MIN), i64::MAX);
+/// Value of the store-wide access clock.
+async fn clock_of(instance: &IdbStorage) -> u64 {
+    let scope = instance.scope(TransactionMode::ReadOnly).unwrap();
+    scope.clock_record().await.unwrap().unwrap().0
 }
 
+/// Law: k ticks from any clock c yield the k stamps c, c + 1, …, c + k − 1 and the clock c + k.
+#[wasm_bindgen_test]
+fn access_clock_ticks_are_consecutive_and_strictly_increasing() {
+    const TICKS: u64 = 1024;
+    for origin in [AccessClock::ORIGIN, AccessClock(CLOCK_LIMIT - TICKS)] {
+        let (stamps, clock) = (0..TICKS).fold((Vec::new(), origin), |(mut stamps, clock), _| {
+            let (stamp, successor) = clock.tick().unwrap();
+            stamps.push(stamp);
+            (stamps, successor)
+        });
+        let expected = (origin.0..origin.0 + TICKS)
+            .map(AccessStamp)
+            .collect::<Vec<_>>();
+        assert_eq!(stamps, expected);
+        assert!(stamps.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(clock, AccessClock(origin.0 + TICKS));
+    }
+}
+
+/// The clock stops at the exact-integer limit instead of repeating or rounding a stamp.
+#[wasm_bindgen_test]
+fn access_clock_refuses_to_leave_the_exact_integer_range() {
+    let (stamp, last) = AccessClock(CLOCK_LIMIT - 1).tick().unwrap();
+    assert_eq!(stamp, AccessStamp(CLOCK_LIMIT - 1));
+    assert_eq!(last, AccessClock(CLOCK_LIMIT));
+    assert!(matches!(
+        last.tick(),
+        Err(crate::error::Error::IdbAccessClockExhausted(CLOCK_LIMIT))
+    ));
+    assert!(AccessClock(u64::MAX).tick().is_err());
+}
+
+/// Legacy rows are stamped 0‥n by (last_visit_time, key); ties and missing times are ordered.
+#[wasm_bindgen_test]
+fn restamp_preserves_and_strictifies_the_legacy_eviction_order() {
+    let legacy = |key: &str, last_visit_time: Option<i64>| LegacyRow {
+        key: key.to_owned(),
+        last_visit_time,
+        data: JsValue::from(key),
+    };
+    let rows = vec![
+        legacy("late", Some(9)),
+        legacy("tie-b", Some(5)),
+        legacy("unstamped", None),
+        legacy("tie-a", Some(5)),
+    ];
+    let (restamped, clock) = restamp(rows).unwrap();
+    let order = restamped
+        .iter()
+        .map(|row| (row.key.as_str(), row.access_stamp.0, row.data.as_string()))
+        .collect::<Vec<_>>();
+    assert_eq!(order, vec![
+        ("unstamped", 0, Some("unstamped".to_owned())),
+        ("tie-a", 1, Some("tie-a".to_owned())),
+        ("tie-b", 2, Some("tie-b".to_owned())),
+        ("late", 3, Some("late".to_owned())),
+    ]);
+    assert_eq!(clock, AccessClock(4));
+}
+
+/// A row is stored as `{key, access_stamp, data}`, and a hit restamps it with the next tick.
 #[wasm_bindgen_test]
 async fn test_create_put_data() {
     let instance = create_db_instance(4).await;
@@ -77,65 +150,91 @@ async fn test_create_put_data() {
         content: "content1".to_string(),
     };
     instance.put(&key, &value).await.unwrap();
+    assert_eq!(instance.count().await.unwrap(), 1);
 
-    let (_tx, store) = instance.transaction(TransactionMode::ReadOnly).unwrap();
-    assert!(store.count(None).await.unwrap() == 1, "indexedDB is empty");
-
-    let real_value_1 = store.get(&JsValue::from(&key)).await.unwrap();
-    let real_value_1: JsonValue = serde_wasm_bindgen::from_value(real_value_1).unwrap();
-    let last_visit_1 = real_value_1
-        .get("last_visit_time")
-        .unwrap()
-        .as_i64()
-        .unwrap();
-
-    assert!(real_value_1.get("visit_count").is_none());
-    assert!(real_value_1.get("created_time").is_none());
-    assert!(store.index("visit_count").is_err());
-    let real_value_data_1: TestDataStruct =
-        serde_json::from_value(real_value_1.get("data").unwrap().to_owned()).unwrap();
-    assert!(
-        real_value_data_1.content.eq(&value.content),
-        "Data content in store not same: expect {}, got {}",
-        value.content,
-        real_value_data_1.content
+    let row = raw_row(&instance, &key).await;
+    assert_eq!(row["key"], key);
+    assert_eq!(row["access_stamp"], 0);
+    assert_eq!(row["data"]["content"], value.content);
+    assert!(row.get("last_visit_time").is_none());
+    assert!(row.get("visit_count").is_none());
+    assert!(row.get("created_time").is_none());
+    let scope = instance.scope(TransactionMode::ReadOnly).unwrap();
+    assert_eq!(
+        scope.rows.index_names(),
+        vec![ACCESS_STAMP_INDEX.to_owned()]
     );
+    drop(scope);
 
-    let r: TestDataStruct = instance.get(&key).await.unwrap().unwrap();
-    tracing::debug!("{:?}", r);
-    assert_eq!(r.content, value.content);
-
-    let (_tx, store) = instance.transaction(TransactionMode::ReadOnly).unwrap();
-    assert!(store.count(None).await.unwrap() == 1, "indexedDB is empty");
-    let real_value_2 = store.get(&JsValue::from(&key)).await.unwrap();
-    let real_value_2: JsonValue = serde_wasm_bindgen::from_value(real_value_2).unwrap();
-    let last_visit_2 = real_value_2
-        .get("last_visit_time")
-        .unwrap()
-        .as_i64()
-        .unwrap();
-
-    assert!(
-        last_visit_1 < last_visit_2,
-        "last_visit_1 and last_visit_2 is same, {last_visit_1}"
-    );
-    assert!(real_value_2.get("visit_count").is_none());
-    assert!(real_value_2.get("created_time").is_none());
-    let real_value_data_2: TestDataStruct =
-        serde_json::from_value(real_value_2.get("data").unwrap().to_owned()).unwrap();
-    assert!(
-        real_value_data_2.content.eq(&value.content),
-        "2. Data content in store not same: expect {}, got {}",
-        value.content,
-        real_value_data_2.content
-    );
+    let read: TestDataStruct = instance.get(&key).await.unwrap().unwrap();
+    assert_eq!(read.content, value.content);
+    assert_eq!(stamp_of(&instance, &key).await, 1);
+    assert_eq!(clock_of(&instance).await, 2);
 
     instance.clear().await.unwrap();
-    let (_tx, store) = instance.transaction(TransactionMode::ReadOnly).unwrap();
-    assert!(
-        store.count(None).await.unwrap() == 0,
-        "indexedDB is not empty"
-    );
+    assert_eq!(instance.count().await.unwrap(), 0);
+}
+
+/// Law, observed through IndexedDB: back-to-back accesses, which share one millisecond on
+/// coarse browser timers, receive consecutive stamps in access order; `clear` keeps the clock.
+#[wasm_bindgen_test]
+async fn accesses_within_one_millisecond_receive_strictly_increasing_stamps() {
+    const KEYS: usize = 32;
+    let instance = create_db_instance(u32::try_from(KEYS).unwrap()).await;
+    let keys = (0..KEYS)
+        .map(|index| format!("k{index}"))
+        .collect::<Vec<_>>();
+    for key in keys.iter() {
+        instance.put(key, key).await.unwrap();
+    }
+    // Touch in reverse order: the last written key becomes the least recent.
+    for key in keys.iter().rev() {
+        assert_eq!(
+            get_string(&instance, key).await.unwrap().as_ref(),
+            Some(key)
+        );
+    }
+    let mut stamps = Vec::with_capacity(KEYS);
+    for key in keys.iter().rev() {
+        stamps.push(stamp_of(&instance, key).await);
+    }
+    let expected = (KEYS as u64..2 * KEYS as u64).collect::<Vec<_>>();
+    assert_eq!(stamps, expected);
+    assert_eq!(clock_of(&instance).await, 2 * KEYS as u64);
+
+    // A miss is not an access; clearing rows does not rewind the clock.
+    assert_eq!(get_string(&instance, "missing").await.unwrap(), None);
+    instance.clear().await.unwrap();
+    instance.put("after-clear", &"x".to_owned()).await.unwrap();
+    assert_eq!(stamp_of(&instance, "after-clear").await, 2 * KEYS as u64);
+}
+
+/// Eviction follows the access order exactly for a burst of operations with no pause.
+#[wasm_bindgen_test]
+async fn burst_eviction_retires_exactly_the_least_recent_rows() {
+    let instance = create_db_instance(8).await;
+    let keys = (0..8).map(|index| format!("k{index}")).collect::<Vec<_>>();
+    for key in keys.iter() {
+        instance.put(key, key).await.unwrap();
+    }
+    // Recency after this loop, oldest first: k7, k6, …, k0.
+    for key in keys.iter().rev() {
+        get_string(&instance, key).await.unwrap();
+    }
+    for index in 0..4 {
+        let key = format!("n{index}");
+        instance.put(&key, &key).await.unwrap();
+    }
+    let mut survivors = <IdbStorage as KvStorageInterface<String>>::get_all(&instance)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect::<Vec<_>>();
+    survivors.sort();
+    assert_eq!(survivors, vec![
+        "k0", "k1", "k2", "k3", "n0", "n1", "n2", "n3"
+    ]);
 }
 
 #[wasm_bindgen_test]
@@ -262,69 +361,121 @@ async fn test_idb_prune() {
     assert_eq!(count, 0, "indexedDB is not empty");
 }
 
-/// Reopening does not upgrade or erase an existing database; touches remove unused fields.
-#[wasm_bindgen_test]
-async fn reopen_existing_database_preserves_data_and_lru() {
-    // Unique scope models the previous schema without opening any application database.
-    let name = format!("rings-idb-old-schema-test-{}", uuid::Uuid::new_v4());
-    // The old schema had one unused index in addition to the eviction index.
-    let old = rexie::Rexie::builder(&name)
-        .add_object_store(
-            rexie::ObjectStore::new(&name)
+/// Seed a database in a pre-clock layout with `rows` and close it.
+///
+/// `version = None` models a version-1 database (opened without a version, wall-clock indexes).
+/// `Some(SCHEMA_VERSION)` models a migration interrupted after the upgrade committed: the clock
+/// store and index exist, but the clock record and the restamped rows do not.
+async fn seed_legacy_database(name: &str, version: Option<u32>, rows: &[JsonValue]) {
+    let builder = rexie::Rexie::builder(name);
+    let builder = match version {
+        None => builder.add_object_store(
+            rexie::ObjectStore::new(name)
                 .key_path("key")
                 .add_index(rexie::Index::new("last_visit_time", "last_visit_time"))
                 .add_index(rexie::Index::new("visit_count", "visit_count")),
-        )
-        .build()
-        .await
+        ),
+        Some(version) => builder
+            .version(version)
+            .add_object_store(
+                rexie::ObjectStore::new(name)
+                    .key_path("key")
+                    .add_index(rexie::Index::new(ACCESS_STAMP_INDEX, ACCESS_STAMP_INDEX)),
+            )
+            .add_object_store(rexie::ObjectStore::new(&clock_store_name(name))),
+    };
+    let database = builder.build().await.unwrap();
+    let transaction = database
+        .transaction(&[name], TransactionMode::ReadWrite)
         .unwrap();
-    // Seed a committed row carrying fields that the new reader does not need.
-    let transaction = old
-        .transaction(&[&name], TransactionMode::ReadWrite)
-        .unwrap();
-    let store = transaction.store(&name).unwrap();
-    let old_row = serde_json::json!({
-        "key": "retained", "data": "payload", "last_visit_time": 1,
-        "visit_count": u32::MAX, "created_time": 0
-    });
-    store
-        .put(&crate::utils::js_value::serialize(&old_row).unwrap(), None)
-        .await
-        .unwrap();
+    let store = transaction.store(name).unwrap();
+    for row in rows {
+        store
+            .put(&crate::utils::js_value::serialize(row).unwrap(), None)
+            .await
+            .unwrap();
+    }
     transaction.done().await.unwrap();
-    old.close();
+    database.close();
+}
 
-    // Opening at the existing version must not run a destructive upgrade.
-    let reopened = IdbStorage::new_with_cap_and_name(2, &name).await.unwrap();
-    let value: Option<String> = reopened.get("retained").await.unwrap();
-    assert_eq!(value.as_deref(), Some("payload"));
-    let (transaction, store) = reopened.transaction(TransactionMode::ReadOnly).unwrap();
-    assert!(
-        store.index("visit_count").is_ok(),
-        "same-version open retains the unused index"
+/// Rows as written by schema version 1, including a same-millisecond tie and surplus fields.
+fn legacy_rows() -> Vec<JsonValue> {
+    vec![
+        serde_json::json!({"key": "warm", "data": "warm", "last_visit_time": 1_700_000_000_005_i64}),
+        serde_json::json!({"key": "tie-b", "data": "tie-b", "last_visit_time": 1_700_000_000_001_i64,
+            "visit_count": u32::MAX, "created_time": 0}),
+        serde_json::json!({"key": "tie-a", "data": {"nested": [1, 2]}, "last_visit_time": 1_700_000_000_001_i64}),
+    ]
+}
+
+/// Assert the migrated layout: rows restamped in legacy order, clock `n`, only the new index.
+async fn assert_migrated(reopened: &IdbStorage) {
+    assert_eq!(reopened.db.version(), f64::from(SCHEMA_VERSION));
+    assert_eq!(stamp_of(reopened, "tie-a").await, 0);
+    assert_eq!(stamp_of(reopened, "tie-b").await, 1);
+    assert_eq!(stamp_of(reopened, "warm").await, 2);
+    assert_eq!(clock_of(reopened).await, 3);
+    let tie_b = raw_row(reopened, "tie-b").await;
+    assert!(tie_b.get("last_visit_time").is_none());
+    assert!(tie_b.get("visit_count").is_none());
+    assert!(tie_b.get("created_time").is_none());
+    assert_eq!(
+        raw_row(reopened, "tie-a").await["data"],
+        serde_json::json!({"nested": [1, 2]})
     );
-    let row: JsonValue =
-        crate::utils::js_value::deserialize(store.get(&"retained".into()).await.unwrap()).unwrap();
-    assert!(row.get("visit_count").is_none());
-    assert!(row.get("created_time").is_none());
-    assert!(row["last_visit_time"].as_i64().unwrap() > 1);
-    transaction.done().await.unwrap();
+    let scope = reopened.scope(TransactionMode::ReadOnly).unwrap();
+    assert_eq!(
+        scope.rows.index_names(),
+        vec![ACCESS_STAMP_INDEX.to_owned()]
+    );
+}
 
-    // A cold row is older than the touched row, regardless of browser clock resolution.
-    let (transaction, store) = reopened.transaction(TransactionMode::ReadWrite).unwrap();
-    let cold_row = serde_json::json!({"key": "cold", "data": "cold", "last_visit_time": 0});
-    store
-        .put(&crate::utils::js_value::serialize(&cold_row).unwrap(), None)
-        .await
-        .unwrap();
-    transaction.done().await.unwrap();
-    // Owned payload matches the adapter's DeserializeOwned contract.
-    let replacement = String::from("new");
-    reopened.put("new", &replacement).await.unwrap();
-    let entries: Vec<(String, String)> = reopened.get_all().await.unwrap();
-    assert_eq!(entries.len(), 2);
-    assert!(entries.iter().any(|(key, _)| key == "retained"));
-    assert!(!entries.iter().any(|(key, _)| key == "cold"));
+/// A version-1 database is upgraded in place: no row is lost, the legacy eviction order
+/// (ties broken by key) becomes strict stamps, and eviction continues from it.
+#[wasm_bindgen_test]
+async fn opening_a_version_one_database_migrates_rows_in_lru_order() {
+    let name = format!("rings-idb-legacy-test-{}", uuid::Uuid::new_v4());
+    seed_legacy_database(&name, None, &legacy_rows()).await;
+
+    let reopened = IdbStorage::new_with_cap_and_name(3, &name).await.unwrap();
+    assert_migrated(&reopened).await;
+    drop(reopened);
+
+    // Reopening at the current schema is a no-op for stamps and clock.
+    let reopened = IdbStorage::new_with_cap_and_name(3, &name).await.unwrap();
+    assert_migrated(&reopened).await;
+
+    // The legacy-oldest row is the first eviction candidate.
+    reopened.put("new", &"new".to_owned()).await.unwrap();
+    assert_eq!(get_string(&reopened, "tie-a").await.unwrap(), None);
+    assert_eq!(stamp_of(&reopened, "new").await, 3);
+    let tie_b = get_string(&reopened, "tie-b").await.unwrap();
+    assert_eq!(tie_b.as_deref(), Some("tie-b"));
+}
+
+/// A migration interrupted after the upgrade reruns from the untouched legacy rows.
+#[wasm_bindgen_test]
+async fn interrupted_migration_reruns_on_next_open() {
+    let name = format!("rings-idb-interrupted-test-{}", uuid::Uuid::new_v4());
+    seed_legacy_database(&name, Some(SCHEMA_VERSION), &legacy_rows()).await;
+
+    let reopened = IdbStorage::new_with_cap_and_name(3, &name).await.unwrap();
+    assert_migrated(&reopened).await;
+}
+
+/// Migration completes before the row bound applies: a smaller capacity retires legacy-oldest rows.
+#[wasm_bindgen_test]
+async fn migrating_under_a_smaller_capacity_retires_legacy_oldest_rows() {
+    let name = format!("rings-idb-legacy-cap-test-{}", uuid::Uuid::new_v4());
+    seed_legacy_database(&name, None, &legacy_rows()).await;
+
+    let reopened = IdbStorage::new_with_cap_and_name(1, &name).await.unwrap();
+    assert_eq!(reopened.count().await.unwrap(), 1);
+    assert_eq!(get_string(&reopened, "tie-a").await.unwrap(), None);
+    assert_eq!(get_string(&reopened, "tie-b").await.unwrap(), None);
+    let warm = get_string(&reopened, "warm").await.unwrap();
+    assert_eq!(warm.as_deref(), Some("warm"));
 }
 
 /// Missing keys complete cleanly; a decode error does not rewrite or remove the stored payload.
@@ -394,19 +545,12 @@ async fn new_key_at_capacity_evicts_lru_row() {
 /// Reopening with a smaller row budget removes every excess row, not just one candidate.
 #[wasm_bindgen_test]
 async fn reopening_with_smaller_capacity_removes_all_excess_rows() {
-    // The first instance persists four rows with explicit ordering in a unique database.
+    // Four back-to-back writes receive the stamps 0‥3 regardless of the browser's timer.
     let name = format!("rings-idb-lowered-cap-test-{}", uuid::Uuid::new_v4());
     let initial = IdbStorage::new_with_cap_and_name(4, &name).await.unwrap();
-    let (transaction, store) = initial.transaction(TransactionMode::ReadWrite).unwrap();
-    for (key, timestamp) in [("a", 1_i64), ("b", 2), ("c", 3), ("d", 4)] {
-        // Distinct timestamps make survivors independent of browser clock timing.
-        let row = serde_json::json!({"key": key, "data": key, "last_visit_time": timestamp});
-        store
-            .put(&crate::utils::js_value::serialize(&row).unwrap(), None)
-            .await
-            .unwrap();
+    for key in ["a", "b", "c", "d"] {
+        initial.put(key, &key.to_owned()).await.unwrap();
     }
-    transaction.done().await.unwrap();
     drop(initial);
 
     // Reopening at capacity two must keep the two most recently written rows only.
