@@ -156,7 +156,8 @@ async fn test_send_backend_message() {
 ///
 /// The handler resolves a `Promise` created before the send. A promise keeps its value, so a
 /// delivery that completes before the test awaits it is not lost. The global resolver is
-/// deleted afterwards, so no later test can resolve this test's stale promise.
+/// deleted afterwards, so no later test can resolve this test's stale promise. If the hang guard
+/// fires first, the global stays behind; no other test uses the name.
 #[wasm_bindgen_test]
 async fn test_handle_backend_message() {
     with_hang_guard("test_handle_backend_message", TEST_HANG_GUARD, async {

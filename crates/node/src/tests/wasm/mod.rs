@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::channel::mpsc;
-use futures::future::Either;
 use futures::lock::Mutex;
+use futures::FutureExt;
 use futures::StreamExt;
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
@@ -39,10 +39,12 @@ const TEST_ICE_SERVERS: &str = "";
 
 /// Per-test hang guard of the connection tests; see [`with_hang_guard`].
 ///
-/// Budget arithmetic: wasm-bindgen-test gives the whole binary 120 s. The suite passes in
-/// about 9 s, so one test that hangs to this guard still leaves the rest of the binary its
-/// normal runtime within the budget, and the named guard fires before the runner's.
-pub const TEST_HANG_GUARD: Duration = Duration::from_secs(30);
+/// Budget arithmetic (measured unloaded in headless Chrome): wasm-bindgen-test gives the whole
+/// binary 120 s, and the suite passes in about 7 s. Five tests carry this guard, so even a
+/// common-cause hang of all five (browser WebRTC broken for every test) costs at most
+/// 5 × 20 s = 100 s, plus the suite's normal runtime, and stays inside the runner budget.
+/// Every guard therefore fails by name before the runner's timeout.
+pub const TEST_HANG_GUARD: Duration = Duration::from_secs(20);
 
 /// A logical peer transition, as [`SwarmEvent::peer_transition`] reads it off the event stream.
 type Transition = (Did, PeerTransition);
@@ -158,14 +160,20 @@ pub async fn await_mutual_admission(
 /// whole binary and starve every test after it. The guard fails with `name` instead. It is a
 /// failure bound only: a passing run proceeds on `test` alone, since every wait inside is on
 /// an event.
+///
+/// Core's `tests::wasm::with_hang_guard` is the same helper; each lives in its crate's
+/// `cfg(test)` module, so they cannot share one definition.
 pub async fn with_hang_guard<T>(
     name: &str,
     budget: Duration,
     test: impl std::future::Future<Output = T>,
 ) -> T {
-    match futures::future::select(Box::pin(test), Box::pin(rings_runtime::sleep(budget))).await {
-        Either::Left((value, _)) => value,
-        Either::Right(_) => panic!("{name} exceeded its {budget:?} hang guard"),
+    let test = test.fuse();
+    let deadline = rings_runtime::sleep(budget).fuse();
+    futures::pin_mut!(test, deadline);
+    futures::select! {
+        value = test => value,
+        _ = deadline => panic!("{name} exceeded its {budget:?} hang guard"),
     }
 }
 

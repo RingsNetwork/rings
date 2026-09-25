@@ -108,6 +108,11 @@ impl ObservedProcessor {
     /// core law pairs them), so the loop consumes both and awaits the next admission. The
     /// browser runtime is single-threaded, and the check and the listing run with no await
     /// between them, so the entries returned belong to the announced generation.
+    ///
+    /// Assumption: an announced generation is `Ready` right after admission. `peers()` lists
+    /// only connections that can make progress, so a generation that is announced but
+    /// momentarily `Recovering` would list `[]` and fail the caller's assertion by name. It
+    /// would not hang, which is why the loop does not wait on readiness.
     async fn settled_peer_states(&self, peer: Did) -> Vec<String> {
         loop {
             self.transitions.admitted(peer).await;
