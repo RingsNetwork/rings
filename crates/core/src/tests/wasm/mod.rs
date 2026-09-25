@@ -67,16 +67,22 @@ pub async fn prepare_repair_node(key: SecretKey) -> Arc<Swarm> {
 /// passing run proceeds on `test` alone. A caller whose test polls on durations passes a
 /// scenario budget instead, which that caller must name as such.
 ///
-/// Budget arithmetic for this binary: the whole suite, repair soak included, runs in about
-/// 80 s with host-only ICE. If both real-transport handshake tests hung, they would add at most
-/// 15 s + 15 s, for about 110 s, still inside the runner's 120 s. So a named guard fails first,
-/// and the tests after it still run.
+/// Budget arithmetic (measured unloaded in headless Chrome, not on CI or Firefox): CI runs the
+/// repair soak as its own invocation (see `qaci.yml`), so its 60 s scenario budget never
+/// shares the 120 s runner budget with the rest. The rest runs in about 55 s. If both
+/// real-transport handshake tests hung, they would add at most 15 s + 15 s, for about 85 s, a
+/// margin of about 1.4× below 120 s. Under that premise a named guard fails first, and the
+/// tests after it still run. A slower runner narrows the margin; the soak's own polls are
+/// tracked in #882.
+///
+/// The node crate's `tests::wasm::with_hang_guard` is the same helper; each lives in its
+/// crate's `cfg(test)` module, so they cannot share one definition.
 pub async fn with_hang_guard<T>(name: &str, budget: Duration, test: impl Future<Output = T>) -> T {
     let test = test.fuse();
     let deadline = sleep(budget).fuse();
     futures::pin_mut!(test, deadline);
     futures::select! {
         value = test => value,
-        () = deadline => panic!("{name} exceeded its {budget:?} hang guard"),
+        _ = deadline => panic!("{name} exceeded its {budget:?} hang guard"),
     }
 }

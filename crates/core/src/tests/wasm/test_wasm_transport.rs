@@ -462,8 +462,9 @@ async fn test_message_handler_manual_handshake_only() {
 ///
 /// Unlike the handshake tests, this soak still synchronises by polling (`SOAK_POLL_INTERVAL` ×
 /// attempts), so `BROWSER_REPAIR_SCENARIO_TIMEOUT` is a **scenario budget**, not a hang guard:
-/// under enough load it decides the outcome. Replacing the polls with events is tracked in
-/// #882.
+/// under enough load it decides the outcome. CI therefore runs this test as its own invocation
+/// (`qaci.yml`), so the budget never shares the 120 s runner budget with the rest of the
+/// binary. Replacing the polls with events is tracked in #882.
 #[wasm_bindgen_test]
 async fn test_storage_repair_load_does_not_starve_three_node_stabilization() {
     with_hang_guard(
