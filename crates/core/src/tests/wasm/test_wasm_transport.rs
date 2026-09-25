@@ -47,8 +47,9 @@ const REPAIR_POLL_ATTEMPTS: usize = 1_200;
 const BROWSER_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(500);
 const BROWSER_REPAIR_SCENARIO_TIMEOUT: Duration = Duration::from_secs(60);
 const BROWSER_PHASE_TRACE_TIMEOUT: Duration = Duration::from_secs(15);
-/// Hang guard of one real browser handshake; a loopback handshake completes far below it.
-const BROWSER_HANDSHAKE_HANG_GUARD: Duration = Duration::from_secs(30);
+/// Hang guard of one real browser handshake. The fixtures gather host candidates only, so a
+/// same-page handshake completes far below it; see `with_hang_guard` for the budget arithmetic.
+const BROWSER_HANDSHAKE_HANG_GUARD: Duration = Duration::from_secs(15);
 
 async fn wait_for_full_mesh(nodes: &[&crate::swarm::Swarm]) {
     for _ in 0..SOAK_POLL_ATTEMPTS {
@@ -391,7 +392,7 @@ async fn get_fake_permission() {
 }
 
 async fn prepare_transport() -> Transport {
-    let trans = Transport::new("stun://stun.l.google.com:19302", None, None);
+    let trans = Transport::new(super::TEST_ICE_SERVERS, None, None);
     trans
         .new_connection("test", Box::new(DefaultCallback))
         .await
@@ -457,6 +458,12 @@ async fn test_message_handler_manual_handshake_only() {
     .await
 }
 
+/// Browser storage repair under load does not starve three-node stabilization.
+///
+/// Unlike the handshake tests, this soak still synchronises by polling (`SOAK_POLL_INTERVAL` ×
+/// attempts), so `BROWSER_REPAIR_SCENARIO_TIMEOUT` is a **scenario budget**, not a hang guard:
+/// under enough load it decides the outcome. Replacing the polls with events is tracked in
+/// #882.
 #[wasm_bindgen_test]
 async fn test_storage_repair_load_does_not_starve_three_node_stabilization() {
     with_hang_guard(

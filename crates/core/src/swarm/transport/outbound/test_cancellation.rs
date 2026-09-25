@@ -12,10 +12,21 @@ use crate::message::MessagePayload;
 use crate::message::PayloadSender;
 use crate::swarm::Swarm;
 
+/// Secret of the node under test; the outcome is independent of identities, so any fixed key.
+const NODE_SECRET: &str = "0101010101010101010101010101010101010101010101010101010101010101";
+
+/// Secret of the detached peer; distinct from [`NODE_SECRET`] so the peer is not the node.
+const PEER_SECRET: &str = "0202020202020202020202020202020202020202020202020202020202020202";
+
+/// The fixed identity with hex secret `secret`.
+fn fixed_key(secret: &str) -> SecretKey {
+    SecretKey::try_from(secret).expect("fixture secret is a valid scalar")
+}
+
 /// Native setup adapter: a dummy-transport test swarm; no connection is established.
 #[cfg(not(target_family = "wasm"))]
 async fn test_swarm() -> Arc<Swarm> {
-    crate::tests::default::prepare_node(SecretKey::random())
+    crate::tests::default::prepare_node(fixed_key(NODE_SECRET))
         .await
         .swarm
 }
@@ -23,7 +34,7 @@ async fn test_swarm() -> Arc<Swarm> {
 /// Browser setup adapter: a browser test swarm; no connection is established.
 #[cfg(target_family = "wasm")]
 async fn test_swarm() -> Arc<Swarm> {
-    crate::tests::wasm::prepare_node(SecretKey::random()).await
+    crate::tests::wasm::prepare_node(fixed_key(NODE_SECRET)).await
 }
 
 /// Admit `peer` on `node` without a link, so the worker has an admitted generation to route to.
@@ -128,7 +139,7 @@ impl ArcWake for ReleasedBeforeWake {
 #[cfg_attr(not(target_family = "wasm"), tokio::test)]
 async fn test_cancellation_after_scan_releases_successor_behind_waiting_head() {
     let node = test_swarm().await;
-    let peer: Did = SecretKey::random().address().into();
+    let peer: Did = fixed_key(PEER_SECRET).address().into();
     admit_detached_peer(&node, peer).await;
     let capacity = Arc::new(TransferCapacity::new(Arc::new(
         GlobalTransferCapacity::new(),
