@@ -1,6 +1,5 @@
 use std::future::Future;
 use std::net::IpAddr;
-use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -10,6 +9,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::mpsc;
+use tokio::sync::watch;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
@@ -321,19 +321,60 @@ pub struct WebrtcConnection {
     /// Negotiated SCTP `max_message_size` (RFC 8841), parsed from the remote SDP at handshake.
     /// `0` means not yet negotiated. webrtc-rs exposes no getter, so we track it ourselves.
     remote_max_message_size: Arc<AtomicUsize>,
-    physical_close_completed: Arc<AtomicBool>,
+    physical_close_completed: PhysicalCloseCompletion,
+}
+
+/// Write side of [`NativePhysicalCloseWitness`]: the fact "`RTCPeerConnection::close()`
+/// succeeded", published at most once and never retracted.
+///
+/// The cell is a watch channel, so the fact is a stored state rather than a pulse: a witness
+/// subscribed before or after the publication observes it alike, and the channel closes when the
+/// last holder (the connection or a detached close task) drops without publishing.
+#[derive(Clone)]
+struct PhysicalCloseCompletion(Arc<watch::Sender<bool>>);
+
+impl PhysicalCloseCompletion {
+    /// A cell that has not observed a successful close.
+    fn new() -> Self {
+        Self(Arc::new(watch::channel(false).0))
+    }
+
+    /// Record that the physical close succeeded; idempotent.
+    fn publish(&self) {
+        self.0.send_replace(true);
+    }
+
+    /// Subscribe a read-only witness to this cell.
+    fn witness(&self) -> NativePhysicalCloseWitness {
+        NativePhysicalCloseWitness {
+            completed: self.0.subscribe(),
+        }
+    }
 }
 
 /// Stable observation that the native peer connection's close future completed successfully.
 #[derive(Clone)]
 pub struct NativePhysicalCloseWitness {
-    completed: Arc<AtomicBool>,
+    completed: watch::Receiver<bool>,
 }
 
 impl NativePhysicalCloseWitness {
     /// Return true only after the underlying `RTCPeerConnection::close()` future succeeds.
     pub fn is_complete(&self) -> bool {
-        self.completed.load(Ordering::Acquire)
+        *self.completed.borrow()
+    }
+
+    /// Await the close outcome: `true` once `RTCPeerConnection::close()` has succeeded, `false`
+    /// once every holder of the connection released it without a successful close.
+    ///
+    /// Law (no lost wake-up): `wait_for` tests the stored value before it suspends, and the
+    /// value is monotone (`false → true` only), so a publication that precedes this call is
+    /// observed as readily as one that follows it.
+    pub async fn completed(mut self) -> bool {
+        self.completed
+            .wait_for(|completed| *completed)
+            .await
+            .is_ok()
     }
 }
 
@@ -367,14 +408,12 @@ impl WebrtcConnection {
             retirement_fence,
             sdp_extra_host_candidates,
             remote_max_message_size: Arc::new(AtomicUsize::new(0)),
-            physical_close_completed: Arc::new(AtomicBool::new(false)),
+            physical_close_completed: PhysicalCloseCompletion::new(),
         }
     }
 
     pub(crate) fn physical_close_witness(&self) -> NativePhysicalCloseWitness {
-        NativePhysicalCloseWitness {
-            completed: Arc::clone(&self.physical_close_completed),
-        }
+        self.physical_close_completed.witness()
     }
 
     fn request_close(&self) {
@@ -526,7 +565,7 @@ impl ConnectionInterface for WebrtcConnection {
         let acceptance = permit.acceptance();
         let pool = self.webrtc_data_channel.clone();
         let connection = self.webrtc_conn.clone();
-        let physical_close_completed = Arc::clone(&self.physical_close_completed);
+        let physical_close_completed = self.physical_close_completed.clone();
         let retirement_fence = self.retirement_fence.clone();
         run_send_with_retirement(
             &runtime,
@@ -612,7 +651,7 @@ impl ConnectionInterface for WebrtcConnection {
         self.request_close();
         close_native_connection(
             self.webrtc_conn.clone(),
-            Arc::clone(&self.physical_close_completed),
+            self.physical_close_completed.clone(),
         )
         .await
     }
@@ -620,7 +659,7 @@ impl ConnectionInterface for WebrtcConnection {
 
 async fn close_native_connection(
     connection: Arc<RTCPeerConnection>,
-    physical_close_completed: Arc<AtomicBool>,
+    physical_close_completed: PhysicalCloseCompletion,
 ) -> Result<()> {
     let runtime = native_send_runtime()?;
     run_native_close_with_witness(
@@ -634,12 +673,12 @@ async fn close_native_connection(
 async fn run_native_close_with_witness(
     runtime: &tokio::runtime::Handle,
     close: impl Future<Output = Result<()>> + Send + 'static,
-    physical_close_completed: Arc<AtomicBool>,
+    physical_close_completed: PhysicalCloseCompletion,
 ) -> Result<()> {
     run_native_close_task(runtime, async move {
         let result = close.await;
         if result.is_ok() {
-            physical_close_completed.store(true, Ordering::Release);
+            physical_close_completed.publish();
         }
         result
     })
@@ -650,7 +689,7 @@ async fn run_native_close_with_witness(
 /// The detached close task retains the separate physical-completion witness.
 async fn close_failed_native_send(
     connection: Arc<RTCPeerConnection>,
-    physical_close_completed: Arc<AtomicBool>,
+    physical_close_completed: PhysicalCloseCompletion,
 ) -> Result<()> {
     tokio::time::timeout(
         NATIVE_CONNECTION_RETIRE_TIMEOUT,

@@ -422,6 +422,19 @@ impl OutboundSchedulers {
             .map(|capacity| capacity.admitted())
     }
 
+    /// Subscribe to `peer`'s admitted transfer count; `None` once its capacity is deallocated.
+    #[cfg(all(test, not(feature = "dummy"), not(target_family = "wasm")))]
+    fn subscribe_admitted_for_test(
+        &self,
+        peer: Did,
+    ) -> Option<tokio::sync::watch::Receiver<usize>> {
+        self.lock_registry()
+            .capacities
+            .get(&peer)
+            .and_then(Weak::upgrade)
+            .map(|capacity| capacity.subscribe_admitted())
+    }
+
     #[cfg(all(test, not(target_family = "wasm")))]
     fn admitted_transfer_total_for_test(&self) -> usize {
         let mut registry = self.lock_registry();

@@ -1,3 +1,6 @@
+#[cfg(all(feature = "std", not(feature = "dummy"), not(target_family = "wasm")))]
+use tokio::sync::watch;
+
 use super::*;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::dht::topology;
@@ -5,6 +8,8 @@ use crate::dht::topology;
 use crate::dht::StorageSyncDestination;
 #[cfg(not(target_family = "wasm"))]
 use crate::lifecycle::StopSource;
+#[cfg(all(feature = "std", not(feature = "dummy"), not(target_family = "wasm")))]
+use crate::storage::KvStorageInterface;
 use crate::tests::live_entry;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::tests::midpoint_storage_key;
@@ -174,12 +179,111 @@ async fn test_continuous_storage_repair_reaches_remote_owners_across_three_nodes
     Ok(())
 }
 
+/// Entry storage that publishes a write generation after every successful `put`.
+///
+/// The generation is a watch cell, so it is a stored state: a reader that marks the current
+/// generation seen and then reads the store cannot miss a write that lands after its read.
+#[cfg(all(feature = "std", not(feature = "dummy"), not(target_family = "wasm")))]
+struct WriteSignalingStorage {
+    inner: MemStorage<Entry>,
+    writes: Arc<watch::Sender<u64>>,
+}
+
+#[cfg(all(feature = "std", not(feature = "dummy"), not(target_family = "wasm")))]
+#[async_trait]
+impl KvStorageInterface<Entry> for WriteSignalingStorage {
+    async fn get(&self, key: &str) -> Result<Option<Entry>> {
+        self.inner.get(key).await
+    }
+
+    async fn put(&self, key: &str, value: &Entry) -> Result<()> {
+        self.inner.put(key, value).await?;
+        self.writes
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
+        Ok(())
+    }
+
+    async fn get_all(&self) -> Result<Vec<(String, Entry)>> {
+        self.inner.get_all().await
+    }
+
+    async fn remove(&self, key: &str) -> Result<()> {
+        self.inner.remove(key).await
+    }
+
+    async fn clear(&self) -> Result<()> {
+        self.inner.clear().await
+    }
+
+    async fn count(&self) -> Result<u32> {
+        self.inner.count().await
+    }
+}
+
+/// Await the event "`node` stores `expected` at `key`", woken by `node`'s storage writes.
+///
+/// ```text
+/// loop:  mark(generation)  ;  read(key) = expected ? return : await generation' ≠ generation
+/// ```
+///
+/// Law (no lost wake-up): the generation is marked seen before the store is read, so a write
+/// that lands after the read advances the generation past the mark and wakes `changed`.
+#[cfg(all(feature = "std", not(feature = "dummy"), not(target_family = "wasm")))]
+async fn await_stored_entry(
+    node: &Node,
+    writes: &mut watch::Receiver<u64>,
+    key: Did,
+    expected: &Entry,
+) -> Result<()> {
+    loop {
+        writes.borrow_and_update();
+        if node.dht().storage.get(&key.to_string()).await?.as_ref() == Some(expected) {
+            return Ok(());
+        }
+        writes
+            .changed()
+            .await
+            .map_err(|_| Error::InvalidMessage("storage write signal closed".to_string()))?;
+    }
+}
+
+/// Native `wait_with` maintenance repairs a remote placement, and retiring the connection
+/// afterwards releases every outbound transfer to the retired peer and closes the physical
+/// connection.
+///
+/// ```text
+/// Stored   ≡ node2.store[placement] = entry
+/// Quiet    ≡ maintenance(node1) and repair_pressure joined
+/// Released ≡ admitted(node1 → node2) = 0          (over the permits held at disconnect)
+/// Closed   ≡ RTCPeerConnection::close() succeeded
+///
+/// (1)  maintenance ∥ repair_pressure  ⊢  ◇Stored       awaited on node2's write signal
+/// (2)  Stored ; stop ; join          ⊢  Quiet
+/// (3)  Quiet ; disconnect(node2)      ⊢  ◇Released ∧ ◇Closed
+/// ```
+///
+/// Stored is stable: nothing removes the placement. Each wait registers its listener before it
+/// reads the state: the write generation is marked before the store read, the transfer watch
+/// is subscribed before the count is tested, and the close witness is taken before
+/// `disconnect`. Every one of them is a stored state, so no event can be missed. Released is
+/// asserted as an awaited event, not as an instantaneous read of a global counter. The
+/// retiring worker drops its permits asynchronously, and an inbound-driven send that was
+/// already running may transiently reserve capacity before it finds no connection. The
+/// timeouts only guard against a hang; no step waits for a duration.
 #[cfg(all(feature = "std", not(feature = "dummy"), not(target_family = "wasm")))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_native_wait_with_repairs_storage_before_connection_retirement() -> Result<()> {
     let (key1, key2) = repair_test_keys()?;
     let node1 = prepare_repair_node(key1)?;
-    let node2 = prepare_repair_node(key2)?;
+    let (writes, mut node2_writes) = watch::channel(0_u64);
+    let node2 = prepare_repair_node_with_storage(
+        key2,
+        Box::new(WriteSignalingStorage {
+            inner: MemStorage::new(),
+            writes: Arc::new(writes),
+        }),
+        None,
+    )?;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
     wait_for_successor(&node1, node2.did()).await?;
     wait_for_msgs([&node1, &node2]).await;
@@ -208,6 +312,7 @@ async fn test_native_wait_with_repairs_storage_before_connection_retirement() ->
         None
     );
 
+    // (1) Repair runs under concurrent maintenance and repair pressure.
     let stop = StopSource::new();
     let maintenance = {
         let token = stop.token();
@@ -225,53 +330,14 @@ async fn test_native_wait_with_repairs_storage_before_connection_retirement() ->
             }
         })
     };
-
-    let repair = timeout(Duration::from_secs(30), async {
-        loop {
-            if node2
-                .dht()
-                .storage
-                .get(&remote_placement.to_string())
-                .await?
-                == Some(expected.clone())
-            {
-                return Ok::<_, Error>(());
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
+    let repair = timeout(
+        Duration::from_secs(30),
+        await_stored_entry(&node2, &mut node2_writes, remote_placement, &expected),
+    )
     .await
-    .map_err(|_| Error::InvalidMessage("native wait_with repair timed out".to_string()));
+    .map_err(|_| Error::InvalidMessage("native wait_with repair did not persist".to_string()));
 
-    if repair.is_ok() {
-        let physical_close = node1
-            .swarm
-            .transport
-            .get_connection(node2.did())
-            .ok_or_else(|| Error::InvalidMessage("missing native connection witness".to_string()))?
-            .physical_close_witness()?;
-        node1.swarm.disconnect(node2.did()).await?;
-        assert!(node1.swarm.transport.get_connection(node2.did()).is_none());
-        assert!(!node1.swarm.transport.has_active_connection(node2.did()));
-        assert!(!node1.dht().successors().contains(&node2.did())?);
-        assert_eq!(
-            node1
-                .swarm
-                .transport
-                .outbound_admitted_transfer_total_for_test(),
-            0
-        );
-        timeout(Duration::from_secs(3), async {
-            while !physical_close.is_complete() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .map_err(|_| {
-            Error::InvalidMessage("native physical connection close did not complete".to_string())
-        })?;
-    }
-
+    // (2) Quiesce both producers before the retirement is observed.
     stop.request_stop();
     timeout(Duration::from_secs(3), maintenance)
         .await
@@ -282,6 +348,35 @@ async fn test_native_wait_with_repairs_storage_before_connection_retirement() ->
         .map_err(|_| Error::InvalidMessage("native repair pressure did not stop".to_string()))?
         .map_err(|error| Error::InvalidMessage(format!("repair pressure failed: {error}")))?;
     repair??;
+
+    // (3) Retire the connection; await the transfer release and the physical close.
+    let physical_close = node1
+        .swarm
+        .transport
+        .get_connection(node2.did())
+        .ok_or_else(|| Error::InvalidMessage("missing native connection witness".to_string()))?
+        .physical_close_witness()?;
+    node1.swarm.disconnect(node2.did()).await?;
+    assert!(node1.swarm.transport.get_connection(node2.did()).is_none());
+    assert!(!node1.swarm.transport.has_active_connection(node2.did()));
+    assert!(!node1.dht().successors().contains(&node2.did())?);
+    timeout(
+        Duration::from_secs(3),
+        node1
+            .swarm
+            .transport
+            .outbound_transfers_released_for_test(node2.did()),
+    )
+    .await
+    .map_err(|_| {
+        Error::InvalidMessage("retired peer's outbound transfers were not released".to_string())
+    })?;
+    let closed = timeout(Duration::from_secs(3), physical_close.completed())
+        .await
+        .map_err(|_| {
+            Error::InvalidMessage("native physical connection close did not complete".to_string())
+        })?;
+    assert!(closed, "native physical connection close failed");
     Ok(())
 }
 

@@ -274,4 +274,27 @@ impl crate::swarm::transport::SwarmTransport {
     pub(crate) fn outbound_admitted_transfer_total_for_test(&self) -> usize {
         self.outbound_schedulers.admitted_transfer_total_for_test()
     }
+
+    /// Await the event "every transfer admitted to `peer` when the wait began has released
+    /// its capacity".
+    ///
+    /// ```text
+    /// A₀     = permits of peer held at subscription
+    /// R(peer) ≡ admitted(peer) = 0  ∨  capacity(peer) deallocated
+    /// R(peer) observed  ⟹  ∀ p ∈ A₀. released(p)
+    /// ```
+    ///
+    /// The count is a sum over live permits, so it reaches zero only after every permit in `A₀`
+    /// has been dropped, whatever transient reservations come and go meanwhile. The watch is
+    /// subscribed while the capacity is pinned, and `wait_for` tests the stored count before it
+    /// suspends, so a release that precedes the wait is not lost. A closed watch means the
+    /// capacity was deallocated, which happens only after every permit (each holds the
+    /// capacity) was dropped.
+    #[cfg(all(test, not(feature = "dummy"), not(target_family = "wasm")))]
+    pub(crate) async fn outbound_transfers_released_for_test(&self, peer: Did) {
+        let Some(mut admitted) = self.outbound_schedulers.subscribe_admitted_for_test(peer) else {
+            return;
+        };
+        drop(admitted.wait_for(|admitted| *admitted == 0).await);
+    }
 }

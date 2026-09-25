@@ -3,6 +3,9 @@ use std::sync::Mutex;
 #[cfg(test)]
 use std::task::Poll;
 
+#[cfg(all(test, not(feature = "dummy"), not(target_family = "wasm")))]
+use tokio::sync::watch;
+
 use super::model::TransferClass;
 use crate::dht::Did;
 use crate::error::Error;
@@ -261,6 +264,12 @@ pub(super) struct TransferCapacity {
     state: Mutex<PeerCapacityState>,
     global: Arc<GlobalTransferCapacity>,
     waiters: Arc<FairWaitQueue>,
+    /// Test observation of the admitted transfer count.
+    ///
+    /// Invariant: written under `state`'s lock at every admission and release, so the watched
+    /// value is the admitted count of the last committed transition, never a stale read.
+    #[cfg(all(test, not(feature = "dummy"), not(target_family = "wasm")))]
+    admitted_watch: watch::Sender<usize>,
 }
 
 impl TransferCapacity {
@@ -270,6 +279,8 @@ impl TransferCapacity {
             state: Mutex::new(PeerCapacityState::new()),
             global,
             waiters: Arc::new(FairWaitQueue::with_budget(wait_budget)),
+            #[cfg(all(test, not(feature = "dummy"), not(target_family = "wasm")))]
+            admitted_watch: watch::channel(0).0,
         }
     }
 
@@ -308,6 +319,9 @@ impl TransferCapacity {
             OUTBOUND_PEER_BYTE_CAPACITY,
         );
         *state = next;
+        #[cfg(all(test, not(feature = "dummy"), not(target_family = "wasm")))]
+        self.admitted_watch
+            .send_replace(state.capacity.admitted_count());
         Ok(PeerCapacityPermit {
             capacity: self.clone(),
             class,
@@ -377,6 +391,12 @@ impl TransferCapacity {
             .admitted_count()
     }
 
+    /// Subscribe to the admitted transfer count; see `admitted_watch` for its invariant.
+    #[cfg(all(test, not(feature = "dummy"), not(target_family = "wasm")))]
+    pub(super) fn subscribe_admitted(&self) -> watch::Receiver<usize> {
+        self.admitted_watch.subscribe()
+    }
+
     #[cfg(test)]
     pub(super) fn admitted_bytes(&self) -> usize {
         self.state
@@ -400,11 +420,17 @@ struct PeerCapacityPermit {
 
 impl Drop for PeerCapacityPermit {
     fn drop(&mut self) {
-        self.capacity
+        let mut state = self
+            .capacity
             .state
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .release(self.class, self.bytes);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.release(self.class, self.bytes);
+        #[cfg(all(test, not(feature = "dummy"), not(target_family = "wasm")))]
+        self.capacity
+            .admitted_watch
+            .send_replace(state.capacity.admitted_count());
+        drop(state);
         self.capacity.waiters.wake_front();
     }
 }
