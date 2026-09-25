@@ -175,7 +175,6 @@ impl LifecycleBounds {
     }
 
     /// Maximum peers in any phase.
-    #[cfg(test)]
     pub(in crate::swarm::transport) const fn total(self) -> usize {
         self.total
     }
@@ -543,6 +542,25 @@ impl ConnectionLifecycleRegistry {
             }) => Some(attempt),
             _ => None,
         }
+    }
+
+    /// Every active generation whose admission was announced, in DID order: the admitted
+    /// projection the application has been told about, `{ a | peers(a.peer) = Active(a, true) }`.
+    pub(in crate::swarm::transport) fn announced_attempts(
+        &self,
+    ) -> impl Iterator<Item = PendingConnectionAttempt> + '_ {
+        self.peers.values().filter_map(|state| match *state {
+            PeerConnectionLifecycle::Active {
+                attempt,
+                announced: true,
+            } => Some(attempt),
+            _ => None,
+        })
+    }
+
+    /// The bounds the registry was created under.
+    pub(in crate::swarm::transport) const fn bounds(&self) -> LifecycleBounds {
+        self.bounds
     }
 
     /// Apply `Active(attempt, announced) -> Absent` iff `attempt` owns the active slot and

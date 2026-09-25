@@ -25,6 +25,7 @@ use crate::dht::PeerRingAction;
 use crate::dht::TopoInfo;
 use crate::error::Error;
 use crate::error::Result;
+use crate::swarm::callback::PeerLink;
 use crate::utils::sleep;
 
 /// Maximum wait for the data channel to open after the peer connection is usable.
@@ -472,6 +473,17 @@ impl SwarmTransport {
             .map(PeerRemovalOutcome::removal))
     }
 
+    /// Disconnect the announced generation `link`, returning whether it was retired: `false`,
+    /// with nothing changed, unless `link` is still the announced generation of its peer.
+    pub(crate) async fn disconnect_link(&self, link: PeerLink) -> Result<bool> {
+        match self.announced_attempt(link.peer())? {
+            Some(attempt) if attempt.generation() == link.generation() => {
+                Ok(self.disconnect_attempt(attempt).await?.is_some())
+            }
+            Some(_) | None => Ok(false),
+        }
+    }
+
     pub(crate) fn remove_unavailable_topology(
         &self,
         peer: Did,
@@ -576,8 +588,12 @@ impl SwarmTransport {
                 RetirementOutcome::Superseded => RetirementOutcome::Superseded,
                 RetirementOutcome::Declined => RetirementOutcome::Declined,
                 RetirementOutcome::Retired((value, retirement)) => {
-                    self.announce_retirement(turn, attempt.peer, retirement)
-                        .await;
+                    self.announce_retirement(
+                        turn,
+                        PeerLink::new(attempt.peer, attempt.generation),
+                        retirement,
+                    )
+                    .await;
                     RetirementOutcome::Retired(value)
                 }
             })

@@ -243,6 +243,7 @@ impl InnerSwarmCallback {
                     delivery_turn,
                     did,
                     WebrtcConnectionState::Connected,
+                    Some(attempt.generation()),
                 )
                 .await?;
                 Ok(true)
@@ -274,8 +275,13 @@ impl InnerSwarmCallback {
                         }
                     }
                 }
-                self.emit_connection_state_change_after_ordered_start(delivery_turn, did, state)
-                    .await
+                self.emit_connection_state_change_after_ordered_start(
+                    delivery_turn,
+                    did,
+                    state,
+                    attempt.map(PendingConnectionAttempt::generation),
+                )
+                .await
             })
             .await
     }
@@ -285,8 +291,13 @@ impl InnerSwarmCallback {
         delivery_turn: crate::swarm::transport::SwarmEventDeliveryTurn,
         did: Did,
         state: WebrtcConnectionState,
+        generation: Option<u64>,
     ) -> Result<(), CallbackError> {
-        let event = SwarmEvent::ConnectionStateChange { peer: did, state };
+        let event = SwarmEvent::ConnectionStateChange {
+            peer: did,
+            state,
+            generation,
+        };
         delivery_turn
             .poll_once_then_release(self.processor.logical.callback.on_event(&event))
             .await

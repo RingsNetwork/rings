@@ -105,8 +105,8 @@ impl SwarmCallback for Backend {
             return Ok(());
         };
         match event.peer_transition() {
-            Some((peer, PeerTransition::Admitted)) => observer.peer_admitted(peer),
-            Some((peer, PeerTransition::Retired)) => observer.peer_retired(peer),
+            Some((link, PeerTransition::Admitted)) => observer.peer_admitted(link.peer()),
+            Some((link, PeerTransition::Retired)) => observer.peer_retired(link.peer()),
             None => {}
         }
         Ok(())

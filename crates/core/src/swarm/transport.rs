@@ -55,6 +55,7 @@ use crate::message::Message;
 use crate::message::PayloadSender;
 use crate::message::TransactionReplay;
 use crate::swarm::callback::InnerSwarmCallback;
+use crate::swarm::callback::PeerLink;
 use crate::swarm::callback::SwarmCallbackSlot;
 use crate::swarm::callback::SwarmEvent;
 use crate::swarm::observer::MessageObservation;
@@ -494,27 +495,30 @@ impl SwarmTransport {
     async fn announce_retirement(
         &self,
         turn: SwarmEventDeliveryTurn,
-        peer: Did,
+        link: PeerLink,
         retirement: Retirement,
     ) {
         if !retirement.announced_admission() {
             return;
         }
-        if let Err(error) = self.deliver_retirement(turn, peer).await {
-            tracing::error!(%peer, %error, "peer retirement callback failed");
+        if let Err(error) = self.deliver_retirement(turn, link).await {
+            tracing::error!(peer = %link.peer(), %error, "peer retirement callback failed");
         }
     }
 
-    /// Start [`SwarmEvent::PeerRetired`] for `peer` on the current application callback under
+    /// Start [`SwarmEvent::PeerRetired`] for `link` on the current application callback under
     /// `turn`.
     async fn deliver_retirement(
         &self,
         turn: SwarmEventDeliveryTurn,
-        peer: Did,
+        link: PeerLink,
     ) -> std::result::Result<(), CallbackError> {
         let callback = self.callback.current()?;
-        turn.poll_once_then_release(callback.on_event(&SwarmEvent::PeerRetired { peer }))
-            .await
+        turn.poll_once_then_release(callback.on_event(&SwarmEvent::PeerRetired {
+            peer: link.peer(),
+            generation: link.generation(),
+        }))
+        .await
     }
 
     /// Run `deliver` under `peer`'s ordered delivery turn: the turn is acquired before `deliver`
