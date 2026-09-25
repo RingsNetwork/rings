@@ -209,10 +209,12 @@ $A=64$ bytes whatever $|t|$; and $\In_f=\Out_f=\mathrm{Frame}$,
 \enc(\mathrm{credit}(\upsilon_1..\upsilon_k))=\mathtt{02}\,\|\,\upsilon_1\|\cdots\|\upsilon_k,
 \end{gather*}
 with $n$ a $32$-bit per-direction sequence, $\phi$ a flags byte,
-$|w|\le C_0-6$ (L3), and $\upsilon_j$ SURBs of $\sid$ (D8).
+$|w|\le C_0-7$ (L3: six frame bytes and the $\pad$ marker), and
+$\upsilon_j$ SURBs of $\sid$ (D8).
 \begin{itemize}
 \item \emph{Opening.}  Flag $T$ (bit~$0$ of $\phi$) marks
-  $w=|t|\,\|\,t\,\|\,w'$ with $|t|$ a $16$-bit length; the other bits are
+  $w=|t|\,\|\,t\,\|\,w'$ with $|t|$ a $16$-bit length, so
+  $|w'|\le C_0-9-|t|$; the other bits are
   reserved for message-oriented symbols and are $0$ (fail closed).  $\cl$
   sets $T$ on every forward $\mathrm{data}$ loop of $\sid$ until the first
   reply of $\sid$; $h$ opens $\sid$ at the first $T$-loop with
@@ -535,7 +537,7 @@ that block; $\gamma_{i+1}$ is then a $\MAC$ under an unseen key.
 The carry slot has width $C=C_b$ on every edge of a loop of class $b$.
 With $C_0=C-\tau$, for fixed-width symbols the client picks the least
 $b$ with $|\enc(v_0)|<C_0$ and $W(f_k)<C_0$ for all $k$; for a stream
-symbol, whose frames carry up to $C_0-6$ bytes, $b$ is the client's choice
+symbol, whose frames carry up to $C_0-7$ bytes, $b$ is the client's choice
 between throughput and leakage (Table~\ref{tab:leak}).  For a fixed-width
 symbol $W$ factors through the output type ($W(f)=w(\Out_f)$, so the
 width a consumer unpads is fixed by its own $\In$); a stream symbol
@@ -673,7 +675,7 @@ session $\sid$ of $h$}
 \State $\upsilon=(\nxt,\chi,\sigma,x)\gets$ the element of least $x$
 \State $Q_{h,\sid}\gets Q_{h,\sid}\setminus\{\upsilon\}$
   \Comment{single use}
-\State $w\gets\mathrm{data}(n,0,\le C_0-6$ world bytes$)$, or $\mathrm{fin}(n)$ at EOF
+\State $w\gets\mathrm{data}(n,0,\le C_0-7$ world bytes$)$, or $\mathrm{fin}(n)$ at EOF
 \State $y'\gets\Enc{0}{k_1}\circ\cdots\circ\Enc{0}{k_s}\circ
   \Enc{\tau}{k_c}(\pad\,\enc(w))$, keys from $\sigma$ (D7)
 \State release $(\chi,y')$ to $\nxt$
@@ -1156,12 +1158,12 @@ take a fresh token of epoch $e_m$ and pass $\nu\notin R_i[x]$.
 \begin{proposition}[Throughput]\label{prop:rate}
 A single client alone on its links downloads on a class-$b$ loop at most
 \[
-\min\Bigl(\frac{\rho B}{V},\ (k+1)\,\rho_{\mathrm{f}}\Bigr)\,(C_0-6)
+\min\Bigl(\frac{\rho B}{V},\ (k+1)\,\rho_{\mathrm{f}}\Bigr)\,(C_0-7)
 \]
 bytes\,s$^{-1}$, $\rho_{\mathrm{f}}$ its forward-cell rate and $\rho B/V$
 the constant emission rate of a link (D6).  At $b=16$\,KiB and $\rho=0.9$,
 \[
-\tfrac{\rho B}{V}(C_0-6)=\tfrac{0.9\cdot16384\cdot13443}{150}\approx1.32\,\mathrm{MB/s},
+\tfrac{\rho B}{V}(C_0-7)=\tfrac{0.9\cdot16384\cdot13442}{150}\approx1.32\,\mathrm{MB/s},
 \]
 $\ge1$\,MB/s with $\approx32\%$ headroom, reached with $\rho_{\mathrm{f}}\ge98/(k+1)$; a
 larger class $b$ admits $16\,\mathrm{KiB}/b$ as many cells, and the bound
@@ -1172,7 +1174,7 @@ share falls.
 Every reply cell passes $s$ relays of segment $n$, each admitting at most
 $B/V$ cells from its predecessor (iii), and consumes one SURB, of which
 each forward cell supplies $k+1$ (Prop.~\ref{prop:batch}); a reply frame
-carries at most $C_0-6$ data bytes (D2$'$), and each link emits at most
+carries at most $C_0-7$ data bytes (D2$'$), and each link emits at most
 $\rho B/V$ units\,s$^{-1}$, real cells substituting for cover (D6).  The
 forward credit cells pass $g$, segment~$0$ and $h$ under the same bound, at
 the required $98/(k+1)\approx20$ cells\,s$^{-1}$, far below it.  $Q_{\max}$
@@ -1343,7 +1345,7 @@ D4a & $\Out\ne\In$, $\WF$ before the last symbol, empty pipeline: rejected at co
 L4 & release at $\arr+L(f)$ and drop on overrun under an injected clock \\
 L5 & property test on the pure builder: vary $\bar a_j$, $j\ne i$, and $v_k\ne\vh i$; $\view_i$ bytes, lengths, and release times equal \\
 L5$'$ & builder for $H\ne H'\le\Hm$: equal layer and cell lengths at every position; every $\gamma_i$ verifies (Prop.~\ref{prop:header}); $x$ is a function of the build quantum only \\
-L3, D6 & one class $b$ and slot width $C_b$ on every edge of a loop, SURB replies included; stream frames of at most $C_0-6$ data bytes; output $>W(f)$ dropped \\
+L3, D6 & one class $b$ and slot width $C_b$ on every edge of a loop, SURB replies included; stream frames of at most $C_0-7$ data bytes; output $>W(f)$ dropped \\
 client & reply accepted once by tag $t_\cl$; unknown, reused, or expired tag dropped; $T$ empty after every $x$ passes \\
 D5, L7 & $H=(s+1)n+s$; guard at $1$ and $H$ only; $n>4$ rejected; selection fails closed below $H-1$ eligible DIDs \\
 draw order & exact-enumeration test pins exit and guard marginals (Prop.~\ref{prop:draw}); no draw fails after the first succeeds \\
