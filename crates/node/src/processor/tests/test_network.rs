@@ -508,6 +508,69 @@ async fn test_processor_e2e_handshake_exchanges_verified_public_keys() {
     }
 }
 
+/// A stream frame at `sequence` with no payload; only sequence and finality matter here.
+fn e2e_test_frame(stream_id: e2e::E2eStreamId, sequence: u64, is_final: bool) -> E2eStreamFrame {
+    E2eStreamFrame {
+        stream_id,
+        sender_public_key: SecretKey::random().pubkey(),
+        sequence,
+        is_final,
+        ciphertext: Vec::new(),
+    }
+}
+
+/// `complete_e2e_stream` under an unordered, duplicating link.
+///
+/// ```text
+/// arrivals: 3ᶠ, 0, 2, 0, 1
+/// complete after each prefix: ⊥, ⊥, ⊥, ⊥, [0, 1, 2, 3ᶠ]
+/// ```
+///
+/// The final frame overtakes the stream, the gap at sequence 1 keeps the stream incomplete,
+/// and the duplicate of sequence 0 is collapsed.
+#[test]
+fn test_complete_e2e_stream_waits_for_every_sequence_below_final() {
+    let stream_id = uuid::Uuid::new_v4();
+    let arrivals = [
+        e2e_test_frame(stream_id, 3, true),
+        e2e_test_frame(stream_id, 0, false),
+        e2e_test_frame(stream_id, 2, false),
+        e2e_test_frame(stream_id, 0, false),
+        e2e_test_frame(stream_id, 1, false),
+    ];
+    for delivered in 1..arrivals.len() {
+        assert_eq!(
+            complete_e2e_stream(arrivals.iter().take(delivered)),
+            None,
+            "{delivered} arrivals leave a gap below the final frame"
+        );
+    }
+    let complete = complete_e2e_stream(arrivals.iter()).expect("every sequence has arrived");
+    assert_eq!(
+        complete
+            .iter()
+            .map(|frame| (frame.sequence, frame.is_final))
+            .collect::<Vec<_>>(),
+        vec![(0, false), (1, false), (2, false), (3, true)]
+    );
+}
+
+/// E2E streaming over a real link, decrypted with the receiver's identity key.
+///
+/// ```text
+/// Admitted ≡ p1 ∈ peers(p2) ∧ p2 ∈ peers(p1)
+/// Complete ≡ complete_e2e_stream(inbound(p2, stream))
+///
+/// connect(p1, p2)       ⊢ ◇Admitted     awaited on `connected_notify`
+/// Admitted ; send(p1)   ⊢ ◇Complete     awaited on `inbound_notify`
+/// ```
+///
+/// Both notifies are `notify_one`, which stores a permit when no task waits, so a wake-up
+/// between a scan and the next wait is not lost. `Complete` is stable: frames are only
+/// appended, and the predicate is monotone. Arrival order is irrelevant to it, since the
+/// link does not guarantee order, and decryption is exercised in reverse order below. The
+/// fixtures use host-only ICE, so the handshake depends on no external server; the deadlines
+/// in the helpers only guard against a hang.
 #[tokio::test]
 async fn test_processor_e2e_message_streams_and_decrypts_with_receiver_identity_key() {
     let _network_guard = network_test_guard().await;

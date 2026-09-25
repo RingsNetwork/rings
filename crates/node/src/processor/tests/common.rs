@@ -8,6 +8,12 @@ use crate::consts::DATA_REDUNDANT;
 // cannot add pressure to another test's handshake.
 static NETWORK_TEST_LOCK: OnceLock<AsyncTestMutex<()>> = OnceLock::new();
 
+/// ICE servers of every processor fixture: none, so peers gather host candidates only.
+///
+/// All peers of these tests run in this process, so loopback host candidates connect them; an
+/// external STUN server would only add a network dependency whose latency no test controls.
+const TEST_ICE_SERVERS: &str = "";
+
 pub(super) fn onion_policy(
     allowed_targets: &[&str],
     denied_targets: &[&str],
@@ -96,13 +102,8 @@ pub(super) async fn prepare_processor_with_identity_key_network_and_virtual_node
     dht_virtual_nodes: u16,
 ) -> Processor {
     let delegatee_key = DelegateeKey::new_with_seckey(&identity_key).unwrap();
-    let config = ProcessorConfig::new(
-        network_id,
-        "stun://stun.l.google.com:19302".to_string(),
-        delegatee_key,
-        3,
-    )
-    .dht_virtual_nodes(dht_virtual_nodes);
+    let config = ProcessorConfig::new(network_id, TEST_ICE_SERVERS.to_string(), delegatee_key, 3)
+        .dht_virtual_nodes(dht_virtual_nodes);
     let storage = Box::new(MemStorage::new());
 
     ProcessorBuilder::from_config(&config)
@@ -167,13 +168,8 @@ pub(super) async fn prepare_processor_with_network_and_virtual_nodes(
 ) -> Processor {
     let key = SecretKey::random();
     let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
-    let config = ProcessorConfig::new(
-        network_id,
-        "stun://stun.l.google.com:19302".to_string(),
-        delegatee_key,
-        3,
-    )
-    .dht_virtual_nodes(dht_virtual_nodes);
+    let config = ProcessorConfig::new(network_id, TEST_ICE_SERVERS.to_string(), delegatee_key, 3)
+        .dht_virtual_nodes(dht_virtual_nodes);
     let storage = Box::new(MemStorage::new());
 
     ProcessorBuilder::from_config(&config)
@@ -199,12 +195,7 @@ pub(super) async fn prepare_processor_with_online_node_type(
 ) -> Processor {
     let key = SecretKey::random();
     let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
-    let config = ProcessorConfig::new(
-        0,
-        "stun://stun.l.google.com:19302".to_string(),
-        delegatee_key,
-        3,
-    );
+    let config = ProcessorConfig::new(0, TEST_ICE_SERVERS.to_string(), delegatee_key, 3);
     let storage = Box::new(MemStorage::new());
 
     ProcessorBuilder::from_config(&config)
@@ -329,12 +320,7 @@ pub(super) fn mismatched_storage_redundancy(value: u16) -> u16 {
 pub(super) async fn prepare_measured_processor() -> Processor {
     let key = SecretKey::random();
     let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
-    let config = ProcessorConfig::new(
-        0,
-        "stun://stun.l.google.com:19302".to_string(),
-        delegatee_key,
-        3,
-    );
+    let config = ProcessorConfig::new(0, TEST_ICE_SERVERS.to_string(), delegatee_key, 3);
     let storage = Box::new(MemStorage::new());
     let measure = PeriodicMeasure::new(Box::new(MemStorage::new()))
         .await
@@ -574,6 +560,43 @@ pub(super) async fn wait_for_inbound_message(
     }
 }
 
+/// The complete stream carried by `frames`, ordered by sequence, or `None` while incomplete.
+///
+/// The overlay link makes no ordering guarantee, so arrival order is irrelevant. With
+/// `S = { f.sequence | f ∈ frames }` and a final frame at sequence `n`:
+///
+/// ```text
+/// complete(frames) ≡ ∃ f ∈ frames. f.is_final ∧ S ⊇ {0, …, f.sequence}
+/// ```
+///
+/// Frames are deduplicated by sequence, so the result holds exactly `n + 1` frames. The
+/// predicate is monotone in `frames`: once complete, more arrivals keep it complete.
+pub(super) fn complete_e2e_stream<'a>(
+    frames: impl IntoIterator<Item = &'a E2eStreamFrame>,
+) -> Option<Vec<E2eStreamFrame>> {
+    let by_sequence = frames
+        .into_iter()
+        .map(|frame| (frame.sequence, frame))
+        .collect::<BTreeMap<_, _>>();
+    let last = by_sequence.values().find(|frame| frame.is_final)?.sequence;
+    let expected = usize::try_from(last).ok()?.checked_add(1)?;
+    let prefix = by_sequence
+        .range(..=last)
+        .map(|(_, frame)| E2eStreamFrame::clone(frame))
+        .collect::<Vec<_>>();
+    (prefix.len() == expected).then_some(prefix)
+}
+
+/// Await the complete E2E stream `stream_id` on `callback`, in sequence order.
+///
+/// ```text
+/// loop:  frames := inbound(stream_id) ;  complete(frames) ? return : await inbound_notify
+/// ```
+///
+/// Law (no lost wake-up): `on_inbound` appends under the lock and then calls `notify_one`,
+/// which stores a permit when no task waits. A frame that arrives between the scan and the
+/// wait therefore leaves a permit that wakes the next wait. The deadline guards only against a
+/// hang; completion is the event.
 pub(super) async fn wait_for_e2e_stream_frames(
     callback: &SwarmCallbackInstance,
     stream_id: e2e::E2eStreamId,
@@ -582,25 +605,20 @@ pub(super) async fn wait_for_e2e_stream_frames(
     loop {
         {
             let inbound = callback.inbound.lock().unwrap();
-            let frames = inbound
-                .iter()
-                .filter_map(|msg| match msg {
-                    Message::E2eStreamFrame(frame) if frame.stream_id == stream_id => {
-                        Some(frame.clone())
-                    }
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            if frames.iter().any(|frame| frame.is_final) {
+            let frames = inbound.iter().filter_map(|msg| match msg {
+                Message::E2eStreamFrame(frame) if frame.stream_id == stream_id => Some(frame),
+                _ => None,
+            });
+            if let Some(frames) = complete_e2e_stream(frames) {
                 return frames;
             }
         }
 
         let remaining = deadline
             .checked_duration_since(Instant::now())
-            .expect("E2E stream final frame was not delivered");
+            .expect("E2E stream was not delivered completely");
         tokio::time::timeout(remaining, callback.inbound_notify.notified())
             .await
-            .expect("E2E stream final frame was not delivered");
+            .expect("E2E stream was not delivered completely");
     }
 }
