@@ -64,6 +64,8 @@ const GOLDEN_DATA_WITH_TARGET: &str = "000000000501000f6578616d706c652e636f6d3a3
 const GOLDEN_DATA: &str = "00000000060078797a";
 /// Pinned `enc(fin(7))`.
 const GOLDEN_FIN: &str = "0100000007";
+/// Pinned `enc(abort(9))`.
+const GOLDEN_ABORT: &str = "0300000009";
 /// Pinned `H(enc(credit(υ)))` of the fixture reply block.
 const GOLDEN_CREDIT_DIGEST: &str =
     "fb3590462a35db66bf2deca51264d9a42f97d35c4ce2b915cd2fd9d696c19957";
@@ -183,6 +185,12 @@ fn test_session_frames_are_pinned() {
             sequence: OnionSequence::new(7),
         },
         GOLDEN_FIN,
+    );
+    assert_frame(
+        &OnionFrame::Abort {
+            sequence: OnionSequence::new(9),
+        },
+        GOLDEN_ABORT,
     );
 }
 

@@ -104,7 +104,7 @@ async fn test_tcp_loop_echoes_a_multi_frame_stream() -> Result<()> {
     Ok(())
 }
 
-/// A target the exit policy denies is refused at the open: `fin` before any data, and no
+/// A target the exit policy denies is refused at the open: `abort` before any data, and no
 /// reason on the wire (#843 Q5).
 #[tokio::test]
 #[ignore = "five real-WebRTC nodes; ~290 ms per send until #887 overruns 30 s bounds (#883)"]

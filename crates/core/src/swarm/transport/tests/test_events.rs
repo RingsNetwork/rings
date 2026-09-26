@@ -89,8 +89,17 @@ async fn test_slow_connected_event_for_one_peer_does_not_block_other_peer_events
             .map_err(|error| Error::InvalidMessage(error.to_string()))
     });
 
+    let other_offer_callback =
+        InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
+    let (other_attempt, _offer) = transport
+        .prepare_connection_offer_with_attempt(other_peer, other_offer_callback)
+        .await?;
+
     app_callback.wait_for_connected_event_started().await;
-    let other_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
+    // A state is reported only for a bound generation, so the unrelated peer's callback is
+    // bound to its own attempt.
+    let other_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone())
+        .with_pending_connection_attempt(other_attempt);
     tokio::time::timeout(
         std::time::Duration::from_millis(100),
         other_callback.on_peer_connection_state_change(

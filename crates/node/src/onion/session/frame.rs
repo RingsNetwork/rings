@@ -4,13 +4,18 @@
 //! enc(data(n, φ, w))    = 00 ‖ n:u32 ‖ φ ‖ w       |w| ≤ C₀ − 7
 //! enc(fin(n))           = 01 ‖ n:u32
 //! enc(credit(υ₁ … υ_k)) = 02 ‖ υ₁ ‖ … ‖ υ_k         |υ| = 2979, k ≥ 1
+//! enc(abort(n))         = 03 ‖ n:u32
 //! φ = T·2⁰,  T ⇒ w = |t|:u16 ‖ t ‖ w′              the other bits of φ are 0
 //! ```
 //!
-//! `n` is the per-direction sequence of `data` and `fin`, starting at 0; `credit` is unsequenced
-//! and flows client-to-`h` only. The flag `T` carries the session target `t` inline, so any loop
-//! can open the session and none is dedicated to opening; its other bits are reserved for
-//! message-oriented symbols (#847) and fail closed until then.
+//! `n` is the per-direction sequence of `data`, `fin` and `abort`, starting at 0; `credit` is
+//! unsequenced and flows client-to-`h` only. `fin` ends a direction whose bytes really ended;
+//! `abort` fails the session, carrying no reason (#834 D2′, #843 Q5), and is never an end of
+//! stream: a receiver applies it on arrival, since nothing after it counts. Every frame fills
+//! one uniform cell, so a relay cannot tell an `abort` from any other frame. The flag `T`
+//! carries the session target `t` inline, so any loop can open the session and none is
+//! dedicated to opening; its other bits are reserved for message-oriented symbols (#847) and
+//! fail closed until then.
 //!
 //! Laws (tested in `session::tests`):
 //!
@@ -21,7 +26,8 @@
 //!   `C₀ − 7` for `data` without `T` (six bytes of frame, one of padding marker), and a `credit`
 //!   frame holds at most `k = ⌊(C₀ − 2) / |υ|⌋` blocks (`k = 4` at 16 KiB).
 //! - **Closure.** Every other tag byte, a reserved flag bit, a truncated field, a `credit` whose
-//!   length is not a whole number of blocks, and trailing bytes after `fin` are rejected.
+//!   length is not a whole number of blocks, and trailing bytes after `fin` or `abort` are
+//!   rejected.
 
 use bytes::Bytes;
 use zeroize::Zeroizing;
@@ -39,6 +45,9 @@ const FIN_TAG: u8 = 0x01;
 /// The tag byte of a `credit` frame.
 const CREDIT_TAG: u8 = 0x02;
 
+/// The tag byte of an `abort` frame.
+const ABORT_TAG: u8 = 0x03;
+
 /// The flag `T` of `φ`: the data carries the session target inline.
 const TARGET_FLAG: u8 = 0x01;
 
@@ -48,7 +57,7 @@ const DATA_OVERHEAD_BYTES: usize = 1 + 4 + 1;
 /// Bytes of the target length `|t|` in front of `t`.
 const TARGET_LENGTH_BYTES: usize = 2;
 
-/// The per-direction sequence `n` of `data` and `fin` frames (#834 D2′).
+/// The per-direction sequence `n` of `data`, `fin` and `abort` frames (#834 D2′).
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct OnionSequence(u32);
 
@@ -93,6 +102,11 @@ pub(crate) enum OnionFrame {
     },
     /// `credit(υ₁ … υ_k)`: `k ≥ 1` further reply blocks for the session.
     Credit(Vec<OnionSurb>),
+    /// `abort(n)`: the session failed at its sender, after frame `n − 1`; no reason is given.
+    Abort {
+        /// `n`.
+        sequence: OnionSequence,
+    },
 }
 
 /// Why a frame was not encoded, so it must not be sent.
@@ -189,6 +203,10 @@ impl OnionFrame {
                 bytes.push(FIN_TAG);
                 bytes.extend_from_slice(&sequence.value().to_be_bytes());
             }
+            Self::Abort { sequence } => {
+                bytes.push(ABORT_TAG);
+                bytes.extend_from_slice(&sequence.value().to_be_bytes());
+            }
             Self::Credit(surbs) if surbs.is_empty() => {
                 return Err(OnionFrameUnencodable::EmptyCredit);
             }
@@ -241,6 +259,10 @@ impl OnionFrame {
                 (sequence, []) => Ok(Self::Fin { sequence }),
                 _ => Err(OnionFrameError::Malformed),
             },
+            ABORT_TAG => match split_sequence(rest)? {
+                (sequence, []) => Ok(Self::Abort { sequence }),
+                _ => Err(OnionFrameError::Malformed),
+            },
             CREDIT_TAG => {
                 let (blocks, []) = rest.as_chunks::<ONION_SURB_BYTES>() else {
                     return Err(OnionFrameError::Malformed);
@@ -266,6 +288,16 @@ fn split_sequence(bytes: &[u8]) -> Result<(OnionSequence, &[u8]), OnionFrameErro
         .map(|(sequence, rest)| (OnionSequence(u32::from_be_bytes(*sequence)), rest))
         .ok_or(OnionFrameError::Malformed)
 }
+
+// The four tags are pairwise distinct, so `decode` is a function of the tag byte.
+const _: () = assert!(
+    DATA_TAG != FIN_TAG
+        && DATA_TAG != CREDIT_TAG
+        && DATA_TAG != ABORT_TAG
+        && FIN_TAG != CREDIT_TAG
+        && FIN_TAG != ABORT_TAG
+        && CREDIT_TAG != ABORT_TAG
+);
 
 // The D8 figure: four reply blocks fit a 16 KiB credit frame, and a data frame carries
 // `C₀ − 7 = 13442` bytes there (`C₀ = 13449`).

@@ -2,10 +2,11 @@
 //!
 //! ```text
 //! data(w):   frame data(n, T?, w), n ← n + 1;  T is set, with t inline, until the first reply
-//! fin:       frame fin(n), n ← n + 1
+//! fin:       frame fin(n), n ← n + 1;     abort: frame abort(n), the session is given up
 //! reply(f):  replied ← ⊤;  reorder f, then per released frame, in order:
 //!   first frame   data(0, ε) ⇒ Opened      fin ⇒ Refused (a fin before any data: no reason given)
 //!   later frames  data(w)    ⇒ Data(w)     fin ⇒ Fin
+//!   abort(n), on arrival      ⇒ Refused before the open is decided, Aborted after it
 //! credit:    want min(W, Q_max) reply blocks outstanding at h; each forward loop leaves one and a
 //!            full credit loop k + 1, so the deficit D asks ⌊D / (k + 1)⌋ full credit loops: the
 //!            window refills only once it is k + 1 short, a hysteresis of one loop
@@ -21,6 +22,9 @@
 //! - **Sequence.** Forward frames carry `n = 0, 1, …`; replies are released in their order.
 //! - **Open result.** The first released reply decides the open: `data(0, ε)` is the ack, `fin`
 //!   is a refusal (#843 Q5).
+//! - **Abort.** An `abort` is a failure, never an end of stream: it yields `Aborted` (or
+//!   `Refused` before the open), at once and whatever is still missing before it, and nothing
+//!   after it, so a stream `h` could not finish is never presented as complete.
 //! - **Credit.** The window never asks for more than `min(W, Q_max)` outstanding blocks. The
 //!   client's count tracks the blocks at `h` up to replies in flight, loss and clock skew at an
 //!   expiry: `h` spends the block of least expiry first, and so does [`OnionClientCredit`]; both
@@ -56,6 +60,8 @@ pub(crate) enum OnionClientEvent {
     Data(Bytes),
     /// The world closed its stream.
     Fin,
+    /// `h` gave the session up: the stream is incomplete.
+    Aborted,
 }
 
 /// Why the session can send no further frame: its 32-bit sequence space is spent.
@@ -76,6 +82,8 @@ pub(crate) struct OnionClientSession {
     decided: bool,
     /// The `h`-to-client direction.
     replies: OnionReorder<OnionStreamFrame>,
+    /// Whether `h` aborted: every later reply is ignored.
+    aborted: bool,
 }
 
 impl OnionClientSession {
@@ -88,6 +96,7 @@ impl OnionClientSession {
             replied: false,
             decided: false,
             replies: OnionReorder::default(),
+            aborted: false,
         }
     }
 
@@ -124,6 +133,16 @@ impl OnionClientSession {
         self.advance().map(|sequence| OnionFrame::Fin { sequence })
     }
 
+    /// The next `abort(n)` frame: the client gives the session up.
+    ///
+    /// # Errors
+    ///
+    /// [`OnionSequenceExhausted`] once the sequence space is spent.
+    pub(crate) fn abort(&mut self) -> Result<OnionFrame, OnionSequenceExhausted> {
+        self.advance()
+            .map(|sequence| OnionFrame::Abort { sequence })
+    }
+
     /// One reply of the session at `now`, returning what it releases, in order.
     ///
     /// # Errors
@@ -136,6 +155,9 @@ impl OnionClientSession {
         frame: OnionFrame,
     ) -> Result<Vec<OnionClientEvent>, OnionSequenceGap> {
         self.replied = true;
+        if self.aborted {
+            return Ok(Vec::new());
+        }
         let (sequence, frame) = match frame {
             OnionFrame::Data {
                 sequence, payload, ..
@@ -146,6 +168,16 @@ impl OnionClientSession {
             OnionFrame::Fin { sequence } => (sequence, OnionStreamFrame::Fin),
             // `h` never sends credit; one that does is ignored.
             OnionFrame::Credit(_) => return Ok(Vec::new()),
+            // Applied on arrival: nothing before it that is still missing will count.
+            OnionFrame::Abort { .. } => {
+                self.aborted = true;
+                let decided = std::mem::replace(&mut self.decided, true);
+                return Ok(vec![if decided {
+                    OnionClientEvent::Aborted
+                } else {
+                    OnionClientEvent::Refused
+                }]);
+            }
         };
         Ok(self
             .replies

@@ -199,7 +199,7 @@ async fn backend_translates_admission_and_retirement_only() {
     let state_change = |state: WebrtcConnectionState| SwarmEvent::ConnectionStateChange {
         peer: managed,
         state,
-        generation: Some(0),
+        generation: 0,
     };
 
     let mut admitted = evidence

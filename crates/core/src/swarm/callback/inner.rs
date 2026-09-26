@@ -243,7 +243,7 @@ impl InnerSwarmCallback {
                     delivery_turn,
                     did,
                     WebrtcConnectionState::Connected,
-                    Some(attempt.generation()),
+                    attempt.generation(),
                 )
                 .await?;
                 Ok(true)
@@ -255,31 +255,29 @@ impl InnerSwarmCallback {
         &self,
         did: Did,
         state: WebrtcConnectionState,
-        attempt: Option<PendingConnectionAttempt>,
+        attempt: PendingConnectionAttempt,
     ) -> Result<(), CallbackError> {
         let transport = &self.processor.logical.transport;
         transport
             .with_delivery_turn(did, |delivery_turn| async move {
-                if let Some(attempt) = attempt {
-                    match transport.connection_event_disposition(attempt)? {
-                        ConnectionEventDisposition::Deliver => {}
-                        ConnectionEventDisposition::Suppress { active } => {
-                            tracing::debug!(
-                                peer = %did,
-                                generation = attempt.generation(),
-                                active_generation = active.generation(),
-                                state = ?state,
-                                "suppressing connection event from superseded generation"
-                            );
-                            return Ok(());
-                        }
+                match transport.connection_event_disposition(attempt)? {
+                    ConnectionEventDisposition::Deliver => {}
+                    ConnectionEventDisposition::Suppress { active } => {
+                        tracing::debug!(
+                            peer = %did,
+                            generation = attempt.generation(),
+                            active_generation = active.generation(),
+                            state = ?state,
+                            "suppressing connection event from superseded generation"
+                        );
+                        return Ok(());
                     }
                 }
                 self.emit_connection_state_change_after_ordered_start(
                     delivery_turn,
                     did,
                     state,
-                    attempt.map(PendingConnectionAttempt::generation),
+                    attempt.generation(),
                 )
                 .await
             })
@@ -291,7 +289,7 @@ impl InnerSwarmCallback {
         delivery_turn: crate::swarm::transport::SwarmEventDeliveryTurn,
         did: Did,
         state: WebrtcConnectionState,
-        generation: Option<u64>,
+        generation: u64,
     ) -> Result<(), CallbackError> {
         let event = SwarmEvent::ConnectionStateChange {
             peer: did,
@@ -678,7 +676,11 @@ impl TransportCallback for InnerSwarmCallback {
         // Other state changes are passed through directly, unless this exact
         // callback completed admission and already emitted the ordered Connected event.
         if s != WebrtcConnectionState::Connected && !admission_completed {
-            self.emit_connection_state_change(did, s, self.pending_attempt())
+            let Some(attempt) = self.pending_attempt() else {
+                tracing::debug!("ignoring unbound {s:?} connection state for {did}");
+                return Ok(());
+            };
+            self.emit_connection_state_change(did, s, attempt)
                 .await
                 .map_err(into_transport_callback_error)?
         }

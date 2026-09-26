@@ -189,7 +189,7 @@ async fn test_retirement_is_reported_between_admission_and_terminal_state() -> R
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
     assert!(!transport.is_active_connection_attempt(attempt));
-    let generation = Some(attempt.generation());
+    let generation = attempt.generation();
     let state = |state| SwarmEvent::ConnectionStateChange {
         peer,
         state,
@@ -204,6 +204,33 @@ async fn test_retirement_is_reported_between_admission_and_terminal_state() -> R
         },
         state(WebrtcConnectionState::Failed),
     ]);
+    Ok(())
+}
+
+/// A state is reported only for a generation (#895 A-L5): a callback bound to no attempt
+/// reports nothing, so every `ConnectionStateChange` names the generation it belongs to.
+#[cfg(feature = "dummy")]
+#[tokio::test]
+async fn test_an_unbound_callback_reports_no_state() -> Result<()> {
+    let transport = Arc::new(transport_with_measure(Arc::new(
+        RecordingMeasure::default(),
+    ))?);
+    let peer: Did = SecretKey::random().address().into();
+    let log = Arc::new(EventLog::default());
+    let callback = InnerSwarmCallback::new(Arc::clone(&transport), log.clone());
+
+    for state in [
+        WebrtcConnectionState::New,
+        WebrtcConnectionState::Connecting,
+        WebrtcConnectionState::Disconnected,
+        WebrtcConnectionState::Failed,
+    ] {
+        callback
+            .on_peer_connection_state_change(&peer.to_string(), state)
+            .await
+            .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+    }
+    assert_eq!(log.events(), Vec::new());
     Ok(())
 }
 

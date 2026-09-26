@@ -128,6 +128,9 @@ fn test_frames_round_trip_at_their_width_bounds() {
     round_trip(&OnionFrame::Fin {
         sequence: OnionSequence::new(u32::MAX),
     });
+    round_trip(&OnionFrame::Abort {
+        sequence: OnionSequence::new(u32::MAX),
+    });
     let credit = OnionFrame::Credit(surbs(10, OnionFrame::credit_capacity(CLASS), 0));
     assert_eq!(OnionFrame::credit_capacity(CLASS), 4);
     round_trip(&credit);
@@ -141,11 +144,16 @@ fn test_frames_round_trip_at_their_width_bounds() {
     assert!(OnionFrame::Credit(surbs(11, 5, 0)).encode(CLASS).is_err());
 }
 
-/// Closure: unknown tags, reserved flags, truncated fields, trailing bytes after `fin`, and
-/// `credit` frames of no or partial blocks are rejected.
+/// Closure: unknown tags, reserved flags, truncated fields, trailing bytes after `fin` or
+/// `abort`, and `credit` frames of no or partial blocks are rejected.
 #[test]
 fn test_malformed_frames_are_rejected() {
     let fin = OnionFrame::Fin {
+        sequence: OnionSequence::FIRST,
+    }
+    .encode(CLASS)
+    .expect("fits");
+    let abort = OnionFrame::Abort {
         sequence: OnionSequence::FIRST,
     }
     .encode(CLASS)
@@ -157,7 +165,8 @@ fn test_malformed_frames_are_rejected() {
     credit.pop();
     for (bytes, error) in [
         (Vec::new(), OnionFrameError::Tag),
-        (vec![0x03], OnionFrameError::Tag),
+        (vec![0x04], OnionFrameError::Tag),
+        (vec![0x03, 0, 0], OnionFrameError::Malformed),
         (vec![0x00, 0, 0, 0, 0, 0x02], OnionFrameError::Flags(0x02)),
         (vec![0x00, 0, 0, 0], OnionFrameError::Malformed),
         (
@@ -165,6 +174,10 @@ fn test_malformed_frames_are_rejected() {
             OnionFrameError::Malformed,
         ),
         ([fin.as_slice(), &[0]].concat(), OnionFrameError::Malformed),
+        (
+            [abort.as_slice(), &[0]].concat(),
+            OnionFrameError::Malformed,
+        ),
         (vec![0x02], OnionFrameError::Malformed),
         (credit, OnionFrameError::Malformed),
     ] {
@@ -580,8 +593,8 @@ fn test_exit_session_rejects_an_unbound_or_mismatching_target() {
     ]);
 }
 
-/// A refused open replies `fin(0)` and closes; an ack without a block waits for credit, and the
-/// credit resumes the session.
+/// A refused open replies `abort(0)` and closes; an ack without a block waits for credit, and
+/// the credit resumes the session.
 #[test]
 fn test_exit_session_refusal_and_credit_resumption() {
     let mut refused = OnionExitSession::new(arguments().digest, NOW_MS);
@@ -601,6 +614,23 @@ fn test_exit_session_refusal_and_credit_resumption() {
         Some(OnionFrame::data_capacity(CLASS)),
         "new credit resumes reading"
     );
+}
+
+/// A client `abort` closes the session on arrival, with no reply: held world bytes are dropped
+/// and a closed session ignores every later frame.
+#[test]
+fn test_exit_session_closes_on_a_client_abort() {
+    let mut blocks = surbs(60, 5, 0).into_iter();
+    let mut session = acked(&mut blocks);
+    let mut next = || blocks.next().expect("a fixture block");
+    // A sequence far ahead of the reorder window: an abort is still applied on arrival.
+    let abort = OnionFrame::Abort {
+        sequence: OnionSequence::new(10_000),
+    };
+
+    assert_eq!(kinds(&session.forward(NOW_MS, abort, next())), ["close"]);
+    assert!(session.is_closed());
+    assert!(kinds(&session.forward(NOW_MS, opening(1, b"late"), next())).is_empty());
 }
 
 /// `V` without a forward loop closes the session.
@@ -686,6 +716,70 @@ fn test_client_session_reads_a_first_fin_as_a_refusal() {
         session.reply(NOW_MS, fin),
         Ok(vec![OnionClientEvent::Refused])
     );
+}
+
+/// An `abort` after the open is `Aborted`, applied on arrival and never an end of stream: a
+/// `fin` held behind a gap is not released as one, and every later frame is ignored.
+#[test]
+fn test_client_session_reads_abort_as_a_failure_never_eof() {
+    let mut session = OnionClientSession::new(Bytes::from_static(TARGET));
+    let ack = OnionFrame::Data {
+        sequence: OnionSequence::FIRST,
+        target: None,
+        payload: Bytes::new(),
+    };
+    let data = OnionFrame::Data {
+        sequence: OnionSequence::new(1),
+        target: None,
+        payload: Bytes::from_static(b"part"),
+    };
+    let held_fin = OnionFrame::Fin {
+        sequence: OnionSequence::new(3),
+    };
+    let abort = OnionFrame::Abort {
+        sequence: OnionSequence::new(4),
+    };
+    let missing = OnionFrame::Data {
+        sequence: OnionSequence::new(2),
+        target: None,
+        payload: Bytes::from_static(b"rest"),
+    };
+
+    assert_eq!(
+        session.reply(NOW_MS, ack),
+        Ok(vec![OnionClientEvent::Opened])
+    );
+    assert_eq!(
+        session.reply(NOW_MS, data),
+        Ok(vec![OnionClientEvent::Data(Bytes::from_static(b"part"))])
+    );
+    assert_eq!(session.reply(NOW_MS, held_fin), Ok(Vec::new()));
+    assert_eq!(
+        session.reply(NOW_MS, abort),
+        Ok(vec![OnionClientEvent::Aborted])
+    );
+    assert_eq!(session.reply(NOW_MS, missing), Ok(Vec::new()));
+}
+
+/// An `abort` before any data is a refusal, and the client's own `abort` is sequenced like any
+/// frame it sends.
+#[test]
+fn test_client_session_reads_a_first_abort_as_a_refusal() {
+    let mut session = OnionClientSession::new(Bytes::from_static(TARGET));
+    let abort = OnionFrame::Abort {
+        sequence: OnionSequence::FIRST,
+    };
+    assert_eq!(
+        session.reply(NOW_MS, abort),
+        Ok(vec![OnionClientEvent::Refused])
+    );
+
+    let mut giving_up = OnionClientSession::new(Bytes::from_static(TARGET));
+    giving_up.data(Bytes::new()).expect("sequence left");
+    let Ok(OnionFrame::Abort { sequence }) = giving_up.abort() else {
+        panic!("an abort frame");
+    };
+    assert_eq!(sequence.value(), 1);
 }
 
 /// The credit window asks `⌊D / (k + 1)⌋` full loops, so it never exceeds `min(W, Q_max)` and

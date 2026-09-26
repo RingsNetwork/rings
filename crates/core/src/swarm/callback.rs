@@ -168,10 +168,10 @@ pub enum SwarmEvent {
         peer: Did,
         /// The final state of the connection.
         state: WebrtcConnectionState,
-        /// The generation of the connection the state belongs to, when the reporting
-        /// connection is bound to one. Always `Some` for `Connected`, which is emitted only
-        /// for the generation just admitted.
-        generation: Option<u64>,
+        /// The generation of the connection the state belongs to: every reported connection
+        /// is bound to the attempt that reserved it, and `Connected` names the generation just
+        /// admitted. A callback not bound to an attempt reports no state at all.
+        generation: u64,
     },
     /// An admitted peer's connection record was retired and its transport is being closed: the
     /// peer left the local DHT. Emitted from the one retirement transition, whatever reached it
@@ -243,21 +243,10 @@ impl SwarmEvent {
             Self::ConnectionStateChange {
                 peer,
                 state: WebrtcConnectionState::Connected,
-                generation: Some(generation),
+                generation,
             } => Some((PeerLink::new(peer, generation), PeerTransition::Admitted)),
             Self::PeerRetired { peer, generation } => {
                 Some((PeerLink::new(peer, generation), PeerTransition::Retired))
-            }
-            // The one emitter of `Connected` names its generation, so this arm is a broken
-            // invariant: surface it rather than lose the admission silently.
-            Self::ConnectionStateChange {
-                peer,
-                state: WebrtcConnectionState::Connected,
-                generation: None,
-            } => {
-                debug_assert!(false, "Connected without a generation for {peer}");
-                tracing::error!(%peer, "a Connected event carries no generation; admission lost");
-                None
             }
             Self::ConnectionStateChange { .. } => None,
         }

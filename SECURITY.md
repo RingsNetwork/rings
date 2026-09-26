@@ -379,6 +379,19 @@ hide the active/idle phase of each link from an observer that watches it.
   owners that hold those topics;
 - the first hop learns the client DID.
 
+**Session ends fail closed.** A session direction ends in one of two ways: `fin(n)`,
+sent only when that direction's bytes really ended, or `abort(n)`, sent on any failure (a
+world error, a spent byte policy, a sequence gap, a target rebind, a refused open, or a
+client that gives the session up) and carrying no reason. A receiver applies `abort` on
+arrival and reads it as a failure, never as an end of stream: the client resets its local
+TCP stream (an RST, not a FIN) instead of closing it, a CONNECT that the exit refuses is
+answered `502`, and an `https` fetch fails. A truncated stream is therefore never presented
+as a complete one. Every frame fills one uniform cell, so relays cannot tell an `abort` from
+any other frame. An exit that holds no reply block cannot send `abort` and closes silently;
+the client then relies on the reply timeout of an outstanding request (the open, an `https`
+response), and an idle session is never failed for being idle. The gateway's captured flows
+cannot yet carry a reset across the gateway boundary (#902).
+
 **Candidate set.** Route security depends on the candidate set as much as on the
 loop protocol. In an authenticated-open overlay, a Sybil operator can try to
 appear in several positions of one route unless the deployment adds independent

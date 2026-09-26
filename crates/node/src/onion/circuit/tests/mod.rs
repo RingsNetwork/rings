@@ -4,6 +4,7 @@
 //! scalars, and time is an argument, so a failure reproduces bit for bit.
 
 mod test_hop;
+mod test_session_ends;
 mod test_tags;
 mod test_wire_golden;
 

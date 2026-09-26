@@ -5,7 +5,7 @@
 //! phase:  Unbound ──T-frame, SHA-256(t) = d──▶ Opening ──opened──▶ Open(ack pending)
 //!            │  T-frame, SHA-256(t) ≠ d                │ refused        │ υ available
 //!            │  or data/fin before any T               ▼                ▼
-//!            └────────────────────────────────▶ Closed ◀── fin(0) ── Open(acked)
+//!            └────────────────────────────────▶ Closed ◀─ abort(0) ─ Open(acked)
 //!
 //! forward(t, f, υ):  Q ← Q ∪ {υ};  f = credit(υ…) ⇒ Q ← Q ∪ υ…;  f ∈ {data, fin} ⇒ reorder,
 //!                    then per released frame, in order:
@@ -13,8 +13,9 @@
 //!                a later T naming another target ⇒ abort
 //!   fin          ⇒ ShutdownWrite
 //!                    then drain the held world bytes into the new credit
+//! forward abort(n):  the client gave up ⇒ Close, on arrival (no reply)
 //! opened(ok):        ok ⇒ Open, reply data(0, 0, ε) once some υ is available
-//!                    ¬ok ⇒ reply fin(0), Close
+//!                    ¬ok ⇒ abort
 //! world(w | eof):    held ← held ‖ w (or eof);  drain
 //! drain:             while held ≠ ε ∧ υ = least x exists:  reply data(n, 0, w′), w′ ≤ cap(υ)
 //!                    held = ε ∧ eof ∧ υ exists ⇒ reply fin(n)
@@ -22,7 +23,8 @@
 //!                    a persisting gap ⇒ abort
 //!                    t − last forward ≥ V, or both directions closed ⇒ Close
 //! fail(t):           the world failed ⇒ abort
-//! abort:             reply fin(n) if a block is left, then Close (fail closed, #834 D2′)
+//! abort:             reply abort(n) if a block is left, then Close (fail closed, #834 D2′);
+//!                    held bytes are dropped, since the stream ends failed
 //! ```
 //!
 //! Laws (tested in `session::tests`):
@@ -36,11 +38,13 @@
 //! - **Binding.** `Open(t)` is emitted at most once, and only for `SHA-256(t) = d`; a later `T`
 //!   naming another target aborts the session.
 //! - **Ack.** The first reply of an opened session is `data(0, 0, ε)`, and a refused one's only
-//!   reply is `fin(0)` (#843 Q5); world bytes are never replied before the ack.
+//!   reply is `abort(0)` (#843 Q5); world bytes are never replied before the ack.
 //! - **Order.** Forward frames reach the world in sequence order, each once; replies carry
 //!   `n = 0, 1, …`.
-//! - **Fail closed.** A gap or a world failure spends a remaining block on `fin(n)` before the
-//!   session closes, so the client learns of it in one loop instead of by its own timeout.
+//! - **Fail closed.** A gap, a world failure, a spent byte policy or a rebind spends a remaining
+//!   block on `abort(n)` before the session closes, so the client learns of it in one loop, as
+//!   a failure; `fin` is sent only when the world's bytes really ended. Without a block the
+//!   session closes silently, and the client's own request timeout decides.
 
 use std::collections::VecDeque;
 
@@ -200,6 +204,11 @@ impl OnionExitSession {
             OnionFrame::Fin { sequence } => {
                 self.release(now_ms, sequence, OnionStreamFrame::Fin, &mut effects);
             }
+            // The client gave the session up: stop reading the world at once.
+            OnionFrame::Abort { .. } => {
+                self.close(&mut effects);
+                return effects;
+            }
         }
         self.flush_ack(now_ms, &mut effects);
         self.drain(now_ms, &mut effects);
@@ -216,8 +225,7 @@ impl OnionExitSession {
             self.phase = OnionExitPhase::Open { acked: false };
             self.flush_ack(now_ms, &mut effects);
         } else {
-            self.reply_frame(now_ms, ReplyKind::Fin, &mut effects);
-            self.close(&mut effects);
+            self.abort(now_ms, &mut effects);
         }
         effects
     }
@@ -374,15 +382,15 @@ impl OnionExitSession {
         }
     }
 
-    /// Fail closed: reply `fin(n)` if the world's stream is still open and a block is left, then
-    /// close. After the world's own `fin` nothing more is replied.
+    /// Fail closed: reply `abort(n)` if a block is left, then close; held bytes are dropped,
+    /// since nothing after an `abort` counts.
     fn abort(&mut self, now_ms: u128, effects: &mut Vec<OnionExitEffect>) {
         if self.is_closed() {
             return;
         }
-        if !self.read_closed && self.reply.is_some() && !self.pool.is_empty(now_ms) {
-            self.reply_frame(now_ms, ReplyKind::Fin, effects);
-        }
+        self.held.clear();
+        self.eof_held = false;
+        self.reply_frame(now_ms, ReplyKind::Abort, effects);
         self.close(effects);
     }
 
@@ -401,6 +409,7 @@ impl OnionExitSession {
                 payload,
             },
             ReplyKind::Fin => OnionFrame::Fin { sequence },
+            ReplyKind::Abort => OnionFrame::Abort { sequence },
         };
         // A data frame is cut to its own block's capacity (`drain`), so `encode` refuses
         // nothing here; a weak key of the block has probability 2^−124.
@@ -432,4 +441,6 @@ enum ReplyKind {
     Data(Bytes),
     /// `fin(n)`.
     Fin,
+    /// `abort(n)`.
+    Abort,
 }

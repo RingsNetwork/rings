@@ -9,6 +9,8 @@
 //!          loop select
 //!            user Data(w)  ─▶ data(n, T?, w′) per chunk w′ ≤ capacity, one loop each (awaited)
 //!            user Fin      ─▶ fin(n)                                                (awaited)
+//!            user gone     ─▶ abort(n), unless both directions ended                (queued)
+//!            reply abort   ─▶ Failed to the user; the session is over
 //!            reply         ─▶ credit.replied;  machine.reply ⇒ events to the user
 //!            tick          ─▶ gap check;  one credit loop if keep_alive_due          (queued)
 //!          top up:  ⌊(min(W, Q_max) − outstanding) / (k + 1)⌋ full credit loops    (queued)
@@ -127,6 +129,54 @@ impl OnionClientStream {
     }
 }
 
+/// The driver's side of a stream whose driver is a test: it emits the stream's events and
+/// observes its commands; the native `tcp` pump's tests drive their stream with it.
+#[cfg(all(test, rings_native))]
+pub(crate) struct OnionTestDriver {
+    /// The stream's event queue.
+    events: mpsc::Sender<OnionStreamEvent>,
+    /// The stream's command queue.
+    commands: mpsc::Receiver<OnionStreamCommand>,
+}
+
+#[cfg(all(test, rings_native))]
+impl OnionClientStream {
+    /// A stream driven by the returned [`OnionTestDriver`] instead of a session driver.
+    pub(crate) fn driven_by_test() -> (Self, OnionTestDriver) {
+        let (commands, received) = mpsc::channel(ONION_SESSION_QUEUE);
+        let (events, delivered) = mpsc::channel(ONION_SESSION_QUEUE);
+        (
+            Self {
+                commands,
+                events: delivered,
+            },
+            OnionTestDriver {
+                events,
+                commands: received,
+            },
+        )
+    }
+}
+
+#[cfg(all(test, rings_native))]
+impl OnionTestDriver {
+    /// Emit `event` to the stream's user.
+    pub(crate) async fn emit(&mut self, event: OnionStreamEvent) {
+        self.events
+            .send(event)
+            .await
+            .expect("the user holds the stream");
+    }
+
+    /// Wait for the user's next command: whether it is `fin`, `None` once the user is gone.
+    pub(crate) async fn next_is_fin(&mut self) -> Option<bool> {
+        self.commands
+            .next()
+            .await
+            .map(|command| matches!(command, OnionStreamCommand::Fin))
+    }
+}
+
 /// The sending half of an [`OnionClientStream`].
 pub(crate) struct OnionStreamSender {
     /// The driver's command queue.
@@ -205,6 +255,7 @@ pub(crate) async fn open(
         credit: OnionClientCredit::default(),
         last_forward_ms: 0,
         fin_sent: false,
+        given_up: false,
         world_ended: false,
     };
     Spawner::current()?.spawn(driver.run(received, events, opened));
@@ -244,6 +295,8 @@ struct OnionSessionDriver {
     last_forward_ms: u128,
     /// Whether this direction's `fin` has been sent.
     fin_sent: bool,
+    /// Whether the session is given up, by `h` or by the client: nothing more is sent.
+    given_up: bool,
     /// Whether the world's `fin` has arrived: `h` replies nothing more, so no credit is sent.
     world_ended: bool,
 }
@@ -282,8 +335,10 @@ impl OnionSessionDriver {
                     Some(OnionStreamCommand::Data(bytes)) => self.upload(bytes, &sink).await,
                     Some(OnionStreamCommand::Fin) => self.finish(&sink).await,
                     None => {
-                        // The user is gone without a `fin`: tell `h`, best effort.
-                        self.abort(&sink);
+                        // The user is gone: give the session up, unless both directions ended.
+                        if !(self.fin_sent && self.world_ended) {
+                            self.abort(&sink);
+                        }
                         return;
                     }
                 },
@@ -303,7 +358,7 @@ impl OnionSessionDriver {
                 },
             };
             if step.and_then(|()| self.top_up(&sink)).is_err() {
-                // Fail closed: `h` learns of it by our `fin`, the user by `Failed`.
+                // Fail closed: `h` learns of it by our `abort`, the user by `Failed`.
                 self.abort(&sink);
                 let _ = events.send(OnionStreamEvent::Failed).await;
                 return;
@@ -342,6 +397,13 @@ impl OnionSessionDriver {
                     self.world_ended = true;
                     events.send(OnionStreamEvent::Fin).await
                 }
+                // `h` gave the session up and dropped it: a failure, never an end of stream,
+                // and nothing to tell `h` back.
+                OnionClientEvent::Aborted => {
+                    self.given_up = true;
+                    let _ = events.send(OnionStreamEvent::Failed).await;
+                    return OnionReplyFlow::Stop;
+                }
             };
             if forwarded.is_err() {
                 return OnionReplyFlow::Stop;
@@ -372,15 +434,16 @@ impl OnionSessionDriver {
         self.send(&frame, sink).await
     }
 
-    /// Fail closed toward `h`: queue `fin(n)` if this direction is still open, best effort.
+    /// Give the session up toward `h`: queue `abort(n)` once, best effort, so `h` drops the
+    /// session and stops reading the world at once.
     fn abort(&mut self, sink: &OnionReplySink) {
-        if self.fin_sent {
+        if self.given_up {
             return;
         }
-        self.fin_sent = true;
-        if let Ok(frame) = self.machine.fin() {
+        self.given_up = true;
+        if let Ok(frame) = self.machine.abort() {
             if let Err(error) = self.enqueue(&frame, sink) {
-                tracing::debug!(%error, "an onion session's closing fin did not leave");
+                tracing::debug!(%error, "an onion session's abort did not leave");
             }
         }
     }

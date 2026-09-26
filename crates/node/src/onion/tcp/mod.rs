@@ -13,6 +13,10 @@
 //!
 //! Law (pause): `h` reads its socket only while the session holds reply blocks, so an
 //! unreplenished session pauses the target instead of dropping its bytes, and resumes on credit.
+//!
+//! Law (fail closed): a session that ends by `abort`, a gap, or any failure resets the local
+//! stream ([`OnionLocalStream::reset`], an RST for a socket); only a pump that closed both halves
+//! in order closes it cleanly, so a truncated stream is never presented as complete.
 
 use std::time::Duration;
 
@@ -38,6 +42,7 @@ mod duplex;
 mod pump;
 
 use pump::pump_tcp_duplex;
+use pump::OnionPumpEnd;
 
 /// Largest read of the local stream, split into frames by the session.
 const TCP_BUF: usize = 30_000;
@@ -152,11 +157,39 @@ impl NativeOnionOpenStream {
         Self { stream }
     }
 
-    /// Relay the local byte stream `local` through the session, until both directions close.
+    /// Relay the local byte stream `local` through the session, until both directions close;
+    /// a pump that does not close both halves in order resets `local` (see the module's
+    /// fail-closed law).
     pub fn relay<S>(self, local: S)
-    where S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static {
+    where S: OnionLocalStream {
         let (sender, receiver) = self.stream.split();
-        tokio::spawn(async move { pump_tcp_duplex(local, sender, receiver).await });
+        tokio::spawn(async move {
+            match pump_tcp_duplex(local, sender, receiver).await {
+                (_, OnionPumpEnd::Closed) => {}
+                (local, OnionPumpEnd::Failed) => local.reset(),
+            }
+        });
+    }
+}
+
+/// A local byte stream a client `tcp` session is relayed against, with the effect that ends it
+/// as failed.
+///
+/// Law: `reset` is observably distinct from a clean close to the stream's peer wherever the
+/// stream's transport can express it, so a failed session is never read as a complete one.
+pub trait OnionLocalStream:
+    tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static
+{
+    /// End the stream as failed: never a clean shutdown.
+    fn reset(self);
+}
+
+impl OnionLocalStream for TcpStream {
+    /// An RST: `SO_LINGER = 0` makes the close abortive, discarding unsent bytes.
+    fn reset(self) {
+        if let Err(error) = self.set_zero_linger() {
+            tracing::debug!(%error, "onion TCP local reset fell back to a close");
+        }
     }
 }
 

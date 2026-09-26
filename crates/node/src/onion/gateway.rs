@@ -9,6 +9,7 @@ use rings_gateway::OnionStreamConnector;
 
 use crate::onion::native::NativeOnionCircuitHandle;
 use crate::onion::proxy::OnionProxyProtocol;
+use crate::onion::tcp::OnionLocalStream;
 use crate::onion::OnionProxyTarget;
 use crate::processor::Processor;
 
@@ -63,4 +64,10 @@ impl OnionStreamConnector for NativeOnionGatewayConnector {
         opened.relay(stream);
         Ok(())
     }
+}
+
+impl OnionLocalStream for BoxGatewayDuplex {
+    /// A drop: the gateway boundary has no abortive close yet, so the bridge reads this as an
+    /// orderly end; carrying the failure across the boundary is #902.
+    fn reset(self) {}
 }
