@@ -4,8 +4,13 @@
 //! owns independent fixed-point message and byte token buckets. [`OriginQuota::admit`] is the
 //! pure transition; the destination replay runtime owns the bounded table and supplies monotonic
 //! time. Quota records are intentionally absent from the durable replay snapshot.
+//!
+//! A logical lane is either a message class under the configured [`OriginQuotaConfig`], or a
+//! paced direct-edge lane whose message rate its owning protocol supplied (see
+//! [`OriginQuotaLane`]). Both resolve to one [`OriginQuotaLimits`] before any transition.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroU64;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
@@ -13,6 +18,9 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::dht::Did;
+use crate::message::paced_lane::OriginQuotaLane;
+use crate::message::paced_lane::OriginQuotaLaneId;
+use crate::message::paced_lane::PacedRate;
 use crate::message::types::MessageCategory;
 
 const NANOS_PER_SECOND: u128 = 1_000_000_000;
@@ -194,6 +202,20 @@ impl OriginQuotaConfig {
             MessageCategory::Application => self.application,
         }
     }
+
+    /// Resolve the token-bucket limits of `lane`.
+    ///
+    /// A paced lane replaces only the message dimension with the supplied rate. Its byte
+    /// dimension and record bound stay the Application lane's, so pacing never widens the byte
+    /// bound of application traffic.
+    pub fn limits(self, lane: OriginQuotaLane) -> OriginQuotaLimits {
+        match lane {
+            OriginQuotaLane::Class(class) => self.lane(class).into(),
+            OriginQuotaLane::Paced(paced) => {
+                OriginQuotaLimits::paced(paced.rate(), self.application)
+            }
+        }
+    }
 }
 
 impl Default for OriginQuotaConfig {
@@ -223,6 +245,77 @@ pub enum OriginQuotaConfigError {
     ZeroRecordCapacity,
 }
 
+/// Tokens replenished per period: `amount` tokens every `period_seconds` seconds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RefillRate {
+    /// Tokens replenished per period.
+    amount: u64,
+    /// Length of one period in seconds.
+    period_seconds: NonZeroU64,
+}
+
+impl RefillRate {
+    /// `amount` tokens every second.
+    const fn per_second(amount: u64) -> Self {
+        Self {
+            amount,
+            period_seconds: NonZeroU64::MIN,
+        }
+    }
+
+    /// Scaled tokens (`token × 10⁹`) replenished over `elapsed_nanos`, saturating.
+    ///
+    /// `elapsed · amount / period` rounds down, so a record never gains a token early.
+    fn replenished(self, elapsed_nanos: u128) -> u128 {
+        elapsed_nanos.saturating_mul(u128::from(self.amount))
+            / u128::from(self.period_seconds.get())
+    }
+}
+
+/// Token-bucket limits of one quota record, resolved from its lane.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OriginQuotaLimits {
+    /// Message-token refill rate.
+    message_rate: RefillRate,
+    /// Maximum accumulated message tokens.
+    message_burst: u64,
+    /// Byte-token refill rate.
+    byte_rate: RefillRate,
+    /// Maximum accumulated byte tokens.
+    byte_burst: u64,
+    /// Maximum runtime-local records retained for this lane.
+    max_records: usize,
+}
+
+impl OriginQuotaLimits {
+    /// The limits of a paced lane: `rate` for messages, `base` for bytes and records.
+    ///
+    /// The burst equals the rate's budget, so the bucket enforces the same bound as a window
+    /// admission of `budget` messages per period.
+    fn paced(rate: PacedRate, base: OriginQuotaLaneConfig) -> Self {
+        Self {
+            message_rate: RefillRate {
+                amount: rate.budget().get(),
+                period_seconds: rate.period_seconds(),
+            },
+            message_burst: rate.budget().get(),
+            ..base.into()
+        }
+    }
+}
+
+impl From<OriginQuotaLaneConfig> for OriginQuotaLimits {
+    fn from(config: OriginQuotaLaneConfig) -> Self {
+        Self {
+            message_rate: RefillRate::per_second(config.message_rate_per_second),
+            message_burst: config.message_burst,
+            byte_rate: RefillRate::per_second(config.byte_rate_per_second),
+            byte_burst: config.byte_burst,
+            max_records: config.max_records,
+        }
+    }
+}
+
 /// Monotonic runtime-local instant used by the pure quota transition.
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub struct OriginQuotaInstant(u128);
@@ -246,8 +339,8 @@ pub struct OriginQuotaKey {
     pub origin_account: Did,
     /// Final logical destination.
     pub destination: Did,
-    /// Logical inbound lane selected from the verified message.
-    pub lane: MessageCategory,
+    /// Identity of the logical quota lane selected from the message and its delivering edge.
+    pub lane: OriginQuotaLaneId,
 }
 
 impl OriginQuotaKey {
@@ -256,7 +349,7 @@ impl OriginQuotaKey {
         network_id: u32,
         origin_account: Did,
         destination: Did,
-        lane: MessageCategory,
+        lane: OriginQuotaLaneId,
     ) -> Self {
         Self {
             network_id,
@@ -279,9 +372,9 @@ impl TokenBucket {
         }
     }
 
-    fn refill(self, rate: u64, burst: u64, elapsed_nanos: u128) -> Self {
+    fn refill(self, rate: RefillRate, burst: u64, elapsed_nanos: u128) -> Self {
         let capacity = u128::from(burst) * NANOS_PER_SECOND;
-        let replenished = elapsed_nanos.saturating_mul(u128::from(rate));
+        let replenished = rate.replenished(elapsed_nanos);
         Self {
             scaled_tokens: self.scaled_tokens.saturating_add(replenished).min(capacity),
         }
@@ -310,7 +403,8 @@ pub struct OriginQuota {
 
 impl OriginQuota {
     /// Construct a fully replenished record at `now`.
-    pub fn full(config: OriginQuotaLaneConfig, now: OriginQuotaInstant) -> Self {
+    pub fn full(config: impl Into<OriginQuotaLimits>, now: OriginQuotaInstant) -> Self {
+        let config = config.into();
         Self {
             messages: TokenBucket::full(config.message_burst),
             bytes: TokenBucket::full(config.byte_burst),
@@ -325,10 +419,11 @@ impl OriginQuota {
     /// this transition.
     pub fn admit(
         self,
-        config: OriginQuotaLaneConfig,
+        config: impl Into<OriginQuotaLimits>,
         byte_cost: usize,
         now: OriginQuotaInstant,
     ) -> Result<(Self, OriginQuotaVerdict), OriginQuotaArithmeticError> {
+        let config = config.into();
         let mut next = self.refilled(config, now)?;
         if !next.messages.has(NANOS_PER_SECOND) {
             return Ok((next, OriginQuotaVerdict::MessageRateExhausted));
@@ -348,7 +443,7 @@ impl OriginQuota {
 
     fn refilled(
         self,
-        config: OriginQuotaLaneConfig,
+        config: OriginQuotaLimits,
         now: OriginQuotaInstant,
     ) -> Result<Self, OriginQuotaArithmeticError> {
         let elapsed = now
@@ -356,21 +451,19 @@ impl OriginQuota {
             .checked_sub(self.last_refill.0)
             .ok_or(OriginQuotaArithmeticError::MonotonicTimeRegressed)?;
         Ok(Self {
-            messages: self.messages.refill(
-                config.message_rate_per_second,
-                config.message_burst,
-                elapsed,
-            ),
+            messages: self
+                .messages
+                .refill(config.message_rate, config.message_burst, elapsed),
             bytes: self
                 .bytes
-                .refill(config.byte_rate_per_second, config.byte_burst, elapsed),
+                .refill(config.byte_rate, config.byte_burst, elapsed),
             last_refill: now,
         })
     }
 
     fn fully_replenished_at(
         self,
-        config: OriginQuotaLaneConfig,
+        config: OriginQuotaLimits,
         now: OriginQuotaInstant,
     ) -> Result<bool, OriginQuotaArithmeticError> {
         let replenished = self.refilled(config, now)?;
@@ -444,7 +537,7 @@ pub enum OriginQuotaError {
     #[error("Origin quota table for {lane:?} exhausted its {capacity} records")]
     TableCapacityExhausted {
         /// Logical lane whose record bound was reached.
-        lane: MessageCategory,
+        lane: OriginQuotaLaneId,
         /// Maximum retained records for that lane.
         capacity: usize,
     },
@@ -508,13 +601,20 @@ impl OriginQuotaTable {
         }
     }
 
+    /// The limits of `lane` under this table's configuration.
+    pub(super) fn limits(&self, lane: OriginQuotaLane) -> OriginQuotaLimits {
+        self.config.limits(lane)
+    }
+
+    /// Reserve one admission of `byte_cost` for `key` under `lane_config`, the limits of the
+    /// lane `key.lane` names.
     pub(super) fn reserve(
         &mut self,
         key: OriginQuotaKey,
+        lane_config: OriginQuotaLimits,
         byte_cost: usize,
         now: OriginQuotaInstant,
     ) -> Result<OriginQuotaReservation, OriginQuotaAdmissionError> {
-        let lane_config = self.config.lane(key.lane);
         if let Some(previous) = self.records.get(&key).copied() {
             let (next, verdict) = previous
                 .admit(lane_config, byte_cost, now)
@@ -567,8 +667,8 @@ impl OriginQuotaTable {
 
     fn safe_victim(
         &self,
-        lane: MessageCategory,
-        config: OriginQuotaLaneConfig,
+        lane: OriginQuotaLaneId,
+        config: OriginQuotaLimits,
         now: OriginQuotaInstant,
     ) -> Result<Option<OriginQuotaKey>, OriginQuotaAdmissionError> {
         let mut victim = None;
@@ -592,6 +692,16 @@ impl OriginQuotaTable {
         self.records.len()
     }
 
+    /// The lanes holding a record of `origin`, in key order.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(super) fn lanes_of(&self, origin: Did) -> Vec<OriginQuotaLaneId> {
+        self.records
+            .keys()
+            .filter(|key| key.origin_account == origin)
+            .map(|key| key.lane)
+            .collect()
+    }
+
     #[cfg(test)]
     pub(super) fn get(&self, key: OriginQuotaKey) -> Option<OriginQuota> {
         self.records.get(&key).copied()
@@ -612,13 +722,19 @@ pub struct OriginQuotaLaneCounters {
 }
 
 /// Aggregate quota drop counters partitioned only by bounded logical lane.
+///
+/// Every paced lane shares one aggregate, so the counter set stays bounded however many paced
+/// lanes the application layer registers.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct OriginQuotaCounters {
+    /// Class lanes in [`MessageCategory`] order.
     lanes: [OriginQuotaLaneCounters; 4],
+    /// All paced direct-edge lanes together.
+    paced: OriginQuotaLaneCounters,
 }
 
 impl OriginQuotaCounters {
-    /// Return aggregate drop counters for `lane`.
+    /// Return aggregate drop counters for the class lane `lane`.
     pub const fn lane(self, lane: MessageCategory) -> OriginQuotaLaneCounters {
         let [dht_control, storage, e2e, application] = self.lanes;
         match lane {
@@ -627,6 +743,11 @@ impl OriginQuotaCounters {
             MessageCategory::E2e => e2e,
             MessageCategory::Application => application,
         }
+    }
+
+    /// Return aggregate drop counters of every paced direct-edge lane.
+    pub const fn paced(self) -> OriginQuotaLaneCounters {
+        self.paced
     }
 }
 
@@ -651,12 +772,14 @@ impl OriginQuotaLaneCounterState {
 
 pub(super) struct OriginQuotaCounterState {
     lanes: [OriginQuotaLaneCounterState; 4],
+    paced: OriginQuotaLaneCounterState,
 }
 
 impl Default for OriginQuotaCounterState {
     fn default() -> Self {
         Self {
             lanes: std::array::from_fn(|_| OriginQuotaLaneCounterState::default()),
+            paced: OriginQuotaLaneCounterState::default(),
         }
     }
 }
@@ -668,16 +791,18 @@ impl OriginQuotaCounterState {
                 .lanes
                 .each_ref()
                 .map(OriginQuotaLaneCounterState::snapshot),
+            paced: self.paced.snapshot(),
         }
     }
 
-    pub(super) fn record(&self, lane: MessageCategory, error: &OriginQuotaAdmissionError) {
+    pub(super) fn record(&self, lane: OriginQuotaLaneId, error: &OriginQuotaAdmissionError) {
         let [dht_control, storage, e2e, application] = &self.lanes;
         let counters = match lane {
-            MessageCategory::DhtControl => dht_control,
-            MessageCategory::Storage => storage,
-            MessageCategory::E2e => e2e,
-            MessageCategory::Application => application,
+            OriginQuotaLaneId::Class(MessageCategory::DhtControl) => dht_control,
+            OriginQuotaLaneId::Class(MessageCategory::Storage) => storage,
+            OriginQuotaLaneId::Class(MessageCategory::E2e) => e2e,
+            OriginQuotaLaneId::Class(MessageCategory::Application) => application,
+            OriginQuotaLaneId::Paced(_) => &self.paced,
         };
         match error {
             OriginQuotaAdmissionError::Verdict(OriginQuotaRejection::MessageRate) => {
@@ -730,6 +855,8 @@ pub(super) fn quota_admission_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::message::paced_lane::PacedLane;
+    use crate::message::paced_lane::PacedLaneId;
 
     fn config(
         message_rate: u64,
@@ -748,8 +875,21 @@ mod tests {
         .expect("test quota configuration is valid")
     }
 
-    fn key(origin: u32, lane: MessageCategory) -> OriginQuotaKey {
-        OriginQuotaKey::new(7, Did::from(origin), Did::from(99_u32), lane)
+    fn key(origin: u32, lane: impl Into<OriginQuotaLane>) -> OriginQuotaKey {
+        OriginQuotaKey::new(7, Did::from(origin), Did::from(99_u32), lane.into().id())
+    }
+
+    /// Reserve one admission of `byte_cost` for `origin` in `lane` under `table`'s limits.
+    fn reserve(
+        table: &mut OriginQuotaTable,
+        origin: u32,
+        lane: impl Into<OriginQuotaLane>,
+        byte_cost: usize,
+        now: OriginQuotaInstant,
+    ) -> Result<OriginQuotaReservation, OriginQuotaAdmissionError> {
+        let lane = lane.into();
+        let limits = table.limits(lane);
+        table.reserve(key(origin, lane), limits, byte_cost, now)
     }
 
     #[test]
@@ -843,20 +983,17 @@ mod tests {
         let mut table = OriginQuotaTable::new(OriginQuotaConfig::new(lane, lane, lane, lane));
         let now = OriginQuotaInstant::ZERO;
 
-        table
-            .reserve(key(1, MessageCategory::Application), 1, now)
+        reserve(&mut table, 1, MessageCategory::Application, 1, now)
             .expect("origin A uses its application allowance");
         assert!(matches!(
-            table.reserve(key(1, MessageCategory::Application), 1, now),
+            reserve(&mut table, 1, MessageCategory::Application, 1, now),
             Err(OriginQuotaAdmissionError::Verdict(
                 OriginQuotaRejection::MessageRate
             ))
         ));
-        table
-            .reserve(key(2, MessageCategory::Application), 1, now)
+        reserve(&mut table, 2, MessageCategory::Application, 1, now)
             .expect("origin B keeps its application allowance");
-        table
-            .reserve(key(1, MessageCategory::Storage), 1, now)
+        reserve(&mut table, 1, MessageCategory::Storage, 1, now)
             .expect("origin A keeps its storage allowance");
     }
 
@@ -864,23 +1001,27 @@ mod tests {
     fn table_reuses_only_a_fully_replenished_oldest_record() {
         let lane = config(1, 1, 1, 1, 2);
         let mut table = OriginQuotaTable::new(OriginQuotaConfig::new(lane, lane, lane, lane));
-        table
-            .reserve(
-                key(2, MessageCategory::Application),
-                1,
-                OriginQuotaInstant::ZERO,
-            )
-            .expect("first record is admitted");
-        table
-            .reserve(
-                key(1, MessageCategory::Application),
-                1,
-                OriginQuotaInstant::from_nanos(1),
-            )
-            .expect("second record is admitted");
+        reserve(
+            &mut table,
+            2,
+            MessageCategory::Application,
+            1,
+            OriginQuotaInstant::ZERO,
+        )
+        .expect("first record is admitted");
+        reserve(
+            &mut table,
+            1,
+            MessageCategory::Application,
+            1,
+            OriginQuotaInstant::from_nanos(1),
+        )
+        .expect("second record is admitted");
         assert!(matches!(
-            table.reserve(
-                key(3, MessageCategory::Application),
+            reserve(
+                &mut table,
+                3,
+                MessageCategory::Application,
                 1,
                 OriginQuotaInstant::from_nanos(2)
             ),
@@ -889,17 +1030,115 @@ mod tests {
             ))
         ));
 
-        table
-            .reserve(
-                key(3, MessageCategory::Application),
-                1,
-                OriginQuotaInstant::from_nanos(NANOS_PER_SECOND + 1),
-            )
-            .expect("oldest fully replenished record is reusable");
+        reserve(
+            &mut table,
+            3,
+            MessageCategory::Application,
+            1,
+            OriginQuotaInstant::from_nanos(NANOS_PER_SECOND + 1),
+        )
+        .expect("oldest fully replenished record is reusable");
         assert_eq!(table.len(), 2);
         assert!(table.get(key(1, MessageCategory::Application)).is_some());
         assert!(table.get(key(2, MessageCategory::Application)).is_none());
         assert!(table.get(key(3, MessageCategory::Application)).is_some());
+    }
+
+    /// A lane whose protocol admits each neighbour through a window of `budget = 16384`
+    /// messages per `period = 150 s`.
+    fn window_admission_lane() -> OriginQuotaLane {
+        OriginQuotaLane::Paced(PacedLane::new(
+            PacedLaneId::new(1),
+            PacedRate::new(
+                NonZeroU64::new(16_384).expect("non-zero budget"),
+                NonZeroU64::new(150).expect("non-zero period"),
+            ),
+        ))
+    }
+
+    /// Admit one message of `byte_cost` every `interval_nanos` for `count` messages under
+    /// `limits`, returning how many were refused.
+    fn paced_refusals(
+        limits: OriginQuotaLimits,
+        interval_nanos: u128,
+        count: u128,
+        byte_cost: usize,
+    ) -> usize {
+        let mut quota = OriginQuota::full(limits, OriginQuotaInstant::ZERO);
+        let mut refused = 0;
+        for index in 0..count {
+            let now = OriginQuotaInstant::from_nanos(index * interval_nanos);
+            let (next, verdict) = quota
+                .admit(limits, byte_cost, now)
+                .expect("monotonic schedule");
+            quota = next;
+            refused += usize::from(verdict != OriginQuotaVerdict::Admitted);
+        }
+        refused
+    }
+
+    /// A sender paced at `r = 98` messages/s, below its protocol's `budget / period ≈ 109`, is
+    /// never refused in its lane for half an hour, while the same schedule in the default
+    /// Application lane is refused beyond its burst and 8 msg/s.
+    #[test]
+    fn paced_sender_at_the_protocol_rate_is_never_refused_but_the_default_lane_is() {
+        let config = OriginQuotaConfig::default();
+        let interval = NANOS_PER_SECOND / 98;
+        let count = 98 * 1_800;
+        let message_bytes = 13_442;
+
+        assert_eq!(
+            paced_refusals(
+                config.limits(window_admission_lane()),
+                interval,
+                count,
+                message_bytes
+            ),
+            0
+        );
+        let default_refusals = paced_refusals(
+            config.limits(MessageCategory::Application.into()),
+            interval,
+            count,
+            message_bytes,
+        );
+        // At most `burst + 8·T + 1` of the schedule fits the default lane.
+        let default_admitted = usize::try_from(count).expect("small count") - default_refusals;
+        assert!(default_admitted <= 32 + 8 * 1_800 + 1);
+    }
+
+    /// The paced lane bounds its origin by the supplied rate: over `T` seconds a flooding
+    /// neighbour gets at most `budget + ⌈budget·T/period⌉` messages, the bound of the
+    /// protocol's own window admission.
+    #[test]
+    fn paced_lane_bounds_a_flooding_neighbour_by_the_supplied_budget() {
+        let limits = OriginQuotaConfig::default().limits(window_admission_lane());
+        let seconds: u128 = 600;
+        let per_second = 1_000;
+        let count = per_second * seconds;
+        let refused = paced_refusals(limits, NANOS_PER_SECOND / per_second, count, 1);
+        let admitted = usize::try_from(count).expect("small count") - refused;
+        let bound = 16_384 + usize::try_from(16_384 * seconds / 150).expect("small bound") + 1;
+        assert!(admitted <= bound, "{admitted} > {bound}");
+        assert!(refused > 0);
+    }
+
+    /// Distinct paced lanes, and a paced lane and its class lane, keep distinct records.
+    #[test]
+    fn paced_and_class_lanes_of_one_origin_are_independent_records() {
+        let lane = config(1, 1, 1_000, 1_000, 4);
+        let mut table = OriginQuotaTable::new(OriginQuotaConfig::new(lane, lane, lane, lane));
+        let now = OriginQuotaInstant::ZERO;
+        reserve(&mut table, 1, MessageCategory::Application, 1, now).expect("class allowance");
+        assert!(reserve(&mut table, 1, MessageCategory::Application, 1, now).is_err());
+        reserve(&mut table, 1, window_admission_lane(), 1, now)
+            .expect("the paced lane keeps its own allowance");
+        let other = OriginQuotaLane::Paced(PacedLane::new(
+            PacedLaneId::new(2),
+            PacedRate::new(NonZeroU64::MIN, NonZeroU64::MIN),
+        ));
+        reserve(&mut table, 1, other, 1, now).expect("a second paced lane keeps its own allowance");
+        assert!(reserve(&mut table, 1, other, 1, now).is_err());
     }
 
     #[test]
@@ -923,19 +1162,19 @@ mod tests {
         let counters = OriginQuotaCounterState::default();
         let lane = MessageCategory::Application;
         counters.record(
-            lane,
+            OriginQuotaLane::from(lane).id(),
             &OriginQuotaAdmissionError::Verdict(OriginQuotaRejection::MessageRate),
         );
         counters.record(
-            lane,
+            OriginQuotaLane::from(lane).id(),
             &OriginQuotaAdmissionError::Verdict(OriginQuotaRejection::ByteRate),
         );
         counters.record(
-            lane,
+            OriginQuotaLane::from(lane).id(),
             &OriginQuotaAdmissionError::Verdict(OriginQuotaRejection::Capacity { capacity: 1 }),
         );
         counters.record(
-            MessageCategory::Storage,
+            OriginQuotaLane::from(MessageCategory::Storage).id(),
             &OriginQuotaAdmissionError::Arithmetic(
                 OriginQuotaArithmeticError::MonotonicTimeRegressed,
             ),

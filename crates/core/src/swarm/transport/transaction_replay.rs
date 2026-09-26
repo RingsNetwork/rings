@@ -6,8 +6,8 @@ use std::ops::RangeInclusive;
 use super::SwarmTransport;
 use crate::dht::Did;
 use crate::error::Result;
-use crate::message::MessageCategory;
 use crate::message::OriginQuotaCounters;
+use crate::message::OriginQuotaLane;
 use crate::message::PayloadSender;
 use crate::message::ReplayCounters;
 use crate::message::StreamKey;
@@ -29,6 +29,15 @@ impl SwarmTransport {
         self.transaction_replay.quota_record_count_for_test().await
     }
 
+    /// The origin-quota lanes holding a record of `origin`.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) async fn origin_quota_lanes_for_test(
+        &self,
+        origin: Did,
+    ) -> Vec<crate::message::OriginQuotaLaneId> {
+        self.transaction_replay.quota_lanes_for_test(origin).await
+    }
+
     /// Persistently reserve one or more sequences for this account and final destination.
     pub(crate) async fn reserve_transaction_sequences(
         &self,
@@ -47,7 +56,7 @@ impl SwarmTransport {
     pub(crate) async fn admit_final_transaction(
         &self,
         transaction: &Transaction,
-        lane: MessageCategory,
+        lane: OriginQuotaLane,
     ) -> Result<()> {
         let key = transaction.stream_key(self.network_id);
         let digest = transaction.digest()?;

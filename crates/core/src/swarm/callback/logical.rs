@@ -5,12 +5,18 @@ use super::CallbackError;
 use super::LocalDelivery;
 use super::LogicalInbound;
 use super::SharedSwarmCallback;
+use crate::dht::Did;
+use crate::measure::Authentication;
 use crate::message::with_message_variants;
+use crate::message::CustomMessage;
+use crate::message::EdgeRelation;
 use crate::message::HandleMsg;
 use crate::message::Message;
 use crate::message::MessageHandler;
 use crate::message::MessageKind;
 use crate::message::MessagePayload;
+use crate::message::OriginQuotaLane;
+use crate::message::PacedLane;
 use crate::swarm::observer::LookupCorrelation;
 use crate::swarm::observer::LookupKind;
 use crate::swarm::observer::LookupOutcome;
@@ -34,6 +40,19 @@ impl LocalDelivery {
     pub(crate) async fn deliver(&self, payload: &MessagePayload) -> crate::error::Result<()> {
         inbound::deliver_local(&self.pipeline, payload).await
     }
+}
+
+/// Relate the connection that delivered `payload` to its origin account.
+///
+/// Only a handshake-authenticated connection names a neighbour; an unauthenticated or unknown
+/// peer is never [`EdgeRelation::Neighbour`], whatever DID it claims.
+pub(super) fn edge_relation(
+    peer: Option<Did>,
+    authentication: Authentication,
+    payload: &MessagePayload,
+) -> EdgeRelation {
+    let authenticated = matches!(authentication, Authentication::Authenticated);
+    EdgeRelation::of(peer.filter(|_| authenticated), payload.transaction.origin())
 }
 
 impl LogicalInbound {
@@ -129,20 +148,38 @@ impl LogicalInbound {
         payload.transaction.destination == self.transport.dht.did
     }
 
+    /// Commit replay and origin-quota admission of a transaction addressed to this node.
+    ///
+    /// The quota lane is the message's class lane, or the paced direct-edge lane its owning
+    /// protocol registered when `edge` is [`EdgeRelation::Neighbour`] (see
+    /// [`OriginQuotaLane::select`]). Transactions for other destinations are not admitted here.
     pub(super) async fn admit_final_transaction(
         &self,
         payload: &MessagePayload,
+        message: &Message,
         lane: crate::swarm::callback::InboundLane,
+        edge: EdgeRelation,
     ) -> crate::error::Result<()> {
         if self.is_local_destination(payload) {
-            let quota_lane = lane
+            let class = lane
                 .class()
                 .ok_or(crate::error::Error::InboundActorInvariantViolation)?;
+            let quota_lane = OriginQuotaLane::select(class, edge, || self.paced_lane(message));
             self.transport
                 .admit_final_transaction(&payload.transaction, quota_lane)
                 .await?;
         }
         Ok(())
+    }
+
+    /// The paced lane the application layer registered for an application message, if any.
+    fn paced_lane(&self, message: &Message) -> Option<PacedLane> {
+        match message {
+            Message::CustomMessage(CustomMessage(application_payload)) => {
+                self.callback.paced_lane(application_payload.as_slice())
+            }
+            _ => None,
+        }
     }
 
     pub(super) async fn on_inbound(
@@ -299,15 +336,19 @@ mod tests {
         let logical = LogicalInbound::new(swarm.transport.clone(), callback);
         let remote_destination = SecretKey::random().address().into();
         let payload = payload(remote_destination, 0).expect("payload");
+        let message = payload.transaction.data::<Message>().expect("message");
 
-        logical
-            .admit_final_transaction(&payload, crate::swarm::callback::InboundLane::Application)
-            .await
-            .expect("first relay pass");
-        logical
-            .admit_final_transaction(&payload, crate::swarm::callback::InboundLane::Application)
-            .await
-            .expect("second relay pass");
+        for pass in ["first relay pass", "second relay pass"] {
+            logical
+                .admit_final_transaction(
+                    &payload,
+                    &message,
+                    crate::swarm::callback::InboundLane::Application,
+                    EdgeRelation::Remote,
+                )
+                .await
+                .expect(pass);
+        }
         assert_eq!(swarm.transaction_replay_counters(), Default::default());
         assert_eq!(swarm.origin_quota_counters(), Default::default());
         assert_eq!(

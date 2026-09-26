@@ -23,6 +23,7 @@ use futures::stream::FuturesUnordered;
 use futures::FutureExt;
 use futures::StreamExt;
 
+use super::logical::edge_relation;
 use super::InboundFrameLease;
 use super::InboundProcessor;
 use super::LogicalInbound;
@@ -31,6 +32,7 @@ use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
 use crate::measure::Authentication;
+use crate::message::EdgeRelation;
 use crate::message::MessagePayload;
 use crate::utils::try_sleep;
 use crate::utils::GenerationWitness;
@@ -263,9 +265,10 @@ impl InboundMailbox {
                 finish_completion(completion, Ok(()));
                 return Ok(());
             }
+            let edge = edge_relation(peer, authentication, &prepared.payload);
             processor
                 .logical
-                .admit_final_transaction(&prepared.payload, lane)
+                .admit_final_transaction(&prepared.payload, &prepared.message, lane, edge)
                 .await?;
         }
         let ticket = self.reserve_ticket(lane)?;
@@ -806,7 +809,10 @@ pub(super) async fn deliver_local(
 ) -> Result<()> {
     let message = payload.transaction.data::<crate::message::Message>()?;
     let lane = InboundLane::from_kind(crate::message::MessageKind::from_message(&message));
-    pipeline.admit_final_transaction(payload, lane).await?;
+    // A local payload crossed no connection, so no neighbour can claim a paced lane for it.
+    pipeline
+        .admit_final_transaction(payload, &message, lane, EdgeRelation::Remote)
+        .await?;
     validate_payload(pipeline, None, payload)
         .await
         .map_err(inbound_failure_error)?;

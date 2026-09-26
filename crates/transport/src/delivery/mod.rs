@@ -11,8 +11,20 @@
 //! moment of send, that resolves to `Ok(())` once the bytes have been flushed
 //! to the wire or `Err(..)` if the data channel closed first. It compresses the
 //! three underlying states (buffered / flushed / lost) into a two-outcome
-//! future — "buffered" is simply the future still being `Pending`. The future
-//! drives its own wake-ups, so callers can just spawn it and forget it.
+//! future — "buffered" is simply the future still being `Pending`.
+//!
+//! The future is event-driven. Each data channel owns one
+//! delivery tracker (`tracker::DeliveryTracker`) whose pure `registry` multiplexes the
+//! channel's single `bufferedAmountLowThreshold` over every pending send; the
+//! channel's `bufferedamountlow`, `close` and `error` events are the only
+//! wake-ups, and no timer takes part in a verdict. Callers can still spawn the
+//! future and forget it: dropping it removes its slot, and the next settle
+//! round re-arms the threshold for the sends that remain.
+//!
+//! "Flushed" means the bytes left the channel's `bufferedAmount`. On native
+//! webrtc-rs that happens only when the peer's SCTP SACK acknowledges them, so
+//! there the verdict is "acknowledged by the peer", which is stronger than
+//! "handed to the wire".
 
 use std::future::Future;
 use std::pin::Pin;
@@ -23,10 +35,26 @@ use crate::error::Result;
     all(feature = "native-webrtc", not(target_family = "wasm")),
     all(feature = "web-sys-webrtc", target_family = "wasm")
 ))]
+mod registry;
+#[cfg(all(test, feature = "native-webrtc", not(target_family = "wasm")))]
+mod test_tracker;
+#[cfg(any(
+    all(feature = "native-webrtc", not(target_family = "wasm")),
+    all(feature = "web-sys-webrtc", target_family = "wasm")
+))]
+pub(crate) mod tracker;
+
+/// Flush predicate `φ(E, b, e) ≜ E ⊖ b ≥ e`: the bytes ending at `end_offset`
+/// have left the local buffer once `enqueued − buffered` reaches it.
+#[cfg(any(
+    all(feature = "native-webrtc", not(target_family = "wasm")),
+    all(feature = "web-sys-webrtc", target_family = "wasm")
+))]
 pub(crate) const fn delivery_flushed(enqueued: u64, buffered: u64, end_offset: u64) -> bool {
     enqueued.saturating_sub(buffered) >= end_offset
 }
 
+/// The error a delivery future reports when its channel closes before the flush.
 #[cfg(any(
     all(feature = "native-webrtc", not(target_family = "wasm")),
     all(feature = "web-sys-webrtc", target_family = "wasm")

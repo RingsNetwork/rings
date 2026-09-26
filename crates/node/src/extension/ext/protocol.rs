@@ -9,6 +9,7 @@
 //! effects and its own interpreter without ever touching the core.
 
 use rings_core::dht::Did;
+use rings_core::message::PacedRate;
 use rings_runtime::MaybeSendSync;
 
 /// The raw boundary input handed to [`Protocol::decode`]: an inbound message's authenticated
@@ -108,4 +109,19 @@ pub trait Protocol {
         ctx: Ctx<'_, Self::State>,
         event: Self::Event,
     ) -> Transition<Self::State, Self::Effect>;
+
+    /// The per-origin rate of this protocol's paced direct-edge lane, if it paces its
+    /// direct-edge traffic and bounds each sending neighbour itself (#888).
+    ///
+    /// Read once when the protocol is registered. Core then admits this namespace's traffic
+    /// from the authenticated neighbour that originated it at this rate, instead of the default
+    /// Application quota; relayed or foreign-origin traffic keeps the default. `None`, the
+    /// default, registers no paced lane.
+    ///
+    /// The rate is trusted local configuration: core does not bound it, so registering a
+    /// protocol that declares one has the authority of raising the Application message quota
+    /// for this namespace's neighbour-originated traffic.
+    fn paced_direct_rate(&self) -> Option<PacedRate> {
+        None
+    }
 }

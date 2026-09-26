@@ -114,7 +114,10 @@ where noted.
   `e2e`, and `application` sets message rate/burst, byte rate/burst, and the maximum retained
   origin records for that lane. Every value must be non-zero. The key uses the verified origin
   account and final destination, not the delegation or immediate relay. Token balances are
-  deliberately reset on restart; durable replay state is separate.
+  deliberately reset on restart; durable replay state is separate. A protocol that paces its
+  direct-edge traffic declares its own per-origin message rate when it is registered; that
+  paced lane is not configured here and applies only to traffic its authenticated neighbour
+  originated. It keeps the `application` byte limits and record bound.
 * `external_ip`, `webrtc_udp_port_min`, `webrtc_udp_port_max`: optional reachability hints, an
   externally visible address and a UDP port range for ICE. The two port bounds must be given
   together.

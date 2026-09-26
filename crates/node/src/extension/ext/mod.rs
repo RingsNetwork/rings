@@ -27,11 +27,14 @@
 //! - `protocol` — the pure core: [`Wire`]/[`Reject`] (decode boundary), [`Ctx`],
 //!   [`Transition`], and the [`Protocol`] trait.
 //! - `interpret` — the per-extension imperative shell ([`Interpret`]).
+//! - `paced` — the paced direct-edge lanes that protocols declare through
+//!   [`Protocol::paced_direct_rate`] (#888).
 //! - `registry` — the scoped capability [`Scope`] handed to shells, plus the router-internal
 //!   `Core` / `Handler` and the namespace registry ([`Extensions`]).
 
 mod envelope;
 mod interpret;
+mod paced;
 mod protocol;
 mod registry;
 

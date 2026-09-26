@@ -3493,6 +3493,7 @@ dependencies = [
  "rand 0.8.6",
  "rings-codec",
  "rings-runtime",
+ "rings-test-support",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
