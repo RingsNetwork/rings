@@ -20,8 +20,11 @@ use std::sync::RwLock;
 use bytes::Bytes;
 use futures::lock::Mutex as AsyncMutex;
 use rings_core::dht::Did;
+use rings_core::message::PacedLane;
+use rings_core::message::PacedRate;
 use rings_runtime::MaybeSendSync;
 
+use super::paced::PacedLanes;
 use super::Ctx;
 use super::Envelope;
 use super::Interpret;
@@ -59,6 +62,8 @@ pub(crate) trait Handler {
 pub(crate) struct Core {
     processor: Arc<Processor>,
     handlers: Arc<HandlerMap>,
+    /// Paced direct-edge lanes of the registered protocols, installed with their handlers.
+    paced: Arc<PacedLanes>,
 }
 
 impl Core {
@@ -348,6 +353,7 @@ impl Extensions {
             core: Core {
                 processor,
                 handlers: Arc::new(RwLock::new(HashMap::new())),
+                paced: Arc::new(PacedLanes::default()),
             },
         }
     }
@@ -400,10 +406,11 @@ impl Extensions {
         I: Interpret<Effect = P::Effect> + MaybeSendSync + 'static,
     {
         // Build (namespace, runner) outside the lock.
-        let prepared: Vec<(String, Arc<DynHandler>)> = items
+        let prepared: Vec<(String, Option<PacedRate>, Arc<DynHandler>)> = items
             .into_iter()
             .map(|(protocol, interpret)| {
                 let namespace = protocol.namespace().to_string();
+                let paced = protocol.paced_direct_rate();
                 let state = Mutex::new(protocol.init());
                 let runner: Arc<DynHandler> = Arc::new(Runner {
                     protocol,
@@ -417,25 +424,30 @@ impl Extensions {
                     #[cfg(all(test, rings_native))]
                     before_gate_wait_for_test: None,
                 });
-                (namespace, runner)
+                (namespace, paced, runner)
             })
             .collect();
 
         let mut handlers = self.core.handlers.write().map_err(|_| Error::Lock)?;
         // Check-all (existing table + intra-batch duplicates) before mutating anything.
-        for (index, (namespace, _)) in prepared.iter().enumerate() {
+        for (index, (namespace, _, _)) in prepared.iter().enumerate() {
             let duplicate_in_batch = prepared
                 .iter()
                 .take(index)
-                .any(|(seen, _)| seen == namespace);
+                .any(|(seen, _, _)| seen == namespace);
             if duplicate_in_batch || handlers.contains_key(namespace) {
                 return Err(Error::ExtensionError(format!(
                     "namespace {namespace:?} is already registered"
                 )));
             }
         }
-        // All free: insert the whole batch.
-        for (namespace, runner) in prepared {
+        // All free: pace and insert the whole batch under the same write lock.
+        self.core.paced.install(
+            prepared
+                .iter()
+                .map(|(namespace, paced, _)| (namespace.as_str(), *paced)),
+        )?;
+        for (namespace, _, runner) in prepared {
             handlers.insert(namespace, runner);
         }
         Ok(())
@@ -449,6 +461,7 @@ impl Extensions {
         I: Interpret<Effect = P::Effect> + MaybeSendSync + 'static,
     {
         let namespace = protocol.namespace().to_string();
+        let paced = protocol.paced_direct_rate();
         let state = Mutex::new(protocol.init());
         let runner: Arc<DynHandler> = Arc::new(Runner {
             protocol,
@@ -468,6 +481,7 @@ impl Extensions {
                 "namespace {namespace:?} is already registered"
             )));
         }
+        self.core.paced.install([(namespace.as_str(), paced)])?;
         handlers.insert(namespace, runner);
         Ok(())
     }
@@ -479,6 +493,13 @@ impl Extensions {
             .read()
             .map(|h| h.contains_key(namespace))
             .unwrap_or(false)
+    }
+
+    /// The paced direct-edge lane of an encoded envelope's namespace, if its protocol declared
+    /// one. Core consults it only where a paced lane may apply; see
+    /// [`Protocol::paced_direct_rate`].
+    pub(crate) fn paced_lane(&self, envelope: &[u8]) -> Option<PacedLane> {
+        self.core.paced.resolve(envelope)
     }
 
     /// Route a decoded envelope (inbound entry point). `pub(crate)`: the authenticated ingress
@@ -642,6 +663,61 @@ mod tests {
             .advertise_presence(false)
             .build()?;
         Ok(Extensions::new(Arc::new(processor)))
+    }
+
+    /// A protocol that paces its direct-edge traffic at `rate`, or not at all.
+    struct PacedProtocol {
+        /// The declared rate.
+        rate: Option<PacedRate>,
+    }
+
+    impl Protocol for PacedProtocol {
+        type State = ();
+        type Event = ();
+        type Effect = u8;
+
+        fn namespace(&self) -> &str {
+            "paced"
+        }
+
+        fn init(&self) -> Self::State {}
+
+        fn decode(&self, _wire: Wire<'_>) -> std::result::Result<Self::Event, Reject> {
+            Ok(())
+        }
+
+        fn step(&self, _ctx: Ctx<'_, Self::State>, _event: Self::Event) -> Transition<(), u8> {
+            Transition::pure(())
+        }
+
+        fn paced_direct_rate(&self) -> Option<PacedRate> {
+            self.rate
+        }
+    }
+
+    /// Registration installs the declared rate with the handler; a replacement that declares
+    /// none withdraws it, so the namespace is paced exactly while a pacing protocol owns it.
+    #[tokio::test]
+    async fn test_registration_installs_and_replacement_withdraws_the_paced_rate() -> Result<()> {
+        let extensions = extensions()?;
+        let rate = PacedRate::new(
+            std::num::NonZeroU64::new(16_384).expect("non-zero budget"),
+            std::num::NonZeroU64::new(150).expect("non-zero period"),
+        );
+        let wire = Envelope::new("paced", Bytes::from_static(b"cell")).encode()?;
+        let other = Envelope::new("ordered-effects", Bytes::from_static(b"x")).encode()?;
+        let interpreter = Arc::new(FailingOrderedInterpreter::default());
+
+        extensions.register(PacedProtocol { rate: Some(rate) }, Arc::clone(&interpreter))?;
+        assert_eq!(
+            extensions.paced_lane(&wire).map(PacedLane::rate),
+            Some(rate)
+        );
+        assert_eq!(extensions.paced_lane(&other), None);
+
+        extensions.replace(PacedProtocol { rate: None }, interpreter)?;
+        assert_eq!(extensions.paced_lane(&wire), None);
+        Ok(())
     }
 
     #[tokio::test]

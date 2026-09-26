@@ -29,11 +29,11 @@ use crate::error::Result;
 use crate::message::quota::quota_admission_error;
 use crate::message::quota::OriginQuotaCounterState;
 use crate::message::quota::OriginQuotaTable;
-use crate::message::types::MessageCategory;
 use crate::message::OriginQuotaConfig;
 use crate::message::OriginQuotaCounters;
 use crate::message::OriginQuotaInstant;
 use crate::message::OriginQuotaKey;
+use crate::message::OriginQuotaLane;
 use crate::storage::KvStorageInterface;
 use crate::utils::Instant;
 
@@ -463,7 +463,7 @@ impl TransactionReplay {
         key: StreamKey,
         sequence: u64,
         digest: TransactionDigest,
-        lane: MessageCategory,
+        lane: OriginQuotaLane,
         byte_cost: usize,
     ) -> Result<SequenceVerdict> {
         let now = OriginQuotaInstant::from_nanos(
@@ -480,7 +480,7 @@ impl TransactionReplay {
         key: StreamKey,
         sequence: u64,
         digest: TransactionDigest,
-        lane: MessageCategory,
+        lane: OriginQuotaLane,
         byte_cost: usize,
         now: OriginQuotaInstant,
     ) -> Result<SequenceVerdict> {
@@ -524,12 +524,17 @@ impl TransactionReplay {
             }
         }
 
-        let quota_key =
-            OriginQuotaKey::new(key.network_id, key.origin_account, key.destination, lane);
-        let quota_reservation = match state.quota.reserve(quota_key, byte_cost, now) {
+        let quota_key = OriginQuotaKey::new(
+            key.network_id,
+            key.origin_account,
+            key.destination,
+            lane.id(),
+        );
+        let limits = state.quota.limits(lane);
+        let quota_reservation = match state.quota.reserve(quota_key, limits, byte_cost, now) {
             Ok(reservation) => reservation,
             Err(error) => {
-                self.quota_counters.record(lane, &error);
+                self.quota_counters.record(quota_key.lane, &error);
                 return Err(quota_admission_error(quota_key, byte_cost, error));
             }
         };
@@ -564,7 +569,7 @@ impl TransactionReplay {
             key,
             sequence,
             digest,
-            MessageCategory::Application,
+            OriginQuotaLane::Class(crate::message::MessageCategory::Application),
             0,
             OriginQuotaInstant::ZERO,
         )

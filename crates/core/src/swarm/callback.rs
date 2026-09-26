@@ -16,6 +16,7 @@ use crate::message::Message;
 use crate::message::MessageHandler;
 use crate::message::MessageKind;
 use crate::message::MessagePayload;
+use crate::message::PacedLane;
 use crate::swarm::session_link::ReferencedDelegations;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
@@ -247,6 +248,18 @@ pub trait SwarmCallback {
     /// swarm delivery turn.
     async fn on_event(&self, _event: &SwarmEvent) -> Result<(), CallbackError> {
         Ok(())
+    }
+
+    /// Resolve the paced direct-edge lane of an application payload (the bytes of a
+    /// [`CustomMessage`](crate::message::CustomMessage)), if the protocol that owns the payload
+    /// registered one.
+    ///
+    /// The swarm consults this only for Application messages whose origin is the authenticated
+    /// neighbour that delivered them, before replay and quota admission; see
+    /// [`OriginQuotaLane`](crate::message::OriginQuotaLane). It runs on the inbound admission
+    /// path, so it must be a cheap, non-blocking lookup. The default registers no paced lane.
+    fn paced_lane(&self, _application_payload: &[u8]) -> Option<PacedLane> {
+        None
     }
 }
 

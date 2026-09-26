@@ -222,6 +222,19 @@ inbound lane)`: one for messages and one for verified logical-message bytes. The
 from the inner transaction signature, so changing a delegated delegation or last-hop relay does not
 reset an active allowance, while unrelated origins carried by one relay remain independent.
 
+The logical lane is the message class, with one exception: the paced direct-edge lane. An
+application protocol that paces its direct-edge traffic and bounds each sending neighbour itself
+(for the onion data plane, the per-link budget `B/V`) declares that per-origin rate when it is
+registered, and core admits the namespace's traffic at that rate in a lane of its own. All other
+Application namespaces keep the configured Application limits. Core takes only a rate and an opaque
+lane identity, and the lane replaces only the message bucket; the byte bucket and record bound stay
+the Application lane's. A transaction qualifies only when it arrived on the handshake-authenticated
+connection of its own origin account. A relayed or foreign origin cannot claim the lane. Its
+traffic reaches the destination through any number of neighbours, so a per-link rate granted per
+origin would multiply with the path count, and no per-link admission bounds it. The relay carrier
+is also unsigned, so "direct" is witnessed only by the authenticated connection, never by the
+payload. Such traffic is charged to its class lane.
+
 The destination serializes replay classification and quota admission as one commit boundary. A
 Replay, Fork, or Stale verdict consumes no tokens; a quota rejection does not advance replay; and
 a replay-persistence failure rolls back the provisional quota reservation. After that commit,
@@ -237,7 +250,8 @@ no origin quota; after complete reassembly and signature verification, the recov
 transaction is charged once by the same function. Quota time is monotonic and local, token state
 is never serialized into the replay snapshot, and each lane has a hard record bound. Under
 pressure only a fully replenished idle record is reusable; if none exists, admission fails closed.
-Quota drops are counted by the bounded lane and reason dimensions, never by origin DID. They are
+Quota drops are counted by the bounded lane and reason dimensions (every paced lane shares one
+aggregate), never by origin DID. They are
 local drops and do not disconnect the immediate peer, which may be an honest relay.
 
 ### Provisional service-receipt boundary
