@@ -243,7 +243,8 @@ async fn test_unauthenticated_peer_claiming_its_origin_never_takes_the_paced_lan
         harness.swarm.did(),
     )?;
     harness.deliver(&stranger, &frame).await;
-    assert!(!harness.lanes(stranger.did).await.contains(&PACED));
+    // Admitted, so the lane choice is observed, and charged to the default lane.
+    assert_eq!(harness.lanes(stranger.did).await, vec![APPLICATION]);
     assert_eq!(harness.app.consulted.load(Ordering::SeqCst), 0);
     Ok(())
 }

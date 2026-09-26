@@ -46,8 +46,9 @@ struct PacedLaneTable {
     ids: HashMap<String, PacedLaneId>,
     /// The currently declared rate of each paced namespace.
     rates: HashMap<String, PacedRate>,
-    /// Identity of the next namespace that declares a rate for the first time.
-    next_id: u32,
+    /// Identity of the next namespace that declares a rate for the first time; beyond
+    /// `u32::MAX` identities are exhausted.
+    next_id: u64,
 }
 
 impl PacedLaneTable {
@@ -56,12 +57,12 @@ impl PacedLaneTable {
         if self.ids.contains_key(namespace) {
             return Ok(());
         }
-        let next = self.next_id.checked_add(1).ok_or_else(|| {
+        let id = u32::try_from(self.next_id).map_err(|_| {
             Error::ExtensionError("paced lane identities are exhausted".to_string())
         })?;
-        self.ids
-            .insert(namespace.to_string(), PacedLaneId::new(self.next_id));
-        self.next_id = next;
+        self.ids.insert(namespace.to_string(), PacedLaneId::new(id));
+        // At most 2^32 increments from zero: never overflows a u64.
+        self.next_id = self.next_id.saturating_add(1);
         Ok(())
     }
 
@@ -126,6 +127,7 @@ mod tests {
     use rings_core::message::PacedRate;
 
     use super::Envelope;
+    use super::PacedLaneTable;
     use super::PacedLanes;
     use crate::error::Result;
 
@@ -177,6 +179,23 @@ mod tests {
         let a = lanes.resolve(&envelope("a")).expect("a is paced");
         let b = lanes.resolve(&envelope("b")).expect("b is paced");
         assert_ne!(a.id(), b.id());
+        Ok(())
+    }
+
+    /// Every `u32` identity is issued, including `u32::MAX`; the next new namespace fails, and
+    /// an already identified namespace is unaffected.
+    #[test]
+    fn test_identity_exhaustion_is_an_error_after_the_last_identity() -> Result<()> {
+        let mut table = PacedLaneTable {
+            next_id: u64::from(u32::MAX),
+            ..PacedLaneTable::default()
+        };
+        table.identify("last")?;
+        table.declare("last", Some(rate(1)));
+        let last = table.lane("last").expect("last is paced");
+        assert_eq!(last.id(), rings_core::message::PacedLaneId::new(u32::MAX));
+        assert!(table.identify("overflow").is_err());
+        assert!(table.identify("last").is_ok());
         Ok(())
     }
 }

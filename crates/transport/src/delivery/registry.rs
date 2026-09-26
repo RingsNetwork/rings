@@ -64,6 +64,14 @@
 //! each successful enqueue with a registration, whose round re-arms `τ`
 //! against the new `E`.
 //!
+//! `Liveness` within one event assumes that registration follows. A caller
+//! cancelled after its enqueue committed `E` but before it registered leaves
+//! `τ` armed against the older `E`, lower than needed by that send's bytes. An
+//! earlier pending send then resolves only once those bytes have drained too,
+//! or at the next registration or event, whichever comes first: a delay
+//! bounded by one message, never a lost verdict, because `b` still crosses the
+//! lower `τ` as the channel drains.
+//!
 //! One snapshot of `E`, taken before `b`, feeds both `τ` and the settlement:
 //!
 //! - **Soundness.** A send's bytes enter `b` inside the channel write, and the
@@ -76,9 +84,11 @@
 //!   holds that lock and loads `E` under it, so the step it absorbs the request
 //!   into arms `τ` against the registered send's `E`.
 //!
-//! A dropped waiter only removes its slot. The armed `τ` then stays at most as
-//! high as `τ` for the remaining sends, so the next event fires no later than
-//! needed, and the round it starts re-arms `τ` for the remaining sends.//!
+//! A dropped waiter only removes its slot. The remaining sends have an
+//! `e_min` no smaller than before, so the armed `τ` stays at least as high as
+//! the `τ` they need. The next event therefore fires no later than needed, and
+//! the round it starts re-arms `τ` for the remaining sends.
+//!
 //! Wakers are data here: the registry returns them and the shell wakes them
 //! after releasing its lock. No clock takes part in any verdict.
 

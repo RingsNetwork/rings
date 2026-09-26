@@ -433,6 +433,11 @@ fn test_enqueue_during_a_round_fabricates_no_flush() {
 /// registration's request forces a step against the advanced `E`, so τ tracks
 /// the first send in the new `E`, and that send resolves on its own drain
 /// rather than on the second send's.
+///
+/// This covers a registration after the round read `b` (the `Rerun` path). A
+/// registration between the round's load of `E` and `begin_step` cannot be
+/// injected here: it is excluded by construction, because `RoundLease` loads
+/// `E` inside the registry lock that `begin_step` holds.
 #[test]
 fn test_registration_during_a_round_rearms_against_the_new_counter() {
     let harness = Harness::new();
