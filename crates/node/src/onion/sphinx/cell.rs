@@ -24,8 +24,8 @@
 //! OnionCell ────────────────────▶ Charged<OnionCell> ──────────▶ Charged<OnionPeeledCell> ─────▶
 //!
 //!                         step, by λ_i's application
-//! OnionAdmittedCell ──┬─ relay:  Dec⁰ under KDF₄₈(σ_in)  ──▶ Relayed(head, OnionCell)
-//!                     └─ symbol: Dec^τ under KDF₄₈(σ_in) ──▶ Consumed(head, v, OnionSurb)
+//! OnionAdmittedCell ──┬─ relay:  Dec⁰ under KDF₄₈(σ_in)  ──▶ Relayed(next, OnionCell)
+//!                     └─ symbol: Dec^τ under KDF₄₈(σ_in) ──▶ Consumed(f, ā, v, OnionSurb)
 //!
 //! OnionSurb υ = (next, χ_{i+1}, σ_out, x) ── produce(v′), keys of σ_out ──▶ (next, OnionCell)
 //! ```
@@ -68,6 +68,7 @@ use super::header::OnionLoopTag;
 use super::header::OnionPeelError;
 use super::header::ONION_HEADER_BYTES;
 use super::header::ONION_HEADER_MAC_BYTES;
+use super::layer::OnionArguments;
 use super::layer::OnionLayer;
 use super::layer::OnionLayerApplication;
 use super::layer::OnionLayerHead;
@@ -80,6 +81,7 @@ use crate::onion::circuit::OnionAdmissionLayer;
 use crate::onion::circuit::OnionAdmissionRejection;
 use crate::onion::circuit::OnionAdmissionState;
 use crate::onion::circuit::OnionExpiry;
+use crate::onion::OnionServiceName;
 
 /// `|υ| = |next| + |χ| + |σ| + |x| = 20 + 2919 + 32 + 8 = 2979`, the encoded width of a reply block
 /// in a `credit` frame (#834 D8).
@@ -133,19 +135,22 @@ pub(crate) struct OnionPeeledCell {
 pub(crate) struct OnionAdmittedCell(OnionPeeledCell);
 
 /// The outcome of a hop's carry step, chosen by its layer's application. The step consumes both
-/// seeds of `λ_i`, so only its key-free head comes out.
+/// seeds of `λ_i`; admission has already read the rest of its head.
 pub(crate) enum OnionStep {
     /// A relay removed one AEZ layer: the cell it forwards.
     Relayed {
-        /// The head of `λ_i`.
-        head: OnionLayerHead,
+        /// `next_i`, where the cell goes.
+        next: Did,
         /// The forwarded cell, of the received class, in the received buffer.
         cell: OnionCell,
     },
-    /// A symbol hop received its input: the value and the reply block of its output.
+    /// A symbol hop received its input: the application, its value and the reply block of its
+    /// output.
     Consumed {
-        /// The head of `λ_i`.
-        head: OnionLayerHead,
+        /// `f_i`.
+        symbol: OnionServiceName,
+        /// `ā_i`.
+        arguments: OnionArguments,
         /// `v`, a view into the received buffer, zeroized on drop.
         value: OnionCarryValue,
         /// The reply block `υ = (next, χ_{i+1}, σ_out, x)` that produces the forwarded cell,
@@ -345,6 +350,13 @@ impl<C> Charged<C> {
 }
 
 impl Charged<OnionCell> {
+    /// Settle the charge without peeling: a cell whose `γ` is one of the client's own tags
+    /// (position `H + 1`, D6′) returns to the client, whose tag entry holds its key. Dropping the
+    /// token settles the charge, as for an invalid `α` or `γ`; no ECDH is spent.
+    pub(crate) fn settle(self) -> OnionCell {
+        self.value
+    }
+
     /// Peel the charged cell's header under the hop's key; the token stays with the peeled
     /// cell. A failed peel drops the token, which settles the charge (#834 L9: an invalid `α` or
     /// `γ` is paid for).
@@ -393,8 +405,8 @@ impl OnionAdmittedCell {
     /// The carry step of this position, by `λ_i`'s application; it consumes both seeds:
     ///
     /// ```text
-    /// relay     y_i = Dec⁰_{KDF₄₈(σ_in)}(y_{i−1})   in place         ⇒ Relayed(head, cell)
-    /// f ∈ Σ_W   v = pad⁻¹ Dec^τ_{KDF₄₈(σ_in)}(y_{i−1})  in place     ⇒ Consumed(head, v, υ)
+    /// relay     y_i = Dec⁰_{KDF₄₈(σ_in)}(y_{i−1})   in place         ⇒ Relayed(next, cell)
+    /// f ∈ Σ_W   v = pad⁻¹ Dec^τ_{KDF₄₈(σ_in)}(y_{i−1})  in place     ⇒ Consumed(f, ā, v, υ)
     ///           υ = (next, χ_{i+1}, σ_out, x)
     /// ```
     ///
@@ -421,11 +433,11 @@ impl OnionAdmittedCell {
                     bytes.get_mut(ONION_HEADER_BYTES..).unwrap_or_default(),
                 );
                 Ok(OnionStep::Relayed {
-                    head,
+                    next: head.next,
                     cell: OnionCell { class, bytes },
                 })
             }
-            OnionLayerApplication::Apply { .. } => {
+            OnionLayerApplication::Apply { symbol, arguments } => {
                 let header = bytes
                     .get(..ONION_HEADER_BYTES)
                     .and_then(OnionHeader::decode)
@@ -439,7 +451,12 @@ impl OnionAdmittedCell {
                 });
                 let end = bytes.len();
                 let value = carry::open(&key, bytes, ONION_HEADER_BYTES..end)?;
-                Ok(OnionStep::Consumed { head, value, surb })
+                Ok(OnionStep::Consumed {
+                    symbol,
+                    arguments,
+                    value,
+                    surb,
+                })
             }
         }
     }
@@ -475,6 +492,7 @@ impl OnionSurb {
     }
 
     /// The widest value this reply block can carry, `C₀ − 1` of its class.
+    #[cfg(test)]
     pub(crate) const fn capacity(&self) -> usize {
         self.class.value_capacity()
     }

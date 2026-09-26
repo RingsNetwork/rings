@@ -245,7 +245,7 @@ async fn test_onion_exit_publish_replaces_observed_self_records() -> Result<()> 
         Duration::from_secs(90),
         default_online_node_type(),
         OnionExitOffer::new(vec![OnionServiceName::https()], policy)?,
-        processor.onion_process_epoch,
+        processor.onion_process_epoch(),
     );
     let published = registration
         .publish_descriptors(&processor.registration_context())
@@ -256,7 +256,7 @@ async fn test_onion_exit_publish_replaces_observed_self_records() -> Result<()> 
         .ok_or_else(|| Error::InvalidConfig("expected one onion-exit descriptor".to_string()))?;
     assert_eq!(
         published_descriptor.process_epoch,
-        processor.onion_process_epoch
+        processor.onion_process_epoch.get()
     );
     let entry_key = entry::Entry::gen_did(ONION_EXITS_TOPIC)?;
     processor.storage_fetch(entry_key).await?;

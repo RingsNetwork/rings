@@ -1,260 +1,119 @@
-//! Native composition of the onion circuit adapters.
+//! The native handle of a node's onion runtime: `tcp` streams and `https` requests over loops.
 //!
-//! A native node installs one circuit protocol whose handler composes two adapters over shared
-//! node-wide resources (exit accounting, link outbox, forward-replay witness). Exit frames are
-//! evaluated by the node's Σ-algebra, which registers exactly the configured exit services `Σ_n`:
+//! A native node installs one runtime (`onion::runtime`) whose exit algebra registers exactly the
+//! configured exit services `Σ_n`, each over its own world: `tcp` over sockets, `https` over the
+//! native fetch. One interpretation per symbol, never a fallback to another (#834 D1′).
 //!
 //! ```text
-//! exit frame ──service──▶ tcp   ↦ ⟦tcp⟧   = TCP exit                if tcp ∈ Σ_n
-//!                   └──▶ https ↦ ⟦https⟧ = HTTPS fetch             if https ∈ Σ_n
-//!
-//! backward frame ──claim(peer, id)──▶ HTTPS client ──Some(claim)──▶ claim.resolve(payload)
-//!                                        │ None
-//!                                        └──────────────────────▶ TCP client streams
+//! open_tcp_stream(route, t)  ─▶ session(tcp, t) ─▶ NativeOnionOpenStream ─relay─▶ local stream
+//! request_https(route, call) ─▶ session(https, route.target) ─▶ response
 //! ```
-//!
-//! Each symbol has exactly one interpretation (#834 D1′): `https` is a request/response fetch
-//! only, and every byte tunnel, TLS included, is `tcp`. No interpretation dispatches on a decode
-//! failure, so a body that is not a well-formed payload of its symbol is dropped, never handed
-//! to another symbol. An operator who wants HTTPS-only egress registers `tcp` restricted to
-//! `*:443`.
-//!
-//! Law (client disjointness): the HTTPS client and the TCP streams draw circuit ids independently
-//! and uniformly from 128 bits, and the HTTPS client claims only the pair `(circuit id, expected
-//! return peer)` it registered. A TCP payload is therefore misdelivered only if both allocators
-//! drew the same id for routes with the same first hop, with probability at most `n² / 2¹²⁹` for
-//! `n` live circuits — the same unguessability every edge-local circuit id already relies on.
 
-use std::sync::Arc;
-
-use rings_core::delegation::DelegateeKey;
-use rings_core::dht::Did;
-use rings_core::message::MessageSigner;
 use tokio::net::TcpStream;
 
+use crate::error::Error;
 use crate::error::Result;
 use crate::extension::ext::Extensions;
-use crate::extension::ext::Scope;
-use crate::onion::circuit::OnionAlgebra;
-use crate::onion::circuit::OnionAuthenticatedPayload;
-use crate::onion::circuit::OnionCircuitExitFrame;
-use crate::onion::circuit::OnionCircuitHandler;
-use crate::onion::circuit::OnionCircuitId;
-use crate::onion::circuit::OnionCircuitProtocol;
-use crate::onion::circuit::OnionCircuitShell;
-use crate::onion::circuit::OnionInterpretation;
-use crate::onion::circuit::OnionLinkSender;
-use crate::onion::circuit::ONION_CIRCUIT_NAMESPACE;
-use crate::onion::exit_accounting::OnionExitAccounting;
 use crate::onion::https::OnionHttpsCall;
 use crate::onion::https::OnionHttpsClient;
-use crate::onion::https::OnionHttpsInterpretation;
 use crate::onion::https::OnionHttpsResponse;
-use crate::onion::https::OnionHttpsRuntime;
 use crate::onion::proxy::OnionProxyRoute;
-use crate::onion::replay::OnionForwardReplayWitness;
+use crate::onion::runtime::OnionRuntime;
+use crate::onion::session::client::OnionCreditWindow;
+use crate::onion::session::dial::OnionSessionRequest;
+use crate::onion::sphinx::class::OnionLoopClass;
 use crate::onion::tcp::NativeOnionOpenStream;
-use crate::onion::tcp::OnionTcpRuntime;
-use crate::onion::OnionExitOffer;
 use crate::onion::OnionProxyTarget;
 use crate::onion::OnionRoute;
+use crate::onion::OnionRouteError;
 use crate::onion::OnionServiceName;
 
-/// Native handle for TCP streams and HTTPS requests over route-aware onion circuits.
+/// Native handle for TCP streams and HTTPS requests over onion loops.
 #[derive(Clone)]
 pub struct NativeOnionCircuitHandle {
-    tcp: Arc<OnionTcpRuntime>,
-    https: Arc<OnionHttpsClient>,
-    scope: Scope,
+    /// The installed runtime.
+    runtime: OnionRuntime,
 }
 
 impl NativeOnionCircuitHandle {
-    /// Install the route-aware onion circuit protocol of the processor behind `extensions`.
+    /// Install the onion runtime of the processor behind `extensions`.
     ///
-    /// Everything is read from that processor: its session key and network, its circuit
-    /// capabilities and, on the exit rung, its exit offer. What the node publishes and what it
-    /// evaluates therefore agree by construction.
+    /// Everything is read from that processor: its session key, its role and, on the exit
+    /// rung, its exit offer, so what the node publishes and what it evaluates agree.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ExtensionError`] if the data plane is already installed.
     pub fn install(extensions: &Extensions) -> Result<Self> {
-        let core = extensions.core();
-        let delegatee_key = core.delegatee_key().clone();
-        let network_id = core.network_id();
-        let capabilities = core.onion_circuit_capabilities();
-        let (tcp, https) = native_onion_runtimes(
-            delegatee_key.clone(),
-            network_id,
-            core.onion_role().exit().cloned(),
-        );
-        if let Some(offer) = tcp.exit_config() {
-            if offer.offers(&OnionServiceName::https()) {
-                https.set_exit_policy(Some(offer.policy().clone()));
-            }
-        }
-        let signer = MessageSigner::new(delegatee_key.clone(), network_id);
-        extensions.register(
-            OnionCircuitProtocol::new(capabilities),
-            OnionCircuitShell::with_link_sender(
-                delegatee_key,
-                NativeOnionCircuitHandler::new(Arc::clone(&tcp), Arc::clone(&https), signer),
-                tcp.link_sender().clone(),
-            ),
-        )?;
-        Ok(Self {
-            tcp,
-            https: Arc::clone(https.client()),
-            scope: Scope::new(extensions.core(), ONION_CIRCUIT_NAMESPACE.to_string()),
-        })
+        OnionRuntime::install(extensions).map(|runtime| Self { runtime })
     }
 
-    /// Relay an already-accepted TCP stream over `route`.
+    /// Relay an already-accepted TCP stream over `route` to `target`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Self::open_tcp_stream`].
     pub async fn relay_tcp_stream(
         &self,
         stream: TcpStream,
         route: OnionRoute,
         target: OnionProxyTarget,
     ) -> Result<()> {
-        let opened = self.open_tcp_stream(route, target).await?;
-        opened.relay(stream);
-        Ok(())
+        self.open_tcp_stream(route, target)
+            .await
+            .map(|opened| opened.relay(stream))
     }
 
-    /// Open a TCP stream over `route` and wait until the exit has connected the target.
+    /// Open a `tcp` session over `route` and wait until the exit has connected `target`.
+    ///
+    /// # Errors
+    ///
+    /// [`OnionRouteError::PayloadServiceMismatch`] for a route selected for another symbol, the
+    /// exit's refusal, or a timeout.
     pub async fn open_tcp_stream(
         &self,
         route: OnionRoute,
         target: OnionProxyTarget,
     ) -> Result<NativeOnionOpenStream> {
-        self.tcp
-            .open_client_connection(self.scope.clone(), route, target)
+        if route.service_name() != &OnionServiceName::tcp() {
+            return Err(Error::OnionRouteError(
+                OnionRouteError::PayloadServiceMismatch {
+                    payload_service: OnionServiceName::tcp().as_str().to_string(),
+                    route_service: route.service().to_string(),
+                },
+            ));
+        }
+        self.runtime
+            .open(OnionSessionRequest {
+                route,
+                symbol: OnionServiceName::tcp(),
+                target,
+                class: OnionLoopClass::DEFAULT,
+                window: OnionCreditWindow::DEFAULT,
+            })
             .await
+            .map(NativeOnionOpenStream::new)
     }
 
-    /// Send `call` to `route.target` over `route` and wait for the exit's authenticated response.
+    /// Send `call` to `route.target` over `route` and wait for the exit's response.
     ///
     /// Obtain the target and call from [`OnionHttpsCall::from_url`], then select `route` for that
     /// target under
     /// [`OnionProxyConfig::https_proxy`](crate::onion::proxy::OnionProxyConfig::https_proxy).
-    /// Dropping the future cancels the pending circuit, and a silent exit yields
-    /// [`Error::OnionProxyRequestTimedOut`](crate::error::Error::OnionProxyRequestTimedOut).
+    /// Dropping the future ends the session, and a silent exit yields
+    /// [`Error::OnionProxyRequestTimedOut`].
+    ///
+    /// # Errors
+    ///
+    /// The session's refusal or failure, the exit's reported failure, or the timeout.
     pub async fn request_https(
         &self,
         route: &OnionProxyRoute,
         call: OnionHttpsCall,
     ) -> Result<OnionHttpsResponse> {
-        self.https.request(self.scope.clone(), route, call).await
-    }
-}
-
-/// Build the TCP and HTTPS adapters over one set of node-wide exit and link resources.
-pub(super) fn native_onion_runtimes(
-    delegatee_key: DelegateeKey,
-    network_id: u32,
-    exit_config: Option<OnionExitOffer>,
-) -> (Arc<OnionTcpRuntime>, Arc<OnionHttpsRuntime>) {
-    let accounting = OnionExitAccounting::default();
-    let link_sender = OnionLinkSender::default();
-    let forward_replays = OnionForwardReplayWitness::default();
-    let return_key = delegatee_key.delegatee_public_key();
-    let tcp = Arc::new(OnionTcpRuntime::with_resources(
-        delegatee_key,
-        network_id,
-        exit_config,
-        accounting.clone(),
-        link_sender.clone(),
-        forward_replays.clone(),
-    ));
-    let https = Arc::new(OnionHttpsRuntime::with_resources(
-        return_key,
-        accounting,
-        link_sender,
-        forward_replays,
-    ));
-    (tcp, https)
-}
-
-/// `⟦tcp⟧`: one byte-stream frame applied to the native TCP exit runtime.
-struct OnionTcpInterpretation {
-    runtime: Arc<OnionTcpRuntime>,
-}
-
-#[async_trait::async_trait]
-impl OnionInterpretation for OnionTcpInterpretation {
-    async fn evaluate(&self, scope: &Scope, frame: OnionCircuitExitFrame) -> Result<()> {
-        self.runtime.handle_exit_payload(scope.clone(), frame).await
-    }
-}
-
-/// Circuit handler of a native node: its Σ-algebra and client continuations (see the module
-/// diagram).
-pub(super) struct NativeOnionCircuitHandler {
-    tcp: Arc<OnionTcpRuntime>,
-    https: Arc<OnionHttpsRuntime>,
-    /// Overlay network whose signing domain authenticates backward payloads.
-    network_id: u32,
-    algebra: OnionAlgebra,
-}
-
-impl NativeOnionCircuitHandler {
-    /// Register exactly the configured exit services `Σ_n` under one exit signing authority.
-    ///
-    /// A node without an exit configuration interprets no world-facing symbol: `Σ_n = ∅`.
-    pub(super) fn new(
-        tcp: Arc<OnionTcpRuntime>,
-        https: Arc<OnionHttpsRuntime>,
-        signer: MessageSigner<DelegateeKey>,
-    ) -> Self {
-        let network_id = signer.network_id();
-        let services = tcp
-            .exit_config()
-            .map(|config| config.services().iter().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
-        let algebra = services
-            .into_iter()
-            .fold(OnionAlgebra::default(), |algebra, service| {
-                // Σ_W = {tcp, https} is closed, so a service other than `https` is `tcp`.
-                if service == OnionServiceName::https() {
-                    algebra.register(
-                        service,
-                        OnionHttpsInterpretation::new(Arc::clone(&https), signer.clone()),
-                    )
-                } else {
-                    algebra.register(service, OnionTcpInterpretation {
-                        runtime: Arc::clone(&tcp),
-                    })
-                }
-            });
-        Self {
-            tcp,
-            https,
-            network_id,
-            algebra,
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl OnionCircuitHandler for NativeOnionCircuitHandler {
-    fn algebra(&self) -> &OnionAlgebra {
-        &self.algebra
-    }
-
-    async fn handle_client(
-        &self,
-        _scope: &Scope,
-        from: Did,
-        circuit_id: OnionCircuitId,
-        payload: OnionAuthenticatedPayload,
-    ) -> Result<()> {
-        match self.https.client().claim(from, circuit_id)? {
-            Some(claim) => {
-                claim.resolve(payload, self.network_id);
-                Ok(())
-            }
-            None => {
-                self.tcp
-                    .handle_client_payload(from, circuit_id, payload)
-                    .await
-            }
-        }
+        OnionHttpsClient::new(self.runtime.clone())
+            .request(route, call)
+            .await
     }
 }
 

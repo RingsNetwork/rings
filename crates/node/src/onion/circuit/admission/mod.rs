@@ -173,11 +173,10 @@ pub(crate) use self::bloom::OnionReplayFilterKey;
 use self::bloom::ReplayStore;
 use self::ledger::QuantumLedger;
 use super::OnionExpiry;
-use super::OnionForwardNonce;
+use super::OnionReplayNonce;
 use super::ONION_FORWARD_EXPIRY_QUANTUM_MS;
 use super::ONION_FORWARD_MAX_VALIDITY_MS;
 use super::ONION_FORWARD_PAYLOAD_TTL_MS;
-use crate::onion::circuit::OnionCellBucket;
 use crate::onion::sphinx::cell::Charged;
 use crate::onion::sphinx::cell::OnionCell;
 use crate::onion::sphinx::class::OnionLoopClass;
@@ -197,7 +196,7 @@ const ADMISSION_WINDOW_QUANTA_WIDE: u128 =
     ONION_ADMISSION_WINDOW_MS / ONION_FORWARD_EXPIRY_QUANTUM_MS;
 
 /// Per-sender budget `B`: units of 16 KiB per DID per aligned window of `N` quanta.
-const ONION_ADMISSION_SENDER_UNITS: u32 = 16_384;
+pub(crate) const ONION_ADMISSION_SENDER_UNITS: u32 = 16_384;
 
 /// Global budget `G = 64·B` units per aligned window of `N` quanta. It is independent of the number
 /// of links and bounds the replay store at 64 blocks per filter.
@@ -205,19 +204,6 @@ const ONION_ADMISSION_GLOBAL_UNITS: u32 = 64 * ONION_ADMISSION_SENDER_UNITS;
 
 /// Compile-time law: the ledger's array length is `N = V / Q`.
 const _: () = assert!(ADMISSION_WINDOW_QUANTA_WIDE == ADMISSION_WINDOW_QUANTA as u128);
-
-/// Bytes of one admission unit, 16 KiB: the least loop class.
-const ONION_ADMISSION_UNIT_BYTES: usize = 16 * 1024;
-
-// Every class is a whole number of units, at least one, and the largest (12 MiB = 768 units)
-// fits the ledgers' `u32`.
-const _: () = assert!(
-    OnionLoopClass::DEFAULT.cell_bytes() == ONION_ADMISSION_UNIT_BYTES
-        && OnionCellBucket::MiB12
-            .plaintext_len()
-            .is_multiple_of(ONION_ADMISSION_UNIT_BYTES)
-        && OnionCellBucket::MiB12.plaintext_len() / ONION_ADMISSION_UNIT_BYTES <= u32::MAX as usize
-);
 
 /// Units of 16 KiB charged for one cell. A class-`b` cell costs `b / 16 KiB ≥ 1` units.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -230,16 +216,9 @@ impl OnionAdmissionUnits {
         Self(units)
     }
 
-    /// `u(b) = b / 16 KiB`, the units of one class-`b` cell: at least one, since the least class
-    /// is 16 KiB (#834 L9).
+    /// `u(b) = b / 16 KiB`, the units of one class-`b` cell.
     fn of_class(class: OnionLoopClass) -> Self {
-        let units = class.cell_bytes() / ONION_ADMISSION_UNIT_BYTES;
-        Self(
-            u32::try_from(units)
-                .ok()
-                .and_then(NonZeroU32::new)
-                .unwrap_or(NonZeroU32::MIN),
-        )
+        Self(NonZeroU32::new(class.units()).unwrap_or(NonZeroU32::MIN))
     }
 
     /// The unit count.
@@ -281,7 +260,7 @@ pub(crate) struct OnionAdmissionLayer {
     /// Quantised expiry `x` of the layer's loop.
     pub(crate) expiry: OnionExpiry,
     /// Replay tag `ν` of the layer.
-    pub(crate) tag: OnionForwardNonce,
+    pub(crate) tag: OnionReplayNonce,
 }
 
 /// Why a cell could not be charged. Nothing was charged, and the cell must not be decrypted.
@@ -566,6 +545,17 @@ impl OnionAdmissionState {
             arrival_ms: self.clock_ms,
             epoch: self.epoch,
         })
+    }
+
+    /// The live link of `did`, against which its cells are charged: core admits at most one
+    /// generation of a DID at a time, so this is that generation. If a lost `Retired` has left
+    /// two live until the next reconciliation, the newest is taken, since core's generations
+    /// increase.
+    pub(crate) fn live_link(&self, did: Did) -> Option<OnionAdmissionLink> {
+        self.senders
+            .get(&did)
+            .and_then(|sender| sender.live.last().copied())
+            .map(|generation| OnionAdmissionLink { did, generation })
     }
 
     /// The number of live links, `Σ_d |live(d)|`, derived rather than stored.

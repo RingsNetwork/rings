@@ -17,7 +17,6 @@ use rings_core::dht::EntryStorage;
 use rings_core::ecc::PublicKey;
 use rings_core::measure::PeerQuality;
 use rings_core::message::DhtProtocolMode;
-use rings_core::message::MessageSigner;
 use rings_core::message::ReplayStorage;
 use rings_core::storage::idb::IdbStorage;
 use rings_core::utils::js_value;
@@ -33,24 +32,18 @@ use wasm_bindgen_futures::JsFuture;
 
 use crate::error::Error;
 use crate::error::Result as NodeResult;
-use crate::extension::ext::Scope;
 use crate::measure::EvidenceStorage;
 use crate::measure::MeasureStorage;
-use crate::onion::circuit::route_first_hop;
-use crate::onion::circuit::OnionCircuitProtocol;
-use crate::onion::circuit::OnionCircuitShell;
-use crate::onion::circuit::ONION_CIRCUIT_NAMESPACE;
 use crate::onion::directory;
 use crate::onion::directory::OnionDirectoryReader;
-use crate::onion::https::BrowserOnionCircuitHandler;
 use crate::onion::https::OnionHttpsClient;
 use crate::onion::https::OnionHttpsClientRequest;
 use crate::onion::https::OnionHttpsResponse;
-use crate::onion::https::OnionHttpsRuntime;
 use crate::onion::https_onion_exit_services;
 use crate::onion::proxy::OnionProxyConfig;
 use crate::onion::proxy::OnionProxyRoute;
 use crate::onion::proxy::OnionProxyTarget;
+use crate::onion::runtime::OnionRuntime;
 use crate::onion::OnionEntryGuardStorage;
 use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitOffer;
@@ -102,9 +95,8 @@ impl ProviderRef {
 #[wasm_export]
 pub struct BrowserOnionProxy {
     processor: Arc<Processor>,
-    scope: Scope,
     config: OnionProxyConfig,
-    client: Arc<OnionHttpsClient>,
+    client: OnionHttpsClient,
     directory_endpoint: Option<RemoteRpcEndpoint>,
 }
 
@@ -123,8 +115,8 @@ pub struct BrowserOnionProxyResponse {
 /// render and audit the result.
 #[derive(serde::Serialize)]
 struct BrowserOnionRouteInfo {
-    /// DIDs of the hops the circuit uses, `g, r₀,₂, exit`: until #834 Phase 2a-4 the return
-    /// segment of the selected loop is unused and not reported.
+    /// DIDs of the loop's positions `1 … H` in order, `g, r₀,₂, exit, r₁,₁, g`: the guard
+    /// opens and closes the loop, so it is listed twice.
     hops: Vec<String>,
     /// Canonical service selected by the route.
     service: String,
@@ -136,7 +128,8 @@ struct BrowserOnionRouteInfo {
 fn browser_onion_route_info(route: &crate::onion::OnionRoute) -> NodeResult<BrowserOnionRouteInfo> {
     Ok(BrowserOnionRouteInfo {
         hops: route
-            .circuit_hops()
+            .hops()
+            .positions()
             .map(|hop| hop.did.to_string())
             .collect(),
         service: route.service().to_string(),
@@ -181,7 +174,7 @@ impl BrowserOnionDirectoryReader {
     }
 
     fn route_first_hop_is_direct(&self, route: &OnionProxyRoute) -> bool {
-        let first_hop = route_first_hop(&route.route);
+        let first_hop = route.route.hops().guard().did;
         first_hop != self.processor.did() && self.direct_peer_dids().contains(&first_hop)
     }
 
@@ -495,7 +488,7 @@ impl Provider {
         .await?;
         provider.set_backend()?;
         if provider.processor.onion_role().registers_relay() {
-            provider.install_onion_https_protocol()?;
+            provider.install_onion_runtime()?;
         }
         Ok(provider)
     }
@@ -608,9 +601,7 @@ impl Provider {
             .await?;
 
             provider.set_backend().map_err(JsError::from)?;
-            provider
-                .install_onion_https_protocol()
-                .map_err(JsError::from)?;
+            provider.install_onion_runtime().map_err(JsError::from)?;
 
             Ok(JsValue::from(provider))
         })
@@ -797,15 +788,11 @@ impl Provider {
     /// The returned proxy is not bound to a URL; call [`BrowserOnionProxy::request`] with a full
     /// `https://` URL to send through the selected exit.
     pub fn onion_https_proxy(&self) -> Result<BrowserOnionProxy, JsError> {
-        let runtime = self.install_onion_https_protocol().map_err(JsError::from)?;
+        let runtime = self.install_onion_runtime().map_err(JsError::from)?;
         Ok(BrowserOnionProxy {
             processor: self.processor.clone(),
-            scope: Scope::new(
-                self.extensions().core(),
-                ONION_CIRCUIT_NAMESPACE.to_string(),
-            ),
             config: OnionProxyConfig::https_proxy(),
-            client: Arc::clone(runtime.client()),
+            client: OnionHttpsClient::new(runtime),
             directory_endpoint: self.onion_directory_endpoint().map_err(JsError::from)?,
         })
     }
@@ -890,57 +877,22 @@ impl Provider {
 }
 
 impl Provider {
-    /// Install this provider's onion runtime once, with the circuit capabilities of the
-    /// processor's role at its process epoch and, for an exit, the policy of its offer.
+    /// Install this provider's onion runtime once: the data plane with the processor's role, and
+    /// for an exit the fetch world under the policy of its offer (`onion::runtime`).
     ///
-    /// The role holds only services this runtime interprets (`https`): the processor builder
-    /// rejects any other offer (`Error::UninterpretableOnionService`).
-    pub(crate) fn install_onion_https_protocol(
-        &self,
-    ) -> crate::error::Result<Arc<OnionHttpsRuntime>> {
+    /// The role holds only services a browser interprets (`https`): the processor builder rejects
+    /// any other offer (`Error::UninterpretableOnionService`).
+    pub(crate) fn install_onion_runtime(&self) -> crate::error::Result<OnionRuntime> {
         let mut slot = self
-            .onion_https_runtime
+            .onion_runtime
             .lock()
             .map_err(|_| crate::error::Error::Lock)?;
         if let Some(runtime) = slot.as_ref() {
             return Ok(runtime.clone());
         }
-        if self.extensions().contains(ONION_CIRCUIT_NAMESPACE) {
-            return Err(crate::error::Error::ExtensionError(format!(
-                "namespace {ONION_CIRCUIT_NAMESPACE:?} is already registered"
-            )));
-        }
-        let offer = self.processor.onion_role().exit();
-        let runtime = Arc::new(OnionHttpsRuntime::new(
-            self.processor.delegatee_key().delegatee_public_key(),
-        ));
-        if let Some(offer) = offer {
-            runtime.set_exit_policy(Some(offer.policy().clone()));
-        }
-        self.register_protocol(
-            OnionCircuitProtocol::new(self.processor.onion_circuit_capabilities()),
-            self.onion_https_shell(runtime.clone()),
-        )?;
+        let runtime = OnionRuntime::install(&self.extensions())?;
         *slot = Some(runtime.clone());
         Ok(runtime)
-    }
-
-    fn onion_https_shell(
-        &self,
-        runtime: Arc<OnionHttpsRuntime>,
-    ) -> OnionCircuitShell<BrowserOnionCircuitHandler> {
-        let link_sender = runtime.link_sender();
-        OnionCircuitShell::with_link_sender(
-            self.processor.delegatee_key().clone(),
-            BrowserOnionCircuitHandler::new(
-                runtime,
-                MessageSigner::new(
-                    self.processor.delegatee_key().clone(),
-                    self.processor.swarm.network_id(),
-                ),
-            ),
-            link_sender,
-        )
     }
 }
 

@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use rings_core::dht::Did;
 use rings_core::utils::get_epoch_ms;
 
-use super::circuit::OnionCircuitId;
+use super::session::OnionSessionId;
 use super::OnionExitPolicy;
 use crate::error::Error;
 use crate::error::Result;
@@ -13,20 +13,22 @@ use crate::peer_quota::PeerQuota;
 use crate::sync_lock::lock;
 
 const EXIT_LIMIT_WINDOW_MS: u128 = 60_000;
-const HARD_MAX_ACTIVE_CIRCUITS: u32 = 1_024;
-const HARD_MAX_CIRCUITS_PER_RETURN_PEER: u32 = 64;
-const HARD_MAX_STREAMS_PER_CIRCUIT: u32 = 64;
+const HARD_MAX_ACTIVE_SESSIONS: u32 = 1_024;
+const HARD_MAX_SESSIONS_PER_PREVIOUS_HOP: u32 = 64;
+const HARD_MAX_STREAMS_PER_SESSION: u32 = 64;
 
-/// Shared accounting gate for onion exits.
+/// Shared accounting gate for onion exits: every session `ς` an exit opens, keyed with the
+/// previous hop its opening loop arrived from.
 ///
-/// Invariant: `circuit_quota.total() == count({ circuit | active_streams_by_circuit[circuit] > 0 })`.
-/// Invariant: for every `peer`, `circuit_quota.peer_total(peer)` equals the number of live circuit
-/// keys whose `return_peer == peer`, and never exceeds [`HARD_MAX_CIRCUITS_PER_RETURN_PEER`].
-/// Invariant: `bytes_this_window <= policy.max_bytes_per_minute` whenever that policy field is
+/// Invariant: `session_quota.total() = |{ k | active_streams_by_session[k] > 0 }|`.
+/// Invariant: for every `peer`, `session_quota.peer_total(peer)` equals the number of live
+/// session keys whose `previous_hop = peer`, and never exceeds
+/// [`HARD_MAX_SESSIONS_PER_PREVIOUS_HOP`].
+/// Invariant: `bytes_this_window ≤ policy.max_bytes_per_minute` whenever that policy field is
 /// non-zero.
 /// Preservation: `admit` intersects advertised limits with hard implementation ceilings, then
-/// checks active counters and byte budget under one lock before committing any stream/circuit
-/// increment; dropping the returned lease decrements the same circuit key;
+/// checks active counters and byte budget under one lock before committing any stream or
+/// session increment; dropping the returned lease decrements the same session key;
 /// `record_bytes` resets stale windows before adding.
 /// Post: `remaining_bytes` returns the exact bytes that may still be recorded in the current window,
 /// or `None` when the byte policy is unlimited.
@@ -36,8 +38,8 @@ pub(crate) struct OnionExitAccounting {
 }
 
 struct ExitLimiter {
-    circuit_quota: PeerQuota,
-    active_streams_by_circuit: HashMap<ExitCircuitKey, u32>,
+    session_quota: PeerQuota,
+    active_streams_by_session: HashMap<ExitSessionKey, u32>,
     window_start_ms: u128,
     bytes_this_window: u64,
 }
@@ -45,11 +47,11 @@ struct ExitLimiter {
 impl Default for ExitLimiter {
     fn default() -> Self {
         Self {
-            circuit_quota: PeerQuota::new(
-                HARD_MAX_ACTIVE_CIRCUITS as usize,
-                HARD_MAX_CIRCUITS_PER_RETURN_PEER as usize,
+            session_quota: PeerQuota::new(
+                HARD_MAX_ACTIVE_SESSIONS as usize,
+                HARD_MAX_SESSIONS_PER_PREVIOUS_HOP as usize,
             ),
-            active_streams_by_circuit: HashMap::new(),
+            active_streams_by_session: HashMap::new(),
             window_start_ms: 0,
             bytes_this_window: 0,
         }
@@ -57,25 +59,25 @@ impl Default for ExitLimiter {
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct ExitCircuitKey {
-    circuit_id: OnionCircuitId,
-    return_peer: Did,
+struct ExitSessionKey {
+    session: OnionSessionId,
+    previous_hop: Did,
 }
 
 /// Pure successor selected by exit admission before any limiter state is mutated.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AdmitCommit {
-    circuit: ExitCircuitKey,
+    session_key: ExitSessionKey,
     reserve_circuit: bool,
     active_streams: u32,
     bytes_this_window: Option<u64>,
 }
 
-impl ExitCircuitKey {
-    const fn new(circuit_id: OnionCircuitId, return_peer: Did) -> Self {
+impl ExitSessionKey {
+    const fn new(session: OnionSessionId, previous_hop: Did) -> Self {
         Self {
-            circuit_id,
-            return_peer,
+            session,
+            previous_hop,
         }
     }
 }
@@ -83,20 +85,22 @@ impl ExitCircuitKey {
 /// Lease for one admitted exit stream/request.
 pub(crate) struct OnionExitLease {
     limiter: Arc<Mutex<ExitLimiter>>,
-    circuit: ExitCircuitKey,
+    session_key: ExitSessionKey,
 }
 
 impl Drop for OnionExitLease {
     fn drop(&mut self) {
         if let Ok(mut limiter) = self.limiter.lock() {
-            if let Some(active_streams) = limiter.active_streams_by_circuit.get_mut(&self.circuit) {
+            if let Some(active_streams) =
+                limiter.active_streams_by_session.get_mut(&self.session_key)
+            {
                 if *active_streams > 1 {
                     *active_streams -= 1;
                 } else {
-                    let released = limiter.circuit_quota.release(self.circuit.return_peer);
+                    let released = limiter.session_quota.release(self.session_key.previous_hop);
                     debug_assert!(released);
                     if released {
-                        limiter.active_streams_by_circuit.remove(&self.circuit);
+                        limiter.active_streams_by_session.remove(&self.session_key);
                     }
                 }
             }
@@ -109,18 +113,18 @@ impl OnionExitAccounting {
     pub(crate) fn admit(
         &self,
         policy: &OnionExitPolicy,
-        circuit_id: OnionCircuitId,
-        return_peer: Did,
+        session: OnionSessionId,
+        previous_hop: Did,
         bytes: u64,
     ) -> Result<OnionExitLease> {
-        let circuit = ExitCircuitKey::new(circuit_id, return_peer);
+        let session_key = ExitSessionKey::new(session, previous_hop);
         let mut limiter = lock(&self.limiter)?;
         limiter.refresh_byte_window(get_epoch_ms());
-        let commit = limiter.decide_admission(policy, circuit.clone(), bytes)?;
+        let commit = limiter.decide_admission(policy, session_key.clone(), bytes)?;
         limiter.apply_admission(commit)?;
         Ok(OnionExitLease {
             limiter: self.limiter.clone(),
-            circuit,
+            session_key,
         })
     }
 
@@ -160,31 +164,31 @@ impl ExitLimiter {
     fn decide_admission(
         &self,
         policy: &OnionExitPolicy,
-        circuit: ExitCircuitKey,
+        session_key: ExitSessionKey,
         bytes: u64,
     ) -> Result<AdmitCommit> {
         let active_streams = self
-            .active_streams_by_circuit
-            .get(&circuit)
+            .active_streams_by_session
+            .get(&session_key)
             .copied()
             .unwrap_or_default();
         let max_streams =
-            effective_limit(policy.max_streams_per_circuit, HARD_MAX_STREAMS_PER_CIRCUIT);
+            effective_limit(policy.max_streams_per_circuit, HARD_MAX_STREAMS_PER_SESSION);
         if active_streams >= max_streams {
             return Err(Error::NoPermission);
         }
-        let max_circuits = effective_limit(policy.max_circuits, HARD_MAX_ACTIVE_CIRCUITS);
-        if active_streams == 0 && self.circuit_quota.total() >= max_circuits as usize {
+        let max_circuits = effective_limit(policy.max_circuits, HARD_MAX_ACTIVE_SESSIONS);
+        if active_streams == 0 && self.session_quota.total() >= max_circuits as usize {
             return Err(Error::NoPermission);
         }
         if active_streams == 0 {
-            self.circuit_quota
-                .can_reserve(circuit.return_peer)
+            self.session_quota
+                .can_reserve(session_key.previous_hop)
                 .map_err(|_| Error::NoPermission)?;
         }
         let active_streams = active_streams.checked_add(1).ok_or(Error::NoPermission)?;
         Ok(AdmitCommit {
-            circuit,
+            session_key,
             reserve_circuit: active_streams == 1,
             active_streams,
             bytes_this_window: self.next_recorded_bytes(policy, bytes)?,
@@ -193,12 +197,12 @@ impl ExitLimiter {
 
     fn apply_admission(&mut self, commit: AdmitCommit) -> Result<()> {
         if commit.reserve_circuit {
-            self.circuit_quota
-                .reserve(commit.circuit.return_peer)
+            self.session_quota
+                .reserve(commit.session_key.previous_hop)
                 .map_err(|_| Error::NoPermission)?;
         }
-        self.active_streams_by_circuit
-            .insert(commit.circuit, commit.active_streams);
+        self.active_streams_by_session
+            .insert(commit.session_key, commit.active_streams);
         if let Some(bytes_this_window) = commit.bytes_this_window {
             self.bytes_this_window = bytes_this_window;
         }
@@ -241,32 +245,32 @@ mod tests {
     use rings_core::dht::Did;
 
     use super::effective_limit;
-    use super::ExitCircuitKey;
     use super::ExitLimiter;
+    use super::ExitSessionKey;
     use super::OnionExitAccounting;
-    use super::HARD_MAX_ACTIVE_CIRCUITS;
-    use super::HARD_MAX_CIRCUITS_PER_RETURN_PEER;
-    use super::HARD_MAX_STREAMS_PER_CIRCUIT;
-    use crate::onion::circuit::OnionCircuitId;
+    use super::HARD_MAX_ACTIVE_SESSIONS;
+    use super::HARD_MAX_SESSIONS_PER_PREVIOUS_HOP;
+    use super::HARD_MAX_STREAMS_PER_SESSION;
+    use crate::onion::session::OnionSessionId;
     use crate::onion::OnionExitPolicy;
 
     #[test]
     fn test_unspecified_or_excessive_policy_uses_hard_resource_limits() {
         assert_eq!(
-            effective_limit(0, HARD_MAX_ACTIVE_CIRCUITS),
-            HARD_MAX_ACTIVE_CIRCUITS
+            effective_limit(0, HARD_MAX_ACTIVE_SESSIONS),
+            HARD_MAX_ACTIVE_SESSIONS
         );
-        assert_eq!(effective_limit(7, HARD_MAX_ACTIVE_CIRCUITS), 7);
+        assert_eq!(effective_limit(7, HARD_MAX_ACTIVE_SESSIONS), 7);
         assert_eq!(
-            effective_limit(u32::MAX, HARD_MAX_ACTIVE_CIRCUITS),
-            HARD_MAX_ACTIVE_CIRCUITS
+            effective_limit(u32::MAX, HARD_MAX_ACTIVE_SESSIONS),
+            HARD_MAX_ACTIVE_SESSIONS
         );
     }
 
     #[test]
     fn test_admission_decision_does_not_mutate_limiter_before_commit() {
         let mut limiter = ExitLimiter::default();
-        let circuit = ExitCircuitKey::new(OnionCircuitId::new([1; 16]), Did::from(9_u32));
+        let session_key = ExitSessionKey::new(OnionSessionId::new([1; 16]), Did::from(9_u32));
         let policy = OnionExitPolicy {
             max_circuits: 1,
             max_streams_per_circuit: 2,
@@ -275,78 +279,84 @@ mod tests {
         };
 
         let commit = limiter
-            .decide_admission(&policy, circuit.clone(), 7)
+            .decide_admission(&policy, session_key.clone(), 7)
             .expect("pure admission decision");
-        assert_eq!(limiter.circuit_quota.total(), 0);
-        assert!(limiter.active_streams_by_circuit.is_empty());
+        assert_eq!(limiter.session_quota.total(), 0);
+        assert!(limiter.active_streams_by_session.is_empty());
         assert_eq!(limiter.bytes_this_window, 0);
 
         limiter
             .apply_admission(commit)
             .expect("validated commit applies atomically");
-        assert_eq!(limiter.circuit_quota.total(), 1);
-        assert_eq!(limiter.circuit_quota.peer_total(circuit.return_peer), 1);
-        assert_eq!(limiter.active_streams_by_circuit.get(&circuit), Some(&1));
+        assert_eq!(limiter.session_quota.total(), 1);
+        assert_eq!(
+            limiter.session_quota.peer_total(session_key.previous_hop),
+            1
+        );
+        assert_eq!(
+            limiter.active_streams_by_session.get(&session_key),
+            Some(&1)
+        );
         assert_eq!(limiter.bytes_this_window, 7);
-        assert!(limiter.decide_admission(&policy, circuit, 4).is_err());
+        assert!(limiter.decide_admission(&policy, session_key, 4).is_err());
     }
 
     #[test]
     fn test_unspecified_stream_limit_is_still_bounded() {
         let accounting = OnionExitAccounting::default();
         let policy = OnionExitPolicy::default();
-        let circuit = OnionCircuitId::random();
+        let session_key = OnionSessionId::random();
         let peer = Did::from(7_u32);
         let mut leases = Vec::new();
-        for _ in 0..HARD_MAX_STREAMS_PER_CIRCUIT {
-            let admitted = accounting.admit(&policy, circuit, peer, 0);
+        for _ in 0..HARD_MAX_STREAMS_PER_SESSION {
+            let admitted = accounting.admit(&policy, session_key, peer, 0);
             assert!(admitted.is_ok());
             if let Ok(lease) = admitted {
                 leases.push(lease);
             }
         }
-        assert!(accounting.admit(&policy, circuit, peer, 0).is_err());
-        assert_eq!(leases.len(), HARD_MAX_STREAMS_PER_CIRCUIT as usize);
+        assert!(accounting.admit(&policy, session_key, peer, 0).is_err());
+        assert_eq!(leases.len(), HARD_MAX_STREAMS_PER_SESSION as usize);
     }
 
     #[test]
-    fn test_unspecified_circuit_limit_is_still_bounded() {
+    fn test_unspecified_session_limit_is_still_bounded() {
         let accounting = OnionExitAccounting::default();
         let policy = OnionExitPolicy::default();
         let mut leases = Vec::new();
-        for index in 0..HARD_MAX_ACTIVE_CIRCUITS {
-            let circuit = OnionCircuitId::new(u128::from(index).to_be_bytes());
+        for index in 0..HARD_MAX_ACTIVE_SESSIONS {
+            let session_key = OnionSessionId::new(u128::from(index).to_be_bytes());
             let peer = Did::from(index.saturating_add(1));
-            let admitted = accounting.admit(&policy, circuit, peer, 0);
+            let admitted = accounting.admit(&policy, session_key, peer, 0);
             assert!(admitted.is_ok());
             if let Ok(lease) = admitted {
                 leases.push(lease);
             }
         }
-        let overflow = OnionCircuitId::new(u128::from(HARD_MAX_ACTIVE_CIRCUITS).to_be_bytes());
+        let overflow = OnionSessionId::new(u128::from(HARD_MAX_ACTIVE_SESSIONS).to_be_bytes());
         assert!(accounting
             .admit(&policy, overflow, Did::from(u32::MAX), 0)
             .is_err());
-        assert_eq!(leases.len(), HARD_MAX_ACTIVE_CIRCUITS as usize);
+        assert_eq!(leases.len(), HARD_MAX_ACTIVE_SESSIONS as usize);
     }
 
     #[test]
-    fn test_one_return_peer_cannot_pin_the_global_exit_circuit_budget() {
+    fn test_one_previous_hop_cannot_pin_the_global_exit_circuit_budget() {
         let accounting = OnionExitAccounting::default();
         let policy = OnionExitPolicy::default();
         let peer = Did::from(8_u32);
         let mut leases = Vec::new();
 
-        for index in 0..HARD_MAX_CIRCUITS_PER_RETURN_PEER {
-            let circuit = OnionCircuitId::new(u128::from(index).to_be_bytes());
+        for index in 0..HARD_MAX_SESSIONS_PER_PREVIOUS_HOP {
+            let session_key = OnionSessionId::new(u128::from(index).to_be_bytes());
             leases.push(
                 accounting
-                    .admit(&policy, circuit, peer, 0)
-                    .expect("peer circuit inside its share"),
+                    .admit(&policy, session_key, peer, 0)
+                    .expect("peer session inside its share"),
             );
         }
         let overflow =
-            OnionCircuitId::new(u128::from(HARD_MAX_CIRCUITS_PER_RETURN_PEER).to_be_bytes());
+            OnionSessionId::new(u128::from(HARD_MAX_SESSIONS_PER_PREVIOUS_HOP).to_be_bytes());
         assert!(accounting.admit(&policy, overflow, peer, 0).is_err());
 
         let other = Did::from(9_u32);

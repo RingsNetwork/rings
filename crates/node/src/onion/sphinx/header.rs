@@ -130,6 +130,12 @@ impl OnionLoopTag {
     pub(crate) const fn new(bytes: [u8; ONION_HEADER_MAC_BYTES]) -> Self {
         Self(bytes)
     }
+
+    /// The `γ` bytes of the tag.
+    #[cfg(all(test, rings_native))]
+    pub(crate) const fn as_bytes(&self) -> &[u8; ONION_HEADER_MAC_BYTES] {
+        &self.0
+    }
 }
 
 /// The Sphinx header `χ = (α, β, γ)`, exactly `|χ|` bytes whatever the loop length.
@@ -168,7 +174,8 @@ pub(crate) struct OnionHeaderRoute {
     last: OnionRoutePosition,
 }
 
-/// The result of peeling one header: this hop's layer and the header it forwards.
+/// The result of peeling one header value: this hop's layer and the header it forwards.
+#[cfg(test)]
 pub(crate) struct OnionPeeledHeader {
     /// `λ_i`.
     pub(crate) layer: OnionLayer,
@@ -345,6 +352,7 @@ impl OnionHeader {
     }
 
     /// The header's encoding `α ‖ β ‖ γ`, exactly `|χ|` bytes.
+    #[cfg(test)]
     pub(super) fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(ONION_HEADER_BYTES);
         self.encode_into(&mut bytes);
@@ -352,6 +360,7 @@ impl OnionHeader {
     }
 
     /// `t_⋄ = γ_{H+1}`: the loop tag, read by the client from the header the guard forwards.
+    #[cfg(test)]
     pub(super) const fn loop_tag(&self) -> OnionLoopTag {
         OnionLoopTag(self.mac.0)
     }
@@ -455,6 +464,7 @@ impl OnionHeader {
     /// # Errors
     ///
     /// The [`OnionPeelError`] of [`peel_in_place`].
+    #[cfg(test)]
     pub(super) fn peel(
         &self,
         class: OnionLoopClass,

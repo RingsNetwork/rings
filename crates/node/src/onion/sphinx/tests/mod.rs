@@ -36,8 +36,8 @@ use super::seed::OnionSegmentSeed;
 use crate::onion::circuit::OnionAdmissionLink;
 use crate::onion::circuit::OnionAdmissionState;
 use crate::onion::circuit::OnionExpiry;
-use crate::onion::circuit::OnionForwardNonce;
 use crate::onion::circuit::OnionReplayFilterKey;
+use crate::onion::circuit::OnionReplayNonce;
 use crate::onion::OnionProcessEpoch;
 use crate::onion::OnionServiceName;
 
@@ -137,7 +137,7 @@ fn fixture_layer(seed: u64, position: usize, hops: usize) -> OnionLayer {
             next: Did::from(u32::try_from(position).expect("fixture position fits u32")),
             epoch: FIXTURE_EPOCH,
             expiry: fixture_expiry(0),
-            nonce: OnionForwardNonce::new(rng.gen()),
+            nonce: OnionReplayNonce::new(rng.gen()),
         },
         inbound: OnionCarrySeed::new(rng.gen()),
         outbound: OnionSegmentSeed::random(&mut rng),

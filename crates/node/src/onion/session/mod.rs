@@ -24,10 +24,12 @@
 //! - **Close.** `fin` in both directions, a gap, or `V` without a forward loop drops `ς` at `h`.
 
 pub(crate) mod client;
+pub(crate) mod dial;
 pub(crate) mod exit;
 pub(crate) mod frame;
 pub(crate) mod order;
 pub(crate) mod pool;
+pub(crate) mod serve;
 #[cfg(test)]
 mod tests;
 
@@ -54,6 +56,12 @@ impl OnionSessionId {
     /// A uniform session id.
     pub(crate) fn random() -> Self {
         Self(rand::random())
+    }
+
+    /// The session id with `bytes`.
+    #[cfg(test)]
+    pub(crate) const fn new(bytes: [u8; ONION_SESSION_ID_BYTES]) -> Self {
+        Self(bytes)
     }
 }
 

@@ -2,11 +2,7 @@ use rings_core::message::MessageSigner;
 
 use super::*;
 use crate::consts::DATA_REDUNDANT;
-
-// Native WebRTC tests share process-global ICE/UDP resources and timing-sensitive
-// connection callbacks; run them serially so one test's candidates or callbacks
-// cannot add pressure to another test's handshake.
-static NETWORK_TEST_LOCK: OnceLock<AsyncTestMutex<()>> = OnceLock::new();
+pub(super) use crate::tests::native::network_test_guard;
 
 pub(super) fn onion_policy(
     allowed_targets: &[&str],
@@ -67,13 +63,6 @@ pub(super) fn test_callback() -> Arc<SwarmCallbackInstance> {
         inbound_notify: Notify::new(),
         connected_notify: Notify::new(),
     })
-}
-
-pub(super) async fn network_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
-    NETWORK_TEST_LOCK
-        .get_or_init(|| AsyncTestMutex::new(()))
-        .lock()
-        .await
 }
 
 pub(super) async fn prepare_processor_with_identity_key(identity_key: SecretKey) -> Processor {
@@ -274,7 +263,7 @@ pub(super) fn onion_exit_descriptor_for_processor_with_node_type_service(
                 .delegator_verification_pubkey()
                 .map_err(Error::CoreError)?,
             delegatee_public_key: processor.delegatee_key.delegatee_public_key(),
-            process_epoch: processor.onion_process_epoch,
+            process_epoch: processor.onion_process_epoch.get(),
             node_type,
             network_id: processor.swarm.network_id(),
             service,
@@ -293,7 +282,7 @@ pub(super) fn online_relay_descriptor_for_processor(
     processor: &Processor,
     now_ms: u128,
 ) -> Result<OnlineNodeDescriptor> {
-    let capabilities = OnlineNodeCapabilities::onion_relay(processor.onion_process_epoch);
+    let capabilities = OnlineNodeCapabilities::onion_relay(processor.onion_process_epoch.get());
     OnlineNodeDescriptor::new_signed(
         OnlineNodeDescriptorBody {
             did: processor.did(),

@@ -25,6 +25,7 @@ pub struct ProcessorBuilder {
     pub(in crate::processor) onion_role: OnionRole<OnionExitOffer>,
     pub(in crate::processor) onion_exit_heartbeat_interval: Duration,
     pub(in crate::processor) onion_exit_ttl: Duration,
+    pub(in crate::processor) onion_idle_floor: OnionIdleFloor,
     pub(in crate::processor) dht_finger_table_size: usize,
     pub(in crate::processor) reassembly_limits: ReassemblyLimits,
 }
@@ -60,6 +61,7 @@ impl ProcessorBuilder {
             onion_role: config.onion_role.clone(),
             onion_exit_heartbeat_interval: config.onion_exit_heartbeat_interval,
             onion_exit_ttl: config.onion_exit_ttl,
+            onion_idle_floor: OnionIdleFloor::DEFAULT,
             dht_finger_table_size: DEFAULT_FINGER_TABLE_SIZE,
             reassembly_limits: ReassemblyLimits::production(),
         })
@@ -131,6 +133,13 @@ impl ProcessorBuilder {
         self
     }
 
+    /// Set the cover floor of this node's idle onion links (#880); the default is one unit per
+    /// second, and a constrained node (a browser) may lower it.
+    pub fn onion_idle_floor(mut self, floor: OnionIdleFloor) -> Self {
+        self.onion_idle_floor = floor;
+        self
+    }
+
     /// Set the onion symbols this process registers (#834 D2).
     pub fn onion_role(mut self, role: OnionRole<OnionExitOffer>) -> Self {
         self.onion_role = role;
@@ -153,19 +162,16 @@ impl ProcessorBuilder {
             .onion_entry_guard_storage
             .unwrap_or_else(|| Box::new(MemStorage::new()));
         let endpoint_hint = self.external_address.clone();
-        let online_node_capabilities = OnlineNodeCapabilities {
-            onion_relay: self
-                .onion_role
-                .registers_relay()
-                .then_some(self.onion_process_epoch),
-        };
+        let onion_process_epoch = OnionProcessEpochCell::new(self.onion_process_epoch);
         let delegatee_key = self.delegatee_key.clone();
         let online_node_registration = OnlineNodeRegistration::new(
             self.online_node_heartbeat_interval,
             self.online_node_ttl,
             self.online_node_type.clone(),
             endpoint_hint,
-            online_node_capabilities,
+            self.onion_role
+                .registers_relay()
+                .then(|| onion_process_epoch.clone()),
         );
         let mut registration_tasks: Vec<Arc<dyn RegistrationTask>> = Vec::new();
         if self.advertise_presence {
@@ -177,7 +183,7 @@ impl ProcessorBuilder {
                 self.onion_exit_ttl,
                 self.online_node_type,
                 offer.clone(),
-                self.onion_process_epoch,
+                onion_process_epoch.clone(),
             );
             registration_tasks.push(Arc::new(onion_exit_registration));
         }
@@ -215,13 +221,14 @@ impl ProcessorBuilder {
         Ok(Processor {
             swarm,
             delegatee_key,
-            onion_process_epoch: self.onion_process_epoch,
+            onion_process_epoch,
             onion_entry_guards: Arc::new(OnionEntryGuards::new(onion_entry_guard_storage)),
             stabilize_interval: self.stabilize_interval,
             online_node_registration,
             measure,
             listener_lifecycle_lock: Arc::new(futures::lock::Mutex::new(())),
             onion_role: self.onion_role,
+            onion_idle_floor: self.onion_idle_floor,
             registration_tasks,
             observability,
         })

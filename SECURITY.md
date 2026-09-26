@@ -79,7 +79,7 @@ Rings has two layers with different security contracts, and the boundary between
 them is where every privacy claim is decided. The rule is: **the communication
 layer minimizes leakage; the privacy layer provides privacy.** A property belongs
 to the communication layer only if the plain relay delivers it to every message;
-everything that needs a circuit belongs to the privacy layer. Confusing the two
+everything that needs an onion loop belongs to the privacy layer. Confusing the two
 produces two recurring errors: privacy properties get attributed to the plain relay,
 as if encryption to a DID were anonymity, and communication-layer leaks get treated
 as privacy-layer bugs that cover traffic is expected to absorb.
@@ -280,28 +280,32 @@ DIDs scarce, prove useful relay/storage work, or create Sybil-resistant reputati
 finalized-epoch DRanking receipt must use a distinct canonical format and signing domain; it must
 not reinterpret this provisional wire or silently aggregate it into trust.
 
-A leak on this layer is a communication-layer bug. Cover traffic and circuits do not
+A leak on this layer is a communication-layer bug. Cover traffic and loops do not
 fix it: they run above the relay and inherit whatever it exposes.
 
 ### Privacy layer
 
-The privacy layer is `crates/node/src/onion`: layered ElGamal-AEAD circuits over
-direct edges, fixed-batch cover cells with pacing, replay witnesses, fixed size
-classes for cells, and route selection from the online-node and onion-exit
-registries. It sits in `rings-node` deliberately: Chord remains the storage and
+The privacy layer is `crates/node/src/onion`: client-sealed loops of fixed-width
+Sphinx cells over direct edges, constant-rate link emission with real cells
+substituted for cover, paid admission with replay witnesses, fixed size classes for
+cells, and route selection from the online-node and onion-exit registries. It sits in `rings-node` deliberately: Chord remains the storage and
 discovery substrate, and exit policy is an application decision.
 
-**Per-hop knowledge bound.** Forward layers are wrapped from exit to entry with the
-selected hops' delegation public keys. Each relay decrypts exactly one ElGamal-AEAD
-layer and learns only the immediate next hop plus an opaque inner layer; backward
-frames carry a client-encrypted AEAD payload that relays forward with local return
-state. A circuit id identifies exactly one directed edge of one route and is
-rewritten at every hop, and the client/exit return id is encrypted inside the exit
-layer and never appears as an edge header. The final layer also authenticates the
-selected descriptor's random process epoch, and the exit checks that epoch before
-emitting any adapter effect. A relay therefore knows its predecessor and its
-successor on the circuit and nothing else about the route; only the exit sees the
-application payload, and only the client knows the whole route.
+**Per-hop knowledge bound.** Every edge of a loop carries one cell `α‖β‖γ‖y` of
+exactly `b` bytes. Each position peels one Sphinx layer with its session key, which
+names its successor, its application and the loop's expiry, and removes one AEZ
+layer of the carry `y`; a relay keeps no state for the loop. A position therefore
+knows its predecessor (the authenticated transport link the cell arrived on) and its
+successor, and nothing else about the route. Only the symbol hop opens the client's
+value, under a key that only the client and that hop hold, and only the client knows
+the whole loop and receives its return, recognised by the tag `γ` it drew. Replies
+carry no exit signature: they open under a key that only the client and the exit's
+process hold, so they are authenticated to the client and deniable to anyone else.
+
+**Admission.** A hop charges `u(b)` units of the sender's budget `B` per window `V`
+on receipt, before it decodes `α` or computes an ECDH, and a layer is admitted at
+most once per epoch for its expiry. The charge is structural: only a charged cell
+can be peeled.
 
 **Route shape.** A route is a loop `g → r → exit → r' → g` that leaves and returns
 through the client's entry guard `g`, with exactly two relays, the guard counted,
@@ -325,27 +329,33 @@ node's cache instead. The exit is drawn first, by quality among the exits, then 
 guard, then the relays, so a scarce high-quality exit is not consumed as a guard or
 relay: when every registered exit extends to a loop, the exit's marginal is its
 quality share among the exits. A draw that would leave a later position unfillable
-is excluded up front, which conditions that marginal otherwise. The current data
-plane still seals the forward prefix `g → r → exit` and answers
-along its reverse; the return segment is selected but not yet used.
+is excluded up front, which conditions that marginal otherwise. Every loop runs the whole
+route: the forward segment carries the client's value to the exit, and the return
+segment carries the exit's reply, from a reply block the client sealed, back
+through `g`.
 
-**Cover and pacing contract** (`circuit/send_outbox.rs`). Let `B = 4` be the link
-batch size. A non-empty batch toward one next hop carries `r` real cells,
-`1 <= r <= B`, followed by exactly `B - r` authenticated one-hop cover cells, so
-every observable batch holds `B` cells and the visible cell-count amplification is at
-most `B`. One pacing delay drawn from the closed interval `[5, 25]` ms precedes each
-batch. Cover is generated only for a real-driven batch and an idle lane emits
-nothing, so a link is batch-shaped rather than constant-rate: an observer that sees
-the link still sees when a client is active. Cells are encoded in fixed size classes,
-from 4 KiB to 12 MiB, and a relay preserves the visible class across an edge so that
-a shrinking cell cannot reveal route position. The bandwidth and latency these rules
-cost are intentional privacy properties, not queue inefficiencies to optimize away.
+**Emission contract** (`circuit/send_outbox.rs`, #880). While a link is up, it
+emits at one of two constant rates, one cell per slot, and never above them: the
+active rate `r = ρ·B/V` (`ρ = 9/10`, one 16 KiB cell per ~10 ms) and the idle floor
+`r_idle` (one unit per second by default; a node may lower it, never raise it). A
+queued real cell takes the next slot, and every other slot carries uniform cover of
+the link's class, so real cells replace cover and are never added to it. The first
+real cell makes the link active, and it stays active for at least `D = Q = 30 s`,
+extended while real cells keep arriving; it returns to the floor only after `D`
+without one. Emission starts are at least one active slot apart in every phase, so
+no window of length `V` carries more than `ρ·B + u_max < B` units, and an honest
+sender is never refused by its receiver's admission. What an observer of one link
+learns is its active/idle phase at the resolution `D`, not its volume. Cells are
+encoded in fixed size classes, from 16 KiB to 12 MiB, and a relay preserves the class
+across an edge, so a cell's size cannot reveal route position. The bandwidth and
+latency these rules cost are intentional privacy properties, not queue
+inefficiencies to optimize away.
 
-**What circuits hide, and what they do not.** A circuit hides the route's hops from
+**What loops hide, and what they do not.** A loop hides the route's hops from
 one another and hides the client from the exit. It does not hide the client from its
 first hop, which authenticates the client's DID on the transport edge the first cell
 arrives on; it does not hide overlay membership, which is public; and it does not
-hide activity timing from an observer that watches every link.
+hide the active/idle phase of each link from an observer that watches it.
 
 **Inherited from the communication layer, and not repairable here:**
 
@@ -359,7 +369,7 @@ hide activity timing from an observer that watches every link.
 - the first hop learns the client DID.
 
 **Candidate set.** Route security depends on the candidate set as much as on the
-circuit protocol. In an authenticated-open overlay, a Sybil operator can try to
+loop protocol. In an authenticated-open overlay, a Sybil operator can try to
 appear in several positions of one route unless the deployment adds independent
 admission or diversity controls. Reliability weighting may reorder eligible
 candidates; it never adds one.
@@ -387,11 +397,11 @@ stale descriptor from an earlier process is never selected. Route construction
 enters through the policy-aware selector only: proxy protocol, target policy, and
 entry guard are explicit predicates rather than permissive wrapper defaults.
 
-TCP and HTTPS exit adapters share one process-local forward-nonce replay witness.
-The authenticated service name still binds the adapter action, but replaying the
-same `(peer, circuit, nonce)` through another installed service cannot authorize a
-second action. This witness is deliberately process-local; the signed random
-process epoch invalidates cells created for a previous process generation.
+Every position of a node, whatever symbol it evaluates, shares one process-local
+replay store keyed by `(expiry, ν)`, so replaying a layer toward another installed
+service cannot authorize a second action. The store is deliberately process-local:
+each layer names the random process epoch it was sealed for, so cells built for a
+previous process generation are refused.
 
 **Entry guards.** A client pins a small local set of eligible first-hop relays per
 network and persists it outside Chord. New routes choose the relay first hop only
@@ -400,7 +410,7 @@ flows do not resample the whole live relay population as their entry. Guards are
 replaced only when they are no longer live, no longer satisfy the caller's first-hop
 policy, or a healthier eligible replacement set exists. This reduces the number of
 relays that can observe the client edge over time, but it does not hide the client
-from whichever guard is selected for a given circuit.
+from whichever guard is selected for a given loop.
 
 ## Feature Boundaries
 

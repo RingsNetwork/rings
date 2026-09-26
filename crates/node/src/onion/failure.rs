@@ -2,13 +2,12 @@
 
 use std::fmt;
 
-use rings_core::dht::Did;
 use serde::Deserialize;
 use serde::Serialize;
 
 use crate::error::Error;
 
-/// Local route/circuit failure before any user-facing rendering.
+/// Local route and session failure before any user-facing rendering.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum OnionRouteError {
     /// A pipeline has no symbol application or more than the loop admits (#834 D4a).
@@ -88,141 +87,63 @@ pub enum OnionRouteError {
     /// Route construction found duplicate DIDs.
     #[error("onion route contains duplicate hops")]
     DuplicateRouteHops,
-    /// The selected exit descriptor does not match the final encrypted hop.
+    /// The selected exit descriptor does not match the loop's symbol hop.
     #[error("onion route exit hop does not match exit descriptor")]
     ExitHopMismatch,
     /// The selected exit does not offer the route service.
     #[error("onion route exit does not offer selected service")]
     ExitServiceMismatch,
-    /// A payload service does not match its route service.
+    /// A session's symbol does not match the service its route was selected for.
     #[error(
         "onion payload service {payload_service:?} does not match route service \
          {route_service:?}"
     )]
     PayloadServiceMismatch {
-        /// Service label authenticated in the payload.
+        /// Symbol the session applies.
         payload_service: String,
         /// Service label selected by the route.
         route_service: String,
     },
-    /// A message cannot fit in the largest supported encrypted cell class.
-    #[error("onion message exceeds the largest encrypted cell class")]
-    CellPayloadTooLarge,
-    /// A decrypted encrypted cell has an invalid length or internal framing.
-    #[error("invalid encrypted onion cell")]
+    /// A cell's length is the length of no loop class.
+    #[error("invalid onion cell")]
     InvalidCell,
-    /// A live relay return edge already belongs to another previous hop.
-    #[error("onion relay return edge already belongs to another previous hop")]
-    ReturnEdgeConflict,
-    /// The relay return table is full.
-    #[error("onion relay circuit table is full")]
-    RelayTableFull,
-    /// One authenticated previous hop exhausted its share of the relay return table.
-    #[error("onion relay circuit table quota for previous hop is full")]
-    RelayPeerTableFull,
-    /// A backward payload signer is not the selected exit DID.
-    #[error("onion backward payload signer is not the selected exit")]
-    BackwardSignerMismatch,
-    /// A backward payload signer account key is not the selected exit key.
-    #[error("onion backward payload account key is not the selected exit")]
-    BackwardAccountKeyMismatch,
-    /// A backward payload delegatee key is not the selected exit delegatee key.
-    #[error("onion backward payload delegatee key is not the selected exit")]
-    BackwardSessionKeyMismatch,
-    /// A backward payload signature or freshness proof is invalid.
-    #[error("invalid onion backward payload signature")]
-    InvalidBackwardSignature,
-    /// A forward nonce has already authorized an exit-side action.
-    #[error("replayed onion forward payload")]
-    ForwardReplay,
-    /// A forward payload reached the exit after its authenticated expiry.
-    #[error("expired onion forward payload")]
-    ForwardPayloadExpired,
-    /// A forward payload names an exit process epoch that is no longer active.
-    #[error("onion forward payload belongs to another exit process epoch")]
-    ForwardEpochMismatch,
-    /// A backward sequence number has already delivered a client-side action.
-    #[error("replayed onion TCP backward payload")]
-    BackwardReplay,
-    /// A circuit direction exhausted its monotonic sequence space.
-    #[error("onion circuit sequence exhausted")]
-    SequenceExhausted,
-    /// A backward payload carries a return id that does not belong to the local client state.
-    #[error("onion backward payload return id mismatch")]
-    BackwardReturnIdMismatch,
-    /// A backward payload decoded to a shape that no client adapter may accept.
-    #[error("unexpected onion backward payload for client adapter")]
-    UnexpectedBackwardPayload,
-    /// The runtime could not allocate a unique circuit id.
-    #[error("failed to allocate unique onion circuit id")]
-    CircuitIdAllocationFailed,
     /// A queued endpoint cell lost its drain task before the overlay reported a result.
     #[error("onion link send was cancelled before overlay completion")]
     LinkSendCancelled,
     /// An HTTPS response channel closed before the exit's outcome was delivered.
     #[error("onion HTTPS response channel closed")]
     HttpsResponseClosed,
-    /// A TCP open response channel closed before an answer.
-    #[error("onion TCP open response channel closed")]
-    TcpOpenResponseClosed,
     /// A TCP open request timed out before the exit answered.
     #[error("onion TCP open timed out")]
     TcpOpenTimedOut,
-    /// A TCP stream key is unknown to this runtime.
-    #[error("unknown onion TCP stream")]
-    UnknownTcpStream,
-    /// A TCP stream channel has already closed.
+    /// A session's driver has already ended.
     #[error("onion TCP stream is closed")]
     TcpStreamClosed,
-    /// A TCP stream's bounded inbound queue cannot accept another frame.
-    #[error("onion TCP stream inbound queue is saturated")]
-    TcpStreamBackpressure,
-    /// A duplicate TCP open targeted a live circuit.
-    #[error("duplicate onion TCP open for live circuit")]
-    DuplicateTcpOpen,
-    /// A received TCP return peer differs from the selected route peer.
-    #[error("unexpected onion TCP return peer: expected {expected:?}, got {actual:?}")]
-    UnexpectedTcpReturnPeer {
-        /// Return peer selected by the client route.
-        expected: Did,
-        /// Peer that delivered the backward payload.
-        actual: Did,
-    },
-    /// A received TCP forward peer differs from the selected route peer.
-    #[error("unexpected onion TCP forward peer: expected {expected:?}, got {actual:?}")]
-    UnexpectedTcpForwardPeer {
-        /// Forward peer recorded when the exit accepted the circuit.
-        expected: Did,
-        /// Peer that delivered the forward payload.
-        actual: Did,
-    },
+    /// The client could not build a loop over its route (a value too wide for its class, or a
+    /// key failure of negligible probability).
+    #[error("could not build an onion loop: {0}")]
+    LoopBuild(String),
+    /// The exit refused to open the session, or the session ended before it opened; the exit
+    /// gives no reason (#834 D2′).
+    #[error("the onion exit refused the session")]
+    ExitRefused,
+    /// A session failed closed: a gap in its sequence, or its loops could not leave.
+    #[error("the onion session failed closed")]
+    SessionFailed,
     /// An exit-reported failure reached the local route client.
     #[error("{0}")]
     ExitFailure(OnionExitFailure),
-    /// A test-only route fixture was missing an expected relay.
-    #[cfg(test)]
-    #[error("missing test relay")]
-    MissingTestRelay,
 }
 
-/// Recoverable failure reported by an onion exit to its client.
+/// Why an `https` exit returned no response: the encoded failure of a fetch outcome. It carries
+/// no local diagnostic, so a failure reveals nothing of the exit beyond its class.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum OnionExitFailure {
-    /// The exit policy or local limiter denied the operation.
+    /// The exit policy or its byte budget denied the fetch.
     PermissionDenied,
-    /// The target name could not be resolved.
-    ResolveTarget,
-    /// The exit could not connect to the target.
-    ConnectTarget,
-    /// The exit failed while reading from the target.
-    ReadTarget,
-    /// The exit rejected a replayed payload.
-    Replay,
-    /// The client supplied a malformed target for this exit protocol.
-    InvalidTarget(String),
-    /// The exit rejected a duplicate live circuit.
-    DuplicateCircuit,
-    /// The exit hit a local internal failure while answering the request.
+    /// The session's stream did not decode as a request.
+    MalformedRequest,
+    /// The fetch failed at the exit.
     Internal,
 }
 
@@ -231,10 +152,6 @@ impl OnionExitFailure {
     pub fn from_error(error: &Error) -> Self {
         match error {
             Error::NoPermission => Self::PermissionDenied,
-            Error::OnionRouteError(OnionRouteError::ForwardReplay)
-            | Error::OnionRouteError(OnionRouteError::ForwardPayloadExpired)
-            | Error::OnionRouteError(OnionRouteError::BackwardReplay) => Self::Replay,
-            Error::OnionRouteError(OnionRouteError::DuplicateTcpOpen) => Self::DuplicateCircuit,
             _ => Self::Internal,
         }
     }
@@ -244,12 +161,7 @@ impl fmt::Display for OnionExitFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::PermissionDenied => Error::NoPermission.fmt(f),
-            Self::ResolveTarget => f.write_str("onion exit could not resolve target"),
-            Self::ConnectTarget => f.write_str("onion exit could not connect to target"),
-            Self::ReadTarget => f.write_str("onion exit could not read target"),
-            Self::InvalidTarget(message) => f.write_str(message),
-            Self::Replay => f.write_str("replayed onion payload"),
-            Self::DuplicateCircuit => f.write_str("duplicate onion TCP open for live circuit"),
+            Self::MalformedRequest => f.write_str("onion exit received a malformed HTTPS request"),
             Self::Internal => f.write_str("onion exit internal failure"),
         }
     }

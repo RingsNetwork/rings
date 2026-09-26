@@ -19,7 +19,7 @@ use super::fixture_keys;
 use super::fixture_rng;
 use super::hop_key;
 use super::FIXTURE_EPOCH;
-use crate::onion::circuit::OnionForwardNonce;
+use crate::onion::circuit::OnionReplayNonce;
 use crate::onion::sphinx::cell::OnionCell;
 use crate::onion::sphinx::cell::OnionProduceError;
 use crate::onion::sphinx::cell::OnionStep;
@@ -49,7 +49,7 @@ fn layer(
             next: Did::from(100 + position),
             epoch: FIXTURE_EPOCH,
             expiry: fixture_expiry(position),
-            nonce: OnionForwardNonce::new([2; 16]),
+            nonce: OnionReplayNonce::new([2; 16]),
         },
         inbound,
         outbound,
@@ -122,25 +122,23 @@ fn test_loop_carries_each_segment_value_to_its_consumer() {
         // Admission read this position's own layer before any carry work.
         let index = u32::try_from(position).expect("small");
         assert_eq!(admitted.head().expiry, fixture_expiry(index));
-        admitted.step().expect("carry step")
+        let is_relay = admitted.head().application == OnionLayerApplication::Relay;
+        (is_relay, admitted.step().expect("carry step"))
     };
     let relay = |cell: Vec<u8>, position| {
-        let OnionStep::Relayed { head, cell } = peel(cell, position) else {
+        let (is_relay, OnionStep::Relayed { cell, .. }) = peel(cell, position) else {
             panic!("a relay position");
         };
-        assert_eq!(head.application, OnionLayerApplication::Relay);
+        assert!(is_relay);
         assert_eq!(cell.class(), class);
         cell.into_bytes()
     };
 
     let cell = relay(relay(cell.into_bytes(), 0), 1);
-    let OnionStep::Consumed { head, value, surb } = peel(cell, 2) else {
+    let (is_relay, OnionStep::Consumed { value, surb, .. }) = peel(cell, 2) else {
         panic!("the symbol position");
     };
-    assert!(matches!(
-        head.application,
-        OnionLayerApplication::Apply { .. }
-    ));
+    assert!(!is_relay);
     assert_eq!(value.as_slice(), input);
     // υ carries the symbol layer's own `next` and `x` (position 2), so a pool needs nothing
     // beside it; a value too wide for the class hands the block back unspent.

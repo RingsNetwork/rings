@@ -56,6 +56,7 @@ impl OnionSequence {
     pub(crate) const FIRST: Self = Self(0);
 
     /// Wrap a wire sequence.
+    #[cfg(test)]
     pub(crate) const fn new(value: u32) -> Self {
         Self(value)
     }

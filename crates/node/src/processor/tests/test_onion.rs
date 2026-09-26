@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use super::common::*;
 use super::*;
 use crate::onion::OnionProcessEpoch;
+use crate::onion::OnionProcessEpochCell;
 use crate::onion::OnionServiceName;
 
 #[tokio::test]
@@ -102,7 +103,7 @@ async fn test_onion_proxy_route_rejects_exit_with_stale_process_epoch() -> Resul
     let processor = prepare_processor().await;
     let exit = prepare_processor().await;
     let mut restarted = exit.clone();
-    restarted.onion_process_epoch = OnionProcessEpoch::new([0x5a; 16]);
+    restarted.onion_process_epoch = OnionProcessEpochCell::new(OnionProcessEpoch::new([0x5a; 16]));
     let stale_descriptor = onion_exit_descriptor_for_processor(&exit, "tcp", get_epoch_ms())?;
     store_onion_relays(&processor, &[&restarted], 3).await?;
     processor

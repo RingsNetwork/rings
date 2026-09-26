@@ -6,9 +6,9 @@ use super::limits::usize_to_u64;
 use super::normalize_method;
 use super::FetchResponse;
 use super::OnionHttpsRequest;
-use super::OnionHttpsRuntime;
 use crate::error::Error;
 use crate::error::Result;
+use crate::onion::exit_accounting::OnionExitAccounting;
 use crate::onion::proxy::OnionProxyTarget;
 use crate::onion::target::resolve_target_addresses;
 use crate::onion::target::select_public_exit_addresses;
@@ -67,7 +67,7 @@ pub(super) async fn execute_https_request(
     target: &OnionProxyTarget,
     request: &OnionHttpsRequest,
     max_body_bytes: u64,
-    runtime: &OnionHttpsRuntime,
+    accounting: &OnionExitAccounting,
     policy: &OnionExitPolicy,
 ) -> Result<FetchResponse> {
     let addresses = resolve_target_addresses(target).await?;
@@ -78,7 +78,7 @@ pub(super) async fn execute_https_request(
         max_body_bytes,
         HTTPS_EXIT_REQUEST_TIMEOUT,
         &egress,
-        |bytes| runtime.record_exit_bytes(policy, bytes),
+        |bytes| accounting.record_bytes(policy, bytes),
     )
     .await
 }

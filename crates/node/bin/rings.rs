@@ -900,7 +900,7 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
         Some(supervisor) => backend.observed_by(supervisor.observer()),
         None => backend,
     };
-    processor.swarm.set_callback(Arc::new(backend))?;
+    backend.install()?;
 
     let stop = StopSource::new();
     let gateway_configured = gateway_runner.is_some();

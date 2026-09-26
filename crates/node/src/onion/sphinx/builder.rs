@@ -53,7 +53,7 @@ use super::seed::OnionCarryKey;
 use super::seed::OnionCarrySeed;
 use super::seed::OnionSegmentSeed;
 use crate::onion::circuit::OnionExpiry;
-use crate::onion::circuit::OnionForwardNonce;
+use crate::onion::circuit::OnionReplayNonce;
 use crate::onion::OnionLoop;
 use crate::onion::OnionLoopRole;
 use crate::onion::OnionRouteHop;
@@ -272,7 +272,7 @@ fn layer(
             next,
             epoch: hop.process_epoch,
             expiry,
-            nonce: OnionForwardNonce::new(rng.gen()),
+            nonce: OnionReplayNonce::new(rng.gen()),
         },
         inbound,
         outbound,

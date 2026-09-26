@@ -25,6 +25,7 @@ use rings_runtime::MaybeSendSync;
 
 use crate::error::Error;
 use crate::error::Result;
+use crate::onion::OnionProcessEpochCell;
 use crate::online::OnlineNodeCapabilities;
 use crate::online::OnlineNodeDescriptor;
 use crate::online::OnlineNodeDescriptorBody;
@@ -407,8 +408,9 @@ pub struct OnlineNodeRegistration {
     node_type: OnlineNodeType,
     started_at_ms: u128,
     endpoint_hint: Option<String>,
-    /// Immutable capabilities selected while the processor is built.
-    capabilities: OnlineNodeCapabilities,
+    /// The process epoch this node registers `relay` at, if it relays (#834 D2): read at every
+    /// heartbeat, so a renewed epoch is published by the next one.
+    onion_relay: Option<OnionProcessEpochCell>,
     publisher: DhtRegistrationPublisher,
 }
 
@@ -419,7 +421,7 @@ impl OnlineNodeRegistration {
         ttl: Duration,
         node_type: OnlineNodeType,
         endpoint_hint: Option<String>,
-        capabilities: OnlineNodeCapabilities,
+        onion_relay: Option<OnionProcessEpochCell>,
     ) -> Self {
         Self {
             heartbeat_interval,
@@ -427,7 +429,7 @@ impl OnlineNodeRegistration {
             node_type,
             started_at_ms: get_epoch_ms(),
             endpoint_hint,
-            capabilities,
+            onion_relay,
             publisher: DhtRegistrationPublisher::new(ONLINE_NODES_TOPIC),
         }
     }
@@ -447,7 +449,9 @@ impl OnlineNodeRegistration {
                 network_id: context.network_id(),
                 storage_redundancy: context.storage_redundancy(),
                 dht_virtual_nodes: context.dht_virtual_nodes(),
-                capabilities: self.capabilities,
+                capabilities: OnlineNodeCapabilities {
+                    onion_relay: self.onion_relay.as_ref().map(OnionProcessEpochCell::get),
+                },
                 endpoint_hint: self.endpoint_hint.clone(),
                 started_at_ms: self.started_at_ms,
                 heartbeat_at_ms: now_ms,

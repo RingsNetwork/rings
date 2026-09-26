@@ -18,6 +18,9 @@ use crate::onion::circuit::OnionCellBucket;
 /// Cell framing `F` beyond `χ ‖ y`: none, since a cell's class is its length.
 pub(crate) const ONION_CELL_FRAMING_BYTES: usize = 0;
 
+/// Bytes of one admission unit, 16 KiB: the least loop class (#834 L9).
+pub(crate) const ONION_UNIT_BYTES: usize = 16 * 1024;
+
 /// The class `b` of one loop, a cell bucket of `16 KiB … 12 MiB` (D6): every cell of the loop,
 /// replies included, is exactly `b` bytes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -34,7 +37,13 @@ impl OnionLoopClass {
 
     /// `b`, the cell length.
     pub(crate) const fn cell_bytes(self) -> usize {
-        self.0.plaintext_len()
+        self.0.cell_bytes()
+    }
+
+    /// `u(b) = b / 16 KiB`, the admission units one cell of the class costs its receiver, at
+    /// least one since the least class is one unit (#834 L9).
+    pub(crate) const fn units(self) -> u32 {
+        (self.cell_bytes() / ONION_UNIT_BYTES) as u32
     }
 
     /// `C_b = b − |χ| − F`, the carry slot width.
@@ -62,7 +71,7 @@ impl OnionLoopClass {
     pub(crate) fn from_cell_bytes(length: usize) -> Option<Self> {
         OnionCellBucket::ALL
             .into_iter()
-            .find(|bucket| bucket.plaintext_len() == length)
+            .find(|bucket| bucket.cell_bytes() == length)
             .and_then(|bucket| Self::try_from(bucket).ok())
     }
 }
@@ -83,6 +92,16 @@ impl TryFrom<OnionCellBucket> for OnionLoopClass {
 // AEZ-core carry slot (`C_b ≥ 32`) and room for the padding marker, and every larger class leaves
 // more.
 const _: () = assert!(
-    OnionLoopClass::DEFAULT.cell_bytes() == OnionCellBucket::KiB16.plaintext_len()
+    OnionLoopClass::DEFAULT.cell_bytes() == OnionCellBucket::KiB16.cell_bytes()
         && OnionLoopClass::DEFAULT.carry_value_bytes() >= 32
+);
+
+// Every class is a whole number of units, and the largest (12 MiB = 768 units) fits `u32`, so
+// `units` is exact.
+const _: () = assert!(
+    OnionLoopClass::DEFAULT.cell_bytes() == ONION_UNIT_BYTES
+        && OnionCellBucket::MiB12
+            .cell_bytes()
+            .is_multiple_of(ONION_UNIT_BYTES)
+        && OnionCellBucket::MiB12.cell_bytes() / ONION_UNIT_BYTES <= u32::MAX as usize
 );

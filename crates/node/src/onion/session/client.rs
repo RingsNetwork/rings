@@ -18,7 +18,11 @@
 //! - **Sequence.** Forward frames carry `n = 0, 1, …`; replies are released in their order.
 //! - **Open result.** The first released reply decides the open: `data(0, ε)` is the ack, `fin`
 //!   is a refusal (#843 Q5).
-//! - **Credit.** The window never asks for more than `W ≤ Q_max` outstanding blocks.
+//! - **Credit.** The window never asks for more than `W ≤ Q_max` outstanding blocks, and the
+//!   client's count of blocks outstanding at `h` is exact: `h` spends the block of least expiry
+//!   first, and so does [`OnionClientCredit`], and both drop a block at its expiry.
+
+use std::collections::BTreeMap;
 
 use bytes::Bytes;
 
@@ -28,7 +32,7 @@ use super::frame::OnionSequence;
 use super::order::OnionReorder;
 use super::order::OnionSequenceGap;
 use super::pool::ONION_SURB_POOL_CAPACITY;
-use super::OnionSessionArguments;
+use crate::onion::circuit::OnionExpiry;
 use crate::onion::sphinx::class::OnionLoopClass;
 
 /// What the session learned from one reply, for the client shell to act on.
@@ -52,8 +56,6 @@ pub(crate) struct OnionSequenceExhausted;
 /// The client's machine of one session; see the module documentation.
 #[derive(Debug)]
 pub(crate) struct OnionClientSession {
-    /// `ā = (ς, d)`.
-    arguments: OnionSessionArguments,
     /// `t`, the canonical target authority.
     target: Bytes,
     /// The sequence of the next forward frame; `None` once spent.
@@ -67,22 +69,16 @@ pub(crate) struct OnionClientSession {
 }
 
 impl OnionClientSession {
-    /// A session of `arguments` whose target has the canonical authority `target`, with
-    /// `arguments.digest = SHA-256(target)`.
-    pub(crate) fn new(arguments: OnionSessionArguments, target: Bytes) -> Self {
+    /// A session to the target with the canonical authority `target`; its arguments
+    /// `ā = ς ‖ SHA-256(t)` are the shell's.
+    pub(crate) fn new(target: Bytes) -> Self {
         Self {
-            arguments,
             target,
             forward: Some(OnionSequence::FIRST),
             replied: false,
             decided: false,
             replies: OnionReorder::default(),
         }
-    }
-
-    /// `ā`, the same on every loop of the session.
-    pub(crate) const fn arguments(&self) -> OnionSessionArguments {
-        self.arguments
     }
 
     /// The most stream bytes the next `data` frame can carry in `class`: less the target while
@@ -179,7 +175,7 @@ impl OnionClientSession {
 }
 
 /// The client's credit window: the number `W ≤ Q_max` of reply blocks it keeps outstanding at
-/// `h` for one session.
+/// `h` for one session; credit beyond `Q_max` would be dropped at `h`.
 ///
 /// `W` bounds the download rate by `W / RTT`: at the default `W = 64` and a loop round trip below
 /// `0.6 s`, one session can take its link's full emission rate (`≈ 98` replies per second, #880).
@@ -193,22 +189,64 @@ impl OnionCreditWindow {
     /// The default window, `W = 64`.
     pub(crate) const DEFAULT: Self = Self { target: 64 };
 
-    /// A window of `target` blocks, capped at `Q_max`: `h` drops credit beyond its pool.
+    /// The window `W = target`.
+    #[cfg(test)]
     pub(crate) const fn new(target: usize) -> Self {
-        Self {
-            target: if target < ONION_SURB_POOL_CAPACITY {
-                target
-            } else {
-                ONION_SURB_POOL_CAPACITY
-            },
-        }
+        Self { target }
     }
 
     /// The credit loops to send when `outstanding` blocks are live at `h`, each leaving
-    /// `k + 1` blocks in class `class`: `⌈(W − outstanding) / (k + 1)⌉`, and none once the window
-    /// is full.
+    /// `k + 1` blocks in class `class`: `⌈(min(W, Q_max) − outstanding) / (k + 1)⌉`, and none once
+    /// the window is full. The window is capped at `h`'s pool bound `Q_max`, since a block past it
+    /// is dropped at `h` and its loop wasted.
     pub(crate) fn loops_wanted(self, outstanding: usize, class: OnionLoopClass) -> usize {
         let per_loop = OnionFrame::credit_capacity(class) + 1;
-        self.target.saturating_sub(outstanding).div_ceil(per_loop)
+        self.target
+            .min(ONION_SURB_POOL_CAPACITY)
+            .saturating_sub(outstanding)
+            .div_ceil(per_loop)
+    }
+}
+
+/// The client's ledger of the reply blocks outstanding at `h` for one session, by expiry.
+///
+/// ```text
+/// sent(x, n):   L[x] ← L[x] + n
+/// replied(t):   L[x] ← L[x] − 1 for the least x > t with L[x] > 0      (h spends least x first)
+/// count(t):     Σ_{x > t} L[x]                                         (h drops a block at x)
+/// ```
+#[derive(Debug, Default)]
+pub(crate) struct OnionClientCredit {
+    /// `L`: blocks sent and not yet spent, by expiry.
+    outstanding: BTreeMap<OnionExpiry, usize>,
+}
+
+impl OnionClientCredit {
+    /// Count `count` blocks sent with expiry `expiry`.
+    pub(crate) fn sent(&mut self, expiry: OnionExpiry, count: usize) {
+        *self.outstanding.entry(expiry).or_default() += count;
+    }
+
+    /// A reply arrived at `now`: `h` spent its block of least expiry.
+    pub(crate) fn replied(&mut self, now_ms: u128) {
+        self.purge(now_ms);
+        if let Some(mut least) = self.outstanding.first_entry() {
+            *least.get_mut() -= 1;
+            if *least.get() == 0 {
+                least.remove();
+            }
+        }
+    }
+
+    /// The blocks still outstanding at `now`.
+    pub(crate) fn count(&mut self, now_ms: u128) -> usize {
+        self.purge(now_ms);
+        self.outstanding.values().sum()
+    }
+
+    /// Drop every bucket whose expiry has passed at `now`.
+    fn purge(&mut self, now_ms: u128) {
+        self.outstanding
+            .retain(|expiry, count| *count > 0 && !expiry.has_passed_at(now_ms));
     }
 }

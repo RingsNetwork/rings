@@ -70,11 +70,13 @@ fn relay(bytes: Vec<u8>, key: &DelegateeKey) -> (Did, Vec<u8>) {
     let admitted = admitted(bytes, key);
     assert_eq!(admitted.head().epoch, FIXTURE_EPOCH);
     assert_eq!(admitted.head().expiry, fixture_expiry(0));
-    let OnionStep::Relayed { head, cell } = admitted.step().expect("strong key") else {
+    assert_eq!(admitted.head().application, OnionLayerApplication::Relay);
+    let expected_next = admitted.head().next;
+    let OnionStep::Relayed { next, cell } = admitted.step().expect("strong key") else {
         panic!("a relay position");
     };
-    assert_eq!(head.application, OnionLayerApplication::Relay);
-    (head.next, cell.into_bytes())
+    assert_eq!(next, expected_next);
+    (next, cell.into_bytes())
 }
 
 /// A built loop carries the client's value to `h`, whose reply reaches the client under the
@@ -110,15 +112,17 @@ fn test_built_loop_runs_through_paid_hops() {
     assert_eq!(next, did(1));
     let (next, cell) = relay(cell, &keys[1]);
     assert_eq!(next, did(2));
-    let OnionStep::Consumed { head, value, surb } =
-        admitted(cell, &keys[2]).step().expect("strong key")
+    let OnionStep::Consumed {
+        symbol,
+        arguments: consumed,
+        value,
+        surb,
+    } = admitted(cell, &keys[2]).step().expect("strong key")
     else {
         panic!("the symbol position");
     };
-    assert_eq!(head.application, OnionLayerApplication::Apply {
-        symbol: application.symbol,
-        arguments,
-    });
+    assert_eq!(symbol, application.symbol);
+    assert_eq!(consumed, arguments);
     assert_eq!(value.as_slice(), input);
     assert_eq!(surb.expiry(), fixture_expiry(0));
     let (next, reply) = surb.produce(&output).expect("produce the reply");

@@ -429,7 +429,7 @@ fn test_exit_session_closes_after_v_without_forward_loops() {
 /// up, and the first released reply decides the open.
 #[test]
 fn test_client_session_sets_t_until_the_first_reply() {
-    let mut session = OnionClientSession::new(arguments(), Bytes::from_static(TARGET));
+    let mut session = OnionClientSession::new(Bytes::from_static(TARGET));
     assert_eq!(
         session.data_capacity(CLASS),
         OnionFrame::data_capacity(CLASS) - 2 - TARGET.len()
@@ -484,7 +484,7 @@ fn test_client_session_sets_t_until_the_first_reply() {
 /// A `fin` before any data is a refusal.
 #[test]
 fn test_client_session_reads_a_first_fin_as_a_refusal() {
-    let mut session = OnionClientSession::new(arguments(), Bytes::from_static(TARGET));
+    let mut session = OnionClientSession::new(Bytes::from_static(TARGET));
     let fin = OnionFrame::Fin {
         sequence: OnionSequence::FIRST,
     };

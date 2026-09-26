@@ -49,4 +49,6 @@ pub use protocol::Wire;
 pub(crate) use registry::Core;
 pub use registry::EffectScope;
 pub use registry::Extensions;
+pub(crate) use registry::LinkFact;
+pub(crate) use registry::LinkObserver;
 pub use registry::Scope;

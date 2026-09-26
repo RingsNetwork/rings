@@ -39,7 +39,7 @@ use super::seed::OnionCarrySeed;
 use super::seed::OnionSegmentSeed;
 use super::seed::ONION_CARRY_SEED_BYTES;
 use crate::onion::circuit::OnionExpiry;
-use crate::onion::circuit::OnionForwardNonce;
+use crate::onion::circuit::OnionReplayNonce;
 use crate::onion::signature::OnionSymbol;
 use crate::onion::OnionProcessEpoch;
 use crate::onion::OnionServiceName;
@@ -176,7 +176,7 @@ pub(crate) struct OnionLayerHead {
     /// decoding, so every hop judges the same value.
     pub(crate) expiry: OnionExpiry,
     /// `ν_i`, the replay nonce the hop admits at most once (L9).
-    pub(crate) nonce: OnionForwardNonce,
+    pub(crate) nonce: OnionReplayNonce,
 }
 
 /// A byte string outside the image of [`OnionLayer::encode`].
@@ -248,7 +248,7 @@ impl OnionLayer {
                     expiry: OnionExpiry::from_wire_ms(u64::from_be_bytes(record.expiry)).ok_or(
                         OnionLayerError::OffGridExpiry(u64::from_be_bytes(record.expiry)),
                     )?,
-                    nonce: OnionForwardNonce::new(record.nonce),
+                    nonce: OnionReplayNonce::new(record.nonce),
                 },
                 inbound: OnionCarrySeed::new(record.inbound),
                 outbound: OnionSegmentSeed::new(record.outbound),

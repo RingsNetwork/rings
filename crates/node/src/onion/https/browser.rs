@@ -22,9 +22,9 @@ use super::limits::usize_to_u64;
 use super::normalize_method;
 use super::FetchResponse;
 use super::OnionHttpsRequest;
-use super::OnionHttpsRuntime;
 use crate::error::Error;
 use crate::error::Result;
+use crate::onion::exit_accounting::OnionExitAccounting;
 use crate::onion::proxy::OnionProxyTarget;
 use crate::onion::target::validate_public_ip_literal;
 use crate::onion::OnionExitPolicy;
@@ -36,7 +36,7 @@ pub(super) async fn execute_https_request(
     target: &OnionProxyTarget,
     request: &OnionHttpsRequest,
     max_body_bytes: u64,
-    runtime: &OnionHttpsRuntime,
+    accounting: &OnionExitAccounting,
     policy: &OnionExitPolicy,
 ) -> Result<FetchResponse> {
     validate_public_ip_literal(target)?;
@@ -68,7 +68,7 @@ pub(super) async fn execute_https_request(
             .and_then(checked_status_code)?;
         let headers = collect_headers(&response)?;
         reject_content_length_over_limit(&headers, max_body_bytes)?;
-        let body = response_body(&response, max_body_bytes, runtime, policy).await?;
+        let body = response_body(&response, max_body_bytes, accounting, policy).await?;
         Ok::<FetchResponse, Error>(FetchResponse {
             status,
             headers,
@@ -167,7 +167,7 @@ fn collect_headers(response: &JsValue) -> Result<Vec<(String, String)>> {
 async fn response_body(
     response: &JsValue,
     max_body_bytes: u64,
-    runtime: &OnionHttpsRuntime,
+    accounting: &OnionExitAccounting,
     policy: &OnionExitPolicy,
 ) -> Result<Vec<u8>> {
     let body = Reflect::get(response, JsValue::from_str("body").as_ref()).map_err(js_error)?;
@@ -214,7 +214,7 @@ async fn response_body(
             }
             return Err(Error::NoPermission);
         }
-        if let Err(error) = runtime.record_exit_bytes(policy, bytes_len) {
+        if let Err(error) = accounting.record_bytes(policy, bytes_len) {
             if let Some(cancel) = &cancel {
                 let _ = cancel.call0(reader.as_ref());
             }

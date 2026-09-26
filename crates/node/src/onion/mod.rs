@@ -1,16 +1,18 @@
-//! Application-layer circuit directory and route selection.
+//! The onion privacy layer: its directory, route selection and loop data plane.
 //!
 //! This module deliberately sits in `rings-node`, not `rings-core`: Chord
 //! remains the storage and discovery substrate, while exit policy is an
 //! application protocol decision.
 //!
-//! The current data plane selects route-aware circuits and exit policies over layered
-//! ElGamal-AEAD frames. A circuit is a pipeline (`pipeline`) over the static signature `Σ` of
-//! operation symbols (`signature`): the pure reducer interprets the identity symbol `relay`, and
-//! each node's Σ-algebra (`circuit::OnionAlgebra`) interprets the world-facing symbols it
-//! registers. Route selection places a pipeline on a guard-closed loop (`loop_shape`) whose every
+//! The data plane runs client-sealed loops of fixed-width Sphinx cells (`circuit`, `sphinx`). A
+//! loop evaluates a pipeline over the static signature `Σ` of operation symbols (`signature`):
+//! every hop's step interprets the identity symbol `relay`, and each node's Σ-algebra interprets
+//! the world-facing symbols it registers, as sessions (`session`) over their worlds (`tcp`,
+//! `https`). Route selection places a pipeline on a guard-closed loop (`loop_shape`) whose every
 //! position is a node registering that position's symbol at its current process epoch.
 
+use std::sync::Arc;
+use std::sync::RwLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -56,24 +58,12 @@ pub mod https;
 mod loop_shape;
 #[cfg(rings_native)]
 pub mod native;
-pub mod pipeline;
 pub mod proxy;
-pub(crate) mod replay;
 mod role;
 pub mod route;
-#[expect(
-    dead_code,
-    reason = "pure session algebra; the #843 wire cutover wires it in and removes this"
-)]
+pub(crate) mod runtime;
 pub(crate) mod session;
 pub mod signature;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "pure Sphinx primitives; #834 Phase 2a-4 (#843) wires them in and removes this"
-    )
-)]
 pub(crate) mod sphinx;
 pub mod target;
 #[cfg(rings_native)]
@@ -132,13 +122,6 @@ impl OnionProcessEpoch {
     }
 
     /// Return the epoch bytes, the `e` field of the uniform layer (#834 D6″).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the layer encoding of the Sphinx primitives; #834 Phase 2a-4 (#843) uses it"
-        )
-    )]
     pub(crate) const fn to_bytes(self) -> [u8; 16] {
         self.0
     }
@@ -146,6 +129,37 @@ impl OnionProcessEpoch {
     /// Draw a fresh process epoch for one process lifetime.
     pub fn random() -> Self {
         Self(rand::random())
+    }
+}
+
+/// The current process epoch `e_n` of this node, shared by the onion admission state, which
+/// renews it, and the registrations, which publish it at every heartbeat (#834 D2, L9).
+///
+/// Law: the epoch changes only by `renew`, to an epoch drawn independently and
+/// uniformly, when admission detects a clock rollback beyond `X₀`; every registration published
+/// after the renewal names the new epoch, and every layer sealed for the old one is rejected.
+#[derive(Clone, Debug)]
+pub struct OnionProcessEpochCell(Arc<RwLock<OnionProcessEpoch>>);
+
+impl OnionProcessEpochCell {
+    /// A cell holding `epoch`, the epoch drawn at process start.
+    pub fn new(epoch: OnionProcessEpoch) -> Self {
+        Self(Arc::new(RwLock::new(epoch)))
+    }
+
+    /// The current epoch.
+    pub fn get(&self) -> OnionProcessEpoch {
+        self.0
+            .read()
+            .map_or_else(|poisoned| *poisoned.into_inner(), |epoch| *epoch)
+    }
+
+    /// Replace the current epoch by `epoch`, after an admission reset.
+    pub(crate) fn renew(&self, epoch: OnionProcessEpoch) {
+        match self.0.write() {
+            Ok(mut current) => *current = epoch,
+            Err(poisoned) => *poisoned.into_inner() = epoch,
+        }
     }
 }
 
@@ -211,9 +225,9 @@ pub struct OnionExitPolicy {
     pub allowed_targets: Vec<OnionExitTarget>,
     /// Target deny-list entries understood by the exit implementation. Deny entries override allows.
     pub denied_targets: Vec<OnionExitTarget>,
-    /// Maximum concurrent circuits this exit wants to serve. `0` means unspecified.
+    /// Maximum concurrent sessions this exit wants to serve. `0` means unspecified.
     pub max_circuits: u32,
-    /// Maximum streams per circuit. `0` means unspecified.
+    /// Maximum streams per session. `0` means unspecified.
     pub max_streams_per_circuit: u32,
     /// Maximum bytes per minute. `0` means unspecified.
     pub max_bytes_per_minute: u64,
@@ -682,7 +696,7 @@ pub(crate) struct OnionExitRegistration {
     heartbeat_interval: Duration,
     ttl: Duration,
     node_type: OnlineNodeType,
-    process_epoch: OnionProcessEpoch,
+    process_epoch: OnionProcessEpochCell,
     started_at_ms: u128,
     offer: OnionExitOffer,
     publisher: DhtRegistrationPublisher,
@@ -694,7 +708,7 @@ impl OnionExitRegistration {
         ttl: Duration,
         node_type: OnlineNodeType,
         offer: OnionExitOffer,
-        process_epoch: OnionProcessEpoch,
+        process_epoch: OnionProcessEpochCell,
     ) -> Self {
         Self {
             heartbeat_interval,
@@ -732,7 +746,7 @@ impl OnionExitRegistration {
                 did: context.did(),
                 public_key: context.delegator_verification_pubkey()?,
                 delegatee_public_key: context.delegatee_key().delegatee_public_key(),
-                process_epoch: self.process_epoch,
+                process_epoch: self.process_epoch.get(),
                 node_type: self.node_type.clone(),
                 network_id: context.network_id(),
                 service,

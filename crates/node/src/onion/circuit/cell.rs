@@ -1,55 +1,32 @@
-//! Fixed-bucket onion-cell encoding.
+//! The cell size classes of the onion data plane.
 //!
-//! Local producers select the smallest bucket that contains the encoded message. Relays preserve
-//! the already-visible bucket across a circuit edge so that shrinking cells cannot reveal route
-//! position. An authenticated hostile peer can deliberately choose a larger bucket for a small
-//! hidden payload; a relay cannot canonicalize that choice without weakening the fixed-bucket
-//! privacy contract. The wire decoder first proves that the ElGamal-wrapped key has its fixed block
-//! count; the crypto admission gate can then charge `bucket.plaintext_len()` before decryption. For
-//! a byte budget `L` and visible bucket size `b`, at most `floor(L / b)` such cells can be admitted
-//! in one limiter window, independent of their hidden encoded lengths.
+//! A loop's class `b` is one of these buckets above 4 KiB (#834 D6), and a cell of the loop is
+//! exactly `b` bytes: the class is the cell's length, visible to every hop, and the only size a
+//! hop can observe.
 
-use bytes::Bytes;
-use rand::CryptoRng;
-use rand::RngCore;
-use rings_core::delegation::DelegateeKey;
-use rings_core::ecc::elgamal::impls::secp256k1::encrypt_aead_with_rng;
-use rings_core::ecc::elgamal::impls::secp256k1::AeadCiphertext;
-use rings_core::ecc::PublicKey;
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::codec::OnionWireMessage;
-use crate::error::Error;
-use crate::error::Result;
-use crate::onion::OnionRouteError;
-
-const CELL_LENGTH_PREFIX_BYTES: usize = size_of::<u32>();
-const ONION_CELL_AEAD_NAMESPACE: &[u8] = b"rings-node:onion-cell";
-
-/// Public size classes used by encrypted onion cells.
+/// Public size classes of onion cells.
 ///
-/// The class is intentionally visible while the direction, message discriminant, and exact
-/// application length are encrypted. A small class set bounds padding overhead without exposing
-/// a byte-accurate traffic fingerprint.
+/// The class is intentionally visible while everything inside the cell is not. A small class
+/// set bounds padding overhead without exposing a byte-accurate traffic fingerprint.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[repr(u8)]
 pub enum OnionCellBucket {
-    /// Up to four KiB of encrypted cell plaintext.
+    /// Four KiB; below every loop class, since the fixed header alone is 2919 bytes.
     KiB4,
-    /// Up to sixteen KiB of encrypted cell plaintext.
+    /// Sixteen KiB, the default loop class.
     KiB16,
-    /// Up to sixty-four KiB of encrypted cell plaintext.
+    /// Sixty-four KiB.
     KiB64,
-    /// Up to 256 KiB of encrypted cell plaintext.
+    /// 256 KiB.
     KiB256,
-    /// Up to one MiB of encrypted cell plaintext.
+    /// One MiB.
     MiB1,
-    /// Up to four MiB of encrypted cell plaintext.
+    /// Four MiB.
     MiB4,
-    /// Up to twelve MiB of encrypted cell plaintext. Admission charges the full visible bucket
-    /// size, irrespective of the hidden encoded length, so an undersized payload cannot bypass
-    /// the relay's per-peer or global byte budget.
+    /// Twelve MiB. Admission charges the cell's full class, `b / 16 KiB` units.
     MiB12,
 }
 
@@ -65,8 +42,8 @@ impl OnionCellBucket {
         Self::MiB12,
     ];
 
-    /// Return the fixed plaintext length protected by this cell class.
-    pub const fn plaintext_len(self) -> usize {
+    /// Return the cell length `b` of this class.
+    pub const fn cell_bytes(self) -> usize {
         match self {
             Self::KiB4 => 4 * 1024,
             Self::KiB16 => 16 * 1024,
@@ -75,232 +52,6 @@ impl OnionCellBucket {
             Self::MiB1 => 1024 * 1024,
             Self::MiB4 => 4 * 1024 * 1024,
             Self::MiB12 => 12 * 1024 * 1024,
-        }
-    }
-
-    fn smallest_for(encoded_len: usize) -> Result<Self> {
-        let required = encoded_len
-            .checked_add(CELL_LENGTH_PREFIX_BYTES)
-            .ok_or_else(|| Error::OnionRouteError(OnionRouteError::CellPayloadTooLarge))?;
-        Self::ALL
-            .into_iter()
-            .find(|bucket| bucket.plaintext_len() >= required)
-            .ok_or_else(|| Error::OnionRouteError(OnionRouteError::CellPayloadTooLarge))
-    }
-
-    fn accepts(self, encoded_len: usize) -> bool {
-        encoded_len
-            .checked_add(CELL_LENGTH_PREFIX_BYTES)
-            .is_some_and(|required| required <= self.plaintext_len())
-    }
-}
-
-/// Hop-to-hop ciphertext whose serialized size reveals only [`OnionCellBucket`].
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(super) struct OnionWireCell {
-    pub(super) bucket: OnionCellBucket,
-    pub(super) sealed: AeadCiphertext,
-}
-
-pub(super) fn encode_message(message: &OnionWireMessage) -> Result<Bytes> {
-    rings_codec::serialize(message)
-        .map(Bytes::from)
-        .map_err(|_| Error::EncodeError)
-}
-
-pub(super) fn seal_message(
-    message: &OnionWireMessage,
-    recipient: PublicKey<33>,
-    bucket: Option<OnionCellBucket>,
-) -> Result<Bytes> {
-    let encoded = encode_message(message)?;
-    seal_encoded_message(&encoded, recipient, bucket)
-}
-
-pub(super) fn seal_encoded_message(
-    encoded: &[u8],
-    recipient: PublicKey<33>,
-    bucket: Option<OnionCellBucket>,
-) -> Result<Bytes> {
-    let mut rng = rand::thread_rng();
-    seal_encoded_message_with_rng(encoded, recipient, bucket, &mut rng)
-}
-
-/// Recover the public size class from a locally sealed cell.
-///
-/// This reads only the hop-visible envelope metadata; it does not decrypt or inspect the hidden
-/// wire message. Endpoint senders use the same class when producing link cover cells.
-pub(super) fn sealed_cell_bucket(payload: &[u8]) -> Result<OnionCellBucket> {
-    rings_codec::deserialize::<OnionWireCell>(payload)
-        .map(|cell| cell.bucket)
-        .map_err(|_| Error::OnionRouteError(OnionRouteError::InvalidCell))
-}
-
-fn seal_encoded_message_with_rng<R: CryptoRng + RngCore>(
-    encoded: &[u8],
-    recipient: PublicKey<33>,
-    bucket: Option<OnionCellBucket>,
-    rng: &mut R,
-) -> Result<Bytes> {
-    let bucket = bucket.map_or_else(|| OnionCellBucket::smallest_for(encoded.len()), Ok)?;
-    if !bucket.accepts(encoded.len()) {
-        return Err(Error::OnionRouteError(OnionRouteError::CellPayloadTooLarge));
-    }
-    let encoded_len = u32::try_from(encoded.len())
-        .map_err(|_| Error::OnionRouteError(OnionRouteError::CellPayloadTooLarge))?;
-    let mut plaintext = vec![0_u8; bucket.plaintext_len()];
-    let encoded_end = CELL_LENGTH_PREFIX_BYTES
-        .checked_add(encoded.len())
-        .ok_or_else(|| Error::OnionRouteError(OnionRouteError::CellPayloadTooLarge))?;
-    plaintext
-        .get_mut(..CELL_LENGTH_PREFIX_BYTES)
-        .ok_or_else(|| Error::OnionRouteError(OnionRouteError::InvalidCell))?
-        .copy_from_slice(&encoded_len.to_le_bytes());
-    plaintext
-        .get_mut(CELL_LENGTH_PREFIX_BYTES..encoded_end)
-        .ok_or_else(|| Error::OnionRouteError(OnionRouteError::InvalidCell))?
-        .copy_from_slice(encoded);
-    rng.fill_bytes(
-        plaintext
-            .get_mut(encoded_end..)
-            .ok_or_else(|| Error::OnionRouteError(OnionRouteError::InvalidCell))?,
-    );
-    let aad = cell_aad(bucket)?;
-    let sealed =
-        encrypt_aead_with_rng(&plaintext, &aad, recipient, rng).map_err(Error::CoreError)?;
-    rings_codec::serialize(&OnionWireCell { bucket, sealed })
-        .map(Bytes::from)
-        .map_err(|_| Error::EncodeError)
-}
-
-pub(super) fn open_cell(
-    delegatee_key: &DelegateeKey,
-    bucket: OnionCellBucket,
-    sealed: &AeadCiphertext,
-) -> Result<OnionWireMessage> {
-    let aad = cell_aad(bucket)?;
-    let plaintext = delegatee_key
-        .decrypt_elgamal_aead(sealed, &aad)
-        .map_err(Error::CoreError)?;
-    if plaintext.len() != bucket.plaintext_len() {
-        return Err(Error::OnionRouteError(OnionRouteError::InvalidCell));
-    }
-    let encoded_len = u32::from_le_bytes(
-        plaintext
-            .get(..CELL_LENGTH_PREFIX_BYTES)
-            .ok_or_else(|| Error::OnionRouteError(OnionRouteError::InvalidCell))?
-            .try_into()
-            .map_err(|_| Error::OnionRouteError(OnionRouteError::InvalidCell))?,
-    ) as usize;
-    if !bucket.accepts(encoded_len) {
-        return Err(Error::OnionRouteError(OnionRouteError::InvalidCell));
-    }
-    let encoded_end = CELL_LENGTH_PREFIX_BYTES
-        .checked_add(encoded_len)
-        .ok_or_else(|| Error::OnionRouteError(OnionRouteError::InvalidCell))?;
-    let encoded = plaintext
-        .get(CELL_LENGTH_PREFIX_BYTES..encoded_end)
-        .ok_or_else(|| Error::OnionRouteError(OnionRouteError::InvalidCell))?;
-    rings_codec::deserialize(encoded).map_err(|_| Error::DecodeError)
-}
-
-fn cell_aad(bucket: OnionCellBucket) -> Result<Vec<u8>> {
-    rings_codec::serialize(&(ONION_CELL_AEAD_NAMESPACE, bucket)).map_err(|_| Error::EncodeError)
-}
-
-#[cfg(test)]
-mod tests {
-    use rings_core::delegation::DelegateeKey;
-    use rings_core::ecc::SecretKey;
-
-    use super::*;
-    use crate::onion::circuit::OnionBackwardFrame;
-    use crate::onion::circuit::OnionCircuitId;
-
-    fn session() -> DelegateeKey {
-        DelegateeKey::new_with_seckey(&SecretKey::random()).expect("delegatee key")
-    }
-
-    fn backward_message(payload_len: usize) -> OnionWireMessage {
-        let recipient = session();
-        let sealed = encrypt_aead_with_rng(
-            &vec![7_u8; payload_len],
-            b"cell-test",
-            recipient.delegatee_public_key(),
-            &mut rand::thread_rng(),
-        )
-        .expect("encrypt fixture");
-        OnionWireMessage::Backward(OnionBackwardFrame {
-            circuit_id: OnionCircuitId::new([1; 16]),
-            payload: sealed,
-        })
-    }
-
-    #[test]
-    fn test_small_messages_share_one_observable_cell_size() {
-        let recipient = session();
-        let short = seal_message(&backward_message(1), recipient.delegatee_public_key(), None)
-            .expect("seal short");
-        let longer = seal_message(
-            &backward_message(1_000),
-            recipient.delegatee_public_key(),
-            None,
-        )
-        .expect("seal longer");
-        assert_eq!(short.len(), longer.len());
-    }
-
-    #[test]
-    fn test_cell_round_trip_rejects_wrong_recipient() {
-        let recipient = session();
-        let wrong = session();
-        let message = backward_message(1);
-        let encoded =
-            seal_message(&message, recipient.delegatee_public_key(), None).expect("seal message");
-        let cell: OnionWireCell = rings_codec::deserialize(&encoded).expect("decode cell");
-        assert_eq!(
-            open_cell(&recipient, cell.bucket, &cell.sealed).expect("open cell"),
-            message
-        );
-        assert!(open_cell(&wrong, cell.bucket, &cell.sealed).is_err());
-    }
-
-    #[test]
-    fn test_one_hop_cover_is_authenticated_inside_the_same_cell_algebra() {
-        let recipient = session();
-        let encoded = seal_message(
-            &OnionWireMessage::Cover,
-            recipient.delegatee_public_key(),
-            Some(OnionCellBucket::KiB4),
-        )
-        .expect("seal cover");
-        let cell: OnionWireCell = rings_codec::deserialize(&encoded).expect("decode cover cell");
-
-        assert_eq!(
-            open_cell(&recipient, cell.bucket, &cell.sealed).expect("open cover cell"),
-            OnionWireMessage::Cover
-        );
-        assert_eq!(
-            sealed_cell_bucket(&encoded).expect("read public cell bucket"),
-            OnionCellBucket::KiB4
-        );
-    }
-
-    #[test]
-    fn test_local_bucket_selection_is_minimal_at_every_boundary() {
-        for (index, bucket) in OnionCellBucket::ALL.into_iter().enumerate() {
-            let encoded_capacity = bucket.plaintext_len() - CELL_LENGTH_PREFIX_BYTES;
-            assert_eq!(
-                OnionCellBucket::smallest_for(encoded_capacity).ok(),
-                Some(bucket)
-            );
-            match OnionCellBucket::ALL.get(index + 1).copied() {
-                Some(next) => assert_eq!(
-                    OnionCellBucket::smallest_for(encoded_capacity + 1).ok(),
-                    Some(next)
-                ),
-                None => assert!(OnionCellBucket::smallest_for(encoded_capacity + 1).is_err()),
-            }
         }
     }
 }

@@ -26,7 +26,7 @@ use super::OnionChargeRejection;
 use super::OnionExpiry;
 use super::OnionReplayFilterKey;
 use super::ADMISSION_WINDOW_QUANTA_WIDE;
-use crate::onion::circuit::OnionForwardNonce;
+use crate::onion::circuit::OnionReplayNonce;
 use crate::onion::circuit::ONION_FORWARD_EXPIRY_QUANTUM_MS;
 use crate::onion::OnionProcessEpoch;
 
@@ -116,7 +116,7 @@ pub(super) fn layer(expiry: OnionExpiry, tag: u128) -> OnionAdmissionLayer {
     OnionAdmissionLayer {
         epoch: EPOCH,
         expiry,
-        tag: OnionForwardNonce::new(tag.to_le_bytes()),
+        tag: OnionReplayNonce::new(tag.to_le_bytes()),
     }
 }
 

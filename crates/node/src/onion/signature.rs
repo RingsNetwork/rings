@@ -1,6 +1,6 @@
-//! The onion signature `Σ`: the static table of operation symbols a circuit applies.
+//! The onion signature `Σ`: the static table of operation symbols a loop applies.
 //!
-//! A circuit is a term over `Σ` evaluated one symbol per hop (#834 D1). This phase fixes
+//! A loop evaluates a term over `Σ`, one symbol per hop (#834 D1). This phase fixes
 //!
 //! ```text
 //! Σ   = {relay} ⊎ Σ_W,    Σ_W = {tcp, https}
@@ -12,8 +12,8 @@
 //!
 //! Laws:
 //!
-//! - **Identity** (#834 L1). `relay = id`, so `relay ⋙ f = f` on carried values. The pure circuit
-//!   reducer interprets `relay`; no exit adapter ever does, and `relay` is registered through the
+//! - **Identity** (#834 L1). `relay = id`, so `relay ⋙ f = f` on carried values. The pure hop step
+//!   interprets `relay`; no exit adapter ever does, and `relay` is registered through the
 //!   online-node relay capability, never as a service (#834 D2).
 //! - **Position.** A world-facing symbol exchanges bytes with the outside world and stands last.
 //! - **Closure.** `Σ` is closed and [`OnionServiceName`] is exactly `Σ_W`: `OnionServiceName ≅ Σ_W`.
@@ -35,8 +35,9 @@
 //! a change to this table and its codec at the cutover, not to their consumers; the statements
 //! "`Σ = {relay} ⊎ Σ_W`" and "`relay` is the only intermediate symbol" hold for Phases 1 and 2a.
 //!
-//! Width and latency classes `W`, `L` of the world-facing symbols are not protocol data yet: their
-//! results return along the reversed path, never through a fixed-width carry slot.
+//! Width and latency classes `W`, `L` of the world-facing symbols are not protocol data yet: a
+//! world-facing symbol is a session whose results return in reply blocks the client supplies
+//! (#834 D8), each carrying at most the value capacity of the loop's class.
 
 use std::fmt;
 
@@ -179,13 +180,6 @@ onion_signature! {
 }
 
 /// A symbol of `Σ = {relay} ⊎ Σ_W`, as the coproduct `1 + Σ_W`.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the layer code of the Sphinx primitives; #834 Phase 2a-4 (#843) uses it"
-    )
-)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum OnionSymbol {
     /// The identity symbol `relay`, the only intermediate symbol.
@@ -194,13 +188,6 @@ pub(crate) enum OnionSymbol {
     WorldFacing(OnionServiceName),
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the layer code of the Sphinx primitives; #834 Phase 2a-4 (#843) uses it"
-    )
-)]
 impl OnionSymbol {
     /// `code : 1 + Σ_W → u8`, `inl ↦ 0`, `inr w ↦ 1 + w`: the position in table order.
     pub(crate) const fn code(&self) -> u8 {

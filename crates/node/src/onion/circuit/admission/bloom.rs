@@ -40,7 +40,7 @@ use zeroize::Zeroize;
 
 use super::OnionExpiry;
 use super::ONION_ADMISSION_SENDER_UNITS;
-use crate::onion::circuit::OnionForwardNonce;
+use crate::onion::circuit::OnionReplayNonce;
 
 /// Tags per block, `B`: one sender's whole budget fits in one block.
 pub(super) const REPLAY_BLOCK_TAGS: u32 = ONION_ADMISSION_SENDER_UNITS;
@@ -106,9 +106,9 @@ pub(super) struct ReplayProbe {
 
 impl ReplayProbe {
     /// Derive the probe of `tag` under `key` from the keyed Keccak-256 counter stream.
-    fn of(key: &OnionReplayFilterKey, tag: OnionForwardNonce) -> Self {
+    fn of(key: &OnionReplayFilterKey, tag: OnionReplayNonce) -> Self {
         let OnionReplayFilterKey(key_bytes) = key;
-        let OnionForwardNonce(tag_bytes) = tag;
+        let OnionReplayNonce(tag_bytes) = tag;
         let mut preimage = [0_u8; 49];
         let mut stream = [0_u8; 32 * REPLAY_PROBE_DIGESTS];
         stream
@@ -276,7 +276,7 @@ impl ReplayStore {
     }
 
     /// The probe of `tag` under this store's key.
-    pub(super) fn probe(&self, tag: OnionForwardNonce) -> ReplayProbe {
+    pub(super) fn probe(&self, tag: OnionReplayNonce) -> ReplayProbe {
         ReplayProbe::of(&self.key, tag)
     }
 

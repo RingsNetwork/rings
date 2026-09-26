@@ -14,6 +14,7 @@
 //! opened(ok):        ok ⇒ Open, reply data(0, 0, ε) once some υ is available;  ¬ok ⇒ reply fin(0), Close
 //! world(w | eof):    υ = take least x;  reply data(n, 0, w) | fin(n);  n ← n + 1
 //! tick(t):           gap, or t − last forward ≥ V, or both directions closed ⇒ Close
+//! fail:              the world failed ⇒ Close
 //! ```
 //!
 //! Laws (tested in `session::tests`):
@@ -137,12 +138,6 @@ impl OnionExitSession {
         }
     }
 
-    /// Whether the session is bound to the digest `digest`: a later loop naming another digest is
-    /// rejected by the shell before it reaches the session (D2′).
-    pub(crate) fn is_bound_to(&self, digest: OnionTargetDigest) -> bool {
-        self.digest == digest
-    }
-
     /// Whether the session has closed; the shell then drops it.
     pub(crate) fn is_closed(&self) -> bool {
         self.phase == OnionExitPhase::Closed
@@ -245,6 +240,13 @@ impl OnionExitSession {
         {
             self.close(&mut effects);
         }
+        effects
+    }
+
+    /// The world failed (a read, a write, or the byte policy): the session fails closed.
+    pub(crate) fn fail(&mut self) -> Vec<OnionExitEffect> {
+        let mut effects = Vec::new();
+        self.close(&mut effects);
         effects
     }
 
