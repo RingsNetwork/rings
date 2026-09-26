@@ -654,9 +654,10 @@ pub enum Error {
     #[error("Relay hop budget {0} is above the maximum a carrier can hold")]
     RelayHopBudgetAboveMax(u8),
 
-    /// Delivery toward a node cannot continue from this hop: no known peer makes progress
-    /// toward its aim, or the route was already handed past it and no direct link leads on
-    /// (see `dht::delivery`). The route ends here instead of spending its hop budget.
+    /// Delivery toward a node cannot continue from this hop: no linked known peer makes
+    /// progress toward its aim, and the route has already crossed that aim once, or this node
+    /// has no linked known peer at all (see `dht::delivery`). The route ends here instead of
+    /// spending its hop budget.
     #[error("Relay destination {destination} is not reachable from this hop")]
     RelayDestinationUnreachable {
         /// The node the payload was routed toward.

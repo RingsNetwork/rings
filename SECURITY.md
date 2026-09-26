@@ -126,14 +126,14 @@ The obligations of this layer are leak-minimization obligations:
 
 - no hop history on the wire, and no cycles. Every greedy hop moves strictly closer
   to its aim without passing it, and a route crosses its aim at most once, by a marked
-  handoff whose receiver delivers over a direct link or ends the route with a typed
-  error (`dht::delivery`). A route therefore takes at most `|V| + 2` hops (one greedy
-  run, one handoff, two terminal deliveries), and a message for a node no view yet
-  knows fails fast instead of circling the ring. With a finger table that spans the
-  identifier space a greedy run takes `O(log |V|)` hops; with a sparse one it
-  degenerates to a successor walk, so exhausting the hop budget on the delivery path
-  means a correct route longer than the budget (`|V| + 2 > MAX_RELAY_HOPS`), not a
-  loop. The carrier is outside every signature, so the budget bounds the work honest
+  handoff after which the receiver routes greedily again but refuses a second crossing,
+  ending the route with a typed error (`dht::delivery`). A route therefore takes at most
+  `2|V|` hops (two greedy runs joined by one handoff, and the final hop from a
+  `reply_via` peer), and a message for a node no view reaches fails fast instead of
+  circling the ring. On a converged ring every greedy hop at least halves the remaining
+  distance; with a sparse finger table greedy delivery degenerates to a successor walk,
+  so exhausting the hop budget on the delivery path means a correct route longer than
+  the budget (`2|V| > MAX_RELAY_HOPS`), not a loop. The carrier is outside every signature, so the budget bounds the work honest
   hops do for one message and is not a promise a dishonest hop keeps;
 - a bounded reflection through `reply_via`: a request names one peer, and a responder
   routes at most one successor or connection answer (`FindSuccessorReport`,

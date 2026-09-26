@@ -3,7 +3,9 @@
 //! | Staleness | Expected outcome |
 //! |---|---|
 //! | a successor list skips `T`, but some view links toward `T` | routed around, delivered |
-//! | no view knows `T` and no greedy hop is linked to it | fails fast: one handoff, then the typed error |
+//! | a sender's only link is past the destination (leaf behind its guard, joiner behind its bootstrap) | one handoff, then the receiver routes on; delivered |
+//! | only `T`'s predecessor is linked to `T` | unlinked entries skipped; delivered at the predecessor |
+//! | no node is linked to `T` | fails fast with the typed error within `2|V|` hops |
 //! | `T` has no predecessor and is linked only to its bootstrap `B` | its answers arrive through `reply_via = B` |
 //! | successor entries name peers without a link | never hopped to; delivered over the linked ring |
 //! | arbitrary views and links | the safety laws of [`Overlay::check_route_law`] only |
@@ -24,6 +26,7 @@ use super::Overlay;
 use super::RouteStage;
 use crate::dht::delivery::origination;
 use crate::dht::topology::find_successor;
+use crate::dht::topology::predecessor;
 use crate::dht::topology::successors;
 use crate::dht::topology::FindSuccessorStep;
 use crate::dht::topology::TopologyState;
@@ -70,20 +73,78 @@ fn test_stale_successor_is_routed_around_through_a_linked_neighbour() {
     overlay.check_all_routes();
 }
 
-/// Unknown destination, fails fast: from `A` no view on the route knows `T`, so the route hands
-/// off once, to `C`, and `C` ends it with the typed error, where the owner-lookup route used to
-/// circle `A → C → D → A` until the hop budget.
+/// One crossing suffices (#865): from `A`, whose view knows nothing on the way to `T`, the route
+/// hands off once, to `C`, whose fuller view routes on through `B`; the owner-lookup route
+/// circled `A → C → D → A` until the hop budget.
 #[test]
-fn test_unknown_destination_fails_fast_after_one_handoff() {
-    let (overlay, [a, _, t, c, _]) = issue_865();
+fn test_stale_sender_hands_off_once_and_the_receiver_routes_on() {
+    let (overlay, [a, b, t, c, _]) = issue_865();
 
     let from_a = overlay.check_route_law(a, t, RouteStage::TOWARD);
-    assert_eq!(from_a.path(), vec![a, c]);
-    assert_eq!(from_a.outcome, Outcome::Unreachable);
+    assert_eq!(from_a.path(), vec![a, c, b, t]);
+    assert_eq!(from_a.outcome, Outcome::Delivered);
     assert_eq!(
-        from_a.states.last().map(|(_, stage)| *stage),
+        from_a.states.get(1).map(|(_, stage)| *stage),
         Some(RouteStage::TOWARD.handed_off())
     );
+}
+
+/// A node without links fails fast: on a converged ring whose members all name `T` in their
+/// views but none is linked to it, every route toward `T` ends with the typed error, never by
+/// the hop budget, within the `2|V|` bound the route law checks.
+#[test]
+fn test_destination_without_links_fails_fast() {
+    let mut rng = Hc128Rng::seed_from_u64(5);
+    for size in [2usize, 3, 5, 8] {
+        let everyone = random_members(&mut rng, size + 1);
+        let (members, offline) = everyone.split_at(size);
+        let Some(offline) = offline.first().copied() else {
+            continue;
+        };
+        let views = members
+            .iter()
+            .map(|local| (*local, converged_view(&everyone, *local)))
+            .collect::<BTreeMap<_, _>>();
+        let links = members
+            .iter()
+            .flat_map(|a| members.iter().map(move |b| (*a, *b)));
+        let overlay = Overlay::with_links(views, links);
+        for origin in members.iter().copied() {
+            let route = overlay.check_route_law(origin, offline, RouteStage::TOWARD);
+            assert_eq!(route.outcome, Outcome::Unreachable, "{route:?}");
+        }
+    }
+}
+
+/// A leaf behind its predecessor is reached by every member: every member names the leaf in
+/// its view, but only the leaf's ring predecessor is linked to it, so greedy delivery skips the
+/// unlinked entries and hands the payload over at the predecessor.
+#[test]
+fn test_leaf_behind_its_predecessor_is_reached_by_every_member() {
+    let mut rng = Hc128Rng::seed_from_u64(6);
+    for size in [2usize, 3, 5, 8] {
+        let everyone = random_members(&mut rng, size + 1);
+        let (members, leaf) = everyone.split_at(size);
+        let Some(leaf) = leaf.first().copied() else {
+            continue;
+        };
+        let Some(guard) = predecessor(&everyone, leaf) else {
+            continue;
+        };
+        let views = everyone
+            .iter()
+            .map(|local| (*local, converged_view(&everyone, *local)))
+            .collect::<BTreeMap<_, _>>();
+        let links = members
+            .iter()
+            .flat_map(|a| members.iter().map(move |b| (*a, *b)))
+            .chain(std::iter::once((guard, leaf)));
+        let overlay = Overlay::with_links(views, links);
+        for origin in members.iter().copied() {
+            let route = overlay.check_route_law(origin, leaf, RouteStage::TOWARD);
+            assert_eq!(route.outcome, Outcome::Delivered, "{route:?}");
+        }
+    }
 }
 
 /// A joiner, answered through `reply_via` (#873 §1.2): the joiner has no predecessor, so its
@@ -134,6 +195,29 @@ fn test_join_window_law() {
                     joiner,
                     RouteStage::replying_via(Some(bootstrap)),
                 );
+                assert_eq!(route.outcome, Outcome::Delivered, "{route:?}");
+            }
+        }
+    }
+}
+
+/// A sparse sender reaches every member: a node linked only to one member `B` of a ring
+/// converged without it, at any position of `B` (a leaf behind its guard, which is its ring
+/// predecessor, or a joiner behind an arbitrary bootstrap), delivers to every member. Its only
+/// hop is past most destinations, and `B`, whose view is complete, must still route on.
+#[test]
+fn test_sparse_sender_reaches_every_member() {
+    let mut rng = Hc128Rng::seed_from_u64(4);
+    for size in [2usize, 3, 5, 8] {
+        let everyone = random_members(&mut rng, size + 1);
+        let (members, sender) = everyone.split_at(size);
+        let Some(sender) = sender.first().copied() else {
+            continue;
+        };
+        for anchor in members.iter().copied() {
+            let overlay = join_window(members, sender, anchor);
+            for destination in members.iter().copied() {
+                let route = overlay.check_route_law(sender, destination, RouteStage::TOWARD);
                 assert_eq!(route.outcome, Outcome::Delivered, "{route:?}");
             }
         }

@@ -6,48 +6,54 @@
 //! second, and crossing `k` is correct there: the owner is the first node at or after `k`.
 //! `T` is a node, not a position, so any node past `T` is farther from it, and a hop that
 //! crosses `T` breaks the progress measure that makes Chord terminate. This module answers
-//! the first question and never crosses its aim except by one marked, terminal handoff.
+//! the first question and crosses its aim at most once, by one marked handoff.
 //!
 //! The carrier's [`RouteStage`](crate::dht::delivery::RouteStage) is `(aim, handed_off)` with
 //! `aim ∈ {T, via b}`:
 //!
 //! ```text
-//! route(T) = Greedy*(T) · ( Deliver | Handoff · (Deliver | ⊥) )                  reply_via = ∅
-//! route(T) = Greedy*(b) · ( Deliver(b) | Handoff · (Deliver(b) | ⊥) ) · (Deliver(T) | ⊥)   reply_via = b
+//! route(a) = Greedy*(a) · ( Deliver(a) | Handoff · Greedy*(a) · (Deliver(a) | ⊥) | ⊥ )
+//! route(T) = route(T)                                   when no reply_via is named
+//! route(T) = route(b) · (Deliver(T) | ⊥)                for an answer with reply_via = b
 //! ```
 //!
 //! - `Greedy(a)`: forward to the linked known peer on `(n, a]` nearest `a`
 //!   ([`route_toward`](crate::dht::delivery::route_toward));
 //! - `Handoff`: no linked known peer lies on `(n, a]`; the payload goes once to the first
-//!   linked known node after `n`, which lies past `a`, and the stage is marked; the receiver
-//!   delivers over a direct link or ends the route with a typed error, and never routes
-//!   greedily again;
+//!   linked known node after `n`, which lies past `a`, and the stage is marked. The node that
+//!   handed off saw too little of the ring, not a wrong ring: a leaf linked only to its guard,
+//!   or a joiner linked only to its bootstrap, hands off on its first hop, and the receiver's
+//!   fuller view routes on greedily. A second crossing is refused, which ends the route with a
+//!   typed error;
 //! - `via b`: a successor or connection answer whose request named `reply_via = b` (see
 //!   [`Transaction`](crate::message::Transaction)) is first delivered to `b`, which hands it
 //!   to `T` over its link.
 //!
 //! Law (safety). Every greedy hop satisfies `next ∈ (n, aim]`, so `dist(·, aim)` strictly
 //! decreases in `ℕ` and a greedy run visits each node at most once; the handoff flag only moves
-//! `⊥ → ⊤`, and reaching `b` in stage `(via b, _)` never starts a second greedy run. A route is
-//! therefore one greedy run (at most `|V| − 1` hops), at most one handoff, and at most two
-//! terminal deliveries (to `b`, then from `b` to `T`):
+//! `⊥ → ⊤`, and a second crossing is refused, so a route toward one aim is at most two greedy
+//! runs joined by one handoff. With the final hop from `b` to `T`:
 //!
 //! ```text
-//! hops(route) ≤ (|V| − 1) + 1 + 2 = |V| + 2        (|V| + 1 without reply_via)
+//! hops(route) ≤ 2(|V| − 1) + 1 + 1 = 2|V|        (2|V| − 1 without reply_via)
 //! ```
 //!
-//! No route cycles in any views. The hop budget ends a delivery only when a correct route is
-//! longer than it: with a sparse finger table greedy delivery degenerates to a walk along the
-//! successor lists, so `RelayHopBudgetExhausted` on the delivery path requires
-//! `|V| + 2 > MAX_RELAY_HOPS` (a ring whose finger table does not span the identifier space).
+//! What cycled before (#865) was the unbounded repetition of crossings; one crossing is what a
+//! sparse view needs. No route cycles in any views. The hop budget ends a delivery only when a
+//! correct route is longer than it: with a sparse finger table greedy delivery degenerates to a
+//! walk along the successor lists, so `RelayHopBudgetExhausted` on the delivery path requires
+//! `2|V| > MAX_RELAY_HOPS` (a ring whose finger table does not span the identifier space).
 //! On the Chord fixpoint every greedy hop at least halves the remaining distance, so a route
 //! takes at most `⌈log₂ dist(n₀, T)⌉ + 1` hops, `O(log |V|)` with high probability for random
 //! identifiers.
 //!
-//! Law (liveness). The payload is delivered if a node on the greedy prefix is linked to the
-//! aim, or the handoff receiver is. On the Chord fixpoint `pred(T)` knows `T`. Before
-//! convergence a payload for a node no view knows fails fast; a successor or connection
-//! answer to a node without a predecessor reaches it through the peer it named.
+//! Law (liveness). The payload is delivered if a node on either greedy run is linked to the
+//! aim. On the Chord fixpoint `pred(T)` knows `T`, so the first run delivers. A sender whose
+//! view is sparse reaches every node its handoff receiver's view reaches. Whatever the 0.31
+//! owner-lookup router delivered without cycling and with at most one crossing, delivery
+//! delivers too. Before convergence a payload for a node no view knows fails fast, within
+//! `2|V|` hops; a successor or connection answer to a node without a predecessor reaches it
+//! through the peer it named.
 
 use num_bigint::BigUint;
 
@@ -60,14 +66,14 @@ use super::Did;
 /// `RouteStage = Aim × 𝔹` with `Aim = {destination} + {via b}`. A fresh carrier starts at
 /// `(destination, ⊥)`, or at `(via b, ⊥)` for a successor or connection answer whose request
 /// named `reply_via = b`; a handoff moves `⊥ → ⊤` and nothing moves it back, which bounds each
-/// aim to one greedy run and one crossing.
+/// aim to two greedy runs and one crossing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct RouteStage {
     /// The peer a report is first delivered to; `None` while the route aims at the
     /// destination itself.
     pub via: Option<Did>,
-    /// Whether the payload has been handed past its aim, to the first linked known node after
-    /// the hop that knew no peer on the way to it.
+    /// Whether the payload has been handed past its aim once, to the first linked known node
+    /// after the hop that knew no peer on the way to it; a second crossing is refused.
     pub handed_off: bool,
 }
 
@@ -178,7 +184,7 @@ fn linked_known_peers<'state>(
 /// Unlike [`find_successor`](crate::dht::topology::find_successor), which answers
 /// `Local(head)` for `a ∈ (n, head]` and so lets a hop that does not know `a` pass it and then
 /// route greedily again from the far side, circling among the nodes whose views skip `a`
-/// (#873), the pass here is explicit and terminal.
+/// (#873), the pass here is explicit and happens at most once per aim.
 pub fn route_toward(state: &TopologyState, aim: Did, linked: impl Fn(Did) -> bool) -> RouteStep {
     let target = dist(state.local, aim);
     let peers = || linked_known_peers(state, &linked);
@@ -222,9 +228,12 @@ pub fn reply_via(state: &TopologyState, linked: impl Fn(Did) -> bool) -> Option<
 /// ```text
 /// linked(T)                 ──▶ Deliver(T)                      (any stage)
 /// stage = (via n, _)        ──▶ ⊥                               (n lost its link to T)
-/// stage = (a, ⊤)            ──▶ linked(a) ? Deliver(a) : ⊥      (handoff receiver)
-/// stage = (a, ⊥)            ──▶ linked(a) ? Deliver(a) : route_toward(view, a, linked) ∈
-///                                 { Forward(p) ↦ (p, (a, ⊥)), Handoff(h) ↦ (h, (a, ⊤)), Isolated ↦ ⊥ }
+/// linked(a)                 ──▶ Deliver(a)
+/// otherwise                 ──▶ route_toward(view, a, linked) ∈
+///                                 { Forward(p)  ↦ (p, stage)
+///                                 , Handoff(h)  ↦ (h, (a, ⊤))   if stage = (a, ⊥)
+///                                 , Handoff(_)  ↦ ⊥             if stage = (a, ⊤)   (no second crossing)
+///                                 , Isolated    ↦ ⊥ }
 /// ```
 pub fn delivery_step(
     view: &TopologyState,
@@ -244,13 +253,12 @@ pub fn delivery_step(
             return Some(NextHop::new(aim, stage));
         }
     }
-    if stage.handed_off {
-        return None;
-    }
     match route_toward(view, aim, linked) {
         RouteStep::Forward(peer) => Some(NextHop::new(peer, stage)),
-        RouteStep::Handoff(peer) => Some(NextHop::new(peer, stage.handed_off())),
-        RouteStep::Isolated => None,
+        RouteStep::Handoff(peer) if !stage.handed_off => {
+            Some(NextHop::new(peer, stage.handed_off()))
+        }
+        RouteStep::Handoff(_) | RouteStep::Isolated => None,
     }
 }
 

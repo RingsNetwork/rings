@@ -24,9 +24,9 @@
 - Deliver messages toward a node DID by a dedicated rule instead of the owner lookup (#865, #873).
   Greedy hops forward to the linked known peer, successors included, that lies nearest the
   destination, and never pass it. A hop that knows no such peer hands the message once to the
-  first linked node after it, which delivers over a direct link or ends the route with
-  `RelayDestinationUnreachable`. This ends the cycles that dropped replies with
-  `RelayHopBudgetExhausted` on unconverged rings: a route takes at most `|V| + 2` hops. Whenever
+  first linked node after it, which routes on greedily but refuses a second crossing, ending the
+  route with `RelayDestinationUnreachable`. This ends the cycles that dropped replies with
+  `RelayHopBudgetExhausted` on unconverged rings: a route takes at most `2|V|` hops. Whenever
   a node has no predecessor, its requests carry a signed `Transaction::reply_via` naming its
   nearest linked successor, and successor and connection answers to it return through that peer, so joins
   work under fail-fast. Every locally originated request is built by

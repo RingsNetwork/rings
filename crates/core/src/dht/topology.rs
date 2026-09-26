@@ -827,7 +827,7 @@ pub fn is_responsible_for(state: &TopologyState, id: Did) -> bool {
 /// successor lookups, inbox hold authority), where `Local(head)` with `head`
 /// past `did` is the intended answer. Delivering a payload to the node `did`
 /// is a different question, answered by [`delivery`](crate::dht::delivery),
-/// which never passes its aim except by one explicit, terminal handoff.
+/// which passes its aim at most once, by one explicit handoff.
 ///
 /// `TopologyState` has public fields, so a successor or finger entry equal to
 /// `local` is representable; such entries are skipped rather than trusted.

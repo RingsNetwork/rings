@@ -17,11 +17,11 @@ use crate::error::Result;
 /// of Chord is the unique identifier of a node, which we call [Did]. Then if we connect
 /// all the nodes in the finger table for every node, we construct a [PeerRing](super::PeerRing).
 /// It's the basic construction of the rings network. When passing a message to a
-/// destination node, each hop forwards to its closest known peer on `(self, destination]`,
-/// and a hop that knows none hands the message once, terminally, to the first linked node after it
-/// (see [`delivery`](super::delivery)); `find_successor` answers the different question of
-/// who owns a ring position. A route takes O(log n) hops over O(log n) connections per node
-/// on a converged ring.
+/// destination node, each hop forwards to its closest linked peer on `(self, destination]`,
+/// and a hop that knows none hands the message, at most once per route, to the first linked
+/// node after it (see [`delivery`](super::delivery)); `find_successor` answers the different
+/// question of who owns a ring position. A route takes O(log n) hops over O(log n)
+/// connections per node on a converged ring.
 ///
 /// Some methods return an `Action` which is used to tell outer the extra action to take
 /// after handling data inside the struct. It's useful since the struct may not work

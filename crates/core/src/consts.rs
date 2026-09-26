@@ -27,7 +27,7 @@ pub const TS_OFFSET_TOLERANCE_MS: u128 = 3000;
 /// routes by successor walk instead, whose length is the ring size and is known to no node, so
 /// the budget is a network constant rather than a per-ring derivation; it covers such rings up
 /// to 65 nodes. Delivery toward a node never cycles (see `dht::delivery`): a route takes at most
-/// `|V| + 2` hops, so the budget ends one only when such a correct route is longer than it.
+/// `2|V|` hops, so the budget ends one only when such a correct route is longer than it.
 pub const MAX_RELAY_HOPS: u8 = 64;
 /// Maximum number of fetched entries the local DHT cache retains before evicting the
 /// least recently written one.

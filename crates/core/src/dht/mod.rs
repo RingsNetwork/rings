@@ -4,7 +4,7 @@
 //! With high probability, the number of nodes that must be contacted to find a successor in an N-node network is O(log N).
 
 mod chord;
-/// Delivery toward a node DID: greedy progress and at most one terminal handoff.
+/// Delivery toward a node DID: greedy progress and at most one handoff past the destination.
 pub mod delivery;
 pub mod did;
 /// Storage entry model used by Chord-backed DHT storage.

@@ -17,18 +17,26 @@
 //! - `Linked`: every hop follows a link;
 //! - `NeverOvershoots`: every hop that does not set the stage's handoff flag satisfies
 //!   `next ∈ (n, aim]` (crossing the aim only by that one flagged hop is then a property of the
-//!   type: nothing clears the flag);
+//!   type: nothing clears the flag, and a flagged stage refuses a second handoff);
 //! - `Acyclic`: no `(node, stage)` repeats, so the hop budget never ends a route;
-//! - `Bounded`: at most `|V| + 2` hops (one greedy run, one handoff, two terminal deliveries);
+//! - `Bounded`: at most `2|V|` hops (two greedy runs joined by one handoff, and the final hop
+//!   from a `reply_via` peer);
 //! - `Exact`: an undelivered route toward `T` visited no node linked to `T`.
+//!
+//! Liveness is not a law of arbitrary views: two greedy choice rules each win on views where the
+//! other dead-ends (a sender knowing `{20, 30}` of which only `20` leads on is lost by
+//! max-progress and won by head-first; the mirror view reverses it), so no greedy router
+//! dominates another. Liveness is therefore stated per role, with its precondition, in
+//! [`test_converged`] and [`test_unconverged`].
 //!
 //! What a route achieves depends on the overlay, so the two regimes are tested apart:
 //!
 //! - [`test_converged`]: on the Chord fixpoint every route is delivered by greedy hops alone, each
 //!   hop at least halves the remaining distance, and no node names a `reply_via`;
 //! - [`test_unconverged`]: each kind of stale view has its own expected outcome: a stale successor
-//!   is routed around, an unknown destination fails fast, a joiner's answers arrive through its
-//!   `reply_via`, and unlinked successor entries are never hopped to.
+//!   is routed around, a sparse sender reaches every member, a leaf behind its predecessor is
+//!   reached by every member, a node without links fails fast, a joiner's answers arrive through
+//!   its `reply_via`, and unlinked successor entries are never hopped to.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -163,7 +171,7 @@ impl Overlay {
         let route = self.route(origin, destination, stage);
         assert_ne!(route.outcome, Outcome::Cycle, "cycle: {route:?}");
         assert!(
-            route.states.len() <= self.views.len() + 3,
+            route.states.len() <= 2 * self.views.len() + 1,
             "unbounded: {route:?}"
         );
         let hops = route
@@ -267,9 +275,9 @@ fn random_members(rng: &mut Hc128Rng, count: usize) -> Vec<Did> {
 
 /// Delivery step unit laws: a linked destination is delivered to in any stage; the greedy step
 /// forwards to the linked known peer on `(n, aim]` nearest the aim over successors ∪ fingers,
-/// skipping known peers without a link, and hands off once to the first linked known node when
-/// none exists; a handoff receiver delivers over a link or ends the route; a via peer hands
-/// over to the destination or ends the route.
+/// skipping known peers without a link, and hands off to the first linked known node when none
+/// exists; after a handoff it still forwards greedily but refuses a second handoff; a via peer
+/// hands over to the destination or ends the route.
 #[test]
 fn test_delivery_step_stages() {
     let local = Did::from(0u32);
@@ -298,11 +306,16 @@ fn test_delivery_step_stages() {
     assert_eq!(step(4, toward, &[16, 40]), Some((Did::from(16u32), handed)));
     assert_eq!(step(4, toward, &[]), None);
     assert_eq!(step(4, handed, &view), None);
+    assert_eq!(step(30, handed, &view), Some((Did::from(16u32), handed)));
     assert_eq!(step(4, via_local, &[4]), Some((Did::from(4u32), via_local)));
     assert_eq!(step(4, via_local, &view), None);
     assert_eq!(step(4, via_far, &view), Some((Did::from(40u32), via_far)));
     assert_eq!(step(4, via_far, &[50]), Some((Did::from(50u32), via_far)));
-    assert_eq!(step(4, via_far.handed_off(), &view), None);
+    assert_eq!(
+        step(4, via_far.handed_off(), &view),
+        Some((Did::from(40u32), via_far.handed_off()))
+    );
+    assert_eq!(step(4, via_far.handed_off(), &[]), None);
 }
 
 /// `ReplyVia(n)` names the nearest linked successor exactly while no predecessor has notified

@@ -43,10 +43,12 @@ Delivery (`dht::delivery`) works as follows:
    decreases, so no route can cycle. A hop linked to the destination delivers directly.
 2. **One handoff.** When no linked known peer lies on that arc, the hop hands the message once to
    the first linked known node after itself, which lies past the destination, and marks the
-   carrier. The receiver delivers if it is linked to the destination; otherwise it ends the route
-   with a typed error (`RelayDestinationUnreachable`). It never routes greedily again.
+   carrier. A node with a sparse view, such as a leaf linked only to its guard or a joiner linked
+   only to its bootstrap, hands off on its first hop, and the receiver's fuller view routes on
+   greedily. A second crossing is refused and ends the route with a typed error
+   (`RelayDestinationUnreachable`), so repeated crossings can never circle the ring.
 
-A message for a node that no view knows yet therefore fails fast, within at most `|V| + 2` hops,
+A message for a node that no view reaches therefore fails fast, within at most `2|V|` hops,
 instead of circling the ring until its hop budget runs out; it is delivered once the ring has
 converged. Greedy hops choose only peers this node is linked to, because the successor list may
 name peers a stabilization report introduced before any connection to them exists.

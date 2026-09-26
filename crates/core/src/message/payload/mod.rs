@@ -407,7 +407,7 @@ pub trait PayloadSender {
 
     /// The delivery decision at this node for a payload addressed to the node `destination`
     /// whose carrier is in `stage`: [`delivery_step`](crate::dht::delivery::delivery_step) over
-    /// this node's view and direct links. No hop passes its aim except by one terminal handoff,
+    /// this node's view and direct links. No hop passes its aim except by one marked handoff,
     /// and a route that cannot continue ends here with
     /// [`Error::RelayDestinationUnreachable`] instead of spending its hop budget.
     fn next_hop_toward(&self, destination: Did, stage: RouteStage) -> Result<NextHop> {
