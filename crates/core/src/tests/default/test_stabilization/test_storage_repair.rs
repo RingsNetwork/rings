@@ -10,6 +10,8 @@ use crate::dht::StorageSyncDestination;
 use crate::lifecycle::StopSource;
 #[cfg(all(feature = "std", not(feature = "dummy"), not(target_family = "wasm")))]
 use crate::storage::KvStorageInterface;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+use crate::tests::activity::probe_on_activity;
 use crate::tests::live_entry;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::tests::midpoint_storage_key;
@@ -35,18 +37,16 @@ fn ensure_storage_repair_route(node: &Node, placement: Did, next_hop: Did) -> Re
 async fn test_stabilize_republishes_local_entries_to_missing_affine_owners() -> Result<()> {
     let key = SecretKey::random();
     let session = DelegateeKey::new_with_seckey(&key)?;
-    let swarm = Arc::new(
+    let node = Node::build(
         SwarmBuilder::new(
             0,
-            "stun://stun.l.google.com:19302",
+            crate::tests::default::TEST_ICE_SERVERS,
             Box::new(MemStorage::new()),
             session,
         )
         .dht_storage_redundancy(2)
-        .dht_virtual_nodes(0)
-        .build(),
+        .dht_virtual_nodes(0),
     );
-    let node = Node::new(swarm);
     let entry = live_entry(key.address().into(), vec![], EntryKind::Data);
     let placement_keys = entry.did.rotate_affine(2)?;
     node.dht()
@@ -65,6 +65,11 @@ async fn test_stabilize_republishes_local_entries_to_missing_affine_owners() -> 
     );
     Ok(())
 }
+
+/// Hang guard of the continuous-repair convergence probe: the maintenance loop it waits on is
+/// paced by its own 500 ms interval, so a converging run needs several rounds.
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+const CONTINUOUS_REPAIR_HANG_GUARD: Duration = Duration::from_secs(15);
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 #[tokio::test]
@@ -129,8 +134,10 @@ async fn test_continuous_storage_repair_reaches_remote_owners_across_three_nodes
         }
     });
 
-    let convergence = timeout(Duration::from_secs(15), async {
-        loop {
+    let convergence = probe_on_activity(
+        "maintenance loop converged under repair pressure",
+        CONTINUOUS_REPAIR_HANG_GUARD,
+        || async {
             let head_repaired = head.dht().storage.get(&head_key.to_string()).await?
                 == Some(expected_head_entry.clone());
             let tail_repaired = tail.dht().storage.get(&tail_key.to_string()).await?
@@ -140,16 +147,16 @@ async fn test_continuous_storage_repair_reaches_remote_owners_across_three_nodes
                 node2.swarm.as_ref(),
                 node3.swarm.as_ref(),
             ])?;
-            if head_repaired && tail_repaired && topology_converged {
-                return Ok::<_, Error>((head_repaired, tail_repaired, topology_converged));
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .map_err(|_| {
-        Error::InvalidMessage("maintenance loop did not converge under repair pressure".to_string())
-    });
+            Ok(
+                (head_repaired && tail_repaired && topology_converged).then_some((
+                    head_repaired,
+                    tail_repaired,
+                    topology_converged,
+                )),
+            )
+        },
+    )
+    .await;
 
     stop.request_stop();
     for task in maintenance {
@@ -162,7 +169,7 @@ async fn test_continuous_storage_repair_reaches_remote_owners_across_three_nodes
         .await
         .map_err(|_| Error::InvalidMessage("repair pressure task did not stop".to_string()))?
         .map_err(|error| Error::InvalidMessage(format!("repair pressure task failed: {error}")))?;
-    let (head_repaired, tail_repaired, topology_converged) = convergence??;
+    let (head_repaired, tail_repaired, topology_converged) = convergence?;
 
     assert!(
         head_repaired,

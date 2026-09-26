@@ -10,6 +10,9 @@ use crate::ecc::SecretKey;
 use crate::storage::idb::IdbStorage;
 use crate::swarm::Swarm;
 use crate::swarm::SwarmBuilder;
+use crate::tests::activity::ActivityCallback;
+use crate::tests::activity::LedgerObserver;
+use crate::tests::activity::MessageLedger;
 use crate::utils::sleep;
 
 mod test_ice_servers;
@@ -30,7 +33,17 @@ enum TestStorageMode {
     Repair,
 }
 
-async fn prepare_node_with_storage_mode(key: SecretKey, mode: TestStorageMode) -> Arc<Swarm> {
+/// A browser test swarm and the conservation ledger its observer and callback count into.
+pub struct TestSwarm {
+    /// The swarm under test.
+    pub swarm: Arc<Swarm>,
+    /// Its wire-message conservation counts; see [`MessageLedger`].
+    pub ledger: Arc<MessageLedger>,
+}
+
+/// Build a browser test swarm whose observer and callback count messages and record activity,
+/// so tests can probe its state on activity instead of on a timer.
+async fn prepare_node_with_storage_mode(key: SecretKey, mode: TestStorageMode) -> TestSwarm {
     let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
     let storage = Box::new(
         IdbStorage::new_with_cap_and_name(1000, uuid::Uuid::new_v4().to_string().as_str())
@@ -38,24 +51,31 @@ async fn prepare_node_with_storage_mode(key: SecretKey, mode: TestStorageMode) -
             .unwrap(),
     );
 
-    let builder = SwarmBuilder::new(0, TEST_ICE_SERVERS, storage, delegatee_key);
+    let ledger = Arc::new(MessageLedger::default());
+    let builder = SwarmBuilder::new(0, TEST_ICE_SERVERS, storage, delegatee_key)
+        .observer(Arc::new(LedgerObserver::new(ledger.clone())));
     let builder = match mode {
         TestStorageMode::Default => builder,
         TestStorageMode::Repair => builder.dht_storage_redundancy(2).dht_virtual_nodes(0),
     };
     let swarm = Arc::new(builder.build());
+    swarm
+        .set_callback(Arc::new(ActivityCallback::new(swarm.did(), ledger.clone())))
+        .unwrap();
 
     println!("key: {:?}", key.to_string());
     println!("did: {:?}", swarm.did());
 
-    swarm
+    TestSwarm { swarm, ledger }
 }
 
 pub async fn prepare_node(key: SecretKey) -> Arc<Swarm> {
-    prepare_node_with_storage_mode(key, TestStorageMode::Default).await
+    prepare_node_with_storage_mode(key, TestStorageMode::Default)
+        .await
+        .swarm
 }
 
-pub async fn prepare_repair_node(key: SecretKey) -> Arc<Swarm> {
+pub async fn prepare_repair_node(key: SecretKey) -> TestSwarm {
     prepare_node_with_storage_mode(key, TestStorageMode::Repair).await
 }
 

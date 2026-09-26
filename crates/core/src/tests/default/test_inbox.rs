@@ -28,7 +28,7 @@ use crate::tests::default::wait_for_storage_entry;
 use crate::tests::default::wait_for_storage_state;
 use crate::tests::default::wait_for_successor;
 use crate::tests::default::Node;
-use crate::tests::default::TEST_WAIT_TIMEOUT;
+use crate::tests::default::TEST_HANG_GUARD;
 use crate::tests::manually_establish_connection;
 use crate::utils::get_epoch_ms;
 
@@ -42,7 +42,7 @@ fn is_held_message(payload: &MessagePayload) -> bool {
 }
 
 async fn next_held_message(node: &Node) -> Result<MessagePayload> {
-    let deadline = Instant::now() + TEST_WAIT_TIMEOUT;
+    let deadline = Instant::now() + TEST_HANG_GUARD;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {

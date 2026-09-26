@@ -466,7 +466,7 @@ impl SwarmTransport {
         self.inbound_capacity.clone()
     }
 
-    #[cfg(all(test, not(target_family = "wasm")))]
+    #[cfg(test)]
     pub(crate) fn inbound_admitted_count_for_test(&self) -> usize {
         self.inbound_capacity.admitted_count_for_test()
     }

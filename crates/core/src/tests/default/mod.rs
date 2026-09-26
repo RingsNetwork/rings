@@ -1,13 +1,12 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::time::Instant;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
 use futures::lock::Mutex;
 use rings_transport::core::transport::WebrtcConnectionState;
 use tokio::sync::mpsc;
-use tokio::time::sleep;
+use tokio::time::timeout;
 use tokio::time::Duration;
 
 use crate::delegation::DelegateeKey;
@@ -23,8 +22,18 @@ use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
 use crate::storage::MemStorage;
 use crate::swarm::callback::SwarmCallback;
+use crate::swarm::callback::SwarmEvent;
 use crate::swarm::Swarm;
 use crate::swarm::SwarmBuilder;
+use crate::tests::activity::activity_after;
+use crate::tests::activity::activity_mark;
+use crate::tests::activity::probe_on_activity;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+use crate::tests::activity::swarm_in_flight;
+use crate::tests::activity::swarms_quiescent;
+use crate::tests::activity::ActivityCallback;
+use crate::tests::activity::LedgerObserver;
+use crate::tests::activity::MessageLedger;
 
 mod test_dht_convergence;
 // Uses the `stateright` model checker, which doesn't build for wasm32.
@@ -58,19 +67,27 @@ mod test_stabilization_failover;
 mod test_sync_storm;
 
 const TEST_DHT_FINGER_TABLE_SIZE: usize = 8;
-/// Default STUN server for real-WebRTC fixtures that exercise remote ICE
-/// gathering; host-only tests opt out when every peer runs in this process.
-const TEST_ICE_SERVERS: &str = "stun://stun.l.google.com:19302";
-const TEST_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
-const TEST_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(5);
+/// ICE servers of every in-process test node: none, so peers gather host candidates only.
+///
+/// Every peer of these tests runs in this process, so host candidates connect them; an
+/// external STUN server would only add a network dependency whose latency no test controls.
+pub(crate) const TEST_ICE_SERVERS: &str = "";
+
+/// Hang guard of every awaited test state: a failure bound that names the missing state,
+/// never the condition a passing run waits for (that is always an observed state change).
+///
+/// Dummy builds deliver in memory. Native builds run real webrtc-rs handshakes, whose latency
+/// under suite load has exceeded 5 s (#850); since no wait is paced by this bound any more, it
+/// only has to exceed any plausible latency, so it is the former quiescence ceiling.
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-pub(crate) const TEST_NETWORK_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const TEST_HANG_GUARD: Duration = Duration::from_secs(5);
 #[cfg(not(all(feature = "dummy", not(target_family = "wasm"))))]
-pub(crate) const TEST_NETWORK_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const TEST_HANG_GUARD: Duration = Duration::from_secs(60);
 
 pub struct Node {
     pub swarm: Arc<Swarm>,
     inbox: Mutex<NodeInbox>,
+    ledger: Arc<MessageLedger>,
 }
 
 struct NodeInbox {
@@ -83,14 +100,27 @@ pub(crate) struct NodeMessageScan<'a> {
     skipped: Vec<MessagePayload>,
 }
 
+/// Callback of a test node: records every validated message in the node's inbox, and counts and
+/// records activity through [`ActivityCallback`].
 pub struct NodeCallback {
     message_tx: mpsc::UnboundedSender<MessagePayload>,
+    activity: ActivityCallback,
 }
 
 impl Node {
-    pub fn new(swarm: Arc<Swarm>) -> Self {
+    /// Build a test node from `builder`, with its conservation observer and recording callback.
+    pub fn build(builder: SwarmBuilder) -> Self {
+        let ledger = Arc::new(MessageLedger::default());
+        let swarm = Arc::new(
+            builder
+                .observer(Arc::new(LedgerObserver::new(ledger.clone())))
+                .build(),
+        );
         let (message_tx, message_rx) = mpsc::unbounded_channel();
-        let callback = NodeCallback { message_tx };
+        let callback = NodeCallback {
+            message_tx,
+            activity: ActivityCallback::new(swarm.did(), ledger.clone()),
+        };
         swarm.set_callback(Arc::new(callback)).unwrap();
         Self {
             swarm,
@@ -98,6 +128,7 @@ impl Node {
                 buffered: VecDeque::new(),
                 receiver: message_rx,
             }),
+            ledger,
         }
     }
 
@@ -139,17 +170,10 @@ impl Node {
             > 0
     }
 
-    /// Whether a transfer is queued, sending, or waiting for delivery.
-    pub fn has_outbound_transfer(&self) -> bool {
-        self.swarm
-            .transport
-            .outbound_admitted_transfer_total_for_test()
-            > 0
-    }
-
-    /// Whether an admitted inbound message is queued or still being handled.
-    pub fn has_inbound_message(&self) -> bool {
-        self.swarm.transport.inbound_admitted_count_for_test() > 0
+    /// Whether this node has work in flight; see [`swarm_in_flight`].
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    pub fn in_flight(&self) -> bool {
+        swarm_in_flight(&self.swarm)
     }
 
     pub fn did(&self) -> Did {
@@ -212,19 +236,26 @@ impl SwarmCallback for NodeCallback {
         // When on_validate return error, the message will be ignored, which is not on purpose.
         // To prevent returning errors when sending fails, we choose to panic instead.
         self.message_tx.send(payload.clone()).unwrap();
-        Ok(())
+        self.activity.on_validate(payload).await
+    }
+
+    async fn on_inbound(
+        &self,
+        payload: &MessagePayload,
+    ) -> std::result::Result<(), crate::error::CallbackError> {
+        self.activity.on_inbound(payload).await
+    }
+
+    async fn on_event(
+        &self,
+        event: &SwarmEvent,
+    ) -> std::result::Result<(), crate::error::CallbackError> {
+        self.activity.on_event(event).await
     }
 }
 
 pub async fn prepare_node(key: SecretKey) -> Node {
     prepare_node_with_optional_measure(key, None).unwrap()
-}
-
-/// Builds a test node with host ICE candidates only, avoiding external STUN
-/// gathering for local integration tests whose peers all run in this process.
-pub async fn prepare_node_without_stun(key: SecretKey) -> Node {
-    prepare_node_with_ice_servers_and_measure(key, "", None)
-        .expect("host-only loopback test node configuration is valid")
 }
 
 pub(super) fn prepare_node_with_measure(key: SecretKey, measure: MeasureImpl) -> Result<Node> {
@@ -239,8 +270,6 @@ fn prepare_node_with_optional_measure(
 }
 
 /// Builds a node with explicit ICE servers and optional measurement recording.
-/// Local integration tests can omit remote STUN dependencies while the shared
-/// test fixture keeps real-WebRTC STUN gathering enabled by default.
 fn prepare_node_with_ice_servers_and_measure(
     key: SecretKey,
     ice_servers: &str,
@@ -261,34 +290,25 @@ fn prepare_node_with_ice_servers_and_measure(
         Some(measure) => builder.measure(measure),
         None => builder,
     };
-    let swarm = Arc::new(builder.build());
+    let node = Node::build(builder);
 
     println!("key: {:?}", key.to_string());
-    println!("did: {:?}", swarm.did());
+    println!("did: {:?}", node.did());
 
-    Ok(Node::new(swarm))
+    Ok(node)
 }
 
+/// Wait until `ready` holds, re-probing it on every observed activity; see
+/// [`probe_on_activity`].
 pub async fn wait_until_result(
     label: &str,
     mut ready: impl FnMut() -> crate::error::Result<bool>,
 ) -> crate::error::Result<()> {
-    // Pre: `ready` observes the protocol state named by `label`.
-    // Post: returns Ok only after `ready` is true; timeout is a failure deadline,
-    // not the condition that makes the passing path proceed.
-    let started = Instant::now();
-    loop {
-        if ready()? {
-            return Ok(());
-        }
-
-        assert!(
-            started.elapsed() <= TEST_WAIT_TIMEOUT,
-            "condition did not become true within {TEST_WAIT_TIMEOUT:?}: {label}"
-        );
-        tokio::task::yield_now().await;
-        sleep(TEST_WAIT_POLL_INTERVAL).await;
-    }
+    probe_on_activity(label, TEST_HANG_GUARD, || {
+        let reached = ready();
+        async move { reached.map(|reached| reached.then_some(())) }
+    })
+    .await
 }
 
 /// Whether `node` holds an active, routable connection to `peer` in `state`.
@@ -334,27 +354,24 @@ pub async fn wait_for_predecessor(node: &Node, predecessor: Did) -> crate::error
 /// Wait until the value `node` stores at `key` (or its absence) satisfies `ready`, returning
 /// that value.
 ///
-/// Post: returns only after `ready` held; the timeout is a failure deadline, never the event.
+/// Post: returns only after `ready` held. Storage changes on a node follow a handled message,
+/// whose `on_inbound` records activity, so every change is probed.
 pub async fn wait_for_storage_state(
     node: &Node,
     key: StorageKey,
     label: &str,
     ready: impl Fn(Option<&Entry>) -> bool,
 ) -> crate::error::Result<Option<Entry>> {
-    let started = Instant::now();
-    loop {
-        let stored = node.dht().storage.get(&key.to_string()).await?;
-        if ready(stored.as_ref()) {
-            return Ok(stored);
-        }
-
-        assert!(
-            started.elapsed() <= TEST_WAIT_TIMEOUT,
-            "storage at {key} did not reach the state within {TEST_WAIT_TIMEOUT:?}: {label}"
-        );
-        tokio::task::yield_now().await;
-        sleep(TEST_WAIT_POLL_INTERVAL).await;
-    }
+    let ready = &ready;
+    probe_on_activity(
+        &format!("storage at {key}: {label}"),
+        TEST_HANG_GUARD,
+        || async move {
+            let stored = node.dht().storage.get(&key.to_string()).await?;
+            Ok(ready(stored.as_ref()).then_some(stored))
+        },
+    )
+    .await
 }
 
 /// Wait until `node` no longer stores a value at `key`.
@@ -436,15 +453,13 @@ pub async fn assert_no_more_msg(nodes: impl IntoIterator<Item = &Node>) {
     }
 }
 
-/// Wait until the nodes are quiescent, **state-driven, not on a wall clock**: every connection has
-/// finished its handshake, every inbound and outbound transfer has completed, and no buffered
-/// message remains.
+/// Wait until `nodes` are quiescent (see [`nodes_quiescent`]), draining and logging every
+/// message they receive meanwhile.
 ///
-/// The old version returned after a fixed 3-second silence gap, which could fire *mid-handshake* —
-/// e.g. while a stabilization-triggered connection's answer SDP (`ConnectNodeReport`) was still
-/// being gathered against STUN — and `assert_no_more_msg` would then catch that late message. Here a
-/// connection a node initiates is created synchronously while its trigger message is handled, so it
-/// is observable as `New`/`Connecting` and is waited on. The timeout is only a failure ceiling.
+/// The quiescence predicate is re-probed on every observed activity; no step waits for a
+/// duration. Every in-flight message is visible to the predicate: as a handshake, an inbound or
+/// outbound transfer, a queued dummy event, or a conservation deficit, so the predicate cannot
+/// hold while a message is still on its way. The hang guard is only a failure bound.
 pub async fn wait_for_msgs(nodes: impl IntoIterator<Item = &Node>) {
     let nodes: Vec<&Node> = nodes.into_iter().collect();
     let did_names: DashMap<Did, String> = DashMap::new();
@@ -470,51 +485,33 @@ pub async fn wait_for_msgs(nodes: impl IntoIterator<Item = &Node>) {
         }
         drained
     };
-    let handshaking = || nodes.iter().any(|n| n.has_handshaking_connection());
-    let inbound = || nodes.iter().any(|n| n.has_inbound_message());
-    let outbound = || nodes.iter().any(|n| n.has_outbound_transfer());
-    let transport_activity = pending_transport_snapshot;
-    // A snapshot of every node's DHT. Opening the data channel fires `join_dht`, which mutates the
-    // DHT and emits more messages *after* the ICE connection state reached `Connected` — so true
-    // quiescence also requires the DHT to have stopped changing, not just the handshakes to be done.
-    let snapshot = || {
-        nodes
-            .iter()
-            .map(|n| crate::inspect::DHTInspect::inspect(&n.dht()))
-            .collect::<Vec<_>>()
-    };
-
-    // Diagnostics + hard failure if quiescence is never reached — never silently proceed, or later
-    // assertions would run against unresolved async state (the bug this helper exists to catch).
-    let ceiling = TEST_NETWORK_IDLE_TIMEOUT;
-    let started = std::time::Instant::now();
-    loop {
-        let drained = drain().await;
-        let before = snapshot();
-        let transport_before = transport_activity();
-        if !drained && !handshaking() && !inbound() && !outbound() && transport_before.is_idle() {
-            // Quiescent candidate: settle briefly, then require that across the gap nothing changed
-            // — no message handed off, no handshake started, and no DHT mutation (join_dht /
-            // stabilize chains). Any change means activity is still in flight; keep waiting.
-            sleep(Duration::from_millis(500)).await;
-            let quiet = !drain().await && !handshaking() && !inbound() && !outbound();
-            let unchanged_dht = snapshot() == before;
-            // This is the final synchronous observation before returning. The dummy queue is
-            // thread-local, so no event can be enqueued between this snapshot and the return.
-            let transport_after = transport_activity();
-            let unchanged_transport =
-                transport_after == transport_before && transport_after.is_idle();
-            if quiet && unchanged_dht && unchanged_transport {
+    let reached = timeout(TEST_HANG_GUARD, async {
+        loop {
+            let mark = activity_mark();
+            if drain().await {
+                continue;
+            }
+            if nodes_quiescent(&nodes) {
                 return;
             }
-        } else {
-            sleep(Duration::from_millis(50)).await;
+            activity_after(mark).await;
         }
-
-        if started.elapsed() > ceiling {
-            panic_wait_for_msgs_timeout(&nodes, &did_names, ceiling, drained);
-        }
+    })
+    .await;
+    if reached.is_err() {
+        panic_wait_for_msgs_timeout(&nodes, &did_names, TEST_HANG_GUARD);
     }
+}
+
+/// Whether `nodes` are quiescent (see [`swarms_quiescent`]) and, in dummy builds, no event
+/// waits in this thread's controlled delivery queue.
+fn nodes_quiescent(nodes: &[&Node]) -> bool {
+    pending_transport_events() == 0
+        && swarms_quiescent(
+            nodes
+                .iter()
+                .map(|node| (node.swarm.as_ref(), node.ledger.as_ref())),
+        )
 }
 
 fn did_name_or_default(did_names: &DashMap<Did, String>, did: Did) -> String {
@@ -542,7 +539,6 @@ fn panic_wait_for_msgs_timeout(
     nodes: &[&Node],
     did_names: &DashMap<Did, String>,
     ceiling: Duration,
-    drained: bool,
 ) -> ! {
     let handshaking_nodes: Vec<String> = nodes
         .iter()
@@ -557,39 +553,24 @@ fn panic_wait_for_msgs_timeout(
     let inbound_nodes = active_node_counts(nodes, did_names, |node| {
         node.swarm.transport.inbound_admitted_count_for_test()
     });
+    let delivered: u64 = nodes.iter().map(|node| node.ledger.delivered()).sum();
+    let received: u64 = nodes.iter().map(|node| node.ledger.received()).sum();
     panic!(
         "wait_for_msgs did not reach quiescence within {ceiling:?}: still-handshaking \
          nodes={handshaking_nodes:?}, inbound={inbound_nodes:?}, outbound={outbound_nodes:?}, \
-         transport-pending={}, last-loop drained={drained}",
-        pending_transport_snapshot().pending
+         transport-pending={}, delivered={delivered}, received={received}",
+        pending_transport_events()
     );
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct PendingTransportSnapshot {
-    pending: usize,
-    generation: u64,
-}
-
-impl PendingTransportSnapshot {
-    const fn is_idle(self) -> bool {
-        self.pending == 0
-    }
-}
-
+/// Events queued on this thread's controlled dummy transport and not yet delivered.
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-fn pending_transport_snapshot() -> PendingTransportSnapshot {
-    let snapshot = rings_transport::connections::dummy_controlled::snapshot();
-    PendingTransportSnapshot {
-        pending: snapshot.pending(),
-        generation: snapshot.generation(),
-    }
+fn pending_transport_events() -> usize {
+    rings_transport::connections::dummy_controlled::pending()
 }
 
+/// Events queued on a controlled dummy transport: none outside dummy builds.
 #[cfg(not(all(feature = "dummy", not(target_family = "wasm"))))]
-const fn pending_transport_snapshot() -> PendingTransportSnapshot {
-    PendingTransportSnapshot {
-        pending: 0,
-        generation: 0,
-    }
+const fn pending_transport_events() -> usize {
+    0
 }

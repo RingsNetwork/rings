@@ -263,22 +263,23 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
 pub mod tests {
     //! tests
     use rings_transport::core::transport::WebrtcConnectionState;
-    use tokio::time::sleep;
-    use tokio::time::Duration;
+    use tokio::time::timeout;
 
     use super::*;
     use crate::ecc::tests::gen_ordered_keys;
     use crate::ecc::SecretKey;
     use crate::message::types::QueryFor;
     use crate::message::types::QueryForTopoInfoReport;
+    use crate::tests::activity::activity_after;
+    use crate::tests::activity::activity_mark;
     use crate::tests::default::assert_no_more_msg;
     use crate::tests::default::gen_pure_dht;
     use crate::tests::default::prepare_node;
-    use crate::tests::default::prepare_node_without_stun;
     use crate::tests::default::wait_for_connection_state;
     use crate::tests::default::wait_for_msgs;
     use crate::tests::default::wait_for_successor;
     use crate::tests::default::Node;
+    use crate::tests::default::TEST_HANG_GUARD;
     use crate::tests::manually_establish_connection;
 
     #[test]
@@ -308,9 +309,9 @@ pub mod tests {
     #[tokio::test]
     async fn test_sync_successor_report_requires_token_before_connecting_successor() -> Result<()> {
         let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys::<3>();
-        let node1 = prepare_node_without_stun(key1).await;
-        let node2 = prepare_node_without_stun(key2).await;
-        let node3 = prepare_node_without_stun(key3).await;
+        let node1 = prepare_node(key1).await;
+        let node2 = prepare_node(key2).await;
+        let node3 = prepare_node(key3).await;
 
         manually_establish_connection(&node1.swarm, &node2.swarm).await;
         wait_for_msgs([&node1, &node2, &node3]).await;
@@ -859,35 +860,38 @@ pub mod tests {
         Ok(())
     }
 
-    /// Poll `cond` every 200ms until it returns true, failing after ~60s.
-    /// Used instead of fixed sleeps so the test is deterministic regardless of
-    /// how long the WebRTC handshake/teardown takes on a given machine.
+    /// Wait until `cond` holds, re-probing it on every observed activity.
     ///
-    /// The window is generous on purpose: ICE paces connectivity checks at
-    /// ~200ms each, so on a host with many network interfaces (lots of
-    /// candidate pairs) establishing the connection can legitimately take ~20s.
+    /// No probe is paced by a timer; `TEST_HANG_GUARD` only bounds a hang.
     async fn wait_until(msg: &str, mut cond: impl FnMut() -> Result<bool>) -> Result<()> {
         wait_until_with_state(msg, &mut cond, String::new).await
     }
 
+    /// Like [`wait_until`], but a hang reports `state()` for diagnosis.
     async fn wait_until_with_state(
         msg: &str,
         mut cond: impl FnMut() -> Result<bool>,
         state: impl Fn() -> String,
     ) -> Result<()> {
-        for _ in 0..300 {
-            if cond()? {
-                return Ok(());
+        let probing = async {
+            loop {
+                let mark = activity_mark();
+                if cond()? {
+                    return Ok(());
+                }
+                activity_after(mark).await;
             }
-            sleep(Duration::from_millis(200)).await;
-        }
-        let state = state();
-        if state.is_empty() {
-            Err(Error::InvalidMessage(format!("timeout waiting for: {msg}")))
-        } else {
-            Err(Error::InvalidMessage(format!(
-                "timeout waiting for: {msg}\n{state}"
-            )))
+        };
+        match timeout(TEST_HANG_GUARD, probing).await {
+            Ok(reached) => reached,
+            Err(_) => {
+                let state = state();
+                Err(Error::InvalidMessage(if state.is_empty() {
+                    format!("not reached within the hang guard: {msg}")
+                } else {
+                    format!("not reached within the hang guard: {msg}\n{state}")
+                }))
+            }
         }
     }
 

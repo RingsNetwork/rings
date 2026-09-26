@@ -1,8 +1,7 @@
-use std::time::Duration;
-
 use super::prepare_node;
 use super::wait_for_connection_state;
 use super::wait_for_msgs;
+use super::wait_until_result;
 use crate::dht::StorageSyncDestination;
 use crate::dht::StorageSyncPurpose;
 use crate::ecc::SecretKey;
@@ -11,13 +10,12 @@ use crate::message::test_probe_request;
 use crate::message::Message;
 use crate::message::MessageCategory;
 use crate::message::SyncEntriesWithSuccessor;
+use crate::tests::activity::activity_after;
+use crate::tests::activity::activity_mark;
 use crate::tests::assert_control_interleaves_transfer;
 use crate::tests::control_interleaves_transfer;
 use crate::tests::manually_establish_connection;
 use crate::tests::multi_frame_storage_sync_entries;
-
-const TRACE_POLL_INTERVAL: Duration = Duration::from_millis(10);
-const TRACE_POLL_ATTEMPTS: usize = 500;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_native_webrtc_control_interleaves_the_shared_multiframe_storage_fixture() -> Result<()>
@@ -56,6 +54,9 @@ async fn test_native_webrtc_control_interleaves_the_shared_multiframe_storage_fi
         .is_sent());
 
     for round in 0..16 {
+        // Each control message follows observable activity caused by the previous one, so the
+        // controls interleave with the storage transfer's frames rather than precede them.
+        let mark = activity_mark();
         node1
             .swarm
             .send_direct_message(
@@ -63,6 +64,7 @@ async fn test_native_webrtc_control_interleaves_the_shared_multiframe_storage_fi
                 node2.did(),
             )
             .await?;
+        activity_after(mark).await;
         if control_interleaves_transfer(
             &node1
                 .swarm
@@ -73,19 +75,16 @@ async fn test_native_webrtc_control_interleaves_the_shared_multiframe_storage_fi
             break;
         }
     }
-
-    for _ in 0..TRACE_POLL_ATTEMPTS {
-        if control_interleaves_transfer(
+    wait_until_result("control interleaves the storage transfer", || {
+        Ok(control_interleaves_transfer(
             &node1
                 .swarm
                 .transport
                 .outbound_frame_trace_for_test(node2.did()),
             MessageCategory::Storage,
-        ) {
-            break;
-        }
-        tokio::time::sleep(TRACE_POLL_INTERVAL).await;
-    }
+        ))
+    })
+    .await?;
     let trace = node1
         .swarm
         .transport

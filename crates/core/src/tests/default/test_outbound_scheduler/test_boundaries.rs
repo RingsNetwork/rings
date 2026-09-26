@@ -41,7 +41,9 @@ async fn test_pending_measurement_does_not_block_peer_scheduler() -> Result<()> 
     });
     let node1 = prepare_node_with_measure(SecretKey::random(), measure)?;
     let node2 = prepare_node(SecretKey::random()).await;
-    let (node1, node2) = connect_nodes(node1, node2).await?;
+    // node1's measurement never completes, so the join traffic it measures never finishes and
+    // the nodes cannot become quiescent; admission is all this test needs.
+    let (node1, node2) = admit_nodes(node1, node2).await?;
     let peer = node2.did();
 
     node1

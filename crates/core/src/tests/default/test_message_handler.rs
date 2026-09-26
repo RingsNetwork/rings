@@ -254,12 +254,7 @@ async fn deliver_until(
 /// resolves on its first poll unless a test gate is set, and this test sets none.
 #[cfg(feature = "dummy")]
 fn controlled_run_quiescent(nodes: &[&Node]) -> bool {
-    dummy_controlled::pending() == 0
-        && nodes.iter().all(|node| {
-            !node.has_handshaking_connection()
-                && !node.has_inbound_message()
-                && !node.has_outbound_transfer()
-        })
+    dummy_controlled::pending() == 0 && nodes.iter().all(|node| !node.in_flight())
 }
 
 /// Deliver until the controlled run is quiescent over `nodes`.

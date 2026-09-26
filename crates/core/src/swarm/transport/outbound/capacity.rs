@@ -422,6 +422,9 @@ impl Drop for PeerCapacityPermit {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .release(self.class, self.bytes);
         self.capacity.waiters.wake_front();
+        // Test builds: an outbound release is a state change that quiescence probes read.
+        #[cfg(test)]
+        crate::tests::activity::record_activity();
     }
 }
 

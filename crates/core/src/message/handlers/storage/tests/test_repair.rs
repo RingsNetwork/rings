@@ -60,18 +60,16 @@ async fn test_storage_repair_request_after_claim_remains_pending() -> Result<()>
 async fn test_leave_dht_defers_repair_until_maintenance_runs() -> Result<()> {
     let key = SecretKey::random();
     let session = DelegateeKey::new_with_seckey(&key)?;
-    let swarm = Arc::new(
+    let node = Node::build(
         SwarmBuilder::new(
             0,
-            "stun://stun.l.google.com:19302",
+            crate::tests::default::TEST_ICE_SERVERS,
             Box::new(MemStorage::new()),
             session,
         )
         .dht_storage_redundancy(2)
-        .dht_virtual_nodes(0)
-        .build(),
+        .dht_virtual_nodes(0),
     );
-    let node = Node::new(swarm);
     let departed = Did::from(100u32);
     node.dht().successors().update(departed)?;
     let entry = live_entry(key.address().into(), vec![], EntryKind::Data);
@@ -315,18 +313,16 @@ async fn test_remote_redundant_store_writes_split_replica_at_affine_placement() 
 async fn test_local_hit_read_repair_sends_no_search_for_unknown_replicas() -> Result<()> {
     let key = SecretKey::random();
     let session = DelegateeKey::new_with_seckey(&key)?;
-    let swarm = Arc::new(
+    let node = Node::build(
         SwarmBuilder::new(
             0,
-            "stun://stun.l.google.com:19302",
+            crate::tests::default::TEST_ICE_SERVERS,
             Box::new(MemStorage::new()),
             session,
         )
         .dht_storage_redundancy(2)
-        .dht_virtual_nodes(0)
-        .build(),
+        .dht_virtual_nodes(0),
     );
-    let node = Node::new(swarm);
     let entry = live_entry(
         key.address().into(),
         vec!["local".to_string().encode()?],

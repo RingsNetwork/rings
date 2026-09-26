@@ -243,25 +243,21 @@ fn prepare_repair_node_with_optional_measure(
     prepare_repair_node_with_storage(key, Box::new(MemStorage::new()), measure)
 }
 
-/// Build a repair-test node over the given DHT entry storage.
-///
-/// ICE is host-only: every peer of these tests runs in this process, so an external STUN
-/// server would only add a network dependency whose latency no test controls.
+/// Build a repair-test node over the given DHT entry storage, with host-only ICE.
 fn prepare_repair_node_with_storage(
     key: SecretKey,
     storage: EntryStorage,
     measure: Option<MeasureImpl>,
 ) -> Result<Node> {
     let session = DelegateeKey::new_with_seckey(&key)?;
-    let mut builder = SwarmBuilder::new(0, "", storage, session)
+    let mut builder = SwarmBuilder::new(0, super::TEST_ICE_SERVERS, storage, session)
         .dht_finger_table_size(super::TEST_DHT_FINGER_TABLE_SIZE)
         .dht_storage_redundancy(2)
         .dht_virtual_nodes(0);
     if let Some(measure) = measure {
         builder = builder.measure(measure);
     }
-    let swarm = Arc::new(builder.build());
-    Ok(Node::new(swarm))
+    Ok(Node::build(builder))
 }
 
 fn repair_test_keys() -> Result<(SecretKey, SecretKey)> {

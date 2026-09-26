@@ -438,7 +438,7 @@ impl OutboundSchedulers {
             .map(|capacity| capacity.subscribe_retirement())
     }
 
-    #[cfg(all(test, not(target_family = "wasm")))]
+    #[cfg(test)]
     fn admitted_transfer_total_for_test(&self) -> usize {
         let mut registry = self.lock_registry();
         registry.prune_capacities();

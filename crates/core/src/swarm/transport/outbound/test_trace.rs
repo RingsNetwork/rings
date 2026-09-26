@@ -268,8 +268,7 @@ fn test_replacement_workers_receive_disjoint_transfer_id_ranges() {
 }
 
 /// The default test build has no `simulation_pressure` module, so this accessor lives with the
-/// other test-only observables that every native test build compiles.
-#[cfg(not(target_family = "wasm"))]
+/// other test-only observables that every test build, native and browser, compiles.
 impl crate::swarm::transport::SwarmTransport {
     pub(crate) fn outbound_admitted_transfer_total_for_test(&self) -> usize {
         self.outbound_schedulers.admitted_transfer_total_for_test()

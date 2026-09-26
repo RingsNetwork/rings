@@ -1072,7 +1072,7 @@ impl SwarmTransport {
         Ok(connection)
     }
 
-    #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
+    #[cfg(test)]
     pub(crate) fn pending_connection_count(&self) -> Result<usize> {
         Ok(self.peer_lifecycles()?.pending_len())
     }

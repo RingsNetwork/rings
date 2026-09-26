@@ -99,6 +99,7 @@ pub(crate) fn held_inbox_for(destination: Did, holder: &DelegateeKey) -> Result<
     Ok(live(Entry::inbox_delta(&held)?))
 }
 
+pub(crate) mod activity;
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
 pub mod wasm;
 
