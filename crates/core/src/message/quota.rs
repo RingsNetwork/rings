@@ -692,6 +692,16 @@ impl OriginQuotaTable {
         self.records.len()
     }
 
+    /// The lanes holding a record of `origin`, in key order.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(super) fn lanes_of(&self, origin: Did) -> Vec<OriginQuotaLaneId> {
+        self.records
+            .keys()
+            .filter(|key| key.origin_account == origin)
+            .map(|key| key.lane)
+            .collect()
+    }
+
     #[cfg(test)]
     pub(super) fn get(&self, key: OriginQuotaKey) -> Option<OriginQuota> {
         self.records.get(&key).copied()
@@ -1034,8 +1044,9 @@ mod tests {
         assert!(table.get(key(3, MessageCategory::Application)).is_some());
     }
 
-    /// The onion data plane's per-link budget: `B = 16384` cells per `V = 150 s`.
-    fn onion_lane() -> OriginQuotaLane {
+    /// A lane whose protocol admits each neighbour through a window of `budget = 16384`
+    /// messages per `period = 150 s`.
+    fn window_admission_lane() -> OriginQuotaLane {
         OriginQuotaLane::Paced(PacedLane::new(
             PacedLaneId::new(1),
             PacedRate::new(
@@ -1066,25 +1077,30 @@ mod tests {
         refused
     }
 
-    /// Acceptance of #888: a sender paced at `r ≈ 98` cells/s (the #880 rate `ρ·B/V`) for half
-    /// an hour is never refused in its lane, while the same schedule in the default
+    /// A sender paced at `r = 98` messages/s, below its protocol's `budget / period ≈ 109`, is
+    /// never refused in its lane for half an hour, while the same schedule in the default
     /// Application lane is refused beyond its burst and 8 msg/s.
     #[test]
     fn paced_sender_at_the_protocol_rate_is_never_refused_but_the_default_lane_is() {
         let config = OriginQuotaConfig::default();
         let interval = NANOS_PER_SECOND / 98;
         let count = 98 * 1_800;
-        let cell_bytes = 13_442;
+        let message_bytes = 13_442;
 
         assert_eq!(
-            paced_refusals(config.limits(onion_lane()), interval, count, cell_bytes),
+            paced_refusals(
+                config.limits(window_admission_lane()),
+                interval,
+                count,
+                message_bytes
+            ),
             0
         );
         let default_refusals = paced_refusals(
             config.limits(MessageCategory::Application.into()),
             interval,
             count,
-            cell_bytes,
+            message_bytes,
         );
         // At most `burst + 8·T + 1` of the schedule fits the default lane.
         let default_admitted = usize::try_from(count).expect("small count") - default_refusals;
@@ -1092,10 +1108,11 @@ mod tests {
     }
 
     /// The paced lane bounds its origin by the supplied rate: over `T` seconds a flooding
-    /// neighbour gets at most `B + ⌈B·T/V⌉` messages, the bound of the protocol's own admission.
+    /// neighbour gets at most `budget + ⌈budget·T/period⌉` messages, the bound of the
+    /// protocol's own window admission.
     #[test]
     fn paced_lane_bounds_a_flooding_neighbour_by_the_supplied_budget() {
-        let limits = OriginQuotaConfig::default().limits(onion_lane());
+        let limits = OriginQuotaConfig::default().limits(window_admission_lane());
         let seconds: u128 = 600;
         let per_second = 1_000;
         let count = per_second * seconds;
@@ -1114,7 +1131,7 @@ mod tests {
         let now = OriginQuotaInstant::ZERO;
         reserve(&mut table, 1, MessageCategory::Application, 1, now).expect("class allowance");
         assert!(reserve(&mut table, 1, MessageCategory::Application, 1, now).is_err());
-        reserve(&mut table, 1, onion_lane(), 1, now)
+        reserve(&mut table, 1, window_admission_lane(), 1, now)
             .expect("the paced lane keeps its own allowance");
         let other = OriginQuotaLane::Paced(PacedLane::new(
             PacedLaneId::new(2),

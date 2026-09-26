@@ -29,6 +29,15 @@ impl SwarmTransport {
         self.transaction_replay.quota_record_count_for_test().await
     }
 
+    /// The origin-quota lanes holding a record of `origin`.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) async fn origin_quota_lanes_for_test(
+        &self,
+        origin: Did,
+    ) -> Vec<crate::message::OriginQuotaLaneId> {
+        self.transaction_replay.quota_lanes_for_test(origin).await
+    }
+
     /// Persistently reserve one or more sequences for this account and final destination.
     pub(crate) async fn reserve_transaction_sequences(
         &self,

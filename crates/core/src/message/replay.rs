@@ -34,6 +34,8 @@ use crate::message::OriginQuotaCounters;
 use crate::message::OriginQuotaInstant;
 use crate::message::OriginQuotaKey;
 use crate::message::OriginQuotaLane;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+use crate::message::OriginQuotaLaneId;
 use crate::storage::KvStorageInterface;
 use crate::utils::Instant;
 
@@ -579,6 +581,12 @@ impl TransactionReplay {
     #[cfg(all(test, not(target_family = "wasm")))]
     pub(crate) async fn quota_record_count_for_test(&self) -> usize {
         self.state.lock().await.quota.len()
+    }
+
+    /// The quota lanes holding a record of `origin`.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) async fn quota_lanes_for_test(&self, origin: Did) -> Vec<OriginQuotaLaneId> {
+        self.state.lock().await.quota.lanes_of(origin)
     }
 }
 

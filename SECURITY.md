@@ -224,7 +224,7 @@ reset an active allowance, while unrelated origins carried by one relay remain i
 
 The logical lane is the message class, with one exception: the paced direct-edge lane. An
 application protocol that paces its direct-edge traffic and bounds each sending neighbour itself
-(for the onion data plane, the per-link budget `B/V`) declares that per-origin rate when it is
+(for the onion data plane, its per-link budget of `B` cells per `V` seconds) declares that per-origin rate when it is
 registered, and core admits the namespace's traffic at that rate in a lane of its own. All other
 Application namespaces keep the configured Application limits. Core takes only a rate and an opaque
 lane identity, and the lane replaces only the message bucket; the byte bucket and record bound stay
@@ -234,6 +234,14 @@ traffic reaches the destination through any number of neighbours, so a per-link 
 origin would multiply with the path count, and no per-link admission bounds it. The relay carrier
 is also unsigned, so "direct" is witnessed only by the authenticated connection, never by the
 payload. Such traffic is charged to its class lane.
+
+Core does not bound a declared rate. A paced rate is trusted local configuration: registering a
+protocol that declares one (or a `SwarmCallback` that returns one) has the authority of raising
+the Application message quota for that namespace's neighbour-originated traffic. A namespace keeps
+one lane identity for the registry's lifetime, so withdrawing and re-declaring its rate never
+grants its neighbours a fresh allowance. No protocol shipped on master declares a paced rate yet,
+so every Application namespace currently runs at the configured limits; the onion data plane
+declares its per-link budget when it lands.
 
 The destination serializes replay classification and quota admission as one commit boundary. A
 Replay, Fork, or Stale verdict consumes no tokens; a quota rejection does not advance replay; and
@@ -248,11 +256,13 @@ The byte charge is `Transaction.data.len()` from the verified original transacti
 frame is charged once at destination admission. Chunk envelopes are transport framing and consume
 no origin quota; after complete reassembly and signature verification, the recovered original
 transaction is charged once by the same function. Quota time is monotonic and local, token state
-is never serialized into the replay snapshot, and each lane has a hard record bound. Under
+is never serialized into the replay snapshot, and each lane has a hard record bound, so the table
+holds at most `(4 + k) · max_records` records for `k` paced lanes (a paced lane uses the
+Application lane's `max_records`). Under
 pressure only a fully replenished idle record is reusable; if none exists, admission fails closed.
 Quota drops are counted by the bounded lane and reason dimensions (every paced lane shares one
-aggregate), never by origin DID. They are
-local drops and do not disconnect the immediate peer, which may be an honest relay.
+aggregate), never by origin DID. They are local drops and do not disconnect the immediate peer,
+which may be an honest relay.
 
 ### Provisional service-receipt boundary
 

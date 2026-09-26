@@ -29,7 +29,7 @@ pub use payload::Transaction;
 pub(crate) use payload::WirePayload;
 
 mod paced_lane;
-pub use paced_lane::EdgeRelation;
+pub(crate) use paced_lane::EdgeRelation;
 pub use paced_lane::OriginQuotaLane;
 pub use paced_lane::OriginQuotaLaneId;
 pub use paced_lane::PacedLane;

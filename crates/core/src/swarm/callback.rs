@@ -258,6 +258,10 @@ pub trait SwarmCallback {
     /// neighbour that delivered them, before replay and quota admission; see
     /// [`OriginQuotaLane`](crate::message::OriginQuotaLane). It runs on the inbound admission
     /// path, so it must be a cheap, non-blocking lookup. The default registers no paced lane.
+    ///
+    /// A returned rate is trusted local configuration: for that namespace's neighbour-originated
+    /// traffic it replaces the configured Application message limit, and core does not bound
+    /// it. Implementers hold the authority of the operator who configures the quota.
     fn paced_lane(&self, _application_payload: &[u8]) -> Option<PacedLane> {
         None
     }

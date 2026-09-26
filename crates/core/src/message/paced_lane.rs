@@ -5,8 +5,8 @@
 //! [`MessageCategory`], and every Application namespace shares the Application limits.
 //!
 //! Some application protocols emit direct-edge traffic at a constant, protocol-defined rate,
-//! and bound each sending neighbour by their own admission before any decryption (for the onion
-//! data plane, the per-link budget of `B` cells per `V` seconds). For such traffic the generic
+//! and bound each sending neighbour by their own per-neighbour window admission before any
+//! further processing (at most `budget` messages per `period`). For such traffic the generic
 //! Application quota is a second, tighter bound on the same traffic, and it refuses what the
 //! protocol admits. The owning protocol therefore supplies the rate of a dedicated lane:
 //!
@@ -17,6 +17,14 @@
 //!
 //! Core takes only a [`PacedRate`] and an opaque [`PacedLaneId`]; it has no vocabulary of the
 //! protocol that owns the lane.
+//!
+//! # Trust
+//!
+//! Core does not bound the supplied rate. A paced rate is trusted local configuration: the
+//! application layer that registers it (through `SwarmCallback::paced_lane`) holds the same
+//! authority as the operator who configures the Application quota, and for that namespace's
+//! neighbour-originated traffic the rate replaces the configured message limit. The byte bucket
+//! and the record bound remain the Application lane's and still apply.
 //!
 //! # Why only the authenticated neighbour may claim the lane
 //!
@@ -45,7 +53,7 @@ use crate::message::types::MessageCategory;
 /// at most `budget` messages per `period_seconds`, with an instantaneous allowance of `budget`.
 ///
 /// This is the bound a window admission of `budget` messages per `period_seconds` enforces,
-/// expressed as a token bucket. For the onion data plane it is the per-link budget `B/V`.
+/// expressed as a token bucket. Core accepts any non-zero rate; see the module's trust section.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PacedRate {
     /// Messages admitted per period, and the instantaneous allowance.
@@ -86,11 +94,6 @@ impl PacedLaneId {
     pub const fn new(id: u32) -> Self {
         Self(id)
     }
-
-    /// The raw identity.
-    pub const fn get(self) -> u32 {
-        self.0
-    }
 }
 
 /// One registered paced lane: its identity and the rate its owning protocol supplied.
@@ -121,7 +124,7 @@ impl PacedLane {
 
 /// How the delivering connection relates to a transaction's origin account.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum EdgeRelation {
+pub(crate) enum EdgeRelation {
     /// The frame arrived on the handshake-authenticated connection of the origin itself.
     Neighbour,
     /// The origin is not the authenticated neighbour: relayed, foreign, local or unauthenticated.
@@ -133,7 +136,7 @@ impl EdgeRelation {
     ///
     /// `authenticated_peer` must be `Some` only when the connection's handshake authenticated
     /// that peer and its generation is still active; any other frame is [`Self::Remote`].
-    pub fn of(authenticated_peer: Option<Did>, origin: Did) -> Self {
+    pub(crate) fn of(authenticated_peer: Option<Did>, origin: Did) -> Self {
         if authenticated_peer == Some(origin) {
             Self::Neighbour
         } else {
@@ -157,7 +160,7 @@ impl OriginQuotaLane {
     /// `paced` resolves the lane the application layer registered for the message. It is
     /// consulted only for Application traffic from the authenticated neighbour that originated
     /// it, so no other traffic reaches the application layer's classifier.
-    pub fn select(
+    pub(crate) fn select(
         class: MessageCategory,
         edge: EdgeRelation,
         paced: impl FnOnce() -> Option<PacedLane>,
@@ -196,8 +199,15 @@ impl From<MessageCategory> for OriginQuotaLane {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::num::NonZeroU64;
 
-    use super::*;
+    use super::EdgeRelation;
+    use super::OriginQuotaLane;
+    use super::PacedLane;
+    use super::PacedLaneId;
+    use super::PacedRate;
+    use crate::dht::Did;
+    use crate::message::types::MessageCategory;
 
     /// A lane the application layer would register.
     fn registered() -> PacedLane {
