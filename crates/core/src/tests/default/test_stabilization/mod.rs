@@ -49,13 +49,13 @@ use crate::swarm::SwarmBuilder;
 use crate::tests::default::assert_no_more_msg;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::tests::default::dummy_hooks::PendingSendGuard;
-use crate::tests::default::fixed_secret_keys;
 use crate::tests::default::prepare_node;
 use crate::tests::default::prepare_node_with_measure;
 use crate::tests::default::wait_for_msgs;
 use crate::tests::default::wait_for_predecessor;
 use crate::tests::default::wait_for_successor;
 use crate::tests::default::Node;
+use crate::tests::fixed_secret_keys;
 use crate::tests::live_entry;
 use crate::tests::manually_establish_connection;
 use crate::tests::replace_observed_fingers;

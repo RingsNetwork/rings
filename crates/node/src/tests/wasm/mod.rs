@@ -27,15 +27,9 @@ use crate::processor::Processor;
 use crate::processor::ProcessorBuilder;
 use crate::processor::ProcessorConfig;
 use crate::provider::Provider;
+use crate::tests::TEST_ICE_SERVERS;
 
 const TEST_DHT_FINGER_TABLE_SIZE: usize = 8;
-
-/// ICE servers of every browser fixture: none, so peers gather host candidates only.
-///
-/// Every peer of these tests lives in the same page. An external STUN server would put its
-/// latency inside `createOffer`/`answerOffer`, which wait for ICE gathering to complete, and
-/// so ahead of every awaited event.
-const TEST_ICE_SERVERS: &str = "";
 
 /// Per-test hang guard of the connection tests; see [`with_hang_guard`].
 ///

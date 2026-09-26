@@ -39,8 +39,6 @@ use crate::swarm::callback::SwarmCallback;
 #[cfg(feature = "dummy")]
 use crate::tests::default::dummy_hooks::ControlledDeliveryGuard;
 #[cfg(feature = "dummy")]
-use crate::tests::default::fixed_secret_keys;
-#[cfg(feature = "dummy")]
 use crate::tests::default::has_connection_in_state;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_connection_state;
@@ -51,6 +49,8 @@ use crate::tests::default::wait_for_storage_entry;
 use crate::tests::default::wait_for_successor;
 #[cfg(feature = "dummy")]
 use crate::tests::default::Node;
+#[cfg(feature = "dummy")]
+use crate::tests::fixed_secret_keys;
 use crate::tests::manually_establish_connection;
 
 #[cfg(feature = "dummy")]

@@ -2,7 +2,7 @@ use rings_core::message::MessageSigner;
 
 use super::*;
 use crate::consts::DATA_REDUNDANT;
-use crate::tests::native::TEST_ICE_SERVERS;
+use crate::tests::TEST_ICE_SERVERS;
 
 // Native WebRTC tests share process-global ICE/UDP resources and timing-sensitive
 // connection callbacks; run them serially so one test's candidates or callbacks
