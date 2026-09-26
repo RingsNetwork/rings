@@ -74,13 +74,22 @@ impl ProcessorBuilder {
         })
     }
 
-    /// Chain `observer` after the processor's own `Observability`, so an embedder observes the
-    /// swarm's message and lookup activity as well. `SwarmBuilder::observer` offers the same for a
-    /// bare swarm; the processor keeps its own recorder first.
+    /// Chain `observer` after the processor's own `Observability`, an open hook for embedders
+    /// to observe the swarm's message and lookup activity. `SwarmBuilder::observer` offers the
+    /// same for a bare swarm.
     ///
-    /// The observer is called synchronously on protocol paths, so it must honour the
-    /// [`SwarmObserver`](rings_core::swarm::observer::SwarmObserver) contract: no I/O, no waiting,
-    /// bounded work. One extra observer is supported; a later call replaces an earlier one.
+    /// Contract:
+    /// - **Synchronous and bounded.** The observer is called synchronously on the send and
+    ///   receive paths, so it must not block, wait or do slow work; see
+    ///   [`SwarmObserver`](rings_core::swarm::observer::SwarmObserver).
+    /// - **After the processor's recorder.** It runs after the processor's own
+    ///   `Observability`, which alone feeds `/status?view=observability`, so installing an
+    ///   observer leaves that status output unchanged.
+    /// - **Bounded data.** Message observations carry no payload, key or identifier: only the
+    ///   activity, the scheduling category, the compile-time message class and the outcome.
+    ///   Lookup events carry a correlation key (a transaction id or a resource DID) so start and
+    ///   finish can be paired; an exporter must aggregate or redact it, never use it as a label.
+    /// - **One extra observer.** A later call replaces the observer set by an earlier one.
     pub fn observer(mut self, observer: rings_core::swarm::observer::SharedSwarmObserver) -> Self {
         self.observer = Some(observer);
         self
