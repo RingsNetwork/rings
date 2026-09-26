@@ -5,6 +5,7 @@ use crate::prelude::DelegateeKey;
 use crate::processor::Processor;
 use crate::processor::ProcessorBuilder;
 use crate::processor::ProcessorConfig;
+use crate::tests::TEST_ICE_SERVERS;
 
 mod test_duplicate_namespace;
 
@@ -16,7 +17,7 @@ pub async fn prepare_processor() -> Processor {
 
     let config = serde_yaml::to_string(&ProcessorConfig::new(
         0,
-        "stun://stun.l.google.com:19302".to_string(),
+        TEST_ICE_SERVERS.to_string(),
         sm,
         3,
     ))
@@ -27,7 +28,8 @@ pub async fn prepare_processor() -> Processor {
     let procssor_builder = ProcessorBuilder::from_serialized(&config)
         .unwrap()
         .storage(storage)
-        .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE);
+        .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
+        .observer(crate::tests::activity::activity_observer());
 
     procssor_builder.build().unwrap()
 }

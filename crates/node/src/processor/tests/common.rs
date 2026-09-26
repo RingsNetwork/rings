@@ -1,7 +1,13 @@
 use rings_core::message::MessageSigner;
 
+#[cfg(feature = "dummy")]
+use super::controlled::ControlledNetwork;
 use super::*;
+#[cfg(feature = "dummy")]
 use crate::consts::DATA_REDUNDANT;
+use crate::tests::activity::probe_on_activity;
+use crate::tests::activity::record_activity;
+use crate::tests::TEST_ICE_SERVERS;
 
 // Native WebRTC tests share process-global ICE/UDP resources and timing-sensitive
 // connection callbacks; run them serially so one test's candidates or callbacks
@@ -25,8 +31,6 @@ pub(super) fn onion_policy(
 }
 pub(super) struct SwarmCallbackInstance {
     inbound: Mutex<Vec<Message>>,
-    inbound_notify: Notify,
-    connected_notify: Notify,
 }
 
 #[async_trait]
@@ -40,22 +44,17 @@ impl SwarmCallback for SwarmCallbackInstance {
             let mut inbound = self.inbound.lock().unwrap();
             inbound.push(msg);
         }
-        self.inbound_notify.notify_one();
+        record_activity();
 
         Ok(())
     }
 
     async fn on_event(
         &self,
-        event: &SwarmEvent,
+        _event: &SwarmEvent,
     ) -> std::result::Result<(), rings_core::error::CallbackError> {
-        if let SwarmEvent::ConnectionStateChange {
-            state: WebrtcConnectionState::Connected,
-            ..
-        } = event
-        {
-            self.connected_notify.notify_one();
-        }
+        // Admission and retirement change what the helpers probe.
+        record_activity();
 
         Ok(())
     }
@@ -64,16 +63,36 @@ impl SwarmCallback for SwarmCallbackInstance {
 pub(super) fn test_callback() -> Arc<SwarmCallbackInstance> {
     Arc::new(SwarmCallbackInstance {
         inbound: Mutex::new(Vec::new()),
-        inbound_notify: Notify::new(),
-        connected_notify: Notify::new(),
     })
 }
 
-pub(super) async fn network_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
-    NETWORK_TEST_LOCK
+/// Exclusive use of the test network for one test.
+///
+/// Default build: serializes the real-WebRTC tests. `dummy` build: additionally runs the test
+/// on the controlled in-memory network (see [`ControlledNetwork`]), a FIFO schedule on which
+/// no message waits on a clock.
+///
+/// Fields drop in declaration order, so the controlled network is torn down before the lock is
+/// released and the next test starts.
+pub(super) struct NetworkTestGuard {
+    /// The controlled network of this test.
+    #[cfg(feature = "dummy")]
+    pub(super) network: ControlledNetwork,
+    /// Serializes tests that share process-global network resources.
+    _serial: tokio::sync::MutexGuard<'static, ()>,
+}
+
+/// Take exclusive use of the test network for the calling test; see [`NetworkTestGuard`].
+pub(super) async fn network_test_guard() -> NetworkTestGuard {
+    let serial = NETWORK_TEST_LOCK
         .get_or_init(|| AsyncTestMutex::new(()))
         .lock()
-        .await
+        .await;
+    NetworkTestGuard {
+        #[cfg(feature = "dummy")]
+        network: ControlledNetwork::start(),
+        _serial: serial,
+    }
 }
 
 pub(super) async fn prepare_processor_with_identity_key(identity_key: SecretKey) -> Processor {
@@ -96,23 +115,20 @@ pub(super) async fn prepare_processor_with_identity_key_network_and_virtual_node
     dht_virtual_nodes: u16,
 ) -> Processor {
     let delegatee_key = DelegateeKey::new_with_seckey(&identity_key).unwrap();
-    let config = ProcessorConfig::new(
-        network_id,
-        "stun://stun.l.google.com:19302".to_string(),
-        delegatee_key,
-        3,
-    )
-    .dht_virtual_nodes(dht_virtual_nodes);
+    let config = ProcessorConfig::new(network_id, TEST_ICE_SERVERS.to_string(), delegatee_key, 3)
+        .dht_virtual_nodes(dht_virtual_nodes);
     let storage = Box::new(MemStorage::new());
 
     ProcessorBuilder::from_config(&config)
         .unwrap()
         .storage(storage)
         .dht_finger_table_size(8)
+        .observer(crate::tests::activity::activity_observer())
         .build()
         .unwrap()
 }
 
+#[cfg(feature = "dummy")]
 pub(super) async fn prepare_online_node_registry_pair(
     network_id: u32,
 ) -> Result<(Processor, Processor)> {
@@ -151,6 +167,7 @@ pub(super) async fn prepare_online_node_registry_pair(
     ))
 }
 
+#[cfg(feature = "dummy")]
 pub(super) fn owns_all_placements(local: Did, successor: Did, placements: &[Did]) -> bool {
     placements
         .iter()
@@ -167,23 +184,20 @@ pub(super) async fn prepare_processor_with_network_and_virtual_nodes(
 ) -> Processor {
     let key = SecretKey::random();
     let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
-    let config = ProcessorConfig::new(
-        network_id,
-        "stun://stun.l.google.com:19302".to_string(),
-        delegatee_key,
-        3,
-    )
-    .dht_virtual_nodes(dht_virtual_nodes);
+    let config = ProcessorConfig::new(network_id, TEST_ICE_SERVERS.to_string(), delegatee_key, 3)
+        .dht_virtual_nodes(dht_virtual_nodes);
     let storage = Box::new(MemStorage::new());
 
     ProcessorBuilder::from_config(&config)
         .unwrap()
         .storage(storage)
         .dht_finger_table_size(8)
+        .observer(crate::tests::activity::activity_observer())
         .build()
         .unwrap()
 }
 
+#[cfg(feature = "dummy")]
 pub(super) fn owns_entry_placement(processor: &Processor, placement_key: Did) -> Result<bool> {
     match processor.swarm.dht().find_successor(placement_key)? {
         PeerRingAction::Some(_) => Ok(true),
@@ -199,12 +213,7 @@ pub(super) async fn prepare_processor_with_online_node_type(
 ) -> Processor {
     let key = SecretKey::random();
     let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
-    let config = ProcessorConfig::new(
-        0,
-        "stun://stun.l.google.com:19302".to_string(),
-        delegatee_key,
-        3,
-    );
+    let config = ProcessorConfig::new(0, TEST_ICE_SERVERS.to_string(), delegatee_key, 3);
     let storage = Box::new(MemStorage::new());
 
     ProcessorBuilder::from_config(&config)
@@ -212,6 +221,7 @@ pub(super) async fn prepare_processor_with_online_node_type(
         .storage(storage)
         .online_node_type(node_type)
         .dht_finger_table_size(8)
+        .observer(crate::tests::activity::activity_observer())
         .build()
         .unwrap()
 }
@@ -329,12 +339,7 @@ pub(super) fn mismatched_storage_redundancy(value: u16) -> u16 {
 pub(super) async fn prepare_measured_processor() -> Processor {
     let key = SecretKey::random();
     let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
-    let config = ProcessorConfig::new(
-        0,
-        "stun://stun.l.google.com:19302".to_string(),
-        delegatee_key,
-        3,
-    );
+    let config = ProcessorConfig::new(0, TEST_ICE_SERVERS.to_string(), delegatee_key, 3);
     let storage = Box::new(MemStorage::new());
     let measure = PeriodicMeasure::new(Box::new(MemStorage::new()))
         .await
@@ -345,262 +350,216 @@ pub(super) async fn prepare_measured_processor() -> Processor {
         .storage(storage)
         .measure(measure)
         .dht_finger_table_size(8)
+        .observer(crate::tests::activity::activity_observer())
         .build()
         .unwrap()
 }
 
-pub(super) async fn connect_processors(
-    p1: &Processor,
-    p2: &Processor,
-    callback1: &SwarmCallbackInstance,
-    callback2: &SwarmCallbackInstance,
-) {
+#[cfg(feature = "dummy")]
+pub(super) async fn connect_processors(p1: &Processor, p2: &Processor) {
     let offer = p1.swarm.create_offer(p2.did()).await.unwrap();
     let answer = p2.swarm.answer_offer(offer).await.unwrap();
     p1.swarm.accept_answer(answer).await.unwrap();
-    wait_processors_connected(p1, p2, callback1, callback2).await;
+    wait_processors_connected(p1, p2).await;
 }
 
-pub(super) async fn wait_processors_connected(
-    p1: &Processor,
-    p2: &Processor,
-    callback1: &SwarmCallbackInstance,
-    callback2: &SwarmCallbackInstance,
-) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if processor_has_admitted_peer(p1, p2.did()) && processor_has_admitted_peer(p2, p1.did()) {
-            return;
-        }
+/// Hang guard of every awaited processor-test state: a failure bound only. In `dummy` builds the
+/// network is in memory; in the default build the two real-WebRTC smoke tests run webrtc-rs
+/// handshakes, whose latency under suite load has exceeded 5 s (#850).
+#[cfg(feature = "dummy")]
+pub(super) const PROCESSOR_TEST_HANG_GUARD: Duration = Duration::from_secs(5);
+#[cfg(not(feature = "dummy"))]
+pub(super) const PROCESSOR_TEST_HANG_GUARD: Duration = Duration::from_secs(60);
 
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .expect("processors did not connect");
-        tokio::time::timeout(remaining, async {
-            tokio::select! {
-                _ = callback1.connected_notify.notified() => {}
-                _ = callback2.connected_notify.notified() => {}
-            }
-        })
-        .await
-        .expect("processors did not connect");
-    }
+/// Await, on activity, both processors admitting each other. Admission is announced as a
+/// `Connected` event, which the test callback records as activity.
+pub(super) async fn wait_processors_connected(p1: &Processor, p2: &Processor) {
+    probe_on_activity(
+        "processors admitted each other",
+        PROCESSOR_TEST_HANG_GUARD,
+        || {
+            let admitted = processor_has_admitted_peer(p1, p2.did())
+                && processor_has_admitted_peer(p2, p1.did());
+            async move { Ok(admitted.then_some(())) }
+        },
+    )
+    .await
+    .unwrap();
 }
 
 pub(super) fn processor_has_admitted_peer(processor: &Processor, peer: Did) -> bool {
     processor.swarm.peer_dids().contains(&peer)
 }
 
-/// Run one stabilize round on both nodes, then wait for the mutual successor and
+/// Run one stabilize round on both nodes, then await, on activity, the mutual successor and
 /// predecessor view it produces.
 ///
 /// A round is issued once: `begin_stabilization` supersedes an unanswered round,
 /// so re-issuing while the head's report is in flight would make every report
 /// stale and the head notify (the only predecessor-propagation path) never fire.
+#[cfg(feature = "dummy")]
 pub(super) async fn wait_for_mutual_dht_topology(
     processor: &Processor,
     other: &Processor,
 ) -> Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(10);
     let stabilizer = processor.swarm.stabilizer();
     let other_stabilizer = other.swarm.stabilizer();
     futures::try_join!(stabilizer.stabilize(), other_stabilizer.stabilize(),)
         .map_err(Error::CoreError)?;
-    loop {
-        let inspect = processor.swarm.inspect().await;
-        let other_inspect = other.swarm.inspect().await;
-        let did = processor.did().to_string();
-        let other_did = other.did().to_string();
-        let processor_sees_other = inspect
-            .dht
-            .successors
-            .iter()
-            .any(|successor| successor == &other_did)
-            && inspect.dht.predecessor.as_ref() == Some(&other_did);
-        let other_sees_processor = other_inspect
-            .dht
-            .successors
-            .iter()
-            .any(|successor| successor == &did)
-            && other_inspect.dht.predecessor.as_ref() == Some(&did);
-        if processor_sees_other && other_sees_processor {
-            return Ok(());
-        }
-
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .unwrap_or_else(|| {
-                panic!(
-                    "mutual DHT topology did not converge: processor={:?}, other={:?}",
-                    inspect.dht, other_inspect.dht
-                )
-            });
-        tokio::time::timeout(remaining, tokio::time::sleep(Duration::from_millis(20)))
-            .await
-            .unwrap_or_else(|_| {
-                panic!(
-                    "mutual DHT topology did not converge: processor={:?}, other={:?}",
-                    inspect.dht, other_inspect.dht
-                )
-            });
-    }
+    let did = processor.did().to_string();
+    let other_did = other.did().to_string();
+    let (did, other_did) = (&did, &other_did);
+    probe_on_activity(
+        "mutual DHT topology",
+        PROCESSOR_TEST_HANG_GUARD,
+        || async move {
+            let inspect = processor.swarm.inspect().await;
+            let other_inspect = other.swarm.inspect().await;
+            let processor_sees_other = inspect
+                .dht
+                .successors
+                .iter()
+                .any(|successor| successor == other_did)
+                && inspect.dht.predecessor.as_ref() == Some(other_did);
+            let other_sees_processor = other_inspect
+                .dht
+                .successors
+                .iter()
+                .any(|successor| successor == did)
+                && other_inspect.dht.predecessor.as_ref() == Some(did);
+            Ok((processor_sees_other && other_sees_processor).then_some(()))
+        },
+    )
+    .await
 }
 
-pub(super) async fn wait_for_online_node_dids(
-    processor: &Processor,
-    expected: &BTreeSet<Did>,
-    context: &str,
-) -> Result<Vec<OnlineNodeDescriptor>> {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        let nodes = processor.lookup_online_nodes(false).await?;
-        let observed = nodes
-            .iter()
-            .map(|descriptor| descriptor.did)
-            .collect::<BTreeSet<_>>();
-        if expected.is_subset(&observed) {
-            return Ok(nodes);
-        }
-
-        let remaining = deadline
-                .checked_duration_since(Instant::now())
-                .unwrap_or_else(|| {
-                    panic!(
-                        "online node registry did not converge during {context}: expected {expected:?}, observed {observed:?}",
-                    )
-                });
-        tokio::time::timeout(remaining, tokio::time::sleep(Duration::from_millis(20)))
-                .await
-                .unwrap_or_else(|_| {
-                    panic!(
-                        "online node registry did not converge during {context}: expected {expected:?}, observed {observed:?}",
-                    )
-                });
-    }
-}
-
+/// Await, on activity, every placement in `processor`'s storage covering `expected`.
+#[cfg(feature = "dummy")]
 pub(super) async fn wait_for_online_node_dids_in_storage(
     processor: &Processor,
     placement_keys: &[Did],
     expected: &BTreeSet<Did>,
     context: &str,
 ) -> Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        let mut observed_by_placement = BTreeMap::new();
-        for placement_key in placement_keys {
-            let observed = match processor
-                .swarm
-                .dht()
-                .storage
-                .get(&placement_key.to_string())
-                .await
-                .map_err(Error::Storage)?
-            {
-                Some(entry) => Processor::online_node_descriptors_from_entry(&entry)
-                    .into_iter()
-                    .map(|descriptor| descriptor.did)
-                    .collect::<BTreeSet<_>>(),
-                None => BTreeSet::new(),
-            };
-            observed_by_placement.insert(*placement_key, observed);
-        }
-
-        if observed_by_placement
-            .values()
-            .all(|observed| expected.is_subset(observed))
-        {
-            return Ok(());
-        }
-
-        let remaining = deadline
-                .checked_duration_since(Instant::now())
-                .unwrap_or_else(|| {
-                    panic!(
-                        "online node registry storage did not converge during {context}: expected {expected:?}, observed {observed_by_placement:?}",
-                    )
-                });
-        tokio::time::timeout(remaining, tokio::time::sleep(Duration::from_millis(20)))
-                .await
-                .unwrap_or_else(|_| {
-                    panic!(
-                        "online node registry storage did not converge during {context}: expected {expected:?}, observed {observed_by_placement:?}",
-                    )
-                });
-    }
+    probe_on_activity(
+        &format!("online node registry storage covers {expected:?} during {context}"),
+        PROCESSOR_TEST_HANG_GUARD,
+        || async move {
+            for placement_key in placement_keys {
+                let observed = match processor
+                    .swarm
+                    .dht()
+                    .storage
+                    .get(&placement_key.to_string())
+                    .await
+                    .map_err(Error::Storage)?
+                {
+                    Some(entry) => Processor::online_node_descriptors_from_entry(&entry)
+                        .into_iter()
+                        .map(|descriptor| descriptor.did)
+                        .collect::<BTreeSet<_>>(),
+                    None => BTreeSet::new(),
+                };
+                if !expected.is_subset(&observed) {
+                    return Ok(None);
+                }
+            }
+            Ok(Some(()))
+        },
+    )
+    .await
 }
 
+/// Await, on activity, a measurement of `did` that satisfies `predicate`.
+#[cfg(feature = "dummy")]
 pub(super) async fn wait_for_peer_measurement(
     processor: &Processor,
     did: Did,
     predicate: impl Fn(&PeerMeasurement) -> bool,
 ) -> PeerMeasurement {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Some(measurement) = processor.peer_measurement(did).await {
-            if predicate(&measurement) {
-                return measurement;
-            }
-        }
-
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .expect("measurement was not updated");
-        tokio::time::timeout(remaining, tokio::time::sleep(Duration::from_millis(20)))
-            .await
-            .expect("measurement was not updated");
-    }
+    let predicate = &predicate;
+    probe_on_activity(
+        "peer measurement updated",
+        PROCESSOR_TEST_HANG_GUARD,
+        || async move {
+            Ok(processor
+                .peer_measurement(did)
+                .await
+                .filter(|measurement| predicate(measurement)))
+        },
+    )
+    .await
+    .unwrap()
 }
 
+/// Await, on activity, an inbound message on `callback` that satisfies `predicate`.
 pub(super) async fn wait_for_inbound_message(
     callback: &SwarmCallbackInstance,
     predicate: impl Fn(&Message) -> bool,
 ) -> Message {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        {
-            let inbound = callback.inbound.lock().unwrap();
-            if let Some(msg) = inbound.iter().find(|msg| predicate(msg)).cloned() {
-                return msg;
-            }
-        }
-
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .expect("inbound message was not delivered");
-        tokio::time::timeout(remaining, callback.inbound_notify.notified())
-            .await
-            .expect("inbound message was not delivered");
-    }
+    probe_on_activity(
+        "inbound message delivered",
+        PROCESSOR_TEST_HANG_GUARD,
+        || {
+            let found = callback
+                .inbound
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|msg| predicate(msg))
+                .cloned();
+            async move { Ok(found) }
+        },
+    )
+    .await
+    .unwrap()
 }
 
-pub(super) async fn wait_for_e2e_stream_frames(
+/// Whether `frames` carry a complete stream: some final frame arrived, and so did every
+/// sequence up to it.
+///
+/// The overlay link makes no ordering guarantee, so arrival order is irrelevant. With
+/// `S = { f.sequence | f ∈ frames }`:
+///
+/// ```text
+/// complete(frames) ≡ ∃ f ∈ frames. f.is_final ∧ {0, …, f.sequence} ⊆ S
+/// ```
+///
+/// The predicate is monotone: `S` and the set of final frames only grow as frames arrive, so
+/// once complete, further arrivals (duplicates or stray frames included) keep it complete.
+pub(super) fn e2e_stream_complete<'a>(
+    frames: impl IntoIterator<Item = &'a E2eStreamFrame>,
+) -> bool {
+    let (sequences, finals): (BTreeSet<u64>, Vec<u64>) = frames.into_iter().fold(
+        (BTreeSet::new(), Vec::new()),
+        |(mut sequences, mut finals), frame| {
+            sequences.insert(frame.sequence);
+            if frame.is_final {
+                finals.push(frame.sequence);
+            }
+            (sequences, finals)
+        },
+    );
+    finals
+        .into_iter()
+        .any(|last| (0..=last).all(|sequence| sequences.contains(&sequence)))
+}
+
+/// Every frame of the E2E stream `stream_id` that `callback` received, raw and in arrival
+/// order: duplicates, stray frames and the actual order are all preserved.
+#[cfg(feature = "dummy")]
+pub(super) fn received_e2e_stream_frames(
     callback: &SwarmCallbackInstance,
     stream_id: e2e::E2eStreamId,
 ) -> Vec<E2eStreamFrame> {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        {
-            let inbound = callback.inbound.lock().unwrap();
-            let frames = inbound
-                .iter()
-                .filter_map(|msg| match msg {
-                    Message::E2eStreamFrame(frame) if frame.stream_id == stream_id => {
-                        Some(frame.clone())
-                    }
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            if frames.iter().any(|frame| frame.is_final) {
-                return frames;
-            }
-        }
-
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .expect("E2E stream final frame was not delivered");
-        tokio::time::timeout(remaining, callback.inbound_notify.notified())
-            .await
-            .expect("E2E stream final frame was not delivered");
-    }
+    callback
+        .inbound
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|msg| match msg {
+            Message::E2eStreamFrame(frame) if frame.stream_id == stream_id => Some(frame.clone()),
+            _ => None,
+        })
+        .collect()
 }

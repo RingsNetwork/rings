@@ -1,0 +1,37 @@
+[package]
+name = "rings-test-support"
+description = "Runtime-neutral test support shared by the Rings crates' test suites (dev-dependency only)"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+# The workspace lints, except `clippy::panic`. This dev-only crate exists to fail tests, and a
+# panic is how libtest and wasm-bindgen-test report a failed test; the crates under test get
+# the same exemption through `cfg(test)`, which a separate support crate cannot use.
+[lints.rust]
+missing_docs = "deny"
+warnings = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+todo = "deny"
+unimplemented = "deny"
+indexing_slicing = "deny"
+
+[features]
+# The swarm activity observer, for crates that build Rings swarms or processors in their tests.
+# rings-core's own tests do not request it, but feature unification may still enable it in a
+# workspace build (rings-node's dev-dependency asks for it). Then rings-core's test binary links
+# a second, non-test rings-core library through this crate; its types are distinct from the
+# crate under test, so core's tests use only this crate's runtime-neutral items, never the
+# observer.
+swarm-observer = ["dep:rings-core"]
+
+[dependencies]
+futures = { version = "0.3.21", default-features = false, features = ["std", "async-await"] }
+rings-core = { workspace = true, optional = true }
+rings-runtime = { workspace = true }

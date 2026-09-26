@@ -1,20 +1,21 @@
-use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Duration;
-use std::time::Instant;
 
+#[cfg(feature = "dummy")]
 use rings_core::dht::Chord;
+#[cfg(feature = "dummy")]
 use rings_core::dht::PeerRingAction;
+#[cfg(feature = "dummy")]
 use rings_core::dht::PeerRingRemoteAction;
 use rings_core::storage::MemStorage;
 use rings_core::swarm::callback::SwarmCallback;
 use rings_core::swarm::callback::SwarmEvent;
+#[cfg(feature = "dummy")]
 use rings_rpc::method::Method;
 use rings_transport::core::transport::WebrtcConnectionState;
 use tokio::sync::Mutex as AsyncTestMutex;
-use tokio::sync::Notify;
 
 use super::*;
 use crate::onion::OnionExitDescriptorBody;
@@ -25,10 +26,13 @@ use crate::provider::Provider;
 use crate::tests::native::prepare_processor;
 
 mod common;
+#[cfg(feature = "dummy")]
+mod controlled;
 #[cfg(rings_native)]
 mod test_bootstrap_probe;
 mod test_config;
-#[cfg(rings_native)]
+// The gateway tests reach a real public network by design; the `dummy` build has none.
+#[cfg(all(rings_native, not(feature = "dummy")))]
 mod test_gateway;
 mod test_network;
 mod test_onion;

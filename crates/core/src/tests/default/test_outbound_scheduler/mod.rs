@@ -51,7 +51,7 @@ use crate::tests::default::wait_for_connection_state;
 use crate::tests::default::wait_for_msgs;
 use crate::tests::default::wait_for_successor;
 use crate::tests::default::Node;
-use crate::tests::default::TEST_WAIT_TIMEOUT;
+use crate::tests::default::TEST_HANG_GUARD;
 use crate::tests::manually_establish_connection;
 use crate::tests::outbound_capacity_released;
 
@@ -548,10 +548,17 @@ async fn test_shutdown_releases_batch_before_first_tracked_completion() -> Resul
     Ok(())
 }
 
-async fn connect_nodes(node1: Node, node2: Node) -> Result<(Node, Node)> {
+/// Connect the nodes and await node1's admission of node2, but not quiescence.
+async fn admit_nodes(node1: Node, node2: Node) -> Result<(Node, Node)> {
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
     wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
     wait_for_successor(&node1, node2.did()).await?;
+    Ok((node1, node2))
+}
+
+/// Connect the nodes, await admission, and then await quiescence of the join traffic.
+async fn connect_nodes(node1: Node, node2: Node) -> Result<(Node, Node)> {
+    let (node1, node2) = admit_nodes(node1, node2).await?;
     wait_for_msgs([&node1, &node2]).await;
     Ok((node1, node2))
 }
@@ -655,7 +662,7 @@ impl BehaviourJudgement for PendingMeasure {
 }
 
 async fn wait_until(label: &str, condition: impl Fn() -> bool) -> Result<()> {
-    timeout(TEST_WAIT_TIMEOUT, async {
+    timeout(TEST_HANG_GUARD, async {
         while !condition() {
             tokio::task::yield_now().await;
         }

@@ -64,6 +64,8 @@ use crate::utils::get_epoch_ms_i64;
 mod connection;
 mod delivery;
 mod event_delivery;
+#[cfg(test)]
+mod frame_ledger;
 mod link_control;
 mod liveness;
 mod measurement;
@@ -87,6 +89,12 @@ use self::event_delivery::PeerOperationLocks;
 use self::event_delivery::SwarmEventDeliveryLock;
 use self::event_delivery::SwarmEventDeliveryLocks;
 pub(crate) use self::event_delivery::SwarmEventDeliveryTurn;
+#[cfg(test)]
+pub(crate) use self::frame_ledger::FrameInFlight;
+#[cfg(test)]
+use self::frame_ledger::FrameLedger;
+#[cfg(test)]
+pub(crate) use self::frame_ledger::FrameSample;
 use self::liveness::PeerLivenessMap;
 pub(crate) use self::liveness::PEER_LIVENESS_IDLE_MS;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -180,6 +188,9 @@ pub struct SwarmTransport {
     storage_lookup_observations: Mutex<StorageLookupObservationMap>,
     pending_storage_sync_acks: Mutex<StorageSyncAckMap>,
     storage_repair_requested: AtomicBool,
+    /// Test builds: the frames this node sent and received; see [`FrameLedger`].
+    #[cfg(test)]
+    frames: Arc<FrameLedger>,
     storage_repair_cursor: Mutex<Option<StorageSyncDeliveryCursor>>,
     outbound_schedulers: OutboundSchedulers,
     measured_disconnects: Mutex<MeasuredDisconnectMap>,
@@ -262,6 +273,9 @@ impl SwarmWebrtcConfig {
 pub struct SwarmConnection {
     peer: Did,
     connection: ConnectionRef<ConnectionOwner>,
+    /// Test builds: the owning transport's frame counts, charged by [`Self::send_data`].
+    #[cfg(test)]
+    frames: Arc<FrameLedger>,
 }
 
 impl SwarmTransport {
@@ -311,6 +325,8 @@ impl SwarmTransport {
             storage_lookup_observations: Mutex::new(BTreeMap::new()),
             pending_storage_sync_acks: Mutex::new(BTreeMap::new()),
             storage_repair_requested: AtomicBool::new(false),
+            #[cfg(test)]
+            frames: Arc::default(),
             storage_repair_cursor: Mutex::new(None),
             outbound_schedulers: OutboundSchedulers::new(measure.clone()),
             measured_disconnects: Mutex::new(BTreeMap::new()),
@@ -466,7 +482,13 @@ impl SwarmTransport {
         self.inbound_capacity.clone()
     }
 
-    #[cfg(all(test, not(target_family = "wasm")))]
+    /// Test builds: the frames this node sent and received; see [`FrameLedger`].
+    #[cfg(test)]
+    pub(crate) fn frames_for_test(&self) -> &Arc<FrameLedger> {
+        &self.frames
+    }
+
+    #[cfg(test)]
     pub(crate) fn inbound_admitted_count_for_test(&self) -> usize {
         self.inbound_capacity.admitted_count_for_test()
     }
@@ -1021,11 +1043,21 @@ impl SwarmConnection {
         self.connection.dummy_generation_id().map_err(Into::into)
     }
 
+    /// Hand one frame to the transport; the sole send of every frame to another node.
     async fn send_data(&self, data: Bytes, permit: SendPermit) -> Result<DeliveryFuture> {
-        self.connection
+        // Test builds: a send dropped before the transport committed to it ends uncounted.
+        #[cfg(test)]
+        let frame_send = self.frames.begin_send(permit.acceptance());
+        let delivery: Result<DeliveryFuture> = self
+            .connection
             .send_message_with_permit(TransportMessage::Custom(data), permit)
             .await
-            .map_err(|e| e.into())
+            .map_err(Into::into);
+        #[cfg(test)]
+        if delivery.is_ok() {
+            frame_send.accept();
+        }
+        delivery
     }
 
     async fn close(&self) -> Result<()> {

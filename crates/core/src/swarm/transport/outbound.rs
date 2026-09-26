@@ -413,16 +413,32 @@ impl OutboundSchedulers {
         self.lock_registry().capacities.len()
     }
 
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    fn admitted_transfer_count_for_test(&self, peer: Did) -> Option<usize> {
+    /// The live capacity of `peer`, if any permit or scheduler still holds it.
+    #[cfg(all(test, not(target_family = "wasm")))]
+    fn capacity_for_test(&self, peer: Did) -> Option<Arc<TransferCapacity>> {
         self.lock_registry()
             .capacities
             .get(&peer)
             .and_then(Weak::upgrade)
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    fn admitted_transfer_count_for_test(&self, peer: Did) -> Option<usize> {
+        self.capacity_for_test(peer)
             .map(|capacity| capacity.admitted())
     }
 
-    #[cfg(all(test, not(target_family = "wasm")))]
+    /// Subscribe to the deallocation of `peer`'s live capacity; `None` when none is live.
+    #[cfg(all(test, not(feature = "dummy"), not(target_family = "wasm")))]
+    fn subscribe_capacity_retirement_for_test(
+        &self,
+        peer: Did,
+    ) -> Option<tokio::sync::watch::Receiver<()>> {
+        self.capacity_for_test(peer)
+            .map(|capacity| capacity.subscribe_retirement())
+    }
+
+    #[cfg(test)]
     fn admitted_transfer_total_for_test(&self) -> usize {
         let mut registry = self.lock_registry();
         registry.prune_capacities();

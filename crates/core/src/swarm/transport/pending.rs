@@ -301,6 +301,8 @@ impl SwarmTransport {
             .map(|conn| SwarmConnection {
                 peer,
                 connection: conn,
+                #[cfg(test)]
+                frames: Arc::clone(self.frames_for_test()),
             })
             .ok()
     }
@@ -578,7 +580,7 @@ impl SwarmTransport {
         self.begin_connection_admission_when(attempt, |_| Ok(true), observe_transition)
     }
 
-    #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
+    #[cfg(test)]
     pub(crate) fn activate_connection_for_test(
         &self,
         attempt: PendingConnectionAttempt,
@@ -586,7 +588,7 @@ impl SwarmTransport {
         self.activate_connection_with_observer_for_test(attempt, |_| {})
     }
 
-    #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
+    #[cfg(test)]
     pub(crate) fn activate_connection_with_observer_for_test(
         &self,
         attempt: PendingConnectionAttempt,
@@ -1025,6 +1027,8 @@ impl SwarmTransport {
                 connection: SwarmConnection {
                     peer: attempt.peer,
                     connection,
+                    #[cfg(test)]
+                    frames: Arc::clone(self.frames_for_test()),
                 },
             },
             Err(error) => {
@@ -1072,7 +1076,7 @@ impl SwarmTransport {
         Ok(connection)
     }
 
-    #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
+    #[cfg(test)]
     pub(crate) fn pending_connection_count(&self) -> Result<usize> {
         Ok(self.peer_lifecycles()?.pending_len())
     }

@@ -1,19 +1,25 @@
 use std::rc::Rc;
 use std::time::Duration;
 
+use futures::channel::mpsc;
+use futures::StreamExt;
 use js_sys::Object;
 use js_sys::Reflect;
 use rings_node::onion::OnionExitPolicy;
+use rings_node::prelude::entry::Entry;
 use rings_node::prelude::rings_core::delegation::DelegateeKey;
 use rings_node::prelude::rings_core::ecc::SecretKey;
+use rings_node::prelude::rings_core::error::Result as CoreResult;
 use rings_node::prelude::rings_core::storage::idb::IdbStorage;
-use rings_node::prelude::rings_runtime::sleep;
-use rings_node::prelude::rings_runtime::TimerError;
+use rings_node::prelude::rings_core::storage::KvStorageInterface;
 use rings_node::prelude::uuid;
 use rings_node::processor::Processor;
 use rings_node::processor::ProcessorBuilder;
 use rings_node::processor::ProcessorConfig;
 use rings_node::provider::Provider;
+use rings_test_support::activity::probe_on_activity;
+use rings_test_support::observer::activity_observer;
+use rings_test_support::within;
 use rings_webview::browser::BOOTSTRAP_MARKER;
 use rings_webview::GatewayHeader;
 use rings_webview::GatewayPrefix;
@@ -36,7 +42,11 @@ use super::GATEWAY_PREFIX;
 
 const TEST_DHT_FINGER_TABLE_SIZE: usize = 8;
 const TEST_NETWORK_ID: u32 = 665;
-const TEST_ICE_SERVERS: &str = "stun://stun.l.google.com:19302";
+/// Host-only ICE: both providers live in this page, so no external STUN server is needed, and
+/// none can put its latency inside `createOffer`/`answerOffer` ahead of every awaited state.
+const TEST_ICE_SERVERS: &str = "";
+/// Hang guard of one awaited state in this flow; a failure bound only.
+const FLOW_HANG_GUARD: Duration = Duration::from_secs(30);
 const TEST_STABILIZE_INTERVAL_SECS: u64 = 15;
 // Invariant: browser onion exits admit only public IP literals because the browser fetch adapter
 // cannot pin a hostname to a previously validated DNS result. The mocked fetch boundary prevents
@@ -73,20 +83,23 @@ async fn run_browser_onion_webview_flow() -> WebviewResult<()> {
     let fixture_css = fixture_url("/site.css");
     let fixture_api = fixture_url("/api/data");
     let fixture_submit = fixture_url("/forms/submit");
+    let (directory_writes, mut directory_written) = mpsc::unbounded();
     let client = browser_provider(
         &format!("rings-webview-onion-client-{storage_suffix}"),
         None,
+        directory_writes.clone(),
     )
     .await?;
     let exit = browser_provider(
         &format!("rings-webview-onion-exit-{storage_suffix}"),
         Some(fixture_authority.as_str()),
+        directory_writes,
     )
     .await?;
     let _client_listener = client.listen();
     let _exit_listener = exit.listen();
     connect_browser_providers(&client, &exit).await?;
-    sleep(Duration::from_secs(1)).await.map_err(timer_webview_error)?;
+    await_connected(&client, &exit).await?;
 
     let node = WebviewNode::new(
         client,
@@ -95,7 +108,7 @@ async fn run_browser_onion_webview_flow() -> WebviewResult<()> {
         web_shell_bootstrap,
     )?;
     let index_target = TargetUrl::parse(fixture_index.as_str())?;
-    let index = retry_gateway_navigation(&node, &index_target).await?;
+    let index = retry_gateway_navigation(&node, &index_target, &mut directory_written).await?;
     expect_status(&index, "index navigation", 200)?;
     let index_body = utf8_body(index)?;
     assert_contains(&index_body, "Rings Onion Fixture")?;
@@ -172,9 +185,11 @@ fn fixture_url(path: &str) -> String {
     format!("{}{path}", fixture_origin())
 }
 
+/// Build a browser provider whose DHT storage signals each write on `directory_writes`.
 async fn browser_provider(
     storage_name: &str,
     exit_target: Option<&str>,
+    directory_writes: mpsc::UnboundedSender<()>,
 ) -> WebviewResult<Rc<Provider>> {
     let delegatee_key = DelegateeKey::new_with_seckey(&SecretKey::random()).map_err(|error| {
         WebviewError::transport(format!("build browser delegatee key: {error:?}"))
@@ -190,15 +205,17 @@ async fn browser_provider(
             .map_err(|error| WebviewError::transport(format!("build exit policy: {error:?}")))?;
         config = config.enable_https_onion_exit().onion_exit_policy(policy);
     }
-    let storage = Box::new(
-        IdbStorage::new_with_cap_and_name(50_000, storage_name)
+    let storage = Box::new(WriteSignalingStorage {
+        inner: IdbStorage::new_with_cap_and_name(50_000, storage_name)
             .await
             .map_err(|error| WebviewError::transport(format!("open idb storage: {error:?}")))?,
-    );
+        writes: directory_writes,
+    });
     let processor = ProcessorBuilder::from_config(&config)
         .map_err(|error| WebviewError::transport(format!("build processor config: {error:?}")))?
         .storage(storage)
         .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
+        .observer(activity_observer())
         .build()
         .map_err(|error| WebviewError::transport(format!("build processor: {error:?}")))?;
     let provider = Rc::new(provider_from_processor(processor));
@@ -271,26 +288,120 @@ fn string_field(value: &JsValue, field: &str) -> WebviewResult<String> {
         .ok_or_else(|| WebviewError::Browser(format!("missing string field {field:?}")))
 }
 
+/// Await, on activity, `client` listing `exit` as a `Connected` peer. Admission starts the join
+/// traffic, so the admitted state is followed by recorded activity.
+async fn await_connected(client: &Provider, exit: &Provider) -> WebviewResult<()> {
+    let exit_did = exit.address();
+    probe_on_activity(
+        "client lists the exit as connected",
+        FLOW_HANG_GUARD,
+        || async {
+            let peers = Reflect::get(
+                &rpc(client, "listPeers", Object::new().into()).await?,
+                &JsValue::from_str("peers"),
+            )
+            .map_err(js_webview_error)?;
+            let connected = js_sys::Array::from(&peers).iter().any(|peer| {
+                string_field(&peer, "did").is_ok_and(|did| did.eq_ignore_ascii_case(&exit_did))
+                    && string_field(&peer, "state").is_ok_and(|state| state == "Connected")
+            });
+            Ok(connected.then_some(()))
+        },
+    )
+    .await
+}
+
+/// A node's DHT storage that signals every write, for [`retry_gateway_navigation`].
+struct WriteSignalingStorage {
+    inner: IdbStorage,
+    writes: mpsc::UnboundedSender<()>,
+}
+
+impl WriteSignalingStorage {
+    /// Signal one write; a closed receiver means the flow no longer waits on writes.
+    fn signal(&self) {
+        let _unobserved = self.writes.unbounded_send(());
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl KvStorageInterface<Entry> for WriteSignalingStorage {
+    async fn get(&self, key: &str) -> CoreResult<Option<Entry>> {
+        KvStorageInterface::<Entry>::get(&self.inner, key).await
+    }
+
+    async fn put(&self, key: &str, value: &Entry) -> CoreResult<()> {
+        KvStorageInterface::<Entry>::put(&self.inner, key, value).await?;
+        self.signal();
+        Ok(())
+    }
+
+    async fn get_all(&self) -> CoreResult<Vec<(String, Entry)>> {
+        KvStorageInterface::<Entry>::get_all(&self.inner).await
+    }
+
+    async fn remove(&self, key: &str) -> CoreResult<()> {
+        KvStorageInterface::<Entry>::remove(&self.inner, key).await?;
+        self.signal();
+        Ok(())
+    }
+
+    async fn clear(&self) -> CoreResult<()> {
+        KvStorageInterface::<Entry>::clear(&self.inner).await?;
+        self.signal();
+        Ok(())
+    }
+
+    async fn count(&self) -> CoreResult<u32> {
+        KvStorageInterface::<Entry>::count(&self.inner).await
+    }
+}
+
+/// Navigate to `target` once the client's directory lookup finds the browser onion exit.
+///
+/// Whether the lookup finds the exit is decided by the DHT storage of the two nodes: the exit's
+/// registration publishes its descriptor, and storage repair moves it to the key's owner. A
+/// failed attempt is therefore retried only after one of the two stores was written:
+///
+/// ```text
+/// loop:  forget(written)  ;  attempt = Ok ? return : await written
+/// ```
+///
+/// Writes are forgotten *before* each attempt, so a write during it wakes the next one and
+/// none is lost. A failed attempt writes a store only through read repair, when its lookup
+/// found the descriptor but observed a placement miss; repair converges, so such self-caused
+/// wakes are bounded, and every other wake is a directory change the next attempt must see. No
+/// timer paces the retries. The last error is kept for the hang-guard report.
 async fn retry_gateway_navigation(
     node: &WebviewNode,
     target: &TargetUrl,
+    directory_written: &mut mpsc::UnboundedReceiver<()>,
 ) -> WebviewResult<GatewayResponse> {
-    let mut last_error = None;
-    for _ in 0..60 {
-        match gateway_navigation(node, target).await {
-            Ok(response) => return Ok(response),
-            Err(error) => {
-                last_error = Some(error.to_string());
-                sleep(Duration::from_millis(250)).await.map_err(timer_webview_error)?;
+    let mut last_error = None::<String>;
+    let navigated = within(FLOW_HANG_GUARD, async {
+        loop {
+            while directory_written.try_recv().is_ok() {}
+            match gateway_navigation(node, target).await {
+                Ok(response) => return Some(response),
+                Err(error) => {
+                    last_error = Some(error.to_string());
+                    directory_written.next().await?;
+                }
             }
         }
-    }
-    Err(WebviewError::transport(format!(
-        "gateway navigation did not find a browser onion exit: {}",
-        last_error.unwrap_or_else(|| "no attempt was made".to_string())
-    )))
+    })
+    .await
+    .flatten();
+    navigated.ok_or_else(|| {
+        WebviewError::transport(format!(
+            "gateway navigation did not find a browser onion exit within {FLOW_HANG_GUARD:?}: {}",
+            last_error.unwrap_or_else(|| "no attempt was made".to_string())
+        ))
+    })
 }
 
+/// Navigate to `target` through the controlled gateway: the external navigation redirects to
+/// the gateway, whose response is the page fetched through the onion exit.
 async fn gateway_navigation(
     node: &WebviewNode,
     target: &TargetUrl,
@@ -524,8 +635,4 @@ fn restore_mock_exit_fetch() -> WebviewResult<()> {
 
 fn js_webview_error(error: JsValue) -> WebviewError {
     WebviewError::Browser(format!("{error:?}"))
-}
-
-fn timer_webview_error(error: TimerError) -> WebviewError {
-    WebviewError::Browser(error.to_string())
 }

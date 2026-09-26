@@ -467,7 +467,7 @@ impl ConnectionLifecycleRegistry {
         Some(AdmittingConnection { state, attempt })
     }
 
-    #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
+    #[cfg(test)]
     pub(in crate::swarm::transport) fn activate_for_test(
         &mut self,
         attempt: PendingConnectionAttempt,

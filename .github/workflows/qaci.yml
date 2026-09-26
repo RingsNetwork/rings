@@ -297,10 +297,14 @@ jobs:
             wasm-pack test --release --headless --chrome . -- two_nodes_fetch_a_hosted_page --nocapture
           working-directory: ./examples/dweb
 
+      # The browser repair soak runs as its own test binary invocation: its 60 s hang guard
+      # must not share the 120 s wasm-bindgen-test budget of the rest.
       - name: Run core browser tests
         uses: coactions/setup-xvfb@b6b4fcfb9f5a895edadc3bc76318fae0ac17c8b3 # v1
         with:
-          run: cargo test -p rings-core --release --target=wasm32-unknown-unknown --features browser_chrome_test --no-default-features
+          run: |
+            cargo test -p rings-core --release --target=wasm32-unknown-unknown --features browser_chrome_test --no-default-features -- --skip test_storage_repair_load_does_not_starve_three_node_stabilization
+            cargo test -p rings-core --release --target=wasm32-unknown-unknown --features browser_chrome_test --no-default-features -- test_storage_repair_load_does_not_starve_three_node_stabilization
           working-directory: ./
 
       - name: Run runtime browser tests
@@ -354,6 +358,16 @@ jobs:
           python3 scripts/run-ci-tests.py target/ci-evidence/native.jsonl
           --inventory target/ci-evidence/native-inventory.json
           --require-file scripts/ci-native-model-tests.txt
+          --skip message::handlers::connection::tests::test_relayed_connect_over_real_webrtc
+
+      # The real-WebRTC relayed-connect smoke test (#882) runs serialized against the rest of the
+      # suite, in its own invocation, so no other test's traffic shares its runner.
+      - name: Exercise a DHT-relayed connect over real WebRTC
+        run: >-
+          python3 scripts/run-ci-tests.py target/ci-evidence/native.jsonl
+          --inventory target/ci-evidence/relayed-connect-inventory.json
+          --target rings_core --exact --nocapture
+          --filter message::handlers::connection::tests::test_relayed_connect_over_real_webrtc
 
       - name: Exercise captured TCP through a two-hop Onion public exit
         run: >-
@@ -432,6 +446,13 @@ jobs:
             --inventory target/ci-evidence/core-dummy-inventory.json \
             --skip-file scripts/ci-native-model-tests.txt \
             --skip tests::default::test_sync_storm::
+      - name: Compile and run node dummy tests
+        env:
+          RUST_TEST_THREADS: 2
+        run: |
+          cargo test --locked --profile ci -p rings-node --features dummy --no-run --timings --message-format=json > target/ci-evidence/node-dummy.jsonl
+          python3 scripts/run-ci-tests.py target/ci-evidence/node-dummy.jsonl \
+            --inventory target/ci-evidence/node-dummy-inventory.json
       - name: Compile and run transport dummy tests
         run: |
           cargo test --locked --profile ci -p rings-transport --no-default-features --features dummy --no-run --timings --message-format=json > target/ci-evidence/transport-dummy.jsonl
@@ -609,8 +630,10 @@ jobs:
         # rings-node inherits warnings and strict Clippy denies from the workspace.
         run: cargo clippy -p rings-node --no-default-features --features node --lib
 
+      # Every feature except `dummy`, which swaps the native transport for the in-memory test
+      # transport and is covered by the dummy_tests job.
       - name: Check node native with browser feature enabled
-        run: cargo check -p rings-node --all-features
+        run: cargo check -p rings-node --features node,ffi,browser,browser_chrome_test
 
       # Native and relay examples do not inherit workspace lints; retain this gate.
       - name: Run clippy

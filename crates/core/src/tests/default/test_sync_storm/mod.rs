@@ -7,7 +7,6 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::sync::Arc;
 use std::time::Duration;
 
 use futures::stream::FuturesUnordered;
@@ -482,16 +481,16 @@ fn build_repair_nodes(count: usize) -> Vec<Node> {
         .map(|index| {
             let session = DelegateeKey::new_with_seckey(&deterministic_key(index))
                 .expect("deterministic repair-node session must be valid");
-            let swarm = SwarmBuilder::new(
-                0,
-                "stun://stun.l.google.com:19302",
-                Box::new(MemStorage::new()),
-                session,
+            Node::build(
+                SwarmBuilder::new(
+                    0,
+                    crate::tests::default::TEST_ICE_SERVERS,
+                    Box::new(MemStorage::new()),
+                    session,
+                )
+                .dht_storage_redundancy(2)
+                .dht_virtual_nodes(0),
             )
-            .dht_storage_redundancy(2)
-            .dht_virtual_nodes(0)
-            .build();
-            Node::new(Arc::new(swarm))
         })
         .collect()
 }
@@ -505,15 +504,15 @@ fn build_finger_nodes(key_indices: &[usize]) -> Vec<Node> {
         .map(|index| {
             let session = DelegateeKey::new_with_seckey(&deterministic_key(index))
                 .expect("deterministic finger-node session must be valid");
-            let swarm = SwarmBuilder::new(
-                0,
-                "stun://stun.l.google.com:19302",
-                Box::new(MemStorage::new()),
-                session,
+            Node::build(
+                SwarmBuilder::new(
+                    0,
+                    crate::tests::default::TEST_ICE_SERVERS,
+                    Box::new(MemStorage::new()),
+                    session,
+                )
+                .dht_virtual_nodes(0),
             )
-            .dht_virtual_nodes(0)
-            .build();
-            Node::new(Arc::new(swarm))
         })
         .collect()
 }
@@ -688,11 +687,7 @@ async fn submit_workload(nodes: &[Node], kind: ScenarioTopology) -> Vec<BTreeMap
 }
 
 fn network_busy(nodes: &[Node]) -> bool {
-    nodes.iter().any(|node| {
-        node.has_handshaking_connection()
-            || node.has_outbound_transfer()
-            || node.has_inbound_message()
-    })
+    nodes.iter().any(|node| node.in_flight())
 }
 
 fn assert_healthy_connections(nodes: &[Node], kind: ScenarioTopology) {

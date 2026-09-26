@@ -30,6 +30,8 @@ pub struct ProcessorBuilder {
     pub(in crate::processor) onion_exit_policy: OnionExitPolicy,
     pub(in crate::processor) dht_finger_table_size: usize,
     pub(in crate::processor) reassembly_limits: ReassemblyLimits,
+    /// An observer chained after the processor's own `Observability`.
+    pub(in crate::processor) observer: Option<rings_core::swarm::observer::SharedSwarmObserver>,
 }
 
 impl ProcessorBuilder {
@@ -68,7 +70,29 @@ impl ProcessorBuilder {
             onion_exit_policy: config.onion_exit_policy.clone(),
             dht_finger_table_size: DEFAULT_FINGER_TABLE_SIZE,
             reassembly_limits: ReassemblyLimits::production(),
+            observer: None,
         })
+    }
+
+    /// Chain `observer` after the processor's own `Observability`, an open hook for embedders
+    /// to observe the swarm's message and lookup activity. `SwarmBuilder::observer` offers the
+    /// same for a bare swarm.
+    ///
+    /// Contract:
+    /// - **Synchronous and bounded.** The observer is called synchronously on the send and
+    ///   receive paths, so it must not block, wait or do slow work; see
+    ///   [`SwarmObserver`](rings_core::swarm::observer::SwarmObserver).
+    /// - **After the processor's recorder.** It runs after the processor's own
+    ///   `Observability`, which alone feeds `/status?view=observability`, so installing an
+    ///   observer leaves that status output unchanged.
+    /// - **Bounded data.** Message observations carry no payload, key or identifier: only the
+    ///   activity, the scheduling category, the compile-time message class and the outcome.
+    ///   Lookup events carry a correlation key (a transaction id or a resource DID) so start and
+    ///   finish can be paired; an exporter must aggregate or redact it, never use it as a label.
+    /// - **One extra observer.** A later call replaces the observer set by an earlier one.
+    pub fn observer(mut self, observer: rings_core::swarm::observer::SharedSwarmObserver) -> Self {
+        self.observer = Some(observer);
+        self
     }
 
     /// Set the storage for the processor.
@@ -207,7 +231,14 @@ impl ProcessorBuilder {
         swarm_builder = swarm_builder.reassembly_limits(self.reassembly_limits);
         swarm_builder = swarm_builder.replay_storage(replay_storage);
         swarm_builder = swarm_builder.origin_quota(self.origin_quota);
-        swarm_builder = swarm_builder.observer(observability.clone());
+        let observer: rings_core::swarm::observer::SharedSwarmObserver = match self.observer {
+            Some(extra) => Arc::new(ChainedObserver {
+                first: observability.clone(),
+                second: extra,
+            }),
+            None => observability.clone(),
+        };
+        swarm_builder = swarm_builder.observer(observer);
 
         if let Some(external_address) = self.external_address {
             swarm_builder = swarm_builder.external_address(external_address);
@@ -263,5 +294,37 @@ impl ProcessorBuilder {
             &self.onion_exit_services,
             &self.onion_exit_policy,
         )
+    }
+}
+
+/// An observer that forwards every observation to two observers, in order.
+struct ChainedObserver {
+    first: rings_core::swarm::observer::SharedSwarmObserver,
+    second: rings_core::swarm::observer::SharedSwarmObserver,
+}
+
+impl rings_core::swarm::observer::SwarmObserver for ChainedObserver {
+    fn observe_message(&self, observation: rings_core::swarm::observer::MessageObservation) {
+        self.first.observe_message(observation);
+        self.second.observe_message(observation);
+    }
+
+    fn lookup_started(
+        &self,
+        kind: rings_core::swarm::observer::LookupKind,
+        correlation: rings_core::swarm::observer::LookupCorrelation,
+    ) {
+        self.first.lookup_started(kind, correlation);
+        self.second.lookup_started(kind, correlation);
+    }
+
+    fn lookup_finished(
+        &self,
+        kind: rings_core::swarm::observer::LookupKind,
+        correlation: rings_core::swarm::observer::LookupCorrelation,
+        outcome: rings_core::swarm::observer::LookupOutcome,
+    ) {
+        self.first.lookup_finished(kind, correlation, outcome);
+        self.second.lookup_finished(kind, correlation, outcome);
     }
 }

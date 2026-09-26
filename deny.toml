@@ -30,6 +30,11 @@ ignore = false
 [bans]
 multiple-versions = "allow"
 wildcards = "deny"
+# Version-less path dependencies are allowed only where they never reach a registry: a
+# dev-dependency (cargo strips it when packaging) or a dependency of an unpublished crate. The
+# test-support crate is such a dependency; a version on it would be packaged into rings-core's
+# and rings-node's manifests and fail to resolve, since it is `publish = false`.
+allow-wildcard-paths = true
 highlight = "all"
 allow-workspace = true
 deny = [

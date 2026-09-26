@@ -2,8 +2,6 @@
 //! slot makes the returning peer visible only as the queried head's predecessor;
 //! zero finger slots exclude an unrelated lookup from discovering that peer.
 
-use std::sync::Arc;
-
 use rings_transport::core::transport::WebrtcConnectionState;
 
 use super::*;
@@ -18,17 +16,18 @@ fn head_only_node(key: SecretKey) -> Result<Node> {
     // The session authenticates this node's real connection and topology messages.
     let session = DelegateeKey::new_with_seckey(&key)?;
     // Only topology breadth is reduced; the production transport and storage remain enabled.
-    let swarm = SwarmBuilder::new(
-        crate::tests::TEST_NETWORK_ID,
-        "stun://stun.l.google.com:19302",
-        Box::new(MemStorage::new()),
-        session,
-    )
-    .dht_succ_max(1)
-    .dht_finger_table_size(0)
-    .dht_virtual_nodes(0)
-    .build();
-    Ok(Node::new(Arc::new(swarm)))
+    let node = Node::build(
+        SwarmBuilder::new(
+            crate::tests::TEST_NETWORK_ID,
+            crate::tests::default::TEST_ICE_SERVERS,
+            Box::new(MemStorage::new()),
+            session,
+        )
+        .dht_succ_max(1)
+        .dht_finger_table_size(0)
+        .dht_virtual_nodes(0),
+    );
+    Ok(node)
 }
 
 /// Retire the observer's head through the production unavailable-peer sweep.
@@ -86,7 +85,7 @@ async fn test_topology_predecessor_discovery_after_rejoin_delivers_held_inbox() 
     head.swarm.disconnect(peer.did()).await?;
     wait_for_msgs([&owner, &peer, &head]).await;
     assert!(peer.swarm.peers().is_empty());
-    hold_message_for_offline_peer(&owner, &head, peer.did()).await?;
+    hold_message_for_offline_peer(&owner, &head, peer.did(), &[&owner, &peer, &head]).await?;
 
     // Admission's successor synchronization may eagerly reconnect owner and peer.
     // Remove that link before the measured round so it cannot satisfy discovery.

@@ -3,6 +3,9 @@ use std::sync::Mutex;
 #[cfg(test)]
 use std::task::Poll;
 
+#[cfg(all(test, not(feature = "dummy"), not(target_family = "wasm")))]
+use tokio::sync::watch;
+
 use super::model::TransferClass;
 use crate::dht::Did;
 use crate::error::Error;
@@ -261,6 +264,11 @@ pub(super) struct TransferCapacity {
     state: Mutex<PeerCapacityState>,
     global: Arc<GlobalTransferCapacity>,
     waiters: Arc<FairWaitQueue>,
+    /// Test witness of this capacity's deallocation. Nothing is ever sent on it, so its
+    /// subscribers observe exactly one event, the channel closing when the capacity is
+    /// dropped, and that event is terminal.
+    #[cfg(all(test, not(feature = "dummy"), not(target_family = "wasm")))]
+    retirement: watch::Sender<()>,
 }
 
 impl TransferCapacity {
@@ -270,6 +278,8 @@ impl TransferCapacity {
             state: Mutex::new(PeerCapacityState::new()),
             global,
             waiters: Arc::new(FairWaitQueue::with_budget(wait_budget)),
+            #[cfg(all(test, not(feature = "dummy"), not(target_family = "wasm")))]
+            retirement: watch::channel(()).0,
         }
     }
 
@@ -377,6 +387,12 @@ impl TransferCapacity {
             .admitted_count()
     }
 
+    /// Subscribe to this capacity's deallocation; see `retirement`.
+    #[cfg(all(test, not(feature = "dummy"), not(target_family = "wasm")))]
+    pub(super) fn subscribe_retirement(&self) -> watch::Receiver<()> {
+        self.retirement.subscribe()
+    }
+
     #[cfg(test)]
     pub(super) fn admitted_bytes(&self) -> usize {
         self.state
@@ -406,6 +422,9 @@ impl Drop for PeerCapacityPermit {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .release(self.class, self.bytes);
         self.capacity.waiters.wake_front();
+        // Test builds: an outbound release is a state change that quiescence probes read.
+        #[cfg(test)]
+        crate::tests::activity::record_activity();
     }
 }
 
