@@ -17,17 +17,16 @@ use wasm_bindgen_futures::JsFuture;
 use web_sys::AbortController;
 
 use super::limits::checked_status_code;
+use super::limits::headers_bytes;
 use super::limits::reject_content_length_over_limit;
 use super::limits::usize_to_u64;
 use super::normalize_method;
 use super::FetchResponse;
 use super::OnionHttpsRequest;
-use super::OnionHttpsRuntime;
 use crate::error::Error;
 use crate::error::Result;
 use crate::onion::proxy::OnionProxyTarget;
 use crate::onion::target::validate_public_ip_literal;
-use crate::onion::OnionExitPolicy;
 
 const HTTPS_EXIT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -36,8 +35,7 @@ pub(super) async fn execute_https_request(
     target: &OnionProxyTarget,
     request: &OnionHttpsRequest,
     max_body_bytes: u64,
-    runtime: &OnionHttpsRuntime,
-    policy: &OnionExitPolicy,
+    record_bytes: impl Fn(u64) -> Result<()>,
 ) -> Result<FetchResponse> {
     validate_public_ip_literal(target)?;
     let global = js_sys::global();
@@ -68,7 +66,8 @@ pub(super) async fn execute_https_request(
             .and_then(checked_status_code)?;
         let headers = collect_headers(&response)?;
         reject_content_length_over_limit(&headers, max_body_bytes)?;
-        let body = response_body(&response, max_body_bytes, runtime, policy).await?;
+        record_bytes(headers_bytes(&headers)?)?;
+        let body = response_body(&response, max_body_bytes, &record_bytes).await?;
         Ok::<FetchResponse, Error>(FetchResponse {
             status,
             headers,
@@ -167,8 +166,7 @@ fn collect_headers(response: &JsValue) -> Result<Vec<(String, String)>> {
 async fn response_body(
     response: &JsValue,
     max_body_bytes: u64,
-    runtime: &OnionHttpsRuntime,
-    policy: &OnionExitPolicy,
+    record_bytes: &impl Fn(u64) -> Result<()>,
 ) -> Result<Vec<u8>> {
     let body = Reflect::get(response, JsValue::from_str("body").as_ref()).map_err(js_error)?;
     if body.is_null() || body.is_undefined() {
@@ -214,7 +212,7 @@ async fn response_body(
             }
             return Err(Error::NoPermission);
         }
-        if let Err(error) = runtime.record_exit_bytes(policy, bytes_len) {
+        if let Err(error) = record_bytes(bytes_len) {
             if let Some(cancel) = &cancel {
                 let _ = cancel.call0(reader.as_ref());
             }

@@ -19,6 +19,16 @@ pub(super) fn checked_status_code(status: f64) -> Result<u16> {
         .map_err(|_| Error::HttpRequestError(format!("invalid fetch response status {status:?}")))
 }
 
+/// The bytes of response headers as the exit's byte policy counts them: every name and value.
+pub(super) fn headers_bytes(headers: &[(String, String)]) -> Result<u64> {
+    usize_to_u64(
+        headers
+            .iter()
+            .map(|(name, value)| name.len().saturating_add(value.len()))
+            .fold(0_usize, usize::saturating_add),
+    )
+}
+
 pub(super) fn usize_to_u64(value: usize) -> Result<u64> {
     u64::try_from(value).map_err(|_| Error::InvalidData)
 }

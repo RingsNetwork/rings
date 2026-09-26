@@ -1,9 +1,9 @@
 //! Loop classes `b` and the carry width `C_b` (#834 D6, L3).
 //!
-//! A loop's class is one of today's cell buckets above 4 KiB (#834 D6: `16 KiB … 12 MiB`):
+//! A loop's class is one of the cell buckets (#834 D6: `16 KiB … 12 MiB`):
 //!
 //! ```text
-//! 𝔅 = OnionCellBucket ∖ {KiB4} ≅ OnionLoopClass            (TryFrom rejects KiB4)
+//! 𝔅 = OnionCellBucket ≅ OnionLoopClass                      (From, and back by cell_bytes)
 //! C_b = b − |χ| − F          carry slot                     F = 0: a cell's class is its length
 //! C₀  = C_b − τ              padded value width             τ = 16
 //! ```
@@ -18,15 +18,13 @@ use crate::onion::circuit::OnionCellBucket;
 /// Cell framing `F` beyond `χ ‖ y`: none, since a cell's class is its length.
 pub(crate) const ONION_CELL_FRAMING_BYTES: usize = 0;
 
+/// Bytes of one admission unit, 16 KiB: the least loop class (#834 L9).
+pub(crate) const ONION_UNIT_BYTES: usize = 16 * 1024;
+
 /// The class `b` of one loop, a cell bucket of `16 KiB … 12 MiB` (D6): every cell of the loop,
 /// replies included, is exactly `b` bytes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct OnionLoopClass(OnionCellBucket);
-
-/// The cell bucket below every loop class: D6 draws classes from the buckets above 4 KiB.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-#[error("cell bucket {0:?} is not an onion loop class")]
-pub(crate) struct OnionLoopClassError(OnionCellBucket);
 
 impl OnionLoopClass {
     /// The default class, `b = 16 KiB`.
@@ -34,7 +32,13 @@ impl OnionLoopClass {
 
     /// `b`, the cell length.
     pub(crate) const fn cell_bytes(self) -> usize {
-        self.0.plaintext_len()
+        self.0.cell_bytes()
+    }
+
+    /// `u(b) = b / 16 KiB`, the admission units one cell of the class costs its receiver, at
+    /// least one since the least class is one unit (#834 L9).
+    pub(crate) const fn units(self) -> u32 {
+        (self.cell_bytes() / ONION_UNIT_BYTES) as u32
     }
 
     /// `C_b = b − |χ| − F`, the carry slot width.
@@ -62,27 +66,32 @@ impl OnionLoopClass {
     pub(crate) fn from_cell_bytes(length: usize) -> Option<Self> {
         OnionCellBucket::ALL
             .into_iter()
-            .find(|bucket| bucket.plaintext_len() == length)
-            .and_then(|bucket| Self::try_from(bucket).ok())
+            .find(|bucket| bucket.cell_bytes() == length)
+            .map(Self::from)
     }
 }
 
-impl TryFrom<OnionCellBucket> for OnionLoopClass {
-    type Error = OnionLoopClassError;
-
-    /// Admit every bucket above 4 KiB, that is every bucket but `KiB4` (D6).
-    fn try_from(bucket: OnionCellBucket) -> Result<Self, Self::Error> {
-        match bucket {
-            OnionCellBucket::KiB4 => Err(OnionLoopClassError(bucket)),
-            _ => Ok(Self(bucket)),
-        }
+impl From<OnionCellBucket> for OnionLoopClass {
+    /// Every bucket is a loop class (D6).
+    fn from(bucket: OnionCellBucket) -> Self {
+        Self(bucket)
     }
 }
 
-// `DEFAULT` is the least class, `KiB16`, the bucket after the excluded `KiB4`; it leaves an
+// `DEFAULT` is the least class, `KiB16`; it leaves an
 // AEZ-core carry slot (`C_b ≥ 32`) and room for the padding marker, and every larger class leaves
 // more.
 const _: () = assert!(
-    OnionLoopClass::DEFAULT.cell_bytes() == OnionCellBucket::KiB16.plaintext_len()
+    OnionLoopClass::DEFAULT.cell_bytes() == OnionCellBucket::KiB16.cell_bytes()
         && OnionLoopClass::DEFAULT.carry_value_bytes() >= 32
+);
+
+// Every class is a whole number of units, and the largest (12 MiB = 768 units) fits `u32`, so
+// `units` is exact.
+const _: () = assert!(
+    OnionLoopClass::DEFAULT.cell_bytes() == ONION_UNIT_BYTES
+        && OnionCellBucket::MiB12
+            .cell_bytes()
+            .is_multiple_of(ONION_UNIT_BYTES)
+        && OnionCellBucket::MiB12.cell_bytes() / ONION_UNIT_BYTES <= u32::MAX as usize
 );

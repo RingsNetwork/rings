@@ -1,16 +1,18 @@
-//! Application-layer circuit directory and route selection.
+//! The onion privacy layer: its directory, route selection and loop data plane.
 //!
 //! This module deliberately sits in `rings-node`, not `rings-core`: Chord
 //! remains the storage and discovery substrate, while exit policy is an
 //! application protocol decision.
 //!
-//! The current data plane selects route-aware circuits and exit policies over layered
-//! ElGamal-AEAD frames. A circuit is a pipeline (`pipeline`) over the static signature `Σ` of
-//! operation symbols (`signature`): the pure reducer interprets the identity symbol `relay`, and
-//! each node's Σ-algebra (`circuit::OnionAlgebra`) interprets the world-facing symbols it
-//! registers. Route selection places a pipeline on a guard-closed loop (`loop_shape`) whose every
+//! The data plane runs client-sealed loops of fixed-width Sphinx cells (`circuit`, `sphinx`). A
+//! loop evaluates a pipeline over the static signature `Σ` of operation symbols (`signature`):
+//! every hop's step interprets the identity symbol `relay`, and each node's Σ-algebra interprets
+//! the world-facing symbols it registers, as sessions (`session`) over their worlds (`tcp`,
+//! `https`). Route selection places a pipeline on a guard-closed loop (`loop_shape`) whose every
 //! position is a node registering that position's symbol at its current process epoch.
 
+use std::sync::Arc;
+use std::sync::RwLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -56,19 +58,12 @@ pub mod https;
 mod loop_shape;
 #[cfg(rings_native)]
 pub mod native;
-pub mod pipeline;
 pub mod proxy;
-pub(crate) mod replay;
 mod role;
 pub mod route;
+pub(crate) mod runtime;
+pub(crate) mod session;
 pub mod signature;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "pure Sphinx primitives; #834 Phase 2a-4 (#843) wires them in and removes this"
-    )
-)]
 pub(crate) mod sphinx;
 pub mod target;
 #[cfg(rings_native)]
@@ -83,6 +78,7 @@ pub use failure::OnionRouteError;
 pub use gateway::NativeOnionGatewayConnector;
 pub use loop_shape::OnionLoop;
 pub(crate) use loop_shape::OnionLoopRelay;
+pub use loop_shape::OnionLoopRole;
 pub use loop_shape::OnionLoopShape;
 pub(crate) use loop_shape::OnionPipelineSymbols;
 pub use loop_shape::MAX_ONION_LOOP_HOPS;
@@ -126,13 +122,6 @@ impl OnionProcessEpoch {
     }
 
     /// Return the epoch bytes, the `e` field of the uniform layer (#834 D6″).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the layer encoding of the Sphinx primitives; #834 Phase 2a-4 (#843) uses it"
-        )
-    )]
     pub(crate) const fn to_bytes(self) -> [u8; 16] {
         self.0
     }
@@ -140,6 +129,37 @@ impl OnionProcessEpoch {
     /// Draw a fresh process epoch for one process lifetime.
     pub fn random() -> Self {
         Self(rand::random())
+    }
+}
+
+/// The current process epoch `e_n` of this node, shared by the onion admission state, which
+/// renews it, and the registrations, which publish it at every heartbeat (#834 D2, L9).
+///
+/// Law: the epoch changes only by `renew`, to an epoch drawn independently and
+/// uniformly, when admission detects a clock rollback beyond `X₀`; every registration published
+/// after the renewal names the new epoch, and every layer sealed for the old one is rejected.
+#[derive(Clone, Debug)]
+pub struct OnionProcessEpochCell(Arc<RwLock<OnionProcessEpoch>>);
+
+impl OnionProcessEpochCell {
+    /// A cell holding `epoch`, the epoch drawn at process start.
+    pub fn new(epoch: OnionProcessEpoch) -> Self {
+        Self(Arc::new(RwLock::new(epoch)))
+    }
+
+    /// The current epoch.
+    pub fn get(&self) -> OnionProcessEpoch {
+        self.0
+            .read()
+            .map_or_else(|poisoned| *poisoned.into_inner(), |epoch| *epoch)
+    }
+
+    /// Replace the current epoch by `epoch`, after an admission reset.
+    pub(crate) fn renew(&self, epoch: OnionProcessEpoch) {
+        match self.0.write() {
+            Ok(mut current) => *current = epoch,
+            Err(poisoned) => *poisoned.into_inner() = epoch,
+        }
     }
 }
 
@@ -205,50 +225,88 @@ pub struct OnionExitPolicy {
     pub allowed_targets: Vec<OnionExitTarget>,
     /// Target deny-list entries understood by the exit implementation. Deny entries override allows.
     pub denied_targets: Vec<OnionExitTarget>,
-    /// Maximum concurrent circuits this exit wants to serve. `0` means unspecified.
-    pub max_circuits: u32,
-    /// Maximum streams per circuit. `0` means unspecified.
-    pub max_streams_per_circuit: u32,
+    /// Maximum concurrent sessions this exit wants to serve. `0` means unspecified.
+    pub max_sessions: u32,
     /// Maximum bytes per minute. `0` means unspecified.
     pub max_bytes_per_minute: u64,
 }
 
-/// Canonical target authority admitted by an onion exit policy.
-#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+/// One entry of an onion exit policy: a pattern over target authorities.
+///
+/// ```text
+/// OnionExitTarget = Any | AnyHost(port) | Authority(host, port)
+/// encode:  *:*      *:port          host:port | [ipv6]:port        (canonical, lowercase)
+/// matches(Any, t) = ⊤    matches(AnyHost(p), t) = (port(t) = p)
+/// matches(Authority(a), t) = (a = t)
+/// ```
+///
+/// Laws: `parse ∘ encode = Ok` on every pattern, `encode ∘ parse` is canonicalisation, and
+/// `matches` is monotone in the pattern order `Authority(h, p) ≤ AnyHost(p) ≤ Any`. The port
+/// wildcard is how an operator expresses HTTPS-only egress: `https` is a fetch only, so a TLS
+/// tunnel is `tcp` restricted to `*:443` (#834 D1′).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct OnionExitTarget(String);
+pub struct OnionExitTarget(OnionExitTargetPattern);
+
+/// The pattern of an [`OnionExitTarget`]; see its encoding table.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum OnionExitTargetPattern {
+    /// `*:*`: every target.
+    Any,
+    /// `*:port`: every host on one port.
+    AnyHost(u16),
+    /// `host:port`: exactly one canonical authority.
+    Authority(OnionProxyTarget),
+}
 
 impl OnionExitTarget {
-    const WILDCARD_AUTHORITY: &'static str = "*:*";
+    /// The wildcard host `*` of a pattern.
+    const WILDCARD: &'static str = "*";
 
-    /// Parse and canonicalize an exit target authority.
+    /// Parse and canonicalize an exit target pattern: `*`, `*:*`, `*:port` or `host:port`.
     pub fn parse(target: impl AsRef<str>) -> Result<Self> {
         let raw = target.as_ref().trim();
-        if raw == "*" || raw == Self::WILDCARD_AUTHORITY {
-            return Ok(Self(Self::WILDCARD_AUTHORITY.to_string()));
+        let invalid = |error: &dyn std::fmt::Display| {
+            Error::InvalidConfig(format!(
+                "invalid onion exit target {:?}; expected host:port, *:port or *:*: {error}",
+                target.as_ref()
+            ))
+        };
+        let pattern = match raw.split_once(':') {
+            _ if raw == Self::WILDCARD => OnionExitTargetPattern::Any,
+            Some((Self::WILDCARD, Self::WILDCARD)) => OnionExitTargetPattern::Any,
+            Some((Self::WILDCARD, port)) => match port.parse::<u16>() {
+                Ok(0) => return Err(invalid(&OnionProxyTargetError::ZeroPort)),
+                Ok(port) => OnionExitTargetPattern::AnyHost(port),
+                Err(_) => return Err(invalid(&OnionProxyTargetError::InvalidPort)),
+            },
+            _ => OnionExitTargetPattern::Authority(
+                OnionProxyTarget::parse_authority(raw).map_err(|error| invalid(&error))?,
+            ),
+        };
+        Ok(Self(pattern))
+    }
+
+    /// Return whether `target` falls under this pattern.
+    pub fn matches(&self, target: &OnionProxyTarget) -> bool {
+        match &self.0 {
+            OnionExitTargetPattern::Any => true,
+            OnionExitTargetPattern::AnyHost(port) => target.port() == *port,
+            OnionExitTargetPattern::Authority(authority) => authority == target,
         }
-        OnionProxyTarget::parse_authority(raw)
-            .map(|target| Self(target.authority()))
-            .map_err(|error| {
-                Error::InvalidConfig(format!(
-                    "invalid onion exit target {:?}; expected host:port or *:*: {error}",
-                    target.as_ref()
-                ))
-            })
     }
+}
 
-    /// Return the canonical host:port authority.
-    pub fn authority(&self) -> &str {
-        self.0.as_str()
-    }
-
-    /// Build a policy target from an already-validated proxy target.
-    pub fn from_proxy_target(target: &OnionProxyTarget) -> Self {
-        Self(target.authority())
-    }
-
-    fn matches_target(&self, target: &Self) -> bool {
-        self.0 == Self::WILDCARD_AUTHORITY || self == target
+impl std::fmt::Display for OnionExitTarget {
+    /// The canonical encoding of the pattern.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            OnionExitTargetPattern::Any => write!(formatter, "*:*"),
+            OnionExitTargetPattern::AnyHost(port) => write!(formatter, "*:{port}"),
+            OnionExitTargetPattern::Authority(authority) => {
+                formatter.write_str(authority.authority().as_str())
+            }
+        }
     }
 }
 
@@ -262,7 +320,7 @@ impl TryFrom<String> for OnionExitTarget {
 
 impl From<OnionExitTarget> for String {
     fn from(target: OnionExitTarget) -> Self {
-        target.0
+        target.to_string()
     }
 }
 
@@ -295,27 +353,24 @@ impl OnionExitPolicy {
         Ok(())
     }
 
-    /// Return whether `target` is admitted by this policy's allow-list.
-    pub fn allows_target(&self, target: &OnionExitTarget) -> bool {
-        if self.is_closed() {
-            return false;
-        }
-        if self.denies(target) {
-            return false;
-        }
-        self.allows(target)
+    /// Return whether `target` is admitted by this policy: some allow entry matches it and no
+    /// deny entry does.
+    pub fn allows_target(&self, target: &OnionProxyTarget) -> bool {
+        !self.is_closed() && !self.denies(target) && self.allows(target)
     }
 
-    fn allows(&self, target: &OnionExitTarget) -> bool {
+    /// Whether an allow entry matches `target`.
+    fn allows(&self, target: &OnionProxyTarget) -> bool {
         self.allowed_targets
             .iter()
-            .any(|allowed| allowed.matches_target(target))
+            .any(|allowed| allowed.matches(target))
     }
 
-    fn denies(&self, target: &OnionExitTarget) -> bool {
+    /// Whether a deny entry matches `target`.
+    fn denies(&self, target: &OnionProxyTarget) -> bool {
         self.denied_targets
             .iter()
-            .any(|denied| denied.matches_target(target))
+            .any(|denied| denied.matches(target))
     }
 }
 
@@ -640,7 +695,7 @@ pub(crate) struct OnionExitRegistration {
     heartbeat_interval: Duration,
     ttl: Duration,
     node_type: OnlineNodeType,
-    process_epoch: OnionProcessEpoch,
+    process_epoch: OnionProcessEpochCell,
     started_at_ms: u128,
     offer: OnionExitOffer,
     publisher: DhtRegistrationPublisher,
@@ -652,7 +707,7 @@ impl OnionExitRegistration {
         ttl: Duration,
         node_type: OnlineNodeType,
         offer: OnionExitOffer,
-        process_epoch: OnionProcessEpoch,
+        process_epoch: OnionProcessEpochCell,
     ) -> Self {
         Self {
             heartbeat_interval,
@@ -690,7 +745,7 @@ impl OnionExitRegistration {
                 did: context.did(),
                 public_key: context.delegator_verification_pubkey()?,
                 delegatee_public_key: context.delegatee_key().delegatee_public_key(),
-                process_epoch: self.process_epoch,
+                process_epoch: self.process_epoch.get(),
                 node_type: self.node_type.clone(),
                 network_id: context.network_id(),
                 service,

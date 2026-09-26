@@ -11,7 +11,7 @@ impl BrowserOnionProxy {
     async fn build_route(&self, target: OnionProxyTarget) -> NodeResult<OnionProxyRoute> {
         build_browser_onion_proxy_route(
             self.processor.clone(),
-            self.config.clone(),
+            self.config,
             target,
             self.directory_endpoint.clone(),
         )
@@ -26,7 +26,7 @@ impl BrowserOnionProxy {
 
     /// Send one typed HTTPS request through this proxy.
     ///
-    /// Dropping the returned future cancels its pending circuit immediately. Browser frontends
+    /// Dropping the returned future ends its session immediately. Browser frontends
     /// should use this method when their own request lifecycle can be cancelled.
     pub async fn request_http(
         &self,
@@ -35,10 +35,7 @@ impl BrowserOnionProxy {
     ) -> NodeResult<BrowserOnionProxyResponse> {
         let (target, call) = OnionHttpsCall::from_url(url, request)?;
         let route = self.build_route(target).await?;
-        let response = self
-            .client
-            .request(self.scope.clone(), &route, call)
-            .await?;
+        let response = self.client.request(&route, call).await?;
         Ok(BrowserOnionProxyResponse { response, route })
     }
 }

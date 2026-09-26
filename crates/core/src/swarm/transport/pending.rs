@@ -459,6 +459,17 @@ impl SwarmTransport {
         Ok(self.peer_lifecycles()?.announced_attempt(peer))
     }
 
+    /// Every announced active generation, in DID order, read once under the lifecycle lock:
+    /// the registry snapshot the application's admitted set is reconciled with.
+    pub(crate) fn announced_attempts(&self) -> Result<Vec<PendingConnectionAttempt>> {
+        Ok(self.peer_lifecycles()?.announced_attempts().collect())
+    }
+
+    /// `𝓡`, the number of lifecycle records the registry holds in any phase (#723).
+    pub(crate) fn connection_registry_capacity(&self) -> Result<usize> {
+        Ok(self.peer_lifecycles()?.bounds().total())
+    }
+
     #[cfg(all(test, feature = "dummy"))]
     pub(crate) fn is_pending_connection_attempt(
         &self,

@@ -1,556 +1,97 @@
-use rings_core::ecc::SecretKey;
-use rings_core::message::MessageSigner;
+use bytes::Bytes;
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
 
-use super::super::*;
-use crate::extension::ext::Extensions;
-use crate::onion::circuit::OnionCircuitHandler;
-use crate::onion::circuit::ONION_CIRCUIT_NAMESPACE;
-use crate::onion::native::native_onion_runtimes;
-use crate::onion::native::NativeOnionCircuitHandler;
-use crate::onion::OnionExitDescriptorBody;
-use crate::onion::OnionServiceName;
-use crate::online::OnlineNodeType;
-use crate::sync_lock::lock;
-use crate::tests::TEST_NETWORK_ID;
+use super::super::duplex::TcpDuplexState;
+use super::super::NativeOnionOpenStream;
+use crate::onion::session::dial::OnionClientStream;
+use crate::onion::session::dial::OnionStreamEvent;
 
-fn did() -> Did {
-    SecretKey::random().address().into()
-}
-
-fn session() -> DelegateeKey {
-    DelegateeKey::new_with_seckey(&SecretKey::random()).expect("delegatee key")
-}
-
-fn exit_descriptor(session: &DelegateeKey) -> OnionExitDescriptor {
-    OnionExitDescriptor::new_signed(
-        OnionExitDescriptorBody {
-            did: session.delegator_did(),
-            public_key: session
-                .delegation()
-                .delegator_verification_pubkey()
-                .expect("verification key"),
-            delegatee_public_key: session.delegatee_public_key(),
-            process_epoch: crate::onion::OnionProcessEpoch::new([19; 16]),
-            node_type: OnlineNodeType::Native,
-            network_id: TEST_NETWORK_ID,
-            service: OnionServiceName::tcp(),
-            policy: OnionExitPolicy::default(),
-            started_at_ms: 0,
-            heartbeat_at_ms: 0,
-            expires_at_ms: 1,
-            version: "test".to_string(),
-        },
-        MessageSigner::new(session, TEST_NETWORK_ID),
-    )
-    .expect("signed exit")
-}
-
-fn runtime() -> OnionTcpRuntime {
-    OnionTcpRuntime::new(session(), TEST_NETWORK_ID, None)
-}
-
-#[test]
-fn test_native_tcp_and_https_share_one_node_wide_exit_budget() {
-    let session = session();
-    let policy = OnionExitPolicy {
-        max_circuits: 1,
-        max_streams_per_circuit: 1,
-        ..OnionExitPolicy::default()
-    };
-    let (tcp, https) = native_onion_runtimes(session, TEST_NETWORK_ID, None);
-    let peer = Did::from(71_u32);
-    let _tcp_lease = tcp
-        .accounting
-        .admit(&policy, OnionCircuitId::new([71; 16]), peer, 0)
-        .expect("first protocol reserves the shared circuit budget");
-
-    assert!(https
-        .accounting_for_test()
-        .admit(&policy, OnionCircuitId::new([72; 16]), peer, 0)
-        .is_err());
-}
-
-#[test]
-fn test_exit_target_admission_returns_the_canonical_parsed_target() -> Result<()> {
-    let policy =
-        OnionExitPolicy::from_target_strings(vec!["example.com:443".to_string()], Vec::new())?;
-
-    let target = admit_exit_target(&policy, " Example.COM.:443 ")
-        .map_err(|failure| Error::InvalidConfig(format!("unexpected rejection: {failure:?}")))?;
-
-    assert_eq!(target.host(), "example.com");
-    assert_eq!(target.port(), 443);
-    assert_eq!(target.authority(), "example.com:443");
-    Ok(())
-}
-
-fn dummy_authenticated_payload(
-    return_id: OnionReturnId,
-    session: &DelegateeKey,
-) -> OnionAuthenticatedPayload {
-    dummy_authenticated_payload_for_service(return_id, session, OnionServiceName::tcp())
-}
-
-fn dummy_authenticated_payload_for_service(
-    return_id: OnionReturnId,
-    session: &DelegateeKey,
-    service: OnionServiceName,
-) -> OnionAuthenticatedPayload {
-    OnionAuthenticatedPayload::new_signed(
-        return_id,
-        encode_tcp_payload(&service, OnionTcpPayload::Close).expect("encode payload"),
-        MessageSigner::new(session, TEST_NETWORK_ID),
-    )
-    .expect("signed payload")
-}
-
-fn insert_test_client_stream(
-    runtime: &OnionTcpRuntime,
-    expected: Did,
-    exit: OnionExitDescriptor,
-    return_id: OnionReturnId,
-    tx: mpsc::Sender<TcpInbound>,
-) -> Result<TcpStreamKey> {
-    insert_test_client_stream_for_service(
-        runtime,
-        OnionServiceName::tcp(),
-        expected,
-        exit,
-        return_id,
-        tx,
-    )
-}
-
-fn insert_test_client_stream_for_service(
-    runtime: &OnionTcpRuntime,
-    service: OnionServiceName,
-    expected: Did,
-    exit: OnionExitDescriptor,
-    return_id: OnionReturnId,
-    tx: mpsc::Sender<TcpInbound>,
-) -> Result<TcpStreamKey> {
-    let (open_tx, _open_rx) = tokio::sync::oneshot::channel();
-    runtime.insert_client_stream(service, expected, exit, return_id, open_tx, tx)
-}
-
+/// Law (half-close): each half closes independently and stays closed; the stream is over
+/// exactly when both are.
 #[test]
 fn test_tcp_duplex_state_closes_only_after_both_halves_close() {
     let mut state = TcpDuplexState::open();
-    assert!(state.should_announce_terminal());
+    assert!(state.can_read() && state.can_write() && !state.is_closed());
 
     state.close_read();
     assert!(!state.can_read());
     assert!(state.can_write());
     assert!(!state.is_closed());
 
+    state.close_read();
+    assert!(!state.can_read());
+
     state.close_write();
     assert!(state.is_closed());
-    assert!(state.should_announce_terminal());
 }
 
+/// Law (commutation): the closed state does not depend on the order the halves close in.
 #[test]
-fn test_tcp_duplex_state_suppresses_terminal_after_remote_close() {
-    let mut state = TcpDuplexState::open();
+fn test_tcp_duplex_state_close_order_commutes() {
+    let mut read_first = TcpDuplexState::open();
+    read_first.close_read();
+    read_first.close_write();
+    let mut write_first = TcpDuplexState::open();
+    write_first.close_write();
+    write_first.close_read();
 
-    state.observe_remote_terminal();
-
-    assert!(state.is_closed());
-    assert!(!state.should_announce_terminal());
+    assert_eq!(read_first, write_first);
 }
 
-#[test]
-fn test_saturated_client_inbound_queue_closes_stream_without_waiting() -> Result<()> {
-    let runtime = runtime();
-    let expected = did();
-    let exit = session();
-    let (tx, _rx) = mpsc::channel(1);
-    let key = insert_test_client_stream(
-        &runtime,
-        expected,
-        exit_descriptor(&exit),
-        OnionReturnId::new([21; 16]),
-        tx,
-    )?;
-
-    runtime.send_client_inbound(key, expected, TcpInbound::Shutdown)?;
-    assert!(matches!(
-        runtime.send_client_inbound(key, expected, TcpInbound::Close),
-        Err(Error::OnionRouteError(
-            OnionRouteError::TcpStreamBackpressure
-        ))
-    ));
-    assert!(!lock(&runtime.client_streams)?.contains_key(&key));
-    Ok(())
+/// A connected pair of loopback sockets: the local stream the pump holds, and its peer.
+async fn socket_pair() -> (tokio::net::TcpStream, tokio::net::TcpStream) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let address = listener.local_addr().expect("address");
+    let (peer, accepted) = tokio::join!(tokio::net::TcpStream::connect(address), listener.accept());
+    (accepted.expect("accept").0, peer.expect("connect"))
 }
 
-#[test]
-fn test_saturated_exit_inbound_queue_closes_stream_without_waiting() -> Result<()> {
-    let runtime = runtime();
-    let peer = did();
-    let service = OnionServiceName::tcp();
-    let key = TcpStreamKey {
-        circuit_id: OnionCircuitId::new([22; 16]),
-    };
-    let (tx, _rx) = mpsc::channel(1);
-    runtime.insert_exit_stream(key, service.clone(), peer, tx)?;
-
-    runtime.send_exit_inbound(
-        key,
-        peer,
-        &service,
-        OnionForwardSequence::new(1),
-        TcpInbound::Shutdown,
-    )?;
-    assert!(matches!(
-        runtime.send_exit_inbound(
-            key,
-            peer,
-            &service,
-            OnionForwardSequence::new(2),
-            TcpInbound::Close,
-        ),
-        Err(Error::OnionRouteError(
-            OnionRouteError::TcpStreamBackpressure
-        ))
-    ));
-    assert!(!lock(&runtime.exit_streams)?.contains_key(&key));
-    Ok(())
-}
-
-#[test]
-fn test_client_stream_accepts_only_expected_return_peer() -> Result<()> {
-    let runtime = runtime();
-    let expected = did();
-    let attacker = did();
-    let exit = session();
-    let (tx, _rx) = mpsc::channel(1);
-    let key = insert_test_client_stream(
-        &runtime,
-        expected,
-        exit_descriptor(&exit),
-        OnionReturnId::new([7; 16]),
-        tx,
-    )?;
-
-    assert!(runtime.client_inbound_sender(key, expected).is_ok());
-    assert!(matches!(
-        runtime.client_inbound_sender(key, attacker),
-        Err(Error::OnionRouteError(_))
-    ));
-    Ok(())
-}
-
-#[test]
-fn test_client_stream_rejects_payload_from_wrong_exit_session() -> Result<()> {
-    let runtime = runtime();
-    let expected = did();
-    let selected_exit = session();
-    let wrong_exit = session();
-    let return_id = OnionReturnId::new([9; 16]);
-    let (tx, _rx) = mpsc::channel(1);
-    let key = insert_test_client_stream(
-        &runtime,
-        expected,
-        exit_descriptor(&selected_exit),
-        return_id,
-        tx,
-    )?;
-
-    assert!(matches!(
-        runtime.verify_client_payload(
-            key,
-            expected,
-            dummy_authenticated_payload(return_id, &wrong_exit),
-        ),
-        Err(Error::OnionRouteError(_))
-    ));
-    Ok(())
-}
-
-#[test]
-fn test_client_stream_rejects_replayed_backward_nonce() -> Result<()> {
-    let runtime = runtime();
-    let expected = did();
-    let exit = session();
-    let return_id = OnionReturnId::new([8; 16]);
-    let (tx, _rx) = mpsc::channel(1);
-    let key = insert_test_client_stream(&runtime, expected, exit_descriptor(&exit), return_id, tx)?;
-    let payload = dummy_authenticated_payload(return_id, &exit);
-
-    assert!(runtime
-        .verify_client_payload(key, expected, payload.clone())
-        .is_ok());
-    assert!(matches!(
-        runtime.verify_client_payload(key, expected, payload),
-        Err(Error::OnionRouteError(_))
-    ));
-    Ok(())
-}
-
-#[test]
-fn test_exit_runtime_rejects_replayed_forward_nonce() -> Result<()> {
-    let runtime = runtime();
-    let peer = Did::from(99_u32);
-    let circuit_id = OnionCircuitId::new([1; 16]);
-    let nonce = OnionForwardNonce::new([2; 16]);
-
-    assert!(runtime
-        .forward_replays
-        .consume_forward_nonce(peer, circuit_id, nonce)
-        .is_ok());
-    assert!(matches!(
-        runtime
-            .forward_replays
-            .consume_forward_nonce(peer, circuit_id, nonce),
-        Err(Error::OnionRouteError(_))
-    ));
-    Ok(())
-}
-
-#[test]
-fn test_busy_forward_stream_uses_constant_memory_sequence_window() -> Result<()> {
-    let runtime = runtime();
-    let peer = Did::from(101_u32);
-    let service = OnionServiceName::tcp();
-    let key = TcpStreamKey {
-        circuit_id: OnionCircuitId::new([7; 16]),
-    };
-    let (tx, _rx) = mpsc::channel(1);
-    runtime.insert_exit_stream(key, service.clone(), peer, tx)?;
-
-    for sequence in 1..=10_000 {
-        runtime.exit_inbound_sender(key, peer, &service, OnionForwardSequence::new(sequence))?;
-    }
-    assert!(matches!(
-        runtime.exit_inbound_sender(key, peer, &service, OnionForwardSequence::new(10_000)),
-        Err(Error::OnionRouteError(OnionRouteError::ForwardReplay))
-    ));
-    Ok(())
-}
-
-#[test]
-fn test_one_peers_open_replay_partition_cannot_fill_another_peers_partition() -> Result<()> {
-    let runtime = runtime();
-    let busy_peer = Did::from(102_u32);
-    let other_peer = Did::from(103_u32);
-    let nonce = OnionForwardNonce::new([9; 16]);
-
-    for value in 0_u128..4096 {
-        runtime.forward_replays.consume_forward_nonce(
-            busy_peer,
-            OnionCircuitId::new(value.to_le_bytes()),
-            nonce,
-        )?;
-    }
-    assert!(matches!(
-        runtime.forward_replays.consume_forward_nonce(
-            busy_peer,
-            OnionCircuitId::new(4096_u128.to_le_bytes()),
-            nonce,
-        ),
-        Err(Error::NoPermission)
-    ));
-    runtime.forward_replays.consume_forward_nonce(
-        other_peer,
-        OnionCircuitId::new(4096_u128.to_le_bytes()),
-        nonce,
-    )?;
-    Ok(())
-}
-
-#[test]
-fn test_busy_backward_stream_uses_constant_memory_sequence_window() -> Result<()> {
-    let runtime = runtime();
-    let expected = Did::from(104_u32);
-    let exit = session();
-    let return_id = OnionReturnId::new([10; 16]);
-    let (tx, _rx) = mpsc::channel(1);
-    let key = insert_test_client_stream(&runtime, expected, exit_descriptor(&exit), return_id, tx)?;
-
-    for sequence in 0..10_000 {
-        runtime.consume_backward_sequence(key, expected, OnionBackwardSequence::new(sequence))?;
-    }
-    assert!(matches!(
-        runtime.consume_backward_sequence(key, expected, OnionBackwardSequence::new(9_999),),
-        Err(Error::OnionRouteError(OnionRouteError::BackwardReplay))
-    ));
-    Ok(())
-}
-
-#[test]
-fn test_tcp_payload_uses_selected_route_service() -> Result<()> {
-    let service = OnionServiceName::https();
-    let payload = encode_tcp_payload(&service, OnionTcpPayload::Close)?;
-
-    assert!(payload.is_service(&service));
-    assert!(!payload.is_service(&OnionServiceName::tcp()));
-    Ok(())
-}
-
-/// The TCP exit runtime decodes every frame the node's algebra routes to it (the algebra alone
-/// selects the served symbols `Σ_n`), and nothing without an exit configuration.
-#[test]
-fn test_exit_runtime_serves_only_with_an_exit_configuration() -> Result<()> {
-    let config = OnionExitOffer::new(
-        [OnionServiceName::https()],
-        OnionExitPolicy::from_target_strings(vec!["example.com:443".to_string()], Vec::new())?,
-    )?;
-    let configured = OnionTcpRuntime::new(session(), TEST_NETWORK_ID, Some(config));
-    let unconfigured = OnionTcpRuntime::new(session(), TEST_NETWORK_ID, None);
-    let payload = encode_tcp_payload(&OnionServiceName::https(), OnionTcpPayload::Close)?;
-
-    assert!(matches!(
-        configured.decode_exit_payload(payload.clone())?,
-        Some((service, OnionTcpPayload::Close, _)) if service == OnionServiceName::https()
-    ));
-    assert!(unconfigured.decode_exit_payload(payload)?.is_none());
-    Ok(())
-}
-
-/// TCP and HTTPS adapters reject a nonce consumed through either service surface.
-#[test]
-fn test_native_tcp_and_https_exits_share_forward_replay_witness() -> Result<()> {
-    let (tcp, https) = native_onion_runtimes(session(), TEST_NETWORK_ID, None);
-    let peer = Did::from(99_u32);
-    let circuit_id = OnionCircuitId::new([7; 16]);
-    let nonce = OnionForwardNonce::new([8; 16]);
-
-    tcp.forward_replays
-        .consume_forward_nonce(peer, circuit_id, nonce)?;
-
-    assert!(matches!(
-        https
-            .forward_replays
-            .consume_forward_nonce(peer, circuit_id, nonce),
-        Err(Error::OnionRouteError(OnionRouteError::ForwardReplay))
-    ));
-    Ok(())
-}
-
-#[test]
-fn test_client_stream_rejects_backward_payload_for_wrong_service() -> Result<()> {
-    let runtime = runtime();
-    let expected = did();
-    let exit = session();
-    let return_id = OnionReturnId::new([10; 16]);
-    let (tx, _rx) = mpsc::channel(1);
-    let key = insert_test_client_stream_for_service(
-        &runtime,
-        OnionServiceName::https(),
-        expected,
-        exit_descriptor(&exit),
-        return_id,
-        tx,
-    )?;
-
-    assert!(matches!(
-        runtime.verify_client_payload(
-            key,
-            expected,
-            dummy_authenticated_payload_for_service(return_id, &exit, OnionServiceName::tcp()),
-        ),
-        Err(Error::OnionRouteError(
-            OnionRouteError::PayloadServiceMismatch { .. }
-        ))
-    ));
-    Ok(())
-}
-
-#[test]
-fn test_exit_limiter_enforces_streams_per_circuit() {
-    let runtime = runtime();
-    let policy = OnionExitPolicy {
-        max_streams_per_circuit: 1,
-        ..OnionExitPolicy::default()
-    };
-    let circuit_id = OnionCircuitId::new([1; 16]);
-    let return_peer = did();
-
-    let lease = runtime
-        .admit_exit_stream(&policy, circuit_id, return_peer, 0)
-        .expect("first stream admitted");
-    assert!(matches!(
-        runtime.admit_exit_stream(&policy, circuit_id, return_peer, 0),
-        Err(Error::NoPermission)
-    ));
-    drop(lease);
-    assert!(runtime
-        .admit_exit_stream(&policy, circuit_id, return_peer, 0)
-        .is_ok());
-}
-
-#[test]
-fn test_exit_stream_rejects_duplicate_live_circuit() {
-    let runtime = runtime();
-    let key = TcpStreamKey {
-        circuit_id: OnionCircuitId::new([3; 16]),
-    };
-    let expected = did();
-    let (first_tx, _first_rx) = mpsc::channel(1);
-    let (second_tx, _second_rx) = mpsc::channel(1);
-
-    assert!(runtime
-        .insert_exit_stream(key, OnionServiceName::tcp(), expected, first_tx)
-        .is_ok());
-    assert!(matches!(
-        runtime.insert_exit_stream(key, OnionServiceName::tcp(), expected, second_tx),
-        Err(Error::OnionRouteError(_))
-    ));
-}
-
-#[test]
-fn test_exit_limiter_counts_distinct_circuit_ids() {
-    let runtime = runtime();
-    let policy = OnionExitPolicy {
-        max_circuits: 1,
-        ..OnionExitPolicy::default()
-    };
-    let return_peer = did();
-    let first = OnionCircuitId::new([1; 16]);
-    let second = OnionCircuitId::new([2; 16]);
-
-    let lease = runtime
-        .admit_exit_stream(&policy, first, return_peer, 0)
-        .expect("first circuit admitted");
-    assert!(matches!(
-        runtime.admit_exit_stream(&policy, second, return_peer, 0),
-        Err(Error::NoPermission)
-    ));
-    drop(lease);
-    assert!(runtime
-        .admit_exit_stream(&policy, second, return_peer, 0)
-        .is_ok());
-}
-
+/// Law (fail closed, #843 D2′ `abort`): a session that fails after delivering bytes resets the
+/// local socket, so its peer reads the bytes and then a reset, never an orderly end.
 #[tokio::test]
-async fn test_native_client_dispatch_hands_tcp_circuits_past_the_https_client() -> Result<()> {
-    let processor = Arc::new(crate::tests::native::prepare_processor().await);
-    let scope = Scope::new(
-        Extensions::new(processor).core(),
-        ONION_CIRCUIT_NAMESPACE.to_string(),
-    );
-    let (tcp, https) = native_onion_runtimes(session(), TEST_NETWORK_ID, None);
-    let handler = NativeOnionCircuitHandler::new(
-        Arc::clone(&tcp),
-        Arc::clone(&https),
-        MessageSigner::new(session(), TEST_NETWORK_ID),
-    );
-    let expected = did();
-    let exit = session();
-    let return_id = OnionReturnId::new([10; 16]);
-    let (tx, mut rx) = mpsc::channel(1);
-    let key = insert_test_client_stream(&tcp, expected, exit_descriptor(&exit), return_id, tx)?;
+async fn test_a_failed_session_resets_the_local_socket() {
+    let (local, mut peer) = socket_pair().await;
+    let (stream, mut driver) = OnionClientStream::driven_by_test();
+    NativeOnionOpenStream::new(stream).relay(local);
 
-    handler
-        .handle_client(
-            &scope,
-            expected,
-            key.circuit_id,
-            dummy_authenticated_payload(return_id, &exit),
-        )
-        .await?;
+    driver
+        .emit(OnionStreamEvent::Data(Bytes::from_static(b"part")))
+        .await;
+    let mut received = [0_u8; 4];
+    peer.read_exact(&mut received)
+        .await
+        .expect("the bytes before the failure");
+    assert_eq!(&received, b"part");
+    // Only after the bytes are read: a reset may discard a receive buffer not yet read.
+    driver.emit(OnionStreamEvent::Failed).await;
+    let end = peer.read(&mut [0_u8; 1]).await;
+    assert_eq!(
+        end.map_err(|error| error.kind()),
+        Err(std::io::ErrorKind::ConnectionReset)
+    );
+}
 
-    assert!(matches!(rx.try_recv(), Ok(TcpInbound::Close)));
-    assert_eq!(https.client().pending_len(), 0);
-    Ok(())
+/// Law (half-close): a session whose two directions both end in order closes the local socket
+/// cleanly, so its peer reads the bytes and then an orderly end.
+#[tokio::test]
+async fn test_a_completed_session_closes_the_local_socket_cleanly() {
+    let (local, mut peer) = socket_pair().await;
+    let (stream, mut driver) = OnionClientStream::driven_by_test();
+    NativeOnionOpenStream::new(stream).relay(local);
+
+    peer.shutdown().await.expect("the peer's end of stream");
+    assert_eq!(driver.next_is_fin().await, Some(true));
+    driver
+        .emit(OnionStreamEvent::Data(Bytes::from_static(b"whole")))
+        .await;
+    driver.emit(OnionStreamEvent::Fin).await;
+
+    let mut received = Vec::new();
+    peer.read_to_end(&mut received)
+        .await
+        .expect("an orderly end");
+    assert_eq!(received, b"whole");
 }

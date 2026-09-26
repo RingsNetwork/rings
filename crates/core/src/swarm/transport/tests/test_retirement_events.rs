@@ -2,10 +2,17 @@
 //! `PeerRetired` started, and a topology prune that keeps the record delivers nothing.
 
 use std::sync::Arc;
+#[cfg(feature = "dummy")]
+use std::sync::Mutex;
+#[cfg(feature = "dummy")]
+use std::sync::OnceLock;
 
 use super::pending::RetirementOutcome;
 use super::*;
 use crate::dht::topology::TopologyRemoval;
+use crate::swarm::callback::PeerLink;
+#[cfg(feature = "dummy")]
+use crate::swarm::callback::PeerTransition;
 
 /// A transport whose application callback is a fresh event log.
 fn transport_with_log() -> Result<(SwarmTransport, Arc<EventLog>)> {
@@ -182,12 +189,180 @@ async fn test_retirement_is_reported_between_admission_and_terminal_state() -> R
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
     assert!(!transport.is_active_connection_attempt(attempt));
-    let state = |state| SwarmEvent::ConnectionStateChange { peer, state };
+    let generation = attempt.generation();
+    let state = |state| SwarmEvent::ConnectionStateChange {
+        peer,
+        state,
+        generation,
+    };
     assert_eq!(log.events(), vec![
         state(WebrtcConnectionState::Connecting),
         state(WebrtcConnectionState::Connected),
-        SwarmEvent::PeerRetired { peer },
+        SwarmEvent::PeerRetired {
+            peer,
+            generation: attempt.generation(),
+        },
         state(WebrtcConnectionState::Failed),
     ]);
+    Ok(())
+}
+
+/// A state is reported only for a generation (#895 A-L5): a callback bound to no attempt
+/// reports nothing, so every `ConnectionStateChange` names the generation it belongs to.
+#[cfg(feature = "dummy")]
+#[tokio::test]
+async fn test_an_unbound_callback_reports_no_state() -> Result<()> {
+    let transport = Arc::new(transport_with_measure(Arc::new(
+        RecordingMeasure::default(),
+    ))?);
+    let peer: Did = SecretKey::random().address().into();
+    let log = Arc::new(EventLog::default());
+    let callback = InnerSwarmCallback::new(Arc::clone(&transport), log.clone());
+
+    for state in [
+        WebrtcConnectionState::New,
+        WebrtcConnectionState::Connecting,
+        WebrtcConnectionState::Disconnected,
+        WebrtcConnectionState::Failed,
+    ] {
+        callback
+            .on_peer_connection_state_change(&peer.to_string(), state)
+            .await
+            .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+    }
+    assert_eq!(log.events(), Vec::new());
+    Ok(())
+}
+
+/// Records, at the start of every event, the event and the admitted snapshot
+/// (`announced_attempts`) of the transport it observes.
+#[cfg(feature = "dummy")]
+#[derive(Default)]
+struct SnapshotLog {
+    transport: OnceLock<Arc<SwarmTransport>>,
+    observed: Mutex<Vec<(SwarmEvent, Vec<PendingConnectionAttempt>)>>,
+}
+
+#[cfg(feature = "dummy")]
+#[async_trait]
+impl SwarmCallback for SnapshotLog {
+    /// Take the snapshot before the first suspension point, as a callback that publishes
+    /// state must.
+    async fn on_event(
+        &self,
+        event: &SwarmEvent,
+    ) -> std::result::Result<(), crate::error::CallbackError> {
+        let snapshot = match self.transport.get() {
+            Some(transport) => transport.announced_attempts()?,
+            None => Vec::new(),
+        };
+        self.observed
+            .lock()
+            .map_err(|_| Error::SwarmConnectionLifecycleLock)?
+            .push((event.clone(), snapshot));
+        Ok(())
+    }
+}
+
+/// Linearisation (#843): when `Connected` of a generation starts, the admitted snapshot already
+/// holds it, and when its `PeerRetired` starts, the snapshot no longer does. Both events name
+/// the generation, the same one, so an application keyed by link pairs them exactly.
+#[cfg(feature = "dummy")]
+#[tokio::test]
+async fn test_admitted_snapshot_is_linearised_with_admission_and_retirement() -> Result<()> {
+    let transport = Arc::new(transport_with_measure(Arc::new(
+        RecordingMeasure::default(),
+    ))?);
+    let peer = SecretKey::random().address().into();
+    let log = Arc::new(SnapshotLog::default());
+    let _ = log.transport.set(Arc::clone(&transport));
+    transport.callback_slot().replace(log.clone())?;
+    let callback = InnerSwarmCallback::new(Arc::clone(&transport), log.clone());
+    let (attempt, _offer) = transport
+        .prepare_connection_offer_with_attempt(peer, callback)
+        .await?;
+    open_dummy_data_channel_before_ice_connected(&transport, peer).await?;
+    let callback = InnerSwarmCallback::new(Arc::clone(&transport), log.clone())
+        .with_pending_connection_attempt(attempt);
+    callback
+        .on_data_channel_open(&peer.to_string())
+        .await
+        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+    assert_eq!(transport.announced_attempts()?, vec![attempt]);
+
+    callback
+        .on_peer_connection_state_change(&peer.to_string(), WebrtcConnectionState::Failed)
+        .await
+        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+    assert!(transport.announced_attempts()?.is_empty());
+
+    let observed = log
+        .observed
+        .lock()
+        .map_err(|_| Error::SwarmConnectionLifecycleLock)?
+        .clone();
+    let link = PeerLink::new(peer, attempt.generation());
+    let transitions = observed
+        .iter()
+        .filter_map(|(event, snapshot)| {
+            event
+                .peer_transition()
+                .map(|(observed, transition)| (observed, transition, snapshot.clone()))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(transitions, vec![
+        (link, PeerTransition::Admitted, vec![attempt]),
+        (link, PeerTransition::Retired, Vec::new()),
+    ]);
+    Ok(())
+}
+
+/// `disconnect_link` retires only the generation it names: a future generation of the same peer
+/// changes nothing, the named one is retired and reported once, and after the peer reconnects
+/// the older, retired generation cannot retire the newer one.
+#[tokio::test]
+async fn test_disconnect_link_retires_only_its_own_generation() -> Result<()> {
+    let (transport, log) = transport_with_log()?;
+    let peer = SecretKey::random().address().into();
+    let attempt = transport.reserve_pending_connection(peer).await?;
+    assert!(transport.activate_connection_for_test(attempt)?);
+    assert!(transport.mark_admission_announced(attempt)?);
+    let future = PeerLink::new(peer, attempt.generation().wrapping_add(1));
+
+    assert!(!transport.disconnect_link(future).await?);
+    assert!(transport.is_active_connection_attempt(attempt));
+    assert!(log.retired().is_empty());
+
+    let older = PeerLink::new(peer, attempt.generation());
+    assert!(transport.disconnect_link(older).await?);
+    assert_eq!(log.retired(), vec![peer]);
+    assert!(!transport.disconnect_link(older).await?);
+
+    let reconnected = transport.reserve_pending_connection(peer).await?;
+    assert!(transport.activate_connection_for_test(reconnected)?);
+    assert!(transport.mark_admission_announced(reconnected)?);
+    assert!(reconnected.generation() > older.generation());
+    assert!(!transport.disconnect_link(older).await?);
+    assert!(transport.is_active_connection_attempt(reconnected));
+    assert_eq!(log.retired(), vec![peer]);
+    assert!(
+        transport
+            .disconnect_link(PeerLink::new(peer, reconnected.generation()))
+            .await?
+    );
+    assert_eq!(log.retired(), vec![peer, peer]);
+    Ok(())
+}
+
+/// `𝓡` is the registry's total bound, `2 × (finger slots + successors + 1)`, and the snapshot
+/// of a fresh transport is empty.
+#[tokio::test]
+async fn test_registry_capacity_is_the_lifecycle_total() -> Result<()> {
+    let (transport, _log) = transport_with_log()?;
+    assert_eq!(
+        transport.connection_registry_capacity()?,
+        2 * (crate::dht::DEFAULT_FINGER_TABLE_SIZE + transport.dht.successors().capacity() + 1)
+    );
+    assert!(transport.announced_attempts()?.is_empty());
     Ok(())
 }

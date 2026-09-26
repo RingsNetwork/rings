@@ -1,149 +1,333 @@
-//! Golden wire bytes of the onion data plane.
+//! Golden wire bytes of the loop data plane (#843).
 //!
-//! Law (#834 L10, Phase 1): a refactor of the onion circuit preserves every encoding below byte for
-//! byte. Writing `enc : T → Bytes` for the Rings codec, each test fixes one value `v₀` built only
-//! from constants and asserts `enc(v₀) = golden` together with `dec ∘ enc (v₀) = v₀`. No RNG reaches
-//! a pinned byte: ciphertexts are literal envelopes, and where a live seal is unavoidable only its
-//! deterministic plaintext framing is compared.
+//! Law (#834 L10): every encoding below is fixed byte for byte. Writing `enc : T → Bytes`, each
+//! test fixes one value `v₀` built only from constants and seeded generators and asserts
+//! `enc(v₀) = golden`, with `dec ∘ enc (v₀) = v₀` where a decoder exists. A cell is pinned by its
+//! SHA-256 digest `H(enc(v₀))` and its width, since it is `b` bytes.
 //!
-//! A failing test here is a wire cutover, never a fixture to refresh: Phase 2 replaces this set in
-//! one commit together with the version bump.
+//! The generator is ChaCha20 from a fixed seed, which is portable across `rand` releases. The
+//! frames, `ā`, the uniform layers, a reply block's reply cell and the descriptor are pure
+//! functions of constants, so they pin the wire alone; the digests of a built loop cell and of a
+//! built reply block also pin the order in which the builder draws its secrets, which is part of
+//! a reproducible build of a cell, not of the wire, so a change there that keeps every other
+//! golden is a refactor of the builder and is re-pinned with it.
+//!
+//! A failing test here is a wire cutover, never a fixture to refresh: there is no protocol
+//! versioning, so a change to any of these bytes is a total cutover of the network.
 
+use rand::SeedableRng;
+use rand_chacha::ChaCha20Rng;
+use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
-use rings_core::ecc::elgamal::impls::secp256k1::encrypt_aead_with_rng;
-use rings_core::ecc::elgamal::impls::secp256k1::AeadCiphertext;
 use rings_core::ecc::PublicKey;
+use rings_core::ecc::SecretKey;
 use rings_core::ecc::VerificationPublicKey;
 use rings_core::message::MessageSigner;
-use serde::de::DeserializeOwned;
-use serde::Serialize;
+use sha2::Digest;
+use sha2::Sha256;
 
-use super::super::cell::seal_message;
-use super::super::cell::OnionWireCell;
-use super::super::codec::OnionWireMessage;
-use super::super::crypto::decrypt_forward_layer;
-use super::super::OnionBackwardFrame;
-use super::super::OnionCellBucket;
-use super::super::OnionCircuitId;
-use super::super::OnionCircuitPayload;
-use super::super::OnionClientReturn;
-use super::super::OnionForwardFrame;
-use super::super::OnionForwardLayer;
-use super::super::OnionForwardNonce;
-use super::super::OnionForwardSequence;
-use super::super::OnionReturnId;
-use super::test_circuit_protocol::session;
+use super::super::OnionExpiry;
+use super::super::OnionReplayNonce;
+use super::super::ONION_CIRCUIT_NAMESPACE;
 use crate::descriptor::SignedDescriptor;
 use crate::descriptor::SignedDescriptorBody;
+use crate::onion::session::frame::OnionFrame;
+use crate::onion::session::frame::OnionSequence;
+use crate::onion::session::OnionSessionArguments;
+use crate::onion::session::OnionSessionId;
+use crate::onion::session::OnionTargetDigest;
+use crate::onion::sphinx::builder::build_loop;
+use crate::onion::sphinx::builder::build_surb;
+use crate::onion::sphinx::builder::OnionApplication;
+use crate::onion::sphinx::cell::OnionSurb;
+use crate::onion::sphinx::class::OnionLoopClass;
+use crate::onion::sphinx::header::OnionHeaderMac;
+use crate::onion::sphinx::layer::OnionLayer;
+use crate::onion::sphinx::layer::OnionLayerApplication;
+use crate::onion::sphinx::layer::OnionLayerHead;
+use crate::onion::sphinx::seed::OnionCarrySeed;
+use crate::onion::sphinx::seed::OnionSegmentSeed;
 use crate::onion::OnionExitDescriptorBody;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionExitTarget;
+use crate::onion::OnionLoop;
 use crate::onion::OnionProcessEpoch;
+use crate::onion::OnionRouteHop;
 use crate::onion::OnionServiceName;
 use crate::onion::ONION_EXITS_TOPIC;
 use crate::online::OnlineNodeType;
 use crate::tests::TEST_NETWORK_ID;
 
-/// Pinned encoding of [`relay_layer`].
-const GOLDEN_RELAY_LAYER: &str = "002a3078303030303030303030303030303030303030303030303030303030303030303030313032303330341111111111111111111111111111111133314c556b7a4d35714c7333314c556b7a4d35714c7333314c556b7a4d35714c7333314c556b7a4d35714c7333314c576f53425833315744647a323846576f34315744647a323846576f34315744647a323846576f34315744647a323846576f34315258557a694401023342763439646b693638593842763439646b693638593842763439646b693638593842763439646b6936385938384d36653272723343356f3264526b574a553943356f3264526b574a553943356f3264526b574a553943356f3264526b574a553938593357704331334346587564366e765551414346587564366e765551414346587564366e765551414346587564366e76555141385a5867444135334352476e636d714c654c424352476e636d714c654c424352476e636d714c654c424352476e636d714c654c42386a7a79486778414141414141414141414141054141414141";
-/// Pinned encoding of [`exit_layer`].
-const GOLDEN_EXIT_LAYER: &str = "0121212121212121212121212121212121333166785779684166676a353166785779684166676a353166785779684166676a353166785779684166676a3531557743527a55222222222222222222222222222222223331716850794e443572663631716850794e443572663631716850794e443572663631716850794e443572663631657242535972b0ba97ffbc31232323232323232323232323232323230703746370046f70656e";
-/// Pinned encoding of `OnionWireMessage::Forward` over [`ciphertext`]`(0x51)`.
-const GOLDEN_FORWARD_MESSAGE: &str = "00505050505050505050505050505050500102334562744459584e6b7353514562744459584e6b7353514562744459584e6b7353514562744459584e6b7353514143544a726e6733456d643659435242334e52456d643659435242334e52456d643659435242334e52456d643659435242334e52414d51756e414c3345774d7958735462444a5345774d7958735462444a5345774d7958735462444a5345774d7958735462444a5341546d54694d663346373672585957315045544637367258595731504554463736725859573150455446373672585957315045544162326d7a3355515151515151515151515151055151515151";
-/// Pinned encoding of `OnionWireMessage::Backward` over [`ciphertext`]`(0x61)`.
-const GOLDEN_BACKWARD_MESSAGE: &str = "016060606060606060606060606060606001023348486948544a3352634c6748486948544a3352634c6748486948544a3352634c6748486948544a3352634c67427843585738443348545441537935716e476848545441537935716e476848545441537935716e476848545441537935716e4768433755527370793348644333536538467843694864433353653846784369486443335365384678436948644333536538467843694345667359614633486e7676534b416738386a486e7676534b416738386a486e7676534b416738386a486e7676534b416738386a434a4d42557055616161616161616161616161056161616161";
-/// Pinned encoding of `OnionWireMessage::Cover`.
-const GOLDEN_COVER_MESSAGE: &str = "02";
-/// Pinned encoding of one `OnionWireCell` in the `KiB16` class over [`ciphertext`]`(0x71)`.
-const GOLDEN_WIRE_CELL: &str = "010102334b79594d4e3469364d45784b79594d4e3469364d45784b79594d4e3469364d45784b79594d4e3469364d4578446d517233586f334c3948454d6a6b575841794c3948454d6a6b575841794c3948454d6a6b575841794c3948454d6a6b5758417944795252584562334c4b32374d516e7668367a4c4b32374d516e7668367a4c4b32374d516e7668367a4c4b32374d516e7668367a45347a75763151334c556b7a4d35714c7333314c556b7a4d35714c7333314c556b7a4d35714c7333314c556b7a4d35714c733331453946484c4a50717171717171717171717171057171717171";
+/// Pinned `enc(data(5, T, t = example.com:443, w′ = "ab"))`.
+const GOLDEN_DATA_WITH_TARGET: &str = "000000000501000f6578616d706c652e636f6d3a3434336162";
+/// Pinned `enc(data(6, 0, "xyz"))`.
+const GOLDEN_DATA: &str = "00000000060078797a";
+/// Pinned `enc(fin(7))`.
+const GOLDEN_FIN: &str = "0100000007";
+/// Pinned `enc(abort(9))`.
+const GOLDEN_ABORT: &str = "0300000009";
+/// Pinned `H(enc(credit(υ)))` of the fixture reply block.
+const GOLDEN_CREDIT_DIGEST: &str =
+    "fb3590462a35db66bf2deca51264d9a42f97d35c4ce2b915cd2fd9d696c19957";
+/// Pinned `ā = ς ‖ SHA-256(t) ‖ 0^16` of the fixture session.
+const GOLDEN_SESSION_ARGUMENTS: &str =
+    "515151515151515151515151515151512d92752e69614799ea8467c10d252c76f79c85845cf23d54406ef49ab463ff0c00000000000000000000000000000000";
+/// Pinned `H(χ₁ ‖ y₀)` of the fixture loop's first cell.
+const GOLDEN_LOOP_CELL_DIGEST: &str =
+    "cd0d86042450d02c24fd2465e9a79bc61ae8f2aa924df057ac04ca91566d48d9";
+/// Pinned `t_⋄` of the fixture loop.
+const GOLDEN_LOOP_REPLY_TAG: &str = "64542fdd8b597b71e4d95d989f31d1d0";
 /// Pinned signing data of [`exit_descriptor_body`].
-const GOLDEN_EXIT_DESCRIPTOR_SIGNING_DATA: &str = "2a30783030303030303030303030303030303030303030303030303030303030303030306130623063306400333231534779334657326237323153477933465732623732315347793346573262373231534779334657326237316a39514a674e33324242397869487643583832424239786948764358383242423978694876435838324242397869487643583831745a374d7676313131313131313131313131313131310101056874747073010f6578616d706c652e636f6d3a343433010b31302e302e302e313a3232100480804080d095ffbc31909e96ffbc31a0dd9bffbc310c302e302e302d676f6c64656e";
+const GOLDEN_EXIT_DESCRIPTOR_SIGNING_DATA: &str =
+    "2a30783030303030303030303030303030303030303030303030303030303030303030306130623063306400333231534779334657326237323153477933465732623732315347793346573262373231534779334657326237316a39514a674e33324242397869487643583832424239786948764358383242423978694876435838324242397869487643583831745a374d7676313131313131313131313131313131310101056874747073020f6578616d706c652e636f6d3a343433052a3a343433010b31302e302e302e313a32321080804080d095ffbc31909e96ffbc31a0dd9bffbc310c302e302e302d676f6c64656e";
 
-/// Frozen AEAD namespace of forward layers (`ONION_AEAD_NAMESPACE`).
-const FORWARD_LAYER_AEAD_NAMESPACE: &[u8] = b"rings-node:onion-circuit";
-/// Frozen AEAD namespace of hop cells (`ONION_CELL_AEAD_NAMESPACE`).
-const CELL_AEAD_NAMESPACE: &[u8] = b"rings-node:onion-cell";
+/// The generator seed of every seeded golden.
+const GOLDEN_SEED: [u8; 32] = [0x43; 32];
+/// Pinned `enc(λ)` of a relay layer, before the header's stream cipher.
+const GOLDEN_RELAY_LAYER: &str =
+    "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010203043131313131313131313131313131313100000000000249f0232323232323232323232323232323232424242424242424242424242424242424242424242424242424242424242424252525252525252525252525252525252525252525252525252525252525252526262626262626262626262626262626";
+/// Pinned `enc(λ)` of a symbol layer applying `tcp` to the fixture session.
+const GOLDEN_SYMBOL_LAYER: &str =
+    "01515151515151515151515151515151512d92752e69614799ea8467c10d252c76f79c85845cf23d54406ef49ab463ff0c0000000000000000000000000000000000000000000000000000000000000000010203043131313131313131313131313131313100000000000249f0232323232323232323232323232323232424242424242424242424242424242424242424242424242424242424242424252525252525252525252525252525252525252525252525252525252525252526262626262626262626262626262626";
+/// Pinned `H(reply cell)` of the fixture reply block producing `golden reply`.
+const GOLDEN_SURB_REPLY_DIGEST: &str =
+    "3a314348bfb2f75467dcc5e2df8101b6f4694ed02c4938bde599cc3eda0601cf";
+
 /// Frozen signing domain of onion-exit descriptors.
 const EXIT_DESCRIPTOR_DOMAIN_TAG: &[u8] = b"rings-node:onion-exit-descriptor";
-/// Fixed circuit id bound into the forward-layer AEAD fixture.
-const PINNED_CIRCUIT_ID: OnionCircuitId = OnionCircuitId::new([0x2a; 16]);
+/// The fixture session's target.
+const FIXTURE_TARGET: &[u8] = b"example.com:443";
+/// The fixture loop's process epoch.
+const FIXTURE_EPOCH: OnionProcessEpoch = OnionProcessEpoch::new([0x31; 16]);
 
 /// Render bytes as lowercase hex so a golden mismatch prints a readable diff.
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// Assert `enc(value) = golden` and `dec(enc(value)) = value` under the Rings codec.
-fn assert_golden<T>(value: &T, golden: &str)
-where T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug {
-    let encoded = rings_codec::serialize(value).expect("encode golden fixture");
+/// `H(bytes)` in hex.
+fn digest(bytes: &[u8]) -> String {
+    hex(Sha256::digest(bytes).as_slice())
+}
+
+/// The fixed secret `(seed)·0x0101…01`.
+fn secret(seed: u8) -> SecretKey {
+    SecretKey::try_from(format!("{seed:02x}").repeat(32).as_str()).expect("fixture scalar")
+}
+
+/// The route hop `seed`: DID and session key both fixed by `seed`.
+fn hop(seed: u8) -> OnionRouteHop {
+    OnionRouteHop::new(
+        Did::from(u32::from(seed)),
+        secret(seed).pubkey(),
+        FIXTURE_EPOCH,
+    )
+}
+
+/// The fixture loop `g = 1, r₀₂ = 2, h = 3, r₁₁ = 4, g = 1`.
+fn fixture_loop() -> OnionLoop<OnionRouteHop> {
+    let mut relays = [1, 2, 4].into_iter();
+    OnionLoop::try_unfold(Vec::new(), hop(3), |_| {
+        relays
+            .next()
+            .map(hop)
+            .ok_or(crate::error::Error::InvalidData)
+    })
+    .expect("the fixture loop")
+}
+
+/// The fixture expiry `x = 5Q`.
+fn fixture_expiry() -> OnionExpiry {
+    OnionExpiry::from_ms(150_000).expect("on the grid")
+}
+
+/// The fixture session's arguments.
+fn session_arguments() -> OnionSessionArguments {
+    OnionSessionArguments {
+        session: OnionSessionId::new([0x51; 16]),
+        digest: OnionTargetDigest::of(FIXTURE_TARGET),
+    }
+}
+
+/// Assert `enc(frame) = golden` and that the encoding decodes to a frame encoding the same.
+fn assert_frame(frame: &OnionFrame, golden: &str) {
+    let encoded = frame
+        .encode(OnionLoopClass::DEFAULT)
+        .expect("the frame fits");
     assert_eq!(hex(encoded.as_slice()), golden);
+    let decoded = OnionFrame::decode(OnionLoopClass::DEFAULT, encoded.as_slice()).expect("decode");
     assert_eq!(
-        rings_codec::deserialize::<T>(encoded.as_slice()).expect("decode golden fixture"),
-        *value
+        decoded.encode(OnionLoopClass::DEFAULT).expect("fits"),
+        encoded
     );
 }
 
-/// Constant compressed-point bytes; the codec carries curve elements opaquely.
-const fn point(seed: u8) -> PublicKey<33> {
-    PublicKey([seed; 33])
-}
-
-/// Literal AEAD envelope with the fixed two-block wrapped key the decoder admits.
-fn ciphertext(seed: u8) -> AeadCiphertext {
-    AeadCiphertext {
-        version: 1,
-        encrypted_key: vec![
-            (point(seed), point(seed.wrapping_add(1))),
-            (point(seed.wrapping_add(2)), point(seed.wrapping_add(3))),
-        ],
-        nonce: [seed; 12],
-        ciphertext: vec![seed; 5],
-    }
-}
-
-/// Relay layer whose every field is a distinct constant.
-fn relay_layer() -> OnionForwardLayer {
-    OnionForwardLayer::Relay {
-        next_hop: Did::from(0x0102_0304_u32),
-        next_circuit_id: OnionCircuitId::new([0x11; 16]),
-        next_delegatee_public_key: point(0x02),
-        return_delegatee_public_key: point(0x03),
-        inner: ciphertext(0x41),
-    }
-}
-
-/// Exit layer whose every field is a distinct constant.
-fn exit_layer() -> OnionForwardLayer {
-    OnionForwardLayer::Exit {
-        process_epoch: OnionProcessEpoch::new([0x21; 16]),
-        client: OnionClientReturn {
-            delegatee_public_key: point(0x04),
-            return_id: OnionReturnId::new([0x22; 16]),
+#[test]
+fn test_session_frames_are_pinned() {
+    assert_frame(
+        &OnionFrame::Data {
+            sequence: OnionSequence::new(5),
+            target: Some(bytes::Bytes::from_static(FIXTURE_TARGET)),
+            payload: bytes::Bytes::from_static(b"ab"),
         },
-        return_delegatee_public_key: point(0x05),
-        expires_at_ms: 1_700_000_030_000,
-        forward_nonce: OnionForwardNonce::new([0x23; 16]),
-        forward_sequence: OnionForwardSequence::new(7),
-        payload: OnionCircuitPayload::new(OnionServiceName::tcp(), b"open".as_slice()),
+        GOLDEN_DATA_WITH_TARGET,
+    );
+    assert_frame(
+        &OnionFrame::Data {
+            sequence: OnionSequence::new(6),
+            target: None,
+            payload: bytes::Bytes::from_static(b"xyz"),
+        },
+        GOLDEN_DATA,
+    );
+    assert_frame(
+        &OnionFrame::Fin {
+            sequence: OnionSequence::new(7),
+        },
+        GOLDEN_FIN,
+    );
+    assert_frame(
+        &OnionFrame::Abort {
+            sequence: OnionSequence::new(9),
+        },
+        GOLDEN_ABORT,
+    );
+}
+
+/// The uniform layer of `next`, applying `application`, with every other field a constant.
+fn layer(application: OnionLayerApplication) -> OnionLayer {
+    OnionLayer {
+        head: OnionLayerHead {
+            application,
+            next: Did::from(0x0102_0304_u32),
+            epoch: FIXTURE_EPOCH,
+            expiry: fixture_expiry(),
+            nonce: OnionReplayNonce::new([0x23; 16]),
+        },
+        inbound: OnionCarrySeed::new([0x24; 32]),
+        outbound: OnionSegmentSeed::new([0x25; 32]),
     }
+}
+
+/// The plaintext uniform layer `λ` (#834 D6″), field by field, for a relay and for a symbol:
+/// the one encoding every hop decodes.
+#[test]
+fn test_uniform_layers_are_pinned() {
+    let mac = OnionHeaderMac::new([0x26; 16]);
+    let relay = layer(OnionLayerApplication::Relay).encode(&mac);
+    let symbol = layer(OnionLayerApplication::Apply {
+        symbol: OnionServiceName::tcp(),
+        arguments: session_arguments().encode(),
+    })
+    .encode(&mac);
+
+    assert_eq!(hex(relay.as_slice()), GOLDEN_RELAY_LAYER);
+    assert_eq!(hex(symbol.as_slice()), GOLDEN_SYMBOL_LAYER);
+    let (decoded, decoded_mac) = OnionLayer::decode(symbol.as_slice()).expect("decodes");
+    assert_eq!(decoded.encode(&decoded_mac).as_slice(), symbol.as_slice());
+}
+
+/// The reply cell a reply block produces from a fixed value.
+#[test]
+fn test_surb_reply_cell_is_pinned() {
+    // υ = next ‖ χ_υ ‖ σ_υ ‖ x_υ from constants: the reply cell is a function of wire inputs only.
+    let block = [
+        [0x11; 20].as_slice(),
+        vec![0x22; 2919].as_slice(),
+        [0x33; 32].as_slice(),
+        fixture_expiry().to_wire_ms().to_be_bytes().as_slice(),
+    ]
+    .concat();
+    let surb = OnionSurb::decode(OnionLoopClass::DEFAULT, &block).expect("a reply block");
+    let (next, cell) = surb.produce(b"golden reply").expect("produce");
+
+    assert_eq!(next.to_string(), format!("0x{}", "11".repeat(20)));
+    assert_eq!(
+        digest(cell.into_bytes().as_slice()),
+        GOLDEN_SURB_REPLY_DIGEST
+    );
+}
+
+#[test]
+fn test_credit_frame_is_pinned() {
+    let (surb, _) = build_surb(
+        fixture_loop().return_path(),
+        Did::from(99_u32),
+        OnionLoopClass::DEFAULT,
+        fixture_expiry(),
+        &mut ChaCha20Rng::from_seed(GOLDEN_SEED),
+    )
+    .expect("build the reply block");
+    let encoded = OnionFrame::Credit(vec![surb])
+        .encode(OnionLoopClass::DEFAULT)
+        .expect("one block fits");
+
+    assert_eq!(digest(encoded.as_slice()), GOLDEN_CREDIT_DIGEST);
+    let decoded = OnionFrame::decode(OnionLoopClass::DEFAULT, encoded.as_slice()).expect("decodes");
+    assert!(matches!(&decoded, OnionFrame::Credit(blocks) if blocks.len() == 1));
+    assert_eq!(
+        decoded
+            .encode(OnionLoopClass::DEFAULT)
+            .expect("re-encodes")
+            .as_slice(),
+        encoded.as_slice(),
+        "dec ∘ enc = id"
+    );
+}
+
+#[test]
+fn test_session_arguments_are_pinned() {
+    let arguments = session_arguments().encode();
+
+    assert_eq!(hex(arguments.as_bytes()), GOLDEN_SESSION_ARGUMENTS);
+    assert_eq!(
+        OnionSessionArguments::decode(&arguments),
+        Some(session_arguments())
+    );
+}
+
+/// The whole first cell of a seeded loop: every header, carry and padding byte is a function
+/// of the hops' keys, the applications, the value and the seed.
+#[test]
+fn test_loop_cell_is_pinned() {
+    let built = build_loop(
+        &fixture_loop(),
+        &[OnionApplication {
+            symbol: OnionServiceName::tcp(),
+            arguments: session_arguments().encode(),
+        }],
+        Did::from(99_u32),
+        OnionLoopClass::DEFAULT,
+        fixture_expiry(),
+        b"golden value",
+        &mut ChaCha20Rng::from_seed(GOLDEN_SEED),
+    )
+    .expect("build the loop");
+
+    assert_eq!(built.guard, Did::from(1_u32));
+    let cell = built.cell.into_bytes();
+    assert_eq!(cell.len(), OnionLoopClass::DEFAULT.cell_bytes());
+    assert_eq!(digest(cell.as_slice()), GOLDEN_LOOP_CELL_DIGEST);
+    assert_eq!(hex(built.reply.tag.as_bytes()), GOLDEN_LOOP_REPLY_TAG);
 }
 
 /// Exit-descriptor body whose every signed field is a distinct constant.
 fn exit_descriptor_body() -> OnionExitDescriptorBody {
     OnionExitDescriptorBody {
         did: Did::from(0x0a0b_0c0d_u32),
-        public_key: VerificationPublicKey::Secp256k1(point(0x06)),
-        delegatee_public_key: point(0x07),
-        process_epoch: OnionProcessEpoch::new([0x31; 16]),
+        public_key: VerificationPublicKey::Secp256k1(PublicKey([0x06; 33])),
+        delegatee_public_key: PublicKey([0x07; 33]),
+        process_epoch: FIXTURE_EPOCH,
         node_type: OnlineNodeType::Native,
         network_id: TEST_NETWORK_ID,
         service: OnionServiceName::https(),
         policy: OnionExitPolicy {
-            allowed_targets: vec![OnionExitTarget::parse("example.com:443").expect("target")],
+            allowed_targets: vec![
+                OnionExitTarget::parse("example.com:443").expect("target"),
+                OnionExitTarget::parse("*:443").expect("target"),
+            ],
             denied_targets: vec![OnionExitTarget::parse("10.0.0.1:22").expect("target")],
-            max_circuits: 16,
-            max_streams_per_circuit: 4,
+            max_sessions: 16,
             max_bytes_per_minute: 1_048_576,
         },
         started_at_ms: 1_700_000_000_000,
@@ -154,109 +338,11 @@ fn exit_descriptor_body() -> OnionExitDescriptorBody {
 }
 
 #[test]
-fn test_relay_layer_wire_is_pinned() {
-    assert_golden(&relay_layer(), GOLDEN_RELAY_LAYER);
-}
-
-#[test]
-fn test_exit_layer_wire_is_pinned() {
-    assert_golden(&exit_layer(), GOLDEN_EXIT_LAYER);
-}
-
-#[test]
-fn test_wire_message_variants_are_pinned() {
-    assert_golden(
-        &OnionWireMessage::Forward(OnionForwardFrame {
-            circuit_id: OnionCircuitId::new([0x50; 16]),
-            layer: ciphertext(0x51),
-        }),
-        GOLDEN_FORWARD_MESSAGE,
-    );
-    assert_golden(
-        &OnionWireMessage::Backward(OnionBackwardFrame {
-            circuit_id: OnionCircuitId::new([0x60; 16]),
-            payload: ciphertext(0x61),
-        }),
-        GOLDEN_BACKWARD_MESSAGE,
-    );
-    assert_golden(&OnionWireMessage::Cover, GOLDEN_COVER_MESSAGE);
-}
-
-#[test]
-fn test_wire_cell_envelope_is_pinned() {
-    assert_golden(
-        &OnionWireCell {
-            bucket: OnionCellBucket::KiB16,
-            sealed: ciphertext(0x71),
-        },
-        GOLDEN_WIRE_CELL,
-    );
-}
-
-/// Cell plaintext = `le32(|m|) ‖ m ‖ pad`, `|plaintext| = bucket.plaintext_len()`, sealed under
-/// `AAD = enc(CELL_AEAD_NAMESPACE, bucket)`. The padding and the ciphertext are random; the
-/// prefix, the message bytes, the length and the AAD are pinned.
-#[test]
-fn test_cell_plaintext_framing_is_pinned() {
-    let recipient = session();
-    let sealed = seal_message(
-        &OnionWireMessage::Cover,
-        recipient.delegatee_public_key(),
-        Some(OnionCellBucket::KiB4),
-    )
-    .expect("seal cover cell");
-    let cell = rings_codec::deserialize::<OnionWireCell>(sealed.as_ref()).expect("decode cell");
-    let aad = [
-        [u8::try_from(CELL_AEAD_NAMESPACE.len()).expect("short namespace")].as_slice(),
-        CELL_AEAD_NAMESPACE,
-        [0x00].as_slice(),
-    ]
-    .concat();
-    let plaintext = recipient
-        .decrypt_elgamal_aead(&cell.sealed, aad.as_slice())
-        .expect("pinned cell AAD opens the cell");
-
-    assert_eq!(cell.bucket, OnionCellBucket::KiB4);
-    assert_eq!(plaintext.len(), 4 * 1024);
-    assert_eq!(plaintext.get(..4), Some([1, 0, 0, 0].as_slice()));
-    assert_eq!(
-        plaintext.get(4..5).map(hex),
-        Some(GOLDEN_COVER_MESSAGE.to_string())
-    );
-}
-
-/// Forward-layer `AAD = enc(ONION_AEAD_NAMESPACE, Forward, circuit_id)`, written out byte by byte:
-/// a layer sealed under this literal AAD opens through the production decryptor.
-#[test]
-fn test_forward_layer_aead_context_is_pinned() {
-    let recipient = session();
-    let aad = [
-        [u8::try_from(FORWARD_LAYER_AEAD_NAMESPACE.len()).expect("short namespace")].as_slice(),
-        FORWARD_LAYER_AEAD_NAMESPACE,
-        [0x00].as_slice(),
-        [0x2a; 16].as_slice(),
-    ]
-    .concat();
-    let plaintext = rings_codec::serialize(&relay_layer()).expect("encode relay layer");
-    let sealed = encrypt_aead_with_rng(
-        plaintext.as_slice(),
-        aad.as_slice(),
-        recipient.delegatee_public_key(),
-        &mut rand::thread_rng(),
-    )
-    .expect("seal relay layer");
-
-    assert_eq!(
-        decrypt_forward_layer(&recipient, PINNED_CIRCUIT_ID, &sealed).expect("open relay layer"),
-        relay_layer()
-    );
-}
-
-#[test]
 fn test_exit_descriptor_signing_data_is_pinned() {
     let body = exit_descriptor_body();
     let signing_data = body.body_signing_data().expect("descriptor signing data");
-    let signature = MessageSigner::new(&session(), TEST_NETWORK_ID)
+    let session = DelegateeKey::new_with_seckey(&secret(9)).expect("fixture delegation");
+    let signature = MessageSigner::new(&session, TEST_NETWORK_ID)
         .sign(OnionExitDescriptorBody::DOMAIN_TAG, signing_data.as_slice())
         .expect("sign descriptor");
     let descriptor = body.into_signed_descriptor(signature);
@@ -280,4 +366,5 @@ fn test_frozen_onion_labels() {
         EXIT_DESCRIPTOR_DOMAIN_TAG
     );
     assert_eq!(ONION_EXITS_TOPIC, "onion_exits");
+    assert_eq!(ONION_CIRCUIT_NAMESPACE, "onion-circuit");
 }

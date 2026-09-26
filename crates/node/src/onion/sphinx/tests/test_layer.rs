@@ -43,6 +43,9 @@ fn test_decode_inverts_encode() {
     }
 }
 
+/// The offset of `x` in a layer: `f`, `ā`, `next` and `e` precede it.
+const LAYER_EXPIRY_OFFSET: usize = 1 + ONION_ARGUMENT_BYTES + 20 + 16;
+
 /// `decode(w) = Right(λ, γ) ⇒ encode(λ, γ) = w`: every accepted string is canonical.
 #[test]
 fn test_accepted_strings_are_canonical() {
@@ -56,6 +59,8 @@ fn test_accepted_strings_are_canonical() {
         if bytes[0] == 0 {
             bytes[1..=ONION_ARGUMENT_BYTES].fill(0);
         }
+        // `x` must lie on the grid `Q·ℕ`; zero does, and every other field stays random.
+        bytes[LAYER_EXPIRY_OFFSET..LAYER_EXPIRY_OFFSET + 8].fill(0);
 
         if let Ok((layer, mac)) = OnionLayer::decode(&bytes) {
             accepted += 1;
@@ -65,8 +70,9 @@ fn test_accepted_strings_are_canonical() {
     assert!(accepted > 0);
 }
 
-/// A code outside `Σ`, a `relay` layer with arguments, and a string of another width are
-/// outside the image of `encode`.
+/// A code outside `Σ`, a `relay` layer with arguments, an expiry off the grid `Q·ℕ`, and a
+/// string of another width are outside the image of `encode`: `x` is parsed once, here, so no hop
+/// ever judges an off-grid expiry.
 #[test]
 fn test_decode_rejects_non_canonical_strings() {
     let relay = *fixture_layer(3, 0, 2).encode(&OnionHeaderMac::new([0; 16]));
@@ -85,6 +91,19 @@ fn test_decode_rejects_non_canonical_strings() {
         Some(OnionLayerError::RelayArguments)
     );
 
+    let mut off_grid = relay;
+    let expiry = LAYER_EXPIRY_OFFSET..LAYER_EXPIRY_OFFSET + 8;
+    off_grid[expiry.clone()].copy_from_slice(&30_001_u64.to_be_bytes());
+    assert_eq!(
+        OnionLayer::decode(&off_grid).err(),
+        Some(OnionLayerError::OffGridExpiry(30_001))
+    );
+    off_grid[expiry].copy_from_slice(&u64::MAX.to_be_bytes());
+    assert_eq!(
+        OnionLayer::decode(&off_grid).err(),
+        Some(OnionLayerError::OffGridExpiry(u64::MAX))
+    );
+
     for width in [ONION_LAYER_BYTES - 1, ONION_LAYER_BYTES + 1] {
         assert_eq!(
             OnionLayer::decode(&vec![0; width]).err(),
@@ -93,19 +112,18 @@ fn test_decode_rejects_non_canonical_strings() {
     }
 }
 
-/// Every bucket but `KiB4` is a class with `C_b = b − |χ| − F` (`C_16KiB = 13465`), the class is
-/// the cell length, and distinct classes have distinct MAC labels.
+/// Every bucket is a class with `C_b = b − |χ| − F` (`C_16KiB = 13465`), the class is the cell
+/// length, a length of no bucket (4 KiB, below the header's reach) is no class, and distinct
+/// classes have distinct MAC labels.
 #[test]
 fn test_carry_width_per_class() {
     assert_eq!(ONION_CELL_FRAMING_BYTES, 0);
     assert_eq!(OnionLoopClass::DEFAULT.carry_bytes(), 13_465);
-    assert!(OnionLoopClass::try_from(OnionCellBucket::KiB4).is_err());
     let classes = OnionCellBucket::ALL
         .into_iter()
-        .filter_map(|bucket| OnionLoopClass::try_from(bucket).ok())
+        .map(OnionLoopClass::from)
         .collect::<Vec<_>>();
 
-    assert_eq!(classes.len(), OnionCellBucket::ALL.len() - 1);
     for class in classes.iter().copied() {
         assert_eq!(class.carry_bytes(), class.cell_bytes() - ONION_HEADER_BYTES);
         assert_eq!(class.carry_value_bytes(), class.carry_bytes() - 16);

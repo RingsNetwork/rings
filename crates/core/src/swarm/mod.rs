@@ -43,6 +43,7 @@ use crate::message::MessageVerificationExt;
 use crate::message::OriginQuotaCounters;
 use crate::message::PayloadSender;
 use crate::message::ReplayCounters;
+use crate::swarm::callback::PeerLink;
 use crate::swarm::callback::SharedSwarmCallback;
 use crate::swarm::inbox::SwarmInboxDelivery;
 use crate::swarm::observer::LookupCorrelation;
@@ -213,6 +214,40 @@ impl Swarm {
     /// not yet announced is not counted, since its retirement would be silent.
     pub fn is_peer_admitted(&self, peer: Did) -> Result<bool> {
         Ok(self.transport.announced_attempt(peer)?.is_some())
+    }
+
+    /// The admitted links as the application sees them: every active generation whose
+    /// admission was announced as `ConnectionStateChange { Connected }`, in DID order, read
+    /// once under the lifecycle lock.
+    ///
+    /// Law (linearisation): the swarm marks a generation announced before its `Connected`
+    /// starts, and retires it before its
+    /// [`SwarmEvent::PeerRetired`](callback::SwarmEvent::PeerRetired) starts. So a snapshot
+    /// taken after an application has applied an event already reflects that event, and an
+    /// event applied after the snapshot either agrees with it or describes a later change of the
+    /// registry.
+    pub fn admitted_links(&self) -> Result<Vec<PeerLink>> {
+        Ok(self
+            .transport
+            .announced_attempts()?
+            .into_iter()
+            .map(|attempt| PeerLink::new(attempt.peer(), attempt.generation()))
+            .collect())
+    }
+
+    /// `𝓡`, the capacity of the connection registry (#723): the most connection records, in
+    /// any phase, the swarm holds at once, `2 × (finger slots + successors + 1)`. It bounds the
+    /// admitted links, so an application keying state by admitted link can size it by `𝓡`.
+    pub fn connection_registry_capacity(&self) -> Result<usize> {
+        self.transport.connection_registry_capacity()
+    }
+
+    /// Retire the admitted generation `link` and close its transport. It is a no-op unless
+    /// `link` is still the admitted generation of its peer, so closing a stale link never
+    /// touches a newer connection of the same peer; `disconnect` closes whichever generation
+    /// is current.
+    pub async fn disconnect_link(&self, link: PeerLink) -> Result<()> {
+        self.transport.disconnect_link(link).await.map(|_| ())
     }
 
     /// Cancel the handshake `attempt` iff it is still pending, that is, no data channel has

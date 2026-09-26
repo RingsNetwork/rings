@@ -8,7 +8,8 @@ use rings_gateway::GatewayError;
 use rings_gateway::OnionStreamConnector;
 
 use crate::onion::native::NativeOnionCircuitHandle;
-use crate::onion::proxy::OnionProxyConfig;
+use crate::onion::proxy::OnionProxyProtocol;
+use crate::onion::tcp::OnionLocalStream;
 use crate::onion::OnionProxyTarget;
 use crate::processor::Processor;
 
@@ -16,7 +17,7 @@ use crate::processor::Processor;
 pub struct NativeOnionGatewayConnector {
     processor: Arc<Processor>,
     onion: NativeOnionCircuitHandle,
-    proxy: OnionProxyConfig,
+    proxy: OnionProxyProtocol,
 }
 
 impl NativeOnionGatewayConnector {
@@ -24,7 +25,7 @@ impl NativeOnionGatewayConnector {
     pub fn new(
         processor: Arc<Processor>,
         onion: NativeOnionCircuitHandle,
-        proxy: OnionProxyConfig,
+        proxy: OnionProxyProtocol,
     ) -> Self {
         Self {
             processor,
@@ -52,7 +53,7 @@ impl OnionStreamConnector for NativeOnionGatewayConnector {
             .map_err(|error| Self::onion_error(flow, error))?;
         let route = self
             .processor
-            .build_onion_proxy_route(self.proxy.clone(), target)
+            .build_onion_proxy_route(self.proxy, target)
             .await
             .map_err(|error| Self::onion_error(flow, error))?;
         let opened = self
@@ -63,4 +64,10 @@ impl OnionStreamConnector for NativeOnionGatewayConnector {
         opened.relay(stream);
         Ok(())
     }
+}
+
+impl OnionLocalStream for BoxGatewayDuplex {
+    /// A drop: the gateway boundary has no abortive close yet, so the bridge reads this as an
+    /// orderly end; carrying the failure across the boundary is #902.
+    fn reset(self) {}
 }

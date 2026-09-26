@@ -16,10 +16,14 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
+use std::sync::Weak;
 
 use bytes::Bytes;
 use futures::lock::Mutex as AsyncMutex;
 use rings_core::dht::Did;
+use rings_core::swarm::callback::PeerLink;
+use rings_core::swarm::callback::PeerTransition;
+use rings_core::swarm::callback::SharedSwarmCallback;
 use rings_runtime::MaybeSendSync;
 
 use super::Ctx;
@@ -42,6 +46,32 @@ pub(crate) type DynHandler = rings_runtime::maybe_send_sync!(dyn Handler);
 
 type HandlerMap = RwLock<HashMap<String, Arc<DynHandler>>>;
 
+/// A fact about the swarm's admitted links, handed to every [`LinkObserver`] in the order the
+/// swarm delivered it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LinkFact {
+    /// A generation was admitted (`Admitted`) or retired (`Retired`).
+    Transition(PeerLink, PeerTransition),
+    /// The swarm's application callback was replaced: events delivered in between may have gone
+    /// to the previous callback, so an observer keyed by link reconciles with the registry.
+    CallbackReplaced,
+}
+
+/// An extension that keeps state per admitted link: it observes every [`LinkFact`] synchronously,
+/// before the backend's first suspension point, so the facts of one peer reach it in the swarm's
+/// order. It must not block.
+pub(crate) trait LinkObserver: MaybeSendSync {
+    /// Observe one fact.
+    fn observe(&self, fact: LinkFact);
+}
+
+/// A registered link observer, `Send + Sync` natively and not in the browser.
+pub(crate) type DynLinkObserver = rings_runtime::maybe_send_sync!(dyn LinkObserver);
+
+/// The registered link observers, held weakly: an observer lives as long as its owner holds
+/// it, and a dropped observer is skipped and pruned.
+type LinkObservers = RwLock<Vec<Weak<DynLinkObserver>>>;
+
 /// Erased, runtime-facing handler — the router-internal ABI. Implemented once, generically, by
 /// `Runner`; protocol authors never name it (they write `Protocol` + `Interpret`).
 #[cfg_attr(rings_browser, async_trait::async_trait(?Send))]
@@ -59,6 +89,7 @@ pub(crate) trait Handler {
 pub(crate) struct Core {
     processor: Arc<Processor>,
     handlers: Arc<HandlerMap>,
+    link_observers: Arc<LinkObservers>,
 }
 
 impl Core {
@@ -68,29 +99,49 @@ impl Core {
     }
 
     /// This node's session key.
-    #[cfg(rings_native)]
     pub(crate) fn delegatee_key(&self) -> &rings_core::delegation::DelegateeKey {
         self.processor.delegatee_key()
     }
 
-    /// The overlay network this node joins.
-    #[cfg(rings_native)]
-    pub(crate) fn network_id(&self) -> u32 {
-        self.processor.swarm.network_id()
-    }
-
     /// This process's onion role (#834 D2).
-    #[cfg(rings_native)]
     pub(crate) fn onion_role(&self) -> &crate::onion::OnionRole<crate::onion::OnionExitOffer> {
         self.processor.onion_role()
     }
 
-    /// This process's circuit capabilities: its onion role at its process epoch.
-    #[cfg(rings_native)]
-    pub(crate) fn onion_circuit_capabilities(
-        &self,
-    ) -> crate::onion::circuit::OnionCircuitCapabilities {
-        self.processor.onion_circuit_capabilities()
+    /// The swarm's admitted links, read once under its lifecycle lock (see
+    /// `Swarm::admitted_links` for its linearisation with the link events).
+    pub(crate) fn admitted_links(&self) -> Result<Vec<PeerLink>> {
+        self.processor
+            .swarm
+            .admitted_links()
+            .map_err(Error::InternalError)
+    }
+
+    /// `𝓡`, the capacity of the swarm's connection registry.
+    pub(crate) fn connection_registry_capacity(&self) -> Result<usize> {
+        self.processor
+            .swarm
+            .connection_registry_capacity()
+            .map_err(Error::InternalError)
+    }
+
+    /// Retire exactly the admitted generation `link`; a no-op for any other generation.
+    pub(crate) async fn disconnect_link(&self, link: PeerLink) -> Result<()> {
+        self.processor
+            .swarm
+            .disconnect_link(link)
+            .await
+            .map_err(Error::InternalError)
+    }
+
+    /// The cover floor of this node's idle onion links (#880).
+    pub(crate) fn onion_idle_floor(&self) -> crate::onion::circuit::OnionIdleFloor {
+        self.processor.onion_idle_floor()
+    }
+
+    /// The onion process epoch cell of this node (#834 D2).
+    pub(crate) fn onion_process_epoch(&self) -> crate::onion::OnionProcessEpochCell {
+        self.processor.onion_process_epoch()
     }
 
     /// Put a message on the overlay to `to` under `namespace`.
@@ -184,6 +235,18 @@ impl Scope {
         self.core
             .send_direct(to, self.namespace.as_str(), payload)
             .await
+    }
+
+    /// The swarm's admitted links, read once under its lifecycle lock; an interpreter that keys
+    /// state by link reads this snapshot inside its effect, so it is linearised with the link
+    /// facts its protocol has already applied.
+    pub(crate) fn admitted_links(&self) -> Result<Vec<PeerLink>> {
+        self.core.admitted_links()
+    }
+
+    /// Retire exactly the admitted generation `link`.
+    pub(crate) async fn disconnect_link(&self, link: PeerLink) -> Result<()> {
+        self.core.disconnect_link(link).await
     }
 
     /// Self-inject `payload` into this interpreter's **own** namespace (`from = this node`).
@@ -369,6 +432,7 @@ impl Extensions {
             core: Core {
                 processor,
                 handlers: Arc::new(RwLock::new(HashMap::new())),
+                link_observers: Arc::new(RwLock::new(Vec::new())),
             },
         }
     }
@@ -500,6 +564,48 @@ impl Extensions {
             .read()
             .map(|h| h.contains_key(namespace))
             .unwrap_or(false)
+    }
+
+    /// Register an observer of the swarm's link facts. The registry holds it weakly, so the
+    /// observer's owner decides its lifetime.
+    pub(crate) fn observe_links(&self, observer: &Arc<DynLinkObserver>) -> Result<()> {
+        self.core
+            .link_observers
+            .write()
+            .map_err(|_| Error::Lock)?
+            .push(Arc::downgrade(observer));
+        Ok(())
+    }
+
+    /// Install `callback` as the swarm's application callback, and tell every link observer
+    /// that the callback was replaced: events delivered in between went elsewhere.
+    pub(crate) fn set_callback(&self, callback: SharedSwarmCallback) -> Result<()> {
+        self.core
+            .processor
+            .swarm
+            .set_callback(callback)
+            .map_err(Error::InternalError)?;
+        self.link_fact(LinkFact::CallbackReplaced);
+        Ok(())
+    }
+
+    /// Hand `fact` to every live link observer, synchronously and in registration order, and
+    /// prune the dropped ones.
+    pub(in crate::extension) fn link_fact(&self, fact: LinkFact) {
+        let mut dropped = false;
+        if let Ok(observers) = self.core.link_observers.read() {
+            observers
+                .iter()
+                .for_each(|observer| match observer.upgrade() {
+                    Some(observer) => observer.observe(fact),
+                    None => dropped = true,
+                });
+        }
+        if dropped {
+            if let Ok(mut observers) = self.core.link_observers.write() {
+                observers.retain(|observer| observer.strong_count() > 0);
+            }
+        }
     }
 
     /// Route a decoded envelope (inbound entry point). `pub(crate)`: the authenticated ingress

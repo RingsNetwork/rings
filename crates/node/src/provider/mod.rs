@@ -57,7 +57,7 @@ pub struct Provider {
     handler: InternalRpcHandler,
     extensions: crate::extension::ext::Extensions,
     #[cfg(all(feature = "browser", target_family = "wasm"))]
-    onion_https_runtime: Arc<Mutex<Option<Arc<crate::onion::https::OnionHttpsRuntime>>>>,
+    onion_runtime: Arc<Mutex<Option<crate::onion::runtime::OnionRuntime>>>,
     #[cfg(all(feature = "browser", target_family = "wasm"))]
     onion_directory_endpoint: Arc<Mutex<Option<RemoteRpcEndpoint>>>,
     /// Serializes the check-and-install of the onion circuit runtime in this provider's
@@ -104,7 +104,7 @@ impl Provider {
             handler: InternalRpcHandler,
             extensions,
             #[cfg(all(feature = "browser", target_family = "wasm"))]
-            onion_https_runtime: Arc::new(Mutex::new(None)),
+            onion_runtime: Arc::new(Mutex::new(None)),
             #[cfg(all(feature = "browser", target_family = "wasm"))]
             onion_directory_endpoint: Arc::new(Mutex::new(None)),
             #[cfg(feature = "node")]
@@ -226,7 +226,7 @@ impl Provider {
             handler: InternalRpcHandler,
             extensions,
             #[cfg(all(feature = "browser", target_family = "wasm"))]
-            onion_https_runtime: Arc::new(Mutex::new(None)),
+            onion_runtime: Arc::new(Mutex::new(None)),
             #[cfg(all(feature = "browser", target_family = "wasm"))]
             onion_directory_endpoint: Arc::new(Mutex::new(None)),
             #[cfg(feature = "node")]
@@ -314,25 +314,15 @@ impl Provider {
     /// custom messages are decoded as [`Envelope`](crate::extension::ext::Envelope)s and
     /// routed to their namespace's protocol. Call once after registering protocols.
     pub fn set_backend(&self) -> Result<()> {
-        let backend = Backend::new(Arc::new(self.clone()));
-        self.processor
-            .swarm
-            .set_callback(Arc::new(backend))
-            .map_err(Error::InternalError)
+        Backend::new(Arc::new(self.clone())).install()
     }
 
     pub(crate) fn set_swarm_callback_internal(&self, callback: SharedSwarmCallback) -> Result<()> {
-        self.processor
-            .swarm
-            .set_callback(callback)
-            .map_err(Error::InternalError)
+        self.extensions().set_callback(callback)
     }
 
     pub(crate) fn clear_swarm_callback_internal(&self) -> Result<()> {
-        self.processor
-            .swarm
-            .set_callback(Arc::new(NoopSwarmCallback))
-            .map_err(Error::InternalError)
+        self.extensions().set_callback(Arc::new(NoopSwarmCallback))
     }
 
     /// Request local rpc interface

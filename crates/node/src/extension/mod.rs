@@ -19,6 +19,7 @@ use rings_runtime::run_detached;
 
 use crate::extension::ext::Envelope;
 use crate::extension::ext::Extensions;
+use crate::extension::ext::LinkFact;
 use crate::provider::Provider;
 
 /// Observer of swarm facts the [`Backend`] decodes or receives but does not act on itself.
@@ -67,6 +68,18 @@ impl Backend {
         self.observer = Some(observer);
         self
     }
+
+    /// Install this backend as the swarm's application callback. Link observers of the registry
+    /// (the onion data plane's link table) are told the callback was replaced, so they reconcile
+    /// with the swarm's registry.
+    ///
+    /// # Errors
+    ///
+    /// The swarm's callback slot is poisoned.
+    pub fn install(self) -> crate::error::Result<()> {
+        let extensions = self.extensions.clone();
+        extensions.set_callback(Arc::new(self))
+    }
 }
 
 #[cfg_attr(rings_browser, async_trait(?Send))]
@@ -99,15 +112,20 @@ impl SwarmCallback for Backend {
         Ok(())
     }
 
-    /// Translate the swarm's events into the observer's facts: an admission and a retirement.
+    /// Translate the swarm's events into link facts, for the registry's link observers and for
+    /// the backend observer: an admission and a retirement. Both are handed over synchronously,
+    /// before any suspension, so a peer's facts keep the swarm's order.
     async fn on_event(&self, event: &SwarmEvent) -> Result<(), rings_core::error::CallbackError> {
-        let Some(observer) = self.observer.as_deref() else {
+        let Some((link, transition)) = event.peer_transition() else {
             return Ok(());
         };
-        match event.peer_transition() {
-            Some((peer, PeerTransition::Admitted)) => observer.peer_admitted(peer),
-            Some((peer, PeerTransition::Retired)) => observer.peer_retired(peer),
-            None => {}
+        self.extensions
+            .link_fact(LinkFact::Transition(link, transition));
+        if let Some(observer) = self.observer.as_deref() {
+            match transition {
+                PeerTransition::Admitted => observer.peer_admitted(link.peer()),
+                PeerTransition::Retired => observer.peer_retired(link.peer()),
+            }
         }
         Ok(())
     }

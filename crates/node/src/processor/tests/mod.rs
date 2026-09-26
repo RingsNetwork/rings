@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Mutex;
-use std::sync::OnceLock;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -13,7 +12,6 @@ use rings_core::swarm::callback::SwarmCallback;
 use rings_core::swarm::callback::SwarmEvent;
 use rings_rpc::method::Method;
 use rings_transport::core::transport::WebrtcConnectionState;
-use tokio::sync::Mutex as AsyncTestMutex;
 use tokio::sync::Notify;
 
 use super::*;

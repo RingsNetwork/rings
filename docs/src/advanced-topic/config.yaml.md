@@ -27,10 +27,8 @@ onion_exit_services:
 onion_exit_policy:
   allowed_targets: []
   denied_targets: []
-  max_circuits: 0
-  max_streams_per_circuit: 0
+  max_sessions: 0
   max_bytes_per_minute: 0
-onion_http_proxy_service: tcp
 onion_http_proxy_header_timeout_secs: 10
 onion_http_proxy_max_connections: 1024
 gateway:
@@ -48,7 +46,6 @@ gateway:
   unix_helper_socket: /home/operator/.rings/gateway-helper.sock
   wintun_dll_path: null
   status_refresh_secs: 2
-  onion_service: tcp
 bootstrap:
   peers: []
 dht_virtual_nodes: 160
@@ -143,20 +140,30 @@ where noted.
   exit descriptor carries the same process epoch as the relay capability. Clients select an exit
   only while both agree. A browser node interprets `https` only, so a browser exit offering `tcp`
   is rejected when it starts.
-  Service names form a closed set: `tcp` (byte streams) and `https` (HTTPS requests, or TLS
-  streams over the same name). Any other name, including `relay` (advertised through
-  `advertise_onion_relay` instead), is rejected, so restrict an exit's reach with the policy
-  targets rather than with a custom service name.
+  Service names form a closed set: `tcp` (byte streams, every tunnel and TLS included) and
+  `https` (one HTTPS request/response fetch; never a tunnel). Any other name, including `relay`
+  (advertised through `advertise_onion_relay` instead), is rejected, so restrict an exit's reach
+  with the policy targets rather than with a custom service name: an exit that should only carry
+  HTTPS registers `tcp` with the allowed target `*:443`.
+  A policy target is `host:port`, `*:port` (any host on that port) or `*:*` (any target).
   An empty `allowed_targets` list is a closed policy that admits no target, so advertising an
   exit requires at least one allowed target; deny entries override allows; a `0` limit is
-  unspecified.
+  unspecified. A `*` is recognised only as a whole host (`*:port`, `*:*`); any other `*` in a
+  host is refused. Deny entries match the requested authority, not the addresses it resolves
+  to: an IP literal or another name for a denied host is not denied by a name entry, so deny
+  by the name the client requests, and rely on the exit's public-address floor for private
+  and loopback ranges.
 
 ## HTTP CONNECT proxy
 
 * `onion_http_proxy_addr`: optional local HTTP CONNECT listener that routes client TCP streams
-  through onion exits; absent means no proxy.
-* `onion_http_proxy_service`, `onion_http_proxy_header_timeout_secs`,
-  `onion_http_proxy_max_connections`: exit service (`tcp` or `https`) and limits of that proxy.
+  through onion exits; absent means no proxy. The CONNECT exit service is always `tcp`, so the
+  former `onion_http_proxy_service` key (and its `ONION_HTTP_PROXY_SERVICE` variable) is
+  removed: a config naming it is refused as an unknown field. A refused CONNECT answers
+  `502 Bad Gateway` with no reason.
+* `onion_http_proxy_header_timeout_secs`, `onion_http_proxy_max_connections`: limits of that
+  proxy. A CONNECT tunnel is a byte stream, so it always uses a `tcp` exit; there is no service
+  to choose.
 
 The route length is not configurable. Every onion route is a loop that leaves and returns through
 the client's entry guard, with two relays around the exit on each side:
@@ -191,8 +198,9 @@ gateway starts ⟺ section present ∧ (enabled = true ∨ rings run --gateway)
 * `unix_helper_socket`: control socket of the `gateway-config-unix` foreground helper on Linux
   and macOS; must match the helper's `--socket`.
 * `status_refresh_secs`: refresh interval of onion-exit availability in `/gateway/status`.
-* `onion_service`: exit service used for captured flows. Route length follows the onion loop
-  shape (see [HTTP CONNECT proxy](#http-connect-proxy)).
+Captured flows are byte tunnels, so they always use a `tcp` exit, and route length follows the
+onion loop shape (see [HTTP CONNECT proxy](#http-connect-proxy)); the removed keys
+`onion_service`, `onion_hop_count` and `onion_allow_short_paths` are rejected by name.
 
 Any other key in the section is rejected rather than ignored, so a misspelt key cannot fall back
 to its default.

@@ -154,11 +154,6 @@ fn parse_onion_exit_service(raw: &str) -> Result<OnionServiceName, String> {
     OnionServiceName::parse(raw).map_err(|error| error.to_string())
 }
 
-/// Parse a canonical service name for client-side onion proxy options.
-fn parse_onion_service_name(raw: &str) -> Result<OnionServiceName, String> {
-    OnionServiceName::parse(raw).map_err(|error| error.to_string())
-}
-
 /// Resolves a handshake payload argument that may be `-`, meaning "read it from stdin".
 ///
 /// The base58-check offer/answer strings are long and awkward to pass inline, so the
@@ -380,15 +375,8 @@ struct RunCommand {
     )]
     pub onion_exit_deny_target: Vec<String>,
 
-    #[arg(long, help = "Maximum onion circuits this exit will serve", env)]
-    pub onion_exit_max_circuits: Option<u32>,
-
-    #[arg(
-        long,
-        help = "Maximum streams per onion circuit this exit will serve",
-        env
-    )]
-    pub onion_exit_max_streams_per_circuit: Option<u32>,
+    #[arg(long, help = "Maximum onion sessions this exit will serve", env)]
+    pub onion_exit_max_sessions: Option<u32>,
 
     #[arg(long, help = "Maximum bytes per minute this exit will serve", env)]
     pub onion_exit_max_bytes_per_minute: Option<u64>,
@@ -405,14 +393,6 @@ struct RunCommand {
         env
     )]
     pub onion_http_proxy_addr: Option<String>,
-
-    #[arg(
-        long,
-        value_parser = parse_onion_service_name,
-        help = "Onion exit service used by the local HTTP CONNECT proxy: tcp or https",
-        env
-    )]
-    pub onion_http_proxy_service: Option<OnionServiceName>,
 
     #[arg(
         long,
@@ -778,11 +758,8 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
     if !args.onion_exit_deny_target.is_empty() {
         c.onion_exit_policy.denied_targets = parse_onion_exit_targets(args.onion_exit_deny_target)?;
     }
-    if let Some(max_circuits) = args.onion_exit_max_circuits {
-        c.onion_exit_policy.max_circuits = max_circuits;
-    }
-    if let Some(max_streams_per_circuit) = args.onion_exit_max_streams_per_circuit {
-        c.onion_exit_policy.max_streams_per_circuit = max_streams_per_circuit;
+    if let Some(max_sessions) = args.onion_exit_max_sessions {
+        c.onion_exit_policy.max_sessions = max_sessions;
     }
     if let Some(max_bytes_per_minute) = args.onion_exit_max_bytes_per_minute {
         c.onion_exit_policy.max_bytes_per_minute = max_bytes_per_minute;
@@ -795,9 +772,6 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
     }
     if let Some(addr) = args.onion_http_proxy_addr {
         c.onion_http_proxy_addr = Some(addr);
-    }
-    if let Some(service) = args.onion_http_proxy_service {
-        c.onion_http_proxy_service = service;
     }
     if let Some(timeout_secs) = args.onion_http_proxy_header_timeout_secs {
         c.onion_http_proxy_header_timeout_secs = timeout_secs;
@@ -825,7 +799,6 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
     )?;
 
     let onion_http_proxy_addr = c.onion_http_proxy_addr.clone();
-    let onion_http_proxy_service = c.onion_http_proxy_service.clone();
     let onion_http_proxy_header_timeout_secs = c.onion_http_proxy_header_timeout_secs;
     let onion_http_proxy_max_connections = c.onion_http_proxy_max_connections;
     let gateway_config = c.enabled_gateway().cloned();
@@ -917,7 +890,7 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
         Some(supervisor) => backend.observed_by(supervisor.observer()),
         None => backend,
     };
-    processor.swarm.set_callback(Arc::new(backend))?;
+    backend.install()?;
 
     let stop = StopSource::new();
     let gateway_configured = gateway_runner.is_some();
@@ -977,7 +950,6 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
         let onion_http_proxy_addr = onion_http_proxy_addr.parse::<SocketAddr>()?;
         let proxy_options = OnionHttpProxyOptions {
             listen_addr: onion_http_proxy_addr,
-            service: onion_http_proxy_service,
             max_connections: onion_http_proxy_max_connections,
             header_timeout: Duration::from_secs(onion_http_proxy_header_timeout_secs),
         };

@@ -1,386 +1,113 @@
-//! Encrypted onion circuit data plane.
+//! The onion loop data plane (#834 Phase 2a, #843).
 //!
-//! Security model: forward layers are wrapped from exit to entry with the selected hop session
-//! public keys. Each relay decrypts exactly one ElGamal-AEAD layer and learns only the immediate
-//! next hop plus an opaque inner layer. Backward frames carry a client-encrypted AEAD payload and
-//! relays forward them with local return state.
+//! A circuit is a client-sealed loop `client → g → r → h → r′ → g → client` of Sphinx cells
+//! (`onion::sphinx`): every edge carries one cell `α‖β‖γ‖y` of the loop's class `b`, exactly `b`
+//! bytes, and every hop, `relay` or symbol, runs the same step `Hop_i`:
 //!
-//! Term structure: the layers seal a closed pipeline `relay^k ⋙ (s, ā)` (see
-//! [`crate::onion::pipeline`]) over the route's hop assignment, one application per hop, built as a
-//! right fold from the world-facing application outward. A hop's layer names only its own symbol:
-//! `Relay` layers apply `relay = id` inside the pure reducer, and the `Exit` layer applies the
-//! world-facing symbol `s` through the node's [`OnionAlgebra`].
+//! ```text
+//! wire cell ──decode──▶ Hop(from, cell) ──shell──▶ hop (pure, over the admission state)
+//!                                                   ├─ Relayed(next, cell)   ─▶ link sender
+//!                                                   ├─ Consumed(f, ā, v, υ)  ─▶ ⟦f⟧ in the algebra
+//!                                                   ├─ Returned(t_⋄, cell)   ─▶ the tag's session
+//!                                                   └─ Refused | Dropped
+//! link facts (core Admitted/Retired, reconcile tick) ─▶ admission link table
+//! ```
+//!
+//! Relays are stateless: a relay keeps no return state, since the loop returns through fresh
+//! positions the client sealed, and the only state of the data plane is the admission state
+//! (ledgers and the replay store, `admission`), which the shell owns. There is no per-edge cell
+//! AEAD: header integrity is `γ`, carry integrity is the consumer's AEZ authenticator under a key
+//! only the client and the consumer hold, and the previous hop is the authenticated transport
+//! link. A reply carries no signature of the exit (#834, Prop. Reply authentication): it opens
+//! under `k_{c_n}`, which only the client and the exit's process hold, so replies are deniable.
+//!
+//! Every link emits at the constant rate of `send_outbox` (#880), real cells replacing cover.
 
-#[cfg_attr(
-    not(all(test, rings_native)),
-    expect(
-        dead_code,
-        reason = "pure L9 admission; #834 Phase 2a-4 wires it into the data plane and removes this"
-    )
-)]
 mod admission;
 mod cell;
 mod codec;
-mod crypto;
 mod expiry;
-mod limiter;
+mod feed;
+mod hop;
+mod loops;
 mod protocol;
 mod reducer;
 mod send_outbox;
 mod shell;
+mod tags;
 
 #[cfg(all(test, rings_native))]
 mod tests;
 
-use bytes::Bytes;
+pub(crate) use admission::OnionAdmissionCharge;
+pub(crate) use admission::OnionAdmissionLayer;
+pub(crate) use admission::OnionAdmissionRejection;
+pub(crate) use admission::OnionAdmissionState;
+#[cfg(test)]
+pub(crate) use admission::OnionReplayFilterKey;
+pub(crate) use admission::ONION_ADMISSION_SENDER_UNITS;
 pub use cell::OnionCellBucket;
-pub use codec::OnionCircuitEvent;
-pub use crypto::encode_initial_forward;
-pub(crate) use crypto::encode_initial_forward_link;
-pub use crypto::route_first_hop;
-pub(crate) use crypto::send_backward;
-#[cfg(rings_native)]
-pub(crate) use crypto::OnionCircuitPath;
-pub use protocol::OnionCircuitCapabilities;
-pub use protocol::OnionCircuitProtocol;
-pub use reducer::OnionCircuitEffect;
-pub use reducer::OnionCircuitState;
+pub(crate) use expiry::OnionExpiry;
+pub(crate) use feed::OnionLinkFeed;
+pub(crate) use loops::OnionLoopClient;
+pub(crate) use protocol::OnionCircuitProtocol;
+pub(crate) use reducer::OnionCircuitEffect;
 use rings_core::dht::Did;
-use rings_core::ecc::elgamal::impls::secp256k1::AeadCiphertext;
-use rings_core::ecc::PublicKey;
-use rings_core::message::MessageVerification;
+pub use send_outbox::OnionIdleFloor;
 pub(crate) use send_outbox::OnionLinkSender;
 use serde::Deserialize;
 use serde::Serialize;
-pub use shell::OnionAlgebra;
-pub use shell::OnionCircuitExitFrame;
-pub use shell::OnionCircuitHandler;
-pub use shell::OnionCircuitShell;
-pub use shell::OnionInterpretation;
+pub(crate) use shell::OnionAlgebra;
+pub(crate) use shell::OnionApplicationInput;
+pub(crate) use shell::OnionCircuitShell;
+pub(crate) use shell::OnionInterpretation;
+#[cfg(all(test, rings_native))]
+pub(crate) use shell::OnionLinkWitness;
+pub(crate) use tags::OnionClientTags;
+pub(crate) use tags::OnionReply;
+pub(crate) use tags::OnionReplySink;
 
-use self::expiry::OnionExpiry;
-use super::OnionServiceName;
-use crate::error::Result;
+/// Namespace of the onion data plane.
+pub const ONION_CIRCUIT_NAMESPACE: &str = "onion-circuit";
 
-/// Immediate authenticated overlay link for one already sealed circuit cell.
+/// `X₀ = V − Q`, the offset of a loop's expiry from its build quantum (#834 D6).
+pub(crate) const ONION_FORWARD_PAYLOAD_TTL_MS: u128 = 120_000;
+/// `Q = 30 s`, the expiry quantum.
+pub(crate) const ONION_FORWARD_EXPIRY_QUANTUM_MS: u128 = 30_000;
+/// `V = X₀ + Q = 150 s`, the admission window: a layer is admissible at `arr` iff
+/// `arr < x ≤ arr + V`.
+///
+/// Law: the replay filter of `x` lives until `x`, so no admissible layer outlives the witness of
+/// its admission (L9).
+pub(crate) const ONION_FORWARD_MAX_VALIDITY_MS: u128 =
+    ONION_FORWARD_PAYLOAD_TTL_MS + ONION_FORWARD_EXPIRY_QUANTUM_MS;
+
+/// The next hop of one cell: the peer it is sent to over their direct link.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct OnionLink {
+    /// The next hop's DID.
     peer: Did,
-    recipient: PublicKey<33>,
 }
 
 impl OnionLink {
-    const fn new(peer: Did, recipient: PublicKey<33>) -> Self {
-        Self { peer, recipient }
+    /// The link to `peer`.
+    pub(crate) const fn new(peer: Did) -> Self {
+        Self { peer }
     }
 }
 
-/// Namespace used by route-aware onion circuit messages.
-pub const ONION_CIRCUIT_NAMESPACE: &str = "onion-circuit";
-
-pub(super) const MAX_ONION_RELAY_CIRCUITS: usize = 1024;
-pub(super) const ONION_RELAY_RETURN_TTL_MS: u128 = 120_000;
-pub(super) const ONION_FORWARD_PAYLOAD_TTL_MS: u128 = 120_000;
-pub(super) const ONION_FORWARD_EXPIRY_QUANTUM_MS: u128 = 30_000;
-/// Maximum authenticated lifetime accepted by an exit after receipt.
-///
-/// Law: replay witnesses live for this same interval, so no still-valid forward layer can outlive
-/// the nonce that proves its one-shot exit effect was already consumed.
-pub(super) const ONION_FORWARD_MAX_VALIDITY_MS: u128 =
-    ONION_FORWARD_PAYLOAD_TTL_MS + ONION_FORWARD_EXPIRY_QUANTUM_MS;
-pub(super) const ONION_CRYPTO_LIMIT_WINDOW_MS: u128 = 60_000;
-pub(super) const MAX_ONION_CRYPTO_OPS_PER_WINDOW: u32 = 4096;
-pub(super) const MAX_ONION_CRYPTO_OPS_GLOBAL_PER_WINDOW: u32 = 8192;
-pub(super) const MAX_ONION_CRYPTO_BYTES_PER_WINDOW: u64 = 256 * 1024 * 1024;
-pub(super) const MAX_ONION_CRYPTO_BYTES_GLOBAL_PER_WINDOW: u64 = 512 * 1024 * 1024;
-pub(super) const MAX_ONION_CRYPTO_PEERS: usize = 64;
-pub(super) const ONION_AEAD_NAMESPACE: &str = "rings-node:onion-circuit";
-
-/// Opaque application payload carried over a route-aware onion circuit.
-///
-/// The circuit layer knows only the service label and authenticated bytes. TCP, HTTPS, or future
-/// adapters own their own payload algebra outside the encrypted circuit core.
-#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
-pub struct OnionCircuitPayload {
-    /// Canonical application service selected from the onion-exit registry.
-    pub service: OnionServiceName,
-    /// Adapter-owned payload bytes.
-    pub body: Bytes,
-}
-
-impl OnionCircuitPayload {
-    /// Build an opaque circuit payload for one already-validated application service.
-    pub fn new(service: OnionServiceName, body: impl Into<Bytes>) -> Self {
-        Self {
-            service,
-            body: body.into(),
-        }
-    }
-
-    /// Build an opaque circuit payload from an untrusted service string.
-    pub fn try_new(service: impl AsRef<str>, body: impl Into<Bytes>) -> Result<Self> {
-        Ok(Self::new(OnionServiceName::parse(service)?, body))
-    }
-
-    /// Return the canonical service selected by this payload.
-    pub fn service(&self) -> &str {
-        self.service.as_str()
-    }
-
-    /// Return the canonical service name selected by this payload.
-    pub fn service_name(&self) -> &OnionServiceName {
-        &self.service
-    }
-
-    /// Return whether this payload belongs to the already canonical `service`.
-    pub fn is_service(&self, service: &OnionServiceName) -> bool {
-        &self.service == service
-    }
-
-    /// Return whether this payload belongs to `service` after service-name canonicalization.
-    pub fn matches_service(&self, service: &str) -> bool {
-        self.service.matches(service)
-    }
-}
-
-/// Client-decrypted backward payload plus the exit delegation proof that authenticated it.
-#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
-pub struct OnionAuthenticatedPayload {
-    /// Client/exit-only return id encrypted in the exit layer.
-    pub return_id: OnionReturnId,
-    /// Random transcript nonce signed by the exit for ciphertext and signature freshness.
-    pub nonce: OnionBackwardNonce,
-    /// Monotonic sequence in the exit-to-client direction for this circuit.
-    pub sequence: OnionBackwardSequence,
-    /// Exit session signature over the backward payload transcript.
-    pub authentication: MessageVerification,
-    /// Application payload signed by the exit and encrypted to the client.
-    pub payload: OnionCircuitPayload,
-}
-
-/// Client/exit-only id used to authenticate backward payloads.
-///
-/// This id is encrypted inside the exit layer and never appears as a relay edge header. Relays may
-/// rewrite [`OnionCircuitId`] while forwarding backward frames; the client adapter accepts a
-/// backward payload only when this signed return id matches its pending request or stream.
+/// The replay nonce `ν` of one layer, admitted at most once per expiry (#834 L9, D6″).
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-pub struct OnionReturnId([u8; 16]);
+pub struct OnionReplayNonce(pub(crate) [u8; 16]);
 
-impl OnionReturnId {
-    /// Build a return id from random bytes.
+impl OnionReplayNonce {
+    /// Build a nonce from its bytes.
     pub const fn new(bytes: [u8; 16]) -> Self {
         Self(bytes)
     }
 
-    /// Generate a random return id.
-    pub fn random() -> Self {
-        Self(rand::random())
-    }
-}
-
-/// Random nonce for one backward payload on a circuit.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-pub struct OnionBackwardNonce([u8; 16]);
-
-impl OnionBackwardNonce {
-    /// Build a nonce from random bytes.
-    pub const fn new(bytes: [u8; 16]) -> Self {
-        Self(bytes)
-    }
-
-    /// Generate a random backward-payload nonce.
-    pub fn random() -> Self {
-        Self(rand::random())
-    }
-}
-
-/// Monotonic exit-to-client sequence number within one circuit.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-pub struct OnionBackwardSequence(u64);
-
-impl OnionBackwardSequence {
-    /// First sequence in a circuit direction.
-    pub const FIRST: Self = Self(0);
-
-    /// Build a sequence from its wire value.
-    pub const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    /// Return the wire-order value.
-    pub const fn value(self) -> u64 {
-        self.0
-    }
-}
-
-/// Random nonce for one forward exit payload on a circuit.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-pub struct OnionForwardNonce([u8; 16]);
-
-impl OnionForwardNonce {
-    /// Build a nonce from random bytes.
-    pub const fn new(bytes: [u8; 16]) -> Self {
-        Self(bytes)
-    }
-
-    /// Return the nonce bytes, the replay nonce `ν` of the uniform layer (#834 D6″).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the layer encoding of the Sphinx primitives; #834 Phase 2a-4 (#843) uses it"
-        )
-    )]
+    /// Return the nonce bytes, the `ν` field of the uniform layer.
     pub(crate) const fn to_bytes(self) -> [u8; 16] {
         self.0
     }
-
-    /// Generate a random forward-payload nonce.
-    pub fn random() -> Self {
-        Self(rand::random())
-    }
-}
-
-/// Monotonic client-to-exit sequence number within one circuit.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-pub struct OnionForwardSequence(u64);
-
-impl OnionForwardSequence {
-    /// First sequence in a circuit direction.
-    pub const FIRST: Self = Self(0);
-
-    /// Build a sequence from its wire value.
-    pub const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    /// Return the wire-order value.
-    pub const fn value(self) -> u64 {
-        self.0
-    }
-}
-
-/// Backward payload that has passed exit identity, signature, and freshness checks.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct OnionVerifiedPayload {
-    /// Verified client/exit return id.
-    pub return_id: OnionReturnId,
-    /// Authenticated transcript nonce; replay admission is carried by `sequence`.
-    pub nonce: OnionBackwardNonce,
-    /// Verified monotonic backward sequence.
-    pub sequence: OnionBackwardSequence,
-    /// Verified application payload.
-    pub payload: OnionCircuitPayload,
-}
-
-/// Client return key encrypted into the exit layer.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
-pub struct OnionClientReturn {
-    /// Client session public key used for backward AEAD payloads.
-    pub delegatee_public_key: PublicKey<33>,
-    /// Client/exit-only id used to authenticate backward payloads.
-    pub return_id: OnionReturnId,
-}
-
-impl OnionClientReturn {
-    /// Build a client return descriptor with a fresh return id.
-    pub fn new(delegatee_public_key: PublicKey<33>) -> Self {
-        Self {
-            delegatee_public_key,
-            return_id: OnionReturnId::random(),
-        }
-    }
-}
-
-/// Edge-local circuit id.
-///
-/// Invariant: an [`OnionCircuitId`] identifies exactly one directed edge of one route. Relay layers
-/// carry the next edge id under AEAD; backward forwarding rewrites the header back to the previous
-/// edge id.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-pub struct OnionCircuitId([u8; 16]);
-
-impl OnionCircuitId {
-    /// Build a circuit id from random bytes.
-    pub const fn new(bytes: [u8; 16]) -> Self {
-        Self(bytes)
-    }
-
-    /// Generate a random circuit id.
-    pub fn random() -> Self {
-        Self(rand::random())
-    }
-}
-
-/// Forward direction: client -> relays -> exit.
-#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
-pub struct OnionForwardFrame {
-    /// Edge-local circuit id for the receiving hop.
-    pub circuit_id: OnionCircuitId,
-    /// AEAD-encrypted layer for the receiving hop.
-    pub layer: AeadCiphertext,
-}
-
-/// Backward direction: exit -> relays -> client.
-#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
-pub struct OnionBackwardFrame {
-    /// Edge-local circuit id for the receiving relay or client.
-    pub circuit_id: OnionCircuitId,
-    /// AEAD payload encrypted to the client session public key.
-    pub payload: AeadCiphertext,
-}
-
-/// Authenticated immediate path used to originate one backward cell at an exit.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct OnionBackwardPath {
-    /// Edge-local circuit id expected by the immediate return peer.
-    pub circuit_id: OnionCircuitId,
-    /// Immediate overlay return peer.
-    pub return_peer: Did,
-    /// Delegation key that encrypts the hop-to-hop return cell.
-    pub return_delegatee_public_key: PublicKey<33>,
-    /// Client-only key and return id for the inner signed payload.
-    pub client: OnionClientReturn,
-}
-
-impl OnionBackwardPath {
-    /// Build a return path from values authenticated in the decrypted exit layer.
-    pub const fn new(
-        circuit_id: OnionCircuitId,
-        return_peer: Did,
-        return_delegatee_public_key: PublicKey<33>,
-        client: OnionClientReturn,
-    ) -> Self {
-        Self {
-            circuit_id,
-            return_peer,
-            return_delegatee_public_key,
-            client,
-        }
-    }
-}
-
-/// One decrypted forward layer: the application a hop evaluates, in today's wire shape.
-///
-/// Variant order is wire data (pinned by the golden tests). The variant is the symbol the layer
-/// applies: `Relay` applies `relay = id`, and `Exit` applies the world-facing application
-/// `(payload.service, payload.body)` with `payload.service ∈ Σ_W` by type.
-#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
-pub(super) enum OnionForwardLayer {
-    Relay {
-        next_hop: Did,
-        next_circuit_id: OnionCircuitId,
-        next_delegatee_public_key: PublicKey<33>,
-        return_delegatee_public_key: PublicKey<33>,
-        inner: AeadCiphertext,
-    },
-    Exit {
-        process_epoch: super::OnionProcessEpoch,
-        client: OnionClientReturn,
-        return_delegatee_public_key: PublicKey<33>,
-        expires_at_ms: u128,
-        forward_nonce: OnionForwardNonce,
-        forward_sequence: OnionForwardSequence,
-        payload: OnionCircuitPayload,
-    },
 }

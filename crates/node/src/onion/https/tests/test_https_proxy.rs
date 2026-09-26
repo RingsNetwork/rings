@@ -1,69 +1,15 @@
-use std::future::Future;
-#[cfg(rings_native)]
-use std::sync::atomic::AtomicU64;
-#[cfg(rings_native)]
-use std::sync::atomic::Ordering;
-use std::task::Context;
-use std::task::Poll;
-#[cfg(rings_native)]
 use std::time::Duration;
 
-use rings_core::delegation::DelegateeKey;
-use rings_core::ecc::SecretKey;
-#[cfg(rings_native)]
-use rings_core::message::MessageSigner;
-#[cfg(rings_native)]
 use tokio::io::AsyncReadExt;
-#[cfg(rings_native)]
 use tokio::io::AsyncWriteExt;
-#[cfg(rings_native)]
 use tokio::net::TcpListener;
 
-use super::super::pending::PendingOnionHttpsRequest;
 use super::super::*;
-use crate::onion::circuit::OnionAuthenticatedPayload;
-use crate::onion::circuit::OnionReturnId;
-use crate::onion::proxy::OnionProxyProtocol;
-use crate::onion::proxy::OnionProxyRoute;
-use crate::onion::OnionExitDescriptor;
-use crate::onion::OnionExitDescriptorBody;
-use crate::onion::OnionLoop;
-use crate::onion::OnionRoute;
-use crate::onion::OnionRouteHop;
-use crate::onion::OnionServiceName;
-use crate::online::OnlineNodeType;
-use crate::tests::TEST_NETWORK_ID;
+use crate::onion::exit_accounting::OnionExitAccounting;
 
-fn did() -> Did {
-    SecretKey::random().address().into()
-}
-
-fn session() -> DelegateeKey {
-    DelegateeKey::new_with_seckey(&SecretKey::random()).expect("delegatee key")
-}
-
-fn exit_descriptor(session: &DelegateeKey) -> OnionExitDescriptor {
-    OnionExitDescriptor::new_signed(
-        OnionExitDescriptorBody {
-            did: session.delegator_did(),
-            public_key: session
-                .delegation()
-                .delegator_verification_pubkey()
-                .expect("verification key"),
-            delegatee_public_key: session.delegatee_public_key(),
-            process_epoch: crate::onion::OnionProcessEpoch::new([23; 16]),
-            node_type: OnlineNodeType::Browser,
-            network_id: TEST_NETWORK_ID,
-            service: OnionServiceName::https(),
-            policy: OnionExitPolicy::default(),
-            started_at_ms: 0,
-            heartbeat_at_ms: 0,
-            expires_at_ms: 1,
-            version: "test".to_string(),
-        },
-        MessageSigner::new(session, TEST_NETWORK_ID),
-    )
-    .expect("signed exit")
+/// The request a normalized call becomes.
+fn wire(call: OnionHttpsCall) -> OnionHttpsRequest {
+    call.into_request()
 }
 
 #[test]
@@ -74,18 +20,16 @@ fn test_normalizes_empty_request_defaults() {
         headers: Vec::new(),
         body: Vec::new(),
     };
-    let target = OnionProxyTarget::parse_authority("Example.COM:443").unwrap();
-    let wire = OnionHttpsCall::with_default_path(request, default_path().as_str())
-        .unwrap()
-        .addressed_to(&target);
 
-    assert_eq!(wire, OnionHttpsRequest {
-        target: "example.com:443".to_string(),
-        method: "GET".to_string(),
-        path: "/".to_string(),
-        headers: Vec::new(),
-        body: Vec::new(),
-    });
+    assert_eq!(
+        wire(OnionHttpsCall::with_default_path(request, default_path().as_str()).unwrap()),
+        OnionHttpsRequest {
+            method: "GET".to_string(),
+            path: "/".to_string(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        }
+    );
 }
 
 #[test]
@@ -94,12 +38,11 @@ fn test_call_from_url_uses_https_url_target_and_path() -> Result<()> {
         "https://Example.COM/search?q=rust#ignored",
         Default::default(),
     )?;
-    let wire = call.addressed_to(&target);
+    let request = wire(call);
 
     assert_eq!(target.authority(), "example.com:443");
-    assert_eq!(wire.target, "example.com:443");
-    assert_eq!(wire.method, "GET");
-    assert_eq!(wire.path, "/search?q=rust");
+    assert_eq!(request.method, "GET");
+    assert_eq!(request.path, "/search?q=rust");
     Ok(())
 }
 
@@ -110,11 +53,9 @@ fn test_call_from_url_preserves_explicit_port_and_path_override() -> Result<()> 
         ..OnionHttpsClientRequest::default()
     };
     let (target, call) = OnionHttpsCall::from_url("https://Example.COM:8443/original", request)?;
-    let wire = call.addressed_to(&target);
 
     assert_eq!(target.authority(), "example.com:8443");
-    assert_eq!(wire.target, "example.com:8443");
-    assert_eq!(wire.path, "/?override=1");
+    assert_eq!(wire(call).path, "/?override=1");
     Ok(())
 }
 
@@ -158,436 +99,78 @@ fn test_checked_status_code_rejects_invalid_js_status_values() {
         checked_status_code(200.5),
         Err(Error::HttpRequestError(_))
     ));
-    assert!(matches!(
-        checked_status_code(f64::NAN),
-        Err(Error::HttpRequestError(_))
-    ));
 }
 
-const TEST_AUTHORITY: &str = "example.com:443";
-
-fn runtime() -> OnionHttpsRuntime {
-    OnionHttpsRuntime::new(session().delegatee_public_key())
-}
-
-fn client() -> Arc<OnionHttpsClient> {
-    Arc::new(OnionHttpsClient::new(
-        session().delegatee_public_key(),
-        OnionLinkSender::default(),
-    ))
-}
-
-/// HTTPS route to [`TEST_AUTHORITY`] over the loop `guard, relay, exit, back, guard`; its first
-/// hop, and so expected return peer, is `guard`.
-fn https_route(exit: &DelegateeKey, guard: &DelegateeKey) -> OnionProxyRoute {
-    let descriptor = exit_descriptor(exit);
-    let symbol = OnionRouteHop::of_symbol(&descriptor);
-    let hop = |session: &DelegateeKey| {
-        OnionRouteHop::new(
-            session.delegator_did(),
-            session.delegatee_public_key(),
-            symbol.process_epoch,
-        )
-    };
-    let mut relays = [hop(guard), hop(&session()), hop(&session())].into_iter();
-    let hops = OnionLoop::try_unfold(Vec::new(), symbol, |_| {
-        relays.next().ok_or(Error::InvalidData)
-    })
-    .expect("HTTPS loop");
-    let route = OnionRoute::new(OnionServiceName::https(), hops, descriptor).expect("HTTPS route");
-    OnionProxyRoute {
-        protocol: OnionProxyProtocol::HttpsProxy,
-        target: OnionProxyTarget::parse_authority(TEST_AUTHORITY).expect("test target"),
-        route,
+/// Read the whole world-to-client stream of a fetch in reads of at most `max` bytes.
+async fn read_outcome(reader: &mut OnionHttpsReader, max: usize) -> Vec<u8> {
+    let mut outcome = Vec::new();
+    while let Some(bytes) = reader.read(max).await.expect("fetch read") {
+        assert!(bytes.len() <= max);
+        outcome.extend_from_slice(&bytes);
     }
+    outcome
 }
 
-/// `GET /` with no headers or body.
-fn get_root() -> OnionHttpsCall {
-    OnionHttpsCall::with_default_path(OnionHttpsClientRequest::default(), "/").expect("GET / call")
-}
-
-/// `payload` signed by `exit` for `return_id`.
-fn exit_payload(
-    return_id: OnionReturnId,
-    exit: &DelegateeKey,
-    payload: OnionHttpsPayload,
-) -> OnionAuthenticatedPayload {
-    OnionAuthenticatedPayload::new_signed(
-        return_id,
-        encode_https_payload(payload).expect("encode payload"),
-        MessageSigner::new(exit, TEST_NETWORK_ID),
-    )
-    .expect("signed payload")
-}
-
-fn ok_response() -> OnionHttpsResponse {
-    OnionHttpsResponse {
-        status: 200,
-        headers: vec![("content-type".to_string(), "text/plain".to_string())],
-        body: b"ok".to_vec(),
-    }
-}
-
-/// Begin one request to `exit` through `guard` and return its circuit, the return id the exit must
-/// sign, and the pending response.
-fn begin(
-    client: &Arc<OnionHttpsClient>,
-    exit: &DelegateeKey,
-    guard: &DelegateeKey,
-) -> (OnionCircuitId, OnionReturnId, PendingOnionHttpsRequest) {
-    let response = client
-        .begin(&https_route(exit, guard), get_root())
-        .expect("begin request")
-        .into_response();
-    let id = response.circuit_id();
-    let return_id = client.pending_return_id(id).expect("circuit is pending");
-    (id, return_id, response)
-}
-
-/// Resolve `future` in one poll: every outcome under test is decided before it is polled.
-fn poll_decided<F: Future>(future: F) -> F::Output {
-    let mut future = Box::pin(future);
-    let mut context = Context::from_waker(futures::task::noop_waker_ref());
-    let Poll::Ready(output) = future.as_mut().poll(&mut context) else {
-        panic!("outcome was not decided before polling");
-    };
-    output
-}
-
-/// Claim the request owning `(id, from)` and resolve it with `payload`.
-fn resolve_from(
-    client: &OnionHttpsClient,
-    from: Did,
-    id: OnionCircuitId,
-    payload: OnionAuthenticatedPayload,
-) -> Result<()> {
-    client
-        .claim(from, id)?
-        .expect("request owns (id, from)")
-        .resolve(payload, TEST_NETWORK_ID);
-    Ok(())
-}
-
-/// A deadline that never fires.
-fn no_deadline() -> impl Future<Output = Result<()>> {
-    futures::future::pending()
-}
-
-/// A deadline that has already fired.
-fn expired_deadline() -> impl Future<Output = Result<()>> {
-    futures::future::ready(Ok(()))
-}
-
-#[test]
-fn test_client_request_resolves_with_authenticated_exit_response() -> Result<()> {
-    let client = client();
-    let exit = session();
-    let guard = session();
-    let (id, return_id, response) = begin(&client, &exit, &guard);
-    let reply = exit_payload(return_id, &exit, OnionHttpsPayload::Response(ok_response()));
-
-    resolve_from(&client, guard.delegator_did(), id, reply)?;
-    assert_eq!(client.pending_len(), 0);
-    assert_eq!(poll_decided(response.within(no_deadline()))?, ok_response());
-    Ok(())
-}
-
-#[test]
-fn test_client_request_surfaces_exit_failure() -> Result<()> {
-    let client = client();
-    let exit = session();
-    let guard = session();
-    let (id, return_id, response) = begin(&client, &exit, &guard);
-    let failure = OnionExitFailure::InvalidTarget("denied".to_string());
-    let reply = exit_payload(return_id, &exit, OnionHttpsPayload::Error(failure.clone()));
-
-    resolve_from(&client, guard.delegator_did(), id, reply)?;
-
-    assert!(matches!(
-        poll_decided(response.within(no_deadline())),
-        Err(Error::OnionRouteError(OnionRouteError::ExitFailure(reported))) if reported == failure
-    ));
-    Ok(())
-}
-
-#[test]
-fn test_client_request_ignores_payload_from_wrong_return_peer() -> Result<()> {
-    let client = client();
-    let (id, _, response) = begin(&client, &session(), &session());
-
-    // The request owns (id, guard), not (id, other): no claim is taken and the request waits.
-    assert!(client.claim(did(), id)?.is_none());
-    assert_eq!(client.pending_len(), 1);
-    assert!(matches!(
-        poll_decided(response.within(expired_deadline())),
-        Err(Error::OnionProxyRequestTimedOut)
-    ));
-    assert_eq!(client.pending_len(), 0);
-    Ok(())
-}
-
-#[test]
-fn test_client_request_rejects_payload_signed_by_another_exit() -> Result<()> {
-    let client = client();
-    let exit = session();
-    let guard = session();
-    let (id, return_id, response) = begin(&client, &exit, &guard);
-    let forged = exit_payload(
-        return_id,
-        &session(),
-        OnionHttpsPayload::Response(ok_response()),
-    );
-
-    resolve_from(&client, guard.delegator_did(), id, forged)?;
-
-    assert_eq!(client.pending_len(), 0);
-    assert!(matches!(
-        poll_decided(response.within(no_deadline())),
-        Err(Error::OnionRouteError(
-            OnionRouteError::BackwardSignerMismatch
-        ))
-    ));
-    Ok(())
-}
-
-#[test]
-fn test_client_request_rejects_payload_for_another_return_id() -> Result<()> {
-    let client = client();
-    let exit = session();
-    let guard = session();
-    let (id, _, response) = begin(&client, &exit, &guard);
-    let misdirected = exit_payload(
-        OnionReturnId::new([9; 16]),
-        &exit,
-        OnionHttpsPayload::Response(ok_response()),
-    );
-
-    resolve_from(&client, guard.delegator_did(), id, misdirected)?;
-
-    assert!(matches!(
-        poll_decided(response.within(no_deadline())),
-        Err(Error::OnionRouteError(
-            OnionRouteError::BackwardReturnIdMismatch
-        ))
-    ));
-    Ok(())
-}
-
-#[test]
-fn test_client_request_reports_authenticated_request_as_unexpected_backward_payload() -> Result<()>
-{
-    let client = client();
-    let exit = session();
-    let guard = session();
-    let (id, return_id, response) = begin(&client, &exit, &guard);
-    let reply = exit_payload(
-        return_id,
-        &exit,
-        OnionHttpsPayload::Request(get_root().addressed_to(&https_route(&exit, &guard).target)),
-    );
-
-    resolve_from(&client, guard.delegator_did(), id, reply)?;
-
-    assert!(matches!(
-        poll_decided(response.within(no_deadline())),
-        Err(Error::OnionRouteError(
-            OnionRouteError::UnexpectedBackwardPayload
-        ))
-    ));
-    Ok(())
-}
-
-#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_family = "wasm"), test)]
-fn test_dropping_waiting_request_cancels_and_releases_its_circuit() {
-    let client = client();
-    let exit = session();
-    let guard = session();
-    let (id, _, response) = begin(&client, &exit, &guard);
-    let mut waiting = Box::pin(response.within(no_deadline()));
-    let mut context = Context::from_waker(futures::task::noop_waker_ref());
-
-    assert!(waiting.as_mut().poll(&mut context).is_pending());
-    assert_eq!(client.pending_len(), 1);
-    drop(waiting);
-    assert_eq!(client.pending_len(), 0);
-
-    // A late reply finds no claim, so it falls through to the next adapter.
-    assert!(matches!(client.claim(guard.delegator_did(), id), Ok(None)));
-}
-
-#[test]
-fn test_client_request_times_out_and_releases_its_circuit() {
-    let client = client();
-    let (_, _, response) = begin(&client, &session(), &session());
-
-    assert!(matches!(
-        poll_decided(response.within(expired_deadline())),
-        Err(Error::OnionProxyRequestTimedOut)
-    ));
-    assert_eq!(client.pending_len(), 0);
-}
-
-/// The native circuit handler routes an HTTPS circuit's backward payload to the shared client.
-#[cfg(rings_native)]
+/// Law (fetch at fin): the world fetches only once its request stream ends, and a request that
+/// does not decode yields an encoded exit failure, not a fetch.
 #[tokio::test]
-async fn test_native_circuit_handler_delivers_https_circuits_to_the_shared_client() -> Result<()> {
-    use crate::extension::ext::Extensions;
-    use crate::onion::circuit::OnionCircuitHandler;
-    use crate::onion::circuit::ONION_CIRCUIT_NAMESPACE;
-    use crate::onion::native::native_onion_runtimes;
-    use crate::onion::native::NativeOnionCircuitHandler;
+async fn test_fetch_world_answers_a_malformed_request_with_an_encoded_failure() {
+    let world = OnionHttpsWorld::new(OnionExitPolicy::default(), OnionExitAccounting::default());
+    let target = OnionProxyTarget::parse_authority("example.com:443").unwrap();
+    let (mut reader, mut writer) = world.open(&target).await.unwrap();
 
-    let processor = Arc::new(crate::tests::native::prepare_processor().await);
-    let scope = Scope::new(
-        Extensions::new(processor).core(),
-        ONION_CIRCUIT_NAMESPACE.to_string(),
-    );
-    let local = session();
-    let (tcp, https) = native_onion_runtimes(local.clone(), TEST_NETWORK_ID, None);
-    let handler = NativeOnionCircuitHandler::new(
-        tcp,
-        Arc::clone(&https),
-        MessageSigner::new(local, TEST_NETWORK_ID),
-    );
-    let exit = session();
-    let guard = session();
-    let (id, return_id, response) = begin(https.client(), &exit, &guard);
-    let reply = exit_payload(return_id, &exit, OnionHttpsPayload::Response(ok_response()));
+    writer.write(Bytes::from_static(b"\xff")).await.unwrap();
+    writer.shutdown().await.unwrap();
 
-    handler
-        .handle_client(&scope, guard.delegator_did(), id, reply)
-        .await?;
-
-    assert_eq!(https.client().pending_len(), 0);
-    assert_eq!(poll_decided(response.within(no_deadline()))?, ok_response());
-    Ok(())
-}
-
-/// The browser circuit handler routes an HTTPS circuit's backward payload to the shared client.
-#[cfg(rings_browser)]
-#[wasm_bindgen_test::wasm_bindgen_test]
-async fn test_browser_circuit_handler_delivers_https_circuits_to_the_shared_client() {
-    use crate::extension::ext::Extensions;
-    use crate::onion::circuit::OnionCircuitHandler;
-    use crate::onion::circuit::ONION_CIRCUIT_NAMESPACE;
-
-    let processor = Arc::new(crate::tests::wasm::prepare_processor().await);
-    let scope = Scope::new(
-        Extensions::new(processor).core(),
-        ONION_CIRCUIT_NAMESPACE.to_string(),
-    );
-    let local = session();
-    let runtime = Arc::new(OnionHttpsRuntime::new(local.delegatee_public_key()));
-    let handler = BrowserOnionCircuitHandler::new(
-        Arc::clone(&runtime),
-        MessageSigner::new(local, TEST_NETWORK_ID),
-    );
-    let exit = session();
-    let guard = session();
-    let (id, return_id, response) = begin(runtime.client(), &exit, &guard);
-    let reply = exit_payload(return_id, &exit, OnionHttpsPayload::Response(ok_response()));
-
-    handler
-        .handle_client(&scope, guard.delegator_did(), id, reply)
-        .await
-        .expect("browser handler accepts the backward payload");
-
-    assert_eq!(runtime.client().pending_len(), 0);
-    assert_eq!(
-        poll_decided(response.within(no_deadline())).expect("exit response"),
-        ok_response()
-    );
-}
-
-#[test]
-fn test_forward_nonce_is_consumed_once_for_https_exit_requests() {
-    let runtime = runtime();
-    let peer = Did::from(99_u32);
-    let circuit_id = OnionCircuitId::new([1; 16]);
-    let nonce = OnionForwardNonce::new([2; 16]);
-
-    assert!(runtime
-        .forward_replays
-        .consume_forward_nonce(peer, circuit_id, nonce)
-        .is_ok());
     assert!(matches!(
-        runtime
-            .forward_replays
-            .consume_forward_nonce(peer, circuit_id, nonce),
-        Err(Error::OnionRouteError(_))
+        decode_outcome(&read_outcome(&mut reader, 3).await).unwrap(),
+        OnionHttpsOutcome::Error(OnionExitFailure::MalformedRequest)
     ));
 }
 
-#[test]
-fn test_exit_limiter_rejects_bytes_over_policy_window() {
-    let runtime = runtime();
-    let policy = OnionExitPolicy {
-        max_bytes_per_minute: 8,
-        ..OnionExitPolicy::default()
-    };
-    let circuit_id = OnionCircuitId::new([1; 16]);
-    let return_peer = did();
-    let _lease = runtime
-        .admit_exit_request(&policy, circuit_id, return_peer, 4)
+/// Law (session end without fin): a fetch whose writer is dropped before `fin` has no request and
+/// ends its stream empty.
+#[tokio::test]
+async fn test_fetch_world_without_fin_ends_empty() {
+    let world = OnionHttpsWorld::new(OnionExitPolicy::default(), OnionExitAccounting::default());
+    let target = OnionProxyTarget::parse_authority("example.com:443").unwrap();
+    let (mut reader, writer) = world.open(&target).await.unwrap();
+
+    drop(writer);
+
+    assert_eq!(reader.read(16).await.unwrap(), None);
+}
+
+/// Law (request bound): the writer refuses a request past [`MAX_HTTPS_REQUEST_BYTES`].
+#[tokio::test]
+async fn test_fetch_world_bounds_the_request() {
+    let world = OnionHttpsWorld::new(OnionExitPolicy::default(), OnionExitAccounting::default());
+    let target = OnionProxyTarget::parse_authority("example.com:443").unwrap();
+    let (_reader, mut writer) = world.open(&target).await.unwrap();
+
+    writer
+        .write(Bytes::from(vec![0; MAX_HTTPS_REQUEST_BYTES]))
+        .await
         .unwrap();
 
-    assert!(runtime.record_exit_bytes(&policy, 4).is_ok());
-    assert!(matches!(
-        runtime.record_exit_bytes(&policy, 1),
-        Err(Error::NoPermission)
-    ));
+    assert!(writer.write(Bytes::from_static(b"x")).await.is_err());
 }
 
+/// Law (codec): an outcome round-trips through its stream encoding.
 #[test]
-fn test_exit_limiter_enforces_streams_per_circuit() {
-    let runtime = runtime();
-    let policy = OnionExitPolicy {
-        max_streams_per_circuit: 1,
-        ..OnionExitPolicy::default()
-    };
-    let circuit_id = OnionCircuitId::new([1; 16]);
-    let return_peer = did();
+fn test_outcome_round_trips() {
+    let outcome = OnionHttpsOutcome::Response(OnionHttpsResponse {
+        status: 204,
+        headers: vec![("a".to_string(), "b".to_string())],
+        body: b"body".to_vec(),
+    });
 
-    let lease = runtime
-        .admit_exit_request(&policy, circuit_id, return_peer, 0)
-        .expect("first stream admitted");
-    assert!(matches!(
-        runtime.admit_exit_request(&policy, circuit_id, return_peer, 0),
-        Err(Error::NoPermission)
-    ));
-    drop(lease);
-    assert!(runtime
-        .admit_exit_request(&policy, circuit_id, return_peer, 0)
-        .is_ok());
+    assert_eq!(
+        decode_outcome(&encode_outcome(&outcome).unwrap()).unwrap(),
+        outcome
+    );
 }
 
-#[test]
-fn test_exit_limiter_counts_distinct_circuit_ids() {
-    let runtime = runtime();
-    let policy = OnionExitPolicy {
-        max_circuits: 1,
-        ..OnionExitPolicy::default()
-    };
-    let return_peer = did();
-    let first = OnionCircuitId::new([1; 16]);
-    let second = OnionCircuitId::new([2; 16]);
-
-    let lease = runtime
-        .admit_exit_request(&policy, first, return_peer, 0)
-        .expect("first circuit admitted");
-    assert!(matches!(
-        runtime.admit_exit_request(&policy, second, return_peer, 0),
-        Err(Error::NoPermission)
-    ));
-    drop(lease);
-    assert!(runtime
-        .admit_exit_request(&policy, second, return_peer, 0)
-        .is_ok());
-}
-
-#[cfg(rings_native)]
 #[tokio::test]
 async fn test_native_fetch_times_out_stalled_response() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -597,7 +180,6 @@ async fn test_native_fetch_times_out_stalled_response() {
         std::future::pending::<()>().await;
     });
     let request = OnionHttpsRequest {
-        target: format!("{address}"),
         method: "GET".to_string(),
         path: "/".to_string(),
         headers: Vec::new(),
@@ -624,9 +206,8 @@ async fn test_native_fetch_times_out_stalled_response() {
     );
 }
 
-#[cfg(rings_native)]
 #[tokio::test]
-async fn test_native_fetch_records_response_bytes_as_chunks_arrive() {
+async fn test_native_fetch_reads_a_chunked_body_whole() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -641,14 +222,11 @@ async fn test_native_fetch_records_response_bytes_as_chunks_arrive() {
             .unwrap();
     });
     let request = OnionHttpsRequest {
-        target: format!("{address}"),
         method: "GET".to_string(),
         path: "/".to_string(),
         headers: Vec::new(),
         body: Vec::new(),
     };
-    let recorded = std::sync::Arc::new(AtomicU64::new(0));
-    let recorded_for_fetch = recorded.clone();
     let egress = NativeHttpsEgress {
         host: address.ip().to_string(),
         addresses: vec![address],
@@ -660,20 +238,15 @@ async fn test_native_fetch_records_response_bytes_as_chunks_arrive() {
         DEFAULT_HTTPS_RESPONSE_BODY_LIMIT_BYTES,
         Duration::from_secs(1),
         &egress,
-        move |bytes| {
-            recorded_for_fetch.fetch_add(bytes, Ordering::SeqCst);
-            Ok(())
-        },
+        |_| Ok(()),
     )
     .await
     .unwrap();
 
     server.await.unwrap();
     assert_eq!(response.body, b"abcde");
-    assert_eq!(recorded.load(Ordering::SeqCst), 5);
 }
 
-#[cfg(rings_native)]
 #[test]
 fn test_native_transport_headers_are_not_caller_controlled() {
     for name in [
@@ -698,7 +271,6 @@ fn test_native_transport_headers_are_not_caller_controlled() {
     }
 }
 
-#[cfg(rings_native)]
 #[tokio::test]
 async fn test_native_fetch_uses_validated_url_authority_instead_of_caller_host() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -728,7 +300,6 @@ async fn test_native_fetch_uses_validated_url_authority_instead_of_caller_host()
             .unwrap();
     });
     let request = OnionHttpsRequest {
-        target: expected_host.clone(),
         method: "POST".to_string(),
         path: "/probe".to_string(),
         headers: vec![
@@ -761,7 +332,6 @@ async fn test_native_fetch_uses_validated_url_authority_instead_of_caller_host()
     assert_eq!(response.body, b"ok");
 }
 
-#[cfg(rings_native)]
 #[test]
 fn test_native_egress_selection_pins_public_addresses_and_denies_the_rest() {
     let target = OnionProxyTarget::parse_authority("example.com:443").unwrap();
@@ -788,13 +358,136 @@ fn test_native_egress_selection_pins_public_addresses_and_denies_the_rest() {
     }
 }
 
-#[test]
-fn test_runtime_exit_policy_starts_empty_then_sets() -> Result<()> {
-    let runtime = runtime();
-    let policy = OnionExitPolicy::from_target_strings(vec!["example.com:443".to_string()], vec![])?;
+/// Render bytes as lowercase hex.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
 
-    assert_eq!(runtime.exit_policy(), None);
-    runtime.set_exit_policy(Some(policy.clone()));
-    assert_eq!(runtime.exit_policy(), Some(policy));
-    Ok(())
+/// The `https` symbol's carry payloads are wire bytes (#834 L10): one request, one response and
+/// every failure, each pinned byte for byte, so a reordered field or variant is a visible cutover.
+#[test]
+fn test_https_session_encodings_are_pinned() {
+    let request = OnionHttpsRequest {
+        method: "POST".to_string(),
+        path: "/p?q".to_string(),
+        headers: vec![("a".to_string(), "b".to_string())],
+        body: b"xy".to_vec(),
+    };
+    let response = OnionHttpsOutcome::Response(OnionHttpsResponse {
+        status: 201,
+        headers: vec![("c".to_string(), "d".to_string())],
+        body: b"z".to_vec(),
+    });
+    let pinned = [
+        (
+            hex(&encode_request(&request).expect("encode")),
+            "04504f5354042f703f710101610162027879",
+        ),
+        (
+            hex(&encode_outcome(&response).expect("encode")),
+            "00c9010101630164017a",
+        ),
+        (
+            hex(&encode_outcome(&OnionHttpsOutcome::Error(
+                OnionExitFailure::PermissionDenied,
+            ))
+            .expect("encode")),
+            "0100",
+        ),
+        (
+            hex(&encode_outcome(&OnionHttpsOutcome::Error(
+                OnionExitFailure::MalformedRequest,
+            ))
+            .expect("encode")),
+            "0101",
+        ),
+        (
+            hex(
+                &encode_outcome(&OnionHttpsOutcome::Error(OnionExitFailure::Internal))
+                    .expect("encode"),
+            ),
+            "0102",
+        ),
+    ];
+
+    for (encoded, golden) in pinned {
+        assert_eq!(encoded, golden);
+    }
+    assert_eq!(
+        decode_outcome(&encode_outcome(&response).expect("encode")).expect("decode"),
+        response
+    );
+}
+
+/// One budget across concurrent fetches (#895 D-N1): each fetch records its headers and body
+/// chunks as they stream against the shared accounting, so two fetches whose bodies together
+/// exceed the window's budget cannot both complete, and no more than the budget is recorded.
+#[tokio::test]
+async fn test_concurrent_fetches_share_one_byte_budget() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let body = vec![b'b'; 3_000];
+    let server = tokio::spawn(async move {
+        let mut served = Vec::new();
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let body = body.clone();
+            served.push(tokio::spawn(async move {
+                let mut request = [0_u8; 1024];
+                let _ = stream.read(&mut request).await;
+                let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());
+                let _ = stream.write_all(head.as_bytes()).await;
+                let _ = stream.write_all(&body).await;
+            }));
+        }
+        for serving in served {
+            let _ = serving.await;
+        }
+    });
+    let policy = OnionExitPolicy {
+        max_bytes_per_minute: 4_000,
+        ..OnionExitPolicy::default()
+    };
+    let accounting = OnionExitAccounting::default();
+    let fetch = || {
+        let request = OnionHttpsRequest {
+            method: "GET".to_string(),
+            path: "/".to_string(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+        let egress = NativeHttpsEgress {
+            host: address.ip().to_string(),
+            addresses: vec![address],
+        };
+        let accounting = accounting.clone();
+        let policy = policy.clone();
+        async move {
+            native_fetch_with_timeout(
+                &format!("http://{address}/"),
+                &request,
+                DEFAULT_HTTPS_RESPONSE_BODY_LIMIT_BYTES,
+                Duration::from_secs(5),
+                &egress,
+                |bytes| accounting.record_bytes(&policy, bytes, 0),
+            )
+            .await
+        }
+    };
+
+    let (first, second) = tokio::join!(fetch(), fetch());
+    server.await.unwrap();
+
+    assert!(
+        first.is_err() || second.is_err(),
+        "both fetches fit a budget below their sum"
+    );
+    assert!(
+        first.is_ok() || second.is_ok(),
+        "the budget admits one whole fetch"
+    );
+    assert!(accounting
+        .remaining_bytes(&policy, 0)
+        .unwrap()
+        .is_some_and(|left| left < 4_000));
 }

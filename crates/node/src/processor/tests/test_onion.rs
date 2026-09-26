@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use super::common::*;
 use super::*;
 use crate::onion::OnionProcessEpoch;
+use crate::onion::OnionProcessEpochCell;
 use crate::onion::OnionServiceName;
 
 #[tokio::test]
@@ -73,7 +74,7 @@ async fn test_onion_proxy_route_uses_presence_relays_without_exit_descriptor() -
 
     let route = processor
         .build_onion_proxy_route(
-            OnionProxyConfig::tcp_connect_service(OnionServiceName::tcp())?,
+            OnionProxyProtocol::TcpConnect,
             OnionProxyTarget::parse_authority("example.com:443")?,
         )
         .await?
@@ -102,7 +103,7 @@ async fn test_onion_proxy_route_rejects_exit_with_stale_process_epoch() -> Resul
     let processor = prepare_processor().await;
     let exit = prepare_processor().await;
     let mut restarted = exit.clone();
-    restarted.onion_process_epoch = OnionProcessEpoch::new([0x5a; 16]);
+    restarted.onion_process_epoch = OnionProcessEpochCell::new(OnionProcessEpoch::new([0x5a; 16]));
     let stale_descriptor = onion_exit_descriptor_for_processor(&exit, "tcp", get_epoch_ms())?;
     store_onion_relays(&processor, &[&restarted], 3).await?;
     processor
@@ -113,7 +114,7 @@ async fn test_onion_proxy_route_rejects_exit_with_stale_process_epoch() -> Resul
 
     let error = processor
         .build_onion_proxy_route(
-            OnionProxyConfig::tcp_connect(),
+            OnionProxyProtocol::TcpConnect,
             OnionProxyTarget::parse_authority("example.com:443")?,
         )
         .await
@@ -147,10 +148,10 @@ async fn test_onion_proxy_route_uses_protocol_service_class() -> Result<()> {
 
     let target = OnionProxyTarget::parse_authority("example.com:443")?;
     let tcp_route = processor
-        .build_onion_proxy_route(OnionProxyConfig::tcp_connect(), target.clone())
+        .build_onion_proxy_route(OnionProxyProtocol::TcpConnect, target.clone())
         .await?;
     let https_route = processor
-        .build_onion_proxy_route(OnionProxyConfig::https_proxy(), target)
+        .build_onion_proxy_route(OnionProxyProtocol::HttpsProxy, target)
         .await?;
 
     assert_eq!(tcp_route.exit_service(), "tcp");
@@ -171,8 +172,7 @@ async fn test_onion_route_accepts_https_service() -> Result<()> {
         get_epoch_ms(),
         {
             let mut policy = onion_policy(&["example.com:443"], &[])?;
-            policy.max_circuits = 8;
-            policy.max_streams_per_circuit = 2;
+            policy.max_sessions = 8;
             policy.max_bytes_per_minute = 4096;
             policy
         },
@@ -185,7 +185,7 @@ async fn test_onion_route_accepts_https_service() -> Result<()> {
 
     let route = processor
         .build_onion_proxy_route(
-            OnionProxyConfig::https_proxy(),
+            OnionProxyProtocol::HttpsProxy,
             OnionProxyTarget::parse_authority("example.com:443")?,
         )
         .await?
@@ -207,8 +207,7 @@ async fn test_onion_proxy_route_accepts_https_service() -> Result<()> {
         get_epoch_ms(),
         {
             let mut policy = onion_policy(&["example.com:443"], &[])?;
-            policy.max_circuits = 8;
-            policy.max_streams_per_circuit = 2;
+            policy.max_sessions = 8;
             policy.max_bytes_per_minute = 4096;
             policy
         },
@@ -221,7 +220,7 @@ async fn test_onion_proxy_route_accepts_https_service() -> Result<()> {
 
     let target = OnionProxyTarget::parse_authority("example.com:443")?;
     let route = processor
-        .build_onion_proxy_route(OnionProxyConfig::https_proxy(), target)
+        .build_onion_proxy_route(OnionProxyProtocol::HttpsProxy, target)
         .await?;
 
     assert_eq!(route.exit_did(), exit.did());
@@ -230,18 +229,18 @@ async fn test_onion_proxy_route_accepts_https_service() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_tcp_connect_route_rejects_browser_https_exit_descriptor() -> Result<()> {
+async fn test_tcp_connect_route_rejects_browser_tcp_exit_descriptor() -> Result<()> {
     let processor = prepare_processor().await;
     let browser_exit = prepare_processor().await;
+    // A browser has no sockets, so a `tcp` registration from one cannot carry a tunnel.
     let descriptor = onion_exit_descriptor_for_processor_with_node_type_service(
         &browser_exit,
         OnlineNodeType::Browser,
-        OnionServiceName::https(),
+        OnionServiceName::tcp(),
         get_epoch_ms(),
         {
             let mut policy = onion_policy(&["example.com:443"], &[])?;
-            policy.max_circuits = 8;
-            policy.max_streams_per_circuit = 2;
+            policy.max_sessions = 8;
             policy.max_bytes_per_minute = 4096;
             policy
         },
@@ -253,10 +252,7 @@ async fn test_tcp_connect_route_rejects_browser_https_exit_descriptor() -> Resul
 
     let target = OnionProxyTarget::parse_authority("example.com:443")?;
     let error = processor
-        .build_onion_proxy_route(
-            OnionProxyConfig::tcp_connect_service(OnionServiceName::https())?,
-            target,
-        )
+        .build_onion_proxy_route(OnionProxyProtocol::TcpConnect, target)
         .await
         .err()
         .ok_or_else(|| Error::InvalidConfig("expected route failure".to_string()))?;
@@ -264,7 +260,7 @@ async fn test_tcp_connect_route_rejects_browser_https_exit_descriptor() -> Resul
     assert!(matches!(
         error,
         Error::OnionRouteError(OnionRouteError::NoExitForProxyProtocol { service, protocol })
-            if service == "https" && protocol == "tcp-connect"
+            if service == "tcp" && protocol == "tcp-connect"
     ));
     Ok(())
 }
@@ -278,16 +274,14 @@ async fn test_onion_proxy_route_filters_exits_by_target_policy() -> Result<()> {
     let allowed_descriptor =
         onion_exit_descriptor_for_processor_with_policy(&allowed_exit, "https", now_ms, {
             let mut policy = onion_policy(&["example.com:443"], &[])?;
-            policy.max_circuits = 8;
-            policy.max_streams_per_circuit = 2;
+            policy.max_sessions = 8;
             policy.max_bytes_per_minute = 4096;
             policy
         })?;
     let denied_descriptor =
         onion_exit_descriptor_for_processor_with_policy(&denied_exit, "https", now_ms, {
             let mut policy = onion_policy(&["example.com:443"], &["example.com:443"])?;
-            policy.max_circuits = 8;
-            policy.max_streams_per_circuit = 2;
+            policy.max_sessions = 8;
             policy.max_bytes_per_minute = 4096;
             policy
         })?;
@@ -302,7 +296,7 @@ async fn test_onion_proxy_route_filters_exits_by_target_policy() -> Result<()> {
 
     let target = OnionProxyTarget::parse_authority("example.com:443")?;
     let route = processor
-        .build_onion_proxy_route(OnionProxyConfig::https_proxy(), target)
+        .build_onion_proxy_route(OnionProxyProtocol::HttpsProxy, target)
         .await?;
 
     assert_eq!(route.exit_did(), allowed_exit.did());
@@ -317,8 +311,7 @@ async fn test_onion_proxy_route_reports_policy_denied_target() -> Result<()> {
     let denied_descriptor =
         onion_exit_descriptor_for_processor_with_policy(&denied_exit, "https", now_ms, {
             let mut policy = onion_policy(&["other.example.com:443"], &[])?;
-            policy.max_circuits = 8;
-            policy.max_streams_per_circuit = 2;
+            policy.max_sessions = 8;
             policy.max_bytes_per_minute = 4096;
             policy
         })?;
@@ -331,7 +324,7 @@ async fn test_onion_proxy_route_reports_policy_denied_target() -> Result<()> {
 
     let target = OnionProxyTarget::parse_authority("example.com:443")?;
     let error = processor
-        .build_onion_proxy_route(OnionProxyConfig::https_proxy(), target)
+        .build_onion_proxy_route(OnionProxyProtocol::HttpsProxy, target)
         .await
         .err()
         .ok_or_else(|| Error::InvalidConfig("expected route failure".to_string()))?;
