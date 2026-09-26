@@ -16,8 +16,9 @@
 //!
 //! - `Linked`: every hop follows a link;
 //! - `NeverOvershoots`: every hop that does not set the stage's handoff flag satisfies
-//!   `next ∈ (n, aim]` (crossing the aim only by that one flagged hop is then a property of the
-//!   type: nothing clears the flag, and a flagged stage refuses a second handoff);
+//!   `next ∈ (n, aim]`. Nothing clears the flag, so the hops of a flagged stage are held to the
+//!   same law, and a second crossing is an overshoot this check rejects: `SingleCrossing` per
+//!   aim follows;
 //! - `Acyclic`: no `(node, stage)` repeats, so the hop budget never ends a route;
 //! - `Bounded`: at most `2|V|` hops (two greedy runs joined by one handoff, and the final hop
 //!   from a `reply_via` peer);

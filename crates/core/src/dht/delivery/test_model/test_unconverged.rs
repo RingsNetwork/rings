@@ -148,8 +148,10 @@ fn test_leaf_behind_its_predecessor_is_reached_by_every_member() {
 }
 
 /// A joiner, answered through `reply_via` (#873 §1.2): the joiner has no predecessor, so its
-/// requests name its bootstrap, and every member's answer to it arrives; without the hint a
-/// member not linked to the joiner fails fast instead.
+/// requests name its bootstrap, and every member's answer to it arrives. Without the hint an
+/// answer arrives only if one of its two greedy runs happens to pass the bootstrap; in these two
+/// topologies neither does, so the unhinted route fails fast: the hint is what makes delivery
+/// certain.
 #[test]
 fn test_joiner_answers_arrive_through_reply_via() {
     for (members, bootstrap, joiner) in [
