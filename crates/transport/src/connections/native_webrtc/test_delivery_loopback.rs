@@ -8,6 +8,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::future::join_all;
+use rings_test_support::with_hang_guard;
 
 use super::WebrtcConnection;
 use super::WebrtcTransport;
@@ -18,7 +19,7 @@ use crate::core::transport::TransportInterface;
 use crate::core::transport::TransportMessage;
 use crate::error::Result;
 
-/// Hang guard: a bound on a test that waits only on events, never a pacing.
+/// Hang guard: a failure bound on a test that waits only on events, never a pacing.
 const HANG_GUARD: Duration = Duration::from_secs(60);
 
 /// Payload size of one test message, as in the #887 loopback measurement.
@@ -75,50 +76,59 @@ fn cell(index: usize) -> TransportMessage {
 /// channel's own event, so a paced sender is never held by a timer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_awaited_sends_resolve_on_buffer_events() -> Result<()> {
-    tokio::time::timeout(HANG_GUARD, async {
-        let link = connect_loopback().await?;
-        for index in 0..256 {
-            link.sender.send_message(cell(index)).await?.await?;
-        }
-        link.sender.close().await
-    })
+    with_hang_guard(
+        "test_awaited_sends_resolve_on_buffer_events",
+        HANG_GUARD,
+        async {
+            let link = connect_loopback().await?;
+            for index in 0..256 {
+                link.sender.send_message(cell(index)).await?.await?;
+            }
+            link.sender.close().await
+        },
+    )
     .await
-    .expect("awaited sends must resolve on buffer events")
 }
 
 /// Many sends pending on the same pool at once: every future resolves `Ok`,
 /// however the round-robin pool spreads them over its channels.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_concurrent_pending_sends_all_resolve() -> Result<()> {
-    tokio::time::timeout(HANG_GUARD, async {
-        let link = connect_loopback().await?;
-        let mut deliveries = Vec::new();
-        for index in 0..256 {
-            deliveries.push(link.sender.send_message(cell(index)).await?);
-        }
-        for delivery in join_all(deliveries).await {
-            delivery?;
-        }
-        link.sender.close().await
-    })
+    with_hang_guard(
+        "test_concurrent_pending_sends_all_resolve",
+        HANG_GUARD,
+        async {
+            let link = connect_loopback().await?;
+            let mut deliveries = Vec::new();
+            for index in 0..256 {
+                deliveries.push(link.sender.send_message(cell(index)).await?);
+            }
+            for delivery in join_all(deliveries).await {
+                delivery?;
+            }
+            link.sender.close().await
+        },
+    )
     .await
-    .expect("concurrent deliveries must resolve on buffer events")
 }
 
 /// A close with sends still pending resolves every future (`Ok` if its bytes
 /// had already flushed, `Err` otherwise); none is left waiting for an event.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_close_resolves_every_pending_delivery() -> Result<()> {
-    tokio::time::timeout(HANG_GUARD, async {
-        let link = connect_loopback().await?;
-        let mut deliveries = Vec::new();
-        for index in 0..64 {
-            deliveries.push(link.sender.send_message(cell(index)).await?);
-        }
-        link.sender.close().await?;
-        join_all(deliveries).await;
-        Ok(())
-    })
+    with_hang_guard(
+        "test_close_resolves_every_pending_delivery",
+        HANG_GUARD,
+        async {
+            let link = connect_loopback().await?;
+            let mut deliveries = Vec::new();
+            for index in 0..64 {
+                deliveries.push(link.sender.send_message(cell(index)).await?);
+            }
+            link.sender.close().await?;
+            join_all(deliveries).await;
+            Ok(())
+        },
+    )
     .await
-    .expect("a close must resolve every pending delivery")
 }

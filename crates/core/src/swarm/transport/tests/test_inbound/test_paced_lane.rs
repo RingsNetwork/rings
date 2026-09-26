@@ -36,6 +36,7 @@ use crate::swarm::callback::SwarmCallback;
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::Swarm;
 use crate::swarm::SwarmBuilder;
+use crate::tests::fixed_secret_keys;
 use crate::tests::TEST_NETWORK_ID;
 
 /// Payload prefix the test application registers a paced lane for.
@@ -90,9 +91,9 @@ struct Harness {
 }
 
 impl Harness {
-    /// A fresh local swarm.
-    fn new() -> Result<Self> {
-        let local = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    /// A fresh local swarm owned by `key`.
+    fn new(key: &SecretKey) -> Result<Self> {
+        let local = DelegateeKey::new_with_seckey(key)?;
         let app = Arc::new(PacedRegistryCallback::default());
         let swarm = SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local)
             .callback(app.clone())
@@ -105,11 +106,10 @@ impl Harness {
         })
     }
 
-    /// A peer whose connection is authenticated when `authenticated` holds.
-    async fn peer(&self, authenticated: bool) -> Result<Peer> {
-        let key = SecretKey::random();
+    /// A peer owned by `key` whose connection is authenticated when `authenticated` holds.
+    async fn peer(&self, key: &SecretKey, authenticated: bool) -> Result<Peer> {
         let did: Did = key.address().into();
-        let session = DelegateeKey::new_with_seckey(&key)?;
+        let session = DelegateeKey::new_with_seckey(key)?;
         let callback = if authenticated {
             let offer = InnerSwarmCallback::new(Arc::clone(&self.transport), self.app.clone());
             let (attempt, _offer) = self
@@ -168,8 +168,9 @@ fn wire(
 
 #[tokio::test]
 async fn test_neighbours_own_registered_traffic_takes_the_paced_lane() -> Result<()> {
-    let harness = Harness::new()?;
-    let neighbour = harness.peer(true).await?;
+    let [local, neighbour] = fixed_secret_keys::<2>()?;
+    let harness = Harness::new(&local)?;
+    let neighbour = harness.peer(&neighbour, true).await?;
     let frame = wire(
         b"paced/cell",
         &neighbour.session,
@@ -183,8 +184,9 @@ async fn test_neighbours_own_registered_traffic_takes_the_paced_lane() -> Result
 
 #[tokio::test]
 async fn test_neighbours_unregistered_namespace_keeps_the_application_lane() -> Result<()> {
-    let harness = Harness::new()?;
-    let neighbour = harness.peer(true).await?;
+    let [local, neighbour] = fixed_secret_keys::<2>()?;
+    let harness = Harness::new(&local)?;
+    let neighbour = harness.peer(&neighbour, true).await?;
     let frame = wire(
         b"other/message",
         &neighbour.session,
@@ -198,9 +200,10 @@ async fn test_neighbours_unregistered_namespace_keeps_the_application_lane() -> 
 
 #[tokio::test]
 async fn test_relayed_origin_cannot_claim_the_paced_lane() -> Result<()> {
-    let harness = Harness::new()?;
-    let neighbour = harness.peer(true).await?;
-    let relayed = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let [local, neighbour, relayed] = fixed_secret_keys::<3>()?;
+    let harness = Harness::new(&local)?;
+    let neighbour = harness.peer(&neighbour, true).await?;
+    let relayed = DelegateeKey::new_with_seckey(&relayed)?;
     let frame = wire(
         b"paced/cell",
         &relayed,
@@ -218,9 +221,10 @@ async fn test_relayed_origin_cannot_claim_the_paced_lane() -> Result<()> {
 
 #[tokio::test]
 async fn test_neighbours_origin_over_another_neighbour_keeps_the_application_lane() -> Result<()> {
-    let harness = Harness::new()?;
-    let origin = harness.peer(true).await?;
-    let carrier = harness.peer(true).await?;
+    let [local, origin, carrier] = fixed_secret_keys::<3>()?;
+    let harness = Harness::new(&local)?;
+    let origin = harness.peer(&origin, true).await?;
+    let carrier = harness.peer(&carrier, true).await?;
     let frame = wire(
         b"paced/cell",
         &origin.session,
@@ -234,8 +238,9 @@ async fn test_neighbours_origin_over_another_neighbour_keeps_the_application_lan
 
 #[tokio::test]
 async fn test_unauthenticated_peer_claiming_its_origin_never_takes_the_paced_lane() -> Result<()> {
-    let harness = Harness::new()?;
-    let stranger = harness.peer(false).await?;
+    let [local, stranger] = fixed_secret_keys::<2>()?;
+    let harness = Harness::new(&local)?;
+    let stranger = harness.peer(&stranger, false).await?;
     let frame = wire(
         b"paced/cell",
         &stranger.session,
@@ -251,8 +256,9 @@ async fn test_unauthenticated_peer_claiming_its_origin_never_takes_the_paced_lan
 
 #[tokio::test]
 async fn test_reassembled_neighbour_traffic_takes_the_paced_lane() -> Result<()> {
-    let harness = Harness::new()?;
-    let neighbour = harness.peer(true).await?;
+    let [local, neighbour] = fixed_secret_keys::<2>()?;
+    let harness = Harness::new(&local)?;
+    let neighbour = harness.peer(&neighbour, true).await?;
     let local = harness.swarm.did();
     let original = MessagePayload::new_send(
         Message::custom(&[PACED_PREFIX, &[7; 512]].concat())?,
