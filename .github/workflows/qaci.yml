@@ -297,10 +297,14 @@ jobs:
             wasm-pack test --release --headless --chrome . -- two_nodes_fetch_a_hosted_page --nocapture
           working-directory: ./examples/dweb
 
+      # The browser repair soak runs as its own test binary invocation: it polls under a 60 s
+      # scenario budget, which must not share the 120 s wasm-bindgen-test budget of the rest.
       - name: Run core browser tests
         uses: coactions/setup-xvfb@b6b4fcfb9f5a895edadc3bc76318fae0ac17c8b3 # v1
         with:
-          run: cargo test -p rings-core --release --target=wasm32-unknown-unknown --features browser_chrome_test --no-default-features
+          run: |
+            cargo test -p rings-core --release --target=wasm32-unknown-unknown --features browser_chrome_test --no-default-features -- --skip test_storage_repair_load_does_not_starve_three_node_stabilization
+            cargo test -p rings-core --release --target=wasm32-unknown-unknown --features browser_chrome_test --no-default-features -- test_storage_repair_load_does_not_starve_three_node_stabilization
           working-directory: ./
 
       - name: Run runtime browser tests

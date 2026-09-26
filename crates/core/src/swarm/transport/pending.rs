@@ -578,7 +578,7 @@ impl SwarmTransport {
         self.begin_connection_admission_when(attempt, |_| Ok(true), observe_transition)
     }
 
-    #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
+    #[cfg(test)]
     pub(crate) fn activate_connection_for_test(
         &self,
         attempt: PendingConnectionAttempt,
@@ -586,7 +586,7 @@ impl SwarmTransport {
         self.activate_connection_with_observer_for_test(attempt, |_| {})
     }
 
-    #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
+    #[cfg(test)]
     pub(crate) fn activate_connection_with_observer_for_test(
         &self,
         attempt: PendingConnectionAttempt,
