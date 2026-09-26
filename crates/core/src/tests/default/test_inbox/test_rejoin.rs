@@ -85,7 +85,7 @@ async fn test_topology_predecessor_discovery_after_rejoin_delivers_held_inbox() 
     head.swarm.disconnect(peer.did()).await?;
     wait_for_msgs([&owner, &peer, &head]).await;
     assert!(peer.swarm.peers().is_empty());
-    hold_message_for_offline_peer(&owner, &head, peer.did()).await?;
+    hold_message_for_offline_peer(&owner, &head, peer.did(), &[&owner, &peer, &head]).await?;
 
     // Admission's successor synchronization may eagerly reconnect owner and peer.
     // Remove that link before the measured round so it cannot satisfy discovery.
