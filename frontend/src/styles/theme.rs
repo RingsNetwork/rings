@@ -51,6 +51,20 @@ pub(super) fn append(css: &mut String) {
     topology::append(css, WARM);
     dialogs::append(css, WARM);
     responsive::append(css);
+    append_landing_serif_typography(css);
+}
+
+/// Sets a classical serif family across the public landing page, including its header, main
+/// content, controls, code samples, and footer. This typography-only override intentionally
+/// leaves existing colors, sizing, spacing, backgrounds, component shapes, and interactions
+/// untouched.
+fn append_landing_serif_typography(css: &mut String) {
+    let serif = "'Iowan Old Style', Baskerville, 'Palatino Linotype', 'Noto Serif CJK SC', 'Songti SC', 'Times New Roman', serif";
+    rule(
+        css,
+        ".app-shell:not(.extension-mode) .landing-header,.landing-page,.landing-page *,.site-footer",
+        &[("font-family", serif)],
+    );
 }
 
 fn themed_nav(css: &mut String, scope: &str, theme: Theme) {
