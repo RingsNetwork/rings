@@ -296,7 +296,7 @@ pub(crate) fn app_header(
                 </span>
                 <div>
                     <strong>{ "Rings Network" }</strong>
-                    <span>{ "Browser-native P2P" }</span>
+                    <span>{ "A P2P network for the sovereign age." }</span>
                 </div>
             </div>
             if show_nav {
