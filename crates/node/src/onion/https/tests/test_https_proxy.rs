@@ -5,6 +5,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 
 use super::super::*;
+use crate::onion::exit_accounting::OnionExitAccounting;
 
 /// The request a normalized call becomes.
 fn wire(call: OnionHttpsCall) -> OnionHttpsRequest {
@@ -195,6 +196,7 @@ async fn test_native_fetch_times_out_stalled_response() {
         DEFAULT_HTTPS_RESPONSE_BODY_LIMIT_BYTES,
         Duration::from_millis(25),
         &egress,
+        |_| Ok(()),
     )
     .await;
 
@@ -236,6 +238,7 @@ async fn test_native_fetch_reads_a_chunked_body_whole() {
         DEFAULT_HTTPS_RESPONSE_BODY_LIMIT_BYTES,
         Duration::from_secs(1),
         &egress,
+        |_| Ok(()),
     )
     .await
     .unwrap();
@@ -319,6 +322,7 @@ async fn test_native_fetch_uses_validated_url_authority_instead_of_caller_host()
         DEFAULT_HTTPS_RESPONSE_BODY_LIMIT_BYTES,
         Duration::from_secs(1),
         &egress,
+        |_| Ok(()),
     )
     .await
     .unwrap();
@@ -413,4 +417,77 @@ fn test_https_session_encodings_are_pinned() {
         decode_outcome(&encode_outcome(&response).expect("encode")).expect("decode"),
         response
     );
+}
+
+/// One budget across concurrent fetches (#895 D-N1): each fetch records its headers and body
+/// chunks as they stream against the shared accounting, so two fetches whose bodies together
+/// exceed the window's budget cannot both complete, and no more than the budget is recorded.
+#[tokio::test]
+async fn test_concurrent_fetches_share_one_byte_budget() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let body = vec![b'b'; 3_000];
+    let server = tokio::spawn(async move {
+        let mut served = Vec::new();
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let body = body.clone();
+            served.push(tokio::spawn(async move {
+                let mut request = [0_u8; 1024];
+                let _ = stream.read(&mut request).await;
+                let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());
+                let _ = stream.write_all(head.as_bytes()).await;
+                let _ = stream.write_all(&body).await;
+            }));
+        }
+        for serving in served {
+            let _ = serving.await;
+        }
+    });
+    let policy = OnionExitPolicy {
+        max_bytes_per_minute: 4_000,
+        ..OnionExitPolicy::default()
+    };
+    let accounting = OnionExitAccounting::default();
+    let fetch = || {
+        let request = OnionHttpsRequest {
+            method: "GET".to_string(),
+            path: "/".to_string(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+        let egress = NativeHttpsEgress {
+            host: address.ip().to_string(),
+            addresses: vec![address],
+        };
+        let accounting = accounting.clone();
+        let policy = policy.clone();
+        async move {
+            native_fetch_with_timeout(
+                &format!("http://{address}/"),
+                &request,
+                DEFAULT_HTTPS_RESPONSE_BODY_LIMIT_BYTES,
+                Duration::from_secs(5),
+                &egress,
+                |bytes| accounting.record_bytes(&policy, bytes, 0),
+            )
+            .await
+        }
+    };
+
+    let (first, second) = tokio::join!(fetch(), fetch());
+    server.await.unwrap();
+
+    assert!(
+        first.is_err() || second.is_err(),
+        "both fetches fit a budget below their sum"
+    );
+    assert!(
+        first.is_ok() || second.is_ok(),
+        "the budget admits one whole fetch"
+    );
+    assert!(accounting
+        .remaining_bytes(&policy, 0)
+        .unwrap()
+        .is_some_and(|left| left < 4_000));
 }

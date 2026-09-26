@@ -110,6 +110,9 @@ pub enum OnionRouteError {
     /// A queued endpoint cell lost its drain task before the overlay reported a result.
     #[error("onion link send was cancelled before overlay completion")]
     LinkSendCancelled,
+    /// An endpoint's cell found no room on its lane, or did not leave, within the send deadline.
+    #[error("onion link send timed out")]
+    LinkSendTimedOut,
     /// An HTTPS response channel closed before the exit's outcome was delivered.
     #[error("onion HTTPS response channel closed")]
     HttpsResponseClosed,

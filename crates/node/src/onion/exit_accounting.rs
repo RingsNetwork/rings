@@ -2,20 +2,23 @@
 //! many world bytes per minute (#834 D2′).
 //!
 //! ```text
-//! admit(policy, ς, p):  total < min(policy.max_sessions, 1024) ∧ share(p) < 64  ⇒ lease
+//! admit(policy, p):     total < min(policy.max_sessions, 1024) ∧ share(p) < 64  ⇒ lease
 //! drop(lease):          total ← total − 1;  share(p) ← share(p) − 1
 //! record(policy, n):    window of 60 s;  bytes + n ≤ policy.max_bytes_per_minute ⇒ bytes += n
 //! ```
 //!
-//! A session is admitted once, when its first loop arrives, and holds its lease until its
+//! A session is admitted once, when its first `T` loop arrives, and holds its lease until its
 //! driver ends, so a session that never binds a target still counts against its previous hop's
-//! share.
+//! share (for at most `Q`, when it closes unbound).
+//!
+//! World bytes are recorded in one place per world, as they stream: the session shell records
+//! what it writes and, for a `tcp` world, what it reads; an `https` fetch records its headers
+//! and body chunks itself, so a budget holds across concurrent fetches.
 
 use std::sync::Arc;
 use std::sync::Mutex;
 
 use rings_core::dht::Did;
-use rings_core::utils::get_epoch_ms;
 
 use super::OnionExitPolicy;
 use crate::error::Error;
@@ -110,17 +113,23 @@ impl OnionExitAccounting {
         })
     }
 
-    /// Record `bytes` world bytes under the per-minute policy window.
+    /// Record `bytes` world bytes at `now` under the per-minute policy window; a refused record
+    /// records nothing.
     ///
     /// # Errors
     ///
     /// [`Error::NoPermission`] once the window's budget is spent.
-    pub(crate) fn record_bytes(&self, policy: &OnionExitPolicy, bytes: u64) -> Result<()> {
+    pub(crate) fn record_bytes(
+        &self,
+        policy: &OnionExitPolicy,
+        bytes: u64,
+        now_ms: u128,
+    ) -> Result<()> {
         if policy.max_bytes_per_minute == 0 || bytes == 0 {
             return Ok(());
         }
         let mut limiter = lock(&self.limiter)?;
-        limiter.refresh_byte_window(get_epoch_ms());
+        limiter.refresh_byte_window(now_ms);
         let next = limiter
             .bytes_this_window
             .checked_add(bytes)
@@ -130,17 +139,22 @@ impl OnionExitAccounting {
         Ok(())
     }
 
-    /// The bytes still available in the current window, or `None` for an unlimited policy.
+    /// The bytes still available at `now` in the current window, or `None` for an unlimited
+    /// policy.
     ///
     /// # Errors
     ///
     /// A poisoned lock.
-    pub(crate) fn remaining_bytes(&self, policy: &OnionExitPolicy) -> Result<Option<u64>> {
+    pub(crate) fn remaining_bytes(
+        &self,
+        policy: &OnionExitPolicy,
+        now_ms: u128,
+    ) -> Result<Option<u64>> {
         if policy.max_bytes_per_minute == 0 {
             return Ok(None);
         }
         let mut limiter = lock(&self.limiter)?;
-        limiter.refresh_byte_window(get_epoch_ms());
+        limiter.refresh_byte_window(now_ms);
         Ok(Some(
             policy
                 .max_bytes_per_minute
@@ -241,7 +255,8 @@ mod tests {
         assert!(accounting.admit(&policy, peer).is_ok());
     }
 
-    /// The byte window: bytes are recorded up to the budget, and the next byte is refused.
+    /// The byte window: bytes are recorded up to the budget, the next byte is refused, and the
+    /// next window starts empty.
     #[test]
     fn test_the_byte_window_refuses_past_its_budget() {
         let accounting = OnionExitAccounting::default();
@@ -250,14 +265,31 @@ mod tests {
             ..OnionExitPolicy::default()
         };
 
-        assert!(accounting.record_bytes(&policy, 6).is_ok());
-        assert_eq!(accounting.remaining_bytes(&policy).expect("lock"), Some(4));
-        assert!(accounting.record_bytes(&policy, 5).is_err());
-        assert!(accounting.record_bytes(&policy, 4).is_ok());
-        assert_eq!(accounting.remaining_bytes(&policy).expect("lock"), Some(0));
+        let window_ms = super::EXIT_LIMIT_WINDOW_MS;
+
+        assert!(accounting.record_bytes(&policy, 6, window_ms).is_ok());
         assert_eq!(
             accounting
-                .remaining_bytes(&OnionExitPolicy::default())
+                .remaining_bytes(&policy, window_ms)
+                .expect("lock"),
+            Some(4)
+        );
+        assert!(accounting.record_bytes(&policy, 5, window_ms).is_err());
+        assert!(accounting.record_bytes(&policy, 4, window_ms).is_ok());
+        assert_eq!(
+            accounting
+                .remaining_bytes(&policy, window_ms)
+                .expect("lock"),
+            Some(0)
+        );
+        // The next window starts empty.
+        assert!(accounting.record_bytes(&policy, 10, 2 * window_ms).is_ok());
+        assert!(accounting
+            .record_bytes(&policy, 1, 2 * window_ms + 1)
+            .is_err());
+        assert_eq!(
+            accounting
+                .remaining_bytes(&OnionExitPolicy::default(), window_ms)
                 .expect("lock"),
             None
         );

@@ -90,6 +90,10 @@ pub(crate) trait OnionWorld: MaybeSendSync + 'static {
     /// The world's write half.
     type Writer: OnionWorldWriter;
 
+    /// Whether the world records the bytes it reads against the exit's byte policy itself, as
+    /// they stream, so the shell must not record them again: one place per byte.
+    const RECORDS_OWN_READS: bool = false;
+
     /// Open the world at `target`, already admitted by the exit policy.
     async fn open(&self, target: &OnionProxyTarget) -> Result<(Self::Reader, Self::Writer)>;
 }
@@ -143,14 +147,24 @@ struct OnionExitTable {
 
 impl OnionExitTable {
     /// Record that `session` closed at `now`; tombstones past their lapse are dropped first,
-    /// and the set never holds more than `ONION_EXIT_MAX_SESSIONS`.
+    /// and a full set evicts the one nearest its lapse, so the set never holds more than
+    /// `ONION_EXIT_MAX_SESSIONS` and the newest closes are always buried.
     fn bury(&mut self, session: OnionSessionId, now_ms: u128) {
         self.live.remove(&session);
         self.closed.retain(|_, lapse_ms| *lapse_ms > now_ms);
-        if self.closed.len() < ONION_EXIT_MAX_SESSIONS {
-            self.closed
-                .insert(session, now_ms + ONION_FORWARD_MAX_VALIDITY_MS);
+        if self.closed.len() >= ONION_EXIT_MAX_SESSIONS {
+            let nearest = self
+                .closed
+                .iter()
+                .min_by_key(|(_, lapse_ms)| **lapse_ms)
+                .map(|(nearest, _)| *nearest);
+            if let Some(nearest) = nearest {
+                tracing::debug!("onion exit tombstones are full; evict the nearest to lapse");
+                self.closed.remove(&nearest);
+            }
         }
+        self.closed
+            .insert(session, now_ms + ONION_FORWARD_MAX_VALIDITY_MS);
     }
 
     /// Whether `session` closed less than `V` before `now`.
@@ -305,8 +319,11 @@ async fn drive<W: OnionWorld>(
                     open.reader = Some(reader);
                 }
                 let now_ms = get_epoch_ms();
+                let recorded = |bytes: &Bytes| {
+                    W::RECORDS_OWN_READS || record(&shared, bytes.len(), now_ms)
+                };
                 match read {
-                    Ok(Some(bytes)) if record(&shared, bytes.len()) => {
+                    Ok(Some(bytes)) if recorded(&bytes) => {
                         machine.world(now_ms, OnionWorldRead::Bytes(bytes))
                     }
                     Ok(None) => machine.world(now_ms, OnionWorldRead::Eof),
@@ -370,7 +387,7 @@ async fn perform<W: OnionWorld>(
             }
             OnionExitEffect::Write(bytes) => {
                 let written = match world.as_mut() {
-                    Some(open) if record(shared, bytes.len()) => {
+                    Some(open) if record(shared, bytes.len(), get_epoch_ms()) => {
                         open.writer.write(bytes).await.is_ok()
                     }
                     _ => false,
@@ -433,11 +450,11 @@ async fn open<W: OnionWorld>(
 }
 
 /// Count `bytes` against the byte policy; `false` once it is spent, which closes the session.
-fn record<W>(shared: &OnionExitShared<W>, bytes: usize) -> bool {
+fn record<W>(shared: &OnionExitShared<W>, bytes: usize, now_ms: u128) -> bool {
     u64::try_from(bytes).ok().is_some_and(|bytes| {
         shared
             .accounting
-            .record_bytes(&shared.policy, bytes)
+            .record_bytes(&shared.policy, bytes, now_ms)
             .is_ok()
     })
 }
@@ -548,8 +565,16 @@ mod tests {
         };
         for index in 0..=ONION_EXIT_MAX_SESSIONS {
             let bytes = u128::try_from(index).expect("small").to_be_bytes();
-            full.bury(OnionSessionId::new(bytes), 0);
+            full.bury(
+                OnionSessionId::new(bytes),
+                u128::try_from(index).expect("small"),
+            );
         }
         assert_eq!(full.closed.len(), ONION_EXIT_MAX_SESSIONS);
+        let newest = u128::try_from(ONION_EXIT_MAX_SESSIONS)
+            .expect("small")
+            .to_be_bytes();
+        assert!(full.is_buried(&OnionSessionId::new(newest), 0));
+        assert!(!full.is_buried(&OnionSessionId::new(0_u128.to_be_bytes()), 0));
     }
 }

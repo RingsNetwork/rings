@@ -63,11 +63,12 @@ pub(crate) struct OnionLinkFeed {
 
 impl OnionLinkFeed {
     /// Start the feed for the data plane behind `scope`: its drain runs until the returned feed
-    /// is dropped, and its tick reconciles every `V/2` while the feed lives.
+    /// is dropped. Its tick starts with [`Self::tick`], once the feed is registered as an
+    /// observer, so its first snapshot misses no fact delivered in between.
     ///
     /// # Errors
     ///
-    /// No runtime to spawn the drain and the tick on.
+    /// No runtime to spawn the drain on.
     pub(crate) fn start(scope: Scope) -> Result<Arc<Self>> {
         let spawner = Spawner::current()?;
         let (facts, mut drained) = mpsc::channel::<OnionLinkFact>(ONION_LINK_FEED_CAPACITY);
@@ -83,13 +84,22 @@ impl OnionLinkFeed {
                 }
             }
         });
-        let feed = Arc::new(Self {
+        Ok(Arc::new(Self {
             facts: Mutex::new(facts),
             scope,
-        });
-        let ticking = Arc::downgrade(&feed);
-        spawner.spawn(async move { tick(ticking).await });
-        Ok(feed)
+        }))
+    }
+
+    /// Start the tick: a snapshot now, and one every `V/2` while the feed lives. Called once the
+    /// feed observes core's facts.
+    ///
+    /// # Errors
+    ///
+    /// No runtime to spawn the tick on.
+    pub(crate) fn tick(self: &Arc<Self>) -> Result<()> {
+        let ticking = Arc::downgrade(self);
+        Spawner::current()?.spawn(async move { tick(ticking).await });
+        Ok(())
     }
 
     /// Push `fact` under the feed's lock.

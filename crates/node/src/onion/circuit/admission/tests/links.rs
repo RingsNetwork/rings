@@ -33,7 +33,6 @@ use crate::onion::circuit::admission::OnionAdmissionState;
 use crate::onion::circuit::admission::OnionChargeRejection;
 use crate::onion::circuit::admission::OnionEpochNotFresh;
 use crate::onion::circuit::admission::OnionLinkTableFull;
-use crate::onion::circuit::admission::OnionRefusedLinks;
 use crate::onion::circuit::admission::OnionReplayFilterKey;
 use crate::onion::circuit::admission::ADMISSION_WINDOW_QUANTA_WIDE;
 use crate::onion::circuit::admission::ONION_ADMISSION_SENDER_UNITS;
@@ -250,14 +249,13 @@ fn test_a_refused_generation_cannot_close_a_live_one() {
     }
 }
 
-/// Law: the epoch reset rebuilds the live set from core's snapshot `L`, not from the old live set.
-/// The snapshot here differs from the live set: it drops the live DID 2 and adds the non-live DID
-/// 3. Every link of `L` starts with a zero ledger, so every live link still has a ledger. The reset
-/// clears the loads, the clock and the replay store, and drops every other ledger. Every layer of
-/// the old epoch is then rejected, and so is every token charged before the reset, because its
-/// epoch differs.
+/// Law: the epoch reset keeps the table's own live links, `ρ = reconcile(live_links(S)) ∘ clear`,
+/// and refuses none. Every live link starts with a zero ledger. The reset clears the loads, the
+/// clock and the replay store, and drops every ledger without a live link. Every layer of the
+/// old epoch is then rejected, and so is every token charged before the reset, because its epoch
+/// differs; a DID that had no live link is still not live.
 #[test]
-fn test_renewal_rebuilds_live_links_from_the_snapshot() {
+fn test_renewal_keeps_the_live_links_and_clears_the_rest() {
     let mut rng = StdRng::seed_from_u64(0x0841_0015);
     let mut admission = state_with(&mut rng, EPOCH, 4, 1..3);
     let x = latest_expiry(ORIGIN_MS);
@@ -280,20 +278,17 @@ fn test_renewal_rebuilds_live_links_from_the_snapshot() {
         .expect("DID 2 has headroom");
     let renewed_epoch = OnionProcessEpoch::new([8; 16]);
     assert_eq!(
-        admission.renew(renewed_epoch, OnionReplayFilterKey::new(rng.gen()), [
-            link(1),
-            link(3)
-        ]),
-        Ok(OnionRefusedLinks::default())
+        admission.renew(renewed_epoch, OnionReplayFilterKey::new(rng.gen())),
+        Ok(())
     );
     assert_eq!(admission.clock_ms, 0);
     assert_eq!(live_filters(&admission), Vec::new());
     assert_eq!(admission.senders.keys().collect::<Vec<_>>(), vec![
         &Did::from(1_u32),
-        &Did::from(3_u32)
+        &Did::from(2_u32)
     ]);
     assert_eq!(sender_load(&admission, 1, ORIGIN_MS), Some(0));
-    assert_eq!(sender_load(&admission, 3, ORIGIN_MS), Some(0));
+    assert_eq!(sender_load(&admission, 2, ORIGIN_MS), Some(0));
     assert_eq!(
         admission.admit(ORIGIN_MS, held, OnionAdmissionLayer {
             epoch: renewed_epoch,
@@ -313,11 +308,11 @@ fn test_renewal_rebuilds_live_links_from_the_snapshot() {
         Verdict::Admitted
     );
     assert_eq!(
-        send(&mut admission, ORIGIN_MS, 2, 1, layer(x, 3)),
+        send(&mut admission, ORIGIN_MS, 3, 1, layer(x, 3)),
         Verdict::Unpaid(OnionChargeRejection::LinkNotLive)
     );
     assert_eq!(
-        send(&mut admission, ORIGIN_MS, 3, 1, OnionAdmissionLayer {
+        send(&mut admission, ORIGIN_MS, 2, 1, OnionAdmissionLayer {
             epoch: renewed_epoch,
             ..layer(x, 5)
         }),
@@ -337,7 +332,7 @@ fn test_a_same_epoch_renewal_is_refused_and_cannot_readmit_a_replay() {
         Verdict::Admitted
     );
     assert_eq!(
-        admission.renew(EPOCH, OnionReplayFilterKey::new(rng.gen()), [link(1)]),
+        admission.renew(EPOCH, OnionReplayFilterKey::new(rng.gen())),
         Err(OnionEpochNotFresh)
     );
     assert_eq!(admission.clock_ms, ORIGIN_MS);

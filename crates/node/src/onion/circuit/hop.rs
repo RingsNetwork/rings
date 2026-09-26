@@ -11,8 +11,9 @@
 //! peel χ under d_i (α, ECDH, γ)                                        else Dropped(Peel)
 //! admit(tk, e, x, ν)                                                   else Dropped(Admission)
 //! relay ∧ this node relays nothing                                     ⇒ Dropped(NotRelay)
+//! relay ∧ next is no live link                                         ⇒ Dropped(NextNotLive)
 //! step (AEZ layer off, or the consumer's open)                         else Dropped(Step)
-//!   ├─ relay   ⇒ Relayed(next, cell)          if next is a live link, else Dropped(NextNotLive)
+//!   ├─ relay   ⇒ Relayed(next, cell)
 //!   └─ f ∈ Σ_W ⇒ Consumed(f, ā, v, υ)
 //! ```
 //!
@@ -28,8 +29,10 @@
 //!   epoch; its replay is `Dropped(Admission(Replayed))`.
 //! - **Identity** (L1). A `Relayed` cell has the received class and length, and its carry is the
 //!   received carry with one AEZ layer removed.
-//! - **Adjacency.** A `Relayed` cell's `next` is a live link, so a layer cannot make this node
-//!   emit toward a peer it has no link to.
+//! - **Adjacency.** A `Relayed` cell's `next` is a live link, as of the link facts this node has
+//!   applied, so a layer cannot make it emit toward a peer it has no link to. A link core has
+//!   just admitted is live once its `Opened` is applied; until then its loops fail closed, so a
+//!   session over a fresh guard waits for the link first.
 
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
@@ -134,13 +137,16 @@ pub(crate) fn hop(
         },
         Err(error) => return OnionHopOutcome::Dropped(error.into()),
     };
-    if !relays && admitted.head().application == OnionLayerApplication::Relay {
-        return OnionHopOutcome::Dropped(OnionHopDrop::NotRelay);
+    if admitted.head().application == OnionLayerApplication::Relay {
+        if !relays {
+            return OnionHopOutcome::Dropped(OnionHopDrop::NotRelay);
+        }
+        // Decided on the head, before the carry step deciphers the slot for nothing.
+        if admission.live_link(admitted.head().next).is_none() {
+            return OnionHopOutcome::Dropped(OnionHopDrop::NextNotLive);
+        }
     }
     match admitted.step() {
-        Ok(OnionStep::Relayed { next, .. }) if admission.live_link(next).is_none() => {
-            OnionHopOutcome::Dropped(OnionHopDrop::NextNotLive)
-        }
         Ok(OnionStep::Relayed { next, cell }) => OnionHopOutcome::Relayed { next, cell },
         Ok(OnionStep::Consumed {
             symbol,

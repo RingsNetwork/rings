@@ -7,8 +7,10 @@
 //!   first frame   data(0, ε) ⇒ Opened      fin ⇒ Refused (a fin before any data: no reason given)
 //!   later frames  data(w)    ⇒ Data(w)     fin ⇒ Fin
 //! credit:    want min(W, Q_max) reply blocks outstanding at h; each forward loop leaves one and a
-//!            credit loop of j ≤ k blocks leaves j + 1, so the deficit D asks ⌊D / (k + 1)⌋ full
-//!            credit loops and, for a remainder r ≥ 2, one of r − 1 blocks
+//!            full credit loop k + 1, so the deficit D asks ⌊D / (k + 1)⌋ full credit loops: the
+//!            window refills only once it is k + 1 short, a hysteresis of one loop
+//! keep-alive: one credit loop once no loop has left for V/2, which also replaces credit lost on
+//!            the way (a session whose replies stop sends nothing else)
 //! ```
 //!
 //! Laws (tested in `session::tests`):
@@ -19,11 +21,15 @@
 //! - **Sequence.** Forward frames carry `n = 0, 1, …`; replies are released in their order.
 //! - **Open result.** The first released reply decides the open: `data(0, ε)` is the ack, `fin`
 //!   is a refusal (#843 Q5).
-//! - **Credit.** The window never asks for more than `min(W, Q_max)` outstanding blocks, and
-//!   the client's count bounds the blocks at `h` from above, with equality absent loss and up to
-//!   clock skew at an expiry: `h` spends the block of least expiry first, and so does
-//!   [`OnionClientCredit`]; both drop a block at its expiry; and the count saturates at `Q_max`,
-//!   where `h` refuses further blocks.
+//! - **Credit.** The window never asks for more than `min(W, Q_max)` outstanding blocks. The
+//!   client's count tracks the blocks at `h` up to replies in flight, loss and clock skew at an
+//!   expiry: `h` spends the block of least expiry first, and so does [`OnionClientCredit`]; both
+//!   drop a block at its expiry; and the count saturates at `Q_max`, where `h` refuses further
+//!   blocks.
+//! - **Batching.** A steady download of `n` replies costs at most `⌈n / (k + 1)⌉ + 1` forward
+//!   loops (Prop. SURB batching), since only full credit frames are sent.
+//! - **Idle.** An idle session sends one loop per `V/2`, whatever its credit, so its route's
+//!   links return to the idle floor between loops (#880).
 
 use std::collections::BTreeMap;
 
@@ -36,6 +42,7 @@ use super::order::OnionReorder;
 use super::order::OnionSequenceGap;
 use super::pool::ONION_SURB_POOL_CAPACITY;
 use crate::onion::circuit::OnionExpiry;
+use crate::onion::circuit::ONION_FORWARD_MAX_VALIDITY_MS;
 use crate::onion::sphinx::class::OnionLoopClass;
 
 /// What the session learned from one reply, for the client shell to act on.
@@ -198,25 +205,25 @@ impl OnionCreditWindow {
         Self { target }
     }
 
-    /// The credit loops to send when `outstanding` blocks are live at `h`, as the number of
-    /// blocks each carries in class `class` (see the module diagram): a loop of `j` blocks
-    /// leaves `j + 1`, so together they leave at most `min(W, Q_max) − outstanding`, and none
-    /// once the window is full. The window is capped at `h`'s pool bound `Q_max`, since a block
-    /// past it is dropped at `h` and its loop wasted.
-    pub(crate) fn credit_loops(self, outstanding: usize, class: OnionLoopClass) -> Vec<usize> {
-        let blocks_per_frame = OnionFrame::credit_capacity(class);
+    /// The number of full credit loops to send when `outstanding` blocks are live at `h` in
+    /// class `class`: `⌊(min(W, Q_max) − outstanding) / (k + 1)⌋`. Each leaves `k + 1` blocks,
+    /// so together they never exceed the window, and none is sent until the window is `k + 1`
+    /// short. The window is capped at `h`'s pool bound `Q_max`, since a block past it is
+    /// dropped at `h` and its loop wasted.
+    pub(crate) fn credit_loops(self, outstanding: usize, class: OnionLoopClass) -> usize {
         let deficit = self
             .target
             .min(ONION_SURB_POOL_CAPACITY)
             .saturating_sub(outstanding);
-        let full = deficit / (blocks_per_frame + 1);
-        let remainder = deficit % (blocks_per_frame + 1);
-        let mut loops = vec![blocks_per_frame; full];
-        if remainder >= 2 {
-            loops.push(remainder - 1);
-        }
-        loops
+        deficit / (OnionFrame::credit_capacity(class) + 1)
     }
+}
+
+/// The keep-alive rule: whether a session whose last loop left at `last_forward` owes `h` one
+/// credit loop at `now`, which it does once `V/2` has passed without one. A forward loop of any
+/// kind resets it, so the rule fires at most once per `V/2`.
+pub(crate) const fn keep_alive_due(now_ms: u128, last_forward_ms: u128) -> bool {
+    now_ms.saturating_sub(last_forward_ms) >= ONION_FORWARD_MAX_VALIDITY_MS / 2
 }
 
 /// The client's ledger of the reply blocks outstanding at `h` for one session, by expiry.

@@ -18,7 +18,8 @@
 //! world(w | eof):    held ← held ‖ w (or eof);  drain
 //! drain:             while held ≠ ε ∧ υ = least x exists:  reply data(n, 0, w′), w′ ≤ cap(υ)
 //!                    held = ε ∧ eof ∧ υ exists ⇒ reply fin(n)
-//! tick(t):           a persisting gap ⇒ abort
+//! tick(t):           Unbound for Q since the first loop ⇒ Close (no world was opened)
+//!                    a persisting gap ⇒ abort
 //!                    t − last forward ≥ V, or both directions closed ⇒ Close
 //! fail(t):           the world failed ⇒ abort
 //! abort:             reply fin(n) if a block is left, then Close (fail closed, #834 D2′)
@@ -51,6 +52,7 @@ use super::frame::OnionSequence;
 use super::order::OnionReorder;
 use super::pool::OnionSurbPool;
 use super::OnionTargetDigest;
+use crate::onion::circuit::ONION_FORWARD_EXPIRY_QUANTUM_MS;
 use crate::onion::circuit::ONION_FORWARD_MAX_VALIDITY_MS;
 use crate::onion::sphinx::cell::OnionCell;
 use crate::onion::sphinx::cell::OnionSurb;
@@ -140,6 +142,8 @@ pub(crate) struct OnionExitSession {
     write_closed: bool,
     /// The arrival of the last forward loop.
     last_forward_ms: u128,
+    /// The arrival of the first forward loop.
+    created_ms: u128,
 }
 
 impl OnionExitSession {
@@ -156,6 +160,7 @@ impl OnionExitSession {
             read_closed: false,
             write_closed: false,
             last_forward_ms: now_ms,
+            created_ms: now_ms,
         }
     }
 
@@ -247,14 +252,19 @@ impl OnionExitSession {
         effects
     }
 
-    /// The periodic step at `now`: a persisting gap aborts; `V` without a forward loop, or both
-    /// directions closed, closes the session.
+    /// The periodic step at `now`: a session still unbound `Q` after its first loop closes (it
+    /// holds a table slot and a lease but opened nothing); a persisting gap aborts; `V` without a
+    /// forward loop, or both directions closed, closes the session.
     pub(crate) fn tick(&mut self, now_ms: u128) -> Vec<OnionExitEffect> {
         let mut effects = Vec::new();
         if self.is_closed() {
             return effects;
         }
-        if self.forward.expire(now_ms).is_err() {
+        if self.phase == OnionExitPhase::Unbound
+            && now_ms.saturating_sub(self.created_ms) >= ONION_FORWARD_EXPIRY_QUANTUM_MS
+        {
+            self.close(&mut effects);
+        } else if self.forward.expire(now_ms).is_err() {
             self.abort(now_ms, &mut effects);
         } else if now_ms.saturating_sub(self.last_forward_ms) >= ONION_FORWARD_MAX_VALIDITY_MS
             || (self.read_closed && self.write_closed)
@@ -364,12 +374,13 @@ impl OnionExitSession {
         }
     }
 
-    /// Fail closed: reply `fin(n)` if a block is left, then close.
+    /// Fail closed: reply `fin(n)` if the world's stream is still open and a block is left, then
+    /// close. After the world's own `fin` nothing more is replied.
     fn abort(&mut self, now_ms: u128, effects: &mut Vec<OnionExitEffect>) {
         if self.is_closed() {
             return;
         }
-        if self.reply.is_some() && !self.pool.is_empty(now_ms) {
+        if !self.read_closed && self.reply.is_some() && !self.pool.is_empty(now_ms) {
             self.reply_frame(now_ms, ReplyKind::Fin, effects);
         }
         self.close(effects);

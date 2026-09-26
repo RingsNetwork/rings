@@ -172,7 +172,9 @@ pub(crate) struct OnionSurb {
     next: Did,
     /// `χ_υ`.
     header: OnionHeader,
-    /// `σ_υ`, zeroized on drop.
+    /// `σ_υ`, zeroized on drop. A move of the block copies it bitwise without a drop of the
+    /// source, so a buffer a block left may still hold it: the builder sizes its vector of blocks
+    /// once, and the seed is zeroized wherever the block ends.
     outbound: OnionSegmentSeed,
     /// `x_υ`.
     expiry: OnionExpiry,
@@ -413,6 +415,12 @@ impl OnionAdmittedCell {
         &self.0.layer.head
     }
 
+    /// The whole decrypted `λ_i`, head and seeds, for the non-interference law.
+    #[cfg(test)]
+    pub(crate) const fn layer(&self) -> &OnionLayer {
+        &self.0.layer
+    }
+
     /// The carry step of this position, by `λ_i`'s application; it consumes both seeds:
     ///
     /// ```text
@@ -500,6 +508,18 @@ impl OnionSurb {
     /// Return the class `b` of the cell it produces.
     pub(crate) const fn class(&self) -> OnionLoopClass {
         self.class
+    }
+
+    /// `next_υ`, for the non-interference law.
+    #[cfg(test)]
+    pub(crate) const fn next(&self) -> Did {
+        self.next
+    }
+
+    /// `σ_υ`, for the seed law.
+    #[cfg(test)]
+    pub(crate) const fn outbound(&self) -> &OnionSegmentSeed {
+        &self.outbound
     }
 
     /// The widest value this reply block can carry, `C₀ − 1` of its class.

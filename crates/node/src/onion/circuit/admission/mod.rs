@@ -102,8 +102,8 @@
 //!   (`circuit::feed`) from core's `Admitted`/`Retired` events. The state keeps the set of live
 //!   links, and one budget ledger per DID with at least one live link or some load.
 //!   * **Event-pairing obligation** (met by `circuit::feed`). Between resets the live set
-//!     shrinks only through `link_closed` and `reconcile`. A lost `Retired` therefore pins a live link, and a ledger
-//!     slot, until a reconciliation repairs it. Core itself splits an `Admitted`/`Retired` pair
+//!     shrinks only through `link_closed` and `reconcile`. A lost `Retired` therefore pins a
+//!     live link, and a ledger slot, until a reconciliation repairs it. Core itself splits an `Admitted`/`Retired` pair
 //!     when the callback is replaced, and a bounded shell queue may drop events. The shell must
 //!     call [`OnionAdmissionState::reconcile`] with core's registry snapshot of live links whenever
 //!     the callback is replaced, and on a periodic tick no longer than `V`. `reconcile` closes
@@ -111,10 +111,11 @@
 //!     so afterwards the live set is `L \ refused` for the snapshot `L`. The leak lasts at most one
 //!     tick.
 //!   * **Linearisation obligation** (met by `circuit::feed`: the snapshot travels in the FIFO).
-//!     `reconcile` and `renew` both treat their snapshot as authoritative, so each snapshot must be linearised with the event stream it repairs. It must
-//!     be delivered through the same ordered channel as `Admitted`/`Retired`, or read and applied
-//!     atomically at the shell's queue-drain point. Under this obligation, after `reconcile` or
-//!     `renew` the live set is exactly core's registry minus the refused links. Without it, a
+//!     `reconcile` treats its snapshot as authoritative, so each snapshot must be linearised with
+//!     the event stream it repairs. It must be delivered through the same ordered channel as
+//!     `Admitted`/`Retired`, or read and applied atomically at the shell's queue-drain point.
+//!     Under this obligation, after `reconcile` the live set is exactly core's registry minus the
+//!     refused links. Without it, a
 //!     snapshot read before an `Admitted(g)` that is processed first would close the live `g` (its
 //!     cells would be `LinkNotLive` for up to one tick), and the converse would reopen a retired
 //!     `g`.
@@ -151,9 +152,11 @@
 //!     owes the rest: it draws `e′` independently and uniformly from `2¹²⁸`, and redraws on that
 //!     rejection. Over `k` resets, the chance of reusing one *fixed* earlier epoch is `≤ k·2⁻¹²⁸`.
 //!     The chance that some reset reuses *any* earlier epoch, the `A → B → A` sequence that would
-//!     revive `A`'s layers, is at most the birthday bound `k²·2⁻¹²⁹`. The reset rebuilds the live
-//!     set from core's snapshot, and every DID with a live link starts with a zero-load ledger, so
-//!     every live link still has a ledger. The per-DID bound `B` therefore holds within one epoch.
+//!     revive `A`'s layers, is at most the birthday bound `k²·2⁻¹²⁹`. The reset keeps the table's
+//!     own live set, `ρ = reconcile(live_links(S)) ∘ clear`, which refuses nothing since it held
+//!     that set before; every DID with a live link starts with a zero-load ledger, so every live
+//!     link still has a ledger, and the next `Reconcile` repairs any link whose `Retired` was
+//!     lost. The per-DID bound `B` therefore holds within one epoch.
 //!     A token charged before the reset is never admitted after it, because its epoch differs.
 //!   * `G` is independent of the table size and bounds what all DIDs admit together, and hence the
 //!     replay store.
@@ -283,7 +286,7 @@ pub(crate) enum OnionAdmissionRejection {
 pub(crate) struct OnionLinkTableFull;
 
 /// The links a table refused, which the shell must close. Returned by
-/// [`OnionAdmissionState::reconcile`] and [`OnionAdmissionState::renew`].
+/// [`OnionAdmissionState::reconcile`].
 #[must_use = "refused links must be closed by the shell"]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct OnionRefusedLinks(Vec<PeerLink>);
@@ -360,21 +363,29 @@ impl OnionAdmissionState {
         now_ms.saturating_add(ONION_EXPIRY_OFFSET_MS) < self.clock_ms
     }
 
-    /// The reset `ρ(epoch, key, live)`: the epoch reset. It requires a fresh `epoch` and otherwise
-    /// changes nothing. On success, `ρ = reconcile ∘ clear`: the state is the initial state of
-    /// `epoch` with probe key `filter_key`, reconciled with core's snapshot `live`, each DID with a
-    /// zero-load ledger. It returns the snapshot links the table refuses, which the shell must
-    /// close. The cleared table is empty and a snapshot has no more DIDs than links, so nothing is
-    /// refused when `|live| ≤ 2·R`.
+    /// The reset `ρ(epoch, key)`: the epoch reset. It requires a fresh `epoch` and otherwise
+    /// changes nothing. On success the state is the initial state of `epoch` with probe key
+    /// `filter_key` and the same live links, each DID with a zero-load ledger: `ρ =
+    /// reconcile(live_links(S)) ∘ clear`. It refuses nothing, since the table held these links
+    /// before, so it keeps no link the shell would have to close.
     pub(crate) fn renew(
         &mut self,
         epoch: OnionProcessEpoch,
         filter_key: OnionReplayFilterKey,
-        live: impl IntoIterator<Item = PeerLink>,
-    ) -> Result<OnionRefusedLinks, OnionEpochNotFresh> {
+    ) -> Result<(), OnionEpochNotFresh> {
         if epoch == self.epoch {
             return Err(OnionEpochNotFresh);
         }
+        let senders = std::mem::take(&mut self.senders)
+            .into_iter()
+            .filter(|(_, sender)| !sender.live.is_empty())
+            .map(|(did, sender)| {
+                (did, SenderLedger {
+                    ledger: QuantumLedger::default(),
+                    live: sender.live,
+                })
+            })
+            .collect();
         *self = Self {
             epoch,
             clock_ms: 0,
@@ -382,9 +393,9 @@ impl OnionAdmissionState {
             replay: ReplayStore::new(filter_key),
             global: QuantumLedger::default(),
             capacity: self.capacity,
-            senders: BTreeMap::new(),
+            senders,
         };
-        Ok(self.reconcile(0, live))
+        Ok(())
     }
 
     /// The step `δ` on `Reconcile(live)`: make the live-link set equal core's registry snapshot

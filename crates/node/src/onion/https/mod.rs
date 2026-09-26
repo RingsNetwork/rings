@@ -19,6 +19,7 @@
 
 use bytes::Bytes;
 use futures::channel::oneshot;
+use rings_core::utils::get_epoch_ms;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -175,6 +176,9 @@ impl OnionWorld for OnionHttpsWorld {
     type Reader = OnionHttpsReader;
     type Writer = OnionHttpsWriter;
 
+    /// The fetch records the response's headers and body as they stream.
+    const RECORDS_OWN_READS: bool = true;
+
     async fn open(&self, target: &OnionProxyTarget) -> Result<(Self::Reader, Self::Writer)> {
         let (complete, request) = oneshot::channel();
         Ok((
@@ -254,16 +258,17 @@ impl OnionHttpsReader {
     }
 }
 
-/// Fetch `request` at `target`, the session's authority, with its body bounded by what is left
-/// of the policy's byte budget. The fetch records nothing itself: the session shell records
-/// every byte of the encoded outcome once, as it reads it.
+/// Fetch `request` at `target`, the session's authority, recording the response's headers and
+/// body chunks against the policy's byte budget as they arrive, and refusing past it: the
+/// budget holds across every concurrent fetch, and the session shell records none of these bytes
+/// again ([`OnionWorld::RECORDS_OWN_READS`]).
 async fn fetch(
     target: &OnionProxyTarget,
     request: &OnionHttpsRequest,
     policy: &OnionExitPolicy,
     accounting: &OnionExitAccounting,
 ) -> Result<OnionHttpsResponse> {
-    let body_limit = https_response_body_limit(accounting.remaining_bytes(policy)?);
+    let body_limit = https_response_body_limit(accounting.remaining_bytes(policy, get_epoch_ms())?);
     if body_limit == 0 {
         return Err(Error::NoPermission);
     }
@@ -272,7 +277,10 @@ async fn fetch(
         target.authority(),
         normalize_path(&request.path)?
     );
-    let response = execute_https_request(&url, target, request, body_limit).await?;
+    let response = execute_https_request(&url, target, request, body_limit, |bytes| {
+        accounting.record_bytes(policy, bytes, get_epoch_ms())
+    })
+    .await?;
     Ok(OnionHttpsResponse {
         status: response.status,
         headers: response.headers,

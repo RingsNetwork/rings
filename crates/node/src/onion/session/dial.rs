@@ -5,17 +5,17 @@
 //! open(route, f, t, b, W):  ς ← uniform;  ā = ς ‖ SHA-256(t);  spawn the driver
 //!                           await the first event: Opened ⇒ the stream, Refused | timeout ⇒ error
 //!
-//! driver:  queue data(0, T, ε);  top up
+//! driver:  send data(0, T, ε);  top up                                            (awaited)
 //!          loop select
 //!            user Data(w)  ─▶ data(n, T?, w′) per chunk w′ ≤ capacity, one loop each (awaited)
-//!            user Fin      ─▶ fin(n)                                                (queued)
+//!            user Fin      ─▶ fin(n)                                                (awaited)
 //!            reply         ─▶ credit.replied;  machine.reply ⇒ events to the user
-//!            tick          ─▶ gap check;  a credit loop if no loop left for V/2     (queued)
-//!          top up:  ⌈(W − outstanding) / (k + 1)⌉ credit loops, each k fresh blocks (queued)
+//!            tick          ─▶ gap check;  one credit loop if keep_alive_due          (queued)
+//!          top up:  ⌊(min(W, Q_max) − outstanding) / (k + 1)⌋ full credit loops    (queued)
 //! ```
 //!
-//! Departure: stream data waits for the guard's lane, which is the upload's backpressure;
-//! control loops are queued, at most `⌈W / (k + 1)⌉` at a time, so they never hold up the
+//! Departure: stream frames wait for the guard's lane, which is the upload's backpressure;
+//! control loops are queued, at most `⌊W / (k + 1)⌋` at a time, so they never hold up the
 //! replies the driver reads.
 //!
 //! Laws: the pure machines' (Target, Sequence, Open result, Credit). Every loop leaves exactly
@@ -36,6 +36,7 @@ use rings_runtime::sleep;
 use rings_runtime::Spawner;
 use zeroize::Zeroizing;
 
+use super::client::keep_alive_due;
 use super::client::OnionClientCredit;
 use super::client::OnionClientEvent;
 use super::client::OnionClientSession;
@@ -52,7 +53,6 @@ use crate::onion::circuit::OnionExpiry;
 use crate::onion::circuit::OnionLoopClient;
 use crate::onion::circuit::OnionReply;
 use crate::onion::circuit::OnionReplySink;
-use crate::onion::circuit::ONION_FORWARD_MAX_VALIDITY_MS;
 use crate::onion::sphinx::builder::OnionApplication;
 use crate::onion::sphinx::class::OnionLoopClass;
 use crate::onion::OnionProxyTarget;
@@ -67,10 +67,6 @@ const ONION_SESSION_OPEN_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// The period of the driver's tick.
 const ONION_SESSION_TICK: Duration = Duration::from_secs(10);
-
-/// The keepalive interval `V/2`: a session that sent no loop for this long sends a credit loop,
-/// so `h` sees a forward loop well within `V` and keeps unexpired credit.
-const ONION_SESSION_KEEPALIVE_MS: u128 = ONION_FORWARD_MAX_VALIDITY_MS / 2;
 
 /// Commands and events queued between a stream and its driver.
 const ONION_SESSION_QUEUE: usize = 32;
@@ -208,7 +204,6 @@ pub(crate) async fn open(
         machine: OnionClientSession::new(target),
         credit: OnionClientCredit::default(),
         last_forward_ms: 0,
-        last_reply_ms: 0,
         fin_sent: false,
         world_ended: false,
     };
@@ -247,8 +242,6 @@ struct OnionSessionDriver {
     credit: OnionClientCredit,
     /// When the last loop left.
     last_forward_ms: u128,
-    /// When the last reply arrived (or the session started).
-    last_reply_ms: u128,
     /// Whether this direction's `fin` has been sent.
     fin_sent: bool,
     /// Whether the world's `fin` has arrived: `h` replies nothing more, so no credit is sent.
@@ -275,7 +268,6 @@ impl OnionSessionDriver {
     ) {
         let (sink, mut replies) = mpsc::channel::<OnionReply>(ONION_SURB_POOL_CAPACITY);
         let mut opened = Some(opened);
-        self.last_reply_ms = get_epoch_ms();
         let started = match self.machine.data(Bytes::new()) {
             Ok(frame) => self.send(&frame, &sink).await.is_ok(),
             Err(_) => false,
@@ -327,7 +319,6 @@ impl OnionSessionDriver {
         events: &mut mpsc::Sender<OnionStreamEvent>,
         opened: &mut Option<futures::channel::oneshot::Sender<bool>>,
     ) -> OnionReplyFlow {
-        self.last_reply_ms = reply.received_at_ms;
         self.credit.replied(reply.received_at_ms);
         let Ok(released) = self.machine.reply(reply.received_at_ms, reply.frame) else {
             return OnionReplyFlow::Fail;
@@ -394,25 +385,15 @@ impl OnionSessionDriver {
         }
     }
 
-    /// The tick: fail on a persisting gap, and send a credit loop if no loop has left for `V/2`,
-    /// or if no reply has come for `V/2` while the ledger reads the window full (blocks lost on
-    /// the way, which the ledger cannot see, are then replaced).
+    /// The tick: fail on a persisting gap, and send one credit loop when the keep-alive rule
+    /// is due ([`keep_alive_due`]).
     fn keep_alive(&mut self, sink: &OnionReplySink) -> Result<()> {
         let now_ms = get_epoch_ms();
         self.machine
             .expire(now_ms)
             .map_err(|_| Error::OnionRouteError(OnionRouteError::SessionFailed))?;
-        if self.world_ended {
-            return Ok(());
-        }
-        let quiet = now_ms.saturating_sub(self.last_forward_ms) >= ONION_SESSION_KEEPALIVE_MS;
-        let starved = now_ms.saturating_sub(self.last_reply_ms) >= ONION_SESSION_KEEPALIVE_MS
-            && self
-                .window
-                .credit_loops(self.credit.count(now_ms), self.class)
-                .is_empty();
-        if quiet || starved {
-            self.credit_loop(OnionFrame::credit_capacity(self.class), sink)?;
+        if !self.world_ended && keep_alive_due(now_ms, self.last_forward_ms) {
+            self.credit_loop(sink)?;
         }
         Ok(())
     }
@@ -426,8 +407,8 @@ impl OnionSessionDriver {
         let loops = self
             .window
             .credit_loops(self.credit.count(get_epoch_ms()), self.class);
-        for blocks in loops {
-            match self.credit_loop(blocks, sink) {
+        for _ in 0..loops {
+            match self.credit_loop(sink) {
                 Ok(()) => {}
                 Err(error) if is_lane_full(&error) => break,
                 Err(error) => return Err(error),
@@ -436,8 +417,9 @@ impl OnionSessionDriver {
         Ok(())
     }
 
-    /// One credit loop of `blocks` fresh reply blocks, `blocks + 1` at `h`.
-    fn credit_loop(&mut self, blocks: usize, sink: &OnionReplySink) -> Result<()> {
+    /// One full credit loop: `k` fresh reply blocks, `k + 1` at `h`.
+    fn credit_loop(&mut self, sink: &OnionReplySink) -> Result<()> {
+        let blocks = OnionFrame::credit_capacity(self.class);
         let (surbs, expiry) = self.loops.surbs(&self.route, self.class, blocks, sink)?;
         self.enqueue(&OnionFrame::Credit(surbs), sink)?;
         self.credit.sent(get_epoch_ms(), expiry, blocks);

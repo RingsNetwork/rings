@@ -32,7 +32,7 @@ This file follows https://llmstxt.org/. It is for coding agents that build on Ri
 
 - `crates/core`: Chord DHT, swarm, DID and elliptic-curve identity, message types, DHT storage bounds. Protocol only: application registries and descriptors do not belong here.
 - `crates/transport`: the WebRTC transports (`native-webrtc`, `web-sys-webrtc`) and the `dummy` transport that topology tests run on.
-- `crates/node`: the node. Native daemon and CLI (`bin/rings.rs`, `src/native`), browser provider (`src/provider/browser`), FFI provider (`src/provider/ffi.rs`, feature `ffi`), extension runtime and built-in protocols (`src/extension`), the privacy layer: onion circuits, cover and pacing, exit registry (`src/onion`), JSON-RPC handlers (`src/rpc_impl.rs`), seeds, peer quotas, registries.
+- `crates/node`: the node. Native daemon and CLI (`bin/rings.rs`, `src/native`), browser provider (`src/provider/browser`), FFI provider (`src/provider/ffi.rs`, feature `ffi`), extension runtime and built-in protocols (`src/extension`), the privacy layer: onion loops, constant-rate link emission, paid admission, exit registry (`src/onion`), JSON-RPC handlers (`src/rpc_impl.rs`), seeds, peer quotas, registries.
 - `crates/rpc`: RPC types and the JSON-RPC client. Its protos are plain data mirrors of node types, never behaviour.
 - `crates/codec`: the serde wire codec. `crates/derive`: proc macros, including `wasm_export`.
 - `crates/measure`: pure local peer credit and reliability algorithms. `crates/network-policy`: the public-network admission policy for egress targets. `crates/gateway`: the native TUN gateway that carries selected TCP destinations over onion circuits (vendored netlink under `vendor/`). `crates/webview`: onion-backed WebView gateway primitives.

@@ -286,12 +286,35 @@ fn test_a_two_symbol_loop_hands_each_segment_to_its_consumer() {
     assert_eq!(next, did(1));
     let (next, cell) = relay(cell, &keys[1]);
     assert_eq!(next, did(2));
-    let (_, first, value, surb) = consume(cell, &keys[2]);
+    let admitted_h1 = admitted(cell, &keys[2]);
+    let segment = *admitted_h1.layer().outbound.as_bytes();
+    let OnionStep::Consumed {
+        arguments: first,
+        value,
+        surb,
+        ..
+    } = admitted_h1.step().expect("strong key")
+    else {
+        panic!("h1 consumes");
+    };
+    let value = value.as_slice().to_vec();
+    assert_eq!(
+        surb.outbound().as_bytes(),
+        &segment,
+        "h1's reply block carries σ₁"
+    );
     assert_eq!(first, OnionArguments::new([1; 64]));
     assert_eq!(value, b"v0");
     let (next, cell) = surb.produce(b"v1").expect("h1 produces");
     assert_eq!(next, did(3));
-    let (next, cell) = relay(cell.into_bytes(), &keys[3]);
+    let cell = cell.into_bytes();
+    let at_relay = admitted(cell.clone(), &keys[3]);
+    assert_ne!(
+        at_relay.layer().outbound.as_bytes(),
+        &segment,
+        "a relay's σ_out is uniform, never the segment seed"
+    );
+    let (next, cell) = relay(cell, &keys[3]);
     assert_eq!(next, did(4));
     let (next, cell) = relay(cell, &keys[4]);
     assert_eq!(next, did(5));
@@ -313,67 +336,132 @@ fn test_a_two_symbol_loop_hands_each_segment_to_its_consumer() {
     );
 }
 
-/// Non-interference (L5, #834 Tests; #895 B-M3): what position `i` sees does not depend on the
-/// applications or values of other positions. Two loops built from the same seed, differing
-/// only in `ā_j, v_j` for `j ≠ i`, give position `i` the same head, the same cell width and,
-/// at a symbol hop, the same application, input and reply block shape; the builder draws its
-/// secrets in an order that no value influences, so equal seeds make these views equal.
+/// The loop positions of the two-symbol fixture, as indices into its keys: `g, r, h₁, r, r, h₂,
+/// r, g`.
+const TWO_SYMBOL_POSITIONS: [usize; 8] = [0, 1, 2, 3, 4, 5, 6, 0];
+
+/// What position `i` of a loop sees: its whole decrypted layer `λ_i` (encoded with a fixed MAC,
+/// so head and both seeds are compared), the width of the cell it received and its class, and
+/// at a symbol hop the value it opens and its reply block's `(next, class, x)`.
+#[derive(Debug, Eq, PartialEq)]
+struct View {
+    /// `enc(λ_i)`.
+    layer: Vec<u8>,
+    /// `|χ_i| + |y_i|`, the received cell's width.
+    width: usize,
+    /// The received cell's class.
+    class: OnionLoopClass,
+    /// `v̂_i` and the reply block's fields, at a symbol hop.
+    consumed: Option<(
+        Vec<u8>,
+        Did,
+        OnionLoopClass,
+        crate::onion::circuit::OnionExpiry,
+    )>,
+}
+
+/// Run a built two-symbol loop to position `stop`, with `h₁` producing `outputs[0]` and `h₂`
+/// producing `outputs[1]`, and return what `stop` sees.
+fn view_at(keys: &[DelegateeKey; 7], cell: Vec<u8>, outputs: [&[u8]; 2], stop: usize) -> View {
+    let mac = crate::onion::sphinx::header::OnionHeaderMac::new([0; 16]);
+    let mut cell = cell;
+    for (position, key) in TWO_SYMBOL_POSITIONS
+        .iter()
+        .map(|index| &keys[*index])
+        .enumerate()
+    {
+        let width = cell.len();
+        let received = OnionCell::parse(&cell).expect("a cell");
+        let class = received.class();
+        let admitted = admitted(cell, key);
+        let layer = admitted.layer().encode(&mac).to_vec();
+        match admitted.step().expect("strong key") {
+            OnionStep::Relayed { cell: next, .. } => {
+                if position == stop {
+                    return View {
+                        layer,
+                        width,
+                        class,
+                        consumed: None,
+                    };
+                }
+                cell = next.into_bytes();
+            }
+            OnionStep::Consumed { value, surb, .. } => {
+                if position == stop {
+                    return View {
+                        layer,
+                        width,
+                        class,
+                        consumed: Some((
+                            value.as_slice().to_vec(),
+                            surb.next(),
+                            surb.class(),
+                            surb.expiry(),
+                        )),
+                    };
+                }
+                let output = if position == 2 {
+                    outputs[0]
+                } else {
+                    outputs[1]
+                };
+                cell = surb.produce(output).expect("produce").1.into_bytes();
+            }
+        }
+    }
+    panic!("position {stop} is not on the loop");
+}
+
+/// Draw a value of 0 to 99 bytes.
+fn draw_value(rng: &mut impl RngCore) -> Vec<u8> {
+    let mut value = vec![0; usize::try_from(rng.next_u32() % 100).expect("small")];
+    rng.fill_bytes(&mut value);
+    value
+}
+
+/// Non-interference (L5, #834 Tests; #895 B-M3, B2-M2), as a seeded property over drawn
+/// applications and values: for every position `i` of a two-symbol loop, two loops built from
+/// the same seed that differ in every `ā_j, v_j` with `j ≠ i` (and agree on `i`'s own `ā_i` and
+/// input) give `i` the same view: its whole layer `λ_i`, the width and class of its cell, and at
+/// a symbol hop the value it opens and its reply block's `(next, class, x)`.
+///
+/// Ciphertext bytes are compared for length only: L5 is computational, and under a shared seed
+/// the ciphertexts differ exactly by the plaintext difference, so byte equality is not the law.
+/// What the property rules out is a builder that writes another position's data into `λ_i`, or
+/// whose draws depend on values, either of which changes some compared field.
 #[test]
 fn test_no_position_sees_the_applications_of_another() {
     let keys = keys_of_two();
-    let width = OnionLoopClass::DEFAULT.cell_bytes();
+    let mut draws = fixture_rng(83);
+    for case in 0..8_u64 {
+        for stop in 0..TWO_SYMBOL_POSITIONS.len() {
+            let [a1, a2, b1, b2] = [(); 4].map(|()| {
+                let mut arguments = [0; 64];
+                draws.fill_bytes(&mut arguments);
+                arguments
+            });
+            let [v0, w0, v1, w1, v2, w2] = [(); 6].map(|()| draw_value(&mut draws));
+            // Keep what position `stop` owns: h₁'s ā₁ and input v₀, h₂'s ā₂ and input v₁.
+            let (b1, w0) = if stop == 2 {
+                (a1, v0.clone())
+            } else {
+                (b1, w0)
+            };
+            let (b2, w1) = if stop == 5 {
+                (a2, v1.clone())
+            } else {
+                (b2, w1)
+            };
+            let seed = 1_000 + case * 16 + u64::try_from(stop).expect("small");
+            let first = build_two(&keys, &two_applications(a1, a2), &v0, seed);
+            let second = build_two(&keys, &two_applications(b1, b2), &w0, seed);
 
-    // Relays before h₁ see nothing of ā₁, ā₂ or v₀.
-    let a = build_two(&keys, &two_applications([1; 64], [2; 64]), b"one value", 81);
-    let b = build_two(&keys, &two_applications([7; 64], [8; 64]), b"another", 81);
-    let (mut cell_a, mut cell_b) = (a.cell.into_bytes(), b.cell.into_bytes());
-    for position in [0, 1] {
-        assert_eq!(cell_a.len(), width);
-        assert_eq!(cell_b.len(), width);
-        let (view_a, view_b) = (
-            admitted(cell_a, &keys[position]),
-            admitted(cell_b, &keys[position]),
-        );
-        assert_eq!(view_a.head(), view_b.head(), "position {position}");
-        let (OnionStep::Relayed { cell: next_a, .. }, OnionStep::Relayed { cell: next_b, .. }) = (
-            view_a.step().expect("strong"),
-            view_b.step().expect("strong"),
-        ) else {
-            panic!("a relay position");
-        };
-        (cell_a, cell_b) = (next_a.into_bytes(), next_b.into_bytes());
+            assert_eq!(
+                view_at(&keys, first.cell.into_bytes(), [&v1, &v2], stop),
+                view_at(&keys, second.cell.into_bytes(), [&w1, &w2], stop),
+                "case {case}, position {stop}"
+            );
+        }
     }
-
-    // h₁ sees its own ā₁ and v₀, never ā₂.
-    let a = build_two(&keys, &two_applications([1; 64], [2; 64]), b"v0", 82);
-    let b = build_two(&keys, &two_applications([1; 64], [9; 64]), b"v0", 82);
-    let (mut cell_a, mut cell_b) = (a.cell.into_bytes(), b.cell.into_bytes());
-    for position in [0, 1] {
-        cell_a = relay(cell_a, &keys[position]).1;
-        cell_b = relay(cell_b, &keys[position]).1;
-    }
-    let view_a = admitted(cell_a, &keys[2]);
-    let view_b = admitted(cell_b, &keys[2]);
-    assert_eq!(view_a.head(), view_b.head());
-    let (
-        OnionStep::Consumed {
-            value: value_a,
-            surb: surb_a,
-            ..
-        },
-        OnionStep::Consumed {
-            value: value_b,
-            surb: surb_b,
-            ..
-        },
-    ) = (
-        view_a.step().expect("strong"),
-        view_b.step().expect("strong"),
-    )
-    else {
-        panic!("the symbol position");
-    };
-    assert_eq!(value_a.as_slice(), value_b.as_slice());
-    assert_eq!(surb_a.expiry(), surb_b.expiry());
-    assert_eq!(surb_a.class(), surb_b.class());
 }

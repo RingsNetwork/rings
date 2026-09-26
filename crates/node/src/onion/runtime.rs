@@ -103,6 +103,7 @@ impl OnionRuntime {
         let feed = OnionLinkFeed::start(scope.clone())?;
         let observer: Arc<DynLinkObserver> = feed.clone();
         extensions.observe_links(&observer)?;
+        feed.tick()?;
         Ok(Self {
             scope,
             loops: OnionLoopClient::new(core.did(), tags, link_sender.clone()),
@@ -144,9 +145,11 @@ struct OnionRuntimeLife {
 }
 
 impl Drop for OnionRuntimeLife {
-    /// Close every lane, which stops its emitter; the feed drops after this.
+    /// Shut the link sender down, which closes every lane and stops its emitter, and refuses
+    /// every later open, so link facts the feed still drains reopen nothing; the feed drops
+    /// after this.
     fn drop(&mut self) {
-        if let Err(error) = self.link_sender.close_all() {
+        if let Err(error) = self.link_sender.shutdown() {
             tracing::debug!(%error, "onion runtime could not close its link lanes");
         }
     }

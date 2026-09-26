@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use super::limits::headers_bytes;
 use super::limits::reject_content_length_over_limit;
 use super::limits::usize_to_u64;
 use super::normalize_method;
@@ -65,6 +66,7 @@ pub(super) async fn execute_https_request(
     target: &OnionProxyTarget,
     request: &OnionHttpsRequest,
     max_body_bytes: u64,
+    record_bytes: impl Fn(u64) -> Result<()>,
 ) -> Result<FetchResponse> {
     let addresses = resolve_target_addresses(target).await?;
     let egress = select_native_https_egress(target, addresses)?;
@@ -74,6 +76,7 @@ pub(super) async fn execute_https_request(
         max_body_bytes,
         HTTPS_EXIT_REQUEST_TIMEOUT,
         &egress,
+        record_bytes,
     )
     .await
 }
@@ -111,6 +114,7 @@ pub(super) async fn native_fetch_with_timeout(
     max_body_bytes: u64,
     timeout: Duration,
     egress: &NativeHttpsEgress,
+    record_bytes: impl Fn(u64) -> Result<()>,
 ) -> Result<FetchResponse> {
     let method = reqwest::Method::from_bytes(normalize_method(&request.method).as_bytes())
         .map_err(|error| Error::HttpRequestError(format!("invalid HTTPS proxy method: {error}")))?;
@@ -147,6 +151,7 @@ pub(super) async fn native_fetch_with_timeout(
         })
         .collect::<Vec<_>>();
     reject_content_length_over_limit(&headers, max_body_bytes)?;
+    record_bytes(headers_bytes(&headers)?)?;
     let mut body = Vec::new();
     while let Some(chunk) = response
         .chunk()
@@ -158,6 +163,7 @@ pub(super) async fn native_fetch_with_timeout(
         if max_body_bytes > 0 && body_len.saturating_add(chunk_len) > max_body_bytes {
             return Err(Error::NoPermission);
         }
+        record_bytes(chunk_len)?;
         body.extend_from_slice(chunk.as_ref());
     }
     Ok(FetchResponse {

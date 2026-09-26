@@ -152,22 +152,23 @@ impl OnionLoopClient {
         let expiry = OnionExpiry::of_build(now_ms);
         let guard = route.hops().guard().did;
         let mut rng = rand::thread_rng();
-        let surbs = (0..count)
-            .map(|_| {
-                let (surb, reply) = build_surb(
-                    route.hops().return_path(),
-                    self.local,
-                    class,
-                    expiry,
-                    &mut rng,
-                )
-                .map_err(|error| {
-                    Error::OnionRouteError(OnionRouteError::LoopBuild(error.to_string()))
-                })?;
-                self.tags.register(now_ms, guard, reply, sink.clone())?;
-                Ok(surb)
-            })
-            .collect::<Result<Vec<_>>>()?;
+        // Sized once: a growing vector would leave copies of the blocks' seeds in the buffers
+        // it frees.
+        let mut surbs = Vec::with_capacity(count);
+        for _ in 0..count {
+            let (surb, reply) = build_surb(
+                route.hops().return_path(),
+                self.local,
+                class,
+                expiry,
+                &mut rng,
+            )
+            .map_err(|error| {
+                Error::OnionRouteError(OnionRouteError::LoopBuild(error.to_string()))
+            })?;
+            self.tags.register(now_ms, guard, reply, sink.clone())?;
+            surbs.push(surb);
+        }
         Ok((surbs, expiry))
     }
 }

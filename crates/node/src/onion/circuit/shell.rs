@@ -247,8 +247,7 @@ impl OnionCircuitShell {
         cell: crate::onion::sphinx::cell::OnionCell,
     ) -> Result<()> {
         let now_ms = get_epoch_ms();
-        let refused = self.renew_if_rolled_back(now_ms)?;
-        self.close(scope, refused).await;
+        self.renew_if_rolled_back(now_ms)?;
         let outcome = {
             let mut admission = lock(&self.admission)?;
             hop(
@@ -356,27 +355,23 @@ impl OnionCircuitShell {
     }
 
     /// Renew `A` into a fresh epoch if the clock has rolled back beyond `X₀`, and set the
-    /// node's epoch cell to it, which the registrations publish at their next heartbeat; return
-    /// the links the renewed table refuses. The renewed table keeps the links the table holds
-    /// live, its own view linearised with the facts it has applied.
-    fn renew_if_rolled_back(&self, now_ms: u128) -> Result<Vec<PeerLink>> {
+    /// node's epoch cell to it, which the registrations publish at their next heartbeat. The
+    /// renewed table keeps its own live links, which are linearised with the facts it has
+    /// applied, so it refuses none.
+    fn renew_if_rolled_back(&self, now_ms: u128) -> Result<()> {
         let mut admission = lock(&self.admission)?;
         if !admission.is_rolled_back_at(now_ms) {
-            return Ok(Vec::new());
+            return Ok(());
         }
-        let live = admission.live_links();
         loop {
             let epoch = OnionProcessEpoch::random();
             let key = OnionReplayFilterKey::new(rand::random());
-            match admission.renew(epoch, key, live.iter().copied()) {
-                Ok(refused) => {
-                    self.epoch.renew(epoch);
-                    tracing::warn!("onion admission renewed its epoch after a clock rollback");
-                    return Ok(refused.links().to_vec());
-                }
-                // The fresh draw met the current epoch (probability 2⁻¹²⁸): draw again.
-                Err(_) => continue,
+            if admission.renew(epoch, key).is_ok() {
+                self.epoch.renew(epoch);
+                tracing::warn!("onion admission renewed its epoch after a clock rollback");
+                return Ok(());
             }
+            // The fresh draw met the current epoch (probability 2⁻¹²⁸): draw again.
         }
     }
 

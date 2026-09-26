@@ -124,8 +124,8 @@ emission that substitutes real cells for cover, paid admission, and fixed cell s
 classes. A loop hides the route's hops from one another and hides the client from the
 exit, whose reply returns through the loop. It does not hide the client from its first
 hop, does not hide overlay membership, and does not hide each link's active/idle phase
-from an observer that watches it. The plain overlay relay offers none of this: it minimizes what it leaks, and
-the privacy layer is where privacy is provided. See
+from an observer that watches it. The plain overlay relay offers none of this: it
+minimizes what it leaks, and the privacy layer is where privacy is provided. See
 [the layer contracts](./SECURITY.md#layer-contracts).
 
 ### Protocol runtime

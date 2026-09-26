@@ -50,6 +50,9 @@ pub(crate) struct OnionReorder<F> {
     pending: BTreeMap<OnionSequence, (F, u128)>,
     /// Set once a gap is detected; the direction then releases nothing.
     failed: Option<OnionSequenceGap>,
+    /// Set once the frame at `u32::MAX` is released: the direction takes no further frame,
+    /// but it has no gap, so only a further frame fails it.
+    exhausted: bool,
 }
 
 impl<F> Default for OnionReorder<F> {
@@ -59,6 +62,7 @@ impl<F> Default for OnionReorder<F> {
             next: OnionSequence::FIRST,
             pending: BTreeMap::new(),
             failed: None,
+            exhausted: false,
         }
     }
 }
@@ -77,6 +81,9 @@ impl<F> OnionReorder<F> {
         frame: F,
     ) -> Result<Vec<F>, OnionSequenceGap> {
         self.expire(now_ms)?;
+        if self.exhausted {
+            return Err(self.fail());
+        }
         if sequence < self.next {
             return Ok(Vec::new());
         }
@@ -93,7 +100,7 @@ impl<F> OnionReorder<F> {
                 // next frame fails it, but what was released stands.
                 None => {
                     self.pending.clear();
-                    self.failed = Some(OnionSequenceGap { missing: u32::MAX });
+                    self.exhausted = true;
                     break;
                 }
             }

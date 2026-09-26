@@ -6,11 +6,11 @@
 //! SHA-256 digest `H(enc(v₀))` and its width, since it is `b` bytes.
 //!
 //! The generator is ChaCha20 from a fixed seed, which is portable across `rand` releases. The
-//! frames, `ā`, the uniform layers and the descriptor are pure functions of constants, so they
-//! pin the wire alone; the digests of a built loop cell, of a reply block and of its reply cell
-//! also pin the order in which the builder draws its secrets, which is part of a reproducible
-//! build of a cell, not of the wire, so a change there that keeps every other golden is a
-//! refactor of the builder and is re-pinned with it.
+//! frames, `ā`, the uniform layers, a reply block's reply cell and the descriptor are pure
+//! functions of constants, so they pin the wire alone; the digests of a built loop cell and of a
+//! built reply block also pin the order in which the builder draws its secrets, which is part of
+//! a reproducible build of a cell, not of the wire, so a change there that keeps every other
+//! golden is a refactor of the builder and is re-pinned with it.
 //!
 //! A failing test here is a wire cutover, never a fixture to refresh: there is no protocol
 //! versioning, so a change to any of these bytes is a total cutover of the network.
@@ -39,6 +39,7 @@ use crate::onion::session::OnionTargetDigest;
 use crate::onion::sphinx::builder::build_loop;
 use crate::onion::sphinx::builder::build_surb;
 use crate::onion::sphinx::builder::OnionApplication;
+use crate::onion::sphinx::cell::OnionSurb;
 use crate::onion::sphinx::class::OnionLoopClass;
 use crate::onion::sphinx::header::OnionHeaderMac;
 use crate::onion::sphinx::layer::OnionLayer;
@@ -88,7 +89,7 @@ const GOLDEN_SYMBOL_LAYER: &str =
     "01515151515151515151515151515151512d92752e69614799ea8467c10d252c76f79c85845cf23d54406ef49ab463ff0c0000000000000000000000000000000000000000000000000000000000000000010203043131313131313131313131313131313100000000000249f0232323232323232323232323232323232424242424242424242424242424242424242424242424242424242424242424252525252525252525252525252525252525252525252525252525252525252526262626262626262626262626262626";
 /// Pinned `H(reply cell)` of the fixture reply block producing `golden reply`.
 const GOLDEN_SURB_REPLY_DIGEST: &str =
-    "71be2f7a4740097761b051fe3d4ce836c071c534711c2a507dccadd9d8c18a9a";
+    "3a314348bfb2f75467dcc5e2df8101b6f4694ed02c4938bde599cc3eda0601cf";
 
 /// Frozen signing domain of onion-exit descriptors.
 const EXIT_DESCRIPTOR_DOMAIN_TAG: &[u8] = b"rings-node:onion-exit-descriptor";
@@ -221,17 +222,18 @@ fn test_uniform_layers_are_pinned() {
 /// The reply cell a reply block produces from a fixed value.
 #[test]
 fn test_surb_reply_cell_is_pinned() {
-    let (surb, _) = build_surb(
-        fixture_loop().return_path(),
-        Did::from(99_u32),
-        OnionLoopClass::DEFAULT,
-        fixture_expiry(),
-        &mut ChaCha20Rng::from_seed(GOLDEN_SEED),
-    )
-    .expect("build the reply block");
+    // υ = next ‖ χ_υ ‖ σ_υ ‖ x_υ from constants: the reply cell is a function of wire inputs only.
+    let block = [
+        [0x11; 20].as_slice(),
+        vec![0x22; 2919].as_slice(),
+        [0x33; 32].as_slice(),
+        fixture_expiry().to_wire_ms().to_be_bytes().as_slice(),
+    ]
+    .concat();
+    let surb = OnionSurb::decode(OnionLoopClass::DEFAULT, &block).expect("a reply block");
     let (next, cell) = surb.produce(b"golden reply").expect("produce");
 
-    assert_eq!(next, Did::from(4_u32));
+    assert_eq!(next.to_string(), format!("0x{}", "11".repeat(20)));
     assert_eq!(
         digest(cell.into_bytes().as_slice()),
         GOLDEN_SURB_REPLY_DIGEST
@@ -253,10 +255,16 @@ fn test_credit_frame_is_pinned() {
         .expect("one block fits");
 
     assert_eq!(digest(encoded.as_slice()), GOLDEN_CREDIT_DIGEST);
-    assert!(matches!(
-        OnionFrame::decode(OnionLoopClass::DEFAULT, encoded.as_slice()),
-        Ok(OnionFrame::Credit(blocks)) if blocks.len() == 1
-    ));
+    let decoded = OnionFrame::decode(OnionLoopClass::DEFAULT, encoded.as_slice()).expect("decodes");
+    assert!(matches!(&decoded, OnionFrame::Credit(blocks) if blocks.len() == 1));
+    assert_eq!(
+        decoded
+            .encode(OnionLoopClass::DEFAULT)
+            .expect("re-encodes")
+            .as_slice(),
+        encoded.as_slice(),
+        "dec ∘ enc = id"
+    );
 }
 
 #[test]
