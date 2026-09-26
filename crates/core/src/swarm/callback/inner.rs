@@ -560,6 +560,9 @@ impl TransportCallback for InnerSwarmCallback {
     }
 
     async fn on_invalid_inbound_frame(&self, cid: &str) -> Result<(), TransportCallbackError> {
+        // Test builds: the transport rejected a frame that was sent; it arrived and is done.
+        #[cfg(test)]
+        drop(self.processor.logical.transport.frames_for_test().arrive());
         let peer = Did::from_str(cid).ok();
         self.processor.record_receive_failure_now(peer).await;
         Ok(())

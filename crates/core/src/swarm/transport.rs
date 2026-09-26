@@ -93,6 +93,8 @@ pub(crate) use self::event_delivery::SwarmEventDeliveryTurn;
 pub(crate) use self::frame_ledger::FrameInFlight;
 #[cfg(test)]
 use self::frame_ledger::FrameLedger;
+#[cfg(test)]
+pub(crate) use self::frame_ledger::FrameSample;
 use self::liveness::PeerLivenessMap;
 pub(crate) use self::liveness::PEER_LIVENESS_IDLE_MS;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -1043,9 +1045,9 @@ impl SwarmConnection {
 
     /// Hand one frame to the transport; the sole send of every frame to another node.
     async fn send_data(&self, data: Bytes, permit: SendPermit) -> Result<DeliveryFuture> {
-        // Test builds: a send cancelled by dropping this future ends uncounted as sent.
+        // Test builds: a send dropped before the transport committed to it ends uncounted.
         #[cfg(test)]
-        let frame_send = self.frames.begin_send();
+        let frame_send = self.frames.begin_send(permit.acceptance());
         let delivery: Result<DeliveryFuture> = self
             .connection
             .send_message_with_permit(TransportMessage::Custom(data), permit)

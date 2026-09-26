@@ -199,31 +199,49 @@ pub fn control_interleaves_transfer(
     })
 }
 
-/// Frames of `data_class` admitted in `trace`.
-pub fn data_frame_count(
-    trace: &[(MessageCategory, u64, usize)],
-    data_class: MessageCategory,
-) -> usize {
-    trace.iter().filter(|event| event.0 == data_class).count()
+/// Frames of `category` admitted in `trace`.
+#[cfg(any(
+    all(feature = "std", not(feature = "dummy")),
+    all(feature = "wasm", target_family = "wasm")
+))]
+pub fn frame_count(trace: &[(MessageCategory, u64, usize)], category: MessageCategory) -> usize {
+    trace.iter().filter(|event| event.0 == category).count()
 }
 
-/// Whether the `data_class` transfer moved on since `trace` held `admitted` of its frames.
+/// Whether a control round may send its next control: the `data_class` transfer moved on past
+/// the control just sent, which is traced once `trace` holds more than `controls_before`
+/// control frames.
 ///
 /// ```text
-/// progressed ≡ #data(trace) > admitted ∨ interleaves(trace) ∨ transfers_in_flight = 0
+/// progressed ≡ (#control(trace) > controls_before ∧ ∃ data frame after the last control)
+///              ∨ interleaves(trace) ∨ transfers_in_flight = 0
 /// ```
 ///
-/// This is the event a control round waits for before sending the next control: the transfer's
-/// own progress, never the control's. The trace is read, not driven, so evaluating this sends
-/// nothing; the last disjunct ends the rounds once the transfer is done and nothing more can
-/// interleave.
+/// Position, not a count snapshot, decides the first disjunct, so a data frame admitted before
+/// the control never satisfies it: consecutive controls always have a data frame between them.
+/// The control's own activity cannot satisfy it either, and evaluating it only reads the trace,
+/// so it sends nothing. The last disjunct ends the rounds once the transfer is done and nothing
+/// more can interleave.
+#[cfg(any(
+    all(feature = "std", not(feature = "dummy")),
+    all(feature = "wasm", target_family = "wasm")
+))]
 pub fn data_transfer_progressed(
     trace: &[(MessageCategory, u64, usize)],
     data_class: MessageCategory,
-    admitted: usize,
+    controls_before: usize,
     transfers_in_flight: usize,
 ) -> bool {
-    data_frame_count(trace, data_class) > admitted
+    let data_follows_last_control = trace
+        .iter()
+        .rposition(|event| event.0 == MessageCategory::DhtControl)
+        .is_some_and(|last_control| {
+            trace
+                .iter()
+                .skip(last_control.saturating_add(1))
+                .any(|event| event.0 == data_class)
+        });
+    (frame_count(trace, MessageCategory::DhtControl) > controls_before && data_follows_last_control)
         || control_interleaves_transfer(trace, data_class)
         || transfers_in_flight == 0
 }

@@ -358,6 +358,16 @@ jobs:
           python3 scripts/run-ci-tests.py target/ci-evidence/native.jsonl
           --inventory target/ci-evidence/native-inventory.json
           --require-file scripts/ci-native-model-tests.txt
+          --skip message::handlers::connection::tests::test_relayed_connect_over_real_webrtc
+
+      # The real-WebRTC relayed-connect smoke test (#882) runs serialized against the rest of the
+      # suite, in its own invocation, so no other test's traffic shares its runner.
+      - name: Exercise a DHT-relayed connect over real WebRTC
+        run: >-
+          python3 scripts/run-ci-tests.py target/ci-evidence/native.jsonl
+          --inventory target/ci-evidence/relayed-connect-inventory.json
+          --target rings_core --exact --nocapture
+          --filter message::handlers::connection::tests::test_relayed_connect_over_real_webrtc
 
       - name: Exercise captured TCP through a two-hop Onion public exit
         run: >-

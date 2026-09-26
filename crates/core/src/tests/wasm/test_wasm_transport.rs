@@ -34,8 +34,8 @@ use crate::tests::activity::probe_on_activity;
 use crate::tests::activity::swarms_quiescent;
 use crate::tests::assert_control_interleaves_transfer;
 use crate::tests::control_interleaves_transfer;
-use crate::tests::data_frame_count;
 use crate::tests::data_transfer_progressed;
+use crate::tests::frame_count;
 use crate::tests::live_entry;
 use crate::tests::manually_establish_connection;
 use crate::tests::midpoint_storage_key;
@@ -249,14 +249,14 @@ async fn exercise_contended_browser_storage(node1: &Swarm, node2: &Swarm) {
         "browser storage contention send must not be deferred"
     );
     for round in 0..8 {
-        // Each control follows a storage frame admitted after the previous control, so the
-        // controls interleave with the transfer rather than precede it. The wait is on the
-        // transfer's progress; the control's own activity does not satisfy it.
+        // The next control is sent only once this one is traced and a storage frame follows
+        // it, so consecutive controls always have a storage frame between them. The wait is on
+        // the transfer's progress; the control's own activity does not satisfy it.
         let trace = node1.transport.outbound_frame_trace_for_test(node2.did());
         if control_interleaves_transfer(&trace, MessageCategory::Storage) {
             break;
         }
-        let admitted = data_frame_count(&trace, MessageCategory::Storage);
+        let controls_before = frame_count(&trace, MessageCategory::DhtControl);
         node1
             .send_direct_message(
                 Message::NotifyPredecessorSend(NotifyPredecessorSend { did: node1.did() }),
@@ -271,7 +271,7 @@ async fn exercise_contended_browser_storage(node1: &Swarm, node2: &Swarm) {
                 let progressed = data_transfer_progressed(
                     &node1.transport.outbound_frame_trace_for_test(node2.did()),
                     MessageCategory::Storage,
-                    admitted,
+                    controls_before,
                     node1.transport.outbound_admitted_transfer_total_for_test(),
                 );
                 async move { Ok(progressed.then_some(())) }

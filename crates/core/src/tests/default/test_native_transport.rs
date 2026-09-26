@@ -12,8 +12,8 @@ use crate::message::MessageCategory;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::tests::assert_control_interleaves_transfer;
 use crate::tests::control_interleaves_transfer;
-use crate::tests::data_frame_count;
 use crate::tests::data_transfer_progressed;
+use crate::tests::frame_count;
 use crate::tests::manually_establish_connection;
 use crate::tests::multi_frame_storage_sync_entries;
 
@@ -54,9 +54,9 @@ async fn test_native_webrtc_control_interleaves_the_shared_multiframe_storage_fi
         .is_sent());
 
     for round in 0..16 {
-        // Each control follows a storage frame admitted after the previous control, so the
-        // controls interleave with the transfer rather than precede it. The wait is on the
-        // transfer's progress; the control's own activity does not satisfy it.
+        // The next control is sent only once this one is traced and a storage frame follows
+        // it, so consecutive controls always have a storage frame between them. The wait is on
+        // the transfer's progress; the control's own activity does not satisfy it.
         let trace = node1
             .swarm
             .transport
@@ -64,7 +64,7 @@ async fn test_native_webrtc_control_interleaves_the_shared_multiframe_storage_fi
         if control_interleaves_transfer(&trace, MessageCategory::Storage) {
             break;
         }
-        let admitted = data_frame_count(&trace, MessageCategory::Storage);
+        let controls_before = frame_count(&trace, MessageCategory::DhtControl);
         node1
             .swarm
             .send_direct_message(
@@ -81,7 +81,7 @@ async fn test_native_webrtc_control_interleaves_the_shared_multiframe_storage_fi
                         .transport
                         .outbound_frame_trace_for_test(node2.did()),
                     MessageCategory::Storage,
-                    admitted,
+                    controls_before,
                     node1
                         .swarm
                         .transport

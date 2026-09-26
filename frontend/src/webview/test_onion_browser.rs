@@ -368,8 +368,10 @@ impl KvStorageInterface<Entry> for WriteSignalingStorage {
 /// ```
 ///
 /// Writes are forgotten *before* each attempt, so a write during it wakes the next one and
-/// none is lost. A failed lookup writes neither store, so no attempt wakes its successor, and
-/// no timer paces the retries. The last error is kept for the hang-guard report.
+/// none is lost. A failed attempt writes a store only through read repair, when its lookup
+/// found the descriptor but observed a placement miss; repair converges, so such self-caused
+/// wakes are bounded, and every other wake is a directory change the next attempt must see. No
+/// timer paces the retries. The last error is kept for the hang-guard report.
 async fn retry_gateway_navigation(
     node: &WebviewNode,
     target: &TargetUrl,

@@ -119,6 +119,7 @@ async fn test_listener_generation_queues_cancelled_starts_and_restarts() {
     let restart_started_in_task = restart_started.clone();
     let restart_processor = processor.clone();
     let restart_token = restart_stop.token();
+    let restart_witness = restart_stop.token();
     let mut restart = Box::pin(async move {
         restart_processor
             .listen_with_started(restart_token, move || {
@@ -129,11 +130,14 @@ async fn test_listener_generation_queues_cancelled_starts_and_restarts() {
     // The lock is free after cleanup, so the first poll acquires it and starts listening.
     assert!(futures::poll!(restart.as_mut()).is_pending());
     assert!(restart_started.load(std::sync::atomic::Ordering::SeqCst));
-    // Stopping the finished generation's token again must not stop the restarted one. Polled
-    // after the stale stop, the restarted listener runs every step that needs no timer: had the
-    // stale token reached it, its cleanup would run and the poll would complete. This is
-    // decided by state, not by how many scheduler turns elapse.
+    // Stopping the finished generation's token again must not stop the restarted one. A
+    // generation observes a stop only through the token it was started with
+    // (`listen_with_started` hands it to every loop of the generation), so the decisive state is
+    // that token: the stale stop leaves it unstopped. The poll adds only that the restarted
+    // listener did not complete on it; it may be parked inside a maintenance step rather than
+    // on its stop select, so it is not the witness.
     first_stop.request_stop();
+    assert!(!restart_witness.should_stop());
     assert!(futures::poll!(restart.as_mut()).is_pending());
     restart_stop.request_stop();
     tokio::time::timeout(LISTENER_STOP_TIMEOUT, restart)

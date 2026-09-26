@@ -11,6 +11,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use async_trait::async_trait;
+#[cfg(not(target_family = "wasm"))]
 pub(crate) use rings_test_support::activity::activity_after;
 pub(crate) use rings_test_support::activity::activity_mark;
 pub(crate) use rings_test_support::activity::record_activity;
@@ -23,6 +24,7 @@ use crate::swarm::observer::LookupKind;
 use crate::swarm::observer::LookupOutcome;
 use crate::swarm::observer::MessageObservation;
 use crate::swarm::observer::SwarmObserver;
+use crate::swarm::transport::FrameSample;
 use crate::swarm::Swarm;
 
 /// [`rings_test_support::activity::probe_on_activity`] with core's error type.
@@ -92,18 +94,32 @@ impl SwarmCallback for ActivityCallback {
     }
 }
 
-/// Whether `swarm` has work in flight: a handshake, a frame being sent or not yet handed off to
-/// the inbound actor, an admitted inbound message not yet handled, or an outbound transfer not
-/// yet completed.
-pub(crate) fn swarm_in_flight(swarm: &Swarm) -> bool {
-    swarm
-        .transport
-        .pending_connection_count()
-        .unwrap_or_default()
-        > 0
-        || swarm.transport.frames_for_test().busy()
+/// One swarm's quiescence witnesses, as [`sample_swarm`] reads them.
+pub(crate) struct SwarmSample {
+    /// Its frame counts.
+    pub(crate) frames: FrameSample,
+    /// Whether it has work in flight: a frame being sent or not yet handed off to the inbound
+    /// actor, an admitted inbound message not yet handled, an outbound transfer not yet
+    /// completed, or a handshake.
+    pub(crate) busy: bool,
+}
+
+/// Sample `swarm`'s quiescence witnesses.
+///
+/// The frame ledger is sampled first, in its sampling law's order, and the actor and scheduler
+/// witnesses after it: a frame reaches the inbound actor's permit before it leaves the ledger's
+/// `in_flight`, so a sample that saw it leave the ledger then sees the permit or the frame done.
+pub(crate) fn sample_swarm(swarm: &Swarm) -> SwarmSample {
+    let frames = swarm.transport.frames_for_test().sample();
+    let busy = frames.busy()
         || swarm.transport.inbound_admitted_count_for_test() > 0
         || swarm.transport.outbound_admitted_transfer_total_for_test() > 0
+        || swarm
+            .transport
+            .pending_connection_count()
+            .unwrap_or_default()
+            > 0;
+    SwarmSample { frames, busy }
 }
 
 /// Whether `swarms` are quiescent: nothing in flight on any of them, and nothing between them.
@@ -113,35 +129,33 @@ pub(crate) fn swarm_in_flight(swarm: &Swarm) -> bool {
 ///             ∧ no activity during the evaluation
 /// ```
 ///
-/// The second clause is frame conservation (see
-/// [`FrameLedger`](crate::swarm::transport::frame_ledger)): a frame one swarm sent that no swarm
-/// has yet received (on the wire, or in a transport's delay) makes `Σ sent > Σ arrived`, so
-/// quiescence is decided by counts, never by a silence window. Frames are counted at the
-/// swarm's two chokepoints, the transport's acceptance of a send and the link stage's entry
-/// before decoding, so a frame a receiver drops anywhere, malformed, refused or swept from a
-/// hold, still balances its send; and an arrived frame stays in flight until the inbound actor's
-/// capacity permit covers it, so no frame falls between two witnesses of the first clause.
+/// The second clause is frame conservation (see `swarm::transport::frame_ledger`): a frame one
+/// swarm sent that no swarm has yet received (on the wire, or in a transport's delay) makes
+/// `Σ sent > Σ arrived`, so quiescence is decided by counts, never by a silence window. Frames
+/// are counted at the swarm's two chokepoints, the transport's commitment to a send and the link
+/// stage's entry before decoding (or the transport's rejection of a malformed frame), so a frame
+/// a receiver drops anywhere still balances its send; and an arrived frame stays in flight until
+/// the inbound actor's capacity permit covers it, so no frame falls between two witnesses of the
+/// first clause.
 ///
-/// The third clause makes the fold safe on a multi-thread runtime: swarms are sampled one after
-/// another, so a frame moving between two samples could balance the counts falsely. Every
+/// Each swarm is read by [`sample_swarm`], in the ledger's sampling law's order, so a counted
+/// arrival or an ended send is never read without its witness. The third clause makes the fold
+/// safe across swarms on a multi-thread runtime: swarms are sampled one after another, and every
 /// counted transition records activity, so the evaluation holds only if the activity generation
 /// did not change while the swarms were sampled.
 ///
-/// Preconditions: `swarms` are all the swarms that exchange frames in the test, and no frame is
-/// lost below the swarm (a link retired with frames still on the wire); a violation makes the
-/// wait fail at its hang guard rather than pass falsely.
+/// Preconditions: `swarms` are all the swarms that exchange frames in the test. A frame lost
+/// below the swarm (a link retired with frames still on the wire) was counted as sent by the
+/// commit law and never arrives, so it leaves `Σ sent > Σ arrived`: the wait fails at its hang
+/// guard rather than pass falsely.
 pub(crate) fn swarms_quiescent<'a>(swarms: impl IntoIterator<Item = &'a Swarm>) -> bool {
     let mark = activity_mark();
     let (idle, sent, arrived) =
         swarms
             .into_iter()
             .fold((true, 0_u64, 0_u64), |(idle, sent, arrived), swarm| {
-                let frames = swarm.transport.frames_for_test();
-                (
-                    idle && !swarm_in_flight(swarm),
-                    sent + frames.sent(),
-                    arrived + frames.arrived(),
-                )
+                let SwarmSample { frames, busy } = sample_swarm(swarm);
+                (idle && !busy, sent + frames.sent, arrived + frames.arrived)
             });
     idle && sent == arrived && activity_mark() == mark
 }

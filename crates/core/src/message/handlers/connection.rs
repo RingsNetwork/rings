@@ -340,7 +340,8 @@ pub mod tests {
     /// connect is therefore always issued and can only travel over the DHT. It runs over real
     /// webrtc-rs with host-only ICE, which is what this test adds over the controlled
     /// `test_handle_connect_node`: the relayed SDP drives a real ICE, DTLS and SCTP handshake.
-    /// Every wait is an activity-woken probe; the hang guard only bounds a hang.
+    /// Every wait is an activity-woken probe; the hang guard only bounds a hang. CI runs it
+    /// serialized against the rest of the suite, as its own invocation (`qaci.yml`).
     #[cfg(not(feature = "dummy"))]
     #[tokio::test]
     async fn test_relayed_connect_over_real_webrtc() -> Result<()> {

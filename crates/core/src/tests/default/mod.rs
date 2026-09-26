@@ -29,7 +29,7 @@ use crate::tests::activity::activity_after;
 use crate::tests::activity::activity_mark;
 use crate::tests::activity::probe_on_activity;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-use crate::tests::activity::swarm_in_flight;
+use crate::tests::activity::sample_swarm;
 use crate::tests::activity::swarms_quiescent;
 use crate::tests::activity::ActivityCallback;
 use crate::tests::activity::ActivityObserver;
@@ -162,10 +162,10 @@ impl Node {
             > 0
     }
 
-    /// Whether this node has work in flight; see [`swarm_in_flight`].
+    /// Whether this node has work in flight; see [`sample_swarm`].
     #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
     pub fn in_flight(&self) -> bool {
-        swarm_in_flight(&self.swarm)
+        sample_swarm(&self.swarm).busy
     }
 
     pub fn did(&self) -> Did {
@@ -541,14 +541,10 @@ fn panic_wait_for_msgs_timeout(
     let inbound_nodes = active_node_counts(nodes, did_names, |node| {
         node.swarm.transport.inbound_admitted_count_for_test()
     });
-    let sent: u64 = nodes
-        .iter()
-        .map(|node| node.swarm.transport.frames_for_test().sent())
-        .sum();
-    let arrived: u64 = nodes
-        .iter()
-        .map(|node| node.swarm.transport.frames_for_test().arrived())
-        .sum();
+    let (sent, arrived) = nodes.iter().fold((0_u64, 0_u64), |(sent, arrived), node| {
+        let frames = node.swarm.transport.frames_for_test().sample();
+        (sent + frames.sent, arrived + frames.arrived)
+    });
     panic!(
         "wait_for_msgs did not reach quiescence within {ceiling:?}: still-handshaking \
          nodes={handshaking_nodes:?}, inbound={inbound_nodes:?}, outbound={outbound_nodes:?}, \
