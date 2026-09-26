@@ -2,7 +2,7 @@
 //!
 //! The activity cell and the activity-woken probe live in [`rings_test_support::activity`];
 //! this module wires node's test processors to it. A processor built with
-//! [`ProcessorBuilder::test_observer`](crate::processor::ProcessorBuilder) and
+//! [`ProcessorBuilder::observer`](crate::processor::ProcessorBuilder::observer) and
 //! [`activity_observer`] records activity on every message delivered, received or stored and on
 //! every lookup event, so helpers probe the state they need on activity instead of on a timer.
 

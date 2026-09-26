@@ -7,13 +7,21 @@ use rings_node::onion::OnionExitPolicy;
 use rings_node::prelude::rings_core::delegation::DelegateeKey;
 use rings_node::prelude::rings_core::ecc::SecretKey;
 use rings_node::prelude::rings_core::storage::idb::IdbStorage;
-use rings_node::prelude::rings_runtime::sleep;
-use rings_node::prelude::rings_runtime::TimerError;
+use rings_node::prelude::rings_core::swarm::observer::LookupCorrelation;
+use rings_node::prelude::rings_core::swarm::observer::LookupKind;
+use rings_node::prelude::rings_core::swarm::observer::LookupOutcome;
+use rings_node::prelude::rings_core::swarm::observer::MessageObservation;
+use rings_node::prelude::rings_core::swarm::observer::SwarmObserver;
 use rings_node::prelude::uuid;
 use rings_node::processor::Processor;
 use rings_node::processor::ProcessorBuilder;
 use rings_node::processor::ProcessorConfig;
 use rings_node::provider::Provider;
+use rings_test_support::activity::activity_after;
+use rings_test_support::activity::activity_mark;
+use rings_test_support::activity::probe_on_activity;
+use rings_test_support::activity::record_activity;
+use rings_test_support::with_hang_guard;
 use rings_webview::browser::BOOTSTRAP_MARKER;
 use rings_webview::GatewayHeader;
 use rings_webview::GatewayPrefix;
@@ -36,7 +44,11 @@ use super::GATEWAY_PREFIX;
 
 const TEST_DHT_FINGER_TABLE_SIZE: usize = 8;
 const TEST_NETWORK_ID: u32 = 665;
-const TEST_ICE_SERVERS: &str = "stun://stun.l.google.com:19302";
+/// Host-only ICE: both providers live in this page, so no external STUN server is needed, and
+/// none can put its latency inside `createOffer`/`answerOffer` ahead of every awaited state.
+const TEST_ICE_SERVERS: &str = "";
+/// Hang guard of one awaited state in this flow; a failure bound only.
+const FLOW_HANG_GUARD: Duration = Duration::from_secs(30);
 const TEST_STABILIZE_INTERVAL_SECS: u64 = 15;
 // Invariant: browser onion exits admit only public IP literals because the browser fetch adapter
 // cannot pin a hostname to a previously validated DNS result. The mocked fetch boundary prevents
@@ -86,7 +98,7 @@ async fn run_browser_onion_webview_flow() -> WebviewResult<()> {
     let _client_listener = client.listen();
     let _exit_listener = exit.listen();
     connect_browser_providers(&client, &exit).await?;
-    sleep(Duration::from_secs(1)).await.map_err(timer_webview_error)?;
+    await_connected(&client, &exit).await?;
 
     let node = WebviewNode::new(
         client,
@@ -199,6 +211,7 @@ async fn browser_provider(
         .map_err(|error| WebviewError::transport(format!("build processor config: {error:?}")))?
         .storage(storage)
         .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
+        .observer(std::sync::Arc::new(ActivityObserver))
         .build()
         .map_err(|error| WebviewError::transport(format!("build processor: {error:?}")))?;
     let provider = Rc::new(provider_from_processor(processor));
@@ -271,24 +284,72 @@ fn string_field(value: &JsValue, field: &str) -> WebviewResult<String> {
         .ok_or_else(|| WebviewError::Browser(format!("missing string field {field:?}")))
 }
 
+/// Observer that records swarm activity, so the flow probes state on activity.
+struct ActivityObserver;
+
+impl SwarmObserver for ActivityObserver {
+    fn observe_message(&self, _observation: MessageObservation) {
+        record_activity();
+    }
+
+    fn lookup_started(&self, _kind: LookupKind, _correlation: LookupCorrelation) {
+        record_activity();
+    }
+
+    fn lookup_finished(
+        &self,
+        _kind: LookupKind,
+        _correlation: LookupCorrelation,
+        _outcome: LookupOutcome,
+    ) {
+        record_activity();
+    }
+}
+
+/// Await, on activity, `client` listing `exit` as a `Connected` peer. Admission starts the join
+/// traffic, so the admitted state is followed by recorded activity.
+async fn await_connected(client: &Provider, exit: &Provider) -> WebviewResult<()> {
+    let exit_did = exit.address();
+    probe_on_activity(
+        "client lists the exit as connected",
+        FLOW_HANG_GUARD,
+        || async {
+            let peers = Reflect::get(
+                &rpc(client, "listPeers", Object::new().into()).await?,
+                &JsValue::from_str("peers"),
+            )
+            .map_err(js_webview_error)?;
+            let connected = js_sys::Array::from(&peers).iter().any(|peer| {
+                string_field(&peer, "did").is_ok_and(|did| did.eq_ignore_ascii_case(&exit_did))
+                    && string_field(&peer, "state").is_ok_and(|state| state == "Connected")
+            });
+            Ok(connected.then_some(()))
+        },
+    )
+    .await
+}
+
+/// Navigate to `target` once the client can reach a browser onion exit.
+///
+/// A failed attempt means the exit is not discoverable yet; the next attempt waits for
+/// activity recorded *after* the failure (the exit's registration traffic), not for a timer.
 async fn retry_gateway_navigation(
     node: &WebviewNode,
     target: &TargetUrl,
 ) -> WebviewResult<GatewayResponse> {
-    let mut last_error = None;
-    for _ in 0..60 {
-        match gateway_navigation(node, target).await {
-            Ok(response) => return Ok(response),
-            Err(error) => {
-                last_error = Some(error.to_string());
-                sleep(Duration::from_millis(250)).await.map_err(timer_webview_error)?;
+    with_hang_guard(
+        "gateway navigation found a browser onion exit",
+        FLOW_HANG_GUARD,
+        async {
+            loop {
+                match gateway_navigation(node, target).await {
+                    Ok(response) => return Ok(response),
+                    Err(_) => activity_after(activity_mark()).await,
+                }
             }
-        }
-    }
-    Err(WebviewError::transport(format!(
-        "gateway navigation did not find a browser onion exit: {}",
-        last_error.unwrap_or_else(|| "no attempt was made".to_string())
-    )))
+        },
+    )
+    .await
 }
 
 async fn gateway_navigation(
@@ -524,8 +585,4 @@ fn restore_mock_exit_fetch() -> WebviewResult<()> {
 
 fn js_webview_error(error: JsValue) -> WebviewError {
     WebviewError::Browser(format!("{error:?}"))
-}
-
-fn timer_webview_error(error: TimerError) -> WebviewError {
-    WebviewError::Browser(error.to_string())
 }

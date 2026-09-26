@@ -198,7 +198,7 @@ pub async fn prepare_processor() -> Processor {
         .unwrap()
         .storage(storage)
         .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
-        .test_observer(crate::tests::activity::activity_observer())
+        .observer(crate::tests::activity::activity_observer())
         .build()
         .unwrap()
 }

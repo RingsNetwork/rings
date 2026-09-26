@@ -30,10 +30,8 @@ pub struct ProcessorBuilder {
     pub(in crate::processor) onion_exit_policy: OnionExitPolicy,
     pub(in crate::processor) dht_finger_table_size: usize,
     pub(in crate::processor) reassembly_limits: ReassemblyLimits,
-    /// Test builds: an observer chained after the processor's own `Observability`.
-    #[cfg(test)]
-    pub(in crate::processor) test_observer:
-        Option<rings_core::swarm::observer::SharedSwarmObserver>,
+    /// An observer chained after the processor's own `Observability`.
+    pub(in crate::processor) observer: Option<rings_core::swarm::observer::SharedSwarmObserver>,
 }
 
 impl ProcessorBuilder {
@@ -72,19 +70,15 @@ impl ProcessorBuilder {
             onion_exit_policy: config.onion_exit_policy.clone(),
             dht_finger_table_size: DEFAULT_FINGER_TABLE_SIZE,
             reassembly_limits: ReassemblyLimits::production(),
-            #[cfg(test)]
-            test_observer: None,
+            observer: None,
         })
     }
 
-    /// Test builds: chain `observer` after the processor's own `Observability`, so a test can
-    /// observe the processor's message and lookup activity.
-    #[cfg(test)]
-    pub(crate) fn test_observer(
-        mut self,
-        observer: rings_core::swarm::observer::SharedSwarmObserver,
-    ) -> Self {
-        self.test_observer = Some(observer);
+    /// Chain `observer` after the processor's own `Observability`, so an embedder observes the
+    /// swarm's message and lookup activity as well. `SwarmBuilder::observer` offers the same for a
+    /// bare swarm; the processor keeps its own recorder first.
+    pub fn observer(mut self, observer: rings_core::swarm::observer::SharedSwarmObserver) -> Self {
+        self.observer = Some(observer);
         self
     }
 
@@ -224,13 +218,10 @@ impl ProcessorBuilder {
         swarm_builder = swarm_builder.reassembly_limits(self.reassembly_limits);
         swarm_builder = swarm_builder.replay_storage(replay_storage);
         swarm_builder = swarm_builder.origin_quota(self.origin_quota);
-        #[cfg(not(test))]
-        let observer: rings_core::swarm::observer::SharedSwarmObserver = observability.clone();
-        #[cfg(test)]
-        let observer: rings_core::swarm::observer::SharedSwarmObserver = match self.test_observer {
-            Some(test_observer) => Arc::new(ChainedObserver {
+        let observer: rings_core::swarm::observer::SharedSwarmObserver = match self.observer {
+            Some(extra) => Arc::new(ChainedObserver {
                 first: observability.clone(),
-                second: test_observer,
+                second: extra,
             }),
             None => observability.clone(),
         };
@@ -293,14 +284,12 @@ impl ProcessorBuilder {
     }
 }
 
-/// Test builds: an observer that forwards every observation to two observers, in order.
-#[cfg(test)]
+/// An observer that forwards every observation to two observers, in order.
 struct ChainedObserver {
     first: rings_core::swarm::observer::SharedSwarmObserver,
     second: rings_core::swarm::observer::SharedSwarmObserver,
 }
 
-#[cfg(test)]
 impl rings_core::swarm::observer::SwarmObserver for ChainedObserver {
     fn observe_message(&self, observation: rings_core::swarm::observer::MessageObservation) {
         self.first.observe_message(observation);

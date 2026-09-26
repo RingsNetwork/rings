@@ -23,4 +23,5 @@ web-sys = { version = "=0.3.98", features = ["HtmlInputElement"] }
 yew = { version = "0.21", features = ["csr"] }
 
 [dev-dependencies]
+rings-test-support = { path = "../../crates/test-support" }
 wasm-bindgen-test = "=0.3.71"

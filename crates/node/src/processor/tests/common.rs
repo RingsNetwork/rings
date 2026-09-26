@@ -123,7 +123,7 @@ pub(super) async fn prepare_processor_with_identity_key_network_and_virtual_node
         .unwrap()
         .storage(storage)
         .dht_finger_table_size(8)
-        .test_observer(crate::tests::activity::activity_observer())
+        .observer(crate::tests::activity::activity_observer())
         .build()
         .unwrap()
 }
@@ -192,7 +192,7 @@ pub(super) async fn prepare_processor_with_network_and_virtual_nodes(
         .unwrap()
         .storage(storage)
         .dht_finger_table_size(8)
-        .test_observer(crate::tests::activity::activity_observer())
+        .observer(crate::tests::activity::activity_observer())
         .build()
         .unwrap()
 }
@@ -221,7 +221,7 @@ pub(super) async fn prepare_processor_with_online_node_type(
         .storage(storage)
         .online_node_type(node_type)
         .dht_finger_table_size(8)
-        .test_observer(crate::tests::activity::activity_observer())
+        .observer(crate::tests::activity::activity_observer())
         .build()
         .unwrap()
 }
@@ -350,7 +350,7 @@ pub(super) async fn prepare_measured_processor() -> Processor {
         .storage(storage)
         .measure(measure)
         .dht_finger_table_size(8)
-        .test_observer(crate::tests::activity::activity_observer())
+        .observer(crate::tests::activity::activity_observer())
         .build()
         .unwrap()
 }

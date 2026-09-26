@@ -302,7 +302,8 @@ mod tests {
     use super::*;
 
     const TEST_NETWORK_ID: u32 = 665;
-    const TEST_ICE_SERVERS: &str = "stun://stun.l.google.com:19302";
+    /// Host-only ICE: these nodes never need an external STUN server.
+    const TEST_ICE_SERVERS: &str = "";
     const LISTENER_START_TIMEOUT_MS: u64 = 2_000;
     const LISTENER_SETTLE_TIMEOUT_MS: u64 = 2_000;
 
@@ -330,7 +331,11 @@ mod tests {
             "ProviderListener did not start",
         )
         .await?;
-        sleep(Duration::from_millis(20)).await;
+        // Run every step that needs no timer, then check the state: a started listener stays
+        // running until it is stopped, however long the test waits.
+        JsFuture::from(js_sys::Promise::resolve(&JsValue::UNDEFINED))
+            .await
+            .map_err(crate::browser_api::js_error_label)?;
         assert!(!node.listener.is_stopped());
         node.stop();
         assert!(node.listener.is_stopped());
