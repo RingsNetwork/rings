@@ -1,4 +1,5 @@
 use super::*;
+use crate::dht::delivery::NextHop;
 use crate::message::HopBudget;
 use crate::message::MessageCategory;
 use crate::message::MessageRelay;
@@ -18,13 +19,14 @@ fn relayed_wire(
         local,
         uuid::Uuid::new_v4(),
         sequence,
+        None,
         message,
         MessageSigner::new(origin, TEST_NETWORK_ID),
     )?;
     MessagePayload::new(
         transaction,
         MessageSigner::new(carrier, TEST_NETWORK_ID),
-        MessageRelay::new(local, local, HopBudget::MAX),
+        MessageRelay::new(NextHop::toward(local), local, HopBudget::MAX),
     )?
     .to_wire()
 }

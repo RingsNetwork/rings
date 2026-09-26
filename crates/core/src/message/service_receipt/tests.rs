@@ -1,5 +1,6 @@
 use super::*;
 use crate::delegation::DelegateeKey;
+use crate::dht::delivery::NextHop;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::message::HopBudget;
@@ -441,6 +442,7 @@ fn probe_offer_verifies_the_exact_signed_request_and_completion() -> Result<()> 
         provider_did,
         tx_id,
         1,
+        None,
         Message::ProbeRequest(request),
         beneficiary_signer,
     )?;
@@ -449,6 +451,7 @@ fn probe_offer_verifies_the_exact_signed_request_and_completion() -> Result<()> 
         beneficiary_did,
         tx_id,
         1,
+        None,
         ProbeCompletion {
             request_digest,
             nonce: request.nonce,
@@ -474,13 +477,18 @@ fn probe_offer_verifies_the_exact_signed_request_and_completion() -> Result<()> 
         beneficiary_did,
         tx_id,
         2,
+        None,
         Message::ProbeOffer(Box::new(offer.clone())),
         provider_signer,
     )?;
     let outer = MessagePayload::new(
         outer_transaction,
         provider_signer,
-        MessageRelay::new(beneficiary_did, beneficiary_did, HopBudget::MAX),
+        MessageRelay::new(
+            NextHop::toward(beneficiary_did),
+            beneficiary_did,
+            HopBudget::MAX,
+        ),
     )?;
 
     assert_eq!(
@@ -536,6 +544,7 @@ fn probe_offer_rejects_an_attestation_from_an_expired_provider_session() -> Resu
         provider_did,
         tx_id,
         1,
+        None,
         Message::ProbeRequest(request),
         beneficiary_signer,
     )?;
@@ -544,6 +553,7 @@ fn probe_offer_rejects_an_attestation_from_an_expired_provider_session() -> Resu
         beneficiary_did,
         tx_id,
         1,
+        None,
         ProbeCompletion {
             request_digest,
             nonce: request.nonce,
@@ -574,13 +584,18 @@ fn probe_offer_rejects_an_attestation_from_an_expired_provider_session() -> Resu
         beneficiary_did,
         tx_id,
         2,
+        None,
         Message::ProbeOffer(Box::new(offer.clone())),
         provider_signer,
     )?;
     let outer = MessagePayload::new(
         outer_transaction,
         provider_signer,
-        MessageRelay::new(beneficiary_did, beneficiary_did, HopBudget::MAX),
+        MessageRelay::new(
+            NextHop::toward(beneficiary_did),
+            beneficiary_did,
+            HopBudget::MAX,
+        ),
     )?;
 
     assert_eq!(
@@ -619,6 +634,7 @@ fn probe_offer_judges_embedded_transaction_sessions_at_observation_time() -> Res
         provider_did,
         tx_id,
         1,
+        None,
         Message::ProbeRequest(request),
         beneficiary_signer,
     )?;
@@ -627,6 +643,7 @@ fn probe_offer_judges_embedded_transaction_sessions_at_observation_time() -> Res
         beneficiary_did,
         tx_id,
         1,
+        None,
         ProbeCompletion {
             request_digest,
             nonce: request.nonce,
@@ -652,13 +669,18 @@ fn probe_offer_judges_embedded_transaction_sessions_at_observation_time() -> Res
         beneficiary_did,
         tx_id,
         2,
+        None,
         Message::ProbeOffer(Box::new(offer.clone())),
         provider_signer,
     )?;
     let outer = MessagePayload::new(
         outer_transaction,
         provider_signer,
-        MessageRelay::new(beneficiary_did, beneficiary_did, HopBudget::MAX),
+        MessageRelay::new(
+            NextHop::toward(beneficiary_did),
+            beneficiary_did,
+            HopBudget::MAX,
+        ),
     )?;
 
     offer.verify_transcript(&outer, NETWORK_ID, beneficiary_did)?;

@@ -732,7 +732,7 @@ impl Stabilizer {
         let request = ProbeRequest::random_for_epoch(epoch);
         let payload = self
             .transport
-            .signed_payload(Message::ProbeRequest(request), peer, peer)
+            .originate(Message::ProbeRequest(request), peer, Some(peer))
             .await?;
         Ok(PreparedLivenessProbe {
             attempt,
@@ -888,7 +888,7 @@ impl Stabilizer {
                     });
                     let payload = match self
                         .transport
-                        .signed_payload(msg.clone(), closest_predecessor, closest_predecessor)
+                        .originate(msg.clone(), closest_predecessor, Some(closest_predecessor))
                         .await
                     {
                         Ok(payload) => payload,

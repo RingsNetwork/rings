@@ -161,6 +161,7 @@ mod tests {
 
     use super::*;
     use crate::delegation::DelegateeKey;
+    use crate::dht::delivery::NextHop;
     use crate::ecc::SecretKey;
     use crate::error::Error;
     use crate::message::Message;
@@ -221,9 +222,10 @@ mod tests {
         MessagePayload::new_send_with_sequence(
             Message::custom(b"replay boundary")?,
             MessageSigner::new(&sender, TEST_NETWORK_ID),
-            destination,
+            NextHop::toward(destination),
             destination,
             sequence,
+            None,
         )
     }
 
@@ -235,9 +237,10 @@ mod tests {
         MessagePayload::new_send_with_sequence(
             Message::custom(b"quota before validation")?,
             MessageSigner::new(sender, TEST_NETWORK_ID),
-            destination,
+            NextHop::toward(destination),
             destination,
             sequence,
+            None,
         )
     }
 

@@ -29,6 +29,37 @@ Correct Chord is derived from Pamela Zave's work on Chord, and it encompasses tw
 
 Rings Network builds upon Correct Chord and incorporates several modifications, including support for multiple successors and improved stabilization algorithms, among other enhancements.
 
+## Delivery toward a node
+
+Finding the owner of a key and delivering a message to a node are different questions, and Rings
+answers them with different rules. The owner lookup (`find_successor`) answers `head` when the key
+lies between a node and its successor head, and crossing the key is correct there: the owner is the
+first node at or after it. A node is not a position, so a message for a node must never pass it.
+
+Delivery (`dht::delivery`) works as follows:
+
+1. **Greedy.** Each hop forwards to the known peer (successor or finger) that lies between itself
+   and the destination and is nearest the destination. The clockwise distance strictly
+   decreases, so no route can cycle. A hop linked to the destination delivers directly.
+2. **One handoff.** When no linked known peer lies on that arc, the hop hands the message once to
+   the first linked known node after itself, which lies past the destination, and marks the
+   carrier. A node with a sparse view, such as a leaf linked only to its guard or a joiner linked
+   only to its bootstrap, hands off on its first hop, and the receiver's fuller view routes on
+   greedily. A second crossing is refused and ends the route with a typed error
+   (`RelayDestinationUnreachable`), so repeated crossings can never circle the ring.
+
+A message for a node that no view reaches therefore fails fast, within at most `2|V|` hops,
+instead of circling the ring until its hop budget runs out; it is delivered once the ring has
+converged. Greedy hops choose only peers this node is linked to, because the successor list may
+name peers a stabilization report introduced before any connection to them exists.
+
+A node without a predecessor is the one case that cannot wait for convergence: a joiner needs the
+answers to its own join lookup and connection offer to converge at all. Whenever a node has no
+predecessor, its requests carry a signed `reply_via` naming its nearest linked successor, which is
+its bootstrap during a join. Successor and connection answers (`FindSuccessorReport`,
+`ConnectNodeReport`) then travel to that peer, which hands them over its direct link. Every other
+report goes straight to the origin, so `reply_via` reflects at most one bounded answer per request.
+
 ## Finger-table convergence
 
 ### Algorithmic basis and Rings policy

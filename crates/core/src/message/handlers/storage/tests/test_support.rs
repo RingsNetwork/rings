@@ -8,6 +8,7 @@ use tokio::time::Instant;
 
 use super::super::ChordStorageInterfaceCacheChecker;
 use crate::delegation::DelegateeKey;
+use crate::dht::delivery::NextHop;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::Chord;
@@ -242,10 +243,11 @@ pub(super) fn storage_sync_report_payload(
         destination,
         request.transaction.tx_id,
         request.transaction.sequence,
+        None,
         Message::SyncEntriesWithSuccessorReport(report),
         signer,
     )?;
-    let relay = MessageRelay::new(next_hop, destination, HopBudget::MAX);
+    let relay = MessageRelay::new(NextHop::toward(next_hop), destination, HopBudget::MAX);
     MessagePayload::new(transaction, signer, relay)
 }
 

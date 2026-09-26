@@ -783,6 +783,12 @@ fn precedes(local: Did, peer: Did, target: &BigUint) -> bool {
 
 /// `ClosestPrecedingFinger(n, id)`: the highest finger slot on the open arc
 /// `(n, id)`, or `None` when the sparse table holds no such hint.
+///
+/// The owner lookup scans fingers only: fingers are set on admission, whereas
+/// the successor list also holds candidates a stabilization report named before
+/// any link to them exists, and the lookup has no link predicate to tell them
+/// apart. Delivery, which has one, scans both (see
+/// [`route_toward`](crate::dht::delivery::route_toward)).
 fn closest_preceding_finger(state: &TopologyState, target: &BigUint) -> Option<Did> {
     state
         .fingers
@@ -806,7 +812,8 @@ pub fn is_responsible_for(state: &TopologyState, id: Did) -> bool {
     }
 }
 
-/// Pure Chord successor lookup against one topology state.
+/// Pure Chord successor lookup against one topology state: the owner of the
+/// ring position `did`.
 ///
 /// `Local(head)` answers when `did` lies in the local successor interval
 /// `(n, head]`; a node without successors answers with itself. Otherwise the
@@ -815,6 +822,12 @@ pub fn is_responsible_for(state: &TopologyState, id: Did) -> bool {
 /// `finger[1]` is the successor, so `closest_preceding_node` always finds a
 /// hop; the sparse/no-wrap finger table may hold no finger right after a join
 /// or after a run was cleared, and the head fallback restores that invariant.
+///
+/// This answers the owner-lookup question (storage placement, finger fixing,
+/// successor lookups, inbox hold authority), where `Local(head)` with `head`
+/// past `did` is the intended answer. Delivering a payload to the node `did`
+/// is a different question, answered by [`delivery`](crate::dht::delivery),
+/// which passes its aim at most once, by one explicit handoff.
 ///
 /// `TopologyState` has public fields, so a successor or finger entry equal to
 /// `local` is representable; such entries are skipped rather than trusted.
