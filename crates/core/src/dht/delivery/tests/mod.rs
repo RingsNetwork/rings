@@ -11,7 +11,8 @@
 //! could end. The model records every route until it is delivered or ends, and asserts that no
 //! state ever repeats.
 //!
-//! Laws checked on every route `n₀ → n₁ → …`:
+//! The safety laws hold in every overlay and are checked on every route by
+//! [`Overlay::check_route_law`]:
 //!
 //! - `Linked`: every hop follows a link;
 //! - `NeverOvershoots`: every hop that does not set the stage's handoff flag satisfies
@@ -19,9 +20,15 @@
 //!   type: nothing clears the flag);
 //! - `Acyclic`: no `(node, stage)` repeats, so the hop budget never ends a route;
 //! - `Bounded`: at most `|V| + 2` hops (one greedy run, one handoff, two terminal deliveries);
-//! - `Exact`: an undelivered route toward `T` visited no node linked to `T`;
-//! - `Converged ⇒ Delivered`, and the join-window law: on a converged ring without `J`, with
-//!   `J` linked only to a bootstrap `B`, every member's report naming `reply_via = B` arrives.
+//! - `Exact`: an undelivered route toward `T` visited no node linked to `T`.
+//!
+//! What a route achieves depends on the overlay, so the two regimes are tested apart:
+//!
+//! - [`converged`]: on the Chord fixpoint every route is delivered by greedy hops alone, each
+//!   hop at least halves the remaining distance, and no node names a `reply_via`;
+//! - [`unconverged`]: each kind of stale view has its own expected outcome: a stale successor
+//!   is routed around, an unknown destination fails fast, a joiner's answers arrive through its
+//!   `reply_via`, and unlinked successor entries are never hopped to.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -29,16 +36,14 @@ use std::collections::HashSet;
 
 use num_bigint::BigUint;
 use rand::Rng;
-use rand::SeedableRng;
 use rand_hc::Hc128Rng;
 
 use super::delivery_step;
 use super::RouteStage;
 use crate::dht::topology::dist;
-use crate::dht::topology::find_successor;
 use crate::dht::topology::finger_table;
+use crate::dht::topology::predecessor;
 use crate::dht::topology::successors;
-use crate::dht::topology::FindSuccessorStep;
 use crate::dht::topology::TopologyState;
 use crate::dht::topology::DEFAULT_SUCCESSOR_CAPACITY;
 use crate::dht::Did;
@@ -214,9 +219,14 @@ fn view(local: Did, known: &[Did], fingers: Vec<Option<Did>>) -> TopologyState {
     )
 }
 
-/// The Chord fixpoint view of `local` over `members`.
+/// The Chord fixpoint view of `local` over `members`: successors, predecessor, and fingers.
 fn converged_view(members: &[Did], local: Did) -> TopologyState {
-    view(local, members, finger_table(members, local))
+    TopologyState::new(
+        local,
+        successors(members, local, DEFAULT_SUCCESSOR_CAPACITY),
+        predecessor(members, local),
+        finger_table(members, local),
+    )
 }
 
 /// The converged overlay of `members`: fixpoint views, links = views.
@@ -294,197 +304,7 @@ fn test_delivery_step_stages() {
     assert_eq!(step(4, via_far.handed_off(), &view), None);
 }
 
-/// #865 regression: the ring `A < B < T < C < D` with the successor lists of the trace. The
-/// owner lookup still answers `C` for the position of `T` at `A`; the reply from its origin `D`
-/// takes the `D – B` edge and arrives; from `A`, whose view does not know `T`'s neighbourhood,
-/// the route fails fast at `C` instead of circling until the hop budget.
-#[test]
-fn test_issue_865_topology_delivers_reply_and_fails_fast() {
-    let a = prefixed(0x0a33);
-    let b = prefixed(0x15c8);
-    let t = prefixed(0x31cf);
-    let c = prefixed(0x91c0);
-    let d = prefixed(0xaf3f);
-    let views = [
-        (a, vec![c, d]),
-        (b, vec![t, c, d]),
-        (t, vec![b]),
-        (c, vec![d, a, b]),
-        (d, vec![a, b, c]),
-    ]
-    .into_iter()
-    .map(|(local, known)| (local, TopologyState::new(local, known, None, vec![None; 8])))
-    .collect::<BTreeMap<_, _>>();
-    let a_view = views.get(&a).cloned();
-    let overlay = Overlay::new(views, []);
-
-    assert_eq!(
-        a_view.map(|view| find_successor(&view, t)),
-        Some(FindSuccessorStep::Local(c))
-    );
-    assert_eq!(
-        overlay.check_route_law(d, t, RouteStage::TOWARD).path(),
-        vec![d, b, t]
-    );
-    let from_a = overlay.check_route_law(a, t, RouteStage::TOWARD);
-    assert_eq!(from_a.path(), vec![a, c]);
-    assert_eq!(from_a.outcome, Outcome::Unreachable);
-    overlay.check_all_routes();
-}
-
-/// The join topologies of #873 §1.2: a report to a joiner linked only to its bootstrap arrives
-/// when the request named `reply_via = bootstrap`, from every member; without the hint the
-/// route still satisfies the route law (it ends, typically with the typed error).
-#[test]
-fn test_join_window_report_arrives_through_reply_via() {
-    for (members, bootstrap, joiner) in [
-        ([0x1fd6, 0x26d3, 0x9114], 0x26d3, 0xeaab),
-        ([0x1875, 0x9046, 0xe2c6], 0x9046, 0xf6f6),
-    ] {
-        let members = members.map(prefixed);
-        let (bootstrap, joiner) = (prefixed(bootstrap), prefixed(joiner));
-        let overlay = join_window(&members, joiner, bootstrap);
-        for origin in members {
-            let replied =
-                overlay.check_route_law(origin, joiner, RouteStage::replying_via(Some(bootstrap)));
-            assert_eq!(replied.outcome, Outcome::Delivered, "{replied:?}");
-            overlay.check_route_law(origin, joiner, RouteStage::TOWARD);
-        }
-    }
-}
-
-/// Join-window law on rings of 2 to 6 random members: with the ring converged without the
-/// joiner and the joiner linked only to a bootstrap at any position, every member's report
-/// naming that bootstrap arrives.
-#[test]
-fn test_join_window_law() {
-    let mut rng = Hc128Rng::seed_from_u64(873);
-    for size in 2..=6usize {
-        let everyone = random_members(&mut rng, size + 1);
-        let (members, joiner) = everyone.split_at(size);
-        let Some(joiner) = joiner.first().copied() else {
-            continue;
-        };
-        for bootstrap in members.iter().copied() {
-            let overlay = join_window(members, joiner, bootstrap);
-            for origin in members.iter().copied() {
-                let route = overlay.check_route_law(
-                    origin,
-                    joiner,
-                    RouteStage::replying_via(Some(bootstrap)),
-                );
-                assert_eq!(route.outcome, Outcome::Delivered, "{route:?}");
-            }
-        }
-    }
-}
-
-/// Exhaustive model: every assignment of known-peer sets on a 4-node ring, crossed with every
-/// set of links to the destination that no view records and with every `reply_via` choice,
-/// satisfies the route law.
-#[test]
-fn test_route_law_holds_on_every_four_node_view() {
-    let members = [10u32, 20, 30, 40].map(Did::from);
-    let subsets = |pool: &[Did]| {
-        (0u32..(1 << pool.len()))
-            .map(|mask| {
-                pool.iter()
-                    .enumerate()
-                    .filter(|(bit, _)| mask & (1 << bit) != 0)
-                    .map(|(_, peer)| *peer)
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>()
-    };
-    let choices = members.map(|local| {
-        subsets(
-            &members
-                .iter()
-                .copied()
-                .filter(|peer| *peer != local)
-                .collect::<Vec<_>>(),
-        )
-    });
-
-    for assignment in 0usize..4096 {
-        let views = members
-            .iter()
-            .zip(choices.iter())
-            .enumerate()
-            .map(|(index, (local, subsets))| {
-                let choice = (assignment >> (3 * index)) & 0b111;
-                let known = subsets.get(choice).cloned().unwrap_or_default();
-                (*local, view(*local, &known, vec![]))
-            })
-            .collect::<BTreeMap<_, _>>();
-        for destination in members {
-            let others = members
-                .iter()
-                .copied()
-                .filter(|peer| *peer != destination)
-                .collect::<Vec<_>>();
-            for linked in subsets(&others) {
-                let extra = linked.iter().map(|peer| (*peer, destination));
-                let overlay = Overlay::new(views.clone(), extra);
-                let stages = std::iter::once(RouteStage::TOWARD).chain(
-                    others
-                        .iter()
-                        .map(|peer| RouteStage::replying_via(Some(*peer))),
-                );
-                for stage in stages {
-                    for origin in others.iter().copied() {
-                        overlay.check_route_law(origin, destination, stage);
-                    }
-                }
-            }
-        }
-    }
-
-    let routes = converged(&members).check_all_routes();
-    assert!(routes
-        .iter()
-        .all(|route| route.outcome == Outcome::Delivered));
-}
-
-/// Randomized model with a fixed seed: rings of 10 random DIDs with random successor
-/// knowledge and finger hints, and links drawn independently of the views (so views name
-/// unlinked peers and links exist outside views), satisfy the route law; the converged overlay
-/// of the same members delivers every route.
-#[test]
-fn test_route_law_holds_on_random_unconverged_views() {
-    let mut rng = Hc128Rng::seed_from_u64(865);
-    for _ in 0..48 {
-        let members = random_members(&mut rng, 10);
-        let views = members
-            .iter()
-            .map(|local| {
-                let known = members
-                    .iter()
-                    .copied()
-                    .filter(|peer| peer != local && rng.gen_bool(0.3))
-                    .collect::<Vec<_>>();
-                let fingers = (0..8)
-                    .map(|_| {
-                        let pick = rng.gen_range(0..members.len());
-                        members
-                            .get(pick)
-                            .copied()
-                            .filter(|peer| peer != local && rng.gen_bool(0.3))
-                    })
-                    .collect();
-                (*local, view(*local, &known, fingers))
-            })
-            .collect();
-        let links = members
-            .iter()
-            .flat_map(|a| members.iter().map(move |b| (*a, *b)))
-            .filter(|_| rng.gen_bool(0.3))
-            .collect::<Vec<_>>();
-        Overlay::with_links(views, links).check_all_routes();
-
-        let routes = converged(&members).check_all_routes();
-        assert!(routes
-            .iter()
-            .all(|route| route.outcome == Outcome::Delivered));
-    }
-}
+/// Laws of delivery on the Chord fixpoint.
+mod converged;
+/// Expected outcomes of delivery on each kind of stale view.
+mod unconverged;
