@@ -10,6 +10,8 @@ pub(crate) const TEST_NETWORK_ID: u32 = 1;
 /// for ICE gathering to complete, ahead of every awaited event.
 pub(crate) const TEST_ICE_SERVERS: &str = "";
 
+pub(crate) mod activity;
+
 #[cfg(feature = "node")]
 pub mod native;
 #[cfg(all(feature = "browser", target_family = "wasm"))]

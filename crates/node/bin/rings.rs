@@ -1,5 +1,10 @@
 //! Rings native node command-line entrypoint.
 
+// The `dummy` feature selects rings-core's in-memory test transport, over which a node cannot
+// reach any peer; it exists for the node's own test suite only.
+#[cfg(all(feature = "dummy", not(test)))]
+compile_error!("the `dummy` test transport cannot run a node; build `rings` without it");
+
 use std::net::SocketAddr;
 use std::path::Path;
 use std::str::FromStr;

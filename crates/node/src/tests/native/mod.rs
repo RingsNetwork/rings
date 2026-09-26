@@ -28,7 +28,8 @@ pub async fn prepare_processor() -> Processor {
     let procssor_builder = ProcessorBuilder::from_serialized(&config)
         .unwrap()
         .storage(storage)
-        .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE);
+        .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
+        .test_observer(crate::tests::activity::activity_observer());
 
     procssor_builder.build().unwrap()
 }

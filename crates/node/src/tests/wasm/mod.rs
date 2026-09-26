@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use futures::channel::mpsc;
 use futures::lock::Mutex;
-use futures::FutureExt;
 use futures::StreamExt;
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
@@ -148,27 +147,25 @@ pub async fn await_mutual_admission(
     futures::join!(a_transitions.admitted(b), b_transitions.admitted(a));
 }
 
-/// Run the test `name` under a per-test hang guard of `budget`.
+/// Per-test hang guard shared with core's browser tests; see
+/// [`rings_test_support::with_hang_guard`].
+pub use rings_test_support::with_hang_guard;
+
+/// Whether `promise` is settled at this moment, decided without waiting on a timer.
 ///
-/// The binary's tests share one runner budget, so a hung test would otherwise time out the
-/// whole binary and starve every test after it. The guard fails with `name` instead. It is a
-/// failure bound only: a passing run proceeds on `test` alone, since every wait inside is on
-/// an event.
-///
-/// Core's `tests::wasm::with_hang_guard` is the same helper; each lives in its crate's
-/// `cfg(test)` module, so they cannot share one definition.
-pub async fn with_hang_guard<T>(
-    name: &str,
-    budget: Duration,
-    test: impl std::future::Future<Output = T>,
-) -> T {
-    let test = test.fuse();
-    let deadline = rings_runtime::sleep(budget).fuse();
-    futures::pin_mut!(test, deadline);
-    futures::select! {
-        value = test => value,
-        _ = deadline => panic!("{name} exceeded its {budget:?} hang guard"),
-    }
+/// The microtask queue is flushed first, so work that is ready without a timer or I/O has run.
+/// `Promise.race` then takes the first *already settled* promise in array order: `promise`
+/// itself if it has settled, otherwise the resolved sentinel.
+pub async fn promise_settled_now(promise: &js_sys::Promise) -> bool {
+    let flushed = js_sys::Promise::resolve(&wasm_bindgen::JsValue::UNDEFINED);
+    JsFuture::from(flushed).await.unwrap();
+    let sentinel = js_sys::Object::new();
+    let raced = js_sys::Promise::race(&js_sys::Array::of2(
+        promise,
+        &js_sys::Promise::resolve(&sentinel),
+    ));
+    let winner = JsFuture::from(raced).await;
+    !matches!(winner, Ok(value) if value == wasm_bindgen::JsValue::from(sentinel))
 }
 
 wasm_bindgen_test_configure!(run_in_browser);
@@ -201,6 +198,7 @@ pub async fn prepare_processor() -> Processor {
         .unwrap()
         .storage(storage)
         .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
+        .test_observer(crate::tests::activity::activity_observer())
         .build()
         .unwrap()
 }

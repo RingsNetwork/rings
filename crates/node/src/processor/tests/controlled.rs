@@ -4,8 +4,9 @@
 //! a random 10–100 ms per message, and only its controlled mode is deterministic: every event
 //! waits in a thread-local FIFO queue until a test delivers it. [`ControlledNetwork`] enables
 //! that mode for one test and runs a pump that delivers the oldest queued event whenever one
-//! is waiting, so the test's own awaits (admission, inbound messages, lookups) progress with
-//! no clock involved:
+//! is waiting, so the test's own awaits (admission, inbound messages, lookups) progress without
+//! any message waiting on a clock; the helpers' waits are activity-woken probes whose only
+//! timer is a hang guard:
 //!
 //! ```text
 //! pump:  loop { ¬paused ∧ pending() > 0 ? deliver(oldest) : () ; yield }
@@ -14,6 +15,10 @@
 //! The queue is thread-local and the tests run on a current-thread runtime, so the pump, the
 //! processors' spawned tasks and the test all share the one queue. A test that needs a
 //! specific delivery order pauses the pump and delivers explicitly.
+//!
+//! The dummy connection ids are seeded per test. A test whose identities are also fixed (the
+//! E2E stream test) has a reproducible schedule; tests that draw random identities have a
+//! clock-free but identity-dependent schedule.
 
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -21,8 +26,26 @@ use std::sync::Arc;
 
 use rings_transport::connections::dummy_controlled;
 
-/// Seed of the dummy connection identifiers in every controlled processor test.
+use crate::tests::activity::record_activity;
+
+/// Base seed of the dummy connection identifiers; see [`test_seed`].
 const CONTROLLED_NETWORK_SEED: u64 = 883;
+
+/// The dummy seed of the running test: [`CONTROLLED_NETWORK_SEED`] mixed with an FNV-1a hash of
+/// the test's name (libtest names each test's thread after it).
+///
+/// Ids are then stable for one test and distinct across tests, so no two tests register the
+/// same id in the dummy transport's process-wide connection registry.
+fn test_seed() -> u64 {
+    let name_hash = std::thread::current()
+        .name()
+        .unwrap_or_default()
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+        });
+    dummy_controlled::mix_seed(CONTROLLED_NETWORK_SEED ^ name_hash)
+}
 
 /// Upper bound on explicit delivery steps in [`ControlledNetwork::deliver_newest_until`]. A
 /// step is one observation, at most one delivery and one cooperative yield, so the bound counts
@@ -38,12 +61,12 @@ pub(super) struct ControlledNetwork {
 }
 
 impl ControlledNetwork {
-    /// Enable controlled delivery with a fixed seed and start the FIFO pump.
+    /// Enable controlled delivery with this test's seed and start the FIFO pump.
     ///
     /// Pre: called on the test's current-thread runtime, before any connection is made.
     pub(super) fn start() -> Self {
         dummy_controlled::enable(true);
-        dummy_controlled::set_seed(CONTROLLED_NETWORK_SEED);
+        dummy_controlled::set_seed(test_seed());
         let paused = Arc::new(AtomicBool::new(false));
         let pump_paused = Arc::clone(&paused);
         let pump = tokio::spawn(async move {
@@ -51,6 +74,8 @@ impl ControlledNetwork {
                 if !pump_paused.load(Ordering::Acquire) && dummy_controlled::pending() > 0 {
                     // A target retired meanwhile is a legal outcome; the event is consumed.
                     dummy_controlled::deliver(0).await;
+                    // A delivered event is a state change that tests probe for.
+                    record_activity();
                 }
                 tokio::task::yield_now().await;
             }
@@ -87,6 +112,7 @@ impl ControlledNetwork {
             let pending = dummy_controlled::pending();
             if pending > 0 {
                 dummy_controlled::deliver(pending - 1).await;
+                record_activity();
             }
             tokio::task::yield_now().await;
         }

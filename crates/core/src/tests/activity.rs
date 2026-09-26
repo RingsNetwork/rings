@@ -1,31 +1,21 @@
-//! Activity-woken state probes for tests, native and browser alike.
+//! Activity sources and the quiescence predicate of core's test nodes, native and browser.
 //!
-//! A test never waits for a duration. It probes the state it needs, and when the state does not
-//! hold yet, it awaits the next *activity*: a process-wide generation that every test node
-//! advances whenever its observable state may have changed.
-//!
-//! ```text
-//! probe:  loop { m := mark() ; probe() = Some(v) ? return v : await generation ≠ m }
-//! ```
-//!
-//! Law (no lost wake-up): the generation is marked before the probe, so a change that lands
-//! after the probe advances the generation past the mark and wakes the next wait. Activity from
-//! other tests in the same process only causes extra probes. The cell is a plain mutex and a
-//! waker list, so it needs no runtime and works on the browser's single thread as well.
+//! The activity cell and the activity-woken probe live in [`rings_test_support::activity`];
+//! this module wires core's test nodes to it. A node's observer ([`LedgerObserver`]) and callback
+//! ([`ActivityCallback`]) record activity on every message delivered, received, handled or
+//! stored, on every lookup event and connection event, and count wire messages for the
+//! conservation clause of [`swarms_quiescent`].
 
-use std::future::poll_fn;
 use std::future::Future;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::MutexGuard;
-use std::task::Poll;
-use std::task::Waker;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::FutureExt;
+pub(crate) use rings_test_support::activity::activity_after;
+pub(crate) use rings_test_support::activity::activity_mark;
+pub(crate) use rings_test_support::activity::record_activity;
 
 use crate::dht::Did;
 use crate::message::MessagePayload;
@@ -41,88 +31,16 @@ use crate::swarm::observer::ObservationOutcome;
 use crate::swarm::observer::SwarmObserver;
 use crate::swarm::Swarm;
 
-/// The activity generation and the tasks waiting for it to advance.
-struct ActivityState {
-    generation: u64,
-    waiters: Vec<Waker>,
-}
-
-/// The process-wide activity cell.
-static ACTIVITY: Mutex<ActivityState> = Mutex::new(ActivityState {
-    generation: 0,
-    waiters: Vec::new(),
-});
-
-/// Lock the activity cell; a panicked test cannot poison the others' waits.
-fn activity() -> MutexGuard<'static, ActivityState> {
-    ACTIVITY
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-/// Record that some test node's observable state may have changed, and wake every waiter.
-pub(crate) fn record_activity() {
-    let waiters = {
-        let mut state = activity();
-        state.generation = state.generation.wrapping_add(1);
-        std::mem::take(&mut state.waiters)
-    };
-    waiters.into_iter().for_each(Waker::wake);
-}
-
-/// The current activity generation, to be marked before a probe.
-pub(crate) fn activity_mark() -> u64 {
-    activity().generation
-}
-
-/// Resolve once the activity generation differs from `mark`.
-pub(crate) async fn activity_after(mark: u64) {
-    poll_fn(|context| {
-        let mut state = activity();
-        if state.generation != mark {
-            return Poll::Ready(());
-        }
-        if !state
-            .waiters
-            .iter()
-            .any(|waiter| waiter.will_wake(context.waker()))
-        {
-            state.waiters.push(context.waker().clone());
-        }
-        Poll::Pending
-    })
-    .await
-}
-
-/// Probe `probe` on every activity until it yields `Some`, failing with `label` once
-/// `hang_guard` has elapsed.
-///
-/// The guard is a failure bound only: a passing run proceeds on an observed state, never on
-/// elapsed time.
+/// [`rings_test_support::activity::probe_on_activity`] with core's error type.
 pub(crate) async fn probe_on_activity<T, F>(
     label: &str,
     hang_guard: Duration,
-    mut probe: impl FnMut() -> F,
+    probe: impl FnMut() -> F,
 ) -> crate::error::Result<T>
 where
     F: Future<Output = crate::error::Result<Option<T>>>,
 {
-    let probing = async {
-        loop {
-            let mark = activity_mark();
-            if let Some(value) = probe().await? {
-                return Ok(value);
-            }
-            activity_after(mark).await;
-        }
-    }
-    .fuse();
-    let expired = crate::utils::sleep(hang_guard).fuse();
-    futures::pin_mut!(probing, expired);
-    futures::select! {
-        reached = probing => reached,
-        () = expired => panic!("state not reached within the {hang_guard:?} hang guard: {label}"),
-    }
+    rings_test_support::activity::probe_on_activity(label, hang_guard, probe).await
 }
 
 /// Wire-message conservation counts of one test node.

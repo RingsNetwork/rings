@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use rings_rpc::protos::rings_node::SendBackendMessageRequest;
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::*;
@@ -7,6 +5,7 @@ use wasm_bindgen_test::*;
 use super::create_connection;
 use super::get_peers;
 use super::new_provider;
+use super::promise_settled_now;
 use super::provider_did;
 use super::with_hang_guard;
 use super::TEST_HANG_GUARD;
@@ -83,19 +82,14 @@ async fn test_provider_listener_handle_requests_stop() {
     let listener_lifecycle_lock = provider.listener_lifecycle_lock_for_test();
     let old_cleanup = listener_lifecycle_lock.lock().await;
     let waiting_listener = provider.listen();
-    // `started` must remain pending while `old_cleanup` owns the processor lifecycle lock.
-    let started = Box::pin(JsFuture::from(waiting_listener.started()));
-    let short_delay = Box::pin(rings_runtime::sleep(Duration::from_millis(10)));
-    let pending_started = match futures::future::select(started, short_delay).await {
-        futures::future::Either::Left(_) => {
-            waiting_listener.stop();
-            panic!("a new listener started while the previous generation still held the lock");
-        }
-        futures::future::Either::Right((delay, pending_started)) => {
-            delay.unwrap();
-            pending_started
-        }
-    };
+    // `started` must remain pending while `old_cleanup` owns the processor lifecycle lock. This
+    // is a state, checked once the listener has run every step that needs no timer.
+    let started = waiting_listener.started();
+    if promise_settled_now(&started).await {
+        waiting_listener.stop();
+        panic!("a new listener started while the previous generation still held the lock");
+    }
+    let pending_started = JsFuture::from(started);
     // Releasing the old generation should allow the queued listener to publish
     // its started signal and later finish through cooperative stop.
     drop(old_cleanup);

@@ -1,3 +1,5 @@
+use futures::FutureExt;
+
 use super::common::*;
 use super::*;
 #[cfg(feature = "dummy")]
@@ -12,12 +14,12 @@ async fn test_listen_with_pre_stopped_token_returns_before_first_tick() {
     let stop = StopSource::new();
     stop.request_stop();
 
-    tokio::time::timeout(
-        Duration::from_millis(100),
-        processor.listen_with(stop.token()),
-    )
-    .await
-    .expect("pre-stopped listen token should exit before the first stabilization tick");
+    // Completing on the first poll means the listener waited for nothing, the first
+    // stabilization tick included; this is decided by state, not by a timeout.
+    assert!(
+        processor.listen_with(stop.token()).now_or_never().is_some(),
+        "pre-stopped listen token should exit before the first stabilization tick"
+    );
 }
 
 #[tokio::test]
@@ -27,12 +29,11 @@ async fn test_provider_listen_with_pre_stopped_token_returns_before_first_tick()
     let stop = StopSource::new();
     stop.request_stop();
 
-    tokio::time::timeout(
-        Duration::from_millis(100),
-        provider.listen_with(stop.token()),
-    )
-    .await
-    .expect("pre-stopped provider listen token should exit before the first stabilization tick");
+    // Completing on the first poll means the listener waited for nothing; see above.
+    assert!(
+        provider.listen_with(stop.token()).now_or_never().is_some(),
+        "pre-stopped provider listen token should exit before the first stabilization tick"
+    );
 }
 
 #[tokio::test]
@@ -213,7 +214,7 @@ async fn test_online_node_registry_lists_two_publishers_over_network() -> Result
     let other_callback = test_callback();
     publisher.swarm.set_callback(callback.clone()).unwrap();
     owner.swarm.set_callback(other_callback.clone()).unwrap();
-    connect_processors(&publisher, &owner, &callback, &other_callback).await;
+    connect_processors(&publisher, &owner).await;
     wait_for_mutual_dht_topology(&publisher, &owner).await?;
     let registry_key = entry::Entry::gen_did(ONLINE_NODES_TOPIC)?;
     let placement_keys = registry_key.rotate_affine(DATA_REDUNDANT)?;
@@ -263,6 +264,13 @@ async fn test_online_node_type_is_configurable() {
     assert_eq!(descriptor.node_type, OnlineNodeType::Browser);
 }
 
+/// Real-transport smoke test: a processor handshake over webrtc-rs reaches admission.
+///
+/// This runs in every build: in the default build over real webrtc-rs with host-only ICE,
+/// serialized by the network lock. It checks what only the real transport can: that the
+/// offer/answer SDP, ICE, DTLS and SCTP handshake of a processor completes and is admitted.
+/// Protocol logic over an admitted link is tested on the controlled network (`dummy` build).
+/// Admission is awaited on activity (the `Connected` event); the hang guard only bounds a hang.
 #[tokio::test]
 async fn test_processor_create_offer() {
     let _network_guard = network_test_guard().await;
@@ -279,7 +287,7 @@ async fn test_processor_create_offer() {
 
     let answer = p2.swarm.answer_offer(offer).await.unwrap();
     p1.swarm.accept_answer(answer).await.unwrap();
-    wait_processors_connected(&p1, &p2, &callback1, &callback2).await;
+    wait_processors_connected(&p1, &p2).await;
 
     let conn_dids = p1.swarm.peers();
     assert_eq!(conn_dids.len(), 1);
@@ -287,6 +295,13 @@ async fn test_processor_create_offer() {
     assert_eq!(conn_dids.first().unwrap().state, "Connected");
 }
 
+/// Real-transport smoke test: custom messages cross an admitted webrtc-rs link both ways.
+///
+/// Beyond [`test_processor_create_offer`], it checks what only the real transport can: that
+/// message frames travel over a real SCTP data channel in both directions. Every wait is an
+/// activity-woken probe (admission, then each inbound message); the hang guard only bounds a
+/// hang. Wire-byte measurement and chunking against a negotiated SCTP `max_message_size` are
+/// not covered at node level (see #883).
 #[tokio::test]
 async fn test_processor_handshake_msg() {
     let _network_guard = network_test_guard().await;
@@ -307,7 +322,7 @@ async fn test_processor_handshake_msg() {
 
     let answer = p2.swarm.answer_offer(offer).await.unwrap();
     p1.swarm.accept_answer(answer).await.unwrap();
-    wait_processors_connected(&p1, &p2, &callback1, &callback2).await;
+    wait_processors_connected(&p1, &p2).await;
 
     let test_text1 = "test1";
     let test_text2 = "test2";
@@ -341,7 +356,7 @@ async fn test_processor_direct_message_reaches_connected_peer() {
 
     p1.swarm.set_callback(callback1.clone()).unwrap();
     p2.swarm.set_callback(callback2.clone()).unwrap();
-    connect_processors(&p1, &p2, &callback1, &callback2).await;
+    connect_processors(&p1, &p2).await;
 
     p1.send_direct_message(p2.did(), b"direct-message")
         .await
@@ -377,7 +392,7 @@ async fn test_provider_exposes_sent_and_received_peer_measurements() {
 
     p1.swarm.set_callback(callback1.clone()).unwrap();
     p2.swarm.set_callback(callback2.clone()).unwrap();
-    connect_processors(&p1, &p2, &callback1, &callback2).await;
+    connect_processors(&p1, &p2).await;
     let sent_before = p1.peer_measurement(p2.did()).await.unwrap();
     let received_before = p2.peer_measurement(p1.did()).await.unwrap();
     let sent_bytes_before = sent_before.credit.bytes_sent_to_peer();
@@ -473,7 +488,7 @@ async fn test_processor_e2e_handshake_exchanges_verified_public_keys() {
     p1.swarm.set_callback(callback1.clone()).unwrap();
     p2.swarm.set_callback(callback2.clone()).unwrap();
 
-    connect_processors(&p1, &p2, &callback1, &callback2).await;
+    connect_processors(&p1, &p2).await;
 
     let did1 = p1.did();
     let did2 = p2.did();
@@ -632,7 +647,7 @@ async fn test_processor_e2e_message_streams_and_decrypts_with_receiver_identity_
     p1.swarm.set_callback(callback1.clone()).unwrap();
     p2.swarm.set_callback(callback2.clone()).unwrap();
 
-    connect_processors(&p1, &p2, &callback1, &callback2).await;
+    connect_processors(&p1, &p2).await;
 
     let did1 = p1.did();
     let did2 = p2.did();

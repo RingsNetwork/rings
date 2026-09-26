@@ -3265,6 +3265,7 @@ dependencies = [
  "rings-derive",
  "rings-measure",
  "rings-runtime",
+ "rings-test-support",
  "rings-transport",
  "serde",
  "serde-wasm-bindgen",
@@ -3393,6 +3394,7 @@ dependencies = [
  "rings-network-policy",
  "rings-rpc",
  "rings-runtime",
+ "rings-test-support",
  "rings-transport",
  "serde",
  "serde-wasm-bindgen",
@@ -3464,6 +3466,14 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
  "web-sys",
+]
+
+[[package]]
+name = "rings-test-support"
+version = "0.32.0"
+dependencies = [
+ "futures",
+ "rings-runtime",
 ]
 
 [[package]]

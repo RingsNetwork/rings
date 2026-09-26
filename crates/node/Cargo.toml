@@ -50,8 +50,8 @@ node = [
 ]
 
 # Test transport: runs the native node over rings-core's in-memory dummy transport instead of
-# webrtc-rs. Processor tests use it for deterministic, clock-free delivery (#883). It is not a
-# production configuration.
+# webrtc-rs, for the processor tests' controlled delivery (#883). It is not a production
+# configuration: the `rings` binary refuses to build with it.
 dummy = ["node", "rings-core/dummy", "rings-transport/dummy"]
 browser_default = ["browser"]
 browser = [
@@ -149,6 +149,7 @@ web-sys = { version = "0.3.64", optional = true, features = [
 rings-gateway = { workspace = true, optional = true }
 
 [dev-dependencies]
+rings-test-support = { workspace = true }
 smoltcp = { version = "0.14.0", default-features = false, features = [
     "std",
     "medium-ip",

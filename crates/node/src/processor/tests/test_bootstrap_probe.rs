@@ -64,9 +64,6 @@ impl SwarmCallback for ProbeTestCallback {
 struct ProbeNode {
     processor: Arc<Processor>,
     evidence: Arc<ReachabilityEvidence>,
-    /// The fixture callback, read by the connecting tests (`dummy` builds only).
-    #[cfg(feature = "dummy")]
-    fixture: Arc<SwarmCallbackInstance>,
 }
 
 impl ProbeNode {
@@ -80,16 +77,11 @@ impl ProbeNode {
         let backend = Backend::new(provider).observed_by(evidence.clone());
         processor
             .swarm
-            .set_callback(Arc::new(ProbeTestCallback {
-                backend,
-                fixture: fixture.clone(),
-            }))
+            .set_callback(Arc::new(ProbeTestCallback { backend, fixture }))
             .expect("callback installs");
         Self {
             processor,
             evidence,
-            #[cfg(feature = "dummy")]
-            fixture,
         }
     }
 
@@ -141,7 +133,7 @@ async fn routed_probe_reports_presence_through_one_hop() {
     let b = ProbeNode::new(b_key).await;
     let c = ProbeNode::new(c_key).await;
 
-    connect_processors(&b.processor, &a.processor, &b.fixture, &a.fixture).await;
+    connect_processors(&b.processor, &a.processor).await;
     // The admission of B is what makes B reachable to C without a lookup, so the test waits
     // for the event, not merely for transport readiness.
     let b_admitted = c
@@ -149,7 +141,7 @@ async fn routed_probe_reports_presence_through_one_hop() {
         .admissions()
         .wait_for(b.did())
         .expect("record readable");
-    connect_processors(&c.processor, &b.processor, &c.fixture, &b.fixture).await;
+    connect_processors(&c.processor, &b.processor).await;
     assert_eq!(
         b_admitted.await,
         Ok(()),
@@ -264,7 +256,7 @@ async fn a_local_disconnect_is_reported_as_a_peer_retirement() {
         .admissions()
         .wait_for(b.did())
         .expect("record readable");
-    connect_processors(&a.processor, &b.processor, &a.fixture, &b.fixture).await;
+    connect_processors(&a.processor, &b.processor).await;
     assert_eq!(
         admitted.await,
         Ok(()),

@@ -620,8 +620,10 @@ jobs:
         # rings-node inherits warnings and strict Clippy denies from the workspace.
         run: cargo clippy -p rings-node --no-default-features --features node --lib
 
+      # Every feature except `dummy`, which swaps the native transport for the in-memory test
+      # transport and is covered by the dummy_tests job.
       - name: Check node native with browser feature enabled
-        run: cargo check -p rings-node --all-features
+        run: cargo check -p rings-node --features node,ffi,browser,browser_chrome_test
 
       # Native and relay examples do not inherit workspace lints; retain this gate.
       - name: Run clippy
