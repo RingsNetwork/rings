@@ -454,7 +454,10 @@ exists that could disagree with it.  Consequences of $F=0$:
   each active link at the constant rate $r=\rho B/V$ units\,s$^{-1}$,
   $\rho<1$, sending a queued real cell in each slot if one exists and a
   cover cell otherwise: no $V$-window carries more than $\rho B<B$ units,
-  and an honest sender is never refused;
+  and an honest sender is never refused; an idle link keeps a cover floor
+  $r_{\mathrm{idle}}=1$ unit\,s$^{-1}$ ($\le r$), and a link that turns
+  active stays at $r$ for at least $D=Q$, extended by every real cell, so
+  activity is visible only at the granularity of $D$;
 \item $\gamma$ is checked before any insertion into $R_i$ and before
   admission (Algorithm~\ref{alg:hop}).
 \end{itemize}
@@ -1214,7 +1217,7 @@ expiry $x$ & shared by all hops of a loop and all loops sealed in one $Q=30$\,s 
 $x$ locates departure within $Q$ & $\arr_i$ then reveals the client-to-hop delay $D_i$ to within $Q$: position advantage $|D_i-D'_{i'}|/Q$ (L5$'$) \\
 session id $\sid$ & seen only by $h$, sealed in $\lambda_h$; links the loops of one session, which $h$ links by target anyway (D2$'$) \\
 deniable replies & no signature of $h$; $\cl$ holds no transferable proof of what $h$ returned; exit accountability out of scope (Prop.~\ref{prop:replyauth}) \\
-link activity & constant rate $\rho B/V$ while a link is active hides volume, not on/off activity; an idle cover floor is open \\
+link activity & rate $\rho B/V$ while active, floor $r_{\mathrm{idle}}$ while idle, active periods of at least $D=Q$: volume hidden, activity visible only at granularity $D$ \\
 $p_k$ holds $\sigma_k$ & $p_k$ colluding with $r_{k,j}$ links two positions of one segment; no value leaks, and timing links them anyway \\
 client-authored semantics ($\bar a_{i+1}$ depends on meaning of $v_i$) & out of protocol scope \\
 \bottomrule
@@ -1356,7 +1359,7 @@ D6 & a uniform (cover) cell is rejected at $\alpha$ decoding or at $\gamma$, is 
 D1$'$, D2 & unknown shape rejected at configuration, descriptor decode, route construction; a backend name only under $\mathsf{invoke}$, canonical, $\le32$ bytes over $[\mathtt{a\text{-}z0\text{-}9.\_\text{-}}]$, validated against signed descriptors; $\sigma$ carries no $\omega$ \\
 credit & a \code{tcp} session emits no reply without a SURB of its own $\sid$, removes each SURB before release, drops expired SURBs, and resumes after new credit; two sessions at one $h$ never share a SURB; $\mathrm{fin}$ both ways drops $\sid$; a credit frame adds $k$ SURBs; credit beyond $Q_{\max}$ is dropped \\
 rate & loopback single-client \code{tcp} download $\ge1$\,MB/s at $b=16$\,KiB, upload $\approx1/(k+1)$ of download \\
-emission & no $V$-window of a link exceeds $\rho B$ units; constant rate while active, real cells FIFO; an honest sender at full load is never refused \\
+emission & no $V$-window of a link exceeds $\rho B$ units; constant rate while active, real cells FIFO; an honest sender at full load is never refused; an idle link emits exactly $r_{\mathrm{idle}}$; a real cell at $t$ keeps rate $r$ on $[t,t+D)$ \\
 frames & $T$ set until the first reply; open only on a matching digest; open ack $\mathrm{data}(0,0,\epsilon)$, $\mathrm{fin}$ first means failure; reorder within $Q_{\max}$; a persisting gap fails closed; reserved $\phi$ bits rejected \\
 reply auth & no exit signature on the wire; a one-bit flip of a reply fails $\Enc{\tau}{k_{c_n}}$ \\
 replay store & no replayed layer admitted across filter rotation; a filter grows by blocks and is dropped exactly when its $x$ passes; memory tracks admitted tags; measured false-positive rate within $2^{-20}$ \\
