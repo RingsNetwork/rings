@@ -327,13 +327,17 @@ pub mod tests {
     /// ring  n1 → n2 → n3 → n4 → n1      (d(n1) < d(n2) < d(n3) < d(n4); links = ring edges)
     /// P₀ ≡ quiescent ∧ n1 has no link to n3, neither admitted nor pending
     /// connect(n1, n3)  ⊢  ◇(C(n1, n3) ∧ C(n3, n1))
-    /// W  ≡ n3 received n1's ConnectNodeSend from hop n2 ∧ n1 received n3's report relayed
+    /// W  ≡ n3 received n1's ConnectNodeSend from hop n2
+    ///      ∧ n1 received n3's ConnectNodeReport from hop n2
     /// ```
     ///
-    /// With one successor and no fingers, each node links on its own to its ring neighbours,
-    /// and at most a join-time successor hint links n1 and n3; such a link is retired first.
-    /// Unlike `test_triple_nodes_*`, the connect is therefore always issued, from a state with
-    /// no n1–n3 link, and it can only travel over the DHT. It runs over real
+    /// With one successor and no fingers, n1 routes the send through its only successor, and
+    /// the report returns through the hop the send arrived by (its `reply_via`), so both paths
+    /// are fixed: n1 → n2 → n3 and n3 → n2 → n1. The joins are
+    /// serialized, each settling before the next, so every join-time successor hint names a
+    /// node no closer than the joiner's current successor and none links n1 and n3: `P₀` is
+    /// asserted on both sides, not established by a branch. Unlike `test_triple_nodes_*`, the
+    /// connect is therefore always issued and can only travel over the DHT. It runs over real
     /// webrtc-rs with host-only ICE, which is what this test adds over the controlled
     /// `test_handle_connect_node`: the relayed SDP drives a real ICE, DTLS and SCTP handshake.
     /// Every wait is an activity-woken probe; the hang guard only bounds a hang.
@@ -343,23 +347,23 @@ pub mod tests {
         let [key1, key2, key3, key4] = crate::tests::fixed_secret_keys::<4>()?;
         let [node1, node2, node3, node4] = [key1, key2, key3, key4]
             .map(|key| prepare_ring_node(key).expect("ring node configuration is valid"));
-        manually_establish_connection(&node1.swarm, &node2.swarm).await;
-        manually_establish_connection(&node2.swarm, &node3.swarm).await;
-        manually_establish_connection(&node3.swarm, &node4.swarm).await;
-        manually_establish_connection(&node4.swarm, &node1.swarm).await;
         let nodes = [&node1, &node2, &node3, &node4];
-        wait_for_msgs(nodes).await;
-        // The joins may already have linked n1 and n3 through a successor hint; retire that
-        // link, so the connect under test always starts from P₀.
-        if node1.swarm.transport.get_connection(node3.did()).is_some() {
-            node1.swarm.disconnect(node3.did()).await?;
+        for (left, right) in [
+            (&node1, &node2),
+            (&node2, &node3),
+            (&node3, &node4),
+            (&node4, &node1),
+        ] {
+            manually_establish_connection(&left.swarm, &right.swarm).await;
             wait_for_msgs(nodes).await;
         }
-        assert!(
-            node1.swarm.transport.get_connection(node3.did()).is_none()
-                && !node1.swarm.has_unadmitted_connection(node3.did())?,
-            "n1 has no link to n3 before the relayed connect"
-        );
+        for (local, remote) in [(&node1, &node3), (&node3, &node1)] {
+            assert!(
+                local.swarm.transport.get_connection(remote.did()).is_none()
+                    && !local.swarm.has_unadmitted_connection(remote.did())?,
+                "P₀: no link between n1 and n3 on either side before the relayed connect"
+            );
+        }
 
         node1.swarm.connect(node3.did()).await?;
         wait_for_connection_state(&node1, node3.did(), WebrtcConnectionState::Connected).await?;
@@ -373,10 +377,10 @@ pub mod tests {
             vec![node2.did()],
             "n3 received n1's ConnectNodeSend relayed by n2"
         );
-        let report_hops = received_hops(&node1, node3.did(), is_report).await;
-        assert!(
-            !report_hops.is_empty() && !report_hops.contains(&node3.did()),
-            "n1 received n3's ConnectNodeReport over a relay, got hops {report_hops:?}"
+        assert_eq!(
+            received_hops(&node1, node3.did(), is_report).await,
+            vec![node2.did()],
+            "n1 received n3's ConnectNodeReport returned through n2"
         );
         wait_for_msgs(nodes).await;
         Ok(())

@@ -199,6 +199,35 @@ pub fn control_interleaves_transfer(
     })
 }
 
+/// Frames of `data_class` admitted in `trace`.
+pub fn data_frame_count(
+    trace: &[(MessageCategory, u64, usize)],
+    data_class: MessageCategory,
+) -> usize {
+    trace.iter().filter(|event| event.0 == data_class).count()
+}
+
+/// Whether the `data_class` transfer moved on since `trace` held `admitted` of its frames.
+///
+/// ```text
+/// progressed ≡ #data(trace) > admitted ∨ interleaves(trace) ∨ transfers_in_flight = 0
+/// ```
+///
+/// This is the event a control round waits for before sending the next control: the transfer's
+/// own progress, never the control's. The trace is read, not driven, so evaluating this sends
+/// nothing; the last disjunct ends the rounds once the transfer is done and nothing more can
+/// interleave.
+pub fn data_transfer_progressed(
+    trace: &[(MessageCategory, u64, usize)],
+    data_class: MessageCategory,
+    admitted: usize,
+    transfers_in_flight: usize,
+) -> bool {
+    data_frame_count(trace, data_class) > admitted
+        || control_interleaves_transfer(trace, data_class)
+        || transfers_in_flight == 0
+}
+
 pub fn assert_control_interleaves_transfer(
     trace: &[(MessageCategory, u64, usize)],
     data_class: MessageCategory,

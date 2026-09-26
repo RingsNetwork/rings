@@ -10,10 +10,10 @@ use crate::message::test_probe_request;
 use crate::message::Message;
 use crate::message::MessageCategory;
 use crate::message::SyncEntriesWithSuccessor;
-use crate::tests::activity::activity_after;
-use crate::tests::activity::activity_mark;
 use crate::tests::assert_control_interleaves_transfer;
 use crate::tests::control_interleaves_transfer;
+use crate::tests::data_frame_count;
+use crate::tests::data_transfer_progressed;
 use crate::tests::manually_establish_connection;
 use crate::tests::multi_frame_storage_sync_entries;
 
@@ -54,9 +54,17 @@ async fn test_native_webrtc_control_interleaves_the_shared_multiframe_storage_fi
         .is_sent());
 
     for round in 0..16 {
-        // Each control message follows observable activity caused by the previous one, so the
-        // controls interleave with the storage transfer's frames rather than precede them.
-        let mark = activity_mark();
+        // Each control follows a storage frame admitted after the previous control, so the
+        // controls interleave with the transfer rather than precede it. The wait is on the
+        // transfer's progress; the control's own activity does not satisfy it.
+        let trace = node1
+            .swarm
+            .transport
+            .outbound_frame_trace_for_test(node2.did());
+        if control_interleaves_transfer(&trace, MessageCategory::Storage) {
+            break;
+        }
+        let admitted = data_frame_count(&trace, MessageCategory::Storage);
         node1
             .swarm
             .send_direct_message(
@@ -64,16 +72,24 @@ async fn test_native_webrtc_control_interleaves_the_shared_multiframe_storage_fi
                 node2.did(),
             )
             .await?;
-        activity_after(mark).await;
-        if control_interleaves_transfer(
-            &node1
-                .swarm
-                .transport
-                .outbound_frame_trace_for_test(node2.did()),
-            MessageCategory::Storage,
-        ) {
-            break;
-        }
+        wait_until_result(
+            &format!("the storage transfer progresses after control {round}"),
+            || {
+                Ok(data_transfer_progressed(
+                    &node1
+                        .swarm
+                        .transport
+                        .outbound_frame_trace_for_test(node2.did()),
+                    MessageCategory::Storage,
+                    admitted,
+                    node1
+                        .swarm
+                        .transport
+                        .outbound_admitted_transfer_total_for_test(),
+                ))
+            },
+        )
+        .await?;
     }
     wait_until_result("control interleaves the storage transfer", || {
         Ok(control_interleaves_transfer(

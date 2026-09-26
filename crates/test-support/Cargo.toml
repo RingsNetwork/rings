@@ -24,7 +24,11 @@ indexing_slicing = "deny"
 
 [features]
 # The swarm activity observer, for crates that build Rings swarms or processors in their tests.
-# rings-core's own tests do not enable it, so this crate never depends on the crate under test.
+# rings-core's own tests do not request it, but feature unification may still enable it in a
+# workspace build (rings-node's dev-dependency asks for it). Then rings-core's test binary links
+# a second, non-test rings-core library through this crate; its types are distinct from the
+# crate under test, so core's tests use only this crate's runtime-neutral items, never the
+# observer.
 swarm-observer = ["dep:rings-core"]
 
 [dependencies]

@@ -433,28 +433,6 @@ pub(super) async fn wait_for_mutual_dht_topology(
     .await
 }
 
-/// Await, on activity, a registry lookup whose result covers `expected`.
-#[cfg(feature = "dummy")]
-pub(super) async fn wait_for_online_node_dids(
-    processor: &Processor,
-    expected: &BTreeSet<Did>,
-    context: &str,
-) -> Result<Vec<OnlineNodeDescriptor>> {
-    probe_on_activity(
-        &format!("online node registry covers {expected:?} during {context}"),
-        PROCESSOR_TEST_HANG_GUARD,
-        || async move {
-            let nodes = processor.lookup_online_nodes(false).await?;
-            let observed = nodes
-                .iter()
-                .map(|descriptor| descriptor.did)
-                .collect::<BTreeSet<_>>();
-            Ok(expected.is_subset(&observed).then_some(nodes))
-        },
-    )
-    .await
-}
-
 /// Await, on activity, every placement in `processor`'s storage covering `expected`.
 #[cfg(feature = "dummy")]
 pub(super) async fn wait_for_online_node_dids_in_storage(

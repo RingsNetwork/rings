@@ -32,8 +32,7 @@ use crate::tests::activity::probe_on_activity;
 use crate::tests::activity::swarm_in_flight;
 use crate::tests::activity::swarms_quiescent;
 use crate::tests::activity::ActivityCallback;
-use crate::tests::activity::LedgerObserver;
-use crate::tests::activity::MessageLedger;
+use crate::tests::activity::ActivityObserver;
 
 mod test_dht_convergence;
 // Uses the `stateright` model checker, which doesn't build for wasm32.
@@ -87,7 +86,6 @@ pub(crate) const TEST_HANG_GUARD: Duration = Duration::from_secs(60);
 pub struct Node {
     pub swarm: Arc<Swarm>,
     inbox: Mutex<NodeInbox>,
-    ledger: Arc<MessageLedger>,
 }
 
 struct NodeInbox {
@@ -108,14 +106,9 @@ pub struct NodeCallback {
 }
 
 impl Node {
-    /// Build a test node from `builder`, with its conservation observer and recording callback.
+    /// Build a test node from `builder`, with its activity observer and recording callback.
     pub fn build(builder: SwarmBuilder) -> Self {
-        let ledger = Arc::new(MessageLedger::default());
-        let swarm = Arc::new(
-            builder
-                .observer(Arc::new(LedgerObserver::new(ledger.clone())))
-                .build(),
-        );
+        let swarm = Arc::new(builder.observer(Arc::new(ActivityObserver)).build());
         let (message_tx, message_rx) = mpsc::unbounded_channel();
         let callback = NodeCallback {
             message_tx,
@@ -128,7 +121,6 @@ impl Node {
                 buffered: VecDeque::new(),
                 receiver: message_rx,
             }),
-            ledger,
         }
     }
 
@@ -507,11 +499,7 @@ pub async fn wait_for_msgs(nodes: impl IntoIterator<Item = &Node>) {
 /// waits in this thread's controlled delivery queue.
 fn nodes_quiescent(nodes: &[&Node]) -> bool {
     pending_transport_events() == 0
-        && swarms_quiescent(
-            nodes
-                .iter()
-                .map(|node| (node.swarm.as_ref(), node.ledger.as_ref())),
-        )
+        && swarms_quiescent(nodes.iter().map(|node| node.swarm.as_ref()))
 }
 
 fn did_name_or_default(did_names: &DashMap<Did, String>, did: Did) -> String {
@@ -553,15 +541,18 @@ fn panic_wait_for_msgs_timeout(
     let inbound_nodes = active_node_counts(nodes, did_names, |node| {
         node.swarm.transport.inbound_admitted_count_for_test()
     });
-    let delivered: u64 = nodes.iter().map(|node| node.ledger.delivered()).sum();
+    let sent: u64 = nodes
+        .iter()
+        .map(|node| node.swarm.transport.frames_for_test().sent())
+        .sum();
     let arrived: u64 = nodes
         .iter()
-        .map(|node| node.swarm.transport.inbound_arrivals_for_test())
+        .map(|node| node.swarm.transport.frames_for_test().arrived())
         .sum();
     panic!(
         "wait_for_msgs did not reach quiescence within {ceiling:?}: still-handshaking \
          nodes={handshaking_nodes:?}, inbound={inbound_nodes:?}, outbound={outbound_nodes:?}, \
-         transport-pending={}, delivered={delivered}, arrived={arrived}",
+         transport-pending={}, sent={sent}, arrived={arrived}",
         pending_transport_events()
     );
 }

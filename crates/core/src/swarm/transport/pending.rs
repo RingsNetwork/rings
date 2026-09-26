@@ -301,6 +301,8 @@ impl SwarmTransport {
             .map(|conn| SwarmConnection {
                 peer,
                 connection: conn,
+                #[cfg(test)]
+                frames: Arc::clone(self.frames_for_test()),
             })
             .ok()
     }
@@ -1025,6 +1027,8 @@ impl SwarmTransport {
                 connection: SwarmConnection {
                     peer: attempt.peer,
                     connection,
+                    #[cfg(test)]
+                    frames: Arc::clone(self.frames_for_test()),
                 },
             },
             Err(error) => {

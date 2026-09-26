@@ -29,7 +29,7 @@ rings-network-policy = { path = "crates/network-policy", version = "0.32.0" }
 rings-node = { path = "crates/node", version = "0.32.0" }
 rings-rpc = { path = "crates/rpc", version = "0.32.0", default-features = false }
 rings-runtime = { path = "crates/runtime", version = "0.32.0", default-features = false }
-rings-test-support = { path = "crates/test-support" }
+rings-test-support = { path = "crates/test-support", version = "0.32.0" }
 rings-transport = { path = "crates/transport", version = "0.32.0" }
 serde-wasm-bindgen = "0.6.5"
 wasm-bindgen = "0.2.121"

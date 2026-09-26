@@ -12,7 +12,6 @@ use wasm_bindgen_test::*;
 use super::prepare_node;
 use super::prepare_repair_node;
 use super::with_hang_guard;
-use super::TestSwarm;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::maintenance_phase_trace_for_test;
@@ -31,12 +30,12 @@ use crate::message::NotifyPredecessorSend;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::swarm::transport::Transport;
 use crate::swarm::Swarm;
-use crate::tests::activity::activity_after;
-use crate::tests::activity::activity_mark;
 use crate::tests::activity::probe_on_activity;
 use crate::tests::activity::swarms_quiescent;
 use crate::tests::assert_control_interleaves_transfer;
 use crate::tests::control_interleaves_transfer;
+use crate::tests::data_frame_count;
+use crate::tests::data_transfer_progressed;
 use crate::tests::live_entry;
 use crate::tests::manually_establish_connection;
 use crate::tests::midpoint_storage_key;
@@ -50,9 +49,9 @@ use crate::utils::sleep;
 /// minimum offset the maintenance cadence assertion expects between phases.
 const REPAIR_PRESSURE_INTERVAL: Duration = Duration::from_millis(25);
 const BROWSER_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(500);
-/// Scenario budget of the browser repair soak; every soak wait inside it is activity-woken.
+/// Hang guard of the whole browser repair soak; every soak wait inside it is activity-woken.
 const BROWSER_REPAIR_SCENARIO_TIMEOUT: Duration = Duration::from_secs(60);
-/// Hang guard of one awaited soak state; the scenario budget bounds the whole run.
+/// Hang guard of one awaited soak state; the scenario hang guard bounds the whole run.
 const SOAK_STATE_HANG_GUARD: Duration = BROWSER_REPAIR_SCENARIO_TIMEOUT;
 /// Hang guard of one real browser handshake. The fixtures gather host candidates only, so a
 /// same-page handshake completes far below it; see `with_hang_guard` for the budget arithmetic.
@@ -91,13 +90,9 @@ async fn wait_for_ring_convergence(nodes: &[&Swarm]) {
 }
 
 /// Await, on activity, the quiescent mesh; see [`swarms_quiescent`].
-async fn wait_for_quiescence(nodes: &[&TestSwarm]) {
+async fn wait_for_quiescence(nodes: &[&Swarm]) {
     probe_on_activity("browser mesh quiescent", SOAK_STATE_HANG_GUARD, || {
-        let quiescent = swarms_quiescent(
-            nodes
-                .iter()
-                .map(|node| (node.swarm.as_ref(), node.ledger.as_ref())),
-        );
+        let quiescent = swarms_quiescent(nodes.iter().copied());
         async move { Ok(quiescent.then_some(())) }
     })
     .await
@@ -109,11 +104,11 @@ async fn wait_for_quiescence(nodes: &[&TestSwarm]) {
 /// A round is not re-issued while its reports are in flight: `begin_stabilization` supersedes
 /// an unanswered round, so re-issuing early would make every report stale. The next round
 /// therefore waits for the quiescent mesh, an observed state, not for a duration.
-async fn run_stabilization_round(nodes: &[&TestSwarm; 3]) {
+async fn run_stabilization_round(nodes: &[&Swarm; 3]) {
     let [first_node, second_node, third_node] = *nodes;
-    let first = first_node.swarm.stabilizer();
-    let second = second_node.swarm.stabilizer();
-    let third = third_node.swarm.stabilizer();
+    let first = first_node.stabilizer();
+    let second = second_node.stabilizer();
+    let third = third_node.stabilizer();
     let (first, second, third) =
         futures::join!(first.stabilize(), second.stabilize(), third.stabilize(),);
     first.unwrap();
@@ -146,23 +141,19 @@ struct RepairFixture {
     placements: [RepairPlacement; 2],
 }
 
-async fn prepare_repair_mesh() -> [TestSwarm; 3] {
+async fn prepare_repair_mesh() -> [Arc<Swarm>; 3] {
     let nodes = [
         prepare_repair_node(SecretKey::random()).await,
         prepare_repair_node(SecretKey::random()).await,
         prepare_repair_node(SecretKey::random()).await,
     ];
     let [node1, node2, node3] = &nodes;
-    manually_establish_connection(&node1.swarm, &node2.swarm).await;
-    manually_establish_connection(&node1.swarm, &node3.swarm).await;
-    manually_establish_connection(&node2.swarm, &node3.swarm).await;
-    let swarms = [
-        node1.swarm.as_ref(),
-        node2.swarm.as_ref(),
-        node3.swarm.as_ref(),
-    ];
+    manually_establish_connection(node1, node2).await;
+    manually_establish_connection(node1, node3).await;
+    manually_establish_connection(node2, node3).await;
+    let swarms = [node1.as_ref(), node2.as_ref(), node3.as_ref()];
     wait_for_full_mesh(&swarms).await;
-    wait_for_quiescence(&[node1, node2, node3]).await;
+    wait_for_quiescence(&swarms).await;
     for node in swarms {
         let peers = swarms
             .iter()
@@ -172,7 +163,7 @@ async fn prepare_repair_mesh() -> [TestSwarm; 3] {
         node.dht().successors().extend(&peers).unwrap();
     }
     for _ in 0..8 {
-        run_stabilization_round(&[node1, node2, node3]).await;
+        run_stabilization_round(&swarms).await;
         if ring_topology_converged(&swarms).unwrap() {
             break;
         }
@@ -258,9 +249,14 @@ async fn exercise_contended_browser_storage(node1: &Swarm, node2: &Swarm) {
         "browser storage contention send must not be deferred"
     );
     for round in 0..8 {
-        // Each control message is sent after the previous one caused observable activity, so
-        // the controls interleave with the storage transfer's frames rather than precede them.
-        let mark = activity_mark();
+        // Each control follows a storage frame admitted after the previous control, so the
+        // controls interleave with the transfer rather than precede it. The wait is on the
+        // transfer's progress; the control's own activity does not satisfy it.
+        let trace = node1.transport.outbound_frame_trace_for_test(node2.did());
+        if control_interleaves_transfer(&trace, MessageCategory::Storage) {
+            break;
+        }
+        let admitted = data_frame_count(&trace, MessageCategory::Storage);
         node1
             .send_direct_message(
                 Message::NotifyPredecessorSend(NotifyPredecessorSend { did: node1.did() }),
@@ -268,11 +264,21 @@ async fn exercise_contended_browser_storage(node1: &Swarm, node2: &Swarm) {
             )
             .await
             .unwrap_or_else(|error| panic!("control round {round} failed: {error}"));
-        activity_after(mark).await;
-        let trace = node1.transport.outbound_frame_trace_for_test(node2.did());
-        if control_interleaves_transfer(&trace, MessageCategory::Storage) {
-            break;
-        }
+        probe_on_activity(
+            &format!("the storage transfer progresses after control {round}"),
+            SOAK_STATE_HANG_GUARD,
+            || {
+                let progressed = data_transfer_progressed(
+                    &node1.transport.outbound_frame_trace_for_test(node2.did()),
+                    MessageCategory::Storage,
+                    admitted,
+                    node1.transport.outbound_admitted_transfer_total_for_test(),
+                );
+                async move { Ok(progressed.then_some(())) }
+            },
+        )
+        .await
+        .unwrap();
     }
     probe_on_activity(
         "control interleaves the storage transfer",
@@ -509,11 +515,10 @@ async fn test_message_handler_manual_handshake_only() {
 
 /// Browser storage repair under load does not starve three-node stabilization.
 ///
-/// Unlike the handshake tests, this soak still synchronises by polling (`SOAK_POLL_INTERVAL` ×
-/// attempts), so `BROWSER_REPAIR_SCENARIO_TIMEOUT` is a **scenario budget**, not a hang guard:
-/// under enough load it decides the outcome. CI therefore runs this test as its own invocation
-/// (`qaci.yml`), so the budget never shares the 120 s runner budget with the rest of the
-/// binary. Replacing the polls with events is tracked in #882.
+/// Every wait of the soak is a state probe woken by activity (#882), so
+/// `BROWSER_REPAIR_SCENARIO_TIMEOUT` is a hang guard: it bounds a failure and never paces a
+/// wait. CI still runs this test as its own invocation (`qaci.yml`), so a hang in it cannot
+/// consume the 120 s runner budget of the rest of the binary.
 #[wasm_bindgen_test]
 async fn test_storage_repair_load_does_not_starve_three_node_stabilization() {
     with_hang_guard(
@@ -523,27 +528,16 @@ async fn test_storage_repair_load_does_not_starve_three_node_stabilization() {
             get_fake_permission().await;
             let nodes = prepare_repair_mesh().await;
             let [node1, node2, node3] = &nodes;
-            let fixture =
-                seed_remote_repair_entries(&node1.swarm, &node2.swarm, &node3.swarm).await;
-            let swarms = [
-                node1.swarm.as_ref(),
-                node2.swarm.as_ref(),
-                node3.swarm.as_ref(),
-            ];
+            let fixture = seed_remote_repair_entries(node1, node2, node3).await;
+            let swarms = [node1.as_ref(), node2.as_ref(), node3.as_ref()];
             perturb_ring_predecessors(&swarms);
             reset_maintenance_phase_trace_for_test();
             let stop = StopSource::new();
-            let completions = start_browser_maintenance(
-                &[
-                    node1.swarm.clone(),
-                    node2.swarm.clone(),
-                    node3.swarm.clone(),
-                ],
-                &stop,
-            );
-            exercise_contended_browser_storage(&node1.swarm, &node2.swarm).await;
+            let completions =
+                start_browser_maintenance(&[node1.clone(), node2.clone(), node3.clone()], &stop);
+            exercise_contended_browser_storage(node1, node2).await;
             wait_for_repair_and_convergence(&swarms, &fixture).await;
-            wait_for_browser_maintenance_cadence(node1.swarm.did()).await;
+            wait_for_browser_maintenance_cadence(node1.did()).await;
             stop_browser_maintenance(stop, completions).await;
         },
     )

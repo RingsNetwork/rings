@@ -80,6 +80,10 @@ impl InnerSwarmCallback {
     ) -> std::result::Result<(), TransportCallbackError> {
         #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
         let _depth_guard = OnMessageRecursionDepthGuard::enter();
+        // Test builds: the frame arrived; it stays in flight until it is dropped here or its
+        // lease is released at the inbound actor's handoff.
+        #[cfg(test)]
+        let in_flight = self.processor.logical.transport.frames_for_test().arrive();
 
         let peer = Did::from_str(cid).ok();
         let frame = match LinkFrame::from_wire(msg.as_ref()) {
@@ -99,6 +103,8 @@ impl InnerSwarmCallback {
         let lease = InboundFrameLease {
             bytes: msg,
             transport_capacity,
+            #[cfg(test)]
+            in_flight,
         };
         let Some(link) = self.bound_attempt(peer) else {
             return self.submit_off_link(peer, frame, lease).await;

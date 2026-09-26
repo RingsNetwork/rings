@@ -51,7 +51,9 @@ node = [
 
 # Test transport: runs the native node over rings-core's in-memory dummy transport instead of
 # webrtc-rs, for the processor tests' controlled delivery (#883). It is not a production
-# configuration: the `rings` binary refuses to build with it.
+# configuration: the `rings` binary refuses to build with it. It also excludes `ffi` (a
+# `compile_error!` in lib.rs), so `--all-features` does not build this crate; CI names its
+# feature sets explicitly.
 dummy = ["node", "rings-core/dummy", "rings-transport/dummy"]
 browser_default = ["browser"]
 browser = [

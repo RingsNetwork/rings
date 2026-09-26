@@ -1,19 +1,22 @@
 use std::rc::Rc;
 use std::time::Duration;
 
+use futures::channel::mpsc;
+use futures::StreamExt;
 use js_sys::Object;
 use js_sys::Reflect;
 use rings_node::onion::OnionExitPolicy;
+use rings_node::prelude::entry::Entry;
 use rings_node::prelude::rings_core::delegation::DelegateeKey;
 use rings_node::prelude::rings_core::ecc::SecretKey;
+use rings_node::prelude::rings_core::error::Result as CoreResult;
 use rings_node::prelude::rings_core::storage::idb::IdbStorage;
+use rings_node::prelude::rings_core::storage::KvStorageInterface;
 use rings_node::prelude::uuid;
 use rings_node::processor::Processor;
 use rings_node::processor::ProcessorBuilder;
 use rings_node::processor::ProcessorConfig;
 use rings_node::provider::Provider;
-use rings_test_support::activity::activity_after;
-use rings_test_support::activity::activity_mark;
 use rings_test_support::activity::probe_on_activity;
 use rings_test_support::observer::activity_observer;
 use rings_test_support::within;
@@ -80,14 +83,17 @@ async fn run_browser_onion_webview_flow() -> WebviewResult<()> {
     let fixture_css = fixture_url("/site.css");
     let fixture_api = fixture_url("/api/data");
     let fixture_submit = fixture_url("/forms/submit");
+    let (directory_writes, mut directory_written) = mpsc::unbounded();
     let client = browser_provider(
         &format!("rings-webview-onion-client-{storage_suffix}"),
         None,
+        directory_writes.clone(),
     )
     .await?;
     let exit = browser_provider(
         &format!("rings-webview-onion-exit-{storage_suffix}"),
         Some(fixture_authority.as_str()),
+        directory_writes,
     )
     .await?;
     let _client_listener = client.listen();
@@ -102,7 +108,7 @@ async fn run_browser_onion_webview_flow() -> WebviewResult<()> {
         web_shell_bootstrap,
     )?;
     let index_target = TargetUrl::parse(fixture_index.as_str())?;
-    let index = retry_gateway_navigation(&node, &index_target).await?;
+    let index = retry_gateway_navigation(&node, &index_target, &mut directory_written).await?;
     expect_status(&index, "index navigation", 200)?;
     let index_body = utf8_body(index)?;
     assert_contains(&index_body, "Rings Onion Fixture")?;
@@ -179,9 +185,11 @@ fn fixture_url(path: &str) -> String {
     format!("{}{path}", fixture_origin())
 }
 
+/// Build a browser provider whose DHT storage signals each write on `directory_writes`.
 async fn browser_provider(
     storage_name: &str,
     exit_target: Option<&str>,
+    directory_writes: mpsc::UnboundedSender<()>,
 ) -> WebviewResult<Rc<Provider>> {
     let delegatee_key = DelegateeKey::new_with_seckey(&SecretKey::random()).map_err(|error| {
         WebviewError::transport(format!("build browser delegatee key: {error:?}"))
@@ -197,11 +205,12 @@ async fn browser_provider(
             .map_err(|error| WebviewError::transport(format!("build exit policy: {error:?}")))?;
         config = config.enable_https_onion_exit().onion_exit_policy(policy);
     }
-    let storage = Box::new(
-        IdbStorage::new_with_cap_and_name(50_000, storage_name)
+    let storage = Box::new(WriteSignalingStorage {
+        inner: IdbStorage::new_with_cap_and_name(50_000, storage_name)
             .await
             .map_err(|error| WebviewError::transport(format!("open idb storage: {error:?}")))?,
-    );
+        writes: directory_writes,
+    });
     let processor = ProcessorBuilder::from_config(&config)
         .map_err(|error| WebviewError::transport(format!("build processor config: {error:?}")))?
         .storage(storage)
@@ -302,40 +311,95 @@ async fn await_connected(client: &Provider, exit: &Provider) -> WebviewResult<()
     .await
 }
 
-/// Navigate to `target` once the client can reach a browser onion exit.
+/// A node's DHT storage that signals every write, for [`retry_gateway_navigation`].
+struct WriteSignalingStorage {
+    inner: IdbStorage,
+    writes: mpsc::UnboundedSender<()>,
+}
+
+impl WriteSignalingStorage {
+    /// Signal one write; a closed receiver means the flow no longer waits on writes.
+    fn signal(&self) {
+        let _unobserved = self.writes.unbounded_send(());
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl KvStorageInterface<Entry> for WriteSignalingStorage {
+    async fn get(&self, key: &str) -> CoreResult<Option<Entry>> {
+        KvStorageInterface::<Entry>::get(&self.inner, key).await
+    }
+
+    async fn put(&self, key: &str, value: &Entry) -> CoreResult<()> {
+        KvStorageInterface::<Entry>::put(&self.inner, key, value).await?;
+        self.signal();
+        Ok(())
+    }
+
+    async fn get_all(&self) -> CoreResult<Vec<(String, Entry)>> {
+        KvStorageInterface::<Entry>::get_all(&self.inner).await
+    }
+
+    async fn remove(&self, key: &str) -> CoreResult<()> {
+        KvStorageInterface::<Entry>::remove(&self.inner, key).await?;
+        self.signal();
+        Ok(())
+    }
+
+    async fn clear(&self) -> CoreResult<()> {
+        KvStorageInterface::<Entry>::clear(&self.inner).await?;
+        self.signal();
+        Ok(())
+    }
+
+    async fn count(&self) -> CoreResult<u32> {
+        KvStorageInterface::<Entry>::count(&self.inner).await
+    }
+}
+
+/// Navigate to `target` once the client's directory lookup finds the browser onion exit.
 ///
-/// A failed attempt means the exit is not discoverable yet. The activity mark is taken
-/// *before* each attempt, so any state change during or after it wakes the next attempt, and
+/// Whether the lookup finds the exit is decided by the DHT storage of the two nodes: the exit's
+/// registration publishes its descriptor, and storage repair moves it to the key's owner. A
+/// failed attempt is therefore retried only after one of the two stores was written:
+///
+/// ```text
+/// loop:  forget(written)  ;  attempt = Ok ? return : await written
+/// ```
+///
+/// Writes are forgotten *before* each attempt, so a write during it wakes the next one and
+/// none is lost. A failed lookup writes neither store, so no attempt wakes its successor, and
 /// no timer paces the retries. The last error is kept for the hang-guard report.
 async fn retry_gateway_navigation(
     node: &WebviewNode,
     target: &TargetUrl,
+    directory_written: &mut mpsc::UnboundedReceiver<()>,
 ) -> WebviewResult<GatewayResponse> {
-    let last_error = std::cell::RefCell::new(None::<String>);
+    let mut last_error = None::<String>;
     let navigated = within(FLOW_HANG_GUARD, async {
         loop {
-            let mark = activity_mark();
+            while directory_written.try_recv().is_ok() {}
             match gateway_navigation(node, target).await {
-                Ok(response) => return response,
+                Ok(response) => return Some(response),
                 Err(error) => {
-                    *last_error.borrow_mut() = Some(error.to_string());
-                    activity_after(mark).await;
+                    last_error = Some(error.to_string());
+                    directory_written.next().await?;
                 }
             }
         }
     })
-    .await;
+    .await
+    .flatten();
     navigated.ok_or_else(|| {
         WebviewError::transport(format!(
             "gateway navigation did not find a browser onion exit within {FLOW_HANG_GUARD:?}: {}",
-            last_error
-                .borrow()
-                .clone()
-                .unwrap_or_else(|| "no attempt was made".to_string())
+            last_error.unwrap_or_else(|| "no attempt was made".to_string())
         ))
     })
 }
 
+/// Navigate to `target` through the controlled gateway: the external navigation redirects to
+/// the gateway, whose response is the page fetched through the onion exit.
 async fn gateway_navigation(
     node: &WebviewNode,
     target: &TargetUrl,

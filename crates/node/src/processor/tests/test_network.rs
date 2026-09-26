@@ -115,35 +115,30 @@ async fn test_listener_generation_queues_cancelled_starts_and_restarts() {
     // A pre-cancelled token still acquires ownership in queue order before returning.
     assert!(queued_started.load(std::sync::atomic::Ordering::SeqCst));
     let restart_stop = StopSource::new();
-    let (restart_started_tx, restart_started_rx) = tokio::sync::oneshot::channel();
-    let restart_finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let restart_finished_in_task = restart_finished.clone();
+    let restart_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let restart_started_in_task = restart_started.clone();
     let restart_processor = processor.clone();
     let restart_token = restart_stop.token();
-    let restart = tokio::spawn(async move {
+    let mut restart = Box::pin(async move {
         restart_processor
             .listen_with_started(restart_token, move || {
-                let _sent = restart_started_tx.send(());
+                restart_started_in_task.store(true, std::sync::atomic::Ordering::SeqCst);
             })
             .await;
-        restart_finished_in_task.store(true, std::sync::atomic::Ordering::SeqCst);
     });
-    restart_started_rx
-        .await
-        .expect("a new generation should start after cleanup");
-    // Stopping the finished generation's token again must not stop the restarted one. The
-    // restarted listener waits only on its own token and tick, so the stale stop wakes nothing:
-    // a scheduler turn later it is still running.
+    // The lock is free after cleanup, so the first poll acquires it and starts listening.
+    assert!(futures::poll!(restart.as_mut()).is_pending());
+    assert!(restart_started.load(std::sync::atomic::Ordering::SeqCst));
+    // Stopping the finished generation's token again must not stop the restarted one. Polled
+    // after the stale stop, the restarted listener runs every step that needs no timer: had the
+    // stale token reached it, its cleanup would run and the poll would complete. This is
+    // decided by state, not by how many scheduler turns elapse.
     first_stop.request_stop();
-    tokio::task::yield_now().await;
-    assert!(!restart.is_finished());
-    assert!(!restart_finished.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(futures::poll!(restart.as_mut()).is_pending());
     restart_stop.request_stop();
     tokio::time::timeout(LISTENER_STOP_TIMEOUT, restart)
         .await
-        .expect("the restarted generation should clean up")
-        .expect("the restarted listener task should not panic");
-    assert!(restart_finished.load(std::sync::atomic::Ordering::SeqCst));
+        .expect("the restarted generation should clean up");
 }
 
 /// Provider clones and independent wrappers over one processor queue cancelled starts.
@@ -242,10 +237,20 @@ async fn test_online_node_registry_lists_two_publishers_over_network() -> Result
         "owner stores both publishers at every placement",
     )
     .await?;
-    let other_nodes =
-        wait_for_online_node_dids(&owner, &expected, "owner sees both publishers").await?;
-    let nodes =
-        wait_for_online_node_dids(&publisher, &expected, "publisher sees both publishers").await?;
+    // The owner holds both descriptors at every placement, so one lookup from each node is
+    // decided: no retry, hence no lookup of the test's own that could wake another.
+    let other_nodes = owner.lookup_online_nodes(false).await?;
+    let nodes = publisher.lookup_online_nodes(false).await?;
+    for (lookup, observed) in [("owner", &other_nodes), ("publisher", &nodes)] {
+        let observed = observed
+            .iter()
+            .map(|descriptor| descriptor.did)
+            .collect::<BTreeSet<_>>();
+        assert!(
+            expected.is_subset(&observed),
+            "the {lookup}'s lookup lists both publishers: expected {expected:?}, got {observed:?}"
+        );
+    }
 
     assert!(nodes
         .iter()
