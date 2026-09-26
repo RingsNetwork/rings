@@ -291,18 +291,42 @@ pub async fn wait_until_result(
     }
 }
 
+/// Hex secrets of [`fixed_secret_keys`]; a request for `N` keys takes the first `N`.
+const FIXED_SECRET_KEY_HEX: [&str; 3] = [
+    "65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0",
+    "1f9275dbafdfba81942eb3330b07f38cbee4ebb86bdc2174af9648d5f5509a54",
+    "27b2fe8ceaf3a6a720f12658301351960b128672e9da4d6f4dead366af3fd834",
+];
+
+/// The first `N ≤ 3` fixed identities, in ascending address order, so fixtures that depend
+/// on ring placement are the same on every run.
+pub fn fixed_secret_keys<const N: usize>() -> Result<[SecretKey; N]> {
+    let mut keys = FIXED_SECRET_KEY_HEX
+        .iter()
+        .take(N)
+        .map(|hex| SecretKey::try_from(*hex))
+        .collect::<Result<Vec<_>>>()?;
+    keys.sort_by_key(|key| key.address());
+    keys.try_into().map_err(|_| {
+        crate::error::Error::InvalidMessage(format!("at most 3 fixed keys, {N} requested"))
+    })
+}
+
+/// Whether `node` holds an active, routable connection to `peer` in `state`.
+pub fn has_connection_in_state(node: &Node, peer: Did, state: WebrtcConnectionState) -> bool {
+    node.swarm
+        .transport
+        .get_connection(peer)
+        .is_some_and(|conn| conn.webrtc_connection_state() == state)
+}
+
 pub async fn wait_for_connection_state(
     node: &Node,
     peer: Did,
     state: WebrtcConnectionState,
 ) -> crate::error::Result<()> {
     wait_until_result("connection reaches expected state", || {
-        Ok(node
-            .swarm
-            .transport
-            .get_connection(peer)
-            .map(|conn| conn.webrtc_connection_state() == state)
-            .unwrap_or(false))
+        Ok(has_connection_in_state(node, peer, state))
     })
     .await
 }
