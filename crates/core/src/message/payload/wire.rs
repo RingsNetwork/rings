@@ -143,6 +143,8 @@ struct WireTransaction<'a> {
     tx_id: uuid::Uuid,
     /// See [`Transaction::sequence`].
     sequence: u64,
+    /// See [`Transaction::reply_via`].
+    reply_via: Option<Did>,
     /// See [`Transaction::data`].
     data: Cow<'a, [u8]>,
     /// The origin's proof.
@@ -204,6 +206,7 @@ impl<'a> WirePayload<'a> {
                 destination: transaction.destination,
                 tx_id: transaction.tx_id,
                 sequence: transaction.sequence,
+                reply_via: transaction.reply_via,
                 data: Cow::Borrowed(transaction.data.as_slice()),
                 verification: WireVerification::view(&transaction.verification, sessions.origin),
             },
@@ -286,6 +289,7 @@ impl<'a> WirePayload<'a> {
                 destination: transaction.destination,
                 tx_id: transaction.tx_id,
                 sequence: transaction.sequence,
+                reply_via: transaction.reply_via,
                 data: transaction.data.into_owned(),
                 verification: origin,
             },

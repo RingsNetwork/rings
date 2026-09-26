@@ -228,7 +228,7 @@ impl InboundCapacity {
         self.try_acquire(peer, lane, bytes)
     }
 
-    #[cfg(all(test, not(target_family = "wasm")))]
+    #[cfg(test)]
     pub(crate) fn admitted_count_for_test(&self) -> usize {
         self.state
             .lock()
@@ -339,5 +339,8 @@ impl Drop for InboundCapacityPermit {
         }
         drop((state, peer_states));
         self.capacity.applied.bump();
+        // Test builds: an inbound release is a state change that quiescence probes read.
+        #[cfg(test)]
+        crate::tests::activity::record_activity();
     }
 }

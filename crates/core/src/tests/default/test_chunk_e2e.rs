@@ -10,7 +10,6 @@ use async_trait::async_trait;
 use rings_transport::connections::dummy_controlled;
 use rings_transport::core::transport::WebrtcConnectionState;
 use tokio::sync::watch;
-use tokio::time::sleep;
 use tokio::time::Duration;
 
 use crate::dht::entry::Entry;
@@ -50,6 +49,8 @@ use crate::tests::default::prepare_node_with_measure;
 use crate::tests::default::wait_for_connection_state;
 use crate::tests::default::wait_for_msgs;
 use crate::tests::default::wait_for_successor;
+use crate::tests::default::wait_until_result;
+use crate::tests::default::Node;
 use crate::tests::manually_establish_connection;
 use crate::tests::multi_frame_storage_sync_entries;
 use crate::tests::outbound_capacity_released;
@@ -298,6 +299,24 @@ async fn test_whole_and_chunked_payloads_have_identical_measurement_delta() {
     );
 }
 
+/// Await the event "the cancelled spawned tail toward `peer` has retired": every transfer
+/// `node` admitted toward `peer` has released its capacity.
+///
+/// A released transfer can dispatch no further chunk, so once this holds the tests' "no second
+/// chunk" assertions are decided by state, not by how long the test waited. Each release
+/// records activity, so the probe observes it.
+async fn await_tail_retired(node: &Node, peer: crate::dht::Did) -> Result<()> {
+    wait_until_result("cancelled chunk tail released its capacity", || {
+        Ok(node
+            .swarm
+            .transport
+            .outbound_admitted_transfer_count_for_test(peer)
+            .unwrap_or_default()
+            == 0)
+    })
+    .await
+}
+
 #[tokio::test]
 async fn test_spawned_storage_sync_tail_cancelled_by_route_disappear_does_not_degrade_next_hop(
 ) -> Result<()> {
@@ -328,7 +347,7 @@ async fn test_spawned_storage_sync_tail_cancelled_by_route_disappear_does_not_de
     );
 
     node1.dht().remove(node2.did())?;
-    sleep(Duration::from_millis(600)).await;
+    await_tail_retired(&node1, node2.did()).await?;
     assert_eq!(
         dummy_controlled::sent_count(),
         1,
@@ -381,7 +400,7 @@ async fn test_spawned_storage_sync_tail_cancels_when_transport_loses_readiness()
         .swarm
         .transport
         .force_peer_data_channel_open_without_callback(node2.did(), Some(true))?;
-    sleep(Duration::from_millis(100)).await;
+    await_tail_retired(&node1, node2.did()).await?;
 
     assert_eq!(
         dummy_controlled::sent_count(),
@@ -429,7 +448,7 @@ async fn test_spawned_chunk_tail_cancels_when_same_peer_is_readmitted() -> Resul
         .transport
         .replace_active_generation_for_test(node2.did())?;
     assert_ne!(old, replacement);
-    sleep(Duration::from_millis(100)).await;
+    await_tail_retired(&node1, node2.did()).await?;
 
     assert_eq!(
         dummy_controlled::sent_count(),

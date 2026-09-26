@@ -253,6 +253,8 @@ impl InboundMailbox {
                 InboundFrameLease {
                     bytes,
                     transport_capacity,
+                    #[cfg(test)]
+                    in_flight,
                 },
         } = submission;
         let lane = prepared.lane;
@@ -280,6 +282,9 @@ impl InboundMailbox {
         // bytes and their transport lease together at this handoff boundary.
         let wire_bytes = bytes.len();
         drop((bytes, transport_capacity));
+        // Test builds: the actor's capacity permit now covers the frame.
+        #[cfg(test)]
+        drop(in_flight);
         self.handoffs.bump();
         if !processor.pending_connection_admits(peer).await? {
             finish_completion(completion, Ok(()));

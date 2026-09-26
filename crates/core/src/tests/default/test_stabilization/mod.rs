@@ -18,6 +18,7 @@ use crate::delegation::DelegateeKey;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::Did;
+use crate::dht::EntryStorage;
 use crate::dht::PeerRingAction;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::dht::StorageRepairOutcome;
@@ -54,6 +55,7 @@ use crate::tests::default::wait_for_msgs;
 use crate::tests::default::wait_for_predecessor;
 use crate::tests::default::wait_for_successor;
 use crate::tests::default::Node;
+use crate::tests::fixed_secret_keys;
 use crate::tests::live_entry;
 use crate::tests::manually_establish_connection;
 use crate::tests::replace_observed_fingers;
@@ -238,32 +240,30 @@ fn prepare_repair_node_with_optional_measure(
     key: SecretKey,
     measure: Option<MeasureImpl>,
 ) -> Result<Node> {
+    prepare_repair_node_with_storage(key, Box::new(MemStorage::new()), measure)
+}
+
+/// Build a repair-test node over the given DHT entry storage, with host-only ICE.
+fn prepare_repair_node_with_storage(
+    key: SecretKey,
+    storage: EntryStorage,
+    measure: Option<MeasureImpl>,
+) -> Result<Node> {
     let session = DelegateeKey::new_with_seckey(&key)?;
-    let mut builder = SwarmBuilder::new(
-        0,
-        "stun://stun.l.google.com:19302",
-        Box::new(MemStorage::new()),
-        session,
-    )
-    .dht_finger_table_size(super::TEST_DHT_FINGER_TABLE_SIZE)
-    .dht_storage_redundancy(2)
-    .dht_virtual_nodes(0);
+    let mut builder = SwarmBuilder::new(0, super::TEST_ICE_SERVERS, storage, session)
+        .dht_finger_table_size(super::TEST_DHT_FINGER_TABLE_SIZE)
+        .dht_storage_redundancy(2)
+        .dht_virtual_nodes(0);
     if let Some(measure) = measure {
         builder = builder.measure(measure);
     }
-    let swarm = Arc::new(builder.build());
-    Ok(Node::new(swarm))
+    Ok(Node::build(builder))
 }
 
 fn repair_test_keys() -> Result<(SecretKey, SecretKey)> {
-    let mut first =
-        SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0")?;
-    let mut second =
-        SecretKey::try_from("1f9275dbafdfba81942eb3330b07f38cbee4ebb86bdc2174af9648d5f5509a54")?;
-    if first.address() < second.address() {
-        (first, second) = (second, first);
-    }
-    Ok((first, second))
+    // Descending address order: the first identity is the higher one.
+    let [lower, higher] = fixed_secret_keys::<2>()?;
+    Ok((higher, lower))
 }
 
 fn entry_for_remote_repair_placement(node: &Node, successor: Did) -> Result<(Entry, Did)> {

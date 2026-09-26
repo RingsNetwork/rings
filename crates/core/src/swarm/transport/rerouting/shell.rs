@@ -9,9 +9,12 @@ use super::Awaiting;
 use super::LinkHop;
 use super::Observation;
 use super::Verdict;
+use crate::dht::delivery::NextHop;
+use crate::dht::delivery::Origination;
 use crate::dht::Did;
 use crate::error::DeferralTrigger;
 use crate::error::Result;
+use crate::message::MessagePayload;
 use crate::message::PayloadSender;
 use crate::swarm::transport::outbound::CapacityView;
 use crate::swarm::transport::outbound::PeerStamp;
@@ -26,10 +29,23 @@ impl SwarmTransport {
         self.connection_lifecycle.link_transitions().advance();
     }
 
-    /// The link hop toward `next` now: the peer `infer_next_hop` binds, its sendable
-    /// generation, and whether that generation can make progress.
-    pub(super) fn link_hop(&self, next: Did) -> Result<LinkHop> {
-        let hop = self.infer_next_hop(next, None)?;
+    /// The first hop toward `next` now, with the `reply_via` read from the same topology
+    /// snapshot: the delivery decision of [`origination`](crate::dht::delivery::origination)
+    /// (#873), never an owner lookup, so the hop never passes `next`.
+    ///
+    /// When no route leaves this node (no linked peer lies toward `next`), the hop is `next`
+    /// itself. That send is refused before acceptance with `SwarmMissDidInTable`, a
+    /// `LinkChange` deferral, so the placement waits for a link or topology change instead of
+    /// failing: the same wait as a hop whose generation died (L1), and still no hop past `next`.
+    fn first_hop(&self, next: Did) -> Result<(NextHop, Origination)> {
+        let origination = self.dht.origination(next, |peer| self.is_connected(peer))?;
+        let hop = origination.hop.unwrap_or_else(|| NextHop::toward(next));
+        Ok((hop, origination))
+    }
+
+    /// The link state of the peer `hop` names: its sendable generation, and whether that
+    /// generation can make progress.
+    fn link_of(&self, hop: Did) -> Result<LinkHop> {
         let admitted = self.admitted_send_connection(hop)?;
         Ok(LinkHop {
             hop,
@@ -41,20 +57,34 @@ impl SwarmTransport {
         })
     }
 
-    /// Send `message` to `destination` through the hop `infer_next_hop` binds, detached, and
-    /// classify the outcome.
+    /// The link hop toward `next` now: the first hop [`Self::first_hop`] decides, its sendable
+    /// generation, and whether that generation can make progress.
+    pub(super) fn link_hop(&self, next: Did) -> Result<LinkHop> {
+        let (hop, _) = self.first_hop(next)?;
+        self.link_of(hop.peer)
+    }
+
+    /// Send `message` to `destination` through the first hop [`Self::first_hop`] decides,
+    /// detached, and classify the outcome.
     ///
-    /// Unlike `PayloadSender::send_message`, a `Cancelled` completion is not reported as a
-    /// success: it is the pre-acceptance deferral the cancellation gate proves it to be.
+    /// The hop, its link and the payload's `reply_via` come from one decision, so the verdict
+    /// is attributed to the hop the payload actually left through. Unlike
+    /// `PayloadSender::send_message`, a `Cancelled` completion is not reported as a success: it
+    /// is the pre-acceptance deferral the cancellation gate proves it to be.
     pub(super) async fn attempt_remote<T>(&self, message: T, destination: Did) -> Verdict
     where T: Serialize + Send {
-        let LinkHop {
-            hop, generation, ..
-        } = match self.link_hop(destination) {
+        let (hop, origination) = match self.first_hop(destination) {
+            Ok(first) => first,
+            Err(error) => return Verdict::Failed(error),
+        };
+        let LinkHop { generation, .. } = match self.link_of(hop.peer) {
             Ok(link) => link,
             Err(error) => return Verdict::Failed(error),
         };
-        let payload = match self.signed_payload(message, hop, destination).await {
+        let payload = match self
+            .originated_payload(message, hop, destination, origination.reply_via)
+            .await
+        {
             Ok(payload) => payload,
             Err(error) => return Verdict::Failed(error),
         };
@@ -63,7 +93,33 @@ impl SwarmTransport {
             Err(error) => return Verdict::Failed(error),
         };
         let result = self.send_payload_detached_with_outcome(payload).await;
-        Verdict::remote(hop, generation, demand, result)
+        Verdict::remote(hop.peer, generation, demand, result)
+    }
+
+    /// Build a locally originated payload through `hop`, naming `reply_via`, after durably
+    /// reserving its stream sequence: `PayloadSender::originate` with the hop already decided.
+    async fn originated_payload<T>(
+        &self,
+        message: T,
+        hop: NextHop,
+        destination: Did,
+        reply_via: Option<Did>,
+    ) -> Result<MessagePayload>
+    where
+        T: Serialize + Send,
+    {
+        let sequence = *self
+            .reserve_transaction_sequences(destination, std::num::NonZeroU64::MIN)
+            .await?
+            .start();
+        MessagePayload::new_send_with_sequence(
+            message,
+            self.message_signer(),
+            hop,
+            destination,
+            sequence,
+            reply_via,
+        )
     }
 
     /// Stamp the channel progress of `awaiting`'s hop, after its refusal was published.

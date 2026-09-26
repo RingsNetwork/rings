@@ -28,7 +28,7 @@ use crate::tests::default::wait_for_storage_entry;
 use crate::tests::default::wait_for_storage_state;
 use crate::tests::default::wait_for_successor;
 use crate::tests::default::Node;
-use crate::tests::default::TEST_WAIT_TIMEOUT;
+use crate::tests::default::TEST_HANG_GUARD;
 use crate::tests::manually_establish_connection;
 use crate::utils::get_epoch_ms;
 
@@ -42,7 +42,7 @@ fn is_held_message(payload: &MessagePayload) -> bool {
 }
 
 async fn next_held_message(node: &Node) -> Result<MessagePayload> {
-    let deadline = Instant::now() + TEST_WAIT_TIMEOUT;
+    let deadline = Instant::now() + TEST_HANG_GUARD;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -68,12 +68,21 @@ async fn next_held_message(node: &Node) -> Result<MessagePayload> {
 /// node1 routes the message to succ(offline) = node3, which is responsible for the offline
 /// position and cannot deliver, so it holds the message in the inbox carrier `offline + 1`.
 /// That key lies in node1's storage interval `(node1, node3]`, so the write lands at node1.
-async fn hold_message_for_offline_peer(node1: &Node, node3: &Node, offline: Did) -> Result<()> {
-    wait_for_msgs([node1, node3]).await;
+///
+/// `network` is every node of the test, `node1` and `node3` included: quiescence is decided by
+/// frame conservation over all nodes that exchange frames, and a departed peer that still exists
+/// may be reconnected by admission's successor synchronization while the message is held.
+async fn hold_message_for_offline_peer(
+    node1: &Node,
+    node3: &Node,
+    offline: Did,
+    network: &[&Node],
+) -> Result<()> {
+    wait_for_msgs(network.iter().copied()).await;
     wait_for_successor(node1, node3.did()).await?;
     // node3 is responsible for `offline` only once it knows node1 as its predecessor.
     node1.swarm.stabilizer().stabilize().await?;
-    wait_for_msgs([node1, node3]).await;
+    wait_for_msgs(network.iter().copied()).await;
     wait_for_predecessor(node3, node1.did()).await?;
 
     node1
@@ -132,7 +141,7 @@ async fn test_message_to_offline_peer_is_held_and_delivered_on_return() -> Resul
     let node3 = prepare_node(key3).await;
     let offline: Did = key2.address().into();
     manually_establish_connection(&node1.swarm, &node3.swarm).await;
-    hold_message_for_offline_peer(&node1, &node3, offline).await?;
+    hold_message_for_offline_peer(&node1, &node3, offline, &[&node1, &node3]).await?;
 
     // The peer returns by joining through its successor node3. node2 notifies node3, node1's
     // next stabilization learns from node3 that node2 now precedes it and connects to it, and the
@@ -160,7 +169,7 @@ async fn test_held_message_is_delivered_when_peer_returns_through_its_predecesso
     let node3 = prepare_node(key3).await;
     let offline: Did = key2.address().into();
     manually_establish_connection(&node1.swarm, &node3.swarm).await;
-    hold_message_for_offline_peer(&node1, &node3, offline).await?;
+    hold_message_for_offline_peer(&node1, &node3, offline, &[&node1, &node3]).await?;
 
     // The peer returns by connecting straight to node1, the inbox owner. No notify report is
     // exchanged: the admission itself moves node1's head to node2 and requests the repair pass

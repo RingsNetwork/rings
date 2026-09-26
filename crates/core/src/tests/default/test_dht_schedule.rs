@@ -288,20 +288,23 @@ mod tests {
     }
 
     async fn prepare_schedule_node(key: SecretKey) -> Node {
-        let stun = "stun://stun.l.google.com:19302";
         let storage = Box::new(MemStorage::new());
         let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
-        let swarm = Arc::new(
-            SwarmBuilder::new(0, stun, storage, delegatee_key)
-                .dht_finger_table_size(SCHEDULE_FINGER_TABLE_SIZE)
-                .dht_virtual_nodes(0)
-                .build(),
+        let node = Node::build(
+            SwarmBuilder::new(
+                0,
+                crate::tests::default::TEST_ICE_SERVERS,
+                storage,
+                delegatee_key,
+            )
+            .dht_finger_table_size(SCHEDULE_FINGER_TABLE_SIZE)
+            .dht_virtual_nodes(0),
         );
 
         println!("key: {:?}", key.to_string());
-        println!("did: {:?}", swarm.did());
+        println!("did: {:?}", node.did());
 
-        Node::new(swarm)
+        node
     }
 
     fn gen_schedule_dht(did: crate::dht::Did) -> PeerRing {

@@ -27,14 +27,14 @@ fn test_spend_is_the_predecessor_on_the_chain() {
 fn test_forwarding_cycle_exhausts_the_budget_and_drops() -> Result<()> {
     let cycle = [did(1), did(2), did(3)];
     let destination = did(9);
-    let mut relay = MessageRelay::new(cycle[0], destination, FIXTURE_BUDGET);
+    let mut relay = MessageRelay::new(NextHop::toward(cycle[0]), destination, FIXTURE_BUDGET);
     let mut forwards = 0u8;
 
     let dropped = loop {
         let index = usize::from(forwards) % cycle.len();
         let current = cycle[index];
         let next = cycle[(index + 1) % cycle.len()];
-        match relay.forward(current, next) {
+        match relay.forward(current, NextHop::toward(next)) {
             Ok(forwarded) => {
                 assert_eq!(forwarded.destination, destination);
                 assert_eq!(forwarded.next_hop, next);
@@ -58,10 +58,10 @@ fn test_forwarding_cycle_exhausts_the_budget_and_drops() -> Result<()> {
 /// A carrier is only forwarded by the node it was addressed to, whatever its budget.
 #[test]
 fn test_forward_rejects_a_node_the_carrier_was_not_addressed_to() {
-    let relay = MessageRelay::new(did(1), did(9), FIXTURE_BUDGET);
+    let relay = MessageRelay::new(NextHop::toward(did(1)), did(9), FIXTURE_BUDGET);
 
     assert!(matches!(
-        relay.forward(did(2), did(3)),
+        relay.forward(did(2), NextHop::toward(did(3))),
         Err(Error::InvalidNextHop)
     ));
 }
@@ -69,16 +69,33 @@ fn test_forward_rejects_a_node_the_carrier_was_not_addressed_to() {
 /// Re-aiming keeps the budget: only `forward` spends it.
 #[test]
 fn test_reset_destination_keeps_the_budget() -> Result<()> {
-    let relay = MessageRelay::new(did(1), did(1), FIXTURE_BUDGET);
+    let relay = MessageRelay::new(NextHop::toward(did(1)), did(1), FIXTURE_BUDGET);
 
     let aimed = relay.reset_destination(did(5));
     assert_eq!(aimed.hop_budget, FIXTURE_BUDGET);
     assert_eq!(aimed.destination, did(5));
 
-    let forwarded = aimed.forward(did(1), did(5))?;
+    let forwarded = aimed.forward(did(1), NextHop::toward(did(5)))?;
     assert_eq!(
         forwarded.hop_budget.remaining() + 1,
         FIXTURE_BUDGET.remaining()
+    );
+    Ok(())
+}
+
+/// Stage law: `forward` sets the stage its hop carries, and re-aiming starts a new route in
+/// [`RouteStage::TOWARD`].
+#[test]
+fn test_stage_is_set_by_forward_and_reset_by_reaiming() -> Result<()> {
+    let relay = MessageRelay::new(NextHop::toward(did(1)), did(9), FIXTURE_BUDGET);
+    assert_eq!(relay.stage, RouteStage::TOWARD);
+
+    let handed = RouteStage::TOWARD.handed_off();
+    let forwarded = relay.forward(did(1), NextHop::new(did(2), handed))?;
+    assert_eq!(forwarded.stage, handed);
+    assert_eq!(
+        forwarded.reset_destination(did(7)).stage,
+        RouteStage::TOWARD
     );
     Ok(())
 }
@@ -89,15 +106,17 @@ fn test_report_is_a_fresh_carrier() -> Result<()> {
     let current = did(2);
     let origin = did(1);
     let next_hop = did(4);
-    let request = MessageRelay::new(current, current, HopBudget::EXHAUSTED);
+    let hop = NextHop::new(next_hop, RouteStage::replying_via(Some(did(5))));
+    let request = MessageRelay::new(NextHop::toward(current), current, HopBudget::EXHAUSTED);
 
-    let report = request.report(current, origin, next_hop)?;
+    let report = request.report(current, origin, hop)?;
 
     assert_eq!(report.next_hop, next_hop);
     assert_eq!(report.destination, origin);
     assert_eq!(report.hop_budget, HopBudget::MAX);
+    assert_eq!(report.stage, hop.stage);
     assert!(matches!(
-        request.report(did(3), origin, next_hop),
+        request.report(did(3), origin, hop),
         Err(Error::InvalidNextHop)
     ));
     Ok(())
@@ -106,7 +125,7 @@ fn test_report_is_a_fresh_carrier() -> Result<()> {
 /// Decoding admits a budget only inside the invariant, so a peer cannot mint forwards.
 #[test]
 fn test_decoding_rejects_a_budget_above_the_cap() -> Result<()> {
-    let relay = MessageRelay::new(did(1), did(9), FIXTURE_BUDGET);
+    let relay = MessageRelay::new(NextHop::toward(did(1)), did(9), FIXTURE_BUDGET);
     let mut wire = rings_codec::serialize(&relay).map_err(Error::CodecSerialize)?;
     let budget_byte = wire
         .iter()
